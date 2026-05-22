@@ -1,0 +1,17 @@
+[package]
+name        = "sentinel-resolve"
+description = "Name resolution, module graph, and import handling"
+
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tracing    = { workspace = true }
+thiserror  = { workspace = true }
+
+[lints.rust]
+unsafe_code = "deny"

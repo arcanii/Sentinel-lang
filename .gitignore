@@ -1,0 +1,25 @@
+# Build artifacts
+/target/
+**/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock for libraries is committed; this is a workspace with
+# the snc binary, so Cargo.lock IS committed at the workspace root.
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Test snapshots that are pending review
+*.snap.new
+
+# Local environment overrides
+.env
+.env.local
+
+# Generated documentation builds
+/book/

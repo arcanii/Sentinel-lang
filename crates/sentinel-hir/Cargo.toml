@@ -1,0 +1,17 @@
+[package]
+name        = "sentinel-hir"
+description = "Typed high-level IR with all qualifiers resolved"
+
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tracing    = { workspace = true }
+thiserror  = { workspace = true }
+
+[lints.rust]
+unsafe_code = "deny"

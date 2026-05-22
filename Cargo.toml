@@ -1,0 +1,90 @@
+# Sentinel language workspace manifest.
+#
+# Member crates are listed below. Dependency versions are pinned in
+# [workspace.dependencies] and inherited by member crates via
+# `package.workspace = true` to prevent version drift.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/sentinel-broker",
+    "crates/sentinel-syntax",
+    "crates/sentinel-ast",
+    "crates/sentinel-resolve",
+    "crates/sentinel-types",
+    "crates/sentinel-hir",
+    "crates/sentinel-mir",
+    "crates/sentinel-codegen",
+    "crates/sentinel-driver",
+    "crates/sentinel-runtime",
+    "crates/sentinel-lsp",
+]
+
+[workspace.package]
+edition      = "2021"
+rust-version = "1.80"
+version      = "0.0.1"
+authors      = ["Sentinel Language Project"]
+license      = "Apache-2.0 OR MIT"
+repository   = "https://github.com/bryan/Sentinel-language"
+
+[workspace.dependencies]
+# Lexing and parsing
+logos      = "0.14"
+
+# Query engine
+salsa      = "0.18"
+
+# LLVM bindings (matches LLVM 18 pinned in 00-bootstrap-environment.sh)
+inkwell    = { version = "0.5", features = ["llvm18-0"] }
+
+# Fast debug codegen
+cranelift              = "0.111"
+cranelift-module       = "0.111"
+cranelift-object       = "0.111"
+
+# Arena allocation for AST/IR nodes
+bumpalo       = "3.16"
+typed-arena   = "2.0"
+
+# Collections and utilities
+indexmap   = "2.5"
+rustc-hash = "2.0"
+smallvec   = "1.13"
+
+# Diagnostics
+miette     = { version = "7.2", features = ["fancy"] }
+thiserror  = "1.0"
+
+# Tracing/logging
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
+
+# Testing
+insta      = "1.40"
+proptest   = "1.5"
+criterion  = { version = "0.5", features = ["html_reports"] }
+serial_test = "3.1"
+
+# Serialization
+serde      = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml       = "0.8"
+
+[profile.release]
+lto              = "thin"
+codegen-units    = 1
+opt-level        = 3
+debug            = "line-tables-only"
+
+[profile.dev]
+opt-level        = 0
+debug            = "full"
+
+[profile.test]
+opt-level        = 1
+
+[profile.bench]
+opt-level        = 3
+lto              = "thin"
+codegen-units    = 1

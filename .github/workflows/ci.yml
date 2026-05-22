@@ -1,0 +1,38 @@
+# Sentinel language project CI.
+# Runs the full check-all suite on macOS Apple Silicon, which is the
+# primary development target. Other targets are added later.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-all:
+    name: check-all on macOS aarch64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 18
+        run: |
+          brew install llvm@18
+          echo "/opt/homebrew/opt/llvm@18/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18" >> "$GITHUB_ENV"
+
+      - name: Install just and nextest
+        run: |
+          brew install just
+          cargo install --locked cargo-nextest
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo nextest run --workspace

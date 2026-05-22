@@ -1,0 +1,17 @@
+[package]
+name        = "sentinel-mir"
+description = "SSA-form mid-level IR with optimizations"
+
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tracing    = { workspace = true }
+thiserror  = { workspace = true }
+
+[lints.rust]
+unsafe_code = "deny"

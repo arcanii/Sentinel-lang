@@ -1,0 +1,8 @@
+# Pinned toolchain for the Sentinel language project.
+# Every contributor builds with this exact channel and components.
+
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]
+targets = ["aarch64-apple-darwin"]
+profile = "default"

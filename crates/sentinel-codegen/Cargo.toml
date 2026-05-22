@@ -1,0 +1,17 @@
+[package]
+name        = "sentinel-codegen"
+description = "LLVM IR lowering via inkwell"
+
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+tracing    = { workspace = true }
+thiserror  = { workspace = true }
+
+[lints.rust]
+unsafe_code = "allow"

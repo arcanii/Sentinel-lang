@@ -1,0 +1,21 @@
+[package]
+name        = "sentinel-driver"
+description = "snc compiler driver and command-line interface"
+
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[[bin]]
+name = "snc"
+path = "src/main.rs"
+
+[dependencies]
+tracing    = { workspace = true }
+thiserror  = { workspace = true }
+
+[lints.rust]
+unsafe_code = "deny"
