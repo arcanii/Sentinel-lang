@@ -86,6 +86,38 @@ impl SlotGeneration {
     pub const fn raw(self) -> u32 { self.0 }
 }
 
+/// Identifier for a Budget scope. Monotonically issued by the broker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BudgetId(pub(crate) u64);
+
+impl BudgetId {
+    #[must_use]
+    pub const fn raw(self) -> u64 { self.0 }
+}
+
+impl std::fmt::Display for BudgetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "budget#{}", self.0)
+    }
+}
+
+/// Counter for issuing fresh BudgetIds. Lives inside the broker.
+#[derive(Debug, Default)]
+pub(crate) struct BudgetIdCounter {
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl BudgetIdCounter {
+    pub(crate) fn new() -> Self {
+        Self { next: std::sync::atomic::AtomicU64::new(1) }
+    }
+
+    pub(crate) fn next(&self) -> BudgetId {
+        BudgetId(self.next.fetch_add(1, std::sync::atomic::Ordering::AcqRel))
+    }
+}
+
+
 impl std::fmt::Display for SlotGeneration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "sgen{}", self.0)

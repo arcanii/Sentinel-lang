@@ -70,6 +70,17 @@ pub enum BrokerError {
         issued: crate::ids::SlotGeneration,
         current: crate::ids::SlotGeneration,
     },
+
+    /// An allocation was rejected because it would exceed a Budget cap.
+    ///
+    /// Returned by allocations inside [`crate::Broker::within_budget`]
+    /// scopes when the cumulative byte total would exceed the budget.
+    #[error("budget exceeded: {budget} would exceed cap (requested {requested}, remaining {remaining})")]
+    BudgetExceeded {
+        budget: crate::ids::BudgetId,
+        requested: usize,
+        remaining: usize,
+    },
 }
 
 impl BrokerError {

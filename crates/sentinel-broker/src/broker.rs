@@ -6,7 +6,8 @@
 use crate::arena::Arena;
 use crate::builder::ArenaBuilder;
 use crate::error::BrokerError;
-use crate::ids::{ArenaId, ArenaIdCounter};
+use crate::budget::{Budget, BudgetScope};
+use crate::ids::{ArenaId, ArenaIdCounter, BudgetIdCounter};
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, RwLock};
@@ -68,6 +69,7 @@ impl std::fmt::Debug for ArenaHandle {
 
 pub struct Broker {
     arena_ids: ArenaIdCounter,
+    budget_ids: BudgetIdCounter,
     arenas: RwLock<HashMap<ArenaId, Arc<Arena>>>,
 }
 
@@ -76,6 +78,7 @@ impl Broker {
     pub fn new() -> Self {
         Self {
             arena_ids: ArenaIdCounter::new(),
+            budget_ids: BudgetIdCounter::new(),
             arenas: RwLock::new(HashMap::new()),
         }
     }
@@ -136,6 +139,31 @@ impl Broker {
         }
         tracing::debug!(arena_id = %id, "arena registered");
     }
+
+
+    /// Run `f` inside a fresh top-level budget capped at `cap` bytes.
+    ///
+    /// Any arena created through the supplied [`BudgetScope`] charges
+    /// against this budget. The closure's return value propagates;
+    /// [`BrokerError::BudgetExceeded`] is returned if any allocation
+    /// inside `f` would exceed the cap.
+    ///
+    /// # Errors
+    /// Returns the closure's error, or [`BrokerError::BudgetExceeded`].
+    pub fn within_budget<R, F>(&self, cap: usize, f: F) -> Result<R, BrokerError>
+    where
+        F: FnOnce(&BudgetScope<'_>) -> Result<R, BrokerError>,
+    {
+        let id = self.next_budget_id();
+        let budget = Budget::new(id, cap, None);
+        let scope = BudgetScope::new(self, budget);
+        f(&scope)
+    }
+
+    pub(crate) fn next_budget_id(&self) -> crate::ids::BudgetId {
+        self.budget_ids.next()
+    }
+
 }
 
 impl Default for Broker {

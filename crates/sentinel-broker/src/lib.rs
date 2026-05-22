@@ -26,6 +26,7 @@
 #![allow(clippy::doc_markdown)]
 mod arena;
 mod broker;
+mod budget;
 mod builder;
 mod error;
 mod handle;
@@ -34,8 +35,9 @@ pub mod strategy;
 
 pub use arena::Arena;
 pub use broker::{ArenaHandle, Broker};
+pub use budget::{Budget, BudgetScope, BudgetArenaBuilder};
 pub use builder::ArenaBuilder;
 pub use error::BrokerError;
 pub use handle::Handle;
-pub use ids::{ArenaId, Generation, SlotGeneration, SlotIndex};
+pub use ids::{ArenaId, BudgetId, Generation, SlotGeneration, SlotIndex};
 pub use strategy::{AllocStrategy, StrategyKind};
