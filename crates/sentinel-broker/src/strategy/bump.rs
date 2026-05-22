@@ -1,33 +1,8 @@
 //! Monotonic bump allocator strategy.
-//!
-//! Allocates by atomically advancing a cursor through a fixed-size
-//! backing buffer. Does not recycle: once memory is allocated it
-//! remains owned until the entire arena is destroyed.
-//!
-//! ## Concurrency model
-//!
-//! Two atomic operations serialize independent state:
-//!
-//! - `cursor` (AtomicUsize): a compare-and-swap loop assigns a unique
-//!   byte range to each successful allocator. Cursor updates are
-//!   lock-free.
-//! - `slots` (Mutex<Vec<SlotInfo>>): the per-slot metadata table is
-//!   guarded by a short mutex. Each allocation acquires the mutex
-//!   once to push its `SlotInfo`. The critical section is bounded by
-//!   `Vec::push` + one indexed assignment.
-//!
-//! Earlier revisions used an `UnsafeCell<Vec<SlotInfo>>` and assumed
-//! the cursor CAS serialized slot-table updates. **That was unsound**:
-//! two threads that both win independent cursor CASes would then race
-//! on the slot table, leading to either UB (multiple `&mut Vec`
-//! references) or actual memory corruption when `Vec::push` reallocates
-//! mid-read. The mutex below is the correct fix; benchmarks of bump
-//! arenas in real workloads show its overhead is dominated by the
-//! cursor CAS contention itself.
 
 use crate::error::BrokerError;
-use crate::ids::{ArenaId, SlotIndex};
-use crate::strategy::{AllocOk, AllocStrategy, StrategyKind};
+use crate::ids::{ArenaId, SlotGeneration, SlotIndex};
+use crate::strategy::{AllocOk, AllocStrategy, SlotPtr, StrategyKind};
 use parking_lot::Mutex;
 use std::alloc::{alloc, dealloc, Layout};
 use std::ptr::NonNull;
@@ -40,7 +15,6 @@ struct SlotInfo {
     size: usize,
 }
 
-/// Bump-allocator strategy. Owns its own backing buffer.
 pub struct BumpStrategy {
     arena_id: ArenaId,
     capacity: usize,
@@ -48,36 +22,26 @@ pub struct BumpStrategy {
     buffer_layout: Layout,
     cursor: AtomicUsize,
     next_slot: AtomicU32,
-    /// Per-slot metadata. Guarded by a mutex; see module docs.
     slots: Mutex<Vec<SlotInfo>>,
 }
 
-// SAFETY: All mutable state is either atomic (cursor, next_slot) or
-// guarded by a Mutex (slots). The raw backing buffer is only read or
-// written via offsets derived from the cursor CAS, which ensures
-// each thread operates on a disjoint range.
 unsafe impl Send for BumpStrategy {}
 unsafe impl Sync for BumpStrategy {}
 
 impl BumpStrategy {
-    /// Construct a new bump strategy with `capacity` bytes, aligned to
-    /// 64 bytes (suitable for any common type up through AVX-512).
+    /// Construct a new bump strategy with `capacity` bytes.
     ///
     /// # Panics
-    /// Panics if `capacity == 0` or the OS refuses the allocation.
+    /// Panics if `capacity == 0`, the layout is unrepresentable,
+    /// or the system allocator refuses the request.
     #[must_use]
     pub fn new(arena_id: ArenaId, capacity: usize) -> Self {
         assert!(capacity > 0, "bump capacity must be positive");
-        let layout = Layout::from_size_align(capacity, 64)
-            .expect("bump capacity layout");
-        // SAFETY: layout has nonzero size.
+        let layout = Layout::from_size_align(capacity, 64).expect("bump capacity layout");
         let raw = unsafe { alloc(layout) };
         let buffer = NonNull::new(raw).expect("bump backing allocation failed");
         Self {
-            arena_id,
-            capacity,
-            buffer,
-            buffer_layout: layout,
+            arena_id, capacity, buffer, buffer_layout: layout,
             cursor: AtomicUsize::new(0),
             next_slot: AtomicU32::new(0),
             slots: Mutex::new(Vec::new()),
@@ -97,7 +61,6 @@ impl std::fmt::Debug for BumpStrategy {
 
 impl Drop for BumpStrategy {
     fn drop(&mut self) {
-        // SAFETY: buffer/layout pair from `Self::new`, not deallocated.
         unsafe { dealloc(self.buffer.as_ptr(), self.buffer_layout); }
     }
 }
@@ -106,11 +69,9 @@ impl AllocStrategy for BumpStrategy {
     fn alloc_raw(&self, layout: Layout) -> Result<AllocOk, BrokerError> {
         let size = layout.size();
         let align = layout.align();
+
         if size == 0 {
-            // Zero-sized allocations get a dangling-but-aligned pointer.
-            // We still claim a slot index for a Handle.
             let slot_index = self.next_slot.fetch_add(1, Ordering::AcqRel);
-            // Record a zero-size entry so slot_ptr can resolve it.
             {
                 let mut slots = self.slots.lock();
                 while slots.len() <= slot_index as usize {
@@ -119,9 +80,9 @@ impl AllocStrategy for BumpStrategy {
                 slots[slot_index as usize] = SlotInfo { offset: 0, size: 0 };
             }
             return Ok(AllocOk {
-                // SAFETY: align is always nonzero by Layout invariants.
                 ptr: NonNull::new(align as *mut u8).expect("nonzero align"),
                 slot: SlotIndex(slot_index),
+                generation: SlotGeneration::INITIAL,
             });
         }
 
@@ -140,21 +101,12 @@ impl AllocStrategy for BumpStrategy {
                     requested: size,
                 });
             }
-            if self
-                .cursor
-                .compare_exchange_weak(current, end, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            if self.cursor.compare_exchange_weak(current, end, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                 break aligned;
             }
-            // else: another thread claimed this byte range; retry.
         };
 
         let slot_index = self.next_slot.fetch_add(1, Ordering::AcqRel);
-
-        // Publish the slot metadata under the mutex. The critical section
-        // is bounded: at most one Vec::push (which may realloc) plus an
-        // indexed write.
         {
             let mut slots = self.slots.lock();
             while slots.len() <= slot_index as usize {
@@ -163,40 +115,34 @@ impl AllocStrategy for BumpStrategy {
             slots[slot_index as usize] = SlotInfo { offset, size };
         }
 
-        // SAFETY: offset + size <= capacity (verified above via the
-        // cursor CAS), and this byte range belongs exclusively to us.
         let ptr = unsafe { self.buffer.as_ptr().add(offset) };
         Ok(AllocOk {
             ptr: NonNull::new(ptr).expect("buffer + offset is nonzero"),
             slot: SlotIndex(slot_index),
+            generation: SlotGeneration::INITIAL,
         })
     }
 
-    fn slot_ptr(&self, slot: SlotIndex) -> Result<NonNull<u8>, BrokerError> {
+    fn slot_ptr(&self, slot: SlotIndex) -> Result<SlotPtr, BrokerError> {
         let info = {
             let slots = self.slots.lock();
             slots.get(slot.raw() as usize).copied()
         };
-        let info = info.ok_or(BrokerError::InvalidSlot {
-            arena: self.arena_id,
-            slot,
-        })?;
-        // SAFETY: offset was produced by `alloc_raw` and is within bounds.
+        let info = info.ok_or(BrokerError::InvalidSlot { arena: self.arena_id, slot })?;
         let ptr = unsafe { self.buffer.as_ptr().add(info.offset) };
-        Ok(NonNull::new(ptr).expect("buffer + offset is nonzero"))
+        Ok(SlotPtr {
+            ptr: NonNull::new(ptr).expect("buffer + offset is nonzero"),
+            generation: SlotGeneration::INITIAL,
+        })
     }
 
-    fn used(&self) -> usize {
-        self.cursor.load(Ordering::Acquire)
-    }
+    // Bump strategy intentionally inherits the default free() which
+    // returns NotImplemented. Once a byte is allocated, it's owned
+    // until the arena is destroyed.
 
-    fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    fn kind(&self) -> StrategyKind {
-        StrategyKind::Bump
-    }
+    fn used(&self) -> usize { self.cursor.load(Ordering::Acquire) }
+    fn capacity(&self) -> usize { self.capacity }
+    fn kind(&self) -> StrategyKind { StrategyKind::Bump }
 }
 
 #[cfg(test)]
@@ -205,10 +151,14 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    /// Stress test: many threads, many allocations, designed to catch
-    /// races in the slot-table publishing path. This is the test that
-    /// originally exposed the UnsafeCell<Vec> unsoundness under
-    /// nextest's process-per-test scheduling.
+    #[test]
+    fn bump_free_returns_not_implemented() {
+        let s = BumpStrategy::new(ArenaId(1), 64);
+        let ok = s.alloc_raw(Layout::new::<u64>()).unwrap();
+        let err = s.free(ok.slot, ok.generation).unwrap_err();
+        assert!(matches!(err, BrokerError::NotImplemented { .. }));
+    }
+
     #[test]
     fn concurrent_allocation_stress() {
         const THREADS: usize = 16;
@@ -219,7 +169,6 @@ mod tests {
             ArenaId(1),
             THREADS * ALLOCS_PER_THREAD * SLOT_BYTES * 2,
         ));
-
         let mut handles = Vec::new();
         for _ in 0..THREADS {
             let s = Arc::clone(&strategy);
@@ -233,13 +182,8 @@ mod tests {
                 slots
             }));
         }
-
         let mut all_slots = Vec::new();
-        for h in handles {
-            all_slots.extend(h.join().unwrap());
-        }
-
-        // Every slot must be distinct and resolvable.
+        for h in handles { all_slots.extend(h.join().unwrap()); }
         assert_eq!(all_slots.len(), THREADS * ALLOCS_PER_THREAD);
         let mut seen = std::collections::HashSet::new();
         for slot in &all_slots {

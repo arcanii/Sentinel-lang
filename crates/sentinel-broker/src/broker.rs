@@ -36,6 +36,18 @@ impl ArenaHandle {
     {
         self.arena.alloc(value)
     }
+
+    /// Free a handle's slot, advancing the slot's generation.
+    ///
+    /// After this returns Ok, the handle becomes invalid; further
+    /// access returns [`BrokerError::UseAfterFreeSlot`].
+    ///
+    /// # Errors
+    /// - [`BrokerError::NotImplemented`] for strategies that don't recycle.
+    /// - [`BrokerError::UseAfterFreeSlot`] for double-free.
+    pub fn free<T>(&self, handle: &crate::Handle<T>) -> Result<(), BrokerError> {
+        self.arena.free(handle)
+    }
 }
 
 impl Deref for ArenaHandle {
@@ -224,14 +236,27 @@ mod tests {
     }
 
     #[test]
-    fn slab_free_returns_not_implemented() {
-        // The strategy's free() returns NotImplemented; for now we just
-        // exercise it directly via the strategy until A3.5 wires it up
-        // through Arena/Handle.
-        use crate::strategy::{slab::SlabStrategy, AllocStrategy};
-        use crate::ids::{ArenaId, SlotIndex};
-        let s = SlabStrategy::new(ArenaId(99), 16, 8, 4);
-        let err = s.free(SlotIndex(0)).unwrap_err();
+    fn bump_strategy_free_returns_not_implemented() {
+        // Bump never recycles: free() returns NotImplemented.
+        use crate::ids::{ArenaId, SlotGeneration, SlotIndex};
+        use crate::strategy::{bump::BumpStrategy, AllocStrategy};
+        let s = BumpStrategy::new(ArenaId(99), 64);
+        let err = s.free(SlotIndex(0), SlotGeneration::INITIAL).unwrap_err();
         assert!(matches!(err, BrokerError::NotImplemented { .. }));
+    }
+
+    #[test]
+    fn slab_strategy_free_recycles() {
+        // Slab supports recycling. Allocate, free with the issued
+        // generation, then allocate again into the same slot.
+        use crate::ids::ArenaId;
+        use crate::strategy::{slab::SlabStrategy, AllocStrategy};
+        use std::alloc::Layout;
+        let s = SlabStrategy::new(ArenaId(100), 16, 8, 2);
+        let a = s.alloc_raw(Layout::new::<u64>()).unwrap();
+        s.free(a.slot, a.generation).unwrap();
+        // Double free: generation has advanced, so the second free fails.
+        let err = s.free(a.slot, a.generation).unwrap_err();
+        assert!(matches!(err, BrokerError::UseAfterFreeSlot { .. }));
     }
 }

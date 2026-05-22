@@ -1,93 +1,86 @@
 //! Allocation strategies plugged into an [`Arena`].
 //!
-//! Every arena delegates its physical allocation to a strategy
-//! object behind a `Box<dyn AllocStrategy>`. The strategy owns the
-//! backing memory and decides how to satisfy requests; the arena
-//! supplies the generation tag and metadata.
+//! Each strategy owns its backing memory and decides how to satisfy
+//! requests. Arenas pair a strategy with identity (id, name, arena-level
+//! generation); the strategy supplies per-slot generations for sound
+//! recycling.
 //!
 //! Current strategies:
-//!
-//! - [`bump::BumpStrategy`] — monotonic cursor, no recycling (this is
-//!   the default).
-//! - [`slab::SlabStrategy`] — fixed-size slots. Recycling will be added
-//!   in milestone A3.5; for now [`AllocStrategy::free`] returns
-//!   [`crate::BrokerError::NotImplemented`].
+//! - [`bump::BumpStrategy`] — monotonic, no recycling.
+//! - [`slab::SlabStrategy`] — fixed-size, supports recycling with
+//!   per-slot generations.
 
 use crate::error::BrokerError;
-use crate::ids::SlotIndex;
+use crate::ids::{SlotGeneration, SlotIndex};
 use std::alloc::Layout;
 use std::ptr::NonNull;
 
 pub mod bump;
 pub mod slab;
 
-/// What kind of strategy backs an arena. Reported by
-/// [`AllocStrategy::kind`] for diagnostics and broker queries.
+/// What kind of strategy backs an arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StrategyKind {
-    /// Monotonic bump allocator.
     Bump,
-    /// Fixed-size slab allocator.
     Slab,
 }
 
-/// A successful allocation: a pointer and the slot index it corresponds to.
+/// A successful allocation: pointer, slot index, and the slot's
+/// current generation.
 #[derive(Debug)]
 pub struct AllocOk {
-    /// Raw, properly-aligned pointer to the start of the slot.
     pub ptr: NonNull<u8>,
-    /// Slot index, used to construct [`crate::Handle`] values.
     pub slot: SlotIndex,
+    pub generation: SlotGeneration,
+}
+
+/// What [`AllocStrategy::slot_ptr`] returns: the pointer plus the
+/// slot's current generation so the caller can verify it matches the
+/// generation a handle was issued with.
+#[derive(Debug)]
+pub struct SlotPtr {
+    pub ptr: NonNull<u8>,
+    pub generation: SlotGeneration,
 }
 
 /// The trait every arena strategy implements.
-///
-/// Implementations must be `Send + Sync`: arenas live behind an `Arc`
-/// and may be touched from multiple threads. Internal synchronization
-/// is the implementor's responsibility.
 pub trait AllocStrategy: Send + Sync {
-    /// Allocate a region matching `layout`. Returns the slot's address
-    /// and its slot index, or [`BrokerError::OutOfMemory`] if the
-    /// strategy cannot satisfy the request.
+    /// Allocate a region matching `layout`.
     ///
     /// # Errors
     /// - [`BrokerError::OutOfMemory`] when capacity is exhausted.
-    /// - May return [`BrokerError::InvalidSlot`] if `layout` is
-    ///   inherently unsupported (e.g., a slab strategy rejecting an
-    ///   ill-fitting size).
+    /// - [`BrokerError::InvalidSlot`] if `layout` is unsupported.
     fn alloc_raw(&self, layout: Layout) -> Result<AllocOk, BrokerError>;
 
-    /// Resolve a previously-issued [`SlotIndex`] back to its pointer.
+    /// Resolve a slot index to its pointer and current generation.
+    ///
+    /// Callers compare the returned generation against the one their
+    /// handle stores and reject mismatches with [`BrokerError::UseAfterFreeSlot`].
     ///
     /// # Errors
-    /// Returns [`BrokerError::InvalidSlot`] if the slot was never
-    /// issued by this strategy.
-    fn slot_ptr(&self, slot: SlotIndex) -> Result<NonNull<u8>, BrokerError>;
+    /// Returns [`BrokerError::InvalidSlot`] for unknown slots.
+    fn slot_ptr(&self, slot: SlotIndex) -> Result<SlotPtr, BrokerError>;
 
-    /// Free a slot, making it available for re-allocation. The default
-    /// implementation returns [`BrokerError::NotImplemented`]; strategies
-    /// that support recycling override this.
+    /// Free a slot. Advances the slot's generation so future
+    /// access through stale handles fails cleanly. Strategies that
+    /// don't support recycling return [`BrokerError::NotImplemented`].
     ///
     /// # Errors
-    /// Returns [`BrokerError::NotImplemented`] unless the strategy
-    /// has opted into recycling.
-    fn free(&self, _slot: SlotIndex) -> Result<(), BrokerError> {
+    /// - [`BrokerError::NotImplemented`] if the strategy doesn't recycle.
+    /// - [`BrokerError::InvalidSlot`] for unknown slots.
+    /// - [`BrokerError::UseAfterFreeSlot`] if the slot was already freed
+    ///   (double-free protection).
+    fn free(&self, slot: SlotIndex, generation: SlotGeneration) -> Result<(), BrokerError> {
+        let _ = (slot, generation);
         Err(BrokerError::NotImplemented {
-            feature: "AllocStrategy::free (recycling) — see milestone A3.5",
+            feature: "AllocStrategy::free (this strategy does not recycle)",
         })
     }
 
-    /// Bytes currently used by this strategy.
     fn used(&self) -> usize;
-
-    /// Total capacity in bytes.
     fn capacity(&self) -> usize;
-
-    /// Bytes still available for allocation.
     fn available(&self) -> usize {
         self.capacity().saturating_sub(self.used())
     }
-
-    /// Strategy kind, for diagnostics and broker queries.
     fn kind(&self) -> StrategyKind;
 }

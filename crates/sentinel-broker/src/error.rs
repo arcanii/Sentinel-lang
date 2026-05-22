@@ -56,6 +56,20 @@ pub enum BrokerError {
     /// Used during staged development to flag callable-but-unfinished APIs.
     #[error("not implemented: {feature}")]
     NotImplemented { feature: &'static str },
+
+    /// A handle was used after its slot was freed and possibly recycled.
+    ///
+    /// Distinct from [`Self::UseAfterFree`] (which fires when the entire
+    /// arena is destroyed). This variant covers slot-level recycling:
+    /// the arena is still alive, but the specific slot now belongs to
+    /// a newer allocation.
+    #[error("slot use-after-free: {arena} slot {slot} was issued at {issued} but slot is now at {current}")]
+    UseAfterFreeSlot {
+        arena: crate::ids::ArenaId,
+        slot: crate::ids::SlotIndex,
+        issued: crate::ids::SlotGeneration,
+        current: crate::ids::SlotGeneration,
+    },
 }
 
 impl BrokerError {
@@ -64,7 +78,7 @@ impl BrokerError {
     /// programming error.
     #[must_use]
     pub const fn is_use_after_free(&self) -> bool {
-        matches!(self, Self::UseAfterFree { .. })
+        matches!(self, Self::UseAfterFree { .. } | Self::UseAfterFreeSlot { .. })
     }
 }
 

@@ -37,5 +37,5 @@ pub use broker::{ArenaHandle, Broker};
 pub use builder::ArenaBuilder;
 pub use error::BrokerError;
 pub use handle::Handle;
-pub use ids::{ArenaId, Generation, SlotIndex};
+pub use ids::{ArenaId, Generation, SlotGeneration, SlotIndex};
 pub use strategy::{AllocStrategy, StrategyKind};

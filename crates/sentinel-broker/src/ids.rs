@@ -70,6 +70,29 @@ impl Generation {
     }
 }
 
+/// Per-slot generation. Each strategy slot has its own counter that
+/// advances on free, so a recycled slot rejects stale handles.
+///
+/// Distinct from [`Generation`], which is per-arena and advances
+/// only when the arena itself is destroyed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SlotGeneration(pub(crate) u32);
+
+impl SlotGeneration {
+    /// The starting generation of a fresh slot.
+    pub const INITIAL: Self = Self(0);
+
+    #[must_use]
+    pub const fn raw(self) -> u32 { self.0 }
+}
+
+impl std::fmt::Display for SlotGeneration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sgen{}", self.0)
+    }
+}
+
+
 impl fmt::Display for Generation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "gen{}", self.0)
@@ -125,5 +148,11 @@ mod tests {
         assert_eq!(format!("{}", ArenaId(7)), "arena#7");
         assert_eq!(format!("{}", SlotIndex(3)), "slot[3]");
         assert_eq!(format!("{}", Generation(5)), "gen5");
+    }
+
+    #[test]
+    fn slot_generation_display() {
+        assert_eq!(format!("{}", SlotGeneration(3)), "sgen3");
+        assert_eq!(SlotGeneration::INITIAL.raw(), 0);
     }
 }
