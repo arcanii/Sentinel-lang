@@ -5,7 +5,7 @@ use crate::handle::Handle;
 use crate::ids::{ArenaId, Generation, SlotIndex};
 use crate::strategy::{AllocStrategy, SlotPtr, StrategyKind};
 use std::alloc::Layout;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering, AtomicU64};
 use std::sync::Arc;
 
 pub struct Arena {
@@ -13,6 +13,8 @@ pub struct Arena {
     name: Box<str>,
     strategy: Box<dyn AllocStrategy>,
     generation: AtomicU32,
+    alloc_count: AtomicU64,
+    free_count: AtomicU64,
 }
 
 impl Arena {
@@ -22,6 +24,8 @@ impl Arena {
             name: name.into(),
             strategy,
             generation: AtomicU32::new(Generation::INITIAL.raw()),
+            alloc_count: AtomicU64::new(0),
+            free_count: AtomicU64::new(0),
         })
     }
 
@@ -29,6 +33,16 @@ impl Arena {
     #[must_use] pub fn name(&self) -> &str { &self.name }
     #[must_use] pub fn capacity(&self) -> usize { self.strategy.capacity() }
     #[must_use] pub fn used(&self) -> usize { self.strategy.used() }
+
+    #[must_use]
+    pub fn alloc_count(&self) -> u64 {
+        self.alloc_count.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn free_count(&self) -> u64 {
+        self.free_count.load(Ordering::Relaxed)
+    }
     #[must_use] pub fn available(&self) -> usize { self.strategy.available() }
     #[must_use] pub fn strategy_kind(&self) -> StrategyKind { self.strategy.kind() }
 
@@ -57,6 +71,7 @@ impl Arena {
             allocated.ptr.as_ptr().cast::<T>().write(value);
         }
 
+        self.alloc_count.fetch_add(1, Ordering::Relaxed);
         Ok(Handle::new(
             self.id,
             allocated.slot,
@@ -86,7 +101,11 @@ impl Arena {
                 current: cur,
             });
         }
-        self.strategy.free(handle.slot, handle.slot_generation)
+        let r = self.strategy.free(handle.slot, handle.slot_generation);
+        if r.is_ok() {
+            self.free_count.fetch_add(1, Ordering::Relaxed);
+        }
+        r
     }
 
     pub(crate) fn strategy_slot_ptr(&self, slot: SlotIndex) -> Result<SlotPtr, BrokerError> {

@@ -27,6 +27,7 @@
 mod arena;
 mod broker;
 mod budget;
+pub mod stats;
 mod builder;
 mod error;
 mod handle;
@@ -36,6 +37,7 @@ pub mod strategy;
 pub use arena::Arena;
 pub use broker::{ArenaHandle, Broker};
 pub use budget::{Budget, BudgetScope, BudgetArenaBuilder};
+pub use stats::{ArenaSummary, BrokerStats, HandleLocation};
 pub use builder::ArenaBuilder;
 pub use error::BrokerError;
 pub use handle::Handle;

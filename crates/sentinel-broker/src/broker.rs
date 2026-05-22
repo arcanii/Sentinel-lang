@@ -4,6 +4,7 @@
 //! Users receive an [`ArenaHandle`] for access without ownership.
 
 use crate::arena::Arena;
+use crate::stats::{ArenaSummary, BrokerStats, HandleLocation};
 use crate::builder::ArenaBuilder;
 use crate::error::BrokerError;
 use crate::budget::{Budget, BudgetScope};
@@ -164,6 +165,62 @@ impl Broker {
         self.budget_ids.next()
     }
 
+    /// Aggregate counters across every currently-live arena.
+    #[must_use]
+    pub fn stats(&self) -> BrokerStats {
+        let Ok(arenas) = self.arenas.read() else {
+            return BrokerStats::default();
+        };
+        let mut s = BrokerStats {
+            live_arenas: arenas.len(),
+            ..BrokerStats::default()
+        };
+        for arena in arenas.values() {
+            s.total_capacity_bytes = s.total_capacity_bytes.saturating_add(arena.capacity());
+            s.total_used_bytes = s.total_used_bytes.saturating_add(arena.used());
+            s.total_allocations = s.total_allocations.saturating_add(arena.alloc_count());
+            s.total_frees = s.total_frees.saturating_add(arena.free_count());
+        }
+        s
+    }
+
+    /// Snapshot every live arena as an [`ArenaSummary`].
+    #[must_use]
+    pub fn list_arenas(&self) -> Vec<ArenaSummary> {
+        let Ok(arenas) = self.arenas.read() else {
+            return Vec::new();
+        };
+        let mut out: Vec<ArenaSummary> = arenas.values().map(|a| ArenaSummary {
+            id: a.id(),
+            name: a.name().to_string(),
+            kind: a.strategy_kind(),
+            capacity: a.capacity(),
+            used: a.used(),
+            generation: a.generation(),
+            allocations: a.alloc_count(),
+            frees: a.free_count(),
+        }).collect();
+        out.sort_by_key(|s| s.id);
+        out
+    }
+
+    /// Resolve a handle's physical location and current liveness.
+    ///
+    /// Returns `None` if the handle's arena has been destroyed.
+    #[must_use]
+    pub fn where_is<T>(&self, handle: &crate::Handle<T>) -> Option<HandleLocation> {
+        let arenas = self.arenas.read().ok()?;
+        let arena = arenas.get(&handle.arena_id())?;
+        Some(HandleLocation {
+            arena: arena.id(),
+            arena_name: arena.name().to_string(),
+            slot: handle.slot(),
+            slot_generation: handle.slot_generation(),
+            is_live: handle.is_live(),
+        })
+    }
+
+
 }
 
 impl Default for Broker {
@@ -286,5 +343,79 @@ mod tests {
         // Double free: generation has advanced, so the second free fails.
         let err = s.free(a.slot, a.generation).unwrap_err();
         assert!(matches!(err, BrokerError::UseAfterFreeSlot { .. }));
+    }
+
+    #[test]
+    fn stats_reports_live_arenas() {
+        let b = Broker::new();
+        let _a = b.create_arena("one", 1024);
+        let _c = b.create_arena("two", 2048);
+        let s = b.stats();
+        assert_eq!(s.live_arenas, 2);
+        assert_eq!(s.total_capacity_bytes, 1024 + 2048);
+    }
+
+    #[test]
+    fn stats_tracks_allocations_and_frees() {
+        let b = Broker::new();
+        let slab = b.arena("s").slab(64, 8, 16);
+        let h = slab.alloc(99_u64).unwrap();
+        let before = b.stats();
+        assert_eq!(before.total_allocations, 1);
+        assert_eq!(before.total_frees, 0);
+        assert!(before.total_used_bytes >= 64);
+        slab.free(&h).unwrap();
+        let after = b.stats();
+        assert_eq!(after.total_allocations, 1);
+        assert_eq!(after.total_frees, 1);
+    }
+
+    #[test]
+    fn list_arenas_sorted_by_id_with_correct_kinds() {
+        use crate::strategy::StrategyKind;
+        let b = Broker::new();
+        let _bmp = b.arena("bumpy").capacity(2048).bump();
+        let _slb = b.arena("slabby").slab(32, 8, 8);
+        let v = b.list_arenas();
+        assert_eq!(v.len(), 2);
+        // sorted by id; creation order ensures bump < slab
+        assert_eq!(v[0].kind, StrategyKind::Bump);
+        assert_eq!(v[0].name, "bumpy");
+        assert_eq!(v[1].kind, StrategyKind::Slab);
+        assert_eq!(v[1].name, "slabby");
+        assert_eq!(v[0].capacity, 2048);
+    }
+
+    #[test]
+    fn list_arenas_excludes_destroyed() {
+        let b = Broker::new();
+        let a1 = b.create_arena("a1", 1024);
+        let a2 = b.create_arena("a2", 1024);
+        let id1 = a1.id();
+        b.destroy_arena(id1).unwrap();
+        let v = b.list_arenas();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].id, a2.id());
+    }
+
+    #[test]
+    fn where_is_returns_some_for_live_handle() {
+        let b = Broker::new();
+        let a = b.create_arena("loc", 1024);
+        let h = a.alloc(7_u64).unwrap();
+        let loc = b.where_is(&h).expect("handle should be locatable");
+        assert_eq!(loc.arena, a.id());
+        assert_eq!(loc.arena_name, "loc");
+        assert!(loc.is_live);
+    }
+
+    #[test]
+    fn where_is_returns_none_after_destroy() {
+        let b = Broker::new();
+        let a = b.create_arena("gone", 1024);
+        let h = a.alloc(7_u64).unwrap();
+        let id = a.id();
+        b.destroy_arena(id).unwrap();
+        assert!(b.where_is(&h).is_none());
     }
 }
