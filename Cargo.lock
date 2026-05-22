@@ -754,6 +754,7 @@ name = "sentinel-broker"
 version = "0.0.1"
 dependencies = [
  "criterion",
+ "parking_lot",
  "proptest",
  "serial_test",
  "smallvec",

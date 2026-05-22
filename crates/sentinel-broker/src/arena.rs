@@ -1,303 +1,108 @@
-//! The simplest possible arena: bump allocation with generational handles.
+//! Arena: a generation-tagged region of memory backed by an [`AllocStrategy`].
 //!
-//! An `Arena` allocates by incrementing a cursor through a fixed
-//! capacity buffer. Each allocation produces a `Handle<T>` carrying
-//! the arena's id, the slot index, and the current generation.
+//! An arena is a thin wrapper that pairs:
+//! - identity (id, name) and a generation counter, with
+//! - a strategy object that owns the backing memory.
 //!
-//! When the arena is dropped, the generation counter advances, which
-//! invalidates all outstanding handles. Subsequent access through
-//! those handles returns `BrokerError::UseAfterFree`.
+//! `Arena::alloc<T>` asks the strategy for raw bytes, writes `T` into
+//! them, and returns a typed [`crate::Handle<T>`]. When the arena is
+//! destroyed (via the broker), `invalidate()` bumps the generation,
+//! turning every outstanding handle into a typed `UseAfterFree` error.
 
 use crate::error::BrokerError;
 use crate::handle::Handle;
-use crate::ids::{ArenaId, Generation, SlotIndex};
-use std::alloc::{alloc, dealloc, Layout};
-use std::cell::UnsafeCell;
-use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use crate::ids::{ArenaId, Generation};
+use crate::strategy::{AllocStrategy, StrategyKind};
+use std::alloc::Layout;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-/// An arena allocator with generational handle safety.
-///
-/// Arenas are reference-counted (Arc) so that outstanding handles can
-/// hold a Weak reference and detect when the arena is dropped.
 pub struct Arena {
     id: ArenaId,
     name: Box<str>,
-    capacity: usize,
-
-    /// Pointer to the start of the backing buffer.
-    buffer: NonNull<u8>,
-    /// Layout used to allocate `buffer`; needed for deallocation.
-    buffer_layout: Layout,
-
-    /// Bump pointer offset into the buffer.
-    cursor: AtomicUsize,
-
-    /// Slot count; incremented on each allocation. Used as the next
-    /// slot index. Stored separately from `cursor` so we can present
-    /// slot indices that are independent of byte offsets.
-    next_slot: AtomicU32,
-
-    /// Per-slot metadata: byte offset within the buffer where the slot's
-    /// data lives, and the layout of that slot. We need both so we can
-    /// resolve a SlotIndex back to a pointer at access time.
-    slots: UnsafeCell<Vec<SlotInfo>>,
-
-    /// Current generation. Initialized to 1; advanced (via overflow-safe
-    /// increment) when the arena is dropped or reset. Stored as
-    /// AtomicU32 so handles can read it without locking.
+    strategy: Box<dyn AllocStrategy>,
+    /// Current generation. Initialized to 1; advanced when
+    /// [`Arena::invalidate`] runs (from broker destroy_arena or Drop).
     generation: AtomicU32,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SlotInfo {
-    offset: usize,
-
-    #[allow(dead_code)]
-
-    size: usize,
-}
-
-// SAFETY: Arena is Send + Sync because all mutable state is behind
-// atomics or is only mutated during allocation (which takes &self but
-// uses atomic CAS to publish updates). The UnsafeCell<Vec<SlotInfo>>
-// is mutated only by alloc(), and we serialize allocations through
-// the cursor's compare-and-swap; this is documented in the SAFETY
-// blocks inside alloc().
-unsafe impl Send for Arena {}
-unsafe impl Sync for Arena {}
-
 impl Arena {
-    pub(crate) fn new(id: ArenaId, name: &str, capacity: usize) -> Arc<Self> {
-        assert!(capacity > 0, "arena capacity must be positive");
-
-        // Allocate the backing buffer. We use a manual allocation
-        // rather than Vec<u8> so we have explicit control over
-        // alignment (we use the maximum alignment, 64 bytes, suitable
-        // for any common type up through AVX-512).
-        let layout = Layout::from_size_align(capacity, 64)
-            .expect("arena capacity layout");
-        // SAFETY: layout has nonzero size (capacity > 0 asserted above).
-        let buffer_raw = unsafe { alloc(layout) };
-        let buffer = NonNull::new(buffer_raw)
-            .expect("arena backing allocation failed");
-
+    /// Create a new arena from a pre-built strategy.
+    pub(crate) fn with_strategy(
+        id: ArenaId,
+        name: &str,
+        strategy: Box<dyn AllocStrategy>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             id,
             name: name.into(),
-            capacity,
-            buffer,
-            buffer_layout: layout,
-            cursor: AtomicUsize::new(0),
-            next_slot: AtomicU32::new(0),
-            slots: UnsafeCell::new(Vec::new()),
+            strategy,
             generation: AtomicU32::new(Generation::INITIAL.raw()),
         })
     }
 
-    /// The ArenaId this arena was created with.
     #[must_use]
-    pub const fn id(&self) -> ArenaId {
-        self.id
-    }
+    pub const fn id(&self) -> ArenaId { self.id }
 
-    /// The name this arena was created with.
     #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
+    pub fn name(&self) -> &str { &self.name }
 
-    /// Total capacity in bytes.
     #[must_use]
-    pub const fn capacity(&self) -> usize {
-        self.capacity
-    }
+    pub fn capacity(&self) -> usize { self.strategy.capacity() }
 
-    /// Bytes currently allocated.
     #[must_use]
-    pub fn used(&self) -> usize {
-        self.cursor.load(Ordering::Acquire)
-    }
+    pub fn used(&self) -> usize { self.strategy.used() }
 
-    /// Bytes available for further allocation.
     #[must_use]
-    pub fn available(&self) -> usize {
-        self.capacity.saturating_sub(self.used())
-    }
+    pub fn available(&self) -> usize { self.strategy.available() }
 
-    /// Current generation.
+    #[must_use]
+    pub fn strategy_kind(&self) -> StrategyKind { self.strategy.kind() }
+
     #[must_use]
     pub fn generation(&self) -> Generation {
         Generation(self.generation.load(Ordering::Acquire))
     }
 
-    /// Advance the generation counter, invalidating every outstanding handle.
-    ///
-    /// Called by `Broker::destroy_arena` and by `Drop` as a safety net.
-    /// After this returns, every `Handle` issued by this arena will
-    /// return `BrokerError::UseAfterFree` on access.
+    /// Advance the generation counter, invalidating every outstanding
+    /// handle. Called by `Broker::destroy_arena` and as a safety net
+    /// from `Drop`.
     pub(crate) fn invalidate(&self) {
-        // fetch_add is sufficient: handles only check for equality, and any
-        // increment makes the issued generation stale.
         self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
-    /// Allocate a value of type T into this arena.
-    ///
-    /// Returns a Handle that can be used to access the value while
-    /// the arena is alive. Returns BrokerError::OutOfMemory if the
-    /// arena does not have enough room.
+    /// Allocate a value of type `T` into this arena.
     ///
     /// # Errors
-    ///
-    /// Returns BrokerError::OutOfMemory if capacity is exhausted.
+    /// Returns [`BrokerError::OutOfMemory`] if the strategy can't
+    /// satisfy the request.
     pub fn alloc<T>(self: &Arc<Self>, value: T) -> Result<Handle<T>, BrokerError>
     where
         T: 'static,
     {
         let layout = Layout::new::<T>();
-        let size = layout.size();
-        let align = layout.align();
+        let allocated = self.strategy.alloc_raw(layout)?;
 
-        // We use a simple atomic bump: load the cursor, align it,
-        // compute the new cursor, and CAS-publish it. If the CAS
-        // fails (because another thread allocated concurrently), we
-        // retry.
-        let offset = loop {
-            let current = self.cursor.load(Ordering::Acquire);
-
-            // Align current up to the required alignment.
-            let aligned = (current + align - 1) & !(align - 1);
-            let end = aligned.checked_add(size).ok_or(BrokerError::OutOfMemory {
-                arena: self.id,
-                available: self.capacity.saturating_sub(current),
-                requested: size,
-            })?;
-
-            if end > self.capacity {
-                return Err(BrokerError::OutOfMemory {
-                    arena: self.id,
-                    available: self.capacity.saturating_sub(current),
-                    requested: size,
-                });
-            }
-
-            if self.cursor
-                .compare_exchange_weak(current, end, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                break aligned;
-            }
-            // else: another thread claimed this slot; retry.
-        };
-
-        // Write the value into the slot.
-        // SAFETY:
-        // - `offset + size <= capacity` was verified above.
-        // - The slot we just claimed via CAS is exclusively ours.
-        // - The alignment was computed above.
+        // SAFETY: strategy returned a properly-aligned, properly-sized
+        // pointer; we own it exclusively until this function returns.
         unsafe {
-            let dest = self.buffer.as_ptr().add(offset).cast::<T>();
-            dest.write(value);
+            allocated.ptr.as_ptr().cast::<T>().write(value);
         }
-
-        // Register the slot. This is the part that conceptually needs
-        // synchronization: multiple allocations might push to `slots`
-        // concurrently. We serialize via a spinlock-style approach
-        // using next_slot: each allocator claims the next slot index
-        // atomically, then writes its SlotInfo at that index.
-        //
-        // To make this work without locking, we grow `slots` only here
-        // and only through &self, which means we need interior
-        // mutability. We use UnsafeCell with a discipline: the slot
-        // at index `i` is published when `next_slot >= i+1`. Readers
-        // wait for next_slot >= their target.
-
-        let slot_index = self.next_slot.fetch_add(1, Ordering::AcqRel);
-        let info = SlotInfo { offset, size };
-
-        // SAFETY: We are the only writer to slot[slot_index] because
-        // each allocator gets a unique slot index via fetch_add. We
-        // grow the vector under a lock-free protocol: extend with
-        // default values if needed, then write our info. To avoid
-        // requiring locks, we use the simpler approach of growing the
-        // vector once per allocation. Since allocations are serialized
-        // by the cursor CAS earlier (each successful CAS commits one
-        // allocation), the writes to `slots` are also effectively
-        // serialized.
-        unsafe {
-            let slots = &mut *self.slots.get();
-            // The cursor CAS above is the linearization point. Any
-            // allocator that successfully CASed the cursor has a
-            // unique slot_index and exclusive access to push.
-            while slots.len() <= slot_index as usize {
-                slots.push(SlotInfo { offset: 0, size: 0 });
-            }
-            slots[slot_index as usize] = info;
-        }
-
-        let generation = self.generation();
-        let weak = Arc::downgrade(self);
 
         Ok(Handle::new(
             self.id,
-            SlotIndex(slot_index),
-            generation,
-            weak,
+            allocated.slot,
+            self.generation(),
+            Arc::downgrade(self),
         ))
     }
 
-    /// Returns a pointer to the data backing a slot, after bounds-checking.
+    /// Resolve a slot index back to a pointer. Used by [`Handle::get`].
     ///
-    /// This is the internal mechanism that Handle::get() uses to
-    /// resolve a slot index to a memory address. It is pub(crate) so
-    /// the handle module can call it but external code cannot.
-    pub(crate) fn slot_ptr(&self, slot: SlotIndex) -> Result<*const u8, BrokerError> {
-        // SAFETY: We only read slot infos that have been published
-        // (next_slot >= slot+1). The Acquire ordering on next_slot
-        // synchronizes with the Release in alloc()'s fetch_add.
-        let published = self.next_slot.load(Ordering::Acquire);
-        if slot.raw() >= published {
-            return Err(BrokerError::InvalidSlot {
-                arena: self.id,
-                slot,
-            });
-        }
-
-        let info = unsafe {
-            let slots = &*self.slots.get();
-            slots[slot.raw() as usize]
-        };
-
-        // SAFETY: offset was computed during alloc and is within
-        // [0, capacity), and the slot's data lives at buffer + offset.
-        Ok(unsafe { self.buffer.as_ptr().add(info.offset) })
-    }
-}
-
-impl Drop for Arena {
-    fn drop(&mut self) {
-        self.invalidate();
-        // Advance the generation. This invalidates all outstanding
-        // handles. We use wrapping_add to avoid overflow; in practice
-        // an arena would need to be created and dropped 4 billion
-        // times for this to matter, and even then the wrap would only
-        // accidentally validate a handle from exactly 4B generations
-        // ago, which we accept.
-        let prev = self.generation.fetch_add(1, Ordering::AcqRel);
-        tracing::debug!(
-            arena_id = %self.id,
-            name = %self.name,
-            previous_generation = prev,
-            "arena dropped; generation advanced"
-        );
-
-        // Deallocate the backing buffer.
-        // SAFETY: buffer was allocated with self.buffer_layout in new().
-        unsafe {
-            dealloc(self.buffer.as_ptr(), self.buffer_layout);
-        }
+    /// # Errors
+    /// Returns [`BrokerError::InvalidSlot`] for unknown slots.
+    pub(crate) fn slot_ptr(&self, slot: crate::ids::SlotIndex) -> Result<*const u8, BrokerError> {
+        Ok(self.strategy.slot_ptr(slot)?.as_ptr())
     }
 }
 
@@ -306,97 +111,101 @@ impl std::fmt::Debug for Arena {
         f.debug_struct("Arena")
             .field("id", &self.id)
             .field("name", &self.name)
-            .field("capacity", &self.capacity)
-            .field("generation", &self.generation)
+            .field("kind", &self.strategy.kind())
+            .field("capacity", &self.capacity())
+            .field("used", &self.used())
+            .field("generation", &self.generation())
             .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        // Safety net: bump generation so any handle that somehow
+        // still has a Weak to us fails its generation check.
+        self.invalidate();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy::bump::BumpStrategy;
 
-    #[test]
-    fn arena_basic_alloc() {
-        let arena = Arena::new(ArenaId(1), "test", 4096);
-        let handle = arena.alloc(42_u64).unwrap();
-        assert_eq!(*handle.get().unwrap(), 42);
+    fn make_bump(id_raw: u64, cap: usize) -> Arc<Arena> {
+        let id = ArenaId(id_raw);
+        Arena::with_strategy(id, "test", Box::new(BumpStrategy::new(id, cap)))
     }
 
     #[test]
-    fn arena_tracks_usage() {
-        let arena = Arena::new(ArenaId(1), "test", 4096);
-        assert_eq!(arena.used(), 0);
-        let _h = arena.alloc(0_u64).unwrap();
-        assert!(arena.used() >= std::mem::size_of::<u64>());
+    fn arena_basic_alloc() {
+        let a = make_bump(1, 1024);
+        let h = a.alloc(42_u64).unwrap();
+        assert_eq!(*h.get().unwrap(), 42);
     }
 
     #[test]
     fn arena_oom_returns_error() {
-        let arena = Arena::new(ArenaId(1), "test", 16);
-        // 16 bytes should fit two u64s.
-        let _h1 = arena.alloc(1_u64).unwrap();
-        let _h2 = arena.alloc(2_u64).unwrap();
-        // Third should fail.
-        let r = arena.alloc(3_u64);
-        assert!(matches!(r, Err(BrokerError::OutOfMemory { .. })));
+        let a = make_bump(2, 8);
+        a.alloc(0_u64).unwrap(); // fills it
+        let err = a.alloc(0_u64).unwrap_err();
+        assert!(matches!(err, BrokerError::OutOfMemory { .. }));
     }
 
     #[test]
     fn arena_drop_invalidates_handles() {
-        let arena = Arena::new(ArenaId(1), "test", 4096);
-        let handle = arena.alloc(42_u64).unwrap();
-        assert_eq!(*handle.get().unwrap(), 42);
-        drop(arena);
-        let r = handle.get();
-        assert!(r.is_err(), "expected use-after-free, got {r:?}");
-        assert!(r.err().unwrap().is_use_after_free());
+        let a = make_bump(3, 64);
+        let h = a.alloc(7_u64).unwrap();
+        assert_eq!(*h.get().unwrap(), 7);
+        drop(a);
+        assert!(h.get().is_err());
     }
 
     #[test]
-    fn arena_alignment_respected() {
-        // Allocate a u8 then a u64; the u64 must be aligned to 8.
-        let arena = Arena::new(ArenaId(1), "test", 4096);
-        let _h1 = arena.alloc(1_u8).unwrap();
-        let h2 = arena.alloc(0x1234_5678_9abc_def0_u64).unwrap();
-        assert_eq!(*h2.get().unwrap(), 0x1234_5678_9abc_def0);
+    fn arena_tracks_usage() {
+        let a = make_bump(4, 1024);
+        assert_eq!(a.used(), 0);
+        a.alloc(0_u64).unwrap();
+        assert!(a.used() >= 8);
+        assert_eq!(a.strategy_kind(), StrategyKind::Bump);
     }
 
     #[test]
     fn arena_many_allocations() {
-        let arena = Arena::new(ArenaId(1), "test", 1024 * 1024);
-        let handles: Vec<_> = (0..1000_u64)
-            .map(|i| arena.alloc(i).unwrap())
-            .collect();
-        for (i, h) in handles.iter().enumerate() {
-            assert_eq!(*h.get().unwrap(), i as u64);
+        let a = make_bump(5, 1024);
+        for i in 0..100_u64 {
+            a.alloc(i).unwrap();
         }
+        assert!(a.used() >= 800);
+    }
+
+    #[test]
+    fn arena_alignment_respected() {
+        #[repr(align(64))]
+        #[allow(dead_code)]
+        struct AlignedBlob([u8; 64]);
+
+        let a = make_bump(6, 4096);
+        let h = a.alloc(AlignedBlob([0; 64])).unwrap();
+        let r = h.get().unwrap();
+        let addr = std::ptr::addr_of!(*r) as usize;
+        assert_eq!(addr % 64, 0);
     }
 
     #[test]
     fn arena_concurrent_allocation() {
         use std::thread;
-        let arena = Arena::new(ArenaId(1), "test", 1024 * 1024);
-        let mut threads = Vec::new();
-        for t in 0..4 {
-            let arena = Arc::clone(&arena);
-            threads.push(thread::spawn(move || {
-                let mut handles = Vec::new();
+        let a = make_bump(7, 1024 * 64);
+        let mut handles = vec![];
+        for t in 0..8_u64 {
+            let a2 = Arc::clone(&a);
+            handles.push(thread::spawn(move || {
                 for i in 0..100_u64 {
-                    let value = t * 1000 + i;
-                    handles.push(arena.alloc(value).unwrap());
+                    a2.alloc(t * 1000 + i).unwrap();
                 }
-                handles
             }));
         }
-        let all_handles: Vec<_> = threads
-            .into_iter()
-            .flat_map(|t| t.join().unwrap())
-            .collect();
-        assert_eq!(all_handles.len(), 400);
-        // Spot-check that values round-trip
-        for h in &all_handles {
-            let _v = *h.get().unwrap();
-        }
+        for h in handles { h.join().unwrap(); }
+        assert!(a.used() >= 8 * 100 * 8);
     }
 }

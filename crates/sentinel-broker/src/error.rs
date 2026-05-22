@@ -51,6 +51,11 @@ pub enum BrokerError {
     /// The broker's internal lock is poisoned by a prior panic.
     #[error("broker state is poisoned")]
     BrokerPoisoned,
+
+    /// A feature has been declared but is not yet implemented.
+    /// Used during staged development to flag callable-but-unfinished APIs.
+    #[error("not implemented: {feature}")]
+    NotImplemented { feature: &'static str },
 }
 
 impl BrokerError {

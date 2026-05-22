@@ -1,12 +1,10 @@
 //! The top-level Broker type.
 //!
-//! The Broker is a process-level registry of arenas. It owns the strong
-//! `Arc<Arena>` references that keep arenas alive; users receive an
-//! [`ArenaHandle`] that gives them access without taking ownership.
-//! To release an arena and invalidate every handle it issued, call
-//! [`Broker::destroy_arena`].
+//! Owns the strong `Arc<Arena>` references that keep arenas alive.
+//! Users receive an [`ArenaHandle`] for access without ownership.
 
 use crate::arena::Arena;
+use crate::builder::ArenaBuilder;
 use crate::error::BrokerError;
 use crate::ids::{ArenaId, ArenaIdCounter};
 use std::collections::HashMap;
@@ -14,11 +12,6 @@ use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 
 /// A user-facing reference to a broker-owned arena.
-///
-/// Cloning an `ArenaHandle` is cheap and does *not* extend the arena's
-/// lifetime: only the broker's internal map keeps the arena alive.
-/// Call [`Broker::destroy_arena`] to free the arena and invalidate
-/// every handle it issued.
 #[derive(Clone)]
 pub struct ArenaHandle {
     id: ArenaId,
@@ -26,23 +19,18 @@ pub struct ArenaHandle {
 }
 
 impl ArenaHandle {
-    /// The id of the arena this handle refers to.
-    #[must_use]
-    pub fn id(&self) -> ArenaId {
-        self.id
+    pub(crate) fn from_parts(id: ArenaId, arena: Arc<Arena>) -> Self {
+        Self { id, arena }
     }
+
+    #[must_use]
+    pub fn id(&self) -> ArenaId { self.id }
 
     /// Allocate a value of type `T` into this arena.
     ///
-    /// Returns a [`crate::Handle`] that can be used to access the
-    /// value while the arena is alive. The handle is invalidated when
-    /// the broker destroys the arena.
-    ///
     /// # Errors
-    ///
-    /// Returns [`crate::BrokerError::OutOfMemory`] if the arena's
-    /// capacity is exhausted.
-    pub fn alloc<T>(&self, value: T) -> Result<crate::Handle<T>, crate::BrokerError>
+    /// Returns [`BrokerError::OutOfMemory`] if capacity is exhausted.
+    pub fn alloc<T>(&self, value: T) -> Result<crate::Handle<T>, BrokerError>
     where
         T: 'static,
     {
@@ -52,9 +40,7 @@ impl ArenaHandle {
 
 impl Deref for ArenaHandle {
     type Target = Arena;
-    fn deref(&self) -> &Arena {
-        &self.arena
-    }
+    fn deref(&self) -> &Arena { &self.arena }
 }
 
 impl std::fmt::Debug for ArenaHandle {
@@ -62,24 +48,18 @@ impl std::fmt::Debug for ArenaHandle {
         f.debug_struct("ArenaHandle")
             .field("id", &self.id)
             .field("name", &self.arena.name())
+            .field("kind", &self.arena.strategy_kind())
             .field("capacity", &self.arena.capacity())
             .finish_non_exhaustive()
     }
 }
 
-/// The runtime memory broker.
-///
-/// In the current scaffold, the broker is a registry that owns arenas
-/// and can destroy them on request. Later milestones will add
-/// allocation strategies, budgets, recording, and secret-memory
-/// policies.
 pub struct Broker {
     arena_ids: ArenaIdCounter,
     arenas: RwLock<HashMap<ArenaId, Arc<Arena>>>,
 }
 
 impl Broker {
-    /// Create a new broker with no arenas.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -88,57 +68,35 @@ impl Broker {
         }
     }
 
-    /// Create a new arena registered with this broker.
+    /// Start building an arena with a fluent API.
     ///
-    /// The returned `ArenaHandle` borrows from the broker's internal
-    /// map. The arena lives until you call [`Broker::destroy_arena`]
-    /// or the broker itself is dropped.
+    /// ```ignore
+    /// let arena = broker.arena("requests").capacity(4096).bump();
+    /// let slab  = broker.arena("events").slab(64, 8, 256);
+    /// ```
+    #[must_use]
+    pub fn arena(&self, name: &str) -> ArenaBuilder<'_> {
+        ArenaBuilder::new(self, name.to_string())
+    }
+
+    /// Convenience: create a bump arena directly (kept for compatibility
+    /// with the A0–A2 API). Equivalent to
+    /// `broker.arena(name).capacity(capacity).bump()`.
     pub fn create_arena(&self, name: &str, capacity: usize) -> ArenaHandle {
-        let id = self.arena_ids.next();
-        let arena = Arena::new(id, name, capacity);
-
-        // Best-effort insertion. A poisoned lock means a previous panic
-        // left state we cannot reason about; in that case we still
-        // return the handle but the arena will not be tracked.
-        if let Ok(mut arenas) = self.arenas.write() {
-            arenas.insert(id, Arc::clone(&arena));
-        }
-
-        tracing::debug!(
-            arena_id = %id,
-            name = %name,
-            capacity = capacity,
-            "arena created"
-        );
-
-        ArenaHandle { id, arena }
+        self.arena(name).capacity(capacity).bump()
     }
 
     /// Destroy an arena, invalidating every handle issued for it.
     ///
-    /// After this call returns successfully, every `Handle` issued by
-    /// this arena will return [`BrokerError::UseAfterFree`] on access,
-    /// regardless of how many `ArenaHandle` clones still exist.
-    ///
     /// # Errors
-    ///
-    /// Returns [`BrokerError::UnknownArena`] if no arena with the given
-    /// id is registered (it was already destroyed, or never created
-    /// by this broker).
+    /// Returns [`BrokerError::UnknownArena`] if no such arena exists.
     pub fn destroy_arena(&self, id: ArenaId) -> Result<(), BrokerError> {
         let removed = {
-            let mut arenas = self
-                .arenas
-                .write()
-                .map_err(|_| BrokerError::BrokerPoisoned)?;
+            let mut arenas = self.arenas.write().map_err(|_| BrokerError::BrokerPoisoned)?;
             arenas.remove(&id)
         };
-
         match removed {
             Some(arena) => {
-                // Advance the generation first so that any concurrent
-                // handle access sees the bumped value even if some
-                // `Arc<Arena>` clone keeps the arena alive afterward.
                 arena.invalidate();
                 tracing::debug!(arena_id = %id, "arena destroyed");
                 Ok(())
@@ -147,22 +105,35 @@ impl Broker {
         }
     }
 
-    /// Number of arenas currently registered with the broker.
+    /// Number of arenas currently registered.
     #[must_use]
     pub fn live_arena_count(&self) -> usize {
         self.arenas.read().map_or(0, |a| a.len())
     }
+
+    // --- pub(crate) hooks used by the builder ---
+
+    pub(crate) fn next_arena_id(&self) -> ArenaId {
+        self.arena_ids.next()
+    }
+
+    pub(crate) fn register_arena(&self, arena: Arc<Arena>) {
+        let id = arena.id();
+        if let Ok(mut arenas) = self.arenas.write() {
+            arenas.insert(id, arena);
+        }
+        tracing::debug!(arena_id = %id, "arena registered");
+    }
 }
 
 impl Default for Broker {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::strategy::StrategyKind;
 
     #[test]
     fn broker_creates_arenas() {
@@ -191,37 +162,76 @@ mod tests {
         let arena = broker.create_arena("example", 4096);
         let handle = arena.alloc(42_u64).unwrap();
         assert_eq!(*handle.get().unwrap(), 42);
-
         broker.destroy_arena(arena.id()).unwrap();
-
-        assert!(matches!(
-            handle.get(),
-            Err(BrokerError::UseAfterFree { .. })
-        ));
+        assert!(matches!(handle.get(), Err(BrokerError::UseAfterFree { .. })));
     }
 
     #[test]
     fn destroy_unknown_arena_is_an_error() {
         let broker = Broker::new();
-        // Create and destroy to consume an id, then try to destroy again.
         let a = broker.create_arena("ephemeral", 64);
         let id = a.id();
         broker.destroy_arena(id).unwrap();
-        assert!(matches!(
-            broker.destroy_arena(id),
-            Err(BrokerError::UnknownArena { .. })
-        ));
+        assert!(matches!(broker.destroy_arena(id), Err(BrokerError::UnknownArena { .. })));
     }
 
     #[test]
     fn live_arena_count_tracks_destruction() {
         let broker = Broker::new();
         let a = broker.create_arena("a", 64);
-        let b = broker.create_arena("b", 64);
+        let b2 = broker.create_arena("b", 64);
         assert_eq!(broker.live_arena_count(), 2);
         broker.destroy_arena(a.id()).unwrap();
         assert_eq!(broker.live_arena_count(), 1);
-        broker.destroy_arena(b.id()).unwrap();
+        broker.destroy_arena(b2.id()).unwrap();
         assert_eq!(broker.live_arena_count(), 0);
+    }
+
+    #[test]
+    fn mixed_bump_and_slab_arenas() {
+        let b = Broker::new();
+        let bump = b.arena("bump").capacity(1024).bump();
+        let slab = b.arena("slab").slab(64, 8, 16);
+        assert_eq!(bump.strategy_kind(), StrategyKind::Bump);
+        assert_eq!(slab.strategy_kind(), StrategyKind::Slab);
+
+        let hb = bump.alloc(1_u64).unwrap();
+        let hs = slab.alloc(2_u64).unwrap();
+        assert_eq!(*hb.get().unwrap(), 1);
+        assert_eq!(*hs.get().unwrap(), 2);
+
+        b.destroy_arena(slab.id()).unwrap();
+        assert!(hs.get().is_err());
+        assert_eq!(*hb.get().unwrap(), 1);
+    }
+
+    #[test]
+    fn slab_oom_when_slots_exhausted() {
+        let b = Broker::new();
+        let slab = b.arena("tiny").slab(8, 8, 2);
+        slab.alloc(1_u64).unwrap();
+        slab.alloc(2_u64).unwrap();
+        let err = slab.alloc(3_u64).unwrap_err();
+        assert!(matches!(err, BrokerError::OutOfMemory { .. }));
+    }
+
+    #[test]
+    fn slab_rejects_oversized_allocation() {
+        let b = Broker::new();
+        let slab = b.arena("small-slots").slab(4, 4, 16);
+        let err = slab.alloc(0_u64).unwrap_err(); // u64 is 8 bytes, slot is 4
+        assert!(matches!(err, BrokerError::OutOfMemory { .. }));
+    }
+
+    #[test]
+    fn slab_free_returns_not_implemented() {
+        // The strategy's free() returns NotImplemented; for now we just
+        // exercise it directly via the strategy until A3.5 wires it up
+        // through Arena/Handle.
+        use crate::strategy::{slab::SlabStrategy, AllocStrategy};
+        use crate::ids::{ArenaId, SlotIndex};
+        let s = SlabStrategy::new(ArenaId(99), 16, 8, 4);
+        let err = s.free(SlotIndex(0)).unwrap_err();
+        assert!(matches!(err, BrokerError::NotImplemented { .. }));
     }
 }
