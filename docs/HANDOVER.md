@@ -12,33 +12,90 @@ reference as you work through the milestones.
 
 ## 0. Current Implementation Status
 
-> This section is a pointer added after Phase A0-A6 landed. The rest of
+> This section is a pointer added after Phase A landed. The rest of
 > this document remains the long-term project plan; for what actually
 > exists in the codebase right now, read docs/STATE.md.
 
-As of the most recent commit on main:
+**Phase A is complete** (commits 9c7474d through b4412d8). The
+sentinel-broker crate provides:
 
-- Phase A0-A6 complete (commits 9c7474d through 2e8fb8b). The
-  sentinel-broker crate now provides: generational arenas (bump and
-  slab strategies), per-slot generations with slab recycling, scoped
-  budgets, stats/list_arenas/where_is diagnostics, and an opt-in
-  recording mode capturing all alloc/free/budget/arena-lifecycle
-  events.
-- 63 tests passing (55 lib + 5 integration + 2 proptest + 1 doc),
-  clippy clean under -D warnings.
-- Next milestone: A7 - secret-memory policy (mlock + zero-on-free).
-  See docs/STATE.md Section 7 for the open design questions.
-- A8 (Phase A capstone) - three validation example programs as
-  described in Section 4.3 below.
+- Generational arenas with two strategies (bump, slab) and per-slot
+  generations with slab recycling.
+- Scoped allocation budgets (within_budget) with pre-charge semantics.
+- Diagnostics: stats(), list_arenas(), where_is(), and a doc(hidden)
+  raw-slot-bytes accessor for forensic tooling.
+- Optional recording mode capturing all alloc/free/budget/arena-
+  lifecycle events with monotonic timestamps; unbounded or bounded
+  ring buffer.
+- Secret-memory policy (mlock + zero-on-free + zero-on-destroy) via
+  a SecretStrategy decorator wrapping any AllocStrategy. STRICT /
+  LENIENT / NONE presets.
+- Three runnable validation example programs under
+  crates/sentinel-broker/examples/ exercising the full surface
+  end-to-end, including unsafe raw-memory reads to verify
+  zero-on-free.
+
+**Test coverage**: 70 green (62 lib + 5 integration + 2 proptest +
+1 doc). Clippy clean under -D warnings across crate AND examples.
+
+**Next**: Phase B (parser / VM / language runtime). The remainder of
+this document describes the long-term plan; see Section 4 onward
+for parser/lexer/VM design notes that were sketched before
+implementation began. These plans may need revision in light of
+what the broker actually shipped.
 
 Other workspace crates listed in Section 3.2 (sentinel-syntax,
-sentinel-ast, etc.) are scaffold-only; Phase B and beyond have not
-started. Sections 4 through 12 below describe the plan and remain
-authoritative for long-term direction.
+sentinel-ast, etc.) are scaffold-only; Phase B has not started.
 
-Scripts that built each milestone live under scripts/ and are named
-NN-<phase>.sh, NNa-..., NNz-commit-...sh. See docs/STATE.md
+Scripts that built each milestone live under scripts/ and are
+named NN-<phase>.sh, NNa-..., NNz-commit-...sh. See docs/STATE.md
 Section 6 for the convention.
+
+### 0.1 Working norms (for the next session)
+
+Carry these into Phase B:
+
+- **Trust STATE.md, not the git log.** Commit messages are dense
+  and miss design rationale. Always read docs/STATE.md and this
+  file before doing anything; never infer state from git log alone.
+
+- **Terminal quirk: nested heredocs break.** This developer's
+  terminal mangles `<<EOF ... <<INNER ... INNER ... EOF`-style
+  scripts. Use one of: (a) base64-encoded python3 -c blocks,
+  (b) write a script to /tmp/ via a single non-nested heredoc and
+  then execute it, or (c) single non-nested heredocs only.
+  Do not paste multi-layer heredocs.
+
+- **Small patches, build between each.** The session that built
+  Phase A7 took four diagnostic/fix iterations because the
+  initial patch was too ambitious. Better practice: land the
+  type/trait changes first, build, then add the implementations,
+  build, then add the tests.
+
+- **Honest disclosure beats confident-but-wrong.** This developer
+  values being told when something is uncertain or guessed at
+  ("I'm not sure if BudgetScope::within_budget emits BudgetClosed
+  on rejection, so I included an assertion to find out") over
+  patches presented as definitely-correct that turn out not to be.
+
+- **Minimal ceremony.** "go", "proceed", short replies are the
+  norm. Long preambles are unwelcome.
+
+- **Script naming**: NN-<phase>.sh for the main patch,
+  NNa-/NNb-/NNc- for diagnostic/fix iterations within a phase,
+  NNz-commit-<phase>.sh for the commit script. Keep them under
+  scripts/ for traceability.
+
+- **Examples held to -D warnings.** Don't allow lint debt in
+  examples; they're educational artifacts.
+
+- **Check before overwriting docs.** When patching documentation
+  files via Python, always check `p.exists()` and read existing
+  content first. `p.write_text(new)` unconditionally clobbers prior
+  content. Prefer merge/append patterns for docs/. (Lesson learned
+  the hard way: BACKLOG.md was a substantive 540-line file that
+  got briefly overwritten during phase A handoff prep.)
+
 
 ---
 

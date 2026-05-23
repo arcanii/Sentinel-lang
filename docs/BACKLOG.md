@@ -1,37 +1,71 @@
 # BACKLOG.md — Sentinel Post-1.0 Backlog and Research Directions
 
-This document captures capabilities that are not part of Sentinel 1.0
-but should remain visible to the project. Each item is described with
-enough detail to evaluate later, along with notes on what foundational
-decisions in 1.0 must accommodate it so the door stays open.
+This document captures capabilities and tracked items in two layers:
 
-## Framing
+- **Section 0 (Phase A carry-over)**: short-term, tactical items
+  deferred from the broker implementation. Address before the broker
+  is considered 1.0-stable.
+- **Sections 1+ (post-1.0 research)**: long-term strategic directions
+  that are not part of Sentinel 1.0 but should remain visible.
 
-Sentinel's purpose is to be a flexible, high-security, high-safety
-framework for systems programming. Its job is to eliminate as many
-unintentionally introduced security bugs as the language layer can
-reach: memory-safety errors, confused-deputy bugs, secret disclosure,
-unchecked capability escalation, race conditions, side channels
-expressible in software, and supply-chain compromises through
-dependencies.
+---
 
-Sentinel does not guard against hardware-level CPU state
-vulnerabilities. Spectre, Meltdown, MDS, Foreshadow, Downfall,
-fault-injection attacks, hardware backdoors, and microcode bugs all
-operate below the language layer. Sentinel can insert mitigations the
-hardware vendors prescribe (speculation barriers, cache flushes,
-register clearing), and can express which data is sensitive so the
-mitigations apply where they matter, but it cannot make insecure
-silicon secure.
+## 0. Phase A Carry-Over (broker tech debt)
 
-What Sentinel can do is ensure that when a programmer writes ordinary
-code without thinking about security, the language and runtime catch
-the security mistakes anyway. That is the bar.
+Deferred from Phase A0-A8 (commits 9c7474d through b4412d8). None block
+Phase B; all are nice-to-haves or known sharp edges.
 
-The items below are organized by theme rather than priority. Priority
-is set on the year the work is actually scheduled, not now. Some items
-will turn out to be wrong directions; that is expected and fine. Each
-should be revisited annually with explicit go/no-go reasoning.
+### 0.1 Broker API hardening
+
+- **Builder panics on SecretStrategy::wrap failure.** The current
+  `ArenaBuilder::bump()` and `.slab()` use `.expect()` when wrapping
+  in SecretStrategy. mlock failure (typical on macOS dev machines
+  without `ulimit -l unlimited`) panics. The `credential_store.rs`
+  example works around this with `std::panic::catch_unwind`, but the
+  fix is to add `try_bump() -> Result<ArenaHandle, BrokerError>`
+  and `try_slab(...) -> Result<...>` variants. Originating context:
+  Phase A8, commit b4412d8.
+
+- **slot_size_hint is None for bump strategies.** The
+  `Arena::__raw_slot_bytes_for_diagnostics` accessor returns None
+  for bump arenas because bump slots are variable-size. Either
+  track per-slot sizes in bump (via the existing SlotInfo struct,
+  which already has a `size` field — currently dead-code), or
+  document that diagnostics are slab-only. The SlotInfo.size field
+  is annotated `#[allow(dead_code)]` and could be returned by a
+  bump-side override of slot_size_hint as a per-call lookup.
+
+- **BrokerError::SecretMemory loses OS error detail.** The `reason`
+  field was changed to `&'static str` to keep `BrokerError: Copy`.
+  The OS error is logged via `tracing::warn!` before the variant is
+  returned, but consumers who only see the error get no specifics.
+  Options: drop Copy from BrokerError (most variants don't need it),
+  or add a separate `os_errno: Option<i32>` field.
+
+- **Probe-arena pattern in credential_store wastes one alloc cycle.**
+  To detect STRICT availability, the demo creates a 1-slot probe
+  arena, destroys it, then builds the real vault. With `try_bump`/
+  `try_slab` (above) this becomes a single direct attempt.
+
+### 0.2 Broker stability
+
+- **Recording event field stability.** Event enum variants currently
+  carry detailed payloads (arena id, name, kind, capacity, slot,
+  generation, at_ns). If consumers serialize these for persistent
+  logs, future field additions are breaking changes. Consider
+  marking Event `#[non_exhaustive]` and committing to a stable
+  on-disk format separately.
+
+### 0.3 Phase B prerequisites (likely)
+
+- Decide whether the broker's `parking_lot::Mutex` is acceptable in
+  no_std contexts, or whether Phase B needs an alternative. (Note:
+  this overlaps with Section 1.1 `no_runtime` Compilation Mode below.)
+- Decide whether the broker should be re-exported from a higher-level
+  crate (sentinel-core?) or stay accessible directly.
+- Cargo workspace currently has stub crates (sentinel-syntax,
+  sentinel-ast, sentinel-vm, etc.) — confirm these names are still
+  the intended Phase B layout before populating them.
 
 ---
 
