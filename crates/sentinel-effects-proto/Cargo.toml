@@ -1,0 +1,21 @@
+[package]
+name        = "sentinel-effects-proto"
+description = "Sentinel-Mini: research-grade tree-walking interpreter for validating the effect system in isolation (Phase B)."
+
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+logos      = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+# none yet; insta/proptest deferred to later B phases
+
+[lints.rust]
+unsafe_code = "deny"
