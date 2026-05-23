@@ -1,14 +1,14 @@
-//! Lexer for Sentinel-Mini (B0).
+//! Lexer for Sentinel-Mini.
 //!
-//! Uses [`logos`] for token recognition. Returns a flat `Vec<Token>` so
-//! the hand-written parser can index into it freely (recovery and span
-//! tracking are deliberately minimal at B0; both will get attention in
-//! later phases).
+//! Uses [`logos`] for token recognition. Returns a flat `Vec<(Token, Span)>`
+//! so downstream stages can attach source positions to AST nodes and
+//! diagnostics. The hand-written parser indexes into this vector directly.
 
+use crate::span::Span;
 use logos::Logos;
 use thiserror::Error;
 
-/// All tokens recognised by the B0 lexer.
+/// All tokens recognised by the lexer.
 #[derive(Logos, Debug, Clone, PartialEq)]
 #[logos(skip r"[ \t\n\r\f]+")]
 #[logos(skip r"//[^\n]*")]
@@ -24,6 +24,8 @@ pub enum Token {
     // Keywords
     #[token("let")]
     Let,
+    #[token("rec")]
+    Rec,
     #[token("in")]
     In,
     #[token("if")]
@@ -69,29 +71,32 @@ pub enum Token {
 /// Errors produced by [`lex`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LexError {
-    #[error("unrecognised token at byte offset {offset}: {snippet:?}")]
-    Unrecognised { offset: usize, snippet: String },
+    #[error("unrecognised token at bytes {}..{}: {snippet:?}", span.start, span.end)]
+    Unrecognised { span: Span, snippet: String },
 }
 
-/// Tokenise `source` into a flat vector of tokens.
-///
-/// Whitespace and `// line comments` are skipped. The first unrecognised
-/// character produces [`LexError::Unrecognised`] and aborts lexing.
-pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
-    let mut out = Vec::new();
+/// Tokenise `source` into a flat vector of `(Token, Span)` pairs.
+pub fn lex(source: &str) -> Result<Vec<(Token, Span)>, LexError> {
+    let mut out: Vec<(Token, Span)> = Vec::new();
     let mut lx = Token::lexer(source);
     while let Some(res) = lx.next() {
         match res {
-            Ok(tok) => out.push(tok),
+            Ok(tok) => {
+                let r = lx.span();
+                out.push((tok, Span::new(r.start, r.end)));
+            }
             Err(()) => {
-                let span = lx.span();
+                let r = lx.span();
                 let snippet: String = source
-                    .get(span.start..span.end)
+                    .get(r.start..r.end)
                     .unwrap_or("")
                     .chars()
                     .take(16)
                     .collect();
-                return Err(LexError::Unrecognised { offset: span.start, snippet });
+                return Err(LexError::Unrecognised {
+                    span: Span::new(r.start, r.end),
+                    snippet,
+                });
             }
         }
     }
@@ -102,9 +107,13 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
 mod tests {
     use super::*;
 
+    fn tokens_only(v: Vec<(Token, Span)>) -> Vec<Token> {
+        v.into_iter().map(|(t, _)| t).collect()
+    }
+
     #[test]
     fn lex_integers_and_arith() {
-        let toks = lex("1 + 2 * 3").unwrap();
+        let toks = tokens_only(lex("1 + 2 * 3").unwrap());
         assert_eq!(
             toks,
             vec![
@@ -119,7 +128,7 @@ mod tests {
 
     #[test]
     fn lex_keywords_vs_idents() {
-        let toks = lex("let lettuce = true in lettuce").unwrap();
+        let toks = tokens_only(lex("let lettuce = true in lettuce").unwrap());
         assert_eq!(
             toks,
             vec![
@@ -135,7 +144,7 @@ mod tests {
 
     #[test]
     fn lex_lambda_syntax() {
-        let toks = lex("fn(x) => x + 1").unwrap();
+        let toks = tokens_only(lex("fn(x) => x + 1").unwrap());
         assert_eq!(
             toks,
             vec![
@@ -153,7 +162,7 @@ mod tests {
 
     #[test]
     fn lex_skips_line_comments() {
-        let toks = lex("// hello\n1 + 2 // trailing").unwrap();
+        let toks = tokens_only(lex("// hello\n1 + 2 // trailing").unwrap());
         assert_eq!(toks, vec![Token::Int(1), Token::Plus, Token::Int(2)]);
     }
 
@@ -161,7 +170,35 @@ mod tests {
     fn lex_unrecognised_char() {
         let err = lex("1 + @").unwrap_err();
         match err {
-            LexError::Unrecognised { offset, .. } => assert_eq!(offset, 4),
+            LexError::Unrecognised { span, snippet } => {
+                assert_eq!(span, Span::new(4, 5));
+                assert_eq!(snippet, "@");
+            }
         }
+    }
+
+    #[test]
+    fn lex_records_spans() {
+        let v = lex("1 + 2").unwrap();
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[0], (Token::Int(1), Span::new(0, 1)));
+        assert_eq!(v[1], (Token::Plus, Span::new(2, 3)));
+        assert_eq!(v[2], (Token::Int(2), Span::new(4, 5)));
+    }
+
+    #[test]
+    fn lex_let_rec_keyword() {
+        let toks = tokens_only(lex("let rec f = fn(n) => n").unwrap());
+        assert_eq!(toks[0], Token::Let);
+        assert_eq!(toks[1], Token::Rec);
+        assert_eq!(toks[2], Token::Ident("f".into()));
+    }
+
+    #[test]
+    fn lex_rec_is_reserved_not_ident() {
+        // After B1.3, `rec` cannot be used as an identifier anywhere.
+        // This is the trade-off accepted in the B1 scope discussion.
+        let toks = tokens_only(lex("rec").unwrap());
+        assert_eq!(toks, vec![Token::Rec]);
     }
 }

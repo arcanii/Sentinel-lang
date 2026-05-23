@@ -1,21 +1,42 @@
-//! Abstract syntax tree for Sentinel-Mini (B0).
+//! Abstract syntax tree for Sentinel-Mini.
 //!
-//! Plain enums, owned `String` names, `Box`ed children. No arena
-//! allocation: the B0 language is small enough that the resulting heap
-//! traffic is irrelevant for a research artifact.
+//! Every expression node carries a [`Span`] via the [`Spanned`] wrapper.
+//! The split between [`ExprKind`] (the variants) and [`Expr`] (the
+//! span-wrapped node) keeps spans in exactly one place.
 
-/// A Sentinel-Mini expression.
+use crate::span::{Span, Spanned};
+
+/// A Sentinel-Mini expression: the kind plus its source span.
+pub type Expr = Spanned<ExprKind>;
+
+/// The shape of an expression, without the span.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
+pub enum ExprKind {
     /// Integer literal.
     Int(i64),
     /// Boolean literal.
     Bool(bool),
     /// Variable reference.
     Var(String),
-    /// `let name = value in body`.
+    /// `let name = value in body`. Non-recursive.
     Let {
         name: String,
+        value: Box<Expr>,
+        body: Box<Expr>,
+    },
+    /// `let rec name = fn(param) => ... in body`.
+    ///
+    /// The right-hand side is required at parse time to be a [`Lambda`]
+    /// expression. This is the standard ML restriction; it sidesteps the
+    /// question of "what does `let rec x = x + 1` mean" without losing
+    /// expressiveness, since the recursion we care about is function
+    /// recursion.
+    ///
+    /// [`Lambda`]: ExprKind::Lambda
+    LetRec {
+        name: String,
+        /// The lambda being bound. Always an [`ExprKind::Lambda`] at the
+        /// node level; the parser enforces this.
         value: Box<Expr>,
         body: Box<Expr>,
     },
@@ -25,14 +46,12 @@ pub enum Expr {
         then_branch: Box<Expr>,
         else_branch: Box<Expr>,
     },
-    /// `fn(param) => body`. B0 supports single-parameter lambdas only;
-    /// multi-parameter functions are curried at the call site by the
-    /// programmer for now.
+    /// `fn(param) => body`.
     Lambda {
         param: String,
         body: Box<Expr>,
     },
-    /// `callee(arg)`. Same single-arg restriction as [`Expr::Lambda`].
+    /// `callee(arg)`.
     App {
         callee: Box<Expr>,
         arg: Box<Expr>,
@@ -45,7 +64,7 @@ pub enum Expr {
     },
 }
 
-/// Binary operators recognised at B0.
+/// Binary operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
@@ -55,4 +74,10 @@ pub enum BinOp {
     Eq,
     Lt,
     Gt,
+}
+
+/// Convenience constructor: wrap an [`ExprKind`] with a [`Span`].
+#[inline]
+pub fn expr(kind: ExprKind, span: Span) -> Expr {
+    Spanned::new(kind, span)
 }

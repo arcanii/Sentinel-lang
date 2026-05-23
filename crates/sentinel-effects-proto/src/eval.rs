@@ -1,12 +1,30 @@
-//! Tree-walking evaluator for Sentinel-Mini (B0).
+//! Tree-walking evaluator for Sentinel-Mini.
 //!
-//! Closures capture by sharing a persistent environment (a cons-list of
-//! `(name, value)` cells behind an `Arc`). This is the textbook
-//! Crafting-Interpreters-style approach; we'll revisit it if/when we
-//! integrate the broker as a value heap in a later B milestone.
+//! Closures capture by sharing a persistent environment - a cons-list of
+//! `(name, value)` cells behind an [`Arc`].
+//!
+//! # `let rec` knot-tying (B1.3)
+//!
+//! For [`ExprKind::LetRec`] the binding's value is itself a lambda that
+//! must be able to see its own name. We do this by allocating the
+//! environment cell *first* with a [`OnceLock`]-backed value slot, then
+//! constructing the closure with that environment already in scope, then
+//! filling the cell. The closure's captured environment therefore
+//! contains a cell that, by the time the closure is ever *invoked*, has
+//! been initialised.
+//!
+//! Two consequences worth noting:
+//!
+//! 1. The cell's value is read through `OnceLock::get`, which returns
+//!    `None` until set. Lookup falls back to "unbound" in that window.
+//!    In practice the parser guarantees the RHS is a lambda, so no code
+//!    can observe the uninitialised window during evaluation of the
+//!    binding itself - lambdas don't evaluate their bodies eagerly.
+//! 2. We use `std::sync::OnceLock` (stable, no extra dependency) rather
+//!    than `once_cell::sync::OnceCell`.
 
-use crate::ast::{BinOp, Expr};
-use std::sync::Arc;
+use crate::ast::{BinOp, Expr, ExprKind};
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
 /// Runtime values.
@@ -14,8 +32,6 @@ use thiserror::Error;
 pub enum Value {
     Int(i64),
     Bool(bool),
-    /// A closure: parameter, body, and the environment captured at
-    /// definition time.
     Closure {
         param: String,
         body: Arc<Expr>,
@@ -28,8 +44,6 @@ impl PartialEq for Value {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
-            // Closures compare by identity-of-source, which we don't
-            // track at B0; treat them as never equal.
             _ => false,
         }
     }
@@ -46,40 +60,70 @@ pub enum EvalError {
     DivByZero,
     #[error("cannot apply non-function value")]
     NotAFunction,
+    /// A `let rec` cell was read before being initialised. Should be
+    /// unreachable given the lambda-RHS restriction; surfaced as an error
+    /// rather than a panic for safety.
+    #[error("internal: letrec cell read before initialisation")]
+    LetRecUninitialised,
 }
 
 /// A persistent environment. Cheaply cloneable.
 #[derive(Debug, Clone, Default)]
 pub struct Env(Option<Arc<EnvCell>>);
 
+/// A single environment binding. `value` is wrapped in `OnceLock` so that
+/// `let rec` can construct the cell, then back-patch it. Non-recursive
+/// `let` initialises the cell immediately and never observes the empty
+/// state.
 #[derive(Debug)]
 struct EnvCell {
     name: String,
-    value: Value,
+    value: OnceLock<Value>,
     rest: Env,
 }
 
 impl Env {
-    /// The empty environment.
     pub fn empty() -> Self {
         Self::default()
     }
 
-    /// Extend with a new binding. Returns a new environment; the original
-    /// is unchanged (shared structurally).
+    /// Extend with a fully-initialised binding (non-recursive `let`).
     pub fn extend(&self, name: String, value: Value) -> Self {
-        Env(Some(Arc::new(EnvCell { name, value, rest: self.clone() })))
+        let cell = EnvCell {
+            name,
+            value: OnceLock::new(),
+            rest: self.clone(),
+        };
+        // `set` only fails if already set; we just created it, so unwrap is safe.
+        cell.value.set(value).expect("freshly-constructed OnceLock");
+        Env(Some(Arc::new(cell)))
     }
 
-    fn lookup(&self, name: &str) -> Option<Value> {
+    /// Extend with a placeholder binding to be filled later. Returns the
+    /// new environment plus a handle to the cell whose value still needs
+    /// to be set. Used only by `let rec`.
+    fn extend_unset(&self, name: String) -> (Self, Arc<EnvCell>) {
+        let cell = Arc::new(EnvCell {
+            name,
+            value: OnceLock::new(),
+            rest: self.clone(),
+        });
+        (Env(Some(cell.clone())), cell)
+    }
+
+    fn lookup(&self, name: &str) -> Result<Value, EvalError> {
         let mut cur = self.0.as_deref();
         while let Some(cell) = cur {
             if cell.name == name {
-                return Some(cell.value.clone());
+                return cell
+                    .value
+                    .get()
+                    .cloned()
+                    .ok_or(EvalError::LetRecUninitialised);
             }
             cur = cell.rest.0.as_deref();
         }
-        None
+        Err(EvalError::Unbound(name.to_string()))
     }
 }
 
@@ -93,17 +137,32 @@ fn type_name(v: &Value) -> &'static str {
 
 /// Evaluate `expr` in the given environment.
 pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
-    match expr {
-        Expr::Int(n) => Ok(Value::Int(*n)),
-        Expr::Bool(b) => Ok(Value::Bool(*b)),
-        Expr::Var(name) => env
-            .lookup(name)
-            .ok_or_else(|| EvalError::Unbound(name.clone())),
-        Expr::Let { name, value, body } => {
+    match &expr.node {
+        ExprKind::Int(n) => Ok(Value::Int(*n)),
+        ExprKind::Bool(b) => Ok(Value::Bool(*b)),
+        ExprKind::Var(name) => env.lookup(name),
+        ExprKind::Let { name, value, body } => {
             let v = eval(value, env)?;
             eval(body, &env.extend(name.clone(), v))
         }
-        Expr::If { cond, then_branch, else_branch } => {
+        ExprKind::LetRec { name, value, body } => {
+            // Step 1: allocate the cell with no value yet, with `name`
+            // already in scope.
+            let (rec_env, cell) = env.extend_unset(name.clone());
+            // Step 2: evaluate the RHS *in the recursive environment*.
+            // The parser guarantees `value` is a Lambda, so this produces
+            // a closure that captures `rec_env` - which contains the
+            // still-empty cell.
+            let v = eval(value, &rec_env)?;
+            // Step 3: tie the knot. `set` returns Err if already set;
+            // shouldn't happen, but if it does it's diagnostic.
+            cell.value
+                .set(v)
+                .map_err(|_| EvalError::LetRecUninitialised)?;
+            // Step 4: evaluate the body in the now-complete environment.
+            eval(body, &rec_env)
+        }
+        ExprKind::If { cond, then_branch, else_branch } => {
             let c = eval(cond, env)?;
             match c {
                 Value::Bool(true) => eval(then_branch, env),
@@ -111,12 +170,12 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 other => Err(EvalError::Type { expected: "bool", got: type_name(&other) }),
             }
         }
-        Expr::Lambda { param, body } => Ok(Value::Closure {
+        ExprKind::Lambda { param, body } => Ok(Value::Closure {
             param: param.clone(),
             body: Arc::new((**body).clone()),
             env: env.clone(),
         }),
-        Expr::App { callee, arg } => {
+        ExprKind::App { callee, arg } => {
             let f = eval(callee, env)?;
             let a = eval(arg, env)?;
             match f {
@@ -126,7 +185,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
                 _ => Err(EvalError::NotAFunction),
             }
         }
-        Expr::BinOp { op, lhs, rhs } => {
+        ExprKind::BinOp { op, lhs, rhs } => {
             let l = eval(lhs, env)?;
             let r = eval(rhs, env)?;
             eval_binop(*op, l, r)
@@ -206,5 +265,29 @@ mod tests {
     fn eval_type_error_in_if() {
         let err = run("if 1 then 2 else 3").unwrap_err();
         assert!(matches!(err, super::super::MiniError::Eval(EvalError::Type { .. })));
+    }
+
+    #[test]
+    fn eval_let_rec_factorial() {
+        let src = "let rec fact = fn(n) => if n == 0 then 1 else n * fact(n - 1) in fact(5)";
+        assert_eq!(run(src).unwrap(), Value::Int(120));
+    }
+
+    #[test]
+    fn eval_let_rec_countdown_to_zero() {
+        // A simpler letrec test that doesn't lean on multiplication.
+        let src = "let rec down = fn(n) => if n == 0 then 0 else down(n - 1) in down(7)";
+        assert_eq!(run(src).unwrap(), Value::Int(0));
+    }
+
+    #[test]
+    fn eval_let_rec_can_be_passed_around() {
+        // The recursive function survives being used as a first-class value.
+        let src = "
+            let rec fact = fn(n) => if n == 0 then 1 else n * fact(n - 1) in
+            let apply = fn(f) => f(4) in
+            apply(fact)
+        ";
+        assert_eq!(run(src).unwrap(), Value::Int(24));
     }
 }

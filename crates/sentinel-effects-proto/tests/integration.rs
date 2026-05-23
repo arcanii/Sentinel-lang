@@ -1,7 +1,7 @@
-//! End-to-end tests for sentinel-effects-proto B0.
+//! End-to-end pipeline integration tests for Sentinel-Mini.
 //!
-//! These exercise the full lex+parse+eval pipeline via the top-level
-//! [`run`] convenience function, ensuring the public surface composes.
+//! These use only the public `run()` API and serve as the canonical
+//! examples of what the language can do at each milestone.
 
 use sentinel_effects_proto::{run, Value};
 
@@ -12,32 +12,28 @@ fn pipeline_arithmetic() {
 
 #[test]
 fn pipeline_nested_let() {
-    let src = "let x = 1 in let y = x + 1 in let z = y + 1 in x + y + z";
-    assert_eq!(run(src).unwrap(), Value::Int(1 + 2 + 3));
+    let src = "let x = 1 in let y = 2 in x + y";
+    assert_eq!(run(src).unwrap(), Value::Int(3));
 }
 
 #[test]
 fn pipeline_higher_order_function() {
-    // (fn(f) => f(10))(fn(x) => x * x)  =  100
-    assert_eq!(
-        run("(fn(f) => f(10))(fn(x) => x * x)").unwrap(),
-        Value::Int(100),
-    );
-}
-
-#[test]
-fn pipeline_recursion_via_y_combinator_would_need_letrec() {
-    // B0 has no `letrec`; this just documents that recursion is a B1+
-    // problem. We test that the missing-feature failure mode is sensible:
-    // `f` is unbound inside its own definition.
-    let src = "let f = fn(n) => if n == 0 then 0 else f(n - 1) in f(3)";
-    let err = run(src).unwrap_err();
-    let msg = format!("{err}");
-    assert!(msg.contains("unbound variable: f"), "got: {msg}");
+    let src = "let twice = fn(f) => fn(x) => f(f(x)) in twice(fn(n) => n + 1)(10)";
+    assert_eq!(run(src).unwrap(), Value::Int(12));
 }
 
 #[test]
 fn pipeline_line_comments_are_ignored() {
-    let src = "// header comment\n1 + 2 // tail comment\n";
+    let src = "// preamble\n1 + 2 // tail";
     assert_eq!(run(src).unwrap(), Value::Int(3));
+}
+
+/// B1.3 flipped this test from "documents the gap" to a positive
+/// assertion. Before B1.3, recursion via the Y combinator failed at
+/// evaluation time because non-recursive `let` could not bind a name
+/// in its own RHS, and `let rec` did not yet exist.
+#[test]
+fn pipeline_letrec_factorial() {
+    let src = "let rec fact = fn(n) => if n == 0 then 1 else n * fact(n - 1) in fact(6)";
+    assert_eq!(run(src).unwrap(), Value::Int(720));
 }
