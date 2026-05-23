@@ -10,6 +10,38 @@ reference as you work through the milestones.
 
 ---
 
+## 0. Current Implementation Status
+
+> This section is a pointer added after Phase A0-A6 landed. The rest of
+> this document remains the long-term project plan; for what actually
+> exists in the codebase right now, read docs/STATE.md.
+
+As of the most recent commit on main:
+
+- Phase A0-A6 complete (commits 9c7474d through 2e8fb8b). The
+  sentinel-broker crate now provides: generational arenas (bump and
+  slab strategies), per-slot generations with slab recycling, scoped
+  budgets, stats/list_arenas/where_is diagnostics, and an opt-in
+  recording mode capturing all alloc/free/budget/arena-lifecycle
+  events.
+- 63 tests passing (55 lib + 5 integration + 2 proptest + 1 doc),
+  clippy clean under -D warnings.
+- Next milestone: A7 - secret-memory policy (mlock + zero-on-free).
+  See docs/STATE.md Section 7 for the open design questions.
+- A8 (Phase A capstone) - three validation example programs as
+  described in Section 4.3 below.
+
+Other workspace crates listed in Section 3.2 (sentinel-syntax,
+sentinel-ast, etc.) are scaffold-only; Phase B and beyond have not
+started. Sections 4 through 12 below describe the plan and remain
+authoritative for long-term direction.
+
+Scripts that built each milestone live under scripts/ and are named
+NN-<phase>.sh, NNa-..., NNz-commit-...sh. See docs/STATE.md
+Section 6 for the convention.
+
+---
+
 ## 1. Scope of This Document
 
 This is not a specification of Sentinel. The design documents are the
