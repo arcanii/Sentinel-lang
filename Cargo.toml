@@ -8,6 +8,7 @@
 resolver = "2"
 members = [
     "crates/sentinel-broker",
+    "crates/sentinel-effects-proto",
     "crates/sentinel-syntax",
     "crates/sentinel-ast",
     "crates/sentinel-resolve",
