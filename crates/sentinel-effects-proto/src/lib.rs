@@ -6,17 +6,16 @@
 //!
 //! # Status
 //!
-//! - **B0**: lex + parse + eval.
-//! - **B1.1**: span infrastructure.
-//! - **B1.2**: AST nodes carry spans.
-//! - **B1.3**: `let rec` with `OnceLock` knot-tying.
-//! - **B1.4**: types scaffold (Ty, Scheme, Subst, unify, ...).
-//! - **B1.5a**: HM inference driver (infer, TypeEnv, infer_top).
-//! - **B1.5b** (this commit): pipeline wiring. [`run`] now type-checks
-//!   between parse and eval; type errors abort before evaluation.
-//!   `let rec` is still typed at a monovar; B1.6 will refine.
-//! - B1.6 - B1.8 remaining: letrec generalisation, diagnostic
-//!   rendering with carets.
+//! - **B0-B1**: complete. Lex + parse + HM type inference (with
+//!   let-polymorphism and let-rec generalization) + eval, all
+//!   span-tracked, with hand-rolled caret diagnostics via
+//!   [`MiniError::render`].
+//! - **B2** (next): effect rows and effect declarations. Per
+//!   ADR 0002, B1's function arrows are bare `Fun(Ty, Ty)`; B2
+//!   extends this with a row component.
+//! - **B3-B4** (planned): effect handlers, `secret` qualifier.
+//!
+//! See `docs/STATE.md` Section B for the authoritative status.
 
 pub mod ast;
 pub mod diag;

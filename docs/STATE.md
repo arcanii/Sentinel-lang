@@ -11,8 +11,9 @@ research-grade interpreter (effects-proto). They are tracked in
 separate sections below. The remaining workspace members listed in
 HANDOVER §3.2 are scaffold-only.
 
-Last updated: phase A9 (broker cleanup) and B0 (effects-proto
-scaffold) landed.
+Last updated: phase B1 complete (HM inference with let-rec
+generalization, span-tracked diagnostics, hand-rolled caret
+renderer). See ADR 0003 for the B1 retrospective.
 
 ---
 
@@ -214,14 +215,20 @@ absorbed.
 | Phase | Title                                              | Status | Commit  |
 |-------|----------------------------------------------------|--------|---------|
 | B0    | Scaffold: lex + parse + eval, no types or effects  | Done   | d090ca1 |
-| B1    | HM type inference, letrec, span-tracked errors     | Planned |        |
+| B1    | HM type inference, letrec, span-tracked errors     | Done   | e6b06cd |
 | B2    | Effect rows and effect declarations                | Planned |        |
 | B3    | Effect handlers (handle .. with ..)                | Planned |        |
 | B4    | Secret T qualifier and constant-time check         | Planned |        |
 | B?    | Broker-as-value-heap integration (bonus)           | Planned |        |
 
-Test coverage as of B0: 23 tests (5 lexer + 5 parser + 8 eval + 5
-integration). Clippy clean under `-D warnings`. No doctests yet.
+Test coverage as of B1: 95 tests (8 lexer + 11 parser + 11 eval +
+4 span + 7 types + 41 infer + 7 diag + 6 integration). Clippy
+clean under `-D warnings`. No doctests yet.
+
+B1 landed across five commits: spans + Spanned AST + `let rec`
+(abfb3d9), types scaffold (b3589ea), inference driver wired into
+`run` (24a3db8), proper HM let-rec typing (72c0996), and
+hand-rolled caret diagnostics (e6b06cd).
 
 ### B.2 Crate Layout
 
@@ -229,24 +236,35 @@ integration). Clippy clean under `-D warnings`. No doctests yet.
       Cargo.toml
       src/
         lib.rs            re-exports + `run()` convenience + `MiniError`
-        lexer.rs          logos tokeniser, `Token`, `LexError`
-        ast.rs            `Expr`, `BinOp` (plain enums, Box-allocated children)
+                          (now incl. `MiniError::render(src) -> String`)
+        lexer.rs          logos tokeniser, `Token` (incl. `Rec`), `LexError`
+        ast.rs            `Expr = Spanned<ExprKind>`, `BinOp`, `LetRec` variant
         parser.rs         hand-written recursive descent, precedence climbing,
-                          `ParseError`
+                          `ParseError`, span-threading
         eval.rs           tree-walking interpreter, persistent `Env`,
-                          `Value`, `EvalError`
+                          `Value`, `EvalError`, `let rec` via `OnceLock`
+        span.rs           `Span { start: u32, end: u32 }`, `Spanned<T>` (B1.1)
+        types.rs          `Ty`, `TyVar`, `Scheme`, free-var sets (B1.4)
+        infer.rs          HM Algorithm W: `Subst`, `unify`, `instantiate`,
+                          `generalize`, `TypeEnv`, `infer`, `infer_top`,
+                          `TypeError` (B1.4-B1.6)
+        diag.rs           `LineCol`, `locate`, `render` -- hand-rolled
+                          rustc-style caret diagnostics (B1.7)
       tests/
         integration.rs    end-to-end pipeline tests
 
 ### B.3 Language Surface (B0)
 
-Pure expression calculus. Everything is an expression. No
-statements, no types, no effects, no `secret`, no recursion.
+Pure expression calculus with HM type inference. Everything is an
+expression. No statements, no effects, no `secret` yet.
+Recursion is supported via `let rec` (B1.3); types are inferred
+with let-polymorphism and let-rec generalization (B1.5/B1.6).
 
 Grammar (informal):
 
-    expr      := let | if | lambda | compare
+    expr      := let | letrec | if | lambda | compare
     let       := "let" IDENT "=" expr "in" expr
+    letrec    := "let" "rec" IDENT "=" lambda "in" expr
     if        := "if" expr "then" expr "else" expr
     lambda    := "fn" "(" IDENT ")" "=>" expr
     compare   := add ( ("==" | "<" | ">") add )?
@@ -264,11 +282,24 @@ curried (`fn(x) => fn(y) => ...`).
 
 All re-exports from `sentinel_effects_proto`:
 
-- `Expr`, `BinOp` (AST)
-- `Token`, `LexError`, `lex(source) -> Result<Vec<Token>, LexError>`
-- `ParseError`, `parse(&[Token]) -> Result<Expr, ParseError>`
-- `Value`, `EvalError`, `Env`, `eval(&Expr, &Env) -> Result<Value, EvalError>`
-- `MiniError`, `run(source) -> Result<Value, MiniError>` (lex+parse+eval)
+- AST: `Expr = Spanned<ExprKind>`, `ExprKind`, `BinOp`, `expr` constructor helper
+- Spans: `Span`, `Spanned<T>`
+- Lexer: `Token`, `LexError`,
+  `lex(source) -> Result<Vec<(Token, Span)>, LexError>`
+- Parser: `ParseError`,
+  `parse(&[(Token, Span)]) -> Result<Expr, ParseError>`
+- Eval: `Value`, `EvalError`, `Env`,
+  `eval(&Expr, &Env) -> Result<Value, EvalError>`
+- Types: `Ty`, `TyVar`, `Scheme`
+- Inference: `TypeError`, `TypeEnv`, `Subst`, `TyVarSupply`,
+  `unify`, `instantiate`, `generalize`, `infer`, `infer_top`
+- Top-level: `MiniError`,
+  `run(source) -> Result<Value, MiniError>` (lex+parse+infer+eval),
+  `MiniError::render(&self, source) -> String` for caret diagnostics
+
+The `diag` module is `pub mod diag` but its items are reached
+through `MiniError::render`; they are not re-exported at the
+crate root in B1.
 
 ### B.5 Design Decisions (B0)
 
@@ -288,18 +319,50 @@ All re-exports from `sentinel_effects_proto`:
    NOT adopted here. Effects-proto is throwaway research code;
    panicking-only is acceptable and simpler. If a panic-free API
    becomes useful for embedding, it lands then.
+6. (B1.1/B1.2) AST nodes carry spans via a `Spanned<T>` wrapper,
+   not an inline `span` field on each variant. Confirmed cheap;
+   parser pattern is `Spanned::new(kind, start_span.merge(end_span))`.
+7. (B1.3) `rec` is a reserved keyword (`Token::Rec`), not a
+   contextual one. `let rec` is the only place it can appear in B1.
+8. (B1.4) Substitutions are eager (`apply` on `bind`), not
+   union-find. Idempotency is maintained by `compose`. Fine at
+   B1 scale; revisit only if profiling demands.
+9. (B1.5/B1.6) Inference is Algorithm W in the textbook shape.
+   `let rec` uses the standard HM treatment: monomorphic recursive
+   occurrence inside the RHS, generalized scheme in the body.
+   Polymorphic recursion is therefore unavailable without
+   annotations -- this is intentional and matches ML/Haskell
+   without explicit type signatures.
+10. (ADR 0002) Function arrows are bare `Fun(Ty, Ty)`. Effect rows
+    are deferred to B2 to keep B1 focused.
+11. (B1.7) Diagnostics are hand-rolled (`diag.rs`, ~110 LoC, no
+    `miette` dependency). Phase C will likely adopt miette; the
+    prototype validates the shape (line/col header, source-line
+    excerpt, caret underline) cheaply. `Display` for `MiniError`
+    stays terse; pretty rendering is opt-in via `.render(src)`.
 
-### B.6 Known Limitations (intentional at B0)
+### B.6 Known Limitations (intentional at B1)
 
-- No recursion. `let f = fn(n) => ... f ...` produces
-  `Unbound("f")`. The integration test
-  `pipeline_recursion_via_y_combinator_would_need_letrec` documents
-  this loudly and flips to a correctness check when `letrec` lands
-  in B1.
-- No types. Type errors surface at evaluation time, not at compile
-  time. (B1 fixes.)
 - No effects. The whole reason this crate exists. (B2 onward.)
+- No `secret` qualifier or constant-time check. (B4.)
 - No REPL, no driver binary. Library-only.
+- `let rec` RHS must be a syntactic lambda. Parser enforces with
+  `ParseError::LetRecNotLambda`. Relaxing this in B3 (when handlers
+  arrive) is an open question; see ADR 0003.
+- Polymorphic recursion is rejected, as in ML/Haskell without an
+  explicit type signature. Test
+  `b16_letrec_recursive_occurrence_is_monomorphic_inside_body`
+  locks this.
+- Equality (`==`) is polymorphic at the type level (`forall a. a -> a -> Bool`).
+  The evaluator still rejects equality on closures; B2/B3 may
+  refine via type-class-style constraints.
+- `EvalError` variants carry no spans. Eval errors are rare
+  post-type-check (div-by-zero, non-function application on a
+  closure-typed value, the letrec uninitialised internal error)
+  but they render without carets. B2 backlog item.
+- Multi-line spans in `diag::render` clip to the first line. Sentinel-Mini
+  programs are usually one-liners; Phase C diagnostics will handle
+  multi-line ranges properly.
 - Closures `clone()` the body `Expr` into an `Arc<Expr>`. Acceptable
   for a research artifact; revisit if body-clone becomes a hot path
   or if the broker becomes the value heap.
@@ -323,7 +386,7 @@ The standard check suite for a clean tree, applied per-crate:
 All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
-  - sentinel-effects-proto: 23 tests + 0 doctests
+  - sentinel-effects-proto: 95 tests + 0 doctests
 
 ### Script Convention
 

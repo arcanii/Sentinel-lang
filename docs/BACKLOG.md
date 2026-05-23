@@ -69,6 +69,36 @@ Phase B; all are nice-to-haves or known sharp edges.
 
 ---
 
+### 0.4 Phase B1 carry-over (effects-proto)
+
+Items noticed during B1 implementation that are too small to be ADRs
+but worth tracking. None block B2.
+
+- **`EvalError` variants carry no spans.** Eval errors are rare
+  post-type-check (div-by-zero, the `LetRecUninitialised` internal
+  invariant, application of a Closure to the wrong-typed value once
+  the type system gets richer), but when they do fire, `MiniError::render`
+  falls back to the terse one-line form. Add `Span` fields to the
+  three variants that can plausibly point at source (`Unbound` is
+  unreachable post-type-check; `DivByZero` and `Type` should carry
+  the offending expression's span; `NotAFunction` likewise; the
+  `LetRecUninitialised` is a bug-class error and may stay span-less).
+  Originating context: B1.7 dispatch, commit e6b06cd.
+
+- **Multi-line span rendering clips to first line.** `diag::render`
+  intentionally degrades on cross-line spans; B2's `effect` and
+  `handle` blocks are likely to introduce multi-line constructs
+  that make this annoying. Either teach `render` to emit a multi-line
+  excerpt with carets on each line, or adopt `miette` here rather
+  than waiting for Phase C.
+
+- **`let rec` RHS-must-be-lambda restriction.** Currently a parser
+  rule. May need relaxing in B3 when effect handlers arrive
+  (handlers as recursive bindings). Re-evaluate when designing the
+  handler surface; see ADR 0003.
+
+---
+
 ## 1. Privileged-Mode and Bare-Metal Sentinel
 
 The 1.0 language assumes an OS underneath it. Substantial new territory
