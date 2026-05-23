@@ -81,6 +81,7 @@ impl AllocStrategy for BumpStrategy {
             }
             return Ok(AllocOk {
                 ptr: NonNull::new(align as *mut u8).expect("nonzero align"),
+                size: 0,
                 slot: SlotIndex(slot_index),
                 generation: SlotGeneration::INITIAL,
             });
@@ -118,6 +119,7 @@ impl AllocStrategy for BumpStrategy {
         let ptr = unsafe { self.buffer.as_ptr().add(offset) };
         Ok(AllocOk {
             ptr: NonNull::new(ptr).expect("buffer + offset is nonzero"),
+            size,
             slot: SlotIndex(slot_index),
             generation: SlotGeneration::INITIAL,
         })
@@ -132,8 +134,7 @@ impl AllocStrategy for BumpStrategy {
         let ptr = unsafe { self.buffer.as_ptr().add(info.offset) };
         Ok(SlotPtr {
             ptr: NonNull::new(ptr).expect("buffer + offset is nonzero"),
-            generation: SlotGeneration::INITIAL,
-        })
+            generation: SlotGeneration::INITIAL })
     }
 
     // Bump strategy intentionally inherits the default free() which
@@ -143,6 +144,10 @@ impl AllocStrategy for BumpStrategy {
     fn used(&self) -> usize { self.cursor.load(Ordering::Acquire) }
     fn capacity(&self) -> usize { self.capacity }
     fn kind(&self) -> StrategyKind { StrategyKind::Bump }
+
+    fn backing_buffer(&self) -> Option<(*mut u8, usize)> {
+        Some((self.buffer.as_ptr(), self.capacity))
+    }
 }
 
 #[cfg(test)]

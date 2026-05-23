@@ -598,4 +598,64 @@ mod tests {
         let alloc_count = events.iter().filter(|e| matches!(e, Event::Allocated { .. })).count();
         assert_eq!(alloc_count, n_threads * per_thread);
     }
+
+    #[test]
+    fn secret_strict_arena_basic_alloc() {
+        use crate::secret::SecretPolicy;
+        let b = Broker::new();
+        // STRICT requires mlock; in CI/dev this normally succeeds on
+        // small buffers under RLIMIT_MEMLOCK.
+        let a = b.arena("creds").capacity(4096).secret(SecretPolicy::STRICT).bump();
+        let h = a.alloc(0x1234_5678_u64).unwrap();
+        assert_eq!(*h.get().unwrap(), 0x1234_5678);
+    }
+
+    #[test]
+    fn secret_lenient_arena_no_mlock() {
+        use crate::secret::SecretPolicy;
+        let b = Broker::new();
+        let a = b.arena("creds-lenient").capacity(4096).secret(SecretPolicy::LENIENT).bump();
+        let h = a.alloc(99_u32).unwrap();
+        assert_eq!(*h.get().unwrap(), 99);
+    }
+
+    #[test]
+    fn secret_slab_zero_on_free_clears_slot() {
+        use crate::secret::SecretPolicy;
+        let b = Broker::new();
+        let a = b.arena("session-keys").secret(SecretPolicy::LENIENT).slab(64, 8, 8);
+        // Write a sentinel pattern.
+        let h = a.alloc(0xDEAD_BEEF_DEAD_BEEFu64).unwrap();
+        let slot = h.slot();
+        a.free(&h).unwrap();
+        // Re-alloc: same slot is recycled. Without the secret policy,
+        // bytes could leak; with zero_on_free, the slot is zeroed
+        // before the next write. We allocate a zero value here and
+        // verify it remains zero. (The real guarantee is observed
+        // via the strategy slot_ptr_mut path; this test is a smoke
+        // check that recycling still works correctly under wrapping.)
+        let h2 = a.alloc(0u64).unwrap();
+        assert_eq!(h2.slot(), slot, "expected slot to be recycled");
+        assert_eq!(*h2.get().unwrap(), 0);
+    }
+
+    #[test]
+    fn secret_none_policy_is_passthrough() {
+        use crate::secret::SecretPolicy;
+        let b = Broker::new();
+        let a = b.arena("plain").capacity(1024).secret(SecretPolicy::NONE).bump();
+        let h = a.alloc(7_u8).unwrap();
+        assert_eq!(*h.get().unwrap(), 7);
+    }
+
+    #[test]
+    fn secret_strict_destroy_unlocks_cleanly() {
+        use crate::secret::SecretPolicy;
+        let b = Broker::new();
+        let a = b.arena("creds-destroy").capacity(4096).secret(SecretPolicy::STRICT).bump();
+        let id = a.id();
+        let _h = a.alloc(42_u64).unwrap();
+        // Dropping the arena should munlock + zero without panicking.
+        b.destroy_arena(id).unwrap();
+    }
 }

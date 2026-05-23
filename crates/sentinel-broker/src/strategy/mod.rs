@@ -30,6 +30,7 @@ pub enum StrategyKind {
 #[derive(Debug)]
 pub struct AllocOk {
     pub ptr: NonNull<u8>,
+    pub size: usize,
     pub slot: SlotIndex,
     pub generation: SlotGeneration,
 }
@@ -83,4 +84,13 @@ pub trait AllocStrategy: Send + Sync {
         self.capacity().saturating_sub(self.used())
     }
     fn kind(&self) -> StrategyKind;
+
+    /// The strategy's backing buffer, if any. Used by SecretStrategy
+    /// to call mlock / zero-on-destroy on the underlying memory.
+    /// Default: None (strategy is opaque or does not own a buffer).
+    fn backing_buffer(&self) -> Option<(*mut u8, usize)> { None }
+
+    /// Mutable pointer + size to a slot's bytes. Used by SecretStrategy
+    /// to wipe slot contents before forwarding to free. Default: None.
+    fn slot_ptr_mut(&self, _slot: crate::ids::SlotIndex) -> Option<SlotPtr> { None }
 }

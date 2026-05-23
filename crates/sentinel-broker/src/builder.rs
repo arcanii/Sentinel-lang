@@ -8,6 +8,7 @@
 use crate::arena::Arena;
 use crate::broker::{ArenaHandle, Broker};
 use crate::strategy::{bump::BumpStrategy, slab::SlabStrategy, AllocStrategy};
+use crate::secret::{SecretPolicy, SecretStrategy};
 use std::sync::Arc;
 
 /// Fluent builder for arena creation.
@@ -18,17 +19,30 @@ pub struct ArenaBuilder<'b> {
     name: String,
     /// Bump capacity, set by `.capacity(n)`. Required for `.bump()`.
     bump_capacity: Option<usize>,
+    /// Optional secret-memory policy. If set, the chosen strategy
+    /// will be wrapped in a [`SecretStrategy`].
+    secret_policy: Option<SecretPolicy>,
 }
 
 impl<'b> ArenaBuilder<'b> {
     pub(crate) fn new(broker: &'b Broker, name: String) -> Self {
-        Self { broker, name, bump_capacity: None }
+        Self { broker, name, bump_capacity: None, secret_policy: None }
     }
 
     /// Set the capacity (in bytes) for a bump-allocated arena.
     #[must_use]
     pub fn capacity(mut self, bytes: usize) -> Self {
         self.bump_capacity = Some(bytes);
+        self
+    }
+
+
+    /// Apply a secret-memory policy to this arena. The strategy
+    /// produced by [`bump`] or [`slab`] will be wrapped in a
+    /// [`SecretStrategy`] that enforces the policy.
+    #[must_use]
+    pub fn secret(mut self, policy: SecretPolicy) -> Self {
+        self.secret_policy = Some(policy);
         self
     }
 
@@ -41,8 +55,14 @@ impl<'b> ArenaBuilder<'b> {
         let cap = self.bump_capacity
             .expect("ArenaBuilder::bump requires .capacity(n) first");
         let id = self.broker.next_arena_id();
-        let strategy: Box<dyn AllocStrategy> =
-            Box::new(BumpStrategy::new(id, cap));
+        let inner: Box<dyn AllocStrategy> = Box::new(BumpStrategy::new(id, cap));
+        let strategy: Box<dyn AllocStrategy> = match self.secret_policy {
+            Some(p) if p != SecretPolicy::NONE => Box::new(
+                SecretStrategy::wrap(inner, p)
+                    .expect("SecretStrategy::wrap failed (check mlock permissions)"),
+            ),
+            _ => inner,
+        };
         let arena = Arena::with_strategy_and_recorder(id, &self.name, strategy, self.broker.recorder_arc());
         self.broker.register_arena(Arc::clone(&arena));
         ArenaHandle::from_parts(id, arena)
@@ -55,8 +75,14 @@ impl<'b> ArenaBuilder<'b> {
     #[must_use]
     pub fn slab(self, slot_size: usize, slot_align: usize, slot_count: u32) -> ArenaHandle {
         let id = self.broker.next_arena_id();
-        let strategy: Box<dyn AllocStrategy> =
-            Box::new(SlabStrategy::new(id, slot_size, slot_align, slot_count));
+        let inner: Box<dyn AllocStrategy> = Box::new(SlabStrategy::new(id, slot_size, slot_align, slot_count));
+        let strategy: Box<dyn AllocStrategy> = match self.secret_policy {
+            Some(p) if p != SecretPolicy::NONE => Box::new(
+                SecretStrategy::wrap(inner, p)
+                    .expect("SecretStrategy::wrap failed (check mlock permissions)"),
+            ),
+            _ => inner,
+        };
         let arena = Arena::with_strategy_and_recorder(id, &self.name, strategy, self.broker.recorder_arc());
         self.broker.register_arena(Arc::clone(&arena));
         ArenaHandle::from_parts(id, arena)

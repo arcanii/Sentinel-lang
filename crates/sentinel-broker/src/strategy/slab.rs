@@ -140,6 +140,7 @@ impl AllocStrategy for SlabStrategy {
         let ptr = unsafe { self.buffer.as_ptr().add(offset) };
         Ok(AllocOk {
             ptr: NonNull::new(ptr).expect("buffer + offset is nonzero"),
+            size: self.slot_size,
             slot: SlotIndex(slot_idx),
             generation,
         })
@@ -157,8 +158,7 @@ impl AllocStrategy for SlabStrategy {
         let ptr = unsafe { self.buffer.as_ptr().add(offset) };
         Ok(SlotPtr {
             ptr: NonNull::new(ptr).expect("buffer + offset is nonzero"),
-            generation,
-        })
+            generation })
     }
 
     fn free(&self, slot: SlotIndex, issued: SlotGeneration) -> Result<(), BrokerError> {
@@ -202,4 +202,12 @@ impl AllocStrategy for SlabStrategy {
     }
 
     fn kind(&self) -> StrategyKind { StrategyKind::Slab }
+
+    fn backing_buffer(&self) -> Option<(*mut u8, usize)> {
+        Some((self.buffer.as_ptr(), self.slot_size * self.slot_count as usize))
+    }
+
+    fn slot_ptr_mut(&self, slot: crate::ids::SlotIndex) -> Option<crate::strategy::SlotPtr> {
+        self.slot_ptr(slot).ok()
+    }
 }

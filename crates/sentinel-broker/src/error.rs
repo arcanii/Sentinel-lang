@@ -81,6 +81,9 @@ pub enum BrokerError {
         requested: usize,
         remaining: usize,
     },
+
+    #[error("secret memory policy failed: {reason}")]
+    SecretMemory { reason: &'static str },
 }
 
 impl BrokerError {
