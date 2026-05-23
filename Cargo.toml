@@ -26,8 +26,8 @@ edition      = "2021"
 rust-version = "1.80"
 version      = "0.0.1"
 authors      = ["Sentinel Language Project"]
-license      = "Apache-2.0 OR MIT"
-repository   = "https://github.com/bryan/Sentinel-language"
+license      = "MIT"
+repository   = "https://github.com/arcanii/Sentinel-lang"
 
 [workspace.dependencies]
 # Lexing and parsing
