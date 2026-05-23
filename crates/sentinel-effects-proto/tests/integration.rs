@@ -37,3 +37,17 @@ fn pipeline_letrec_factorial() {
     let src = "let rec fact = fn(n) => if n == 0 then 1 else n * fact(n - 1) in fact(6)";
     assert_eq!(run(src).unwrap(), Value::Int(720));
 }
+
+#[test]
+fn pipeline_type_error_renders_with_caret() {
+    use sentinel_effects_proto::run;
+    let source = "1 + true";
+    let err = run(source).expect_err("Int + Bool should fail type-check");
+    let rendered = err.render(source);
+    // Header carries the severity tag.
+    assert!(rendered.starts_with("type error:"), "header: {rendered}");
+    // Source line excerpt is present.
+    assert!(rendered.contains("1 | 1 + true"), "excerpt: {rendered}");
+    // Some caret is present.
+    assert!(rendered.contains("^"), "caret: {rendered}");
+}

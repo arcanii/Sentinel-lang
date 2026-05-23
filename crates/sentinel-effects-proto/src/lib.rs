@@ -19,6 +19,7 @@
 //!   rendering with carets.
 
 pub mod ast;
+pub mod diag;
 pub mod eval;
 pub mod infer;
 pub mod lexer;
@@ -60,4 +61,43 @@ pub enum MiniError {
     Type(#[from] TypeError),
     #[error("eval error: {0}")]
     Eval(#[from] EvalError),
+}
+
+impl MiniError {
+    /// Render this error with a caret-underlined source excerpt.
+    ///
+    /// `Display` produces a single terse line; this method produces the
+    /// multi-line rustc-style diagnostic. Callers that have the source
+    /// string handy should prefer this for human-facing output.
+    pub fn render(&self, source: &str) -> String {
+        use crate::diag::render;
+        match self {
+            MiniError::Lex(e) => match e {
+                LexError::Unrecognised { span, .. } => {
+                    render(source, Some(*span), "lex error", &e.to_string())
+                }
+            },
+            MiniError::Parse(e) => {
+                let span = match e {
+                    ParseError::UnexpectedEof { .. } => None,
+                    ParseError::Unexpected { span, .. } => Some(*span),
+                    ParseError::Trailing { span, .. } => Some(*span),
+                    ParseError::LetRecNotLambda { span } => Some(*span),
+                };
+                render(source, span, "parse error", &e.to_string())
+            }
+            MiniError::Type(e) => {
+                let span = match e {
+                    TypeError::Mismatch { span, .. } => Some(*span),
+                    TypeError::OccursCheck { span, .. } => Some(*span),
+                    TypeError::Unbound { span, .. } => Some(*span),
+                };
+                render(source, span, "type error", &e.to_string())
+            }
+            MiniError::Eval(e) => {
+                // Eval errors carry no spans in B1; they print terse.
+                render(source, None, "eval error", &e.to_string())
+            }
+        }
+    }
 }
