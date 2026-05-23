@@ -195,13 +195,23 @@ pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
             Ok((s2.compose(&s1), t_body))
         }
         ExprKind::LetRec { name, value, body } => {
-            // B1.5 stub: monomorphic. See module docs.
+            // B1.6: proper HM let-rec. The recursive occurrence inside
+            // the RHS is monomorphic (sees t_name directly); the body
+            // sees a generalized scheme so the binding is polymorphic
+            // at use sites.
             let t_name = supply.fresh_ty();
-            let env_for_value = env.extend(name.clone(), Scheme::mono(t_name.clone()));
+            let env_for_value =
+                env.extend(name.clone(), Scheme::mono(t_name.clone()));
             let (s1, t_value) = infer(&env_for_value, value, supply)?;
+            // Unify the recursive monovar with the inferred RHS type.
             let s2 = unify(&s1, &t_name, &t_value, expr.span)?;
-            let env_for_body = env.apply(&s2)
-                .extend(name.clone(), Scheme::mono(s2.apply(&t_name)));
+            // Generalize against the *outer* env (not env_for_value),
+            // so the recursive binding itself does not appear in the
+            // free-var set we generalize over.
+            let env_after = env.apply(&s2);
+            let t_name_solved = s2.apply(&t_name);
+            let scheme = generalize(&t_name_solved, &env_after.free_vars());
+            let env_for_body = env_after.extend(name.clone(), scheme);
             let (s3, t_body) = infer(&env_for_body, body, supply)?;
             Ok((s3.compose(&s2), t_body))
         }
@@ -519,5 +529,67 @@ mod tests {
     fn letrec_application_typechecks_at_int() {
         let src = "let rec fact = fn(n) => if n == 0 then 1 else n * fact(n - 1) in fact(5)";
         assert_eq!(ty_of(src), Ty::Int);
+    }
+
+    // ----- B1.6 let-rec typing tests -----
+
+    fn infer_source(src: &str) -> Result<Ty, TypeError> {
+        let tokens = crate::lexer::lex(src).expect("lex");
+        let expr = crate::parser::parse(&tokens).expect("parse");
+        let env = TypeEnv::default();
+        let mut supply = TyVarSupply::new();
+        infer(&env, &expr, &mut supply).map(|(s, t)| s.apply(&t))
+    }
+
+    #[test]
+    fn b16_letrec_factorial_still_types_as_int_to_int() {
+        let src = "let rec fact = fn(n) => if n == 0 then 1 else n * fact(n - 1) in fact";
+        let ty = infer_source(src).expect("factorial should type-check");
+        match ty {
+            Ty::Fun(a, b) => {
+                assert!(matches!(*a, Ty::Int), "arg should be Int, got {:?}", a);
+                assert!(matches!(*b, Ty::Int), "ret should be Int, got {:?}", b);
+            }
+            other => panic!("expected Int -> Int, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn b16_letrec_identity_is_generalized_at_use_sites() {
+        // Polymorphic identity used at two different types in the body.
+        // Requires generalization of the let-rec binding.
+        let src = "let rec id = fn(x) => x in let a = id(1) in let b = id(true) in a";
+        let ty = infer_source(src).expect("polymorphic id should type-check");
+        assert!(matches!(ty, Ty::Int), "result should be Int, got {:?}", ty);
+    }
+
+    #[test]
+    fn b16_letrec_recursive_occurrence_is_monomorphic_inside_body() {
+        // Inside the RHS, f has type t_name (a monovar). f(true) forces
+        // t_name to be Bool -> a; the outer call f(1) forces Int -> b.
+        // Conflict -> Mismatch.
+        let src = "let rec f = fn(x) => f(true) in f(1)";
+        let err = infer_source(src)
+            .expect_err("polymorphic recursion inside body must be rejected");
+        match err {
+            TypeError::Mismatch { .. } => {}
+            other => panic!("expected Mismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn b16_letrec_body_type_error_span_points_into_body() {
+        let src = "let rec fact = fn(n) => if n == 0 then 1 else n * fact(n - 1) in fact + true";
+        let err = infer_source(src).expect_err("body has fun + Bool");
+        let span = match err {
+            TypeError::Mismatch { span, .. } => span,
+            other => panic!("expected Mismatch, got {:?}", other),
+        };
+        let rhs_end = src.find(" in ").expect("in keyword") as u32;
+        assert!(
+            span.start >= rhs_end,
+            "error span {}..{} should be inside body (>= {})",
+            span.start, span.end, rhs_end
+        );
     }
 }
