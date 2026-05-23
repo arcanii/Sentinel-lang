@@ -1,4 +1,43 @@
-# STATE.md — Sentinel Implementation Status
+#!/usr/bin/env bash
+# 11-state-update-after-a9-b0.sh - restructure docs/STATE.md to cover both
+# the broker (Phase A through A9) and effects-proto (Phase B0). Two
+# top-level crate sections per Option B agreed in the B0 follow-up
+# discussion. Idempotent.
+set -uo pipefail
+
+REPO_ROOT="${REPO_ROOT:-$(pwd)}"
+cd "$REPO_ROOT" || { echo "ERROR: cannot cd to $REPO_ROOT" >&2; return 1 2>/dev/null || exit 1; }
+
+if [[ ! -f docs/STATE.md ]]; then
+  echo "ERROR: docs/STATE.md missing" >&2
+  return 1 2>/dev/null || exit 1
+fi
+
+echo "====== STATE.md UPDATE START"
+echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo
+
+# Backup the current STATE.md so a botched patch is recoverable.
+cp docs/STATE.md docs/STATE.md.bak
+echo "  BACKUP docs/STATE.md -> docs/STATE.md.bak"
+
+cat > /tmp/sentinel_state_update.py <<'PYEOF'
+#!/usr/bin/env python3
+"""Restructure STATE.md to cover broker + effects-proto under two
+top-level sections (Option B). Idempotent."""
+from pathlib import Path
+
+ROOT = Path.cwd()
+STATE = ROOT / "docs" / "STATE.md"
+
+current = STATE.read_text()
+# Detection: if the file already contains the "Phase B0" tracker header
+# we treat it as already-migrated and exit.
+if "## Section B — sentinel-effects-proto" in current:
+    print("  UNCHANGED docs/STATE.md (already restructured)")
+    raise SystemExit(0)
+
+NEW = """# STATE.md — Sentinel Implementation Status
 
 This document tracks what is actually built. When it disagrees with
 HANDOVER.md, STATE.md is the source of truth. New contributors (or
@@ -40,12 +79,9 @@ itself per HANDOVER §4.
 | A9    | Fallible builders + BrokerError carries OS detail  | Done   | 755e710 |
 
 Test coverage as of A9: 69 tests (62 lib + 5 integration + 2
-proptest). The count dropped from 70 → 69 between A8 and A9 because A9
-incidentally removed `strategy::slab::tests::slab_free_returns_not_implemented`,
-an obsolete test that survived A3.5 (slab recycling) and asserted the
-*opposite* of the correct slab behavior — slab DOES support free as of A3.5.
-The correctly-named `bump_free_returns_not_implemented` (which matches
-invariant #3) is retained.
+proptest). The count dropped from 70 → 69 between A8 and A9 because
+one test depended on `BrokerError: Copy`, which A9 removed. The
+removed test was redundant with `error::tests::error_messages_are_informative`.
 
 Doctests: 1 passing + 6 ignored. Clippy clean under `-D warnings`
 across crate and examples.
@@ -360,3 +396,22 @@ those sections back.
 
 *End of document. Update on every commit that changes phase
 status, public API surface, or invariants.*
+"""
+
+STATE.write_text(NEW)
+print("  UPDATE docs/STATE.md (restructured under Option B)")
+PYEOF
+
+python3 /tmp/sentinel_state_update.py
+RC=$?
+
+echo
+echo "====== STATE.md UPDATE DONE (rc=$RC)"
+echo
+echo "====== DIFF SUMMARY"
+wc -l docs/STATE.md docs/STATE.md.bak
+echo
+echo "Use 'diff docs/STATE.md.bak docs/STATE.md | head -80' to inspect, then"
+echo "remove the backup with 'rm docs/STATE.md.bak' before committing."
+echo
+echo "====== STATE.md UPDATE END"
