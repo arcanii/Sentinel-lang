@@ -65,6 +65,36 @@ impl Arena {
         Generation(self.generation.load(Ordering::Acquire))
     }
 
+    /// **DIAGNOSTIC ONLY**: return a raw read-only pointer to a slot's
+    /// bytes plus the byte length of the slot. This exposes the inner
+    /// strategy's backing memory for forensic tools and examples.
+    ///
+    /// # Safety
+    /// The caller must not interpret the returned pointer as exclusive.
+    /// The bytes are shared with the arena; reads are racy if another
+    /// thread is allocating into the same slot. The pointer must not
+    /// outlive the `Arena` itself.
+    ///
+    /// **Unstable**: this function is not part of the public API contract.
+    /// It may change or be removed without notice. Only any address-
+    /// based diagnostic tool (e.g. the `credential_store` example)
+    /// should call it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __raw_slot_bytes_for_diagnostics(
+        &self,
+        slot: crate::ids::SlotIndex,
+    ) -> Option<(*const u8, usize)> {
+        let sp = self.strategy.slot_ptr_mut(slot)?;
+        // Strategies with uniform slot sizes (e.g. slab) report their
+        // slot size via slot_size_hint(). Variable-size strategies
+        // (e.g. bump) return None and the diagnostic accessor is
+        // unavailable for them.
+        let per_slot = self.strategy.slot_size_hint()?;
+        Some((sp.ptr.as_ptr().cast_const(), per_slot))
+    }
+
+
     pub(crate) fn invalidate(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
     }

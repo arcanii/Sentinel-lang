@@ -210,4 +210,6 @@ impl AllocStrategy for SlabStrategy {
     fn slot_ptr_mut(&self, slot: crate::ids::SlotIndex) -> Option<crate::strategy::SlotPtr> {
         self.slot_ptr(slot).ok()
     }
+
+    fn slot_size_hint(&self) -> Option<usize> { Some(self.slot_size) }
 }

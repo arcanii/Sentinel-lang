@@ -93,4 +93,9 @@ pub trait AllocStrategy: Send + Sync {
     /// Mutable pointer + size to a slot's bytes. Used by SecretStrategy
     /// to wipe slot contents before forwarding to free. Default: None.
     fn slot_ptr_mut(&self, _slot: crate::ids::SlotIndex) -> Option<SlotPtr> { None }
+
+    /// Per-slot byte size for strategies with uniform slots.
+    /// Returns None for variable-size strategies (e.g. bump).
+    /// Used by diagnostic tools to read raw slot bytes.
+    fn slot_size_hint(&self) -> Option<usize> { None }
 }

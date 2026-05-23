@@ -51,6 +51,18 @@ impl ArenaHandle {
     pub fn free<T>(&self, handle: &crate::Handle<T>) -> Result<(), BrokerError> {
         self.arena.free(handle)
     }
+
+    /// **DIAGNOSTIC ONLY**: forwards to [`Arena::__raw_slot_bytes_for_diagnostics`].
+    /// See that method's safety/stability notes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __raw_slot_bytes_for_diagnostics(
+        &self,
+        slot: crate::ids::SlotIndex,
+    ) -> Option<(*const u8, usize)> {
+        self.arena.__raw_slot_bytes_for_diagnostics(slot)
+    }
+
 }
 
 impl Deref for ArenaHandle {

@@ -24,10 +24,10 @@ Last updated: phase A6 complete.
 | A4    | Scoped allocation budgets                          | Done    | 493ee7b |
 | A5    | Stats, list_arenas, where_is                       | Done    | 15d751c |
 | A6    | Recording mode (event log, ring buffer)            | Done    | 2e8fb8b |
-| A7    | Secret-memory policy (mlock + zero-on-free)        | Next    |         |
-| A8    | Validation examples / integration demos            | Pending |         |
+| A7    | Secret-memory policy (mlock + zero-on-free)        | Done    | f3170bf |
+| A8    | Validation examples / integration demos            | Done    |          683981d |
 
-Test coverage: 63 tests passing (55 lib + 5 integration + 2 proptest
+Test coverage: 70 tests passing (62 lib + 5 integration + 2 proptest
 + 1 doctest). Clippy clean under -D warnings.
 
 ---
@@ -181,29 +181,18 @@ those sections back.
 
 ---
 
-## 7. Pending Decisions (A7 entry point)
+## 7. Phase A Complete
 
-A7 adds a SecretPolicy for arenas (mlock + zero-on-free). Open
-questions, with current recommendations:
+All eight Phase A milestones (A0-A8) are landed. The broker is
+now a feature-complete, production-shape memory subsystem with
+generational arenas, two allocation strategies, scoped budgets,
+stats and queries, recording mode, secret-memory policy, and
+three runnable validation example programs.
 
-1. Dependencies: inline extern "C" { fn mlock(...) } declarations
-   vs add libc crate. Recommended: inline (no new deps).
-2. mlock failure policy: hard-fail with BrokerError::SecretMemory
-   vs soft-fail with a warning. Recommended: hard-fail (STRICT means
-   STRICT).
-3. Implementation pattern: SecretStrategy<S: AllocStrategy>
-   decorator vs secret_policy: Option<SecretPolicy> field on
-   Arena. Recommended: decorator (cleaner separation of concerns).
-4. Recording: add Event::MemoryLocked in A7 or defer. Recommended:
-   defer (keep A7 diff smaller).
-5. Volatile zero: hand-rolled write_volatile loop vs add the
-   zeroize crate. Recommended: hand-rolled (no new deps).
+**Test coverage**: 62 lib + 5 integration + 2 proptest + 1 doc = 70 green.
+**Clippy**: clean with `-D warnings` across crate and examples.
 
-After A7: A8 - three example programs demonstrating the broker
-under load. These also serve as the validation criteria in
-HANDOVER.md Section 4.3.
-
----
+Next: Phase B (parser / VM / language runtime). See HANDOVER.md.
 
 ## 8. Known Limitations / Tech Debt
 
@@ -222,3 +211,31 @@ HANDOVER.md Section 4.3.
 - Several doctests are ignored to avoid pulling in test-only types
   into the public API examples. They should be tagged no_run and
   fleshed out before publishing the crate.
+
+
+### Phase A7 - secret-memory policy (f3170bf)
+
+Opt-in protection for sensitive arenas via the builder.
+
+- SecretPolicy { lock_memory, zero_on_free, zero_on_destroy } with STRICT / LENIENT / NONE constants.
+- SecretStrategy decorator wraps any AllocStrategy; forwards alloc/free/slot_ptr and layers mlock + volatile-zero on top.
+- mlock via inline extern "C" on Unix, VirtualLock on Windows. Hard-fail on errors.
+- secure_zero() uses write_volatile + SeqCst compiler fence.
+- Per-slot size tracked via Mutex<HashMap<SlotIndex, usize>> so zero-on-free wipes the exact extent.
+- New error variant BrokerError::SecretMemory.
+- 7 new tests; total now 70 green.
+
+
+
+### Phase A8 - validation examples (683981d)
+
+Three runnable example programs under `crates/sentinel-broker/examples/`:
+
+- `token_bucket.rs` - high-frequency slab allocation (~100k allocs in ~30ms), generation recycling via 128-slot reuse, `where_is` lookup demo.
+- `request_pipeline.rs` - scoped per-request bump arenas under `within_budget`, with recorder-based event tracing; demonstrates budget rejection.
+- `credential_store.rs` - secret slab with STRICT-or-LENIENT fallback; uses unsafe raw-pointer reads via `Arena::__raw_slot_bytes_for_diagnostics` to prove zero-on-free wipes slot bytes (visual hex dump shows `alice:hunter2` -> all zeros).
+
+API additions:
+- `AllocStrategy::slot_size_hint() -> Option<usize>`: per-slot byte size for uniform strategies (slab returns Some, bump returns None).
+- `Arena::__raw_slot_bytes_for_diagnostics(slot)` and `ArenaHandle::__raw_slot_bytes_for_diagnostics(slot)`: `#[doc(hidden)]` diagnostic accessor returning `(*const u8, usize)`. Unstable; for forensic tools and examples only.
+

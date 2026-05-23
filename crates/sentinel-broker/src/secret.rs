@@ -229,6 +229,8 @@ impl AllocStrategy for SecretStrategy {
     fn available(&self) -> usize { self.inner.available() }
     fn kind(&self) -> StrategyKind { self.inner.kind() }
 
+    fn slot_size_hint(&self) -> Option<usize> { self.inner.slot_size_hint() }
+
     fn backing_buffer(&self) -> Option<(*mut u8, usize)> {
         self.inner.backing_buffer()
     }
