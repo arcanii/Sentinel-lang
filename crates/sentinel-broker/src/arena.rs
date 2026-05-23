@@ -1,6 +1,7 @@
 //! Arena: a generation-tagged region of memory backed by an [`AllocStrategy`].
 
 use crate::error::BrokerError;
+use crate::recording::{Event, Recorder};
 use crate::handle::Handle;
 use crate::ids::{ArenaId, Generation, SlotIndex};
 use crate::strategy::{AllocStrategy, SlotPtr, StrategyKind};
@@ -15,10 +16,22 @@ pub struct Arena {
     generation: AtomicU32,
     alloc_count: AtomicU64,
     free_count: AtomicU64,
+    recorder: Option<Arc<Recorder>>,
 }
 
 impl Arena {
+    #[allow(dead_code)] // kept as a convenience wrapper; primary constructor is with_strategy_and_recorder
     pub(crate) fn with_strategy(id: ArenaId, name: &str, strategy: Box<dyn AllocStrategy>) -> Arc<Self> {
+        Self::with_strategy_and_recorder(id, name, strategy, None)
+    }
+
+    /// Same as `with_strategy`, but attaches a recorder for event emission.
+    pub(crate) fn with_strategy_and_recorder(
+        id: ArenaId,
+        name: &str,
+        strategy: Box<dyn AllocStrategy>,
+        recorder: Option<Arc<Recorder>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             id,
             name: name.into(),
@@ -26,6 +39,7 @@ impl Arena {
             generation: AtomicU32::new(Generation::INITIAL.raw()),
             alloc_count: AtomicU64::new(0),
             free_count: AtomicU64::new(0),
+            recorder,
         })
     }
 
@@ -72,6 +86,16 @@ impl Arena {
         }
 
         self.alloc_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(r) = &self.recorder {
+            r.record(Event::Allocated {
+                arena: self.id,
+                slot: allocated.slot,
+                slot_generation: allocated.generation,
+                size: layout.size(),
+                align: layout.align(),
+                at_ns: r.now_ns(),
+            });
+        }
         Ok(Handle::new(
             self.id,
             allocated.slot,
@@ -101,11 +125,19 @@ impl Arena {
                 current: cur,
             });
         }
-        let r = self.strategy.free(handle.slot, handle.slot_generation);
-        if r.is_ok() {
+        let res = self.strategy.free(handle.slot, handle.slot_generation);
+        if res.is_ok() {
             self.free_count.fetch_add(1, Ordering::Relaxed);
+            if let Some(rec) = &self.recorder {
+                rec.record(Event::Freed {
+                    arena: self.id,
+                    slot: handle.slot,
+                    slot_generation: handle.slot_generation,
+                    at_ns: rec.now_ns(),
+                });
+            }
         }
-        r
+        res
     }
 
     pub(crate) fn strategy_slot_ptr(&self, slot: SlotIndex) -> Result<SlotPtr, BrokerError> {

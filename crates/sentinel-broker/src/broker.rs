@@ -5,6 +5,7 @@
 
 use crate::arena::Arena;
 use crate::stats::{ArenaSummary, BrokerStats, HandleLocation};
+use crate::recording::{Event, Recorder};
 use crate::builder::ArenaBuilder;
 use crate::error::BrokerError;
 use crate::budget::{Budget, BudgetScope};
@@ -72,6 +73,7 @@ pub struct Broker {
     arena_ids: ArenaIdCounter,
     budget_ids: BudgetIdCounter,
     arenas: RwLock<HashMap<ArenaId, Arc<Arena>>>,
+    recorder: Option<Arc<Recorder>>,
 }
 
 impl Broker {
@@ -81,6 +83,7 @@ impl Broker {
             arena_ids: ArenaIdCounter::new(),
             budget_ids: BudgetIdCounter::new(),
             arenas: RwLock::new(HashMap::new()),
+            recorder: None,
         }
     }
 
@@ -114,6 +117,9 @@ impl Broker {
         match removed {
             Some(arena) => {
                 arena.invalidate();
+                if let Some(r) = &self.recorder {
+                    r.record(Event::ArenaDestroyed { id, at_ns: r.now_ns() });
+                }
                 tracing::debug!(arena_id = %id, "arena destroyed");
                 Ok(())
             }
@@ -129,16 +135,33 @@ impl Broker {
 
     // --- pub(crate) hooks used by the builder ---
 
+    pub(crate) fn recorder_arc(&self) -> Option<Arc<Recorder>> {
+        self.recorder.clone()
+    }
+
     pub(crate) fn next_arena_id(&self) -> ArenaId {
         self.arena_ids.next()
     }
 
     pub(crate) fn register_arena(&self, arena: Arc<Arena>) {
         let id = arena.id();
+        // Capture summary BEFORE moving `arena` into the map.
+        let name = arena.name().to_string();
+        let kind = arena.strategy_kind();
+        let capacity = arena.capacity();
         if let Ok(mut arenas) = self.arenas.write() {
             arenas.insert(id, arena);
         }
         tracing::debug!(arena_id = %id, "arena registered");
+        if let Some(r) = &self.recorder {
+            r.record(Event::ArenaCreated {
+                id,
+                name,
+                kind,
+                capacity,
+                at_ns: r.now_ns(),
+            });
+        }
     }
 
 
@@ -157,8 +180,19 @@ impl Broker {
     {
         let id = self.next_budget_id();
         let budget = Budget::new(id, cap, None);
+        if let Some(r) = &self.recorder {
+            r.record(Event::BudgetOpened { id, cap, parent: None, at_ns: r.now_ns() });
+        }
         let scope = BudgetScope::new(self, budget);
-        f(&scope)
+        let result = f(&scope);
+        if let Some(r) = &self.recorder {
+            r.record(Event::BudgetClosed {
+                id,
+                used_at_close: scope.budget().used(),
+                at_ns: r.now_ns(),
+            });
+        }
+        result
     }
 
     pub(crate) fn next_budget_id(&self) -> crate::ids::BudgetId {
@@ -221,6 +255,24 @@ impl Broker {
     }
 
 
+}
+
+
+impl Broker {
+    /// Construct a broker with an attached recorder. All event-emitting
+    /// sites will forward to it.
+    #[must_use]
+    pub fn with_recorder(recorder: Arc<Recorder>) -> Self {
+        let mut b = Self::new();
+        b.recorder = Some(recorder);
+        b
+    }
+
+    /// Access the broker's recorder, if any.
+    #[must_use]
+    pub fn recorder(&self) -> Option<&Arc<Recorder>> {
+        self.recorder.as_ref()
+    }
 }
 
 impl Default for Broker {
@@ -417,5 +469,133 @@ mod tests {
         let id = a.id();
         b.destroy_arena(id).unwrap();
         assert!(b.where_is(&h).is_none());
+    }
+
+    #[test]
+    fn recording_disabled_by_default() {
+        let b = Broker::new();
+        assert!(b.recorder().is_none());
+        let _a = b.create_arena("x", 256);
+        // No way to observe events; existence check is enough.
+    }
+
+    #[test]
+    fn recording_captures_basic_lifecycle() {
+        use crate::recording::{Event, Recorder};
+        let rec = Recorder::unbounded();
+        let b = Broker::with_recorder(rec.clone());
+        let a = b.arena("slabby").slab(64, 8, 8);
+        let h = a.alloc(7_u64).unwrap();
+        a.free(&h).unwrap();
+        let id = a.id();
+        b.destroy_arena(id).unwrap();
+        let events = rec.snapshot();
+        assert_eq!(events.len(), 4, "got {events:?}");
+        assert!(matches!(events[0], Event::ArenaCreated { .. }));
+        assert!(matches!(events[1], Event::Allocated { .. }));
+        assert!(matches!(events[2], Event::Freed { .. }));
+        assert!(matches!(events[3], Event::ArenaDestroyed { .. }));
+    }
+
+    #[test]
+    fn recording_carries_correct_payload() {
+        use crate::recording::{Event, Recorder};
+        let rec = Recorder::unbounded();
+        let b = Broker::with_recorder(rec.clone());
+        let a = b.create_arena("named", 4096);
+        let h = a.alloc(0xCAFE_BABE_u32).unwrap();
+        let events = rec.snapshot();
+        let (arena_id, name, capacity) = match &events[0] {
+            Event::ArenaCreated { id, name, capacity, .. } => (*id, name.clone(), *capacity),
+            other => panic!("expected ArenaCreated, got {other:?}"),
+        };
+        assert_eq!(name, "named");
+        assert_eq!(capacity, 4096);
+        match &events[1] {
+            Event::Allocated { arena, size, align, slot, .. } => {
+                assert_eq!(*arena, arena_id);
+                assert_eq!(*size, std::mem::size_of::<u32>());
+                assert_eq!(*align, std::mem::align_of::<u32>());
+                assert_eq!(*slot, h.slot());
+            }
+            other => panic!("expected Allocated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recording_timestamps_monotonic_per_thread() {
+        use crate::recording::Recorder;
+        let rec = Recorder::unbounded();
+        let b = Broker::with_recorder(rec.clone());
+        let a = b.create_arena("t", 1024);
+        for i in 0..16u64 {
+            let _ = a.alloc(i).unwrap();
+        }
+        let events = rec.snapshot();
+        let mut last = 0u64;
+        for e in &events {
+            assert!(e.at_ns() >= last, "non-monotonic at_ns in {events:?}");
+            last = e.at_ns();
+        }
+    }
+
+    #[test]
+    fn recording_bounded_ring_buffer_evicts_oldest() {
+        use crate::recording::Recorder;
+        let rec = Recorder::with_capacity(4);
+        let b = Broker::with_recorder(rec.clone());
+        let a = b.create_arena("ring", 4096);
+        // 1 ArenaCreated + 10 Allocated = 11 events; ring keeps last 4.
+        for i in 0..10u64 {
+            a.alloc(i).unwrap();
+        }
+        let events = rec.snapshot();
+        assert_eq!(events.len(), 4);
+        // The oldest surviving event should be an Allocated, not ArenaCreated.
+        assert!(matches!(events[0], crate::recording::Event::Allocated { .. }));
+    }
+
+    #[test]
+    fn recording_emits_budget_open_close() {
+        use crate::recording::{Event, Recorder};
+        let rec = Recorder::unbounded();
+        let b = Broker::with_recorder(rec.clone());
+        let _ = b.within_budget(4096, |scope| {
+            let _a = scope.arena("inside").capacity(1024).bump()?;
+            Ok(())
+        });
+        let events = rec.snapshot();
+        assert!(events.iter().any(|e| matches!(e, Event::BudgetOpened { .. })));
+        assert!(events.iter().any(|e| matches!(e, Event::BudgetClosed { .. })));
+        // BudgetOpened comes before BudgetClosed.
+        let open_idx = events.iter().position(|e| matches!(e, Event::BudgetOpened { .. })).unwrap();
+        let close_idx = events.iter().position(|e| matches!(e, Event::BudgetClosed { .. })).unwrap();
+        assert!(open_idx < close_idx);
+    }
+
+    #[test]
+    fn recording_concurrent_allocations_consistent() {
+        use crate::recording::{Event, Recorder};
+        use std::sync::Arc;
+        use std::thread;
+        let rec = Recorder::unbounded();
+        let b = Arc::new(Broker::with_recorder(rec.clone()));
+        let a = b.arena("conc").slab(32, 8, 4096);
+        let a = Arc::new(a);
+        let n_threads = 16usize;
+        let per_thread = 100usize;
+        let mut joins = Vec::new();
+        for _ in 0..n_threads {
+            let a = Arc::clone(&a);
+            joins.push(thread::spawn(move || {
+                for i in 0..per_thread {
+                    let _ = a.alloc(i as u64).unwrap();
+                }
+            }));
+        }
+        for j in joins { j.join().unwrap(); }
+        let events = rec.snapshot();
+        let alloc_count = events.iter().filter(|e| matches!(e, Event::Allocated { .. })).count();
+        assert_eq!(alloc_count, n_threads * per_thread);
     }
 }

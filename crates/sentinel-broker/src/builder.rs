@@ -43,7 +43,7 @@ impl<'b> ArenaBuilder<'b> {
         let id = self.broker.next_arena_id();
         let strategy: Box<dyn AllocStrategy> =
             Box::new(BumpStrategy::new(id, cap));
-        let arena = Arena::with_strategy(id, &self.name, strategy);
+        let arena = Arena::with_strategy_and_recorder(id, &self.name, strategy, self.broker.recorder_arc());
         self.broker.register_arena(Arc::clone(&arena));
         ArenaHandle::from_parts(id, arena)
     }
@@ -57,7 +57,7 @@ impl<'b> ArenaBuilder<'b> {
         let id = self.broker.next_arena_id();
         let strategy: Box<dyn AllocStrategy> =
             Box::new(SlabStrategy::new(id, slot_size, slot_align, slot_count));
-        let arena = Arena::with_strategy(id, &self.name, strategy);
+        let arena = Arena::with_strategy_and_recorder(id, &self.name, strategy, self.broker.recorder_arc());
         self.broker.register_arena(Arc::clone(&arena));
         ArenaHandle::from_parts(id, arena)
     }

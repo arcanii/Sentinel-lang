@@ -15,6 +15,7 @@
 //! ```
 
 use crate::broker::{ArenaHandle, Broker};
+use crate::recording::Event;
 use crate::error::BrokerError;
 use crate::ids::BudgetId;
 use crate::strategy::{bump::BumpStrategy, slab::SlabStrategy, AllocStrategy};
@@ -158,8 +159,24 @@ impl<'b> BudgetScope<'b> {
     {
         let id = self.broker.next_budget_id();
         let inner = Budget::new(id, cap, Some(Arc::clone(&self.budget)));
+        if let Some(r) = self.broker.recorder_arc() {
+            r.record(Event::BudgetOpened {
+                id,
+                cap,
+                parent: Some(self.budget.id()),
+                at_ns: r.now_ns(),
+            });
+        }
         let scope = BudgetScope::new(self.broker, inner);
-        f(&scope)
+        let result = f(&scope);
+        if let Some(r) = self.broker.recorder_arc() {
+            r.record(Event::BudgetClosed {
+                id,
+                used_at_close: scope.budget().used(),
+                at_ns: r.now_ns(),
+            });
+        }
+        result
     }
 }
 
@@ -195,7 +212,7 @@ impl BudgetArenaBuilder<'_, '_> {
         self.scope.budget.try_charge(cap)?;
         let id = self.scope.broker.next_arena_id();
         let strategy: Box<dyn AllocStrategy> = Box::new(BumpStrategy::new(id, cap));
-        let arena = crate::arena::Arena::with_strategy(id, &self.name, strategy);
+        let arena = crate::arena::Arena::with_strategy_and_recorder(id, &self.name, strategy, self.scope.broker.recorder_arc());
         self.scope.broker.register_arena(Arc::clone(&arena));
         Ok(ArenaHandle::from_parts(id, arena))
     }
@@ -218,7 +235,7 @@ impl BudgetArenaBuilder<'_, '_> {
         let id = self.scope.broker.next_arena_id();
         let strategy: Box<dyn AllocStrategy> =
             Box::new(SlabStrategy::new(id, slot_size, slot_align, slot_count));
-        let arena = crate::arena::Arena::with_strategy(id, &self.name, strategy);
+        let arena = crate::arena::Arena::with_strategy_and_recorder(id, &self.name, strategy, self.scope.broker.recorder_arc());
         self.scope.broker.register_arena(Arc::clone(&arena));
         Ok(ArenaHandle::from_parts(id, arena))
     }
