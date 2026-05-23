@@ -12,7 +12,7 @@ use thiserror::Error;
 /// These are typed so callers can match on specific cases and respond
 /// appropriately (e.g., logging a use-after-free in production while
 /// rolling back the affected operation).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BrokerError {
     /// A handle was used after its arena was dropped.
     ///
@@ -83,7 +83,12 @@ pub enum BrokerError {
     },
 
     #[error("secret memory policy failed: {reason}")]
-    SecretMemory { reason: &'static str },
+    SecretMemory { reason: String, os_errno: Option<i32> },
+
+    /// Builder used incorrectly (e.g. .try_bump() without .capacity()).
+    #[error("builder misuse: {reason}")]
+    BuilderMisuse { reason: &'static str },
+
 }
 
 impl BrokerError {

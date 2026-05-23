@@ -177,12 +177,13 @@ impl SecretStrategy {
         if policy.lock_memory {
             let Some((ptr, len)) = inner.backing_buffer() else {
                 return Err(BrokerError::SecretMemory {
-                    reason: "inner strategy does not expose a backing buffer",
+                    reason: "inner strategy does not expose a backing buffer".to_string(),
+                    os_errno: None,
                 });
             };
             os::lock(ptr, len).map_err(|e| {
                 tracing::warn!(error = %e, "mlock failed");
-                BrokerError::SecretMemory { reason: "mlock failed" }
+                BrokerError::SecretMemory { reason: "mlock failed".to_string(), os_errno: None }
             })?;
             locked_region = Some((ptr, len));
         }

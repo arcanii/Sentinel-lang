@@ -87,6 +87,51 @@ impl<'b> ArenaBuilder<'b> {
         self.broker.register_arena(Arc::clone(&arena));
         ArenaHandle::from_parts(id, arena)
     }
+
+    /// Fallible counterpart of [`bump`]. Returns
+    /// [`BrokerError::BuilderMisuse`] if [`capacity`] was not called,
+    /// or [`BrokerError::SecretMemory`] if a secret-memory policy was
+    /// requested and [`SecretStrategy::wrap`] failed (e.g. mlock
+    /// refused on a host without `IPC_LOCK`).
+    pub fn try_bump(self) -> Result<ArenaHandle, crate::error::BrokerError> {
+        let cap = self.bump_capacity
+            .ok_or(crate::error::BrokerError::BuilderMisuse {
+                reason: "ArenaBuilder::try_bump requires .capacity(n) first",
+            })?;
+        let id = self.broker.next_arena_id();
+        let inner: Box<dyn AllocStrategy> = Box::new(BumpStrategy::new(id, cap));
+        let strategy: Box<dyn AllocStrategy> = match self.secret_policy {
+            Some(p) if p != SecretPolicy::NONE => {
+                Box::new(SecretStrategy::wrap(inner, p)?)
+            }
+            _ => inner,
+        };
+        let arena = Arena::with_strategy_and_recorder(id, &self.name, strategy, self.broker.recorder_arc());
+        self.broker.register_arena(Arc::clone(&arena));
+        Ok(ArenaHandle::from_parts(id, arena))
+    }
+
+    /// Fallible counterpart of [`slab`]. Returns
+    /// [`BrokerError::SecretMemory`] if a secret-memory policy was
+    /// requested and [`SecretStrategy::wrap`] failed.
+    pub fn try_slab(
+        self,
+        slot_size: usize,
+        slot_align: usize,
+        slot_count: u32,
+    ) -> Result<ArenaHandle, crate::error::BrokerError> {
+        let id = self.broker.next_arena_id();
+        let inner: Box<dyn AllocStrategy> = Box::new(SlabStrategy::new(id, slot_size, slot_align, slot_count));
+        let strategy: Box<dyn AllocStrategy> = match self.secret_policy {
+            Some(p) if p != SecretPolicy::NONE => {
+                Box::new(SecretStrategy::wrap(inner, p)?)
+            }
+            _ => inner,
+        };
+        let arena = Arena::with_strategy_and_recorder(id, &self.name, strategy, self.broker.recorder_arc());
+        self.broker.register_arena(Arc::clone(&arena));
+        Ok(ArenaHandle::from_parts(id, arena))
+    }
 }
 
 #[cfg(test)]

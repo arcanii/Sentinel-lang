@@ -63,40 +63,27 @@ fn pack_credential(user: &str, secret: &str) -> [u8; SLOT_BYTES] {
 /// (e.g., the dev machine has no `IPC_LOCK`), narrate the fallback and
 /// retry with LENIENT.
 fn build_vault(broker: &Broker) -> ArenaHandle {
-    // First attempt: STRICT (mlock + zero_on_free + zero_on_destroy).
-    // SecretStrategy::wrap is called eagerly inside .slab(), so an
-    // mlock failure surfaces here. Unfortunately the builder API
-    // panics on construction error rather than returning Result,
-    // so we have to detect mlock support a different way: try a
-    // tiny throwaway STRICT arena first and catch the panic? No —
-    // simpler: the builder's `.slab()` returns ArenaHandle directly,
-    // and SecretStrategy::wrap returns BrokerError. The current
-    // builder uses .expect("SecretStrategy::wrap failed ...") which
-    // would panic. So we can't gracefully fall back through the
-    // public builder. Instead: probe once with a temporary 1-slot
-    // arena and catch via std::panic::catch_unwind.
-
-    let probe = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        broker.arena("vault-probe").secret(SecretPolicy::STRICT).slab(SLOT_BYTES, 8, 1)
-    }));
-
-    match probe {
-        Ok(handle) => {
+    // Try STRICT first (mlock + zero_on_free + zero_on_destroy). If
+    // SecretStrategy::wrap reports an mlock failure (typical on macOS
+    // dev machines without `ulimit -l unlimited`), narrate the fallback
+    // and retry with LENIENT.
+    match broker
+        .arena("vault")
+        .secret(SecretPolicy::STRICT)
+        .try_slab(SLOT_BYTES, 8, SLOT_COUNT)
+    {
+        Ok(h) => {
             println!("  policy: STRICT (mlock active)");
-            // Destroy the probe; build the real vault.
-            broker.destroy_arena(handle.id()).expect("destroy probe");
-            broker
-                .arena("vault")
-                .secret(SecretPolicy::STRICT)
-                .slab(SLOT_BYTES, 8, SLOT_COUNT)
+            h
         }
-        Err(_) => {
-            println!("  policy: STRICT unavailable (mlock refused); falling back to LENIENT");
+        Err(e) => {
+            println!("  policy: STRICT unavailable ({e}); falling back to LENIENT");
             println!("          (this is expected on macOS dev machines without `ulimit -l unlimited`)");
             broker
                 .arena("vault")
                 .secret(SecretPolicy::LENIENT)
-                .slab(SLOT_BYTES, 8, SLOT_COUNT)
+                .try_slab(SLOT_BYTES, 8, SLOT_COUNT)
+                .expect("LENIENT slab construction should never fail")
         }
     }
 }
@@ -189,10 +176,7 @@ fn main() {
         "\n  broker stats: live_arenas={} allocations={} frees={}",
         stats.live_arenas, stats.total_allocations, stats.total_frees,
     );
-    assert_eq!(stats.total_allocations, 4, "3 originals + 1 probe + 1 dave = wait, plus probe...");
-    // Note: probe arena was destroyed; its alloc count isn't recorded in this counter
-    // because no alloc was made on the probe (we just built and destroyed the arena).
-    // So total_allocations = 3 (alice, bob, carol) + 1 (dave) = 4.
+    assert_eq!(stats.total_allocations, 4, "alice + bob + carol + dave = 4");
 
     // Cleanup.
     broker.destroy_arena(vault.id()).expect("destroy vault");
