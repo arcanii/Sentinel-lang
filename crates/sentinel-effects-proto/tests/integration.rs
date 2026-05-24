@@ -51,3 +51,29 @@ fn pipeline_type_error_renders_with_caret() {
     // Some caret is present.
     assert!(rendered.contains("^"), "caret: {rendered}");
 }
+
+// ---- B2.2b: end-to-end effect surface ----
+
+#[test]
+fn pipeline_effect_decl_with_pure_body_evaluates() {
+    // The declaration is accepted by the parser, ignored by
+    // inference (B2.3 wires the real env), and the pure body runs.
+    let src = "effect Print : Int -> Bool ; 1 + 2";
+    assert_eq!(run(src).unwrap(), Value::Int(3));
+}
+
+#[test]
+fn pipeline_perform_is_type_error_in_b22b() {
+    use sentinel_effects_proto::{MiniError, TypeError};
+    let source = "effect Print : Int -> Bool ; do Print(1)";
+    let err = run(source).expect_err("do should be rejected until B2.3");
+    match &err {
+        MiniError::Type(TypeError::EffectNotYetSupported { label, .. }) => {
+            assert_eq!(label, "Print");
+        }
+        other => panic!("expected EffectNotYetSupported, got {other:?}"),
+    }
+    let rendered = err.render(source);
+    assert!(rendered.starts_with("type error:"), "header: {rendered}");
+    assert!(rendered.contains("^"), "caret: {rendered}");
+}

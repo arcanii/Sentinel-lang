@@ -29,6 +29,11 @@ pub enum TypeError {
     RowMismatch { expected: Row, found: Row, span: Span },
     #[error("row occurs check failed: {var} appears in {row}")]
     RowOccursCheck { var: RowVar, row: Row, span: Span },
+    /// B2.2b: `do Label(arg)` is parseable but cannot yet be typed
+    /// or evaluated. Real handling lands in B2.3 (inference) and
+    /// B3 (handlers).
+    #[error("effect {label:?} cannot be performed yet (effect inference arrives in B2.3, handlers in B3)")]
+    EffectNotYetSupported { label: String, span: Span },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -444,9 +449,13 @@ pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
                 Ok((s4, result_ty))
             }
         }
-        // B2.2a scaffolding: Perform inference lands in B2.2b.
-        ExprKind::Perform { label, .. } => {
-            todo!("B2.2b: Perform inference -- effect {:?}", label)
+        // B2.2b: parser accepts `do Label(arg)`, inference rejects it
+        // with a dedicated error until B2.3 wires real effect rows.
+        ExprKind::Perform { label, label_span, .. } => {
+            Err(TypeError::EffectNotYetSupported {
+                label: label.clone(),
+                span: *label_span,
+            })
         }
     }
 }
@@ -463,6 +472,17 @@ pub fn infer_top(expr: &Expr) -> Result<Ty, TypeError> {
     let mut supply = TyVarSupply::new();
     let (s, t) = infer(&TypeEnv::empty(), expr, &mut supply)?;
     Ok(s.apply(&t))
+}
+
+/// B2.2b: program-level inference entry point.
+///
+/// In B2.2 the `effects` field of [`crate::ast::Program`] is
+/// inert: declarations are accepted by the parser but contribute
+/// nothing to the typing environment. B2.3 will thread declared
+/// labels through an environment so `do Label(arg)` infers a
+/// proper effect row, and handlers in B3 will discharge them.
+pub fn infer_program(prog: &crate::ast::Program) -> Result<Ty, TypeError> {
+    infer_top(&prog.body)
 }
 
 #[cfg(test)]
@@ -933,5 +953,43 @@ mod tests {
             "error span {}..{} should be inside body (>= {})",
             span.start, span.end, rhs_end
         );
+    }
+    // ---- B2.2b: Perform inference rejection ----
+
+    #[test]
+    fn b22b_perform_alone_is_type_error() {
+        let toks = crate::lexer::lex("do Print(1)").unwrap();
+        let expr = crate::parser::parse(&toks).unwrap();
+        let err = infer_top(&expr).expect_err("do should fail type-check in B2.2b");
+        match err {
+            TypeError::EffectNotYetSupported { label, .. } => {
+                assert_eq!(label, "Print");
+            }
+            other => panic!("expected EffectNotYetSupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b22b_perform_error_span_targets_label_not_do_keyword() {
+        let src = "do Print(1)";
+        let toks = crate::lexer::lex(src).unwrap();
+        let expr = crate::parser::parse(&toks).unwrap();
+        let err = infer_top(&expr).expect_err("should fail");
+        match err {
+            TypeError::EffectNotYetSupported { span, .. } => {
+                // Label `Print` lives at bytes 3..8 in "do Print(1)".
+                assert_eq!(&src[span.start as usize .. span.end as usize], "Print");
+            }
+            other => panic!("expected EffectNotYetSupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b22b_program_with_effect_decl_and_pure_body_infers() {
+        use crate::parser::parse_program;
+        let toks = crate::lexer::lex("effect Print : Int -> Bool ; 1 + 2").unwrap();
+        let prog = parse_program(&toks).unwrap();
+        let ty = infer_program(&prog).expect("pure body must infer");
+        assert_eq!(ty, Ty::Int);
     }
 }

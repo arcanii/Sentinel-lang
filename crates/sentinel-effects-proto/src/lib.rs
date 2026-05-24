@@ -34,13 +34,14 @@ pub mod parser;
 pub mod span;
 pub mod types;
 
-pub use ast::{expr, BinOp, Expr, ExprKind};
+pub use ast::{expr, BinOp, EffectDecl, Expr, ExprKind, Program, TyExpr};
 pub use eval::{eval, Env, EvalError, Value};
 pub use infer::{
-    generalize, infer, infer_top, instantiate, unify, Subst, TyVarSupply, TypeEnv, TypeError,
+    generalize, infer, infer_program, infer_top, instantiate, unify, Subst, TyVarSupply,
+    TypeEnv, TypeError,
 };
 pub use lexer::{lex, LexError, Token};
-pub use parser::{parse, ParseError};
+pub use parser::{parse, parse_program, ParseError};
 pub use span::{Span, Spanned};
 pub use types::{Scheme, Ty, TyVar};
 
@@ -52,9 +53,12 @@ pub use types::{Scheme, Ty, TyVar};
 /// reported by [`infer_top`] on the same source.
 pub fn run(source: &str) -> Result<Value, MiniError> {
     let tokens = lex(source).map_err(MiniError::Lex)?;
-    let expr = parse(&tokens).map_err(MiniError::Parse)?;
-    infer_top(&expr).map_err(MiniError::Type)?;
-    eval(&expr, &Env::empty()).map_err(MiniError::Eval)
+    // B2.2b: pipeline now goes through `parse_program` and
+    // `infer_program`. Effect declarations are parsed but inert
+    // until B2.3.
+    let program = parse_program(&tokens).map_err(MiniError::Parse)?;
+    infer_program(&program).map_err(MiniError::Type)?;
+    eval(&program.body, &Env::empty()).map_err(MiniError::Eval)
 }
 
 /// Top-level error type spanning every pipeline stage.
@@ -102,6 +106,7 @@ impl MiniError {
                     TypeError::Unbound { span, .. } => Some(*span),
                     TypeError::RowMismatch { span, .. } => Some(*span),
                     TypeError::RowOccursCheck { span, .. } => Some(*span),
+                    TypeError::EffectNotYetSupported { span, .. } => Some(*span),
                 };
                 render(source, span, "type error", &e.to_string())
             }

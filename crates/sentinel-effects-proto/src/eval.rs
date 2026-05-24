@@ -43,6 +43,12 @@ pub enum EvalError {
     NotAFunction,
     #[error("internal: letrec cell read before initialisation")]
     LetRecUninitialised,
+    /// B2.2b: defence-in-depth. Inference catches `do Label(arg)`
+    /// in the standard pipeline, but a caller that bypasses
+    /// [`crate::infer_program`] and goes straight to [`eval`] will
+    /// surface this instead of a panic.
+    #[error("effect {0:?} cannot be performed yet (handlers arrive in B3)")]
+    EffectNotYetSupported(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -148,9 +154,11 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let r = eval(rhs, env)?;
             eval_binop(*op, l, r)
         }
-        // B2.2a scaffolding: Perform eval lands in B2.2b.
+        // B2.2b: unreachable through the pipeline (inference catches
+        // it first), but if eval is called directly we surface a
+        // dedicated error instead of panicking.
         ExprKind::Perform { label, .. } => {
-            todo!("B2.2b: Perform eval -- effect {:?}", label)
+            Err(EvalError::EffectNotYetSupported(label.clone()))
         }
     }
 }
@@ -265,5 +273,19 @@ mod tests {
             apply(fact)
         ";
         assert_eq!(run(src).unwrap(), Value::Int(24));
+    }
+
+    // ---- B2.2b: direct-eval defence in depth ----
+
+    #[test]
+    fn b22b_eval_perform_directly_returns_effect_error() {
+        // Bypass infer; call eval on a Perform node directly.
+        let toks = crate::lexer::lex("do Print(1)").unwrap();
+        let expr = crate::parser::parse(&toks).unwrap();
+        let err = eval(&expr, &Env::empty()).expect_err("eval should reject Perform");
+        match err {
+            EvalError::EffectNotYetSupported(label) => assert_eq!(label, "Print"),
+            other => panic!("expected EffectNotYetSupported, got {other:?}"),
+        }
     }
 }
