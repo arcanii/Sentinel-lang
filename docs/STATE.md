@@ -11,12 +11,17 @@ research-grade interpreter (effects-proto). They are tracked in
 separate sections below. The remaining workspace members listed in
 HANDOVER §3.2 are scaffold-only.
 
-Last updated: phase B2.3b2 landed (Perform fully wired through
-effect environment; row generalization in Scheme; UnknownEffect
-type error; placeholder EffectNotYetSupported retired from
-TypeError). See ADRs 0003 (B1 retrospective), 0004 (row
-representation), 0005 (effect-inference judgment; D9 closed), 0006
-(default-close, amended; D4 row polymorphism now implemented).
+Last updated: phase B3.1 complete (handler surface in B3.0; handler
+typing rule in B3.1). 169 lib + 10 integration tests pass.
+`row_split` lands as the dual of `rewrite_row`. New typing errors:
+`HandlerLabelNotInRow`, `DuplicateHandlerArm`. Placeholder
+`TypeError::HandlersNotYetSupported` removed; eval-side placeholders
+(`EvalError::EffectNotYetSupported`, `EvalError::HandlersNotYetSupported`)
+remain pending B3.2 runtime. See ADRs 0003 (B1 retrospective), 0004
+(row representation), 0005 (effect-inference judgment; D9 closed),
+0006 (default-close, amended; D4 row polymorphism implemented),
+0007 (effect handlers; status ACCEPTED, B3.0 + B3.1 landed, B3.2
+pending; D9 amended).
 
 ---
 
@@ -227,8 +232,11 @@ absorbed.
 | B2.3b1 | Row mechanics (Lambda mints ρ, App via arrow_with); default-close residual rows | Done   | f2a17d9 |
 | B2.3b2-a | Perform inference + UnknownEffect; eff_env from prog.effects | Done   | 4c69ed7 |
 | B2.3b2-b | Row generalization in Scheme; instantiate freshens row vars; drop EffectNotYetSupported | Done   | 47cc5a1 |
-| B2    | Effect rows and effect declarations                | In progress |   |
-| B3    | Effect handlers (handle .. with ..)                | Planned |        |
+| B2    | Effect rows and effect declarations                | Done   |        |
+| B3.0  | Handler surface (lexer + parser + AST + placeholders) | Done   | 821b16a |
+| B3.1a | row_split + HandlerLabelNotInRow                   | Done   | febf379 |
+| B3.1b | Handler typing rule + DuplicateHandlerArm          | Done   | e7958e1 |
+| B3.2  | Handler runtime (operation reification + dispatch) | Planned |        |
 | B4    | Secret T qualifier and constant-time check         | Planned |        |
 | B?    | Broker-as-value-heap integration (bonus)           | Planned |        |
 
@@ -505,6 +513,78 @@ crate root in B1.
     and each under ~300 LOC. Net +14 tests (10 b23b2_* unit + 5
     b23b2b_* unit + 2 integration − 2 obsolete b22b_perform_*
     rewritten − 1 integration test repurposed).
+
+
+19. (B3.0, ADR 0007 D1/D2) Handler surface landed: `handle e with
+    { L(x, k) => body, ..., return v => ret_body }` with arms
+    comma-separated, trailing comma permitted, empty `{}` rejected,
+    arm labels required to be uppercase (mirroring `do Label`).
+    `handle` parses at `parse_expr` precedence (peer of `if`, `let`,
+    `fn`). `return` becomes a globally reserved keyword — no
+    existing test or code used `return` as an identifier, but the
+    reservation is real and future surface work should account for
+    it. AST: `ExprKind::Handle { body: Box<Expr>, arms:
+    Vec<HandlerArm>, ret_arm: Option<ReturnArm> }`, with `HandlerArm`
+    carrying `label`, `label_span`, `arg`, `kont`, `body`, `span` and
+    `ReturnArm` carrying `var`, `body`, `span`. The return arm is
+    optional; absence semantically defaults to `return v => v`, with
+    the default introduced by the typer (D1 in the ADR), not the
+    parser, so synthesized AST nodes with fake spans never enter the
+    diagnostic path. New `ParseError` variants
+    `HandlerArmLabelNotUpper` and `EmptyHandler`. Placeholder
+    inference and eval errors (`TypeError::HandlersNotYetSupported`
+    and `EvalError::HandlersNotYetSupported`) keep the build whole
+    until B3.1 (typing) and B3.2 (runtime) replace them. Commit
+    821b16a.
+
+20. (B3.1, ADR 0007 D3/D4) Handler typing rule landed in two commits.
+    **B3.1a** (febf379) adds `row_split` as the dual of the existing
+    `rewrite_row`: given a row and a label, returns the discovered
+    `(arg_ty, ret_ty)` signature and the residual row, with four
+    cases per ADR 0007 D4 (head match, deeper match, row-var case
+    minting fresh `α`/`β`/`tail` and binding the var, empty-row
+    erroring with the new `HandlerLabelNotInRow`). Critically the
+    row-var case mints a fresh *type* var for both arg and ret —
+    this is what makes handlers compose with row-polymorphic
+    callers, because the handler arm's typing of `x` and `k` later
+    pins those fresh vars to concrete types. `rewrite_row` was not
+    reused: it expects a known signature to unify against;
+    `row_split` reads the signature out. Distinct errors, distinct
+    intent, easier to diagnose. **B3.1b** (e7958e1) wires the
+    typing rule per D3: infer body, reject duplicate arm labels with
+    `DuplicateHandlerArm`, peel each arm's label out of the body's
+    row threading substitution, capture the post-peel residual as
+    `r_outer_initial`, mint `t_result`, type each arm body under
+    `env + {x: arg_ty, k: ret_ty -> t_result ! r_outer_initial}` and
+    unify with `t_result`, union each arm body's own row
+    contribution into `r_accumulated`, handle the return arm
+    (or default to `t_body = t_result` when absent). The
+    continuation arrow uses `r_outer_initial` rather than the
+    final `r_accumulated` — the standard Eff/Koka calculus, sound
+    because `k`'s declared row is what `k` requires of its
+    invocation context, not what the arm body around the `k`
+    invocation may additionally perform. `TypeError::HandlersNotYetSupported`
+    removed (variant + `lib.rs` span arm). Three planned items
+    landed as no-ops: (a) the D7 canary collapses to
+    `b31b_handle_identity_discharges_effect` because
+    `infer_program`'s default-close policy (ADR 0006 D6) hides
+    observable row polymorphism at the public type level — the
+    canary's load-bearing property (generalize/instantiate compose
+    with handler typing) is satisfied transitively by all `b31b_*`
+    tests passing without modifying that machinery; (b) the D8
+    positive/negative pair is unreachable through `infer_program`
+    (permissive) and uncallable through `infer_top` (no effect
+    env), so strictness coverage comes indirectly through
+    `b31b_handle_two_arms_discharges_both` and
+    `pipeline_handle_typechecks_then_runtime_is_placeholder`; (c)
+    extending `TypeError::UnhandledEffects` was reviewed and
+    rejected — `Row`'s `Display` already renders residuals as
+    `{Label1, Label2 | tail}`, human-readable as-is. ADR 0007
+    status flipped to ACCEPTED for B3.0 + B3.1; D9 amended with
+    completion-marker status. Net +20 lib tests (4 b31_row_split_*
+    + 7 b31b_* + 9 b30_ from B3.0) + 1 integration test rewritten
+    (`pipeline_handle_typechecks_then_runtime_is_placeholder`).
+    Eval-side placeholders remain pending B3.2.
 
 ### B.6 Known Limitations (intentional at B1)
 

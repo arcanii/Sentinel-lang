@@ -1,6 +1,6 @@
 # ADR 0007: Effect handler design
 
-Status: PROPOSED
+Status: ACCEPTED (B3.0 + B3.1 landed; B3.2 runtime pending)
 Date: 2026-05-24
 Related: 0003 (let-rec restriction), 0005 (effect surface), 0006 (effect rows)
 
@@ -275,6 +275,52 @@ Phase breakdown:
 - B3.2: runtime. `Step` enum, frame reification, `Continuation`,
   `handle` evaluation, removal of `EvalError::EffectNotYetSupported`.
   Probably multiple commits.
+
+
+### D9 amendment (2026-05-24, B3.0 + B3.1 landed)
+
+Completion criteria status:
+
+- ~~`TypeError::HandlersNotYetSupported` placeholder removed.~~ Done in
+  B3.1b (e7958e1). The variant + its `lib.rs` span arm are gone; the
+  typing rule per D3 fires for any `ExprKind::Handle`.
+- `crates/sentinel-effects-proto/src/eval.rs:51` perform-site
+  placeholder: **still in place.** `EvalError::EffectNotYetSupported`
+  fires here. B3.2 replaces with operation reification per D5.
+- `crates/sentinel-effects-proto/src/eval.rs:161` dispatch stub:
+  **still in place.** `ExprKind::Handle` returns
+  `EvalError::HandlersNotYetSupported` (added in B3.0). B3.2 replaces
+  with deep-handler dispatch.
+- `EvalError::EffectNotYetSupported` variant: **still present.** B3.2
+  deliverable.
+- `EvalError::HandlersNotYetSupported` variant: **still present.** B3.2
+  deliverable, parallel to `EffectNotYetSupported`.
+
+Phase breakdown status:
+
+- B3.0 (surface): landed 821b16a. Lexer keywords `handle`/`with`/`return`
+  (`return` is now globally reserved); braces `{`/`}`;
+  `ExprKind::Handle` with `HandlerArm`/`ReturnArm`; parser at
+  `parse_expr` precedence; `ParseError::HandlerArmLabelNotUpper` and
+  `ParseError::EmptyHandler`.
+- B3.1 (typing): landed across febf379 (row_split +
+  HandlerLabelNotInRow) and e7958e1 (typing rule per D3 +
+  DuplicateHandlerArm). Notable divergences from the original plan:
+  (a) the D7 canary collapses to `b31b_handle_identity_discharges_effect`
+  because `infer_program`'s default-close policy (ADR 0006 D6) hides
+  observable row polymorphism at the public type level; the canary's
+  load-bearing property — that generalize/instantiate compose with
+  handler typing — is satisfied transitively by all `b31b_*` tests
+  passing without modifying the generalize/instantiate machinery.
+  (b) The D8 positive/negative pair is unreachable through
+  `infer_program` (permissive) and uncallable through `infer_top` (no
+  effect env); strictness coverage comes indirectly through
+  `b31b_handle_two_arms_discharges_both` and
+  `pipeline_handle_typechecks_then_runtime_is_placeholder`. (c)
+  `TypeError::UnhandledEffects` payload extension was reviewed and
+  judged unnecessary — `Row`'s `Display` renders residuals as
+  `{Label1, Label2 | tail}` which is already human-readable.
+- B3.2 (runtime): not started. Plan unchanged from the original ADR.
 
 ## Considered and rejected (for B3)
 
