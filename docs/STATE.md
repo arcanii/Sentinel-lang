@@ -11,9 +11,11 @@ research-grade interpreter (effects-proto). They are tracked in
 separate sections below. The remaining workspace members listed in
 HANDOVER §3.2 are scaffold-only.
 
-Last updated: phase B1 complete (HM inference with let-rec
-generalization, span-tracked diagnostics, hand-rolled caret
-renderer). See ADR 0003 for the B1 retrospective.
+Last updated: phase B2.3a landed (effect-inference judgment
+refactor; infer returns (Subst, Ty, Row) and threads EffectEnv,
+all arms still produce Row::Empty). See ADRs 0003 (B1
+retrospective), 0004 (row representation), 0005 (effect-inference
+judgment).
 
 ---
 
@@ -220,6 +222,7 @@ absorbed.
 | B2.1  | Remy-style row unification                         | Done   | 323ab33 |
 | B2.2a | Effect-surface lexer/AST/parser                    | Done   | a3fd3cc |
 | B2.2b | Wire Perform through pipeline as type error        | Done   | 62405f2 |
+| B2.3a | Effect-inference judgment refactor (no semantics)  | Done   | fd8eef6 |
 | B2    | Effect rows and effect declarations                | In progress |   |
 | B3    | Effect handlers (handle .. with ..)                | Planned |        |
 | B4    | Secret T qualifier and constant-time check         | Planned |        |
@@ -255,6 +258,21 @@ infers), 1 eval (direct-eval defence in depth), 2
 integration (pure body evaluates, do is rejected with
 rendered caret). Clippy clean under `-D warnings`. See
 B.5 design decisions 14 and 15.
+
+Test coverage as of B2.3a: 134 tests (B2.2 carry-over 134 + 0
+new). B2.3a is a pure behavior-identical refactor per ADR 0005
+D9: the inference judgment changes from `(Subst, Ty)` to
+`(Subst, Ty, Row)`, every arm returns `Row::Empty`, every
+recursive `infer` call site is threaded with a new `EffectEnv`
+parameter that is unused at this phase, `Scheme` gains a
+`row_vars: Vec<RowVar>` field (empty by default), and `infer_top`
+gains a strict residual-row check that is unreachable in B2.3a.
+All 134 existing test assertions pass unchanged; only the four
+`Scheme { .. }` struct-literal call sites in tests were updated
+to include the new (empty) `row_vars` field. Clippy clean under
+`-D warnings`. See B.5 design decision 16 for the ADR 0005 D9
+divergence (`TypeError::UnhandledEffects` and the strict
+`infer_top` check were pulled forward from the D9 B2.3b list).
 
 B1 landed across five commits: spans + Spanned AST + `let rec`
 (abfb3d9), types scaffold (b3589ea), inference driver wired into
@@ -322,8 +340,9 @@ All re-exports from `sentinel_effects_proto`:
 - Eval: `Value`, `EvalError`, `Env`,
   `eval(&Expr, &Env) -> Result<Value, EvalError>`
 - Types: `Ty`, `TyVar`, `Scheme`
-- Inference: `TypeError`, `TypeEnv`, `Subst`, `TyVarSupply`,
-  `unify`, `instantiate`, `generalize`, `infer`, `infer_top`
+- Inference: `TypeError`, `TypeEnv`, `EffectEnv`, `Subst`,
+  `TyVarSupply`, `unify`, `instantiate`, `generalize`, `infer`,
+  `infer_top`, `infer_program`
 - Top-level: `MiniError`,
   `run(source) -> Result<Value, MiniError>` (lex+parse+infer+eval),
   `MiniError::render(&self, source) -> String` for caret diagnostics
@@ -424,6 +443,24 @@ crate root in B1.
     inert (typing environment is unchanged). Real effect
     rows wire in B2.3.
 
+16. (B2.3a, ADR 0005 D9) Effect-inference judgment refactored
+    behavior-identical: `infer` returns `(Subst, Ty, Row)` and
+    takes a new `eff_env: &EffectEnv` parameter; `Scheme` gains
+    a `row_vars: Vec<RowVar>` field (empty default, source-
+    compatible with `Scheme::mono`); every arm returns
+    `Row::Empty`; `Perform` keeps its B2.2b `EffectNotYetSupported`
+    behavior. Divergence from ADR 0005 D9 B2.3a list, deliberate:
+    `TypeError::UnhandledEffects { row, span }` and the strict
+    residual-row check in `infer_top` were pulled forward from
+    the D9 B2.3b list. Both are unreachable in B2.3a (every arm
+    returns `Row::Empty`, so `s.apply_row(&Row::Empty)` is always
+    `Row::Empty`) and land here to isolate B2.3b's diff to
+    semantics only -- this strengthens the bisection-point property
+    ADR 0005 D9 Consequences sec.1 calls for. `UnknownEffect` is
+    *not* pulled forward; it remains strictly B2.3b because it
+    would be genuinely dead (never constructed) in B2.3a. Commit
+    fd8eef6.
+
 ### B.6 Known Limitations (intentional at B1)
 
 - No effects. The whole reason this crate exists. (B2 onward.)
@@ -469,7 +506,7 @@ The standard check suite for a clean tree, applied per-crate:
 All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
-  - sentinel-effects-proto: 95 tests + 0 doctests
+  - sentinel-effects-proto: 134 tests (126 lib + 8 integration) + 0 doctests
 
 ### Script Convention
 
