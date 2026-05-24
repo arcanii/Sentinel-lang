@@ -216,7 +216,8 @@ absorbed.
 |-------|----------------------------------------------------|--------|---------|
 | B0    | Scaffold: lex + parse + eval, no types or effects  | Done   | d090ca1 |
 | B1    | HM type inference, letrec, span-tracked errors     | Done   | e6b06cd |
-| B2    | Effect rows and effect declarations                | Planned |        |
+| B2.0  | Row scaffold: Ty::Fun carries empty Row            | Done   | 2cd81a7 |
+| B2    | Effect rows and effect declarations                | In progress |   |
 | B3    | Effect handlers (handle .. with ..)                | Planned |        |
 | B4    | Secret T qualifier and constant-time check         | Planned |        |
 | B?    | Broker-as-value-heap integration (bonus)           | Planned |        |
@@ -224,6 +225,15 @@ absorbed.
 Test coverage as of B1: 95 tests (8 lexer + 11 parser + 11 eval +
 4 span + 7 types + 41 infer + 7 diag + 6 integration). Clippy
 clean under `-D warnings`. No doctests yet.
+
+Test coverage as of B2.0: 98 tests (B1 carry-over 95 + 3 new in
+`types.rs`: `b20_empty_row_renders_as_empty_string`,
+`b20_arrow_with_empty_row_is_unchanged_from_b1`,
+`b20_rowvar_display_uses_r_prefix`). Clippy clean under
+`-D warnings`; `clippy::result_large_err` allowed crate-wide in
+`lib.rs` because widening `Ty::Fun` with `Row` pushed
+`TypeError::Mismatch` over the 128-byte threshold. See B.5
+design decision 12.
 
 B1 landed across five commits: spans + Spanned AST + `let rec`
 (abfb3d9), types scaffold (b3589ea), inference driver wired into
@@ -340,6 +350,16 @@ crate root in B1.
     prototype validates the shape (line/col header, source-line
     excerpt, caret underline) cheaply. `Display` for `MiniError`
     stays terse; pretty rendering is opt-in via `.render(src)`.
+12. (B2.0) `Ty::Fun` now carries a `Row` per ADR 0002 / ADR 0004.
+    `Row` is a distinct enum (`Empty | Var(RowVar) | Cons { .. }`),
+    `RowVar` is a distinct kind from `TyVar`, `Subst` carries
+    parallel `map` / `row_map` fields. B2.0 ships behaviour-
+    preserving: every arrow gets `Row::Empty`, `unify_row` is a
+    stub handling only the empty-vs-empty case (B2.1 fills in
+    Remy-style row unification). Clippy `result_large_err` allowed
+    crate-wide because `Row` pushed `TypeError` past the lint's
+    128-byte threshold; STATE.md decision 5 already documented
+    that effects-proto does not optimise error shape.
 
 ### B.6 Known Limitations (intentional at B1)
 
