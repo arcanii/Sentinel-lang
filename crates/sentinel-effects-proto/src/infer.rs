@@ -43,6 +43,11 @@ pub enum TypeError {
     /// Lambda/Perform start populating the row.
     #[error("unhandled effects: residual row {row} at top level")]
     UnhandledEffects { row: Row, span: Span },
+    /// B3.0: `handle e with { ... }` is parseable but not yet typed.
+    /// B3.1 introduces row subtraction and the full typing rule
+    /// (ADR 0007 D3, D4); this variant is removed at that point.
+    #[error("handlers are not yet supported (B3.1 lands typing)")]
+    HandlersNotYetSupported { span: Span },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -694,6 +699,10 @@ pub fn infer(
             let (row, s_final) =
                 row_union(&r_arg_resolved, &perform_row, &s_unif, expr.span, supply)?;
             Ok((s_final, decl_ret, row))
+        }
+        // B3.0: handler surface parses but typing arrives in B3.1.
+        ExprKind::Handle { .. } => {
+            Err(TypeError::HandlersNotYetSupported { span: expr.span })
         }
     }
 }
@@ -1380,6 +1389,19 @@ mod tests {
             TypeError::UnknownEffect { label, .. } => assert_eq!(label, "Print"),
             other => panic!("expected UnknownEffect, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn b30_handle_in_infer_is_handlers_not_yet_supported() {
+        use crate::lexer::lex;
+        use crate::parser::parse;
+        let toks = lex("handle e with { Get(x, k) => k }").unwrap();
+        let e = parse(&toks).unwrap();
+        let err = infer_top(&e).unwrap_err();
+        assert!(
+            matches!(err, TypeError::HandlersNotYetSupported { .. }),
+            "expected HandlersNotYetSupported, got {err:?}"
+        );
     }
 
     #[test]

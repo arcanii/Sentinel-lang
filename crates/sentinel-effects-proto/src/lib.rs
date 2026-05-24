@@ -96,6 +96,8 @@ impl MiniError {
                     ParseError::LetRecNotLambda { span } => Some(*span),
                     ParseError::EffectLabelNotUpper { span, .. } => Some(*span),
                     ParseError::ExpectedTypeExpr { span, .. } => Some(*span),
+                    ParseError::HandlerArmLabelNotUpper { span, .. } => Some(*span),
+                    ParseError::EmptyHandler { span } => Some(*span),
                 };
                 render(source, span, "parse error", &e.to_string())
             }
@@ -108,6 +110,7 @@ impl MiniError {
                     TypeError::RowOccursCheck { span, .. } => Some(*span),
                     TypeError::UnknownEffect { span, .. } => Some(*span),
                     TypeError::UnhandledEffects { span, .. } => Some(*span),
+                    TypeError::HandlersNotYetSupported { span } => Some(*span),
                 };
                 render(source, span, "type error", &e.to_string())
             }

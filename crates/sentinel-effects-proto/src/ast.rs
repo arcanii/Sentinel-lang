@@ -72,6 +72,16 @@ pub enum ExprKind {
         label_span: Span,
         arg: Box<Expr>,
     },
+    /// `handle body with { L(x, k) => arm_body, ..., return v => ret_body }`.
+    ///
+    /// B3.0: parser/AST only. Inference and eval reject this with
+    /// `HandlersNotYetSupported` until B3.1 (typing) and B3.2
+    /// (runtime) land. See ADR 0007.
+    Handle {
+        body: Box<Expr>,
+        arms: Vec<HandlerArm>,
+        ret_arm: Option<ReturnArm>,
+    },
 }
 
 /// Binary operators.
@@ -84,6 +94,33 @@ pub enum BinOp {
     Eq,
     Lt,
     Gt,
+}
+
+/// One arm of a handler: `L(x, k) => body`.
+///
+/// `label` is the effect operation handled. `arg` and `kont` are the
+/// names bound for the operation argument and the resumption
+/// continuation respectively. `body` is checked under the outer row
+/// (see ADR 0007 D3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandlerArm {
+    pub label: String,
+    pub label_span: Span,
+    pub arg: String,
+    pub kont: String,
+    pub body: Box<Expr>,
+    pub span: Span,
+}
+
+/// Optional `return v => body` arm of a handler.
+///
+/// When omitted at the source level, defaults semantically to
+/// `return v => v` (see ADR 0007 D1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReturnArm {
+    pub var: String,
+    pub body: Box<Expr>,
+    pub span: Span,
 }
 
 /// Convenience constructor: wrap an [`ExprKind`] with a [`Span`].

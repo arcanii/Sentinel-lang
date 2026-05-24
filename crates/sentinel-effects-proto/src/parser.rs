@@ -20,6 +20,14 @@ pub enum ParseError {
     EffectLabelNotUpper { label: String, span: Span },
     #[error("expected a type expression; got {found:?}")]
     ExpectedTypeExpr { found: Option<Token>, span: Span },
+    /// B3.0: handler arm label must start with an uppercase letter
+    /// (mirrors the `do Label` rule from B2.2a).
+    #[error("handler arm label {label:?} must start with an uppercase letter")]
+    HandlerArmLabelNotUpper { label: String, span: Span },
+    /// B3.0: a `handle ... with { ... }` form had no arms between the
+    /// braces. At minimum a single arm or a `return` arm is required.
+    #[error("handler must contain at least one arm")]
+    EmptyHandler { span: Span },
 }
 
 /// Parse a flat token stream into a single [`Expr`].
@@ -109,8 +117,87 @@ impl<'a> Parser<'a> {
             }
             Some(Token::If) => self.parse_if(),
             Some(Token::Fn) => self.parse_lambda(),
+            Some(Token::Handle) => self.parse_handle(),
             _ => self.parse_compare(),
         }
+    }
+
+    fn parse_handle(&mut self) -> Result<Expr, ParseError> {
+        let start = self.peek_span().expect("parse_handle called with no 'handle' token");
+        self.bump(); // 'handle'
+        let body = Box::new(self.parse_expr()?);
+        self.expect("'with'", |t| matches!(t, Token::With))?;
+        self.expect("'{'", |t| matches!(t, Token::LBrace))?;
+        let mut arms: Vec<crate::ast::HandlerArm> = Vec::new();
+        let mut ret_arm: Option<crate::ast::ReturnArm> = None;
+        // Empty `{}` is rejected after the loop. We accept a trailing
+        // comma after the last arm (D1).
+        loop {
+            if matches!(self.peek_tok(), Some(Token::RBrace)) {
+                break;
+            }
+            if matches!(self.peek_tok(), Some(Token::Return)) {
+                let ret_start = self.peek_span().expect("return token has span");
+                self.bump(); // 'return'
+                let var = match self.bump() {
+                    Some((Token::Ident(s), _)) => s,
+                    Some((t, span)) => return Err(ParseError::Unexpected {
+                        found: t, expected: "identifier", span,
+                    }),
+                    None => return Err(ParseError::UnexpectedEof { expected: "identifier" }),
+                };
+                self.expect("'=>'", |t| matches!(t, Token::FatArrow))?;
+                let body = Box::new(self.parse_expr()?);
+                let span = ret_start.merge(body.span);
+                ret_arm = Some(crate::ast::ReturnArm { var, body, span });
+            } else {
+                let (label, label_span) = match self.bump() {
+                    Some((Token::Ident(s), sp)) => (s, sp),
+                    Some((t, span)) => return Err(ParseError::Unexpected {
+                        found: t, expected: "handler arm label", span,
+                    }),
+                    None => return Err(ParseError::UnexpectedEof { expected: "handler arm label" }),
+                };
+                if !label.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+                    return Err(ParseError::HandlerArmLabelNotUpper { label, span: label_span });
+                }
+                self.expect("'('", |t| matches!(t, Token::LParen))?;
+                let arg = match self.bump() {
+                    Some((Token::Ident(s), _)) => s,
+                    Some((t, span)) => return Err(ParseError::Unexpected {
+                        found: t, expected: "identifier", span,
+                    }),
+                    None => return Err(ParseError::UnexpectedEof { expected: "identifier" }),
+                };
+                self.expect("','", |t| matches!(t, Token::Comma))?;
+                let kont = match self.bump() {
+                    Some((Token::Ident(s), _)) => s,
+                    Some((t, span)) => return Err(ParseError::Unexpected {
+                        found: t, expected: "identifier", span,
+                    }),
+                    None => return Err(ParseError::UnexpectedEof { expected: "identifier" }),
+                };
+                self.expect("')'", |t| matches!(t, Token::RParen))?;
+                self.expect("'=>'", |t| matches!(t, Token::FatArrow))?;
+                let body = Box::new(self.parse_expr()?);
+                let span = label_span.merge(body.span);
+                arms.push(crate::ast::HandlerArm {
+                    label, label_span, arg, kont, body, span,
+                });
+            }
+            if matches!(self.peek_tok(), Some(Token::Comma)) {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        self.expect("'}'", |t| matches!(t, Token::RBrace))?;
+        let close_span = self.last_span();
+        if arms.is_empty() && ret_arm.is_none() {
+            return Err(ParseError::EmptyHandler { span: start.merge(close_span) });
+        }
+        let span = start.merge(close_span);
+        Ok(expr(ExprKind::Handle { body, arms, ret_arm }, span))
     }
 
     fn parse_let(&mut self) -> Result<Expr, ParseError> {
@@ -450,6 +537,129 @@ mod tests {
             }
             other => panic!("expected let rec, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn b30_handle_parses_single_arm_no_return() {
+        let toks = crate::lexer::lex("handle e with { Get(x, k) => k }").unwrap();
+        let e = parse(&toks).unwrap();
+        match e.node {
+            ExprKind::Handle { arms, ret_arm, .. } => {
+                assert_eq!(arms.len(), 1);
+                assert_eq!(arms[0].label, "Get");
+                assert_eq!(arms[0].arg, "x");
+                assert_eq!(arms[0].kont, "k");
+                assert!(ret_arm.is_none());
+            }
+            other => panic!("expected Handle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b30_handle_parses_multiple_arms() {
+        let src = "handle e with { Get(x, k) => k, Put(s, k) => k }";
+        let toks = crate::lexer::lex(src).unwrap();
+        let e = parse(&toks).unwrap();
+        match e.node {
+            ExprKind::Handle { arms, .. } => {
+                assert_eq!(arms.len(), 2);
+                assert_eq!(arms[0].label, "Get");
+                assert_eq!(arms[1].label, "Put");
+            }
+            other => panic!("expected Handle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b30_handle_with_return_arm() {
+        let src = "handle e with { Get(x, k) => k, return v => v }";
+        let toks = crate::lexer::lex(src).unwrap();
+        let e = parse(&toks).unwrap();
+        match e.node {
+            ExprKind::Handle { arms, ret_arm, .. } => {
+                assert_eq!(arms.len(), 1);
+                let ret = ret_arm.expect("return arm");
+                assert_eq!(ret.var, "v");
+            }
+            other => panic!("expected Handle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b30_handle_return_arm_only() {
+        let src = "handle e with { return v => v }";
+        let toks = crate::lexer::lex(src).unwrap();
+        let e = parse(&toks).unwrap();
+        match e.node {
+            ExprKind::Handle { arms, ret_arm, .. } => {
+                assert!(arms.is_empty());
+                assert!(ret_arm.is_some());
+            }
+            other => panic!("expected Handle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b30_handle_trailing_comma_allowed() {
+        let src = "handle e with { Get(x, k) => k, }";
+        let toks = crate::lexer::lex(src).unwrap();
+        let e = parse(&toks).unwrap();
+        assert!(matches!(e.node, ExprKind::Handle { .. }));
+    }
+
+    #[test]
+    fn b30_handle_empty_braces_errors() {
+        let toks = crate::lexer::lex("handle e with { }").unwrap();
+        let err = parse(&toks).unwrap_err();
+        assert!(matches!(err, ParseError::EmptyHandler { .. }),
+                "expected EmptyHandler, got {err:?}");
+    }
+
+    #[test]
+    fn b30_handle_arm_label_must_be_uppercase() {
+        let toks = crate::lexer::lex("handle e with { get(x, k) => k }").unwrap();
+        let err = parse(&toks).unwrap_err();
+        match err {
+            ParseError::HandlerArmLabelNotUpper { label, .. } => {
+                assert_eq!(label, "get");
+            }
+            other => panic!("expected HandlerArmLabelNotUpper, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b30_handle_nested_in_let() {
+        let src = "let r = handle e with { Get(x, k) => k } in r";
+        let toks = crate::lexer::lex(src).unwrap();
+        let e = parse(&toks).unwrap();
+        match e.node {
+            ExprKind::Let { value, .. } => {
+                assert!(matches!(value.node, ExprKind::Handle { .. }));
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b30_handle_as_lambda_body() {
+        let src = "fn(e) => handle e with { Get(x, k) => k }";
+        let toks = crate::lexer::lex(src).unwrap();
+        let e = parse(&toks).unwrap();
+        match e.node {
+            ExprKind::Lambda { body, .. } => {
+                assert!(matches!(body.node, ExprKind::Handle { .. }));
+            }
+            other => panic!("expected Lambda, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b30_handle_span_covers_handle_through_close_brace() {
+        let src = "handle e with { Get(x, k) => k }";
+        let toks = crate::lexer::lex(src).unwrap();
+        let e = parse(&toks).unwrap();
+        assert_eq!(e.span.start, 0);
+        assert_eq!(e.span.end as usize, src.len());
     }
 
     #[test]

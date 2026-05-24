@@ -91,3 +91,17 @@ fn pipeline_perform_undeclared_label_is_unknown_effect() {
     assert!(rendered.starts_with("type error:"), "header: {rendered}");
     assert!(rendered.contains("^"), "caret: {rendered}");
 }
+
+#[test]
+fn pipeline_handle_surface_is_handlers_not_yet_supported() {
+    // B3.0: handler surface parses cleanly but inference rejects with
+    // a dedicated placeholder. B3.1 will replace this with the real
+    // typing rule (ADR 0007 D3).
+    use sentinel_effects_proto::{MiniError, TypeError};
+    let source = "handle 1 with { Get(x, k) => k }";
+    let err = run(source).expect_err("handlers not yet supported");
+    assert!(
+        matches!(err, MiniError::Type(TypeError::HandlersNotYetSupported { .. })),
+        "expected HandlersNotYetSupported, got {err:?}"
+    );
+}

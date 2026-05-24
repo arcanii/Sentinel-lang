@@ -49,6 +49,12 @@ pub enum EvalError {
     /// surface this instead of a panic.
     #[error("effect {0:?} cannot be performed yet (handlers arrive in B3)")]
     EffectNotYetSupported(String),
+    /// B3.0: `handle e with { ... }` is parseable but has no runtime
+    /// yet. B3.2 lands the operation-reification model (ADR 0007 D5);
+    /// this variant is removed at that point alongside
+    /// `EffectNotYetSupported`.
+    #[error("handlers are not yet supported at runtime (B3.2 lands eval)")]
+    HandlersNotYetSupported,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -159,6 +165,10 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
         // dedicated error instead of panicking.
         ExprKind::Perform { label, .. } => {
             Err(EvalError::EffectNotYetSupported(label.clone()))
+        }
+        // B3.0: handler surface parses but runtime arrives in B3.2.
+        ExprKind::Handle { .. } => {
+            Err(EvalError::HandlersNotYetSupported)
         }
     }
 }
@@ -287,5 +297,21 @@ mod tests {
             EvalError::EffectNotYetSupported(label) => assert_eq!(label, "Print"),
             other => panic!("expected EffectNotYetSupported, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn b30_eval_handle_directly_returns_handlers_not_yet_supported() {
+        use crate::ast::{Expr, ExprKind};
+        use crate::span::Span;
+        let body = Box::new(Expr { node: ExprKind::Int(0), span: Span::new(0, 1) });
+        let e = Expr {
+            node: ExprKind::Handle { body, arms: vec![], ret_arm: None },
+            span: Span::new(0, 1),
+        };
+        let err = eval(&e, &Env::empty()).unwrap_err();
+        assert!(
+            matches!(err, EvalError::HandlersNotYetSupported),
+            "expected HandlersNotYetSupported, got {err:?}"
+        );
     }
 }

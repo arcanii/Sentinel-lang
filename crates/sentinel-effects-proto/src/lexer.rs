@@ -62,6 +62,11 @@ pub enum Token {
     LParen,
     #[token(")")]
     RParen,
+    // B3.0: braces for `handle e with { ... }`.
+    #[token("{")]
+    LBrace,
+    #[token("}")]
+    RBrace,
     #[token(",")]
     Comma,
     #[token("=>")]
@@ -77,6 +82,13 @@ pub enum Token {
     Effect,
     #[token("do")]
     Do,
+    // B3.0: handler-surface keywords.
+    #[token("handle")]
+    Handle,
+    #[token("with")]
+    With,
+    #[token("return")]
+    Return,
 }
 
 /// Errors produced by [`lex`].
@@ -257,6 +269,18 @@ mod tests {
             Token::Ident("Bool".into()),
             Token::Semicolon,
         ]);
+    }
+
+    #[test]
+    fn b30_lex_handle_with_return_keywords() {
+        let toks = lex("handle e with { return v => v }").unwrap();
+        let kinds: Vec<&Token> = toks.iter().map(|(t, _)| t).collect();
+        assert!(matches!(kinds[0], Token::Handle));
+        assert!(matches!(kinds[1], Token::Ident(s) if s == "e"));
+        assert!(matches!(kinds[2], Token::With));
+        assert!(matches!(kinds[4], Token::Return));
+        assert!(matches!(kinds[5], Token::Ident(s) if s == "v"));
+        assert!(matches!(kinds[6], Token::FatArrow));
     }
 
     #[test]
