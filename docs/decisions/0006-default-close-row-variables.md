@@ -190,3 +190,32 @@ at the policy site.
   2014. (Koka's default-close behavior for unconstrained ambient rows.)
 - GHC user's guide, "Defaulting." (Haskell's analogous defaulting for
   ambiguous type-class variables; same pattern.)
+
+## Amendment (2026-05-24, B2.3b1 implementation)
+
+D1 originally specified default-close only on the returned `Ty` at
+`infer_top` / `infer_program`. Implementation revealed a second
+locus where unconstrained row variables surface: **row contributions
+returned by `infer`**. Whenever `App` unifies a callee of type
+`Ty::Var(_)` against `arrow_with(t_arg, ρ_call, result)` -- which
+happens for every recursive call and every higher-order parameter
+application -- `ρ_call` ends up free in the App's row contribution.
+
+Extended rule: a free `Row::Var` in a *contribution* (the third
+component of `infer`'s return tuple, and the operands of
+`row_union`) is treated as `Row::Empty`. Concretely:
+
+1. `infer_top` calls `.close()` on the resolved residual row before
+   the strict `UnhandledEffects` check (so unconstrained ρ_call
+   never trips the check).
+2. `row_union` / `cons_onto` / `cons_or_unify` treat `Row::Var`
+   operands as `Row::Empty` rather than `unreachable!`.
+
+This preserves D4 (row polymorphism inside let-bindings is
+unaffected; the change only touches contributions, never types
+inside `Scheme`s). It also sharpens what the strict residual-row
+check actually catches: declared effects (Cons-chains terminating
+in Empty) that escaped a handler, never unsolved row variables.
+
+B3 revisits when handlers bind row variables that *must* propagate
+to caller contributions.

@@ -11,11 +11,11 @@ research-grade interpreter (effects-proto). They are tracked in
 separate sections below. The remaining workspace members listed in
 HANDOVER §3.2 are scaffold-only.
 
-Last updated: phase B2.3a landed (effect-inference judgment
-refactor; infer returns (Subst, Ty, Row) and threads EffectEnv,
-all arms still produce Row::Empty). See ADRs 0003 (B1
-retrospective), 0004 (row representation), 0005 (effect-inference
-judgment).
+Last updated: phase B2.3b1 landed (row mechanics; Lambda mints
+fresh ρ; App unifies callee against arrow_with; default-close
+extended to row contributions). See ADRs 0003 (B1 retrospective),
+0004 (row representation), 0005 (effect-inference judgment), 0006
+(default-close, amended).
 
 ---
 
@@ -223,6 +223,7 @@ absorbed.
 | B2.2a | Effect-surface lexer/AST/parser                    | Done   | a3fd3cc |
 | B2.2b | Wire Perform through pipeline as type error        | Done   | 62405f2 |
 | B2.3a | Effect-inference judgment refactor (no semantics)  | Done   | fd8eef6 |
+| B2.3b1 | Row mechanics (Lambda mints ρ, App via arrow_with); default-close residual rows | Done   | f2a17d9 |
 | B2    | Effect rows and effect declarations                | In progress |   |
 | B3    | Effect handlers (handle .. with ..)                | Planned |        |
 | B4    | Secret T qualifier and constant-time check         | Planned |        |
@@ -461,6 +462,22 @@ crate root in B1.
     would be genuinely dead (never constructed) in B2.3a. Commit
     fd8eef6.
 
+17. (B2.3b1, ADR 0005 D2 + ADR 0006 amended) Row mechanics landed
+    behavior-extending: `Lambda` mints fresh `ρ` and embeds it in
+    the arrow via `Ty::arrow_with`; the lambda's own row
+    contribution stays `Row::Empty`. `App` mints `ρ_call`, unifies
+    callee against `arrow_with(t_arg, ρ_call, result)`, and unions
+    `r_callee`, `r_arg`, and resolved `ρ_call` into its
+    contribution. `Let`, `LetRec`, `If`, `BinOp` union
+    subexpression contributions. `Perform` still rejects with
+    `EffectNotYetSupported` (B2.3b2 wires it). Default-close (ADR
+    0006 D1) extended: `Row::Var` in *contributions* is treated as
+    `Row::Empty` (in `row_union` and at `infer_top`'s residual
+    check), because `App` legitimately produces free `ρ_call`s
+    whenever the callee is a `Ty::Var` (recursive calls,
+    higher-order parameters). Net +7 tests (one earlier B2.3b1
+    test with a wrong premise was deleted). Commit f2a17d9.
+
 ### B.6 Known Limitations (intentional at B1)
 
 - No effects. The whole reason this crate exists. (B2 onward.)
@@ -506,7 +523,7 @@ The standard check suite for a clean tree, applied per-crate:
 All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
-  - sentinel-effects-proto: 134 tests (126 lib + 8 integration) + 0 doctests
+  - sentinel-effects-proto: 141 tests (133 lib + 8 integration) + 0 doctests
 
 ### Script Convention
 
