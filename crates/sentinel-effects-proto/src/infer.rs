@@ -25,6 +25,10 @@ pub enum TypeError {
     OccursCheck { var: TyVar, ty: Ty, span: Span },
     #[error("unbound variable: {name}")]
     Unbound { name: String, span: Span },
+    #[error("row mismatch: expected {expected}, found {found}")]
+    RowMismatch { expected: Row, found: Row, span: Span },
+    #[error("row occurs check failed: {var} appears in {row}")]
+    RowOccursCheck { var: RowVar, row: Row, span: Span },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -156,20 +160,27 @@ fn bind(v: TyVar, t: &Ty, span: Span, s: &Subst) -> Result<Subst, TypeError> {
     Ok(Subst::singleton(v, t_resolved))
 }
 
-pub fn unify(s: &Subst, a: &Ty, b: &Ty, span: Span) -> Result<Subst, TypeError> {
+pub fn unify(
+    s: &Subst,
+    a: &Ty,
+    b: &Ty,
+    span: Span,
+    supply: &mut TyVarSupply,
+) -> Result<Subst, TypeError> {
     let a = s.apply(a);
     let b = s.apply(b);
     match (a, b) {
         (Ty::Int, Ty::Int) => Ok(s.clone()),
         (Ty::Bool, Ty::Bool) => Ok(s.clone()),
         (Ty::Var(v), t) | (t, Ty::Var(v)) => {
+            let _ = supply;
             let extension = bind(v, &t, span, s)?;
             Ok(extension.compose(s))
         }
         (Ty::Fun(a1, r1, b1), Ty::Fun(a2, r2, b2)) => {
-            let s1 = unify(s, &a1, &a2, span)?;
-            let s2 = unify(&s1, &b1, &b2, span)?;
-            unify_row(&s2, &r1, &r2, span)
+            let s1 = unify(s, &a1, &a2, span, supply)?;
+            let s2 = unify(&s1, &b1, &b2, span, supply)?;
+            unify_row(&s2, &r1, &r2, span, supply)
         }
         (expected, found) => Err(TypeError::Mismatch { expected, found, span }),
     }
@@ -177,21 +188,128 @@ pub fn unify(s: &Subst, a: &Ty, b: &Ty, span: Span) -> Result<Subst, TypeError> 
 
 /// Unify two effect rows.
 ///
-/// B2.0 stub: only handles the empty-vs-empty case (the only case the
-/// inferer produces). Every other arm is `unreachable!("B2.1")` and
-/// will be filled in by B2.1's Rémy-style row unifier. The presence of
-/// this function ensures the call shape in `unify`'s `Fun, Fun` arm is
-/// stable across B2.0/B2.1, so B2.1 is a localised change.
-pub fn unify_row(s: &Subst, a: &Row, b: &Row, _span: Span) -> Result<Subst, TypeError> {
+/// B2.1: full Remy/Leijen rewriting algorithm.
+///
+/// The interesting case is `(Cons l1 .., Cons l2 ..)` with `l1 != l2`:
+/// we search for `l1` inside the second row's tail (via `rewrite_row`),
+/// unify the signature, and unify what's left of each side. The search
+/// can extend a trailing row variable by minting a fresh row var, which
+/// is why this function needs the supply.
+pub fn unify_row(
+    s: &Subst,
+    a: &Row,
+    b: &Row,
+    span: Span,
+    supply: &mut TyVarSupply,
+) -> Result<Subst, TypeError> {
     let a = s.apply_row(a);
     let b = s.apply_row(b);
     match (a, b) {
         (Row::Empty, Row::Empty) => Ok(s.clone()),
-        // Anything else cannot arise in B2.0: the inferer never mints
-        // a Row::Var or Row::Cons. B2.1 will replace these arms.
-        _ => unreachable!("B2.1: non-empty row unification not yet implemented"),
+
+        (Row::Var(v), other) | (other, Row::Var(v)) => {
+            if let Row::Var(v2) = &other {
+                if *v2 == v {
+                    return Ok(s.clone());
+                }
+            }
+            if row_occurs(v, &other, s) {
+                return Err(TypeError::RowOccursCheck { var: v, row: other, span });
+            }
+            let ext = Subst::singleton_row(v, other);
+            Ok(ext.compose(s))
+        }
+
+        (Row::Cons { label: l1, arg: a1, ret: r1, tail: t1 },
+         Row::Cons { label: l2, arg: a2, ret: r2, tail: t2 }) => {
+            if l1 == l2 {
+                let s1 = unify(s, &a1, &a2, span, supply)?;
+                let s2 = unify(&s1, &r1, &r2, span, supply)?;
+                unify_row(&s2, &t1, &t2, span, supply)
+            } else {
+                let rhs_full = Row::Cons {
+                    label: l2,
+                    arg: a2,
+                    ret: r2,
+                    tail: t2,
+                };
+                let (rhs_remaining, s1) =
+                    rewrite_row(&l1, &a1, &r1, &rhs_full, span, s, supply)?;
+                unify_row(&s1, &t1, &rhs_remaining, span, supply)
+            }
+        }
+
+        (a, b) => Err(TypeError::RowMismatch { expected: a, found: b, span }),
     }
 }
+
+fn rewrite_row(
+    label: &str,
+    arg: &Ty,
+    ret: &Ty,
+    row: &Row,
+    span: Span,
+    s: &Subst,
+    supply: &mut TyVarSupply,
+) -> Result<(Row, Subst), TypeError> {
+    match row {
+        Row::Empty => Err(TypeError::RowMismatch {
+            expected: Row::Cons {
+                label: label.to_string(),
+                arg: Box::new(arg.clone()),
+                ret: Box::new(ret.clone()),
+                tail: Box::new(Row::Empty),
+            },
+            found: Row::Empty,
+            span,
+        }),
+        Row::Var(v) => {
+            let fresh = supply.fresh_row_var();
+            let extended = Row::Cons {
+                label: label.to_string(),
+                arg: Box::new(arg.clone()),
+                ret: Box::new(ret.clone()),
+                tail: Box::new(Row::Var(fresh)),
+            };
+            if row_occurs(*v, &extended, s) {
+                return Err(TypeError::RowOccursCheck {
+                    var: *v,
+                    row: extended,
+                    span,
+                });
+            }
+            let ext = Subst::singleton_row(*v, extended);
+            let s1 = ext.compose(s);
+            Ok((Row::Var(fresh), s1))
+        }
+        Row::Cons { label: l, arg: a, ret: r, tail: t } => {
+            if label == l.as_str() {
+                let s1 = unify(s, arg, a, span, supply)?;
+                let s2 = unify(&s1, ret, r, span, supply)?;
+                Ok(((**t).clone(), s2))
+            } else {
+                let (rest_tail, s1) =
+                    rewrite_row(label, arg, ret, t, span, s, supply)?;
+                let reconstructed = Row::Cons {
+                    label: l.clone(),
+                    arg: a.clone(),
+                    ret: r.clone(),
+                    tail: Box::new(rest_tail),
+                };
+                Ok((reconstructed, s1))
+            }
+        }
+    }
+}
+
+fn row_occurs(v: RowVar, row: &Row, s: &Subst) -> bool {
+    let resolved = s.apply_row(row);
+    let mut acc = std::collections::BTreeSet::new();
+    resolved.collect_free_row_vars(&mut acc);
+    acc.contains(&v)
+}
+
+
 
 pub fn instantiate(scheme: &Scheme, supply: &mut TyVarSupply) -> Ty {
     if scheme.vars.is_empty() { return scheme.ty.clone(); }
@@ -264,7 +382,7 @@ pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
             let t_callee_subst = s2.apply(&t_callee);
             // B2.0: callee's row is empty; B2.3 unifies with ambient row.
             let s3 = unify(&Subst::empty(), &t_callee_subst,
-                &Ty::arrow(t_arg, result_var.clone()), expr.span)?;
+                &Ty::arrow(t_arg, result_var.clone()), expr.span, supply)?;
             let combined = s3.compose(&s2).compose(&s1);
             let result_ty = combined.apply(&result_var);
             Ok((combined, result_ty))
@@ -287,7 +405,7 @@ pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
                 env.extend(name.clone(), Scheme::mono(t_name.clone()));
             let (s1, t_value) = infer(&env_for_value, value, supply)?;
             // Unify the recursive monovar with the inferred RHS type.
-            let s2 = unify(&s1, &t_name, &t_value, expr.span)?;
+            let s2 = unify(&s1, &t_name, &t_value, expr.span, supply)?;
             // Generalize against the *outer* env (not env_for_value),
             // so the recursive binding itself does not appear in the
             // free-var set we generalize over.
@@ -300,14 +418,14 @@ pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
         }
         ExprKind::If { cond, then_branch, else_branch } => {
             let (s1, t_cond) = infer(env, cond, supply)?;
-            let s2 = unify(&s1, &t_cond, &Ty::Bool, cond.span)?;
+            let s2 = unify(&s1, &t_cond, &Ty::Bool, cond.span, supply)?;
             let env_after = env.apply(&s2);
             let (s3, t_then) = infer(&env_after, then_branch, supply)?;
             let s3 = s3.compose(&s2);
             let env_after = env.apply(&s3);
             let (s4, t_else) = infer(&env_after, else_branch, supply)?;
             let s4 = s4.compose(&s3);
-            let s5 = unify(&s4, &t_then, &t_else, expr.span)?;
+            let s5 = unify(&s4, &t_then, &t_else, expr.span, supply)?;
             let ty = s5.apply(&t_then);
             Ok((s5, ty))
         }
@@ -317,12 +435,12 @@ pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
             let (s2, t_rhs) = infer(&env_after, rhs, supply)?;
             let s2 = s2.compose(&s1);
             if matches!(op, BinOp::Eq) {
-                let s3 = unify(&s2, &t_lhs, &t_rhs, expr.span)?;
+                let s3 = unify(&s2, &t_lhs, &t_rhs, expr.span, supply)?;
                 Ok((s3, Ty::Bool))
             } else {
                 let (expected_lhs, expected_rhs, result_ty) = binop_signature(*op);
-                let s3 = unify(&s2, &t_lhs, &expected_lhs, lhs.span)?;
-                let s4 = unify(&s3, &t_rhs, &expected_rhs, rhs.span)?;
+                let s3 = unify(&s2, &t_lhs, &expected_lhs, lhs.span, supply)?;
+                let s4 = unify(&s3, &t_rhs, &expected_rhs, rhs.span, supply)?;
                 Ok((s4, result_ty))
             }
         }
@@ -351,6 +469,23 @@ mod tests {
 
     fn sp() -> Span { Span::new(0, 0) }
     fn v(n: u32) -> Ty { Ty::Var(TyVar(n)) }
+    fn rv(n: u32) -> Row { Row::Var(RowVar(n)) }
+    fn cons(label: &str, arg: Ty, ret: Ty, tail: Row) -> Row {
+        Row::Cons {
+            label: label.to_string(),
+            arg: Box::new(arg),
+            ret: Box::new(ret),
+            tail: Box::new(tail),
+        }
+    }
+    fn unify_t(a: &Ty, b: &Ty) -> Result<Subst, TypeError> {
+        let mut supply = TyVarSupply::new();
+        unify(&Subst::empty(), a, b, sp(), &mut supply)
+    }
+    fn unify_r(a: &Row, b: &Row) -> Result<Subst, TypeError> {
+        let mut supply = TyVarSupply::new();
+        unify_row(&Subst::empty(), a, b, sp(), &mut supply)
+    }
 
     fn ty_of(src: &str) -> Ty {
         let toks = lex(src).expect("lex");
@@ -407,25 +542,25 @@ mod tests {
 
     #[test]
     fn unify_two_concretes_succeeds_trivially() {
-        let s = unify(&Subst::empty(), &Ty::Int, &Ty::Int, sp()).unwrap();
+        let s = unify_t(&Ty::Int, &Ty::Int).unwrap();
         assert!(s.is_empty());
     }
 
     #[test]
     fn unify_concrete_mismatch_is_an_error() {
-        let err = unify(&Subst::empty(), &Ty::Int, &Ty::Bool, sp()).unwrap_err();
+        let err = unify_t(&Ty::Int, &Ty::Bool).unwrap_err();
         assert!(matches!(err, TypeError::Mismatch { .. }));
     }
 
     #[test]
     fn unify_var_binds() {
-        let s = unify(&Subst::empty(), &v(0), &Ty::Int, sp()).unwrap();
+        let s = unify_t(&v(0), &Ty::Int).unwrap();
         assert_eq!(s.apply(&v(0)), Ty::Int);
     }
 
     #[test]
     fn unify_var_with_itself_yields_empty_extension() {
-        let s = unify(&Subst::empty(), &v(0), &v(0), sp()).unwrap();
+        let s = unify_t(&v(0), &v(0)).unwrap();
         assert!(s.is_empty());
     }
 
@@ -433,7 +568,7 @@ mod tests {
     fn unify_arrows_recursively() {
         let left = Ty::arrow(v(0), v(1));
         let right = Ty::arrow(Ty::Int, Ty::Bool);
-        let s = unify(&Subst::empty(), &left, &right, sp()).unwrap();
+        let s = unify_t(&left, &right).unwrap();
         assert_eq!(s.apply(&v(0)), Ty::Int);
         assert_eq!(s.apply(&v(1)), Ty::Bool);
     }
@@ -442,21 +577,20 @@ mod tests {
     fn unify_propagates_constraints_across_arms() {
         let left = Ty::arrow(v(0), v(0));
         let right = Ty::arrow(Ty::Int, v(1));
-        let s = unify(&Subst::empty(), &left, &right, sp()).unwrap();
+        let s = unify_t(&left, &right).unwrap();
         assert_eq!(s.apply(&v(0)), Ty::Int);
         assert_eq!(s.apply(&v(1)), Ty::Int);
     }
 
     #[test]
     fn unify_arrow_with_concrete_is_mismatch() {
-        let err = unify(&Subst::empty(),
-            &Ty::arrow(Ty::Int, Ty::Int), &Ty::Bool, sp()).unwrap_err();
+        let err = unify_t(&Ty::arrow(Ty::Int, Ty::Int), &Ty::Bool).unwrap_err();
         assert!(matches!(err, TypeError::Mismatch { .. }));
     }
 
     #[test]
     fn occurs_check_rejects_self_application() {
-        let err = unify(&Subst::empty(), &v(0), &Ty::arrow(v(0), v(1)), sp()).unwrap_err();
+        let err = unify_t(&v(0), &Ty::arrow(v(0), v(1))).unwrap_err();
         match err {
             TypeError::OccursCheck { var, .. } => assert_eq!(var, TyVar(0)),
             other => panic!("expected OccursCheck, got {other:?}"),
@@ -466,7 +600,8 @@ mod tests {
     #[test]
     fn occurs_check_indirect_through_subst() {
         let s = Subst::singleton(TyVar(1), Ty::arrow(v(0), v(2)));
-        let err = unify(&s, &v(0), &v(1), sp()).unwrap_err();
+        let mut supply = TyVarSupply::new();
+        let err = unify(&s, &v(0), &v(1), sp(), &mut supply).unwrap_err();
         assert!(matches!(err, TypeError::OccursCheck { .. }));
     }
 
@@ -612,6 +747,126 @@ mod tests {
     fn letrec_application_typechecks_at_int() {
         let src = "let rec fact = fn(n) => if n == 0 then 1 else n * fact(n - 1) in fact(5)";
         assert_eq!(ty_of(src), Ty::Int);
+    }
+
+    // ---------- B2.1 row unification ----------
+
+    #[test]
+    fn b21_unify_row_empty_empty_succeeds() {
+        let s = unify_r(&Row::Empty, &Row::Empty).unwrap();
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn b21_unify_row_var_with_empty_binds() {
+        let s = unify_r(&rv(0), &Row::Empty).unwrap();
+        assert_eq!(s.apply_row(&rv(0)), Row::Empty);
+    }
+
+    #[test]
+    fn b21_unify_row_empty_with_var_binds() {
+        let s = unify_r(&Row::Empty, &rv(0)).unwrap();
+        assert_eq!(s.apply_row(&rv(0)), Row::Empty);
+    }
+
+    #[test]
+    fn b21_unify_row_same_label_same_signature_recurses() {
+        let a = cons("Print", Ty::Int, Ty::Bool, Row::Empty);
+        let b = cons("Print", Ty::Int, Ty::Bool, Row::Empty);
+        let s = unify_r(&a, &b).unwrap();
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn b21_unify_row_same_label_different_arg_is_type_mismatch() {
+        let a = cons("Print", Ty::Int, Ty::Bool, Row::Empty);
+        let b = cons("Print", Ty::Bool, Ty::Bool, Row::Empty);
+        let err = unify_r(&a, &b).unwrap_err();
+        match err {
+            TypeError::Mismatch { .. } => {}
+            other => panic!("expected Mismatch on arg type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b21_unify_row_different_labels_swaps_and_unifies() {
+        // High-numbered ids dodge supply collision (see note on
+        // b21_unify_row_disjoint_with_open_tails_succeeds).
+        let a = cons("Print", Ty::Int, Ty::Bool,
+                cons("Ask", Ty::Int, Ty::Int, rv(100)));
+        let b = cons("Ask", Ty::Int, Ty::Int,
+                cons("Print", Ty::Int, Ty::Bool, rv(101)));
+        let s = unify_r(&a, &b).expect("rows with permuted labels should unify");
+        let ra = s.apply_row(&rv(100));
+        let rb = s.apply_row(&rv(101));
+        assert_eq!(ra, rb, "tails should resolve identically: {ra:?} vs {rb:?}");
+    }
+
+    #[test]
+    fn b21_unify_row_var_occurs_in_self_is_error() {
+        let a = rv(0);
+        let b = cons("Print", Ty::Int, Ty::Bool, rv(0));
+        let err = unify_r(&a, &b).unwrap_err();
+        match err {
+            TypeError::RowOccursCheck { var, .. } => assert_eq!(var, RowVar(0)),
+            other => panic!("expected RowOccursCheck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b21_unify_row_var_occurs_in_cons_tail_is_error() {
+        let a = rv(0);
+        let b = cons("Print", Ty::Int, Ty::Bool,
+                cons("Ask", Ty::Int, Ty::Int, rv(0)));
+        let err = unify_r(&a, &b).unwrap_err();
+        assert!(matches!(err, TypeError::RowOccursCheck { .. }));
+    }
+
+    #[test]
+    fn b21_unify_row_disjoint_with_open_tails_succeeds() {
+        // Use high-numbered row-vars to dodge collision with the
+        // supply's fresh_row_var(), which starts at 0. Real inference
+        // never hits this because the supply is shared across the
+        // whole tree; unit tests have to dodge it manually.
+        let a = cons("Print", Ty::Int, Ty::Bool, rv(100));
+        let b = cons("Ask", Ty::Int, Ty::Int, rv(101));
+        let s = unify_r(&a, &b).expect("disjoint open rows should unify");
+        let r100 = s.apply_row(&rv(100));
+        let mut labels = Vec::new();
+        let mut cur = &r100;
+        while let Row::Cons { label, tail, .. } = cur {
+            labels.push(label.clone());
+            cur = tail.as_ref();
+        }
+        assert!(labels.contains(&"Ask".to_string()),
+            "r100 should resolve to a row including Ask; got labels {labels:?}");
+    }
+
+    #[test]
+    fn b21_unify_row_label_missing_from_closed_row_is_error() {
+        let a = cons("Print", Ty::Int, Ty::Bool, rv(0));
+        let b = Row::Empty;
+        let err = unify_r(&a, &b).unwrap_err();
+        assert!(matches!(err, TypeError::RowMismatch { .. }));
+    }
+
+    #[test]
+    fn b21_row_display_var_renders_curly_brace_form() {
+        let r = rv(0);
+        assert_eq!(format!("{r}"), "{'ra}");
+    }
+
+    #[test]
+    fn b21_row_display_cons_with_var_tail_renders_pipe() {
+        let r = cons("Print", Ty::Int, Ty::Bool, rv(0));
+        assert_eq!(format!("{r}"), "{Print | 'ra}");
+    }
+
+    #[test]
+    fn b21_row_display_cons_chain_uses_commas() {
+        let r = cons("Print", Ty::Int, Ty::Bool,
+                cons("Ask", Ty::Int, Ty::Int, Row::Empty));
+        assert_eq!(format!("{r}"), "{Print, Ask}");
     }
 
     // ----- B1.6 let-rec typing tests -----

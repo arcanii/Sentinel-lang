@@ -98,6 +98,8 @@ impl MiniError {
                     TypeError::Mismatch { span, .. } => Some(*span),
                     TypeError::OccursCheck { span, .. } => Some(*span),
                     TypeError::Unbound { span, .. } => Some(*span),
+                    TypeError::RowMismatch { span, .. } => Some(*span),
+                    TypeError::RowOccursCheck { span, .. } => Some(*span),
                 };
                 render(source, span, "type error", &e.to_string())
             }
