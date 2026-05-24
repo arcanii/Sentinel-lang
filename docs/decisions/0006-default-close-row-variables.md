@@ -85,12 +85,18 @@ fresh row vars for each quantified ρ. Default-close runs only at
 `infer_top` / `infer_program`, *not* inside `instantiate` or
 `generalize` -- so row polymorphism inside a program is preserved.
 
-Concretely: the test
-`b23b_let_row_polymorphism` (if added in B2.3b2) checks that
-`let f = fn(x) => x in let g = fn(x) => x in 1` types to `Int` even
-though `f` and `g` each have row-polymorphic schemes. Default-close
-only affects what the *outermost* `infer_top` returns to the caller,
-which in this case is just `Int` -- no row vars to close.
+Concretely: as landed in B2.3b2-b (47cc5a1), the tests
+`b23b2b_let_bound_identity_polymorphic_at_two_types` and
+`b23b2b_let_bound_lambda_used_under_perform` check that let-bound
+lambdas retain row-polymorphic schemes and are usable at distinct
+call sites, including inside effectful contexts, while
+`infer_top`/`infer_program` continue to return cleanly closed
+types. `generalize` quantifies free row vars in the *type*
+(minus env-free row vars) into `Scheme.row_vars`; row
+*contributions* are excluded from generalization because they
+describe latent effect, not scheme. Default-close at the top
+level operates on what `infer` returned to the caller and is
+oblivious to internal row polymorphism inside schemes.
 
 ### D5: Default-close is a `Ty` method, not a `Subst` operation
 
@@ -219,3 +225,28 @@ in Empty) that escaped a handler, never unsolved row variables.
 
 B3 revisits when handlers bind row variables that *must* propagate
 to caller contributions.
+
+## Amendment (2026-05-24, B2.3b2 implementation)
+
+D4 (row polymorphism inside let-bindings) is now implemented and
+coexists with the default-close presentation layer without
+interference. `TypeEnv::free_row_vars()` mirrors `free_vars()`;
+`generalize` accepts `env_free_rows: &BTreeSet<RowVar>` and
+populates `Scheme.row_vars`; `instantiate` freshens row vars via
+`supply.fresh_row_var()` and composes `Subst::singleton_row` per
+quantified row. Default-close at `infer_top` / `infer_program`
+walks the *returned* type only and never inspects schemes inside
+the type environment, so internal row polymorphism is preserved
+across let-binding boundaries.
+
+Design note (B2.3b2 split decision 18): row *contributions* are
+intentionally excluded from `generalize`. A contribution describes
+the RHS's latent effect (the row union of its subexpressions and
+any `Perform` it contains); quantifying over those row vars would
+make every effectful let-binding look effectful from the outside,
+which would either (a) force `infer_program` to abandon its
+permissive D6 policy or (b) require a second presentation pass to
+erase the just-introduced quantifiers. Cleaner: keep
+contributions as latent-effect information for the *caller* of
+`infer` to consume (or discard, at top level), and generalize
+only over the type itself.

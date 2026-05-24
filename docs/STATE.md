@@ -11,11 +11,12 @@ research-grade interpreter (effects-proto). They are tracked in
 separate sections below. The remaining workspace members listed in
 HANDOVER §3.2 are scaffold-only.
 
-Last updated: phase B2.3b1 landed (row mechanics; Lambda mints
-fresh ρ; App unifies callee against arrow_with; default-close
-extended to row contributions). See ADRs 0003 (B1 retrospective),
-0004 (row representation), 0005 (effect-inference judgment), 0006
-(default-close, amended).
+Last updated: phase B2.3b2 landed (Perform fully wired through
+effect environment; row generalization in Scheme; UnknownEffect
+type error; placeholder EffectNotYetSupported retired from
+TypeError). See ADRs 0003 (B1 retrospective), 0004 (row
+representation), 0005 (effect-inference judgment; D9 closed), 0006
+(default-close, amended; D4 row polymorphism now implemented).
 
 ---
 
@@ -224,6 +225,8 @@ absorbed.
 | B2.2b | Wire Perform through pipeline as type error        | Done   | 62405f2 |
 | B2.3a | Effect-inference judgment refactor (no semantics)  | Done   | fd8eef6 |
 | B2.3b1 | Row mechanics (Lambda mints ρ, App via arrow_with); default-close residual rows | Done   | f2a17d9 |
+| B2.3b2-a | Perform inference + UnknownEffect; eff_env from prog.effects | Done   | 4c69ed7 |
+| B2.3b2-b | Row generalization in Scheme; instantiate freshens row vars; drop EffectNotYetSupported | Done   | 47cc5a1 |
 | B2    | Effect rows and effect declarations                | In progress |   |
 | B3    | Effect handlers (handle .. with ..)                | Planned |        |
 | B4    | Secret T qualifier and constant-time check         | Planned |        |
@@ -478,6 +481,31 @@ crate root in B1.
     higher-order parameters). Net +7 tests (one earlier B2.3b1
     test with a wrong premise was deleted). Commit f2a17d9.
 
+18. (B2.3b2, ADR 0005 D9 closed) Perform inference + row
+    generalization landed as a two-commit split. **b2.3b2-a**
+    (4c69ed7) wires `do Label(arg)` through the effect environment:
+    `infer_program` populates `EffectEnv` from `prog.effects`; the
+    `Perform` arm looks up the label, infers and unifies the arg
+    against the declared arg type, and contributes a closed
+    single-label `Cons` row union'd with the arg's row. Unknown
+    labels surface as a new `TypeError::UnknownEffect { label,
+    span }` targeting the label token. **b2.3b2-b** (47cc5a1)
+    extends `generalize` to quantify free row variables in the
+    type (minus those free in the env) into `Scheme.row_vars`;
+    `instantiate` freshens them via `fresh_row_var`. Row
+    *contributions* are intentionally excluded from generalization
+    — they describe the RHS's latent effect, not its binding
+    scheme; conflating them would make every let-binding look
+    effectful from the outside, breaking the default-close
+    presentation contract (ADR 0006 D3). The placeholder
+    `TypeError::EffectNotYetSupported` is removed entirely now
+    that `Perform` is fully typed; `EvalError::EffectNotYetSupported`
+    stays until B3 handlers land. Split rationale: semantics
+    first, generalization second, each independently bisectable
+    and each under ~300 LOC. Net +14 tests (10 b23b2_* unit + 5
+    b23b2b_* unit + 2 integration − 2 obsolete b22b_perform_*
+    rewritten − 1 integration test repurposed).
+
 ### B.6 Known Limitations (intentional at B1)
 
 - No effects. The whole reason this crate exists. (B2 onward.)
@@ -523,7 +551,7 @@ The standard check suite for a clean tree, applied per-crate:
 All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
-  - sentinel-effects-proto: 141 tests (133 lib + 8 integration) + 0 doctests
+  - sentinel-effects-proto: 155 tests (146 lib + 9 integration) + 0 doctests
 
 ### Script Convention
 

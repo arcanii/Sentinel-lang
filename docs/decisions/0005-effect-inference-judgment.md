@@ -135,7 +135,7 @@ about here: declared types in B2.3 are first-order, effect-free on their interna
 Higher-order effectful signatures (e.g., `effect Map : (Int -> {ε} Int) -> List -> List`)
 require surface row syntax that B2.3 does not introduce. Pushed to B?.
 
-### D9: Phase split — B2.3a refactor, B2.3b semantics
+### D9: Phase split — B2.3a refactor, B2.3b semantics (LANDED)
 
 **B2.3a (refactor, behavior-identical):**
 
