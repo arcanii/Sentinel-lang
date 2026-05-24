@@ -37,8 +37,8 @@ pub mod types;
 pub use ast::{expr, BinOp, EffectDecl, Expr, ExprKind, Program, TyExpr};
 pub use eval::{eval, Env, EvalError, Value};
 pub use infer::{
-    generalize, infer, infer_program, infer_top, instantiate, unify, Subst, TyVarSupply,
-    TypeEnv, TypeError,
+    generalize, infer, infer_program, infer_top, instantiate, unify, EffectEnv, Subst,
+    TyVarSupply, TypeEnv, TypeError,
 };
 pub use lexer::{lex, LexError, Token};
 pub use parser::{parse, parse_program, ParseError};
@@ -107,6 +107,7 @@ impl MiniError {
                     TypeError::RowMismatch { span, .. } => Some(*span),
                     TypeError::RowOccursCheck { span, .. } => Some(*span),
                     TypeError::EffectNotYetSupported { span, .. } => Some(*span),
+                    TypeError::UnhandledEffects { span, .. } => Some(*span),
                 };
                 render(source, span, "type error", &e.to_string())
             }

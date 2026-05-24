@@ -252,12 +252,16 @@ impl fmt::Display for Ty {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scheme {
     pub vars: Vec<TyVar>,
+    /// B2.3a (ADR 0005 D5): row variables quantified by this scheme.
+    /// Empty in B2.3a — `Scheme::mono` and existing call sites leave it
+    /// empty; B2.3b extends `generalize`/`instantiate` to populate it.
+    pub row_vars: Vec<RowVar>,
     pub ty: Ty,
 }
 
 impl Scheme {
     pub fn mono(ty: Ty) -> Self {
-        Scheme { vars: Vec::new(), ty }
+        Scheme { vars: Vec::new(), row_vars: Vec::new(), ty }
     }
 
     pub fn free_vars(&self) -> BTreeSet<TyVar> {
@@ -269,20 +273,28 @@ impl Scheme {
     }
 
     pub fn free_row_vars(&self) -> BTreeSet<RowVar> {
-        // B2.0: Scheme does not quantify row vars, so all row vars
-        // in ty are free.
-        self.ty.free_row_vars()
+        // B2.3a: Scheme now carries `row_vars` (empty in 2.3a; B2.3b
+        // populates them via `generalize`). Subtract quantified row
+        // vars to match the existing `free_vars` shape.
+        let mut fvs = self.ty.free_row_vars();
+        for rv in &self.row_vars {
+            fvs.remove(rv);
+        }
+        fvs
     }
 }
 
 impl fmt::Display for Scheme {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.vars.is_empty() {
+        if self.vars.is_empty() && self.row_vars.is_empty() {
             write!(f, "{}", self.ty)
         } else {
             write!(f, "forall")?;
             for v in &self.vars {
                 write!(f, " {v}")?;
+            }
+            for rv in &self.row_vars {
+                write!(f, " {rv}")?;
             }
             write!(f, ". {}", self.ty)
         }
@@ -323,6 +335,7 @@ mod tests {
     fn scheme_free_vars_subtracts_quantifiers() {
         let s = Scheme {
             vars: vec![TyVar(0)],
+            row_vars: Vec::new(),
             ty: Ty::arrow(v(0), v(1)),
         };
         let fvs = s.free_vars();
@@ -352,6 +365,7 @@ mod tests {
     fn scheme_display_includes_forall() {
         let s = Scheme {
             vars: vec![TyVar(0), TyVar(1)],
+            row_vars: Vec::new(),
             ty: Ty::arrow(v(0), v(1)),
         };
         assert_eq!(format!("{s}"), "forall 'a 'b. 'a -> 'b");

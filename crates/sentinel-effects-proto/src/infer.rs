@@ -34,6 +34,12 @@ pub enum TypeError {
     /// B3 (handlers).
     #[error("effect {label:?} cannot be performed yet (effect inference arrives in B2.3, handlers in B3)")]
     EffectNotYetSupported { label: String, span: Span },
+    /// B2.3a (ADR 0005 D6): residual non-empty row at `infer_top`.
+    /// Variant + strict-check landed inert in B2.3a per the divergence
+    /// note in ADR 0005 D9; B2.3b makes the check reachable when
+    /// Lambda/Perform start populating the row.
+    #[error("unhandled effects: residual row {row} at top level")]
+    UnhandledEffects { row: Row, span: Span },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -133,7 +139,7 @@ impl Subst {
         // the full row_map. B2.3 may revisit when generalisation
         // grows row quantifiers.
         let tmp = Subst { map: filtered, row_map: self.row_map.clone() };
-        Scheme { vars: s.vars.clone(), ty: tmp.apply(&s.ty) }
+        Scheme { vars: s.vars.clone(), row_vars: s.row_vars.clone(), ty: tmp.apply(&s.ty) }
     }
     pub fn compose(&self, s1: &Subst) -> Subst {
         let mut composed: HashMap<TyVar, Ty> =
@@ -329,12 +335,19 @@ pub fn instantiate(scheme: &Scheme, supply: &mut TyVarSupply) -> Ty {
 pub fn generalize(ty: &Ty, env_free: &BTreeSet<TyVar>) -> Scheme {
     let ty_free = ty.free_vars();
     let vars: Vec<TyVar> = ty_free.difference(env_free).copied().collect();
-    Scheme { vars, ty: ty.clone() }
+    Scheme { vars, row_vars: Vec::new(), ty: ty.clone() }
 }
 
 // ============================================================================
 // Inference driver (new in B1.5a)
 // ============================================================================
+
+/// B2.3a (ADR 0005 D6): map from declared effect labels to their
+/// (arg, ret) signature. Synthesised empty by `infer_top` and
+/// `infer_program` in B2.3a — `Perform` still rejects with
+/// `EffectNotYetSupported` regardless of contents. B2.3b will
+/// populate it from `Program.effects` and consult it in `Perform`.
+pub type EffectEnv = HashMap<String, (Ty, Ty)>;
 
 #[derive(Debug, Clone, Default)]
 pub struct TypeEnv { bindings: HashMap<String, Scheme> }
@@ -361,44 +374,56 @@ impl TypeEnv {
     }
 }
 
-pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
-    -> Result<(Subst, Ty), TypeError>
-{
+pub fn infer(
+    env: &TypeEnv,
+    eff_env: &EffectEnv,
+    expr: &Expr,
+    supply: &mut TyVarSupply,
+) -> Result<(Subst, Ty, Row), TypeError> {
+    // B2.3a: eff_env is threaded but not consulted. B2.3b's `Perform`
+    // arm reads it; until then the discard keeps `-D warnings` happy.
+    let _ = eff_env;
     match &expr.node {
-        ExprKind::Int(_) => Ok((Subst::empty(), Ty::Int)),
-        ExprKind::Bool(_) => Ok((Subst::empty(), Ty::Bool)),
+        ExprKind::Int(_) => Ok((Subst::empty(), Ty::Int, Row::Empty)),
+        ExprKind::Bool(_) => Ok((Subst::empty(), Ty::Bool, Row::Empty)),
         ExprKind::Var(name) => match env.lookup(name) {
-            Some(scheme) => Ok((Subst::empty(), instantiate(scheme, supply))),
+            Some(scheme) => Ok((Subst::empty(), instantiate(scheme, supply), Row::Empty)),
             None => Err(TypeError::Unbound { name: name.clone(), span: expr.span }),
         },
         ExprKind::Lambda { param, body } => {
             let param_ty = supply.fresh_ty();
             let extended = env.extend(param.clone(), Scheme::mono(param_ty.clone()));
-            let (s_body, t_body) = infer(&extended, body, supply)?;
-            // B2.0: empty row; B2.3 will mint a fresh row var here.
+            let (s_body, t_body, _r_body) = infer(&extended, eff_env, body, supply)?;
+            // B2.0/B2.3a: empty row on the arrow; B2.3b mints a fresh
+            // row var and unifies _r_body against it. The closure
+            // value's own row contribution is Empty (D2: only *calling*
+            // a lambda performs effects).
             let arrow = Ty::arrow(s_body.apply(&param_ty), t_body);
-            Ok((s_body, arrow))
+            Ok((s_body, arrow, Row::Empty))
         }
         ExprKind::App { callee, arg } => {
-            let (s1, t_callee) = infer(env, callee, supply)?;
+            let (s1, t_callee, _r_callee) = infer(env, eff_env, callee, supply)?;
             let env_after_callee = env.apply(&s1);
-            let (s2, t_arg) = infer(&env_after_callee, arg, supply)?;
+            let (s2, t_arg, _r_arg) = infer(&env_after_callee, eff_env, arg, supply)?;
             let result_var = supply.fresh_ty();
             let t_callee_subst = s2.apply(&t_callee);
-            // B2.0: callee's row is empty; B2.3 unifies with ambient row.
+            // B2.0/B2.3a: callee's row is empty; B2.3b will unify the
+            // callee against `arrow_with(t_arg, ρ_app, result_var)` and
+            // union ρ_app with _r_callee and _r_arg.
             let s3 = unify(&Subst::empty(), &t_callee_subst,
                 &Ty::arrow(t_arg, result_var.clone()), expr.span, supply)?;
             let combined = s3.compose(&s2).compose(&s1);
             let result_ty = combined.apply(&result_var);
-            Ok((combined, result_ty))
+            Ok((combined, result_ty, Row::Empty))
         }
         ExprKind::Let { name, value, body } => {
-            let (s1, t_value) = infer(env, value, supply)?;
+            let (s1, t_value, _r_value) = infer(env, eff_env, value, supply)?;
             let env_after_value = env.apply(&s1);
             let scheme = generalize(&t_value, &env_after_value.free_vars());
             let env_with_name = env_after_value.extend(name.clone(), scheme);
-            let (s2, t_body) = infer(&env_with_name, body, supply)?;
-            Ok((s2.compose(&s1), t_body))
+            let (s2, t_body, _r_body) = infer(&env_with_name, eff_env, body, supply)?;
+            // B2.3b will union _r_value with _r_body here (D2).
+            Ok((s2.compose(&s1), t_body, Row::Empty))
         }
         ExprKind::LetRec { name, value, body } => {
             // B1.6: proper HM let-rec. The recursive occurrence inside
@@ -408,7 +433,7 @@ pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
             let t_name = supply.fresh_ty();
             let env_for_value =
                 env.extend(name.clone(), Scheme::mono(t_name.clone()));
-            let (s1, t_value) = infer(&env_for_value, value, supply)?;
+            let (s1, t_value, _r_value) = infer(&env_for_value, eff_env, value, supply)?;
             // Unify the recursive monovar with the inferred RHS type.
             let s2 = unify(&s1, &t_name, &t_value, expr.span, supply)?;
             // Generalize against the *outer* env (not env_for_value),
@@ -418,35 +443,40 @@ pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
             let t_name_solved = s2.apply(&t_name);
             let scheme = generalize(&t_name_solved, &env_after.free_vars());
             let env_for_body = env_after.extend(name.clone(), scheme);
-            let (s3, t_body) = infer(&env_for_body, body, supply)?;
-            Ok((s3.compose(&s2), t_body))
+            let (s3, t_body, _r_body) = infer(&env_for_body, eff_env, body, supply)?;
+            // B2.3b unions _r_value with _r_body (D2); per ADR 0005 D4
+            // the parser enforces RHS-is-lambda so _r_value is the
+            // closure-value contribution (Empty per D2), not the body's.
+            Ok((s3.compose(&s2), t_body, Row::Empty))
         }
         ExprKind::If { cond, then_branch, else_branch } => {
-            let (s1, t_cond) = infer(env, cond, supply)?;
+            let (s1, t_cond, _r_cond) = infer(env, eff_env, cond, supply)?;
             let s2 = unify(&s1, &t_cond, &Ty::Bool, cond.span, supply)?;
             let env_after = env.apply(&s2);
-            let (s3, t_then) = infer(&env_after, then_branch, supply)?;
+            let (s3, t_then, _r_then) = infer(&env_after, eff_env, then_branch, supply)?;
             let s3 = s3.compose(&s2);
             let env_after = env.apply(&s3);
-            let (s4, t_else) = infer(&env_after, else_branch, supply)?;
+            let (s4, t_else, _r_else) = infer(&env_after, eff_env, else_branch, supply)?;
             let s4 = s4.compose(&s3);
             let s5 = unify(&s4, &t_then, &t_else, expr.span, supply)?;
             let ty = s5.apply(&t_then);
-            Ok((s5, ty))
+            // B2.3b unions _r_cond, _r_then, _r_else (D2).
+            Ok((s5, ty, Row::Empty))
         }
         ExprKind::BinOp { op, lhs, rhs } => {
-            let (s1, t_lhs) = infer(env, lhs, supply)?;
+            let (s1, t_lhs, _r_lhs) = infer(env, eff_env, lhs, supply)?;
             let env_after = env.apply(&s1);
-            let (s2, t_rhs) = infer(&env_after, rhs, supply)?;
+            let (s2, t_rhs, _r_rhs) = infer(&env_after, eff_env, rhs, supply)?;
             let s2 = s2.compose(&s1);
+            // B2.3b unions _r_lhs with _r_rhs (D2).
             if matches!(op, BinOp::Eq) {
                 let s3 = unify(&s2, &t_lhs, &t_rhs, expr.span, supply)?;
-                Ok((s3, Ty::Bool))
+                Ok((s3, Ty::Bool, Row::Empty))
             } else {
                 let (expected_lhs, expected_rhs, result_ty) = binop_signature(*op);
                 let s3 = unify(&s2, &t_lhs, &expected_lhs, lhs.span, supply)?;
                 let s4 = unify(&s3, &t_rhs, &expected_rhs, rhs.span, supply)?;
-                Ok((s4, result_ty))
+                Ok((s4, result_ty, Row::Empty))
             }
         }
         // B2.2b: parser accepts `do Label(arg)`, inference rejects it
@@ -470,7 +500,16 @@ fn binop_signature(op: BinOp) -> (Ty, Ty, Ty) {
 
 pub fn infer_top(expr: &Expr) -> Result<Ty, TypeError> {
     let mut supply = TyVarSupply::new();
-    let (s, t) = infer(&TypeEnv::empty(), expr, &mut supply)?;
+    let eff_env: EffectEnv = HashMap::new();
+    let (s, t, r) = infer(&TypeEnv::empty(), &eff_env, expr, &mut supply)?;
+    // B2.3a (ADR 0005 D6): strict-residual-row check. In B2.3a every
+    // arm returns Row::Empty, so `resolved` is always Row::Empty and
+    // this branch is unreachable. The variant + check land inert here
+    // to keep B2.3b's diff scoped to semantics only (see commit body).
+    let resolved = s.apply_row(&r);
+    if !matches!(resolved, Row::Empty) {
+        return Err(TypeError::UnhandledEffects { row: resolved, span: expr.span });
+    }
     Ok(s.apply(&t))
 }
 
@@ -482,7 +521,13 @@ pub fn infer_top(expr: &Expr) -> Result<Ty, TypeError> {
 /// labels through an environment so `do Label(arg)` infers a
 /// proper effect row, and handlers in B3 will discharge them.
 pub fn infer_program(prog: &crate::ast::Program) -> Result<Ty, TypeError> {
-    infer_top(&prog.body)
+    // B2.3a: synthesise an empty EffectEnv and discard the residual
+    // row (D6: infer_program is permissive at B2 scope). B2.3b will
+    // populate eff_env from prog.effects and reuse this body shape.
+    let mut supply = TyVarSupply::new();
+    let eff_env: EffectEnv = HashMap::new();
+    let (s, t, _r) = infer(&TypeEnv::empty(), &eff_env, &prog.body, &mut supply)?;
+    Ok(s.apply(&t))
 }
 
 #[cfg(test)]
@@ -557,11 +602,11 @@ mod tests {
     #[test]
     fn apply_scheme_skips_quantified_vars() {
         let s = Subst::singleton(TyVar(0), Ty::Int);
-        let scheme = Scheme { vars: vec![TyVar(0)], ty: Ty::arrow(v(0), v(1)) };
+        let scheme = Scheme { vars: vec![TyVar(0)], row_vars: Vec::new(), ty: Ty::arrow(v(0), v(1)) };
         assert_eq!(s.apply_scheme(&scheme), scheme);
         let s = Subst::singleton(TyVar(1), Ty::Bool);
         let after = s.apply_scheme(&scheme);
-        assert_eq!(after, Scheme { vars: vec![TyVar(0)], ty: Ty::arrow(v(0), Ty::Bool) });
+        assert_eq!(after, Scheme { vars: vec![TyVar(0)], row_vars: Vec::new(), ty: Ty::arrow(v(0), Ty::Bool) });
     }
 
     #[test]
@@ -640,6 +685,7 @@ mod tests {
     fn instantiate_polymorphic_scheme_uses_fresh_vars() {
         let scheme = Scheme {
             vars: vec![TyVar(99)],
+            row_vars: Vec::new(),
             ty: Ty::arrow(Ty::Var(TyVar(99)), Ty::Var(TyVar(99))),
         };
         let mut supply = TyVarSupply::new();
@@ -899,8 +945,9 @@ mod tests {
         let tokens = crate::lexer::lex(src).expect("lex");
         let expr = crate::parser::parse(&tokens).expect("parse");
         let env = TypeEnv::default();
+        let eff_env: EffectEnv = HashMap::new();
         let mut supply = TyVarSupply::new();
-        infer(&env, &expr, &mut supply).map(|(s, t)| s.apply(&t))
+        infer(&env, &eff_env, &expr, &mut supply).map(|(s, t, _r)| s.apply(&t))
     }
 
     #[test]
