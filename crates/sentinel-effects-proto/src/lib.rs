@@ -106,7 +106,6 @@ impl MiniError {
                     TypeError::Unbound { span, .. } => Some(*span),
                     TypeError::RowMismatch { span, .. } => Some(*span),
                     TypeError::RowOccursCheck { span, .. } => Some(*span),
-                    TypeError::EffectNotYetSupported { span, .. } => Some(*span),
                     TypeError::UnknownEffect { span, .. } => Some(*span),
                     TypeError::UnhandledEffects { span, .. } => Some(*span),
                 };

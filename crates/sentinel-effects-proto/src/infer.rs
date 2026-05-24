@@ -32,9 +32,6 @@ pub enum TypeError {
     /// B2.2b: `do Label(arg)` is parseable but cannot yet be typed
     /// or evaluated. Real handling lands in B2.3 (inference) and
     /// B3 (handlers).
-    #[error("effect {label:?} cannot be performed yet (effect inference arrives in B2.3, handlers in B3)")]
-    #[allow(dead_code)]
-    EffectNotYetSupported { label: String, span: Span },
     /// B2.3b2 (ADR 0005 D9): `do Label(arg)` whose label is not in
     /// the program's effect environment. Replaces the placeholder
     /// `EffectNotYetSupported` once Perform is wired through.
@@ -437,19 +434,42 @@ fn cons_or_unify(
 
 
 pub fn instantiate(scheme: &Scheme, supply: &mut TyVarSupply) -> Ty {
-    if scheme.vars.is_empty() { return scheme.ty.clone(); }
+    if scheme.vars.is_empty() && scheme.row_vars.is_empty() {
+        return scheme.ty.clone();
+    }
     let mut renaming = Subst::empty();
     for v in &scheme.vars {
         let fresh = supply.fresh();
         renaming = renaming.compose(&Subst::singleton(*v, Ty::Var(fresh)));
     }
+    // B2.3b2-b (ADR 0005 D9): freshen quantified row vars too.
+    // This is what makes let-bound effectful functions safely
+    // reusable at distinct call sites with distinct latent rows.
+    for rv in &scheme.row_vars {
+        let fresh = supply.fresh_row_var();
+        renaming = renaming.compose(&Subst::singleton_row(*rv, Row::Var(fresh)));
+    }
     renaming.apply(&scheme.ty)
 }
 
-pub fn generalize(ty: &Ty, env_free: &BTreeSet<TyVar>) -> Scheme {
+pub fn generalize(
+    ty: &Ty,
+    env_free: &BTreeSet<TyVar>,
+    env_free_rows: &BTreeSet<RowVar>,
+) -> Scheme {
     let ty_free = ty.free_vars();
     let vars: Vec<TyVar> = ty_free.difference(env_free).copied().collect();
-    Scheme { vars, row_vars: Vec::new(), ty: ty.clone() }
+    // B2.3b2-b (ADR 0005 D9): quantify free row vars in the type
+    // minus those free in the env. Row contributions are *not*
+    // considered — they describe the latent effect of the RHS,
+    // not the scheme of the binding. Top-level default-close
+    // (ADR 0006 D3) still erases unconstrained row vars in the
+    // *returned* type; generalization preserves them inside
+    // let-bound schemes for sound reuse.
+    let ty_free_rows = ty.free_row_vars();
+    let row_vars: Vec<RowVar> =
+        ty_free_rows.difference(env_free_rows).copied().collect();
+    Scheme { vars, row_vars, ty: ty.clone() }
 }
 
 // ============================================================================
@@ -483,6 +503,17 @@ impl TypeEnv {
         let mut acc = BTreeSet::new();
         for scheme in self.bindings.values() {
             acc.extend(scheme.free_vars());
+        }
+        acc
+    }
+    /// B2.3b2-b (ADR 0005 D9): collect free row vars across all
+    /// bound schemes, mirroring `free_vars`. Used by `generalize`
+    /// to avoid quantifying row vars that are constrained by the
+    /// surrounding environment.
+    pub fn free_row_vars(&self) -> BTreeSet<RowVar> {
+        let mut acc = BTreeSet::new();
+        for scheme in self.bindings.values() {
+            acc.extend(scheme.free_row_vars());
         }
         acc
     }
@@ -551,7 +582,11 @@ pub fn infer(
         ExprKind::Let { name, value, body } => {
             let (s1, t_value, r_value) = infer(env, eff_env, value, supply)?;
             let env_after_value = env.apply(&s1);
-            let scheme = generalize(&t_value, &env_after_value.free_vars());
+            let scheme = generalize(
+                &t_value,
+                &env_after_value.free_vars(),
+                &env_after_value.free_row_vars(),
+            );
             let env_with_name = env_after_value.extend(name.clone(), scheme);
             let (s2, t_body, r_body) = infer(&env_with_name, eff_env, body, supply)?;
             let combined = s2.compose(&s1);
@@ -573,7 +608,11 @@ pub fn infer(
             let s2 = unify(&s1, &t_name, &t_value, expr.span, supply)?;
             let env_after = env.apply(&s2);
             let t_name_solved = s2.apply(&t_name);
-            let scheme = generalize(&t_name_solved, &env_after.free_vars());
+            let scheme = generalize(
+                &t_name_solved,
+                &env_after.free_vars(),
+                &env_after.free_row_vars(),
+            );
             let env_for_body = env_after.extend(name.clone(), scheme);
             let (s3, t_body, r_body) = infer(&env_for_body, eff_env, body, supply)?;
             // Per ADR 0005 D2/D4: parser enforces RHS-is-lambda so
@@ -886,7 +925,7 @@ mod tests {
     #[test]
     fn generalize_with_empty_env_quantifies_everything() {
         let ty = Ty::arrow(v(0), v(1));
-        let scheme = generalize(&ty, &BTreeSet::new());
+        let scheme = generalize(&ty, &BTreeSet::new(), &BTreeSet::new());
         assert_eq!(scheme.vars.len(), 2);
         assert!(scheme.vars.contains(&TyVar(0)));
         assert!(scheme.vars.contains(&TyVar(1)));
@@ -897,8 +936,68 @@ mod tests {
         let ty = Ty::arrow(v(0), v(1));
         let mut env_free = BTreeSet::new();
         env_free.insert(TyVar(0));
-        let scheme = generalize(&ty, &env_free);
+        let scheme = generalize(&ty, &env_free, &BTreeSet::new());
         assert_eq!(scheme.vars, vec![TyVar(1)]);
+    }
+
+    // ---- B2.3b2-b: row generalization ----
+
+    #[test]
+    fn b23b2b_generalize_quantifies_free_row_vars() {
+        // Type 'a -> 'a with row 'ra on the arrow.
+        let ty = Ty::arrow_with(v(0), rv(0), v(0));
+        let scheme = generalize(&ty, &BTreeSet::new(), &BTreeSet::new());
+        assert_eq!(scheme.vars, vec![TyVar(0)]);
+        assert_eq!(scheme.row_vars, vec![RowVar(0)]);
+    }
+
+    #[test]
+    fn b23b2b_generalize_skips_env_free_row_vars() {
+        let ty = Ty::arrow_with(v(0), rv(0), v(0));
+        let mut env_free_rows = BTreeSet::new();
+        env_free_rows.insert(RowVar(0));
+        let scheme = generalize(&ty, &BTreeSet::new(), &env_free_rows);
+        assert!(scheme.row_vars.is_empty(),
+            "row var bound in env must not be quantified");
+    }
+
+    #[test]
+    fn b23b2b_instantiate_freshens_row_vars() {
+        let scheme = Scheme {
+            vars: Vec::new(),
+            row_vars: vec![RowVar(99)],
+            ty: Ty::arrow_with(Ty::Int, Row::Var(RowVar(99)), Ty::Int),
+        };
+        let mut supply = TyVarSupply::new();
+        let t1 = instantiate(&scheme, &mut supply);
+        let t2 = instantiate(&scheme, &mut supply);
+        // Two instantiations must produce distinct fresh row vars.
+        match (&t1, &t2) {
+            (Ty::Fun(_, r1, _), Ty::Fun(_, r2, _)) => {
+                assert!(matches!(r1, Row::Var(_)));
+                assert!(matches!(r2, Row::Var(_)));
+                assert_ne!(r1, r2, "fresh row vars must differ");
+            }
+            _ => panic!("expected two arrows"),
+        }
+    }
+
+    #[test]
+    fn b23b2b_let_bound_identity_polymorphic_at_two_types() {
+        // Regression: row generalization must not break ordinary
+        // type-polymorphic let-binding behaviour.
+        let src = "let id = fn(x) => x in if id(true) then id(1) else id(2)";
+        assert_eq!(ty_of(src), Ty::Int);
+    }
+
+    #[test]
+    fn b23b2b_let_bound_lambda_used_under_perform() {
+        // The let-bound function has a row-polymorphic arrow scheme;
+        // calling it inside an effectful context still type-checks.
+        let src = "effect Print : Int -> Bool ;                    let id = fn(x) => x in                    do Print(id(1))";
+        let toks = crate::lexer::lex(src).unwrap();
+        let prog = crate::parser::parse_program(&toks).unwrap();
+        assert_eq!(infer_program(&prog).unwrap(), Ty::Bool);
     }
 
     // ---------- B1.5a driver ----------
