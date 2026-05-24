@@ -1,3 +1,11 @@
+#![allow(clippy::result_large_err)]
+//! ^ B2.0: widening `Ty::Fun` with `Row` pushed `TypeError::Mismatch`
+//! over the 128-byte threshold that triggers `clippy::result_large_err`.
+//! Per STATE.md sec B.5 design decision 5 (effects-proto is a research
+//! prototype; we are not optimising error shape), we allow this lint
+//! crate-wide rather than boxing every `Result<_, TypeError>`. Phase C
+//! production code will revisit.
+
 //! sentinel-effects-proto (Sentinel-Mini)
 //!
 //! A research-grade tree-walking interpreter built to validate Sentinel's

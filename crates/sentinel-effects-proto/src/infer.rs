@@ -13,7 +13,7 @@
 
 use crate::ast::{BinOp, Expr, ExprKind};
 use crate::span::Span;
-use crate::types::{Scheme, Ty, TyVar};
+use crate::types::{Row, RowVar, Scheme, Ty, TyVar};
 use std::collections::{BTreeSet, HashMap};
 use thiserror::Error;
 
@@ -28,7 +28,13 @@ pub enum TypeError {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct TyVarSupply { next: u32 }
+pub struct TyVarSupply {
+    next: u32,
+    /// B2.0: parallel counter for row variables. Kept separate from
+    /// `next` so a TyVar and a RowVar with the same numeric id are
+    /// not confusable when stepping through debugger output.
+    next_row: u32,
+}
 
 impl TyVarSupply {
     pub fn new() -> Self { Self::default() }
@@ -38,20 +44,42 @@ impl TyVarSupply {
         v
     }
     pub fn fresh_ty(&mut self) -> Ty { Ty::Var(self.fresh()) }
+
+    /// B2.0: defined for symmetry with `fresh`. Not yet called by
+    /// `infer`; B2.3 wires it into lambda introduction.
+    pub fn fresh_row_var(&mut self) -> RowVar {
+        let v = RowVar(self.next_row);
+        self.next_row = self.next_row.checked_add(1).expect("TyVarSupply row exhausted");
+        v
+    }
+
+    pub fn fresh_row(&mut self) -> Row { Row::Var(self.fresh_row_var()) }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Subst { map: HashMap<TyVar, Ty> }
+pub struct Subst {
+    map: HashMap<TyVar, Ty>,
+    /// B2.0: parallel row-var substitution. Empty in practice until B2.1.
+    row_map: HashMap<RowVar, Row>,
+}
 
 impl Subst {
     pub fn empty() -> Self { Self::default() }
     pub fn singleton(v: TyVar, t: Ty) -> Self {
         let mut map = HashMap::new();
         map.insert(v, t);
-        Subst { map }
+        Subst { map, row_map: HashMap::new() }
     }
-    pub fn is_empty(&self) -> bool { self.map.is_empty() }
-    pub fn len(&self) -> usize { self.map.len() }
+
+    /// B2.0: row-singleton. Not yet exercised by inference; defined so
+    /// B2.1's `unify_row` can `bind` a row var without adding API later.
+    pub fn singleton_row(v: RowVar, r: Row) -> Self {
+        let mut row_map = HashMap::new();
+        row_map.insert(v, r);
+        Subst { map: HashMap::new(), row_map }
+    }
+    pub fn is_empty(&self) -> bool { self.map.is_empty() && self.row_map.is_empty() }
+    pub fn len(&self) -> usize { self.map.len() + self.row_map.len() }
     pub fn apply(&self, ty: &Ty) -> Ty {
         match ty {
             Ty::Int => Ty::Int,
@@ -60,13 +88,42 @@ impl Subst {
                 Some(bound) => self.apply(bound),
                 None => Ty::Var(*v),
             },
-            Ty::Fun(a, b) => Ty::Fun(Box::new(self.apply(a)), Box::new(self.apply(b))),
+            Ty::Fun(a, row, b) => Ty::Fun(
+                Box::new(self.apply(a)),
+                self.apply_row(row),
+                Box::new(self.apply(b)),
+            ),
         }
     }
+    /// Apply this substitution to a row.
+    ///
+    /// B2.0: only `Row::Empty` is ever produced by the inferer, so this
+    /// is exercised only by the empty-row arm. The other arms are
+    /// defined so B2.1's unifier and B2.3's effect inference can reuse
+    /// the same `apply` infrastructure.
+    pub fn apply_row(&self, row: &Row) -> Row {
+        match row {
+            Row::Empty => Row::Empty,
+            Row::Var(v) => match self.row_map.get(v) {
+                Some(bound) => self.apply_row(bound),
+                None => Row::Var(*v),
+            },
+            Row::Cons { label, arg, ret, tail } => Row::Cons {
+                label: label.clone(),
+                arg: Box::new(self.apply(arg)),
+                ret: Box::new(self.apply(ret)),
+                tail: Box::new(self.apply_row(tail)),
+            },
+        }
+    }
+
     pub fn apply_scheme(&self, s: &Scheme) -> Scheme {
         let mut filtered = self.map.clone();
         for v in &s.vars { filtered.remove(v); }
-        let tmp = Subst { map: filtered };
+        // B2.0: Scheme does not quantify row vars yet, so we keep
+        // the full row_map. B2.3 may revisit when generalisation
+        // grows row quantifiers.
+        let tmp = Subst { map: filtered, row_map: self.row_map.clone() };
         Scheme { vars: s.vars.clone(), ty: tmp.apply(&s.ty) }
     }
     pub fn compose(&self, s1: &Subst) -> Subst {
@@ -75,7 +132,12 @@ impl Subst {
         for (v, t) in &self.map {
             composed.entry(*v).or_insert_with(|| t.clone());
         }
-        Subst { map: composed }
+        let mut composed_rows: HashMap<RowVar, Row> =
+            s1.row_map.iter().map(|(v, r)| (*v, self.apply_row(r))).collect();
+        for (v, r) in &self.row_map {
+            composed_rows.entry(*v).or_insert_with(|| r.clone());
+        }
+        Subst { map: composed, row_map: composed_rows }
     }
 }
 
@@ -104,11 +166,30 @@ pub fn unify(s: &Subst, a: &Ty, b: &Ty, span: Span) -> Result<Subst, TypeError> 
             let extension = bind(v, &t, span, s)?;
             Ok(extension.compose(s))
         }
-        (Ty::Fun(a1, b1), Ty::Fun(a2, b2)) => {
+        (Ty::Fun(a1, r1, b1), Ty::Fun(a2, r2, b2)) => {
             let s1 = unify(s, &a1, &a2, span)?;
-            unify(&s1, &b1, &b2, span)
+            let s2 = unify(&s1, &b1, &b2, span)?;
+            unify_row(&s2, &r1, &r2, span)
         }
         (expected, found) => Err(TypeError::Mismatch { expected, found, span }),
+    }
+}
+
+/// Unify two effect rows.
+///
+/// B2.0 stub: only handles the empty-vs-empty case (the only case the
+/// inferer produces). Every other arm is `unreachable!("B2.1")` and
+/// will be filled in by B2.1's Rémy-style row unifier. The presence of
+/// this function ensures the call shape in `unify`'s `Fun, Fun` arm is
+/// stable across B2.0/B2.1, so B2.1 is a localised change.
+pub fn unify_row(s: &Subst, a: &Row, b: &Row, _span: Span) -> Result<Subst, TypeError> {
+    let a = s.apply_row(a);
+    let b = s.apply_row(b);
+    match (a, b) {
+        (Row::Empty, Row::Empty) => Ok(s.clone()),
+        // Anything else cannot arise in B2.0: the inferer never mints
+        // a Row::Var or Row::Cons. B2.1 will replace these arms.
+        _ => unreachable!("B2.1: non-empty row unification not yet implemented"),
     }
 }
 
@@ -171,6 +252,7 @@ pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
             let param_ty = supply.fresh_ty();
             let extended = env.extend(param.clone(), Scheme::mono(param_ty.clone()));
             let (s_body, t_body) = infer(&extended, body, supply)?;
+            // B2.0: empty row; B2.3 will mint a fresh row var here.
             let arrow = Ty::arrow(s_body.apply(&param_ty), t_body);
             Ok((s_body, arrow))
         }
@@ -180,6 +262,7 @@ pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
             let (s2, t_arg) = infer(&env_after_callee, arg, supply)?;
             let result_var = supply.fresh_ty();
             let t_callee_subst = s2.apply(&t_callee);
+            // B2.0: callee's row is empty; B2.3 unifies with ambient row.
             let s3 = unify(&Subst::empty(), &t_callee_subst,
                 &Ty::arrow(t_arg, result_var.clone()), expr.span)?;
             let combined = s3.compose(&s2).compose(&s1);
@@ -404,7 +487,7 @@ mod tests {
         let t1 = instantiate(&scheme, &mut supply);
         let t2 = instantiate(&scheme, &mut supply);
         match (&t1, &t2) {
-            (Ty::Fun(a1, b1), Ty::Fun(a2, b2)) => {
+            (Ty::Fun(a1, _, b1), Ty::Fun(a2, _, b2)) => {
                 assert_eq!(a1, b1); assert_eq!(a2, b2); assert_ne!(a1, a2);
             }
             _ => panic!("expected arrows"),
@@ -451,7 +534,7 @@ mod tests {
     #[test]
     fn infer_identity_lambda_is_polymorphic_arrow() {
         match ty_of("fn(x) => x") {
-            Ty::Fun(a, b) => assert_eq!(a, b),
+            Ty::Fun(a, _, b) => assert_eq!(a, b),
             other => panic!("expected arrow, got {other}"),
         }
     }
@@ -459,7 +542,7 @@ mod tests {
     #[test]
     fn infer_const_lambda_arrow() {
         match ty_of("fn(x) => 42") {
-            Ty::Fun(_a, b) => assert_eq!(*b, Ty::Int),
+            Ty::Fun(_a, _, b) => assert_eq!(*b, Ty::Int),
             other => panic!("expected arrow, got {other}"),
         }
     }
@@ -546,7 +629,7 @@ mod tests {
         let src = "let rec fact = fn(n) => if n == 0 then 1 else n * fact(n - 1) in fact";
         let ty = infer_source(src).expect("factorial should type-check");
         match ty {
-            Ty::Fun(a, b) => {
+            Ty::Fun(a, _, b) => {
                 assert!(matches!(*a, Ty::Int), "arg should be Int, got {:?}", a);
                 assert!(matches!(*b, Ty::Int), "ret should be Int, got {:?}", b);
             }
