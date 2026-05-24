@@ -218,6 +218,8 @@ absorbed.
 | B1    | HM type inference, letrec, span-tracked errors     | Done   | e6b06cd |
 | B2.0  | Row scaffold: Ty::Fun carries empty Row            | Done   | 2cd81a7 |
 | B2.1  | Remy-style row unification                         | Done   | 323ab33 |
+| B2.2a | Effect-surface lexer/AST/parser                    | Done   | a3fd3cc |
+| B2.2b | Wire Perform through pipeline as type error        | Done   | 62405f2 |
 | B2    | Effect rows and effect declarations                | In progress |   |
 | B3    | Effect handlers (handle .. with ..)                | Planned |        |
 | B4    | Secret T qualifier and constant-time check         | Planned |        |
@@ -242,6 +244,17 @@ var binding, matching labels, mismatched payloads, label
 rewriting, occurs-check, disjoint open tails, and closed-row
 failures; ~3 row display tests). Clippy clean under
 `-D warnings`. See B.5 design decision 13.
+
+Test coverage as of B2.2: 134 tests (B2.1 carry-over 111 + 23
+new: 6 lexer tokens, 11 parser (effect decls, do-perform,
+uppercase-label rule, paren ty-expr, missing-semicolon,
+arrow-required signature, right-associative arrows, do
+inside arithmetic), 3 infer (Perform rejected with
+EffectNotYetSupported, span targets label, pure-body
+infers), 1 eval (direct-eval defence in depth), 2
+integration (pure body evaluates, do is rejected with
+rendered caret). Clippy clean under `-D warnings`. See
+B.5 design decisions 14 and 15.
 
 B1 landed across five commits: spans + Spanned AST + `let rec`
 (abfb3d9), types scaffold (b3589ea), inference driver wired into
@@ -382,6 +395,34 @@ crate root in B1.
     at 0). Inference still mints only `Row::Empty` at
     lambda introduction; user-visible effect behaviour
     arrives in B2.3.
+14. (B2.2a) Surface for effect declarations and operations.
+    Five new tokens (`Colon`, `Semicolon`, `Arrow`, `Effect`,
+    `Do`) make `effect` and `do` reserved keywords; neither
+    was used as an identifier in B1. Grammar:
+    `effect Label : TyExpr ;` where TyExpr is required to be
+    an arrow at the top level, and `do Label(arg)` at the
+    atom level. Effect labels must start with an uppercase
+    ASCII letter (parser-enforced via
+    `ParseError::EffectLabelNotUpper`). A new surface-level
+    `TyExpr` enum lives in `ast.rs` deliberately distinct
+    from the inference-time `Ty` so the parser does not
+    depend on the type system. Fix-A grammar (single
+    `TyExpr` then split-on-arrow) was chosen over
+    `ArgTy '->' RetTy` because the latter is ambiguous when
+    `ArgTy` itself contains `->`. ADR 0004 will be amended
+    in B2.5 to reflect the actual grammar production.
+15. (B2.2b) `Perform` is parseable but rejected by inference
+    with `TypeError::EffectNotYetSupported { label, span }`
+    where span targets the label identifier (not the `do`
+    keyword) so diagnostics caret the meaningful token.
+    `EvalError::EffectNotYetSupported(String)` exists for
+    defence in depth (callers bypassing inference) and is
+    span-less to match the B1 `EvalError` precedent
+    (decision 5 lineage; full span enrichment is a backlog
+    item). `run()` now pipelines through `parse_program` +
+    `infer_program`; effect declarations are parsed but
+    inert (typing environment is unchanged). Real effect
+    rows wire in B2.3.
 
 ### B.6 Known Limitations (intentional at B1)
 
