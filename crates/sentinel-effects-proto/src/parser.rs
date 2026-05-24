@@ -16,6 +16,10 @@ pub enum ParseError {
     Trailing { found: Token, span: Span },
     #[error("'let rec' requires a lambda on the right-hand side; got something else")]
     LetRecNotLambda { span: Span },
+    #[error("effect label {label:?} must start with an uppercase letter")]
+    EffectLabelNotUpper { label: String, span: Span },
+    #[error("expected a type expression; got {found:?}")]
+    ExpectedTypeExpr { found: Option<Token>, span: Span },
 }
 
 /// Parse a flat token stream into a single [`Expr`].
@@ -26,6 +30,21 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Expr, ParseError> {
         return Err(ParseError::Trailing { found: t, span });
     }
     Ok(e)
+}
+
+/// Parse a full Sentinel-Mini program: zero or more `effect` declarations
+/// followed by a single body expression. Added in B2.2a.
+pub fn parse_program(tokens: &[(Token, Span)]) -> Result<crate::ast::Program, ParseError> {
+    let mut p = Parser { toks: tokens, pos: 0 };
+    let mut effects = Vec::new();
+    while matches!(p.peek_tok(), Some(Token::Effect)) {
+        effects.push(p.parse_effect_decl()?);
+    }
+    let body = p.parse_expr()?;
+    if let Some((t, span)) = p.peek().cloned() {
+        return Err(ParseError::Trailing { found: t, span });
+    }
+    Ok(crate::ast::Program { effects, body })
 }
 
 struct Parser<'a> {
@@ -234,6 +253,7 @@ impl<'a> Parser<'a> {
             Some((Token::Int(n), span)) => Ok(expr(ExprKind::Int(n), span)),
             Some((Token::Bool(b), span)) => Ok(expr(ExprKind::Bool(b), span)),
             Some((Token::Ident(s), span)) => Ok(expr(ExprKind::Var(s), span)),
+            Some((Token::Do, start_span)) => self.parse_perform(start_span),
             Some((Token::LParen, open_span)) => {
                 let inner = self.parse_expr()?;
                 self.expect("')'", |t| matches!(t, Token::RParen))?;
@@ -243,6 +263,97 @@ impl<'a> Parser<'a> {
             }
             Some((t, span)) => Err(ParseError::Unexpected { found: t, expected: "atom", span }),
             None => Err(ParseError::UnexpectedEof { expected: "atom" }),
+        }
+    }
+
+    // ---- B2.2a: effect-surface parsing helpers ----
+
+    fn parse_perform(&mut self, start_span: Span) -> Result<Expr, ParseError> {
+        // The `do` token has already been consumed; `start_span` is its span.
+        let (label, label_span) = match self.bump() {
+            Some((Token::Ident(s), sp)) => (s, sp),
+            Some((t, span)) => {
+                return Err(ParseError::Unexpected { found: t, expected: "effect label", span })
+            }
+            None => return Err(ParseError::UnexpectedEof { expected: "effect label" }),
+        };
+        if !label.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            return Err(ParseError::EffectLabelNotUpper { label, span: label_span });
+        }
+        self.expect("'('", |t| matches!(t, Token::LParen))?;
+        let arg = self.parse_expr()?;
+        self.expect("')'", |t| matches!(t, Token::RParen))?;
+        let close = self.last_span();
+        let span = start_span.merge(close);
+        Ok(expr(ExprKind::Perform { label, label_span, arg: Box::new(arg) }, span))
+    }
+
+    fn parse_effect_decl(&mut self) -> Result<crate::ast::EffectDecl, ParseError> {
+        // Caller has NOT yet consumed `effect`.
+        let start = self.peek_span().ok_or(ParseError::UnexpectedEof { expected: "'effect'" })?;
+        self.expect("'effect'", |t| matches!(t, Token::Effect))?;
+        let (label, label_span) = match self.bump() {
+            Some((Token::Ident(s), sp)) => (s, sp),
+            Some((t, span)) => {
+                return Err(ParseError::Unexpected { found: t, expected: "effect label", span })
+            }
+            None => return Err(ParseError::UnexpectedEof { expected: "effect label" }),
+        };
+        if !label.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            return Err(ParseError::EffectLabelNotUpper { label, span: label_span });
+        }
+        self.expect("':'", |t| matches!(t, Token::Colon))?;
+        // B2.2a: parse a single type expression for the signature, then
+        // require it to be an arrow at the top level. Writing
+        // `effect L : ArgTy -> RetTy ;` as `arg + '->' + ret` is
+        // ambiguous when ArgTy itself contains `->` (right-associative
+        // arrows would eat the separator), so we parse one TyExpr and
+        // destructure.
+        let sig = self.parse_ty_expr()?;
+        let sig_span = sig.span();
+        let (arg, ret) = match sig {
+            crate::ast::TyExpr::Arrow(a, b, _) => (*a, *b),
+            other => return Err(ParseError::ExpectedTypeExpr {
+                found: None,
+                span: other.span(),
+            }),
+        };
+        self.expect("';'", |t| matches!(t, Token::Semicolon))?;
+        let end = self.last_span();
+        let span = start.merge(end);
+        let _ = sig_span;
+        Ok(crate::ast::EffectDecl { label, label_span, arg, ret, span })
+    }
+
+    fn parse_ty_expr(&mut self) -> Result<crate::ast::TyExpr, ParseError> {
+        let lhs = self.parse_ty_atom()?;
+        if matches!(self.peek_tok(), Some(Token::Arrow)) {
+            self.bump();
+            let rhs = self.parse_ty_expr()?; // right-associative
+            let span = lhs.span().merge(rhs.span());
+            Ok(crate::ast::TyExpr::Arrow(Box::new(lhs), Box::new(rhs), span))
+        } else {
+            Ok(lhs)
+        }
+    }
+
+    fn parse_ty_atom(&mut self) -> Result<crate::ast::TyExpr, ParseError> {
+        match self.bump() {
+            Some((Token::Ident(s), span)) if s == "Int" => Ok(crate::ast::TyExpr::Int(span)),
+            Some((Token::Ident(s), span)) if s == "Bool" => Ok(crate::ast::TyExpr::Bool(span)),
+            Some((Token::LParen, open)) => {
+                let inner = self.parse_ty_expr()?;
+                self.expect("')'", |t| matches!(t, Token::RParen))?;
+                let close = self.last_span();
+                let span = open.merge(close);
+                match inner {
+                    crate::ast::TyExpr::Int(_) => Ok(crate::ast::TyExpr::Int(span)),
+                    crate::ast::TyExpr::Bool(_) => Ok(crate::ast::TyExpr::Bool(span)),
+                    crate::ast::TyExpr::Arrow(a, b, _) => Ok(crate::ast::TyExpr::Arrow(a, b, span)),
+                }
+            }
+            Some((t, span)) => Err(ParseError::ExpectedTypeExpr { found: Some(t), span }),
+            None => Err(ParseError::ExpectedTypeExpr { found: None, span: self.last_span() }),
         }
     }
 }
@@ -359,5 +470,118 @@ mod tests {
         // `let` without `rec` must still parse as ExprKind::Let.
         let e = p("let x = 1 in x");
         assert!(matches!(e.node, ExprKind::Let { .. }));
+    }
+
+    // ---- B2.2a: effect-surface parser tests ----
+
+    fn pp(src: &str) -> crate::ast::Program {
+        parse_program(&lex(src).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn b22a_program_with_no_effects_parses_body() {
+        let prog = pp("1 + 2");
+        assert!(prog.effects.is_empty());
+        assert!(matches!(prog.body.node, ExprKind::BinOp { .. }));
+    }
+
+    #[test]
+    fn b22a_single_effect_decl_then_body() {
+        let prog = pp("effect Print : Int -> Bool ; 1");
+        assert_eq!(prog.effects.len(), 1);
+        assert_eq!(prog.effects[0].label, "Print");
+        assert_eq!(prog.body.node, ExprKind::Int(1));
+    }
+
+    #[test]
+    fn b22a_two_effect_decls_in_order() {
+        let prog = pp("effect Print : Int -> Bool ; effect Ask : Bool -> Int ; 0");
+        assert_eq!(prog.effects.len(), 2);
+        assert_eq!(prog.effects[0].label, "Print");
+        assert_eq!(prog.effects[1].label, "Ask");
+    }
+
+    #[test]
+    fn b22a_ty_expr_arrow_is_right_associative() {
+        // With Fix A, `effect F : Int -> Bool -> Int ;` parses as a single
+        // TyExpr `Int -> Bool -> Int` (right-associative: `Int -> (Bool -> Int)`),
+        // then splits into arg=Int and ret=(Bool -> Int).
+        let prog = pp("effect F : Int -> Bool -> Int ; 0");
+        assert!(matches!(prog.effects[0].arg, crate::ast::TyExpr::Int(_)));
+        match &prog.effects[0].ret {
+            crate::ast::TyExpr::Arrow(a, b, _) => {
+                assert!(matches!(**a, crate::ast::TyExpr::Bool(_)));
+                assert!(matches!(**b, crate::ast::TyExpr::Int(_)));
+            }
+            other => panic!("expected ret to be an arrow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b22a_do_invocation_parses_as_perform() {
+        let e = p("do Print(1)");
+        match e.node {
+            ExprKind::Perform { label, arg, .. } => {
+                assert_eq!(label, "Print");
+                assert_eq!(arg.node, ExprKind::Int(1));
+            }
+            other => panic!("not a Perform: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b22a_do_label_must_be_uppercase() {
+        let err = parse(&lex("do print(1)").unwrap()).unwrap_err();
+        match err {
+            ParseError::EffectLabelNotUpper { label, .. } => assert_eq!(label, "print"),
+            other => panic!("expected EffectLabelNotUpper, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b22a_effect_decl_label_must_be_uppercase() {
+        let err = parse_program(&lex("effect print : Int -> Bool ; 0").unwrap()).unwrap_err();
+        assert!(matches!(err, ParseError::EffectLabelNotUpper { .. }));
+    }
+
+    #[test]
+    fn b22a_effect_decl_missing_semicolon_errors() {
+        // With Fix A the signature `Int -> Bool` is parsed as one TyExpr,
+        // then a `;` is required. `0` shows up where `;` was expected.
+        let err = parse_program(&lex("effect Print : Int -> Bool 0").unwrap()).unwrap_err();
+        assert!(matches!(err, ParseError::Unexpected { expected: "';'", .. }),
+                "got {err:?}");
+    }
+
+    #[test]
+    fn b22a_effect_decl_signature_must_be_arrow() {
+        // `effect Foo : Int ; 0` -- no arrow -- must error.
+        let err = parse_program(&lex("effect Foo : Int ; 0").unwrap()).unwrap_err();
+        assert!(matches!(err, ParseError::ExpectedTypeExpr { .. }),
+                "got {err:?}");
+    }
+
+    #[test]
+    fn b22a_effect_decl_with_paren_ty_expr() {
+        // Parens force the LHS of the top-level arrow to itself be an arrow.
+        let prog = pp("effect F : (Int -> Bool) -> Int ; 0");
+        match &prog.effects[0].arg {
+            crate::ast::TyExpr::Arrow(..) => {}
+            other => panic!("expected arg to be an arrow, got {other:?}"),
+        }
+        assert!(matches!(prog.effects[0].ret, crate::ast::TyExpr::Int(_)));
+    }
+
+    #[test]
+    fn b22a_do_inside_arithmetic_context() {
+        // `do Print(1) + 2` should parse: Perform is an atom, BinOp wraps it.
+        let e = p("do Print(1) + 2");
+        match e.node {
+            ExprKind::BinOp { lhs, rhs, .. } => {
+                assert!(matches!(lhs.node, ExprKind::Perform { .. }));
+                assert_eq!(rhs.node, ExprKind::Int(2));
+            }
+            other => panic!("expected BinOp wrapping Perform, got {other:?}"),
+        }
     }
 }

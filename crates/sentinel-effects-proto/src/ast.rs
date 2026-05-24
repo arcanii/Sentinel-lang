@@ -62,6 +62,16 @@ pub enum ExprKind {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
     },
+    /// `do <Label>(arg)` -- perform an effect operation.
+    ///
+    /// B2.2a: parser/AST only. Inference and eval reject this with a
+    /// dedicated `EffectNotYetSupported` error in B2.2b; handlers and
+    /// real semantics arrive in B2.3 / B3.
+    Perform {
+        label: String,
+        label_span: Span,
+        arg: Box<Expr>,
+    },
 }
 
 /// Binary operators.
@@ -80,4 +90,46 @@ pub enum BinOp {
 #[inline]
 pub fn expr(kind: ExprKind, span: Span) -> Expr {
     Spanned::new(kind, span)
+}
+
+
+// ---- B2.2a: program-level AST ----
+
+/// A surface-level type expression, as written in `effect` declarations.
+///
+/// Kept distinct from the inference-time [`crate::Ty`] so the parser does
+/// not depend on the type system and so future surface extensions (rows,
+/// qualifiers) live here without churning `types.rs`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TyExpr {
+    Int(Span),
+    Bool(Span),
+    Arrow(Box<TyExpr>, Box<TyExpr>, Span),
+}
+
+impl TyExpr {
+    pub fn span(&self) -> Span {
+        match self {
+            TyExpr::Int(s) | TyExpr::Bool(s) => *s,
+            TyExpr::Arrow(_, _, s) => *s,
+        }
+    }
+}
+
+/// A single `effect Label : ArgTy -> RetTy ;` declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectDecl {
+    pub label: String,
+    pub label_span: Span,
+    pub arg: TyExpr,
+    pub ret: TyExpr,
+    pub span: Span,
+}
+
+/// A whole Sentinel-Mini program: zero or more effect declarations
+/// followed by a single body expression.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Program {
+    pub effects: Vec<EffectDecl>,
+    pub body: Expr,
 }

@@ -148,6 +148,10 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             let r = eval(rhs, env)?;
             eval_binop(*op, l, r)
         }
+        // B2.2a scaffolding: Perform eval lands in B2.2b.
+        ExprKind::Perform { label, .. } => {
+            todo!("B2.2b: Perform eval -- effect {:?}", label)
+        }
     }
 }
 

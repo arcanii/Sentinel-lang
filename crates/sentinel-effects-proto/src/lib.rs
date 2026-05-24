@@ -90,6 +90,8 @@ impl MiniError {
                     ParseError::Unexpected { span, .. } => Some(*span),
                     ParseError::Trailing { span, .. } => Some(*span),
                     ParseError::LetRecNotLambda { span } => Some(*span),
+                    ParseError::EffectLabelNotUpper { span, .. } => Some(*span),
+                    ParseError::ExpectedTypeExpr { span, .. } => Some(*span),
                 };
                 render(source, span, "parse error", &e.to_string())
             }

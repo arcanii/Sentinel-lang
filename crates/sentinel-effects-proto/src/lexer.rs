@@ -66,6 +66,17 @@ pub enum Token {
     Comma,
     #[token("=>")]
     FatArrow,
+    // B2.2: effect-surface punctuation and keywords.
+    #[token(":")]
+    Colon,
+    #[token(";")]
+    Semicolon,
+    #[token("->")]
+    Arrow,
+    #[token("effect")]
+    Effect,
+    #[token("do")]
+    Do,
 }
 
 /// Errors produced by [`lex`].
@@ -200,5 +211,63 @@ mod tests {
         // This is the trade-off accepted in the B1 scope discussion.
         let toks = tokens_only(lex("rec").unwrap());
         assert_eq!(toks, vec![Token::Rec]);
+    }
+
+    // ---- B2.2a: effect-surface tokens ----
+
+    #[test]
+    fn b22a_lex_effect_keyword() {
+        let toks = tokens_only(lex("effect").unwrap());
+        assert_eq!(toks, vec![Token::Effect]);
+    }
+
+    #[test]
+    fn b22a_lex_do_keyword() {
+        let toks = tokens_only(lex("do").unwrap());
+        assert_eq!(toks, vec![Token::Do]);
+    }
+
+    #[test]
+    fn b22a_lex_colon_and_semicolon() {
+        let toks = tokens_only(lex(": ;").unwrap());
+        assert_eq!(toks, vec![Token::Colon, Token::Semicolon]);
+    }
+
+    #[test]
+    fn b22a_lex_arrow_distinct_from_minus() {
+        let toks = tokens_only(lex("a -> b - c").unwrap());
+        assert_eq!(toks, vec![
+            Token::Ident("a".into()),
+            Token::Arrow,
+            Token::Ident("b".into()),
+            Token::Minus,
+            Token::Ident("c".into()),
+        ]);
+    }
+
+    #[test]
+    fn b22a_lex_effect_decl_full_token_stream() {
+        let toks = tokens_only(lex("effect Print : Int -> Bool ;").unwrap());
+        assert_eq!(toks, vec![
+            Token::Effect,
+            Token::Ident("Print".into()),
+            Token::Colon,
+            Token::Ident("Int".into()),
+            Token::Arrow,
+            Token::Ident("Bool".into()),
+            Token::Semicolon,
+        ]);
+    }
+
+    #[test]
+    fn b22a_lex_do_invocation() {
+        let toks = tokens_only(lex("do Print(1)").unwrap());
+        assert_eq!(toks, vec![
+            Token::Do,
+            Token::Ident("Print".into()),
+            Token::LParen,
+            Token::Int(1),
+            Token::RParen,
+        ]);
     }
 }

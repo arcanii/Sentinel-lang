@@ -444,6 +444,10 @@ pub fn infer(env: &TypeEnv, expr: &Expr, supply: &mut TyVarSupply)
                 Ok((s4, result_ty))
             }
         }
+        // B2.2a scaffolding: Perform inference lands in B2.2b.
+        ExprKind::Perform { label, .. } => {
+            todo!("B2.2b: Perform inference -- effect {:?}", label)
+        }
     }
 }
 
