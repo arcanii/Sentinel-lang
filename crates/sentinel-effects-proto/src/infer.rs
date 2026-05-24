@@ -47,11 +47,10 @@ pub enum TypeError {
     /// in the body's effect row.
     #[error("handler arm {label:?} names an effect not present in the row")]
     HandlerLabelNotInRow { label: String, span: Span },
-    /// B3.0: `handle e with { ... }` is parseable but not yet typed.
-    /// B3.1 introduces row subtraction and the full typing rule
-    /// (ADR 0007 D3, D4); this variant is removed at that point.
-    #[error("handlers are not yet supported (B3.1 lands typing)")]
-    HandlersNotYetSupported { span: Span },
+    /// B3.1 (ADR 0007 D2): two arms of one handler share a label.
+    /// Parser accepts duplicates; typing rejects them.
+    #[error("handler contains two arms for effect {label:?}")]
+    DuplicateHandlerArm { label: String, span: Span },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -767,9 +766,107 @@ pub fn infer(
                 row_union(&r_arg_resolved, &perform_row, &s_unif, expr.span, supply)?;
             Ok((s_final, decl_ret, row))
         }
-        // B3.0: handler surface parses but typing arrives in B3.1.
-        ExprKind::Handle { .. } => {
-            Err(TypeError::HandlersNotYetSupported { span: expr.span })
+        // B3.1 (ADR 0007 D3): handler typing rule.
+        //
+        // Strategy:
+        //   1. Infer body, get (t_body, r_body).
+        //   2. Check duplicate arm labels.
+        //   3. Peel each arm label out of r_body via row_split,
+        //      threading substitution. Collect per-arm (arg_ty, ret_ty).
+        //      Final residual is r_outer (the row of the handle expr,
+        //      modulo additional effects performed by arm bodies).
+        //   4. Mint t_result. Type each arm body under env extended
+        //      with x : arg_ty and k : ret_ty -> t_result ! r_outer.
+        //      Unify each arm-body type with t_result. Union each
+        //      arm-body row into r_accumulated.
+        //   5. Type the return arm (or default to identity: t_body =
+        //      t_result). Union its row into r_accumulated.
+        //   6. Return (s_final, t_result, r_accumulated).
+        ExprKind::Handle { body, arms, ret_arm } => {
+            let (s0, t_body, r_body) = infer(env, eff_env, body, supply)?;
+
+            for i in 0..arms.len() {
+                for j in (i + 1)..arms.len() {
+                    if arms[i].label == arms[j].label {
+                        return Err(TypeError::DuplicateHandlerArm {
+                            label: arms[j].label.clone(),
+                            span: arms[j].label_span,
+                        });
+                    }
+                }
+            }
+
+            let mut s_acc = s0;
+            let mut r_current = s_acc.apply_row(&r_body);
+            let mut arm_sigs: Vec<(Ty, Ty)> = Vec::with_capacity(arms.len());
+            for arm in arms {
+                let (sig, residual, s_next) =
+                    row_split(&s_acc, &r_current, &arm.label, arm.label_span, supply)?;
+                arm_sigs.push(sig);
+                r_current = s_next.apply_row(&residual);
+                s_acc = s_next;
+            }
+            let r_outer_initial = r_current.clone();
+
+            let t_result = supply.fresh_ty();
+            let mut r_accumulated = r_outer_initial.clone();
+            for (arm, (arg_ty, ret_ty)) in arms.iter().zip(arm_sigs.into_iter()) {
+                let kont_ty = Ty::arrow_with(
+                    ret_ty,
+                    r_outer_initial.clone(),
+                    t_result.clone(),
+                );
+                let env_arm = env
+                    .apply(&s_acc)
+                    .extend(arm.arg.clone(), Scheme::mono(arg_ty))
+                    .extend(arm.kont.clone(), Scheme::mono(kont_ty));
+                let (s_i, t_arm_body, r_arm_body) =
+                    infer(&env_arm, eff_env, &arm.body, supply)?;
+                s_acc = s_i;
+                s_acc = unify(&s_acc, &t_arm_body, &t_result, arm.body.span, supply)?;
+                let r_arm_body_resolved = s_acc.apply_row(&r_arm_body);
+                let r_accumulated_resolved = s_acc.apply_row(&r_accumulated);
+                let (r_union, s_next) = row_union(
+                    &r_accumulated_resolved,
+                    &r_arm_body_resolved,
+                    &s_acc,
+                    arm.body.span,
+                    supply,
+                )?;
+                r_accumulated = r_union;
+                s_acc = s_next;
+            }
+
+            match ret_arm {
+                Some(ra) => {
+                    let t_body_resolved = s_acc.apply(&t_body);
+                    let env_ret = env
+                        .apply(&s_acc)
+                        .extend(ra.var.clone(), Scheme::mono(t_body_resolved));
+                    let (s_r, t_ret_body, r_ret_body) =
+                        infer(&env_ret, eff_env, &ra.body, supply)?;
+                    s_acc = s_r;
+                    s_acc = unify(&s_acc, &t_ret_body, &t_result, ra.body.span, supply)?;
+                    let r_ret_resolved = s_acc.apply_row(&r_ret_body);
+                    let r_accumulated_resolved = s_acc.apply_row(&r_accumulated);
+                    let (r_union, s_next) = row_union(
+                        &r_accumulated_resolved,
+                        &r_ret_resolved,
+                        &s_acc,
+                        ra.body.span,
+                        supply,
+                    )?;
+                    r_accumulated = r_union;
+                    s_acc = s_next;
+                }
+                None => {
+                    s_acc = unify(&s_acc, &t_body, &t_result, body.span, supply)?;
+                }
+            }
+
+            let ty = s_acc.apply(&t_result);
+            let row = s_acc.apply_row(&r_accumulated);
+            Ok((s_acc, ty, row))
         }
     }
 }
@@ -1458,18 +1555,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn b30_handle_in_infer_is_handlers_not_yet_supported() {
-        use crate::lexer::lex;
-        use crate::parser::parse;
-        let toks = lex("handle e with { Get(x, k) => k }").unwrap();
-        let e = parse(&toks).unwrap();
-        let err = infer_top(&e).unwrap_err();
-        assert!(
-            matches!(err, TypeError::HandlersNotYetSupported { .. }),
-            "expected HandlersNotYetSupported, got {err:?}"
-        );
-    }
 
     #[test]
     fn b23b2_perform_with_bool_arg_type_declared() {
@@ -1653,6 +1738,114 @@ mod tests {
             other => panic!("expected HandlerLabelNotInRow, got {other:?}"),
         }
     }
+    fn type_program(src: &str) -> Result<Ty, TypeError> {
+        let toks = crate::lexer::lex(src).expect("lex");
+        let prog = crate::parser::parse_program(&toks).expect("parse");
+        infer_program(&prog)
+    }
+
+    #[test]
+    fn b31b_handle_identity_discharges_effect() {
+        // Body performs Get; handler discharges it via k(x). Result
+        // type is the declared return type of Get.
+        let src = "effect Get : Int -> Int ; handle do Get(1) with { Get(x, k) => k(x) }";
+        let ty = type_program(src).expect("should type-check");
+        assert_eq!(ty, Ty::Int);
+    }
+
+    #[test]
+    fn b31b_handle_two_arms_discharges_both() {
+        let src = "\
+            effect Get : Int -> Int ; \
+            effect Put : Int -> Int ; \
+            handle do Get(1) + do Put(2) with { \
+                Get(x, k) => k(x), \
+                Put(y, k) => k(y) \
+            }";
+        let ty = type_program(src).expect("should type-check");
+        assert_eq!(ty, Ty::Int);
+    }
+
+    #[test]
+    fn b31b_handle_return_arm_transforms_result_type() {
+        // Body returns Int (from Get); return arm wraps it into Bool
+        // via a comparison. Result type should be Bool, not Int.
+        let src = "\
+            effect Get : Int -> Int ; \
+            handle do Get(1) with { \
+                Get(x, k) => k(x), \
+                return v => v == 0 \
+            }";
+        let ty = type_program(src).expect("should type-check");
+        assert_eq!(ty, Ty::Bool);
+    }
+
+    #[test]
+    fn b31b_handle_missing_label_in_row_is_error() {
+        // Body has only Get; handler arm names Put. row_split should
+        // error with HandlerLabelNotInRow on Put.
+        let src = "\
+            effect Get : Int -> Int ; \
+            effect Put : Int -> Int ; \
+            handle do Get(1) with { Put(y, k) => k(y) }";
+        let err = type_program(src).expect_err("Put not in body's row");
+        match err {
+            TypeError::HandlerLabelNotInRow { label, .. } => {
+                assert_eq!(label, "Put");
+            }
+            other => panic!("expected HandlerLabelNotInRow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b31b_handle_duplicate_arm_is_error() {
+        let src = "\
+            effect Get : Int -> Int ; \
+            handle do Get(1) with { Get(x, k) => k(x), Get(y, k) => k(y) }";
+        let err = type_program(src).expect_err("duplicate Get arm");
+        match err {
+            TypeError::DuplicateHandlerArm { label, .. } => {
+                assert_eq!(label, "Get");
+            }
+            other => panic!("expected DuplicateHandlerArm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b31b_handle_arm_body_can_perform_residual_effect() {
+        // Handler discharges Get but the arm body performs Put. The
+        // resulting handle expression's row should contain Put.
+        let src = "\
+            effect Get : Int -> Int ; \
+            effect Put : Int -> Int ; \
+            handle do Get(1) with { Get(x, k) => do Put(x) }";
+        // We can't easily inspect the row from infer_program (which
+        // closes rows per ADR 0006 D6). What we can assert is that
+        // this type-checks at all, i.e. the arm body's effect doesn't
+        // confuse the rule.
+        let ty = type_program(src).expect("should type-check");
+        assert_eq!(ty, Ty::Int);
+    }
+
+    #[test]
+    fn b31b_handle_arm_body_type_must_match_other_arms() {
+        // Two arms with different body types should be rejected by
+        // unification: arm 1 returns k(x): Int; arm 2 returns 'true':
+        // Bool. Both must equal t_result, so one fails.
+        let src = "\
+            effect Get : Int -> Int ; \
+            effect Put : Int -> Int ; \
+            handle do Get(1) + do Put(2) with { \
+                Get(x, k) => k(x), \
+                Put(y, k) => true \
+            }";
+        let err = type_program(src).expect_err("arm body type mismatch");
+        match err {
+            TypeError::Mismatch { .. } => {}
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+    }
+
 
 
 }

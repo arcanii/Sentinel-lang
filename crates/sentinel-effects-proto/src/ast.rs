@@ -74,9 +74,9 @@ pub enum ExprKind {
     },
     /// `handle body with { L(x, k) => arm_body, ..., return v => ret_body }`.
     ///
-    /// B3.0: parser/AST only. Inference and eval reject this with
-    /// `HandlersNotYetSupported` until B3.1 (typing) and B3.2
-    /// (runtime) land. See ADR 0007.
+    /// B3.1: typed per ADR 0007 D3. Runtime is still a placeholder
+    /// (`EvalError::HandlersNotYetSupported`) until B3.2 lands the
+    /// operation-reification model (D5).
     Handle {
         body: Box<Expr>,
         arms: Vec<HandlerArm>,

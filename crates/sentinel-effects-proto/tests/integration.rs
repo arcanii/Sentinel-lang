@@ -93,15 +93,14 @@ fn pipeline_perform_undeclared_label_is_unknown_effect() {
 }
 
 #[test]
-fn pipeline_handle_surface_is_handlers_not_yet_supported() {
-    // B3.0: handler surface parses cleanly but inference rejects with
-    // a dedicated placeholder. B3.1 will replace this with the real
-    // typing rule (ADR 0007 D3).
-    use sentinel_effects_proto::{MiniError, TypeError};
-    let source = "handle 1 with { Get(x, k) => k }";
-    let err = run(source).expect_err("handlers not yet supported");
+fn pipeline_handle_typechecks_then_runtime_is_placeholder() {
+    // B3.1: handlers type-check end-to-end. Runtime still has
+    // EvalError::HandlersNotYetSupported until B3.2 (ADR 0007 D5).
+    use sentinel_effects_proto::MiniError;
+    let source = "effect Get : Int -> Int ; handle do Get(1) with { Get(x, k) => k(x) }";
+    let err = run(source).expect_err("eval placeholder still fires");
     assert!(
-        matches!(err, MiniError::Type(TypeError::HandlersNotYetSupported { .. })),
-        "expected HandlersNotYetSupported, got {err:?}"
+        matches!(err, MiniError::Eval(_)),
+        "expected MiniError::Eval, got {err:?}"
     );
 }
