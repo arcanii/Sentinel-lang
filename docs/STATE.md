@@ -217,6 +217,7 @@ absorbed.
 | B0    | Scaffold: lex + parse + eval, no types or effects  | Done   | d090ca1 |
 | B1    | HM type inference, letrec, span-tracked errors     | Done   | e6b06cd |
 | B2.0  | Row scaffold: Ty::Fun carries empty Row            | Done   | 2cd81a7 |
+| B2.1  | Remy-style row unification                         | Done   | 323ab33 |
 | B2    | Effect rows and effect declarations                | In progress |   |
 | B3    | Effect handlers (handle .. with ..)                | Planned |        |
 | B4    | Secret T qualifier and constant-time check         | Planned |        |
@@ -234,6 +235,13 @@ Test coverage as of B2.0: 98 tests (B1 carry-over 95 + 3 new in
 `lib.rs` because widening `Ty::Fun` with `Row` pushed
 `TypeError::Mismatch` over the 128-byte threshold. See B.5
 design decision 12.
+
+Test coverage as of B2.1: 111 tests (B2.0 carry-over 98 + 13 new
+in `infer.rs`: ~10 `b21_unify_row_*` cases covering empty rows,
+var binding, matching labels, mismatched payloads, label
+rewriting, occurs-check, disjoint open tails, and closed-row
+failures; ~3 row display tests). Clippy clean under
+`-D warnings`. See B.5 design decision 13.
 
 B1 landed across five commits: spans + Spanned AST + `let rec`
 (abfb3d9), types scaffold (b3589ea), inference driver wired into
@@ -360,6 +368,20 @@ crate root in B1.
     crate-wide because `Row` pushed `TypeError` past the lint's
     128-byte threshold; STATE.md decision 5 already documented
     that effects-proto does not optimise error shape.
+13. (B2.1) Row unification follows Remy 1989 / Leijen's
+    extensible records: `unify_row` handles empty-vs-empty,
+    var binding (with `row_occurs` check), matching `Cons`
+    heads by recursing on arg/ret/tail, and label rewriting
+    via `rewrite_row` when heads differ. Two new
+    `TypeError` variants `RowMismatch` and `RowOccursCheck`
+    carry the offending row and span. `unify` now threads
+    `&mut TyVarSupply` to mint fresh row tails during
+    rewriting; all call sites (App, If, BinOp, LetRec) were
+    updated. Unit tests use `RowVar` IDs >= 100 to avoid
+    collisions with the fresh-supply counter (which starts
+    at 0). Inference still mints only `Row::Empty` at
+    lambda introduction; user-visible effect behaviour
+    arrives in B2.3.
 
 ### B.6 Known Limitations (intentional at B1)
 
