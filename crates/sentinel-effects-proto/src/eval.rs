@@ -55,13 +55,26 @@ pub enum EvalError {
     /// `EffectNotYetSupported`.
     #[error("handlers are not yet supported at runtime (B3.2 lands eval)")]
     HandlersNotYetSupported,
+    /// B3.2a: defence-in-depth for the runtime top level. If a
+    /// `Step::Op` escapes [`eval`] all the way up to [`crate::run`],
+    /// the inference pass either did not run or has a bug — the row
+    /// of a closed top-level program is `Empty`, so no operation
+    /// should be reachable here. This variant is the runtime
+    /// counterpart of B2.2b's `EffectNotYetSupported`.
+    #[error("unhandled operation at top level: {label}")]
+    UnhandledOpAtTopLevel { label: String },
+    /// B3.2a: one-shot enforcement. Second call to
+    /// [`Continuation::resume`] surfaces this. Keeps multi-shot
+    /// extensibility open without committing to it.
+    #[error("continuation already resumed (one-shot)")]
+    ContinuationAlreadyResumed,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Env(Option<Arc<EnvCell>>);
 
 #[derive(Debug)]
-struct EnvCell {
+pub(crate) struct EnvCell {
     name: String,
     value: OnceLock<Value>,
     rest: Env,
@@ -107,6 +120,88 @@ impl Env {
     }
 }
 
+#[derive(Debug)]
+pub enum Step {
+    Value(Value),
+    Op {
+        label: String,
+        arg: Value,
+        kont: Continuation,
+    },
+}
+
+#[derive(Debug)]
+pub struct Continuation {
+    frames: Vec<Frame>,
+    resumed: std::cell::Cell<bool>,
+}
+
+impl Continuation {
+    pub fn empty() -> Self {
+        Self {
+            frames: Vec::new(),
+            resumed: std::cell::Cell::new(false),
+        }
+    }
+
+    pub(crate) fn push(&mut self, f: Frame) {
+        self.frames.push(f);
+    }
+
+    pub fn resume(self, _v: Value) -> Result<Step, EvalError> {
+        if self.resumed.get() {
+            return Err(EvalError::ContinuationAlreadyResumed);
+        }
+        self.resumed.set(true);
+        todo!("B3.2b: walk self.frames in reverse, threading Value through each frame's resume semantics")
+    }
+}
+
+/// B3.2a: every variant is constructed at frame-push sites in
+/// `eval`, but no variant is destructured until B3.2b lands
+/// `Continuation::resume`. `PerformReify` additionally has no
+/// construction site yet because the `Perform` arm is still the
+/// B2.2b placeholder. The blanket allow is removed in B3.2b.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) enum Frame {
+    LetBody {
+        name: String,
+        body: Arc<Expr>,
+        env: Env,
+    },
+    LetRecBody {
+        cell: Arc<EnvCell>,
+        body: Arc<Expr>,
+        rec_env: Env,
+    },
+    IfBranch {
+        then_branch: Arc<Expr>,
+        else_branch: Arc<Expr>,
+        env: Env,
+    },
+    AppArg {
+        arg: Arc<Expr>,
+        env: Env,
+    },
+    AppCall {
+        func: Value,
+    },
+    BinOpRight {
+        op: BinOp,
+        rhs: Arc<Expr>,
+        env: Env,
+    },
+    BinOpApply {
+        op: BinOp,
+        lhs: Value,
+    },
+    PerformReify {
+        label: String,
+    },
+}
+
+
 fn type_name(v: &Value) -> &'static str {
     match v {
         Value::Int(_) => "int",
@@ -115,39 +210,84 @@ fn type_name(v: &Value) -> &'static str {
     }
 }
 
-pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
+pub fn eval(expr: &Expr, env: &Env) -> Result<Step, EvalError> {
     match &expr.node {
-        ExprKind::Int(n) => Ok(Value::Int(*n)),
-        ExprKind::Bool(b) => Ok(Value::Bool(*b)),
-        ExprKind::Var(name) => env.lookup(name),
+        ExprKind::Int(n) => Ok(Step::Value(Value::Int(*n))),
+        ExprKind::Bool(b) => Ok(Step::Value(Value::Bool(*b))),
+        ExprKind::Var(name) => env.lookup(name).map(Step::Value),
         ExprKind::Let { name, value, body } => {
-            let v = eval(value, env)?;
-            eval(body, &env.extend(name.clone(), v))
+            match eval(value, env)? {
+                Step::Value(v) => eval(body, &env.extend(name.clone(), v)),
+                Step::Op { label, arg, mut kont } => {
+                    kont.push(Frame::LetBody {
+                        name: name.clone(),
+                        body: Arc::new((**body).clone()),
+                        env: env.clone(),
+                    });
+                    Ok(Step::Op { label, arg, kont })
+                }
+            }
         }
         ExprKind::LetRec { name, value, body } => {
             let (rec_env, cell) = env.extend_unset(name.clone());
-            let v = eval(value, &rec_env)?;
-            cell.value
-                .set(v)
-                .map_err(|_| EvalError::LetRecUninitialised)?;
-            eval(body, &rec_env)
-        }
-        ExprKind::If { cond, then_branch, else_branch } => {
-            let c = eval(cond, env)?;
-            match c {
-                Value::Bool(true) => eval(then_branch, env),
-                Value::Bool(false) => eval(else_branch, env),
-                other => Err(EvalError::Type { expected: "bool", got: type_name(&other) }),
+            match eval(value, &rec_env)? {
+                Step::Value(v) => {
+                    cell.value
+                        .set(v)
+                        .map_err(|_| EvalError::LetRecUninitialised)?;
+                    eval(body, &rec_env)
+                }
+                Step::Op { label, arg, mut kont } => {
+                    kont.push(Frame::LetRecBody {
+                        cell,
+                        body: Arc::new((**body).clone()),
+                        rec_env,
+                    });
+                    Ok(Step::Op { label, arg, kont })
+                }
             }
         }
-        ExprKind::Lambda { param, body } => Ok(Value::Closure {
+        ExprKind::If { cond, then_branch, else_branch } => {
+            match eval(cond, env)? {
+                Step::Value(Value::Bool(true)) => eval(then_branch, env),
+                Step::Value(Value::Bool(false)) => eval(else_branch, env),
+                Step::Value(other) => Err(EvalError::Type {
+                    expected: "bool",
+                    got: type_name(&other),
+                }),
+                Step::Op { label, arg, mut kont } => {
+                    kont.push(Frame::IfBranch {
+                        then_branch: Arc::new((**then_branch).clone()),
+                        else_branch: Arc::new((**else_branch).clone()),
+                        env: env.clone(),
+                    });
+                    Ok(Step::Op { label, arg, kont })
+                }
+            }
+        }
+        ExprKind::Lambda { param, body } => Ok(Step::Value(Value::Closure {
             param: param.clone(),
             body: Arc::new((**body).clone()),
             env: env.clone(),
-        }),
+        })),
         ExprKind::App { callee, arg } => {
-            let f = eval(callee, env)?;
-            let a = eval(arg, env)?;
+            let f = match eval(callee, env)? {
+                Step::Value(v) => v,
+                Step::Op { label, arg: op_arg, mut kont } => {
+                    kont.push(Frame::AppArg {
+                        arg: Arc::new((**arg).clone()),
+                        env: env.clone(),
+                    });
+                    return Ok(Step::Op { label, arg: op_arg, kont });
+                }
+            };
+            let a = match eval(arg, env)? {
+                Step::Value(v) => v,
+                Step::Op { label, arg: op_arg, mut kont } => {
+                    kont.push(Frame::AppCall { func: f });
+                    return Ok(Step::Op { label, arg: op_arg, kont });
+                }
+            };
             match f {
                 Value::Closure { param, body, env: captured } => {
                     eval(&body, &captured.extend(param, a))
@@ -156,9 +296,25 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Value, EvalError> {
             }
         }
         ExprKind::BinOp { op, lhs, rhs } => {
-            let l = eval(lhs, env)?;
-            let r = eval(rhs, env)?;
-            eval_binop(*op, l, r)
+            let l = match eval(lhs, env)? {
+                Step::Value(v) => v,
+                Step::Op { label, arg, mut kont } => {
+                    kont.push(Frame::BinOpRight {
+                        op: *op,
+                        rhs: Arc::new((**rhs).clone()),
+                        env: env.clone(),
+                    });
+                    return Ok(Step::Op { label, arg, kont });
+                }
+            };
+            let r = match eval(rhs, env)? {
+                Step::Value(v) => v,
+                Step::Op { label, arg, mut kont } => {
+                    kont.push(Frame::BinOpApply { op: *op, lhs: l });
+                    return Ok(Step::Op { label, arg, kont });
+                }
+            };
+            eval_binop(*op, l, r).map(Step::Value)
         }
         // B2.2b: unreachable through the pipeline (inference catches
         // it first), but if eval is called directly we surface a
@@ -206,7 +362,12 @@ mod tests {
         let toks = lex(src)?;
         let expr = parse(&toks)?;
         crate::infer::infer_top(&expr).map_err(MiniError::Type)?;
-        Ok(eval(&expr, &Env::empty())?)
+        match eval(&expr, &Env::empty())? {
+            Step::Value(v) => Ok(v),
+            Step::Op { label, .. } => Err(MiniError::Eval(
+                EvalError::UnhandledOpAtTopLevel { label },
+            )),
+        }
     }
 
     #[test]
@@ -292,7 +453,7 @@ mod tests {
         // Bypass infer; call eval on a Perform node directly.
         let toks = crate::lexer::lex("do Print(1)").unwrap();
         let expr = crate::parser::parse(&toks).unwrap();
-        let err = eval(&expr, &Env::empty()).expect_err("eval should reject Perform");
+        let err = eval(&expr, &Env::empty()).err().expect("eval should reject Perform");
         match err {
             EvalError::EffectNotYetSupported(label) => assert_eq!(label, "Print"),
             other => panic!("expected EffectNotYetSupported, got {other:?}"),

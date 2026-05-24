@@ -35,7 +35,7 @@ pub mod span;
 pub mod types;
 
 pub use ast::{expr, BinOp, EffectDecl, Expr, ExprKind, Program, TyExpr};
-pub use eval::{eval, Env, EvalError, Value};
+pub use eval::{eval, Env, EvalError, Step, Value};
 pub use infer::{
     generalize, infer, infer_program, infer_top, instantiate, unify, EffectEnv, Subst,
     TyVarSupply, TypeEnv, TypeError,
@@ -58,7 +58,12 @@ pub fn run(source: &str) -> Result<Value, MiniError> {
     // until B2.3.
     let program = parse_program(&tokens).map_err(MiniError::Parse)?;
     infer_program(&program).map_err(MiniError::Type)?;
-    eval(&program.body, &Env::empty()).map_err(MiniError::Eval)
+    match eval(&program.body, &Env::empty()).map_err(MiniError::Eval)? {
+        Step::Value(v) => Ok(v),
+        Step::Op { label, .. } => Err(MiniError::Eval(
+            EvalError::UnhandledOpAtTopLevel { label },
+        )),
+    }
 }
 
 /// Top-level error type spanning every pipeline stage.
