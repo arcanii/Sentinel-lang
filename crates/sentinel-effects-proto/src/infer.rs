@@ -33,7 +33,13 @@ pub enum TypeError {
     /// or evaluated. Real handling lands in B2.3 (inference) and
     /// B3 (handlers).
     #[error("effect {label:?} cannot be performed yet (effect inference arrives in B2.3, handlers in B3)")]
+    #[allow(dead_code)]
     EffectNotYetSupported { label: String, span: Span },
+    /// B2.3b2 (ADR 0005 D9): `do Label(arg)` whose label is not in
+    /// the program's effect environment. Replaces the placeholder
+    /// `EffectNotYetSupported` once Perform is wired through.
+    #[error("unknown effect {label:?} (no matching `effect` declaration in scope)")]
+    UnknownEffect { label: String, span: Span },
     /// B2.3a (ADR 0005 D6): residual non-empty row at `infer_top`.
     /// Variant + strict-check landed inert in B2.3a per the divergence
     /// note in ADR 0005 D9; B2.3b makes the check reachable when
@@ -623,13 +629,32 @@ pub fn infer(
                 row_union(&r_lhs_resolved, &r_rhs_resolved, &s_final, expr.span, supply)?;
             Ok((s_done, result_ty, row))
         }
-        // B2.2b: parser accepts `do Label(arg)`, inference rejects it
-        // with a dedicated error until B2.3 wires real effect rows.
-        ExprKind::Perform { label, label_span, .. } => {
-            Err(TypeError::EffectNotYetSupported {
+        // B2.3b2 (ADR 0005 D9): Perform looks up the label in the
+        // program's effect environment. Unknown labels are a type
+        // error; known labels infer the arg, unify it against the
+        // declared arg type, and contribute a single-label Cons row.
+        ExprKind::Perform { label, arg, label_span, .. } => {
+            let (decl_arg, decl_ret) = match eff_env.get(label) {
+                Some(pair) => pair.clone(),
+                None => {
+                    return Err(TypeError::UnknownEffect {
+                        label: label.clone(),
+                        span: *label_span,
+                    });
+                }
+            };
+            let (s_arg, t_arg, r_arg) = infer(env, eff_env, arg, supply)?;
+            let s_unif = unify(&s_arg, &t_arg, &decl_arg, arg.span, supply)?;
+            let r_arg_resolved = s_unif.apply_row(&r_arg);
+            let perform_row = Row::Cons {
                 label: label.clone(),
-                span: *label_span,
-            })
+                arg: Box::new(decl_arg.clone()),
+                ret: Box::new(decl_ret.clone()),
+                tail: Box::new(Row::Empty),
+            };
+            let (row, s_final) =
+                row_union(&r_arg_resolved, &perform_row, &s_unif, expr.span, supply)?;
+            Ok((s_final, decl_ret, row))
         }
     }
 }
@@ -666,11 +691,18 @@ pub fn infer_top(expr: &Expr) -> Result<Ty, TypeError> {
 /// labels through an environment so `do Label(arg)` infers a
 /// proper effect row, and handlers in B3 will discharge them.
 pub fn infer_program(prog: &crate::ast::Program) -> Result<Ty, TypeError> {
-    // B2.3a: synthesise an empty EffectEnv and discard the residual
-    // row (D6: infer_program is permissive at B2 scope). B2.3b will
-    // populate eff_env from prog.effects and reuse this body shape.
+    // B2.3b2 (ADR 0005 D9): populate the EffectEnv from prog.effects
+    // so `do Label(arg)` resolves against declared labels. Residual
+    // row is still discarded (D6: infer_program is permissive at B2
+    // scope; handlers in B3 will discharge rows for real).
     let mut supply = TyVarSupply::new();
-    let eff_env: EffectEnv = HashMap::new();
+    let mut eff_env: EffectEnv = HashMap::new();
+    for decl in &prog.effects {
+        eff_env.insert(
+            decl.label.clone(),
+            (decl.arg.to_ty(), decl.ret.to_ty()),
+        );
+    }
     let (s, t, _r) = infer(&TypeEnv::empty(), &eff_env, &prog.body, &mut supply)?;
     // B2.3b1 (ADR 0006 D3): same default-close policy as infer_top.
     Ok(s.apply(&t).close_rows())
@@ -1155,32 +1187,106 @@ mod tests {
     }
     // ---- B2.2b: Perform inference rejection ----
 
+    // ---- B2.3b2: Perform inference (replaces B2.2b placeholders) ----
+
     #[test]
-    fn b22b_perform_alone_is_type_error() {
+    fn b23b2_perform_undeclared_label_is_unknown_effect() {
         let toks = crate::lexer::lex("do Print(1)").unwrap();
         let expr = crate::parser::parse(&toks).unwrap();
-        let err = infer_top(&expr).expect_err("do should fail type-check in B2.2b");
+        let err = infer_top(&expr).expect_err("undeclared Print should fail");
         match err {
-            TypeError::EffectNotYetSupported { label, .. } => {
-                assert_eq!(label, "Print");
-            }
-            other => panic!("expected EffectNotYetSupported, got {other:?}"),
+            TypeError::UnknownEffect { label, .. } => assert_eq!(label, "Print"),
+            other => panic!("expected UnknownEffect, got {other:?}"),
         }
     }
 
     #[test]
-    fn b22b_perform_error_span_targets_label_not_do_keyword() {
+    fn b23b2_unknown_effect_span_targets_label_not_do_keyword() {
         let src = "do Print(1)";
         let toks = crate::lexer::lex(src).unwrap();
         let expr = crate::parser::parse(&toks).unwrap();
         let err = infer_top(&expr).expect_err("should fail");
         match err {
-            TypeError::EffectNotYetSupported { span, .. } => {
-                // Label `Print` lives at bytes 3..8 in "do Print(1)".
+            TypeError::UnknownEffect { span, .. } => {
                 assert_eq!(&src[span.start as usize .. span.end as usize], "Print");
             }
-            other => panic!("expected EffectNotYetSupported, got {other:?}"),
+            other => panic!("expected UnknownEffect, got {other:?}"),
         }
+    }
+
+    fn infer_prog(src: &str) -> Result<Ty, TypeError> {
+        let toks = crate::lexer::lex(src).unwrap();
+        let prog = crate::parser::parse_program(&toks).unwrap();
+        infer_program(&prog)
+    }
+
+    #[test]
+    fn b23b2_single_perform_with_declared_label_infers_ret_ty() {
+        let src = "effect Print : Int -> Bool ; do Print(1)";
+        assert_eq!(infer_prog(src).unwrap(), Ty::Bool);
+    }
+
+    #[test]
+    fn b23b2_perform_in_let_body_infers_ret_ty() {
+        let src = "effect Ask : Int -> Int ; let x = 1 in do Ask(x)";
+        assert_eq!(infer_prog(src).unwrap(), Ty::Int);
+    }
+
+    #[test]
+    fn b23b2_perform_inside_lambda_infers_arrow() {
+        // The lambda is pure-typed at B2 (default-close); we just
+        // assert it type-checks and yields an Int -> Bool shape.
+        let src = "effect Print : Int -> Bool ; fn(x) => do Print(x)";
+        let t = infer_prog(src).unwrap();
+        match t {
+            Ty::Fun(arg, _row, ret) => {
+                assert_eq!(*arg, Ty::Int);
+                assert_eq!(*ret, Ty::Bool);
+            }
+            other => panic!("expected Fun, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b23b2_perform_arg_type_mismatch_is_type_error() {
+        // Print declared Int -> Bool; passing `true` is a mismatch.
+        let src = "effect Print : Int -> Bool ; do Print(true)";
+        let err = infer_prog(src).expect_err("Bool != Int should fail");
+        assert!(
+            matches!(err, TypeError::Mismatch { .. }),
+            "expected Mismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn b23b2_two_performs_unioned_in_binop_typecheck() {
+        // Both perform Int-returning effects; the sum is Int.
+        let src = "effect A : Int -> Int ; effect B : Int -> Int ; do A(1) + do B(2)";
+        assert_eq!(infer_prog(src).unwrap(), Ty::Int);
+    }
+
+    #[test]
+    fn b23b2_perform_then_pure_body_typechecks() {
+        // Sequenced via let; binding has effects, body is pure.
+        let src = "effect Print : Int -> Bool ; let _b = do Print(1) in 42";
+        assert_eq!(infer_prog(src).unwrap(), Ty::Int);
+    }
+
+    #[test]
+    fn b23b2_unknown_label_in_program_with_other_decls() {
+        // `Ask` is declared, `Print` is not.
+        let src = "effect Ask : Int -> Int ; do Print(1)";
+        let err = infer_prog(src).expect_err("Print is undeclared");
+        match err {
+            TypeError::UnknownEffect { label, .. } => assert_eq!(label, "Print"),
+            other => panic!("expected UnknownEffect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b23b2_perform_with_bool_arg_type_declared() {
+        let src = "effect Log : Bool -> Int ; do Log(true)";
+        assert_eq!(infer_prog(src).unwrap(), Ty::Int);
     }
 
     // ---------- B2.3b1: row_union unit tests ----------

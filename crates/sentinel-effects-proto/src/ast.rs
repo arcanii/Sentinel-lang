@@ -114,6 +114,20 @@ impl TyExpr {
             TyExpr::Arrow(_, _, s) => *s,
         }
     }
+
+    /// B2.3b2: convert a surface `TyExpr` (from an `effect` decl) into
+    /// a core `Ty`. Arrows use `Row::Empty` since effect-decl arrow
+    /// annotations describe pure handler shapes at B2 scope; B3 will
+    /// revisit when handlers can declare residual effects on their
+    /// return arrows.
+    pub fn to_ty(&self) -> crate::types::Ty {
+        use crate::types::{Row, Ty};
+        match self {
+            TyExpr::Int(_) => Ty::Int,
+            TyExpr::Bool(_) => Ty::Bool,
+            TyExpr::Arrow(a, b, _) => Ty::arrow_with(a.to_ty(), Row::Empty, b.to_ty()),
+        }
+    }
 }
 
 /// A single `effect Label : ArgTy -> RetTy ;` declaration.

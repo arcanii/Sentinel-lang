@@ -63,15 +63,29 @@ fn pipeline_effect_decl_with_pure_body_evaluates() {
 }
 
 #[test]
-fn pipeline_perform_is_type_error_in_b22b() {
-    use sentinel_effects_proto::{MiniError, TypeError};
+fn pipeline_perform_with_declared_effect_typechecks_and_evaluates() {
+    // B2.3b2: with `Print` declared, `do Print(1)` type-checks. The
+    // evaluator still rejects perform at runtime (no handlers until
+    // B3), so we assert the eval-side error rather than a value.
+    use sentinel_effects_proto::MiniError;
     let source = "effect Print : Int -> Bool ; do Print(1)";
-    let err = run(source).expect_err("do should be rejected until B2.3");
+    let err = run(source).expect_err("evaluator has no handlers yet");
+    assert!(
+        matches!(err, MiniError::Eval(_)),
+        "expected an Eval error (not Type), got {err:?}"
+    );
+}
+
+#[test]
+fn pipeline_perform_undeclared_label_is_unknown_effect() {
+    use sentinel_effects_proto::{MiniError, TypeError};
+    let source = "do Print(1)";
+    let err = run(source).expect_err("undeclared Print should fail type-check");
     match &err {
-        MiniError::Type(TypeError::EffectNotYetSupported { label, .. }) => {
+        MiniError::Type(TypeError::UnknownEffect { label, .. }) => {
             assert_eq!(label, "Print");
         }
-        other => panic!("expected EffectNotYetSupported, got {other:?}"),
+        other => panic!("expected UnknownEffect, got {other:?}"),
     }
     let rendered = err.render(source);
     assert!(rendered.starts_with("type error:"), "header: {rendered}");
