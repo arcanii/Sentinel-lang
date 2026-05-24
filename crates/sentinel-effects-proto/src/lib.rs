@@ -110,6 +110,7 @@ impl MiniError {
                     TypeError::RowOccursCheck { span, .. } => Some(*span),
                     TypeError::UnknownEffect { span, .. } => Some(*span),
                     TypeError::UnhandledEffects { span, .. } => Some(*span),
+                    TypeError::HandlerLabelNotInRow { span, .. } => Some(*span),
                     TypeError::HandlersNotYetSupported { span } => Some(*span),
                 };
                 render(source, span, "type error", &e.to_string())

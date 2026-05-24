@@ -43,6 +43,10 @@ pub enum TypeError {
     /// Lambda/Perform start populating the row.
     #[error("unhandled effects: residual row {row} at top level")]
     UnhandledEffects { row: Row, span: Span },
+    /// B3.1 (ADR 0007 D4): handler arm names a label not present
+    /// in the body's effect row.
+    #[error("handler arm {label:?} names an effect not present in the row")]
+    HandlerLabelNotInRow { label: String, span: Span },
     /// B3.0: `handle e with { ... }` is parseable but not yet typed.
     /// B3.1 introduces row subtraction and the full typing rule
     /// (ADR 0007 D3, D4); this variant is removed at that point.
@@ -318,6 +322,69 @@ fn rewrite_row(
                 Ok((reconstructed, s1))
             }
         }
+    }
+}
+
+/// B3.1 (ADR 0007 D4): row subtraction. Given a row `rho` and a
+/// label `L`, split out L's signature and return the residual row.
+///
+/// Cases mirror ADR 0007 D4:
+/// 1. `Row::Cons{L, a, r, t}` -> `Ok(((a, r), t))`.
+/// 2. `Row::Cons{L', a, r, t}` with `L' != L` -> recurse on `t`,
+///    reconstruct head on the residual.
+/// 3. `Row::Var(rho)` -> mint fresh `alpha`, `beta`, `tail`; bind
+///    `rho := Cons{L, alpha, beta, tail}`; return
+///    `((alpha, beta), Row::Var(tail))`. This case makes handlers
+///    compose with row-polymorphic callers.
+/// 4. `Row::Empty` -> `HandlerLabelNotInRow`.
+///
+/// Distinct from `rewrite_row` (which expects a known signature to
+/// unify against; used by `unify_row` for two-sided row matching).
+/// `row_split` reads the signature out as an output.
+fn row_split(
+    s: &Subst,
+    row: &Row,
+    label: &str,
+    span: Span,
+    supply: &mut TyVarSupply,
+) -> Result<((Ty, Ty), Row, Subst), TypeError> {
+    let row = s.apply_row(row);
+    match row {
+        Row::Cons { label: l, arg, ret, tail } => {
+            if label == l.as_str() {
+                Ok((((*arg).clone(), (*ret).clone()), (*tail).clone(), s.clone()))
+            } else {
+                let (sig, rest, s1) = row_split(s, &tail, label, span, supply)?;
+                let reconstructed = Row::Cons {
+                    label: l,
+                    arg,
+                    ret,
+                    tail: Box::new(rest),
+                };
+                Ok((sig, reconstructed, s1))
+            }
+        }
+        Row::Var(v) => {
+            let alpha = supply.fresh_ty();
+            let beta = supply.fresh_ty();
+            let fresh_tail = supply.fresh_row_var();
+            let bound = Row::Cons {
+                label: label.to_string(),
+                arg: Box::new(alpha.clone()),
+                ret: Box::new(beta.clone()),
+                tail: Box::new(Row::Var(fresh_tail)),
+            };
+            if row_occurs(v, &bound, s) {
+                return Err(TypeError::RowOccursCheck { var: v, row: bound, span });
+            }
+            let ext = Subst::singleton_row(v, bound);
+            let s1 = ext.compose(s);
+            Ok(((alpha, beta), Row::Var(fresh_tail), s1))
+        }
+        Row::Empty => Err(TypeError::HandlerLabelNotInRow {
+            label: label.to_string(),
+            span,
+        }),
     }
 }
 
@@ -1503,4 +1570,89 @@ mod tests {
         let ty = infer_program(&prog).expect("pure body must infer");
         assert_eq!(ty, Ty::Int);
     }
+    #[test]
+    fn b31_row_split_at_head_returns_signature_and_tail() {
+        let mut supply = TyVarSupply::new();
+        let row = Row::Cons {
+            label: "Get".to_string(),
+            arg: Box::new(Ty::Int),
+            ret: Box::new(Ty::Bool),
+            tail: Box::new(Row::Empty),
+        };
+        let (sig, residual, _s) =
+            row_split(&Subst::empty(), &row, "Get", Span::point(0), &mut supply).unwrap();
+        assert_eq!(sig.0, Ty::Int);
+        assert_eq!(sig.1, Ty::Bool);
+        assert_eq!(residual, Row::Empty);
+    }
+
+    #[test]
+    fn b31_row_split_deeper_reconstructs_head() {
+        let mut supply = TyVarSupply::new();
+        let row = Row::Cons {
+            label: "Put".to_string(),
+            arg: Box::new(Ty::Int),
+            ret: Box::new(Ty::Bool),
+            tail: Box::new(Row::Cons {
+                label: "Get".to_string(),
+                arg: Box::new(Ty::Bool),
+                ret: Box::new(Ty::Int),
+                tail: Box::new(Row::Empty),
+            }),
+        };
+        let (sig, residual, _s) =
+            row_split(&Subst::empty(), &row, "Get", Span::point(0), &mut supply).unwrap();
+        assert_eq!(sig.0, Ty::Bool);
+        assert_eq!(sig.1, Ty::Int);
+        // Put must still be present in the residual.
+        match residual {
+            Row::Cons { label, tail, .. } => {
+                assert_eq!(label, "Put");
+                assert_eq!(*tail, Row::Empty);
+            }
+            other => panic!("expected Put in residual, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b31_row_split_on_var_mints_fresh_signature_and_tail() {
+        let mut supply = TyVarSupply::new();
+        let v = supply.fresh_row_var();
+        let row = Row::Var(v);
+        let (sig, residual, s1) =
+            row_split(&Subst::empty(), &row, "Get", Span::point(0), &mut supply).unwrap();
+        // Signature components are fresh type vars.
+        assert!(matches!(sig.0, Ty::Var(_)));
+        assert!(matches!(sig.1, Ty::Var(_)));
+        // Residual is a fresh row var, different from the original.
+        match residual {
+            Row::Var(rv) => assert_ne!(rv, v),
+            other => panic!("expected fresh Row::Var, got {other:?}"),
+        }
+        // The original var is now substituted to a Cons headed by Get.
+        let resolved = s1.apply_row(&Row::Var(v));
+        match resolved {
+            Row::Cons { label, .. } => assert_eq!(label, "Get"),
+            other => panic!("expected Cons binding for v, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b31_row_split_on_empty_is_handler_label_not_in_row() {
+        let mut supply = TyVarSupply::new();
+        let err = row_split(
+            &Subst::empty(),
+            &Row::Empty,
+            "Get",
+            Span::point(0),
+            &mut supply,
+        )
+        .unwrap_err();
+        match err {
+            TypeError::HandlerLabelNotInRow { label, .. } => assert_eq!(label, "Get"),
+            other => panic!("expected HandlerLabelNotInRow, got {other:?}"),
+        }
+    }
+
+
 }
