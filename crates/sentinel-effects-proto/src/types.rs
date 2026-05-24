@@ -85,6 +85,21 @@ impl Row {
         Row::Empty
     }
 
+    /// B2.3b1 (ADR 0006 D1): replace free `Row::Var(_)` with
+    /// `Row::Empty`, recursing into `Cons` payloads. Counterpart of
+    /// `Ty::close_rows`.
+    pub fn close(self) -> Row {
+        match self {
+            Row::Empty | Row::Var(_) => Row::Empty,
+            Row::Cons { label, arg, ret, tail } => Row::Cons {
+                label,
+                arg: Box::new(arg.close_rows()),
+                ret: Box::new(ret.close_rows()),
+                tail: Box::new(tail.close()),
+            },
+        }
+    }
+
     /// Collect free type variables reachable through cons-cell
     /// payloads.
     pub fn collect_free_vars(&self, acc: &mut BTreeSet<TyVar>) {
@@ -171,6 +186,22 @@ impl Ty {
     /// Convenience: build an arrow with an explicit row.
     pub fn arrow_with(arg: Ty, row: Row, ret: Ty) -> Ty {
         Ty::Fun(Box::new(arg), row, Box::new(ret))
+    }
+
+    /// B2.3b1 (ADR 0006 D1/D3/D5): replace every free `Row::Var(_)`
+    /// inside this type with `Row::Empty`. Applied at `infer_top` and
+    /// `infer_program` as a presentation-layer zonk for unconstrained
+    /// row variables; never called inside `generalize`/`instantiate`
+    /// so row polymorphism inside let-bindings is preserved (D4).
+    pub fn close_rows(self) -> Ty {
+        match self {
+            Ty::Int | Ty::Bool | Ty::Var(_) => self,
+            Ty::Fun(a, row, b) => Ty::Fun(
+                Box::new(a.close_rows()),
+                row.close(),
+                Box::new(b.close_rows()),
+            ),
+        }
     }
 
     /// Collect the set of type variables that appear free in this

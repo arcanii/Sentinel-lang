@@ -320,6 +320,114 @@ fn row_occurs(v: RowVar, row: &Row, s: &Subst) -> bool {
     acc.contains(&v)
 }
 
+/// B2.3b1 (ADR 0005 D2): union two row contributions.
+///
+/// In B2.3b1 the only row contributions are `Row::Empty` (every arm
+/// except `Perform`, which is still `Err`). B2.3b2 makes `Perform`
+/// contribute `Cons(label, decl_arg, decl_ret, Row::Empty)` -- a
+/// closed single-label row. Therefore every union encountered in
+/// practice is between two *closed* rows (Empty or Cons-chain
+/// terminating in Empty). Open rows live inside arrow *types*; they
+/// are not produced as row contributions by any arm.
+///
+/// The `unreachable!` in the `Var` case is load-bearing: it enforces
+/// the closed-contributions invariant. If B3 changes the model and
+/// row variables start appearing in contributions, `row_union` must
+/// be generalised (and this `unreachable!` is the canary that flags
+/// the day it happens).
+fn row_union(
+    r1: &Row,
+    r2: &Row,
+    s: &Subst,
+    span: Span,
+    supply: &mut TyVarSupply,
+) -> Result<(Row, Subst), TypeError> {
+    let r1 = s.apply_row(r1);
+    let r2 = s.apply_row(r2);
+    match (&r1, &r2) {
+        (Row::Empty, _) => Ok((r2, s.clone())),
+        (_, Row::Empty) => Ok((r1, s.clone())),
+        // B2.3b1 (ADR 0006 D1, extended): a free row variable in a
+        // *contribution* represents an unconstrained latent row
+        // (typically a callee's ρ_call that nothing concrete bound).
+        // Per the default-close policy, treat it as the empty row
+        // for union purposes. B3 will revisit when handlers bind row
+        // variables that *must* carry through to caller contributions.
+        (Row::Var(_), Row::Var(_)) => Ok((Row::Empty, s.clone())),
+        (Row::Var(_), _) => Ok((r2, s.clone())),
+        (_, Row::Var(_)) => Ok((r1, s.clone())),
+        (Row::Cons { .. }, _) => cons_onto(&r1, r2, s, span, supply),
+    }
+}
+
+fn cons_onto(
+    r1: &Row,
+    r2: Row,
+    s: &Subst,
+    span: Span,
+    supply: &mut TyVarSupply,
+) -> Result<(Row, Subst), TypeError> {
+    match r1 {
+        Row::Empty => Ok((r2, s.clone())),
+        // See row_union: row vars in contributions are treated as Empty.
+        Row::Var(_) => Ok((r2, s.clone())),
+        Row::Cons { label, arg, ret, tail } => {
+            let (tail_unioned, s1) = cons_onto(tail, r2, s, span, supply)?;
+            cons_or_unify(label, arg, ret, &tail_unioned, &s1, span, supply)
+        }
+    }
+}
+
+fn cons_or_unify(
+    label: &str,
+    arg: &Ty,
+    ret: &Ty,
+    into: &Row,
+    s: &Subst,
+    span: Span,
+    supply: &mut TyVarSupply,
+) -> Result<(Row, Subst), TypeError> {
+    match into {
+        Row::Empty => Ok((
+            Row::Cons {
+                label: label.to_string(),
+                arg: Box::new(arg.clone()),
+                ret: Box::new(ret.clone()),
+                tail: Box::new(Row::Empty),
+            },
+            s.clone(),
+        )),
+        Row::Var(_) => Ok((
+            Row::Cons {
+                label: label.to_string(),
+                arg: Box::new(arg.clone()),
+                ret: Box::new(ret.clone()),
+                tail: Box::new(Row::Empty),
+            },
+            s.clone(),
+        )),
+        Row::Cons { label: l, arg: a, ret: r, tail: t } => {
+            if label == l.as_str() {
+                let s1 = unify(s, arg, a, span, supply)?;
+                let s2 = unify(&s1, ret, r, span, supply)?;
+                Ok((into.clone(), s2))
+            } else {
+                let (new_tail, s1) =
+                    cons_or_unify(label, arg, ret, t, s, span, supply)?;
+                Ok((
+                    Row::Cons {
+                        label: l.clone(),
+                        arg: a.clone(),
+                        ret: r.clone(),
+                        tail: Box::new(new_tail),
+                    },
+                    s1,
+                ))
+            }
+        }
+    }
+}
+
 
 
 pub fn instantiate(scheme: &Scheme, supply: &mut TyVarSupply) -> Ty {
@@ -393,37 +501,59 @@ pub fn infer(
         ExprKind::Lambda { param, body } => {
             let param_ty = supply.fresh_ty();
             let extended = env.extend(param.clone(), Scheme::mono(param_ty.clone()));
-            let (s_body, t_body, _r_body) = infer(&extended, eff_env, body, supply)?;
-            // B2.0/B2.3a: empty row on the arrow; B2.3b mints a fresh
-            // row var and unifies _r_body against it. The closure
-            // value's own row contribution is Empty (D2: only *calling*
-            // a lambda performs effects).
-            let arrow = Ty::arrow(s_body.apply(&param_ty), t_body);
-            Ok((s_body, arrow, Row::Empty))
+            let (s_body, t_body, r_body) = infer(&extended, eff_env, body, supply)?;
+            // B2.3b1 (ADR 0005 D2): mint fresh row var for the arrow,
+            // unify body's row contribution against it, build arrow
+            // with arrow_with. The closure *value*'s row contribution
+            // is Empty -- only *calling* the lambda performs effects.
+            let row_var = supply.fresh_row();
+            let s_unified = unify_row(&s_body, &r_body, &row_var, body.span, supply)?;
+            let arrow = Ty::arrow_with(
+                s_unified.apply(&param_ty),
+                s_unified.apply_row(&row_var),
+                s_unified.apply(&t_body),
+            );
+            Ok((s_unified, arrow, Row::Empty))
         }
         ExprKind::App { callee, arg } => {
-            let (s1, t_callee, _r_callee) = infer(env, eff_env, callee, supply)?;
+            let (s1, t_callee, r_callee) = infer(env, eff_env, callee, supply)?;
             let env_after_callee = env.apply(&s1);
-            let (s2, t_arg, _r_arg) = infer(&env_after_callee, eff_env, arg, supply)?;
+            let (s2, t_arg, r_arg) = infer(&env_after_callee, eff_env, arg, supply)?;
             let result_var = supply.fresh_ty();
             let t_callee_subst = s2.apply(&t_callee);
-            // B2.0/B2.3a: callee's row is empty; B2.3b will unify the
-            // callee against `arrow_with(t_arg, ρ_app, result_var)` and
-            // union ρ_app with _r_callee and _r_arg.
-            let s3 = unify(&Subst::empty(), &t_callee_subst,
-                &Ty::arrow(t_arg, result_var.clone()), expr.span, supply)?;
+            // B2.3b1 (ADR 0005 D2): mint fresh ρ_call, unify callee
+            // against arrow_with(t_arg, ρ_call, result_var). App's row
+            // contribution is union(r_callee, r_arg, ρ_call_resolved).
+            let rho_call = supply.fresh_row();
+            let s3 = unify(
+                &Subst::empty(),
+                &t_callee_subst,
+                &Ty::arrow_with(t_arg, rho_call.clone(), result_var.clone()),
+                expr.span,
+                supply,
+            )?;
             let combined = s3.compose(&s2).compose(&s1);
             let result_ty = combined.apply(&result_var);
-            Ok((combined, result_ty, Row::Empty))
+            let r_callee_resolved = combined.apply_row(&r_callee);
+            let r_arg_resolved = combined.apply_row(&r_arg);
+            let rho_call_resolved = combined.apply_row(&rho_call);
+            let (u1, s4) =
+                row_union(&r_callee_resolved, &r_arg_resolved, &combined, expr.span, supply)?;
+            let (row_app, s5) = row_union(&u1, &rho_call_resolved, &s4, expr.span, supply)?;
+            Ok((s5, result_ty, row_app))
         }
         ExprKind::Let { name, value, body } => {
-            let (s1, t_value, _r_value) = infer(env, eff_env, value, supply)?;
+            let (s1, t_value, r_value) = infer(env, eff_env, value, supply)?;
             let env_after_value = env.apply(&s1);
             let scheme = generalize(&t_value, &env_after_value.free_vars());
             let env_with_name = env_after_value.extend(name.clone(), scheme);
-            let (s2, t_body, _r_body) = infer(&env_with_name, eff_env, body, supply)?;
-            // B2.3b will union _r_value with _r_body here (D2).
-            Ok((s2.compose(&s1), t_body, Row::Empty))
+            let (s2, t_body, r_body) = infer(&env_with_name, eff_env, body, supply)?;
+            let combined = s2.compose(&s1);
+            let r_value_resolved = combined.apply_row(&r_value);
+            let r_body_resolved = combined.apply_row(&r_body);
+            let (row, s3) =
+                row_union(&r_value_resolved, &r_body_resolved, &combined, expr.span, supply)?;
+            Ok((s3, t_body, row))
         }
         ExprKind::LetRec { name, value, body } => {
             // B1.6: proper HM let-rec. The recursive occurrence inside
@@ -433,51 +563,65 @@ pub fn infer(
             let t_name = supply.fresh_ty();
             let env_for_value =
                 env.extend(name.clone(), Scheme::mono(t_name.clone()));
-            let (s1, t_value, _r_value) = infer(&env_for_value, eff_env, value, supply)?;
-            // Unify the recursive monovar with the inferred RHS type.
+            let (s1, t_value, r_value) = infer(&env_for_value, eff_env, value, supply)?;
             let s2 = unify(&s1, &t_name, &t_value, expr.span, supply)?;
-            // Generalize against the *outer* env (not env_for_value),
-            // so the recursive binding itself does not appear in the
-            // free-var set we generalize over.
             let env_after = env.apply(&s2);
             let t_name_solved = s2.apply(&t_name);
             let scheme = generalize(&t_name_solved, &env_after.free_vars());
             let env_for_body = env_after.extend(name.clone(), scheme);
-            let (s3, t_body, _r_body) = infer(&env_for_body, eff_env, body, supply)?;
-            // B2.3b unions _r_value with _r_body (D2); per ADR 0005 D4
-            // the parser enforces RHS-is-lambda so _r_value is the
-            // closure-value contribution (Empty per D2), not the body's.
-            Ok((s3.compose(&s2), t_body, Row::Empty))
+            let (s3, t_body, r_body) = infer(&env_for_body, eff_env, body, supply)?;
+            // Per ADR 0005 D2/D4: parser enforces RHS-is-lambda so
+            // r_value is the closure-*value* contribution (Empty). The
+            // body's row contribution is what surfaces from LetRec.
+            let combined = s3.compose(&s2);
+            let r_value_resolved = combined.apply_row(&r_value);
+            let r_body_resolved = combined.apply_row(&r_body);
+            let (row, s4) =
+                row_union(&r_value_resolved, &r_body_resolved, &combined, expr.span, supply)?;
+            Ok((s4, t_body, row))
         }
         ExprKind::If { cond, then_branch, else_branch } => {
-            let (s1, t_cond, _r_cond) = infer(env, eff_env, cond, supply)?;
+            let (s1, t_cond, r_cond) = infer(env, eff_env, cond, supply)?;
             let s2 = unify(&s1, &t_cond, &Ty::Bool, cond.span, supply)?;
             let env_after = env.apply(&s2);
-            let (s3, t_then, _r_then) = infer(&env_after, eff_env, then_branch, supply)?;
+            let (s3, t_then, r_then) = infer(&env_after, eff_env, then_branch, supply)?;
             let s3 = s3.compose(&s2);
             let env_after = env.apply(&s3);
-            let (s4, t_else, _r_else) = infer(&env_after, eff_env, else_branch, supply)?;
+            let (s4, t_else, r_else) = infer(&env_after, eff_env, else_branch, supply)?;
             let s4 = s4.compose(&s3);
             let s5 = unify(&s4, &t_then, &t_else, expr.span, supply)?;
             let ty = s5.apply(&t_then);
-            // B2.3b unions _r_cond, _r_then, _r_else (D2).
-            Ok((s5, ty, Row::Empty))
+            let r_cond_resolved = s5.apply_row(&r_cond);
+            let r_then_resolved = s5.apply_row(&r_then);
+            let r_else_resolved = s5.apply_row(&r_else);
+            let (u1, s6) =
+                row_union(&r_cond_resolved, &r_then_resolved, &s5, expr.span, supply)?;
+            let (row, s7) =
+                row_union(&u1, &r_else_resolved, &s6, expr.span, supply)?;
+            Ok((s7, ty, row))
         }
         ExprKind::BinOp { op, lhs, rhs } => {
-            let (s1, t_lhs, _r_lhs) = infer(env, eff_env, lhs, supply)?;
+            let (s1, t_lhs, r_lhs) = infer(env, eff_env, lhs, supply)?;
             let env_after = env.apply(&s1);
-            let (s2, t_rhs, _r_rhs) = infer(&env_after, eff_env, rhs, supply)?;
+            let (s2, t_rhs, r_rhs) = infer(&env_after, eff_env, rhs, supply)?;
             let s2 = s2.compose(&s1);
-            // B2.3b unions _r_lhs with _r_rhs (D2).
-            if matches!(op, BinOp::Eq) {
-                let s3 = unify(&s2, &t_lhs, &t_rhs, expr.span, supply)?;
-                Ok((s3, Ty::Bool, Row::Empty))
+            let s_final = if matches!(op, BinOp::Eq) {
+                unify(&s2, &t_lhs, &t_rhs, expr.span, supply)?
             } else {
-                let (expected_lhs, expected_rhs, result_ty) = binop_signature(*op);
+                let (expected_lhs, expected_rhs, _result_ty) = binop_signature(*op);
                 let s3 = unify(&s2, &t_lhs, &expected_lhs, lhs.span, supply)?;
-                let s4 = unify(&s3, &t_rhs, &expected_rhs, rhs.span, supply)?;
-                Ok((s4, result_ty, Row::Empty))
-            }
+                unify(&s3, &t_rhs, &expected_rhs, rhs.span, supply)?
+            };
+            let result_ty = if matches!(op, BinOp::Eq) {
+                Ty::Bool
+            } else {
+                binop_signature(*op).2
+            };
+            let r_lhs_resolved = s_final.apply_row(&r_lhs);
+            let r_rhs_resolved = s_final.apply_row(&r_rhs);
+            let (row, s_done) =
+                row_union(&r_lhs_resolved, &r_rhs_resolved, &s_final, expr.span, supply)?;
+            Ok((s_done, result_ty, row))
         }
         // B2.2b: parser accepts `do Label(arg)`, inference rejects it
         // with a dedicated error until B2.3 wires real effect rows.
@@ -506,11 +650,12 @@ pub fn infer_top(expr: &Expr) -> Result<Ty, TypeError> {
     // arm returns Row::Empty, so `resolved` is always Row::Empty and
     // this branch is unreachable. The variant + check land inert here
     // to keep B2.3b's diff scoped to semantics only (see commit body).
-    let resolved = s.apply_row(&r);
+    let resolved = s.apply_row(&r).close();
     if !matches!(resolved, Row::Empty) {
         return Err(TypeError::UnhandledEffects { row: resolved, span: expr.span });
     }
-    Ok(s.apply(&t))
+    // B2.3b1 (ADR 0006 D1/D2): default-close after the residual check.
+    Ok(s.apply(&t).close_rows())
 }
 
 /// B2.2b: program-level inference entry point.
@@ -527,7 +672,8 @@ pub fn infer_program(prog: &crate::ast::Program) -> Result<Ty, TypeError> {
     let mut supply = TyVarSupply::new();
     let eff_env: EffectEnv = HashMap::new();
     let (s, t, _r) = infer(&TypeEnv::empty(), &eff_env, &prog.body, &mut supply)?;
-    Ok(s.apply(&t))
+    // B2.3b1 (ADR 0006 D3): same default-close policy as infer_top.
+    Ok(s.apply(&t).close_rows())
 }
 
 #[cfg(test)]
@@ -554,6 +700,12 @@ mod tests {
     fn unify_r(a: &Row, b: &Row) -> Result<Subst, TypeError> {
         let mut supply = TyVarSupply::new();
         unify_row(&Subst::empty(), a, b, sp(), &mut supply)
+    }
+
+    fn union_r(a: &Row, b: &Row) -> Result<Row, TypeError> {
+        let mut supply = TyVarSupply::new();
+        let (r, _s) = row_union(a, b, &Subst::empty(), sp(), &mut supply)?;
+        Ok(r)
     }
 
     fn ty_of(src: &str) -> Ty {
@@ -1028,6 +1180,91 @@ mod tests {
                 assert_eq!(&src[span.start as usize .. span.end as usize], "Print");
             }
             other => panic!("expected EffectNotYetSupported, got {other:?}"),
+        }
+    }
+
+    // ---------- B2.3b1: row_union unit tests ----------
+
+    #[test]
+    fn b23b1_row_union_empty_empty_is_empty() {
+        assert_eq!(union_r(&Row::Empty, &Row::Empty).unwrap(), Row::Empty);
+    }
+
+    #[test]
+    fn b23b1_row_union_empty_with_cons_is_cons() {
+        let r = cons("Print", Ty::Int, Ty::Bool, Row::Empty);
+        assert_eq!(union_r(&Row::Empty, &r).unwrap(), r);
+        let r = cons("Print", Ty::Int, Ty::Bool, Row::Empty);
+        assert_eq!(union_r(&r, &Row::Empty).unwrap(), r);
+    }
+
+    #[test]
+    fn b23b1_row_union_two_distinct_labels_contains_both() {
+        let a = cons("Print", Ty::Int, Ty::Bool, Row::Empty);
+        let b = cons("Ask", Ty::Int, Ty::Int, Row::Empty);
+        let u = union_r(&a, &b).unwrap();
+        let mut labels = Vec::new();
+        let mut cur = &u;
+        while let Row::Cons { label, tail, .. } = cur {
+            labels.push(label.clone());
+            cur = tail.as_ref();
+        }
+        labels.sort();
+        assert_eq!(labels, vec!["Ask".to_string(), "Print".to_string()]);
+    }
+
+    #[test]
+    fn b23b1_row_union_same_label_same_signature_is_deduped() {
+        let a = cons("Print", Ty::Int, Ty::Bool, Row::Empty);
+        let b = cons("Print", Ty::Int, Ty::Bool, Row::Empty);
+        let u = union_r(&a, &b).unwrap();
+        // Exactly one Print label, no duplicate.
+        let mut count = 0;
+        let mut cur = &u;
+        while let Row::Cons { label, tail, .. } = cur {
+            if label == "Print" { count += 1; }
+            cur = tail.as_ref();
+        }
+        assert_eq!(count, 1, "Print should appear exactly once after union; got row {u}");
+    }
+
+    #[test]
+    fn b23b1_row_union_same_label_conflicting_signature_is_mismatch() {
+        let a = cons("Print", Ty::Int, Ty::Bool, Row::Empty);
+        let b = cons("Print", Ty::Bool, Ty::Bool, Row::Empty);
+        let err = union_r(&a, &b).unwrap_err();
+        assert!(matches!(err, TypeError::Mismatch { .. }),
+            "expected Mismatch on conflicting Print arg type, got {err:?}");
+    }
+
+    // ---------- B2.3b1: lambda mints row var; default-close at top ----------
+
+    #[test]
+    fn b23b1_infer_top_default_closes_unconstrained_row_var() {
+        // After close_rows, fn(x) => x has type 'a -> 'a (empty row).
+        let ty = ty_of("fn(x) => x");
+        match ty {
+            Ty::Fun(a, row, b) => {
+                assert_eq!(*a, *b, "identity: arg == ret");
+                assert_eq!(row, Row::Empty, "default-close should erase free row var");
+            }
+            other => panic!("expected arrow, got {other}"),
+        }
+    }
+
+    #[test]
+    fn b23b1_infer_program_default_closes_too() {
+        use crate::parser::parse_program;
+        // A program with no effects, body is a pure lambda. After
+        // infer_program, the returned type should have Row::Empty
+        // (not a free row var) on its arrow.
+        let toks = crate::lexer::lex("fn(x) => x").unwrap();
+        let prog = parse_program(&toks).unwrap();
+        let ty = infer_program(&prog).unwrap();
+        match ty {
+            Ty::Fun(_, row, _) => assert_eq!(row, Row::Empty,
+                "infer_program should also default-close per ADR 0006 D3"),
+            other => panic!("expected arrow, got {other}"),
         }
     }
 
