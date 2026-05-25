@@ -924,7 +924,7 @@ pub fn infer(
 
             let t_result = supply.fresh_ty();
             let mut r_accumulated = r_outer_initial.clone();
-            for (arm, (arg_ty, ret_ty)) in arms.iter().zip(arm_sigs.into_iter()) {
+            for (arm, (arg_ty, ret_ty)) in arms.iter().zip(arm_sigs) {
                 let kont_ty = Ty::arrow_with(
                     ret_ty,
                     r_outer_initial.clone(),

@@ -165,7 +165,7 @@ impl<'a> Parser<'a> {
                     }),
                     None => return Err(ParseError::UnexpectedEof { expected: "handler arm label" }),
                 };
-                if !label.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+                if !label.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
                     return Err(ParseError::HandlerArmLabelNotUpper { label, span: label_span });
                 }
                 self.expect("'('", |t| matches!(t, Token::LParen))?;

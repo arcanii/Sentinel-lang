@@ -7,6 +7,7 @@
 //! defense in depth and for callers that bypass the pipeline.
 
 use crate::ast::{BinOp, Expr, ExprKind, HandlerArm, ReturnArm};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
@@ -68,8 +69,17 @@ pub enum EvalError {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Env(Option<Arc<EnvCell>>);
+pub struct Env(Option<Rc<EnvCell>>);
 
+// Rc rather than Arc: `EnvCell` transitively contains
+// `Value::Resumption -> Continuation -> Cell<bool>`, which is
+// `!Sync`, so an Arc would never be sendable across threads
+// (clippy::arc_with_non_send_sync). The prototype's eval is
+// single-threaded by design; Rc matches that model and elides the
+// unnecessary atomic refcount overhead. If Sentinel proper wants
+// cross-thread Value sharing, the one-shot resumed-flag would need
+// to move to `Arc<AtomicBool>` (per the Continuation Clone note)
+// and EnvCell would migrate back to Arc.
 #[derive(Debug)]
 pub(crate) struct EnvCell {
     name: String,
@@ -89,11 +99,11 @@ impl Env {
             rest: self.clone(),
         };
         cell.value.set(value).expect("freshly-constructed OnceLock");
-        Env(Some(Arc::new(cell)))
+        Env(Some(Rc::new(cell)))
     }
 
-    fn extend_unset(&self, name: String) -> (Self, Arc<EnvCell>) {
-        let cell = Arc::new(EnvCell {
+    fn extend_unset(&self, name: String) -> (Self, Rc<EnvCell>) {
+        let cell = Rc::new(EnvCell {
             name,
             value: OnceLock::new(),
             rest: self.clone(),
@@ -178,7 +188,7 @@ impl Continuation {
                 }
                 Step::Op { label, arg, mut kont } => {
                     let mut new_frames = frames;
-                    new_frames.extend(kont.frames.drain(..));
+                    new_frames.append(&mut kont.frames);
                     kont.frames = new_frames;
                     return Ok(Step::Op { label, arg, kont });
                 }
@@ -205,7 +215,7 @@ pub(crate) enum Frame {
         env: Env,
     },
     LetRecBody {
-        cell: Arc<EnvCell>,
+        cell: Rc<EnvCell>,
         body: Arc<Expr>,
         rec_env: Env,
     },
