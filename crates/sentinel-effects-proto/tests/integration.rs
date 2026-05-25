@@ -93,14 +93,15 @@ fn pipeline_perform_undeclared_label_is_unknown_effect() {
 }
 
 #[test]
-fn pipeline_handle_typechecks_then_runtime_is_placeholder() {
-    // B3.1: handlers type-check end-to-end. Runtime still has
-    // EvalError::HandlersNotYetSupported until B3.2 (ADR 0007 D5).
-    use sentinel_effects_proto::MiniError;
+fn pipeline_handle_resumes_with_arg_through_run() {
+    // B3.2b: handlers run end-to-end through `run`. The arm
+    // `Get(x, k) => k(x)` resumes with the operation's argument;
+    // with an empty kont and no return arm, handle_step's identity
+    // branch yields the value unchanged. Pre-B3.2b this surfaced
+    // MiniError::Eval(HandlersNotYetSupported) — see commit history
+    // around ADR 0007 D5.
+    use sentinel_effects_proto::Value;
     let source = "effect Get : Int -> Int ; handle do Get(1) with { Get(x, k) => k(x) }";
-    let err = run(source).expect_err("eval placeholder still fires");
-    assert!(
-        matches!(err, MiniError::Eval(_)),
-        "expected MiniError::Eval, got {err:?}"
-    );
+    let v = run(source).expect("handle should produce a value");
+    assert_eq!(v, Value::Int(1));
 }

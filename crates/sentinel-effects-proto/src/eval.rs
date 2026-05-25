@@ -6,7 +6,7 @@
 //! [`crate::TypeError`] earlier. The eval-level variants remain for
 //! defense in depth and for callers that bypass the pipeline.
 
-use crate::ast::{BinOp, Expr, ExprKind};
+use crate::ast::{BinOp, Expr, ExprKind, HandlerArm, ReturnArm};
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
@@ -17,6 +17,15 @@ pub enum Value {
     Closure {
         param: String,
         body: Arc<Expr>,
+        env: Env,
+    },
+    /// B3.2b: a captured continuation, bundled with the deep-handler
+    /// re-wrap context (the same arms / ret_arm / env that produced
+    /// it). Applied via the normal call form; see [`apply`].
+    Resumption {
+        kont: Continuation,
+        arms: Arc<Vec<HandlerArm>>,
+        ret_arm: Option<Arc<ReturnArm>>,
         env: Env,
     },
 }
@@ -43,18 +52,6 @@ pub enum EvalError {
     NotAFunction,
     #[error("internal: letrec cell read before initialisation")]
     LetRecUninitialised,
-    /// B2.2b: defence-in-depth. Inference catches `do Label(arg)`
-    /// in the standard pipeline, but a caller that bypasses
-    /// [`crate::infer_program`] and goes straight to [`eval`] will
-    /// surface this instead of a panic.
-    #[error("effect {0:?} cannot be performed yet (handlers arrive in B3)")]
-    EffectNotYetSupported(String),
-    /// B3.0: `handle e with { ... }` is parseable but has no runtime
-    /// yet. B3.2 lands the operation-reification model (ADR 0007 D5);
-    /// this variant is removed at that point alongside
-    /// `EffectNotYetSupported`.
-    #[error("handlers are not yet supported at runtime (B3.2 lands eval)")]
-    HandlersNotYetSupported,
     /// B3.2a: defence-in-depth for the runtime top level. If a
     /// `Step::Op` escapes [`eval`] all the way up to [`crate::run`],
     /// the inference pass either did not run or has a bug — the row
@@ -130,7 +127,17 @@ pub enum Step {
     },
 }
 
-#[derive(Debug)]
+/// B3.2b: derives Clone because [`Value::Resumption`] holds a
+/// Continuation by value and `Value` itself is Clone. The Cell<bool>
+/// resumed-flag copies its bool on clone, so cloning a *resumed*
+/// Continuation produces a clone that also refuses to resume. The
+/// one-shot guarantee therefore holds per-Continuation-instance, not
+/// per-logical-resumption: nothing in eval clones a Resumption today,
+/// but Value being Clone means user-level multi-shot via aliasing is
+/// not statically prevented. Revisit if Sentinel proper wants a
+/// stricter guarantee (move-only Resumption value variant, or a
+/// shared resumed-flag via Rc<Cell<bool>>).
+#[derive(Debug, Clone)]
 pub struct Continuation {
     frames: Vec<Frame>,
     resumed: std::cell::Cell<bool>,
@@ -148,22 +155,49 @@ impl Continuation {
         self.frames.push(f);
     }
 
-    pub fn resume(self, _v: Value) -> Result<Step, EvalError> {
+    /// B3.2b: true iff no frames remain. Useful for tests that
+    /// want to assert a freshly-reified Op carries an empty kont
+    /// without exposing Frame internals.
+    pub fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    pub fn resume(self, v: Value) -> Result<Step, EvalError> {
         if self.resumed.get() {
             return Err(EvalError::ContinuationAlreadyResumed);
         }
         self.resumed.set(true);
-        todo!("B3.2b: walk self.frames in reverse, threading Value through each frame's resume semantics")
+
+        let mut frames = self.frames;
+        let mut v = v;
+
+        while let Some(frame) = frames.pop() {
+            match step_frame(frame, v)? {
+                Step::Value(next) => {
+                    v = next;
+                }
+                Step::Op { label, arg, mut kont } => {
+                    let mut new_frames = frames;
+                    new_frames.extend(kont.frames.drain(..));
+                    kont.frames = new_frames;
+                    return Ok(Step::Op { label, arg, kont });
+                }
+            }
+        }
+        Ok(Step::Value(v))
     }
 }
 
-/// B3.2a: every variant is constructed at frame-push sites in
-/// `eval`, but no variant is destructured until B3.2b lands
-/// `Continuation::resume`. `PerformReify` additionally has no
-/// construction site yet because the `Perform` arm is still the
-/// B2.2b placeholder. The blanket allow is removed in B3.2b.
-#[allow(dead_code)]
-#[derive(Debug)]
+/// Runtime frames that record "what eval was about to do next"
+/// at each resume-point in the evaluator. Pushed onto a
+/// [`Continuation`] whenever a sub-evaluation produces a
+/// `Step::Op`; popped by [`Continuation::resume`] when a handler
+/// arm resumes the captured continuation. See ADR 0007 D5.
+///
+/// Clone is derived because [`Continuation`] is Clone, which in
+/// turn is required so [`Value::Resumption`] can live in a Clone
+/// `Value`.
+#[derive(Debug, Clone)]
 pub(crate) enum Frame {
     LetBody {
         name: String,
@@ -199,14 +233,130 @@ pub(crate) enum Frame {
     PerformReify {
         label: String,
     },
+    /// B3.2b: when a Step::Op walks past a `handle` that has no
+    /// matching arm, we record that handle as a frame on the Op's
+    /// kont so that on resume, the value (or further Op) flowing back
+    /// is re-dispatched through the same handler. This is what makes
+    /// non-matching handlers transparent to inner operations while
+    /// still re-wrapping resumed computations — deep handler semantics.
+    HandleFwd {
+        arms: Arc<Vec<HandlerArm>>,
+        ret_arm: Option<Arc<ReturnArm>>,
+        env: Env,
+    },
 }
 
+
+fn step_frame(frame: Frame, v: Value) -> Result<Step, EvalError> {
+    match frame {
+        Frame::LetBody { name, body, env } => {
+            eval(&body, &env.extend(name, v))
+        }
+        Frame::LetRecBody { cell, body, rec_env } => {
+            cell.value
+                .set(v)
+                .map_err(|_| EvalError::LetRecUninitialised)?;
+            eval(&body, &rec_env)
+        }
+        Frame::IfBranch { then_branch, else_branch, env } => match v {
+            Value::Bool(true) => eval(&then_branch, &env),
+            Value::Bool(false) => eval(&else_branch, &env),
+            other => Err(EvalError::Type {
+                expected: "bool",
+                got: type_name(&other),
+            }),
+        },
+        Frame::AppArg { arg, env } => {
+            let func = v;
+            match eval(&arg, &env)? {
+                Step::Value(a) => apply(func, a),
+                Step::Op { label, arg: op_arg, mut kont } => {
+                    kont.frames.insert(0, Frame::AppCall { func });
+                    Ok(Step::Op { label, arg: op_arg, kont })
+                }
+            }
+        }
+        Frame::AppCall { func } => apply(func, v),
+        Frame::BinOpRight { op, rhs, env } => {
+            let lhs = v;
+            match eval(&rhs, &env)? {
+                Step::Value(r) => eval_binop(op, lhs, r).map(Step::Value),
+                Step::Op { label, arg, mut kont } => {
+                    kont.frames.insert(0, Frame::BinOpApply { op, lhs });
+                    Ok(Step::Op { label, arg, kont })
+                }
+            }
+        }
+        Frame::BinOpApply { op, lhs } => {
+            eval_binop(op, lhs, v).map(Step::Value)
+        }
+        Frame::PerformReify { label } => Ok(Step::Op {
+            label,
+            arg: v,
+            kont: Continuation::empty(),
+        }),
+        Frame::HandleFwd { arms, ret_arm, env } => {
+            handle_step(Step::Value(v), &arms, &ret_arm, &env)
+        }
+    }
+}
+
+fn handle_step(
+    step: Step,
+    arms: &Arc<Vec<HandlerArm>>,
+    ret_arm: &Option<Arc<ReturnArm>>,
+    env: &Env,
+) -> Result<Step, EvalError> {
+    match step {
+        Step::Value(v) => match ret_arm {
+            Some(ra) => eval(&ra.body, &env.extend(ra.var.clone(), v)),
+            None => Ok(Step::Value(v)),
+        },
+        Step::Op { label, arg, kont } => {
+            for arm in arms.iter() {
+                if arm.label == label {
+                    let resumption = Value::Resumption {
+                        kont,
+                        arms: Arc::clone(arms),
+                        ret_arm: ret_arm.clone(),
+                        env: env.clone(),
+                    };
+                    let arm_env = env
+                        .extend(arm.arg.clone(), arg)
+                        .extend(arm.kont.clone(), resumption);
+                    return eval(&arm.body, &arm_env);
+                }
+            }
+            let mut kont = kont;
+            kont.push(Frame::HandleFwd {
+                arms: Arc::clone(arms),
+                ret_arm: ret_arm.clone(),
+                env: env.clone(),
+            });
+            Ok(Step::Op { label, arg, kont })
+        }
+    }
+}
+
+fn apply(func: Value, a: Value) -> Result<Step, EvalError> {
+    match func {
+        Value::Closure { param, body, env: captured } => {
+            eval(&body, &captured.extend(param, a))
+        }
+        Value::Resumption { kont, arms, ret_arm, env } => {
+            let step = kont.resume(a)?;
+            handle_step(step, &arms, &ret_arm, &env)
+        }
+        _ => Err(EvalError::NotAFunction),
+    }
+}
 
 fn type_name(v: &Value) -> &'static str {
     match v {
         Value::Int(_) => "int",
         Value::Bool(_) => "bool",
         Value::Closure { .. } => "function",
+        Value::Resumption { .. } => "function",
     }
 }
 
@@ -288,12 +438,7 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Step, EvalError> {
                     return Ok(Step::Op { label, arg: op_arg, kont });
                 }
             };
-            match f {
-                Value::Closure { param, body, env: captured } => {
-                    eval(&body, &captured.extend(param, a))
-                }
-                _ => Err(EvalError::NotAFunction),
-            }
+            apply(f, a)
         }
         ExprKind::BinOp { op, lhs, rhs } => {
             let l = match eval(lhs, env)? {
@@ -316,15 +461,35 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Step, EvalError> {
             };
             eval_binop(*op, l, r).map(Step::Value)
         }
-        // B2.2b: unreachable through the pipeline (inference catches
-        // it first), but if eval is called directly we surface a
-        // dedicated error instead of panicking.
-        ExprKind::Perform { label, .. } => {
-            Err(EvalError::EffectNotYetSupported(label.clone()))
+        // B3.2b: reify into Step::Op. The arg is evaluated first;
+        // if it itself performs an effect, Frame::PerformReify
+        // records the pending reification so resume can complete
+        // it once the arg's effect is handled.
+        ExprKind::Perform { label, arg, .. } => {
+            match eval(arg, env)? {
+                Step::Value(v) => Ok(Step::Op {
+                    label: label.clone(),
+                    arg: v,
+                    kont: Continuation::empty(),
+                }),
+                Step::Op { label: inner_label, arg: inner_arg, mut kont } => {
+                    kont.push(Frame::PerformReify { label: label.clone() });
+                    Ok(Step::Op { label: inner_label, arg: inner_arg, kont })
+                }
+            }
         }
-        // B3.0: handler surface parses but runtime arrives in B3.2.
-        ExprKind::Handle { .. } => {
-            Err(EvalError::HandlersNotYetSupported)
+        // B3.2b: full handler dispatch per ADR 0007 D5. Eager-Arc
+        // the arms and ret_arm once so subsequent Resumption /
+        // HandleFwd constructions share them cheaply, then run the
+        // body and route the resulting Step through handle_step.
+        // handle_step is also the re-entry point for deep re-wrap
+        // when an arm body resumes the captured continuation.
+        ExprKind::Handle { body, arms, ret_arm } => {
+            let arms_arc: Arc<Vec<HandlerArm>> = Arc::new(arms.clone());
+            let ret_arm_arc: Option<Arc<ReturnArm>> =
+                ret_arm.as_ref().map(|r| Arc::new(r.clone()));
+            let step = eval(body, env)?;
+            handle_step(step, &arms_arc, &ret_arm_arc, env)
         }
     }
 }
@@ -449,19 +614,30 @@ mod tests {
     // ---- B2.2b: direct-eval defence in depth ----
 
     #[test]
-    fn b22b_eval_perform_directly_returns_effect_error() {
+    fn b32b_eval_perform_directly_reifies_step_op() {
         // Bypass infer; call eval on a Perform node directly.
+        // B3.2b: Perform now reifies into Step::Op with an empty
+        // continuation rather than producing the B2.2b placeholder
+        // error. The label and arg flow through unchanged.
         let toks = crate::lexer::lex("do Print(1)").unwrap();
         let expr = crate::parser::parse(&toks).unwrap();
-        let err = eval(&expr, &Env::empty()).err().expect("eval should reject Perform");
-        match err {
-            EvalError::EffectNotYetSupported(label) => assert_eq!(label, "Print"),
-            other => panic!("expected EffectNotYetSupported, got {other:?}"),
+        let step = eval(&expr, &Env::empty()).expect("eval should reify Perform");
+        match step {
+            Step::Op { label, arg, kont } => {
+                assert_eq!(label, "Print");
+                assert_eq!(arg, Value::Int(1));
+                assert!(kont.is_empty(), "freshly-reified Op carries empty kont");
+            }
+            Step::Value(v) => panic!("expected Step::Op, got Step::Value({v:?})"),
         }
     }
 
     #[test]
-    fn b30_eval_handle_directly_returns_handlers_not_yet_supported() {
+    fn b32b_eval_handle_no_arms_no_ret_is_identity_on_value() {
+        // B3.2b: a handle with empty arms and no ret_arm is the
+        // identity handler on values — the body's Step::Value flows
+        // through handle_step's None-ret_arm branch unchanged.
+        // Pre-B3.2b this returned HandlersNotYetSupported.
         use crate::ast::{Expr, ExprKind};
         use crate::span::Span;
         let body = Box::new(Expr { node: ExprKind::Int(0), span: Span::new(0, 1) });
@@ -469,10 +645,10 @@ mod tests {
             node: ExprKind::Handle { body, arms: vec![], ret_arm: None },
             span: Span::new(0, 1),
         };
-        let err = eval(&e, &Env::empty()).unwrap_err();
-        assert!(
-            matches!(err, EvalError::HandlersNotYetSupported),
-            "expected HandlersNotYetSupported, got {err:?}"
-        );
+        let step = eval(&e, &Env::empty()).expect("identity handle should succeed");
+        match step {
+            Step::Value(Value::Int(0)) => {}
+            other => panic!("expected Step::Value(Int(0)), got {other:?}"),
+        }
     }
 }
