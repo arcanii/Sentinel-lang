@@ -12,13 +12,17 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: ADR 0009 (Phase C kickoff + C0 plan) ACCEPTED at
-7a04ba1; C0.0 (tokens + lexer + tests/ui/ harness + invalid-char UI
-snapshot) landed in sentinel-syntax at 8f37381. Workspace test count:
-317 active (226 effects-proto + 69 broker + 13 syntax + 9 scaffold
-smokes) + 1 broker doctest. All four check-suite checks green:
-cargo build --workspace, cargo clippy --workspace --all-targets
--D warnings, cargo test --workspace, cargo test --workspace --doc.
+Last updated: C0.1 (hand-written recursive-descent parser +
+sentinel-ast AST + `snc parse <file>` driver subcommand) landed at
+7e32e8c. ADR 0010 (concrete C0 surface syntax) ACCEPTED at the same
+time. C0.1 lifts sentinel-ast and sentinel-driver out of
+scaffold-stub status; sentinel-syntax gains parser.rs alongside
+the C0.0 lexer. Workspace test count: +30 over C0.0 (23 new parser
+unit tests + 6 new sentinel-ast Display tests + 1 new UI integration
+test); per-crate breakdown in the Conventions section. All four
+check-suite checks green: cargo build --workspace, cargo clippy
+--workspace --all-targets -D warnings, cargo test --workspace,
+cargo test --workspace --doc.
 
 Phase B retrospective (preserved as historical context for what
 came before C0): all three HANDOVER §5.2 validation demos landed
@@ -1076,7 +1080,7 @@ scaffold stubs.
 | Phase | Title                                                          | Status  | Commit  |
 |-------|----------------------------------------------------------------|---------|---------|
 | C0.0  | Tokens + lexer + tests/ui/ harness + 1 lex-error UI test       | Done    | 8f37381 |
-| C0.1  | Hand-written parser + AST (int literal, arithmetic, parens)    | Planned |         |
+| C0.1  | Hand-written parser + AST + `snc parse` subcommand             | Done    | 7e32e8c |
 | C0.2  | LLVM codegen for C0.1 AST; first runnable binary + tests/pass/ | Planned |         |
 | C0.3  | let bindings + variable references (i64 everywhere)            | Planned |         |
 | C0.4  | if/else + function calls (forward-declared, fixed signatures)  | Planned |         |
@@ -1092,39 +1096,86 @@ smoke + 1 UI integration). The UI test runs
 the lexer and snapshots the miette-formatted diagnostic at
 `crates/sentinel-syntax/tests/snapshots/ui__ui_lex_invalid_char.snap`.
 
-### C.2 Crate Layout (C0.0)
+Test coverage as of C0.1: sentinel-syntax gains 23 parser unit
+tests (six covering the precedence ladder and left-associativity
+on both add and mul; three covering unary minus including the
+unary-binds-tighter-than-mul rule; three covering span tracking
+across full / parenthesized / unary expressions; seven covering
+parse errors — unmatched open paren, unexpected close paren, EOF
+after operator, EOF after unary, lex-error passthrough, int-lit
+overflow, trailing garbage; plus an int_lit_zero edge case and a
+nested-parens test). One new UI integration test
+(`ui_parse_unbalanced_paren`, snapshotted at
+`ui__ui_parse_unbalanced_paren.snap`) snapshots the
+`unmatched_paren` diagnostic for the fixture `(1 + 2`. sentinel-ast
+gains 6 Display tests (int literal, binary, nested precedence,
+unary, plus the BinOp::symbol and UnaryOp::symbol helpers) on top
+of its existing smoke. Workspace delta: +30 active tests.
+
+### C.2 Crate Layout (C0.1)
+
+    crates/sentinel-ast/
+      Cargo.toml          deps: tracing, thiserror
+      src/
+        lib.rs            Span (= Range<usize>), Spanned<T>, BinOp
+                          (Add|Sub|Mul|Div), UnaryOp (Neg), ExprKind
+                          (IntLit | Unary | Binary), Expr =
+                          Spanned<ExprKind>, Display impl for
+                          s-expression pretty-printing
 
     crates/sentinel-syntax/
-      Cargo.toml          deps: logos, miette, thiserror, tracing
+      Cargo.toml          deps: sentinel-ast (path), logos, miette,
+                          thiserror, tracing
                           dev-deps: insta
       src/
-        lib.rs            re-exports the lexer surface
+        lib.rs            module declarations + public re-exports
+                          (lex, LexError, TokenKind from lexer;
+                          parse, ParseError, Parser from parser;
+                          Span, Spanned re-exported from sentinel-ast)
         lexer.rs          logos-based TokenKind (4 keywords + 11
-                          punctuation kinds + Ident + IntLit;
-                          skip patterns for whitespace and `//`
-                          line comments); Spanned<T>, Span,
-                          LexError (miette::Diagnostic), pure
-                          lex() fn returning (tokens, errors)
+                          punctuation kinds + Ident + IntLit; skip
+                          patterns for whitespace and `//` line
+                          comments); imports Spanned from
+                          sentinel-ast; LexError (miette::Diagnostic);
+                          pure lex() fn returning (tokens, errors)
+        parser.rs         hand-written recursive descent
+                          (parse_top -> parse_expr -> parse_add ->
+                          parse_mul -> parse_unary -> parse_atom);
+                          Parser<'a> holds src + tokens + pos; pure
+                          `parse(src) -> Result<Expr, ParseError>`;
+                          ParseError variants: Lex (transparent),
+                          UnexpectedToken, UnexpectedEof,
+                          UnmatchedParen, IntLitOverflow
       tests/
-        ui.rs             integration runner; reads workspace-root
-                          tests/ui/*.sentinel, formats diagnostics
-                          via GraphicalTheme::none() + 80-col
-                          width for snapshot stability
+        ui.rs             integration runner; shared themed-none
+                          handler at 80 cols; ui_lex_invalid_char,
+                          ui_parse_unbalanced_paren
         snapshots/
           ui__ui_lex_invalid_char.snap
+          ui__ui_parse_unbalanced_paren.snap
+
+    crates/sentinel-driver/
+      Cargo.toml          deps: sentinel-syntax (path), miette
+                          (with "fancy" feature), thiserror, tracing
+      src/
+        main.rs           snc binary; `snc parse <file>` subcommand
+                          reads the file, calls sentinel_syntax::parse,
+                          either prints the Expr's Display impl
+                          (s-expr form) or renders the ParseError via
+                          miette's default GraphicalReportHandler
+                          (fancy color); exit codes 0 / 1 / 2
 
     tests/                                (workspace root, ADR 0009 D5)
       ui/
         lex_invalid_char.sentinel         `let x = @` fixture
+        parse_unbalanced_paren.sentinel   `(1 + 2` fixture
 
-The other nine compiler crates remain 20-line scaffold stubs per ADR
-0009 D7. Population schedule:
+Seven scaffold-stub compiler crates remain at 20-line
+`crate_name() + smoke` stubs per ADR 0009 D7. Updated population
+schedule:
 
-  - sentinel-ast:      C0.1 (AST nodes)
-  - sentinel-driver:   C0.0 onward (snc binary wires the pipeline) —
-                       currently still a 10-line scaffold-stub main
-  - sentinel-codegen:  C0.2 onward (LLVM lowering)
   - sentinel-types:    C0.2 stub returning Ok; C1 fills it in
+  - sentinel-codegen:  C0.2 onward (LLVM lowering)
   - sentinel-runtime:  C0.2 (minimal print/exit stub in emitted binaries)
   - sentinel-resolve:  C1
   - sentinel-hir:      C1/C2
@@ -1160,6 +1211,28 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
    runner). Centralizing snapshots under workspace-root
    `tests/snapshots/` is deferred until there's more than one
    runner crate to coordinate.
+8. Parser is the pure function `parse(src: &str) -> Result<Expr,
+   ParseError>` per ADR 0009 D1a. Lex errors block parsing and
+   surface through a transparent `ParseError::Lex(LexError)` variant
+   — the front end has a single error type for the driver to handle.
+   Parse errors are fail-fast (one error per call); error recovery
+   is deferred until parser ergonomics demand it.
+9. `Span` and `Spanned<T>` live in `sentinel-ast` rather than
+   `sentinel-syntax` because the AST is conceptually below syntax
+   in the pipeline. The lexer's `Spanned<TokenKind>` and the parser's
+   `Spanned<ExprKind>` are the same generic type. `sentinel-syntax`
+   re-exports `Span` and `Spanned` for crates that consume tokens
+   and AST nodes together.
+10. Parens are syntactic only — they are not represented as a
+    distinct AST node. `(1 + 2)` and `1 + 2` produce the same AST
+    shape; the outer span on the parenthesized form covers the
+    parens. C5+ LSP-style source-preserving formatting may revisit
+    this if exact original-source round-trip becomes a requirement.
+11. The driver uses miette's default (fancy color) `GraphicalReport
+    Handler` for human-facing errors; UI tests use
+    `GraphicalTheme::none()` + 80-col width in the test runner for
+    host-independent snapshots. Two separate code paths, two
+    separate concerns.
 
 ---
 
@@ -1178,8 +1251,12 @@ All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
-  - sentinel-syntax:        13 tests (12 lib + 1 UI integration) + 0 doctests
+  - sentinel-syntax:        37 tests (35 lib + 2 UI integration) + 0 doctests
+  - sentinel-ast:           7 tests (1 smoke + 6 Display) + 0 doctests
+  - sentinel-driver:        binary, no tests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
+                            (sentinel-resolve, -types, -hir, -mir,
+                            -codegen, -runtime, -lsp)
 
 ### Script Convention
 

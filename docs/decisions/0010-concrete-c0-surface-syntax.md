@@ -1,6 +1,6 @@
 # ADR 0010: Concrete C0 surface syntax
 
-Status: PROPOSED (becomes ACCEPTED when C0.1 parser lands)
+Status: ACCEPTED (C0.1 parser at 7e32e8c committed to the D8 arithmetic precedence ladder + D1 decimal-only literals + D3 `//`-only comments + D12 whitespace insensitivity; D2 idents, D4-D7 structure, D8 control-flow half, D9 if/else, D10 calls, D11 `print` await C0.3-0.5 per the Revisit clauses)
 Date: 2026-05-25
 Related: 0009 (Phase C kickoff; D8 deferred this decision to the
 present ADR), 0002 (decide-now-or-later asymmetry that justified the
