@@ -12,19 +12,17 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: C0.2 (LLVM lowering via inkwell + `snc build` driver
-subcommand + first runnable binaries via `tests/pass/`) landed at
-0b07931. ADR 0009 status line refreshed to reflect C0.0-C0.2
-progress. The compile pipeline is now end-to-end: source → lex →
-parse → AST → LLVM IR → object file → system cc link → executable.
-The compiled program's exit code is the value of its top-level
-expression truncated to i32 — the temporary exit-code-is-the-
-answer convention that ADR 0010 D11's `print(x)` will replace at
-C0.4. `.cargo/config.toml` added at the workspace root to anchor
-LLVM_SYS_180_PREFIX and macOS link-search paths so subprocess
-shells (CI, automation) see what the dev's interactive zshrc
-already provides. Workspace test count: +6 over C0.1 (1 new
-codegen target-init probe + 5 new driver pass tests).
+Last updated: C0.3 (let bindings + variable references) landed at
+80d2b6b. Programs are no longer single expressions — they are
+`stmt* tail_expr` per ADR 0010 D7. The new Program type is the
+pipeline's currency throughout: parser builds it, codegen consumes
+it, driver pretty-prints and compiles it. Variable storage uses
+LLVM `alloca`/`load`/`store`; name resolution lives in codegen
+until sentinel-resolve lands at C1 (per ADR 0009 D7 deferral). Flat
+per-function scoping: no shadowing in C0; redeclaration is a
+CodegenError::RedeclaredVariable. ADR 0009 and ADR 0010 status
+lines refreshed. Workspace test count: +27 over C0.2 (5 ast Display
++ 14 parser + 4 codegen + 4 pass tests = 27 new, 380 total).
 
 Phase B retrospective (preserved as historical context for what
 came before C0): all three HANDOVER §5.2 validation demos landed
@@ -1084,7 +1082,7 @@ scaffold stubs.
 | C0.0  | Tokens + lexer + tests/ui/ harness + 1 lex-error UI test       | Done    | 8f37381 |
 | C0.1  | Hand-written parser + AST + `snc parse` subcommand             | Done    | 7e32e8c |
 | C0.2  | LLVM codegen + `snc build` + first runnable binary + tests/pass/ | Done  | 0b07931 |
-| C0.3  | let bindings + variable references (i64 everywhere)            | Planned |         |
+| C0.3  | let bindings + variable references (i64 everywhere)            | Done    | 80d2b6b |
 | C0.4  | if/else + function calls (forward-declared, fixed signatures)  | Planned |         |
 | C0.5  | fn definitions + main entry; C0 go/no-go                       | Planned |         |
 | C1+   | Type system, regions, effects (HANDOVER §6.2)                  | Planned |         |
@@ -1126,16 +1124,44 @@ before integration tests run; per-fixture executables land in
 `target/sentinel-pass/` (gitignored). Workspace delta: +6 active
 tests (353 total).
 
-### C.2 Crate Layout (C0.2)
+Test coverage as of C0.3: sentinel-ast gains 5 Display tests
+covering Var, StmtKind::Let, StmtKind::Expr, Program with empty
+stmts (which prints just the tail — preserving C0.1/C0.2 output
+verbatim), and Program with stmts (one stmt per line + tail).
+sentinel-syntax lib gains 14 parser tests: 2 Var-in-expression
+tests, 6 program-level happy paths (empty stmts, single let,
+multiple lets, expr-statement followed by tail, let-uses-let, span
+tracking on `let` covering keyword through `;`), and 6 program-
+level error cases (empty input, only-let-no-tail, missing `;`,
+missing `=`, missing identifier, bare `let`). sentinel-codegen
+gains 4 lib tests: empty-stmts program, let program, undefined
+variable rejection, redeclared variable rejection. sentinel-driver
+gains 4 pass tests (`pass_c03_simple_let`,
+`pass_c03_multiple_lets`, `pass_c03_let_uses_let`,
+`pass_c03_expr_statement` — the last verifies that an expression-
+statement is computed but its result is discarded). Workspace
+delta: +27 active tests (380 total).
+
+A UI snapshot for the `undefined_variable` codegen diagnostic was
+deliberately deferred — the lib unit tests cover the error variants
+and a dedicated UI runner for codegen errors lands when C0.4+
+introduces more codegen-stage diagnostics worth coordinating
+(unbound call target, arity mismatch, etc.).
+
+### C.2 Crate Layout (C0.3)
 
     crates/sentinel-ast/
       Cargo.toml          deps: tracing, thiserror
       src/
         lib.rs            Span (= Range<usize>), Spanned<T>, BinOp
                           (Add|Sub|Mul|Div), UnaryOp (Neg), ExprKind
-                          (IntLit | Unary | Binary), Expr =
-                          Spanned<ExprKind>, Display impl for
-                          s-expression pretty-printing
+                          (IntLit | Var | Unary | Binary), Expr =
+                          Spanned<ExprKind>; StmtKind (Let { name,
+                          name_span, value } | Expr), Stmt =
+                          Spanned<StmtKind>; Program { stmts, tail,
+                          span }; Display impls for all (Program
+                          with empty stmts prints just the tail —
+                          preserves C0.1/C0.2 output verbatim)
 
     crates/sentinel-syntax/
       Cargo.toml          deps: sentinel-ast (path), logos, miette,
@@ -1144,20 +1170,28 @@ tests (353 total).
       src/
         lib.rs            module declarations + public re-exports
                           (lex, LexError, TokenKind from lexer;
-                          parse, ParseError, Parser from parser;
-                          Span, Spanned re-exported from sentinel-ast)
+                          parse, parse_expr, ParseError, Parser
+                          from parser; Program, Span, Spanned, Stmt,
+                          StmtKind re-exported from sentinel-ast)
         lexer.rs          logos-based TokenKind (4 keywords + 11
                           punctuation kinds + Ident + IntLit; skip
                           patterns for whitespace and `//` line
                           comments); imports Spanned from
                           sentinel-ast; LexError (miette::Diagnostic);
                           pure lex() fn returning (tokens, errors)
-        parser.rs         hand-written recursive descent
-                          (parse_top -> parse_expr -> parse_add ->
-                          parse_mul -> parse_unary -> parse_atom);
-                          Parser<'a> holds src + tokens + pos; pure
-                          `parse(src) -> Result<Expr, ParseError>`;
-                          ParseError variants: Lex (transparent),
+        parser.rs         hand-written recursive descent. Two pure
+                          entry points: parse(src) -> Result<Program>
+                          handles `stmt* tail_expr` for C0.3+;
+                          parse_expr(src) -> Result<Expr> retains
+                          the single-expression contract for lib
+                          callers and existing C0.1 unit tests.
+                          parse_program loops, parse_let_stmt eats
+                          `let Ident = expr ;`. The expression
+                          ladder (parse_expr / parse_add / parse_mul
+                          / parse_unary / parse_atom) is unchanged
+                          from C0.1 except parse_atom now recognises
+                          Ident as ExprKind::Var. ParseError variants
+                          unchanged: Lex (transparent),
                           UnexpectedToken, UnexpectedEof,
                           UnmatchedParen, IntLitOverflow
       tests/
@@ -1175,26 +1209,39 @@ tests (353 total).
                           lints.rust: unsafe_code = "allow" (inkwell
                           uses unsafe internally for FFI)
       src/
-        lib.rs            compile_to_object(expr, output_path)
+        lib.rs            compile_to_object(program, output_path)
                           builds an LLVM module with a single
-                          `main() -> i32`, lowers ExprKind to IntValue
-                          via lower_expr, verifies, and writes a
-                          native object file via TargetMachine;
+                          `main() -> i32`. CodegenCtx threads
+                          builder + i64_type + entry block + name
+                          -> alloca map through lowering. lower_stmt
+                          handles Let (alloca + store + reject
+                          redeclaration) and Expr (compute and
+                          discard); lower_expr handles IntLit, Var
+                          (load from alloca; reject undefined),
+                          Unary, Binary. After all stmts and the
+                          tail expression, the i64 result is
+                          truncated to i32 and returned. Per ADR
+                          0009 D7, name resolution lives in codegen
+                          until sentinel-resolve lands at C1.
                           CodegenError variants: VerifyFailed,
                           TargetInit, TargetMachine, WriteFailed,
-                          Builder
+                          Builder, UndefinedVariable,
+                          RedeclaredVariable
 
     crates/sentinel-driver/
       Cargo.toml          deps: sentinel-syntax (path), sentinel-codegen
                           (path), miette (with "fancy" feature),
                           thiserror, tracing
       src/
-        main.rs           snc binary; subcommands `parse` and `build`;
-                          `parse <file>` lexes/parses/prints the AST
-                          via Expr's Display; `build <file> [-o <out>]`
-                          additionally lowers via sentinel_codegen,
+        main.rs           snc binary; subcommands `parse` and `build`
+                          (C0.1+ shape; both lifted from Expr to
+                          Program at C0.3). `parse <file>` lexes,
+                          parses, and pretty-prints the Program
+                          (s-expr per stmt + trailing expr last);
+                          `build <file> [-o <out>]` additionally
+                          lowers the Program via sentinel_codegen,
                           then invokes the system `cc` on the emitted
-                          `.o` to produce the executable; output
+                          `.o` to produce the executable. Output
                           defaults to <file_stem>; exit codes 0 / 1 / 2
       tests/
         pass.rs           pass-test runner; reads workspace-root
@@ -1214,6 +1261,10 @@ tests (353 total).
         c02_parens.sentinel               `(5 + 3) * 2 - 1` -> exit 15
         c02_unary.sentinel                `-(-5)` -> exit 5
         c02_division.sentinel             `12 / 3` -> exit 4
+        c03_simple_let.sentinel           `let x = 5; x` -> exit 5
+        c03_multiple_lets.sentinel        `let x = 3; let y = 4; x + y` -> exit 7
+        c03_let_uses_let.sentinel         `let a = 2; let b = a * 3; b + 1` -> exit 7
+        c03_expr_statement.sentinel       `let x = 1; x + 99; 5` -> exit 5
 
     .cargo/
       config.toml         workspace-local cargo config (C0.2): [env]
@@ -1236,7 +1287,9 @@ schedule:
   - sentinel-runtime:  C0.4 (provides the `print` runtime symbol so
                        ADR 0010 D11's print(x) has a libc-backed
                        implementation)
-  - sentinel-resolve:  C1
+  - sentinel-resolve:  C1 (absorbed temporarily into sentinel-codegen
+                       for C0.3 name resolution per ADR 0009 D7
+                       deferral; moves to its own crate at C1)
   - sentinel-hir:      C1/C2
   - sentinel-mir:      C2
   - sentinel-lsp:      C5
@@ -1324,11 +1377,49 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     because the stub adds no value at C0.2: arithmetic has no type
     semantics, the no-op `check()` would be threaded through the
     driver as `parse -> check (noop) -> codegen`, and the driver
-    pipeline is already the right shape without it. When the type
-    system has something to actually check (C1's type inference,
-    or C0.3's let-binding scope tracking if we get that far), the
-    `check()` slot lands then. ADR 0009 status line records the
-    deviation.
+    pipeline is already the right shape without it. C0.3 confirmed
+    the deferral — let-binding scope tracking lives in codegen
+    (see 20), not in a separate types pass. ADR 0009 status line
+    records the deviation.
+16. `ExprKind::Var(String)` stores the bound name as an owned
+    `String` rather than an interned identifier. Interning is a C1
+    concern: it lives in `sentinel-resolve` where name resolution
+    formalises the symbol table. C0.3's `String` allocations are
+    bounded by program size and disappear at codegen time, so the
+    cost is acceptable.
+17. Flat per-function scoping in C0.3. There is no notion of
+    nested scope yet; redeclaring an existing name in the same
+    function is `CodegenError::RedeclaredVariable` rather than
+    shadowing. Block-scoped shadowing arrives with nested blocks
+    at C0.4 (when `if`/`else` requires them). The choice was
+    deliberate at the start of C0.3 — flat is simpler to
+    implement and easier to diagnose; shadowing is a useful
+    feature but not load-bearing at C0.
+18. `StmtKind::Let { name, name_span, value }` carries the name's
+    own span in addition to the wrapping `Stmt`'s full span. This
+    is so redeclaration diagnostics can point at just the
+    identifier rather than the whole `let x = expr;` statement.
+    The pattern generalises: future statements with prominent
+    sub-spans (struct definitions, function parameters) carry
+    their own field-spans alongside the statement-level span.
+19. `Program { stmts, tail, span }` is the AST top-level rather
+    than an `ExprKind::Block(Vec<Stmt>, Box<Expr>)`. The Block-
+    expression approach would have changed the C0.1/C0.2 parser
+    tests (they would read the IntLit through a Block wrapper);
+    keeping `Program` distinct lets `parse_expr(src)` keep its
+    "single expression, no statements" contract that those tests
+    rely on. Block arrives as an expression at C0.4 when `if`/
+    `else` needs nested blocks; both representations coexist —
+    Program at the top, Block inside expressions.
+20. Codegen name resolution: the codegen pass maintains a
+    `HashMap<String, PointerValue>` from variable names to LLVM
+    alloca pointers. Each `let` enters the map; each `Var`
+    reference reads from it. When `sentinel-resolve` lands at C1
+    (per ADR 0009 D7), this map moves out of codegen and codegen
+    becomes a pure structural lowering pass against a resolved
+    AST. The C0.3 arrangement is a deliberate short-term
+    architectural debt — STATE.md flags it in this list so the
+    refactor at C1 is obvious.
 
 ---
 
@@ -1347,10 +1438,10 @@ All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
-  - sentinel-syntax:        37 tests (35 lib + 2 UI integration) + 0 doctests
-  - sentinel-ast:           7 tests (1 smoke + 6 Display) + 0 doctests
-  - sentinel-codegen:       2 tests (1 smoke + 1 target-init probe) + 0 doctests
-  - sentinel-driver:        5 pass integration tests + 0 doctests
+  - sentinel-syntax:        51 tests (49 lib + 2 UI integration) + 0 doctests
+  - sentinel-ast:           12 tests (1 smoke + 11 Display) + 0 doctests
+  - sentinel-codegen:       6 tests (1 smoke + 5 codegen tests) + 0 doctests
+  - sentinel-driver:        9 pass integration tests + 0 doctests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
                             (sentinel-resolve, -types, -hir, -mir,
                             -runtime, -lsp)
