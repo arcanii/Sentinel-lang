@@ -1,6 +1,6 @@
 # ADR 0009: Phase C kickoff and C0 plan
 
-Status: ACCEPTED (Phase C in flight; C0.0/C0.1/C0.2/C0.3/C0.4 at 8f37381/7e32e8c/0b07931/80d2b6b/baf68fc exercise D1 defer-Salsa, D1a pure-function discipline, D2 LLVM-only via inkwell, D3 miette+thiserror+insta, D4 logos lexer + hand-written-RD parser, D5 tests/ui+tests/pass harnesses, D7 sentinel-{syntax,ast,codegen,driver,runtime} populated, D6 sub-phase rows C0.0-C0.4; D8 closed via ADR 0010 at 72e29d1; D7 sentinel-types-stub-at-C0.2 deferred to C1 per STATE.md C.3; D7 sentinel-resolve absorbed into codegen for C0.3-0.4 then moves to its own crate at C1; D6 C0.5 still ahead)
+Status: ACCEPTED (**Phase C0 complete**; C0.0/C0.1/C0.2/C0.3/C0.4/C0.5 at 8f37381/7e32e8c/0b07931/80d2b6b/baf68fc/6ce8336 exercise the entire D-list: D1 defer-Salsa, D1a pure-function discipline, D2 LLVM-only via inkwell, D3 miette+thiserror+insta, D4 logos lexer + hand-written-RD parser, D5 tests/ui+tests/pass harnesses, D6 all six C0 sub-phase rows done, D7 sentinel-{syntax,ast,codegen,driver,runtime} populated. D8 closed via ADR 0010 at 72e29d1. The C0 go/no-go from ADR 0010 appendix passes as `tests/pass/c05_go_no_go.sentinel`. Carry-forwards: D7 sentinel-types stub deferred to C1 per STATE.md C.3 note 15; D7 sentinel-resolve absorbed into codegen for C0.3-0.5 — moves to its own crate at C1. Phase C1 (type system, regions) is the next major phase per HANDOVER §6.2.)
 Date: 2026-05-25
 Related: 0001 (staged-validation umbrella), 0002 (Phase B kickoff
 template; pay-once-vs-defer asymmetry), 0008 (latest ADR D-numbered

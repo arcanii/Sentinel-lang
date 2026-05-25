@@ -1,6 +1,6 @@
 # ADR 0010: Concrete C0 surface syntax
 
-Status: ACCEPTED (C0.1 at 7e32e8c committed to D1 decimal-only literals, D3 `//`-only comments, D8 arithmetic precedence ladder, D12 whitespace insensitivity; C0.3 at 80d2b6b exercises D2 idents in atom position, D7 `let x = expr;` + `expr;` statements; C0.4 at baf68fc exercises D6 block syntax, D8 call/block atoms with the if-only-at-expr-top precedence rule, D9 if/else with C-style truthy condition, D10 calls with trailing-comma support, D11 `print` via the `sentinel_print` runtime symbol; D4 fn-based top-level and D5 fn syntax await C0.5)
+Status: ACCEPTED (**all D-decisions exercised by Phase C0 completion**; C0.1 at 7e32e8c committed to D1 decimal-only literals, D3 `//`-only comments, D8 arithmetic precedence ladder, D12 whitespace insensitivity; C0.3 at 80d2b6b exercises D2 idents in atom position, D7 `let x = expr;` + `expr;` statements; C0.4 at baf68fc exercises D6 block syntax, D8 call/block atoms with the if-only-at-expr-top precedence rule, D9 if/else with C-style truthy condition, D10 calls with trailing-comma support, D11 `print` via the `sentinel_print` runtime symbol; **C0.5 at 6ce8336 exercises D4 fn-based top-level with forward refs and D5 fn syntax with no type annotations** (the `->` token reservation stays for C1's annotation grammar). The C0 go/no-go program from this ADR's appendix runs in `tests/pass/c05_go_no_go.sentinel`.)
 Date: 2026-05-25
 Related: 0009 (Phase C kickoff; D8 deferred this decision to the
 present ADR), 0002 (decide-now-or-later asymmetry that justified the

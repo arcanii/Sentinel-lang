@@ -12,19 +12,27 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: C0.4 (if/else + function calls + print built-in)
-landed at baf68fc. **Programs now produce stdout**, not just exit
-codes — the first Sentinel binaries that exercise the runtime have
-shipped. sentinel-runtime is lifted out of scaffold status: it
-exports `sentinel_print(i64) -> i64` via `#[no_mangle] extern "C"`
-and now builds as both rlib and staticlib so the driver can link
-the resulting `libsentinel_runtime.a` into emitted programs via
-the system `cc`. Block expressions, if/else (alloca-based result
-per the C0.4 plan A), and direct-call-by-Ident (only `print`
-resolves; `fn` defs wait for C0.5) all land. ADR 0009 and ADR 0010
-status lines refreshed. Workspace test count: +43 over C0.3
-(7 ast Display + 20 parser + 6 codegen + 8 pass + 1 runtime + 1
-new ast helper test = 43 new, 423 total).
+Last updated: **C0.5 (fn defs + main entry) landed at 6ce8336 —
+Phase C0 is complete.** The ADR 0010 appendix go/no-go program
+(`double + pick + main with print`) compiles and runs at
+`tests/pass/c05_go_no_go.sentinel`: stdout `10\n`, exit 0. Programs
+are now one-or-more `fn` definitions with an explicit `main` entry
+point; the previous implicit-main `stmt* tail_expr` form is gone
+(it lives inside fn bodies as Block). The codegen is two-pass:
+pass 1 declares every function (including `print` mapped to
+`sentinel_print`) so forward references work; pass 2 emits each
+body with per-fn alloca-bound params. `main` returns i32 (the C
+ABI shape); other fns return i64. ADR 0009 status now records
+Phase C0 as complete; ADR 0010 status notes all D-decisions
+exercised. Workspace test count: +22 over C0.4 (2 ast Display +
+14 parser + 1 codegen net + 5 pass = 22 new, 445 total).
+
+Phase C0 retrospective: six sub-phases (C0.0 lexer, C0.1 parser +
+AST, C0.2 LLVM codegen + first runnable binaries, C0.3 let +
+variables, C0.4 if/else + print + first stdout, C0.5 fn defs +
+main) shipped across twelve commits. The compile pipeline source
+-> lex -> parse -> AST -> two-pass LLVM IR -> object -> cc-linked
+executable handles every C0 feature.
 
 Phase B retrospective (preserved as historical context for what
 came before C0): all three HANDOVER §5.2 validation demos landed
@@ -1086,7 +1094,7 @@ scaffold stubs.
 | C0.2  | LLVM codegen + `snc build` + first runnable binary + tests/pass/ | Done  | 0b07931 |
 | C0.3  | let bindings + variable references (i64 everywhere)            | Done    | 80d2b6b |
 | C0.4  | if/else + block expressions + `print` calls + first stdout     | Done    | baf68fc |
-| C0.5  | fn definitions + main entry; C0 go/no-go                       | Planned |         |
+| C0.5  | fn definitions + main entry; **C0 go/no-go passes**            | Done    | 6ce8336 |
 | C1+   | Type system, regions, effects (HANDOVER §6.2)                  | Planned |         |
 
 ADR 0010 (concrete C0 surface syntax) lands between C0.0 and C0.1
@@ -1170,7 +1178,34 @@ else_if_chain, block_expression, if_with_print) — five assert
 on exit codes, three assert on stdout content + exit. Workspace
 delta: +43 active tests (423 total).
 
-### C.2 Crate Layout (C0.4)
+Test coverage as of C0.5: sentinel-ast gains 4 new FnDef-related
+Display tests (display_program_one_main, display_program_two_fns,
+display_fn_def_zero_params, display_fn_def_multi_params) and
+retires 2 stmt+tail Program tests, net +2. sentinel-syntax lib
+gains 14 new parser tests covering fn-def parsing (single fn,
+fn with one/multi/trailing-comma params, multi-fn programs,
+fn-def Display round-trip, span tracking) plus 6 fn-def error
+cases (top-level not-fn, top-level bare expr, missing name, missing
+parens, missing body, bad param name); a `parse_block_str` public
+function is added so the existing C0.3-0.4 parse_program_* tests
+keep working with brace-wrapped inputs. sentinel-codegen gains 1
+net test (compile_main_with_int_lit, compile_main_with_let_program,
+compile_rejects_missing_main, compile_rejects_redefined_function,
+compile_rejects_user_redefining_print, compile_multi_fn_with_
+forward_ref, compile_call_to_user_fn_arity_check — 7 new tests but
+with restructuring of the C0.4 tests around the new main-required
+shape, the net is +1). sentinel-driver gains 5 new pass-test
+fixtures: c05_simple_fn (double + main), c05_multi_arg_fn (add),
+c05_forward_ref (main calls fn defined after it), c05_call_chain
+(quad = double(double(...))), and the C0 acceptance program
+**c05_go_no_go** (the ADR 0010 appendix double + pick + main with
+print). All 17 pre-C0.5 fixtures are mechanically rewrapped in
+`fn main() { ... }` for the hard-break top-level shape change.
+The UI fixture parse_unbalanced_paren rewrites to
+`fn main() { (1 + 2 }` so it remains valid C0.5 program shape with
+the embedded error. Workspace delta: +22 active tests (445 total).
+
+### C.2 Crate Layout (C0.5)
 
     crates/sentinel-ast/
       Cargo.toml          deps: tracing, thiserror
@@ -1180,13 +1215,14 @@ delta: +43 active tests (423 total).
                           (IntLit | Var | Unary | Binary | Block | If
                           | Call), Expr = Spanned<ExprKind>; StmtKind
                           (Let { name, name_span, value } | Expr),
-                          Stmt = Spanned<StmtKind>; Program { stmts,
-                          tail, span }; Block { stmts, tail, span }
-                          (same shape as Program but a distinct type
-                          for brace-wrapped nested forms); Display
-                          impls for all (Program with empty stmts
-                          prints just the tail — preserves C0.1/C0.2
-                          output verbatim)
+                          Stmt = Spanned<StmtKind>; Block { stmts,
+                          tail, span }; Param { name, span }; FnDef
+                          { name, name_span, params, body: Block,
+                          span }; Program { fns: Vec<FnDef>, span }
+                          (C0.5 top-level — was stmts+tail at
+                          C0.3-0.4); Display impls for all (Program
+                          prints fn-defs newline-separated, FnDef
+                          prints `(fn name (params) body)`)
 
     crates/sentinel-syntax/
       Cargo.toml          deps: sentinel-ast (path), logos, miette,
@@ -1204,26 +1240,28 @@ delta: +43 active tests (423 total).
                           comments); imports Spanned from
                           sentinel-ast; LexError (miette::Diagnostic);
                           pure lex() fn returning (tokens, errors)
-        parser.rs         hand-written recursive descent. Two pure
-                          entry points: parse(src) -> Result<Program>
-                          handles `stmt* tail_expr` for C0.3+;
-                          parse_expr(src) -> Result<Expr> retains
-                          the single-expression contract for lib
-                          callers and existing C0.1 unit tests.
-                          parse_program loops, parse_let_stmt eats
-                          `let Ident = expr ;`. C0.4 grows
-                          parse_expr to check for `if` at expr top
-                          (delegating to parse_if for the
-                          if/else/else-if chain), parse_block for
-                          the brace-wrapped `{ stmt* tail }`, and
-                          parse_atom now: Ident-followed-by-`(`
-                          becomes a call (with trailing comma
-                          allowed in args); bare Ident is Var;
-                          LBrace becomes a block. ParseError
-                          variants unchanged from C0.3: Lex
-                          (transparent), UnexpectedToken,
-                          UnexpectedEof, UnmatchedParen,
-                          IntLitOverflow
+        parser.rs         hand-written recursive descent. Three
+                          pure entry points: parse(src) ->
+                          Result<Program> at C0.5+ parses one or
+                          more fn-defs (parse_program loops over
+                          parse_fn_def, which eats `fn Ident
+                          ( params? ) block`); parse_expr(src) ->
+                          Result<Expr> retains the single-expression
+                          contract for existing C0.1 tests + REPL;
+                          parse_block_str(src) -> Result<Block>
+                          parses a brace-wrapped block in isolation
+                          (used by tests + future REPL/completion).
+                          Internal: parse_block (for `{ stmt* tail
+                          }` from `if` branches, atoms, and fn
+                          bodies), parse_let_stmt (`let Ident =
+                          expr ;`), parse_if (with else-if chain
+                          via synthetic Block wrapping), parse_atom
+                          dispatches IntLit / Ident-with-`(`-is-call
+                          / bare-Ident-is-Var / `{`-is-Block /
+                          `(`-is-paren. ParseError variants
+                          unchanged since C0.3: Lex (transparent),
+                          UnexpectedToken, UnexpectedEof,
+                          UnmatchedParen, IntLitOverflow
       tests/
         ui.rs             integration runner; shared themed-none
                           handler at 80 cols; ui_lex_invalid_char,
@@ -1240,33 +1278,34 @@ delta: +43 active tests (423 total).
                           uses unsafe internally for FFI)
       src/
         lib.rs            compile_to_object(program, output_path)
-                          builds an LLVM module with a single
-                          `main() -> i32`. CodegenCtx<'ctx, 'a>
-                          threads &context + &module + builder +
-                          i64_type + entry block + main_fn + name
-                          -> alloca map through lowering; the two
-                          lifetimes let the ctx be scoped to drop
-                          before module.verify() runs. lower_stmt
-                          handles Let (alloca + store + reject
-                          redeclaration) and Expr (compute and
-                          discard); lower_block iterates stmts and
-                          returns the tail value; lower_if creates
-                          then/else/merge basic blocks with an
-                          alloca-based result slot (mem2reg promotes
-                          to phi when optimization is enabled) and
-                          uses `!= 0` compare per ADR 0010 D9
-                          truthy condition; lower_call dispatches
-                          `print` to a lazily-declared `declare i64
-                          @sentinel_print(i64)` and errors on
-                          other names. After all stmts and the tail
-                          expression, the i64 result is truncated
-                          to i32 and returned. Per ADR 0009 D7,
-                          name resolution lives in codegen until
+                          builds an LLVM module containing all fns
+                          declared by the program. **Two-pass**:
+                          pass 1 declares every fn (including the
+                          runtime `print` mapped to `sentinel_print`)
+                          so forward references work; pass 2 emits
+                          each body. `main` returns i32 (C ABI shape,
+                          truncated from i64 body value); other
+                          fns return i64. CodegenCtx<'ctx, 'a>
+                          threads &context + builder + i64_type +
+                          a HashMap<String, FunctionValue> fns
+                          table + current_fn + name -> alloca vars
+                          map. compile_fn resets vars + current_fn
+                          per fn, allocates+stores each param, then
+                          lowers the body. lower_if uses current_fn
+                          for basic-block creation; lower_call
+                          looks up the fns table for the callee
+                          (replacing the C0.4 hardcoded print
+                          special case). Per ADR 0009 D7, name
+                          resolution lives in codegen until
                           sentinel-resolve lands at C1. CodegenError
                           variants: VerifyFailed, TargetInit,
                           TargetMachine, WriteFailed, Builder,
                           UndefinedVariable, RedeclaredVariable,
-                          UndefinedFunction, ArityMismatch
+                          UndefinedFunction, ArityMismatch,
+                          RedefinedFunction (C0.5; covers user-
+                          redefines-print collisions with the
+                          runtime symbol), MissingMain (C0.5;
+                          programs require a `fn main`)
 
     crates/sentinel-runtime/
       Cargo.toml          deps: tracing, thiserror
@@ -1311,7 +1350,7 @@ delta: +43 active tests (423 total).
       ui/
         lex_invalid_char.sentinel         `let x = @` fixture
         parse_unbalanced_paren.sentinel   `(1 + 2` fixture
-      pass/
+      pass/                               (all wrapped in `fn main() { ... }` at C0.5)
         c02_arithmetic.sentinel           `6 + 7` -> exit 13
         c02_precedence.sentinel           `1 + 2 * 3` -> exit 7
         c02_parens.sentinel               `(5 + 3) * 2 - 1` -> exit 15
@@ -1329,6 +1368,12 @@ delta: +43 active tests (423 total).
         c04_else_if_chain.sentinel        let x=0; if/else-if/else -> exit 3
         c04_block_expression.sentinel     `let r = { let y = 4; y + 1 }; r * 2` -> exit 10
         c04_if_with_print.sentinel        if/print -> stdout "100\n", exit 0
+        c05_simple_fn.sentinel            double + main -> exit 14
+        c05_multi_arg_fn.sentinel         add(5, 6) -> exit 11
+        c05_forward_ref.sentinel          main calls triple defined later -> exit 12
+        c05_call_chain.sentinel           quad(3) = double(double(3)) -> exit 12
+        c05_go_no_go.sentinel             ADR 0010 appendix: double + pick + main
+                                          with print -> stdout "10\n", exit 0
 
     .cargo/
       config.toml         workspace-local cargo config (C0.2): [env]
@@ -1345,13 +1390,15 @@ Five scaffold-stub compiler crates remain at 20-line
 schedule:
 
   - sentinel-types:    C1 (stub deferral from C0.2 per STATE.md C.3
-                       note 15 — arithmetic, lets, and if/else have
-                       no type semantics that a stub `check()` would
-                       add value to; the slot lands when the type
-                       system has something to actually check)
+                       note 15 — arithmetic, lets, if/else, and
+                       fn-defs have no type semantics that a stub
+                       `check()` would add value to; the slot lands
+                       when the type system has something to
+                       actually check)
   - sentinel-resolve:  C1 (absorbed temporarily into sentinel-codegen
-                       for C0.3-0.4 name resolution per ADR 0009 D7
-                       deferral; moves to its own crate at C1)
+                       for C0.3-C0.5 name resolution — vars AND
+                       functions; per ADR 0009 D7 deferral; moves
+                       to its own crate at C1)
   - sentinel-hir:      C1/C2
   - sentinel-mir:      C2
   - sentinel-lsp:      C5
@@ -1526,9 +1573,49 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     bound by an inner scope in `compile_to_object`). The two
     lifetimes let the ctx be scoped to drop before `module.
     verify()` and `target_machine.write_to_file(&module, …)` run
-    — the borrow checker can see that the ctx's `&module` ends at
+    — the borrow checker can see that the ctx's borrows end at
     the inner block's `}` and so the later `module.verify()` is
-    unaliased.
+    unaliased. C0.5 dropped the `&module` field from the ctx
+    because pass 1 declares every function up-front, so pass 2
+    never needs to mutate the module — it only emits IR through
+    the builder against pre-existing FunctionValues.
+27. C0.5 top-level shape is **`Vec<FnDef>`** with a mandatory
+    `main` entry point — a hard break from the C0.3-0.4 implicit-
+    main `stmt* tail_expr` form. The existing 17 C0.2-0.4 pass
+    fixtures were mechanically rewrapped in `fn main() { ... }`.
+    The hard break was chosen at the C0.5 start because clean
+    shape going into C1 was worth the one-time fixture rewrite
+    over preserving two top-level forms forever.
+28. Codegen is **two-pass** per the C0.5 plan A. Pass 1 declares
+    every function (including the runtime `print` mapped to
+    `sentinel_print`); pass 2 emits each body. Forward references
+    work because all signatures are in the module before any body
+    is emitted. The cost is one extra walk of `program.fns`; the
+    benefit is no defined-before-use constraint on user code.
+29. `main` returns i32 while every other fn returns i64. This
+    matches the C ABI's `main` signature so the system linker is
+    happy with no extra glue. The i64 -> i32 truncation happens
+    inside `compile_fn` only for `main`; other fns build a normal
+    i64 return.
+30. `print` is reserved: pre-declared in pass 1 as the runtime
+    `sentinel_print` symbol, so a user-defined `fn print(x)` at
+    pass-1 declaration time collides with the pre-declaration and
+    surfaces as `CodegenError::RedefinedFunction`. The check is
+    by name in the fns table, not a special-case in the parser.
+31. Function parameters become per-fn allocas in the entry block:
+    on `compile_fn` we clear `vars`, then for each param we
+    allocate an i64 slot and `store` the incoming parameter value
+    into it. The body then reads parameters via the same
+    `vars.get` path as `let`-bindings — uniform treatment. C0.5
+    arity check fires from `lower_call` via
+    `fn_value.count_params()`; it covers both `print` (declared
+    with one param) and user-defined fns uniformly.
+32. `parse_block_str(src)` is a new C0.5 public entry point that
+    parses a single brace-wrapped block. It's used by the
+    parser's own tests (so the C0.3-0.4 stmt+tail tests can wrap
+    their input in `{ ... }` and keep their assertions) and is
+    available for any future REPL or LSP completion machinery
+    that wants to parse just a block.
 
 ---
 
@@ -1547,10 +1634,10 @@ All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
-  - sentinel-syntax:        71 tests (69 lib + 2 UI integration) + 0 doctests
-  - sentinel-ast:           19 tests (1 smoke + 18 Display) + 0 doctests
-  - sentinel-codegen:       12 tests (1 smoke + 11 codegen tests) + 0 doctests
-  - sentinel-driver:        17 pass integration tests + 0 doctests
+  - sentinel-syntax:        85 tests (83 lib + 2 UI integration) + 0 doctests
+  - sentinel-ast:           21 tests (1 smoke + 20 Display) + 0 doctests
+  - sentinel-codegen:       13 tests (1 smoke + 12 codegen tests) + 0 doctests
+  - sentinel-driver:        22 pass integration tests + 0 doctests
   - sentinel-runtime:       2 tests (smoke + sentinel_print_returns_zero) + 0 doctests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
                             (sentinel-resolve, -types, -hir, -mir, -lsp)
