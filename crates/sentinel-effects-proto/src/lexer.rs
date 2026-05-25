@@ -89,6 +89,13 @@ pub enum Token {
     With,
     #[token("return")]
     Return,
+    // B4.0 (ADR 0008 D6): secret qualifier and declassify keywords.
+    // Both are globally reserved; `secret` and `declassify` cannot be
+    // used as identifiers anywhere in the source.
+    #[token("secret")]
+    Secret,
+    #[token("declassify")]
+    Declassify,
 }
 
 /// Errors produced by [`lex`].
@@ -281,6 +288,72 @@ mod tests {
         assert!(matches!(kinds[4], Token::Return));
         assert!(matches!(kinds[5], Token::Ident(s) if s == "v"));
         assert!(matches!(kinds[6], Token::FatArrow));
+    }
+
+    // ---- B4.0b: secret + declassify keyword tokens (ADR 0008 D6) ----
+
+    #[test]
+    fn b40b_lex_secret_keyword() {
+        let toks = tokens_only(lex("secret").unwrap());
+        assert_eq!(toks, vec![Token::Secret]);
+    }
+
+    #[test]
+    fn b40b_lex_declassify_keyword() {
+        let toks = tokens_only(lex("declassify").unwrap());
+        assert_eq!(toks, vec![Token::Declassify]);
+    }
+
+    #[test]
+    fn b40b_lex_secret_is_reserved_not_ident() {
+        // After B4.0b, `secret` cannot be used as an identifier.
+        // Same global-reservation policy as `rec` (B1.3) / `handle`,
+        // `with`, `return` (B3.0).
+        let toks = tokens_only(lex("let secret = 1 in secret").unwrap());
+        assert_eq!(toks, vec![
+            Token::Let,
+            Token::Secret,
+            Token::Eq,
+            Token::Int(1),
+            Token::In,
+            Token::Secret,
+        ]);
+    }
+
+    #[test]
+    fn b40b_lex_declassify_is_reserved_not_ident() {
+        // Used in an identifier position; lexer still emits the keyword.
+        let toks = tokens_only(lex("let declassify = 1 in declassify").unwrap());
+        assert_eq!(toks, vec![
+            Token::Let,
+            Token::Declassify,
+            Token::Eq,
+            Token::Int(1),
+            Token::In,
+            Token::Declassify,
+        ]);
+    }
+
+    #[test]
+    fn b40b_lex_secret_type_annotation_stream() {
+        // `secret Bytes` (Bytes is just an Ident at the lexer level;
+        // type-atom recognition happens in the parser).
+        let toks = tokens_only(lex("secret Bytes").unwrap());
+        assert_eq!(toks, vec![
+            Token::Secret,
+            Token::Ident("Bytes".into()),
+        ]);
+    }
+
+    #[test]
+    fn b40b_lex_declassify_call_stream() {
+        let toks = tokens_only(lex("declassify(x)").unwrap());
+        assert_eq!(toks, vec![
+            Token::Declassify,
+            Token::LParen,
+            Token::Ident("x".into()),
+            Token::RParen,
+        ]);
     }
 
     #[test]
