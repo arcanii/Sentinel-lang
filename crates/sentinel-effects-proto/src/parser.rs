@@ -437,6 +437,12 @@ impl<'a> Parser<'a> {
                     crate::ast::TyExpr::Int(_) => Ok(crate::ast::TyExpr::Int(span)),
                     crate::ast::TyExpr::Bool(_) => Ok(crate::ast::TyExpr::Bool(span)),
                     crate::ast::TyExpr::Arrow(a, b, _) => Ok(crate::ast::TyExpr::Arrow(a, b, span)),
+                    // ADR 0008 D6: `( secret T )` preserves the
+                    // Secret wrapper; the outer span absorbs the
+                    // parens just like the other arms.
+                    crate::ast::TyExpr::Secret(inner, _) => {
+                        Ok(crate::ast::TyExpr::Secret(inner, span))
+                    }
                 }
             }
             Some((t, span)) => Err(ParseError::ExpectedTypeExpr { found: Some(t), span }),

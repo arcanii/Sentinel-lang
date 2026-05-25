@@ -117,6 +117,7 @@ impl MiniError {
                     TypeError::UnhandledEffects { span, .. } => Some(*span),
                     TypeError::HandlerLabelNotInRow { span, .. } => Some(*span),
                     TypeError::DuplicateHandlerArm { span, .. } => Some(*span),
+                    TypeError::SecretsNotYetSupported { span } => Some(*span),
                 };
                 render(source, span, "type error", &e.to_string())
             }

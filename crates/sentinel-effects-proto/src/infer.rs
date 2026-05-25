@@ -51,6 +51,12 @@ pub enum TypeError {
     /// Parser accepts duplicates; typing rejects them.
     #[error("handler contains two arms for effect {label:?}")]
     DuplicateHandlerArm { label: String, span: Span },
+    /// B4.0 (ADR 0008 D9): placeholder fired on any program that
+    /// uses the `secret T` qualifier in a type annotation or the
+    /// `declassify(e)` form. Real B4.1 typing replaces this. Mirrors
+    /// the `EffectNotYetSupported` placeholder removed in B2.3b2.
+    #[error("`secret` qualifier and `declassify` not yet supported by inference (B4.0 surface only; typing lands in B4.1)")]
+    SecretsNotYetSupported { span: Span },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -114,6 +120,11 @@ impl Subst {
                 Some(bound) => self.apply(bound),
                 None => Ty::Var(*v),
             },
+            // ADR 0008 D1: recurse into Secret. Use Ty::secret
+            // (not Ty::Secret(Box::new(...))) so the idempotency
+            // invariant survives even if a future Subst maps a
+            // var to a Secret type.
+            Ty::Secret(inner) => Ty::secret(self.apply(inner)),
             Ty::Fun(a, row, b) => Ty::Fun(
                 Box::new(self.apply(a)),
                 self.apply_row(row),
@@ -204,6 +215,15 @@ pub fn unify(
             let s2 = unify(&s1, &b1, &b2, span, supply)?;
             unify_row(&s2, &r1, &r2, span, supply)
         }
+        // ADR 0008 D1: structural recursion. Secret-vs-non-Secret
+        // (other than Var, which is handled above) falls through
+        // to the catch-all Mismatch arm. ADR 0008 D2's no-alpha-leak
+        // restriction is B4.1; in B4.0 the Var arm above will happily
+        // bind a TyVar to a Ty::Secret(_). This is unobservable in
+        // B4.0 because Declassify is the only way to introduce a
+        // secret-typed value into inference and it's blocked by the
+        // SecretsNotYetSupported placeholder.
+        (Ty::Secret(a), Ty::Secret(b)) => unify(s, &a, &b, span, supply),
         (expected, found) => Err(TypeError::Mismatch { expected, found, span }),
     }
 }
@@ -868,6 +888,13 @@ pub fn infer(
             let row = s_acc.apply_row(&r_accumulated);
             Ok((s_acc, ty, row))
         }
+        // ADR 0008 D9: surface-only placeholder. B4.1 replaces this
+        // with the real typing rule (`e : Secret<T> ⊢ declassify(e) : T`,
+        // ADR 0008 D5). Mirrors how `EffectNotYetSupported` gated
+        // `Perform` from B2.2b until B2.3b2 wired real typing.
+        ExprKind::Declassify { span, .. } => {
+            Err(TypeError::SecretsNotYetSupported { span: *span })
+        }
     }
 }
 
@@ -902,6 +929,22 @@ pub fn infer_top(expr: &Expr) -> Result<Ty, TypeError> {
 /// nothing to the typing environment. B2.3 will thread declared
 /// labels through an environment so `do Label(arg)` infers a
 /// proper effect row, and handlers in B3 will discharge them.
+/// B4.0 (ADR 0008 D9): walk a surface `TyExpr` tree, returning the
+/// span of the first `secret` qualifier encountered. None if the
+/// tree contains no secret. Used by [`infer_program`] to reject
+/// programs whose effect declarations mention `secret` before B4.1
+/// wires real Secret typing.
+fn tyexpr_find_secret_span(ty: &crate::ast::TyExpr) -> Option<Span> {
+    use crate::ast::TyExpr;
+    match ty {
+        TyExpr::Int(_) | TyExpr::Bool(_) => None,
+        TyExpr::Secret(_, s) => Some(*s),
+        TyExpr::Arrow(a, b, _) => {
+            tyexpr_find_secret_span(a).or_else(|| tyexpr_find_secret_span(b))
+        }
+    }
+}
+
 pub fn infer_program(prog: &crate::ast::Program) -> Result<Ty, TypeError> {
     // B2.3b2 (ADR 0005 D9): populate the EffectEnv from prog.effects
     // so `do Label(arg)` resolves against declared labels. Residual
@@ -910,6 +953,17 @@ pub fn infer_program(prog: &crate::ast::Program) -> Result<Ty, TypeError> {
     let mut supply = TyVarSupply::new();
     let mut eff_env: EffectEnv = HashMap::new();
     for decl in &prog.effects {
+        // ADR 0008 D9: reject `effect L : ... secret T ...` in B4.0.
+        // The placeholder fires before `to_ty` lowers Secret into
+        // inference, so no Ty::Secret value escapes to the unify Var
+        // arm (whose B4.0 behaviour would happily bind a TyVar to a
+        // secret, violating D2's no-α-leak rule). Removed in B4.1
+        // when real Secret typing lands.
+        if let Some(span) = tyexpr_find_secret_span(&decl.arg)
+            .or_else(|| tyexpr_find_secret_span(&decl.ret))
+        {
+            return Err(TypeError::SecretsNotYetSupported { span });
+        }
         eff_env.insert(
             decl.label.clone(),
             (decl.arg.to_ty(), decl.ret.to_ty()),
@@ -1846,6 +1900,71 @@ mod tests {
         }
     }
 
+    // ---- B4.0 (ADR 0008 D9): SecretsNotYetSupported placeholder ----
+    //
+    // These tests build AST directly because the lexer/parser do not
+    // yet recognise `secret` or `declassify` (those are B4.0b/c). They
+    // exercise the two surface entry points that lower to `Ty::Secret`
+    // or `ExprKind::Declassify`: `declassify(e)` in expressions and
+    // `secret T` in effect-decl signatures.
 
+    #[test]
+    fn b40a_declassify_expr_rejected_with_placeholder() {
+        use crate::ast::{expr, ExprKind};
+        let inner = expr(ExprKind::Int(1), sp());
+        let de = expr(
+            ExprKind::Declassify { inner: Box::new(inner), span: sp() },
+            sp(),
+        );
+        let mut supply = TyVarSupply::new();
+        let env = TypeEnv::empty();
+        let eff_env: EffectEnv = HashMap::new();
+        let err = infer(&env, &eff_env, &de, &mut supply).expect_err("declassify");
+        match err {
+            TypeError::SecretsNotYetSupported { .. } => {}
+            other => panic!("expected SecretsNotYetSupported, got {other:?}"),
+        }
+    }
 
+    #[test]
+    fn b40a_effect_decl_with_secret_ret_rejected_with_placeholder() {
+        use crate::ast::{expr, EffectDecl, ExprKind, Program, TyExpr};
+        let prog = Program {
+            effects: vec![EffectDecl {
+                label: "ReadKey".to_string(),
+                label_span: sp(),
+                arg: TyExpr::Int(sp()),
+                ret: TyExpr::Secret(Box::new(TyExpr::Int(sp())), sp()),
+                span: sp(),
+            }],
+            body: expr(ExprKind::Int(0), sp()),
+        };
+        let err = infer_program(&prog).expect_err("effect-decl secret");
+        match err {
+            TypeError::SecretsNotYetSupported { .. } => {}
+            other => panic!("expected SecretsNotYetSupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b40a_effect_decl_with_secret_arg_rejected_with_placeholder() {
+        // Symmetric to ret: the find_secret walker checks arg first,
+        // then ret. This test pins the arg path.
+        use crate::ast::{expr, EffectDecl, ExprKind, Program, TyExpr};
+        let prog = Program {
+            effects: vec![EffectDecl {
+                label: "Sign".to_string(),
+                label_span: sp(),
+                arg: TyExpr::Secret(Box::new(TyExpr::Int(sp())), sp()),
+                ret: TyExpr::Int(sp()),
+                span: sp(),
+            }],
+            body: expr(ExprKind::Int(0), sp()),
+        };
+        let err = infer_program(&prog).expect_err("effect-decl secret arg");
+        match err {
+            TypeError::SecretsNotYetSupported { .. } => {}
+            other => panic!("expected SecretsNotYetSupported, got {other:?}"),
+        }
+    }
 }

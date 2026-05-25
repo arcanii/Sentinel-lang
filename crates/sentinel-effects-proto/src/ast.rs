@@ -82,6 +82,15 @@ pub enum ExprKind {
         arms: Vec<HandlerArm>,
         ret_arm: Option<ReturnArm>,
     },
+    /// `declassify(e)` (ADR 0008 D5). Special form: lowers a
+    /// `secret T`-typed expression to `T` at the type level;
+    /// eval is identity on the value. The audit-point property
+    /// is preserved by keeping this a syntactic form rather than
+    /// a function, so every declassification is grep-able in source.
+    Declassify {
+        inner: Box<Expr>,
+        span: Span,
+    },
 }
 
 /// Binary operators.
@@ -142,6 +151,10 @@ pub enum TyExpr {
     Int(Span),
     Bool(Span),
     Arrow(Box<TyExpr>, Box<TyExpr>, Span),
+    /// `secret T` qualifier (ADR 0008 D1/D6). Parser produces this
+    /// from the prefix `secret` keyword in TyExpr position;
+    /// `to_ty` lowers to [`Ty::secret`].
+    Secret(Box<TyExpr>, Span),
 }
 
 impl TyExpr {
@@ -149,6 +162,7 @@ impl TyExpr {
         match self {
             TyExpr::Int(s) | TyExpr::Bool(s) => *s,
             TyExpr::Arrow(_, _, s) => *s,
+            TyExpr::Secret(_, s) => *s,
         }
     }
 
@@ -163,6 +177,12 @@ impl TyExpr {
             TyExpr::Int(_) => Ty::Int,
             TyExpr::Bool(_) => Ty::Bool,
             TyExpr::Arrow(a, b, _) => Ty::arrow_with(a.to_ty(), Row::Empty, b.to_ty()),
+            // ADR 0008 D1/D6: prefix `secret T` lowers to
+            // Ty::secret(inner). Idempotent smart constructor
+            // collapses any accidental double-wrap (the parser
+            // separately rejects literal `secret secret T` via
+            // ParseError::DoubleSecret).
+            TyExpr::Secret(inner, _) => Ty::secret(inner.to_ty()),
         }
     }
 }

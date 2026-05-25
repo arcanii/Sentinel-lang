@@ -491,6 +491,16 @@ pub fn eval(expr: &Expr, env: &Env) -> Result<Step, EvalError> {
             let step = eval(body, env)?;
             handle_step(step, &arms_arc, &ret_arm_arc, env)
         }
+        // ADR 0008 D5: `declassify(e)` is a type-level audit point;
+        // at the value layer it is the identity. The Step (Value or
+        // Op) propagates unchanged — declassification does not change
+        // any value representation (`Value` is qualifier-blind by B0
+        // design), and no resume-point work is needed because there
+        // is nothing to do "after" a declassify other than yield the
+        // inner value. Unreachable in B4.0 via the full pipeline
+        // because `SecretsNotYetSupported` rejects the program at
+        // inference; this arm exists so eval is total over `ExprKind`.
+        ExprKind::Declassify { inner, .. } => eval(inner, env),
     }
 }
 

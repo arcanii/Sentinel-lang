@@ -171,6 +171,14 @@ pub enum Ty {
     Bool,
     Var(TyVar),
     Fun(Box<Ty>, Row, Box<Ty>),
+    /// `secret T` qualifier (ADR 0008 D1). Constructed via
+    /// [`Ty::secret`] which enforces idempotency:
+    /// `Ty::secret(Ty::Secret(t))` collapses to `Ty::Secret(t)`,
+    /// so `Ty::Secret(Box::new(Ty::Secret(_)))` never appears.
+    /// `unify`, `Subst::apply`, and `close_rows` preserve this
+    /// invariant by recursing into the inner type without
+    /// re-wrapping.
+    Secret(Box<Ty>),
 }
 
 impl Ty {
@@ -188,6 +196,18 @@ impl Ty {
         Ty::Fun(Box::new(arg), row, Box::new(ret))
     }
 
+    /// Idempotent secret-wrapping smart constructor (ADR 0008 D1).
+    /// `Ty::secret(Ty::Secret(t))` returns `Ty::Secret(t)` unchanged.
+    /// Use this instead of `Ty::Secret(Box::new(t))` anywhere `t`
+    /// could already be secret (substitution, unification,
+    /// `to_ty` lowering from `TyExpr`).
+    pub fn secret(t: Ty) -> Ty {
+        match t {
+            Ty::Secret(_) => t,
+            other => Ty::Secret(Box::new(other)),
+        }
+    }
+
     /// B2.3b1 (ADR 0006 D1/D3/D5): replace every free `Row::Var(_)`
     /// inside this type with `Row::Empty`. Applied at `infer_top` and
     /// `infer_program` as a presentation-layer zonk for unconstrained
@@ -201,6 +221,10 @@ impl Ty {
                 row.close(),
                 Box::new(b.close_rows()),
             ),
+            // ADR 0008 D1: recurse into Secret; smart constructor
+            // not needed because inner.close_rows() preserves the
+            // non-doubly-wrapped invariant structurally.
+            Ty::Secret(inner) => Ty::Secret(Box::new(inner.close_rows())),
         }
     }
 
@@ -232,6 +256,7 @@ impl Ty {
                 row.collect_free_vars(acc);
                 b.collect_free_vars(acc);
             }
+            Ty::Secret(inner) => inner.collect_free_vars(acc),
         }
     }
 
@@ -243,6 +268,7 @@ impl Ty {
                 row.collect_free_row_vars(acc);
                 b.collect_free_row_vars(acc);
             }
+            Ty::Secret(inner) => inner.collect_free_row_vars(acc),
         }
     }
 }
@@ -269,6 +295,16 @@ impl fmt::Display for Ty {
                     write!(f, " -> {b}")
                 } else {
                     write!(f, " -> {row} {b}")
+                }
+            }
+            // ADR 0008 D6: render as `secret T`. Parenthesise the
+            // inner if it's an arrow so `secret (a -> b)` is
+            // unambiguous against `secret a -> b`.
+            Ty::Secret(inner) => {
+                if matches!(**inner, Ty::Fun(_, _, _)) {
+                    write!(f, "secret ({inner})")
+                } else {
+                    write!(f, "secret {inner}")
                 }
             }
         }
@@ -420,5 +456,48 @@ mod tests {
         assert_eq!(format!("{}", RowVar(0)), "'ra");
         assert_eq!(format!("{}", RowVar(25)), "'rz");
         assert_eq!(format!("{}", RowVar(26)), "'ra1");
+    }
+
+    // ---------- B4.0: Ty::Secret invariants ----------
+
+    #[test]
+    fn b40_ty_secret_display_simple() {
+        let t = Ty::secret(Ty::Int);
+        assert_eq!(format!("{t}"), "secret int");
+    }
+
+    #[test]
+    fn b40_ty_secret_display_parens_arrow() {
+        let t = Ty::secret(Ty::arrow(Ty::Int, Ty::Bool));
+        assert_eq!(format!("{t}"), "secret (int -> bool)");
+    }
+
+    #[test]
+    fn b40_ty_secret_smart_constructor_is_idempotent() {
+        let once = Ty::secret(Ty::Int);
+        let twice = Ty::secret(once.clone());
+        assert_eq!(once, twice);
+        // Structural: exactly one layer of Secret wrap.
+        match twice {
+            Ty::Secret(inner) => assert_eq!(*inner, Ty::Int),
+            other => panic!("expected Secret, got {other}"),
+        }
+    }
+
+    #[test]
+    fn b40_ty_secret_free_vars_recurse() {
+        let t = Ty::secret(v(7));
+        let fvs = t.free_vars();
+        assert_eq!(fvs.len(), 1);
+        assert!(fvs.contains(&TyVar(7)));
+    }
+
+    #[test]
+    fn b40_ty_secret_close_rows_recurses() {
+        // Secret(Int -> {'ra} Int) closes to Secret(Int -> Int).
+        let inner = Ty::arrow_with(Ty::Int, Row::Var(RowVar(0)), Ty::Int);
+        let t = Ty::secret(inner);
+        let closed = t.close_rows();
+        assert_eq!(format!("{closed}"), "secret (int -> int)");
     }
 }
