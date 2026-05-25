@@ -36,7 +36,7 @@
 //! `fn` definitions arrive in C0.5 per ADR 0009 D6.
 
 use sentinel_ast::{
-    BinOp, Block, Expr, ExprKind, Program, Span, Spanned, Stmt, StmtKind, UnaryOp,
+    BinOp, Block, Expr, ExprKind, FnDef, Param, Program, Span, Spanned, Stmt, StmtKind, UnaryOp,
 };
 
 use crate::{lex, LexError, TokenKind};
@@ -105,6 +105,16 @@ pub fn parse_expr(src: &str) -> Result<Expr, ParseError> {
     p.parse_top()
 }
 
+/// Parse a Sentinel source string as a single brace-wrapped block.
+/// The input must be `{ stmt* tail_expr }` with no surrounding
+/// content. Used by tests and REPL/completion machinery that need
+/// to parse a block in isolation; the rest of the parser exercises
+/// block parsing through `parse_fn_def` -> `parse_block`.
+pub fn parse_block_str(src: &str) -> Result<Block, ParseError> {
+    let mut p = lex_into_parser(src)?;
+    p.parse_block_str()
+}
+
 fn lex_into_parser<'a>(src: &'a str) -> Result<ParserOwned<'a>, ParseError> {
     let (tokens, lex_errs) = lex(src);
     if let Some(err) = lex_errs.into_iter().next() {
@@ -128,6 +138,18 @@ impl<'a> ParserOwned<'a> {
     fn parse_program(&mut self) -> Result<Program, ParseError> {
         let mut p = Parser::new(self.src, &self.tokens);
         p.parse_program()
+    }
+    fn parse_block_str(&mut self) -> Result<Block, ParseError> {
+        let mut p = Parser::new(self.src, &self.tokens);
+        let block = p.parse_block()?;
+        if let Some(t) = p.peek() {
+            return Err(ParseError::UnexpectedToken {
+                got: format!("{:?}", t.kind),
+                expected: "end of input",
+                span: to_source_span(&t.span),
+            });
+        }
+        Ok(block)
     }
 }
 
@@ -156,39 +178,148 @@ impl<'a> Parser<'a> {
 
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
         let start = self.peek().map_or(0, |t| t.span.start);
-        let mut stmts = Vec::new();
+        let mut fns = Vec::new();
+        while self.peek().is_some() {
+            let f = self.parse_fn_def()?;
+            fns.push(f);
+        }
+        if fns.is_empty() {
+            return Err(ParseError::UnexpectedEof {
+                expected: "`fn` (programs are one or more function definitions)",
+                span: to_source_span(&self.eof_span()),
+            });
+        }
+        let end = fns.last().expect("non-empty").span.end;
+        Ok(Program { fns, span: start..end })
+    }
 
-        loop {
-            match self.peek_kind() {
-                None => {
-                    return Err(ParseError::UnexpectedEof {
-                        expected: "expression",
-                        span: to_source_span(&self.eof_span()),
-                    });
-                }
-                Some(TokenKind::Let) => {
-                    let stmt = self.parse_let_stmt()?;
-                    stmts.push(stmt);
-                }
-                Some(_) => {
-                    let expr = self.parse_expr()?;
-                    if self.peek_kind() == Some(TokenKind::Semi) {
-                        let semi_end = self.advance().expect("peeked").span.end;
-                        let span = expr.span.start..semi_end;
-                        stmts.push(Spanned { kind: StmtKind::Expr(expr), span });
-                        continue;
-                    }
-                    if let Some(t) = self.peek() {
-                        return Err(ParseError::UnexpectedToken {
-                            got: format!("{:?}", t.kind),
-                            expected: "end of input",
-                            span: to_source_span(&t.span),
-                        });
-                    }
-                    let end = expr.span.end;
-                    return Ok(Program { stmts, tail: expr, span: start..end });
-                }
+    fn parse_fn_def(&mut self) -> Result<FnDef, ParseError> {
+        let fn_start = match self.peek_kind() {
+            Some(TokenKind::Fn) => self.advance().expect("peeked").span.start,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`fn`",
+                    span: to_source_span(&t.span),
+                });
             }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`fn`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        // Function name.
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "function name after `fn`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "function name after `fn`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        // `(`
+        match self.peek_kind() {
+            Some(TokenKind::LParen) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`(` after function name",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`(` after function name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        // Parameter list.
+        let mut params = Vec::new();
+        if self.peek_kind() != Some(TokenKind::RParen) {
+            params.push(self.parse_param()?);
+            while self.peek_kind() == Some(TokenKind::Comma) {
+                self.advance();
+                if self.peek_kind() == Some(TokenKind::RParen) {
+                    break; // trailing comma allowed
+                }
+                params.push(self.parse_param()?);
+            }
+        }
+
+        // `)`
+        match self.peek_kind() {
+            Some(TokenKind::RParen) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`,` or `)` in parameter list",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`,` or `)` in parameter list",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        // Body.
+        let body = self.parse_block()?;
+        let end = body.span.end;
+
+        Ok(FnDef { name, name_span, params, body, span: fn_start..end })
+    }
+
+    fn parse_param(&mut self) -> Result<Param, ParseError> {
+        match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                Ok(Param { name, span })
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "parameter name",
+                    span: to_source_span(&span),
+                })
+            }
+            None => Err(ParseError::UnexpectedEof {
+                expected: "parameter name",
+                span: to_source_span(&self.eof_span()),
+            }),
         }
     }
 
@@ -561,12 +692,28 @@ mod tests {
         parse_ok(src).kind.to_string()
     }
 
-    fn parse_program_ok(src: &str) -> Program {
-        parse(src).unwrap_or_else(|e| panic!("expected parse to succeed: {e:?}"))
+    /// Parse `src` as a block by wrapping it in `{ … }` and calling
+    /// [`parse_block_str`]. Lets the existing C0.3-0.4 stmt/tail tests
+    /// keep their literal input strings unchanged after the C0.5
+    /// hard break — they're now testing the block parser, which has
+    /// the same internal logic as the old top-level parse_program.
+    fn parse_block_ok(src: &str) -> Block {
+        let wrapped = format!("{{ {src} }}");
+        parse_block_str(&wrapped)
+            .unwrap_or_else(|e| panic!("expected parse to succeed: {e:?}"))
     }
 
-    fn pretty_program(src: &str) -> String {
-        parse_program_ok(src).to_string()
+    fn pretty_block(src: &str) -> String {
+        parse_block_ok(src).to_string()
+    }
+
+    /// Parse `src` as a block by wrapping it in `{ … }` and return
+    /// the error. Used by tests that previously called `parse(src)`
+    /// to test stmt-level error cases — those tests now apply to
+    /// block bodies inside fn defs.
+    fn parse_block_err(src: &str) -> ParseError {
+        let wrapped = format!("{{ {src} }}");
+        parse_block_str(&wrapped).expect_err("expected parse error")
     }
 
     #[test]
@@ -716,14 +863,14 @@ mod tests {
     fn parse_program_empty_stmts() {
         // Pure expression program still parses; the Program wraps the
         // expression with an empty stmts list.
-        let p = parse_program_ok("42");
+        let p = parse_block_ok("42");
         assert!(p.stmts.is_empty());
         assert_eq!(p.tail.kind.to_string(), "42");
     }
 
     #[test]
     fn parse_program_single_let() {
-        let p = parse_program_ok("let x = 5; x");
+        let p = parse_block_ok("let x = 5; x");
         assert_eq!(p.stmts.len(), 1);
         match &p.stmts[0].kind {
             StmtKind::Let { name, value, .. } => {
@@ -738,15 +885,15 @@ mod tests {
     #[test]
     fn parse_program_multiple_lets() {
         assert_eq!(
-            pretty_program("let x = 1; let y = 2; x + y"),
-            "(let x 1)\n(let y 2)\n(+ x y)"
+            pretty_block("let x = 1; let y = 2; x + y"),
+            "(block (let x 1) (let y 2) (+ x y))"
         );
     }
 
     #[test]
     fn parse_program_expr_statement() {
         // `1 + 2;` is an expression-statement; `3` is the trailing expr.
-        let p = parse_program_ok("1 + 2; 3");
+        let p = parse_block_ok("1 + 2; 3");
         assert_eq!(p.stmts.len(), 1);
         match &p.stmts[0].kind {
             StmtKind::Expr(e) => assert_eq!(e.kind.to_string(), "(+ 1 2)"),
@@ -758,46 +905,57 @@ mod tests {
     #[test]
     fn parse_program_uses_prior_let() {
         assert_eq!(
-            pretty_program("let a = 2; let b = a * 3; b + 1"),
-            "(let a 2)\n(let b (* a 3))\n(+ b 1)"
+            pretty_block("let a = 2; let b = a * 3; b + 1"),
+            "(block (let a 2) (let b (* a 3)) (+ b 1))"
         );
     }
 
     #[test]
     fn parse_program_let_span_covers_let_through_semi() {
-        let p = parse_program_ok("let x = 5; x");
+        // parse_block_ok wraps the input in `{ ` + src + ` }`, so all
+        // byte offsets in the result shift by 2 (the leading `{ `).
+        let p = parse_block_ok("let x = 5; x");
         let let_stmt = &p.stmts[0];
-        assert_eq!(let_stmt.span, 0..10); // `let x = 5;`
+        assert_eq!(let_stmt.span, 2..12); // `let x = 5;` shifted by `{ `
         match &let_stmt.kind {
-            StmtKind::Let { name_span, .. } => assert_eq!(*name_span, 4..5), // `x`
+            StmtKind::Let { name_span, .. } => assert_eq!(*name_span, 6..7), // `x` shifted
             _ => unreachable!(),
         }
     }
 
     #[test]
     fn parse_program_error_empty_input() {
+        // Top-level: programs must contain at least one fn def.
         let err = parse("").unwrap_err();
-        assert!(matches!(err, ParseError::UnexpectedEof { .. }), "got {err:?}");
+        assert!(
+            matches!(&err, ParseError::UnexpectedEof { expected, .. } if expected.contains("`fn`")),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn parse_program_error_only_let_no_tail() {
-        let err = parse("let x = 1;").unwrap_err();
-        assert!(matches!(err, ParseError::UnexpectedEof { .. }), "got {err:?}");
+        // The wrapped input `{ let x = 1; }` has a stmt but no tail
+        // expression — the block parser flags this.
+        let err = parse_block_err("let x = 1;");
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if expected.contains("blocks must end with an expression")),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn parse_program_error_let_missing_semi() {
-        let err = parse("let x = 1").unwrap_err();
+        let err = parse_block_err("let x = 1");
         assert!(
-            matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "`;` after let-binding"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`;` after let-binding"),
             "got {err:?}"
         );
     }
 
     #[test]
     fn parse_program_error_let_missing_eq() {
-        let err = parse("let x 1;").unwrap_err();
+        let err = parse_block_err("let x 1;");
         assert!(
             matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`=` in let-binding"),
             "got {err:?}"
@@ -806,7 +964,7 @@ mod tests {
 
     #[test]
     fn parse_program_error_let_missing_ident() {
-        let err = parse("let = 1;").unwrap_err();
+        let err = parse_block_err("let = 1;");
         assert!(
             matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "identifier after `let`"),
             "got {err:?}"
@@ -815,10 +973,9 @@ mod tests {
 
     #[test]
     fn parse_program_error_let_bare() {
-        // `let` with nothing after it.
-        let err = parse("let").unwrap_err();
+        let err = parse_block_err("let");
         assert!(
-            matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "identifier after `let`"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "identifier after `let`"),
             "got {err:?}"
         );
     }
@@ -906,10 +1063,11 @@ mod tests {
 
     #[test]
     fn parse_program_with_print_statement() {
-        // Pass tests will use this shape: `print(x);` as expr-stmt.
+        // Pass tests will use this shape: `print(x);` as expr-stmt
+        // inside a fn body block.
         assert_eq!(
-            pretty_program("let x = 5; print(x); x"),
-            "(let x 5)\n(print x);\nx"
+            pretty_block("let x = 5; print(x); x"),
+            "(block (let x 5) (print x); x)"
         );
     }
 
@@ -956,5 +1114,128 @@ mod tests {
             matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "`}` after trailing block expression"),
             "got {err:?}"
         );
+    }
+
+    // C0.5: fn-definition parsing at top level.
+
+    fn parse_ok_program(src: &str) -> Program {
+        parse(src).unwrap_or_else(|e| panic!("expected parse to succeed: {e:?}"))
+    }
+
+    #[test]
+    fn parse_one_fn_main() {
+        let p = parse_ok_program("fn main() { 42 }");
+        assert_eq!(p.fns.len(), 1);
+        assert_eq!(p.fns[0].name, "main");
+        assert!(p.fns[0].params.is_empty());
+        assert_eq!(p.fns[0].body.tail.kind.to_string(), "42");
+    }
+
+    #[test]
+    fn parse_fn_with_one_param() {
+        let p = parse_ok_program("fn double(x) { x * 2 }");
+        assert_eq!(p.fns[0].name, "double");
+        assert_eq!(p.fns[0].params.len(), 1);
+        assert_eq!(p.fns[0].params[0].name, "x");
+    }
+
+    #[test]
+    fn parse_fn_with_multi_params() {
+        let p = parse_ok_program("fn add(a, b, c) { a + b + c }");
+        let names: Vec<&str> = p.fns[0].params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn parse_fn_with_trailing_comma_in_params() {
+        let p = parse_ok_program("fn add(a, b,) { a + b }");
+        assert_eq!(p.fns[0].params.len(), 2);
+    }
+
+    #[test]
+    fn parse_multi_fn_program() {
+        let p = parse_ok_program("fn double(x) { x * 2 }\nfn main() { double(7) }");
+        assert_eq!(p.fns.len(), 2);
+        assert_eq!(p.fns[0].name, "double");
+        assert_eq!(p.fns[1].name, "main");
+    }
+
+    #[test]
+    fn parse_fn_display_round_trip() {
+        let p = parse_ok_program("fn main() { 1 + 2 }");
+        assert_eq!(p.to_string(), "(fn main () (block (+ 1 2)))");
+    }
+
+    #[test]
+    fn parse_error_top_level_not_fn() {
+        // Top level expects `fn`, not `let`.
+        let err = parse("let x = 1;").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_top_level_bare_expression() {
+        // Bare expressions at top level no longer parse — they're fn-body content now.
+        let err = parse("42").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_fn_missing_name() {
+        let err = parse("fn () { 1 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "function name after `fn`"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_fn_missing_open_paren() {
+        let err = parse("fn main { 1 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`(` after function name"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_fn_missing_close_paren() {
+        let err = parse("fn main(x { 1 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`,` or `)` in parameter list"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_fn_missing_body() {
+        let err = parse("fn main()").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "`{` to open block"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_fn_bad_param_name() {
+        let err = parse("fn main(1) { 1 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "parameter name"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_fn_span_covers_keyword_through_close_brace() {
+        let src = "fn main() { 42 }";
+        let p = parse_ok_program(src);
+        assert_eq!(p.fns[0].span, 0..src.len());
+        assert_eq!(p.fns[0].name_span, 3..7); // `main`
     }
 }

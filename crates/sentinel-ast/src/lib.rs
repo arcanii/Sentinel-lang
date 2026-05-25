@@ -3,13 +3,12 @@
 //! Abstract syntax tree for Sentinel source. C0.1 populated the
 //! expression layer (integer literals, arithmetic, parens); C0.3
 //! added variable references, let-statements, expression-statements,
-//! and the program-level [`Program`] structure (a sequence of
-//! statements followed by a trailing expression — the implicit body
-//! of `main` until C0.5 introduces explicit `fn` syntax). C0.4 adds
-//! [`Block`] (a brace-wrapped `{ stmt* expr }`), `ExprKind::Block`,
-//! `ExprKind::If` (with mandatory else; ADR 0010 D9), and
-//! `ExprKind::Call` (only `print(x)` is callable in C0.4 since `fn`
-//! defs wait for C0.5; ADR 0010 D10).
+//! and a [`Program`] structure of `stmt* tail_expr` (the implicit
+//! body of main). C0.4 added [`Block`], `ExprKind::Block`,
+//! `ExprKind::If`, and `ExprKind::Call`. **C0.5** restructures the
+//! top level: [`Program`] now contains [`FnDef`]s (with an explicit
+//! `main` entry point), and the old implicit-main `stmt* tail`
+//! form is gone (it lives inside fn bodies now per ADR 0010 D4/D5).
 //!
 //! `Span` and `Spanned<T>` live here because they straddle the
 //! lexer/parser/AST boundary — the lexer produces tokens with spans
@@ -114,23 +113,42 @@ pub enum StmtKind {
 
 pub type Stmt = Spanned<StmtKind>;
 
-/// A C0.3+ program: zero or more statements followed by a trailing
-/// expression. The trailing expression is the program's value
-/// (returned as the exit code in C0.2-0.4). At C0.5 this shape
-/// moves inside `fn main() { ... }`.
+/// A C0.5+ program: one or more function definitions. One of them
+/// must be named `main` (no parameters) — the entry point. The
+/// previous C0.3-0.4 shape (`stmt* tail_expr`) now lives inside fn
+/// bodies as [`Block`]s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
-    pub stmts: Vec<Stmt>,
-    pub tail: Expr,
+    pub fns: Vec<FnDef>,
     pub span: Span,
 }
 
-/// A brace-wrapped block expression `{ stmt* tail_expr }`. Same
-/// shape as [`Program`] but appears inside [`ExprKind`] — used by
-/// `if`/`else` branches and standalone `{ ... }` expressions.
-/// Kept as a distinct type from `Program` so the top-level
-/// "implicit body of main" reads differently from a brace-wrapped
-/// nested block at a glance.
+/// A function definition: `fn name(p1, p2, …) { body }`. All
+/// parameters and return value are i64 in C0.5 (ADR 0009 says
+/// everything is i64); ADR 0010 D5 reserves the `->` token for
+/// the C1 type-annotation grammar but C0.5 emits none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FnDef {
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<Param>,
+    pub body: Block,
+    pub span: Span,
+}
+
+/// A function parameter. Just a name + span for C0.5 (no type
+/// annotation); the annotation slot lands at C1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Param {
+    pub name: String,
+    pub span: Span,
+}
+
+/// A brace-wrapped block expression `{ stmt* tail_expr }`. The
+/// trailing expression is the block's value. Used by `if`/`else`
+/// branches, standalone `{ ... }` expressions, and function bodies
+/// (a function's body is its [`Block`] whose tail expression is
+/// the return value).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
@@ -201,16 +219,35 @@ impl fmt::Display for Stmt {
     }
 }
 
-/// Program prints statements one per line, then the trailing
-/// expression. Pure expression programs (no statements) print as
-/// just the expression — preserving the C0.1/C0.2 pretty-print
-/// output verbatim for backward compatibility with their tests.
+/// Program prints each function definition on its own line.
 impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for stmt in &self.stmts {
-            writeln!(f, "{}", stmt.kind)?;
+        let mut first = true;
+        for fn_def in &self.fns {
+            if !first {
+                writeln!(f)?;
+            }
+            first = false;
+            write!(f, "{fn_def}")?;
         }
-        write!(f, "{}", self.tail.kind)
+        Ok(())
+    }
+}
+
+/// `(fn name (params) body)` — params is a space-separated list
+/// of bare parameter names; body delegates to [`Block`].
+impl fmt::Display for FnDef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(fn {} (", self.name)?;
+        let mut first = true;
+        for p in &self.params {
+            if !first {
+                write!(f, " ")?;
+            }
+            first = false;
+            write!(f, "{}", p.name)?;
+        }
+        write!(f, ") {})", self.body)
     }
 }
 
@@ -310,32 +347,91 @@ mod tests {
         assert_eq!(s.to_string(), "42;");
     }
 
-    #[test]
-    fn display_program_empty_stmts_prints_just_tail() {
-        let p = Program {
-            stmts: vec![],
-            tail: lit(42, 0..2),
-            span: 0..2,
-        };
-        assert_eq!(p.to_string(), "42");
+    fn main_fn(tail: Expr) -> FnDef {
+        let body_span = tail.span.clone();
+        FnDef {
+            name: "main".to_string(),
+            name_span: 0..4,
+            params: vec![],
+            body: Block { stmts: vec![], tail, span: body_span.clone() },
+            span: 0..body_span.end,
+        }
     }
 
     #[test]
-    fn display_program_with_stmts() {
-        let let_x = Spanned {
-            kind: StmtKind::Let {
-                name: "x".to_string(),
-                name_span: 4..5,
-                value: lit(1, 8..9),
+    fn display_program_one_main() {
+        let p = Program {
+            fns: vec![main_fn(lit(42, 0..2))],
+            span: 0..2,
+        };
+        assert_eq!(p.to_string(), "(fn main () (block 42))");
+    }
+
+    #[test]
+    fn display_program_two_fns() {
+        let double = FnDef {
+            name: "double".to_string(),
+            name_span: 0..6,
+            params: vec![Param { name: "x".to_string(), span: 0..1 }],
+            body: Block {
+                stmts: vec![],
+                tail: Spanned {
+                    kind: ExprKind::Binary(
+                        BinOp::Mul,
+                        Box::new(Spanned { kind: ExprKind::Var("x".to_string()), span: 0..1 }),
+                        Box::new(lit(2, 0..1)),
+                    ),
+                    span: 0..5,
+                },
+                span: 0..5,
             },
             span: 0..10,
         };
-        let tail = Spanned {
-            kind: ExprKind::Var("x".to_string()),
-            span: 11..12,
+        let main = main_fn(Spanned {
+            kind: ExprKind::Call {
+                callee: "double".to_string(),
+                callee_span: 0..6,
+                args: vec![lit(7, 0..1)],
+            },
+            span: 0..9,
+        });
+        let p = Program { fns: vec![double, main], span: 0..20 };
+        assert_eq!(
+            p.to_string(),
+            "(fn double (x) (block (* x 2)))\n(fn main () (block (double 7)))"
+        );
+    }
+
+    #[test]
+    fn display_fn_def_zero_params() {
+        let f = main_fn(lit(5, 0..1));
+        assert_eq!(f.to_string(), "(fn main () (block 5))");
+    }
+
+    #[test]
+    fn display_fn_def_multi_params() {
+        let f = FnDef {
+            name: "add".to_string(),
+            name_span: 0..3,
+            params: vec![
+                Param { name: "a".to_string(), span: 0..1 },
+                Param { name: "b".to_string(), span: 0..1 },
+            ],
+            body: Block {
+                stmts: vec![],
+                tail: Spanned {
+                    kind: ExprKind::Binary(
+                        BinOp::Add,
+                        Box::new(Spanned { kind: ExprKind::Var("a".to_string()), span: 0..1 }),
+                        Box::new(Spanned { kind: ExprKind::Var("b".to_string()), span: 0..1 }),
+                    ),
+                    span: 0..5,
+                },
+                span: 0..5,
+            },
+            span: 0..10,
         };
-        let p = Program { stmts: vec![let_x], tail, span: 0..12 };
-        assert_eq!(p.to_string(), "(let x 1)\nx");
+        assert_eq!(f.to_string(), "(fn add (a b) (block (+ a b)))");
     }
 
     fn block_lit(n: i64, span: Span) -> Block {

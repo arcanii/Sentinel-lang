@@ -1,0 +1,7 @@
+fn main() {
+    triple(4)
+}
+
+fn triple(x) {
+    x * 3
+}

@@ -1,0 +1,11 @@
+fn double(x) {
+    x * 2
+}
+
+fn quad(x) {
+    double(double(x))
+}
+
+fn main() {
+    quad(3)
+}

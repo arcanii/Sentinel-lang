@@ -181,3 +181,36 @@ fn pass_c04_if_with_print() {
     assert_eq!(r.stdout, "100\n");
     assert_eq!(r.exit, 0);
 }
+
+#[test]
+fn pass_c05_simple_fn() {
+    // fn double(x) { x * 2 }; fn main() { double(7) } -> exit 14
+    assert_eq!(run_exit("c05_simple_fn.sentinel"), 14);
+}
+
+#[test]
+fn pass_c05_multi_arg_fn() {
+    // fn add(a, b) { a + b }; fn main() { add(5, 6) } -> exit 11
+    assert_eq!(run_exit("c05_multi_arg_fn.sentinel"), 11);
+}
+
+#[test]
+fn pass_c05_forward_ref() {
+    // fn main calls triple defined AFTER main -> exit 12
+    assert_eq!(run_exit("c05_forward_ref.sentinel"), 12);
+}
+
+#[test]
+fn pass_c05_call_chain() {
+    // quad(3) = double(double(3)) = 12
+    assert_eq!(run_exit("c05_call_chain.sentinel"), 12);
+}
+
+#[test]
+fn pass_c05_go_no_go() {
+    // ADR 0010 appendix go/no-go program: double + pick + main with print
+    // -> stdout "10\n", exit 0 (print returns 0)
+    let r = build_and_run("c05_go_no_go.sentinel");
+    assert_eq!(r.stdout, "10\n");
+    assert_eq!(r.exit, 0);
+}

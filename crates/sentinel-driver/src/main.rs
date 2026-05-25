@@ -45,12 +45,14 @@ fn main() -> ExitCode {
 }
 
 fn print_usage() {
-    eprintln!("snc — Sentinel compiler (C0.4)");
+    eprintln!("snc — Sentinel compiler (C0.5)");
     eprintln!();
     eprintln!("usage:");
     eprintln!("    snc parse <file>                 lex, parse, and pretty-print the program");
     eprintln!("    snc build <file> [-o <output>]   compile and link to an executable");
     eprintln!("    snc help                         show this message");
+    eprintln!();
+    eprintln!("programs are one or more `fn` definitions; `main` is the entry point.");
 }
 
 fn run_parse(path: &str) -> ExitCode {

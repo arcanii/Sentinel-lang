@@ -1,2 +1,4 @@
-let x = 5;
-x
+fn main() {
+    let x = 5;
+    x
+}

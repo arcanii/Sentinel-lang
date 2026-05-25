@@ -1,2 +1,4 @@
-let x = 5;
-if x { x * 2 } else { 0 }
+fn main() {
+    let x = 5;
+    if x { x * 2 } else { 0 }
+}
