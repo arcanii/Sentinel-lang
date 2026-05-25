@@ -9,6 +9,14 @@ authors.workspace      = true
 license.workspace      = true
 repository.workspace   = true
 
+[lib]
+# Two crate-types so the runtime is consumable both from Rust code
+# (the `lib` rlib, used by sentinel-driver's tests if it ever wants
+# to call the runtime directly) and from the C ABI (the `staticlib`
+# .a archive, linked into emitted Sentinel programs by the system
+# cc per ADR 0010 D11 and the C0.4 plan).
+crate-type = ["lib", "staticlib"]
+
 [dependencies]
 tracing    = { workspace = true }
 thiserror  = { workspace = true }

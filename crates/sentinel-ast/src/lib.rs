@@ -2,11 +2,14 @@
 //!
 //! Abstract syntax tree for Sentinel source. C0.1 populated the
 //! expression layer (integer literals, arithmetic, parens); C0.3
-//! adds variable references, let-statements, expression-statements,
+//! added variable references, let-statements, expression-statements,
 //! and the program-level [`Program`] structure (a sequence of
 //! statements followed by a trailing expression — the implicit body
-//! of `main` until C0.5 introduces explicit `fn` syntax). Blocks
-//! as nested expressions wait for C0.4 when `if`/`else` needs them.
+//! of `main` until C0.5 introduces explicit `fn` syntax). C0.4 adds
+//! [`Block`] (a brace-wrapped `{ stmt* expr }`), `ExprKind::Block`,
+//! `ExprKind::If` (with mandatory else; ADR 0010 D9), and
+//! `ExprKind::Call` (only `print(x)` is callable in C0.4 since `fn`
+//! defs wait for C0.5; ADR 0010 D10).
 //!
 //! `Span` and `Spanned<T>` live here because they straddle the
 //! lexer/parser/AST boundary — the lexer produces tokens with spans
@@ -66,17 +69,29 @@ impl UnaryOp {
 /// directly. Parens are syntactic only and are not represented in
 /// the tree — they are recoverable from precedence.
 ///
-/// C0.3 adds [`ExprKind::Var`] for variable references; the parser
-/// recognises any bare identifier in atom position as a variable
-/// reference. Name resolution (catching undefined names) currently
-/// happens in `sentinel-codegen` because `sentinel-resolve` is
-/// deferred to C1 per ADR 0009 D7.
+/// C0.3 added [`ExprKind::Var`] for variable references. C0.4 adds
+/// [`ExprKind::Block`] (brace-wrapped block as expression),
+/// [`ExprKind::If`] (mandatory else per ADR 0010 D9, C-style truthy
+/// condition), and [`ExprKind::Call`] (direct call by identifier
+/// per ADR 0010 D10; only `print` resolves to anything in C0.4
+/// since `fn` defs wait for C0.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExprKind {
     IntLit(i64),
     Var(String),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
+    Block(Box<Block>),
+    If {
+        cond: Box<Expr>,
+        then_branch: Box<Block>,
+        else_branch: Box<Block>,
+    },
+    Call {
+        callee: String,
+        callee_span: Span,
+        args: Vec<Expr>,
+    },
 }
 
 /// Spanned expression. Every AST node carries the byte range it was
@@ -101,11 +116,23 @@ pub type Stmt = Spanned<StmtKind>;
 
 /// A C0.3+ program: zero or more statements followed by a trailing
 /// expression. The trailing expression is the program's value
-/// (returned as the exit code in C0.2-0.4, replaced by `print` at
-/// C0.4 per ADR 0010 D11). At C0.5 this shape moves inside `fn
-/// main() { ... }`.
+/// (returned as the exit code in C0.2-0.4). At C0.5 this shape
+/// moves inside `fn main() { ... }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
+    pub stmts: Vec<Stmt>,
+    pub tail: Expr,
+    pub span: Span,
+}
+
+/// A brace-wrapped block expression `{ stmt* tail_expr }`. Same
+/// shape as [`Program`] but appears inside [`ExprKind`] — used by
+/// `if`/`else` branches and standalone `{ ... }` expressions.
+/// Kept as a distinct type from `Program` so the top-level
+/// "implicit body of main" reads differently from a brace-wrapped
+/// nested block at a glance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
     pub stmts: Vec<Stmt>,
     pub tail: Expr,
     pub span: Span,
@@ -128,7 +155,28 @@ impl fmt::Display for ExprKind {
             ExprKind::Binary(op, lhs, rhs) => {
                 write!(f, "({} {} {})", op.symbol(), lhs.kind, rhs.kind)
             }
+            ExprKind::Block(b) => b.fmt(f),
+            ExprKind::If { cond, then_branch, else_branch } => {
+                write!(f, "(if {} {} {})", cond.kind, then_branch, else_branch)
+            }
+            ExprKind::Call { callee, args, .. } => {
+                write!(f, "({callee}")?;
+                for arg in args {
+                    write!(f, " {}", arg.kind)?;
+                }
+                write!(f, ")")
+            }
         }
+    }
+}
+
+impl fmt::Display for Block {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(block")?;
+        for stmt in &self.stmts {
+            write!(f, " {}", stmt.kind)?;
+        }
+        write!(f, " {})", self.tail.kind)
     }
 }
 
@@ -288,5 +336,88 @@ mod tests {
         };
         let p = Program { stmts: vec![let_x], tail, span: 0..12 };
         assert_eq!(p.to_string(), "(let x 1)\nx");
+    }
+
+    fn block_lit(n: i64, span: Span) -> Block {
+        Block { stmts: vec![], tail: lit(n, span.clone()), span }
+    }
+
+    #[test]
+    fn display_block_simple() {
+        let b = block_lit(7, 0..1);
+        assert_eq!(b.to_string(), "(block 7)");
+    }
+
+    #[test]
+    fn display_block_with_stmt() {
+        let let_x = Spanned {
+            kind: StmtKind::Let {
+                name: "x".to_string(),
+                name_span: 6..7,
+                value: lit(1, 10..11),
+            },
+            span: 2..12,
+        };
+        let tail = Spanned { kind: ExprKind::Var("x".to_string()), span: 13..14 };
+        let b = Block { stmts: vec![let_x], tail, span: 0..16 };
+        assert_eq!(b.to_string(), "(block (let x 1) x)");
+    }
+
+    #[test]
+    fn display_expr_block() {
+        let inner = Box::new(block_lit(42, 1..3));
+        let e = Spanned { kind: ExprKind::Block(inner), span: 0..4 };
+        assert_eq!(e.to_string(), "(block 42)");
+    }
+
+    #[test]
+    fn display_if() {
+        let cond = Box::new(lit(1, 3..4));
+        let then_b = Box::new(block_lit(2, 5..8));
+        let else_b = Box::new(block_lit(3, 14..17));
+        let e = Spanned {
+            kind: ExprKind::If { cond, then_branch: then_b, else_branch: else_b },
+            span: 0..18,
+        };
+        assert_eq!(e.to_string(), "(if 1 (block 2) (block 3))");
+    }
+
+    #[test]
+    fn display_call_zero_args() {
+        let e = Spanned {
+            kind: ExprKind::Call {
+                callee: "print".to_string(),
+                callee_span: 0..5,
+                args: vec![],
+            },
+            span: 0..7,
+        };
+        assert_eq!(e.to_string(), "(print)");
+    }
+
+    #[test]
+    fn display_call_one_arg() {
+        let e = Spanned {
+            kind: ExprKind::Call {
+                callee: "print".to_string(),
+                callee_span: 0..5,
+                args: vec![lit(42, 6..8)],
+            },
+            span: 0..9,
+        };
+        assert_eq!(e.to_string(), "(print 42)");
+    }
+
+    #[test]
+    fn display_call_two_args() {
+        let e = Spanned {
+            kind: ExprKind::Call {
+                callee: "f".to_string(),
+                callee_span: 0..1,
+                args: vec![lit(1, 2..3), lit(2, 5..6)],
+            },
+            span: 0..7,
+        };
+        assert_eq!(e.to_string(), "(f 1 2)");
     }
 }

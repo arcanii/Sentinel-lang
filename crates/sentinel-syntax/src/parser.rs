@@ -1,19 +1,27 @@
-//! Hand-written recursive descent parser for Sentinel C0.1-C0.3.
+//! Hand-written recursive descent parser for Sentinel C0.1-C0.4.
 //!
-//! C0.3 grammar (subset of ADR 0010):
+//! C0.4 grammar (subset of ADR 0010):
 //!
 //! ```text
-//! program  = stmt* tail_expr
-//! stmt     = let_stmt | expr_stmt
-//! let_stmt = 'let' Ident '=' expr ';'
-//! expr_stmt = expr ';'
-//! tail_expr = expr                                  (no trailing ';')
+//! program     = stmt* tail_expr
+//! stmt        = let_stmt | expr_stmt
+//! let_stmt    = 'let' Ident '=' expr ';'
+//! expr_stmt   = expr ';'
+//! tail_expr   = expr                                  (no trailing ';')
 //!
-//! expr     = add_expr
-//! add_expr = mul_expr (('+' | '-') mul_expr)*       left-assoc
-//! mul_expr = unary    (('*' | '/') unary)*          left-assoc
-//! unary    = '-' unary | atom
-//! atom     = IntLit | Ident | '(' expr ')'
+//! expr        = if_expr | add_expr                    (if only at expr top)
+//! if_expr     = 'if' expr block else_branch
+//! else_branch = 'else' (if_expr | block)
+//! block       = '{' stmt* tail_expr '}'
+//! add_expr    = mul_expr (('+' | '-') mul_expr)*       left-assoc
+//! mul_expr    = unary    (('*' | '/') unary)*          left-assoc
+//! unary       = '-' unary | atom
+//! atom        = IntLit
+//!             | Ident                                 (Var, unless followed by `(`)
+//!             | Ident '(' arg_list ')'                (Call)
+//!             | '(' expr ')'
+//!             | block
+//! arg_list    = (expr (',' expr)*)? ','?
 //! ```
 //!
 //! Per ADR 0009 D1a, the public entry points are pure functions:
@@ -25,10 +33,11 @@
 //! type. Parse errors are fail-fast — error recovery is deferred
 //! until parser ergonomics demand it.
 //!
-//! `if`, function calls, `fn` definitions, and nested blocks
-//! arrive in C0.4-0.5 per ADR 0009 D6.
+//! `fn` definitions arrive in C0.5 per ADR 0009 D6.
 
-use sentinel_ast::{BinOp, Expr, ExprKind, Program, Span, Spanned, Stmt, StmtKind, UnaryOp};
+use sentinel_ast::{
+    BinOp, Block, Expr, ExprKind, Program, Span, Spanned, Stmt, StmtKind, UnaryOp,
+};
 
 use crate::{lex, LexError, TokenKind};
 
@@ -268,7 +277,132 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        if self.peek_kind() == Some(TokenKind::If) {
+            return self.parse_if();
+        }
         self.parse_add()
+    }
+
+    fn parse_if(&mut self) -> Result<Expr, ParseError> {
+        let if_start = self.advance().expect("checked `if`").span.start;
+        let cond = self.parse_expr()?;
+        let then_branch = self.parse_block()?;
+
+        match self.peek_kind() {
+            Some(TokenKind::Else) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`else` after if-then block",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`else` after if-then block",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        // else_branch is either a chained `if` or a brace-wrapped block.
+        let else_branch = if self.peek_kind() == Some(TokenKind::If) {
+            let inner_if = self.parse_if()?;
+            let span = inner_if.span.clone();
+            Block { stmts: vec![], tail: inner_if, span }
+        } else {
+            self.parse_block()?
+        };
+
+        let end = else_branch.span.end;
+        Ok(Spanned {
+            kind: ExprKind::If {
+                cond: Box::new(cond),
+                then_branch: Box::new(then_branch),
+                else_branch: Box::new(else_branch),
+            },
+            span: if_start..end,
+        })
+    }
+
+    fn parse_block(&mut self) -> Result<Block, ParseError> {
+        let lbrace_start = match self.peek_kind() {
+            Some(TokenKind::LBrace) => self.advance().expect("peeked").span.start,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`{` to open block",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`{` to open block",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        let mut stmts = Vec::new();
+        loop {
+            match self.peek_kind() {
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "expression or `}` in block",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+                Some(TokenKind::RBrace) => {
+                    // ADR 0010 D6: no empty blocks — a trailing expression is required.
+                    let t = self.peek().expect("peeked");
+                    return Err(ParseError::UnexpectedToken {
+                        got: "RBrace".to_string(),
+                        expected: "expression before `}` (blocks must end with an expression)",
+                        span: to_source_span(&t.span),
+                    });
+                }
+                Some(TokenKind::Let) => {
+                    let stmt = self.parse_let_stmt()?;
+                    stmts.push(stmt);
+                }
+                Some(_) => {
+                    let expr = self.parse_expr()?;
+                    if self.peek_kind() == Some(TokenKind::Semi) {
+                        let semi_end = self.advance().expect("peeked").span.end;
+                        let span = expr.span.start..semi_end;
+                        stmts.push(Spanned { kind: StmtKind::Expr(expr), span });
+                        continue;
+                    }
+                    // Tail expression — expect `}`.
+                    let rbrace_end = match self.peek_kind() {
+                        Some(TokenKind::RBrace) => self.advance().expect("peeked").span.end,
+                        Some(other) => {
+                            let t = self.peek().expect("peeked");
+                            return Err(ParseError::UnexpectedToken {
+                                got: format!("{other:?}"),
+                                expected: "`}` after trailing block expression",
+                                span: to_source_span(&t.span),
+                            });
+                        }
+                        None => {
+                            return Err(ParseError::UnexpectedEof {
+                                expected: "`}` after trailing block expression",
+                                span: to_source_span(&self.eof_span()),
+                            });
+                        }
+                    };
+                    return Ok(Block {
+                        stmts,
+                        tail: expr,
+                        span: lbrace_start..rbrace_end,
+                    });
+                }
+            }
+        }
     }
 
     fn parse_add(&mut self) -> Result<Expr, ParseError> {
@@ -335,9 +469,51 @@ impl<'a> Parser<'a> {
                 Ok(Spanned { kind: ExprKind::IntLit(n), span })
             }
             Some(TokenKind::Ident) => {
-                let span = self.advance().expect("peeked").span.clone();
-                let name = self.src[span.clone()].to_string();
-                Ok(Spanned { kind: ExprKind::Var(name), span })
+                let name_span = self.advance().expect("peeked").span.clone();
+                let name = self.src[name_span.clone()].to_string();
+                // Lookahead for a call: Ident '(' ...
+                if self.peek_kind() == Some(TokenKind::LParen) {
+                    self.advance(); // consume `(`
+                    let mut args = Vec::new();
+                    if self.peek_kind() != Some(TokenKind::RParen) {
+                        args.push(self.parse_expr()?);
+                        while self.peek_kind() == Some(TokenKind::Comma) {
+                            self.advance();
+                            if self.peek_kind() == Some(TokenKind::RParen) {
+                                break; // trailing comma allowed
+                            }
+                            args.push(self.parse_expr()?);
+                        }
+                    }
+                    let rparen_end = match self.peek_kind() {
+                        Some(TokenKind::RParen) => self.advance().expect("peeked").span.end,
+                        Some(other) => {
+                            let t = self.peek().expect("peeked");
+                            return Err(ParseError::UnexpectedToken {
+                                got: format!("{other:?}"),
+                                expected: "`,` or `)` in argument list",
+                                span: to_source_span(&t.span),
+                            });
+                        }
+                        None => {
+                            return Err(ParseError::UnexpectedEof {
+                                expected: "`,` or `)` in argument list",
+                                span: to_source_span(&self.eof_span()),
+                            });
+                        }
+                    };
+                    Ok(Spanned {
+                        kind: ExprKind::Call { callee: name, callee_span: name_span.clone(), args },
+                        span: name_span.start..rparen_end,
+                    })
+                } else {
+                    Ok(Spanned { kind: ExprKind::Var(name), span: name_span })
+                }
+            }
+            Some(TokenKind::LBrace) => {
+                let block = self.parse_block()?;
+                let span = block.span.clone();
+                Ok(Spanned { kind: ExprKind::Block(Box::new(block)), span })
             }
             Some(TokenKind::LParen) => {
                 let open_span = self.advance().expect("peeked").span.clone();
@@ -643,6 +819,141 @@ mod tests {
         let err = parse("let").unwrap_err();
         assert!(
             matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "identifier after `let`"),
+            "got {err:?}"
+        );
+    }
+
+    // C0.4: blocks, if/else, calls.
+
+    #[test]
+    fn parse_block_expr() {
+        assert_eq!(pretty("{ 42 }"), "(block 42)");
+    }
+
+    #[test]
+    fn parse_block_with_stmt() {
+        assert_eq!(pretty("{ let x = 1; x + 2 }"), "(block (let x 1) (+ x 2))");
+    }
+
+    #[test]
+    fn parse_block_in_arithmetic() {
+        // `{ 5 } + 3` is valid because block is an atom.
+        assert_eq!(pretty("{ 5 } + 3"), "(+ (block 5) 3)");
+    }
+
+    #[test]
+    fn parse_if_simple() {
+        assert_eq!(pretty("if 1 { 2 } else { 3 }"), "(if 1 (block 2) (block 3))");
+    }
+
+    #[test]
+    fn parse_if_else_if_chain() {
+        assert_eq!(
+            pretty("if 1 { 2 } else if 3 { 4 } else { 5 }"),
+            "(if 1 (block 2) (block (if 3 (block 4) (block 5))))"
+        );
+    }
+
+    #[test]
+    fn parse_if_with_var_condition() {
+        assert_eq!(pretty("if x { 1 } else { 2 }"), "(if x (block 1) (block 2))");
+    }
+
+    #[test]
+    fn parse_if_nested_in_parens_in_arithmetic() {
+        // `if` is only at expr top; embedding in arithmetic needs parens.
+        assert_eq!(
+            pretty("(if 1 { 2 } else { 3 }) + 4"),
+            "(+ (if 1 (block 2) (block 3)) 4)"
+        );
+    }
+
+    #[test]
+    fn parse_call_zero_args() {
+        assert_eq!(pretty("foo()"), "(foo)");
+    }
+
+    #[test]
+    fn parse_call_one_arg() {
+        assert_eq!(pretty("print(42)"), "(print 42)");
+    }
+
+    #[test]
+    fn parse_call_multi_args() {
+        assert_eq!(pretty("f(1, 2, 3)"), "(f 1 2 3)");
+    }
+
+    #[test]
+    fn parse_call_trailing_comma() {
+        assert_eq!(pretty("f(1, 2,)"), "(f 1 2)");
+    }
+
+    #[test]
+    fn parse_call_in_arithmetic() {
+        assert_eq!(pretty("1 + f(2) * 3"), "(+ 1 (* (f 2) 3))");
+    }
+
+    #[test]
+    fn parse_call_with_complex_arg() {
+        assert_eq!(pretty("print(x + 1)"), "(print (+ x 1))");
+    }
+
+    #[test]
+    fn parse_var_followed_by_non_paren_is_var() {
+        // Make sure Ident-followed-by-something-other-than-`(` is Var.
+        assert_eq!(pretty("foo + 1"), "(+ foo 1)");
+    }
+
+    #[test]
+    fn parse_program_with_print_statement() {
+        // Pass tests will use this shape: `print(x);` as expr-stmt.
+        assert_eq!(
+            pretty_program("let x = 5; print(x); x"),
+            "(let x 5)\n(print x);\nx"
+        );
+    }
+
+    #[test]
+    fn parse_error_if_missing_else() {
+        let err = parse_expr("if 1 { 2 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "`else` after if-then block"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_if_missing_then_block() {
+        let err = parse_expr("if 1 else { 2 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`{` to open block"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_empty_block() {
+        let err = parse_expr("{ }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if expected.contains("blocks must end with an expression")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_call_unclosed_args() {
+        let err = parse_expr("f(1, 2").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "`,` or `)` in argument list"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_block_unclosed_after_tail() {
+        let err = parse_expr("{ 42").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "`}` after trailing block expression"),
             "got {err:?}"
         );
     }

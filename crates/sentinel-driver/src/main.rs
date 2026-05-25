@@ -4,11 +4,12 @@
 //! C0.2: `snc build <file> [-o <output>]` additionally lowers to
 //! LLVM IR, emits an object file, and links it into an executable
 //! via the system `cc`. The compiled program's exit code is the
-//! evaluated program's tail expression truncated to i32 (the
-//! temporary exit-code-is-the-answer convention; ADR 0009 D6 C0.4
-//! replaces this with `print(x)` once function calls land).
+//! evaluated program's tail expression truncated to i32.
 //! C0.3: parse and build now operate on full [`Program`]s
 //! (`stmt* tail_expr`) rather than single expressions.
+//! C0.4: `print(x)`, `if`/`else`, and block expressions land; the
+//! linker invocation now pulls in `libsentinel_runtime.a` from the
+//! same directory as the snc binary so `sentinel_print` resolves.
 //!
 //! Pipeline stages compose via direct function calls per ADR 0009
 //! D1a. Linker invocation lives here, not in sentinel-codegen,
@@ -44,7 +45,7 @@ fn main() -> ExitCode {
 }
 
 fn print_usage() {
-    eprintln!("snc — Sentinel compiler (C0.3)");
+    eprintln!("snc — Sentinel compiler (C0.4)");
     eprintln!();
     eprintln!("usage:");
     eprintln!("    snc parse <file>                 lex, parse, and pretty-print the program");
@@ -113,8 +114,10 @@ fn read_source(path: &str) -> Result<String, ExitCode> {
 }
 
 fn link(object: &Path, exe: &Path) -> Result<(), String> {
+    let runtime = find_runtime()?;
     let status = Command::new("cc")
         .arg(object)
+        .arg(&runtime)
         .arg("-o")
         .arg(exe)
         .status()
@@ -124,4 +127,25 @@ fn link(object: &Path, exe: &Path) -> Result<(), String> {
     } else {
         Err(format!("cc exited with {status}"))
     }
+}
+
+/// Locate `libsentinel_runtime.a` adjacent to the snc binary. Cargo
+/// puts the snc bin and the runtime staticlib in the same target
+/// directory (`target/<profile>/`), so a single lookup off
+/// `current_exe().parent()` covers both `cargo run --bin snc` and
+/// `CARGO_BIN_EXE_snc`-driven integration tests.
+fn find_runtime() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe(): {e}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "current_exe has no parent directory".to_string())?;
+    let runtime = dir.join("libsentinel_runtime.a");
+    if !runtime.exists() {
+        return Err(format!(
+            "libsentinel_runtime.a not found at {} — \
+             run `cargo build -p sentinel-runtime` to produce it",
+            runtime.display()
+        ));
+    }
+    Ok(runtime)
 }
