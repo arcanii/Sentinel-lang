@@ -1,9 +1,12 @@
 # ADR 0011: Phase C1 kickoff — type system, name resolution, Salsa retrofit
 
-Status: PROPOSED — D1 (Salsa) exercised end-to-end at C1.0b; full
-ACCEPTED when C1.0 completes (codegen wrapping at C1.0c)
+Status: PROPOSED — D1 (Salsa) fully exercised at C1.0a-c with the
+intentional scope-cut that codegen stays out of the query graph
+until C1.2+. The ADR remains PROPOSED overall because D2-D12 cover
+the rest of C1 (type system, structs, nullability, arrays,
+generics) which haven't landed yet.
 Date: 2026-05-25
-Last touched: 2026-05-25 (C1.0b landed; status note updated)
+Last touched: 2026-05-25 (C1.0c decision landed; D1 status updated)
 Related: 0001 (staged validation), 0009 (Phase C kickoff; D1 deferred
 Salsa to C1, D7 deferred sentinel-types and sentinel-resolve stubs
 to C1), 0010 (concrete C0 surface; D5 reserved `->` for C1
@@ -74,11 +77,12 @@ attribute and its first arg becomes `db: &dyn SentinelDb`.
 
 **Status — C1.0a (09dc8c3): foundation crate `sentinel-base`
 landed with SourceFile / SentinelDb / Diagnostic accumulator.
-C1.0b: lex_query and parse_query land in sentinel-syntax; driver
-instantiates concrete SentinelDatabase. Codegen retrofit deferred
-to C1.0c — the LLVM context's `'ctx` lifetime does not obviously
-fit salsa's `'static`-ish query model and is worth separating from
-the lex/parse retrofit to keep the deltas reviewable.**
+C1.0b (557cc60): lex_query and parse_query land in sentinel-syntax;
+driver instantiates concrete SentinelDatabase. C1.0c: codegen-
+salsa decision committed — see "C1.0c codegen-salsa decision"
+addendum below. The Salsa retrofit is now complete for the scope
+this ADR committed to in spirit; codegen wrapping is intentionally
+out of D1's scope until typed HIR exists.**
 
 **Tracked-struct return types collapse to success-only payloads.**
 The original D1 sketch had each query return `(Output, Vec<Error>)`
@@ -94,6 +98,72 @@ via the accumulator. Driver collects via
 drops per-variant help/label text from the miette-derived error
 enums; refining that is a separate concern from the retrofit
 pattern.
+
+**C1.0c codegen-salsa decision (option 2: defer until typed HIR
+exists at C1.2+).** The original D1 ellipsis ("… through codegen")
+implied that the Salsa retrofit would eventually wrap
+`compile_to_object` as a tracked query. C1.0c reconsiders that
+commitment and decides against it for now. Three options were
+weighed at the C1.0c session opening (per HANDOVER §0.2 sketches):
+
+  1. **Wrap a bitcode-producing query.** `compile_module(db, file)
+     -> Vec<u8>` returns serialised LLVM bitcode (via
+     `module.write_bitcode_to_memory()`); driver writes the object
+     file + invokes cc outside the query graph. Sidesteps the
+     LLVM `'ctx` lifetime by keeping Context/Module local to the
+     query body. Cost: bitcode roundtrip per cache miss, plus
+     bitcode-as-cache-key for change detection.
+
+  2. **Don't wrap codegen at all.** Driver continues calling
+     `compile_to_object` directly. Codegen sits outside the salsa
+     query graph until at least C1.2 (when typed HIR replaces raw
+     AST as codegen's input).
+
+  3. **Wrap a `lower_to_ir` step only.** Split codegen into in-
+     memory IR build (tracked) and object emit (untracked). Mostly
+     an organisational win over option 1.
+
+**Decision: option 2.** Reasoning:
+
+  - Codegen gets rewritten at C1.2 anyway. The current
+    `sentinel-codegen` lowers raw AST → LLVM IR; at C1.2 it will
+    lower TypedProgram → LLVM IR with the type information
+    informing instruction selection. Investing in a salsa wrapper
+    for the pre-types codegen pays off for a few weeks at most
+    and then has to be redone against the new input shape.
+  - The LLVM lifetime story is non-trivial. `inkwell::Context`,
+    `Module<'ctx>`, `Builder<'ctx>`, and `FunctionValue<'ctx>`
+    all carry the same `'ctx` lifetime; making them survive
+    across a tracked-query boundary requires either bitcode
+    serialisation (option 1) or refactoring codegen to be a
+    single function call that builds + emits in one go (which it
+    almost already is). The design pressure to get this right is
+    real but not load-bearing for any user-visible feature today.
+  - The C1.0b front-end retrofit gave us the incremental-rebuild
+    shape that matters for LSP / `cargo check`-style tooling.
+    Those tools want types-but-not-codegen; they short-circuit
+    after parse/types and never touch the codegen query. So
+    codegen incremental rebuild has near-zero practical value
+    until end-to-end incremental builds become a measurable
+    bottleneck — far beyond C1.
+
+  - The ADR 0009 D1a discipline (pipeline stages are pure
+    functions) keeps codegen retrofittable at any later point.
+    `compile_to_object(program, path) -> Result<(), CodegenError>`
+    is already a pure-function-with-side-effect; wrapping it in
+    salsa whenever we decide to is mechanical.
+
+The cost of option 2 is a small piece of architectural debt: the
+driver still has a direct function call from query-graph output
+(parse_query's Program) into a non-salsa stage (codegen). This is
+explicit, documented, and revisited automatically at C1.2 because
+the codegen rewrite for typed HIR will touch the call site.
+
+Status flips D1 to "fully exercised at C1.0c" — the Salsa retrofit
+is complete for the front-end and intentionally bounded.
+**Re-opens** at C1.2 with the typed-HIR codegen rewrite, when the
+salsa-wrapping cost vs benefit can be reassessed against a more
+complete query graph.
 
 ### D2. Type system shape: explicit annotations at fn boundaries; monomorphic in C1.
 

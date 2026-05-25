@@ -12,7 +12,15 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C1.0b landed at 557cc60** — the lex and parse pipeline stages
+Last updated: **C1.0c decision landed** — the codegen-salsa
+question is resolved as "defer until C1.2+ (typed HIR rewrite)";
+ADR 0011 D1 amended with the three-option weigh-up and rationale.
+The Salsa retrofit is now complete for the front-end with codegen
+intentionally outside the query graph. **Phase C1.0 is complete**;
+C1.1 (sentinel-resolve crate lift) is the next sub-phase. No code
+change at C1.0c — this is a docs-only commit capturing the
+architectural decision. Pre-C1.0c context: **C1.0b landed at
+557cc60** — the lex and parse pipeline stages
 now run through `#[salsa::tracked]` queries against `SentinelDb`,
 with `sentinel_base::Diagnostic`s flowing through the
 `#[salsa::accumulator]` rather than rich error vectors through
@@ -1121,8 +1129,9 @@ scaffold stubs.
 | C0.5  | fn definitions + main entry; **C0 go/no-go passes**            | Done    | 6ce8336 |
 | C1.0a | sentinel-base crate: Salsa db trait + SourceFile input + Diagnostic accumulator | Done | 09dc8c3 |
 | C1.0b | Wrap lex/parse as `#[salsa::tracked]` queries; driver uses SentinelDatabase | Done | 557cc60 |
-| C1.0c | Wrap codegen as `#[salsa::tracked]` query                      | Pending |         |
-| C1.1+ | sentinel-resolve lift, sentinel-types real, …                  | Planned |         |
+| C1.0c | Codegen-salsa decision: defer until typed HIR (C1.2+); ADR 0011 D1 amended | Done | (pending) |
+| C1.1  | sentinel-resolve crate lift (name resolution out of codegen)   | Pending |         |
+| C1.2+ | sentinel-types real, primitive types, structs, …               | Planned |         |
 
 ADR 0010 (concrete C0 surface syntax) lands between C0.0 and C0.1
 per ADR 0009 D8.
@@ -1787,6 +1796,34 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     boilerplate (~12 lines per crate) is acceptable; a shared
     test-util crate would invert the dep direction and bloat
     test-build times.
+
+37. (C1.0c, ADR 0011 D1 amendment) Codegen stays outside the salsa
+    query graph through Phase C1.0. ADR 0011's original D1 sketch
+    had "… through codegen" in the query list, suggesting
+    `compile_to_object` would eventually become `#[salsa::tracked]`.
+    C1.0c reconsiders and rejects that for now. Three options
+    were weighed (see ADR 0011 D1 amendment for the full
+    write-up); the chosen option (2: don't wrap codegen at all)
+    is justified by three factors: (a) codegen gets rewritten at
+    C1.2 against typed HIR anyway, so investing in a pre-types
+    salsa wrapper amortises over weeks at most; (b) the LLVM
+    `'ctx` lifetime woven through `Context`, `Module<'ctx>`,
+    `Builder<'ctx>`, and `FunctionValue<'ctx>` doesn't trivially
+    fit salsa's `'static`-ish query model — fitting it requires
+    either bitcode-roundtripping or single-fn codegen, and the
+    cost-benefit isn't favorable yet; (c) the C1.0b front-end
+    retrofit is what LSP / `cargo check`-style tooling actually
+    cares about, since those tools exit after types-but-not-
+    codegen — codegen incremental rebuild has near-zero practical
+    value at C0/C1 scale. The cost is a small piece of explicit
+    architectural debt (driver does a direct function call from
+    parse_query's Program output into non-salsa codegen). It is
+    revisited automatically at C1.2 because the codegen rewrite
+    for typed HIR will touch the call site. ADR 0009 D1a's pure-
+    function discipline preserved through C0+C1.0 keeps the
+    retrofit mechanical whenever we do choose to do it. No code
+    change at C1.0c; this is a pure docs commit capturing the
+    architectural decision.
 
 ---
 

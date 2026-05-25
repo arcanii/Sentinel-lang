@@ -52,33 +52,46 @@ kickoff) and 0010 (concrete C0 surface) are ACCEPTED. Everything
 is `i64` per ADR 0009 ("no type system in C0"); `bool` arrives at
 C1.3. See STATE.md Section C.
 
-**Phase C1.0a-b — Salsa retrofit foundation + lex/parse wrapped — complete; C1.0c pending.**
+**Phase C1.0 — Salsa retrofit — complete.**
 Phase C1 (type system, regions, effects per HANDOVER §6.2) is in
 flight per ADR 0011 (PROPOSED, 8 sub-phases, honest 5-6 month
-estimate vs HANDOVER's 3-month budget). C1.0a landed the
-foundation crate `sentinel-base` hosting the `#[salsa::db]`
-SentinelDb trait, `#[salsa::input]` SourceFile, and
-`#[salsa::accumulator]` Diagnostic (3 tests; salsa 0.18 is in
-the dep graph). **C1.0b landed** — `sentinel-syntax::query`
-exposes `lex_query` and `parse_query` as `#[salsa::tracked]`
-queries; errors route through the Diagnostic accumulator rather
-than tracked-struct fields (side-stepping the
-`miette::SourceSpan: !Hash` issue that paused the C1.0a draft);
-sentinel-driver instantiates a concrete `SentinelDatabase` and
-collects diagnostics via `parse_query::accumulated::<Diagnostic>`.
-All 22 C0 pass-test fixtures still run end-to-end through the
-new query-based driver path. **C1.0c is pending** — wrap codegen
-as a tracked query (LLVM context lifetimes may need a careful
-design pass; deferred to keep the C1.0b deltas reviewable). See
-ADR 0011 D1 status notes.
+estimate vs HANDOVER's 3-month budget). The three C1.0 sub-phases
+have all landed:
+
+  - **C1.0a** (09dc8c3): foundation crate `sentinel-base` hosting
+    the `#[salsa::db]` SentinelDb trait, `#[salsa::input]`
+    SourceFile, and `#[salsa::accumulator]` Diagnostic. Salsa 0.18
+    is in the dep graph.
+  - **C1.0b** (557cc60): `sentinel-syntax::query` exposes
+    `lex_query` and `parse_query` as `#[salsa::tracked]` queries
+    against `SentinelDb`. Errors route through the Diagnostic
+    accumulator rather than tracked-struct fields (side-stepping
+    the `miette::SourceSpan: !Hash` issue that paused C1.0a's
+    initial draft). sentinel-driver instantiates a concrete
+    `SentinelDatabase` and collects diagnostics via
+    `parse_query::accumulated::<Diagnostic>`. All 22 C0 pass-test
+    fixtures run end-to-end through the new query-based driver
+    path.
+  - **C1.0c** (decision-only commit): codegen stays outside the
+    salsa query graph through Phase C1.0. Three options weighed
+    (see ADR 0011 D1 amendment); chosen option is "don't wrap
+    codegen at all" because (a) it gets rewritten at C1.2 for
+    typed HIR, (b) LLVM `'ctx` lifetimes don't trivially fit
+    salsa's query model, (c) LSP/check-only tooling that wants
+    incremental rebuild exits after types-not-codegen anyway.
+
+**C1 next: C1.1** — `sentinel-resolve` crate lift, moving name
+resolution out of `sentinel-codegen::CodegenCtx` into a dedicated
+pre-codegen pass per ADR 0011 D4. See §0.2 below for the resume
+plan.
 
 **Workspace test count**: 453 active across all crates (+7 over
 C1.0a, all in sentinel-syntax: 4 positive lex/parse + 1 cross-
-stage propagation + 2 cache validation). All four check-suite
-checks green (cargo build --workspace, cargo clippy --workspace
---all-targets -D warnings, cargo test --workspace, cargo test
---workspace --doc). See STATE.md "Conventions" for the per-crate
-breakdown.
+stage propagation + 2 cache validation). C1.0c is a docs-only
+landing — no test delta. All four check-suite checks green
+(cargo build --workspace, cargo clippy --workspace --all-targets
+-D warnings, cargo test --workspace, cargo test --workspace
+--doc). See STATE.md "Conventions" for the per-crate breakdown.
 
 **ADR status**:
 
@@ -95,10 +108,17 @@ breakdown.
   - 0010 concrete-c0-surface-syntax              ACCEPTED (all
                                                  D-decisions exercised)
   - 0011 phase-c1-kickoff-and-type-system-plan   PROPOSED — D1
-                                                 (Salsa) exercised
-                                                 end-to-end at C1.0b;
-                                                 fully ACCEPTED when
-                                                 C1.0c lands codegen
+                                                 (Salsa) fully
+                                                 exercised at C1.0a-c
+                                                 with codegen
+                                                 intentionally out of
+                                                 scope until C1.2+;
+                                                 ADR remains PROPOSED
+                                                 because D2-D12 cover
+                                                 the rest of C1 (type
+                                                 system, structs,
+                                                 nullability, arrays,
+                                                 generics)
 
 ### 0.1 Working norms (carry forward into Phase C1)
 
@@ -186,83 +206,122 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C1.0c)
+### 0.2 Next session opening (C1.1)
 
-Resume at **C1.0c**: wrap `sentinel_codegen::compile_to_object`
-as a `#[salsa::tracked]` query. The C1.0b session deliberately
-deferred this because (a) the LLVM `Context` and `Module` types
-hold a `'ctx` lifetime that doesn't trivially fit salsa's
-`'static`-ish query model, and (b) `compile_to_object` writes to
-the filesystem, which makes it a side-effectful "query" — salsa
-usually expects pure functions. The C1.0b retrofit gave the
-front-end the incremental shape it'll want anyway; C1.0c is its
-own design question.
+Resume at **C1.1**: lift name resolution out of
+`sentinel-codegen::CodegenCtx` into a dedicated `sentinel-resolve`
+crate per ADR 0011 D4. Estimated 2-3 weeks (per ADR 0011 D6).
 
-Sketches to evaluate:
+The current state: `sentinel-codegen` does both name resolution
+and LLVM lowering. Its `CodegenCtx<'ctx, 'a>` holds a
+`HashMap<String, FunctionValue>` (the `fns` table) and a per-fn
+`HashMap<String, PointerValue>` (the `vars` table). Two-pass
+codegen builds the fns table first (so forward references work),
+then for each fn body resolves variable references against the
+vars table. Per STATE.md C.3 decision 20, this is "deliberate
+short-term architectural debt" — the refactor at C1 is the C1.1
+work this resume note describes.
 
-1. **Salsa wraps just the path that builds the in-memory module,
-   not the object emit.** A tracked `compile_module(db, file) ->
-   ??` returns IR-as-bytes (or a serialised LLVM module — bitcode
-   via `module.write_bitcode_to_memory()` is the obvious carrier);
-   the driver does the object-emit + cc-link outside the query
-   graph. This sidesteps the lifetime issue because the
-   `Context`/`Module` live only inside the query body and the
-   return value is owned bytes. Cost: bitcode roundtrip per
-   query rerun even when caching wins; bitcode-as-cache-key
-   means salsa diffs IR (which is what we want).
+Sub-steps to attack in order:
 
-2. **Salsa doesn't wrap codegen at all; the codegen call stays a
-   direct fn from the driver.** Defensible if the codegen pass is
-   destined to be re-architected at C1.2 (when types arrive and
-   codegen becomes a structural lowering of a typed HIR rather
-   than the current name-resolved-AST → LLVM lump). Cost: codegen
-   doesn't get incremental rebuild; LSP / `cargo check`-style
-   tools that only need types-but-not-codegen are unaffected.
+1. **Populate sentinel-resolve crate.** Currently a 20-line
+   scaffold stub per ADR 0009 D7. Add deps on `sentinel-ast`,
+   `sentinel-base`, `miette`, `thiserror`. Define `VarId(u32)`
+   and `FnId(u32)` newtype wrappers (stable identifiers,
+   per-program scope), `ResolvedProgram` (the AST with name
+   references replaced by IDs), and `ResolveError` (variants:
+   `UndefinedVariable`, `UndefinedFunction`, `RedeclaredVariable`,
+   `RedefinedFunction`, `MissingMain` — moved from
+   `CodegenError`).
 
-3. **Salsa wraps a `lower_to_ir` step but the final object emit
-   stays out.** Splits codegen into an in-memory IR-build (tracked)
-   and an object-emit (untracked). Mostly an organisational win.
+2. **Write `resolve(program: &Program) -> Result<ResolvedProgram,
+   ResolveError>`.** Mirrors the current codegen-side name
+   resolution: a function-table pass (collect every FnDef's name
+   + arity, error on duplicates or `print` collisions), then a
+   per-function body walk that builds the per-fn vars table and
+   replaces each `ExprKind::Var(name)` with
+   `ExprKind::Var(VarId)` and each `ExprKind::Call { callee,
+   .. }` with `ExprKind::Call { callee: FnId, .. }`. Likely
+   needs new `ExprKind`/`StmtKind` variants for the resolved
+   form, OR a parallel `ResolvedExpr`/`ResolvedStmt` tree, OR
+   the AST gets generic over the name-reference shape (e.g.,
+   `ExprKind<N>` where N is either `String` or `VarId`). The
+   third option is the most "rustc-style" but adds generics
+   complexity; option 2 (parallel tree) is the cleanest C1
+   landing and easier to debug.
 
-C1.0c's first action is to write a short note (or ADR amendment)
-choosing between these, since the choice cascades into the
-sentinel-types and sentinel-resolve crates' query shapes at
-C1.1 / C1.2. Tentative recommendation given the C0-style pure-
-function discipline that survived through C1.0b: option 2 for
-the immediate session (don't wrap codegen yet; revisit when
-types land and we have a richer HIR to feed it). Filing this
-note as the first C1.0c artifact is itself the first commit.
+3. **Add `resolve_query` as a `#[salsa::tracked]` query in
+   sentinel-resolve.** Same pattern as sentinel-syntax's
+   `parse_query`: takes a SourceFile, calls `parse_query`
+   internally, then runs `resolve(&program)`. Errors flow
+   through the Diagnostic accumulator with stage="resolve".
+   This is where C1.1 starts cashing in the C1.0b retrofit:
+   the driver's call to resolve is salsa-cached, and changes
+   to a fn body don't re-resolve the whole program.
 
-After C1.0c (whichever option) flips ADR 0011 to fully ACCEPTED
-for D1, **C1.1** (sentinel-resolve crate lift — move name
-resolution out of codegen) is the next sub-phase per ADR 0011 D6.
+4. **Strip name resolution from sentinel-codegen.** Codegen's
+   input becomes `&ResolvedProgram`. `CodegenCtx` loses the
+   String-keyed maps; vars become a `Vec<PointerValue>` indexed
+   by `VarId` (or a small HashMap if VarId space is sparse).
+   `CodegenError` variants `UndefinedVariable`,
+   `UndefinedFunction`, `RedeclaredVariable`, `RedefinedFunction`,
+   `MissingMain` all delete because the resolve pass catches
+   those first; only the LLVM-specific errors (`VerifyFailed`,
+   `TargetInit`, etc.) remain. `ArityMismatch` is a judgment
+   call — arity is checkable at resolve time given the fn
+   table, so it probably also moves.
 
-**Estimated effort for C1.0c**: 1 session if option 2 (writeup
-only); 2-3 sessions if option 1 (bitcode plumbing + tests).
+5. **Update sentinel-driver to thread the resolve stage.** The
+   pipeline becomes `parse_query → resolve_query → codegen`.
+   The driver collects diagnostics via
+   `resolve_query::accumulated::<Diagnostic>(db, file)` (which
+   transitively picks up parse_query's accumulator too). If
+   resolve fails, codegen doesn't run.
+
+6. **Validate.** All 22 C0 pass-test fixtures still pass.
+   Update the codegen unit tests (some test name-resolution
+   errors that now live in resolve). Add a few resolve unit
+   tests covering the moved error paths. UI snapshots for the
+   moved errors get refreshed if their wording changes.
+
+7. **Commit as C1.1 feat + docs.** Update STATE.md, ADR 0011
+   D4 status note, HANDOVER §0.
+
+**Estimated effort**: 2-3 sessions. The mechanical resolve
+implementation is bounded; the AST representation question (step
+2) is the design-pressure point and may want a short note before
+implementation if option 3 (generic AST) wins.
+
+After C1.1: **C1.2** (sentinel-types::check() real, annotation
+grammar via ADR 0012) is the next sub-phase per ADR 0011 D5 and
+D7. ADR 0012 needs to land first per ADR 0011 D7.
 
 ### 0.3 Quick-status block for session start
 
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: <docs-hash> (docs: C1.0b landed at 557cc60).
+    Local HEAD: <docs-hash> (docs: C1.0c decision landed; Phase C1.0 complete).
     [N] commits ahead of origin/main pending GitHub Desktop push.
     Working tree clean.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0 (bootstrap
-    compiler MVP) complete. 453 active workspace tests. C0 go/no-go
-    program runs at tests/pass/c05_go_no_go.sentinel: stdout "10\n",
-    exit 0. ADRs 0001-0010 ACCEPTED.
+    compiler MVP) + Phase C1.0 (salsa retrofit) complete. 453 active
+    workspace tests. C0 go/no-go program runs at
+    tests/pass/c05_go_no_go.sentinel: stdout "10\n", exit 0. ADRs
+    0001-0010 ACCEPTED.
 
-    Phase C1 in flight per ADR 0011 (PROPOSED, 8 sub-phases). C1.0a
-    landed sentinel-base (Salsa db trait + SourceFile + Diagnostic
-    accumulator) at 09dc8c3. C1.0b landed sentinel-syntax's
-    salsa-tracked lex_query/parse_query plus the driver's
-    SentinelDatabase wiring; the front-end now runs through Salsa.
-    C1.0c is the next step: choose how (or whether) to wrap codegen
-    as a salsa query — see HANDOVER §0.2 for the three sketches.
+    Phase C1 in flight per ADR 0011 (PROPOSED, 8 sub-phases).
+    C1.0a-c landed: sentinel-base foundation crate, salsa-tracked
+    lex_query/parse_query in sentinel-syntax, driver's
+    SentinelDatabase wiring, and the C1.0c decision to keep
+    codegen out of the salsa query graph until C1.2+ (ADR 0011 D1
+    amended). C1.1 is the next step: lift name resolution out of
+    sentinel-codegen into a dedicated sentinel-resolve crate per
+    ADR 0011 D4. ~2-3 sessions estimated.
 
     Read docs/HANDOVER.md §0 in full, then docs/STATE.md, then
-    ADR 0011 — that's the canonical context. Resume at C1.0c per
+    ADR 0011 — that's the canonical context. Resume at C1.1 per
     HANDOVER §0.2.
 
 ---
