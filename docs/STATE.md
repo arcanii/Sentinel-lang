@@ -12,17 +12,19 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: C0.3 (let bindings + variable references) landed at
-80d2b6b. Programs are no longer single expressions — they are
-`stmt* tail_expr` per ADR 0010 D7. The new Program type is the
-pipeline's currency throughout: parser builds it, codegen consumes
-it, driver pretty-prints and compiles it. Variable storage uses
-LLVM `alloca`/`load`/`store`; name resolution lives in codegen
-until sentinel-resolve lands at C1 (per ADR 0009 D7 deferral). Flat
-per-function scoping: no shadowing in C0; redeclaration is a
-CodegenError::RedeclaredVariable. ADR 0009 and ADR 0010 status
-lines refreshed. Workspace test count: +27 over C0.2 (5 ast Display
-+ 14 parser + 4 codegen + 4 pass tests = 27 new, 380 total).
+Last updated: C0.4 (if/else + function calls + print built-in)
+landed at baf68fc. **Programs now produce stdout**, not just exit
+codes — the first Sentinel binaries that exercise the runtime have
+shipped. sentinel-runtime is lifted out of scaffold status: it
+exports `sentinel_print(i64) -> i64` via `#[no_mangle] extern "C"`
+and now builds as both rlib and staticlib so the driver can link
+the resulting `libsentinel_runtime.a` into emitted programs via
+the system `cc`. Block expressions, if/else (alloca-based result
+per the C0.4 plan A), and direct-call-by-Ident (only `print`
+resolves; `fn` defs wait for C0.5) all land. ADR 0009 and ADR 0010
+status lines refreshed. Workspace test count: +43 over C0.3
+(7 ast Display + 20 parser + 6 codegen + 8 pass + 1 runtime + 1
+new ast helper test = 43 new, 423 total).
 
 Phase B retrospective (preserved as historical context for what
 came before C0): all three HANDOVER §5.2 validation demos landed
@@ -1083,7 +1085,7 @@ scaffold stubs.
 | C0.1  | Hand-written parser + AST + `snc parse` subcommand             | Done    | 7e32e8c |
 | C0.2  | LLVM codegen + `snc build` + first runnable binary + tests/pass/ | Done  | 0b07931 |
 | C0.3  | let bindings + variable references (i64 everywhere)            | Done    | 80d2b6b |
-| C0.4  | if/else + function calls (forward-declared, fixed signatures)  | Planned |         |
+| C0.4  | if/else + block expressions + `print` calls + first stdout     | Done    | baf68fc |
 | C0.5  | fn definitions + main entry; C0 go/no-go                       | Planned |         |
 | C1+   | Type system, regions, effects (HANDOVER §6.2)                  | Planned |         |
 
@@ -1148,20 +1150,43 @@ and a dedicated UI runner for codegen errors lands when C0.4+
 introduces more codegen-stage diagnostics worth coordinating
 (unbound call target, arity mismatch, etc.).
 
-### C.2 Crate Layout (C0.3)
+Test coverage as of C0.4: sentinel-ast gains 7 new Display tests
+covering block/if/call/expr_block and the call-zero/one/two-arg
+variants. sentinel-syntax lib gains 20 new parser tests: 3 for
+blocks (simple, with stmt, in arithmetic position as atom), 4 for
+if/else (simple, else-if chain, with var condition, in parens
+inside arithmetic), 6 for calls (zero/one/multi args, trailing
+comma, in arithmetic, with complex arg), 1 for var-vs-call
+disambiguation, 1 for a program with a print-statement, and 5
+error cases (if missing else, if missing then-block, empty block,
+call unclosed args, block unclosed after tail). sentinel-codegen
+gains 6 new tests (if expression, block expression, call to
+print, undefined function, arity mismatch too-many, arity
+mismatch too-few). sentinel-runtime gains its first real
+function (`sentinel_print`) with a smoke + return-zero test.
+sentinel-driver gains 8 new pass-test fixtures (print_simple,
+print_then_tail, if_true_branch, if_false_branch, if_with_var_cond,
+else_if_chain, block_expression, if_with_print) — five assert
+on exit codes, three assert on stdout content + exit. Workspace
+delta: +43 active tests (423 total).
+
+### C.2 Crate Layout (C0.4)
 
     crates/sentinel-ast/
       Cargo.toml          deps: tracing, thiserror
       src/
         lib.rs            Span (= Range<usize>), Spanned<T>, BinOp
                           (Add|Sub|Mul|Div), UnaryOp (Neg), ExprKind
-                          (IntLit | Var | Unary | Binary), Expr =
-                          Spanned<ExprKind>; StmtKind (Let { name,
-                          name_span, value } | Expr), Stmt =
-                          Spanned<StmtKind>; Program { stmts, tail,
-                          span }; Display impls for all (Program
-                          with empty stmts prints just the tail —
-                          preserves C0.1/C0.2 output verbatim)
+                          (IntLit | Var | Unary | Binary | Block | If
+                          | Call), Expr = Spanned<ExprKind>; StmtKind
+                          (Let { name, name_span, value } | Expr),
+                          Stmt = Spanned<StmtKind>; Program { stmts,
+                          tail, span }; Block { stmts, tail, span }
+                          (same shape as Program but a distinct type
+                          for brace-wrapped nested forms); Display
+                          impls for all (Program with empty stmts
+                          prints just the tail — preserves C0.1/C0.2
+                          output verbatim)
 
     crates/sentinel-syntax/
       Cargo.toml          deps: sentinel-ast (path), logos, miette,
@@ -1186,14 +1211,19 @@ introduces more codegen-stage diagnostics worth coordinating
                           the single-expression contract for lib
                           callers and existing C0.1 unit tests.
                           parse_program loops, parse_let_stmt eats
-                          `let Ident = expr ;`. The expression
-                          ladder (parse_expr / parse_add / parse_mul
-                          / parse_unary / parse_atom) is unchanged
-                          from C0.1 except parse_atom now recognises
-                          Ident as ExprKind::Var. ParseError variants
-                          unchanged: Lex (transparent),
-                          UnexpectedToken, UnexpectedEof,
-                          UnmatchedParen, IntLitOverflow
+                          `let Ident = expr ;`. C0.4 grows
+                          parse_expr to check for `if` at expr top
+                          (delegating to parse_if for the
+                          if/else/else-if chain), parse_block for
+                          the brace-wrapped `{ stmt* tail }`, and
+                          parse_atom now: Ident-followed-by-`(`
+                          becomes a call (with trailing comma
+                          allowed in args); bare Ident is Var;
+                          LBrace becomes a block. ParseError
+                          variants unchanged from C0.3: Lex
+                          (transparent), UnexpectedToken,
+                          UnexpectedEof, UnmatchedParen,
+                          IntLitOverflow
       tests/
         ui.rs             integration runner; shared themed-none
                           handler at 80 cols; ui_lex_invalid_char,
@@ -1211,22 +1241,46 @@ introduces more codegen-stage diagnostics worth coordinating
       src/
         lib.rs            compile_to_object(program, output_path)
                           builds an LLVM module with a single
-                          `main() -> i32`. CodegenCtx threads
-                          builder + i64_type + entry block + name
-                          -> alloca map through lowering. lower_stmt
+                          `main() -> i32`. CodegenCtx<'ctx, 'a>
+                          threads &context + &module + builder +
+                          i64_type + entry block + main_fn + name
+                          -> alloca map through lowering; the two
+                          lifetimes let the ctx be scoped to drop
+                          before module.verify() runs. lower_stmt
                           handles Let (alloca + store + reject
                           redeclaration) and Expr (compute and
-                          discard); lower_expr handles IntLit, Var
-                          (load from alloca; reject undefined),
-                          Unary, Binary. After all stmts and the
-                          tail expression, the i64 result is
-                          truncated to i32 and returned. Per ADR
-                          0009 D7, name resolution lives in codegen
-                          until sentinel-resolve lands at C1.
-                          CodegenError variants: VerifyFailed,
-                          TargetInit, TargetMachine, WriteFailed,
-                          Builder, UndefinedVariable,
-                          RedeclaredVariable
+                          discard); lower_block iterates stmts and
+                          returns the tail value; lower_if creates
+                          then/else/merge basic blocks with an
+                          alloca-based result slot (mem2reg promotes
+                          to phi when optimization is enabled) and
+                          uses `!= 0` compare per ADR 0010 D9
+                          truthy condition; lower_call dispatches
+                          `print` to a lazily-declared `declare i64
+                          @sentinel_print(i64)` and errors on
+                          other names. After all stmts and the tail
+                          expression, the i64 result is truncated
+                          to i32 and returned. Per ADR 0009 D7,
+                          name resolution lives in codegen until
+                          sentinel-resolve lands at C1. CodegenError
+                          variants: VerifyFailed, TargetInit,
+                          TargetMachine, WriteFailed, Builder,
+                          UndefinedVariable, RedeclaredVariable,
+                          UndefinedFunction, ArityMismatch
+
+    crates/sentinel-runtime/
+      Cargo.toml          deps: tracing, thiserror
+                          [lib] crate-type = ["lib", "staticlib"]
+                          (the staticlib output is libsentinel_
+                          runtime.a, linked into Sentinel programs
+                          by the driver via the system cc; the rlib
+                          remains for Rust consumers)
+      src/
+        lib.rs            sentinel_print(i64) -> i64 via
+                          `#[no_mangle] extern "C"` — writes the
+                          i64 to stdout as ASCII decimal + newline
+                          and returns 0 (the call expression's
+                          value per ADR 0010 D11)
 
     crates/sentinel-driver/
       Cargo.toml          deps: sentinel-syntax (path), sentinel-codegen
@@ -1240,9 +1294,11 @@ introduces more codegen-stage diagnostics worth coordinating
                           (s-expr per stmt + trailing expr last);
                           `build <file> [-o <out>]` additionally
                           lowers the Program via sentinel_codegen,
-                          then invokes the system `cc` on the emitted
-                          `.o` to produce the executable. Output
-                          defaults to <file_stem>; exit codes 0 / 1 / 2
+                          then invokes the system `cc` on the
+                          emitted `.o` plus `libsentinel_runtime.a`
+                          (found via current_exe().parent()) to
+                          produce the executable. Output defaults
+                          to <file_stem>; exit codes 0 / 1 / 2
       tests/
         pass.rs           pass-test runner; reads workspace-root
                           tests/pass/*.sentinel; uses CARGO_BIN_EXE_snc
@@ -1265,6 +1321,14 @@ introduces more codegen-stage diagnostics worth coordinating
         c03_multiple_lets.sentinel        `let x = 3; let y = 4; x + y` -> exit 7
         c03_let_uses_let.sentinel         `let a = 2; let b = a * 3; b + 1` -> exit 7
         c03_expr_statement.sentinel       `let x = 1; x + 99; 5` -> exit 5
+        c04_print_simple.sentinel         `print(42)` -> stdout "42\n", exit 0
+        c04_print_then_tail.sentinel      let + 2x print + tail -> stdout "7\n14\n", exit 21
+        c04_if_true_branch.sentinel       `if 1 { 42 } else { 99 }` -> exit 42
+        c04_if_false_branch.sentinel      `if 0 { 42 } else { 99 }` -> exit 99
+        c04_if_with_var_cond.sentinel     let x=5; if x { x*2 } else { 0 } -> exit 10
+        c04_else_if_chain.sentinel        let x=0; if/else-if/else -> exit 3
+        c04_block_expression.sentinel     `let r = { let y = 4; y + 1 }; r * 2` -> exit 10
+        c04_if_with_print.sentinel        if/print -> stdout "100\n", exit 0
 
     .cargo/
       config.toml         workspace-local cargo config (C0.2): [env]
@@ -1276,19 +1340,17 @@ introduces more codegen-stage diagnostics worth coordinating
                           so the linker can find brew-installed
                           zstd/libxml2 that LLVM 18 references
 
-Six scaffold-stub compiler crates remain at 20-line
+Five scaffold-stub compiler crates remain at 20-line
 `crate_name() + smoke` stubs per ADR 0009 D7. Updated population
 schedule:
 
-  - sentinel-types:    C0.3 stub returning Ok (deferred from C0.2
-                       per STATE.md C.3 note 15 — arithmetic has no
-                       type semantics so the stub provides no current
-                       value); C1 fills it in
-  - sentinel-runtime:  C0.4 (provides the `print` runtime symbol so
-                       ADR 0010 D11's print(x) has a libc-backed
-                       implementation)
+  - sentinel-types:    C1 (stub deferral from C0.2 per STATE.md C.3
+                       note 15 — arithmetic, lets, and if/else have
+                       no type semantics that a stub `check()` would
+                       add value to; the slot lands when the type
+                       system has something to actually check)
   - sentinel-resolve:  C1 (absorbed temporarily into sentinel-codegen
-                       for C0.3 name resolution per ADR 0009 D7
+                       for C0.3-0.4 name resolution per ADR 0009 D7
                        deferral; moves to its own crate at C1)
   - sentinel-hir:      C1/C2
   - sentinel-mir:      C2
@@ -1420,6 +1482,53 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     AST. The C0.3 arrangement is a deliberate short-term
     architectural debt — STATE.md flags it in this list so the
     refactor at C1 is obvious.
+21. `Block { stmts, tail, span }` and `Program { stmts, tail,
+    span }` have the same shape. Both are AST struct types, and a
+    Block can be promoted to an Expr via `ExprKind::Block(Box<Block>)`.
+    Program is the top-level form (no surrounding braces in source;
+    implicit body of the future `main` function); Block is the
+    brace-wrapped nested form. Keeping them as distinct types lets
+    a reader see at a glance which level of nesting a value
+    represents, at the cost of one redundant struct. At C0.5 when
+    `fn main() { … }` lands, Program may collapse into a list of
+    fn-defs each containing a Block body.
+22. `if`/`else` codegen uses an **alloca-based result slot** rather
+    than LLVM `phi` nodes. The result alloca is created in the
+    current insert position; both branches `store` the branch
+    value; the merge block does `load` from the slot to produce
+    the if-expression's value. At -O0 this is correct and easy to
+    read in the IR; mem2reg promotes the alloca to phi when
+    optimization is enabled. The C0.4 plan A pinned this choice up
+    front.
+23. `if` condition is `cond != 0` (C-style truthy per ADR 0010
+    D9). The condition is computed as i64 and compared to zero via
+    `IntPredicate::NE`. When C1 introduces `bool`, ADR 0010 D9's
+    Revisit clause fires and the comparison goes away — the
+    condition will be `bool`-typed by then.
+24. `if` is positioned at the top of `parse_expr`, not inside the
+    arithmetic precedence ladder. `if x { 1 } else { 2 } + 3` is
+    a parse error ("expected end of input" after the if-expr);
+    `(if x { 1 } else { 2 }) + 3` works because the parens accept
+    any expression. The restriction parallels Rust's; revisited
+    if a real program wants the looser form.
+25. sentinel-runtime is built with `crate-type = ["lib",
+    "staticlib"]` so cargo produces both `libsentinel_runtime.a`
+    (linked into Sentinel programs by the system cc) and
+    `libsentinel_runtime.rlib` (consumable from Rust if a future
+    integration test wants to call the runtime directly). The
+    driver locates the staticlib via
+    `current_exe().parent().join("libsentinel_runtime.a")` because
+    cargo puts the snc bin and the runtime in the same target
+    directory — works for both `cargo run --bin snc` and
+    `CARGO_BIN_EXE_snc`-driven integration tests.
+26. `CodegenCtx<'ctx, 'a>` decouples the LLVM IR lifetime ('ctx,
+    bound by Context) from the ctx struct's borrow lifetime ('a,
+    bound by an inner scope in `compile_to_object`). The two
+    lifetimes let the ctx be scoped to drop before `module.
+    verify()` and `target_machine.write_to_file(&module, …)` run
+    — the borrow checker can see that the ctx's `&module` ends at
+    the inner block's `}` and so the later `module.verify()` is
+    unaliased.
 
 ---
 
@@ -1438,13 +1547,13 @@ All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
-  - sentinel-syntax:        51 tests (49 lib + 2 UI integration) + 0 doctests
-  - sentinel-ast:           12 tests (1 smoke + 11 Display) + 0 doctests
-  - sentinel-codegen:       6 tests (1 smoke + 5 codegen tests) + 0 doctests
-  - sentinel-driver:        9 pass integration tests + 0 doctests
+  - sentinel-syntax:        71 tests (69 lib + 2 UI integration) + 0 doctests
+  - sentinel-ast:           19 tests (1 smoke + 18 Display) + 0 doctests
+  - sentinel-codegen:       12 tests (1 smoke + 11 codegen tests) + 0 doctests
+  - sentinel-driver:        17 pass integration tests + 0 doctests
+  - sentinel-runtime:       2 tests (smoke + sentinel_print_returns_zero) + 0 doctests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
-                            (sentinel-resolve, -types, -hir, -mir,
-                            -runtime, -lsp)
+                            (sentinel-resolve, -types, -hir, -mir, -lsp)
 
 ### Script Convention
 
