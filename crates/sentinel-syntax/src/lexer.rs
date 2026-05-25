@@ -11,14 +11,7 @@
 //! a Vec of diagnostics; no shared mutable state.
 
 use logos::Logos;
-
-pub type Span = std::ops::Range<usize>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Spanned<T> {
-    pub kind: T,
-    pub span: Span,
-}
+use sentinel_ast::Spanned;
 
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[logos(skip r"[ \t\r\n]+")]

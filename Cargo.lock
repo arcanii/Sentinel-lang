@@ -959,6 +959,8 @@ dependencies = [
 name = "sentinel-driver"
 version = "0.0.1"
 dependencies = [
+ "miette",
+ "sentinel-syntax",
  "thiserror",
  "tracing",
 ]
@@ -1019,6 +1021,7 @@ dependencies = [
  "insta",
  "logos",
  "miette",
+ "sentinel-ast",
  "thiserror",
  "tracing",
 ]

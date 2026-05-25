@@ -10,6 +10,8 @@ license.workspace      = true
 repository.workspace   = true
 
 [dependencies]
+sentinel-ast = { path = "../sentinel-ast" }
+
 logos      = { workspace = true }
 miette     = { workspace = true }
 thiserror  = { workspace = true }

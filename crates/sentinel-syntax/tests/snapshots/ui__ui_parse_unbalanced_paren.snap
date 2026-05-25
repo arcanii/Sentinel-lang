@@ -1,0 +1,13 @@
+---
+source: crates/sentinel-syntax/tests/ui.rs
+expression: formatted
+---
+sentinel::parse::unmatched_paren
+
+  x unmatched opening parenthesis
+   ,-[parse_unbalanced_paren.sentinel:1:1]
+ 1 | (1 + 2
+   : |
+   : `-- this `(` is never closed
+   `----
+  help: add a matching `)` to close the parenthesized expression

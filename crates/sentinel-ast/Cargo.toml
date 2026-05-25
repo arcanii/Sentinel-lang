@@ -1,6 +1,6 @@
 [package]
 name        = "sentinel-ast"
-description = "Abstract syntax tree types after lowering from CST"
+description = "Abstract syntax tree types for Sentinel source"
 
 edition.workspace      = true
 rust-version.workspace = true
