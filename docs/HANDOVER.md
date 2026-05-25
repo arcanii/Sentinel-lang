@@ -52,25 +52,33 @@ kickoff) and 0010 (concrete C0 surface) are ACCEPTED. Everything
 is `i64` per ADR 0009 ("no type system in C0"); `bool` arrives at
 C1.3. See STATE.md Section C.
 
-**Phase C1.0a — Salsa retrofit foundation — partial; C1.0b pending.**
+**Phase C1.0a-b — Salsa retrofit foundation + lex/parse wrapped — complete; C1.0c pending.**
 Phase C1 (type system, regions, effects per HANDOVER §6.2) is in
 flight per ADR 0011 (PROPOSED, 8 sub-phases, honest 5-6 month
 estimate vs HANDOVER's 3-month budget). C1.0a landed the
 foundation crate `sentinel-base` hosting the `#[salsa::db]`
 SentinelDb trait, `#[salsa::input]` SourceFile, and
-`#[salsa::accumulator]` Diagnostic (3 tests verifying the salsa
-machinery; salsa 0.18 is now in the dep graph). **C1.0b is
-pending** — wrapping `lex`/`parse`/`compile_to_object` as
-`#[salsa::tracked]` queries; paused because `Vec<LexError>` /
-`Vec<ParseError>` as tracked-struct fields require their inner
-types to be `Hash`, and `miette::SourceSpan` doesn't derive Hash.
-The resolution path is documented in Section 0.2 below.
+`#[salsa::accumulator]` Diagnostic (3 tests; salsa 0.18 is in
+the dep graph). **C1.0b landed** — `sentinel-syntax::query`
+exposes `lex_query` and `parse_query` as `#[salsa::tracked]`
+queries; errors route through the Diagnostic accumulator rather
+than tracked-struct fields (side-stepping the
+`miette::SourceSpan: !Hash` issue that paused the C1.0a draft);
+sentinel-driver instantiates a concrete `SentinelDatabase` and
+collects diagnostics via `parse_query::accumulated::<Diagnostic>`.
+All 22 C0 pass-test fixtures still run end-to-end through the
+new query-based driver path. **C1.0c is pending** — wrap codegen
+as a tracked query (LLVM context lifetimes may need a careful
+design pass; deferred to keep the C1.0b deltas reviewable). See
+ADR 0011 D1 status notes.
 
-**Workspace test count**: 448 active across all crates. All four
-check-suite checks green (cargo build --workspace, cargo clippy
---workspace --all-targets -D warnings, cargo test --workspace,
-cargo test --workspace --doc). See STATE.md "Conventions" for
-the per-crate breakdown.
+**Workspace test count**: 453 active across all crates (+7 over
+C1.0a, all in sentinel-syntax: 4 positive lex/parse + 1 cross-
+stage propagation + 2 cache validation). All four check-suite
+checks green (cargo build --workspace, cargo clippy --workspace
+--all-targets -D warnings, cargo test --workspace, cargo test
+--workspace --doc). See STATE.md "Conventions" for the per-crate
+breakdown.
 
 **ADR status**:
 
@@ -86,9 +94,11 @@ the per-crate breakdown.
                                                  sub-phases done)
   - 0010 concrete-c0-surface-syntax              ACCEPTED (all
                                                  D-decisions exercised)
-  - 0011 phase-c1-kickoff-and-type-system-plan   PROPOSED (flips
-                                                 ACCEPTED when C1.0
-                                                 completes)
+  - 0011 phase-c1-kickoff-and-type-system-plan   PROPOSED — D1
+                                                 (Salsa) exercised
+                                                 end-to-end at C1.0b;
+                                                 fully ACCEPTED when
+                                                 C1.0c lands codegen
 
 ### 0.1 Working norms (carry forward into Phase C1)
 
@@ -176,79 +186,84 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C1.0b)
+### 0.2 Next session opening (C1.0c)
 
-Resume at **C1.0b**. The full plan is ADR 0011 D1; the
-resolution path for the Hash-bounds issue that paused C1.0a is:
+Resume at **C1.0c**: wrap `sentinel_codegen::compile_to_object`
+as a `#[salsa::tracked]` query. The C1.0b session deliberately
+deferred this because (a) the LLVM `Context` and `Module` types
+hold a `'ctx` lifetime that doesn't trivially fit salsa's
+`'static`-ish query model, and (b) `compile_to_object` writes to
+the filesystem, which makes it a side-effectful "query" — salsa
+usually expects pure functions. The C1.0b retrofit gave the
+front-end the incremental shape it'll want anyway; C1.0c is its
+own design question.
 
-1. **Add Hash derives across sentinel-ast.** `Spanned<T>`, `Block`,
-   `Param`, `FnDef`, `Program`, `StmtKind`, `ExprKind` — each
-   needs `#[derive(Hash)]` so they're salsa-friendly. `BinOp`,
-   `UnaryOp`, `TokenKind` already derive Hash.
+Sketches to evaluate:
 
-2. **Rewrite the (deleted) sentinel-syntax/src/query.rs.** The
-   C1.0a draft tried to put `Vec<LexError>` and `Vec<ParseError>`
-   into salsa-tracked structs; that fails because
-   `miette::SourceSpan` isn't Hash. The fix: tracked structs hold
-   ONLY the success values (`Vec<Spanned<TokenKind>>` for lex,
-   `Option<Program>` for parse). Errors get converted to
-   `sentinel_base::Diagnostic` and accumulated via
-   `Diagnostic { stage: "lex", … }.accumulate(db)`.
+1. **Salsa wraps just the path that builds the in-memory module,
+   not the object emit.** A tracked `compile_module(db, file) ->
+   ??` returns IR-as-bytes (or a serialised LLVM module — bitcode
+   via `module.write_bitcode_to_memory()` is the obvious carrier);
+   the driver does the object-emit + cc-link outside the query
+   graph. This sidesteps the lifetime issue because the
+   `Context`/`Module` live only inside the query body and the
+   return value is owned bytes. Cost: bitcode roundtrip per
+   query rerun even when caching wins; bitcode-as-cache-key
+   means salsa diffs IR (which is what we want).
 
-3. **Helper fns to convert LexError → Diagnostic and ParseError
-   → Diagnostic** live in sentinel-syntax/src/query.rs alongside
-   the queries.
+2. **Salsa doesn't wrap codegen at all; the codegen call stays a
+   direct fn from the driver.** Defensible if the codegen pass is
+   destined to be re-architected at C1.2 (when types arrive and
+   codegen becomes a structural lowering of a typed HIR rather
+   than the current name-resolved-AST → LLVM lump). Cost: codegen
+   doesn't get incremental rebuild; LSP / `cargo check`-style
+   tools that only need types-but-not-codegen are unaffected.
 
-4. **Wire sentinel-driver to use the queries.** Create a
-   `SentinelDatabase` struct with `#[salsa::db] impl SentinelDb`
-   plus the required `salsa_event` method, set a SourceFile,
-   call lex_query/parse_query, collect accumulated Diagnostics
-   via `Query::accumulated::<Diagnostic>(db, ...)`, render via
-   miette.
+3. **Salsa wraps a `lower_to_ir` step but the final object emit
+   stays out.** Splits codegen into an in-memory IR-build (tracked)
+   and an object-emit (untracked). Mostly an organisational win.
 
-5. **Defer sentinel-codegen's salsa wrapping to C1.0c** unless
-   it's trivial. The LLVM context lifetimes may not fit salsa's
-   query model cleanly; better to land lex/parse retrofit + the
-   driver wiring first and revisit codegen separately.
+C1.0c's first action is to write a short note (or ADR amendment)
+choosing between these, since the choice cascades into the
+sentinel-types and sentinel-resolve crates' query shapes at
+C1.1 / C1.2. Tentative recommendation given the C0-style pure-
+function discipline that survived through C1.0b: option 2 for
+the immediate session (don't wrap codegen yet; revisit when
+types land and we have a richer HIR to feed it). Filing this
+note as the first C1.0c artifact is itself the first commit.
 
-6. **Validate**: all 22 existing pass tests still run end-to-end
-   through the new query-based driver path; add a test that the
-   same input produces stable results across query reruns
-   (salsa cache validation).
+After C1.0c (whichever option) flips ADR 0011 to fully ACCEPTED
+for D1, **C1.1** (sentinel-resolve crate lift — move name
+resolution out of codegen) is the next sub-phase per ADR 0011 D6.
 
-7. **Commit as C1.0b feat + docs**, flip ADR 0011 status to
-   reflect D1 (Salsa) exercised, update STATE.md.
-
-**Estimated effort**: 1-2 sessions of work, partly bounded by
-salsa 0.18 ergonomic surprises and how Hash derives propagate
-through the AST module's existing tests.
-
-After C1.0b: C1.1 (sentinel-resolve crate lift — move name
-resolution out of codegen) is the next ADR-tracked sub-phase
-per ADR 0011 D6.
+**Estimated effort for C1.0c**: 1 session if option 2 (writeup
+only); 2-3 sessions if option 1 (bitcode plumbing + tests).
 
 ### 0.3 Quick-status block for session start
 
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: 0a468c8 (docs: C1.0a landed).
+    Local HEAD: <docs-hash> (docs: C1.0b landed at 557cc60).
     [N] commits ahead of origin/main pending GitHub Desktop push.
     Working tree clean.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0 (bootstrap
-    compiler MVP) complete. 448 active workspace tests. C0 go/no-go
+    compiler MVP) complete. 453 active workspace tests. C0 go/no-go
     program runs at tests/pass/c05_go_no_go.sentinel: stdout "10\n",
     exit 0. ADRs 0001-0010 ACCEPTED.
 
     Phase C1 in flight per ADR 0011 (PROPOSED, 8 sub-phases). C1.0a
     landed sentinel-base (Salsa db trait + SourceFile + Diagnostic
-    accumulator). C1.0b is the next step: wrap lex/parse as salsa-
-    tracked queries using the Diagnostic accumulator pattern.
+    accumulator) at 09dc8c3. C1.0b landed sentinel-syntax's
+    salsa-tracked lex_query/parse_query plus the driver's
+    SentinelDatabase wiring; the front-end now runs through Salsa.
+    C1.0c is the next step: choose how (or whether) to wrap codegen
+    as a salsa query — see HANDOVER §0.2 for the three sketches.
 
-    Read docs/HANDOVER.md Section 0 in full, then docs/STATE.md,
-    then ADR 0011 — that's the canonical context. Resume at C1.0b
-    per HANDOVER §0.2.
+    Read docs/HANDOVER.md §0 in full, then docs/STATE.md, then
+    ADR 0011 — that's the canonical context. Resume at C1.0c per
+    HANDOVER §0.2.
 
 ---
 

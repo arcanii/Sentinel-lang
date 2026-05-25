@@ -12,20 +12,29 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C1.0a landed at 09dc8c3** — first step of the
-Phase C1 Salsa retrofit. The new `sentinel-base` crate hosts the
-shared Salsa machinery: `SourceFile` (input), `SentinelDb` (db
-trait), `Diagnostic` (accumulator). ADR 0011 (Phase C1 kickoff
-plan) is PROPOSED at 6372914. C1.0b — wiring lex/parse as
-`#[salsa::tracked]` queries against `SentinelDb` — is paused
-because `Vec<LexError>` and `Vec<ParseError>` as tracked-struct
-fields require the inner error types to be Hash, and
-`miette::SourceSpan` does not derive Hash; C1.0b's plan is to
-accumulate `Diagnostic`s rather than return rich error vectors
-through tracked fields. The AST-side Hash derives + parser/codegen
-query wrappers + driver wiring all land in C1.0b. Workspace test
-count: +3 over the Phase C0 final (448 total). Salsa 0.18 is
-now in the actual dep graph (was pinned but unused).
+Last updated: **C1.0b landed at 557cc60** — the lex and parse pipeline stages
+now run through `#[salsa::tracked]` queries against `SentinelDb`,
+with `sentinel_base::Diagnostic`s flowing through the
+`#[salsa::accumulator]` rather than rich error vectors through
+tracked-struct fields (the C1.0a pause was caused by
+`miette::SourceSpan` not deriving Hash; routing errors through the
+accumulator side-steps the Hash bound entirely). AST types
+(`Spanned<T>`, `Block`, `Param`, `FnDef`, `Program`, `StmtKind`,
+`ExprKind`) gained `#[derive(Hash)]`. `sentinel-syntax::query`
+exposes `lex_query` and `parse_query`; the `sentinel-driver`
+binary instantiates a concrete `SentinelDatabase`, sets a
+`SourceFile`, calls `parse_query`, and collects diagnostics via
+`parse_query::accumulated::<Diagnostic>`. All 22 existing pass-test
+fixtures still run end-to-end through the new query-based driver
+path; the C0 go/no-go program at `tests/pass/c05_go_no_go.sentinel`
+still produces stdout `10\n`, exit 0. Codegen is intentionally not
+yet salsa-wrapped (deferred to C1.0c per HANDOVER §0.2 step 5);
+LLVM context lifetimes may not fit salsa's query model cleanly and
+the retrofit/driver wiring was worth landing first. ADR 0011's D1
+(Salsa adoption at C1.0) is now exercised end-to-end; ADR 0011
+remains PROPOSED until all of C1.0 (incl. codegen) is in. Net +7
+workspace tests over C1.0a (4 lex/parse query positive + 1
+diagnostic + 2 cache validation).
 
 Phase C0 retrospective (preserved as historical context for what
 came before Phase C1): the bootstrap compiler can lex, parse,
@@ -1111,7 +1120,8 @@ scaffold stubs.
 | C0.4  | if/else + block expressions + `print` calls + first stdout     | Done    | baf68fc |
 | C0.5  | fn definitions + main entry; **C0 go/no-go passes**            | Done    | 6ce8336 |
 | C1.0a | sentinel-base crate: Salsa db trait + SourceFile input + Diagnostic accumulator | Done | 09dc8c3 |
-| C1.0b | Wrap lex/parse/codegen as `#[salsa::tracked]` queries          | Pending |         |
+| C1.0b | Wrap lex/parse as `#[salsa::tracked]` queries; driver uses SentinelDatabase | Done | 557cc60 |
+| C1.0c | Wrap codegen as `#[salsa::tracked]` query                      | Pending |         |
 | C1.1+ | sentinel-resolve lift, sentinel-types real, …                  | Planned |         |
 
 ADR 0010 (concrete C0 surface syntax) lands between C0.0 and C0.1
@@ -1222,6 +1232,28 @@ The UI fixture parse_unbalanced_paren rewrites to
 `fn main() { (1 + 2 }` so it remains valid C0.5 program shape with
 the embedded error. Workspace delta: +22 active tests (445 total).
 
+Test coverage as of C1.0b: sentinel-syntax gains a new `query`
+module hosting two `#[salsa::tracked]` queries and seven unit tests
+covering positive lex / positive parse / diagnostic-accumulation on
+lex error / diagnostic-accumulation on parse error / lex error
+propagated through parse with lex stage preserved / cache stability
+across reruns for both queries. sentinel-driver's bin gains a
+concrete `SentinelDatabase` struct (Storage<Self> + salsa::Database
+impl with no-op salsa_event + SentinelDb impl); `run_parse` and
+`run_build` are refactored to instantiate the DB, set a SourceFile,
+call `parse_query`, and collect diagnostics via the accumulator.
+sentinel-ast types `Spanned<T>`, `Block`, `Param`, `FnDef`,
+`Program`, `StmtKind`, `ExprKind` gain `#[derive(Hash)]`
+(non-behavioral; required for salsa-friendliness of any future
+tracked-struct fields, even though C1.0b avoids tracked structs by
+going through the accumulator). Workspace delta: +7 active tests
+(453 total: 90 syntax lib + 2 ui + 22 ast + 13 codegen + 22 pass +
+2 runtime + 3 base + 5 stub + 69 broker + 226 effects-proto). All
+22 C0 pass-test fixtures still run end-to-end through the new
+query-based driver path; the C0 go/no-go program at
+`tests/pass/c05_go_no_go.sentinel` still produces stdout `10\n`
+exit 0. See C.3 design decisions 33-36.
+
 ### C.2 Crate Layout (C0.5)
 
     crates/sentinel-base/                 (C1.0a)
@@ -1235,7 +1267,8 @@ the embedded error. Workspace delta: +22 active tests (445 total).
                           code / message / span fields. Test-only
                           TestDb verifies the salsa machinery
                           (3 tests). Downstream pipeline crates
-                          plug into SentinelDb at C1.0b onward.
+                          plug into SentinelDb at C1.0b (lex/parse)
+                          and C1.0c (codegen).
 
     crates/sentinel-ast/
       Cargo.toml          deps: tracing, thiserror
@@ -1252,18 +1285,28 @@ the embedded error. Workspace delta: +22 active tests (445 total).
                           (C0.5 top-level — was stmts+tail at
                           C0.3-0.4); Display impls for all (Program
                           prints fn-defs newline-separated, FnDef
-                          prints `(fn name (params) body)`)
+                          prints `(fn name (params) body)`).
+                          **C1.0b**: Spanned<T>, Block, Param, FnDef,
+                          Program, StmtKind, ExprKind all derive
+                          Hash; BinOp / UnaryOp already did. Required
+                          for salsa-friendliness of any future
+                          tracked-struct field, even though C1.0b
+                          itself routes errors through the accumulator
+                          and avoids tracked-struct fields.
 
-    crates/sentinel-syntax/
-      Cargo.toml          deps: sentinel-ast (path), logos, miette,
-                          thiserror, tracing
+    crates/sentinel-syntax/                (C1.0b adds query module)
+      Cargo.toml          deps: sentinel-ast (path), sentinel-base
+                          (path, C1.0b), logos, miette, salsa
+                          (C1.0b), thiserror, tracing
                           dev-deps: insta
       src/
         lib.rs            module declarations + public re-exports
                           (lex, LexError, TokenKind from lexer;
-                          parse, parse_expr, ParseError, Parser
-                          from parser; Program, Span, Spanned, Stmt,
-                          StmtKind re-exported from sentinel-ast)
+                          parse, parse_expr, parse_block_str,
+                          ParseError, Parser from parser;
+                          lex_query, parse_query from query — C1.0b;
+                          Program, Span, Spanned, Stmt, StmtKind
+                          re-exported from sentinel-ast)
         lexer.rs          logos-based TokenKind (4 keywords + 11
                           punctuation kinds + Ident + IntLit; skip
                           patterns for whitespace and `//` line
@@ -1292,6 +1335,25 @@ the embedded error. Workspace delta: +22 active tests (445 total).
                           unchanged since C0.3: Lex (transparent),
                           UnexpectedToken, UnexpectedEof,
                           UnmatchedParen, IntLitOverflow
+        query.rs          (C1.0b) two `#[salsa::tracked]` queries:
+                          lex_query(db, file) -> Vec<Spanned<TokenKind>>
+                          (return_ref) and parse_query(db, file) ->
+                          Option<Program> (return_ref). Each
+                          accumulates `sentinel_base::Diagnostic`s
+                          for errors via the salsa::Accumulator
+                          trait. Private helpers
+                          lex_error_to_diagnostic and
+                          parse_error_to_diagnostic perform the
+                          (stage, code, message, span) conversion;
+                          ParseError::Lex forwards to the lex
+                          converter so a lex-error-through-parse
+                          still carries the lex stage/code. The
+                          queries are independent — parse_query calls
+                          `parse(src)` directly rather than depending
+                          on lex_query, matching parse's existing
+                          fail-fast-on-lex-error semantics. Test-only
+                          TestDb mirrors the one in sentinel-base
+                          (7 tests).
       tests/
         ui.rs             integration runner; shared themed-none
                           handler at 80 cols; ui_lex_invalid_char,
@@ -1351,23 +1413,37 @@ the embedded error. Workspace delta: +22 active tests (445 total).
                           and returns 0 (the call expression's
                           value per ADR 0010 D11)
 
-    crates/sentinel-driver/
-      Cargo.toml          deps: sentinel-syntax (path), sentinel-codegen
+    crates/sentinel-driver/                (C1.0b adds SentinelDatabase)
+      Cargo.toml          deps: sentinel-base (path, C1.0b),
+                          sentinel-codegen (path), sentinel-syntax
                           (path), miette (with "fancy" feature),
-                          thiserror, tracing
+                          salsa (C1.0b), thiserror, tracing
       src/
         main.rs           snc binary; subcommands `parse` and `build`
                           (C0.1+ shape; both lifted from Expr to
-                          Program at C0.3). `parse <file>` lexes,
-                          parses, and pretty-prints the Program
-                          (s-expr per stmt + trailing expr last);
-                          `build <file> [-o <out>]` additionally
-                          lowers the Program via sentinel_codegen,
-                          then invokes the system `cc` on the
-                          emitted `.o` plus `libsentinel_runtime.a`
-                          (found via current_exe().parent()) to
-                          produce the executable. Output defaults
-                          to <file_stem>; exit codes 0 / 1 / 2
+                          Program at C0.3). **C1.0b**: defines
+                          `SentinelDatabase` (storage: salsa::Storage
+                          <Self>) with `#[salsa::db]` impls for
+                          `salsa::Database` (no-op salsa_event) and
+                          `SentinelDb`. `run_parse` and `run_build`
+                          instantiate the DB, build a SourceFile
+                          input (path + src text), call parse_query
+                          (which returns &Option<Program>), collect
+                          diagnostics via parse_query::accumulated::
+                          <Diagnostic>(&db, file), render each
+                          through miette::MietteDiagnostic
+                          (constructed at runtime from
+                          stage/code/message/span — drops per-variant
+                          help text and label text; rough but
+                          functional, refinement deferred). `build`
+                          then lowers the Program via sentinel_codegen
+                          (still a direct fn call, not yet salsa-
+                          wrapped — see C1.0c), invokes the system
+                          `cc` on the emitted `.o` plus
+                          `libsentinel_runtime.a` (found via
+                          current_exe().parent()) to produce the
+                          executable. Output defaults to <file_stem>;
+                          exit codes 0 / 1 / 2.
       tests/
         pass.rs           pass-test runner; reads workspace-root
                           tests/pass/*.sentinel; uses CARGO_BIN_EXE_snc
@@ -1647,6 +1723,71 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     available for any future REPL or LSP completion machinery
     that wants to parse just a block.
 
+33. (C1.0b, ADR 0011 D1) The salsa retrofit lands lex and parse but
+    not yet codegen. `parse_query` does NOT depend on `lex_query`;
+    it calls the pure `parse(src)` entry point directly. Pros: the
+    salsa-aware queries inherit `parse`'s existing fail-fast-on-
+    lex-error semantics with zero divergence; lex errors flow
+    through exactly one diagnostic path (via
+    `parse_error_to_diagnostic(ParseError::Lex)`, which forwards to
+    `lex_error_to_diagnostic` so the diagnostic carries the lex
+    stage/code); no risk of double-emitting a lex diagnostic from
+    both queries when the driver collects via parse_query's
+    accumulator alone. Cons: parse_query re-lexes internally
+    (wasted CPU; bounded by program size); no salsa cache benefit
+    between lex and parse. C1.0c+ may revisit if codegen or
+    sentinel-types want both tokens and AST in the same incremental-
+    rebuild scope — a `parse_from_tokens(src, &tokens)` helper plus
+    a parse_query that depends on lex_query is the obvious move,
+    paired with peeking-the-accumulator from inside parse_query to
+    avoid double-diagnostics (or accepting that minor cost).
+
+34. (C1.0b) Errors flow through the `#[salsa::accumulator]`
+    pattern rather than tracked-struct fields. The C1.0a session
+    halted on `Vec<LexError> as tracked-struct field` because
+    `miette::SourceSpan` doesn't derive Hash; the C1.0b resolution
+    is that tracked-function return values carry ONLY the success
+    payload (`Vec<Spanned<TokenKind>>`, `Option<Program>`) and
+    errors get converted at the query boundary into
+    `sentinel_base::Diagnostic`s — a Hash-friendly struct with
+    `(stage, code, message, span: Range<usize>)` — and pushed via
+    `Accumulator::accumulate(db)`. The conversion drops per-variant
+    `#[diagnostic(help(...))]` text and per-`#[label(...)]` text
+    that the lex/parse error enums carried; the driver renders
+    using `miette::MietteDiagnostic` constructed at runtime, which
+    produces a less ornamented but still source-pointed diagnostic.
+    Refining the help/label preservation is a follow-up; the
+    pipeline shape is the C1.0b deliverable, not diagnostic
+    polish.
+
+35. (C1.0b) Hash derives across sentinel-ast (Spanned<T>, Block,
+    Param, FnDef, Program, StmtKind, ExprKind) land prophylactically.
+    C1.0b itself routes errors through the accumulator and does
+    NOT use tracked structs, so strictly speaking Hash isn't
+    required for the retrofit to compile. But: (a) HANDOVER §0.2
+    step 1 prescribed it based on the C1.0a investigation; (b)
+    Hash is a strictly additive derive (no breakage); (c) future
+    sub-phases that DO want to put AST nodes into tracked-struct
+    fields (e.g., a `#[salsa::tracked]` Module struct in C1.1 with
+    a resolved-program field) inherit Hash for free. Cost is one
+    derive per type; benefit is "salsa will not surprise us at the
+    next sub-phase."
+
+36. (C1.0b) The concrete `SentinelDatabase` struct lives in
+    sentinel-driver/src/main.rs, not in sentinel-base. ADR 0011 D1
+    placed the cross-crate `SentinelDb` trait in sentinel-base
+    deliberately so pipeline crates (sentinel-syntax,
+    sentinel-codegen, future sentinel-resolve, sentinel-types) can
+    depend on the trait without depending on the concrete database
+    that wires every query. The driver is the assembly point; the
+    concrete DB lives there. Tests inside individual crates (e.g.,
+    `query.rs`'s tests in sentinel-syntax) declare their own
+    `TestDb` rather than reaching into the driver — same pattern
+    as `sentinel-base`'s test module. Repeated minimal `TestDb`
+    boilerplate (~12 lines per crate) is acceptable; a shared
+    test-util crate would invert the dep direction and bloat
+    test-build times.
+
 ---
 
 ## Conventions
@@ -1664,7 +1805,8 @@ All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
-  - sentinel-syntax:        85 tests (83 lib + 2 UI integration) + 0 doctests
+  - sentinel-syntax:        92 tests (90 lib + 2 UI integration) + 0 doctests
+                            (lib = 83 lexer/parser + 7 query at C1.0b)
   - sentinel-ast:           21 tests (1 smoke + 20 Display) + 0 doctests
   - sentinel-codegen:       13 tests (1 smoke + 12 codegen tests) + 0 doctests
   - sentinel-driver:        22 pass integration tests + 0 doctests

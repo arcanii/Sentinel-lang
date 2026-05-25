@@ -1,7 +1,9 @@
 # ADR 0011: Phase C1 kickoff — type system, name resolution, Salsa retrofit
 
-Status: PROPOSED (becomes ACCEPTED when C1.0 lands)
+Status: PROPOSED — D1 (Salsa) exercised end-to-end at C1.0b; full
+ACCEPTED when C1.0 completes (codegen wrapping at C1.0c)
 Date: 2026-05-25
+Last touched: 2026-05-25 (C1.0b landed; status note updated)
 Related: 0001 (staged validation), 0009 (Phase C kickoff; D1 deferred
 Salsa to C1, D7 deferred sentinel-types and sentinel-resolve stubs
 to C1), 0010 (concrete C0 surface; D5 reserved `->` for C1
@@ -59,9 +61,8 @@ ADR 0009 D1 deferred Salsa to C1+; C1.0 is when. The retrofit
 wraps each existing pipeline stage as a Salsa query:
 
   - `#[salsa::input] SourceFile` — input
-  - `#[salsa::tracked] fn lex(db, file) -> (Tokens, Vec<LexError>)`
-  - `#[salsa::tracked] fn parse(db, file) -> (Program,
-    Vec<ParseError>)`
+  - `#[salsa::tracked] fn lex_query(db, file) -> Vec<Spanned<TokenKind>>`
+  - `#[salsa::tracked] fn parse_query(db, file) -> Option<Program>`
   - … through codegen.
 
 The `salsa = "0.18"` workspace dep is already pinned. C1.0 either
@@ -70,6 +71,29 @@ alternative). Diagnostic queries use `salsa::accumulator` so
 they don't break invalidation. The C0 pure-function discipline
 makes the retrofit largely mechanical: each fn gets a `#[tracked]`
 attribute and its first arg becomes `db: &dyn SentinelDb`.
+
+**Status — C1.0a (09dc8c3): foundation crate `sentinel-base`
+landed with SourceFile / SentinelDb / Diagnostic accumulator.
+C1.0b: lex_query and parse_query land in sentinel-syntax; driver
+instantiates concrete SentinelDatabase. Codegen retrofit deferred
+to C1.0c — the LLVM context's `'ctx` lifetime does not obviously
+fit salsa's `'static`-ish query model and is worth separating from
+the lex/parse retrofit to keep the deltas reviewable.**
+
+**Tracked-struct return types collapse to success-only payloads.**
+The original D1 sketch had each query return `(Output, Vec<Error>)`
+in a tracked struct. C1.0a discovered this fails because
+`miette::SourceSpan` does not derive Hash, and tracked-struct
+fields require their inner types to be Hash. C1.0b's resolution:
+tracked-function return values carry ONLY success payloads
+(`Vec<Spanned<TokenKind>>` for lex, `Option<Program>` for parse —
+None on failure); errors get converted to
+`sentinel_base::Diagnostic` (a Hash-friendly struct) and pushed
+via the accumulator. Driver collects via
+`parse_query::accumulated::<Diagnostic>(db, file)`. The conversion
+drops per-variant help/label text from the miette-derived error
+enums; refining that is a separate concern from the retrofit
+pattern.
 
 ### D2. Type system shape: explicit annotations at fn boundaries; monomorphic in C1.
 
