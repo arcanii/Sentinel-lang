@@ -179,16 +179,24 @@ Test coverage: 222 (203 lib + 19 integration), net +13 from B4.0's 209. B4.1a: +
 
 A positive end-to-end test for declassify-on-Secret cannot be written because D5 intentionally omits a `classify` primitive (the Secret-introduction dual). The Secret-introducing path is restricted to typing of `do L(arg)` for effect-decls naming secret; resuming a continuation requires producing a Secret value, and the surface has no form that does so. Positive D5 coverage lives in lib's `b41a_declassify_on_secret_unwraps_the_inner_type` via a synthetic env. The integration tests file carries an inline note explaining the gap.
 
-## D9 amendment (2026-05-25, B4.2 not yet started)
+## D9 amendment (2026-05-25, B4.2 landed)
 
-B4.2 is the demo-polish phase. Scope per ADR 0008 D9 + HANDOVER §5.2:
+B4.2 closed in one commit covering the three HANDOVER §5.2 Phase B validation deliverables plus README/STATE refresh:
 
-1. The HANDOVER §5.2 password-verify demo already lives as `pipeline_password_verify_naive_rejects_with_secret_branch` (B4.1b). B4.2 may add a more polished version with realistic naming and a comment block explaining the CT rationale, possibly elevated to a featured example.
+- **Polished password-verify demo** (`pipeline_b42_password_verify_demo_rejects_branching_on_secret`). The B4.1b terse form (`pipeline_password_verify_naive_rejects_with_secret_branch`) is kept as a regression pin; the polished form carries the full CT-chain rationale (D7 → D4 → D3) as a comment block above the test and uses realistic identifiers (`VerifyPassword`, `provided_hash`).
 
-2. If a "passing rewrite" of the demo is desired (a version that type-checks using a constant-time equality primitive), Sentinel-Mini needs a builtin-function mechanism, which the prototype does not have. ADR 0008 D9 calls this out as a fallback: "a simpler rewrite using `declassify` after some explicit CT step (or just omitting the passing case from the demo) is the fallback." The rejection deliverable is the load-bearing one and is complete.
+- **Supply-chain demo** (`pipeline_b42_supply_chain_demo_handler_mismatch`). Demonstrates `HandlerLabelNotInRow` when a "library" function uses `Network` under a handler that only permits `Storage`. The error diagnostic is from the handler's perspective ("said I'd handle Storage but the body raised Network"); the user-perspective reading ("body used Network without permission") is the dual. Both are correct; the comment explains the supply-chain framing.
 
-3. Documentation work: README / example files / inline lints may reference the new surface; any such cleanup belongs here.
+- **Async-as-effect demo** (`pipeline_b42_async_demo_production_handler_doubles` + `pipeline_b42_async_demo_test_handler_identity`). A pair of tests with byte-identical `let app = fn(n) => do Tick(n) + 1 in ...` prefixes; only the handler arm differs. The pair asserts different `Value::Int` results (21 vs 11), pinning the handler-swap property.
 
-4. Optional: revisit the gap that no positive end-to-end `declassify` test exists. If a tiny built-in `classify : T -> secret T` is added (with a strong audit comment that it would not exist in real Sentinel), a positive test becomes possible. This is a B4.2 design call.
+Scope decisions:
 
-If B4.2 only does (1) and (3), it can be a small docs-and-naming commit.
+1. **No `examples/` directory added.** The crate stays library-only per HANDOVER §5's "research artifact" framing. Demos are discoverable via `cargo test pipeline_b42_`.
+
+2. **No `classify : T -> secret T` primitive.** Was offered as a design call to enable a positive end-to-end `declassify` test; rejected because Secret-introduction is exactly what D5 deliberately omits to preserve the audit-point property. Adding `classify` would need its own ADR amendment. Deferred indefinitely.
+
+3. **No "passing rewrite" of the password-verify demo.** Would require a builtin `constant_time_eq` primitive that the prototype's builtin-function mechanism (which doesn't exist) would have to host. ADR 0008 D9's fallback applies: the rejection deliverable is the load-bearing one.
+
+Test coverage: 226 (203 lib + 23 integration), net +4 integration from B4.1's 222. README updated: B1-B4 marked done, test count refreshed (23 → 226), "What works today" gains an effects-proto paragraph with the `cargo test pipeline_b42_` invocation. STATE.md decision 24 captures the implementation choices.
+
+Phase B is complete. Phase C (bootstrap compiler) per HANDOVER §6 is the next major phase.

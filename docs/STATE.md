@@ -11,27 +11,30 @@ research-grade interpreter (effects-proto). They are tracked in
 separate sections below. The remaining workspace members listed in
 HANDOVER §3.2 are scaffold-only.
 
-Last updated: phase B4.1 complete (secret typing per ADR 0008
-D2/D3/D4/D5/D7; password-verify demo rejects with `SecretBranch`).
-203 lib + 19 integration tests pass. Two commits land B4.1:
-e760d57 (B4.1a foundation — 4 new `TypeError` variants
-[`SecretBranch`, `SecretDivisor`, `SecretFlow`,
-`SecretEscapesPolymorphism`], D2 no-α-leak wired in `unify` Var arm,
-catch-all SecretFlow split, D5 Declassify typing rule replaces
-B4.0a placeholder), 52acc0a (B4.1b CT-specific rejections — `infer`
-If arm rejects secret cond with `SecretBranch`, BinOp arm rejects
-secret divisor with `SecretDivisor` and extends Eq/Lt/Gt with D4
-returning `Secret<Bool>`, the `infer_program` effect-decl walker +
-`SecretsNotYetSupported` variant deleted). B4.2 remaining: the
-HANDOVER §5.2 password-verify demo as a featured integration test
-plus any related documentation work. See ADRs 0003 (B1
-retrospective), 0004 (row representation), 0005 (effect-inference
-judgment; D9 closed), 0006 (default-close, amended; D4 row
-polymorphism implemented), 0007 (effect handlers; status fully
-ACCEPTED, D9 fully complete — all phases B3.0 + B3.1 + B3.2 landed),
-0008 (secret qualifier and constant-time check; status ACCEPTED, D1
-through D7 confirmed by B4.0 + B4.1, D8 implicit via existing
-free-var/free-row-var recursion).
+Last updated: phase B4 complete — all three HANDOVER §5.2 Phase B
+validation demos landed (supply-chain, async-as-effect,
+password-verify). 203 lib + 23 integration tests pass. B4.2 is one
+commit on top of B4.1's two — surface-polishing and demo-completion
+work. The polished password-verify demo
+(`pipeline_b42_password_verify_demo_rejects_branching_on_secret`)
+sits next to the original `pipeline_password_verify_naive_rejects_with_secret_branch`
+(kept as a regression pin); the supply-chain demo demonstrates
+HandlerLabelNotInRow when a library "secretly" uses Network under
+a Storage-only handler; the async demo pair shows the same library
+function `app` producing different results under two handlers
+(doubling vs identity Tick), with the `let app = ...` source string
+byte-identical between the two tests. README updated to reflect
+B0-B4 done and the 226-test total; the existing 8 ADRs are also
+mentioned. See ADRs 0003 (B1 retrospective), 0004 (row
+representation), 0005 (effect-inference judgment; D9 closed), 0006
+(default-close, amended; D4 row polymorphism implemented), 0007
+(effect handlers; status fully ACCEPTED, D9 fully complete — all
+phases B3.0 + B3.1 + B3.2 landed), 0008 (secret qualifier and
+constant-time check; status ACCEPTED, D1 through D7 confirmed by
+B4.0 + B4.1, D8 implicit via existing free-var/free-row-var
+recursion, D9 amended for B4.2 landed). Phase B is finished;
+Phase C (bootstrap compiler) is the next major phase per HANDOVER
+§6.
 
 ---
 
@@ -257,7 +260,8 @@ absorbed.
 | B4.1a | 4 TypeError variants + D2 unify + Declassify typing  | Done   | e760d57 |
 | B4.1b | D3 If/Div + D4 comparisons; drop placeholder         | Done   | 52acc0a |
 | B4.1  | Secret typing (unify, infer, four CT rejections)     | Done   |         |
-| B4.2  | Password-verify demo + B4 complete                   | Planned |        |
+| B4.2  | Three Phase B validation demos + README/STATE refresh| Done   | (next)  |
+| B4    | Secret T qualifier and constant-time check           | Done   |         |
 | B?    | Broker-as-value-heap integration (bonus)           | Planned |        |
 
 Test coverage as of B1: 95 tests (8 lexer + 11 parser + 11 eval +
@@ -940,19 +944,93 @@ See B.5 design decision 23.
     SecretFlow, SecretEscapesPolymorphism, SecretBranch,
     SecretDivisor. Variant removed: SecretsNotYetSupported.
 
+Test coverage as of B4.2: 226 tests (203 lib + 23 integration).
+B4.2 lands one commit covering the three HANDOVER §5.2 Phase B
+validation demos plus README/STATE refresh. Net +4 integration
+(supply-chain handler-mismatch, async-as-effect doubling-handler,
+async-as-effect identity-handler, polished password-verify with the
+CT-chain rationale block); 0 lib changes. The polished
+password-verify is added next to the terse
+`pipeline_password_verify_naive_rejects_with_secret_branch` rather
+than replacing it -- the terse form is useful as a
+regression-pin; the polished form is what HANDOVER §5.2 actually
+calls for as the Phase B deliverable. Clippy clean under
+`-D warnings`; no doctests. See B.5 design decision 24.
+
+24. (B4.2, ADR 0008 D9 + HANDOVER §5.2) Phase B's three validation
+    demos all live as integration tests under the `pipeline_b42_`
+    prefix in `crates/sentinel-effects-proto/tests/integration.rs`.
+    Implementation choices:
+
+    (a) Tests, not example files. The crate has no `examples/`
+    directory and remains library-only. Examples would have
+    required `crate::run` and `Value` exposed as `cargo run`
+    targets; the test runner already exposes both via the
+    pipeline path. The trade-off accepted: examples are
+    discoverable via `cargo run --example`, tests are
+    discoverable via `cargo test pipeline_b42_`. The latter is
+    sufficient given the prototype's "throwaway research artifact"
+    framing in HANDOVER §5.
+
+    (b) Supply-chain demo asserts `HandlerLabelNotInRow{label:
+    "Storage"}`. The error diagnostic is from the handler's
+    perspective ("I said I'd handle Storage but the body never
+    raised it") rather than the user's ("the body raised Network
+    without my permission"). Both readings are correct; the row
+    machinery refuses the program either way. ADR 0007's row
+    discipline doesn't carry user-intent metadata, so the
+    diagnostic frame is mechanical. A comment in the test
+    explains the supply-chain framing.
+
+    (c) Async-as-effect demo is a pair of tests with the same
+    `let app = fn(n) => do Tick(n) + 1 in ...` prefix; only the
+    handler arm differs (`Tick(x, k) => k(x * 2)` vs
+    `Tick(x, k) => k(x)`). The byte-identical-source assertion is
+    pinned via test pairing, not via shared-string-constant
+    machinery (which would require helper indirection and
+    obscure the demo). The two tests assert different `Value::Int`
+    results, which is the load-bearing observation.
+
+    (d) Polished password-verify demo carries the full CT-chain
+    rationale as a comment block above the test: the D7 effect
+    signature, the D4 comparison rule producing `Secret<Bool>`,
+    the D3 `SecretBranch` rejection of the surrounding `if`. The
+    naive comment in the original B4.1b test is intentionally
+    short; the polished version is the "publishable" form of the
+    demo.
+
+    (e) No featured `classify : T -> secret T` primitive added.
+    The B4.2 task offered it as a design call (it would enable a
+    positive end-to-end declassify test); rejected for B4.2 because
+    Secret-introduction is exactly what ADR 0008 D5 deliberately
+    omits to preserve the audit-point property. Adding `classify`
+    would require its own ADR amendment justifying the exception
+    and a strong-comment audit marker. Deferred indefinitely.
+
+    Net +4 integration tests, 0 lib changes (no new variants, no
+    surface changes; the demos are exercise programs over the
+    existing surface). README updated to mark B1-B4 done, refresh
+    the test count, and add a "What works today" paragraph for
+    effects-proto with the `cargo test pipeline_b42_` invocation
+    that runs the three demos. ADR 0008 D9 amendment updated to
+    flip B4.2 from roadmap to landed. Phase B is now complete;
+    Phase C (bootstrap compiler) per HANDOVER §6 is the next major
+    phase.
+
 
 ### B.6 Known Limitations (intentional at B1)
 
-- No effects. The whole reason this crate exists. (B2 onward.)
-- `secret` qualifier and constant-time check: surface (B4.0) + typing
-  (B4.1) landed. D2 (no-α-leak) prevents secret values from flowing
-  into polymorphic positions; D3 rejects branching on secrets and
-  division-by-secret; D4 makes comparisons on secrets produce
-  `Secret<Bool>`; D5 typing rule wires `declassify(e)`. The
-  HANDOVER §5.2 password-verify demo is exercised as an integration
-  test (`pipeline_password_verify_naive_rejects_with_secret_branch`).
-  Featured demo polish, additional CT-passing rewrites, and any
-  surface documentation belong in B4.2.
+- No effects. The whole reason this crate exists. (B2 onward — done.)
+- `secret` qualifier and constant-time check: complete (B4.0 surface,
+  B4.1 typing, B4.2 validation demos). D2 (no-α-leak), D3 (the four
+  CT rejections), D4 (comparisons produce `Secret<Bool>`), D5
+  (declassify typing) all wired. All three HANDOVER §5.2 Phase B
+  validation deliverables exist as integration tests under the
+  `pipeline_b42_` prefix. A positive end-to-end `declassify` test is
+  intentionally absent because ADR 0008 D5 omits a `classify`
+  primitive (audit-point property); positive D5 coverage lives in
+  lib's `b41a_declassify_on_secret_unwraps_the_inner_type` via a
+  synthetic env.
 - No REPL, no driver binary. Library-only.
 - `let rec` RHS must be a syntactic lambda. Parser enforces with
   `ParseError::LetRecNotLambda`. Relaxing this in B3 (when handlers
@@ -994,7 +1072,7 @@ The standard check suite for a clean tree, applied per-crate:
 All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
-  - sentinel-effects-proto: 222 tests (203 lib + 19 integration) + 0 doctests
+  - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
 
 ### Script Convention
 

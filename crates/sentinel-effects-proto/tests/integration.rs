@@ -226,11 +226,11 @@ fn pipeline_double_secret_rejected_at_parse() {
 
 // ---- B4.1b: password-verify demo (HANDOVER §5.2 deliverable) ----
 //
-// The full demo per HANDOVER: a program that tries to branch on a
-// secret comparison fails to compile. The chain is D4 -> D3:
-//   - `do GetStored(unit) == provided` types as Secret<Bool> per D4
-//   - the surrounding `if` then rejects per D3 SecretBranch
-// This is the load-bearing rejection deliverable that motivated B4.
+// See the B4.2 polished version below
+// (`pipeline_b42_password_verify_demo_rejects_branching_on_secret`)
+// for the same demo with realistic identifiers and a full CT-chain
+// rationale comment. This shorter form is retained because the more
+// terse identifiers make it useful as a regression-check pin.
 
 #[test]
 fn pipeline_password_verify_naive_rejects_with_secret_branch() {
@@ -259,6 +259,154 @@ fn pipeline_secret_in_arithmetic_is_secret_flow() {
     match err {
         MiniError::Type(TypeError::SecretFlow { .. }) => {}
         other => panic!("expected SecretFlow, got {other:?}"),
+    }
+}
+
+// ==================================================================
+// B4.2 Phase B validation demos (HANDOVER §5.2).
+//
+// Phase B's three validation deliverables, all expressed in
+// Sentinel-Mini. These exist as integration tests rather than
+// standalone example files because the crate has no `examples/`
+// directory (the prototype is library-only and intentionally so);
+// they double as regression pins for the three load-bearing
+// language-design claims of Phase B.
+//
+// 1. Supply-chain demo. A library function declares its effect
+//    capabilities through its type. An app that audits the library
+//    for "only Storage" rejects at compile time when the library
+//    actually performs Network.
+//
+// 2. Async-as-effect demo. The same library function `app` runs
+//    under two different handlers and produces two different
+//    results. Application code doesn't change; only the handler
+//    swap (the "test vs production" boundary in HANDOVER's phrasing).
+//
+// 3. Password-verify demo. Naively writing `if secret_value ==
+//    public_value then _ else _` rejects with `SecretBranch` via
+//    the D4 -> D3 chain. This is the load-bearing rejection
+//    deliverable per ADR 0008 D9 and the entire reason B4 exists.
+// ==================================================================
+
+#[test]
+fn pipeline_b42_supply_chain_demo_handler_mismatch() {
+    // Supply-chain attack: a library function declares it works
+    // under the Storage capability, but actually performs Network.
+    // The app provides only a Storage handler -- its audited surface
+    // is "Storage allowed". The typing rejects: the handler arm
+    // names "Storage", but the body's effect row contains Network,
+    // which the handler doesn't allow.
+    //
+    // The error diagnostic is from the handler's perspective:
+    // "handler arm Storage names an effect not present in the row"
+    // -- i.e., the handler said it would handle Storage but the
+    // body never raised Storage. The user-perspective reading is
+    // the dual: "the body raised Network, which I never granted
+    // permission for." Both readings of the diagnostic are correct;
+    // ADR 0007's row machinery refuses the program either way.
+    //
+    // Real-world translation: replace `Network` with "filesystem",
+    // "spawn process", "DNS lookup", etc. -- any capability a
+    // pulled-in dependency might quietly require. The whole point
+    // of effect-as-capability is that audit-by-types is
+    // mechanically enforced rather than convention.
+    use sentinel_effects_proto::{MiniError, TypeError};
+    let source = "\
+        effect Network : Int -> Int ; \
+        effect Storage : Int -> Int ; \
+        handle do Network(1) with { Storage(x, k) => k(x) }";
+    let err = run(source).expect_err("supply-chain mismatch should reject");
+    match err {
+        MiniError::Type(TypeError::HandlerLabelNotInRow { label, .. }) => {
+            assert_eq!(label, "Storage");
+        }
+        other => panic!("expected HandlerLabelNotInRow, got {other:?}"),
+    }
+}
+
+#[test]
+fn pipeline_b42_async_demo_production_handler_doubles() {
+    // Async-as-effect: the SAME library function `app` runs under a
+    // handler that doubles the operation's argument before resuming.
+    // The function body never changes. This is the "swap the
+    // effect handler" pattern HANDOVER §5.2 describes for the
+    // sync-in-tests/async-in-production split: in a real Sentinel
+    // app, `Tick` might be `Sleep` or `Now`, and the handler swap
+    // would route to real-time vs simulated-time without touching
+    // the function code.
+    let source = "\
+        effect Tick : Int -> Int ; \
+        let app = fn(n) => do Tick(n) + 1 in \
+        handle app(10) with { Tick(x, k) => k(x * 2) }";
+    let v = run(source).expect("production handler should run");
+    assert_eq!(v, Value::Int(21)); // Tick doubled 10 -> 20, then +1
+}
+
+#[test]
+fn pipeline_b42_async_demo_test_handler_identity() {
+    // The other half of the swap: the same `app` under a handler
+    // that resumes with the operation's argument unchanged. Useful
+    // as a test double; the "wall clock" effect becomes a pure
+    // pass-through.
+    //
+    // Pairing this with `pipeline_b42_async_demo_production_handler_doubles`
+    // pins the load-bearing property: the source string for `app`
+    // (the body inside the `let`) is byte-identical between the two
+    // tests. Only the handler arm differs. The result type stays
+    // Int either way because Tick's declared signature is Int -> Int.
+    let source = "\
+        effect Tick : Int -> Int ; \
+        let app = fn(n) => do Tick(n) + 1 in \
+        handle app(10) with { Tick(x, k) => k(x) }";
+    let v = run(source).expect("test handler should run");
+    assert_eq!(v, Value::Int(11)); // Tick is identity, then +1
+}
+
+#[test]
+fn pipeline_b42_password_verify_demo_rejects_branching_on_secret() {
+    // The B4 deliverable, polished form. HANDOVER §5.2: "a
+    // constant-time password verification demo that fails to
+    // compile if you try to branch on the comparison result."
+    //
+    // The chain in detail:
+    //
+    //   effect VerifyPassword : Int -> secret Int ;
+    //   if do VerifyPassword(user_id) == provided_hash then ok else fail
+    //                                 ^^                  ^^
+    //                                 (1)                 (2)
+    //
+    // (1) `do VerifyPassword(user_id)` types as `secret Int` per
+    //     the effect declaration's return type. ADR 0008 D7
+    //     confirms effect signatures may mention `secret`.
+    //
+    // (2) `secret Int == Int` triggers ADR 0008 D4: when either
+    //     operand of `==` is `Ty::Secret(_)`, the comparison
+    //     unwraps that side to its inner type, unifies the other
+    //     against the inner (`Int == Int` succeeds here), and
+    //     produces `Ty::Secret(Bool)` as the result type. The
+    //     secret-ness of the operand "infects" the result.
+    //
+    // (3) The surrounding `if` then sees a condition of type
+    //     `Ty::Secret(Bool)` and rejects per ADR 0008 D3
+    //     `SecretBranch`: branching on a secret produces
+    //     data-dependent timing on real hardware. The fix is for
+    //     the user to introduce a constant-time selection
+    //     primitive (Phase C standard library) or `declassify`
+    //     the comparison's result with a clear audit point.
+    //
+    // The rejection is the entire point. In a non-secret-aware
+    // language, the naive code above would compile and run, leak
+    // timing information through the branch, and quietly expose
+    // the stored hash one byte at a time. Here it fails to
+    // type-check before it can be run.
+    use sentinel_effects_proto::{MiniError, TypeError};
+    let source = "\
+        effect VerifyPassword : Int -> secret Int ; \
+        if do VerifyPassword(42) == 12345 then 1 else 0";
+    let err = run(source).expect_err("password-verify naive branch should reject");
+    match err {
+        MiniError::Type(TypeError::SecretBranch { .. }) => {}
+        other => panic!("expected SecretBranch, got {other:?}"),
     }
 }
 

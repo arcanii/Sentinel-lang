@@ -15,19 +15,19 @@ Sentinel is in active early-stage development. This is a multi-year research pro
 - [x] **Phase A — Memory Broker prototype** (Rust crate, complete)
   - [x] A0–A8: generational arenas, two allocation strategies, scoped budgets, stats and diagnostics, recording mode, secret-memory policy (mlock + zero-on-free), validation example programs
   - [x] A9: fallible builders, structured OS-error detail in `BrokerError`
-- [ ] **Phase B — Sentinel-Mini effects prototype** (tree-walking interpreter, in progress)
+- [x] **Phase B — Sentinel-Mini effects prototype** (tree-walking interpreter, complete)
   - [x] B0: lexer + recursive-descent parser + evaluator for a pure expression calculus (no types, no effects yet)
-  - [ ] B1: Hindley-Milner type inference, `letrec`, span-tracked diagnostics
-  - [ ] B2: effect rows and effect declarations
-  - [ ] B3: effect handlers (`handle … with …`)
-  - [ ] B4: `secret T` qualifier with constant-time check
+  - [x] B1: Hindley-Milner type inference, `letrec`, span-tracked diagnostics
+  - [x] B2: effect rows and effect declarations
+  - [x] B3: effect handlers (`handle … with …`)
+  - [x] B4: `secret T` qualifier with constant-time check (B4.0 surface, B4.1 typing, B4.2 demos)
 - [ ] **Phase C — Bootstrap compiler** (production Rust implementation of full Sentinel, targets LLVM)
 - [ ] **Phase D — Self-hosting** (Sentinel compiler written in Sentinel)
 
 Current test coverage:
 
 - `sentinel-broker`:        69 tests + 1 doctest, clippy clean under `-D warnings`
-- `sentinel-effects-proto`: 23 tests, clippy clean under `-D warnings`
+- `sentinel-effects-proto`: 226 tests (203 lib + 23 integration), clippy clean under `-D warnings`
 
 For the authoritative state of the codebase, see
 [`docs/STATE.md`](docs/STATE.md). When STATE.md and any other document
@@ -49,6 +49,26 @@ Sentinel's security thesis available today. It allocates credentials
 into a slab arena with `mlock` + zero-on-free policy active, hex-dumps
 the raw memory before and after `free()`, and verifies that the
 64-byte slot is fully zeroed when the credential is released.
+
+The effects-proto crate (Sentinel-Mini) is complete through Phase B
+and demonstrates the language-level security thesis: a tree-walking
+interpreter with Hindley-Milner inference, row-polymorphic effect
+tracking, deep effect handlers, and a `secret T` qualifier with a
+static constant-time check. HANDOVER §5.2's three Phase B validation
+deliverables — a supply-chain demo (effect-as-capability rejects an
+auditing mismatch), an async-as-effect demo (same library function,
+two handlers, two results), and a constant-time password-verify demo
+(naively branching on a secret comparison fails to type-check) — all
+live as integration tests:
+
+```bash
+cargo test -p sentinel-effects-proto pipeline_b42_
+```
+
+See [`crates/sentinel-effects-proto/tests/integration.rs`](crates/sentinel-effects-proto/tests/integration.rs)
+for the demo programs and their commentary. The crate is intentionally
+library-only and has no `examples/` directory; the demos are
+regression-pinned by the test runner.
 
 ## Build
 
@@ -75,7 +95,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   - [`BACKLOG.md`](docs/BACKLOG.md) — post-1.0 backlog and research directions
   - [`SECRETS_LIFECYCLE.md`](docs/SECRETS_LIFECYCLE.md) — secret-memory design
   - [`TIERED_RELEASES.md`](docs/TIERED_RELEASES.md) — release tiers
-  - [`decisions/`](docs/decisions/) — architecture decision records (1 so far)
+  - [`decisions/`](docs/decisions/) — architecture decision records (8 so far)
 - `scripts/` — patch scripts that built each milestone, named `NN-<phase>.sh`.
 
 ## Who's building this
