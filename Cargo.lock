@@ -1155,6 +1155,8 @@ name = "sentinel-driver"
 version = "0.0.1"
 dependencies = [
  "miette",
+ "salsa",
+ "sentinel-base",
  "sentinel-codegen",
  "sentinel-syntax",
  "thiserror",
@@ -1217,7 +1219,9 @@ dependencies = [
  "insta",
  "logos",
  "miette",
+ "salsa",
  "sentinel-ast",
+ "sentinel-base",
  "thiserror",
  "tracing",
 ]

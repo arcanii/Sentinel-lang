@@ -10,10 +10,12 @@ license.workspace      = true
 repository.workspace   = true
 
 [dependencies]
-sentinel-ast = { path = "../sentinel-ast" }
+sentinel-ast  = { path = "../sentinel-ast" }
+sentinel-base = { path = "../sentinel-base" }
 
 logos      = { workspace = true }
 miette     = { workspace = true }
+salsa      = { workspace = true }
 thiserror  = { workspace = true }
 tracing    = { workspace = true }
 

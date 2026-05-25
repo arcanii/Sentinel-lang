@@ -5,21 +5,42 @@
 //! LLVM IR, emits an object file, and links it into an executable
 //! via the system `cc`. The compiled program's exit code is the
 //! evaluated program's tail expression truncated to i32.
-//! C0.3: parse and build now operate on full [`Program`]s
+//! C0.3: parse and build now operate on full [`sentinel_syntax::Program`]s
 //! (`stmt* tail_expr`) rather than single expressions.
 //! C0.4: `print(x)`, `if`/`else`, and block expressions land; the
 //! linker invocation now pulls in `libsentinel_runtime.a` from the
 //! same directory as the snc binary so `sentinel_print` resolves.
-//!
-//! Pipeline stages compose via direct function calls per ADR 0009
-//! D1a. Linker invocation lives here, not in sentinel-codegen,
-//! because it is platform glue rather than a compiler concern.
+//! C1.0b: front-end stages run through Salsa-tracked queries per
+//! ADR 0011 D1. The driver instantiates a [`SentinelDatabase`],
+//! sets a [`SourceFile`] input, calls `parse_query`, and collects
+//! diagnostics via the accumulator. Codegen remains a direct
+//! function call against the resulting [`sentinel_syntax::Program`];
+//! its salsa retrofit is deferred to C1.0c per HANDOVER §0.2 step 5.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use miette::{NamedSource, Report};
-use sentinel_syntax::parse;
+use miette::{LabeledSpan, MietteDiagnostic, NamedSource, Report, Severity as MietteSeverity, SourceSpan};
+use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
+use sentinel_syntax::parse_query;
+
+/// The concrete Salsa database for the snc driver. Per ADR 0011 D1
+/// the cross-crate database trait [`SentinelDb`] lives in
+/// `sentinel-base`; the concrete struct lives here because the
+/// driver is the assembly point where the pipeline is instantiated.
+#[salsa::db]
+#[derive(Default, Clone)]
+struct SentinelDatabase {
+    storage: salsa::Storage<Self>,
+}
+
+#[salsa::db]
+impl salsa::Database for SentinelDatabase {
+    fn salsa_event(&self, _event: &dyn Fn() -> salsa::Event) {}
+}
+
+#[salsa::db]
+impl SentinelDb for SentinelDatabase {}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -45,7 +66,7 @@ fn main() -> ExitCode {
 }
 
 fn print_usage() {
-    eprintln!("snc — Sentinel compiler (C0.5)");
+    eprintln!("snc — Sentinel compiler (C1.0b)");
     eprintln!();
     eprintln!("usage:");
     eprintln!("    snc parse <file>                 lex, parse, and pretty-print the program");
@@ -60,16 +81,17 @@ fn run_parse(path: &str) -> ExitCode {
         Ok(s) => s,
         Err(code) => return code,
     };
-    match parse(&src) {
-        Ok(program) => {
+    let db = SentinelDatabase::default();
+    let file = SourceFile::new(&db, path.to_string(), src.clone());
+    let program_opt = parse_query(&db, file);
+    let diags = parse_query::accumulated::<Diagnostic>(&db, file);
+    render_diagnostics(&diags, path, &src);
+    match program_opt {
+        Some(program) => {
             println!("{program}");
             ExitCode::SUCCESS
         }
-        Err(err) => {
-            let report = Report::new(err).with_source_code(NamedSource::new(path, src));
-            eprintln!("{report:?}");
-            ExitCode::from(1)
-        }
+        None => ExitCode::from(1),
     }
 }
 
@@ -78,13 +100,14 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
         Ok(s) => s,
         Err(code) => return code,
     };
-    let program = match parse(&src) {
-        Ok(p) => p,
-        Err(err) => {
-            let report = Report::new(err).with_source_code(NamedSource::new(path, src));
-            eprintln!("{report:?}");
-            return ExitCode::from(1);
-        }
+    let db = SentinelDatabase::default();
+    let file = SourceFile::new(&db, path.to_string(), src.clone());
+    let program_opt = parse_query(&db, file);
+    let diags = parse_query::accumulated::<Diagnostic>(&db, file);
+    render_diagnostics(&diags, path, &src);
+    let program = match program_opt {
+        Some(p) => p,
+        None => return ExitCode::from(1),
     };
 
     let exe_path: PathBuf = match output {
@@ -93,7 +116,7 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     };
     let object_path = exe_path.with_extension("o");
 
-    if let Err(err) = sentinel_codegen::compile_to_object(&program, &object_path) {
+    if let Err(err) = sentinel_codegen::compile_to_object(program, &object_path) {
         let report = Report::new(err).with_source_code(NamedSource::new(path, src));
         eprintln!("{report:?}");
         return ExitCode::from(1);
@@ -105,6 +128,31 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
             eprintln!("snc: link failed: {msg}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// Render each accumulated [`Diagnostic`] through miette's fancy
+/// reporter. The conversion drops the per-variant help text and
+/// label text that the lex/parse error enums carried as
+/// `#[diagnostic(help(...))]` / `#[label(...)]` attributes; the
+/// stage/code/message/span quartet is what survives. Refining this
+/// (e.g., a code → help-text table, or carrying labels through the
+/// accumulator) is a follow-up — for C1.0b the goal is to prove
+/// the salsa retrofit works end-to-end.
+fn render_diagnostics(diags: &[Diagnostic], path: &str, src: &str) {
+    for d in diags {
+        let severity = match d.severity {
+            Severity::Error => MietteSeverity::Error,
+            Severity::Warning => MietteSeverity::Warning,
+        };
+        let source_span: SourceSpan = (d.span.start, d.span.end - d.span.start).into();
+        let mietted = MietteDiagnostic::new(d.message.clone())
+            .with_code(d.code)
+            .with_severity(severity)
+            .with_label(LabeledSpan::at(source_span, ""));
+        let report = Report::new(mietted)
+            .with_source_code(NamedSource::new(path, src.to_string()));
+        eprintln!("{report:?}");
     }
 }
 

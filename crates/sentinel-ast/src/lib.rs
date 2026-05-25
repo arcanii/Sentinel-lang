@@ -22,7 +22,7 @@ use std::fmt;
 /// Byte-range span into the original source text. Half-open: `start..end`.
 pub type Span = std::ops::Range<usize>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Spanned<T> {
     pub kind: T,
     pub span: Span,
@@ -74,7 +74,7 @@ impl UnaryOp {
 /// condition), and [`ExprKind::Call`] (direct call by identifier
 /// per ADR 0010 D10; only `print` resolves to anything in C0.4
 /// since `fn` defs wait for C0.5).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExprKind {
     IntLit(i64),
     Var(String),
@@ -105,7 +105,7 @@ pub type Expr = Spanned<ExprKind>;
 /// name resolution moves into `sentinel-resolve`. `name_span` is
 /// the span of just the identifier, useful for redeclaration and
 /// undefined-name diagnostics that target the binding site.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
     Let { name: String, name_span: Span, value: Expr },
     Expr(Expr),
@@ -117,7 +117,7 @@ pub type Stmt = Spanned<StmtKind>;
 /// must be named `main` (no parameters) — the entry point. The
 /// previous C0.3-0.4 shape (`stmt* tail_expr`) now lives inside fn
 /// bodies as [`Block`]s.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Program {
     pub fns: Vec<FnDef>,
     pub span: Span,
@@ -127,7 +127,7 @@ pub struct Program {
 /// parameters and return value are i64 in C0.5 (ADR 0009 says
 /// everything is i64); ADR 0010 D5 reserves the `->` token for
 /// the C1 type-annotation grammar but C0.5 emits none.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FnDef {
     pub name: String,
     pub name_span: Span,
@@ -138,7 +138,7 @@ pub struct FnDef {
 
 /// A function parameter. Just a name + span for C0.5 (no type
 /// annotation); the annotation slot lands at C1.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Param {
     pub name: String,
     pub span: Span,
@@ -149,7 +149,7 @@ pub struct Param {
 /// branches, standalone `{ ... }` expressions, and function bodies
 /// (a function's body is its [`Block`] whose tail expression is
 /// the return value).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub tail: Expr,

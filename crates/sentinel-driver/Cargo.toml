@@ -14,10 +14,12 @@ name = "snc"
 path = "src/main.rs"
 
 [dependencies]
+sentinel-base    = { path = "../sentinel-base" }
 sentinel-codegen = { path = "../sentinel-codegen" }
 sentinel-syntax  = { path = "../sentinel-syntax" }
 
 miette     = { workspace = true, features = ["fancy"] }
+salsa      = { workspace = true }
 tracing    = { workspace = true }
 thiserror  = { workspace = true }
 
