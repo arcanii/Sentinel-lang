@@ -23,24 +23,25 @@ Sentinel is in active early-stage development. This is a multi-year research pro
   - ✅ B2: effect rows and effect declarations
   - ✅ B3: effect handlers (`handle … with …`)
   - ✅ B4: `secret T` qualifier with constant-time check (B4.0 surface, B4.1 typing, B4.2 demos)
-- 🟡 **Phase C — Bootstrap compiler** (production Rust implementation of full Sentinel, targets LLVM) — C0 complete, C1 in flight
+- 🟡 **Phase C — Bootstrap compiler** (production Rust implementation of full Sentinel, targets LLVM) — C0 + C1.0 + C1.1 complete; C1.2+ in flight
   - ✅ C0: end-to-end pipeline — lex → parse → AST → two-pass LLVM IR → object → cc-linked executable; six sub-phases C0.0–C0.5; everything is `i64` (no type system yet); the ADR 0010 go/no-go program runs end-to-end (`tests/pass/c05_go_no_go.sentinel`: stdout `10\n`, exit 0)
   - 🟡 C1: type system, regions, name-resolution lift, Salsa retrofit — in flight per ADR 0011 (8 sub-phases)
     - ✅ C1.0a: `sentinel-base` foundation crate (`SentinelDb` trait + `SourceFile` input + `Diagnostic` accumulator)
     - ✅ C1.0b: `lex_query` and `parse_query` as `#[salsa::tracked]` queries; driver instantiates concrete `SentinelDatabase`
-    - ⬜ C1.0c: wrap codegen as a tracked query (LLVM lifetime design pass first)
-    - ⬜ C1.1: `sentinel-resolve` crate lift (name resolution out of codegen)
-    - ⬜ C1.2: `sentinel-types::check()` real (annotation grammar + basic type check)
+    - ✅ C1.0c: codegen-salsa decision — codegen stays outside the query graph until C1.2+ typed HIR (ADR 0011 D1 amended)
+    - ✅ C1.1: `sentinel-resolve` crate lift; name resolution out of codegen; driver pipeline = parse_query → resolve_query → codegen
+    - ⬜ C1.2: ADR 0012 (concrete C1 surface — annotation grammar) + `sentinel-types::check()` real
     - ⬜ C1.3–C1.7: primitive types, `?T` nullability, structs, arrays, generics
 - ⬜ **Phase D — Self-hosting** (Sentinel compiler written in Sentinel)
 
-Current test coverage (453 active tests across the workspace):
+Current test coverage (468 active tests across the workspace):
 
 - `sentinel-broker`:        69 tests + 1 doctest, clippy clean under `-D warnings`
 - `sentinel-effects-proto`: 226 tests (203 lib + 23 integration), clippy clean under `-D warnings`
 - `sentinel-syntax`:        92 tests (90 lib + 2 UI integration) — includes 7 salsa-query tests at C1.0b
 - `sentinel-ast`:           21 tests
-- `sentinel-codegen`:       13 tests
+- `sentinel-resolve`:       21 tests (positive paths + each error variant + 4 salsa query tests)
+- `sentinel-codegen`:       8 tests (positive lowering only; name-resolution rejection tests moved to sentinel-resolve at C1.1.2)
 - `sentinel-driver`:        22 pass-test fixtures (each compiles + runs a `.sentinel` program)
 - `sentinel-runtime`:       2 tests
 - `sentinel-base`:          3 tests (salsa machinery verification)
@@ -137,7 +138,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 - `crates/sentinel-codegen/` — Phase C: LLVM IR lowering via inkwell.
 - `crates/sentinel-runtime/` — Phase C: minimal runtime (`sentinel_print`) linked into compiled binaries.
 - `crates/sentinel-driver/` — Phase C: the `snc` compiler driver binary.
-- `crates/sentinel-{resolve,types,hir,mir,lsp}/` — Phase C1+ scaffolds (stub crates; populated in pipeline order).
+- `crates/sentinel-resolve/` — Phase C1.1: name resolution; produces a `ResolvedProgram` with `VarId`/`FnId` stable identifiers.
+- `crates/sentinel-{types,hir,mir,lsp}/` — Phase C1.2+ scaffolds (stub crates; populated in pipeline order).
 - `docs/` — design, status, and process documents:
   - [`PROGRAMMING_GUIDE.md`](docs/PROGRAMMING_GUIDE.md) — intro to writing Sentinel programs today (C0 surface)
   - [`SENTINEL_SUMMARY.md`](docs/SENTINEL_SUMMARY.md) — one-page pitch

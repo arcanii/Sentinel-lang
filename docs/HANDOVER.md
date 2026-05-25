@@ -53,9 +53,10 @@ is `i64` per ADR 0009 ("no type system in C0"); `bool` arrives at
 C1.3. See STATE.md Section C.
 
 **Phase C1.0 — Salsa retrofit — complete.**
+**Phase C1.1 — sentinel-resolve crate lift — complete.**
 Phase C1 (type system, regions, effects per HANDOVER §6.2) is in
 flight per ADR 0011 (PROPOSED, 8 sub-phases, honest 5-6 month
-estimate vs HANDOVER's 3-month budget). The three C1.0 sub-phases
+estimate vs HANDOVER's 3-month budget). The C1.0 + C1.1 sub-phases
 have all landed:
 
   - **C1.0a** (09dc8c3): foundation crate `sentinel-base` hosting
@@ -63,35 +64,47 @@ have all landed:
     SourceFile, and `#[salsa::accumulator]` Diagnostic. Salsa 0.18
     is in the dep graph.
   - **C1.0b** (557cc60): `sentinel-syntax::query` exposes
-    `lex_query` and `parse_query` as `#[salsa::tracked]` queries
-    against `SentinelDb`. Errors route through the Diagnostic
-    accumulator rather than tracked-struct fields (side-stepping
-    the `miette::SourceSpan: !Hash` issue that paused C1.0a's
-    initial draft). sentinel-driver instantiates a concrete
-    `SentinelDatabase` and collects diagnostics via
-    `parse_query::accumulated::<Diagnostic>`. All 22 C0 pass-test
-    fixtures run end-to-end through the new query-based driver
-    path.
-  - **C1.0c** (decision-only commit): codegen stays outside the
-    salsa query graph through Phase C1.0. Three options weighed
-    (see ADR 0011 D1 amendment); chosen option is "don't wrap
-    codegen at all" because (a) it gets rewritten at C1.2 for
+    `lex_query` and `parse_query` as `#[salsa::tracked]` queries.
+    Errors route through the Diagnostic accumulator. sentinel-driver
+    instantiates a concrete `SentinelDatabase`.
+  - **C1.0c** (8b58644, decision-only commit): codegen stays
+    outside the salsa query graph through Phase C1.0. Three options
+    weighed in the ADR 0011 D1 amendment; chosen option is "don't
+    wrap codegen at all" because (a) it gets rewritten at C1.2 for
     typed HIR, (b) LLVM `'ctx` lifetimes don't trivially fit
     salsa's query model, (c) LSP/check-only tooling that wants
     incremental rebuild exits after types-not-codegen anyway.
+  - **C1.1.1** (438dd16): sentinel-resolve crate populated.
+    VarId(u32) / FnId(u32) stable identifiers; FnSignature lookup
+    table; parallel-tree resolved AST mirroring sentinel-ast's
+    Program shape with name references replaced by IDs;
+    ResolveError with the 6 name-resolution variants migrated from
+    CodegenError; pure `resolve(program)` entry point;
+    `resolve_query(db, file)` `#[salsa::tracked]` wrapper chaining
+    on parse_query. 21 unit tests (positive paths + each error
+    variant + 4 salsa query smoke).
+  - **C1.1.2** (9374edf): codegen consumes &ResolvedProgram;
+    driver pipeline becomes parse_query → resolve_query → codegen.
+    Codegen loses ~200 lines (name resolution is gone); the 6
+    CodegenError name-resolution variants gone (covered by
+    ResolveError now); codegen tests shed 8 reject-cases (moved to
+    resolve) and add 3 positive cases. The driver's
+    `resolve_query::accumulated::<Diagnostic>` picks up parse-stage
+    diagnostics transitively — the C1.0b retrofit cashing in for
+    the multi-stage front-end.
 
-**C1 next: C1.1** — `sentinel-resolve` crate lift, moving name
-resolution out of `sentinel-codegen::CodegenCtx` into a dedicated
-pre-codegen pass per ADR 0011 D4. See §0.2 below for the resume
-plan.
+**C1 next: ADR 0012 (concrete C1 surface) → C1.2** — annotation
+grammar, then sentinel-types::check() lands. See §0.2 below for
+the resume plan.
 
-**Workspace test count**: 453 active across all crates (+7 over
-C1.0a, all in sentinel-syntax: 4 positive lex/parse + 1 cross-
-stage propagation + 2 cache validation). C1.0c is a docs-only
-landing — no test delta. All four check-suite checks green
-(cargo build --workspace, cargo clippy --workspace --all-targets
--D warnings, cargo test --workspace, cargo test --workspace
---doc). See STATE.md "Conventions" for the per-crate breakdown.
+**Workspace test count**: 468 active across all crates (+15 over
+C1.0c: +20 sentinel-resolve, -5 sentinel-codegen). All four check-
+suite checks green (cargo build --workspace, cargo clippy
+--workspace --all-targets -D warnings, cargo test --workspace,
+cargo test --workspace --doc). C0 go/no-go program at
+`tests/pass/c05_go_no_go.sentinel` still runs end-to-end: stdout
+"10", exit 0. See STATE.md "Conventions" for the per-crate
+breakdown.
 
 **ADR status**:
 
@@ -108,15 +121,14 @@ landing — no test delta. All four check-suite checks green
   - 0010 concrete-c0-surface-syntax              ACCEPTED (all
                                                  D-decisions exercised)
   - 0011 phase-c1-kickoff-and-type-system-plan   PROPOSED — D1
-                                                 (Salsa) fully
-                                                 exercised at C1.0a-c
-                                                 with codegen
-                                                 intentionally out of
-                                                 scope until C1.2+;
+                                                 (Salsa, C1.0a-c) +
+                                                 D4 (sentinel-resolve
+                                                 lift, C1.1.1-2)
+                                                 fully exercised;
                                                  ADR remains PROPOSED
-                                                 because D2-D12 cover
-                                                 the rest of C1 (type
-                                                 system, structs,
+                                                 because D2/D3/D5-D12
+                                                 cover the rest of C1
+                                                 (type system, structs,
                                                  nullability, arrays,
                                                  generics)
 
@@ -206,123 +218,94 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C1.1)
+### 0.2 Next session opening (ADR 0012 then C1.2)
 
-Resume at **C1.1**: lift name resolution out of
-`sentinel-codegen::CodegenCtx` into a dedicated `sentinel-resolve`
-crate per ADR 0011 D4. Estimated 2-3 weeks (per ADR 0011 D6).
+Resume at **ADR 0012** — concrete C1 surface syntax for type
+annotations. Per ADR 0011 D7 this lands before C1.2's
+sentinel-types::check() so the parser has a real annotation grammar
+to point at.
 
-The current state: `sentinel-codegen` does both name resolution
-and LLVM lowering. Its `CodegenCtx<'ctx, 'a>` holds a
-`HashMap<String, FunctionValue>` (the `fns` table) and a per-fn
-`HashMap<String, PointerValue>` (the `vars` table). Two-pass
-codegen builds the fns table first (so forward references work),
-then for each fn body resolves variable references against the
-vars table. Per STATE.md C.3 decision 20, this is "deliberate
-short-term architectural debt" — the refactor at C1 is the C1.1
-work this resume note describes.
+ADR 0012 needs to decide:
 
-Sub-steps to attack in order:
+1. **Annotation syntax for parameters.** `fn add(a: i64, b: i64)
+   -> i64 { a + b }` — confirms ADR 0010 D5's reservation of the
+   `->` and `:` tokens. The `:` token isn't yet in the lexer (no
+   uses through C0); it lands as part of the ADR 0012 / C1.2 work.
+2. **Annotation syntax for let-bindings.** `let x: i64 = expr;`
+   alongside `let x = expr;` (the inferred form). The inferred
+   form's bidirectional check is ADR 0011 D2.
+3. **Primitive type names in source.** `i32`, `i64`, `bool` per
+   ADR 0011 D3 — uppercase or lowercase? Probably lowercase to
+   match Rust convention.
+4. **Literal forms for `bool`.** `true`/`false` as keywords (per
+   ADR 0011 D3); reserves the identifiers. ADR 0010 D9's C-style
+   truthy `if cond` retires at C1.3 when bool lands; until then,
+   `if 5 { ... }` still works.
+5. **Comparison operators.** `==`, `!=`, `<`, `<=`, `>`, `>=`
+   per ADR 0011 D3's "introduces comparison operators at C1.3."
+   ADR 0012 decides surface syntax; type rules are C1.3.
+6. **Logical operators.** `&&`, `||`, `!` per ADR 0011 D3 (they're
+   listed under "what arrives at C1.3"). Surface decision for
+   ADR 0012, type rules for C1.3.
 
-1. **Populate sentinel-resolve crate.** Currently a 20-line
-   scaffold stub per ADR 0009 D7. Add deps on `sentinel-ast`,
-   `sentinel-base`, `miette`, `thiserror`. Define `VarId(u32)`
-   and `FnId(u32)` newtype wrappers (stable identifiers,
-   per-program scope), `ResolvedProgram` (the AST with name
-   references replaced by IDs), and `ResolveError` (variants:
-   `UndefinedVariable`, `UndefinedFunction`, `RedeclaredVariable`,
-   `RedefinedFunction`, `MissingMain` — moved from
-   `CodegenError`).
+After ADR 0012 ships PROPOSED, **C1.2** is sentinel-types::check
+() landing the basic type checker. Per ADR 0011 D5 + D6, the
+work is ~4 weeks:
 
-2. **Write `resolve(program: &Program) -> Result<ResolvedProgram,
-   ResolveError>`.** Mirrors the current codegen-side name
-   resolution: a function-table pass (collect every FnDef's name
-   + arity, error on duplicates or `print` collisions), then a
-   per-function body walk that builds the per-fn vars table and
-   replaces each `ExprKind::Var(name)` with
-   `ExprKind::Var(VarId)` and each `ExprKind::Call { callee,
-   .. }` with `ExprKind::Call { callee: FnId, .. }`. Likely
-   needs new `ExprKind`/`StmtKind` variants for the resolved
-   form, OR a parallel `ResolvedExpr`/`ResolvedStmt` tree, OR
-   the AST gets generic over the name-reference shape (e.g.,
-   `ExprKind<N>` where N is either `String` or `VarId`). The
-   third option is the most "rustc-style" but adds generics
-   complexity; option 2 (parallel tree) is the cleanest C1
-   landing and easier to debug.
+  - Populate sentinel-types crate (currently a 20-line stub).
+    Define `Type` (i32, i64, bool, Unit, possibly Unknown as an
+    inference placeholder), `TypedProgram` (parallel tree like
+    ResolvedProgram, but typed), `TypeError` variants.
+  - Parser updates (in sentinel-syntax) for the annotation
+    grammar from ADR 0012.
+  - The type checker itself: walks ResolvedProgram, infers/checks
+    each expression, produces TypedProgram.
+  - Salsa-tracked `check_query(db, file)` chaining on
+    resolve_query.
+  - Codegen adapts to TypedProgram (currently consumes
+    ResolvedProgram). Since C0/C1 everything is i64, the LLVM
+    lowering doesn't change much yet — but the bool path needs
+    real i1 handling at C1.3.
+  - ADR 0011 D8 hard break: 22 pass-test fixtures get mechanical
+    annotation rewrites. Same pattern as C0.5's fn-wrap pass.
 
-3. **Add `resolve_query` as a `#[salsa::tracked]` query in
-   sentinel-resolve.** Same pattern as sentinel-syntax's
-   `parse_query`: takes a SourceFile, calls `parse_query`
-   internally, then runs `resolve(&program)`. Errors flow
-   through the Diagnostic accumulator with stage="resolve".
-   This is where C1.1 starts cashing in the C1.0b retrofit:
-   the driver's call to resolve is salsa-cached, and changes
-   to a fn body don't re-resolve the whole program.
+**Estimated effort for ADR 0012**: 1 session (decision doc only).
+**Estimated effort for C1.2**: 3-4 sessions.
 
-4. **Strip name resolution from sentinel-codegen.** Codegen's
-   input becomes `&ResolvedProgram`. `CodegenCtx` loses the
-   String-keyed maps; vars become a `Vec<PointerValue>` indexed
-   by `VarId` (or a small HashMap if VarId space is sparse).
-   `CodegenError` variants `UndefinedVariable`,
-   `UndefinedFunction`, `RedeclaredVariable`, `RedefinedFunction`,
-   `MissingMain` all delete because the resolve pass catches
-   those first; only the LLVM-specific errors (`VerifyFailed`,
-   `TargetInit`, etc.) remain. `ArityMismatch` is a judgment
-   call — arity is checkable at resolve time given the fn
-   table, so it probably also moves.
-
-5. **Update sentinel-driver to thread the resolve stage.** The
-   pipeline becomes `parse_query → resolve_query → codegen`.
-   The driver collects diagnostics via
-   `resolve_query::accumulated::<Diagnostic>(db, file)` (which
-   transitively picks up parse_query's accumulator too). If
-   resolve fails, codegen doesn't run.
-
-6. **Validate.** All 22 C0 pass-test fixtures still pass.
-   Update the codegen unit tests (some test name-resolution
-   errors that now live in resolve). Add a few resolve unit
-   tests covering the moved error paths. UI snapshots for the
-   moved errors get refreshed if their wording changes.
-
-7. **Commit as C1.1 feat + docs.** Update STATE.md, ADR 0011
-   D4 status note, HANDOVER §0.
-
-**Estimated effort**: 2-3 sessions. The mechanical resolve
-implementation is bounded; the AST representation question (step
-2) is the design-pressure point and may want a short note before
-implementation if option 3 (generic AST) wins.
-
-After C1.1: **C1.2** (sentinel-types::check() real, annotation
-grammar via ADR 0012) is the next sub-phase per ADR 0011 D5 and
-D7. ADR 0012 needs to land first per ADR 0011 D7.
+After C1.2: C1.3 (bool, comparison ops, retires C-style truthy)
+per ADR 0011 D10. Then C1.4 (structs), C1.5 (`?T`), C1.6 (arrays),
+C1.7 (generics).
 
 ### 0.3 Quick-status block for session start
 
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: <docs-hash> (docs: C1.0c decision landed; Phase C1.0 complete).
+    Local HEAD: <docs-hash> (docs: C1.1 landed at 438dd16+9374edf).
     [N] commits ahead of origin/main pending GitHub Desktop push.
     Working tree clean.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0 (bootstrap
-    compiler MVP) + Phase C1.0 (salsa retrofit) complete. 453 active
-    workspace tests. C0 go/no-go program runs at
+    compiler MVP) + Phase C1.0 (salsa retrofit) + Phase C1.1
+    (sentinel-resolve crate lift) complete. 468 active workspace
+    tests. C0 go/no-go program runs at
     tests/pass/c05_go_no_go.sentinel: stdout "10\n", exit 0. ADRs
-    0001-0010 ACCEPTED.
+    0001-0010 ACCEPTED; ADR 0011 PROPOSED with D1 (Salsa) + D4
+    (resolve lift) fully exercised.
 
     Phase C1 in flight per ADR 0011 (PROPOSED, 8 sub-phases).
-    C1.0a-c landed: sentinel-base foundation crate, salsa-tracked
-    lex_query/parse_query in sentinel-syntax, driver's
-    SentinelDatabase wiring, and the C1.0c decision to keep
-    codegen out of the salsa query graph until C1.2+ (ADR 0011 D1
-    amended). C1.1 is the next step: lift name resolution out of
-    sentinel-codegen into a dedicated sentinel-resolve crate per
-    ADR 0011 D4. ~2-3 sessions estimated.
+    C1.0a-c + C1.1.1-2 landed: salsa retrofit for the front-end
+    (lex_query, parse_query, resolve_query); driver pipeline is
+    parse → resolve → codegen with diagnostics transitively
+    accumulated; codegen consumes a typed-by-ID ResolvedProgram
+    and has no string-keyed lookups. Next: write ADR 0012 (concrete
+    C1 surface — annotation grammar) then start C1.2 (sentinel-
+    types::check() real). ~1 session for ADR 0012, then ~3-4
+    sessions for C1.2.
 
     Read docs/HANDOVER.md §0 in full, then docs/STATE.md, then
-    ADR 0011 — that's the canonical context. Resume at C1.1 per
-    HANDOVER §0.2.
+    ADR 0011 — that's the canonical context. Resume at ADR 0012
+    per HANDOVER §0.2.
 
 ---
 

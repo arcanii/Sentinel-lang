@@ -12,14 +12,31 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C1.0c decision landed** — the codegen-salsa
-question is resolved as "defer until C1.2+ (typed HIR rewrite)";
-ADR 0011 D1 amended with the three-option weigh-up and rationale.
-The Salsa retrofit is now complete for the front-end with codegen
-intentionally outside the query graph. **Phase C1.0 is complete**;
-C1.1 (sentinel-resolve crate lift) is the next sub-phase. No code
-change at C1.0c — this is a docs-only commit capturing the
-architectural decision. Pre-C1.0c context: **C1.0b landed at
+Last updated: **C1.1 landed (C1.1.1 at 438dd16, C1.1.2 at
+9374edf)** — name resolution lifts out of `sentinel-codegen` into
+a populated `sentinel-resolve` crate per ADR 0011 D4. C1.1.1
+scaffolds the crate: VarId/FnId/FnSignature, parallel-tree
+resolved AST (ResolvedProgram/FnDef/Param/Block/Stmt/Expr),
+ResolveError with the 6 variants that used to live in
+CodegenError (UndefinedVariable, RedeclaredVariable,
+UndefinedFunction, ArityMismatch, RedefinedFunction, MissingMain),
+pure `resolve()` + `#[salsa::tracked]` `resolve_query` chaining on
+parse_query. C1.1.2 rewires sentinel-codegen and sentinel-driver:
+`compile_to_object` now takes `&ResolvedProgram`; codegen's vars
+map is keyed by VarId, fns map by FnId; the driver pipeline
+becomes parse_query → resolve_query → codegen with diagnostics
+transitively accumulated across all three stages. **Phase C1.1
+complete**; ADR 0011 D4 ACCEPTED. Workspace test delta: +20
+(C1.1.1's resolve unit tests + salsa query smoke) -5 (codegen's
+rejects-NAME tests moved to resolve, net -8 deleted + 3 new
+positive codegen tests added) = net +15. 468 tests total. All
+22 C0 pass-test fixtures still run end-to-end through the new
+pipeline. Pre-C1.1 context: **C1.0c decision landed** — the
+codegen-salsa question is resolved as "defer until C1.2+ (typed
+HIR rewrite)"; ADR 0011 D1 amended with the three-option weigh-up
+and rationale. The Salsa retrofit is now complete for the front-
+end with codegen intentionally outside the query graph. **Phase
+C1.0 is complete**. Pre-C1.0c context: **C1.0b landed at
 557cc60** — the lex and parse pipeline stages
 now run through `#[salsa::tracked]` queries against `SentinelDb`,
 with `sentinel_base::Diagnostic`s flowing through the
@@ -1129,9 +1146,11 @@ scaffold stubs.
 | C0.5  | fn definitions + main entry; **C0 go/no-go passes**            | Done    | 6ce8336 |
 | C1.0a | sentinel-base crate: Salsa db trait + SourceFile input + Diagnostic accumulator | Done | 09dc8c3 |
 | C1.0b | Wrap lex/parse as `#[salsa::tracked]` queries; driver uses SentinelDatabase | Done | 557cc60 |
-| C1.0c | Codegen-salsa decision: defer until typed HIR (C1.2+); ADR 0011 D1 amended | Done | (pending) |
-| C1.1  | sentinel-resolve crate lift (name resolution out of codegen)   | Pending |         |
-| C1.2+ | sentinel-types real, primitive types, structs, …               | Planned |         |
+| C1.0c | Codegen-salsa decision: defer until typed HIR (C1.2+); ADR 0011 D1 amended | Done | 8b58644 |
+| C1.1.1 | Scaffold sentinel-resolve: VarId/FnId, parallel-tree resolved AST, resolve() + salsa query | Done | 438dd16 |
+| C1.1.2 | Codegen consumes ResolvedProgram; driver chains resolve_query | Done | 9374edf |
+| C1.2  | ADR 0012 (concrete C1 surface) + sentinel-types::check() real | Pending |         |
+| C1.3+ | Multiple primitives, structs, nullability, arrays, generics    | Planned |         |
 
 ADR 0010 (concrete C0 surface syntax) lands between C0.0 and C0.1
 per ADR 0009 D8.
@@ -1371,42 +1390,84 @@ exit 0. See C.3 design decisions 33-36.
           ui__ui_lex_invalid_char.snap
           ui__ui_parse_unbalanced_paren.snap
 
-    crates/sentinel-codegen/
-      Cargo.toml          deps: sentinel-ast (path), inkwell (llvm18-0
-                          feature, workspace-pinned), miette, thiserror,
+    crates/sentinel-resolve/                (C1.1: populated)
+      Cargo.toml          deps: sentinel-ast (path), sentinel-base
+                          (path), sentinel-syntax (path), miette,
+                          salsa, thiserror, tracing
+      src/
+        lib.rs            Stable identifiers: VarId(u32), FnId(u32),
+                          plus the PRINT_FN_ID const (= FnId(0)).
+                          FnSignature { id, name, name_span: Option<Span>,
+                          arity, is_main, is_runtime }. Parallel-tree
+                          resolved AST: ResolvedProgram { fns:
+                          Vec<ResolvedFnDef>, fn_signatures: Vec<FnSignature>,
+                          span }; ResolvedFnDef, ResolvedParam,
+                          ResolvedBlock, ResolvedStmt(Kind),
+                          ResolvedExpr(Kind) all mirror their AST
+                          counterparts with Var/Call replaced by
+                          IDs; binding sites retain their source
+                          name for diagnostics + IR debug names.
+                          ResolveError with 6 variants:
+                          UndefinedVariable, RedeclaredVariable,
+                          UndefinedFunction, ArityMismatch,
+                          RedefinedFunction, MissingMain (moved from
+                          CodegenError at C1.1.2). resolve(program:
+                          &Program) -> Result<ResolvedProgram,
+                          ResolveError> is the pure-function entry
+                          point: pass 1 builds the fn table
+                          (`print` as FnId(0), user fns following),
+                          pass 2 resolves each fn body with a
+                          per-fn vars HashMap. RHS of `let x = expr`
+                          resolves BEFORE binding x, so `let x = x`
+                          with no outer x is UndefinedVariable.
+                          resolve_query(db, file) -> &Option<ResolvedProgram>
+                          is the `#[salsa::tracked]` wrapper that
+                          chains on sentinel_syntax::parse_query;
+                          errors flow through the Diagnostic
+                          accumulator with stage="resolve" and parse
+                          errors propagate transitively. 21 tests
+                          (positive paths + each error variant + 4
+                          salsa query tests including parse-error
+                          propagation and cache validation).
+
+    crates/sentinel-codegen/                (C1.1.2 rewrite — consumes ResolvedProgram)
+      Cargo.toml          deps: sentinel-ast (path), sentinel-resolve
+                          (path, C1.1.2), inkwell (llvm18-0 feature,
+                          workspace-pinned), miette, thiserror,
                           tracing
+                          dev-deps: sentinel-syntax (for src-string
+                          test driving via parse + resolve)
                           lints.rust: unsafe_code = "allow" (inkwell
                           uses unsafe internally for FFI)
       src/
-        lib.rs            compile_to_object(program, output_path)
-                          builds an LLVM module containing all fns
-                          declared by the program. **Two-pass**:
-                          pass 1 declares every fn (including the
-                          runtime `print` mapped to `sentinel_print`)
-                          so forward references work; pass 2 emits
-                          each body. `main` returns i32 (C ABI shape,
-                          truncated from i64 body value); other
-                          fns return i64. CodegenCtx<'ctx, 'a>
-                          threads &context + builder + i64_type +
-                          a HashMap<String, FunctionValue> fns
-                          table + current_fn + name -> alloca vars
-                          map. compile_fn resets vars + current_fn
-                          per fn, allocates+stores each param, then
-                          lowers the body. lower_if uses current_fn
-                          for basic-block creation; lower_call
-                          looks up the fns table for the callee
-                          (replacing the C0.4 hardcoded print
-                          special case). Per ADR 0009 D7, name
-                          resolution lives in codegen until
-                          sentinel-resolve lands at C1. CodegenError
-                          variants: VerifyFailed, TargetInit,
-                          TargetMachine, WriteFailed, Builder,
-                          UndefinedVariable, RedeclaredVariable,
-                          UndefinedFunction, ArityMismatch,
-                          RedefinedFunction (C0.5; covers user-
-                          redefines-print collisions with the
-                          runtime symbol), MissingMain (C0.5;
-                          programs require a `fn main`)
+        lib.rs            compile_to_object(program: &ResolvedProgram,
+                          output_path) builds an LLVM module
+                          containing all fns declared by the program.
+                          **Two-pass**: pass 1 declares every fn by
+                          iterating program.fn_signatures (the runtime
+                          `print` maps to LLVM symbol `sentinel_print`
+                          via signature.is_runtime; otherwise the
+                          source name); pass 2 emits each user fn
+                          body. `main` returns i32 (C ABI shape,
+                          truncated from i64 body value) — gated on
+                          signature.is_main; other fns return i64.
+                          CodegenCtx<'ctx, 'a> threads &context +
+                          builder + i64_type + HashMap<FnId,
+                          FunctionValue> fns table + current_fn +
+                          HashMap<VarId, PointerValue> vars map.
+                          compile_fn resets vars + current_fn per fn,
+                          allocates+stores each param by VarId, then
+                          lowers the body. lower_call dispatches via
+                          FnId; lower_expr's Var arm reads vars by
+                          VarId. LLVM SSA debug names preserved via
+                          find_var_name_in_block / _in_expr that walks
+                          the current fn for the binding's source
+                          name — purely for IR readability.
+                          **CodegenError** keeps only LLVM-lowering
+                          errors: VerifyFailed, TargetInit,
+                          TargetMachine, WriteFailed, Builder. The
+                          6 name-resolution variants migrated to
+                          ResolveError at C1.1.2.
 
     crates/sentinel-runtime/
       Cargo.toml          deps: tracing, thiserror
@@ -1422,11 +1483,12 @@ exit 0. See C.3 design decisions 33-36.
                           and returns 0 (the call expression's
                           value per ADR 0010 D11)
 
-    crates/sentinel-driver/                (C1.0b adds SentinelDatabase)
+    crates/sentinel-driver/                (C1.1.2 chains resolve_query)
       Cargo.toml          deps: sentinel-base (path, C1.0b),
-                          sentinel-codegen (path), sentinel-syntax
-                          (path), miette (with "fancy" feature),
-                          salsa (C1.0b), thiserror, tracing
+                          sentinel-codegen (path), sentinel-resolve
+                          (path, C1.1.2), sentinel-syntax (path),
+                          miette (with "fancy" feature), salsa
+                          (C1.0b), thiserror, tracing
       src/
         main.rs           snc binary; subcommands `parse` and `build`
                           (C0.1+ shape; both lifted from Expr to
@@ -1434,25 +1496,27 @@ exit 0. See C.3 design decisions 33-36.
                           `SentinelDatabase` (storage: salsa::Storage
                           <Self>) with `#[salsa::db]` impls for
                           `salsa::Database` (no-op salsa_event) and
-                          `SentinelDb`. `run_parse` and `run_build`
-                          instantiate the DB, build a SourceFile
-                          input (path + src text), call parse_query
-                          (which returns &Option<Program>), collect
-                          diagnostics via parse_query::accumulated::
-                          <Diagnostic>(&db, file), render each
-                          through miette::MietteDiagnostic
+                          `SentinelDb`. `run_parse` calls
+                          sentinel_syntax::parse_query and pretty-
+                          prints the AST. **C1.1.2**: `run_build`
+                          chains sentinel_resolve::resolve_query
+                          (which depends on parse_query in the
+                          salsa graph), collects diagnostics via
+                          resolve_query::accumulated::<Diagnostic>
+                          — picks up parse-stage diagnostics
+                          transitively — and feeds the resulting
+                          &ResolvedProgram to
+                          sentinel_codegen::compile_to_object.
+                          Diagnostics render through miette::MietteDiagnostic
                           (constructed at runtime from
                           stage/code/message/span — drops per-variant
                           help text and label text; rough but
                           functional, refinement deferred). `build`
-                          then lowers the Program via sentinel_codegen
-                          (still a direct fn call, not yet salsa-
-                          wrapped — see C1.0c), invokes the system
-                          `cc` on the emitted `.o` plus
-                          `libsentinel_runtime.a` (found via
-                          current_exe().parent()) to produce the
-                          executable. Output defaults to <file_stem>;
-                          exit codes 0 / 1 / 2.
+                          then invokes the system `cc` on the
+                          emitted `.o` plus `libsentinel_runtime.a`
+                          (found via current_exe().parent()) to
+                          produce the executable. Output defaults
+                          to <file_stem>; exit codes 0 / 1 / 2.
       tests/
         pass.rs           pass-test runner; reads workspace-root
                           tests/pass/*.sentinel; uses CARGO_BIN_EXE_snc
@@ -1500,20 +1564,13 @@ exit 0. See C.3 design decisions 33-36.
                           so the linker can find brew-installed
                           zstd/libxml2 that LLVM 18 references
 
-Five scaffold-stub compiler crates remain at 20-line
+Four scaffold-stub compiler crates remain at 20-line
 `crate_name() + smoke` stubs per ADR 0009 D7. Updated population
-schedule:
+schedule (sentinel-resolve populated at C1.1):
 
-  - sentinel-types:    C1 (stub deferral from C0.2 per STATE.md C.3
-                       note 15 — arithmetic, lets, if/else, and
-                       fn-defs have no type semantics that a stub
-                       `check()` would add value to; the slot lands
-                       when the type system has something to
-                       actually check)
-  - sentinel-resolve:  C1 (absorbed temporarily into sentinel-codegen
-                       for C0.3-C0.5 name resolution — vars AND
-                       functions; per ADR 0009 D7 deferral; moves
-                       to its own crate at C1)
+  - sentinel-types:    C1.2 (per ADR 0011 D5; arrives after
+                       ADR 0012 (concrete C1 surface, annotation
+                       grammar) lands)
   - sentinel-hir:      C1/C2
   - sentinel-mir:      C2
   - sentinel-lsp:      C5
@@ -1797,6 +1854,51 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     test-util crate would invert the dep direction and bloat
     test-build times.
 
+38. (C1.1.1, ADR 0011 D4) sentinel-resolve uses a **parallel-tree**
+    representation rather than a side-table or generic-AST scheme.
+    ADR 0011 D4 specifies that `ResolvedProgram` "is the input AST
+    with name references replaced by stable identifiers." Three
+    representations were considered: (a) the parallel-tree approach
+    (chosen) where ResolvedProgram has its own ResolvedExprKind /
+    ResolvedStmtKind etc. mirroring the AST shape; (b) a side-table
+    approach where the original AST stays untouched and resolution
+    state lives in HashMap<Span, ID> tables; (c) a generic-AST
+    approach where ExprKind<R> takes a reference type R that
+    instantiates to String pre-resolve and to VarId/FnId post-
+    resolve. Reasoning: (a) wins on debuggability and ergonomics
+    (each variant is concrete, no generics to chase through error
+    messages or type signatures); (b) was rejected because span-
+    keyed maps are fragile (duplicate spans break it; future
+    macro-expanded code would too) and HashMap-of-pointers is
+    ergonomically awful; (c) was rejected because the generics
+    parameter propagates through every AST type's signature and
+    inflates the surface that callers (codegen, future types pass,
+    LSP) have to track. The cost of (a) is keeping two parallel
+    type hierarchies in sync as the AST grows; the discipline is
+    "every AST change at C1.3+ updates the resolved tree in the
+    same commit," which matches the rhythm of the codebase already.
+
+39. (C1.1.1) `let x = expr` resolves the RHS BEFORE binding the
+    name. So `let x = x` with no outer `x` is UndefinedVariable,
+    not a self-reference. This matches the C0 codegen's behavior
+    (lower_expr on the RHS happens before vars.insert(name)) and
+    keeps the language consistent with Rust on this point. The
+    behavior is locked by the
+    `let_x_equals_x_errors_when_outer_x_undefined` unit test.
+
+40. (C1.1.2) Codegen preserves source names in LLVM SSA labels by
+    walking the current fn's body for the binding's source name at
+    each Var load. The walk lives in `find_var_name_in_block` /
+    `find_var_name_in_expr`. This is **purely IR readability** —
+    semantically the VarId is the load-bearing identifier;
+    codegen never depends on the name for lookup. Cost: O(fn-body
+    size) per Var reference at codegen time. Acceptable at C1 scale
+    (no fn body is more than ~50 lines at C0); revisit if codegen
+    becomes a profiling bottleneck. An alternative would be to
+    pre-build a HashMap<VarId, &str> per fn at the start of
+    compile_fn; the walk-on-each-load avoids the bookkeeping and
+    is the simpler default until measurements demand otherwise.
+
 37. (C1.0c, ADR 0011 D1 amendment) Codegen stays outside the salsa
     query graph through Phase C1.0. ADR 0011's original D1 sketch
     had "… through codegen" in the query list, suggesting
@@ -1845,12 +1947,17 @@ All four must pass for any commit on `main`. Current expected counts:
   - sentinel-syntax:        92 tests (90 lib + 2 UI integration) + 0 doctests
                             (lib = 83 lexer/parser + 7 query at C1.0b)
   - sentinel-ast:           21 tests (1 smoke + 20 Display) + 0 doctests
-  - sentinel-codegen:       13 tests (1 smoke + 12 codegen tests) + 0 doctests
+  - sentinel-codegen:       8 tests (1 smoke + 1 target init + 6 positive compile)
+                            + 0 doctests — name-resolution rejection tests
+                            migrated to sentinel-resolve at C1.1.2
+  - sentinel-resolve:       21 tests (positive paths + 6 error variants
+                            + 4 salsa query smoke incl. parse-stage propagation
+                            + cache validation) + 0 doctests
   - sentinel-driver:        22 pass integration tests + 0 doctests
   - sentinel-runtime:       2 tests (smoke + sentinel_print_returns_zero) + 0 doctests
   - sentinel-base:          3 tests (salsa query runs/caches + source file accessors) + 0 doctests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
-                            (sentinel-resolve, -types, -hir, -mir, -lsp)
+                            (sentinel-types, -hir, -mir, -lsp)
 
 ### Script Convention
 

@@ -1,12 +1,14 @@
 # ADR 0011: Phase C1 kickoff — type system, name resolution, Salsa retrofit
 
-Status: PROPOSED — D1 (Salsa) fully exercised at C1.0a-c with the
-intentional scope-cut that codegen stays out of the query graph
-until C1.2+. The ADR remains PROPOSED overall because D2-D12 cover
-the rest of C1 (type system, structs, nullability, arrays,
-generics) which haven't landed yet.
+Status: PROPOSED — D1 (Salsa) and D4 (sentinel-resolve crate
+lift) fully exercised at C1.0a-c and C1.1.1-2 respectively, with
+the intentional scope-cut that codegen stays out of the salsa
+query graph until C1.2+. The ADR remains PROPOSED overall because
+D2/D3/D5/D6/D7/D8/D9/D10/D11/D12 cover the rest of C1 (type
+system, structs, nullability, arrays, generics) which haven't
+landed yet.
 Date: 2026-05-25
-Last touched: 2026-05-25 (C1.0c decision landed; D1 status updated)
+Last touched: 2026-05-25 (C1.1 landed; D4 status updated)
 Related: 0001 (staged validation), 0009 (Phase C kickoff; D1 deferred
 Salsa to C1, D7 deferred sentinel-types and sentinel-resolve stubs
 to C1), 0010 (concrete C0 surface; D5 reserved `->` for C1
@@ -208,6 +210,21 @@ The name-resolution code currently in `sentinel-codegen` (the
 by stable identifiers (`VarId`, `FnId`) — no more string lookups
 in codegen. The codegen pass becomes pure-structural against
 `ResolvedProgram`.
+
+**Status — ACCEPTED at C1.1.** C1.1.1 (438dd16) populated the
+crate: VarId/FnId/FnSignature, parallel-tree resolved AST,
+ResolveError with the 6 name-resolution variants migrated from
+CodegenError, pure `resolve()` + `#[salsa::tracked]` `resolve_query`
+chaining on parse_query. C1.1.2 (9374edf) rewired codegen to
+consume `&ResolvedProgram` and updated the driver pipeline to
+chain parse_query → resolve_query → codegen. The 22 C0 pass-test
+fixtures still run end-to-end through the new path.
+
+**Representation choice: parallel tree.** Three options were
+weighed (side-table, generic-AST `ExprKind<R>`, parallel tree).
+Parallel tree wins on debuggability — concrete variants, no
+generics to chase — at the cost of keeping two type hierarchies
+in sync. See STATE.md C.3 decision 38 for the full weigh-up.
 
 ### D5. sentinel-types implements check() at C1.2.
 
