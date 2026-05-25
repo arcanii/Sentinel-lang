@@ -202,25 +202,20 @@ fn pipeline_declassify_on_non_secret_is_secret_flow() {
 }
 
 #[test]
-fn pipeline_effect_decl_with_secret_rejected_at_inference_in_b40() {
-    // B4.0 ships only the surface. Effect signatures may already
-    // mention `secret` per ADR 0008 D7, but B4.1 wires the typing;
-    // B4.0 rejects the program so secret-typed values never reach
-    // unconstrained inference (D2's no-α-leak rule is B4.1).
-    use sentinel_effects_proto::{MiniError, TypeError};
-    let err = run("effect ReadKey : Int -> secret Int ; 0").unwrap_err();
-    match err {
-        MiniError::Type(TypeError::SecretsNotYetSupported { .. }) => {}
-        other => panic!("expected SecretsNotYetSupported, got {other:?}"),
-    }
+fn pipeline_effect_decl_with_secret_now_type_checks() {
+    // B4.1b removed the effect-decl walker. `effect ReadKey : Int ->
+    // secret Int ;` now type-checks; the body `0` just evaluates to
+    // Int. (Was a placeholder rejection at B4.0c, rewritten as a
+    // positive end-to-end check here.)
+    let v = run("effect ReadKey : Int -> secret Int ; 0").expect("should type-check");
+    assert_eq!(v, Value::Int(0));
 }
 
 #[test]
 fn pipeline_double_secret_rejected_at_parse() {
-    // `secret secret T` is rejected by the parser, ahead of the
-    // SecretsNotYetSupported placeholder. The smart constructor would
-    // still collapse it, but the parser-level rejection is the human-
-    // source early complaint (ADR 0008 D1/D6).
+    // `secret secret T` is rejected by the parser. The smart
+    // constructor would still collapse it, but the parser-level
+    // rejection is the human-source early complaint (ADR 0008 D1/D6).
     use sentinel_effects_proto::{MiniError, ParseError};
     let err = run("effect F : Int -> secret secret Int ; 0").unwrap_err();
     match err {
@@ -228,3 +223,55 @@ fn pipeline_double_secret_rejected_at_parse() {
         other => panic!("expected DoubleSecret, got {other:?}"),
     }
 }
+
+// ---- B4.1b: password-verify demo (HANDOVER §5.2 deliverable) ----
+//
+// The full demo per HANDOVER: a program that tries to branch on a
+// secret comparison fails to compile. The chain is D4 -> D3:
+//   - `do GetStored(unit) == provided` types as Secret<Bool> per D4
+//   - the surrounding `if` then rejects per D3 SecretBranch
+// This is the load-bearing rejection deliverable that motivated B4.
+
+#[test]
+fn pipeline_password_verify_naive_rejects_with_secret_branch() {
+    // `if (do GetStored(0)) == 42 then 1 else 0` with GetStored
+    // returning `secret Int`. The comparison produces Secret<Bool>,
+    // the surrounding if rejects.
+    use sentinel_effects_proto::{MiniError, TypeError};
+    let source = "\
+        effect GetStored : Int -> secret Int ; \
+        if do GetStored(0) == 42 then 1 else 0";
+    let err = run(source).expect_err("naive password verify should reject");
+    match err {
+        MiniError::Type(TypeError::SecretBranch { .. }) => {}
+        other => panic!("expected SecretBranch, got {other:?}"),
+    }
+}
+
+#[test]
+fn pipeline_secret_in_arithmetic_is_secret_flow() {
+    // Adding a public Int to a secret-returning effect's result is
+    // SecretFlow -- arithmetic isn't D4-extended (only comparisons
+    // are), so unify(Int, Secret<Int>) fires the catch-all SecretFlow.
+    use sentinel_effects_proto::{MiniError, TypeError};
+    let source = "effect ReadKey : Int -> secret Int ; do ReadKey(0) + 1";
+    let err = run(source).expect_err("secret + int should reject");
+    match err {
+        MiniError::Type(TypeError::SecretFlow { .. }) => {}
+        other => panic!("expected SecretFlow, got {other:?}"),
+    }
+}
+
+// Note: a positive end-to-end test that runs `declassify(e)` at
+// runtime cannot be constructed without a `classify` primitive
+// (the Secret-introduction dual of declassify). ADR 0008 D5
+// intentionally omits such a form -- declassification sites must be
+// syntactically distinguishable in source as the only Secret-removing
+// construct. The Secret-introducing path is restricted to typing of
+// `do L(arg)` for effect-decls naming secret. Inside the arm body
+// the captured continuation `k : Secret<T> -> ...` requires a Secret
+// value to resume, and there is no source form that constructs one.
+// Positive coverage for the D5 typing rule lives in
+// `b41a_declassify_on_secret_unwraps_the_inner_type` (lib, synthetic
+// env). HANDOVER §5.2's password-verify demo is purely a rejection
+// deliverable per ADR 0008 D9.

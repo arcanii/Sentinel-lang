@@ -51,16 +51,6 @@ pub enum TypeError {
     /// Parser accepts duplicates; typing rejects them.
     #[error("handler contains two arms for effect {label:?}")]
     DuplicateHandlerArm { label: String, span: Span },
-    /// B4.0 (ADR 0008 D9): placeholder fired on any program that
-    /// uses the `secret T` qualifier in a type annotation or the
-    /// `declassify(e)` form. B4.1a removed it from the `Declassify`
-    /// arm in `infer` (replaced by the real D5 typing rule); the
-    /// `infer_program` effect-decl walker still fires it until B4.1b
-    /// lands D3/D4 and the surface for effect-decl-with-secret is
-    /// safe to expose. Mirrors the `EffectNotYetSupported`
-    /// placeholder removed in B2.3b2.
-    #[error("`secret` qualifier in effect declarations not yet supported by inference (B4.0/B4.1a; full surface in B4.1b)")]
-    SecretsNotYetSupported { span: Span },
     /// B4.1a (ADR 0008 D3). Raised by `unify` when a `Ty::Secret(_)`
     /// meets a non-secret non-variable type (or vice versa). Carries
     /// both sides so the diagnostic shows the direction of the
@@ -769,6 +759,14 @@ pub fn infer(
         }
         ExprKind::If { cond, then_branch, else_branch } => {
             let (s1, t_cond, r_cond) = infer(env, eff_env, cond, supply)?;
+            // ADR 0008 D3 SecretBranch: branching on a secret-typed
+            // condition produces data-dependent timing on real
+            // hardware. Reject before the Bool unify so the
+            // diagnostic names the CT violation directly rather
+            // than firing SecretFlow.
+            if matches!(s1.apply(&t_cond), Ty::Secret(_)) {
+                return Err(TypeError::SecretBranch { span: cond.span });
+            }
             let s2 = unify(&s1, &t_cond, &Ty::Bool, cond.span, supply)?;
             let env_after = env.apply(&s2);
             let (s3, t_then, r_then) = infer(&env_after, eff_env, then_branch, supply)?;
@@ -792,18 +790,63 @@ pub fn infer(
             let env_after = env.apply(&s1);
             let (s2, t_rhs, r_rhs) = infer(&env_after, eff_env, rhs, supply)?;
             let s2 = s2.compose(&s1);
-            let s_final = if matches!(op, BinOp::Eq) {
-                unify(&s2, &t_lhs, &t_rhs, expr.span, supply)?
+
+            // ADR 0008 D3 SecretDivisor: variable-time division on
+            // hardware is the canonical CT footgun. Reject when the
+            // divisor types as secret. Checked before unification so
+            // the diagnostic is the dedicated SecretDivisor rather
+            // than the generic SecretFlow from `unify(Secret(_), Int)`.
+            // (Sentinel-Mini has Div but no Mod; ADR D3's `Div | Mod`
+            // language is forward-looking.)
+            if matches!(op, BinOp::Div)
+                && matches!(s2.apply(&t_rhs), Ty::Secret(_))
+            {
+                return Err(TypeError::SecretDivisor { span: rhs.span });
+            }
+
+            // ADR 0008 D4: comparisons on secrets produce Secret<Bool>.
+            // When either operand of Eq/Lt/Gt is `Ty::Secret(_)`,
+            // unwrap that side to its inner type, unify the other
+            // operand against the inner (the (Secret, Secret) arm of
+            // `unify` handles the both-secret case naturally via the
+            // same code path because both inners become non-Secret
+            // here), and produce `Secret(Bool)` as the result type.
+            // For Lt/Gt the inner type must additionally be Int per
+            // the existing binop_signature; that unify fires after
+            // the cross-side unify and produces a SecretFlow if the
+            // inner isn't Int (or Mismatch if neither side was secret).
+            let is_comparison = matches!(op, BinOp::Eq | BinOp::Lt | BinOp::Gt);
+            let t_lhs_resolved = s2.apply(&t_lhs);
+            let t_rhs_resolved = s2.apply(&t_rhs);
+            let either_secret = matches!(t_lhs_resolved, Ty::Secret(_))
+                || matches!(t_rhs_resolved, Ty::Secret(_));
+
+            let (s_final, result_ty) = if is_comparison && either_secret {
+                let inner_lhs = match t_lhs_resolved.clone() {
+                    Ty::Secret(inner) => *inner,
+                    other => other,
+                };
+                let inner_rhs = match t_rhs_resolved.clone() {
+                    Ty::Secret(inner) => *inner,
+                    other => other,
+                };
+                let s3 = unify(&s2, &inner_lhs, &inner_rhs, expr.span, supply)?;
+                let s4 = if matches!(op, BinOp::Lt | BinOp::Gt) {
+                    unify(&s3, &s3.apply(&inner_lhs), &Ty::Int, lhs.span, supply)?
+                } else {
+                    s3
+                };
+                (s4, Ty::secret(Ty::Bool))
+            } else if matches!(op, BinOp::Eq) {
+                let s = unify(&s2, &t_lhs, &t_rhs, expr.span, supply)?;
+                (s, Ty::Bool)
             } else {
-                let (expected_lhs, expected_rhs, _result_ty) = binop_signature(*op);
+                let (expected_lhs, expected_rhs, result_ty) = binop_signature(*op);
                 let s3 = unify(&s2, &t_lhs, &expected_lhs, lhs.span, supply)?;
-                unify(&s3, &t_rhs, &expected_rhs, rhs.span, supply)?
+                let s = unify(&s3, &t_rhs, &expected_rhs, rhs.span, supply)?;
+                (s, result_ty)
             };
-            let result_ty = if matches!(op, BinOp::Eq) {
-                Ty::Bool
-            } else {
-                binop_signature(*op).2
-            };
+
             let r_lhs_resolved = s_final.apply_row(&r_lhs);
             let r_rhs_resolved = s_final.apply_row(&r_rhs);
             let (row, s_done) =
@@ -998,41 +1041,21 @@ pub fn infer_top(expr: &Expr) -> Result<Ty, TypeError> {
 /// nothing to the typing environment. B2.3 will thread declared
 /// labels through an environment so `do Label(arg)` infers a
 /// proper effect row, and handlers in B3 will discharge them.
-/// B4.0 (ADR 0008 D9): walk a surface `TyExpr` tree, returning the
-/// span of the first `secret` qualifier encountered. None if the
-/// tree contains no secret. Used by [`infer_program`] to reject
-/// programs whose effect declarations mention `secret` before B4.1
-/// wires real Secret typing.
-fn tyexpr_find_secret_span(ty: &crate::ast::TyExpr) -> Option<Span> {
-    use crate::ast::TyExpr;
-    match ty {
-        TyExpr::Int(_) | TyExpr::Bool(_) => None,
-        TyExpr::Secret(_, s) => Some(*s),
-        TyExpr::Arrow(a, b, _) => {
-            tyexpr_find_secret_span(a).or_else(|| tyexpr_find_secret_span(b))
-        }
-    }
-}
-
 pub fn infer_program(prog: &crate::ast::Program) -> Result<Ty, TypeError> {
     // B2.3b2 (ADR 0005 D9): populate the EffectEnv from prog.effects
     // so `do Label(arg)` resolves against declared labels. Residual
     // row is still discarded (D6: infer_program is permissive at B2
     // scope; handlers in B3 will discharge rows for real).
+    //
+    // B4.1b: ADR 0008 D7 -- effect signatures may mention `secret`.
+    // The B4.0a/B4.1a placeholder walker that rejected such decls is
+    // gone now that D2 (no-α-leak), D3 (SecretBranch/SecretDivisor),
+    // and D4 (Secret<Bool> comparisons) collectively ensure
+    // secret-typed values reaching inference via `do L(arg)` have
+    // nowhere unsafe to flow.
     let mut supply = TyVarSupply::new();
     let mut eff_env: EffectEnv = HashMap::new();
     for decl in &prog.effects {
-        // ADR 0008 D9: reject `effect L : ... secret T ...` in B4.0.
-        // The placeholder fires before `to_ty` lowers Secret into
-        // inference, so no Ty::Secret value escapes to the unify Var
-        // arm (whose B4.0 behaviour would happily bind a TyVar to a
-        // secret, violating D2's no-α-leak rule). Removed in B4.1
-        // when real Secret typing lands.
-        if let Some(span) = tyexpr_find_secret_span(&decl.arg)
-            .or_else(|| tyexpr_find_secret_span(&decl.ret))
-        {
-            return Err(TypeError::SecretsNotYetSupported { span });
-        }
         eff_env.insert(
             decl.label.clone(),
             (decl.arg.to_ty(), decl.ret.to_ty()),
@@ -2090,10 +2113,18 @@ mod tests {
         }
     }
 
-    // ---- B4.0a placeholder tests (still firing in B4.1a) ----
+    // ---- B4.1b: effect-decls with `secret` now accepted (ADR 0008 D7) ----
+    //
+    // The B4.0a `b40a_effect_decl_with_secret_*` placeholder tests
+    // are rewritten here as positive tests now that B4.1b removed
+    // the `infer_program` effect-decl walker. The placeholder was
+    // safe to drop because D2 (no-α-leak), D3 (SecretBranch /
+    // SecretDivisor), and D4 (Secret<Bool> comparisons) collectively
+    // ensure secret-typed values produced by `do L(arg)` have
+    // nowhere unsafe to flow downstream.
 
     #[test]
-    fn b40a_effect_decl_with_secret_ret_rejected_with_placeholder() {
+    fn b41b_effect_decl_with_secret_ret_now_type_checks() {
         use crate::ast::{expr, EffectDecl, ExprKind, Program, TyExpr};
         let prog = Program {
             effects: vec![EffectDecl {
@@ -2105,17 +2136,12 @@ mod tests {
             }],
             body: expr(ExprKind::Int(0), sp()),
         };
-        let err = infer_program(&prog).expect_err("effect-decl secret");
-        match err {
-            TypeError::SecretsNotYetSupported { .. } => {}
-            other => panic!("expected SecretsNotYetSupported, got {other:?}"),
-        }
+        let ty = infer_program(&prog).expect("effect-decl with secret ret should type-check");
+        assert_eq!(ty, Ty::Int);
     }
 
     #[test]
-    fn b40a_effect_decl_with_secret_arg_rejected_with_placeholder() {
-        // Symmetric to ret: the find_secret walker checks arg first,
-        // then ret. This test pins the arg path.
+    fn b41b_effect_decl_with_secret_arg_now_type_checks() {
         use crate::ast::{expr, EffectDecl, ExprKind, Program, TyExpr};
         let prog = Program {
             effects: vec![EffectDecl {
@@ -2127,10 +2153,145 @@ mod tests {
             }],
             body: expr(ExprKind::Int(0), sp()),
         };
-        let err = infer_program(&prog).expect_err("effect-decl secret arg");
+        let ty = infer_program(&prog).expect("effect-decl with secret arg should type-check");
+        assert_eq!(ty, Ty::Int);
+    }
+
+    // ---- B4.1b: D3 SecretBranch / SecretDivisor + D4 comparisons ----
+
+    #[test]
+    fn b41b_if_on_secret_bool_is_secret_branch() {
+        // Synthetic env: cond : Secret<Bool>. `if cond then 1 else 2`
+        // must reject with SecretBranch -- the dedicated diagnostic
+        // for D3's CT violation, not the generic SecretFlow.
+        use crate::ast::{expr, ExprKind};
+        let cond = expr(ExprKind::Var("c".into()), sp());
+        let then_b = expr(ExprKind::Int(1), sp());
+        let else_b = expr(ExprKind::Int(2), sp());
+        let if_expr = expr(
+            ExprKind::If {
+                cond: Box::new(cond),
+                then_branch: Box::new(then_b),
+                else_branch: Box::new(else_b),
+            },
+            sp(),
+        );
+        let mut supply = TyVarSupply::new();
+        let env = TypeEnv::empty()
+            .extend("c".to_string(), Scheme::mono(Ty::secret(Ty::Bool)));
+        let eff_env: EffectEnv = HashMap::new();
+        let err = infer(&env, &eff_env, &if_expr, &mut supply).expect_err("if on secret");
         match err {
-            TypeError::SecretsNotYetSupported { .. } => {}
-            other => panic!("expected SecretsNotYetSupported, got {other:?}"),
+            TypeError::SecretBranch { .. } => {}
+            other => panic!("expected SecretBranch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b41b_div_by_secret_is_secret_divisor() {
+        // Synthetic env: d : Secret<Int>. `1 / d` must reject with
+        // SecretDivisor (the canonical CT footgun).
+        use crate::ast::{expr, BinOp, ExprKind};
+        let lhs = expr(ExprKind::Int(1), sp());
+        let rhs = expr(ExprKind::Var("d".into()), sp());
+        let div = expr(
+            ExprKind::BinOp {
+                op: BinOp::Div,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+            sp(),
+        );
+        let mut supply = TyVarSupply::new();
+        let env = TypeEnv::empty()
+            .extend("d".to_string(), Scheme::mono(Ty::secret(Ty::Int)));
+        let eff_env: EffectEnv = HashMap::new();
+        let err = infer(&env, &eff_env, &div, &mut supply).expect_err("div by secret");
+        match err {
+            TypeError::SecretDivisor { .. } => {}
+            other => panic!("expected SecretDivisor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b41b_eq_on_two_secrets_produces_secret_bool() {
+        // D4: `a == b` where both are Secret<Int> produces Secret<Bool>.
+        use crate::ast::{expr, BinOp, ExprKind};
+        let lhs = expr(ExprKind::Var("a".into()), sp());
+        let rhs = expr(ExprKind::Var("b".into()), sp());
+        let eq = expr(
+            ExprKind::BinOp { op: BinOp::Eq, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+            sp(),
+        );
+        let mut supply = TyVarSupply::new();
+        let env = TypeEnv::empty()
+            .extend("a".to_string(), Scheme::mono(Ty::secret(Ty::Int)))
+            .extend("b".to_string(), Scheme::mono(Ty::secret(Ty::Int)));
+        let eff_env: EffectEnv = HashMap::new();
+        let (_s, t, _r) = infer(&env, &eff_env, &eq, &mut supply).expect("a == b");
+        assert_eq!(t, Ty::secret(Ty::Bool));
+    }
+
+    #[test]
+    fn b41b_eq_secret_vs_public_int_produces_secret_bool() {
+        // D4: one side secret, the other plain Int, still works -- the
+        // rule unifies the plain Int against the inner (Int) and the
+        // result is Secret<Bool>. This is the password-verify shape.
+        use crate::ast::{expr, BinOp, ExprKind};
+        let lhs = expr(ExprKind::Var("stored".into()), sp());
+        let rhs = expr(ExprKind::Int(42), sp());
+        let eq = expr(
+            ExprKind::BinOp { op: BinOp::Eq, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+            sp(),
+        );
+        let mut supply = TyVarSupply::new();
+        let env = TypeEnv::empty()
+            .extend("stored".to_string(), Scheme::mono(Ty::secret(Ty::Int)));
+        let eff_env: EffectEnv = HashMap::new();
+        let (_s, t, _r) = infer(&env, &eff_env, &eq, &mut supply).expect("stored == 42");
+        assert_eq!(t, Ty::secret(Ty::Bool));
+    }
+
+    #[test]
+    fn b41b_lt_on_secrets_produces_secret_bool() {
+        // D4 + Lt: both sides Secret<Int>, result is Secret<Bool>.
+        use crate::ast::{expr, BinOp, ExprKind};
+        let lhs = expr(ExprKind::Var("a".into()), sp());
+        let rhs = expr(ExprKind::Var("b".into()), sp());
+        let lt = expr(
+            ExprKind::BinOp { op: BinOp::Lt, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+            sp(),
+        );
+        let mut supply = TyVarSupply::new();
+        let env = TypeEnv::empty()
+            .extend("a".to_string(), Scheme::mono(Ty::secret(Ty::Int)))
+            .extend("b".to_string(), Scheme::mono(Ty::secret(Ty::Int)));
+        let eff_env: EffectEnv = HashMap::new();
+        let (_s, t, _r) = infer(&env, &eff_env, &lt, &mut supply).expect("a < b");
+        assert_eq!(t, Ty::secret(Ty::Bool));
+    }
+
+    #[test]
+    fn b41b_lt_on_secret_bool_rejects_at_inner_unify() {
+        // D4 + Lt: Secret<Bool> < Secret<Bool> unwraps to (Bool, Bool),
+        // then the Lt's inner-must-be-Int rule rejects with Mismatch
+        // (Bool meets Int — neither is Secret at that point).
+        use crate::ast::{expr, BinOp, ExprKind};
+        let lhs = expr(ExprKind::Var("p".into()), sp());
+        let rhs = expr(ExprKind::Var("q".into()), sp());
+        let lt = expr(
+            ExprKind::BinOp { op: BinOp::Lt, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+            sp(),
+        );
+        let mut supply = TyVarSupply::new();
+        let env = TypeEnv::empty()
+            .extend("p".to_string(), Scheme::mono(Ty::secret(Ty::Bool)))
+            .extend("q".to_string(), Scheme::mono(Ty::secret(Ty::Bool)));
+        let eff_env: EffectEnv = HashMap::new();
+        let err = infer(&env, &eff_env, &lt, &mut supply).expect_err("Lt on secret bools");
+        match err {
+            TypeError::Mismatch { .. } => {}
+            other => panic!("expected Mismatch on inner Bool-vs-Int, got {other:?}"),
         }
     }
 }
