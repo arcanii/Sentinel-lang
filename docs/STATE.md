@@ -12,20 +12,35 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C0.5 (fn defs + main entry) landed at 6ce8336 —
-Phase C0 is complete.** The ADR 0010 appendix go/no-go program
+Last updated: **C1.0a landed at 09dc8c3** — first step of the
+Phase C1 Salsa retrofit. The new `sentinel-base` crate hosts the
+shared Salsa machinery: `SourceFile` (input), `SentinelDb` (db
+trait), `Diagnostic` (accumulator). ADR 0011 (Phase C1 kickoff
+plan) is PROPOSED at 6372914. C1.0b — wiring lex/parse as
+`#[salsa::tracked]` queries against `SentinelDb` — is paused
+because `Vec<LexError>` and `Vec<ParseError>` as tracked-struct
+fields require the inner error types to be Hash, and
+`miette::SourceSpan` does not derive Hash; C1.0b's plan is to
+accumulate `Diagnostic`s rather than return rich error vectors
+through tracked fields. The AST-side Hash derives + parser/codegen
+query wrappers + driver wiring all land in C1.0b. Workspace test
+count: +3 over the Phase C0 final (448 total). Salsa 0.18 is
+now in the actual dep graph (was pinned but unused).
+
+Phase C0 retrospective (preserved as historical context for what
+came before Phase C1): the bootstrap compiler can lex, parse,
+name-resolve (still in codegen), and lower fn-based programs with
+let, arithmetic, if/else, blocks, and print to runnable binaries
+via LLVM. The ADR 0010 appendix go/no-go program
 (`double + pick + main with print`) compiles and runs at
-`tests/pass/c05_go_no_go.sentinel`: stdout `10\n`, exit 0. Programs
-are now one-or-more `fn` definitions with an explicit `main` entry
-point; the previous implicit-main `stmt* tail_expr` form is gone
-(it lives inside fn bodies as Block). The codegen is two-pass:
-pass 1 declares every function (including `print` mapped to
-`sentinel_print`) so forward references work; pass 2 emits each
-body with per-fn alloca-bound params. `main` returns i32 (the C
-ABI shape); other fns return i64. ADR 0009 status now records
-Phase C0 as complete; ADR 0010 status notes all D-decisions
-exercised. Workspace test count: +22 over C0.4 (2 ast Display +
-14 parser + 1 codegen net + 5 pass = 22 new, 445 total).
+`tests/pass/c05_go_no_go.sentinel`: stdout `10\n`, exit 0.
+Programs are one-or-more `fn` definitions with an explicit `main`
+entry point. Codegen is two-pass (signatures, then bodies); main
+returns i32 (the C ABI shape) and other fns return i64. ADR 0009
+status records Phase C0 as complete; ADR 0010 status notes all
+D-decisions exercised. Workspace test count at Phase C0 close:
+445 (+22 over C0.4 — 2 ast Display + 14 parser + 1 codegen net +
+5 pass).
 
 Phase C0 retrospective: six sub-phases (C0.0 lexer, C0.1 parser +
 AST, C0.2 LLVM codegen + first runnable binaries, C0.3 let +
@@ -1095,7 +1110,9 @@ scaffold stubs.
 | C0.3  | let bindings + variable references (i64 everywhere)            | Done    | 80d2b6b |
 | C0.4  | if/else + block expressions + `print` calls + first stdout     | Done    | baf68fc |
 | C0.5  | fn definitions + main entry; **C0 go/no-go passes**            | Done    | 6ce8336 |
-| C1+   | Type system, regions, effects (HANDOVER §6.2)                  | Planned |         |
+| C1.0a | sentinel-base crate: Salsa db trait + SourceFile input + Diagnostic accumulator | Done | 09dc8c3 |
+| C1.0b | Wrap lex/parse/codegen as `#[salsa::tracked]` queries          | Pending |         |
+| C1.1+ | sentinel-resolve lift, sentinel-types real, …                  | Planned |         |
 
 ADR 0010 (concrete C0 surface syntax) lands between C0.0 and C0.1
 per ADR 0009 D8.
@@ -1206,6 +1223,19 @@ The UI fixture parse_unbalanced_paren rewrites to
 the embedded error. Workspace delta: +22 active tests (445 total).
 
 ### C.2 Crate Layout (C0.5)
+
+    crates/sentinel-base/                 (C1.0a)
+      Cargo.toml          deps: salsa, thiserror, tracing
+      src/
+        lib.rs            SourceFile (#[salsa::input] with `path`
+                          and `text` fields); SentinelDb trait
+                          (#[salsa::db], inherits salsa::Database);
+                          Diagnostic accumulator (#[salsa::
+                          accumulator]) with stage / severity /
+                          code / message / span fields. Test-only
+                          TestDb verifies the salsa machinery
+                          (3 tests). Downstream pipeline crates
+                          plug into SentinelDb at C1.0b onward.
 
     crates/sentinel-ast/
       Cargo.toml          deps: tracing, thiserror
@@ -1639,6 +1669,7 @@ All four must pass for any commit on `main`. Current expected counts:
   - sentinel-codegen:       13 tests (1 smoke + 12 codegen tests) + 0 doctests
   - sentinel-driver:        22 pass integration tests + 0 doctests
   - sentinel-runtime:       2 tests (smoke + sentinel_print_returns_zero) + 0 doctests
+  - sentinel-base:          3 tests (salsa query runs/caches + source file accessors) + 0 doctests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
                             (sentinel-resolve, -types, -hir, -mir, -lsp)
 
