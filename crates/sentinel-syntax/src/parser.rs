@@ -1,23 +1,34 @@
-//! Hand-written recursive descent parser for Sentinel C0.1.
+//! Hand-written recursive descent parser for Sentinel C0.1-C0.3.
 //!
-//! Implements the strict expression-only subset of ADR 0010 D8:
+//! C0.3 grammar (subset of ADR 0010):
 //!
 //! ```text
+//! program  = stmt* tail_expr
+//! stmt     = let_stmt | expr_stmt
+//! let_stmt = 'let' Ident '=' expr ';'
+//! expr_stmt = expr ';'
+//! tail_expr = expr                                  (no trailing ';')
+//!
 //! expr     = add_expr
 //! add_expr = mul_expr (('+' | '-') mul_expr)*       left-assoc
 //! mul_expr = unary    (('*' | '/') unary)*          left-assoc
 //! unary    = '-' unary | atom
-//! atom     = IntLit | '(' expr ')'
+//! atom     = IntLit | Ident | '(' expr ')'
 //! ```
 //!
-//! Identifiers, calls, `let`, `if`, and `fn` arrive in C0.3-0.5
-//! per ADR 0009 D6. Per ADR 0009 D1a, `parse` is a pure function:
-//! input is the source string, output is `Result<Expr, ParseError>`.
-//! Lex errors are surfaced as a transparent `ParseError::Lex` variant
-//! so a single error type carries every diagnostic the front-end can
-//! produce.
+//! Per ADR 0009 D1a, the public entry points are pure functions:
+//! [`parse`] returns a [`Program`] (statements + trailing
+//! expression), [`parse_expr`] returns a single [`Expr`] (used by
+//! library callers and existing C0.1 tests that pre-date the
+//! statement layer). Lex errors are surfaced as a transparent
+//! `ParseError::Lex` variant so the front-end has a single error
+//! type. Parse errors are fail-fast — error recovery is deferred
+//! until parser ergonomics demand it.
+//!
+//! `if`, function calls, `fn` definitions, and nested blocks
+//! arrive in C0.4-0.5 per ADR 0009 D6.
 
-use sentinel_ast::{BinOp, Expr, ExprKind, Span, Spanned, UnaryOp};
+use sentinel_ast::{BinOp, Expr, ExprKind, Program, Span, Spanned, Stmt, StmtKind, UnaryOp};
 
 use crate::{lex, LexError, TokenKind};
 
@@ -63,18 +74,52 @@ pub enum ParseError {
     },
 }
 
-/// Parse a Sentinel C0.1 source string into a single expression.
+/// Parse a Sentinel source string into a [`Program`] — zero or
+/// more statements followed by a trailing expression. This is the
+/// C0.3+ top-level entry point.
 ///
-/// Lex errors block parsing and are surfaced as `ParseError::Lex`.
-/// Per ADR 0009 D1a the function takes only its input and returns
-/// its output; no shared mutable state.
-pub fn parse(src: &str) -> Result<Expr, ParseError> {
+/// Per ADR 0009 D1a the function is pure: input is the source
+/// string, output is a `Result`. Lex errors block parsing and are
+/// surfaced as `ParseError::Lex`.
+pub fn parse(src: &str) -> Result<Program, ParseError> {
+    let mut p = lex_into_parser(src)?;
+    p.parse_program()
+}
+
+/// Parse a Sentinel source string as a single expression. The whole
+/// input must be one expression with no surrounding statements or
+/// trailing `;` — used by library callers that want to parse an
+/// expression in isolation (notably the parser's own unit tests
+/// and any future REPL / language-server completion machinery).
+pub fn parse_expr(src: &str) -> Result<Expr, ParseError> {
+    let mut p = lex_into_parser(src)?;
+    p.parse_top()
+}
+
+fn lex_into_parser<'a>(src: &'a str) -> Result<ParserOwned<'a>, ParseError> {
     let (tokens, lex_errs) = lex(src);
     if let Some(err) = lex_errs.into_iter().next() {
         return Err(ParseError::from(err));
     }
-    let mut p = Parser::new(src, &tokens);
-    p.parse_top()
+    Ok(ParserOwned { src, tokens })
+}
+
+/// Helper type that owns the lexed tokens so the [`Parser`] borrow
+/// is locally scoped — keeps the two entry points symmetric.
+struct ParserOwned<'a> {
+    src: &'a str,
+    tokens: Vec<Spanned<TokenKind>>,
+}
+
+impl<'a> ParserOwned<'a> {
+    fn parse_top(&mut self) -> Result<Expr, ParseError> {
+        let mut p = Parser::new(self.src, &self.tokens);
+        p.parse_top()
+    }
+    fn parse_program(&mut self) -> Result<Program, ParseError> {
+        let mut p = Parser::new(self.src, &self.tokens);
+        p.parse_program()
+    }
 }
 
 pub struct Parser<'a> {
@@ -98,6 +143,110 @@ impl<'a> Parser<'a> {
             });
         }
         Ok(e)
+    }
+
+    pub fn parse_program(&mut self) -> Result<Program, ParseError> {
+        let start = self.peek().map_or(0, |t| t.span.start);
+        let mut stmts = Vec::new();
+
+        loop {
+            match self.peek_kind() {
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "expression",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+                Some(TokenKind::Let) => {
+                    let stmt = self.parse_let_stmt()?;
+                    stmts.push(stmt);
+                }
+                Some(_) => {
+                    let expr = self.parse_expr()?;
+                    if self.peek_kind() == Some(TokenKind::Semi) {
+                        let semi_end = self.advance().expect("peeked").span.end;
+                        let span = expr.span.start..semi_end;
+                        stmts.push(Spanned { kind: StmtKind::Expr(expr), span });
+                        continue;
+                    }
+                    if let Some(t) = self.peek() {
+                        return Err(ParseError::UnexpectedToken {
+                            got: format!("{:?}", t.kind),
+                            expected: "end of input",
+                            span: to_source_span(&t.span),
+                        });
+                    }
+                    let end = expr.span.end;
+                    return Ok(Program { stmts, tail: expr, span: start..end });
+                }
+            }
+        }
+    }
+
+    fn parse_let_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let let_start = self.advance().expect("checked above").span.start;
+
+        let name_token = self.peek().ok_or_else(|| ParseError::UnexpectedEof {
+            expected: "identifier after `let`",
+            span: to_source_span(&self.eof_span()),
+        })?;
+        if name_token.kind != TokenKind::Ident {
+            let kind = name_token.kind;
+            let span = name_token.span.clone();
+            return Err(ParseError::UnexpectedToken {
+                got: format!("{kind:?}"),
+                expected: "identifier after `let`",
+                span: to_source_span(&span),
+            });
+        }
+        let name_span = name_token.span.clone();
+        let name = self.src[name_span.clone()].to_string();
+        self.advance();
+
+        match self.peek_kind() {
+            Some(TokenKind::Eq) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`=` in let-binding",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`=` in let-binding",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let value = self.parse_expr()?;
+
+        let semi_end = match self.peek_kind() {
+            Some(TokenKind::Semi) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`;` after let-binding",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`;` after let-binding",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        Ok(Spanned {
+            kind: StmtKind::Let { name, name_span, value },
+            span: let_start..semi_end,
+        })
     }
 
     fn peek(&self) -> Option<&Spanned<TokenKind>> {
@@ -185,6 +334,11 @@ impl<'a> Parser<'a> {
                 })?;
                 Ok(Spanned { kind: ExprKind::IntLit(n), span })
             }
+            Some(TokenKind::Ident) => {
+                let span = self.advance().expect("peeked").span.clone();
+                let name = self.src[span.clone()].to_string();
+                Ok(Spanned { kind: ExprKind::Var(name), span })
+            }
             Some(TokenKind::LParen) => {
                 let open_span = self.advance().expect("peeked").span.clone();
                 let inner = self.parse_expr()?;
@@ -224,11 +378,19 @@ mod tests {
     use super::*;
 
     fn parse_ok(src: &str) -> Expr {
-        parse(src).unwrap_or_else(|e| panic!("expected parse to succeed: {e:?}"))
+        parse_expr(src).unwrap_or_else(|e| panic!("expected parse to succeed: {e:?}"))
     }
 
     fn pretty(src: &str) -> String {
         parse_ok(src).kind.to_string()
+    }
+
+    fn parse_program_ok(src: &str) -> Program {
+        parse(src).unwrap_or_else(|e| panic!("expected parse to succeed: {e:?}"))
+    }
+
+    fn pretty_program(src: &str) -> String {
+        parse_program_ok(src).to_string()
     }
 
     #[test]
@@ -319,37 +481,37 @@ mod tests {
 
     #[test]
     fn parse_error_unmatched_open_paren() {
-        let err = parse("(1 + 2").unwrap_err();
+        let err = parse_expr("(1 + 2").unwrap_err();
         assert!(matches!(err, ParseError::UnmatchedParen { .. }), "got {err:?}");
     }
 
     #[test]
     fn parse_error_unexpected_close_paren() {
-        let err = parse(")").unwrap_err();
+        let err = parse_expr(")").unwrap_err();
         assert!(matches!(err, ParseError::UnexpectedToken { .. }), "got {err:?}");
     }
 
     #[test]
     fn parse_error_eof_after_operator() {
-        let err = parse("1 +").unwrap_err();
+        let err = parse_expr("1 +").unwrap_err();
         assert!(matches!(err, ParseError::UnexpectedEof { .. }), "got {err:?}");
     }
 
     #[test]
     fn parse_error_eof_after_unary() {
-        let err = parse("-").unwrap_err();
+        let err = parse_expr("-").unwrap_err();
         assert!(matches!(err, ParseError::UnexpectedEof { .. }), "got {err:?}");
     }
 
     #[test]
     fn parse_error_lex_passthrough() {
-        let err = parse("1 + @").unwrap_err();
+        let err = parse_expr("1 + @").unwrap_err();
         assert!(matches!(err, ParseError::Lex(_)), "got {err:?}");
     }
 
     #[test]
     fn parse_error_int_lit_overflow() {
-        let err = parse("99999999999999999999").unwrap_err();
+        let err = parse_expr("99999999999999999999").unwrap_err();
         assert!(matches!(err, ParseError::IntLitOverflow { .. }), "got {err:?}");
     }
 
@@ -357,7 +519,131 @@ mod tests {
     fn parse_error_trailing_garbage() {
         // The parser accepts an expression and then expects EOF;
         // `1 2` parses `1` as an expression but `2` is leftover.
-        let err = parse("1 2").unwrap_err();
+        let err = parse_expr("1 2").unwrap_err();
         assert!(matches!(err, ParseError::UnexpectedToken { expected, .. } if expected == "end of input"));
+    }
+
+    // C0.3: identifier atom and program-level statements.
+
+    #[test]
+    fn parse_var_atom() {
+        // `parse_expr` recognises a bare identifier as a Var reference.
+        assert_eq!(pretty("foo"), "foo");
+    }
+
+    #[test]
+    fn parse_var_in_arithmetic() {
+        assert_eq!(pretty("x + y * 2"), "(+ x (* y 2))");
+    }
+
+    #[test]
+    fn parse_program_empty_stmts() {
+        // Pure expression program still parses; the Program wraps the
+        // expression with an empty stmts list.
+        let p = parse_program_ok("42");
+        assert!(p.stmts.is_empty());
+        assert_eq!(p.tail.kind.to_string(), "42");
+    }
+
+    #[test]
+    fn parse_program_single_let() {
+        let p = parse_program_ok("let x = 5; x");
+        assert_eq!(p.stmts.len(), 1);
+        match &p.stmts[0].kind {
+            StmtKind::Let { name, value, .. } => {
+                assert_eq!(name, "x");
+                assert_eq!(value.kind.to_string(), "5");
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
+        assert_eq!(p.tail.kind.to_string(), "x");
+    }
+
+    #[test]
+    fn parse_program_multiple_lets() {
+        assert_eq!(
+            pretty_program("let x = 1; let y = 2; x + y"),
+            "(let x 1)\n(let y 2)\n(+ x y)"
+        );
+    }
+
+    #[test]
+    fn parse_program_expr_statement() {
+        // `1 + 2;` is an expression-statement; `3` is the trailing expr.
+        let p = parse_program_ok("1 + 2; 3");
+        assert_eq!(p.stmts.len(), 1);
+        match &p.stmts[0].kind {
+            StmtKind::Expr(e) => assert_eq!(e.kind.to_string(), "(+ 1 2)"),
+            other => panic!("expected Expr stmt, got {other:?}"),
+        }
+        assert_eq!(p.tail.kind.to_string(), "3");
+    }
+
+    #[test]
+    fn parse_program_uses_prior_let() {
+        assert_eq!(
+            pretty_program("let a = 2; let b = a * 3; b + 1"),
+            "(let a 2)\n(let b (* a 3))\n(+ b 1)"
+        );
+    }
+
+    #[test]
+    fn parse_program_let_span_covers_let_through_semi() {
+        let p = parse_program_ok("let x = 5; x");
+        let let_stmt = &p.stmts[0];
+        assert_eq!(let_stmt.span, 0..10); // `let x = 5;`
+        match &let_stmt.kind {
+            StmtKind::Let { name_span, .. } => assert_eq!(*name_span, 4..5), // `x`
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn parse_program_error_empty_input() {
+        let err = parse("").unwrap_err();
+        assert!(matches!(err, ParseError::UnexpectedEof { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_program_error_only_let_no_tail() {
+        let err = parse("let x = 1;").unwrap_err();
+        assert!(matches!(err, ParseError::UnexpectedEof { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_program_error_let_missing_semi() {
+        let err = parse("let x = 1").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "`;` after let-binding"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_program_error_let_missing_eq() {
+        let err = parse("let x 1;").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`=` in let-binding"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_program_error_let_missing_ident() {
+        let err = parse("let = 1;").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "identifier after `let`"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_program_error_let_bare() {
+        // `let` with nothing after it.
+        let err = parse("let").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "identifier after `let`"),
+            "got {err:?}"
+        );
     }
 }

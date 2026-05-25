@@ -14,8 +14,8 @@ mod lexer;
 mod parser;
 
 pub use lexer::{lex, LexError, TokenKind};
-pub use parser::{parse, ParseError, Parser};
-pub use sentinel_ast::{Span, Spanned};
+pub use parser::{parse, parse_expr, ParseError, Parser};
+pub use sentinel_ast::{Program, Span, Spanned, Stmt, StmtKind};
 
 /// Returns the crate name as a sanity-check that the build is wired up.
 pub fn crate_name() -> &'static str {

@@ -86,3 +86,27 @@ fn pass_c02_division() {
     // 12 / 3 == 4  (signed integer division)
     assert_eq!(build_and_run("c02_division.sentinel"), 4);
 }
+
+#[test]
+fn pass_c03_simple_let() {
+    // let x = 5; x == 5
+    assert_eq!(build_and_run("c03_simple_let.sentinel"), 5);
+}
+
+#[test]
+fn pass_c03_multiple_lets() {
+    // let x = 3; let y = 4; x + y == 7
+    assert_eq!(build_and_run("c03_multiple_lets.sentinel"), 7);
+}
+
+#[test]
+fn pass_c03_let_uses_let() {
+    // let a = 2; let b = a * 3; b + 1 == 7
+    assert_eq!(build_and_run("c03_let_uses_let.sentinel"), 7);
+}
+
+#[test]
+fn pass_c03_expr_statement() {
+    // let x = 1; x + 99; 5 == 5  (expr-stmt computed and discarded)
+    assert_eq!(build_and_run("c03_expr_statement.sentinel"), 5);
+}

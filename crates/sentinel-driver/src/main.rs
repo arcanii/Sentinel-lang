@@ -4,9 +4,11 @@
 //! C0.2: `snc build <file> [-o <output>]` additionally lowers to
 //! LLVM IR, emits an object file, and links it into an executable
 //! via the system `cc`. The compiled program's exit code is the
-//! evaluated expression truncated to i32 (the temporary
-//! exit-code-is-the-answer convention; ADR 0009 D6 C0.4 replaces
-//! this with `print(x)` once function calls land).
+//! evaluated program's tail expression truncated to i32 (the
+//! temporary exit-code-is-the-answer convention; ADR 0009 D6 C0.4
+//! replaces this with `print(x)` once function calls land).
+//! C0.3: parse and build now operate on full [`Program`]s
+//! (`stmt* tail_expr`) rather than single expressions.
 //!
 //! Pipeline stages compose via direct function calls per ADR 0009
 //! D1a. Linker invocation lives here, not in sentinel-codegen,
@@ -42,10 +44,10 @@ fn main() -> ExitCode {
 }
 
 fn print_usage() {
-    eprintln!("snc — Sentinel compiler (C0.2)");
+    eprintln!("snc — Sentinel compiler (C0.3)");
     eprintln!();
     eprintln!("usage:");
-    eprintln!("    snc parse <file>                 lex, parse, and pretty-print the AST");
+    eprintln!("    snc parse <file>                 lex, parse, and pretty-print the program");
     eprintln!("    snc build <file> [-o <output>]   compile and link to an executable");
     eprintln!("    snc help                         show this message");
 }
@@ -56,8 +58,8 @@ fn run_parse(path: &str) -> ExitCode {
         Err(code) => return code,
     };
     match parse(&src) {
-        Ok(expr) => {
-            println!("{}", expr.kind);
+        Ok(program) => {
+            println!("{program}");
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -73,8 +75,8 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
         Ok(s) => s,
         Err(code) => return code,
     };
-    let expr = match parse(&src) {
-        Ok(e) => e,
+    let program = match parse(&src) {
+        Ok(p) => p,
         Err(err) => {
             let report = Report::new(err).with_source_code(NamedSource::new(path, src));
             eprintln!("{report:?}");
@@ -88,8 +90,9 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     };
     let object_path = exe_path.with_extension("o");
 
-    if let Err(err) = sentinel_codegen::compile_to_object(&expr, &object_path) {
-        eprintln!("{:?}", Report::new(err));
+    if let Err(err) = sentinel_codegen::compile_to_object(&program, &object_path) {
+        let report = Report::new(err).with_source_code(NamedSource::new(path, src));
+        eprintln!("{report:?}");
         return ExitCode::from(1);
     }
 
