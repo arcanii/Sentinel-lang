@@ -105,3 +105,82 @@ fn pipeline_handle_resumes_with_arg_through_run() {
     let v = run(source).expect("handle should produce a value");
     assert_eq!(v, Value::Int(1));
 }
+
+#[test]
+fn pipeline_two_effect_handler_discharges_both() {
+    // B3.2c: two distinct arms in one handler. The handle body is
+    // `do A(1) + do B(2)`; lhs raises first, the BinOp arm pushes
+    // Frame::BinOpRight onto the kont and re-raises; the A arm
+    // resumes with x, the resume hits BinOpRight which evals the
+    // rhs `do B(2)` and raises again (with Frame::BinOpApply{lhs:1}
+    // pushed onto the new Op's kont); the B arm resumes with x, the
+    // resume hits BinOpApply, producing Int(1 + 2). Exercises deep
+    // re-wrap (apply's handle_step after resume) and the splice
+    // mechanism (BinOpRight producing a nested Op).
+    use sentinel_effects_proto::Value;
+    let source = "\
+        effect A : Int -> Int ; \
+        effect B : Int -> Int ; \
+        handle do A(1) + do B(2) with { \
+            A(x, k) => k(x), \
+            B(x, k) => k(x) \
+        }";
+    let v = run(source).expect("two-effect handle should produce a value");
+    assert_eq!(v, Value::Int(3));
+}
+
+#[test]
+fn pipeline_arm_body_computes_with_op_arg_before_resume() {
+    // B3.2c: arm body does work with x before passing to k. Handle
+    // body is `10 + do Ask(0)`; lhs is a Value so BinOp evaluates
+    // rhs which raises, BinOp pushes Frame::BinOpApply{lhs:10} and
+    // re-raises. Arm body `k(x + 5)` computes 0+5=5 and resumes,
+    // hitting BinOpApply which produces 10+5=15. Exercises the
+    // rhs-raises BinOp path (sibling to test 1's lhs-raises path).
+    use sentinel_effects_proto::Value;
+    let source = "\
+        effect Ask : Int -> Int ; \
+        handle 10 + do Ask(0) with { \
+            Ask(x, k) => k(x + 5) \
+        }";
+    let v = run(source).expect("arm-body-computes handle should produce a value");
+    assert_eq!(v, Value::Int(15));
+}
+
+#[test]
+fn pipeline_arm_body_uses_outer_let_binding() {
+    // B3.2c: arm body references a variable bound in the enclosing
+    // scope, not introduced by the operation. The Resumption value
+    // bundles the env captured at Handle-eval time, so the arm body
+    // (which evaluates under that env extended with x and k) can see
+    // outer bindings. This is the closest the current language gets
+    // to a state handler without CPS gymnastics.
+    use sentinel_effects_proto::Value;
+    let source = "\
+        effect Get : Int -> Int ; \
+        let s = 42 in \
+        handle do Get(0) with { \
+            Get(dummy, k) => k(s) \
+        }";
+    let v = run(source).expect("outer-let handle should produce a value");
+    assert_eq!(v, Value::Int(42));
+}
+
+#[test]
+fn pipeline_return_arm_runs_on_resumed_value() {
+    // B3.2c: explicit return arm transforms the final value. Handle
+    // body raises immediately; the Ask arm resumes with x; the
+    // resumed Value flows through handle_step's Some(ret_arm) branch
+    // and is rebound as `v` inside `v + 1`. The integration test
+    // from B3.2b had no ret_arm (identity branch); this covers the
+    // present branch.
+    use sentinel_effects_proto::Value;
+    let source = "\
+        effect E : Int -> Int ; \
+        handle do E(7) with { \
+            E(x, k) => k(x), \
+            return v => v + 1 \
+        }";
+    let v = run(source).expect("ret-arm handle should produce a value");
+    assert_eq!(v, Value::Int(8));
+}
