@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 sentinel-base    = { path = "../sentinel-base" }
 sentinel-codegen = { path = "../sentinel-codegen" }
+sentinel-resolve = { path = "../sentinel-resolve" }
 sentinel-syntax  = { path = "../sentinel-syntax" }
 
 miette     = { workspace = true, features = ["fancy"] }

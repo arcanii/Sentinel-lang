@@ -1146,6 +1146,8 @@ dependencies = [
  "inkwell",
  "miette",
  "sentinel-ast",
+ "sentinel-resolve",
+ "sentinel-syntax",
  "thiserror",
  "tracing",
 ]
@@ -1158,6 +1160,7 @@ dependencies = [
  "salsa",
  "sentinel-base",
  "sentinel-codegen",
+ "sentinel-resolve",
  "sentinel-syntax",
  "thiserror",
  "tracing",

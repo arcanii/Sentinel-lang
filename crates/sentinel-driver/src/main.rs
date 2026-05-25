@@ -14,15 +14,19 @@
 //! ADR 0011 D1. The driver instantiates a [`SentinelDatabase`],
 //! sets a [`SourceFile`] input, calls `parse_query`, and collects
 //! diagnostics via the accumulator. Codegen remains a direct
-//! function call against the resulting [`sentinel_syntax::Program`];
-//! its salsa retrofit is deferred to C1.0c per HANDOVER §0.2 step 5.
+//! function call; its salsa retrofit is deferred to C1.2+ per
+//! ADR 0011 D1's C1.0c amendment.
+//! C1.1.2: pipeline now chains parse_query → resolve_query →
+//! compile_to_object. Name resolution lives in sentinel-resolve
+//! per ADR 0011 D4; codegen consumes a `ResolvedProgram` (no more
+//! string-keyed lookups in codegen).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use miette::{LabeledSpan, MietteDiagnostic, NamedSource, Report, Severity as MietteSeverity, SourceSpan};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
-use sentinel_syntax::parse_query;
+use sentinel_resolve::resolve_query;
 
 /// The concrete Salsa database for the snc driver. Per ADR 0011 D1
 /// the cross-crate database trait [`SentinelDb`] lives in
@@ -83,8 +87,10 @@ fn run_parse(path: &str) -> ExitCode {
     };
     let db = SentinelDatabase::default();
     let file = SourceFile::new(&db, path.to_string(), src.clone());
-    let program_opt = parse_query(&db, file);
-    let diags = parse_query::accumulated::<Diagnostic>(&db, file);
+    // `parse <file>` only needs the parse stage — pretty-print the
+    // AST and stop. resolve_query exists for `build`.
+    let program_opt = sentinel_syntax::parse_query(&db, file);
+    let diags = sentinel_syntax::parse_query::accumulated::<Diagnostic>(&db, file);
     render_diagnostics(&diags, path, &src);
     match program_opt {
         Some(program) => {
@@ -102,11 +108,14 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     };
     let db = SentinelDatabase::default();
     let file = SourceFile::new(&db, path.to_string(), src.clone());
-    let program_opt = parse_query(&db, file);
-    let diags = parse_query::accumulated::<Diagnostic>(&db, file);
+    // Pipeline: parse_query → resolve_query → codegen. resolve_query
+    // depends on parse_query, so accumulated::<Diagnostic> on
+    // resolve_query picks up parse-stage diagnostics too.
+    let resolved_opt = resolve_query(&db, file);
+    let diags = resolve_query::accumulated::<Diagnostic>(&db, file);
     render_diagnostics(&diags, path, &src);
-    let program = match program_opt {
-        Some(p) => p,
+    let resolved = match resolved_opt {
+        Some(r) => r,
         None => return ExitCode::from(1),
     };
 
@@ -116,7 +125,7 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     };
     let object_path = exe_path.with_extension("o");
 
-    if let Err(err) = sentinel_codegen::compile_to_object(program, &object_path) {
+    if let Err(err) = sentinel_codegen::compile_to_object(resolved, &object_path) {
         let report = Report::new(err).with_source_code(NamedSource::new(path, src));
         eprintln!("{report:?}");
         return ExitCode::from(1);

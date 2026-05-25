@@ -1,26 +1,24 @@
 //! sentinel-codegen
 //!
-//! LLVM IR lowering via inkwell. C0.5 takes a [`Program`] of
-//! function definitions; pass 1 declares every fn (plus the
-//! `print` -> `sentinel_print` runtime mapping), pass 2 emits each
-//! fn body. Forward references between fns work because all
-//! signatures land in pass 1 before any body is emitted.
+//! LLVM IR lowering via inkwell. Takes a [`ResolvedProgram`] (the
+//! output of `sentinel-resolve::resolve`) and produces a native
+//! object file. **Pass 1** declares every fn (including the runtime
+//! `print` → `sentinel_print` mapping) so forward references work;
+//! **pass 2** emits each fn body.
 //!
 //! `main` is required and is given an `i32` return type (the C ABI
 //! `main` signature); other fns return `i64`. The exit code is the
-//! i32-truncated i64 value of `main`'s tail expression — the
-//! "exit-code-is-the-answer" convention from C0.2 still holds.
-//! Programs additionally produce stdout via `print(x)` calls.
+//! i32-truncated i64 value of `main`'s tail expression. Programs
+//! additionally produce stdout via `print(x)` calls.
 //!
-//! `print` is reserved: user-defined `fn print` collides with the
-//! pre-declared runtime symbol and is caught as
-//! `CodegenError::RedefinedFunction` in pass 1.
-//!
-//! Per ADR 0009 D7, sentinel-resolve is deferred to C1; until then
-//! codegen continues to do name resolution as a side effect.
-//! Variable scoping is flat per function (no shadowing); the vars
-//! map is reset at the start of each fn body. C0.5 adds function-
-//! name resolution to the same "absorbed into codegen" arrangement.
+//! **C1.1.2** moved name resolution out of this crate into
+//! `sentinel-resolve`. The 6 error variants
+//! (`UndefinedVariable`, `RedeclaredVariable`, `UndefinedFunction`,
+//! `ArityMismatch`, `RedefinedFunction`, `MissingMain`) all moved
+//! with it; what remains here is pure LLVM lowering errors. Per
+//! ADR 0011 D4, codegen now consumes a `ResolvedProgram` where
+//! every name reference is a stable `VarId` / `FnId` — no more
+//! string lookups in this crate.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -33,7 +31,11 @@ use inkwell::targets::{
 use inkwell::types::IntType;
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{IntPredicate, OptimizationLevel};
-use sentinel_ast::{BinOp, Block, Expr, ExprKind, FnDef, Program, Span, Stmt, StmtKind, UnaryOp};
+use sentinel_ast::{BinOp, UnaryOp};
+use sentinel_resolve::{
+    FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef, ResolvedProgram,
+    ResolvedStmt, ResolvedStmtKind, VarId,
+};
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
 pub enum CodegenError {
@@ -56,74 +58,14 @@ pub enum CodegenError {
     #[error("LLVM builder error: {0}")]
     #[diagnostic(code(sentinel::codegen::builder))]
     Builder(String),
-
-    #[error("undefined variable `{name}`")]
-    #[diagnostic(
-        code(sentinel::codegen::undefined_variable),
-        help("declare it with `let {name} = ...;` before this reference")
-    )]
-    UndefinedVariable {
-        name: String,
-        #[label("not declared in this scope")]
-        span: miette::SourceSpan,
-    },
-
-    #[error("variable `{name}` is already declared")]
-    #[diagnostic(
-        code(sentinel::codegen::redeclared_variable),
-        help("C0 scoping is flat per function; pick a different name or remove the earlier binding")
-    )]
-    RedeclaredVariable {
-        name: String,
-        #[label("redeclaration here")]
-        span: miette::SourceSpan,
-    },
-
-    #[error("undefined function `{name}`")]
-    #[diagnostic(
-        code(sentinel::codegen::undefined_function),
-        help("define it with `fn {name}(…) {{ … }}` or use `print` for the runtime builtin")
-    )]
-    UndefinedFunction {
-        name: String,
-        #[label("no such function")]
-        span: miette::SourceSpan,
-    },
-
-    #[error("`{name}` takes {expected} argument(s), got {got}")]
-    #[diagnostic(code(sentinel::codegen::arity_mismatch))]
-    ArityMismatch {
-        name: String,
-        expected: usize,
-        got: usize,
-        #[label("wrong number of arguments")]
-        span: miette::SourceSpan,
-    },
-
-    #[error("function `{name}` is already declared")]
-    #[diagnostic(
-        code(sentinel::codegen::redefined_function),
-        help("each fn name must be unique within a program; `print` is reserved by the runtime")
-    )]
-    RedefinedFunction {
-        name: String,
-        #[label("redefinition here")]
-        span: miette::SourceSpan,
-    },
-
-    #[error("program has no `main` function")]
-    #[diagnostic(
-        code(sentinel::codegen::missing_main),
-        help("add `fn main() {{ … }}` — it is the program entry point")
-    )]
-    MissingMain,
 }
 
-/// Lower a [`Program`] (C0.5 fn-defs) to a native object file at
-/// `output`. The emitted module exports `main` (i32-returning, the
-/// C ABI entry); the runtime symbol `sentinel_print` is pre-declared
-/// in pass 1 and called as `print(x)` from Sentinel source.
-pub fn compile_to_object(program: &Program, output: &Path) -> Result<(), CodegenError> {
+/// Lower a [`ResolvedProgram`] to a native object file at `output`.
+/// The emitted module exports `main` (i32-returning, the C ABI
+/// entry); the runtime symbol `sentinel_print` is pre-declared in
+/// pass 1 and called by `FnId(0)` references from resolved
+/// programs.
+pub fn compile_to_object(program: &ResolvedProgram, output: &Path) -> Result<(), CodegenError> {
     let context = Context::create();
     let module = context.create_module("sentinel");
     let builder = context.create_builder();
@@ -131,39 +73,29 @@ pub fn compile_to_object(program: &Program, output: &Path) -> Result<(), Codegen
     let i32_type = context.i32_type();
     let i64_type = context.i64_type();
 
-    // Pass 1: declare every function (including the runtime print).
-    let mut fns: HashMap<String, FunctionValue> = HashMap::new();
-
-    // `print(x: i64) -> i64` is the runtime symbol.
-    let print_type = i64_type.fn_type(&[i64_type.into()], false);
-    let print_fn = module.add_function("sentinel_print", print_type, None);
-    fns.insert("print".to_string(), print_fn);
-
-    let mut main_seen = false;
-    for fn_def in &program.fns {
-        if fns.contains_key(&fn_def.name) {
-            return Err(CodegenError::RedefinedFunction {
-                name: fn_def.name.clone(),
-                span: to_source_span(&fn_def.name_span),
-            });
-        }
-        let return_type = if fn_def.name == "main" {
-            main_seen = true;
-            i32_type
-        } else {
-            i64_type
-        };
-        let param_types: Vec<_> = fn_def.params.iter().map(|_| i64_type.into()).collect();
+    // Pass 1: declare every function in the resolved program's
+    // signature table. Signatures are indexed by FnId.0; FnId(0) is
+    // always `print` (the runtime symbol) per sentinel-resolve's
+    // pre-registration.
+    let mut fns: HashMap<FnId, FunctionValue> = HashMap::new();
+    for signature in &program.fn_signatures {
+        let return_type = if signature.is_main { i32_type } else { i64_type };
+        let param_types: Vec<_> =
+            (0..signature.arity).map(|_| i64_type.into()).collect();
         let fn_type = return_type.fn_type(&param_types, false);
-        let fn_value = module.add_function(&fn_def.name, fn_type, None);
-        fns.insert(fn_def.name.clone(), fn_value);
+        // The runtime print symbol lives at "sentinel_print"; user
+        // fns get their source name. is_runtime is the routing flag.
+        let llvm_name = if signature.is_runtime {
+            "sentinel_print"
+        } else {
+            &signature.name
+        };
+        let fn_value = module.add_function(llvm_name, fn_type, None);
+        fns.insert(signature.id, fn_value);
     }
 
-    if !main_seen {
-        return Err(CodegenError::MissingMain);
-    }
-
-    // Pass 2: emit each function body.
+    // Pass 2: emit each user function body. (The runtime `print`
+    // has no body — it's defined externally by sentinel-runtime.)
     {
         let mut cx = CodegenCtx {
             context: &context,
@@ -174,7 +106,7 @@ pub fn compile_to_object(program: &Program, output: &Path) -> Result<(), Codegen
             vars: HashMap::new(),
         };
         for fn_def in &program.fns {
-            cx.compile_fn(fn_def)?;
+            cx.compile_fn(fn_def, program)?;
         }
     }
 
@@ -214,26 +146,29 @@ pub fn compile_to_object(program: &Program, output: &Path) -> Result<(), Codegen
 /// Per-function codegen state plus a shared function table. `'ctx`
 /// is the LLVM IR lifetime (bound by Context); `'a` is the borrow
 /// lifetime — short enough for the ctx to drop before
-/// `module.verify()`. The `module` itself is not stored in the
-/// ctx because pass 1 declares all functions up-front so pass 2
-/// never needs to mutate the module (it only emits IR via the
-/// builder against pre-existing FunctionValues). `current_fn` and
-/// `vars` are reset at the start of each fn body via
-/// [`CodegenCtx::compile_fn`].
+/// `module.verify()`. `current_fn` and `vars` are reset at the
+/// start of each fn body via [`CodegenCtx::compile_fn`].
 struct CodegenCtx<'ctx, 'a> {
     context: &'a Context,
     builder: Builder<'ctx>,
     i64_type: IntType<'ctx>,
-    fns: HashMap<String, FunctionValue<'ctx>>,
+    fns: HashMap<FnId, FunctionValue<'ctx>>,
     current_fn: Option<FunctionValue<'ctx>>,
-    vars: HashMap<String, PointerValue<'ctx>>,
+    /// Per-function variable map. VarIds are program-global but
+    /// only the IDs declared inside `current_fn` are populated
+    /// here; the map clears at the start of each fn.
+    vars: HashMap<VarId, PointerValue<'ctx>>,
 }
 
 impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
-    fn compile_fn(&mut self, fn_def: &FnDef) -> Result<(), CodegenError> {
+    fn compile_fn(
+        &mut self,
+        fn_def: &ResolvedFnDef,
+        program: &ResolvedProgram,
+    ) -> Result<(), CodegenError> {
         let fn_value = *self
             .fns
-            .get(&fn_def.name)
+            .get(&fn_def.id)
             .expect("declared in pass 1");
         self.current_fn = Some(fn_value);
         self.vars.clear();
@@ -241,14 +176,10 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
         let entry = self.context.append_basic_block(fn_value, "entry");
         self.builder.position_at_end(entry);
 
-        // Bind parameters: alloca + store the incoming value.
+        // Bind parameters: alloca + store the incoming value. Resolve
+        // already caught duplicate-name params; we just allocate by
+        // VarId here.
         for (i, param) in fn_def.params.iter().enumerate() {
-            if self.vars.contains_key(&param.name) {
-                return Err(CodegenError::RedeclaredVariable {
-                    name: param.name.clone(),
-                    span: to_source_span(&param.span),
-                });
-            }
             let arg = fn_value
                 .get_nth_param(i as u32)
                 .expect("param exists")
@@ -260,12 +191,12 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
             self.builder
                 .build_store(alloca, arg)
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            self.vars.insert(param.name.clone(), alloca);
+            self.vars.insert(param.id, alloca);
         }
 
-        let body_val = self.lower_block(&fn_def.body)?;
+        let body_val = self.lower_block(&fn_def.body, program)?;
 
-        if fn_def.name == "main" {
+        if fn_def.signature(program).is_main {
             let i32_type = self.context.i32_type();
             let exit = self
                 .builder
@@ -282,16 +213,14 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
         Ok(())
     }
 
-    fn lower_stmt(&mut self, stmt: &Stmt) -> Result<(), CodegenError> {
+    fn lower_stmt(
+        &mut self,
+        stmt: &ResolvedStmt,
+        program: &ResolvedProgram,
+    ) -> Result<(), CodegenError> {
         match &stmt.kind {
-            StmtKind::Let { name, name_span, value } => {
-                if self.vars.contains_key(name) {
-                    return Err(CodegenError::RedeclaredVariable {
-                        name: name.clone(),
-                        span: to_source_span(name_span),
-                    });
-                }
-                let v = self.lower_expr(value)?;
+            ResolvedStmtKind::Let { id, name, value, .. } => {
+                let v = self.lower_expr(value, program)?;
                 let alloca = self
                     .builder
                     .build_alloca(self.i64_type, name)
@@ -299,29 +228,34 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
                 self.builder
                     .build_store(alloca, v)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
-                self.vars.insert(name.clone(), alloca);
+                self.vars.insert(*id, alloca);
             }
-            StmtKind::Expr(e) => {
-                let _ = self.lower_expr(e)?;
+            ResolvedStmtKind::Expr(e) => {
+                let _ = self.lower_expr(e, program)?;
             }
         }
         Ok(())
     }
 
-    fn lower_block(&mut self, block: &Block) -> Result<IntValue<'ctx>, CodegenError> {
+    fn lower_block(
+        &mut self,
+        block: &ResolvedBlock,
+        program: &ResolvedProgram,
+    ) -> Result<IntValue<'ctx>, CodegenError> {
         for stmt in &block.stmts {
-            self.lower_stmt(stmt)?;
+            self.lower_stmt(stmt, program)?;
         }
-        self.lower_expr(&block.tail)
+        self.lower_expr(&block.tail, program)
     }
 
     fn lower_if(
         &mut self,
-        cond: &Expr,
-        then_branch: &Block,
-        else_branch: &Block,
+        cond: &ResolvedExpr,
+        then_branch: &ResolvedBlock,
+        else_branch: &ResolvedBlock,
+        program: &ResolvedProgram,
     ) -> Result<IntValue<'ctx>, CodegenError> {
-        let cond_val = self.lower_expr(cond)?;
+        let cond_val = self.lower_expr(cond, program)?;
         let zero = self.i64_type.const_zero();
         let cond_i1 = self
             .builder
@@ -343,7 +277,7 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
         self.builder.position_at_end(then_bb);
-        let then_val = self.lower_block(then_branch)?;
+        let then_val = self.lower_block(then_branch, program)?;
         self.builder
             .build_store(result, then_val)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -352,7 +286,7 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
         self.builder.position_at_end(else_bb);
-        let else_val = self.lower_block(else_branch)?;
+        let else_val = self.lower_block(else_branch, program)?;
         self.builder
             .build_store(result, else_val)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -370,69 +304,66 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
 
     fn lower_call(
         &mut self,
-        callee: &str,
-        callee_span: &Span,
-        args: &[Expr],
+        id: FnId,
+        args: &[ResolvedExpr],
+        program: &ResolvedProgram,
     ) -> Result<IntValue<'ctx>, CodegenError> {
         let fn_value = *self
             .fns
-            .get(callee)
-            .ok_or_else(|| CodegenError::UndefinedFunction {
-                name: callee.to_string(),
-                span: to_source_span(callee_span),
-            })?;
-        let expected = fn_value.count_params() as usize;
-        if args.len() != expected {
-            return Err(CodegenError::ArityMismatch {
-                name: callee.to_string(),
-                expected,
-                got: args.len(),
-                span: to_source_span(callee_span),
-            });
-        }
+            .get(&id)
+            .expect("FnId from a resolved program is always in the fn table");
+        let signature = program.signature(id);
         let arg_values: Vec<BasicMetadataValueEnum> = args
             .iter()
-            .map(|a| self.lower_expr(a).map(|v| v.into()))
+            .map(|a| self.lower_expr(a, program).map(|v| v.into()))
             .collect::<Result<Vec<_>, _>>()?;
         let call = self
             .builder
-            .build_call(fn_value, &arg_values, &format!("call_{callee}"))
+            .build_call(fn_value, &arg_values, &format!("call_{}", signature.name))
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
         call.try_as_basic_value()
             .left()
             .map(|v| v.into_int_value())
             .ok_or_else(|| {
-                CodegenError::Builder(format!("call to `{callee}` returned void unexpectedly"))
+                CodegenError::Builder(format!(
+                    "call to `{}` returned void unexpectedly",
+                    signature.name
+                ))
             })
     }
 
-    fn lower_expr(&mut self, expr: &Expr) -> Result<IntValue<'ctx>, CodegenError> {
+    fn lower_expr(
+        &mut self,
+        expr: &ResolvedExpr,
+        program: &ResolvedProgram,
+    ) -> Result<IntValue<'ctx>, CodegenError> {
         match &expr.kind {
-            ExprKind::IntLit(n) => Ok(self.i64_type.const_int(*n as u64, true)),
-            ExprKind::Var(name) => {
-                let ptr = self
+            ResolvedExprKind::IntLit(n) => Ok(self.i64_type.const_int(*n as u64, true)),
+            ResolvedExprKind::Var(id) => {
+                let ptr = *self
                     .vars
-                    .get(name)
-                    .copied()
-                    .ok_or_else(|| CodegenError::UndefinedVariable {
-                        name: name.clone(),
-                        span: to_source_span(&expr.span),
-                    })?;
+                    .get(id)
+                    .expect("VarId from a resolved program is always live in its scope");
+                // Use the binding's source name as the LLVM SSA name
+                // for readability; fall back to a synthetic name if
+                // somehow the program tables disagree (shouldn't
+                // happen).
+                let name = self.var_name(*id, program).unwrap_or("load");
                 let loaded = self
                     .builder
                     .build_load(self.i64_type, ptr, name)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 Ok(loaded.into_int_value())
             }
-            ExprKind::Unary(UnaryOp::Neg, inner) => {
-                let v = self.lower_expr(inner)?;
+            ResolvedExprKind::Unary(UnaryOp::Neg, inner) => {
+                let v = self.lower_expr(inner, program)?;
                 self.builder
                     .build_int_neg(v, "neg")
                     .map_err(|e| CodegenError::Builder(e.to_string()))
             }
-            ExprKind::Binary(op, lhs, rhs) => {
-                let l = self.lower_expr(lhs)?;
-                let r = self.lower_expr(rhs)?;
+            ResolvedExprKind::Binary(op, lhs, rhs) => {
+                let l = self.lower_expr(lhs, program)?;
+                let r = self.lower_expr(rhs, program)?;
                 let result = match op {
                     BinOp::Add => self.builder.build_int_add(l, r, "add"),
                     BinOp::Sub => self.builder.build_int_sub(l, r, "sub"),
@@ -441,19 +372,71 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
                 };
                 result.map_err(|e| CodegenError::Builder(e.to_string()))
             }
-            ExprKind::Block(b) => self.lower_block(b),
-            ExprKind::If { cond, then_branch, else_branch } => {
-                self.lower_if(cond, then_branch, else_branch)
+            ResolvedExprKind::Block(b) => self.lower_block(b, program),
+            ResolvedExprKind::If { cond, then_branch, else_branch } => {
+                self.lower_if(cond, then_branch, else_branch, program)
             }
-            ExprKind::Call { callee, callee_span, args } => {
-                self.lower_call(callee, callee_span, args)
-            }
+            ResolvedExprKind::Call { id, args, .. } => self.lower_call(*id, args, program),
         }
+    }
+
+    /// Look up a binding's source name for use as an LLVM SSA debug
+    /// name. Walks the current fn's params and then its body for a
+    /// matching binding. This is purely for IR readability; returns
+    /// None if no match (unreachable in practice for well-formed
+    /// resolved programs).
+    fn var_name<'p>(&self, id: VarId, program: &'p ResolvedProgram) -> Option<&'p str> {
+        let current_fn_value = self.current_fn?;
+        let current_fn_id = *self.fns.iter().find_map(|(fn_id, value)| {
+            if *value == current_fn_value {
+                Some(fn_id)
+            } else {
+                None
+            }
+        })?;
+        let fn_def = program.fns.iter().find(|f| f.id == current_fn_id)?;
+        if let Some(param) = fn_def.params.iter().find(|p| p.id == id) {
+            return Some(&param.name);
+        }
+        find_var_name_in_block(&fn_def.body, id)
     }
 }
 
-fn to_source_span(span: &Span) -> miette::SourceSpan {
-    (span.start, span.len()).into()
+fn find_var_name_in_block(block: &ResolvedBlock, id: VarId) -> Option<&str> {
+    for stmt in &block.stmts {
+        if let ResolvedStmtKind::Let { id: bid, name, value, .. } = &stmt.kind {
+            if *bid == id {
+                return Some(name);
+            }
+            if let Some(n) = find_var_name_in_expr(value, id) {
+                return Some(n);
+            }
+        } else if let ResolvedStmtKind::Expr(e) = &stmt.kind {
+            if let Some(n) = find_var_name_in_expr(e, id) {
+                return Some(n);
+            }
+        }
+    }
+    find_var_name_in_expr(&block.tail, id)
+}
+
+fn find_var_name_in_expr(expr: &ResolvedExpr, id: VarId) -> Option<&str> {
+    match &expr.kind {
+        ResolvedExprKind::IntLit(_) | ResolvedExprKind::Var(_) => None,
+        ResolvedExprKind::Unary(_, inner) => find_var_name_in_expr(inner, id),
+        ResolvedExprKind::Binary(_, lhs, rhs) => {
+            find_var_name_in_expr(lhs, id).or_else(|| find_var_name_in_expr(rhs, id))
+        }
+        ResolvedExprKind::Block(b) => find_var_name_in_block(b, id),
+        ResolvedExprKind::If { cond, then_branch, else_branch } => {
+            find_var_name_in_expr(cond, id)
+                .or_else(|| find_var_name_in_block(then_branch, id))
+                .or_else(|| find_var_name_in_block(else_branch, id))
+        }
+        ResolvedExprKind::Call { args, .. } => {
+            args.iter().find_map(|a| find_var_name_in_expr(a, id))
+        }
+    }
 }
 
 /// Returns the crate name as a sanity-check that the build is wired up.
@@ -464,42 +447,13 @@ pub fn crate_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sentinel_ast::{Block, Expr, ExprKind, FnDef, Param, Program, Spanned, Stmt, StmtKind};
+    use sentinel_resolve::resolve;
+    use sentinel_syntax::parse;
 
-    fn lit(n: i64, span: Span) -> Expr {
-        Spanned { kind: ExprKind::IntLit(n), span }
-    }
-
-    fn var(name: &str, span: Span) -> Expr {
-        Spanned { kind: ExprKind::Var(name.to_string()), span }
-    }
-
-    fn let_stmt(name: &str, name_span: Span, value: Expr, span: Span) -> Stmt {
-        Spanned {
-            kind: StmtKind::Let { name: name.to_string(), name_span, value },
-            span,
-        }
-    }
-
-    fn main_with_body(body: Block) -> FnDef {
-        FnDef {
-            name: "main".to_string(),
-            name_span: 0..4,
-            params: vec![],
-            body,
-            span: 0..50,
-        }
-    }
-
-    fn main_returning(tail: Expr) -> FnDef {
-        let body_span = tail.span.clone();
-        let body = Block { stmts: vec![], tail, span: body_span };
-        main_with_body(body)
-    }
-
-    fn single_fn_program(f: FnDef) -> Program {
-        let span = f.span.clone();
-        Program { fns: vec![f], span }
+    fn compile_src(src: &str) -> Result<(), CodegenError> {
+        let prog = parse(src).expect("parse");
+        let resolved = resolve(&prog).expect("resolve");
+        compile_to_object(&resolved, &out_path())
     }
 
     fn out_path() -> std::path::PathBuf {
@@ -518,203 +472,31 @@ mod tests {
 
     #[test]
     fn compile_main_with_int_lit() {
-        let prog = single_fn_program(main_returning(lit(42, 0..2)));
-        compile_to_object(&prog, &out_path()).expect("compile");
+        compile_src("fn main() { 42 }").expect("compile");
     }
 
     #[test]
     fn compile_main_with_let_program() {
-        let body = Block {
-            stmts: vec![let_stmt("x", 4..5, lit(5, 8..9), 0..10)],
-            tail: var("x", 11..12),
-            span: 0..12,
-        };
-        let prog = single_fn_program(main_with_body(body));
-        compile_to_object(&prog, &out_path()).expect("compile");
-    }
-
-    #[test]
-    fn compile_rejects_undefined_variable() {
-        let prog = single_fn_program(main_returning(var("y", 0..1)));
-        let err = compile_to_object(&prog, &out_path()).expect_err("should fail");
-        assert!(
-            matches!(err, CodegenError::UndefinedVariable { ref name, .. } if name == "y"),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn compile_rejects_redeclared_variable() {
-        let body = Block {
-            stmts: vec![
-                let_stmt("x", 4..5, lit(1, 8..9), 0..10),
-                let_stmt("x", 15..16, lit(2, 19..20), 11..21),
-            ],
-            tail: var("x", 22..23),
-            span: 0..23,
-        };
-        let prog = single_fn_program(main_with_body(body));
-        let err = compile_to_object(&prog, &out_path()).expect_err("should fail");
-        assert!(
-            matches!(err, CodegenError::RedeclaredVariable { ref name, .. } if name == "x"),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn compile_rejects_missing_main() {
-        let f = FnDef {
-            name: "foo".to_string(),
-            name_span: 0..3,
-            params: vec![],
-            body: Block { stmts: vec![], tail: lit(0, 0..1), span: 0..1 },
-            span: 0..20,
-        };
-        let prog = Program { fns: vec![f], span: 0..20 };
-        let err = compile_to_object(&prog, &out_path()).expect_err("should fail");
-        assert!(matches!(err, CodegenError::MissingMain), "got {err:?}");
-    }
-
-    #[test]
-    fn compile_rejects_redefined_function() {
-        let f1 = FnDef {
-            name: "double".to_string(),
-            name_span: 0..6,
-            params: vec![],
-            body: Block { stmts: vec![], tail: lit(0, 0..1), span: 0..1 },
-            span: 0..20,
-        };
-        let f2 = FnDef {
-            name: "double".to_string(),
-            name_span: 30..36,
-            params: vec![],
-            body: Block { stmts: vec![], tail: lit(1, 0..1), span: 0..1 },
-            span: 21..40,
-        };
-        let main = main_returning(lit(0, 0..1));
-        let prog = Program { fns: vec![f1, f2, main], span: 0..50 };
-        let err = compile_to_object(&prog, &out_path()).expect_err("should fail");
-        assert!(
-            matches!(err, CodegenError::RedefinedFunction { ref name, .. } if name == "double"),
-            "got {err:?}"
-        );
-    }
-
-    #[test]
-    fn compile_rejects_user_redefining_print() {
-        // `print` is pre-declared by the runtime; user fns can't take it.
-        let user_print = FnDef {
-            name: "print".to_string(),
-            name_span: 0..5,
-            params: vec![Param { name: "x".to_string(), span: 6..7 }],
-            body: Block { stmts: vec![], tail: lit(0, 0..1), span: 0..1 },
-            span: 0..20,
-        };
-        let main = main_returning(lit(0, 0..1));
-        let prog = Program { fns: vec![user_print, main], span: 0..40 };
-        let err = compile_to_object(&prog, &out_path()).expect_err("should fail");
-        assert!(
-            matches!(err, CodegenError::RedefinedFunction { ref name, .. } if name == "print"),
-            "got {err:?}"
-        );
+        compile_src("fn main() { let x = 5; x }").expect("compile");
     }
 
     #[test]
     fn compile_multi_fn_with_forward_ref() {
-        // fn main() { double(7) }      <- forward-refs double
-        // fn double(x) { x * 2 }
-        let call_double = Spanned {
-            kind: ExprKind::Call {
-                callee: "double".to_string(),
-                callee_span: 0..6,
-                args: vec![lit(7, 0..1)],
-            },
-            span: 0..9,
-        };
-        let main = main_returning(call_double);
-        let double = FnDef {
-            name: "double".to_string(),
-            name_span: 0..6,
-            params: vec![Param { name: "x".to_string(), span: 0..1 }],
-            body: Block {
-                stmts: vec![],
-                tail: Spanned {
-                    kind: ExprKind::Binary(
-                        BinOp::Mul,
-                        Box::new(var("x", 0..1)),
-                        Box::new(lit(2, 0..1)),
-                    ),
-                    span: 0..5,
-                },
-                span: 0..5,
-            },
-            span: 30..50,
-        };
-        let prog = Program { fns: vec![main, double], span: 0..50 };
-        compile_to_object(&prog, &out_path()).expect("compile");
+        compile_src("fn main() { double(7) }\nfn double(x) { x * 2 }").expect("compile");
     }
 
     #[test]
-    fn compile_rejects_undefined_function() {
-        let call = Spanned {
-            kind: ExprKind::Call {
-                callee: "frobnicate".to_string(),
-                callee_span: 0..10,
-                args: vec![lit(5, 11..12)],
-            },
-            span: 0..13,
-        };
-        let prog = single_fn_program(main_returning(call));
-        let err = compile_to_object(&prog, &out_path()).expect_err("should fail");
-        assert!(
-            matches!(err, CodegenError::UndefinedFunction { ref name, .. } if name == "frobnicate"),
-            "got {err:?}"
-        );
+    fn compile_call_to_print() {
+        compile_src("fn main() { print(42) }").expect("compile");
     }
 
     #[test]
-    fn compile_rejects_arity_mismatch() {
-        let call = Spanned {
-            kind: ExprKind::Call {
-                callee: "print".to_string(),
-                callee_span: 0..5,
-                args: vec![lit(1, 6..7), lit(2, 9..10)],
-            },
-            span: 0..11,
-        };
-        let prog = single_fn_program(main_returning(call));
-        let err = compile_to_object(&prog, &out_path()).expect_err("should fail");
-        assert!(
-            matches!(err, CodegenError::ArityMismatch { ref name, expected: 1, got: 2, .. } if name == "print"),
-            "got {err:?}"
-        );
+    fn compile_if_else_program() {
+        compile_src("fn main() { if 1 { 42 } else { 99 } }").expect("compile");
     }
 
     #[test]
-    fn compile_call_to_user_fn_arity_check() {
-        // fn one_arg(x) { x }
-        // fn main() { one_arg(1, 2) }   <- arity mismatch
-        let one_arg = FnDef {
-            name: "one_arg".to_string(),
-            name_span: 0..7,
-            params: vec![Param { name: "x".to_string(), span: 0..1 }],
-            body: Block { stmts: vec![], tail: var("x", 0..1), span: 0..1 },
-            span: 0..20,
-        };
-        let bad_call = Spanned {
-            kind: ExprKind::Call {
-                callee: "one_arg".to_string(),
-                callee_span: 0..7,
-                args: vec![lit(1, 0..1), lit(2, 0..1)],
-            },
-            span: 0..15,
-        };
-        let main = main_returning(bad_call);
-        let prog = Program { fns: vec![one_arg, main], span: 0..50 };
-        let err = compile_to_object(&prog, &out_path()).expect_err("should fail");
-        assert!(
-            matches!(err, CodegenError::ArityMismatch { ref name, expected: 1, got: 2, .. } if name == "one_arg"),
-            "got {err:?}"
-        );
+    fn compile_block_expression() {
+        compile_src("fn main() { let r = { let y = 4; y + 1 }; r * 2 }").expect("compile");
     }
 }

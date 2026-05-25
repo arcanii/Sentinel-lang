@@ -10,12 +10,16 @@ license.workspace      = true
 repository.workspace   = true
 
 [dependencies]
-sentinel-ast = { path = "../sentinel-ast" }
+sentinel-ast     = { path = "../sentinel-ast" }
+sentinel-resolve = { path = "../sentinel-resolve" }
 
 inkwell    = { workspace = true }
 miette     = { workspace = true }
 thiserror  = { workspace = true }
 tracing    = { workspace = true }
+
+[dev-dependencies]
+sentinel-syntax = { path = "../sentinel-syntax" }
 
 [lints.rust]
 unsafe_code = "allow"
