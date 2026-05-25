@@ -1,6 +1,6 @@
 # ADR 0007: Effect handler design
 
-Status: ACCEPTED (B3.0 + B3.1 landed; B3.2 runtime pending)
+Status: ACCEPTED
 Date: 2026-05-24
 Related: 0003 (let-rec restriction), 0005 (effect surface), 0006 (effect rows)
 
@@ -193,6 +193,55 @@ One-shot enforcement. `Continuation` carries an internal
 `EvalError::ContinuationAlreadyResumed` on the second invocation.
 Multi-shot via continuation cloning is out of scope for B3 and recorded
 under "Considered and rejected" below.
+### D5 implementation note (B3.2 landed)
+
+B3.2 implemented D5 across three commits: B3.2a (bdda217) scaffolding,
+B3.2b (a9cefb1) substantive runtime, B3.2c (8e3de20) positive coverage.
+Concrete shape choices made during implementation:
+
+`Continuation` is a `Vec<Frame>` enum, not a boxed `FnOnce`. The data
+form was chosen for `Debug`/`Clone` ergonomics and for keeping the
+"what eval was about to do next" states explicit and greppable. Eight
+frame variants enumerated by counting resume-points in the existing
+eval arms (LetBody, LetRecBody, IfBranch, AppArg, AppCall, BinOpRight,
+BinOpApply, PerformReify); a ninth, HandleFwd, was added in B3.2b to
+record handlers that a non-matching Op walks past, so resumed
+computations get re-wrapped through the same handler (the deep re-wrap
+travels via this frame, not via the arm-body `\v. handle (kont.resume v)
+with H` closure the ADR sketches).
+
+Continuation captured at the perform site is reified as a new
+`Value::Resumption { kont, arms, ret_arm, env }` rather than the
+ADR's `\v. handle (kont.resume v) with H` synthesised closure. The
+bundled-context form keeps the deep re-wrap data with the resumption
+value, lets `apply` dispatch on `Value` (sibling to `Value::Closure`)
+without an App-site lookup into handler state, and avoids requiring a
+builtin-function mechanism the prototype does not have. `handle_step`
+is the shared dispatch hub used both by the `Handle` arm at evaluation
+start and by `apply` at resume re-wrap.
+
+`Continuation` derives `Clone` because `Value` is `Clone` and
+`Value::Resumption` holds `Continuation` by value. The one-shot
+guarantee therefore holds per-Continuation-instance (the
+`Cell<bool>` resumed-flag fires `EvalError::ContinuationAlreadyResumed`
+on second resume of the same Continuation) rather than
+per-logical-resumption (a cloned `Value::Resumption` is two
+independently-resumable Continuations). Nothing in eval clones a
+Resumption today; user-level multi-shot via `Value::Clone` is not
+statically prevented. Stricter alternatives are recorded inline at
+the `Continuation` definition: a move-only variant, or
+`Rc<Cell<bool>>` for a shared flag.
+
+`EvalError::EffectNotYetSupported` and
+`EvalError::HandlersNotYetSupported` were both deleted in B3.2b once
+their producing arms gained real implementations.
+`EvalError::UnhandledOpAtTopLevel { label }` and
+`EvalError::ContinuationAlreadyResumed` were added: the former as
+defence-in-depth at `crate::run` mirroring B2.2b's posture (the type
+system's default-close at `infer_program` should prevent open rows at
+the top level; the runtime checks anyway), the latter to actively
+enforce one-shot on second resume.
+
 
 ### D6. Interaction with let-rec
 
@@ -321,6 +370,52 @@ Phase breakdown status:
   judged unnecessary — `Row`'s `Display` renders residuals as
   `{Label1, Label2 | tail}` which is already human-readable.
 - B3.2 (runtime): not started. Plan unchanged from the original ADR.
+### D9 amendment (2026-05-25, B3.2 landed)
+
+All completion criteria now satisfied:
+
+- ~~`crates/sentinel-effects-proto/src/eval.rs:51` perform-site
+  placeholder.~~ Replaced in B3.2b (a9cefb1) with operation reification
+  per D5. `ExprKind::Perform { label, arg, .. }` evaluates `arg`; on
+  `Step::Value(v)` produces `Step::Op { label, arg: v, kont:
+  Continuation::empty() }`; on `Step::Op` pushes
+  `Frame::PerformReify { label }` onto the kont and re-raises.
+- ~~`crates/sentinel-effects-proto/src/eval.rs:161` dispatch stub.~~
+  Replaced in B3.2b (a9cefb1) with deep-handler dispatch via
+  `handle_step`. `ExprKind::Handle { body, arms, ret_arm }` eager-Arcs
+  arms and ret_arm once (so subsequent `Resumption`/`HandleFwd`
+  constructions share them cheaply), evaluates the body, and routes
+  the resulting `Step` through `handle_step`.
+- ~~`EvalError::EffectNotYetSupported` variant.~~ Removed in B3.2b
+  (a9cefb1).
+- ~~`EvalError::HandlersNotYetSupported` variant.~~ Removed in B3.2b
+  (a9cefb1).
+- ~~All tests pass.~~ 169 lib + 14 integration + 0 doctests. The D7
+  canary and D8 positive/negative pair both remain landed-as-no-ops
+  per the B3.1 amendment above; the substantive positive coverage for
+  B3.2 lives in `tests/integration.rs` as
+  `pipeline_handle_resumes_with_arg_through_run` (B3.2b),
+  `pipeline_two_effect_handler_discharges_both`,
+  `pipeline_arm_body_computes_with_op_arg_before_resume`,
+  `pipeline_arm_body_uses_outer_let_binding`, and
+  `pipeline_return_arm_runs_on_resumed_value` (B3.2c).
+
+Phase breakdown status:
+
+- B3.0 (surface): landed 821b16a. (Status unchanged from B3.1 amendment.)
+- B3.1 (typing): landed febf379 + e7958e1. (Status unchanged from B3.1
+  amendment.)
+- B3.2 (runtime): landed bdda217 (B3.2a scaffolding: `Step` enum,
+  `Continuation` with `todo!` resume, eight `Frame` variants,
+  `UnhandledOpAtTopLevel` + `ContinuationAlreadyResumed` variants
+  added; no behavior change), a9cefb1 (B3.2b substantive: `resume`
+  body filled in, `Perform` reifies, `Handle` dispatches via
+  `handle_step`, `Value::Resumption` variant added, `Frame::HandleFwd`
+  variant added, both placeholder error variants deleted), 8e3de20
+  (B3.2c positive coverage: four integration tests).
+
+ADR 0007 status is now ACCEPTED in full; no qualifiers remain.
+
 
 ## Considered and rejected (for B3)
 
@@ -354,3 +449,18 @@ produces a value of type `Handler<rho_in, rho_out, T1, T2>`, applicable
 via a separate `with H handle e` form. Rejected for B3 to keep scope
 contained; can be layered on later as sugar over the syntactic form
 without breaking existing source.
+CPS-state state handler in B3.2c. A real state handler in the
+Eff/Koka sense (Get/Put paired effects threading mutable state
+through resumption) requires either multi-argument continuations
+(`k(state, value)`) or CPS-state encoding where the handle's result
+type is `state -> result`. The prototype's unary lambdas/apps preclude
+the former; the latter is expressible but the test program becomes
+~6 source lines and the trace is long enough to obscure what is being
+tested. Deferred. The B3.2c
+`pipeline_arm_body_uses_outer_let_binding` test exercises the
+load-bearing mechanic (an outer Let binding is visible inside the
+arm body via the env bundled into `Value::Resumption`) which is what
+a CPS-state handler would also depend on. A proper state-handler test
+is filed against whatever phase introduces multi-arg functions or
+records.
+

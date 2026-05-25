@@ -11,17 +11,20 @@ research-grade interpreter (effects-proto). They are tracked in
 separate sections below. The remaining workspace members listed in
 HANDOVER §3.2 are scaffold-only.
 
-Last updated: phase B3.1 complete (handler surface in B3.0; handler
-typing rule in B3.1). 169 lib + 10 integration tests pass.
-`row_split` lands as the dual of `rewrite_row`. New typing errors:
-`HandlerLabelNotInRow`, `DuplicateHandlerArm`. Placeholder
-`TypeError::HandlersNotYetSupported` removed; eval-side placeholders
-(`EvalError::EffectNotYetSupported`, `EvalError::HandlersNotYetSupported`)
-remain pending B3.2 runtime. See ADRs 0003 (B1 retrospective), 0004
-(row representation), 0005 (effect-inference judgment; D9 closed),
-0006 (default-close, amended; D4 row polymorphism implemented),
-0007 (effect handlers; status ACCEPTED, B3.0 + B3.1 landed, B3.2
-pending; D9 amended).
+Last updated: phase B3.2 complete (handler runtime per ADR 0007 D5).
+169 lib + 14 integration tests pass. Three commits land B3.2: bdda217
+(B3.2a `Step`/`Continuation`/`Frame` scaffolding), a9cefb1 (B3.2b
+substantive runtime — `Perform` reifies, `Handle` dispatches via
+`handle_step`, `Value::Resumption` and `Frame::HandleFwd` added),
+8e3de20 (B3.2c positive coverage — four integration tests). Eval-side
+placeholders (`EvalError::EffectNotYetSupported`,
+`EvalError::HandlersNotYetSupported`) removed; two new variants added
+(`UnhandledOpAtTopLevel` for runtime-top-level defence in depth,
+`ContinuationAlreadyResumed` for one-shot enforcement). See ADRs 0003
+(B1 retrospective), 0004 (row representation), 0005 (effect-inference
+judgment; D9 closed), 0006 (default-close, amended; D4 row
+polymorphism implemented), 0007 (effect handlers; status fully
+ACCEPTED, D9 fully complete — all phases B3.0 + B3.1 + B3.2 landed).
 
 ---
 
@@ -236,7 +239,10 @@ absorbed.
 | B3.0  | Handler surface (lexer + parser + AST + placeholders) | Done   | 821b16a |
 | B3.1a | row_split + HandlerLabelNotInRow                   | Done   | febf379 |
 | B3.1b | Handler typing rule + DuplicateHandlerArm          | Done   | e7958e1 |
-| B3.2  | Handler runtime (operation reification + dispatch) | Planned |        |
+| B3.2a | Handler runtime scaffolding (Step/Continuation/Frame)| Done   | bdda217 |
+| B3.2b | Handler runtime (Perform reifies, Handle dispatches) | Done   | a9cefb1 |
+| B3.2c | Positive runtime coverage (4 integration tests)      | Done   | 8e3de20 |
+| B3.2  | Handler runtime (operation reification + dispatch)   | Done   |         |
 | B4    | Secret T qualifier and constant-time check         | Planned |        |
 | B?    | Broker-as-value-heap integration (bonus)           | Planned |        |
 
@@ -349,8 +355,10 @@ All re-exports from `sentinel_effects_proto`:
   `lex(source) -> Result<Vec<(Token, Span)>, LexError>`
 - Parser: `ParseError`,
   `parse(&[(Token, Span)]) -> Result<Expr, ParseError>`
-- Eval: `Value`, `EvalError`, `Env`,
-  `eval(&Expr, &Env) -> Result<Value, EvalError>`
+- Eval: `Value`, `EvalError`, `Env`, `Step`, `Continuation`,
+  `eval(&Expr, &Env) -> Result<Step, EvalError>` (B3.2a return type;
+  `crate::run` bridges `Step::Value` → `Value` and surfaces
+  `Step::Op` as `EvalError::UnhandledOpAtTopLevel`)
 - Types: `Ty`, `TyVar`, `Scheme`
 - Inference: `TypeError`, `TypeEnv`, `EffectEnv`, `Subst`,
   `TyVarSupply`, `unify`, `instantiate`, `generalize`, `infer`,
@@ -585,6 +593,125 @@ crate root in B1.
     + 7 b31b_* + 9 b30_ from B3.0) + 1 integration test rewritten
     (`pipeline_handle_typechecks_then_runtime_is_placeholder`).
     Eval-side placeholders remain pending B3.2.
+Test coverage as of B3.2: 183 tests (169 lib + 14 integration). Lib
+count unchanged from B3.1 because B3.2a was scaffolding (no behavior
+change) and B3.2b rewrote three placeholder-asserting tests in place
+rather than adding new ones (one direct-eval Perform test:
+`b22b_eval_perform_directly_returns_effect_error` →
+`b32b_eval_perform_directly_reifies_step_op`; one direct-eval Handle
+test: `b30_eval_handle_directly_returns_handlers_not_yet_supported` →
+`b32b_eval_handle_no_arms_no_ret_is_identity_on_value`; one
+integration test: `pipeline_handle_typechecks_then_runtime_is_placeholder`
+→ `pipeline_handle_resumes_with_arg_through_run`, the first Sentinel
+program with effects to actually compute a value through `run()`).
+B3.2c added four integration tests covering two-effect dispatch,
+non-trivial arm body work, arm-body reading outer Let bindings via
+the env bundled into `Value::Resumption`, and explicit return-arm
+post-resume. Clippy clean under `-D warnings`; no doctests. See B.5
+design decision 21.
+
+21. (B3.2, ADR 0007 D5) Handler runtime landed in three commits.
+    **B3.2a** (bdda217) is scaffolding: `eval`'s return type changed
+    from `Result<Value, EvalError>` to `Result<Step, EvalError>` where
+    `Step = Value(Value) | Op { label, arg, kont }`; every existing
+    arm threaded `Step::Value` propagation (Int/Bool/Var/Lambda wrap;
+    Let/LetRec/If/App/BinOp match on the recursive eval result,
+    propagating Value on the happy path and pushing a `Frame` onto
+    kont + re-raising Op otherwise). `Continuation` is a Vec<Frame>
+    enum, not a boxed `FnOnce` — chosen for Debug/Clone ergonomics
+    and for keeping the resume-point states explicit and greppable.
+    Eight Frame variants enumerated by counting resume-points in the
+    existing eval arms (LetBody, LetRecBody, IfBranch, AppArg,
+    AppCall, BinOpRight, BinOpApply, PerformReify). `Continuation::resume`
+    declared as `todo!("B3.2b")` so the API signature was fixed.
+    Perform and Handle arms kept their B2.2b/B3.0 placeholder errors
+    unchanged; tests stayed at 169 + 10 + 0. Two new EvalError
+    variants added: `UnhandledOpAtTopLevel { label }` for
+    defence-in-depth at `crate::run` (mirroring B2.2b's posture —
+    the type system's default-close at `infer_program` should
+    prevent open rows at the top level, but the runtime checks
+    anyway), and `ContinuationAlreadyResumed` reserved for B3.2b's
+    one-shot enforcement. `Step` re-exported from the crate root.
+
+    **B3.2b** (a9cefb1) is the substantive commit. Five sub-patches
+    in the working tree, single commit at the end: (1)
+    `Value::Resumption { kont, arms, ret_arm, env }` variant added
+    + `apply` refactored to dispatch on it (initially without the
+    deep re-wrap, filled in next); (2) `Frame::HandleFwd { arms,
+    ret_arm, env }` variant added — the 9th Frame, not visible in
+    B3.2a because Handle didn't propagate before — and `handle_step`
+    helper added as the shared dispatch hub used both by the Handle
+    arm at evaluation start and by `apply` at resume re-wrap; (3)
+    `Perform` arm now reifies — eval the arg, on Value produce
+    `Step::Op { label, arg: v, kont: Continuation::empty() }`, on Op
+    push `Frame::PerformReify` and re-raise; (4) `Handle` arm now
+    dispatches — eager-Arc the arms and ret_arm once per Handle
+    evaluation (so subsequent Resumption/HandleFwd clones are cheap
+    refcount bumps), eval the body, route the resulting Step
+    through `handle_step`; (5) cleanup —
+    `EvalError::EffectNotYetSupported` and `EvalError::HandlersNotYetSupported`
+    deleted now that their producing arms gained real
+    implementations, `#[allow(dead_code)]` stripped from Frame.
+    Three placeholder tests were rewritten in place to assert real
+    behavior. The bundled-context shape of `Value::Resumption`
+    (kont + arms + ret_arm + env) was chosen over a bare
+    `Value::Continuation` because the deep re-wrap data must travel
+    with the resumption value — `apply`'s dispatch stays in one
+    place (sibling to `Value::Closure`) without an App-site lookup
+    into handler state, and the alternative (synthesising a
+    Lambda AST node that calls a builtin) requires a builtin-
+    function mechanism the prototype does not have.
+
+    **B3.2c** (8e3de20) adds four pipeline tests through `run()`
+    along axes the B3.2b integration test did not cover:
+    `pipeline_two_effect_handler_discharges_both` exercises deep
+    re-wrap (apply's `handle_step` after `kont.resume`) and the
+    splice mechanism (step_frame's `BinOpRight` branch producing a
+    nested Op with `BinOpApply` prepended onto its inner kont);
+    `pipeline_arm_body_computes_with_op_arg_before_resume` covers
+    the rhs-raises BinOp path (sibling to the previous test's
+    lhs-raises path) and confirms arm bodies can do non-trivial
+    work with the operation's argument before invoking k;
+    `pipeline_arm_body_uses_outer_let_binding` confirms the arm
+    body sees outer Let bindings via the env bundled into
+    `Value::Resumption` (the closest the current language reaches
+    toward a state handler without CPS state-threading);
+    `pipeline_return_arm_runs_on_resumed_value` exercises
+    `handle_step`'s Some-ret_arm branch (the B3.2b integration test
+    had no ret_arm, hitting only the None/identity branch).
+
+    Two structural decisions worth recording inline. (a)
+    `Continuation` derives `Clone` because `Value` is `Clone` and
+    `Value::Resumption` holds `Continuation` by value. The
+    `Cell<bool>` resumed-flag copies its bool on clone, so cloning
+    a *resumed* `Continuation` produces a clone that also refuses
+    to resume — the one-shot guarantee therefore holds
+    per-Continuation-instance, not per-logical-resumption. Nothing
+    in eval clones a Resumption today; user-level multi-shot via
+    `Value::Clone` is not statically prevented. Stricter alternatives
+    (move-only `Resumption` variant, or `Rc<Cell<bool>>` for a
+    shared flag) are recorded inline at the `Continuation`
+    definition for Sentinel proper. (b) A real CPS-state state
+    handler in the Eff/Koka sense — Get/Put paired effects threading
+    mutable state through resumption — was scoped *out* of B3.2c
+    in favor of the simpler `pipeline_arm_body_uses_outer_let_binding`
+    test. The prototype's unary lambdas preclude `k(state, value)`,
+    and CPS-state via `state -> result` returns produces a test
+    program ~6 lines long with a trace that obscures what is being
+    tested. The load-bearing mechanic (outer Let visible inside arm
+    via bundled env) is covered. Deferred to whatever phase
+    introduces multi-arg functions or records. Filed in ADR 0007's
+    "Considered and rejected" section.
+
+    Net 0 lib tests, +4 integration tests, −1 lib test renamed,
+    −2 lib test rewrites in place, −1 integration test rewrite in
+    place. Placeholder-error variants gone:
+    `EvalError::EffectNotYetSupported`,
+    `EvalError::HandlersNotYetSupported`. New variants:
+    `EvalError::UnhandledOpAtTopLevel`,
+    `EvalError::ContinuationAlreadyResumed`. New public types: `Step`,
+    `Continuation` (with `is_empty()` for tests).
+
 
 ### B.6 Known Limitations (intentional at B1)
 
@@ -631,7 +758,7 @@ The standard check suite for a clean tree, applied per-crate:
 All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
-  - sentinel-effects-proto: 155 tests (146 lib + 9 integration) + 0 doctests
+  - sentinel-effects-proto: 183 tests (169 lib + 14 integration) + 0 doctests
 
 ### Script Convention
 
