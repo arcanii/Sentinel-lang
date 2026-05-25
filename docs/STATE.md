@@ -5,36 +5,34 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-The workspace now has two non-stub crates with very different
-purposes: a production-shape memory subsystem (broker) and a
-research-grade interpreter (effects-proto). They are tracked in
-separate sections below. The remaining workspace members listed in
-HANDOVER §3.2 are scaffold-only.
+The workspace has two complete Phase A/B crates plus the in-progress
+Phase C bootstrap compiler. Phase A is the broker (production-shape
+memory subsystem), Phase B is sentinel-effects-proto (Sentinel-Mini,
+research-grade interpreter), Phase C populates the remaining
+sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
+has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: phase B4 complete — all three HANDOVER §5.2 Phase B
-validation demos landed (supply-chain, async-as-effect,
-password-verify). 203 lib + 23 integration tests pass. B4.2 is one
-commit on top of B4.1's two — surface-polishing and demo-completion
-work. The polished password-verify demo
-(`pipeline_b42_password_verify_demo_rejects_branching_on_secret`)
-sits next to the original `pipeline_password_verify_naive_rejects_with_secret_branch`
-(kept as a regression pin); the supply-chain demo demonstrates
-HandlerLabelNotInRow when a library "secretly" uses Network under
-a Storage-only handler; the async demo pair shows the same library
-function `app` producing different results under two handlers
-(doubling vs identity Tick), with the `let app = ...` source string
-byte-identical between the two tests. README updated to reflect
-B0-B4 done and the 226-test total; the existing 8 ADRs are also
-mentioned. See ADRs 0003 (B1 retrospective), 0004 (row
-representation), 0005 (effect-inference judgment; D9 closed), 0006
-(default-close, amended; D4 row polymorphism implemented), 0007
-(effect handlers; status fully ACCEPTED, D9 fully complete — all
-phases B3.0 + B3.1 + B3.2 landed), 0008 (secret qualifier and
-constant-time check; status ACCEPTED, D1 through D7 confirmed by
-B4.0 + B4.1, D8 implicit via existing free-var/free-row-var
-recursion, D9 amended for B4.2 landed). Phase B is finished;
-Phase C (bootstrap compiler) is the next major phase per HANDOVER
-§6.
+Last updated: ADR 0009 (Phase C kickoff + C0 plan) ACCEPTED at
+7a04ba1; C0.0 (tokens + lexer + tests/ui/ harness + invalid-char UI
+snapshot) landed in sentinel-syntax at 8f37381. Workspace test count:
+317 active (226 effects-proto + 69 broker + 13 syntax + 9 scaffold
+smokes) + 1 broker doctest. All four check-suite checks green:
+cargo build --workspace, cargo clippy --workspace --all-targets
+-D warnings, cargo test --workspace, cargo test --workspace --doc.
+
+Phase B retrospective (preserved as historical context for what
+came before C0): all three HANDOVER §5.2 validation demos landed
+(supply-chain, async-as-effect, password-verify), 226 tests passing
+in effects-proto. ADRs 0001-0008 ACCEPTED. See ADRs 0003 (B1
+retrospective), 0004 (row representation), 0005 (effect-inference
+judgment; D9 closed), 0006 (default-close, amended; D4 row
+polymorphism implemented), 0007 (effect handlers; status fully
+ACCEPTED, D9 fully complete — all phases B3.0 + B3.1 + B3.2 landed),
+0008 (secret qualifier and constant-time check; status ACCEPTED, D1
+through D7 confirmed by B4.0 + B4.1, D8 implicit via existing
+free-var/free-row-var recursion, D9 amended for B4.2 landed). Phase
+B is finished; Phase C began with ADR 0009 at 7a04ba1 and C0.0 at
+8f37381.
 
 ---
 
@@ -1058,6 +1056,113 @@ calls for as the Phase B deliverable. Clippy clean under
 
 ---
 
+## Section C — bootstrap compiler (HANDOVER §6)
+
+Phase C is the production Sentinel compiler in Rust per ADR 0009. C0
+is the end-to-end pipeline for the smallest language subset (let,
+arithmetic, if, function calls) compiling to LLVM with no type
+system — everything i64 — to prove the pipeline shape works. Six
+sub-phases C0.0-C0.5.
+
+The Phase C compiler crates are populated in pipeline order across
+C0-C5 per ADR 0009 D7. As of C0.0, sentinel-syntax has a lexer; the
+remaining nine compiler crates (sentinel-ast, sentinel-resolve,
+sentinel-types, sentinel-hir, sentinel-mir, sentinel-codegen,
+sentinel-driver, sentinel-runtime, sentinel-lsp) remain 20-line
+scaffold stubs.
+
+### C.1 Phase Tracker
+
+| Phase | Title                                                          | Status  | Commit  |
+|-------|----------------------------------------------------------------|---------|---------|
+| C0.0  | Tokens + lexer + tests/ui/ harness + 1 lex-error UI test       | Done    | 8f37381 |
+| C0.1  | Hand-written parser + AST (int literal, arithmetic, parens)    | Planned |         |
+| C0.2  | LLVM codegen for C0.1 AST; first runnable binary + tests/pass/ | Planned |         |
+| C0.3  | let bindings + variable references (i64 everywhere)            | Planned |         |
+| C0.4  | if/else + function calls (forward-declared, fixed signatures)  | Planned |         |
+| C0.5  | fn definitions + main entry; C0 go/no-go                       | Planned |         |
+| C1+   | Type system, regions, effects (HANDOVER §6.2)                  | Planned |         |
+
+ADR 0010 (concrete C0 surface syntax) lands between C0.0 and C0.1
+per ADR 0009 D8.
+
+Test coverage as of C0.0: 13 sentinel-syntax tests (11 lexer + 1
+smoke + 1 UI integration). The UI test runs
+`tests/ui/lex_invalid_char.sentinel` (one-line `let x = @`) through
+the lexer and snapshots the miette-formatted diagnostic at
+`crates/sentinel-syntax/tests/snapshots/ui__ui_lex_invalid_char.snap`.
+
+### C.2 Crate Layout (C0.0)
+
+    crates/sentinel-syntax/
+      Cargo.toml          deps: logos, miette, thiserror, tracing
+                          dev-deps: insta
+      src/
+        lib.rs            re-exports the lexer surface
+        lexer.rs          logos-based TokenKind (4 keywords + 11
+                          punctuation kinds + Ident + IntLit;
+                          skip patterns for whitespace and `//`
+                          line comments); Spanned<T>, Span,
+                          LexError (miette::Diagnostic), pure
+                          lex() fn returning (tokens, errors)
+      tests/
+        ui.rs             integration runner; reads workspace-root
+                          tests/ui/*.sentinel, formats diagnostics
+                          via GraphicalTheme::none() + 80-col
+                          width for snapshot stability
+        snapshots/
+          ui__ui_lex_invalid_char.snap
+
+    tests/                                (workspace root, ADR 0009 D5)
+      ui/
+        lex_invalid_char.sentinel         `let x = @` fixture
+
+The other nine compiler crates remain 20-line scaffold stubs per ADR
+0009 D7. Population schedule:
+
+  - sentinel-ast:      C0.1 (AST nodes)
+  - sentinel-driver:   C0.0 onward (snc binary wires the pipeline) —
+                       currently still a 10-line scaffold-stub main
+  - sentinel-codegen:  C0.2 onward (LLVM lowering)
+  - sentinel-types:    C0.2 stub returning Ok; C1 fills it in
+  - sentinel-runtime:  C0.2 (minimal print/exit stub in emitted binaries)
+  - sentinel-resolve:  C1
+  - sentinel-hir:      C1/C2
+  - sentinel-mir:      C2
+  - sentinel-lsp:      C5
+
+### C.3 Design Decisions (C0)
+
+ADR 0009 (D1-D8) is authoritative; in-source highlights:
+
+1. Lexer uses `logos`. ADR 0009 D4 prescribes hand-written recursive
+   descent for the parser only; lexers benefit from the regex-DFA
+   payoff with no ergonomic cost.
+2. `lex(src: &str) -> (Vec<Spanned<TokenKind>>, Vec<LexError>)` is
+   a pure function per ADR 0009 D1a's "C0 pipeline stages are pure
+   functions" discipline. No shared mutable state. No `&mut Cx`
+   threading. Diagnostics accumulate via the return value.
+3. No CST/AST split (ADR 0009 D4). The lexer's output is a flat
+   `Vec<Spanned<TokenKind>>`; C0.1's parser will produce a direct
+   AST enum.
+4. Keywords (`let`, `fn`, `if`, `else`) lex via dedicated `#[token]`
+   rules. logos's longest-match guarantees `letter` lexes as
+   `Ident`, not `Let` + `ter`. See `lex_keyword_prefix_is_ident`.
+5. Valid tokens still flow through when `LexError`s occur (the
+   lexer collects errors rather than fail-fast). C0.1's parser
+   decides whether to stop on lex errors or continue.
+6. UI snapshot uses `GraphicalTheme::none()` + `width(80)` for
+   host-independence. Terminal-width detection and ANSI colors
+   would make snapshots host-dependent.
+7. Workspace-root `tests/ui/` holds data files (HANDOVER §3.2); the
+   integration runner lives in `crates/sentinel-syntax/tests/ui.rs`.
+   insta snapshots stay at insta's default location (next to the
+   runner). Centralizing snapshots under workspace-root
+   `tests/snapshots/` is deferred until there's more than one
+   runner crate to coordinate.
+
+---
+
 ## Conventions
 
 ### Build & Test Commands
@@ -1073,6 +1178,8 @@ All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
+  - sentinel-syntax:        13 tests (12 lib + 1 UI integration) + 0 doctests
+  - other compiler crates:  1 scaffold smoke test each, 0 doctests
 
 ### Script Convention
 

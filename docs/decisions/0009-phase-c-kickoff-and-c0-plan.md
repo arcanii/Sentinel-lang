@@ -1,6 +1,6 @@
 # ADR 0009: Phase C kickoff and C0 plan
 
-Status: PROPOSED (becomes ACCEPTED when C0.0 lands)
+Status: ACCEPTED (C0.0 landed at 8f37381 — D1, D1a, D3, D4 lexer-half, D5, D6 C0.0 row, D7 sentinel-syntax row exercised; D2, D4 parser-half, D6 remainder, D8 open for downstream sub-phases per the Revisit clauses)
 Date: 2026-05-25
 Related: 0001 (staged-validation umbrella), 0002 (Phase B kickoff
 template; pay-once-vs-defer asymmetry), 0008 (latest ADR D-numbered
