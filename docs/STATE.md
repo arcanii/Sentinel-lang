@@ -11,20 +11,29 @@ research-grade interpreter (effects-proto). They are tracked in
 separate sections below. The remaining workspace members listed in
 HANDOVER §3.2 are scaffold-only.
 
-Last updated: phase B3.2 complete (handler runtime per ADR 0007 D5).
-169 lib + 14 integration tests pass. Three commits land B3.2: bdda217
-(B3.2a `Step`/`Continuation`/`Frame` scaffolding), a9cefb1 (B3.2b
-substantive runtime — `Perform` reifies, `Handle` dispatches via
-`handle_step`, `Value::Resumption` and `Frame::HandleFwd` added),
-8e3de20 (B3.2c positive coverage — four integration tests). Eval-side
-placeholders (`EvalError::EffectNotYetSupported`,
-`EvalError::HandlersNotYetSupported`) removed; two new variants added
-(`UnhandledOpAtTopLevel` for runtime-top-level defence in depth,
-`ContinuationAlreadyResumed` for one-shot enforcement). See ADRs 0003
-(B1 retrospective), 0004 (row representation), 0005 (effect-inference
-judgment; D9 closed), 0006 (default-close, amended; D4 row
-polymorphism implemented), 0007 (effect handlers; status fully
-ACCEPTED, D9 fully complete — all phases B3.0 + B3.1 + B3.2 landed).
+Last updated: phase B4.0 complete (secret/declassify surface per
+ADR 0008 D9; inference rejects with `SecretsNotYetSupported`
+placeholder pending B4.1 real typing). 192 lib + 17 integration
+tests pass. Three commits land B4.0: 1693b8c (B4.0a surface AST —
+`Ty::Secret(Box<Ty>)` + idempotent smart constructor,
+`TyExpr::Secret`, `ExprKind::Declassify`, `Subst::apply`/`unify`
+Secret recursion, `TypeError::SecretsNotYetSupported` placeholder
+fired from `infer` on `Declassify` and from `infer_program` on
+effect decls whose signatures mention `secret`), 63cd57b (B4.0b
+lexer tokens — `Token::Secret`, `Token::Declassify`, both globally
+reserved), 0b6b2ce (B4.0c parser surface — `secret T` prefix on
+TyExpr binding tighter than `->`, `declassify(e)` atom-precedence
+expression mirroring `do Label(arg)`, `ParseError::DoubleSecret`
+rejecting literal `secret secret T` and `secret (secret T)` at
+parse time). Real typing (D1/D2/D3/D4/D5 enforcement, comparison
+returns `Secret<Bool>`, the four CT rejections) lands in B4.1. See
+ADRs 0003 (B1 retrospective), 0004 (row representation), 0005
+(effect-inference judgment; D9 closed), 0006 (default-close,
+amended; D4 row polymorphism implemented), 0007 (effect handlers;
+status fully ACCEPTED, D9 fully complete — all phases B3.0 + B3.1 +
+B3.2 landed), 0008 (secret qualifier and constant-time check;
+status ACCEPTED for D1/D5/D6 surface confirmed by B4.0, D2/D3/D4/D8
+pending B4.1).
 
 ---
 
@@ -243,7 +252,12 @@ absorbed.
 | B3.2b | Handler runtime (Perform reifies, Handle dispatches) | Done   | a9cefb1 |
 | B3.2c | Positive runtime coverage (4 integration tests)      | Done   | 8e3de20 |
 | B3.2  | Handler runtime (operation reification + dispatch)   | Done   |         |
-| B4    | Secret T qualifier and constant-time check         | Planned |        |
+| B4.0a | Surface AST + SecretsNotYetSupported placeholder     | Done   | 1693b8c |
+| B4.0b | Lexer Token::Secret + Token::Declassify              | Done   | 63cd57b |
+| B4.0c | Parser secret prefix + declassify atom + DoubleSecret| Done   | 0b6b2ce |
+| B4.0  | Secret/declassify surface (B4 phase 0 of 3)          | Done   |         |
+| B4.1  | Secret typing (unify, infer, four CT rejections)     | Planned |        |
+| B4.2  | Password-verify demo + B4 complete                   | Planned |        |
 | B?    | Broker-as-value-heap integration (bonus)           | Planned |        |
 
 Test coverage as of B1: 95 tests (8 lexer + 11 parser + 11 eval +
@@ -712,11 +726,118 @@ design decision 21.
     `EvalError::ContinuationAlreadyResumed`. New public types: `Step`,
     `Continuation` (with `is_empty()` for tests).
 
+Test coverage as of B4.0: 209 tests (192 lib + 17 integration). Net
++23 lib (+5 b40_ in types.rs from B4.0a, +3 b40a_ placeholder tests
+in infer.rs, +6 b40b_ lexer tests, +9 b40c_ parser tests) and +3
+integration (declassify rejected at infer, effect-decl-with-secret
+rejected at infer, double-secret rejected at parse). Clippy under
+`-D warnings` is broken by 5 pre-existing lints (Arc-not-Send/Sync,
+extend-vs-append, into_iter-in-IntoIterator-context, unnecessary
+map_or) that pre-date B4 and were inherited from B3.2; not a B4
+regression. cargo test remains the project's green-gate. See B.5
+design decision 22.
+
+22. (B4.0, ADR 0008 D9) Secret/declassify surface landed in three
+    commits. **B4.0a** (1693b8c) is the surface AST + placeholder.
+    `Ty::Secret(Box<Ty>)` chosen over (a) qualifier-field-on-every-Ty
+    and (c) parallel qualifier lattice per ADR 0008 D1: shape (b)
+    falls out of HM unification with zero new machinery, while the
+    no-α-leak unification restriction (D2) substitutes for full
+    qualifier polymorphism. Idempotent smart constructor
+    `Ty::secret` collapses `Secret(Secret(_))` so substitution and
+    unification call sites don't worry about flattening; the parser
+    separately rejects literal `secret secret T` (B4.0c) so the
+    surface complains early but the inference layer is robust
+    regardless. Display per D6 with arrow-parens (`secret int` vs
+    `secret (a -> b)`). `Subst::apply` recurses via `Ty::secret`;
+    `unify` adds a structural `(Secret, Secret)` arm. The B4.0 Var
+    arm in `unify` will happily bind a TyVar to a `Ty::Secret(_)` —
+    D2's no-α-leak rule is B4.1 — but this is unobservable in B4.0
+    because every entry point that introduces `Ty::Secret` into
+    inference is gated: `infer`'s `Declassify` arm returns
+    `SecretsNotYetSupported`, and `infer_program` walks each effect
+    decl's signature with a new `tyexpr_find_secret_span` helper,
+    rejecting any decl that mentions `secret`. `eval` gets a
+    `Declassify` arm that delegates to `inner.eval` (the
+    declassification is type-level only; `Value` is qualifier-blind
+    by B0 design, so no resume-point work is needed) — unreachable
+    in B4.0 via the full pipeline because inference rejects first,
+    but exists so eval is total over `ExprKind`. 3 placeholder tests
+    in infer.rs build AST directly because the lexer/parser do not
+    yet recognise the keywords; 5 `b40_*` tests in types.rs (added
+    in the prior session, landed in this commit) pin display,
+    idempotency, free-var recursion, close_rows recursion.
+
+    **B4.0b** (63cd57b) adds `Token::Secret` and `Token::Declassify`
+    to the lexer. Both globally reserved — cannot be used as
+    identifiers, matching the policy applied to `rec` (B1.3) and the
+    handler keywords (B3.0). Logos token attributes only; the
+    existing Ident regex is tried after keyword matches. 6 lexer
+    tests (standalone for each keyword, reserved-status in let-bind
+    position for each, `secret Bytes` and `declassify(x)` full
+    streams).
+
+    **B4.0c** (0b6b2ce) adds the parser surface. `secret T` as a
+    prefix on type atoms in `parse_ty_atom`, binding tighter than
+    `->` per ADR 0008 D6: `secret Int -> Bool` parses as
+    `(secret Int) -> Bool`, not `secret (Int -> Bool)`. This
+    precedence falls out of recursing on `parse_ty_atom` (not
+    `parse_ty_expr`); users wanting the arrow inside the secret
+    write `secret (Int -> Bool)`. `declassify(e)` as
+    atom-precedence expression in `parse_atom`, mandatory parens
+    paralleling `do Label(arg)` and preserving the audit-point
+    property called out in D5. `ParseError::DoubleSecret` rejects
+    literal `secret secret T` (caught at the immediately-recursive
+    call site) and `secret (secret T)` (caught after the paren
+    collapse returns `TyExpr::Secret(_, span_with_parens)`). 9
+    parser tests + 3 integration tests through `run()`. The
+    integration trio confirms: full-pipeline `declassify(1)`
+    rejected at inference with `SecretsNotYetSupported`;
+    full-pipeline `effect ReadKey : Int -> secret Int ; 0` likewise;
+    full-pipeline `effect F : Int -> secret secret Int ; 0` rejected
+    at parse with `DoubleSecret` (proves the early parser rejection
+    short-circuits ahead of the placeholder).
+
+    Three structural decisions worth recording inline. (a) `secret`
+    binds tighter than `->`. Considered the inverse (arrow tighter,
+    so `secret Int -> Bool` parses as `secret (Int -> Bool)`),
+    rejected because the former matches Rust's `&mut T -> U` reading
+    that ADR 0008 D6 cites as precedent, and because `secret`
+    binding loosely would force users writing single-arrow effect
+    signatures `Int -> secret Bytes` to add redundant parens around
+    the `secret Bytes` ret type. (b) `tyexpr_find_secret_span` walks
+    the surface `TyExpr` rather than the lowered `Ty` because the
+    surface tree carries human-source spans and is the right layer
+    to point a diagnostic at. The walker is recursive structural —
+    no row-handling needed because effect-decl signatures are pure
+    `Int`/`Bool`/`Arrow`/`Secret` at this scope (no inline
+    polymorphism in the surface yet). (c) Both `secret` in effect
+    decls and `declassify` in expressions block at inference, not
+    earlier. The parser produces well-formed AST for both surfaces;
+    rejection happens at the inference layer specifically so that
+    `infer_program` is the one boundary that decides "we're not
+    ready to type secrets" — when B4.1 lands, the rejection sites
+    delete and the typing rules replace them, no parser or lexer
+    churn.
+
+    Net +23 lib tests, +3 integration tests, no rewrites in place
+    (the surface is wholly new). New `TypeError` variant:
+    `SecretsNotYetSupported`. New `ParseError` variant:
+    `DoubleSecret`. New `Token` variants: `Secret`, `Declassify`.
+    New `Ty` variant: `Secret(Box<Ty>)` + `Ty::secret` smart
+    constructor. New `ExprKind` variant: `Declassify { inner, span }`.
+    New `TyExpr` variant: `Secret(Box<TyExpr>, Span)`. ADR 0008
+    status flipped from PROPOSED to ACCEPTED with note that D1/D5/D6
+    are confirmed by B4.0 and D2/D3/D4/D8 land in B4.1.
+
 
 ### B.6 Known Limitations (intentional at B1)
 
 - No effects. The whole reason this crate exists. (B2 onward.)
-- No `secret` qualifier or constant-time check. (B4.)
+- `secret` qualifier and constant-time check: surface landed in B4.0
+  (lex+parse+AST+placeholder); inference layer rejects every B4.0
+  entry point with `SecretsNotYetSupported`. Real typing in B4.1;
+  password-verify demo in B4.2.
 - No REPL, no driver binary. Library-only.
 - `let rec` RHS must be a syntactic lambda. Parser enforces with
   `ParseError::LetRecNotLambda`. Relaxing this in B3 (when handlers
@@ -758,7 +879,7 @@ The standard check suite for a clean tree, applied per-crate:
 All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
-  - sentinel-effects-proto: 183 tests (169 lib + 14 integration) + 0 doctests
+  - sentinel-effects-proto: 209 tests (192 lib + 17 integration) + 0 doctests
 
 ### Script Convention
 

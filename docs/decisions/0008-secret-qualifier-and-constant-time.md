@@ -1,6 +1,6 @@
 # ADR 0008: Secret qualifier and constant-time check
 
-Status: PROPOSED
+Status: ACCEPTED (D1, D5, D6 confirmed by B4.0; D2, D3, D4, D7, D8 pending B4.1/B4.2)
 Date: 2026-05-25
 Related: 0004 (row representation), 0005 (effect inference judgment), 0006 (default-close row variables), 0007 (effect handlers)
 
@@ -148,3 +148,32 @@ Memory-access-at-secret-index check. Per D3: Sentinel-Mini has no arrays or memo
 Speculative-execution barriers / `lfence` insertion. Per D3 and HANDOVER §6.1: codegen-level, Phase C.
 
 Secret memory lifecycle integration with the broker. The broker has `SecretStrategy` (Phase A7); Sentinel-Mini's `Value` representation does not currently allocate from the broker at all. Broker-as-value-heap integration is the "B?" backlog item in STATE.md §B.1's phase tracker. The `secret T` qualifier in B4 is purely type-level and does not require any allocator coordination. When broker-as-value-heap lands, secret-typed values should route to a `SecretStrategy`-wrapped arena, but that integration is its own ADR.
+
+## D9 amendment (2026-05-25, B4.0 landed)
+
+B4.0 closed in three commits:
+
+- **B4.0a** (1693b8c) — surface AST + `SecretsNotYetSupported` placeholder. `Ty::Secret(Box<Ty>)` + idempotent `Ty::secret` smart constructor (D1); `TyExpr::Secret(Box<TyExpr>, Span)` + `ExprKind::Declassify { inner, span }` (D5/D6 surface); `Subst::apply` recurses via `Ty::secret`; `unify` adds `(Secret, Secret)` structural arm. `eval` `Declassify` arm delegates to `inner.eval` — unreachable in B4.0 via the full pipeline because inference rejects first, but exists so eval is total over `ExprKind`. Placeholder fires from `infer`'s `Declassify` arm and from `infer_program`'s effect-decl walker (`tyexpr_find_secret_span`).
+- **B4.0b** (63cd57b) — lexer `Token::Secret` + `Token::Declassify`, both globally reserved.
+- **B4.0c** (0b6b2ce) — parser surface. `secret T` prefix on type atoms binding tighter than `->` (precedence chosen to make single-arrow effect signatures `Int -> secret Bytes` paren-free); `declassify(e)` atom-precedence expression with mandatory parens (D5 audit-point property). `ParseError::DoubleSecret` rejects literal `secret secret T` and `secret (secret T)` — the smart constructor still collapses, this is the human-source early complaint.
+
+D1 (shape (b) over (a)/(c)), D5 (declassify as special form, parser-rejected at non-call positions), and D6 (surface syntax) survived first contact with the lexer/parser/AST and are confirmed.
+
+D7 (effect signatures may mention `secret`) is parser-confirmed (the parser accepts `effect ReadKey : Int -> secret Int ;`) but inference-rejected with `SecretsNotYetSupported` in B4.0. Full D7 confirmation lands when B4.1 removes the placeholder and exercises an effect-decl-with-secret end to end.
+
+D2 (no-α-leak unification restriction), D3 (the four CT rejections: `SecretBranch`, `SecretDivisor`, `SecretFlow`, `SecretEscapesPolymorphism`), D4 (comparisons on secrets produce `Secret<Bool>`), D8 (generalization participation) are pending B4.1. The current `unify` `Var` arm will happily bind a TyVar to a `Ty::Secret(_)` — D2 enforcement is B4.1 — but this is unobservable in B4.0 because every entry point that introduces `Ty::Secret` into inference is gated by the placeholder.
+
+Test coverage: 209 (192 lib + 17 integration), net +26 from B3.2's 183 (192 - 169 = +23 lib, +3 integration). Of the +23 lib: 5 `b40_*` in types.rs (Display/idempotency/recursion), 3 `b40a_*` placeholder tests in infer.rs (build AST directly because lexer doesn't recognise the keywords until B4.0b), 6 `b40b_*` lexer tests (keyword tokenisation + reserved-status), 9 `b40c_*` parser tests (precedence, paren behavior, DoubleSecret, declassify atom). Integration: declassify-rejected-at-infer, effect-decl-with-secret-rejected-at-infer, double-secret-rejected-at-parse.
+
+## D9 amendment (2026-05-25, B4.1 not yet started)
+
+B4.1 will:
+
+1. Remove `TypeError::SecretsNotYetSupported` and the two rejection sites in `infer.rs` (the `Declassify` arm; the `tyexpr_find_secret_span` walk in `infer_program`).
+2. Implement the D2 no-α-leak restriction in the `unify` `Var` arm: `unify(Ty::Var(α), Ty::Secret(_))` and the symmetric direction return `TypeError::SecretEscapesPolymorphism`.
+3. Add the `Declassify` typing rule in `infer`: `e : Ty::Secret(t) ⊢ declassify(e) : t`, with `TypeError::SecretFlow` if `e` is non-secret (D3/D5).
+4. Extend the `If` arm to reject `cond : Ty::Secret(_)` with `TypeError::SecretBranch` (D3).
+5. Extend the `BinOp(Div | Mod, _, e)` typing to reject `e : Ty::Secret(_)` with `TypeError::SecretDivisor` (D3).
+6. Extend the `BinOp(Eq | Lt | Gt, a, b)` typing to produce `Ty::Secret(Bool)` when either side is secret, with unification of the inner types (D4). Comparison on a mixed Secret/non-Secret pair becomes a `SecretFlow` via the unification side effect.
+
+Each B4.1 change has corresponding negative tests (the diagnostic fires on the matching surface program) and the existing 3 placeholder tests in infer.rs delete (their rejection sites no longer exist).
