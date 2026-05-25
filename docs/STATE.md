@@ -260,7 +260,7 @@ absorbed.
 | B4.1a | 4 TypeError variants + D2 unify + Declassify typing  | Done   | e760d57 |
 | B4.1b | D3 If/Div + D4 comparisons; drop placeholder         | Done   | 52acc0a |
 | B4.1  | Secret typing (unify, infer, four CT rejections)     | Done   |         |
-| B4.2  | Three Phase B validation demos + README/STATE refresh| Done   | (next)  |
+| B4.2  | Three Phase B validation demos + README/STATE refresh| Done   | 9541969 |
 | B4    | Secret T qualifier and constant-time check           | Done   |         |
 | B?    | Broker-as-value-heap integration (bonus)           | Planned |        |
 
