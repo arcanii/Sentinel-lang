@@ -10,8 +10,12 @@ license.workspace      = true
 repository.workspace   = true
 
 [dependencies]
-tracing    = { workspace = true }
+sentinel-ast = { path = "../sentinel-ast" }
+
+inkwell    = { workspace = true }
+miette     = { workspace = true }
 thiserror  = { workspace = true }
+tracing    = { workspace = true }
 
 [lints.rust]
 unsafe_code = "allow"

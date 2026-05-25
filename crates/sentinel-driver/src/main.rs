@@ -1,11 +1,19 @@
 //! snc: the Sentinel compiler driver.
 //!
-//! C0.1 ships the `parse` subcommand: read a source file, lex it,
-//! parse it as a single expression, and pretty-print the AST in
-//! s-expression form. Pipeline stages compose via direct function
-//! calls per ADR 0009 D1a.
+//! C0.1: `snc parse <file>` lexes, parses, pretty-prints the AST.
+//! C0.2: `snc build <file> [-o <output>]` additionally lowers to
+//! LLVM IR, emits an object file, and links it into an executable
+//! via the system `cc`. The compiled program's exit code is the
+//! evaluated expression truncated to i32 (the temporary
+//! exit-code-is-the-answer convention; ADR 0009 D6 C0.4 replaces
+//! this with `print(x)` once function calls land).
+//!
+//! Pipeline stages compose via direct function calls per ADR 0009
+//! D1a. Linker invocation lives here, not in sentinel-codegen,
+//! because it is platform glue rather than a compiler concern.
 
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
 
 use miette::{NamedSource, Report};
 use sentinel_syntax::parse;
@@ -14,6 +22,10 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.as_slice() {
         [_, cmd, path] if cmd == "parse" => run_parse(path),
+        [_, cmd, path] if cmd == "build" => run_build(path, None),
+        [_, cmd, path, flag, output] if cmd == "build" && flag == "-o" => {
+            run_build(path, Some(output))
+        }
         [_] => {
             print_usage();
             ExitCode::from(2)
@@ -30,20 +42,18 @@ fn main() -> ExitCode {
 }
 
 fn print_usage() {
-    eprintln!("snc — Sentinel compiler (C0.1)");
+    eprintln!("snc — Sentinel compiler (C0.2)");
     eprintln!();
     eprintln!("usage:");
-    eprintln!("    snc parse <file>     lex, parse, and pretty-print the AST");
-    eprintln!("    snc help             show this message");
+    eprintln!("    snc parse <file>                 lex, parse, and pretty-print the AST");
+    eprintln!("    snc build <file> [-o <output>]   compile and link to an executable");
+    eprintln!("    snc help                         show this message");
 }
 
 fn run_parse(path: &str) -> ExitCode {
-    let src = match std::fs::read_to_string(path) {
+    let src = match read_source(path) {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("snc: cannot read `{path}`: {e}");
-            return ExitCode::from(1);
-        }
+        Err(code) => return code,
     };
     match parse(&src) {
         Ok(expr) => {
@@ -55,5 +65,60 @@ fn run_parse(path: &str) -> ExitCode {
             eprintln!("{report:?}");
             ExitCode::from(1)
         }
+    }
+}
+
+fn run_build(path: &str, output: Option<&str>) -> ExitCode {
+    let src = match read_source(path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let expr = match parse(&src) {
+        Ok(e) => e,
+        Err(err) => {
+            let report = Report::new(err).with_source_code(NamedSource::new(path, src));
+            eprintln!("{report:?}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let exe_path: PathBuf = match output {
+        Some(o) => PathBuf::from(o),
+        None => PathBuf::from(path).with_extension(""),
+    };
+    let object_path = exe_path.with_extension("o");
+
+    if let Err(err) = sentinel_codegen::compile_to_object(&expr, &object_path) {
+        eprintln!("{:?}", Report::new(err));
+        return ExitCode::from(1);
+    }
+
+    match link(&object_path, &exe_path) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            eprintln!("snc: link failed: {msg}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn read_source(path: &str) -> Result<String, ExitCode> {
+    std::fs::read_to_string(path).map_err(|e| {
+        eprintln!("snc: cannot read `{path}`: {e}");
+        ExitCode::from(1)
+    })
+}
+
+fn link(object: &Path, exe: &Path) -> Result<(), String> {
+    let status = Command::new("cc")
+        .arg(object)
+        .arg("-o")
+        .arg(exe)
+        .status()
+        .map_err(|e| format!("failed to invoke cc: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("cc exited with {status}"))
     }
 }

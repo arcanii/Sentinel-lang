@@ -1,0 +1,21 @@
+# Workspace-local cargo config.
+#
+# `LLVM_SYS_180_PREFIX` tells the `llvm-sys` build script (a transitive
+# dependency of `inkwell`) where to find LLVM 18. The path is the
+# Homebrew default on Apple Silicon per HANDOVER §3.1; intel-mac and
+# Linux developers can override via their shell environment (cargo's
+# `[env]` does not clobber pre-existing env vars unless `force = true`).
+#
+# When Sentinel grows beyond macOS, replace this with a build script
+# that probes `llvm-config-18 --prefix` or accepts the env passthrough.
+
+[env]
+LLVM_SYS_180_PREFIX = "/opt/homebrew/opt/llvm@18"
+
+# LLVM 18 from Homebrew links against zstd, libxml2, etc., which are
+# installed at the brew prefix (/opt/homebrew on Apple Silicon,
+# /usr/local on Intel Macs). `llvm-sys` emits `-lzstd` but does not
+# add the search path; we add both prefixes here. Non-existent paths
+# are silently ignored by the linker.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-L", "/opt/homebrew/lib", "-L", "/usr/local/lib"]
