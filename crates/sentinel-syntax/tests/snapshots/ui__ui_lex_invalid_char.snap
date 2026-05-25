@@ -1,0 +1,13 @@
+---
+source: crates/sentinel-syntax/tests/ui.rs
+expression: formatted
+---
+sentinel::lex::invalid_char
+
+  x invalid character `@` in source
+   ,-[lex_invalid_char.sentinel:1:9]
+ 1 | let x = @
+   :         |
+   :         `-- not a valid token
+   `----
+  help: remove the character or replace it with a valid token
