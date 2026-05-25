@@ -12,17 +12,19 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: C0.1 (hand-written recursive-descent parser +
-sentinel-ast AST + `snc parse <file>` driver subcommand) landed at
-7e32e8c. ADR 0010 (concrete C0 surface syntax) ACCEPTED at the same
-time. C0.1 lifts sentinel-ast and sentinel-driver out of
-scaffold-stub status; sentinel-syntax gains parser.rs alongside
-the C0.0 lexer. Workspace test count: +30 over C0.0 (23 new parser
-unit tests + 6 new sentinel-ast Display tests + 1 new UI integration
-test); per-crate breakdown in the Conventions section. All four
-check-suite checks green: cargo build --workspace, cargo clippy
---workspace --all-targets -D warnings, cargo test --workspace,
-cargo test --workspace --doc.
+Last updated: C0.2 (LLVM lowering via inkwell + `snc build` driver
+subcommand + first runnable binaries via `tests/pass/`) landed at
+0b07931. ADR 0009 status line refreshed to reflect C0.0-C0.2
+progress. The compile pipeline is now end-to-end: source → lex →
+parse → AST → LLVM IR → object file → system cc link → executable.
+The compiled program's exit code is the value of its top-level
+expression truncated to i32 — the temporary exit-code-is-the-
+answer convention that ADR 0010 D11's `print(x)` will replace at
+C0.4. `.cargo/config.toml` added at the workspace root to anchor
+LLVM_SYS_180_PREFIX and macOS link-search paths so subprocess
+shells (CI, automation) see what the dev's interactive zshrc
+already provides. Workspace test count: +6 over C0.1 (1 new
+codegen target-init probe + 5 new driver pass tests).
 
 Phase B retrospective (preserved as historical context for what
 came before C0): all three HANDOVER §5.2 validation demos landed
@@ -1081,7 +1083,7 @@ scaffold stubs.
 |-------|----------------------------------------------------------------|---------|---------|
 | C0.0  | Tokens + lexer + tests/ui/ harness + 1 lex-error UI test       | Done    | 8f37381 |
 | C0.1  | Hand-written parser + AST + `snc parse` subcommand             | Done    | 7e32e8c |
-| C0.2  | LLVM codegen for C0.1 AST; first runnable binary + tests/pass/ | Planned |         |
+| C0.2  | LLVM codegen + `snc build` + first runnable binary + tests/pass/ | Done  | 0b07931 |
 | C0.3  | let bindings + variable references (i64 everywhere)            | Planned |         |
 | C0.4  | if/else + function calls (forward-declared, fixed signatures)  | Planned |         |
 | C0.5  | fn definitions + main entry; C0 go/no-go                       | Planned |         |
@@ -1112,7 +1114,19 @@ gains 6 Display tests (int literal, binary, nested precedence,
 unary, plus the BinOp::symbol and UnaryOp::symbol helpers) on top
 of its existing smoke. Workspace delta: +30 active tests.
 
-### C.2 Crate Layout (C0.1)
+Test coverage as of C0.2: sentinel-codegen lifts out of scaffold-
+stub status with 1 new target-init probe (`target_init_does_not_panic`)
+on top of its existing smoke. sentinel-driver gains 5 pass tests at
+`crates/sentinel-driver/tests/pass.rs` (`pass_c02_arithmetic`,
+`pass_c02_precedence`, `pass_c02_parens`, `pass_c02_unary`,
+`pass_c02_division`) covering the four operators, precedence,
+parens, and unary minus via the full pipeline. The runner uses
+`CARGO_BIN_EXE_snc` to locate the snc binary that cargo builds
+before integration tests run; per-fixture executables land in
+`target/sentinel-pass/` (gitignored). Workspace delta: +6 active
+tests (353 total).
+
+### C.2 Crate Layout (C0.2)
 
     crates/sentinel-ast/
       Cargo.toml          deps: tracing, thiserror
@@ -1154,29 +1168,74 @@ of its existing smoke. Workspace delta: +30 active tests.
           ui__ui_lex_invalid_char.snap
           ui__ui_parse_unbalanced_paren.snap
 
-    crates/sentinel-driver/
-      Cargo.toml          deps: sentinel-syntax (path), miette
-                          (with "fancy" feature), thiserror, tracing
+    crates/sentinel-codegen/
+      Cargo.toml          deps: sentinel-ast (path), inkwell (llvm18-0
+                          feature, workspace-pinned), miette, thiserror,
+                          tracing
+                          lints.rust: unsafe_code = "allow" (inkwell
+                          uses unsafe internally for FFI)
       src/
-        main.rs           snc binary; `snc parse <file>` subcommand
-                          reads the file, calls sentinel_syntax::parse,
-                          either prints the Expr's Display impl
-                          (s-expr form) or renders the ParseError via
-                          miette's default GraphicalReportHandler
-                          (fancy color); exit codes 0 / 1 / 2
+        lib.rs            compile_to_object(expr, output_path)
+                          builds an LLVM module with a single
+                          `main() -> i32`, lowers ExprKind to IntValue
+                          via lower_expr, verifies, and writes a
+                          native object file via TargetMachine;
+                          CodegenError variants: VerifyFailed,
+                          TargetInit, TargetMachine, WriteFailed,
+                          Builder
+
+    crates/sentinel-driver/
+      Cargo.toml          deps: sentinel-syntax (path), sentinel-codegen
+                          (path), miette (with "fancy" feature),
+                          thiserror, tracing
+      src/
+        main.rs           snc binary; subcommands `parse` and `build`;
+                          `parse <file>` lexes/parses/prints the AST
+                          via Expr's Display; `build <file> [-o <out>]`
+                          additionally lowers via sentinel_codegen,
+                          then invokes the system `cc` on the emitted
+                          `.o` to produce the executable; output
+                          defaults to <file_stem>; exit codes 0 / 1 / 2
+      tests/
+        pass.rs           pass-test runner; reads workspace-root
+                          tests/pass/*.sentinel; uses CARGO_BIN_EXE_snc
+                          to locate the binary cargo built for the
+                          integration tests; builds each fixture into
+                          target/sentinel-pass/ and asserts on the
+                          executable's exit code
 
     tests/                                (workspace root, ADR 0009 D5)
       ui/
         lex_invalid_char.sentinel         `let x = @` fixture
         parse_unbalanced_paren.sentinel   `(1 + 2` fixture
+      pass/
+        c02_arithmetic.sentinel           `6 + 7` -> exit 13
+        c02_precedence.sentinel           `1 + 2 * 3` -> exit 7
+        c02_parens.sentinel               `(5 + 3) * 2 - 1` -> exit 15
+        c02_unary.sentinel                `-(-5)` -> exit 5
+        c02_division.sentinel             `12 / 3` -> exit 4
 
-Seven scaffold-stub compiler crates remain at 20-line
+    .cargo/
+      config.toml         workspace-local cargo config (C0.2): [env]
+                          sets LLVM_SYS_180_PREFIX (non-forcing —
+                          developers with the env in zshrc are
+                          unaffected); target.'cfg(target_os =
+                          "macos")' rustflags add /opt/homebrew/lib
+                          and /usr/local/lib to the link search path
+                          so the linker can find brew-installed
+                          zstd/libxml2 that LLVM 18 references
+
+Six scaffold-stub compiler crates remain at 20-line
 `crate_name() + smoke` stubs per ADR 0009 D7. Updated population
 schedule:
 
-  - sentinel-types:    C0.2 stub returning Ok; C1 fills it in
-  - sentinel-codegen:  C0.2 onward (LLVM lowering)
-  - sentinel-runtime:  C0.2 (minimal print/exit stub in emitted binaries)
+  - sentinel-types:    C0.3 stub returning Ok (deferred from C0.2
+                       per STATE.md C.3 note 15 — arithmetic has no
+                       type semantics so the stub provides no current
+                       value); C1 fills it in
+  - sentinel-runtime:  C0.4 (provides the `print` runtime symbol so
+                       ADR 0010 D11's print(x) has a libc-backed
+                       implementation)
   - sentinel-resolve:  C1
   - sentinel-hir:      C1/C2
   - sentinel-mir:      C2
@@ -1233,6 +1292,43 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     `GraphicalTheme::none()` + 80-col width in the test runner for
     host-independent snapshots. Two separate code paths, two
     separate concerns.
+12. sentinel-codegen lowers `Expr` to an LLVM IR module via inkwell
+    0.5 with the `llvm18-0` feature. The emitted module defines
+    `main() -> i32` whose return value is the i64 expression value
+    truncated to i32 — the temporary exit-code-is-the-answer
+    convention. ADR 0010 D11's `print(x)` will replace it at C0.4
+    when function calls land; the truncation goes away when stdout
+    is the result channel.
+13. Linking lives in the driver, not in sentinel-codegen. The
+    driver's `build` subcommand invokes the system `cc` on the
+    emitted `.o` to produce the executable. Linking is platform
+    glue (linker flags, library search paths, dynamic loader
+    conventions) rather than a compiler concern; sentinel-codegen
+    stays focused on IR generation. The `cc` invocation will move
+    behind a more controlled interface when cross-compilation is
+    in scope (C5+).
+14. `.cargo/config.toml` (workspace root) sets two things: (a)
+    `LLVM_SYS_180_PREFIX` via cargo's non-forcing `[env]` so
+    subprocess shells (CI, automation) see what the developer's
+    interactive zshrc already provides; (b) target-conditional
+    `rustflags` adding `/opt/homebrew/lib` and `/usr/local/lib`
+    to the link search path so the linker finds brew-installed
+    `zstd` and `libxml2` that LLVM 18 references but `llvm-sys`
+    does not emit search paths for. Non-existent paths are
+    silently ignored. This is a macOS-specific workaround; when
+    Sentinel grows beyond macOS the configuration moves to a
+    build script that probes `llvm-config --libdir`.
+15. ADR 0009 D7 prescribed a `sentinel-types::check() -> Result<(),
+    Diagnostic>` stub at C0.2 "so the pipeline shape is right when
+    C1 fills it in." C0.2 deferred this to C0.3 (or possibly C1)
+    because the stub adds no value at C0.2: arithmetic has no type
+    semantics, the no-op `check()` would be threaded through the
+    driver as `parse -> check (noop) -> codegen`, and the driver
+    pipeline is already the right shape without it. When the type
+    system has something to actually check (C1's type inference,
+    or C0.3's let-binding scope tracking if we get that far), the
+    `check()` slot lands then. ADR 0009 status line records the
+    deviation.
 
 ---
 
@@ -1253,10 +1349,11 @@ All four must pass for any commit on `main`. Current expected counts:
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
   - sentinel-syntax:        37 tests (35 lib + 2 UI integration) + 0 doctests
   - sentinel-ast:           7 tests (1 smoke + 6 Display) + 0 doctests
-  - sentinel-driver:        binary, no tests
+  - sentinel-codegen:       2 tests (1 smoke + 1 target-init probe) + 0 doctests
+  - sentinel-driver:        5 pass integration tests + 0 doctests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
                             (sentinel-resolve, -types, -hir, -mir,
-                            -codegen, -runtime, -lsp)
+                            -runtime, -lsp)
 
 ### Script Convention
 

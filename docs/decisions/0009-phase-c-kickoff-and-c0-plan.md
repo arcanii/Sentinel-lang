@@ -1,6 +1,6 @@
 # ADR 0009: Phase C kickoff and C0 plan
 
-Status: ACCEPTED (C0.0 landed at 8f37381 — D1, D1a, D3, D4 lexer-half, D5, D6 C0.0 row, D7 sentinel-syntax row exercised; D2, D4 parser-half, D6 remainder, D8 open for downstream sub-phases per the Revisit clauses)
+Status: ACCEPTED (Phase C in flight; C0.0/C0.1/C0.2 at 8f37381/7e32e8c/0b07931 exercise D1 defer-Salsa, D1a pure-function discipline, D2 LLVM-only via inkwell, D3 miette+thiserror+insta, D4 logos lexer + hand-written-RD parser, D5 tests/ui+tests/pass harnesses, D7 sentinel-{syntax,ast,codegen,driver} populated, D6 sub-phase rows C0.0-C0.2; D8 closed via ADR 0010 at 72e29d1; D7 sentinel-types-stub-at-C0.2 deferred to C1 per STATE.md C.3; D6 C0.3-C0.5 still ahead)
 Date: 2026-05-25
 Related: 0001 (staged-validation umbrella), 0002 (Phase B kickoff
 template; pay-once-vs-defer asymmetry), 0008 (latest ADR D-numbered
