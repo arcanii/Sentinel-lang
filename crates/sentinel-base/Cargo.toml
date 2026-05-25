@@ -1,0 +1,18 @@
+[package]
+name        = "sentinel-base"
+description = "Shared Salsa database trait, inputs, and accumulators for the Sentinel compiler pipeline"
+
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+salsa      = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+[lints.rust]
+unsafe_code = "deny"
