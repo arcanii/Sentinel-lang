@@ -12,48 +12,88 @@ reference as you work through the milestones.
 
 ## 0. Current Implementation Status
 
-> This section is a pointer added after Phase A landed. The rest of
-> this document remains the long-term project plan; for what actually
-> exists in the codebase right now, read docs/STATE.md.
+> This section is the canonical "where the codebase is right now"
+> pointer. For per-crate detail and design decisions, read
+> docs/STATE.md and the ADRs under docs/decisions/.
 
-**Phase A is complete** (commits 9c7474d through b4412d8). The
-sentinel-broker crate provides:
+**Phase A — sentinel-broker — complete.** Generational arenas
+(bump + slab), scoped budgets, diagnostics, recording mode,
+secret-memory policy. 69 active tests + 1 doctest. See STATE.md
+Section A. ADR 0001 (staged validation) is the umbrella.
 
-- Generational arenas with two strategies (bump, slab) and per-slot
-  generations with slab recycling.
-- Scoped allocation budgets (within_budget) with pre-charge semantics.
-- Diagnostics: stats(), list_arenas(), where_is(), and a doc(hidden)
-  raw-slot-bytes accessor for forensic tooling.
-- Optional recording mode capturing all alloc/free/budget/arena-
-  lifecycle events with monotonic timestamps; unbounded or bounded
-  ring buffer.
-- Secret-memory policy (mlock + zero-on-free + zero-on-destroy) via
-  a SecretStrategy decorator wrapping any AllocStrategy. STRICT /
-  LENIENT / NONE presets.
-- Three runnable validation example programs under
-  crates/sentinel-broker/examples/ exercising the full surface
-  end-to-end, including unsafe raw-memory reads to verify
-  zero-on-free.
+**Phase B — sentinel-effects-proto (Sentinel-Mini) — complete.**
+Research-grade tree-walking interpreter validating Sentinel's
+effect-system design before the production compiler commits.
+226 tests (203 lib + 23 integration). All three HANDOVER §5.2
+validation demos landed (supply-chain, async-as-effect,
+password-verify). The crate is explicitly throwaway per
+HANDOVER §5; deletion-eligible once C3 absorbs its lessons.
+ADRs 0002-0008 are authoritative. See STATE.md Section B.
 
-**Test coverage**: 70 green (62 lib + 5 integration + 2 proptest +
-1 doc). Clippy clean under -D warnings across crate AND examples.
+**Phase C0 — bootstrap compiler MVP — complete.** The new
+production-shape crates (sentinel-syntax, sentinel-ast,
+sentinel-codegen, sentinel-driver, sentinel-runtime) now ship a
+full lex → parse → AST → two-pass LLVM IR → object → cc-linked
+executable pipeline via the `snc` binary. The ADR 0010 appendix
+go/no-go program runs:
 
-**Next**: Phase B (parser / VM / language runtime). The remainder of
-this document describes the long-term plan; see Section 4 onward
-for parser/lexer/VM design notes that were sketched before
-implementation began. These plans may need revision in light of
-what the broker actually shipped.
+    fn double(x) { x * 2 }
+    fn pick(cond, a, b) { if cond { a } else { b } }
+    fn main() {
+        let x = 5;
+        let y = pick(x, double(x), 0);
+        print(y)
+    }
+    // stdout: "10\n", exit 0
 
-Other workspace crates listed in Section 3.2 (sentinel-syntax,
-sentinel-ast, etc.) are scaffold-only; Phase B has not started.
+Six sub-phases C0.0-C0.5 shipped across twelve feat+docs commits.
+22 pass-test fixtures cover the full surface. ADRs 0009 (Phase C
+kickoff) and 0010 (concrete C0 surface) are ACCEPTED. Everything
+is `i64` per ADR 0009 ("no type system in C0"); `bool` arrives at
+C1.3. See STATE.md Section C.
 
-Scripts that built each milestone live under scripts/ and are
-named NN-<phase>.sh, NNa-..., NNz-commit-...sh. See docs/STATE.md
-Section 6 for the convention.
+**Phase C1.0a — Salsa retrofit foundation — partial; C1.0b pending.**
+Phase C1 (type system, regions, effects per HANDOVER §6.2) is in
+flight per ADR 0011 (PROPOSED, 8 sub-phases, honest 5-6 month
+estimate vs HANDOVER's 3-month budget). C1.0a landed the
+foundation crate `sentinel-base` hosting the `#[salsa::db]`
+SentinelDb trait, `#[salsa::input]` SourceFile, and
+`#[salsa::accumulator]` Diagnostic (3 tests verifying the salsa
+machinery; salsa 0.18 is now in the dep graph). **C1.0b is
+pending** — wrapping `lex`/`parse`/`compile_to_object` as
+`#[salsa::tracked]` queries; paused because `Vec<LexError>` /
+`Vec<ParseError>` as tracked-struct fields require their inner
+types to be `Hash`, and `miette::SourceSpan` doesn't derive Hash.
+The resolution path is documented in Section 0.2 below.
 
-### 0.1 Working norms (for the next session)
+**Workspace test count**: 448 active across all crates. All four
+check-suite checks green (cargo build --workspace, cargo clippy
+--workspace --all-targets -D warnings, cargo test --workspace,
+cargo test --workspace --doc). See STATE.md "Conventions" for
+the per-crate breakdown.
 
-Carry these into Phase B:
+**ADR status**:
+
+  - 0001 staged-validation                       ACCEPTED
+  - 0002 effect-rows-in-mini                     ACCEPTED
+  - 0003 b1-retrospective                        ACCEPTED
+  - 0004 row-representation-and-effect-surface   ACCEPTED
+  - 0005 effect-inference-judgment               ACCEPTED
+  - 0006 default-close-row-variables             ACCEPTED
+  - 0007 effect-handlers                         ACCEPTED
+  - 0008 secret-qualifier-and-constant-time      ACCEPTED
+  - 0009 phase-c-kickoff-and-c0-plan             ACCEPTED (all C0
+                                                 sub-phases done)
+  - 0010 concrete-c0-surface-syntax              ACCEPTED (all
+                                                 D-decisions exercised)
+  - 0011 phase-c1-kickoff-and-type-system-plan   PROPOSED (flips
+                                                 ACCEPTED when C1.0
+                                                 completes)
+
+### 0.1 Working norms (carry forward into Phase C1)
+
+Original Phase-A norms, augmented with Phase-B and Phase-C
+lessons:
 
 - **Trust STATE.md, not the git log.** Commit messages are dense
   and miss design rationale. Always read docs/STATE.md and this
@@ -64,38 +104,151 @@ Carry these into Phase B:
   scripts. Use one of: (a) base64-encoded python3 -c blocks,
   (b) write a script to /tmp/ via a single non-nested heredoc and
   then execute it, or (c) single non-nested heredocs only.
-  Do not paste multi-layer heredocs.
 
 - **Small patches, build between each.** The session that built
   Phase A7 took four diagnostic/fix iterations because the
   initial patch was too ambitious. Better practice: land the
   type/trait changes first, build, then add the implementations,
-  build, then add the tests.
+  build, then add the tests. Same lesson held for Phase C0:
+  small sub-phase commits + cargo test after each beats one big
+  commit.
 
 - **Honest disclosure beats confident-but-wrong.** This developer
   values being told when something is uncertain or guessed at
   ("I'm not sure if BudgetScope::within_budget emits BudgetClosed
   on rejection, so I included an assertion to find out") over
   patches presented as definitely-correct that turn out not to be.
+  The C1.0b pause is an example: rather than land a half-working
+  retrofit, the session committed the working sentinel-base alone
+  and documented C1.0b's path forward.
 
 - **Minimal ceremony.** "go", "proceed", short replies are the
   norm. Long preambles are unwelcome.
 
-- **Script naming**: NN-<phase>.sh for the main patch,
-  NNa-/NNb-/NNc- for diagnostic/fix iterations within a phase,
-  NNz-commit-<phase>.sh for the commit script. Keep them under
-  scripts/ for traceability.
-
 - **Examples held to -D warnings.** Don't allow lint debt in
-  examples; they're educational artifacts.
+  examples; they're educational artifacts. Same for tests/pass/
+  fixtures (Phase C).
 
 - **Check before overwriting docs.** When patching documentation
   files via Python, always check `p.exists()` and read existing
-  content first. `p.write_text(new)` unconditionally clobbers prior
-  content. Prefer merge/append patterns for docs/. (Lesson learned
-  the hard way: BACKLOG.md was a substantive 540-line file that
-  got briefly overwritten during phase A handoff prep.)
+  content first. Prefer merge/append patterns for docs/. Phase A
+  hard-learned lesson on BACKLOG.md.
 
+New norms learned during Phase B and Phase C:
+
+- **ADR-first per phase boundary.** ADR 0002 was the Phase B
+  kickoff; ADR 0009 was Phase C kickoff; ADR 0011 was Phase C1
+  kickoff. Each landed PROPOSED before the first feat commit,
+  became ACCEPTED at sub-phase completion. Continue the pattern
+  for Phase D and beyond.
+
+- **feat + docs commit pairs per sub-phase.** Each sub-phase
+  ships as a feat commit (code + tests) followed by a docs
+  commit (STATE.md refresh + ADR status updates). The docs
+  commit also backfills the hash that the feat commit produced.
+  See the C0.0-C0.5 history for the rhythm.
+
+- **The pure-function pipeline discipline (ADR 0009 D1a).**
+  C0 held it — `lex`, `parse`, `compile_to_object` are all
+  `(input) -> (output, diagnostics)`. C1.0a starts cashing in
+  the payoff by retrofitting Salsa. Keep new pipeline stages
+  pure-function until salsa wrapping happens at a known
+  sub-phase.
+
+- **cargo clippy --workspace --all-targets -D warnings** is
+  part of the standard four-check suite alongside build / test
+  / test --doc. Don't let clippy debt accumulate; it has caused
+  full re-sweep commits before (4182ff6 cleared pre-B4.0 lints).
+
+- **No pushes from the assistant.** Commits land locally; the
+  dev pushes via GitHub Desktop in batches. Never run `git push`.
+
+- **macOS-only assumption.** `.cargo/config.toml` hardcodes brew
+  paths (LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18, link
+  search at /opt/homebrew/lib + /usr/local/lib). Cross-platform
+  is a future concern; right now LLVM 18 must be `brew install`-ed.
+
+- **Mode B working conventions** (from Phase B onward): paste-
+  direct zsh; anchor-guarded Python patches via `/tmp/`; no
+  nested heredocs; when a Python script needs multi-line Rust
+  text put it in a separate `cat > /tmp/foo.txt <<'RSEOF' …`
+  block and `read_text()` it from Python (triple-quoted Python
+  strings inside a bash heredoc can mangle terminals); cargo
+  test -p <crate> after each patch.
+
+### 0.2 Next session opening (C1.0b)
+
+Resume at **C1.0b**. The full plan is ADR 0011 D1; the
+resolution path for the Hash-bounds issue that paused C1.0a is:
+
+1. **Add Hash derives across sentinel-ast.** `Spanned<T>`, `Block`,
+   `Param`, `FnDef`, `Program`, `StmtKind`, `ExprKind` — each
+   needs `#[derive(Hash)]` so they're salsa-friendly. `BinOp`,
+   `UnaryOp`, `TokenKind` already derive Hash.
+
+2. **Rewrite the (deleted) sentinel-syntax/src/query.rs.** The
+   C1.0a draft tried to put `Vec<LexError>` and `Vec<ParseError>`
+   into salsa-tracked structs; that fails because
+   `miette::SourceSpan` isn't Hash. The fix: tracked structs hold
+   ONLY the success values (`Vec<Spanned<TokenKind>>` for lex,
+   `Option<Program>` for parse). Errors get converted to
+   `sentinel_base::Diagnostic` and accumulated via
+   `Diagnostic { stage: "lex", … }.accumulate(db)`.
+
+3. **Helper fns to convert LexError → Diagnostic and ParseError
+   → Diagnostic** live in sentinel-syntax/src/query.rs alongside
+   the queries.
+
+4. **Wire sentinel-driver to use the queries.** Create a
+   `SentinelDatabase` struct with `#[salsa::db] impl SentinelDb`
+   plus the required `salsa_event` method, set a SourceFile,
+   call lex_query/parse_query, collect accumulated Diagnostics
+   via `Query::accumulated::<Diagnostic>(db, ...)`, render via
+   miette.
+
+5. **Defer sentinel-codegen's salsa wrapping to C1.0c** unless
+   it's trivial. The LLVM context lifetimes may not fit salsa's
+   query model cleanly; better to land lex/parse retrofit + the
+   driver wiring first and revisit codegen separately.
+
+6. **Validate**: all 22 existing pass tests still run end-to-end
+   through the new query-based driver path; add a test that the
+   same input produces stable results across query reruns
+   (salsa cache validation).
+
+7. **Commit as C1.0b feat + docs**, flip ADR 0011 status to
+   reflect D1 (Salsa) exercised, update STATE.md.
+
+**Estimated effort**: 1-2 sessions of work, partly bounded by
+salsa 0.18 ergonomic surprises and how Hash derives propagate
+through the AST module's existing tests.
+
+After C1.0b: C1.1 (sentinel-resolve crate lift — move name
+resolution out of codegen) is the next ADR-tracked sub-phase
+per ADR 0011 D6.
+
+### 0.3 Quick-status block for session start
+
+For pasting into a fresh chat to bootstrap context:
+
+    Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
+    Local HEAD: 0a468c8 (docs: C1.0a landed).
+    [N] commits ahead of origin/main pending GitHub Desktop push.
+    Working tree clean.
+
+    Phase A (broker) + Phase B (effects-proto) + Phase C0 (bootstrap
+    compiler MVP) complete. 448 active workspace tests. C0 go/no-go
+    program runs at tests/pass/c05_go_no_go.sentinel: stdout "10\n",
+    exit 0. ADRs 0001-0010 ACCEPTED.
+
+    Phase C1 in flight per ADR 0011 (PROPOSED, 8 sub-phases). C1.0a
+    landed sentinel-base (Salsa db trait + SourceFile + Diagnostic
+    accumulator). C1.0b is the next step: wrap lex/parse as salsa-
+    tracked queries using the Diagnostic accumulator pattern.
+
+    Read docs/HANDOVER.md Section 0 in full, then docs/STATE.md,
+    then ADR 0011 — that's the canonical context. Resume at C1.0b
+    per HANDOVER §0.2.
 
 ---
 
