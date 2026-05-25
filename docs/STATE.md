@@ -11,29 +11,27 @@ research-grade interpreter (effects-proto). They are tracked in
 separate sections below. The remaining workspace members listed in
 HANDOVER §3.2 are scaffold-only.
 
-Last updated: phase B4.0 complete (secret/declassify surface per
-ADR 0008 D9; inference rejects with `SecretsNotYetSupported`
-placeholder pending B4.1 real typing). 192 lib + 17 integration
-tests pass. Three commits land B4.0: 1693b8c (B4.0a surface AST —
-`Ty::Secret(Box<Ty>)` + idempotent smart constructor,
-`TyExpr::Secret`, `ExprKind::Declassify`, `Subst::apply`/`unify`
-Secret recursion, `TypeError::SecretsNotYetSupported` placeholder
-fired from `infer` on `Declassify` and from `infer_program` on
-effect decls whose signatures mention `secret`), 63cd57b (B4.0b
-lexer tokens — `Token::Secret`, `Token::Declassify`, both globally
-reserved), 0b6b2ce (B4.0c parser surface — `secret T` prefix on
-TyExpr binding tighter than `->`, `declassify(e)` atom-precedence
-expression mirroring `do Label(arg)`, `ParseError::DoubleSecret`
-rejecting literal `secret secret T` and `secret (secret T)` at
-parse time). Real typing (D1/D2/D3/D4/D5 enforcement, comparison
-returns `Secret<Bool>`, the four CT rejections) lands in B4.1. See
-ADRs 0003 (B1 retrospective), 0004 (row representation), 0005
-(effect-inference judgment; D9 closed), 0006 (default-close,
-amended; D4 row polymorphism implemented), 0007 (effect handlers;
-status fully ACCEPTED, D9 fully complete — all phases B3.0 + B3.1 +
-B3.2 landed), 0008 (secret qualifier and constant-time check;
-status ACCEPTED for D1/D5/D6 surface confirmed by B4.0, D2/D3/D4/D8
-pending B4.1).
+Last updated: phase B4.1 complete (secret typing per ADR 0008
+D2/D3/D4/D5/D7; password-verify demo rejects with `SecretBranch`).
+203 lib + 19 integration tests pass. Two commits land B4.1:
+e760d57 (B4.1a foundation — 4 new `TypeError` variants
+[`SecretBranch`, `SecretDivisor`, `SecretFlow`,
+`SecretEscapesPolymorphism`], D2 no-α-leak wired in `unify` Var arm,
+catch-all SecretFlow split, D5 Declassify typing rule replaces
+B4.0a placeholder), 52acc0a (B4.1b CT-specific rejections — `infer`
+If arm rejects secret cond with `SecretBranch`, BinOp arm rejects
+secret divisor with `SecretDivisor` and extends Eq/Lt/Gt with D4
+returning `Secret<Bool>`, the `infer_program` effect-decl walker +
+`SecretsNotYetSupported` variant deleted). B4.2 remaining: the
+HANDOVER §5.2 password-verify demo as a featured integration test
+plus any related documentation work. See ADRs 0003 (B1
+retrospective), 0004 (row representation), 0005 (effect-inference
+judgment; D9 closed), 0006 (default-close, amended; D4 row
+polymorphism implemented), 0007 (effect handlers; status fully
+ACCEPTED, D9 fully complete — all phases B3.0 + B3.1 + B3.2 landed),
+0008 (secret qualifier and constant-time check; status ACCEPTED, D1
+through D7 confirmed by B4.0 + B4.1, D8 implicit via existing
+free-var/free-row-var recursion).
 
 ---
 
@@ -256,7 +254,9 @@ absorbed.
 | B4.0b | Lexer Token::Secret + Token::Declassify              | Done   | 63cd57b |
 | B4.0c | Parser secret prefix + declassify atom + DoubleSecret| Done   | 0b6b2ce |
 | B4.0  | Secret/declassify surface (B4 phase 0 of 3)          | Done   |         |
-| B4.1  | Secret typing (unify, infer, four CT rejections)     | Planned |        |
+| B4.1a | 4 TypeError variants + D2 unify + Declassify typing  | Done   | e760d57 |
+| B4.1b | D3 If/Div + D4 comparisons; drop placeholder         | Done   | 52acc0a |
+| B4.1  | Secret typing (unify, infer, four CT rejections)     | Done   |         |
 | B4.2  | Password-verify demo + B4 complete                   | Planned |        |
 | B?    | Broker-as-value-heap integration (bonus)           | Planned |        |
 
@@ -830,14 +830,129 @@ design decision 22.
     status flipped from PROPOSED to ACCEPTED with note that D1/D5/D6
     are confirmed by B4.0 and D2/D3/D4/D8 land in B4.1.
 
+Test coverage as of B4.1: 222 tests (203 lib + 19 integration).
+Net +13 lib / +2 integration from B4.0's 192 + 17. B4.1a landed
++5 lib (Declassify-on-non-secret-is-SecretFlow rename of the
+B4.0a placeholder test, plus +5 fresh tests covering D2 direct,
+Declassify positive via synthetic env, SecretFlow via catch-all,
+Secret-Secret recursion sanity, Secret-Int-vs-Secret-Bool mismatch
+on inners), 0 net integration (rename in place of the declassify
+placeholder). B4.1b landed +8 lib (effect-decl-with-secret tests
+rewritten from rejection to positive [+2 in place], +6 fresh
+covering SecretBranch, SecretDivisor, D4 on three comparison shapes,
+D4-Lt-Bool-rejects-on-inner) and +2 integration (password-verify
+chain rejects with SecretBranch -- the HANDOVER §5.2 deliverable;
+secret-in-arithmetic-is-SecretFlow). The effect-decl-rejection
+integration test was rewritten as a positive type-check (net 0).
+The placeholder variant `TypeError::SecretsNotYetSupported` is
+gone. Clippy under `-D warnings` still has the 5 pre-existing
+lints inherited from B3.2; chip filed to clean up separately.
+See B.5 design decision 23.
+
+23. (B4.1, ADR 0008 D2-D7) Secret typing landed in two commits.
+    **B4.1a** (e760d57) is the foundation. Four new `TypeError`
+    variants: `SecretFlow { from, to, span }` (the public/secret
+    unification failure, raised by the catch-all arm of `unify`
+    when either side is `Ty::Secret(_)` and the other is
+    non-secret-non-Var), `SecretEscapesPolymorphism { var, span }`
+    (D2 no-α-leak, raised by the Var arm of `unify` when a bare
+    TyVar would bind to a secret type), `SecretBranch { span }`
+    (declared; fires in B4.1b), `SecretDivisor { span }` (declared;
+    fires in B4.1b). The `unify` Var arm gains a `matches!(t,
+    Ty::Secret(_))` short-circuit; the catch-all Mismatch arm
+    splits into SecretFlow (one side Secret) and Mismatch (neither
+    side Secret). The Declassify infer arm replaces its B4.0a
+    `SecretsNotYetSupported` placeholder with the real D5 rule:
+    mint a fresh α, unify `t_inner` against `Ty::Secret(α)`, return
+    `s.apply(α)` as the result type. Three failure cases handled
+    naturally by the unify machinery: inner is concrete non-secret
+    → SecretFlow via catch-all; inner is bare TyVar →
+    SecretEscapesPolymorphism via Var arm; inner is Secret(t) →
+    Secret-Secret arm binds α := t, result is t.
+
+    **B4.1b** (52acc0a) is the CT-specific rejections + cleanup.
+    `infer`'s If arm rejects `cond : Ty::Secret(_)` with
+    SecretBranch before the Bool unify so the diagnostic is
+    dedicated rather than the generic SecretFlow. `infer`'s BinOp
+    arm rejects Div with a secret divisor with SecretDivisor
+    (Sentinel-Mini has no Mod; ADR D3's `Div | Mod` is
+    forward-looking). The Eq/Lt/Gt arms gain the D4 comparison
+    rule: when either operand types as Secret(_), unwrap that side
+    to its inner type, unify the other operand against the inner
+    (the (Secret, Secret) arm of unify handles the both-secret case
+    naturally via the same code path because both inners become
+    non-Secret here), and produce Secret(Bool) as the result type.
+    For Lt/Gt the inner type must additionally be Int per the
+    existing binop_signature; that unify fires after the cross-side
+    unify and produces a SecretFlow if the inner isn't Int (or
+    Mismatch if neither side was secret).
+
+    The `infer_program` `tyexpr_find_secret_span` walker and the
+    associated SecretsNotYetSupported variant are deleted in B4.1b.
+    ADR 0008 D7 (effect signatures may mention `secret`) is
+    confirmed end-to-end: `effect ReadKey : Int -> secret Int ;`
+    now type-checks, and `do ReadKey(0)` flows a Secret(Int) value
+    into inference where D2/D3/D4 keep it safe.
+
+    Two structural decisions worth recording inline. (a) The Var
+    arm's D2 check is `matches!(t, Ty::Secret(_))` rather than a
+    deeper walk that would refuse to bind any TyVar that contains a
+    Secret inside a structural type (like `Fun(_, _, Secret(_))`).
+    The shallow check is sufficient because Secret-inside-Fun is
+    not a "bare TyVar binds to secret" violation -- the inner
+    binding is fine if the function itself is concrete. Forward
+    compatibility note: if a future ADR promotes the restriction
+    to full qualifier polymorphism (shape (c)), the shallow check
+    becomes a quantifier-restricted bind rule; the existing call
+    sites already test it at the Var arm so the migration is
+    contained.
+
+    (b) The D4 comparison rule for Lt/Gt unifies the (potentially
+    secret-unwrapped) lhs inner type against Int as a SECOND
+    unification step, after the cross-side unify. This makes
+    `Lt(Secret(Bool), Secret(Bool))` reject with Mismatch (the
+    unwrapped Bool vs Int) rather than SecretFlow (which would be
+    odd because both sides are secret-and-equal). The trade-off:
+    diagnostic for Lt-on-secret-non-Int is "expected Int, found
+    Bool" rather than something CT-specific. Acceptable because
+    such a program is rare and the inner-type mismatch is what the
+    user actually needs to fix.
+
+    A positive end-to-end test for declassify-on-Secret cannot be
+    written because ADR 0008 D5 intentionally omits a `classify`
+    primitive (the Secret-introduction dual). The Secret-introducing
+    path is restricted to typing of `do L(arg)` for effect-decls
+    naming secret; resuming a continuation requires producing a
+    Secret value, and the surface has no form that does so. Positive
+    D5 coverage lives in lib's
+    `b41a_declassify_on_secret_unwraps_the_inner_type` via a
+    synthetic env. The integration tests file carries an inline note
+    explaining the gap.
+
+    D8 (generalization participation) was implicit by B4.0a's
+    structural recursion of `collect_free_vars` and
+    `collect_free_row_vars` into `Ty::Secret(_)`. No dedicated test
+    added because no surface program exposes the generalization
+    boundary with a polymorphic secret-typed value -- D2 prevents
+    that by construction. Confirmed by code review of types.rs.
+
+    Net +13 lib / +2 integration. New TypeError variants land:
+    SecretFlow, SecretEscapesPolymorphism, SecretBranch,
+    SecretDivisor. Variant removed: SecretsNotYetSupported.
+
 
 ### B.6 Known Limitations (intentional at B1)
 
 - No effects. The whole reason this crate exists. (B2 onward.)
-- `secret` qualifier and constant-time check: surface landed in B4.0
-  (lex+parse+AST+placeholder); inference layer rejects every B4.0
-  entry point with `SecretsNotYetSupported`. Real typing in B4.1;
-  password-verify demo in B4.2.
+- `secret` qualifier and constant-time check: surface (B4.0) + typing
+  (B4.1) landed. D2 (no-α-leak) prevents secret values from flowing
+  into polymorphic positions; D3 rejects branching on secrets and
+  division-by-secret; D4 makes comparisons on secrets produce
+  `Secret<Bool>`; D5 typing rule wires `declassify(e)`. The
+  HANDOVER §5.2 password-verify demo is exercised as an integration
+  test (`pipeline_password_verify_naive_rejects_with_secret_branch`).
+  Featured demo polish, additional CT-passing rewrites, and any
+  surface documentation belong in B4.2.
 - No REPL, no driver binary. Library-only.
 - `let rec` RHS must be a syntactic lambda. Parser enforces with
   `ParseError::LetRecNotLambda`. Relaxing this in B3 (when handlers
@@ -879,7 +994,7 @@ The standard check suite for a clean tree, applied per-crate:
 All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
-  - sentinel-effects-proto: 209 tests (192 lib + 17 integration) + 0 doctests
+  - sentinel-effects-proto: 222 tests (203 lib + 19 integration) + 0 doctests
 
 ### Script Convention
 
