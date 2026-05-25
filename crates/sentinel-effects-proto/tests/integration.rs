@@ -188,16 +188,16 @@ fn pipeline_return_arm_runs_on_resumed_value() {
 // ---- B4.0c: secret/declassify surface end-to-end (ADR 0008 D9) ----
 
 #[test]
-fn pipeline_declassify_rejected_at_inference_in_b40() {
-    // B4.0 ships only the surface. Programs that use `declassify` are
-    // rejected by the SecretsNotYetSupported placeholder; the real
-    // typing rule (e : Secret<T> ⊢ declassify(e) : T, ADR 0008 D5)
-    // lands in B4.1.
+fn pipeline_declassify_on_non_secret_is_secret_flow() {
+    // B4.1a wired the D5 typing rule: `e : Secret<T> ⊢ declassify(e) : T`.
+    // On `declassify(1)`, `1 : Int` cannot unify with `Secret(α)` so
+    // the catch-all SecretFlow arm fires. (Was a placeholder
+    // rejection at B4.0c, renamed and rewritten here.)
     use sentinel_effects_proto::{MiniError, TypeError};
     let err = run("declassify(1)").unwrap_err();
     match err {
-        MiniError::Type(TypeError::SecretsNotYetSupported { .. }) => {}
-        other => panic!("expected SecretsNotYetSupported, got {other:?}"),
+        MiniError::Type(TypeError::SecretFlow { .. }) => {}
+        other => panic!("expected SecretFlow, got {other:?}"),
     }
 }
 

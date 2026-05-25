@@ -119,6 +119,10 @@ impl MiniError {
                     TypeError::HandlerLabelNotInRow { span, .. } => Some(*span),
                     TypeError::DuplicateHandlerArm { span, .. } => Some(*span),
                     TypeError::SecretsNotYetSupported { span } => Some(*span),
+                    TypeError::SecretFlow { span, .. } => Some(*span),
+                    TypeError::SecretEscapesPolymorphism { span, .. } => Some(*span),
+                    TypeError::SecretBranch { span } => Some(*span),
+                    TypeError::SecretDivisor { span } => Some(*span),
                 };
                 render(source, span, "type error", &e.to_string())
             }

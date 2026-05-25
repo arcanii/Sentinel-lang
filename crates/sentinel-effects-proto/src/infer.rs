@@ -53,10 +53,45 @@ pub enum TypeError {
     DuplicateHandlerArm { label: String, span: Span },
     /// B4.0 (ADR 0008 D9): placeholder fired on any program that
     /// uses the `secret T` qualifier in a type annotation or the
-    /// `declassify(e)` form. Real B4.1 typing replaces this. Mirrors
-    /// the `EffectNotYetSupported` placeholder removed in B2.3b2.
-    #[error("`secret` qualifier and `declassify` not yet supported by inference (B4.0 surface only; typing lands in B4.1)")]
+    /// `declassify(e)` form. B4.1a removed it from the `Declassify`
+    /// arm in `infer` (replaced by the real D5 typing rule); the
+    /// `infer_program` effect-decl walker still fires it until B4.1b
+    /// lands D3/D4 and the surface for effect-decl-with-secret is
+    /// safe to expose. Mirrors the `EffectNotYetSupported`
+    /// placeholder removed in B2.3b2.
+    #[error("`secret` qualifier in effect declarations not yet supported by inference (B4.0/B4.1a; full surface in B4.1b)")]
     SecretsNotYetSupported { span: Span },
+    /// B4.1a (ADR 0008 D3). Raised by `unify` when a `Ty::Secret(_)`
+    /// meets a non-secret non-variable type (or vice versa). Carries
+    /// both sides so the diagnostic shows the direction of the
+    /// disallowed flow. Construction is from the catch-all arm of
+    /// `unify`; Var-vs-Secret routes to `SecretEscapesPolymorphism`
+    /// instead. Also fires from the `Declassify` typing rule when the
+    /// inner expression types as non-secret -- declassify expects a
+    /// `Ty::Secret(_)` argument by D5.
+    #[error("secret type mismatch: cannot flow {from} into {to}")]
+    SecretFlow { from: Ty, to: Ty, span: Span },
+    /// B4.1a (ADR 0008 D2 — no-α-leak). Raised by `unify` when a
+    /// bare type variable would bind to `Ty::Secret(_)`. Substitutes
+    /// for full qualifier polymorphism (shape (c)) at prototype
+    /// cost: polymorphic library functions become two-flavored. The
+    /// rejected program either needs a secret-aware variant of the
+    /// generic function, or an explicit `declassify` to remove the
+    /// qualifier first.
+    #[error("secret escapes polymorphism: type variable {var} cannot bind to a secret type")]
+    SecretEscapesPolymorphism { var: TyVar, span: Span },
+    /// B4.1b (ADR 0008 D3). Raised by `infer` on `if` when the
+    /// condition types as `Ty::Secret(_)`. Branching on a secret
+    /// produces data-dependent timing on real hardware; the program
+    /// must use a constant-time selection primitive (Phase C
+    /// standard library) or `declassify` the condition first.
+    #[error("constant-time violation: cannot branch on a value of secret type")]
+    SecretBranch { span: Span },
+    /// B4.1b (ADR 0008 D3). Raised by `infer` on `Div`/`Mod` when
+    /// the divisor types as `Ty::Secret(_)`. Variable-time division
+    /// on hardware is the canonical CT footgun.
+    #[error("constant-time violation: cannot divide by a value of secret type")]
+    SecretDivisor { span: Span },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -206,6 +241,15 @@ pub fn unify(
         (Ty::Int, Ty::Int) => Ok(s.clone()),
         (Ty::Bool, Ty::Bool) => Ok(s.clone()),
         (Ty::Var(v), t) | (t, Ty::Var(v)) => {
+            // ADR 0008 D2 — no-α-leak. A bare type variable cannot
+            // bind to a secret type; rejecting here is the cheap
+            // substitute for full qualifier polymorphism (shape (c)).
+            // The restriction is forward-compatible: any program that
+            // types under this rule also types under qualifier
+            // polymorphism if a future ADR adopts it.
+            if matches!(t, Ty::Secret(_)) {
+                return Err(TypeError::SecretEscapesPolymorphism { var: v, span });
+            }
             let _ = supply;
             let extension = bind(v, &t, span, s)?;
             Ok(extension.compose(s))
@@ -215,16 +259,23 @@ pub fn unify(
             let s2 = unify(&s1, &b1, &b2, span, supply)?;
             unify_row(&s2, &r1, &r2, span, supply)
         }
-        // ADR 0008 D1: structural recursion. Secret-vs-non-Secret
-        // (other than Var, which is handled above) falls through
-        // to the catch-all Mismatch arm. ADR 0008 D2's no-alpha-leak
-        // restriction is B4.1; in B4.0 the Var arm above will happily
-        // bind a TyVar to a Ty::Secret(_). This is unobservable in
-        // B4.0 because Declassify is the only way to introduce a
-        // secret-typed value into inference and it's blocked by the
-        // SecretsNotYetSupported placeholder.
+        // ADR 0008 D1: structural recursion on Secret-Secret. Inner
+        // types unify normally; the smart constructor ensures the
+        // inner cannot itself be Secret, so recursion terminates.
         (Ty::Secret(a), Ty::Secret(b)) => unify(s, &a, &b, span, supply),
-        (expected, found) => Err(TypeError::Mismatch { expected, found, span }),
+        // ADR 0008 D3 SecretFlow: Secret-vs-non-Secret-non-Var (Var
+        // is handled above) is the public/secret unification failure.
+        // Split out of the catch-all Mismatch arm so the diagnostic
+        // names the qualifier mismatch directly.
+        (expected, found) => {
+            let either_secret =
+                matches!(expected, Ty::Secret(_)) || matches!(found, Ty::Secret(_));
+            if either_secret {
+                Err(TypeError::SecretFlow { from: expected, to: found, span })
+            } else {
+                Err(TypeError::Mismatch { expected, found, span })
+            }
+        }
     }
 }
 
@@ -888,12 +939,30 @@ pub fn infer(
             let row = s_acc.apply_row(&r_accumulated);
             Ok((s_acc, ty, row))
         }
-        // ADR 0008 D9: surface-only placeholder. B4.1 replaces this
-        // with the real typing rule (`e : Secret<T> ⊢ declassify(e) : T`,
-        // ADR 0008 D5). Mirrors how `EffectNotYetSupported` gated
-        // `Perform` from B2.2b until B2.3b2 wired real typing.
-        ExprKind::Declassify { span, .. } => {
-            Err(TypeError::SecretsNotYetSupported { span: *span })
+        // ADR 0008 D5: declassify typing rule. `e : Secret<T> ⊢
+        // declassify(e) : T`. Implemented by minting a fresh α and
+        // unifying `t_inner` against `Ty::Secret(α)`; on success the
+        // result type is `s.apply(α)` (the inner of the secret).
+        // - inner is `Ty::Secret(t)`: Secret-Secret arm of `unify`
+        //   recurses, binds α := t, result is t. ✓
+        // - inner is a concrete non-secret type (Int/Bool/Fun): falls
+        //   to the catch-all SecretFlow arm with from=non-secret,
+        //   to=Secret(α). The diagnostic reads "cannot flow Int into
+        //   secret '_a".
+        // - inner is a bare `Ty::Var(β)`: Var arm of unify hits D2
+        //   and returns SecretEscapesPolymorphism. The diagnostic
+        //   reads "secret escapes polymorphism: '_b" -- consistent
+        //   with the polymorphism rule, slightly indirect for the
+        //   declassify-specific failure but correct per D2.
+        // The arg-row r_inner threads through unchanged: declassify
+        // performs no effects beyond what its argument performs.
+        ExprKind::Declassify { inner, span } => {
+            let (s1, t_inner, r_inner) = infer(env, eff_env, inner, supply)?;
+            let inner_var = supply.fresh_ty();
+            let expected = Ty::secret(inner_var.clone());
+            let s2 = unify(&s1, &t_inner, &expected, *span, supply)?;
+            let result_ty = s2.apply(&inner_var);
+            Ok((s2, result_ty, r_inner))
         }
     }
 }
@@ -1900,16 +1969,28 @@ mod tests {
         }
     }
 
-    // ---- B4.0 (ADR 0008 D9): SecretsNotYetSupported placeholder ----
+    // ---- B4.1a (ADR 0008 D2/D5): real Declassify typing + D2 no-α-leak ----
     //
-    // These tests build AST directly because the lexer/parser do not
-    // yet recognise `secret` or `declassify` (those are B4.0b/c). They
-    // exercise the two surface entry points that lower to `Ty::Secret`
-    // or `ExprKind::Declassify`: `declassify(e)` in expressions and
-    // `secret T` in effect-decl signatures.
+    // B4.0a's three `b40a_*` placeholder tests are revised here:
+    // the Declassify-expression test moves to `b41a_*` and asserts
+    // SecretFlow (the real D5 typing rule's reaction to a non-secret
+    // inner). The two effect-decl tests below still assert
+    // SecretsNotYetSupported because B4.1a leaves the
+    // `infer_program` effect-decl walker in place; B4.1b removes
+    // that walker once D3/D4 land.
+    //
+    // Synthetic AST is still used because the parser-level surface
+    // (B4.0c) accepts the keywords but B4.1a inference has no path
+    // from source into a `Ty::Secret(_)` -- the effect-decl walker
+    // is the only public producer. Synthetic envs cover the typing
+    // rule directly.
 
     #[test]
-    fn b40a_declassify_expr_rejected_with_placeholder() {
+    fn b41a_declassify_on_non_secret_is_secret_flow() {
+        // B4.0a placeholder is gone for Declassify; the real D5 rule
+        // unifies the inner against `Secret(α)`. On `declassify(1)`,
+        // `1 : Int` cannot unify with `Secret(α)` and the catch-all
+        // SecretFlow arm fires.
         use crate::ast::{expr, ExprKind};
         let inner = expr(ExprKind::Int(1), sp());
         let de = expr(
@@ -1919,12 +2000,97 @@ mod tests {
         let mut supply = TyVarSupply::new();
         let env = TypeEnv::empty();
         let eff_env: EffectEnv = HashMap::new();
-        let err = infer(&env, &eff_env, &de, &mut supply).expect_err("declassify");
+        let err = infer(&env, &eff_env, &de, &mut supply).expect_err("declassify on Int");
         match err {
-            TypeError::SecretsNotYetSupported { .. } => {}
-            other => panic!("expected SecretsNotYetSupported, got {other:?}"),
+            TypeError::SecretFlow { from, .. } => {
+                assert_eq!(from, Ty::Int, "from-type should be the non-secret Int");
+            }
+            other => panic!("expected SecretFlow, got {other:?}"),
         }
     }
+
+    #[test]
+    fn b41a_declassify_on_secret_unwraps_the_inner_type() {
+        // Positive D5 case. Synthetic env binds `k : Secret<Int>`;
+        // declassify(k) types as Int.
+        use crate::ast::{expr, ExprKind};
+        let k_ref = expr(ExprKind::Var("k".into()), sp());
+        let de = expr(
+            ExprKind::Declassify { inner: Box::new(k_ref), span: sp() },
+            sp(),
+        );
+        let mut supply = TyVarSupply::new();
+        let env = TypeEnv::empty()
+            .extend("k".to_string(), Scheme::mono(Ty::secret(Ty::Int)));
+        let eff_env: EffectEnv = HashMap::new();
+        let (_s, t, _r) = infer(&env, &eff_env, &de, &mut supply).expect("declassify k");
+        assert_eq!(t, Ty::Int);
+    }
+
+    #[test]
+    fn b41a_unify_var_vs_secret_is_secret_escapes_polymorphism() {
+        // D2 no-α-leak. unify(Var(α), Secret(Int)) must reject; the
+        // symmetric direction is handled by the same Var arm via the
+        // or-pattern.
+        let s = Subst::empty();
+        let mut supply = TyVarSupply::new();
+        let err = unify(&s, &v(0), &Ty::secret(Ty::Int), sp(), &mut supply)
+            .expect_err("Var-vs-Secret");
+        match err {
+            TypeError::SecretEscapesPolymorphism { var, .. } => {
+                assert_eq!(var, TyVar(0));
+            }
+            other => panic!("expected SecretEscapesPolymorphism, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b41a_unify_secret_vs_non_secret_is_secret_flow() {
+        // Direct unify test for the catch-all SecretFlow split.
+        // unify(Int, Secret(Int)) is non-Var-vs-Secret, catch-all
+        // fires SecretFlow rather than the generic Mismatch.
+        let s = Subst::empty();
+        let mut supply = TyVarSupply::new();
+        let err = unify(&s, &Ty::Int, &Ty::secret(Ty::Int), sp(), &mut supply)
+            .expect_err("Int-vs-Secret(Int)");
+        match err {
+            TypeError::SecretFlow { from, to, .. } => {
+                assert_eq!(from, Ty::Int);
+                assert_eq!(to, Ty::secret(Ty::Int));
+            }
+            other => panic!("expected SecretFlow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b41a_unify_secret_vs_secret_recurses_on_inner() {
+        // Sanity: the (Secret, Secret) arm still works after the
+        // SecretFlow upgrade. unify(Secret(Int), Secret(Int)) succeeds.
+        let s = Subst::empty();
+        let mut supply = TyVarSupply::new();
+        let result = unify(&s, &Ty::secret(Ty::Int), &Ty::secret(Ty::Int), sp(), &mut supply);
+        assert!(result.is_ok(), "Secret(Int) ~ Secret(Int) should unify: {result:?}");
+    }
+
+    #[test]
+    fn b41a_unify_secret_int_vs_secret_bool_is_mismatch_on_inner() {
+        // unify(Secret(Int), Secret(Bool)) -- the (Secret, Secret) arm
+        // recurses to unify(Int, Bool), which falls to the catch-all
+        // Mismatch arm (neither side is Secret at that point).
+        let s = Subst::empty();
+        let mut supply = TyVarSupply::new();
+        let err = unify(&s, &Ty::secret(Ty::Int), &Ty::secret(Ty::Bool), sp(), &mut supply)
+            .expect_err("Secret(Int) vs Secret(Bool)");
+        match err {
+            TypeError::Mismatch { expected, found, .. } => {
+                assert_eq!(expected, Ty::Int);
+                assert_eq!(found, Ty::Bool);
+            }
+            other => panic!("expected Mismatch on inner types, got {other:?}"),
+        }
+    }
+
+    // ---- B4.0a placeholder tests (still firing in B4.1a) ----
 
     #[test]
     fn b40a_effect_decl_with_secret_ret_rejected_with_placeholder() {
