@@ -103,6 +103,7 @@ impl MiniError {
                     ParseError::ExpectedTypeExpr { span, .. } => Some(*span),
                     ParseError::HandlerArmLabelNotUpper { span, .. } => Some(*span),
                     ParseError::EmptyHandler { span } => Some(*span),
+                    ParseError::DoubleSecret { span } => Some(*span),
                 };
                 render(source, span, "parse error", &e.to_string())
             }

@@ -184,3 +184,47 @@ fn pipeline_return_arm_runs_on_resumed_value() {
     let v = run(source).expect("ret-arm handle should produce a value");
     assert_eq!(v, Value::Int(8));
 }
+
+// ---- B4.0c: secret/declassify surface end-to-end (ADR 0008 D9) ----
+
+#[test]
+fn pipeline_declassify_rejected_at_inference_in_b40() {
+    // B4.0 ships only the surface. Programs that use `declassify` are
+    // rejected by the SecretsNotYetSupported placeholder; the real
+    // typing rule (e : Secret<T> ⊢ declassify(e) : T, ADR 0008 D5)
+    // lands in B4.1.
+    use sentinel_effects_proto::{MiniError, TypeError};
+    let err = run("declassify(1)").unwrap_err();
+    match err {
+        MiniError::Type(TypeError::SecretsNotYetSupported { .. }) => {}
+        other => panic!("expected SecretsNotYetSupported, got {other:?}"),
+    }
+}
+
+#[test]
+fn pipeline_effect_decl_with_secret_rejected_at_inference_in_b40() {
+    // B4.0 ships only the surface. Effect signatures may already
+    // mention `secret` per ADR 0008 D7, but B4.1 wires the typing;
+    // B4.0 rejects the program so secret-typed values never reach
+    // unconstrained inference (D2's no-α-leak rule is B4.1).
+    use sentinel_effects_proto::{MiniError, TypeError};
+    let err = run("effect ReadKey : Int -> secret Int ; 0").unwrap_err();
+    match err {
+        MiniError::Type(TypeError::SecretsNotYetSupported { .. }) => {}
+        other => panic!("expected SecretsNotYetSupported, got {other:?}"),
+    }
+}
+
+#[test]
+fn pipeline_double_secret_rejected_at_parse() {
+    // `secret secret T` is rejected by the parser, ahead of the
+    // SecretsNotYetSupported placeholder. The smart constructor would
+    // still collapse it, but the parser-level rejection is the human-
+    // source early complaint (ADR 0008 D1/D6).
+    use sentinel_effects_proto::{MiniError, ParseError};
+    let err = run("effect F : Int -> secret secret Int ; 0").unwrap_err();
+    match err {
+        MiniError::Parse(ParseError::DoubleSecret { .. }) => {}
+        other => panic!("expected DoubleSecret, got {other:?}"),
+    }
+}

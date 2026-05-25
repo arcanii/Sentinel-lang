@@ -28,6 +28,13 @@ pub enum ParseError {
     /// braces. At minimum a single arm or a `return` arm is required.
     #[error("handler must contain at least one arm")]
     EmptyHandler { span: Span },
+    /// B4.0c (ADR 0008 D1/D6): literal `secret secret T` (or
+    /// `secret (secret T)`) rejected at parse time. The smart
+    /// constructor [`crate::types::Ty::secret`] separately collapses
+    /// doubly-wrapped types should they arrive through substitution;
+    /// this parser rejection is the early complaint for source.
+    #[error("`secret` may not be applied to a type that is already secret")]
+    DoubleSecret { span: Span },
 }
 
 /// Parse a flat token stream into a single [`Expr`].
@@ -341,6 +348,9 @@ impl<'a> Parser<'a> {
             Some((Token::Bool(b), span)) => Ok(expr(ExprKind::Bool(b), span)),
             Some((Token::Ident(s), span)) => Ok(expr(ExprKind::Var(s), span)),
             Some((Token::Do, start_span)) => self.parse_perform(start_span),
+            // ADR 0008 D5/D6: `declassify(e)` at atom precedence,
+            // mandatory parens (parallel to `do Label(arg)`).
+            Some((Token::Declassify, start_span)) => self.parse_declassify(start_span),
             Some((Token::LParen, open_span)) => {
                 let inner = self.parse_expr()?;
                 self.expect("')'", |t| matches!(t, Token::RParen))?;
@@ -373,6 +383,25 @@ impl<'a> Parser<'a> {
         let close = self.last_span();
         let span = start_span.merge(close);
         Ok(expr(ExprKind::Perform { label, label_span, arg: Box::new(arg) }, span))
+    }
+
+    /// B4.0c (ADR 0008 D5/D6): `declassify(e)` as a parser-special
+    /// atom-precedence form. Mandatory parens around the argument,
+    /// paralleling `do Label(arg)`. The parens around `declassify`'s
+    /// argument are part of the surface (D6) so every declassification
+    /// site is syntactically grep-able in source -- this preserves
+    /// the audit-point property called out in D5.
+    fn parse_declassify(&mut self, start_span: Span) -> Result<Expr, ParseError> {
+        // The `declassify` token has already been consumed.
+        self.expect("'('", |t| matches!(t, Token::LParen))?;
+        let inner = self.parse_expr()?;
+        self.expect("')'", |t| matches!(t, Token::RParen))?;
+        let close = self.last_span();
+        let span = start_span.merge(close);
+        Ok(expr(
+            ExprKind::Declassify { inner: Box::new(inner), span },
+            span,
+        ))
     }
 
     fn parse_effect_decl(&mut self) -> Result<crate::ast::EffectDecl, ParseError> {
@@ -428,6 +457,24 @@ impl<'a> Parser<'a> {
         match self.bump() {
             Some((Token::Ident(s), span)) if s == "Int" => Ok(crate::ast::TyExpr::Int(span)),
             Some((Token::Ident(s), span)) if s == "Bool" => Ok(crate::ast::TyExpr::Bool(span)),
+            // ADR 0008 D6: prefix `secret T` binds tighter than `->`,
+            // so `secret int -> bool` parses as `(secret int) -> bool`.
+            // Recursing on parse_ty_atom (not parse_ty_expr) gives that
+            // precedence; users wanting the arrow inside the secret
+            // write `secret (int -> bool)`. DoubleSecret rejects
+            // literal `secret secret T` and `secret (secret T)` -- the
+            // smart-constructor still collapses double-wraps that
+            // arrive through unification, this is the human-source
+            // early complaint.
+            Some((Token::Secret, start)) => {
+                let inner = self.parse_ty_atom()?;
+                if matches!(inner, crate::ast::TyExpr::Secret(_, _)) {
+                    let span = start.merge(inner.span());
+                    return Err(ParseError::DoubleSecret { span });
+                }
+                let span = start.merge(inner.span());
+                Ok(crate::ast::TyExpr::Secret(Box::new(inner), span))
+            }
             Some((Token::LParen, open)) => {
                 let inner = self.parse_ty_expr()?;
                 self.expect("')'", |t| matches!(t, Token::RParen))?;
@@ -798,6 +845,106 @@ mod tests {
                 assert_eq!(rhs.node, ExprKind::Int(2));
             }
             other => panic!("expected BinOp wrapping Perform, got {other:?}"),
+        }
+    }
+
+    // ---- B4.0c: secret + declassify parser surface (ADR 0008 D5/D6) ----
+
+    #[test]
+    fn b40c_secret_prefix_on_int_in_effect_decl() {
+        let prog = pp("effect ReadKey : Int -> secret Int ; 0");
+        match &prog.effects[0].ret {
+            crate::ast::TyExpr::Secret(inner, _) => {
+                assert!(matches!(**inner, crate::ast::TyExpr::Int(_)));
+            }
+            other => panic!("expected ret to be Secret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b40c_secret_binds_tighter_than_arrow() {
+        // `secret Int -> Bool` parses as `(secret Int) -> Bool`,
+        // not `secret (Int -> Bool)`. The arrow is at outer precedence.
+        let prog = pp("effect F : secret Int -> Bool ; 0");
+        match &prog.effects[0].arg {
+            crate::ast::TyExpr::Secret(inner, _) => {
+                assert!(matches!(**inner, crate::ast::TyExpr::Int(_)));
+            }
+            other => panic!("expected arg to be Secret(Int), got {other:?}"),
+        }
+        assert!(matches!(prog.effects[0].ret, crate::ast::TyExpr::Bool(_)));
+    }
+
+    #[test]
+    fn b40c_secret_arrow_inside_parens() {
+        // `secret (Int -> Bool)` keeps the arrow under the Secret.
+        let prog = pp("effect F : Int -> secret (Int -> Bool) ; 0");
+        match &prog.effects[0].ret {
+            crate::ast::TyExpr::Secret(inner, _) => match &**inner {
+                crate::ast::TyExpr::Arrow(_, _, _) => {}
+                other => panic!("expected Secret(Arrow), inner was {other:?}"),
+            },
+            other => panic!("expected ret to be Secret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b40c_double_secret_literal_rejected() {
+        let err = parse_program(&lex("effect F : Int -> secret secret Int ; 0").unwrap())
+            .unwrap_err();
+        assert!(matches!(err, ParseError::DoubleSecret { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn b40c_double_secret_through_parens_rejected() {
+        // `secret (secret Int)` is also flagged at parse time.
+        let err = parse_program(&lex("effect F : Int -> secret (secret Int) ; 0").unwrap())
+            .unwrap_err();
+        assert!(matches!(err, ParseError::DoubleSecret { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn b40c_declassify_call_parses() {
+        let e = p("declassify(1)");
+        match e.node {
+            ExprKind::Declassify { inner, .. } => {
+                assert_eq!(inner.node, ExprKind::Int(1));
+            }
+            other => panic!("expected Declassify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b40c_declassify_requires_parens() {
+        // `declassify 1` (no parens) is rejected -- mirrors `do` which
+        // also requires parens around its argument.
+        let err = parse(&lex("declassify 1").unwrap()).unwrap_err();
+        assert!(matches!(err, ParseError::Unexpected { expected: "'('", .. }),
+                "got {err:?}");
+    }
+
+    #[test]
+    fn b40c_declassify_inside_arithmetic_context() {
+        // declassify is atom-precedence, so it composes with BinOp.
+        let e = p("declassify(x) + 1");
+        match e.node {
+            ExprKind::BinOp { lhs, rhs, .. } => {
+                assert!(matches!(lhs.node, ExprKind::Declassify { .. }));
+                assert_eq!(rhs.node, ExprKind::Int(1));
+            }
+            other => panic!("expected BinOp wrapping Declassify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn b40c_declassify_arg_can_be_full_expr() {
+        // The argument inside the parens is a full expression, not an atom.
+        let e = p("declassify(1 + 2)");
+        match e.node {
+            ExprKind::Declassify { inner, .. } => {
+                assert!(matches!(inner.node, ExprKind::BinOp { .. }));
+            }
+            other => panic!("expected Declassify, got {other:?}"),
         }
     }
 }
