@@ -1148,6 +1148,7 @@ dependencies = [
  "sentinel-ast",
  "sentinel-resolve",
  "sentinel-syntax",
+ "sentinel-types",
  "thiserror",
  "tracing",
 ]
@@ -1162,6 +1163,7 @@ dependencies = [
  "sentinel-codegen",
  "sentinel-resolve",
  "sentinel-syntax",
+ "sentinel-types",
  "thiserror",
  "tracing",
 ]

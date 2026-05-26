@@ -12,6 +12,7 @@ repository.workspace   = true
 [dependencies]
 sentinel-ast     = { path = "../sentinel-ast" }
 sentinel-resolve = { path = "../sentinel-resolve" }
+sentinel-types   = { path = "../sentinel-types" }
 
 inkwell    = { workspace = true }
 miette     = { workspace = true }

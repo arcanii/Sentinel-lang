@@ -20,13 +20,18 @@
 //! compile_to_object. Name resolution lives in sentinel-resolve
 //! per ADR 0011 D4; codegen consumes a `ResolvedProgram` (no more
 //! string-keyed lookups in codegen).
+//! C1.2.4: type-check pass joins the pipeline:
+//!   parse_query → resolve_query → check_query → codegen.
+//! Codegen now consumes a `TypedProgram` per ADR 0011 D5 + ADR
+//! 0012 D1-D4; diagnostics from every front-end stage transitively
+//! accumulate on check_query.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use miette::{LabeledSpan, MietteDiagnostic, NamedSource, Report, Severity as MietteSeverity, SourceSpan};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
-use sentinel_resolve::resolve_query;
+use sentinel_types::check_query;
 
 /// The concrete Salsa database for the snc driver. Per ADR 0011 D1
 /// the cross-crate database trait [`SentinelDb`] lives in
@@ -108,14 +113,15 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     };
     let db = SentinelDatabase::default();
     let file = SourceFile::new(&db, path.to_string(), src.clone());
-    // Pipeline: parse_query → resolve_query → codegen. resolve_query
-    // depends on parse_query, so accumulated::<Diagnostic> on
-    // resolve_query picks up parse-stage diagnostics too.
-    let resolved_opt = resolve_query(&db, file);
-    let diags = resolve_query::accumulated::<Diagnostic>(&db, file);
+    // Pipeline: parse_query → resolve_query → check_query → codegen.
+    // check_query depends transitively on the upstream queries, so
+    // accumulated::<Diagnostic> on check_query picks up parse, resolve,
+    // and type-check diagnostics in one collection.
+    let typed_opt = check_query(&db, file);
+    let diags = check_query::accumulated::<Diagnostic>(&db, file);
     render_diagnostics(&diags, path, &src);
-    let resolved = match resolved_opt {
-        Some(r) => r,
+    let typed = match typed_opt {
+        Some(t) => t,
         None => return ExitCode::from(1),
     };
 
@@ -125,7 +131,7 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     };
     let object_path = exe_path.with_extension("o");
 
-    if let Err(err) = sentinel_codegen::compile_to_object(resolved, &object_path) {
+    if let Err(err) = sentinel_codegen::compile_to_object(typed, &object_path) {
         let report = Report::new(err).with_source_code(NamedSource::new(path, src));
         eprintln!("{report:?}");
         return ExitCode::from(1);

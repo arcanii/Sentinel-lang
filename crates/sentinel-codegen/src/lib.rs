@@ -1,7 +1,7 @@
 //! sentinel-codegen
 //!
-//! LLVM IR lowering via inkwell. Takes a [`ResolvedProgram`] (the
-//! output of `sentinel-resolve::resolve`) and produces a native
+//! LLVM IR lowering via inkwell. Takes a [`TypedProgram`] (the
+//! output of `sentinel-types::check`) and produces a native
 //! object file. **Pass 1** declares every fn (including the runtime
 //! `print` → `sentinel_print` mapping) so forward references work;
 //! **pass 2** emits each fn body.
@@ -12,13 +12,13 @@
 //! additionally produce stdout via `print(x)` calls.
 //!
 //! **C1.1.2** moved name resolution out of this crate into
-//! `sentinel-resolve`. The 6 error variants
-//! (`UndefinedVariable`, `RedeclaredVariable`, `UndefinedFunction`,
-//! `ArityMismatch`, `RedefinedFunction`, `MissingMain`) all moved
-//! with it; what remains here is pure LLVM lowering errors. Per
-//! ADR 0011 D4, codegen now consumes a `ResolvedProgram` where
-//! every name reference is a stable `VarId` / `FnId` — no more
-//! string lookups in this crate.
+//! `sentinel-resolve`. **C1.2.4** swaps the input shape from
+//! `ResolvedProgram` to `TypedProgram`: codegen now reads the
+//! type-checked tree where every expression carries a [`Type`]
+//! field. At C1.2 the universe is just `I64` so the LLVM lowering
+//! is identical to the pre-types path; the input change is
+//! infrastructure for C1.3 when `i32` and `bool` arrive and the
+//! `Type` field actually drives instruction selection.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -32,9 +32,9 @@ use inkwell::types::IntType;
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{IntPredicate, OptimizationLevel};
 use sentinel_ast::{BinOp, UnaryOp};
-use sentinel_resolve::{
-    FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef, ResolvedProgram,
-    ResolvedStmt, ResolvedStmtKind, VarId,
+use sentinel_resolve::{FnId, VarId};
+use sentinel_types::{
+    TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -60,12 +60,11 @@ pub enum CodegenError {
     Builder(String),
 }
 
-/// Lower a [`ResolvedProgram`] to a native object file at `output`.
+/// Lower a [`TypedProgram`] to a native object file at `output`.
 /// The emitted module exports `main` (i32-returning, the C ABI
 /// entry); the runtime symbol `sentinel_print` is pre-declared in
-/// pass 1 and called by `FnId(0)` references from resolved
-/// programs.
-pub fn compile_to_object(program: &ResolvedProgram, output: &Path) -> Result<(), CodegenError> {
+/// pass 1.
+pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), CodegenError> {
     let context = Context::create();
     let module = context.create_module("sentinel");
     let builder = context.create_builder();
@@ -73,18 +72,15 @@ pub fn compile_to_object(program: &ResolvedProgram, output: &Path) -> Result<(),
     let i32_type = context.i32_type();
     let i64_type = context.i64_type();
 
-    // Pass 1: declare every function in the resolved program's
+    // Pass 1: declare every function in the typed program's
     // signature table. Signatures are indexed by FnId.0; FnId(0) is
-    // always `print` (the runtime symbol) per sentinel-resolve's
-    // pre-registration.
+    // always `print` (the runtime symbol).
     let mut fns: HashMap<FnId, FunctionValue> = HashMap::new();
     for signature in &program.fn_signatures {
         let return_type = if signature.is_main { i32_type } else { i64_type };
         let param_types: Vec<_> =
-            (0..signature.arity).map(|_| i64_type.into()).collect();
+            (0..signature.param_types.len()).map(|_| i64_type.into()).collect();
         let fn_type = return_type.fn_type(&param_types, false);
-        // The runtime print symbol lives at "sentinel_print"; user
-        // fns get their source name. is_runtime is the routing flag.
         let llvm_name = if signature.is_runtime {
             "sentinel_print"
         } else {
@@ -143,28 +139,22 @@ pub fn compile_to_object(program: &ResolvedProgram, output: &Path) -> Result<(),
     Ok(())
 }
 
-/// Per-function codegen state plus a shared function table. `'ctx`
-/// is the LLVM IR lifetime (bound by Context); `'a` is the borrow
-/// lifetime — short enough for the ctx to drop before
-/// `module.verify()`. `current_fn` and `vars` are reset at the
-/// start of each fn body via [`CodegenCtx::compile_fn`].
+/// Per-function codegen state. See C1.1.2 docs in commit 9374edf
+/// for the lifetime / dropping rationale.
 struct CodegenCtx<'ctx, 'a> {
     context: &'a Context,
     builder: Builder<'ctx>,
     i64_type: IntType<'ctx>,
     fns: HashMap<FnId, FunctionValue<'ctx>>,
     current_fn: Option<FunctionValue<'ctx>>,
-    /// Per-function variable map. VarIds are program-global but
-    /// only the IDs declared inside `current_fn` are populated
-    /// here; the map clears at the start of each fn.
     vars: HashMap<VarId, PointerValue<'ctx>>,
 }
 
 impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
     fn compile_fn(
         &mut self,
-        fn_def: &ResolvedFnDef,
-        program: &ResolvedProgram,
+        fn_def: &TypedFnDef,
+        program: &TypedProgram,
     ) -> Result<(), CodegenError> {
         let fn_value = *self
             .fns
@@ -176,9 +166,6 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
         let entry = self.context.append_basic_block(fn_value, "entry");
         self.builder.position_at_end(entry);
 
-        // Bind parameters: alloca + store the incoming value. Resolve
-        // already caught duplicate-name params; we just allocate by
-        // VarId here.
         for (i, param) in fn_def.params.iter().enumerate() {
             let arg = fn_value
                 .get_nth_param(i as u32)
@@ -196,7 +183,8 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
 
         let body_val = self.lower_block(&fn_def.body, program)?;
 
-        if fn_def.signature(program).is_main {
+        let is_main = program.signature(fn_def.id).is_main;
+        if is_main {
             let i32_type = self.context.i32_type();
             let exit = self
                 .builder
@@ -215,11 +203,11 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
 
     fn lower_stmt(
         &mut self,
-        stmt: &ResolvedStmt,
-        program: &ResolvedProgram,
+        stmt: &TypedStmt,
+        program: &TypedProgram,
     ) -> Result<(), CodegenError> {
         match &stmt.kind {
-            ResolvedStmtKind::Let { id, name, value, .. } => {
+            TypedStmtKind::Let { id, name, value, .. } => {
                 let v = self.lower_expr(value, program)?;
                 let alloca = self
                     .builder
@@ -230,7 +218,7 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 self.vars.insert(*id, alloca);
             }
-            ResolvedStmtKind::Expr(e) => {
+            TypedStmtKind::Expr(e) => {
                 let _ = self.lower_expr(e, program)?;
             }
         }
@@ -239,8 +227,8 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
 
     fn lower_block(
         &mut self,
-        block: &ResolvedBlock,
-        program: &ResolvedProgram,
+        block: &TypedBlock,
+        program: &TypedProgram,
     ) -> Result<IntValue<'ctx>, CodegenError> {
         for stmt in &block.stmts {
             self.lower_stmt(stmt, program)?;
@@ -250,10 +238,10 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
 
     fn lower_if(
         &mut self,
-        cond: &ResolvedExpr,
-        then_branch: &ResolvedBlock,
-        else_branch: &ResolvedBlock,
-        program: &ResolvedProgram,
+        cond: &TypedExpr,
+        then_branch: &TypedBlock,
+        else_branch: &TypedBlock,
+        program: &TypedProgram,
     ) -> Result<IntValue<'ctx>, CodegenError> {
         let cond_val = self.lower_expr(cond, program)?;
         let zero = self.i64_type.const_zero();
@@ -305,13 +293,13 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
     fn lower_call(
         &mut self,
         id: FnId,
-        args: &[ResolvedExpr],
-        program: &ResolvedProgram,
+        args: &[TypedExpr],
+        program: &TypedProgram,
     ) -> Result<IntValue<'ctx>, CodegenError> {
         let fn_value = *self
             .fns
             .get(&id)
-            .expect("FnId from a resolved program is always in the fn table");
+            .expect("FnId from a typed program is always in the fn table");
         let signature = program.signature(id);
         let arg_values: Vec<BasicMetadataValueEnum> = args
             .iter()
@@ -334,20 +322,16 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
 
     fn lower_expr(
         &mut self,
-        expr: &ResolvedExpr,
-        program: &ResolvedProgram,
+        expr: &TypedExpr,
+        program: &TypedProgram,
     ) -> Result<IntValue<'ctx>, CodegenError> {
         match &expr.kind {
-            ResolvedExprKind::IntLit(n) => Ok(self.i64_type.const_int(*n as u64, true)),
-            ResolvedExprKind::Var(id) => {
+            TypedExprKind::IntLit(n) => Ok(self.i64_type.const_int(*n as u64, true)),
+            TypedExprKind::Var(id) => {
                 let ptr = *self
                     .vars
                     .get(id)
-                    .expect("VarId from a resolved program is always live in its scope");
-                // Use the binding's source name as the LLVM SSA name
-                // for readability; fall back to a synthetic name if
-                // somehow the program tables disagree (shouldn't
-                // happen).
+                    .expect("VarId from a typed program is always live in its scope");
                 let name = self.var_name(*id, program).unwrap_or("load");
                 let loaded = self
                     .builder
@@ -355,13 +339,13 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 Ok(loaded.into_int_value())
             }
-            ResolvedExprKind::Unary(UnaryOp::Neg, inner) => {
+            TypedExprKind::Unary(UnaryOp::Neg, inner) => {
                 let v = self.lower_expr(inner, program)?;
                 self.builder
                     .build_int_neg(v, "neg")
                     .map_err(|e| CodegenError::Builder(e.to_string()))
             }
-            ResolvedExprKind::Binary(op, lhs, rhs) => {
+            TypedExprKind::Binary(op, lhs, rhs) => {
                 let l = self.lower_expr(lhs, program)?;
                 let r = self.lower_expr(rhs, program)?;
                 let result = match op {
@@ -372,20 +356,17 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
                 };
                 result.map_err(|e| CodegenError::Builder(e.to_string()))
             }
-            ResolvedExprKind::Block(b) => self.lower_block(b, program),
-            ResolvedExprKind::If { cond, then_branch, else_branch } => {
+            TypedExprKind::Block(b) => self.lower_block(b, program),
+            TypedExprKind::If { cond, then_branch, else_branch } => {
                 self.lower_if(cond, then_branch, else_branch, program)
             }
-            ResolvedExprKind::Call { id, args, .. } => self.lower_call(*id, args, program),
+            TypedExprKind::Call { id, args, .. } => self.lower_call(*id, args, program),
         }
     }
 
     /// Look up a binding's source name for use as an LLVM SSA debug
-    /// name. Walks the current fn's params and then its body for a
-    /// matching binding. This is purely for IR readability; returns
-    /// None if no match (unreachable in practice for well-formed
-    /// resolved programs).
-    fn var_name<'p>(&self, id: VarId, program: &'p ResolvedProgram) -> Option<&'p str> {
+    /// name. See C1.1.2 commit 9374edf for the rationale.
+    fn var_name<'p>(&self, id: VarId, program: &'p TypedProgram) -> Option<&'p str> {
         let current_fn_value = self.current_fn?;
         let current_fn_id = *self.fns.iter().find_map(|(fn_id, value)| {
             if *value == current_fn_value {
@@ -402,16 +383,16 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
     }
 }
 
-fn find_var_name_in_block(block: &ResolvedBlock, id: VarId) -> Option<&str> {
+fn find_var_name_in_block(block: &TypedBlock, id: VarId) -> Option<&str> {
     for stmt in &block.stmts {
-        if let ResolvedStmtKind::Let { id: bid, name, value, .. } = &stmt.kind {
+        if let TypedStmtKind::Let { id: bid, name, value, .. } = &stmt.kind {
             if *bid == id {
                 return Some(name);
             }
             if let Some(n) = find_var_name_in_expr(value, id) {
                 return Some(n);
             }
-        } else if let ResolvedStmtKind::Expr(e) = &stmt.kind {
+        } else if let TypedStmtKind::Expr(e) = &stmt.kind {
             if let Some(n) = find_var_name_in_expr(e, id) {
                 return Some(n);
             }
@@ -420,20 +401,20 @@ fn find_var_name_in_block(block: &ResolvedBlock, id: VarId) -> Option<&str> {
     find_var_name_in_expr(&block.tail, id)
 }
 
-fn find_var_name_in_expr(expr: &ResolvedExpr, id: VarId) -> Option<&str> {
+fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
     match &expr.kind {
-        ResolvedExprKind::IntLit(_) | ResolvedExprKind::Var(_) => None,
-        ResolvedExprKind::Unary(_, inner) => find_var_name_in_expr(inner, id),
-        ResolvedExprKind::Binary(_, lhs, rhs) => {
+        TypedExprKind::IntLit(_) | TypedExprKind::Var(_) => None,
+        TypedExprKind::Unary(_, inner) => find_var_name_in_expr(inner, id),
+        TypedExprKind::Binary(_, lhs, rhs) => {
             find_var_name_in_expr(lhs, id).or_else(|| find_var_name_in_expr(rhs, id))
         }
-        ResolvedExprKind::Block(b) => find_var_name_in_block(b, id),
-        ResolvedExprKind::If { cond, then_branch, else_branch } => {
+        TypedExprKind::Block(b) => find_var_name_in_block(b, id),
+        TypedExprKind::If { cond, then_branch, else_branch } => {
             find_var_name_in_expr(cond, id)
                 .or_else(|| find_var_name_in_block(then_branch, id))
                 .or_else(|| find_var_name_in_block(else_branch, id))
         }
-        ResolvedExprKind::Call { args, .. } => {
+        TypedExprKind::Call { args, .. } => {
             args.iter().find_map(|a| find_var_name_in_expr(a, id))
         }
     }
@@ -449,11 +430,13 @@ mod tests {
     use super::*;
     use sentinel_resolve::resolve;
     use sentinel_syntax::parse;
+    use sentinel_types::check;
 
     fn compile_src(src: &str) -> Result<(), CodegenError> {
         let prog = parse(src).expect("parse");
         let resolved = resolve(&prog).expect("resolve");
-        compile_to_object(&resolved, &out_path())
+        let typed = check(&resolved).expect("check");
+        compile_to_object(&typed, &out_path())
     }
 
     fn out_path() -> std::path::PathBuf {
