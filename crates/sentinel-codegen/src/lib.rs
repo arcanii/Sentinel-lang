@@ -472,31 +472,32 @@ mod tests {
 
     #[test]
     fn compile_main_with_int_lit() {
-        compile_src("fn main() { 42 }").expect("compile");
+        compile_src("fn main() -> i64 { 42 }").expect("compile");
     }
 
     #[test]
     fn compile_main_with_let_program() {
-        compile_src("fn main() { let x = 5; x }").expect("compile");
+        compile_src("fn main() -> i64 { let x = 5; x }").expect("compile");
     }
 
     #[test]
     fn compile_multi_fn_with_forward_ref() {
-        compile_src("fn main() { double(7) }\nfn double(x) { x * 2 }").expect("compile");
+        compile_src("fn main() -> i64 { double(7) }\nfn double(x: i64) -> i64 { x * 2 }")
+            .expect("compile");
     }
 
     #[test]
     fn compile_call_to_print() {
-        compile_src("fn main() { print(42) }").expect("compile");
+        compile_src("fn main() -> i64 { print(42) }").expect("compile");
     }
 
     #[test]
     fn compile_if_else_program() {
-        compile_src("fn main() { if 1 { 42 } else { 99 } }").expect("compile");
+        compile_src("fn main() -> i64 { if 1 { 42 } else { 99 } }").expect("compile");
     }
 
     #[test]
     fn compile_block_expression() {
-        compile_src("fn main() { let r = { let y = 4; y + 1 }; r * 2 }").expect("compile");
+        compile_src("fn main() -> i64 { let r = { let y = 4; y + 1 }; r * 2 }").expect("compile");
     }
 }

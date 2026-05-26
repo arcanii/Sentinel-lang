@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 use salsa::Accumulator;
 use sentinel_ast::{
-    BinOp, Block, Expr, ExprKind, FnDef, Program, Span, Spanned, Stmt, StmtKind, UnaryOp,
+    BinOp, Block, Expr, ExprKind, FnDef, Program, Span, Spanned, Stmt, StmtKind, TypeExpr, UnaryOp,
 };
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 
@@ -110,6 +110,10 @@ pub struct ResolvedFnDef {
     pub name: String,
     pub name_span: Span,
     pub params: Vec<ResolvedParam>,
+    /// C1.2 (per ADR 0012 D1): mandatory return-type annotation.
+    /// Carried through from the AST for the type checker to consume
+    /// at C1.2's check() pass.
+    pub return_type: TypeExpr,
     pub body: ResolvedBlock,
     pub span: Span,
 }
@@ -127,6 +131,8 @@ pub struct ResolvedParam {
     /// debug names.
     pub name: String,
     pub span: Span,
+    /// C1.2 (per ADR 0012 D1): mandatory parameter-type annotation.
+    pub ty: TypeExpr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -145,6 +151,9 @@ pub enum ResolvedStmtKind {
         /// Source-level name retained for diagnostics / IR debug.
         name: String,
         name_span: Span,
+        /// C1.2 (per ADR 0012 D2): optional `let x: T = ...`
+        /// annotation. None means "infer from RHS".
+        ty_annot: Option<TypeExpr>,
         value: ResolvedExpr,
     },
     Expr(ResolvedExpr),
@@ -336,6 +345,7 @@ fn resolve_fn(
             id: var_id,
             name: param.name.clone(),
             span: param.span.clone(),
+            ty: param.ty.clone(),
         });
     }
 
@@ -346,6 +356,7 @@ fn resolve_fn(
         name: fn_def.name.clone(),
         name_span: fn_def.name_span.clone(),
         params,
+        return_type: fn_def.return_type.clone(),
         body,
         span: fn_def.span.clone(),
     })
@@ -378,7 +389,7 @@ fn resolve_stmt(
     next_var_id: &mut u32,
 ) -> Result<ResolvedStmt, ResolveError> {
     let kind = match &stmt.kind {
-        StmtKind::Let { name, name_span, value } => {
+        StmtKind::Let { name, name_span, ty_annot, value } => {
             // Resolve the RHS BEFORE binding the name — `let x = x` with
             // `x` undefined in the outer scope is an error, not a self-
             // reference. (Matches C0's existing behaviour: lower_expr on
@@ -397,6 +408,7 @@ fn resolve_stmt(
                 id,
                 name: name.clone(),
                 name_span: name_span.clone(),
+                ty_annot: ty_annot.clone(),
                 value,
             }
         }
@@ -579,7 +591,7 @@ mod tests {
 
     #[test]
     fn resolves_minimal_main() {
-        let p = resolve_ok("fn main() { 0 }");
+        let p = resolve_ok("fn main() -> i64 { 0 }");
         assert_eq!(p.fns.len(), 1);
         assert_eq!(p.main().name, "main");
         assert!(p.main().signature(&p).is_main);
@@ -591,7 +603,7 @@ mod tests {
 
     #[test]
     fn resolves_let_and_var() {
-        let p = resolve_ok("fn main() { let x = 5; x }");
+        let p = resolve_ok("fn main() -> i64 { let x = 5; x }");
         let body = &p.main().body;
         assert_eq!(body.stmts.len(), 1);
         // Let binds VarId(0) (first var in the program).
@@ -610,7 +622,7 @@ mod tests {
 
     #[test]
     fn resolves_param_and_use() {
-        let p = resolve_ok("fn double(x) { x * 2 }\nfn main() { double(7) }");
+        let p = resolve_ok("fn double(x: i64) -> i64 { x * 2 }\nfn main() -> i64 { double(7) }");
         // double has 1 param → VarId(0)
         let double = &p.fns[0];
         assert_eq!(double.name, "double");
@@ -634,7 +646,7 @@ mod tests {
 
     #[test]
     fn print_resolves_to_print_fn_id() {
-        let p = resolve_ok("fn main() { print(42) }");
+        let p = resolve_ok("fn main() -> i64 { print(42) }");
         match &p.main().body.tail.kind {
             ResolvedExprKind::Call { id, .. } => assert_eq!(*id, PRINT_FN_ID),
             other => panic!("expected Call to print, got {other:?}"),
@@ -643,7 +655,7 @@ mod tests {
 
     #[test]
     fn fn_ids_are_unique_per_program() {
-        let p = resolve_ok("fn a() { 1 }\nfn b() { 2 }\nfn c() { 3 }\nfn main() { 0 }");
+        let p = resolve_ok("fn a() -> i64 { 1 }\nfn b() -> i64 { 2 }\nfn c() -> i64 { 3 }\nfn main() -> i64 { 0 }");
         let mut ids: Vec<FnId> = p.fns.iter().map(|f| f.id).collect();
         ids.sort_by_key(|f| f.0);
         ids.dedup();
@@ -653,7 +665,7 @@ mod tests {
     #[test]
     fn var_ids_increment_across_functions() {
         // Two fns each binding one param — should get distinct VarIds.
-        let p = resolve_ok("fn f(x) { x }\nfn g(y) { y }\nfn main() { f(1) + g(2) }");
+        let p = resolve_ok("fn f(x: i64) -> i64 { x }\nfn g(y: i64) -> i64 { y }\nfn main() -> i64 { f(1) + g(2) }");
         let f = &p.fns[0];
         let g = &p.fns[1];
         assert_ne!(f.params[0].id, g.params[0].id);
@@ -663,31 +675,31 @@ mod tests {
 
     #[test]
     fn undefined_variable_errors() {
-        let err = resolve_err("fn main() { y }");
+        let err = resolve_err("fn main() -> i64 { y }");
         assert!(matches!(err, ResolveError::UndefinedVariable { ref name, .. } if name == "y"));
     }
 
     #[test]
     fn redeclared_variable_errors() {
-        let err = resolve_err("fn main() { let x = 1; let x = 2; x }");
+        let err = resolve_err("fn main() -> i64 { let x = 1; let x = 2; x }");
         assert!(matches!(err, ResolveError::RedeclaredVariable { ref name, .. } if name == "x"));
     }
 
     #[test]
     fn redeclared_param_errors() {
-        let err = resolve_err("fn dup(x, x) { x }\nfn main() { dup(1, 2) }");
+        let err = resolve_err("fn dup(x: i64, x: i64) -> i64 { x }\nfn main() -> i64 { dup(1, 2) }");
         assert!(matches!(err, ResolveError::RedeclaredVariable { ref name, .. } if name == "x"));
     }
 
     #[test]
     fn undefined_function_errors() {
-        let err = resolve_err("fn main() { frobnicate(5) }");
+        let err = resolve_err("fn main() -> i64 { frobnicate(5) }");
         assert!(matches!(err, ResolveError::UndefinedFunction { ref name, .. } if name == "frobnicate"));
     }
 
     #[test]
     fn arity_mismatch_errors() {
-        let err = resolve_err("fn main() { print(1, 2) }");
+        let err = resolve_err("fn main() -> i64 { print(1, 2) }");
         assert!(matches!(
             err,
             ResolveError::ArityMismatch { ref name, expected: 1, got: 2, .. } if name == "print"
@@ -696,7 +708,7 @@ mod tests {
 
     #[test]
     fn arity_mismatch_for_user_fn() {
-        let err = resolve_err("fn one(x) { x }\nfn main() { one(1, 2) }");
+        let err = resolve_err("fn one(x: i64) -> i64 { x }\nfn main() -> i64 { one(1, 2) }");
         assert!(matches!(
             err,
             ResolveError::ArityMismatch { ref name, expected: 1, got: 2, .. } if name == "one"
@@ -705,19 +717,19 @@ mod tests {
 
     #[test]
     fn redefined_function_errors() {
-        let err = resolve_err("fn dup() { 1 }\nfn dup() { 2 }\nfn main() { 0 }");
+        let err = resolve_err("fn dup() -> i64 { 1 }\nfn dup() -> i64 { 2 }\nfn main() -> i64 { 0 }");
         assert!(matches!(err, ResolveError::RedefinedFunction { ref name, .. } if name == "dup"));
     }
 
     #[test]
     fn user_redefining_print_errors() {
-        let err = resolve_err("fn print(x) { x }\nfn main() { 0 }");
+        let err = resolve_err("fn print(x: i64) -> i64 { x }\nfn main() -> i64 { 0 }");
         assert!(matches!(err, ResolveError::RedefinedFunction { ref name, .. } if name == "print"));
     }
 
     #[test]
     fn missing_main_errors() {
-        let err = resolve_err("fn foo() { 0 }");
+        let err = resolve_err("fn foo() -> i64 { 0 }");
         assert!(matches!(err, ResolveError::MissingMain));
     }
 
@@ -725,7 +737,7 @@ mod tests {
     fn let_x_equals_x_errors_when_outer_x_undefined() {
         // The RHS resolves BEFORE the binding takes effect, so this
         // is "x undefined" not "self-reference."
-        let err = resolve_err("fn main() { let x = x; x }");
+        let err = resolve_err("fn main() -> i64 { let x = x; x }");
         assert!(matches!(err, ResolveError::UndefinedVariable { ref name, .. } if name == "x"));
     }
 
@@ -749,7 +761,7 @@ mod tests {
     fn resolve_query_returns_some_for_valid_source() {
         let db = TestDb::default();
         let file =
-            SourceFile::new(&db, "test.sentinel".to_string(), "fn main() { 42 }".to_string());
+            SourceFile::new(&db, "test.sentinel".to_string(), "fn main() -> i64 { 42 }".to_string());
         let result = resolve_query(&db, file);
         assert!(result.is_some());
         let diags = resolve_query::accumulated::<Diagnostic>(&db, file);
@@ -762,7 +774,7 @@ mod tests {
         let file = SourceFile::new(
             &db,
             "test.sentinel".to_string(),
-            "fn main() { undeclared }".to_string(),
+            "fn main() -> i64 { undeclared }".to_string(),
         );
         let result = resolve_query(&db, file);
         assert!(result.is_none());
@@ -795,7 +807,7 @@ mod tests {
         let file = SourceFile::new(
             &db,
             "test.sentinel".to_string(),
-            "fn main() { 1 + 2 }".to_string(),
+            "fn main() -> i64 { 1 + 2 }".to_string(),
         );
         let r1 = resolve_query(&db, file).clone();
         let r2 = resolve_query(&db, file).clone();

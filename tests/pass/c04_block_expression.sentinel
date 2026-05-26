@@ -1,4 +1,4 @@
-fn main() {
+fn main() -> i64 {
     let r = { let y = 4; y + 1 };
     r * 2
 }

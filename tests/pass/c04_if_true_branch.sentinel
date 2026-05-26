@@ -1,1 +1,1 @@
-fn main() { if 1 { 42 } else { 99 } }
+fn main() -> i64 { if 1 { 42 } else { 99 } }

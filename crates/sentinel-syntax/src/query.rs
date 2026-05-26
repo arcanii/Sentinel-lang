@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn parse_query_returns_program_for_valid_source() {
         let db = TestDb::default();
-        let file = make_file(&db, "fn main() { 42 }");
+        let file = make_file(&db, "fn main() -> i64 { 42 }");
         let result = parse_query(&db, file);
         assert!(result.is_some(), "expected Some(Program), got {result:?}");
         let p = result.as_ref().unwrap();
@@ -186,7 +186,7 @@ mod tests {
     fn parse_query_emits_diagnostic_on_parse_error() {
         let db = TestDb::default();
         // Unmatched paren in fn body.
-        let file = make_file(&db, "fn main() { (1 + 2 }");
+        let file = make_file(&db, "fn main() -> i64 { (1 + 2 }");
         let result = parse_query(&db, file);
         assert!(result.is_none());
         let diags = parse_query::accumulated::<Diagnostic>(&db, file);
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn parse_query_propagates_lex_error_with_lex_stage() {
         let db = TestDb::default();
-        let file = make_file(&db, "fn main() { @ }");
+        let file = make_file(&db, "fn main() -> i64 { @ }");
         let result = parse_query(&db, file);
         assert!(result.is_none());
         let diags = parse_query::accumulated::<Diagnostic>(&db, file);
@@ -216,7 +216,7 @@ mod tests {
         // returned the cached value" but it pins the contract that
         // repeated calls don't observe drift.
         let db = TestDb::default();
-        let file = make_file(&db, "fn main() { 1 + 2 }");
+        let file = make_file(&db, "fn main() -> i64 { 1 + 2 }");
         let r1 = parse_query(&db, file).clone();
         let r2 = parse_query(&db, file).clone();
         assert_eq!(r1, r2);
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn lex_query_caches_across_reruns() {
         let db = TestDb::default();
-        let file = make_file(&db, "fn main() { 42 }");
+        let file = make_file(&db, "fn main() -> i64 { 42 }");
         let t1 = lex_query(&db, file).clone();
         let t2 = lex_query(&db, file).clone();
         assert_eq!(t1, t2);

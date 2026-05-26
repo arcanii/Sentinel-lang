@@ -36,7 +36,8 @@
 //! `fn` definitions arrive in C0.5 per ADR 0009 D6.
 
 use sentinel_ast::{
-    BinOp, Block, Expr, ExprKind, FnDef, Param, Program, Span, Spanned, Stmt, StmtKind, UnaryOp,
+    BinOp, Block, Expr, ExprKind, FnDef, Param, Program, Span, Spanned, Stmt, StmtKind, TypeExpr,
+    TypeExprKind, UnaryOp,
 };
 
 use crate::{lex, LexError, TokenKind};
@@ -292,35 +293,116 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // `-> return_type` is mandatory at C1.2 per ADR 0012 D1.
+        let return_type = self.parse_return_type()?;
+
         // Body.
         let body = self.parse_block()?;
         let end = body.span.end;
 
-        Ok(FnDef { name, name_span, params, body, span: fn_start..end })
+        Ok(FnDef { name, name_span, params, return_type, body, span: fn_start..end })
     }
 
-    fn parse_param(&mut self) -> Result<Param, ParseError> {
+    /// Consume `-> type`. Required after every fn's parameter list
+    /// per ADR 0012 D1. Returns the parsed [`TypeExpr`].
+    fn parse_return_type(&mut self) -> Result<TypeExpr, ParseError> {
+        match self.peek_kind() {
+            Some(TokenKind::Arrow) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`->` introducing return type",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`->` introducing return type",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+        self.parse_type()
+    }
+
+    /// Parse a [`TypeExpr`]. At C1.2 this is just an `Ident`. Later
+    /// sub-phases extend the grammar per ADR 0012 D3 + D10's revisit
+    /// notes (struct names at C1.4, `?T` at C1.5, generics at C1.7).
+    fn parse_type(&mut self) -> Result<TypeExpr, ParseError> {
         match self.peek() {
             Some(t) if t.kind == TokenKind::Ident => {
                 let span = t.span.clone();
                 let name = self.src[span.clone()].to_string();
                 self.advance();
-                Ok(Param { name, span })
+                Ok(Spanned { kind: TypeExprKind::Ident(name), span })
             }
             Some(t) => {
                 let kind = t.kind;
                 let span = t.span.clone();
                 Err(ParseError::UnexpectedToken {
                     got: format!("{kind:?}"),
-                    expected: "parameter name",
+                    expected: "type",
                     span: to_source_span(&span),
                 })
             }
             None => Err(ParseError::UnexpectedEof {
-                expected: "parameter name",
+                expected: "type",
                 span: to_source_span(&self.eof_span()),
             }),
         }
+    }
+
+    fn parse_param(&mut self) -> Result<Param, ParseError> {
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "parameter name",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "parameter name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        // `:` between name and type per ADR 0012 D1.
+        match self.peek_kind() {
+            Some(TokenKind::Colon) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`:` followed by parameter type",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`:` followed by parameter type",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+        let ty = self.parse_type()?;
+        let span_end = ty.span.end;
+        Ok(Param { name, span: name_span.start..span_end, ty })
     }
 
     fn parse_let_stmt(&mut self) -> Result<Stmt, ParseError> {
@@ -342,6 +424,14 @@ impl<'a> Parser<'a> {
         let name_span = name_token.span.clone();
         let name = self.src[name_span.clone()].to_string();
         self.advance();
+
+        // Optional `: type` annotation per ADR 0012 D2.
+        let ty_annot = if self.peek_kind() == Some(TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
 
         match self.peek_kind() {
             Some(TokenKind::Eq) => {
@@ -384,7 +474,7 @@ impl<'a> Parser<'a> {
         };
 
         Ok(Spanned {
-            kind: StmtKind::Let { name, name_span, value },
+            kind: StmtKind::Let { name, name_span, ty_annot, value },
             span: let_start..semi_end,
         })
     }
@@ -1124,37 +1214,44 @@ mod tests {
 
     #[test]
     fn parse_one_fn_main() {
-        let p = parse_ok_program("fn main() { 42 }");
+        let p = parse_ok_program("fn main() -> i64 { 42 }");
         assert_eq!(p.fns.len(), 1);
         assert_eq!(p.fns[0].name, "main");
         assert!(p.fns[0].params.is_empty());
+        assert_eq!(p.fns[0].return_type.kind.to_string(), "i64");
         assert_eq!(p.fns[0].body.tail.kind.to_string(), "42");
     }
 
     #[test]
     fn parse_fn_with_one_param() {
-        let p = parse_ok_program("fn double(x) { x * 2 }");
+        let p = parse_ok_program("fn double(x: i64) -> i64 { x * 2 }");
         assert_eq!(p.fns[0].name, "double");
         assert_eq!(p.fns[0].params.len(), 1);
         assert_eq!(p.fns[0].params[0].name, "x");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "i64");
     }
 
     #[test]
     fn parse_fn_with_multi_params() {
-        let p = parse_ok_program("fn add(a, b, c) { a + b + c }");
+        let p = parse_ok_program("fn add(a: i64, b: i64, c: i64) -> i64 { a + b + c }");
         let names: Vec<&str> = p.fns[0].params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b", "c"]);
+        for param in &p.fns[0].params {
+            assert_eq!(param.ty.kind.to_string(), "i64");
+        }
     }
 
     #[test]
     fn parse_fn_with_trailing_comma_in_params() {
-        let p = parse_ok_program("fn add(a, b,) { a + b }");
+        let p = parse_ok_program("fn add(a: i64, b: i64,) -> i64 { a + b }");
         assert_eq!(p.fns[0].params.len(), 2);
     }
 
     #[test]
     fn parse_multi_fn_program() {
-        let p = parse_ok_program("fn double(x) { x * 2 }\nfn main() { double(7) }");
+        let p = parse_ok_program(
+            "fn double(x: i64) -> i64 { x * 2 }\nfn main() -> i64 { double(7) }",
+        );
         assert_eq!(p.fns.len(), 2);
         assert_eq!(p.fns[0].name, "double");
         assert_eq!(p.fns[1].name, "main");
@@ -1162,8 +1259,67 @@ mod tests {
 
     #[test]
     fn parse_fn_display_round_trip() {
-        let p = parse_ok_program("fn main() { 1 + 2 }");
-        assert_eq!(p.to_string(), "(fn main () (block (+ 1 2)))");
+        let p = parse_ok_program("fn main() -> i64 { 1 + 2 }");
+        assert_eq!(p.to_string(), "(fn main () -> i64 (block (+ 1 2)))");
+    }
+
+    // C1.2 annotation grammar tests.
+
+    #[test]
+    fn parse_fn_with_annotated_params_and_return() {
+        let p = parse_ok_program("fn id(x: i64) -> i64 { x }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "i64");
+        assert_eq!(p.fns[0].return_type.kind.to_string(), "i64");
+    }
+
+    #[test]
+    fn parse_let_with_annotation() {
+        let block = parse_block_str("{ let x: i64 = 5; x }").expect("parse");
+        match &block.stmts[0].kind {
+            StmtKind::Let { ty_annot, .. } => {
+                let ty = ty_annot.as_ref().expect("annotation present");
+                assert_eq!(ty.kind.to_string(), "i64");
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_let_without_annotation_has_none() {
+        let block = parse_block_str("{ let x = 5; x }").expect("parse");
+        match &block.stmts[0].kind {
+            StmtKind::Let { ty_annot: None, .. } => {}
+            other => panic!("expected Let with no annotation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_error_fn_missing_return_type_arrow() {
+        // Per ADR 0012 D1 the return type is mandatory; missing `->`
+        // surfaces as a parse error.
+        let err = parse("fn main() { 1 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`->` introducing return type"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_param_missing_colon() {
+        let err = parse("fn id(x) -> i64 { x }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`:` followed by parameter type"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_param_colon_without_type() {
+        let err = parse("fn id(x:) -> i64 { x }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "type"),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1206,7 +1362,8 @@ mod tests {
 
     #[test]
     fn parse_error_fn_missing_close_paren() {
-        let err = parse("fn main(x { 1 }").unwrap_err();
+        // `fn main(x: i64 { 1 }` — annotated param but unclosed `)`.
+        let err = parse("fn main(x: i64 { 1 }").unwrap_err();
         assert!(
             matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`,` or `)` in parameter list"),
             "got {err:?}"
@@ -1215,7 +1372,8 @@ mod tests {
 
     #[test]
     fn parse_error_fn_missing_body() {
-        let err = parse("fn main()").unwrap_err();
+        // Annotated `fn name() -> i64` with no body — `{` is expected next.
+        let err = parse("fn main() -> i64").unwrap_err();
         assert!(
             matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "`{` to open block"),
             "got {err:?}"
@@ -1233,7 +1391,7 @@ mod tests {
 
     #[test]
     fn parse_fn_span_covers_keyword_through_close_brace() {
-        let src = "fn main() { 42 }";
+        let src = "fn main() -> i64 { 42 }";
         let p = parse_ok_program(src);
         assert_eq!(p.fns[0].span, 0..src.len());
         assert_eq!(p.fns[0].name_span, 3..7); // `main`

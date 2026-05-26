@@ -99,6 +99,9 @@ pub type Expr = Spanned<ExprKind>;
 
 /// Statement kinds. Per ADR 0010 D7 there are exactly two statement
 /// shapes in C0: `let x = expr;` and `expr;`. Both are `;`-terminated.
+/// C1.2 (ADR 0012 D2) extends `Let` with an optional type annotation
+/// (`let x: i64 = expr;`); the annotation is checked against the
+/// RHS at type-check time when present, inferred otherwise.
 ///
 /// `Let { name }` stores the bound name as an owned `String` rather
 /// than an interned identifier — interning is C1's problem, when
@@ -107,7 +110,15 @@ pub type Expr = Spanned<ExprKind>;
 /// undefined-name diagnostics that target the binding site.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
-    Let { name: String, name_span: Span, value: Expr },
+    Let {
+        name: String,
+        name_span: Span,
+        /// Optional type annotation per ADR 0012 D2. `Some` if the
+        /// source had `let x: T = ...`; `None` if it was `let x = ...`
+        /// (inference path).
+        ty_annot: Option<TypeExpr>,
+        value: Expr,
+    },
     Expr(Expr),
 }
 
@@ -123,25 +134,41 @@ pub struct Program {
     pub span: Span,
 }
 
-/// A function definition: `fn name(p1, p2, …) { body }`. All
-/// parameters and return value are i64 in C0.5 (ADR 0009 says
-/// everything is i64); ADR 0010 D5 reserves the `->` token for
-/// the C1 type-annotation grammar but C0.5 emits none.
+/// A function definition: `fn name(p1: T, p2: T, …) -> T { body }`.
+/// C0.5 had no annotations and treated everything as `i64`; C1.2
+/// (ADR 0012 D1) makes parameter types and the return type
+/// mandatory.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FnDef {
     pub name: String,
     pub name_span: Span,
     pub params: Vec<Param>,
+    /// Return-type annotation per ADR 0012 D1. Mandatory at C1.2 —
+    /// every fn declares its return type explicitly at the boundary.
+    pub return_type: TypeExpr,
     pub body: Block,
     pub span: Span,
 }
 
-/// A function parameter. Just a name + span for C0.5 (no type
-/// annotation); the annotation slot lands at C1.
+/// A function parameter with a mandatory type annotation
+/// (`name: type`) per ADR 0012 D1.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Param {
     pub name: String,
     pub span: Span,
+    pub ty: TypeExpr,
+}
+
+/// Surface-level type expression. C1.2 ships only the `Ident` form
+/// (recognised at type-check time as `i64`, later `i32`/`bool`/struct
+/// names per ADR 0012 D3 and D4). The enum is open-ended so later
+/// sub-phases can add `?T` (C1.5), `&T` (C2), `secret T` (C3), and
+/// generics (C1.7) without churning every annotation site.
+pub type TypeExpr = Spanned<TypeExprKind>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TypeExprKind {
+    Ident(String),
 }
 
 /// A brace-wrapped block expression `{ stmt* tail_expr }`. The
@@ -207,9 +234,26 @@ impl fmt::Display for Expr {
 impl fmt::Display for StmtKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StmtKind::Let { name, value, .. } => write!(f, "(let {name} {})", value.kind),
+            StmtKind::Let { name, ty_annot, value, .. } => match ty_annot {
+                Some(ty) => write!(f, "(let {name}: {} {})", ty.kind, value.kind),
+                None => write!(f, "(let {name} {})", value.kind),
+            },
             StmtKind::Expr(e) => write!(f, "{};", e.kind),
         }
+    }
+}
+
+impl fmt::Display for TypeExprKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TypeExprKind::Ident(name) => write!(f, "{name}"),
+        }
+    }
+}
+
+impl fmt::Display for TypeExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.kind.fmt(f)
     }
 }
 
@@ -234,8 +278,10 @@ impl fmt::Display for Program {
     }
 }
 
-/// `(fn name (params) body)` — params is a space-separated list
-/// of bare parameter names; body delegates to [`Block`].
+/// `(fn name (params) -> return_type body)` — params is a space-
+/// separated list of `name: type` pairs (or just names for C0
+/// backwards-compatible rendering, but C1.2 onward always carries
+/// the annotation). Body delegates to [`Block`].
 impl fmt::Display for FnDef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(fn {} (", self.name)?;
@@ -245,9 +291,9 @@ impl fmt::Display for FnDef {
                 write!(f, " ")?;
             }
             first = false;
-            write!(f, "{}", p.name)?;
+            write!(f, "{}: {}", p.name, p.ty.kind)?;
         }
-        write!(f, ") {})", self.body)
+        write!(f, ") -> {} {})", self.return_type.kind, self.body)
     }
 }
 
@@ -262,6 +308,11 @@ mod tests {
 
     fn lit(n: i64, span: Span) -> Expr {
         Spanned { kind: ExprKind::IntLit(n), span }
+    }
+
+    /// Test helper: an `i64` type annotation at the given span.
+    fn ty_i64(span: Span) -> TypeExpr {
+        Spanned { kind: TypeExprKind::Ident("i64".to_string()), span }
     }
 
     #[test]
@@ -326,16 +377,36 @@ mod tests {
     }
 
     #[test]
-    fn display_stmt_let() {
+    fn display_stmt_let_no_annotation() {
         let s = Spanned {
             kind: StmtKind::Let {
                 name: "x".to_string(),
                 name_span: 4..5,
+                ty_annot: None,
                 value: lit(5, 8..9),
             },
             span: 0..10,
         };
         assert_eq!(s.to_string(), "(let x 5)");
+    }
+
+    #[test]
+    fn display_stmt_let_with_annotation() {
+        let s = Spanned {
+            kind: StmtKind::Let {
+                name: "x".to_string(),
+                name_span: 4..5,
+                ty_annot: Some(ty_i64(7..10)),
+                value: lit(5, 13..14),
+            },
+            span: 0..15,
+        };
+        assert_eq!(s.to_string(), "(let x: i64 5)");
+    }
+
+    #[test]
+    fn display_type_expr_ident() {
+        assert_eq!(ty_i64(0..3).to_string(), "i64");
     }
 
     #[test]
@@ -353,6 +424,7 @@ mod tests {
             name: "main".to_string(),
             name_span: 0..4,
             params: vec![],
+            return_type: ty_i64(0..3),
             body: Block { stmts: vec![], tail, span: body_span.clone() },
             span: 0..body_span.end,
         }
@@ -364,7 +436,7 @@ mod tests {
             fns: vec![main_fn(lit(42, 0..2))],
             span: 0..2,
         };
-        assert_eq!(p.to_string(), "(fn main () (block 42))");
+        assert_eq!(p.to_string(), "(fn main () -> i64 (block 42))");
     }
 
     #[test]
@@ -372,7 +444,12 @@ mod tests {
         let double = FnDef {
             name: "double".to_string(),
             name_span: 0..6,
-            params: vec![Param { name: "x".to_string(), span: 0..1 }],
+            params: vec![Param {
+                name: "x".to_string(),
+                span: 0..1,
+                ty: ty_i64(0..3),
+            }],
+            return_type: ty_i64(0..3),
             body: Block {
                 stmts: vec![],
                 tail: Spanned {
@@ -398,14 +475,14 @@ mod tests {
         let p = Program { fns: vec![double, main], span: 0..20 };
         assert_eq!(
             p.to_string(),
-            "(fn double (x) (block (* x 2)))\n(fn main () (block (double 7)))"
+            "(fn double (x: i64) -> i64 (block (* x 2)))\n(fn main () -> i64 (block (double 7)))"
         );
     }
 
     #[test]
     fn display_fn_def_zero_params() {
         let f = main_fn(lit(5, 0..1));
-        assert_eq!(f.to_string(), "(fn main () (block 5))");
+        assert_eq!(f.to_string(), "(fn main () -> i64 (block 5))");
     }
 
     #[test]
@@ -414,9 +491,10 @@ mod tests {
             name: "add".to_string(),
             name_span: 0..3,
             params: vec![
-                Param { name: "a".to_string(), span: 0..1 },
-                Param { name: "b".to_string(), span: 0..1 },
+                Param { name: "a".to_string(), span: 0..1, ty: ty_i64(0..3) },
+                Param { name: "b".to_string(), span: 0..1, ty: ty_i64(0..3) },
             ],
+            return_type: ty_i64(0..3),
             body: Block {
                 stmts: vec![],
                 tail: Spanned {
@@ -431,7 +509,7 @@ mod tests {
             },
             span: 0..10,
         };
-        assert_eq!(f.to_string(), "(fn add (a b) (block (+ a b)))");
+        assert_eq!(f.to_string(), "(fn add (a: i64 b: i64) -> i64 (block (+ a b)))");
     }
 
     fn block_lit(n: i64, span: Span) -> Block {
@@ -450,6 +528,7 @@ mod tests {
             kind: StmtKind::Let {
                 name: "x".to_string(),
                 name_span: 6..7,
+                ty_annot: None,
                 value: lit(1, 10..11),
             },
             span: 2..12,
