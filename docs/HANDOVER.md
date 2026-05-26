@@ -631,10 +631,30 @@ For pasting into a fresh chat to bootstrap context:
     with real generic fns. ~4-6 sessions estimated (the longest
     single C1 sub-phase); see HANDOVER §0.2 for the rough plan.
 
-    Read docs/HANDOVER.md §0 in full, then docs/STATE.md, then
-    ADR 0011 D6 sub-phase budget. ADRs 0009-0010 are historical
-    context for C0; 0012/0013/0014 are closed-ACCEPTED; 0015 is
-    ACCEPTED-WITH-AMENDMENTS. Resume at C1.7 per HANDOVER §0.2.
+    Read in order:
+      1. docs/HANDOVER.md §0 in full (~640 lines through §0.3)
+      2. docs/STATE.md (last-updated banner + C.1 phase tracker +
+         C.3 design-decision notes 74-81 for C1.6 retrospective)
+      3. docs/decisions/0011-phase-c1-kickoff-and-type-system-plan.md
+         (especially D6 sub-phase budget — C1.7 is the last
+         remaining; D7 ADR-first norm for ADR 0016)
+      4. docs/decisions/0015-concrete-c1-6-array-syntax.md
+         (especially D6 amendment + D11 unlock — sets the
+         precedent for how C1.7's generics interact with the
+         existing flat-subset Type representation)
+
+    Sanity check at session start:
+      cargo build --workspace
+      cargo clippy --workspace --all-targets -- -D warnings
+      cargo test --workspace                  # expect 751 passing
+      cargo run --bin snc -- build tests/pass/c16_go_no_go.sentinel -o /tmp/c16
+      /tmp/c16 && echo "exit=$?"              # expect "15" then "exit=0"
+
+    Resume at C1.7 per HANDOVER §0.2. First step: write ADR 0016
+    PROPOSED before any code. Sub-phases will likely follow the
+    same rhythm as C1.4 / C1.5 / C1.6 — lexer additions in one
+    commit, then a bundled AST + parser + resolve + types +
+    codegen commit, then a docs + fixtures commit.
 
 ---
 
