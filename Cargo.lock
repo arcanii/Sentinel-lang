@@ -1238,6 +1238,12 @@ dependencies = [
 name = "sentinel-types"
 version = "0.0.1"
 dependencies = [
+ "miette",
+ "salsa",
+ "sentinel-ast",
+ "sentinel-base",
+ "sentinel-resolve",
+ "sentinel-syntax",
  "thiserror",
  "tracing",
 ]
