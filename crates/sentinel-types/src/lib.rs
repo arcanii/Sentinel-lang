@@ -28,7 +28,7 @@ use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, TypeExpr, TypeExprKind, UnaryOp}
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
     FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef, ResolvedProgram,
-    ResolvedStmt, ResolvedStmtKind, StructId, VarId, IS_SOME_FN_ID, UNWRAP_OR_FN_ID,
+    ResolvedStmt, ResolvedStmtKind, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
 };
 
 // =============================================================================
@@ -58,11 +58,25 @@ pub enum Type {
     Struct(StructId),
     /// `?T` per ADR 0014 D1. Payload is the inner base type.
     Nullable(NullableInner),
+    /// `[T]` per ADR 0015 D1. Payload is the element type.
+    Array(ArrayElem),
 }
 
-/// The base types that can appear inside a `?T`. Structurally a
-/// subset of [`Type`] minus the `Nullable` constructor — enforces
-/// ADR 0014 D6 (no nested nullables) at the type level.
+/// The base types that can appear inside a `?T` per ADR 0014 D6 +
+/// ADR 0015 D6. Structurally a subset of [`Type`] minus the
+/// `Nullable` and `Array` constructors — enforces no-nested-
+/// nullables AND no-nullable-of-array at the type level.
+///
+/// **C1.6 implementation amendment of ADR 0015 D6**: the ADR
+/// proposed extending NullableInner with `Array(ArrayElem)` to
+/// represent `?[T]`. Rust's mutual recursion (NullableInner has
+/// Array(ArrayElem), ArrayElem has Nullable(NullableInner)) forces
+/// `Box` indirection somewhere, which breaks `Type`'s `Copy`.
+/// The simpler choice for C1.6: bound the depth to 1 — `?T` and
+/// `[T]` can each contain primitives or structs only, never each
+/// other. `?[T]` and `[?T]` become "not yet representable"; a
+/// future ADR adds them when generics or a more sophisticated type
+/// representation is in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NullableInner {
     I64,
@@ -79,6 +93,30 @@ impl NullableInner {
             NullableInner::I32 => Type::I32,
             NullableInner::Bool => Type::Bool,
             NullableInner::Struct(id) => Type::Struct(id),
+        }
+    }
+}
+
+/// The base types that can appear inside an `[T]` per ADR 0015 D6.
+/// Same shape and same C1.6 amendment as [`NullableInner`]: just
+/// primitives and structs, no Nullable, no Array. `[?T]` is
+/// deferred along with `?[T]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArrayElem {
+    I64,
+    I32,
+    Bool,
+    Struct(StructId),
+}
+
+impl ArrayElem {
+    /// Promote to the corresponding [`Type`].
+    pub fn to_type(self) -> Type {
+        match self {
+            ArrayElem::I64 => Type::I64,
+            ArrayElem::I32 => Type::I32,
+            ArrayElem::Bool => Type::Bool,
+            ArrayElem::Struct(id) => Type::Struct(id),
         }
     }
 }
@@ -102,16 +140,37 @@ impl Type {
         matches!(self, Type::Nullable(_))
     }
 
+    /// `true` if this is an array type (`[T]`).
+    pub fn is_array(self) -> bool {
+        matches!(self, Type::Array(_))
+    }
+
     /// Try to demote this Type to a [`NullableInner`] for use as
-    /// the payload of a `Nullable`. Returns `None` if this is
-    /// already a `Nullable` (would be nested per ADR 0014 D6).
+    /// the payload of a `Nullable`. Returns `None` for `Nullable`
+    /// (would be nested per ADR 0014 D6) AND for `Array` (the
+    /// `?[T]` combination is deferred per C1.6's depth-1 amendment
+    /// of ADR 0015 D6).
     pub fn to_nullable_inner(self) -> Option<NullableInner> {
         match self {
             Type::I64 => Some(NullableInner::I64),
             Type::I32 => Some(NullableInner::I32),
             Type::Bool => Some(NullableInner::Bool),
             Type::Struct(id) => Some(NullableInner::Struct(id)),
-            Type::Nullable(_) => None,
+            Type::Array(_) | Type::Nullable(_) => None,
+        }
+    }
+
+    /// Try to demote this Type to an [`ArrayElem`] for use as the
+    /// payload of an `Array`. Returns `None` for `Array` (would be
+    /// nested per ADR 0015 D6) AND for `Nullable` (the `[?T]`
+    /// combination is deferred per C1.6's depth-1 amendment).
+    pub fn to_array_elem(self) -> Option<ArrayElem> {
+        match self {
+            Type::I64 => Some(ArrayElem::I64),
+            Type::I32 => Some(ArrayElem::I32),
+            Type::Bool => Some(ArrayElem::Bool),
+            Type::Struct(id) => Some(ArrayElem::Struct(id)),
+            Type::Array(_) | Type::Nullable(_) => None,
         }
     }
 }
@@ -130,6 +189,7 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             None => format!("<struct#{}>", id.0),
         },
         Type::Nullable(inner) => format!("?{}", type_display(inner.to_type(), program)),
+        Type::Array(elem) => format!("[{}]", type_display(elem.to_type(), program)),
     }
 }
 
@@ -141,6 +201,7 @@ impl std::fmt::Display for Type {
             Type::Bool => write!(f, "bool"),
             Type::Struct(id) => write!(f, "<struct#{}>", id.0),
             Type::Nullable(inner) => write!(f, "?{}", inner.to_type()),
+            Type::Array(elem) => write!(f, "[{}]", elem.to_type()),
         }
     }
 }
@@ -180,6 +241,17 @@ fn resolve_type_expr(
                 Some(ni) => Ok(Type::Nullable(ni)),
                 None => Err(TypeError::UnknownType {
                     name: "?(nullable)".to_string(),
+                    span: to_source_span(&te.span),
+                }),
+            }
+        }
+        TypeExprKind::Array(inner) => {
+            // Recursively resolve the inner; reject `[[T]]` per
+            // ADR 0015 D6 (multi-dim arrays are deferred).
+            let inner_ty = resolve_type_expr(inner, struct_table)?;
+            match inner_ty.to_array_elem() {
+                Some(ae) => Ok(Type::Array(ae)),
+                None => Err(TypeError::NestedArray {
                     span: to_source_span(&te.span),
                 }),
             }
@@ -360,6 +432,22 @@ pub enum TypedExprKind {
         field_span: Span,
         field_index: usize,
     },
+    /// Array literal `[e1, e2, …]` per ADR 0015 D2. All elements
+    /// have been checked against the expected element type; the
+    /// outer node's ty is `[T]` for the inferred T.
+    ArrayLit {
+        elem_ty: ArrayElem,
+        elements: Vec<TypedExpr>,
+    },
+    /// Postfix indexing `target[index]` per ADR 0015 D3. The
+    /// target's type is `[T]`; the index's type is `i64`; the
+    /// outer node's ty is `T` (the element type promoted from
+    /// ArrayElem).
+    Index {
+        target: Box<TypedExpr>,
+        index: Box<TypedExpr>,
+        elem_ty: ArrayElem,
+    },
 }
 
 // =============================================================================
@@ -470,6 +558,47 @@ pub enum TypeError {
         #[label("inner type unknown here")]
         span: miette::SourceSpan,
     },
+
+    /// C1.6 / ADR 0015 D5: an empty array literal `[]` without
+    /// enough context to infer `[T]` for some concrete T.
+    #[error("ambiguous empty array — cannot infer the element type")]
+    #[diagnostic(
+        code(sentinel::types::ambiguous_empty_array),
+        help("add a type annotation, e.g. `let xs: [i64] = [];`")
+    )]
+    AmbiguousEmptyArray {
+        #[label("element type unknown here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.6 / ADR 0015 D3: indexing a non-array value.
+    #[error("indexing on non-array type `{got}`")]
+    #[diagnostic(code(sentinel::types::index_on_non_array))]
+    IndexOnNonArray {
+        got: Type,
+        #[label("expected an array, got {got}")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.6 / ADR 0015 D3: array index must be `i64`.
+    #[error("array index must be `i64`, got `{got}`")]
+    #[diagnostic(code(sentinel::types::index_not_int))]
+    IndexNotInt {
+        got: Type,
+        #[label("expected i64, got {got}")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.6 / ADR 0015 D6: nested arrays `[[T]]` are rejected.
+    #[error("nested array types `[[T]]` are not allowed at C1.6")]
+    #[diagnostic(
+        code(sentinel::types::nested_array),
+        help("multi-dimensional arrays are deferred to a future ADR")
+    )]
+    NestedArray {
+        #[label("nested array here")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -560,6 +689,19 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         is_main: false,
         is_runtime: true,
     });
+    // C1.6 / ADR 0015 D4: `len(a: [T]) -> i64`. Placeholder param
+    // type (the type checker special-cases the call so this isn't
+    // consulted).
+    let len_sig = &program.fn_signatures[3];
+    typed_signatures.push(TypedFnSignature {
+        id: len_sig.id,
+        name: len_sig.name.clone(),
+        name_span: len_sig.name_span.clone(),
+        param_types: vec![Type::Array(ArrayElem::I64)],
+        return_type: Type::I64,
+        is_main: false,
+        is_runtime: true,
+    });
 
     for fn_def in &program.fns {
         let resolved_sig = &program.fn_signatures[fn_def.id.0 as usize];
@@ -597,21 +739,21 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     })
 }
 
-/// Walk the struct-field graph looking for cycles. Returns
-/// [`TypeError::RecursiveStruct`] on the first cycle found.
+/// Walk the struct-field graph looking for cycles consisting of
+/// only direct (non-nullable) edges. C1.6 / ADR 0015 D11 implements
+/// the ADR 0014 D10 relaxation: cycles that pass through at least
+/// one `Nullable(Struct)` edge are accepted because the nullable
+/// payload is now heap-allocated (per the C1.6 codegen `?Struct =
+/// { i1, T* }` representation), which provides the indirection
+/// that bounds the recursive struct's size at runtime.
 ///
-/// **ADR 0014 D10 deferral**: the original C1.5 ADR proposed
-/// relaxing the cycle check so cycles via nullable edges (`?Node`)
-/// are accepted. C1.5 implementation discovered that the codegen
-/// representation of `?T` as a flat `{ i1, T }` struct doesn't
-/// actually provide the indirection — `struct Node { next: ?Node }`
-/// has infinite LLVM size because `?Node` contains a Node inline,
-/// not a pointer-to-Node. Proper indirection requires heap
-/// allocation (malloc/free) or stack-with-lifetime semantics —
-/// both beyond C1.5 scope. So the cycle-check at C1.5 still walks
-/// nullable edges as if they were direct edges (the conservative
-/// stance), keeping recursive structs rejected. The proper
-/// relaxation lands at C1.6+ when malloc/heap arrives.
+/// The detector walks only `Type::Struct(_)` edges as cycle-
+/// contributing. `Type::Nullable(NullableInner::Struct(_))` edges
+/// are skipped — the heap indirection breaks the cycle. Arrays
+/// (`Type::Array(_)`) are also heap-backed so they similarly break
+/// cycles, but at C1.6 array elements can't themselves be arrays
+/// (per ADR 0015 D6), so array-via-cycle is a corner case captured
+/// implicitly.
 fn detect_struct_cycle(structs: &[TypedStructDecl]) -> Result<(), TypeError> {
     #[derive(Clone, Copy, PartialEq)]
     enum Color {
@@ -633,15 +775,11 @@ fn detect_struct_cycle(structs: &[TypedStructDecl]) -> Result<(), TypeError> {
         color[i] = Color::Gray;
         path.push(i);
         for field in &structs[i].fields {
-            // Walk both direct `Struct` edges and `Nullable(Struct)`
-            // edges — at C1.5 the nullable doesn't break cycles in
-            // codegen, so the type check stays conservative.
-            let child_struct_id = match field.ty {
-                Type::Struct(id) => Some(id),
-                Type::Nullable(NullableInner::Struct(id)) => Some(id),
-                _ => None,
-            };
-            if let Some(child_id) = child_struct_id {
+            // C1.6 / ADR 0015 D11: only direct `Struct(_)` edges
+            // contribute to cycles. Nullable struct edges
+            // (`?Struct`) and array edges break cycles via heap
+            // indirection.
+            if let Type::Struct(child_id) = field.ty {
                 let j = child_id.0 as usize;
                 match color[j] {
                     Color::Gray => {
@@ -661,6 +799,10 @@ fn detect_struct_cycle(structs: &[TypedStructDecl]) -> Result<(), TypeError> {
                     Color::Black => {}
                 }
             }
+            // Nullable struct edges (`Type::Nullable(
+            // NullableInner::Struct(_))`) intentionally don't
+            // contribute. The codegen `{ i1, T* }` heap representation
+            // makes the cycle finite-sized.
         }
         path.pop();
         color[i] = Color::Black;
@@ -1127,6 +1269,26 @@ fn check_expr(
                     },
                     Type::Bool,
                 )
+            } else if *id == LEN_FN_ID {
+                // len(a: [T]) -> i64 per ADR 0015 D4. Synthesize the
+                // first arg; it must be `[T]` for any T.
+                let a = check_expr(&args[0], None, env, signatures, structs)?;
+                if !a.ty.is_array() {
+                    return Err(TypeError::Mismatch {
+                        expected: Type::Array(ArrayElem::I64), // hint
+                        got: a.ty,
+                        span: to_source_span(&args[0].span),
+                    });
+                }
+                let typed_args = vec![a];
+                (
+                    TypedExprKind::Call {
+                        id: *id,
+                        callee_span: callee_span.clone(),
+                        args: typed_args,
+                    },
+                    Type::I64,
+                )
             } else {
                 let signature = &signatures[id.0 as usize];
                 let mut typed_args = Vec::with_capacity(args.len());
@@ -1250,6 +1412,99 @@ fn check_expr(
                 Type::Struct(*id),
             )
         }
+        ResolvedExprKind::ArrayLit(elems) => {
+            // ADR 0015 D2 + D7: each element checked against the
+            // expected element type (from `[T]` context) if present.
+            // If no expected, infer T from the first element.
+            let expected_elem: Option<Type> = match expected {
+                Some(Type::Array(elem)) => Some(elem.to_type()),
+                _ => None,
+            };
+            if elems.is_empty() {
+                // ADR 0015 D5: empty array needs context.
+                let elem_ty = match expected_elem {
+                    Some(t) => t,
+                    None => {
+                        return Err(TypeError::AmbiguousEmptyArray {
+                            span: to_source_span(&expr.span),
+                        });
+                    }
+                };
+                let ae = elem_ty.to_array_elem().ok_or_else(|| {
+                    TypeError::NestedArray {
+                        span: to_source_span(&expr.span),
+                    }
+                })?;
+                (
+                    TypedExprKind::ArrayLit {
+                        elem_ty: ae,
+                        elements: Vec::new(),
+                    },
+                    Type::Array(ae),
+                )
+            } else {
+                // Type-check elements. First element synthesizes T
+                // if no expected; subsequent elements get T as
+                // expected (so widening / null work inside `[T]`).
+                let first = check_expr(&elems[0], expected_elem, env, signatures, structs)?;
+                let elem_ty = first.ty;
+                let mut typed = Vec::with_capacity(elems.len());
+                typed.push(first);
+                for e in &elems[1..] {
+                    let t = check_expr(e, Some(elem_ty), env, signatures, structs)?;
+                    if t.ty != elem_ty {
+                        return Err(TypeError::Mismatch {
+                            expected: elem_ty,
+                            got: t.ty,
+                            span: to_source_span(&e.span),
+                        });
+                    }
+                    typed.push(t);
+                }
+                let ae = elem_ty.to_array_elem().ok_or_else(|| {
+                    TypeError::NestedArray {
+                        span: to_source_span(&expr.span),
+                    }
+                })?;
+                (
+                    TypedExprKind::ArrayLit {
+                        elem_ty: ae,
+                        elements: typed,
+                    },
+                    Type::Array(ae),
+                )
+            }
+        }
+        ResolvedExprKind::Index { target, index } => {
+            let target_t = check_expr(target, None, env, signatures, structs)?;
+            let elem_ty = match target_t.ty {
+                Type::Array(ae) => ae,
+                other => {
+                    return Err(TypeError::IndexOnNonArray {
+                        got: other,
+                        span: to_source_span(&target.span),
+                    });
+                }
+            };
+            // Synthesize the index without pushdown so a non-int
+            // index surfaces as the more-specific `IndexNotInt`
+            // rather than a generic `Mismatch`.
+            let index_t = check_expr(index, None, env, signatures, structs)?;
+            if index_t.ty != Type::I64 {
+                return Err(TypeError::IndexNotInt {
+                    got: index_t.ty,
+                    span: to_source_span(&index.span),
+                });
+            }
+            (
+                TypedExprKind::Index {
+                    target: Box::new(target_t),
+                    index: Box::new(index_t),
+                    elem_ty,
+                },
+                elem_ty.to_type(),
+            )
+        }
         ResolvedExprKind::FieldAccess { target, field, field_span } => {
             let target_t = check_expr(target, None, env, signatures, structs)?;
             let struct_id = match target_t.ty {
@@ -1370,6 +1625,26 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "ambiguous `null` — cannot infer the nullable's inner type".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::AmbiguousEmptyArray { span } => (
+            "sentinel::types::ambiguous_empty_array",
+            "ambiguous empty array — cannot infer the element type".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::IndexOnNonArray { got, span } => (
+            "sentinel::types::index_on_non_array",
+            format!("indexing on non-array type `{got}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::IndexNotInt { got, span } => (
+            "sentinel::types::index_not_int",
+            format!("array index must be `i64`, got `{got}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::NestedArray { span } => (
+            "sentinel::types::nested_array",
+            "nested array types `[[T]]` are not allowed at C1.6".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
     };
     Diagnostic {
         stage: "types",
@@ -1417,14 +1692,15 @@ mod tests {
         let main = p.main();
         assert_eq!(main.return_type, Type::I64);
         assert_eq!(main.body.ty, Type::I64);
-        // Signature table at C1.5: FnId(0)=print, (1)=unwrap_or,
-        // (2)=is_some, (3)=main. The generic builtins occupy
-        // FnId(1)/(2) per ADR 0014 D9.
+        // Signature table at C1.6: FnId(0)=print, (1)=unwrap_or,
+        // (2)=is_some, (3)=len, (4)=main. The generic builtins
+        // occupy FnId(1..=3) per ADR 0014 D9 + ADR 0015 D4.
         assert_eq!(p.fn_signatures[0].name, "print");
         assert_eq!(p.fn_signatures[0].param_types, vec![Type::I64]);
         assert_eq!(p.fn_signatures[1].name, "unwrap_or");
         assert_eq!(p.fn_signatures[2].name, "is_some");
-        assert_eq!(p.fn_signatures[3].name, "main");
+        assert_eq!(p.fn_signatures[3].name, "len");
+        assert_eq!(p.fn_signatures[4].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 
@@ -2093,12 +2369,31 @@ fn main() -> i64 {
     }
 
     #[test]
-    fn recursive_nullable_struct_still_rejected() {
-        // The ADR 0014 D10 relaxation was deferred — recursive structs
-        // via nullable still error at C1.5 because codegen can't yet
-        // represent the indirection.
-        let err = check_err(
+    fn recursive_nullable_struct_now_accepted() {
+        // C1.6 / ADR 0015 D11: the ADR 0014 D10 deferral is now
+        // implemented. Recursive structs via nullable edges are
+        // accepted because `?Struct` uses heap indirection in
+        // codegen — the cycle is broken at runtime by the pointer.
+        let p = check_ok(
             "struct Node { value: i64, next: ?Node }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs[0].name, "Node");
+        // First field is i64; second is ?Node (Nullable struct).
+        assert_eq!(p.structs[0].fields[0].ty, Type::I64);
+        match p.structs[0].fields[1].ty {
+            Type::Nullable(NullableInner::Struct(id)) => {
+                assert_eq!(id, p.structs[0].id);
+            }
+            other => panic!("expected ?Node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_recursive_struct_still_rejected() {
+        // `struct Bad { x: Bad }` — direct cycle, no nullable
+        // indirection, still rejected.
+        let err = check_err(
+            "struct Bad { x: Bad }\nfn main() -> i64 { 0 }",
         );
         assert!(matches!(err, TypeError::RecursiveStruct { .. }), "got {err:?}");
     }
@@ -2123,6 +2418,119 @@ fn main() -> i64 {
             Type::Nullable(NullableInner::I64).to_nullable_inner(),
             None
         );
+    }
+
+    // ----- C1.6: arrays + indexing + len + recursive struct unlock -----
+
+    #[test]
+    fn array_type_resolves() {
+        let p = check_ok("fn f(xs: [i64]) -> i64 { 0 }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty, Type::Array(ArrayElem::I64));
+    }
+
+    #[test]
+    fn array_literal_typechecks() {
+        let p = check_ok("fn main() -> i64 { let xs = [1, 2, 3]; 0 }");
+        let main = p.main();
+        match &main.body.stmts[0].kind {
+            TypedStmtKind::Let { ty, value, .. } => {
+                assert_eq!(*ty, Type::Array(ArrayElem::I64));
+                assert_eq!(value.ty, Type::Array(ArrayElem::I64));
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn array_index_typechecks() {
+        let p = check_ok("fn main() -> i64 { let xs = [42]; xs[0] }");
+        assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    #[test]
+    fn len_builtin_typechecks() {
+        let p = check_ok("fn main() -> i64 { let xs = [1, 2, 3]; len(xs) }");
+        assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    #[test]
+    fn empty_array_with_annotation_typechecks() {
+        let _ = check_ok("fn main() -> i64 { let xs: [i64] = []; 0 }");
+    }
+
+    #[test]
+    fn empty_array_without_annotation_errors() {
+        let err = check_err("fn main() -> i64 { let xs = []; 0 }");
+        assert!(matches!(err, TypeError::AmbiguousEmptyArray { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn array_index_on_non_array_errors() {
+        let err = check_err("fn main() -> i64 { let x = 5; x[0] }");
+        assert!(
+            matches!(err, TypeError::IndexOnNonArray { got: Type::I64, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn array_index_non_int_errors() {
+        let err = check_err("fn main() -> i64 { let xs = [1]; xs[true] }");
+        assert!(
+            matches!(err, TypeError::IndexNotInt { got: Type::Bool, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nested_array_type_errors() {
+        let err = check_err("fn f(x: [[i64]]) -> i64 { 0 }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::NestedArray { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn array_mixed_element_types_errors() {
+        let err = check_err("fn main() -> i64 { let xs = [1, true]; 0 }");
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn len_on_non_array_errors() {
+        let err = check_err("fn main() -> i64 { len(5) }");
+        assert!(matches!(err, TypeError::Mismatch { got: Type::I64, .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn array_in_struct_field_typechecks() {
+        let p = check_ok(
+            "struct Bag { items: [i64] }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs[0].fields[0].ty, Type::Array(ArrayElem::I64));
+    }
+
+    #[test]
+    fn linked_list_struct_typechecks() {
+        // C1.6 / ADR 0015 D11: the ADR 0014 D10 unlock — recursive
+        // structs via `?T` work now.
+        let p = check_ok(
+            "struct Node { value: i64, next: ?Node }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs[0].name, "Node");
+    }
+
+    #[test]
+    fn c16_phasego_sum_typechecks() {
+        let src = "\
+fn sum_from(a: [i64], i: i64) -> i64 {
+    if i == len(a) { 0 } else { a[i] + sum_from(a, i + 1) }
+}
+fn main() -> i64 {
+    let arr: [i64] = [1, 2, 3, 4, 5];
+    sum_from(arr, 0)
+}
+";
+        let p = check_ok(src);
+        assert_eq!(p.main().body.ty, Type::I64);
     }
 
     #[test]

@@ -37,13 +37,16 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicType, BasicTypeEnum, IntType, StructType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, PointerValue,
+    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue,
 };
 use inkwell::{IntPredicate, OptimizationLevel};
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
-use sentinel_resolve::{FnId, StructId, VarId, IS_SOME_FN_ID, UNWRAP_OR_FN_ID};
+use sentinel_resolve::{
+    FnId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
+};
 use sentinel_types::{
-    Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
+    ArrayElem, NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram,
+    TypedStmt, TypedStmtKind,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -106,9 +109,34 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
 
     // Pass 1: declare every function in the typed program's
     // signature table. Signatures are indexed by FnId.0; FnId(0) is
-    // always `print` (the runtime symbol).
+    // always `print` (the actual runtime symbol). FnId(1)/(2)/(3)
+    // are the generic builtins `unwrap_or` / `is_some` / `len`
+    // which codegen INLINES — no LLVM symbol needed for them. So
+    // we only emit an LLVM declaration for the real runtime fn
+    // (print) and the user fns. The inlined builtins still occupy
+    // FnId slots so the fns HashMap entries are populated with the
+    // print function value as a placeholder (never read; defensive).
     let mut fns: HashMap<FnId, FunctionValue> = HashMap::new();
-    for signature in &program.fn_signatures {
+    let print_fn_value = {
+        let print_sig = &program.fn_signatures[0];
+        debug_assert!(print_sig.is_runtime && print_sig.name == "print");
+        let param_types: Vec<_> = print_sig
+            .param_types
+            .iter()
+            .map(|t| llvm_basic_type(&context, *t, &struct_types).into())
+            .collect();
+        let fn_type = llvm_basic_type(&context, print_sig.return_type, &struct_types)
+            .fn_type(&param_types, false);
+        module.add_function("sentinel_print", fn_type, None)
+    };
+    fns.insert(FnId(0), print_fn_value);
+    // The other inline builtins map to print_fn_value as a dummy —
+    // codegen never reads these entries.
+    for signature in program.fn_signatures.iter().skip(1) {
+        if signature.is_runtime {
+            fns.insert(signature.id, print_fn_value);
+            continue;
+        }
         let param_types: Vec<_> = signature
             .param_types
             .iter()
@@ -120,14 +148,27 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
             llvm_basic_type(&context, signature.return_type, &struct_types)
                 .fn_type(&param_types, false)
         };
-        let llvm_name = if signature.is_runtime {
-            "sentinel_print"
-        } else {
-            &signature.name
-        };
-        let fn_value = module.add_function(llvm_name, fn_type, None);
+        let fn_value = module.add_function(&signature.name, fn_type, None);
         fns.insert(signature.id, fn_value);
     }
+
+    // C1.6 / ADR 0015 D9: declare the heap runtime symbols. These
+    // are external; sentinel-runtime supplies the implementations.
+    let alloc_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        module.add_function(
+            "sentinel_alloc",
+            ptr_ty.fn_type(&[i64_ty.into()], false),
+            None,
+        )
+    };
+    let panic_oob_fn = {
+        let i64_ty = context.i64_type();
+        let void_ty = context.void_type();
+        let panic_type = void_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false);
+        module.add_function("sentinel_panic_oob", panic_type, None)
+    };
 
     // Pass 2: emit each user function body. (The runtime `print`
     // has no body — it's defined externally by sentinel-runtime.)
@@ -137,6 +178,8 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
             builder,
             fns,
             struct_types,
+            alloc_fn,
+            panic_oob_fn,
             current_fn: None,
             vars: HashMap::new(),
         };
@@ -192,15 +235,27 @@ struct CodegenCtx<'ctx> {
     builder: Builder<'ctx>,
     fns: HashMap<FnId, FunctionValue<'ctx>>,
     struct_types: HashMap<StructId, StructType<'ctx>>,
+    /// C1.6: `sentinel_alloc(i64) -> ptr` runtime function. Called
+    /// to back array storage and `?Struct` heap payloads.
+    alloc_fn: FunctionValue<'ctx>,
+    /// C1.6: `sentinel_panic_oob(i64 idx, i64 len) -> void` runtime
+    /// function. Called from the bounds-check failure block.
+    panic_oob_fn: FunctionValue<'ctx>,
     current_fn: Option<FunctionValue<'ctx>>,
     vars: HashMap<VarId, (PointerValue<'ctx>, Type)>,
 }
 
-/// Map a Sentinel [`Type`] to its LLVM `BasicTypeEnum`. At C1.5
-/// the universe is `{ I64, I32, Bool, Struct, Nullable }`;
-/// primitives map to IntType, structs map to the per-struct
-/// StructType cached in pass 0, nullables lower to a 2-field LLVM
-/// struct `{ i1 valid, T payload }` per ADR 0014's codegen sketch.
+/// Map a Sentinel [`Type`] to its LLVM `BasicTypeEnum`. C1.5
+/// shipped the universe `{ I64, I32, Bool, Struct, Nullable }` with
+/// `?T` as flat `{ i1, T }`. C1.6 / ADR 0015 D11 splits the
+/// nullable lowering: `?primitive` stays flat inline, but
+/// `?Struct(id)` becomes `{ i1 valid, ptr payload }` where the
+/// payload is a heap-allocated `Struct(id)`. This breaks recursive
+/// struct cycles (the cycle goes through a pointer-sized field
+/// instead of an infinite-sized inline field).
+///
+/// C1.6 also adds `Type::Array(ArrayElem)` lowering to
+/// `{ i64 len, ptr data }` per ADR 0015 D1.
 fn llvm_basic_type<'ctx>(
     context: &'ctx Context,
     ty: Type,
@@ -215,19 +270,38 @@ fn llvm_basic_type<'ctx>(
             .expect("struct declared in pass 0"))
         .into(),
         Type::Nullable(inner) => {
-            // `?T` lowers as `{ i1 valid, T payload }`.
             let valid_ty: BasicTypeEnum = context.bool_type().into();
-            let payload_ty = llvm_basic_type(context, inner.to_type(), struct_types);
+            let payload_ty: BasicTypeEnum = match inner {
+                NullableInner::Struct(_) => {
+                    // C1.6 / ADR 0015 D11: `?Struct` payload is a
+                    // pointer to a heap-allocated struct.
+                    context.ptr_type(inkwell::AddressSpace::default()).into()
+                }
+                _ => {
+                    // `?primitive` stays inline { i1, T }.
+                    llvm_basic_type(context, inner.to_type(), struct_types)
+                }
+            };
             context
                 .struct_type(&[valid_ty, payload_ty], false)
                 .into()
+        }
+        Type::Array(_) => {
+            // `[T]` lowers as `{ i64 len, ptr data }` per ADR 0015
+            // D1. The element type is tracked at the Sentinel-types
+            // level (in TypedExprKind::ArrayLit / Index); LLVM uses
+            // opaque pointers since LLVM 15.
+            let len_ty: BasicTypeEnum = context.i64_type().into();
+            let data_ty: BasicTypeEnum =
+                context.ptr_type(inkwell::AddressSpace::default()).into();
+            context.struct_type(&[len_ty, data_ty], false).into()
         }
     }
 }
 
 /// Map a Sentinel int type (i1 / i32 / i64) to its LLVM IntType.
-/// Panics on `Type::Struct` / `Type::Nullable` — callers must gate
-/// on `Type::is_int()` first.
+/// Panics on non-int types — callers must gate on
+/// `Type::is_int()` first.
 fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
     match ty {
         Type::Bool => context.bool_type(),
@@ -235,6 +309,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::I64 => context.i64_type(),
         Type::Struct(_) => panic!("llvm_int_type called on non-int Type::Struct"),
         Type::Nullable(_) => panic!("llvm_int_type called on non-int Type::Nullable"),
+        Type::Array(_) => panic!("llvm_int_type called on non-int Type::Array"),
     }
 }
 
@@ -476,6 +551,20 @@ impl<'ctx> CodegenCtx<'ctx> {
         Ok(phi.as_basic_value())
     }
 
+    /// Call `sentinel_alloc(size)` and return the resulting pointer.
+    /// Used by ArrayLit (D2) and WidenToNullable for `?Struct` (D11).
+    fn alloc_call(&self, size: IntValue<'ctx>) -> Result<PointerValue<'ctx>, CodegenError> {
+        let call = self
+            .builder
+            .build_call(self.alloc_fn, &[size.into()], "sentinel_alloc")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let ret = call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CodegenError::Builder("sentinel_alloc returned void".to_string()))?;
+        Ok(ret.into_pointer_value())
+    }
+
     /// Lower `is_some(x: ?T) -> bool` per ADR 0014 D9. Inline:
     /// extract the discriminator field (i1 valid) from the `?T`
     /// struct value.
@@ -490,6 +579,161 @@ impl<'ctx> CodegenCtx<'ctx> {
             .build_extract_value(nullable_val, 0, "is_some_valid")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
         Ok(valid)
+    }
+
+    /// Lower `len(a: [T]) -> i64` per ADR 0015 D4. Inline: extract
+    /// the length field (i64 at index 0) of the `{ i64, ptr }`
+    /// array struct.
+    fn lower_len(
+        &mut self,
+        arg: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let array_val = self.lower_expr(arg, program)?.into_struct_value();
+        let len = self
+            .builder
+            .build_extract_value(array_val, 0, "len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(len)
+    }
+
+    /// Lower an array literal `[e1, e2, ...]` per ADR 0015 D2.
+    /// Allocates `n * sizeof(T)` bytes on the heap, stores each
+    /// element via GEP+store, and builds the `{ i64 len, ptr data }`
+    /// struct value.
+    fn lower_array_lit(
+        &mut self,
+        elem_ty: ArrayElem,
+        elements: &[TypedExpr],
+        array_ty: Type,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_type = self.context.i64_type();
+        let n = elements.len() as u64;
+        let len_val = i64_type.const_int(n, false);
+
+        let elem_llvm_ty = self.llvm_basic_type(elem_ty.to_type());
+        // Compute total size = n * sizeof(elem).
+        // size_of() for primitive types returns Some(IntValue); for
+        // structs it also returns Some. We use the build_int_mul
+        // path for safety.
+        let elem_size = elem_llvm_ty
+            .size_of()
+            .expect("non-void basic types have a known size");
+        let total_size = self
+            .builder
+            .build_int_mul(len_val, elem_size, "array_size")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Allocate. For an empty array, total_size is 0; malloc(0)
+        // is implementation-defined but our sentinel_alloc treats
+        // it as a normal allocation (may return null or a unique
+        // pointer per the C standard). We pass it through; reading
+        // from an empty array would already be a bounds-check
+        // failure.
+        let data_ptr = self.alloc_call(total_size)?;
+
+        // Store each element: GEP to elem-i, store.
+        for (i, elem) in elements.iter().enumerate() {
+            let idx = i64_type.const_int(i as u64, false);
+            let elem_ptr = unsafe {
+                self.builder
+                    .build_gep(elem_llvm_ty, data_ptr, &[idx], &format!("arr_elem_{i}"))
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+            };
+            let elem_val = self.lower_expr(elem, program)?;
+            self.builder
+                .build_store(elem_ptr, elem_val)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
+
+        // Build the { i64 len, ptr data } struct value.
+        let struct_ty = match self.llvm_basic_type(array_ty) {
+            BasicTypeEnum::StructType(st) => st,
+            _ => unreachable!("Array lowers to a struct type"),
+        };
+        let agg = struct_ty.get_undef();
+        let with_len = self
+            .builder
+            .build_insert_value(agg, len_val, 0, "arr_with_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let with_data = self
+            .builder
+            .build_insert_value(with_len, data_ptr, 1, "arr_with_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(with_data.into_struct_value().into())
+    }
+
+    /// Lower an array indexing `target[index]` per ADR 0015 D3 with
+    /// bounds checking per D10. Emits the conditional branch on
+    /// `0 <= idx < len`; the false branch calls
+    /// `sentinel_panic_oob(idx, len)` and falls through to
+    /// `unreachable`; the true branch does GEP+load.
+    fn lower_index(
+        &mut self,
+        target: &TypedExpr,
+        index: &TypedExpr,
+        elem_ty: ArrayElem,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let array_val = self.lower_expr(target, program)?.into_struct_value();
+        let idx = self.lower_expr(index, program)?.into_int_value();
+        let len = self
+            .builder
+            .build_extract_value(array_val, 0, "arr_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let data_ptr = self
+            .builder
+            .build_extract_value(array_val, 1, "arr_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+
+        // Bounds check: 0 <= idx < len.
+        let i64_type = self.context.i64_type();
+        let zero = i64_type.const_zero();
+        let ge_zero = self
+            .builder
+            .build_int_compare(IntPredicate::SGE, idx, zero, "idx_ge_zero")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let lt_len = self
+            .builder
+            .build_int_compare(IntPredicate::SLT, idx, len, "idx_lt_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let in_bounds = self
+            .builder
+            .build_and(ge_zero, lt_len, "idx_in_bounds")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        let current_fn = self.current_fn.expect("current_fn set");
+        let ok_bb = self.context.append_basic_block(current_fn, "idx_ok");
+        let oob_bb = self.context.append_basic_block(current_fn, "idx_oob");
+        self.builder
+            .build_conditional_branch(in_bounds, ok_bb, oob_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // OOB branch: call sentinel_panic_oob then unreachable.
+        self.builder.position_at_end(oob_bb);
+        self.builder
+            .build_call(self.panic_oob_fn, &[idx.into(), len.into()], "")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // OK branch: GEP + load.
+        self.builder.position_at_end(ok_bb);
+        let elem_llvm_ty = self.llvm_basic_type(elem_ty.to_type());
+        let elem_ptr = unsafe {
+            self.builder
+                .build_gep(elem_llvm_ty, data_ptr, &[idx], "idx_gep")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?
+        };
+        let elem_val = self
+            .builder
+            .build_load(elem_llvm_ty, elem_ptr, "idx_load")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(elem_val)
     }
 
     /// Lower `unwrap_or(x: ?T, default: T) -> T` per ADR 0014 D9.
@@ -664,21 +908,24 @@ impl<'ctx> CodegenCtx<'ctx> {
                 self.lower_if(cond, then_branch, else_branch, program)
             }
             TypedExprKind::Call { id, args, .. } => {
-                // ADR 0014 D9 builtins: lower inline rather than
-                // calling an external runtime function. The codegen
-                // emits a few LLVM instructions per call site.
+                // ADR 0014 D9 + ADR 0015 D4 builtins: lower inline
+                // rather than calling an external runtime function.
                 if *id == UNWRAP_OR_FN_ID {
                     return self.lower_unwrap_or(&args[0], &args[1], program);
                 }
                 if *id == IS_SOME_FN_ID {
                     return self.lower_is_some(&args[0], program);
                 }
+                if *id == LEN_FN_ID {
+                    return self.lower_len(&args[0], program);
+                }
                 self.lower_call(*id, args, program)
             }
             TypedExprKind::NullLit => {
-                // ADR 0014 D2: NullLit lowers to `{ i1 false, undef T }`.
-                // The expression's type carries the ?T so we know the
-                // payload's LLVM shape.
+                // ADR 0014 D2: NullLit lowers to `{ i1 false, undef payload }`.
+                // C1.6 / ADR 0015 D11: for `?Struct`, the payload is
+                // a pointer (heap-indirected); the null case uses a
+                // null pointer.
                 let nullable_inner = match expr.ty {
                     Type::Nullable(ni) => ni,
                     _ => unreachable!("type-check guarantees NullLit.ty is Nullable"),
@@ -687,18 +934,51 @@ impl<'ctx> CodegenCtx<'ctx> {
                     BasicTypeEnum::StructType(st) => st,
                     _ => unreachable!("Nullable lowers to a struct type"),
                 };
-                let payload_ty = self.llvm_basic_type(nullable_inner.to_type());
                 let valid = self.context.bool_type().const_int(0, false);
-                let payload = payload_ty.const_zero();
+                let payload: BasicValueEnum = match nullable_inner {
+                    NullableInner::Struct(_) => {
+                        // null pointer
+                        self.context
+                            .ptr_type(inkwell::AddressSpace::default())
+                            .const_null()
+                            .into()
+                    }
+                    _ => {
+                        let payload_ty = self.llvm_basic_type(nullable_inner.to_type());
+                        payload_ty.const_zero()
+                    }
+                };
                 Ok(struct_ty.const_named_struct(&[valid.into(), payload]).into())
             }
             TypedExprKind::WidenToNullable(inner) => {
-                // ADR 0014 D3: lower the inner T value and wrap into
-                // `{ i1 true, T payload }`.
-                let payload = self.lower_expr(inner, program)?;
+                // ADR 0014 D3: lower the inner T value and wrap.
+                // For primitives: `{ i1 true, T payload }` inline.
+                // C1.6 / ADR 0015 D11: for Struct, allocate the
+                // payload on the heap and wrap as `{ i1 true, ptr }`.
+                let nullable_inner = match expr.ty {
+                    Type::Nullable(ni) => ni,
+                    _ => unreachable!("WidenToNullable.ty is Nullable"),
+                };
                 let struct_ty = match self.llvm_basic_type(expr.ty) {
                     BasicTypeEnum::StructType(st) => st,
                     _ => unreachable!("Nullable lowers to a struct type"),
+                };
+                let payload_val = self.lower_expr(inner, program)?;
+                let payload_in_struct: BasicValueEnum = match nullable_inner {
+                    NullableInner::Struct(_) => {
+                        // Heap-allocate the inner struct, store the
+                        // value, use the pointer as the payload.
+                        let inner_ty = self.llvm_basic_type(inner.ty);
+                        let size = inner_ty
+                            .size_of()
+                            .expect("struct types have a known size");
+                        let raw_ptr = self.alloc_call(size)?;
+                        self.builder
+                            .build_store(raw_ptr, payload_val)
+                            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                        raw_ptr.into()
+                    }
+                    _ => payload_val,
                 };
                 let agg = struct_ty.get_undef();
                 let valid = self.context.bool_type().const_int(1, false);
@@ -708,7 +988,7 @@ impl<'ctx> CodegenCtx<'ctx> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 let with_payload = self
                     .builder
-                    .build_insert_value(with_valid, payload, 1, "widen_payload")
+                    .build_insert_value(with_valid, payload_in_struct, 1, "widen_payload")
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 Ok(with_payload.into_struct_value().into())
             }
@@ -739,6 +1019,12 @@ impl<'ctx> CodegenCtx<'ctx> {
                     .build_extract_value(struct_val, *field_index as u32, "field")
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 Ok(field_val)
+            }
+            TypedExprKind::ArrayLit { elem_ty, elements } => {
+                self.lower_array_lit(*elem_ty, elements, expr.ty, program)
+            }
+            TypedExprKind::Index { target, index, elem_ty } => {
+                self.lower_index(target, index, *elem_ty, program)
             }
         }
     }
@@ -807,6 +1093,12 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
             fields.iter().find_map(|f| find_var_name_in_expr(f, id))
         }
         TypedExprKind::FieldAccess { target, .. } => find_var_name_in_expr(target, id),
+        TypedExprKind::ArrayLit { elements, .. } => {
+            elements.iter().find_map(|e| find_var_name_in_expr(e, id))
+        }
+        TypedExprKind::Index { target, index, .. } => {
+            find_var_name_in_expr(target, id).or_else(|| find_var_name_in_expr(index, id))
+        }
     }
 }
 
@@ -1048,6 +1340,77 @@ fn main() -> i64 {
             "struct Pair { first: ?i64, second: i64 }\nfn main() -> i64 { let p = Pair { first: 1, second: 2 }; p.second }",
         )
         .expect("compile");
+    }
+
+    // ----- C1.6 codegen smoke: arrays + indexing + len + heap ?Struct -----
+
+    #[test]
+    fn compile_array_literal() {
+        compile_src("fn main() -> i64 { let xs = [1, 2, 3]; 0 }").expect("compile");
+    }
+
+    #[test]
+    fn compile_array_index() {
+        compile_src("fn main() -> i64 { let xs = [42]; xs[0] }").expect("compile");
+    }
+
+    #[test]
+    fn compile_len_builtin() {
+        compile_src("fn main() -> i64 { let xs = [1, 2, 3]; len(xs) }").expect("compile");
+    }
+
+    #[test]
+    fn compile_empty_array_with_annotation() {
+        compile_src("fn main() -> i64 { let xs: [i64] = []; 0 }").expect("compile");
+    }
+
+    #[test]
+    fn compile_array_as_fn_arg() {
+        compile_src(
+            "fn first(xs: [i64]) -> i64 { xs[0] }\nfn main() -> i64 { first([7, 8, 9]) }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_linked_list_struct_via_nullable() {
+        // ADR 0014 D10 unlock via ADR 0015 D11: recursive struct
+        // through `?Node` heap indirection.
+        compile_src(
+            "struct Node { value: i64, next: ?Node }\nfn main() -> i64 { let n = Node { value: 42, next: null }; n.value }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_nullable_struct_widening() {
+        // `?Foo` heap-allocates the payload per ADR 0015 D11.
+        compile_src(
+            "struct Foo { x: i64 }\nfn maybe(c: bool) -> ?Foo { if c { Foo { x: 1 } } else { null } }\nfn main() -> i64 { 0 }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_array_of_struct() {
+        compile_src(
+            "struct P { x: i64, y: i64 }\nfn main() -> i64 { let ps = [P { x: 1, y: 2 }, P { x: 3, y: 4 }]; ps[0].x + ps[1].y }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_c16_phasego_sum_program() {
+        let src = "\
+fn sum_from(a: [i64], i: i64) -> i64 {
+    if i == len(a) { 0 } else { a[i] + sum_from(a, i + 1) }
+}
+fn main() -> i64 {
+    let arr: [i64] = [1, 2, 3, 4, 5];
+    sum_from(arr, 0)
+}
+";
+        compile_src(src).expect("compile");
     }
 
     #[test]

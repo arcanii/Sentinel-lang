@@ -20,6 +20,10 @@ crate-type = ["lib", "staticlib"]
 [dependencies]
 tracing    = { workspace = true }
 thiserror  = { workspace = true }
+# C1.6 / ADR 0015 D9: wraps libc malloc for sentinel_alloc.
+# Sentinel programs link with the C runtime, so using libc malloc
+# directly (rather than Rust's allocator) avoids mixing allocators.
+libc       = "0.2"
 
 [lints.rust]
 unsafe_code = "allow"

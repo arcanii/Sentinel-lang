@@ -588,9 +588,11 @@ impl<'a> Parser<'a> {
 
     /// Parse a [`TypeExpr`]. C1.2 shipped only the `Ident` form;
     /// C1.4 widened to recognize struct names; C1.5 adds the
-    /// `?T` prefix per ADR 0014 D1. Nested `??T` is rejected at
-    /// parse time per D6 — the second `?` surfaces as
-    /// [`ParseError::NestedNullable`].
+    /// `?T` prefix per ADR 0014 D1; C1.6 adds the `[T]` array
+    /// form per ADR 0015 D1. Nested `??T` is rejected at parse
+    /// time per ADR 0014 D6; nested `[[T]]` parses at the AST
+    /// level and is rejected at the type-resolution stage per
+    /// ADR 0015 D6.
     fn parse_type(&mut self) -> Result<TypeExpr, ParseError> {
         // Optional leading `?` for the C1.5 nullable type form.
         if self.peek_kind() == Some(TokenKind::Question) {
@@ -608,6 +610,36 @@ impl<'a> Parser<'a> {
                 kind: TypeExprKind::Nullable(Box::new(inner)),
                 span,
             });
+        }
+        // C1.6 / ADR 0015 D1: `[T]` array type. Parser accepts any
+        // T including arrays; nested-array rejection happens at
+        // type-resolve.
+        if self.peek_kind() == Some(TokenKind::LBracket) {
+            let lb_start = self.advance().expect("peeked").span.start;
+            let inner = self.parse_type()?;
+            match self.peek_kind() {
+                Some(TokenKind::RBracket) => {
+                    let rb_end = self.advance().expect("peeked").span.end;
+                    return Ok(Spanned {
+                        kind: TypeExprKind::Array(Box::new(inner)),
+                        span: lb_start..rb_end,
+                    });
+                }
+                Some(other) => {
+                    let t = self.peek().expect("peeked");
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{other:?}"),
+                        expected: "`]` to close array type",
+                        span: to_source_span(&t.span),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "`]` to close array type",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            }
         }
         match self.peek() {
             Some(t) if t.kind == TokenKind::Ident => {
@@ -1031,40 +1063,80 @@ impl<'a> Parser<'a> {
     /// shape: `a.b.c` parses as `(a.b).c`.
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut atom = self.parse_atom()?;
-        while self.peek_kind() == Some(TokenKind::Dot) {
-            self.advance();
-            let (field, field_span) = match self.peek() {
-                Some(t) if t.kind == TokenKind::Ident => {
-                    let span = t.span.clone();
-                    let name = self.src[span.clone()].to_string();
+        loop {
+            match self.peek_kind() {
+                Some(TokenKind::Dot) => {
                     self.advance();
-                    (name, span)
+                    let (field, field_span) = match self.peek() {
+                        Some(t) if t.kind == TokenKind::Ident => {
+                            let span = t.span.clone();
+                            let name = self.src[span.clone()].to_string();
+                            self.advance();
+                            (name, span)
+                        }
+                        Some(t) => {
+                            let kind = t.kind;
+                            let span = t.span.clone();
+                            return Err(ParseError::UnexpectedToken {
+                                got: format!("{kind:?}"),
+                                expected: "field name after `.`",
+                                span: to_source_span(&span),
+                            });
+                        }
+                        None => {
+                            return Err(ParseError::UnexpectedEof {
+                                expected: "field name after `.`",
+                                span: to_source_span(&self.eof_span()),
+                            });
+                        }
+                    };
+                    let span = atom.span.start..field_span.end;
+                    atom = Spanned {
+                        kind: ExprKind::FieldAccess {
+                            target: Box::new(atom),
+                            field,
+                            field_span,
+                        },
+                        span,
+                    };
                 }
-                Some(t) => {
-                    let kind = t.kind;
-                    let span = t.span.clone();
-                    return Err(ParseError::UnexpectedToken {
-                        got: format!("{kind:?}"),
-                        expected: "field name after `.`",
-                        span: to_source_span(&span),
-                    });
+                Some(TokenKind::LBracket) => {
+                    // C1.6 / ADR 0015 D3: postfix `[index]` indexing.
+                    // Inside `[...]` struct literals are
+                    // unambiguous; restore allow_struct_lit.
+                    self.advance();
+                    let saved = self.allow_struct_lit;
+                    self.allow_struct_lit = true;
+                    let index = self.parse_expr()?;
+                    self.allow_struct_lit = saved;
+                    let rb_end = match self.peek_kind() {
+                        Some(TokenKind::RBracket) => self.advance().expect("peeked").span.end,
+                        Some(other) => {
+                            let t = self.peek().expect("peeked");
+                            return Err(ParseError::UnexpectedToken {
+                                got: format!("{other:?}"),
+                                expected: "`]` to close index expression",
+                                span: to_source_span(&t.span),
+                            });
+                        }
+                        None => {
+                            return Err(ParseError::UnexpectedEof {
+                                expected: "`]` to close index expression",
+                                span: to_source_span(&self.eof_span()),
+                            });
+                        }
+                    };
+                    let span = atom.span.start..rb_end;
+                    atom = Spanned {
+                        kind: ExprKind::Index {
+                            target: Box::new(atom),
+                            index: Box::new(index),
+                        },
+                        span,
+                    };
                 }
-                None => {
-                    return Err(ParseError::UnexpectedEof {
-                        expected: "field name after `.`",
-                        span: to_source_span(&self.eof_span()),
-                    });
-                }
-            };
-            let span = atom.span.start..field_span.end;
-            atom = Spanned {
-                kind: ExprKind::FieldAccess {
-                    target: Box::new(atom),
-                    field,
-                    field_span,
-                },
-                span,
-            };
+                _ => break,
+            }
         }
         Ok(atom)
     }
@@ -1093,6 +1165,46 @@ impl<'a> Parser<'a> {
                 // checker infers `?T` from context.
                 let span = self.advance().expect("peeked").span.clone();
                 Ok(Spanned { kind: ExprKind::NullLit, span })
+            }
+            Some(TokenKind::LBracket) => {
+                // C1.6 / ADR 0015 D2: array literal `[e1, e2, ...]`.
+                // Inside `[...]`, struct literals are unambiguous.
+                let lb_start = self.advance().expect("peeked").span.start;
+                let saved = self.allow_struct_lit;
+                self.allow_struct_lit = true;
+                let mut elems = Vec::new();
+                if self.peek_kind() != Some(TokenKind::RBracket) {
+                    elems.push(self.parse_expr()?);
+                    while self.peek_kind() == Some(TokenKind::Comma) {
+                        self.advance();
+                        if self.peek_kind() == Some(TokenKind::RBracket) {
+                            break; // trailing comma allowed
+                        }
+                        elems.push(self.parse_expr()?);
+                    }
+                }
+                let rb_end = match self.peek_kind() {
+                    Some(TokenKind::RBracket) => self.advance().expect("peeked").span.end,
+                    Some(other) => {
+                        let t = self.peek().expect("peeked");
+                        return Err(ParseError::UnexpectedToken {
+                            got: format!("{other:?}"),
+                            expected: "`,` or `]` in array literal",
+                            span: to_source_span(&t.span),
+                        });
+                    }
+                    None => {
+                        return Err(ParseError::UnexpectedEof {
+                            expected: "`,` or `]` in array literal",
+                            span: to_source_span(&self.eof_span()),
+                        });
+                    }
+                };
+                self.allow_struct_lit = saved;
+                Ok(Spanned {
+                    kind: ExprKind::ArrayLit(elems),
+                    span: lb_start..rb_end,
+                })
             }
             Some(TokenKind::Ident) => {
                 let name_span = self.advance().expect("peeked").span.clone();
@@ -2266,5 +2378,142 @@ mod tests {
         // `null + 1` parses (syntactic level); the type checker
         // rejects later.
         assert_eq!(pretty("null + 1"), "(+ null 1)");
+    }
+
+    // ----- C1.6: arrays, indexing, array literals -----
+
+    #[test]
+    fn parse_array_type_in_param() {
+        let p = parse_ok_program("fn f(xs: [i64]) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "[i64]");
+    }
+
+    #[test]
+    fn parse_array_type_in_return() {
+        let p = parse_ok_program("fn f() -> [i64] { [] }");
+        assert_eq!(p.fns[0].return_type.kind.to_string(), "[i64]");
+    }
+
+    #[test]
+    fn parse_nullable_array_type() {
+        // `?[i64]` per ADR 0015 D6.
+        let p = parse_ok_program("fn f(x: ?[i64]) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "?[i64]");
+    }
+
+    #[test]
+    fn parse_array_of_nullable_type() {
+        // `[?i64]` per ADR 0015 D6.
+        let p = parse_ok_program("fn f(x: [?i64]) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "[?i64]");
+    }
+
+    #[test]
+    fn parse_array_literal_three_elems() {
+        assert_eq!(pretty("[1, 2, 3]"), "(array 1 2 3)");
+    }
+
+    #[test]
+    fn parse_array_literal_empty() {
+        assert_eq!(pretty("[]"), "(array)");
+    }
+
+    #[test]
+    fn parse_array_literal_trailing_comma() {
+        assert_eq!(pretty("[1, 2,]"), "(array 1 2)");
+    }
+
+    #[test]
+    fn parse_array_literal_one_elem() {
+        assert_eq!(pretty("[42]"), "(array 42)");
+    }
+
+    #[test]
+    fn parse_array_index() {
+        assert_eq!(pretty("a[0]"), "(index a 0)");
+    }
+
+    #[test]
+    fn parse_array_index_with_var() {
+        assert_eq!(pretty("a[i]"), "(index a i)");
+    }
+
+    #[test]
+    fn parse_array_index_chained() {
+        // a[i].x — indexing then field access — postfix chain.
+        assert_eq!(pretty("a[i].x"), "(. (index a i) x)");
+    }
+
+    #[test]
+    fn parse_field_then_index() {
+        // p.xs[0] — field access then index.
+        assert_eq!(pretty("p.xs[0]"), "(index (. p xs) 0)");
+    }
+
+    #[test]
+    fn parse_array_index_in_arithmetic() {
+        assert_eq!(pretty("a[0] + a[1]"), "(+ (index a 0) (index a 1))");
+    }
+
+    #[test]
+    fn parse_nested_array_literal() {
+        // `[[1, 2], [3, 4]]` parses; rejection happens at the
+        // type-resolve stage per ADR 0015 D6.
+        let _ = parse_expr("[[1, 2], [3, 4]]").expect("parse");
+    }
+
+    #[test]
+    fn parse_nested_array_type_parses() {
+        // `[[i64]]` parses (the grammar accepts); type-resolve
+        // will reject.
+        let p = parse_ok_program("fn f(x: [[i64]]) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "[[i64]]");
+    }
+
+    #[test]
+    fn parse_error_unclosed_array_type() {
+        let err = parse("fn f(x: [i64) -> i64 { 0 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`]` to close array type"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_unclosed_array_literal() {
+        let err = parse_expr("[1, 2").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "`,` or `]` in array literal"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_unclosed_index() {
+        let err = parse_expr("a[0").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "`]` to close index expression"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_array_literal_in_let() {
+        let block = parse_block_str("{ let xs = [1, 2, 3]; xs }").expect("parse");
+        match &block.stmts[0].kind {
+            StmtKind::Let { value, .. } => match &value.kind {
+                ExprKind::ArrayLit(elems) => assert_eq!(elems.len(), 3),
+                other => panic!("expected ArrayLit, got {other:?}"),
+            },
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_struct_with_array_field() {
+        let p = parse_ok_program(
+            "struct Bag { items: [i64] }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs[0].fields[0].ty.kind.to_string(), "[i64]");
     }
 }

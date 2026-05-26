@@ -63,6 +63,12 @@ pub const UNWRAP_OR_FN_ID: FnId = FnId(1);
 /// machinery as `unwrap_or`.
 pub const IS_SOME_FN_ID: FnId = FnId(2);
 
+/// `len(a: [T]) -> i64` per ADR 0015 D4. Generic over T; the type
+/// checker special-cases it the same way `unwrap_or` / `is_some`
+/// are. Codegen inlines it as `extract_value(struct, 0)` of the
+/// `{ i64 len, T* data }` array representation.
+pub const LEN_FN_ID: FnId = FnId(3);
+
 /// Identifier for a struct declaration. Added at C1.4 per ADR 0013
 /// D4 / D5; unique per-program, assigned in source order starting
 /// at 0.
@@ -250,6 +256,16 @@ pub enum ResolvedExprKind {
         target: Box<ResolvedExpr>,
         field: String,
         field_span: Span,
+    },
+    /// Array literal `[e1, e2, …]` per ADR 0015 D2. Pass-through;
+    /// type checker validates element-type consistency.
+    ArrayLit(Vec<ResolvedExpr>),
+    /// Postfix indexing `target[index]` per ADR 0015 D3.
+    /// Pass-through; type checker validates target is `[T]` and
+    /// index is `i64`.
+    Index {
+        target: Box<ResolvedExpr>,
+        index: Box<ResolvedExpr>,
     },
 }
 
@@ -440,12 +456,23 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         is_runtime: true,
     };
     next_fn_id += 1;
+    let len_sig = FnSignature {
+        id: FnId(next_fn_id),
+        name: "len".to_string(),
+        name_span: None,
+        arity: 1,
+        is_main: false,
+        is_runtime: true,
+    };
+    next_fn_id += 1;
 
     let mut fn_table: HashMap<String, FnId> = HashMap::new();
-    let mut signatures: Vec<FnSignature> = vec![print_sig, unwrap_or_sig, is_some_sig];
+    let mut signatures: Vec<FnSignature> =
+        vec![print_sig, unwrap_or_sig, is_some_sig, len_sig];
     fn_table.insert("print".to_string(), PRINT_FN_ID);
     fn_table.insert("unwrap_or".to_string(), UNWRAP_OR_FN_ID);
     fn_table.insert("is_some".to_string(), IS_SOME_FN_ID);
+    fn_table.insert("len".to_string(), LEN_FN_ID);
 
     // Pass 1: collect every fn into the table.
     for fn_def in &program.fns {
@@ -790,6 +817,42 @@ fn resolve_expr(
                 field_span: field_span.clone(),
             }
         }
+        ExprKind::ArrayLit(elems) => {
+            let mut resolved_elems = Vec::with_capacity(elems.len());
+            for e in elems {
+                resolved_elems.push(resolve_expr(
+                    e,
+                    fn_table,
+                    signatures,
+                    struct_table,
+                    vars,
+                    next_var_id,
+                )?);
+            }
+            ResolvedExprKind::ArrayLit(resolved_elems)
+        }
+        ExprKind::Index { target, index } => {
+            let target = resolve_expr(
+                target,
+                fn_table,
+                signatures,
+                struct_table,
+                vars,
+                next_var_id,
+            )?;
+            let index = resolve_expr(
+                index,
+                fn_table,
+                signatures,
+                struct_table,
+                vars,
+                next_var_id,
+            )?;
+            ResolvedExprKind::Index {
+                target: Box::new(target),
+                index: Box::new(index),
+            }
+        }
     };
     Ok(Spanned { kind, span: expr.span.clone() })
 }
@@ -921,8 +984,8 @@ mod tests {
         assert_eq!(p.main().name, "main");
         assert!(p.main().signature(&p).is_main);
         // FnId(0) = print, FnId(1) = unwrap_or, FnId(2) = is_some,
-        // FnId(3) = main (the first user fn).
-        assert_eq!(p.main().id, FnId(3));
+        // FnId(3) = len, FnId(4) = main (the first user fn).
+        assert_eq!(p.main().id, FnId(4));
         assert_eq!(p.fn_signatures[0].name, "print");
         assert!(p.fn_signatures[0].is_runtime);
     }
@@ -963,10 +1026,10 @@ mod tests {
             other => panic!("expected Binary, got {other:?}"),
         }
         // FnId(0) = print, FnId(1) = unwrap_or, FnId(2) = is_some,
-        // FnId(3) = double (first user fn), FnId(4) = main.
+        // FnId(3) = len, FnId(4) = double (first user fn), FnId(5) = main.
         let main = p.main();
         match &main.body.tail.kind {
-            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(3)),
+            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(4)),
             other => panic!("expected Call, got {other:?}"),
         }
     }
@@ -1258,6 +1321,46 @@ mod tests {
             "fn is_some(x: i64) -> bool { true }\nfn main() -> i64 { 0 }",
         );
         assert!(matches!(err, ResolveError::RedefinedFunction { ref name, .. } if name == "is_some"));
+    }
+
+    // ----- C1.6: array literal + indexing + len builtin -----
+
+    #[test]
+    fn array_literal_resolves() {
+        let p = resolve_ok("fn main() -> i64 { let xs = [1, 2, 3]; 0 }");
+        match &p.main().body.stmts[0].kind {
+            ResolvedStmtKind::Let { value, .. } => match &value.kind {
+                ResolvedExprKind::ArrayLit(elems) => assert_eq!(elems.len(), 3),
+                other => panic!("expected ArrayLit, got {other:?}"),
+            },
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn array_index_resolves() {
+        let p = resolve_ok("fn main() -> i64 { let xs = [42]; xs[0] }");
+        match &p.main().body.tail.kind {
+            ResolvedExprKind::Index { .. } => {}
+            other => panic!("expected Index, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn len_builtin_pre_registered() {
+        let p = resolve_ok("fn main() -> i64 { 0 }");
+        // FnId(3) is len at C1.6.
+        assert_eq!(p.fn_signatures[3].name, "len");
+        assert_eq!(p.fn_signatures[3].arity, 1);
+        assert!(p.fn_signatures[3].is_runtime);
+    }
+
+    #[test]
+    fn user_redefining_len_errors() {
+        let err = resolve_err(
+            "fn len(x: i64) -> i64 { x }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, ResolveError::RedefinedFunction { ref name, .. } if name == "len"));
     }
 
     #[test]

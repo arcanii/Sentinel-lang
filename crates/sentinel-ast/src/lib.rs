@@ -139,6 +139,10 @@ impl UnaryOp {
 /// C1.5 adds [`ExprKind::NullLit`] — the bare `null` keyword. Its
 /// type is `?T` for some T, resolved bidirectionally at type-check
 /// time per ADR 0014 D2.
+///
+/// C1.6 adds [`ExprKind::ArrayLit`] (`[e1, e2, …]` per ADR 0015 D2)
+/// and [`ExprKind::Index`] (postfix `a[i]` per D3; binds as part of
+/// the postfix chain alongside `.field`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExprKind {
     IntLit(i64),
@@ -181,6 +185,17 @@ pub enum ExprKind {
         target: Box<Expr>,
         field: String,
         field_span: Span,
+    },
+    /// Array literal `[e1, e2, …]` per ADR 0015 D2. Trailing comma
+    /// allowed. All elements must type to the same T; the result
+    /// is `[T]`.
+    ArrayLit(Vec<Expr>),
+    /// Postfix indexing `target[index]` per ADR 0015 D3. The target
+    /// must type to `[T]` and the index to `i64`; result is `T`.
+    /// Bounds-checked at runtime per D10.
+    Index {
+        target: Box<Expr>,
+        index: Box<Expr>,
     },
 }
 
@@ -309,6 +324,11 @@ pub enum TypeExprKind {
     /// TypeExpr is the base type. Nested nullables (`??T`) are
     /// rejected at parse time per ADR 0014 D6.
     Nullable(Box<TypeExpr>),
+    /// `[T]` array type per ADR 0015 D1. The inner TypeExpr is the
+    /// element type. Nested arrays (`[[T]]`) are rejected at the
+    /// type-resolution stage per D6 (the parser accepts them; the
+    /// type checker rejects).
+    Array(Box<TypeExpr>),
 }
 
 /// A brace-wrapped block expression `{ stmt* tail_expr }`. The
@@ -369,6 +389,16 @@ impl fmt::Display for ExprKind {
             ExprKind::FieldAccess { target, field, .. } => {
                 write!(f, "(. {} {})", target.kind, field)
             }
+            ExprKind::ArrayLit(elems) => {
+                write!(f, "(array")?;
+                for e in elems {
+                    write!(f, " {}", e.kind)?;
+                }
+                write!(f, ")")
+            }
+            ExprKind::Index { target, index } => {
+                write!(f, "(index {} {})", target.kind, index.kind)
+            }
         }
     }
 }
@@ -406,6 +436,7 @@ impl fmt::Display for TypeExprKind {
         match self {
             TypeExprKind::Ident(name) => write!(f, "{name}"),
             TypeExprKind::Nullable(inner) => write!(f, "?{}", inner.kind),
+            TypeExprKind::Array(inner) => write!(f, "[{}]", inner.kind),
         }
     }
 }
@@ -949,6 +980,48 @@ mod tests {
             span: 0..4,
         };
         assert_eq!(ne.kind.to_string(), "?i64");
+    }
+
+    // ----- C1.6: array literal + indexing + array type -----
+
+    #[test]
+    fn display_array_literal() {
+        let e = Spanned {
+            kind: ExprKind::ArrayLit(vec![
+                lit(1, 1..2),
+                lit(2, 4..5),
+                lit(3, 7..8),
+            ]),
+            span: 0..9,
+        };
+        assert_eq!(e.to_string(), "(array 1 2 3)");
+    }
+
+    #[test]
+    fn display_array_literal_empty() {
+        let e = Spanned { kind: ExprKind::ArrayLit(vec![]), span: 0..2 };
+        assert_eq!(e.to_string(), "(array)");
+    }
+
+    #[test]
+    fn display_index() {
+        let target = Box::new(Spanned { kind: ExprKind::Var("a".to_string()), span: 0..1 });
+        let index = Box::new(lit(0, 2..3));
+        let e = Spanned {
+            kind: ExprKind::Index { target, index },
+            span: 0..4,
+        };
+        assert_eq!(e.to_string(), "(index a 0)");
+    }
+
+    #[test]
+    fn display_array_type() {
+        let inner = ty_i64(1..4);
+        let arr = Spanned {
+            kind: TypeExprKind::Array(Box::new(inner)),
+            span: 0..5,
+        };
+        assert_eq!(arr.kind.to_string(), "[i64]");
     }
 
     #[test]
