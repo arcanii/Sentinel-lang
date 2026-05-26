@@ -13,6 +13,10 @@
 //! `!`, `<=` before `<`, `>=` before `>`, listed below in
 //! longer-first order accordingly.
 //!
+//! C1.4 adds (per ADR 0013 D8): `struct` keyword and `.` token for
+//! postfix field access. No longest-match concerns at C1.4 — `.`
+//! has no `..` / `.=` / `...` neighbours until ranges arrive in C2+.
+//!
 //! Whitespace and `//` line comments are skipped. ADR 0009 D4 picks
 //! hand-written recursive descent for the parser; the lexer uses
 //! `logos` because the regex-DFA payoff is purely positive at this
@@ -40,6 +44,8 @@ pub enum TokenKind {
     True,
     #[token("false")]
     False,
+    #[token("struct")]
+    Struct,
 
     #[token("+")]
     Plus,
@@ -85,6 +91,8 @@ pub enum TokenKind {
     Semi,
     #[token(":")]
     Colon,
+    #[token(".")]
+    Dot,
     #[token("->")]
     Arrow,
 
@@ -166,7 +174,7 @@ mod tests {
     #[test]
     fn lex_all_punctuation() {
         assert_eq!(
-            kinds("( ) { } , ; : ->"),
+            kinds("( ) { } , ; : . ->"),
             vec![
                 TokenKind::LParen,
                 TokenKind::RParen,
@@ -175,6 +183,7 @@ mod tests {
                 TokenKind::Comma,
                 TokenKind::Semi,
                 TokenKind::Colon,
+                TokenKind::Dot,
                 TokenKind::Arrow,
             ]
         );
@@ -192,7 +201,7 @@ mod tests {
     #[test]
     fn lex_all_keywords() {
         assert_eq!(
-            kinds("let fn if else true false"),
+            kinds("let fn if else true false struct"),
             vec![
                 TokenKind::Let,
                 TokenKind::Fn,
@@ -200,6 +209,50 @@ mod tests {
                 TokenKind::Else,
                 TokenKind::True,
                 TokenKind::False,
+                TokenKind::Struct,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_struct_keyword_distinct_from_ident_prefix() {
+        // `structure`, `structured` must NOT lex as Struct + Ident.
+        assert_eq!(
+            kinds("structure structured"),
+            vec![TokenKind::Ident, TokenKind::Ident]
+        );
+    }
+
+    #[test]
+    fn lex_dot_token() {
+        assert_eq!(kinds("."), vec![TokenKind::Dot]);
+    }
+
+    #[test]
+    fn lex_field_access_shape() {
+        // The shape the parser will see for `p.x`.
+        assert_eq!(
+            kinds("p.x"),
+            vec![TokenKind::Ident, TokenKind::Dot, TokenKind::Ident]
+        );
+    }
+
+    #[test]
+    fn lex_struct_literal_shape() {
+        // `Foo { x: 1, y: 2 }`
+        assert_eq!(
+            kinds("Foo { x: 1, y: 2 }"),
+            vec![
+                TokenKind::Ident,
+                TokenKind::LBrace,
+                TokenKind::Ident,
+                TokenKind::Colon,
+                TokenKind::IntLit,
+                TokenKind::Comma,
+                TokenKind::Ident,
+                TokenKind::Colon,
+                TokenKind::IntLit,
+                TokenKind::RBrace,
             ]
         );
     }
