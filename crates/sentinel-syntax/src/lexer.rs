@@ -48,6 +48,8 @@ pub enum TokenKind {
     Comma,
     #[token(";")]
     Semi,
+    #[token(":")]
+    Colon,
     #[token("->")]
     Arrow,
 
@@ -129,7 +131,7 @@ mod tests {
     #[test]
     fn lex_all_punctuation() {
         assert_eq!(
-            kinds("( ) { } , ; ->"),
+            kinds("( ) { } , ; : ->"),
             vec![
                 TokenKind::LParen,
                 TokenKind::RParen,
@@ -137,8 +139,18 @@ mod tests {
                 TokenKind::RBrace,
                 TokenKind::Comma,
                 TokenKind::Semi,
+                TokenKind::Colon,
                 TokenKind::Arrow,
             ]
+        );
+    }
+
+    #[test]
+    fn lex_colon_in_annotation_position() {
+        // Annotation grammar (C1.2 per ADR 0012 D1): `Ident ':' type`.
+        assert_eq!(
+            kinds("x: i64"),
+            vec![TokenKind::Ident, TokenKind::Colon, TokenKind::Ident]
         );
     }
 
