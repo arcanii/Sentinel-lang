@@ -54,6 +54,7 @@ C1.3. See STATE.md Section C.
 
 **Phase C1.0 — Salsa retrofit — complete.**
 **Phase C1.1 — sentinel-resolve crate lift — complete.**
+**Phase C1.2 — annotation grammar + sentinel-types::check() — complete.**
 Phase C1 (type system, regions, effects per HANDOVER §6.2) is in
 flight per ADR 0011 (PROPOSED, 8 sub-phases, honest 5-6 month
 estimate vs HANDOVER's 3-month budget). The C1.0 + C1.1 sub-phases
@@ -85,26 +86,46 @@ have all landed:
     variant + 4 salsa query smoke).
   - **C1.1.2** (9374edf): codegen consumes &ResolvedProgram;
     driver pipeline becomes parse_query → resolve_query → codegen.
-    Codegen loses ~200 lines (name resolution is gone); the 6
-    CodegenError name-resolution variants gone (covered by
-    ResolveError now); codegen tests shed 8 reject-cases (moved to
-    resolve) and add 3 positive cases. The driver's
-    `resolve_query::accumulated::<Diagnostic>` picks up parse-stage
-    diagnostics transitively — the C1.0b retrofit cashing in for
-    the multi-stage front-end.
+    Codegen loses ~200 lines (name resolution is gone).
+  - **ADR 0012** (6ab3661, PROPOSED): concrete C1 surface syntax
+    — annotation grammar (D1-D4 for C1.2), bool/comparison/logical
+    operators (D5-D8 for C1.3), lexer additions (D9), hard-break
+    fixture rewrite plan (D10).
+  - **C1.2.1** (af16655): lexer `:` token landed per ADR 0012 D9.
+  - **C1.2.2** (90965a5): AST gains `TypeExpr` (Spanned<Ident at
+    C1.2>), `FnDef.return_type`, `Param.ty`, `StmtKind::Let.ty_annot`
+    (Option); parser wires `fn name(p: T) -> T` and optional
+    `let x: T = ...`; resolve carries TypeExpr through;
+    22 pass-test fixtures + 1 UI fixture mechanically rewritten
+    via committed Python script per ADR 0012 D10.
+  - **C1.2.3** (ded07bc): sentinel-types crate populated.
+    `Type::I64` universe (C1.3 widens), parallel-tree TypedProgram
+    with `ty: Type` on every TypedExpr, 4 TypeError variants
+    (UnknownType active at C1.2; Mismatch / ReturnTypeMismatch /
+    CallArgMismatch dormant until C1.3 multi-type expressions),
+    pure `check()` + `#[salsa::tracked]` `check_query`.
+  - **C1.2.4** (c9a21ff): codegen consumes &TypedProgram; driver
+    pipeline becomes parse_query → resolve_query → check_query
+    → codegen. `check_query::accumulated::<Diagnostic>` picks up
+    lex / parse / resolve / types diagnostics transitively — full
+    four-stage front-end is now query-shaped.
 
-**C1 next: ADR 0012 (concrete C1 surface) → C1.2** — annotation
-grammar, then sentinel-types::check() lands. See §0.2 below for
-the resume plan.
+**C1 next: C1.3** — `bool`, comparison operators (== != < <= > >=),
+logical operators (&& || !), retire ADR 0010 D9's C-style truthy
+per ADR 0012 D5-D8. The C1.2 type-checker has Mismatch /
+ReturnTypeMismatch / CallArgMismatch ready for activation; the
+lexer / parser / type-checker / codegen all need bool-aware paths.
+See §0.2 below for the resume plan.
 
-**Workspace test count**: 468 active across all crates (+15 over
-C1.0c: +20 sentinel-resolve, -5 sentinel-codegen). All four check-
-suite checks green (cargo build --workspace, cargo clippy
---workspace --all-targets -D warnings, cargo test --workspace,
-cargo test --workspace --doc). C0 go/no-go program at
-`tests/pass/c05_go_no_go.sentinel` still runs end-to-end: stdout
-"10", exit 0. See STATE.md "Conventions" for the per-crate
-breakdown.
+**Workspace test count**: 492 active across all crates (+24 over
+C1.1: +9 ast/syntax for the annotation grammar, +15 sentinel-types
+for the type checker). All four check-suite checks green (cargo
+build --workspace, cargo clippy --workspace --all-targets -D
+warnings, cargo test --workspace, cargo test --workspace --doc).
+C0 go/no-go program at `tests/pass/c05_go_no_go.sentinel` (now
+annotated per ADR 0012 D10) still runs end-to-end through the
+parse → resolve → check → codegen pipeline: stdout "10", exit 0.
+See STATE.md "Conventions" for the per-crate breakdown.
 
 **ADR status**:
 
@@ -123,21 +144,26 @@ breakdown.
   - 0011 phase-c1-kickoff-and-type-system-plan   PROPOSED — D1
                                                  (Salsa, C1.0a-c) +
                                                  D4 (sentinel-resolve
-                                                 lift, C1.1.1-2)
+                                                 lift, C1.1.1-2) +
+                                                 D5 (sentinel-types
+                                                 check(), C1.2.1-4)
                                                  fully exercised;
                                                  ADR remains PROPOSED
-                                                 because D2/D3/D5-D12
-                                                 cover the rest of C1
-                                                 (type system, structs,
-                                                 nullability, arrays,
-                                                 generics)
-  - 0012 concrete-c1-surface-syntax              PROPOSED — annotation
-                                                 grammar (C1.2) +
-                                                 bool/comparisons/
-                                                 logicals (C1.3);
-                                                 ACCEPTED when C1.3
-                                                 lands the
-                                                 D5-D8 decisions
+                                                 because D2/D3 (multi-
+                                                 primitive types), D6
+                                                 (full sub-phase split),
+                                                 D8/D10 (further hard
+                                                 breaks) cover the rest
+                                                 of C1
+  - 0012 concrete-c1-surface-syntax              PROPOSED — C1.2 half
+                                                 (D1-D4) exercised at
+                                                 C1.2.1-4; D9 `:` token
+                                                 landed; D10 fn-def
+                                                 fixtures rewritten;
+                                                 C1.3 half (D5-D8 +
+                                                 D9 remaining tokens +
+                                                 D10 if-conditions)
+                                                 still PENDING
 
 ### 0.1 Working norms (carry forward into Phase C1)
 
@@ -225,121 +251,117 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C1.2 — sentinel-types::check)
+### 0.2 Next session opening (C1.3 — bool, comparisons, logicals)
 
-ADR 0012 (concrete C1 surface syntax) is now PROPOSED. It pins
-down annotation grammar, primitive type names, bool literals,
-comparison operators, and logical operators. C1.2 implements the
-annotation half (D1-D4); C1.3 implements the bool/comparison/
-logical half (D5-D8). Both ADR halves are revisited at the
-respective sub-phase landings to flip to ACCEPTED status notes.
+Resume at **C1.3** per ADR 0012 D5-D8 + ADR 0011 D10. The C1.2
+type-checker landed Mismatch / ReturnTypeMismatch /
+CallArgMismatch variants that are dormant — they activate when
+the type universe widens beyond `I64`. C1.3 wakes them up and
+introduces the rest of the C1 primitive surface.
 
-Resume at **C1.2** — `sentinel-types::check()` real, landing the
-annotation grammar from ADR 0012 D1-D4. Per ADR 0011 D5 + D6,
-the work is ~3-4 sessions split into bounded sub-steps:
+Sub-steps to attack in order:
 
-1. **Lexer extension**: add the `:` token to sentinel-syntax's
-   logos enum. Single token; 5 LOC + a few tests. Make this its
-   own commit so the parser/types changes are visible against a
-   stable lexer.
+1. **Lexer extension**: add the 11 remaining ADR 0012 D9 tokens
+   in one feat commit. Two keywords (`true`, `false`); six
+   comparison ops (`== != < <= > >=`); three logical ops (`&& ||
+   !`). logos longest-match: list `!=` before `!`, `<=` before
+   `<`, `>=` before `>`. Update `lex_all_punctuation` and add
+   per-token tests. ~5-10 LOC + ~10 tests.
 
-2. **Parser extension**: extend `parse_fn_def` to accept
-   `Ident ':' type` parameters and a `-> type` return clause;
-   extend `parse_let_stmt` to accept an optional `':' type`
-   before the `=`. `type` parses as a single Ident at C1.2
-   (per ADR 0012 D3 + D4). Add ParseError variants if needed
-   for missing annotations. The `Param` AST type grows a
-   `Spanned<TypeExpr>` field; `FnDef` grows an `Option<Spanned
-   <TypeExpr>>` return type; `StmtKind::Let` grows an
-   `Option<Spanned<TypeExpr>>` annotation. Hash derives propagate
-   to TypeExpr.
+2. **AST + parser for comparisons and logicals**: extend
+   `ExprKind` with new variants (or extend `BinOp` with the six
+   comparison ops and add a `LogicOp` enum for `&& ||`; `!` is
+   a new `UnaryOp::Not` variant). Extend the precedence ladder
+   per ADR 0012 D7: `or > and > cmp > add > mul > unary`. Cmp
+   is non-associative (D6) so write the parser to reject
+   `1 < 2 < 3` at parse time rather than typecheck. New tests:
+   parser tests for each new operator + precedence + non-assoc
+   rejection. ~30-40 LOC + ~20 tests.
 
-3. **Populate sentinel-types**: currently a 20-line stub. Add deps
-   on sentinel-ast, sentinel-base, sentinel-resolve, miette,
-   salsa, thiserror, tracing. Define:
-   - `Type` enum (initially just `I64` per ADR 0012 D4; C1.3 adds
-     `I32`, `Bool`)
-   - `TypedProgram` / `TypedFnDef` / `TypedParam` / `TypedBlock`
-     / `TypedStmt(Kind)` / `TypedExpr(Kind)` — parallel tree
-     mirroring ResolvedProgram but with `ty: Type` on every
-     expression node.
-   - `TypeError` enum with variants: `Mismatch { expected, got,
-     span }`, `UnknownType { name, span }`, plus any others
-     needed.
-   - `check(program: &ResolvedProgram) -> Result<TypedProgram,
-     TypeError>` pure-function entry point.
-   - `check_query(db, file)` `#[salsa::tracked]` chaining on
-     resolve_query.
+3. **Bool literals**: add `BoolLit(bool)` to `ExprKind` (and
+   `ResolvedExprKind` and `TypedExprKind`). Parser recognizes
+   `true` / `false` as atoms. Codegen emits `i1` constants —
+   though at C1.3 bool values are eventually widened to i64 for
+   uniform calling conventions (TBD; might keep bool as native
+   i1 throughout and only widen at the C ABI boundary if needed).
 
-4. **Type checker implementation**: at C1.2 the universe is just
-   `I64`, so the checker mostly validates "every annotation says
-   `i64`, every expression types to i64." Per ADR 0011 D2,
-   inference inside fn bodies handles `let x = expr;` by reading
-   the expression's type. Return-type annotations are checked
-   against the body's final expression. Call argument types are
-   checked against the callee's declared parameter types.
+4. **Type universe widening**: `Type` enum gains `I32` and `Bool`
+   variants. `resolve_type_expr` recognises `"i32"` and `"bool"`.
+   Operator-typing rules:
+   - Arithmetic `+ - * /`: requires both operands of same integer
+     type (I32 or I64); result is same type.
+   - Comparisons `== != < <= > >=`: both operands same type;
+     result is Bool. (No comparing i64 to i32 — explicit cast
+     would be required, but cast syntax doesn't exist yet, so
+     practically same-width-only.)
+   - Logicals `&& || !`: operands must be Bool; result is Bool.
+   - `if cond`: condition must be Bool — retires ADR 0010 D9's
+     C-style truthy. The 7 if-using fixtures get their conditions
+     rewritten per ADR 0012 D10.
 
-5. **Codegen adapts to TypedProgram**: same pattern as C1.1.2.
-   compile_to_object takes &TypedProgram instead of
-   &ResolvedProgram. The actual LLVM lowering doesn't change much
-   yet (still i64 everywhere); the change is in the type of the
-   input. Codegen tests get a thin parse → resolve → check chain.
+5. **Codegen for bool / i32 / comparisons / logicals**: the LLVM
+   lowering becomes type-driven. Read `expr.ty` to pick `i64_type`
+   vs `i32_type` vs `bool_type` (i1). Comparison ops emit
+   `build_int_compare` with the appropriate predicate. Logical
+   `&&` / `||` are short-circuit so they need basic-block
+   control flow similar to `if`/`else` — not a single SSA
+   compare. Unary `!` is `build_int_compare(EQ, x, false)`.
 
-6. **Driver wires check_query**: pipeline becomes
-   parse_query → resolve_query → check_query → codegen.
-   Diagnostics flow transitively.
+6. **`fn main() -> i64` invariant stays**: per ADR 0012 D11,
+   main's return type is the codegen-time i32 truncation target.
+   Codegen continues to truncate body_val to i32 only for `main`.
 
-7. **Hard break — fixture annotation rewrite**: per ADR 0012 D10,
-   all 22 pass-test fixtures get mechanical annotation rewrites:
-   `fn main() { ... }` → `fn main() -> i64 { ... }`,
-   `fn double(x) { x * 2 }` → `fn double(x: i64) -> i64 { x * 2 }`,
-   etc. The parse_unbalanced_paren UI fixture gets its return
-   type annotation too. The lex_invalid_char fixture stays
-   as-is (no fn defs to annotate).
+7. **Hard break — if-condition rewrite**: per ADR 0012 D10, the
+   7 if-using fixtures get `if x { ... }` → `if x != 0 { ... }`
+   (or equivalent boolean expression). The c05_go_no_go program
+   needs `pick(cond: bool, ...)` and the caller needs to pass a
+   bool — likely `pick(is_positive(x), ...)` per the ADR 0012
+   appendix's C1.3 phase-go program shape.
 
-8. **Commit cadence**: lexer change (small feat), parser+ast
-   changes (medium feat), sentinel-types crate (large feat), then
-   codegen+driver wire-in (large feat), then fixture rewrite
-   (mechanical), then docs commit. ~5-6 commits estimated across
-   ~3-4 sessions.
+8. **Commit cadence**: lexer extension (small), parser+ast for
+   operators (medium), bool literals (small), Type widening +
+   operator-typing rules in sentinel-types (medium-large),
+   codegen type-awareness (medium-large), fixture rewrite
+   (mechanical). ~5-6 commits across ~2 sessions.
 
-**Estimated effort for C1.2**: 3-4 sessions.
+**Estimated effort for C1.3**: 2 sessions (per ADR 0011 D6).
+Less than C1.2 because the infrastructure is in place; C1.3 is
+substantively about widening Type and operator-typing rules.
 
-After C1.2: **C1.3** (bool, comparison ops, logical ops, retires
-C-style truthy) per ADR 0011 D10 + ADR 0012 D5-D8. Then C1.4
-(structs), C1.5 (`?T`), C1.6 (arrays), C1.7 (generics).
+After C1.3: **C1.4** (structs + field access) per ADR 0011 D6.
+Then C1.5 (`?T`), C1.6 (arrays), C1.7 (generics).
 
 ### 0.3 Quick-status block for session start
 
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: <docs-hash> (docs: ADR 0012 PROPOSED).
+    Local HEAD: <docs-hash> (docs: C1.2 landed; HANDOVER §0 + STATE.md + ADR refresh).
     [N] commits ahead of origin/main pending GitHub Desktop push.
     Working tree clean.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0 (bootstrap
     compiler MVP) + Phase C1.0 (salsa retrofit) + Phase C1.1
-    (sentinel-resolve crate lift) complete. 468 active workspace
-    tests. C0 go/no-go program runs at
-    tests/pass/c05_go_no_go.sentinel: stdout "10\n", exit 0. ADRs
-    0001-0010 ACCEPTED; ADR 0011 PROPOSED with D1 (Salsa) + D4
-    (resolve lift) fully exercised; ADR 0012 PROPOSED (concrete
-    C1 surface syntax — annotation grammar D1-D4 for C1.2, bool /
-    comparisons / logicals D5-D8 for C1.3).
+    (sentinel-resolve crate lift) + Phase C1.2 (annotation grammar
+    + sentinel-types::check) complete. 492 active workspace tests.
+    C0 go/no-go program (now annotated `fn f(x: i64) -> i64 {...}`
+    per ADR 0012 D10) runs at tests/pass/c05_go_no_go.sentinel:
+    stdout "10\n", exit 0. Pipeline is now parse_query →
+    resolve_query → check_query → codegen with diagnostics
+    transitively accumulated. ADRs 0001-0010 ACCEPTED;
+    ADR 0011 PROPOSED with D1 + D4 + D5 fully exercised;
+    ADR 0012 PROPOSED with D1-D4 + half-D9 + half-D10 exercised
+    (C1.3 half pending).
 
     Phase C1 in flight per ADR 0011 (PROPOSED, 8 sub-phases).
-    C1.0a-c + C1.1.1-2 landed: salsa retrofit for the front-end
-    (lex_query, parse_query, resolve_query); driver pipeline is
-    parse → resolve → codegen with diagnostics transitively
-    accumulated; codegen consumes a typed-by-ID ResolvedProgram
-    and has no string-keyed lookups. Next: start C1.2 (sentinel-
-    types::check() real) per ADR 0012 D1-D4 + ADR 0011 D5. ~3-4
-    sessions estimated; see HANDOVER §0.2 for the 8-step plan.
+    C1.0a-c + C1.1.1-2 + ADR 0012 + C1.2.1-4 landed. Next: start
+    C1.3 (bool, i32, comparison + logical operators; retire ADR
+    0010 D9 C-style truthy) per ADR 0012 D5-D8 + ADR 0011 D10.
+    ~2 sessions estimated; see HANDOVER §0.2 for the 8-step plan.
 
     Read docs/HANDOVER.md §0 in full, then docs/STATE.md, then
     ADRs 0011 + 0012 — that's the canonical context. Resume at
-    C1.2 per HANDOVER §0.2.
+    C1.3 per HANDOVER §0.2.
 
 ---
 

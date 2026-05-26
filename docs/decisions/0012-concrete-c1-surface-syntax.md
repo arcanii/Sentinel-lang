@@ -1,8 +1,15 @@
 # ADR 0012: Concrete C1 surface syntax — annotations, primitive types, comparisons, logicals
 
-Status: PROPOSED (becomes ACCEPTED when C1.2 and C1.3 land the
-syntax this ADR pins down)
+Status: PROPOSED — C1.2 half (D1-D4) fully exercised at
+C1.2.1-4 (commits af16655 / 90965a5 / ded07bc / c9a21ff);
+D9 partially exercised (`:` token landed; the remaining 11
+C1.3 tokens stay deferred); D10 fully exercised for fn-def
+fixtures (the C1.3 if-condition rewrite half lands when bool
+arrives). C1.3 half (D5-D8) still PENDING; ACCEPTED flip when
+C1.3 lands.
 Date: 2026-05-26
+Last touched: 2026-05-26 (C1.2 landed; D1-D4 + D9 partial + D10
+partial status updated)
 Related: 0010 (concrete C0 surface; D5 reserved `->` for this ADR's
 annotation grammar, D9's C-style truthy retires here, D8's
 comparison-operator gap closes here), 0011 (Phase C1 kickoff; D2

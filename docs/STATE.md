@@ -12,18 +12,37 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **ADR 0012 PROPOSED** — concrete C1 surface syntax
-ADR landed as a docs-only commit pinning the annotation grammar
-(D1-D4, for C1.2) and the bool/comparison/logical operator set
-(D5-D8, for C1.3) before either sub-phase begins. Eleven
-D-numbered decisions: mandatory return-type annotations on `fn`,
-optional `let` annotations, primitives as identifiers (not lexer
-keywords), `i64` is the C1.2 universe with `i32` + `bool`
-arriving at C1.3, lexer additions (`:`, `true`, `false`, six
-comparison ops, `&& || !`), non-associative comparisons matching
-Rust, retirement of ADR 0010 D9 C-style truthy at C1.3, hard
-break for fixture annotation rewrite per ADR 0011 D8. Workspace
-state unchanged (468 tests). Pre-ADR-0012 context: **C1.1 landed
+Last updated: **C1.2 landed** — annotation grammar + sentinel-types
+type checker exercised end-to-end across four feat commits
+(af16655 lexer `:` token; 90965a5 AST/parser/resolve annotation
+grammar + 22 pass-test fixture rewrite; ded07bc sentinel-types
+scaffold with Type/TypedProgram/check/check_query; c9a21ff
+codegen+driver consume TypedProgram). The bootstrap pipeline is
+now **parse_query → resolve_query → check_query → codegen** with
+diagnostics transitively accumulated across all four stages. At
+C1.2 the type universe is `I64` only per ADR 0012 D4 — every
+annotation must say `i64` (anything else surfaces as
+`TypeError::UnknownType`); the Mismatch / ReturnTypeMismatch /
+CallArgMismatch variants exist but are dormant at C1.2 since
+everything types to I64. They activate at C1.3 when bool + i32
+arrive. ADR 0011 D5 (sentinel-types::check() real) and ADR 0012
+D1-D4 (annotation grammar) are now exercised. All 22 C0 pass-test
+fixtures still run end-to-end through the new typed pipeline; the
+go/no-go program at `tests/pass/c05_go_no_go.sentinel` (now
+annotated per ADR 0012 D10) still produces stdout `10\n`, exit 0.
+Workspace test delta: +24 (492 total: +15 sentinel-types, +9 in
+ast/syntax). Pre-C1.2 context: **ADR 0012 PROPOSED** — concrete
+C1 surface syntax ADR landed as a docs-only commit pinning the
+annotation grammar (D1-D4, for C1.2) and the bool/comparison/
+logical operator set (D5-D8, for C1.3) before either sub-phase
+begins. Eleven D-numbered decisions: mandatory return-type
+annotations on `fn`, optional `let` annotations, primitives as
+identifiers (not lexer keywords), `i64` is the C1.2 universe with
+`i32` + `bool` arriving at C1.3, lexer additions (`:`, `true`,
+`false`, six comparison ops, `&& || !`), non-associative
+comparisons matching Rust, retirement of ADR 0010 D9 C-style
+truthy at C1.3, hard break for fixture annotation rewrite per
+ADR 0011 D8. Pre-ADR-0012 context: **C1.1 landed
 (C1.1.1 at 438dd16, C1.1.2 at 9374edf)** — name resolution lifts
 out of `sentinel-codegen` into
 a populated `sentinel-resolve` crate per ADR 0011 D4. C1.1.1
@@ -1161,8 +1180,11 @@ scaffold stubs.
 | C1.0c | Codegen-salsa decision: defer until typed HIR (C1.2+); ADR 0011 D1 amended | Done | 8b58644 |
 | C1.1.1 | Scaffold sentinel-resolve: VarId/FnId, parallel-tree resolved AST, resolve() + salsa query | Done | 438dd16 |
 | C1.1.2 | Codegen consumes ResolvedProgram; driver chains resolve_query | Done | 9374edf |
-| ADR 12 | Concrete C1 surface syntax (annotation grammar + bool/cmp/logical ops) | Done | (pending) |
-| C1.2  | Lexer `:` + annotation parsing + sentinel-types::check() real | Pending |         |
+| ADR 12 | Concrete C1 surface syntax (annotation grammar + bool/cmp/logical ops) | Done | 6ab3661 |
+| C1.2.1 | Lexer `:` token                                                | Done | af16655 |
+| C1.2.2 | AST/parser annotation grammar + 22 fixture rewrite             | Done | 90965a5 |
+| C1.2.3 | sentinel-types scaffold (Type, TypedProgram, check, check_query) | Done | ded07bc |
+| C1.2.4 | Codegen consumes TypedProgram; driver chains check_query       | Done | c9a21ff |
 | C1.3  | bool, i32, comparison ops, logical ops; retire C-style truthy  | Pending |         |
 | C1.4+ | Structs, nullability, arrays, generics                         | Planned |         |
 
@@ -1444,17 +1466,65 @@ exit 0. See C.3 design decisions 33-36.
                           salsa query tests including parse-error
                           propagation and cache validation).
 
-    crates/sentinel-codegen/                (C1.1.2 rewrite — consumes ResolvedProgram)
+    crates/sentinel-types/                (C1.2.3: populated)
+      Cargo.toml          deps: sentinel-ast (path), sentinel-base
+                          (path), sentinel-resolve (path),
+                          sentinel-syntax (path), miette, salsa,
+                          thiserror, tracing
+      src/
+        lib.rs            Type universe: `Type::I64` only at C1.2 per
+                          ADR 0012 D4; C1.3 adds I32 + Bool. Display
+                          renders lowercase identifier (`i64`).
+                          Parallel-tree typed AST mirrors
+                          ResolvedProgram with `ty: Type` fields on
+                          expressions: TypedProgram { fns, fn_signatures,
+                          span }; TypedFnSignature { id, name,
+                          name_span, param_types: Vec<Type>, return_type,
+                          is_main, is_runtime }; TypedFnDef, TypedParam
+                          (with `ty: Type`), TypedBlock (with
+                          `ty: Type` == tail.ty), TypedStmt(Kind),
+                          TypedExpr { kind, span, ty }, TypedExprKind
+                          (variants identical to ResolvedExprKind).
+                          TypeError with 4 variants: UnknownType
+                          (annotation says something other than known
+                          type name), Mismatch (cross-expression type
+                          clash), ReturnTypeMismatch (fn body type ≠
+                          declared return), CallArgMismatch (call arg
+                          type ≠ callee param type). At C1.2 only
+                          UnknownType is reachable since everything
+                          types to I64; the others activate at C1.3.
+                          check(program: &ResolvedProgram) ->
+                          Result<TypedProgram, TypeError> pure-function
+                          entry point: pass 1 builds typed_signatures
+                          by resolving every fn's TypeExpr annotations
+                          (print pre-registered); pass 2 walks each fn
+                          body with a per-fn VarTypeEnv: HashMap<VarId,
+                          Type> seeded from params. check_query(db,
+                          file) -> &Option<TypedProgram> is the
+                          #[salsa::tracked] wrapper that chains on
+                          sentinel_resolve::resolve_query; errors flow
+                          through the Diagnostic accumulator with
+                          stage="types"; upstream stage diagnostics
+                          propagate transitively. 15 unit tests:
+                          positive paths (minimal main, annotated/
+                          unannotated let, params+use, if/else
+                          branches, print call, full go/no-go), 3
+                          UnknownType paths (param, return, let
+                          annotation), 4 salsa query tests including
+                          resolve-error propagation and cache
+                          validation.
+
+    crates/sentinel-codegen/                (C1.2.4 rewrite — consumes TypedProgram)
       Cargo.toml          deps: sentinel-ast (path), sentinel-resolve
-                          (path, C1.1.2), inkwell (llvm18-0 feature,
-                          workspace-pinned), miette, thiserror,
-                          tracing
+                          (path), sentinel-types (path, C1.2.4),
+                          inkwell (llvm18-0 feature, workspace-pinned),
+                          miette, thiserror, tracing
                           dev-deps: sentinel-syntax (for src-string
-                          test driving via parse + resolve)
+                          test driving via parse + resolve + check)
                           lints.rust: unsafe_code = "allow" (inkwell
                           uses unsafe internally for FFI)
       src/
-        lib.rs            compile_to_object(program: &ResolvedProgram,
+        lib.rs            compile_to_object(program: &TypedProgram,
                           output_path) builds an LLVM module
                           containing all fns declared by the program.
                           **Two-pass**: pass 1 declares every fn by
@@ -1464,24 +1534,23 @@ exit 0. See C.3 design decisions 33-36.
                           source name); pass 2 emits each user fn
                           body. `main` returns i32 (C ABI shape,
                           truncated from i64 body value) — gated on
-                          signature.is_main; other fns return i64.
-                          CodegenCtx<'ctx, 'a> threads &context +
-                          builder + i64_type + HashMap<FnId,
-                          FunctionValue> fns table + current_fn +
-                          HashMap<VarId, PointerValue> vars map.
-                          compile_fn resets vars + current_fn per fn,
-                          allocates+stores each param by VarId, then
-                          lowers the body. lower_call dispatches via
-                          FnId; lower_expr's Var arm reads vars by
-                          VarId. LLVM SSA debug names preserved via
-                          find_var_name_in_block / _in_expr that walks
-                          the current fn for the binding's source
-                          name — purely for IR readability.
-                          **CodegenError** keeps only LLVM-lowering
-                          errors: VerifyFailed, TargetInit,
-                          TargetMachine, WriteFailed, Builder. The
-                          6 name-resolution variants migrated to
-                          ResolveError at C1.1.2.
+                          signature.is_main via the TypedFnSignature;
+                          other fns return i64. CodegenCtx<'ctx, 'a>
+                          threads &context + builder + i64_type +
+                          HashMap<FnId, FunctionValue> fns table +
+                          current_fn + HashMap<VarId, PointerValue>
+                          vars map. C1.2.4 changes: input shape
+                          (Typed* instead of Resolved*) and how
+                          is_main is read (via program.signature(id)
+                          instead of fn_def.signature(program)).
+                          Otherwise the LLVM lowering is unchanged
+                          from C1.1.2 — at C1.2 every type is I64 so
+                          the Type field on TypedExpr is not yet
+                          driving instruction selection; that's
+                          C1.3's bool/i32 work. find_var_name walk
+                          ported to TypedBlock/TypedExpr. CodegenError
+                          unchanged (5 LLVM-lowering-only variants
+                          since C1.1.2).
 
     crates/sentinel-runtime/
       Cargo.toml          deps: tracing, thiserror
@@ -1497,10 +1566,11 @@ exit 0. See C.3 design decisions 33-36.
                           and returns 0 (the call expression's
                           value per ADR 0010 D11)
 
-    crates/sentinel-driver/                (C1.1.2 chains resolve_query)
+    crates/sentinel-driver/                (C1.2.4 chains check_query)
       Cargo.toml          deps: sentinel-base (path, C1.0b),
                           sentinel-codegen (path), sentinel-resolve
                           (path, C1.1.2), sentinel-syntax (path),
+                          sentinel-types (path, C1.2.4),
                           miette (with "fancy" feature), salsa
                           (C1.0b), thiserror, tracing
       src/
@@ -1512,14 +1582,15 @@ exit 0. See C.3 design decisions 33-36.
                           `salsa::Database` (no-op salsa_event) and
                           `SentinelDb`. `run_parse` calls
                           sentinel_syntax::parse_query and pretty-
-                          prints the AST. **C1.1.2**: `run_build`
-                          chains sentinel_resolve::resolve_query
-                          (which depends on parse_query in the
-                          salsa graph), collects diagnostics via
-                          resolve_query::accumulated::<Diagnostic>
-                          — picks up parse-stage diagnostics
-                          transitively — and feeds the resulting
-                          &ResolvedProgram to
+                          prints the AST. **C1.2.4**: `run_build`
+                          chains sentinel_types::check_query (which
+                          depends transitively on resolve_query and
+                          parse_query in the salsa graph), collects
+                          diagnostics via
+                          check_query::accumulated::<Diagnostic>
+                          — picks up parse + resolve + types-stage
+                          diagnostics in one collection — and feeds
+                          the resulting &TypedProgram to
                           sentinel_codegen::compile_to_object.
                           Diagnostics render through miette::MietteDiagnostic
                           (constructed at runtime from
@@ -1578,15 +1649,16 @@ exit 0. See C.3 design decisions 33-36.
                           so the linker can find brew-installed
                           zstd/libxml2 that LLVM 18 references
 
-Four scaffold-stub compiler crates remain at 20-line
+Three scaffold-stub compiler crates remain at 20-line
 `crate_name() + smoke` stubs per ADR 0009 D7. Updated population
-schedule (sentinel-resolve populated at C1.1):
+schedule (sentinel-resolve populated at C1.1, sentinel-types at
+C1.2):
 
-  - sentinel-types:    C1.2 (per ADR 0011 D5; arrives after
-                       ADR 0012 (concrete C1 surface, annotation
-                       grammar) lands)
-  - sentinel-hir:      C1/C2
-  - sentinel-mir:      C2
+  - sentinel-hir:      C1.3+ (typed HIR may replace TypedProgram
+                       once enough type-system features land to
+                       motivate a separate HIR layer; or HIR may
+                       remain folded into sentinel-types)
+  - sentinel-mir:      C2 (SSA-form IR for region/borrow checking)
   - sentinel-lsp:      C5
 
 ### C.3 Design Decisions (C0)
@@ -1913,6 +1985,68 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     compile_fn; the walk-on-each-load avoids the bookkeeping and
     is the simpler default until measurements demand otherwise.
 
+41. (C1.2.2, ADR 0012 D1-D4) Annotation grammar wires through the AST.
+    Three parallel additions to sentinel-ast: `Param.ty: TypeExpr`
+    (mandatory at C1.2 per ADR 0012 D1), `FnDef.return_type:
+    TypeExpr` (mandatory), `StmtKind::Let.ty_annot: Option<TypeExpr>`
+    (optional per ADR 0012 D2). `TypeExpr = Spanned<TypeExprKind>`
+    where `TypeExprKind::Ident(String)` is the only variant at
+    C1.2 — the enum is deliberately open-ended so C1.4's struct
+    names, C1.5's `?T`, C2's `&T`/`@region T`, and C3's `secret T`
+    all land as new variants without churning the existing
+    annotation sites. Display preserves source-readable form
+    (`(fn name (p: i64 q: i64) -> i64 body)`) so `snc parse` output
+    remains human-debuggable.
+
+42. (C1.2.2, ADR 0012 D10) Fixture rewrite is a Python script
+    (`/tmp/annotate_fixtures.py`) committed alongside the feat for
+    reproducibility. The regex `fn IDENT(PARAMS) {` captures
+    bare-name params and injects `: i64` plus appends `-> i64`
+    after `)`. All 22 .sentinel pass-test fixtures + the
+    parse_unbalanced_paren UI fixture were rewritten in one pass;
+    snapshots re-blessed. The script is "throwaway tooling"
+    (the rewrite happens once); checking it in alongside the
+    commit makes the rewrite reproducible if a future hard break
+    needs the same shape.
+
+43. (C1.2.3, ADR 0011 D5) sentinel-types uses a **parallel-tree**
+    representation matching sentinel-resolve's pattern from
+    C1.1.1. ResolvedExpr and TypedExpr have different shapes —
+    ResolvedExpr is `Spanned<ResolvedExprKind>`, TypedExpr is a
+    struct `{ kind, span, ty }`. The inline `ty: Type` field
+    avoids `Spanned<(TypedExprKind, Type)>` ergonomic awkwardness
+    and gives codegen one-hop access to the type during lowering.
+    Same for TypedBlock (carries `ty: Type` == tail.ty so codegen
+    can read the block's type without recursion). TypedStmt is a
+    struct `{ kind, span }` (statements have no value type at C1.2,
+    but the struct shape stays consistent with the rest of the
+    typed tree). The cost is keeping yet-another parallel tree in
+    sync; at C1.3 this is "the same maintenance cadence as
+    sentinel-resolve" which the codebase already absorbs.
+
+44. (C1.2.3) The `check()` pass at C1.2 is mostly mechanical
+    because the universe is just `I64`. Real cross-type validation
+    (Mismatch, ReturnTypeMismatch, CallArgMismatch) is implemented
+    but unreachable at C1.2 since every annotation must say `i64`
+    (anything else hits UnknownType first). C1.3 activates the
+    dormant variants when `bool` and comparison operators introduce
+    multi-type expressions. The implementation already has the
+    right shape (env: HashMap<VarId, Type>, signatures resolved
+    once into TypedFnSignature.param_types/return_type, recursive
+    walk threading the env); only the Type universe + a few
+    operator-typing rules need to expand at C1.3.
+
+45. (C1.2.4) Codegen sheds zero LOC and gains zero LOC of LLVM
+    logic at C1.2.4 — the lowering is identical to C1.1.2's
+    because every type is still I64. The change is **only the
+    input shape**: ResolvedExpr → TypedExpr, ResolvedBlock →
+    TypedBlock, etc. The `ty: Type` field on TypedExpr is
+    available to codegen but unused at C1.2; C1.3 will start
+    reading it (e.g., to emit `i1` for bool conditions and `i32`
+    for i32-typed values). This minimal-diff refactor keeps
+    C1.2.4 reviewable; the substantive type-aware codegen work
+    happens at C1.3.
+
 37. (C1.0c, ADR 0011 D1 amendment) Codegen stays outside the salsa
     query graph through Phase C1.0. ADR 0011's original D1 sketch
     had "… through codegen" in the query list, suggesting
@@ -1958,20 +2092,23 @@ All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
-  - sentinel-syntax:        92 tests (90 lib + 2 UI integration) + 0 doctests
-                            (lib = 83 lexer/parser + 7 query at C1.0b)
-  - sentinel-ast:           21 tests (1 smoke + 20 Display) + 0 doctests
+  - sentinel-syntax:        99 tests (97 lib + 2 UI integration) + 0 doctests
+                            (lib = 90 lexer/parser + 7 query at C1.0b)
+  - sentinel-ast:           23 tests (1 smoke + 22 Display) + 0 doctests
   - sentinel-codegen:       8 tests (1 smoke + 1 target init + 6 positive compile)
                             + 0 doctests — name-resolution rejection tests
                             migrated to sentinel-resolve at C1.1.2
   - sentinel-resolve:       21 tests (positive paths + 6 error variants
                             + 4 salsa query smoke incl. parse-stage propagation
                             + cache validation) + 0 doctests
+  - sentinel-types:         15 tests (positive paths + 3 UnknownType variants
+                            + 4 salsa query smoke incl. resolve-stage propagation
+                            + cache validation) + 0 doctests
   - sentinel-driver:        22 pass integration tests + 0 doctests
   - sentinel-runtime:       2 tests (smoke + sentinel_print_returns_zero) + 0 doctests
   - sentinel-base:          3 tests (salsa query runs/caches + source file accessors) + 0 doctests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
-                            (sentinel-types, -hir, -mir, -lsp)
+                            (sentinel-hir, -mir, -lsp)
 
 ### Script Convention
 

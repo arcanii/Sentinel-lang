@@ -1,14 +1,21 @@
 # ADR 0011: Phase C1 kickoff — type system, name resolution, Salsa retrofit
 
-Status: PROPOSED — D1 (Salsa) and D4 (sentinel-resolve crate
-lift) fully exercised at C1.0a-c and C1.1.1-2 respectively, with
-the intentional scope-cut that codegen stays out of the salsa
-query graph until C1.2+. The ADR remains PROPOSED overall because
-D2/D3/D5/D6/D7/D8/D9/D10/D11/D12 cover the rest of C1 (type
-system, structs, nullability, arrays, generics) which haven't
-landed yet.
+Status: PROPOSED — D1 (Salsa), D4 (sentinel-resolve crate lift),
+and D5 (sentinel-types::check() real) fully exercised at C1.0a-c,
+C1.1.1-2, and C1.2.1-4 respectively, with the intentional scope-cut
+that codegen stays out of the salsa query graph until C1.2+ (the
+typed-HIR rewrite per ADR 0012 lands codegen against TypedProgram,
+still as a non-tracked downstream stage). The ADR remains PROPOSED
+overall because D2 (explicit annotations at boundaries — partially
+exercised; full activation at C1.3), D3 (multi-primitive types —
+arrives at C1.3), D6 (sub-phase split — still in flight),
+D7/D8/D9/D10 (concrete C1 surface, fixture rewrite, etc. —
+exercised at C1.2 via ADR 0012), D11 (CodegenCtx layout shrink —
+done at C1.1.2), D12 (perf discipline — deferred per the ADR) all
+cover the rest of C1 (type system widening, structs, nullability,
+arrays, generics) which haven't landed yet.
 Date: 2026-05-25
-Last touched: 2026-05-25 (C1.1 landed; D4 status updated)
+Last touched: 2026-05-26 (C1.2 landed; D5 status updated)
 Related: 0001 (staged validation), 0009 (Phase C kickoff; D1 deferred
 Salsa to C1, D7 deferred sentinel-types and sentinel-resolve stubs
 to C1), 0010 (concrete C0 surface; D5 reserved `->` for C1
@@ -242,6 +249,20 @@ between resolve and codegen:
 
 C0's `CodegenError::ArityMismatch` and similar shift upstream;
 codegen at C1.2+ should be diagnostic-free if `check()` passed.
+
+**Status — ACCEPTED at C1.2** (C1.2.1 lexer `:` token at af16655;
+C1.2.2 AST/parser annotation grammar + 22 fixture rewrite at
+90965a5; C1.2.3 sentinel-types scaffold at ded07bc; C1.2.4
+codegen+driver consume TypedProgram at c9a21ff). The check()
+function takes &ResolvedProgram and returns a TypedProgram
+parallel tree with `Type` on every expression. At C1.2 the
+universe is just `I64` so only `TypeError::UnknownType` fires;
+`Mismatch`, `ReturnTypeMismatch`, and `CallArgMismatch` exist
+but are dormant until C1.3 introduces multi-type expressions.
+`ArityMismatch` (the old codegen variant from D5's "and similar")
+already moved to `ResolveError` at C1.1.1 since arity-checking
+is name-resolution territory; sentinel-types didn't need to
+duplicate it.
 
 ### D6. C1 sub-phase split — eight sub-phases.
 
