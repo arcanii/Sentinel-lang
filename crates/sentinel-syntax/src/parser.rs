@@ -48,7 +48,7 @@
 
 use sentinel_ast::{
     BinOp, Block, CmpOp, Expr, ExprKind, FieldInit, FnDef, LogicOp, Param, Program, Span, Spanned,
-    Stmt, StmtKind, StructDecl, StructField, TypeExpr, TypeExprKind, UnaryOp,
+    Stmt, StmtKind, StructDecl, StructField, TypeExpr, TypeExprKind, TypeParam, UnaryOp,
 };
 
 use crate::{lex, LexError, TokenKind};
@@ -111,6 +111,26 @@ pub enum ParseError {
     )]
     NestedNullable {
         #[label("second `?` here")]
+        span: miette::SourceSpan,
+    },
+
+    #[error("empty generic parameter list `<>` is not allowed")]
+    #[diagnostic(
+        code(sentinel::parse::empty_type_params),
+        help("either drop the `<>` for a non-generic definition or list at least one parameter, e.g. `<T>` per ADR 0016 D1")
+    )]
+    EmptyTypeParams {
+        #[label("expected at least one type parameter")]
+        span: miette::SourceSpan,
+    },
+
+    #[error("empty generic argument list `<>` is not allowed")]
+    #[diagnostic(
+        code(sentinel::parse::empty_type_args),
+        help("drop the `<>` for a non-generic type or list at least one argument per ADR 0016 D3")
+    )]
+    EmptyTypeArgs {
+        #[label("expected at least one type argument")]
         span: miette::SourceSpan,
     },
 }
@@ -282,6 +302,14 @@ impl<'a> Parser<'a> {
             }
         };
 
+        // Optional `<T1, T2, ...>` generic parameter list per ADR
+        // 0016 D2. Empty `<>` is rejected by the helper.
+        let type_params = if self.peek_kind() == Some(TokenKind::Lt) {
+            self.parse_type_params()?
+        } else {
+            Vec::new()
+        };
+
         match self.peek_kind() {
             Some(TokenKind::LBrace) => {
                 self.advance();
@@ -336,6 +364,7 @@ impl<'a> Parser<'a> {
         Ok(StructDecl {
             name,
             name_span,
+            type_params,
             fields,
             span: struct_start..rbrace_end,
         })
@@ -496,6 +525,14 @@ impl<'a> Parser<'a> {
             }
         };
 
+        // Optional `<T1, T2, ...>` generic parameter list per ADR
+        // 0016 D1. Empty `<>` is rejected by the helper.
+        let type_params = if self.peek_kind() == Some(TokenKind::Lt) {
+            self.parse_type_params()?
+        } else {
+            Vec::new()
+        };
+
         // `(`
         match self.peek_kind() {
             Some(TokenKind::LParen) => {
@@ -558,7 +595,133 @@ impl<'a> Parser<'a> {
         let body = self.parse_block()?;
         let end = body.span.end;
 
-        Ok(FnDef { name, name_span, params, return_type, body, span: fn_start..end })
+        Ok(FnDef {
+            name,
+            name_span,
+            type_params,
+            params,
+            return_type,
+            body,
+            span: fn_start..end,
+        })
+    }
+
+    /// Parse a `<T1, T2, ...>` type-parameter list per ADR 0016 D1
+    /// / D2. Called when the next token is known to be `<`. Returns
+    /// the parsed list, which is guaranteed non-empty (empty `<>`
+    /// surfaces as [`ParseError::EmptyTypeParams`]).
+    fn parse_type_params(&mut self) -> Result<Vec<TypeParam>, ParseError> {
+        let lt_start = self.advance().expect("`<` peeked").span.start;
+        let mut params: Vec<TypeParam> = Vec::new();
+        if self.peek_kind() == Some(TokenKind::Gt) {
+            // Empty `<>`.
+            let gt = self.peek().expect("peeked");
+            let span = lt_start..gt.span.end;
+            return Err(ParseError::EmptyTypeParams { span: to_source_span(&span) });
+        }
+        loop {
+            let (name, span) = match self.peek() {
+                Some(t) if t.kind == TokenKind::Ident => {
+                    let s = t.span.clone();
+                    let n = self.src[s.clone()].to_string();
+                    self.advance();
+                    (n, s)
+                }
+                Some(t) => {
+                    let kind = t.kind;
+                    let s = t.span.clone();
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{kind:?}"),
+                        expected: "type parameter name",
+                        span: to_source_span(&s),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "type parameter name",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            };
+            params.push(TypeParam { name, name_span: span });
+            match self.peek_kind() {
+                Some(TokenKind::Comma) => {
+                    self.advance();
+                    if self.peek_kind() == Some(TokenKind::Gt) {
+                        break; // trailing comma allowed
+                    }
+                }
+                Some(TokenKind::Gt) => break,
+                Some(other) => {
+                    let t = self.peek().expect("peeked");
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{other:?}"),
+                        expected: "`,` or `>` in type parameter list",
+                        span: to_source_span(&t.span),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "`,` or `>` in type parameter list",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            }
+        }
+        // Consume the closing `>`.
+        match self.peek_kind() {
+            Some(TokenKind::Gt) => {
+                self.advance();
+            }
+            _ => unreachable!("loop only breaks on Gt"),
+        }
+        Ok(params)
+    }
+
+    /// Parse a `<TypeArg1, TypeArg2, ...>` type-argument list per
+    /// ADR 0016 D3. Called when the next token is known to be `<`
+    /// in type-position. Returns the parsed list, guaranteed non-
+    /// empty (empty `<>` surfaces as [`ParseError::EmptyTypeArgs`]).
+    fn parse_type_args(&mut self) -> Result<(Vec<TypeExpr>, Span), ParseError> {
+        let lt_start = self.advance().expect("`<` peeked").span.start;
+        let mut args: Vec<TypeExpr> = Vec::new();
+        if self.peek_kind() == Some(TokenKind::Gt) {
+            let gt = self.peek().expect("peeked");
+            let span = lt_start..gt.span.end;
+            return Err(ParseError::EmptyTypeArgs { span: to_source_span(&span) });
+        }
+        loop {
+            let arg = self.parse_type()?;
+            args.push(arg);
+            match self.peek_kind() {
+                Some(TokenKind::Comma) => {
+                    self.advance();
+                    if self.peek_kind() == Some(TokenKind::Gt) {
+                        break;
+                    }
+                }
+                Some(TokenKind::Gt) => break,
+                Some(other) => {
+                    let t = self.peek().expect("peeked");
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{other:?}"),
+                        expected: "`,` or `>` in type argument list",
+                        span: to_source_span(&t.span),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "`,` or `>` in type argument list",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            }
+        }
+        let gt_end = match self.peek_kind() {
+            Some(TokenKind::Gt) => self.advance().expect("peeked").span.end,
+            _ => unreachable!("loop only breaks on Gt"),
+        };
+        Ok((args, lt_start..gt_end))
     }
 
     /// Consume `-> type`. Required after every fn's parameter list
@@ -643,10 +806,24 @@ impl<'a> Parser<'a> {
         }
         match self.peek() {
             Some(t) if t.kind == TokenKind::Ident => {
-                let span = t.span.clone();
-                let name = self.src[span.clone()].to_string();
+                let name_span = t.span.clone();
+                let name = self.src[name_span.clone()].to_string();
                 self.advance();
-                Ok(Spanned { kind: TypeExprKind::Ident(name), span })
+                // C1.7 / ADR 0016 D3: optional `<TypeArg1, ...>`
+                // after an Ident in type position promotes to
+                // `TypeExprKind::Generic`. The parser is permissive
+                // about arity / generic-vs-not; the type checker
+                // validates.
+                if self.peek_kind() == Some(TokenKind::Lt) {
+                    let (args, args_span) = self.parse_type_args()?;
+                    let span = name_span.start..args_span.end;
+                    Ok(Spanned {
+                        kind: TypeExprKind::Generic { name, name_span, args },
+                        span,
+                    })
+                } else {
+                    Ok(Spanned { kind: TypeExprKind::Ident(name), span: name_span })
+                }
             }
             Some(t) => {
                 let kind = t.kind;
@@ -2515,5 +2692,170 @@ mod tests {
             "struct Bag { items: [i64] }\nfn main() -> i64 { 0 }",
         );
         assert_eq!(p.structs[0].fields[0].ty.kind.to_string(), "[i64]");
+    }
+
+    // ----- C1.7 / ADR 0016: generic fns + generic structs + type args -----
+
+    #[test]
+    fn parse_generic_fn_single_type_param() {
+        let p = parse_ok_program("fn id<T>(x: T) -> T { x }\nfn main() -> i64 { 0 }");
+        let f = &p.fns[0];
+        assert_eq!(f.name, "id");
+        assert_eq!(f.type_params.len(), 1);
+        assert_eq!(f.type_params[0].name, "T");
+    }
+
+    #[test]
+    fn parse_generic_fn_multiple_type_params() {
+        let p = parse_ok_program(
+            "fn pair<A, B>(a: A, b: B) -> A { a }\nfn main() -> i64 { 0 }",
+        );
+        let f = &p.fns[0];
+        assert_eq!(f.type_params.len(), 2);
+        assert_eq!(f.type_params[0].name, "A");
+        assert_eq!(f.type_params[1].name, "B");
+    }
+
+    #[test]
+    fn parse_generic_fn_trailing_comma_in_type_params() {
+        let p = parse_ok_program(
+            "fn pair<A, B,>(a: A, b: B) -> A { a }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].type_params.len(), 2);
+    }
+
+    #[test]
+    fn parse_generic_struct_single_type_param() {
+        let p = parse_ok_program(
+            "struct Box<T> { value: T }\nfn main() -> i64 { 0 }",
+        );
+        let s = &p.structs[0];
+        assert_eq!(s.name, "Box");
+        assert_eq!(s.type_params.len(), 1);
+        assert_eq!(s.type_params[0].name, "T");
+        assert_eq!(s.fields[0].ty.kind.to_string(), "T");
+    }
+
+    #[test]
+    fn parse_generic_struct_multiple_type_params() {
+        let p = parse_ok_program(
+            "struct Pair<A, B> { first: A, second: B }\nfn main() -> i64 { 0 }",
+        );
+        let s = &p.structs[0];
+        assert_eq!(s.type_params.len(), 2);
+        assert_eq!(s.fields.len(), 2);
+    }
+
+    #[test]
+    fn parse_generic_type_in_param_position() {
+        let p = parse_ok_program(
+            "fn unbox(b: Box<i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "Box<i64>");
+    }
+
+    #[test]
+    fn parse_generic_type_multi_arg() {
+        let p = parse_ok_program(
+            "fn f(p: Pair<i64, bool>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "Pair<i64, bool>");
+    }
+
+    #[test]
+    fn parse_generic_type_nested() {
+        let p = parse_ok_program(
+            "fn f(p: Pair<Box<i64>, bool>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "Pair<Box<i64>, bool>");
+    }
+
+    #[test]
+    fn parse_generic_type_with_nullable_arg() {
+        let p = parse_ok_program(
+            "fn f(b: Box<?i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "Box<?i64>");
+    }
+
+    #[test]
+    fn parse_generic_type_with_array_arg() {
+        let p = parse_ok_program(
+            "fn f(b: Box<[i64]>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "Box<[i64]>");
+    }
+
+    #[test]
+    fn parse_generic_in_return_type() {
+        let p = parse_ok_program(
+            "fn make_box(x: i64) -> Box<i64> { 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].return_type.kind.to_string(), "Box<i64>");
+    }
+
+    #[test]
+    fn parse_generic_in_let_annotation() {
+        let p = parse_ok_program(
+            "fn main() -> i64 { let x: Box<i64> = 0; x }",
+        );
+        let f = &p.fns[0];
+        match &f.body.stmts[0].kind {
+            StmtKind::Let { ty_annot: Some(ty), .. } => {
+                assert_eq!(ty.kind.to_string(), "Box<i64>");
+            }
+            other => panic!("expected Let with annotation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_error_empty_type_params_on_fn() {
+        let err = parse("fn id<>(x: i64) -> i64 { x }").unwrap_err();
+        assert!(matches!(&err, ParseError::EmptyTypeParams { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_error_empty_type_params_on_struct() {
+        let err = parse("struct Foo<> { x: i64 }\nfn main() -> i64 { 0 }").unwrap_err();
+        assert!(matches!(&err, ParseError::EmptyTypeParams { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_error_empty_type_args() {
+        let err = parse("fn f(x: Box<>) -> i64 { 0 }").unwrap_err();
+        assert!(matches!(&err, ParseError::EmptyTypeArgs { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_error_unclosed_type_params() {
+        let err = parse("fn id<T(x: T) -> T { x }").unwrap_err();
+        assert!(matches!(&err, ParseError::UnexpectedToken { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_error_unclosed_type_args() {
+        let err = parse("fn f(x: Box<i64) -> i64 { 0 }").unwrap_err();
+        assert!(matches!(&err, ParseError::UnexpectedToken { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_generic_struct_with_nullable_field() {
+        // `?T` as a field type inside a generic struct.
+        let p = parse_ok_program(
+            "struct Maybe<T> { inner: ?T }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs[0].fields[0].ty.kind.to_string(), "?T");
+    }
+
+    #[test]
+    fn parse_generic_in_call_arg_position_is_not_a_thing() {
+        // C1.7 has no turbofish (per ADR 0016 D4). `f(g, h)` is
+        // still parsed as a call with two args; `f<g, h>(x)` is
+        // NOT special at call sites — the `<` would be lexed as
+        // comparison and the parser handles that under expression
+        // grammar. We don't assert success here; just confirm the
+        // parser doesn't get confused into believing call sites
+        // accept type args.
+        let _ = parse_expr("f(g, h)").expect("plain call still works");
     }
 }

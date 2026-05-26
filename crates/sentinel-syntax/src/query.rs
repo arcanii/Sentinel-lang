@@ -122,6 +122,20 @@ fn parse_error_to_diagnostic(err: &ParseError) -> Diagnostic {
             message: "nested nullable types are not allowed".to_string(),
             span: span.offset()..(span.offset() + span.len()),
         },
+        ParseError::EmptyTypeParams { span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::empty_type_params",
+            message: "empty generic parameter list `<>` is not allowed".to_string(),
+            span: span.offset()..(span.offset() + span.len()),
+        },
+        ParseError::EmptyTypeArgs { span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::empty_type_args",
+            message: "empty generic argument list `<>` is not allowed".to_string(),
+            span: span.offset()..(span.offset() + span.len()),
+        },
     }
 }
 

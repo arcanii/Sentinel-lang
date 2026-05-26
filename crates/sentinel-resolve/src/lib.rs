@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use salsa::Accumulator;
 use sentinel_ast::{
     BinOp, Block, CmpOp, Expr, ExprKind, FnDef, LogicOp, Program, Span, Spanned, Stmt, StmtKind,
-    TypeExpr, UnaryOp,
+    TypeExpr, TypeParam as AstTypeParam, UnaryOp,
 };
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 
@@ -75,6 +75,14 @@ pub const LEN_FN_ID: FnId = FnId(3);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StructId(pub u32);
 
+/// Position-indexed identifier for a generic type parameter
+/// inside the surrounding fn / struct, added at C1.7 per ADR
+/// 0016 D6c. Two distinct fns can each have `TypeParamId(0)`
+/// referring to their own first type parameter — the ID is
+/// scoped to its parent and only meaningful in that context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeParamId(pub u32);
+
 /// A function's signature as needed by call-site resolution and
 /// arity-checking. Stored on the resolved program for codegen to
 /// consult without re-walking source.
@@ -87,12 +95,28 @@ pub struct FnSignature {
     pub name_span: Option<Span>,
     /// Number of formal parameters.
     pub arity: usize,
+    /// Number of generic type parameters per ADR 0016 D1. `0` for
+    /// non-generic fns; positive for generic fns (including the
+    /// runtime builtins `unwrap_or`, `is_some`, `len` which all
+    /// carry `1` type parameter).
+    pub type_params_count: usize,
     /// `true` iff this is the user's `main`. Codegen uses this to
     /// emit the C-ABI i32 return.
     pub is_main: bool,
     /// `true` iff this is the runtime `print` symbol. Codegen uses
     /// this to map the call to `sentinel_print`.
     pub is_runtime: bool,
+}
+
+/// A generic type parameter at resolve time per ADR 0016 D9.
+/// Carries the source-level name + span for diagnostics; the
+/// position of this entry in its parent's `type_params` vector is
+/// the [`TypeParamId`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedTypeParam {
+    pub id: TypeParamId,
+    pub name: String,
+    pub name_span: Span,
 }
 
 // =============================================================================
@@ -122,6 +146,10 @@ pub struct ResolvedStructDecl {
     pub id: StructId,
     pub name: String,
     pub name_span: Span,
+    /// Generic type parameters per ADR 0016 D2 / D9. Empty for
+    /// non-generic structs. The position in this vec is the
+    /// [`TypeParamId`] within this struct's scope.
+    pub type_params: Vec<ResolvedTypeParam>,
     pub fields: Vec<ResolvedStructField>,
     pub span: Span,
 }
@@ -157,6 +185,10 @@ pub struct ResolvedFnDef {
     pub id: FnId,
     pub name: String,
     pub name_span: Span,
+    /// Generic type parameters per ADR 0016 D1 / D9. Empty for
+    /// non-generic fns. The position in this vec is the
+    /// [`TypeParamId`] within this fn's scope.
+    pub type_params: Vec<ResolvedTypeParam>,
     pub params: Vec<ResolvedParam>,
     /// C1.2 (per ADR 0012 D1): mandatory return-type annotation.
     /// Carried through from the AST for the type checker to consume
@@ -372,6 +404,19 @@ pub enum ResolveError {
         #[label("no such struct")]
         span: miette::SourceSpan,
     },
+
+    /// C1.7 / ADR 0016 D9: a fn or struct lists the same type
+    /// parameter name twice (e.g., `fn f<T, T>(...)`).
+    #[error("duplicate type parameter `{name}`")]
+    #[diagnostic(
+        code(sentinel::resolve::duplicate_type_param),
+        help("each type parameter in a `<...>` list must be unique within its fn or struct per ADR 0016 D9")
+    )]
+    DuplicateTypeParam {
+        name: String,
+        #[label("redeclared here")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -407,6 +452,9 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         }
         let id = StructId(idx as u32);
         struct_table.insert(sd.name.clone(), id);
+        // C1.7 / ADR 0016 D9: assign TypeParamIds + reject
+        // duplicate type-param names.
+        let type_params = resolve_type_params(&sd.type_params)?;
         let fields = sd
             .fields
             .iter()
@@ -421,6 +469,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
             id,
             name: sd.name.clone(),
             name_span: sd.name_span.clone(),
+            type_params,
             fields,
             span: sd.span.clone(),
         });
@@ -434,6 +483,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         name: "print".to_string(),
         name_span: None,
         arity: 1,
+        type_params_count: 0,
         is_main: false,
         is_runtime: true,
     };
@@ -443,6 +493,8 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         name: "unwrap_or".to_string(),
         name_span: None,
         arity: 2,
+        // C1.7 / ADR 0016 D8a: `unwrap_or<T>(x: ?T, default: T) -> T`.
+        type_params_count: 1,
         is_main: false,
         is_runtime: true,
     };
@@ -452,6 +504,8 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         name: "is_some".to_string(),
         name_span: None,
         arity: 1,
+        // C1.7 / ADR 0016 D8a: `is_some<T>(x: ?T) -> bool`.
+        type_params_count: 1,
         is_main: false,
         is_runtime: true,
     };
@@ -461,6 +515,8 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         name: "len".to_string(),
         name_span: None,
         arity: 1,
+        // C1.7 / ADR 0016 D8a: `len<T>(a: [T]) -> i64`.
+        type_params_count: 1,
         is_main: false,
         is_runtime: true,
     };
@@ -490,6 +546,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
             name: fn_def.name.clone(),
             name_span: Some(fn_def.name_span.clone()),
             arity: fn_def.params.len(),
+            type_params_count: fn_def.type_params.len(),
             is_main,
             is_runtime: false,
         });
@@ -531,6 +588,9 @@ fn resolve_fn(
         .get(&fn_def.name)
         .expect("registered in pass 1");
 
+    // C1.7 / ADR 0016 D9: assign TypeParamIds + reject duplicates.
+    let type_params = resolve_type_params(&fn_def.type_params)?;
+
     let mut vars: HashMap<String, VarId> = HashMap::new();
     let mut params = Vec::with_capacity(fn_def.params.len());
     for param in &fn_def.params {
@@ -564,11 +624,36 @@ fn resolve_fn(
         id,
         name: fn_def.name.clone(),
         name_span: fn_def.name_span.clone(),
+        type_params,
         params,
         return_type: fn_def.return_type.clone(),
         body,
         span: fn_def.span.clone(),
     })
+}
+
+/// Walk an AST type-parameter list and assign [`TypeParamId`]s in
+/// source order per ADR 0016 D6c / D9. Rejects duplicate names with
+/// [`ResolveError::DuplicateTypeParam`].
+fn resolve_type_params(
+    src: &[AstTypeParam],
+) -> Result<Vec<ResolvedTypeParam>, ResolveError> {
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    let mut out: Vec<ResolvedTypeParam> = Vec::with_capacity(src.len());
+    for (idx, tp) in src.iter().enumerate() {
+        if seen.insert(tp.name.clone(), ()).is_some() {
+            return Err(ResolveError::DuplicateTypeParam {
+                name: tp.name.clone(),
+                span: to_source_span(&tp.name_span),
+            });
+        }
+        out.push(ResolvedTypeParam {
+            id: TypeParamId(idx as u32),
+            name: tp.name.clone(),
+            name_span: tp.name_span.clone(),
+        });
+    }
+    Ok(out)
 }
 
 fn resolve_block(
@@ -938,6 +1023,11 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
         ResolveError::UndefinedStruct { name, span } => (
             "sentinel::resolve::undefined_struct",
             format!("undefined struct `{name}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::DuplicateTypeParam { name, span } => (
+            "sentinel::resolve::duplicate_type_param",
+            format!("duplicate type parameter `{name}`"),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -1375,5 +1465,86 @@ mod tests {
         let r2 = resolve_query(&db, file).clone();
         assert_eq!(r1, r2);
         assert!(r1.is_some());
+    }
+
+    // ----- C1.7 / ADR 0016: generics resolve -----
+
+    #[test]
+    fn c17_generic_fn_carries_type_params() {
+        let p = resolve_ok("fn id<T>(x: T) -> T { x }\nfn main() -> i64 { 0 }");
+        let id_fn = p.fns.iter().find(|f| f.name == "id").expect("id fn");
+        assert_eq!(id_fn.type_params.len(), 1);
+        assert_eq!(id_fn.type_params[0].name, "T");
+        assert_eq!(id_fn.type_params[0].id, TypeParamId(0));
+        // Signature also tracks the count.
+        let sig = p.signature(id_fn.id);
+        assert_eq!(sig.type_params_count, 1);
+    }
+
+    #[test]
+    fn c17_generic_struct_carries_type_params() {
+        let p = resolve_ok(
+            "struct Box<T> { value: T }\nfn main() -> i64 { 0 }",
+        );
+        let s = &p.structs[0];
+        assert_eq!(s.type_params.len(), 1);
+        assert_eq!(s.type_params[0].name, "T");
+        assert_eq!(s.type_params[0].id, TypeParamId(0));
+    }
+
+    #[test]
+    fn c17_multi_type_param_fn() {
+        let p = resolve_ok(
+            "fn pair<A, B>(a: A, b: B) -> A { a }\nfn main() -> i64 { 0 }",
+        );
+        let f = p.fns.iter().find(|f| f.name == "pair").expect("pair");
+        assert_eq!(f.type_params.len(), 2);
+        assert_eq!(f.type_params[0].name, "A");
+        assert_eq!(f.type_params[0].id, TypeParamId(0));
+        assert_eq!(f.type_params[1].name, "B");
+        assert_eq!(f.type_params[1].id, TypeParamId(1));
+    }
+
+    #[test]
+    fn c17_duplicate_type_param_in_fn_errors() {
+        let err =
+            resolve_err("fn f<T, T>(x: T) -> T { x }\nfn main() -> i64 { 0 }");
+        assert!(
+            matches!(err, ResolveError::DuplicateTypeParam { ref name, .. } if name == "T"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c17_duplicate_type_param_in_struct_errors() {
+        let err = resolve_err(
+            "struct Foo<T, T> { x: T }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, ResolveError::DuplicateTypeParam { ref name, .. } if name == "T"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c17_builtins_carry_type_params_count() {
+        let p = resolve_ok("fn main() -> i64 { 0 }");
+        // print is non-generic; the three builtins post-print are.
+        assert_eq!(p.fn_signatures[0].name, "print");
+        assert_eq!(p.fn_signatures[0].type_params_count, 0);
+        assert_eq!(p.fn_signatures[1].name, "unwrap_or");
+        assert_eq!(p.fn_signatures[1].type_params_count, 1);
+        assert_eq!(p.fn_signatures[2].name, "is_some");
+        assert_eq!(p.fn_signatures[2].type_params_count, 1);
+        assert_eq!(p.fn_signatures[3].name, "len");
+        assert_eq!(p.fn_signatures[3].type_params_count, 1);
+    }
+
+    #[test]
+    fn c17_non_generic_fn_has_empty_type_params() {
+        let p = resolve_ok("fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { 0 }");
+        let f = p.fns.iter().find(|f| f.name == "add").expect("add");
+        assert!(f.type_params.is_empty());
+        assert_eq!(p.signature(f.id).type_params_count, 0);
     }
 }

@@ -256,6 +256,16 @@ fn resolve_type_expr(
                 }),
             }
         }
+        TypeExprKind::Generic { name, .. } => {
+            // C1.7 placeholder: full generic-type resolution lands
+            // with the rest of the C1.7 surface. For now surface
+            // a generic-as-unknown diagnostic carrying the name so
+            // downstream tests can pin the rejection point.
+            Err(TypeError::UnknownType {
+                name: format!("{name}<...>"),
+                span: to_source_span(&te.span),
+            })
+        }
     }
 }
 

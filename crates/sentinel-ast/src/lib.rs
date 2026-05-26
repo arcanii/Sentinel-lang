@@ -262,14 +262,21 @@ pub struct Program {
     pub span: Span,
 }
 
-/// A function definition: `fn name(p1: T, p2: T, …) -> T { body }`.
+/// A function definition: `fn name<T1, T2>(p1: T, p2: T, …) -> T { body }`.
 /// C0.5 had no annotations and treated everything as `i64`; C1.2
 /// (ADR 0012 D1) makes parameter types and the return type
-/// mandatory.
+/// mandatory; C1.7 (ADR 0016 D1) adds the optional `<T1, T2>`
+/// generic-parameter clause between the name and the parameter
+/// list.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FnDef {
     pub name: String,
     pub name_span: Span,
+    /// Generic type-parameter list per ADR 0016 D1. Empty for
+    /// non-generic fns; never contains zero entries when the source
+    /// wrote `fn f<>` (rejected at parse time as
+    /// [`ParseError::EmptyTypeParams`](../sentinel_syntax/parser/enum.ParseError.html)).
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     /// Return-type annotation per ADR 0012 D1. Mandatory at C1.2 —
     /// every fn declares its return type explicitly at the boundary.
@@ -287,15 +294,32 @@ pub struct Param {
     pub ty: TypeExpr,
 }
 
-/// A C1.4+ struct declaration: `struct Name { field: Type, … }`
+/// A C1.4+ struct declaration: `struct Name<T1, T2> { field: Type, … }`
 /// per ADR 0013 D1. Empty structs (zero fields) are allowed.
-/// Trailing comma after the last field is permitted.
+/// Trailing comma after the last field is permitted. C1.7 (ADR
+/// 0016 D2) adds the optional `<T1, T2>` generic-parameter clause
+/// between the name and the body.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StructDecl {
     pub name: String,
     pub name_span: Span,
+    /// Generic type-parameter list per ADR 0016 D2. Empty for
+    /// non-generic structs; the parser rejects `struct Foo<>` via
+    /// [`ParseError::EmptyTypeParams`](../sentinel_syntax/parser/enum.ParseError.html).
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<StructField>,
     pub span: Span,
+}
+
+/// A single generic type parameter (`T`, `U`, …) per ADR 0016 D1
+/// / D2. Carries just the name and its span — type-parameter
+/// position inside the surrounding fn / struct is determined by
+/// the index in the parent's `type_params` vector and assigned a
+/// `TypeParamId` at the resolve stage.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeParam {
+    pub name: String,
+    pub name_span: Span,
 }
 
 /// A single named field inside a struct declaration. `name_span`
@@ -329,6 +353,16 @@ pub enum TypeExprKind {
     /// type-resolution stage per D6 (the parser accepts them; the
     /// type checker rejects).
     Array(Box<TypeExpr>),
+    /// `Name<TypeArg1, TypeArg2, ...>` generic instance per ADR
+    /// 0016 D3. The parser accepts any non-zero arg list (empty
+    /// `<>` is rejected as [`ParseError::EmptyTypeArgs`]); the type
+    /// checker validates arity, that `Name` is a generic struct,
+    /// etc.
+    Generic {
+        name: String,
+        name_span: Span,
+        args: Vec<TypeExpr>,
+    },
 }
 
 /// A brace-wrapped block expression `{ stmt* tail_expr }`. The
@@ -437,6 +471,18 @@ impl fmt::Display for TypeExprKind {
             TypeExprKind::Ident(name) => write!(f, "{name}"),
             TypeExprKind::Nullable(inner) => write!(f, "?{}", inner.kind),
             TypeExprKind::Array(inner) => write!(f, "[{}]", inner.kind),
+            TypeExprKind::Generic { name, args, .. } => {
+                write!(f, "{name}<")?;
+                let mut first = true;
+                for a in args {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+                    write!(f, "{}", a.kind)?;
+                }
+                write!(f, ">")
+            }
         }
     }
 }
@@ -495,7 +541,20 @@ impl fmt::Display for StructDecl {
 /// the annotation). Body delegates to [`Block`].
 impl fmt::Display for FnDef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(fn {} (", self.name)?;
+        write!(f, "(fn {}", self.name)?;
+        if !self.type_params.is_empty() {
+            write!(f, "<")?;
+            let mut first = true;
+            for tp in &self.type_params {
+                if !first {
+                    write!(f, ", ")?;
+                }
+                first = false;
+                write!(f, "{}", tp.name)?;
+            }
+            write!(f, ">")?;
+        }
+        write!(f, " (")?;
         let mut first = true;
         for p in &self.params {
             if !first {
@@ -689,6 +748,7 @@ mod tests {
         FnDef {
             name: "main".to_string(),
             name_span: 0..4,
+            type_params: vec![],
             params: vec![],
             return_type: ty_i64(0..3),
             body: Block { stmts: vec![], tail, span: body_span.clone() },
@@ -711,6 +771,7 @@ mod tests {
         let double = FnDef {
             name: "double".to_string(),
             name_span: 0..6,
+            type_params: vec![],
             params: vec![Param {
                 name: "x".to_string(),
                 span: 0..1,
@@ -757,6 +818,7 @@ mod tests {
         let f = FnDef {
             name: "add".to_string(),
             name_span: 0..3,
+            type_params: vec![],
             params: vec![
                 Param { name: "a".to_string(), span: 0..1, ty: ty_i64(0..3) },
                 Param { name: "b".to_string(), span: 0..1, ty: ty_i64(0..3) },
@@ -870,6 +932,7 @@ mod tests {
         let s = StructDecl {
             name: "Point".to_string(),
             name_span: 7..12,
+            type_params: vec![],
             fields: vec![
                 StructField {
                     name: "x".to_string(),
@@ -894,6 +957,7 @@ mod tests {
         let s = StructDecl {
             name: "Empty".to_string(),
             name_span: 7..12,
+            type_params: vec![],
             fields: vec![],
             span: 0..14,
         };
@@ -1042,6 +1106,7 @@ mod tests {
         let s = StructDecl {
             name: "P".to_string(),
             name_span: 7..8,
+            type_params: vec![],
             fields: vec![StructField {
                 name: "x".to_string(),
                 name_span: 11..12,
