@@ -1,0 +1,12 @@
+// Struct values flow through `if`-expression merge — both arms
+// produce the same struct type, the alloca uses llvm_basic_type.
+struct Pair { a: i64, b: i64 }
+
+fn pick(c: bool) -> Pair {
+    if c { Pair { a: 1, b: 2 } } else { Pair { a: 10, b: 20 } }
+}
+
+fn main() -> i64 {
+    let p = pick(true);
+    p.a + p.b
+}

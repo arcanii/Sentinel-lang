@@ -1,0 +1,13 @@
+// C1.4 phase-go program per ADR 0013 D12 appendix.
+// Exercises struct declaration + construction + field access +
+// pass-by-value through fn args.
+struct Point { x: i64, y: i64 }
+
+fn manhattan(p: Point) -> i64 {
+    p.x + p.y
+}
+
+fn main() -> i64 {
+    let p = Point { x: 3, y: 4 };
+    print(manhattan(p))
+}

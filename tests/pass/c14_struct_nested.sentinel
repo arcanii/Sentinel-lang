@@ -1,0 +1,9 @@
+// Nested struct field access — chained `.` lowers to multiple
+// build_extract_value calls in codegen.
+struct Inner { x: i64 }
+struct Outer { inner: Inner, y: i64 }
+
+fn main() -> i64 {
+    let o = Outer { inner: Inner { x: 7 }, y: 3 };
+    o.inner.x + o.y
+}

@@ -12,7 +12,28 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C1.3 landed** — the C1 primitive surface is now
+Last updated: **C1.4 landed** — structs + field access + struct
+literals shipped end-to-end across three commits (e93635b ADR
+0013 PROPOSED; f34b401 lexer adds `struct` keyword + `.` token;
+aa8f252 AST + parser + resolve + types + codegen for struct decl,
+construction, field access). The bootstrap pipeline is still
+**parse_query → resolve_query → check_query → codegen**; the
+struct surface flows through as new parallel-tree variants in
+each crate. Type universe at C1.4 close: `{ I64, I32, Bool,
+Struct(StructId) }` per ADR 0013 D4. The codegen value type
+widened from `IntValue<'ctx>` to `BasicValueEnum<'ctx>` so struct
+values flow through the same machinery; struct literals lower
+via `build_insert_value` chains from `get_undef()`; field access
+via `build_extract_value`. Recursive structs (direct + mutual)
+are detected at type-check time per ADR 0013 D7 — `struct Node
+{ next: Node }` surfaces as `TypeError::RecursiveStruct` with
+the full cycle path; lifts at C1.5 when `?T` arrives. The C1.4
+phase-go program at `tests/pass/c14_go_no_go.sentinel` runs:
+`Point { x: 3, y: 4 }` + `manhattan(p) { p.x + p.y }` produces
+stdout `7\n`, exit 0. ADR 0013 is now ACCEPTED. Workspace test
+delta: +68 (632 total) — +4 lexer, +6 AST, +21 parser, +7
+resolve, +19 types, +6 codegen, +5 pass-test fixtures (c14_*).
+Pre-C1.4 context: **C1.3 landed** — the C1 primitive surface is now
 complete (bool + comparison + logical operators) across three
 feat commits (2801a81 lexer adds the 11 C1.3 tokens; cd1c0d4
 AST + parser + resolve + types + codegen handle bool literals,
@@ -1214,7 +1235,10 @@ scaffold stubs.
 | C1.3.1 | Lexer: 11 C1.3 tokens (`true` `false` `==` `!=` `<` `<=` `>` `>=` `&&` `\|\|` `!`) | Done | 2801a81 |
 | C1.3.2-4 | AST + parser + resolve + types + codegen for bool/cmp/logic/`!`; type universe widens to `{I64, I32, Bool}` | Done | cd1c0d4 |
 | C1.3.5 | Retire ADR 0010 D9 C-style truthy; rewrite 6 if-fixtures; add 7 c13 pass-tests | Done | ba5fd9d |
-| C1.4+ | Structs, nullability, arrays, generics                         | Planned |         |
+| ADR 13 | Concrete C1.4 surface syntax (struct decl + literal + field access) | Done | e93635b |
+| C1.4.1 | Lexer: `struct` keyword + `.` token                            | Done | f34b401 |
+| C1.4.2-6 | AST + parser + resolve + types + codegen for structs (bundled) | Done | aa8f252 |
+| C1.5+ | Nullability, arrays, generics                                  | Planned |         |
 
 ADR 0010 (concrete C0 surface syntax) lands between C0.0 and C0.1
 per ADR 0009 D8.
@@ -2178,6 +2202,118 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     `2` types as I64). Future literal-typing work (C1.5+) will
     revisit this; documented here so the C1.3 scope is clear.
 
+54. (C1.4.1 / f34b401) The C1.4 lexer additions are just two
+    tokens (`struct` keyword + `.` punctuation) per ADR 0013 D8.
+    logos's longest-match is not relevant here — `.` has no
+    `..` / `.=` / `...` neighbours until ranges arrive in C2+.
+    The `structure` / `structured` ident-prefix-vs-keyword
+    regression is verified by a dedicated test. 4 new lexer
+    tests + the existing lex_all_keywords / lex_all_punctuation
+    extended.
+
+55. (C1.4.2-6 / aa8f252) C1.4's AST adds new variants
+    `ExprKind::StructLit` and `ExprKind::FieldAccess` —
+    separate from `ExprKind::Call` because their typing rules
+    differ. StructLit takes a struct name + a set of named
+    field initializers; FieldAccess is postfix `.field` on any
+    expression. Both could in principle be expressed via
+    existing variants (StructLit as a magical `Foo` call,
+    FieldAccess as a method-call shape), but separate variants
+    let the type checker enforce per-feature rules without
+    runtime branching on a generic `Call` shape. Same precedent
+    as C1.3's Cmp / Logic separation.
+
+56. (C1.4.2-6 / aa8f252) The parser's `allow_struct_lit: bool`
+    mode flag per ADR 0013 D3a is the first piece of context-
+    sensitive parsing in Sentinel. It's set to false while
+    parsing an `if` condition so `if Foo { ... }` parses as
+    if-condition `Foo` (Var atom) + if-then block `{ ... }`
+    rather than struct-literal `Foo { ... }` + unexpected `else`.
+    Parens always restore it (the LParen arm in parse_atom saves
+    and re-sets the flag inside the parenthesized subexpr).
+    Bounded — just a single Boolean threaded through `parse_expr`.
+    Rust has the same shape and reasoning. C2+'s `while` / `for`
+    / `match` will inherit the same forbidden-position list.
+
+57. (C1.4.2-6 / aa8f252) Field access is implemented via a
+    `parse_postfix()` wrapper that runs `parse_atom()` and then
+    loops on `.field` chains. This pattern generalises to other
+    postfix operators — C1.6's arrays will add `[index]`
+    indexing; C4's classes will add `.method()` (which is `.`
+    plus call shape). The loop shape gives left-associativity
+    naturally: `a.b.c` parses as `(a.b).c`. parse_unary now
+    calls parse_postfix instead of parse_atom directly.
+
+58. (C1.4.2-6 / aa8f252) The resolve crate's struct table is
+    built BEFORE fn signatures so that fn signatures can
+    reference struct types in their TypeExprs. Resolution
+    order in `resolve()`: (0) struct decls, (1) fn signatures,
+    (2) fn bodies. Without this ordering, a fn `fn f(p: Point)
+    -> i64` that mentions `Point` before its declaration in
+    source order would fail. Sentinel doesn't require source-
+    order declaration anyway (Sentinel-Mini taught this), so
+    the multi-pass approach is correct.
+
+59. (C1.4.2-6 / aa8f252) The recursive-struct check at
+    sentinel-types runs a depth-first walk on the
+    struct→field-struct edges using a Color enum (White / Gray
+    / Black). Cycles surface when the walker hits a Gray node
+    — the current path stack is the cycle. Direct cycles
+    (`struct Node { next: Node }`) and mutual cycles
+    (`struct A { b: B } struct B { a: A }`) both detected.
+    Lifts at C1.5 when `?T` introduces indirection that breaks
+    cycles. The error includes the full cycle path for the
+    diagnostic.
+
+60. (C1.4.2-6 / aa8f252) The type checker reorders struct-
+    literal fields to declaration order at check() time, so
+    codegen iterates by index without needing to consult field
+    names. Source order `{ y: 4, x: 3 }` becomes
+    `{ x: 3, y: 4 }` in TypedExprKind::StructLit.fields,
+    matching the struct declaration's field order. The
+    field_index in FieldAccess is set similarly — it's the
+    GEP offset that codegen consumes directly.
+
+61. (C1.4.2-6 / aa8f252) Codegen's value type widens from
+    `IntValue<'ctx>` to `BasicValueEnum<'ctx>` to accommodate
+    struct values. Every lower_* function's return signature is
+    updated; arithmetic / cmp / logic / unary ops call
+    `.into_int_value()` on their operands (the type checker
+    guarantees they're int-typed) and `.into()` on results.
+    The `vars` map's `(PointerValue, Type)` shape is unchanged
+    at the surface but now backs struct-typed bindings — alloca
+    uses `llvm_basic_type` instead of `llvm_int_type`. The
+    refactor is mechanical but pervasive (every match arm
+    touched). One-shot value-type widening is much cleaner than
+    threading two return types.
+
+62. (C1.4.2-6 / aa8f252) Struct literal codegen builds via a
+    chain of `build_insert_value` starting from
+    `struct_type.get_undef()`. Field access codegen uses
+    `build_extract_value(struct_val, field_index)`. Both are
+    SSA-native (no alloca dance needed for the value-level
+    operations). Pass-by-value through fn calls is transparent
+    — LLVM's ABI lowering handles the small-struct-in-registers
+    vs large-struct-via-pointer choice automatically. C1.4
+    doesn't need to think about it.
+
+63. (C1.4.2-6 / aa8f252) Struct equality `==` / `!=` is
+    rejected at C1.4 per ADR 0013 D6 — the Cmp typing rule
+    explicitly rejects struct operands. Allows `struct == struct`
+    in a future ADR (C1.5+) without retroactively breaking
+    programs that depend on the current rejection. Same for
+    struct arithmetic (`struct + struct`) — caught by the
+    existing arithmetic rule that requires int operands.
+
+64. (C1.4.2-6 / aa8f252) The codegen lifetime situation
+    settled at C1.3 as `'ctx` alone parameterising `CodegenCtx`
+    holds through C1.4. The new `struct_types: HashMap<StructId,
+    StructType<'ctx>>` field shares that lifetime. Pass 0 of
+    `compile_to_object` (declare LLVM struct types) happens
+    before the CodegenCtx is built, so the types are passed in
+    by-value at construction. This avoids re-creating struct
+    types per fn body.
+
 37. (C1.0c, ADR 0011 D1 amendment) Codegen stays outside the salsa
     query graph through Phase C1.0. ADR 0011's original D1 sketch
     had "… through codegen" in the query list, suggesting
@@ -2223,34 +2359,42 @@ All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
-  - sentinel-syntax:        129 tests (127 lib + 2 UI integration) + 0 doctests
-                            (lib = 120 lexer/parser + 7 query;
-                             C1.3 step 1 adds 9 lexer tests for the new tokens;
-                             C1.3 step 2 adds 21 parser tests for bool / cmp /
-                             logic / precedence / non-assoc rejection)
-  - sentinel-ast:           29 tests (1 smoke + Display impls + op symbols);
-                            C1.3 adds 7 (BoolLit / Cmp / Logic / UnaryOp::Not
-                            Display + CmpOp.symbol() + LogicOp.symbol())
-  - sentinel-codegen:       18 tests (1 smoke + 1 target init + 16 positive
-                            compile) + 0 doctests; C1.3 adds 10 (per-op
-                            compile smoke + C1.3 phase-go + i32 propagation)
-  - sentinel-resolve:       21 tests (positive paths + 6 error variants
-                            + 4 salsa query smoke incl. parse-stage propagation
-                            + cache validation) + 0 doctests
-  - sentinel-types:         34 tests (15 from C1.2 + 18 new C1.3: every typing
-                            rule positive path + every error path + C1.3
-                            phase-go program + i32/bool type-resolve sanity
-                            + if-condition-rejects-non-bool) + 0 doctests
-  - sentinel-driver:        29 pass integration tests + 0 doctests
-                            (22 from C0 + 7 new c13_* fixtures: bool_literal,
-                            comparison, logical_and/or, unary_not,
-                            short_circuit_and/or)
+  - sentinel-syntax:        154 tests (152 lib + 2 UI integration) + 0 doctests
+                            (lib at C1.4: 145 lexer/parser + 7 query;
+                             C1.3 added 9 lexer + 21 parser tests;
+                             C1.4 added 4 lexer + 21 parser tests for
+                             struct decl / literal / field access / D3a
+                             forbidden-in-if-cond / chained field access)
+  - sentinel-ast:           35 tests (1 smoke + Display impls + op symbols);
+                            C1.3 added 7; C1.4 added 6 (StructDecl /
+                            StructLit / FieldAccess / chained Display +
+                            mixed-program Display)
+  - sentinel-codegen:       24 tests (1 smoke + 1 target init + 22 positive
+                            compile) + 0 doctests; C1.3 added 10; C1.4
+                            added 6 (struct decl, literal+access, by-value,
+                            bool field, chained access, C1.4 phase-go)
+  - sentinel-resolve:       28 tests (21 from C1.1-3 + 7 new C1.4: struct
+                            table, multi-decl ordering, StructLit -> StructId,
+                            FieldAccess pass-through, RedefinedStruct,
+                            UndefinedStruct, struct_name_table helper)
+                            + 0 doctests
+  - sentinel-types:         53 tests (34 from C1.2-3 + 19 new C1.4: every
+                            struct typing rule + every error path
+                            (UnknownField / MissingField /
+                            FieldAccessOnNonStruct / RecursiveStruct
+                            direct + mutual / non-cycle-chain-ok / empty
+                            struct / let-annot / reordering) + C1.4
+                            phase-go) + 0 doctests
+  - sentinel-driver:        34 pass integration tests + 0 doctests
+                            (22 from C0 + 7 c13_* + 5 new c14_*:
+                            struct_basic, struct_nested, struct_in_if,
+                            struct_bool_field, c14_go_no_go)
   - sentinel-runtime:       2 tests (smoke + sentinel_print_returns_zero) + 0 doctests
   - sentinel-base:          3 tests (salsa query runs/caches + source file accessors) + 0 doctests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
                             (sentinel-hir, -mir, -lsp)
 
-Total active workspace tests: **564**.
+Total active workspace tests: **632**.
 
 ### Script Convention
 

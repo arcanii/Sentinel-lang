@@ -271,3 +271,40 @@ fn pass_c13_short_circuit_or() {
     assert_eq!(r.stdout, "", "rhs of || was evaluated despite lhs being true");
     assert_eq!(r.exit, 3);
 }
+
+// ----- C1.4 pass-tests: structs + field access -----
+
+#[test]
+fn pass_c14_struct_basic() {
+    // struct Box { v: i64 }; Box { v: 42 }.v -> exit 42
+    assert_eq!(run_exit("c14_struct_basic.sentinel"), 42);
+}
+
+#[test]
+fn pass_c14_struct_nested() {
+    // Outer { inner: Inner { x: 7 }, y: 3 }.inner.x + .y -> exit 10
+    assert_eq!(run_exit("c14_struct_nested.sentinel"), 10);
+}
+
+#[test]
+fn pass_c14_struct_in_if() {
+    // pick(true) returns Pair { a: 1, b: 2 }; sum is 3.
+    // Exercises the if-merge alloca for struct-typed results.
+    assert_eq!(run_exit("c14_struct_in_if.sentinel"), 3);
+}
+
+#[test]
+fn pass_c14_struct_bool_field() {
+    // Tagged { value: 5, valid: true, count: 9 } — valid is true,
+    // so result is 5 + 9 = 14.
+    assert_eq!(run_exit("c14_struct_bool_field.sentinel"), 14);
+}
+
+#[test]
+fn pass_c14_go_no_go() {
+    // ADR 0013 D12 phase-go program: Point { x: 3, y: 4 } ->
+    // manhattan returns 7 -> print produces stdout "7\n", exit 0.
+    let r = build_and_run("c14_go_no_go.sentinel");
+    assert_eq!(r.stdout, "7\n");
+    assert_eq!(r.exit, 0);
+}

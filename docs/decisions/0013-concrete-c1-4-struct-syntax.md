@@ -1,11 +1,15 @@
 # ADR 0013: Concrete C1.4 surface syntax — struct declarations, field access, construction
 
-Status: PROPOSED — no D-decision exercised yet; this ADR pins the
-surface decisions before the C1.4 feat commits land per the
-ADR-first-per-phase-boundary norm (HANDOVER §0.1). Will flip to
-ACCEPTED when the C1.4 sub-phases all ship.
+Status: ACCEPTED — every D-decision exercised at C1.4. The lexer
+additions (`struct` keyword + `.` token, D8) landed at f34b401;
+all of D1-D7 + D9-D12 landed in the bundled feat commit aa8f252
+(AST + parser + resolve + types + codegen for struct decl,
+literal, field access). The C1.4 phase-go program at
+`tests/pass/c14_go_no_go.sentinel` produces stdout `7\n`, exit 0
+through the full pipeline. ADR fully landed.
 Date: 2026-05-26
-Last touched: 2026-05-26 (initial PROPOSED draft)
+Last touched: 2026-05-26 (C1.4 landed; status flipped to
+ACCEPTED with the per-decision audit trail in commit messages)
 Related: 0011 (Phase C1 kickoff; D3 commits to `struct` as part of
 the C1 primitive set, D6 schedules C1.4 after C1.3), 0012 (concrete
 C1 surface — established the D3 "primitives are identifiers, not

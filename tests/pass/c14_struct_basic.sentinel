@@ -1,0 +1,7 @@
+// Minimal struct: declare, construct, access one field.
+struct Box { v: i64 }
+
+fn main() -> i64 {
+    let b = Box { v: 42 };
+    b.v
+}

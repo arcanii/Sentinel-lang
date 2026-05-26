@@ -56,10 +56,11 @@ C1.3. See STATE.md Section C.
 **Phase C1.1 — sentinel-resolve crate lift — complete.**
 **Phase C1.2 — annotation grammar + sentinel-types::check() — complete.**
 **Phase C1.3 — bool + i32 + comparison + logical operators; ADR 0010 D9 retired — complete.**
+**Phase C1.4 — struct definitions + field access + struct literals — complete.**
 Phase C1 (type system, regions, effects per HANDOVER §6.2) is in
 flight per ADR 0011 (PROPOSED, 8 sub-phases, honest 5-6 month
 estimate vs HANDOVER's 3-month budget). The C1.0 + C1.1 + C1.2 +
-C1.3 sub-phases have all landed:
+C1.3 + C1.4 sub-phases have all landed:
 
   - **C1.0a** (09dc8c3): foundation crate `sentinel-base` hosting
     the `#[salsa::db]` SentinelDb trait, `#[salsa::input]`
@@ -154,23 +155,78 @@ C1.3 sub-phases have all landed:
     evaluation, the side effect of the skipped `print(99)` will
     surface in stdout and the test fails. +8 tests over step 2
     (+1 types if_condition_rejects_non_bool + 7 c13 fixtures).
+  - **ADR 0013** (e93635b, PROPOSED→ACCEPTED): concrete C1.4
+    surface — struct declaration grammar (D1), postfix field
+    access (D2), struct literal grammar (D3) with parser-
+    disambiguation D3a (no struct lit in if-cond, parens
+    escape), struct types in type position (D4) extending ADR
+    0012 D3's "primitives are identifiers" pattern, nominal
+    type equality (D5), struct == deferred to C1.5+ (D6),
+    recursive-struct detection at type-check time (D7), lexer
+    additions (D8: `struct` keyword + `.` token), tuple /
+    unit / derives / methods / generics all out of scope at
+    C1.4 (D9, D10), `fn main() -> i64` invariant stays (D11),
+    phase-go program spec (D12).
+  - **C1.4.1** (f34b401): lexer adds `struct` keyword + `.`
+    token per ADR 0013 D8. Two new TokenKind variants. logos
+    longest-match not relevant — no `..` / `.=` neighbours
+    until ranges arrive at C2+. +4 new lexer tests including
+    the `structure` / `structured` ident-prefix-vs-keyword
+    regression.
+  - **C1.4.2-6** (aa8f252): the struct surface lands end-to-end
+    as a single coordinated commit because the parallel-tree
+    pattern requires it. AST gains `StructDecl` + `StructField`
+    at top-level; `Program` gains `structs: Vec<StructDecl>`
+    alongside `fns`. New `ExprKind` variants: `StructLit`
+    (Rust-style `Name { field: expr, ... }`), `FieldAccess`
+    (postfix `expr.field`). Parser handles all of it with a
+    new `allow_struct_lit: bool` mode flag for D3a (forbids
+    bare struct lit in if-cond; parens escape). The parser also
+    gains a `parse_postfix()` wrapper that consumes `.field`
+    chains after any atom — sets up the pattern for C1.6
+    arrays' `[index]` and C4 methods' `.method()`. Resolve
+    adds `StructId(u32)`, struct table built in pass 0 (before
+    fn signatures), `ResolveError::RedefinedStruct` +
+    `UndefinedStruct`. Types widens the universe to
+    `{ I64, I32, Bool, Struct(StructId) }`; `resolve_type_expr`
+    looks up Idents against the struct table; check_expr handles
+    StructLit (validates field set matches decl, reorders to
+    decl order so codegen iterates by index) and FieldAccess
+    (validates target is struct, looks up field index); cycle
+    detection emits `TypeError::RecursiveStruct` for direct
+    + mutual cycles; four new error variants in total
+    (FieldAccessOnNonStruct, UnknownField, MissingField,
+    RecursiveStruct). **Codegen's value type widens from
+    `IntValue<'ctx>` to `BasicValueEnum<'ctx>`** so struct
+    values flow through the same machinery; new pass 0 declares
+    LLVM struct types; new `llvm_basic_type` helper replaces
+    `llvm_int_type` for the storage-type path (int helper
+    retained for arithmetic operand coercion); StructLit lowers
+    via `build_insert_value` chain from `get_undef`; FieldAccess
+    lowers via `build_extract_value`. +63 tests across all
+    crates. Five new c14_* pass-test fixtures land
+    (struct_basic, struct_nested, struct_in_if,
+    struct_bool_field, c14_go_no_go).
 
-**C1 next: C1.4** — struct definitions + field access per ADR
-0011 D6. Estimated 3-4 weeks. ADR 0012 is now ACCEPTED; ADR
-0013 (concrete C1.4 surface — struct decl syntax, field-access
-syntax, struct-Type variant, etc.) lands before the first
-C1.4 feat commit per the ADR-first-per-phase-boundary norm.
+**C1 next: C1.5** — `?T` nullability + null-checks per ADR
+0011 D6. Estimated 2-3 weeks. ADR 0013 is now ACCEPTED; ADR
+0014 (concrete C1.5 surface — `?T` postfix syntax, `null`
+literal, null-check operator probably `?.`, the `if let Some(x)`
+shape, etc.) lands before the first C1.5 feat commit. C1.5 will
+likely also lift the C1.4 recursive-struct restriction since
+`?T` provides the indirection for `struct Node { next: ?Node }`.
 
-**Workspace test count**: 564 active across all crates (+72 over
-C1.2: +9 lexer, +28 AST+parser, +18 types, +10 codegen, +7
-pass-test fixtures). All four check-suite checks green (cargo
-build --workspace, cargo clippy --workspace --all-targets -D
-warnings, cargo test --workspace, cargo test --workspace --doc).
-C0 go/no-go program at `tests/pass/c05_go_no_go.sentinel` (now
-in the C1.3 phase-go shape with `is_positive`, `pick(cond: bool,
-...)`, bool if-condition) still runs end-to-end through the
-parse → resolve → check → codegen pipeline: stdout "10", exit 0.
-See STATE.md "Conventions" for the per-crate breakdown.
+**Workspace test count**: 632 active across all crates (+68 over
+C1.3: +4 lexer, +6 AST, +21 parser, +7 resolve, +19 types, +6
+codegen, +5 pass-test fixtures). All four check-suite checks
+green (cargo build --workspace, cargo clippy --workspace
+--all-targets -D warnings, cargo test --workspace, cargo test
+--workspace --doc). C0 go/no-go program at
+`tests/pass/c05_go_no_go.sentinel` (C1.3 bool flow shape) still
+runs end-to-end: stdout "10", exit 0. C1.4 go/no-go at
+`tests/pass/c14_go_no_go.sentinel` (struct flow shape) runs:
+stdout "7", exit 0. See STATE.md "Conventions" for the per-crate
+breakdown.
 
 **ADR status**:
 
@@ -186,44 +242,48 @@ See STATE.md "Conventions" for the per-crate breakdown.
                                                  sub-phases done)
   - 0010 concrete-c0-surface-syntax              ACCEPTED (all
                                                  D-decisions exercised)
-  - 0011 phase-c1-kickoff-and-type-system-plan   PROPOSED — D1
-                                                 (Salsa, C1.0a-c) +
-                                                 D2 (annotations +
-                                                 inside-body inference)
-                                                 + D3 (I32/I64/Bool
-                                                 primitives) + D4
-                                                 (sentinel-resolve lift,
-                                                 C1.1.1-2) + D5
-                                                 (sentinel-types check(),
-                                                 C1.2.1-4) + D10
-                                                 (C-style truthy
-                                                 RETIRED at C1.3.5)
-                                                 fully exercised;
+  - 0011 phase-c1-kickoff-and-type-system-plan   PROPOSED — D1 +
+                                                 D2 + D3 + D4 + D5 +
+                                                 D7 + D10 + D11 all
+                                                 fully exercised across
+                                                 C1.0a-c (Salsa), C1.1
+                                                 (resolve lift), C1.2
+                                                 (annotation grammar +
+                                                 check), C1.3 (primitive
+                                                 widening + truthy
+                                                 retirement), C1.4
+                                                 (structs + ADR 0013);
                                                  ADR remains PROPOSED
                                                  because D6 (sub-phase
-                                                 split — C1.4+ in
-                                                 flight), D7 (concrete
-                                                 surface — ADR 0013+
-                                                 cover C1.4+), D11
-                                                 done at C1.1.2, D12
-                                                 deferred per the ADR
-                                                 — these cover structs,
-                                                 nullability, arrays,
-                                                 generics
+                                                 split — C1.5+ in
+                                                 flight: nullability,
+                                                 arrays, generics) and
+                                                 D12 (perf discipline —
+                                                 deferred per the ADR)
+                                                 are still ahead
   - 0012 concrete-c1-surface-syntax              ACCEPTED — every
+                                                 D-decision exercised
+                                                 across C1.2-3
+  - 0013 concrete-c1-4-struct-syntax             ACCEPTED — every
                                                  D-decision exercised:
-                                                 D1-D4 (annotation
-                                                 grammar) at C1.2.1-4;
-                                                 D5-D8 (bool / cmp /
-                                                 logical / if-bool)
-                                                 at C1.3.2-5; D9 (all
-                                                 12 tokens) at C1.2.1
-                                                 + C1.3.1; D10 (fn
-                                                 + if fixture rewrites)
-                                                 at C1.2.2 + C1.3.5;
-                                                 D11 (fn main -> i64)
-                                                 across both. ADR
-                                                 fully landed.
+                                                 D1-D3 (decl + access
+                                                 + literal grammar)
+                                                 + D3a (parser disamb.)
+                                                 + D4 (struct in type
+                                                 position) + D5
+                                                 (nominal equality)
+                                                 at C1.4.2-6; D6
+                                                 (struct == deferred)
+                                                 actively rejected by
+                                                 check(); D7 (recursive-
+                                                 struct rejection) +
+                                                 D8 (lexer additions)
+                                                 + D9/D10 (out-of-scope
+                                                 list) + D11 (fn main
+                                                 -> i64 stays) + D12
+                                                 (phase-go fixture at
+                                                 c14_go_no_go) all
+                                                 landed. ADR fully in.
 
 ### 0.1 Working norms (carry forward into Phase C1)
 
@@ -311,82 +371,95 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C1.4 — structs + field access)
+### 0.2 Next session opening (C1.5 — `?T` nullability)
 
-Resume at **C1.4** per ADR 0011 D6 + the (not-yet-written) ADR
-0013 for the concrete C1.4 surface. The C1.3 primitive surface
-is complete; C1.4 introduces the first compound type.
+Resume at **C1.5** per ADR 0011 D6. The C1 primitive surface
++ first compound type (structs) are complete; C1.5 introduces
+nullable types `?T`, the `null` literal, and null-check syntax.
+This is also when the C1.4 recursive-struct restriction lifts
+— `struct Node { next: ?Node }` becomes representable because
+`?T` provides the indirection.
 
-**Pre-flight work before any code**: write ADR 0013 *PROPOSED*
-covering the concrete C1.4 surface decisions. Patterns to argue:
+**Pre-flight work before any code**: write ADR 0014 *PROPOSED*
+covering the concrete C1.5 surface decisions. Patterns to argue:
 
-  - `struct Name { field: Type, field: Type, … }` declaration
-    syntax (Rust-style); field-access via `.` (the `.` token
-    needs to land in the lexer); construction syntax (Rust-style
-    `Foo { x: 1, y: 2 }` vs C-style positional `Foo(1, 2)`); 
-    methods are explicitly out of scope (C4 with classes).
-  - `Type::Struct(StructId)` variant; `StructDecl` in AST with
-    span + field list; resolve assigns stable `StructId`; types
-    walks field types and validates.
-  - Codegen: structs as LLVM struct types (`context.struct_type`);
-    field access via GEP + load; construction via alloca + per-
-    field store (or build_insert_value for SSA composition).
-    The `vars` hashmap grows to handle struct-typed bindings.
-  - The same parallel-tree pattern as resolve / types: new
-    `StructId` ID space, FnId / VarId already in place.
+  - **`?T` syntax**: postfix `?` after a type (`?i64`, `?Point`).
+    The lexer needs no new token — `?` already isn't used; the
+    parser's `parse_type` extends to recognize a trailing `?`.
+    Alternative considered (and likely rejected): prefix `?T`.
+    Postfix matches Rust's `Option<T>` ergonomics in a more
+    lightweight form.
+  - **`null` literal**: a new keyword. Its type is `?T` for any
+    `T` (polymorphic). The type checker either lifts `null` to
+    the expected type from context (bidirectional checking
+    inside expressions) or rejects ambiguous `null` (e.g., bare
+    `let x = null;` without annotation).
+  - **Null-check operator**: probably `?.` (Rust-style propagation)
+    or pattern matching `if let Some(x) = opt { ... }`. The
+    latter is more Rust-flavoured but requires `match`/`if let`
+    which doesn't exist yet. The former is a more focused
+    addition.
+  - **Codegen**: `?T` lowers to a tagged union — for primitives,
+    a struct `{ valid: bool, value: T }`; for pointer-shaped
+    types (structs at C1.4 are passed by value, but at C2 with
+    references this gets simpler), the null-bit might fold into
+    a tagged pointer (later optimization). At C1.5 keep the
+    representation simple and always-tagged.
+  - **Recursive-struct unlock**: the C1.4 cycle check needs to
+    accept cycles that go through `?T`. The detector tracks
+    whether each edge is "direct" or "via-nullable"; cycles
+    consisting of only direct edges still error, cycles that
+    cross at least one nullable edge are accepted.
 
-Sub-steps once ADR 0013 is in (rough sketch — refine in the
+Sub-steps once ADR 0014 is in (rough sketch — refine in the
 ADR):
 
-1. **Lexer**: add `.` and `struct` keyword tokens (~5 LOC, ~3 tests).
-2. **AST + parser**: `StructDecl` at top-level (alongside
-   `FnDef`); `ExprKind::StructLit` and `ExprKind::FieldAccess`;
-   `TypeExprKind::Named` already exists as `Ident` — type
-   checker resolves to either built-in or struct.
-3. **Resolve**: `StructId`, struct table, field name -> index
-   resolution. Refactor `ResolveError` to add
-   `UndefinedStruct` / `UndefinedField` / `RedefinedStruct`.
-4. **Types**: `Type::Struct(StructId)`; field-access typing
-   (struct.field → field's type); struct-literal typing (all
-   fields present + correct types); type-equality already
-   nominal so structs compare by StructId.
-5. **Codegen**: struct LLVM types in pass 1 alongside fn
-   signatures; struct-literal lowering via alloca + per-field
-   GEP + store; field-access lowering via GEP + load; pass
-   structs by-value where possible (memcpy for large ones, but
-   C1.4 can defer that and just pass-by-pointer).
-6. **Fixtures**: at least a `c14_struct_basic.sentinel` (declare
-   + construct + access + compare), `c14_struct_in_fn.sentinel`
-   (pass + return), `c14_struct_nested.sentinel` (struct
-   field's type is another struct).
+1. **Lexer**: `null` keyword. Possibly `?.` token for the
+   null-check operator (TBD in the ADR). ~3 tokens at most.
+2. **AST + parser**: `TypeExprKind::Nullable(Box<TypeExpr>)`
+   for `?T`; `ExprKind::NullLit` for `null`; null-check
+   operator (form TBD). Parser extension to type-expr grammar.
+3. **Resolve**: passes through; nothing new at the resolve layer
+   (no new identifiers introduced).
+4. **Types**: `Type::Nullable(Box<Type>)`; null-literal typing
+   needs context (bidirectional); null-check rule; cycle-check
+   relaxation for nullable edges.
+5. **Codegen**: `?T` lowers to LLVM struct `{ i1, T }` (or
+   similar). NullLit lowers to `{ false, undef }`. Null-check
+   operator lowers to a conditional branch on the `valid` field.
 
-**Estimated effort for C1.4**: 3-4 sessions per ADR 0011 D6.
-Larger than C1.3 because struct codegen is genuinely new LLVM
-territory (GEP + struct types weren't in C0-C1.3) and the
-parallel-tree maintenance has more variants.
+**Estimated effort for C1.5**: 2-3 sessions per ADR 0011 D6.
+Likely faster than C1.4 because the parallel-tree pattern is
+well-established now and `?T` is mostly a type-level addition
+(codegen for tagged-unions is straightforward).
 
-After C1.4: **C1.5** (`?T`) per ADR 0011 D6. Then C1.6 (arrays),
-C1.7 (generics). The remaining C1 budget per ADR 0011 D6 is
-~12-17 weeks if estimates hold.
+After C1.5: **C1.6** (arrays) per ADR 0011 D6. Then C1.7
+(generics). The remaining C1 budget per ADR 0011 D6 is ~7-13
+weeks if estimates hold.
 
-C1.3 retrospective (estimate vs actual): ADR 0011 D6 estimated
+C1.4 retrospective (estimate vs actual): ADR 0011 D6 estimated
+"3-4 weeks" for C1.4; the actual was ~1 session across 3
+commits. Faster than estimated because the C1.3 infrastructure
+(the parallel-tree pattern, the query graph, the type-driven
+codegen) absorbed most of the design overhead. The pieces that
+took the most thought were: (a) the codegen value-type widening
+from `IntValue<'ctx>` to `BasicValueEnum<'ctx>` (mechanical but
+pervasive), (b) the D3a parser disambiguation (first context-
+sensitive parsing — kept bounded with a single Boolean), (c)
+the recursive-struct cycle detection (depth-first walk with a
+Color tristate). Notes captured in STATE.md decisions 54-64.
+
+C1.3 retrospective (kept for reference): ADR 0011 D6 estimated
 "2 weeks" for C1.3; the actual was ~1 session across 3 commits.
-Faster than estimated because the C1.2 infrastructure (the
-parallel-tree pattern, the query graph, the `Type` field on
-TypedExpr) absorbed most of the design overhead. The pieces
-that took the most thought were: (a) the AST decision to keep
-Cmp / Logic separate from Binary (kept clean exhaustivity at
-the type-check and codegen layers), (b) the PHI-vs-alloca
-question for short-circuit lowering (PHI won because the join
-block is short and SSA-natural). Notes captured in STATE.md
-decisions 46-53.
+Same pattern — infrastructure investment from previous sub-
+phases compounds.
 
 ### 0.3 Quick-status block for session start
 
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: 8a173c4 (docs: C1.3 landed; HANDOVER §0 + STATE.md + ADR refresh).
+    Local HEAD: <docs-commit> (docs: C1.4 landed; HANDOVER §0 + STATE.md + ADR refresh).
     Branch in sync with origin/main (verify with `git status` at session start).
     Working tree clean.
 
@@ -394,28 +467,34 @@ For pasting into a fresh chat to bootstrap context:
     compiler MVP) + Phase C1.0 (salsa retrofit) + Phase C1.1
     (sentinel-resolve crate lift) + Phase C1.2 (annotation grammar
     + sentinel-types::check) + Phase C1.3 (bool, i32, comparison +
-    logical operators; ADR 0010 D9 C-style truthy retired) complete.
-    564 active workspace tests. c05 go/no-go program (now in the
-    C1.3 phase-go shape with is_positive returning bool +
-    pick(cond: bool, ...) + bool if-condition) runs at
-    tests/pass/c05_go_no_go.sentinel: stdout "10", exit 0. Pipeline
+    logical operators; ADR 0010 D9 C-style truthy retired) +
+    Phase C1.4 (structs + field access + struct literals; ADR 0013
+    ACCEPTED) complete. 632 active workspace tests. c05 go/no-go
+    program (C1.3 bool flow shape) runs at
+    tests/pass/c05_go_no_go.sentinel: stdout "10", exit 0. c14
+    go/no-go program (C1.4 struct flow shape) runs at
+    tests/pass/c14_go_no_go.sentinel: stdout "7", exit 0. Pipeline
     is parse_query → resolve_query → check_query → codegen with
-    diagnostics transitively accumulated. ADRs 0001-0010 + 0012
-    ACCEPTED; ADR 0011 PROPOSED with D1 + D2 + D3 + D4 + D5 + D10
-    fully exercised (the C1 primitive surface is complete; structs/
-    nullability/arrays/generics remain).
+    diagnostics transitively accumulated and codegen value type
+    is BasicValueEnum<'ctx> (widened from IntValue<'ctx> at C1.4
+    so struct values flow through). ADRs 0001-0010 + 0012 + 0013
+    ACCEPTED; ADR 0011 PROPOSED with D1 + D2 + D3 + D4 + D5 + D7
+    + D10 + D11 fully exercised (the C1 type system covers
+    primitive scalars + nominal structs; nullability/arrays/
+    generics remain).
 
     Phase C1 in flight per ADR 0011 (PROPOSED, 8 sub-phases).
-    C1.0 + C1.1 + C1.2 + C1.3 all landed. Next: start C1.4
-    (struct definitions + field access) per ADR 0011 D6. Begin
-    with ADR 0013 PROPOSED for the concrete C1.4 surface (struct
-    decl syntax, field-access syntax, struct-Type variant). ~3-4
-    sessions estimated; see HANDOVER §0.2 for the rough plan.
+    C1.0 + C1.1 + C1.2 + C1.3 + C1.4 all landed. Next: start C1.5
+    (`?T` nullability + null-checks) per ADR 0011 D6. Begin with
+    ADR 0014 PROPOSED for the concrete C1.5 surface (postfix `?T`
+    syntax, `null` literal, null-check operator, recursive-struct
+    cycle-check relaxation for nullable edges). ~2-3 sessions
+    estimated; see HANDOVER §0.2 for the rough plan.
 
     Read docs/HANDOVER.md §0 in full, then docs/STATE.md, then
-    ADR 0011 D6 sub-phase budget. ADR 0012 is closed-ACCEPTED;
-    ADRs 0009-0010 are historical context for C0. Resume at
-    C1.4 per HANDOVER §0.2.
+    ADR 0011 D6 sub-phase budget. ADRs 0009-0010 are historical
+    context for C0; 0012 + 0013 are closed-ACCEPTED. Resume at
+    C1.5 per HANDOVER §0.2.
 
 ---
 

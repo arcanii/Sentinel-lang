@@ -1,0 +1,8 @@
+// Struct with a bool field exercises the per-field type alignment
+// in LLVM struct types — fields are heterogeneous (i64 + i1 + i64).
+struct Tagged { value: i64, valid: bool, count: i64 }
+
+fn main() -> i64 {
+    let t = Tagged { value: 5, valid: true, count: 9 };
+    if t.valid { t.value + t.count } else { 0 }
+}
