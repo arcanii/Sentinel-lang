@@ -17,6 +17,12 @@
 //! postfix field access. No longest-match concerns at C1.4 — `.`
 //! has no `..` / `.=` / `...` neighbours until ranges arrive in C2+.
 //!
+//! C1.5 adds (per ADR 0014 D8): `null` keyword (the nullable
+//! literal) and `?` token (postfix type-position marker for `?T`).
+//! `?` is reserved for type-position only at C1.5 — the
+//! expression-position uses (`?.`, `??`, `?` propagation, postfix
+//! `x!` unwrap) are deferred per D11 to avoid token-role conflicts.
+//!
 //! Whitespace and `//` line comments are skipped. ADR 0009 D4 picks
 //! hand-written recursive descent for the parser; the lexer uses
 //! `logos` because the regex-DFA payoff is purely positive at this
@@ -46,6 +52,8 @@ pub enum TokenKind {
     False,
     #[token("struct")]
     Struct,
+    #[token("null")]
+    Null,
 
     #[token("+")]
     Plus,
@@ -93,6 +101,8 @@ pub enum TokenKind {
     Colon,
     #[token(".")]
     Dot,
+    #[token("?")]
+    Question,
     #[token("->")]
     Arrow,
 
@@ -174,7 +184,7 @@ mod tests {
     #[test]
     fn lex_all_punctuation() {
         assert_eq!(
-            kinds("( ) { } , ; : . ->"),
+            kinds("( ) { } , ; : . ? ->"),
             vec![
                 TokenKind::LParen,
                 TokenKind::RParen,
@@ -184,6 +194,7 @@ mod tests {
                 TokenKind::Semi,
                 TokenKind::Colon,
                 TokenKind::Dot,
+                TokenKind::Question,
                 TokenKind::Arrow,
             ]
         );
@@ -201,7 +212,7 @@ mod tests {
     #[test]
     fn lex_all_keywords() {
         assert_eq!(
-            kinds("let fn if else true false struct"),
+            kinds("let fn if else true false struct null"),
             vec![
                 TokenKind::Let,
                 TokenKind::Fn,
@@ -210,6 +221,7 @@ mod tests {
                 TokenKind::True,
                 TokenKind::False,
                 TokenKind::Struct,
+                TokenKind::Null,
             ]
         );
     }
@@ -254,6 +266,62 @@ mod tests {
                 TokenKind::IntLit,
                 TokenKind::RBrace,
             ]
+        );
+    }
+
+    // ----- C1.5: null keyword + `?` token -----
+
+    #[test]
+    fn lex_null_keyword() {
+        assert_eq!(kinds("null"), vec![TokenKind::Null]);
+    }
+
+    #[test]
+    fn lex_null_keyword_distinct_from_ident_prefix() {
+        // `nullify`, `null_value` must NOT lex as Null + ident-fragment.
+        assert_eq!(
+            kinds("nullify null_value nullable"),
+            vec![TokenKind::Ident, TokenKind::Ident, TokenKind::Ident]
+        );
+    }
+
+    #[test]
+    fn lex_question_token() {
+        assert_eq!(kinds("?"), vec![TokenKind::Question]);
+    }
+
+    #[test]
+    fn lex_nullable_type_shape() {
+        // The shape the parser will see for `?i64`.
+        assert_eq!(
+            kinds("?i64"),
+            vec![TokenKind::Question, TokenKind::Ident]
+        );
+    }
+
+    #[test]
+    fn lex_nullable_annotation_in_let() {
+        // `let x: ?i64 = null`
+        assert_eq!(
+            kinds("let x: ?i64 = null"),
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Colon,
+                TokenKind::Question,
+                TokenKind::Ident,
+                TokenKind::Eq,
+                TokenKind::Null,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_question_token_with_whitespace() {
+        // Whitespace allowed between `?` and base type per ADR 0014 D1.
+        assert_eq!(
+            kinds("? i64"),
+            vec![TokenKind::Question, TokenKind::Ident]
         );
     }
 
