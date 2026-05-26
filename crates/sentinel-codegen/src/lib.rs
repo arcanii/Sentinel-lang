@@ -7,18 +7,19 @@
 //! **pass 2** emits each fn body.
 //!
 //! `main` is required and is given an `i32` return type (the C ABI
-//! `main` signature); other fns return `i64`. The exit code is the
-//! i32-truncated i64 value of `main`'s tail expression. Programs
-//! additionally produce stdout via `print(x)` calls.
+//! `main` signature); other fns return their declared type. The
+//! exit code is the i32-truncated i64 value of `main`'s tail
+//! expression. Programs additionally produce stdout via `print(x)`
+//! calls.
 //!
 //! **C1.1.2** moved name resolution out of this crate into
-//! `sentinel-resolve`. **C1.2.4** swaps the input shape from
-//! `ResolvedProgram` to `TypedProgram`: codegen now reads the
-//! type-checked tree where every expression carries a [`Type`]
-//! field. At C1.2 the universe is just `I64` so the LLVM lowering
-//! is identical to the pre-types path; the input change is
-//! infrastructure for C1.3 when `i32` and `bool` arrive and the
-//! `Type` field actually drives instruction selection.
+//! `sentinel-resolve`. **C1.2.4** swapped the input shape from
+//! `ResolvedProgram` to `TypedProgram`. **C1.3** activates the
+//! `Type` field: lowering picks between `i1` (bool), `i32`, and
+//! `i64` storage based on the expression's typed annotation.
+//! Comparisons emit `build_int_compare`; logical `&&` / `||` are
+//! short-circuit via basic-block control flow (one PHI per join);
+//! unary `!` is implemented as `xor x, 1`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -31,10 +32,10 @@ use inkwell::targets::{
 use inkwell::types::IntType;
 use inkwell::values::{BasicMetadataValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{IntPredicate, OptimizationLevel};
-use sentinel_ast::{BinOp, UnaryOp};
+use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_resolve::{FnId, VarId};
 use sentinel_types::{
-    TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
+    Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -70,16 +71,22 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
     let builder = context.create_builder();
 
     let i32_type = context.i32_type();
-    let i64_type = context.i64_type();
 
     // Pass 1: declare every function in the typed program's
     // signature table. Signatures are indexed by FnId.0; FnId(0) is
     // always `print` (the runtime symbol).
     let mut fns: HashMap<FnId, FunctionValue> = HashMap::new();
     for signature in &program.fn_signatures {
-        let return_type = if signature.is_main { i32_type } else { i64_type };
-        let param_types: Vec<_> =
-            (0..signature.param_types.len()).map(|_| i64_type.into()).collect();
+        let return_type = if signature.is_main {
+            i32_type
+        } else {
+            llvm_int_type(&context, signature.return_type)
+        };
+        let param_types: Vec<_> = signature
+            .param_types
+            .iter()
+            .map(|t| llvm_int_type(&context, *t).into())
+            .collect();
         let fn_type = return_type.fn_type(&param_types, false);
         let llvm_name = if signature.is_runtime {
             "sentinel_print"
@@ -96,7 +103,6 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
         let mut cx = CodegenCtx {
             context: &context,
             builder,
-            i64_type,
             fns,
             current_fn: None,
             vars: HashMap::new(),
@@ -140,17 +146,35 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
 }
 
 /// Per-function codegen state. See C1.1.2 docs in commit 9374edf
-/// for the lifetime / dropping rationale.
-struct CodegenCtx<'ctx, 'a> {
-    context: &'a Context,
+/// for the lifetime / dropping rationale. C1.3 stores both the
+/// alloca pointer AND its [`Type`] per binding so `build_load` can
+/// pick the right element type — this replaces the C1.2 `i64_type`
+/// field, which assumed every value was i64. The `'ctx` lifetime
+/// covers both the borrowed Context and the LLVM derived values
+/// (Builder, FunctionValue, etc.) — they all live and die together.
+struct CodegenCtx<'ctx> {
+    context: &'ctx Context,
     builder: Builder<'ctx>,
-    i64_type: IntType<'ctx>,
     fns: HashMap<FnId, FunctionValue<'ctx>>,
     current_fn: Option<FunctionValue<'ctx>>,
-    vars: HashMap<VarId, PointerValue<'ctx>>,
+    vars: HashMap<VarId, (PointerValue<'ctx>, Type)>,
 }
 
-impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
+/// Map a Sentinel [`Type`] to its LLVM `IntType`. Bool is `i1`
+/// (LLVM's native 1-bit type), i32/i64 are their obvious widths.
+fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
+    match ty {
+        Type::Bool => context.bool_type(),
+        Type::I32 => context.i32_type(),
+        Type::I64 => context.i64_type(),
+    }
+}
+
+impl<'ctx> CodegenCtx<'ctx> {
+    fn llvm_int_type(&self, ty: Type) -> IntType<'ctx> {
+        llvm_int_type(self.context, ty)
+    }
+
     fn compile_fn(
         &mut self,
         fn_def: &TypedFnDef,
@@ -171,14 +195,15 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
                 .get_nth_param(i as u32)
                 .expect("param exists")
                 .into_int_value();
+            let llvm_ty = self.llvm_int_type(param.ty);
             let alloca = self
                 .builder
-                .build_alloca(self.i64_type, &param.name)
+                .build_alloca(llvm_ty, &param.name)
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
             self.builder
                 .build_store(alloca, arg)
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            self.vars.insert(param.id, alloca);
+            self.vars.insert(param.id, (alloca, param.ty));
         }
 
         let body_val = self.lower_block(&fn_def.body, program)?;
@@ -207,16 +232,17 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
         program: &TypedProgram,
     ) -> Result<(), CodegenError> {
         match &stmt.kind {
-            TypedStmtKind::Let { id, name, value, .. } => {
+            TypedStmtKind::Let { id, name, ty, value, .. } => {
                 let v = self.lower_expr(value, program)?;
+                let llvm_ty = self.llvm_int_type(*ty);
                 let alloca = self
                     .builder
-                    .build_alloca(self.i64_type, name)
+                    .build_alloca(llvm_ty, name)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 self.builder
                     .build_store(alloca, v)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
-                self.vars.insert(*id, alloca);
+                self.vars.insert(*id, (alloca, *ty));
             }
             TypedStmtKind::Expr(e) => {
                 let _ = self.lower_expr(e, program)?;
@@ -236,6 +262,25 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
         self.lower_expr(&block.tail, program)
     }
 
+    /// Lower a typed condition expression to an `i1` for use in a
+    /// conditional branch. If the condition is already `bool`, just
+    /// return its value; otherwise (ADR 0010 D9 C-style truthy on
+    /// integers, retires at C1.3 step 5) compare-NE against zero.
+    fn lower_cond_to_i1(
+        &mut self,
+        cond: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<IntValue<'ctx>, CodegenError> {
+        let cond_val = self.lower_expr(cond, program)?;
+        if cond.ty == Type::Bool {
+            return Ok(cond_val);
+        }
+        let zero = self.llvm_int_type(cond.ty).const_zero();
+        self.builder
+            .build_int_compare(IntPredicate::NE, cond_val, zero, "ifcond")
+            .map_err(|e| CodegenError::Builder(e.to_string()))
+    }
+
     fn lower_if(
         &mut self,
         cond: &TypedExpr,
@@ -243,21 +288,20 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
         else_branch: &TypedBlock,
         program: &TypedProgram,
     ) -> Result<IntValue<'ctx>, CodegenError> {
-        let cond_val = self.lower_expr(cond, program)?;
-        let zero = self.i64_type.const_zero();
-        let cond_i1 = self
-            .builder
-            .build_int_compare(IntPredicate::NE, cond_val, zero, "ifcond")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let cond_i1 = self.lower_cond_to_i1(cond, program)?;
 
         let current_fn = self.current_fn.expect("current_fn set by compile_fn");
         let then_bb = self.context.append_basic_block(current_fn, "then");
         let else_bb = self.context.append_basic_block(current_fn, "else");
         let merge_bb = self.context.append_basic_block(current_fn, "ifmerge");
 
+        // Both arms produce the same type per check(); use that for
+        // the merged-result alloca.
+        let result_ty = then_branch.ty;
+        let llvm_result_ty = self.llvm_int_type(result_ty);
         let result = self
             .builder
-            .build_alloca(self.i64_type, "ifresult")
+            .build_alloca(llvm_result_ty, "ifresult")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
         self.builder
@@ -285,9 +329,90 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
         self.builder.position_at_end(merge_bb);
         let loaded = self
             .builder
-            .build_load(self.i64_type, result, "ifresult_val")
+            .build_load(llvm_result_ty, result, "ifresult_val")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
         Ok(loaded.into_int_value())
+    }
+
+    /// Short-circuit lowering for `lhs && rhs`. Evaluates `lhs`; if
+    /// false, the result is `lhs` (i.e. false) and `rhs` is skipped;
+    /// otherwise the result is `rhs`. Implemented with one branching
+    /// basic block and a PHI at the merge.
+    fn lower_logic_and(
+        &mut self,
+        lhs: &TypedExpr,
+        rhs: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<IntValue<'ctx>, CodegenError> {
+        let l = self.lower_expr(lhs, program)?;
+        let lhs_end_bb = self
+            .builder
+            .get_insert_block()
+            .expect("builder positioned inside a basic block");
+        let current_fn = self.current_fn.expect("current_fn set by compile_fn");
+        let rhs_bb = self.context.append_basic_block(current_fn, "and_rhs");
+        let merge_bb = self.context.append_basic_block(current_fn, "and_merge");
+        self.builder
+            .build_conditional_branch(l, rhs_bb, merge_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        self.builder.position_at_end(rhs_bb);
+        let r = self.lower_expr(rhs, program)?;
+        let rhs_end_bb = self
+            .builder
+            .get_insert_block()
+            .expect("builder positioned inside a basic block");
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(self.context.bool_type(), "and_result")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        phi.add_incoming(&[(&l, lhs_end_bb), (&r, rhs_end_bb)]);
+        Ok(phi.as_basic_value().into_int_value())
+    }
+
+    /// Short-circuit lowering for `lhs || rhs`. If `lhs` is true,
+    /// skip `rhs` and the result is `lhs`; otherwise the result is
+    /// `rhs`.
+    fn lower_logic_or(
+        &mut self,
+        lhs: &TypedExpr,
+        rhs: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<IntValue<'ctx>, CodegenError> {
+        let l = self.lower_expr(lhs, program)?;
+        let lhs_end_bb = self
+            .builder
+            .get_insert_block()
+            .expect("builder positioned inside a basic block");
+        let current_fn = self.current_fn.expect("current_fn set by compile_fn");
+        let rhs_bb = self.context.append_basic_block(current_fn, "or_rhs");
+        let merge_bb = self.context.append_basic_block(current_fn, "or_merge");
+        self.builder
+            .build_conditional_branch(l, merge_bb, rhs_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        self.builder.position_at_end(rhs_bb);
+        let r = self.lower_expr(rhs, program)?;
+        let rhs_end_bb = self
+            .builder
+            .get_insert_block()
+            .expect("builder positioned inside a basic block");
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        self.builder.position_at_end(merge_bb);
+        let phi = self
+            .builder
+            .build_phi(self.context.bool_type(), "or_result")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        phi.add_incoming(&[(&l, lhs_end_bb), (&r, rhs_end_bb)]);
+        Ok(phi.as_basic_value().into_int_value())
     }
 
     fn lower_call(
@@ -326,16 +451,23 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
         program: &TypedProgram,
     ) -> Result<IntValue<'ctx>, CodegenError> {
         match &expr.kind {
-            TypedExprKind::IntLit(n) => Ok(self.i64_type.const_int(*n as u64, true)),
+            TypedExprKind::IntLit(n) => {
+                let llvm_ty = self.llvm_int_type(expr.ty);
+                Ok(llvm_ty.const_int(*n as u64, true))
+            }
+            TypedExprKind::BoolLit(b) => {
+                Ok(self.context.bool_type().const_int(u64::from(*b), false))
+            }
             TypedExprKind::Var(id) => {
-                let ptr = *self
+                let (ptr, ty) = *self
                     .vars
                     .get(id)
                     .expect("VarId from a typed program is always live in its scope");
                 let name = self.var_name(*id, program).unwrap_or("load");
+                let llvm_ty = self.llvm_int_type(ty);
                 let loaded = self
                     .builder
-                    .build_load(self.i64_type, ptr, name)
+                    .build_load(llvm_ty, ptr, name)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 Ok(loaded.into_int_value())
             }
@@ -343,6 +475,15 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
                 let v = self.lower_expr(inner, program)?;
                 self.builder
                     .build_int_neg(v, "neg")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))
+            }
+            TypedExprKind::Unary(UnaryOp::Not, inner) => {
+                // `!b` for bool b ≡ `b XOR 1`. The type checker
+                // guarantees inner.ty == Bool, so the constant is i1.
+                let v = self.lower_expr(inner, program)?;
+                let one = self.context.bool_type().const_int(1, false);
+                self.builder
+                    .build_xor(v, one, "not")
                     .map_err(|e| CodegenError::Builder(e.to_string()))
             }
             TypedExprKind::Binary(op, lhs, rhs) => {
@@ -355,6 +496,27 @@ impl<'ctx, 'a> CodegenCtx<'ctx, 'a> {
                     BinOp::Div => self.builder.build_int_signed_div(l, r, "div"),
                 };
                 result.map_err(|e| CodegenError::Builder(e.to_string()))
+            }
+            TypedExprKind::Cmp(op, lhs, rhs) => {
+                let l = self.lower_expr(lhs, program)?;
+                let r = self.lower_expr(rhs, program)?;
+                let predicate = match op {
+                    CmpOp::Eq => IntPredicate::EQ,
+                    CmpOp::Ne => IntPredicate::NE,
+                    CmpOp::Lt => IntPredicate::SLT,
+                    CmpOp::Le => IntPredicate::SLE,
+                    CmpOp::Gt => IntPredicate::SGT,
+                    CmpOp::Ge => IntPredicate::SGE,
+                };
+                self.builder
+                    .build_int_compare(predicate, l, r, "cmp")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))
+            }
+            TypedExprKind::Logic(LogicOp::And, lhs, rhs) => {
+                self.lower_logic_and(lhs, rhs, program)
+            }
+            TypedExprKind::Logic(LogicOp::Or, lhs, rhs) => {
+                self.lower_logic_or(lhs, rhs, program)
             }
             TypedExprKind::Block(b) => self.lower_block(b, program),
             TypedExprKind::If { cond, then_branch, else_branch } => {
@@ -403,9 +565,11 @@ fn find_var_name_in_block(block: &TypedBlock, id: VarId) -> Option<&str> {
 
 fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
     match &expr.kind {
-        TypedExprKind::IntLit(_) | TypedExprKind::Var(_) => None,
+        TypedExprKind::IntLit(_) | TypedExprKind::BoolLit(_) | TypedExprKind::Var(_) => None,
         TypedExprKind::Unary(_, inner) => find_var_name_in_expr(inner, id),
-        TypedExprKind::Binary(_, lhs, rhs) => {
+        TypedExprKind::Binary(_, lhs, rhs)
+        | TypedExprKind::Cmp(_, lhs, rhs)
+        | TypedExprKind::Logic(_, lhs, rhs) => {
             find_var_name_in_expr(lhs, id).or_else(|| find_var_name_in_expr(rhs, id))
         }
         TypedExprKind::Block(b) => find_var_name_in_block(b, id),
@@ -482,5 +646,87 @@ mod tests {
     #[test]
     fn compile_block_expression() {
         compile_src("fn main() -> i64 { let r = { let y = 4; y + 1 }; r * 2 }").expect("compile");
+    }
+
+    // ----- C1.3 codegen smoke -----
+
+    #[test]
+    fn compile_bool_literal_program() {
+        compile_src("fn yes() -> bool { true }\nfn main() -> i64 { 0 }").expect("compile");
+    }
+
+    #[test]
+    fn compile_comparison_program() {
+        compile_src("fn gt(x: i64) -> bool { x > 0 }\nfn main() -> i64 { 0 }").expect("compile");
+    }
+
+    #[test]
+    fn compile_all_six_comparisons() {
+        for op in ["==", "!=", "<", "<=", ">", ">="] {
+            let src = format!(
+                "fn cmp(x: i64, y: i64) -> bool {{ x {op} y }}\nfn main() -> i64 {{ 0 }}"
+            );
+            compile_src(&src).unwrap_or_else(|e| panic!("op {op} failed: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn compile_logical_and() {
+        compile_src(
+            "fn band(a: bool, b: bool) -> bool { a && b }\nfn main() -> i64 { 0 }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_logical_or() {
+        compile_src(
+            "fn bor(a: bool, b: bool) -> bool { a || b }\nfn main() -> i64 { 0 }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_unary_not() {
+        compile_src("fn neg(b: bool) -> bool { !b }\nfn main() -> i64 { 0 }").expect("compile");
+    }
+
+    #[test]
+    fn compile_if_with_bool_condition() {
+        compile_src(
+            "fn main() -> i64 { let b: bool = true; if b { 1 } else { 2 } }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_if_with_comparison_condition() {
+        compile_src("fn main() -> i64 { if 5 > 0 { 1 } else { 2 } }").expect("compile");
+    }
+
+    #[test]
+    fn compile_c13_phasego_program() {
+        // The C1.3 phase-go program per ADR 0012 appendix — bool
+        // flow end-to-end through is_positive, pick, comparisons.
+        let src = "\
+fn double(x: i64) -> i64 { x * 2 }
+fn is_positive(x: i64) -> bool { x > 0 }
+fn pick(cond: bool, a: i64, b: i64) -> i64 { if cond { a } else { b } }
+fn main() -> i64 {
+    let x: i64 = 5;
+    let y = pick(is_positive(x), double(x), 0);
+    print(y)
+}
+";
+        compile_src(src).expect("compile");
+    }
+
+    #[test]
+    fn compile_i32_signature_program() {
+        // i32 type resolves and codegen handles it. Integer literals
+        // default to i64 so direct i32 arithmetic still requires
+        // future casting infrastructure (C1.5+); this fixture
+        // exercises i32 propagation across fn boundaries.
+        compile_src("fn echo32(x: i32) -> i32 { x }\nfn main() -> i64 { 0 }").expect("compile");
     }
 }

@@ -29,7 +29,9 @@ pub struct Spanned<T> {
 }
 
 /// Binary arithmetic operator. C0.1 supports the four operators in
-/// the lexer's punctuation set.
+/// the lexer's punctuation set. Comparison + logical operators get
+/// their own enums per ADR 0012 D6/D7 because their typing rules
+/// differ (cmp: same → Bool; logic: Bool, Bool → Bool, short-circuit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinOp {
     Add,
@@ -49,37 +51,100 @@ impl BinOp {
     }
 }
 
-/// Unary operator. C0.1 ships only negation per ADR 0010 D8.
+/// Comparison operator (C1.3, per ADR 0012 D6). Six operators; both
+/// operands must be the same numeric type, result is `bool`. Parsed
+/// non-associatively (`1 < 2 < 3` is a parse error) per D6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl CmpOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            CmpOp::Eq => "==",
+            CmpOp::Ne => "!=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+        }
+    }
+}
+
+/// Logical operator (C1.3, per ADR 0012 D7). Binary, short-circuit;
+/// both operands must be `bool`, result is `bool`. Unary `!` is a
+/// new [`UnaryOp::Not`] variant alongside [`UnaryOp::Neg`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LogicOp {
+    And,
+    Or,
+}
+
+impl LogicOp {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            LogicOp::And => "&&",
+            LogicOp::Or => "||",
+        }
+    }
+}
+
+/// Unary operator. C0.1 ships only negation per ADR 0010 D8; C1.3
+/// adds logical not (`!`) per ADR 0012 D7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnaryOp {
     Neg,
+    Not,
 }
 
 impl UnaryOp {
     pub fn symbol(self) -> &'static str {
         match self {
             UnaryOp::Neg => "-",
+            UnaryOp::Not => "!",
         }
     }
 }
 
 /// The expression layer of the AST. Per ADR 0010 D8 the precedence
-/// ladder is unary < mul < add; the parser builds this shape
-/// directly. Parens are syntactic only and are not represented in
-/// the tree — they are recoverable from precedence.
+/// ladder is unary < mul < add; C1.3 (per ADR 0012 D6/D7) widens it
+/// to `or < and < cmp < add < mul < unary`. The parser builds this
+/// shape directly. Parens are syntactic only and are not represented
+/// in the tree — they are recoverable from precedence.
 ///
 /// C0.3 added [`ExprKind::Var`] for variable references. C0.4 adds
 /// [`ExprKind::Block`] (brace-wrapped block as expression),
 /// [`ExprKind::If`] (mandatory else per ADR 0010 D9, C-style truthy
-/// condition), and [`ExprKind::Call`] (direct call by identifier
-/// per ADR 0010 D10; only `print` resolves to anything in C0.4
-/// since `fn` defs wait for C0.5).
+/// condition; the C-style-truthy retires at C1.3 step 5), and
+/// [`ExprKind::Call`] (direct call by identifier per ADR 0010 D10;
+/// only `print` resolves to anything in C0.4 since `fn` defs wait
+/// for C0.5).
+///
+/// C1.3 adds [`ExprKind::BoolLit`] (the `true` / `false` literals
+/// per ADR 0012 D5), [`ExprKind::Cmp`] (six comparison operators per
+/// D6, separate from [`ExprKind::Binary`] because the typing rule
+/// differs — same → Bool), and [`ExprKind::Logic`] (`&&` / `||`,
+/// short-circuit per D7).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExprKind {
     IntLit(i64),
+    BoolLit(bool),
     Var(String),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
+    /// Comparison expression per ADR 0012 D6. Non-associative — the
+    /// parser rejects `1 < 2 < 3` at parse time.
+    Cmp(CmpOp, Box<Expr>, Box<Expr>),
+    /// Logical `&&` / `||` per ADR 0012 D7. Short-circuit semantics
+    /// are codegen's concern; the AST shape is the same as any other
+    /// binary node.
+    Logic(LogicOp, Box<Expr>, Box<Expr>),
     Block(Box<Block>),
     If {
         cond: Box<Expr>,
@@ -195,9 +260,16 @@ impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ExprKind::IntLit(n) => write!(f, "{n}"),
+            ExprKind::BoolLit(b) => write!(f, "{b}"),
             ExprKind::Var(name) => write!(f, "{name}"),
             ExprKind::Unary(op, inner) => write!(f, "({} {})", op.symbol(), inner.kind),
             ExprKind::Binary(op, lhs, rhs) => {
+                write!(f, "({} {} {})", op.symbol(), lhs.kind, rhs.kind)
+            }
+            ExprKind::Cmp(op, lhs, rhs) => {
+                write!(f, "({} {} {})", op.symbol(), lhs.kind, rhs.kind)
+            }
+            ExprKind::Logic(op, lhs, rhs) => {
                 write!(f, "({} {} {})", op.symbol(), lhs.kind, rhs.kind)
             }
             ExprKind::Block(b) => b.fmt(f),
@@ -366,8 +438,63 @@ mod tests {
     }
 
     #[test]
+    fn cmpop_symbols() {
+        assert_eq!(CmpOp::Eq.symbol(), "==");
+        assert_eq!(CmpOp::Ne.symbol(), "!=");
+        assert_eq!(CmpOp::Lt.symbol(), "<");
+        assert_eq!(CmpOp::Le.symbol(), "<=");
+        assert_eq!(CmpOp::Gt.symbol(), ">");
+        assert_eq!(CmpOp::Ge.symbol(), ">=");
+    }
+
+    #[test]
+    fn logicop_symbols() {
+        assert_eq!(LogicOp::And.symbol(), "&&");
+        assert_eq!(LogicOp::Or.symbol(), "||");
+    }
+
+    #[test]
     fn unaryop_symbols() {
         assert_eq!(UnaryOp::Neg.symbol(), "-");
+        assert_eq!(UnaryOp::Not.symbol(), "!");
+    }
+
+    #[test]
+    fn display_bool_lit() {
+        let t = Spanned { kind: ExprKind::BoolLit(true), span: 0..4 };
+        let f = Spanned { kind: ExprKind::BoolLit(false), span: 0..5 };
+        assert_eq!(t.to_string(), "true");
+        assert_eq!(f.to_string(), "false");
+    }
+
+    #[test]
+    fn display_cmp_eq() {
+        let e = Spanned {
+            kind: ExprKind::Cmp(CmpOp::Eq, Box::new(lit(1, 0..1)), Box::new(lit(2, 5..6))),
+            span: 0..6,
+        };
+        assert_eq!(e.to_string(), "(== 1 2)");
+    }
+
+    #[test]
+    fn display_logic_and() {
+        let lhs = Spanned { kind: ExprKind::BoolLit(true), span: 0..4 };
+        let rhs = Spanned { kind: ExprKind::BoolLit(false), span: 8..13 };
+        let e = Spanned {
+            kind: ExprKind::Logic(LogicOp::And, Box::new(lhs), Box::new(rhs)),
+            span: 0..13,
+        };
+        assert_eq!(e.to_string(), "(&& true false)");
+    }
+
+    #[test]
+    fn display_unary_not() {
+        let inner = Spanned { kind: ExprKind::BoolLit(true), span: 1..5 };
+        let e = Spanned {
+            kind: ExprKind::Unary(UnaryOp::Not, Box::new(inner)),
+            span: 0..5,
+        };
+        assert_eq!(e.to_string(), "(! true)");
     }
 
     #[test]

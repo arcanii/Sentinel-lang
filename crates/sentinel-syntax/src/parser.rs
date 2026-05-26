@@ -1,22 +1,35 @@
-//! Hand-written recursive descent parser for Sentinel C0.1-C0.4.
+//! Hand-written recursive descent parser for Sentinel C0/C1.
 //!
-//! C0.4 grammar (subset of ADR 0010):
+//! C1.3 grammar (subset of ADRs 0010 + 0012):
 //!
 //! ```text
-//! program     = stmt* tail_expr
+//! program     = fn_def+
+//! fn_def      = 'fn' Ident '(' param_list ')' '->' type block
+//! param       = Ident ':' type
+//! type        = Ident
+//!
 //! stmt        = let_stmt | expr_stmt
-//! let_stmt    = 'let' Ident '=' expr ';'
+//! let_stmt    = 'let' Ident (':' type)? '=' expr ';'
 //! expr_stmt   = expr ';'
 //! tail_expr   = expr                                  (no trailing ';')
 //!
-//! expr        = if_expr | add_expr                    (if only at expr top)
+//! expr        = if_expr | or_expr                     (if only at expr top)
 //! if_expr     = 'if' expr block else_branch
 //! else_branch = 'else' (if_expr | block)
 //! block       = '{' stmt* tail_expr '}'
-//! add_expr    = mul_expr (('+' | '-') mul_expr)*       left-assoc
-//! mul_expr    = unary    (('*' | '/') unary)*          left-assoc
-//! unary       = '-' unary | atom
+//!
+//! Precedence ladder (C1.3, ADR 0012 D7):
+//!   or_expr   = and_expr ('||' and_expr)*              left-assoc, short-circuit
+//!   and_expr  = cmp_expr ('&&' cmp_expr)*              left-assoc, short-circuit
+//!   cmp_expr  = add_expr (cmp_op add_expr)?            NON-associative (D6)
+//!   add_expr  = mul_expr (('+' | '-') mul_expr)*       left-assoc
+//!   mul_expr  = unary    (('*' | '/') unary)*          left-assoc
+//!   unary     = ('-' | '!') unary | atom
+//!
+//!   cmp_op    = '==' | '!=' | '<' | '<=' | '>' | '>='
+//!
 //! atom        = IntLit
+//!             | 'true' | 'false'                       (C1.3 BoolLit)
 //!             | Ident                                 (Var, unless followed by `(`)
 //!             | Ident '(' arg_list ')'                (Call)
 //!             | '(' expr ')'
@@ -32,12 +45,10 @@
 //! `ParseError::Lex` variant so the front-end has a single error
 //! type. Parse errors are fail-fast — error recovery is deferred
 //! until parser ergonomics demand it.
-//!
-//! `fn` definitions arrive in C0.5 per ADR 0009 D6.
 
 use sentinel_ast::{
-    BinOp, Block, Expr, ExprKind, FnDef, Param, Program, Span, Spanned, Stmt, StmtKind, TypeExpr,
-    TypeExprKind, UnaryOp,
+    BinOp, Block, CmpOp, Expr, ExprKind, FnDef, LogicOp, Param, Program, Span, Spanned, Stmt,
+    StmtKind, TypeExpr, TypeExprKind, UnaryOp,
 };
 
 use crate::{lex, LexError, TokenKind};
@@ -80,6 +91,16 @@ pub enum ParseError {
     IntLitOverflow {
         text: String,
         #[label("does not fit in i64")]
+        span: miette::SourceSpan,
+    },
+
+    #[error("chained comparison is not allowed")]
+    #[diagnostic(
+        code(sentinel::parse::chained_comparison),
+        help("comparison operators are non-associative per ADR 0012 D6; parenthesise one side, e.g. `(a < b) && (b < c)`")
+    )]
+    ChainedComparison {
+        #[label("second comparison operator")]
         span: miette::SourceSpan,
     },
 }
@@ -501,7 +522,64 @@ impl<'a> Parser<'a> {
         if self.peek_kind() == Some(TokenKind::If) {
             return self.parse_if();
         }
-        self.parse_add()
+        self.parse_or()
+    }
+
+    /// `or_expr = and_expr ('||' and_expr)*` — left-associative,
+    /// short-circuit (semantics handled by codegen).
+    fn parse_or(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_and()?;
+        while self.peek_kind() == Some(TokenKind::PipePipe) {
+            self.advance();
+            let rhs = self.parse_and()?;
+            let span = lhs.span.start..rhs.span.end;
+            lhs = Spanned {
+                kind: ExprKind::Logic(LogicOp::Or, Box::new(lhs), Box::new(rhs)),
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    /// `and_expr = cmp_expr ('&&' cmp_expr)*` — left-associative.
+    fn parse_and(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_cmp()?;
+        while self.peek_kind() == Some(TokenKind::AmpAmp) {
+            self.advance();
+            let rhs = self.parse_cmp()?;
+            let span = lhs.span.start..rhs.span.end;
+            lhs = Spanned {
+                kind: ExprKind::Logic(LogicOp::And, Box::new(lhs), Box::new(rhs)),
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    /// `cmp_expr = add_expr (cmp_op add_expr)?` — non-associative
+    /// per ADR 0012 D6. A second comparison operator is rejected at
+    /// parse time as [`ParseError::ChainedComparison`].
+    fn parse_cmp(&mut self) -> Result<Expr, ParseError> {
+        let lhs = self.parse_add()?;
+        let Some(op) = cmp_op_from_token(self.peek_kind()) else {
+            return Ok(lhs);
+        };
+        self.advance();
+        let rhs = self.parse_add()?;
+        // Reject a chained comparison: `a < b < c` — the third atom
+        // would imply a second cmp op next.
+        if let Some(t) = self.peek() {
+            if cmp_op_from_token(Some(t.kind)).is_some() {
+                return Err(ParseError::ChainedComparison {
+                    span: to_source_span(&t.span),
+                });
+            }
+        }
+        let span = lhs.span.start..rhs.span.end;
+        Ok(Spanned {
+            kind: ExprKind::Cmp(op, Box::new(lhs), Box::new(rhs)),
+            span,
+        })
     }
 
     fn parse_if(&mut self) -> Result<Expr, ParseError> {
@@ -665,13 +743,18 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
-        if self.peek_kind() == Some(TokenKind::Minus) {
+        let unary_op = match self.peek_kind() {
+            Some(TokenKind::Minus) => Some(UnaryOp::Neg),
+            Some(TokenKind::Bang) => Some(UnaryOp::Not),
+            _ => None,
+        };
+        if let Some(op) = unary_op {
             let start = self.peek().expect("checked above").span.start;
             self.advance();
             let inner = self.parse_unary()?;
             let span = start..inner.span.end;
             return Ok(Spanned {
-                kind: ExprKind::Unary(UnaryOp::Neg, Box::new(inner)),
+                kind: ExprKind::Unary(op, Box::new(inner)),
                 span,
             });
         }
@@ -688,6 +771,14 @@ impl<'a> Parser<'a> {
                     span: to_source_span(&span),
                 })?;
                 Ok(Spanned { kind: ExprKind::IntLit(n), span })
+            }
+            Some(TokenKind::True) => {
+                let span = self.advance().expect("peeked").span.clone();
+                Ok(Spanned { kind: ExprKind::BoolLit(true), span })
+            }
+            Some(TokenKind::False) => {
+                let span = self.advance().expect("peeked").span.clone();
+                Ok(Spanned { kind: ExprKind::BoolLit(false), span })
             }
             Some(TokenKind::Ident) => {
                 let name_span = self.advance().expect("peeked").span.clone();
@@ -768,6 +859,20 @@ impl<'a> Parser<'a> {
 
 fn to_source_span(span: &Span) -> miette::SourceSpan {
     (span.start, span.len()).into()
+}
+
+/// Map a comparison-operator [`TokenKind`] to its [`CmpOp`].
+/// Returns `None` for non-comparison tokens (and for `None`).
+fn cmp_op_from_token(tok: Option<TokenKind>) -> Option<CmpOp> {
+    match tok? {
+        TokenKind::EqEq => Some(CmpOp::Eq),
+        TokenKind::BangEq => Some(CmpOp::Ne),
+        TokenKind::Lt => Some(CmpOp::Lt),
+        TokenKind::LtEq => Some(CmpOp::Le),
+        TokenKind::Gt => Some(CmpOp::Gt),
+        TokenKind::GtEq => Some(CmpOp::Ge),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -1395,5 +1500,134 @@ mod tests {
         let p = parse_ok_program(src);
         assert_eq!(p.fns[0].span, 0..src.len());
         assert_eq!(p.fns[0].name_span, 3..7); // `main`
+    }
+
+    // C1.3 bool literals, comparisons, logicals, unary `!`.
+
+    #[test]
+    fn parse_bool_literal_true() {
+        assert_eq!(pretty("true"), "true");
+    }
+
+    #[test]
+    fn parse_bool_literal_false() {
+        assert_eq!(pretty("false"), "false");
+    }
+
+    #[test]
+    fn parse_cmp_eq() {
+        assert_eq!(pretty("1 == 2"), "(== 1 2)");
+    }
+
+    #[test]
+    fn parse_cmp_ne() {
+        assert_eq!(pretty("a != b"), "(!= a b)");
+    }
+
+    #[test]
+    fn parse_cmp_lt_le_gt_ge() {
+        assert_eq!(pretty("1 < 2"), "(< 1 2)");
+        assert_eq!(pretty("1 <= 2"), "(<= 1 2)");
+        assert_eq!(pretty("1 > 2"), "(> 1 2)");
+        assert_eq!(pretty("1 >= 2"), "(>= 1 2)");
+    }
+
+    #[test]
+    fn parse_logic_and() {
+        assert_eq!(pretty("true && false"), "(&& true false)");
+    }
+
+    #[test]
+    fn parse_logic_or() {
+        assert_eq!(pretty("true || false"), "(|| true false)");
+    }
+
+    #[test]
+    fn parse_unary_not() {
+        assert_eq!(pretty("!true"), "(! true)");
+    }
+
+    #[test]
+    fn parse_unary_not_double() {
+        assert_eq!(pretty("!!true"), "(! (! true))");
+    }
+
+    #[test]
+    fn parse_precedence_cmp_higher_than_logic_and() {
+        // a < b && c < d  parses as (&& (< a b) (< c d))
+        assert_eq!(pretty("a < b && c < d"), "(&& (< a b) (< c d))");
+    }
+
+    #[test]
+    fn parse_precedence_and_higher_than_or() {
+        // a || b && c parses as (|| a (&& b c))
+        assert_eq!(pretty("a || b && c"), "(|| a (&& b c))");
+    }
+
+    #[test]
+    fn parse_precedence_add_higher_than_cmp() {
+        // 1 + 2 < 3 parses as (< (+ 1 2) 3)
+        assert_eq!(pretty("1 + 2 < 3"), "(< (+ 1 2) 3)");
+    }
+
+    #[test]
+    fn parse_precedence_unary_not_higher_than_logic() {
+        // !a && b parses as (&& (! a) b), not (! (&& a b))
+        assert_eq!(pretty("!a && b"), "(&& (! a) b)");
+    }
+
+    #[test]
+    fn parse_left_assoc_and() {
+        assert_eq!(pretty("a && b && c"), "(&& (&& a b) c)");
+    }
+
+    #[test]
+    fn parse_left_assoc_or() {
+        assert_eq!(pretty("a || b || c"), "(|| (|| a b) c)");
+    }
+
+    #[test]
+    fn parse_error_chained_comparison() {
+        let err = parse_expr("1 < 2 < 3").unwrap_err();
+        assert!(matches!(err, ParseError::ChainedComparison { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_error_chained_comparison_mixed_ops() {
+        // Mixed cmp ops are also rejected: `a == b != c`
+        let err = parse_expr("a == b != c").unwrap_err();
+        assert!(matches!(err, ParseError::ChainedComparison { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_chained_comparison_via_parens_ok() {
+        // Parenthesising one side allows the comparison ladder via &&.
+        assert_eq!(pretty("(1 < 2) && (2 < 3)"), "(&& (< 1 2) (< 2 3))");
+    }
+
+    #[test]
+    fn parse_if_condition_with_comparison() {
+        assert_eq!(
+            pretty("if x != 0 { 1 } else { 2 }"),
+            "(if (!= x 0) (block 1) (block 2))"
+        );
+    }
+
+    #[test]
+    fn parse_fn_returning_bool() {
+        let p = parse_ok_program("fn is_pos(x: i64) -> bool { x > 0 }");
+        assert_eq!(p.fns[0].return_type.kind.to_string(), "bool");
+        assert_eq!(p.fns[0].body.tail.kind.to_string(), "(> x 0)");
+    }
+
+    #[test]
+    fn parse_let_with_bool_value() {
+        let block = parse_block_str("{ let b = true; b }").expect("parse");
+        match &block.stmts[0].kind {
+            StmtKind::Let { value, .. } => {
+                assert_eq!(value.kind.to_string(), "true");
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
     }
 }

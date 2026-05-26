@@ -22,7 +22,7 @@
 //! `sentinel_resolve::resolve_query`.
 
 use salsa::Accumulator;
-use sentinel_ast::{BinOp, Span, TypeExpr, TypeExprKind, UnaryOp};
+use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, TypeExpr, TypeExprKind, UnaryOp};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
     FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef, ResolvedProgram,
@@ -33,29 +33,45 @@ use sentinel_resolve::{
 // Type universe
 // =============================================================================
 
-/// The C1.2 type universe is just `I64`. C1.3 (per ADR 0012 D5-D8)
-/// adds `I32` and `Bool`. C1.4+ extends with struct, nullable,
-/// references, etc.
+/// Sentinel's type universe. C1.2 shipped only `I64`; C1.3 (per ADR
+/// 0012 D5-D8) widens to `I32` and `Bool`. C1.4+ extends with
+/// struct, nullable, references, etc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Type {
     I64,
+    I32,
+    Bool,
+}
+
+impl Type {
+    /// `true` if this is a signed-integer type (`I32` or `I64`).
+    /// Used to gate arithmetic-operator typing rules — comparisons
+    /// accept any integer type but logicals require [`Type::Bool`].
+    pub fn is_int(self) -> bool {
+        matches!(self, Type::I32 | Type::I64)
+    }
 }
 
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::I64 => write!(f, "i64"),
+            Type::I32 => write!(f, "i32"),
+            Type::Bool => write!(f, "bool"),
         }
     }
 }
 
 /// Resolve a surface-level [`TypeExpr`] to a concrete [`Type`].
-/// At C1.2 the only recognised name is `"i64"` per ADR 0012 D4.
-/// Anything else surfaces as [`TypeError::UnknownType`].
+/// C1.2 recognised only `"i64"`; C1.3 (per ADR 0012 D3 + D5) adds
+/// `"i32"` and `"bool"`. Anything else surfaces as
+/// [`TypeError::UnknownType`].
 fn resolve_type_expr(te: &TypeExpr) -> Result<Type, TypeError> {
     match &te.kind {
         TypeExprKind::Ident(name) => match name.as_str() {
             "i64" => Ok(Type::I64),
+            "i32" => Ok(Type::I32),
+            "bool" => Ok(Type::Bool),
             other => Err(TypeError::UnknownType {
                 name: other.to_string(),
                 span: to_source_span(&te.span),
@@ -159,9 +175,17 @@ pub struct TypedExpr {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypedExprKind {
     IntLit(i64),
+    /// Bool literal. Always carries [`Type::Bool`].
+    BoolLit(bool),
     Var(VarId),
     Unary(UnaryOp, Box<TypedExpr>),
     Binary(BinOp, Box<TypedExpr>, Box<TypedExpr>),
+    /// Comparison. Both operands are the same numeric type; the
+    /// expression's `ty` field is always [`Type::Bool`].
+    Cmp(CmpOp, Box<TypedExpr>, Box<TypedExpr>),
+    /// Logical `&&` / `||`. Both operands are `bool`; result is
+    /// `bool`. Short-circuit semantics live in codegen.
+    Logic(LogicOp, Box<TypedExpr>, Box<TypedExpr>),
     Block(Box<TypedBlock>),
     If {
         cond: Box<TypedExpr>,
@@ -401,6 +425,7 @@ fn check_expr(
 ) -> Result<TypedExpr, TypeError> {
     let (kind, ty) = match &expr.kind {
         ResolvedExprKind::IntLit(n) => (TypedExprKind::IntLit(*n), Type::I64),
+        ResolvedExprKind::BoolLit(b) => (TypedExprKind::BoolLit(*b), Type::Bool),
         ResolvedExprKind::Var(id) => {
             let ty = *env
                 .get(id)
@@ -409,14 +434,45 @@ fn check_expr(
         }
         ResolvedExprKind::Unary(op, inner) => {
             let inner_t = check_expr(inner, env, signatures)?;
-            // C1.2 universe is I64 only; unary minus on I64 → I64.
-            let ty = inner_t.ty;
+            // C1.3: `-x` requires int; `!x` requires bool.
+            let ty = match op {
+                UnaryOp::Neg => {
+                    if !inner_t.ty.is_int() {
+                        return Err(TypeError::Mismatch {
+                            expected: Type::I64,
+                            got: inner_t.ty,
+                            span: to_source_span(&inner.span),
+                        });
+                    }
+                    inner_t.ty
+                }
+                UnaryOp::Not => {
+                    if inner_t.ty != Type::Bool {
+                        return Err(TypeError::Mismatch {
+                            expected: Type::Bool,
+                            got: inner_t.ty,
+                            span: to_source_span(&inner.span),
+                        });
+                    }
+                    Type::Bool
+                }
+            };
             (TypedExprKind::Unary(*op, Box::new(inner_t)), ty)
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
             let l = check_expr(lhs, env, signatures)?;
             let r = check_expr(rhs, env, signatures)?;
-            // C1.2: arithmetic on I64 → I64. Comparison/logical at C1.3.
+            // C1.3: arithmetic requires both operands the same int
+            // type (I32 or I64); result is that int type. Bool
+            // arithmetic is rejected — comparisons / logicals are
+            // the typed-bool ops.
+            if !l.ty.is_int() {
+                return Err(TypeError::Mismatch {
+                    expected: Type::I64,
+                    got: l.ty,
+                    span: to_source_span(&lhs.span),
+                });
+            }
             if l.ty != r.ty {
                 return Err(TypeError::Mismatch {
                     expected: l.ty,
@@ -424,10 +480,51 @@ fn check_expr(
                     span: to_source_span(&rhs.span),
                 });
             }
+            let _ = op; // arithmetic dispatch is codegen's concern
             let ty = l.ty;
             (
                 TypedExprKind::Binary(*op, Box::new(l), Box::new(r)),
                 ty,
+            )
+        }
+        ResolvedExprKind::Cmp(op, lhs, rhs) => {
+            let l = check_expr(lhs, env, signatures)?;
+            let r = check_expr(rhs, env, signatures)?;
+            // C1.3: comparisons require both operands the same type
+            // (any type with equality semantics — C1.3 supports
+            // I32, I64, Bool). Result is always Bool.
+            if l.ty != r.ty {
+                return Err(TypeError::Mismatch {
+                    expected: l.ty,
+                    got: r.ty,
+                    span: to_source_span(&rhs.span),
+                });
+            }
+            (
+                TypedExprKind::Cmp(*op, Box::new(l), Box::new(r)),
+                Type::Bool,
+            )
+        }
+        ResolvedExprKind::Logic(op, lhs, rhs) => {
+            let l = check_expr(lhs, env, signatures)?;
+            let r = check_expr(rhs, env, signatures)?;
+            if l.ty != Type::Bool {
+                return Err(TypeError::Mismatch {
+                    expected: Type::Bool,
+                    got: l.ty,
+                    span: to_source_span(&lhs.span),
+                });
+            }
+            if r.ty != Type::Bool {
+                return Err(TypeError::Mismatch {
+                    expected: Type::Bool,
+                    got: r.ty,
+                    span: to_source_span(&rhs.span),
+                });
+            }
+            (
+                TypedExprKind::Logic(*op, Box::new(l), Box::new(r)),
+                Type::Bool,
             )
         }
         ResolvedExprKind::Block(b) => {
@@ -437,8 +534,19 @@ fn check_expr(
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
             let cond_t = check_expr(cond, env, signatures)?;
-            // Per ADR 0010 D9 (still active at C1.2; retires at C1.3):
-            // the if-condition is C-style truthy on i64.
+            // ADR 0010 D9's C-style truthy is still active here in
+            // step 2: an `if` condition may be `bool` (preferred,
+            // typically the result of a comparison) OR an integer
+            // (C-style truthy via NE-zero in codegen). The bool-only
+            // enforcement lands in step 5 alongside the seven-fixture
+            // condition rewrite.
+            if cond_t.ty != Type::Bool && !cond_t.ty.is_int() {
+                return Err(TypeError::Mismatch {
+                    expected: Type::Bool,
+                    got: cond_t.ty,
+                    span: to_source_span(&cond.span),
+                });
+            }
             let then_t = check_block(then_branch, env, signatures)?;
             let else_t = check_block(else_branch, env, signatures)?;
             if then_t.ty != else_t.ty {
@@ -761,5 +869,172 @@ fn main() -> i64 {
         let r2 = check_query(&db, file).clone();
         assert_eq!(r1, r2);
         assert!(r1.is_some());
+    }
+
+    // ----- C1.3: bool literals + comparisons + logicals + unary ! -----
+
+    #[test]
+    fn bool_lit_true_types_to_bool() {
+        let p = check_ok("fn pred() -> bool { true }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.fns[0].return_type, Type::Bool);
+        assert_eq!(p.fns[0].body.ty, Type::Bool);
+    }
+
+    #[test]
+    fn bool_lit_false_types_to_bool() {
+        let p = check_ok("fn pred() -> bool { false }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.fns[0].body.ty, Type::Bool);
+    }
+
+    #[test]
+    fn comparison_produces_bool() {
+        let p = check_ok("fn gt(x: i64, y: i64) -> bool { x > y }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.fns[0].body.ty, Type::Bool);
+    }
+
+    #[test]
+    fn all_six_comparisons_produce_bool() {
+        for op in ["==", "!=", "<", "<=", ">", ">="] {
+            let src = format!(
+                "fn cmp(x: i64, y: i64) -> bool {{ x {op} y }}\nfn main() -> i64 {{ 0 }}"
+            );
+            let p = check_ok(&src);
+            assert_eq!(p.fns[0].body.ty, Type::Bool, "op = {op}");
+        }
+    }
+
+    #[test]
+    fn logic_and_requires_both_bool() {
+        let p = check_ok("fn pred(b: bool) -> bool { b && true }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.fns[0].body.ty, Type::Bool);
+    }
+
+    #[test]
+    fn logic_or_requires_both_bool() {
+        let p = check_ok("fn pred(b: bool) -> bool { b || false }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.fns[0].body.ty, Type::Bool);
+    }
+
+    #[test]
+    fn unary_not_requires_bool() {
+        let p = check_ok("fn neg(b: bool) -> bool { !b }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.fns[0].body.ty, Type::Bool);
+    }
+
+    #[test]
+    fn comparison_chain_in_logical_typechecks() {
+        let p = check_ok(
+            "fn between(x: i64, lo: i64, hi: i64) -> bool { x > lo && x < hi }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].body.ty, Type::Bool);
+    }
+
+    // ----- C1.3 error paths -----
+
+    #[test]
+    fn logical_and_rejects_int_operand() {
+        let err = check_err("fn bad(x: i64) -> bool { x && true }\nfn main() -> i64 { 0 }");
+        assert!(
+            matches!(err, TypeError::Mismatch { expected: Type::Bool, got: Type::I64, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn logical_or_rejects_int_operand() {
+        let err = check_err("fn bad() -> bool { true || 1 }\nfn main() -> i64 { 0 }");
+        assert!(
+            matches!(err, TypeError::Mismatch { expected: Type::Bool, got: Type::I64, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn unary_not_rejects_int() {
+        let err = check_err("fn bad(x: i64) -> bool { !x }\nfn main() -> i64 { 0 }");
+        assert!(
+            matches!(err, TypeError::Mismatch { expected: Type::Bool, got: Type::I64, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn arithmetic_rejects_bool_operand() {
+        // `+` on bool — should error.
+        let err = check_err("fn bad(b: bool) -> bool { b + b }\nfn main() -> i64 { 0 }");
+        assert!(
+            matches!(err, TypeError::Mismatch { got: Type::Bool, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn comparison_rejects_mismatched_operands() {
+        let err =
+            check_err("fn bad(x: i64, b: bool) -> bool { x == b }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn return_type_mismatch_bool_for_i64() {
+        let err = check_err("fn wrong() -> i64 { true }\nfn main() -> i64 { 0 }");
+        assert!(
+            matches!(
+                err,
+                TypeError::ReturnTypeMismatch {
+                    expected: Type::I64,
+                    got: Type::Bool,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn call_arg_mismatch_int_for_bool_param() {
+        let err = check_err(
+            "fn takes_bool(b: bool) -> i64 { 0 }\nfn main() -> i64 { takes_bool(1) }",
+        );
+        assert!(
+            matches!(
+                err,
+                TypeError::CallArgMismatch { expected: Type::Bool, got: Type::I64, .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    // ----- C1.3: i32 + bool universe sanity -----
+
+    #[test]
+    fn i32_type_resolves() {
+        let p = check_ok("fn echo(x: i32) -> i32 { x }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty, Type::I32);
+        assert_eq!(p.fns[0].return_type, Type::I32);
+    }
+
+    #[test]
+    fn bool_type_resolves() {
+        let p = check_ok("fn echo(x: bool) -> bool { x }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty, Type::Bool);
+        assert_eq!(p.fns[0].return_type, Type::Bool);
+    }
+
+    #[test]
+    fn c13_phasego_program_typechecks() {
+        let src = "\
+fn double(x: i64) -> i64 { x * 2 }
+fn is_positive(x: i64) -> bool { x > 0 }
+fn pick(cond: bool, a: i64, b: i64) -> i64 { if cond { a } else { b } }
+fn main() -> i64 {
+    let x: i64 = 5;
+    let y = pick(is_positive(x), double(x), 0);
+    print(y)
+}
+";
+        let p = check_ok(src);
+        assert_eq!(p.fns.len(), 4);
+        assert_eq!(p.main().body.ty, Type::I64);
     }
 }

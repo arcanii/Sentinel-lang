@@ -30,7 +30,8 @@ use std::collections::HashMap;
 
 use salsa::Accumulator;
 use sentinel_ast::{
-    BinOp, Block, Expr, ExprKind, FnDef, Program, Span, Spanned, Stmt, StmtKind, TypeExpr, UnaryOp,
+    BinOp, Block, CmpOp, Expr, ExprKind, FnDef, LogicOp, Program, Span, Spanned, Stmt, StmtKind,
+    TypeExpr, UnaryOp,
 };
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 
@@ -164,10 +165,17 @@ pub type ResolvedExpr = Spanned<ResolvedExprKind>;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ResolvedExprKind {
     IntLit(i64),
+    /// Bool literal (`true` / `false`) per ADR 0012 D5. Added at C1.3.
+    BoolLit(bool),
     /// Variable reference, resolved to a binding's [`VarId`].
     Var(VarId),
     Unary(UnaryOp, Box<ResolvedExpr>),
     Binary(BinOp, Box<ResolvedExpr>, Box<ResolvedExpr>),
+    /// Comparison per ADR 0012 D6. Mirrors AST's [`ExprKind::Cmp`].
+    Cmp(CmpOp, Box<ResolvedExpr>, Box<ResolvedExpr>),
+    /// Logical `&&` / `||` per ADR 0012 D7. Mirrors AST's
+    /// [`ExprKind::Logic`]. Short-circuit semantics belong to codegen.
+    Logic(LogicOp, Box<ResolvedExpr>, Box<ResolvedExpr>),
     Block(Box<ResolvedBlock>),
     If {
         cond: Box<ResolvedExpr>,
@@ -428,6 +436,7 @@ fn resolve_expr(
 ) -> Result<ResolvedExpr, ResolveError> {
     let kind = match &expr.kind {
         ExprKind::IntLit(n) => ResolvedExprKind::IntLit(*n),
+        ExprKind::BoolLit(b) => ResolvedExprKind::BoolLit(*b),
         ExprKind::Var(name) => {
             let id =
                 *vars
@@ -446,6 +455,16 @@ fn resolve_expr(
             let l = resolve_expr(lhs, fn_table, signatures, vars, next_var_id)?;
             let r = resolve_expr(rhs, fn_table, signatures, vars, next_var_id)?;
             ResolvedExprKind::Binary(*op, Box::new(l), Box::new(r))
+        }
+        ExprKind::Cmp(op, lhs, rhs) => {
+            let l = resolve_expr(lhs, fn_table, signatures, vars, next_var_id)?;
+            let r = resolve_expr(rhs, fn_table, signatures, vars, next_var_id)?;
+            ResolvedExprKind::Cmp(*op, Box::new(l), Box::new(r))
+        }
+        ExprKind::Logic(op, lhs, rhs) => {
+            let l = resolve_expr(lhs, fn_table, signatures, vars, next_var_id)?;
+            let r = resolve_expr(rhs, fn_table, signatures, vars, next_var_id)?;
+            ResolvedExprKind::Logic(*op, Box::new(l), Box::new(r))
         }
         ExprKind::Block(b) => ResolvedExprKind::Block(Box::new(resolve_block(
             b, fn_table, signatures, vars, next_var_id,

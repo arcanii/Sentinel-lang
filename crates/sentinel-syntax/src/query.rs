@@ -108,6 +108,13 @@ fn parse_error_to_diagnostic(err: &ParseError) -> Diagnostic {
             message: format!("integer literal `{text}` does not fit in i64"),
             span: span.offset()..(span.offset() + span.len()),
         },
+        ParseError::ChainedComparison { span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::chained_comparison",
+            message: "chained comparison is not allowed".to_string(),
+            span: span.offset()..(span.offset() + span.len()),
+        },
     }
 }
 
