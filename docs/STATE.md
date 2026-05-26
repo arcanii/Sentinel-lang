@@ -12,25 +12,51 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C1.2 landed** — annotation grammar + sentinel-types
-type checker exercised end-to-end across four feat commits
-(af16655 lexer `:` token; 90965a5 AST/parser/resolve annotation
-grammar + 22 pass-test fixture rewrite; ded07bc sentinel-types
-scaffold with Type/TypedProgram/check/check_query; c9a21ff
-codegen+driver consume TypedProgram). The bootstrap pipeline is
-now **parse_query → resolve_query → check_query → codegen** with
-diagnostics transitively accumulated across all four stages. At
-C1.2 the type universe is `I64` only per ADR 0012 D4 — every
-annotation must say `i64` (anything else surfaces as
-`TypeError::UnknownType`); the Mismatch / ReturnTypeMismatch /
-CallArgMismatch variants exist but are dormant at C1.2 since
-everything types to I64. They activate at C1.3 when bool + i32
-arrive. ADR 0011 D5 (sentinel-types::check() real) and ADR 0012
-D1-D4 (annotation grammar) are now exercised. All 22 C0 pass-test
-fixtures still run end-to-end through the new typed pipeline; the
-go/no-go program at `tests/pass/c05_go_no_go.sentinel` (now
-annotated per ADR 0012 D10) still produces stdout `10\n`, exit 0.
-Workspace test delta: +24 (492 total: +15 sentinel-types, +9 in
+Last updated: **C1.3 landed** — the C1 primitive surface is now
+complete (bool + comparison + logical operators) across three
+feat commits (2801a81 lexer adds the 11 C1.3 tokens; cd1c0d4
+AST + parser + resolve + types + codegen handle bool literals,
+comparisons, logicals, unary `!`, with i32 added to the type
+universe; ba5fd9d retires ADR 0010 D9 C-style truthy and rewrites
+the 6 if-using C0 fixtures + adds 7 new c13 pass-test fixtures).
+The bootstrap pipeline is still **parse_query → resolve_query →
+check_query → codegen**; the new pieces flow Type information
+through the existing four-stage shape rather than adding new
+stages. Type universe at C1.3 close: `{ I64, I32, Bool }`, all
+three recognised by `resolve_type_expr` and all three handled
+type-aware in codegen (i1 for Bool, i32 / i64 for the int
+widths). Operator-typing rules per ADR 0012:
+  * arithmetic `+ - * /` — both operands same int type → same
+    int type (Bool rejected)
+  * comparisons `== != < <= > >=` — both operands same type →
+    Bool (parser-level non-associative per D6)
+  * logicals `&& ||` — both operands Bool → Bool, short-circuit
+    via PHI-based basic-block control flow in codegen
+  * unary `-` — int → same int type
+  * unary `!` — Bool → Bool (lowered as xor with i1 const 1)
+  * `if cond` — cond must be Bool (ADR 0010 D9 retired)
+The dormant `Mismatch` / `ReturnTypeMismatch` / `CallArgMismatch`
+variants from C1.2 are now exercised by C1.3's operator + bool
+flow. The C0 go/no-go program at `tests/pass/c05_go_no_go.sentinel`
+was rewritten per the ADR 0012 appendix's C1.3 phase-go shape
+(`is_positive(x)` returns bool, `pick(cond: bool, ...)` consumes
+bool, the if-condition is bool) and still produces stdout `10\n`,
+exit 0. Workspace test delta: +72 (564 total) — +9 lexer, +28
+AST+parser, +18 types, +10 codegen, +7 pass-test fixtures (c13_*).
+i32 is in the universe but practically thin without literal
+typing (integer literals default to I64), which is a C1.5+
+concern. Pre-C1.3 context: **C1.2 landed** — annotation grammar
++ sentinel-types type checker exercised end-to-end across four
+feat commits (af16655 lexer `:` token; 90965a5 AST/parser/resolve
+annotation grammar + 22 pass-test fixture rewrite; ded07bc
+sentinel-types scaffold with Type/TypedProgram/check/check_query;
+c9a21ff codegen+driver consume TypedProgram). At C1.2 the type
+universe was `I64` only per ADR 0012 D4 — every annotation had
+to say `i64`; Mismatch / ReturnTypeMismatch / CallArgMismatch
+variants existed but were dormant at C1.2 since everything typed
+to I64. ADR 0011 D5 (sentinel-types::check() real) and ADR 0012
+D1-D4 (annotation grammar) became exercised at C1.2. Workspace
+test delta at C1.2: +24 (492 total: +15 sentinel-types, +9 in
 ast/syntax). Pre-C1.2 context: **ADR 0012 PROPOSED** — concrete
 C1 surface syntax ADR landed as a docs-only commit pinning the
 annotation grammar (D1-D4, for C1.2) and the bool/comparison/
@@ -1185,7 +1211,9 @@ scaffold stubs.
 | C1.2.2 | AST/parser annotation grammar + 22 fixture rewrite             | Done | 90965a5 |
 | C1.2.3 | sentinel-types scaffold (Type, TypedProgram, check, check_query) | Done | ded07bc |
 | C1.2.4 | Codegen consumes TypedProgram; driver chains check_query       | Done | c9a21ff |
-| C1.3  | bool, i32, comparison ops, logical ops; retire C-style truthy  | Pending |         |
+| C1.3.1 | Lexer: 11 C1.3 tokens (`true` `false` `==` `!=` `<` `<=` `>` `>=` `&&` `\|\|` `!`) | Done | 2801a81 |
+| C1.3.2-4 | AST + parser + resolve + types + codegen for bool/cmp/logic/`!`; type universe widens to `{I64, I32, Bool}` | Done | cd1c0d4 |
+| C1.3.5 | Retire ADR 0010 D9 C-style truthy; rewrite 6 if-fixtures; add 7 c13 pass-tests | Done | ba5fd9d |
 | C1.4+ | Structs, nullability, arrays, generics                         | Planned |         |
 
 ADR 0010 (concrete C0 surface syntax) lands between C0.0 and C0.1
@@ -2047,6 +2075,109 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     C1.2.4 reviewable; the substantive type-aware codegen work
     happens at C1.3.
 
+46. (C1.3.1, ADR 0012 D9) The lexer additions for C1.3 — six
+    comparison ops (`== != < <= > >=`), three logical ops (`&& ||
+    !`), two boolean keywords (`true` `false`) — landed as a
+    single ~15-LOC patch + 9 new tests. logos's longest-match
+    guarantee made the precedence-aware lexing automatic: `==`
+    beats `=`, `!=` beats `!`, `<=` beats `<`, `>=` beats `>` —
+    no manual reordering tricks needed beyond listing them as
+    separate `#[token]` entries. The change is isolated to
+    `crates/sentinel-syntax/src/lexer.rs`; nothing downstream
+    sees the new tokens at this commit because parser changes
+    follow in step 2.
+
+47. (C1.3.2-4 / cd1c0d4) New ExprKind variants `Cmp(CmpOp, l, r)`
+    and `Logic(LogicOp, l, r)` are kept separate from `Binary`
+    rather than overloading `BinOp` with all 12 operators. The
+    motivation is exhaustive matching at the type-check and
+    codegen layers — `Binary` typing is "same int type → same
+    int type", `Cmp` is "same type → Bool", `Logic` is "Bool,
+    Bool → Bool with short-circuit". Three distinct typing rules
+    map cleanly to three distinct ExprKind arms; collapsing them
+    into Binary would require a runtime dispatch on `BinOp` in
+    every consumer. Same argument applies at the codegen layer:
+    arithmetic uses `build_int_add` / etc., comparison uses
+    `build_int_compare`, logical uses basic-block control flow
+    with a PHI — three different LLVM idioms that benefit from
+    being separate match arms.
+
+48. (C1.3.2-4 / cd1c0d4) The parser's precedence ladder grew
+    three new levels (or > and > cmp) between `parse_expr` and
+    `parse_add`. Comparisons (`cmp_expr`) are non-associative
+    per ADR 0012 D6 — a second cmp op after the first surfaces
+    as the new `ParseError::ChainedComparison` rather than
+    parsing as `(a < b) < c` (which would type-error anyway
+    because `(a < b)` is Bool and Bool can't compare with int).
+    Parser-level rejection gives a better diagnostic ("chained
+    comparison is not allowed; parenthesise one side") than
+    the type error would. Aligns with Rust; diverges from Python.
+
+49. (C1.3.2-4 / cd1c0d4) Codegen drops its `i64_type` ctx field
+    in favour of a type-driven `llvm_int_type(Type)` helper that
+    picks between `i1`, `i32`, and `i64` based on the typed
+    expression's annotation. The `vars` HashMap changes from
+    `VarId → PointerValue` to `VarId → (PointerValue, Type)` so
+    `build_load` can pick the right element type for each
+    variable. Function signatures consult `signature.return_type`
+    and `.param_types` for the LLVM fn type. The `'ctx` and `'a`
+    lifetimes on `CodegenCtx` collapsed to a single `'ctx` since
+    the borrowed Context and the LLVM derived values share the
+    same effective scope; the two-lifetime version was a hold-
+    over from C1.2 that no longer earned its keep.
+
+50. (C1.3.2-4 / cd1c0d4) Short-circuit `&&` / `||` lower to
+    PHI-based control flow: one conditional branch on the lhs,
+    a separate basic block for the rhs evaluation, and a join
+    block with a PHI that takes the lhs value (when the rhs is
+    skipped) or the rhs value (when it ran). The pattern is
+    standard for compiled languages — same shape as LLVM's
+    canonical short-circuit lowering and what Rust / Swift /
+    Clang produce. Unary `!` is the simpler case: `xor x, 1`
+    flips an i1 bit cheaper than a `compare-EQ-with-false`
+    would. The PHI versus alloca-and-branch question was
+    decided in favour of PHI because the join block is short
+    and SSA-natural; alloca-and-branch makes more sense for the
+    `if-else` lowering which has multi-statement branches.
+
+51. (C1.3.5, ADR 0010 D9 retirement / ba5fd9d) Retiring C-style
+    truthy + rewriting the 6 if-using fixtures is a single
+    commit because the type-checker rule and the fixture
+    rewrites are intrinsically coupled — flipping one without
+    the other fails the suite. The fixture rewrites are
+    mechanical (`if x` → `if x != 0`, `if 1` → `if true`, etc.);
+    the c05_go_no_go program gets the full ADR 0012 appendix
+    shape with `is_positive(x)` returning bool and
+    `pick(cond: bool, ...)` consuming it. Codegen sheds the
+    legacy "compare-NE-zero on int condition" path since the
+    type checker now guarantees `cond.ty == Bool` — a
+    `debug_assert_eq` pins the invariant. ADR 0012 D9 is fully
+    exercised; ADR 0010 D9 is now historically retired (the
+    "deliberate temporary ugliness" loop opened by C0.4 is
+    closed).
+
+52. (C1.3.5 / ba5fd9d) Short-circuit verification fixtures
+    `c13_short_circuit_and` and `c13_short_circuit_or` pin the
+    PHI-based control flow against regression. They use a
+    `print(99) > 0` rhs operand that, if evaluated, would emit
+    "99\n" to stdout; the test asserts stdout is empty. If a
+    future codegen change accidentally collapses `&&` / `||` to
+    eager evaluation (e.g., `build_and(l, r)` / `build_or(l,
+    r)`), the side effect surfaces and the test fails. This is
+    a stronger guarantee than just verifying the result value
+    is correct — many bugs that produce the right value still
+    eagerly evaluate.
+
+53. (C1.3 / cd1c0d4) i32 is in the type universe per ADR 0012
+    D3 but practically thin without literal-typing
+    infrastructure. Integer literals always type as I64; there
+    is no `5i32` suffix, no `cast(x as i32)`, no bidirectional
+    inference. So `let r: i32 = some_fn_returning_i32()` works,
+    `fn add32(a: i32, b: i32) -> i32 { a + b }` works (operands
+    flow from parameters), but `add32(2, 3)` fails (the literal
+    `2` types as I64). Future literal-typing work (C1.5+) will
+    revisit this; documented here so the C1.3 scope is clear.
+
 37. (C1.0c, ADR 0011 D1 amendment) Codegen stays outside the salsa
     query graph through Phase C1.0. ADR 0011's original D1 sketch
     had "… through codegen" in the query list, suggesting
@@ -2092,23 +2223,34 @@ All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
-  - sentinel-syntax:        99 tests (97 lib + 2 UI integration) + 0 doctests
-                            (lib = 90 lexer/parser + 7 query at C1.0b)
-  - sentinel-ast:           23 tests (1 smoke + 22 Display) + 0 doctests
-  - sentinel-codegen:       8 tests (1 smoke + 1 target init + 6 positive compile)
-                            + 0 doctests — name-resolution rejection tests
-                            migrated to sentinel-resolve at C1.1.2
+  - sentinel-syntax:        129 tests (127 lib + 2 UI integration) + 0 doctests
+                            (lib = 120 lexer/parser + 7 query;
+                             C1.3 step 1 adds 9 lexer tests for the new tokens;
+                             C1.3 step 2 adds 21 parser tests for bool / cmp /
+                             logic / precedence / non-assoc rejection)
+  - sentinel-ast:           29 tests (1 smoke + Display impls + op symbols);
+                            C1.3 adds 7 (BoolLit / Cmp / Logic / UnaryOp::Not
+                            Display + CmpOp.symbol() + LogicOp.symbol())
+  - sentinel-codegen:       18 tests (1 smoke + 1 target init + 16 positive
+                            compile) + 0 doctests; C1.3 adds 10 (per-op
+                            compile smoke + C1.3 phase-go + i32 propagation)
   - sentinel-resolve:       21 tests (positive paths + 6 error variants
                             + 4 salsa query smoke incl. parse-stage propagation
                             + cache validation) + 0 doctests
-  - sentinel-types:         15 tests (positive paths + 3 UnknownType variants
-                            + 4 salsa query smoke incl. resolve-stage propagation
-                            + cache validation) + 0 doctests
-  - sentinel-driver:        22 pass integration tests + 0 doctests
+  - sentinel-types:         34 tests (15 from C1.2 + 18 new C1.3: every typing
+                            rule positive path + every error path + C1.3
+                            phase-go program + i32/bool type-resolve sanity
+                            + if-condition-rejects-non-bool) + 0 doctests
+  - sentinel-driver:        29 pass integration tests + 0 doctests
+                            (22 from C0 + 7 new c13_* fixtures: bool_literal,
+                            comparison, logical_and/or, unary_not,
+                            short_circuit_and/or)
   - sentinel-runtime:       2 tests (smoke + sentinel_print_returns_zero) + 0 doctests
   - sentinel-base:          3 tests (salsa query runs/caches + source file accessors) + 0 doctests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
                             (sentinel-hir, -mir, -lsp)
+
+Total active workspace tests: **564**.
 
 ### Script Convention
 

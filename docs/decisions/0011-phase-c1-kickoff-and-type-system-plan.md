@@ -1,21 +1,20 @@
 # ADR 0011: Phase C1 kickoff — type system, name resolution, Salsa retrofit
 
-Status: PROPOSED — D1 (Salsa), D4 (sentinel-resolve crate lift),
-and D5 (sentinel-types::check() real) fully exercised at C1.0a-c,
-C1.1.1-2, and C1.2.1-4 respectively, with the intentional scope-cut
-that codegen stays out of the salsa query graph until C1.2+ (the
-typed-HIR rewrite per ADR 0012 lands codegen against TypedProgram,
-still as a non-tracked downstream stage). The ADR remains PROPOSED
-overall because D2 (explicit annotations at boundaries — partially
-exercised; full activation at C1.3), D3 (multi-primitive types —
-arrives at C1.3), D6 (sub-phase split — still in flight),
-D7/D8/D9/D10 (concrete C1 surface, fixture rewrite, etc. —
-exercised at C1.2 via ADR 0012), D11 (CodegenCtx layout shrink —
-done at C1.1.2), D12 (perf discipline — deferred per the ADR) all
-cover the rest of C1 (type system widening, structs, nullability,
-arrays, generics) which haven't landed yet.
+Status: PROPOSED — D1 (Salsa), D2 (explicit-annotations / inside-
+body inference), D3 (multi-primitive types I32/I64/Bool), D4
+(sentinel-resolve crate lift), D5 (sentinel-types::check() real),
+D10 (C-style truthy retired at C1.3) all fully exercised at
+C1.0a-c, C1.1.1-2, C1.2.1-4, and C1.3.1-5. With C1.3 landed the
+C1 primitive surface is complete; the ADR remains PROPOSED
+overall because D6 (sub-phase split — C1.4+ still in flight),
+D7 (concrete C1 surface — ADR 0012 covers C1.2-3 but C1.4+
+syntax decisions stay open), D11 (CodegenCtx layout shrink —
+done at C1.1.2), D12 (perf discipline — deferred per the ADR)
+cover the rest of C1 (structs, nullability, arrays, generics)
+which haven't landed yet.
 Date: 2026-05-25
-Last touched: 2026-05-26 (C1.2 landed; D5 status updated)
+Last touched: 2026-05-26 (C1.3 landed; D2 + D3 + D10 status
+updated; the C1 primitive-types surface is complete)
 Related: 0001 (staged validation), 0009 (Phase C kickoff; D1 deferred
 Salsa to C1, D7 deferred sentinel-types and sentinel-resolve stubs
 to C1), 0010 (concrete C0 surface; D5 reserved `->` for C1
@@ -266,16 +265,16 @@ duplicate it.
 
 ### D6. C1 sub-phase split — eight sub-phases.
 
-| Sub  | Title                                                    | Estimate |
-|------|----------------------------------------------------------|----------|
-| C1.0 | Salsa retrofit; pipeline becomes queries                 | 2 wks    |
-| C1.1 | sentinel-resolve crate; name resolution moves out of codegen | 2-3 wks |
-| C1.2 | sentinel-types: annotation grammar + basic type check    | 4 wks    |
-| C1.3 | Multiple primitive types (i32, i64, bool); replace C-style truthy | 2 wks |
-| C1.4 | Struct definitions + field access                        | 3-4 wks  |
-| C1.5 | `?T` nullability + null-checks                            | 2-3 wks  |
-| C1.6 | Arrays + bounds checking                                  | 3-4 wks  |
-| C1.7 | Witness-table generics (basic)                            | 4-6 wks  |
+| Sub  | Title                                                    | Estimate | Actual / Status |
+|------|----------------------------------------------------------|----------|------------------|
+| C1.0 | Salsa retrofit; pipeline becomes queries                 | 2 wks    | done (3 commits) |
+| C1.1 | sentinel-resolve crate; name resolution moves out of codegen | 2-3 wks | done (2 commits) |
+| C1.2 | sentinel-types: annotation grammar + basic type check    | 4 wks    | done (4 commits) |
+| C1.3 | Multiple primitive types (i32, i64, bool); replace C-style truthy | 2 wks | done (3 commits) |
+| C1.4 | Struct definitions + field access                        | 3-4 wks  | next             |
+| C1.5 | `?T` nullability + null-checks                            | 2-3 wks  |                  |
+| C1.6 | Arrays + bounds checking                                  | 3-4 wks  |                  |
+| C1.7 | Witness-table generics (basic)                            | 4-6 wks  |                  |
 
 Honest total: ~22-28 weeks (~5-6 months). HANDOVER §6.2's
 3-month budget for C1 was optimistic; ADR 0011 acknowledges this
@@ -313,11 +312,18 @@ sub-phase lands new diagnostics. `tests/pass/` grows with
 
 ### D10. C0.4 C-style truthy retires at C1.3.
 
-When `bool` lands in C1.3, `if cond { … }` requires `cond:
-bool`. C-style `if 5 { … }` becomes a `TypeError::Mismatch`.
-The seven if-using C0 fixtures (c04_if_*, c05_go_no_go) get
-their conditions updated — typically via comparison operators
-(also C1.3): `if x != 0 { … }`, `if cond_fn(x) { … }`, etc.
+**Status — RETIRED at C1.3.5 (ba5fd9d).** When `bool` lands in
+C1.3, `if cond { … }` requires `cond: bool`. C-style `if 5 { …
+}` is now a `TypeError::Mismatch { expected: Bool, got: I64,
+... }`. The six if-using C0 fixtures (c04_if_*, c05_go_no_go)
+were rewritten in the same commit: `if 1` → `if true`, `if 0`
+→ `if false`, `if x` (x: i64) → `if x != 0`, c05_go_no_go's
+`pick(cond: i64, ...)` → `pick(cond: bool, ...)` with a new
+`is_positive(x)` helper per the ADR 0012 appendix's C1.3
+phase-go shape. Codegen's `lower_cond_to_i1` helper retired
+since the type checker now guarantees `cond.ty == Bool`; a
+`debug_assert_eq` pins the invariant. ADR 0010 D9's
+"deliberate temporary ugliness" loop is now closed.
 
 ### D11. CodegenCtx layout shrinks.
 
