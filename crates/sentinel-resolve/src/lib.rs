@@ -54,6 +54,12 @@ pub struct FnId(pub u32);
 /// by [`resolve`]; user fns get higher IDs.
 pub const PRINT_FN_ID: FnId = FnId(0);
 
+/// Identifier for a struct declaration. Added at C1.4 per ADR 0013
+/// D4 / D5; unique per-program, assigned in source order starting
+/// at 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StructId(pub u32);
+
 /// A function's signature as needed by call-site resolution and
 /// arity-checking. Stored on the resolved program for codegen to
 /// consult without re-walking source.
@@ -84,6 +90,32 @@ pub struct ResolvedProgram {
     /// Lookup table — index by `FnId.0 as usize` for O(1) signature
     /// access from codegen / future passes.
     pub fn_signatures: Vec<FnSignature>,
+    /// Struct declarations in source order, added at C1.4. Each
+    /// carries its own [`StructId`] matching its index in this vec.
+    /// The struct table is built before fn signatures so fn
+    /// parameters can reference struct names per ADR 0013 D4.
+    pub structs: Vec<ResolvedStructDecl>,
+    pub span: Span,
+}
+
+/// A struct declaration after name resolution. The decl's
+/// [`StructId`] matches its index in [`ResolvedProgram::structs`].
+/// Field-type annotations are carried as [`TypeExpr`] (string-keyed)
+/// — sentinel-types resolves those at C1.4.5.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedStructDecl {
+    pub id: StructId,
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<ResolvedStructField>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedStructField {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: TypeExpr,
     pub span: Span,
 }
 
@@ -190,6 +222,31 @@ pub enum ResolvedExprKind {
         callee_span: Span,
         args: Vec<ResolvedExpr>,
     },
+    /// Struct literal per ADR 0013 D3. The struct's [`StructId`] is
+    /// resolved here; field names stay as strings (the type checker
+    /// validates them at C1.4.5).
+    StructLit {
+        id: StructId,
+        name: String,
+        name_span: Span,
+        fields: Vec<ResolvedFieldInit>,
+    },
+    /// Field access per ADR 0013 D2. The field stays as a string
+    /// (the type checker validates it against the struct
+    /// declaration at C1.4.5; we don't know the target's type yet).
+    FieldAccess {
+        target: Box<ResolvedExpr>,
+        field: String,
+        field_span: Span,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedFieldInit {
+    pub name: String,
+    pub name_span: Span,
+    pub value: ResolvedExpr,
+    pub span: Span,
 }
 
 // =============================================================================
@@ -258,6 +315,35 @@ pub enum ResolveError {
         help("add `fn main() {{ … }}` — it is the program entry point")
     )]
     MissingMain,
+
+    /// C1.4 / ADR 0013 D1: struct names must be unique within a
+    /// program.
+    #[error("struct `{name}` is already declared")]
+    #[diagnostic(
+        code(sentinel::resolve::redefined_struct),
+        help("each struct name must be unique within a program")
+    )]
+    RedefinedStruct {
+        name: String,
+        #[label("redefinition here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.4 / ADR 0013 D3: struct literal references an unknown
+    /// struct name. (Type-position uses of unknown names surface as
+    /// `TypeError::UnknownType` at the type-check stage, since the
+    /// type-resolution lookup happens there. Expression-position
+    /// uses are caught here at resolve time.)
+    #[error("undefined struct `{name}`")]
+    #[diagnostic(
+        code(sentinel::resolve::undefined_struct),
+        help("declare it with `struct {name} {{ … }}` at the top level before this reference")
+    )]
+    UndefinedStruct {
+        name: String,
+        #[label("no such struct")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -268,9 +354,49 @@ pub enum ResolveError {
 /// the first error encountered, matching the C0 codegen pass's
 /// existing diagnostic shape. Multi-error accumulation is a future
 /// concern.
+///
+/// Order: structs are registered first (so fn signatures can
+/// reference struct types in their TypeExprs), then fns, then fn
+/// bodies.
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     let mut next_fn_id: u32 = 0;
     let mut next_var_id: u32 = 0;
+
+    // Pass 0: collect struct declarations. Indexed by source order
+    // (each struct's StructId matches its index in resolved_structs).
+    // Names must be unique within a program; struct names and fn
+    // names share a namespace at C1.4 (a struct named `print` is
+    // illegal, same as a fn named `print`). Future ADRs may relax.
+    let mut struct_table: HashMap<String, StructId> = HashMap::new();
+    let mut resolved_structs: Vec<ResolvedStructDecl> =
+        Vec::with_capacity(program.structs.len());
+    for (idx, sd) in program.structs.iter().enumerate() {
+        if struct_table.contains_key(&sd.name) {
+            return Err(ResolveError::RedefinedStruct {
+                name: sd.name.clone(),
+                span: to_source_span(&sd.name_span),
+            });
+        }
+        let id = StructId(idx as u32);
+        struct_table.insert(sd.name.clone(), id);
+        let fields = sd
+            .fields
+            .iter()
+            .map(|f| ResolvedStructField {
+                name: f.name.clone(),
+                name_span: f.name_span.clone(),
+                ty: f.ty.clone(),
+                span: f.span.clone(),
+            })
+            .collect();
+        resolved_structs.push(ResolvedStructDecl {
+            id,
+            name: sd.name.clone(),
+            name_span: sd.name_span.clone(),
+            fields,
+            span: sd.span.clone(),
+        });
+    }
 
     // Pre-register `print`. The runtime supplies it; user code can't
     // redefine it (that path errors as RedefinedFunction below).
@@ -317,12 +443,19 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     // Pass 2: resolve each fn body.
     let mut resolved_fns = Vec::with_capacity(program.fns.len());
     for fn_def in &program.fns {
-        resolved_fns.push(resolve_fn(fn_def, &fn_table, &signatures, &mut next_var_id)?);
+        resolved_fns.push(resolve_fn(
+            fn_def,
+            &fn_table,
+            &signatures,
+            &struct_table,
+            &mut next_var_id,
+        )?);
     }
 
     Ok(ResolvedProgram {
         fns: resolved_fns,
         fn_signatures: signatures,
+        structs: resolved_structs,
         span: program.span.clone(),
     })
 }
@@ -331,6 +464,7 @@ fn resolve_fn(
     fn_def: &FnDef,
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
+    struct_table: &HashMap<String, StructId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedFnDef, ResolveError> {
     let id = *fn_table
@@ -357,7 +491,14 @@ fn resolve_fn(
         });
     }
 
-    let body = resolve_block(&fn_def.body, fn_table, signatures, &mut vars, next_var_id)?;
+    let body = resolve_block(
+        &fn_def.body,
+        fn_table,
+        signatures,
+        struct_table,
+        &mut vars,
+        next_var_id,
+    )?;
 
     Ok(ResolvedFnDef {
         id,
@@ -374,14 +515,29 @@ fn resolve_block(
     block: &Block,
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
+    struct_table: &HashMap<String, StructId>,
     vars: &mut HashMap<String, VarId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedBlock, ResolveError> {
     let mut stmts = Vec::with_capacity(block.stmts.len());
     for stmt in &block.stmts {
-        stmts.push(resolve_stmt(stmt, fn_table, signatures, vars, next_var_id)?);
+        stmts.push(resolve_stmt(
+            stmt,
+            fn_table,
+            signatures,
+            struct_table,
+            vars,
+            next_var_id,
+        )?);
     }
-    let tail = resolve_expr(&block.tail, fn_table, signatures, vars, next_var_id)?;
+    let tail = resolve_expr(
+        &block.tail,
+        fn_table,
+        signatures,
+        struct_table,
+        vars,
+        next_var_id,
+    )?;
     Ok(ResolvedBlock {
         stmts,
         tail,
@@ -393,6 +549,7 @@ fn resolve_stmt(
     stmt: &Stmt,
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
+    struct_table: &HashMap<String, StructId>,
     vars: &mut HashMap<String, VarId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedStmt, ResolveError> {
@@ -402,7 +559,14 @@ fn resolve_stmt(
             // `x` undefined in the outer scope is an error, not a self-
             // reference. (Matches C0's existing behaviour: lower_expr on
             // the RHS happens before vars.insert(name).)
-            let value = resolve_expr(value, fn_table, signatures, vars, next_var_id)?;
+            let value = resolve_expr(
+                value,
+                fn_table,
+                signatures,
+                struct_table,
+                vars,
+                next_var_id,
+            )?;
             if vars.contains_key(name) {
                 return Err(ResolveError::RedeclaredVariable {
                     name: name.clone(),
@@ -420,9 +584,14 @@ fn resolve_stmt(
                 value,
             }
         }
-        StmtKind::Expr(e) => {
-            ResolvedStmtKind::Expr(resolve_expr(e, fn_table, signatures, vars, next_var_id)?)
-        }
+        StmtKind::Expr(e) => ResolvedStmtKind::Expr(resolve_expr(
+            e,
+            fn_table,
+            signatures,
+            struct_table,
+            vars,
+            next_var_id,
+        )?),
     };
     Ok(Spanned { kind, span: stmt.span.clone() })
 }
@@ -431,6 +600,7 @@ fn resolve_expr(
     expr: &Expr,
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
+    struct_table: &HashMap<String, StructId>,
     vars: &mut HashMap<String, VarId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedExpr, ResolveError> {
@@ -449,30 +619,56 @@ fn resolve_expr(
         }
         ExprKind::Unary(op, inner) => ResolvedExprKind::Unary(
             *op,
-            Box::new(resolve_expr(inner, fn_table, signatures, vars, next_var_id)?),
+            Box::new(resolve_expr(
+                inner,
+                fn_table,
+                signatures,
+                struct_table,
+                vars,
+                next_var_id,
+            )?),
         ),
         ExprKind::Binary(op, lhs, rhs) => {
-            let l = resolve_expr(lhs, fn_table, signatures, vars, next_var_id)?;
-            let r = resolve_expr(rhs, fn_table, signatures, vars, next_var_id)?;
+            let l = resolve_expr(lhs, fn_table, signatures, struct_table, vars, next_var_id)?;
+            let r = resolve_expr(rhs, fn_table, signatures, struct_table, vars, next_var_id)?;
             ResolvedExprKind::Binary(*op, Box::new(l), Box::new(r))
         }
         ExprKind::Cmp(op, lhs, rhs) => {
-            let l = resolve_expr(lhs, fn_table, signatures, vars, next_var_id)?;
-            let r = resolve_expr(rhs, fn_table, signatures, vars, next_var_id)?;
+            let l = resolve_expr(lhs, fn_table, signatures, struct_table, vars, next_var_id)?;
+            let r = resolve_expr(rhs, fn_table, signatures, struct_table, vars, next_var_id)?;
             ResolvedExprKind::Cmp(*op, Box::new(l), Box::new(r))
         }
         ExprKind::Logic(op, lhs, rhs) => {
-            let l = resolve_expr(lhs, fn_table, signatures, vars, next_var_id)?;
-            let r = resolve_expr(rhs, fn_table, signatures, vars, next_var_id)?;
+            let l = resolve_expr(lhs, fn_table, signatures, struct_table, vars, next_var_id)?;
+            let r = resolve_expr(rhs, fn_table, signatures, struct_table, vars, next_var_id)?;
             ResolvedExprKind::Logic(*op, Box::new(l), Box::new(r))
         }
         ExprKind::Block(b) => ResolvedExprKind::Block(Box::new(resolve_block(
-            b, fn_table, signatures, vars, next_var_id,
+            b,
+            fn_table,
+            signatures,
+            struct_table,
+            vars,
+            next_var_id,
         )?)),
         ExprKind::If { cond, then_branch, else_branch } => {
-            let cond = resolve_expr(cond, fn_table, signatures, vars, next_var_id)?;
-            let then_b = resolve_block(then_branch, fn_table, signatures, vars, next_var_id)?;
-            let else_b = resolve_block(else_branch, fn_table, signatures, vars, next_var_id)?;
+            let cond = resolve_expr(cond, fn_table, signatures, struct_table, vars, next_var_id)?;
+            let then_b = resolve_block(
+                then_branch,
+                fn_table,
+                signatures,
+                struct_table,
+                vars,
+                next_var_id,
+            )?;
+            let else_b = resolve_block(
+                else_branch,
+                fn_table,
+                signatures,
+                struct_table,
+                vars,
+                next_var_id,
+            )?;
             ResolvedExprKind::If {
                 cond: Box::new(cond),
                 then_branch: Box::new(then_b),
@@ -498,7 +694,14 @@ fn resolve_expr(
             }
             let mut resolved_args = Vec::with_capacity(args.len());
             for arg in args {
-                resolved_args.push(resolve_expr(arg, fn_table, signatures, vars, next_var_id)?);
+                resolved_args.push(resolve_expr(
+                    arg,
+                    fn_table,
+                    signatures,
+                    struct_table,
+                    vars,
+                    next_var_id,
+                )?);
             }
             ResolvedExprKind::Call {
                 id,
@@ -506,8 +709,67 @@ fn resolve_expr(
                 args: resolved_args,
             }
         }
+        ExprKind::StructLit { name, name_span, fields } => {
+            let id =
+                *struct_table
+                    .get(name)
+                    .ok_or_else(|| ResolveError::UndefinedStruct {
+                        name: name.clone(),
+                        span: to_source_span(name_span),
+                    })?;
+            let mut resolved_fields = Vec::with_capacity(fields.len());
+            for fi in fields {
+                let value = resolve_expr(
+                    &fi.value,
+                    fn_table,
+                    signatures,
+                    struct_table,
+                    vars,
+                    next_var_id,
+                )?;
+                resolved_fields.push(ResolvedFieldInit {
+                    name: fi.name.clone(),
+                    name_span: fi.name_span.clone(),
+                    value,
+                    span: fi.span.clone(),
+                });
+            }
+            ResolvedExprKind::StructLit {
+                id,
+                name: name.clone(),
+                name_span: name_span.clone(),
+                fields: resolved_fields,
+            }
+        }
+        ExprKind::FieldAccess { target, field, field_span } => {
+            let target = resolve_expr(
+                target,
+                fn_table,
+                signatures,
+                struct_table,
+                vars,
+                next_var_id,
+            )?;
+            ResolvedExprKind::FieldAccess {
+                target: Box::new(target),
+                field: field.clone(),
+                field_span: field_span.clone(),
+            }
+        }
     };
     Ok(Spanned { kind, span: expr.span.clone() })
+}
+
+/// Visible to crates that consume `ResolvedProgram` and need a
+/// struct-name → [`StructId`] lookup (e.g., sentinel-types resolving
+/// type-position identifiers per ADR 0013 D4). Built on demand from
+/// `program.structs`.
+pub fn struct_name_table(program: &ResolvedProgram) -> HashMap<String, StructId> {
+    program
+        .structs
+        .iter()
+        .map(|s| (s.name.clone(), s.id))
+        .collect()
 }
 
 fn to_source_span(span: &Span) -> miette::SourceSpan {
@@ -570,6 +832,16 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
             "sentinel::resolve::missing_main",
             "program has no `main` function".to_string(),
             0..0,
+        ),
+        ResolveError::RedefinedStruct { name, span } => (
+            "sentinel::resolve::redefined_struct",
+            format!("struct `{name}` is already declared"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::UndefinedStruct { name, span } => (
+            "sentinel::resolve::undefined_struct",
+            format!("undefined struct `{name}`"),
+            span.offset()..(span.offset() + span.len()),
         ),
     };
     Diagnostic {
@@ -818,6 +1090,94 @@ mod tests {
         let diags = resolve_query::accumulated::<Diagnostic>(&db, file);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].stage, "parse");
+    }
+
+    // ----- C1.4: struct decls + struct literal + field access -----
+
+    #[test]
+    fn resolves_struct_decl() {
+        let p = resolve_ok(
+            "struct Point { x: i64, y: i64 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs.len(), 1);
+        assert_eq!(p.structs[0].name, "Point");
+        assert_eq!(p.structs[0].id, StructId(0));
+        assert_eq!(p.structs[0].fields.len(), 2);
+    }
+
+    #[test]
+    fn resolves_multiple_struct_decls_in_order() {
+        let p = resolve_ok(
+            "struct A { x: i64 }\nstruct B { y: i64 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs[0].id, StructId(0));
+        assert_eq!(p.structs[0].name, "A");
+        assert_eq!(p.structs[1].id, StructId(1));
+        assert_eq!(p.structs[1].name, "B");
+    }
+
+    #[test]
+    fn resolves_struct_literal_to_struct_id() {
+        let p = resolve_ok(
+            "struct Point { x: i64, y: i64 }\nfn main() -> i64 { let p = Point { x: 3, y: 4 }; 0 }",
+        );
+        let main = p.main();
+        match &main.body.stmts[0].kind {
+            ResolvedStmtKind::Let { value, .. } => match &value.kind {
+                ResolvedExprKind::StructLit { id, name, fields, .. } => {
+                    assert_eq!(*id, StructId(0));
+                    assert_eq!(name, "Point");
+                    assert_eq!(fields.len(), 2);
+                }
+                other => panic!("expected StructLit, got {other:?}"),
+            },
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolves_field_access() {
+        let p = resolve_ok(
+            "struct P { x: i64 }\nfn main() -> i64 { let p = P { x: 3 }; p.x }",
+        );
+        let tail = &p.main().body.tail;
+        match &tail.kind {
+            ResolvedExprKind::FieldAccess { field, target, .. } => {
+                assert_eq!(field, "x");
+                match &target.kind {
+                    ResolvedExprKind::Var(_) => {}
+                    other => panic!("expected Var target, got {other:?}"),
+                }
+            }
+            other => panic!("expected FieldAccess, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redefined_struct_errors() {
+        let err = resolve_err(
+            "struct Foo { x: i64 }\nstruct Foo { y: i64 }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, ResolveError::RedefinedStruct { ref name, .. } if name == "Foo"));
+    }
+
+    #[test]
+    fn undefined_struct_in_literal_errors() {
+        let err = resolve_err(
+            "fn main() -> i64 { let p = Bogus { x: 1 }; 0 }",
+        );
+        assert!(matches!(err, ResolveError::UndefinedStruct { ref name, .. } if name == "Bogus"));
+    }
+
+    #[test]
+    fn struct_name_table_helper_works() {
+        let p = resolve_ok(
+            "struct A { x: i64 }\nstruct B { y: i64 }\nfn main() -> i64 { 0 }",
+        );
+        let t = struct_name_table(&p);
+        assert_eq!(t["A"], StructId(0));
+        assert_eq!(t["B"], StructId(1));
+        assert_eq!(t.len(), 2);
     }
 
     #[test]

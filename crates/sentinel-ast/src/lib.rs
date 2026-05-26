@@ -131,6 +131,10 @@ impl UnaryOp {
 /// D6, separate from [`ExprKind::Binary`] because the typing rule
 /// differs — same → Bool), and [`ExprKind::Logic`] (`&&` / `||`,
 /// short-circuit per D7).
+///
+/// C1.4 adds [`ExprKind::StructLit`] (`Name { field: expr, … }` per
+/// ADR 0013 D3) and [`ExprKind::FieldAccess`] (postfix `expr.field`
+/// per D2; binds as part of the atom so `-p.x` is `-(p.x)`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExprKind {
     IntLit(i64),
@@ -156,6 +160,33 @@ pub enum ExprKind {
         callee_span: Span,
         args: Vec<Expr>,
     },
+    /// Struct literal: `Name { field: expr, … }` per ADR 0013 D3.
+    /// Field order may differ from the declaration order — the type
+    /// checker validates the set, not the order.
+    StructLit {
+        name: String,
+        name_span: Span,
+        fields: Vec<FieldInit>,
+    },
+    /// Postfix field access: `target.field` per ADR 0013 D2. Binds
+    /// as part of the atom (`-p.x` parses as `-(p.x)`).
+    FieldAccess {
+        target: Box<Expr>,
+        field: String,
+        field_span: Span,
+    },
+}
+
+/// A single `field: expr` initializer inside a struct literal. The
+/// `name_span` is the span of just the field identifier (useful for
+/// "unknown field" diagnostics).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FieldInit {
+    pub name: String,
+    pub name_span: Span,
+    pub value: Expr,
+    /// Span covering the whole `field: expr` initializer.
+    pub span: Span,
 }
 
 /// Spanned expression. Every AST node carries the byte range it was
@@ -189,13 +220,23 @@ pub enum StmtKind {
 
 pub type Stmt = Spanned<StmtKind>;
 
-/// A C0.5+ program: one or more function definitions. One of them
+/// A C0.5+ program: one or more function definitions plus zero or
+/// more struct declarations (added at C1.4 per ADR 0013 D1). One fn
 /// must be named `main` (no parameters) — the entry point. The
 /// previous C0.3-0.4 shape (`stmt* tail_expr`) now lives inside fn
 /// bodies as [`Block`]s.
+///
+/// Structs and fns are stored in separate vectors rather than a
+/// shared `items` enum — the per-pass downstream code (resolve,
+/// types, codegen) needs to walk them in a specific order anyway
+/// (struct table built before fn signatures, which are built before
+/// fn bodies). Source order within each category is preserved.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Program {
     pub fns: Vec<FnDef>,
+    /// Top-level struct declarations per ADR 0013 D1. Always present
+    /// (may be empty for C0/C1.3-compatible programs).
+    pub structs: Vec<StructDecl>,
     pub span: Span,
 }
 
@@ -222,6 +263,28 @@ pub struct Param {
     pub name: String,
     pub span: Span,
     pub ty: TypeExpr,
+}
+
+/// A C1.4+ struct declaration: `struct Name { field: Type, … }`
+/// per ADR 0013 D1. Empty structs (zero fields) are allowed.
+/// Trailing comma after the last field is permitted.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<StructField>,
+    pub span: Span,
+}
+
+/// A single named field inside a struct declaration. `name_span`
+/// is the span of just the field identifier; `span` covers the
+/// whole `name: type` clause.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StructField {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: TypeExpr,
+    pub span: Span,
 }
 
 /// Surface-level type expression. C1.2 ships only the `Ident` form
@@ -283,6 +346,16 @@ impl fmt::Display for ExprKind {
                 }
                 write!(f, ")")
             }
+            ExprKind::StructLit { name, fields, .. } => {
+                write!(f, "(struct-lit {name}")?;
+                for fi in fields {
+                    write!(f, " ({} {})", fi.name, fi.value.kind)?;
+                }
+                write!(f, ")")
+            }
+            ExprKind::FieldAccess { target, field, .. } => {
+                write!(f, "(. {} {})", target.kind, field)
+            }
         }
     }
 }
@@ -335,10 +408,19 @@ impl fmt::Display for Stmt {
     }
 }
 
-/// Program prints each function definition on its own line.
+/// Program prints each top-level item on its own line. Structs
+/// come first (declaration order), then fns. Each is rendered by
+/// its own Display impl.
 impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
+        for s in &self.structs {
+            if !first {
+                writeln!(f)?;
+            }
+            first = false;
+            write!(f, "{s}")?;
+        }
         for fn_def in &self.fns {
             if !first {
                 writeln!(f)?;
@@ -347,6 +429,18 @@ impl fmt::Display for Program {
             write!(f, "{fn_def}")?;
         }
         Ok(())
+    }
+}
+
+/// `(struct Name (field_name: type) (field_name: type) ...)`.
+/// Empty struct renders as `(struct Name)`.
+impl fmt::Display for StructDecl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(struct {}", self.name)?;
+        for field in &self.fields {
+            write!(f, " ({}: {})", field.name, field.ty.kind)?;
+        }
+        write!(f, ")")
     }
 }
 
@@ -561,6 +655,7 @@ mod tests {
     fn display_program_one_main() {
         let p = Program {
             fns: vec![main_fn(lit(42, 0..2))],
+            structs: vec![],
             span: 0..2,
         };
         assert_eq!(p.to_string(), "(fn main () -> i64 (block 42))");
@@ -599,7 +694,7 @@ mod tests {
             },
             span: 0..9,
         });
-        let p = Program { fns: vec![double, main], span: 0..20 };
+        let p = Program { fns: vec![double, main], structs: vec![], span: 0..20 };
         assert_eq!(
             p.to_string(),
             "(fn double (x: i64) -> i64 (block (* x 2)))\n(fn main () -> i64 (block (double 7)))"
@@ -721,5 +816,131 @@ mod tests {
             span: 0..7,
         };
         assert_eq!(e.to_string(), "(f 1 2)");
+    }
+
+    // ----- C1.4: struct decl, struct literal, field access -----
+
+    #[test]
+    fn display_struct_decl_with_two_fields() {
+        let s = StructDecl {
+            name: "Point".to_string(),
+            name_span: 7..12,
+            fields: vec![
+                StructField {
+                    name: "x".to_string(),
+                    name_span: 15..16,
+                    ty: ty_i64(18..21),
+                    span: 15..21,
+                },
+                StructField {
+                    name: "y".to_string(),
+                    name_span: 23..24,
+                    ty: ty_i64(26..29),
+                    span: 23..29,
+                },
+            ],
+            span: 0..31,
+        };
+        assert_eq!(s.to_string(), "(struct Point (x: i64) (y: i64))");
+    }
+
+    #[test]
+    fn display_struct_decl_empty() {
+        let s = StructDecl {
+            name: "Empty".to_string(),
+            name_span: 7..12,
+            fields: vec![],
+            span: 0..14,
+        };
+        assert_eq!(s.to_string(), "(struct Empty)");
+    }
+
+    #[test]
+    fn display_struct_literal() {
+        let e = Spanned {
+            kind: ExprKind::StructLit {
+                name: "Point".to_string(),
+                name_span: 0..5,
+                fields: vec![
+                    FieldInit {
+                        name: "x".to_string(),
+                        name_span: 8..9,
+                        value: lit(3, 11..12),
+                        span: 8..12,
+                    },
+                    FieldInit {
+                        name: "y".to_string(),
+                        name_span: 14..15,
+                        value: lit(4, 17..18),
+                        span: 14..18,
+                    },
+                ],
+            },
+            span: 0..20,
+        };
+        assert_eq!(e.to_string(), "(struct-lit Point (x 3) (y 4))");
+    }
+
+    #[test]
+    fn display_field_access() {
+        let target =
+            Box::new(Spanned { kind: ExprKind::Var("p".to_string()), span: 0..1 });
+        let e = Spanned {
+            kind: ExprKind::FieldAccess {
+                target,
+                field: "x".to_string(),
+                field_span: 2..3,
+            },
+            span: 0..3,
+        };
+        assert_eq!(e.to_string(), "(. p x)");
+    }
+
+    #[test]
+    fn display_field_access_chained() {
+        // a.b.c -> (. (. a b) c)
+        let a = Spanned { kind: ExprKind::Var("a".to_string()), span: 0..1 };
+        let a_dot_b = Spanned {
+            kind: ExprKind::FieldAccess {
+                target: Box::new(a),
+                field: "b".to_string(),
+                field_span: 2..3,
+            },
+            span: 0..3,
+        };
+        let e = Spanned {
+            kind: ExprKind::FieldAccess {
+                target: Box::new(a_dot_b),
+                field: "c".to_string(),
+                field_span: 4..5,
+            },
+            span: 0..5,
+        };
+        assert_eq!(e.to_string(), "(. (. a b) c)");
+    }
+
+    #[test]
+    fn display_program_with_struct_and_fn() {
+        let s = StructDecl {
+            name: "P".to_string(),
+            name_span: 7..8,
+            fields: vec![StructField {
+                name: "x".to_string(),
+                name_span: 11..12,
+                ty: ty_i64(14..17),
+                span: 11..17,
+            }],
+            span: 0..19,
+        };
+        let p = Program {
+            fns: vec![main_fn(lit(7, 0..1))],
+            structs: vec![s],
+            span: 0..30,
+        };
+        // Structs first, then fns.
+        assert_eq!(
+            p.to_string(),
+            "(struct P (x: i64))\n(fn main () -> i64 (block 7))"
+        );
     }
 }

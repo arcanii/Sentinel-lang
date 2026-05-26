@@ -47,8 +47,8 @@
 //! until parser ergonomics demand it.
 
 use sentinel_ast::{
-    BinOp, Block, CmpOp, Expr, ExprKind, FnDef, LogicOp, Param, Program, Span, Spanned, Stmt,
-    StmtKind, TypeExpr, TypeExprKind, UnaryOp,
+    BinOp, Block, CmpOp, Expr, ExprKind, FieldInit, FnDef, LogicOp, Param, Program, Span, Spanned,
+    Stmt, StmtKind, StructDecl, StructField, TypeExpr, TypeExprKind, UnaryOp,
 };
 
 use crate::{lex, LexError, TokenKind};
@@ -179,11 +179,16 @@ pub struct Parser<'a> {
     src: &'a str,
     tokens: &'a [Spanned<TokenKind>],
     pos: usize,
+    /// Per ADR 0013 D3a: when false, `Name { ... }` parses as just
+    /// `Name` (a Var atom) followed by separate tokens — never as a
+    /// struct literal. Set to false while parsing an `if` condition;
+    /// parens / let-RHS / fn-call args / etc. restore it to true.
+    allow_struct_lit: bool,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(src: &'a str, tokens: &'a [Spanned<TokenKind>]) -> Self {
-        Self { src, tokens, pos: 0 }
+        Self { src, tokens, pos: 0, allow_struct_lit: true }
     }
 
     pub fn parse_top(&mut self) -> Result<Expr, ParseError> {
@@ -201,18 +206,240 @@ impl<'a> Parser<'a> {
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
         let start = self.peek().map_or(0, |t| t.span.start);
         let mut fns = Vec::new();
+        let mut structs = Vec::new();
         while self.peek().is_some() {
-            let f = self.parse_fn_def()?;
-            fns.push(f);
+            match self.peek_kind() {
+                Some(TokenKind::Fn) => fns.push(self.parse_fn_def()?),
+                Some(TokenKind::Struct) => structs.push(self.parse_struct_decl()?),
+                Some(other) => {
+                    let t = self.peek().expect("peeked");
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{other:?}"),
+                        expected: "`fn` or `struct`",
+                        span: to_source_span(&t.span),
+                    });
+                }
+                None => unreachable!(),
+            }
         }
-        if fns.is_empty() {
+        if fns.is_empty() && structs.is_empty() {
             return Err(ParseError::UnexpectedEof {
                 expected: "`fn` (programs are one or more function definitions)",
                 span: to_source_span(&self.eof_span()),
             });
         }
-        let end = fns.last().expect("non-empty").span.end;
-        Ok(Program { fns, span: start..end })
+        // End-of-program span = end of the last item (whichever is later).
+        let fn_end = fns.last().map_or(0, |f| f.span.end);
+        let struct_end = structs.last().map_or(0, |s| s.span.end);
+        let end = fn_end.max(struct_end);
+        Ok(Program { fns, structs, span: start..end })
+    }
+
+    /// Parse a top-level struct declaration per ADR 0013 D1:
+    ///
+    /// ```text
+    /// struct_decl  = 'struct' Ident '{' field_list '}'
+    /// field_list   = (field (',' field)*)? ','?
+    /// field        = Ident ':' type
+    /// ```
+    fn parse_struct_decl(&mut self) -> Result<StructDecl, ParseError> {
+        let struct_start = match self.peek_kind() {
+            Some(TokenKind::Struct) => self.advance().expect("peeked").span.start,
+            _ => unreachable!("called only after peek_kind() == Struct"),
+        };
+
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "struct name after `struct`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "struct name after `struct`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        match self.peek_kind() {
+            Some(TokenKind::LBrace) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`{` to open struct body",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`{` to open struct body",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        // Field list (possibly empty, trailing comma allowed).
+        let mut fields = Vec::new();
+        if self.peek_kind() != Some(TokenKind::RBrace) {
+            fields.push(self.parse_struct_field()?);
+            while self.peek_kind() == Some(TokenKind::Comma) {
+                self.advance();
+                if self.peek_kind() == Some(TokenKind::RBrace) {
+                    break; // trailing comma allowed
+                }
+                fields.push(self.parse_struct_field()?);
+            }
+        }
+
+        let rbrace_end = match self.peek_kind() {
+            Some(TokenKind::RBrace) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`,` or `}` in struct body",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`,` or `}` in struct body",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        Ok(StructDecl {
+            name,
+            name_span,
+            fields,
+            span: struct_start..rbrace_end,
+        })
+    }
+
+    /// Parse a single `field: expr` clause inside a struct literal
+    /// per ADR 0013 D3.
+    fn parse_field_init(&mut self) -> Result<FieldInit, ParseError> {
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "field name in struct literal",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "field name in struct literal",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        match self.peek_kind() {
+            Some(TokenKind::Colon) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`:` followed by field value",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`:` followed by field value",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let value = self.parse_expr()?;
+        let span_end = value.span.end;
+        Ok(FieldInit {
+            name,
+            name_span: name_span.clone(),
+            value,
+            span: name_span.start..span_end,
+        })
+    }
+
+    fn parse_struct_field(&mut self) -> Result<StructField, ParseError> {
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "field name",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "field name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        match self.peek_kind() {
+            Some(TokenKind::Colon) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`:` followed by field type",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`:` followed by field type",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+        let ty = self.parse_type()?;
+        let span_end = ty.span.end;
+        Ok(StructField {
+            name,
+            name_span: name_span.clone(),
+            ty,
+            span: name_span.start..span_end,
+        })
     }
 
     fn parse_fn_def(&mut self) -> Result<FnDef, ParseError> {
@@ -584,7 +811,12 @@ impl<'a> Parser<'a> {
 
     fn parse_if(&mut self) -> Result<Expr, ParseError> {
         let if_start = self.advance().expect("checked `if`").span.start;
+        // ADR 0013 D3a: forbid struct literals in the if-condition
+        // position so `if x { ... }` is unambiguous.
+        let saved = self.allow_struct_lit;
+        self.allow_struct_lit = false;
         let cond = self.parse_expr()?;
+        self.allow_struct_lit = saved;
         let then_branch = self.parse_block()?;
 
         match self.peek_kind() {
@@ -758,7 +990,54 @@ impl<'a> Parser<'a> {
                 span,
             });
         }
-        self.parse_atom()
+        self.parse_postfix()
+    }
+
+    /// Parse an atom followed by zero or more postfix operators. At
+    /// C1.4 the only postfix operator is `.field` (per ADR 0013 D2);
+    /// arrays at C1.6 will add `[index]`, methods at C4 will add
+    /// `.method()` (which is `.method` + call shape).
+    ///
+    /// Field access is left-associative as a side effect of the loop
+    /// shape: `a.b.c` parses as `(a.b).c`.
+    fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
+        let mut atom = self.parse_atom()?;
+        while self.peek_kind() == Some(TokenKind::Dot) {
+            self.advance();
+            let (field, field_span) = match self.peek() {
+                Some(t) if t.kind == TokenKind::Ident => {
+                    let span = t.span.clone();
+                    let name = self.src[span.clone()].to_string();
+                    self.advance();
+                    (name, span)
+                }
+                Some(t) => {
+                    let kind = t.kind;
+                    let span = t.span.clone();
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{kind:?}"),
+                        expected: "field name after `.`",
+                        span: to_source_span(&span),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "field name after `.`",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            };
+            let span = atom.span.start..field_span.end;
+            atom = Spanned {
+                kind: ExprKind::FieldAccess {
+                    target: Box::new(atom),
+                    field,
+                    field_span,
+                },
+                span,
+            };
+        }
+        Ok(atom)
     }
 
     fn parse_atom(&mut self) -> Result<Expr, ParseError> {
@@ -783,7 +1062,9 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Ident) => {
                 let name_span = self.advance().expect("peeked").span.clone();
                 let name = self.src[name_span.clone()].to_string();
-                // Lookahead for a call: Ident '(' ...
+                // Lookahead: `Ident '('` = call; `Ident '{'` = struct
+                // literal (when allow_struct_lit is on per ADR 0013
+                // D3a); otherwise = Var.
                 if self.peek_kind() == Some(TokenKind::LParen) {
                     self.advance(); // consume `(`
                     let mut args = Vec::new();
@@ -818,6 +1099,53 @@ impl<'a> Parser<'a> {
                         kind: ExprKind::Call { callee: name, callee_span: name_span.clone(), args },
                         span: name_span.start..rparen_end,
                     })
+                } else if self.allow_struct_lit
+                    && self.peek_kind() == Some(TokenKind::LBrace)
+                {
+                    // Struct literal: `Name { field: expr, ... }`.
+                    self.advance(); // consume `{`
+                    // Inside the struct-literal body, struct literals
+                    // are unambiguous again (we're definitely in expr
+                    // position now).
+                    let saved = self.allow_struct_lit;
+                    self.allow_struct_lit = true;
+                    let mut fields = Vec::new();
+                    if self.peek_kind() != Some(TokenKind::RBrace) {
+                        fields.push(self.parse_field_init()?);
+                        while self.peek_kind() == Some(TokenKind::Comma) {
+                            self.advance();
+                            if self.peek_kind() == Some(TokenKind::RBrace) {
+                                break; // trailing comma allowed
+                            }
+                            fields.push(self.parse_field_init()?);
+                        }
+                    }
+                    let rbrace_end = match self.peek_kind() {
+                        Some(TokenKind::RBrace) => self.advance().expect("peeked").span.end,
+                        Some(other) => {
+                            let t = self.peek().expect("peeked");
+                            return Err(ParseError::UnexpectedToken {
+                                got: format!("{other:?}"),
+                                expected: "`,` or `}` in struct literal",
+                                span: to_source_span(&t.span),
+                            });
+                        }
+                        None => {
+                            return Err(ParseError::UnexpectedEof {
+                                expected: "`,` or `}` in struct literal",
+                                span: to_source_span(&self.eof_span()),
+                            });
+                        }
+                    };
+                    self.allow_struct_lit = saved;
+                    Ok(Spanned {
+                        kind: ExprKind::StructLit {
+                            name,
+                            name_span: name_span.clone(),
+                            fields,
+                        },
+                        span: name_span.start..rbrace_end,
+                    })
                 } else {
                     Ok(Spanned { kind: ExprKind::Var(name), span: name_span })
                 }
@@ -829,7 +1157,12 @@ impl<'a> Parser<'a> {
             }
             Some(TokenKind::LParen) => {
                 let open_span = self.advance().expect("peeked").span.clone();
+                // Parens always escape D3a's no-struct-lit-in-cond
+                // rule. `if (Foo { x: 1 }.x == 1) { ... }` works.
+                let saved = self.allow_struct_lit;
+                self.allow_struct_lit = true;
                 let inner = self.parse_expr()?;
+                self.allow_struct_lit = saved;
                 match self.peek_kind() {
                     Some(TokenKind::RParen) => {
                         let close = self.advance().expect("peeked");
@@ -1429,10 +1762,10 @@ mod tests {
 
     #[test]
     fn parse_error_top_level_not_fn() {
-        // Top level expects `fn`, not `let`.
+        // Top level expects `fn` or `struct` (C1.4), not `let`.
         let err = parse("let x = 1;").unwrap_err();
         assert!(
-            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn` or `struct`"),
             "got {err:?}"
         );
     }
@@ -1442,7 +1775,7 @@ mod tests {
         // Bare expressions at top level no longer parse — they're fn-body content now.
         let err = parse("42").unwrap_err();
         assert!(
-            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn` or `struct`"),
             "got {err:?}"
         );
     }
@@ -1629,5 +1962,196 @@ mod tests {
             }
             other => panic!("expected Let, got {other:?}"),
         }
+    }
+
+    // ----- C1.4: struct decl, struct literal, field access -----
+
+    #[test]
+    fn parse_struct_decl_two_fields() {
+        let p = parse_ok_program(
+            "struct Point { x: i64, y: i64 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs.len(), 1);
+        let s = &p.structs[0];
+        assert_eq!(s.name, "Point");
+        assert_eq!(s.fields.len(), 2);
+        assert_eq!(s.fields[0].name, "x");
+        assert_eq!(s.fields[0].ty.kind.to_string(), "i64");
+        assert_eq!(s.fields[1].name, "y");
+    }
+
+    #[test]
+    fn parse_struct_decl_empty() {
+        let p = parse_ok_program("struct Empty { }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.structs[0].name, "Empty");
+        assert!(p.structs[0].fields.is_empty());
+    }
+
+    #[test]
+    fn parse_struct_decl_trailing_comma() {
+        let p = parse_ok_program(
+            "struct P { x: i64, y: i64, }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs[0].fields.len(), 2);
+    }
+
+    #[test]
+    fn parse_struct_lit_in_let() {
+        let p = parse_ok_program(
+            "struct P { x: i64, y: i64 }\nfn main() -> i64 { let p = P { x: 3, y: 4 }; 0 }",
+        );
+        let main = &p.fns[0];
+        match &main.body.stmts[0].kind {
+            StmtKind::Let { value, .. } => match &value.kind {
+                ExprKind::StructLit { name, fields, .. } => {
+                    assert_eq!(name, "P");
+                    assert_eq!(fields.len(), 2);
+                    assert_eq!(fields[0].name, "x");
+                    assert_eq!(fields[1].name, "y");
+                }
+                other => panic!("expected StructLit, got {other:?}"),
+            },
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_struct_lit_display_pretty() {
+        // Struct literal Display: (struct-lit Name (x 3) (y 4))
+        let e = parse_expr("Foo { x: 3, y: 4 }").expect("parse");
+        assert_eq!(e.kind.to_string(), "(struct-lit Foo (x 3) (y 4))");
+    }
+
+    #[test]
+    fn parse_field_access_simple() {
+        assert_eq!(pretty("p.x"), "(. p x)");
+    }
+
+    #[test]
+    fn parse_field_access_chained() {
+        assert_eq!(pretty("a.b.c"), "(. (. a b) c)");
+    }
+
+    #[test]
+    fn parse_field_access_after_call() {
+        // f(x).y -> (. (f x) y)
+        assert_eq!(pretty("f(x).y"), "(. (f x) y)");
+    }
+
+    #[test]
+    fn parse_field_access_in_arithmetic() {
+        assert_eq!(pretty("p.x + p.y"), "(+ (. p x) (. p y))");
+    }
+
+    #[test]
+    fn parse_field_access_binds_tighter_than_unary() {
+        // -p.x -> (- (. p x))
+        assert_eq!(pretty("-p.x"), "(- (. p x))");
+    }
+
+    #[test]
+    fn parse_field_access_binds_tighter_than_not() {
+        // !p.b -> (! (. p b))
+        assert_eq!(pretty("!p.b"), "(! (. p b))");
+    }
+
+    #[test]
+    fn parse_struct_lit_with_trailing_comma() {
+        let e = parse_expr("Foo { x: 1, y: 2, }").expect("parse");
+        match e.kind {
+            ExprKind::StructLit { fields, .. } => assert_eq!(fields.len(), 2),
+            other => panic!("expected StructLit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_struct_lit_forbidden_in_if_cond() {
+        // ADR 0013 D3a: bare `Foo { ... }` is forbidden in if-cond
+        // position. The parser should treat `Foo` as a Var atom
+        // and then expect a block for the if-then; the `{ x: 1 }`
+        // becomes the if-then block but the `x: 1` inside is a
+        // parse error.
+        let err = parse("fn main() -> i64 { if Foo { x: 1 } { 1 } else { 2 } }").unwrap_err();
+        // The exact error message depends on which token fails first,
+        // but it should be a parse error of some sort.
+        assert!(
+            matches!(err, ParseError::UnexpectedToken { .. } | ParseError::UnexpectedEof { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_struct_lit_in_if_cond_via_parens_ok() {
+        // Per D3a, parens escape: `(Foo { x: 1 }.x == 1)` is fine.
+        let p = parse_ok_program(
+            "struct Foo { x: i64 }\nfn main() -> i64 { if (Foo { x: 1 }.x == 1) { 7 } else { 0 } }",
+        );
+        // We don't deeply inspect; the success of parse is the assertion.
+        assert_eq!(p.fns.len(), 1);
+        assert_eq!(p.structs.len(), 1);
+    }
+
+    #[test]
+    fn parse_struct_decl_with_bool_field() {
+        let p = parse_ok_program(
+            "struct Flag { value: bool }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs[0].fields[0].ty.kind.to_string(), "bool");
+    }
+
+    #[test]
+    fn parse_mixed_structs_and_fns() {
+        let p = parse_ok_program(
+            "struct A { x: i64 }\nfn foo() -> i64 { 1 }\nstruct B { y: i64 }\nfn main() -> i64 { 0 }",
+        );
+        // Both structs and both fns land in the right vectors regardless of source order.
+        assert_eq!(p.structs.len(), 2);
+        assert_eq!(p.fns.len(), 2);
+    }
+
+    #[test]
+    fn parse_error_struct_missing_name() {
+        let err = parse("struct { x: i64 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "struct name after `struct`"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_struct_missing_open_brace() {
+        let err = parse("struct Foo x: i64 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`{` to open struct body"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_struct_field_missing_colon() {
+        let err = parse("struct Foo { x i64 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`:` followed by field type"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_field_access_no_field_name() {
+        let err = parse_expr("p.").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedEof { expected, .. } if *expected == "field name after `.`"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_field_access_not_ident() {
+        // `p.1` — second token after `.` is an IntLit, not an Ident.
+        let err = parse_expr("p.1").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "field name after `.`"),
+            "got {err:?}"
+        );
     }
 }

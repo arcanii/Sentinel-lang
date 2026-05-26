@@ -21,12 +21,14 @@
 //! `#[salsa::tracked]` wrapper that chains on
 //! `sentinel_resolve::resolve_query`.
 
+use std::collections::HashMap;
+
 use salsa::Accumulator;
 use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, TypeExpr, TypeExprKind, UnaryOp};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
     FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef, ResolvedProgram,
-    ResolvedStmt, ResolvedStmtKind, VarId,
+    ResolvedStmt, ResolvedStmtKind, StructId, VarId,
 };
 
 // =============================================================================
@@ -34,13 +36,16 @@ use sentinel_resolve::{
 // =============================================================================
 
 /// Sentinel's type universe. C1.2 shipped only `I64`; C1.3 (per ADR
-/// 0012 D5-D8) widens to `I32` and `Bool`. C1.4+ extends with
-/// struct, nullable, references, etc.
+/// 0012 D5-D8) widened to `I32` and `Bool`; C1.4 (per ADR 0013 D4)
+/// adds user-defined struct types tagged by [`StructId`]. Nominal
+/// equality — two structs with identical field shapes are distinct
+/// types per ADR 0013 D5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Type {
     I64,
     I32,
     Bool,
+    Struct(StructId),
 }
 
 impl Type {
@@ -50,6 +55,28 @@ impl Type {
     pub fn is_int(self) -> bool {
         matches!(self, Type::I32 | Type::I64)
     }
+
+    /// `true` if this is a struct type. Used by the field-access
+    /// rule to gate "the target must be a struct".
+    pub fn is_struct(self) -> bool {
+        matches!(self, Type::Struct(_))
+    }
+}
+
+/// Format a [`Type`] for display, looking up the struct name when
+/// the type is `Struct(StructId)`. Pass `None` when no program is
+/// available (e.g. error rendering in tests) — struct types render
+/// as `<struct#N>` in that case.
+pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
+    match ty {
+        Type::I64 => "i64".to_string(),
+        Type::I32 => "i32".to_string(),
+        Type::Bool => "bool".to_string(),
+        Type::Struct(id) => match program.and_then(|p| p.structs.get(id.0 as usize)) {
+            Some(s) => s.name.clone(),
+            None => format!("<struct#{}>", id.0),
+        },
+    }
 }
 
 impl std::fmt::Display for Type {
@@ -58,24 +85,35 @@ impl std::fmt::Display for Type {
             Type::I64 => write!(f, "i64"),
             Type::I32 => write!(f, "i32"),
             Type::Bool => write!(f, "bool"),
+            Type::Struct(id) => write!(f, "<struct#{}>", id.0),
         }
     }
 }
 
 /// Resolve a surface-level [`TypeExpr`] to a concrete [`Type`].
-/// C1.2 recognised only `"i64"`; C1.3 (per ADR 0012 D3 + D5) adds
-/// `"i32"` and `"bool"`. Anything else surfaces as
-/// [`TypeError::UnknownType`].
-fn resolve_type_expr(te: &TypeExpr) -> Result<Type, TypeError> {
+/// C1.2 recognised only `"i64"`; C1.3 (per ADR 0012 D3 + D5) added
+/// `"i32"` and `"bool"`; C1.4 (per ADR 0013 D4) extends to look up
+/// user-defined struct names against the struct table. Anything not
+/// matching surfaces as [`TypeError::UnknownType`].
+fn resolve_type_expr(
+    te: &TypeExpr,
+    struct_table: &HashMap<String, StructId>,
+) -> Result<Type, TypeError> {
     match &te.kind {
         TypeExprKind::Ident(name) => match name.as_str() {
             "i64" => Ok(Type::I64),
             "i32" => Ok(Type::I32),
             "bool" => Ok(Type::Bool),
-            other => Err(TypeError::UnknownType {
-                name: other.to_string(),
-                span: to_source_span(&te.span),
-            }),
+            other => {
+                if let Some(&id) = struct_table.get(other) {
+                    Ok(Type::Struct(id))
+                } else {
+                    Err(TypeError::UnknownType {
+                        name: other.to_string(),
+                        span: to_source_span(&te.span),
+                    })
+                }
+            }
         },
     }
 }
@@ -88,6 +126,10 @@ fn resolve_type_expr(te: &TypeExpr) -> Result<Type, TypeError> {
 pub struct TypedProgram {
     pub fns: Vec<TypedFnDef>,
     pub fn_signatures: Vec<TypedFnSignature>,
+    /// Struct declarations with resolved field types (parallel-tree
+    /// mirror of [`sentinel_resolve::ResolvedProgram::structs`]).
+    /// Each struct's [`StructId`] matches its index here.
+    pub structs: Vec<TypedStructDecl>,
     pub span: Span,
 }
 
@@ -102,6 +144,29 @@ impl TypedProgram {
     pub fn signature(&self, id: FnId) -> &TypedFnSignature {
         &self.fn_signatures[id.0 as usize]
     }
+
+    pub fn struct_decl(&self, id: StructId) -> &TypedStructDecl {
+        &self.structs[id.0 as usize]
+    }
+}
+
+/// A struct declaration after type-checking: each field's
+/// [`TypeExpr`] has been resolved to a concrete [`Type`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedStructDecl {
+    pub id: StructId,
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<TypedStructField>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedStructField {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: Type,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -197,6 +262,26 @@ pub enum TypedExprKind {
         callee_span: Span,
         args: Vec<TypedExpr>,
     },
+    /// Struct literal per ADR 0013 D3. The fields are reordered to
+    /// match the declaration order so codegen can lower by index
+    /// without consulting field names.
+    StructLit {
+        id: StructId,
+        name: String,
+        name_span: Span,
+        /// Field values in **declaration order** (not source order).
+        /// The check() pass rearranges source-order field inits to
+        /// match the struct decl so codegen can iterate by index.
+        fields: Vec<TypedExpr>,
+    },
+    /// Field access per ADR 0013 D2. `field_index` is the field's
+    /// position in the declaration, for codegen's GEP offset.
+    FieldAccess {
+        target: Box<TypedExpr>,
+        field: String,
+        field_span: Span,
+        field_index: usize,
+    },
 }
 
 // =============================================================================
@@ -245,6 +330,55 @@ pub enum TypeError {
         #[label("expected {expected}, got {got}")]
         span: miette::SourceSpan,
     },
+
+    /// C1.4 / ADR 0013 D2: postfix `.field` requires the target to
+    /// be a struct.
+    #[error("field access on non-struct type `{got}`")]
+    #[diagnostic(code(sentinel::types::field_access_on_non_struct))]
+    FieldAccessOnNonStruct {
+        got: Type,
+        #[label("expected a struct, got {got}")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.4 / ADR 0013 D2 + D3: the struct named `struct_name` has
+    /// no field named `field`. Same diagnostic for both
+    /// `expr.unknown` and `Foo { unknown: 1 }`.
+    #[error("struct `{struct_name}` has no field `{field}`")]
+    #[diagnostic(code(sentinel::types::unknown_field))]
+    UnknownField {
+        struct_name: String,
+        field: String,
+        #[label("no such field on {struct_name}")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.4 / ADR 0013 D3: struct literal omits a field that the
+    /// declaration requires (no defaults at C1.4).
+    #[error("struct literal `{struct_name}` is missing field `{field}`")]
+    #[diagnostic(code(sentinel::types::missing_field))]
+    MissingField {
+        struct_name: String,
+        field: String,
+        #[label("missing field {field}")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.4 / ADR 0013 D7: a struct contains itself (directly or
+    /// transitively) with no indirection. Lifts when `?T` arrives
+    /// at C1.5.
+    #[error("recursive struct `{name}` has no representable size")]
+    #[diagnostic(
+        code(sentinel::types::recursive_struct),
+        help("recursive structs need indirection — wait for C1.5's `?T` nullable form")
+    )]
+    RecursiveStruct {
+        name: String,
+        /// Names of the structs in the cycle, in order.
+        cycle: Vec<String>,
+        #[label("recursive struct cycle")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -254,11 +388,47 @@ pub enum TypeError {
 /// Type-check a [`ResolvedProgram`] and produce a [`TypedProgram`].
 /// Fails fast on the first error, matching the C0/C1.1 fail-fast
 /// pattern of lex / parse / resolve.
+///
+/// Order:
+///   0. Build struct table (name → StructId) from resolved structs.
+///   1. Resolve every struct's field types into `TypedStructDecl`s
+///      — UnknownType fires here for stale references.
+///   2. Detect recursive structs and emit RecursiveStruct on cycle.
+///   3. Resolve fn signatures' param + return types (struct names
+///      now resolve cleanly against the struct table).
+///   4. Type-check each fn body.
 pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
-    // Build the typed signature table by resolving every fn's
-    // declared parameter and return TypeExprs. The runtime `print`
-    // (program.fn_signatures[0]) has no source-level TypeExpr — we
-    // hardcode its signature.
+    // Pass 0: struct name table.
+    let struct_table: HashMap<String, StructId> =
+        sentinel_resolve::struct_name_table(program);
+
+    // Pass 1: resolve struct field types.
+    let mut typed_structs: Vec<TypedStructDecl> =
+        Vec::with_capacity(program.structs.len());
+    for sd in &program.structs {
+        let mut fields = Vec::with_capacity(sd.fields.len());
+        for f in &sd.fields {
+            let ty = resolve_type_expr(&f.ty, &struct_table)?;
+            fields.push(TypedStructField {
+                name: f.name.clone(),
+                name_span: f.name_span.clone(),
+                ty,
+                span: f.span.clone(),
+            });
+        }
+        typed_structs.push(TypedStructDecl {
+            id: sd.id,
+            name: sd.name.clone(),
+            name_span: sd.name_span.clone(),
+            fields,
+            span: sd.span.clone(),
+        });
+    }
+
+    // Pass 2: cycle detection.
+    detect_struct_cycle(&typed_structs)?;
+
+    // Pass 3: fn signatures.
     let mut typed_signatures: Vec<TypedFnSignature> =
         Vec::with_capacity(program.fn_signatures.len());
 
@@ -274,16 +444,13 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         is_runtime: true,
     });
 
-    // User fns: pair signatures with their FnDefs (signatures are
-    // indexed by FnId.0, fns are in source order so they may not
-    // align; use the .id field).
     for fn_def in &program.fns {
         let resolved_sig = &program.fn_signatures[fn_def.id.0 as usize];
         let mut param_types = Vec::with_capacity(fn_def.params.len());
         for param in &fn_def.params {
-            param_types.push(resolve_type_expr(&param.ty)?);
+            param_types.push(resolve_type_expr(&param.ty, &struct_table)?);
         }
-        let return_type = resolve_type_expr(&fn_def.return_type)?;
+        let return_type = resolve_type_expr(&fn_def.return_type, &struct_table)?;
         typed_signatures.push(TypedFnSignature {
             id: fn_def.id,
             name: resolved_sig.name.clone(),
@@ -299,22 +466,83 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     // FnId(i) — matches ResolvedProgram's invariant.
     typed_signatures.sort_by_key(|s| s.id.0);
 
-    // Type-check each function body.
+    // Pass 4: type-check each fn body.
     let mut typed_fns = Vec::with_capacity(program.fns.len());
     for fn_def in &program.fns {
-        typed_fns.push(check_fn(fn_def, &typed_signatures)?);
+        typed_fns.push(check_fn(fn_def, &typed_signatures, &typed_structs)?);
     }
 
     Ok(TypedProgram {
         fns: typed_fns,
         fn_signatures: typed_signatures,
+        structs: typed_structs,
         span: program.span.clone(),
     })
+}
+
+/// Walk the struct-field graph looking for cycles. Returns
+/// [`TypeError::RecursiveStruct`] on the first cycle found. C1.5's
+/// `?T` lifts this restriction; at C1.4 a cycle means no
+/// representable size.
+fn detect_struct_cycle(structs: &[TypedStructDecl]) -> Result<(), TypeError> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+    let n = structs.len();
+    let mut color = vec![Color::White; n];
+    // path: the current DFS stack, indices into structs.
+    let mut path: Vec<usize> = Vec::new();
+
+    fn visit(
+        i: usize,
+        structs: &[TypedStructDecl],
+        color: &mut [Color],
+        path: &mut Vec<usize>,
+    ) -> Result<(), TypeError> {
+        color[i] = Color::Gray;
+        path.push(i);
+        for field in &structs[i].fields {
+            if let Type::Struct(child_id) = field.ty {
+                let j = child_id.0 as usize;
+                match color[j] {
+                    Color::Gray => {
+                        // Cycle found — collect names from the path
+                        // starting at the first occurrence of j.
+                        let start = path.iter().position(|&p| p == j).unwrap_or(0);
+                        let mut cycle: Vec<String> =
+                            path[start..].iter().map(|&p| structs[p].name.clone()).collect();
+                        cycle.push(structs[j].name.clone()); // close the loop
+                        return Err(TypeError::RecursiveStruct {
+                            name: structs[j].name.clone(),
+                            cycle,
+                            span: to_source_span(&structs[j].span),
+                        });
+                    }
+                    Color::White => visit(j, structs, color, path)?,
+                    Color::Black => {}
+                }
+            }
+        }
+        path.pop();
+        color[i] = Color::Black;
+        Ok(())
+    }
+
+    for i in 0..n {
+        if color[i] == Color::White {
+            visit(i, structs, &mut color, &mut path)?;
+        }
+    }
+    Ok(())
 }
 
 fn check_fn(
     fn_def: &ResolvedFnDef,
     signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
 ) -> Result<TypedFnDef, TypeError> {
     // Pull our own signature.
     let signature = &signatures[fn_def.id.0 as usize];
@@ -337,7 +565,7 @@ fn check_fn(
         env.insert(tp.id, tp.ty);
     }
 
-    let body = check_block(&fn_def.body, &mut env, signatures)?;
+    let body = check_block(&fn_def.body, &mut env, signatures, structs)?;
     let return_type = signature.return_type;
 
     if body.ty != return_type {
@@ -367,12 +595,13 @@ fn check_block(
     block: &ResolvedBlock,
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
 ) -> Result<TypedBlock, TypeError> {
     let mut stmts = Vec::with_capacity(block.stmts.len());
     for stmt in &block.stmts {
-        stmts.push(check_stmt(stmt, env, signatures)?);
+        stmts.push(check_stmt(stmt, env, signatures, structs)?);
     }
-    let tail = check_expr(&block.tail, env, signatures)?;
+    let tail = check_expr(&block.tail, env, signatures, structs)?;
     let ty = tail.ty;
     Ok(TypedBlock {
         stmts,
@@ -386,13 +615,15 @@ fn check_stmt(
     stmt: &ResolvedStmt,
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
 ) -> Result<TypedStmt, TypeError> {
     let kind = match &stmt.kind {
         ResolvedStmtKind::Let { id, name, name_span, ty_annot, value } => {
-            let value_typed = check_expr(value, env, signatures)?;
+            let value_typed = check_expr(value, env, signatures, structs)?;
             let ty = match ty_annot {
                 Some(annot) => {
-                    let annotated = resolve_type_expr(annot)?;
+                    let struct_table = struct_name_table_local(structs);
+                    let annotated = resolve_type_expr(annot, &struct_table)?;
                     if annotated != value_typed.ty {
                         return Err(TypeError::Mismatch {
                             expected: annotated,
@@ -413,15 +644,25 @@ fn check_stmt(
                 value: value_typed,
             }
         }
-        ResolvedStmtKind::Expr(e) => TypedStmtKind::Expr(check_expr(e, env, signatures)?),
+        ResolvedStmtKind::Expr(e) => {
+            TypedStmtKind::Expr(check_expr(e, env, signatures, structs)?)
+        }
     };
     Ok(TypedStmt { kind, span: stmt.span.clone() })
+}
+
+/// Build a local struct-name table from the typed struct list.
+/// Used by [`check_stmt`] when resolving let-binding annotations
+/// (which arrive as TypeExprs at C1.4).
+fn struct_name_table_local(structs: &[TypedStructDecl]) -> HashMap<String, StructId> {
+    structs.iter().map(|s| (s.name.clone(), s.id)).collect()
 }
 
 fn check_expr(
     expr: &ResolvedExpr,
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
 ) -> Result<TypedExpr, TypeError> {
     let (kind, ty) = match &expr.kind {
         ResolvedExprKind::IntLit(n) => (TypedExprKind::IntLit(*n), Type::I64),
@@ -433,7 +674,7 @@ fn check_expr(
             (TypedExprKind::Var(*id), ty)
         }
         ResolvedExprKind::Unary(op, inner) => {
-            let inner_t = check_expr(inner, env, signatures)?;
+            let inner_t = check_expr(inner, env, signatures, structs)?;
             // C1.3: `-x` requires int; `!x` requires bool.
             let ty = match op {
                 UnaryOp::Neg => {
@@ -460,12 +701,11 @@ fn check_expr(
             (TypedExprKind::Unary(*op, Box::new(inner_t)), ty)
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
-            let l = check_expr(lhs, env, signatures)?;
-            let r = check_expr(rhs, env, signatures)?;
+            let l = check_expr(lhs, env, signatures, structs)?;
+            let r = check_expr(rhs, env, signatures, structs)?;
             // C1.3: arithmetic requires both operands the same int
-            // type (I32 or I64); result is that int type. Bool
-            // arithmetic is rejected — comparisons / logicals are
-            // the typed-bool ops.
+            // type (I32 or I64); result is that int type. Bool /
+            // struct arithmetic is rejected.
             if !l.ty.is_int() {
                 return Err(TypeError::Mismatch {
                     expected: Type::I64,
@@ -488,11 +728,18 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Cmp(op, lhs, rhs) => {
-            let l = check_expr(lhs, env, signatures)?;
-            let r = check_expr(rhs, env, signatures)?;
-            // C1.3: comparisons require both operands the same type
-            // (any type with equality semantics — C1.3 supports
-            // I32, I64, Bool). Result is always Bool.
+            let l = check_expr(lhs, env, signatures, structs)?;
+            let r = check_expr(rhs, env, signatures, structs)?;
+            // C1.3: comparisons require both operands the same type.
+            // C1.4 keeps this as int + bool only (ADR 0013 D6 defers
+            // struct equality to C1.5+) — reject struct operands.
+            if l.ty.is_struct() {
+                return Err(TypeError::Mismatch {
+                    expected: Type::I64,
+                    got: l.ty,
+                    span: to_source_span(&lhs.span),
+                });
+            }
             if l.ty != r.ty {
                 return Err(TypeError::Mismatch {
                     expected: l.ty,
@@ -506,8 +753,8 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Logic(op, lhs, rhs) => {
-            let l = check_expr(lhs, env, signatures)?;
-            let r = check_expr(rhs, env, signatures)?;
+            let l = check_expr(lhs, env, signatures, structs)?;
+            let r = check_expr(rhs, env, signatures, structs)?;
             if l.ty != Type::Bool {
                 return Err(TypeError::Mismatch {
                     expected: Type::Bool,
@@ -528,17 +775,13 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Block(b) => {
-            let typed_block = check_block(b, env, signatures)?;
+            let typed_block = check_block(b, env, signatures, structs)?;
             let ty = typed_block.ty;
             (TypedExprKind::Block(Box::new(typed_block)), ty)
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
-            let cond_t = check_expr(cond, env, signatures)?;
-            // C1.3 step 5: ADR 0010 D9's C-style truthy retires. The
-            // if-condition must be `bool` (typically the result of a
-            // comparison or a fn returning bool). The 6 if-using C0
-            // fixtures (c04_if_*, c05_go_no_go) are mechanically
-            // rewritten in this commit to use `x != 0` etc.
+            let cond_t = check_expr(cond, env, signatures, structs)?;
+            // C1.3 step 5: if-condition must be bool.
             if cond_t.ty != Type::Bool {
                 return Err(TypeError::Mismatch {
                     expected: Type::Bool,
@@ -546,8 +789,8 @@ fn check_expr(
                     span: to_source_span(&cond.span),
                 });
             }
-            let then_t = check_block(then_branch, env, signatures)?;
-            let else_t = check_block(else_branch, env, signatures)?;
+            let then_t = check_block(then_branch, env, signatures, structs)?;
+            let else_t = check_block(else_branch, env, signatures, structs)?;
             if then_t.ty != else_t.ty {
                 return Err(TypeError::Mismatch {
                     expected: then_t.ty,
@@ -569,7 +812,7 @@ fn check_expr(
             let signature = &signatures[id.0 as usize];
             let mut typed_args = Vec::with_capacity(args.len());
             for (i, arg) in args.iter().enumerate() {
-                let typed_arg = check_expr(arg, env, signatures)?;
+                let typed_arg = check_expr(arg, env, signatures, structs)?;
                 let expected = signature.param_types[i];
                 if typed_arg.ty != expected {
                     return Err(TypeError::CallArgMismatch {
@@ -590,6 +833,120 @@ fn check_expr(
                     args: typed_args,
                 },
                 ty,
+            )
+        }
+        ResolvedExprKind::StructLit { id, name, name_span, fields } => {
+            // The struct decl provides the expected field set + types.
+            let decl = &structs[id.0 as usize];
+
+            // Type-check each provided field's value.
+            let mut provided: Vec<(usize, TypedExpr)> = Vec::with_capacity(fields.len());
+            for fi in fields {
+                // Find the field's index in the declaration.
+                let decl_idx = decl
+                    .fields
+                    .iter()
+                    .position(|df| df.name == fi.name)
+                    .ok_or_else(|| TypeError::UnknownField {
+                        struct_name: decl.name.clone(),
+                        field: fi.name.clone(),
+                        span: to_source_span(&fi.name_span),
+                    })?;
+                let expected = decl.fields[decl_idx].ty;
+                let value_t = check_expr(&fi.value, env, signatures, structs)?;
+                if value_t.ty != expected {
+                    return Err(TypeError::Mismatch {
+                        expected,
+                        got: value_t.ty,
+                        span: to_source_span(&fi.value.span),
+                    });
+                }
+                provided.push((decl_idx, value_t));
+            }
+
+            // Validate every declared field was provided. (Duplicate
+            // detection is implicit — a duplicate field name in the
+            // literal would lead to two provided entries with the
+            // same decl_idx, both pointing at the same expected type
+            // and both being type-checked; codegen would emit two
+            // stores to the same slot. C1.4 accepts this without a
+            // diagnostic — Rust does too. A future ADR may revisit.)
+            if provided.len() < decl.fields.len() {
+                for df in &decl.fields {
+                    if !provided
+                        .iter()
+                        .any(|(idx, _)| decl.fields[*idx].name == df.name)
+                    {
+                        return Err(TypeError::MissingField {
+                            struct_name: decl.name.clone(),
+                            field: df.name.clone(),
+                            span: to_source_span(name_span),
+                        });
+                    }
+                }
+            }
+
+            // Reorder to declaration order so codegen can iterate
+            // by index without consulting field names.
+            provided.sort_by_key(|(idx, _)| *idx);
+            // After sort, the index sequence may have gaps if a
+            // field was provided multiple times; for C1.4 we just
+            // take the last value at each index.
+            let mut by_index: Vec<Option<TypedExpr>> = vec![None; decl.fields.len()];
+            for (idx, val) in provided {
+                by_index[idx] = Some(val);
+            }
+            let ordered: Vec<TypedExpr> = by_index
+                .into_iter()
+                .map(|opt| opt.expect("every field was provided"))
+                .collect();
+
+            (
+                TypedExprKind::StructLit {
+                    id: *id,
+                    name: name.clone(),
+                    name_span: name_span.clone(),
+                    fields: ordered,
+                },
+                Type::Struct(*id),
+            )
+        }
+        ResolvedExprKind::FieldAccess { target, field, field_span } => {
+            let target_t = check_expr(target, env, signatures, structs)?;
+            let struct_id = match target_t.ty {
+                Type::Struct(id) => id,
+                other => {
+                    return Err(TypeError::FieldAccessOnNonStruct {
+                        got: other,
+                        span: to_source_span(&target.span),
+                    });
+                }
+            };
+            let decl = &structs[struct_id.0 as usize];
+            let (field_index, field_ty) = decl
+                .fields
+                .iter()
+                .enumerate()
+                .find_map(|(i, df)| {
+                    if df.name == *field {
+                        Some((i, df.ty))
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| TypeError::UnknownField {
+                    struct_name: decl.name.clone(),
+                    field: field.clone(),
+                    span: to_source_span(field_span),
+                })?;
+            (
+                TypedExprKind::FieldAccess {
+                    target: Box::new(target_t),
+                    field: field.clone(),
+                    field_span: field_span.clone(),
+                    field_index,
+                },
+                field_ty,
             )
         }
     };
@@ -644,6 +1001,26 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::CallArgMismatch { callee, arg_index, expected, got, span } => (
             "sentinel::types::call_arg_mismatch",
             format!("argument {arg_index} of `{callee}` expects {expected}, got {got}"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::FieldAccessOnNonStruct { got, span } => (
+            "sentinel::types::field_access_on_non_struct",
+            format!("field access on non-struct type `{got}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::UnknownField { struct_name, field, span } => (
+            "sentinel::types::unknown_field",
+            format!("struct `{struct_name}` has no field `{field}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::MissingField { struct_name, field, span } => (
+            "sentinel::types::missing_field",
+            format!("struct literal `{struct_name}` is missing field `{field}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::RecursiveStruct { name, span, .. } => (
+            "sentinel::types::recursive_struct",
+            format!("recursive struct `{name}` has no representable size"),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -1033,6 +1410,239 @@ fn main() -> i64 {
         let p = check_ok("fn echo(x: bool) -> bool { x }\nfn main() -> i64 { 0 }");
         assert_eq!(p.fns[0].params[0].ty, Type::Bool);
         assert_eq!(p.fns[0].return_type, Type::Bool);
+    }
+
+    // ----- C1.4: structs + field access + struct literal -----
+
+    #[test]
+    fn struct_decl_typechecks() {
+        let p = check_ok(
+            "struct Point { x: i64, y: i64 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs.len(), 1);
+        assert_eq!(p.structs[0].name, "Point");
+        assert_eq!(p.structs[0].fields[0].ty, Type::I64);
+        assert_eq!(p.structs[0].fields[1].ty, Type::I64);
+    }
+
+    #[test]
+    fn struct_with_mixed_field_types() {
+        let p = check_ok(
+            "struct Mixed { i: i64, b: bool, j: i32 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs[0].fields[0].ty, Type::I64);
+        assert_eq!(p.structs[0].fields[1].ty, Type::Bool);
+        assert_eq!(p.structs[0].fields[2].ty, Type::I32);
+    }
+
+    #[test]
+    fn struct_literal_typechecks() {
+        let p = check_ok(
+            "struct P { x: i64, y: i64 }\nfn main() -> i64 { let p = P { x: 3, y: 4 }; 0 }",
+        );
+        let main = p.main();
+        match &main.body.stmts[0].kind {
+            TypedStmtKind::Let { ty, value, .. } => {
+                assert!(matches!(ty, Type::Struct(_)));
+                assert_eq!(value.ty, *ty);
+                match &value.kind {
+                    TypedExprKind::StructLit { fields, .. } => {
+                        assert_eq!(fields.len(), 2);
+                        assert_eq!(fields[0].ty, Type::I64);
+                        assert_eq!(fields[1].ty, Type::I64);
+                    }
+                    other => panic!("expected StructLit, got {other:?}"),
+                }
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn field_access_typechecks() {
+        let p = check_ok(
+            "struct P { x: i64 }\nfn main() -> i64 { let p = P { x: 7 }; p.x }",
+        );
+        match &p.main().body.tail.kind {
+            TypedExprKind::FieldAccess { field, field_index, .. } => {
+                assert_eq!(field, "x");
+                assert_eq!(*field_index, 0);
+            }
+            other => panic!("expected FieldAccess, got {other:?}"),
+        }
+        assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    #[test]
+    fn struct_in_fn_signature_typechecks() {
+        let p = check_ok(
+            "struct P { x: i64, y: i64 }\nfn sum(p: P) -> i64 { p.x + p.y }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(p.fns[0].params[0].ty, Type::Struct(_)));
+    }
+
+    #[test]
+    fn struct_field_order_reordered_to_decl_order() {
+        // Source order: `P { y: 4, x: 3 }`. Decl order: `x`, then `y`.
+        // After check(), the fields vec is reordered to decl order.
+        let p = check_ok(
+            "struct P { x: i64, y: i64 }\nfn main() -> i64 { let p = P { y: 4, x: 3 }; 0 }",
+        );
+        let main = p.main();
+        match &main.body.stmts[0].kind {
+            TypedStmtKind::Let { value, .. } => match &value.kind {
+                TypedExprKind::StructLit { fields, .. } => {
+                    // After reorder: fields[0] is x=3, fields[1] is y=4
+                    match &fields[0].kind {
+                        TypedExprKind::IntLit(n) => assert_eq!(*n, 3),
+                        other => panic!("expected IntLit 3 at index 0, got {other:?}"),
+                    }
+                    match &fields[1].kind {
+                        TypedExprKind::IntLit(n) => assert_eq!(*n, 4),
+                        other => panic!("expected IntLit 4 at index 1, got {other:?}"),
+                    }
+                }
+                other => panic!("expected StructLit, got {other:?}"),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn struct_let_annotation_typechecks() {
+        let p = check_ok(
+            "struct P { x: i64 }\nfn main() -> i64 { let p: P = P { x: 1 }; 0 }",
+        );
+        let main = p.main();
+        match &main.body.stmts[0].kind {
+            TypedStmtKind::Let { ty, .. } => assert!(matches!(ty, Type::Struct(_))),
+            _ => unreachable!(),
+        }
+    }
+
+    // ----- C1.4 error paths -----
+
+    #[test]
+    fn struct_literal_unknown_field_errors() {
+        let err = check_err(
+            "struct P { x: i64 }\nfn main() -> i64 { let p = P { y: 1 }; 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::UnknownField { ref field, ref struct_name, .. } if field == "y" && struct_name == "P"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn struct_literal_missing_field_errors() {
+        let err = check_err(
+            "struct P { x: i64, y: i64 }\nfn main() -> i64 { let p = P { x: 1 }; 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::MissingField { ref field, ref struct_name, .. } if field == "y" && struct_name == "P"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn struct_literal_field_type_mismatch_errors() {
+        let err = check_err(
+            "struct P { x: i64 }\nfn main() -> i64 { let p = P { x: true }; 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::Mismatch { expected: Type::I64, got: Type::Bool, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn field_access_unknown_field_errors() {
+        let err = check_err(
+            "struct P { x: i64 }\nfn main() -> i64 { let p = P { x: 1 }; p.y }",
+        );
+        assert!(
+            matches!(err, TypeError::UnknownField { ref field, ref struct_name, .. } if field == "y" && struct_name == "P"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn field_access_on_non_struct_errors() {
+        let err =
+            check_err("fn main() -> i64 { let x = 5; x.y }");
+        assert!(
+            matches!(err, TypeError::FieldAccessOnNonStruct { got: Type::I64, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn struct_cmp_eq_rejected_for_now() {
+        // ADR 0013 D6: struct == struct is deferred.
+        let err = check_err(
+            "struct P { x: i64 }\nfn eq(a: P, b: P) -> bool { a == b }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn struct_arithmetic_rejected() {
+        // struct + struct is rejected (arithmetic requires int).
+        let err = check_err(
+            "struct P { x: i64 }\nfn add(a: P, b: P) -> P { a + b }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn recursive_struct_direct_errors() {
+        let err = check_err(
+            "struct Node { next: Node }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::RecursiveStruct { ref name, .. } if name == "Node"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn recursive_struct_mutual_errors() {
+        let err = check_err(
+            "struct A { b: B }\nstruct B { a: A }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::RecursiveStruct { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn non_recursive_struct_chain_ok() {
+        // A contains B contains nothing. No cycle.
+        let _ = check_ok(
+            "struct B { x: i64 }\nstruct A { b: B }\nfn main() -> i64 { 0 }",
+        );
+    }
+
+    #[test]
+    fn empty_struct_typechecks() {
+        let p = check_ok(
+            "struct Empty { }\nfn main() -> i64 { 0 }",
+        );
+        assert!(p.structs[0].fields.is_empty());
+    }
+
+    #[test]
+    fn c14_phasego_program_typechecks() {
+        let src = "\
+struct Point { x: i64, y: i64 }
+fn manhattan(p: Point) -> i64 { p.x + p.y }
+fn main() -> i64 {
+    let p = Point { x: 3, y: 4 };
+    print(manhattan(p))
+}
+";
+        let p = check_ok(src);
+        assert_eq!(p.structs.len(), 1);
+        assert_eq!(p.fns.len(), 2);
+        assert_eq!(p.main().body.ty, Type::I64);
     }
 
     #[test]
