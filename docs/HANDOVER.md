@@ -386,7 +386,7 @@ decisions 46-53.
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: <docs-commit> (docs: C1.3 landed; HANDOVER §0 + STATE.md + ADR refresh).
+    Local HEAD: 8a173c4 (docs: C1.3 landed; HANDOVER §0 + STATE.md + ADR refresh).
     Branch in sync with origin/main (verify with `git status` at session start).
     Working tree clean.
 
