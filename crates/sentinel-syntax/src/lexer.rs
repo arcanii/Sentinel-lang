@@ -1,11 +1,22 @@
-//! Lexer for Sentinel C0.
+//! Lexer for Sentinel C0 / C1.
 //!
-//! Token set: keywords (`let`, `fn`, `if`, `else`), identifiers, decimal
-//! integer literals, arithmetic operators (`+ - * /`), `=`, parens,
-//! braces, comma, semicolon, `->`. Whitespace and `//` line comments are
-//! skipped. ADR 0009 D4 picks hand-written recursive descent for the
-//! parser; the lexer uses `logos` because the regex-DFA payoff is
-//! purely positive at this scale.
+//! Token set (C0): keywords (`let`, `fn`, `if`, `else`), identifiers,
+//! decimal integer literals, arithmetic operators (`+ - * /`), `=`,
+//! parens, braces, comma, semicolon, `->`.
+//!
+//! C1.2 added `:` (per ADR 0012 D9).
+//!
+//! C1.3 adds (per ADR 0012 D9): `true` / `false` keywords, six
+//! comparison operators (`== != < <= > >=`), and three logical
+//! operators (`&& || !`). logos's longest-match guarantee handles
+//! the precedence-aware lexing — `!=` lexes as a single token before
+//! `!`, `<=` before `<`, `>=` before `>`, listed below in
+//! longer-first order accordingly.
+//!
+//! Whitespace and `//` line comments are skipped. ADR 0009 D4 picks
+//! hand-written recursive descent for the parser; the lexer uses
+//! `logos` because the regex-DFA payoff is purely positive at this
+//! scale.
 //!
 //! Pure function per ADR 0009 D1a: `lex` returns the token stream and
 //! a Vec of diagnostics; no shared mutable state.
@@ -25,6 +36,10 @@ pub enum TokenKind {
     If,
     #[token("else")]
     Else,
+    #[token("true")]
+    True,
+    #[token("false")]
+    False,
 
     #[token("+")]
     Plus,
@@ -34,8 +49,28 @@ pub enum TokenKind {
     Star,
     #[token("/")]
     Slash,
+    // `==` must lex before `=`; logos's longest-match makes this
+    // automatic but ordering here mirrors the intent.
+    #[token("==")]
+    EqEq,
     #[token("=")]
     Eq,
+    #[token("!=")]
+    BangEq,
+    #[token("!")]
+    Bang,
+    #[token("<=")]
+    LtEq,
+    #[token("<")]
+    Lt,
+    #[token(">=")]
+    GtEq,
+    #[token(">")]
+    Gt,
+    #[token("&&")]
+    AmpAmp,
+    #[token("||")]
+    PipePipe,
     #[token("(")]
     LParen,
     #[token(")")]
@@ -157,8 +192,103 @@ mod tests {
     #[test]
     fn lex_all_keywords() {
         assert_eq!(
-            kinds("let fn if else"),
-            vec![TokenKind::Let, TokenKind::Fn, TokenKind::If, TokenKind::Else]
+            kinds("let fn if else true false"),
+            vec![
+                TokenKind::Let,
+                TokenKind::Fn,
+                TokenKind::If,
+                TokenKind::Else,
+                TokenKind::True,
+                TokenKind::False,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_bool_literals_distinct_from_ident_prefixes() {
+        // `truely`, `falsehood` must NOT be parsed as keyword + ident.
+        assert_eq!(
+            kinds("truely falsehood"),
+            vec![TokenKind::Ident, TokenKind::Ident]
+        );
+    }
+
+    #[test]
+    fn lex_all_comparison_ops() {
+        assert_eq!(
+            kinds("== != < <= > >="),
+            vec![
+                TokenKind::EqEq,
+                TokenKind::BangEq,
+                TokenKind::Lt,
+                TokenKind::LtEq,
+                TokenKind::Gt,
+                TokenKind::GtEq,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_all_logical_ops() {
+        assert_eq!(
+            kinds("&& || !"),
+            vec![TokenKind::AmpAmp, TokenKind::PipePipe, TokenKind::Bang]
+        );
+    }
+
+    #[test]
+    fn lex_longest_match_eq_vs_eqeq() {
+        // `==` is one token; `= =` is two.
+        assert_eq!(kinds("=="), vec![TokenKind::EqEq]);
+        assert_eq!(kinds("= ="), vec![TokenKind::Eq, TokenKind::Eq]);
+    }
+
+    #[test]
+    fn lex_longest_match_bang_vs_bangeq() {
+        // `!=` is one token; `! =` is two.
+        assert_eq!(kinds("!="), vec![TokenKind::BangEq]);
+        assert_eq!(kinds("! ="), vec![TokenKind::Bang, TokenKind::Eq]);
+    }
+
+    #[test]
+    fn lex_longest_match_lt_vs_lteq() {
+        assert_eq!(kinds("<="), vec![TokenKind::LtEq]);
+        assert_eq!(kinds("< ="), vec![TokenKind::Lt, TokenKind::Eq]);
+    }
+
+    #[test]
+    fn lex_longest_match_gt_vs_gteq() {
+        assert_eq!(kinds(">="), vec![TokenKind::GtEq]);
+        assert_eq!(kinds("> ="), vec![TokenKind::Gt, TokenKind::Eq]);
+    }
+
+    #[test]
+    fn lex_logical_ops_packed_against_atoms() {
+        // No whitespace between operands and operators — common case.
+        assert_eq!(
+            kinds("a&&b||!c"),
+            vec![
+                TokenKind::Ident,
+                TokenKind::AmpAmp,
+                TokenKind::Ident,
+                TokenKind::PipePipe,
+                TokenKind::Bang,
+                TokenKind::Ident,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_comparison_in_expression_context() {
+        // The kind of source the C1.3 parser will see.
+        assert_eq!(
+            kinds("if x != 0"),
+            vec![
+                TokenKind::If,
+                TokenKind::Ident,
+                TokenKind::BangEq,
+                TokenKind::IntLit,
+            ]
         );
     }
 
