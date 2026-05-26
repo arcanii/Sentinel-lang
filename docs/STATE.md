@@ -12,7 +12,37 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C1.5 landed** — nullable types `?T` + `null` literal
+Last updated: **C1.6 landed** — arrays + heap-allocation runtime
++ `len` builtin + ADR 0014 D10 unlock (recursive structs via `?T`
+heap indirection) shipped end-to-end across three feat commits
+(8924d38 ADR 0015 PROPOSED; 3cfd49f lexer adds `[` and `]`
+tokens; 8c5bbbe bundled runtime + AST + parser + resolve + types
++ codegen). The bootstrap pipeline is still **parse_query →
+resolve_query → check_query → codegen**; the array surface flows
+through as new parallel-tree variants. Type universe at C1.6
+close: `{ I64, I32, Bool, Struct(StructId), Nullable(NullableInner),
+Array(ArrayElem) }` where `NullableInner` and `ArrayElem` are
+parallel flat subset enums (primitives + structs only) — `?[T]`
+and `[?T]` are deferred per the C1.6 amendment of ADR 0015 D6.
+**ADR 0014 D10 retired**: the C1.5 deferral closes here per ADR
+0015 D11. `?Struct` codegen switches from inline `{ i1, T }` to
+heap-indirect `{ i1, ptr }`; the cycle detector relaxes — only
+direct struct edges contribute to cycles, nullable struct edges
+break them. `struct Node { next: ?Node }` now type-checks AND
+compiles AND runs. The C1.6 phase-go program at
+`tests/pass/c16_go_no_go.sentinel` runs: `sum_from([1,2,3,4,5],
+0)` recursive over `[i64]` with `len` + `a[i]` produces stdout
+`15\n`, exit 0. Pipeline introduces the first heap allocations
+in Sentinel via `sentinel_alloc` / `sentinel_panic_oob` runtime
+symbols added to sentinel-runtime (libc malloc wrapper + abort
+on OOB). NO `free` at C1.6 — arrays leak; resource management is
+C2's region work. ADR 0015 is now ACCEPTED-WITH-AMENDMENTS (D6
+flat-depth-1 subset + D11 unlock implemented). ADR 0014 D10
+retires (no longer deferred). Workspace test delta: +58 (744
+total) — +4 AST, +20 syntax (6 lexer + 14 parser; the lexer
+count was 6 new tests for `[`/`]` brackets), +4 resolve, +14
+types, +9 codegen, +7 pass-test fixtures (c16_*). Pre-C1.6
+context: **C1.5 landed** — nullable types `?T` + `null` literal
 + `unwrap_or` / `is_some` builtins shipped end-to-end across three
 commits (3cb1238 ADR 0014 PROPOSED; dff8642 lexer adds `null`
 keyword + `?` token; 1d0adae bundled AST + parser + resolve +
@@ -1277,7 +1307,10 @@ scaffold stubs.
 | ADR 14 | Concrete C1.5 surface syntax (`?T` nullables + null + unwrap_or/is_some) | Done | 3cb1238 |
 | C1.5.1 | Lexer: `null` keyword + `?` token                              | Done | dff8642 |
 | C1.5.2-6 | AST + parser + resolve + types + codegen for `?T` (bundled)   | Done | 1d0adae |
-| C1.6+ | Arrays, generics                                                | Planned |         |
+| ADR 15 | Concrete C1.6 surface syntax (arrays + heap + len + D11 unlock) | Done | 8924d38 |
+| C1.6.1 | Lexer: `[` and `]` tokens                                      | Done | 3cfd49f |
+| C1.6.2-6 | Runtime + AST + parser + resolve + types + codegen for arrays (bundled) | Done | 8c5bbbe |
+| C1.7+ | Generics                                                        | Planned |         |
 
 ADR 0010 (concrete C0 surface syntax) lands between C0.0 and C0.1
 per ADR 0009 D8.
@@ -2454,6 +2487,93 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     Future C1.7+ generics will retire the builtins, shifting
     FnIds back; tests should not hardcode IDs.
 
+74. (C1.6.1 / 3cfd49f) The C1.6 lexer additions are just two
+    punctuation tokens: `[` (LBracket) and `]` (RBracket) per
+    ADR 0015 D8. They serve three roles disambiguated by the
+    parser at C1.6.2-6: array type `[T]`, array literal
+    `[e1, e2, ...]`, and postfix indexing `a[i]`. No new
+    keywords — `len` is a registered builtin per D4, not a
+    reserved word. 6 new lexer tests.
+
+75. (C1.6.2-6 / 8c5bbbe) **ADR 0015 D6 amendment: depth-1 type
+    nesting.** The ADR proposed extending NullableInner with
+    `Array(ArrayElem)` and ArrayElem with `Nullable(NullableInner)`
+    to represent `?[T]` / `[?T]` combinations. Rust's mutual
+    enum recursion forces Box indirection somewhere, which breaks
+    `Type`'s Copy and cascades through the codebase. The
+    implementation cap: NullableInner and ArrayElem stay as
+    primitive-only subset enums (I64/I32/Bool/Struct). `?T` and
+    `[T]` each contain primitives + structs only, never each
+    other. `?[T]` and `[?T]` become "not yet representable" at
+    C1.6; a future ADR adds them when generics or a more
+    sophisticated representation is in place.
+
+76. (C1.6.2-6 / 8c5bbbe) **Codegen value-type representation
+    split for `?T`** per ADR 0015 D11. `?primitive` (I64, I32,
+    Bool) stays as the flat `{ i1 valid, T payload }` from C1.5.
+    `?Struct` switches to heap-indirect `{ i1 valid, ptr payload }`
+    where payload points to a `sentinel_alloc`'d struct value.
+    The asymmetry is the key insight: primitives are tiny and
+    inline pays for itself; structs can be arbitrarily large and
+    might be recursive, so the pointer indirection both bounds
+    the parent's size AND breaks recursive struct cycles. The
+    detect_struct_cycle pass relaxes to walk only direct
+    `Type::Struct` edges, accepting cycles through `?Struct`.
+
+77. (C1.6.2-6 / 8c5bbbe) **Runtime additions land in C1.6.**
+    sentinel-runtime gains two new C-ABI symbols:
+    `sentinel_alloc(i64 size) -> *mut u8` (libc malloc wrapper
+    + abort on failure) and `sentinel_panic_oob(i64 idx, i64
+    len) -> never` (print + abort on out-of-bounds index).
+    Codegen pass 1 declares both as external `extern "C"` fns
+    in the LLVM module; the actual implementations come from
+    sentinel-runtime when the program is linked. NO `free`
+    exposed — arrays + nullable struct payloads leak per ADR
+    0015 D9. Documented limitation; C2 introduces region-based
+    resource management.
+
+78. (C1.6.2-6 / 8c5bbbe) **The fns HashMap "dummy entries" for
+    inlined builtins.** Pre-C1.6 codegen aliased ALL is_runtime
+    signatures to the same `sentinel_print` LLVM symbol (a
+    latent name clash that worked only because LLVM's
+    add_function with a duplicate name returns the existing fn).
+    C1.6 fixes this: only `print` (FnId 0) gets a real LLVM
+    declaration as `sentinel_print`; the inlined builtins
+    (`unwrap_or` FnId(1), `is_some` FnId(2), `len` FnId(3))
+    have fns HashMap entries pointing at print_fn as a sentinel
+    value (never read because codegen special-cases their
+    FnIds before calling `lower_call`). The runtime symbols
+    `sentinel_alloc` and `sentinel_panic_oob` get their own
+    declarations — they're called by codegen helpers, not by
+    user code via the Call mechanism.
+
+79. (C1.6.2-6 / 8c5bbbe) Array codegen lowers `[T]` to LLVM
+    `{ i64 len, ptr data }`. Array literal allocates
+    `n * sizeof(T)` bytes via `sentinel_alloc`, stores each
+    element via GEP+store, then build_insert_values the
+    `{ len, data }` struct. Indexing extracts both fields,
+    bounds-checks (`0 <= idx < len`), branches: ok-branch does
+    GEP+load, oob-branch calls `sentinel_panic_oob` then
+    `build_unreachable`. The element type for GEP comes from
+    `TypedExprKind::Index.elem_ty` (cached by the type checker)
+    — LLVM uses opaque pointers since LLVM 15, so we track the
+    payload type at the AST level.
+
+80. (C1.6.2-6 / 8c5bbbe) The cycle-detector relaxation that
+    closes ADR 0014 D10 is a one-line change: walk only
+    `Type::Struct(_)` edges, not `Type::Nullable(NullableInner::
+    Struct(_))`. The codegen change is more involved (the `?T`
+    representation split per decision 76) but the type-check
+    relaxation is trivial — the cycle is broken at the
+    representation level, so the type checker can simply
+    accept it.
+
+81. (C1.6.2-6 / 8c5bbbe) Test FnId shift: user fns now start
+    at FnId(4) because we have four builtins (print at 0,
+    unwrap_or at 1, is_some at 2, len at 3). Updated 2 tests
+    in sentinel-resolve and 1 in sentinel-types. Same caution
+    as decision 73 — tests should not hardcode FnIds.
+
 37. (C1.0c, ADR 0011 D1 amendment) Codegen stays outside the salsa
     query graph through Phase C1.0. ADR 0011's original D1 sketch
     had "… through codegen" in the query list, suggesting
@@ -2499,46 +2619,53 @@ All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
-  - sentinel-syntax:        169 tests (167 lib + 2 UI integration) + 0 doctests
-                            (lib at C1.5: 160 lexer/parser + 7 query;
-                             C1.4 added 4 lexer + 21 parser tests for
-                             struct decl/literal/field access;
-                             C1.5 added 6 lexer + 9 parser tests for
-                             null literal / `?T` type / nested-nullable
-                             rejection / whitespace tolerance)
-  - sentinel-ast:           38 tests (1 smoke + Display impls + op symbols);
-                            C1.3 added 7; C1.4 added 6; C1.5 added 3
-                            (NullLit + Nullable TypeExpr + nullable struct
-                            TypeExpr Display)
-  - sentinel-codegen:       32 tests (1 smoke + 1 target init + 30 positive
-                            compile) + 0 doctests; C1.4 added 6; C1.5
-                            added 8 (?T let with null, ?T let with
-                            widening, unwrap_or, is_some, == null,
-                            ?T in fn return, nullable struct field,
-                            C1.5 phase-go)
-  - sentinel-resolve:       32 tests (21 from C1.1-3 + 7 from C1.4 + 4
-                            new C1.5: null literal pass-through, builtin
-                            pre-registration, redefining unwrap_or /
-                            is_some rejected) + 0 doctests
-  - sentinel-types:         71 tests (34 from C1.2-3 + 19 from C1.4 + 18
-                            new C1.5: nullable type resolution + null
-                            with/without annotation + widening (let +
-                            call-arg) + unwrap_or / is_some typing +
-                            cmp eq/ne null + nullable struct field +
-                            recursive-nullable-struct-still-rejected
-                            (D10 deferral) + Display + roundtrip +
-                            C1.5 phase-go) + 0 doctests
-  - sentinel-driver:        40 pass integration tests + 0 doctests
-                            (22 from C0 + 7 c13_* + 5 c14_* + 6 new c15_*:
-                            null_literal, widen, eq_null,
-                            nullable_struct_field, maybe_compose,
-                            c15_go_no_go)
+  - sentinel-syntax:        195 tests (193 lib + 2 UI integration) + 0 doctests
+                            (lib at C1.6: 186 lexer/parser + 7 query;
+                             C1.5 added 6 lexer + 9 parser tests;
+                             C1.6 added 6 lexer + 20 parser tests for
+                             `[T]` array type / `[...]` literal / `a[i]`
+                             indexing / nullable+array / nested array
+                             parsing / error cases)
+  - sentinel-ast:           42 tests (1 smoke + Display impls + op symbols);
+                            C1.5 added 3; C1.6 added 4 (ArrayLit + Index +
+                            array type Display + empty array)
+  - sentinel-codegen:       41 tests (1 smoke + 1 target init + 39 positive
+                            compile) + 0 doctests; C1.5 added 8; C1.6
+                            added 9 (array literal, index, len, empty
+                            array, array as fn arg, linked list,
+                            nullable-struct widening, array of struct,
+                            C1.6 phase-go)
+  - sentinel-resolve:       36 tests (32 from C1.1-5 + 4 new C1.6:
+                            array literal pass-through, array index
+                            pass-through, len builtin pre-registration,
+                            redefining len rejected) + 0 doctests
+  - sentinel-types:         86 tests (71 from C1.2-5 + 14 new C1.6:
+                            array type resolution + array literal typing
+                            + array index typing + len builtin +
+                            empty-needs-annotation + IndexOnNonArray +
+                            IndexNotInt + NestedArray + mixed-element
+                            rejection + len-on-non-array + array in
+                            struct + linked-list-unlock + direct-cycle
+                            still-rejected + C1.6 phase-go;
+                            recursive_nullable_struct_now_accepted
+                            replaces the C1.5 deferral test)
+                            + 0 doctests
+  - sentinel-driver:        47 pass integration tests + 0 doctests
+                            (22 from C0 + 7 c13_* + 5 c14_* + 6 c15_* +
+                            7 new c16_*: array_basic, empty_array,
+                            array_as_arg, array_of_struct,
+                            array_in_struct, linked_list_node,
+                            c16_go_no_go)
   - sentinel-runtime:       2 tests (smoke + sentinel_print_returns_zero) + 0 doctests
+                            — note: sentinel_alloc + sentinel_panic_oob
+                            (C1.6 / ADR 0015 D9) are exercised via the
+                            c16_* pass-test integration tests, not direct
+                            Rust unit tests (they abort on failure paths)
   - sentinel-base:          3 tests (salsa query runs/caches + source file accessors) + 0 doctests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
                             (sentinel-hir, -mir, -lsp)
 
-Total active workspace tests: **686**.
+Total active workspace tests: **744**.
 
 ### Script Convention
 

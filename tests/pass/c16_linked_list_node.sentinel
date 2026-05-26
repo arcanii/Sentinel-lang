@@ -1,0 +1,9 @@
+// ADR 0014 D10 unlock via ADR 0015 D11: `struct Node { next: ?Node }`
+// is representable because `?Node` uses heap indirection. Construct
+// a head with a null next; print the head's value.
+struct Node { value: i64, next: ?Node }
+
+fn main() -> i64 {
+    let head = Node { value: 99, next: null };
+    head.value
+}

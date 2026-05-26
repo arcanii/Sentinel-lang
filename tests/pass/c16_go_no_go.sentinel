@@ -1,0 +1,15 @@
+// C1.6 phase-go program per ADR 0015 appendix.
+// Exercises [T] array type + array literal + indexing + len builtin
+// + bounds-check termination + heap-backed storage + recursive fn.
+fn sum_from(a: [i64], i: i64) -> i64 {
+    if i == len(a) {
+        0
+    } else {
+        a[i] + sum_from(a, i + 1)
+    }
+}
+
+fn main() -> i64 {
+    let arr: [i64] = [1, 2, 3, 4, 5];
+    print(sum_from(arr, 0))
+}

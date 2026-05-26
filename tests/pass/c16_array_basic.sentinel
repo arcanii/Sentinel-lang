@@ -1,0 +1,5 @@
+// Minimal array program: literal + indexing + len.
+fn main() -> i64 {
+    let xs = [10, 20, 30];
+    xs[1] + len(xs)
+}

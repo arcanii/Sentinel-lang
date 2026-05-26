@@ -1,0 +1,6 @@
+// Empty array literal with annotation per ADR 0015 D5.
+// len of an empty array is 0.
+fn main() -> i64 {
+    let xs: [i64] = [];
+    len(xs)
+}

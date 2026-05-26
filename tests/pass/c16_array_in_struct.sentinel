@@ -1,0 +1,8 @@
+// A struct with an array field. The array is heap-allocated;
+// the struct value contains the { i64, ptr } fat pointer.
+struct Bag { items: [i64], owner_id: i64 }
+
+fn main() -> i64 {
+    let b = Bag { items: [3, 4, 5], owner_id: 7 };
+    b.items[2] + b.owner_id
+}

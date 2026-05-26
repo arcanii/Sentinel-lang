@@ -1,11 +1,30 @@
 # ADR 0015: Concrete C1.6 surface syntax — arrays, indexing, heap allocation, and the D10 unlock
 
-Status: PROPOSED — no D-decision exercised yet; this ADR pins the
-surface decisions before the C1.6 feat commits land per the
-ADR-first-per-phase-boundary norm (HANDOVER §0.1). Will flip to
-ACCEPTED when the C1.6 sub-phases all ship.
+Status: ACCEPTED-WITH-AMENDMENTS — D1-D5, D7-D13 all fully
+exercised at C1.6.1 + C1.6.2-6 (commits 3cfd49f + 8c5bbbe). One
+amendment uncovered during implementation:
+
+  - **D6 amendment**: the ADR proposed extending NullableInner
+    with `Array(ArrayElem)` and ArrayElem with
+    `Nullable(NullableInner)` to represent `?[T]` and `[?T]`.
+    Rust's mutual enum recursion forces Box indirection which
+    breaks Type's Copy and would cascade through the codebase.
+    The C1.6 implementation caps the depth at 1: NullableInner
+    and ArrayElem stay as primitive-only subset enums (I64,
+    I32, Bool, Struct). `?[T]` and `[?T]` are deferred — they
+    become "not yet representable" until a future ADR adds them
+    (likely alongside generics at C1.7).
+
+  - **D11 unlock implemented**: the ADR 0014 D10 deferral
+    retires here. `?Struct` codegen uses heap indirection
+    (`{ i1 valid, ptr payload }`); the cycle detector relaxes
+    to walk only direct struct edges. Recursive structs through
+    `?T` now type-check, compile, and run.
+
 Date: 2026-05-26
-Last touched: 2026-05-26 (initial PROPOSED draft)
+Last touched: 2026-05-26 (C1.6 landed; status flipped to
+ACCEPTED-WITH-AMENDMENTS with the D6 amendment + D11 implementation
+documented)
 Related: 0011 (Phase C1 kickoff; D3 lists arrays as a C1
 deliverable, D6 schedules C1.6 after C1.5), 0014 (concrete C1.5
 surface — D10 deferred the recursive-struct cycle-check

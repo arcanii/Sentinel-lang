@@ -356,3 +356,52 @@ fn pass_c15_go_no_go() {
     assert_eq!(r.stdout, "142\n");
     assert_eq!(r.exit, 0);
 }
+
+// ----- C1.6 pass-tests: arrays + len + indexing + recursive struct unlock -----
+
+#[test]
+fn pass_c16_array_basic() {
+    // [10, 20, 30]; xs[1] + len(xs) = 20 + 3 = 23 -> exit 23
+    assert_eq!(run_exit("c16_array_basic.sentinel"), 23);
+}
+
+#[test]
+fn pass_c16_empty_array() {
+    // let xs: [i64] = []; len(xs) -> exit 0
+    assert_eq!(run_exit("c16_empty_array.sentinel"), 0);
+}
+
+#[test]
+fn pass_c16_array_as_arg() {
+    // first([7, 8, 9]) -> exit 7 (the [0] element)
+    assert_eq!(run_exit("c16_array_as_arg.sentinel"), 7);
+}
+
+#[test]
+fn pass_c16_array_of_struct() {
+    // [Point{1,2}, Point{3,4}]; ps[0].x + ps[1].y = 1 + 4 = 5 -> exit 5
+    assert_eq!(run_exit("c16_array_of_struct.sentinel"), 5);
+}
+
+#[test]
+fn pass_c16_array_in_struct() {
+    // Bag { items: [3, 4, 5], owner_id: 7 }; b.items[2] + b.owner_id
+    // = 5 + 7 = 12 -> exit 12
+    assert_eq!(run_exit("c16_array_in_struct.sentinel"), 12);
+}
+
+#[test]
+fn pass_c16_linked_list_node() {
+    // ADR 0014 D10 unlock via ADR 0015 D11. Node { value: 99,
+    // next: null }; head.value -> exit 99.
+    assert_eq!(run_exit("c16_linked_list_node.sentinel"), 99);
+}
+
+#[test]
+fn pass_c16_go_no_go() {
+    // ADR 0015 phase-go 1: sum_from([1,2,3,4,5], 0)
+    // = 1+2+3+4+5 = 15 -> stdout "15\n", exit 0.
+    let r = build_and_run("c16_go_no_go.sentinel");
+    assert_eq!(r.stdout, "15\n");
+    assert_eq!(r.exit, 0);
+}

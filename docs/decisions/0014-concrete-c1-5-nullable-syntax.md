@@ -1,30 +1,30 @@
 # ADR 0014: Concrete C1.5 surface syntax — nullable types `?T`, `null` literal, null-check semantics
 
-Status: ACCEPTED-WITH-AMENDMENTS — D1, D2, D3, D5, D6, D7, D8, D9,
-D11 all fully exercised at C1.5.1 + C1.5.2-6 (commits dff8642 +
-1d0adae). Two amendments uncovered during implementation:
+Status: ACCEPTED — D1, D2, D3, D5, D6, D7, D8, D9, D10, D11 all
+fully exercised across C1.5 + C1.6. The C1.5 D4 amendment (flat
+NullableInner subset instead of Box<Type>) stays in force. The
+C1.5 D10 deferral RETIRES at C1.6 / ADR 0015 D11 — recursive
+structs through `?T` work now because `?Struct` codegen uses
+heap indirection (per ADR 0015 D11), which breaks the cycle at
+the representation level.
 
-  - **D4 representation amendment**: the ADR proposed
-    `Type::Nullable(Box<Type>)` but the implementation went with a
-    flat `NullableInner` subset enum instead (see Reasoning
-    addendum below). The subset enum keeps `Type` `Copy` and makes
-    `?(?T)` structurally unrepresentable. Strictly an
-    implementation choice; the surface semantics (no nested
-    nullables per D6) match the ADR.
-  - **D10 deferral**: the recursive-struct cycle-check
-    relaxation is documented but NOT exercised at C1.5. The
-    `?T = { i1, T }` flat-inline LLVM representation makes
-    recursive structs (e.g. `struct Node { next: ?Node }`) have
-    infinite LLVM size. Proper indirection requires heap
-    allocation (malloc/free), which is C1.6+ territory. The
-    cycle detector at C1.5 walks nullable struct edges
-    conservatively (still rejects recursive nullables). D10's
-    spirit is preserved as the future target; D10's text said
-    "relaxes" but the runtime behavior says "deferred."
+  - **D4 representation amendment** (from C1.5): the ADR
+    proposed `Type::Nullable(Box<Type>)` but the implementation
+    went with a flat `NullableInner` subset enum. The subset
+    enum keeps `Type` `Copy` and makes `?(?T)` structurally
+    unrepresentable. Strictly an implementation choice; the
+    surface semantics match the ADR.
+  - **D10 retired** (at C1.6 via ADR 0015 D11): the recursive-
+    struct cycle-check relaxation lands. The cycle detector
+    walks only direct `Type::Struct(_)` edges; nullable struct
+    edges break cycles because the `?Struct` codegen uses heap
+    indirection (`{ i1 valid, ptr payload }`). `struct Node {
+    next: ?Node }` now type-checks AND compiles AND runs.
 
 Date: 2026-05-26
-Last touched: 2026-05-26 (C1.5 landed; status flipped to
-ACCEPTED-WITH-AMENDMENTS with the D4 + D10 details documented)
+Last touched: 2026-05-26 (C1.6 landed; D10 retires per ADR 0015
+D11 implementation; status flipped from ACCEPTED-WITH-AMENDMENTS
+to ACCEPTED)
 Related: 0011 (Phase C1 kickoff; D3 lists `?T` as part of the C1
 type system, D6 schedules C1.5 after C1.4), 0013 (concrete C1.4
 surface — D7's recursive-struct rejection lifts here when nullable

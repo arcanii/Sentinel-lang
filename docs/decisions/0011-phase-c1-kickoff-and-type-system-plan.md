@@ -1,21 +1,23 @@
 # ADR 0011: Phase C1 kickoff — type system, name resolution, Salsa retrofit
 
 Status: PROPOSED — D1 (Salsa), D2 (explicit-annotations / inside-
-body inference), D3 (primitive types + struct + ?T per ADRs 12-14),
-D4 (sentinel-resolve crate lift), D5 (sentinel-types::check() real),
-D7 (ADRs 0012/0013/0014 for concrete C1.2-5 surfaces), D10
-(C-style truthy retired at C1.3), D11 (CodegenCtx evolution at
-C1.1.2 / C1.3 / C1.4 / C1.5) all fully exercised at C1.0a-c,
-C1.1.1-2, C1.2.1-4, C1.3.1-5, C1.4.1-6+1.4.7, and C1.5.1-6.
-With C1.5 landed the C1 type system covers primitive scalars +
-nominal structs + nullable types (non-recursive); the ADR remains
-PROPOSED overall because D6 (sub-phase split — C1.6+ still in
-flight: arrays + heap indirection + generics) and D12 (perf
-discipline — deferred per the ADR) cover the remaining sub-phases.
+body inference), D3 (primitive types + struct + ?T + arrays per
+ADRs 12-15), D4 (sentinel-resolve crate lift), D5 (sentinel-
+types::check() real), D7 (ADRs 0012/0013/0014/0015 for concrete
+C1.2-6 surfaces), D10 (C-style truthy retired at C1.3), D11
+(CodegenCtx evolution across C1.1.2 / C1.3 / C1.4 / C1.5 / C1.6)
+all fully exercised at C1.0a-c, C1.1.1-2, C1.2.1-4, C1.3.1-5,
+C1.4.1-7, C1.5.1-7, and C1.6.1-6. With C1.6 landed the C1 type
+system covers primitive scalars + nominal structs + nullable
+types (including recursive via heap) + heap-backed arrays; the
+ADR remains PROPOSED overall because D6 (sub-phase split — C1.7
+still ahead: generics) and D12 (perf discipline — deferred per
+the ADR) cover the remaining sub-phases.
 Date: 2026-05-25
-Last touched: 2026-05-26 (C1.5 landed; D3 + D7 + D11 status
-updated; nullable surface complete (non-recursive); ADR 0014
-ACCEPTED-WITH-AMENDMENTS)
+Last touched: 2026-05-26 (C1.6 landed; D3 + D7 + D11 status
+updated; arrays + heap surface complete; ADR 0014 flips to fully
+ACCEPTED because its D10 retires; ADR 0015 ACCEPTED-WITH-
+AMENDMENTS)
 Related: 0001 (staged validation), 0009 (Phase C kickoff; D1 deferred
 Salsa to C1, D7 deferred sentinel-types and sentinel-resolve stubs
 to C1), 0010 (concrete C0 surface; D5 reserved `->` for C1
@@ -273,9 +275,9 @@ duplicate it.
 | C1.2 | sentinel-types: annotation grammar + basic type check    | 4 wks    | done (4 commits) |
 | C1.3 | Multiple primitive types (i32, i64, bool); replace C-style truthy | 2 wks | done (3 commits) |
 | C1.4 | Struct definitions + field access                        | 3-4 wks  | done (3 commits) |
-| C1.5 | `?T` nullability + null-checks                            | 2-3 wks  | done (3 commits; D10 deferred to C1.6+) |
-| C1.6 | Arrays + bounds checking + heap indirection (unlocks D10) | 3-4 wks  | next             |
-| C1.7 | Witness-table generics (basic)                            | 4-6 wks  |                  |
+| C1.5 | `?T` nullability + null-checks                            | 2-3 wks  | done (3 commits; D10 retired at C1.6) |
+| C1.6 | Arrays + bounds checking + heap indirection (unlocks D10) | 3-4 wks  | done (3 commits) |
+| C1.7 | Witness-table generics (basic)                            | 4-6 wks  | next             |
 
 Honest total: ~22-28 weeks (~5-6 months). HANDOVER §6.2's
 3-month budget for C1 was optimistic; ADR 0011 acknowledges this

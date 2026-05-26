@@ -1,0 +1,8 @@
+// Arrays of struct values. Each element is a Point stored
+// in the heap-allocated backing buffer.
+struct Point { x: i64, y: i64 }
+
+fn main() -> i64 {
+    let ps = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }];
+    ps[0].x + ps[1].y
+}

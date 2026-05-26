@@ -57,11 +57,12 @@ C1.3. See STATE.md Section C.
 **Phase C1.2 — annotation grammar + sentinel-types::check() — complete.**
 **Phase C1.3 — bool + i32 + comparison + logical operators; ADR 0010 D9 retired — complete.**
 **Phase C1.4 — struct definitions + field access + struct literals — complete.**
-**Phase C1.5 — nullable types `?T` + null literal + unwrap_or / is_some builtins — complete (D10 deferred).**
+**Phase C1.5 — nullable types `?T` + null literal + unwrap_or / is_some builtins — complete (D10 deferred; retired at C1.6).**
+**Phase C1.6 — arrays `[T]` + indexing `a[i]` + `len` builtin + heap runtime + ADR 0014 D10 unlock — complete.**
 Phase C1 (type system, regions, effects per HANDOVER §6.2) is in
 flight per ADR 0011 (PROPOSED, 8 sub-phases, honest 5-6 month
 estimate vs HANDOVER's 3-month budget). The C1.0 + C1.1 + C1.2 +
-C1.3 + C1.4 + C1.5 sub-phases have all landed:
+C1.3 + C1.4 + C1.5 + C1.6 sub-phases have all landed:
 
   - **C1.0a** (09dc8c3): foundation crate `sentinel-base` hosting
     the `#[salsa::db]` SentinelDb trait, `#[salsa::input]`
@@ -257,25 +258,75 @@ C1.3 + C1.4 + C1.5 sub-phases have all landed:
     land (null_literal, widen, eq_null, nullable_struct_field,
     maybe_compose, c15_go_no_go).
 
-**C1 next: C1.6** — arrays + bounds checking per ADR 0011 D6.
-Estimated 3-4 weeks. ADRs 0013 + 0014 are ACCEPTED (0014 with
-amendments); ADR 0015 (concrete C1.6 surface — array literal
-syntax probably `[1, 2, 3]`, array type `[T; N]` or `[T]`,
-indexing `a[i]`, bounds-check semantics) lands before the
-first C1.6 feat commit. C1.6 will likely also introduce the
-heap-allocation primitive that unlocks ADR 0014 D10's deferred
-recursive-struct relaxation.
+  - **ADR 0015** (8924d38, PROPOSED→ACCEPTED-WITH-AMENDMENTS):
+    concrete C1.6 surface — `[T]` array type syntax (D1),
+    `[e1, e2, ...]` array literal (D2), postfix `a[i]` indexing
+    (D3), `len(a) -> i64` builtin (D4), empty array needs
+    annotation (D5), `Type::Array(ArrayElem)` flat subset
+    representation (D6 — amended to depth-1: NullableInner and
+    ArrayElem stay primitive-only, no `?[T]` / `[?T]` at C1.6
+    because mutual enum recursion would force Box and break
+    Type's Copy), bidirectional element typing (D7), lexer
+    additions (D8: `[` + `]`), heap runtime (D9:
+    `sentinel_alloc` + `sentinel_panic_oob`, no `free`),
+    bounds-check semantics (D10: 0 <= idx < len; panic_oob on
+    failure), ADR 0014 D10 unlock implemented (D11: `?Struct`
+    codegen switches to heap-indirect `{ i1, ptr }` so
+    recursive structs through `?T` work; cycle detector
+    relaxes), out-of-scope list (D12: mutable indexing,
+    slicing, push/pop, multi-dim, methods, free, ==), fn main
+    invariant stays (D13). The ADR 0014 D10 deferral retires
+    here.
+  - **C1.6.1** (3cfd49f): lexer adds `[` and `]` tokens per
+    ADR 0015 D8. Two new TokenKind variants disambiguated by
+    the parser into three roles: array type / array literal /
+    postfix index. +6 new lexer tests.
+  - **C1.6.2-6** (8c5bbbe): the array surface + heap runtime
+    + ADR 0014 D10 unlock land end-to-end. sentinel-runtime
+    gains `sentinel_alloc` (libc malloc wrapper + abort on
+    failure) and `sentinel_panic_oob` (abort with diagnostic).
+    AST gains `ExprKind::ArrayLit` + `ExprKind::Index` +
+    `TypeExprKind::Array`. Parser handles `[T]` in parse_type,
+    `[...]` in parse_atom (with empty-needs-annotation per D5),
+    `a[i]` in parse_postfix alongside `.field`. Resolve
+    pre-registers `len` builtin at FnId(3); user fns now start
+    at FnId(4). Types widens with `Type::Array(ArrayElem)` flat
+    subset (D6 amendment — primitives only; no `?[T]` / `[?T]`),
+    bidirectional element typing (D7), array literal / index /
+    len typing rules (D2/D3/D4), four new TypeError variants
+    (AmbiguousEmptyArray, IndexOnNonArray, IndexNotInt,
+    NestedArray), and **the cycle-detector relaxation** that
+    closes ADR 0014 D10: only direct struct edges contribute to
+    cycles; `?Struct` edges break them via heap indirection.
+    Codegen: array as `{ i64 len, ptr data }`; ArrayLit lowers
+    to alloc+store+insert_value; Index lowers to bounds-check
+    + GEP + load (two basic blocks idx_ok/idx_oob); len
+    extract_value(0); the `?Struct` representation switches
+    from inline `{ i1, T }` to heap-indirect `{ i1, ptr }`;
+    `WidenToNullable` for struct types allocates+stores +
+    wraps in pointer. +52 tests across all crates. Seven new
+    c16_* pass-test fixtures (array_basic, empty_array,
+    array_as_arg, array_of_struct, array_in_struct,
+    linked_list_node, c16_go_no_go).
 
-**Workspace test count**: 686 active across all crates (+54 over
-C1.4: +3 AST, +15 syntax (6 lexer + 9 parser), +4 resolve, +18
-types, +8 codegen, +6 pass-test fixtures). All four check-suite
+**C1 next: C1.7** — witness-table generics per ADR 0011 D6.
+Estimated 4-6 weeks (the longest single sub-phase). ADRs
+0013/0014/0015 all closed; ADR 0016 (concrete C1.7 surface —
+generic fn / struct syntax `<T>`, type parameters, witness
+tables) lands before the first C1.7 feat commit. C1.7 will
+likely retire the special-cased generic builtins (unwrap_or,
+is_some, len) by replacing them with real generic fns.
+
+**Workspace test count**: 744 active across all crates (+58 over
+C1.5: +4 AST, +20 syntax (6 lexer + 14 parser), +4 resolve, +14
+types, +9 codegen, +7 pass-test fixtures). All four check-suite
 checks green (cargo build --workspace, cargo clippy --workspace
 --all-targets -D warnings, cargo test --workspace, cargo test
---workspace --doc). c05 go/no-go (C1.3 bool flow) still runs
-end-to-end: stdout "10", exit 0. c14 go/no-go (C1.4 struct flow)
-runs: stdout "7", exit 0. c15 go/no-go (C1.5 nullable flow) runs:
-stdout "142", exit 0. See STATE.md "Conventions" for the per-crate
-breakdown.
+--workspace --doc). c05 go/no-go (C1.3 bool flow) runs: stdout
+"10", exit 0. c14 go/no-go (C1.4 struct flow) runs: stdout "7",
+exit 0. c15 go/no-go (C1.5 nullable flow) runs: stdout "142",
+exit 0. c16 go/no-go (C1.6 array flow) runs: stdout "15", exit
+0. See STATE.md "Conventions" for the per-crate breakdown.
 
 **ADR status**:
 
@@ -303,11 +354,12 @@ breakdown.
                                                  retirement), C1.4
                                                  (structs + ADR 0013),
                                                  C1.5 (nullables + ADR
-                                                 0014); ADR remains
+                                                 0014), C1.6 (arrays +
+                                                 heap + ADR 0015 + D10
+                                                 unlock); ADR remains
                                                  PROPOSED because D6
                                                  (sub-phase split —
-                                                 C1.6+ in flight:
-                                                 arrays + heap +
+                                                 C1.7 in flight:
                                                  generics) and D12
                                                  (perf discipline —
                                                  deferred per the ADR)
@@ -318,21 +370,32 @@ breakdown.
   - 0013 concrete-c1-4-struct-syntax             ACCEPTED — every
                                                  D-decision exercised
                                                  across C1.4
-  - 0014 concrete-c1-5-nullable-syntax           ACCEPTED-WITH-
-                                                 AMENDMENTS — D1-D3 +
-                                                 D5-D9 + D11 all
-                                                 fully exercised; D4
-                                                 amended from
-                                                 Box<Type> to a flat
+  - 0014 concrete-c1-5-nullable-syntax           ACCEPTED — D1-D11
+                                                 all fully exercised:
+                                                 D1-D9 + D11 at C1.5;
+                                                 D10 retires at C1.6
+                                                 via ADR 0015 D11
+                                                 (`?Struct` heap
+                                                 indirection unlocks
+                                                 the recursive-
+                                                 struct relaxation).
+                                                 D4 representation
+                                                 stays as the flat
                                                  NullableInner subset
-                                                 enum (preserves Type
-                                                 Copy); D10 deferred
-                                                 to C1.6+ because the
-                                                 `?T = { i1, T }`
-                                                 flat representation
-                                                 can't break cycles
-                                                 without heap
-                                                 indirection
+                                                 enum (C1.5
+                                                 amendment)
+  - 0015 concrete-c1-6-array-syntax              ACCEPTED-WITH-
+                                                 AMENDMENTS — D1-D5
+                                                 + D7-D13 all fully
+                                                 exercised; D6 amended
+                                                 (NullableInner +
+                                                 ArrayElem stay
+                                                 primitive-only,
+                                                 deferring `?[T]` and
+                                                 `[?T]` to a future
+                                                 ADR); D11
+                                                 implementation
+                                                 closes ADR 0014 D10
 
 ### 0.1 Working norms (carry forward into Phase C1)
 
@@ -420,108 +483,109 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C1.6 — arrays + bounds checking + heap indirection)
+### 0.2 Next session opening (C1.7 — witness-table generics)
 
-Resume at **C1.6** per ADR 0011 D6. The C1 primitive surface
-+ first compound type (structs) + non-recursive nullables are
-complete; C1.6 introduces arrays and the heap-allocation
-primitive that unlocks ADR 0014 D10's deferred recursive-struct
-relaxation.
+Resume at **C1.7** per ADR 0011 D6. The C1 type system is now
+substantially complete: primitive scalars, nominal structs,
+nullable types (including recursive via heap), heap-backed
+arrays. C1.7 introduces generic types — the last sub-phase before
+C1 closes and Phase C2's region work begins.
 
-**Pre-flight work before any code**: write ADR 0015 *PROPOSED*
-covering the concrete C1.6 surface decisions. Patterns to argue:
+**Pre-flight work before any code**: write ADR 0016 *PROPOSED*
+covering the concrete C1.7 surface decisions. Patterns to argue:
 
-  - **Array type syntax**: `[T; N]` for fixed-size arrays?
-    `[T]` for dynamically-sized? Or both, with different
-    semantics? Rust uses `[T; N]` for stack arrays and `Vec<T>`
-    for heap. Sentinel might want a simpler "always-heap-
-    backed" model at C1.6 with `[T]` syntax — defer the size-
-    in-type story to a later ADR.
-  - **Array literal syntax**: `[1, 2, 3]` (Rust-style) is the
-    obvious choice. No new lexer tokens needed (uses existing
-    `[` and `]`).
-  - **Lexer additions**: `[` and `]` brackets. Two new tokens.
-  - **Indexing syntax**: postfix `a[i]` — extends parse_postfix
-    alongside `.field` (precedent from C1.4). Returns `T` for
-    array `[T]` indexed by `i64`.
-  - **Bounds checking semantics**: per HANDOVER §6.2's
-    "obvious memory-safety violations" criterion, out-of-bounds
-    indices must be runtime-detected. Options: (a) every index
-    becomes `if i < len { a[i] } else { panic }`, (b) compiler
-    inserts a check that traps on OOB, (c) bounds-check elision
-    when statically provable. C1.6 ships (a) or (b); (c) is C2+.
-  - **Heap allocation primitive**: needed both for the array
-    storage backing AND for ADR 0014 D10's deferred recursive-
-    struct unlock. Likely a `box T` operator or builtin that
-    moves a T into heap-allocated storage and returns a pointer.
-    The pointer's representation in the type system: a new
-    `Type::Heap(Box<Type>)` variant, OR fold it into the
-    nullable / array representations directly. TBD in ADR.
-  - **Recursive-struct unlock**: once heap is available, the
-    cycle detector's D10 relaxation becomes implementable —
-    nullable edges that point to heap-allocated structs break
-    cycles because heap pointers have fixed size.
+  - **Generic fn syntax**: `fn name<T>(x: T) -> T { … }` (Rust-
+    style) with type-parameter annotations. The angle-bracket
+    lexer tokens `<` and `>` already exist (used by comparison),
+    so this is a parser-level ambiguity to disambiguate per the
+    Rust pattern (turbofish `::<>` may or may not be needed).
+  - **Generic struct syntax**: `struct Box<T> { value: T }`.
+    Field types may mention `T`.
+  - **Type arguments**: `Box<i64>` in type position. Lexer
+    sees this as `Box` Ident, `<`, `i64` Ident, `>` — the
+    parser disambiguates based on context (after an Ident in
+    type position = type args; in expression position = less-
+    than).
+  - **Witness-table representation**: per HANDOVER §14.1's
+    witness-table choice, generic instances carry a runtime
+    table of operations for the type parameter T. C1.7 keeps it
+    minimal — just enough to retire the C1.5/C1.6 special-cased
+    builtins (`unwrap_or`, `is_some`, `len`) by making them
+    real generic fns.
+  - **Generic builtins retire**: with real generics, `unwrap_or
+    <T>(x: ?T, default: T) -> T`, `is_some<T>(x: ?T) -> bool`,
+    `len<T>(a: [T]) -> i64` all become regular generic fns.
+    The special-case branches in sentinel-types evaporate.
+  - **Out of scope**: trait/protocol bounds (`<T: Eq>`),
+    higher-kinded types, lifetime parameters (those wait for
+    C2's region work), const generics. Keep C1.7 minimal:
+    just type-parameter substitution, no bounds.
 
-Sub-steps once ADR 0015 is in (rough sketch — refine in the
+Sub-steps once ADR 0016 is in (rough sketch — refine in the
 ADR):
 
-1. **Lexer**: `[` and `]` tokens. Possibly a `box` keyword for
-   heap allocation. ~2-3 tokens.
-2. **AST + parser**: `TypeExprKind::Array(Box<TypeExpr>)`;
-   `ExprKind::ArrayLit(Vec<Expr>)`; `ExprKind::Index(target,
-   index)`. parse_postfix extends with `[expr]`. parse_type
-   extends with `[T]`.
-3. **Resolve**: passes through.
-4. **Types**: `Type::Array(Box<Type>)` (or flat subset like
-   C1.5's NullableInner). Array literal typing requires
-   all elements to be the same T. Index typing requires
-   target to be array, index to be i64; result is T.
-5. **Codegen**: arrays as LLVM pointers + length pairs?
-   Or fat pointers `{ ptr, len }`? Needs malloc/free
-   runtime additions in sentinel-runtime.
+1. **Lexer**: probably no new tokens (reuses `<` `>` from
+   comparisons). Possibly `::` for turbofish (TBD).
+2. **AST + parser**: `TypeExprKind::Generic(name, args)` or
+   similar; type-parameter annotations on FnDef + StructDecl;
+   parser disambiguation for `<` in type position vs expression
+   position. ~80-120 LOC.
+3. **Resolve**: type parameters need to be in scope for fn
+   bodies + struct field types; track per-fn / per-struct
+   generic environments.
+4. **Types**: monomorphization at every call site +
+   instantiation. The witness-table machinery for trait-bounded
+   parameters (if D6 includes them; otherwise just type
+   substitution).
+5. **Codegen**: monomorphize each generic fn for every concrete
+   T it's instantiated with. Cache the monomorphizations to
+   avoid blowup.
 
-**Estimated effort for C1.6**: 3-4 sessions per ADR 0011 D6.
-Larger than C1.5 because heap allocation is genuinely new
-runtime territory (malloc/free wiring through
-sentinel-runtime); bounds-checked indexing requires a new
-codegen pattern (cmp + branch + trap or panic call); array
-ABI / by-value vs by-reference is a real design question.
+**Estimated effort for C1.7**: 4-6 sessions per ADR 0011 D6.
+The longest single sub-phase. Generics are genuinely new
+territory — the parser disambiguation is non-trivial, the
+monomorphization-or-witness-table decision has real
+performance/code-size tradeoffs.
 
-After C1.6: **C1.7** (generics) per ADR 0011 D6. The
-remaining C1 budget per ADR 0011 D6 is ~4-6 weeks (just
-C1.7) if estimates hold.
+After C1.7: **C1 closes**. Phase C2 (regions, references,
+mutability) begins. The overall C1 budget per ADR 0011 D6 was
+22-28 weeks; actual elapsed time so far has been faster
+(infrastructure investment compounding) but C1.7 is the
+unknown — it may take the estimated full 4-6 weeks.
 
-C1.5 retrospective (estimate vs actual): ADR 0011 D6 estimated
-"2-3 weeks" for C1.5; the actual was ~1 session across 3
-commits. Faster than estimated. The pieces that took the most
-thought were: (a) the bidirectional checking infrastructure
-(threading `expected: Option<Type>` through check_expr while
-preserving the more-specific ReturnTypeMismatch /
-CallArgMismatch error variants for non-nullable contexts), (b)
-the D4 amendment from `Box<Type>` to `Type::Nullable(NullableInner)`
-flat subset (keeps Type Copy), (c) the D10 deferral discovery
-— the `?T = { i1, T }` flat representation makes recursive
-nullable structs infinite-sized in LLVM, so the
-recursive-struct unlock waits for C1.6's heap. Notes captured
-in STATE.md decisions 65-73.
+C1.6 retrospective (estimate vs actual): ADR 0011 D6 estimated
+"3-4 weeks" for C1.6; the actual was ~1 session across 3
+commits. Faster than estimated. The substantive pieces:
+(a) the codegen value-type representation split for `?T`
+(primitive stays inline, struct switches to heap-indirect),
+which closed ADR 0014 D10 elegantly; (b) the D6 amendment from
+mutually-recursive `NullableInner::Array` + `ArrayElem::Nullable`
+to flat depth-1 subsets (forced by Rust's Box requirement on
+mutual enum recursion, which would have broken Type's Copy);
+(c) wiring the new runtime symbols `sentinel_alloc` /
+`sentinel_panic_oob` through both sentinel-runtime (libc wrapper)
+and the codegen (external declarations + helper invocations).
+Notes captured in STATE.md decisions 74-81.
 
-C1.4 retrospective (kept for reference): ADR 0011 D6 estimated
-"3-4 weeks" for C1.4; the actual was ~1 session across 3
-commits. The codegen value-type widening from `IntValue<'ctx>`
-to `BasicValueEnum<'ctx>` and the D3a parser disambiguation
-were the highest-thought-cost pieces. Notes in STATE.md
-decisions 54-64.
+C1.5 retrospective (kept for reference): "2-3 weeks" estimated;
+~1 session actual. The bidirectional checking infrastructure
+and the D4/D10 amendments were the highest-thought-cost pieces.
+Notes in STATE.md decisions 65-73.
 
-C1.3 retrospective (kept for reference): ADR 0011 D6 estimated
-"2 weeks" for C1.3; the actual was ~1 session across 3
-commits. Notes in STATE.md decisions 46-53.
+C1.4 retrospective (kept for reference): "3-4 weeks" estimated;
+~1 session actual. The codegen value-type widening from
+`IntValue<'ctx>` to `BasicValueEnum<'ctx>` was the substantive
+change. Notes in STATE.md decisions 54-64.
+
+C1.3 retrospective (kept for reference): "2 weeks" estimated;
+~1 session actual. Notes in STATE.md decisions 46-53.
 
 ### 0.3 Quick-status block for session start
 
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: 96d2d37 (docs: C1.5 landed; HANDOVER §0 + STATE.md + ADR refresh).
+    Local HEAD: <docs-commit> (docs: C1.6 landed; HANDOVER §0 + STATE.md + ADR refresh).
     Branch in sync with origin/main (verify with `git status` at session start).
     Working tree clean.
 
@@ -533,36 +597,44 @@ For pasting into a fresh chat to bootstrap context:
     Phase C1.4 (structs + field access + struct literals; ADR 0013
     ACCEPTED) + Phase C1.5 (`?T` nullables + null literal +
     unwrap_or / is_some builtins + bidirectional checking; ADR
-    0014 ACCEPTED-WITH-AMENDMENTS) complete. 686 active workspace
-    tests. Three go/no-go programs run end-to-end:
+    0014 fully ACCEPTED after C1.6 D10 retirement) + Phase C1.6
+    (arrays + heap runtime + len builtin + ADR 0014 D10 unlock;
+    ADR 0015 ACCEPTED-WITH-AMENDMENTS) complete. 744 active
+    workspace tests. Four go/no-go programs run end-to-end:
     tests/pass/c05_go_no_go.sentinel (C1.3 bool flow): stdout
     "10", exit 0; tests/pass/c14_go_no_go.sentinel (C1.4 struct
     flow): stdout "7", exit 0; tests/pass/c15_go_no_go.sentinel
-    (C1.5 nullable flow): stdout "142", exit 0. Pipeline is
-    parse_query → resolve_query → check_query → codegen with
-    diagnostics transitively accumulated; codegen value type is
-    BasicValueEnum<'ctx>. ADRs 0001-0010 + 0012 + 0013 ACCEPTED;
-    ADR 0014 ACCEPTED-WITH-AMENDMENTS (D4 representation amended
-    to flat NullableInner subset; D10 deferred to C1.6+); ADR 0011
-    PROPOSED with D1 + D2 + D3 + D4 + D5 + D7 + D10 + D11 fully
-    exercised. C1 type system covers primitive scalars + nominal
-    structs + non-recursive nullables; arrays + heap + generics
-    remain.
+    (C1.5 nullable flow): stdout "142", exit 0;
+    tests/pass/c16_go_no_go.sentinel (C1.6 array flow): stdout
+    "15", exit 0. Pipeline is parse_query → resolve_query →
+    check_query → codegen with diagnostics transitively
+    accumulated; codegen value type is BasicValueEnum<'ctx>;
+    sentinel-runtime gained sentinel_alloc + sentinel_panic_oob
+    (libc malloc wrapper + abort on OOB) per ADR 0015 D9; arrays
+    leak (no free at C1.6 — C2 territory). ADRs 0001-0010 + 0012
+    + 0013 + 0014 ACCEPTED; ADR 0015 ACCEPTED-WITH-AMENDMENTS (D6
+    capped to depth-1 because mutual enum recursion would break
+    Type Copy); ADR 0011 PROPOSED with D1 + D2 + D3 + D4 + D5 +
+    D7 + D10 + D11 fully exercised. C1 type system covers
+    primitive scalars + nominal structs + nullable types
+    (including recursive via heap) + heap-backed arrays;
+    generics remain.
 
     Phase C1 in flight per ADR 0011 (PROPOSED, 8 sub-phases).
-    C1.0 + C1.1 + C1.2 + C1.3 + C1.4 + C1.5 all landed. Next:
-    start C1.6 (arrays + bounds checking + heap indirection) per
-    ADR 0011 D6. Begin with ADR 0015 PROPOSED for the concrete
-    C1.6 surface (array type/literal syntax, `[i]` indexing,
-    bounds-check semantics, heap-allocation primitive). C1.6's
-    heap arrival also unlocks ADR 0014 D10's deferred recursive-
-    struct relaxation. ~3-4 sessions estimated; see HANDOVER §0.2
-    for the rough plan.
+    C1.0 + C1.1 + C1.2 + C1.3 + C1.4 + C1.5 + C1.6 all landed.
+    Next: start C1.7 (witness-table generics) per ADR 0011 D6.
+    Begin with ADR 0016 PROPOSED for the concrete C1.7 surface
+    (generic fn/struct syntax, type arguments, parser
+    disambiguation for `<` in type position, witness-table
+    representation). C1.7 will likely retire the special-cased
+    generic builtins (unwrap_or, is_some, len) by replacing them
+    with real generic fns. ~4-6 sessions estimated (the longest
+    single C1 sub-phase); see HANDOVER §0.2 for the rough plan.
 
     Read docs/HANDOVER.md §0 in full, then docs/STATE.md, then
     ADR 0011 D6 sub-phase budget. ADRs 0009-0010 are historical
-    context for C0; 0012 + 0013 are closed-ACCEPTED; 0014 is
-    ACCEPTED-WITH-AMENDMENTS. Resume at C1.6 per HANDOVER §0.2.
+    context for C0; 0012/0013/0014 are closed-ACCEPTED; 0015 is
+    ACCEPTED-WITH-AMENDMENTS. Resume at C1.7 per HANDOVER §0.2.
 
 ---
 
