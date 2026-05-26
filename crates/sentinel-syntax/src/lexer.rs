@@ -23,6 +23,11 @@
 //! expression-position uses (`?.`, `??`, `?` propagation, postfix
 //! `x!` unwrap) are deferred per D11 to avoid token-role conflicts.
 //!
+//! C1.6 adds (per ADR 0015 D8): `[` and `]` brackets for array type
+//! `[T]`, array literal `[e1, e2, ...]`, and postfix indexing
+//! `a[i]`. No new keywords — the `len` builtin per D4 is registered
+//! by the resolve pass alongside `print` / `unwrap_or` / `is_some`.
+//!
 //! Whitespace and `//` line comments are skipped. ADR 0009 D4 picks
 //! hand-written recursive descent for the parser; the lexer uses
 //! `logos` because the regex-DFA payoff is purely positive at this
@@ -93,6 +98,10 @@ pub enum TokenKind {
     LBrace,
     #[token("}")]
     RBrace,
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
     #[token(",")]
     Comma,
     #[token(";")]
@@ -184,12 +193,14 @@ mod tests {
     #[test]
     fn lex_all_punctuation() {
         assert_eq!(
-            kinds("( ) { } , ; : . ? ->"),
+            kinds("( ) { } [ ] , ; : . ? ->"),
             vec![
                 TokenKind::LParen,
                 TokenKind::RParen,
                 TokenKind::LBrace,
                 TokenKind::RBrace,
+                TokenKind::LBracket,
+                TokenKind::RBracket,
                 TokenKind::Comma,
                 TokenKind::Semi,
                 TokenKind::Colon,
@@ -322,6 +333,79 @@ mod tests {
         assert_eq!(
             kinds("? i64"),
             vec![TokenKind::Question, TokenKind::Ident]
+        );
+    }
+
+    // ----- C1.6: `[` and `]` brackets -----
+
+    #[test]
+    fn lex_bracket_tokens() {
+        assert_eq!(
+            kinds("[ ]"),
+            vec![TokenKind::LBracket, TokenKind::RBracket]
+        );
+    }
+
+    #[test]
+    fn lex_array_type_shape() {
+        // The shape the parser will see for `[i64]`.
+        assert_eq!(
+            kinds("[i64]"),
+            vec![TokenKind::LBracket, TokenKind::Ident, TokenKind::RBracket]
+        );
+    }
+
+    #[test]
+    fn lex_nullable_array_type_shape() {
+        // `?[i64]` — nullable of array per ADR 0015 D6.
+        assert_eq!(
+            kinds("?[i64]"),
+            vec![
+                TokenKind::Question,
+                TokenKind::LBracket,
+                TokenKind::Ident,
+                TokenKind::RBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_array_literal_shape() {
+        // `[1, 2, 3]`
+        assert_eq!(
+            kinds("[1, 2, 3]"),
+            vec![
+                TokenKind::LBracket,
+                TokenKind::IntLit,
+                TokenKind::Comma,
+                TokenKind::IntLit,
+                TokenKind::Comma,
+                TokenKind::IntLit,
+                TokenKind::RBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_array_index_shape() {
+        // `a[i]`
+        assert_eq!(
+            kinds("a[i]"),
+            vec![
+                TokenKind::Ident,
+                TokenKind::LBracket,
+                TokenKind::Ident,
+                TokenKind::RBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_empty_array_shape() {
+        // `[]` — empty array literal per ADR 0015 D5.
+        assert_eq!(
+            kinds("[]"),
+            vec![TokenKind::LBracket, TokenKind::RBracket]
         );
     }
 
