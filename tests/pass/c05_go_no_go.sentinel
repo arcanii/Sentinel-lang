@@ -2,12 +2,16 @@ fn double(x: i64) -> i64 {
     x * 2
 }
 
-fn pick(cond: i64, a: i64, b: i64) -> i64 {
+fn is_positive(x: i64) -> bool {
+    x > 0
+}
+
+fn pick(cond: bool, a: i64, b: i64) -> i64 {
     if cond { a } else { b }
 }
 
 fn main() -> i64 {
-    let x = 5;
-    let y = pick(x, double(x), 0);
+    let x: i64 = 5;
+    let y = pick(is_positive(x), double(x), 0);
     print(y)
 }

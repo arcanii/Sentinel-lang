@@ -1,0 +1,4 @@
+// `true || (print(99) > 0)` — short-circuit must skip the rhs.
+fn main() -> i64 {
+    if true || print(99) > 0 { 3 } else { 0 }
+}

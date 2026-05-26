@@ -1,4 +1,4 @@
 fn main() -> i64 {
     let x = 5;
-    if x { x * 2 } else { 0 }
+    if x != 0 { x * 2 } else { 0 }
 }

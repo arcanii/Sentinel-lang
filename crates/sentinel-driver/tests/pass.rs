@@ -143,7 +143,8 @@ fn pass_c04_print_then_tail() {
 
 #[test]
 fn pass_c04_if_true_branch() {
-    // if 1 { 42 } else { 99 } -> exit 42 (cond non-zero)
+    // if true { 42 } else { 99 } -> exit 42 (cond true; C1.3 rewrite
+    // of the C0 `if 1 { ... }` shape per ADR 0012 D10)
     let r = build_and_run("c04_if_true_branch.sentinel");
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
@@ -151,19 +152,21 @@ fn pass_c04_if_true_branch() {
 
 #[test]
 fn pass_c04_if_false_branch() {
-    // if 0 { 42 } else { 99 } -> exit 99 (cond zero)
+    // if false { 42 } else { 99 } -> exit 99 (C1.3 rewrite)
     assert_eq!(run_exit("c04_if_false_branch.sentinel"), 99);
 }
 
 #[test]
 fn pass_c04_if_with_var_cond() {
-    // let x = 5; if x { x * 2 } else { 0 } -> exit 10
+    // let x = 5; if x != 0 { x * 2 } else { 0 } -> exit 10
+    // (C1.3 rewrite: `if x` becomes `if x != 0` per ADR 0012 D10)
     assert_eq!(run_exit("c04_if_with_var_cond.sentinel"), 10);
 }
 
 #[test]
 fn pass_c04_else_if_chain() {
-    // let x = 0; if x { 1 } else if x { 2 } else { 3 } -> exit 3
+    // let x = 0; if x != 0 { 1 } else if x != 0 { 2 } else { 3 } -> exit 3
+    // (C1.3 rewrite)
     assert_eq!(run_exit("c04_else_if_chain.sentinel"), 3);
 }
 
@@ -175,8 +178,9 @@ fn pass_c04_block_expression() {
 
 #[test]
 fn pass_c04_if_with_print() {
-    // let x = 1; if x { print(100) } else { print(200) }
-    // -> stdout "100\n", exit 0 (print's return is the if-value)
+    // let x = 1; if x != 0 { print(100) } else { print(200) }
+    // -> stdout "100\n", exit 0 (print's return is the if-value).
+    // C1.3 rewrite: `if x` -> `if x != 0` per ADR 0012 D10.
     let r = build_and_run("c04_if_with_print.sentinel");
     assert_eq!(r.stdout, "100\n");
     assert_eq!(r.exit, 0);
@@ -208,9 +212,62 @@ fn pass_c05_call_chain() {
 
 #[test]
 fn pass_c05_go_no_go() {
-    // ADR 0010 appendix go/no-go program: double + pick + main with print
-    // -> stdout "10\n", exit 0 (print returns 0)
+    // C1.3 phase-go program per ADR 0012 appendix: double + is_positive
+    // + pick(cond: bool, ...) + main with print. Exercises bool flow
+    // end-to-end (`x > 0` returns bool, `is_positive(x)` returns bool,
+    // `pick(bool, ...)` takes bool, `if cond` requires bool).
+    // -> stdout "10\n", exit 0.
     let r = build_and_run("c05_go_no_go.sentinel");
     assert_eq!(r.stdout, "10\n");
     assert_eq!(r.exit, 0);
+}
+
+// ----- C1.3 pass-tests: bool / comparisons / logicals / short-circuit -----
+
+#[test]
+fn pass_c13_bool_literal() {
+    // if true { 7 } else { 99 } -> exit 7
+    assert_eq!(run_exit("c13_bool_literal.sentinel"), 7);
+}
+
+#[test]
+fn pass_c13_comparison() {
+    // if 5 > 3 { 12 } else { 0 } -> exit 12
+    assert_eq!(run_exit("c13_comparison.sentinel"), 12);
+}
+
+#[test]
+fn pass_c13_logical_and() {
+    // let x = 5; if x > 0 && x < 10 { 42 } else { 0 } -> exit 42
+    assert_eq!(run_exit("c13_logical_and.sentinel"), 42);
+}
+
+#[test]
+fn pass_c13_logical_or() {
+    // let x = 7; if x == 0 || x > 5 { 11 } else { 0 } -> exit 11
+    assert_eq!(run_exit("c13_logical_or.sentinel"), 11);
+}
+
+#[test]
+fn pass_c13_unary_not() {
+    // if !false { 5 } else { 0 } -> exit 5
+    assert_eq!(run_exit("c13_unary_not.sentinel"), 5);
+}
+
+#[test]
+fn pass_c13_short_circuit_and() {
+    // `false && print(99) > 0` must short-circuit: print never runs.
+    // -> stdout "", exit 7
+    let r = build_and_run("c13_short_circuit_and.sentinel");
+    assert_eq!(r.stdout, "", "rhs of && was evaluated despite lhs being false");
+    assert_eq!(r.exit, 7);
+}
+
+#[test]
+fn pass_c13_short_circuit_or() {
+    // `true || print(99) > 0` must short-circuit: print never runs.
+    // -> stdout "", exit 3
+    let r = build_and_run("c13_short_circuit_or.sentinel");
+    assert_eq!(r.stdout, "", "rhs of || was evaluated despite lhs being true");
+    assert_eq!(r.exit, 3);
 }

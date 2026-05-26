@@ -1,4 +1,4 @@
 fn main() -> i64 {
     let x = 1;
-    if x { print(100) } else { print(200) }
+    if x != 0 { print(100) } else { print(200) }
 }

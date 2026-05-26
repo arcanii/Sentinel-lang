@@ -262,25 +262,6 @@ impl<'ctx> CodegenCtx<'ctx> {
         self.lower_expr(&block.tail, program)
     }
 
-    /// Lower a typed condition expression to an `i1` for use in a
-    /// conditional branch. If the condition is already `bool`, just
-    /// return its value; otherwise (ADR 0010 D9 C-style truthy on
-    /// integers, retires at C1.3 step 5) compare-NE against zero.
-    fn lower_cond_to_i1(
-        &mut self,
-        cond: &TypedExpr,
-        program: &TypedProgram,
-    ) -> Result<IntValue<'ctx>, CodegenError> {
-        let cond_val = self.lower_expr(cond, program)?;
-        if cond.ty == Type::Bool {
-            return Ok(cond_val);
-        }
-        let zero = self.llvm_int_type(cond.ty).const_zero();
-        self.builder
-            .build_int_compare(IntPredicate::NE, cond_val, zero, "ifcond")
-            .map_err(|e| CodegenError::Builder(e.to_string()))
-    }
-
     fn lower_if(
         &mut self,
         cond: &TypedExpr,
@@ -288,7 +269,11 @@ impl<'ctx> CodegenCtx<'ctx> {
         else_branch: &TypedBlock,
         program: &TypedProgram,
     ) -> Result<IntValue<'ctx>, CodegenError> {
-        let cond_i1 = self.lower_cond_to_i1(cond, program)?;
+        // ADR 0010 D9 retired at C1.3 step 5: the type checker
+        // guarantees cond.ty == Bool, so the lowered value is already
+        // i1 and feeds straight into build_conditional_branch.
+        debug_assert_eq!(cond.ty, Type::Bool);
+        let cond_i1 = self.lower_expr(cond, program)?;
 
         let current_fn = self.current_fn.expect("current_fn set by compile_fn");
         let then_bb = self.context.append_basic_block(current_fn, "then");
@@ -640,7 +625,8 @@ mod tests {
 
     #[test]
     fn compile_if_else_program() {
-        compile_src("fn main() -> i64 { if 1 { 42 } else { 99 } }").expect("compile");
+        // C1.3: if-condition must be Bool (ADR 0010 D9 retired).
+        compile_src("fn main() -> i64 { if true { 42 } else { 99 } }").expect("compile");
     }
 
     #[test]

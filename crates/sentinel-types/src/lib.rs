@@ -534,13 +534,12 @@ fn check_expr(
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
             let cond_t = check_expr(cond, env, signatures)?;
-            // ADR 0010 D9's C-style truthy is still active here in
-            // step 2: an `if` condition may be `bool` (preferred,
-            // typically the result of a comparison) OR an integer
-            // (C-style truthy via NE-zero in codegen). The bool-only
-            // enforcement lands in step 5 alongside the seven-fixture
-            // condition rewrite.
-            if cond_t.ty != Type::Bool && !cond_t.ty.is_int() {
+            // C1.3 step 5: ADR 0010 D9's C-style truthy retires. The
+            // if-condition must be `bool` (typically the result of a
+            // comparison or a fn returning bool). The 6 if-using C0
+            // fixtures (c04_if_*, c05_go_no_go) are mechanically
+            // rewritten in this commit to use `x != 0` etc.
+            if cond_t.ty != Type::Bool {
                 return Err(TypeError::Mismatch {
                     expected: Type::Bool,
                     got: cond_t.ty,
@@ -738,8 +737,20 @@ mod tests {
 
     #[test]
     fn checks_if_else_branches_match() {
-        let p = check_ok("fn main() -> i64 { if 1 { 10 } else { 20 } }");
+        // C1.3: if-condition must be Bool. `if 1` rewrites to `if true`.
+        let p = check_ok("fn main() -> i64 { if true { 10 } else { 20 } }");
         assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    #[test]
+    fn if_condition_rejects_non_bool() {
+        // ADR 0010 D9 retired at C1.3 step 5: `if x` with x: i64 is
+        // a type error.
+        let err = check_err("fn main() -> i64 { let x = 1; if x { 1 } else { 2 } }");
+        assert!(
+            matches!(err, TypeError::Mismatch { expected: Type::Bool, got: Type::I64, .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -750,18 +761,21 @@ mod tests {
 
     #[test]
     fn checks_go_no_go_program() {
-        // The C0/C1.2 acceptance program type-checks end-to-end.
+        // The C1.3 phase-go program type-checks end-to-end. The pick
+        // function takes a bool condition per the ADR 0012 D10 / step 5
+        // rewrite.
         let src = "\
 fn double(x: i64) -> i64 { x * 2 }
-fn pick(cond: i64, a: i64, b: i64) -> i64 { if cond { a } else { b } }
+fn is_positive(x: i64) -> bool { x > 0 }
+fn pick(cond: bool, a: i64, b: i64) -> i64 { if cond { a } else { b } }
 fn main() -> i64 {
     let x: i64 = 5;
-    let y = pick(x, double(x), 0);
+    let y = pick(is_positive(x), double(x), 0);
     print(y)
 }
 ";
         let p = check_ok(src);
-        assert_eq!(p.fns.len(), 3);
+        assert_eq!(p.fns.len(), 4);
         assert_eq!(p.main().body.ty, Type::I64);
     }
 
