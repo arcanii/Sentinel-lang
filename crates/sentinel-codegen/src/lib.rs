@@ -41,7 +41,7 @@ use inkwell::values::{
 };
 use inkwell::{IntPredicate, OptimizationLevel};
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
-use sentinel_resolve::{FnId, StructId, VarId};
+use sentinel_resolve::{FnId, StructId, VarId, IS_SOME_FN_ID, UNWRAP_OR_FN_ID};
 use sentinel_types::{
     Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
 };
@@ -83,16 +83,25 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
     // Pass 0: declare every user struct as an LLVM struct type. The
     // typed program's struct list is in StructId order; we mirror
     // that order so the StructId.0 indexes the struct_types vec.
+    //
+    // Two-step to handle forward references via `?T`-style nullables
+    // (C1.5): first declare all opaque struct types, then set their
+    // bodies. Without this, `struct Node { next: ?Node }` would
+    // panic when llvm_basic_type tries to look up Node before it's
+    // inserted.
     let mut struct_types: HashMap<StructId, StructType> = HashMap::new();
+    for sd in &program.structs {
+        let st = context.opaque_struct_type(&sd.name);
+        struct_types.insert(sd.id, st);
+    }
     for sd in &program.structs {
         let field_tys: Vec<BasicTypeEnum> = sd
             .fields
             .iter()
             .map(|f| llvm_basic_type(&context, f.ty, &struct_types))
             .collect();
-        let st = context.opaque_struct_type(&sd.name);
+        let st = struct_types[&sd.id];
         st.set_body(&field_tys, false);
-        struct_types.insert(sd.id, st);
     }
 
     // Pass 1: declare every function in the typed program's
@@ -187,10 +196,11 @@ struct CodegenCtx<'ctx> {
     vars: HashMap<VarId, (PointerValue<'ctx>, Type)>,
 }
 
-/// Map a Sentinel [`Type`] to its LLVM `BasicTypeEnum`. At C1.4
-/// the universe is `{ I64, I32, Bool, Struct }`; primitives map to
-/// IntType, structs map to the per-struct StructType cached in
-/// pass 0.
+/// Map a Sentinel [`Type`] to its LLVM `BasicTypeEnum`. At C1.5
+/// the universe is `{ I64, I32, Bool, Struct, Nullable }`;
+/// primitives map to IntType, structs map to the per-struct
+/// StructType cached in pass 0, nullables lower to a 2-field LLVM
+/// struct `{ i1 valid, T payload }` per ADR 0014's codegen sketch.
 fn llvm_basic_type<'ctx>(
     context: &'ctx Context,
     ty: Type,
@@ -204,18 +214,27 @@ fn llvm_basic_type<'ctx>(
             .get(&id)
             .expect("struct declared in pass 0"))
         .into(),
+        Type::Nullable(inner) => {
+            // `?T` lowers as `{ i1 valid, T payload }`.
+            let valid_ty: BasicTypeEnum = context.bool_type().into();
+            let payload_ty = llvm_basic_type(context, inner.to_type(), struct_types);
+            context
+                .struct_type(&[valid_ty, payload_ty], false)
+                .into()
+        }
     }
 }
 
 /// Map a Sentinel int type (i1 / i32 / i64) to its LLVM IntType.
-/// Panics on `Type::Struct` — callers must gate on `Type::is_int()`
-/// first.
+/// Panics on `Type::Struct` / `Type::Nullable` — callers must gate
+/// on `Type::is_int()` first.
 fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
     match ty {
         Type::Bool => context.bool_type(),
         Type::I32 => context.i32_type(),
         Type::I64 => context.i64_type(),
         Type::Struct(_) => panic!("llvm_int_type called on non-int Type::Struct"),
+        Type::Nullable(_) => panic!("llvm_int_type called on non-int Type::Nullable"),
     }
 }
 
@@ -457,6 +476,54 @@ impl<'ctx> CodegenCtx<'ctx> {
         Ok(phi.as_basic_value())
     }
 
+    /// Lower `is_some(x: ?T) -> bool` per ADR 0014 D9. Inline:
+    /// extract the discriminator field (i1 valid) from the `?T`
+    /// struct value.
+    fn lower_is_some(
+        &mut self,
+        arg: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let nullable_val = self.lower_expr(arg, program)?.into_struct_value();
+        let valid = self
+            .builder
+            .build_extract_value(nullable_val, 0, "is_some_valid")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(valid)
+    }
+
+    /// Lower `unwrap_or(x: ?T, default: T) -> T` per ADR 0014 D9.
+    /// Inline: extract the valid bit; conditional select between the
+    /// payload (when valid) and the default (when null). Uses
+    /// `build_select` rather than basic-block control flow because
+    /// both operands are already evaluated by their caller.
+    fn lower_unwrap_or(
+        &mut self,
+        x: &TypedExpr,
+        default: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let nullable_val = self.lower_expr(x, program)?.into_struct_value();
+        let default_val = self.lower_expr(default, program)?;
+        let valid = self
+            .builder
+            .build_extract_value(nullable_val, 0, "unwrap_valid")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let payload = self
+            .builder
+            .build_extract_value(nullable_val, 1, "unwrap_payload")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        // build_select on BasicValueEnum requires both arms to be
+        // the same BasicValueEnum variant — payload and default are
+        // both T, so they match.
+        let selected = self
+            .builder
+            .build_select(valid, payload, default_val, "unwrap_or_result")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(selected)
+    }
+
     fn lower_call(
         &mut self,
         id: FnId,
@@ -543,8 +610,13 @@ impl<'ctx> CodegenCtx<'ctx> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))
             }
             TypedExprKind::Cmp(op, lhs, rhs) => {
-                let l = self.lower_expr(lhs, program)?.into_int_value();
-                let r = self.lower_expr(rhs, program)?.into_int_value();
+                // ADR 0014 D7: `x == null` / `x != null` compares the
+                // discriminator (i1 valid bit) rather than the int
+                // payload. The type checker only allows Eq / Ne on
+                // nullable operands, so other predicates are
+                // unreachable here for nullable values.
+                let lhs_is_nullable = lhs.ty.is_nullable();
+                let rhs_is_nullable = rhs.ty.is_nullable();
                 let predicate = match op {
                     CmpOp::Eq => IntPredicate::EQ,
                     CmpOp::Ne => IntPredicate::NE,
@@ -553,6 +625,29 @@ impl<'ctx> CodegenCtx<'ctx> {
                     CmpOp::Gt => IntPredicate::SGT,
                     CmpOp::Ge => IntPredicate::SGE,
                 };
+                if lhs_is_nullable || rhs_is_nullable {
+                    // Extract the valid bits from both sides and
+                    // compare them.
+                    let l_struct = self.lower_expr(lhs, program)?.into_struct_value();
+                    let r_struct = self.lower_expr(rhs, program)?.into_struct_value();
+                    let l_valid = self
+                        .builder
+                        .build_extract_value(l_struct, 0, "lhs_valid")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                        .into_int_value();
+                    let r_valid = self
+                        .builder
+                        .build_extract_value(r_struct, 0, "rhs_valid")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                        .into_int_value();
+                    return self
+                        .builder
+                        .build_int_compare(predicate, l_valid, r_valid, "cmp_null")
+                        .map(|v| v.into())
+                        .map_err(|e| CodegenError::Builder(e.to_string()));
+                }
+                let l = self.lower_expr(lhs, program)?.into_int_value();
+                let r = self.lower_expr(rhs, program)?.into_int_value();
                 self.builder
                     .build_int_compare(predicate, l, r, "cmp")
                     .map(|v| v.into())
@@ -568,7 +663,55 @@ impl<'ctx> CodegenCtx<'ctx> {
             TypedExprKind::If { cond, then_branch, else_branch } => {
                 self.lower_if(cond, then_branch, else_branch, program)
             }
-            TypedExprKind::Call { id, args, .. } => self.lower_call(*id, args, program),
+            TypedExprKind::Call { id, args, .. } => {
+                // ADR 0014 D9 builtins: lower inline rather than
+                // calling an external runtime function. The codegen
+                // emits a few LLVM instructions per call site.
+                if *id == UNWRAP_OR_FN_ID {
+                    return self.lower_unwrap_or(&args[0], &args[1], program);
+                }
+                if *id == IS_SOME_FN_ID {
+                    return self.lower_is_some(&args[0], program);
+                }
+                self.lower_call(*id, args, program)
+            }
+            TypedExprKind::NullLit => {
+                // ADR 0014 D2: NullLit lowers to `{ i1 false, undef T }`.
+                // The expression's type carries the ?T so we know the
+                // payload's LLVM shape.
+                let nullable_inner = match expr.ty {
+                    Type::Nullable(ni) => ni,
+                    _ => unreachable!("type-check guarantees NullLit.ty is Nullable"),
+                };
+                let struct_ty = match self.llvm_basic_type(expr.ty) {
+                    BasicTypeEnum::StructType(st) => st,
+                    _ => unreachable!("Nullable lowers to a struct type"),
+                };
+                let payload_ty = self.llvm_basic_type(nullable_inner.to_type());
+                let valid = self.context.bool_type().const_int(0, false);
+                let payload = payload_ty.const_zero();
+                Ok(struct_ty.const_named_struct(&[valid.into(), payload]).into())
+            }
+            TypedExprKind::WidenToNullable(inner) => {
+                // ADR 0014 D3: lower the inner T value and wrap into
+                // `{ i1 true, T payload }`.
+                let payload = self.lower_expr(inner, program)?;
+                let struct_ty = match self.llvm_basic_type(expr.ty) {
+                    BasicTypeEnum::StructType(st) => st,
+                    _ => unreachable!("Nullable lowers to a struct type"),
+                };
+                let agg = struct_ty.get_undef();
+                let valid = self.context.bool_type().const_int(1, false);
+                let with_valid = self
+                    .builder
+                    .build_insert_value(agg, valid, 0, "widen_valid")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                let with_payload = self
+                    .builder
+                    .build_insert_value(with_valid, payload, 1, "widen_payload")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                Ok(with_payload.into_struct_value().into())
+            }
             TypedExprKind::StructLit { id, fields, .. } => {
                 // Build the struct value via a chain of build_insert_value
                 // starting from undef. Field-order is already declaration
@@ -639,8 +782,13 @@ fn find_var_name_in_block(block: &TypedBlock, id: VarId) -> Option<&str> {
 
 fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
     match &expr.kind {
-        TypedExprKind::IntLit(_) | TypedExprKind::BoolLit(_) | TypedExprKind::Var(_) => None,
-        TypedExprKind::Unary(_, inner) => find_var_name_in_expr(inner, id),
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::Var(_) => None,
+        TypedExprKind::Unary(_, inner) | TypedExprKind::WidenToNullable(inner) => {
+            find_var_name_in_expr(inner, id)
+        }
         TypedExprKind::Binary(_, lhs, rhs)
         | TypedExprKind::Cmp(_, lhs, rhs)
         | TypedExprKind::Logic(_, lhs, rhs) => {
@@ -846,6 +994,77 @@ fn main() -> i64 {
             "struct Inner { x: i64 }\nstruct Outer { inner: Inner }\nfn main() -> i64 { let o = Outer { inner: Inner { x: 7 } }; o.inner.x }",
         )
         .expect("compile");
+    }
+
+    // ----- C1.5: nullable types + null literal + builtins -----
+
+    #[test]
+    fn compile_nullable_let_with_null() {
+        compile_src("fn main() -> i64 { let x: ?i64 = null; 0 }").expect("compile");
+    }
+
+    #[test]
+    fn compile_nullable_let_with_widening() {
+        // `42` widens to ?i64.
+        compile_src("fn main() -> i64 { let x: ?i64 = 42; 0 }").expect("compile");
+    }
+
+    #[test]
+    fn compile_unwrap_or_builtin() {
+        compile_src(
+            "fn main() -> i64 { let x: ?i64 = 42; unwrap_or(x, 0) }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_is_some_builtin() {
+        compile_src(
+            "fn main() -> i64 { let x: ?i64 = null; if is_some(x) { 1 } else { 0 } }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_cmp_against_null() {
+        compile_src(
+            "fn main() -> i64 { let x: ?i64 = null; if x == null { 1 } else { 0 } }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_nullable_in_fn_return() {
+        compile_src(
+            "fn maybe(c: bool) -> ?i64 { if c { 42 } else { null } }\nfn main() -> i64 { unwrap_or(maybe(true), 0) }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_nullable_struct_field() {
+        // Non-recursive struct with a nullable field.
+        compile_src(
+            "struct Pair { first: ?i64, second: i64 }\nfn main() -> i64 { let p = Pair { first: 1, second: 2 }; p.second }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_c15_phasego_value_program() {
+        // ADR 0014 phase-go 1: value flow with ?T + null + unwrap_or
+        // + implicit widening.
+        let src = "\
+fn find_or(x: ?i64, default: i64) -> i64 {
+    unwrap_or(x, default)
+}
+fn main() -> i64 {
+    let some: ?i64 = 42;
+    let none: ?i64 = null;
+    print(find_or(some, 0) + find_or(none, 100))
+}
+";
+        compile_src(src).expect("compile");
     }
 
     #[test]

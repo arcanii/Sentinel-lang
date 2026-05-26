@@ -54,6 +54,15 @@ pub struct FnId(pub u32);
 /// by [`resolve`]; user fns get higher IDs.
 pub const PRINT_FN_ID: FnId = FnId(0);
 
+/// `unwrap_or(x: ?T, default: T) -> T` per ADR 0014 D9. Generic
+/// over T; the type checker special-cases the typing rule. Codegen
+/// inlines per call site.
+pub const UNWRAP_OR_FN_ID: FnId = FnId(1);
+
+/// `is_some(x: ?T) -> bool` per ADR 0014 D9. Generic over T; same
+/// machinery as `unwrap_or`.
+pub const IS_SOME_FN_ID: FnId = FnId(2);
+
 /// Identifier for a struct declaration. Added at C1.4 per ADR 0013
 /// D4 / D5; unique per-program, assigned in source order starting
 /// at 0.
@@ -199,6 +208,9 @@ pub enum ResolvedExprKind {
     IntLit(i64),
     /// Bool literal (`true` / `false`) per ADR 0012 D5. Added at C1.3.
     BoolLit(bool),
+    /// Null literal per ADR 0014 D2. Added at C1.5. The type is
+    /// resolved bidirectionally at the type-check stage.
+    NullLit,
     /// Variable reference, resolved to a binding's [`VarId`].
     Var(VarId),
     Unary(UnaryOp, Box<ResolvedExpr>),
@@ -398,8 +410,9 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         });
     }
 
-    // Pre-register `print`. The runtime supplies it; user code can't
-    // redefine it (that path errors as RedefinedFunction below).
+    // Pre-register the runtime builtins. The runtime (and codegen
+    // for C1.5's generic builtins) supplies them; user code can't
+    // redefine them (that path errors as RedefinedFunction below).
     let print_sig = FnSignature {
         id: FnId(next_fn_id),
         name: "print".to_string(),
@@ -409,10 +422,30 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         is_runtime: true,
     };
     next_fn_id += 1;
+    let unwrap_or_sig = FnSignature {
+        id: FnId(next_fn_id),
+        name: "unwrap_or".to_string(),
+        name_span: None,
+        arity: 2,
+        is_main: false,
+        is_runtime: true,
+    };
+    next_fn_id += 1;
+    let is_some_sig = FnSignature {
+        id: FnId(next_fn_id),
+        name: "is_some".to_string(),
+        name_span: None,
+        arity: 1,
+        is_main: false,
+        is_runtime: true,
+    };
+    next_fn_id += 1;
 
     let mut fn_table: HashMap<String, FnId> = HashMap::new();
-    let mut signatures: Vec<FnSignature> = vec![print_sig];
+    let mut signatures: Vec<FnSignature> = vec![print_sig, unwrap_or_sig, is_some_sig];
     fn_table.insert("print".to_string(), PRINT_FN_ID);
+    fn_table.insert("unwrap_or".to_string(), UNWRAP_OR_FN_ID);
+    fn_table.insert("is_some".to_string(), IS_SOME_FN_ID);
 
     // Pass 1: collect every fn into the table.
     for fn_def in &program.fns {
@@ -607,6 +640,7 @@ fn resolve_expr(
     let kind = match &expr.kind {
         ExprKind::IntLit(n) => ResolvedExprKind::IntLit(*n),
         ExprKind::BoolLit(b) => ResolvedExprKind::BoolLit(*b),
+        ExprKind::NullLit => ResolvedExprKind::NullLit,
         ExprKind::Var(name) => {
             let id =
                 *vars
@@ -886,8 +920,9 @@ mod tests {
         assert_eq!(p.fns.len(), 1);
         assert_eq!(p.main().name, "main");
         assert!(p.main().signature(&p).is_main);
-        // print is FnId(0), main is FnId(1)
-        assert_eq!(p.main().id, FnId(1));
+        // FnId(0) = print, FnId(1) = unwrap_or, FnId(2) = is_some,
+        // FnId(3) = main (the first user fn).
+        assert_eq!(p.main().id, FnId(3));
         assert_eq!(p.fn_signatures[0].name, "print");
         assert!(p.fn_signatures[0].is_runtime);
     }
@@ -927,10 +962,11 @@ mod tests {
             },
             other => panic!("expected Binary, got {other:?}"),
         }
-        // main's call resolves to double's FnId (FnId(0) is print, FnId(1) is double, FnId(2) is main)
+        // FnId(0) = print, FnId(1) = unwrap_or, FnId(2) = is_some,
+        // FnId(3) = double (first user fn), FnId(4) = main.
         let main = p.main();
         match &main.body.tail.kind {
-            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(1)),
+            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(3)),
             other => panic!("expected Call, got {other:?}"),
         }
     }
@@ -1178,6 +1214,50 @@ mod tests {
         assert_eq!(t["A"], StructId(0));
         assert_eq!(t["B"], StructId(1));
         assert_eq!(t.len(), 2);
+    }
+
+    // ----- C1.5: null literal + builtin registration -----
+
+    #[test]
+    fn null_literal_resolves() {
+        let p = resolve_ok("fn main() -> i64 { let _x = null; 0 }");
+        // The Let RHS is a NullLit.
+        match &p.main().body.stmts[0].kind {
+            ResolvedStmtKind::Let { value, .. } => match &value.kind {
+                ResolvedExprKind::NullLit => {}
+                other => panic!("expected NullLit, got {other:?}"),
+            },
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unwrap_or_builtin_pre_registered() {
+        let p = resolve_ok("fn main() -> i64 { 0 }");
+        // FnId(0) is print, FnId(1) is unwrap_or, FnId(2) is is_some.
+        assert_eq!(p.fn_signatures[0].name, "print");
+        assert_eq!(p.fn_signatures[1].name, "unwrap_or");
+        assert_eq!(p.fn_signatures[1].arity, 2);
+        assert!(p.fn_signatures[1].is_runtime);
+        assert_eq!(p.fn_signatures[2].name, "is_some");
+        assert_eq!(p.fn_signatures[2].arity, 1);
+        assert!(p.fn_signatures[2].is_runtime);
+    }
+
+    #[test]
+    fn user_redefining_unwrap_or_errors() {
+        let err = resolve_err(
+            "fn unwrap_or(x: i64, y: i64) -> i64 { x }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, ResolveError::RedefinedFunction { ref name, .. } if name == "unwrap_or"));
+    }
+
+    #[test]
+    fn user_redefining_is_some_errors() {
+        let err = resolve_err(
+            "fn is_some(x: i64) -> bool { true }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, ResolveError::RedefinedFunction { ref name, .. } if name == "is_some"));
     }
 
     #[test]

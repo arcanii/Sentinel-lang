@@ -103,6 +103,16 @@ pub enum ParseError {
         #[label("second comparison operator")]
         span: miette::SourceSpan,
     },
+
+    #[error("nested nullable types are not allowed")]
+    #[diagnostic(
+        code(sentinel::parse::nested_nullable),
+        help("`??T` is rejected at C1.5 per ADR 0014 D6 — nested nullables don't earn their keep yet")
+    )]
+    NestedNullable {
+        #[label("second `?` here")]
+        span: miette::SourceSpan,
+    },
 }
 
 /// Parse a Sentinel source string into a [`Program`] — zero or
@@ -576,10 +586,29 @@ impl<'a> Parser<'a> {
         self.parse_type()
     }
 
-    /// Parse a [`TypeExpr`]. At C1.2 this is just an `Ident`. Later
-    /// sub-phases extend the grammar per ADR 0012 D3 + D10's revisit
-    /// notes (struct names at C1.4, `?T` at C1.5, generics at C1.7).
+    /// Parse a [`TypeExpr`]. C1.2 shipped only the `Ident` form;
+    /// C1.4 widened to recognize struct names; C1.5 adds the
+    /// `?T` prefix per ADR 0014 D1. Nested `??T` is rejected at
+    /// parse time per D6 — the second `?` surfaces as
+    /// [`ParseError::NestedNullable`].
     fn parse_type(&mut self) -> Result<TypeExpr, ParseError> {
+        // Optional leading `?` for the C1.5 nullable type form.
+        if self.peek_kind() == Some(TokenKind::Question) {
+            let q_start = self.advance().expect("peeked").span.start;
+            // Reject `??T` at the second `?`.
+            if self.peek_kind() == Some(TokenKind::Question) {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::NestedNullable {
+                    span: to_source_span(&t.span),
+                });
+            }
+            let inner = self.parse_type()?;
+            let span = q_start..inner.span.end;
+            return Ok(Spanned {
+                kind: TypeExprKind::Nullable(Box::new(inner)),
+                span,
+            });
+        }
         match self.peek() {
             Some(t) if t.kind == TokenKind::Ident => {
                 let span = t.span.clone();
@@ -1058,6 +1087,12 @@ impl<'a> Parser<'a> {
             Some(TokenKind::False) => {
                 let span = self.advance().expect("peeked").span.clone();
                 Ok(Spanned { kind: ExprKind::BoolLit(false), span })
+            }
+            Some(TokenKind::Null) => {
+                // C1.5 / ADR 0014 D2: the `null` keyword. The type
+                // checker infers `?T` from context.
+                let span = self.advance().expect("peeked").span.clone();
+                Ok(Spanned { kind: ExprKind::NullLit, span })
             }
             Some(TokenKind::Ident) => {
                 let name_span = self.advance().expect("peeked").span.clone();
@@ -2153,5 +2188,83 @@ mod tests {
             matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "field name after `.`"),
             "got {err:?}"
         );
+    }
+
+    // ----- C1.5: nullable types + null literal -----
+
+    #[test]
+    fn parse_null_literal() {
+        assert_eq!(pretty("null"), "null");
+    }
+
+    #[test]
+    fn parse_nullable_type_in_param() {
+        let p = parse_ok_program("fn f(x: ?i64) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "?i64");
+    }
+
+    #[test]
+    fn parse_nullable_type_in_return() {
+        let p = parse_ok_program("fn f() -> ?i64 { null }");
+        assert_eq!(p.fns[0].return_type.kind.to_string(), "?i64");
+    }
+
+    #[test]
+    fn parse_nullable_let_annotation() {
+        let block = parse_block_str("{ let x: ?i64 = null; x }").expect("parse");
+        match &block.stmts[0].kind {
+            StmtKind::Let { ty_annot, value, .. } => {
+                let ty = ty_annot.as_ref().expect("annot present");
+                assert_eq!(ty.kind.to_string(), "?i64");
+                match &value.kind {
+                    ExprKind::NullLit => {}
+                    other => panic!("expected NullLit, got {other:?}"),
+                }
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_nullable_struct_field() {
+        let p = parse_ok_program(
+            "struct Node { value: i64, next: ?Node }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.structs[0].fields[1].ty.kind.to_string(), "?Node");
+    }
+
+    #[test]
+    fn parse_nullable_type_with_whitespace() {
+        // ADR 0014 D1: whitespace allowed between `?` and base type.
+        let p = parse_ok_program("fn f(x: ? i64) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "?i64");
+    }
+
+    #[test]
+    fn parse_error_nested_nullable() {
+        // ADR 0014 D6: `??T` is rejected at parse time.
+        let err = parse("fn f(x: ??i64) -> i64 { 0 }").unwrap_err();
+        assert!(matches!(&err, ParseError::NestedNullable { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_error_question_with_no_type() {
+        // `?` not followed by a base type — parse_type recurses
+        // and hits an UnexpectedToken or UnexpectedEof.
+        let err = parse_expr("?").unwrap_err();
+        // The parser sees `?` in an expression position (parse_expr →
+        // parse_or → ... → parse_atom), which doesn't know about `?`,
+        // so it errors as UnexpectedToken.
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_null_in_arithmetic_position_parses() {
+        // `null + 1` parses (syntactic level); the type checker
+        // rejects later.
+        assert_eq!(pretty("null + 1"), "(+ null 1)");
     }
 }

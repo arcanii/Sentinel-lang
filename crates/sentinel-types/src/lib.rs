@@ -28,7 +28,7 @@ use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, TypeExpr, TypeExprKind, UnaryOp}
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
     FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef, ResolvedProgram,
-    ResolvedStmt, ResolvedStmtKind, StructId, VarId,
+    ResolvedStmt, ResolvedStmtKind, StructId, VarId, IS_SOME_FN_ID, UNWRAP_OR_FN_ID,
 };
 
 // =============================================================================
@@ -37,15 +37,50 @@ use sentinel_resolve::{
 
 /// Sentinel's type universe. C1.2 shipped only `I64`; C1.3 (per ADR
 /// 0012 D5-D8) widened to `I32` and `Bool`; C1.4 (per ADR 0013 D4)
-/// adds user-defined struct types tagged by [`StructId`]. Nominal
-/// equality — two structs with identical field shapes are distinct
-/// types per ADR 0013 D5.
+/// added user-defined struct types tagged by [`StructId`]; C1.5
+/// (per ADR 0014 D4) adds `Nullable(NullableInner)` for `?T`.
+/// Nominal equality — two structs with identical field shapes are
+/// distinct types per ADR 0013 D5.
+///
+/// Implementation note (revises ADR 0014 D4): the Nullable variant
+/// holds a [`NullableInner`] subset rather than `Box<Type>`. This
+/// keeps `Type` `Copy` (no cascading `.clone()` refactor across
+/// the codebase) and makes the no-nested-nullables rule (ADR 0014
+/// D6) structural rather than convention-based — `?(?T)` is
+/// literally unrepresentable in the AST. The cost is duplicating
+/// the variant list in [`NullableInner`] — every new Type at C1.6+
+/// adds one line there; small.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Type {
     I64,
     I32,
     Bool,
     Struct(StructId),
+    /// `?T` per ADR 0014 D1. Payload is the inner base type.
+    Nullable(NullableInner),
+}
+
+/// The base types that can appear inside a `?T`. Structurally a
+/// subset of [`Type`] minus the `Nullable` constructor — enforces
+/// ADR 0014 D6 (no nested nullables) at the type level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NullableInner {
+    I64,
+    I32,
+    Bool,
+    Struct(StructId),
+}
+
+impl NullableInner {
+    /// Promote to the corresponding [`Type`].
+    pub fn to_type(self) -> Type {
+        match self {
+            NullableInner::I64 => Type::I64,
+            NullableInner::I32 => Type::I32,
+            NullableInner::Bool => Type::Bool,
+            NullableInner::Struct(id) => Type::Struct(id),
+        }
+    }
 }
 
 impl Type {
@@ -60,6 +95,24 @@ impl Type {
     /// rule to gate "the target must be a struct".
     pub fn is_struct(self) -> bool {
         matches!(self, Type::Struct(_))
+    }
+
+    /// `true` if this is a nullable type (`?T`).
+    pub fn is_nullable(self) -> bool {
+        matches!(self, Type::Nullable(_))
+    }
+
+    /// Try to demote this Type to a [`NullableInner`] for use as
+    /// the payload of a `Nullable`. Returns `None` if this is
+    /// already a `Nullable` (would be nested per ADR 0014 D6).
+    pub fn to_nullable_inner(self) -> Option<NullableInner> {
+        match self {
+            Type::I64 => Some(NullableInner::I64),
+            Type::I32 => Some(NullableInner::I32),
+            Type::Bool => Some(NullableInner::Bool),
+            Type::Struct(id) => Some(NullableInner::Struct(id)),
+            Type::Nullable(_) => None,
+        }
     }
 }
 
@@ -76,6 +129,7 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             Some(s) => s.name.clone(),
             None => format!("<struct#{}>", id.0),
         },
+        Type::Nullable(inner) => format!("?{}", type_display(inner.to_type(), program)),
     }
 }
 
@@ -86,6 +140,7 @@ impl std::fmt::Display for Type {
             Type::I32 => write!(f, "i32"),
             Type::Bool => write!(f, "bool"),
             Type::Struct(id) => write!(f, "<struct#{}>", id.0),
+            Type::Nullable(inner) => write!(f, "?{}", inner.to_type()),
         }
     }
 }
@@ -115,6 +170,20 @@ fn resolve_type_expr(
                 }
             }
         },
+        TypeExprKind::Nullable(inner) => {
+            // Recursively resolve the inner; reject if it's also
+            // nullable (the parser already rejects `??T` per ADR
+            // 0014 D6, so this should be unreachable for source-
+            // level inputs).
+            let inner_ty = resolve_type_expr(inner, struct_table)?;
+            match inner_ty.to_nullable_inner() {
+                Some(ni) => Ok(Type::Nullable(ni)),
+                None => Err(TypeError::UnknownType {
+                    name: "?(nullable)".to_string(),
+                    span: to_source_span(&te.span),
+                }),
+            }
+        }
     }
 }
 
@@ -242,6 +311,15 @@ pub enum TypedExprKind {
     IntLit(i64),
     /// Bool literal. Always carries [`Type::Bool`].
     BoolLit(bool),
+    /// Null literal per ADR 0014 D2. Always carries
+    /// [`Type::Nullable`]; the inner type comes from bidirectional
+    /// checking against the expected context.
+    NullLit,
+    /// Implicit `T → ?T` widening per ADR 0014 D3. Wraps a `T`-typed
+    /// expression so that the outer node carries `?T`. Codegen
+    /// lowers this as constructing the `{ i1 true, T payload }`
+    /// struct value.
+    WidenToNullable(Box<TypedExpr>),
     Var(VarId),
     Unary(UnaryOp, Box<TypedExpr>),
     Binary(BinOp, Box<TypedExpr>, Box<TypedExpr>),
@@ -365,18 +443,31 @@ pub enum TypeError {
     },
 
     /// C1.4 / ADR 0013 D7: a struct contains itself (directly or
-    /// transitively) with no indirection. Lifts when `?T` arrives
-    /// at C1.5.
+    /// transitively) with no indirection. C1.5 / ADR 0014 D10
+    /// relaxes the check so cycles via nullable edges are accepted;
+    /// only direct-edge cycles surface this error now.
     #[error("recursive struct `{name}` has no representable size")]
     #[diagnostic(
         code(sentinel::types::recursive_struct),
-        help("recursive structs need indirection — wait for C1.5's `?T` nullable form")
+        help("recursive structs need indirection — make at least one edge nullable via `?T`")
     )]
     RecursiveStruct {
         name: String,
         /// Names of the structs in the cycle, in order.
         cycle: Vec<String>,
         #[label("recursive struct cycle")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.5 / ADR 0014 D2: a bare `null` literal without enough
+    /// context to infer `?T` for some concrete T.
+    #[error("ambiguous `null` — cannot infer the nullable's inner type")]
+    #[diagnostic(
+        code(sentinel::types::ambiguous_null),
+        help("add a type annotation, e.g. `let x: ?i64 = null;`")
+    )]
+    AmbiguousNull {
+        #[label("inner type unknown here")]
         span: miette::SourceSpan,
     },
 }
@@ -432,7 +523,10 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     let mut typed_signatures: Vec<TypedFnSignature> =
         Vec::with_capacity(program.fn_signatures.len());
 
-    // Index 0: runtime print(i64) -> i64.
+    // Builtins (FnId 0..3): print, unwrap_or, is_some. The generic
+    // builtins' param types are placeholders — the type checker
+    // bypasses the standard CallArgMismatch path for them and
+    // applies the ADR 0014 D9 special-case rules instead.
     let print_sig = &program.fn_signatures[0];
     typed_signatures.push(TypedFnSignature {
         id: print_sig.id,
@@ -440,6 +534,29 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         name_span: print_sig.name_span.clone(),
         param_types: vec![Type::I64],
         return_type: Type::I64,
+        is_main: false,
+        is_runtime: true,
+    });
+    let unwrap_or_sig = &program.fn_signatures[1];
+    typed_signatures.push(TypedFnSignature {
+        id: unwrap_or_sig.id,
+        name: unwrap_or_sig.name.clone(),
+        name_span: unwrap_or_sig.name_span.clone(),
+        // Placeholder param_types — the actual types are inferred at
+        // each call site per ADR 0014 D9. Use I64 as a stand-in to
+        // keep the vec well-shaped; nothing reads these.
+        param_types: vec![Type::Nullable(NullableInner::I64), Type::I64],
+        return_type: Type::I64,
+        is_main: false,
+        is_runtime: true,
+    });
+    let is_some_sig = &program.fn_signatures[2];
+    typed_signatures.push(TypedFnSignature {
+        id: is_some_sig.id,
+        name: is_some_sig.name.clone(),
+        name_span: is_some_sig.name_span.clone(),
+        param_types: vec![Type::Nullable(NullableInner::I64)],
+        return_type: Type::Bool,
         is_main: false,
         is_runtime: true,
     });
@@ -481,9 +598,20 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
 }
 
 /// Walk the struct-field graph looking for cycles. Returns
-/// [`TypeError::RecursiveStruct`] on the first cycle found. C1.5's
-/// `?T` lifts this restriction; at C1.4 a cycle means no
-/// representable size.
+/// [`TypeError::RecursiveStruct`] on the first cycle found.
+///
+/// **ADR 0014 D10 deferral**: the original C1.5 ADR proposed
+/// relaxing the cycle check so cycles via nullable edges (`?Node`)
+/// are accepted. C1.5 implementation discovered that the codegen
+/// representation of `?T` as a flat `{ i1, T }` struct doesn't
+/// actually provide the indirection — `struct Node { next: ?Node }`
+/// has infinite LLVM size because `?Node` contains a Node inline,
+/// not a pointer-to-Node. Proper indirection requires heap
+/// allocation (malloc/free) or stack-with-lifetime semantics —
+/// both beyond C1.5 scope. So the cycle-check at C1.5 still walks
+/// nullable edges as if they were direct edges (the conservative
+/// stance), keeping recursive structs rejected. The proper
+/// relaxation lands at C1.6+ when malloc/heap arrives.
 fn detect_struct_cycle(structs: &[TypedStructDecl]) -> Result<(), TypeError> {
     #[derive(Clone, Copy, PartialEq)]
     enum Color {
@@ -505,7 +633,15 @@ fn detect_struct_cycle(structs: &[TypedStructDecl]) -> Result<(), TypeError> {
         color[i] = Color::Gray;
         path.push(i);
         for field in &structs[i].fields {
-            if let Type::Struct(child_id) = field.ty {
+            // Walk both direct `Struct` edges and `Nullable(Struct)`
+            // edges — at C1.5 the nullable doesn't break cycles in
+            // codegen, so the type check stays conservative.
+            let child_struct_id = match field.ty {
+                Type::Struct(id) => Some(id),
+                Type::Nullable(NullableInner::Struct(id)) => Some(id),
+                _ => None,
+            };
+            if let Some(child_id) = child_struct_id {
                 let j = child_id.0 as usize;
                 match color[j] {
                     Color::Gray => {
@@ -565,8 +701,18 @@ fn check_fn(
         env.insert(tp.id, tp.ty);
     }
 
-    let body = check_block(&fn_def.body, &mut env, signatures, structs)?;
     let return_type = signature.return_type;
+    // ADR 0014 D5: push the declared return type down into the body
+    // so NullLit / T→?T widening at the tail can resolve against it.
+    // But only push if the return type is nullable — otherwise we'd
+    // pre-empt the more specific ReturnTypeMismatch diagnostic with
+    // a less-specific Mismatch on the tail's span.
+    let body_expected = if return_type.is_nullable() {
+        Some(return_type)
+    } else {
+        None
+    };
+    let body = check_block(&fn_def.body, body_expected, &mut env, signatures, structs)?;
 
     if body.ty != return_type {
         return Err(TypeError::ReturnTypeMismatch {
@@ -593,6 +739,7 @@ type VarTypeEnv = std::collections::HashMap<VarId, Type>;
 
 fn check_block(
     block: &ResolvedBlock,
+    expected: Option<Type>,
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
@@ -601,7 +748,9 @@ fn check_block(
     for stmt in &block.stmts {
         stmts.push(check_stmt(stmt, env, signatures, structs)?);
     }
-    let tail = check_expr(&block.tail, env, signatures, structs)?;
+    // Only the tail receives the expected-type pushdown (the block's
+    // value is the tail's value).
+    let tail = check_expr(&block.tail, expected, env, signatures, structs)?;
     let ty = tail.ty;
     Ok(TypedBlock {
         stmts,
@@ -619,11 +768,20 @@ fn check_stmt(
 ) -> Result<TypedStmt, TypeError> {
     let kind = match &stmt.kind {
         ResolvedStmtKind::Let { id, name, name_span, ty_annot, value } => {
-            let value_typed = check_expr(value, env, signatures, structs)?;
-            let ty = match ty_annot {
+            // ADR 0014 D5: if the let has a type annotation, push it
+            // down into the RHS as the expected type. This is what
+            // makes `let x: ?i64 = null;` typecheck.
+            let expected = match ty_annot {
                 Some(annot) => {
                     let struct_table = struct_name_table_local(structs);
-                    let annotated = resolve_type_expr(annot, &struct_table)?;
+                    Some(resolve_type_expr(annot, &struct_table)?)
+                }
+                None => None,
+            };
+            let value_typed = check_expr(value, expected, env, signatures, structs)?;
+            let ty = match (ty_annot, expected) {
+                (Some(_), Some(annotated)) => {
+                    // check_expr already validated; result must match.
                     if annotated != value_typed.ty {
                         return Err(TypeError::Mismatch {
                             expected: annotated,
@@ -633,7 +791,7 @@ fn check_stmt(
                     }
                     annotated
                 }
-                None => value_typed.ty,
+                _ => value_typed.ty,
             };
             env.insert(*id, ty);
             TypedStmtKind::Let {
@@ -645,7 +803,7 @@ fn check_stmt(
             }
         }
         ResolvedStmtKind::Expr(e) => {
-            TypedStmtKind::Expr(check_expr(e, env, signatures, structs)?)
+            TypedStmtKind::Expr(check_expr(e, None, env, signatures, structs)?)
         }
     };
     Ok(TypedStmt { kind, span: stmt.span.clone() })
@@ -658,15 +816,66 @@ fn struct_name_table_local(structs: &[TypedStructDecl]) -> HashMap<String, Struc
     structs.iter().map(|s| (s.name.clone(), s.id)).collect()
 }
 
+/// Apply ADR 0014 D3 widening / D2 null-literal context to a typed
+/// expression against an expected type. If `expected` is None, the
+/// expression's synthesized type passes through unchanged. If it's
+/// `Some(?T)` and the synth type is `T`, wrap with WidenToNullable.
+/// Mismatches surface as `TypeError::Mismatch`.
+fn coerce_to_expected(
+    synth: TypedExpr,
+    expected: Option<Type>,
+    span_for_mismatch: &Span,
+) -> Result<TypedExpr, TypeError> {
+    let Some(exp) = expected else {
+        return Ok(synth);
+    };
+    if synth.ty == exp {
+        return Ok(synth);
+    }
+    // Implicit T → ?T widening per ADR 0014 D3.
+    if let Type::Nullable(inner) = exp {
+        if synth.ty == inner.to_type() {
+            let span = synth.span.clone();
+            return Ok(TypedExpr {
+                kind: TypedExprKind::WidenToNullable(Box::new(synth)),
+                span,
+                ty: exp,
+            });
+        }
+    }
+    Err(TypeError::Mismatch {
+        expected: exp,
+        got: synth.ty,
+        span: to_source_span(span_for_mismatch),
+    })
+}
+
 fn check_expr(
     expr: &ResolvedExpr,
+    expected: Option<Type>,
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
 ) -> Result<TypedExpr, TypeError> {
+    // C1.5 / ADR 0014 D2: NullLit has no synthesis type — it MUST
+    // see an expected `?T` context to type-check.
+    if matches!(expr.kind, ResolvedExprKind::NullLit) {
+        return match expected {
+            Some(Type::Nullable(_)) => Ok(TypedExpr {
+                kind: TypedExprKind::NullLit,
+                span: expr.span.clone(),
+                ty: expected.expect("matched Some"),
+            }),
+            _ => Err(TypeError::AmbiguousNull {
+                span: to_source_span(&expr.span),
+            }),
+        };
+    }
+
     let (kind, ty) = match &expr.kind {
         ResolvedExprKind::IntLit(n) => (TypedExprKind::IntLit(*n), Type::I64),
         ResolvedExprKind::BoolLit(b) => (TypedExprKind::BoolLit(*b), Type::Bool),
+        ResolvedExprKind::NullLit => unreachable!("handled above"),
         ResolvedExprKind::Var(id) => {
             let ty = *env
                 .get(id)
@@ -674,7 +883,7 @@ fn check_expr(
             (TypedExprKind::Var(*id), ty)
         }
         ResolvedExprKind::Unary(op, inner) => {
-            let inner_t = check_expr(inner, env, signatures, structs)?;
+            let inner_t = check_expr(inner, None, env, signatures, structs)?;
             // C1.3: `-x` requires int; `!x` requires bool.
             let ty = match op {
                 UnaryOp::Neg => {
@@ -701,8 +910,8 @@ fn check_expr(
             (TypedExprKind::Unary(*op, Box::new(inner_t)), ty)
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
-            let l = check_expr(lhs, env, signatures, structs)?;
-            let r = check_expr(rhs, env, signatures, structs)?;
+            let l = check_expr(lhs, None, env, signatures, structs)?;
+            let r = check_expr(rhs, None, env, signatures, structs)?;
             // C1.3: arithmetic requires both operands the same int
             // type (I32 or I64); result is that int type. Bool /
             // struct arithmetic is rejected.
@@ -728,12 +937,61 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Cmp(op, lhs, rhs) => {
-            let l = check_expr(lhs, env, signatures, structs)?;
-            let r = check_expr(rhs, env, signatures, structs)?;
+            // ADR 0014 D7: equality against `null` requires special
+            // handling. If one side is NullLit and the other types
+            // to `?T`, the result is bool. The Cmp must be Eq/Ne for
+            // null comparisons; <, <=, >, >= on nullables are rejected.
+            let lhs_is_null = matches!(lhs.kind, ResolvedExprKind::NullLit);
+            let rhs_is_null = matches!(rhs.kind, ResolvedExprKind::NullLit);
+            if lhs_is_null || rhs_is_null {
+                if !matches!(op, CmpOp::Eq | CmpOp::Ne) {
+                    return Err(TypeError::Mismatch {
+                        expected: Type::Bool,
+                        got: Type::Bool, // placeholder; real issue is op shape
+                        span: to_source_span(&expr.span),
+                    });
+                }
+                // The non-null side determines the expected ?T type.
+                // First, synthesize the non-null side.
+                let (non_null_side, non_null_expr, null_span) = if lhs_is_null {
+                    let r = check_expr(rhs, None, env, signatures, structs)?;
+                    (r.ty, r, lhs.span.clone())
+                } else {
+                    let l = check_expr(lhs, None, env, signatures, structs)?;
+                    (l.ty, l, rhs.span.clone())
+                };
+                // Non-null side must be Nullable for null-comparison.
+                if !non_null_side.is_nullable() {
+                    return Err(TypeError::Mismatch {
+                        expected: Type::Nullable(NullableInner::I64), // hint
+                        got: non_null_side,
+                        span: to_source_span(if lhs_is_null { &rhs.span } else { &lhs.span }),
+                    });
+                }
+                let null_typed = TypedExpr {
+                    kind: TypedExprKind::NullLit,
+                    span: null_span,
+                    ty: non_null_side,
+                };
+                let (l, r) = if lhs_is_null {
+                    (null_typed, non_null_expr)
+                } else {
+                    (non_null_expr, null_typed)
+                };
+                return Ok(TypedExpr {
+                    kind: TypedExprKind::Cmp(*op, Box::new(l), Box::new(r)),
+                    span: expr.span.clone(),
+                    ty: Type::Bool,
+                });
+            }
+            let l = check_expr(lhs, None, env, signatures, structs)?;
+            let r = check_expr(rhs, None, env, signatures, structs)?;
             // C1.3: comparisons require both operands the same type.
-            // C1.4 keeps this as int + bool only (ADR 0013 D6 defers
-            // struct equality to C1.5+) — reject struct operands.
-            if l.ty.is_struct() {
+            // C1.4 + C1.5 keep this as int + bool only (ADR 0013 D6
+            // defers struct equality; nullable-vs-nullable equality
+            // also deferred). Reject struct + nullable operands when
+            // neither side is null.
+            if l.ty.is_struct() || l.ty.is_nullable() {
                 return Err(TypeError::Mismatch {
                     expected: Type::I64,
                     got: l.ty,
@@ -753,8 +1011,8 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Logic(op, lhs, rhs) => {
-            let l = check_expr(lhs, env, signatures, structs)?;
-            let r = check_expr(rhs, env, signatures, structs)?;
+            let l = check_expr(lhs, None, env, signatures, structs)?;
+            let r = check_expr(rhs, None, env, signatures, structs)?;
             if l.ty != Type::Bool {
                 return Err(TypeError::Mismatch {
                     expected: Type::Bool,
@@ -775,12 +1033,12 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Block(b) => {
-            let typed_block = check_block(b, env, signatures, structs)?;
+            let typed_block = check_block(b, expected, env, signatures, structs)?;
             let ty = typed_block.ty;
             (TypedExprKind::Block(Box::new(typed_block)), ty)
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
-            let cond_t = check_expr(cond, env, signatures, structs)?;
+            let cond_t = check_expr(cond, None, env, signatures, structs)?;
             // C1.3 step 5: if-condition must be bool.
             if cond_t.ty != Type::Bool {
                 return Err(TypeError::Mismatch {
@@ -789,8 +1047,10 @@ fn check_expr(
                     span: to_source_span(&cond.span),
                 });
             }
-            let then_t = check_block(then_branch, env, signatures, structs)?;
-            let else_t = check_block(else_branch, env, signatures, structs)?;
+            // ADR 0014 D5: push the expected type down into both
+            // branches so `null` in either branch can resolve.
+            let then_t = check_block(then_branch, expected, env, signatures, structs)?;
+            let else_t = check_block(else_branch, expected, env, signatures, structs)?;
             if then_t.ty != else_t.ty {
                 return Err(TypeError::Mismatch {
                     expected: then_t.ty,
@@ -809,31 +1069,102 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Call { id, callee_span, args } => {
-            let signature = &signatures[id.0 as usize];
-            let mut typed_args = Vec::with_capacity(args.len());
-            for (i, arg) in args.iter().enumerate() {
-                let typed_arg = check_expr(arg, env, signatures, structs)?;
-                let expected = signature.param_types[i];
-                if typed_arg.ty != expected {
+            // ADR 0014 D9: special-case the generic builtins. Resolve
+            // already verified arity; here we apply the generic-typing
+            // rule that the standard param-type comparison can't
+            // express without real generics.
+            if *id == UNWRAP_OR_FN_ID {
+                // unwrap_or(x: ?T, default: T) -> T
+                // Synthesize the first arg; it must be Nullable(_).
+                let x = check_expr(&args[0], None, env, signatures, structs)?;
+                let inner = match x.ty {
+                    Type::Nullable(ni) => ni,
+                    other => {
+                        return Err(TypeError::Mismatch {
+                            expected: Type::Nullable(NullableInner::I64), // hint
+                            got: other,
+                            span: to_source_span(&args[0].span),
+                        });
+                    }
+                };
+                let inner_ty = inner.to_type();
+                // Second arg must be T (the inner type).
+                let default = check_expr(&args[1], Some(inner_ty), env, signatures, structs)?;
+                if default.ty != inner_ty {
                     return Err(TypeError::CallArgMismatch {
-                        callee: signature.name.clone(),
-                        arg_index: i,
-                        expected,
-                        got: typed_arg.ty,
-                        span: to_source_span(&arg.span),
+                        callee: "unwrap_or".to_string(),
+                        arg_index: 1,
+                        expected: inner_ty,
+                        got: default.ty,
+                        span: to_source_span(&args[1].span),
                     });
                 }
-                typed_args.push(typed_arg);
+                let typed_args = vec![x, default];
+                (
+                    TypedExprKind::Call {
+                        id: *id,
+                        callee_span: callee_span.clone(),
+                        args: typed_args,
+                    },
+                    inner_ty,
+                )
+            } else if *id == IS_SOME_FN_ID {
+                // is_some(x: ?T) -> bool
+                let x = check_expr(&args[0], None, env, signatures, structs)?;
+                if !x.ty.is_nullable() {
+                    return Err(TypeError::Mismatch {
+                        expected: Type::Nullable(NullableInner::I64), // hint
+                        got: x.ty,
+                        span: to_source_span(&args[0].span),
+                    });
+                }
+                let typed_args = vec![x];
+                (
+                    TypedExprKind::Call {
+                        id: *id,
+                        callee_span: callee_span.clone(),
+                        args: typed_args,
+                    },
+                    Type::Bool,
+                )
+            } else {
+                let signature = &signatures[id.0 as usize];
+                let mut typed_args = Vec::with_capacity(args.len());
+                for (i, arg) in args.iter().enumerate() {
+                    let expected_param = signature.param_types[i];
+                    // ADR 0014 D5: push the param type down only
+                    // when it's nullable (so `null` / widening work).
+                    // Non-nullable params synthesize without pushdown
+                    // so the standard CallArgMismatch path fires for
+                    // type mismatches (more specific than Mismatch).
+                    let arg_expected = if expected_param.is_nullable() {
+                        Some(expected_param)
+                    } else {
+                        None
+                    };
+                    let typed_arg =
+                        check_expr(arg, arg_expected, env, signatures, structs)?;
+                    if typed_arg.ty != expected_param {
+                        return Err(TypeError::CallArgMismatch {
+                            callee: signature.name.clone(),
+                            arg_index: i,
+                            expected: expected_param,
+                            got: typed_arg.ty,
+                            span: to_source_span(&arg.span),
+                        });
+                    }
+                    typed_args.push(typed_arg);
+                }
+                let ty = signature.return_type;
+                (
+                    TypedExprKind::Call {
+                        id: *id,
+                        callee_span: callee_span.clone(),
+                        args: typed_args,
+                    },
+                    ty,
+                )
             }
-            let ty = signature.return_type;
-            (
-                TypedExprKind::Call {
-                    id: *id,
-                    callee_span: callee_span.clone(),
-                    args: typed_args,
-                },
-                ty,
-            )
         }
         ResolvedExprKind::StructLit { id, name, name_span, fields } => {
             // The struct decl provides the expected field set + types.
@@ -852,11 +1183,19 @@ fn check_expr(
                         field: fi.name.clone(),
                         span: to_source_span(&fi.name_span),
                     })?;
-                let expected = decl.fields[decl_idx].ty;
-                let value_t = check_expr(&fi.value, env, signatures, structs)?;
-                if value_t.ty != expected {
+                let expected_field_ty = decl.fields[decl_idx].ty;
+                // ADR 0014 D5: push the field's expected type down so
+                // `null` / widening work inside struct literals.
+                let value_t = check_expr(
+                    &fi.value,
+                    Some(expected_field_ty),
+                    env,
+                    signatures,
+                    structs,
+                )?;
+                if value_t.ty != expected_field_ty {
                     return Err(TypeError::Mismatch {
-                        expected,
+                        expected: expected_field_ty,
                         got: value_t.ty,
                         span: to_source_span(&fi.value.span),
                     });
@@ -912,7 +1251,7 @@ fn check_expr(
             )
         }
         ResolvedExprKind::FieldAccess { target, field, field_span } => {
-            let target_t = check_expr(target, env, signatures, structs)?;
+            let target_t = check_expr(target, None, env, signatures, structs)?;
             let struct_id = match target_t.ty {
                 Type::Struct(id) => id,
                 other => {
@@ -950,7 +1289,10 @@ fn check_expr(
             )
         }
     };
-    Ok(TypedExpr { kind, span: expr.span.clone(), ty })
+    let synth = TypedExpr { kind, span: expr.span.clone(), ty };
+    // ADR 0014 D3: apply T→?T widening if the expected type is ?T and
+    // the synthesized type is T.
+    coerce_to_expected(synth, expected, &expr.span)
 }
 
 fn to_source_span(span: &Span) -> miette::SourceSpan {
@@ -1023,6 +1365,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             format!("recursive struct `{name}` has no representable size"),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::AmbiguousNull { span } => (
+            "sentinel::types::ambiguous_null",
+            "ambiguous `null` — cannot infer the nullable's inner type".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
     };
     Diagnostic {
         stage: "types",
@@ -1070,10 +1417,14 @@ mod tests {
         let main = p.main();
         assert_eq!(main.return_type, Type::I64);
         assert_eq!(main.body.ty, Type::I64);
-        // Signature table: FnId(0) is print, FnId(1) is main.
+        // Signature table at C1.5: FnId(0)=print, (1)=unwrap_or,
+        // (2)=is_some, (3)=main. The generic builtins occupy
+        // FnId(1)/(2) per ADR 0014 D9.
         assert_eq!(p.fn_signatures[0].name, "print");
         assert_eq!(p.fn_signatures[0].param_types, vec![Type::I64]);
-        assert_eq!(p.fn_signatures[1].name, "main");
+        assert_eq!(p.fn_signatures[1].name, "unwrap_or");
+        assert_eq!(p.fn_signatures[2].name, "is_some");
+        assert_eq!(p.fn_signatures[3].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 
@@ -1627,6 +1978,167 @@ fn main() -> i64 {
             "struct Empty { }\nfn main() -> i64 { 0 }",
         );
         assert!(p.structs[0].fields.is_empty());
+    }
+
+    // ----- C1.5: nullable types + null literal + builtins -----
+
+    #[test]
+    fn nullable_type_resolves() {
+        let p = check_ok("fn f(x: ?i64) -> i64 { unwrap_or(x, 0) }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty, Type::Nullable(NullableInner::I64));
+    }
+
+    #[test]
+    fn null_with_annotation_typechecks() {
+        let _ = check_ok("fn main() -> i64 { let x: ?i64 = null; 0 }");
+    }
+
+    #[test]
+    fn null_without_annotation_errors() {
+        let err = check_err("fn main() -> i64 { let x = null; 0 }");
+        assert!(matches!(err, TypeError::AmbiguousNull { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn implicit_widen_i64_to_nullable_i64() {
+        // `let x: ?i64 = 42;` — `42` (I64) widens to ?i64.
+        let _ = check_ok("fn main() -> i64 { let x: ?i64 = 42; 0 }");
+    }
+
+    #[test]
+    fn implicit_widen_in_call_arg() {
+        let _ = check_ok(
+            "fn takes_opt(x: ?i64) -> i64 { 0 }\nfn main() -> i64 { takes_opt(7) }",
+        );
+    }
+
+    #[test]
+    fn unwrap_or_typechecks() {
+        let p = check_ok(
+            "fn main() -> i64 { let x: ?i64 = 42; unwrap_or(x, 0) }",
+        );
+        assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    #[test]
+    fn is_some_typechecks() {
+        let p = check_ok(
+            "fn main() -> i64 { let x: ?i64 = null; if is_some(x) { 1 } else { 0 } }",
+        );
+        assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    #[test]
+    fn unwrap_or_with_non_nullable_errors() {
+        let err = check_err(
+            "fn main() -> i64 { unwrap_or(5, 0) }",
+        );
+        // The first arg is I64, not ?T — special-cased Mismatch.
+        assert!(matches!(err, TypeError::Mismatch { got: Type::I64, .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn cmp_eq_against_null_typechecks() {
+        let p = check_ok(
+            "fn main() -> i64 { let x: ?i64 = null; if x == null { 1 } else { 0 } }",
+        );
+        assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    #[test]
+    fn cmp_ne_against_null_typechecks() {
+        let p = check_ok(
+            "fn main() -> i64 { let x: ?i64 = null; if x != null { 1 } else { 0 } }",
+        );
+        assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    #[test]
+    fn cmp_lt_against_null_errors() {
+        // `<` on nullable is rejected per ADR 0014 D7.
+        let err = check_err(
+            "fn main() -> i64 { let x: ?i64 = null; if x < null { 1 } else { 0 } }",
+        );
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn cmp_null_against_non_nullable_errors() {
+        let err = check_err(
+            "fn main() -> i64 { let x = 5; if x == null { 1 } else { 0 } }",
+        );
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn nullable_in_fn_return_typechecks() {
+        let _ = check_ok(
+            "fn maybe(c: bool) -> ?i64 { if c { 42 } else { null } }\nfn main() -> i64 { 0 }",
+        );
+    }
+
+    #[test]
+    fn nullable_struct_field_typechecks() {
+        // A struct with a nullable field (non-recursive). This works
+        // even though recursive nullable structs are rejected per
+        // the C1.5 codegen limitation noted in detect_struct_cycle.
+        let p = check_ok(
+            "struct Pair { first: ?i64, second: i64 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(
+            p.structs[0].fields[0].ty,
+            Type::Nullable(NullableInner::I64)
+        );
+        assert_eq!(p.structs[0].fields[1].ty, Type::I64);
+    }
+
+    #[test]
+    fn recursive_nullable_struct_still_rejected() {
+        // The ADR 0014 D10 relaxation was deferred — recursive structs
+        // via nullable still error at C1.5 because codegen can't yet
+        // represent the indirection.
+        let err = check_err(
+            "struct Node { value: i64, next: ?Node }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::RecursiveStruct { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn nullable_display_renders_with_question_prefix() {
+        let p = check_ok("fn f(x: ?i64) -> i64 { unwrap_or(x, 0) }\nfn main() -> i64 { 0 }");
+        let param_ty = p.fns[0].params[0].ty;
+        assert_eq!(type_display(param_ty, None), "?i64");
+        assert_eq!(format!("{param_ty}"), "?i64");
+    }
+
+    #[test]
+    fn nullable_inner_to_type_roundtrip() {
+        assert_eq!(NullableInner::I64.to_type(), Type::I64);
+        assert_eq!(NullableInner::Bool.to_type(), Type::Bool);
+        assert_eq!(
+            Type::I64.to_nullable_inner(),
+            Some(NullableInner::I64)
+        );
+        assert_eq!(
+            Type::Nullable(NullableInner::I64).to_nullable_inner(),
+            None
+        );
+    }
+
+    #[test]
+    fn c15_phasego_value_program_typechecks() {
+        let src = "\
+fn find_or(x: ?i64, default: i64) -> i64 {
+    unwrap_or(x, default)
+}
+fn main() -> i64 {
+    let some: ?i64 = 42;
+    let none: ?i64 = null;
+    print(find_or(some, 0) + find_or(none, 100))
+}
+";
+        let p = check_ok(src);
+        assert_eq!(p.main().body.ty, Type::I64);
     }
 
     #[test]

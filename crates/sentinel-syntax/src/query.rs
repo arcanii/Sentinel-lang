@@ -115,6 +115,13 @@ fn parse_error_to_diagnostic(err: &ParseError) -> Diagnostic {
             message: "chained comparison is not allowed".to_string(),
             span: span.offset()..(span.offset() + span.len()),
         },
+        ParseError::NestedNullable { span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::nested_nullable",
+            message: "nested nullable types are not allowed".to_string(),
+            span: span.offset()..(span.offset() + span.len()),
+        },
     }
 }
 

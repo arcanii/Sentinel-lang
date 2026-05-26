@@ -135,10 +135,17 @@ impl UnaryOp {
 /// C1.4 adds [`ExprKind::StructLit`] (`Name { field: expr, … }` per
 /// ADR 0013 D3) and [`ExprKind::FieldAccess`] (postfix `expr.field`
 /// per D2; binds as part of the atom so `-p.x` is `-(p.x)`).
+///
+/// C1.5 adds [`ExprKind::NullLit`] — the bare `null` keyword. Its
+/// type is `?T` for some T, resolved bidirectionally at type-check
+/// time per ADR 0014 D2.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExprKind {
     IntLit(i64),
     BoolLit(bool),
+    /// The `null` keyword literal per ADR 0014 D2. The type checker
+    /// resolves its `?T` type from the surrounding context.
+    NullLit,
     Var(String),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
@@ -287,16 +294,21 @@ pub struct StructField {
     pub span: Span,
 }
 
-/// Surface-level type expression. C1.2 ships only the `Ident` form
+/// Surface-level type expression. C1.2 shipped only the `Ident` form
 /// (recognised at type-check time as `i64`, later `i32`/`bool`/struct
-/// names per ADR 0012 D3 and D4). The enum is open-ended so later
-/// sub-phases can add `?T` (C1.5), `&T` (C2), `secret T` (C3), and
-/// generics (C1.7) without churning every annotation site.
+/// names per ADR 0012 D3 and D4). C1.5 adds [`TypeExprKind::Nullable`]
+/// for `?T` per ADR 0014 D1. The enum stays open-ended so later
+/// sub-phases can add `&T` (C2), `secret T` (C3), and generics
+/// (C1.7) without churning every annotation site.
 pub type TypeExpr = Spanned<TypeExprKind>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeExprKind {
     Ident(String),
+    /// Postfix-`?` nullable type per ADR 0014 D1. The inner
+    /// TypeExpr is the base type. Nested nullables (`??T`) are
+    /// rejected at parse time per ADR 0014 D6.
+    Nullable(Box<TypeExpr>),
 }
 
 /// A brace-wrapped block expression `{ stmt* tail_expr }`. The
@@ -324,6 +336,7 @@ impl fmt::Display for ExprKind {
         match self {
             ExprKind::IntLit(n) => write!(f, "{n}"),
             ExprKind::BoolLit(b) => write!(f, "{b}"),
+            ExprKind::NullLit => write!(f, "null"),
             ExprKind::Var(name) => write!(f, "{name}"),
             ExprKind::Unary(op, inner) => write!(f, "({} {})", op.symbol(), inner.kind),
             ExprKind::Binary(op, lhs, rhs) => {
@@ -392,6 +405,7 @@ impl fmt::Display for TypeExprKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TypeExprKind::Ident(name) => write!(f, "{name}"),
+            TypeExprKind::Nullable(inner) => write!(f, "?{}", inner.kind),
         }
     }
 }
@@ -917,6 +931,37 @@ mod tests {
             span: 0..5,
         };
         assert_eq!(e.to_string(), "(. (. a b) c)");
+    }
+
+    // ----- C1.5: NullLit + Nullable TypeExpr -----
+
+    #[test]
+    fn display_null_lit() {
+        let e = Spanned { kind: ExprKind::NullLit, span: 0..4 };
+        assert_eq!(e.to_string(), "null");
+    }
+
+    #[test]
+    fn display_nullable_type() {
+        let inner = ty_i64(0..3);
+        let ne = Spanned {
+            kind: TypeExprKind::Nullable(Box::new(inner)),
+            span: 0..4,
+        };
+        assert_eq!(ne.kind.to_string(), "?i64");
+    }
+
+    #[test]
+    fn display_nullable_struct_type() {
+        let inner = Spanned {
+            kind: TypeExprKind::Ident("Point".to_string()),
+            span: 0..5,
+        };
+        let ne = Spanned {
+            kind: TypeExprKind::Nullable(Box::new(inner)),
+            span: 0..6,
+        };
+        assert_eq!(ne.kind.to_string(), "?Point");
     }
 
     #[test]
