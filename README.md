@@ -30,8 +30,10 @@ Sentinel is in active early-stage development. This is a multi-year research pro
     - ✅ C1.0b: `lex_query` and `parse_query` as `#[salsa::tracked]` queries; driver instantiates concrete `SentinelDatabase`
     - ✅ C1.0c: codegen-salsa decision — codegen stays outside the query graph until C1.2+ typed HIR (ADR 0011 D1 amended)
     - ✅ C1.1: `sentinel-resolve` crate lift; name resolution out of codegen; driver pipeline = parse_query → resolve_query → codegen
-    - ⬜ C1.2: ADR 0012 (concrete C1 surface — annotation grammar) + `sentinel-types::check()` real
-    - ⬜ C1.3–C1.7: primitive types, `?T` nullability, structs, arrays, generics
+    - 🟡 ADR 0012: concrete C1 surface syntax — annotation grammar (D1-D4) + bool/comparisons/logicals (D5-D8); PROPOSED (decision-only commit before C1.2/C1.3 implementation)
+    - ⬜ C1.2: lexer `:` + annotation parsing + `sentinel-types::check()` real (per ADR 0012 D1-D4)
+    - ⬜ C1.3: `bool`, `i32`, comparison + logical operators; retires ADR 0010 D9 C-style truthy (per ADR 0012 D5-D8)
+    - ⬜ C1.4–C1.7: structs, `?T` nullability, arrays, generics
 - ⬜ **Phase D — Self-hosting** (Sentinel compiler written in Sentinel)
 
 Current test coverage (468 active tests across the workspace):
@@ -149,7 +151,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   - [`BACKLOG.md`](docs/BACKLOG.md) — post-1.0 backlog and research directions
   - [`SECRETS_LIFECYCLE.md`](docs/SECRETS_LIFECYCLE.md) — secret-memory design
   - [`TIERED_RELEASES.md`](docs/TIERED_RELEASES.md) — release tiers
-  - [`decisions/`](docs/decisions/) — architecture decision records (11 so far)
+  - [`decisions/`](docs/decisions/) — architecture decision records (12 so far)
 - `tests/pass/` — workspace-root pass-test fixtures (`.sentinel` programs that should compile and run).
 - `tests/ui/` — workspace-root UI-test fixtures (`.sentinel` programs that should produce specific diagnostics).
 - `scripts/` — patch scripts that built each milestone, named `NN-<phase>.sh`.

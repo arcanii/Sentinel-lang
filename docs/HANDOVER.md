@@ -131,6 +131,13 @@ breakdown.
                                                  (type system, structs,
                                                  nullability, arrays,
                                                  generics)
+  - 0012 concrete-c1-surface-syntax              PROPOSED — annotation
+                                                 grammar (C1.2) +
+                                                 bool/comparisons/
+                                                 logicals (C1.3);
+                                                 ACCEPTED when C1.3
+                                                 lands the
+                                                 D5-D8 decisions
 
 ### 0.1 Working norms (carry forward into Phase C1)
 
@@ -218,70 +225,96 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (ADR 0012 then C1.2)
+### 0.2 Next session opening (C1.2 — sentinel-types::check)
 
-Resume at **ADR 0012** — concrete C1 surface syntax for type
-annotations. Per ADR 0011 D7 this lands before C1.2's
-sentinel-types::check() so the parser has a real annotation grammar
-to point at.
+ADR 0012 (concrete C1 surface syntax) is now PROPOSED. It pins
+down annotation grammar, primitive type names, bool literals,
+comparison operators, and logical operators. C1.2 implements the
+annotation half (D1-D4); C1.3 implements the bool/comparison/
+logical half (D5-D8). Both ADR halves are revisited at the
+respective sub-phase landings to flip to ACCEPTED status notes.
 
-ADR 0012 needs to decide:
+Resume at **C1.2** — `sentinel-types::check()` real, landing the
+annotation grammar from ADR 0012 D1-D4. Per ADR 0011 D5 + D6,
+the work is ~3-4 sessions split into bounded sub-steps:
 
-1. **Annotation syntax for parameters.** `fn add(a: i64, b: i64)
-   -> i64 { a + b }` — confirms ADR 0010 D5's reservation of the
-   `->` and `:` tokens. The `:` token isn't yet in the lexer (no
-   uses through C0); it lands as part of the ADR 0012 / C1.2 work.
-2. **Annotation syntax for let-bindings.** `let x: i64 = expr;`
-   alongside `let x = expr;` (the inferred form). The inferred
-   form's bidirectional check is ADR 0011 D2.
-3. **Primitive type names in source.** `i32`, `i64`, `bool` per
-   ADR 0011 D3 — uppercase or lowercase? Probably lowercase to
-   match Rust convention.
-4. **Literal forms for `bool`.** `true`/`false` as keywords (per
-   ADR 0011 D3); reserves the identifiers. ADR 0010 D9's C-style
-   truthy `if cond` retires at C1.3 when bool lands; until then,
-   `if 5 { ... }` still works.
-5. **Comparison operators.** `==`, `!=`, `<`, `<=`, `>`, `>=`
-   per ADR 0011 D3's "introduces comparison operators at C1.3."
-   ADR 0012 decides surface syntax; type rules are C1.3.
-6. **Logical operators.** `&&`, `||`, `!` per ADR 0011 D3 (they're
-   listed under "what arrives at C1.3"). Surface decision for
-   ADR 0012, type rules for C1.3.
+1. **Lexer extension**: add the `:` token to sentinel-syntax's
+   logos enum. Single token; 5 LOC + a few tests. Make this its
+   own commit so the parser/types changes are visible against a
+   stable lexer.
 
-After ADR 0012 ships PROPOSED, **C1.2** is sentinel-types::check
-() landing the basic type checker. Per ADR 0011 D5 + D6, the
-work is ~4 weeks:
+2. **Parser extension**: extend `parse_fn_def` to accept
+   `Ident ':' type` parameters and a `-> type` return clause;
+   extend `parse_let_stmt` to accept an optional `':' type`
+   before the `=`. `type` parses as a single Ident at C1.2
+   (per ADR 0012 D3 + D4). Add ParseError variants if needed
+   for missing annotations. The `Param` AST type grows a
+   `Spanned<TypeExpr>` field; `FnDef` grows an `Option<Spanned
+   <TypeExpr>>` return type; `StmtKind::Let` grows an
+   `Option<Spanned<TypeExpr>>` annotation. Hash derives propagate
+   to TypeExpr.
 
-  - Populate sentinel-types crate (currently a 20-line stub).
-    Define `Type` (i32, i64, bool, Unit, possibly Unknown as an
-    inference placeholder), `TypedProgram` (parallel tree like
-    ResolvedProgram, but typed), `TypeError` variants.
-  - Parser updates (in sentinel-syntax) for the annotation
-    grammar from ADR 0012.
-  - The type checker itself: walks ResolvedProgram, infers/checks
-    each expression, produces TypedProgram.
-  - Salsa-tracked `check_query(db, file)` chaining on
-    resolve_query.
-  - Codegen adapts to TypedProgram (currently consumes
-    ResolvedProgram). Since C0/C1 everything is i64, the LLVM
-    lowering doesn't change much yet — but the bool path needs
-    real i1 handling at C1.3.
-  - ADR 0011 D8 hard break: 22 pass-test fixtures get mechanical
-    annotation rewrites. Same pattern as C0.5's fn-wrap pass.
+3. **Populate sentinel-types**: currently a 20-line stub. Add deps
+   on sentinel-ast, sentinel-base, sentinel-resolve, miette,
+   salsa, thiserror, tracing. Define:
+   - `Type` enum (initially just `I64` per ADR 0012 D4; C1.3 adds
+     `I32`, `Bool`)
+   - `TypedProgram` / `TypedFnDef` / `TypedParam` / `TypedBlock`
+     / `TypedStmt(Kind)` / `TypedExpr(Kind)` — parallel tree
+     mirroring ResolvedProgram but with `ty: Type` on every
+     expression node.
+   - `TypeError` enum with variants: `Mismatch { expected, got,
+     span }`, `UnknownType { name, span }`, plus any others
+     needed.
+   - `check(program: &ResolvedProgram) -> Result<TypedProgram,
+     TypeError>` pure-function entry point.
+   - `check_query(db, file)` `#[salsa::tracked]` chaining on
+     resolve_query.
 
-**Estimated effort for ADR 0012**: 1 session (decision doc only).
+4. **Type checker implementation**: at C1.2 the universe is just
+   `I64`, so the checker mostly validates "every annotation says
+   `i64`, every expression types to i64." Per ADR 0011 D2,
+   inference inside fn bodies handles `let x = expr;` by reading
+   the expression's type. Return-type annotations are checked
+   against the body's final expression. Call argument types are
+   checked against the callee's declared parameter types.
+
+5. **Codegen adapts to TypedProgram**: same pattern as C1.1.2.
+   compile_to_object takes &TypedProgram instead of
+   &ResolvedProgram. The actual LLVM lowering doesn't change much
+   yet (still i64 everywhere); the change is in the type of the
+   input. Codegen tests get a thin parse → resolve → check chain.
+
+6. **Driver wires check_query**: pipeline becomes
+   parse_query → resolve_query → check_query → codegen.
+   Diagnostics flow transitively.
+
+7. **Hard break — fixture annotation rewrite**: per ADR 0012 D10,
+   all 22 pass-test fixtures get mechanical annotation rewrites:
+   `fn main() { ... }` → `fn main() -> i64 { ... }`,
+   `fn double(x) { x * 2 }` → `fn double(x: i64) -> i64 { x * 2 }`,
+   etc. The parse_unbalanced_paren UI fixture gets its return
+   type annotation too. The lex_invalid_char fixture stays
+   as-is (no fn defs to annotate).
+
+8. **Commit cadence**: lexer change (small feat), parser+ast
+   changes (medium feat), sentinel-types crate (large feat), then
+   codegen+driver wire-in (large feat), then fixture rewrite
+   (mechanical), then docs commit. ~5-6 commits estimated across
+   ~3-4 sessions.
+
 **Estimated effort for C1.2**: 3-4 sessions.
 
-After C1.2: C1.3 (bool, comparison ops, retires C-style truthy)
-per ADR 0011 D10. Then C1.4 (structs), C1.5 (`?T`), C1.6 (arrays),
-C1.7 (generics).
+After C1.2: **C1.3** (bool, comparison ops, logical ops, retires
+C-style truthy) per ADR 0011 D10 + ADR 0012 D5-D8. Then C1.4
+(structs), C1.5 (`?T`), C1.6 (arrays), C1.7 (generics).
 
 ### 0.3 Quick-status block for session start
 
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: <docs-hash> (docs: C1.1 landed at 438dd16+9374edf).
+    Local HEAD: <docs-hash> (docs: ADR 0012 PROPOSED).
     [N] commits ahead of origin/main pending GitHub Desktop push.
     Working tree clean.
 
@@ -291,21 +324,22 @@ For pasting into a fresh chat to bootstrap context:
     tests. C0 go/no-go program runs at
     tests/pass/c05_go_no_go.sentinel: stdout "10\n", exit 0. ADRs
     0001-0010 ACCEPTED; ADR 0011 PROPOSED with D1 (Salsa) + D4
-    (resolve lift) fully exercised.
+    (resolve lift) fully exercised; ADR 0012 PROPOSED (concrete
+    C1 surface syntax — annotation grammar D1-D4 for C1.2, bool /
+    comparisons / logicals D5-D8 for C1.3).
 
     Phase C1 in flight per ADR 0011 (PROPOSED, 8 sub-phases).
     C1.0a-c + C1.1.1-2 landed: salsa retrofit for the front-end
     (lex_query, parse_query, resolve_query); driver pipeline is
     parse → resolve → codegen with diagnostics transitively
     accumulated; codegen consumes a typed-by-ID ResolvedProgram
-    and has no string-keyed lookups. Next: write ADR 0012 (concrete
-    C1 surface — annotation grammar) then start C1.2 (sentinel-
-    types::check() real). ~1 session for ADR 0012, then ~3-4
-    sessions for C1.2.
+    and has no string-keyed lookups. Next: start C1.2 (sentinel-
+    types::check() real) per ADR 0012 D1-D4 + ADR 0011 D5. ~3-4
+    sessions estimated; see HANDOVER §0.2 for the 8-step plan.
 
     Read docs/HANDOVER.md §0 in full, then docs/STATE.md, then
-    ADR 0011 — that's the canonical context. Resume at ADR 0012
-    per HANDOVER §0.2.
+    ADRs 0011 + 0012 — that's the canonical context. Resume at
+    C1.2 per HANDOVER §0.2.
 
 ---
 

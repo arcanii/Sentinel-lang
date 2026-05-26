@@ -12,8 +12,20 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C1.1 landed (C1.1.1 at 438dd16, C1.1.2 at
-9374edf)** — name resolution lifts out of `sentinel-codegen` into
+Last updated: **ADR 0012 PROPOSED** — concrete C1 surface syntax
+ADR landed as a docs-only commit pinning the annotation grammar
+(D1-D4, for C1.2) and the bool/comparison/logical operator set
+(D5-D8, for C1.3) before either sub-phase begins. Eleven
+D-numbered decisions: mandatory return-type annotations on `fn`,
+optional `let` annotations, primitives as identifiers (not lexer
+keywords), `i64` is the C1.2 universe with `i32` + `bool`
+arriving at C1.3, lexer additions (`:`, `true`, `false`, six
+comparison ops, `&& || !`), non-associative comparisons matching
+Rust, retirement of ADR 0010 D9 C-style truthy at C1.3, hard
+break for fixture annotation rewrite per ADR 0011 D8. Workspace
+state unchanged (468 tests). Pre-ADR-0012 context: **C1.1 landed
+(C1.1.1 at 438dd16, C1.1.2 at 9374edf)** — name resolution lifts
+out of `sentinel-codegen` into
 a populated `sentinel-resolve` crate per ADR 0011 D4. C1.1.1
 scaffolds the crate: VarId/FnId/FnSignature, parallel-tree
 resolved AST (ResolvedProgram/FnDef/Param/Block/Stmt/Expr),
@@ -1149,8 +1161,10 @@ scaffold stubs.
 | C1.0c | Codegen-salsa decision: defer until typed HIR (C1.2+); ADR 0011 D1 amended | Done | 8b58644 |
 | C1.1.1 | Scaffold sentinel-resolve: VarId/FnId, parallel-tree resolved AST, resolve() + salsa query | Done | 438dd16 |
 | C1.1.2 | Codegen consumes ResolvedProgram; driver chains resolve_query | Done | 9374edf |
-| C1.2  | ADR 0012 (concrete C1 surface) + sentinel-types::check() real | Pending |         |
-| C1.3+ | Multiple primitives, structs, nullability, arrays, generics    | Planned |         |
+| ADR 12 | Concrete C1 surface syntax (annotation grammar + bool/cmp/logical ops) | Done | (pending) |
+| C1.2  | Lexer `:` + annotation parsing + sentinel-types::check() real | Pending |         |
+| C1.3  | bool, i32, comparison ops, logical ops; retire C-style truthy  | Pending |         |
+| C1.4+ | Structs, nullability, arrays, generics                         | Planned |         |
 
 ADR 0010 (concrete C0 surface syntax) lands between C0.0 and C0.1
 per ADR 0009 D8.
