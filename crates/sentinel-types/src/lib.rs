@@ -28,7 +28,7 @@ use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, TypeExpr, TypeExprKind, UnaryOp}
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
     FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef, ResolvedProgram,
-    ResolvedStmt, ResolvedStmtKind, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
+    ResolvedStmt, ResolvedStmtKind, StructId, TypeParamId, VarId,
 };
 
 // =============================================================================
@@ -60,6 +60,16 @@ pub enum Type {
     Nullable(NullableInner),
     /// `[T]` per ADR 0015 D1. Payload is the element type.
     Array(ArrayElem),
+    /// Abstract type parameter in the body of a generic fn or
+    /// generic struct per ADR 0016 D6. The [`TypeParamId`] (re-
+    /// exported from `sentinel_resolve`) is scoped to the
+    /// surrounding fn / struct — two distinct generic fns can each
+    /// have `TypeParam(0)` referring to their own first type
+    /// parameter. Outside its scope, a TypeParam is meaningless;
+    /// codegen monomorphization substitutes concrete types in per-
+    /// instance via the `type_args` carried on each
+    /// [`TypedExprKind::Call`].
+    TypeParam(TypeParamId),
 }
 
 /// The base types that can appear inside a `?T` per ADR 0014 D6 +
@@ -83,6 +93,9 @@ pub enum NullableInner {
     I32,
     Bool,
     Struct(StructId),
+    /// `?T` where T is a generic type parameter (only meaningful
+    /// inside a generic fn body). C1.7 / ADR 0016 D6b.
+    TypeParam(TypeParamId),
 }
 
 impl NullableInner {
@@ -93,6 +106,7 @@ impl NullableInner {
             NullableInner::I32 => Type::I32,
             NullableInner::Bool => Type::Bool,
             NullableInner::Struct(id) => Type::Struct(id),
+            NullableInner::TypeParam(id) => Type::TypeParam(id),
         }
     }
 }
@@ -107,6 +121,9 @@ pub enum ArrayElem {
     I32,
     Bool,
     Struct(StructId),
+    /// `[T]` where T is a generic type parameter (only meaningful
+    /// inside a generic fn body). C1.7 / ADR 0016 D6b.
+    TypeParam(TypeParamId),
 }
 
 impl ArrayElem {
@@ -117,6 +134,7 @@ impl ArrayElem {
             ArrayElem::I32 => Type::I32,
             ArrayElem::Bool => Type::Bool,
             ArrayElem::Struct(id) => Type::Struct(id),
+            ArrayElem::TypeParam(id) => Type::TypeParam(id),
         }
     }
 }
@@ -145,6 +163,13 @@ impl Type {
         matches!(self, Type::Array(_))
     }
 
+    /// `true` if this is a generic type parameter (`T`, `U`, …).
+    /// C1.7 / ADR 0016. Only meaningful inside a generic fn body
+    /// or struct decl.
+    pub fn is_type_param(self) -> bool {
+        matches!(self, Type::TypeParam(_))
+    }
+
     /// Try to demote this Type to a [`NullableInner`] for use as
     /// the payload of a `Nullable`. Returns `None` for `Nullable`
     /// (would be nested per ADR 0014 D6) AND for `Array` (the
@@ -156,6 +181,7 @@ impl Type {
             Type::I32 => Some(NullableInner::I32),
             Type::Bool => Some(NullableInner::Bool),
             Type::Struct(id) => Some(NullableInner::Struct(id)),
+            Type::TypeParam(id) => Some(NullableInner::TypeParam(id)),
             Type::Array(_) | Type::Nullable(_) => None,
         }
     }
@@ -170,7 +196,51 @@ impl Type {
             Type::I32 => Some(ArrayElem::I32),
             Type::Bool => Some(ArrayElem::Bool),
             Type::Struct(id) => Some(ArrayElem::Struct(id)),
+            Type::TypeParam(id) => Some(ArrayElem::TypeParam(id)),
             Type::Array(_) | Type::Nullable(_) => None,
+        }
+    }
+
+    /// Substitute every [`Type::TypeParam`] inside `self` against
+    /// the given substitution map. Used at generic-fn call sites
+    /// per ADR 0016 D7c to compute the concrete parameter / return
+    /// type of a monomorphic instantiation. Handles substitution
+    /// through `Nullable` and `Array` payloads.
+    ///
+    /// Concrete (non-TypeParam) types pass through unchanged.
+    pub fn substitute(self, subst: &[Type]) -> Type {
+        match self {
+            Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => self,
+            Type::TypeParam(id) => {
+                let idx = id.0 as usize;
+                debug_assert!(
+                    idx < subst.len(),
+                    "TypeParam({idx}) out of substitution range ({len})",
+                    len = subst.len()
+                );
+                subst[idx]
+            }
+            Type::Nullable(ni) => {
+                let inner = ni.to_type();
+                let new_inner = inner.substitute(subst);
+                match new_inner.to_nullable_inner() {
+                    Some(new_ni) => Type::Nullable(new_ni),
+                    // Substitution can't legally produce a nested
+                    // nullable at C1.7 (no `?(?T)` shape exists in
+                    // the surface), but if a future representation
+                    // allows it, fall back to the unsubstituted
+                    // value rather than panicking.
+                    None => Type::Nullable(ni),
+                }
+            }
+            Type::Array(ae) => {
+                let inner = ae.to_type();
+                let new_inner = inner.substitute(subst);
+                match new_inner.to_array_elem() {
+                    Some(new_ae) => Type::Array(new_ae),
+                    None => Type::Array(ae),
+                }
+            }
         }
     }
 }
@@ -190,6 +260,7 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
         },
         Type::Nullable(inner) => format!("?{}", type_display(inner.to_type(), program)),
         Type::Array(elem) => format!("[{}]", type_display(elem.to_type(), program)),
+        Type::TypeParam(id) => format!("<T#{}>", id.0),
     }
 }
 
@@ -202,41 +273,73 @@ impl std::fmt::Display for Type {
             Type::Struct(id) => write!(f, "<struct#{}>", id.0),
             Type::Nullable(inner) => write!(f, "?{}", inner.to_type()),
             Type::Array(elem) => write!(f, "[{}]", elem.to_type()),
+            Type::TypeParam(id) => write!(f, "<T#{}>", id.0),
         }
     }
 }
 
+/// Per-fn / per-struct type-parameter scope per ADR 0016 D6c / D9.
+/// Maps a source-level type-parameter name (e.g., `"T"`) to its
+/// [`TypeParamId`] within the surrounding fn or struct. An empty
+/// scope means "no type params in scope" — typical for non-generic
+/// items, where the standard struct + primitive lookup applies.
+type TypeParamScope = HashMap<String, TypeParamId>;
+
 /// Resolve a surface-level [`TypeExpr`] to a concrete [`Type`].
 /// C1.2 recognised only `"i64"`; C1.3 (per ADR 0012 D3 + D5) added
 /// `"i32"` and `"bool"`; C1.4 (per ADR 0013 D4) extends to look up
-/// user-defined struct names against the struct table. Anything not
+/// user-defined struct names against the struct table; C1.7 (per
+/// ADR 0016 D6 + D9) extends to look up type-parameter names against
+/// the surrounding fn / struct's type-param scope. Anything not
 /// matching surfaces as [`TypeError::UnknownType`].
+///
+/// At C1.7.4a generic struct instances (`TypeExprKind::Generic`)
+/// are explicitly rejected — that closes at C1.7.4b. Type-param
+/// args inside Nullable / Array are supported (e.g., `?T` and `[T]`
+/// inside a generic fn body).
 fn resolve_type_expr(
     te: &TypeExpr,
     struct_table: &HashMap<String, StructId>,
 ) -> Result<Type, TypeError> {
+    let empty: TypeParamScope = HashMap::new();
+    resolve_type_expr_with_scope(te, struct_table, &empty)
+}
+
+fn resolve_type_expr_with_scope(
+    te: &TypeExpr,
+    struct_table: &HashMap<String, StructId>,
+    type_param_scope: &TypeParamScope,
+) -> Result<Type, TypeError> {
     match &te.kind {
-        TypeExprKind::Ident(name) => match name.as_str() {
-            "i64" => Ok(Type::I64),
-            "i32" => Ok(Type::I32),
-            "bool" => Ok(Type::Bool),
-            other => {
-                if let Some(&id) = struct_table.get(other) {
-                    Ok(Type::Struct(id))
-                } else {
-                    Err(TypeError::UnknownType {
-                        name: other.to_string(),
-                        span: to_source_span(&te.span),
-                    })
+        TypeExprKind::Ident(name) => {
+            // ADR 0016 D9 lookup precedence: type-param scope first,
+            // then struct table, then primitives.
+            if let Some(&tp_id) = type_param_scope.get(name) {
+                return Ok(Type::TypeParam(tp_id));
+            }
+            match name.as_str() {
+                "i64" => Ok(Type::I64),
+                "i32" => Ok(Type::I32),
+                "bool" => Ok(Type::Bool),
+                other => {
+                    if let Some(&id) = struct_table.get(other) {
+                        Ok(Type::Struct(id))
+                    } else {
+                        Err(TypeError::UnknownType {
+                            name: other.to_string(),
+                            span: to_source_span(&te.span),
+                        })
+                    }
                 }
             }
-        },
+        }
         TypeExprKind::Nullable(inner) => {
             // Recursively resolve the inner; reject if it's also
             // nullable (the parser already rejects `??T` per ADR
             // 0014 D6, so this should be unreachable for source-
             // level inputs).
-            let inner_ty = resolve_type_expr(inner, struct_table)?;
+            let inner_ty =
+                resolve_type_expr_with_scope(inner, struct_table, type_param_scope)?;
             match inner_ty.to_nullable_inner() {
                 Some(ni) => Ok(Type::Nullable(ni)),
                 None => Err(TypeError::UnknownType {
@@ -248,7 +351,8 @@ fn resolve_type_expr(
         TypeExprKind::Array(inner) => {
             // Recursively resolve the inner; reject `[[T]]` per
             // ADR 0015 D6 (multi-dim arrays are deferred).
-            let inner_ty = resolve_type_expr(inner, struct_table)?;
+            let inner_ty =
+                resolve_type_expr_with_scope(inner, struct_table, type_param_scope)?;
             match inner_ty.to_array_elem() {
                 Some(ae) => Ok(Type::Array(ae)),
                 None => Err(TypeError::NestedArray {
@@ -257,12 +361,14 @@ fn resolve_type_expr(
             }
         }
         TypeExprKind::Generic { name, .. } => {
-            // C1.7 placeholder: full generic-type resolution lands
-            // with the rest of the C1.7 surface. For now surface
-            // a generic-as-unknown diagnostic carrying the name so
-            // downstream tests can pin the rejection point.
-            Err(TypeError::UnknownType {
-                name: format!("{name}<...>"),
+            // C1.7.4a: generic struct instances are deferred to
+            // C1.7.4b — surface a "generics-not-yet" diagnostic
+            // carrying the offending name so the placeholder
+            // failure mode is clear. (`name<args>` arity / lookup
+            // errors will land at C1.7.4b when the real resolution
+            // path arrives.)
+            Err(TypeError::GenericStructNotYetSupported {
+                name: name.clone(),
                 span: to_source_span(&te.span),
             })
         }
@@ -302,14 +408,28 @@ impl TypedProgram {
 }
 
 /// A struct declaration after type-checking: each field's
-/// [`TypeExpr`] has been resolved to a concrete [`Type`].
+/// [`TypeExpr`] has been resolved to a concrete [`Type`] (or to
+/// [`Type::TypeParam`] inside a generic struct body per ADR 0016).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypedStructDecl {
     pub id: StructId,
     pub name: String,
     pub name_span: Span,
+    /// Generic type parameters per ADR 0016 D2 / D9. Empty for
+    /// non-generic structs.
+    pub type_params: Vec<TypedTypeParam>,
     pub fields: Vec<TypedStructField>,
     pub span: Span,
+}
+
+/// A generic type parameter at type-check time. Mirrors the
+/// resolve-stage [`ResolvedTypeParam`] one-to-one — the type
+/// checker doesn't introduce new TypeParamIds.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedTypeParam {
+    pub id: TypeParamId,
+    pub name: String,
+    pub name_span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -325,6 +445,11 @@ pub struct TypedFnSignature {
     pub id: FnId,
     pub name: String,
     pub name_span: Option<Span>,
+    /// Generic type parameters per ADR 0016 D1. Empty for non-
+    /// generic fns. When non-empty, `param_types` and `return_type`
+    /// may contain [`Type::TypeParam`] references that get
+    /// substituted at each call site.
+    pub type_params: Vec<TypedTypeParam>,
     pub param_types: Vec<Type>,
     pub return_type: Type,
     pub is_main: bool,
@@ -336,6 +461,9 @@ pub struct TypedFnDef {
     pub id: FnId,
     pub name: String,
     pub name_span: Span,
+    /// Generic type parameters per ADR 0016 D1 / D9. Empty for
+    /// non-generic fns; matches `signature.type_params`.
+    pub type_params: Vec<TypedTypeParam>,
     pub params: Vec<TypedParam>,
     pub return_type: Type,
     pub body: TypedBlock,
@@ -421,6 +549,12 @@ pub enum TypedExprKind {
         id: FnId,
         callee_span: Span,
         args: Vec<TypedExpr>,
+        /// Concrete type arguments for a generic-fn call per ADR
+        /// 0016 D7c. Empty `Vec` for calls to non-generic fns.
+        /// Codegen consults this at monomorphic-instance emission
+        /// to substitute the callee's body. Index `i` corresponds
+        /// to [`TypeParamId(i)`] in the callee's type-param list.
+        type_args: Vec<Type>,
     },
     /// Struct literal per ADR 0013 D3. The fields are reordered to
     /// match the declaration order so codegen can lower by index
@@ -609,6 +743,63 @@ pub enum TypeError {
         #[label("nested array here")]
         span: miette::SourceSpan,
     },
+
+    /// C1.7 / ADR 0016 D11: `fn main` cannot be generic (the C ABI
+    /// is monomorphic; main is the program entry point).
+    #[error("`fn main` cannot have type parameters")]
+    #[diagnostic(
+        code(sentinel::types::generic_main),
+        help("`main` is the C-ABI entry point per ADR 0016 D11; remove the generic parameter list")
+    )]
+    GenericMain {
+        #[label("type parameters on main are forbidden")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.7 / ADR 0016 D4: a generic-fn call's type argument can't
+    /// be inferred from the supplied arguments (e.g., null literals
+    /// in every position that mentions T, with no other binding
+    /// site). The user adds an annotation to resolve.
+    #[error("ambiguous type argument for `{type_param}` in call to `{callee}`")]
+    #[diagnostic(
+        code(sentinel::types::ambiguous_type_arg),
+        help("add a type annotation, e.g. `let x: ?i64 = {callee}(...)`, so the type checker can pin {type_param}")
+    )]
+    AmbiguousTypeArg {
+        callee: String,
+        type_param: String,
+        #[label("can't infer the type here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.7 / ADR 0016 D4: a generic-fn call binds the same
+    /// type-parameter to two different concrete types across
+    /// different arg positions (e.g., `pair<T>(a: T, b: T)` called
+    /// with `pair(1, true)` — T = i64 vs T = bool).
+    #[error("conflicting inference for `{type_param}` in call to `{callee}`: bound to `{first}` then to `{second}`")]
+    #[diagnostic(code(sentinel::types::type_arg_inference_conflict))]
+    TypeArgInferenceConflict {
+        callee: String,
+        type_param: String,
+        first: Type,
+        second: Type,
+        #[label("inferred {second} here, conflicts with {first}")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.7 / ADR 0016 D6: generic struct instances (`Name<T1, T2>`
+    /// in type position) are accepted by the parser but not yet
+    /// resolvable in C1.7.4a. Closes at C1.7.4b.
+    #[error("generic struct types like `{name}<...>` are not yet supported at C1.7.4a")]
+    #[diagnostic(
+        code(sentinel::types::generic_struct_not_yet_supported),
+        help("generic struct instances land at C1.7.4b — generic fns work at C1.7.4a, but generic structs follow in the next commit")
+    )]
+    GenericStructNotYetSupported {
+        name: String,
+        #[label("generic struct type")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -636,9 +827,20 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     let mut typed_structs: Vec<TypedStructDecl> =
         Vec::with_capacity(program.structs.len());
     for sd in &program.structs {
+        // C1.7.4a: generic structs are NOT yet supported in this
+        // sub-phase — defer to C1.7.4b. Reject early with a clear
+        // diagnostic (the resolve stage already accepted them).
+        if !sd.type_params.is_empty() {
+            return Err(TypeError::GenericStructNotYetSupported {
+                name: sd.name.clone(),
+                span: to_source_span(&sd.name_span),
+            });
+        }
+        let typed_type_params: Vec<TypedTypeParam> = Vec::new();
+        let empty_scope: TypeParamScope = HashMap::new();
         let mut fields = Vec::with_capacity(sd.fields.len());
         for f in &sd.fields {
-            let ty = resolve_type_expr(&f.ty, &struct_table)?;
+            let ty = resolve_type_expr_with_scope(&f.ty, &struct_table, &empty_scope)?;
             fields.push(TypedStructField {
                 name: f.name.clone(),
                 name_span: f.name_span.clone(),
@@ -650,6 +852,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             id: sd.id,
             name: sd.name.clone(),
             name_span: sd.name_span.clone(),
+            type_params: typed_type_params,
             fields,
             span: sd.span.clone(),
         });
@@ -662,15 +865,19 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     let mut typed_signatures: Vec<TypedFnSignature> =
         Vec::with_capacity(program.fn_signatures.len());
 
-    // Builtins (FnId 0..3): print, unwrap_or, is_some. The generic
-    // builtins' param types are placeholders — the type checker
-    // bypasses the standard CallArgMismatch path for them and
-    // applies the ADR 0014 D9 special-case rules instead.
+    // Builtins (FnId 0..3): print + the three C1.7-generic builtins
+    // (unwrap_or, is_some, len). Their signatures are now expressed
+    // with real `Type::TypeParam` references per ADR 0016 D8a so the
+    // standard generic-call inference path handles them uniformly
+    // with user-defined generic fns. Codegen retains its special-
+    // case lowering per D8b (force-unwrap / discriminator-extract /
+    // length-extract have no Sentinel-source bodies at C1.7).
     let print_sig = &program.fn_signatures[0];
     typed_signatures.push(TypedFnSignature {
         id: print_sig.id,
         name: print_sig.name.clone(),
         name_span: print_sig.name_span.clone(),
+        type_params: vec![],
         param_types: vec![Type::I64],
         return_type: Type::I64,
         is_main: false,
@@ -681,11 +888,14 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         id: unwrap_or_sig.id,
         name: unwrap_or_sig.name.clone(),
         name_span: unwrap_or_sig.name_span.clone(),
-        // Placeholder param_types — the actual types are inferred at
-        // each call site per ADR 0014 D9. Use I64 as a stand-in to
-        // keep the vec well-shaped; nothing reads these.
-        param_types: vec![Type::Nullable(NullableInner::I64), Type::I64],
-        return_type: Type::I64,
+        // `unwrap_or<T>(x: ?T, default: T) -> T` per ADR 0014 D9
+        // / ADR 0016 D8a.
+        type_params: vec![builtin_type_param("T", 0)],
+        param_types: vec![
+            Type::Nullable(NullableInner::TypeParam(TypeParamId(0))),
+            Type::TypeParam(TypeParamId(0)),
+        ],
+        return_type: Type::TypeParam(TypeParamId(0)),
         is_main: false,
         is_runtime: true,
     });
@@ -694,20 +904,21 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         id: is_some_sig.id,
         name: is_some_sig.name.clone(),
         name_span: is_some_sig.name_span.clone(),
-        param_types: vec![Type::Nullable(NullableInner::I64)],
+        // `is_some<T>(x: ?T) -> bool` per ADR 0014 D9 / ADR 0016 D8a.
+        type_params: vec![builtin_type_param("T", 0)],
+        param_types: vec![Type::Nullable(NullableInner::TypeParam(TypeParamId(0)))],
         return_type: Type::Bool,
         is_main: false,
         is_runtime: true,
     });
-    // C1.6 / ADR 0015 D4: `len(a: [T]) -> i64`. Placeholder param
-    // type (the type checker special-cases the call so this isn't
-    // consulted).
     let len_sig = &program.fn_signatures[3];
     typed_signatures.push(TypedFnSignature {
         id: len_sig.id,
         name: len_sig.name.clone(),
         name_span: len_sig.name_span.clone(),
-        param_types: vec![Type::Array(ArrayElem::I64)],
+        // `len<T>(a: [T]) -> i64` per ADR 0015 D4 / ADR 0016 D8a.
+        type_params: vec![builtin_type_param("T", 0)],
+        param_types: vec![Type::Array(ArrayElem::TypeParam(TypeParamId(0)))],
         return_type: Type::I64,
         is_main: false,
         is_runtime: true,
@@ -715,15 +926,42 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
 
     for fn_def in &program.fns {
         let resolved_sig = &program.fn_signatures[fn_def.id.0 as usize];
+        // C1.7 / ADR 0016 D11: reject `fn main<T>(...)` early.
+        if resolved_sig.is_main && !fn_def.type_params.is_empty() {
+            return Err(TypeError::GenericMain {
+                span: to_source_span(&fn_def.name_span),
+            });
+        }
+        // Build the per-fn type-param scope so subsequent
+        // resolve_type_expr_with_scope calls see them.
+        let mut tp_scope: TypeParamScope = HashMap::new();
+        for tp in &fn_def.type_params {
+            tp_scope.insert(tp.name.clone(), tp.id);
+        }
+        let typed_type_params: Vec<TypedTypeParam> = fn_def
+            .type_params
+            .iter()
+            .map(|tp| TypedTypeParam {
+                id: tp.id,
+                name: tp.name.clone(),
+                name_span: tp.name_span.clone(),
+            })
+            .collect();
         let mut param_types = Vec::with_capacity(fn_def.params.len());
         for param in &fn_def.params {
-            param_types.push(resolve_type_expr(&param.ty, &struct_table)?);
+            param_types.push(resolve_type_expr_with_scope(
+                &param.ty,
+                &struct_table,
+                &tp_scope,
+            )?);
         }
-        let return_type = resolve_type_expr(&fn_def.return_type, &struct_table)?;
+        let return_type =
+            resolve_type_expr_with_scope(&fn_def.return_type, &struct_table, &tp_scope)?;
         typed_signatures.push(TypedFnSignature {
             id: fn_def.id,
             name: resolved_sig.name.clone(),
             name_span: resolved_sig.name_span.clone(),
+            type_params: typed_type_params,
             param_types,
             return_type,
             is_main: resolved_sig.is_main,
@@ -875,10 +1113,21 @@ fn check_fn(
         });
     }
 
+    let typed_type_params: Vec<TypedTypeParam> = fn_def
+        .type_params
+        .iter()
+        .map(|tp| TypedTypeParam {
+            id: tp.id,
+            name: tp.name.clone(),
+            name_span: tp.name_span.clone(),
+        })
+        .collect();
+
     Ok(TypedFnDef {
         id: fn_def.id,
         name: fn_def.name.clone(),
         name_span: fn_def.name_span.clone(),
+        type_params: typed_type_params,
         params,
         return_type,
         body,
@@ -886,8 +1135,22 @@ fn check_fn(
     })
 }
 
-/// Per-fn type environment: VarId → Type.
+/// Per-fn type environment: VarId → Type. Inside a generic-fn
+/// body the value type may be `Type::TypeParam(_)`; concrete
+/// substitution happens at the caller.
 type VarTypeEnv = std::collections::HashMap<VarId, Type>;
+
+/// Synthesize a [`TypedTypeParam`] for one of the C1.7 generic
+/// builtins (`unwrap_or`, `is_some`, `len`). The name is the
+/// source-level identifier (`"T"`) for diagnostics; the span is
+/// synthetic (`0..0`) since builtins have no source-level decl.
+fn builtin_type_param(name: &str, idx: u32) -> TypedTypeParam {
+    TypedTypeParam {
+        id: TypeParamId(idx),
+        name: name.to_string(),
+        name_span: 0..0,
+    }
+}
 
 fn check_block(
     block: &ResolvedBlock,
@@ -1000,6 +1263,269 @@ fn coerce_to_expected(
         got: synth.ty,
         span: to_source_span(span_for_mismatch),
     })
+}
+
+/// Try to substitute every [`Type::TypeParam`] in `ty` using the
+/// partial substitution map. Returns `Some(concrete)` iff every
+/// TypeParam encountered has been bound; `None` otherwise. Used by
+/// [`check_call`] to determine whether a generic param's type is
+/// fully concretized enough to push down to its arg as bidirectional
+/// expected-type.
+fn try_substitute(ty: Type, subst: &[Option<Type>]) -> Option<Type> {
+    match ty {
+        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => Some(ty),
+        Type::TypeParam(id) => subst.get(id.0 as usize).copied().flatten(),
+        Type::Nullable(ni) => {
+            let inner = try_substitute(ni.to_type(), subst)?;
+            inner.to_nullable_inner().map(Type::Nullable)
+        }
+        Type::Array(ae) => {
+            let inner = try_substitute(ae.to_type(), subst)?;
+            inner.to_array_elem().map(Type::Array)
+        }
+    }
+}
+
+/// `true` iff `ty` mentions at least one [`Type::TypeParam`].
+fn contains_type_param(ty: Type) -> bool {
+    match ty {
+        Type::TypeParam(_) => true,
+        Type::Nullable(ni) => contains_type_param(ni.to_type()),
+        Type::Array(ae) => contains_type_param(ae.to_type()),
+        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => false,
+    }
+}
+
+/// Internal result type for [`unify_one`]. The outer call site
+/// translates these into [`TypeError::CallArgMismatch`] or
+/// [`TypeError::TypeArgInferenceConflict`] with the proper arg
+/// index / callee name context.
+enum UnifyFailure {
+    /// The structural shape of `param` doesn't match `arg` — the
+    /// classic CallArgMismatch (the inner pair is `(expected, got)`).
+    Mismatch(Type, Type),
+    /// The same TypeParam was bound twice to different concrete
+    /// types — surfaces as `TypeError::TypeArgInferenceConflict`.
+    TypeParamConflict {
+        idx: u32,
+        first: Type,
+        second: Type,
+    },
+}
+
+/// Walk `param` and `arg` in parallel, binding any [`Type::TypeParam`]
+/// in `param` to the corresponding piece of `arg`. Recurses through
+/// [`Type::Nullable`] and [`Type::Array`] payloads. Per ADR 0016 D7c.
+fn unify_one(
+    param: Type,
+    arg: Type,
+    subst: &mut [Option<Type>],
+) -> Result<(), UnifyFailure> {
+    match (param, arg) {
+        (Type::TypeParam(id), other) => {
+            let idx = id.0 as usize;
+            match subst[idx] {
+                None => {
+                    subst[idx] = Some(other);
+                    Ok(())
+                }
+                Some(existing) if existing == other => Ok(()),
+                Some(existing) => Err(UnifyFailure::TypeParamConflict {
+                    idx: id.0,
+                    first: existing,
+                    second: other,
+                }),
+            }
+        }
+        (Type::Nullable(p), Type::Nullable(a)) => {
+            unify_one(p.to_type(), a.to_type(), subst)
+        }
+        (Type::Array(p), Type::Array(a)) => {
+            unify_one(p.to_type(), a.to_type(), subst)
+        }
+        (p, a) if p == a => Ok(()),
+        (p, a) => Err(UnifyFailure::Mismatch(p, a)),
+    }
+}
+
+/// Type-check a fn call per ADR 0016 D4 / D7c / D8a. Handles both
+/// non-generic calls (signature.type_params is empty) and generic
+/// calls (TypeParams in param / return types). For generic calls,
+/// uses an iterative bidirectional inference pass:
+///
+/// 1. Initialize an empty substitution `subst[TypeParamId → Option<Type>]`.
+/// 2. Loop: for each not-yet-typed arg, compute its effective
+///    expected type: substitute the param under the current `subst`
+///    if every TypeParam in the param is already bound, else use
+///    `None`. Skip null literals if their expected is still None
+///    (they'll be retried after some other arg has bound the
+///    relevant TypeParam).
+/// 3. After typing an arg, unify its synthesized type against the
+///    param type, refining `subst`.
+/// 4. Repeat until all args are typed or progress halts.
+/// 5. Final: any unbound TypeParam → [`TypeError::AmbiguousTypeArg`];
+///    any untyped arg → AmbiguousNull (existing C1.5 path).
+/// 6. Substitute the return type using the final `subst`.
+#[allow(clippy::too_many_arguments)]
+fn check_call(
+    id: FnId,
+    callee_span: &Span,
+    args: &[ResolvedExpr],
+    expected_return: Option<Type>,
+    env: &mut VarTypeEnv,
+    signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
+    call_span: &Span,
+) -> Result<(TypedExprKind, Type), TypeError> {
+    let signature = &signatures[id.0 as usize];
+    let arity = signature.param_types.len();
+    debug_assert_eq!(
+        args.len(),
+        arity,
+        "resolve guarantees arity match for FnId({})",
+        id.0
+    );
+    let n_type_params = signature.type_params.len();
+    let mut subst: Vec<Option<Type>> = vec![None; n_type_params];
+    let mut typed_args: Vec<Option<TypedExpr>> = (0..arity).map(|_| None).collect();
+
+    // If the caller has an expected return type AND the signature's
+    // return type is exactly a TypeParam, seed the substitution from
+    // it. This is the bidirectional pushdown for generic returns —
+    // e.g., `let x: ?i64 = id(null)` pre-binds T = ?i64 so `null`
+    // can be typed against the expected param ?T.
+    if let (Some(exp), true) = (expected_return, n_type_params > 0) {
+        // Seed subst by unifying the signature's return type
+        // against the expected. Best-effort — failures here are
+        // silent because a real downstream mismatch will surface
+        // as ReturnTypeMismatch / Mismatch later.
+        let _ = unify_one(signature.return_type, exp, &mut subst);
+    }
+
+    // Iterative inference. Each iteration types as many args as
+    // possible given the current `subst`. Halts when no further
+    // progress can be made.
+    loop {
+        let mut progressed = false;
+        for i in 0..arity {
+            if typed_args[i].is_some() {
+                continue;
+            }
+            let param = signature.param_types[i];
+            // What expected type can we push down to arg i?
+            // Preserve the C1.5 / C1.6 behavior: push the param
+            // down only when the *concrete* form is nullable
+            // (enables T→?T widening per ADR 0014 D3). Non-nullable
+            // concrete params synthesize without pushdown so the
+            // more specific `CallArgMismatch` (rather than the
+            // generic `Mismatch`) surfaces on shape errors.
+            let concrete_param = if contains_type_param(param) {
+                try_substitute(param, &subst)
+            } else {
+                Some(param)
+            };
+            let arg_expected: Option<Type> = match concrete_param {
+                Some(c) if c.is_nullable() => Some(c),
+                _ => None,
+            };
+            // Null literals require a concrete expected — skip
+            // them until enough subst is built up to push one down.
+            if matches!(args[i].kind, ResolvedExprKind::NullLit)
+                && arg_expected.is_none()
+            {
+                continue;
+            }
+            let typed = check_expr(&args[i], arg_expected, env, signatures, structs)?;
+            // Validate the arg's type against the param (possibly
+            // refining subst with any new TypeParam bindings).
+            match unify_one(param, typed.ty, &mut subst) {
+                Ok(()) => {}
+                Err(UnifyFailure::Mismatch(expected, got)) => {
+                    // If the failing param has unbound TypeParams,
+                    // surface as `Mismatch` (matches the pre-C1.7
+                    // generic-builtin error shape — e.g.,
+                    // `unwrap_or(5, 0)` says "expected ?T, got i64").
+                    // If the param fully substitutes to a concrete
+                    // shape, the more specific `CallArgMismatch`
+                    // pinpoints the arg position by callee + index.
+                    return match try_substitute(expected, &subst) {
+                        Some(concrete) => Err(TypeError::CallArgMismatch {
+                            callee: signature.name.clone(),
+                            arg_index: i,
+                            expected: concrete,
+                            got,
+                            span: to_source_span(&args[i].span),
+                        }),
+                        None => Err(TypeError::Mismatch {
+                            expected,
+                            got,
+                            span: to_source_span(&args[i].span),
+                        }),
+                    };
+                }
+                Err(UnifyFailure::TypeParamConflict { idx, first, second }) => {
+                    let tp_name = signature.type_params[idx as usize].name.clone();
+                    return Err(TypeError::TypeArgInferenceConflict {
+                        callee: signature.name.clone(),
+                        type_param: tp_name,
+                        first,
+                        second,
+                        span: to_source_span(&args[i].span),
+                    });
+                }
+            }
+            typed_args[i] = Some(typed);
+            progressed = true;
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    // Any still-untyped arg means we hit a null literal whose
+    // surrounding TypeParam never got bound (only inference path
+    // was via the null itself, which is circular).
+    for (i, opt) in typed_args.iter().enumerate() {
+        if opt.is_none() {
+            return Err(TypeError::AmbiguousNull {
+                span: to_source_span(&args[i].span),
+            });
+        }
+    }
+
+    // Validate every TypeParam got bound. A param like `fn f<T>(x: i64)
+    // -> ?T { null }` could hit this — T appears only in the return.
+    // Use the call's overall span for the diagnostic since there's no
+    // single arg to blame.
+    let mut concrete_type_args: Vec<Type> = Vec::with_capacity(n_type_params);
+    for (idx, opt) in subst.iter().enumerate() {
+        match opt {
+            Some(t) => concrete_type_args.push(*t),
+            None => {
+                let tp_name = signature.type_params[idx].name.clone();
+                return Err(TypeError::AmbiguousTypeArg {
+                    callee: signature.name.clone(),
+                    type_param: tp_name,
+                    span: to_source_span(call_span),
+                });
+            }
+        }
+    }
+
+    // Compute the substituted return type.
+    let ret_ty = signature.return_type.substitute(&concrete_type_args);
+
+    let typed_args: Vec<TypedExpr> =
+        typed_args.into_iter().map(|o| o.expect("filled above")).collect();
+    Ok((
+        TypedExprKind::Call {
+            id,
+            callee_span: callee_span.clone(),
+            args: typed_args,
+            type_args: concrete_type_args,
+        },
+        ret_ty,
+    ))
 }
 
 fn check_expr(
@@ -1221,122 +1747,7 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Call { id, callee_span, args } => {
-            // ADR 0014 D9: special-case the generic builtins. Resolve
-            // already verified arity; here we apply the generic-typing
-            // rule that the standard param-type comparison can't
-            // express without real generics.
-            if *id == UNWRAP_OR_FN_ID {
-                // unwrap_or(x: ?T, default: T) -> T
-                // Synthesize the first arg; it must be Nullable(_).
-                let x = check_expr(&args[0], None, env, signatures, structs)?;
-                let inner = match x.ty {
-                    Type::Nullable(ni) => ni,
-                    other => {
-                        return Err(TypeError::Mismatch {
-                            expected: Type::Nullable(NullableInner::I64), // hint
-                            got: other,
-                            span: to_source_span(&args[0].span),
-                        });
-                    }
-                };
-                let inner_ty = inner.to_type();
-                // Second arg must be T (the inner type).
-                let default = check_expr(&args[1], Some(inner_ty), env, signatures, structs)?;
-                if default.ty != inner_ty {
-                    return Err(TypeError::CallArgMismatch {
-                        callee: "unwrap_or".to_string(),
-                        arg_index: 1,
-                        expected: inner_ty,
-                        got: default.ty,
-                        span: to_source_span(&args[1].span),
-                    });
-                }
-                let typed_args = vec![x, default];
-                (
-                    TypedExprKind::Call {
-                        id: *id,
-                        callee_span: callee_span.clone(),
-                        args: typed_args,
-                    },
-                    inner_ty,
-                )
-            } else if *id == IS_SOME_FN_ID {
-                // is_some(x: ?T) -> bool
-                let x = check_expr(&args[0], None, env, signatures, structs)?;
-                if !x.ty.is_nullable() {
-                    return Err(TypeError::Mismatch {
-                        expected: Type::Nullable(NullableInner::I64), // hint
-                        got: x.ty,
-                        span: to_source_span(&args[0].span),
-                    });
-                }
-                let typed_args = vec![x];
-                (
-                    TypedExprKind::Call {
-                        id: *id,
-                        callee_span: callee_span.clone(),
-                        args: typed_args,
-                    },
-                    Type::Bool,
-                )
-            } else if *id == LEN_FN_ID {
-                // len(a: [T]) -> i64 per ADR 0015 D4. Synthesize the
-                // first arg; it must be `[T]` for any T.
-                let a = check_expr(&args[0], None, env, signatures, structs)?;
-                if !a.ty.is_array() {
-                    return Err(TypeError::Mismatch {
-                        expected: Type::Array(ArrayElem::I64), // hint
-                        got: a.ty,
-                        span: to_source_span(&args[0].span),
-                    });
-                }
-                let typed_args = vec![a];
-                (
-                    TypedExprKind::Call {
-                        id: *id,
-                        callee_span: callee_span.clone(),
-                        args: typed_args,
-                    },
-                    Type::I64,
-                )
-            } else {
-                let signature = &signatures[id.0 as usize];
-                let mut typed_args = Vec::with_capacity(args.len());
-                for (i, arg) in args.iter().enumerate() {
-                    let expected_param = signature.param_types[i];
-                    // ADR 0014 D5: push the param type down only
-                    // when it's nullable (so `null` / widening work).
-                    // Non-nullable params synthesize without pushdown
-                    // so the standard CallArgMismatch path fires for
-                    // type mismatches (more specific than Mismatch).
-                    let arg_expected = if expected_param.is_nullable() {
-                        Some(expected_param)
-                    } else {
-                        None
-                    };
-                    let typed_arg =
-                        check_expr(arg, arg_expected, env, signatures, structs)?;
-                    if typed_arg.ty != expected_param {
-                        return Err(TypeError::CallArgMismatch {
-                            callee: signature.name.clone(),
-                            arg_index: i,
-                            expected: expected_param,
-                            got: typed_arg.ty,
-                            span: to_source_span(&arg.span),
-                        });
-                    }
-                    typed_args.push(typed_arg);
-                }
-                let ty = signature.return_type;
-                (
-                    TypedExprKind::Call {
-                        id: *id,
-                        callee_span: callee_span.clone(),
-                        args: typed_args,
-                    },
-                    ty,
-                )
-            }
+            check_call(*id, callee_span, args, expected, env, signatures, structs, &expr.span)?
         }
         ResolvedExprKind::StructLit { id, name, name_span, fields } => {
             // The struct decl provides the expected field set + types.
@@ -1653,6 +2064,34 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::NestedArray { span } => (
             "sentinel::types::nested_array",
             "nested array types `[[T]]` are not allowed at C1.6".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::GenericMain { span } => (
+            "sentinel::types::generic_main",
+            "`fn main` cannot have type parameters".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::AmbiguousTypeArg { callee, type_param, span } => (
+            "sentinel::types::ambiguous_type_arg",
+            format!("ambiguous type argument for `{type_param}` in call to `{callee}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::TypeArgInferenceConflict {
+            callee,
+            type_param,
+            first,
+            second,
+            span,
+        } => (
+            "sentinel::types::type_arg_inference_conflict",
+            format!(
+                "conflicting inference for `{type_param}` in call to `{callee}`: bound to `{first}` then to `{second}`"
+            ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::GenericStructNotYetSupported { name, span } => (
+            "sentinel::types::generic_struct_not_yet_supported",
+            format!("generic struct types like `{name}<...>` are not yet supported at C1.7.4a"),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -2590,5 +3029,204 @@ fn main() -> i64 {
         let p = check_ok(src);
         assert_eq!(p.fns.len(), 4);
         assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    // ----- C1.7.4a / ADR 0016: generic fns typing -----
+
+    #[test]
+    fn c17_generic_fn_signature_uses_type_param() {
+        let p = check_ok("fn id<T>(x: T) -> T { x }\nfn main() -> i64 { 0 }");
+        let id_fn = p.fns.iter().find(|f| f.name == "id").expect("id");
+        assert_eq!(id_fn.type_params.len(), 1);
+        assert_eq!(id_fn.type_params[0].name, "T");
+        // The signature's param + return types must use TypeParam(0).
+        let sig = p.signature(id_fn.id);
+        assert_eq!(sig.param_types, vec![Type::TypeParam(TypeParamId(0))]);
+        assert_eq!(sig.return_type, Type::TypeParam(TypeParamId(0)));
+        assert_eq!(sig.type_params.len(), 1);
+    }
+
+    #[test]
+    fn c17_builtins_have_generic_signatures() {
+        let p = check_ok("fn main() -> i64 { 0 }");
+        // unwrap_or<T>(x: ?T, default: T) -> T
+        let unwrap = &p.fn_signatures[1];
+        assert_eq!(unwrap.name, "unwrap_or");
+        assert_eq!(unwrap.type_params.len(), 1);
+        assert_eq!(
+            unwrap.param_types,
+            vec![
+                Type::Nullable(NullableInner::TypeParam(TypeParamId(0))),
+                Type::TypeParam(TypeParamId(0)),
+            ]
+        );
+        assert_eq!(unwrap.return_type, Type::TypeParam(TypeParamId(0)));
+        // is_some<T>(x: ?T) -> bool
+        let is_some = &p.fn_signatures[2];
+        assert_eq!(is_some.name, "is_some");
+        assert_eq!(is_some.type_params.len(), 1);
+        assert_eq!(
+            is_some.param_types,
+            vec![Type::Nullable(NullableInner::TypeParam(TypeParamId(0)))],
+        );
+        assert_eq!(is_some.return_type, Type::Bool);
+        // len<T>(a: [T]) -> i64
+        let len = &p.fn_signatures[3];
+        assert_eq!(len.name, "len");
+        assert_eq!(len.type_params.len(), 1);
+        assert_eq!(
+            len.param_types,
+            vec![Type::Array(ArrayElem::TypeParam(TypeParamId(0)))]
+        );
+        assert_eq!(len.return_type, Type::I64);
+    }
+
+    #[test]
+    fn c17_generic_fn_with_nullable_param_typechecks() {
+        // A generic fn whose param is `?T` — exercises NullableInner::TypeParam.
+        let p = check_ok(
+            "fn first_or<T>(x: ?T, default: T) -> T { unwrap_or(x, default) }\nfn main() -> i64 { 0 }",
+        );
+        let f = p.fns.iter().find(|f| f.name == "first_or").expect("first_or");
+        assert_eq!(f.type_params.len(), 1);
+        let sig = p.signature(f.id);
+        assert_eq!(
+            sig.param_types,
+            vec![
+                Type::Nullable(NullableInner::TypeParam(TypeParamId(0))),
+                Type::TypeParam(TypeParamId(0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn c17_generic_fn_with_array_param_typechecks() {
+        let p = check_ok(
+            "fn count<T>(a: [T]) -> i64 { len(a) }\nfn main() -> i64 { 0 }",
+        );
+        let f = p.fns.iter().find(|f| f.name == "count").expect("count");
+        let sig = p.signature(f.id);
+        assert_eq!(
+            sig.param_types,
+            vec![Type::Array(ArrayElem::TypeParam(TypeParamId(0)))]
+        );
+        assert_eq!(sig.return_type, Type::I64);
+    }
+
+    #[test]
+    fn c17_call_to_unwrap_or_infers_t_from_first_arg() {
+        // unwrap_or(maybe_i64, 0) — infer T = i64 from arg[0]'s ?i64.
+        let p = check_ok(
+            "fn main() -> i64 { let x: ?i64 = null; unwrap_or(x, 0) }",
+        );
+        // Find the unwrap_or call in main; verify type_args.
+        match &p.main().body.tail.kind {
+            TypedExprKind::Call { id, type_args, .. } => {
+                assert_eq!(*id, FnId(1)); // unwrap_or
+                assert_eq!(type_args, &vec![Type::I64]);
+            }
+            other => panic!("expected Call in tail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn c17_call_to_len_infers_t() {
+        let p = check_ok(
+            "fn main() -> i64 { let xs: [bool] = [true, false]; len(xs) }",
+        );
+        match &p.main().body.tail.kind {
+            TypedExprKind::Call { id, type_args, .. } => {
+                assert_eq!(*id, FnId(3)); // len
+                assert_eq!(type_args, &vec![Type::Bool]);
+            }
+            other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn c17_call_to_is_some_infers_t() {
+        let p = check_ok(
+            "fn main() -> i64 { let x: ?bool = null; if is_some(x) { 1 } else { 0 } }",
+        );
+        // The body is an if; pull the cond.
+        match &p.main().body.tail.kind {
+            TypedExprKind::If { cond, .. } => match &cond.kind {
+                TypedExprKind::Call { id, type_args, .. } => {
+                    assert_eq!(*id, FnId(2)); // is_some
+                    assert_eq!(type_args, &vec![Type::Bool]);
+                }
+                other => panic!("expected Call inside If cond, got {other:?}"),
+            },
+            other => panic!("expected If in tail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn c17_generic_main_rejected() {
+        let err = check_err("fn main<T>() -> i64 { 0 }");
+        assert!(
+            matches!(err, TypeError::GenericMain { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c17_generic_struct_rejected_at_c17_4a() {
+        let err = check_err(
+            "struct Box<T> { value: T }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::GenericStructNotYetSupported { ref name, .. } if name == "Box"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c17_generic_struct_type_in_signature_rejected_at_c17_4a() {
+        // `Box<i64>` in type position — even without a `struct Box`
+        // decl, the parser produces TypeExprKind::Generic which
+        // surfaces as the not-yet diagnostic.
+        let err = check_err(
+            "fn unbox(b: Box<i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::GenericStructNotYetSupported { ref name, .. } if name == "Box"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c17_unwrap_or_mismatch_first_arg_keeps_legacy_shape() {
+        // `unwrap_or(5, 0)` — first arg should be ?T, got i64.
+        // Pre-C1.7 surfaced this as Mismatch with a hint; the new
+        // generic-call path keeps Mismatch because the failing param
+        // mentions an unbound TypeParam.
+        let err = check_err("fn main() -> i64 { unwrap_or(5, 0) }");
+        assert!(
+            matches!(err, TypeError::Mismatch { got: Type::I64, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c17_generic_call_arg_conflict_detected() {
+        // unwrap_or<T>(?T, T): arg[0] is ?bool so T = bool; arg[1] is
+        // i64 — conflicts. The standard Mismatch / CallArgMismatch
+        // path triggers via the second-arg bidirectional pushdown
+        // (T = bool, expected ?bool inner -> bool, got i64).
+        let err = check_err(
+            "fn main() -> i64 { let x: ?bool = null; unwrap_or(x, 0) }",
+        );
+        // Either CallArgMismatch (concrete pushdown caught it) or
+        // TypeArgInferenceConflict (unify path) is acceptable here —
+        // both indicate the right diagnosis to the user. The legacy
+        // C1.5 special-case fired CallArgMismatch.
+        assert!(
+            matches!(
+                err,
+                TypeError::CallArgMismatch { .. } | TypeError::TypeArgInferenceConflict { .. }
+            ),
+            "got {err:?}"
+        );
     }
 }

@@ -70,6 +70,17 @@ pub enum CodegenError {
     #[error("LLVM builder error: {0}")]
     #[diagnostic(code(sentinel::codegen::builder))]
     Builder(String),
+
+    /// C1.7.4a: calls to user-defined generic fns can't be lowered
+    /// until monomorphization arrives at C1.7.5. Generic builtins
+    /// (`unwrap_or`, `is_some`, `len`) keep their existing special-
+    /// case lowering per ADR 0016 D8b.
+    #[error("calls to user-defined generic fn `{name}` are not yet supported at C1.7.4a")]
+    #[diagnostic(
+        code(sentinel::codegen::generic_call_not_yet_supported),
+        help("generic-fn monomorphization arrives at C1.7.5; for now only the builtin generics (unwrap_or, is_some, len) lower")
+    )]
+    GenericCallNotYetSupported { name: String },
 }
 
 /// Lower a [`TypedProgram`] to a native object file at `output`.
@@ -137,6 +148,18 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
             fns.insert(signature.id, print_fn_value);
             continue;
         }
+        // C1.7.4a / ADR 0016 D7: skip declaring user-defined
+        // generic fns. Their param / return types contain
+        // `Type::TypeParam` which has no LLVM representation;
+        // monomorphic instances will be emitted at call sites
+        // when C1.7.5 lands. Insert a dummy mapping so any
+        // accidental call-site lookup gets a clear (and unused)
+        // FunctionValue — actual call lowering catches the
+        // generic case via `GenericCallNotYetSupported` below.
+        if !signature.type_params.is_empty() {
+            fns.insert(signature.id, print_fn_value);
+            continue;
+        }
         let param_types: Vec<_> = signature
             .param_types
             .iter()
@@ -184,6 +207,12 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
             vars: HashMap::new(),
         };
         for fn_def in &program.fns {
+            // C1.7.4a / ADR 0016 D7: skip generic fn bodies (no
+            // LLVM fn was declared in pass 1). Monomorphic
+            // instantiations will be emitted at C1.7.5.
+            if !fn_def.type_params.is_empty() {
+                continue;
+            }
             cx.compile_fn(fn_def, program)?;
         }
     }
@@ -296,6 +325,15 @@ fn llvm_basic_type<'ctx>(
                 context.ptr_type(inkwell::AddressSpace::default()).into();
             context.struct_type(&[len_ty, data_ty], false).into()
         }
+        // C1.7 / ADR 0016 D7: TypeParams are abstract; codegen
+        // requires substitution at the monomorphic instantiation
+        // boundary. Reaching here is a codegen bug. Until C1.7.5
+        // implements monomorphization, generic-fn bodies are not
+        // emitted (see the skip in pass 0/1), so this branch is
+        // unreachable for source-level programs.
+        Type::TypeParam(_) => {
+            panic!("llvm_basic_type called on Type::TypeParam — generic fn body must be monomorphised first per ADR 0016 D7")
+        }
     }
 }
 
@@ -310,6 +348,14 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::Struct(_) => panic!("llvm_int_type called on non-int Type::Struct"),
         Type::Nullable(_) => panic!("llvm_int_type called on non-int Type::Nullable"),
         Type::Array(_) => panic!("llvm_int_type called on non-int Type::Array"),
+        // C1.7 / ADR 0016 D7: TypeParams must be substituted to a
+        // concrete Type at the monomorphic instantiation boundary
+        // before codegen sees them. Reaching here is a codegen bug
+        // (e.g., trying to lower a generic fn body without an
+        // active substitution).
+        Type::TypeParam(_) => {
+            panic!("llvm_int_type called on Type::TypeParam — generic fn body must be monomorphised first per ADR 0016 D7")
+        }
     }
 }
 
@@ -910,6 +956,10 @@ impl<'ctx> CodegenCtx<'ctx> {
             TypedExprKind::Call { id, args, .. } => {
                 // ADR 0014 D9 + ADR 0015 D4 builtins: lower inline
                 // rather than calling an external runtime function.
+                // Per ADR 0016 D8b these stay special-cased at C1.7
+                // because their bodies can't be expressed in
+                // Sentinel-1.7 source (force-unwrap / pattern
+                // matching / runtime-metadata access are absent).
                 if *id == UNWRAP_OR_FN_ID {
                     return self.lower_unwrap_or(&args[0], &args[1], program);
                 }
@@ -918,6 +968,16 @@ impl<'ctx> CodegenCtx<'ctx> {
                 }
                 if *id == LEN_FN_ID {
                     return self.lower_len(&args[0], program);
+                }
+                // C1.7.4a / ADR 0016 D7: user-defined generic-fn
+                // calls fail at codegen until C1.7.5 lands
+                // monomorphization. Type-check still validates the
+                // call shape; only the lowering is deferred.
+                let signature = program.signature(*id);
+                if !signature.type_params.is_empty() {
+                    return Err(CodegenError::GenericCallNotYetSupported {
+                        name: signature.name.clone(),
+                    });
                 }
                 self.lower_call(*id, args, program)
             }
