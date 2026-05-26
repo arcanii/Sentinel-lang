@@ -336,8 +336,8 @@ Then C1.5 (`?T`), C1.6 (arrays), C1.7 (generics).
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: <docs-hash> (docs: C1.2 landed; HANDOVER §0 + STATE.md + ADR refresh).
-    [N] commits ahead of origin/main pending GitHub Desktop push.
+    Local HEAD: 83ab12f (docs: C1.2 landed; HANDOVER §0 + STATE.md + ADR refresh).
+    Branch in sync with origin/main (verify with `git status` at session start).
     Working tree clean.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0 (bootstrap
