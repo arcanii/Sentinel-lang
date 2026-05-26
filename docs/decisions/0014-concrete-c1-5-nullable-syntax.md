@@ -1,11 +1,30 @@
 # ADR 0014: Concrete C1.5 surface syntax — nullable types `?T`, `null` literal, null-check semantics
 
-Status: PROPOSED — no D-decision exercised yet; this ADR pins the
-surface decisions before the C1.5 feat commits land per the
-ADR-first-per-phase-boundary norm (HANDOVER §0.1). Will flip to
-ACCEPTED when the C1.5 sub-phases all ship.
+Status: ACCEPTED-WITH-AMENDMENTS — D1, D2, D3, D5, D6, D7, D8, D9,
+D11 all fully exercised at C1.5.1 + C1.5.2-6 (commits dff8642 +
+1d0adae). Two amendments uncovered during implementation:
+
+  - **D4 representation amendment**: the ADR proposed
+    `Type::Nullable(Box<Type>)` but the implementation went with a
+    flat `NullableInner` subset enum instead (see Reasoning
+    addendum below). The subset enum keeps `Type` `Copy` and makes
+    `?(?T)` structurally unrepresentable. Strictly an
+    implementation choice; the surface semantics (no nested
+    nullables per D6) match the ADR.
+  - **D10 deferral**: the recursive-struct cycle-check
+    relaxation is documented but NOT exercised at C1.5. The
+    `?T = { i1, T }` flat-inline LLVM representation makes
+    recursive structs (e.g. `struct Node { next: ?Node }`) have
+    infinite LLVM size. Proper indirection requires heap
+    allocation (malloc/free), which is C1.6+ territory. The
+    cycle detector at C1.5 walks nullable struct edges
+    conservatively (still rejects recursive nullables). D10's
+    spirit is preserved as the future target; D10's text said
+    "relaxes" but the runtime behavior says "deferred."
+
 Date: 2026-05-26
-Last touched: 2026-05-26 (initial PROPOSED draft)
+Last touched: 2026-05-26 (C1.5 landed; status flipped to
+ACCEPTED-WITH-AMENDMENTS with the D4 + D10 details documented)
 Related: 0011 (Phase C1 kickoff; D3 lists `?T` as part of the C1
 type system, D6 schedules C1.5 after C1.4), 0013 (concrete C1.4
 surface — D7's recursive-struct rejection lifts here when nullable
@@ -134,36 +153,54 @@ The widening is one-way: `T → ?T` is implicit, `?T → T` is NOT
 (requires an explicit unwrap per D9). Without this asymmetry,
 "forgot to null-check" bugs would slip past the type checker.
 
-### D4. Type-level representation: `Type::Nullable(Box<Type>)`.
+### D4. Type-level representation: `Type::Nullable(NullableInner)` (amended).
 
-The internal representation extends the C1.4 universe:
+**Amendment from PROPOSED → ACCEPTED-WITH-AMENDMENTS**: the
+original D4 proposed `Type::Nullable(Box<Type>)`. The C1.5
+implementation chose a flat subset enum instead:
 
     enum Type {
         I64,
         I32,
         Bool,
         Struct(StructId),
-        Nullable(Box<Type>),
+        Nullable(NullableInner),
     }
 
-Implementation choice: `Box<Type>` rather than a flat
-`enum NonNullableType { … }` subset. The tradeoff:
+    enum NullableInner {
+        I64,
+        I32,
+        Bool,
+        Struct(StructId),
+    }
 
-  - Box requires `Type` to lose `Copy` (Rust's enums with `Box`
-    fields can't be `Copy`); callers shift from `let t = expr.ty`
-    to `let t = expr.ty.clone()`. ~20-30 mechanical changes
-    expected across the codebase.
-  - Box is future-compatible: when C1.7's generics introduce
-    legitimate `?Option<T>`-like cases (e.g., the `Option<Option<T>>`
-    of optional generic parameters), the existing representation
-    handles nesting without refactoring.
-  - A flat subset enum would duplicate the constructor list
-    (every new Type variant needs a NonNullable counterpart) and
-    isn't future-proof.
+Both Type and NullableInner are `Copy` + `Clone` + `Hash` + `Eq`.
 
-The non-nesting rule from D6 is enforced at the type-resolution
-boundary (`resolve_type_expr` rejects `??T`), not at the type
-universe itself.
+Why the amendment:
+
+  - **Keeps `Type` `Copy`.** The Box<Type> approach forces Type
+    to give up Copy because Rust enums with Box fields can't
+    derive Copy. ~20-30 use sites would need `.clone()` /
+    `&Type` updates in sentinel-types + sentinel-codegen.
+    Tedious and noisy.
+  - **`?(?T)` becomes structurally unrepresentable.** NullableInner
+    doesn't have a Nullable variant, so there's no way to
+    construct a nested-nullable Type value. The D6 no-nesting
+    rule is enforced by the type system itself, not just at
+    `resolve_type_expr`.
+  - **Cost: a duplicate constructor list.** Every future Type
+    variant needs a corresponding NullableInner entry. Each
+    addition is one extra line; small.
+
+The Box<Type> approach stays available if future generics work
+surfaces a real `??T` use case. For C1.5 the flat subset is the
+ergonomic win.
+
+The non-nesting rule from D6 is still enforced redundantly at
+the parser (`??T` is a `ParseError::NestedNullable`) and at
+`resolve_type_expr` (defense in depth — if a future code path
+ever constructs nested TypeExprs internally, the resolver
+catches it).
 
 ### D5. Bidirectional checking for `null` literals.
 
@@ -275,27 +312,39 @@ without introducing panic-on-null behavior. A future ADR may add
 it (or a force-unwrap operator `x!`) once Sentinel has a clear
 panic semantics for runtime errors.
 
-### D10. Recursive-struct cycle-check relaxation.
+### D10. Recursive-struct cycle-check relaxation (DEFERRED to C1.6+).
 
-ADR 0013 D7's cycle detector rejected any cycle in the struct-
-field graph. C1.5 relaxes the rule: a cycle that passes through
-at least one nullable edge is accepted, because the cycle is
-guaranteed to terminate at runtime (the nullable can be `null`).
+**Amendment from PROPOSED → ACCEPTED-WITH-AMENDMENTS**: D10's
+spirit is preserved but the runtime implementation is deferred.
 
-Formally: the cycle detector now distinguishes "direct" edges
-(field type `Struct(id)`) from "nullable" edges (field type
-`Nullable(Box<Struct(id)>)`). A cycle consisting of only direct
-edges still surfaces `TypeError::RecursiveStruct`. A cycle that
-crosses at least one nullable edge is accepted.
+The ADR proposed relaxing the cycle detector: cycles via nullable
+edges (`?Node`) would be accepted because the indirection breaks
+the cycle at runtime. C1.5 implementation discovered the codegen
+representation `?T = { i1, T }` (flat-inline) means a struct
+field of type `?Node` literally contains a Node value, not a
+pointer-to-Node. So `struct Node { next: ?Node }` has infinite
+LLVM size and triggers stack overflow in LLVM's struct-size
+computation.
 
-This unblocks:
+Proper indirection requires heap allocation (malloc/free), which
+is C1.6+ territory. C1.5's cycle detector therefore walks
+nullable struct edges as if they were direct edges — the
+conservative stance.
 
-    struct Node { value: i64, next: ?Node }     // OK — cycle via nullable
-    struct Tree { l: ?Tree, r: ?Tree }          // OK — same
-    struct Bad { x: Bad }                       // STILL ERROR — direct cycle
+What this means at C1.5:
 
-The detector's DFS walk tracks the "nullable-crossed" bit per
-path; on a Gray hit, the bit determines accept vs reject.
+    struct Node { value: i64, next: ?Node }     // STILL ERROR
+    struct Tree { l: ?Tree, r: ?Tree }          // STILL ERROR
+    struct Bad { x: Bad }                       // STILL ERROR (unchanged from C1.4)
+    struct Pair { first: ?i64, second: i64 }    // OK — non-recursive
+
+Non-recursive nullable struct fields work fine. The recursive
+case waits for C1.6+ when malloc / smart-pointer indirection
+arrives — at that point the cycle detector relaxes and these
+declarations type-check.
+
+The deferral is captured in the `detect_struct_cycle` docstring
+in sentinel-types and in STATE.md decision 72.
 
 ### D11. Out of scope at C1.5.
 

@@ -1,0 +1,8 @@
+// A struct with a nullable field (non-recursive). Exercises the
+// LLVM struct-type lowering for `?T` inside a user struct.
+struct Pair { first: ?i64, second: i64 }
+
+fn main() -> i64 {
+    let p = Pair { first: 5, second: 8 };
+    unwrap_or(p.first, 0) + p.second
+}

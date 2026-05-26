@@ -1,0 +1,5 @@
+// Bare null literal with annotation; is_some returns false.
+fn main() -> i64 {
+    let x: ?i64 = null;
+    if is_some(x) { 1 } else { 7 }
+}

@@ -1,0 +1,7 @@
+// Implicit `T → ?T` widening per ADR 0014 D3: `42` (i64) widens to ?i64
+// when assigned to a `?i64`-annotated binding. unwrap_or pulls the
+// i64 back out.
+fn main() -> i64 {
+    let x: ?i64 = 42;
+    unwrap_or(x, 0)
+}

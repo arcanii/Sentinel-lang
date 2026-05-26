@@ -308,3 +308,51 @@ fn pass_c14_go_no_go() {
     assert_eq!(r.stdout, "7\n");
     assert_eq!(r.exit, 0);
 }
+
+// ----- C1.5 pass-tests: ?T + null + unwrap_or / is_some + == null -----
+
+#[test]
+fn pass_c15_null_literal() {
+    // let x: ?i64 = null; if is_some(x) { 1 } else { 7 } -> exit 7
+    assert_eq!(run_exit("c15_null_literal.sentinel"), 7);
+}
+
+#[test]
+fn pass_c15_widen() {
+    // let x: ?i64 = 42; unwrap_or(x, 0) -> exit 42 (i64 widens to ?i64)
+    assert_eq!(run_exit("c15_widen.sentinel"), 42);
+}
+
+#[test]
+fn pass_c15_eq_null() {
+    // let x: ?i64 = null; if x == null { 11 } else { 0 } -> exit 11
+    assert_eq!(run_exit("c15_eq_null.sentinel"), 11);
+}
+
+#[test]
+fn pass_c15_nullable_struct_field() {
+    // Pair { first: 5, second: 8 }; unwrap_or(p.first, 0) + p.second -> exit 13
+    // (the `first` field's `5` literal widens to ?i64 inside the
+    // struct literal because the field's declared type is ?i64).
+    assert_eq!(run_exit("c15_nullable_struct_field.sentinel"), 13);
+}
+
+#[test]
+fn pass_c15_maybe_compose() {
+    // maybe_double(some 5) = some 10; unwrap_or = 10.
+    // maybe_double(null) = null; unwrap_or with default 999 = 999.
+    // 10 + 999 = 1009 -> stdout "1009\n", exit 0. (Uses print
+    // because the value doesn't fit in i32 exit code range.)
+    let r = build_and_run("c15_maybe_compose.sentinel");
+    assert_eq!(r.stdout, "1009\n");
+    assert_eq!(r.exit, 0);
+}
+
+#[test]
+fn pass_c15_go_no_go() {
+    // ADR 0014 phase-go 1 program: find_or(some 42, 0) + find_or(null, 100)
+    // = 42 + 100 = 142 -> stdout "142\n", exit 0.
+    let r = build_and_run("c15_go_no_go.sentinel");
+    assert_eq!(r.stdout, "142\n");
+    assert_eq!(r.exit, 0);
+}

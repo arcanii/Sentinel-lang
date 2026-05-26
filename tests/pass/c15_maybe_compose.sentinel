@@ -1,0 +1,19 @@
+// Composition test: a fn that takes ?T and returns ?T, exercising
+// widening (`null` and `i64` literal both flow as `?i64`), is_some,
+// unwrap_or, and nullable through fn signature boundaries.
+fn maybe_double(x: ?i64) -> ?i64 {
+    if is_some(x) {
+        unwrap_or(x, 0) * 2
+    } else {
+        null
+    }
+}
+
+fn main() -> i64 {
+    let some_val: ?i64 = 5;
+    let none_val: ?i64 = null;
+    let r1 = unwrap_or(maybe_double(some_val), 0);
+    let r2 = unwrap_or(maybe_double(none_val), 999);
+    // Use print so the value doesn't have to fit in i32 exit code range.
+    print(r1 + r2)
+}

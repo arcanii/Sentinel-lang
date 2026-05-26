@@ -1,0 +1,12 @@
+// C1.5 phase-go program per ADR 0014 appendix (phase-go 1: value flow).
+// Exercises `?T` type + `null` literal + implicit `T → ?T` widening
+// + `unwrap_or` builtin.
+fn find_or(x: ?i64, default: i64) -> i64 {
+    unwrap_or(x, default)
+}
+
+fn main() -> i64 {
+    let some: ?i64 = 42;
+    let none: ?i64 = null;
+    print(find_or(some, 0) + find_or(none, 100))
+}

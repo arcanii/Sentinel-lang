@@ -1,0 +1,5 @@
+// Equality against `null` per ADR 0014 D7. Compares discriminator bits.
+fn main() -> i64 {
+    let x: ?i64 = null;
+    if x == null { 11 } else { 0 }
+}

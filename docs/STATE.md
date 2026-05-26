@@ -12,7 +12,43 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C1.4 landed** — structs + field access + struct
+Last updated: **C1.5 landed** — nullable types `?T` + `null` literal
++ `unwrap_or` / `is_some` builtins shipped end-to-end across three
+commits (3cb1238 ADR 0014 PROPOSED; dff8642 lexer adds `null`
+keyword + `?` token; 1d0adae bundled AST + parser + resolve +
+types + codegen). The bootstrap pipeline is still **parse_query
+→ resolve_query → check_query → codegen**; the nullable surface
+flows through as new parallel-tree variants in each crate. Type
+universe at C1.5 close: `{ I64, I32, Bool, Struct(StructId),
+Nullable(NullableInner) }` where `NullableInner` is a flat subset
+enum that keeps `Type` `Copy` (revises ADR 0014 D4's Box<Type>
+choice — the subset enum makes ?(?T) structurally unrepresentable
+and avoids a 20-30-site `.clone()` refactor). C1.5 ships
+bidirectional checking for `?T` contexts: let-annotations push to
+RHS, fn return-types push to the body tail (when ?T), call-arg
+types push to each arg (when ?T), struct-literal field types push
+to each field value. The `null` keyword has no synthesis type and
+requires an inferable `?T` context; bare `let x = null;` surfaces
+as `TypeError::AmbiguousNull`. Implicit `T → ?T` widening at
+expression position per ADR 0014 D3 inserts an explicit
+`TypedExprKind::WidenToNullable` wrapper that codegen lowers via
+`build_insert_value` into `{ i1 true, T payload }`. Codegen
+represents `?T` as the LLVM struct `{ i1 valid, T payload }`;
+`unwrap_or` lowers inline as `build_select(valid, payload,
+default)`; `is_some` lowers as `build_extract_value(struct, 0)`.
+Equality against `null` (`==` / `!=`) compares the valid bits.
+**ADR 0014 D10 deferred**: the cycle-check relaxation (recursive
+structs via nullable edges) is documented but NOT implemented at
+C1.5 because the `{ i1, T }` flat representation makes `struct
+Node { next: ?Node }` infinite-sized in LLVM. Proper indirection
+needs heap allocation; C1.6+. The C1.5 cycle detector walks
+nullable struct edges as if they were direct edges (conservative).
+The C1.5 phase-go program at `tests/pass/c15_go_no_go.sentinel`
+runs: `find_or(some 42, 0) + find_or(null, 100)` produces stdout
+`142\n`, exit 0. ADR 0014 is now ACCEPTED. Workspace test delta:
++54 (686 total) — +3 AST, +15 syntax (6 lexer + 9 parser), +4
+resolve, +18 types, +8 codegen, +6 pass-test fixtures (c15_*).
+Pre-C1.5 context: **C1.4 landed** — structs + field access + struct
 literals shipped end-to-end across three commits (e93635b ADR
 0013 PROPOSED; f34b401 lexer adds `struct` keyword + `.` token;
 aa8f252 AST + parser + resolve + types + codegen for struct decl,
@@ -1238,7 +1274,10 @@ scaffold stubs.
 | ADR 13 | Concrete C1.4 surface syntax (struct decl + literal + field access) | Done | e93635b |
 | C1.4.1 | Lexer: `struct` keyword + `.` token                            | Done | f34b401 |
 | C1.4.2-6 | AST + parser + resolve + types + codegen for structs (bundled) | Done | aa8f252 |
-| C1.5+ | Nullability, arrays, generics                                  | Planned |         |
+| ADR 14 | Concrete C1.5 surface syntax (`?T` nullables + null + unwrap_or/is_some) | Done | 3cb1238 |
+| C1.5.1 | Lexer: `null` keyword + `?` token                              | Done | dff8642 |
+| C1.5.2-6 | AST + parser + resolve + types + codegen for `?T` (bundled)   | Done | 1d0adae |
+| C1.6+ | Arrays, generics                                                | Planned |         |
 
 ADR 0010 (concrete C0 surface syntax) lands between C0.0 and C0.1
 per ADR 0009 D8.
@@ -2314,6 +2353,107 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     by-value at construction. This avoids re-creating struct
     types per fn body.
 
+65. (C1.5.1 / dff8642) The C1.5 lexer additions are `null`
+    keyword + `?` token per ADR 0014 D8. The `?` token is
+    reserved for type-position only at C1.5 — `?.` / `??` /
+    `?` propagation / `x!` force-unwrap are deferred per D11
+    to avoid token-role conflicts. 6 new lexer tests including
+    the `nullify` / `null_value` / `nullable` ident-prefix
+    regression.
+
+66. (C1.5.2-6 / 1d0adae) **Implementation revises ADR 0014 D4**:
+    the D4 spec proposed `Type::Nullable(Box<Type>)` but the
+    implementation went with a flat `NullableInner` subset enum
+    instead. The reason: `Box<Type>` would force `Type` to lose
+    `Copy`, cascading `.clone()` additions across ~20-30 use
+    sites in sentinel-types + sentinel-codegen. The subset enum
+    keeps `Type` `Copy` and makes the no-nested-nullables rule
+    (ADR 0014 D6) structural rather than convention-based —
+    `?(?T)` is literally unrepresentable. Cost: a duplicate
+    constructor list (Type and NullableInner mirror each other
+    minus the Nullable case); every new Type at C1.6+ adds one
+    line to NullableInner. Worth it.
+
+67. (C1.5.2-6 / 1d0adae) **Bidirectional checking infrastructure**
+    via `check_expr(expr, expected: Option<Type>, ...)`. The
+    `expected` is threaded through and bottoms out at
+    `coerce_to_expected(synth, expected)` which either passes
+    through, widens T→?T via `WidenToNullable`, or surfaces a
+    `Mismatch` if synth type doesn't fit expected. Pushed into:
+    let RHS, fn body tail (only when return type is Nullable to
+    preserve ReturnTypeMismatch granularity), call args (only
+    when param type is Nullable to preserve CallArgMismatch
+    granularity), struct-lit field values, if/else branches.
+    The selective-pushdown rule prevents the more specific
+    error variants from being shadowed by Mismatch in the
+    non-nullable case.
+
+68. (C1.5.2-6 / 1d0adae) `null` literal has no synthesis type.
+    The check_expr handles ResolvedExprKind::NullLit before the
+    main match: if expected is Some(Type::Nullable(_)), the
+    NullLit types as expected; otherwise `TypeError::AmbiguousNull`.
+    This is the only place in the type checker where the
+    expected type is REQUIRED (everywhere else it's optional
+    extra info).
+
+69. (C1.5.2-6 / 1d0adae) The generic builtins `unwrap_or` and
+    `is_some` are special-cased at the Call typing arm because
+    Sentinel doesn't have real generics yet. The signature
+    table holds placeholder param types (?I64 / I64 for
+    unwrap_or; ?I64 for is_some); the type checker bypasses
+    the standard `CallArgMismatch` path when `Call.id` is one
+    of the two known IDs and applies the ADR 0014 D9
+    type-from-arg inference rule instead. The machinery
+    evaporates at C1.7 when real generics arrive.
+
+70. (C1.5.2-6 / 1d0adae) Codegen's `?T` representation is the
+    LLVM struct `{ i1 valid, T payload }`. The widening
+    `WidenToNullable` lowers as `insert_value` into a fresh
+    `get_undef()` struct (set the i1 to true, fill in payload).
+    `null` literal lowers as a const struct with i1 false + T
+    zero. `unwrap_or` lowers inline as `build_select(valid,
+    payload, default)` — both arms are unconditionally
+    evaluated because they're already on the value stack;
+    short-circuit semantics aren't needed (the builtin is a
+    pure projection). `is_some` is just `extract_value(0)`.
+    `x == null` extracts the valid bits from both sides and
+    compares them as i1.
+
+71. (C1.5.2-6 / 1d0adae) **Forward-reference fix in codegen pass 0**:
+    the original C1.4 pass-0 code computed struct field types
+    INSIDE the loop that inserts the struct into the struct_types
+    map. For `struct Node { next: ?Node }`, computing the
+    `next` field type requires looking up `Node` in
+    struct_types — which fails because Node hasn't been
+    inserted yet. The fix: two sub-passes. First, declare all
+    opaque struct types via `context.opaque_struct_type(name)`
+    + insert into struct_types. Then, in a second loop,
+    compute field types (which can now see all struct names)
+    and call `set_body`. The forward-reference path works for
+    LLVM because struct types can be referenced opaquely before
+    their body is set.
+
+72. (C1.5.2-6 / 1d0adae) **ADR 0014 D10 deferral**: the
+    cycle-check relaxation was documented in the ADR (cycles
+    via nullable edges should be accepted) but the
+    implementation choice of `?T = { i1, T }` inline makes
+    recursive structs infinite-sized in LLVM. So C1.5 keeps
+    the C1.4 cycle check unrelaxed — recursive structs via
+    `?T` still error. Proper indirection (heap allocation,
+    smart pointers) is C1.6+. The detect_struct_cycle docstring
+    explains the deferral. ADR 0014 D10's text says "relaxes"
+    but the runtime behavior says "deferred" — this is a known
+    gap, documented in the docs commit's notes.
+
+73. (C1.5.2-6 / 1d0adae) FnId remapping: with `unwrap_or` and
+    `is_some` pre-registered alongside `print`, user fns now
+    start at `FnId(3)` (was `FnId(1)` at C1.4). Updated 3
+    existing resolve tests that hardcoded FnId(1)/(2) for
+    user fns. Same shift in sentinel-types tests that asserted
+    `fn_signatures[1].name == "main"` — now FnId(3) is main.
+    Future C1.7+ generics will retire the builtins, shifting
+    FnIds back; tests should not hardcode IDs.
+
 37. (C1.0c, ADR 0011 D1 amendment) Codegen stays outside the salsa
     query graph through Phase C1.0. ADR 0011's original D1 sketch
     had "… through codegen" in the query list, suggesting
@@ -2359,42 +2499,46 @@ All four must pass for any commit on `main`. Current expected counts:
 
   - sentinel-broker:        69 tests + 1 doctest
   - sentinel-effects-proto: 226 tests (203 lib + 23 integration) + 0 doctests
-  - sentinel-syntax:        154 tests (152 lib + 2 UI integration) + 0 doctests
-                            (lib at C1.4: 145 lexer/parser + 7 query;
-                             C1.3 added 9 lexer + 21 parser tests;
+  - sentinel-syntax:        169 tests (167 lib + 2 UI integration) + 0 doctests
+                            (lib at C1.5: 160 lexer/parser + 7 query;
                              C1.4 added 4 lexer + 21 parser tests for
-                             struct decl / literal / field access / D3a
-                             forbidden-in-if-cond / chained field access)
-  - sentinel-ast:           35 tests (1 smoke + Display impls + op symbols);
-                            C1.3 added 7; C1.4 added 6 (StructDecl /
-                            StructLit / FieldAccess / chained Display +
-                            mixed-program Display)
-  - sentinel-codegen:       24 tests (1 smoke + 1 target init + 22 positive
-                            compile) + 0 doctests; C1.3 added 10; C1.4
-                            added 6 (struct decl, literal+access, by-value,
-                            bool field, chained access, C1.4 phase-go)
-  - sentinel-resolve:       28 tests (21 from C1.1-3 + 7 new C1.4: struct
-                            table, multi-decl ordering, StructLit -> StructId,
-                            FieldAccess pass-through, RedefinedStruct,
-                            UndefinedStruct, struct_name_table helper)
-                            + 0 doctests
-  - sentinel-types:         53 tests (34 from C1.2-3 + 19 new C1.4: every
-                            struct typing rule + every error path
-                            (UnknownField / MissingField /
-                            FieldAccessOnNonStruct / RecursiveStruct
-                            direct + mutual / non-cycle-chain-ok / empty
-                            struct / let-annot / reordering) + C1.4
-                            phase-go) + 0 doctests
-  - sentinel-driver:        34 pass integration tests + 0 doctests
-                            (22 from C0 + 7 c13_* + 5 new c14_*:
-                            struct_basic, struct_nested, struct_in_if,
-                            struct_bool_field, c14_go_no_go)
+                             struct decl/literal/field access;
+                             C1.5 added 6 lexer + 9 parser tests for
+                             null literal / `?T` type / nested-nullable
+                             rejection / whitespace tolerance)
+  - sentinel-ast:           38 tests (1 smoke + Display impls + op symbols);
+                            C1.3 added 7; C1.4 added 6; C1.5 added 3
+                            (NullLit + Nullable TypeExpr + nullable struct
+                            TypeExpr Display)
+  - sentinel-codegen:       32 tests (1 smoke + 1 target init + 30 positive
+                            compile) + 0 doctests; C1.4 added 6; C1.5
+                            added 8 (?T let with null, ?T let with
+                            widening, unwrap_or, is_some, == null,
+                            ?T in fn return, nullable struct field,
+                            C1.5 phase-go)
+  - sentinel-resolve:       32 tests (21 from C1.1-3 + 7 from C1.4 + 4
+                            new C1.5: null literal pass-through, builtin
+                            pre-registration, redefining unwrap_or /
+                            is_some rejected) + 0 doctests
+  - sentinel-types:         71 tests (34 from C1.2-3 + 19 from C1.4 + 18
+                            new C1.5: nullable type resolution + null
+                            with/without annotation + widening (let +
+                            call-arg) + unwrap_or / is_some typing +
+                            cmp eq/ne null + nullable struct field +
+                            recursive-nullable-struct-still-rejected
+                            (D10 deferral) + Display + roundtrip +
+                            C1.5 phase-go) + 0 doctests
+  - sentinel-driver:        40 pass integration tests + 0 doctests
+                            (22 from C0 + 7 c13_* + 5 c14_* + 6 new c15_*:
+                            null_literal, widen, eq_null,
+                            nullable_struct_field, maybe_compose,
+                            c15_go_no_go)
   - sentinel-runtime:       2 tests (smoke + sentinel_print_returns_zero) + 0 doctests
   - sentinel-base:          3 tests (salsa query runs/caches + source file accessors) + 0 doctests
   - other compiler crates:  1 scaffold smoke test each, 0 doctests
                             (sentinel-hir, -mir, -lsp)
 
-Total active workspace tests: **632**.
+Total active workspace tests: **686**.
 
 ### Script Convention
 
