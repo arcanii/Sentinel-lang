@@ -423,6 +423,30 @@ investment compounded). All eight sub-phases landed:
     match handles `&&` (AmpAmp) staying a single token. +10
     new lexer tests = 808 total.
 
+  - **C2.3** (50c826b): move semantics + use-after-move
+    detection per ADR 0017 D9. Adds `FnCtx.moved: HashMap<VarId,
+    Span>` tracking which bindings have been consumed +
+    `is_copy_type(ty)` classification (Copy = primitives + refs +
+    ?Copy-inner; Move = struct / array / generic-instance /
+    ?Move-inner / TypeParam-conservative). Var(x) reads in
+    CONSUMING context transition Live → Moved; subsequent reads
+    surface `BorrowError::UseAfterMove` with three-label miette
+    diagnostic (decl_span / move_span / use_span). Non-consuming
+    contexts (postfix receivers `p.field` / `xs[i]`, lvalue
+    operands `&x` / `&mut x`, runtime-builtin call args `len(xs)`
+    / `is_some(x)` / `unwrap_or(x, d)` / `print(x)`) check
+    use-after-move without transitioning. Branch-aware merge at
+    if/else: snapshot before each branch + restore between +
+    merge after with "moved in either branch → moved after" —
+    this is what makes `if c { fst(p) } else { snd(p) }` accept.
+    c17_go_no_go fixture updated for move semantics (previous
+    `pick_int(true, p) + pick_int(false, p)` double-used p; now
+    constructs p1 + p2). +12 borrow-check unit tests + 4 driver
+    pass-test fixtures (c23_move_struct / c23_branch_isolation /
+    c23_array_move / c23_go_no_go). c23_go_no_go runs: stdout
+    "100\n", exit 0 (Account struct, transfer moves src + dst,
+    balance_of in if/else).
+
   - **C2.2** (4a0ca92): `&mut T` + shared-XOR-mutable rule per
     ADR 0017 D6. Extends sentinel-borrow-check with place-
     tracking + transient/rooted borrow lifetimes + five new
@@ -525,33 +549,34 @@ investment compounded). All eight sub-phases landed:
     `add(&a, &b)` shared-borrows + `increment(&mut a)`
     exclusive-borrow + `let mut a` + deref-assignment + print).
 
-**C2 next: C2.3 — move semantics + use-after-move.** Per ADR
-0017 D9 / D6. Bindings of compound types (`struct`, `[T]`,
-`Pair<...>`) implicitly own their data; re-assignment or
-pass-by-value moves them. New `UseAfterMove` error variant
-lands; per-binding move-state tracking in the borrow checker
-(`Live` vs `Moved { at_span }`). Primitives (i64, i32, bool)
-stay `Copy` and pass freely without consumption. References
-(&T, &mut T) are `Copy`-like (sharing is free) but constrained
-by the C2.1 + C2.2 borrow checker.
+**C2 next: C2.4 — RAII / drop + `sentinel_free` runtime
+symbol.** Per ADR 0017 D8 — auto-drop at scope exit; closes
+the C1.6+ heap-leak deferral. New `sentinel_free(ptr)` runtime
+symbol in sentinel-runtime (libc free wrapper). Codegen emits
+drop calls at scope-exit for heap-backed values (arrays +
+?Struct payloads). Move-state interaction: a moved-from value
+is not dropped at its original scope's exit (the move tracked
+by C2.3 transfers ownership). Drop order within a scope:
+reverse declaration order (Rust convention).
 
-**Workspace test count**: 907 active across all crates (+1
-doctest at sentinel-broker; +18 over C2.1: +14 borrow-check
-unit tests (positive: multi-shared / single-mut / scoped-mut /
-shared-then-mut-in-separate-blocks / transient-die-at-stmt-end /
-c22-shape / read-while-shared-ok / shared-in-block-then-mut-
-outside; negative: double-mut / shared-then-mut / mut-then-
-shared / write-while-shared / write-while-mut / read-while-mut),
-+4 driver pass-test fixtures across c22_*). All four check-
-suite checks green. c05 go/no-go (C1.3 bool flow) runs: stdout
-"10", exit 0. c14 go/no-go (C1.4 struct flow) runs: stdout "7",
-exit 0. c15 go/no-go (C1.5 nullable flow) runs: stdout "142",
-exit 0. c16 go/no-go (C1.6 array flow) runs: stdout "15", exit
-0. c17 go/no-go (C1.7 generics flow) runs: stdout "42", exit
-0. c20 go/no-go (C2.0.2 refs+mut+assign flow) runs: stdout
+**Workspace test count**: 923 active across all crates (+1
+doctest at sentinel-broker; +16 over C2.2: +12 borrow-check
+unit tests (positive: primitives-are-copy / struct-moved-once /
+field-access-no-move / array-index-no-move / builtin-no-consume /
+branch-both-arms-OK / two-distinct-bindings / nullable-of-copy;
+negative: double-pass-by-value / rebind-then-use / array-double-
+consume / use-after-move-via-let), +4 driver pass-test fixtures
+across c23_*). All four check-suite checks green. c05 go/no-go
+(C1.3 bool flow) runs: stdout "10", exit 0. c14 go/no-go (C1.4
+struct flow) runs: stdout "7", exit 0. c15 go/no-go (C1.5
+nullable flow) runs: stdout "142", exit 0. c16 go/no-go (C1.6
+array flow) runs: stdout "15", exit 0. c17 go/no-go (C1.7
+generics flow — updated for move semantics) runs: stdout "42",
+exit 0. c20 go/no-go (C2.0.2 refs+mut+assign flow) runs: stdout
 "53", exit 0. c21 go/no-go (C2.1 shared-borrow flow) runs:
 stdout "168", exit 0. c22 go/no-go (C2.2 XOR alternation flow)
-runs: stdout "35", exit 0. See STATE.md "Conventions" for the
+runs: stdout "35", exit 0. c23 go/no-go (C2.3 move semantics)
+runs: stdout "100", exit 0. See STATE.md "Conventions" for the
 per-crate breakdown.
 
 **ADR status**:
@@ -629,37 +654,33 @@ per-crate breakdown.
                                                  implementation as
                                                  drafted.
   - 0017 phase-c2-kickoff-and-region-plan        PROPOSED — D1-D5
-                                                 + D6 + D7 + D10 +
-                                                 D11 + D12 + D13 all
-                                                 exercised at C2.0.1
-                                                 + C2.0.2 + C2.1 +
-                                                 C2.2. D6 fully
-                                                 exercised at C2.2 —
-                                                 the shared-only
-                                                 subset shipped at
-                                                 C2.1 and the &mut
-                                                 + shared-XOR-mutable
-                                                 rule shipped at
-                                                 C2.2 (five new
-                                                 error variants:
-                                                 MutableBorrowOfShared
-                                                 / SharedBorrowOfMutable
-                                                 / BorrowConflict /
-                                                 WriteWhileBorrowed /
-                                                 ReadWhileMutBorrowed).
-                                                 D7's second-class-
-                                                 refs enforced via
-                                                 ReturnsLocalRef.
-                                                 D8's RAII+drop /
-                                                 D9's move semantics
-                                                 still pending across
-                                                 C2.3 → C2.4; D14's
-                                                 full borrow-checking
-                                                 phase-go program
-                                                 lands at C2.5. ADR
-                                                 flips to ACCEPTED at
-                                                 C2.5 close-out per
-                                                 its sub-phase split
+                                                 + D6 + D7 + D9 +
+                                                 D10 + D11 + D12 +
+                                                 D13 exercised at
+                                                 C2.0.1 + C2.0.2 +
+                                                 C2.1 + C2.2 + C2.3.
+                                                 D6 fully at C2.1
+                                                 (shared) + C2.2
+                                                 (&mut+XOR). D7
+                                                 enforced via
+                                                 ReturnsLocalRef
+                                                 (C2.1). D9 at C2.3
+                                                 (move semantics +
+                                                 use-after-move +
+                                                 branch-aware merge;
+                                                 eighth error
+                                                 variant UseAfterMove
+                                                 with three-label
+                                                 miette diagnostic).
+                                                 D8's RAII+drop +
+                                                 D14's full
+                                                 borrow-checking
+                                                 phase-go still
+                                                 pending at C2.4 +
+                                                 C2.5. ADR flips to
+                                                 ACCEPTED at C2.5
+                                                 close-out per its
+                                                 sub-phase split
                                                  table.
 
 ### 0.1 Working norms (carry forward into Phase C2)
@@ -871,8 +892,8 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: 4a0ca92 (feat(c2.2): &mut T + shared-XOR-mutable
-    rule).
+    Local HEAD: 50c826b (feat(c2.3): move semantics + use-
+    after-move detection).
     Branch in sync with origin/main (verify with `git status` at session start).
     Working tree clean.
 
@@ -882,16 +903,18 @@ For pasting into a fresh chat to bootstrap context:
     per ADR 0017 PROPOSED — refs / mutability / regions /
     borrow checking. C2.0.1 (lexer) + C2.0.2 (refs infrastructure)
     + C2.1 (shared-only borrow checker) + C2.2 (&mut + XOR rule)
-    all landed. 907 active workspace tests + 1 doctest. **Eight
-    go/no-go programs run end-to-end:**
-    tests/pass/c05_go_no_go.sentinel (C1.3 bool flow): stdout
-    "10", exit 0; c14_go_no_go (C1.4 struct flow): "7";
-    c15_go_no_go (C1.5 nullable flow): "142"; c16_go_no_go
-    (C1.6 array flow): "15"; c17_go_no_go (C1.7 generics flow):
-    "42"; c20_go_no_go (C2.0.2 refs+mut+assign flow): "53";
-    c21_go_no_go (C2.1 shared-borrow flow): "168";
-    c22_go_no_go (C2.2 XOR alternation — block-scoped shared
-    multi-read then block-scoped exclusive write): "35", exit 0.
+    + C2.3 (move semantics + use-after-move) all landed. 923
+    active workspace tests + 1 doctest. **Nine go/no-go
+    programs run end-to-end:** tests/pass/c05_go_no_go.sentinel
+    (C1.3 bool): stdout "10", exit 0; c14_go_no_go (C1.4
+    struct): "7"; c15_go_no_go (C1.5 nullable): "142";
+    c16_go_no_go (C1.6 array): "15"; c17_go_no_go (C1.7
+    generics — updated for move semantics with two distinct
+    Pair instances): "42"; c20_go_no_go (C2.0.2 refs+mut+
+    assign): "53"; c21_go_no_go (C2.1 shared-borrow): "168";
+    c22_go_no_go (C2.2 XOR alternation): "35";
+    c23_go_no_go (C2.3 move semantics — Account struct +
+    transfer with branch-aware move): "100", exit 0.
 
     Pipeline at C2.1: **parse_query → resolve_query → check_query
     → borrow_check_query → codegen** with diagnostics
@@ -910,29 +933,30 @@ For pasting into a fresh chat to bootstrap context:
     + C2.0.2 + C2.1; D8 / D9 / D14 still pending across C2.2 →
     C2.5; ADR flips to ACCEPTED at C2.5 close-out).
 
-    Borrow-checker state at C2.2 close: full ADR 0017 D6
-    formulation — shared-only at C2.1 + `&mut` + shared-XOR-
-    mutable at C2.2. Seven `BorrowError` variants total:
+    Borrow-checker state at C2.3 close: ADR 0017 D6+D7+D9
+    formulation. **Eight `BorrowError` variants total**:
     `OutlivesSource` + `ReturnsLocalRef` (C2.1);
     `MutableBorrowOfShared` + `SharedBorrowOfMutable` +
     `BorrowConflict` + `WriteWhileBorrowed` +
-    `ReadWhileMutBorrowed` (C2.2). Borrow-source enum is
-    `{ Local(VarId), Incoming(VarId), LocalAnonymous }`
-    (Incoming gained a VarId payload at C2.2 to serve as the
-    XOR place-key). Per-place tracking: `FnCtx.places:
+    `ReadWhileMutBorrowed` (C2.2); `UseAfterMove` (C2.3,
+    three-label miette diagnostic: decl_span + move_span +
+    use_span). Borrow-source enum
+    `{ Local(VarId), Incoming(VarId), LocalAnonymous }`.
+    **Per-place borrow tracking** via `FnCtx.places:
     HashMap<VarId, PlaceState { shared: Vec, mut_borrow:
-    Option }>`. Each `&x` / `&mut x` adds a `BorrowInstance`
-    with lifetime `Transient` (default; cleared at every
-    statement boundary by `clear_transients()`) or
-    `UntilScope(depth)` (promoted via `promote_transients`
-    at ref-typed `let r = &x;` / equivalent assign). The
-    transient model is what keeps c20_go_no_go valid —
-    `add(&a, &b);` shared borrows die at end of stmt before
-    `increment(&mut a);` takes its exclusive borrow. Inner
-    blocks push/pop scopes; pop removes all borrows with
-    `UntilScope(popped_depth)`. C2.3 will add move semantics
-    + use-after-move (new `UseAfterMove` error variant +
-    per-binding move-state in FnCtx).
+    Option }>` with `BorrowLifetime ∈ { Transient,
+    UntilScope(depth) }`. **Per-binding move tracking** via
+    `FnCtx.moved: HashMap<VarId, Span>` (absent = Live,
+    present = Moved at this span). **Type classification**:
+    `is_copy_type(ty)` — Copy for primitives/refs/?Copy-inner;
+    Move for struct/array/generic-instance/?Move-inner/
+    TypeParam-conservative. **Consuming context detection**:
+    Var(x) in non-lvalue, non-postfix-receiver, non-runtime-
+    builtin-arg position. **Branch-aware merge at if/else**:
+    snapshot moved before each branch, restore between, merge
+    after ("moved in either → moved after"). C2.4 will add
+    RAII / drop (move-state interaction: moved-from values
+    aren't dropped at their original scope's exit).
 
     Type universe at C2.0.2 / C2.1 (unchanged at C2.1): `{ I64,
     I32, Bool, Struct(StructId), Nullable(NullableInner),
@@ -951,17 +975,18 @@ For pasting into a fresh chat to bootstrap context:
     && || !`. `*` reused for deref; `&` reused for borrow-take
     + ref-type prefix.
 
-    **Next: C2.3** — move semantics + use-after-move per ADR
-    0017 D9. Compound-type bindings (struct, [T], Pair<...>)
-    implicitly own their data; re-assignment or pass-by-value
-    *moves* them. New `UseAfterMove` error variant lands;
-    per-binding move-state in FnCtx (`Live` vs `Moved {
-    at_span }`). Primitives (i64, i32, bool) stay `Copy` and
-    pass freely. References (&T, &mut T) are `Copy`-like
-    (sharing is free) but constrained by the C2.1+C2.2 borrow
-    checker. The `own T` keyword from SENTINEL_DESIGN2 §4.2
-    stays implicit at C2 — every owned binding is conceptually
-    `own T` but the keyword isn't surfaced in the C2 grammar.
+    **Next: C2.4** — RAII / drop + `sentinel_free` runtime
+    symbol per ADR 0017 D8. Closes the C1.6+ heap-leak deferral.
+    New runtime symbol `sentinel_free(ptr) -> void` (libc free
+    wrapper); codegen emits drop calls at scope-exit for heap-
+    backed values (arrays + ?Struct payloads). Move-state
+    interaction (per the C2.3 work): a moved-from value is NOT
+    dropped at its original scope's exit (the move tracked by
+    `FnCtx.moved` transfers ownership to the consumer). Drop
+    order within a scope: reverse declaration order (Rust
+    convention). For struct-by-value, drop recursively drops
+    owned fields. User-defined `fn drop(&mut self)` stays out
+    of scope (lands at C4 with traits).
 
     Sub-phase split for the rest of C2 (per ADR 0017 D9 table,
     revisit at each sub-phase boundary):
@@ -969,30 +994,37 @@ For pasting into a fresh chat to bootstrap context:
       - ✅ C2.0.2 — refs infrastructure
       - ✅ C2.1   — shared-only lexical borrow checker
       - ✅ C2.2   — &mut T + shared-XOR-mutable rule
-      - C2.3   — move semantics + use-after-move (next; this
-                  session if continuing)
+      - ✅ C2.3   — move semantics + use-after-move
       - C2.4   — RAII / drop + sentinel_free runtime symbol;
                   **closes the C1.6+ heap-leak deferral**
+                  (next; this session if continuing)
       - C2.5   — polish + Polonius migration plan doc + ADR
                   0017 PROPOSED → ACCEPTED flip + STATE +
                   HANDOVER close-out
 
     Read in order:
-      1. docs/HANDOVER.md §0 in full (~850 lines through §0.3)
+      1. docs/HANDOVER.md §0 in full (~870 lines through §0.3)
       2. docs/decisions/0017-phase-c2-kickoff-and-region-plan.md
-         (the canonical C2 design — especially D9 for the move
-         semantics + per-sub-phase split table; D6/D7 exercise
-         notes at C2.1+C2.2 are in the ADR's status header)
-      3. docs/STATE.md (last-updated banner — C2.2 landed;
-         &mut + XOR rule. Previous C2.1 banner kept as
-         pre-C2.2 context)
-      4. crates/sentinel-borrow-check/src/lib.rs (~1100 LOC
+         (the canonical C2 design — especially D8 for RAII +
+         drop semantics; D6 / D7 / D9 exercise notes at
+         C2.1+C2.2+C2.3 are in the ADR's status header)
+      3. docs/STATE.md (last-updated banner — C2.3 landed; move
+         semantics + use-after-move. Previous C2.2 banner kept
+         as pre-C2.3 context)
+      4. crates/sentinel-borrow-check/src/lib.rs (~1400 LOC
          including tests) — the analysis structure to extend
-         at C2.3; see PlaceState / BorrowInstance /
-         BorrowLifetime / clear_transients /
-         promote_transients / check_*_conflict helpers. C2.3
-         will add per-binding move-state to FnCtx.
-      5. docs/SENTINEL_DESIGN2.md §4 / §15 for the C2 long-term
+         at C2.4. C2.4 may stay in this crate (drop-needed sites
+         from move-state) OR migrate parts to sentinel-codegen
+         (drop emission at scope exit). See FnCtx.moved /
+         is_copy_type + check_and_record_move / check_use_alive
+         + the if/else snapshot-restore-merge pattern.
+      5. crates/sentinel-runtime/src/lib.rs — add `sentinel_free`
+         + tests
+      6. crates/sentinel-codegen/src/lib.rs — emit drop calls
+         at scope exit for heap-backed types (arrays + ?Struct
+         payloads). Honor move-state: skip drops for moved-from
+         bindings.
+      7. docs/SENTINEL_DESIGN2.md §4 / §15 for the C2 long-term
          surface (named regions, ownership qualifiers,
          first-class refs via `'esc`) — the eventual target
          that ADR 0017's C2 minimum is the stepping stone for
@@ -1000,19 +1032,20 @@ For pasting into a fresh chat to bootstrap context:
     Sanity check at session start:
       cargo build --workspace
       cargo clippy --workspace --all-targets -- -D warnings
-      cargo test --workspace                  # expect 907 passing
-      cargo run --bin snc -- build tests/pass/c22_go_no_go.sentinel -o /tmp/c22
-      /tmp/c22 && echo "exit=$?"              # expect "35" then "exit=0"
+      cargo test --workspace                  # expect 923 passing
+      cargo run --bin snc -- build tests/pass/c23_go_no_go.sentinel -o /tmp/c23
+      /tmp/c23 && echo "exit=$?"              # expect "100" then "exit=0"
 
-    Resume at C2.3 per ADR 0017. Add move-state tracking to
-    FnCtx (HashMap<VarId, MoveState> where MoveState ∈ { Live,
-    Moved { at_span } }). On Var(x) read where x is a non-
-    primitive non-ref type: check Live; if Moved emit
-    UseAfterMove. On let-binding RHS that's a Var(y) of
-    compound type, OR fn-call arg of compound type: transition
-    y to Moved. Primitives stay Copy. References stay
-    Copy-like (the C2.1+C2.2 borrow rules already constrain
-    them).
+    Resume at C2.4 per ADR 0017. Implementation outline:
+    (a) add `sentinel_free` to sentinel-runtime as libc free
+    wrapper; (b) borrow-check or codegen pass determines
+    drop-needed bindings at scope exit (those still Live —
+    not in FnCtx.moved); (c) codegen emits `sentinel_free(ptr)`
+    calls at scope-exit for arrays' data ptr + ?Struct's heap
+    payload ptr; (d) order is reverse-declaration-order; (e)
+    fn return moves the return value out — exclude from
+    drop-set; (f) c24 fixtures verify no leaks via leak
+    sanitizer (or just by inspection of LLVM IR).
 
 ---
 

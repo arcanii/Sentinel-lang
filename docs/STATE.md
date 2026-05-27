@@ -12,7 +12,66 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C2.2 landed; `&mut T` + shared-XOR-mutable rule.**
+Last updated: **C2.3 landed; move semantics + use-after-move.**
+Move detection extends the borrow checker with per-binding move-
+state tracking + branch-aware merge at if/else per ADR 0017 D9.
+Compound-type bindings (struct, array, generic-instance,
+nullable-of-non-Copy, TypeParam) implicitly own their data;
+pass-by-value or re-binding MOVES them. Primitives (i64, i32,
+bool), references (&T, &mut T), and nullables of Copy types
+remain Copy and pass freely. New `BorrowError::UseAfterMove`
+variant (three-label miette diagnostic: decl_span, move_span,
+use_span) brings the C2.x error count to eight total. **Type
+classification** via `is_copy_type(ty)`: Copy = primitives +
+refs + ?Copy-inner; Move = everything else. **Consuming
+contexts** (Var(x) reads that transition to Moved) are
+everything EXCEPT: postfix receivers (`p.field`, `xs[i]` — read
+for projection, non-consuming), lvalue operands (`& x`, `&mut
+x`, LHS of `=`), and runtime-builtin call args (`len(xs)`,
+`is_some(x)`, `unwrap_or(x, d)`, `print(x)` — these are inline-
+lowered and semantically borrow). The runtime-builtin
+non-consuming rule is the C2.3 special case that keeps
+c15_maybe_compose (`is_some(x) ... unwrap_or(x, ...)`) and
+c16_go_no_go (`len(a)` in cond + `a[i]` / `sum_from(a, ...)`
+in branches) valid without manual rewriting — a future ADR can
+promote builtins to real `&T` signatures + trait bounds.
+**Branch-aware merge at if/else**: `FnCtx.moved` is snapshotted
+before each branch, restored between, and merged after with
+"moved in either branch → moved after". This is what makes
+`fn pick(c, p) { if c { fst(p) } else { snd(p) } }` accept —
+both branches independently move p; the merge declares p Moved
+after the if/else; no use follows. **c17_go_no_go fixture
+updated** for move semantics — the previous
+`pick_int(true, p) + pick_int(false, p)` double-used p (would
+fire UseAfterMove); the updated fixture constructs two distinct
+Pair values (p1, p2), each moved once. Other c17 fixtures
+(c17_id / c17_two_instantiations / c17_generic_nullable /
+c17_generic_array / c17_box) didn't need changes — each
+binding used at most once per fixture under move semantics. The
+C2.3 phase-go program at `tests/pass/c23_go_no_go.sentinel`
+(Account struct + transfer with branch-aware move + balance_of)
+produces stdout `100\n`, exit 0. Three additional fixtures:
+c23_move_struct (exit 7 — single move of Point), c23_branch_isolation
+(exit 1 — if/else with both arms moving), c23_array_move (exit
+15 — sum_to_end recursion over [i64] showing postfix + builtin
++ user-fn move interaction). Negative cases verified end-to-end
+via snc — `consume(p) + consume(p)` surfaces
+`sentinel::borrow::use_after_move` with the three-label
+diagnostic + exits 1. ADR 0017 D9 is now exercised at C2.3 — D6
+fully at C2.1+C2.2, D7 at C2.1, D9 at C2.3. D8 (RAII+drop closing
+the C1.6+ heap-leak deferral) + D14 (full borrow-checking
+phase-go combining XOR + move + drop) still pending at C2.4 +
+C2.5. Workspace test delta: +16 (923 total) — +12 borrow-check
+unit tests (positive: primitives-are-copy / struct-moved-once /
+field-access-no-move / array-index-no-move / builtin-no-consume /
+branch-both-arms-OK / two-distinct-bindings / nullable-of-copy;
+negative: double-pass-by-value / rebind-then-use / array-double-
+consume / use-after-move-via-let), +4 driver pass-test fixtures
+(c23_*). **Phase C2.3 closes here.** Phase C2.4 (RAII / drop +
+`sentinel_free` runtime symbol — closes the C1.6+ heap-leak
+deferral) opens next.
+
+Pre-C2.3 context: **C2.2 landed; `&mut T` + shared-XOR-mutable rule.**
 The "interesting half" of ADR 0017 D6's borrow checker — shared-
 only shipped at C2.1, and C2.2 adds the mutable side. Five new
 `BorrowError` variants land covering the full XOR rule:

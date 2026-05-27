@@ -8,25 +8,29 @@ C2 code so the substantial design decisions — borrow-checker
 formulation, region representation, drop semantics — can be
 challenged on paper.
 
-D-decision progress: D1-D5 + D6 + D7 + D10 + D11 + D12 + D13
-exercised at C2.0.1 (d7b18c2) + C2.0.2 (9516ebb) + C2.1
-(64edf3d) + C2.2 (4a0ca92). D1-D5 + D11 + D12 cover the refs
-+ mut + deref + assignment surface. D10 covers the lexer
-additions. D6 is **fully exercised** at C2.2 — the lexical-
-first formulation shipped shared-only at C2.1 and the `&mut T`
-+ shared-XOR-mutable rule shipped at C2.2 (five new error
-variants: MutableBorrowOfShared / SharedBorrowOfMutable /
-BorrowConflict / WriteWhileBorrowed / ReadWhileMutBorrowed).
-D7's second-class-refs rule is enforced via the
-`BorrowError::ReturnsLocalRef` check at C2.1 + continues at
-C2.2. D8 (RAII+drop closing the C1.6+ heap-leak deferral),
-D9 (move semantics + use-after-move), and D14 (full borrow-
-checking phase-go program combining XOR + move + drop) still
-pending across C2.3 → C2.5.
+D-decision progress: D1-D5 + D6 + D7 + D9 + D10 + D11 + D12 +
+D13 exercised at C2.0.1 (d7b18c2) + C2.0.2 (9516ebb) + C2.1
+(64edf3d) + C2.2 (4a0ca92) + C2.3 (50c826b). D1-D5 + D11 + D12
+cover the refs + mut + deref + assignment surface. D10 covers
+the lexer additions. D6 fully exercised at C2.2 — shared-only
+at C2.1 + `&mut T` + shared-XOR-mutable rule at C2.2. D7's
+second-class-refs rule enforced via `BorrowError::ReturnsLocalRef`
+(C2.1). **D9 fully exercised at C2.3** — move semantics +
+use-after-move detection + branch-aware merge at if/else.
+Eighth error variant `BorrowError::UseAfterMove` with three-
+label miette diagnostic (decl_span / move_span / use_span).
+Type classification via `is_copy_type(ty)`: Copy = primitives
++ refs + ?Copy-inner; Move = compound types. Runtime builtins
+(print / unwrap_or / is_some / len) treated as non-consuming
+to keep c15_maybe_compose + c16_go_no_go valid (future ADR
+can promote to real `&T` signatures + trait bounds). D8
+(RAII+drop closing the C1.6+ heap-leak deferral) and D14 (full
+borrow-checking phase-go program combining XOR + move + drop)
+still pending at C2.4 + C2.5.
 
 Date: 2026-05-27
-Last touched: 2026-05-28 (C2.2 landing — D6 fully exercised:
-shared-only at C2.1 + `&mut` + XOR rule at C2.2)
+Last touched: 2026-05-28 (C2.3 landing — D9 exercised with
+move semantics + use-after-move + branch-aware merge)
 Related: 0011 (Phase C1 kickoff — now ACCEPTED, with the
 parallel-tree pattern + ADR-first norm + interned-instance
 trick all inherited here), 0016 (C1.7 generics — the interned
@@ -569,9 +573,9 @@ ADRs.
 |      | tracking. Rejects use-after-scope but no `&mut` yet.         |              | 64edf3d|
 | C2.2 | `&mut T` + shared-XOR-mutable rule. The interesting half.    | 2-3 sessions | DONE   |
 |      | This is where most borrow-checker complexity lives.          |              | 4a0ca92|
-| C2.3 | Move semantics + `own T` defaults + use-after-move.          | 1-2 sessions | next   |
-|      | Struct + array bindings consume on re-assignment / call.     |              |        |
-| C2.4 | RAII / drop + `sentinel_free`. Closes the C1.6+ heap         | 1-2 sessions |        |
+| C2.3 | Move semantics + `own T` defaults + use-after-move.          | 1-2 sessions | DONE   |
+|      | Struct + array bindings consume on re-assignment / call.     |              | 50c826b|
+| C2.4 | RAII / drop + `sentinel_free`. Closes the C1.6+ heap         | 1-2 sessions | next   |
 |      | leak. Auto-drop on scope exit.                               |              |        |
 | C2.5 | Polish: NLL/Polonius migration plan documented; consolidation | 0-2 sessions |        |
 |      | of corner cases; phase-go program; STATE.md + HANDOVER       |              |        |
