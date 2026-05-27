@@ -944,22 +944,19 @@ For pasting into a fresh chat to bootstrap context:
     c24_go_no_go (C2.4 RAII / drop — inner-block array +
     main-level array + move into consume): "160", exit 0.
 
-    Pipeline at C2.1: **parse_query → resolve_query → check_query
+    Pipeline at C2.4: **parse_query → resolve_query → check_query
     → borrow_check_query → codegen** with diagnostics
-    transitively accumulated through the chain (borrow_check_query
-    is the final pre-codegen query; its `accumulated::<Diagnostic>`
-    picks up parse + resolve + types + borrow stages). The driver
-    gates codegen on borrow_check_query::is_some(); the
-    TypedProgram for codegen still comes from check_query (no
-    clone). codegen value type is BasicValueEnum<'ctx>;
-    sentinel-runtime ships sentinel_alloc + sentinel_panic_oob
-    per ADR 0015 D9; arrays + ?Struct heap payloads still leak
-    (closes at C2.4 per ADR 0017 D8 / new sentinel_free symbol).
-    ADRs 0001-0014 + 0016 ACCEPTED; ADR 0015 ACCEPTED-WITH-
-    AMENDMENTS; **ADR 0017 PROPOSED** (Phase C2 kickoff with 14
-    D-decisions: D1-D5 + D6 + D7 + D10-D13 exercised at C2.0.1
-    + C2.0.2 + C2.1; D8 / D9 / D14 still pending across C2.2 →
-    C2.5; ADR flips to ACCEPTED at C2.5 close-out).
+    transitively accumulated; borrow_check_query returns
+    `Option<DropPlan>` which codegen consumes to emit drops at
+    scope exit (closing the C1.6+ heap leak per ADR 0017 D8).
+    Codegen value type is BasicValueEnum<'ctx>; sentinel-runtime
+    ships sentinel_alloc + sentinel_panic_oob + **sentinel_free**
+    (C2.4 new). ADRs 0001-0014 + 0016 ACCEPTED; ADR 0015
+    ACCEPTED-WITH-AMENDMENTS; **ADR 0017 PROPOSED** (Phase C2
+    kickoff with 14 D-decisions: D1-D13 all exercised across
+    C2.0.1 + C2.0.2 + C2.1 + C2.2 + C2.3 + C2.4; only D14 (full
+    borrow-checking phase-go) still pending at C2.5; ADR flips
+    to ACCEPTED at C2.5 close-out).
 
     Borrow-checker state at C2.4 close: full ADR 0017 D6+D7+D8+D9
     formulation. **Eight `BorrowError` variants** unchanged from
