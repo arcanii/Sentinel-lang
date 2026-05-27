@@ -215,6 +215,12 @@ pub enum ExprKind {
         target: Box<Expr>,
         index: Box<Expr>,
     },
+    /// `declassify(e)` — the C3 / ADR 0019 D6 escape hatch from
+    /// `secret T`. Inner must type to `Type::Secret(_)`; result is
+    /// the unwrapped type. Mandatory parens. Parser produces this
+    /// variant at C3.0; type-check rejects with
+    /// `TypeError::DeclassifyNotYet` until C3.1 lands.
+    Declassify(Box<Expr>),
 }
 
 /// A single `field: expr` initializer inside a struct literal. The
@@ -290,6 +296,12 @@ pub struct Program {
     /// Top-level struct declarations per ADR 0013 D1. Always present
     /// (may be empty for C0/C1.3-compatible programs).
     pub structs: Vec<StructDecl>,
+    /// Top-level effect declarations per ADR 0019 D4 (C3.0). Always
+    /// present (may be empty for pre-C3 programs). Resolve rejects
+    /// any non-empty `effects` at C3.0 with
+    /// `ResolveError::EffectDeclNotYet` until C3.2 ships the
+    /// effect-check query.
+    pub effects: Vec<EffectDecl>,
     pub span: Span,
 }
 
@@ -312,6 +324,14 @@ pub struct FnDef {
     /// Return-type annotation per ADR 0012 D1. Mandatory at C1.2 —
     /// every fn declares its return type explicitly at the boundary.
     pub return_type: TypeExpr,
+    /// Postfix effect-row annotation per ADR 0019 D1 (C3.0). Each
+    /// entry is the spanned name of a declared effect. Empty for
+    /// fns without an annotation. The annotation lives between the
+    /// return type and the body: `fn f() -> i64 ! { Io, Net }`.
+    /// Resolve rejects any non-empty `effect_row` at C3.0 with
+    /// `ResolveError::EffectAnnotationNotYet` until C3.2 ships the
+    /// effect-check query.
+    pub effect_row: Vec<Spanned<String>>,
     pub body: Block,
     pub span: Span,
 }
@@ -369,6 +389,39 @@ pub struct StructField {
     pub span: Span,
 }
 
+/// A C3.0+ top-level effect declaration per ADR 0019 D4:
+/// `effect Name { op_decl; op_decl; ... }`. The operations
+/// declared inside are *invocable* via `perform Name.op(args)`
+/// once handler runtime lands (ADR 0020); at C3.0 / C3.1 /
+/// C3.2 they're declared-but-not-invokable per ADR 0019 D8.
+/// Empty effect declarations (no ops) are allowed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EffectDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub ops: Vec<OpDecl>,
+    pub span: Span,
+}
+
+/// A single operation declaration inside an
+/// [`EffectDecl`]: `op_name(p1: T, ...) -> RetT` (the return
+/// type is optional — defaults to `i64` if omitted, matching the
+/// Sentinel-Mini Phase B convention). Operations cannot themselves
+/// carry effect rows at C3.0 (a perform-site discharges into the
+/// surrounding effect-row; the op's own row is fixed by the
+/// effect it belongs to).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<Param>,
+    /// Optional return type. `None` means the op returns the unit-
+    /// equivalent (currently `i64` per Sentinel's lack of a unit
+    /// type; revisits once unit lands).
+    pub return_type: Option<TypeExpr>,
+    pub span: Span,
+}
+
 /// Surface-level type expression. C1.2 shipped only the `Ident` form
 /// (recognised at type-check time as `i64`, later `i32`/`bool`/struct
 /// names per ADR 0012 D3 and D4). C1.5 adds [`TypeExprKind::Nullable`]
@@ -410,6 +463,13 @@ pub enum TypeExprKind {
         name_span: Span,
         args: Vec<TypeExpr>,
     },
+    /// `secret T` — the C3 / ADR 0019 D5 secret-qualifier type
+    /// prefix. Nested `secret secret T` is rejected at parse
+    /// (`ParseError::DoubleSecret`). The parser accepts the form
+    /// at C3.0; the type checker rejects with
+    /// `TypeError::SecretNotYet` until C3.1 ships
+    /// `Type::Secret(SecretId)` + the five static CT rejections.
+    Secret(Box<TypeExpr>),
 }
 
 /// A brace-wrapped block expression `{ stmt* tail_expr }`. The
@@ -480,6 +540,9 @@ impl fmt::Display for ExprKind {
             ExprKind::Index { target, index } => {
                 write!(f, "(index {} {})", target.kind, index.kind)
             }
+            ExprKind::Declassify(inner) => {
+                write!(f, "(declassify {})", inner.kind)
+            }
         }
     }
 }
@@ -543,6 +606,7 @@ impl fmt::Display for TypeExprKind {
                 }
                 write!(f, ">")
             }
+            TypeExprKind::Secret(inner) => write!(f, "secret {}", inner.kind),
         }
     }
 }
@@ -559,12 +623,19 @@ impl fmt::Display for Stmt {
     }
 }
 
-/// Program prints each top-level item on its own line. Structs
-/// come first (declaration order), then fns. Each is rendered by
-/// its own Display impl.
+/// Program prints each top-level item on its own line. Effects
+/// come first (declaration order, ADR 0019 D4), then structs,
+/// then fns. Each is rendered by its own Display impl.
 impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
+        for e in &self.effects {
+            if !first {
+                writeln!(f)?;
+            }
+            first = false;
+            write!(f, "{e}")?;
+        }
         for s in &self.structs {
             if !first {
                 writeln!(f)?;
@@ -580,6 +651,38 @@ impl fmt::Display for Program {
             write!(f, "{fn_def}")?;
         }
         Ok(())
+    }
+}
+
+/// `(effect Name (op_name (params) -> ret_ty) ...)`.
+impl fmt::Display for EffectDecl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(effect {}", self.name)?;
+        for op in &self.ops {
+            write!(f, " {op}")?;
+        }
+        write!(f, ")")
+    }
+}
+
+/// `(op_name (params) -> ret_ty)`; ret_ty omitted if not declared.
+impl fmt::Display for OpDecl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({}", self.name)?;
+        write!(f, " (")?;
+        let mut first = true;
+        for p in &self.params {
+            if !first {
+                write!(f, " ")?;
+            }
+            first = false;
+            write!(f, "{}: {}", p.name, p.ty.kind)?;
+        }
+        write!(f, ")")?;
+        if let Some(rt) = &self.return_type {
+            write!(f, " -> {}", rt.kind)?;
+        }
+        write!(f, ")")
     }
 }
 
@@ -623,7 +726,14 @@ impl fmt::Display for FnDef {
             first = false;
             write!(f, "{}: {}", p.name, p.ty.kind)?;
         }
-        write!(f, ") -> {} {})", self.return_type.kind, self.body)
+        write!(f, ") -> {}", self.return_type.kind)?;
+        if !self.effect_row.is_empty() {
+            write!(f, " !")?;
+            for e in &self.effect_row {
+                write!(f, " {}", e.kind)?;
+            }
+        }
+        write!(f, " {})", self.body)
     }
 }
 
@@ -813,6 +923,7 @@ mod tests {
             type_params: vec![],
             params: vec![],
             return_type: ty_i64(0..3),
+            effect_row: vec![],
             body: Block { stmts: vec![], tail, span: body_span.clone() },
             span: 0..body_span.end,
         }
@@ -823,6 +934,7 @@ mod tests {
         let p = Program {
             fns: vec![main_fn(lit(42, 0..2))],
             structs: vec![],
+            effects: vec![],
             span: 0..2,
         };
         assert_eq!(p.to_string(), "(fn main () -> i64 (block 42))");
@@ -841,6 +953,7 @@ mod tests {
                 ty: ty_i64(0..3),
             }],
             return_type: ty_i64(0..3),
+            effect_row: vec![],
             body: Block {
                 stmts: vec![],
                 tail: Spanned {
@@ -863,7 +976,7 @@ mod tests {
             },
             span: 0..9,
         });
-        let p = Program { fns: vec![double, main], structs: vec![], span: 0..20 };
+        let p = Program { fns: vec![double, main], structs: vec![], effects: vec![], span: 0..20 };
         assert_eq!(
             p.to_string(),
             "(fn double (x: i64) -> i64 (block (* x 2)))\n(fn main () -> i64 (block (double 7)))"
@@ -887,6 +1000,7 @@ mod tests {
                 Param { mutable: false, name: "b".to_string(), span: 0..1, ty: ty_i64(0..3) },
             ],
             return_type: ty_i64(0..3),
+            effect_row: vec![],
             body: Block {
                 stmts: vec![],
                 tail: Spanned {
@@ -1273,6 +1387,7 @@ mod tests {
         let p = Program {
             fns: vec![main_fn(lit(7, 0..1))],
             structs: vec![s],
+            effects: vec![],
             span: 0..30,
         };
         // Structs first, then fns.

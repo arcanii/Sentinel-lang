@@ -434,6 +434,48 @@ pub enum ResolveError {
         #[label("redeclared here")]
         span: miette::SourceSpan,
     },
+
+    /// C3 / ADR 0019 D4 (C3.0): top-level `effect E { ... }`
+    /// declarations are parsed at C3.0 but not yet resolvable.
+    /// Effect-decl resolution + the effect-check query land at
+    /// C3.2 per ADR 0019's sub-phase split.
+    #[error("`effect` declarations are not yet supported (lands at C3.2)")]
+    #[diagnostic(
+        code(sentinel::resolve::effect_decl_not_yet),
+        help("the effect-system typing layer ships at C3.1 (secret typing) and C3.2 (effect rows + effect_check_query) per ADR 0019")
+    )]
+    EffectDeclNotYet {
+        #[label("effect declaration here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3 / ADR 0019 D1 (C3.0): postfix `! { ... }` effect-row
+    /// annotations on fn signatures parse at C3.0 but are not yet
+    /// resolvable. Effect-row inference + annotation check land
+    /// at C3.2.
+    #[error("effect-row annotations on `fn` signatures are not yet supported (lands at C3.2)")]
+    #[diagnostic(
+        code(sentinel::resolve::effect_annotation_not_yet),
+        help("the effect_check_query lands at C3.2 per ADR 0019 D2 — at C3.0 the parser accepts the annotation but cannot yet check it")
+    )]
+    EffectAnnotationNotYet {
+        fn_name: String,
+        #[label("effect annotation on `{fn_name}`")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3 / ADR 0019 D6 (C3.0): `declassify(e)` parses at C3.0 but
+    /// is not yet resolvable. The expression lands when secret
+    /// typing arrives at C3.1.
+    #[error("`declassify(...)` is not yet supported (lands at C3.1)")]
+    #[diagnostic(
+        code(sentinel::resolve::declassify_not_yet),
+        help("the `secret T` qualifier + `declassify` form ship together at C3.1 per ADR 0019 D5/D6")
+    )]
+    DeclassifyNotYet {
+        #[label("declassify expression here")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -449,6 +491,27 @@ pub enum ResolveError {
 /// reference struct types in their TypeExprs), then fns, then fn
 /// bodies.
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
+    // C3 / ADR 0019 D4 (C3.0 deferral): top-level `effect E { ... }`
+    // declarations parse at C3.0 but don't resolve until C3.2. If
+    // the source has any, fail fast — points to the first one.
+    if let Some(first) = program.effects.first() {
+        return Err(ResolveError::EffectDeclNotYet {
+            span: to_source_span(&first.name_span),
+        });
+    }
+
+    // C3 / ADR 0019 D1 (C3.0 deferral): postfix `! { ... }` effect-
+    // row annotations on fn signatures parse at C3.0 but don't
+    // resolve until C3.2. If any fn declares one, fail fast.
+    for fn_def in &program.fns {
+        if let Some(first) = fn_def.effect_row.first() {
+            return Err(ResolveError::EffectAnnotationNotYet {
+                fn_name: fn_def.name.clone(),
+                span: to_source_span(&first.span),
+            });
+        }
+    }
+
     let mut next_fn_id: u32 = 0;
     let mut next_var_id: u32 = 0;
 
@@ -976,6 +1039,15 @@ fn resolve_expr(
                 index: Box::new(index),
             }
         }
+        ExprKind::Declassify(_inner) => {
+            // C3 / ADR 0019 D6 (C3.0 deferral): `declassify(e)`
+            // parses at C3.0 but waits for C3.1's secret typing
+            // to actually resolve. We bail at the resolve layer
+            // pointing to the whole declassify expression.
+            return Err(ResolveError::DeclassifyNotYet {
+                span: to_source_span(&expr.span),
+            });
+        }
     };
     Ok(Spanned { kind, span: expr.span.clone() })
 }
@@ -1066,6 +1138,23 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
         ResolveError::DuplicateTypeParam { name, span } => (
             "sentinel::resolve::duplicate_type_param",
             format!("duplicate type parameter `{name}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::EffectDeclNotYet { span } => (
+            "sentinel::resolve::effect_decl_not_yet",
+            "`effect` declarations are not yet supported (lands at C3.2)".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::EffectAnnotationNotYet { fn_name, span } => (
+            "sentinel::resolve::effect_annotation_not_yet",
+            format!(
+                "effect-row annotation on `{fn_name}` is not yet supported (lands at C3.2)"
+            ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::DeclassifyNotYet { span } => (
+            "sentinel::resolve::declassify_not_yet",
+            "`declassify(...)` is not yet supported (lands at C3.1)".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -1584,5 +1673,57 @@ mod tests {
         let f = p.fns.iter().find(|f| f.name == "add").expect("add");
         assert!(f.type_params.is_empty());
         assert_eq!(p.signature(f.id).type_params_count, 0);
+    }
+
+    // ---- C3 / ADR 0019 C3.0 deferrals: surface parses, resolve rejects ----
+
+    #[test]
+    fn c30_effect_decl_is_rejected_at_resolve() {
+        let err = resolve_err(
+            "effect Io { log(msg: i64) -> i64; }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, ResolveError::EffectDeclNotYet { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c30_fn_effect_annotation_is_rejected_at_resolve() {
+        let err = resolve_err("fn main() -> i64 ! { Io } { 0 }");
+        assert!(
+            matches!(err, ResolveError::EffectAnnotationNotYet { ref fn_name, .. } if fn_name == "main"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c30_declassify_is_rejected_at_resolve() {
+        let err = resolve_err("fn main() -> i64 { declassify(x) }");
+        // The DeclassifyNotYet error fires when the resolver
+        // walks the declassify expression — but the inner Var(x)
+        // would also be UndefinedVariable. Either error is fine;
+        // both are valid resolver rejections. We just confirm we
+        // reject before C3.1.
+        assert!(
+            matches!(
+                err,
+                ResolveError::DeclassifyNotYet { .. } | ResolveError::UndefinedVariable { .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c30_declassify_on_defined_var_routes_to_declassify_not_yet() {
+        // With a defined variable, the UndefinedVariable path
+        // doesn't fire — DeclassifyNotYet is what surfaces.
+        let err = resolve_err(
+            "fn main() -> i64 { let x: i64 = 1; declassify(x) }",
+        );
+        assert!(
+            matches!(err, ResolveError::DeclassifyNotYet { .. }),
+            "got {err:?}"
+        );
     }
 }

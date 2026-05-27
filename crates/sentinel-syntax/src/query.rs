@@ -136,6 +136,20 @@ fn parse_error_to_diagnostic(err: &ParseError) -> Diagnostic {
             message: "empty generic argument list `<>` is not allowed".to_string(),
             span: span.offset()..(span.offset() + span.len()),
         },
+        ParseError::DoubleSecret { span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::double_secret",
+            message: "nested `secret secret T` is not allowed".to_string(),
+            span: span.offset()..(span.offset() + span.len()),
+        },
+        ParseError::EmptyEffectAnnotation { span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::empty_effect_annotation",
+            message: "empty effect-row annotation `! { }` is not allowed".to_string(),
+            span: span.offset()..(span.offset() + span.len()),
+        },
     }
 }
 

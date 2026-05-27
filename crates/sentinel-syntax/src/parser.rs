@@ -47,8 +47,9 @@
 //! until parser ergonomics demand it.
 
 use sentinel_ast::{
-    BinOp, Block, CmpOp, Expr, ExprKind, FieldInit, FnDef, LogicOp, Param, Program, Span, Spanned,
-    Stmt, StmtKind, StructDecl, StructField, TypeExpr, TypeExprKind, TypeParam, UnaryOp,
+    BinOp, Block, CmpOp, EffectDecl, Expr, ExprKind, FieldInit, FnDef, LogicOp, OpDecl, Param,
+    Program, Span, Spanned, Stmt, StmtKind, StructDecl, StructField, TypeExpr, TypeExprKind,
+    TypeParam, UnaryOp,
 };
 
 use crate::{lex, LexError, TokenKind};
@@ -131,6 +132,34 @@ pub enum ParseError {
     )]
     EmptyTypeArgs {
         #[label("expected at least one type argument")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3 / ADR 0019 D5: nested `secret secret T` is rejected at
+    /// parse time. The depth-1 rule mirrors C1.5's `??T` rejection
+    /// per ADR 0014 D6 — qualifier composition stays bounded at
+    /// the C3 minimum.
+    #[error("nested `secret secret T` is not allowed")]
+    #[diagnostic(
+        code(sentinel::parse::double_secret),
+        help("`secret secret T` is rejected at C3.0 per ADR 0019 D5 — secret-qualifier depth is bounded to 1")
+    )]
+    DoubleSecret {
+        #[label("second `secret` here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3 / ADR 0019 D1: an empty effect-row annotation `! { }`
+    /// is rejected at parse time. Write no annotation at all to
+    /// mean "no effects" (`fn f() -> T { ... }` already implies
+    /// no effects); `! { Op }` is the single-effect case.
+    #[error("empty effect-row annotation `! {{ }}` is not allowed")]
+    #[diagnostic(
+        code(sentinel::parse::empty_effect_annotation),
+        help("either drop the `! {{ }}` for a no-effect fn or list at least one effect, e.g. `! {{ Io }}` per ADR 0019 D1")
+    )]
+    EmptyEffectAnnotation {
+        #[label("`!` here")]
         span: miette::SourceSpan,
     },
 }
@@ -237,32 +266,35 @@ impl<'a> Parser<'a> {
         let start = self.peek().map_or(0, |t| t.span.start);
         let mut fns = Vec::new();
         let mut structs = Vec::new();
+        let mut effects = Vec::new();
         while self.peek().is_some() {
             match self.peek_kind() {
                 Some(TokenKind::Fn) => fns.push(self.parse_fn_def()?),
                 Some(TokenKind::Struct) => structs.push(self.parse_struct_decl()?),
+                Some(TokenKind::Effect) => effects.push(self.parse_effect_decl()?),
                 Some(other) => {
                     let t = self.peek().expect("peeked");
                     return Err(ParseError::UnexpectedToken {
                         got: format!("{other:?}"),
-                        expected: "`fn` or `struct`",
+                        expected: "`fn`, `struct`, or `effect`",
                         span: to_source_span(&t.span),
                     });
                 }
                 None => unreachable!(),
             }
         }
-        if fns.is_empty() && structs.is_empty() {
+        if fns.is_empty() && structs.is_empty() && effects.is_empty() {
             return Err(ParseError::UnexpectedEof {
                 expected: "`fn` (programs are one or more function definitions)",
                 span: to_source_span(&self.eof_span()),
             });
         }
-        // End-of-program span = end of the last item (whichever is later).
+        // End-of-program span = end of the last item (whichever is latest).
         let fn_end = fns.last().map_or(0, |f| f.span.end);
         let struct_end = structs.last().map_or(0, |s| s.span.end);
-        let end = fn_end.max(struct_end);
-        Ok(Program { fns, structs, span: start..end })
+        let effect_end = effects.last().map_or(0, |e| e.span.end);
+        let end = fn_end.max(struct_end).max(effect_end);
+        Ok(Program { fns, structs, effects, span: start..end })
     }
 
     /// Parse a top-level struct declaration per ADR 0013 D1:
@@ -591,6 +623,13 @@ impl<'a> Parser<'a> {
         // `-> return_type` is mandatory at C1.2 per ADR 0012 D1.
         let return_type = self.parse_return_type()?;
 
+        // Optional postfix effect-row annotation per ADR 0019 D1
+        // (C3.0): `! { Op1, Op2 }`. The `!` token doubles as
+        // logical-not (C1.3) — parser disambiguates positionally:
+        // at fn-signature position immediately after the return
+        // type, `!` opens the effect-row annotation.
+        let effect_row = self.parse_optional_effect_row()?;
+
         // Body.
         let body = self.parse_block()?;
         let end = body.span.end;
@@ -601,8 +640,299 @@ impl<'a> Parser<'a> {
             type_params,
             params,
             return_type,
+            effect_row,
             body,
             span: fn_start..end,
+        })
+    }
+
+    /// Parse an optional postfix effect-row annotation per ADR
+    /// 0019 D1: `! { Op1, Op2, ... }`. Trailing comma allowed.
+    /// Empty annotation `! { }` is rejected at parse (write
+    /// no annotation at all to mean "no effects"). Returns the
+    /// (possibly empty) list of effect-label spans.
+    fn parse_optional_effect_row(
+        &mut self,
+    ) -> Result<Vec<Spanned<String>>, ParseError> {
+        if self.peek_kind() != Some(TokenKind::Bang) {
+            return Ok(Vec::new());
+        }
+        let bang_start = self.advance().expect("peeked").span.start;
+        match self.peek_kind() {
+            Some(TokenKind::LBrace) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`{` after `!` in fn effect-row annotation",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`{` after `!` in fn effect-row annotation",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+        let mut effects: Vec<Spanned<String>> = Vec::new();
+        if self.peek_kind() != Some(TokenKind::RBrace) {
+            effects.push(self.parse_effect_label()?);
+            while self.peek_kind() == Some(TokenKind::Comma) {
+                self.advance();
+                if self.peek_kind() == Some(TokenKind::RBrace) {
+                    break; // trailing comma allowed
+                }
+                effects.push(self.parse_effect_label()?);
+            }
+        }
+        // RBrace
+        match self.peek_kind() {
+            Some(TokenKind::RBrace) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`,` or `}` in fn effect-row annotation",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`,` or `}` in fn effect-row annotation",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+        if effects.is_empty() {
+            return Err(ParseError::EmptyEffectAnnotation {
+                span: to_source_span(&(bang_start..bang_start + 1)),
+            });
+        }
+        Ok(effects)
+    }
+
+    /// Parse a single effect-label identifier inside an effect-row
+    /// annotation or inside an `effect E { ... }` declaration's
+    /// op-name position. Returns the spanned name.
+    fn parse_effect_label(&mut self) -> Result<Spanned<String>, ParseError> {
+        match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                Ok(Spanned { kind: name, span })
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "effect-label identifier",
+                    span: to_source_span(&span),
+                })
+            }
+            None => Err(ParseError::UnexpectedEof {
+                expected: "effect-label identifier",
+                span: to_source_span(&self.eof_span()),
+            }),
+        }
+    }
+
+    /// Parse a top-level effect declaration per ADR 0019 D4:
+    ///
+    /// ```text
+    /// effect_decl  = 'effect' Ident '{' op_decl (';' op_decl)* ';'? '}'
+    /// op_decl      = Ident '(' params ')' ('->' type)?
+    /// ```
+    ///
+    /// Empty effect declarations (zero ops) are allowed.
+    fn parse_effect_decl(&mut self) -> Result<EffectDecl, ParseError> {
+        let effect_start = match self.peek_kind() {
+            Some(TokenKind::Effect) => self.advance().expect("peeked").span.start,
+            _ => unreachable!("called only after peek_kind() == Effect"),
+        };
+
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "effect name after `effect`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "effect name after `effect`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        match self.peek_kind() {
+            Some(TokenKind::LBrace) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`{` to open effect body",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`{` to open effect body",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let mut ops = Vec::new();
+        while self.peek_kind() != Some(TokenKind::RBrace) {
+            ops.push(self.parse_op_decl()?);
+            // Each op must be `;`-terminated (allows trailing `;`).
+            match self.peek_kind() {
+                Some(TokenKind::Semi) => {
+                    self.advance();
+                }
+                Some(TokenKind::RBrace) => break,
+                Some(other) => {
+                    let t = self.peek().expect("peeked");
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{other:?}"),
+                        expected: "`;` after op declaration",
+                        span: to_source_span(&t.span),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "`;` after op declaration",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            }
+        }
+        let end = self.advance().expect("RBrace peeked").span.end;
+
+        Ok(EffectDecl {
+            name,
+            name_span,
+            ops,
+            span: effect_start..end,
+        })
+    }
+
+    /// Parse a single op declaration inside an `effect E { ... }`
+    /// body: `name(p1: T1, ...) -> RetT`. The `-> RetT` clause is
+    /// optional per ADR 0019 D4 (default to no explicit return
+    /// type; types layer treats absence as `i64` for now).
+    fn parse_op_decl(&mut self) -> Result<OpDecl, ParseError> {
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "op name",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "op name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+        let op_start = name_span.start;
+
+        // `(`
+        match self.peek_kind() {
+            Some(TokenKind::LParen) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`(` after op name",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`(` after op name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let mut params = Vec::new();
+        if self.peek_kind() != Some(TokenKind::RParen) {
+            params.push(self.parse_param()?);
+            while self.peek_kind() == Some(TokenKind::Comma) {
+                self.advance();
+                if self.peek_kind() == Some(TokenKind::RParen) {
+                    break;
+                }
+                params.push(self.parse_param()?);
+            }
+        }
+        // `)`
+        let mut end = match self.peek_kind() {
+            Some(TokenKind::RParen) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`,` or `)` in op parameter list",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`,` or `)` in op parameter list",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        // Optional `-> RetT`
+        let return_type = if self.peek_kind() == Some(TokenKind::Arrow) {
+            self.advance();
+            let ty = self.parse_type()?;
+            end = ty.span.end;
+            Some(ty)
+        } else {
+            None
+        };
+
+        Ok(OpDecl {
+            name,
+            name_span,
+            params,
+            return_type,
+            span: op_start..end,
         })
     }
 
@@ -757,6 +1087,24 @@ impl<'a> Parser<'a> {
     /// level and is rejected at the type-resolution stage per
     /// ADR 0015 D6.
     fn parse_type(&mut self) -> Result<TypeExpr, ParseError> {
+        // C3 / ADR 0019 D5: `secret T` type prefix. Nested
+        // `secret secret T` rejected at parse time per D5; depth-1
+        // qualifier matching C1.5's `??T` rule.
+        if self.peek_kind() == Some(TokenKind::Secret) {
+            let s_start = self.advance().expect("peeked").span.start;
+            if self.peek_kind() == Some(TokenKind::Secret) {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::DoubleSecret {
+                    span: to_source_span(&t.span),
+                });
+            }
+            let inner = self.parse_type()?;
+            let span = s_start..inner.span.end;
+            return Ok(Spanned {
+                kind: TypeExprKind::Secret(Box::new(inner)),
+                span,
+            });
+        }
         // C2 / ADR 0017 D1: `&T` and `&mut T` reference types. The
         // optional `mut` keyword between `&` and the inner type
         // marks the borrow as exclusive. Nested refs (`&&T`) parse
@@ -1454,6 +1802,57 @@ impl<'a> Parser<'a> {
                 // checker infers `?T` from context.
                 let span = self.advance().expect("peeked").span.clone();
                 Ok(Spanned { kind: ExprKind::NullLit, span })
+            }
+            Some(TokenKind::Declassify) => {
+                // C3 / ADR 0019 D6: `declassify(e)` special form
+                // with mandatory parens. Type-check rejects with
+                // `TypeError::DeclassifyNotYet` at C3.0; lands at
+                // C3.1 alongside `Type::Secret(SecretId)`.
+                let d_start = self.advance().expect("peeked").span.start;
+                match self.peek_kind() {
+                    Some(TokenKind::LParen) => {
+                        self.advance();
+                    }
+                    Some(other) => {
+                        let t = self.peek().expect("peeked");
+                        return Err(ParseError::UnexpectedToken {
+                            got: format!("{other:?}"),
+                            expected: "`(` after `declassify`",
+                            span: to_source_span(&t.span),
+                        });
+                    }
+                    None => {
+                        return Err(ParseError::UnexpectedEof {
+                            expected: "`(` after `declassify`",
+                            span: to_source_span(&self.eof_span()),
+                        });
+                    }
+                }
+                let saved = self.allow_struct_lit;
+                self.allow_struct_lit = true;
+                let inner = self.parse_expr()?;
+                self.allow_struct_lit = saved;
+                let rp_end = match self.peek_kind() {
+                    Some(TokenKind::RParen) => self.advance().expect("peeked").span.end,
+                    Some(other) => {
+                        let t = self.peek().expect("peeked");
+                        return Err(ParseError::UnexpectedToken {
+                            got: format!("{other:?}"),
+                            expected: "`)` to close `declassify(...)`",
+                            span: to_source_span(&t.span),
+                        });
+                    }
+                    None => {
+                        return Err(ParseError::UnexpectedEof {
+                            expected: "`)` to close `declassify(...)`",
+                            span: to_source_span(&self.eof_span()),
+                        });
+                    }
+                };
+                Ok(Spanned {
+                    kind: ExprKind::Declassify(Box::new(inner)),
+                    span: d_start..rp_end,
+                })
             }
             Some(TokenKind::LBracket) => {
                 // C1.6 / ADR 0015 D2: array literal `[e1, e2, ...]`.
@@ -2201,7 +2600,7 @@ mod tests {
         // Top level expects `fn` or `struct` (C1.4), not `let`.
         let err = parse("let x = 1;").unwrap_err();
         assert!(
-            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn` or `struct`"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, or `effect`"),
             "got {err:?}"
         );
     }
@@ -2211,7 +2610,7 @@ mod tests {
         // Bare expressions at top level no longer parse — they're fn-body content now.
         let err = parse("42").unwrap_err();
         assert!(
-            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn` or `struct`"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, or `effect`"),
             "got {err:?}"
         );
     }
@@ -3153,5 +3552,158 @@ mod tests {
         // parser doesn't get confused into believing call sites
         // accept type args.
         let _ = parse_expr("f(g, h)").expect("plain call still works");
+    }
+
+    // ---- C3 / ADR 0019 D1+D4+D5+D6: surface parser tests ----
+
+    #[test]
+    fn parse_effect_decl_empty() {
+        let p = parse_ok_program("effect Io { } fn main() -> i64 { 0 }");
+        assert_eq!(p.effects.len(), 1);
+        assert_eq!(p.effects[0].name, "Io");
+        assert!(p.effects[0].ops.is_empty());
+    }
+
+    #[test]
+    fn parse_effect_decl_one_op() {
+        let p = parse_ok_program(
+            "effect Io { log(msg: i64) -> i64; } fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.effects[0].ops.len(), 1);
+        let op = &p.effects[0].ops[0];
+        assert_eq!(op.name, "log");
+        assert_eq!(op.params.len(), 1);
+        assert_eq!(op.params[0].name, "msg");
+        assert_eq!(op.return_type.as_ref().unwrap().kind.to_string(), "i64");
+    }
+
+    #[test]
+    fn parse_effect_decl_multi_ops() {
+        let p = parse_ok_program(
+            "effect Net { connect(host: i64); send(x: i64) -> i64; }\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.effects[0].name, "Net");
+        assert_eq!(p.effects[0].ops.len(), 2);
+        assert_eq!(p.effects[0].ops[0].name, "connect");
+        // First op has no return type.
+        assert!(p.effects[0].ops[0].return_type.is_none());
+        assert_eq!(p.effects[0].ops[1].name, "send");
+        assert!(p.effects[0].ops[1].return_type.is_some());
+    }
+
+    #[test]
+    fn parse_effect_decl_trailing_semi_allowed() {
+        let p = parse_ok_program(
+            "effect Io { log(msg: i64) -> i64; }\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.effects[0].ops.len(), 1);
+    }
+
+    #[test]
+    fn parse_fn_with_one_effect_annotation() {
+        let p = parse_ok_program("fn f() -> i64 ! { Io } { 0 }");
+        assert_eq!(p.fns[0].effect_row.len(), 1);
+        assert_eq!(p.fns[0].effect_row[0].kind, "Io");
+    }
+
+    #[test]
+    fn parse_fn_with_multi_effect_annotation() {
+        let p = parse_ok_program("fn f() -> i64 ! { Io, Net, Panic } { 0 }");
+        let labels: Vec<&str> = p.fns[0]
+            .effect_row
+            .iter()
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert_eq!(labels, vec!["Io", "Net", "Panic"]);
+    }
+
+    #[test]
+    fn parse_fn_no_effect_annotation_means_empty_row() {
+        let p = parse_ok_program("fn f() -> i64 { 0 }");
+        assert!(p.fns[0].effect_row.is_empty());
+    }
+
+    #[test]
+    fn parse_fn_effect_annotation_with_trailing_comma() {
+        let p = parse_ok_program("fn f() -> i64 ! { Io, } { 0 }");
+        assert_eq!(p.fns[0].effect_row.len(), 1);
+    }
+
+    #[test]
+    fn parse_error_empty_effect_annotation() {
+        // `! { }` is rejected — write no annotation to mean "no
+        // effects" per ADR 0019 D1.
+        let err = parse("fn f() -> i64 ! { } { 0 }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::EmptyEffectAnnotation { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_secret_type_in_param() {
+        let p = parse_ok_program("fn f(x: secret i64) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "secret i64");
+    }
+
+    #[test]
+    fn parse_secret_type_in_return() {
+        let p = parse_ok_program("fn f() -> secret i64 { 0 }");
+        assert_eq!(p.fns[0].return_type.kind.to_string(), "secret i64");
+    }
+
+    #[test]
+    fn parse_secret_type_composes_with_ref() {
+        // `& secret T` and `secret &T` both parse. The type
+        // checker rejects both at C3.0 (SecretNotYet); at C3.1
+        // `& secret T` is allowed and `secret &T` is rejected per
+        // ADR 0019 D7 (`SecretInRefDeref`).
+        let p = parse_ok_program("fn f(x: & secret i64) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "&secret i64");
+        let p = parse_ok_program("fn f(x: secret &i64) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "secret &i64");
+    }
+
+    #[test]
+    fn parse_error_double_secret() {
+        // `secret secret T` rejected at the second `secret` per ADR
+        // 0019 D5. Mirrors C1.5's `??T` NestedNullable rule.
+        let err = parse("fn f(x: secret secret i64) -> i64 { 0 }").unwrap_err();
+        assert!(matches!(&err, ParseError::DoubleSecret { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_declassify_call() {
+        // `declassify(x)` is an atom; the parsed expression appears
+        // inside the body's tail position.
+        let p = parse_ok_program("fn f() -> i64 { declassify(x) }");
+        assert_eq!(p.fns[0].body.tail.kind.to_string(), "(declassify x)");
+    }
+
+    #[test]
+    fn parse_declassify_call_inner_expression() {
+        // Parens around arbitrary expression — the inner is a Cmp
+        // with logical-not chain.
+        let p = parse_ok_program("fn f() -> i64 { declassify(a + b) }");
+        assert_eq!(
+            p.fns[0].body.tail.kind.to_string(),
+            "(declassify (+ a b))"
+        );
+    }
+
+    #[test]
+    fn parse_error_declassify_without_parens() {
+        // `declassify x` — mandatory parens (D6).
+        let err = parse("fn f() -> i64 { declassify x }").unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ParseError::UnexpectedToken { expected, .. }
+                    if *expected == "`(` after `declassify`"
+            ),
+            "got {err:?}"
+        );
     }
 }

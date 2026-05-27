@@ -728,6 +728,20 @@ fn resolve_type_expr_with_scope(
                 }
             }
         }
+        TypeExprKind::Secret(_inner) => {
+            // C3 / ADR 0019 D5 (C3.0 deferral): `secret T` parses
+            // at C3.0 but the `Type::Secret(SecretId)` variant +
+            // five-rule constant-time check ship together at C3.1.
+            // For now, reject. The resolve layer would normally
+            // catch the related deferrals before we ever get here
+            // (effect_decl / effect_row / declassify), but the
+            // `secret` type prefix can show up in a fn signature
+            // even when the body doesn't use declassify — so
+            // types-layer rejection is the right place to catch it.
+            Err(TypeError::SecretNotYet {
+                span: to_source_span(&te.span),
+            })
+        }
     }
 }
 
@@ -1553,6 +1567,21 @@ pub enum TypeError {
     )]
     IndexAssignNotSupported {
         #[label("indexing on LHS of assignment")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3 / ADR 0019 D5 (C3.0 deferral): `secret T` parses at
+    /// C3.0 but the `Type::Secret(SecretId)` interner + the five
+    /// static constant-time rejections ship together at C3.1.
+    /// The types layer rejects any `secret T` annotation until
+    /// then.
+    #[error("`secret T` is not yet supported (lands at C3.1)")]
+    #[diagnostic(
+        code(sentinel::types::secret_not_yet),
+        help("the `Type::Secret(SecretId)` qualifier + the five static constant-time checks ship at C3.1 per ADR 0019 D5/D7")
+    )]
+    SecretNotYet {
+        #[label("`secret T` here")]
         span: miette::SourceSpan,
     },
 }
@@ -3460,6 +3489,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "mutable indexing `a[i] = v;` is not supported at C2".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::SecretNotYet { span } => (
+            "sentinel::types::secret_not_yet",
+            "`secret T` is not yet supported (lands at C3.1)".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
     };
     Diagnostic {
         stage: "types",
@@ -4843,5 +4877,27 @@ fn main() -> i64 {
             ),
             "got {err:?}"
         );
+    }
+
+    // ---- C3 / ADR 0019 C3.0 deferrals: `secret T` rejected at types ----
+
+    #[test]
+    fn c30_secret_in_param_type_rejected_with_secret_not_yet() {
+        let err = check_err("fn f(x: secret i64) -> i64 { 0 } fn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::SecretNotYet { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn c30_secret_in_return_type_rejected_with_secret_not_yet() {
+        let err = check_err("fn f() -> secret i64 { 0 } fn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::SecretNotYet { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn c30_secret_inside_ref_rejected_with_secret_not_yet() {
+        // `& secret T` also rejected at C3.0 — `Type::Secret`
+        // isn't yet a thing for the inner type.
+        let err = check_err("fn f(x: & secret i64) -> i64 { 0 } fn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::SecretNotYet { .. }), "got {err:?}");
     }
 }
