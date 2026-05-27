@@ -632,3 +632,44 @@ fn pass_c24_go_no_go() {
     assert_eq!(r.stdout, "160\n");
     assert_eq!(r.exit, 0);
 }
+
+// ---- C2.5(a) / ADR 0017 D8 closure: recursive field drops ----
+
+#[test]
+fn pass_c25_struct_field_drop() {
+    // A struct with an array field. Drop recursion frees the
+    // inner array at scope exit. 3+4+5+7 = 19.
+    let r = build_and_run("c25_struct_field_drop.sentinel");
+    assert_eq!(r.stdout, "19\n");
+    assert_eq!(r.exit, 0);
+}
+
+#[test]
+fn pass_c25_nested_struct_drop() {
+    // Outer { inner: Inner { items: [i64] } } — drop recurses
+    // two levels deep + frees the array. 100+200+300+7+0 = 607.
+    let r = build_and_run("c25_nested_struct_drop.sentinel");
+    assert_eq!(r.stdout, "607\n");
+    assert_eq!(r.exit, 0);
+}
+
+#[test]
+fn pass_c25_generic_struct_array_drop() {
+    // Generic-instance case: Holder<[i64]> field-substitutes
+    // T = [i64] when descending into fields. 11+22+33 = 66.
+    let r = build_and_run("c25_generic_struct_array_drop.sentinel");
+    assert_eq!(r.stdout, "66\n");
+    assert_eq!(r.exit, 0);
+}
+
+#[test]
+fn pass_c25_go_no_go() {
+    // ADR 0017 D14 phase-go: full C2 surface — shared + mut
+    // borrows (D1+D3+D6), move (D9), RAII drop (D8) over a
+    // struct with a heap-backed array field (C2.5(a) closure).
+    // sum_via_shared=45 + (consume=45) + (add_into 100->145)
+    // = 190.
+    let r = build_and_run("c25_go_no_go.sentinel");
+    assert_eq!(r.stdout, "190\n");
+    assert_eq!(r.exit, 0);
+}

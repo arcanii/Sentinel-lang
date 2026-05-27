@@ -1,0 +1,15 @@
+// C2.5(a): nested non-generic struct case. Outer contains
+// Inner contains a heap-backed array. Drop recursion walks
+// Outer.inner.items and frees the array. Without recursive
+// field drop, the array would leak.
+// 100+200+300+7+0 = 607.
+struct Inner { items: [i64], tag: i64 }
+struct Outer { inner: Inner, label: i64 }
+
+fn main() -> i64 {
+    let o: Outer = Outer {
+        inner: Inner { items: [100, 200, 300], tag: 7 },
+        label: 0,
+    };
+    print(o.inner.items[0] + o.inner.items[1] + o.inner.items[2] + o.inner.tag + o.label)
+}

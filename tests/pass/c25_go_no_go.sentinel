@@ -1,0 +1,41 @@
+// C2.5 / ADR 0017 D14 phase-go: combines XOR borrowing,
+// move semantics, and RAII drop with the new C2.5(a)
+// recursive-field-drop closure. Exercises:
+//
+//   - struct with a heap-backed array field (`Bag.items`)
+//   - shared borrows of the bag (D1 + D3 + D6 shared rule)
+//   - move of the bag into a consumer (D9; original scope's
+//     drop is skipped for the bag, consumer's scope drops it)
+//   - recursive drop of `Bag.items` at the consumer's scope
+//     exit (D8 + C2.5(a) closure)
+//   - `let mut` + `&mut` exclusive borrow on a primitive
+//     (D2 + XOR exclusive rule)
+//
+// sum_via_shared = items[0]+items[1]+items[2] = 5+15+25 = 45
+// total via consume(b) (move): same sum 45.
+// `accumulator` mutated via `&mut acc` from 100 -> 145.
+// final print = 45 + 145 = 190.
+struct Bag { items: [i64] }
+
+fn sum_via_shared(b: &Bag) -> i64 {
+    (*b).items[0] + (*b).items[1] + (*b).items[2]
+}
+
+fn consume(b: Bag) -> i64 {
+    b.items[0] + b.items[1] + b.items[2]
+}
+
+fn add_into(target: &mut i64, delta: i64) -> i64 {
+    let new_val: i64 = *target + delta;
+    *target = new_val;
+    *target
+}
+
+fn main() -> i64 {
+    let b: Bag = Bag { items: [5, 15, 25] };
+    let s1: i64 = sum_via_shared(&b);
+    let s2: i64 = consume(b);
+    let mut acc: i64 = 100;
+    let final_acc: i64 = add_into(&mut acc, s1);
+    print(s2 + final_acc)
+}

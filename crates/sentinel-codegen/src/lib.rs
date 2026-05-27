@@ -48,6 +48,7 @@ use sentinel_resolve::{
 use sentinel_types::{
     ArrayElem, GenericInstanceData, GenericInstanceId, NullableInner, RefData, Type, TypedBlock,
     TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
+    TypedStructDecl,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -456,6 +457,70 @@ struct CodegenCtx<'ctx, 'plan> {
 ///
 /// C1.6 also adds `Type::Array(ArrayElem)` lowering to
 /// `{ i64 len, ptr data }` per ADR 0015 D1.
+///
+/// C2.5(a): does the given field type contain anything the drop
+/// machinery needs to free? Used by [`emit_drop_struct_fields`]
+/// to skip pure-data fields cheaply.
+///
+///   * `Array(_)` → owns heap memory; drop frees it.
+///   * `Nullable(Struct | GenericInstance)` → owns a heap payload
+///     conditionally; drop frees it when valid.
+///   * `Struct(_)` / `GenericInstance(_)` → recurse only if some
+///     transitive field needs drop. Otherwise the struct is pure
+///     data and can be skipped.
+///   * Everything else (primitives, refs, `?primitive`) → no drop.
+fn field_type_needs_drop(ty: Type, program: &TypedProgram) -> bool {
+    field_type_needs_drop_inner(ty, program, &mut Vec::new())
+}
+
+fn field_type_needs_drop_inner(
+    ty: Type,
+    program: &TypedProgram,
+    seen: &mut Vec<Type>,
+) -> bool {
+    if seen.contains(&ty) {
+        // Cycle guard. Recursive structs go through `?Struct`
+        // which we count as needing drop at the `Nullable` arm
+        // below, so the recursion terminates without ever
+        // re-entering the same nominal struct directly.
+        return false;
+    }
+    match ty {
+        Type::Array(_) => true,
+        Type::Nullable(NullableInner::Struct(_))
+        | Type::Nullable(NullableInner::GenericInstance(_)) => true,
+        Type::Struct(id) => {
+            seen.push(ty);
+            let decl = program.struct_decl(id);
+            let any = decl
+                .fields
+                .iter()
+                .any(|f| field_type_needs_drop_inner(f.ty, program, seen));
+            seen.pop();
+            any
+        }
+        Type::GenericInstance(id) => {
+            if (id.0 as usize) >= program.generic_instances.len() {
+                return false;
+            }
+            seen.push(ty);
+            let inst = program.generic_instance(id);
+            let decl = program.struct_decl(inst.struct_id);
+            let mut local_instances = program.generic_instances.clone();
+            let mut local_refs = program.refs.clone();
+            let any = decl.fields.iter().any(|f| {
+                let concrete =
+                    f.ty.substitute(&inst.args, &mut local_instances, &mut local_refs);
+                field_type_needs_drop_inner(concrete, program, seen)
+            });
+            seen.pop();
+            any
+        }
+        Type::Nullable(_) | Type::I64 | Type::I32 | Type::Bool | Type::Ref(_) => false,
+        Type::TypeParam(_) => false,
+    }
+}
+
 fn llvm_basic_type<'ctx>(
     context: &'ctx Context,
     ty: Type,
@@ -947,7 +1012,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
         let body_val = self.lower_block(&def.body, program)?;
         let tail_returned = tail_returned_var(&def.body.tail);
-        self.emit_scope_drops(tail_returned)?;
+        self.emit_scope_drops(tail_returned, program)?;
         self.scope_stack.pop();
 
         // Monomorphic instances of `main<T>` are forbidden by ADR
@@ -1008,7 +1073,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // any binding consumed by the tail is in the moved-source
         // set and gets skipped.
         let tail_returned = tail_returned_var(&fn_def.body.tail);
-        self.emit_scope_drops(tail_returned)?;
+        self.emit_scope_drops(tail_returned, program)?;
         self.scope_stack.pop();
 
         let is_main = program.signature(fn_def.id).is_main;
@@ -1143,7 +1208,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // tail — the move tracking will mark it in
         // `moved_sources`, but we also conservatively guard here.
         let tail_returned = tail_returned_var(&block.tail);
-        self.emit_scope_drops(tail_returned)?;
+        self.emit_scope_drops(tail_returned, program)?;
         self.scope_stack.pop();
         Ok(val)
     }
@@ -1156,9 +1221,14 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     ///     current fn (the consumer owns + drops them).
     ///   - The binding returned via the tail expression (if the
     ///     tail is a Var(id)) — passed via `tail_returned`.
+    ///
+    /// C2.5(a): now takes `program` so [`emit_drop_struct_fields`]
+    /// can resolve struct decls + generic-instance args to recurse
+    /// through heap-backed fields.
     fn emit_scope_drops(
         &mut self,
         tail_returned: Option<VarId>,
+        program: &TypedProgram,
     ) -> Result<(), CodegenError> {
         let scope = self
             .scope_stack
@@ -1177,7 +1247,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 Some(&v) => v,
                 None => continue,
             };
-            self.emit_drop_for_binding(ptr, ty)?;
+            self.emit_drop_for_binding(ptr, ty, program)?;
         }
         Ok(())
     }
@@ -1185,10 +1255,15 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     /// Emit a drop call for a binding stored at `ptr` with type
     /// `ty`. For heap-backed types, this loads the value from
     /// `ptr` and frees the embedded heap pointer.
+    ///
+    /// C2.5(a): `program` lets [`emit_drop_struct_fields`] resolve
+    /// struct decls + substitute generic-instance args when
+    /// recursing through fields.
     fn emit_drop_for_binding(
         &mut self,
         ptr: PointerValue<'ctx>,
         ty: Type,
+        program: &TypedProgram,
     ) -> Result<(), CodegenError> {
         match ty {
             Type::Array(_) => {
@@ -1247,24 +1322,12 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 self.builder.position_at_end(after_block);
             }
-            Type::Struct(id) => {
-                // Recursive drop: load the struct value, then
-                // drop each heap-backed field.
-                let decl_fields: Vec<_> = self
-                    .struct_types
-                    .get(&id)
-                    .map(|_| {
-                        // We don't have direct access to the
-                        // TypedStructDecl from CodegenCtx; pass
-                        // through via a separate emit_drop_struct.
-                        Vec::<()>::new()
-                    })
-                    .unwrap_or_default();
-                let _ = decl_fields; // suppress unused
-                self.emit_drop_struct_fields(ptr, ty)?;
-            }
-            Type::GenericInstance(_) => {
-                self.emit_drop_struct_fields(ptr, ty)?;
+            Type::Struct(_) | Type::GenericInstance(_) => {
+                // C2.5(a): recursive field drop. Per-field GEP +
+                // dispatch on the field's type — handles Array,
+                // ?Struct/?GenericInstance, nested structs, and
+                // nested generic instances.
+                self.emit_drop_struct_fields(ptr, ty, program)?;
             }
             Type::Nullable(_) | Type::I64 | Type::I32 | Type::Bool | Type::Ref(_) => {
                 // Primitives + refs + nullable-of-primitive: no
@@ -1277,26 +1340,85 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(())
     }
 
-    /// Helper for recursive drop of struct fields. Loads the
-    /// struct value from `ptr` and emits drop for each heap-
-    /// backed field. Used by both [`Type::Struct`] and
+    /// Helper for recursive drop of struct fields. GEPs into the
+    /// struct at `ptr` field-by-field and emits drop for each
+    /// heap-backed field. Used by both [`Type::Struct`] and
     /// [`Type::GenericInstance`] (concrete instances after
     /// monomorphisation are structurally the same).
     ///
-    /// **C2.4 known gap**: struct field drops are deferred —
-    /// only direct array bindings + `?Struct` bindings get
-    /// dropped at scope exit. A struct containing an array
-    /// field (e.g., c16_array_in_struct's `Bag`) would leak the
-    /// inner array. Closes via a follow-on commit that threads
-    /// `&TypedProgram` access through `emit_scope_drops` so we
-    /// can iterate the struct's declared fields by index +
-    /// recursively drop each.
+    /// C2.5(a) closes the C2.4 known gap: a struct containing an
+    /// array field (e.g., c16_array_in_struct's `Bag`) no longer
+    /// leaks the inner array's heap data. For generic instances
+    /// the field types are substituted with the instance's
+    /// concrete args before checking heap-backedness.
     fn emit_drop_struct_fields(
         &mut self,
-        _ptr: PointerValue<'ctx>,
-        _ty: Type,
+        ptr: PointerValue<'ctx>,
+        ty: Type,
+        program: &TypedProgram,
     ) -> Result<(), CodegenError> {
-        // No-op at C2.4 minimum (see doc comment above).
+        // Resolve (decl, concrete_field_types, llvm_struct_ty).
+        let (decl, field_tys, struct_llvm_ty): (
+            &TypedStructDecl,
+            Vec<Type>,
+            StructType<'ctx>,
+        ) = match ty {
+            Type::Struct(id) => {
+                let decl = program.struct_decl(id);
+                let llvm = *self
+                    .struct_types
+                    .get(&id)
+                    .expect("struct LLVM type declared in pass 0");
+                let tys = decl.fields.iter().map(|f| f.ty).collect();
+                (decl, tys, llvm)
+            }
+            Type::GenericInstance(id) => {
+                let inst = program.generic_instance(id);
+                let decl = program.struct_decl(inst.struct_id);
+                let llvm = *self
+                    .generic_struct_types
+                    .get(&id)
+                    .expect("generic instance LLVM type declared in pass 0");
+                // Substitute each field's type with the instance's
+                // concrete args. Use local clones of the program's
+                // interner tables — substitution may push new
+                // entries, but those are only needed transiently
+                // for the resulting Type itself (we don't recurse
+                // into yet-unseen GenericInstance IDs; defensive
+                // skip below).
+                let mut local_instances = program.generic_instances.clone();
+                let mut local_refs = program.refs.clone();
+                let tys = decl
+                    .fields
+                    .iter()
+                    .map(|f| f.ty.substitute(&inst.args, &mut local_instances, &mut local_refs))
+                    .collect();
+                (decl, tys, llvm)
+            }
+            _ => return Ok(()),
+        };
+
+        for (idx, field_ty) in field_tys.iter().enumerate() {
+            if !field_type_needs_drop(*field_ty, program) {
+                continue;
+            }
+            // GenericInstance whose ID is past program bounds —
+            // arose from local substitution; LLVM type unavailable
+            // so we can't GEP into it. Defensive skip; in practice
+            // the type checker has already covered every type
+            // that appears in the program.
+            if let Type::GenericInstance(gid) = field_ty {
+                if (gid.0 as usize) >= program.generic_instances.len() {
+                    continue;
+                }
+            }
+            let field_ptr = self
+                .builder
+                .build_struct_gep(struct_llvm_ty, ptr, idx as u32, "drop_fldptr")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.emit_drop_for_binding(field_ptr, *field_ty, program)?;
+        }
+        let _ = decl; // captured for clarity; field types are what we used
         Ok(())
     }
 

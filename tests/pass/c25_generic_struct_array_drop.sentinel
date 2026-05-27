@@ -1,0 +1,13 @@
+// C2.5(a): the generic-instance case for recursive struct
+// field drop. `Holder<[i64]>` is a monomorphic instance whose
+// `value` field has type `[i64]` (heap-allocated). Drop
+// emission substitutes T = [i64] when descending into the
+// instance's fields, then frees the array. Pre-C2.5 this
+// leaked the array. items[0]+items[1]+items[2] = 11+22+33
+// = 66.
+struct Holder<T> { value: T }
+
+fn main() -> i64 {
+    let h: Holder<[i64]> = Holder { value: [11, 22, 33] };
+    print(h.value[0] + h.value[1] + h.value[2])
+}

@@ -1,0 +1,12 @@
+// C2.5(a) / ADR 0017 D8 closure: a struct containing an array
+// field. Drop emission at scope exit descends into the struct
+// + frees the array's heap data. Pre-C2.5 this leaked the
+// inner array. The program's stdout only proves correctness
+// of the read path; the drop fires silently.
+// items[0]+items[1]+items[2]+owner_id = 3+4+5+7 = 19.
+struct Bag { items: [i64], owner_id: i64 }
+
+fn main() -> i64 {
+    let b: Bag = Bag { items: [3, 4, 5], owner_id: 7 };
+    print(b.items[0] + b.items[1] + b.items[2] + b.owner_id)
+}
