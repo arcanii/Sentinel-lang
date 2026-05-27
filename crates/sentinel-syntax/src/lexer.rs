@@ -62,6 +62,27 @@ pub enum TokenKind {
     /// C2 / ADR 0017 D2: `let mut x` and `mut` param prefix.
     #[token("mut")]
     Mut,
+    /// C3 / ADR 0019 D4 + D10: top-level effect declarations.
+    #[token("effect")]
+    Effect,
+    /// C3 / ADR 0019 D5 + D10: `secret T` type prefix.
+    #[token("secret")]
+    Secret,
+    /// C3 / ADR 0019 D6 + D10: `declassify(e)` special form.
+    #[token("declassify")]
+    Declassify,
+    /// C3 / ADR 0019 D8 + D10: `handle e with { ... }` — reserved
+    /// at C3.0; rejected at type-check until D8 closure
+    /// (handler runtime in C3.last / ADR 0020).
+    #[token("handle")]
+    Handle,
+    /// C3 / ADR 0019 D8 + D10: pairs with `handle`.
+    #[token("with")]
+    With,
+    /// C3 / ADR 0019 D8 + D10: `perform E.op(args)` — reserved
+    /// at C3.0; rejected at type-check until D8 closure.
+    #[token("perform")]
+    Perform,
 
     #[token("+")]
     Plus,
@@ -655,5 +676,147 @@ mod tests {
         // ADR 0017 D10 / D4. The parser disambiguates dereference
         // vs multiplication positionally.
         assert_eq!(kinds("*x"), vec![TokenKind::Star, TokenKind::Ident]);
+    }
+
+    // ---- C3 / ADR 0019 D10: effect-system lexer additions ----
+
+    #[test]
+    fn lex_effect_keyword() {
+        assert_eq!(kinds("effect"), vec![TokenKind::Effect]);
+    }
+
+    #[test]
+    fn lex_secret_keyword() {
+        assert_eq!(kinds("secret"), vec![TokenKind::Secret]);
+    }
+
+    #[test]
+    fn lex_declassify_keyword() {
+        assert_eq!(kinds("declassify"), vec![TokenKind::Declassify]);
+    }
+
+    #[test]
+    fn lex_handle_keyword() {
+        assert_eq!(kinds("handle"), vec![TokenKind::Handle]);
+    }
+
+    #[test]
+    fn lex_with_keyword() {
+        assert_eq!(kinds("with"), vec![TokenKind::With]);
+    }
+
+    #[test]
+    fn lex_perform_keyword() {
+        assert_eq!(kinds("perform"), vec![TokenKind::Perform]);
+    }
+
+    #[test]
+    fn lex_c3_keywords_ident_prefix_regression() {
+        // logos's `[A-Za-z_][A-Za-z0-9_]*` regex is greedy, so an
+        // identifier that *starts* with a keyword lexes as a single
+        // Ident — not as keyword + suffix. Matches the C1.4 struct /
+        // C2 mut precedent.
+        assert_eq!(kinds("effective"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("secrets"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("declassifier"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("handler"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("within"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("performance"), vec![TokenKind::Ident]);
+    }
+
+    #[test]
+    fn lex_effect_decl_skeleton() {
+        // `effect Io { read() -> i64; }` — the D4 surface.
+        assert_eq!(
+            kinds("effect Io { read() -> i64; }"),
+            vec![
+                TokenKind::Effect,
+                TokenKind::Ident,
+                TokenKind::LBrace,
+                TokenKind::Ident,
+                TokenKind::LParen,
+                TokenKind::RParen,
+                TokenKind::Arrow,
+                TokenKind::Ident,
+                TokenKind::Semi,
+                TokenKind::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_postfix_effect_annotation() {
+        // `fn f() -> i64 ! { Io }` — the D1 surface. `!` reuses the
+        // existing C1.3 logical-not token; parser disambiguates
+        // positionally.
+        assert_eq!(
+            kinds("fn f() -> i64 ! { Io }"),
+            vec![
+                TokenKind::Fn,
+                TokenKind::Ident,
+                TokenKind::LParen,
+                TokenKind::RParen,
+                TokenKind::Arrow,
+                TokenKind::Ident,
+                TokenKind::Bang,
+                TokenKind::LBrace,
+                TokenKind::Ident,
+                TokenKind::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_secret_type_prefix() {
+        // `secret i64` — the D5 surface.
+        assert_eq!(
+            kinds("secret i64"),
+            vec![TokenKind::Secret, TokenKind::Ident]
+        );
+    }
+
+    #[test]
+    fn lex_declassify_call() {
+        // `declassify(x)` — the D6 surface. Mandatory parens.
+        assert_eq!(
+            kinds("declassify(x)"),
+            vec![
+                TokenKind::Declassify,
+                TokenKind::LParen,
+                TokenKind::Ident,
+                TokenKind::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_handle_with_skeleton() {
+        // `handle e with { ... }` — the D8 placeholder surface.
+        assert_eq!(
+            kinds("handle e with { }"),
+            vec![
+                TokenKind::Handle,
+                TokenKind::Ident,
+                TokenKind::With,
+                TokenKind::LBrace,
+                TokenKind::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_perform_call_skeleton() {
+        // `perform Io.read()` — the D8 placeholder surface.
+        assert_eq!(
+            kinds("perform Io.read()"),
+            vec![
+                TokenKind::Perform,
+                TokenKind::Ident,
+                TokenKind::Dot,
+                TokenKind::Ident,
+                TokenKind::LParen,
+                TokenKind::RParen,
+            ]
+        );
     }
 }
