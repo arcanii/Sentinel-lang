@@ -1,0 +1,27 @@
+[package]
+name        = "sentinel-borrow-check"
+description = "Lexical borrow checker — references + lifetimes (C2.1 ships shared-only; C2.2 adds &mut + XOR; C2.5 documents the Polonius migration path)"
+
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+sentinel-ast     = { path = "../sentinel-ast" }
+sentinel-base    = { path = "../sentinel-base" }
+sentinel-resolve = { path = "../sentinel-resolve" }
+sentinel-types   = { path = "../sentinel-types" }
+
+miette     = { workspace = true }
+salsa      = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+sentinel-syntax = { path = "../sentinel-syntax" }
+
+[lints.rust]
+unsafe_code = "deny"

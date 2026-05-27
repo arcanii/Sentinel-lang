@@ -499,3 +499,36 @@ fn pass_c20_go_no_go() {
     assert_eq!(r.stdout, "53\n");
     assert_eq!(r.exit, 0);
 }
+
+// ---- C2.1 / ADR 0017 D6: shared-only lexical borrow checker ----
+
+#[test]
+fn pass_c21_borrow_local_ok() {
+    // `let r = &x; *r + *r` — borrow used within source's scope.
+    // 5 + 5 = 10.
+    assert_eq!(run_exit("c21_borrow_local_ok.sentinel"), 10);
+}
+
+#[test]
+fn pass_c21_pass_through_ref() {
+    // `fn pass(r: &i64) -> &i64 { r }` — returning an incoming
+    // ref is sound. Caller derefs the result. exit 17.
+    assert_eq!(run_exit("c21_pass_through_ref.sentinel"), 17);
+}
+
+#[test]
+fn pass_c21_reborrow() {
+    // `& *r` reborrow shape — source propagates through deref.
+    // The result ref's source is Incoming (caller's), so escapable
+    // via return. exit 21.
+    assert_eq!(run_exit("c21_reborrow.sentinel"), 21);
+}
+
+#[test]
+fn pass_c21_go_no_go() {
+    // ADR 0017 D6 phase-go (shared-only subset): sum_two(&a, &b)
+    // + triple(&a) + triple(&b) = 42 + 30 + 96 = 168.
+    let r = build_and_run("c21_go_no_go.sentinel");
+    assert_eq!(r.stdout, "168\n");
+    assert_eq!(r.exit, 0);
+}

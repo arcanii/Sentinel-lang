@@ -1,0 +1,12 @@
+// C2.1 / ADR 0017 D6: returning an incoming `&T` is sound — its
+// source lives in the caller's scope (Incoming). pass returns
+// the same ref it received.
+// caller derefs the result: x = 17 -> exit 17.
+fn pass(r: &i64) -> &i64 {
+    r
+}
+
+fn main() -> i64 {
+    let x: i64 = 17;
+    *pass(&x)
+}

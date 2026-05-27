@@ -1127,6 +1127,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sentinel-borrow-check"
+version = "0.0.1"
+dependencies = [
+ "miette",
+ "salsa",
+ "sentinel-ast",
+ "sentinel-base",
+ "sentinel-resolve",
+ "sentinel-syntax",
+ "sentinel-types",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "sentinel-broker"
 version = "0.0.1"
 dependencies = [
@@ -1160,6 +1175,7 @@ dependencies = [
  "miette",
  "salsa",
  "sentinel-base",
+ "sentinel-borrow-check",
  "sentinel-codegen",
  "sentinel-resolve",
  "sentinel-syntax",

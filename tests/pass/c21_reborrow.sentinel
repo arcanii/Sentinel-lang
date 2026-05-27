@@ -1,0 +1,12 @@
+// C2.1 / ADR 0017 D6: `& *r` reborrow shape. The result ref's
+// source is r's source (Incoming for the param), so the
+// reborrow can escape via return.
+// 21 -> exit 21.
+fn reborrow(r: &i64) -> &i64 {
+    &*r
+}
+
+fn main() -> i64 {
+    let x: i64 = 21;
+    *reborrow(&x)
+}

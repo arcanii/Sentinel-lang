@@ -1,0 +1,8 @@
+// C2.1 / ADR 0017 D6: borrow-check accepts a `&x` used within
+// x's scope. No diagnostics; pipeline reaches codegen.
+// 5 + 5 = 10 -> exit 10.
+fn main() -> i64 {
+    let x: i64 = 5;
+    let r: &i64 = &x;
+    *r + *r
+}

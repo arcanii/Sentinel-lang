@@ -1,0 +1,21 @@
+// C2.1 phase-go: combines shared borrows of multiple locals,
+// pass-through via fn args, deref reads, and arithmetic on the
+// results. The full C2.0.2 c20_go_no_go would exercise &mut
+// which lands at C2.2 — at C2.1 we use only &T (shared).
+// sum_two(&a, &b) = 10 + 32 = 42
+// triple(&a)      = 10 * 3 = 30
+// triple(&b)      = 32 * 3 = 96
+// 42 + 30 + 96    = 168 -> stdout "168\n", exit 0.
+fn sum_two(a: &i64, b: &i64) -> i64 {
+    *a + *b
+}
+
+fn triple(x: &i64) -> i64 {
+    *x + *x + *x
+}
+
+fn main() -> i64 {
+    let a: i64 = 10;
+    let b: i64 = 32;
+    print(sum_two(&a, &b) + triple(&a) + triple(&b))
+}

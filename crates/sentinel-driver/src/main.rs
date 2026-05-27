@@ -25,12 +25,19 @@
 //! Codegen now consumes a `TypedProgram` per ADR 0011 D5 + ADR
 //! 0012 D1-D4; diagnostics from every front-end stage transitively
 //! accumulate on check_query.
+//! C2.1: borrow-check pass joins the pipeline per ADR 0017 D6:
+//!   parse_query → resolve_query → check_query → borrow_check_query
+//!   → codegen.
+//! Codegen is gated on borrow_check_query succeeding; diagnostics
+//! from every front-end stage including borrow check transitively
+//! accumulate on borrow_check_query.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use miette::{LabeledSpan, MietteDiagnostic, NamedSource, Report, Severity as MietteSeverity, SourceSpan};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
+use sentinel_borrow_check::borrow_check_query;
 use sentinel_types::check_query;
 
 /// The concrete Salsa database for the snc driver. Per ADR 0011 D1
@@ -113,15 +120,23 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     };
     let db = SentinelDatabase::default();
     let file = SourceFile::new(&db, path.to_string(), src.clone());
-    // Pipeline: parse_query → resolve_query → check_query → codegen.
-    // check_query depends transitively on the upstream queries, so
-    // accumulated::<Diagnostic> on check_query picks up parse, resolve,
-    // and type-check diagnostics in one collection.
-    let typed_opt = check_query(&db, file);
-    let diags = check_query::accumulated::<Diagnostic>(&db, file);
+    // Pipeline: parse_query → resolve_query → check_query →
+    // borrow_check_query → codegen (per ADR 0017 D6). The
+    // borrow-check query chains on check_query, so
+    // accumulated::<Diagnostic> on it picks up parse, resolve,
+    // type-check, AND borrow-check diagnostics in one collection.
+    // The TypedProgram itself comes from check_query (no clone
+    // through borrow_check_query); both queries are salsa-cached.
+    let borrow_ok = borrow_check_query(&db, file).is_some();
+    let diags = borrow_check_query::accumulated::<Diagnostic>(&db, file);
     render_diagnostics(&diags, path, &src);
-    let typed = match typed_opt {
+    if !borrow_ok {
+        return ExitCode::from(1);
+    }
+    let typed = match check_query(&db, file) {
         Some(t) => t,
+        // Should be unreachable: if check_query failed, borrow_ok
+        // would already be false. Kept defensive.
         None => return ExitCode::from(1),
     };
 
