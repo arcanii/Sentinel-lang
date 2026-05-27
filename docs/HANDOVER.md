@@ -423,6 +423,29 @@ investment compounded). All eight sub-phases landed:
     match handles `&&` (AmpAmp) staying a single token. +10
     new lexer tests = 808 total.
 
+  - **C2.4** (8d72679): RAII / drop + `sentinel_free` runtime
+    symbol per ADR 0017 D8. **Closes the C1.6+ heap-leak
+    deferral** that's been open since arrays + `?Struct`
+    payloads landed. Auto-drop at scope exit for un-moved heap-
+    backed bindings. Integration with C2.3 via new `DropPlan`
+    artifact from borrow checker — per-fn `BTreeMap<FnId,
+    BTreeSet<VarId>>` of moved-source VarIds. Salsa pipeline
+    becomes parse → resolve → check → borrow_check (returns
+    `Option<DropPlan>`) → codegen (consumes DropPlan).
+    sentinel-runtime gains `sentinel_free(ptr)` (libc free
+    wrapper). CodegenCtx gains `scope_stack`, `current_fn_id`,
+    `free_fn`, `drop_plan` field. compile_fn / lower_block push/
+    pop scopes; emit_scope_drops fires at exit (reverse decl
+    order; skips moved + tail-returned). emit_drop_for_binding
+    dispatches on Type: Array → free data ptr; ?Struct → cond-
+    branch free payload if valid; primitive / ref → no-op.
+    Struct field recursive drops DEFERRED (known gap; closes
+    at C2.5). FnId / VarId gain PartialOrd + Ord. +4 c24
+    fixtures: c24_array_dropped (24), c24_moved_array_no_double_free
+    (66), c24_nested_blocks_drop (10), c24_go_no_go (160 —
+    phase-go). +2 borrow-check unit tests (DropPlan), +2
+    runtime tests (sentinel_free).
+
   - **C2.3** (50c826b): move semantics + use-after-move
     detection per ADR 0017 D9. Adds `FnCtx.moved: HashMap<VarId,
     Span>` tracking which bindings have been consumed +
@@ -549,35 +572,40 @@ investment compounded). All eight sub-phases landed:
     `add(&a, &b)` shared-borrows + `increment(&mut a)`
     exclusive-borrow + `let mut a` + deref-assignment + print).
 
-**C2 next: C2.4 — RAII / drop + `sentinel_free` runtime
-symbol.** Per ADR 0017 D8 — auto-drop at scope exit; closes
-the C1.6+ heap-leak deferral. New `sentinel_free(ptr)` runtime
-symbol in sentinel-runtime (libc free wrapper). Codegen emits
-drop calls at scope-exit for heap-backed values (arrays +
-?Struct payloads). Move-state interaction: a moved-from value
-is not dropped at its original scope's exit (the move tracked
-by C2.3 transfers ownership). Drop order within a scope:
-reverse declaration order (Rust convention).
+**C2 next: C2.5 — polish + Polonius migration plan + ADR 0017
+→ ACCEPTED.** Phase C2 closes here. Items:
+(a) Close the struct + generic-instance recursive field drop
+    gap (`emit_drop_struct_fields` is a no-op at C2.4 v1).
+    Thread `&TypedProgram` access through emit_scope_drops to
+    iterate declared fields by index + recursively drop each.
+(b) Write the Polonius migration plan doc per ADR 0017 D6
+    "lexical first, Polonius later" — the upgrade path from
+    Sentinel's current per-fn lexical formulation to a fully
+    flow-sensitive Polonius-style borrow checker.
+(c) Consolidate corner cases (any remaining strict-lexical
+    over-rejections; revisit if user testing surfaces them).
+(d) Phase C2 close-out: STATE.md + HANDOVER §0.2 refresh; ADR
+    0017 PROPOSED → ACCEPTED flip with the D-decision
+    retrospective; per-sub-phase session-budget retrospective
+    (compare actual vs ADR's "6-13 sessions across 5-6 sub-
+    phases" estimate).
 
-**Workspace test count**: 923 active across all crates (+1
-doctest at sentinel-broker; +16 over C2.2: +12 borrow-check
-unit tests (positive: primitives-are-copy / struct-moved-once /
-field-access-no-move / array-index-no-move / builtin-no-consume /
-branch-both-arms-OK / two-distinct-bindings / nullable-of-copy;
-negative: double-pass-by-value / rebind-then-use / array-double-
-consume / use-after-move-via-let), +4 driver pass-test fixtures
-across c23_*). All four check-suite checks green. c05 go/no-go
-(C1.3 bool flow) runs: stdout "10", exit 0. c14 go/no-go (C1.4
-struct flow) runs: stdout "7", exit 0. c15 go/no-go (C1.5
-nullable flow) runs: stdout "142", exit 0. c16 go/no-go (C1.6
-array flow) runs: stdout "15", exit 0. c17 go/no-go (C1.7
-generics flow — updated for move semantics) runs: stdout "42",
-exit 0. c20 go/no-go (C2.0.2 refs+mut+assign flow) runs: stdout
-"53", exit 0. c21 go/no-go (C2.1 shared-borrow flow) runs:
-stdout "168", exit 0. c22 go/no-go (C2.2 XOR alternation flow)
-runs: stdout "35", exit 0. c23 go/no-go (C2.3 move semantics)
-runs: stdout "100", exit 0. See STATE.md "Conventions" for the
-per-crate breakdown.
+**Workspace test count**: 931 active across all crates (+1
+doctest at sentinel-broker; +8 over C2.3: +2 borrow-check unit
+tests (DropPlan tracking), +2 runtime sentinel_free unit tests,
++4 driver pass-test fixtures (c24_*)). All four check-suite
+checks green. c05 go/no-go (C1.3 bool flow) runs: stdout "10",
+exit 0. c14 go/no-go (C1.4 struct flow) runs: stdout "7", exit
+0. c15 go/no-go (C1.5 nullable flow) runs: stdout "142", exit
+0. c16 go/no-go (C1.6 array flow) runs: stdout "15", exit 0.
+c17 go/no-go (C1.7 generics flow — updated for move semantics)
+runs: stdout "42", exit 0. c20 go/no-go (C2.0.2 refs+mut+assign
+flow) runs: stdout "53", exit 0. c21 go/no-go (C2.1 shared-
+borrow flow) runs: stdout "168", exit 0. c22 go/no-go (C2.2
+XOR alternation flow) runs: stdout "35", exit 0. c23 go/no-go
+(C2.3 move semantics) runs: stdout "100", exit 0. c24 go/no-go
+(C2.4 RAII / drop) runs: stdout "160", exit 0. See STATE.md
+"Conventions" for the per-crate breakdown.
 
 **ADR status**:
 
@@ -653,33 +681,32 @@ per-crate breakdown.
                                                  D-decision survived
                                                  implementation as
                                                  drafted.
-  - 0017 phase-c2-kickoff-and-region-plan        PROPOSED — D1-D5
-                                                 + D6 + D7 + D9 +
-                                                 D10 + D11 + D12 +
-                                                 D13 exercised at
+  - 0017 phase-c2-kickoff-and-region-plan        PROPOSED — D1-D13
+                                                 (all but D14)
+                                                 exercised across
                                                  C2.0.1 + C2.0.2 +
-                                                 C2.1 + C2.2 + C2.3.
-                                                 D6 fully at C2.1
-                                                 (shared) + C2.2
-                                                 (&mut+XOR). D7
-                                                 enforced via
-                                                 ReturnsLocalRef
-                                                 (C2.1). D9 at C2.3
-                                                 (move semantics +
-                                                 use-after-move +
-                                                 branch-aware merge;
-                                                 eighth error
-                                                 variant UseAfterMove
-                                                 with three-label
-                                                 miette diagnostic).
-                                                 D8's RAII+drop +
-                                                 D14's full
+                                                 C2.1 + C2.2 +
+                                                 C2.3 + C2.4. D6
+                                                 (lexical borrow
+                                                 checker) fully at
+                                                 C2.1 + C2.2. D7
+                                                 (second-class
+                                                 refs) at C2.1. D8
+                                                 (RAII+drop closing
+                                                 the C1.6+ heap-
+                                                 leak deferral) at
+                                                 C2.4. D9 (move
+                                                 semantics) at
+                                                 C2.3. D14 (full
                                                  borrow-checking
-                                                 phase-go still
-                                                 pending at C2.4 +
-                                                 C2.5. ADR flips to
-                                                 ACCEPTED at C2.5
-                                                 close-out per its
+                                                 phase-go) still
+                                                 pending at C2.5
+                                                 — and so is the
+                                                 ADR's PROPOSED →
+                                                 ACCEPTED flip +
+                                                 the Polonius
+                                                 migration plan
+                                                 doc per the
                                                  sub-phase split
                                                  table.
 
@@ -892,8 +919,8 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: 50c826b (feat(c2.3): move semantics + use-
-    after-move detection).
+    Local HEAD: 8d72679 (feat(c2.4): RAII / drop + sentinel_free;
+    closes C1.6+ heap leak).
     Branch in sync with origin/main (verify with `git status` at session start).
     Working tree clean.
 
@@ -903,18 +930,19 @@ For pasting into a fresh chat to bootstrap context:
     per ADR 0017 PROPOSED — refs / mutability / regions /
     borrow checking. C2.0.1 (lexer) + C2.0.2 (refs infrastructure)
     + C2.1 (shared-only borrow checker) + C2.2 (&mut + XOR rule)
-    + C2.3 (move semantics + use-after-move) all landed. 923
-    active workspace tests + 1 doctest. **Nine go/no-go
-    programs run end-to-end:** tests/pass/c05_go_no_go.sentinel
-    (C1.3 bool): stdout "10", exit 0; c14_go_no_go (C1.4
-    struct): "7"; c15_go_no_go (C1.5 nullable): "142";
-    c16_go_no_go (C1.6 array): "15"; c17_go_no_go (C1.7
-    generics — updated for move semantics with two distinct
-    Pair instances): "42"; c20_go_no_go (C2.0.2 refs+mut+
-    assign): "53"; c21_go_no_go (C2.1 shared-borrow): "168";
+    + C2.3 (move semantics + use-after-move) + C2.4 (RAII /
+    drop, closing the C1.6+ heap-leak deferral) all landed. 931
+    active workspace tests + 1 doctest. **Ten go/no-go programs
+    run end-to-end:** tests/pass/c05_go_no_go.sentinel (C1.3
+    bool): stdout "10", exit 0; c14_go_no_go (C1.4 struct):
+    "7"; c15_go_no_go (C1.5 nullable): "142"; c16_go_no_go
+    (C1.6 array): "15"; c17_go_no_go (C1.7 generics): "42";
+    c20_go_no_go (C2.0.2 refs+mut+assign): "53";
+    c21_go_no_go (C2.1 shared-borrow): "168";
     c22_go_no_go (C2.2 XOR alternation): "35";
-    c23_go_no_go (C2.3 move semantics — Account struct +
-    transfer with branch-aware move): "100", exit 0.
+    c23_go_no_go (C2.3 move semantics): "100";
+    c24_go_no_go (C2.4 RAII / drop — inner-block array +
+    main-level array + move into consume): "160", exit 0.
 
     Pipeline at C2.1: **parse_query → resolve_query → check_query
     → borrow_check_query → codegen** with diagnostics
@@ -933,30 +961,30 @@ For pasting into a fresh chat to bootstrap context:
     + C2.0.2 + C2.1; D8 / D9 / D14 still pending across C2.2 →
     C2.5; ADR flips to ACCEPTED at C2.5 close-out).
 
-    Borrow-checker state at C2.3 close: ADR 0017 D6+D7+D9
-    formulation. **Eight `BorrowError` variants total**:
-    `OutlivesSource` + `ReturnsLocalRef` (C2.1);
-    `MutableBorrowOfShared` + `SharedBorrowOfMutable` +
-    `BorrowConflict` + `WriteWhileBorrowed` +
-    `ReadWhileMutBorrowed` (C2.2); `UseAfterMove` (C2.3,
-    three-label miette diagnostic: decl_span + move_span +
-    use_span). Borrow-source enum
-    `{ Local(VarId), Incoming(VarId), LocalAnonymous }`.
-    **Per-place borrow tracking** via `FnCtx.places:
-    HashMap<VarId, PlaceState { shared: Vec, mut_borrow:
-    Option }>` with `BorrowLifetime ∈ { Transient,
-    UntilScope(depth) }`. **Per-binding move tracking** via
-    `FnCtx.moved: HashMap<VarId, Span>` (absent = Live,
-    present = Moved at this span). **Type classification**:
-    `is_copy_type(ty)` — Copy for primitives/refs/?Copy-inner;
-    Move for struct/array/generic-instance/?Move-inner/
-    TypeParam-conservative. **Consuming context detection**:
-    Var(x) in non-lvalue, non-postfix-receiver, non-runtime-
-    builtin-arg position. **Branch-aware merge at if/else**:
-    snapshot moved before each branch, restore between, merge
-    after ("moved in either → moved after"). C2.4 will add
-    RAII / drop (move-state interaction: moved-from values
-    aren't dropped at their original scope's exit).
+    Borrow-checker state at C2.4 close: full ADR 0017 D6+D7+D8+D9
+    formulation. **Eight `BorrowError` variants** unchanged from
+    C2.3. **DropPlan** new at C2.4: `{ moved_sources:
+    BTreeMap<FnId, BTreeSet<VarId>> }` — per-fn union of all
+    moved-source VarIds. Salsa pipeline: parse → resolve →
+    check → borrow_check (returns Option&lt;DropPlan&gt;) →
+    codegen (consumes DropPlan to skip dropping moved bindings).
+    Borrow-source enum still
+    `{ Local(VarId), Incoming(VarId), LocalAnonymous }`. Per-
+    place + per-binding tracking via FnCtx as before, plus new
+    `moved_sources_union` that accumulates across branches
+    (the snapshot/restore pattern resets `moved` but not the
+    union, which feeds DropPlan). FnId / VarId gained
+    PartialOrd + Ord for BTreeMap/BTreeSet keying. Codegen
+    drops: `scope_stack` + `current_fn_id` + `free_fn`;
+    push/pop on each block (fn + inner). emit_scope_drops
+    iterates current scope in reverse declaration order,
+    skipping moved + tail-returned bindings; calls
+    emit_drop_for_binding which dispatches on Type: Array →
+    load+extract+sentinel_free(data); ?Struct → cond-branch
+    free payload; others → no-op. Struct + GenericInstance
+    recursive field drops DEFERRED at C2.4 v1 — direct array
+    + ?Struct bindings drop correctly; a struct containing an
+    array field would leak the inner array. Closes at C2.5.
 
     Type universe at C2.0.2 / C2.1 (unchanged at C2.1): `{ I64,
     I32, Bool, Struct(StructId), Nullable(NullableInner),
@@ -975,18 +1003,28 @@ For pasting into a fresh chat to bootstrap context:
     && || !`. `*` reused for deref; `&` reused for borrow-take
     + ref-type prefix.
 
-    **Next: C2.4** — RAII / drop + `sentinel_free` runtime
-    symbol per ADR 0017 D8. Closes the C1.6+ heap-leak deferral.
-    New runtime symbol `sentinel_free(ptr) -> void` (libc free
-    wrapper); codegen emits drop calls at scope-exit for heap-
-    backed values (arrays + ?Struct payloads). Move-state
-    interaction (per the C2.3 work): a moved-from value is NOT
-    dropped at its original scope's exit (the move tracked by
-    `FnCtx.moved` transfers ownership to the consumer). Drop
-    order within a scope: reverse declaration order (Rust
-    convention). For struct-by-value, drop recursively drops
-    owned fields. User-defined `fn drop(&mut self)` stays out
-    of scope (lands at C4 with traits).
+    **Next: C2.5** — Phase C2 close-out per ADR 0017's sub-
+    phase split table. Four items:
+    (a) Close the struct + generic-instance recursive field
+        drop gap at C2.4 — emit_drop_struct_fields is a no-op
+        stub. Thread &TypedProgram access through
+        emit_scope_drops to iterate declared fields by index
+        + recursively drop each. Verifies c16_array_in_struct
+        no longer leaks the inner array.
+    (b) Write the Polonius migration plan doc per ADR 0017 D6
+        "lexical first, Polonius later" — the upgrade path
+        from Sentinel's per-fn lexical formulation to a fully
+        flow-sensitive Polonius-style borrow checker. Reference
+        polonius-engine 0.13 / Niko's "Polonius dataflow
+        intro" + RFC 2025.
+    (c) Consolidate corner cases (any strict-lexical over-
+        rejections worth documenting in a "limitations" doc;
+        revisit if user testing surfaces them).
+    (d) Phase C2 close-out: STATE.md + HANDOVER §0.2 refresh;
+        ADR 0017 PROPOSED → ACCEPTED flip with the D-decision
+        retrospective; per-sub-phase session-budget
+        retrospective (compare actual vs ADR 0017 D9 estimate
+        "6-13 sessions across 5-6 sub-phases").
 
     Sub-phase split for the rest of C2 (per ADR 0017 D9 table,
     revisit at each sub-phase boundary):
@@ -995,36 +1033,30 @@ For pasting into a fresh chat to bootstrap context:
       - ✅ C2.1   — shared-only lexical borrow checker
       - ✅ C2.2   — &mut T + shared-XOR-mutable rule
       - ✅ C2.3   — move semantics + use-after-move
-      - C2.4   — RAII / drop + sentinel_free runtime symbol;
-                  **closes the C1.6+ heap-leak deferral**
-                  (next; this session if continuing)
+      - ✅ C2.4   — RAII / drop + sentinel_free runtime symbol
+                  (closes the C1.6+ heap-leak deferral)
       - C2.5   — polish + Polonius migration plan doc + ADR
                   0017 PROPOSED → ACCEPTED flip + STATE +
-                  HANDOVER close-out
+                  HANDOVER close-out (next; this session if
+                  continuing)
 
     Read in order:
-      1. docs/HANDOVER.md §0 in full (~870 lines through §0.3)
+      1. docs/HANDOVER.md §0 in full (~880 lines through §0.3)
       2. docs/decisions/0017-phase-c2-kickoff-and-region-plan.md
-         (the canonical C2 design — especially D8 for RAII +
-         drop semantics; D6 / D7 / D9 exercise notes at
-         C2.1+C2.2+C2.3 are in the ADR's status header)
-      3. docs/STATE.md (last-updated banner — C2.3 landed; move
-         semantics + use-after-move. Previous C2.2 banner kept
-         as pre-C2.3 context)
-      4. crates/sentinel-borrow-check/src/lib.rs (~1400 LOC
-         including tests) — the analysis structure to extend
-         at C2.4. C2.4 may stay in this crate (drop-needed sites
-         from move-state) OR migrate parts to sentinel-codegen
-         (drop emission at scope exit). See FnCtx.moved /
-         is_copy_type + check_and_record_move / check_use_alive
-         + the if/else snapshot-restore-merge pattern.
-      5. crates/sentinel-runtime/src/lib.rs — add `sentinel_free`
-         + tests
-      6. crates/sentinel-codegen/src/lib.rs — emit drop calls
-         at scope exit for heap-backed types (arrays + ?Struct
-         payloads). Honor move-state: skip drops for moved-from
-         bindings.
-      7. docs/SENTINEL_DESIGN2.md §4 / §15 for the C2 long-term
+         (the canonical C2 design — D-decision exercise notes
+         in the ADR's status header; D14 is the C2.5
+         deliverable)
+      3. docs/STATE.md (last-updated banner — C2.4 landed;
+         RAII / drop. Previous C2.3 banner kept as pre-C2.4
+         context)
+      4. crates/sentinel-borrow-check/src/lib.rs (~1500 LOC
+         including tests) — DropPlan + move-state tracking.
+         C2.5 may add field-precise tracking for the recursive
+         drop closure.
+      5. crates/sentinel-codegen/src/lib.rs — emit_scope_drops
+         + emit_drop_for_binding + emit_drop_struct_fields
+         (the no-op stub to fill in at C2.5).
+      6. docs/SENTINEL_DESIGN2.md §4 / §15 for the C2 long-term
          surface (named regions, ownership qualifiers,
          first-class refs via `'esc`) — the eventual target
          that ADR 0017's C2 minimum is the stepping stone for
@@ -1032,20 +1064,22 @@ For pasting into a fresh chat to bootstrap context:
     Sanity check at session start:
       cargo build --workspace
       cargo clippy --workspace --all-targets -- -D warnings
-      cargo test --workspace                  # expect 923 passing
-      cargo run --bin snc -- build tests/pass/c23_go_no_go.sentinel -o /tmp/c23
-      /tmp/c23 && echo "exit=$?"              # expect "100" then "exit=0"
+      cargo test --workspace                  # expect 931 passing
+      cargo run --bin snc -- build tests/pass/c24_go_no_go.sentinel -o /tmp/c24
+      /tmp/c24 && echo "exit=$?"              # expect "160" then "exit=0"
 
-    Resume at C2.4 per ADR 0017. Implementation outline:
-    (a) add `sentinel_free` to sentinel-runtime as libc free
-    wrapper; (b) borrow-check or codegen pass determines
-    drop-needed bindings at scope exit (those still Live —
-    not in FnCtx.moved); (c) codegen emits `sentinel_free(ptr)`
-    calls at scope-exit for arrays' data ptr + ?Struct's heap
-    payload ptr; (d) order is reverse-declaration-order; (e)
-    fn return moves the return value out — exclude from
-    drop-set; (f) c24 fixtures verify no leaks via leak
-    sanitizer (or just by inspection of LLVM IR).
+    Resume at C2.5 per ADR 0017. Implementation outline:
+    (a) thread &TypedProgram through emit_scope_drops →
+    emit_drop_for_binding → emit_drop_struct_fields so the
+    struct-field recursive drop can iterate program.structs[id]
+    or program.generic_instances[id]; emit a recursive drop
+    call per heap-backed field; (b) write
+    docs/decisions/0018-polonius-migration.md (or extend
+    ADR 0017) documenting the migration plan; (c) flip
+    ADR 0017 status → ACCEPTED with retrospective notes; (d)
+    update STATE.md + HANDOVER §0.2 with "Phase C2 closes,
+    Phase C3 (effects integration from Phase B) opens next"
+    framing.
 
 ---
 

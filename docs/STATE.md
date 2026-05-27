@@ -12,7 +12,56 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C2.3 landed; move semantics + use-after-move.**
+Last updated: **C2.4 landed; RAII / drop closes the C1.6+ heap
+leak.** Auto-drop at scope-exit per ADR 0017 D8 — the long-
+standing leak from arrays + `?Struct` payloads since C1.6
+finally closes. New `sentinel_free(ptr: *mut u8) -> void`
+runtime symbol (libc free wrapper, null-guarded). Codegen emits
+`sentinel_free` calls at every scope exit for heap-backed
+bindings that aren't in the move-source set (the destination of
+a move owns the value + drops it). The drop tracking integrates
+with C2.3 via a new **DropPlan** artifact from the borrow
+checker: `DropPlan { moved_sources: BTreeMap<FnId,
+BTreeSet<VarId>> }` — per-fn union of all VarIds that are
+sources of moves somewhere in the fn body. The borrow checker
+populates this via `FnCtx.moved_sources_union` (accumulates
+across branches; never reset by if/else snapshot/restore). The
+salsa pipeline becomes parse → resolve → check → borrow_check
+(returns Option&lt;DropPlan&gt; on success) → codegen (consumes
+DropPlan). FnId / VarId gain PartialOrd + Ord derives for
+BTreeMap/BTreeSet ordering. CodegenCtx gains `scope_stack:
+Vec<Vec<VarId>>`, `current_fn_id`, `free_fn` (FunctionValue),
+and `drop_plan: &'plan DropPlan` (introducing a second lifetime
+`<'ctx, 'plan>`). Drop helpers: `emit_scope_drops(tail_returned)`
+iterates the current scope's bindings in reverse declaration
+order; `emit_drop_for_binding(ptr, ty)` dispatches on type —
+`Type::Array` loads + extracts data ptr + calls sentinel_free;
+`Type::Nullable(Struct | GenericInstance)` does the same
+conditionally on the valid bit; primitives + refs + nullable-of-
+primitive are no-ops. `tail_returned_var` helper recognises a
+trailing `Var(id)` (the value being moved out via fn / block
+return) so we don't drop it. **Known gap at C2.4 v1**: struct +
+generic-instance recursive field drops are DEFERRED —
+`emit_drop_struct_fields` is a no-op stub. A struct containing
+an array field (e.g., c16_array_in_struct's `Bag`) leaks its
+inner array's heap data. Direct array bindings + `?Struct`
+bindings ARE dropped. Documented for closure during C2.5 polish.
+The C2.4 phase-go program at `tests/pass/c24_go_no_go.sentinel`
+(inner-block array + main-level array + move into consume)
+produces stdout `160\n`, exit 0. Three additional fixtures:
+c24_array_dropped (exit 24 — array dropped at fn return),
+c24_moved_array_no_double_free (exit 66 — move skips drop, no
+double-free), c24_nested_blocks_drop (exit 10 — inner-block
+array dropped at block exit). ADR 0017 D8 now exercised at
+C2.4 — D6 / D7 / D9 already covered at C2.1 / C2.2 / C2.3. D14
+(full borrow-checking phase-go) still pending at C2.5. Workspace
+test delta: +8 (931 total) — +2 borrow-check unit tests
+(DropPlan tracking), +2 runtime sentinel_free unit tests, +4
+driver pass-test fixtures (c24_*). **Phase C2.4 closes here.**
+Phase C2.5 (polish + Polonius migration plan + ADR 0017 →
+ACCEPTED + STATE/HANDOVER close-out for Phase C2) opens next.
+
+Pre-C2.4 context: **C2.3 landed; move semantics + use-after-move.**
 Move detection extends the borrow checker with per-binding move-
 state tracking + branch-aware merge at if/else per ADR 0017 D9.
 Compound-type bindings (struct, array, generic-instance,
