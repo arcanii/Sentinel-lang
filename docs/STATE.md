@@ -12,7 +12,56 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C2.0.2 landed; refs + mutability + deref +
+Last updated: **C2.1 landed; shared-only lexical borrow checker.**
+New crate `sentinel-borrow-check` slots between check_query and
+codegen in the salsa pipeline per ADR 0017 D6. The bootstrap
+pipeline is now **parse_query → resolve_query → check_query →
+borrow_check_query → codegen** with diagnostics accumulating
+transitively. C2.1 ships the shared-only subset — `&T` only;
+`&mut` + shared-XOR-mutable lands at C2.2; move semantics at
+C2.3; RAII+drop closing the C1.6+ heap-leak deferral at C2.4;
+Polonius migration plan at C2.5 with the ADR flipping to
+ACCEPTED. **Two error variants at C2.1**: `OutlivesSource`
+(canonical use-after-scope, e.g., `let r = { let inner = 5;
+&inner }; *r`) and `ReturnsLocalRef` (a fn returns a `&T` whose
+ultimate source is a fn-local — `let` or by-value param — both
+die at return per ADR 0017 D7's "second-class refs everywhere").
+The borrow-source representation is the bounded enum
+`BorrowSource ∈ { Local(VarId), Incoming, LocalAnonymous }`.
+Local = a binding declared in this fn (let or by-value param);
+Incoming = came in via an incoming `&T` param (caller's scope);
+LocalAnonymous = fallback for fn-call returns where no ref arg
+contributes a source (mostly defensive at C2.1 since only user
+fns return refs and they themselves must have borrow-checked).
+The analysis is per-fn; inter-procedural reasoning is bounded
+to "a call returning a ref inherits the most-restrictive source
+among its ref args" — sufficient for the no-`&mut` subset. Inner
+blocks (`{ ... }`) push/pop scopes; let-stmts record source from
+RHS before declaring the binding; assign-stmts to ref-typed Vars
+update the recorded source. The C2.1 phase-go program at
+`tests/pass/c21_go_no_go.sentinel` (`sum_two(&a, &b) + triple(&a)
++ triple(&b)` exercising multi-ref fn calls + shared borrows of
+multiple locals) produces stdout `168\n`, exit 0. Three additional
+fixtures: c21_borrow_local_ok (exit 10 — `&x` used in source's
+scope), c21_pass_through_ref (exit 17 — incoming ref returned),
+c21_reborrow (exit 21 — `& *r` reborrow propagating source).
+Negative cases verified end-to-end via snc on /tmp fixtures —
+borrow errors surface as clean miette diagnostics + snc exits
+with code 1, blocking codegen. ADR 0017 D6's lexical-first
+formulation is now exercised (D7's second-class-refs rule
+enforced via the ReturnsLocalRef check); D8 (RAII+drop), D9
+(move semantics), D14 (full borrow-checking phase-go) still
+pending. Workspace test delta: +19 (889 total) — +15
+borrow-check unit tests (positive: no-refs / in-scope-ref /
+multi-ref / pass-through / reborrow / c20-subset / inner-block-
+ok; negative: return-local / return-by-value-param /
+use-after-inner-scope / return-via-call-chain; salsa: succeeds-
+valid / emits-on-error / propagates-type-diagnostic), +4 driver
+pass-test fixtures (c21_*). **Phase C2.1 closes here.** Phase
+C2.2 (`&mut T` + shared-XOR-mutable rule per ADR 0017 D6 — the
+largest sub-phase per D9's table) opens next.
+
+Pre-C2.1 context: **C2.0.2 landed; refs + mutability + deref +
 assignment end-to-end.** The bundled C2 infrastructure commit per
 ADR 0017 D1-D5 + D11 — references (`&T` / `&mut T`), mutable
 bindings (`let mut x` + `mut x: T` params), dereference (`*expr`),

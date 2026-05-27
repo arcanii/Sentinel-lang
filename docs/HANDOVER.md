@@ -423,6 +423,30 @@ investment compounded). All eight sub-phases landed:
     match handles `&&` (AmpAmp) staying a single token. +10
     new lexer tests = 808 total.
 
+  - **C2.1** (64edf3d): shared-only lexical borrow checker per
+    ADR 0017 D6. New crate `sentinel-borrow-check` (~600 LOC
+    including tests). New salsa-tracked query `borrow_check_query`
+    chains on `check_query`; the pipeline becomes parse_query →
+    resolve_query → check_query → borrow_check_query → codegen
+    with diagnostics accumulating transitively. Driver wires the
+    gate: a borrow failure blocks codegen + exits with code 1.
+    Two `BorrowError` variants at C2.1: `OutlivesSource`
+    (canonical use-after-scope) and `ReturnsLocalRef` (a fn
+    returns a `&T` whose source is fn-local — per ADR 0017 D7's
+    "second-class refs" rule). Borrow-source representation is
+    a bounded enum `{ Local(VarId), Incoming, LocalAnonymous }`;
+    the analysis is per-fn with limited inter-procedural
+    reasoning (a call returning a ref inherits the most-
+    restrictive source among its ref args). Inner blocks push/
+    pop scopes; let-stmts record source from RHS before declaring
+    the binding; assign-stmts to ref-typed Vars update the
+    recorded source. ADR 0017 D6's lexical-first formulation is
+    now exercised; D7's second-class-refs rule enforced.
+    +15 borrow-check unit tests + 4 driver pass-test fixtures
+    (c21_borrow_local_ok / c21_pass_through_ref / c21_reborrow /
+    c21_go_no_go). c21_go_no_go runs: stdout "168\n", exit 0
+    (`sum_two(&a, &b) + triple(&a) + triple(&b)` = 42 + 30 + 96).
+
   - **C2.0.2** (9516ebb): bundled AST + parser + resolve +
     types + codegen for refs end-to-end per ADR 0017 D1-D5 +
     D11. AST gains `UnaryOp::Ref` / `UnaryOp::RefMut` /
@@ -469,16 +493,21 @@ investment compounded). All eight sub-phases landed:
     `add(&a, &b)` shared-borrows + `increment(&mut a)`
     exclusive-borrow + `let mut a` + deref-assignment + print).
 
-**C2 next: C2.1 — shared-only lexical borrow checker (`&T`
-only).** A new salsa query `borrow_check_query` slots between
-check_query and codegen per ADR 0017 D6. The infrastructure
-landed at C2.0.2 (refs typed end-to-end + interned RefId table)
-is the substrate the borrow checker reasons over.
+**C2 next: C2.2 — `&mut T` + shared-XOR-mutable rule.** The
+largest C2 sub-phase per ADR 0017 D6 / D9. C2.2 introduces
+borrow conflict detection: a `&mut T` borrow can't coexist with
+ANY other `&T` or `&mut T` of the same place; multiple `&T`s
+remain fine. New BorrowError variants: `BorrowConflict` /
+`MutableBorrowOfShared` / `SharedBorrowOfMutable`. The
+sentinel-borrow-check crate landed at C2.1 is the substrate;
+C2.2 extends its analysis with the place-tracking machinery
++ conflict-window detection. Estimated 2-3 sessions per ADR
+0017 D9.
 
-**Workspace test count**: 870 active across all crates (+1
-doctest at sentinel-broker; +62 over C2.0.1: +8 ast, +23
-syntax, +21 types, +6 codegen, +4 pass-test fixtures across
-c20_*). All four check-suite checks green (cargo build
+**Workspace test count**: 889 active across all crates (+1
+doctest at sentinel-broker; +19 over C2.0.2: +15 borrow-check
+unit tests in the new crate, +4 driver pass-test fixtures
+across c21_*). All four check-suite checks green (cargo build
 --workspace, cargo clippy --workspace --all-targets -D warnings,
 cargo test --workspace, cargo test --workspace --doc). c05
 go/no-go (C1.3 bool flow) runs: stdout "10", exit 0. c14
@@ -487,7 +516,9 @@ go/no-go (C1.5 nullable flow) runs: stdout "142", exit 0. c16
 go/no-go (C1.6 array flow) runs: stdout "15", exit 0. c17
 go/no-go (C1.7 generics flow) runs: stdout "42", exit 0. c20
 go/no-go (C2.0.2 refs+mut+assign flow) runs: stdout "53", exit
-0. See STATE.md "Conventions" for the per-crate breakdown.
+0. c21 go/no-go (C2.1 shared-borrow flow — `sum_two(&a,&b) +
+triple(&a) + triple(&b)`) runs: stdout "168", exit 0. See
+STATE.md "Conventions" for the per-crate breakdown.
 
 **ADR status**:
 
@@ -564,23 +595,30 @@ go/no-go (C2.0.2 refs+mut+assign flow) runs: stdout "53", exit
                                                  implementation as
                                                  drafted.
   - 0017 phase-c2-kickoff-and-region-plan        PROPOSED — D1-D5
-                                                 + D10 + D11 + D12 +
-                                                 D13 all exercised at
-                                                 C2.0.1 (lexer
-                                                 additions per D10)
-                                                 and C2.0.2 (refs
+                                                 + D6 + D7 + D10 +
+                                                 D11 + D12 + D13 all
+                                                 exercised at C2.0.1
+                                                 (lexer additions per
+                                                 D10), C2.0.2 (refs
                                                  end-to-end per D1-D5
-                                                 + D11). D6's lexical
-                                                 borrow checker /
-                                                 D7's lexical-only
-                                                 regions / D8's
-                                                 RAII+drop / D9's
-                                                 move semantics still
-                                                 pending across C2.1
-                                                 → C2.4. ADR flips to
-                                                 ACCEPTED at C2.5
-                                                 close-out per its
-                                                 sub-phase split
+                                                 + D11), and C2.1
+                                                 (lexical-first
+                                                 shared-only borrow
+                                                 checker per D6 +
+                                                 second-class-refs
+                                                 ReturnsLocalRef
+                                                 enforcement per D7).
+                                                 D8's RAII+drop /
+                                                 D9's move semantics
+                                                 still pending
+                                                 across C2.3 → C2.4;
+                                                 D14's full
+                                                 borrow-checking
+                                                 phase-go program
+                                                 lands at C2.5. ADR
+                                                 flips to ACCEPTED at
+                                                 C2.5 close-out per
+                                                 its sub-phase split
                                                  table.
 
 ### 0.1 Working norms (carry forward into Phase C2)
@@ -792,8 +830,8 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: 9516ebb (feat(c2.0.2): refs + mutability + deref
-    + assignment end-to-end).
+    Local HEAD: 64edf3d (feat(c2.1): shared-only lexical borrow
+    checker).
     Branch in sync with origin/main (verify with `git status` at session start).
     Working tree clean.
 
@@ -801,91 +839,85 @@ For pasting into a fresh chat to bootstrap context:
     (bootstrap compiler MVP) + Phase C1 (full type system — all
     8 sub-phases C1.0 through C1.7) complete. Phase C2 in flight
     per ADR 0017 PROPOSED — refs / mutability / regions /
-    borrow checking — with C2.0.1 (lexer additions) AND C2.0.2
-    (refs end-to-end through AST + parser + resolve + types +
-    codegen) landed. Type-check enforces lvalue + mutability +
-    no-nested-refs + no-refs-in-arrays / struct-fields statically;
-    NO dynamic borrow checking yet (that's C2.1 / C2.2).
-    870 active workspace tests + 1 doctest. **Six go/no-go
+    borrow checking. C2.0.1 (lexer) + C2.0.2 (refs infrastructure)
+    + C2.1 (shared-only lexical borrow checker) all landed.
+    889 active workspace tests + 1 doctest. **Seven go/no-go
     programs run end-to-end:** tests/pass/c05_go_no_go.sentinel
     (C1.3 bool flow): stdout "10", exit 0; c14_go_no_go (C1.4
     struct flow): "7"; c15_go_no_go (C1.5 nullable flow):
     "142"; c16_go_no_go (C1.6 array flow): "15";
-    c17_go_no_go (C1.7 generics flow — the full ADR 0016 D12
-    Pair<A,B> + make_pair / fst / snd / pick_int program): "42",
-    exit 0; c20_go_no_go (C2.0.2 refs+mut+assign flow — the full
-    ADR 0017 D14 program with add(&a,&b) + increment(&mut a) +
-    let mut + deref-assign + print): "53", exit 0.
+    c17_go_no_go (C1.7 generics flow): "42", exit 0;
+    c20_go_no_go (C2.0.2 refs+mut+assign flow): "53", exit 0;
+    c21_go_no_go (C2.1 shared-borrow flow — sum_two(&a,&b) +
+    triple(&a) + triple(&b)): "168", exit 0.
 
-    Pipeline is parse_query → resolve_query → check_query →
-    codegen with diagnostics transitively accumulated; codegen
-    value type is BasicValueEnum<'ctx>; sentinel-runtime ships
-    sentinel_alloc + sentinel_panic_oob (libc malloc wrapper +
-    abort on OOB) per ADR 0015 D9; arrays + ?Struct heap
-    payloads still leak (no free yet — closes at C2.4 per ADR
-    0017 D8 / new sentinel_free symbol). ADRs 0001-0014 + 0016
-    ACCEPTED; ADR 0015 ACCEPTED-WITH-AMENDMENTS (D6 capped to
-    depth-1; partially closed at C1.7.4b via GenericInstance
-    variants); **ADR 0017 PROPOSED** (Phase C2 kickoff with 14
-    D-decisions: D1-D5 + D10 + D11 + D12 + D13 exercised at
-    C2.0.1 + C2.0.2; D6 / D7 / D8 / D9 still pending across
-    C2.1 → C2.4; ADR flips to ACCEPTED at C2.5 close-out).
+    Pipeline at C2.1: **parse_query → resolve_query → check_query
+    → borrow_check_query → codegen** with diagnostics
+    transitively accumulated through the chain (borrow_check_query
+    is the final pre-codegen query; its `accumulated::<Diagnostic>`
+    picks up parse + resolve + types + borrow stages). The driver
+    gates codegen on borrow_check_query::is_some(); the
+    TypedProgram for codegen still comes from check_query (no
+    clone). codegen value type is BasicValueEnum<'ctx>;
+    sentinel-runtime ships sentinel_alloc + sentinel_panic_oob
+    per ADR 0015 D9; arrays + ?Struct heap payloads still leak
+    (closes at C2.4 per ADR 0017 D8 / new sentinel_free symbol).
+    ADRs 0001-0014 + 0016 ACCEPTED; ADR 0015 ACCEPTED-WITH-
+    AMENDMENTS; **ADR 0017 PROPOSED** (Phase C2 kickoff with 14
+    D-decisions: D1-D5 + D6 + D7 + D10-D13 exercised at C2.0.1
+    + C2.0.2 + C2.1; D8 / D9 / D14 still pending across C2.2 →
+    C2.5; ADR flips to ACCEPTED at C2.5 close-out).
 
-    Type universe at C2.0.2 close: `{ I64, I32, Bool,
-    Struct(StructId), Nullable(NullableInner),
+    Borrow-checker state at C2.1 close: shared-only (`&T`
+    only). Two `BorrowError` variants — `OutlivesSource`
+    (use-after-scope) and `ReturnsLocalRef` (per ADR 0017 D7
+    "second-class refs everywhere"). Borrow-source enum is
+    `{ Local(VarId), Incoming, LocalAnonymous }`. Per-fn
+    analysis; inter-procedural reasoning bounded to "a call
+    returning a ref inherits the most-restrictive source among
+    its ref args". Lexical formulation per ADR 0017 D6 — each
+    borrow's lifetime is "from creation to enclosing scope
+    end"; inner blocks push/pop scopes. C2.2 will extend the
+    same crate with `&mut T` + shared-XOR-mutable rule (3
+    new error variants: BorrowConflict /
+    MutableBorrowOfShared / SharedBorrowOfMutable).
+
+    Type universe at C2.0.2 / C2.1 (unchanged at C2.1): `{ I64,
+    I32, Bool, Struct(StructId), Nullable(NullableInner),
     Array(ArrayElem), TypeParam(TypeParamId),
-    GenericInstance(GenericInstanceId), Ref(RefId) }`. The
-    `Ref(RefId)` variant is new; backed by a new
-    `refs: Vec<RefData>` interner table on TypedProgram
-    (`RefData { mutable: bool, inner: Type }`). Same C1.7.4b
-    interner pattern as GenericInstance, preserving the load-
-    bearing `Type: Copy` invariant across the 5th ADR running.
-    NullableInner gains a `Ref(RefId)` variant for `?&T`;
-    ArrayElem stays primitive-only (`[&T]` rejected with
-    `TypeError::RefInArray` at resolve-type-expr time per ADR
-    0017 D1 — first-class refs need named regions for
-    soundness, deferred to a future ADR). Refs in struct
-    fields rejected with `RefInStructField` per ADR 0017 D7 /
-    D12. VarTypeEnv extended to HashMap<VarId, (Type, bool)>
-    tracking mutability for `&mut x` / `x = v;` validation.
-    Codegen lowers refs as LLVM opaque pointers (LLVM 15+
-    no-typed-pointer); new `lower_lvalue_ptr` helper bridges
-    `&expr` (borrow-take), `*r = v;` (deref-assign), `x = v;`
-    (var assign), and `p.field = v;` (field assign) on a
-    single pointer-computation path.
+    GenericInstance(GenericInstanceId), Ref(RefId) }`.
+    `refs: Vec<RefData>` interner on TypedProgram preserves
+    `Type: Copy` across the 5th ADR running. NullableInner has
+    `Ref(RefId)` for `?&T`; ArrayElem stays primitive-only
+    (`[&T]` rejected with `TypeError::RefInArray` per ADR 0017
+    D1; refs in struct fields rejected with `RefInStructField`
+    per D7).
 
-    Lexer state after C2.0.2 (unchanged from C2.0.1): keywords
-    `let, fn, if, else, true, false, struct, null, mut`;
-    punctuation `+ - * / = ( ) { } [ ] , ; : . ? & ->`
-    `== != < <= > >= && || !`. The `*` token is reused for
-    dereference per ADR 0017 D10 (the parser disambiguates
-    positionally — unary prefix vs infix multiply, same
-    precedent as C1.3's `-`). The `&` token is reused for
-    borrow-take and ref-type prefix; the parser disambiguates
-    positionally + a `mut`-after-`&` lookahead selects the
-    exclusive variant.
+    Lexer state (unchanged from C2.0.1): keywords `let, fn,
+    if, else, true, false, struct, null, mut`; punctuation
+    `+ - * / = ( ) { } [ ] , ; : . ? & ->` `== != < <= > >=
+    && || !`. `*` reused for deref; `&` reused for borrow-take
+    + ref-type prefix.
 
-    **Next: C2.1** — shared-only lexical borrow checker (`&T`
-    only) per ADR 0017 D6. New salsa-tracked query
-    `borrow_check_query` slotted between check_query and
-    codegen, consuming a `TypedProgram` and producing a
-    `BorrowCheckedProgram` (parallel tree adding lifetime +
-    move-state metadata) or a `BorrowError`. New error
-    variants: `BorrowConflict`, `UseAfterMove`,
-    `BorrowOutlivesScope`, `MutableBorrowOfShared`,
-    `SharedBorrowOfMutable`. Lexical formulation per D6 —
-    each borrow's lifetime is "from creation to enclosing
-    block end". Bounded ~few-hundred LOC scope; the
-    rejected-programs cases all have local workarounds. NLL
-    / Polonius migration plan stays a documented C2.5
-    deliverable.
+    **Next: C2.2** — `&mut T` exclusive borrow + the shared-
+    XOR-mutable rule per ADR 0017 D6. The largest sub-phase
+    per D9's table (2-3 sessions estimated). Introduces borrow
+    conflict detection: a `&mut T` borrow can't coexist with
+    ANY other `&T` or `&mut T` of the same place; multiple
+    `&T`s remain fine. New BorrowError variants:
+    BorrowConflict, MutableBorrowOfShared, SharedBorrowOfMutable.
+    Extends the C2.1 BorrowSource tracking with a "place
+    tracking" representation (which binding does an lvalue
+    ultimately denote, transitively through field-access /
+    deref) + per-place conflict windows.
 
     Sub-phase split for the rest of C2 (per ADR 0017 D9 table,
     revisit at each sub-phase boundary):
       - ✅ C2.0.1 — lexer: `&` token + `mut` keyword
-      - ✅ C2.0.2 — refs infrastructure (this session)
-      - C2.1   — shared-only lexical borrow checker (&T only)
-      - C2.2   — &mut T + shared-XOR-mutable rule (largest)
+      - ✅ C2.0.2 — refs infrastructure
+      - ✅ C2.1   — shared-only lexical borrow checker
+      - C2.2   — &mut T + shared-XOR-mutable rule (largest;
+                  this session if continuing)
       - C2.3   — move semantics + use-after-move
       - C2.4   — RAII / drop + sentinel_free runtime symbol;
                   **closes the C1.6+ heap-leak deferral**
@@ -894,18 +926,19 @@ For pasting into a fresh chat to bootstrap context:
                   HANDOVER close-out
 
     Read in order:
-      1. docs/HANDOVER.md §0 in full (~810 lines through §0.3)
+      1. docs/HANDOVER.md §0 in full (~830 lines through §0.3)
       2. docs/decisions/0017-phase-c2-kickoff-and-region-plan.md
          (the canonical C2 design — especially D6 for the
-         lexical-first borrow checker formulation, the
-         migration plan to Polonius, and the per-sub-phase
-         split table)
-      3. docs/STATE.md (last-updated banner — C2.0.2 landed;
-         refs end-to-end. Previous C1.7 banner kept as
-         pre-C2.0.2 context)
-      4. docs/decisions/0016-concrete-c1-7-generics-syntax.md
-         (precedent for the interned-RefId pattern in ADR 0017
-         D11)
+         lexical-first borrow checker, D7 for second-class-refs,
+         and the per-sub-phase split table; D6 exercise notes
+         at C2.1 are in the ADR's status header)
+      3. docs/STATE.md (last-updated banner — C2.1 landed;
+         shared-only borrow checker. Previous C2.0.2 banner
+         kept as pre-C2.1 context)
+      4. crates/sentinel-borrow-check/src/lib.rs (~600 LOC
+         including tests) — the analysis structure to extend
+         at C2.2; see source_of_expr / source_of_lvalue /
+         BorrowSource / FnCtx.
       5. docs/SENTINEL_DESIGN2.md §4 / §15 for the C2 long-term
          surface (named regions, ownership qualifiers,
          first-class refs via `'esc`) — the eventual target
@@ -914,18 +947,19 @@ For pasting into a fresh chat to bootstrap context:
     Sanity check at session start:
       cargo build --workspace
       cargo clippy --workspace --all-targets -- -D warnings
-      cargo test --workspace                  # expect 870 passing
-      cargo run --bin snc -- build tests/pass/c20_go_no_go.sentinel -o /tmp/c20
-      /tmp/c20 && echo "exit=$?"              # expect "53" then "exit=0"
+      cargo test --workspace                  # expect 889 passing
+      cargo run --bin snc -- build tests/pass/c21_go_no_go.sentinel -o /tmp/c21
+      /tmp/c21 && echo "exit=$?"              # expect "168" then "exit=0"
 
-    Resume at C2.1 per ADR 0017. New crate `sentinel-borrow-check`
-    (per ADR D6 "borrow checker runs as a new pass between
-    check_query and codegen"). The infrastructure landed at
-    C2.0.2 — refs typed end-to-end + interned RefId interner —
-    is the substrate. Pre-flight: write the C2.1 sub-phase
-    plan (concrete error variants, the lifetime-tracking
-    representation, sketch of the analysis pass). C2.1 is the
-    "shared-only" scope; `&mut` + XOR ships at C2.2.
+    Resume at C2.2 per ADR 0017. Extend
+    sentinel-borrow-check with `&mut T` analysis + place-
+    tracking + per-place conflict windows. New BorrowError
+    variants land + new c22_* pass/fail fixtures. The
+    BorrowCheckedProgram parallel-tree that ADR 0017 D6
+    mentions hasn't been needed yet (C2.1 just returns
+    Vec<BorrowError>); C2.2 may introduce it if the conflict-
+    window analysis benefits from materialised lifetime
+    metadata.
 
 ---
 
