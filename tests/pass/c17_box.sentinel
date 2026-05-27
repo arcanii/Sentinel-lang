@@ -1,0 +1,9 @@
+// C1.7 / ADR 0016: single-param generic struct exercise.
+struct Box<T> { value: T }
+
+fn unbox(b: Box<i64>) -> i64 { b.value }
+
+fn main() -> i64 {
+    let b: Box<i64> = Box { value: 42 };
+    print(unbox(b))
+}

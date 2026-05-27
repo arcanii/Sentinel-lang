@@ -1,0 +1,23 @@
+// C1.7 / ADR 0016 D12 phase-go: the full multi-fn, multi-struct
+// generics program. Exercises generic struct decls, generic fns,
+// type-arg inference at call sites, struct literal under bidirectional
+// context, field access with type-arg substitution, and the
+// `pick_int` non-generic wrapper that consumes a concrete
+// `Pair<i64, i64>`.
+struct Pair<A, B> { first: A, second: B }
+
+fn make_pair<A, B>(a: A, b: B) -> Pair<A, B> {
+    Pair { first: a, second: b }
+}
+
+fn fst<A, B>(p: Pair<A, B>) -> A { p.first }
+fn snd<A, B>(p: Pair<A, B>) -> B { p.second }
+
+fn pick_int(use_first: bool, p: Pair<i64, i64>) -> i64 {
+    if use_first { fst(p) } else { snd(p) }
+}
+
+fn main() -> i64 {
+    let p: Pair<i64, i64> = make_pair(7, 35);
+    print(pick_int(true, p) + pick_int(false, p))
+}

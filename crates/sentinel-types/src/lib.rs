@@ -70,6 +70,35 @@ pub enum Type {
     /// instance via the `type_args` carried on each
     /// [`TypedExprKind::Call`].
     TypeParam(TypeParamId),
+    /// Concrete generic-struct instance per ADR 0016 D6a. The
+    /// [`GenericInstanceId`] indexes into
+    /// `TypedProgram.generic_instances`, where the underlying
+    /// `{ struct_id, args: Vec<Type> }` lives. Keeping the
+    /// indirection through an ID lets `Type` stay `Copy + Hash`
+    /// (cf. the C1.5 / C1.6 amendments that preserved this
+    /// invariant for `?T` / `[T]`).
+    GenericInstance(GenericInstanceId),
+}
+
+/// Identifier for an interned generic-struct instance like
+/// `Pair<i64, bool>`. C1.7 / ADR 0016 D6a. Assigned in source-
+/// encounter order during type-check; stable across cargo runs
+/// for a given program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GenericInstanceId(pub u32);
+
+/// The concrete type arguments backing a [`GenericInstanceId`].
+/// Owned by [`TypedProgram::generic_instances`]; never `Copy`
+/// (the `Vec<Type>` payload precludes that — but we don't need
+/// it Copy since callers always reach the data through the
+/// program-level table).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GenericInstanceData {
+    pub struct_id: StructId,
+    /// Concrete (or abstract — TypeParam-containing for generic-
+    /// fn signature instances) type arguments, one per type-param
+    /// of the underlying generic struct.
+    pub args: Vec<Type>,
 }
 
 /// The base types that can appear inside a `?T` per ADR 0014 D6 +
@@ -96,6 +125,12 @@ pub enum NullableInner {
     /// `?T` where T is a generic type parameter (only meaningful
     /// inside a generic fn body). C1.7 / ADR 0016 D6b.
     TypeParam(TypeParamId),
+    /// `?Foo<args>` — nullable of a generic-struct instance.
+    /// C1.7 / ADR 0016 D6b — partially closes the ADR 0015 D6
+    /// deferral (nullable-of-generic now representable; `?[T]`
+    /// stays deferred since that needs a different mutual
+    /// recursion).
+    GenericInstance(GenericInstanceId),
 }
 
 impl NullableInner {
@@ -107,6 +142,7 @@ impl NullableInner {
             NullableInner::Bool => Type::Bool,
             NullableInner::Struct(id) => Type::Struct(id),
             NullableInner::TypeParam(id) => Type::TypeParam(id),
+            NullableInner::GenericInstance(id) => Type::GenericInstance(id),
         }
     }
 
@@ -114,9 +150,13 @@ impl NullableInner {
     /// substituted form would nest (Nullable or Array — neither is
     /// supported as an inner per the C1.6 depth-1 amendment of ADR
     /// 0015 D6). C1.7 / ADR 0016.
-    pub fn substitute(self, subst: &[Type]) -> NullableInner {
+    pub fn substitute(
+        self,
+        subst: &[Type],
+        instances: &mut Vec<GenericInstanceData>,
+    ) -> NullableInner {
         self.to_type()
-            .substitute(subst)
+            .substitute(subst, instances)
             .to_nullable_inner()
             .unwrap_or(self)
     }
@@ -135,6 +175,10 @@ pub enum ArrayElem {
     /// `[T]` where T is a generic type parameter (only meaningful
     /// inside a generic fn body). C1.7 / ADR 0016 D6b.
     TypeParam(TypeParamId),
+    /// `[Foo<args>]` — array of a generic-struct instance. C1.7
+    /// / ADR 0016 D6b — partially closes the ADR 0015 D6
+    /// deferral.
+    GenericInstance(GenericInstanceId),
 }
 
 impl ArrayElem {
@@ -146,6 +190,7 @@ impl ArrayElem {
             ArrayElem::Bool => Type::Bool,
             ArrayElem::Struct(id) => Type::Struct(id),
             ArrayElem::TypeParam(id) => Type::TypeParam(id),
+            ArrayElem::GenericInstance(id) => Type::GenericInstance(id),
         }
     }
 
@@ -154,9 +199,13 @@ impl ArrayElem {
     /// flat subset; otherwise (substitution would introduce
     /// Nullable or Array nesting, deferred per ADR 0015 D6) returns
     /// `self` unchanged. C1.7 / ADR 0016.
-    pub fn substitute(self, subst: &[Type]) -> ArrayElem {
+    pub fn substitute(
+        self,
+        subst: &[Type],
+        instances: &mut Vec<GenericInstanceData>,
+    ) -> ArrayElem {
         self.to_type()
-            .substitute(subst)
+            .substitute(subst, instances)
             .to_array_elem()
             .unwrap_or(self)
     }
@@ -170,10 +219,12 @@ impl Type {
         matches!(self, Type::I32 | Type::I64)
     }
 
-    /// `true` if this is a struct type. Used by the field-access
-    /// rule to gate "the target must be a struct".
+    /// `true` if this is a struct type — either a non-generic
+    /// nominal `Struct(_)` or a generic-instance `GenericInstance(_)`
+    /// (which is also a struct at the runtime level). Used by the
+    /// field-access rule to gate "the target must be a struct".
     pub fn is_struct(self) -> bool {
-        matches!(self, Type::Struct(_))
+        matches!(self, Type::Struct(_) | Type::GenericInstance(_))
     }
 
     /// `true` if this is a nullable type (`?T`).
@@ -193,6 +244,12 @@ impl Type {
         matches!(self, Type::TypeParam(_))
     }
 
+    /// `true` if this is a concrete generic-struct instance
+    /// (e.g., `Pair<i64, bool>`). C1.7 / ADR 0016 D6a.
+    pub fn is_generic_instance(self) -> bool {
+        matches!(self, Type::GenericInstance(_))
+    }
+
     /// Try to demote this Type to a [`NullableInner`] for use as
     /// the payload of a `Nullable`. Returns `None` for `Nullable`
     /// (would be nested per ADR 0014 D6) AND for `Array` (the
@@ -205,6 +262,7 @@ impl Type {
             Type::Bool => Some(NullableInner::Bool),
             Type::Struct(id) => Some(NullableInner::Struct(id)),
             Type::TypeParam(id) => Some(NullableInner::TypeParam(id)),
+            Type::GenericInstance(id) => Some(NullableInner::GenericInstance(id)),
             Type::Array(_) | Type::Nullable(_) => None,
         }
     }
@@ -220,6 +278,7 @@ impl Type {
             Type::Bool => Some(ArrayElem::Bool),
             Type::Struct(id) => Some(ArrayElem::Struct(id)),
             Type::TypeParam(id) => Some(ArrayElem::TypeParam(id)),
+            Type::GenericInstance(id) => Some(ArrayElem::GenericInstance(id)),
             Type::Array(_) | Type::Nullable(_) => None,
         }
     }
@@ -228,10 +287,21 @@ impl Type {
     /// the given substitution map. Used at generic-fn call sites
     /// per ADR 0016 D7c to compute the concrete parameter / return
     /// type of a monomorphic instantiation. Handles substitution
-    /// through `Nullable` and `Array` payloads.
+    /// through `Nullable`, `Array`, and `GenericInstance` payloads.
     ///
-    /// Concrete (non-TypeParam) types pass through unchanged.
-    pub fn substitute(self, subst: &[Type]) -> Type {
+    /// The mutable `instances` table is extended whenever
+    /// substitution would produce a new (struct_id, args) pair not
+    /// already interned — this is what enables transitive
+    /// monomorphisation of nested generics like `Pair<Box<T>, T>`
+    /// without losing `Type: Copy`.
+    ///
+    /// Concrete (non-TypeParam, non-GenericInstance-with-
+    /// TypeParam-args) types pass through unchanged.
+    pub fn substitute(
+        self,
+        subst: &[Type],
+        instances: &mut Vec<GenericInstanceData>,
+    ) -> Type {
         match self {
             Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => self,
             Type::TypeParam(id) => {
@@ -245,7 +315,7 @@ impl Type {
             }
             Type::Nullable(ni) => {
                 let inner = ni.to_type();
-                let new_inner = inner.substitute(subst);
+                let new_inner = inner.substitute(subst, instances);
                 match new_inner.to_nullable_inner() {
                     Some(new_ni) => Type::Nullable(new_ni),
                     // Substitution can't legally produce a nested
@@ -258,14 +328,47 @@ impl Type {
             }
             Type::Array(ae) => {
                 let inner = ae.to_type();
-                let new_inner = inner.substitute(subst);
+                let new_inner = inner.substitute(subst, instances);
                 match new_inner.to_array_elem() {
                     Some(new_ae) => Type::Array(new_ae),
                     None => Type::Array(ae),
                 }
             }
+            Type::GenericInstance(id) => {
+                let idx = id.0 as usize;
+                let (struct_id, old_args) = {
+                    let data = &instances[idx];
+                    (data.struct_id, data.args.clone())
+                };
+                let new_args: Vec<Type> = old_args
+                    .into_iter()
+                    .map(|a| a.substitute(subst, instances))
+                    .collect();
+                let new_id = intern_generic_instance(instances, struct_id, new_args);
+                Type::GenericInstance(new_id)
+            }
         }
     }
+}
+
+/// Intern a `(struct_id, args)` pair into `instances`, returning
+/// its [`GenericInstanceId`]. Linear search — at C1.7 scale (few
+/// instances per program) this is fine. Profile-driven HashMap
+/// interning is a trivial future optimisation per ADR 0016
+/// "Consequences/Negative". Per ADR 0016 D6a.
+pub fn intern_generic_instance(
+    instances: &mut Vec<GenericInstanceData>,
+    struct_id: StructId,
+    args: Vec<Type>,
+) -> GenericInstanceId {
+    for (idx, existing) in instances.iter().enumerate() {
+        if existing.struct_id == struct_id && existing.args == args {
+            return GenericInstanceId(idx as u32);
+        }
+    }
+    let id = GenericInstanceId(instances.len() as u32);
+    instances.push(GenericInstanceData { struct_id, args });
+    id
 }
 
 /// Format a [`Type`] for display, looking up the struct name when
@@ -284,6 +387,25 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
         Type::Nullable(inner) => format!("?{}", type_display(inner.to_type(), program)),
         Type::Array(elem) => format!("[{}]", type_display(elem.to_type(), program)),
         Type::TypeParam(id) => format!("<T#{}>", id.0),
+        Type::GenericInstance(id) => {
+            if let Some(p) = program {
+                if let Some(inst) = p.generic_instances.get(id.0 as usize) {
+                    let name = p
+                        .structs
+                        .get(inst.struct_id.0 as usize)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_else(|| format!("<struct#{}>", inst.struct_id.0));
+                    let args = inst
+                        .args
+                        .iter()
+                        .map(|a| type_display(*a, program))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return format!("{name}<{args}>");
+                }
+            }
+            format!("<gi#{}>", id.0)
+        }
     }
 }
 
@@ -297,6 +419,7 @@ impl std::fmt::Display for Type {
             Type::Nullable(inner) => write!(f, "?{}", inner.to_type()),
             Type::Array(elem) => write!(f, "[{}]", elem.to_type()),
             Type::TypeParam(id) => write!(f, "<T#{}>", id.0),
+            Type::GenericInstance(id) => write!(f, "<gi#{}>", id.0),
         }
     }
 }
@@ -323,15 +446,19 @@ type TypeParamScope = HashMap<String, TypeParamId>;
 fn resolve_type_expr(
     te: &TypeExpr,
     struct_table: &HashMap<String, StructId>,
+    instances: &mut Vec<GenericInstanceData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<Type, TypeError> {
     let empty: TypeParamScope = HashMap::new();
-    resolve_type_expr_with_scope(te, struct_table, &empty)
+    resolve_type_expr_with_scope(te, struct_table, &empty, instances, struct_type_param_counts)
 }
 
 fn resolve_type_expr_with_scope(
     te: &TypeExpr,
     struct_table: &HashMap<String, StructId>,
     type_param_scope: &TypeParamScope,
+    instances: &mut Vec<GenericInstanceData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<Type, TypeError> {
     match &te.kind {
         TypeExprKind::Ident(name) => {
@@ -346,6 +473,18 @@ fn resolve_type_expr_with_scope(
                 "bool" => Ok(Type::Bool),
                 other => {
                     if let Some(&id) = struct_table.get(other) {
+                        // ADR 0016 D3: a bare struct name used in
+                        // type position requires zero type-params.
+                        // If the struct is generic, the user must
+                        // supply args via `Foo<...>`.
+                        let expected = struct_type_param_counts.get(&id).copied().unwrap_or(0);
+                        if expected != 0 {
+                            return Err(TypeError::MissingTypeArgs {
+                                type_name: other.to_string(),
+                                expected_count: expected,
+                                span: to_source_span(&te.span),
+                            });
+                        }
                         Ok(Type::Struct(id))
                     } else {
                         Err(TypeError::UnknownType {
@@ -361,8 +500,13 @@ fn resolve_type_expr_with_scope(
             // nullable (the parser already rejects `??T` per ADR
             // 0014 D6, so this should be unreachable for source-
             // level inputs).
-            let inner_ty =
-                resolve_type_expr_with_scope(inner, struct_table, type_param_scope)?;
+            let inner_ty = resolve_type_expr_with_scope(
+                inner,
+                struct_table,
+                type_param_scope,
+                instances,
+                struct_type_param_counts,
+            )?;
             match inner_ty.to_nullable_inner() {
                 Some(ni) => Ok(Type::Nullable(ni)),
                 None => Err(TypeError::UnknownType {
@@ -374,8 +518,13 @@ fn resolve_type_expr_with_scope(
         TypeExprKind::Array(inner) => {
             // Recursively resolve the inner; reject `[[T]]` per
             // ADR 0015 D6 (multi-dim arrays are deferred).
-            let inner_ty =
-                resolve_type_expr_with_scope(inner, struct_table, type_param_scope)?;
+            let inner_ty = resolve_type_expr_with_scope(
+                inner,
+                struct_table,
+                type_param_scope,
+                instances,
+                struct_type_param_counts,
+            )?;
             match inner_ty.to_array_elem() {
                 Some(ae) => Ok(Type::Array(ae)),
                 None => Err(TypeError::NestedArray {
@@ -383,17 +532,66 @@ fn resolve_type_expr_with_scope(
                 }),
             }
         }
-        TypeExprKind::Generic { name, .. } => {
-            // C1.7.4a: generic struct instances are deferred to
-            // C1.7.4b — surface a "generics-not-yet" diagnostic
-            // carrying the offending name so the placeholder
-            // failure mode is clear. (`name<args>` arity / lookup
-            // errors will land at C1.7.4b when the real resolution
-            // path arrives.)
-            Err(TypeError::GenericStructNotYetSupported {
-                name: name.clone(),
-                span: to_source_span(&te.span),
-            })
+        TypeExprKind::Generic { name, args, .. } => {
+            // ADR 0016 D3: `Foo<T1, T2, ...>` in type position.
+            // Lookup precedence: type-param scope first (in case
+            // someone wrote `T<...>` — rejected as
+            // `TypeArgsOnNonGeneric`), then struct table.
+            if type_param_scope.contains_key(name) {
+                return Err(TypeError::TypeArgsOnNonGeneric {
+                    type_name: name.clone(),
+                    span: to_source_span(&te.span),
+                });
+            }
+            match name.as_str() {
+                "i64" | "i32" | "bool" => Err(TypeError::TypeArgsOnNonGeneric {
+                    type_name: name.clone(),
+                    span: to_source_span(&te.span),
+                }),
+                other => {
+                    let struct_id = match struct_table.get(other) {
+                        Some(&id) => id,
+                        None => {
+                            return Err(TypeError::UnknownType {
+                                name: other.to_string(),
+                                span: to_source_span(&te.span),
+                            });
+                        }
+                    };
+                    let expected = struct_type_param_counts
+                        .get(&struct_id)
+                        .copied()
+                        .unwrap_or(0);
+                    if expected == 0 {
+                        return Err(TypeError::TypeArgsOnNonGeneric {
+                            type_name: other.to_string(),
+                            span: to_source_span(&te.span),
+                        });
+                    }
+                    if args.len() != expected {
+                        return Err(TypeError::TypeArgCountMismatch {
+                            type_name: other.to_string(),
+                            expected,
+                            found: args.len(),
+                            span: to_source_span(&te.span),
+                        });
+                    }
+                    // Recursively resolve each arg (possibly itself
+                    // a generic instance), then intern.
+                    let mut resolved_args = Vec::with_capacity(args.len());
+                    for arg in args {
+                        resolved_args.push(resolve_type_expr_with_scope(
+                            arg,
+                            struct_table,
+                            type_param_scope,
+                            instances,
+                            struct_type_param_counts,
+                        )?);
+                    }
+                    let id = intern_generic_instance(instances, struct_id, resolved_args);
+                    Ok(Type::GenericInstance(id))
+                }
+            }
         }
     }
 }
@@ -410,6 +608,14 @@ pub struct TypedProgram {
     /// mirror of [`sentinel_resolve::ResolvedProgram::structs`]).
     /// Each struct's [`StructId`] matches its index here.
     pub structs: Vec<TypedStructDecl>,
+    /// C1.7 / ADR 0016 D6a: interned generic-struct instances. Each
+    /// `Type::GenericInstance(id)` indexes this vector to recover
+    /// `(struct_id, args)`. Populated by the type checker as
+    /// `Foo<i64, bool>` shows up in source; potentially extended at
+    /// codegen monomorphisation time when substituting through
+    /// nested generic instances (per ADR 0016 D6a's "linear
+    /// search; HashMap if profile demands").
+    pub generic_instances: Vec<GenericInstanceData>,
     pub span: Span,
 }
 
@@ -427,6 +633,13 @@ impl TypedProgram {
 
     pub fn struct_decl(&self, id: StructId) -> &TypedStructDecl {
         &self.structs[id.0 as usize]
+    }
+
+    /// Look up the underlying `(struct_id, args)` for a generic-
+    /// instance type. Panics on out-of-range — IDs only come from
+    /// [`check`] or [`intern_generic_instance`].
+    pub fn generic_instance(&self, id: GenericInstanceId) -> &GenericInstanceData {
+        &self.generic_instances[id.0 as usize]
     }
 }
 
@@ -450,9 +663,14 @@ impl TypedFnDef {
     /// Deep-clone this fn def, substituting every [`Type::TypeParam`]
     /// against `subst`. The resulting fn is a monomorphic instance
     /// of the original generic fn — its `type_params` list is empty
-    /// and every embedded Type is concrete (or, in C1.7.4b+, a
-    /// `GenericInstance` of a generic struct's monomorphic image).
-    pub fn substitute(&self, subst: &[Type]) -> TypedFnDef {
+    /// and every embedded Type is concrete (or a `GenericInstance`
+    /// of a generic struct's monomorphic image, interned in the
+    /// shared `instances` table).
+    pub fn substitute(
+        &self,
+        subst: &[Type],
+        instances: &mut Vec<GenericInstanceData>,
+    ) -> TypedFnDef {
         TypedFnDef {
             id: self.id,
             name: self.name.clone(),
@@ -466,85 +684,106 @@ impl TypedFnDef {
                     id: p.id,
                     name: p.name.clone(),
                     span: p.span.clone(),
-                    ty: p.ty.substitute(subst),
+                    ty: p.ty.substitute(subst, instances),
                 })
                 .collect(),
-            return_type: self.return_type.substitute(subst),
-            body: self.body.substitute(subst),
+            return_type: self.return_type.substitute(subst, instances),
+            body: self.body.substitute(subst, instances),
             span: self.span.clone(),
         }
     }
 }
 
 impl TypedBlock {
-    pub fn substitute(&self, subst: &[Type]) -> TypedBlock {
+    pub fn substitute(
+        &self,
+        subst: &[Type],
+        instances: &mut Vec<GenericInstanceData>,
+    ) -> TypedBlock {
         TypedBlock {
-            stmts: self.stmts.iter().map(|s| s.substitute(subst)).collect(),
-            tail: self.tail.substitute(subst),
+            stmts: self
+                .stmts
+                .iter()
+                .map(|s| s.substitute(subst, instances))
+                .collect(),
+            tail: self.tail.substitute(subst, instances),
             span: self.span.clone(),
-            ty: self.ty.substitute(subst),
+            ty: self.ty.substitute(subst, instances),
         }
     }
 }
 
 impl TypedStmt {
-    pub fn substitute(&self, subst: &[Type]) -> TypedStmt {
+    pub fn substitute(
+        &self,
+        subst: &[Type],
+        instances: &mut Vec<GenericInstanceData>,
+    ) -> TypedStmt {
         let kind = match &self.kind {
             TypedStmtKind::Let { id, name, name_span, ty, value } => TypedStmtKind::Let {
                 id: *id,
                 name: name.clone(),
                 name_span: name_span.clone(),
-                ty: ty.substitute(subst),
-                value: value.substitute(subst),
+                ty: ty.substitute(subst, instances),
+                value: value.substitute(subst, instances),
             },
-            TypedStmtKind::Expr(e) => TypedStmtKind::Expr(e.substitute(subst)),
+            TypedStmtKind::Expr(e) => TypedStmtKind::Expr(e.substitute(subst, instances)),
         };
         TypedStmt { kind, span: self.span.clone() }
     }
 }
 
 impl TypedExpr {
-    pub fn substitute(&self, subst: &[Type]) -> TypedExpr {
+    pub fn substitute(
+        &self,
+        subst: &[Type],
+        instances: &mut Vec<GenericInstanceData>,
+    ) -> TypedExpr {
         let kind = match &self.kind {
             TypedExprKind::IntLit(n) => TypedExprKind::IntLit(*n),
             TypedExprKind::BoolLit(b) => TypedExprKind::BoolLit(*b),
             TypedExprKind::NullLit => TypedExprKind::NullLit,
-            TypedExprKind::WidenToNullable(inner) => {
-                TypedExprKind::WidenToNullable(Box::new(inner.substitute(subst)))
-            }
+            TypedExprKind::WidenToNullable(inner) => TypedExprKind::WidenToNullable(
+                Box::new(inner.substitute(subst, instances)),
+            ),
             TypedExprKind::Var(id) => TypedExprKind::Var(*id),
             TypedExprKind::Unary(op, inner) => {
-                TypedExprKind::Unary(*op, Box::new(inner.substitute(subst)))
+                TypedExprKind::Unary(*op, Box::new(inner.substitute(subst, instances)))
             }
             TypedExprKind::Binary(op, l, r) => TypedExprKind::Binary(
                 *op,
-                Box::new(l.substitute(subst)),
-                Box::new(r.substitute(subst)),
+                Box::new(l.substitute(subst, instances)),
+                Box::new(r.substitute(subst, instances)),
             ),
             TypedExprKind::Cmp(op, l, r) => TypedExprKind::Cmp(
                 *op,
-                Box::new(l.substitute(subst)),
-                Box::new(r.substitute(subst)),
+                Box::new(l.substitute(subst, instances)),
+                Box::new(r.substitute(subst, instances)),
             ),
             TypedExprKind::Logic(op, l, r) => TypedExprKind::Logic(
                 *op,
-                Box::new(l.substitute(subst)),
-                Box::new(r.substitute(subst)),
+                Box::new(l.substitute(subst, instances)),
+                Box::new(r.substitute(subst, instances)),
             ),
-            TypedExprKind::Block(b) => TypedExprKind::Block(Box::new(b.substitute(subst))),
+            TypedExprKind::Block(b) => {
+                TypedExprKind::Block(Box::new(b.substitute(subst, instances)))
+            }
             TypedExprKind::If { cond, then_branch, else_branch } => TypedExprKind::If {
-                cond: Box::new(cond.substitute(subst)),
-                then_branch: Box::new(then_branch.substitute(subst)),
-                else_branch: Box::new(else_branch.substitute(subst)),
+                cond: Box::new(cond.substitute(subst, instances)),
+                then_branch: Box::new(then_branch.substitute(subst, instances)),
+                else_branch: Box::new(else_branch.substitute(subst, instances)),
             },
             TypedExprKind::Call { id, callee_span, args, type_args } => {
                 TypedExprKind::Call {
                     id: *id,
                     callee_span: callee_span.clone(),
-                    args: args.iter().map(|a| a.substitute(subst)).collect(),
+                    args: args.iter().map(|a| a.substitute(subst, instances)).collect(),
                     // Substitute the call's type_args too — this is
                     // what enables transitive monomorphic emission.
-                    type_args: type_args.iter().map(|t| t.substitute(subst)).collect(),
+                    type_args: type_args
+                        .iter()
+                        .map(|t| t.substitute(subst, instances))
+                        .collect(),
                 }
             }
             TypedExprKind::StructLit { id, name, name_span, fields } => {
@@ -552,28 +791,28 @@ impl TypedExpr {
                     id: *id,
                     name: name.clone(),
                     name_span: name_span.clone(),
-                    fields: fields.iter().map(|f| f.substitute(subst)).collect(),
+                    fields: fields.iter().map(|f| f.substitute(subst, instances)).collect(),
                 }
             }
             TypedExprKind::FieldAccess { target, field, field_span, field_index } => {
                 TypedExprKind::FieldAccess {
-                    target: Box::new(target.substitute(subst)),
+                    target: Box::new(target.substitute(subst, instances)),
                     field: field.clone(),
                     field_span: field_span.clone(),
                     field_index: *field_index,
                 }
             }
             TypedExprKind::ArrayLit { elem_ty, elements } => TypedExprKind::ArrayLit {
-                elem_ty: elem_ty.substitute(subst),
-                elements: elements.iter().map(|e| e.substitute(subst)).collect(),
+                elem_ty: elem_ty.substitute(subst, instances),
+                elements: elements.iter().map(|e| e.substitute(subst, instances)).collect(),
             },
             TypedExprKind::Index { target, index, elem_ty } => TypedExprKind::Index {
-                target: Box::new(target.substitute(subst)),
-                index: Box::new(index.substitute(subst)),
-                elem_ty: elem_ty.substitute(subst),
+                target: Box::new(target.substitute(subst, instances)),
+                index: Box::new(index.substitute(subst, instances)),
+                elem_ty: elem_ty.substitute(subst, instances),
             },
         };
-        TypedExpr { kind, span: self.span.clone(), ty: self.ty.substitute(subst) }
+        TypedExpr { kind, span: self.span.clone(), ty: self.ty.substitute(subst, instances) }
     }
 }
 
@@ -957,17 +1196,57 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
-    /// C1.7 / ADR 0016 D6: generic struct instances (`Name<T1, T2>`
-    /// in type position) are accepted by the parser but not yet
-    /// resolvable in C1.7.4a. Closes at C1.7.4b.
-    #[error("generic struct types like `{name}<...>` are not yet supported at C1.7.4a")]
+    /// C1.7 / ADR 0016 D3: a `Name<T1, T2>` use in type position
+    /// supplies the wrong number of type arguments.
+    #[error("`{type_name}` takes {expected} type argument(s), got {found}")]
+    #[diagnostic(code(sentinel::types::type_arg_count_mismatch))]
+    TypeArgCountMismatch {
+        type_name: String,
+        expected: usize,
+        found: usize,
+        #[label("wrong number of type arguments")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.7 / ADR 0016 D3: `<...>` was supplied for a non-generic
+    /// type name (a primitive, a non-generic struct, or a
+    /// type-parameter).
+    #[error("`{type_name}` is not a generic type")]
     #[diagnostic(
-        code(sentinel::types::generic_struct_not_yet_supported),
-        help("generic struct instances land at C1.7.4b — generic fns work at C1.7.4a, but generic structs follow in the next commit")
+        code(sentinel::types::type_args_on_non_generic),
+        help("only generic structs accept type arguments; `{type_name}` doesn't take any")
     )]
-    GenericStructNotYetSupported {
-        name: String,
-        #[label("generic struct type")]
+    TypeArgsOnNonGeneric {
+        type_name: String,
+        #[label("type arguments on a non-generic type")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.7 / ADR 0016 D3: a generic struct was referenced without
+    /// its type arguments (e.g., bare `Box` instead of `Box<i64>`).
+    #[error("`{type_name}` is generic; supply {expected_count} type argument(s)")]
+    #[diagnostic(
+        code(sentinel::types::missing_type_args),
+        help("write `{type_name}<...>` with the type arguments")
+    )]
+    MissingTypeArgs {
+        type_name: String,
+        expected_count: usize,
+        #[label("missing type arguments")]
+        span: miette::SourceSpan,
+    },
+
+    /// C1.7 / ADR 0016: a generic struct literal needs an expected
+    /// type to pin its type arguments. Bare `Pair { ... }` with no
+    /// `let x: Pair<...> = ...` context surfaces this.
+    #[error("ambiguous generic struct literal `{struct_name}` — supply type arguments via context")]
+    #[diagnostic(
+        code(sentinel::types::ambiguous_generic_struct_lit),
+        help("annotate the binding, e.g. `let p: {struct_name}<...> = {struct_name} {{ ... }};`")
+    )]
+    AmbiguousGenericStructLit {
+        struct_name: String,
+        #[label("can't infer type arguments")]
         span: miette::SourceSpan,
     },
 }
@@ -989,28 +1268,47 @@ pub enum TypeError {
 ///      now resolve cleanly against the struct table).
 ///   4. Type-check each fn body.
 pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
-    // Pass 0: struct name table.
+    // Pass 0: struct name table + type-param counts.
     let struct_table: HashMap<String, StructId> =
         sentinel_resolve::struct_name_table(program);
+    let struct_type_param_counts: HashMap<StructId, usize> = program
+        .structs
+        .iter()
+        .map(|sd| (sd.id, sd.type_params.len()))
+        .collect();
+    let mut generic_instances: Vec<GenericInstanceData> = Vec::new();
 
-    // Pass 1: resolve struct field types.
+    // Pass 1: resolve struct field types. C1.7.4b / ADR 0016 D2 /
+    // D6: generic structs are now supported; their fields can
+    // reference the struct's type-params (which appear as
+    // `Type::TypeParam(_)` in the typed AST).
     let mut typed_structs: Vec<TypedStructDecl> =
         Vec::with_capacity(program.structs.len());
     for sd in &program.structs {
-        // C1.7.4a: generic structs are NOT yet supported in this
-        // sub-phase — defer to C1.7.4b. Reject early with a clear
-        // diagnostic (the resolve stage already accepted them).
-        if !sd.type_params.is_empty() {
-            return Err(TypeError::GenericStructNotYetSupported {
-                name: sd.name.clone(),
-                span: to_source_span(&sd.name_span),
-            });
+        let typed_type_params: Vec<TypedTypeParam> = sd
+            .type_params
+            .iter()
+            .map(|tp| TypedTypeParam {
+                id: tp.id,
+                name: tp.name.clone(),
+                name_span: tp.name_span.clone(),
+            })
+            .collect();
+        // Build the per-struct type-param scope so field types can
+        // mention `T`, `U`, etc.
+        let mut tp_scope: TypeParamScope = HashMap::new();
+        for tp in &sd.type_params {
+            tp_scope.insert(tp.name.clone(), tp.id);
         }
-        let typed_type_params: Vec<TypedTypeParam> = Vec::new();
-        let empty_scope: TypeParamScope = HashMap::new();
         let mut fields = Vec::with_capacity(sd.fields.len());
         for f in &sd.fields {
-            let ty = resolve_type_expr_with_scope(&f.ty, &struct_table, &empty_scope)?;
+            let ty = resolve_type_expr_with_scope(
+                &f.ty,
+                &struct_table,
+                &tp_scope,
+                &mut generic_instances,
+                &struct_type_param_counts,
+            )?;
             fields.push(TypedStructField {
                 name: f.name.clone(),
                 name_span: f.name_span.clone(),
@@ -1123,10 +1421,17 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &param.ty,
                 &struct_table,
                 &tp_scope,
+                &mut generic_instances,
+                &struct_type_param_counts,
             )?);
         }
-        let return_type =
-            resolve_type_expr_with_scope(&fn_def.return_type, &struct_table, &tp_scope)?;
+        let return_type = resolve_type_expr_with_scope(
+            &fn_def.return_type,
+            &struct_table,
+            &tp_scope,
+            &mut generic_instances,
+            &struct_type_param_counts,
+        )?;
         typed_signatures.push(TypedFnSignature {
             id: fn_def.id,
             name: resolved_sig.name.clone(),
@@ -1143,16 +1448,26 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     // FnId(i) — matches ResolvedProgram's invariant.
     typed_signatures.sort_by_key(|s| s.id.0);
 
-    // Pass 4: type-check each fn body.
+    // Pass 4: type-check each fn body. Any `Pair<i64, bool>` /
+    // similar new instances that show up here (e.g., from let
+    // annotations or generic call sites) are interned into
+    // `generic_instances`.
     let mut typed_fns = Vec::with_capacity(program.fns.len());
     for fn_def in &program.fns {
-        typed_fns.push(check_fn(fn_def, &typed_signatures, &typed_structs)?);
+        typed_fns.push(check_fn(
+            fn_def,
+            &typed_signatures,
+            &typed_structs,
+            &mut generic_instances,
+            &struct_type_param_counts,
+        )?);
     }
 
     Ok(TypedProgram {
         fns: typed_fns,
         fn_signatures: typed_signatures,
         structs: typed_structs,
+        generic_instances,
         span: program.span.clone(),
     })
 }
@@ -1239,6 +1554,8 @@ fn check_fn(
     fn_def: &ResolvedFnDef,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    instances: &mut Vec<GenericInstanceData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<TypedFnDef, TypeError> {
     // Pull our own signature.
     let signature = &signatures[fn_def.id.0 as usize];
@@ -1264,15 +1581,27 @@ fn check_fn(
     let return_type = signature.return_type;
     // ADR 0014 D5: push the declared return type down into the body
     // so NullLit / T→?T widening at the tail can resolve against it.
-    // But only push if the return type is nullable — otherwise we'd
-    // pre-empt the more specific ReturnTypeMismatch diagnostic with
-    // a less-specific Mismatch on the tail's span.
-    let body_expected = if return_type.is_nullable() {
-        Some(return_type)
-    } else {
-        None
-    };
-    let body = check_block(&fn_def.body, body_expected, &mut env, signatures, structs)?;
+    // We only push for the type-shapes that actually NEED context:
+    // nullables (per ADR 0014 D5) and generic-struct instances (per
+    // ADR 0016 D6 — the literal `Pair { ... }` inside `make_pair<A, B>`
+    // can't synthesise its own type args). Other returns synthesise
+    // freely so the more specific ReturnTypeMismatch fires on
+    // primitive shape errors.
+    let body_expected =
+        if return_type.is_nullable() || return_type.is_generic_instance() {
+            Some(return_type)
+        } else {
+            None
+        };
+    let body = check_block(
+        &fn_def.body,
+        body_expected,
+        &mut env,
+        signatures,
+        structs,
+        instances,
+        struct_type_param_counts,
+    )?;
 
     if body.ty != return_type {
         return Err(TypeError::ReturnTypeMismatch {
@@ -1310,6 +1639,12 @@ fn check_fn(
 /// substitution happens at the caller.
 type VarTypeEnv = std::collections::HashMap<VarId, Type>;
 
+// `build_struct_type_param_counts` lived here briefly as a
+// helper but was inlined into the few sites that needed it; the
+// `struct_type_param_counts` parameter is threaded through `check`
+// itself.
+
+
 /// Synthesize a [`TypedTypeParam`] for one of the C1.7 generic
 /// builtins (`unwrap_or`, `is_some`, `len`). The name is the
 /// source-level identifier (`"T"`) for diagnostics; the span is
@@ -1328,14 +1663,31 @@ fn check_block(
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    instances: &mut Vec<GenericInstanceData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<TypedBlock, TypeError> {
     let mut stmts = Vec::with_capacity(block.stmts.len());
     for stmt in &block.stmts {
-        stmts.push(check_stmt(stmt, env, signatures, structs)?);
+        stmts.push(check_stmt(
+            stmt,
+            env,
+            signatures,
+            structs,
+            instances,
+            struct_type_param_counts,
+        )?);
     }
     // Only the tail receives the expected-type pushdown (the block's
     // value is the tail's value).
-    let tail = check_expr(&block.tail, expected, env, signatures, structs)?;
+    let tail = check_expr(
+        &block.tail,
+        expected,
+        env,
+        signatures,
+        structs,
+        instances,
+        struct_type_param_counts,
+    )?;
     let ty = tail.ty;
     Ok(TypedBlock {
         stmts,
@@ -1350,6 +1702,8 @@ fn check_stmt(
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    instances: &mut Vec<GenericInstanceData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<TypedStmt, TypeError> {
     let kind = match &stmt.kind {
         ResolvedStmtKind::Let { id, name, name_span, ty_annot, value } => {
@@ -1359,11 +1713,24 @@ fn check_stmt(
             let expected = match ty_annot {
                 Some(annot) => {
                     let struct_table = struct_name_table_local(structs);
-                    Some(resolve_type_expr(annot, &struct_table)?)
+                    Some(resolve_type_expr(
+                        annot,
+                        &struct_table,
+                        instances,
+                        struct_type_param_counts,
+                    )?)
                 }
                 None => None,
             };
-            let value_typed = check_expr(value, expected, env, signatures, structs)?;
+            let value_typed = check_expr(
+                value,
+                expected,
+                env,
+                signatures,
+                structs,
+                instances,
+                struct_type_param_counts,
+            )?;
             let ty = match (ty_annot, expected) {
                 (Some(_), Some(annotated)) => {
                     // check_expr already validated; result must match.
@@ -1387,9 +1754,15 @@ fn check_stmt(
                 value: value_typed,
             }
         }
-        ResolvedStmtKind::Expr(e) => {
-            TypedStmtKind::Expr(check_expr(e, None, env, signatures, structs)?)
-        }
+        ResolvedStmtKind::Expr(e) => TypedStmtKind::Expr(check_expr(
+            e,
+            None,
+            env,
+            signatures,
+            structs,
+            instances,
+            struct_type_param_counts,
+        )?),
     };
     Ok(TypedStmt { kind, span: stmt.span.clone() })
 }
@@ -1441,28 +1814,47 @@ fn coerce_to_expected(
 /// [`check_call`] to determine whether a generic param's type is
 /// fully concretized enough to push down to its arg as bidirectional
 /// expected-type.
-fn try_substitute(ty: Type, subst: &[Option<Type>]) -> Option<Type> {
+fn try_substitute(
+    ty: Type,
+    subst: &[Option<Type>],
+    instances: &[GenericInstanceData],
+) -> Option<Type> {
     match ty {
         Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => Some(ty),
         Type::TypeParam(id) => subst.get(id.0 as usize).copied().flatten(),
         Type::Nullable(ni) => {
-            let inner = try_substitute(ni.to_type(), subst)?;
+            let inner = try_substitute(ni.to_type(), subst, instances)?;
             inner.to_nullable_inner().map(Type::Nullable)
         }
         Type::Array(ae) => {
-            let inner = try_substitute(ae.to_type(), subst)?;
+            let inner = try_substitute(ae.to_type(), subst, instances)?;
             inner.to_array_elem().map(Type::Array)
+        }
+        Type::GenericInstance(id) => {
+            // Concrete only if every arg is concrete (under
+            // current subst). Doesn't re-intern — that's the
+            // mutable-substitute path.
+            let inst = &instances[id.0 as usize];
+            for arg in &inst.args {
+                try_substitute(*arg, subst, instances)?;
+            }
+            Some(ty)
         }
     }
 }
 
-/// `true` iff `ty` mentions at least one [`Type::TypeParam`].
-fn contains_type_param(ty: Type) -> bool {
+/// `true` iff `ty` mentions at least one [`Type::TypeParam`],
+/// either directly or inside the args of a GenericInstance.
+fn contains_type_param(ty: Type, instances: &[GenericInstanceData]) -> bool {
     match ty {
         Type::TypeParam(_) => true,
-        Type::Nullable(ni) => contains_type_param(ni.to_type()),
-        Type::Array(ae) => contains_type_param(ae.to_type()),
+        Type::Nullable(ni) => contains_type_param(ni.to_type(), instances),
+        Type::Array(ae) => contains_type_param(ae.to_type(), instances),
         Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => false,
+        Type::GenericInstance(id) => instances[id.0 as usize]
+            .args
+            .iter()
+            .any(|a| contains_type_param(*a, instances)),
     }
 }
 
@@ -1490,6 +1882,7 @@ fn unify_one(
     param: Type,
     arg: Type,
     subst: &mut [Option<Type>],
+    instances: &[GenericInstanceData],
 ) -> Result<(), UnifyFailure> {
     match (param, arg) {
         (Type::TypeParam(id), other) => {
@@ -1508,10 +1901,27 @@ fn unify_one(
             }
         }
         (Type::Nullable(p), Type::Nullable(a)) => {
-            unify_one(p.to_type(), a.to_type(), subst)
+            unify_one(p.to_type(), a.to_type(), subst, instances)
         }
         (Type::Array(p), Type::Array(a)) => {
-            unify_one(p.to_type(), a.to_type(), subst)
+            unify_one(p.to_type(), a.to_type(), subst, instances)
+        }
+        (Type::GenericInstance(p_id), Type::GenericInstance(a_id)) => {
+            // Same instance id → trivially equal.
+            if p_id == a_id {
+                return Ok(());
+            }
+            let p_inst = &instances[p_id.0 as usize];
+            let a_inst = &instances[a_id.0 as usize];
+            // Both must be instances of the same generic struct;
+            // otherwise it's a structural mismatch.
+            if p_inst.struct_id != a_inst.struct_id || p_inst.args.len() != a_inst.args.len() {
+                return Err(UnifyFailure::Mismatch(param, arg));
+            }
+            for (pa, aa) in p_inst.args.iter().zip(a_inst.args.iter()) {
+                unify_one(*pa, *aa, subst, instances)?;
+            }
+            Ok(())
         }
         (p, a) if p == a => Ok(()),
         (p, a) => Err(UnifyFailure::Mismatch(p, a)),
@@ -1545,6 +1955,8 @@ fn check_call(
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    instances: &mut Vec<GenericInstanceData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
     call_span: &Span,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let signature = &signatures[id.0 as usize];
@@ -1569,7 +1981,7 @@ fn check_call(
         // against the expected. Best-effort — failures here are
         // silent because a real downstream mismatch will surface
         // as ReturnTypeMismatch / Mismatch later.
-        let _ = unify_one(signature.return_type, exp, &mut subst);
+        let _ = unify_one(signature.return_type, exp, &mut subst, instances);
     }
 
     // Iterative inference. Each iteration types as many args as
@@ -1589,8 +2001,8 @@ fn check_call(
             // concrete params synthesize without pushdown so the
             // more specific `CallArgMismatch` (rather than the
             // generic `Mismatch`) surfaces on shape errors.
-            let concrete_param = if contains_type_param(param) {
-                try_substitute(param, &subst)
+            let concrete_param = if contains_type_param(param, instances) {
+                try_substitute(param, &subst, instances)
             } else {
                 Some(param)
             };
@@ -1605,10 +2017,10 @@ fn check_call(
             {
                 continue;
             }
-            let typed = check_expr(&args[i], arg_expected, env, signatures, structs)?;
+            let typed = check_expr(&args[i], arg_expected, env, signatures, structs, instances, struct_type_param_counts)?;
             // Validate the arg's type against the param (possibly
             // refining subst with any new TypeParam bindings).
-            match unify_one(param, typed.ty, &mut subst) {
+            match unify_one(param, typed.ty, &mut subst, instances) {
                 Ok(()) => {}
                 Err(UnifyFailure::Mismatch(expected, got)) => {
                     // If the failing param has unbound TypeParams,
@@ -1618,7 +2030,7 @@ fn check_call(
                     // If the param fully substitutes to a concrete
                     // shape, the more specific `CallArgMismatch`
                     // pinpoints the arg position by callee + index.
-                    return match try_substitute(expected, &subst) {
+                    return match try_substitute(expected, &subst, instances) {
                         Some(concrete) => Err(TypeError::CallArgMismatch {
                             callee: signature.name.clone(),
                             arg_index: i,
@@ -1682,8 +2094,10 @@ fn check_call(
         }
     }
 
-    // Compute the substituted return type.
-    let ret_ty = signature.return_type.substitute(&concrete_type_args);
+    // Compute the substituted return type. This may extend
+    // `instances` if the return type contains a GenericInstance
+    // with TypeParam args.
+    let ret_ty = signature.return_type.substitute(&concrete_type_args, instances);
 
     let typed_args: Vec<TypedExpr> =
         typed_args.into_iter().map(|o| o.expect("filled above")).collect();
@@ -1704,6 +2118,8 @@ fn check_expr(
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    instances: &mut Vec<GenericInstanceData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<TypedExpr, TypeError> {
     // C1.5 / ADR 0014 D2: NullLit has no synthesis type — it MUST
     // see an expected `?T` context to type-check.
@@ -1731,7 +2147,7 @@ fn check_expr(
             (TypedExprKind::Var(*id), ty)
         }
         ResolvedExprKind::Unary(op, inner) => {
-            let inner_t = check_expr(inner, None, env, signatures, structs)?;
+            let inner_t = check_expr(inner, None, env, signatures, structs, instances, struct_type_param_counts)?;
             // C1.3: `-x` requires int; `!x` requires bool.
             let ty = match op {
                 UnaryOp::Neg => {
@@ -1758,8 +2174,8 @@ fn check_expr(
             (TypedExprKind::Unary(*op, Box::new(inner_t)), ty)
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs)?;
-            let r = check_expr(rhs, None, env, signatures, structs)?;
+            let l = check_expr(lhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
             // C1.3: arithmetic requires both operands the same int
             // type (I32 or I64); result is that int type. Bool /
             // struct arithmetic is rejected.
@@ -1802,10 +2218,10 @@ fn check_expr(
                 // The non-null side determines the expected ?T type.
                 // First, synthesize the non-null side.
                 let (non_null_side, non_null_expr, null_span) = if lhs_is_null {
-                    let r = check_expr(rhs, None, env, signatures, structs)?;
+                    let r = check_expr(rhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
                     (r.ty, r, lhs.span.clone())
                 } else {
-                    let l = check_expr(lhs, None, env, signatures, structs)?;
+                    let l = check_expr(lhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
                     (l.ty, l, rhs.span.clone())
                 };
                 // Non-null side must be Nullable for null-comparison.
@@ -1832,8 +2248,8 @@ fn check_expr(
                     ty: Type::Bool,
                 });
             }
-            let l = check_expr(lhs, None, env, signatures, structs)?;
-            let r = check_expr(rhs, None, env, signatures, structs)?;
+            let l = check_expr(lhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
             // C1.3: comparisons require both operands the same type.
             // C1.4 + C1.5 keep this as int + bool only (ADR 0013 D6
             // defers struct equality; nullable-vs-nullable equality
@@ -1859,8 +2275,8 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Logic(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs)?;
-            let r = check_expr(rhs, None, env, signatures, structs)?;
+            let l = check_expr(lhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
             if l.ty != Type::Bool {
                 return Err(TypeError::Mismatch {
                     expected: Type::Bool,
@@ -1881,12 +2297,12 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Block(b) => {
-            let typed_block = check_block(b, expected, env, signatures, structs)?;
+            let typed_block = check_block(b, expected, env, signatures, structs, instances, struct_type_param_counts)?;
             let ty = typed_block.ty;
             (TypedExprKind::Block(Box::new(typed_block)), ty)
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
-            let cond_t = check_expr(cond, None, env, signatures, structs)?;
+            let cond_t = check_expr(cond, None, env, signatures, structs, instances, struct_type_param_counts)?;
             // C1.3 step 5: if-condition must be bool.
             if cond_t.ty != Type::Bool {
                 return Err(TypeError::Mismatch {
@@ -1897,8 +2313,8 @@ fn check_expr(
             }
             // ADR 0014 D5: push the expected type down into both
             // branches so `null` in either branch can resolve.
-            let then_t = check_block(then_branch, expected, env, signatures, structs)?;
-            let else_t = check_block(else_branch, expected, env, signatures, structs)?;
+            let then_t = check_block(then_branch, expected, env, signatures, structs, instances, struct_type_param_counts)?;
+            let else_t = check_block(else_branch, expected, env, signatures, structs, instances, struct_type_param_counts)?;
             if then_t.ty != else_t.ty {
                 return Err(TypeError::Mismatch {
                     expected: then_t.ty,
@@ -1916,12 +2332,55 @@ fn check_expr(
                 ty,
             )
         }
-        ResolvedExprKind::Call { id, callee_span, args } => {
-            check_call(*id, callee_span, args, expected, env, signatures, structs, &expr.span)?
-        }
+        ResolvedExprKind::Call { id, callee_span, args } => check_call(
+            *id,
+            callee_span,
+            args,
+            expected,
+            env,
+            signatures,
+            structs,
+            instances,
+            struct_type_param_counts,
+            &expr.span,
+        )?,
         ResolvedExprKind::StructLit { id, name, name_span, fields } => {
             // The struct decl provides the expected field set + types.
             let decl = &structs[id.0 as usize];
+
+            // C1.7.4b / ADR 0016 D6: if the decl is generic, the
+            // literal needs type arguments to pin field types. We
+            // recover them from the expected type (a `let p: Pair
+            // <i64, i64> = Pair { ... }` context) or, failing that,
+            // surface `AmbiguousGenericStructLit`.
+            let (instance_id, type_args): (
+                Option<GenericInstanceId>,
+                Vec<Type>,
+            ) = if decl.type_params.is_empty() {
+                (None, Vec::new())
+            } else {
+                match expected {
+                    Some(Type::GenericInstance(gi_id)) => {
+                        // The expected instance's struct_id must
+                        // match this literal's struct id; if not,
+                        // standard `Mismatch` later catches it.
+                        let inst = &instances[gi_id.0 as usize];
+                        if inst.struct_id != *id {
+                            return Err(TypeError::AmbiguousGenericStructLit {
+                                struct_name: decl.name.clone(),
+                                span: to_source_span(name_span),
+                            });
+                        }
+                        (Some(gi_id), inst.args.clone())
+                    }
+                    _ => {
+                        return Err(TypeError::AmbiguousGenericStructLit {
+                            struct_name: decl.name.clone(),
+                            span: to_source_span(name_span),
+                        });
+                    }
+                }
+            };
 
             // Type-check each provided field's value.
             let mut provided: Vec<(usize, TypedExpr)> = Vec::with_capacity(fields.len());
@@ -1936,7 +2395,14 @@ fn check_expr(
                         field: fi.name.clone(),
                         span: to_source_span(&fi.name_span),
                     })?;
-                let expected_field_ty = decl.fields[decl_idx].ty;
+                // Field type, substituted by the instance's type-
+                // args when the struct is generic.
+                let raw_field_ty = decl.fields[decl_idx].ty;
+                let expected_field_ty = if type_args.is_empty() {
+                    raw_field_ty
+                } else {
+                    raw_field_ty.substitute(&type_args, instances)
+                };
                 // ADR 0014 D5: push the field's expected type down so
                 // `null` / widening work inside struct literals.
                 let value_t = check_expr(
@@ -1945,6 +2411,8 @@ fn check_expr(
                     env,
                     signatures,
                     structs,
+                    instances,
+                    struct_type_param_counts,
                 )?;
                 if value_t.ty != expected_field_ty {
                     return Err(TypeError::Mismatch {
@@ -1956,13 +2424,6 @@ fn check_expr(
                 provided.push((decl_idx, value_t));
             }
 
-            // Validate every declared field was provided. (Duplicate
-            // detection is implicit — a duplicate field name in the
-            // literal would lead to two provided entries with the
-            // same decl_idx, both pointing at the same expected type
-            // and both being type-checked; codegen would emit two
-            // stores to the same slot. C1.4 accepts this without a
-            // diagnostic — Rust does too. A future ADR may revisit.)
             if provided.len() < decl.fields.len() {
                 for df in &decl.fields {
                     if !provided
@@ -1978,12 +2439,7 @@ fn check_expr(
                 }
             }
 
-            // Reorder to declaration order so codegen can iterate
-            // by index without consulting field names.
             provided.sort_by_key(|(idx, _)| *idx);
-            // After sort, the index sequence may have gaps if a
-            // field was provided multiple times; for C1.4 we just
-            // take the last value at each index.
             let mut by_index: Vec<Option<TypedExpr>> = vec![None; decl.fields.len()];
             for (idx, val) in provided {
                 by_index[idx] = Some(val);
@@ -1993,6 +2449,10 @@ fn check_expr(
                 .map(|opt| opt.expect("every field was provided"))
                 .collect();
 
+            let result_ty = match instance_id {
+                Some(gi_id) => Type::GenericInstance(gi_id),
+                None => Type::Struct(*id),
+            };
             (
                 TypedExprKind::StructLit {
                     id: *id,
@@ -2000,7 +2460,7 @@ fn check_expr(
                     name_span: name_span.clone(),
                     fields: ordered,
                 },
-                Type::Struct(*id),
+                result_ty,
             )
         }
         ResolvedExprKind::ArrayLit(elems) => {
@@ -2037,12 +2497,20 @@ fn check_expr(
                 // Type-check elements. First element synthesizes T
                 // if no expected; subsequent elements get T as
                 // expected (so widening / null work inside `[T]`).
-                let first = check_expr(&elems[0], expected_elem, env, signatures, structs)?;
+                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, instances, struct_type_param_counts)?;
                 let elem_ty = first.ty;
                 let mut typed = Vec::with_capacity(elems.len());
                 typed.push(first);
                 for e in &elems[1..] {
-                    let t = check_expr(e, Some(elem_ty), env, signatures, structs)?;
+                    let t = check_expr(
+                        e,
+                        Some(elem_ty),
+                        env,
+                        signatures,
+                        structs,
+                        instances,
+                        struct_type_param_counts,
+                    )?;
                     if t.ty != elem_ty {
                         return Err(TypeError::Mismatch {
                             expected: elem_ty,
@@ -2067,7 +2535,7 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Index { target, index } => {
-            let target_t = check_expr(target, None, env, signatures, structs)?;
+            let target_t = check_expr(target, None, env, signatures, structs, instances, struct_type_param_counts)?;
             let elem_ty = match target_t.ty {
                 Type::Array(ae) => ae,
                 other => {
@@ -2080,7 +2548,7 @@ fn check_expr(
             // Synthesize the index without pushdown so a non-int
             // index surfaces as the more-specific `IndexNotInt`
             // rather than a generic `Mismatch`.
-            let index_t = check_expr(index, None, env, signatures, structs)?;
+            let index_t = check_expr(index, None, env, signatures, structs, instances, struct_type_param_counts)?;
             if index_t.ty != Type::I64 {
                 return Err(TypeError::IndexNotInt {
                     got: index_t.ty,
@@ -2097,9 +2565,24 @@ fn check_expr(
             )
         }
         ResolvedExprKind::FieldAccess { target, field, field_span } => {
-            let target_t = check_expr(target, None, env, signatures, structs)?;
-            let struct_id = match target_t.ty {
-                Type::Struct(id) => id,
+            let target_t = check_expr(
+                target,
+                None,
+                env,
+                signatures,
+                structs,
+                instances,
+                struct_type_param_counts,
+            )?;
+            // C1.7.4b / ADR 0016 D6: field access on a generic
+            // instance substitutes the field type by the instance's
+            // type-args.
+            let (struct_id, type_args): (StructId, Vec<Type>) = match target_t.ty {
+                Type::Struct(id) => (id, Vec::new()),
+                Type::GenericInstance(gi_id) => {
+                    let inst = &instances[gi_id.0 as usize];
+                    (inst.struct_id, inst.args.clone())
+                }
                 other => {
                     return Err(TypeError::FieldAccessOnNonStruct {
                         got: other,
@@ -2108,7 +2591,7 @@ fn check_expr(
                 }
             };
             let decl = &structs[struct_id.0 as usize];
-            let (field_index, field_ty) = decl
+            let (field_index, raw_field_ty) = decl
                 .fields
                 .iter()
                 .enumerate()
@@ -2124,6 +2607,11 @@ fn check_expr(
                     field: field.clone(),
                     span: to_source_span(field_span),
                 })?;
+            let field_ty = if type_args.is_empty() {
+                raw_field_ty
+            } else {
+                raw_field_ty.substitute(&type_args, instances)
+            };
             (
                 TypedExprKind::FieldAccess {
                     target: Box::new(target_t),
@@ -2259,9 +2747,24 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             ),
             span.offset()..(span.offset() + span.len()),
         ),
-        TypeError::GenericStructNotYetSupported { name, span } => (
-            "sentinel::types::generic_struct_not_yet_supported",
-            format!("generic struct types like `{name}<...>` are not yet supported at C1.7.4a"),
+        TypeError::TypeArgCountMismatch { type_name, expected, found, span } => (
+            "sentinel::types::type_arg_count_mismatch",
+            format!("`{type_name}` takes {expected} type argument(s), got {found}"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::TypeArgsOnNonGeneric { type_name, span } => (
+            "sentinel::types::type_args_on_non_generic",
+            format!("`{type_name}` is not a generic type"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::MissingTypeArgs { type_name, expected_count, span } => (
+            "sentinel::types::missing_type_args",
+            format!("`{type_name}` is generic; supply {expected_count} type argument(s)"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::AmbiguousGenericStructLit { struct_name, span } => (
+            "sentinel::types::ambiguous_generic_struct_lit",
+            format!("ambiguous generic struct literal `{struct_name}` — supply type arguments via context"),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -3341,26 +3844,74 @@ fn main() -> i64 {
     }
 
     #[test]
-    fn c17_generic_struct_rejected_at_c17_4a() {
+    fn c17_generic_struct_decl_typechecks() {
+        // C1.7.4b: generic struct decls are now supported. Field
+        // types reference TypeParam(_) inside the struct's scope.
+        let p = check_ok("struct Box<T> { value: T }\nfn main() -> i64 { 0 }");
+        let s = &p.structs[0];
+        assert_eq!(s.name, "Box");
+        assert_eq!(s.type_params.len(), 1);
+        // value: T → TypeParam(0)
+        assert_eq!(s.fields[0].ty, Type::TypeParam(TypeParamId(0)));
+    }
+
+    #[test]
+    fn c17_generic_instance_in_signature_typechecks() {
+        // `Box<i64>` in type position now resolves to a
+        // Type::GenericInstance, interned in program.generic_instances.
+        let p = check_ok(
+            "struct Box<T> { value: T }\n\
+             fn unbox(b: Box<i64>) -> i64 { b.value }\n\
+             fn main() -> i64 { 0 }",
+        );
+        let f = p.fns.iter().find(|f| f.name == "unbox").expect("unbox");
+        let sig = p.signature(f.id);
+        // param[0]: Box<i64> → GenericInstance referencing
+        // (BoxStructId, [I64]).
+        match sig.param_types[0] {
+            Type::GenericInstance(gi_id) => {
+                let inst = p.generic_instance(gi_id);
+                assert_eq!(inst.struct_id, StructId(0));
+                assert_eq!(inst.args, vec![Type::I64]);
+            }
+            other => panic!("expected GenericInstance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn c17_generic_struct_arity_mismatch() {
+        // Box takes 1 type-arg; giving 2 surfaces TypeArgCountMismatch.
         let err = check_err(
-            "struct Box<T> { value: T }\nfn main() -> i64 { 0 }",
+            "struct Box<T> { value: T }\n\
+             fn unbox(b: Box<i64, bool>) -> i64 { 0 }\n\
+             fn main() -> i64 { 0 }",
         );
         assert!(
-            matches!(err, TypeError::GenericStructNotYetSupported { ref name, .. } if name == "Box"),
+            matches!(err, TypeError::TypeArgCountMismatch { ref type_name, expected: 1, found: 2, .. } if type_name == "Box"),
             "got {err:?}"
         );
     }
 
     #[test]
-    fn c17_generic_struct_type_in_signature_rejected_at_c17_4a() {
-        // `Box<i64>` in type position — even without a `struct Box`
-        // decl, the parser produces TypeExprKind::Generic which
-        // surfaces as the not-yet diagnostic.
+    fn c17_missing_type_args_on_generic_struct() {
+        // Bare `Box` without args surfaces MissingTypeArgs.
         let err = check_err(
-            "fn unbox(b: Box<i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+            "struct Box<T> { value: T }\n\
+             fn unbox(b: Box) -> i64 { 0 }\n\
+             fn main() -> i64 { 0 }",
         );
         assert!(
-            matches!(err, TypeError::GenericStructNotYetSupported { ref name, .. } if name == "Box"),
+            matches!(err, TypeError::MissingTypeArgs { ref type_name, expected_count: 1, .. } if type_name == "Box"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c17_type_args_on_non_generic() {
+        // `i64<bool>` is meaningless.
+        let err = check_err("fn f(b: i64<bool>) -> i64 { 0 }\nfn main() -> i64 { 0 }");
+        assert!(
+            matches!(err, TypeError::TypeArgsOnNonGeneric { ref type_name, .. } if type_name == "i64"),
             "got {err:?}"
         );
     }

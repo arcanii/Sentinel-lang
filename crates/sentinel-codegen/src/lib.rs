@@ -45,8 +45,8 @@ use sentinel_resolve::{
     FnId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
 };
 use sentinel_types::{
-    ArrayElem, NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram,
-    TypedStmt, TypedStmtKind,
+    ArrayElem, GenericInstanceData, GenericInstanceId, NullableInner, Type, TypedBlock, TypedExpr,
+    TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -94,27 +94,108 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
 
     let i32_type = context.i32_type();
 
-    // Pass 0: declare every user struct as an LLVM struct type. The
-    // typed program's struct list is in StructId order; we mirror
-    // that order so the StructId.0 indexes the struct_types vec.
+    // C1.7.4b: take a mutable copy of the program's generic-instance
+    // table and run the monomorphic worklist BEFORE LLVM struct
+    // declarations, since substitution may extend `instances` with
+    // new entries (e.g., transitive nested generics). The walk
+    // doesn't need LLVM types yet — it just discovers `(FnId,
+    // type_args)` tuples and threads through `Type::substitute`.
+    let mut instances: Vec<GenericInstanceData> = program.generic_instances.clone();
+    let instantiations = collect_mono_instantiations(program, &mut instances);
+    // Materialise each fn instance as a substituted TypedFnDef so
+    // pass 2's body lowering can consume it without TypeParam-
+    // awareness. May extend `instances` further as nested generic
+    // instances surface during substitution.
+    let mono_defs: Vec<((FnId, Vec<Type>), TypedFnDef)> = instantiations
+        .iter()
+        .map(|(fn_id, args)| {
+            let generic_def = program
+                .fns
+                .iter()
+                .find(|f| f.id == *fn_id)
+                .expect("collect_mono_instantiations only queues real user-defined fns");
+            ((*fn_id, args.clone()), generic_def.substitute(args, &mut instances))
+        })
+        .collect();
+
+    // Pass 0: declare every user struct (non-generic + generic
+    // instance) as an LLVM struct type. The typed program's struct
+    // list is in StructId order. Generic instances get their own
+    // LLVM struct types keyed by [`GenericInstanceId`]; their LLVM
+    // names are mangled per [`mangle_generic_struct_name`] to avoid
+    // collisions across instantiations.
     //
-    // Two-step to handle forward references via `?T`-style nullables
-    // (C1.5): first declare all opaque struct types, then set their
-    // bodies. Without this, `struct Node { next: ?Node }` would
-    // panic when llvm_basic_type tries to look up Node before it's
-    // inserted.
+    // Three-step to handle forward references through `?T`-style
+    // nullables (C1.5) and `?Struct`/`?GenericInstance` pointer
+    // payloads: declare all opaque types first, then set bodies.
     let mut struct_types: HashMap<StructId, StructType> = HashMap::new();
+    let mut generic_struct_types: HashMap<GenericInstanceId, StructType> = HashMap::new();
     for sd in &program.structs {
-        let st = context.opaque_struct_type(&sd.name);
-        struct_types.insert(sd.id, st);
+        // Skip the generic struct decl itself — only concrete
+        // instances get LLVM types.
+        if sd.type_params.is_empty() {
+            let st = context.opaque_struct_type(&sd.name);
+            struct_types.insert(sd.id, st);
+        }
     }
+    // Only concrete instances (no TypeParam in args, transitively)
+    // get an LLVM struct type. Abstract instances exist in the
+    // table because the type checker interned them for generic-fn
+    // signatures (e.g., `fst<A, B>(p: Pair<A, B>)` interns a
+    // `Pair<TypeParam(0), TypeParam(1)>` shape) but they never
+    // materialize at runtime — the monomorphic clones use
+    // concrete-arg instances built during substitution.
+    let abstract_args = |args: &[Type]| -> bool {
+        args.iter().any(|a| arg_contains_typeparam(*a, &instances))
+    };
+    for (idx, inst) in instances.iter().enumerate() {
+        if abstract_args(&inst.args) {
+            continue;
+        }
+        let name = mangle_generic_struct_name(program, inst);
+        let st = context.opaque_struct_type(&name);
+        generic_struct_types.insert(GenericInstanceId(idx as u32), st);
+    }
+    // Set bodies. Non-generic struct fields may reference generic
+    // instances (e.g., `struct Cache { items: Box<i64> }`), so the
+    // generic instances must already be in `generic_struct_types`
+    // before this point — which they are.
     for sd in &program.structs {
+        if !sd.type_params.is_empty() {
+            continue; // generic decls don't get a runtime body
+        }
         let field_tys: Vec<BasicTypeEnum> = sd
             .fields
             .iter()
-            .map(|f| llvm_basic_type(&context, f.ty, &struct_types))
+            .map(|f| llvm_basic_type(&context, f.ty, &struct_types, &generic_struct_types))
             .collect();
         let st = struct_types[&sd.id];
+        st.set_body(&field_tys, false);
+    }
+    for (idx, inst) in instances.iter().enumerate() {
+        if abstract_args(&inst.args) {
+            continue;
+        }
+        // The generic struct decl's field types may mention
+        // `Type::TypeParam`; substitute them by the instance's args
+        // to get concrete LLVM field types.
+        let decl = &program.structs[inst.struct_id.0 as usize];
+        let field_tys: Vec<BasicTypeEnum> = decl
+            .fields
+            .iter()
+            .map(|f| {
+                let args = inst.args.clone();
+                let mut local_instances = instances.clone();
+                let concrete = f.ty.substitute(&args, &mut local_instances);
+                llvm_basic_type(
+                    &context,
+                    concrete,
+                    &struct_types,
+                    &generic_struct_types,
+                )
+            })
+            .collect();
+        let st = generic_struct_types[&GenericInstanceId(idx as u32)];
         st.set_body(&field_tys, false);
     }
 
@@ -134,9 +215,9 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
         let param_types: Vec<_> = print_sig
             .param_types
             .iter()
-            .map(|t| llvm_basic_type(&context, *t, &struct_types).into())
+            .map(|t| llvm_basic_type(&context, *t, &struct_types, &generic_struct_types).into())
             .collect();
-        let fn_type = llvm_basic_type(&context, print_sig.return_type, &struct_types)
+        let fn_type = llvm_basic_type(&context, print_sig.return_type, &struct_types, &generic_struct_types)
             .fn_type(&param_types, false);
         module.add_function("sentinel_print", fn_type, None)
     };
@@ -163,12 +244,12 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
         let param_types: Vec<_> = signature
             .param_types
             .iter()
-            .map(|t| llvm_basic_type(&context, *t, &struct_types).into())
+            .map(|t| llvm_basic_type(&context, *t, &struct_types, &generic_struct_types).into())
             .collect();
         let fn_type = if signature.is_main {
             i32_type.fn_type(&param_types, false)
         } else {
-            llvm_basic_type(&context, signature.return_type, &struct_types)
+            llvm_basic_type(&context, signature.return_type, &struct_types, &generic_struct_types)
                 .fn_type(&param_types, false)
         };
         let fn_value = module.add_function(&signature.name, fn_type, None);
@@ -193,28 +274,10 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
         module.add_function("sentinel_panic_oob", panic_type, None)
     };
 
-    // C1.7.5 / ADR 0016 D7: collect generic-fn instantiations
-    // reachable from non-generic fn bodies (the seed) and any
-    // transitive calls discovered while walking already-queued
-    // instances. Each unique `(FnId, Vec<Type>)` becomes one
-    // monomorphic LLVM function.
-    let instantiations = collect_mono_instantiations(program);
-    // Materialise each instance as a substituted TypedFnDef so
-    // pass 2's body lowering can consume it without TypeParam-
-    // awareness. The substituted defs are owned here and held
-    // alive across pass 2.
-    let mono_defs: Vec<((FnId, Vec<Type>), TypedFnDef)> = instantiations
-        .iter()
-        .map(|(fn_id, args)| {
-            let generic_def = program
-                .fns
-                .iter()
-                .find(|f| f.id == *fn_id)
-                .expect("collect_mono_instantiations only queues real user-defined fns");
-            ((*fn_id, args.clone()), generic_def.substitute(args))
-        })
-        .collect();
-    // Pre-declare each monomorphic LLVM fn with a mangled name so
+    // C1.7.5 / ADR 0016 D7: mono_defs + the `instances` table were
+    // already built above before pass 0 (so the LLVM struct types
+    // for nested generic instances could be declared). Here we
+    // pre-declare each monomorphic LLVM fn with a mangled name so
     // that within pass 2 we can resolve `(FnId, Vec<Type>)` →
     // FunctionValue at every call site (including transitive
     // generic-fn-to-generic-fn calls).
@@ -224,9 +287,9 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
         let param_types: Vec<_> = def
             .params
             .iter()
-            .map(|p| llvm_basic_type(&context, p.ty, &struct_types).into())
+            .map(|p| llvm_basic_type(&context, p.ty, &struct_types, &generic_struct_types).into())
             .collect();
-        let fn_type = llvm_basic_type(&context, def.return_type, &struct_types)
+        let fn_type = llvm_basic_type(&context, def.return_type, &struct_types, &generic_struct_types)
             .fn_type(&param_types, false);
         let fn_value = module.add_function(&mangled, fn_type, None);
         mono_fns.insert((*fn_id, args.clone()), fn_value);
@@ -241,6 +304,7 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
             fns,
             mono_fns,
             struct_types,
+            generic_struct_types,
             alloc_fn,
             panic_oob_fn,
             current_fn: None,
@@ -315,6 +379,9 @@ struct CodegenCtx<'ctx> {
     /// callee is a user-defined generic fn.
     mono_fns: HashMap<(FnId, Vec<Type>), FunctionValue<'ctx>>,
     struct_types: HashMap<StructId, StructType<'ctx>>,
+    /// C1.7.4b / ADR 0016 D6: per-instance LLVM struct types,
+    /// keyed by [`GenericInstanceId`]. Built in pass 0.
+    generic_struct_types: HashMap<GenericInstanceId, StructType<'ctx>>,
     /// C1.6: `sentinel_alloc(i64) -> ptr` runtime function. Called
     /// to back array storage and `?Struct` heap payloads.
     alloc_fn: FunctionValue<'ctx>,
@@ -340,6 +407,7 @@ fn llvm_basic_type<'ctx>(
     context: &'ctx Context,
     ty: Type,
     struct_types: &HashMap<StructId, StructType<'ctx>>,
+    generic_struct_types: &HashMap<GenericInstanceId, StructType<'ctx>>,
 ) -> BasicTypeEnum<'ctx> {
     match ty {
         Type::Bool => context.bool_type().into(),
@@ -349,17 +417,28 @@ fn llvm_basic_type<'ctx>(
             .get(&id)
             .expect("struct declared in pass 0"))
         .into(),
+        Type::GenericInstance(id) => (*generic_struct_types
+            .get(&id)
+            .expect("generic instance declared in pass 0"))
+        .into(),
         Type::Nullable(inner) => {
             let valid_ty: BasicTypeEnum = context.bool_type().into();
             let payload_ty: BasicTypeEnum = match inner {
-                NullableInner::Struct(_) => {
-                    // C1.6 / ADR 0015 D11: `?Struct` payload is a
-                    // pointer to a heap-allocated struct.
+                NullableInner::Struct(_) | NullableInner::GenericInstance(_) => {
+                    // C1.6 / ADR 0015 D11 + C1.7.4b: `?Struct` and
+                    // `?GenericInstance` payloads are pointers to
+                    // heap-allocated values (both are nominal
+                    // structs at the runtime level).
                     context.ptr_type(inkwell::AddressSpace::default()).into()
                 }
                 _ => {
                     // `?primitive` stays inline { i1, T }.
-                    llvm_basic_type(context, inner.to_type(), struct_types)
+                    llvm_basic_type(
+                        context,
+                        inner.to_type(),
+                        struct_types,
+                        generic_struct_types,
+                    )
                 }
             };
             context
@@ -401,6 +480,7 @@ fn llvm_basic_type<'ctx>(
 /// (insertion) order for stable LLVM output.
 fn collect_mono_instantiations(
     program: &TypedProgram,
+    instances: &mut Vec<GenericInstanceData>,
 ) -> Vec<(FnId, Vec<Type>)> {
     let mut visited: HashSet<(FnId, Vec<Type>)> = HashSet::new();
     let mut order: Vec<(FnId, Vec<Type>)> = Vec::new();
@@ -416,6 +496,7 @@ fn collect_mono_instantiations(
             &fn_def.body,
             &no_subst,
             program,
+            instances,
             &mut visited,
             &mut order,
             &mut pending,
@@ -434,6 +515,7 @@ fn collect_mono_instantiations(
             &generic_def.body,
             &subst,
             program,
+            instances,
             &mut visited,
             &mut order,
             &mut pending,
@@ -443,31 +525,35 @@ fn collect_mono_instantiations(
     order
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_block_for_mono(
     block: &TypedBlock,
     subst: &[Type],
     program: &TypedProgram,
+    instances: &mut Vec<GenericInstanceData>,
     visited: &mut HashSet<(FnId, Vec<Type>)>,
     order: &mut Vec<(FnId, Vec<Type>)>,
     pending: &mut Vec<(FnId, Vec<Type>)>,
 ) {
     for stmt in &block.stmts {
         match &stmt.kind {
-            TypedStmtKind::Let { value, .. } => {
-                walk_expr_for_mono(value, subst, program, visited, order, pending)
-            }
+            TypedStmtKind::Let { value, .. } => walk_expr_for_mono(
+                value, subst, program, instances, visited, order, pending,
+            ),
             TypedStmtKind::Expr(e) => {
-                walk_expr_for_mono(e, subst, program, visited, order, pending)
+                walk_expr_for_mono(e, subst, program, instances, visited, order, pending)
             }
         }
     }
-    walk_expr_for_mono(&block.tail, subst, program, visited, order, pending);
+    walk_expr_for_mono(&block.tail, subst, program, instances, visited, order, pending);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_expr_for_mono(
     e: &TypedExpr,
     subst: &[Type],
     program: &TypedProgram,
+    instances: &mut Vec<GenericInstanceData>,
     visited: &mut HashSet<(FnId, Vec<Type>)>,
     order: &mut Vec<(FnId, Vec<Type>)>,
     pending: &mut Vec<(FnId, Vec<Type>)>,
@@ -478,30 +564,36 @@ fn walk_expr_for_mono(
         | TypedExprKind::NullLit
         | TypedExprKind::Var(_) => {}
         TypedExprKind::WidenToNullable(inner) => {
-            walk_expr_for_mono(inner, subst, program, visited, order, pending)
+            walk_expr_for_mono(inner, subst, program, instances, visited, order, pending)
         }
         TypedExprKind::Unary(_, inner) => {
-            walk_expr_for_mono(inner, subst, program, visited, order, pending)
+            walk_expr_for_mono(inner, subst, program, instances, visited, order, pending)
         }
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
         | TypedExprKind::Logic(_, l, r) => {
-            walk_expr_for_mono(l, subst, program, visited, order, pending);
-            walk_expr_for_mono(r, subst, program, visited, order, pending);
+            walk_expr_for_mono(l, subst, program, instances, visited, order, pending);
+            walk_expr_for_mono(r, subst, program, instances, visited, order, pending);
         }
         TypedExprKind::Block(b) => {
-            walk_block_for_mono(b, subst, program, visited, order, pending)
+            walk_block_for_mono(b, subst, program, instances, visited, order, pending)
         }
         TypedExprKind::If { cond, then_branch, else_branch } => {
-            walk_expr_for_mono(cond, subst, program, visited, order, pending);
-            walk_block_for_mono(then_branch, subst, program, visited, order, pending);
-            walk_block_for_mono(else_branch, subst, program, visited, order, pending);
+            walk_expr_for_mono(cond, subst, program, instances, visited, order, pending);
+            walk_block_for_mono(
+                then_branch, subst, program, instances, visited, order, pending,
+            );
+            walk_block_for_mono(
+                else_branch, subst, program, instances, visited, order, pending,
+            );
         }
         TypedExprKind::Call { id, args, type_args, .. } => {
             // Substitute the call's type_args under the active
             // subst to get the concrete instantiation key.
-            let concrete_args: Vec<Type> =
-                type_args.iter().map(|t| t.substitute(subst)).collect();
+            let concrete_args: Vec<Type> = type_args
+                .iter()
+                .map(|t| t.substitute(subst, instances))
+                .collect();
             let signature = program.signature(*id);
             // Only enqueue user-defined generic fns. Builtins are
             // inlined; print and other runtime fns don't need
@@ -514,25 +606,27 @@ fn walk_expr_for_mono(
                 }
             }
             for a in args {
-                walk_expr_for_mono(a, subst, program, visited, order, pending);
+                walk_expr_for_mono(a, subst, program, instances, visited, order, pending);
             }
         }
         TypedExprKind::StructLit { fields, .. } => {
             for f in fields {
-                walk_expr_for_mono(f, subst, program, visited, order, pending);
+                walk_expr_for_mono(f, subst, program, instances, visited, order, pending);
             }
         }
         TypedExprKind::FieldAccess { target, .. } => {
-            walk_expr_for_mono(target, subst, program, visited, order, pending)
+            walk_expr_for_mono(target, subst, program, instances, visited, order, pending)
         }
         TypedExprKind::ArrayLit { elements, .. } => {
             for el in elements {
-                walk_expr_for_mono(el, subst, program, visited, order, pending);
+                walk_expr_for_mono(
+                    el, subst, program, instances, visited, order, pending,
+                );
             }
         }
         TypedExprKind::Index { target, index, .. } => {
-            walk_expr_for_mono(target, subst, program, visited, order, pending);
-            walk_expr_for_mono(index, subst, program, visited, order, pending);
+            walk_expr_for_mono(target, subst, program, instances, visited, order, pending);
+            walk_expr_for_mono(index, subst, program, instances, visited, order, pending);
         }
     }
 }
@@ -576,7 +670,66 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         // type-args by construction; if one slips through, render
         // it for debuggability.
         Type::TypeParam(id) => format!("T{}", id.0),
+        Type::GenericInstance(id) => {
+            // Look up the instance and render its tag recursively.
+            // The instance lookup goes through program.generic_instances
+            // for the base name; for nested instances during codegen
+            // (when `instances` may have been extended), we conservatively
+            // fall back to `<gi#N>`.
+            if let Some(inst) = program.generic_instances.get(id.0 as usize) {
+                let base = program
+                    .structs
+                    .get(inst.struct_id.0 as usize)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| format!("struct{}", inst.struct_id.0));
+                let mut s = base;
+                for a in &inst.args {
+                    s.push('_');
+                    s.push_str(&mangle_type(*a, program));
+                }
+                s
+            } else {
+                format!("gi{}", id.0)
+            }
+        }
     }
+}
+
+/// `true` iff `ty` mentions any `Type::TypeParam`, transitively
+/// through `Nullable`, `Array`, and `GenericInstance` args. Used by
+/// codegen pass 0 to filter the abstract (TypeParam-using)
+/// instances out of LLVM struct-type emission per ADR 0016 D6.
+fn arg_contains_typeparam(ty: Type, instances: &[GenericInstanceData]) -> bool {
+    match ty {
+        Type::TypeParam(_) => true,
+        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => false,
+        Type::Nullable(ni) => arg_contains_typeparam(ni.to_type(), instances),
+        Type::Array(ae) => arg_contains_typeparam(ae.to_type(), instances),
+        Type::GenericInstance(id) => instances[id.0 as usize]
+            .args
+            .iter()
+            .any(|a| arg_contains_typeparam(*a, instances)),
+    }
+}
+
+/// C1.7.4b / ADR 0016 D6: produce a mangled LLVM struct-type name
+/// for a generic instance. The scheme is `{StructName}_{arg1}_{arg2}…`
+/// where each arg goes through [`mangle_type`]. Internal-only.
+fn mangle_generic_struct_name(
+    program: &TypedProgram,
+    inst: &GenericInstanceData,
+) -> String {
+    let base = program
+        .structs
+        .get(inst.struct_id.0 as usize)
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| format!("struct{}", inst.struct_id.0));
+    let mut s = base;
+    for a in &inst.args {
+        s.push('_');
+        s.push_str(&mangle_type(*a, program));
+    }
+    s
 }
 
 /// Map a Sentinel int type (i1 / i32 / i64) to its LLVM IntType.
@@ -590,6 +743,9 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::Struct(_) => panic!("llvm_int_type called on non-int Type::Struct"),
         Type::Nullable(_) => panic!("llvm_int_type called on non-int Type::Nullable"),
         Type::Array(_) => panic!("llvm_int_type called on non-int Type::Array"),
+        Type::GenericInstance(_) => {
+            panic!("llvm_int_type called on non-int Type::GenericInstance")
+        }
         // C1.7 / ADR 0016 D7: TypeParams must be substituted to a
         // concrete Type at the monomorphic instantiation boundary
         // before codegen sees them. Reaching here is a codegen bug
@@ -603,7 +759,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
 
 impl<'ctx> CodegenCtx<'ctx> {
     fn llvm_basic_type(&self, ty: Type) -> BasicTypeEnum<'ctx> {
-        llvm_basic_type(self.context, ty, &self.struct_types)
+        llvm_basic_type(self.context, ty, &self.struct_types, &self.generic_struct_types)
     }
 
     fn llvm_int_type(&self, ty: Type) -> IntType<'ctx> {
@@ -1390,11 +1546,20 @@ impl<'ctx> CodegenCtx<'ctx> {
             TypedExprKind::StructLit { id, fields, .. } => {
                 // Build the struct value via a chain of build_insert_value
                 // starting from undef. Field-order is already declaration
-                // order per check()'s reordering at C1.4.
-                let struct_ty = *self
-                    .struct_types
-                    .get(id)
-                    .expect("struct declared in pass 0");
+                // order per check()'s reordering at C1.4. C1.7.4b: pick
+                // the LLVM type from `generic_struct_types` when the
+                // outer expr resolves to a `GenericInstance`; otherwise
+                // use the plain `struct_types` lookup.
+                let struct_ty = match expr.ty {
+                    Type::GenericInstance(gi_id) => *self
+                        .generic_struct_types
+                        .get(&gi_id)
+                        .expect("generic instance declared in pass 0"),
+                    _ => *self
+                        .struct_types
+                        .get(id)
+                        .expect("struct declared in pass 0"),
+                };
                 let mut agg = struct_ty.get_undef();
                 for (i, fv) in fields.iter().enumerate() {
                     let val = self.lower_expr(fv, program)?;

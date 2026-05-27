@@ -446,3 +446,24 @@ fn pass_c17_generic_array() {
     assert_eq!(r.stdout, "6\n");
     assert_eq!(r.exit, 0);
 }
+
+#[test]
+fn pass_c17_box() {
+    // Single-param generic struct. `Box<i64>` is one
+    // GenericInstance; `unbox` is non-generic and reads its field.
+    let r = build_and_run("c17_box.sentinel");
+    assert_eq!(r.stdout, "42\n");
+    assert_eq!(r.exit, 0);
+}
+
+#[test]
+fn pass_c17_go_no_go() {
+    // ADR 0016 D12 phase-go: Pair<A, B> + make_pair / fst / snd +
+    // pick_int composition. The full generic-struct + generic-fn
+    // dance: monomorphises `make_pair<i64, i64>`, `fst<i64, i64>`,
+    // `snd<i64, i64>` and emits an LLVM struct type for
+    // `Pair<i64, i64>`. Result: 7 + 35 = 42.
+    let r = build_and_run("c17_go_no_go.sentinel");
+    assert_eq!(r.stdout, "42\n");
+    assert_eq!(r.exit, 0);
+}
