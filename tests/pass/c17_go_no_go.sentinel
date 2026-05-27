@@ -4,6 +4,13 @@
 // context, field access with type-arg substitution, and the
 // `pick_int` non-generic wrapper that consumes a concrete
 // `Pair<i64, i64>`.
+//
+// C2.3 update: under move semantics (per ADR 0017 D9), Pair<i64,
+// i64> is a Move-classified type (compound). The original
+// `pick_int(true, p) + pick_int(false, p)` double-used p; the
+// second call would surface UseAfterMove. We now construct two
+// distinct Pair values (p1, p2) so each is moved exactly once.
+// Same expected output: 7 + 35 = 42.
 struct Pair<A, B> { first: A, second: B }
 
 fn make_pair<A, B>(a: A, b: B) -> Pair<A, B> {
@@ -18,6 +25,7 @@ fn pick_int(use_first: bool, p: Pair<i64, i64>) -> i64 {
 }
 
 fn main() -> i64 {
-    let p: Pair<i64, i64> = make_pair(7, 35);
-    print(pick_int(true, p) + pick_int(false, p))
+    let p1: Pair<i64, i64> = make_pair(7, 35);
+    let p2: Pair<i64, i64> = make_pair(7, 35);
+    print(pick_int(true, p1) + pick_int(false, p2))
 }

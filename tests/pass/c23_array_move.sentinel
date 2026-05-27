@@ -1,0 +1,17 @@
+// C2.3 / ADR 0017 D9: arrays are Move-classified ([T] is
+// heap-backed). Pass-by-value moves the array. Inside the fn,
+// `xs[i]` reads via postfix (non-consuming); `len(xs)` is a
+// runtime builtin which borrows.
+// sum 1+2+3+4+5 = 15 -> exit 15.
+fn sum_to_end(xs: [i64], i: i64) -> i64 {
+    if i == len(xs) {
+        0
+    } else {
+        xs[i] + sum_to_end(xs, i + 1)
+    }
+}
+
+fn main() -> i64 {
+    let arr: [i64] = [1, 2, 3, 4, 5];
+    sum_to_end(arr, 0)
+}

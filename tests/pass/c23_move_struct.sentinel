@@ -1,0 +1,14 @@
+// C2.3 / ADR 0017 D9: moving a struct into a fn argument
+// consumes the binding. Single move is sound — the original is
+// no longer reachable but the consumer holds the value.
+// Point { x: 3, y: 4 } → manhattan returns 7 → exit 7.
+struct Point { x: i64, y: i64 }
+
+fn manhattan(p: Point) -> i64 {
+    p.x + p.y
+}
+
+fn main() -> i64 {
+    let p: Point = Point { x: 3, y: 4 };
+    manhattan(p)
+}

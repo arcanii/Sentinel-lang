@@ -1,0 +1,27 @@
+// C2.3 phase-go program per ADR 0017 D9: exercises move
+// semantics + use-after-move detection in one end-to-end
+// program.
+//
+//   - struct Account { balance: i64, id: i64 } is Move-classified.
+//   - `transfer(take_first, src, dst)` moves both args; reads
+//     one of them via balance_of inside an if/else (branch-
+//     aware move-state merge).
+//   - main constructs TWO accounts and calls transfer ONCE;
+//     both are consumed there.
+//
+// transfer(true, a, b) where a.balance=100, b.balance=50:
+//   take_first = true → balance_of(src) = 100.
+// print(100) → stdout "100\n", exit 0.
+struct Account { balance: i64, id: i64 }
+
+fn balance_of(a: Account) -> i64 { a.balance }
+
+fn transfer(take_first: bool, src: Account, dst: Account) -> i64 {
+    if take_first { balance_of(src) } else { balance_of(dst) }
+}
+
+fn main() -> i64 {
+    let a: Account = Account { balance: 100, id: 1 };
+    let b: Account = Account { balance: 50, id: 2 };
+    print(transfer(true, a, b))
+}

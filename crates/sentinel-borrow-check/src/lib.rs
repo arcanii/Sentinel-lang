@@ -1,15 +1,17 @@
 //! sentinel-borrow-check
 //!
-//! Lexical borrow checker for Sentinel per ADR 0017 D6. C2.1 shipped
-//! the **shared-only** subset (`&T` only); C2.2 adds `&mut T` and
-//! the **shared-XOR-mutable** rule with place-tracking + transient
-//! / rooted borrow lifetimes. The remaining sub-phases per ADR
-//! 0017's D9 sub-phase split:
+//! Lexical borrow checker for Sentinel per ADR 0017 D6 + D9. C2.1
+//! shipped the **shared-only** borrow subset (`&T` only); C2.2
+//! added `&mut T` and the **shared-XOR-mutable** rule with
+//! place-tracking + transient/rooted borrow lifetimes; C2.3 adds
+//! **move semantics** + **use-after-move detection** with
+//! branch-aware merging at if/else. The remaining sub-phases per
+//! ADR 0017's D9 sub-phase split:
 //!
 //!   - ✅ C2.1 — shared-only lexical borrow checker (`&T` only).
-//!   - ✅ C2.2 — `&mut T` + the shared-XOR-mutable rule (this
+//!   - ✅ C2.2 — `&mut T` + the shared-XOR-mutable rule.
+//!   - ✅ C2.3 — move semantics + use-after-move (this
 //!     sub-phase).
-//!   - C2.3 — move semantics + use-after-move.
 //!   - C2.4 — RAII / drop + `sentinel_free` runtime symbol.
 //!   - C2.5 — Polonius migration plan + ADR 0017 → ACCEPTED.
 //!
@@ -26,7 +28,7 @@
 //! instead of borrowing). Polonius / NLL precision is the C2.5
 //! migration target per D6's "lexical first" call.
 //!
-//! ## What C2.1 + C2.2 check
+//! ## What C2.1 + C2.2 + C2.3 check
 //!
 //! 1. **Use-after-scope** (C2.1) — `let r = { let inner = 5;
 //!    &inner }; *r` rejected at `*r` because `inner`'s scope has
@@ -46,16 +48,43 @@
 //! 5. **Read while exclusively borrowed** (C2.2) — reading a
 //!    binding (e.g., `print(x)`, or passing `x` by value) while
 //!    `&mut x` is active is rejected.
+//! 6. **Use-after-move** (C2.3) — reading a Move-classified
+//!    binding after it has been consumed (passed by value to a
+//!    fn, re-assigned into another binding, used in a non-lvalue
+//!    expression). The first such read marks the binding `Moved`;
+//!    any subsequent read surfaces `UseAfterMove`. Per-binding
+//!    move-state lives in `FnCtx.moved`; if-then-else branches
+//!    each get an isolated walk with conservative merge ("moved
+//!    in either branch → moved after").
 //!
-//! ## What C2.1 + C2.2 do NOT check
+//! ## Type classification at C2.3
 //!
-//! - Use-after-move — bindings are still implicitly `Copy` through
-//!   C2.2. Move semantics + use-after-move ship at C2.3.
+//! `is_copy_type(ty) -> bool` partitions types:
+//!   - **Copy**: `i64`, `i32`, `bool`, `&T`, `&mut T`, `?T` where
+//!     T is Copy.
+//!   - **Move**: structs, arrays `[T]`, nullables `?T` where T is
+//!     Move, generic-struct instances, `TypeParam` (conservative —
+//!     concrete substitution may be Copy but borrow-check is per-
+//!     definition and uses the abstract form).
+//!
+//! Reads in non-lvalue, non-postfix-receiver context CONSUME the
+//! binding when its type is Move. Postfix receivers
+//! (`p.field` / `xs[i]` — the target side) read the binding
+//! WITHOUT consuming; this matches the existing codegen
+//! (`build_extract_value` copies the field). Lvalue contexts
+//! (`& x`, `&mut x`, LHS of assignment) also don't consume.
+//!
+//! ## What C2.1-C2.3 do NOT check
+//!
 //! - Drop / RAII — heap allocations from C1.6+ still leak.
 //!   Closes at C2.4 per ADR 0017 D8.
 //! - Field-disjoint borrows — `&p.x` and `&mut p.y` both conflict
 //!   on `p` under C2.2's place-by-binding model. Polonius-style
 //!   field-precise borrows are post-C2.5 work.
+//! - Partial moves through field projection — `let inner = p.x`
+//!   doesn't consume p (the field copy goes through
+//!   build_extract_value). This is slightly unsound for non-Copy
+//!   fields but benign at C2.3 since drop hasn't shipped.
 //!
 //! ## Borrow-source representation
 //!
@@ -100,7 +129,8 @@ use sentinel_ast::{Span, UnaryOp};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::VarId;
 use sentinel_types::{
-    TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
+    NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram,
+    TypedStmt, TypedStmtKind,
 };
 
 // =============================================================================
@@ -242,6 +272,26 @@ pub enum BorrowError {
         #[label("attempted read here")]
         attempt_span: miette::SourceSpan,
     },
+
+    /// A Move-classified binding (struct, array, generic-instance,
+    /// nullable-of-non-Copy, or TypeParam) is read after it has
+    /// already been consumed — passed by value to a fn, re-bound
+    /// into another `let`, or used in a non-lvalue expression
+    /// elsewhere. Per ADR 0017 D9.
+    #[error("use of moved binding `{binding_name}`")]
+    #[diagnostic(
+        code(sentinel::borrow::use_after_move),
+        help("`{binding_name}` was consumed by an earlier use; either bind via reference (`&{binding_name}`) at the call site, or duplicate the value (e.g., reconstruct the struct)")
+    )]
+    UseAfterMove {
+        binding_name: String,
+        #[label("binding declared here")]
+        decl_span: miette::SourceSpan,
+        #[label("moved here")]
+        move_span: miette::SourceSpan,
+        #[label("used here after move")]
+        use_span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -349,6 +399,13 @@ struct FnCtx {
     /// expire either at statement-end (transient) or at scope
     /// pop (rooted). See [`BorrowLifetime`].
     places: HashMap<VarId, PlaceState>,
+    /// C2.3: per-binding move state. Absent = `Live`. Present
+    /// (with the span of the consuming use) = `Moved`. A read in
+    /// a consuming context when the binding is already Moved
+    /// surfaces [`BorrowError::UseAfterMove`]; otherwise a read
+    /// in a consuming context of a Move-classified binding
+    /// transitions it to Moved.
+    moved: HashMap<VarId, Span>,
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +422,7 @@ impl FnCtx {
             scopes: Vec::new(),
             var_in_scope: HashMap::new(),
             places: HashMap::new(),
+            moved: HashMap::new(),
         }
     }
 
@@ -657,7 +715,8 @@ fn walk_expr(
 
         // Ref-typed Var reads trigger the C2.1 use-after-scope
         // check. Non-ref Var reads trigger the C2.2 read-while-
-        // mutably-borrowed check.
+        // mutably-borrowed check AND the C2.3 use-after-move
+        // check + consume.
         TypedExprKind::Var(id) => {
             if expr.ty.is_ref() {
                 if let Some(source) = ctx.ref_source.get(id).copied() {
@@ -669,6 +728,11 @@ fn walk_expr(
                 // C2.2: reading a non-ref binding while a `&mut T`
                 // of it is active violates exclusivity.
                 check_read_conflict(*id, &expr.span, ctx, errors);
+                // C2.3: check use-after-move + consume if the
+                // type is Move-classified. This is a CONSUMING
+                // context (Var in expr position, not postfix
+                // receiver / not lvalue).
+                check_and_record_move(*id, expr.ty, &expr.span, ctx, errors);
             }
         }
 
@@ -714,17 +778,50 @@ fn walk_expr(
 
         TypedExprKind::If { cond, then_branch, else_branch } => {
             walk_expr(cond, ctx, errors, program);
+            // C2.3: snapshot the move-state, walk each branch in
+            // isolation, then merge — "moved in either branch →
+            // moved after". This is what makes `if c { fst(p) }
+            // else { snd(p) }` accept: each branch independently
+            // moves p, but the merge sees p as Moved after, which
+            // is fine when no further uses follow.
+            let snapshot_moved = ctx.moved.clone();
             ctx.push_scope();
             walk_block_contents(then_branch, ctx, errors, program);
             ctx.pop_scope();
+            let then_moved = std::mem::replace(&mut ctx.moved, snapshot_moved);
             ctx.push_scope();
             walk_block_contents(else_branch, ctx, errors, program);
             ctx.pop_scope();
+            // Merge: any binding moved in the then-branch but
+            // not in the else-branch is conservatively Moved
+            // after (we can't statically know which branch ran).
+            for (id, span) in then_moved {
+                ctx.moved.entry(id).or_insert(span);
+            }
         }
 
-        TypedExprKind::Call { args, .. } => {
-            for arg in args {
-                walk_expr(arg, ctx, errors, program);
+        TypedExprKind::Call { id, args, .. } => {
+            // C2.3: runtime builtins (`print`, `unwrap_or`,
+            // `is_some`, `len`) semantically take their args by
+            // reference — the inline LLVM lowering reads but
+            // doesn't consume. Treating their args as
+            // non-consuming keeps c15_maybe_compose
+            // (`is_some(x) ... unwrap_or(x, ...)`) and
+            // c16_go_no_go (`len(a)` in cond, then `a[i]` /
+            // `sum_from(a, ...)` in branches) valid under move
+            // semantics. User-defined fns walk normally —
+            // pass-by-value moves their args. Future ADRs may
+            // add real `&T` builtin signatures + trait-bounded
+            // generics to retire this special case.
+            let signature = program.signature(*id);
+            if signature.is_runtime {
+                for arg in args {
+                    walk_expr_lvalue(arg, ctx, errors, program);
+                }
+            } else {
+                for arg in args {
+                    walk_expr(arg, ctx, errors, program);
+                }
             }
         }
 
@@ -735,7 +832,11 @@ fn walk_expr(
         }
 
         TypedExprKind::FieldAccess { target, .. } => {
-            walk_expr(target, ctx, errors, program);
+            // C2.3: postfix receiver — non-consuming. The target
+            // is read for projection but not moved. Use
+            // walk_expr_lvalue which checks liveness without
+            // consuming.
+            walk_expr_lvalue(target, ctx, errors, program);
         }
 
         TypedExprKind::ArrayLit { elements, .. } => {
@@ -745,7 +846,10 @@ fn walk_expr(
         }
 
         TypedExprKind::Index { target, index, .. } => {
-            walk_expr(target, ctx, errors, program);
+            // C2.3: same as FieldAccess — postfix receiver is
+            // non-consuming. The index is a regular expression
+            // (consuming read).
+            walk_expr_lvalue(target, ctx, errors, program);
             walk_expr(index, ctx, errors, program);
         }
     }
@@ -762,7 +866,13 @@ fn walk_expr_lvalue(
     program: &TypedProgram,
 ) {
     match &expr.kind {
-        TypedExprKind::Var(_) => {} // no read-check on lvalue Var
+        TypedExprKind::Var(id) => {
+            // C2.3: lvalue Var still needs the use-after-move
+            // liveness check (so `let _ = consume(p); p.field`
+            // is rejected at the `p.field` site). No CONSUME
+            // here — postfix projection is non-destructive.
+            check_use_alive(*id, &expr.span, ctx, errors);
+        }
         TypedExprKind::Unary(UnaryOp::Deref, inner) => {
             // `& *r` — walk r as a normal expression so its
             // OutlivesSource check fires.
@@ -907,6 +1017,93 @@ fn place_name(ctx: &FnCtx, id: VarId) -> String {
         .get(&id)
         .map(|info| info.name.clone())
         .unwrap_or_else(|| format!("var{}", id.0))
+}
+
+/// C2.3: classify a [`Type`] as Copy (free to duplicate at
+/// reads) or Move (consumed on read). Per ADR 0017 D9:
+///
+///   - **Copy**: primitives (i64, i32, bool), references (&T,
+///     &mut T), and nullables `?T` where the inner is itself
+///     Copy.
+///   - **Move**: structs, arrays `[T]`, generic-struct instances,
+///     nullables of non-Copy types, and `TypeParam` (conservative
+///     — concrete substitution may be Copy but borrow-check is
+///     per-definition).
+///
+/// The C2.3 implementation deliberately punts on partial-move
+/// tracking (field-disjoint moves) per the module-doc rationale.
+fn is_copy_type(ty: Type) -> bool {
+    match ty {
+        Type::I64 | Type::I32 | Type::Bool | Type::Ref(_) => true,
+        Type::Nullable(inner) => is_copy_nullable_inner(inner),
+        Type::Struct(_)
+        | Type::Array(_)
+        | Type::GenericInstance(_)
+        | Type::TypeParam(_) => false,
+    }
+}
+
+fn is_copy_nullable_inner(inner: NullableInner) -> bool {
+    match inner {
+        NullableInner::I64 | NullableInner::I32 | NullableInner::Bool => true,
+        NullableInner::Ref(_) => true,
+        NullableInner::Struct(_)
+        | NullableInner::GenericInstance(_)
+        | NullableInner::TypeParam(_) => false,
+    }
+}
+
+/// C2.3: at a Var(id) read in CONSUMING context, fire the move
+/// check. If the binding is already Moved, surface UseAfterMove
+/// pointing at the prior move site + this use. If the binding is
+/// Live and Move-classified, transition to Moved.
+fn check_and_record_move(
+    id: VarId,
+    ty: Type,
+    use_span: &Span,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+) {
+    if let Some(move_span) = ctx.moved.get(&id).cloned() {
+        emit_use_after_move(ctx, errors, id, &move_span, use_span);
+        return;
+    }
+    if !is_copy_type(ty) {
+        ctx.moved.insert(id, use_span.clone());
+    }
+}
+
+/// C2.3: at a Var(id) read in NON-CONSUMING context (postfix
+/// receiver, lvalue), check only that the binding hasn't already
+/// been moved. Doesn't transition to Moved.
+fn check_use_alive(
+    id: VarId,
+    use_span: &Span,
+    ctx: &FnCtx,
+    errors: &mut Vec<BorrowError>,
+) {
+    if let Some(move_span) = ctx.moved.get(&id).cloned() {
+        emit_use_after_move(ctx, errors, id, &move_span, use_span);
+    }
+}
+
+fn emit_use_after_move(
+    ctx: &FnCtx,
+    errors: &mut Vec<BorrowError>,
+    id: VarId,
+    move_span: &Span,
+    use_span: &Span,
+) {
+    let info = ctx.var_info.get(&id).cloned().unwrap_or(VarInfo {
+        name: format!("var{}", id.0),
+        span: 0..0,
+    });
+    errors.push(BorrowError::UseAfterMove {
+        binding_name: info.name,
+        decl_span: to_source_span(&info.span),
+        move_span: to_source_span(move_span),
+        use_span: to_source_span(use_span),
+    });
 }
 
 /// Compute the [`BorrowSource`] of a ref-typed expression. Used
@@ -1108,6 +1305,11 @@ fn borrow_error_to_diagnostic(err: &BorrowError) -> Diagnostic {
             "sentinel::borrow::read_while_mut_borrowed",
             format!("cannot read `{place_name}` while it is borrowed mutably"),
             attempt_span.offset()..(attempt_span.offset() + attempt_span.len()),
+        ),
+        BorrowError::UseAfterMove { binding_name, use_span, .. } => (
+            "sentinel::borrow::use_after_move",
+            format!("use of moved binding `{binding_name}`"),
+            use_span.offset()..(use_span.offset() + use_span.len()),
         ),
     };
     Diagnostic {
@@ -1417,6 +1619,132 @@ mod tests {
         // satisfy the borrow checker" workaround.
         borrow_check_ok(
             "fn main() -> i64 { let mut x: i64 = 5; { let r: &i64 = &x; let y: i64 = *r; y }; let r2: &mut i64 = &mut x; *r2 = 9; *r2 }",
+        );
+    }
+
+    // ----- C2.3 positive: move semantics + use-after-move accepts -----
+
+    #[test]
+    fn primitives_are_copy_no_move_check() {
+        // i64 is Copy — multiple reads are fine.
+        borrow_check_ok(
+            "fn main() -> i64 { let x: i64 = 5; let y: i64 = x; let z: i64 = x; x + y + z }",
+        );
+    }
+
+    #[test]
+    fn struct_moved_once_ok() {
+        // Single move of a struct is fine.
+        borrow_check_ok(
+            "struct P { x: i64 } fn consume(p: P) -> i64 { p.x } fn main() -> i64 { let p: P = P { x: 7 }; consume(p) }",
+        );
+    }
+
+    #[test]
+    fn field_access_does_not_move_struct() {
+        // `p.x + p.y` reads two fields without consuming p.
+        borrow_check_ok(
+            "struct Point { x: i64, y: i64 } fn main() -> i64 { let p: Point = Point { x: 3, y: 4 }; p.x + p.y }",
+        );
+    }
+
+    #[test]
+    fn array_index_does_not_move() {
+        // `xs[0] + xs[1]` reads two elements without moving xs.
+        borrow_check_ok(
+            "fn main() -> i64 { let xs: [i64] = [10, 20]; xs[0] + xs[1] }",
+        );
+    }
+
+    #[test]
+    fn builtin_call_is_non_consuming() {
+        // `len(xs) + xs[0]` — len is runtime, treated as
+        // borrowing xs; xs[0] is postfix-receiver, also
+        // non-consuming.
+        borrow_check_ok(
+            "fn main() -> i64 { let xs: [i64] = [10, 20, 30]; len(xs) + xs[0] }",
+        );
+    }
+
+    #[test]
+    fn branch_moves_in_both_arms_ok() {
+        // `if c { fst(p) } else { snd(p) }` — each branch
+        // moves p independently. Branch-aware merge declares p
+        // Moved after, but no further use → OK.
+        borrow_check_ok(
+            "struct Pair { first: i64, second: i64 } fn fst(p: Pair) -> i64 { p.first } fn snd(p: Pair) -> i64 { p.second } fn pick(c: bool, p: Pair) -> i64 { if c { fst(p) } else { snd(p) } } fn main() -> i64 { let p: Pair = Pair { first: 1, second: 2 }; pick(true, p) }",
+        );
+    }
+
+    #[test]
+    fn two_distinct_bindings_each_moved_once_ok() {
+        // c17_go_no_go shape: two Pair instances, each moved
+        // into its own pick call.
+        borrow_check_ok(
+            "struct Pair { first: i64, second: i64 } fn consume(p: Pair) -> i64 { p.first + p.second } fn main() -> i64 { let p1: Pair = Pair { first: 7, second: 35 }; let p2: Pair = Pair { first: 7, second: 35 }; consume(p1) + consume(p2) }",
+        );
+    }
+
+    #[test]
+    fn nullable_of_primitive_is_copy() {
+        // ?i64 is Nullable<I64> — i64 is Copy, so ?i64 is too.
+        // c15_maybe_compose shape: is_some(x) then unwrap_or(x, ...).
+        borrow_check_ok(
+            "fn main() -> i64 { let x: ?i64 = 42; let y: ?i64 = x; unwrap_or(x, 0) + unwrap_or(y, 1) }",
+        );
+    }
+
+    // ----- C2.3 negative: use-after-move rejects -----
+
+    #[test]
+    fn double_pass_by_value_rejected() {
+        // `consume(p) + consume(p)` — p moved on first call;
+        // second call uses moved p.
+        let errs = borrow_check_err(
+            "struct P { x: i64 } fn consume(p: P) -> i64 { p.x } fn main() -> i64 { let p: P = P { x: 5 }; consume(p) + consume(p) }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::UseAfterMove { binding_name, .. } if binding_name == "p"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn rebind_then_use_original_rejected() {
+        // `let q = p; print(p.x);` — q is bound to p (which
+        // moves p), then p.x is accessed.
+        let errs = borrow_check_err(
+            "struct P { x: i64 } fn main() -> i64 { let p: P = P { x: 5 }; let q: P = p; p.x + q.x }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::UseAfterMove { binding_name, .. } if binding_name == "p"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn array_double_consume_rejected() {
+        // `consume_arr(xs) + consume_arr(xs)` — arrays are
+        // Move-classified ([T] regardless of T).
+        let errs = borrow_check_err(
+            "fn consume_arr(xs: [i64]) -> i64 { len(xs) } fn main() -> i64 { let arr: [i64] = [1, 2, 3]; consume_arr(arr) + consume_arr(arr) }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::UseAfterMove { binding_name, .. } if binding_name == "arr"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn use_after_move_via_let_rhs_rejected() {
+        // `let q = p; q.x + p.x` — q binds p (move), p.x reads
+        // moved p.
+        let errs = borrow_check_err(
+            "struct P { x: i64 } fn main() -> i64 { let p: P = P { x: 5 }; let q: P = p; q.x + p.x }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::UseAfterMove { binding_name, .. } if binding_name == "p"),
+            "got {errs:?}"
         );
     }
 

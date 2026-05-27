@@ -564,3 +564,36 @@ fn pass_c22_go_no_go() {
     assert_eq!(r.stdout, "35\n");
     assert_eq!(r.exit, 0);
 }
+
+// ---- C2.3 / ADR 0017 D9: move semantics + use-after-move ----
+
+#[test]
+fn pass_c23_move_struct() {
+    // Single move of a Point into manhattan. 3 + 4 = 7.
+    assert_eq!(run_exit("c23_move_struct.sentinel"), 7);
+}
+
+#[test]
+fn pass_c23_branch_isolation() {
+    // if/else both branches move p (into fst/snd). Branch-aware
+    // merge sees p as Moved after the if/else, which is fine
+    // since the if/else IS the tail. exit 1.
+    assert_eq!(run_exit("c23_branch_isolation.sentinel"), 1);
+}
+
+#[test]
+fn pass_c23_array_move() {
+    // Array passed by value moves; xs[i] (postfix) doesn't
+    // consume; len(xs) (runtime builtin) doesn't consume;
+    // sum_to_end(xs, ...) (user-defined) does. Sum = 15.
+    assert_eq!(run_exit("c23_array_move.sentinel"), 15);
+}
+
+#[test]
+fn pass_c23_go_no_go() {
+    // ADR 0017 D9 phase-go: Account struct, transfer(take_first,
+    // src, dst) moves both. balance_of(a or b) returns 100.
+    let r = build_and_run("c23_go_no_go.sentinel");
+    assert_eq!(r.stdout, "100\n");
+    assert_eq!(r.exit, 0);
+}

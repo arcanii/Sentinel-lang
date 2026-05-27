@@ -1,0 +1,21 @@
+// C2.3 / ADR 0017 D9: if/else branches each get an isolated
+// move-state walk. A binding moved in EITHER branch is
+// conservatively Moved after the if/else — but if no further
+// use follows, the check passes.
+//
+// Here `pick` moves p in both branches (into fst or snd). After
+// the if/else, p is Moved per the merge — and the if/else IS
+// the tail expression, so no further use. 1 -> exit 1.
+struct Pair { first: i64, second: i64 }
+
+fn fst(p: Pair) -> i64 { p.first }
+fn snd(p: Pair) -> i64 { p.second }
+
+fn pick(use_first: bool, p: Pair) -> i64 {
+    if use_first { fst(p) } else { snd(p) }
+}
+
+fn main() -> i64 {
+    let p: Pair = Pair { first: 1, second: 99 };
+    pick(true, p)
+}
