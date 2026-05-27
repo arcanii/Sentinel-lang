@@ -74,17 +74,28 @@
 //! (`build_extract_value` copies the field). Lvalue contexts
 //! (`& x`, `&mut x`, LHS of assignment) also don't consume.
 //!
-//! ## What C2.1-C2.3 do NOT check
+//! ## What this checker does NOT catch at C2.5 close
 //!
-//! - Drop / RAII — heap allocations from C1.6+ still leak.
-//!   Closes at C2.4 per ADR 0017 D8.
-//! - Field-disjoint borrows — `&p.x` and `&mut p.y` both conflict
-//!   on `p` under C2.2's place-by-binding model. Polonius-style
-//!   field-precise borrows are post-C2.5 work.
-//! - Partial moves through field projection — `let inner = p.x`
-//!   doesn't consume p (the field copy goes through
-//!   build_extract_value). This is slightly unsound for non-Copy
-//!   fields but benign at C2.3 since drop hasn't shipped.
+//! See `docs/borrow-check-limitations.md` for reproducers + closure
+//! plans. Summary:
+//!
+//! - **Over-rejection: borrow lives past last use** — the canonical
+//!   NLL case. Workaround: wrap the borrow + use in an inner block.
+//!   Closes via the ADR 0018 Polonius migration.
+//! - **Over-rejection: field-disjoint borrows** — `&p.x` blocks all
+//!   mutation of `p` under C2.2's binding-precise place tracking.
+//!   Polonius-style field-precise borrows are a post-Polonius ADR.
+//! - **Soundness gap: partial move + drop ⇒ double-free.**
+//!   Postfix `.field` on a Move-typed binding is non-consuming
+//!   (per the `p.x + p.y` common shape). With drop shipping at
+//!   C2.4, passing `p.items` by value to a fn that drops it
+//!   causes a double-free at main's drop. C2.3's docstring noted
+//!   "benign at C2.3"; no longer benign at C2.5. Closure: a
+//!   follow-on sub-phase (C2.6 or ADR 0019) adds per-
+//!   (VarId, FieldPath) move state. Until it lands, programs that
+//!   pass Move-typed struct fields by value to a drop-eligible
+//!   consumer are unsound. Highest-priority post-C2.5 work on
+//!   this side.
 //!
 //! ## Borrow-source representation
 //!
