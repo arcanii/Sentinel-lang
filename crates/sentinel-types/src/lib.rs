@@ -78,6 +78,36 @@ pub enum Type {
     /// (cf. the C1.5 / C1.6 amendments that preserved this
     /// invariant for `?T` / `[T]`).
     GenericInstance(GenericInstanceId),
+    /// `&T` (shared) or `&mut T` (exclusive) reference type per ADR
+    /// 0017 D1 + D11. The [`RefId`] indexes into
+    /// `TypedProgram.refs`, where `(mutable, inner: Type)` lives.
+    /// Following the C1.7.4b interned-instance precedent — keeps
+    /// `Type: Copy` (the load-bearing invariant carried through
+    /// every ADR since C1.5). At C2.0.2 no borrow checking yet
+    /// (per ADR 0017's sub-phase split — that lands at C2.1 / C2.2).
+    Ref(RefId),
+}
+
+/// Identifier for an interned reference type. C2 / ADR 0017 D11.
+/// Assigned in source-encounter order during type-check; stable
+/// across cargo runs for a given program — same scheme as
+/// [`GenericInstanceId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RefId(pub u32);
+
+/// The underlying data of a [`Type::Ref`]. Owned by
+/// [`TypedProgram::refs`]; not `Copy` (carries a `Type` payload).
+/// Borrow checking does NOT happen at C2.0.2 — this struct just
+/// records the reference's shape (mutability + pointed-to type).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RefData {
+    /// `true` for `&mut T`, `false` for `&T`.
+    pub mutable: bool,
+    /// The referenced type. May contain [`Type::TypeParam`] inside
+    /// a generic-fn body (e.g., `fn f<T>(x: &T)`); concrete
+    /// substitution happens at monomorphization per the standard
+    /// interner pattern.
+    pub inner: Type,
 }
 
 /// Identifier for an interned generic-struct instance like
@@ -131,6 +161,10 @@ pub enum NullableInner {
     /// stays deferred since that needs a different mutual
     /// recursion).
     GenericInstance(GenericInstanceId),
+    /// `?&T` or `?&mut T` — nullable of a reference. C2 / ADR 0017
+    /// D1 + D11. The matching `&?T` (ref of nullable) goes through
+    /// [`Type::Ref`] with `inner: Type::Nullable(_)`.
+    Ref(RefId),
 }
 
 impl NullableInner {
@@ -143,20 +177,23 @@ impl NullableInner {
             NullableInner::Struct(id) => Type::Struct(id),
             NullableInner::TypeParam(id) => Type::TypeParam(id),
             NullableInner::GenericInstance(id) => Type::GenericInstance(id),
+            NullableInner::Ref(id) => Type::Ref(id),
         }
     }
 
     /// Apply a TypeParam substitution. Falls back to `self` if the
     /// substituted form would nest (Nullable or Array — neither is
     /// supported as an inner per the C1.6 depth-1 amendment of ADR
-    /// 0015 D6). C1.7 / ADR 0016.
+    /// 0015 D6). C1.7 / ADR 0016. C2 / ADR 0017: also threads through
+    /// the refs interner so substituted ref types pick up new RefIds.
     pub fn substitute(
         self,
         subst: &[Type],
         instances: &mut Vec<GenericInstanceData>,
+        refs: &mut Vec<RefData>,
     ) -> NullableInner {
         self.to_type()
-            .substitute(subst, instances)
+            .substitute(subst, instances, refs)
             .to_nullable_inner()
             .unwrap_or(self)
     }
@@ -198,14 +235,18 @@ impl ArrayElem {
     /// the substituted ArrayElem when the result still fits the
     /// flat subset; otherwise (substitution would introduce
     /// Nullable or Array nesting, deferred per ADR 0015 D6) returns
-    /// `self` unchanged. C1.7 / ADR 0016.
+    /// `self` unchanged. C1.7 / ADR 0016. C2 / ADR 0017: refs in
+    /// arrays are rejected at resolve-type-expr time (per D1's
+    /// `RefInArray` rule), so substitution should never produce a
+    /// `Type::Ref` here.
     pub fn substitute(
         self,
         subst: &[Type],
         instances: &mut Vec<GenericInstanceData>,
+        refs: &mut Vec<RefData>,
     ) -> ArrayElem {
         self.to_type()
-            .substitute(subst, instances)
+            .substitute(subst, instances, refs)
             .to_array_elem()
             .unwrap_or(self)
     }
@@ -250,6 +291,12 @@ impl Type {
         matches!(self, Type::GenericInstance(_))
     }
 
+    /// `true` if this is a reference type (`&T` or `&mut T`).
+    /// C2 / ADR 0017 D11.
+    pub fn is_ref(self) -> bool {
+        matches!(self, Type::Ref(_))
+    }
+
     /// Try to demote this Type to a [`NullableInner`] for use as
     /// the payload of a `Nullable`. Returns `None` for `Nullable`
     /// (would be nested per ADR 0014 D6) AND for `Array` (the
@@ -263,6 +310,7 @@ impl Type {
             Type::Struct(id) => Some(NullableInner::Struct(id)),
             Type::TypeParam(id) => Some(NullableInner::TypeParam(id)),
             Type::GenericInstance(id) => Some(NullableInner::GenericInstance(id)),
+            Type::Ref(id) => Some(NullableInner::Ref(id)),
             Type::Array(_) | Type::Nullable(_) => None,
         }
     }
@@ -271,6 +319,10 @@ impl Type {
     /// payload of an `Array`. Returns `None` for `Array` (would be
     /// nested per ADR 0015 D6) AND for `Nullable` (the `[?T]`
     /// combination is deferred per C1.6's depth-1 amendment).
+    /// `Type::Ref` is also rejected — refs in arrays need named
+    /// regions per ADR 0017 D7 / D12 (`RefInArray`), so this
+    /// returns `None` for refs and the caller surfaces the right
+    /// diagnostic.
     pub fn to_array_elem(self) -> Option<ArrayElem> {
         match self {
             Type::I64 => Some(ArrayElem::I64),
@@ -279,7 +331,7 @@ impl Type {
             Type::Struct(id) => Some(ArrayElem::Struct(id)),
             Type::TypeParam(id) => Some(ArrayElem::TypeParam(id)),
             Type::GenericInstance(id) => Some(ArrayElem::GenericInstance(id)),
-            Type::Array(_) | Type::Nullable(_) => None,
+            Type::Array(_) | Type::Nullable(_) | Type::Ref(_) => None,
         }
     }
 
@@ -287,13 +339,14 @@ impl Type {
     /// the given substitution map. Used at generic-fn call sites
     /// per ADR 0016 D7c to compute the concrete parameter / return
     /// type of a monomorphic instantiation. Handles substitution
-    /// through `Nullable`, `Array`, and `GenericInstance` payloads.
+    /// through `Nullable`, `Array`, `GenericInstance`, and `Ref`
+    /// payloads.
     ///
-    /// The mutable `instances` table is extended whenever
-    /// substitution would produce a new (struct_id, args) pair not
-    /// already interned — this is what enables transitive
+    /// The mutable `instances` and `refs` tables are extended
+    /// whenever substitution would produce a new interned pair not
+    /// already present — this is what enables transitive
     /// monomorphisation of nested generics like `Pair<Box<T>, T>`
-    /// without losing `Type: Copy`.
+    /// (and `&T` inside generic fns) without losing `Type: Copy`.
     ///
     /// Concrete (non-TypeParam, non-GenericInstance-with-
     /// TypeParam-args) types pass through unchanged.
@@ -301,6 +354,7 @@ impl Type {
         self,
         subst: &[Type],
         instances: &mut Vec<GenericInstanceData>,
+        refs: &mut Vec<RefData>,
     ) -> Type {
         match self {
             Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => self,
@@ -315,7 +369,7 @@ impl Type {
             }
             Type::Nullable(ni) => {
                 let inner = ni.to_type();
-                let new_inner = inner.substitute(subst, instances);
+                let new_inner = inner.substitute(subst, instances, refs);
                 match new_inner.to_nullable_inner() {
                     Some(new_ni) => Type::Nullable(new_ni),
                     // Substitution can't legally produce a nested
@@ -328,7 +382,7 @@ impl Type {
             }
             Type::Array(ae) => {
                 let inner = ae.to_type();
-                let new_inner = inner.substitute(subst, instances);
+                let new_inner = inner.substitute(subst, instances, refs);
                 match new_inner.to_array_elem() {
                     Some(new_ae) => Type::Array(new_ae),
                     None => Type::Array(ae),
@@ -342,10 +396,24 @@ impl Type {
                 };
                 let new_args: Vec<Type> = old_args
                     .into_iter()
-                    .map(|a| a.substitute(subst, instances))
+                    .map(|a| a.substitute(subst, instances, refs))
                     .collect();
                 let new_id = intern_generic_instance(instances, struct_id, new_args);
                 Type::GenericInstance(new_id)
+            }
+            Type::Ref(id) => {
+                // C2 / ADR 0017 D11: substitute through the ref's
+                // inner type and re-intern. Mirrors the
+                // GenericInstance branch's read-clone-substitute-
+                // intern shape.
+                let idx = id.0 as usize;
+                let (mutable, old_inner) = {
+                    let data = &refs[idx];
+                    (data.mutable, data.inner)
+                };
+                let new_inner = old_inner.substitute(subst, instances, refs);
+                let new_id = intern_ref(refs, mutable, new_inner);
+                Type::Ref(new_id)
             }
         }
     }
@@ -368,6 +436,20 @@ pub fn intern_generic_instance(
     }
     let id = GenericInstanceId(instances.len() as u32);
     instances.push(GenericInstanceData { struct_id, args });
+    id
+}
+
+/// Intern a `(mutable, inner)` pair into `refs`, returning its
+/// [`RefId`]. Linear search; same scale + future-optimisation story
+/// as [`intern_generic_instance`]. C2 / ADR 0017 D11.
+pub fn intern_ref(refs: &mut Vec<RefData>, mutable: bool, inner: Type) -> RefId {
+    for (idx, existing) in refs.iter().enumerate() {
+        if existing.mutable == mutable && existing.inner == inner {
+            return RefId(idx as u32);
+        }
+    }
+    let id = RefId(refs.len() as u32);
+    refs.push(RefData { mutable, inner });
     id
 }
 
@@ -406,6 +488,19 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             }
             format!("<gi#{}>", id.0)
         }
+        Type::Ref(id) => {
+            if let Some(p) = program {
+                if let Some(data) = p.refs.get(id.0 as usize) {
+                    let inner = type_display(data.inner, program);
+                    return if data.mutable {
+                        format!("&mut {inner}")
+                    } else {
+                        format!("&{inner}")
+                    };
+                }
+            }
+            format!("<ref#{}>", id.0)
+        }
     }
 }
 
@@ -420,6 +515,7 @@ impl std::fmt::Display for Type {
             Type::Array(elem) => write!(f, "[{}]", elem.to_type()),
             Type::TypeParam(id) => write!(f, "<T#{}>", id.0),
             Type::GenericInstance(id) => write!(f, "<gi#{}>", id.0),
+            Type::Ref(id) => write!(f, "<ref#{}>", id.0),
         }
     }
 }
@@ -447,10 +543,18 @@ fn resolve_type_expr(
     te: &TypeExpr,
     struct_table: &HashMap<String, StructId>,
     instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<Type, TypeError> {
     let empty: TypeParamScope = HashMap::new();
-    resolve_type_expr_with_scope(te, struct_table, &empty, instances, struct_type_param_counts)
+    resolve_type_expr_with_scope(
+        te,
+        struct_table,
+        &empty,
+        instances,
+        refs,
+        struct_type_param_counts,
+    )
 }
 
 fn resolve_type_expr_with_scope(
@@ -458,6 +562,7 @@ fn resolve_type_expr_with_scope(
     struct_table: &HashMap<String, StructId>,
     type_param_scope: &TypeParamScope,
     instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<Type, TypeError> {
     match &te.kind {
@@ -505,6 +610,7 @@ fn resolve_type_expr_with_scope(
                 struct_table,
                 type_param_scope,
                 instances,
+                refs,
                 struct_type_param_counts,
             )?;
             match inner_ty.to_nullable_inner() {
@@ -517,20 +623,48 @@ fn resolve_type_expr_with_scope(
         }
         TypeExprKind::Array(inner) => {
             // Recursively resolve the inner; reject `[[T]]` per
-            // ADR 0015 D6 (multi-dim arrays are deferred).
+            // ADR 0015 D6 (multi-dim arrays are deferred) and
+            // `[&T]` per ADR 0017 D1 (refs in arrays need named
+            // regions for soundness, deferred to a later ADR).
             let inner_ty = resolve_type_expr_with_scope(
                 inner,
                 struct_table,
                 type_param_scope,
                 instances,
+                refs,
                 struct_type_param_counts,
             )?;
+            if inner_ty.is_ref() {
+                return Err(TypeError::RefInArray {
+                    span: to_source_span(&te.span),
+                });
+            }
             match inner_ty.to_array_elem() {
                 Some(ae) => Ok(Type::Array(ae)),
                 None => Err(TypeError::NestedArray {
                     span: to_source_span(&te.span),
                 }),
             }
+        }
+        TypeExprKind::Ref { mutable, inner } => {
+            // C2 / ADR 0017 D1 + D11. Recursively resolve the inner;
+            // reject `&&T` (NestedRef per the depth-1 amendment of
+            // D11). `?&T` / `&?T` / `&[T]` are all valid.
+            let inner_ty = resolve_type_expr_with_scope(
+                inner,
+                struct_table,
+                type_param_scope,
+                instances,
+                refs,
+                struct_type_param_counts,
+            )?;
+            if inner_ty.is_ref() {
+                return Err(TypeError::NestedRef {
+                    span: to_source_span(&te.span),
+                });
+            }
+            let id = intern_ref(refs, *mutable, inner_ty);
+            Ok(Type::Ref(id))
         }
         TypeExprKind::Generic { name, args, .. } => {
             // ADR 0016 D3: `Foo<T1, T2, ...>` in type position.
@@ -585,6 +719,7 @@ fn resolve_type_expr_with_scope(
                             struct_table,
                             type_param_scope,
                             instances,
+                            refs,
                             struct_type_param_counts,
                         )?);
                     }
@@ -616,6 +751,11 @@ pub struct TypedProgram {
     /// nested generic instances (per ADR 0016 D6a's "linear
     /// search; HashMap if profile demands").
     pub generic_instances: Vec<GenericInstanceData>,
+    /// C2 / ADR 0017 D11: interned reference types. Each
+    /// `Type::Ref(id)` indexes this vector to recover
+    /// `(mutable, inner)`. Same scale + scheme as
+    /// [`generic_instances`].
+    pub refs: Vec<RefData>,
     pub span: Span,
 }
 
@@ -640,6 +780,13 @@ impl TypedProgram {
     /// [`check`] or [`intern_generic_instance`].
     pub fn generic_instance(&self, id: GenericInstanceId) -> &GenericInstanceData {
         &self.generic_instances[id.0 as usize]
+    }
+
+    /// Look up the underlying `(mutable, inner)` for a reference
+    /// type. Panics on out-of-range — IDs only come from [`check`]
+    /// or [`intern_ref`]. C2 / ADR 0017 D11.
+    pub fn ref_data(&self, id: RefId) -> &RefData {
+        &self.refs[id.0 as usize]
     }
 }
 
@@ -670,6 +817,7 @@ impl TypedFnDef {
         &self,
         subst: &[Type],
         instances: &mut Vec<GenericInstanceData>,
+        refs: &mut Vec<RefData>,
     ) -> TypedFnDef {
         TypedFnDef {
             id: self.id,
@@ -682,13 +830,14 @@ impl TypedFnDef {
                 .iter()
                 .map(|p| TypedParam {
                     id: p.id,
+                    mutable: p.mutable,
                     name: p.name.clone(),
                     span: p.span.clone(),
-                    ty: p.ty.substitute(subst, instances),
+                    ty: p.ty.substitute(subst, instances, refs),
                 })
                 .collect(),
-            return_type: self.return_type.substitute(subst, instances),
-            body: self.body.substitute(subst, instances),
+            return_type: self.return_type.substitute(subst, instances, refs),
+            body: self.body.substitute(subst, instances, refs),
             span: self.span.clone(),
         }
     }
@@ -699,16 +848,17 @@ impl TypedBlock {
         &self,
         subst: &[Type],
         instances: &mut Vec<GenericInstanceData>,
+        refs: &mut Vec<RefData>,
     ) -> TypedBlock {
         TypedBlock {
             stmts: self
                 .stmts
                 .iter()
-                .map(|s| s.substitute(subst, instances))
+                .map(|s| s.substitute(subst, instances, refs))
                 .collect(),
-            tail: self.tail.substitute(subst, instances),
+            tail: self.tail.substitute(subst, instances, refs),
             span: self.span.clone(),
-            ty: self.ty.substitute(subst, instances),
+            ty: self.ty.substitute(subst, instances, refs),
         }
     }
 }
@@ -718,16 +868,24 @@ impl TypedStmt {
         &self,
         subst: &[Type],
         instances: &mut Vec<GenericInstanceData>,
+        refs: &mut Vec<RefData>,
     ) -> TypedStmt {
         let kind = match &self.kind {
-            TypedStmtKind::Let { id, name, name_span, ty, value } => TypedStmtKind::Let {
-                id: *id,
-                name: name.clone(),
-                name_span: name_span.clone(),
-                ty: ty.substitute(subst, instances),
-                value: value.substitute(subst, instances),
+            TypedStmtKind::Let { id, mutable, name, name_span, ty, value } => {
+                TypedStmtKind::Let {
+                    id: *id,
+                    mutable: *mutable,
+                    name: name.clone(),
+                    name_span: name_span.clone(),
+                    ty: ty.substitute(subst, instances, refs),
+                    value: value.substitute(subst, instances, refs),
+                }
+            }
+            TypedStmtKind::Assign { target, value } => TypedStmtKind::Assign {
+                target: target.substitute(subst, instances, refs),
+                value: value.substitute(subst, instances, refs),
             },
-            TypedStmtKind::Expr(e) => TypedStmtKind::Expr(e.substitute(subst, instances)),
+            TypedStmtKind::Expr(e) => TypedStmtKind::Expr(e.substitute(subst, instances, refs)),
         };
         TypedStmt { kind, span: self.span.clone() }
     }
@@ -738,51 +896,53 @@ impl TypedExpr {
         &self,
         subst: &[Type],
         instances: &mut Vec<GenericInstanceData>,
+        refs: &mut Vec<RefData>,
     ) -> TypedExpr {
         let kind = match &self.kind {
             TypedExprKind::IntLit(n) => TypedExprKind::IntLit(*n),
             TypedExprKind::BoolLit(b) => TypedExprKind::BoolLit(*b),
             TypedExprKind::NullLit => TypedExprKind::NullLit,
             TypedExprKind::WidenToNullable(inner) => TypedExprKind::WidenToNullable(
-                Box::new(inner.substitute(subst, instances)),
+                Box::new(inner.substitute(subst, instances, refs)),
             ),
             TypedExprKind::Var(id) => TypedExprKind::Var(*id),
-            TypedExprKind::Unary(op, inner) => {
-                TypedExprKind::Unary(*op, Box::new(inner.substitute(subst, instances)))
-            }
+            TypedExprKind::Unary(op, inner) => TypedExprKind::Unary(
+                *op,
+                Box::new(inner.substitute(subst, instances, refs)),
+            ),
             TypedExprKind::Binary(op, l, r) => TypedExprKind::Binary(
                 *op,
-                Box::new(l.substitute(subst, instances)),
-                Box::new(r.substitute(subst, instances)),
+                Box::new(l.substitute(subst, instances, refs)),
+                Box::new(r.substitute(subst, instances, refs)),
             ),
             TypedExprKind::Cmp(op, l, r) => TypedExprKind::Cmp(
                 *op,
-                Box::new(l.substitute(subst, instances)),
-                Box::new(r.substitute(subst, instances)),
+                Box::new(l.substitute(subst, instances, refs)),
+                Box::new(r.substitute(subst, instances, refs)),
             ),
             TypedExprKind::Logic(op, l, r) => TypedExprKind::Logic(
                 *op,
-                Box::new(l.substitute(subst, instances)),
-                Box::new(r.substitute(subst, instances)),
+                Box::new(l.substitute(subst, instances, refs)),
+                Box::new(r.substitute(subst, instances, refs)),
             ),
             TypedExprKind::Block(b) => {
-                TypedExprKind::Block(Box::new(b.substitute(subst, instances)))
+                TypedExprKind::Block(Box::new(b.substitute(subst, instances, refs)))
             }
             TypedExprKind::If { cond, then_branch, else_branch } => TypedExprKind::If {
-                cond: Box::new(cond.substitute(subst, instances)),
-                then_branch: Box::new(then_branch.substitute(subst, instances)),
-                else_branch: Box::new(else_branch.substitute(subst, instances)),
+                cond: Box::new(cond.substitute(subst, instances, refs)),
+                then_branch: Box::new(then_branch.substitute(subst, instances, refs)),
+                else_branch: Box::new(else_branch.substitute(subst, instances, refs)),
             },
             TypedExprKind::Call { id, callee_span, args, type_args } => {
                 TypedExprKind::Call {
                     id: *id,
                     callee_span: callee_span.clone(),
-                    args: args.iter().map(|a| a.substitute(subst, instances)).collect(),
+                    args: args.iter().map(|a| a.substitute(subst, instances, refs)).collect(),
                     // Substitute the call's type_args too — this is
                     // what enables transitive monomorphic emission.
                     type_args: type_args
                         .iter()
-                        .map(|t| t.substitute(subst, instances))
+                        .map(|t| t.substitute(subst, instances, refs))
                         .collect(),
                 }
             }
@@ -791,28 +951,32 @@ impl TypedExpr {
                     id: *id,
                     name: name.clone(),
                     name_span: name_span.clone(),
-                    fields: fields.iter().map(|f| f.substitute(subst, instances)).collect(),
+                    fields: fields.iter().map(|f| f.substitute(subst, instances, refs)).collect(),
                 }
             }
             TypedExprKind::FieldAccess { target, field, field_span, field_index } => {
                 TypedExprKind::FieldAccess {
-                    target: Box::new(target.substitute(subst, instances)),
+                    target: Box::new(target.substitute(subst, instances, refs)),
                     field: field.clone(),
                     field_span: field_span.clone(),
                     field_index: *field_index,
                 }
             }
             TypedExprKind::ArrayLit { elem_ty, elements } => TypedExprKind::ArrayLit {
-                elem_ty: elem_ty.substitute(subst, instances),
-                elements: elements.iter().map(|e| e.substitute(subst, instances)).collect(),
+                elem_ty: elem_ty.substitute(subst, instances, refs),
+                elements: elements.iter().map(|e| e.substitute(subst, instances, refs)).collect(),
             },
             TypedExprKind::Index { target, index, elem_ty } => TypedExprKind::Index {
-                target: Box::new(target.substitute(subst, instances)),
-                index: Box::new(index.substitute(subst, instances)),
-                elem_ty: elem_ty.substitute(subst, instances),
+                target: Box::new(target.substitute(subst, instances, refs)),
+                index: Box::new(index.substitute(subst, instances, refs)),
+                elem_ty: elem_ty.substitute(subst, instances, refs),
             },
         };
-        TypedExpr { kind, span: self.span.clone(), ty: self.ty.substitute(subst, instances) }
+        TypedExpr {
+            kind,
+            span: self.span.clone(),
+            ty: self.ty.substitute(subst, instances, refs),
+        }
     }
 }
 
@@ -882,6 +1046,10 @@ pub struct TypedFnDef {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypedParam {
     pub id: VarId,
+    /// C2 / ADR 0017 D2: `true` iff the source declared `mut x: T`.
+    /// Binding-local — passes through from
+    /// [`sentinel_resolve::ResolvedParam`].
+    pub mutable: bool,
     pub name: String,
     pub span: Span,
     pub ty: Type,
@@ -908,11 +1076,23 @@ pub struct TypedStmt {
 pub enum TypedStmtKind {
     Let {
         id: VarId,
+        /// C2 / ADR 0017 D2: mutability of the binding. Type checker
+        /// uses this to validate `&mut x` and `x = v;` against the
+        /// binding's declaration.
+        mutable: bool,
         name: String,
         name_span: Span,
         /// The variable's resolved type (from the annotation if
         /// present, otherwise inferred from the RHS).
         ty: Type,
+        value: TypedExpr,
+    },
+    /// Assignment statement per ADR 0017 D2: `lhs = expr;`. LHS must
+    /// be a *mutable* lvalue (validated here at type-check time);
+    /// the LHS expression's type must match the RHS's. Mutable
+    /// indexing (`a[i] = v;`) is out of scope at C2 per ADR 0017 D12.
+    Assign {
+        target: TypedExpr,
         value: TypedExpr,
     },
     Expr(TypedExpr),
@@ -1249,6 +1429,132 @@ pub enum TypeError {
         #[label("can't infer type arguments")]
         span: miette::SourceSpan,
     },
+
+    /// C2 / ADR 0017 D1 + D11: nested references like `&&T` are
+    /// not allowed (depth-1 amendment). The parser allows `& &T`
+    /// to land here; `&&` lexes as logical-and at the token level.
+    #[error("nested references `&&T` are not allowed")]
+    #[diagnostic(
+        code(sentinel::types::nested_ref),
+        help("references are depth-1 at C2 per ADR 0017 D11; remove one of the `&`s")
+    )]
+    NestedRef {
+        #[label("nested reference here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C2 / ADR 0017 D1: refs in array elements are rejected. The
+    /// array could outlive the refs (a "first-class refs" problem),
+    /// which needs named regions per D7 / D12.
+    #[error("references in array elements are not allowed at C2")]
+    #[diagnostic(
+        code(sentinel::types::ref_in_array),
+        help("first-class refs (storable in arrays) need named regions per ADR 0017 D7; this is deferred to a later ADR")
+    )]
+    RefInArray {
+        #[label("reference in array element type")]
+        span: miette::SourceSpan,
+    },
+
+    /// C2 / ADR 0017 D7 / D12: refs in struct field types are
+    /// rejected for the same reason as `RefInArray` — first-class
+    /// refs need named regions.
+    #[error("references in struct fields are not allowed at C2")]
+    #[diagnostic(
+        code(sentinel::types::ref_in_struct_field),
+        help("first-class refs (storable in struct fields) need named regions per ADR 0017 D7; this is deferred to a later ADR")
+    )]
+    RefInStructField {
+        #[label("reference in struct field type")]
+        span: miette::SourceSpan,
+    },
+
+    /// C2 / ADR 0017 D3 + D5: `&expr` / `&mut expr` requires the
+    /// operand to be an lvalue (a place — Var, deref, field-access,
+    /// or index). R-value borrowing like `&5` or `&(a + b)` is
+    /// rejected; later ADRs may add temporary-promotion.
+    #[error("cannot borrow a non-lvalue expression")]
+    #[diagnostic(
+        code(sentinel::types::borrow_of_rvalue),
+        help("only variables, dereferences, field accesses, and indexes can be borrowed; bind the expression to a `let` first")
+    )]
+    BorrowOfRvalue {
+        #[label("not an lvalue")]
+        span: miette::SourceSpan,
+    },
+
+    /// C2 / ADR 0017 D2 + D5: assignment LHS must be an lvalue.
+    #[error("cannot assign to a non-lvalue expression")]
+    #[diagnostic(
+        code(sentinel::types::assign_to_rvalue),
+        help("assignment requires an lvalue (variable, deref, or field-access)")
+    )]
+    AssignToRvalue {
+        #[label("not an lvalue")]
+        span: miette::SourceSpan,
+    },
+
+    /// C2 / ADR 0017 D2: assignment to an immutable binding requires
+    /// `let mut`.
+    #[error("cannot assign to immutable binding `{name}`")]
+    #[diagnostic(
+        code(sentinel::types::assign_to_immutable),
+        help("change the declaration to `let mut {name}` to allow re-assignment")
+    )]
+    AssignToImmutable {
+        name: String,
+        #[label("binding `{name}` is immutable")]
+        span: miette::SourceSpan,
+    },
+
+    /// C2 / ADR 0017 D3: exclusive borrow of an immutable binding
+    /// requires `let mut` (or `mut` on a param).
+    #[error("cannot take `&mut` of immutable binding `{name}`")]
+    #[diagnostic(
+        code(sentinel::types::borrow_mut_of_immutable),
+        help("change the declaration to `let mut {name}` to allow exclusive borrowing")
+    )]
+    BorrowMutOfImmutable {
+        name: String,
+        #[label("binding `{name}` is immutable")]
+        span: miette::SourceSpan,
+    },
+
+    /// C2 / ADR 0017 D4: dereference applied to a non-ref operand.
+    #[error("dereference of non-reference type `{got}`")]
+    #[diagnostic(
+        code(sentinel::types::deref_of_non_ref),
+        help("`*expr` requires `expr` to have a `&T` or `&mut T` type")
+    )]
+    DerefOfNonRef {
+        got: Type,
+        #[label("expected a reference, got {got}")]
+        span: miette::SourceSpan,
+    },
+
+    /// C2 / ADR 0017 D2: deref-assignment (`*r = v;`) through a
+    /// shared `&T` is rejected — only `&mut T` allows writes.
+    #[error("cannot assign through a shared reference `&T`")]
+    #[diagnostic(
+        code(sentinel::types::assign_through_shared_ref),
+        help("the reference must be `&mut T` to be written to; declare or pass it as `&mut`")
+    )]
+    AssignThroughSharedRef {
+        #[label("shared reference is read-only")]
+        span: miette::SourceSpan,
+    },
+
+    /// C2 / ADR 0017 D12: mutable indexing (`a[i] = v;`) is out of
+    /// scope at C2. Future ADRs may add it.
+    #[error("mutable indexing `a[i] = v;` is not supported at C2")]
+    #[diagnostic(
+        code(sentinel::types::index_assign_not_supported),
+        help("array elements cannot be re-assigned at C2 per ADR 0017 D12; rebuild the array via a new let")
+    )]
+    IndexAssignNotSupported {
+        #[label("indexing on LHS of assignment")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -1277,11 +1583,13 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         .map(|sd| (sd.id, sd.type_params.len()))
         .collect();
     let mut generic_instances: Vec<GenericInstanceData> = Vec::new();
+    let mut refs: Vec<RefData> = Vec::new();
 
     // Pass 1: resolve struct field types. C1.7.4b / ADR 0016 D2 /
     // D6: generic structs are now supported; their fields can
     // reference the struct's type-params (which appear as
-    // `Type::TypeParam(_)` in the typed AST).
+    // `Type::TypeParam(_)` in the typed AST). C2 / ADR 0017 D7:
+    // refs in field types are rejected (`RefInStructField`).
     let mut typed_structs: Vec<TypedStructDecl> =
         Vec::with_capacity(program.structs.len());
     for sd in &program.structs {
@@ -1307,8 +1615,17 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &struct_table,
                 &tp_scope,
                 &mut generic_instances,
+                &mut refs,
                 &struct_type_param_counts,
             )?;
+            // C2 / ADR 0017 D7 / D12: refs can't live in struct
+            // fields at C2 — that's the first-class-refs case,
+            // deferred until named regions land.
+            if ty.is_ref() {
+                return Err(TypeError::RefInStructField {
+                    span: to_source_span(&f.ty.span),
+                });
+            }
             fields.push(TypedStructField {
                 name: f.name.clone(),
                 name_span: f.name_span.clone(),
@@ -1422,6 +1739,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &struct_table,
                 &tp_scope,
                 &mut generic_instances,
+                &mut refs,
                 &struct_type_param_counts,
             )?);
         }
@@ -1430,6 +1748,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             &struct_table,
             &tp_scope,
             &mut generic_instances,
+            &mut refs,
             &struct_type_param_counts,
         )?;
         typed_signatures.push(TypedFnSignature {
@@ -1451,7 +1770,8 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     // Pass 4: type-check each fn body. Any `Pair<i64, bool>` /
     // similar new instances that show up here (e.g., from let
     // annotations or generic call sites) are interned into
-    // `generic_instances`.
+    // `generic_instances`. Same for `&T` / `&mut T` refs into
+    // `refs` per ADR 0017 D11.
     let mut typed_fns = Vec::with_capacity(program.fns.len());
     for fn_def in &program.fns {
         typed_fns.push(check_fn(
@@ -1459,6 +1779,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             &typed_signatures,
             &typed_structs,
             &mut generic_instances,
+            &mut refs,
             &struct_type_param_counts,
         )?);
     }
@@ -1468,6 +1789,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         fn_signatures: typed_signatures,
         structs: typed_structs,
         generic_instances,
+        refs,
         span: program.span.clone(),
     })
 }
@@ -1555,6 +1877,7 @@ fn check_fn(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<TypedFnDef, TypeError> {
     // Pull our own signature.
@@ -1566,16 +1889,19 @@ fn check_fn(
     for (param, ty) in fn_def.params.iter().zip(signature.param_types.iter()) {
         params.push(TypedParam {
             id: param.id,
+            mutable: param.mutable,
             name: param.name.clone(),
             span: param.span.clone(),
             ty: *ty,
         });
     }
 
-    // Build a VarId -> Type map for this fn's scope.
+    // Build a VarId -> (Type, mutable) map for this fn's scope.
+    // C2 / ADR 0017 D2: mutability is per-binding; the type checker
+    // consults this to validate `&mut x` / `x = v;` operations.
     let mut env: VarTypeEnv = VarTypeEnv::new();
     for tp in &params {
-        env.insert(tp.id, tp.ty);
+        env.insert(tp.id, (tp.ty, tp.mutable));
     }
 
     let return_type = signature.return_type;
@@ -1600,6 +1926,7 @@ fn check_fn(
         signatures,
         structs,
         instances,
+        refs,
         struct_type_param_counts,
     )?;
 
@@ -1634,10 +1961,13 @@ fn check_fn(
     })
 }
 
-/// Per-fn type environment: VarId → Type. Inside a generic-fn
-/// body the value type may be `Type::TypeParam(_)`; concrete
-/// substitution happens at the caller.
-type VarTypeEnv = std::collections::HashMap<VarId, Type>;
+/// Per-fn type environment: VarId → (Type, mutable). Inside a
+/// generic-fn body the value type may be `Type::TypeParam(_)`;
+/// concrete substitution happens at the caller. The `mutable` bit
+/// (C2 / ADR 0017 D2) records whether the binding was declared
+/// with `let mut` / `mut param` — the type checker reads it for
+/// `&mut x` and `x = v;` validation.
+type VarTypeEnv = std::collections::HashMap<VarId, (Type, bool)>;
 
 // `build_struct_type_param_counts` lived here briefly as a
 // helper but was inlined into the few sites that needed it; the
@@ -1657,6 +1987,7 @@ fn builtin_type_param(name: &str, idx: u32) -> TypedTypeParam {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_block(
     block: &ResolvedBlock,
     expected: Option<Type>,
@@ -1664,6 +1995,7 @@ fn check_block(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<TypedBlock, TypeError> {
     let mut stmts = Vec::with_capacity(block.stmts.len());
@@ -1674,6 +2006,7 @@ fn check_block(
             signatures,
             structs,
             instances,
+            refs,
             struct_type_param_counts,
         )?);
     }
@@ -1686,6 +2019,7 @@ fn check_block(
         signatures,
         structs,
         instances,
+        refs,
         struct_type_param_counts,
     )?;
     let ty = tail.ty;
@@ -1703,10 +2037,11 @@ fn check_stmt(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<TypedStmt, TypeError> {
     let kind = match &stmt.kind {
-        ResolvedStmtKind::Let { id, name, name_span, ty_annot, value } => {
+        ResolvedStmtKind::Let { id, mutable, name, name_span, ty_annot, value } => {
             // ADR 0014 D5: if the let has a type annotation, push it
             // down into the RHS as the expected type. This is what
             // makes `let x: ?i64 = null;` typecheck.
@@ -1717,6 +2052,7 @@ fn check_stmt(
                         annot,
                         &struct_table,
                         instances,
+                        refs,
                         struct_type_param_counts,
                     )?)
                 }
@@ -1729,6 +2065,7 @@ fn check_stmt(
                 signatures,
                 structs,
                 instances,
+                refs,
                 struct_type_param_counts,
             )?;
             let ty = match (ty_annot, expected) {
@@ -1745,12 +2082,53 @@ fn check_stmt(
                 }
                 _ => value_typed.ty,
             };
-            env.insert(*id, ty);
+            env.insert(*id, (ty, *mutable));
             TypedStmtKind::Let {
                 id: *id,
+                mutable: *mutable,
                 name: name.clone(),
                 name_span: name_span.clone(),
                 ty,
+                value: value_typed,
+            }
+        }
+        ResolvedStmtKind::Assign { target, value } => {
+            // C2 / ADR 0017 D2 + D5: type-check the LHS first (as
+            // a normal expression) so we can read its type; then
+            // type-check the RHS with the LHS type as the expected
+            // (so widening / null work inside `x = null;` for
+            // `x: ?T`). Then validate the LHS is an lvalue and is
+            // mutable-assignable.
+            let target_typed = check_expr(
+                target,
+                None,
+                env,
+                signatures,
+                structs,
+                instances,
+                refs,
+                struct_type_param_counts,
+            )?;
+            let value_typed = check_expr(
+                value,
+                Some(target_typed.ty),
+                env,
+                signatures,
+                structs,
+                instances,
+                refs,
+                struct_type_param_counts,
+            )?;
+            if value_typed.ty != target_typed.ty {
+                return Err(TypeError::Mismatch {
+                    expected: target_typed.ty,
+                    got: value_typed.ty,
+                    span: to_source_span(&value.span),
+                });
+            }
+            check_assign_lvalue(&target_typed, env, refs)?;
+            TypedStmtKind::Assign {
+                target: target_typed,
                 value: value_typed,
             }
         }
@@ -1761,10 +2139,154 @@ fn check_stmt(
             signatures,
             structs,
             instances,
+            refs,
             struct_type_param_counts,
         )?),
     };
     Ok(TypedStmt { kind, span: stmt.span.clone() })
+}
+
+/// `true` iff `expr` is an lvalue per ADR 0017 D5 — a Var, a
+/// dereference, a field access on an lvalue, or an index on an
+/// lvalue. The borrow-take operator `&` / `&mut` and assignment
+/// statements both require their operand to be an lvalue.
+fn is_lvalue(expr: &TypedExpr) -> bool {
+    matches!(
+        &expr.kind,
+        TypedExprKind::Var(_)
+            | TypedExprKind::Unary(UnaryOp::Deref, _)
+            | TypedExprKind::FieldAccess { .. }
+            | TypedExprKind::Index { .. }
+    )
+}
+
+/// Validate the LHS of an assignment per ADR 0017 D2 + D5.
+/// Checks: (a) the target is an lvalue; (b) it's mutable —
+/// either the binding was declared `let mut` / `mut param`, or
+/// the deref is through `&mut T`, or transitively through a
+/// chain of those.
+fn check_assign_lvalue(
+    target: &TypedExpr,
+    env: &VarTypeEnv,
+    refs: &[RefData],
+) -> Result<(), TypeError> {
+    if !is_lvalue(target) {
+        return Err(TypeError::AssignToRvalue {
+            span: to_source_span(&target.span),
+        });
+    }
+    check_mutable_lvalue(target, env, refs)
+}
+
+/// Validate that the operand of `&mut expr` is a mutable lvalue.
+/// Symmetric with [`check_mutable_lvalue`] (the assignment-LHS
+/// path); diagnostics use `BorrowMutOfImmutable` instead of
+/// `AssignToImmutable` for the Var case.
+fn check_mutable_borrow_target(
+    target: &TypedExpr,
+    env: &VarTypeEnv,
+    refs: &[RefData],
+) -> Result<(), TypeError> {
+    match &target.kind {
+        TypedExprKind::Var(id) => {
+            let (_ty, mutable) = env
+                .get(id)
+                .copied()
+                .expect("VarId in scope per resolve invariants");
+            if !mutable {
+                return Err(TypeError::BorrowMutOfImmutable {
+                    name: "x".to_string(),
+                    span: to_source_span(&target.span),
+                });
+            }
+            Ok(())
+        }
+        TypedExprKind::Unary(UnaryOp::Deref, inner) => match inner.ty {
+            Type::Ref(id) => {
+                let data = &refs[id.0 as usize];
+                if !data.mutable {
+                    return Err(TypeError::AssignThroughSharedRef {
+                        span: to_source_span(&target.span),
+                    });
+                }
+                Ok(())
+            }
+            _ => Err(TypeError::DerefOfNonRef {
+                got: inner.ty,
+                span: to_source_span(&inner.span),
+            }),
+        },
+        TypedExprKind::FieldAccess { target: inner_target, .. } => {
+            check_mutable_borrow_target(inner_target, env, refs)
+        }
+        TypedExprKind::Index { .. } => Err(TypeError::IndexAssignNotSupported {
+            span: to_source_span(&target.span),
+        }),
+        _ => Err(TypeError::BorrowOfRvalue {
+            span: to_source_span(&target.span),
+        }),
+    }
+}
+
+/// Inner check: recurse through lvalue shape and gate on
+/// mutability. Surfaces `AssignToImmutable` for var stores,
+/// `AssignThroughSharedRef` for deref-stores via `&T`, and
+/// `IndexAssignNotSupported` for `a[i] = v;` which ADR 0017 D12
+/// punts.
+fn check_mutable_lvalue(
+    target: &TypedExpr,
+    env: &VarTypeEnv,
+    refs: &[RefData],
+) -> Result<(), TypeError> {
+    match &target.kind {
+        TypedExprKind::Var(id) => {
+            let (_ty, mutable) = env
+                .get(id)
+                .copied()
+                .expect("VarId in scope per resolve invariants");
+            if !mutable {
+                let name = "x".to_string();
+                // We don't have the binding's source name here
+                // without an additional lookup table; surfacing a
+                // placeholder keeps the diagnostic compiling. The
+                // codegen / driver layer already has the name from
+                // [`TypedExprKind::Var`] in the value layer, but
+                // for type-error context we use a placeholder.
+                return Err(TypeError::AssignToImmutable {
+                    name,
+                    span: to_source_span(&target.span),
+                });
+            }
+            Ok(())
+        }
+        TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+            // `*r = v;` requires r: &mut T.
+            match inner.ty {
+                Type::Ref(id) => {
+                    let data = &refs[id.0 as usize];
+                    if !data.mutable {
+                        return Err(TypeError::AssignThroughSharedRef {
+                            span: to_source_span(&target.span),
+                        });
+                    }
+                    Ok(())
+                }
+                _ => Err(TypeError::DerefOfNonRef {
+                    got: inner.ty,
+                    span: to_source_span(&inner.span),
+                }),
+            }
+        }
+        TypedExprKind::FieldAccess { target: inner_target, .. } => {
+            check_mutable_lvalue(inner_target, env, refs)
+        }
+        TypedExprKind::Index { .. } => Err(TypeError::IndexAssignNotSupported {
+            span: to_source_span(&target.span),
+        }),
+        _ => Err(TypeError::AssignToRvalue {
+            span: to_source_span(&target.span),
+        }),
+    }
 }
 
 /// Build a local struct-name table from the typed struct list.
@@ -1818,16 +2340,17 @@ fn try_substitute(
     ty: Type,
     subst: &[Option<Type>],
     instances: &[GenericInstanceData],
+    refs: &[RefData],
 ) -> Option<Type> {
     match ty {
         Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => Some(ty),
         Type::TypeParam(id) => subst.get(id.0 as usize).copied().flatten(),
         Type::Nullable(ni) => {
-            let inner = try_substitute(ni.to_type(), subst, instances)?;
+            let inner = try_substitute(ni.to_type(), subst, instances, refs)?;
             inner.to_nullable_inner().map(Type::Nullable)
         }
         Type::Array(ae) => {
-            let inner = try_substitute(ae.to_type(), subst, instances)?;
+            let inner = try_substitute(ae.to_type(), subst, instances, refs)?;
             inner.to_array_elem().map(Type::Array)
         }
         Type::GenericInstance(id) => {
@@ -1836,25 +2359,37 @@ fn try_substitute(
             // mutable-substitute path.
             let inst = &instances[id.0 as usize];
             for arg in &inst.args {
-                try_substitute(*arg, subst, instances)?;
+                try_substitute(*arg, subst, instances, refs)?;
             }
+            Some(ty)
+        }
+        Type::Ref(id) => {
+            // Concrete only if the inner type is fully bound.
+            let data = &refs[id.0 as usize];
+            try_substitute(data.inner, subst, instances, refs)?;
             Some(ty)
         }
     }
 }
 
 /// `true` iff `ty` mentions at least one [`Type::TypeParam`],
-/// either directly or inside the args of a GenericInstance.
-fn contains_type_param(ty: Type, instances: &[GenericInstanceData]) -> bool {
+/// either directly or inside the args of a GenericInstance / the
+/// inner of a Ref.
+fn contains_type_param(
+    ty: Type,
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
+) -> bool {
     match ty {
         Type::TypeParam(_) => true,
-        Type::Nullable(ni) => contains_type_param(ni.to_type(), instances),
-        Type::Array(ae) => contains_type_param(ae.to_type(), instances),
+        Type::Nullable(ni) => contains_type_param(ni.to_type(), instances, refs),
+        Type::Array(ae) => contains_type_param(ae.to_type(), instances, refs),
         Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => false,
         Type::GenericInstance(id) => instances[id.0 as usize]
             .args
             .iter()
-            .any(|a| contains_type_param(*a, instances)),
+            .any(|a| contains_type_param(*a, instances, refs)),
+        Type::Ref(id) => contains_type_param(refs[id.0 as usize].inner, instances, refs),
     }
 }
 
@@ -1883,6 +2418,7 @@ fn unify_one(
     arg: Type,
     subst: &mut [Option<Type>],
     instances: &[GenericInstanceData],
+    refs: &[RefData],
 ) -> Result<(), UnifyFailure> {
     match (param, arg) {
         (Type::TypeParam(id), other) => {
@@ -1901,10 +2437,10 @@ fn unify_one(
             }
         }
         (Type::Nullable(p), Type::Nullable(a)) => {
-            unify_one(p.to_type(), a.to_type(), subst, instances)
+            unify_one(p.to_type(), a.to_type(), subst, instances, refs)
         }
         (Type::Array(p), Type::Array(a)) => {
-            unify_one(p.to_type(), a.to_type(), subst, instances)
+            unify_one(p.to_type(), a.to_type(), subst, instances, refs)
         }
         (Type::GenericInstance(p_id), Type::GenericInstance(a_id)) => {
             // Same instance id → trivially equal.
@@ -1919,9 +2455,23 @@ fn unify_one(
                 return Err(UnifyFailure::Mismatch(param, arg));
             }
             for (pa, aa) in p_inst.args.iter().zip(a_inst.args.iter()) {
-                unify_one(*pa, *aa, subst, instances)?;
+                unify_one(*pa, *aa, subst, instances, refs)?;
             }
             Ok(())
+        }
+        (Type::Ref(p_id), Type::Ref(a_id)) => {
+            // C2 / ADR 0017 D11: refs unify when their mutability
+            // matches and their inner types unify. Recurse so
+            // `fn f<T>(x: &T)` called with `&i64` binds T = i64.
+            if p_id == a_id {
+                return Ok(());
+            }
+            let p_data = &refs[p_id.0 as usize];
+            let a_data = &refs[a_id.0 as usize];
+            if p_data.mutable != a_data.mutable {
+                return Err(UnifyFailure::Mismatch(param, arg));
+            }
+            unify_one(p_data.inner, a_data.inner, subst, instances, refs)
         }
         (p, a) if p == a => Ok(()),
         (p, a) => Err(UnifyFailure::Mismatch(p, a)),
@@ -1956,6 +2506,7 @@ fn check_call(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     call_span: &Span,
 ) -> Result<(TypedExprKind, Type), TypeError> {
@@ -1981,7 +2532,7 @@ fn check_call(
         // against the expected. Best-effort — failures here are
         // silent because a real downstream mismatch will surface
         // as ReturnTypeMismatch / Mismatch later.
-        let _ = unify_one(signature.return_type, exp, &mut subst, instances);
+        let _ = unify_one(signature.return_type, exp, &mut subst, instances, refs);
     }
 
     // Iterative inference. Each iteration types as many args as
@@ -2001,8 +2552,8 @@ fn check_call(
             // concrete params synthesize without pushdown so the
             // more specific `CallArgMismatch` (rather than the
             // generic `Mismatch`) surfaces on shape errors.
-            let concrete_param = if contains_type_param(param, instances) {
-                try_substitute(param, &subst, instances)
+            let concrete_param = if contains_type_param(param, instances, refs) {
+                try_substitute(param, &subst, instances, refs)
             } else {
                 Some(param)
             };
@@ -2017,10 +2568,19 @@ fn check_call(
             {
                 continue;
             }
-            let typed = check_expr(&args[i], arg_expected, env, signatures, structs, instances, struct_type_param_counts)?;
+            let typed = check_expr(
+                &args[i],
+                arg_expected,
+                env,
+                signatures,
+                structs,
+                instances,
+                refs,
+                struct_type_param_counts,
+            )?;
             // Validate the arg's type against the param (possibly
             // refining subst with any new TypeParam bindings).
-            match unify_one(param, typed.ty, &mut subst, instances) {
+            match unify_one(param, typed.ty, &mut subst, instances, refs) {
                 Ok(()) => {}
                 Err(UnifyFailure::Mismatch(expected, got)) => {
                     // If the failing param has unbound TypeParams,
@@ -2030,7 +2590,7 @@ fn check_call(
                     // If the param fully substitutes to a concrete
                     // shape, the more specific `CallArgMismatch`
                     // pinpoints the arg position by callee + index.
-                    return match try_substitute(expected, &subst, instances) {
+                    return match try_substitute(expected, &subst, instances, refs) {
                         Some(concrete) => Err(TypeError::CallArgMismatch {
                             callee: signature.name.clone(),
                             arg_index: i,
@@ -2095,9 +2655,11 @@ fn check_call(
     }
 
     // Compute the substituted return type. This may extend
-    // `instances` if the return type contains a GenericInstance
-    // with TypeParam args.
-    let ret_ty = signature.return_type.substitute(&concrete_type_args, instances);
+    // `instances` (and `refs`) if the return type contains a
+    // GenericInstance with TypeParam args (or a ref-of-TypeParam).
+    let ret_ty = signature
+        .return_type
+        .substitute(&concrete_type_args, instances, refs);
 
     let typed_args: Vec<TypedExpr> =
         typed_args.into_iter().map(|o| o.expect("filled above")).collect();
@@ -2112,6 +2674,7 @@ fn check_call(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_expr(
     expr: &ResolvedExpr,
     expected: Option<Type>,
@@ -2119,6 +2682,7 @@ fn check_expr(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
 ) -> Result<TypedExpr, TypeError> {
     // C1.5 / ADR 0014 D2: NullLit has no synthesis type — it MUST
@@ -2141,41 +2705,116 @@ fn check_expr(
         ResolvedExprKind::BoolLit(b) => (TypedExprKind::BoolLit(*b), Type::Bool),
         ResolvedExprKind::NullLit => unreachable!("handled above"),
         ResolvedExprKind::Var(id) => {
-            let ty = *env
+            let (ty, _mutable) = *env
                 .get(id)
                 .expect("resolve guarantees VarId is bound in the current scope");
             (TypedExprKind::Var(*id), ty)
         }
         ResolvedExprKind::Unary(op, inner) => {
-            let inner_t = check_expr(inner, None, env, signatures, structs, instances, struct_type_param_counts)?;
-            // C1.3: `-x` requires int; `!x` requires bool.
-            let ty = match op {
-                UnaryOp::Neg => {
-                    if !inner_t.ty.is_int() {
-                        return Err(TypeError::Mismatch {
-                            expected: Type::I64,
-                            got: inner_t.ty,
+            // C2 / ADR 0017 D3 + D4: borrow / deref need
+            // structural checks beyond Neg / Not's "operand has
+            // the right base type". Dispatch up front.
+            match op {
+                UnaryOp::Ref | UnaryOp::RefMut => {
+                    let inner_t = check_expr(
+                        inner,
+                        None,
+                        env,
+                        signatures,
+                        structs,
+                        instances,
+                        refs,
+                        struct_type_param_counts,
+                    )?;
+                    // Operand must be an lvalue.
+                    if !is_lvalue(&inner_t) {
+                        return Err(TypeError::BorrowOfRvalue {
                             span: to_source_span(&inner.span),
                         });
                     }
-                    inner_t.ty
-                }
-                UnaryOp::Not => {
-                    if inner_t.ty != Type::Bool {
-                        return Err(TypeError::Mismatch {
-                            expected: Type::Bool,
-                            got: inner_t.ty,
-                            span: to_source_span(&inner.span),
+                    let mutable_borrow = matches!(op, UnaryOp::RefMut);
+                    if mutable_borrow {
+                        // `&mut` requires a mutable lvalue.
+                        check_mutable_borrow_target(&inner_t, env, refs)?;
+                    }
+                    let inner_ty = inner_t.ty;
+                    // Reject `&&T` at the type level — though the
+                    // lexer + parser typically rule this out via
+                    // longest-match (`&&` lexes as logical-and).
+                    if inner_ty.is_ref() {
+                        return Err(TypeError::NestedRef {
+                            span: to_source_span(&expr.span),
                         });
                     }
-                    Type::Bool
+                    let id = intern_ref(refs, mutable_borrow, inner_ty);
+                    (
+                        TypedExprKind::Unary(*op, Box::new(inner_t)),
+                        Type::Ref(id),
+                    )
                 }
-            };
-            (TypedExprKind::Unary(*op, Box::new(inner_t)), ty)
+                UnaryOp::Deref => {
+                    let inner_t = check_expr(
+                        inner,
+                        None,
+                        env,
+                        signatures,
+                        structs,
+                        instances,
+                        refs,
+                        struct_type_param_counts,
+                    )?;
+                    let inner_ty = match inner_t.ty {
+                        Type::Ref(id) => refs[id.0 as usize].inner,
+                        other => {
+                            return Err(TypeError::DerefOfNonRef {
+                                got: other,
+                                span: to_source_span(&inner.span),
+                            });
+                        }
+                    };
+                    (TypedExprKind::Unary(*op, Box::new(inner_t)), inner_ty)
+                }
+                UnaryOp::Neg | UnaryOp::Not => {
+                    let inner_t = check_expr(
+                        inner,
+                        None,
+                        env,
+                        signatures,
+                        structs,
+                        instances,
+                        refs,
+                        struct_type_param_counts,
+                    )?;
+                    let ty = match op {
+                        UnaryOp::Neg => {
+                            if !inner_t.ty.is_int() {
+                                return Err(TypeError::Mismatch {
+                                    expected: Type::I64,
+                                    got: inner_t.ty,
+                                    span: to_source_span(&inner.span),
+                                });
+                            }
+                            inner_t.ty
+                        }
+                        UnaryOp::Not => {
+                            if inner_t.ty != Type::Bool {
+                                return Err(TypeError::Mismatch {
+                                    expected: Type::Bool,
+                                    got: inner_t.ty,
+                                    span: to_source_span(&inner.span),
+                                });
+                            }
+                            Type::Bool
+                        }
+                        _ => unreachable!(),
+                    };
+                    (TypedExprKind::Unary(*op, Box::new(inner_t)), ty)
+                }
+            }
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, struct_type_param_counts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, struct_type_param_counts)?;
             // C1.3: arithmetic requires both operands the same int
             // type (I32 or I64); result is that int type. Bool /
             // struct arithmetic is rejected.
@@ -2218,10 +2857,10 @@ fn check_expr(
                 // The non-null side determines the expected ?T type.
                 // First, synthesize the non-null side.
                 let (non_null_side, non_null_expr, null_span) = if lhs_is_null {
-                    let r = check_expr(rhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
+                    let r = check_expr(rhs, None, env, signatures, structs, instances, refs, struct_type_param_counts)?;
                     (r.ty, r, lhs.span.clone())
                 } else {
-                    let l = check_expr(lhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
+                    let l = check_expr(lhs, None, env, signatures, structs, instances, refs, struct_type_param_counts)?;
                     (l.ty, l, rhs.span.clone())
                 };
                 // Non-null side must be Nullable for null-comparison.
@@ -2248,8 +2887,8 @@ fn check_expr(
                     ty: Type::Bool,
                 });
             }
-            let l = check_expr(lhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, struct_type_param_counts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, struct_type_param_counts)?;
             // C1.3: comparisons require both operands the same type.
             // C1.4 + C1.5 keep this as int + bool only (ADR 0013 D6
             // defers struct equality; nullable-vs-nullable equality
@@ -2275,8 +2914,8 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Logic(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, instances, struct_type_param_counts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, struct_type_param_counts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, struct_type_param_counts)?;
             if l.ty != Type::Bool {
                 return Err(TypeError::Mismatch {
                     expected: Type::Bool,
@@ -2297,12 +2936,12 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Block(b) => {
-            let typed_block = check_block(b, expected, env, signatures, structs, instances, struct_type_param_counts)?;
+            let typed_block = check_block(b, expected, env, signatures, structs, instances, refs, struct_type_param_counts)?;
             let ty = typed_block.ty;
             (TypedExprKind::Block(Box::new(typed_block)), ty)
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
-            let cond_t = check_expr(cond, None, env, signatures, structs, instances, struct_type_param_counts)?;
+            let cond_t = check_expr(cond, None, env, signatures, structs, instances, refs, struct_type_param_counts)?;
             // C1.3 step 5: if-condition must be bool.
             if cond_t.ty != Type::Bool {
                 return Err(TypeError::Mismatch {
@@ -2313,8 +2952,8 @@ fn check_expr(
             }
             // ADR 0014 D5: push the expected type down into both
             // branches so `null` in either branch can resolve.
-            let then_t = check_block(then_branch, expected, env, signatures, structs, instances, struct_type_param_counts)?;
-            let else_t = check_block(else_branch, expected, env, signatures, structs, instances, struct_type_param_counts)?;
+            let then_t = check_block(then_branch, expected, env, signatures, structs, instances, refs, struct_type_param_counts)?;
+            let else_t = check_block(else_branch, expected, env, signatures, structs, instances, refs, struct_type_param_counts)?;
             if then_t.ty != else_t.ty {
                 return Err(TypeError::Mismatch {
                     expected: then_t.ty,
@@ -2341,6 +2980,7 @@ fn check_expr(
             signatures,
             structs,
             instances,
+            refs,
             struct_type_param_counts,
             &expr.span,
         )?,
@@ -2401,7 +3041,7 @@ fn check_expr(
                 let expected_field_ty = if type_args.is_empty() {
                     raw_field_ty
                 } else {
-                    raw_field_ty.substitute(&type_args, instances)
+                    raw_field_ty.substitute(&type_args, instances, refs)
                 };
                 // ADR 0014 D5: push the field's expected type down so
                 // `null` / widening work inside struct literals.
@@ -2412,6 +3052,7 @@ fn check_expr(
                     signatures,
                     structs,
                     instances,
+                    refs,
                     struct_type_param_counts,
                 )?;
                 if value_t.ty != expected_field_ty {
@@ -2497,7 +3138,7 @@ fn check_expr(
                 // Type-check elements. First element synthesizes T
                 // if no expected; subsequent elements get T as
                 // expected (so widening / null work inside `[T]`).
-                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, instances, struct_type_param_counts)?;
+                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, instances, refs, struct_type_param_counts)?;
                 let elem_ty = first.ty;
                 let mut typed = Vec::with_capacity(elems.len());
                 typed.push(first);
@@ -2509,6 +3150,7 @@ fn check_expr(
                         signatures,
                         structs,
                         instances,
+                        refs,
                         struct_type_param_counts,
                     )?;
                     if t.ty != elem_ty {
@@ -2535,7 +3177,7 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Index { target, index } => {
-            let target_t = check_expr(target, None, env, signatures, structs, instances, struct_type_param_counts)?;
+            let target_t = check_expr(target, None, env, signatures, structs, instances, refs, struct_type_param_counts)?;
             let elem_ty = match target_t.ty {
                 Type::Array(ae) => ae,
                 other => {
@@ -2548,7 +3190,7 @@ fn check_expr(
             // Synthesize the index without pushdown so a non-int
             // index surfaces as the more-specific `IndexNotInt`
             // rather than a generic `Mismatch`.
-            let index_t = check_expr(index, None, env, signatures, structs, instances, struct_type_param_counts)?;
+            let index_t = check_expr(index, None, env, signatures, structs, instances, refs, struct_type_param_counts)?;
             if index_t.ty != Type::I64 {
                 return Err(TypeError::IndexNotInt {
                     got: index_t.ty,
@@ -2572,6 +3214,7 @@ fn check_expr(
                 signatures,
                 structs,
                 instances,
+                refs,
                 struct_type_param_counts,
             )?;
             // C1.7.4b / ADR 0016 D6: field access on a generic
@@ -2610,7 +3253,7 @@ fn check_expr(
             let field_ty = if type_args.is_empty() {
                 raw_field_ty
             } else {
-                raw_field_ty.substitute(&type_args, instances)
+                raw_field_ty.substitute(&type_args, instances, refs)
             };
             (
                 TypedExprKind::FieldAccess {
@@ -2765,6 +3408,56 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::AmbiguousGenericStructLit { struct_name, span } => (
             "sentinel::types::ambiguous_generic_struct_lit",
             format!("ambiguous generic struct literal `{struct_name}` — supply type arguments via context"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::NestedRef { span } => (
+            "sentinel::types::nested_ref",
+            "nested references `&&T` are not allowed".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::RefInArray { span } => (
+            "sentinel::types::ref_in_array",
+            "references in array elements are not allowed at C2".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::RefInStructField { span } => (
+            "sentinel::types::ref_in_struct_field",
+            "references in struct fields are not allowed at C2".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::BorrowOfRvalue { span } => (
+            "sentinel::types::borrow_of_rvalue",
+            "cannot borrow a non-lvalue expression".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::AssignToRvalue { span } => (
+            "sentinel::types::assign_to_rvalue",
+            "cannot assign to a non-lvalue expression".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::AssignToImmutable { name, span } => (
+            "sentinel::types::assign_to_immutable",
+            format!("cannot assign to immutable binding `{name}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::BorrowMutOfImmutable { name, span } => (
+            "sentinel::types::borrow_mut_of_immutable",
+            format!("cannot take `&mut` of immutable binding `{name}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::DerefOfNonRef { got, span } => (
+            "sentinel::types::deref_of_non_ref",
+            format!("dereference of non-reference type `{got}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::AssignThroughSharedRef { span } => (
+            "sentinel::types::assign_through_shared_ref",
+            "cannot assign through a shared reference `&T`".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::IndexAssignNotSupported { span } => (
+            "sentinel::types::index_assign_not_supported",
+            "mutable indexing `a[i] = v;` is not supported at C2".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -3146,6 +3839,207 @@ fn main() -> i64 {
     }
 
     // ----- C1.3: i32 + bool universe sanity -----
+
+    // ----- C2.0.2 / ADR 0017: refs + mutability + deref + assignment -----
+
+    #[test]
+    fn ref_param_type_resolves() {
+        let p = check_ok("fn f(x: &i64) -> i64 { *x }\nfn main() -> i64 { 0 }");
+        let param_ty = p.fns[0].params[0].ty;
+        assert!(param_ty.is_ref());
+        if let Type::Ref(id) = param_ty {
+            let data = p.ref_data(id);
+            assert!(!data.mutable);
+            assert_eq!(data.inner, Type::I64);
+        }
+    }
+
+    #[test]
+    fn ref_mut_param_type_resolves() {
+        let p = check_ok("fn f(x: &mut i64) -> i64 { *x }\nfn main() -> i64 { 0 }");
+        let param_ty = p.fns[0].params[0].ty;
+        if let Type::Ref(id) = param_ty {
+            let data = p.ref_data(id);
+            assert!(data.mutable);
+            assert_eq!(data.inner, Type::I64);
+        } else {
+            panic!("expected Ref param");
+        }
+    }
+
+    #[test]
+    fn ref_interner_dedupes() {
+        // Two distinct `&i64` mentions should reuse the same RefId.
+        let p = check_ok(
+            "fn add(a: &i64, b: &i64) -> i64 { *a + *b }\nfn main() -> i64 { 0 }",
+        );
+        let t0 = p.fns[0].params[0].ty;
+        let t1 = p.fns[0].params[1].ty;
+        assert_eq!(t0, t1);
+    }
+
+    #[test]
+    fn ref_borrow_take_produces_ref_type() {
+        let p = check_ok(
+            "fn f() -> i64 { let x: i64 = 5; let r: &i64 = &x; *r }\nfn main() -> i64 { 0 }",
+        );
+        // The let-r binding's RHS is `&x`; its type is `&i64`.
+        let body = &p.fns[0].body;
+        match &body.stmts[1].kind {
+            TypedStmtKind::Let { ty, .. } => assert!(ty.is_ref()),
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deref_produces_inner_type() {
+        let p = check_ok("fn read(x: &i64) -> i64 { *x }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.fns[0].body.ty, Type::I64);
+    }
+
+    #[test]
+    fn ref_in_array_rejected() {
+        let err = check_err("fn f(xs: [&i64]) -> i64 { 0 }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::RefInArray { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn ref_in_struct_field_rejected() {
+        let err = check_err(
+            "struct Bad { r: &i64 }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::RefInStructField { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nested_ref_rejected() {
+        // `& &T` produces `&&T` at parse time (whitespace mandatory
+        // since `&&` lexes as logical-and). The type checker rejects.
+        let err = check_err("fn f(x: & &i64) -> i64 { 0 }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::NestedRef { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn borrow_of_rvalue_rejected() {
+        let err = check_err(
+            "fn f() -> i64 { let r: &i64 = &5; *r }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::BorrowOfRvalue { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn borrow_mut_of_immutable_rejected() {
+        let err = check_err(
+            "fn f() -> i64 { let x: i64 = 5; let r: &mut i64 = &mut x; *r }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::BorrowMutOfImmutable { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn borrow_mut_of_mutable_ok() {
+        let p = check_ok(
+            "fn f() -> i64 { let mut x: i64 = 5; let r: &mut i64 = &mut x; *r }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].body.ty, Type::I64);
+    }
+
+    #[test]
+    fn assign_to_immutable_rejected() {
+        let err = check_err(
+            "fn f() -> i64 { let x: i64 = 5; x = 7; x }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::AssignToImmutable { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn assign_to_mutable_ok() {
+        let p = check_ok(
+            "fn f() -> i64 { let mut x: i64 = 5; x = 7; x }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].body.ty, Type::I64);
+    }
+
+    #[test]
+    fn deref_assign_through_mut_ref_ok() {
+        let p = check_ok(
+            "fn set(x: &mut i64, v: i64) -> i64 { *x = v; *x }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].body.ty, Type::I64);
+    }
+
+    #[test]
+    fn deref_assign_through_shared_ref_rejected() {
+        let err = check_err(
+            "fn set(x: &i64, v: i64) -> i64 { *x = v; *x }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::AssignThroughSharedRef { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn deref_of_non_ref_rejected() {
+        let err = check_err("fn f(x: i64) -> i64 { *x }\nfn main() -> i64 { 0 }");
+        assert!(
+            matches!(err, TypeError::DerefOfNonRef { got: Type::I64, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn mut_param_allows_assign() {
+        let p = check_ok(
+            "fn f(mut x: i64) -> i64 { x = x + 1; x }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].body.ty, Type::I64);
+    }
+
+    #[test]
+    fn immutable_param_assign_rejected() {
+        let err = check_err(
+            "fn f(x: i64) -> i64 { x = x + 1; x }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::AssignToImmutable { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn ref_of_array_type_ok() {
+        // `&[T]` — ref to array. Per ADR 0017 D1.
+        let p = check_ok(
+            "fn first(xs: &[i64]) -> i64 { (*xs)[0] }\nfn main() -> i64 { 0 }",
+        );
+        let param_ty = p.fns[0].params[0].ty;
+        assert!(param_ty.is_ref());
+    }
+
+    #[test]
+    fn ref_of_nullable_type_ok() {
+        // `&?T` — ref to nullable. Per ADR 0017 D1.
+        let p = check_ok("fn f(x: &?i64) -> i64 { 0 }\nfn main() -> i64 { 0 }");
+        let param_ty = p.fns[0].params[0].ty;
+        assert!(param_ty.is_ref());
+    }
+
+    #[test]
+    fn assign_type_mismatch_rejected() {
+        let err = check_err(
+            "fn f() -> i64 { let mut x: i64 = 5; x = true; x }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
 
     #[test]
     fn i32_type_resolves() {

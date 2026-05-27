@@ -45,8 +45,8 @@ use sentinel_resolve::{
     FnId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
 };
 use sentinel_types::{
-    ArrayElem, GenericInstanceData, GenericInstanceId, NullableInner, Type, TypedBlock, TypedExpr,
-    TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
+    ArrayElem, GenericInstanceData, GenericInstanceId, NullableInner, RefData, Type, TypedBlock,
+    TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -100,8 +100,12 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
     // new entries (e.g., transitive nested generics). The walk
     // doesn't need LLVM types yet — it just discovers `(FnId,
     // type_args)` tuples and threads through `Type::substitute`.
+    // C2 / ADR 0017 D11: same treatment for `refs` — substitution
+    // through a ref-of-TypeParam interns a fresh RefId for each
+    // concrete instantiation.
     let mut instances: Vec<GenericInstanceData> = program.generic_instances.clone();
-    let instantiations = collect_mono_instantiations(program, &mut instances);
+    let mut refs: Vec<RefData> = program.refs.clone();
+    let instantiations = collect_mono_instantiations(program, &mut instances, &mut refs);
     // Materialise each fn instance as a substituted TypedFnDef so
     // pass 2's body lowering can consume it without TypeParam-
     // awareness. May extend `instances` further as nested generic
@@ -114,7 +118,10 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
                 .iter()
                 .find(|f| f.id == *fn_id)
                 .expect("collect_mono_instantiations only queues real user-defined fns");
-            ((*fn_id, args.clone()), generic_def.substitute(args, &mut instances))
+            (
+                (*fn_id, args.clone()),
+                generic_def.substitute(args, &mut instances, &mut refs),
+            )
         })
         .collect();
 
@@ -146,7 +153,7 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
     // materialize at runtime — the monomorphic clones use
     // concrete-arg instances built during substitution.
     let abstract_args = |args: &[Type]| -> bool {
-        args.iter().any(|a| arg_contains_typeparam(*a, &instances))
+        args.iter().any(|a| arg_contains_typeparam(*a, &instances, &refs))
     };
     for (idx, inst) in instances.iter().enumerate() {
         if abstract_args(&inst.args) {
@@ -186,7 +193,9 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
             .map(|f| {
                 let args = inst.args.clone();
                 let mut local_instances = instances.clone();
-                let concrete = f.ty.substitute(&args, &mut local_instances);
+                let mut local_refs = refs.clone();
+                let concrete =
+                    f.ty.substitute(&args, &mut local_instances, &mut local_refs);
                 llvm_basic_type(
                     &context,
                     concrete,
@@ -455,6 +464,14 @@ fn llvm_basic_type<'ctx>(
                 context.ptr_type(inkwell::AddressSpace::default()).into();
             context.struct_type(&[len_ty, data_ty], false).into()
         }
+        Type::Ref(_) => {
+            // C2 / ADR 0017 D11: references lower to LLVM opaque
+            // pointers. The pointed-to type is recovered from
+            // [`TypedProgram::refs`] at deref + borrow-take sites
+            // (LLVM 15+ uses opaque pointers, so no LLVM-level
+            // pointee tag is needed here).
+            context.ptr_type(inkwell::AddressSpace::default()).into()
+        }
         // C1.7 / ADR 0016 D7: TypeParams are abstract; codegen
         // requires substitution at the monomorphic instantiation
         // boundary. Reaching here is a codegen bug. Until C1.7.5
@@ -481,6 +498,7 @@ fn llvm_basic_type<'ctx>(
 fn collect_mono_instantiations(
     program: &TypedProgram,
     instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
 ) -> Vec<(FnId, Vec<Type>)> {
     let mut visited: HashSet<(FnId, Vec<Type>)> = HashSet::new();
     let mut order: Vec<(FnId, Vec<Type>)> = Vec::new();
@@ -497,6 +515,7 @@ fn collect_mono_instantiations(
             &no_subst,
             program,
             instances,
+            refs,
             &mut visited,
             &mut order,
             &mut pending,
@@ -516,6 +535,7 @@ fn collect_mono_instantiations(
             &subst,
             program,
             instances,
+            refs,
             &mut visited,
             &mut order,
             &mut pending,
@@ -531,6 +551,7 @@ fn walk_block_for_mono(
     subst: &[Type],
     program: &TypedProgram,
     instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
     visited: &mut HashSet<(FnId, Vec<Type>)>,
     order: &mut Vec<(FnId, Vec<Type>)>,
     pending: &mut Vec<(FnId, Vec<Type>)>,
@@ -538,14 +559,31 @@ fn walk_block_for_mono(
     for stmt in &block.stmts {
         match &stmt.kind {
             TypedStmtKind::Let { value, .. } => walk_expr_for_mono(
-                value, subst, program, instances, visited, order, pending,
+                value, subst, program, instances, refs, visited, order, pending,
             ),
-            TypedStmtKind::Expr(e) => {
-                walk_expr_for_mono(e, subst, program, instances, visited, order, pending)
+            TypedStmtKind::Assign { target, value } => {
+                walk_expr_for_mono(
+                    target, subst, program, instances, refs, visited, order, pending,
+                );
+                walk_expr_for_mono(
+                    value, subst, program, instances, refs, visited, order, pending,
+                );
             }
+            TypedStmtKind::Expr(e) => walk_expr_for_mono(
+                e, subst, program, instances, refs, visited, order, pending,
+            ),
         }
     }
-    walk_expr_for_mono(&block.tail, subst, program, instances, visited, order, pending);
+    walk_expr_for_mono(
+        &block.tail,
+        subst,
+        program,
+        instances,
+        refs,
+        visited,
+        order,
+        pending,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -554,6 +592,7 @@ fn walk_expr_for_mono(
     subst: &[Type],
     program: &TypedProgram,
     instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
     visited: &mut HashSet<(FnId, Vec<Type>)>,
     order: &mut Vec<(FnId, Vec<Type>)>,
     pending: &mut Vec<(FnId, Vec<Type>)>,
@@ -563,28 +602,44 @@ fn walk_expr_for_mono(
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
         | TypedExprKind::Var(_) => {}
-        TypedExprKind::WidenToNullable(inner) => {
-            walk_expr_for_mono(inner, subst, program, instances, visited, order, pending)
-        }
-        TypedExprKind::Unary(_, inner) => {
-            walk_expr_for_mono(inner, subst, program, instances, visited, order, pending)
-        }
+        TypedExprKind::WidenToNullable(inner) => walk_expr_for_mono(
+            inner, subst, program, instances, refs, visited, order, pending,
+        ),
+        TypedExprKind::Unary(_, inner) => walk_expr_for_mono(
+            inner, subst, program, instances, refs, visited, order, pending,
+        ),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
         | TypedExprKind::Logic(_, l, r) => {
-            walk_expr_for_mono(l, subst, program, instances, visited, order, pending);
-            walk_expr_for_mono(r, subst, program, instances, visited, order, pending);
+            walk_expr_for_mono(l, subst, program, instances, refs, visited, order, pending);
+            walk_expr_for_mono(r, subst, program, instances, refs, visited, order, pending);
         }
-        TypedExprKind::Block(b) => {
-            walk_block_for_mono(b, subst, program, instances, visited, order, pending)
-        }
+        TypedExprKind::Block(b) => walk_block_for_mono(
+            b, subst, program, instances, refs, visited, order, pending,
+        ),
         TypedExprKind::If { cond, then_branch, else_branch } => {
-            walk_expr_for_mono(cond, subst, program, instances, visited, order, pending);
-            walk_block_for_mono(
-                then_branch, subst, program, instances, visited, order, pending,
+            walk_expr_for_mono(
+                cond, subst, program, instances, refs, visited, order, pending,
             );
             walk_block_for_mono(
-                else_branch, subst, program, instances, visited, order, pending,
+                then_branch,
+                subst,
+                program,
+                instances,
+                refs,
+                visited,
+                order,
+                pending,
+            );
+            walk_block_for_mono(
+                else_branch,
+                subst,
+                program,
+                instances,
+                refs,
+                visited,
+                order,
+                pending,
             );
         }
         TypedExprKind::Call { id, args, type_args, .. } => {
@@ -592,7 +647,7 @@ fn walk_expr_for_mono(
             // subst to get the concrete instantiation key.
             let concrete_args: Vec<Type> = type_args
                 .iter()
-                .map(|t| t.substitute(subst, instances))
+                .map(|t| t.substitute(subst, instances, refs))
                 .collect();
             let signature = program.signature(*id);
             // Only enqueue user-defined generic fns. Builtins are
@@ -606,27 +661,35 @@ fn walk_expr_for_mono(
                 }
             }
             for a in args {
-                walk_expr_for_mono(a, subst, program, instances, visited, order, pending);
+                walk_expr_for_mono(
+                    a, subst, program, instances, refs, visited, order, pending,
+                );
             }
         }
         TypedExprKind::StructLit { fields, .. } => {
             for f in fields {
-                walk_expr_for_mono(f, subst, program, instances, visited, order, pending);
+                walk_expr_for_mono(
+                    f, subst, program, instances, refs, visited, order, pending,
+                );
             }
         }
-        TypedExprKind::FieldAccess { target, .. } => {
-            walk_expr_for_mono(target, subst, program, instances, visited, order, pending)
-        }
+        TypedExprKind::FieldAccess { target, .. } => walk_expr_for_mono(
+            target, subst, program, instances, refs, visited, order, pending,
+        ),
         TypedExprKind::ArrayLit { elements, .. } => {
             for el in elements {
                 walk_expr_for_mono(
-                    el, subst, program, instances, visited, order, pending,
+                    el, subst, program, instances, refs, visited, order, pending,
                 );
             }
         }
         TypedExprKind::Index { target, index, .. } => {
-            walk_expr_for_mono(target, subst, program, instances, visited, order, pending);
-            walk_expr_for_mono(index, subst, program, instances, visited, order, pending);
+            walk_expr_for_mono(
+                target, subst, program, instances, refs, visited, order, pending,
+            );
+            walk_expr_for_mono(
+                index, subst, program, instances, refs, visited, order, pending,
+            );
         }
     }
 }
@@ -666,6 +729,19 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
             .unwrap_or_else(|| format!("struct{}", id.0)),
         Type::Nullable(inner) => format!("opt_{}", mangle_type(inner.to_type(), program)),
         Type::Array(elem) => format!("arr_{}", mangle_type(elem.to_type(), program)),
+        Type::Ref(id) => {
+            // C2 / ADR 0017 D11: render `&T` as `ref_T`, `&mut T`
+            // as `refmut_T`. Internal-only mangling — debug
+            // affordance.
+            program
+                .refs
+                .get(id.0 as usize)
+                .map(|d| {
+                    let prefix = if d.mutable { "refmut" } else { "ref" };
+                    format!("{prefix}_{}", mangle_type(d.inner, program))
+                })
+                .unwrap_or_else(|| format!("ref{}", id.0))
+        }
         // TypeParams shouldn't appear in a monomorphic instance's
         // type-args by construction; if one slips through, render
         // it for debuggability.
@@ -696,19 +772,25 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
 }
 
 /// `true` iff `ty` mentions any `Type::TypeParam`, transitively
-/// through `Nullable`, `Array`, and `GenericInstance` args. Used by
-/// codegen pass 0 to filter the abstract (TypeParam-using)
-/// instances out of LLVM struct-type emission per ADR 0016 D6.
-fn arg_contains_typeparam(ty: Type, instances: &[GenericInstanceData]) -> bool {
+/// through `Nullable`, `Array`, `GenericInstance`, and `Ref`. Used
+/// by codegen pass 0 to filter the abstract (TypeParam-using)
+/// instances out of LLVM struct-type emission per ADR 0016 D6 +
+/// ADR 0017 D11.
+fn arg_contains_typeparam(
+    ty: Type,
+    instances: &[GenericInstanceData],
+    refs: &[RefData],
+) -> bool {
     match ty {
         Type::TypeParam(_) => true,
         Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => false,
-        Type::Nullable(ni) => arg_contains_typeparam(ni.to_type(), instances),
-        Type::Array(ae) => arg_contains_typeparam(ae.to_type(), instances),
+        Type::Nullable(ni) => arg_contains_typeparam(ni.to_type(), instances, refs),
+        Type::Array(ae) => arg_contains_typeparam(ae.to_type(), instances, refs),
         Type::GenericInstance(id) => instances[id.0 as usize]
             .args
             .iter()
-            .any(|a| arg_contains_typeparam(*a, instances)),
+            .any(|a| arg_contains_typeparam(*a, instances, refs)),
+        Type::Ref(id) => arg_contains_typeparam(refs[id.0 as usize].inner, instances, refs),
     }
 }
 
@@ -746,6 +828,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::GenericInstance(_) => {
             panic!("llvm_int_type called on non-int Type::GenericInstance")
         }
+        Type::Ref(_) => panic!("llvm_int_type called on non-int Type::Ref"),
         // C1.7 / ADR 0016 D7: TypeParams must be substituted to a
         // concrete Type at the monomorphic instantiation boundary
         // before codegen sees them. Reaching here is a codegen bug
@@ -891,11 +974,73 @@ impl<'ctx> CodegenCtx<'ctx> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 self.vars.insert(*id, (alloca, *ty));
             }
+            TypedStmtKind::Assign { target, value } => {
+                // C2 / ADR 0017 D2: lower the RHS, compute the LHS
+                // address as a pointer, then store. Lvalue / mut
+                // gates already passed at type-check time.
+                let v = self.lower_expr(value, program)?;
+                let ptr = self.lower_lvalue_ptr(target, program)?;
+                self.builder
+                    .build_store(ptr, v)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            }
             TypedStmtKind::Expr(e) => {
                 let _ = self.lower_expr(e, program)?;
             }
         }
         Ok(())
+    }
+
+    /// Compute a pointer to the storage of an lvalue expression.
+    /// C2 / ADR 0017 D3 + D4: `&expr` (borrow-take) and assignment
+    /// LHS share this code path — both need the address rather
+    /// than the value of `expr`. Handles Var (alloca pointer
+    /// directly), `*r` (load r's value as the pointer), and
+    /// `target.field` (GEP into the struct's field by index, with
+    /// recursion into the target).
+    fn lower_lvalue_ptr(
+        &mut self,
+        expr: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        match &expr.kind {
+            TypedExprKind::Var(id) => {
+                let (ptr, _ty) = *self
+                    .vars
+                    .get(id)
+                    .expect("VarId in scope per resolve invariants");
+                Ok(ptr)
+            }
+            TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+                // `*r` as an lvalue: the address is the *value* of
+                // r — load r from its alloca to get the underlying
+                // pointer.
+                let inner_val = self.lower_expr(inner, program)?;
+                Ok(inner_val.into_pointer_value())
+            }
+            TypedExprKind::FieldAccess { target, field_index, .. } => {
+                let target_ptr = self.lower_lvalue_ptr(target, program)?;
+                let target_struct_ty = match self.llvm_basic_type(target.ty) {
+                    BasicTypeEnum::StructType(st) => st,
+                    other => {
+                        return Err(CodegenError::Builder(format!(
+                            "expected struct type for field access target, got {other:?}"
+                        )));
+                    }
+                };
+                self.builder
+                    .build_struct_gep(
+                        target_struct_ty,
+                        target_ptr,
+                        *field_index as u32,
+                        "fieldptr",
+                    )
+                    .map_err(|e| CodegenError::Builder(e.to_string()))
+            }
+            _ => Err(CodegenError::Builder(
+                "lvalue required but expression is an rvalue".to_string(),
+            )),
+        }
     }
 
     fn lower_block(
@@ -1377,6 +1522,31 @@ impl<'ctx> CodegenCtx<'ctx> {
                 self.builder
                     .build_xor(v, one, "not")
                     .map(|v| v.into())
+                    .map_err(|e| CodegenError::Builder(e.to_string()))
+            }
+            TypedExprKind::Unary(UnaryOp::Ref, inner)
+            | TypedExprKind::Unary(UnaryOp::RefMut, inner) => {
+                // C2 / ADR 0017 D3: `&x` / `&mut x` produces a
+                // pointer to x's storage. Mutability is enforced at
+                // type-check time; LLVM doesn't distinguish.
+                let ptr = self.lower_lvalue_ptr(inner, program)?;
+                Ok(ptr.into())
+            }
+            TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+                // C2 / ADR 0017 D4: `*r` loads the inner type from
+                // r's pointer value. Look up the ref's pointee type
+                // from `program.refs[id]`.
+                let ref_ptr = self.lower_expr(inner, program)?.into_pointer_value();
+                let ref_id = match inner.ty {
+                    Type::Ref(id) => id,
+                    _ => unreachable!(
+                        "type-check guarantees Deref operand has Type::Ref"
+                    ),
+                };
+                let inner_ty = program.refs[ref_id.0 as usize].inner;
+                let llvm_inner = self.llvm_basic_type(inner_ty);
+                self.builder
+                    .build_load(llvm_inner, ref_ptr, "deref")
                     .map_err(|e| CodegenError::Builder(e.to_string()))
             }
             TypedExprKind::Binary(op, lhs, rhs) => {
@@ -1988,6 +2158,61 @@ fn main() -> i64 {
 }
 ";
         compile_src(src).expect("compile");
+    }
+
+    // ----- C2.0.2 / ADR 0017 codegen smoke: refs + mut + deref + assign -----
+
+    #[test]
+    fn compile_ref_shared_basic() {
+        // `&x` as fn arg; callee derefs.
+        compile_src(
+            "fn read(x: &i64) -> i64 { *x }\nfn main() -> i64 { let v: i64 = 7; read(&v) }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_ref_mut_basic() {
+        // `&mut x` exclusive borrow; deref-assign.
+        compile_src(
+            "fn set(x: &mut i64, v: i64) -> i64 { *x = v; *x }\nfn main() -> i64 { let mut a: i64 = 1; set(&mut a, 9) }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_let_mut_then_assign() {
+        compile_src(
+            "fn main() -> i64 { let mut x: i64 = 0; x = 42; x }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_field_assign_via_mut_binding() {
+        // p.field = v where p is a let-mut struct.
+        compile_src(
+            "struct P { x: i64, y: i64 }\nfn main() -> i64 { let mut p: P = P { x: 1, y: 2 }; p.x = 9; p.x + p.y }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_deref_assign_field_through_mut_ref() {
+        // Compose deref + field-access on the LHS: `(*r).x = v;`.
+        compile_src(
+            "struct P { x: i64, y: i64 }\nfn bump(r: &mut P) -> i64 { (*r).x = 99; (*r).x + (*r).y }\nfn main() -> i64 { let mut p: P = P { x: 1, y: 2 }; bump(&mut p) }",
+        )
+        .expect("compile");
+    }
+
+    #[test]
+    fn compile_ref_of_array() {
+        // `&[i64]` passes through compile, deref reads array.
+        compile_src(
+            "fn first(xs: &[i64]) -> i64 { (*xs)[0] }\nfn main() -> i64 { let arr: [i64] = [11, 22, 33]; first(&arr) }",
+        )
+        .expect("compile");
     }
 
     #[test]

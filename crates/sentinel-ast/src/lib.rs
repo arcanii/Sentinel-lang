@@ -96,11 +96,26 @@ impl LogicOp {
 }
 
 /// Unary operator. C0.1 ships only negation per ADR 0010 D8; C1.3
-/// adds logical not (`!`) per ADR 0012 D7.
+/// adds logical not (`!`) per ADR 0012 D7; C2.0.2 (per ADR 0017 D3 /
+/// D4 / D10) adds `&` shared borrow, `&mut` exclusive borrow, and
+/// `*` dereference. The `*` and `&` tokens are reused from existing
+/// lexer entries — the parser disambiguates positionally (prefix
+/// unary vs. infix multiply for `*`; prefix borrow-take is unambiguous
+/// since `&&` lexes longest-first as logical-and).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnaryOp {
     Neg,
     Not,
+    /// `&expr` — shared borrow per ADR 0017 D3. Operand must be an
+    /// lvalue (the type checker enforces this with
+    /// [`TypeError::BorrowOfRvalue`](../sentinel_types/enum.TypeError.html)).
+    Ref,
+    /// `&mut expr` — exclusive borrow per ADR 0017 D3. Operand must
+    /// be a *mutable* lvalue.
+    RefMut,
+    /// `*expr` — dereference per ADR 0017 D4. Operand must be a
+    /// reference type (`&T` or `&mut T`).
+    Deref,
 }
 
 impl UnaryOp {
@@ -108,6 +123,9 @@ impl UnaryOp {
         match self {
             UnaryOp::Neg => "-",
             UnaryOp::Not => "!",
+            UnaryOp::Ref => "&",
+            UnaryOp::RefMut => "&mut",
+            UnaryOp::Deref => "*",
         }
     }
 }
@@ -229,12 +247,25 @@ pub type Expr = Spanned<ExprKind>;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StmtKind {
     Let {
+        /// C2 / ADR 0017 D2: `let mut x = ...` produces a mutable
+        /// binding (re-assignable + exclusive-borrowable). Bare
+        /// `let x = ...` is immutable.
+        mutable: bool,
         name: String,
         name_span: Span,
         /// Optional type annotation per ADR 0012 D2. `Some` if the
         /// source had `let x: T = ...`; `None` if it was `let x = ...`
         /// (inference path).
         ty_annot: Option<TypeExpr>,
+        value: Expr,
+    },
+    /// Assignment statement per ADR 0017 D2: `lhs = expr;`. LHS must
+    /// be an lvalue (bare ident, `*ref`, or `expr.field`); the type
+    /// checker enforces this and the mutability constraints.
+    /// Mutable indexing (`a[i] = v;`) is out of scope at C2 per ADR
+    /// 0017 D12.
+    Assign {
+        target: Expr,
         value: Expr,
     },
     Expr(Expr),
@@ -286,9 +317,14 @@ pub struct FnDef {
 }
 
 /// A function parameter with a mandatory type annotation
-/// (`name: type`) per ADR 0012 D1.
+/// (`name: type`) per ADR 0012 D1. C2 / ADR 0017 D2 adds the
+/// optional `mut` prefix: `mut x: T` lets the callee re-assign or
+/// `&mut`-borrow its local copy. Param mutability is *binding-local*
+/// — distinct from the caller passing a `&mut T` (which IS observable
+/// to the caller).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Param {
+    pub mutable: bool,
     pub name: String,
     pub span: Span,
     pub ty: TypeExpr,
@@ -353,6 +389,17 @@ pub enum TypeExprKind {
     /// type-resolution stage per D6 (the parser accepts them; the
     /// type checker rejects).
     Array(Box<TypeExpr>),
+    /// `&T` (shared) or `&mut T` (exclusive) reference type per ADR
+    /// 0017 D1. The parser accepts any inner; the type checker
+    /// rejects nested refs (`&&T` → [`TypeError::NestedRef`]) and
+    /// refs in array elements / struct fields
+    /// ([`TypeError::RefInArray`] / [`TypeError::RefInStructField`])
+    /// since first-class refs need named regions per ADR 0017 D7 /
+    /// D12.
+    Ref {
+        mutable: bool,
+        inner: Box<TypeExpr>,
+    },
     /// `Name<TypeArg1, TypeArg2, ...>` generic instance per ADR
     /// 0016 D3. The parser accepts any non-zero arg list (empty
     /// `<>` is rejected as [`ParseError::EmptyTypeArgs`]); the type
@@ -456,10 +503,16 @@ impl fmt::Display for Expr {
 impl fmt::Display for StmtKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StmtKind::Let { name, ty_annot, value, .. } => match ty_annot {
-                Some(ty) => write!(f, "(let {name}: {} {})", ty.kind, value.kind),
-                None => write!(f, "(let {name} {})", value.kind),
-            },
+            StmtKind::Let { mutable, name, ty_annot, value, .. } => {
+                let kw = if *mutable { "let-mut" } else { "let" };
+                match ty_annot {
+                    Some(ty) => write!(f, "({kw} {name}: {} {})", ty.kind, value.kind),
+                    None => write!(f, "({kw} {name} {})", value.kind),
+                }
+            }
+            StmtKind::Assign { target, value } => {
+                write!(f, "(assign {} {})", target.kind, value.kind)
+            }
             StmtKind::Expr(e) => write!(f, "{};", e.kind),
         }
     }
@@ -471,6 +524,13 @@ impl fmt::Display for TypeExprKind {
             TypeExprKind::Ident(name) => write!(f, "{name}"),
             TypeExprKind::Nullable(inner) => write!(f, "?{}", inner.kind),
             TypeExprKind::Array(inner) => write!(f, "[{}]", inner.kind),
+            TypeExprKind::Ref { mutable, inner } => {
+                if *mutable {
+                    write!(f, "&mut {}", inner.kind)
+                } else {
+                    write!(f, "&{}", inner.kind)
+                }
+            }
             TypeExprKind::Generic { name, args, .. } => {
                 write!(f, "{name}<")?;
                 let mut first = true;
@@ -705,6 +765,7 @@ mod tests {
     fn display_stmt_let_no_annotation() {
         let s = Spanned {
             kind: StmtKind::Let {
+                mutable: false,
                 name: "x".to_string(),
                 name_span: 4..5,
                 ty_annot: None,
@@ -719,6 +780,7 @@ mod tests {
     fn display_stmt_let_with_annotation() {
         let s = Spanned {
             kind: StmtKind::Let {
+                mutable: false,
                 name: "x".to_string(),
                 name_span: 4..5,
                 ty_annot: Some(ty_i64(7..10)),
@@ -773,6 +835,7 @@ mod tests {
             name_span: 0..6,
             type_params: vec![],
             params: vec![Param {
+                mutable: false,
                 name: "x".to_string(),
                 span: 0..1,
                 ty: ty_i64(0..3),
@@ -820,8 +883,8 @@ mod tests {
             name_span: 0..3,
             type_params: vec![],
             params: vec![
-                Param { name: "a".to_string(), span: 0..1, ty: ty_i64(0..3) },
-                Param { name: "b".to_string(), span: 0..1, ty: ty_i64(0..3) },
+                Param { mutable: false, name: "a".to_string(), span: 0..1, ty: ty_i64(0..3) },
+                Param { mutable: false, name: "b".to_string(), span: 0..1, ty: ty_i64(0..3) },
             ],
             return_type: ty_i64(0..3),
             body: Block {
@@ -855,6 +918,7 @@ mod tests {
     fn display_block_with_stmt() {
         let let_x = Spanned {
             kind: StmtKind::Let {
+                mutable: false,
                 name: "x".to_string(),
                 name_span: 6..7,
                 ty_annot: None,
@@ -1099,6 +1163,97 @@ mod tests {
             span: 0..6,
         };
         assert_eq!(ne.kind.to_string(), "?Point");
+    }
+
+    // ----- C2.0.2 / ADR 0017: refs, mut, deref, assignment -----
+
+    #[test]
+    fn display_unary_ref() {
+        let e = Spanned {
+            kind: ExprKind::Unary(
+                UnaryOp::Ref,
+                Box::new(Spanned { kind: ExprKind::Var("x".to_string()), span: 1..2 }),
+            ),
+            span: 0..2,
+        };
+        assert_eq!(e.to_string(), "(& x)");
+    }
+
+    #[test]
+    fn display_unary_ref_mut() {
+        let e = Spanned {
+            kind: ExprKind::Unary(
+                UnaryOp::RefMut,
+                Box::new(Spanned { kind: ExprKind::Var("x".to_string()), span: 5..6 }),
+            ),
+            span: 0..6,
+        };
+        assert_eq!(e.to_string(), "(&mut x)");
+    }
+
+    #[test]
+    fn display_unary_deref() {
+        let e = Spanned {
+            kind: ExprKind::Unary(
+                UnaryOp::Deref,
+                Box::new(Spanned { kind: ExprKind::Var("p".to_string()), span: 1..2 }),
+            ),
+            span: 0..2,
+        };
+        assert_eq!(e.to_string(), "(* p)");
+    }
+
+    #[test]
+    fn unaryop_ref_symbols() {
+        assert_eq!(UnaryOp::Ref.symbol(), "&");
+        assert_eq!(UnaryOp::RefMut.symbol(), "&mut");
+        assert_eq!(UnaryOp::Deref.symbol(), "*");
+    }
+
+    #[test]
+    fn display_type_expr_ref() {
+        let inner = ty_i64(1..4);
+        let r = Spanned {
+            kind: TypeExprKind::Ref { mutable: false, inner: Box::new(inner) },
+            span: 0..4,
+        };
+        assert_eq!(r.kind.to_string(), "&i64");
+    }
+
+    #[test]
+    fn display_type_expr_ref_mut() {
+        let inner = ty_i64(5..8);
+        let r = Spanned {
+            kind: TypeExprKind::Ref { mutable: true, inner: Box::new(inner) },
+            span: 0..8,
+        };
+        assert_eq!(r.kind.to_string(), "&mut i64");
+    }
+
+    #[test]
+    fn display_let_mut_no_annotation() {
+        let s = Spanned {
+            kind: StmtKind::Let {
+                mutable: true,
+                name: "x".to_string(),
+                name_span: 8..9,
+                ty_annot: None,
+                value: lit(5, 12..13),
+            },
+            span: 0..14,
+        };
+        assert_eq!(s.to_string(), "(let-mut x 5)");
+    }
+
+    #[test]
+    fn display_assign_stmt() {
+        let target = Spanned { kind: ExprKind::Var("x".to_string()), span: 0..1 };
+        let value = lit(7, 4..5);
+        let s = Spanned {
+            kind: StmtKind::Assign { target, value },
+            span: 0..6,
+        };
+        assert_eq!(s.to_string(), "(assign x 7)");
     }
 
     #[test]

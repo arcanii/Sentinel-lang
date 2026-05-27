@@ -757,6 +757,34 @@ impl<'a> Parser<'a> {
     /// level and is rejected at the type-resolution stage per
     /// ADR 0015 D6.
     fn parse_type(&mut self) -> Result<TypeExpr, ParseError> {
+        // C2 / ADR 0017 D1: `&T` and `&mut T` reference types. The
+        // optional `mut` keyword between `&` and the inner type
+        // marks the borrow as exclusive. Nested refs (`&&T`) parse
+        // syntactically but are rejected at type-resolve time with
+        // [`TypeError::NestedRef`] (the depth-1 amendment of ADR
+        // 0017 D11). Note: `&&` lexes as `AmpAmp` (logical-and)
+        // due to logos longest-match, so `&&T` shows up here as
+        // `Amp` followed by another `Amp` only if the source had
+        // `& &T` with whitespace; the `AmpAmp`-flavoured `&&T`
+        // can't be re-interpreted as two `&` tokens (different
+        // lexeme). The type checker still rejects via the
+        // recursive parse_type call seeing `&T` followed by
+        // another `&T`.
+        if self.peek_kind() == Some(TokenKind::Amp) {
+            let amp_start = self.advance().expect("peeked").span.start;
+            let mutable = if self.peek_kind() == Some(TokenKind::Mut) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+            let inner = self.parse_type()?;
+            let span = amp_start..inner.span.end;
+            return Ok(Spanned {
+                kind: TypeExprKind::Ref { mutable, inner: Box::new(inner) },
+                span,
+            });
+        }
         // Optional leading `?` for the C1.5 nullable type form.
         if self.peek_kind() == Some(TokenKind::Question) {
             let q_start = self.advance().expect("peeked").span.start;
@@ -842,6 +870,14 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_param(&mut self) -> Result<Param, ParseError> {
+        // C2 / ADR 0017 D2: optional `mut` prefix on the parameter.
+        // Binding-local — distinct from passing `&mut T`.
+        let (mutable, mut_start) = if self.peek_kind() == Some(TokenKind::Mut) {
+            let s = self.advance().expect("peeked").span.start;
+            (true, Some(s))
+        } else {
+            (false, None)
+        };
         let (name, name_span) = match self.peek() {
             Some(t) if t.kind == TokenKind::Ident => {
                 let span = t.span.clone();
@@ -888,11 +924,21 @@ impl<'a> Parser<'a> {
         }
         let ty = self.parse_type()?;
         let span_end = ty.span.end;
-        Ok(Param { name, span: name_span.start..span_end, ty })
+        let span_start = mut_start.unwrap_or(name_span.start);
+        Ok(Param { mutable, name, span: span_start..span_end, ty })
     }
 
     fn parse_let_stmt(&mut self) -> Result<Stmt, ParseError> {
         let let_start = self.advance().expect("checked above").span.start;
+
+        // C2 / ADR 0017 D2: optional `mut` after `let` makes the
+        // binding re-assignable + exclusive-borrowable.
+        let mutable = if self.peek_kind() == Some(TokenKind::Mut) {
+            self.advance();
+            true
+        } else {
+            false
+        };
 
         let name_token = self.peek().ok_or_else(|| ParseError::UnexpectedEof {
             expected: "identifier after `let`",
@@ -960,7 +1006,7 @@ impl<'a> Parser<'a> {
         };
 
         Ok(Spanned {
-            kind: StmtKind::Let { name, name_span, ty_annot, value },
+            kind: StmtKind::Let { mutable, name, name_span, ty_annot, value },
             span: let_start..semi_end,
         })
     }
@@ -1140,6 +1186,39 @@ impl<'a> Parser<'a> {
                 }
                 Some(_) => {
                     let expr = self.parse_expr()?;
+                    // C2 / ADR 0017 D2: assignment statement
+                    // `lhs = rhs;`. After parsing the LHS, check
+                    // for `=` and consume the RHS + semi. The
+                    // type checker validates the LHS is an lvalue
+                    // and that any binding being written is
+                    // mutable.
+                    if self.peek_kind() == Some(TokenKind::Eq) {
+                        self.advance();
+                        let value = self.parse_expr()?;
+                        let semi_end = match self.peek_kind() {
+                            Some(TokenKind::Semi) => self.advance().expect("peeked").span.end,
+                            Some(other) => {
+                                let t = self.peek().expect("peeked");
+                                return Err(ParseError::UnexpectedToken {
+                                    got: format!("{other:?}"),
+                                    expected: "`;` after assignment",
+                                    span: to_source_span(&t.span),
+                                });
+                            }
+                            None => {
+                                return Err(ParseError::UnexpectedEof {
+                                    expected: "`;` after assignment",
+                                    span: to_source_span(&self.eof_span()),
+                                });
+                            }
+                        };
+                        let span = expr.span.start..semi_end;
+                        stmts.push(Spanned {
+                            kind: StmtKind::Assign { target: expr, value },
+                            span,
+                        });
+                        continue;
+                    }
                     if self.peek_kind() == Some(TokenKind::Semi) {
                         let semi_end = self.advance().expect("peeked").span.end;
                         let span = expr.span.start..semi_end;
@@ -1213,6 +1292,39 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        // C2 / ADR 0017 D3: `&expr` / `&mut expr` borrow-take prefix.
+        // The presence of `mut` after `&` switches between shared
+        // and exclusive borrow. Combined with parse_type's `&T` /
+        // `&mut T` handling, the `&` token is now overloaded
+        // between type position and expression position; the parser
+        // picks the right path positionally.
+        if self.peek_kind() == Some(TokenKind::Amp) {
+            let start = self.advance().expect("peeked").span.start;
+            let op = if self.peek_kind() == Some(TokenKind::Mut) {
+                self.advance();
+                UnaryOp::RefMut
+            } else {
+                UnaryOp::Ref
+            };
+            let inner = self.parse_unary()?;
+            let span = start..inner.span.end;
+            return Ok(Spanned {
+                kind: ExprKind::Unary(op, Box::new(inner)),
+                span,
+            });
+        }
+        // C2 / ADR 0017 D4 + D10: `*expr` dereference prefix. Reuses
+        // the multiplication `*` token; the parser disambiguates by
+        // position (prefix here vs. infix in parse_mul).
+        if self.peek_kind() == Some(TokenKind::Star) {
+            let start = self.advance().expect("peeked").span.start;
+            let inner = self.parse_unary()?;
+            let span = start..inner.span.end;
+            return Ok(Spanned {
+                kind: ExprKind::Unary(UnaryOp::Deref, Box::new(inner)),
+                span,
+            });
+        }
         let unary_op = match self.peek_kind() {
             Some(TokenKind::Minus) => Some(UnaryOp::Neg),
             Some(TokenKind::Bang) => Some(UnaryOp::Not),
@@ -2845,6 +2957,190 @@ mod tests {
             "struct Maybe<T> { inner: ?T }\nfn main() -> i64 { 0 }",
         );
         assert_eq!(p.structs[0].fields[0].ty.kind.to_string(), "?T");
+    }
+
+    // ----- C2.0.2 / ADR 0017: refs, mut, deref, assignment -----
+
+    #[test]
+    fn parse_ref_type_in_param() {
+        let p = parse_ok_program("fn f(x: &i64) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "&i64");
+    }
+
+    #[test]
+    fn parse_ref_mut_type_in_param() {
+        let p = parse_ok_program("fn f(x: &mut i64) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "&mut i64");
+    }
+
+    #[test]
+    fn parse_ref_type_with_whitespace() {
+        // `& mut T` whitespace-tolerant per ADR 0017 D1.
+        let p = parse_ok_program("fn f(x: & mut i64) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "&mut i64");
+    }
+
+    #[test]
+    fn parse_ref_type_in_return() {
+        let p = parse_ok_program("fn f() -> &i64 { let x: i64 = 0; &x }");
+        assert_eq!(p.fns[0].return_type.kind.to_string(), "&i64");
+    }
+
+    #[test]
+    fn parse_unary_ref_expr() {
+        // `&x` is a prefix unary borrow-take.
+        assert_eq!(pretty("&x"), "(& x)");
+    }
+
+    #[test]
+    fn parse_unary_ref_mut_expr() {
+        assert_eq!(pretty("&mut x"), "(&mut x)");
+    }
+
+    #[test]
+    fn parse_unary_deref_expr() {
+        assert_eq!(pretty("*r"), "(* r)");
+    }
+
+    #[test]
+    fn parse_deref_in_arithmetic() {
+        // `*a + *b` — both `*` are prefix unary derefs, not multiplies.
+        assert_eq!(pretty("*a + *b"), "(+ (* a) (* b))");
+    }
+
+    #[test]
+    fn parse_mul_still_works() {
+        // Make sure parse_unary's new `*` prefix doesn't break the
+        // infix `*` in parse_mul.
+        assert_eq!(pretty("a * b"), "(* a b)");
+    }
+
+    #[test]
+    fn parse_let_mut_no_annotation() {
+        let block = parse_block_str("{ let mut x = 5; x }").expect("parse");
+        match &block.stmts[0].kind {
+            StmtKind::Let { mutable: true, name, .. } => assert_eq!(name, "x"),
+            other => panic!("expected Let-mut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_let_mut_with_annotation() {
+        let block = parse_block_str("{ let mut x: i64 = 5; x }").expect("parse");
+        match &block.stmts[0].kind {
+            StmtKind::Let { mutable: true, ty_annot, .. } => {
+                assert_eq!(ty_annot.as_ref().expect("annot").kind.to_string(), "i64");
+            }
+            other => panic!("expected Let-mut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_let_without_mut_is_immutable() {
+        let block = parse_block_str("{ let x = 5; x }").expect("parse");
+        match &block.stmts[0].kind {
+            StmtKind::Let { mutable: false, .. } => {}
+            other => panic!("expected immutable Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_mut_param() {
+        // `fn f(mut x: i64) -> i64 { x }` — `mut` is a binding-local
+        // modifier per ADR 0017 D2.
+        let p = parse_ok_program("fn f(mut x: i64) -> i64 { x }\nfn main() -> i64 { 0 }");
+        assert!(p.fns[0].params[0].mutable);
+        assert_eq!(p.fns[0].params[0].name, "x");
+    }
+
+    #[test]
+    fn parse_assign_var_stmt() {
+        let block = parse_block_str("{ let mut x = 0; x = 5; x }").expect("parse");
+        // Stmt[1] is the assignment.
+        match &block.stmts[1].kind {
+            StmtKind::Assign { target, value } => {
+                assert_eq!(target.kind.to_string(), "x");
+                assert_eq!(value.kind.to_string(), "5");
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_assign_deref_stmt() {
+        // `*r = v;` deref-assignment.
+        let p = parse_ok_program(
+            "fn set(r: &mut i64, v: i64) -> i64 { *r = v; v }\nfn main() -> i64 { 0 }",
+        );
+        let f = &p.fns[0];
+        match &f.body.stmts[0].kind {
+            StmtKind::Assign { target, .. } => {
+                assert_eq!(target.kind.to_string(), "(* r)");
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_error_assign_missing_semi() {
+        let err = parse_block_err("let mut x = 0; x = 5");
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`;` after assignment"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_ref_take_of_field_access() {
+        // `&p.x` — `&` is unary so the LHS is the postfix chain.
+        // Precedence: `&p.x` parses as `&(p.x)` because postfix `.`
+        // binds tighter than prefix `&`.
+        assert_eq!(pretty("&p.x"), "(& (. p x))");
+    }
+
+    #[test]
+    fn parse_deref_then_field_access() {
+        // `(*r).x` — explicit paren. Without parens, `*r.x` would
+        // parse as `*(r.x)` since postfix binds tighter than prefix.
+        assert_eq!(pretty("*r.x"), "(* (. r x))");
+        assert_eq!(pretty("(*r).x"), "(. (* r) x)");
+    }
+
+    #[test]
+    fn parse_ref_then_deref_round_trip() {
+        // `*&x` — first parse `&x`, then deref.
+        assert_eq!(pretty("*&x"), "(* (& x))");
+    }
+
+    #[test]
+    fn parse_nested_ref_type_parses() {
+        // `&&T` lexes as AmpAmp (logical-and); the type checker
+        // never sees a doubled-ref via this token. The user can
+        // write `& &T` with whitespace to provoke a `NestedRef`
+        // type error.
+        let p = parse_ok_program("fn f(x: & &i64) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "&&i64");
+    }
+
+    #[test]
+    fn parse_nullable_ref_type() {
+        // `?&T` — ADR 0017 D1.
+        let p = parse_ok_program("fn f(x: ?&i64) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "?&i64");
+    }
+
+    #[test]
+    fn parse_ref_of_nullable_type() {
+        // `&?T` — ADR 0017 D1.
+        let p = parse_ok_program("fn f(x: &?i64) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "&?i64");
+    }
+
+    #[test]
+    fn parse_ref_of_array_type() {
+        // `&[T]` — passes parse; the type checker accepts it.
+        let p = parse_ok_program("fn f(x: &[i64]) -> i64 { 0 }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "&[i64]");
     }
 
     #[test]

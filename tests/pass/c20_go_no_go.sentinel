@@ -1,0 +1,31 @@
+// C2.0.2 phase-go program per ADR 0017 D14 — exercises every
+// D1-D9 surface piece in one program:
+//   - Shared ref params `&i64` + dereference (D1 + D3 + D4).
+//   - Mutable ref param `&mut i64` + deref-assignment (D2 + D4).
+//   - `let mut a` binding (D2).
+//   - Reference-take `&a` (shared) and `&mut a` (exclusive) (D3).
+//   - Sequential borrows (the lexical borrow checker at C2.1 will
+//     accept this; C2.0.2's "no borrow checking yet" trivially does).
+//   - Codegen lowers refs as LLVM pointers; deref as load;
+//     deref-assign as store.
+// Expected: stdout "53\n", exit 0.
+//   sum = 10 + 32 = 42
+//   inc = increment(&mut a) = 11 (a moves 10 -> 11)
+//   sum + inc = 53
+fn add(a: &i64, b: &i64) -> i64 {
+    *a + *b
+}
+
+fn increment(x: &mut i64) -> i64 {
+    let new_val: i64 = *x + 1;
+    *x = new_val;
+    *x
+}
+
+fn main() -> i64 {
+    let mut a: i64 = 10;
+    let b: i64 = 32;
+    let sum: i64 = add(&a, &b);
+    let inc: i64 = increment(&mut a);
+    print(sum + inc)
+}

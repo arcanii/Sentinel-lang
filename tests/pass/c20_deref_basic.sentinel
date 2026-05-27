@@ -1,0 +1,14 @@
+// C2.0.2 / ADR 0017 D3 + D4 + D11: `&mut T` param threaded through
+// a fn, with deref-assignment writing back through the ref. The
+// callee mutates the caller's `a` from 10 to 11; then we read it.
+fn increment(x: &mut i64) -> i64 {
+    let new_val: i64 = *x + 1;
+    *x = new_val;
+    *x
+}
+
+fn main() -> i64 {
+    let mut a: i64 = 10;
+    let inc: i64 = increment(&mut a);
+    a + inc
+}

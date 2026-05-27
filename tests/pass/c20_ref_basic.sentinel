@@ -1,0 +1,12 @@
+// C2.0.2 / ADR 0017 D1 + D3 + D4: shared borrow + deref through fn
+// boundary. add(&a, &b) takes two `&i64` params; deref each to read.
+// 10 + 32 = 42 -> exit 42.
+fn add(a: &i64, b: &i64) -> i64 {
+    *a + *b
+}
+
+fn main() -> i64 {
+    let a: i64 = 10;
+    let b: i64 = 32;
+    add(&a, &b)
+}

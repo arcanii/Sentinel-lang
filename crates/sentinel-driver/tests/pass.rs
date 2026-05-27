@@ -467,3 +467,35 @@ fn pass_c17_go_no_go() {
     assert_eq!(r.stdout, "42\n");
     assert_eq!(r.exit, 0);
 }
+
+// ---- C2.0.2 / ADR 0017: refs + mutability + deref + assignment ----
+
+#[test]
+fn pass_c20_ref_basic() {
+    // `add(&a, &b)` with `&i64` params + `*a + *b` body. 10 + 32 = 42.
+    assert_eq!(run_exit("c20_ref_basic.sentinel"), 42);
+}
+
+#[test]
+fn pass_c20_mut_basic() {
+    // `let mut x = 0; x = x + 1; x = x + 1; x * 2` -> exit 4.
+    // Exercises let-mut binding + same-name assignment statement.
+    assert_eq!(run_exit("c20_mut_basic.sentinel"), 4);
+}
+
+#[test]
+fn pass_c20_deref_basic() {
+    // `increment(&mut a)` mutates `a` in place. After increment,
+    // a = 11 and the call returns 11. 11 + 11 = 22.
+    assert_eq!(run_exit("c20_deref_basic.sentinel"), 22);
+}
+
+#[test]
+fn pass_c20_go_no_go() {
+    // ADR 0017 D14 phase-go: `add(&a, &b)` (shared) + `increment(&mut a)`
+    // (exclusive) + let-mut + deref-assign + print. sum = 42; inc = 11
+    // (after `a` advances 10 -> 11); sum + inc = 53.
+    let r = build_and_run("c20_go_no_go.sentinel");
+    assert_eq!(r.stdout, "53\n");
+    assert_eq!(r.exit, 0);
+}

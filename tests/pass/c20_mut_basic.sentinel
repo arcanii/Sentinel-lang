@@ -1,0 +1,9 @@
+// C2.0.2 / ADR 0017 D2: `let mut x` + direct assignment. Increment x
+// twice via re-assignment; tail evaluates to the final value.
+// 0 + 1 + 1 = 2, then doubled to 4 -> exit 4.
+fn main() -> i64 {
+    let mut x: i64 = 0;
+    x = x + 1;
+    x = x + 1;
+    x * 2
+}

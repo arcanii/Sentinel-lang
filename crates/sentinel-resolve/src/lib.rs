@@ -207,6 +207,10 @@ impl ResolvedFnDef {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedParam {
     pub id: VarId,
+    /// C2 / ADR 0017 D2: `true` iff the source declared `mut x: T`.
+    /// Binding-local mutability — does NOT imply the caller passes
+    /// `&mut T`.
+    pub mutable: bool,
     /// Source-level name retained for diagnostics and LLVM IR
     /// debug names.
     pub name: String,
@@ -228,12 +232,22 @@ pub type ResolvedStmt = Spanned<ResolvedStmtKind>;
 pub enum ResolvedStmtKind {
     Let {
         id: VarId,
+        /// C2 / ADR 0017 D2: `true` iff the source wrote `let mut x`.
+        mutable: bool,
         /// Source-level name retained for diagnostics / IR debug.
         name: String,
         name_span: Span,
         /// C1.2 (per ADR 0012 D2): optional `let x: T = ...`
         /// annotation. None means "infer from RHS".
         ty_annot: Option<TypeExpr>,
+        value: ResolvedExpr,
+    },
+    /// Assignment statement per ADR 0017 D2: `lhs = expr;`. LHS is
+    /// resolved as an expression here (the type checker enforces it
+    /// is actually an lvalue + that the target binding is mutable
+    /// or the deref is through `&mut T`).
+    Assign {
+        target: ResolvedExpr,
         value: ResolvedExpr,
     },
     Expr(ResolvedExpr),
@@ -605,6 +619,7 @@ fn resolve_fn(
         vars.insert(param.name.clone(), var_id);
         params.push(ResolvedParam {
             id: var_id,
+            mutable: param.mutable,
             name: param.name.clone(),
             span: param.span.clone(),
             ty: param.ty.clone(),
@@ -699,7 +714,7 @@ fn resolve_stmt(
     next_var_id: &mut u32,
 ) -> Result<ResolvedStmt, ResolveError> {
     let kind = match &stmt.kind {
-        StmtKind::Let { name, name_span, ty_annot, value } => {
+        StmtKind::Let { mutable, name, name_span, ty_annot, value } => {
             // Resolve the RHS BEFORE binding the name — `let x = x` with
             // `x` undefined in the outer scope is an error, not a self-
             // reference. (Matches C0's existing behaviour: lower_expr on
@@ -723,11 +738,31 @@ fn resolve_stmt(
             vars.insert(name.clone(), id);
             ResolvedStmtKind::Let {
                 id,
+                mutable: *mutable,
                 name: name.clone(),
                 name_span: name_span.clone(),
                 ty_annot: ty_annot.clone(),
                 value,
             }
+        }
+        StmtKind::Assign { target, value } => {
+            let target = resolve_expr(
+                target,
+                fn_table,
+                signatures,
+                struct_table,
+                vars,
+                next_var_id,
+            )?;
+            let value = resolve_expr(
+                value,
+                fn_table,
+                signatures,
+                struct_table,
+                vars,
+                next_var_id,
+            )?;
+            ResolvedStmtKind::Assign { target, value }
         }
         StmtKind::Expr(e) => ResolvedStmtKind::Expr(resolve_expr(
             e,
