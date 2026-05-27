@@ -1,14 +1,18 @@
 # ADR 0016: Concrete C1.7 surface syntax — generic fns, generic structs, monomorphization
 
-Status: PROPOSED — to flip to ACCEPTED (or ACCEPTED-WITH-AMENDMENTS)
-once C1.7 lands the syntax decisions herein. C1.7 is the last sub-
-phase of Phase C1 per ADR 0011 D6 and the longest by estimate
-(4-6 weeks). This ADR is intentionally written before the first
-C1.7 code commit so the surface decisions can be challenged on
-paper rather than reverse-engineered from an implementation.
+Status: ACCEPTED — all twelve D-decisions exercised across the
+C1.7 scaffolding commit (c1e5083, AST + parser + resolve), the
+C1.7.4a commit (d32a9fe, types crate + builtin re-route), the
+C1.7.5 commit (ad7e10d, codegen monomorphization for generic
+fns), and the C1.7.4b commit (2c6c652, generic structs end-to-end
++ the D12 phase-go). The ADR landed cleanly with no amendments —
+each D-decision survived implementation as written. C1.7
+estimated at "4-6 weeks" (ADR 0011 D6); actual elapsed was ~1
+session across five commits.
 
 Date: 2026-05-26
-Last touched: 2026-05-26 (initial PROPOSED draft)
+Last touched: 2026-05-27 (status flipped to ACCEPTED after the
+C1.7 implementation closed; no D-decision amendments)
 Related: 0011 (Phase C1 kickoff; D3 names generics as a C1 type-
 system deliverable, D6 schedules C1.7 last, D12 perf discipline
 becomes measurable here), 0015 (concrete C1.6 surface — D6

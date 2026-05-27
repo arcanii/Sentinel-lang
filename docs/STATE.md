@@ -12,12 +12,65 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C1.6 landed** — arrays + heap-allocation runtime
-+ `len` builtin + ADR 0014 D10 unlock (recursive structs via `?T`
-heap indirection) shipped end-to-end across three feat commits
-(8924d38 ADR 0015 PROPOSED; 3cfd49f lexer adds `[` and `]`
-tokens; 8c5bbbe bundled runtime + AST + parser + resolve + types
-+ codegen). The bootstrap pipeline is still **parse_query →
+Last updated: **C1.7 landed; Phase C1 closes.** Witness-table
+generics per ADR 0011 D6 / ADR 0016 — generic fns + generic
+structs + codegen monomorphisation — shipped end-to-end across
+five commits (e411ded ADR 0016 PROPOSED, the pre-flight design;
+c1e5083 AST + parser + resolve scaffolding; d32a9fe types crate
+generic-fn typing + builtin re-route; ad7e10d codegen
+monomorphization for user generic fns; 2c6c652 generic structs
+end-to-end with the ADR 0016 D12 phase-go). The bootstrap
+pipeline is still **parse_query → resolve_query → check_query →
+codegen**; C1.7 flows through as new variants on the existing
+parallel trees plus a new interner table for generic-struct
+instances. Type universe at C1.7 close: `{ I64, I32, Bool,
+Struct(StructId), Nullable(NullableInner), Array(ArrayElem),
+TypeParam(TypeParamId), GenericInstance(GenericInstanceId) }`
+where `NullableInner` and `ArrayElem` each gain `TypeParam` and
+`GenericInstance` variants (partially closing the ADR 0015 D6
+deferral — `?Box<i64>` and `[Box<i64>]` now work; `?[T]` and
+`[?T]` stay deferred). `Type` stays `Copy` — the interned-
+instance trick (per ADR 0016 D6a) wraps each unique
+`(struct_id, args: Vec<Type>)` pair in a `Copy` `u32` newtype,
+preserving the load-bearing invariant across four ADRs (0014,
+0015, and 0016 amendments). Generic builtins (`unwrap_or`,
+`is_some`, `len`) lose their special-cased typing branches in
+sentinel-types — their typing now routes through the unified
+`check_call` inference path per ADR 0016 D8a — while keeping
+their special codegen lowering per D8b (force-unwrap / pattern
+matching / runtime-metadata extraction have no Sentinel-1.7
+source bodies). Codegen monomorphises each `(FnId, Vec<Type>)`
+call site into its own LLVM fn with a mangled name (`pick__i64`,
+`make_pair__i64__bool`, etc.); each generic-struct instance gets
+its own LLVM struct type (`Pair_i64_i64`). The C1.7 phase-go
+program at `tests/pass/c17_go_no_go.sentinel` (the full ADR 0016
+D12 program: `struct Pair<A, B>` + `make_pair / fst / snd` +
+`pick_int(true, p) + pick_int(false, p)`) produces stdout `42\n`,
+exit 0. Plus c17_id (`stdout "42"`), c17_two_instantiations
+(`stdout "41"`), c17_generic_nullable (`stdout "100"`),
+c17_generic_array (`stdout "6"`), c17_box (`stdout "42"`) — six
+fixtures total. ADR 0016 flips PROPOSED → ACCEPTED (no
+amendments; all twelve D-decisions exercised as drafted). ADR
+0011 flips PROPOSED → ACCEPTED (D6 sub-phase budget closed;
+D12 perf discipline measured: sub-second cold builds,
+sub-100ms incremental rebuilds). Workspace test delta: +47 (798
+total; +1 doctest unchanged at sentinel-broker) — +0 lexer (no
+new tokens per ADR 0016 D5; `<` and `>` reused from C1.3
+comparisons), +19 syntax parser, +7 resolve, +18 types (12 at
+C1.7.4a + 6 at C1.7.4b: generic-decl typecheck, generic-instance
+signature, arity mismatch, missing args, args-on-non-generic),
++6 pass-test fixtures (c17_*), +4 driver pass-tests (c17_id /
+c17_two_instantiations / c17_generic_nullable / c17_generic_array
+already from C1.7.5 + c17_box + c17_go_no_go from C1.7.4b).
+**Phase C1 closes here.** Phase C2 (regions, references,
+mutability per HANDOVER §6.3) opens next.
+
+Pre-C1.7 context: **C1.6 landed** — arrays + heap-allocation
+runtime + `len` builtin + ADR 0014 D10 unlock (recursive structs
+via `?T` heap indirection) shipped end-to-end across three feat
+commits (8924d38 ADR 0015 PROPOSED; 3cfd49f lexer adds `[` and
+`]` tokens; 8c5bbbe bundled runtime + AST + parser + resolve +
+types + codegen). The bootstrap pipeline is still **parse_query →
 resolve_query → check_query → codegen**; the array surface flows
 through as new parallel-tree variants. Type universe at C1.6
 close: `{ I64, I32, Bool, Struct(StructId), Nullable(NullableInner),
@@ -2573,6 +2626,142 @@ ADR 0009 (D1-D8) is authoritative; in-source highlights:
     unwrap_or at 1, is_some at 2, len at 3). Updated 2 tests
     in sentinel-resolve and 1 in sentinel-types. Same caution
     as decision 73 — tests should not hardcode FnIds.
+
+82. (C1.7 scaffolding / c1e5083) **No new lexer tokens at C1.7.**
+    ADR 0016 D5: `<` and `>` from C1.3 comparisons get reused as
+    type-param / type-arg delimiters. The parser disambiguates by
+    position — `parse_type` looks for `<...>` after an Ident,
+    expression-position grammar is unchanged. The cost is no
+    turbofish (`f::<i64>(x)`) at call sites per ADR 0016 D4 —
+    type-args are inferred bidirectionally. C1.7's parser change
+    is bounded: parse_type_params, parse_type_args helpers + a
+    Generic branch in parse_type + optional `<T1, T2>` clause on
+    parse_fn_def / parse_struct_decl.
+
+83. (C1.7.4a / d32a9fe) **TypeParam variants on the helper enums.**
+    `NullableInner::TypeParam(TypeParamId)` and
+    `ArrayElem::TypeParam(TypeParamId)` were added so `?T` and
+    `[T]` are representable inside generic-fn bodies. This is the
+    same flat-subset pattern from C1.5 / C1.6 (preserves `Type:
+    Copy`); the TypeParamId is a `Copy` `u32` newtype re-exported
+    from sentinel-resolve.
+
+84. (C1.7.4a / d32a9fe) **Builtin typing routes through generics
+    uniformly.** The three C1.5/C1.6 special-cased builtins
+    (unwrap_or, is_some, len) had ad-hoc Call branches in
+    check_expr that pre-computed T from arg[0] then pushed it
+    down to arg[1]. C1.7.4a deletes ~75 LOC of those branches and
+    re-expresses the builtins' signatures with real
+    `Type::TypeParam` (e.g., `unwrap_or<T>(x: ?T, default: T) -> T`).
+    The new unified `check_call` handles them identically to
+    user-defined generic fns via iterative bidirectional
+    inference. Code-path simplification + the right framing for
+    user generic fns.
+
+85. (C1.7.4a / d32a9fe) **Iterative call-site inference.** ADR
+    0016 D4: bidirectional generic-call inference is implemented
+    as a fixed-point loop. Each round, for each not-yet-typed
+    arg, compute its effective expected type by substituting the
+    param under the current `subst` (`try_substitute`). If the
+    param has unbound TypeParams AND the arg is a null literal,
+    skip that round — it'll be retried after another arg has
+    bound the relevant T. After all args are typed, any unbound
+    TypeParam surfaces `AmbiguousTypeArg`; any untyped null arg
+    surfaces `AmbiguousNull`. The substituted return type is the
+    call's `ty`. Handles e.g., `unwrap_or(null, 0)` correctly:
+    arg[1]=0 → I64 → bind T=I64; arg[0]=null re-checked with
+    expected `?I64` → typed.
+
+86. (C1.7.5 / ad7e10d) **Eager monomorphisation via TypedFnDef::
+    substitute.** Codegen materialises each `(FnId, type_args)`
+    instantiation as a deep-cloned `TypedFnDef` with every
+    `Type::TypeParam` substituted to its concrete type-arg. The
+    substituted def has empty `type_params` and looks no
+    different from a non-generic fn to `compile_fn`'s machinery
+    — so codegen's per-fn lowering path stays unchanged. The
+    eager-substitute approach (vs lazy substitution at every
+    Type-access site) was chosen for safety: missing a single
+    site in lazy substitution would silently emit wrong code,
+    whereas eager substitution surfaces any TypeParam that
+    leaks through llvm_basic_type's panic arm.
+
+87. (C1.7.5 / ad7e10d) **Worklist for transitive monomorphic
+    instantiations.** A user generic fn calling another user
+    generic fn (`fn first_or<T>(?T, T) -> T { unwrap_or(...) }`
+    works because unwrap_or is inline, but `fn foo<T>(x: T) -> T
+    { bar<T>(x) }` requires `bar<concrete>` to be emitted when
+    foo is monomorphised) needs the codegen pre-pass to
+    transitively discover instantiations. The implementation is a
+    worklist: seed from non-generic fn bodies, pop each pending
+    instance, walk its body substituting type_args under the
+    current subst, queue any new instances. Substitution may
+    extend `instances` table (when nested generics produce new
+    `Pair<i64, bool>`-style entries).
+
+88. (C1.7.5 / ad7e10d) **Generic-fn name mangling.** Each
+    monomorphic LLVM fn gets a deterministic mangled name:
+    `id__i64`, `pick__bool__i64`, etc. Per ADR 0016 D7. Format
+    is `{name}__{type1}__{type2}...` where each type is rendered
+    by `mangle_type` (e.g., `Box_i64` for nested generics).
+    Stable across runs given the same input program — useful for
+    LLVM IR inspection. Internal-only; no surface implication.
+
+89. (C1.7.4b / 2c6c652) **Interned generic-struct instances
+    preserve `Type: Copy`.** ADR 0016 D6a. The naive approach
+    (`Type::GenericInstance { struct_id, args: Box<[Type]> }`)
+    would break Copy and force ~30 site .clone() refactors. The
+    interned-id approach wraps each unique `(struct_id, args:
+    Vec<Type>)` in a `Copy` `u32` newtype (`GenericInstanceId`).
+    The underlying `Vec<Type>` lives in a program-level table
+    (`TypedProgram.generic_instances`) keyed by id. Mirrors the
+    StructId / FnId pattern. Linear search through the table at
+    intern time — fine at C1.7 program scale; HashMap interning
+    is a profile-driven future optimisation.
+
+90. (C1.7.4b / 2c6c652) **Codegen extends the instance table
+    during substitution.** The type checker populates
+    `program.generic_instances` with every instance it sees
+    (`Pair<i64, i64>` annotations, return types after call-site
+    inference, etc.). Codegen owns a *mutable copy* of this
+    table and may extend it during monomorphisation when nested
+    generic substitution produces new `(struct_id, args)` pairs
+    not seen by the type checker (e.g., `fn f<T>() -> Pair<T, T>
+    { ... }` instantiated as `f<i64>` produces `Pair<i64, i64>`
+    — same instance the type checker may or may not have seen
+    directly). The abstract-vs-concrete filter in pass 0
+    (`arg_contains_typeparam`) skips abstract instances (those
+    with TypeParam args) from LLVM struct-type emission since
+    they never materialize at runtime.
+
+91. (C1.7.4b / 2c6c652) **Generic-struct unification recurses
+    into args.** `unify_one(Type::GenericInstance(p_id),
+    Type::GenericInstance(a_id), ...)` doesn't shortcut on
+    `p_id == a_id` equality alone (two different abstract
+    instances with the same shape would have different ids).
+    Instead it looks up both data entries, verifies same
+    `struct_id`, then unifies each arg pairwise. This is what
+    makes `fst<A, B>(p: Pair<A, B>)` called with `p: Pair<i64,
+    i64>` correctly infer A=i64, B=i64.
+
+92. (C1.7.4b / 2c6c652) **Bidirectional pushdown extended for
+    generic-instance returns.** The C1.5 ADR 0014 D5 rule pushed
+    the return type down only for nullable returns. C1.7.4b
+    extends to generic-instance returns too — without this, the
+    body of `fn make_pair<A, B>(...) -> Pair<A, B> { Pair {
+    first: a, second: b } }` would hit `AmbiguousGenericStructLit`
+    because the literal can't synthesize its own type args.
+
+93. (C1.7 retrospective) **ADR 0011 D6 estimated "4-6 weeks" for
+    C1.7; actual was ~1 session across 5 commits (e411ded +
+    c1e5083 + d32a9fe + ad7e10d + 2c6c652).** Faster than
+    estimated, in line with the C1.4 / C1.5 / C1.6 pattern
+    (estimated "2-4 weeks" each, actual ~1 session each). The
+    speedup came from (a) the interned-instance design choice
+    (avoided the Type-loses-Copy refactor cascade), (b) the
+    eager-substitute approach for codegen (avoided the
+    lazy-substitution audit risk), (c) the well-established
+    pattern of "scaffolding commit → typing commit → codegen
+    commit → fixtures commit" inherited from C1.4/5/6.
 
 37. (C1.0c, ADR 0011 D1 amendment) Codegen stays outside the salsa
     query graph through Phase C1.0. ADR 0011's original D1 sketch

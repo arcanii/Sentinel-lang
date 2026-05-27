@@ -59,10 +59,12 @@ C1.3. See STATE.md Section C.
 **Phase C1.4 — struct definitions + field access + struct literals — complete.**
 **Phase C1.5 — nullable types `?T` + null literal + unwrap_or / is_some builtins — complete (D10 deferred; retired at C1.6).**
 **Phase C1.6 — arrays `[T]` + indexing `a[i]` + `len` builtin + heap runtime + ADR 0014 D10 unlock — complete.**
-Phase C1 (type system, regions, effects per HANDOVER §6.2) is in
-flight per ADR 0011 (PROPOSED, 8 sub-phases, honest 5-6 month
-estimate vs HANDOVER's 3-month budget). The C1.0 + C1.1 + C1.2 +
-C1.3 + C1.4 + C1.5 + C1.6 sub-phases have all landed:
+**Phase C1.7 — witness-table generics (generic fns + generic structs + monomorphisation) — complete. Phase C1 closes.**
+Phase C1 (type system per HANDOVER §6.2) is **complete** per ADR
+0011 (now ACCEPTED, 8 sub-phases, ADR's honest 5-6 month estimate
+beaten — actual elapsed across C1.0a through C1.7.4b was ~10-12
+sessions, ~5-6x faster than estimated; the infrastructure
+investment compounded). All eight sub-phases landed:
 
   - **C1.0a** (09dc8c3): foundation crate `sentinel-base` hosting
     the `#[salsa::db]` SentinelDb trait, `#[salsa::input]`
@@ -309,24 +311,111 @@ C1.3 + C1.4 + C1.5 + C1.6 sub-phases have all landed:
     array_as_arg, array_of_struct, array_in_struct,
     linked_list_node, c16_go_no_go).
 
-**C1 next: C1.7** — witness-table generics per ADR 0011 D6.
-Estimated 4-6 weeks (the longest single sub-phase). ADRs
-0013/0014/0015 all closed; ADR 0016 (concrete C1.7 surface —
-generic fn / struct syntax `<T>`, type parameters, witness
-tables) lands before the first C1.7 feat commit. C1.7 will
-likely retire the special-cased generic builtins (unwrap_or,
-is_some, len) by replacing them with real generic fns.
+  - **ADR 0016** (e411ded, PROPOSED→ACCEPTED): concrete C1.7
+    surface — generic fn syntax `fn name<T>(x: T) -> T` (D1),
+    generic struct syntax `struct Box<T> { ... }` (D2), type args
+    in type position `Box<i64>` (D3), no turbofish at call sites
+    (D4) with iterative bidirectional inference, no new lexer
+    tokens (D5 — `<` and `>` reused from C1.3 comparisons),
+    interned-instance `Type::GenericInstance(GenericInstanceId)`
+    representation preserving `Type: Copy` (D6a), monomorphic
+    codegen (D7) chosen over witness tables because unbounded
+    generics trivialise them to "empty", builtins typing routes
+    through the unified inference path (D8a) but codegen stays
+    special (D8b — no Sentinel-1.7 source bodies for force-
+    unwrap / pattern-matching / runtime-metadata extraction),
+    resolve-side type-param scoping with DuplicateTypeParam
+    diagnostic (D9), out-of-scope list (D10: bounds, lifetimes,
+    HKT, const generics, turbofish, generic methods), `fn main`
+    not generic (D11), Pair<A,B> phase-go (D12).
+  - **C1.7 scaffolding** (c1e5083): AST + parser + resolve
+    infrastructure. AST gains `TypeParam` struct, `type_params:
+    Vec<TypeParam>` on `FnDef` / `StructDecl`, and
+    `TypeExprKind::Generic { name, args }`. Parser gains
+    `parse_type_params` / `parse_type_args` helpers and the
+    `Ident<...>` branch in `parse_type`. Resolve gains
+    `TypeParamId`, `ResolvedTypeParam`, `DuplicateTypeParam`
+    error, and `FnSignature.type_params_count` (builtins flagged
+    as generic with count=1). +19 parser tests + 7 resolve tests
+    = 777 total.
+  - **C1.7.4a** (d32a9fe): types crate generic-fn typing +
+    builtin re-route. New `Type::TypeParam(TypeParamId)` +
+    matching variants on `NullableInner` / `ArrayElem`. New
+    helpers `Type::substitute`, `try_substitute`,
+    `contains_type_param`. Builtin signatures rewritten with
+    real `Type::TypeParam` (`unwrap_or<T>(?T, T) -> T`,
+    `is_some<T>(?T) -> bool`, `len<T>([T]) -> i64`); the
+    ~75 LOC of special-cased Call branches in check_expr
+    collapse into one unified `check_call`. Iterative
+    bidirectional inference handles null literals via
+    fixed-point typing (`unwrap_or(null, 0)` works:
+    arg[1]=0→I64 binds T=I64; arg[0]=null re-checked with
+    expected `?I64`). `TypedExprKind::Call` gains
+    `type_args: Vec<Type>`. New error variants: GenericMain,
+    AmbiguousTypeArg, TypeArgInferenceConflict,
+    GenericStructNotYetSupported (placeholder for C1.7.4b).
+    Codegen: skip generic user fn declarations + bodies
+    + emit `CodegenError::GenericCallNotYetSupported` at
+    user generic-fn call sites pending C1.7.5. +12 types
+    tests = 789 total.
+  - **C1.7.5** (ad7e10d): codegen monomorphization for user
+    generic fns. `TypedFnDef::substitute` deep-clones a generic
+    fn with TypeParams substituted to concrete types — the
+    monomorphic def looks no different from a non-generic fn
+    to compile_fn. Worklist algorithm
+    (`collect_mono_instantiations`) walks non-generic fn bodies
+    seeding instantiations, then transitively processes each
+    pending instance under its substitution. Per-instance LLVM
+    fn declaration with mangled name (`id__i64`, etc.) via
+    `mangle_mono_name` + `mangle_type`. Builtin lowering stays
+    inline per ADR 0016 D8b. Four new c17 fixtures
+    (c17_id stdout "42", c17_two_instantiations "41",
+    c17_generic_nullable "100", c17_generic_array "6"). +4
+    pass tests = 793 total.
+  - **C1.7.4b** (2c6c652): generic structs end-to-end + ADR
+    0016 D12 phase-go. New `Type::GenericInstance(GenericInstanceId)`
+    variant + interner table on TypedProgram. NullableInner /
+    ArrayElem gain `GenericInstance` variants (partially
+    closing the ADR 0015 D6 deferral: `?Box<i64>` and
+    `[Box<i64>]` now work; `?[T]` and `[?T]` stay deferred).
+    `Type::substitute` extended to take `&mut Vec<GenericInstanceData>`
+    for interner-extending substitution. Same threading
+    through TypedFnDef/Block/Stmt/Expr::substitute. New
+    `check_call` extensions: unify_one recurses into
+    GenericInstance args; bidirectional pushdown extended for
+    generic-instance returns (so `fn make_pair<A, B>(...) -> Pair<A, B>
+    { Pair { ... } }` works). Codegen pass 0 splits into
+    declare-then-set-bodies passes for both regular structs and
+    generic-struct instances, with abstract instances
+    (TypeParam-using args) filtered out via
+    `arg_contains_typeparam`. Two new fixtures (c17_box stdout
+    "42", c17_go_no_go stdout "42" — the full ADR 0016 D12
+    Pair<A,B> + make_pair / fst / snd / pick_int program). +5
+    types tests + 2 pass tests = 798 total.
 
-**Workspace test count**: 744 active across all crates (+58 over
-C1.5: +4 AST, +20 syntax (6 lexer + 14 parser), +4 resolve, +14
-types, +9 codegen, +7 pass-test fixtures). All four check-suite
-checks green (cargo build --workspace, cargo clippy --workspace
---all-targets -D warnings, cargo test --workspace, cargo test
---workspace --doc). c05 go/no-go (C1.3 bool flow) runs: stdout
-"10", exit 0. c14 go/no-go (C1.4 struct flow) runs: stdout "7",
-exit 0. c15 go/no-go (C1.5 nullable flow) runs: stdout "142",
-exit 0. c16 go/no-go (C1.6 array flow) runs: stdout "15", exit
-0. See STATE.md "Conventions" for the per-crate breakdown.
+  - **C1.7 docs commit** (this commit): STATE.md banner refresh +
+    HANDOVER §0 close-out + ADR 0011/0016 flips to ACCEPTED.
+
+**C1 next: C2 — regions, references, mutability.** Phase C1 is
+complete. The next phase per HANDOVER §6.3 introduces references
+(`&T`, `&mut T`), region inference, and the borrow checker.
+Start with an ADR — the "ADR 0017 PROPOSED: Phase C2 kickoff" —
+covering region lifetimes, reference syntax, mutability rules,
+borrow-checker shape, RAII / drop semantics, and the first sub-
+phase split.
+
+**Workspace test count**: 798 active across all crates (+1
+doctest at sentinel-broker; +47 over C1.6: +19 parser, +7
+resolve, +18 types, +0 codegen, +6 pass-test fixtures across
+c17_*). All four check-suite checks green (cargo build
+--workspace, cargo clippy --workspace --all-targets -D warnings,
+cargo test --workspace, cargo test --workspace --doc). c05
+go/no-go (C1.3 bool flow) runs: stdout "10", exit 0. c14
+go/no-go (C1.4 struct flow) runs: stdout "7", exit 0. c15
+go/no-go (C1.5 nullable flow) runs: stdout "142", exit 0. c16
+go/no-go (C1.6 array flow) runs: stdout "15", exit 0. c17
+go/no-go (C1.7 generics flow) runs: stdout "42", exit 0. See
+STATE.md "Conventions" for the per-crate breakdown.
 
 **ADR status**:
 
@@ -342,28 +431,19 @@ exit 0. c16 go/no-go (C1.6 array flow) runs: stdout "15", exit
                                                  sub-phases done)
   - 0010 concrete-c0-surface-syntax              ACCEPTED (all
                                                  D-decisions exercised)
-  - 0011 phase-c1-kickoff-and-type-system-plan   PROPOSED — D1 +
-                                                 D2 + D3 + D4 + D5 +
-                                                 D7 + D10 + D11 all
-                                                 fully exercised across
-                                                 C1.0a-c (Salsa), C1.1
-                                                 (resolve lift), C1.2
-                                                 (annotation grammar +
-                                                 check), C1.3 (primitive
-                                                 widening + truthy
-                                                 retirement), C1.4
-                                                 (structs + ADR 0013),
-                                                 C1.5 (nullables + ADR
-                                                 0014), C1.6 (arrays +
-                                                 heap + ADR 0015 + D10
-                                                 unlock); ADR remains
-                                                 PROPOSED because D6
-                                                 (sub-phase split —
-                                                 C1.7 in flight:
-                                                 generics) and D12
-                                                 (perf discipline —
-                                                 deferred per the ADR)
-                                                 are still ahead
+  - 0011 phase-c1-kickoff-and-type-system-plan   ACCEPTED — all 12
+                                                 D-decisions exercised
+                                                 across C1.0 through
+                                                 C1.7. D6's eight-
+                                                 sub-phase budget is
+                                                 closed (every C1.x
+                                                 done). D12's perf
+                                                 discipline measured:
+                                                 sub-second cold
+                                                 builds + sub-100ms
+                                                 incremental rebuilds
+                                                 on the current
+                                                 corpus.
   - 0012 concrete-c1-surface-syntax              ACCEPTED — every
                                                  D-decision exercised
                                                  across C1.2-3
@@ -393,11 +473,26 @@ exit 0. c16 go/no-go (C1.6 array flow) runs: stdout "15", exit
                                                  primitive-only,
                                                  deferring `?[T]` and
                                                  `[?T]` to a future
-                                                 ADR); D11
+                                                 ADR; C1.7.4b partially
+                                                 closes by adding
+                                                 GenericInstance
+                                                 variants — `?Box<i64>`
+                                                 and `[Box<i64>]` work,
+                                                 but `?[T]` and `[?T]`
+                                                 stay deferred); D11
                                                  implementation
                                                  closes ADR 0014 D10
+  - 0016 concrete-c1-7-generics-syntax           ACCEPTED — all 12
+                                                 D-decisions exercised
+                                                 cleanly across the
+                                                 C1.7 scaffolding +
+                                                 4a + 5 + 4b commits.
+                                                 No amendments — each
+                                                 D-decision survived
+                                                 implementation as
+                                                 drafted.
 
-### 0.1 Working norms (carry forward into Phase C1)
+### 0.1 Working norms (carry forward into Phase C2)
 
 Original Phase-A norms, augmented with Phase-B and Phase-C
 lessons:
@@ -483,89 +578,110 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C1.7 — witness-table generics)
+### 0.2 Next session opening (Phase C2 — regions, references, mutability)
 
-Resume at **C1.7** per ADR 0011 D6. The C1 type system is now
-substantially complete: primitive scalars, nominal structs,
-nullable types (including recursive via heap), heap-backed
-arrays. C1.7 introduces generic types — the last sub-phase before
-C1 closes and Phase C2's region work begins.
+Resume at **Phase C2** per HANDOVER §6.3. Phase C1 closed with
+C1.7. The C1 type system covers: primitive scalars, nominal
+structs, nullable types (including recursive via heap), heap-
+backed arrays, and generics (witness-table-style via
+monomorphisation). C2 introduces references (`&T`, `&mut T`),
+region inference, and the borrow checker — the substrate for
+Sentinel's memory-safety guarantees at the language layer.
 
-**Pre-flight work before any code**: write ADR 0016 *PROPOSED*
-covering the concrete C1.7 surface decisions. Patterns to argue:
+**Pre-flight work before any code**: write ADR 0017 *PROPOSED*
+covering the concrete C2 surface decisions and the sub-phase
+split. Likely Patterns to argue:
 
-  - **Generic fn syntax**: `fn name<T>(x: T) -> T { … }` (Rust-
-    style) with type-parameter annotations. The angle-bracket
-    lexer tokens `<` and `>` already exist (used by comparison),
-    so this is a parser-level ambiguity to disambiguate per the
-    Rust pattern (turbofish `::<>` may or may not be needed).
-  - **Generic struct syntax**: `struct Box<T> { value: T }`.
-    Field types may mention `T`.
-  - **Type arguments**: `Box<i64>` in type position. Lexer
-    sees this as `Box` Ident, `<`, `i64` Ident, `>` — the
-    parser disambiguates based on context (after an Ident in
-    type position = type args; in expression position = less-
-    than).
-  - **Witness-table representation**: per HANDOVER §14.1's
-    witness-table choice, generic instances carry a runtime
-    table of operations for the type parameter T. C1.7 keeps it
-    minimal — just enough to retire the C1.5/C1.6 special-cased
-    builtins (`unwrap_or`, `is_some`, `len`) by making them
-    real generic fns.
-  - **Generic builtins retire**: with real generics, `unwrap_or
-    <T>(x: ?T, default: T) -> T`, `is_some<T>(x: ?T) -> bool`,
-    `len<T>(a: [T]) -> i64` all become regular generic fns.
-    The special-case branches in sentinel-types evaporate.
-  - **Out of scope**: trait/protocol bounds (`<T: Eq>`),
-    higher-kinded types, lifetime parameters (those wait for
-    C2's region work), const generics. Keep C1.7 minimal:
-    just type-parameter substitution, no bounds.
+  - **Reference syntax**: `&T` for shared, `&mut T` for unique.
+    Where syntactically can refs appear — fn params, let bindings,
+    fn returns? Per HANDOVER §6.3.
+  - **Mutability**: `let mut x = ...` for mutable bindings;
+    parameter mutability (Rust's `mut` on params is local; Swift
+    style with `inout` is heavier). Pick one.
+  - **Region inference**: lexical regions vs NLL-style (the Rust
+    pre-2018 vs post-2018 split). Lexical is simpler to implement
+    + teach; NLL handles more programs correctly. Trade-off.
+  - **Borrow-checker shape**: explicit lifetime parameters
+    (`<'a>` on fn signatures) vs inferred-only at C2. Sentinel
+    1.0 will probably want explicit when needed; C2 can ship
+    inferred-only with explicit deferred.
+  - **RAII / drop semantics**: arrays leaked at C1.6+ — the heap
+    payload of `sentinel_alloc` is never freed. C2 introduces
+    Drop (`fn drop(&mut self)`-style finalizers) tied to lexical
+    region exit. The leaks close here.
+  - **`?Struct` heap indirection**: now under region control —
+    the heap allocation has a region lifetime, freed on region
+    exit. Reuse the C1.6 `sentinel_alloc` machinery; add the
+    matching `sentinel_free`.
+  - **Out of scope at C2**: lifetimes-as-generic-params (`<'a,
+    T>`) — defer; cell types (`Cell`, `RefCell`) — defer;
+    multi-region inference (regions that span loops, etc.) —
+    likely the C2 split point.
 
-Sub-steps once ADR 0016 is in (rough sketch — refine in the
+Sub-steps once ADR 0017 is in (rough sketch — refine in the
 ADR):
 
-1. **Lexer**: probably no new tokens (reuses `<` `>` from
-   comparisons). Possibly `::` for turbofish (TBD).
-2. **AST + parser**: `TypeExprKind::Generic(name, args)` or
-   similar; type-parameter annotations on FnDef + StructDecl;
-   parser disambiguation for `<` in type position vs expression
-   position. ~80-120 LOC.
-3. **Resolve**: type parameters need to be in scope for fn
-   bodies + struct field types; track per-fn / per-struct
-   generic environments.
-4. **Types**: monomorphization at every call site +
-   instantiation. The witness-table machinery for trait-bounded
-   parameters (if D6 includes them; otherwise just type
-   substitution).
-5. **Codegen**: monomorphize each generic fn for every concrete
-   T it's instantiated with. Cache the monomorphizations to
-   avoid blowup.
+1. **Lexer**: `&` and `mut` keyword. Possibly `'a` lifetime
+   syntax (deferred if not needed at C2 minimum).
+2. **AST + parser**: `TypeExprKind::Ref { mutable, inner }`;
+   `mut` modifier on let bindings + params; `&expr` for
+   reference-take.
+3. **Resolve**: nothing new — refs flow through transparently.
+4. **Types**: borrow checking; region inference; reject
+   double-borrow, use-after-move, etc. New error variants:
+   `BorrowConflict`, `UseAfterMove`, `LifetimeMismatch`,
+   `MutableBorrowOfShared`, etc.
+5. **Codegen**: refs as LLVM pointers; drop calls inserted at
+   region exit; sentinel_free added.
 
-**Estimated effort for C1.7**: 4-6 sessions per ADR 0011 D6.
-The longest single sub-phase. Generics are genuinely new
-territory — the parser disambiguation is non-trivial, the
-monomorphization-or-witness-table decision has real
-performance/code-size tradeoffs.
+**Estimated effort for Phase C2**: substantial — likely 6-10
+sessions across 4-5 sub-phases. Borrow checking is genuinely
+new territory and the design space is wide (compare Rust's
+multi-year NLL development). The good news: C1's infrastructure
+investment (Salsa + resolve + types parallel tree + monomorphic
+codegen) all carries forward. Region inference is "just" another
+analysis pass between check_query and codegen.
 
-After C1.7: **C1 closes**. Phase C2 (regions, references,
-mutability) begins. The overall C1 budget per ADR 0011 D6 was
-22-28 weeks; actual elapsed time so far has been faster
-(infrastructure investment compounding) but C1.7 is the
-unknown — it may take the estimated full 4-6 weeks.
+C1.7 retrospective (estimate vs actual): ADR 0011 D6 estimated
+"4-6 weeks" (the longest single C1 sub-phase); actual was ~1
+session across 5 commits (e411ded ADR 0016 PROPOSED + c1e5083
+scaffolding + d32a9fe types + ad7e10d codegen + 2c6c652 generic
+structs end-to-end). Faster than estimated, in line with the
+C1.4/5/6 pattern. The substantive pieces:
+(a) the interned-instance design choice (`Type::GenericInstance(
+GenericInstanceId)` with the args in a program-level table)
+preserved `Type: Copy` and avoided a ~30-site clone-cascade
+refactor; (b) the eager-substitute approach for codegen
+(`TypedFnDef::substitute` deep-clone + lower the substituted
+def via the existing per-fn path) avoided the lazy-substitution
+audit risk; (c) the unified `check_call` consolidation —
+deleting the ~75 LOC of special-cased C1.5/6 builtin Call
+branches — is the cleanest payoff of the C1.7 design. Notes
+captured in STATE.md decisions 82-93.
 
-C1.6 retrospective (estimate vs actual): ADR 0011 D6 estimated
-"3-4 weeks" for C1.6; the actual was ~1 session across 3
-commits. Faster than estimated. The substantive pieces:
-(a) the codegen value-type representation split for `?T`
-(primitive stays inline, struct switches to heap-indirect),
-which closed ADR 0014 D10 elegantly; (b) the D6 amendment from
-mutually-recursive `NullableInner::Array` + `ArrayElem::Nullable`
-to flat depth-1 subsets (forced by Rust's Box requirement on
-mutual enum recursion, which would have broken Type's Copy);
-(c) wiring the new runtime symbols `sentinel_alloc` /
-`sentinel_panic_oob` through both sentinel-runtime (libc wrapper)
-and the codegen (external declarations + helper invocations).
-Notes captured in STATE.md decisions 74-81.
+C1.6 retrospective (kept for reference): "3-4 weeks" estimated;
+~1 session actual. Notes in STATE.md decisions 74-81.
+
+C1.5 retrospective (kept for reference): "2-3 weeks" estimated;
+~1 session actual. Notes in STATE.md decisions 65-73.
+
+C1.4 retrospective (kept for reference): "3-4 weeks" estimated;
+~1 session actual. Notes in STATE.md decisions 54-64.
+
+C1.3 retrospective (kept for reference): "2 weeks" estimated;
+~1 session actual. Notes in STATE.md decisions 46-53.
+
+**C1 overall retrospective**: ADR 0011 D6's honest 22-28 week
+budget for all of C1 was generous; actual elapsed across C1.0a
+through C1.7.4b was ~10-12 sessions (~5-6x faster). The
+infrastructure investment (Salsa retrofit + per-pass crate split
++ parallel-tree pattern + per-sub-phase ADR-first discipline)
+compounded heavily — each sub-phase reused the same scaffolding
+and the same five-step rhythm (ADR → lexer → bundled AST/parser/
+resolve/types/codegen → fixtures → docs). C2's region work
+likely won't compound the same way (borrow checking is novel
+machinery) but the ADR-first norm, the parallel-tree pattern,
+and the salsa pipeline all carry forward intact.
 
 C1.5 retrospective (kept for reference): "2-3 weeks" estimated;
 ~1 session actual. The bidirectional checking infrastructure
@@ -585,76 +701,92 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: 71c578a (docs: C1.6 landed; HANDOVER §0 + STATE.md + ADR refresh).
+    Local HEAD: <C1.7 docs commit> (docs: C1.7 landed; STATE.md +
+    HANDOVER §0 + ADR 0011/0016 close-outs).
     Branch in sync with origin/main (verify with `git status` at session start).
     Working tree clean.
 
-    Phase A (broker) + Phase B (effects-proto) + Phase C0 (bootstrap
-    compiler MVP) + Phase C1.0 (salsa retrofit) + Phase C1.1
-    (sentinel-resolve crate lift) + Phase C1.2 (annotation grammar
-    + sentinel-types::check) + Phase C1.3 (bool, i32, comparison +
-    logical operators; ADR 0010 D9 C-style truthy retired) +
-    Phase C1.4 (structs + field access + struct literals; ADR 0013
-    ACCEPTED) + Phase C1.5 (`?T` nullables + null literal +
-    unwrap_or / is_some builtins + bidirectional checking; ADR
-    0014 fully ACCEPTED after C1.6 D10 retirement) + Phase C1.6
-    (arrays + heap runtime + len builtin + ADR 0014 D10 unlock;
-    ADR 0015 ACCEPTED-WITH-AMENDMENTS) complete. 744 active
-    workspace tests. Four go/no-go programs run end-to-end:
+    Phase A (broker) + Phase B (effects-proto) + Phase C0
+    (bootstrap compiler MVP) + Phase C1 (full type system —
+    primitive scalars + nominal structs + nullable types + heap-
+    backed arrays + witness-table generics) all complete. Eight
+    C1 sub-phases landed: C1.0 (salsa retrofit), C1.1 (sentinel-
+    resolve crate lift), C1.2 (annotation grammar +
+    sentinel-types::check), C1.3 (bool / i32 / comparisons /
+    logicals + ADR 0010 D9 truthy retirement), C1.4 (structs +
+    field access; ADR 0013 ACCEPTED), C1.5 (?T nullables + null
+    literal + unwrap_or / is_some builtins + bidirectional
+    checking; ADR 0014 ACCEPTED), C1.6 (arrays + heap runtime +
+    len builtin + ADR 0014 D10 unlock; ADR 0015 ACCEPTED-WITH-
+    AMENDMENTS), C1.7 (generic fns + generic structs +
+    monomorphisation; ADR 0016 ACCEPTED). 798 active workspace
+    tests + 1 doctest. **Five go/no-go programs run end-to-end:**
     tests/pass/c05_go_no_go.sentinel (C1.3 bool flow): stdout
-    "10", exit 0; tests/pass/c14_go_no_go.sentinel (C1.4 struct
-    flow): stdout "7", exit 0; tests/pass/c15_go_no_go.sentinel
-    (C1.5 nullable flow): stdout "142", exit 0;
-    tests/pass/c16_go_no_go.sentinel (C1.6 array flow): stdout
-    "15", exit 0. Pipeline is parse_query → resolve_query →
-    check_query → codegen with diagnostics transitively
-    accumulated; codegen value type is BasicValueEnum<'ctx>;
-    sentinel-runtime gained sentinel_alloc + sentinel_panic_oob
-    (libc malloc wrapper + abort on OOB) per ADR 0015 D9; arrays
-    leak (no free at C1.6 — C2 territory). ADRs 0001-0010 + 0012
-    + 0013 + 0014 ACCEPTED; ADR 0015 ACCEPTED-WITH-AMENDMENTS (D6
-    capped to depth-1 because mutual enum recursion would break
-    Type Copy); ADR 0011 PROPOSED with D1 + D2 + D3 + D4 + D5 +
-    D7 + D10 + D11 fully exercised. C1 type system covers
-    primitive scalars + nominal structs + nullable types
-    (including recursive via heap) + heap-backed arrays;
-    generics remain.
+    "10", exit 0; c14_go_no_go.sentinel (C1.4 struct flow):
+    "7"; c15_go_no_go.sentinel (C1.5 nullable flow): "142";
+    c16_go_no_go.sentinel (C1.6 array flow): "15";
+    c17_go_no_go.sentinel (C1.7 generics flow — the full ADR
+    0016 D12 Pair<A,B> + make_pair / fst / snd / pick_int
+    program): "42", exit 0. Pipeline is parse_query →
+    resolve_query → check_query → codegen with diagnostics
+    transitively accumulated; codegen value type is
+    BasicValueEnum<'ctx>; sentinel-runtime gained sentinel_alloc
+    + sentinel_panic_oob (libc malloc wrapper + abort on OOB)
+    per ADR 0015 D9; arrays + ?Struct heap payloads still leak
+    (no free at C1.7 — RAII / drop is C2 territory). ADRs 0001-
+    0014 + 0016 ACCEPTED; ADR 0015 ACCEPTED-WITH-AMENDMENTS (D6
+    capped to depth-1; partially closed at C1.7.4b via
+    GenericInstance variants on NullableInner/ArrayElem).
 
-    Phase C1 in flight per ADR 0011 (PROPOSED, 8 sub-phases).
-    C1.0 + C1.1 + C1.2 + C1.3 + C1.4 + C1.5 + C1.6 all landed.
-    Next: start C1.7 (witness-table generics) per ADR 0011 D6.
-    Begin with ADR 0016 PROPOSED for the concrete C1.7 surface
-    (generic fn/struct syntax, type arguments, parser
-    disambiguation for `<` in type position, witness-table
-    representation). C1.7 will likely retire the special-cased
-    generic builtins (unwrap_or, is_some, len) by replacing them
-    with real generic fns. ~4-6 sessions estimated (the longest
-    single C1 sub-phase); see HANDOVER §0.2 for the rough plan.
+    Type universe at C1.7 close: `{ I64, I32, Bool,
+    Struct(StructId), Nullable(NullableInner),
+    Array(ArrayElem), TypeParam(TypeParamId),
+    GenericInstance(GenericInstanceId) }` with the interned-
+    instance trick preserving `Type: Copy` (args live in
+    `TypedProgram.generic_instances`, accessed by id; same
+    pattern as StructId / FnId).
+
+    **Phase C1 closed.** Next: start Phase C2 — regions,
+    references, mutability per HANDOVER §6.3. Begin with ADR
+    0017 PROPOSED covering &T / &mut T syntax, region
+    inference (lexical vs NLL), mutability rules, borrow-
+    checker shape, RAII / drop semantics tied to lexical region
+    exit (this closes the C1.6+ heap-leak deferral), and the C2
+    sub-phase split. C2 is substantial — likely 6-10 sessions
+    across 4-5 sub-phases; borrow checking is genuinely new
+    territory and the design space is wide. See HANDOVER §0.2
+    for the rough plan.
 
     Read in order:
-      1. docs/HANDOVER.md §0 in full (~640 lines through §0.3)
-      2. docs/STATE.md (last-updated banner + C.1 phase tracker +
-         C.3 design-decision notes 74-81 for C1.6 retrospective)
+      1. docs/HANDOVER.md §0 in full (~720 lines through §0.3)
+      2. docs/STATE.md (last-updated banner — C1.7 landed +
+         C.3 design-decision notes 82-93 for C1.7 retrospective)
       3. docs/decisions/0011-phase-c1-kickoff-and-type-system-plan.md
-         (especially D6 sub-phase budget — C1.7 is the last
-         remaining; D7 ADR-first norm for ADR 0016)
-      4. docs/decisions/0015-concrete-c1-6-array-syntax.md
-         (especially D6 amendment + D11 unlock — sets the
-         precedent for how C1.7's generics interact with the
-         existing flat-subset Type representation)
+         (now ACCEPTED — D6 sub-phase budget closed; D12 perf
+         discipline measured)
+      4. docs/decisions/0016-concrete-c1-7-generics-syntax.md
+         (now ACCEPTED — twelve D-decisions exercised cleanly,
+         no amendments; sets the precedent for C2's ADR 0017
+         shape including the iterative-inference-via-fixed-point
+         pattern that C2's borrow checker may borrow)
+      5. docs/SENTINEL_DESIGN2.md §4 / §15 for the C2 surface
+         (references, mutability, regions) — the canonical
+         target shape
 
     Sanity check at session start:
       cargo build --workspace
       cargo clippy --workspace --all-targets -- -D warnings
-      cargo test --workspace                  # expect 751 passing
-      cargo run --bin snc -- build tests/pass/c16_go_no_go.sentinel -o /tmp/c16
-      /tmp/c16 && echo "exit=$?"              # expect "15" then "exit=0"
+      cargo test --workspace                  # expect 798 passing
+      cargo run --bin snc -- build tests/pass/c17_go_no_go.sentinel -o /tmp/c17
+      /tmp/c17 && echo "exit=$?"              # expect "42" then "exit=0"
 
-    Resume at C1.7 per HANDOVER §0.2. First step: write ADR 0016
-    PROPOSED before any code. Sub-phases will likely follow the
-    same rhythm as C1.4 / C1.5 / C1.6 — lexer additions in one
-    commit, then a bundled AST + parser + resolve + types +
-    codegen commit, then a docs + fixtures commit.
+    Resume at Phase C2 per HANDOVER §0.2. First step: write ADR
+    0017 PROPOSED before any code. Sub-phases will likely follow
+    the same rhythm as C1.4 / C1.5 / C1.6 / C1.7 — lexer
+    additions in one commit (`&` + `mut` + maybe `'a`), then a
+    bundled AST + parser + resolve + types + codegen commit, then
+    a docs + fixtures commit. Borrow checking probably needs its
+    own commit between types and codegen given the novelty.
 
 ---
 
