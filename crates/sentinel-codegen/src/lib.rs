@@ -41,6 +41,7 @@ use inkwell::values::{
 };
 use inkwell::{IntPredicate, OptimizationLevel};
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
+use sentinel_borrow_check::DropPlan;
 use sentinel_resolve::{
     FnId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
 };
@@ -87,7 +88,16 @@ pub enum CodegenError {
 /// The emitted module exports `main` (i32-returning, the C ABI
 /// entry); the runtime symbol `sentinel_print` is pre-declared in
 /// pass 1.
-pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), CodegenError> {
+///
+/// C2.4: `drop_plan` carries per-fn moved-source info from the
+/// borrow checker. Codegen consults it at scope exit to skip
+/// dropping bindings that have been moved away (the destination
+/// owns + drops them). See [`DropPlan`] in sentinel-borrow-check.
+pub fn compile_to_object(
+    program: &TypedProgram,
+    drop_plan: &DropPlan,
+    output: &Path,
+) -> Result<(), CodegenError> {
     let context = Context::create();
     let module = context.create_module("sentinel");
     let builder = context.create_builder();
@@ -282,6 +292,17 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
         let panic_type = void_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false);
         module.add_function("sentinel_panic_oob", panic_type, None)
     };
+    // C2.4 / ADR 0017 D8: declare sentinel_free for scope-exit
+    // drop emission. Closes the C1.6+ heap-leak deferral.
+    let free_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let void_ty = context.void_type();
+        module.add_function(
+            "sentinel_free",
+            void_ty.fn_type(&[ptr_ty.into()], false),
+            None,
+        )
+    };
 
     // C1.7.5 / ADR 0016 D7: mono_defs + the `instances` table were
     // already built above before pass 0 (so the LLVM struct types
@@ -316,8 +337,12 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
             generic_struct_types,
             alloc_fn,
             panic_oob_fn,
+            free_fn,
             current_fn: None,
+            current_fn_id: FnId(0), // placeholder; reset in compile_fn
             vars: HashMap::new(),
+            scope_stack: Vec::new(),
+            drop_plan,
         };
         for fn_def in &program.fns {
             // C1.7.4a / ADR 0016 D7: skip generic fn bodies; their
@@ -377,7 +402,7 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
 /// lifetime covers both the borrowed Context and the LLVM derived
 /// values (Builder, FunctionValue, etc.) — they all live and die
 /// together.
-struct CodegenCtx<'ctx> {
+struct CodegenCtx<'ctx, 'plan> {
     context: &'ctx Context,
     builder: Builder<'ctx>,
     fns: HashMap<FnId, FunctionValue<'ctx>>,
@@ -397,8 +422,27 @@ struct CodegenCtx<'ctx> {
     /// C1.6: `sentinel_panic_oob(i64 idx, i64 len) -> void` runtime
     /// function. Called from the bounds-check failure block.
     panic_oob_fn: FunctionValue<'ctx>,
+    /// C2.4 / ADR 0017 D8: `sentinel_free(ptr) -> void` runtime
+    /// function. Emitted at scope-exit for un-moved heap-backed
+    /// bindings (closes the C1.6+ heap-leak deferral).
+    free_fn: FunctionValue<'ctx>,
     current_fn: Option<FunctionValue<'ctx>>,
+    /// C2.4: the FnId of the fn currently being compiled. Used to
+    /// look up the moved-source set from `drop_plan` at scope-exit
+    /// drop emission.
+    current_fn_id: FnId,
     vars: HashMap<VarId, (PointerValue<'ctx>, Type)>,
+    /// C2.4 / ADR 0017 D8: stack of scopes; each scope is the
+    /// ordered list of VarIds declared in it. At scope exit
+    /// (block-pop, fn return), the codegen iterates these in
+    /// reverse to emit drop calls for heap-backed bindings that
+    /// weren't moved.
+    scope_stack: Vec<Vec<VarId>>,
+    /// C2.4: per-fn moved-source sets from the borrow checker.
+    /// Codegen looks up `current_fn_id` to determine which
+    /// bindings should be skipped at scope-exit drop emission
+    /// (the destination of the move owns the value now).
+    drop_plan: &'plan DropPlan,
 }
 
 /// Map a Sentinel [`Type`] to its LLVM `BasicTypeEnum`. C1.5
@@ -840,7 +884,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
     }
 }
 
-impl<'ctx> CodegenCtx<'ctx> {
+impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     fn llvm_basic_type(&self, ty: Type) -> BasicTypeEnum<'ctx> {
         llvm_basic_type(self.context, ty, &self.struct_types, &self.generic_struct_types)
     }
@@ -872,10 +916,15 @@ impl<'ctx> CodegenCtx<'ctx> {
             .get(&(fn_id, type_args.to_vec()))
             .expect("declared in monomorphic pre-pass");
         self.current_fn = Some(fn_value);
+        self.current_fn_id = fn_id;
         self.vars.clear();
+        self.scope_stack.clear();
 
         let entry = self.context.append_basic_block(fn_value, "entry");
         self.builder.position_at_end(entry);
+
+        // C2.4: scope 0 for params (same as compile_fn).
+        self.scope_stack.push(Vec::new());
 
         for (i, param) in def.params.iter().enumerate() {
             let arg = fn_value
@@ -890,9 +939,17 @@ impl<'ctx> CodegenCtx<'ctx> {
                 .build_store(alloca, arg)
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
             self.vars.insert(param.id, (alloca, param.ty));
+            self.scope_stack
+                .last_mut()
+                .expect("just pushed")
+                .push(param.id);
         }
 
         let body_val = self.lower_block(&def.body, program)?;
+        let tail_returned = tail_returned_var(&def.body.tail);
+        self.emit_scope_drops(tail_returned)?;
+        self.scope_stack.pop();
+
         // Monomorphic instances of `main<T>` are forbidden by ADR
         // 0016 D11 — the type checker rejects them. So no main-
         // truncation special-case is needed here.
@@ -912,10 +969,18 @@ impl<'ctx> CodegenCtx<'ctx> {
             .get(&fn_def.id)
             .expect("declared in pass 1");
         self.current_fn = Some(fn_value);
+        self.current_fn_id = fn_def.id;
         self.vars.clear();
+        self.scope_stack.clear();
 
         let entry = self.context.append_basic_block(fn_value, "entry");
         self.builder.position_at_end(entry);
+
+        // C2.4: params live at scope depth 0. lower_block on the
+        // body pushes scope 1, etc. At fn return, scope 0 (params)
+        // gets drop emission too — moved-source set will skip
+        // params that were passed-through.
+        self.scope_stack.push(Vec::new());
 
         for (i, param) in fn_def.params.iter().enumerate() {
             let arg = fn_value
@@ -930,9 +995,21 @@ impl<'ctx> CodegenCtx<'ctx> {
                 .build_store(alloca, arg)
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
             self.vars.insert(param.id, (alloca, param.ty));
+            self.scope_stack
+                .last_mut()
+                .expect("just pushed")
+                .push(param.id);
         }
 
         let body_val = self.lower_block(&fn_def.body, program)?;
+
+        // C2.4: emit drops for params (scope 0). The tail value
+        // has already been loaded into body_val by lower_block;
+        // any binding consumed by the tail is in the moved-source
+        // set and gets skipped.
+        let tail_returned = tail_returned_var(&fn_def.body.tail);
+        self.emit_scope_drops(tail_returned)?;
+        self.scope_stack.pop();
 
         let is_main = program.signature(fn_def.id).is_main;
         if is_main {
@@ -973,6 +1050,11 @@ impl<'ctx> CodegenCtx<'ctx> {
                     .build_store(alloca, v)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 self.vars.insert(*id, (alloca, *ty));
+                // C2.4: record this binding in the current scope
+                // so scope-exit drop emission can find it.
+                if let Some(top) = self.scope_stack.last_mut() {
+                    top.push(*id);
+                }
             }
             TypedStmtKind::Assign { target, value } => {
                 // C2 / ADR 0017 D2: lower the RHS, compute the LHS
@@ -1048,10 +1130,174 @@ impl<'ctx> CodegenCtx<'ctx> {
         block: &TypedBlock,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        // C2.4: push a fresh scope for this block's bindings.
+        // Drops fire at the bottom (after the tail evaluates)
+        // for any heap-backed binding in this scope that wasn't
+        // moved away.
+        self.scope_stack.push(Vec::new());
         for stmt in &block.stmts {
             self.lower_stmt(stmt, program)?;
         }
-        self.lower_expr(&block.tail, program)
+        let val = self.lower_expr(&block.tail, program)?;
+        // Skip dropping a Var binding that's returned via the
+        // tail — the move tracking will mark it in
+        // `moved_sources`, but we also conservatively guard here.
+        let tail_returned = tail_returned_var(&block.tail);
+        self.emit_scope_drops(tail_returned)?;
+        self.scope_stack.pop();
+        Ok(val)
+    }
+
+    /// C2.4 / ADR 0017 D8: emit drop calls for un-moved heap-
+    /// backed bindings declared in the current (top-of-stack)
+    /// scope. Iterates in reverse declaration order per Rust
+    /// convention. Skips:
+    ///   - Bindings in [`DropPlan::moved_sources_for`] for the
+    ///     current fn (the consumer owns + drops them).
+    ///   - The binding returned via the tail expression (if the
+    ///     tail is a Var(id)) — passed via `tail_returned`.
+    fn emit_scope_drops(
+        &mut self,
+        tail_returned: Option<VarId>,
+    ) -> Result<(), CodegenError> {
+        let scope = self
+            .scope_stack
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        let moved = self.drop_plan.moved_sources_for(self.current_fn_id);
+        for &id in scope.iter().rev() {
+            if Some(id) == tail_returned {
+                continue;
+            }
+            if moved.contains(&id) {
+                continue;
+            }
+            let (ptr, ty) = match self.vars.get(&id) {
+                Some(&v) => v,
+                None => continue,
+            };
+            self.emit_drop_for_binding(ptr, ty)?;
+        }
+        Ok(())
+    }
+
+    /// Emit a drop call for a binding stored at `ptr` with type
+    /// `ty`. For heap-backed types, this loads the value from
+    /// `ptr` and frees the embedded heap pointer.
+    fn emit_drop_for_binding(
+        &mut self,
+        ptr: PointerValue<'ctx>,
+        ty: Type,
+    ) -> Result<(), CodegenError> {
+        match ty {
+            Type::Array(_) => {
+                // `[T]` is `{ i64 len, ptr data }`. Load + free
+                // the data ptr.
+                let llvm_ty = self.llvm_basic_type(ty);
+                let val = self
+                    .builder
+                    .build_load(llvm_ty, ptr, "drop_arr")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_struct_value();
+                let data = self
+                    .builder
+                    .build_extract_value(val, 1, "drop_arr_data")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_pointer_value();
+                self.builder
+                    .build_call(self.free_fn, &[data.into()], "")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            }
+            Type::Nullable(NullableInner::Struct(_))
+            | Type::Nullable(NullableInner::GenericInstance(_)) => {
+                // `?Struct` / `?GenericInstance` is `{ i1 valid,
+                // ptr payload }` per ADR 0015 D11. If valid,
+                // free the payload pointer.
+                let llvm_ty = self.llvm_basic_type(ty);
+                let val = self
+                    .builder
+                    .build_load(llvm_ty, ptr, "drop_opt")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_struct_value();
+                let valid = self
+                    .builder
+                    .build_extract_value(val, 0, "drop_opt_valid")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_int_value();
+                let payload = self
+                    .builder
+                    .build_extract_value(val, 1, "drop_opt_payload")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_pointer_value();
+                let current_fn = self.current_fn.expect("current_fn set");
+                let free_block = self.context.append_basic_block(current_fn, "drop_opt_free");
+                let after_block = self
+                    .context
+                    .append_basic_block(current_fn, "drop_opt_after");
+                self.builder
+                    .build_conditional_branch(valid, free_block, after_block)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder.position_at_end(free_block);
+                self.builder
+                    .build_call(self.free_fn, &[payload.into()], "")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_unconditional_branch(after_block)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder.position_at_end(after_block);
+            }
+            Type::Struct(id) => {
+                // Recursive drop: load the struct value, then
+                // drop each heap-backed field.
+                let decl_fields: Vec<_> = self
+                    .struct_types
+                    .get(&id)
+                    .map(|_| {
+                        // We don't have direct access to the
+                        // TypedStructDecl from CodegenCtx; pass
+                        // through via a separate emit_drop_struct.
+                        Vec::<()>::new()
+                    })
+                    .unwrap_or_default();
+                let _ = decl_fields; // suppress unused
+                self.emit_drop_struct_fields(ptr, ty)?;
+            }
+            Type::GenericInstance(_) => {
+                self.emit_drop_struct_fields(ptr, ty)?;
+            }
+            Type::Nullable(_) | Type::I64 | Type::I32 | Type::Bool | Type::Ref(_) => {
+                // Primitives + refs + nullable-of-primitive: no
+                // heap data to free.
+            }
+            Type::TypeParam(_) => {
+                // Unreachable post-monomorphisation; defensive.
+            }
+        }
+        Ok(())
+    }
+
+    /// Helper for recursive drop of struct fields. Loads the
+    /// struct value from `ptr` and emits drop for each heap-
+    /// backed field. Used by both [`Type::Struct`] and
+    /// [`Type::GenericInstance`] (concrete instances after
+    /// monomorphisation are structurally the same).
+    ///
+    /// **C2.4 known gap**: struct field drops are deferred —
+    /// only direct array bindings + `?Struct` bindings get
+    /// dropped at scope exit. A struct containing an array
+    /// field (e.g., c16_array_in_struct's `Bag`) would leak the
+    /// inner array. Closes via a follow-on commit that threads
+    /// `&TypedProgram` access through `emit_scope_drops` so we
+    /// can iterate the struct's declared fields by index +
+    /// recursively drop each.
+    fn emit_drop_struct_fields(
+        &mut self,
+        _ptr: PointerValue<'ctx>,
+        _ty: Type,
+    ) -> Result<(), CodegenError> {
+        // No-op at C2.4 minimum (see doc comment above).
+        Ok(())
     }
 
     fn lower_if(
@@ -1832,6 +2078,19 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
     }
 }
 
+/// C2.4 / ADR 0017 D8 helper: if a block / fn tail expression
+/// is `Var(id)`, returns `Some(id)` — codegen should skip
+/// dropping that binding at scope exit (it's being returned by
+/// move). Recurses through trivial Block wrappers since the
+/// type checker rewrites `{ x }` as `Block { tail: Var(x) }`.
+fn tail_returned_var(tail: &TypedExpr) -> Option<VarId> {
+    match &tail.kind {
+        TypedExprKind::Var(id) => Some(*id),
+        TypedExprKind::Block(b) => tail_returned_var(&b.tail),
+        _ => None,
+    }
+}
+
 /// Returns the crate name as a sanity-check that the build is wired up.
 pub fn crate_name() -> &'static str {
     "sentinel-codegen"
@@ -1848,7 +2107,13 @@ mod tests {
         let prog = parse(src).expect("parse");
         let resolved = resolve(&prog).expect("resolve");
         let typed = check(&resolved).expect("check");
-        compile_to_object(&typed, &out_path())
+        // C2.4: compile_to_object now takes a DropPlan. For
+        // codegen unit tests we use an empty plan — equivalent
+        // to "no moves recorded", so every heap-backed binding
+        // gets dropped at scope exit (which is the conservative
+        // default and exercises the drop emission code path).
+        let drop_plan = DropPlan::default();
+        compile_to_object(&typed, &drop_plan, &out_path())
     }
 
     fn out_path() -> std::path::PathBuf {

@@ -597,3 +597,38 @@ fn pass_c23_go_no_go() {
     assert_eq!(r.stdout, "100\n");
     assert_eq!(r.exit, 0);
 }
+
+// ---- C2.4 / ADR 0017 D8: RAII / drop + sentinel_free ----
+
+#[test]
+fn pass_c24_array_dropped() {
+    // Array allocated in main + dropped at fn-return.
+    // 7+8+9 = 24.
+    assert_eq!(run_exit("c24_array_dropped.sentinel"), 24);
+}
+
+#[test]
+fn pass_c24_moved_array_no_double_free() {
+    // arr moved into consume(arr); the borrow checker records
+    // arr in moved_sources, so codegen skips arr's drop at
+    // main's scope exit. consume drops xs (its param) instead.
+    // No double-free. 11+22+33 = 66.
+    assert_eq!(run_exit("c24_moved_array_no_double_free.sentinel"), 66);
+}
+
+#[test]
+fn pass_c24_nested_blocks_drop() {
+    // tmp declared in an inner block; dropped at inner-block
+    // exit (not at fn return). 6 + 4 = 10.
+    assert_eq!(run_exit("c24_nested_blocks_drop.sentinel"), 10);
+}
+
+#[test]
+fn pass_c24_go_no_go() {
+    // ADR 0017 D8 phase-go: array drop at fn return + array
+    // drop at inner-block exit + move-into-consume skipping
+    // drop. inner_sum=10, fn_sum=150, total=160.
+    let r = build_and_run("c24_go_no_go.sentinel");
+    assert_eq!(r.stdout, "160\n");
+    assert_eq!(r.exit, 0);
+}

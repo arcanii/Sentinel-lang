@@ -1,0 +1,24 @@
+// C2.4 phase-go per ADR 0017 D8: drop emission at scope exit
+// closes the C1.6+ heap-leak deferral. This program exercises:
+//   - Array allocated + used + dropped at fn-return.
+//   - Move into a fn (no double-free; moved binding skipped at
+//     the source-scope drop).
+//   - Inner block with its own array drop at block-exit.
+//
+// nums = [10, 20, 30, 40, 50]
+// inner_sum (block-scoped tmp [1, 2, 3, 4]) = 10
+// fn_sum (consume(nums) = 10+20+30+40+50) = 150
+// print(150 + 10) = 160 -> stdout "160\n", exit 0.
+fn consume(xs: [i64]) -> i64 {
+    xs[0] + xs[1] + xs[2] + xs[3] + xs[4]
+}
+
+fn main() -> i64 {
+    let inner_sum: i64 = {
+        let tmp: [i64] = [1, 2, 3, 4];
+        tmp[0] + tmp[1] + tmp[2] + tmp[3]
+    };
+    let nums: [i64] = [10, 20, 30, 40, 50];
+    let fn_sum: i64 = consume(nums);
+    print(fn_sum + inner_sum)
+}

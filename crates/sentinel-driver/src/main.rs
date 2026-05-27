@@ -127,16 +127,17 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     // type-check, AND borrow-check diagnostics in one collection.
     // The TypedProgram itself comes from check_query (no clone
     // through borrow_check_query); both queries are salsa-cached.
-    let borrow_ok = borrow_check_query(&db, file).is_some();
+    let drop_plan_opt = borrow_check_query(&db, file);
     let diags = borrow_check_query::accumulated::<Diagnostic>(&db, file);
     render_diagnostics(&diags, path, &src);
-    if !borrow_ok {
-        return ExitCode::from(1);
-    }
+    let drop_plan = match drop_plan_opt {
+        Some(plan) => plan,
+        None => return ExitCode::from(1),
+    };
     let typed = match check_query(&db, file) {
         Some(t) => t,
-        // Should be unreachable: if check_query failed, borrow_ok
-        // would already be false. Kept defensive.
+        // Should be unreachable: if check_query failed, drop_plan
+        // would already be None. Kept defensive.
         None => return ExitCode::from(1),
     };
 
@@ -146,7 +147,9 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     };
     let object_path = exe_path.with_extension("o");
 
-    if let Err(err) = sentinel_codegen::compile_to_object(typed, &object_path) {
+    // C2.4 / ADR 0017 D8: pass DropPlan to codegen so it emits
+    // drop calls at scope-exit for un-moved heap-backed bindings.
+    if let Err(err) = sentinel_codegen::compile_to_object(typed, drop_plan, &object_path) {
         let report = Report::new(err).with_source_code(NamedSource::new(path, src));
         eprintln!("{report:?}");
         return ExitCode::from(1);

@@ -1161,6 +1161,7 @@ dependencies = [
  "inkwell",
  "miette",
  "sentinel-ast",
+ "sentinel-borrow-check",
  "sentinel-resolve",
  "sentinel-syntax",
  "sentinel-types",

@@ -10,9 +10,10 @@ license.workspace      = true
 repository.workspace   = true
 
 [dependencies]
-sentinel-ast     = { path = "../sentinel-ast" }
-sentinel-resolve = { path = "../sentinel-resolve" }
-sentinel-types   = { path = "../sentinel-types" }
+sentinel-ast          = { path = "../sentinel-ast" }
+sentinel-borrow-check = { path = "../sentinel-borrow-check" }
+sentinel-resolve      = { path = "../sentinel-resolve" }
+sentinel-types        = { path = "../sentinel-types" }
 
 inkwell    = { workspace = true }
 miette     = { workspace = true }

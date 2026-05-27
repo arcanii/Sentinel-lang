@@ -1,0 +1,9 @@
+// C2.4 / ADR 0017 D8: an array allocated in fn-body scope is
+// dropped at scope exit (the closing brace of `main`). Without
+// drop emission, this program leaks the heap buffer; with drop,
+// `sentinel_free` runs.
+// xs[0] + xs[1] + xs[2] = 7 + 8 + 9 = 24 -> exit 24.
+fn main() -> i64 {
+    let xs: [i64] = [7, 8, 9];
+    xs[0] + xs[1] + xs[2]
+}

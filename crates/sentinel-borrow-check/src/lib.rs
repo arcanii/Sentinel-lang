@@ -122,12 +122,12 @@
 //! don't need re-checking because TypeParam substitution preserves
 //! the ref structure that borrow-check analysed.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use salsa::Accumulator;
 use sentinel_ast::{Span, UnaryOp};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
-use sentinel_resolve::VarId;
+use sentinel_resolve::{FnId, VarId};
 use sentinel_types::{
     NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram,
     TypedStmt, TypedStmtKind,
@@ -404,8 +404,16 @@ struct FnCtx {
     /// a consuming context when the binding is already Moved
     /// surfaces [`BorrowError::UseAfterMove`]; otherwise a read
     /// in a consuming context of a Move-classified binding
-    /// transitions it to Moved.
+    /// transitions it to Moved. Reset by if/else snapshot/restore
+    /// for branch-aware merging.
     moved: HashMap<VarId, Span>,
+    /// C2.4: union of ALL bindings that were ever moved during
+    /// this fn's analysis (even across branches that got
+    /// snapshot/restored from [`moved`]). Codegen uses this set
+    /// via [`DropPlan`] to skip dropping moved-from bindings.
+    /// Never reset by snapshot/restore — always growing within
+    /// a single fn analysis.
+    moved_sources_union: HashSet<VarId>,
 }
 
 #[derive(Debug, Clone)]
@@ -423,6 +431,7 @@ impl FnCtx {
             var_in_scope: HashMap::new(),
             places: HashMap::new(),
             moved: HashMap::new(),
+            moved_sources_union: HashSet::new(),
         }
     }
 
@@ -518,31 +527,70 @@ impl FnCtx {
 }
 
 // =============================================================================
+// Drop plan — codegen artifact (C2.4 / ADR 0017 D8)
+// =============================================================================
+
+/// Per-fn metadata produced by [`borrow_check`] for codegen to
+/// consume when emitting drop calls at scope-exit per ADR 0017 D8.
+/// At C2.4 the plan carries just the **moved-source set** — the
+/// VarIds that act as the source of a move somewhere in their
+/// fn's body. Codegen uses this to skip dropping moved-from
+/// bindings (the destination owns the value).
+///
+/// Future C2.5+ may extend this to track per-scope drop sites
+/// explicitly (e.g., for non-block scope boundaries like `if`
+/// arms that take ownership) — for C2.4 the per-fn set is
+/// sufficient because every let-binding lives in some block and
+/// codegen emits drops at every block-exit.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+pub struct DropPlan {
+    /// VarIds that are sources of moves somewhere in their fn's
+    /// body. Conservative — a VarId moved in *either* branch of
+    /// an `if/else` is included. Stored as `BTreeMap`/`BTreeSet`
+    /// rather than `HashMap`/`HashSet` so the plan implements
+    /// `Hash + Eq` for salsa-tracked caching.
+    pub moved_sources: BTreeMap<FnId, BTreeSet<VarId>>,
+}
+
+impl DropPlan {
+    /// Look up the moved-source set for a fn. Returns an empty
+    /// set if the fn has no recorded moves.
+    pub fn moved_sources_for(&self, fn_id: FnId) -> &BTreeSet<VarId> {
+        static EMPTY: std::sync::OnceLock<BTreeSet<VarId>> = std::sync::OnceLock::new();
+        self.moved_sources
+            .get(&fn_id)
+            .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
+    }
+}
+
+// =============================================================================
 // Entry point + per-fn walk
 // =============================================================================
 
-/// Borrow-check a [`TypedProgram`]. Returns an empty Vec if every
-/// fn passes; otherwise the accumulated errors (one or more per
-/// failing fn). Per ADR 0017 D6, the analysis is *lexical*: each
-/// borrow's lifetime extends from creation to the end of its
-/// enclosing block.
+/// Borrow-check a [`TypedProgram`]. Returns a [`DropPlan`] (drop
+/// info for codegen) and a vector of errors. Empty errors = the
+/// program borrow-checks; non-empty = at least one fn failed and
+/// codegen must NOT proceed (the DropPlan is still computed
+/// best-effort for partial diagnostics, but isn't sound to use).
 ///
-/// At C2.1 the check is **per-fn** and shared-only. Inter-procedural
-/// reasoning is limited to "a call returning a ref inherits the
-/// most-restrictive source among its ref args" — sufficient for
-/// the no-`&mut` subset.
-pub fn borrow_check(program: &TypedProgram) -> Vec<BorrowError> {
+/// Per ADR 0017 D6, the analysis is *lexical*: each borrow's
+/// lifetime extends from creation to the end of its enclosing
+/// block. At C2.4 the check is **per-fn** with branch-aware move-
+/// state merging at if/else (per D9).
+pub fn borrow_check(program: &TypedProgram) -> (DropPlan, Vec<BorrowError>) {
     let mut errors = Vec::new();
+    let mut drop_plan = DropPlan::default();
     for fn_def in &program.fns {
-        borrow_check_fn(fn_def, program, &mut errors);
+        borrow_check_fn(fn_def, program, &mut errors, &mut drop_plan);
     }
-    errors
+    (drop_plan, errors)
 }
 
 fn borrow_check_fn(
     fn_def: &TypedFnDef,
     program: &TypedProgram,
     errors: &mut Vec<BorrowError>,
+    drop_plan: &mut DropPlan,
 ) {
     let mut ctx = FnCtx::new();
     // Register params at "depth 0" — they're alive for the whole
@@ -560,6 +608,13 @@ fn borrow_check_fn(
     // Walk the body. Inner Block expressions push/pop their own
     // scopes via [`walk_expr`]'s [`TypedExprKind::Block`] arm.
     walk_block_contents(&fn_def.body, &mut ctx, errors, program);
+
+    // C2.4: record the per-fn move-sources union into the
+    // DropPlan before the return-source check (which may move
+    // the tail's source, e.g. `fn f() -> Pair { p }`).
+    let mut moved_btree = BTreeSet::new();
+    moved_btree.extend(ctx.moved_sources_union.iter().copied());
+    drop_plan.moved_sources.insert(fn_def.id, moved_btree);
 
     // ADR 0017 D7's "second-class refs everywhere" check: if the
     // fn returns a ref, the tail's source must be Incoming. We
@@ -1056,7 +1111,8 @@ fn is_copy_nullable_inner(inner: NullableInner) -> bool {
 /// C2.3: at a Var(id) read in CONSUMING context, fire the move
 /// check. If the binding is already Moved, surface UseAfterMove
 /// pointing at the prior move site + this use. If the binding is
-/// Live and Move-classified, transition to Moved.
+/// Live and Move-classified, transition to Moved. C2.4: also
+/// record into [`FnCtx::moved_sources_union`] for the DropPlan.
 fn check_and_record_move(
     id: VarId,
     ty: Type,
@@ -1070,6 +1126,7 @@ fn check_and_record_move(
     }
     if !is_copy_type(ty) {
         ctx.moved.insert(id, use_span.clone());
+        ctx.moved_sources_union.insert(id);
     }
 }
 
@@ -1245,16 +1302,17 @@ fn to_source_span(span: &Span) -> miette::SourceSpan {
 /// Salsa-tracked borrow-check query. Chains on
 /// [`sentinel_types::check_query`]; runs the borrow analysis on
 /// the typed program and accumulates [`BorrowError`] diagnostics.
-/// Returns `Some(())` if the program borrow-checks; `None`
-/// otherwise. Diagnostics from upstream queries (parse / resolve
-/// / types) flow through transitively when callers ask for
-/// `borrow_check_query::accumulated::<Diagnostic>`.
+/// Returns `Some(DropPlan)` if the program borrow-checks (codegen
+/// consumes the plan to emit drop calls at scope-exit per ADR
+/// 0017 D8); `None` if any errors fired. Diagnostics from upstream
+/// queries (parse / resolve / types) flow through transitively
+/// when callers ask for `borrow_check_query::accumulated::<Diagnostic>`.
 #[salsa::tracked(return_ref)]
-pub fn borrow_check_query(db: &dyn SentinelDb, file: SourceFile) -> Option<()> {
+pub fn borrow_check_query(db: &dyn SentinelDb, file: SourceFile) -> Option<DropPlan> {
     let typed = sentinel_types::check_query(db, file).as_ref()?;
-    let errors = borrow_check(typed);
+    let (drop_plan, errors) = borrow_check(typed);
     if errors.is_empty() {
-        Some(())
+        Some(drop_plan)
     } else {
         for err in &errors {
             borrow_error_to_diagnostic(err).accumulate(db);
@@ -1337,7 +1395,7 @@ mod tests {
         let prog = parse(src).expect("parse");
         let resolved = resolve(&prog).expect("resolve");
         let typed = check(&resolved).expect("check");
-        let errors = borrow_check(&typed);
+        let (_plan, errors) = borrow_check(&typed);
         assert!(errors.is_empty(), "expected no borrow errors, got {errors:?}");
     }
 
@@ -1345,7 +1403,7 @@ mod tests {
         let prog = parse(src).expect("parse");
         let resolved = resolve(&prog).expect("resolve");
         let typed = check(&resolved).expect("check");
-        let errors = borrow_check(&typed);
+        let (_plan, errors) = borrow_check(&typed);
         assert!(!errors.is_empty(), "expected borrow errors, got none");
         errors
     }
@@ -1773,7 +1831,7 @@ mod tests {
             "fn main() -> i64 { 42 }".to_string(),
         );
         let result = borrow_check_query(&db, file);
-        assert_eq!(result.as_ref(), Some(&()));
+        assert!(result.is_some());
         let diags = borrow_check_query::accumulated::<Diagnostic>(&db, file);
         assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
     }
@@ -1787,7 +1845,7 @@ mod tests {
             "fn f() -> &i64 { let x: i64 = 5; &x }\nfn main() -> i64 { *f() }".to_string(),
         );
         let result = borrow_check_query(&db, file);
-        assert_eq!(result.as_ref(), None);
+        assert!(result.is_none());
         let diags = borrow_check_query::accumulated::<Diagnostic>(&db, file);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].stage, "borrow");
@@ -1805,9 +1863,43 @@ mod tests {
             "fn main() -> bogus { 0 }".to_string(),
         );
         let result = borrow_check_query(&db, file);
-        assert_eq!(result.as_ref(), None);
+        assert!(result.is_none());
         let diags = borrow_check_query::accumulated::<Diagnostic>(&db, file);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].stage, "types");
+    }
+
+    // ----- C2.4: DropPlan computation -----
+
+    #[test]
+    fn drop_plan_records_moved_sources() {
+        // Single move: `consume(p)` marks p as moved. DropPlan
+        // should include p in moved_sources.
+        let prog = parse(
+            "struct P { x: i64 } fn consume(p: P) -> i64 { p.x } fn main() -> i64 { let p: P = P { x: 5 }; consume(p) }",
+        )
+        .expect("parse");
+        let resolved = resolve(&prog).expect("resolve");
+        let typed = check(&resolved).expect("check");
+        let (plan, errors) = borrow_check(&typed);
+        assert!(errors.is_empty(), "got {errors:?}");
+        // main's fn_id: print + 3 builtins + consume + main = FnId(5).
+        let main = typed.fns.iter().find(|f| f.name == "main").unwrap();
+        let moved = plan.moved_sources_for(main.id);
+        // p's VarId is 0 (first binding in main).
+        assert_eq!(moved.len(), 1, "expected 1 moved source, got {moved:?}");
+    }
+
+    #[test]
+    fn drop_plan_empty_for_no_moves() {
+        // Pure i64 program — no Move-typed bindings, no moves.
+        let prog = parse("fn main() -> i64 { let x: i64 = 5; x + 1 }").expect("parse");
+        let resolved = resolve(&prog).expect("resolve");
+        let typed = check(&resolved).expect("check");
+        let (plan, errors) = borrow_check(&typed);
+        assert!(errors.is_empty());
+        let main = typed.fns.iter().find(|f| f.name == "main").unwrap();
+        let moved = plan.moved_sources_for(main.id);
+        assert!(moved.is_empty(), "expected no moved sources, got {moved:?}");
     }
 }

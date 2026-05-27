@@ -1,0 +1,15 @@
+// C2.4 / ADR 0017 D8: arrays declared in nested blocks get
+// dropped at their inner-block exit (not at fn return). After
+// the inner block exits, the outer block runs with no live
+// bindings.
+// Inner block: declares `tmp`, computes its sum, returns the sum.
+// At inner-block exit: `tmp` is dropped (sentinel_free runs).
+// Outer continues: declares `outer_sum`, returns it.
+// Inner sum = 1 + 2 + 3 = 6. Outer adds 4 = 10 -> exit 10.
+fn main() -> i64 {
+    let inner_sum: i64 = {
+        let tmp: [i64] = [1, 2, 3];
+        tmp[0] + tmp[1] + tmp[2]
+    };
+    inner_sum + 4
+}

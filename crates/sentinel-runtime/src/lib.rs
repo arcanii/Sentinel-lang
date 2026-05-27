@@ -14,11 +14,15 @@
 //!   - `sentinel_panic_oob(i64 idx, i64 len) -> never` prints a
 //!     diagnostic and aborts with a non-zero exit code.
 //!
-//! Neither is exposed at the language level — they're called
-//! internally by codegen for array-literal construction and bounds
-//! checking respectively. There is intentionally NO `free` at C1.6;
-//! arrays leak. Resource management is C2's region work per ADR
-//! 0015 D9.
+//! C2.4 (per ADR 0017 D8) adds the matching `free`:
+//!
+//!   - `sentinel_free(ptr: *mut u8) -> void` wraps libc `free`.
+//!     Closes the C1.6+ heap-leak deferral — codegen now emits
+//!     drop calls at scope-exit for heap-backed values (arrays +
+//!     `?Struct` payloads).
+//!
+//! None of these are exposed at the language level — they're
+//! called internally by codegen.
 
 /// Print an i64 to stdout as ASCII decimal followed by `\n`.
 /// Returns 0. Called from Sentinel programs as `print(x)`.
@@ -74,6 +78,29 @@ pub extern "C" fn sentinel_panic_oob(idx: i64, len: i64) -> ! {
     std::process::abort();
 }
 
+/// Free a pointer previously returned by [`sentinel_alloc`]. C2.4
+/// / ADR 0017 D8: paired with `sentinel_alloc` to close the
+/// C1.6+ heap-leak deferral. Calls libc `free` directly because
+/// the emitted Sentinel programs link with the C runtime;
+/// alternating allocators would risk UB.
+///
+/// # Safety
+///
+/// `ptr` must have been returned by an earlier `sentinel_alloc`
+/// call (or be null). Passing a null pointer is safe — libc
+/// `free(NULL)` is a no-op per the C standard. Double-free or
+/// free of an unrelated pointer is undefined behavior; the
+/// borrow checker (C2.1+) statically prevents these in user
+/// programs.
+#[no_mangle]
+pub extern "C" fn sentinel_free(ptr: *mut u8) {
+    // SAFETY: caller guarantees ptr is from sentinel_alloc or
+    // null. libc free handles null as a no-op.
+    if !ptr.is_null() {
+        unsafe { libc::free(ptr as *mut libc::c_void) };
+    }
+}
+
 /// Returns the crate name as a sanity-check that the build is wired up.
 pub fn crate_name() -> &'static str {
     "sentinel-runtime"
@@ -94,5 +121,21 @@ mod tests {
         // assert the return value here. End-to-end behavior is
         // covered by the C0.4 pass tests via the compiled binary.
         assert_eq!(sentinel_print(42), 0);
+    }
+
+    #[test]
+    fn sentinel_free_null_is_noop() {
+        // libc free(NULL) is a no-op per C standard; sentinel_free
+        // adds an explicit null guard for clarity.
+        sentinel_free(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn sentinel_alloc_then_free_round_trips() {
+        // Round-trip: alloc 32 bytes + free. No assertion on the
+        // pointer value; we just confirm no crash.
+        let ptr = sentinel_alloc(32);
+        assert!(!ptr.is_null());
+        sentinel_free(ptr);
     }
 }

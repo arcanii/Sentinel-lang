@@ -40,14 +40,17 @@ use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 // =============================================================================
 
 /// Identifier for a value binding (parameter or `let`). Unique
-/// per-program; assigned by [`resolve`] in source order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// per-program; assigned by [`resolve`] in source order. Ord
+/// derived (C2.4) so BorrowCheck's DropPlan can use BTreeMap
+/// keyed by VarId for salsa-cacheable storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VarId(pub u32);
 
 /// Identifier for a function. Unique per-program; assigned by
 /// [`resolve`] in source order, with `print` taking `FnId(0)`
 /// because the runtime symbol is pre-registered before user fns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Ord derived (C2.4) — same rationale as [`VarId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FnId(pub u32);
 
 /// Sentinel's runtime `print` is always `FnId(0)`. Pre-registered
