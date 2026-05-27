@@ -27,7 +27,7 @@
 //! transparent — LLVM's ABI lowering handles the small-struct vs
 //! by-pointer choice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use inkwell::builder::Builder;
@@ -193,6 +193,45 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
         module.add_function("sentinel_panic_oob", panic_type, None)
     };
 
+    // C1.7.5 / ADR 0016 D7: collect generic-fn instantiations
+    // reachable from non-generic fn bodies (the seed) and any
+    // transitive calls discovered while walking already-queued
+    // instances. Each unique `(FnId, Vec<Type>)` becomes one
+    // monomorphic LLVM function.
+    let instantiations = collect_mono_instantiations(program);
+    // Materialise each instance as a substituted TypedFnDef so
+    // pass 2's body lowering can consume it without TypeParam-
+    // awareness. The substituted defs are owned here and held
+    // alive across pass 2.
+    let mono_defs: Vec<((FnId, Vec<Type>), TypedFnDef)> = instantiations
+        .iter()
+        .map(|(fn_id, args)| {
+            let generic_def = program
+                .fns
+                .iter()
+                .find(|f| f.id == *fn_id)
+                .expect("collect_mono_instantiations only queues real user-defined fns");
+            ((*fn_id, args.clone()), generic_def.substitute(args))
+        })
+        .collect();
+    // Pre-declare each monomorphic LLVM fn with a mangled name so
+    // that within pass 2 we can resolve `(FnId, Vec<Type>)` →
+    // FunctionValue at every call site (including transitive
+    // generic-fn-to-generic-fn calls).
+    let mut mono_fns: HashMap<(FnId, Vec<Type>), FunctionValue> = HashMap::new();
+    for ((fn_id, args), def) in &mono_defs {
+        let mangled = mangle_mono_name(&def.name, args, program);
+        let param_types: Vec<_> = def
+            .params
+            .iter()
+            .map(|p| llvm_basic_type(&context, p.ty, &struct_types).into())
+            .collect();
+        let fn_type = llvm_basic_type(&context, def.return_type, &struct_types)
+            .fn_type(&param_types, false);
+        let fn_value = module.add_function(&mangled, fn_type, None);
+        mono_fns.insert((*fn_id, args.clone()), fn_value);
+    }
+
     // Pass 2: emit each user function body. (The runtime `print`
     // has no body — it's defined externally by sentinel-runtime.)
     {
@@ -200,6 +239,7 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
             context: &context,
             builder,
             fns,
+            mono_fns,
             struct_types,
             alloc_fn,
             panic_oob_fn,
@@ -207,13 +247,18 @@ pub fn compile_to_object(program: &TypedProgram, output: &Path) -> Result<(), Co
             vars: HashMap::new(),
         };
         for fn_def in &program.fns {
-            // C1.7.4a / ADR 0016 D7: skip generic fn bodies (no
-            // LLVM fn was declared in pass 1). Monomorphic
-            // instantiations will be emitted at C1.7.5.
+            // C1.7.4a / ADR 0016 D7: skip generic fn bodies; their
+            // monomorphic images are emitted below.
             if !fn_def.type_params.is_empty() {
                 continue;
             }
             cx.compile_fn(fn_def, program)?;
+        }
+        // C1.7.5: emit each monomorphic instance. The substituted
+        // `TypedFnDef` carries concrete types; compile_fn lowers
+        // it identically to a non-generic fn.
+        for ((fn_id, args), def) in &mono_defs {
+            cx.compile_mono_fn(*fn_id, args, def, program)?;
         }
     }
 
@@ -263,6 +308,12 @@ struct CodegenCtx<'ctx> {
     context: &'ctx Context,
     builder: Builder<'ctx>,
     fns: HashMap<FnId, FunctionValue<'ctx>>,
+    /// C1.7.5 / ADR 0016 D7: monomorphic instances of generic user
+    /// fns, keyed by `(FnId, type_args)`. Each entry's
+    /// FunctionValue has a mangled LLVM name and a substituted
+    /// signature. Call-site lowering consults this map when the
+    /// callee is a user-defined generic fn.
+    mono_fns: HashMap<(FnId, Vec<Type>), FunctionValue<'ctx>>,
     struct_types: HashMap<StructId, StructType<'ctx>>,
     /// C1.6: `sentinel_alloc(i64) -> ptr` runtime function. Called
     /// to back array storage and `?Struct` heap payloads.
@@ -337,6 +388,197 @@ fn llvm_basic_type<'ctx>(
     }
 }
 
+// =============================================================================
+// C1.7.5 monomorphization helpers per ADR 0016 D7.
+// =============================================================================
+
+/// Walk the [`TypedProgram`] starting from non-generic fn bodies
+/// and collect every reachable `(FnId, Vec<Type>)` instantiation
+/// of a user-defined generic fn. Transitive cases — a generic fn's
+/// body calling another generic fn — are handled by repeatedly
+/// processing newly-discovered instances with their type-arg
+/// substitution applied. Returns instances in a deterministic
+/// (insertion) order for stable LLVM output.
+fn collect_mono_instantiations(
+    program: &TypedProgram,
+) -> Vec<(FnId, Vec<Type>)> {
+    let mut visited: HashSet<(FnId, Vec<Type>)> = HashSet::new();
+    let mut order: Vec<(FnId, Vec<Type>)> = Vec::new();
+    let mut pending: Vec<(FnId, Vec<Type>)> = Vec::new();
+
+    // Seed: scan non-generic fn bodies for calls to generic fns.
+    let no_subst: Vec<Type> = Vec::new();
+    for fn_def in &program.fns {
+        if !fn_def.type_params.is_empty() {
+            continue;
+        }
+        walk_block_for_mono(
+            &fn_def.body,
+            &no_subst,
+            program,
+            &mut visited,
+            &mut order,
+            &mut pending,
+        );
+    }
+
+    // Worklist: each pending instance is itself a generic-fn body
+    // we now walk under its concrete type-args.
+    while let Some((fn_id, subst)) = pending.pop() {
+        let generic_def = program
+            .fns
+            .iter()
+            .find(|f| f.id == fn_id)
+            .expect("collect: queued instance must reference an existing fn");
+        walk_block_for_mono(
+            &generic_def.body,
+            &subst,
+            program,
+            &mut visited,
+            &mut order,
+            &mut pending,
+        );
+    }
+
+    order
+}
+
+fn walk_block_for_mono(
+    block: &TypedBlock,
+    subst: &[Type],
+    program: &TypedProgram,
+    visited: &mut HashSet<(FnId, Vec<Type>)>,
+    order: &mut Vec<(FnId, Vec<Type>)>,
+    pending: &mut Vec<(FnId, Vec<Type>)>,
+) {
+    for stmt in &block.stmts {
+        match &stmt.kind {
+            TypedStmtKind::Let { value, .. } => {
+                walk_expr_for_mono(value, subst, program, visited, order, pending)
+            }
+            TypedStmtKind::Expr(e) => {
+                walk_expr_for_mono(e, subst, program, visited, order, pending)
+            }
+        }
+    }
+    walk_expr_for_mono(&block.tail, subst, program, visited, order, pending);
+}
+
+fn walk_expr_for_mono(
+    e: &TypedExpr,
+    subst: &[Type],
+    program: &TypedProgram,
+    visited: &mut HashSet<(FnId, Vec<Type>)>,
+    order: &mut Vec<(FnId, Vec<Type>)>,
+    pending: &mut Vec<(FnId, Vec<Type>)>,
+) {
+    match &e.kind {
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::Var(_) => {}
+        TypedExprKind::WidenToNullable(inner) => {
+            walk_expr_for_mono(inner, subst, program, visited, order, pending)
+        }
+        TypedExprKind::Unary(_, inner) => {
+            walk_expr_for_mono(inner, subst, program, visited, order, pending)
+        }
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => {
+            walk_expr_for_mono(l, subst, program, visited, order, pending);
+            walk_expr_for_mono(r, subst, program, visited, order, pending);
+        }
+        TypedExprKind::Block(b) => {
+            walk_block_for_mono(b, subst, program, visited, order, pending)
+        }
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            walk_expr_for_mono(cond, subst, program, visited, order, pending);
+            walk_block_for_mono(then_branch, subst, program, visited, order, pending);
+            walk_block_for_mono(else_branch, subst, program, visited, order, pending);
+        }
+        TypedExprKind::Call { id, args, type_args, .. } => {
+            // Substitute the call's type_args under the active
+            // subst to get the concrete instantiation key.
+            let concrete_args: Vec<Type> =
+                type_args.iter().map(|t| t.substitute(subst)).collect();
+            let signature = program.signature(*id);
+            // Only enqueue user-defined generic fns. Builtins are
+            // inlined; print and other runtime fns don't need
+            // monomorphic copies.
+            if !signature.is_runtime && !signature.type_params.is_empty() {
+                let key = (*id, concrete_args);
+                if visited.insert(key.clone()) {
+                    order.push(key.clone());
+                    pending.push(key);
+                }
+            }
+            for a in args {
+                walk_expr_for_mono(a, subst, program, visited, order, pending);
+            }
+        }
+        TypedExprKind::StructLit { fields, .. } => {
+            for f in fields {
+                walk_expr_for_mono(f, subst, program, visited, order, pending);
+            }
+        }
+        TypedExprKind::FieldAccess { target, .. } => {
+            walk_expr_for_mono(target, subst, program, visited, order, pending)
+        }
+        TypedExprKind::ArrayLit { elements, .. } => {
+            for el in elements {
+                walk_expr_for_mono(el, subst, program, visited, order, pending);
+            }
+        }
+        TypedExprKind::Index { target, index, .. } => {
+            walk_expr_for_mono(target, subst, program, visited, order, pending);
+            walk_expr_for_mono(index, subst, program, visited, order, pending);
+        }
+    }
+}
+
+/// C1.7.5 / ADR 0016 D7: produce a mangled LLVM symbol name for a
+/// monomorphic instance of a generic fn. The scheme is
+/// `{name}__{type1}_{type2}_...` where each type is rendered via
+/// [`mangle_type`]. Stable across runs given the same input
+/// program — handy for LLVM IR inspection.
+fn mangle_mono_name(
+    base_name: &str,
+    type_args: &[Type],
+    program: &TypedProgram,
+) -> String {
+    let mut s = String::with_capacity(base_name.len() + 16);
+    s.push_str(base_name);
+    for t in type_args {
+        s.push_str("__");
+        s.push_str(&mangle_type(*t, program));
+    }
+    s
+}
+
+/// Render a [`Type`] as a mangling-friendly tag. `i64` → `"i64"`,
+/// `Pair<i64, bool>` (when generic structs land) → something like
+/// `"Pair_i64_bool"`, etc. The format is internal-only — anyone
+/// who wants a human display should use [`type_display`].
+fn mangle_type(ty: Type, program: &TypedProgram) -> String {
+    match ty {
+        Type::I64 => "i64".to_string(),
+        Type::I32 => "i32".to_string(),
+        Type::Bool => "bool".to_string(),
+        Type::Struct(id) => program
+            .structs
+            .get(id.0 as usize)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| format!("struct{}", id.0)),
+        Type::Nullable(inner) => format!("opt_{}", mangle_type(inner.to_type(), program)),
+        Type::Array(elem) => format!("arr_{}", mangle_type(elem.to_type(), program)),
+        // TypeParams shouldn't appear in a monomorphic instance's
+        // type-args by construction; if one slips through, render
+        // it for debuggability.
+        Type::TypeParam(id) => format!("T{}", id.0),
+    }
+}
+
 /// Map a Sentinel int type (i1 / i32 / i64) to its LLVM IntType.
 /// Panics on non-int types — callers must gate on
 /// `Type::is_int()` first.
@@ -366,6 +608,59 @@ impl<'ctx> CodegenCtx<'ctx> {
 
     fn llvm_int_type(&self, ty: Type) -> IntType<'ctx> {
         llvm_int_type(self.context, ty)
+    }
+
+    /// C1.7.5 / ADR 0016 D7: emit a monomorphic instance of a
+    /// generic fn. The `def` is the substituted [`TypedFnDef`]
+    /// (with `Type::TypeParam` replaced by concrete types per
+    /// `type_args`); `fn_id` and `type_args` are the keys into
+    /// `mono_fns` where the pre-declared LLVM fn lives.
+    ///
+    /// Body lowering reuses [`compile_fn`]'s machinery — the
+    /// substituted def looks no different from a non-generic fn
+    /// to the per-fn lowering path. The only special case is
+    /// resolving the `current_fn` against `mono_fns` rather than
+    /// the regular `fns` table at the start.
+    fn compile_mono_fn(
+        &mut self,
+        fn_id: FnId,
+        type_args: &[Type],
+        def: &TypedFnDef,
+        program: &TypedProgram,
+    ) -> Result<(), CodegenError> {
+        let fn_value = *self
+            .mono_fns
+            .get(&(fn_id, type_args.to_vec()))
+            .expect("declared in monomorphic pre-pass");
+        self.current_fn = Some(fn_value);
+        self.vars.clear();
+
+        let entry = self.context.append_basic_block(fn_value, "entry");
+        self.builder.position_at_end(entry);
+
+        for (i, param) in def.params.iter().enumerate() {
+            let arg = fn_value
+                .get_nth_param(i as u32)
+                .expect("param exists");
+            let llvm_ty = self.llvm_basic_type(param.ty);
+            let alloca = self
+                .builder
+                .build_alloca(llvm_ty, &param.name)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(alloca, arg)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(param.id, (alloca, param.ty));
+        }
+
+        let body_val = self.lower_block(&def.body, program)?;
+        // Monomorphic instances of `main<T>` are forbidden by ADR
+        // 0016 D11 — the type checker rejects them. So no main-
+        // truncation special-case is needed here.
+        self.builder
+            .build_return(Some(&body_val))
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(())
     }
 
     fn compile_fn(
@@ -841,6 +1136,48 @@ impl<'ctx> CodegenCtx<'ctx> {
         })
     }
 
+    /// C1.7.5 / ADR 0016 D7: lower a call to a user-defined
+    /// generic fn. The pre-pass already declared an LLVM fn for
+    /// `(id, type_args)`; this method resolves it from `mono_fns`
+    /// and emits the call. If the lookup misses (which would
+    /// indicate the pre-pass collector missed an instantiation —
+    /// a codegen bug), surface as `GenericCallNotYetSupported` so
+    /// the failure is at least diagnostic-friendly rather than a
+    /// panic.
+    fn lower_mono_call(
+        &mut self,
+        id: FnId,
+        type_args: &[Type],
+        args: &[TypedExpr],
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let signature = program.signature(id);
+        let key = (id, type_args.to_vec());
+        let fn_value = match self.mono_fns.get(&key).copied() {
+            Some(fv) => fv,
+            None => {
+                return Err(CodegenError::GenericCallNotYetSupported {
+                    name: signature.name.clone(),
+                });
+            }
+        };
+        let arg_values: Vec<BasicMetadataValueEnum> = args
+            .iter()
+            .map(|a| self.lower_expr(a, program).map(|v| v.into()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let call_name = format!("call_{}", signature.name);
+        let call = self
+            .builder
+            .build_call(fn_value, &arg_values, &call_name)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        call.try_as_basic_value().left().ok_or_else(|| {
+            CodegenError::Builder(format!(
+                "call to `{}` returned void unexpectedly",
+                signature.name
+            ))
+        })
+    }
+
     fn lower_expr(
         &mut self,
         expr: &TypedExpr,
@@ -953,7 +1290,7 @@ impl<'ctx> CodegenCtx<'ctx> {
             TypedExprKind::If { cond, then_branch, else_branch } => {
                 self.lower_if(cond, then_branch, else_branch, program)
             }
-            TypedExprKind::Call { id, args, .. } => {
+            TypedExprKind::Call { id, args, type_args, .. } => {
                 // ADR 0014 D9 + ADR 0015 D4 builtins: lower inline
                 // rather than calling an external runtime function.
                 // Per ADR 0016 D8b these stay special-cased at C1.7
@@ -969,15 +1306,13 @@ impl<'ctx> CodegenCtx<'ctx> {
                 if *id == LEN_FN_ID {
                     return self.lower_len(&args[0], program);
                 }
-                // C1.7.4a / ADR 0016 D7: user-defined generic-fn
-                // calls fail at codegen until C1.7.5 lands
-                // monomorphization. Type-check still validates the
-                // call shape; only the lowering is deferred.
+                // C1.7.5 / ADR 0016 D7: user-defined generic-fn
+                // calls route to the monomorphic instance emitted
+                // in the pre-pass. Non-generic calls take the
+                // existing path.
                 let signature = program.signature(*id);
                 if !signature.type_params.is_empty() {
-                    return Err(CodegenError::GenericCallNotYetSupported {
-                        name: signature.name.clone(),
-                    });
+                    return self.lower_mono_call(*id, type_args, args, program);
                 }
                 self.lower_call(*id, args, program)
             }

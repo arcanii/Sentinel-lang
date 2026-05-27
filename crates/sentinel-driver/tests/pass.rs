@@ -405,3 +405,44 @@ fn pass_c16_go_no_go() {
     assert_eq!(r.stdout, "15\n");
     assert_eq!(r.exit, 0);
 }
+
+// ---- C1.7.5 / ADR 0016: user-defined generic fns + monomorphization ----
+
+#[test]
+fn pass_c17_id() {
+    // The minimum-viable generic fn: `id<T>(x: T) -> T { x }`
+    // monomorphised to `id__i64` at the i64 call site.
+    let r = build_and_run("c17_id.sentinel");
+    assert_eq!(r.stdout, "42\n");
+    assert_eq!(r.exit, 0);
+}
+
+#[test]
+fn pass_c17_two_instantiations() {
+    // `pick<T>` instantiated for both T = i64 and T = bool.
+    // Codegen emits `pick__i64` AND `pick__bool` as separate
+    // LLVM fns. 41 + 0 = 41 (pick(false, true, false) = false,
+    // to_i64(false) = 0).
+    let r = build_and_run("c17_two_instantiations.sentinel");
+    assert_eq!(r.stdout, "41\n");
+    assert_eq!(r.exit, 0);
+}
+
+#[test]
+fn pass_c17_generic_nullable() {
+    // Generic fn with `?T` in its signature, body calls the
+    // `unwrap_or` builtin. 99 + 1 = 100.
+    let r = build_and_run("c17_generic_nullable.sentinel");
+    assert_eq!(r.stdout, "100\n");
+    assert_eq!(r.exit, 0);
+}
+
+#[test]
+fn pass_c17_generic_array() {
+    // Generic fn with `[T]` param, body calls the `len`
+    // builtin. count<i64>([10,20,30,40]) + count<bool>([true,false])
+    // = 4 + 2 = 6.
+    let r = build_and_run("c17_generic_array.sentinel");
+    assert_eq!(r.stdout, "6\n");
+    assert_eq!(r.exit, 0);
+}

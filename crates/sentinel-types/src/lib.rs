@@ -109,6 +109,17 @@ impl NullableInner {
             NullableInner::TypeParam(id) => Type::TypeParam(id),
         }
     }
+
+    /// Apply a TypeParam substitution. Falls back to `self` if the
+    /// substituted form would nest (Nullable or Array — neither is
+    /// supported as an inner per the C1.6 depth-1 amendment of ADR
+    /// 0015 D6). C1.7 / ADR 0016.
+    pub fn substitute(self, subst: &[Type]) -> NullableInner {
+        self.to_type()
+            .substitute(subst)
+            .to_nullable_inner()
+            .unwrap_or(self)
+    }
 }
 
 /// The base types that can appear inside an `[T]` per ADR 0015 D6.
@@ -136,6 +147,18 @@ impl ArrayElem {
             ArrayElem::Struct(id) => Type::Struct(id),
             ArrayElem::TypeParam(id) => Type::TypeParam(id),
         }
+    }
+
+    /// Apply a TypeParam substitution to this ArrayElem. Returns
+    /// the substituted ArrayElem when the result still fits the
+    /// flat subset; otherwise (substitution would introduce
+    /// Nullable or Array nesting, deferred per ADR 0015 D6) returns
+    /// `self` unchanged. C1.7 / ADR 0016.
+    pub fn substitute(self, subst: &[Type]) -> ArrayElem {
+        self.to_type()
+            .substitute(subst)
+            .to_array_elem()
+            .unwrap_or(self)
     }
 }
 
@@ -404,6 +427,153 @@ impl TypedProgram {
 
     pub fn struct_decl(&self, id: StructId) -> &TypedStructDecl {
         &self.structs[id.0 as usize]
+    }
+}
+
+// =============================================================================
+// Eager monomorphic substitution helpers per ADR 0016 D7c.
+// =============================================================================
+//
+// These functions deep-clone a typed AST node, applying a TypeParam
+// substitution to every [`Type`] embedded in it. Codegen uses this
+// at C1.7.5 to materialise a monomorphic instance of a generic fn
+// from its abstract definition + a concrete type-arg vector.
+//
+// The substitution semantics mirror [`Type::substitute`]: each
+// `Type::TypeParam(idx)` is replaced with `subst[idx]`. Concrete
+// types pass through unchanged. `Call` nodes also have their
+// `type_args: Vec<Type>` substituted, which is what enables
+// transitive monomorphic emission (`f<T>` calling `g<T>` produces
+// the correct `g_<concrete>` instance for each `f_<concrete>`).
+
+impl TypedFnDef {
+    /// Deep-clone this fn def, substituting every [`Type::TypeParam`]
+    /// against `subst`. The resulting fn is a monomorphic instance
+    /// of the original generic fn — its `type_params` list is empty
+    /// and every embedded Type is concrete (or, in C1.7.4b+, a
+    /// `GenericInstance` of a generic struct's monomorphic image).
+    pub fn substitute(&self, subst: &[Type]) -> TypedFnDef {
+        TypedFnDef {
+            id: self.id,
+            name: self.name.clone(),
+            name_span: self.name_span.clone(),
+            // Monomorphic instance: no type-params remain.
+            type_params: Vec::new(),
+            params: self
+                .params
+                .iter()
+                .map(|p| TypedParam {
+                    id: p.id,
+                    name: p.name.clone(),
+                    span: p.span.clone(),
+                    ty: p.ty.substitute(subst),
+                })
+                .collect(),
+            return_type: self.return_type.substitute(subst),
+            body: self.body.substitute(subst),
+            span: self.span.clone(),
+        }
+    }
+}
+
+impl TypedBlock {
+    pub fn substitute(&self, subst: &[Type]) -> TypedBlock {
+        TypedBlock {
+            stmts: self.stmts.iter().map(|s| s.substitute(subst)).collect(),
+            tail: self.tail.substitute(subst),
+            span: self.span.clone(),
+            ty: self.ty.substitute(subst),
+        }
+    }
+}
+
+impl TypedStmt {
+    pub fn substitute(&self, subst: &[Type]) -> TypedStmt {
+        let kind = match &self.kind {
+            TypedStmtKind::Let { id, name, name_span, ty, value } => TypedStmtKind::Let {
+                id: *id,
+                name: name.clone(),
+                name_span: name_span.clone(),
+                ty: ty.substitute(subst),
+                value: value.substitute(subst),
+            },
+            TypedStmtKind::Expr(e) => TypedStmtKind::Expr(e.substitute(subst)),
+        };
+        TypedStmt { kind, span: self.span.clone() }
+    }
+}
+
+impl TypedExpr {
+    pub fn substitute(&self, subst: &[Type]) -> TypedExpr {
+        let kind = match &self.kind {
+            TypedExprKind::IntLit(n) => TypedExprKind::IntLit(*n),
+            TypedExprKind::BoolLit(b) => TypedExprKind::BoolLit(*b),
+            TypedExprKind::NullLit => TypedExprKind::NullLit,
+            TypedExprKind::WidenToNullable(inner) => {
+                TypedExprKind::WidenToNullable(Box::new(inner.substitute(subst)))
+            }
+            TypedExprKind::Var(id) => TypedExprKind::Var(*id),
+            TypedExprKind::Unary(op, inner) => {
+                TypedExprKind::Unary(*op, Box::new(inner.substitute(subst)))
+            }
+            TypedExprKind::Binary(op, l, r) => TypedExprKind::Binary(
+                *op,
+                Box::new(l.substitute(subst)),
+                Box::new(r.substitute(subst)),
+            ),
+            TypedExprKind::Cmp(op, l, r) => TypedExprKind::Cmp(
+                *op,
+                Box::new(l.substitute(subst)),
+                Box::new(r.substitute(subst)),
+            ),
+            TypedExprKind::Logic(op, l, r) => TypedExprKind::Logic(
+                *op,
+                Box::new(l.substitute(subst)),
+                Box::new(r.substitute(subst)),
+            ),
+            TypedExprKind::Block(b) => TypedExprKind::Block(Box::new(b.substitute(subst))),
+            TypedExprKind::If { cond, then_branch, else_branch } => TypedExprKind::If {
+                cond: Box::new(cond.substitute(subst)),
+                then_branch: Box::new(then_branch.substitute(subst)),
+                else_branch: Box::new(else_branch.substitute(subst)),
+            },
+            TypedExprKind::Call { id, callee_span, args, type_args } => {
+                TypedExprKind::Call {
+                    id: *id,
+                    callee_span: callee_span.clone(),
+                    args: args.iter().map(|a| a.substitute(subst)).collect(),
+                    // Substitute the call's type_args too — this is
+                    // what enables transitive monomorphic emission.
+                    type_args: type_args.iter().map(|t| t.substitute(subst)).collect(),
+                }
+            }
+            TypedExprKind::StructLit { id, name, name_span, fields } => {
+                TypedExprKind::StructLit {
+                    id: *id,
+                    name: name.clone(),
+                    name_span: name_span.clone(),
+                    fields: fields.iter().map(|f| f.substitute(subst)).collect(),
+                }
+            }
+            TypedExprKind::FieldAccess { target, field, field_span, field_index } => {
+                TypedExprKind::FieldAccess {
+                    target: Box::new(target.substitute(subst)),
+                    field: field.clone(),
+                    field_span: field_span.clone(),
+                    field_index: *field_index,
+                }
+            }
+            TypedExprKind::ArrayLit { elem_ty, elements } => TypedExprKind::ArrayLit {
+                elem_ty: elem_ty.substitute(subst),
+                elements: elements.iter().map(|e| e.substitute(subst)).collect(),
+            },
+            TypedExprKind::Index { target, index, elem_ty } => TypedExprKind::Index {
+                target: Box::new(target.substitute(subst)),
+                index: Box::new(index.substitute(subst)),
+                elem_ty: elem_ty.substitute(subst),
+            },
+        };
+        TypedExpr { kind, span: self.span.clone(), ty: self.ty.substitute(subst) }
     }
 }
 

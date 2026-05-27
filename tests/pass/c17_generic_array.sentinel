@@ -1,0 +1,12 @@
+// C1.7.5 / ADR 0016: a user-defined generic fn whose param is
+// `[T]`. The body calls the `len` builtin (stays inline per ADR
+// 0016 D8b); `count<T>` itself is monomorphised.
+fn count<T>(a: [T]) -> i64 {
+    len(a)
+}
+
+fn main() -> i64 {
+    let xs: [i64] = [10, 20, 30, 40];
+    let ys: [bool] = [true, false];
+    print(count(xs) + count(ys))
+}

@@ -1,0 +1,13 @@
+// C1.7.5 / ADR 0016: a user-defined generic fn with `?T` in its
+// signature. The body calls the `unwrap_or` builtin, which stays
+// inline-lowered per ADR 0016 D8b — only `first_or<T>` itself is
+// monomorphised (into `first_or__i64`).
+fn first_or<T>(x: ?T, default: T) -> T {
+    unwrap_or(x, default)
+}
+
+fn main() -> i64 {
+    let a: ?i64 = 99;
+    let b: ?i64 = null;
+    print(first_or(a, 0) + first_or(b, 1))
+}

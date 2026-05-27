@@ -1,0 +1,8 @@
+// C1.7.5 / ADR 0016: the minimum-viable generic-fn program.
+// `id<T>` is the identity function for any T. main calls it with
+// an i64 literal — codegen monomorphizes to `id__i64(x: i64) -> i64`.
+fn id<T>(x: T) -> T { x }
+
+fn main() -> i64 {
+    print(id(42))
+}
