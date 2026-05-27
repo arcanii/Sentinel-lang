@@ -12,7 +12,66 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C2.1 landed; shared-only lexical borrow checker.**
+Last updated: **C2.2 landed; `&mut T` + shared-XOR-mutable rule.**
+The "interesting half" of ADR 0017 D6's borrow checker — shared-
+only shipped at C2.1, and C2.2 adds the mutable side. Five new
+`BorrowError` variants land covering the full XOR rule:
+`MutableBorrowOfShared` (& then &mut), `SharedBorrowOfMutable`
+(&mut then &), `BorrowConflict` (two &mut), `WriteWhileBorrowed`
+(`x = v;` while &x or &mut x active), `ReadWhileMutBorrowed`
+(reading `x` while &mut x active). The XOR invariant per ADR
+0017 D6: at any point a place P is either (a) borrow-free, (b)
+has N ≥ 1 shared borrows, or (c) has exactly one exclusive
+borrow. Multiple shared borrows coexist freely; mixing shared
+and mutable is rejected; two mutables conflict; the owner can't
+mutate the place under any outstanding lend; reading the owner
+while &mut active violates exclusivity. **Place-tracking**: per-
+source-VarId `PlaceState { shared: Vec<BorrowInstance>,
+mut_borrow: Option<BorrowInstance> }` lives in FnCtx. Each
+`&x` / `&mut x` site adds a borrow with `BorrowLifetime ∈
+{ Transient, UntilScope(depth) }`. **Transient borrows** die at
+every statement boundary (`clear_transients()` runs in walk_stmt
+after every stmt); **rooted borrows** (those promoted via
+`promote_transients(depth)` at ref-typed `let r = &x;` or
+equivalent assignment) live until their scope pops. The
+transient model is what keeps c20_go_no_go's `add(&a, &b);` +
+`increment(&mut a);` valid — the shared borrows from `add` are
+transient and die before `increment`'s `&mut a` is taken.
+**BorrowSource::Incoming** gained a VarId payload so place-
+tracking can route conflicts through the param's place key.
+`walk_assign_target` walks LHS lvalues without triggering read-
+checks on Var leaves, instead firing `check_write_conflict` to
+catch direct `x = v` writes under outstanding borrows.
+`walk_expr_lvalue` is the dual for `&` / `&mut` operands — no
+read-check on the inner lvalue. The C2.2 phase-go program at
+`tests/pass/c22_go_no_go.sentinel` (block-scoped shared multi-
+read followed by block-scoped exclusive write) produces stdout
+`35\n`, exit 0 — a = 20 from two `&x` shared reads, b = 15
+from `*r2 = *r2 + 5` increment under `&mut x`, a + b = 35.
+Three additional fixtures: c22_multi_shared (exit 15 —
+3-way shared), c22_scoped_mut (exit 34 — scoped mut then read),
+c22_transient_then_mut (exit 16 — transient shareds + mut on
+consecutive stmts). Negative cases verified end-to-end via snc
+on /tmp fixtures (e.g., `let r1 = &x; let r2 = &mut x;`
+surfaces `sentinel::borrow::mutable_borrow_of_shared`). ADR
+0017 D6 is now **fully exercised** — both the shared-only AND
+`&mut`+XOR halves shipped. D7's second-class-refs rule
+continues to be enforced via the C2.1 ReturnsLocalRef check.
+D8 (RAII+drop closing the C1.6+ heap-leak deferral), D9 (move
+semantics + use-after-move), D14 (full borrow-checking phase-
+go combining XOR + move + drop) still pending across C2.3 →
+C2.5. Workspace test delta: +18 (907 total) — +14 borrow-check
+unit tests (positive: multi-shared / single-mut-with-use /
+mut-in-inner-scope-then-shared-outside / shared-then-mut-in-
+separate-blocks / transient-borrows-die-at-stmt-end / c22-
+shape / read-while-shared-ok / shared-in-block-then-mut-
+outside; negative: double-mut / shared-then-mut / mut-then-
+shared / write-while-shared-borrowed / write-while-mut-
+borrowed / read-while-mut-borrowed), +4 driver pass-test
+fixtures (c22_*). **Phase C2.2 closes here.** Phase C2.3 (move
+semantics + use-after-move per ADR 0017 D9) opens next.
+
+Pre-C2.2 context: **C2.1 landed; shared-only lexical borrow checker.**
 New crate `sentinel-borrow-check` slots between check_query and
 codegen in the salsa pipeline per ADR 0017 D6. The bootstrap
 pipeline is now **parse_query → resolve_query → check_query →
