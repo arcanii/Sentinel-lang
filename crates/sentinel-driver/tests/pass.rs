@@ -532,3 +532,35 @@ fn pass_c21_go_no_go() {
     assert_eq!(r.stdout, "168\n");
     assert_eq!(r.exit, 0);
 }
+
+// ---- C2.2 / ADR 0017 D6: shared-XOR-mutable rule ----
+
+#[test]
+fn pass_c22_multi_shared() {
+    // Three `&x` borrows of the same place coexist. 5 + 5 + 5 = 15.
+    assert_eq!(run_exit("c22_multi_shared.sentinel"), 15);
+}
+
+#[test]
+fn pass_c22_scoped_mut() {
+    // `&mut x` scoped to an inner block; after exit, x is
+    // borrow-free. a = 17 (mut deref result); x = 17 (post-write).
+    // 17 + 17 = 34.
+    assert_eq!(run_exit("c22_scoped_mut.sentinel"), 34);
+}
+
+#[test]
+fn pass_c22_transient_then_mut() {
+    // `add(&x, &x)` transient shared borrows die at stmt end;
+    // next statement takes `&mut x` cleanly. 10 + 6 = 16.
+    assert_eq!(run_exit("c22_transient_then_mut.sentinel"), 16);
+}
+
+#[test]
+fn pass_c22_go_no_go() {
+    // ADR 0017 D6 XOR phase-go: shared-multi block then mut
+    // block. a = 20 (shared reads); b = 15 (after +5); 20 + 15 = 35.
+    let r = build_and_run("c22_go_no_go.sentinel");
+    assert_eq!(r.stdout, "35\n");
+    assert_eq!(r.exit, 0);
+}

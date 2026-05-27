@@ -1,11 +1,14 @@
 //! sentinel-borrow-check
 //!
-//! Lexical borrow checker for Sentinel per ADR 0017 D6. C2.1 ships
-//! the **shared-only** subset — `&T` only, no `&mut`, no move
-//! semantics, no drop. The remaining sub-phases per ADR 0017's
-//! D9 sub-phase split:
+//! Lexical borrow checker for Sentinel per ADR 0017 D6. C2.1 shipped
+//! the **shared-only** subset (`&T` only); C2.2 adds `&mut T` and
+//! the **shared-XOR-mutable** rule with place-tracking + transient
+//! / rooted borrow lifetimes. The remaining sub-phases per ADR
+//! 0017's D9 sub-phase split:
 //!
-//!   - C2.2 — `&mut T` + the shared-XOR-mutable rule.
+//!   - ✅ C2.1 — shared-only lexical borrow checker (`&T` only).
+//!   - ✅ C2.2 — `&mut T` + the shared-XOR-mutable rule (this
+//!     sub-phase).
 //!   - C2.3 — move semantics + use-after-move.
 //!   - C2.4 — RAII / drop + `sentinel_free` runtime symbol.
 //!   - C2.5 — Polonius migration plan + ADR 0017 → ACCEPTED.
@@ -23,40 +26,65 @@
 //! instead of borrowing). Polonius / NLL precision is the C2.5
 //! migration target per D6's "lexical first" call.
 //!
-//! ## What C2.1 checks
+//! ## What C2.1 + C2.2 check
 //!
-//! 1. **Use-after-scope** — `let r = { let inner = 5; &inner };
-//!    *r` rejected at `*r` because `inner`'s scope has ended.
-//! 2. **Ref escapes via return** — `fn f() -> &i64 { let x = 5;
-//!    &x }` rejected because `x` is fn-local and dies at return.
-//!    Per ADR 0017 D7 "second-class refs everywhere", the only
-//!    sound returnable refs come from incoming `&T` params.
+//! 1. **Use-after-scope** (C2.1) — `let r = { let inner = 5;
+//!    &inner }; *r` rejected at `*r` because `inner`'s scope has
+//!    ended.
+//! 2. **Ref escapes via return** (C2.1) — `fn f() -> &i64 { let
+//!    x = 5; &x }` rejected because `x` is fn-local and dies at
+//!    return. Per ADR 0017 D7 "second-class refs everywhere", the
+//!    only sound returnable refs come from incoming `&T` params.
+//! 3. **Shared-XOR-mutable** (C2.2) — at any program point, a
+//!    place is either (a) free of borrows, (b) has N ≥ 1 shared
+//!    `&T` borrows active, or (c) has exactly one `&mut T` borrow
+//!    active. Mixing a `&T` and `&mut T` of the same place is
+//!    rejected.
+//! 4. **Write while borrowed** (C2.2) — direct assignment `x =
+//!    v;` while any `&x` or `&mut x` is active is rejected. The
+//!    owner can't write while the binding is borrowed.
+//! 5. **Read while exclusively borrowed** (C2.2) — reading a
+//!    binding (e.g., `print(x)`, or passing `x` by value) while
+//!    `&mut x` is active is rejected.
 //!
-//! ## What C2.1 does NOT check
+//! ## What C2.1 + C2.2 do NOT check
 //!
-//! - Multiple `&T` borrows of the same place — these are fine
-//!   under shared-only rules. (XOR with `&mut` ships at C2.2.)
-//! - Use-after-move — bindings are still implicitly `Copy` at
-//!   C2.1. Move semantics ship at C2.3.
+//! - Use-after-move — bindings are still implicitly `Copy` through
+//!   C2.2. Move semantics + use-after-move ship at C2.3.
 //! - Drop / RAII — heap allocations from C1.6+ still leak.
 //!   Closes at C2.4 per ADR 0017 D8.
+//! - Field-disjoint borrows — `&p.x` and `&mut p.y` both conflict
+//!   on `p` under C2.2's place-by-binding model. Polonius-style
+//!   field-precise borrows are post-C2.5 work.
 //!
 //! ## Borrow-source representation
 //!
 //! Each ref-typed binding gets a [`BorrowSource`]:
 //!
-//!   - [`BorrowSource::Local`] — the ref points to a binding
-//!     declared in this fn (`let x = ...;` or by-value param).
-//!     Source dies when the declaring scope exits; cannot escape
-//!     via return.
-//!   - [`BorrowSource::Incoming`] — the ref came in via a `&T`
-//!     param. Source lives in the caller's scope; always alive
-//!     within this fn body; can escape via return.
+//!   - [`BorrowSource::Local(VarId)`] — the ref points to a
+//!     binding declared in this fn (`let x = ...;` or by-value
+//!     param). Source dies when the declaring scope exits; cannot
+//!     escape via return.
+//!   - [`BorrowSource::Incoming(VarId)`] — the ref came in via a
+//!     `&T` param. The VarId is the param itself (used as the
+//!     place-key for C2.2's XOR tracking). Source lives in the
+//!     caller's scope; always alive within this fn body; can
+//!     escape via return.
 //!   - [`BorrowSource::LocalAnonymous`] — fallback for fn-call
-//!     results where no ref arg contributes a source. At C2.1
-//!     this only fires if a fn returns a ref without any ref
-//!     args, which would itself fail borrow-check — so this
-//!     variant is mostly defensive.
+//!     results where no ref arg contributes a source. Treated
+//!     like Local for lifetime purposes; gets no XOR tracking.
+//!
+//! C2.2 adds per-place active-borrow tracking: each `&x` /
+//! `&mut x` site records a [`BorrowInstance`] in `FnCtx.places`
+//! keyed by the source's VarId. Borrows have a
+//! [`BorrowLifetime`] tag:
+//!
+//!   - [`BorrowLifetime::Transient`] — added during an expression
+//!     evaluation but not yet rooted in a binding. Cleared at the
+//!     end of the containing statement.
+//!   - [`BorrowLifetime::UntilScope(depth)`] — promoted to live
+//!     until the scope at `depth` pops. Set when the borrow gets
+//!     bound to a `let r: &T = ...` (or ref-typed `let mut`).
 //!
 //! The check is **per-fn** and uses no inter-procedural reasoning
 //! beyond "a fn-call returning a ref has source = most-restrictive
@@ -79,10 +107,11 @@ use sentinel_types::{
 // Errors
 // =============================================================================
 
-/// C2.1 borrow-check error variants. The shared-only subset
-/// surfaces exactly two categories — block-scoped use-after-scope
-/// and fn-return ref-to-local. C2.2 + C2.3 + C2.4 will add more
-/// variants as `&mut` / move / drop semantics arrive.
+/// Borrow-check error variants. C2.1 shipped the shared-only
+/// pair (OutlivesSource / ReturnsLocalRef); C2.2 adds the
+/// shared-XOR-mutable family + the write-while-borrowed +
+/// read-while-mutably-borrowed checks. C2.3 + C2.4 will add
+/// `UseAfterMove` and drop-related variants.
 #[derive(Debug, Clone, thiserror::Error, miette::Diagnostic)]
 pub enum BorrowError {
     /// A reference is read at a point where its ultimate source
@@ -128,6 +157,91 @@ pub enum BorrowError {
         #[label("returned here")]
         return_span: miette::SourceSpan,
     },
+
+    /// A `&mut T` borrow was attempted while a `&T` (shared)
+    /// borrow of the same place is still active. The shared-XOR-
+    /// mutable rule per ADR 0017 D6 — shared borrows ARE allowed
+    /// to coexist with each other, but adding `&mut` requires
+    /// exclusive access.
+    #[error("cannot take `&mut {place_name}` while it is already borrowed shared")]
+    #[diagnostic(
+        code(sentinel::borrow::mutable_borrow_of_shared),
+        help("shared (`&T`) borrows must die before `&mut T` can be taken; introduce a new scope to bound the shared borrows")
+    )]
+    MutableBorrowOfShared {
+        place_name: String,
+        #[label("existing shared borrow")]
+        prior_borrow_span: miette::SourceSpan,
+        #[label("attempted mutable borrow here")]
+        attempt_span: miette::SourceSpan,
+    },
+
+    /// A `&T` (shared) borrow was attempted while a `&mut T`
+    /// borrow of the same place is still active. Same rule —
+    /// the exclusive borrow excludes ALL other borrows.
+    #[error("cannot take `&{place_name}` while it is already borrowed mutably")]
+    #[diagnostic(
+        code(sentinel::borrow::shared_borrow_of_mutable),
+        help("the `&mut T` borrow must die before any other borrow can be taken; introduce a new scope to bound the mutable borrow")
+    )]
+    SharedBorrowOfMutable {
+        place_name: String,
+        #[label("existing mutable borrow")]
+        prior_borrow_span: miette::SourceSpan,
+        #[label("attempted shared borrow here")]
+        attempt_span: miette::SourceSpan,
+    },
+
+    /// A `&mut T` borrow was attempted while another `&mut T`
+    /// of the same place is still active. The shared-XOR-mutable
+    /// rule per ADR 0017 D6's strict interpretation — at most one
+    /// `&mut T` to a place at any time.
+    #[error("cannot take `&mut {place_name}` while it is already borrowed mutably")]
+    #[diagnostic(
+        code(sentinel::borrow::borrow_conflict),
+        help("only one `&mut T` to a place can exist at a time; introduce a new scope to bound the prior mutable borrow")
+    )]
+    BorrowConflict {
+        place_name: String,
+        #[label("existing mutable borrow")]
+        prior_borrow_span: miette::SourceSpan,
+        #[label("conflicting mutable borrow here")]
+        attempt_span: miette::SourceSpan,
+    },
+
+    /// A direct write to a binding (`x = v;`) while one or more
+    /// borrows of that binding are still active. The owner can't
+    /// mutate the place while it's borrowed — would invalidate
+    /// the borrowers' view.
+    #[error("cannot assign to `{place_name}` while it is borrowed")]
+    #[diagnostic(
+        code(sentinel::borrow::write_while_borrowed),
+        help("the binding's borrow must die before the owner can write; introduce a new scope to bound the borrow")
+    )]
+    WriteWhileBorrowed {
+        place_name: String,
+        #[label("existing borrow")]
+        prior_borrow_span: miette::SourceSpan,
+        #[label("attempted write here")]
+        attempt_span: miette::SourceSpan,
+    },
+
+    /// A read of a binding while a `&mut T` of it is active.
+    /// Reading from the owner while exclusively borrowed
+    /// violates the exclusivity invariant — the `&mut T` holder
+    /// has the only legal read/write path during its lifetime.
+    #[error("cannot read `{place_name}` while it is borrowed mutably")]
+    #[diagnostic(
+        code(sentinel::borrow::read_while_mut_borrowed),
+        help("the `&mut T` borrow must die before the owner can read; introduce a new scope to bound the mutable borrow")
+    )]
+    ReadWhileMutBorrowed {
+        place_name: String,
+        #[label("existing mutable borrow")]
+        prior_borrow_span: miette::SourceSpan,
+        #[label("attempted read here")]
+        attempt_span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -143,12 +257,73 @@ enum BorrowSource {
     /// when emitting diagnostics. Source dies when its declaring
     /// scope exits; cannot escape via return.
     Local(VarId),
-    /// Tied to caller's scope via an incoming `&T` param. Always
-    /// alive in this fn; can escape via return.
-    Incoming,
+    /// Tied to caller's scope via an incoming `&T` param. The
+    /// VarId is the *param* itself (used as the place-key for
+    /// C2.2's XOR tracking — conflicts on derived refs route
+    /// through this param's place). Always alive in this fn; can
+    /// escape via return.
+    Incoming(VarId),
     /// Fallback for fn-call returns with no attributable arg
-    /// source. Treated like Local for lifetime purposes.
+    /// source. Treated like Local for lifetime purposes; no place-
+    /// key, so no XOR tracking applies.
     LocalAnonymous,
+}
+
+impl BorrowSource {
+    /// The VarId that serves as the place-key for C2.2 borrow
+    /// tracking, if any. `LocalAnonymous` returns None.
+    fn place_key(self) -> Option<VarId> {
+        match self {
+            BorrowSource::Local(id) | BorrowSource::Incoming(id) => Some(id),
+            BorrowSource::LocalAnonymous => None,
+        }
+    }
+}
+
+/// When a borrow expires. Set at borrow creation and possibly
+/// promoted at the containing statement's rooting moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BorrowLifetime {
+    /// Lives until the end of the containing statement. Default
+    /// for borrows in expression position; cleared by
+    /// [`FnCtx::clear_transients`] at every statement boundary.
+    Transient,
+    /// Lives until the scope at the given depth pops. Set when
+    /// a borrow is rooted in a ref-typed `let r = &x;` (or
+    /// equivalent assignment).
+    UntilScope(usize),
+}
+
+/// A single active borrow record. Carries enough info to surface
+/// a clean diagnostic when a later borrow / write / read attempts
+/// to conflict with it. The borrow's kind (shared vs. mut) is
+/// implicit in where it's stored — [`PlaceState::shared`] for
+/// shared, [`PlaceState::mut_borrow`] for exclusive.
+#[derive(Debug, Clone)]
+struct BorrowInstance {
+    /// Source span of the `&` / `&mut` expression that created
+    /// this borrow — used as the "prior borrow" label.
+    span: Span,
+    lifetime: BorrowLifetime,
+}
+
+/// Per-place active-borrow state. Per ADR 0017 D6's shared-XOR-
+/// mutable rule: at most one mut borrow, OR any number of shared
+/// borrows.
+#[derive(Debug, Default, Clone)]
+struct PlaceState {
+    shared: Vec<BorrowInstance>,
+    mut_borrow: Option<BorrowInstance>,
+}
+
+impl PlaceState {
+    fn has_mut(&self) -> Option<&BorrowInstance> {
+        self.mut_borrow.as_ref()
+    }
+
+    fn first_shared(&self) -> Option<&BorrowInstance> {
+        self.shared.first()
+    }
 }
 
 /// Per-fn analysis context. Reset for each fn body.
@@ -169,6 +344,11 @@ struct FnCtx {
     /// popped. Queried by [`FnCtx::is_alive`] for the use-after-
     /// scope check.
     var_in_scope: HashMap<VarId, ()>,
+    /// C2.2: per-place active-borrow tracking keyed by source
+    /// VarId. Borrows are added at `&x` / `&mut x` sites and
+    /// expire either at statement-end (transient) or at scope
+    /// pop (rooted). See [`BorrowLifetime`].
+    places: HashMap<VarId, PlaceState>,
 }
 
 #[derive(Debug, Clone)]
@@ -184,7 +364,12 @@ impl FnCtx {
             ref_source: HashMap::new(),
             scopes: Vec::new(),
             var_in_scope: HashMap::new(),
+            places: HashMap::new(),
         }
+    }
+
+    fn current_depth(&self) -> usize {
+        self.scopes.len().saturating_sub(1)
     }
 
     fn push_scope(&mut self) {
@@ -192,9 +377,23 @@ impl FnCtx {
     }
 
     fn pop_scope(&mut self) {
+        let popped_depth = self.scopes.len().saturating_sub(1);
         if let Some(popped) = self.scopes.pop() {
             for id in popped {
                 self.var_in_scope.remove(&id);
+            }
+        }
+        // C2.2: remove borrows that expire when this scope ends.
+        // Borrows with `UntilScope(popped_depth)` lifetime die here.
+        for state in self.places.values_mut() {
+            state.shared.retain(|b| {
+                !matches!(b.lifetime, BorrowLifetime::UntilScope(d) if d == popped_depth)
+            });
+            if let Some(b) = &state.mut_borrow {
+                if matches!(b.lifetime, BorrowLifetime::UntilScope(d) if d == popped_depth)
+                {
+                    state.mut_borrow = None;
+                }
             }
         }
     }
@@ -213,11 +412,49 @@ impl FnCtx {
     fn is_alive(&self, source: BorrowSource) -> bool {
         match source {
             BorrowSource::Local(id) => self.var_in_scope.contains_key(&id),
-            BorrowSource::Incoming => true,
+            BorrowSource::Incoming(_) => true,
             // Anonymous: pessimistically "alive within the fn body"
             // — the check that matters for this variant is the fn-
             // return check (it can't escape via return).
             BorrowSource::LocalAnonymous => true,
+        }
+    }
+
+    /// C2.2: promote every transient borrow to the given scope
+    /// depth. Called at ref-typed `let r = ...;` (or equivalent
+    /// assign) — borrows from the RHS get rooted in r's scope.
+    /// Over-conservative when the RHS has multiple borrows of
+    /// which only some flow to r (e.g., `let r = { foo(&y); &x }`
+    /// would promote both); the cost is rejecting some valid
+    /// programs, never accepting unsound ones.
+    fn promote_transients(&mut self, depth: usize) {
+        for state in self.places.values_mut() {
+            for b in &mut state.shared {
+                if matches!(b.lifetime, BorrowLifetime::Transient) {
+                    b.lifetime = BorrowLifetime::UntilScope(depth);
+                }
+            }
+            if let Some(b) = &mut state.mut_borrow {
+                if matches!(b.lifetime, BorrowLifetime::Transient) {
+                    b.lifetime = BorrowLifetime::UntilScope(depth);
+                }
+            }
+        }
+    }
+
+    /// C2.2: remove all transient borrows. Called at every
+    /// statement boundary; rooted borrows (those promoted to a
+    /// scope by [`promote_transients`]) survive.
+    fn clear_transients(&mut self) {
+        for state in self.places.values_mut() {
+            state
+                .shared
+                .retain(|b| !matches!(b.lifetime, BorrowLifetime::Transient));
+            if let Some(b) = &state.mut_borrow {
+                if matches!(b.lifetime, BorrowLifetime::Transient) {
+                    state.mut_borrow = None;
+                }
+            }
         }
     }
 }
@@ -257,7 +494,8 @@ fn borrow_check_fn(
     for param in &fn_def.params {
         ctx.declare(param.id, param.name.clone(), param.span.clone());
         if param.ty.is_ref() {
-            ctx.ref_source.insert(param.id, BorrowSource::Incoming);
+            ctx.ref_source
+                .insert(param.id, BorrowSource::Incoming(param.id));
         }
     }
 
@@ -273,7 +511,7 @@ fn borrow_check_fn(
     if fn_def.return_type.is_ref() {
         let tail_source = source_of_expr(&fn_def.body.tail, &ctx, program);
         match tail_source {
-            Some(BorrowSource::Incoming) | None => {}
+            Some(BorrowSource::Incoming(_)) | None => {}
             Some(BorrowSource::Local(src_id)) => {
                 let info = ctx
                     .var_info
@@ -332,24 +570,76 @@ fn walk_stmt(
                 if let Some(source) = source_of_expr(value, ctx, program) {
                     ctx.ref_source.insert(*id, source);
                 }
+                // C2.2: promote any transient borrows created by
+                // the RHS to live until the *current* scope pops
+                // — they're now rooted in `id`, which lives at
+                // the current scope's depth.
+                ctx.promote_transients(ctx.current_depth());
             }
             ctx.declare(*id, name.clone(), name_span.clone());
+            ctx.clear_transients();
         }
         TypedStmtKind::Assign { target, value } => {
-            walk_expr(target, ctx, errors, program);
+            // C2.2: walk the value first so its borrows are
+            // visible; then check the target for write-conflicts
+            // before recording the assignment.
             walk_expr(value, ctx, errors, program);
+            walk_assign_target(target, ctx, errors, program);
             // If the assignment target is a ref-typed Var, update
             // its recorded source — re-assignment shifts which
-            // place the ref points to.
+            // place the ref points to. Same transient promotion
+            // as the ref-typed Let path.
             if target.ty.is_ref() {
                 if let TypedExprKind::Var(id) = &target.kind {
                     if let Some(source) = source_of_expr(value, ctx, program) {
                         ctx.ref_source.insert(*id, source);
                     }
                 }
+                ctx.promote_transients(ctx.current_depth());
             }
+            ctx.clear_transients();
         }
-        TypedStmtKind::Expr(e) => walk_expr(e, ctx, errors, program),
+        TypedStmtKind::Expr(e) => {
+            walk_expr(e, ctx, errors, program);
+            ctx.clear_transients();
+        }
+    }
+}
+
+/// Walk the LHS of an assignment statement. The target is an
+/// lvalue — we DON'T trigger a read-check at the Var leaf (we're
+/// writing, not reading) but we DO trigger a write-conflict check
+/// against any active borrows of the place.
+fn walk_assign_target(
+    target: &TypedExpr,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+    program: &TypedProgram,
+) {
+    match &target.kind {
+        TypedExprKind::Var(id) => {
+            // Direct write to a binding. C2.2: error if any
+            // borrow of this place is active.
+            check_write_conflict(*id, &target.span, ctx, errors);
+        }
+        TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+            // `*r = v;` — the write goes through r (a `&mut T`
+            // by type-check invariant). Walk r as a normal
+            // expression so its read-check fires (use-after-scope
+            // for r itself); the write to r's pointee is sound
+            // because XOR already ensured r is the only active
+            // borrow of its source.
+            walk_expr(inner, ctx, errors, program);
+        }
+        TypedExprKind::FieldAccess { target: inner_target, .. } => {
+            // `p.field = v;` — recurse. The eventual Var leaf
+            // triggers the write-conflict on p.
+            walk_assign_target(inner_target, ctx, errors, program);
+        }
+        // `a[i] = v;` is rejected at type-check (per ADR 0017 D12
+        // / TypeError::IndexAssignNotSupported); we won't reach
+        // it here. Fall through to a normal walk for defensiveness.
+        _ => walk_expr(target, ctx, errors, program),
     }
 }
 
@@ -365,9 +655,9 @@ fn walk_expr(
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit => {}
 
-        // Ref-typed Var reads trigger the use-after-scope check.
-        // Non-ref Vars don't — their values were copied at bind
-        // time per Sentinel's implicit-Copy semantics through C2.2.
+        // Ref-typed Var reads trigger the C2.1 use-after-scope
+        // check. Non-ref Var reads trigger the C2.2 read-while-
+        // mutably-borrowed check.
         TypedExprKind::Var(id) => {
             if expr.ty.is_ref() {
                 if let Some(source) = ctx.ref_source.get(id).copied() {
@@ -375,6 +665,10 @@ fn walk_expr(
                         emit_outlives(ctx, errors, source, &expr.span);
                     }
                 }
+            } else {
+                // C2.2: reading a non-ref binding while a `&mut T`
+                // of it is active violates exclusivity.
+                check_read_conflict(*id, &expr.span, ctx, errors);
             }
         }
 
@@ -382,11 +676,26 @@ fn walk_expr(
             walk_expr(inner, ctx, errors, program);
         }
 
+        TypedExprKind::Unary(UnaryOp::Ref, inner) => {
+            // C2.2: walk the inner lvalue (no read-check on its
+            // leaves) then attempt to add a shared borrow.
+            walk_expr_lvalue(inner, ctx, errors, program);
+            if let Some(source) = source_of_lvalue(inner, ctx, program) {
+                check_and_add_shared_borrow(source, &expr.span, ctx, errors);
+            }
+        }
+        TypedExprKind::Unary(UnaryOp::RefMut, inner) => {
+            // C2.2: same as Ref but for exclusive borrows.
+            walk_expr_lvalue(inner, ctx, errors, program);
+            if let Some(source) = source_of_lvalue(inner, ctx, program) {
+                check_and_add_mut_borrow(source, &expr.span, ctx, errors);
+            }
+        }
         TypedExprKind::Unary(_, inner) => {
-            // Borrow-take / deref / neg / not: walk the inner.
-            // The borrow-take itself doesn't *use* the source,
-            // so no liveness check at this point — the check
-            // fires later when the resulting ref is *read*.
+            // Deref / Neg / Not: walk the inner. Deref through a
+            // ref-typed Var triggers the C2.1 OutlivesSource
+            // check on r; the inner value's `*r` doesn't create
+            // a new borrow.
             walk_expr(inner, ctx, errors, program);
         }
 
@@ -440,6 +749,164 @@ fn walk_expr(
             walk_expr(index, ctx, errors, program);
         }
     }
+}
+
+/// Walk an lvalue expression — `& x` / `&mut x` / assignment
+/// targets. Differs from [`walk_expr`] in that Var leaves don't
+/// trigger the read-while-mutably-borrowed check (we're taking
+/// the address, not reading the value).
+fn walk_expr_lvalue(
+    expr: &TypedExpr,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+    program: &TypedProgram,
+) {
+    match &expr.kind {
+        TypedExprKind::Var(_) => {} // no read-check on lvalue Var
+        TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+            // `& *r` — walk r as a normal expression so its
+            // OutlivesSource check fires.
+            walk_expr(inner, ctx, errors, program);
+        }
+        TypedExprKind::FieldAccess { target, .. } => {
+            walk_expr_lvalue(target, ctx, errors, program);
+        }
+        TypedExprKind::Index { target, index, .. } => {
+            walk_expr_lvalue(target, ctx, errors, program);
+            walk_expr(index, ctx, errors, program);
+        }
+        // Other shapes shouldn't appear here (type-check would
+        // have rejected). Fall through to the normal walk for
+        // defensiveness.
+        _ => walk_expr(expr, ctx, errors, program),
+    }
+}
+
+/// C2.2: attempt to add a shared borrow at the source's place-
+/// key. If a `&mut T` is already active, emit
+/// `SharedBorrowOfMutable`. Otherwise record the borrow as
+/// transient (the containing statement may promote it later).
+fn check_and_add_shared_borrow(
+    source: BorrowSource,
+    span: &Span,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+) {
+    let Some(place) = source.place_key() else {
+        return; // LocalAnonymous — no place-key, no tracking
+    };
+    let state = ctx.places.entry(place).or_default();
+    if let Some(mut_borrow) = state.has_mut() {
+        let prior_span = mut_borrow.span.clone();
+        let name = place_name(ctx, place);
+        errors.push(BorrowError::SharedBorrowOfMutable {
+            place_name: name,
+            prior_borrow_span: to_source_span(&prior_span),
+            attempt_span: to_source_span(span),
+        });
+        return;
+    }
+    let state = ctx.places.entry(place).or_default();
+    state.shared.push(BorrowInstance {
+        span: span.clone(),
+        lifetime: BorrowLifetime::Transient,
+    });
+}
+
+/// C2.2: attempt to add a `&mut T` borrow at the source's place-
+/// key. Either fires `BorrowConflict` (existing `&mut`) or
+/// `MutableBorrowOfShared` (existing `&`s), or records as
+/// transient on success.
+fn check_and_add_mut_borrow(
+    source: BorrowSource,
+    span: &Span,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+) {
+    let Some(place) = source.place_key() else {
+        return;
+    };
+    let state = ctx.places.entry(place).or_default();
+    if let Some(mut_borrow) = state.has_mut() {
+        let prior_span = mut_borrow.span.clone();
+        let name = place_name(ctx, place);
+        errors.push(BorrowError::BorrowConflict {
+            place_name: name,
+            prior_borrow_span: to_source_span(&prior_span),
+            attempt_span: to_source_span(span),
+        });
+        return;
+    }
+    if let Some(shared) = state.first_shared() {
+        let prior_span = shared.span.clone();
+        let name = place_name(ctx, place);
+        errors.push(BorrowError::MutableBorrowOfShared {
+            place_name: name,
+            prior_borrow_span: to_source_span(&prior_span),
+            attempt_span: to_source_span(span),
+        });
+        return;
+    }
+    let state = ctx.places.entry(place).or_default();
+    state.mut_borrow = Some(BorrowInstance {
+        span: span.clone(),
+        lifetime: BorrowLifetime::Transient,
+    });
+}
+
+/// C2.2: writing through `x = v;` is rejected if ANY borrow of
+/// the place is currently active. The owner can't mutate a
+/// borrowed binding.
+fn check_write_conflict(
+    place: VarId,
+    span: &Span,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+) {
+    let state = ctx.places.entry(place).or_default();
+    let prior = state
+        .mut_borrow
+        .as_ref()
+        .map(|b| b.span.clone())
+        .or_else(|| state.shared.first().map(|b| b.span.clone()));
+    if let Some(prior_span) = prior {
+        let name = place_name(ctx, place);
+        errors.push(BorrowError::WriteWhileBorrowed {
+            place_name: name,
+            prior_borrow_span: to_source_span(&prior_span),
+            attempt_span: to_source_span(span),
+        });
+    }
+}
+
+/// C2.2: reading a non-ref binding while a `&mut T` of it is
+/// active is rejected (exclusivity violation).
+fn check_read_conflict(
+    place: VarId,
+    span: &Span,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+) {
+    let state = ctx.places.entry(place).or_default();
+    if let Some(mut_borrow) = state.has_mut() {
+        let prior_span = mut_borrow.span.clone();
+        let name = place_name(ctx, place);
+        errors.push(BorrowError::ReadWhileMutBorrowed {
+            place_name: name,
+            prior_borrow_span: to_source_span(&prior_span),
+            attempt_span: to_source_span(span),
+        });
+    }
+}
+
+/// Look up a place's source-level name for diagnostics. Falls
+/// back to a `var<N>` placeholder if the VarId isn't in
+/// `var_info` (shouldn't happen for any VarId reachable here).
+fn place_name(ctx: &FnCtx, id: VarId) -> String {
+    ctx.var_info
+        .get(&id)
+        .map(|info| info.name.clone())
+        .unwrap_or_else(|| format!("var{}", id.0))
 }
 
 /// Compute the [`BorrowSource`] of a ref-typed expression. Used
@@ -541,7 +1008,7 @@ fn merge(a: BorrowSource, b: BorrowSource) -> BorrowSource {
         (_, BorrowSource::Local(_)) => b,
         (BorrowSource::LocalAnonymous, _) => a,
         (_, BorrowSource::LocalAnonymous) => b,
-        (BorrowSource::Incoming, BorrowSource::Incoming) => BorrowSource::Incoming,
+        (BorrowSource::Incoming(_), BorrowSource::Incoming(_)) => a,
     }
 }
 
@@ -561,7 +1028,7 @@ fn emit_outlives(
             (info.name, info.span)
         }
         BorrowSource::LocalAnonymous => ("<anonymous>".to_string(), use_span.clone()),
-        BorrowSource::Incoming => return, // Incoming is always alive; no error
+        BorrowSource::Incoming(_) => return, // Incoming is always alive; no error
     };
     errors.push(BorrowError::OutlivesSource {
         source_name,
@@ -610,6 +1077,37 @@ fn borrow_error_to_diagnostic(err: &BorrowError) -> Diagnostic {
             "sentinel::borrow::returns_local_ref",
             format!("function `{fn_name}` returns a reference to local `{source_name}`"),
             return_span.offset()..(return_span.offset() + return_span.len()),
+        ),
+        BorrowError::MutableBorrowOfShared { place_name, attempt_span, .. } => (
+            "sentinel::borrow::mutable_borrow_of_shared",
+            format!(
+                "cannot take `&mut {place_name}` while it is already borrowed shared"
+            ),
+            attempt_span.offset()..(attempt_span.offset() + attempt_span.len()),
+        ),
+        BorrowError::SharedBorrowOfMutable { place_name, attempt_span, .. } => (
+            "sentinel::borrow::shared_borrow_of_mutable",
+            format!(
+                "cannot take `&{place_name}` while it is already borrowed mutably"
+            ),
+            attempt_span.offset()..(attempt_span.offset() + attempt_span.len()),
+        ),
+        BorrowError::BorrowConflict { place_name, attempt_span, .. } => (
+            "sentinel::borrow::borrow_conflict",
+            format!(
+                "cannot take `&mut {place_name}` while it is already borrowed mutably"
+            ),
+            attempt_span.offset()..(attempt_span.offset() + attempt_span.len()),
+        ),
+        BorrowError::WriteWhileBorrowed { place_name, attempt_span, .. } => (
+            "sentinel::borrow::write_while_borrowed",
+            format!("cannot assign to `{place_name}` while it is borrowed"),
+            attempt_span.offset()..(attempt_span.offset() + attempt_span.len()),
+        ),
+        BorrowError::ReadWhileMutBorrowed { place_name, attempt_span, .. } => (
+            "sentinel::borrow::read_while_mut_borrowed",
+            format!("cannot read `{place_name}` while it is borrowed mutably"),
+            attempt_span.offset()..(attempt_span.offset() + attempt_span.len()),
         ),
     };
     Diagnostic {
@@ -765,6 +1263,160 @@ mod tests {
         assert!(
             matches!(&errs[0], BorrowError::ReturnsLocalRef { .. }),
             "got {errs:?}"
+        );
+    }
+
+    // ----- C2.2 positive: shared-XOR-mutable accepts -----
+
+    #[test]
+    fn multiple_shared_borrows_ok() {
+        // Multiple `&x` borrows of the same place coexist fine.
+        borrow_check_ok(
+            "fn main() -> i64 { let x: i64 = 5; let r1: &i64 = &x; let r2: &i64 = &x; *r1 + *r2 }",
+        );
+    }
+
+    #[test]
+    fn single_mut_borrow_with_use_ok() {
+        // One `&mut x` lifetime + deref-write through it. No
+        // other access to x while the mut borrow is alive.
+        borrow_check_ok(
+            "fn main() -> i64 { let mut x: i64 = 5; let r: &mut i64 = &mut x; *r = 9; *r }",
+        );
+    }
+
+    #[test]
+    fn mut_in_inner_scope_then_shared_outside_ok() {
+        // The `&mut x` borrow dies with the inner block; the
+        // subsequent direct read of x is in a fresh borrow-state.
+        borrow_check_ok(
+            "fn main() -> i64 { let mut x: i64 = 5; { let r: &mut i64 = &mut x; *r = 7; *r }; x }",
+        );
+    }
+
+    #[test]
+    fn shared_then_mut_in_separate_blocks_ok() {
+        // Shared borrows die with their block; subsequent &mut
+        // is fine.
+        borrow_check_ok(
+            "fn main() -> i64 { let mut x: i64 = 5; { let r: &i64 = &x; *r }; { let r2: &mut i64 = &mut x; *r2 = 9; *r2 } }",
+        );
+    }
+
+    #[test]
+    fn transient_borrows_die_at_stmt_end_ok() {
+        // `add(&x, &x)` adds two TRANSIENT shared borrows that
+        // expire at end of statement. The next `&mut x` is then
+        // free to take exclusive access.
+        borrow_check_ok(
+            "fn add(a: &i64, b: &i64) -> i64 { *a + *b }\nfn bump(r: &mut i64) -> i64 { *r = *r + 1; *r }\nfn main() -> i64 { let mut x: i64 = 5; let sum: i64 = add(&x, &x); let b: i64 = bump(&mut x); sum + b }",
+        );
+    }
+
+    #[test]
+    fn c22_go_no_go_borrow_checks() {
+        // c22_go_no_go phase-go shape: multi-shared block then
+        // mut block.
+        borrow_check_ok(
+            "fn main() -> i64 { let mut x: i64 = 10; let a: i64 = { let r: &i64 = &x; let s: &i64 = &x; *r + *s }; let b: i64 = { let r2: &mut i64 = &mut x; *r2 = *r2 + 5; *r2 }; a + b }",
+        );
+    }
+
+    // ----- C2.2 negative: XOR rule rejects -----
+
+    #[test]
+    fn double_mut_rejected() {
+        // Two `&mut x` simultaneously — BorrowConflict.
+        let errs = borrow_check_err(
+            "fn main() -> i64 { let mut x: i64 = 5; let r1: &mut i64 = &mut x; let r2: &mut i64 = &mut x; *r1 + *r2 }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::BorrowConflict { place_name, .. } if place_name == "x"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn shared_then_mut_rejected() {
+        // `&x` first, then `&mut x` — MutableBorrowOfShared.
+        let errs = borrow_check_err(
+            "fn main() -> i64 { let mut x: i64 = 5; let r: &i64 = &x; let r2: &mut i64 = &mut x; *r + *r2 }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::MutableBorrowOfShared { place_name, .. } if place_name == "x"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn mut_then_shared_rejected() {
+        // `&mut x` first, then `&x` — SharedBorrowOfMutable.
+        let errs = borrow_check_err(
+            "fn main() -> i64 { let mut x: i64 = 5; let r: &mut i64 = &mut x; let s: &i64 = &x; *r + *s }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::SharedBorrowOfMutable { place_name, .. } if place_name == "x"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn write_while_shared_borrowed_rejected() {
+        // `let r = &x; x = 9;` — direct write while shared
+        // borrow active.
+        let errs = borrow_check_err(
+            "fn main() -> i64 { let mut x: i64 = 5; let r: &i64 = &x; x = 9; *r }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::WriteWhileBorrowed { place_name, .. } if place_name == "x"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn write_while_mut_borrowed_rejected() {
+        // `let r = &mut x; x = 9;` — direct write while &mut
+        // active. The exclusive holder hasn't released; owner
+        // writes conflict.
+        let errs = borrow_check_err(
+            "fn main() -> i64 { let mut x: i64 = 5; let r: &mut i64 = &mut x; x = 9; *r }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::WriteWhileBorrowed { place_name, .. } if place_name == "x"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn read_while_mut_borrowed_rejected() {
+        // `let r = &mut x; let _ = x;` — read of x while &mut
+        // x active violates exclusivity. (Using the value in
+        // an arithmetic expression triggers the Var(x) read.)
+        let errs = borrow_check_err(
+            "fn main() -> i64 { let mut x: i64 = 5; let r: &mut i64 = &mut x; let y: i64 = x + 1; *r + y }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::ReadWhileMutBorrowed { place_name, .. } if place_name == "x"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn read_while_shared_borrowed_ok() {
+        // Shared borrows allow further reads of the owner —
+        // sharing means readers, multiple are fine.
+        borrow_check_ok(
+            "fn main() -> i64 { let x: i64 = 5; let r: &i64 = &x; let y: i64 = x + 1; *r + y }",
+        );
+    }
+
+    #[test]
+    fn shared_in_block_then_mut_outside_ok() {
+        // Use a scoped block to bound a shared borrow, then take
+        // `&mut` after. The classic "introduce a new scope to
+        // satisfy the borrow checker" workaround.
+        borrow_check_ok(
+            "fn main() -> i64 { let mut x: i64 = 5; { let r: &i64 = &x; let y: i64 = *r; y }; let r2: &mut i64 = &mut x; *r2 = 9; *r2 }",
         );
     }
 

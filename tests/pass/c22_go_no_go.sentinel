@@ -1,0 +1,24 @@
+// C2.2 phase-go: alternation of shared and mutable borrows
+// scoped to inner blocks. Demonstrates that under shared-XOR-
+// mutable, programs can freely mix shared multi-readers with
+// exclusive single-writer windows as long as they don't overlap.
+//
+// Block A: shared multi-read. r and s both `&i64` of x = 10.
+//   *r + *s = 20.
+// Block B: exclusive write. r2 = &mut x; *r2 = *r2 + 5 increments
+//   x from 10 to 15; returns 15.
+// a + b = 20 + 15 = 35 -> stdout "35\n", exit 0.
+fn main() -> i64 {
+    let mut x: i64 = 10;
+    let a: i64 = {
+        let r: &i64 = &x;
+        let s: &i64 = &x;
+        *r + *s
+    };
+    let b: i64 = {
+        let r2: &mut i64 = &mut x;
+        *r2 = *r2 + 5;
+        *r2
+    };
+    print(a + b)
+}

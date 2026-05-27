@@ -1,0 +1,15 @@
+// C2.2 / ADR 0017 D6: an exclusive `&mut T` borrow scoped to an
+// inner block; after the block exits, the borrow expires and x
+// is accessible again.
+// Inside block: *r = 17 stores 17 through r; block tail = *r = 17
+// Outer: read x = 17 directly (no active borrow now).
+// 17 + 17 = 34 -> exit 34.
+fn main() -> i64 {
+    let mut x: i64 = 5;
+    let a: i64 = {
+        let r: &mut i64 = &mut x;
+        *r = 17;
+        *r
+    };
+    a + x
+}

@@ -1,0 +1,21 @@
+// C2.2 / ADR 0017 D6: transient shared borrows (used by fn args
+// and not stored) expire at end of statement; the next statement
+// can take a fresh exclusive borrow.
+// add(&x, &x) = 5 + 5 = 10; transient borrows die.
+// bump(&mut x) increments x: 5 -> 6; returns 6.
+// 10 + 6 = 16 -> exit 16.
+fn add(a: &i64, b: &i64) -> i64 {
+    *a + *b
+}
+
+fn bump(r: &mut i64) -> i64 {
+    *r = *r + 1;
+    *r
+}
+
+fn main() -> i64 {
+    let mut x: i64 = 5;
+    let sum: i64 = add(&x, &x);
+    let b: i64 = bump(&mut x);
+    sum + b
+}
