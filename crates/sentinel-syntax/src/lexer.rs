@@ -59,6 +59,9 @@ pub enum TokenKind {
     Struct,
     #[token("null")]
     Null,
+    /// C2 / ADR 0017 D2: `let mut x` and `mut` param prefix.
+    #[token("mut")]
+    Mut,
 
     #[token("+")]
     Plus,
@@ -86,8 +89,13 @@ pub enum TokenKind {
     GtEq,
     #[token(">")]
     Gt,
+    // `&&` must lex before `&` per logos longest-match.
     #[token("&&")]
     AmpAmp,
+    /// C2 / ADR 0017 D1 + D3 + D10: `&T` / `&mut T` ref types,
+    /// `&expr` / `&mut expr` borrow-take, address-of prefix unary.
+    #[token("&")]
+    Amp,
     #[token("||")]
     PipePipe,
     #[token("(")]
@@ -554,5 +562,98 @@ mod tests {
         let (toks, errs) = lex("  // comment\n  \t  ");
         assert!(toks.is_empty());
         assert!(errs.is_empty());
+    }
+
+    // ----- C2.0 / ADR 0017: `&` token + `mut` keyword -----
+
+    #[test]
+    fn lex_amp_token() {
+        assert_eq!(kinds("&"), vec![TokenKind::Amp]);
+    }
+
+    #[test]
+    fn lex_amp_then_ident() {
+        // `&x` lexes as two tokens — parser disambiguates as
+        // borrow-take prefix unary.
+        assert_eq!(kinds("&x"), vec![TokenKind::Amp, TokenKind::Ident]);
+    }
+
+    #[test]
+    fn lex_amp_amp_still_lexes_as_logical_and() {
+        // Longest-match: `&&` stays a single AmpAmp token, not two `&`s.
+        assert_eq!(kinds("a && b"), vec![
+            TokenKind::Ident,
+            TokenKind::AmpAmp,
+            TokenKind::Ident,
+        ]);
+    }
+
+    #[test]
+    fn lex_amp_amp_amp() {
+        // Triple `&` — longest-match takes `&&` first, then `&`.
+        assert_eq!(kinds("&&&"), vec![TokenKind::AmpAmp, TokenKind::Amp]);
+    }
+
+    #[test]
+    fn lex_mut_keyword() {
+        assert_eq!(kinds("mut"), vec![TokenKind::Mut]);
+    }
+
+    #[test]
+    fn lex_mut_in_let_binding() {
+        // `let mut x = 5;` — the canonical D2 binding form.
+        assert_eq!(
+            kinds("let mut x = 5;"),
+            vec![
+                TokenKind::Let,
+                TokenKind::Mut,
+                TokenKind::Ident,
+                TokenKind::Eq,
+                TokenKind::IntLit,
+                TokenKind::Semi,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_mut_as_ident_prefix_still_lexes_as_keyword() {
+        // `mutable` should lex as Mut + Ident? No — logos regex match
+        // `[A-Za-z_][A-Za-z0-9_]*` is greedy, so `mutable` lexes as a
+        // single Ident. Reserves `mut` as a keyword only when standalone.
+        assert_eq!(kinds("mutable"), vec![TokenKind::Ident]);
+    }
+
+    #[test]
+    fn lex_amp_mut_ref_type() {
+        // `&mut T` — the canonical D1 ref-type form.
+        assert_eq!(
+            kinds("&mut i64"),
+            vec![TokenKind::Amp, TokenKind::Mut, TokenKind::Ident]
+        );
+    }
+
+    #[test]
+    fn lex_amp_x_then_amp_mut_y() {
+        // `&x; &mut y;` — both forms in sequence.
+        assert_eq!(
+            kinds("&x; &mut y;"),
+            vec![
+                TokenKind::Amp,
+                TokenKind::Ident,
+                TokenKind::Semi,
+                TokenKind::Amp,
+                TokenKind::Mut,
+                TokenKind::Ident,
+                TokenKind::Semi,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_star_dereference() {
+        // `*x` — the `*` token from C0 multiplication is reused per
+        // ADR 0017 D10 / D4. The parser disambiguates dereference
+        // vs multiplication positionally.
+        assert_eq!(kinds("*x"), vec![TokenKind::Star, TokenKind::Ident]);
     }
 }
