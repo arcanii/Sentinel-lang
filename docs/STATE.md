@@ -12,7 +12,74 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C1.7 landed; Phase C1 closes.** Witness-table
+Last updated: **C2.0.2 landed; refs + mutability + deref +
+assignment end-to-end.** The bundled C2 infrastructure commit per
+ADR 0017 D1-D5 + D11 — references (`&T` / `&mut T`), mutable
+bindings (`let mut x` + `mut x: T` params), dereference (`*expr`),
+borrow-take (`&expr` / `&mut expr`), and assignment statements
+(`lhs = rhs;`) all ship together in one feat commit (9516ebb).
+**NO borrow checking yet** — that lands at C2.1 / C2.2 as a new
+salsa query (`borrow_check_query`) slotted between check_query
+and codegen per ADR 0017 D6. C2.0.2 does enforce the *static*
+ref rules at type-check time: lvalue / mutability gates,
+no-nested-refs, no-refs-in-arrays / struct-fields, deref-of-
+non-ref. The bootstrap pipeline is still **parse_query →
+resolve_query → check_query → codegen**; refs flow through as
+new parallel-tree variants in each crate. Type universe at
+C2.0.2 close: `{ I64, I32, Bool, Struct(StructId),
+Nullable(NullableInner), Array(ArrayElem), TypeParam(TypeParamId),
+GenericInstance(GenericInstanceId), Ref(RefId) }` — `Ref(RefId)`
+is the new variant, indexed into a new `refs: Vec<RefData>`
+interner table on `TypedProgram` (`RefData { mutable: bool,
+inner: Type }`). Same C1.7.4b interner pattern as
+`GenericInstance(GenericInstanceId)`, preserving the load-bearing
+`Type: Copy` invariant across the fifth ADR running (0014, 0015,
+0016, 0017). `NullableInner` gains a `Ref(RefId)` variant for
+`?&T`; `ArrayElem` does NOT gain Ref because `[&T]` is rejected
+at resolve-type-expr time with `TypeError::RefInArray` per ADR
+0017 D1 (refs in array elements need named regions for
+soundness, deferred). Refs in struct fields rejected with
+`TypeError::RefInStructField` per ADR 0017 D7 / D12 — same
+first-class-refs case. Ten new TypeError variants land at C2.0.2:
+`NestedRef`, `RefInArray`, `RefInStructField`, `BorrowOfRvalue`,
+`AssignToRvalue`, `AssignToImmutable`, `BorrowMutOfImmutable`,
+`DerefOfNonRef`, `AssignThroughSharedRef`, `IndexAssignNotSupported`
+(the last per D12's "mutable indexing deferred"). Type::substitute
+extended to recurse through Ref's inner (mirrors the
+GenericInstance arm — clone the data, substitute the inner,
+intern the new ref). unify_one extended for `Type::Ref(p) ~
+Type::Ref(a)`: mutability must match + inner types unify, which
+enables generic+ref inference like `fn f<T>(x: &T)` called with
+`&i64` binding `T = I64`. The mutability env (`VarTypeEnv`) is
+now `HashMap<VarId, (Type, bool)>`; the second slot tracks
+binding mutability for `&mut x` / `x = v;` validation. Codegen
+lowers refs as LLVM opaque pointers (LLVM 15+ no-typed-pointer
+era); `&x` returns the alloca pointer directly via a new
+`lower_lvalue_ptr` helper that also handles `*r`-as-lvalue and
+`p.field`-as-lvalue (recursive); `*r` loads from r's pointer
+value of the inner type; `x = v;` / `*r = v;` / `p.x = v;`
+share the lvalue-ptr machinery for the store target. The C2.0.2
+phase-go program at `tests/pass/c20_go_no_go.sentinel`
+(the full ADR 0017 D14 program: `add(&a, &b)` + `increment(&mut a)`
++ `let mut a` + print) produces stdout `53\n`, exit 0 — sum=42
+(10+32 shared-borrow add) + inc=11 (after exclusive-borrow
+deref-assign mutates a 10→11). Three additional fixtures:
+c20_ref_basic (exit 42 — bare `add(&a, &b)`), c20_mut_basic
+(exit 4 — `let mut + reassignment + arithmetic`), c20_deref_basic
+(exit 22 — `&mut a + *x = new_val + tail-read`). ADR 0017
+stays **PROPOSED** — only C2.0.2 of six sub-phases has landed;
+the ADR flips ACCEPTED at C2.5 close-out. Workspace test delta:
++62 (870 total) — +8 ast (UnaryOp Ref/RefMut/Deref symbols,
+TypeExprKind::Ref display, let-mut display, assign display),
++23 syntax (parser tests for `&T` / `&mut T` types + unary
+`&` / `&mut` / `*` + `let mut` + `mut` param + assignment
+statements), +21 types (ref interner + lvalue rules + new error
+variants), +6 codegen (smoke tests for ref/mut/deref/assign
+through the lowering path), +4 driver pass-tests (c20_*).
+**C2.0.2 closes the C2 infrastructure phase.** Phase C2.1
+(shared-only lexical borrow checker per ADR 0017 D6) opens next.
+
+Pre-C2.0.2 context: **C1.7 landed; Phase C1 closes.** Witness-table
 generics per ADR 0011 D6 / ADR 0016 — generic fns + generic
 structs + codegen monomorphisation — shipped end-to-end across
 five commits (e411ded ADR 0016 PROPOSED, the pre-flight design;

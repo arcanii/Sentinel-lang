@@ -393,29 +393,101 @@ investment compounded). All eight sub-phases landed:
     Pair<A,B> + make_pair / fst / snd / pick_int program). +5
     types tests + 2 pass tests = 798 total.
 
-  - **C1.7 docs commit** (this commit): STATE.md banner refresh +
+  - **C1.7 docs commit** (4028dd7): STATE.md banner refresh +
     HANDOVER §0 close-out + ADR 0011/0016 flips to ACCEPTED.
 
-**C1 next: C2 — regions, references, mutability.** Phase C1 is
-complete. The next phase per HANDOVER §6.3 introduces references
-(`&T`, `&mut T`), region inference, and the borrow checker.
-Start with an ADR — the "ADR 0017 PROPOSED: Phase C2 kickoff" —
-covering region lifetimes, reference syntax, mutability rules,
-borrow-checker shape, RAII / drop semantics, and the first sub-
-phase split.
+  - **ADR 0017** (ea4bcfd, PROPOSED): Phase C2 kickoff. 14
+    D-decisions covering reference syntax (`&T` / `&mut T` per
+    D1), mutability (`let mut` + `mut` param prefix per D2),
+    borrow-take + dereference (`&expr` / `&mut expr` / `*expr`
+    per D3 / D4), lvalue / rvalue distinction (D5), borrow-
+    checker formulation (lexical first, Polonius later per D6),
+    region representation (lexical only at C2 minimum per D7;
+    named regions deferred), drop / RAII (auto-drop at scope
+    exit + `sentinel_free` per D8 closes the C1.6+ heap-leak
+    deferral), move semantics + use-after-move (D9), lexer
+    additions (D10), interned `Type::Ref(RefId)` (D11 — the
+    fifth ADR running to preserve `Type: Copy` via
+    internment), out-of-scope items (D12), `fn main` invariant
+    (D13), and phase-go program spec (D14). Sub-phase split
+    table: C2.0 (infrastructure) → C2.1 (shared borrow
+    checker) → C2.2 (`&mut` + XOR — the largest) → C2.3 (move
+    semantics) → C2.4 (RAII + drop) → C2.5 (Polonius
+    migration plan + STATE.md / HANDOVER close-out).
 
-**Workspace test count**: 798 active across all crates (+1
-doctest at sentinel-broker; +47 over C1.6: +19 parser, +7
-resolve, +18 types, +0 codegen, +6 pass-test fixtures across
-c17_*). All four check-suite checks green (cargo build
+  - **C2.0.1** (d7b18c2): lexer adds `&` (Amp) token + `mut`
+    keyword per ADR 0017 D10. The `*` token already exists for
+    multiplication from C0; per D10 the parser disambiguates
+    dereference vs multiplication positionally at C2.0.2. No
+    `'a` lifetime syntax at C2 minimum per D7. logos longest-
+    match handles `&&` (AmpAmp) staying a single token. +10
+    new lexer tests = 808 total.
+
+  - **C2.0.2** (9516ebb): bundled AST + parser + resolve +
+    types + codegen for refs end-to-end per ADR 0017 D1-D5 +
+    D11. AST gains `UnaryOp::Ref` / `UnaryOp::RefMut` /
+    `UnaryOp::Deref`; `TypeExprKind::Ref { mutable, inner }`;
+    `StmtKind::Let.mutable`; `StmtKind::Assign { target, value }`;
+    `Param.mutable`. Parser handles `&T` / `&mut T` (with
+    whitespace tolerance), `&expr` / `&mut expr` / `*expr`
+    prefix unaries, `let mut`, `mut` params, and assignment
+    statements (after parsing an expression at stmt position,
+    a following `=` triggers Assign-statement parsing).
+    Resolve passes the new variants through with `mutable`
+    bits threaded on ResolvedParam / ResolvedStmtKind::Let;
+    new ResolvedStmtKind::Assign. Types adds `Type::Ref(RefId)`
+    + `RefData { mutable, inner }` + `intern_ref` per ADR
+    0017 D11, mirroring the C1.7.4b GenericInstance interner
+    pattern (keeps `Type: Copy`). `NullableInner` gains `Ref`
+    for `?&T`; ArrayElem stays primitive-only (refs in arrays
+    rejected at parse-array-type time with `RefInArray`).
+    Type::substitute extended to recurse through Ref (clone,
+    substitute inner, re-intern). unify_one extended for Ref
+    (mutability match + inner recursion — enables generic+ref
+    inference). VarTypeEnv becomes `HashMap<VarId, (Type,
+    bool)>` to track mutability. New TypeError variants:
+    NestedRef, RefInArray, RefInStructField, BorrowOfRvalue,
+    AssignToRvalue, AssignToImmutable, BorrowMutOfImmutable,
+    DerefOfNonRef, AssignThroughSharedRef,
+    IndexAssignNotSupported. check_expr dispatches Unary
+    Ref/RefMut/Deref: Ref requires lvalue; RefMut requires
+    mutable lvalue; Deref requires Type::Ref operand and
+    returns its inner. check_stmt's Assign arm validates LHS
+    is a mutable lvalue (recursive through field-access),
+    pushes target.ty down to RHS for widening, and Mismatch's
+    on type disagreement. Codegen lowers refs as LLVM opaque
+    pointers (LLVM 15+ no-typed-pointer). New
+    `lower_lvalue_ptr` helper handles Var → alloca ptr, `*r` →
+    load r's value (the ptr), `p.field` → struct_gep into the
+    field; assignment and `&` / `&mut` both delegate through
+    it. `*r` lowers as load-from-pointer of the inner type
+    (looked up via `program.refs[id].inner`). Tests: +62 (870
+    total) — +8 ast, +23 syntax, +21 types, +6 codegen, +4
+    driver pass-test fixtures (c20_ref_basic / c20_mut_basic /
+    c20_deref_basic / c20_go_no_go). c20_go_no_go runs:
+    stdout "53\n", exit 0 (the full ADR 0017 D14 program with
+    `add(&a, &b)` shared-borrows + `increment(&mut a)`
+    exclusive-borrow + `let mut a` + deref-assignment + print).
+
+**C2 next: C2.1 — shared-only lexical borrow checker (`&T`
+only).** A new salsa query `borrow_check_query` slots between
+check_query and codegen per ADR 0017 D6. The infrastructure
+landed at C2.0.2 (refs typed end-to-end + interned RefId table)
+is the substrate the borrow checker reasons over.
+
+**Workspace test count**: 870 active across all crates (+1
+doctest at sentinel-broker; +62 over C2.0.1: +8 ast, +23
+syntax, +21 types, +6 codegen, +4 pass-test fixtures across
+c20_*). All four check-suite checks green (cargo build
 --workspace, cargo clippy --workspace --all-targets -D warnings,
 cargo test --workspace, cargo test --workspace --doc). c05
 go/no-go (C1.3 bool flow) runs: stdout "10", exit 0. c14
 go/no-go (C1.4 struct flow) runs: stdout "7", exit 0. c15
 go/no-go (C1.5 nullable flow) runs: stdout "142", exit 0. c16
 go/no-go (C1.6 array flow) runs: stdout "15", exit 0. c17
-go/no-go (C1.7 generics flow) runs: stdout "42", exit 0. See
-STATE.md "Conventions" for the per-crate breakdown.
+go/no-go (C1.7 generics flow) runs: stdout "42", exit 0. c20
+go/no-go (C2.0.2 refs+mut+assign flow) runs: stdout "53", exit
+0. See STATE.md "Conventions" for the per-crate breakdown.
 
 **ADR status**:
 
@@ -491,6 +563,25 @@ STATE.md "Conventions" for the per-crate breakdown.
                                                  D-decision survived
                                                  implementation as
                                                  drafted.
+  - 0017 phase-c2-kickoff-and-region-plan        PROPOSED — D1-D5
+                                                 + D10 + D11 + D12 +
+                                                 D13 all exercised at
+                                                 C2.0.1 (lexer
+                                                 additions per D10)
+                                                 and C2.0.2 (refs
+                                                 end-to-end per D1-D5
+                                                 + D11). D6's lexical
+                                                 borrow checker /
+                                                 D7's lexical-only
+                                                 regions / D8's
+                                                 RAII+drop / D9's
+                                                 move semantics still
+                                                 pending across C2.1
+                                                 → C2.4. ADR flips to
+                                                 ACCEPTED at C2.5
+                                                 close-out per its
+                                                 sub-phase split
+                                                 table.
 
 ### 0.1 Working norms (carry forward into Phase C2)
 
@@ -701,8 +792,8 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: d7b18c2 (feat(c2.0.1): lexer adds `&` token +
-    `mut` keyword).
+    Local HEAD: 9516ebb (feat(c2.0.2): refs + mutability + deref
+    + assignment end-to-end).
     Branch in sync with origin/main (verify with `git status` at session start).
     Working tree clean.
 
@@ -710,17 +801,21 @@ For pasting into a fresh chat to bootstrap context:
     (bootstrap compiler MVP) + Phase C1 (full type system — all
     8 sub-phases C1.0 through C1.7) complete. Phase C2 in flight
     per ADR 0017 PROPOSED — refs / mutability / regions /
-    borrow checking — with C2.0.1 (lexer additions) landed; the
-    bundled C2.0.2 (AST + parser + resolve + types + codegen
-    for refs end-to-end, no borrow checking yet) is next.
-    808 active workspace tests + 1 doctest. **Five go/no-go
+    borrow checking — with C2.0.1 (lexer additions) AND C2.0.2
+    (refs end-to-end through AST + parser + resolve + types +
+    codegen) landed. Type-check enforces lvalue + mutability +
+    no-nested-refs + no-refs-in-arrays / struct-fields statically;
+    NO dynamic borrow checking yet (that's C2.1 / C2.2).
+    870 active workspace tests + 1 doctest. **Six go/no-go
     programs run end-to-end:** tests/pass/c05_go_no_go.sentinel
     (C1.3 bool flow): stdout "10", exit 0; c14_go_no_go (C1.4
     struct flow): "7"; c15_go_no_go (C1.5 nullable flow):
     "142"; c16_go_no_go (C1.6 array flow): "15";
     c17_go_no_go (C1.7 generics flow — the full ADR 0016 D12
     Pair<A,B> + make_pair / fst / snd / pick_int program): "42",
-    exit 0.
+    exit 0; c20_go_no_go (C2.0.2 refs+mut+assign flow — the full
+    ADR 0017 D14 program with add(&a,&b) + increment(&mut a) +
+    let mut + deref-assign + print): "53", exit 0.
 
     Pipeline is parse_query → resolve_query → check_query →
     codegen with diagnostics transitively accumulated; codegen
@@ -732,76 +827,63 @@ For pasting into a fresh chat to bootstrap context:
     ACCEPTED; ADR 0015 ACCEPTED-WITH-AMENDMENTS (D6 capped to
     depth-1; partially closed at C1.7.4b via GenericInstance
     variants); **ADR 0017 PROPOSED** (Phase C2 kickoff with 14
-    D-decisions including lexical-first borrow checker per D6,
-    interned `Type::Ref(RefId)` per D11 preserving Type: Copy
-    for the 5th ADR running, lexical regions only at C2 minimum
-    per D7 with named regions deferred).
+    D-decisions: D1-D5 + D10 + D11 + D12 + D13 exercised at
+    C2.0.1 + C2.0.2; D6 / D7 / D8 / D9 still pending across
+    C2.1 → C2.4; ADR flips to ACCEPTED at C2.5 close-out).
 
-    Type universe at C1.7 close: `{ I64, I32, Bool,
+    Type universe at C2.0.2 close: `{ I64, I32, Bool,
     Struct(StructId), Nullable(NullableInner),
     Array(ArrayElem), TypeParam(TypeParamId),
-    GenericInstance(GenericInstanceId) }`. C2.0.2 adds
-    `Ref(RefId)` to this + matching `Ref` variants on
-    NullableInner / ArrayElem (though `[&T]` and refs-in-struct
-    are rejected per ADR 0017 D1's first-class-ref deferral).
+    GenericInstance(GenericInstanceId), Ref(RefId) }`. The
+    `Ref(RefId)` variant is new; backed by a new
+    `refs: Vec<RefData>` interner table on TypedProgram
+    (`RefData { mutable: bool, inner: Type }`). Same C1.7.4b
+    interner pattern as GenericInstance, preserving the load-
+    bearing `Type: Copy` invariant across the 5th ADR running.
+    NullableInner gains a `Ref(RefId)` variant for `?&T`;
+    ArrayElem stays primitive-only (`[&T]` rejected with
+    `TypeError::RefInArray` at resolve-type-expr time per ADR
+    0017 D1 — first-class refs need named regions for
+    soundness, deferred to a future ADR). Refs in struct
+    fields rejected with `RefInStructField` per ADR 0017 D7 /
+    D12. VarTypeEnv extended to HashMap<VarId, (Type, bool)>
+    tracking mutability for `&mut x` / `x = v;` validation.
+    Codegen lowers refs as LLVM opaque pointers (LLVM 15+
+    no-typed-pointer); new `lower_lvalue_ptr` helper bridges
+    `&expr` (borrow-take), `*r = v;` (deref-assign), `x = v;`
+    (var assign), and `p.field = v;` (field assign) on a
+    single pointer-computation path.
 
-    Lexer state after C2.0.1: keywords `let, fn, if, else,
-    true, false, struct, null, mut`; punctuation `+ - * / =
-    ( ) { } [ ] , ; : . ? & ->` `== != < <= > >= && || !`. The
-    `*` token is reused for dereference per ADR 0017 D10 (the
-    parser disambiguates positionally — unary prefix vs infix
-    multiply, same precedent as C1.3's `-`).
+    Lexer state after C2.0.2 (unchanged from C2.0.1): keywords
+    `let, fn, if, else, true, false, struct, null, mut`;
+    punctuation `+ - * / = ( ) { } [ ] , ; : . ? & ->`
+    `== != < <= > >= && || !`. The `*` token is reused for
+    dereference per ADR 0017 D10 (the parser disambiguates
+    positionally — unary prefix vs infix multiply, same
+    precedent as C1.3's `-`). The `&` token is reused for
+    borrow-take and ref-type prefix; the parser disambiguates
+    positionally + a `mut`-after-`&` lookahead selects the
+    exclusive variant.
 
-    **Next: C2.0.2** — bundled AST + parser + resolve + types
-    + codegen for refs end-to-end. Per ADR 0017 D1-D5 + D11:
-    TypeExprKind::Ref { mutable, inner } in AST; parse_type
-    handles `&T` and `&mut T`; parse_atom adds `&expr` /
-    `&mut expr` / `*expr` prefix unary alongside `-` / `!`;
-    parse_stmt adds `let mut` bindings + assignment statements;
-    resolve passes refs through; types adds Type::Ref(RefId) +
-    RefData + TypedProgram.refs interner table, lvalue/rvalue
-    distinction, no-nested-refs + RefInArray + RefInStructField
-    rejections; codegen lowers refs as LLVM pointers, `&` as
-    address-of, `*` as load/store. NO borrow checking yet —
-    that's C2.1. Includes c20_ref_basic / c20_mut_basic /
-    c20_deref_basic pass-test fixtures.
-
-    Read in order:
-      1. docs/HANDOVER.md §0 in full (~730 lines through §0.3)
-      2. docs/decisions/0017-phase-c2-kickoff-and-region-plan.md
-         (the canonical C2 design — 14 D-decisions covering
-         refs / mutability / regions / borrow-checker plan /
-         drop / sub-phase split; especially D1-D5 + D10 + D11
-         for C2.0.2 implementation)
-      3. docs/STATE.md (last-updated banner — C1.7 landed +
-         C.3 design-decision notes 82-93 for C1.7 retrospective;
-         the C2.0.1 lexer commit doesn't yet have a STATE.md
-         entry — that lands with C2.0.2 or the C2 close-out)
-      4. docs/decisions/0016-concrete-c1-7-generics-syntax.md
-         (precedent for the interned-RefId pattern in ADR 0017
-         D11 — `Type::GenericInstance(GenericInstanceId)` with
-         args in a program-level table)
-      5. docs/SENTINEL_DESIGN2.md §4 / §15 for the C2 long-term
-         surface (named regions, ownership qualifiers,
-         first-class refs via `'esc`) — the eventual target
-         that ADR 0017's C2 minimum is the stepping stone for
-
-    Sanity check at session start:
-      cargo build --workspace
-      cargo clippy --workspace --all-targets -- -D warnings
-      cargo test --workspace                  # expect 808 passing
-      cargo run --bin snc -- build tests/pass/c17_go_no_go.sentinel -o /tmp/c17
-      /tmp/c17 && echo "exit=$?"              # expect "42" then "exit=0"
-
-    Resume at C2.0.2 per ADR 0017. Rhythm mirrors C1.4 / C1.5 /
-    C1.6 / C1.7's bundled-feat pattern: AST + parser + resolve
-    + types + codegen in one coordinated commit because the
-    parallel-tree enums need their exhaustive matches updated
-    together. No borrow checking at C2.0.2 — that's C2.1.
+    **Next: C2.1** — shared-only lexical borrow checker (`&T`
+    only) per ADR 0017 D6. New salsa-tracked query
+    `borrow_check_query` slotted between check_query and
+    codegen, consuming a `TypedProgram` and producing a
+    `BorrowCheckedProgram` (parallel tree adding lifetime +
+    move-state metadata) or a `BorrowError`. New error
+    variants: `BorrowConflict`, `UseAfterMove`,
+    `BorrowOutlivesScope`, `MutableBorrowOfShared`,
+    `SharedBorrowOfMutable`. Lexical formulation per D6 —
+    each borrow's lifetime is "from creation to enclosing
+    block end". Bounded ~few-hundred LOC scope; the
+    rejected-programs cases all have local workarounds. NLL
+    / Polonius migration plan stays a documented C2.5
+    deliverable.
 
     Sub-phase split for the rest of C2 (per ADR 0017 D9 table,
     revisit at each sub-phase boundary):
-      - C2.0.2 — refs infrastructure (next; this session)
+      - ✅ C2.0.1 — lexer: `&` token + `mut` keyword
+      - ✅ C2.0.2 — refs infrastructure (this session)
       - C2.1   — shared-only lexical borrow checker (&T only)
       - C2.2   — &mut T + shared-XOR-mutable rule (largest)
       - C2.3   — move semantics + use-after-move
@@ -810,6 +892,40 @@ For pasting into a fresh chat to bootstrap context:
       - C2.5   — polish + Polonius migration plan doc + ADR
                   0017 PROPOSED → ACCEPTED flip + STATE +
                   HANDOVER close-out
+
+    Read in order:
+      1. docs/HANDOVER.md §0 in full (~810 lines through §0.3)
+      2. docs/decisions/0017-phase-c2-kickoff-and-region-plan.md
+         (the canonical C2 design — especially D6 for the
+         lexical-first borrow checker formulation, the
+         migration plan to Polonius, and the per-sub-phase
+         split table)
+      3. docs/STATE.md (last-updated banner — C2.0.2 landed;
+         refs end-to-end. Previous C1.7 banner kept as
+         pre-C2.0.2 context)
+      4. docs/decisions/0016-concrete-c1-7-generics-syntax.md
+         (precedent for the interned-RefId pattern in ADR 0017
+         D11)
+      5. docs/SENTINEL_DESIGN2.md §4 / §15 for the C2 long-term
+         surface (named regions, ownership qualifiers,
+         first-class refs via `'esc`) — the eventual target
+         that ADR 0017's C2 minimum is the stepping stone for
+
+    Sanity check at session start:
+      cargo build --workspace
+      cargo clippy --workspace --all-targets -- -D warnings
+      cargo test --workspace                  # expect 870 passing
+      cargo run --bin snc -- build tests/pass/c20_go_no_go.sentinel -o /tmp/c20
+      /tmp/c20 && echo "exit=$?"              # expect "53" then "exit=0"
+
+    Resume at C2.1 per ADR 0017. New crate `sentinel-borrow-check`
+    (per ADR D6 "borrow checker runs as a new pass between
+    check_query and codegen"). The infrastructure landed at
+    C2.0.2 — refs typed end-to-end + interned RefId interner —
+    is the substrate. Pre-flight: write the C2.1 sub-phase
+    plan (concrete error variants, the lifetime-tracking
+    representation, sketch of the analysis pass). C2.1 is the
+    "shared-only" scope; `&mut` + XOR ships at C2.2.
 
 ---
 

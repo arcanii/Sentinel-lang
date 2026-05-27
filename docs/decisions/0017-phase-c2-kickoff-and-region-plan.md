@@ -8,8 +8,19 @@ C2 code so the substantial design decisions — borrow-checker
 formulation, region representation, drop semantics — can be
 challenged on paper.
 
+D-decision progress: D1-D5 + D10 + D11 + D12 + D13 exercised at
+C2.0.1 (d7b18c2) + C2.0.2 (9516ebb) — lexer additions, refs +
+mut + deref + assignment surface, interned `Type::Ref(RefId)`,
+out-of-scope rules (RefInArray / RefInStructField / nested-ref
+rejected), `fn main()` invariant preserved. D6 (lexical borrow
+checker), D7 (lexical-only regions), D8 (RAII+drop closing the
+C1.6+ heap-leak deferral), D9 (move semantics + use-after-move),
+and D14 (phase-go program — the C2.0.2 c20_go_no_go shipped a
+subset; the full borrow-checking program lands at C2.5) still
+pending across C2.1 → C2.5.
+
 Date: 2026-05-27
-Last touched: 2026-05-27 (initial PROPOSED draft)
+Last touched: 2026-05-27 (C2.0.2 landing — D1-D5 + D11 exercised)
 Related: 0011 (Phase C1 kickoff — now ACCEPTED, with the
 parallel-tree pattern + ADR-first norm + interned-instance
 trick all inherited here), 0016 (C1.7 generics — the interned
@@ -544,10 +555,14 @@ ADRs.
 
 | Sub  | Title                                                        | Estimate     | Status |
 |------|--------------------------------------------------------------|--------------|--------|
-| C2.0 | Infrastructure: `Type::Ref(RefId)` + AST + parser + lexer;   | 1-2 sessions | next   |
-|      | resolve passes through; types accepts; codegen lowers refs   |              |        |
-|      | as LLVM pointers. NO borrow checking yet.                    |              |        |
-| C2.1 | Shared-only lexical borrow checker. `&T` only. Lifetime      | 1-2 sessions |        |
+| C2.0 | Infrastructure: `Type::Ref(RefId)` + AST + parser + lexer;   | 1-2 sessions | DONE   |
+|      | resolve passes through; types accepts; codegen lowers refs   |              | (lexer |
+|      | as LLVM pointers. NO borrow checking yet.                    |              | d7b18c2|
+|      |                                                              |              | + bod. |
+|      |                                                              |              | 9516ebb|
+|      |                                                              |              | + this |
+|      |                                                              |              | docs)  |
+| C2.1 | Shared-only lexical borrow checker. `&T` only. Lifetime      | 1-2 sessions | next   |
 |      | tracking. Rejects use-after-scope but no `&mut` yet.         |              |        |
 | C2.2 | `&mut T` + shared-XOR-mutable rule. The interesting half.    | 2-3 sessions |        |
 |      | This is where most borrow-checker complexity lives.          |              |        |
