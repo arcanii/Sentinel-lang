@@ -919,8 +919,10 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: 8d72679 (feat(c2.4): RAII / drop + sentinel_free;
-    closes C1.6+ heap leak).
+    Local HEAD: e3db4e3 (docs: tighten HANDOVER §0.3 pipeline
+    paragraph for C2.4 close). Last feat commit: 8d72679
+    (feat(c2.4): RAII / drop + sentinel_free; closes C1.6+ heap
+    leak).
     Branch in sync with origin/main (verify with `git status` at session start).
     Working tree clean.
 
