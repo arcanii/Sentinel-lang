@@ -1,0 +1,11 @@
+// C3.7 / ADR 0020 D12: secondary phase-go fixture for the
+// `return v => body` arm applied to a pure body. The body has
+// no perform; lower_handle wraps the i64 literal `42` via
+// sentinel_kont_pure so the dispatch loop's PURE_RETURN switch
+// case fires. The return arm transforms 42 → 84.
+//
+// Expected: exit code 84.
+
+fn main() -> i64 {
+    handle 42 with { return v => v * 2 }
+}

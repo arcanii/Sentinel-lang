@@ -3566,25 +3566,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         self.handle_depth += 1;
         let is_nested = self.handle_depth > 1;
 
-        // C3.5(b) + C3.6(b) restriction: the body must be a
-        // direct Perform, a call to an effecting fn, or a
-        // nested Handle (whose own lowering produces a Kont*
-        // when nested). All other forms need additional frame
-        // reification machinery (covered by C3.5(c)/(d)/(e)
-        // for fn bodies, or unsupported at C3.6 minimum).
-        let is_supported = match &body.kind {
-            TypedExprKind::Perform { .. } => true,
-            TypedExprKind::Call { id, .. } => {
-                !program.signature(*id).effect_row.is_empty()
-            }
-            TypedExprKind::Handle { .. } => true,
-            _ => false,
-        };
-        if !is_supported {
-            self.handle_depth -= 1;
-            return Err(CodegenError::HandleBodyNotDirectPerform);
-        }
-
+        // C3.7 / ADR 0020 D12: the body can be any expression
+        // that produces either a Kont* (direct Perform, call to
+        // an effecting fn, nested Handle when nested itself) or
+        // an i64 (pure expression — wrapped via
+        // sentinel_kont_pure so the dispatch loop sees a
+        // uniform Kont* and falls through to the PURE_RETURN
+        // case). Earlier sub-phases C3.5(a)/(b) restricted the
+        // body shape; ADR 0020 D12's c37_handle_return fixture
+        // (`handle 42 with { return v => v * 2 }`) requires the
+        // lifted form, which the typing layer already permits.
         let result = self.lower_handle_inner(
             body,
             arms,
@@ -3604,12 +3595,31 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         program: &TypedProgram,
         is_nested: bool,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        // Lower the body — produces a Kont* (BasicValueEnum::Pointer).
-        // For Perform: lower_perform emits sentinel_perform_op.
-        // For Call to effecting fn: lower_call uses the fn's
-        // effecting-ABI signature (returns ptr). For nested
-        // Handle: that handle's own merge is Kont*-typed.
-        let initial_kont = self.lower_expr(body, program)?.into_pointer_value();
+        // Lower the body.
+        //
+        //   - Perform / Call-to-effecting / nested Handle:
+        //     produces a Kont* directly.
+        //   - Pure expression (i64): wrap via sentinel_kont_pure
+        //     so the dispatch loop sees a uniform Kont* (the
+        //     switch then matches PURE_RETURN_OP_ID).
+        let body_val = self.lower_expr(body, program)?;
+        let initial_kont = if body_val.is_pointer_value() {
+            body_val.into_pointer_value()
+        } else {
+            let wrap_call = self
+                .builder
+                .build_call(
+                    self.kont_pure_fn,
+                    &[body_val.into_int_value().into()],
+                    "body_pure_wrap",
+                )
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            wrap_call
+                .try_as_basic_value()
+                .left()
+                .expect("sentinel_kont_pure returns ptr")
+                .into_pointer_value()
+        };
 
         let i32_ty = self.context.i32_type();
         let i64_ty = self.context.i64_type();
@@ -3828,9 +3838,15 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
         // Merge: phi over all paths. When nested the type is
         // Kont* (ptr); top-level it's i64 (the handle's outer
-        // type per the MVP restriction).
+        // type per the MVP restriction). Empty arms list (e.g.,
+        // `handle X with { return v => body }`) is permitted —
+        // we take the type from pure_val.
         self.builder.position_at_end(merge_block);
-        let result_ty = arm_results[0].0.get_type();
+        let result_ty = if let Some((arm_val, _)) = arm_results.first() {
+            arm_val.get_type()
+        } else {
+            pure_val.get_type()
+        };
         let phi = self
             .builder
             .build_phi(result_ty, "handle_result")

@@ -1,0 +1,30 @@
+// C3.7 / ADR 0020 D12: Phase C3 handler-runtime phase-go program.
+// Exercises the full handler surface end-to-end: an effecting fn
+// with a let-bound perform + tail using the bound var, a handle
+// site that resumes via the continuation, effect discharge in
+// main, and `print` of the final value.
+//
+// do_work(42) reifies as K1 (op_id = Io.log, arg = 42). Inner
+// resumer-0 captures x = 42 + tail `x + logged`. The handle's
+// arm fires with msg = 42, k(msg + 1) = k(43). resume(K1, 43)
+// runs resumer-0: logged = 43, x = 42, x + logged = 85. Wrapped
+// pure → consume_pure → 85. Main binds result = 85; print(85)
+// emits "85\n" and returns 0.
+//
+// Expected: stdout "85\n", exit code 0.
+
+effect Io {
+    log(msg: i64) -> i64;
+}
+
+fn do_work(x: i64) -> i64 ! { Io } {
+    let logged: i64 = perform Io.log(x);
+    x + logged
+}
+
+fn main() -> i64 {
+    let result: i64 = handle do_work(42) with {
+        Io.log(msg, k) => k(msg + 1)
+    };
+    print(result)
+}

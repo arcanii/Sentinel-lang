@@ -1031,3 +1031,43 @@ fn pass_c36b_nested_handle_inner_full() {
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
 }
+
+// ============================================================================
+// C3.7 / ADR 0020 D12: Phase C3 handler-runtime phase-go programs. Final
+// fixtures for ADR 0020's PROPOSED → ACCEPTED flip + Phase C3 close-out.
+// ============================================================================
+
+#[test]
+fn pass_c37_go_no_go() {
+    // The D12 phase-go: do_work(42) performs Io.log; handler
+    // arm resumes with msg + 1 = 43; do_work computes x +
+    // logged = 42 + 43 = 85; print(85) emits "85\n" + returns 0.
+    let r = build_and_run("c37_go_no_go.sentinel");
+    assert_eq!(r.stdout, "85\n");
+    assert_eq!(r.exit, 0);
+}
+
+#[test]
+fn pass_c37_handle_return() {
+    // `handle 42 with { return v => v * 2 }`. The pure body
+    // is wrapped via sentinel_kont_pure at the handle site;
+    // PURE_RETURN switch case unwraps + applies the return
+    // arm. 42 * 2 = 84.
+    let r = build_and_run("c37_handle_return.sentinel");
+    assert_eq!(r.exit, 84);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn c37_perform_outside_handle_rejects_at_effect_check() {
+    // ADR 0019 D13: `main` must be effect-free. A bare
+    // `perform Io.log(...)` in main with no wrapping handle
+    // surfaces `sentinel::effect::unhandled_effect`.
+    let out = build_ui_fixture("c37_perform_outside_handle.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unhandled_effect"),
+        "expected unhandled_effect; got: {stderr}"
+    );
+}

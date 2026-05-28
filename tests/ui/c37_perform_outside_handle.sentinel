@@ -1,0 +1,13 @@
+// C3.7 / ADR 0020 D12 (negative): `perform` outside any handle.
+// main's body performs Io.log without a wrapping handle; the
+// effect-check pass surfaces `sentinel::effect::unhandled_effect`
+// per ADR 0019 D13 (main must be effect-free). Exits with a
+// non-zero code blocking codegen.
+
+effect Io {
+    log(msg: i64) -> i64;
+}
+
+fn main() -> i64 {
+    perform Io.log(42)
+}
