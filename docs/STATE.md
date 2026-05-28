@@ -12,7 +12,62 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C3.3 landed; Phase C3 typing-layer closes.**
+Last updated: **C3.4 landed; handler runtime typing layer in.**
+ADR 0020 stays PROPOSED (still in flight across C3.4-C3.7); the
+typing-layer pieces — AST, parser, resolve, type-check, effect-
+check — all ship here. Codegen for `handle` / `perform` /
+continuation resume surfaces a clean
+`CodegenError::HandlersNotYetSupported` diagnostic at C3.4 and
+lands at C3.5 (perform) + C3.6 (handle) per ADR 0020 D9.
+**Surface additions at C3.4**: `ExprKind::Handle { body, arms,
+return_arm }`, `ExprKind::Perform { effect, op, args }`, plus
+`HandlerArm` and `ReturnArm` AST structs. The handler-arm
+syntax `EffectName.OpName(p1, ..., k) => body` plus the
+optional `return v => body` parse via two new lexer tokens
+(`FatArrow` for `=>`, `Return` for the contextual keyword).
+**Resolve mirrors** Handle + Perform with `(EffectId,
+op_index)` references; handler-arm params each get a VarId
+(last is the continuation `k`). `Call` resolution gains a
+vars-first lookup so `k(arg)` inside an arm body resolves to
+the new `ResolvedExprKind::ResumeKont { kont, args }` variant
+instead of failing as UndefinedFunction. **Type-check** adds a
+seventh interner table: `Type::Kont(KontId)` indexes
+`TypedProgram.konts: Vec<KontData { arg_ty, ret_ty }>` — the
+kont's arg_ty is the op's return type and ret_ty is the outer
+`handle` expression's type. Preserves the load-bearing
+`Type: Copy + Hash` invariant (now across 7 ADRs: 0014, 0015,
+0016, 0017, 0019, 0020). **Effect discharge** per ADR 0020 D6:
+`walk_expr` on a `Handle` node walks the body into a
+*temporary* set, subtracts the handled (EffectId, op_index)
+pairs, then merges into the outer accumulator — so an
+`Io`-bearing computation wrapped in a matching handler
+contributes the empty row to its enclosing fn. **New error
+variants**: ResolveError gains UndefinedHandlerEffect /
+UndefinedHandlerOp / DuplicateHandlerArm; TypeError gains
+KontUsedAsValue / HandlerArmTypeMismatch /
+OperationArityMismatch / KontArityMismatch. Pipeline at C3.4
+close: **unchanged** from C3.3 — parse_query → resolve_query →
+check_query → effect_check_query → borrow_check_query →
+codegen. Handle/Perform/ResumeKont flow as new
+TypedExprKind variants through borrow-check (defensive
+recursive walk) and bail at codegen. C3.4 fixture at
+`tests/ui/c34_handlers_codegen_not_yet.sentinel` exercises the
+full flow — body performs Io.read, handler arm calls k(42),
+type-check + effect-check + borrow-check pass; codegen
+surfaces `sentinel::codegen::handlers_not_yet_supported`. Five
+UI fixtures cover the new error variants. Workspace test
+delta from C3.3 close: +44 (1052 total) — +4 ast (Handle /
+Perform display tests), +19 syntax (7 lexer + 12 parser),
++8 resolve unit tests, +5 types unit tests, +3 effect-check
+unit tests, +5 driver tests (4 UI + 1 codegen-rejection
+assertion). **Phase C3.4 closes here.** Next: C3.5 — codegen
+for `perform` per ADR 0020 D9 (3 new runtime symbols:
+sentinel_perform_op + sentinel_kont_push +
+sentinel_kont_panic_resumed; 2-3 sessions). Then C3.6 (handle
+codegen + sentinel_kont_resume) + C3.7 (polish + phase-go +
+ADR 0020 PROPOSED → ACCEPTED flip).
+
+Pre-C3.4 context: **C3.3 landed; Phase C3 typing-layer closes.**
 ADR 0019 flips PROPOSED → ACCEPTED-WITH-AMENDMENTS with
 D1+D2+D3+D4+D5+D6+D7+D10+D11+D12+D13+D14 all exercised. **D8
 (handler runtime) deferred to follow-on ADR 0020** per the

@@ -8,6 +8,20 @@ call: which lowering strategy for `handle e with { ... }` —
 free-monad reification (Phase B's approach), CPS transform, or
 stack-saved continuations.
 
+**Sub-phase progress** (per D9 table):
+
+  - **C3.4** — typing layer (AST + parser + resolve + type-
+    check + effect discharge) **SHIPPED** in this commit.
+    Exercised D4 (surface syntax), D5 (AST + parser + resolve),
+    D6 (effect discharge typing), D11 (fn main integration via
+    handlers). 1052 workspace tests passing (+44 from C3.3
+    close). Codegen surfaces `HandlersNotYetSupported` cleanly
+    for Handle/Perform/ResumeKont.
+  - **C3.5** — codegen for `perform` + 3 runtime symbols —
+    next.
+  - **C3.6** — codegen for `handle` + `sentinel_kont_resume`.
+  - **C3.7** — polish + phase-go + ADR PROPOSED → ACCEPTED.
+
 Date: 2026-05-28
 Related:
   - **0019** (Phase C3 kickoff — ACCEPTED-WITH-AMENDMENTS): the
@@ -392,10 +406,10 @@ A rough split into 4-5 sub-phases:
 
 | Sub  | Title                                                          | Estimate     | Status |
 |------|----------------------------------------------------------------|--------------|--------|
-| C3.4 | AST + parser for `handle ... with { ... }` + `perform Op(args)`. | 1-2 sessions |        |
+| C3.4 | AST + parser for `handle ... with { ... }` + `perform Op(args)`. | 1-2 sessions | **DONE** |
 |      | Resolve mirrors. Effect discharge in the type checker per D6.  |              |        |
 |      | Continuation type representation (no codegen yet).             |              |        |
-| C3.5 | Codegen for `perform` — emit `sentinel_perform_op` calls;      | 2-3 sessions |        |
+| C3.5 | Codegen for `perform` — emit `sentinel_perform_op` calls;      | 2-3 sessions | next   |
 |      | frame reification at each evaluation site. Runtime symbols     |              |        |
 |      | added to sentinel-runtime (sentinel_perform_op +               |              |        |
 |      | sentinel_kont_push + sentinel_kont_panic_resumed).             |              |        |
@@ -521,8 +535,8 @@ A rough split per the D9 table:
 
 | Sub  | Title                                                          | Estimate     | Status |
 |------|----------------------------------------------------------------|--------------|--------|
-| C3.4 | AST + parser + resolve mirror + effect discharge in type-check | 1-2 sessions | next   |
-| C3.5 | Codegen for `perform` + 3 runtime symbols                      | 2-3 sessions |        |
+| C3.4 | AST + parser + resolve mirror + effect discharge in type-check | 1-2 sessions | **DONE** |
+| C3.5 | Codegen for `perform` + 3 runtime symbols                      | 2-3 sessions | next   |
 | C3.6 | Codegen for `handle` + sentinel_kont_resume                    | 2-3 sessions |        |
 | C3.7 | Polish + phase-go programs + ADR 0020 flip + STATE close       | 0-1 sessions |        |
 
