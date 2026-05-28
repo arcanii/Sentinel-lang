@@ -12,7 +12,42 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C4.1 close-out: ADR 0022 → ACCEPTED-WITH-AMENDMENTS;
+Last updated: **ADR 0023 PROPOSED: concrete C4.2 trait + impl
+surface.** No code changes — this is the C4.2 detail ADR
+mirroring ADR 0022 (C4.1 classes) within the larger Phase C4
+plan from ADR 0021. Twelve D-decisions cover trait declaration
+grammar (D1), method signature shape inside traits (D2),
+default impl block grammar `impl as Trait for Type` (D3),
+named impl form `impl Name as Trait for Type` per ADR 0021 D5
+(D4), three dispatch paths (D5: receiver-typed +
+qualified-named + bounded-generic via witness tables),
+method-call resolution algorithm (D6), `Self` in trait /
+impl contexts via the new `Type::TraitSelf(TraitId)` interner
+variant (D7), the typing pipeline (D8: two new resolve passes
++ one new types pass + one new bodies pass), codegen with
+per-impl LLVM fn + global witness-table values (D9), the
+out-of-scope list (D10: default method bodies, supertraits,
+generic traits, `dyn Trait`, bounded-generic + named-impl
+pairing, generic-impl, cross-module coherence, associated
+types, where clauses), the C4.0 lexer state (D11: no new
+tokens — `trait`/`impl`/`as`/`for` reserved at C4.0), and
+the c42_go_no_go phase-go fixture (D12: trait Writer with
+two impls — default + named `Doubling` — on FileSink class,
+demonstrating receiver-typed + qualified-named dispatch
+together).
+
+**Key D5 amendment** (bounded-generic + named-impl pairing):
+the C4.2 minimum ships Path 3 (`fn use_writer<W: Writer>(w:
+W)`) for **default impls only** — the `@`-form turbofish
+syntax for picking a named impl at the call site is deferred
+to a follow-on. ADR 0021 D5's static-by-default dispatch
+holds; named impls participate in Path 1 (receiver-typed)
+and Path 2 (qualified-named) only at C4.2.
+
+Workspace test count unchanged (1124 + 1 doctest); no code
+shipped in this docs-only commit.
+
+Pre-ADR-0023 context: **C4.1 close-out: ADR 0022 → ACCEPTED-WITH-AMENDMENTS;
 Phase C4.1 closes.** Two C4.1 sub-iterations shipped (C4.1
 (1/N) AST + parser; C4.1 (2/N) resolve / types / codegen +
 method-call + Name::init). All eleven D-decisions exercised
