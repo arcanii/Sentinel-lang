@@ -12,7 +12,26 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C4.1 (2/N): resolve / types / codegen wired up for classes;
+Last updated: **C4.1 close-out: ADR 0022 → ACCEPTED-WITH-AMENDMENTS;
+Phase C4.1 closes.** Two C4.1 sub-iterations shipped (C4.1
+(1/N) AST + parser; C4.1 (2/N) resolve / types / codegen +
+method-call + Name::init). All eleven D-decisions exercised
+modulo two amendments: A1 the D4 definite-assignment dataflow
+is partial (flat any-assigned check; branch-aware merge +
+InitFieldReadBeforeAssign deferred); A2 `Self` in general
+type position deferred (only positional `self: &Self` via
+parse_self_param at C4.1). The phase-go fixture (Point with
+manhattan + translate) runs end-to-end at exit 42; the
+amendments don't block C4.2.
+
+ADR 0021 stays PROPOSED — flips at C4.5 close after the full
+Phase C4 surface (traits + impls + delegation + structured
+concurrency) lands.
+
+Workspace test count unchanged from C4.1 (2/N) close (1124 +
+1 doctest); this is a docs-only commit pair.
+
+Pre-C4.1-close context: **C4.1 (2/N): resolve / types / codegen wired up for classes;
 `Name::init(args)` + postfix `.method(args)` ship end-to-end.**
 ADRs 0021 + 0022 stay PROPOSED until C4.1 close. Second of
 the C4.1 sub-iterations: class declarations now flow through

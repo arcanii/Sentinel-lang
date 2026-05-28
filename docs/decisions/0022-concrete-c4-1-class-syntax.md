@@ -1,10 +1,15 @@
 # ADR 0022: Concrete C4.1 class surface — declarations, methods, init
 
-Status: PROPOSED — to flip to ACCEPTED at C4.1 close. This ADR
-details the concrete surface syntax + typing rules for the
-Phase C4.1 class sub-phase per ADR 0021 D1-D3. ADR 0021 is the
-phase kickoff (PROPOSED); ADR 0022 mirrors the role of ADR
-0013 (concrete C1.4 struct syntax) within the larger phase.
+Status: ACCEPTED-WITH-AMENDMENTS — flipped at C4.1 close after
+the two-iteration landing (C4.1 (1/N) AST + parser; C4.1 (2/N)
+resolve / types / codegen + method-call + Name::init). Eleven
+D-decisions exercised; two amendments documented below covering
+the partial definite-assignment dataflow (D4) and the deferred
+`Self` in general type position (D8). This ADR details the
+concrete surface syntax + typing rules for the Phase C4.1
+class sub-phase per ADR 0021 D1-D3. ADR 0021 is the phase
+kickoff (PROPOSED); ADR 0022 mirrors the role of ADR 0013
+(concrete C1.4 struct syntax) within the larger phase.
 
 Date: 2026-05-28
 Related:
@@ -471,25 +476,101 @@ materialise.
   Without modules, visibility has no enforcement substrate.
   Parsing `pub` reserves the surface for later.
 
+## Amendments at C4.1 close
+
+Two amendments document the gap between the as-drafted ADR
+and what shipped at C4.1 (2/N). Both are carry-overs to a
+future iteration; neither blocks Phase C4.2.
+
+### A1. D4 definite-assignment is partial (flat any-assigned)
+
+The drafted D4 specifies a dataflow analysis with per-arm
+snapshots merged at if/else join points + a separate
+`InitFieldReadBeforeAssign` check for mid-body reads. C4.1
+(2/N) ships a **simpler check**: walk the init body, collect
+the set of field names assigned via `self.field = expr`
+anywhere in the body (stmts, tail, branches of conditionals),
+and reject any declared field not in the set with
+`InitFieldMaybeUnassigned`. This catches the obvious case
+(field never written) — sufficient for the
+`c41_init_field_unassigned` UI fixture and the phase-go's
+linear init body. The branch-aware merge + the
+`InitFieldReadBeforeAssign` mid-body check are deferred as
+C4.1 follow-ons; the type-check pass surfaces neither at
+C4.1 close. Reopen via a follow-on iteration when conditional-
+init bodies surface in practice.
+
+### A2. D8 `Self` in general type position deferred
+
+The drafted D8 specifies `Self` as a synthetic alias that
+resolves to `Type::Class(this_class_id)` anywhere inside a
+class block — including method return types and field type
+annotations. C4.1 (2/N) only supports `Self` positionally
+inside `parse_self_param` (`self: &Self` / `self: &mut Self`).
+General `Self` in type position is rejected at parse time
+because `parse_type` doesn't handle the `SelfTy` token.
+
+The phase-go fixture and c41_class_basic both use concrete
+return types (i64), so the gap doesn't surface. Reopen when
+a return-Self method shape surfaces (e.g., builder pattern,
+chainable mutators).
+
 ## Revisit
 
-This ADR is **PROPOSED** until C4.1 closes. Per-D revisit
-triggers:
+This ADR is **ACCEPTED-WITH-AMENDMENTS at C4.1 close**.
+Per-D status:
 
-- **D1 (class declaration grammar)**: revisit if generic
-  classes surface as needed before C4.2 (the typing layer
-  can accept `class Pair<A, B>` with modest work).
-- **D4 (definite-assignment)**: revisit if the dataflow
-  analysis duplicates too much of the borrow-check CFG;
-  candidate for refactoring into a shared analysis core.
+- **D1 (class declaration grammar)**: exercised. Generic
+  classes (`class Pair<A, B>`) still deferred to a follow-on
+  per the original D1 deferral; AST shape already supports
+  the surface, only resolve+types+codegen monomorphisation
+  is missing.
+- **D2 (field declarations)**: exercised. Visibility parsed
+  but not enforced — module system at Phase C5 will activate
+  per D2.
+- **D3 (method declarations)**: exercised. Methods support
+  `&Self` + `&mut Self` receivers; method-call dispatch is
+  static (D7).
+- **D4 (init constructor + definite-assignment)**: exercised
+  with amendment A1 — full dataflow deferred.
+- **D5 (Name::init form)**: exercised. Struct-literal syntax
+  for classes (`Point { x: 1 }`) NOT reached at type-check
+  because resolve catches it as UndefinedStruct first;
+  `ClassConstructionMustUseInit` declared but unreachable in
+  practice — promote to a resolve-level detection in a
+  follow-on iteration for clearer diagnostics.
+- **D6 (field access + assignment)**: exercised. `self.field`
+  + `self.field = v` reuse the C1.4 + C2 lvalue machinery
+  via the FieldAccess Class arm.
+- **D7 (method dispatch)**: exercised. Static dispatch only;
+  dyn Trait post-C4.2.
+- **D8 (Self / self resolution)**: exercised with amendment
+  A2 — `self` (the value) fully supported including
+  SelfOutsideClassContext; `Self` (the type) only via
+  parse_self_param's positional form.
+- **D9 (codegen out_ptr ABI + per-method namespace)**:
+  exercised. Direct-return for small classes considered as a
+  follow-on perf optimisation; out_ptr is the safe baseline.
+- **D10 (no new lexer tokens at C4.1)**: exercised.
+  `ColonColon` landed at C4.1 (1/N); no further tokens
+  needed in (2/N).
+- **D11 (phase-go program)**: exercised by
+  `c41_go_no_go.sentinel` running end-to-end at exit 42.
+
+Future revisit triggers (carried forward):
+
+- **D1 (generic classes)**: revisit if user testing surfaces
+  the need before C4.2 (the typing layer can accept
+  `class Pair<A, B>` with modest work).
+- **D4 (definite-assignment)**: revisit when branch-aware
+  merge becomes necessary in practice. Candidate for
+  refactoring into a shared analysis core with the C2
+  borrow CFG.
 - **D5 (Name::init form)**: revisit at first user-reported
-  ergonomic friction. `new Name(args)` sugar is the natural
-  alternative.
+  ergonomic friction. `new Name(args)` sugar remains the
+  natural alternative.
 - **D9 (codegen out_ptr ABI)**: revisit if struct-return-by-
-  value performs adequately for classes-with-few-fields;
-  could switch to direct return for small classes.
-- **D11 (phase-go program)**: revisit at C4.1 close if the
-  fixture proves insufficient to pin the surface.
+  value performs adequately for classes-with-few-fields.
 
 ## Appendix: estimated implementation footprint
 

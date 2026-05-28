@@ -86,6 +86,7 @@ C1.3. See STATE.md Section C.
 **Phase C4.0 — lexer keywords for classes / traits / delegation / structured concurrency per ADR 0021 D11 — complete.**
 **Phase C4.1 (1/N) — class AST + parser per ADR 0022 D1-D4 — complete.**
 **Phase C4.1 (2/N) — resolve / types / codegen wiring + postfix `.method(args)` + `Name::init(args)` per ADR 0022 D3+D5+D7+D9 — complete. Definite-assignment via flat any-assigned check (branch-aware merge deferred); ADR 0022 D11 phase-go (Point with manhattan/translate) runs end-to-end at exit 42.**
+**Phase C4.1 close — ADR 0022 → ACCEPTED-WITH-AMENDMENTS — complete. Phase C4.1 closes.** Two amendments: A1 D4 definite-assignment is partial (flat any-assigned, branch-aware merge + InitFieldReadBeforeAssign deferred); A2 D8 general `Self` in type position deferred (only positional `self: &Self` via parse_self_param).
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -866,6 +867,60 @@ per-crate breakdown.
                                                  0020; D9 (async)
                                                  deferred
                                                  indefinitely.
+  - 0020 phase-c3-handler-runtime                ACCEPTED-WITH-
+                                                 AMENDMENTS — all
+                                                 twelve D-decisions
+                                                 exercised modulo
+                                                 D2 across eight
+                                                 sub-phases (C3.4
+                                                 + C3.5(a/b/c/d/e)
+                                                 + C3.6(a/b) +
+                                                 C3.7). The
+                                                 amendment: D2's
+                                                 multi-shot
+                                                 relaxation is
+                                                 deferred
+                                                 indefinitely;
+                                                 one-shot suffices
+                                                 for the bootstrap.
+  - 0021 phase-c4-kickoff                        PROPOSED — Phase
+                                                 C4 umbrella
+                                                 (classes + traits
+                                                 + delegation +
+                                                 structured
+                                                 concurrency). 14
+                                                 D-decisions; six
+                                                 sub-phases C4.0
+                                                 → C4.5; 8-12
+                                                 sessions estimate.
+                                                 C4.0 + C4.1 done;
+                                                 flips at C4.5
+                                                 close.
+  - 0022 concrete-c4-1-class-syntax              ACCEPTED-WITH-
+                                                 AMENDMENTS — all
+                                                 eleven D-decisions
+                                                 exercised across
+                                                 C4.1 (1/N) AST +
+                                                 parser and C4.1
+                                                 (2/N) resolve /
+                                                 types / codegen +
+                                                 method-call + init
+                                                 call + close-out.
+                                                 Two amendments at
+                                                 C4.1 close: A1 D4
+                                                 definite-assignment
+                                                 ships as a flat
+                                                 any-assigned check
+                                                 (branch-aware
+                                                 merge +
+                                                 InitFieldReadBeforeAssign
+                                                 deferred); A2 D8
+                                                 general `Self` in
+                                                 type position
+                                                 deferred (only
+                                                 positional `self:
+                                                 &Self` via
+                                                 parse_self_param).
 
 ### 0.1 Working norms (carry forward into Phase C3)
 
@@ -953,61 +1008,73 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C4.1 close-out → C4.2 trait + impl surface)
+### 0.2 Next session opening (C4.2 — traits + named impls)
 
-Resume at **C4.1 close-out** per ADR 0022, or move to
-**C4.2** per ADR 0021 D14. **C4.1 (2/N) closed**:
-resolve / types / codegen wired up for classes; postfix
-`.method(args)` and `Name::init(args)` ship end-to-end per
-ADR 0022 D3 + D5 + D7 + D9. Definite-assignment runs at
-type-check with a flat any-assigned check; the
-c41_init_field_unassigned UI fixture pins the rejection.
+Resume at **C4.2** per ADR 0021 D14. **C4.1 closed at C4.1
+(2/N) + close-out**: class declarations parse, resolve,
+type-check, and lower end-to-end. ADR 0022 ACCEPTED-WITH-
+AMENDMENTS with two carry-overs: A1 definite-assignment is
+partial (flat any-assigned check; branch-aware merge +
+InitFieldReadBeforeAssign deferred); A2 `Self` in general
+type position deferred (only positional `self: &Self`
+supported via parse_self_param).
 
-**Pre-C4.2 follow-ons available** (none blocking):
+**Open with ADR 0023 PROPOSED** detailing the C4.2 surface
+before any code lands. The ADR should cover:
 
-  - **Branch-aware definite-assignment**: extend the C4.1
-    (2/N) flat any-assigned check with if/else snapshot+merge
-    mirroring the C2 borrow CFG so init bodies with
-    conditional field writes get a proper per-arm bitmap.
-    Pin with an additional UI fixture (init that assigns
-    `x` only in the if-branch but not the else-branch).
+  - **Trait declaration grammar**: `trait Name { fn sig;
+    fn sig; ... }`. Methods inside traits declare a `self`
+    receiver per ADR 0021 D2 + ADR 0022 D3 pattern. No
+    default method bodies at C4.2 minimum.
+  - **Impl block grammar**: `impl Trait for Type { fn body;
+    ... }`. Each impl supplies bodies for the trait's
+    methods. Per ADR 0021 D5 the bare form (one impl per
+    `(Trait, Type)` pair) is the minimum.
+  - **Named impls per ADR 0021 D5**: `impl Name = Trait for
+    Type { ... }` — coherence is scope-local per ADR 0021 D7,
+    so multiple named impls of the same `(Trait, Type)` can
+    coexist. Resolve-level disambiguation by name.
+  - **Dispatch**: static at C4.2 minimum (per ADR 0021 D10).
+    Generic fns with `fn f<T: Trait>(...)` lower via witness-
+    table parameter passing per ADR 0016 D7's monomorphic
+    discipline.
+  - **No new lexer tokens**: `trait`, `impl`, `as`, `for`
+    reserved at C4.0 — parser activates them at C4.2.
+
+**C4.2 sub-phase split** (estimate per ADR 0021 D14, 2-3
+sessions total):
+
+  - **C4.2 (1/N)**: AST + parser for trait decls + impl
+    blocks. Mirror the C4.1 (1/N) pattern — surface lands
+    without downstream wiring.
+  - **C4.2 (2/N)**: resolve (TraitId + impl registration) +
+    types (witness-table threading) + codegen (per-impl
+    method emission + static dispatch). Phase-go fixture
+    (`c42_go_no_go.sentinel`) — a trait with one method, two
+    implementing types, a generic fn using the trait bound,
+    end-to-end exit code.
+
+**C4.1 follow-ons remain available** (none blocking C4.2):
+
+  - **Branch-aware definite-assignment**: extend the flat
+    any-assigned check with if/else snapshot+merge mirroring
+    the C2 borrow CFG; add a UI fixture pinning the per-arm
+    bitmap (init assigning `x` only in the if-branch).
   - **InitFieldReadBeforeAssign**: detect reads of
     `self.field` before the field's first assignment within
-    the init body. Mid-body read dataflow with a per-stmt
-    "may have been read" tracker. ADR 0022 D4 specs this; the
-    C4.1 (2/N) impl skips it.
+    the init body.
   - **Non-lvalue receiver MethodCall**: support
-    `Point::init(1, 2).manhattan()` directly. The current
-    codegen requires `lower_lvalue_ptr` on the receiver, so
-    expressions like a chained init-then-method need an
-    alloca + store + GEP detour.
-  - **`Block.tail` becoming `Option<Expr>`**: closes the
-    placeholder-`0` workaround in init bodies. Cross-cutting
-    parser + AST + typing + codegen change; small but
-    touches every block-handling site.
-  - **`ClassConstructionMustUseInit`**: currently unreachable
-    because resolve catches struct-lit-on-class as
-    UndefinedStruct first. Promote to a resolve-level
-    detection (peek at class_table before failing with
-    UndefinedStruct) for clearer diagnostics.
-
-**Moving to C4.2 traits + named impls** is the natural next
-step per ADR 0021 D14. C4.2 brings:
-
-  - **Parser**: `trait Name { fn sig; ... }` + `impl Trait
-    for Type { ... }` (+ named impls via
-    `impl Name = Trait for Type`).
-  - **Resolve**: `TraitId(u32)` interner + per-trait method
-    signatures + impl registration.
-  - **Types**: trait-bound dispatch (static at C4.2 minimum
-    per ADR 0021 D10; dyn Trait is post-C4.2). Witness-table
-    threading for generic fns with trait bounds.
-  - **Codegen**: monomorphic impl methods at static dispatch
-    sites; witness-table parameter passing for generic-fn
-    bound dispatch.
-
-ADR 0023 PROPOSED at C4.2 open will detail the surface. Per
-ADR 0021 D14 the estimate is 2-3 sessions for C4.2. The bootstrap language surface at C3.7 close has the
+    `Point::init(1, 2).manhattan()` directly via alloca +
+    store + GEP detour at the call site.
+  - **`Block.tail` → `Option<Expr>`**: closes the placeholder-
+    `0` workaround in init bodies. Cross-cutting parser +
+    AST + typing + codegen change.
+  - **`ClassConstructionMustUseInit` promotion**: move from
+    types-level to resolve-level so struct-lit-on-class
+    gives the clearer diagnostic instead of UndefinedStruct.
+  - **Generic classes**: `class Pair<A, B>` per ADR 0022 D1's
+    revisit trigger. Resolve+types+codegen monomorphisation
+    extension; AST already supports the surface shape. The bootstrap language surface at C3.7 close has the
 full memory-safety + secret-typing + effect-system trifecta
 from HANDOVER §6.2:
 
@@ -1427,19 +1494,15 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last work: **C4.1 (2/N) — resolve / types / codegen wired up
-    for classes; postfix `.method(args)` + `Name::init(args)`
-    ship end-to-end per ADR 0022 D3 + D5 + D7 + D9.
-    `ResolvedExprKind::{MethodCall,ClassInit}` +
-    `TypedExprKind::{MethodCall,ClassInit}` + new
-    `Type::Class(ClassId)` interner (eighth Copy+Hash
-    preserving interner). Codegen emits per-class LLVM
-    struct + `Name__init(out_ptr, args)` ABI + per-method
-    `Name__method(self_ptr, args)`. Definite-assignment runs
-    at type-check as a flat any-assigned check
-    (InitFieldMaybeUnassigned); branch-aware merge deferred.
-    c41_go_no_go (Point with manhattan/translate methods) exits
-    42 per ADR 0022 D11.**
+    Last work: **C4.1 close — ADR 0022 → ACCEPTED-WITH-AMENDMENTS.
+    Phase C4.1 closes.** Two amendments: A1 D4 definite-
+    assignment is partial (flat any-assigned check; branch-
+    aware merge + InitFieldReadBeforeAssign deferred); A2 D8
+    general `Self` in type position deferred (only positional
+    `self: &Self` via parse_self_param). All eleven D-decisions
+    exercised. ADR 0021 stays PROPOSED until C4.5 close. **Next
+    session opens C4.2** — traits + named impls per ADR 0021
+    D14. ADR 0023 PROPOSED at C4.2 open.
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
