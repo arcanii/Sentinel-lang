@@ -12,7 +12,143 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C4.1 (1/N): class AST + parser landed per ADR 0022.**
+Last updated: **C4.1 (2/N): resolve / types / codegen wired up for classes;
+`Name::init(args)` + postfix `.method(args)` ship end-to-end.**
+ADRs 0021 + 0022 stay PROPOSED until C4.1 close. Second of
+the C4.1 sub-iterations: class declarations now flow through
+the full pipeline. `Point::init(10, 20).translate(3, 9)` works
+end-to-end per ADR 0022 D11. Definite-assignment runs at type-
+check with a flat any-assigned check (branch-aware merge
+deferred); the c41_init_field_unassigned UI fixture pins the
+rejection.
+
+**Parser additions**: postfix `.method(args)` extension to
+`parse_postfix` (Dot followed by Ident-then-LParen produces
+`ExprKind::MethodCall`; Ident-then-anything-else produces
+`FieldAccess` as before). `Name::init(args)` extension to
+`parse_atom`'s Ident arm (Ident followed by `::` then `init`
+then `(args)` produces `ExprKind::ClassInit`). Non-`init`
+associated fns (`Name::new(...)`) rejected with a clear
+expected-`init` diagnostic; the surface stays minimal at C4.1
+per ADR 0022 D5.
+
+**AST additions**: two new `ExprKind` variants
+— `MethodCall { target, method, method_span, args }` and
+`ClassInit { class_name, class_name_span, args }`. Display
+impls follow the existing pattern.
+
+**Resolve additions**: `ClassId(u32)` interner +
+`ResolvedClassDecl` / `ResolvedClassField` / `ResolvedInitDef`
+/ `ResolvedMethodDef` parallel-tree types +
+`ResolvedProgram.classes: Vec<ResolvedClassDecl>`. Pass 0c
+builds class_table alongside struct_table; classes share a
+namespace with structs (RedefinedClass on collision). Pass 3
+resolves init + method bodies; each binds synthetic `self`
+VarId so `Var("self")` lookups against the standard vars
+HashMap. `ResolvedExprKind` gains `MethodCall` + `ClassInit`
+variants (parallel to AST). Five new ResolveError variants:
+RedefinedClass, UndefinedClass, DuplicateClassField,
+DuplicateClassMethod, SelfOutsideClassContext (fires when
+`self` used outside a class context, e.g., `fn main() { self
+}`).
+
+**Types additions**: `Type::Class(ClassId)` interner extension
+preserving the `Copy + Hash` invariant (the eighth interner-
+table ADR running: 0014 / 0015 / 0016 / 0017 / 0019 / 0020 /
+0022). `TypedProgram.class_decls: Vec<ClassData>` holds
+field types + init signature + per-method signatures with
+bodies. Pass 0 builds both struct_table AND class_table so
+field/signature type-exprs can reference either. Pass 3.5
+(new) populates class signatures with stub bodies before fn-
+body type-check so fn bodies can call `Name::init(args)` /
+`obj.method(args)` via the typed class_decls table. Pass 5
+(new) overwrites stubs with real type-checked bodies. `self`
+binds as `Type::Class(class_id)` with the mutable bit
+tracking `&Self` (false) vs `&mut Self` (true) — keeps the
+existing struct field-access + assignment machinery
+applicable without new ref-deref logic. **FieldAccess** in
+`check_expr` extends with a `Type::Class` arm (lookup via
+`ClassData::field`). **Definite-assignment** (minimal): walk
+init body, collect field names assigned via `self.field =
+expr` anywhere; reject any declared field not in the set with
+InitFieldMaybeUnassigned. Branch-aware merge (if/else
+snapshot+restore mirroring the C2 borrow CFG) deferred to a
+follow-on iteration. Two new `TypedExprKind` variants
+(MethodCall + ClassInit) with `Substitute` impls + walk
+methods updated across walk_expr_for_mono / count_performs /
+find_unique_perform / walk_collect_var_refs /
+find_var_name_in_expr. Six new TypeError variants:
+InitFieldMaybeUnassigned, ClassConstructionMustUseInit
+(reserved but currently unused — the resolve-layer
+UndefinedStruct catches struct-lit on class names),
+MethodNotFound, MethodCallOnNonClass,
+ClassInitArityMismatch, MethodArityMismatch.
+
+**Codegen additions**: per-class LLVM struct type in pass 0
+(declared opaque alongside structs, body set after); per-class
+init + per-method LLVM fn declarations in pass 1 (mangled as
+`Name__init` / `Name__method`); per-class body compilation in
+pass 2 via the new `compile_class` method. Init has the
+`out_ptr` ABI per ADR 0022 D9 — first param is a pointer to
+caller-provided storage; field writes inside the body GEP into
+that storage. Methods take `self_ptr` as the first param.
+**Inside init/method bodies** self_var_id binds directly to
+the incoming pointer (no extra alloca + store + load); subsequent
+`self.field` reads + writes GEP straight into the class
+storage. **MethodCall** lowers via `lower_lvalue_ptr` on the
+receiver + direct call to the mangled method fn. **ClassInit**
+lowers via alloca for the class struct + call to the mangled
+init fn (passing alloca as out_ptr) + load of the alloca.
+Drop emission for class instances follows the C2.4 recursive
+struct field drop machinery (Class arm in
+`emit_drop_for_binding`); at C4.1 minimum class fields are
+typically primitives so no actual drop work fires for the
+phase-go fixture.
+
+**Three new C4.1 fixtures**:
+- `c41_class_basic.sentinel`: single-field Point with init +
+  one shared-self `get` method; `Point::init(7).get()` exits 7.
+- `c41_go_no_go.sentinel` (ADR 0022 D11 phase-go): Point with
+  two i64 fields + init + shared-self `manhattan` +
+  exclusive-self `translate` (which mutates fields then calls
+  `self.manhattan()`); p starts at (10, 20); translate(3, 9)
+  updates to (13, 29) and returns 42.
+- `c41_init_field_unassigned.sentinel` (UI): Pair declares
+  `a` + `b` but init only assigns `a`;
+  `sentinel::types::init_field_maybe_unassigned` fires.
+
+**Init body limitation carries forward**: init bodies still
+parse with a trailing placeholder `0` per the C4.1 (1/N)
+note; codegen's `compile_class` strips this by lowering only
+the stmts (not the tail) for init. `Block.tail` becoming
+`Option<Expr>` is still queued as a follow-on cleanup.
+
+**Carry-overs from this iteration**:
+- Branch-aware definite-assignment dataflow (if/else
+  snapshot+merge) — current impl is flat any-assigned. Pin
+  with an additional UI fixture when it lands.
+- Non-lvalue receiver MethodCall (e.g.,
+  `Point::init(1, 2).manhattan()` directly) — current impl
+  requires an lvalue receiver. Needs an alloca-store-GEP
+  detour at the call site.
+- `ClassConstructionMustUseInit` is declared but unreachable
+  because resolve catches struct-lit-on-class as
+  UndefinedStruct first. A follow-on can promote the
+  diagnostic for a clearer error.
+
+Workspace test delta from C4.1 (1/N) close: +17 (1124 total)
+— +4 syntax parser (method-call postfix + ClassInit + chains
+with field-access + non-`init` rejection), +10 resolve
+(positive class-decl id assignment / init-call / method-call /
+Self in method + 6 rejection paths), +3 driver
+(c41_class_basic + c41_go_no_go + c41_init_field_unassigned
+UI). **Phase C4.1 (2/N) closes here.** Next: C4.1 close-out
+— phase-go integration + ADR 0022 PROPOSED → ACCEPTED flip
+(if all D-decisions exercised cleanly; D6's partial-init
+field-lvalue form may want a follow-on note), then
+**Phase C4.2** — traits + named impls per ADR 0021 D14.
+
+Pre-C4.1(2/N) context: **C4.1 (1/N): class AST + parser landed per ADR 0022.**
 ADRs 0021 + 0022 stay PROPOSED. First of the C4.1 sub-iterations:
 class declarations parse end-to-end at the AST + parser layer.
 Downstream passes (resolve / types / codegen) leave classes

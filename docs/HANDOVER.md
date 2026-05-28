@@ -84,7 +84,8 @@ C1.3. See STATE.md Section C.
 **Phase C3.6(b) — nested handles per ADR 0020 D3: handle_depth counter detects nesting; inner handles emit Kont*-typed merge values; switch default propagates un-caught op to outer's dispatch via the merge — complete.**
 **Phase C3.7 — handle body lift + phase-go fixtures + ADR 0020 → ACCEPTED-WITH-AMENDMENTS — complete. Phase C3 closes.**
 **Phase C4.0 — lexer keywords for classes / traits / delegation / structured concurrency per ADR 0021 D11 — complete.**
-**Phase C4.1 (1/N) — class AST + parser per ADR 0022 D1-D4 — complete. Downstream resolve/types/codegen wiring still pending.**
+**Phase C4.1 (1/N) — class AST + parser per ADR 0022 D1-D4 — complete.**
+**Phase C4.1 (2/N) — resolve / types / codegen wiring + postfix `.method(args)` + `Name::init(args)` per ADR 0022 D3+D5+D7+D9 — complete. Definite-assignment via flat any-assigned check (branch-aware merge deferred); ADR 0022 D11 phase-go (Point with manhattan/translate) runs end-to-end at exit 42.**
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -952,40 +953,61 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C4.1 2/N — resolve / types / codegen + method calls)
+### 0.2 Next session opening (C4.1 close-out → C4.2 trait + impl surface)
 
-Resume at **C4.1 second iteration** per ADR 0022. **C4.1
-first iteration closed: AST + parser bring up the class
-surface; downstream passes leave classes untouched.** ADRs
-0021 + 0022 stay PROPOSED. The next iteration brings up:
+Resume at **C4.1 close-out** per ADR 0022, or move to
+**C4.2** per ADR 0021 D14. **C4.1 (2/N) closed**:
+resolve / types / codegen wired up for classes; postfix
+`.method(args)` and `Name::init(args)` ship end-to-end per
+ADR 0022 D3 + D5 + D7 + D9. Definite-assignment runs at
+type-check with a flat any-assigned check; the
+c41_init_field_unassigned UI fixture pins the rejection.
 
-  - **Parser**: postfix `.method(args)` method-call form +
-    `Name::init(args)` instantiation call. Both add new
-    `ExprKind` variants (MethodCall / ClassInit) at the
-    AST.
-  - **Resolve**: `ClassId(u32)` interner, method-table
-    population per class, `Self` resolution inside class
-    bodies, `self` synthetic VarId, ResolveError variants
-    for class-context violations.
-  - **Types**: `Type::Class(ClassId)` interner extension
-    (Copy + Hash preserved), method-signature check
-    requiring a `self` first param, **definite-assignment
-    dataflow for init bodies** (per-field bitmap, if/else
-    snapshot+merge mirroring the C2 borrow CFG) + four new
-    TypeError variants (`InitFieldMaybeUnassigned`,
-    `InitFieldReadBeforeAssign`,
-    `ClassConstructionMustUseInit`,
-    `SelfOutsideClassContext`).
-  - **Codegen**: LLVM struct per class + per-method fn +
-    init `out_ptr` ABI + auto-ref method calls.
-  - **Block.tail Option**: replacing the placeholder-0
-    workaround in init bodies. The typing layer treats
-    void-tailed blocks as implicit-i64-zero or as a real
-    void return — TBD per the typing pass design.
+**Pre-C4.2 follow-ons available** (none blocking):
 
-Per ADR 0022 D11, C4.1 closes with the `c41_go_no_go.sentinel`
-phase-go fixture (Point class with manhattan/translate
-methods). The bootstrap language surface at C3.7 close has the
+  - **Branch-aware definite-assignment**: extend the C4.1
+    (2/N) flat any-assigned check with if/else snapshot+merge
+    mirroring the C2 borrow CFG so init bodies with
+    conditional field writes get a proper per-arm bitmap.
+    Pin with an additional UI fixture (init that assigns
+    `x` only in the if-branch but not the else-branch).
+  - **InitFieldReadBeforeAssign**: detect reads of
+    `self.field` before the field's first assignment within
+    the init body. Mid-body read dataflow with a per-stmt
+    "may have been read" tracker. ADR 0022 D4 specs this; the
+    C4.1 (2/N) impl skips it.
+  - **Non-lvalue receiver MethodCall**: support
+    `Point::init(1, 2).manhattan()` directly. The current
+    codegen requires `lower_lvalue_ptr` on the receiver, so
+    expressions like a chained init-then-method need an
+    alloca + store + GEP detour.
+  - **`Block.tail` becoming `Option<Expr>`**: closes the
+    placeholder-`0` workaround in init bodies. Cross-cutting
+    parser + AST + typing + codegen change; small but
+    touches every block-handling site.
+  - **`ClassConstructionMustUseInit`**: currently unreachable
+    because resolve catches struct-lit-on-class as
+    UndefinedStruct first. Promote to a resolve-level
+    detection (peek at class_table before failing with
+    UndefinedStruct) for clearer diagnostics.
+
+**Moving to C4.2 traits + named impls** is the natural next
+step per ADR 0021 D14. C4.2 brings:
+
+  - **Parser**: `trait Name { fn sig; ... }` + `impl Trait
+    for Type { ... }` (+ named impls via
+    `impl Name = Trait for Type`).
+  - **Resolve**: `TraitId(u32)` interner + per-trait method
+    signatures + impl registration.
+  - **Types**: trait-bound dispatch (static at C4.2 minimum
+    per ADR 0021 D10; dyn Trait is post-C4.2). Witness-table
+    threading for generic fns with trait bounds.
+  - **Codegen**: monomorphic impl methods at static dispatch
+    sites; witness-table parameter passing for generic-fn
+    bound dispatch.
+
+ADR 0023 PROPOSED at C4.2 open will detail the surface. Per
+ADR 0021 D14 the estimate is 2-3 sessions for C4.2. The bootstrap language surface at C3.7 close has the
 full memory-safety + secret-typing + effect-system trifecta
 from HANDOVER §6.2:
 
@@ -1405,16 +1427,19 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last work: **C4.1 (1/N) — class declarations parse at
-    AST + parser per ADR 0022 D1-D4 (ClassDecl / ClassField /
-    InitDef / MethodDef / SelfKind / Visibility AST types;
-    ColonColon lexer token; parse_class_decl + dispatchers;
-    parse_atom SelfVal arm emitting Var("self");
-    DuplicateClassInit parse error). Downstream resolve /
-    types / codegen leave classes untouched in this
-    iteration; next iteration brings them up alongside
-    method-call parsing + Type::Class interner + definite-
-    assignment dataflow.**
+    Last work: **C4.1 (2/N) — resolve / types / codegen wired up
+    for classes; postfix `.method(args)` + `Name::init(args)`
+    ship end-to-end per ADR 0022 D3 + D5 + D7 + D9.
+    `ResolvedExprKind::{MethodCall,ClassInit}` +
+    `TypedExprKind::{MethodCall,ClassInit}` + new
+    `Type::Class(ClassId)` interner (eighth Copy+Hash
+    preserving interner). Codegen emits per-class LLVM
+    struct + `Name__init(out_ptr, args)` ABI + per-method
+    `Name__method(self_ptr, args)`. Definite-assignment runs
+    at type-check as a flat any-assigned check
+    (InitFieldMaybeUnassigned); branch-aware merge deferred.
+    c41_go_no_go (Point with manhattan/translate methods) exits
+    42 per ADR 0022 D11.**
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1436,10 +1461,10 @@ For pasting into a fresh chat to bootstrap context:
     concurrency; 14 D-decisions; 6 sub-phases; 8-12 sessions);
     **ADR 0022 PROPOSED** details C4.1 class surface (11 D-
     decisions; ~700-1000 LOC across AST + parser + resolve +
-    types + codegen). **C4.1 (1/N) landed**: AST + parser only;
-    downstream wiring is the next iteration. 1107 active
-    workspace tests + 1 doctest.
-    **Thirty-two go/no-go programs run end-to-end + 1 UI rejection:** c05_go_no_go
+    types + codegen). **C4.1 (1/N) + (2/N) landed**: AST +
+    parser + resolve + types + codegen all wired up end-to-
+    end. 1124 active workspace tests + 1 doctest.
+    **Thirty-three go/no-go programs run end-to-end + 2 UI rejections:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
     nullable): "142"; c16_go_no_go (C1.6 array): "15";
@@ -1498,7 +1523,15 @@ For pasting into a fresh chat to bootstrap context:
     **c37_handle_return (C3.7 `handle 42 with { return v =>
     v * 2 }` — pure body wrapped via sentinel_kont_pure): exit
     84**; **c37_perform_outside_handle (C3.7 UI: bare perform
-    in main → unhandled_effect rejection): snc exit 1**,
+    in main → unhandled_effect rejection): snc exit 1**;
+    **c41_class_basic (C4.1 (2/N) smallest class:
+    `Point::init(7).get()` end-to-end): exit 7**; **c41_go_no_go
+    (C4.1 (2/N) ADR 0022 D11 phase-go: Point with manhattan
+    + translate methods; `let mut p = Point::init(10,20);
+    p.translate(3,9)` calls self.manhattan() to return
+    13+29=42): exit 42**; **c41_init_field_unassigned (C4.1
+    (2/N) UI: init doesn't assign declared field b →
+    init_field_maybe_unassigned rejection): snc exit 1**,
     exit 0.
 
     Pipeline at C3.1: **parse_query → resolve_query →
@@ -1507,14 +1540,17 @@ For pasting into a fresh chat to bootstrap context:
     check_query and borrow_check_query at C3.2 per ADR 0019
     D11). Diagnostics transitively accumulated.
 
-    Type universe at C3.4 close: `{ I64, I32, Bool,
+    Type universe at C4.1 (2/N) close: `{ I64, I32, Bool,
     Struct(StructId), Nullable(NullableInner),
     Array(ArrayElem), TypeParam(TypeParamId),
     GenericInstance(GenericInstanceId), Ref(RefId),
-    Secret(SecretId), Kont(KontId) }`. `Type::Kont` is the
-    seventh interner-table ADR running
-    (0014+0015+0016+0017+0019+0020) preserving
-    `Type: Copy + Hash`. TypedProgram.konts: Vec<KontData
+    Secret(SecretId), Kont(KontId), Class(ClassId) }`.
+    `Type::Class` is the **eighth** interner-table ADR running
+    (0014+0015+0016+0017+0019+0020+0022) preserving
+    `Type: Copy + Hash`. TypedProgram.class_decls:
+    Vec<ClassData { fields, init, methods }> indexes per-
+    class signature + body populated during type-check.
+    TypedProgram.konts: Vec<KontData
     { arg_ty: Type, ret_ty: Type }> indexes per-handler-arm
     continuations populated during type-check.
     TypedProgram.secrets: Vec<SecretData>
