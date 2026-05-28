@@ -84,6 +84,7 @@ C1.3. See STATE.md Section C.
 **Phase C3.6(b) — nested handles per ADR 0020 D3: handle_depth counter detects nesting; inner handles emit Kont*-typed merge values; switch default propagates un-caught op to outer's dispatch via the merge — complete.**
 **Phase C3.7 — handle body lift + phase-go fixtures + ADR 0020 → ACCEPTED-WITH-AMENDMENTS — complete. Phase C3 closes.**
 **Phase C4.0 — lexer keywords for classes / traits / delegation / structured concurrency per ADR 0021 D11 — complete.**
+**Phase C4.1 (1/N) — class AST + parser per ADR 0022 D1-D4 — complete. Downstream resolve/types/codegen wiring still pending.**
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -951,37 +952,40 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C4.1 implementation — AST/parser first)
+### 0.2 Next session opening (C4.1 2/N — resolve / types / codegen + method calls)
 
-Resume at **C4.1 implementation** per ADR 0022. **C4.0
-closed: lexer reserves the 12 Phase C4 keywords; ADR 0022
-PROPOSED details the C4.1 surface.** ADRs 0021 + 0022 stay
-PROPOSED. Per ADR 0022 the C4.1 implementation footprint is
-~700-1000 LOC across AST + parser + resolve + types +
-codegen; the next session(s) bring up:
+Resume at **C4.1 second iteration** per ADR 0022. **C4.1
+first iteration closed: AST + parser bring up the class
+surface; downstream passes leave classes untouched.** ADRs
+0021 + 0022 stay PROPOSED. The next iteration brings up:
 
-  - **AST**: `ClassDecl { name, fields, init, methods }` +
-    `Init` + `Method`. `Program.classes` alongside `.fns`
-    and `.structs`.
-  - **Parser**: `parse_class_decl` dispatching to
-    `parse_class_item` → field / init / method; new
-    `parse_self_param` for the `self: &mut? Self` form;
-    `Name::init(args)` calls (with a possible `ColonColon`
-    token addition if a two-Colon sequence is awkward —
-    decision deferred to implementation).
+  - **Parser**: postfix `.method(args)` method-call form +
+    `Name::init(args)` instantiation call. Both add new
+    `ExprKind` variants (MethodCall / ClassInit) at the
+    AST.
   - **Resolve**: `ClassId(u32)` interner, method-table
     population per class, `Self` resolution inside class
-    bodies, `self` synthetic VarId.
+    bodies, `self` synthetic VarId, ResolveError variants
+    for class-context violations.
   - **Types**: `Type::Class(ClassId)` interner extension
     (Copy + Hash preserved), method-signature check
-    requiring a `self` first param, definite-assignment
-    dataflow for init bodies + four new TypeError variants
-    (`InitFieldMaybeUnassigned`,
+    requiring a `self` first param, **definite-assignment
+    dataflow for init bodies** (per-field bitmap, if/else
+    snapshot+merge mirroring the C2 borrow CFG) + four new
+    TypeError variants (`InitFieldMaybeUnassigned`,
     `InitFieldReadBeforeAssign`,
     `ClassConstructionMustUseInit`,
     `SelfOutsideClassContext`).
   - **Codegen**: LLVM struct per class + per-method fn +
-    init `out_ptr` ABI + auto-ref method calls. The bootstrap language surface at C3.7 close has the
+    init `out_ptr` ABI + auto-ref method calls.
+  - **Block.tail Option**: replacing the placeholder-0
+    workaround in init bodies. The typing layer treats
+    void-tailed blocks as implicit-i64-zero or as a real
+    void return — TBD per the typing pass design.
+
+Per ADR 0022 D11, C4.1 closes with the `c41_go_no_go.sentinel`
+phase-go fixture (Point class with manhattan/translate
+methods). The bootstrap language surface at C3.7 close has the
 full memory-safety + secret-typing + effect-system trifecta
 from HANDOVER §6.2:
 
@@ -1401,16 +1405,16 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last work: **ADR 0022 PROPOSED — concrete C4.1 class
-    surface (11 D-decisions: class decl grammar, fields,
-    methods with `self: &Self`/`&mut Self`, `init(args)`
-    constructor with definite-assignment dataflow,
-    `Name::init(args)` instantiation rejecting struct-literal
-    for classes, static method dispatch, `Self`/`self`
-    resolution, LLVM lowering via per-class struct + per-
-    method fn + init `out_ptr` ABI). Per ADR 0022 the next
-    code-bearing session brings up AST + parser for the
-    class surface — ~700-1000 LOC across crates total.**
+    Last work: **C4.1 (1/N) — class declarations parse at
+    AST + parser per ADR 0022 D1-D4 (ClassDecl / ClassField /
+    InitDef / MethodDef / SelfKind / Visibility AST types;
+    ColonColon lexer token; parse_class_decl + dispatchers;
+    parse_atom SelfVal arm emitting Var("self");
+    DuplicateClassInit parse error). Downstream resolve /
+    types / codegen leave classes untouched in this
+    iteration; next iteration brings them up alongside
+    method-call parsing + Type::Class interner + definite-
+    assignment dataflow.**
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1432,7 +1436,9 @@ For pasting into a fresh chat to bootstrap context:
     concurrency; 14 D-decisions; 6 sub-phases; 8-12 sessions);
     **ADR 0022 PROPOSED** details C4.1 class surface (11 D-
     decisions; ~700-1000 LOC across AST + parser + resolve +
-    types + codegen). 1093 active workspace tests + 1 doctest.
+    types + codegen). **C4.1 (1/N) landed**: AST + parser only;
+    downstream wiring is the next iteration. 1107 active
+    workspace tests + 1 doctest.
     **Thirty-two go/no-go programs run end-to-end + 1 UI rejection:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5

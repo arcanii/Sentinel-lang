@@ -12,7 +12,63 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **ADR 0022 PROPOSED: concrete C4.1 class surface.**
+Last updated: **C4.1 (1/N): class AST + parser landed per ADR 0022.**
+ADRs 0021 + 0022 stay PROPOSED. First of the C4.1 sub-iterations:
+class declarations parse end-to-end at the AST + parser layer.
+Downstream passes (resolve / types / codegen) leave classes
+untouched — `Program.classes` is a fresh Vec they don't yet
+iterate. Class declarations parse but go nowhere through the
+pipeline; the resolve/types/codegen wiring is the next C4.1
+sub-iteration.
+
+**AST additions**:
+- `ClassDecl { name, fields, init, methods, span }` alongside
+  `Program.fns` / `.structs` / `.effects`.
+- `ClassField { visibility, name, ty }`.
+- `InitDef { visibility, params, body }`.
+- `MethodDef { visibility, name, self_kind, params,
+  return_type, effect_row, body }`.
+- `Visibility { Private, Public }` parsed but not enforced
+  until Phase C5 modules.
+- `SelfKind { Shared, Exclusive }` captures
+  `self: &Self` vs `self: &mut Self`.
+
+**Lexer addition**: `ColonColon` token for `Name::init(args)`
+per ADR 0022 D5.
+
+**Parser additions**: `parse_class_decl` + dispatchers
+(`parse_class_field` / `parse_init_decl` / `parse_method_decl`
+/ `parse_self_param` / `parse_optional_visibility`). Generic
+classes (`class Pair<A, B>`) explicitly rejected per ADR 0022
+D1; the typed AST extension is its own follow-on. The new
+`DuplicateClassInit` ParseError variant enforces ADR 0022 D4's
+at-most-one-init rule.
+
+**`parse_atom`** gains a `SelfVal` arm: `self` is emitted as
+`Var("self")` at the AST layer; resolve checks the class-
+context constraint per ADR 0022 D8.
+
+**Init body limitation**: the existing `Block` requires a
+trailing expression; init bodies temporarily carry a
+placeholder `0` until `block.tail` becomes `Option` in a
+follow-on. The typing layer will strip the placeholder when
+init resolution lands.
+
+**Method-call form** (`obj.method(args)`) is NOT in this
+iteration — postfix `.method(args)` parsing arrives alongside
+the resolve/types/codegen wiring. Method bodies that
+reference other methods use direct-field-access workarounds
+in the parser tests.
+
+Workspace test delta from ADR 0022 PROPOSED: +14 (1107 total)
+— +3 lexer (ColonColon + colon-vs-coloncolon + init-call
+skeleton) + +11 parser (empty class / fields-only / pub field
+/ init / methods / full-surface + 3 rejection paths).
+**Phase C4.1 (1/N) closes here.** Next: C4.1 second iteration
+— resolve / types / codegen wiring + method-call parsing +
+typed `Type::Class(ClassId)` interner.
+
+Pre-C4.1(1/N) context: **ADR 0022 PROPOSED: concrete C4.1 class surface.**
 No code changes — this is the C4.1 detail ADR mirroring ADR
 0013 (C1.4 structs) within the larger Phase C4 plan from ADR
 0021. Eleven D-decisions cover the class declaration grammar
