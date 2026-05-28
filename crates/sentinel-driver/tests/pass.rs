@@ -673,3 +673,15 @@ fn pass_c25_go_no_go() {
     assert_eq!(r.stdout, "190\n");
     assert_eq!(r.exit, 0);
 }
+
+// ---- C3.1 / ADR 0019 D5+D6: secret typing + declassify ----
+
+#[test]
+fn pass_c31_secret_typing() {
+    // `let stored: secret i64 = 42;` implicit-widens 42 to
+    // secret i64; declassify strips it back to i64 inside the
+    // `unwrap` fn. 42 + 8 = 50.
+    let r = build_and_run("c31_secret_typing.sentinel");
+    assert_eq!(r.stdout, "50\n");
+    assert_eq!(r.exit, 0);
+}

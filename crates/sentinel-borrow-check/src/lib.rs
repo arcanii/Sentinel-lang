@@ -798,11 +798,20 @@ fn walk_expr(
                 // type is Move-classified. This is a CONSUMING
                 // context (Var in expr position, not postfix
                 // receiver / not lvalue).
-                check_and_record_move(*id, expr.ty, &expr.span, ctx, errors);
+                check_and_record_move(*id, expr.ty, &expr.span, ctx, errors, program);
             }
         }
 
         TypedExprKind::WidenToNullable(inner) => {
+            walk_expr(inner, ctx, errors, program);
+        }
+
+        // C3 / ADR 0019 D5+D6 (C3.1): the new typed wrappers
+        // (`secret(T)` widen + declassify strip) don't change move/
+        // borrow semantics — they're purely type-level. Walk the
+        // inner and let normal moves/borrows flow through.
+        TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner) => {
             walk_expr(inner, ctx, errors, program);
         }
 
@@ -1098,7 +1107,7 @@ fn place_name(ctx: &FnCtx, id: VarId) -> String {
 ///
 /// The C2.3 implementation deliberately punts on partial-move
 /// tracking (field-disjoint moves) per the module-doc rationale.
-fn is_copy_type(ty: Type) -> bool {
+fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
     match ty {
         Type::I64 | Type::I32 | Type::Bool | Type::Ref(_) => true,
         Type::Nullable(inner) => is_copy_nullable_inner(inner),
@@ -1106,6 +1115,11 @@ fn is_copy_type(ty: Type) -> bool {
         | Type::Array(_)
         | Type::GenericInstance(_)
         | Type::TypeParam(_) => false,
+        // C3 / ADR 0019 D5: Copy-ness of `secret T` follows the
+        // inner type — `secret i64` is Copy; `secret Bag` is Move.
+        // The secret qualifier is orthogonal to ownership;
+        // borrow-check unwraps it before deciding.
+        Type::Secret(id) => is_copy_type(program.secret_data(id).inner, program),
     }
 }
 
@@ -1130,12 +1144,13 @@ fn check_and_record_move(
     use_span: &Span,
     ctx: &mut FnCtx,
     errors: &mut Vec<BorrowError>,
+    program: &TypedProgram,
 ) {
     if let Some(move_span) = ctx.moved.get(&id).cloned() {
         emit_use_after_move(ctx, errors, id, &move_span, use_span);
         return;
     }
-    if !is_copy_type(ty) {
+    if !is_copy_type(ty, program) {
         ctx.moved.insert(id, use_span.clone());
         ctx.moved_sources_union.insert(id);
     }

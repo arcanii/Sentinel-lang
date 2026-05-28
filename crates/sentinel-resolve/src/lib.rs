@@ -316,6 +316,11 @@ pub enum ResolvedExprKind {
         target: Box<ResolvedExpr>,
         index: Box<ResolvedExpr>,
     },
+    /// C3 / ADR 0019 D6 (C3.1): `declassify(e)` strips one layer
+    /// of `secret` from the inner expression. Type-check validates
+    /// the inner is `secret T` and produces T as the result.
+    /// Idempotent on non-secret types per ADR 0008 D5.
+    Declassify(Box<ResolvedExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1039,14 +1044,19 @@ fn resolve_expr(
                 index: Box::new(index),
             }
         }
-        ExprKind::Declassify(_inner) => {
-            // C3 / ADR 0019 D6 (C3.0 deferral): `declassify(e)`
-            // parses at C3.0 but waits for C3.1's secret typing
-            // to actually resolve. We bail at the resolve layer
-            // pointing to the whole declassify expression.
-            return Err(ResolveError::DeclassifyNotYet {
-                span: to_source_span(&expr.span),
-            });
+        ExprKind::Declassify(inner) => {
+            // C3 / ADR 0019 D6 (C3.1): mirror the AST variant into
+            // the resolved tree; type-check validates the inner is
+            // `secret T` and strips the wrapper.
+            let inner = resolve_expr(
+                inner,
+                fn_table,
+                signatures,
+                struct_table,
+                vars,
+                next_var_id,
+            )?;
+            ResolvedExprKind::Declassify(Box::new(inner))
         }
     };
     Ok(Spanned { kind, span: expr.span.clone() })
@@ -1698,32 +1708,24 @@ mod tests {
     }
 
     #[test]
-    fn c30_declassify_is_rejected_at_resolve() {
+    fn c30_declassify_on_undefined_var_still_routes_to_undefined_var() {
+        // declassify resolves at C3.1, but its inner is still
+        // resolved — an undefined Var inside surfaces normally.
         let err = resolve_err("fn main() -> i64 { declassify(x) }");
-        // The DeclassifyNotYet error fires when the resolver
-        // walks the declassify expression — but the inner Var(x)
-        // would also be UndefinedVariable. Either error is fine;
-        // both are valid resolver rejections. We just confirm we
-        // reject before C3.1.
         assert!(
-            matches!(
-                err,
-                ResolveError::DeclassifyNotYet { .. } | ResolveError::UndefinedVariable { .. }
-            ),
+            matches!(err, ResolveError::UndefinedVariable { .. }),
             "got {err:?}"
         );
     }
 
     #[test]
-    fn c30_declassify_on_defined_var_routes_to_declassify_not_yet() {
-        // With a defined variable, the UndefinedVariable path
-        // doesn't fire — DeclassifyNotYet is what surfaces.
-        let err = resolve_err(
+    fn c31_declassify_on_defined_var_resolves() {
+        // At C3.1 declassify is no longer rejected at resolve.
+        // Type-checking is what validates the inner is `secret T`.
+        // The resolve step alone succeeds.
+        let p = resolve_ok(
             "fn main() -> i64 { let x: i64 = 1; declassify(x) }",
         );
-        assert!(
-            matches!(err, ResolveError::DeclassifyNotYet { .. }),
-            "got {err:?}"
-        );
+        assert!(!p.fns.is_empty());
     }
 }

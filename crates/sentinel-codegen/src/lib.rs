@@ -46,8 +46,8 @@ use sentinel_resolve::{
     FnId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
 };
 use sentinel_types::{
-    ArrayElem, GenericInstanceData, GenericInstanceId, NullableInner, RefData, Type, TypedBlock,
-    TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
+    ArrayElem, GenericInstanceData, GenericInstanceId, NullableInner, RefData, SecretData, Type,
+    TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
     TypedStructDecl,
 };
 
@@ -116,6 +116,10 @@ pub fn compile_to_object(
     // concrete instantiation.
     let mut instances: Vec<GenericInstanceData> = program.generic_instances.clone();
     let mut refs: Vec<RefData> = program.refs.clone();
+    // C3 / ADR 0019 D5 (C3.1): secrets are cloned from the typed
+    // program too. The interner table flows into llvm_basic_type so
+    // every Secret(SecretId) lookup can strip to the inner type.
+    let secrets: Vec<SecretData> = program.secrets.clone();
     let instantiations = collect_mono_instantiations(program, &mut instances, &mut refs);
     // Materialise each fn instance as a substituted TypedFnDef so
     // pass 2's body lowering can consume it without TypeParam-
@@ -185,7 +189,7 @@ pub fn compile_to_object(
         let field_tys: Vec<BasicTypeEnum> = sd
             .fields
             .iter()
-            .map(|f| llvm_basic_type(&context, f.ty, &struct_types, &generic_struct_types))
+            .map(|f| llvm_basic_type(&context, f.ty, &struct_types, &generic_struct_types, &secrets))
             .collect();
         let st = struct_types[&sd.id];
         st.set_body(&field_tys, false);
@@ -212,6 +216,7 @@ pub fn compile_to_object(
                     concrete,
                     &struct_types,
                     &generic_struct_types,
+                    &secrets,
                 )
             })
             .collect();
@@ -235,9 +240,9 @@ pub fn compile_to_object(
         let param_types: Vec<_> = print_sig
             .param_types
             .iter()
-            .map(|t| llvm_basic_type(&context, *t, &struct_types, &generic_struct_types).into())
+            .map(|t| llvm_basic_type(&context, *t, &struct_types, &generic_struct_types, &secrets).into())
             .collect();
-        let fn_type = llvm_basic_type(&context, print_sig.return_type, &struct_types, &generic_struct_types)
+        let fn_type = llvm_basic_type(&context, print_sig.return_type, &struct_types, &generic_struct_types, &secrets)
             .fn_type(&param_types, false);
         module.add_function("sentinel_print", fn_type, None)
     };
@@ -264,12 +269,12 @@ pub fn compile_to_object(
         let param_types: Vec<_> = signature
             .param_types
             .iter()
-            .map(|t| llvm_basic_type(&context, *t, &struct_types, &generic_struct_types).into())
+            .map(|t| llvm_basic_type(&context, *t, &struct_types, &generic_struct_types, &secrets).into())
             .collect();
         let fn_type = if signature.is_main {
             i32_type.fn_type(&param_types, false)
         } else {
-            llvm_basic_type(&context, signature.return_type, &struct_types, &generic_struct_types)
+            llvm_basic_type(&context, signature.return_type, &struct_types, &generic_struct_types, &secrets)
                 .fn_type(&param_types, false)
         };
         let fn_value = module.add_function(&signature.name, fn_type, None);
@@ -318,9 +323,9 @@ pub fn compile_to_object(
         let param_types: Vec<_> = def
             .params
             .iter()
-            .map(|p| llvm_basic_type(&context, p.ty, &struct_types, &generic_struct_types).into())
+            .map(|p| llvm_basic_type(&context, p.ty, &struct_types, &generic_struct_types, &secrets).into())
             .collect();
-        let fn_type = llvm_basic_type(&context, def.return_type, &struct_types, &generic_struct_types)
+        let fn_type = llvm_basic_type(&context, def.return_type, &struct_types, &generic_struct_types, &secrets)
             .fn_type(&param_types, false);
         let fn_value = module.add_function(&mangled, fn_type, None);
         mono_fns.insert((*fn_id, args.clone()), fn_value);
@@ -336,6 +341,7 @@ pub fn compile_to_object(
             mono_fns,
             struct_types,
             generic_struct_types,
+            secrets,
             alloc_fn,
             panic_oob_fn,
             free_fn,
@@ -417,6 +423,12 @@ struct CodegenCtx<'ctx, 'plan> {
     /// C1.7.4b / ADR 0016 D6: per-instance LLVM struct types,
     /// keyed by [`GenericInstanceId`]. Built in pass 0.
     generic_struct_types: HashMap<GenericInstanceId, StructType<'ctx>>,
+    /// C3 / ADR 0019 D5 (C3.1): secrets table cloned from
+    /// `TypedProgram.secrets` at codegen entry. Used to strip
+    /// `Type::Secret(SecretId)` to its inner type — secrets lower
+    /// identically to their inner at C3.1 (constant-time codegen
+    /// is deferred per ADR 0019 D12).
+    secrets: Vec<SecretData>,
     /// C1.6: `sentinel_alloc(i64) -> ptr` runtime function. Called
     /// to back array storage and `?Struct` heap payloads.
     alloc_fn: FunctionValue<'ctx>,
@@ -518,6 +530,15 @@ fn field_type_needs_drop_inner(
         }
         Type::Nullable(_) | Type::I64 | Type::I32 | Type::Bool | Type::Ref(_) => false,
         Type::TypeParam(_) => false,
+        // C3 / ADR 0019 D5 (C3.1): drop semantics of `secret T`
+        // follow the inner — secrets don't introduce new heap
+        // payloads. Unwrap and recurse.
+        Type::Secret(id) => {
+            if (id.0 as usize) >= program.secrets.len() {
+                return false;
+            }
+            field_type_needs_drop_inner(program.secret_data(id).inner, program, seen)
+        }
     }
 }
 
@@ -526,7 +547,16 @@ fn llvm_basic_type<'ctx>(
     ty: Type,
     struct_types: &HashMap<StructId, StructType<'ctx>>,
     generic_struct_types: &HashMap<GenericInstanceId, StructType<'ctx>>,
+    secrets: &[SecretData],
 ) -> BasicTypeEnum<'ctx> {
+    // C3 / ADR 0019 D5 (C3.1): `secret T` lowers identically to T
+    // at C3.1. Constant-time codegen (branch-free `select`/`cmov`,
+    // speculation barriers) is deferred to a follow-on ADR per
+    // ADR 0019 D12.
+    let ty = match ty {
+        Type::Secret(id) => secrets[id.0 as usize].inner,
+        other => other,
+    };
     match ty {
         Type::Bool => context.bool_type().into(),
         Type::I32 => context.i32_type().into(),
@@ -556,6 +586,7 @@ fn llvm_basic_type<'ctx>(
                         inner.to_type(),
                         struct_types,
                         generic_struct_types,
+                        secrets,
                     )
                 }
             };
@@ -590,6 +621,9 @@ fn llvm_basic_type<'ctx>(
         Type::TypeParam(_) => {
             panic!("llvm_basic_type called on Type::TypeParam — generic fn body must be monomorphised first per ADR 0016 D7")
         }
+        // Unreachable: the early-return at fn entry strips
+        // Type::Secret. If it shows up here, that's a codegen bug.
+        Type::Secret(_) => unreachable!("Type::Secret stripped at llvm_basic_type entry"),
     }
 }
 
@@ -711,7 +745,9 @@ fn walk_expr_for_mono(
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
         | TypedExprKind::Var(_) => {}
-        TypedExprKind::WidenToNullable(inner) => walk_expr_for_mono(
+        TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner) => walk_expr_for_mono(
             inner, subst, program, instances, refs, visited, order, pending,
         ),
         TypedExprKind::Unary(_, inner) => walk_expr_for_mono(
@@ -877,6 +913,14 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
                 format!("gi{}", id.0)
             }
         }
+        // C3 / ADR 0019 D5: mangle `secret T` as `sec_T`. Secret
+        // wrapping participates in the mono key so `id<secret i64>`
+        // and `id<i64>` get distinct LLVM symbols.
+        Type::Secret(id) => program
+            .secrets
+            .get(id.0 as usize)
+            .map(|d| format!("sec_{}", mangle_type(d.inner, program)))
+            .unwrap_or_else(|| format!("sec{}", id.0)),
     }
 }
 
@@ -900,6 +944,11 @@ fn arg_contains_typeparam(
             .iter()
             .any(|a| arg_contains_typeparam(*a, instances, refs)),
         Type::Ref(id) => arg_contains_typeparam(refs[id.0 as usize].inner, instances, refs),
+        // C3 / ADR 0019 D5: `secret T` at C3.1 wraps a concrete
+        // (non-TypeParam) inner — no recursion. Returns false.
+        // Future ADRs may relax for `secret <generic-T>` and need
+        // a `secrets: &[SecretData]` parameter here.
+        Type::Secret(_) => false,
     }
 }
 
@@ -946,16 +995,40 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::TypeParam(_) => {
             panic!("llvm_int_type called on Type::TypeParam — generic fn body must be monomorphised first per ADR 0016 D7")
         }
+        // C3 / ADR 0019 D5: `secret T` arithmetic operations use
+        // the LLVM int type of T. The CodegenCtx wrapper strips
+        // secrets before calling this. Reaching here is a bug.
+        Type::Secret(_) => panic!(
+            "llvm_int_type called on Type::Secret — strip via CodegenCtx::llvm_int_type"
+        ),
     }
 }
 
 impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     fn llvm_basic_type(&self, ty: Type) -> BasicTypeEnum<'ctx> {
-        llvm_basic_type(self.context, ty, &self.struct_types, &self.generic_struct_types)
+        llvm_basic_type(
+            self.context,
+            ty,
+            &self.struct_types,
+            &self.generic_struct_types,
+            &self.secrets,
+        )
+    }
+
+    /// C3 / ADR 0019 D5 (C3.1): strip one layer of `secret` if
+    /// present. Lets codegen treat `secret T` as T for the underlying
+    /// LLVM type / arithmetic / control-flow decisions. Constant-
+    /// time codegen for secret operations is deferred per ADR 0019
+    /// D12.
+    fn strip_secret(&self, ty: Type) -> Type {
+        match ty {
+            Type::Secret(id) => self.secrets[id.0 as usize].inner,
+            other => other,
+        }
     }
 
     fn llvm_int_type(&self, ty: Type) -> IntType<'ctx> {
-        llvm_int_type(self.context, ty)
+        llvm_int_type(self.context, self.strip_secret(ty))
     }
 
     /// C1.7.5 / ADR 0016 D7: emit a monomorphic instance of a
@@ -1265,6 +1338,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         ty: Type,
         program: &TypedProgram,
     ) -> Result<(), CodegenError> {
+        // C3 / ADR 0019 D5 (C3.1): unwrap one layer of `secret T`
+        // before dispatching on shape. Drop semantics of secrets
+        // follow the inner type.
+        let ty = self.strip_secret(ty);
         match ty {
             Type::Array(_) => {
                 // `[T]` is `{ i64 len, ptr data }`. Load + free
@@ -1335,6 +1412,9 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             }
             Type::TypeParam(_) => {
                 // Unreachable post-monomorphisation; defensive.
+            }
+            Type::Secret(_) => {
+                // Unreachable: stripped at fn entry. Defensive.
             }
         }
         Ok(())
@@ -2039,6 +2119,14 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 };
                 Ok(struct_ty.const_named_struct(&[valid.into(), payload]).into())
             }
+            TypedExprKind::WidenToSecret(inner) | TypedExprKind::Declassify(inner) => {
+                // C3 / ADR 0019 D5 + D6 (C3.1): secret wrap +
+                // declassify lower as identity at C3.1. The secret
+                // qualifier is purely type-level; constant-time
+                // codegen (branch-free `select`/`cmov`, speculation
+                // barriers) is a follow-on per ADR 0019 D12.
+                self.lower_expr(inner, program)
+            }
             TypedExprKind::WidenToNullable(inner) => {
                 // ADR 0014 D3: lower the inner T value and wrap.
                 // For primitives: `{ i1 true, T payload }` inline.
@@ -2170,7 +2258,10 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
         | TypedExprKind::Var(_) => None,
-        TypedExprKind::Unary(_, inner) | TypedExprKind::WidenToNullable(inner) => {
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner) => {
             find_var_name_in_expr(inner, id)
         }
         TypedExprKind::Binary(_, lhs, rhs)
