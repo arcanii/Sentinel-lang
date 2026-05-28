@@ -56,12 +56,22 @@ stack-saved continuations.
     c35d_perform_with_capture_and_binop,
     c35d_perform_in_call_arg). +3 workspace tests (1065
     total).
-  - **C3.5(e)** — chained effecting lets + multiple performs
-    in tail — next. Requires resumers-can-perform: the
-    runtime resume loop currently assumes pure-return wraps;
-    nested perform inside a resumer returns a real op kont
-    that must bubble through remaining frames. Estimate
-    1-2 sessions.
+  - **C3.5(e)** — chained effecting lets via resumers-can-
+    perform — **SHIPPED**. `sentinel_kont_resume` widens its
+    return type to `*mut SentinelKont` — either a PURE_RETURN
+    wrap (chain drained) or a fresh op-perform kont with the
+    original's remaining frames spliced onto its chain tail
+    (bubble, per ADR 0020 D3 deep-handler semantics).
+    `lower_handle` becomes a dispatch loop with an alloca-
+    backed `current_kont_slot`; `lower_resume_kont`'s bubble
+    path stores the new kont + branches to the loop block.
+    `compile_effecting_fn_with_chained_lets` emits N per-let
+    resumer fns iteratively; each non-last resumer's body
+    performs the next let's RHS + pushes the next resumer.
+    Three pass fixtures (c35e_chained_perform,
+    c35e_chained_perform_with_capture,
+    c35e_chained_dependent_perform). +3 workspace tests
+    (1068 total).
   - **C3.6** — return arms with non-identity transforms +
     nested handles + multi-shot continuations per D2
     relaxation.
@@ -467,7 +477,7 @@ A rough split into 4-5 sub-phases:
 | C3.5(d) | Unified embedded-perform shape — single perform anywhere in   | 1 session    | **DONE** |
 |      | tail (binop, struct-lit, fn-call arg, field, index, ...).      |              |        |
 |      | Substitute-perform-with-Var walker; same resumer machinery.    |              |        |
-| C3.5(e) | Chained effecting lets + multiple performs in tail —          | 1-2 sessions | next   |
+| C3.5(e) | Chained effecting lets + multiple performs in tail —          | 1-2 sessions | **DONE** |
 |      | requires resumers-can-perform (runtime resume loop bubbles     |              |        |
 |      | non-pure-return result konts through remaining frames).        |              |        |
 | C3.6 | Codegen for `handle` — dispatch on label; resume call;         | 2-3 sessions |        |
@@ -597,7 +607,7 @@ A rough split per the D9 table:
 | C3.5(b) | Effecting fn ABI + handle-of-call + PURE_RETURN switch case   | 1 session    | **DONE** |
 | C3.5(c) | Let-bound perform via per-let resumer + sentinel_kont_push    | 1 session    | **DONE** |
 | C3.5(d) | Unified embedded-perform shape (binop / call-arg / etc.)      | 1 session    | **DONE** |
-| C3.5(e) | Chained effecting lets via resumers-can-perform               | 1-2 sessions | next   |
+| C3.5(e) | Chained effecting lets via resumers-can-perform               | 1-2 sessions | **DONE** |
 | C3.6 | Return arms + nested handles + multi-shot continuations         | 1-2 sessions |        |
 | C3.7 | Polish + phase-go programs + ADR 0020 flip + STATE close       | 0-1 sessions |        |
 

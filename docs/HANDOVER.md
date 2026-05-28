@@ -79,6 +79,7 @@ C1.3. See STATE.md Section C.
 **Phase C3.5(b) — effecting fn ABI + handle-of-call per ADR 0020 D7: effecting fns return Kont* at the IR level; sentinel_kont_pure wraps pure values via PURE_RETURN_OP_ID; handle codegen unified around a runtime switch — complete.**
 **Phase C3.5(c) — let-bound perform via per-let resumer fns + sentinel_kont_push per ADR 0020 D7: first piece of per-eval-site frame reification; SentinelKont grows a frame-chain; sentinel_kont_resume replays frames head→tail — complete.**
 **Phase C3.5(d) — unified embedded-perform shape per ADR 0020 D7: count_performs / find_unique_perform / substitute_perform_with_var walkers; supports binop / struct-lit / fn-call-arg / index / etc. with single embedded perform — complete.**
+**Phase C3.5(e) — chained effecting lets via resumer-can-perform per ADR 0020 D7: sentinel_kont_resume returns *mut SentinelKont (bubble-aware); handle becomes a dispatch loop with alloca'd current_kont_slot; compile_effecting_fn_with_chained_lets emits N per-let resumers — complete.**
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -90,21 +91,23 @@ complete** as of C3.3 — ADR 0019 ACCEPTED-WITH-AMENDMENTS with
 all D-decisions exercised except D8 (handler runtime, deferred
 to ADR 0020) and D9 (async, deferred indefinitely). Phase C3
 runtime layer (ADR 0020) is **in flight**: sub-phases C3.4 +
-C3.5(a) + C3.5(b) + C3.5(c) + C3.5(d) all landed. The handler
-surface compiles and runs end-to-end for: direct-perform
-bodies, fn-call-that-performs bodies (effecting fn ABI returns
-Kont*), pure-bodied effecting fns (PURE_RETURN wrap), let-bound
-performs, and any pure surrounding context with a single
-embedded perform (binop, struct-lit, fn-call-arg, index, etc.).
-Five runtime symbols are in place: sentinel_perform_op,
-sentinel_kont_resume, sentinel_kont_panic_resumed,
+C3.5(a) + C3.5(b) + C3.5(c) + C3.5(d) + C3.5(e) all landed.
+The handler surface compiles and runs end-to-end for: direct-
+perform bodies, fn-call-that-performs bodies (effecting fn ABI
+returns Kont*), pure-bodied effecting fns (PURE_RETURN wrap),
+let-bound performs, any pure surrounding context with a single
+embedded perform (binop, struct-lit, fn-call-arg, index, etc.),
+and chained effecting lets where each let's RHS is a direct
+perform / effecting call. Five runtime symbols are in place:
+sentinel_perform_op, sentinel_kont_resume (now bubble-aware,
+returns Kont*), sentinel_kont_panic_resumed,
 sentinel_kont_pure + sentinel_kont_consume_pure,
-sentinel_kont_push. Still pending: chained effecting lets
-(needs resumers-can-perform), return arms with non-identity
-transforms, nested handles, multi-shot continuations,
-non-i64-returning ops. Pipeline at current close (unchanged
-since C3.3): parse → resolve → check → **effect_check** →
-borrow_check → codegen.
+sentinel_kont_push. Still pending: return arms with non-
+identity transforms, nested handles, multi-shot continuations,
+non-i64-returning ops, embedded performs inside chained-let
+RHSes (e.g., `let a = perform Op() + 1`). Pipeline at current
+close (unchanged since C3.3): parse → resolve → check →
+**effect_check** → borrow_check → codegen.
 Phase C1 (type system per HANDOVER §6.2) is **complete** per ADR
 0011 (now ACCEPTED, 8 sub-phases, ADR's honest 5-6 month estimate
 beaten — actual elapsed across C1.0a through C1.7.4b was ~10-12
@@ -933,60 +936,94 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C3.5(e) / C3.6 — chained lets, return arms, multi-shot)
+### 0.2 Next session opening (C3.6 — return arms, nested handles, multi-shot)
 
-Resume at **C3.5(e) or C3.6** per ADR 0020. **C3.5(d) closed:
-unified embedded-perform shape.** Twelve sub-phases shipped
-across Phase C3. Programs can now use `perform Op()` in any
-pure surrounding context within an effecting fn's tail (binop,
-struct-lit field, pure fn-call arg, field-access target,
-index, unary op, etc.) — codegen detects the unique perform,
-substitutes it with a placeholder Var, emits a resumer that
-re-evaluates the substituted tail with the placeholder bound
-to the resumed value.
+Resume at **C3.6** per ADR 0020. **C3.5(e) closed: chained
+effecting lets via resumer-can-perform.** Thirteen sub-phases
+shipped across Phase C3. Programs can now use `let a = perform
+Op1(); let b = perform Op2(); ...; tail` (any N >= 2 chained
+effecting lets) inside an effecting fn — codegen emits N per-
+let resumer fns, the runtime's `sentinel_kont_resume` bubbles
+non-pure-return result konts back to the enclosing handle, and
+the handle's dispatch loop re-dispatches per ADR 0020 D3 deep-
+handler semantics.
 
 What's NOT yet running:
 
-  - **Chained effecting lets**: `let a = perform Op1(); let b
-    = perform Op2(); ...` — needs *resumers-can-perform*
-    support. The runtime's resume loop currently assumes
-    every resumer returns a pure-return kont; a nested
-    perform inside a resumer returns a real op-perform kont
-    that needs to bubble back through the remaining frames.
-    Either: extend the resume loop to detect non-pure
-    results and re-package the remaining frames onto the
-    new kont, OR rewrite resumer codegen to itself emit
-    perform-site bubbles (mirroring effecting fn ABI).
-  - **Multiple performs in tail** (e.g.,
-    `perform Op1() + perform Op2()`): same machinery
-    needed — currently rejected because count_performs > 1.
-  - **Non-i64-returning ops**: placeholder type hardcoded
-    to i64. Needs a more general resumer ABI (e.g., always
-    pass an i64 + cast inside, or per-fn resumer types).
   - **Return arms with non-identity transforms**
     (ADR 0020 D4 generalisation): currently the runtime's
     pure-return path always returns the value as-is; a
     user-specified `return v => transform(v)` would need
-    additional dispatch.
+    additional dispatch in lower_handle's pure block.
   - **Nested handles**: each handle's frames are scoped to
     itself; nesting requires reasoning about frame ownership
     when an inner handle resumes its kont and the outer
     handle catches a bubbled effect.
   - **Multi-shot continuations** (ADR 0020 D2 relaxation):
-    one-shot only enforced via `consumed` flag.
-
-The substantive choice for C3.5(e) is the resumers-can-perform
-mechanism. Once that lands, chained lets and multi-perform
-tails fall out naturally (the runtime resume loop handles
-non-pure results by extending the kont chain in flight).
-Estimate: 1-2 sessions.
+    one-shot only enforced via `consumed` flag. Multi-shot
+    needs deep-clone of the kont's frame chain on each
+    resume + sharing-analysis discipline for the captured
+    state.
+  - **Non-i64-returning ops**: placeholder type hardcoded
+    to i64. Needs a more general resumer ABI (e.g., always
+    pass an i64 + cast inside, or per-fn resumer types).
+  - **Embedded performs inside chained-let RHSes**:
+    e.g. `let a = perform Op() + 1; let b = ...`. The C3.5(d)
+    embedded-shape detector requires stmts.len() == 0; the
+    C3.5(e) chained-lets detector requires each let RHS to
+    be a direct perform / effecting call (`tail_produces_kont`).
+    The union case is achievable but needs additional
+    machinery.
 
 For C3.6, the focus shifts from frame-reification machinery to
-handle features: return arms, nested handles, multi-shot.
-Each is a smaller piece independent of the others; could be
-combined or split across sessions.
+handle features. Each piece is smaller than C3.5(e)'s
+resumers-can-perform work — could be combined or split across
+1-2 sessions.
 
-**C3.5(d) retrospective** (this session): ADR 0020 D9
+After C3.6: C3.7 (phase-go fixture per ADR 0020 D12 + ADR 0020
+PROPOSED → ACCEPTED flip + close-out).
+
+**C3.5(e) retrospective** (this session): ADR 0020 D9
+estimated "1-2 sessions" for C3.5(e). Actual: ~1 session. The
+substantive piece was the runtime + lower_handle restructure
+to support bubble. Once `sentinel_kont_resume` returns a kont*
+and the handle becomes a dispatch loop, chained-lets codegen
+is straightforward — each resumer is a smaller chained-lets
+fn. Design notes:
+
+  - **Uniform Kont* return**: changing
+    `sentinel_kont_resume`'s return type to `*mut SentinelKont`
+    unifies the pure-return and bubble cases at the caller
+    site — both go through the same `load op_id → check
+    PURE_RETURN_OP_ID` check. The "always wrap final value
+    in pure-return" cost is one extra alloc/free pair per
+    `k(v)` call in trivial cases, which is acceptable at C3
+    minimum perf budget.
+  - **Alloca-backed dispatch slot**: using an alloca for
+    `current_kont_slot` instead of an LLVM phi node avoided
+    threading PhiValue references through the
+    `handle_stack`. The phi-based alternative is equivalent
+    and would generate slightly tighter IR after mem2reg.
+  - **HandleContext stack**: lower_resume_kont consults
+    `self.handle_stack.last()` to find its enclosing
+    handle's loop block + slot. Pushed on lower_handle
+    entry; popped on exit. Nested handles will need this
+    plus an "ownership" rule (an inner handle's resumer
+    shouldn't bubble to an outer handle's loop) — a C3.6
+    concern.
+  - **Captures: precise vs conservative**:
+    `compute_chained_lets_captures` walks
+    `lets[i+1..].rhs + tail` and excludes future-let-bound
+    ids + the let_i value param. Conservative
+    "everything-in-scope" would over-allocate; precise
+    walking matches what each resumer actually reads.
+
+Workspace test delta: +3 tests (1068 total) — +3 driver
+pass-tests (c35e_chained_perform,
+c35e_chained_perform_with_capture,
+c35e_chained_dependent_perform).
+
+**Pre-C3.5(e) — C3.5(d) retrospective**: ADR 0020 D9
 estimated "1 session" for C3.5(d). Actual: ~1 session. The
 unified approach (count_performs / find_unique_perform /
 substitute_perform_with_var walkers + detect_embedded_perform_shape)
@@ -1014,8 +1051,8 @@ Design notes:
     placeholder in its own env; no cross-fn collision since
     env is reset per compile_fn.
 
-Workspace test delta: +3 tests (1065 total) — +3 driver
-pass-tests (c35d_binop_with_perform,
+Workspace test delta at C3.5(d) close: +3 tests (1065 total)
+— +3 driver pass-tests (c35d_binop_with_perform,
 c35d_perform_with_capture_and_binop, c35d_perform_in_call_arg).
 
 **Pre-C3.5(d) — C3.5(c) retrospective**: ADR 0020 D9
@@ -1232,12 +1269,14 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last sub-phase: **C3.5(d) — unified embedded-perform shape
-    per ADR 0020 D7 (per-eval-site frame reification extended
-    to ANY pure surrounding context with a single embedded
-    perform — binop, struct-lit, fn-call arg, field-access,
-    index, etc.; substitute_perform_with_var walker emits a
-    resumer that re-evaluates the substituted tail).**
+    Last sub-phase: **C3.5(e) — chained effecting lets via
+    resumer-can-perform per ADR 0020 D7 (sentinel_kont_resume
+    widens to *mut SentinelKont and bubbles non-pure-return
+    result konts with the original's remaining frames spliced
+    onto the bubble's chain tail; lower_handle becomes a
+    dispatch loop with alloca'd current_kont_slot;
+    compile_effecting_fn_with_chained_lets emits N per-let
+    resumer fns iteratively).**
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1248,21 +1287,21 @@ For pasting into a fresh chat to bootstrap context:
     seven sub-phases C3.0(a)/C3.0(b) + C3.1/C3.1b + C3.2(a)/
     C3.2(b) + C3.3 + C3.4) — all complete.** Phase C3 RUNTIME
     layer (handler codegen per ADR 0020 D9) in progress:
-    **C3.5(a) + C3.5(b) + C3.5(c) + C3.5(d) landed (restricted
-    + effecting fn ABI + handle-of-call + let-bound perform +
-    unified embedded-perform shape)**; C3.5(e) (chained lets
-    via resumers-can-perform) + C3.6 (return arms / nested
-    handles / multi-shot) + C3.7 (close-out) remaining. ADR
-    0017 ACCEPTED-WITH-AMENDMENTS; ADR 0018 (Polonius
-    migration plan) PROPOSED; **ADR 0019 ACCEPTED-WITH-
-    AMENDMENTS at C3.3 close**; **ADR 0020 PROPOSED** with
-    C3.4 + C3.5(a/b/c/d) shipped (8 of 12 D-decisions
-    exercised: D2 one-shot, D4 surface + default return-arm,
-    D5 AST+parser+resolve, D6 effect discharge, D7 all 5
-    runtime symbols, D11 fn-main integration, partial D1
-    free-monad lowering via frame-chain). 1065 active
-    workspace tests + 1 doctest.
-    **Twenty-three go/no-go programs run end-to-end:** c05_go_no_go
+    **C3.5(a) + C3.5(b) + C3.5(c) + C3.5(d) + C3.5(e) landed
+    (restricted + effecting fn ABI + handle-of-call + let-
+    bound perform + unified embedded-perform shape + chained
+    effecting lets via resumer-can-perform)**; C3.6 (return
+    arms / nested handles / multi-shot) + C3.7 (close-out)
+    remaining. ADR 0017 ACCEPTED-WITH-AMENDMENTS; ADR 0018
+    (Polonius migration plan) PROPOSED; **ADR 0019 ACCEPTED-
+    WITH-AMENDMENTS at C3.3 close**; **ADR 0020 PROPOSED**
+    with C3.4 + C3.5(a/b/c/d/e) shipped (9 of 12 D-decisions
+    exercised: D2 one-shot, D3 deep-handler re-wrap, D4
+    surface + default return-arm, D5 AST+parser+resolve, D6
+    effect discharge, D7 all 5 runtime symbols, D11 fn-main
+    integration, partial D1 free-monad lowering via frame-
+    chain). 1068 active workspace tests + 1 doctest.
+    **Twenty-six go/no-go programs run end-to-end:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
     nullable): "142"; c16_go_no_go (C1.6 array): "15";
@@ -1295,7 +1334,15 @@ For pasting into a fresh chat to bootstrap context:
     `perform Io.read() * 2 + extra` with captured fn param):
     exit 42**; **c35d_perform_in_call_arg (C3.5(d)
     `double(perform Io.read())` — perform inside pure fn-call
-    arg): exit 42**, exit 0.
+    arg): exit 42**; **c35e_chained_perform (C3.5(e) two
+    chained effecting lets; resumer-0 performs the second let;
+    bubble re-dispatches; a + b = 42): exit 42**;
+    **c35e_chained_perform_with_capture (C3.5(e) two chained
+    lets + outer `base: i64` captured forward through both
+    resumers): exit 42**; **c35e_chained_dependent_perform
+    (C3.5(e) second perform's arg uses first let's binding —
+    captures-for-resumer-0 correctly includes a; a + b + 12 =
+    42): exit 42**, exit 0.
 
     Pipeline at C3.1: **parse_query → resolve_query →
     check_query → borrow_check_query → codegen** (unchanged

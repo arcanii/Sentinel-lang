@@ -12,7 +12,77 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C3.5(d) landed; unified embedded-perform shape.**
+Last updated: **C3.5(e) landed; chained effecting lets via resumer-can-perform.**
+ADR 0020 stays PROPOSED. This sub-phase closes the
+resumers-can-perform gap from C3.5(c)/(d) — a `let v: i64 =
+perform Op` inside another resumer's body now bubbles its
+result kont back to the enclosing handle's dispatch loop
+instead of asserting pure-return. Effecting fn bodies of the
+shape `let a = perform; let b = perform; ...; pure_tail` (any
+N >= 2 chained effecting lets) now compile end-to-end via N
+per-let resumer fns, emitted iteratively in
+`compile_effecting_fn_with_chained_lets`.
+
+**Runtime change** (`sentinel_kont_resume`): return type widens
+from `i64` to `*mut SentinelKont`. The chain-drain loop, on
+encountering a resumer's non-PURE_RETURN result kont, splices
+the original kont's remaining frames onto the bubble's chain
+tail (deep-handler re-wrap per ADR 0020 D3) and returns the
+bubble. If the chain drains pure, the final i64 is wrapped via
+`sentinel_kont_pure` so the returned kont is uniform. Existing
+runtime tests adjusted: callers now unwrap via
+`sentinel_kont_consume_pure` instead of reading the i64
+directly.
+
+**Codegen change** (`lower_handle` + `lower_resume_kont`): the
+handle's switch is now inside a dispatch *loop*. An alloca-backed
+`current_kont_slot` holds the kont the switch reads each
+iteration; `lower_resume_kont`'s bubble path stores the new
+kont into the slot + branches to the loop block. The pure path
+calls `sentinel_kont_consume_pure` to recover the resumed i64.
+`CodegenCtx` grows a `handle_stack: Vec<HandleContext>` that
+`lower_resume_kont` consults at lowering time to find the
+enclosing handle's loop block + slot.
+
+**Chained-lets compilation**:
+`detect_chained_effecting_lets_shape` matches `stmts.len() >=
+2`, every stmt is `let v: i64 = <produces-kont>`, tail is
+pure. Pass 1 pre-declares N resumer fns + computes the per-
+resumer capture set via `compute_chained_lets_captures` (vars
+referenced in `lets[i+1..].rhs + tail`, minus the future-let-
+bound ids and the let_i value param).
+`compile_effecting_fn_with_chained_lets` emits each resumer
+body in turn: bind let-i to the value param + unpack captures,
+then either (a) wrap the pure tail (last resumer) or (b) build
+captures for resumer-(i+1), lower `lets[i+1].rhs` to a kont,
+push the next resumer + return the kont. The parent fn body
+mirrors case (b) with fn params instead of unpacked captures.
+A new `emit_chained_lets_captures_alloc` helper centralises
+the captured-struct alloc + populate step.
+
+**Three new pass fixtures**:
+- `c35e_chained_perform.sentinel`: two reads + sum → 42.
+- `c35e_chained_perform_with_capture.sentinel`: two reads with
+  outer `base: i64` captured forward through both resumers
+  → 42.
+- `c35e_chained_dependent_perform.sentinel`: second perform's
+  arg uses the first let's binding (validates that resumer-0
+  correctly captures `a` for use in resumer-1's perform arg)
+  → 42.
+
+**Still pending for C3.6 / C3.7**: return arms with non-
+identity transforms (ADR 0020 D4 generalisation), nested
+handles (scoped frame ownership), multi-shot continuations
+(ADR 0020 D2 relaxation), non-i64-returning ops, embedded
+performs in chained-let RHSes (e.g.,
+`let a = perform Op() + 1`).
+
+Workspace test delta from C3.5(d) close: +3 (1068 total) — +3
+driver pass-tests (c35e_*). **Phase C3.5(e) closes here.**
+Next: C3.6 — return arms + nested handles + multi-shot
+relaxation per ADR 0020 D2/D4.
+
+Pre-C3.5(e) context: **C3.5(d) landed; unified embedded-perform shape.**
 ADR 0020 stays PROPOSED. This sub-phase generalises C3.5(c)'s
 per-let frame reification: an effecting fn whose tail contains
 **exactly one perform anywhere** in its tree (binop, pure fn-
