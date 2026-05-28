@@ -12,15 +12,80 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C4.4 (1/N): scope / spawn / await AST + parser
-landed per ADR 0024 D1+D2+D3.** ADR 0024 stays PROPOSED. First
-of the C4.4 sub-iterations: structured-concurrency surface
-parses end-to-end at AST + parser. Downstream resolve rejects
-with three new "not yet" diagnostics — ScopeNotYet /
-SpawnNotYet / AwaitNotYet — until C4.4 (2/N) brings up the
-typing layer + runtime (5 new symbols: sentinel_task_spawn,
-_await, sentinel_scope_enter, _exit, _register) + codegen
-per ADR 0024 D4-D9.
+Last updated: **C4.4 (2/N runtime): sentinel-runtime
+structured-concurrency substrate landed per ADR 0024 D6+D7.**
+ADR 0024 stays PROPOSED. Five new C-ABI runtime symbols ship
+in isolation: sentinel_task_spawn / sentinel_task_await /
+sentinel_scope_enter / sentinel_scope_exit /
+sentinel_scope_register. SentinelTask is a 32-byte C-stable
+struct holding `{ result: i64, done: u32, _pad: u32,
+join_handle_ptr, args_free_ptr }`; SentinelScopeCtx wraps a
+heap-allocated ScopeRegistry tracking in-flight tasks.
+Thread-per-spawn implementation using std::thread internally
+— real work-stealing scheduler is the deferred follow-on per
+ADR 0024 D6. Cancellation on early scope exit DEFERRED per
+ADR 0024 D9. The runtime substrate ships in isolation so the
+typing + codegen wiring can land cleanly in a follow-on
+iteration without surface churn.
+
+**Runtime additions** (sentinel-runtime/src/lib.rs):
+- `SentinelTask { result: i64, done: u32, _pad: u32,
+  join_handle_ptr: *JoinHandleBox, args_free_ptr: *u8 }` —
+  32 bytes / 8-byte aligned. Stable-layout test pins the
+  size for ABI compat with codegen.
+- `SentinelScopeCtx { registry_ptr: *ScopeRegistry }` +
+  `ScopeRegistry { tasks: Vec<*mut SentinelTask> }`.
+- Five `#[no_mangle] pub extern "C"` fns per ADR 0024 D7:
+  - `sentinel_task_spawn(wrapper, args_storage, args_size)
+    -> *mut SentinelTask` allocates task + spawns OS thread.
+  - `sentinel_task_await(*mut SentinelTask) -> i64` joins
+    the thread + frees the task.
+  - `sentinel_scope_enter() -> *mut SentinelScopeCtx`
+    allocates a per-scope task registry.
+  - `sentinel_scope_register(*mut SentinelScopeCtx, *mut
+    SentinelTask)` registers a task in the scope.
+  - `sentinel_scope_exit(*mut SentinelScopeCtx)` walks the
+    registry + auto-awaits + frees the scope.
+- `JoinHandleBox { handle: Option<std::thread::JoinHandle<()>> }`
+  internal struct holding the OS thread handle behind a
+  pointer the FFI side stashes opaquely.
+
+**No types / codegen / phase-go yet**: the runtime substrate
+ships standalone. Resolve still rejects scope/spawn/await
+with the C4.4 (1/N) NotYet diagnostics; the typing + codegen
+wiring + c44_go_no_go phase-go land in the next iteration.
+
+**Why ship runtime alone**: the prior attempt at the full
+C4.4 (2/N) (types + codegen + phase-go in one push) ran into
+codegen wrapper-synthesis complexity — synthesizing per-fn
+wrapper LLVM IR from inside CodegenCtx is awkward because
+CodegenCtx doesn't hold a `&Module` reference. The cleanest
+fix is to pre-walk the typed program in compile_to_object
+BEFORE CodegenCtx is created. The runtime substrate is
+isolated + tested + correct; landing it solo lets the
+follow-on focus entirely on the types + codegen wiring with
+a clean working tree. See HANDOVER §0.2 for detailed prep.
+
+Workspace test delta from C4.4 (1/N) close: +6 (1182 total)
+— +6 sentinel-runtime tests (spawn-then-await round trip /
+spawn with i64 arg / scope enter+exit round trip / scope
+register + auto-await / Task layout stability + smoke).
+**Phase C4.4 (2/N runtime) closes here.** Next: C4.4 (2/N
+types + codegen) — types layer (Type::Task interner +
+spawn/await/scope typing + 3 new TypeError variants),
+codegen (5 runtime-fn externs + pre-walk wrapper synthesis +
+lower Spawn/Await/Scope), c44_go_no_go phase-go, ADR 0024 →
+ACCEPTED-WITH-AMENDMENTS flip.
+
+Pre-C4.4(2/N runtime) context: **C4.4 (1/N): scope / spawn /
+await AST + parser landed per ADR 0024 D1+D2+D3.** ADR 0024
+stays PROPOSED. First of the C4.4 sub-iterations: structured-
+concurrency surface parses end-to-end at AST + parser.
+Downstream resolve rejects with three new "not yet"
+diagnostics — ScopeNotYet / SpawnNotYet / AwaitNotYet — until
+C4.4 (2/N) brings up the typing layer + runtime (5 new
+symbols: sentinel_task_spawn, _await, sentinel_scope_enter,
+_exit, _register) + codegen per ADR 0024 D4-D9.
 
 **AST additions**:
 - `ExprKind::Scope { mode: ScopeMode, body: Box<Block> }` +

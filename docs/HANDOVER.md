@@ -93,6 +93,7 @@ C1.3. See STATE.md Section C.
 **Phase C4.3 — delegation auto-forwarders per ADR 0021 D6 — complete.** `delegate field: T to Trait;` inside a class body synthesizes a default impl of `Trait` for the class that auto-forwards every trait method to `self.field.method(args)`. Synthesis happens entirely at the resolve layer — Pass 0e extension registers delegate impls alongside user impls (coherence collision = DuplicateDefaultImpl); Pass 3 (resolve_class_decl) adds the synthesized field; new Pass 4.5 synthesizes the per-trait-method auto-forwarder bodies. Types + codegen unchanged. No detail ADR — lands under ADR 0021 D6 + C4.0 D11 lexer reservation. +14 tests (1168 total). c43_go_no_go phase-go (Logger delegates Writer to FileSink; `l.write(42)` returns 42) runs at exit 42.
 **ADR 0024 PROPOSED — C4.4 structured concurrency surface + Async effect + runtime scheduler — docs-only.** Twelve D-decisions covering scope/spawn/await grammar (D1-D3), Type::Task interner (D4), Async built-in effect (D5), thread-per-spawn scheduler (D6), 5 new runtime symbols (D7), lowering (D8 + D9), out-of-scope (D10), lexer recap (D11), c44_go_no_go phase-go (D12), 2-sub-iteration split (D13). Key amendment to ADR 0021 D9: direct runtime API rather than async-as-effect (multi-shot continuations from ADR 0020 D2 would be required). User surface identical to the async-as-effect vision.
 **Phase C4.4 (1/N) — scope / spawn / await AST + parser per ADR 0024 D1+D2+D3 — complete.** Structured-concurrency surface parses end-to-end at AST + parser. Downstream resolve rejects with ScopeNotYet / SpawnNotYet / AwaitNotYet until C4.4 (2/N) lands the typing + runtime + codegen. +9 tests (1177 total). ADR 0024 stays PROPOSED.
+**Phase C4.4 (2/N runtime) — sentinel-runtime symbols per ADR 0024 D6+D7 — complete.** Thread-per-spawn substrate ships: sentinel_task_spawn / sentinel_task_await / sentinel_scope_enter / sentinel_scope_exit / sentinel_scope_register + SentinelTask (32-byte C-stable struct) + SentinelScopeCtx. Uses std::thread internally; real work-stealing scheduler is a deferred follow-on per ADR 0024 D6. Cancellation on early scope exit DEFERRED per ADR 0024 D9. +6 runtime tests (1182 total active workspace). ADR 0024 stays PROPOSED. The typing layer + codegen wiring + c44_go_no_go phase-go land in a follow-on iteration.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -965,6 +966,25 @@ per-crate breakdown.
                                                  — low end of the
                                                  ADR 0021 D14
                                                  estimate.
+  - 0024 c4-4-structured-concurrency             PROPOSED — C4.4
+                                                 surface
+                                                 (scope / spawn /
+                                                 await) + Async
+                                                 built-in effect +
+                                                 thread-per-spawn
+                                                 runtime scheduler.
+                                                 Twelve D-decisions.
+                                                 C4.4 (1/N) parser
+                                                 layer done; C4.4
+                                                 (2/N runtime)
+                                                 done (5 new C-ABI
+                                                 symbols + Task +
+                                                 ScopeCtx structs).
+                                                 What remains: types
+                                                 + codegen + phase-
+                                                 go fixture. ADR
+                                                 flips at C4.4
+                                                 (2/N) close.
 
 ### 0.1 Working norms (carry forward into Phase C3)
 
@@ -1052,53 +1072,167 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C4.4 (2/N) — types / runtime / codegen for scope / spawn / await)
+### 0.2 Next session opening (C4.4 (2/N) — types + codegen for scope / spawn / await)
 
-Resume at **C4.4 (2/N)** per ADR 0024. **C4.4 (1/N) closed**:
-scope / spawn / await parse end-to-end at AST + parser;
-downstream resolve rejects with ScopeNotYet / SpawnNotYet /
-AwaitNotYet diagnostics. ADR 0024 PROPOSED at C4.4 open
-documents the design. The next iteration brings the typing +
-runtime + codegen + phase-go.
+Resume at **C4.4 (2/N)** per ADR 0024. **C4.4 (1/N) closed**
+(parser surface) + **C4.4 (2/N runtime) closed** (5 new C-ABI
+runtime symbols + SentinelTask/ScopeCtx structs; 13 runtime
+tests passing). What remains: **types layer + codegen + phase-
+go fixture**.
 
-**C4.4 (2/N) deliverables** (per ADR 0024 D4-D9 + D12):
+**Prior-art reference**: the prior session attempted the
+types+codegen layer end-to-end and rolled back the partial
+work (kept only the runtime scaffolding). Lessons learned + a
+known sticking point for the next attempt are captured below.
 
-  - **Types**: `Type::Task(TaskId)` interner extension (tenth
-    Copy+Hash-preserving variant) with `TaskData { result_ty:
-    Type }`. `Async` built-in effect auto-registered alongside
-    runtime fn builtins at resolve time. `spawn fn_name(args)`
-    typing: validates fn-call shape (per ADR 0024 D2
-    restriction); produces Task<T> where T is the call's
-    return type; requires the enclosing fn declares `! { Async }`.
-    `task.await` typing: requires Task<T> receiver; produces T.
-    `scope concurrent { ... }` typing: block-shaped; the body's
-    tail is the scope expression's value.
-  - **Runtime** (sentinel-runtime): five new symbols per ADR
-    0024 D7 — sentinel_task_spawn / _await / sentinel_scope_enter /
-    _exit / _register. Task + ScopeCtx structs. Thread-per-spawn
-    at C4.4 minimum (pthread_create + pthread_join); the
-    work-stealing scheduler is deferred per ADR 0024 D6.
-  - **Codegen** (per ADR 0024 D8): per-spawn-site wrapper fn
-    synthesis (C-ABI `void wrapper(*Task, *ArgsStorage)` that
-    unpacks args, calls the spawned fn, stores result in Task).
-    At spawn call site: alloc ArgsStorage on heap, pack args,
-    call sentinel_task_spawn(wrapper, args, size). At await
-    site: call sentinel_task_await(task_ptr). At scope entry:
-    sentinel_scope_enter(); at scope exit: sentinel_scope_exit()
-    auto-awaits remaining tasks.
-  - **Phase-go fixture**: `c44_go_no_go.sentinel` per ADR
-    0024 D12 — scope concurrent { let t = spawn double(21);
-    t.await } → exit 42.
-  - **UI fixtures**: c44_spawn_non_fn_call_rejected (D2
-    restriction), c44_spawn_without_async_effect_rejected
-    (D5 effect-row enforcement), c44_await_on_non_task_rejected.
+**C4.4 (2/N types) deliverables** (per ADR 0024 D4 + D5):
 
-Per ADR 0024 D13, C4.4 closes with `c44_go_no_go` running
-end-to-end at exit 42 + ADR 0024 → ACCEPTED (or
-ACCEPTED-WITH-AMENDMENTS depending on which D-decisions ship
-as drafted; the thread-per-spawn vs work-stealing scheduler
-choice is the likely amendment if the surface lands cleanly
-otherwise).
+  - Add `Type::Task(TaskId)` as the tenth interner-table-
+    style variant (preserve `Type: Copy + Hash`); add
+    `TaskData { result_ty: Type }`; add `intern_task` helper
+    matching `intern_kont`'s shape.
+  - Add `tasks: Vec<TaskData>` to `TypedProgram`. Thread
+    `tasks: &mut Vec<TaskData>` through `check_expr` and its
+    callees — there are many call sites; a sed/python pass
+    after `konts` is the cleanest mechanical update (see the
+    prior session's commit history for the pattern).
+  - Add `TypedExprKind::Scope { mode, body: Box<TypedBlock> }`,
+    `Spawn { call: Box<TypedExpr>, task_id: TaskId }`,
+    `Await { task_expr: Box<TypedExpr>, task_id: TaskId }`.
+  - In `check_expr`: Scope types as the body's tail type;
+    Spawn validates the inner is a `TypedExprKind::Call`
+    (per ADR 0024 D2), restricts call's return type to I64
+    (per ADR 0024 D7), interns `Task<I64>`; Await requires
+    the receiver be `Type::Task(_)` and produces the
+    interned TaskData's result_ty.
+  - Three new `TypeError` variants: `SpawnMustBeCall`,
+    `SpawnResultMustBeI64`, `AwaitOnNonTask`.
+  - Update all Type-match sites for `Type::Task(_)` arms
+    (≈8 sites: try_to_nullable_inner, try_to_array_elem,
+    substitute, type_display, Display impl,
+    coerce_to_expected match, is_nullable, llvm_basic_type's
+    callers).
+  - Update all TypedExprKind-match sites for Scope/Spawn/
+    Await arms in: `substitute`, `walk_expr_for_mono`,
+    `expr_performs`, `count_performs`, `find_unique_perform`,
+    `walk_collect_var_refs`, `find_var_name_in_expr`,
+    `substitute_perform_with_var`. **Prior attempt missed
+    `substitute_perform_with_var` and one other** — the
+    error site list is preserved in the prior session's
+    last build output (2 remaining match arms at codegen
+    lines ~5572 and ~5852).
+  - Drop the C4.4 (1/N) NotYet variants from `ResolveError`
+    AND from the resolve `check_expr` arms (replace with
+    full pass-through). Drop the C4.4 (1/N) `unreachable!`
+    stub in types' check_expr.
+
+  **Decision deferred** (ADR 0024 D5 — Async effect-row
+  enforcement): the prior attempt's MVP plan was to skip
+  effect-row enforcement entirely at C4.4 (2/N) and treat
+  spawn/await as effect-free. This keeps the phase-go
+  trivially typecheckable but contradicts ADR 0024 D5.
+  Recommended: ship the enforcement at C4.4 (2/N) — auto-
+  register the Async effect in resolve (pre-register
+  `EffectId(0)` as Async before user effects), make
+  spawn/await contribute Async to effect-check's row, make
+  `scope concurrent { ... }` discharge Async at the
+  effect-check layer. This requires ~50 extra LOC in
+  sentinel-effect-check (a new TypedExprKind arm) + a small
+  resolve change. Document any deferral as an amendment to
+  ADR 0024 D5.
+
+**C4.4 (2/N codegen) deliverables** (per ADR 0024 D8):
+
+  - **Add 5 runtime-fn externs to CodegenCtx + declare in
+    pass 1**: task_spawn_fn / task_await_fn / scope_enter_fn /
+    scope_exit_fn / scope_register_fn. Signatures per ADR
+    0024 D7 (all opaque `ptr` types except task_await
+    returns i64; scope_enter takes no args; etc.).
+  - **Per-spawn-fn wrapper synthesis** (the tricky bit). One
+    wrapper per unique spawn-target FnId (not per spawn
+    site). The wrapper signature is
+    `void wrapper(*Task task_ptr, *u8 args)`. Body: GEPs
+    into args at i64 offsets to unpack each arg, calls the
+    target fn, stores result in task_ptr->result (offset 0),
+    writes 1 into task_ptr->done (offset 8).
+    **Sticking point from prior attempt**: synthesizing
+    wrappers from inside CodegenCtx fails because CodegenCtx
+    doesn't hold a `&Module` reference. The cleanest fix:
+    pre-walk the typed program in compile_to_object (BEFORE
+    CodegenCtx is created) via a `collect_spawn_targets` fn
+    that returns a `Vec<FnId>`. Then for each FnId, declare
+    the wrapper via `module.add_function(...)` and emit its
+    body using a fresh `context.create_builder()` (local to
+    the pre-walk loop). Pass the resulting
+    `spawn_wrappers: HashMap<FnId, FunctionValue<'ctx>>` to
+    CodegenCtx by ownership. The prior attempt's wrapper
+    code is at `/dev/null` (reverted) but the pattern is in
+    the runtime tests showing the wrapper's expected shape.
+  - **Lower Spawn at the call site**: `sentinel_alloc(N*8)`
+    for args storage; lower each arg + store at offset i*8
+    via GEP; call sentinel_task_spawn(wrapper_ptr,
+    args_storage, args_size_bytes); if a current_scope is
+    pushed on CodegenCtx, also call sentinel_scope_register.
+  - **Lower Await**: lower task to a ptr value + call
+    sentinel_task_await + return the i64 result.
+  - **Lower Scope**: call sentinel_scope_enter to get a
+    ScopeCtx*; push `current_scope: Option<PointerValue>`
+    on CodegenCtx (save+restore for nested scopes); lower
+    body; call sentinel_scope_exit; pop current_scope.
+
+  **Drop emission**: add `Type::Task(_) => {}` arm to
+  emit_drop_for_binding — Task cleanup is the runtime's job
+  (sentinel_task_await / sentinel_scope_exit free the
+  Task). Add `Type::Task(_) => false` to
+  field_type_needs_drop_inner.
+
+**Phase-go fixture** per ADR 0024 D12: `c44_go_no_go.sentinel`
+— `scope concurrent { let t = spawn double(21); t.await }`
+returns 42 via the thread + auto-await.
+
+**UI fixtures**: c44_spawn_non_fn_call (D2 restriction —
+spawn target isn't a Call shape), c44_await_on_non_task (D3
+— await receiver isn't Task<T>), c44_spawn_result_must_be_i64
+(D7 — spawned fn returns non-i64).
+
+**Close-out**: ADR 0024 PROPOSED → ACCEPTED or
+ACCEPTED-WITH-AMENDMENTS. Likely amendments per the prior
+attempt's learning: A1 D6 thread-per-spawn vs work-stealing
+(thread-per-spawn shipped; work-stealing deferred); A2 D9
+cancellation on early exit (deferred); A3 D7 Task<T>
+restricted to T=I64 (broader T deferred); A4 D5 (if Async
+effect-row enforcement gets deferred to C4.5).
+
+**Estimated footprint after the runtime is already in**:
+~700-900 LOC across types (~300) + codegen (~400) + fixtures
+(~80). Achievable in 1-1.5 sessions of focused work.
+
+**Lessons from the prior C4.4 (2/N) attempt** (preserved for
+the next attempt):
+
+  - The `tasks` plumbing through `check_expr` is mechanical
+    but the chain is long (≈40 call sites). Use a Python /
+    sed script to add `tasks` next to `konts` in both
+    signatures and call sites; the prior attempt's pattern
+    was `'        konts,$' → '        konts,\n        tasks,'`.
+  - The TypedExprKind walks (10+ helper fns) all need the
+    same three new arms — easier to do them all in one pass
+    via grep+edit rather than chasing build errors.
+  - **The codegen wrapper-synthesis approach matters**:
+    inline-during-lower_expr DOES NOT WORK because
+    CodegenCtx lacks a `&Module` reference. The clean
+    pattern is to pre-walk in compile_to_object before
+    CodegenCtx exists.
+  - The `wrapper_builder.build_*` patterns must match
+    inkwell's BuilderError types — chains of `.expect("call")`
+    work but verify the inkwell version's Result vs panic
+    semantics before committing. The prior attempt's
+    wrapper code had `wrapper_builder.build_call(...)
+    .expect("call")` which compiles cleanly in inkwell 0.4+.
+  - Once spawn lowering exists, validate with
+    `cargo run -p sentinel-driver -- tests/pass/c44_go_no_go.sentinel`
+    before adding the scope cleanup arm — bug-isolation is
+    easier in stages.
 
 **Alternative — Path 3 bounded-generic follow-on** (per ADR
 0023 A1 amendment):
@@ -1558,22 +1692,29 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: verify with `git log -1` at session start.
-    Last work: **C4.4 (1/N) — scope / spawn / await AST + parser
-    landed per ADR 0024 D1+D2+D3.** ExprKind::Scope { mode:
-    Concurrent, body: Box<Block> } + ExprKind::Spawn
-    { call_expr } + ExprKind::Await { task_expr }. parse_scope_expr
-    (positional `concurrent` Ident) + parse_spawn_expr + postfix
-    `.await` dispatch in parse_postfix's Dot arm. Precedence:
-    prefix `spawn` looser than postfix `.await` (mirrors Rust).
-    ADR 0024 PROPOSED at C4.4 open: twelve D-decisions; key
-    amendment to ADR 0021 D9 = direct runtime API instead of
-    async-as-effect (multi-shot continuations deferred per ADR
-    0020 D2). Resolve rejects scope/spawn/await with three
-    NotYet diagnostics until C4.4 (2/N) brings types + runtime
-    (5 new symbols per ADR 0024 D7) + codegen. +9 tests (1177
-    active workspace).
-    Branch state: verify with `git status` at session start.
+    Local HEAD: verify with `git log -1` at session start
+    (expect: edf758c "feat(c4.4 2/N runtime): structured-
+    concurrency runtime symbols per ADR 0024 D6+D7").
+    Last work: **C4.4 (2/N runtime) — sentinel-runtime
+    structured-concurrency substrate landed.** Five new C-ABI
+    runtime symbols (sentinel_task_spawn / _await /
+    sentinel_scope_enter / _exit / _register) + SentinelTask
+    (32-byte C-stable struct) + SentinelScopeCtx. Thread-per-
+    spawn implementation using std::thread internally — real
+    work-stealing scheduler deferred per ADR 0024 D6. +6
+    runtime tests (1182 active workspace).
+    What remains for C4.4 (2/N) close: **types layer**
+    (Type::Task interner + spawn/await/scope typing + 3 new
+    TypeError variants), **codegen** (5 runtime fn externs +
+    per-spawn-fn wrapper synthesis via compile_to_object
+    pre-walk + lower Spawn/Await/Scope in lower_expr),
+    **c44_go_no_go phase-go fixture**, and ADR 0024 →
+    ACCEPTED-WITH-AMENDMENTS flip. See §0.2 for the detailed
+    deliverables + lessons from the prior attempt (rolled
+    back due to incomplete codegen wrapper synthesis).
+    ADR 0024 stays PROPOSED.
+    Branch state: verify with `git status` at session start
+    (working tree should be clean from edf758c).
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
     (bootstrap compiler MVP) + Phase C1 (full type system — all
