@@ -12,7 +12,33 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C4.0 landed; lexer keywords for Phase C4.**
+Last updated: **ADR 0022 PROPOSED: concrete C4.1 class surface.**
+No code changes — this is the C4.1 detail ADR mirroring ADR
+0013 (C1.4 structs) within the larger Phase C4 plan from ADR
+0021. Eleven D-decisions cover the class declaration grammar
+(D1), field declarations (D2), method declarations with
+`self: &Self` / `self: &mut Self` (D3), `init(args)`
+constructor + definite-assignment (D4), class instantiation
+via `Name::init(args)` — struct-literal syntax rejected for
+classes (D5), field access reusing C1.4 + C2 lvalue
+machinery (D6), static method dispatch (D7), `Self` + `self`
+resolution rules (D8), codegen lowering classes as LLVM
+struct + per-class method namespace + init `out_ptr` ABI
+(D9), no new lexer tokens (D10 — all reserved at C4.0), and
+the c41_go_no_go phase-go fixture (D11).
+
+**Key amendments to D5**: the `new Name(args)` sugar floated
+in ADR 0021 D3 stays rejected at C4.1 — `Name::init(args)`
+form composes cleanly with future associated fns + no new
+keyword needed. Struct-literal syntax `Name { field: value }`
+remains valid for `struct` declarations but rejected for
+`class` declarations to enforce the no-half-constructed
+invariant.
+
+Workspace test count unchanged (1093 + 1 doctest); no code
+shipped in this docs-only commit.
+
+Pre-ADR-0022 context: **C4.0 landed; lexer keywords for Phase C4.**
 ADR 0021 stays PROPOSED. Twelve new TokenKind variants reserve
 the Phase C4 surface: `class`, `trait`, `impl`, `init`,
 `delegate`, `scope`, `spawn`, `await`, `Self`, `self`, `as`,

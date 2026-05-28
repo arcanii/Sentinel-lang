@@ -951,15 +951,37 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C4.1 — class declarations + methods + init)
+### 0.2 Next session opening (C4.1 implementation — AST/parser first)
 
-Resume at **C4.1** per ADR 0021 D14. **C4.0 closed: lexer
-reserves the 12 Phase C4 keywords.** ADR 0021 stays PROPOSED.
-Per the D14 sub-phase split, C4.1 lands the class+method+init
-surface end-to-end (AST + parser + resolve + types + codegen,
-parallel-tree mirror across crates). Estimate per ADR 0021:
-2-3 sessions. A detail ADR 0022 PROPOSED at C4.1 open covers
-the concrete surface (mirroring ADR 0013 for C1.4 structs). The bootstrap language surface at C3.7 close has the
+Resume at **C4.1 implementation** per ADR 0022. **C4.0
+closed: lexer reserves the 12 Phase C4 keywords; ADR 0022
+PROPOSED details the C4.1 surface.** ADRs 0021 + 0022 stay
+PROPOSED. Per ADR 0022 the C4.1 implementation footprint is
+~700-1000 LOC across AST + parser + resolve + types +
+codegen; the next session(s) bring up:
+
+  - **AST**: `ClassDecl { name, fields, init, methods }` +
+    `Init` + `Method`. `Program.classes` alongside `.fns`
+    and `.structs`.
+  - **Parser**: `parse_class_decl` dispatching to
+    `parse_class_item` → field / init / method; new
+    `parse_self_param` for the `self: &mut? Self` form;
+    `Name::init(args)` calls (with a possible `ColonColon`
+    token addition if a two-Colon sequence is awkward —
+    decision deferred to implementation).
+  - **Resolve**: `ClassId(u32)` interner, method-table
+    population per class, `Self` resolution inside class
+    bodies, `self` synthetic VarId.
+  - **Types**: `Type::Class(ClassId)` interner extension
+    (Copy + Hash preserved), method-signature check
+    requiring a `self` first param, definite-assignment
+    dataflow for init bodies + four new TypeError variants
+    (`InitFieldMaybeUnassigned`,
+    `InitFieldReadBeforeAssign`,
+    `ClassConstructionMustUseInit`,
+    `SelfOutsideClassContext`).
+  - **Codegen**: LLVM struct per class + per-method fn +
+    init `out_ptr` ABI + auto-ref method calls. The bootstrap language surface at C3.7 close has the
 full memory-safety + secret-typing + effect-system trifecta
 from HANDOVER §6.2:
 
@@ -1379,12 +1401,16 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last sub-phase: **C4.0 — lexer keywords for Phase C4
-    (twelve new TokenKind variants: class / trait / impl /
-    init / delegate / scope / spawn / await / Self / self /
-    as / for; `Self` and `self` are case-distinguished tokens
-    SelfTy / SelfVal per ADR 0021 D2; `to` and `concurrent`
-    stay Idents — parser handles them positionally).**
+    Last work: **ADR 0022 PROPOSED — concrete C4.1 class
+    surface (11 D-decisions: class decl grammar, fields,
+    methods with `self: &Self`/`&mut Self`, `init(args)`
+    constructor with definite-assignment dataflow,
+    `Name::init(args)` instantiation rejecting struct-literal
+    for classes, static method dispatch, `Self`/`self`
+    resolution, LLVM lowering via per-class struct + per-
+    method fn + init `out_ptr` ABI). Per ADR 0022 the next
+    code-bearing session brings up AST + parser for the
+    class surface — ~700-1000 LOC across crates total.**
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1403,8 +1429,10 @@ For pasting into a fresh chat to bootstrap context:
     close** with all twelve D-decisions exercised modulo D2
     (multi-shot deferred per amendment); **ADR 0021 PROPOSED**
     opens Phase C4 (classes + traits + delegation + structured
-    concurrency; 14 D-decisions; 6 sub-phases; 8-12 sessions).
-    1093 active workspace tests + 1 doctest.
+    concurrency; 14 D-decisions; 6 sub-phases; 8-12 sessions);
+    **ADR 0022 PROPOSED** details C4.1 class surface (11 D-
+    decisions; ~700-1000 LOC across AST + parser + resolve +
+    types + codegen). 1093 active workspace tests + 1 doctest.
     **Thirty-two go/no-go programs run end-to-end + 1 UI rejection:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
