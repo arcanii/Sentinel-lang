@@ -831,6 +831,75 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Parse a C4.4 `scope concurrent { ... }` expression per ADR
+    /// 0024 D1. `concurrent` is a positional Ident (kept as a plain
+    /// Ident at the C4.0 lexer per the smallest-surface principle).
+    /// Other scope modes (`sequential`, `race`) are reserved for
+    /// future ADRs.
+    fn parse_scope_expr(&mut self) -> Result<Expr, ParseError> {
+        let kw_start = match self.peek_kind() {
+            Some(TokenKind::Scope) => self.advance().expect("peeked").span.start,
+            _ => unreachable!("called only after peek_kind() == Scope"),
+        };
+        // Positional `concurrent` mode keyword (an Ident token).
+        match self.peek() {
+            Some(t)
+                if t.kind == TokenKind::Ident && &self.src[t.span.clone()] == "concurrent" =>
+            {
+                self.advance();
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "`concurrent` after `scope`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`concurrent` after `scope`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+        // Block body. Reuses the standard parse_block; the trailing
+        // expression is the scope's value at the surface level.
+        let body = self.parse_block()?;
+        let body_span_end = body.span.end;
+        Ok(Spanned {
+            kind: ExprKind::Scope {
+                mode: sentinel_ast::ScopeMode::Concurrent,
+                body: Box::new(body),
+            },
+            span: kw_start..body_span_end,
+        })
+    }
+
+    /// Parse a C4.4 `spawn expr` expression per ADR 0024 D2. The
+    /// inner expression is restricted to a function-call shape at
+    /// C4.4 minimum (validated at the resolve / types layer);
+    /// here the parser accepts any expression — narrowing happens
+    /// downstream.
+    fn parse_spawn_expr(&mut self) -> Result<Expr, ParseError> {
+        let kw_start = match self.peek_kind() {
+            Some(TokenKind::Spawn) => self.advance().expect("peeked").span.start,
+            _ => unreachable!("called only after peek_kind() == Spawn"),
+        };
+        // Use parse_postfix so the call's argument list parses;
+        // arbitrary expressions are accepted at the parser level
+        // (types layer rejects non-call shapes per ADR 0024 D2).
+        let call_expr = self.parse_postfix()?;
+        let span = kw_start..call_expr.span.end;
+        Ok(Spanned {
+            kind: ExprKind::Spawn {
+                call_expr: Box::new(call_expr),
+            },
+            span,
+        })
+    }
+
     /// Parse a C4.2 trait declaration per ADR 0021 D4 + ADR 0023
     /// D1:
     ///
@@ -2935,6 +3004,22 @@ impl<'a> Parser<'a> {
             match self.peek_kind() {
                 Some(TokenKind::Dot) => {
                     self.advance();
+                    // C4.4 / ADR 0024 D3: `task.await` postfix.
+                    // The `await` keyword is reserved at C4.0
+                    // (TokenKind::Await), distinct from a regular
+                    // Ident. Check here before the field/method
+                    // dispatch falls through.
+                    if self.peek_kind() == Some(TokenKind::Await) {
+                        let await_end = self.advance().expect("peeked").span.end;
+                        let span = atom.span.start..await_end;
+                        atom = Spanned {
+                            kind: ExprKind::Await {
+                                task_expr: Box::new(atom),
+                            },
+                            span,
+                        };
+                        continue;
+                    }
                     let (field, field_span) = match self.peek() {
                         Some(t) if t.kind == TokenKind::Ident => {
                             let span = t.span.clone();
@@ -3097,6 +3182,8 @@ impl<'a> Parser<'a> {
                     span,
                 })
             }
+            Some(TokenKind::Scope) => self.parse_scope_expr(),
+            Some(TokenKind::Spawn) => self.parse_spawn_expr(),
             Some(TokenKind::Declassify) => {
                 // C3 / ADR 0019 D6: `declassify(e)` special form
                 // with mandatory parens. Type-check rejects with
@@ -5170,6 +5257,108 @@ mod tests {
         assert_eq!(c.delegates.len(), 1);
         assert!(c.init.is_some());
         assert_eq!(c.methods.len(), 1);
+    }
+
+    // ========================================================================
+    // C4.4 (1/N): scope / spawn / await parser tests per ADR 0024 D1-D3.
+    // `concurrent` is positional (a plain Ident); `await` is reserved at
+    // C4.0 (TokenKind::Await). Downstream resolve surfaces NotYet
+    // diagnostics until C4.4 (2/N) brings up the runtime + codegen.
+    // ========================================================================
+
+    #[test]
+    fn parse_scope_concurrent_block() {
+        let p = parse_ok_program(
+            "fn main() -> i64 { scope concurrent { 42 } }",
+        );
+        match &p.fns.iter().find(|f| f.name == "main").expect("has main").body.tail.kind {
+            ExprKind::Scope { mode, body } => {
+                assert_eq!(*mode, sentinel_ast::ScopeMode::Concurrent);
+                assert_eq!(body.stmts.len(), 0);
+            }
+            other => panic!("expected Scope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_scope_missing_concurrent_rejects() {
+        let err = parse("fn main() -> i64 { scope { 0 } }").unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if expected.contains("`concurrent`")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_spawn_fn_call() {
+        let p = parse_ok_program(
+            "fn double(x: i64) -> i64 { x * 2 }\nfn main() -> i64 { spawn double(21); 0 }",
+        );
+        match &p.fns.iter().find(|f| f.name == "main").expect("has main").body.stmts[0].kind {
+            StmtKind::Expr(e) => match &e.kind {
+                ExprKind::Spawn { call_expr } => {
+                    assert!(matches!(call_expr.kind, ExprKind::Call { .. }));
+                }
+                other => panic!("expected Spawn, got {other:?}"),
+            },
+            other => panic!("expected Expr stmt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_await_postfix() {
+        // Postfix `.await` on a let-bound variable. `spawn` is
+        // prefix and binds looser than postfix `.await`, so
+        // `spawn double(21).await` parses as `spawn (double(21).await)`.
+        // A let binding sidesteps the precedence question.
+        let p = parse_ok_program(
+            "fn double(x: i64) -> i64 { x * 2 }\nfn main() -> i64 { let t = 0; t.await }",
+        );
+        match &p.fns.iter().find(|f| f.name == "main").expect("has main").body.tail.kind {
+            ExprKind::Await { task_expr } => {
+                assert!(matches!(task_expr.kind, ExprKind::Var(_)));
+            }
+            other => panic!("expected Await, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_await_on_parenthesized_spawn() {
+        // Explicit parens override the prefix-spawn / postfix-.await
+        // precedence so `(spawn fn(x)).await` lands as
+        // `Await { task_expr: Spawn { ... } }`.
+        let p = parse_ok_program(
+            "fn double(x: i64) -> i64 { x * 2 }\nfn main() -> i64 { (spawn double(21)).await }",
+        );
+        match &p.fns.iter().find(|f| f.name == "main").expect("has main").body.tail.kind {
+            ExprKind::Await { task_expr } => {
+                assert!(matches!(task_expr.kind, ExprKind::Spawn { .. }));
+            }
+            other => panic!("expected Await, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_scope_spawn_await_combined() {
+        // Phase-go shape: scope concurrent { let t = spawn fn(args); t.await }
+        let p = parse_ok_program(
+            r#"
+            fn double(x: i64) -> i64 { x * 2 }
+            fn main() -> i64 {
+                scope concurrent {
+                    let t = spawn double(21);
+                    t.await
+                }
+            }
+            "#,
+        );
+        match &p.fns.iter().find(|f| f.name == "main").expect("has main").body.tail.kind {
+            ExprKind::Scope { body, .. } => {
+                assert_eq!(body.stmts.len(), 1);
+                assert!(matches!(body.tail.kind, ExprKind::Await { .. }));
+            }
+            other => panic!("expected Scope, got {other:?}"),
+        }
     }
 
     #[test]

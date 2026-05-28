@@ -5497,6 +5497,16 @@ fn check_expr(
             impl_decls,
             konts,
         )?,
+        // C4.4 (1/N) / ADR 0024: scope/spawn/await are pass-
+        // through at resolve but surface ScopeNotYet/SpawnNotYet/
+        // AwaitNotYet there — these arms are unreachable in
+        // practice at C4.4 (1/N). C4.4 (2/N) brings the typing
+        // layer + runtime + codegen up; these arms light up then.
+        ResolvedExprKind::Scope { .. }
+        | ResolvedExprKind::Spawn { .. }
+        | ResolvedExprKind::Await { .. } => {
+            unreachable!("ResolvedExprKind::Scope/Spawn/Await unreachable at C4.4 (1/N) — resolve surfaces NotYet")
+        }
     };
     let synth = TypedExpr { kind, span: expr.span.clone(), ty };
     // ADR 0014 D3: apply T→?T widening if the expected type is ?T and

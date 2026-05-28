@@ -637,6 +637,22 @@ pub enum ResolvedExprKind {
         method_span: Span,
         args: Vec<ResolvedExpr>,
     },
+    /// C4.4 / ADR 0024 D1: `scope concurrent { ... }`. Pass-through
+    /// at resolve time; types + runtime + codegen at C4.4 (2/N).
+    Scope {
+        mode: sentinel_ast::ScopeMode,
+        body: Box<ResolvedBlock>,
+    },
+    /// C4.4 / ADR 0024 D2: `spawn fn_name(args)`. Pass-through at
+    /// resolve time; the inner expression must be a function call
+    /// (validated at C4.4 (2/N) types layer).
+    Spawn {
+        call_expr: Box<ResolvedExpr>,
+    },
+    /// C4.4 / ADR 0024 D3: `task.await`. Pass-through.
+    Await {
+        task_expr: Box<ResolvedExpr>,
+    },
 }
 
 /// C3.4 / ADR 0020 D5: a resolved handler arm. Each arm's effect+op
@@ -1076,6 +1092,49 @@ pub enum ResolveError {
         trait_name: String,
         method_name: String,
         #[label("no such method on `{trait_name}`")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.4 / ADR 0024 D1 (C4.4 1/N): `scope concurrent {{ ... }}`
+    /// parses at C4.4 (1/N) but the typing layer + runtime + codegen
+    /// land at C4.4 (2/N). Pass-through diagnostic in the meantime.
+    #[error(
+        "`scope concurrent {{ ... }}` is not yet supported (lands at C4.4 (2/N))"
+    )]
+    #[diagnostic(
+        code(sentinel::resolve::scope_not_yet),
+        help("scope blocks parse + AST-mirror at C4.4 (1/N); the runtime scheduler + codegen per ADR 0024 D6-D8 lands at C4.4 (2/N)")
+    )]
+    ScopeNotYet {
+        #[label("scope block here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.4 / ADR 0024 D2 (C4.4 1/N): `spawn fn(args)` parses at
+    /// C4.4 (1/N) but the runtime + codegen lands at C4.4 (2/N).
+    #[error(
+        "`spawn expr` is not yet supported (lands at C4.4 (2/N))"
+    )]
+    #[diagnostic(
+        code(sentinel::resolve::spawn_not_yet),
+        help("`spawn fn_name(args)` parses + AST-mirrors at C4.4 (1/N); the runtime task-spawn + codegen per ADR 0024 D6-D8 lands at C4.4 (2/N)")
+    )]
+    SpawnNotYet {
+        #[label("spawn here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.4 / ADR 0024 D3 (C4.4 1/N): `task.await` parses at C4.4
+    /// (1/N) but the runtime + codegen lands at C4.4 (2/N).
+    #[error(
+        "`task.await` is not yet supported (lands at C4.4 (2/N))"
+    )]
+    #[diagnostic(
+        code(sentinel::resolve::await_not_yet),
+        help("`task.await` parses + AST-mirrors at C4.4 (1/N); the runtime task-await + codegen per ADR 0024 D6-D8 lands at C4.4 (2/N)")
+    )]
+    AwaitNotYet {
+        #[label("await here")]
         span: miette::SourceSpan,
     },
 }
@@ -2732,6 +2791,23 @@ fn resolve_expr(
                 args: resolved_args,
             }
         }
+        ExprKind::Scope { .. } => {
+            // C4.4 (1/N) / ADR 0024 D13: parser ships the surface;
+            // runtime + codegen wiring lands at (2/N).
+            return Err(ResolveError::ScopeNotYet {
+                span: to_source_span(&expr.span),
+            });
+        }
+        ExprKind::Spawn { .. } => {
+            return Err(ResolveError::SpawnNotYet {
+                span: to_source_span(&expr.span),
+            });
+        }
+        ExprKind::Await { .. } => {
+            return Err(ResolveError::AwaitNotYet {
+                span: to_source_span(&expr.span),
+            });
+        }
     };
     Ok(Spanned { kind, span: expr.span.clone() })
 }
@@ -3161,6 +3237,21 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
             format!(
                 "trait `{trait_name}` (impl `{impl_name}`) has no method `{method_name}`"
             ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::ScopeNotYet { span } => (
+            "sentinel::resolve::scope_not_yet",
+            "`scope concurrent { ... }` is not yet supported (lands at C4.4 (2/N))".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::SpawnNotYet { span } => (
+            "sentinel::resolve::spawn_not_yet",
+            "`spawn expr` is not yet supported (lands at C4.4 (2/N))".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::AwaitNotYet { span } => (
+            "sentinel::resolve::await_not_yet",
+            "`task.await` is not yet supported (lands at C4.4 (2/N))".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -3818,6 +3909,32 @@ mod tests {
             err,
             ResolveError::UndefinedTraitForImpl { ref name, .. } if name == "Missing"
         ));
+    }
+
+    // ----- C4.4 (1/N): scope/spawn/await NotYet rejection -----
+
+    #[test]
+    fn scope_concurrent_rejected_at_resolve() {
+        let err = resolve_err(
+            "fn main() -> i64 { scope concurrent { 42 } }",
+        );
+        assert!(matches!(err, ResolveError::ScopeNotYet { .. }));
+    }
+
+    #[test]
+    fn spawn_rejected_at_resolve() {
+        let err = resolve_err(
+            "fn double(x: i64) -> i64 { x * 2 }\nfn main() -> i64 { spawn double(21); 0 }",
+        );
+        assert!(matches!(err, ResolveError::SpawnNotYet { .. }));
+    }
+
+    #[test]
+    fn await_rejected_at_resolve() {
+        let err = resolve_err(
+            "fn main() -> i64 { let t = 0; t.await }",
+        );
+        assert!(matches!(err, ResolveError::AwaitNotYet { .. }));
     }
 
     #[test]

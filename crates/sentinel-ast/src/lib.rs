@@ -280,6 +280,41 @@ pub enum ExprKind {
         method_span: Span,
         args: Vec<Expr>,
     },
+    /// C4.4 / ADR 0024 D1: `scope concurrent { ... }` — structured-
+    /// concurrency block. The `concurrent` keyword is a positional
+    /// Ident (the C4.0 lexer keeps it as a plain Ident per the
+    /// smallest-surface principle); other scope modes are reserved
+    /// for future ADRs. The block's value is its tail expression;
+    /// the scope's concurrency contract (auto-await on exit) is a
+    /// runtime concern. Resolve at C4.4 (1/N) surfaces ScopeNotYet
+    /// until C4.4 (2/N) brings up the runtime + codegen.
+    Scope {
+        mode: ScopeMode,
+        body: Box<Block>,
+    },
+    /// C4.4 / ADR 0024 D2: `spawn fn_name(args)` — creates a Task
+    /// running the given fn call. At C4.4 minimum the inner
+    /// expression must be a function-call (validated at resolve);
+    /// arbitrary spawnable expressions are deferred per ADR 0024
+    /// D10. The outer expression's type is `Task<T>` where T is
+    /// the call's return type.
+    Spawn {
+        call_expr: Box<Expr>,
+    },
+    /// C4.4 / ADR 0024 D3: `task.await` — postfix form over a
+    /// Task<T>-typed expression. Result type is T. Blocks until
+    /// the spawned task produces a value.
+    Await {
+        task_expr: Box<Expr>,
+    },
+}
+
+/// C4.4 / ADR 0024 D1: scope-mode tag. Only `Concurrent` ships
+/// at C4.4 minimum; `Sequential` / `Race` / other modes are
+/// reserved for future ADRs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScopeMode {
+    Concurrent,
 }
 
 /// A single operation arm inside a `handle ... with { ... }`
@@ -887,6 +922,18 @@ impl fmt::Display for ExprKind {
                     write!(f, " {}", a.kind)?;
                 }
                 write!(f, ")")
+            }
+            ExprKind::Scope { mode, body } => {
+                let mode_str = match mode {
+                    ScopeMode::Concurrent => "concurrent",
+                };
+                write!(f, "(scope-{mode_str} {})", **body)
+            }
+            ExprKind::Spawn { call_expr } => {
+                write!(f, "(spawn {})", call_expr.kind)
+            }
+            ExprKind::Await { task_expr } => {
+                write!(f, "(await {})", task_expr.kind)
             }
         }
     }
