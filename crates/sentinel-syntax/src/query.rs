@@ -150,6 +150,13 @@ fn parse_error_to_diagnostic(err: &ParseError) -> Diagnostic {
             message: "empty effect-row annotation `! { }` is not allowed".to_string(),
             span: span.offset()..(span.offset() + span.len()),
         },
+        ParseError::DuplicateClassInit { class_name, span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::duplicate_class_init",
+            message: format!("class `{class_name}` declares multiple `init` constructors"),
+            span: span.offset()..(span.offset() + span.len()),
+        },
     }
 }
 

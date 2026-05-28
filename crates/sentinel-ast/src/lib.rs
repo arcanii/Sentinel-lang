@@ -351,6 +351,13 @@ pub struct Program {
     /// `ResolveError::EffectDeclNotYet` until C3.2 ships the
     /// effect-check query.
     pub effects: Vec<EffectDecl>,
+    /// Top-level class declarations per ADR 0021 D1 + ADR 0022 D1
+    /// (C4.1). Always present (may be empty for pre-C4 programs).
+    /// Resolve / types / codegen at C4.1's first iteration leave
+    /// classes untouched — the AST + parser layer ships first; the
+    /// downstream passes light up incrementally in follow-on
+    /// commits.
+    pub classes: Vec<ClassDecl>,
     pub span: Span,
 }
 
@@ -469,6 +476,94 @@ pub struct OpDecl {
     /// type; revisits once unit lands).
     pub return_type: Option<TypeExpr>,
     pub span: Span,
+}
+
+/// A C4.1+ top-level class declaration per ADR 0021 D1 + ADR
+/// 0022 D1: `class Name { field_decl* init_decl? method_decl* }`.
+/// At C4.1 minimum each class carries `fields`, an optional `init`,
+/// and `methods`; generic classes (`class Pair<A, B>`) are deferred
+/// per ADR 0022 D1. Per ADR 0022 D4 a class with at least one
+/// field MUST have an `init`; classes with zero fields may omit it
+/// (typed AST synthesises an empty `init() { }`). The parser does
+/// not enforce this — the typing layer does. Class items are
+/// pre-grouped here (fields / init / methods are each in their own
+/// vec) rather than interleaved, simplifying downstream passes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<ClassField>,
+    pub init: Option<InitDef>,
+    pub methods: Vec<MethodDef>,
+    pub span: Span,
+}
+
+/// A single field declaration inside a class body: `('pub')? 'let'
+/// name ':' type ';'`. Mirrors [`StructField`] but adds optional
+/// visibility (`pub`). Visibility is parsed at C4.1 but enforcement
+/// is deferred to Phase C5's module system per ADR 0022 D2.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassField {
+    pub visibility: Visibility,
+    pub name: String,
+    pub name_span: Span,
+    pub ty: TypeExpr,
+    pub span: Span,
+}
+
+/// The `init(args) { body }` constructor declaration inside a
+/// class body per ADR 0022 D4. Per the same D-decision, `init`
+/// has no return-type annotation — it implicitly returns the
+/// fully-constructed class. The body must definite-assign every
+/// declared field before returning (enforced at C4.1 type-check
+/// via the new dataflow analysis).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InitDef {
+    pub visibility: Visibility,
+    pub params: Vec<Param>,
+    pub body: Block,
+    pub span: Span,
+}
+
+/// A method declaration inside a class body per ADR 0022 D3.
+/// Differs from [`FnDef`] only by the implicit `self: &Self` /
+/// `self: &mut Self` first parameter, captured here as the
+/// `self_kind` field. The remaining `params` exclude the `self`
+/// parameter (the typing layer synthesises it). Methods may
+/// declare an `effect_row` exactly as free fns do.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MethodDef {
+    pub visibility: Visibility,
+    pub name: String,
+    pub name_span: Span,
+    pub self_kind: SelfKind,
+    pub params: Vec<Param>,
+    pub return_type: TypeExpr,
+    pub effect_row: Vec<Spanned<String>>,
+    pub body: Block,
+    pub span: Span,
+}
+
+/// The receiver kind of a method's `self` parameter per ADR 0022
+/// D3 + ADR 0017 D6's borrow rules. `Shared` for `self: &Self`
+/// (read-only access); `Exclusive` for `self: &mut Self`
+/// (write access). `Owned` (`self: Self`) is reserved for a
+/// later sub-phase — by-value methods are uncommon at C4.1 and
+/// would interact with the C2 drop machinery non-trivially.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SelfKind {
+    Shared,
+    Exclusive,
+}
+
+/// Visibility marker per ADR 0022 D2. Parsed at C4.1 but
+/// effectively a no-op until Phase C5 adds the module system.
+/// `Private` is the default (no `pub` prefix); `Public` is
+/// emitted when the prefix is present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Visibility {
+    Private,
+    Public,
 }
 
 /// Surface-level type expression. C1.2 shipped only the `Ident` form
@@ -1010,6 +1105,7 @@ mod tests {
             fns: vec![main_fn(lit(42, 0..2))],
             structs: vec![],
             effects: vec![],
+            classes: vec![],
             span: 0..2,
         };
         assert_eq!(p.to_string(), "(fn main () -> i64 (block 42))");
@@ -1051,7 +1147,13 @@ mod tests {
             },
             span: 0..9,
         });
-        let p = Program { fns: vec![double, main], structs: vec![], effects: vec![], span: 0..20 };
+        let p = Program {
+            fns: vec![double, main],
+            structs: vec![],
+            effects: vec![],
+            classes: vec![],
+            span: 0..20,
+        };
         assert_eq!(
             p.to_string(),
             "(fn double (x: i64) -> i64 (block (* x 2)))\n(fn main () -> i64 (block (double 7)))"
@@ -1463,6 +1565,7 @@ mod tests {
             fns: vec![main_fn(lit(7, 0..1))],
             structs: vec![s],
             effects: vec![],
+            classes: vec![],
             span: 0..30,
         };
         // Structs first, then fns.

@@ -216,6 +216,12 @@ pub enum TokenKind {
     /// (equality); longest-match keeps them unambiguous.
     #[token("=>")]
     FatArrow,
+    /// C4 / ADR 0022 D5: the `::` path separator used in
+    /// `Name::init(args)` class instantiation form. Distinct
+    /// from `:` (annotation prefix) — logos's longest-match
+    /// picks `::` over two `:` tokens when adjacent.
+    #[token("::")]
+    ColonColon,
 
     #[regex(r"[0-9]+")]
     IntLit,
@@ -1135,6 +1141,41 @@ mod tests {
                 TokenKind::Ident,
                 TokenKind::Ident,
                 TokenKind::Semi,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_colon_colon_token() {
+        // `::` is one token, not two `:`. Longest-match
+        // resolves the ambiguity.
+        assert_eq!(kinds("::"), vec![TokenKind::ColonColon]);
+    }
+
+    #[test]
+    fn lex_colon_vs_colon_colon() {
+        // `:` and `::` coexist on the same line — single
+        // colons must NOT collapse.
+        assert_eq!(
+            kinds(": :: :"),
+            vec![TokenKind::Colon, TokenKind::ColonColon, TokenKind::Colon]
+        );
+    }
+
+    #[test]
+    fn lex_class_init_call_skeleton() {
+        // `Point::init(3, 4)` — the D5 instantiation form.
+        assert_eq!(
+            kinds("Point::init(3, 4)"),
+            vec![
+                TokenKind::Ident,
+                TokenKind::ColonColon,
+                TokenKind::Init,
+                TokenKind::LParen,
+                TokenKind::IntLit,
+                TokenKind::Comma,
+                TokenKind::IntLit,
+                TokenKind::RParen,
             ]
         );
     }
