@@ -1,0 +1,43 @@
+// C3.6(b) / ADR 0020 D3: nested handles where the INNER fully
+// discharges its effects (Io). The outer's Net.fetch arm never
+// fires; outer just dispatches PURE_RETURN on inner's wrap.
+//
+// Trace:
+//   do_io's body is `perform Io.read()` → K1 (op_id = Io.read).
+//   Inner switch matches Io.read; arm body k(15). resume(K1, 15)
+//   drains (no frames) + returns pure-wrap(15). k(15)'s pure
+//   path: consume_pure → 15. Arm body value = 15. Inner is
+//   nested → wrap via pure_kont(15) → fresh K2 (PURE_RETURN, 15).
+//   Inner's merge → K2.
+//
+//   Outer's body result = K2. Outer's switch on K2.op_id =
+//   PURE_RETURN → outer's pure_block. Outer is NOT nested →
+//   consume_pure(K2) → 15. No return arm → 15 flows to merge.
+//
+//   Then the outer expr's value is 15. But we want 42 for the
+//   test, so the program adds + 27: `(handle ...) + 27` = 42.
+//
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+}
+
+effect Net {
+    fetch() -> i64;
+}
+
+fn do_io() -> i64 ! { Io } {
+    perform Io.read()
+}
+
+fn main() -> i64 {
+    let inner_val: i64 = handle
+        handle do_io() with {
+            Io.read(k) => k(15)
+        }
+    with {
+        Net.fetch(k) => k(0)
+    };
+    inner_val + 27
+}

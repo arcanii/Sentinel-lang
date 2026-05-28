@@ -555,6 +555,7 @@ pub fn compile_to_object(
             embedded_perform_resumers,
             chained_lets_resumers,
             handle_stack: Vec::new(),
+            handle_depth: 0,
             current_fn: None,
             current_fn_id: FnId(0), // placeholder; reset in compile_fn
             vars: HashMap::new(),
@@ -726,6 +727,16 @@ struct CodegenCtx<'ctx, 'plan> {
     /// block; `current_kont_slot` is an alloca holding the kont
     /// the switch reads next iteration.
     handle_stack: Vec<HandleContext<'ctx>>,
+    /// C3.6(b) / ADR 0020 D7: per-fn nesting depth of `handle`
+    /// expressions currently being lowered. Incremented at
+    /// [`Self::lower_handle`] entry, decremented at exit.
+    /// `depth > 1` means the current handle is nested inside
+    /// another — in that case the lowering emits Kont*-typed
+    /// merge values (arms wrap i64 via sentinel_kont_pure;
+    /// switch's default propagates the un-caught op kont to
+    /// the merge) so the enclosing outer handle can dispatch
+    /// on the result per ADR 0020 D3 deep-handler semantics.
+    handle_depth: u32,
     current_fn: Option<FunctionValue<'ctx>>,
     /// C2.4: the FnId of the fn currently being compiled. Used to
     /// look up the moved-source set from `drop_plan` at scope-exit
@@ -3527,14 +3538,24 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         }
     }
 
-    /// C3.5(e) / ADR 0020 D7: lower `handle body with { arms }`
-    /// as a dispatch *loop*. The body produces an initial kont;
-    /// the loop reads `current_kont_slot`, switches on its
-    /// `op_id`, and runs the matching arm. A `k(v)` call inside
-    /// the arm that bubbles (resumer in the chain performed)
-    /// stores the bubble kont back into `current_kont_slot` and
-    /// branches to the top of the loop — re-dispatching per
-    /// ADR 0020 D3 deep-handler semantics.
+    /// C3.5(e) + C3.6(b) / ADR 0020 D7: lower `handle body with
+    /// { arms }` as a dispatch *loop*. The body produces an
+    /// initial kont; the loop reads `current_kont_slot`,
+    /// switches on its `op_id`, and runs the matching arm. A
+    /// `k(v)` call inside the arm that bubbles (resumer in the
+    /// chain performed) stores the bubble kont back into
+    /// `current_kont_slot` and branches to the top of the loop —
+    /// re-dispatching per ADR 0020 D3 deep-handler semantics.
+    ///
+    /// **C3.6(b) nested-handle support**: when this handle is
+    /// itself the body (or transitively reached from the body)
+    /// of an enclosing handle — detected via `handle_depth > 1`
+    /// — the lowering shifts to Kont*-typed output: arms wrap
+    /// their i64 result via `sentinel_kont_pure`, the pure-
+    /// return switch case passes the kont through (or wraps the
+    /// return-arm'd value), and the switch's default is a
+    /// propagate block that contributes the un-caught kont to
+    /// the merge so the outer handle can dispatch on it.
     fn lower_handle(
         &mut self,
         body: &TypedExpr,
@@ -3542,29 +3563,56 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         return_arm: Option<&TypedReturnArm>,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        // C3.5(b) restriction: the body must be a direct Perform
-        // OR a call to an effecting fn. Both produce a Kont*
-        // IR value that the handle dispatches via runtime switch
-        // on the kont's op_id field. let-bound performs +
-        // arbitrary inline forms land at C3.5(c) / C3.6.
+        self.handle_depth += 1;
+        let is_nested = self.handle_depth > 1;
+
+        // C3.5(b) + C3.6(b) restriction: the body must be a
+        // direct Perform, a call to an effecting fn, or a
+        // nested Handle (whose own lowering produces a Kont*
+        // when nested). All other forms need additional frame
+        // reification machinery (covered by C3.5(c)/(d)/(e)
+        // for fn bodies, or unsupported at C3.6 minimum).
         let is_supported = match &body.kind {
             TypedExprKind::Perform { .. } => true,
             TypedExprKind::Call { id, .. } => {
                 !program.signature(*id).effect_row.is_empty()
             }
+            TypedExprKind::Handle { .. } => true,
             _ => false,
         };
         if !is_supported {
+            self.handle_depth -= 1;
             return Err(CodegenError::HandleBodyNotDirectPerform);
         }
 
+        let result = self.lower_handle_inner(
+            body,
+            arms,
+            return_arm,
+            program,
+            is_nested,
+        );
+        self.handle_depth -= 1;
+        result
+    }
+
+    fn lower_handle_inner(
+        &mut self,
+        body: &TypedExpr,
+        arms: &[TypedHandlerArm],
+        return_arm: Option<&TypedReturnArm>,
+        program: &TypedProgram,
+        is_nested: bool,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         // Lower the body — produces a Kont* (BasicValueEnum::Pointer).
         // For Perform: lower_perform emits sentinel_perform_op.
         // For Call to effecting fn: lower_call uses the fn's
-        // new effecting-ABI signature (returns ptr).
+        // effecting-ABI signature (returns ptr). For nested
+        // Handle: that handle's own merge is Kont*-typed.
         let initial_kont = self.lower_expr(body, program)?.into_pointer_value();
 
         let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let current_fn = self.current_fn.expect("inside compile_fn");
 
@@ -3581,9 +3629,18 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
         let loop_block = self.context.append_basic_block(current_fn, "handle_loop");
         let merge_block = self.context.append_basic_block(current_fn, "handle_merge");
-        let unreachable_block = self
+        // Switch's default destination: a propagate block when
+        // nested (contributes the un-caught kont to the merge so
+        // the outer handle can dispatch on it), or unreachable
+        // at top-level (type-check guarantees full coverage).
+        let default_block_name = if is_nested {
+            "handle_propagate"
+        } else {
+            "handle_unreachable"
+        };
+        let default_block = self
             .context
-            .append_basic_block(current_fn, "handle_unreachable");
+            .append_basic_block(current_fn, default_block_name);
         let pure_block = self.context.append_basic_block(current_fn, "handle_pure");
 
         self.builder
@@ -3605,8 +3662,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
         // One block per arm + a case-list for the switch. The
         // PURE_RETURN_OP_ID case (u32::MAX) goes to a dedicated
-        // pure-return block which unwraps the kont and branches
-        // straight to merge.
+        // pure-return block which unwraps the kont (or, when
+        // nested, passes through) and branches to merge.
         let arm_blocks: Vec<_> = arms
             .iter()
             .map(|_| self.context.append_basic_block(current_fn, "handle_arm"))
@@ -3619,59 +3676,75 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 (i32_ty.const_int(op_id as u64, false), *bb)
             })
             .collect();
-        // Pure-return tag handling per ADR 0020 D4's default
-        // `return v => v`. The body may have produced a pure
-        // value (effecting fn with pure tail wrapped via
-        // sentinel_kont_pure); we recover the value and branch
-        // to merge.
         let pure_op_id_const = i32_ty.const_int(u32::MAX as u64, false);
         cases.push((pure_op_id_const, pure_block));
 
         self.builder
-            .build_switch(op_id_val, unreachable_block, &cases)
+            .build_switch(op_id_val, default_block, &cases)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
-        // Pure-return block: call sentinel_kont_consume_pure to
-        // unwrap the value + free the kont. If a `return v =>
-        // body` arm is present (ADR 0020 D4 non-identity
-        // transform), bind v to the unwrapped value + lower the
-        // body — its result is what flows to merge. Otherwise
-        // the unwrapped value flows directly (default identity
-        // `return v => v`).
+        // Pure-return block:
+        //
+        //   - Top-level: consume_pure → i64; apply return arm
+        //     (if any) → i64; flow to merge.
+        //   - Nested: if return arm, consume_pure → apply →
+        //     re-wrap via sentinel_kont_pure → Kont* (so outer's
+        //     pure path can consume_pure). If no return arm,
+        //     pass current_kont through unchanged (it's already
+        //     a PURE_RETURN-tagged kont).
         self.builder.position_at_end(pure_block);
-        let pure_call = self
-            .builder
-            .build_call(
-                self.kont_consume_pure_fn,
-                &[current_kont.into()],
-                "kont_pure_value",
-            )
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        let pure_unwrap = pure_call
-            .try_as_basic_value()
-            .left()
-            .expect("sentinel_kont_consume_pure returns i64");
-        let pure_val: BasicValueEnum<'ctx> = if let Some(ra) = return_arm {
-            // C3.6(a) / ADR 0020 D4: bind the return arm's value
-            // VarId to the unwrapped i64 + lower the body. The
-            // body's result type is the handle's outer type per
-            // typing rules; here that's i64 by MVP restriction.
-            let i64_ty = self.context.i64_type();
-            let alloca = self
-                .builder
-                .build_alloca(i64_ty, &ra.value_name.kind)
-                .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            self.builder
-                .build_store(alloca, pure_unwrap.into_int_value())
-                .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            self.vars.insert(ra.value_var_id, (alloca, Type::I64));
-            let ra_val = self.lower_expr(&ra.body, program)?;
-            // Clean up the binding (defensive — env reset between
-            // fns covers it, but mirrors the per-arm scoping).
-            self.vars.remove(&ra.value_var_id);
-            ra_val
+        let pure_val: BasicValueEnum<'ctx> = if is_nested && return_arm.is_none() {
+            // Pass current_kont through.
+            current_kont.into()
         } else {
-            pure_unwrap
+            let pure_call = self
+                .builder
+                .build_call(
+                    self.kont_consume_pure_fn,
+                    &[current_kont.into()],
+                    "kont_pure_value",
+                )
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let pure_unwrap = pure_call
+                .try_as_basic_value()
+                .left()
+                .expect("sentinel_kont_consume_pure returns i64");
+            let unwrapped_or_transformed: BasicValueEnum<'ctx> =
+                if let Some(ra) = return_arm {
+                    // C3.6(a) / ADR 0020 D4: bind the return
+                    // arm's value VarId + lower the body.
+                    let alloca = self
+                        .builder
+                        .build_alloca(i64_ty, &ra.value_name.kind)
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    self.builder
+                        .build_store(alloca, pure_unwrap.into_int_value())
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    self.vars.insert(ra.value_var_id, (alloca, Type::I64));
+                    let ra_val = self.lower_expr(&ra.body, program)?;
+                    self.vars.remove(&ra.value_var_id);
+                    ra_val
+                } else {
+                    pure_unwrap
+                };
+            if is_nested {
+                // Re-wrap the i64 in a PURE_RETURN kont so the
+                // outer handle's pure-path can dispatch on it.
+                let wrap_call = self
+                    .builder
+                    .build_call(
+                        self.kont_pure_fn,
+                        &[unwrapped_or_transformed.into_int_value().into()],
+                        "pure_rewrap",
+                    )
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                wrap_call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("sentinel_kont_pure returns ptr")
+            } else {
+                unwrapped_or_transformed
+            }
         };
         let post_pure_block = self
             .builder
@@ -3694,14 +3767,31 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         });
 
         // Lower each arm: bind op-params + kont, lower the
-        // arm body, branch to merge. Collect (value, block) pairs
-        // for the phi.
+        // arm body, optionally wrap the i64 in pure_kont (when
+        // nested) so the merge type is Kont*, then branch to
+        // merge. Collect (value, block) pairs for the phi.
         let mut arm_results: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
             Vec::with_capacity(arms.len());
         for (arm, arm_bb) in arms.iter().zip(arm_blocks.iter()) {
             self.builder.position_at_end(*arm_bb);
             self.bind_handler_arm_params(arm, current_kont)?;
             let arm_val = self.lower_expr(&arm.body, program)?;
+            let final_arm_val: BasicValueEnum<'ctx> = if is_nested {
+                let wrap_call = self
+                    .builder
+                    .build_call(
+                        self.kont_pure_fn,
+                        &[arm_val.into_int_value().into()],
+                        "arm_pure_wrap",
+                    )
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                wrap_call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("sentinel_kont_pure returns ptr")
+            } else {
+                arm_val
+            };
             let post_arm_block = self
                 .builder
                 .get_insert_block()
@@ -3709,25 +3799,36 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             self.builder
                 .build_unconditional_branch(merge_block)
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            arm_results.push((arm_val, post_arm_block));
+            arm_results.push((final_arm_val, post_arm_block));
         }
 
         self.handle_stack.pop();
 
-        // Unreachable: emit `unreachable` so LLVM can prune the
-        // path. The type-check + effect-check should guarantee
-        // every kont op_id matches some arm at runtime; if not
-        // we'd hit this and abort cleanly.
-        self.builder.position_at_end(unreachable_block);
-        self.builder
-            .build_unreachable()
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        // Default block:
+        //   - Top-level (!is_nested): unreachable. Type-check
+        //     guarantees every op_id matches some arm.
+        //   - Nested: propagate the un-caught kont to merge so
+        //     the outer handle's dispatch loop catches it.
+        self.builder.position_at_end(default_block);
+        let propagate_val: Option<(BasicValueEnum<'ctx>, _)> = if is_nested {
+            let post_default = self
+                .builder
+                .get_insert_block()
+                .expect("inside default block");
+            self.builder
+                .build_unconditional_branch(merge_block)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            Some((current_kont.into(), post_default))
+        } else {
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            None
+        };
 
-        // Merge: phi over arm results + the pure-return value.
-        // All arms produce the same Sentinel type per ADR 0020 D6,
-        // so the LLVM type matches; pure_val (i64) matches when
-        // the handle's outer type is i64 (the only op-return shape
-        // supported at C3.5(b)).
+        // Merge: phi over all paths. When nested the type is
+        // Kont* (ptr); top-level it's i64 (the handle's outer
+        // type per the MVP restriction).
         self.builder.position_at_end(merge_block);
         let result_ty = arm_results[0].0.get_type();
         let phi = self
@@ -3739,6 +3840,9 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .map(|(v, bb)| (v as &dyn BasicValue<'ctx>, *bb))
             .collect();
         incoming.push((&pure_val as &dyn BasicValue<'ctx>, post_pure_block));
+        if let Some((v, bb)) = propagate_val.as_ref() {
+            incoming.push((v as &dyn BasicValue<'ctx>, *bb));
+        }
         phi.add_incoming(&incoming);
         Ok(phi.as_basic_value())
     }

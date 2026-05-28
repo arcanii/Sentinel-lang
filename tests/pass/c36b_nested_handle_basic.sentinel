@@ -1,0 +1,58 @@
+// C3.6(b) / ADR 0020 D3: nested handles where the inner handle
+// catches one effect and the outer catches another. The inner
+// handle's switch default propagates the un-caught op kont
+// (Net.fetch) to the merge so the outer handle's dispatch loop
+// can pick it up.
+//
+// Trace:
+//   do_both body lowers as a chained-lets fn (C3.5(e)) with
+//     resumer-0: let b = perform Net.fetch(); a + b
+//     resumer-1: a + b
+//   do_both returns K1 (op_id = Io.read), frames = [resumer-0].
+//
+//   Inner handle's switch on K1.op_id = Io.read → Io.read arm.
+//   Arm body k(7):
+//     resume(K1, 7) drains resumer-0:
+//       a = 7, perform Net.fetch → K2 (op_id = Net.fetch),
+//       push resumer-1 onto K2 (captured: a=7), return K2 (bubble).
+//     k(7)'s bubble path → store K2 into INNER's slot →
+//     branch inner_loop.
+//
+//   inner_loop reloads K2. Switch on K2.op_id = Net.fetch → NOT
+//   in inner's arms → default = propagate. propagate contributes
+//   K2 to inner's merge. Inner returns K2 (Kont*-typed merge).
+//
+//   Outer's body lowering's result = K2. Outer stores K2 into
+//   its slot, branches to outer_loop. Switch on Net.fetch →
+//   outer's Net.fetch arm. Arm body k(35):
+//     resume(K2, 35) drains resumer-1:
+//       b = 35, a (captured) = 7, tail = a + b = 42.
+//       Wrap pure → return.
+//     k(35)'s pure path → consume_pure → 42.
+//   Outer's arm body value = 42. Merge phi → 42. main returns 42.
+//
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+}
+
+effect Net {
+    fetch() -> i64;
+}
+
+fn do_both() -> i64 ! { Io, Net } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Net.fetch();
+    a + b
+}
+
+fn main() -> i64 {
+    handle
+        handle do_both() with {
+            Io.read(k) => k(7)
+        }
+    with {
+        Net.fetch(k) => k(35)
+    }
+}

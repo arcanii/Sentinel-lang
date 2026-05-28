@@ -1003,3 +1003,31 @@ fn pass_c36a_return_arm_after_resume() {
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
 }
+
+// ============================================================================
+// C3.6(b) / ADR 0020 D3: nested handles. When an inner handle's body emits
+// an op the inner doesn't catch, the inner's switch default propagates the
+// un-caught kont to the merge so the outer handle's dispatch loop catches
+// it. Detected via CodegenCtx.handle_depth > 1 — nested handles emit
+// Kont*-typed merge values; top-level handles emit i64 as before.
+// ============================================================================
+
+#[test]
+fn pass_c36b_nested_handle_basic() {
+    // do_both performs Io.read + Net.fetch in chained-let
+    // shape. Inner catches Io (resume 7), bubbles Net to outer
+    // which catches Net (resume 35). 7 + 35 = 42.
+    let r = build_and_run("c36b_nested_handle_basic.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c36b_nested_handle_inner_full() {
+    // do_io performs only Io. Inner catches it fully (k(15));
+    // inner's pure-path wraps via pure_kont; outer's PURE_RETURN
+    // switch case dispatches + consume_pure → 15. + 27 = 42.
+    let r = build_and_run("c36b_nested_handle_inner_full.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
