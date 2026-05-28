@@ -972,3 +972,34 @@ fn pass_c35e_chained_dependent_perform() {
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
 }
+
+// ============================================================================
+// C3.6(a) / ADR 0020 D4: return arm with non-identity transform.
+// lower_handle binds the return arm's value VarId to the unwrapped i64 +
+// lowers the body in pure_block; lower_resume_kont mirrors this on the
+// k(v) pure-unwrap path per Phase B's `k := \v. handle (kont.resume v)
+// with H` deep-handler re-wrap semantics. HandleContext now carries the
+// optional return arm (cloned at lower_handle entry) so k(v)'s pure path
+// can apply it.
+// ============================================================================
+
+#[test]
+fn pass_c36a_return_arm_transform() {
+    // do_pure() body is the pure expression `21`; effecting ABI
+    // wraps via sentinel_kont_pure. Handle's PURE_RETURN switch
+    // dispatches the return arm `return v => v * 2` → 21 * 2 = 42.
+    let r = build_and_run("c36a_return_arm_transform.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c36a_return_arm_after_resume() {
+    // handle perform Io.read() with arm k(21) + return v => v * 2.
+    // The arm body's k(21) drains pure (no frames); pure-unwrap
+    // path applies the return arm per deep-handler re-wrap →
+    // 21 * 2 = 42.
+    let r = build_and_run("c36a_return_arm_after_resume.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}

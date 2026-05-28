@@ -1,0 +1,22 @@
+// C3.6(a) / ADR 0020 D4: non-identity return arm. do_pure() is
+// declared `! { Io }` but its body is the pure expression `21` —
+// no perform fires. The effecting ABI wraps via sentinel_kont_pure;
+// the handle's pure-return dispatch hits the return arm
+// `return v => v * 2` which transforms 21 → 42.
+//
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+}
+
+fn do_pure() -> i64 ! { Io } {
+    21
+}
+
+fn main() -> i64 {
+    handle do_pure() with {
+        Io.read(k) => k(0),
+        return v => v * 2
+    }
+}

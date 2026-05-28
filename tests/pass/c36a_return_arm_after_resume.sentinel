@@ -1,0 +1,20 @@
+// C3.6(a) / ADR 0020 D4: non-identity return arm applied to a
+// resumed-value flow per Phase B's deep-handler re-wrap
+// semantics. The handle body performs Io.read; the arm resumes
+// with 21; the return arm `return v => v * 2` transforms the
+// resumed value 21 → 42. Per Phase B, `k := \v. handle
+// (kont.resume v) with H` — the return arm fires for k(v)'s
+// pure-drain just as it fires for the body's pure return.
+//
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+}
+
+fn main() -> i64 {
+    handle perform Io.read() with {
+        Io.read(k) => k(21),
+        return v => v * 2
+    }
+}

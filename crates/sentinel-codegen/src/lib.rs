@@ -616,10 +616,18 @@ pub fn compile_to_object(
 /// PURE_RETURN kont) stores the bubble kont into
 /// `current_kont_slot` and branches to `loop_block`, where the
 /// handle re-reads `current_kont_slot` + re-dispatches.
-#[derive(Clone, Copy)]
+///
+/// C3.6(a) extension: `return_arm` carries the (optional)
+/// non-identity `return v => body` transform. When `k(v)`'s
+/// resume drains to a pure value, [`Self::lower_resume_kont`]
+/// applies the return arm to that value per Phase B's deep-
+/// handler re-wrap semantics (k := `\v. handle (kont.resume v)
+/// with H`, where H includes the return arm).
+#[derive(Clone)]
 struct HandleContext<'ctx> {
     loop_block: inkwell::basic_block::BasicBlock<'ctx>,
     current_kont_slot: PointerValue<'ctx>,
+    return_arm: Option<TypedReturnArm>,
 }
 
 /// Per-function codegen state. See C1.1.2 docs in commit 9374edf
@@ -3462,13 +3470,17 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .build_conditional_branch(is_pure, pure_block, bubble_block)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
+        // Snapshot the enclosing handle's dispatch context before
+        // emitting either branch — both reach for it.
+        let handle_ctx = self
+            .handle_stack
+            .last()
+            .expect("ResumeKont must be lowered inside a handle arm")
+            .clone();
+
         // Bubble path: the enclosing handle's dispatch loop owns
         // re-dispatching the new kont. Store + branch.
         self.builder.position_at_end(bubble_block);
-        let handle_ctx = *self
-            .handle_stack
-            .last()
-            .expect("ResumeKont must be lowered inside a handle arm");
         self.builder
             .build_store(handle_ctx.current_kont_slot, result_kont)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -3478,7 +3490,11 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
         // Pure path: unwrap to i64. After this the builder stays
         // positioned in pure_block; the i64 flows back as the
-        // value of k(v).
+        // value of k(v). If the enclosing handle has a non-
+        // identity return arm (ADR 0020 D4 + C3.6(a)), apply it
+        // per Phase B's deep-handler re-wrap: k := `\v. handle
+        // (kont.resume v) with H` means k(v)'s pure result IS
+        // the return arm applied to the resumed value.
         self.builder.position_at_end(pure_block);
         let consume_call = self
             .builder
@@ -3488,11 +3504,27 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 "kv_pure_val",
             )
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        consume_call.try_as_basic_value().left().ok_or_else(|| {
+        let pure_unwrap = consume_call.try_as_basic_value().left().ok_or_else(|| {
             CodegenError::Builder(
                 "sentinel_kont_consume_pure returned void unexpectedly".to_string(),
             )
-        })
+        })?;
+        if let Some(ra) = handle_ctx.return_arm.as_ref() {
+            let i64_ty = self.context.i64_type();
+            let alloca = self
+                .builder
+                .build_alloca(i64_ty, &ra.value_name.kind)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(alloca, pure_unwrap.into_int_value())
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(ra.value_var_id, (alloca, Type::I64));
+            let ra_val = self.lower_expr(&ra.body, program)?;
+            self.vars.remove(&ra.value_var_id);
+            Ok(ra_val)
+        } else {
+            Ok(pure_unwrap)
+        }
     }
 
     /// C3.5(e) / ADR 0020 D7: lower `handle body with { arms }`
@@ -3507,7 +3539,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         &mut self,
         body: &TypedExpr,
         arms: &[TypedHandlerArm],
-        _return_arm: Option<&TypedReturnArm>,
+        return_arm: Option<&TypedReturnArm>,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         // C3.5(b) restriction: the body must be a direct Perform
@@ -3600,7 +3632,12 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
         // Pure-return block: call sentinel_kont_consume_pure to
-        // unwrap the value + free the kont, then branch to merge.
+        // unwrap the value + free the kont. If a `return v =>
+        // body` arm is present (ADR 0020 D4 non-identity
+        // transform), bind v to the unwrapped value + lower the
+        // body — its result is what flows to merge. Otherwise
+        // the unwrapped value flows directly (default identity
+        // `return v => v`).
         self.builder.position_at_end(pure_block);
         let pure_call = self
             .builder
@@ -3610,10 +3647,32 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 "kont_pure_value",
             )
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        let pure_val = pure_call
+        let pure_unwrap = pure_call
             .try_as_basic_value()
             .left()
             .expect("sentinel_kont_consume_pure returns i64");
+        let pure_val: BasicValueEnum<'ctx> = if let Some(ra) = return_arm {
+            // C3.6(a) / ADR 0020 D4: bind the return arm's value
+            // VarId to the unwrapped i64 + lower the body. The
+            // body's result type is the handle's outer type per
+            // typing rules; here that's i64 by MVP restriction.
+            let i64_ty = self.context.i64_type();
+            let alloca = self
+                .builder
+                .build_alloca(i64_ty, &ra.value_name.kind)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(alloca, pure_unwrap.into_int_value())
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(ra.value_var_id, (alloca, Type::I64));
+            let ra_val = self.lower_expr(&ra.body, program)?;
+            // Clean up the binding (defensive — env reset between
+            // fns covers it, but mirrors the per-arm scoping).
+            self.vars.remove(&ra.value_var_id);
+            ra_val
+        } else {
+            pure_unwrap
+        };
         let post_pure_block = self
             .builder
             .get_insert_block()
@@ -3624,10 +3683,14 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
         // Push the dispatch context so any k(v) call inside an
         // arm body's lowering can branch back to loop_block on
-        // bubble (see [`Self::lower_resume_kont`]).
+        // bubble (see [`Self::lower_resume_kont`]). The return
+        // arm (if any) is cloned into the context so k(v)'s
+        // pure-unwrap path can apply it per Phase B's deep-
+        // handler re-wrap semantics.
         self.handle_stack.push(HandleContext {
             loop_block,
             current_kont_slot,
+            return_arm: return_arm.cloned(),
         });
 
         // Lower each arm: bind op-params + kont, lower the
