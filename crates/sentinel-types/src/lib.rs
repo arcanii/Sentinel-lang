@@ -3065,26 +3065,39 @@ fn check_expr(
                         secrets,
                         struct_type_param_counts,
                     )?;
+                    // C3 / ADR 0019 D5 (C3.1b): unary preserves
+                    // the secret qualifier — `-secret_x` is
+                    // `secret int`, `!secret_bool` is `secret bool`.
+                    let (inner_unwrapped, inner_secret) =
+                        inner_t.ty.strip_secret(secrets);
                     let ty = match op {
                         UnaryOp::Neg => {
-                            if !inner_t.ty.is_int() {
+                            if !inner_unwrapped.is_int() {
                                 return Err(TypeError::Mismatch {
                                     expected: Type::I64,
                                     got: inner_t.ty,
                                     span: to_source_span(&inner.span),
                                 });
                             }
-                            inner_t.ty
+                            if inner_secret {
+                                Type::Secret(intern_secret(secrets, inner_unwrapped))
+                            } else {
+                                inner_unwrapped
+                            }
                         }
                         UnaryOp::Not => {
-                            if inner_t.ty != Type::Bool {
+                            if inner_unwrapped != Type::Bool {
                                 return Err(TypeError::Mismatch {
                                     expected: Type::Bool,
                                     got: inner_t.ty,
                                     span: to_source_span(&inner.span),
                                 });
                             }
-                            Type::Bool
+                            if inner_secret {
+                                Type::Secret(intern_secret(secrets, Type::Bool))
+                            } else {
+                                Type::Bool
+                            }
                         }
                         _ => unreachable!(),
                     };
@@ -3095,10 +3108,21 @@ fn check_expr(
         ResolvedExprKind::Binary(op, lhs, rhs) => {
             let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
             let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+            // C3 / ADR 0019 D5 + D7 (C3.1b): operator-secret-
+            // preserving. Strip one layer of `secret` from both
+            // sides, run the usual int-type check on the inners,
+            // and re-wrap the result if both were secret. Mixing
+            // public + secret operands surfaces as Mismatch (the
+            // "SecretFlow" semantics from Phase B ADR 0008 D4).
+            // `l.ty != r.ty` below handles the SecretFlow-via-
+            // Mismatch case (mixed); we only need the l-side
+            // wrappers plus the r_secret flag for SecretDivisor.
+            let (l_inner, l_secret) = l.ty.strip_secret(secrets);
+            let (_r_inner, r_secret) = r.ty.strip_secret(secrets);
             // C1.3: arithmetic requires both operands the same int
             // type (I32 or I64); result is that int type. Bool /
             // struct arithmetic is rejected.
-            if !l.ty.is_int() {
+            if !l_inner.is_int() {
                 return Err(TypeError::Mismatch {
                     expected: Type::I64,
                     got: l.ty,
@@ -3112,8 +3136,23 @@ fn check_expr(
                     span: to_source_span(&rhs.span),
                 });
             }
-            let _ = op; // arithmetic dispatch is codegen's concern
-            let ty = l.ty;
+            // C3 / ADR 0019 D7 (C3.1b) — SecretDivisor: variable-
+            // time `/` on a secret divisor leaks the divisor's bit
+            // pattern via timing. Reject. `secret a / secret b`
+            // hits this; `a / b` (both public) is fine.
+            if matches!(op, BinOp::Div) && r_secret {
+                return Err(TypeError::SecretDivisor {
+                    span: to_source_span(&rhs.span),
+                });
+            }
+            // Result preserves the secret qualifier when both
+            // operands are secret. By this point l_secret ==
+            // r_secret (l.ty == r.ty above).
+            let ty = if l_secret {
+                Type::Secret(intern_secret(secrets, l_inner))
+            } else {
+                l_inner
+            };
             (
                 TypedExprKind::Binary(*op, Box::new(l), Box::new(r)),
                 ty,
@@ -3169,12 +3208,21 @@ fn check_expr(
             }
             let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
             let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+            // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
+            // for comparisons. `secret T == secret T -> secret bool`
+            // per Phase B ADR 0008 D4. Strip wrappers to check
+            // inner compatibility; the wrapper question is set
+            // equality between the two sides.
+            // The `l.ty != r.ty` check below covers the
+            // SecretFlow-via-Mismatch case (mixed secret + public);
+            // we only need the l-side wrappers here.
+            let (l_inner, l_secret) = l.ty.strip_secret(secrets);
             // C1.3: comparisons require both operands the same type.
             // C1.4 + C1.5 keep this as int + bool only (ADR 0013 D6
             // defers struct equality; nullable-vs-nullable equality
             // also deferred). Reject struct + nullable operands when
             // neither side is null.
-            if l.ty.is_struct() || l.ty.is_nullable() {
+            if l_inner.is_struct() || l_inner.is_nullable() {
                 return Err(TypeError::Mismatch {
                     expected: Type::I64,
                     got: l.ty,
@@ -3188,31 +3236,58 @@ fn check_expr(
                     span: to_source_span(&rhs.span),
                 });
             }
+            let ty = if l_secret {
+                Type::Secret(intern_secret(secrets, Type::Bool))
+            } else {
+                Type::Bool
+            };
             (
                 TypedExprKind::Cmp(*op, Box::new(l), Box::new(r)),
-                Type::Bool,
+                ty,
             )
         }
         ResolvedExprKind::Logic(op, lhs, rhs) => {
             let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
             let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
-            if l.ty != Type::Bool {
+            // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
+            // for logicals. Both operands must be the same bool-
+            // shape (`bool` or `secret bool`); result preserves
+            // the secret qualifier.
+            let (l_inner, l_secret) = l.ty.strip_secret(secrets);
+            let (r_inner, r_secret) = r.ty.strip_secret(secrets);
+            if l_inner != Type::Bool {
                 return Err(TypeError::Mismatch {
                     expected: Type::Bool,
                     got: l.ty,
                     span: to_source_span(&lhs.span),
                 });
             }
-            if r.ty != Type::Bool {
+            if r_inner != Type::Bool {
                 return Err(TypeError::Mismatch {
                     expected: Type::Bool,
                     got: r.ty,
                     span: to_source_span(&rhs.span),
                 });
             }
+            // Mixed secret-then-public surfaces as Mismatch (the
+            // SecretFlow path from Phase B ADR 0008 D4 — public
+            // and secret can't merge without explicit declassify
+            // / widening).
+            if l_secret != r_secret {
+                return Err(TypeError::Mismatch {
+                    expected: l.ty,
+                    got: r.ty,
+                    span: to_source_span(&rhs.span),
+                });
+            }
+            let ty = if l_secret {
+                Type::Secret(intern_secret(secrets, Type::Bool))
+            } else {
+                Type::Bool
+            };
             (
                 TypedExprKind::Logic(*op, Box::new(l), Box::new(r)),
-                Type::Bool,
+                ty,
             )
         }
         ResolvedExprKind::Block(b) => {
@@ -5306,6 +5381,101 @@ fn main() -> i64 {
         let p = check_ok(
             "fn main() -> i64 { let x: secret i64 = 5; let r: & secret i64 = &x; declassify(*r) }",
         );
+        assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    // ---- C3.1b / ADR 0019 D5+D7: operator-secret-preserving ----
+
+    #[test]
+    fn c31_secret_arithmetic_preserves_secret() {
+        // `secret i64 + secret i64 -> secret i64`. The result of
+        // `a + b` in the body has type `secret i64`; declassify
+        // strips it.
+        let p = check_ok(
+            "fn add_secrets(a: secret i64, b: secret i64) -> i64 { declassify(a + b) }\
+             fn main() -> i64 { 0 }",
+        );
+        let f = p.fns.iter().find(|f| f.name == "add_secrets").expect("add_secrets");
+        // The body tail is declassify((a + b)); the declassify
+        // strips. So the tail type is i64.
+        assert_eq!(f.body.ty, Type::I64);
+    }
+
+    #[test]
+    fn c31_mixed_public_secret_arithmetic_rejects() {
+        // `secret i64 + i64 -> Mismatch` (SecretFlow via the
+        // existing Mismatch path).
+        let err = check_err(
+            "fn f(a: secret i64, b: i64) -> i64 { declassify(a + b) }\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn c31_secret_cmp_yields_secret_bool() {
+        // `secret i64 == secret i64 -> secret bool`. The body
+        // declassifies the comparison to a public bool, then
+        // converts to i64.
+        let p = check_ok(
+            "fn eq_secrets(a: secret i64, b: secret i64) -> i64 { if declassify(a == b) { 1 } else { 0 } }\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.main().return_type, Type::I64);
+    }
+
+    #[test]
+    fn c31_secret_logic_preserves_secret() {
+        // `secret bool && secret bool -> secret bool`. Declassify
+        // to compare against literal.
+        let p = check_ok(
+            "fn f(a: secret bool, b: secret bool) -> i64 { if declassify(a && b) { 1 } else { 0 } }\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.main().return_type, Type::I64);
+    }
+
+    #[test]
+    fn c31_unary_neg_preserves_secret() {
+        // `-secret_i64 -> secret i64`.
+        let p = check_ok(
+            "fn neg_secret(x: secret i64) -> i64 { declassify(-x) }\
+             fn main() -> i64 { 0 }",
+        );
+        let f = p.fns.iter().find(|f| f.name == "neg_secret").expect("neg_secret");
+        assert_eq!(f.body.ty, Type::I64);
+    }
+
+    #[test]
+    fn c31_unary_not_preserves_secret() {
+        // `!secret_bool -> secret bool`.
+        let p = check_ok(
+            "fn not_secret(x: secret bool) -> i64 { if declassify(!x) { 1 } else { 0 } }\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.main().return_type, Type::I64);
+    }
+
+    #[test]
+    fn c31_secret_divisor_rejects() {
+        // `secret_a / secret_b` — rejected with SecretDivisor.
+        // Variable-time division on a secret divisor leaks the
+        // divisor's bit pattern.
+        let err = check_err(
+            "fn f(a: secret i64, b: secret i64) -> i64 { declassify(a / b) }\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::SecretDivisor { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c31_public_div_unaffected() {
+        // Confirms SecretDivisor only fires when the divisor is
+        // secret — public divisor is fine.
+        let p = check_ok("fn main() -> i64 { 10 / 2 }");
         assert_eq!(p.main().body.ty, Type::I64);
     }
 }

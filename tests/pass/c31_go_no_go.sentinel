@@ -1,0 +1,35 @@
+// C3.1 phase-go per ADR 0019 D5 + D6 + D7: secret typing +
+// declassify + operator-preserving + constant-time check.
+//
+// Exercises:
+//   - `secret T` in fn signatures (D5)
+//   - Implicit T -> secret T widening at let-annotation (D5)
+//   - `secret int + secret int -> secret int` (D5b operator)
+//   - `secret int == secret int -> secret bool` (D5b operator)
+//   - `declassify(e)` strips secret (D6)
+//   - Public if-branch on the declassified bool — secret-aware
+//     control flow with the leak made explicit (D7 SecretBranch
+//     workaround)
+//
+// Computation:
+//   stored = 42 (secret), guess = 42 (secret).
+//   sum = stored + guess = 84 (secret).
+//   matched = (stored == guess) = true (secret).
+//   if declassify(matched) { print(declassify(sum) + 16) }
+//   else { print(0) }
+//   -> "100\n", exit 0.
+fn check_match(stored: secret i64, guess: secret i64) -> i64 {
+    let sum: secret i64 = stored + guess;
+    let matched: secret bool = stored == guess;
+    if declassify(matched) {
+        declassify(sum) + 16
+    } else {
+        0
+    }
+}
+
+fn main() -> i64 {
+    let stored: secret i64 = 42;
+    let guess: secret i64 = 42;
+    print(check_match(stored, guess))
+}

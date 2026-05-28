@@ -685,3 +685,14 @@ fn pass_c31_secret_typing() {
     assert_eq!(r.stdout, "50\n");
     assert_eq!(r.exit, 0);
 }
+
+#[test]
+fn pass_c31_go_no_go() {
+    // ADR 0019 D5+D6+D7 phase-go: full secret-typing surface —
+    // implicit widening + secret arithmetic + secret comparison
+    // + declassify before branching. stored=42, guess=42, sum=84,
+    // matched=true, declassify(sum)+16 = 100.
+    let r = build_and_run("c31_go_no_go.sentinel");
+    assert_eq!(r.stdout, "100\n");
+    assert_eq!(r.exit, 0);
+}
