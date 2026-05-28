@@ -30,8 +30,8 @@ use std::collections::{HashMap, HashSet};
 
 use salsa::Accumulator;
 use sentinel_ast::{
-    BinOp, Block, CmpOp, Expr, ExprKind, FnDef, LogicOp, Program, Span, Spanned, Stmt, StmtKind,
-    TypeExpr, TypeParam as AstTypeParam, UnaryOp,
+    BinOp, Block, CmpOp, Expr, ExprKind, FnDef, HandlerArm, LogicOp, Program, ReturnArm, Span,
+    Spanned, Stmt, StmtKind, TypeExpr, TypeParam as AstTypeParam, UnaryOp,
 };
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 
@@ -370,6 +370,75 @@ pub enum ResolvedExprKind {
     /// the inner is `secret T` and produces T as the result.
     /// Idempotent on non-secret types per ADR 0008 D5.
     Declassify(Box<ResolvedExpr>),
+    /// C3.4 / ADR 0020 D4 + D5: `handle expr with { arms }`. The
+    /// effects handled by `arms` are subtracted from the body's
+    /// inferred row at the type-check / effect-check pass per D6.
+    Handle {
+        body: Box<ResolvedExpr>,
+        arms: Vec<ResolvedHandlerArm>,
+        return_arm: Option<Box<ResolvedReturnArm>>,
+    },
+    /// C3.4 / ADR 0020 D4 + D5: `perform EffectName.OpName(args)`.
+    /// `effect_id` + `op_index` resolve the (Effect, Op) pair
+    /// against `ResolvedProgram::effects`; the op_index is the
+    /// position of the op inside its parent effect's `ops` list.
+    Perform {
+        effect_id: EffectId,
+        op_index: usize,
+        effect_name: String,
+        effect_span: Span,
+        op_name: String,
+        op_span: Span,
+        args: Vec<ResolvedExpr>,
+    },
+    /// C3.4 / ADR 0020 D5: a continuation-resume call `k(arg)`
+    /// inside a handler arm body. `kont` is the VarId of the
+    /// arm's continuation binding (last entry in the arm's
+    /// `param_var_ids`). The args' types are checked against the
+    /// op's return type + the call's result type is the outer
+    /// `handle` expression's type at type-check time.
+    ///
+    /// Resolve produces this variant whenever a `Call`'s callee
+    /// name resolves to an in-scope VarId — type-check verifies
+    /// the binding actually has a continuation type (and surfaces
+    /// `TypeError::KontCallOnNonKont` if not).
+    ResumeKont {
+        kont: VarId,
+        callee_span: Span,
+        args: Vec<ResolvedExpr>,
+    },
+}
+
+/// C3.4 / ADR 0020 D5: a resolved handler arm. Each arm's effect+op
+/// pair has been resolved to (`effect_id`, `op_index`); each
+/// param name has been assigned its own [`VarId`]. The kont is
+/// `param_var_ids.last()` — by D5 the last parameter is always
+/// the continuation binding.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedHandlerArm {
+    pub effect_id: EffectId,
+    pub op_index: usize,
+    pub effect_name: String,
+    pub effect_span: Span,
+    pub op_name: String,
+    pub op_span: Span,
+    /// VarIds for the op's params and (last) the continuation
+    /// binding. Length = op's arity + 1.
+    pub param_var_ids: Vec<VarId>,
+    /// Source-level param names (parallel to `param_var_ids`)
+    /// retained for diagnostics and IR debug.
+    pub param_names: Vec<Spanned<String>>,
+    pub body: ResolvedExpr,
+    pub span: Span,
+}
+
+/// C3.4 / ADR 0020 D4: the optional `return v => body` arm.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedReturnArm {
+    pub value_var_id: VarId,
+    pub value_name: Spanned<String>,
+    pub body: ResolvedExpr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -543,6 +612,50 @@ pub enum ResolveError {
     )]
     DeclassifyNotYet {
         #[label("declassify expression here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3.4 / ADR 0020 D5: a `handle` arm or `perform` expression
+    /// references an effect name that isn't declared anywhere in
+    /// the program.
+    #[error("undefined effect `{name}` in handler arm / perform")]
+    #[diagnostic(
+        code(sentinel::resolve::undefined_handler_effect),
+        help("declare it at the top level with `effect {name} {{ ... }}` before this reference")
+    )]
+    UndefinedHandlerEffect {
+        name: String,
+        #[label("no such effect")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3.4 / ADR 0020 D5: a `handle` arm or `perform` references
+    /// an op name that isn't declared inside the named effect.
+    #[error("operation `{op_name}` is not declared in `effect {effect_name}`")]
+    #[diagnostic(
+        code(sentinel::resolve::undefined_handler_op),
+        help("check the effect declaration for the available op names")
+    )]
+    UndefinedHandlerOp {
+        effect_name: String,
+        op_name: String,
+        #[label("no such op on `{effect_name}`")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3.4 / ADR 0020 D5: two arms in the same `handle` cover the
+    /// same (effect, op) pair.
+    #[error(
+        "duplicate handler arm for `{effect_name}.{op_name}` in this `handle`"
+    )]
+    #[diagnostic(
+        code(sentinel::resolve::duplicate_handler_arm),
+        help("each (effect, op) pair must appear at most once per `handle`")
+    )]
+    DuplicateHandlerArm {
+        effect_name: String,
+        op_name: String,
+        #[label("duplicate arm")]
         span: miette::SourceSpan,
     },
 }
@@ -757,6 +870,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
             &signatures,
             &struct_table,
             &effect_table,
+            &resolved_effects,
             &mut next_var_id,
         )?);
     }
@@ -776,6 +890,7 @@ fn resolve_fn(
     signatures: &[FnSignature],
     struct_table: &HashMap<String, StructId>,
     effect_table: &HashMap<String, EffectId>,
+    effects: &[ResolvedEffectDecl],
     next_var_id: &mut u32,
 ) -> Result<ResolvedFnDef, ResolveError> {
     let id = *fn_table
@@ -826,6 +941,8 @@ fn resolve_fn(
         fn_table,
         signatures,
         struct_table,
+        effect_table,
+        effects,
         &mut vars,
         next_var_id,
     )?;
@@ -867,11 +984,14 @@ fn resolve_type_params(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_block(
     block: &Block,
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
     struct_table: &HashMap<String, StructId>,
+    effect_table: &HashMap<String, EffectId>,
+    effects: &[ResolvedEffectDecl],
     vars: &mut HashMap<String, VarId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedBlock, ResolveError> {
@@ -882,6 +1002,8 @@ fn resolve_block(
             fn_table,
             signatures,
             struct_table,
+            effect_table,
+            effects,
             vars,
             next_var_id,
         )?);
@@ -891,6 +1013,8 @@ fn resolve_block(
         fn_table,
         signatures,
         struct_table,
+        effect_table,
+        effects,
         vars,
         next_var_id,
     )?;
@@ -901,11 +1025,14 @@ fn resolve_block(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_stmt(
     stmt: &Stmt,
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
     struct_table: &HashMap<String, StructId>,
+    effect_table: &HashMap<String, EffectId>,
+    effects: &[ResolvedEffectDecl],
     vars: &mut HashMap<String, VarId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedStmt, ResolveError> {
@@ -920,6 +1047,8 @@ fn resolve_stmt(
                 fn_table,
                 signatures,
                 struct_table,
+                effect_table,
+                effects,
                 vars,
                 next_var_id,
             )?;
@@ -947,6 +1076,8 @@ fn resolve_stmt(
                 fn_table,
                 signatures,
                 struct_table,
+                effect_table,
+                effects,
                 vars,
                 next_var_id,
             )?;
@@ -955,6 +1086,8 @@ fn resolve_stmt(
                 fn_table,
                 signatures,
                 struct_table,
+                effect_table,
+                effects,
                 vars,
                 next_var_id,
             )?;
@@ -965,6 +1098,8 @@ fn resolve_stmt(
             fn_table,
             signatures,
             struct_table,
+            effect_table,
+            effects,
             vars,
             next_var_id,
         )?),
@@ -972,11 +1107,14 @@ fn resolve_stmt(
     Ok(Spanned { kind, span: stmt.span.clone() })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_expr(
     expr: &Expr,
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
     struct_table: &HashMap<String, StructId>,
+    effect_table: &HashMap<String, EffectId>,
+    effects: &[ResolvedEffectDecl],
     vars: &mut HashMap<String, VarId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedExpr, ResolveError> {
@@ -1001,23 +1139,79 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                effect_table,
+                effects,
                 vars,
                 next_var_id,
             )?),
         ),
         ExprKind::Binary(op, lhs, rhs) => {
-            let l = resolve_expr(lhs, fn_table, signatures, struct_table, vars, next_var_id)?;
-            let r = resolve_expr(rhs, fn_table, signatures, struct_table, vars, next_var_id)?;
+            let l = resolve_expr(
+                lhs,
+                fn_table,
+                signatures,
+                struct_table,
+                effect_table,
+                effects,
+                vars,
+                next_var_id,
+            )?;
+            let r = resolve_expr(
+                rhs,
+                fn_table,
+                signatures,
+                struct_table,
+                effect_table,
+                effects,
+                vars,
+                next_var_id,
+            )?;
             ResolvedExprKind::Binary(*op, Box::new(l), Box::new(r))
         }
         ExprKind::Cmp(op, lhs, rhs) => {
-            let l = resolve_expr(lhs, fn_table, signatures, struct_table, vars, next_var_id)?;
-            let r = resolve_expr(rhs, fn_table, signatures, struct_table, vars, next_var_id)?;
+            let l = resolve_expr(
+                lhs,
+                fn_table,
+                signatures,
+                struct_table,
+                effect_table,
+                effects,
+                vars,
+                next_var_id,
+            )?;
+            let r = resolve_expr(
+                rhs,
+                fn_table,
+                signatures,
+                struct_table,
+                effect_table,
+                effects,
+                vars,
+                next_var_id,
+            )?;
             ResolvedExprKind::Cmp(*op, Box::new(l), Box::new(r))
         }
         ExprKind::Logic(op, lhs, rhs) => {
-            let l = resolve_expr(lhs, fn_table, signatures, struct_table, vars, next_var_id)?;
-            let r = resolve_expr(rhs, fn_table, signatures, struct_table, vars, next_var_id)?;
+            let l = resolve_expr(
+                lhs,
+                fn_table,
+                signatures,
+                struct_table,
+                effect_table,
+                effects,
+                vars,
+                next_var_id,
+            )?;
+            let r = resolve_expr(
+                rhs,
+                fn_table,
+                signatures,
+                struct_table,
+                effect_table,
+                effects,
+                vars,
+                next_var_id,
+            )?;
             ResolvedExprKind::Logic(*op, Box::new(l), Box::new(r))
         }
         ExprKind::Block(b) => ResolvedExprKind::Block(Box::new(resolve_block(
@@ -1025,16 +1219,29 @@ fn resolve_expr(
             fn_table,
             signatures,
             struct_table,
+            effect_table,
+            effects,
             vars,
             next_var_id,
         )?)),
         ExprKind::If { cond, then_branch, else_branch } => {
-            let cond = resolve_expr(cond, fn_table, signatures, struct_table, vars, next_var_id)?;
+            let cond = resolve_expr(
+                cond,
+                fn_table,
+                signatures,
+                struct_table,
+                effect_table,
+                effects,
+                vars,
+                next_var_id,
+            )?;
             let then_b = resolve_block(
                 then_branch,
                 fn_table,
                 signatures,
                 struct_table,
+                effect_table,
+                effects,
                 vars,
                 next_var_id,
             )?;
@@ -1043,6 +1250,8 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                effect_table,
+                effects,
                 vars,
                 next_var_id,
             )?;
@@ -1053,37 +1262,66 @@ fn resolve_expr(
             }
         }
         ExprKind::Call { callee, callee_span, args } => {
-            let id =
-                *fn_table
-                    .get(callee)
-                    .ok_or_else(|| ResolveError::UndefinedFunction {
+            // C3.4 / ADR 0020 D5: a Call whose callee name resolves
+            // to an in-scope VarId is a continuation-resume call
+            // (`k(arg)` inside a handler arm). Vars win over fns —
+            // a let-bound `k` shadows any top-level `fn k`, matching
+            // the standard inner-scope-wins rule. If no var match,
+            // fall through to the existing fn_table lookup.
+            if let Some(kid) = vars.get(callee).copied() {
+                let mut resolved_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    resolved_args.push(resolve_expr(
+                        arg,
+                        fn_table,
+                        signatures,
+                        struct_table,
+                        effect_table,
+                        effects,
+                        vars,
+                        next_var_id,
+                    )?);
+                }
+                ResolvedExprKind::ResumeKont {
+                    kont: kid,
+                    callee_span: callee_span.clone(),
+                    args: resolved_args,
+                }
+            } else {
+                let id =
+                    *fn_table
+                        .get(callee)
+                        .ok_or_else(|| ResolveError::UndefinedFunction {
+                            name: callee.clone(),
+                            span: to_source_span(callee_span),
+                        })?;
+                let signature = &signatures[id.0 as usize];
+                if args.len() != signature.arity {
+                    return Err(ResolveError::ArityMismatch {
                         name: callee.clone(),
+                        expected: signature.arity,
+                        got: args.len(),
                         span: to_source_span(callee_span),
-                    })?;
-            let signature = &signatures[id.0 as usize];
-            if args.len() != signature.arity {
-                return Err(ResolveError::ArityMismatch {
-                    name: callee.clone(),
-                    expected: signature.arity,
-                    got: args.len(),
-                    span: to_source_span(callee_span),
-                });
-            }
-            let mut resolved_args = Vec::with_capacity(args.len());
-            for arg in args {
-                resolved_args.push(resolve_expr(
-                    arg,
-                    fn_table,
-                    signatures,
-                    struct_table,
-                    vars,
-                    next_var_id,
-                )?);
-            }
-            ResolvedExprKind::Call {
-                id,
-                callee_span: callee_span.clone(),
-                args: resolved_args,
+                    });
+                }
+                let mut resolved_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    resolved_args.push(resolve_expr(
+                        arg,
+                        fn_table,
+                        signatures,
+                        struct_table,
+                        effect_table,
+                        effects,
+                        vars,
+                        next_var_id,
+                    )?);
+                }
+                ResolvedExprKind::Call {
+                    id,
+                    callee_span: callee_span.clone(),
+                    args: resolved_args,
+                }
             }
         }
         ExprKind::StructLit { name, name_span, fields } => {
@@ -1101,6 +1339,8 @@ fn resolve_expr(
                     fn_table,
                     signatures,
                     struct_table,
+                    effect_table,
+                    effects,
                     vars,
                     next_var_id,
                 )?;
@@ -1124,6 +1364,8 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                effect_table,
+                effects,
                 vars,
                 next_var_id,
             )?;
@@ -1141,6 +1383,8 @@ fn resolve_expr(
                     fn_table,
                     signatures,
                     struct_table,
+                    effect_table,
+                    effects,
                     vars,
                     next_var_id,
                 )?);
@@ -1153,6 +1397,8 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                effect_table,
+                effects,
                 vars,
                 next_var_id,
             )?;
@@ -1161,6 +1407,8 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                effect_table,
+                effects,
                 vars,
                 next_var_id,
             )?;
@@ -1178,13 +1426,238 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                effect_table,
+                effects,
                 vars,
                 next_var_id,
             )?;
             ResolvedExprKind::Declassify(Box::new(inner))
         }
+        ExprKind::Handle { body, arms, return_arm } => resolve_handle_expr(
+            body,
+            arms,
+            return_arm.as_deref(),
+            fn_table,
+            signatures,
+            struct_table,
+            effect_table,
+            effects,
+            vars,
+            next_var_id,
+        )?,
+        ExprKind::Perform { effect, op, args } => resolve_perform_expr(
+            effect,
+            op,
+            args,
+            fn_table,
+            signatures,
+            struct_table,
+            effect_table,
+            effects,
+            vars,
+            next_var_id,
+        )?,
     };
     Ok(Spanned { kind, span: expr.span.clone() })
+}
+
+/// C3.4 / ADR 0020 D5: resolve `handle body with { arms }`.
+/// Looks up each arm's effect+op pair against the effect_table,
+/// rejects duplicate (effect, op) pairs across arms, and assigns
+/// VarIds to every arm param (including the trailing kont).
+#[allow(clippy::too_many_arguments)]
+fn resolve_handle_expr(
+    body: &Expr,
+    arms: &[HandlerArm],
+    return_arm: Option<&ReturnArm>,
+    fn_table: &HashMap<String, FnId>,
+    signatures: &[FnSignature],
+    struct_table: &HashMap<String, StructId>,
+    effect_table: &HashMap<String, EffectId>,
+    effects: &[ResolvedEffectDecl],
+    vars: &mut HashMap<String, VarId>,
+    next_var_id: &mut u32,
+) -> Result<ResolvedExprKind, ResolveError> {
+    let body = resolve_expr(
+        body,
+        fn_table,
+        signatures,
+        struct_table,
+        effect_table,
+        effects,
+        vars,
+        next_var_id,
+    )?;
+
+    let mut seen: HashSet<(EffectId, usize)> = HashSet::new();
+    let mut resolved_arms = Vec::with_capacity(arms.len());
+    for arm in arms {
+        // Look up effect by name.
+        let effect_id = *effect_table.get(&arm.effect.kind).ok_or_else(|| {
+            ResolveError::UndefinedHandlerEffect {
+                name: arm.effect.kind.clone(),
+                span: to_source_span(&arm.effect.span),
+            }
+        })?;
+        let effect_decl = &effects[effect_id.0 as usize];
+        let op_index = effect_decl
+            .ops
+            .iter()
+            .position(|op| op.name == arm.op.kind)
+            .ok_or_else(|| ResolveError::UndefinedHandlerOp {
+                effect_name: arm.effect.kind.clone(),
+                op_name: arm.op.kind.clone(),
+                span: to_source_span(&arm.op.span),
+            })?;
+        if !seen.insert((effect_id, op_index)) {
+            return Err(ResolveError::DuplicateHandlerArm {
+                effect_name: arm.effect.kind.clone(),
+                op_name: arm.op.kind.clone(),
+                span: to_source_span(&arm.span),
+            });
+        }
+
+        // Bind arm params + kont in a child scope. We snapshot the
+        // outer `vars` so the handler-arm bindings don't leak past
+        // the arm body. The snapshot+restore pattern is also used
+        // by the if/else moved-set merge in the borrow checker —
+        // bindings are scope-local.
+        let saved_vars = vars.clone();
+        let mut param_var_ids = Vec::with_capacity(arm.param_names.len());
+        for pn in &arm.param_names {
+            if vars.contains_key(&pn.kind) {
+                // C3.4: handler-arm param names share the standard
+                // RedeclaredVariable rule. Shadowing isn't allowed
+                // at the same scope; an outer-scope binding is
+                // simply replaced for the arm body.
+                // (Conservative: allow shadowing instead by
+                // re-inserting; here we mirror RedeclaredVariable
+                // only when the SAME arm declares the same param
+                // twice.)
+                if saved_vars.get(&pn.kind) != vars.get(&pn.kind) {
+                    return Err(ResolveError::RedeclaredVariable {
+                        name: pn.kind.clone(),
+                        span: to_source_span(&pn.span),
+                    });
+                }
+            }
+            let vid = VarId(*next_var_id);
+            *next_var_id += 1;
+            vars.insert(pn.kind.clone(), vid);
+            param_var_ids.push(vid);
+        }
+        let body = resolve_expr(
+            &arm.body,
+            fn_table,
+            signatures,
+            struct_table,
+            effect_table,
+            effects,
+            vars,
+            next_var_id,
+        )?;
+        // Restore the outer scope.
+        *vars = saved_vars;
+
+        resolved_arms.push(ResolvedHandlerArm {
+            effect_id,
+            op_index,
+            effect_name: arm.effect.kind.clone(),
+            effect_span: arm.effect.span.clone(),
+            op_name: arm.op.kind.clone(),
+            op_span: arm.op.span.clone(),
+            param_var_ids,
+            param_names: arm.param_names.clone(),
+            body,
+            span: arm.span.clone(),
+        });
+    }
+
+    let resolved_return_arm = if let Some(ra) = return_arm {
+        let saved_vars = vars.clone();
+        let vid = VarId(*next_var_id);
+        *next_var_id += 1;
+        vars.insert(ra.value_name.kind.clone(), vid);
+        let body = resolve_expr(
+            &ra.body,
+            fn_table,
+            signatures,
+            struct_table,
+            effect_table,
+            effects,
+            vars,
+            next_var_id,
+        )?;
+        *vars = saved_vars;
+        Some(Box::new(ResolvedReturnArm {
+            value_var_id: vid,
+            value_name: ra.value_name.clone(),
+            body,
+            span: ra.span.clone(),
+        }))
+    } else {
+        None
+    };
+
+    Ok(ResolvedExprKind::Handle {
+        body: Box::new(body),
+        arms: resolved_arms,
+        return_arm: resolved_return_arm,
+    })
+}
+
+/// C3.4 / ADR 0020 D5: resolve `perform EffectName.OpName(args)`.
+#[allow(clippy::too_many_arguments)]
+fn resolve_perform_expr(
+    effect: &Spanned<String>,
+    op: &Spanned<String>,
+    args: &[Expr],
+    fn_table: &HashMap<String, FnId>,
+    signatures: &[FnSignature],
+    struct_table: &HashMap<String, StructId>,
+    effect_table: &HashMap<String, EffectId>,
+    effects: &[ResolvedEffectDecl],
+    vars: &mut HashMap<String, VarId>,
+    next_var_id: &mut u32,
+) -> Result<ResolvedExprKind, ResolveError> {
+    let effect_id = *effect_table.get(&effect.kind).ok_or_else(|| {
+        ResolveError::UndefinedHandlerEffect {
+            name: effect.kind.clone(),
+            span: to_source_span(&effect.span),
+        }
+    })?;
+    let effect_decl = &effects[effect_id.0 as usize];
+    let op_index = effect_decl
+        .ops
+        .iter()
+        .position(|odecl| odecl.name == op.kind)
+        .ok_or_else(|| ResolveError::UndefinedHandlerOp {
+            effect_name: effect.kind.clone(),
+            op_name: op.kind.clone(),
+            span: to_source_span(&op.span),
+        })?;
+    let mut resolved_args = Vec::with_capacity(args.len());
+    for arg in args {
+        resolved_args.push(resolve_expr(
+            arg,
+            fn_table,
+            signatures,
+            struct_table,
+            effect_table,
+            effects,
+            vars,
+            next_var_id,
+        )?);
+    }
+    Ok(ResolvedExprKind::Perform {
+        effect_id,
+        op_index,
+        effect_name: effect.kind.clone(),
+        effect_span: effect.span.clone(),
+        op_name: op.kind.clone(),
+        op_span: op.span.clone(),
+        args: resolved_args,
+    })
 }
 
 /// Visible to crates that consume `ResolvedProgram` and need a
@@ -1295,6 +1768,23 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
         ResolveError::DeclassifyNotYet { span } => (
             "sentinel::resolve::declassify_not_yet",
             "`declassify(...)` is not yet supported (lands at C3.1)".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::UndefinedHandlerEffect { name, span } => (
+            "sentinel::resolve::undefined_handler_effect",
+            format!("undefined effect `{name}` in handler arm / perform"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::UndefinedHandlerOp { effect_name, op_name, span } => (
+            "sentinel::resolve::undefined_handler_op",
+            format!("operation `{op_name}` is not declared in `effect {effect_name}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::DuplicateHandlerArm { effect_name, op_name, span } => (
+            "sentinel::resolve::duplicate_handler_arm",
+            format!(
+                "duplicate handler arm for `{effect_name}.{op_name}` in this `handle`"
+            ),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -1892,5 +2382,116 @@ mod tests {
             "fn main() -> i64 { let x: i64 = 1; declassify(x) }",
         );
         assert!(!p.fns.is_empty());
+    }
+
+    // ----- C3.4 / ADR 0020: handle + perform resolve -----
+
+    #[test]
+    fn c34_perform_resolves() {
+        let p = resolve_ok(
+            "effect Io { read() -> i64; }\
+             fn main() -> i64 { handle perform Io.read() with { Io.read(k) => 0 } }",
+        );
+        let main = p.main();
+        // The body should resolve cleanly.
+        assert!(matches!(main.body.tail.kind, ResolvedExprKind::Handle { .. }));
+    }
+
+    #[test]
+    fn c34_perform_undefined_effect_errors() {
+        let err = resolve_err(
+            "fn main() -> i64 { perform Io.read() }",
+        );
+        assert!(
+            matches!(err, ResolveError::UndefinedHandlerEffect { ref name, .. } if name == "Io"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c34_perform_undefined_op_errors() {
+        let err = resolve_err(
+            "effect Io { read() -> i64; }\
+             fn main() -> i64 { perform Io.write() }",
+        );
+        assert!(
+            matches!(err, ResolveError::UndefinedHandlerOp { ref op_name, .. } if op_name == "write"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c34_handle_undefined_effect_errors() {
+        let err = resolve_err(
+            "fn main() -> i64 { handle 0 with { Io.read(k) => 1 } }",
+        );
+        assert!(
+            matches!(err, ResolveError::UndefinedHandlerEffect { ref name, .. } if name == "Io"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c34_handle_undefined_op_errors() {
+        let err = resolve_err(
+            "effect Io { read() -> i64; }\
+             fn main() -> i64 { handle 0 with { Io.write(k) => 1 } }",
+        );
+        assert!(
+            matches!(err, ResolveError::UndefinedHandlerOp { ref op_name, .. } if op_name == "write"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c34_handle_duplicate_arm_errors() {
+        let err = resolve_err(
+            "effect Io { read() -> i64; }\
+             fn main() -> i64 { handle 0 with { Io.read(k) => 1, Io.read(k) => 2 } }",
+        );
+        assert!(
+            matches!(err, ResolveError::DuplicateHandlerArm { ref op_name, .. } if op_name == "read"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c34_kont_call_resolves_as_resume_kont() {
+        // `k(0)` inside a handler arm body resolves as a
+        // ResumeKont, NOT as a (failed) fn lookup.
+        let p = resolve_ok(
+            "effect Io { read() -> i64; }\
+             fn main() -> i64 { handle 0 with { Io.read(k) => k(0) } }",
+        );
+        // Drill into the handle's first arm and confirm its
+        // body is a ResumeKont reference to the arm's kont VarId.
+        let main = p.main();
+        let kind = &main.body.tail.kind;
+        let arms = match kind {
+            ResolvedExprKind::Handle { arms, .. } => arms,
+            other => panic!("expected Handle, got {other:?}"),
+        };
+        let arm = &arms[0];
+        let kont_id = *arm.param_var_ids.last().expect("kont VarId present");
+        match &arm.body.kind {
+            ResolvedExprKind::ResumeKont { kont, args, .. } => {
+                assert_eq!(*kont, kont_id);
+                assert_eq!(args.len(), 1);
+            }
+            other => panic!("expected ResumeKont, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn c34_handle_with_return_arm_resolves() {
+        let p = resolve_ok(
+            "effect Io { read() -> i64; }\
+             fn main() -> i64 { handle 0 with { Io.read(k) => 1, return v => v } }",
+        );
+        let main = p.main();
+        match &main.body.tail.kind {
+            ResolvedExprKind::Handle { return_arm: Some(_), .. } => {}
+            other => panic!("expected Handle with return arm, got {other:?}"),
+        }
     }
 }

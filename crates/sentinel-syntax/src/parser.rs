@@ -47,9 +47,9 @@
 //! until parser ergonomics demand it.
 
 use sentinel_ast::{
-    BinOp, Block, CmpOp, EffectDecl, Expr, ExprKind, FieldInit, FnDef, LogicOp, OpDecl, Param,
-    Program, Span, Spanned, Stmt, StmtKind, StructDecl, StructField, TypeExpr, TypeExprKind,
-    TypeParam, UnaryOp,
+    BinOp, Block, CmpOp, EffectDecl, Expr, ExprKind, FieldInit, FnDef, HandlerArm, LogicOp,
+    OpDecl, Param, Program, ReturnArm, Span, Spanned, Stmt, StmtKind, StructDecl, StructField,
+    TypeExpr, TypeExprKind, TypeParam, UnaryOp,
 };
 
 use crate::{lex, LexError, TokenKind};
@@ -1854,6 +1854,8 @@ impl<'a> Parser<'a> {
                     span: d_start..rp_end,
                 })
             }
+            Some(TokenKind::Handle) => self.parse_handle_expr(),
+            Some(TokenKind::Perform) => self.parse_perform_expr(),
             Some(TokenKind::LBracket) => {
                 // C1.6 / ADR 0015 D2: array literal `[e1, e2, ...]`.
                 // Inside `[...]`, struct literals are unambiguous.
@@ -2022,6 +2024,510 @@ impl<'a> Parser<'a> {
                 span: to_source_span(&self.eof_span()),
             }),
         }
+    }
+
+    /// C3.4 / ADR 0020 D4 + D5: parse `handle expr with { arms }`.
+    /// Called from `parse_atom` when the current token is `handle`.
+    /// The handler body parses with `allow_struct_lit = true` so a
+    /// `handle Point { x: 1 } with { ... }` form parses as
+    /// expected (the `with` keyword unambiguously closes the body).
+    fn parse_handle_expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.advance().expect("peeked Handle").span.start;
+        let saved = self.allow_struct_lit;
+        self.allow_struct_lit = true;
+        let body = self.parse_expr()?;
+        self.allow_struct_lit = saved;
+
+        match self.peek_kind() {
+            Some(TokenKind::With) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`with` after handle body",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`with` after handle body",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+        match self.peek_kind() {
+            Some(TokenKind::LBrace) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`{` after `with`",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`{` after `with`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let mut arms: Vec<HandlerArm> = Vec::new();
+        let mut return_arm: Option<Box<ReturnArm>> = None;
+        // First arm (if any). Empty handler-arm lists are accepted
+        // structurally; type-check decides whether they make sense.
+        if self.peek_kind() != Some(TokenKind::RBrace) {
+            self.parse_handler_or_return_arm(&mut arms, &mut return_arm)?;
+            while self.peek_kind() == Some(TokenKind::Comma) {
+                self.advance();
+                if self.peek_kind() == Some(TokenKind::RBrace) {
+                    break; // trailing comma allowed
+                }
+                self.parse_handler_or_return_arm(&mut arms, &mut return_arm)?;
+            }
+        }
+        let rb_end = match self.peek_kind() {
+            Some(TokenKind::RBrace) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`,` or `}` in handler arms",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`,` or `}` in handler arms",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        Ok(Spanned {
+            kind: ExprKind::Handle {
+                body: Box::new(body),
+                arms,
+                return_arm,
+            },
+            span: start..rb_end,
+        })
+    }
+
+    /// C3.4 / ADR 0020 D4: parse a single handler arm OR the
+    /// optional `return v => body` arm. Operation arms are
+    /// `EffectName.OpName ( param (, param)* ) => expr`; the
+    /// final param is the continuation binding `k` per D5. A
+    /// second `return` arm is rejected at parse via
+    /// `DuplicateReturnArm`.
+    fn parse_handler_or_return_arm(
+        &mut self,
+        arms: &mut Vec<HandlerArm>,
+        return_arm: &mut Option<Box<ReturnArm>>,
+    ) -> Result<(), ParseError> {
+        if self.peek_kind() == Some(TokenKind::Return) {
+            let ra = self.parse_return_arm()?;
+            if return_arm.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    got: "second `return` arm".to_string(),
+                    expected: "at most one `return v => body` arm per handler",
+                    span: to_source_span(&ra.span),
+                });
+            }
+            *return_arm = Some(Box::new(ra));
+            return Ok(());
+        }
+        let arm = self.parse_handler_arm()?;
+        arms.push(arm);
+        Ok(())
+    }
+
+    /// C3.4 / ADR 0020 D4: `EffectName.OpName(param (, param)*) => expr`.
+    /// Per D5 the last param is the continuation binding `k`.
+    fn parse_handler_arm(&mut self) -> Result<HandlerArm, ParseError> {
+        // Effect name (Ident).
+        let effect_span = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                self.advance();
+                span
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "effect name (Ident) at start of handler arm",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "effect name (Ident) at start of handler arm",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+        let effect_name = self.src[effect_span.clone()].to_string();
+        let arm_start = effect_span.start;
+
+        // `.`
+        match self.peek_kind() {
+            Some(TokenKind::Dot) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`.` after effect name",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`.` after effect name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        // Op name (Ident).
+        let op_span = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                self.advance();
+                span
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "op name after `.`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "op name after `.`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+        let op_name = self.src[op_span.clone()].to_string();
+
+        // `(`
+        match self.peek_kind() {
+            Some(TokenKind::LParen) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`(` after op name",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`(` after op name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        // Param names: at least one (the kont). The lexer accepts
+        // any Ident here; resolve enforces uniqueness within the
+        // arm body.
+        let mut param_names: Vec<Spanned<String>> = Vec::new();
+        if self.peek_kind() != Some(TokenKind::RParen) {
+            param_names.push(self.parse_handler_arm_param()?);
+            while self.peek_kind() == Some(TokenKind::Comma) {
+                self.advance();
+                if self.peek_kind() == Some(TokenKind::RParen) {
+                    break;
+                }
+                param_names.push(self.parse_handler_arm_param()?);
+            }
+        }
+        match self.peek_kind() {
+            Some(TokenKind::RParen) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`,` or `)` in handler arm parameters",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`,` or `)` in handler arm parameters",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        // `=>`
+        match self.peek_kind() {
+            Some(TokenKind::FatArrow) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`=>` after handler arm parameters",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`=>` after handler arm parameters",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        // Body expression. Struct literals are unambiguous here
+        // (no leading-Ident ambiguity for `{` since `{` of a
+        // struct literal is preceded by an Ident-call shape, not
+        // by a bare expression).
+        let saved = self.allow_struct_lit;
+        self.allow_struct_lit = true;
+        let body = self.parse_expr()?;
+        self.allow_struct_lit = saved;
+        let body_end = body.span.end;
+
+        Ok(HandlerArm {
+            effect: Spanned { kind: effect_name, span: effect_span },
+            op: Spanned { kind: op_name, span: op_span },
+            param_names,
+            body,
+            span: arm_start..body_end,
+        })
+    }
+
+    fn parse_handler_arm_param(&mut self) -> Result<Spanned<String>, ParseError> {
+        match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                Ok(Spanned { kind: name, span })
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "parameter name (Ident) in handler arm",
+                    span: to_source_span(&span),
+                })
+            }
+            None => Err(ParseError::UnexpectedEof {
+                expected: "parameter name (Ident) in handler arm",
+                span: to_source_span(&self.eof_span()),
+            }),
+        }
+    }
+
+    /// C3.4 / ADR 0020 D4: `return Ident => expr` — the optional
+    /// arm bound to the handle body's value.
+    fn parse_return_arm(&mut self) -> Result<ReturnArm, ParseError> {
+        let arm_start = self.advance().expect("peeked Return").span.start;
+        // value name (Ident)
+        let value_span = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                self.advance();
+                span
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "binding name after `return`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "binding name after `return`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+        let value_name = self.src[value_span.clone()].to_string();
+        // `=>`
+        match self.peek_kind() {
+            Some(TokenKind::FatArrow) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`=>` after return binding name",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`=>` after return binding name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+        let saved = self.allow_struct_lit;
+        self.allow_struct_lit = true;
+        let body = self.parse_expr()?;
+        self.allow_struct_lit = saved;
+        let body_end = body.span.end;
+        Ok(ReturnArm {
+            value_name: Spanned { kind: value_name, span: value_span },
+            body,
+            span: arm_start..body_end,
+        })
+    }
+
+    /// C3.4 / ADR 0020 D4 + D5: parse `perform EffectName.OpName(args)`.
+    /// Called from `parse_atom` when the current token is `perform`.
+    fn parse_perform_expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.advance().expect("peeked Perform").span.start;
+        let effect_span = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                self.advance();
+                span
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "effect name after `perform`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "effect name after `perform`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+        let effect_name = self.src[effect_span.clone()].to_string();
+        match self.peek_kind() {
+            Some(TokenKind::Dot) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`.` after effect name in `perform`",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`.` after effect name in `perform`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+        let op_span = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                self.advance();
+                span
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "op name after `.` in `perform`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "op name after `.` in `perform`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+        let op_name = self.src[op_span.clone()].to_string();
+        match self.peek_kind() {
+            Some(TokenKind::LParen) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`(` after op name in `perform`",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`(` after op name in `perform`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+        let mut args = Vec::new();
+        if self.peek_kind() != Some(TokenKind::RParen) {
+            let saved = self.allow_struct_lit;
+            self.allow_struct_lit = true;
+            args.push(self.parse_expr()?);
+            while self.peek_kind() == Some(TokenKind::Comma) {
+                self.advance();
+                if self.peek_kind() == Some(TokenKind::RParen) {
+                    break;
+                }
+                args.push(self.parse_expr()?);
+            }
+            self.allow_struct_lit = saved;
+        }
+        let rp_end = match self.peek_kind() {
+            Some(TokenKind::RParen) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`,` or `)` in `perform` arguments",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`,` or `)` in `perform` arguments",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+        Ok(Spanned {
+            kind: ExprKind::Perform {
+                effect: Spanned { kind: effect_name, span: effect_span },
+                op: Spanned { kind: op_name, span: op_span },
+                args,
+            },
+            span: start..rp_end,
+        })
     }
 }
 
@@ -3704,6 +4210,157 @@ mod tests {
                     if *expected == "`(` after `declassify`"
             ),
             "got {err:?}"
+        );
+    }
+
+    // ----- C3.4 / ADR 0020 D4 + D5: handle + perform parser -----
+
+    #[test]
+    fn parse_perform_no_args() {
+        let p = parse_ok_program("fn f() -> i64 { perform Io.read() }");
+        assert_eq!(p.fns[0].body.tail.kind.to_string(), "(perform Io.read)");
+    }
+
+    #[test]
+    fn parse_perform_one_arg() {
+        let p = parse_ok_program("fn f() -> i64 { perform Io.log(42) }");
+        assert_eq!(p.fns[0].body.tail.kind.to_string(), "(perform Io.log 42)");
+    }
+
+    #[test]
+    fn parse_perform_multi_args() {
+        let p = parse_ok_program("fn f() -> i64 { perform Io.write(1, 2) }");
+        assert_eq!(
+            p.fns[0].body.tail.kind.to_string(),
+            "(perform Io.write 1 2)"
+        );
+    }
+
+    #[test]
+    fn parse_handle_minimal() {
+        // The body and one arm; no return arm.
+        let p = parse_ok_program(
+            "fn f() -> i64 { handle 42 with { Io.read(k) => 7 } }",
+        );
+        assert_eq!(
+            p.fns[0].body.tail.kind.to_string(),
+            "(handle 42 (arm Io.read (k) 7))"
+        );
+    }
+
+    #[test]
+    fn parse_handle_with_return_arm() {
+        let p = parse_ok_program(
+            "fn f() -> i64 { handle 42 with { Io.log(msg, k) => msg, return v => v } }",
+        );
+        assert_eq!(
+            p.fns[0].body.tail.kind.to_string(),
+            "(handle 42 (arm Io.log (msg k) msg) (return v v))"
+        );
+    }
+
+    #[test]
+    fn parse_handle_trailing_comma() {
+        let p = parse_ok_program(
+            "fn f() -> i64 { handle 0 with { Io.read(k) => 1, } }",
+        );
+        assert_eq!(
+            p.fns[0].body.tail.kind.to_string(),
+            "(handle 0 (arm Io.read (k) 1))"
+        );
+    }
+
+    #[test]
+    fn parse_handle_multi_param_arm() {
+        let p = parse_ok_program(
+            "fn f() -> i64 { handle 0 with { Io.write(a, b, k) => a } }",
+        );
+        assert_eq!(
+            p.fns[0].body.tail.kind.to_string(),
+            "(handle 0 (arm Io.write (a b k) a))"
+        );
+    }
+
+    #[test]
+    fn parse_handle_only_return_arm() {
+        // `handle 42 with { return v => v * 2 }` — pure-compute handler.
+        let p = parse_ok_program(
+            "fn f() -> i64 { handle 42 with { return v => v * 2 } }",
+        );
+        assert_eq!(
+            p.fns[0].body.tail.kind.to_string(),
+            "(handle 42 (return v (* v 2)))"
+        );
+    }
+
+    #[test]
+    fn parse_error_handle_without_with() {
+        let err = parse("fn f() -> i64 { handle 42 { } }").unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ParseError::UnexpectedToken { expected, .. }
+                    if *expected == "`with` after handle body"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_perform_missing_dot() {
+        let err = parse("fn f() -> i64 { perform Io read() }").unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ParseError::UnexpectedToken { expected, .. }
+                    if *expected == "`.` after effect name in `perform`"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_handler_arm_without_fat_arrow() {
+        let err = parse(
+            "fn f() -> i64 { handle 0 with { Io.read(k) 7 } }",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ParseError::UnexpectedToken { expected, .. }
+                    if *expected == "`=>` after handler arm parameters"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_error_duplicate_return_arm() {
+        let err = parse(
+            "fn f() -> i64 { handle 0 with { return a => a, return b => b } }",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ParseError::UnexpectedToken { expected, .. }
+                    if *expected
+                        == "at most one `return v => body` arm per handler"
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_handle_body_is_call() {
+        // The body can be any expression; here it's a function call.
+        let p = parse_ok_program(
+            "fn f() -> i64 { handle do_work() with { Io.read(k) => 1 } }",
+        );
+        assert_eq!(
+            p.fns[0].body.tail.kind.to_string(),
+            "(handle (do_work) (arm Io.read (k) 1))"
         );
     }
 }

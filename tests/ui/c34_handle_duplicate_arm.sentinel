@@ -1,0 +1,11 @@
+// C3.4 / ADR 0020 D5: two arms in the same `handle` cover the same
+// (effect, op) pair. Surfaces
+// `sentinel::resolve::duplicate_handler_arm` at resolve.
+
+effect Io {
+    read() -> i64;
+}
+
+fn main() -> i64 {
+    handle 0 with { Io.read(k) => k(1), Io.read(k) => k(2) }
+}

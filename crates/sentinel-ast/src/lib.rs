@@ -221,6 +221,55 @@ pub enum ExprKind {
     /// variant at C3.0; type-check rejects with
     /// `TypeError::DeclassifyNotYet` until C3.1 lands.
     Declassify(Box<Expr>),
+    /// `handle expr with { Effect.op(p1, ..., k) => body, return v => body }`
+    /// per ADR 0020 D4 + D5 (C3.4). The body's effect row is
+    /// reduced by the set of effects handled here per D6. Arms
+    /// share the outer handle expression's type — return arm's
+    /// body type IS the outer type, all op arms' bodies match it.
+    /// The last `param_names` entry inside each arm is the kont
+    /// binding (used to resume the captured continuation).
+    Handle {
+        body: Box<Expr>,
+        arms: Vec<HandlerArm>,
+        return_arm: Option<Box<ReturnArm>>,
+    },
+    /// `perform Effect.op(args)` per ADR 0020 D4 + D5 (C3.4). The
+    /// effect bubbles into the enclosing fn's row; the inferred
+    /// row only discharges when the perform is wrapped in a
+    /// matching `handle` per D6.
+    Perform {
+        effect: Spanned<String>,
+        op: Spanned<String>,
+        args: Vec<Expr>,
+    },
+}
+
+/// A single operation arm inside a `handle ... with { ... }`
+/// expression per ADR 0020 D4 + D5 (C3.4). The `param_names`
+/// vector lists the bindings for the op's parameters in order,
+/// PLUS a final continuation binding (the kont). For an op
+/// declared as `op(p1: T1, p2: T2) -> Ret`, an arm's
+/// `param_names` has exactly three entries: two op-param
+/// bindings and the kont. Resolve gives each its own VarId.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HandlerArm {
+    pub effect: Spanned<String>,
+    pub op: Spanned<String>,
+    pub param_names: Vec<Spanned<String>>,
+    pub body: Expr,
+    pub span: Span,
+}
+
+/// The optional `return v => body` arm of a `handle ... with`
+/// expression per ADR 0020 D4 (C3.4). When present, the
+/// handle's outer type equals `body`'s type with `value_name`
+/// bound to the handled expression's type. When absent the
+/// default `return v => v` is assumed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReturnArm {
+    pub value_name: Spanned<String>,
+    pub body: Expr,
+    pub span: Span,
 }
 
 /// A single `field: expr` initializer inside a struct literal. The
@@ -542,6 +591,32 @@ impl fmt::Display for ExprKind {
             }
             ExprKind::Declassify(inner) => {
                 write!(f, "(declassify {})", inner.kind)
+            }
+            ExprKind::Handle { body, arms, return_arm } => {
+                write!(f, "(handle {}", body.kind)?;
+                for arm in arms {
+                    write!(f, " (arm {}.{} (", arm.effect.kind, arm.op.kind)?;
+                    let mut first = true;
+                    for p in &arm.param_names {
+                        if !first {
+                            write!(f, " ")?;
+                        }
+                        first = false;
+                        write!(f, "{}", p.kind)?;
+                    }
+                    write!(f, ") {})", arm.body.kind)?;
+                }
+                if let Some(ra) = return_arm {
+                    write!(f, " (return {} {})", ra.value_name.kind, ra.body.kind)?;
+                }
+                write!(f, ")")
+            }
+            ExprKind::Perform { effect, op, args } => {
+                write!(f, "(perform {}.{}", effect.kind, op.kind)?;
+                for a in args {
+                    write!(f, " {}", a.kind)?;
+                }
+                write!(f, ")")
             }
         }
     }
@@ -1394,6 +1469,88 @@ mod tests {
         assert_eq!(
             p.to_string(),
             "(struct P (x: i64))\n(fn main () -> i64 (block 7))"
+        );
+    }
+
+    // ----- C3.4 / ADR 0020: handle + perform display -----
+
+    fn spanned_name(s: &str, span: Span) -> Spanned<String> {
+        Spanned { kind: s.to_string(), span }
+    }
+
+    #[test]
+    fn display_perform_zero_args() {
+        let e = Spanned {
+            kind: ExprKind::Perform {
+                effect: spanned_name("Io", 8..10),
+                op: spanned_name("read", 11..15),
+                args: vec![],
+            },
+            span: 0..17,
+        };
+        assert_eq!(e.to_string(), "(perform Io.read)");
+    }
+
+    #[test]
+    fn display_perform_with_args() {
+        let e = Spanned {
+            kind: ExprKind::Perform {
+                effect: spanned_name("Io", 8..10),
+                op: spanned_name("log", 11..14),
+                args: vec![lit(42, 15..17)],
+            },
+            span: 0..18,
+        };
+        assert_eq!(e.to_string(), "(perform Io.log 42)");
+    }
+
+    #[test]
+    fn display_handle_basic() {
+        let body = Box::new(lit(42, 7..9));
+        let arm = HandlerArm {
+            effect: spanned_name("Io", 17..19),
+            op: spanned_name("read", 20..24),
+            param_names: vec![spanned_name("k", 25..26)],
+            body: lit(7, 31..32),
+            span: 17..32,
+        };
+        let e = Spanned {
+            kind: ExprKind::Handle {
+                body,
+                arms: vec![arm],
+                return_arm: None,
+            },
+            span: 0..33,
+        };
+        assert_eq!(e.to_string(), "(handle 42 (arm Io.read (k) 7))");
+    }
+
+    #[test]
+    fn display_handle_with_return_arm() {
+        let body = Box::new(lit(5, 7..8));
+        let arm = HandlerArm {
+            effect: spanned_name("Io", 0..2),
+            op: spanned_name("log", 3..6),
+            param_names: vec![spanned_name("msg", 7..10), spanned_name("k", 12..13)],
+            body: Spanned { kind: ExprKind::Var("msg".to_string()), span: 17..20 },
+            span: 0..20,
+        };
+        let return_arm = ReturnArm {
+            value_name: spanned_name("v", 22..23),
+            body: Spanned { kind: ExprKind::Var("v".to_string()), span: 27..28 },
+            span: 22..28,
+        };
+        let e = Spanned {
+            kind: ExprKind::Handle {
+                body,
+                arms: vec![arm],
+                return_arm: Some(Box::new(return_arm)),
+            },
+            span: 0..30,
+        };
+        assert_eq!(
+            e.to_string(),
+            "(handle 5 (arm Io.log (msg k) msg) (return v v))"
         );
     }
 }

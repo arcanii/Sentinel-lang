@@ -309,6 +309,49 @@ fn walk_expr(
             walk_expr(target, effective, acc);
             walk_expr(index, effective, acc);
         }
+
+        // C3.4 / ADR 0020 D6: handle removes the handled (Effect,
+        // op) effects from the body's contribution. We walk the
+        // body into a *temporary* set, subtract the handled
+        // effects, then merge into the outer accumulator. Arms +
+        // return arm bodies contribute their own effects normally.
+        TypedExprKind::Handle { body, arms, return_arm, handled } => {
+            let mut body_row = BTreeSet::new();
+            walk_expr(body, effective, &mut body_row);
+            let handled_effects: BTreeSet<EffectId> =
+                handled.iter().map(|(eid, _)| *eid).collect();
+            for eid in body_row.difference(&handled_effects) {
+                acc.insert(*eid);
+            }
+            for arm in arms {
+                walk_expr(&arm.body, effective, acc);
+            }
+            if let Some(ra) = return_arm {
+                walk_expr(&ra.body, effective, acc);
+            }
+        }
+
+        // C3.4 / ADR 0020 D6: perform contributes the op's
+        // effect to the row, plus walks args. Inside a matching
+        // `handle` the effect is discharged at the outer node;
+        // outside one it bubbles to the enclosing fn (and to
+        // main, where D13 rejects).
+        TypedExprKind::Perform { effect_id, args, .. } => {
+            acc.insert(*effect_id);
+            for a in args {
+                walk_expr(a, effective, acc);
+            }
+        }
+
+        // C3.4 / ADR 0020 D5: ResumeKont is the call `k(arg)` —
+        // contributes whatever effects the arg expression carries
+        // but no new effects of its own. Resuming a continuation
+        // doesn't perform additional ops.
+        TypedExprKind::ResumeKont { args, .. } => {
+            for a in args {
+                walk_expr(a, effective, acc);
+            }
+        }
     }
 }
 
@@ -507,5 +550,61 @@ mod tests {
             errors.iter().any(|e| matches!(e, EffectError::UnhandledEffect { .. })),
             "got {errors:?}"
         );
+    }
+
+    // ----- C3.4 / ADR 0020 D6: handle discharges effects -----
+
+    #[test]
+    fn handle_discharges_io_so_main_is_pure() {
+        // do_work() ! { Io } performs Io.read. main wraps it in
+        // `handle ... with { Io.read(k) => k(42) }`. After the
+        // handle expression, the {Io} row is discharged — main's
+        // effective row is empty, ADR 0019 D13 is satisfied.
+        let (_, errors) = check_program(
+            "effect Io { read() -> i64; }\
+             fn do_work() -> i64 ! { Io } { perform Io.read() }\
+             fn main() -> i64 {\
+                 handle do_work() with { Io.read(k) => k(42) }\
+             }",
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "got {errors:?}");
+    }
+
+    #[test]
+    fn handle_partial_discharge_leaves_unhandled_effect() {
+        // do_two() ! { Io, Net }. main wraps it in a handler that
+        // only discharges Io. Net still bubbles to main → reject.
+        let (_, errors) = check_program(
+            "effect Io { read() -> i64; }\
+             effect Net { fetch() -> i64; }\
+             fn do_two() -> i64 ! { Io, Net } {\
+                 let a: i64 = perform Io.read();\
+                 let b: i64 = perform Net.fetch();\
+                 a + b\
+             }\
+             fn main() -> i64 {\
+                 handle do_two() with { Io.read(k) => k(1) }\
+             }",
+        )
+        .unwrap();
+        assert!(
+            errors.iter().any(|e| matches!(e, EffectError::UnhandledEffect { effect_name, .. } if effect_name == "Net")),
+            "got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn perform_inside_handle_does_not_bubble() {
+        // Inline perform inside a handle — same as above with
+        // body=perform-call. Effect discharges cleanly.
+        let (_, errors) = check_program(
+            "effect Io { read() -> i64; }\
+             fn main() -> i64 {\
+                 handle perform Io.read() with { Io.read(k) => k(7) }\
+             }",
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "got {errors:?}");
     }
 }

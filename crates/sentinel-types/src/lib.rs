@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 
 use salsa::Accumulator;
-use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, TypeExpr, TypeExprKind, UnaryOp};
+use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, Spanned, TypeExpr, TypeExprKind, UnaryOp};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
     EffectId, FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef,
@@ -95,6 +95,16 @@ pub enum Type {
     /// recursion would force `Box` indirection somewhere that
     /// breaks `Copy`.
     Secret(SecretId),
+    /// C3.4 / ADR 0020 D5: continuation-binding type. Only appears
+    /// as the env type of a handler arm's last parameter (the kont
+    /// `k`). The [`KontId`] indexes into `TypedProgram.konts`,
+    /// where `KontData { arg_ty, ret_ty }` lives. Seventh interner-
+    /// table ADR running to preserve `Type: Copy + Hash`.
+    /// Operationally: `ResumeKont { kont, args }` is the only
+    /// valid use of a kont-typed binding. Any other reference
+    /// (Var, let-bind, arithmetic, ...) is rejected at type-check
+    /// with [`TypeError::KontUsedAsValue`].
+    Kont(KontId),
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -109,6 +119,24 @@ pub struct RefId(pub u32);
 /// same scheme as [`RefId`] / [`GenericInstanceId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SecretId(pub u32);
+
+/// Identifier for an interned continuation type per ADR 0020 D5
+/// (C3.4). Assigned in source-encounter order during type-check
+/// of `handle ... with { ... }` expressions; same scheme as
+/// [`SecretId`] / [`RefId`] / [`GenericInstanceId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KontId(pub u32);
+
+/// The underlying data of a [`Type::Kont`] per ADR 0020 D5.
+/// `arg_ty` = the op's return type (the value the handler arm
+/// supplies via `k(v)`). `ret_ty` = the outer `handle` expression's
+/// type (what the resume call's result evaluates to). Owned by
+/// [`TypedProgram::konts`]; not `Copy` (carries two `Type` payloads).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KontData {
+    pub arg_ty: Type,
+    pub ret_ty: Type,
+}
 
 /// The underlying data of a [`Type::Secret`]. Owned by
 /// [`TypedProgram::secrets`]. Not `Copy` (carries a `Type` payload).
@@ -342,7 +370,7 @@ impl Type {
             // representable — NullableInner has no Secret variant
             // at C3.1 (depth-1 composition limit). Caller surfaces
             // the appropriate diagnostic.
-            Type::Array(_) | Type::Nullable(_) | Type::Secret(_) => None,
+            Type::Array(_) | Type::Nullable(_) | Type::Secret(_) | Type::Kont(_) => None,
         }
     }
 
@@ -368,7 +396,11 @@ impl Type {
             // the outer-secret level) IS representable via
             // `Type::Secret(secret_id_for_[T])` and works through
             // the regular Secret arm.
-            Type::Array(_) | Type::Nullable(_) | Type::Ref(_) | Type::Secret(_) => None,
+            Type::Array(_)
+            | Type::Nullable(_)
+            | Type::Ref(_)
+            | Type::Secret(_)
+            | Type::Kont(_) => None,
         }
     }
 
@@ -461,6 +493,15 @@ impl Type {
                 // need to re-intern after substituting the inner.
                 self
             }
+            Type::Kont(_) => {
+                // C3.4 / ADR 0020 D5: konts only appear inside
+                // handler-arm bodies; generic substitution can't
+                // reach them at C3.4 minimum (handlers + generics
+                // don't compose yet). Pass through unchanged — a
+                // future ADR may revisit if effect-polymorphism
+                // lands per ADR 0020 D10.
+                self
+            }
         }
     }
 
@@ -543,6 +584,21 @@ pub fn intern_ref(refs: &mut Vec<RefData>, mutable: bool, inner: Type) -> RefId 
     id
 }
 
+/// Intern a `(arg_ty, ret_ty)` pair into `konts`, returning its
+/// [`KontId`] per ADR 0020 D5 (C3.4). Linear search; one kont per
+/// handler arm in practice, so the scale is even smaller than
+/// the other interner tables.
+pub fn intern_kont(konts: &mut Vec<KontData>, arg_ty: Type, ret_ty: Type) -> KontId {
+    for (idx, existing) in konts.iter().enumerate() {
+        if existing.arg_ty == arg_ty && existing.ret_ty == ret_ty {
+            return KontId(idx as u32);
+        }
+    }
+    let id = KontId(konts.len() as u32);
+    konts.push(KontData { arg_ty, ret_ty });
+    id
+}
+
 /// Format a [`Type`] for display, looking up the struct name when
 /// the type is `Struct(StructId)`. Pass `None` when no program is
 /// available (e.g. error rendering in tests) — struct types render
@@ -599,6 +655,16 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             }
             format!("<secret#{}>", id.0)
         }
+        Type::Kont(id) => {
+            if let Some(p) = program {
+                if let Some(data) = p.konts.get(id.0 as usize) {
+                    let arg = type_display(data.arg_ty, program);
+                    let ret = type_display(data.ret_ty, program);
+                    return format!("kont({arg}) -> {ret}");
+                }
+            }
+            format!("<kont#{}>", id.0)
+        }
     }
 }
 
@@ -615,6 +681,7 @@ impl std::fmt::Display for Type {
             Type::GenericInstance(id) => write!(f, "<gi#{}>", id.0),
             Type::Ref(id) => write!(f, "<ref#{}>", id.0),
             Type::Secret(id) => write!(f, "<secret#{}>", id.0),
+            Type::Kont(id) => write!(f, "<kont#{}>", id.0),
         }
     }
 }
@@ -892,6 +959,12 @@ pub struct TypedProgram {
     /// EffectId. At C3.2 minimum ops are declared-but-not-
     /// invocable (handler runtime is ADR 0020).
     pub effect_decls: Vec<TypedEffectDecl>,
+    /// C3.4 / ADR 0020 D5: interned continuation types. Each
+    /// `Type::Kont(id)` indexes this vector to recover
+    /// `(arg_ty, ret_ty)`. Same scale + scheme as [`refs`] /
+    /// [`secrets`]. Populated during type-check of `handle ...
+    /// with { ... }` expressions.
+    pub konts: Vec<KontData>,
     pub span: Span,
 }
 
@@ -930,6 +1003,13 @@ impl TypedProgram {
     /// [`intern_secret`]. C3 / ADR 0019 D5 (C3.1).
     pub fn secret_data(&self, id: SecretId) -> &SecretData {
         &self.secrets[id.0 as usize]
+    }
+
+    /// Look up the `(arg_ty, ret_ty)` for a continuation type per
+    /// ADR 0020 D5 (C3.4). Panics on out-of-range — IDs only come
+    /// from [`check`] / [`intern_kont`].
+    pub fn kont_data(&self, id: KontId) -> &KontData {
+        &self.konts[id.0 as usize]
     }
 }
 
@@ -1120,6 +1200,64 @@ impl TypedExpr {
                 index: Box::new(index.substitute(subst, instances, refs)),
                 elem_ty: elem_ty.substitute(subst, instances, refs),
             },
+            // C3.4 / ADR 0020 D5: handle/perform/resume don't compose
+            // with generics at C3.4 minimum (no effect polymorphism
+            // per D10). Clone the bodies straight through —
+            // substitute() through TypedExpr children would only
+            // touch concrete-type fields and the arm-level kont_id
+            // already references concrete types in the konts table.
+            TypedExprKind::Handle { body, arms, return_arm, handled } => {
+                TypedExprKind::Handle {
+                    body: Box::new(body.substitute(subst, instances, refs)),
+                    arms: arms
+                        .iter()
+                        .map(|a| TypedHandlerArm {
+                            effect_id: a.effect_id,
+                            op_index: a.op_index,
+                            effect_name: a.effect_name.clone(),
+                            op_name: a.op_name.clone(),
+                            op_span: a.op_span.clone(),
+                            param_var_ids: a.param_var_ids.clone(),
+                            param_names: a.param_names.clone(),
+                            kont_id: a.kont_id,
+                            body: a.body.substitute(subst, instances, refs),
+                            span: a.span.clone(),
+                        })
+                        .collect(),
+                    return_arm: return_arm.as_ref().map(|ra| {
+                        Box::new(TypedReturnArm {
+                            value_var_id: ra.value_var_id,
+                            value_name: ra.value_name.clone(),
+                            body: ra.body.substitute(subst, instances, refs),
+                            span: ra.span.clone(),
+                        })
+                    }),
+                    handled: handled.clone(),
+                }
+            }
+            TypedExprKind::Perform {
+                effect_id,
+                op_index,
+                effect_name,
+                op_name,
+                op_span,
+                args,
+            } => TypedExprKind::Perform {
+                effect_id: *effect_id,
+                op_index: *op_index,
+                effect_name: effect_name.clone(),
+                op_name: op_name.clone(),
+                op_span: op_span.clone(),
+                args: args.iter().map(|a| a.substitute(subst, instances, refs)).collect(),
+            },
+            TypedExprKind::ResumeKont { kont, callee_span, args, kont_id } => {
+                TypedExprKind::ResumeKont {
+                    kont: *kont,
+                    callee_span: callee_span.clone(),
+                    args: args.iter().map(|a| a.substitute(subst, instances, refs)).collect(),
+                    kont_id: *kont_id,
+                }
+            }
         };
         TypedExpr {
             kind,
@@ -1375,6 +1513,76 @@ pub enum TypedExprKind {
         index: Box<TypedExpr>,
         elem_ty: ArrayElem,
     },
+    /// C3.4 / ADR 0020 D5: `handle body with { arms }`. The body's
+    /// inferred row is reduced by the union of effects covered by
+    /// `arms` (the `handled` field). At C3.4 codegen rejects this
+    /// variant — only type-check + effect-check consume it.
+    Handle {
+        body: Box<TypedExpr>,
+        arms: Vec<TypedHandlerArm>,
+        return_arm: Option<Box<TypedReturnArm>>,
+        /// The (EffectId, op_index) pairs covered by `arms`,
+        /// in arm order. Effect-check consults this to compute
+        /// the discharge: body row - { effect of each entry } =
+        /// outer row.
+        handled: Vec<(EffectId, usize)>,
+    },
+    /// C3.4 / ADR 0020 D5: `perform Effect.Op(args)`. Contributes
+    /// `effect_id` to the enclosing fn's inferred row. The outer
+    /// expression's type is the op's declared return type.
+    Perform {
+        effect_id: EffectId,
+        op_index: usize,
+        effect_name: String,
+        op_name: String,
+        op_span: Span,
+        args: Vec<TypedExpr>,
+    },
+    /// C3.4 / ADR 0020 D5: continuation resume `k(arg)` inside a
+    /// handler arm body. `kont` is the VarId of the arm's
+    /// continuation binding; its type in env is [`Type::Kont`].
+    /// The expression's `ty` is the kont's `ret_ty` (= the outer
+    /// `handle`'s type).
+    ResumeKont {
+        kont: VarId,
+        callee_span: Span,
+        args: Vec<TypedExpr>,
+        kont_id: KontId,
+    },
+}
+
+/// C3.4 / ADR 0020 D5: a type-checked handler arm. The arm's
+/// effect+op pair has been resolved to (`effect_id`, `op_index`);
+/// each param VarId is bound in env with the op's declared param
+/// types (and the kont with [`Type::Kont`]). The arm body has been
+/// checked against the outer `handle` expression's type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedHandlerArm {
+    pub effect_id: EffectId,
+    pub op_index: usize,
+    pub effect_name: String,
+    pub op_name: String,
+    pub op_span: Span,
+    pub param_var_ids: Vec<VarId>,
+    pub param_names: Vec<Spanned<String>>,
+    /// The KontId for the arm's continuation binding (last entry
+    /// in `param_var_ids`). Used by codegen at C3.5/C3.6 to look
+    /// up the kont's (arg_ty, ret_ty).
+    pub kont_id: KontId,
+    pub body: TypedExpr,
+    pub span: Span,
+}
+
+/// C3.4 / ADR 0020 D4: the optional `return v => body` arm after
+/// type-checking. `value_var_id` is bound in env with the handled
+/// expression's type; `body`'s type equals the outer `handle`'s
+/// type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedReturnArm {
+    pub value_var_id: VarId,
+    pub value_name: Spanned<String>,
+    pub body: TypedExpr,
+    pub span: Span,
 }
 
 // =============================================================================
@@ -1806,6 +2014,80 @@ pub enum TypeError {
         #[label("deref of `secret &T` here")]
         span: miette::SourceSpan,
     },
+
+    /// C3.4 / ADR 0020 D5: a continuation binding `k` was used as
+    /// a value (e.g., `let f = k;` or `k + 1`) instead of in a
+    /// resume call. Konts are only valid as the callee of a
+    /// resume — passing them around is rejected so handlers
+    /// can't be smuggled past their handle.
+    #[error("continuation binding can only be called, not used as a value")]
+    #[diagnostic(
+        code(sentinel::types::kont_used_as_value),
+        help("inside a handler arm, the continuation `k` may only appear as `k(arg)` — assigning it, passing it, or operating on it is rejected at C3.4")
+    )]
+    KontUsedAsValue {
+        #[label("continuation used as a value here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3.4 / ADR 0020 D6: a handler arm's body type doesn't
+    /// match the outer `handle` expression's type. Every arm —
+    /// op arms and the optional return arm — must produce the
+    /// same type, the `handle`'s value.
+    #[error(
+        "handler arm `{effect_name}.{op_name}` body returns {got} but the `handle` expression's type is {expected}"
+    )]
+    #[diagnostic(
+        code(sentinel::types::handler_arm_type_mismatch),
+        help("all arms of a `handle` (op arms + optional return arm) must produce the same type as the handle expression")
+    )]
+    HandlerArmTypeMismatch {
+        effect_name: String,
+        op_name: String,
+        expected: Type,
+        got: Type,
+        #[label("arm body has the wrong type")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3.4 / ADR 0020 D5: a handler arm's param list doesn't
+    /// match the op's declared arity (plus the trailing
+    /// continuation). For `op(p1: T1, p2: T2) -> R`, an arm
+    /// must declare exactly three params: two for the op + one
+    /// for `k`.
+    #[error(
+        "handler arm `{effect_name}.{op_name}` has {got} parameter(s) but expected {expected} (including the trailing continuation `k`)"
+    )]
+    #[diagnostic(
+        code(sentinel::types::operation_arity_mismatch),
+        help("the op's params come first; the last param is always the continuation `k`")
+    )]
+    OperationArityMismatch {
+        effect_name: String,
+        op_name: String,
+        expected: usize,
+        got: usize,
+        #[label("wrong number of arm parameters")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3.4 / ADR 0020 D5: a continuation-resume call `k(arg)`
+    /// passed the wrong number of args. At C3.4 minimum konts
+    /// are always unary (single-value resume per the op's
+    /// return type).
+    #[error(
+        "continuation resume call expected {expected} argument(s), got {got}"
+    )]
+    #[diagnostic(
+        code(sentinel::types::kont_arity_mismatch),
+        help("a resume call passes one value per element of the op's return type — typically a single i64")
+    )]
+    KontArityMismatch {
+        expected: usize,
+        got: usize,
+        #[label("wrong number of resume arguments")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -2105,6 +2387,11 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     // annotations or generic call sites) are interned into
     // `generic_instances`. Same for `&T` / `&mut T` refs into
     // `refs` per ADR 0017 D11.
+    // C3.4 / ADR 0020 D5: per-handle-arm continuation interner.
+    // Starts empty; populated whenever check_expr enters a
+    // `handle ... with { ... }` and interns a kont per arm.
+    let mut konts: Vec<KontData> = Vec::new();
+
     let mut typed_fns = Vec::with_capacity(program.fns.len());
     for fn_def in &program.fns {
         typed_fns.push(check_fn(
@@ -2115,6 +2402,8 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             &mut refs,
             &mut secrets,
             &struct_type_param_counts,
+            &typed_effect_decls,
+            &mut konts,
         )?);
     }
 
@@ -2126,6 +2415,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         refs,
         secrets,
         effect_decls: typed_effect_decls,
+        konts,
         span: program.span.clone(),
     })
 }
@@ -2208,6 +2498,7 @@ fn detect_struct_cycle(structs: &[TypedStructDecl]) -> Result<(), TypeError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_fn(
     fn_def: &ResolvedFnDef,
     signatures: &[TypedFnSignature],
@@ -2216,6 +2507,8 @@ fn check_fn(
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    konts: &mut Vec<KontData>,
 ) -> Result<TypedFnDef, TypeError> {
     // Pull our own signature.
     let signature = &signatures[fn_def.id.0 as usize];
@@ -2266,6 +2559,8 @@ fn check_fn(
         refs,
         secrets,
         struct_type_param_counts,
+        effect_decls,
+        konts,
     )?;
 
     if body.ty != return_type {
@@ -2336,6 +2631,8 @@ fn check_block(
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    konts: &mut Vec<KontData>,
 ) -> Result<TypedBlock, TypeError> {
     let mut stmts = Vec::with_capacity(block.stmts.len());
     for stmt in &block.stmts {
@@ -2348,6 +2645,8 @@ fn check_block(
             refs,
             secrets,
             struct_type_param_counts,
+            effect_decls,
+            konts,
         )?);
     }
     // Only the tail receives the expected-type pushdown (the block's
@@ -2362,6 +2661,8 @@ fn check_block(
         refs,
         secrets,
         struct_type_param_counts,
+        effect_decls,
+        konts,
     )?;
     let ty = tail.ty;
     Ok(TypedBlock {
@@ -2382,6 +2683,8 @@ fn check_stmt(
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    konts: &mut Vec<KontData>,
 ) -> Result<TypedStmt, TypeError> {
     let kind = match &stmt.kind {
         ResolvedStmtKind::Let { id, mutable, name, name_span, ty_annot, value } => {
@@ -2412,6 +2715,8 @@ fn check_stmt(
                 refs,
                 secrets,
                 struct_type_param_counts,
+                effect_decls,
+                konts,
             )?;
             let ty = match (ty_annot, expected) {
                 (Some(_), Some(annotated)) => {
@@ -2454,6 +2759,8 @@ fn check_stmt(
                 refs,
                 secrets,
                 struct_type_param_counts,
+                effect_decls,
+                konts,
             )?;
             let value_typed = check_expr(
                 value,
@@ -2465,6 +2772,8 @@ fn check_stmt(
                 refs,
                 secrets,
                 struct_type_param_counts,
+                effect_decls,
+                konts,
             )?;
             if value_typed.ty != target_typed.ty {
                 return Err(TypeError::Mismatch {
@@ -2489,6 +2798,8 @@ fn check_stmt(
             refs,
             secrets,
             struct_type_param_counts,
+            effect_decls,
+            konts,
         )?),
     };
     Ok(TypedStmt { kind, span: stmt.span.clone() })
@@ -2739,6 +3050,9 @@ fn try_substitute(
         // with generics in the minimum-viable surface. Just pass
         // through.
         Type::Secret(_) => Some(ty),
+        // C3.4 / ADR 0020 D5: konts never compose with generics at
+        // C3.4 minimum (no effect polymorphism per D10).
+        Type::Kont(_) => Some(ty),
     }
 }
 
@@ -2764,6 +3078,9 @@ fn contains_type_param(
         // recursion needed. Will revisit if `secret T<U>` style
         // ever lands.
         Type::Secret(_) => false,
+        // C3.4 / ADR 0020 D5: konts don't carry TypeParams at C3.4
+        // minimum.
+        Type::Kont(_) => false,
     }
 }
 
@@ -2883,6 +3200,8 @@ fn check_call(
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    konts: &mut Vec<KontData>,
     call_span: &Span,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let signature = &signatures[id.0 as usize];
@@ -2953,6 +3272,8 @@ fn check_call(
                 refs,
                 secrets,
                 struct_type_param_counts,
+                effect_decls,
+                konts,
             )?;
             // Validate the arg's type against the param (possibly
             // refining subst with any new TypeParam bindings).
@@ -3061,6 +3382,8 @@ fn check_expr(
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    konts: &mut Vec<KontData>,
 ) -> Result<TypedExpr, TypeError> {
     // C1.5 / ADR 0014 D2: NullLit has no synthesis type — it MUST
     // see an expected `?T` context to type-check.
@@ -3085,6 +3408,18 @@ fn check_expr(
             let (ty, _mutable) = *env
                 .get(id)
                 .expect("resolve guarantees VarId is bound in the current scope");
+            // C3.4 / ADR 0020 D5: a continuation binding (kont) is
+            // only valid in resume-call position. Surfacing it as
+            // a value would let the user smuggle it past the
+            // handler — reject here. ResumeKont's own check_expr
+            // arm constructs a TypedExprKind without going through
+            // Var lookup, so this rejection doesn't bite the legal
+            // path.
+            if matches!(ty, Type::Kont(_)) {
+                return Err(TypeError::KontUsedAsValue {
+                    span: to_source_span(&expr.span),
+                });
+            }
             (TypedExprKind::Var(*id), ty)
         }
         ResolvedExprKind::Unary(op, inner) => {
@@ -3103,6 +3438,8 @@ fn check_expr(
                         refs,
                         secrets,
                         struct_type_param_counts,
+                        effect_decls,
+                        konts,
                     )?;
                     // Operand must be an lvalue.
                     if !is_lvalue(&inner_t) {
@@ -3141,6 +3478,8 @@ fn check_expr(
                         refs,
                         secrets,
                         struct_type_param_counts,
+                        effect_decls,
+                        konts,
                     )?;
                     let inner_ty = match inner_t.ty {
                         Type::Ref(id) => refs[id.0 as usize].inner,
@@ -3182,6 +3521,8 @@ fn check_expr(
                         refs,
                         secrets,
                         struct_type_param_counts,
+                        effect_decls,
+                        konts,
                     )?;
                     // C3 / ADR 0019 D5 (C3.1b): unary preserves
                     // the secret qualifier — `-secret_x` is
@@ -3224,8 +3565,8 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             // C3 / ADR 0019 D5 + D7 (C3.1b): operator-secret-
             // preserving. Strip one layer of `secret` from both
             // sides, run the usual int-type check on the inners,
@@ -3294,10 +3635,10 @@ fn check_expr(
                 // The non-null side determines the expected ?T type.
                 // First, synthesize the non-null side.
                 let (non_null_side, non_null_expr, null_span) = if lhs_is_null {
-                    let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+                    let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
                     (r.ty, r, lhs.span.clone())
                 } else {
-                    let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+                    let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
                     (l.ty, l, rhs.span.clone())
                 };
                 // Non-null side must be Nullable for null-comparison.
@@ -3324,8 +3665,8 @@ fn check_expr(
                     ty: Type::Bool,
                 });
             }
-            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for comparisons. `secret T == secret T -> secret bool`
             // per Phase B ADR 0008 D4. Strip wrappers to check
@@ -3365,8 +3706,8 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Logic(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for logicals. Both operands must be the same bool-
             // shape (`bool` or `secret bool`); result preserves
@@ -3409,12 +3750,12 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Block(b) => {
-            let typed_block = check_block(b, expected, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+            let typed_block = check_block(b, expected, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             let ty = typed_block.ty;
             (TypedExprKind::Block(Box::new(typed_block)), ty)
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
-            let cond_t = check_expr(cond, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+            let cond_t = check_expr(cond, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             // C3 / ADR 0019 D7 (C3.1) — SecretBranch: an
             // `if` condition with type `secret bool` would
             // leak via timing. Reject before the generic
@@ -3436,8 +3777,8 @@ fn check_expr(
             }
             // ADR 0014 D5: push the expected type down into both
             // branches so `null` in either branch can resolve.
-            let then_t = check_block(then_branch, expected, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
-            let else_t = check_block(else_branch, expected, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+            let then_t = check_block(then_branch, expected, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let else_t = check_block(else_branch, expected, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             if then_t.ty != else_t.ty {
                 return Err(TypeError::Mismatch {
                     expected: then_t.ty,
@@ -3467,6 +3808,8 @@ fn check_expr(
             refs,
             secrets,
             struct_type_param_counts,
+            effect_decls,
+            konts,
             &expr.span,
         )?,
         ResolvedExprKind::StructLit { id, name, name_span, fields } => {
@@ -3540,6 +3883,8 @@ fn check_expr(
                     refs,
                     secrets,
                     struct_type_param_counts,
+                    effect_decls,
+                    konts,
                 )?;
                 if value_t.ty != expected_field_ty {
                     return Err(TypeError::Mismatch {
@@ -3624,7 +3969,7 @@ fn check_expr(
                 // Type-check elements. First element synthesizes T
                 // if no expected; subsequent elements get T as
                 // expected (so widening / null work inside `[T]`).
-                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
                 let elem_ty = first.ty;
                 let mut typed = Vec::with_capacity(elems.len());
                 typed.push(first);
@@ -3639,6 +3984,8 @@ fn check_expr(
                         refs,
                         secrets,
                         struct_type_param_counts,
+                        effect_decls,
+                        konts,
                     )?;
                     if t.ty != elem_ty {
                         return Err(TypeError::Mismatch {
@@ -3664,7 +4011,7 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Index { target, index } => {
-            let target_t = check_expr(target, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+            let target_t = check_expr(target, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             let elem_ty = match target_t.ty {
                 Type::Array(ae) => ae,
                 other => {
@@ -3677,7 +4024,7 @@ fn check_expr(
             // Synthesize the index without pushdown so a non-int
             // index surfaces as the more-specific `IndexNotInt`
             // rather than a generic `Mismatch`.
-            let index_t = check_expr(index, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts)?;
+            let index_t = check_expr(index, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             if index_t.ty != Type::I64 {
                 return Err(TypeError::IndexNotInt {
                     got: index_t.ty,
@@ -3704,6 +4051,8 @@ fn check_expr(
                 refs,
                 secrets,
                 struct_type_param_counts,
+                effect_decls,
+                konts,
             )?;
             // C1.7.4b / ADR 0016 D6: field access on a generic
             // instance substitutes the field type by the instance's
@@ -3767,6 +4116,8 @@ fn check_expr(
                 refs,
                 secrets,
                 struct_type_param_counts,
+                effect_decls,
+                konts,
             )?;
             let (stripped, _was_secret) = inner_t.ty.strip_secret(secrets);
             (
@@ -3774,6 +4125,61 @@ fn check_expr(
                 stripped,
             )
         }
+        ResolvedExprKind::Handle { body, arms, return_arm } => check_handle_expr(
+            body,
+            arms,
+            return_arm.as_deref(),
+            expected,
+            env,
+            signatures,
+            structs,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            konts,
+            &expr.span,
+        )?,
+        ResolvedExprKind::Perform {
+            effect_id,
+            op_index,
+            effect_name,
+            effect_span: _,
+            op_name,
+            op_span,
+            args,
+        } => check_perform_expr(
+            *effect_id,
+            *op_index,
+            effect_name,
+            op_name,
+            op_span,
+            args,
+            env,
+            signatures,
+            structs,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            konts,
+        )?,
+        ResolvedExprKind::ResumeKont { kont, callee_span, args } => check_resume_kont_expr(
+            *kont,
+            callee_span,
+            args,
+            env,
+            signatures,
+            structs,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            konts,
+        )?,
     };
     let synth = TypedExpr { kind, span: expr.span.clone(), ty };
     // ADR 0014 D3: apply T→?T widening if the expected type is ?T and
@@ -3783,6 +4189,351 @@ fn check_expr(
 
 fn to_source_span(span: &Span) -> miette::SourceSpan {
     (span.start, span.len()).into()
+}
+
+/// C3.4 / ADR 0020 D5 + D6: type-check `handle body with { arms,
+/// return_arm }`. Each arm's body type must equal the outer
+/// handle expression's type. The outer type is determined by
+/// the return arm if present (binds `value_name` to the body's
+/// type and uses the return arm body's type); else it's the
+/// body's own type (default `return v => v`).
+#[allow(clippy::too_many_arguments)]
+fn check_handle_expr(
+    body: &ResolvedExpr,
+    arms: &[sentinel_resolve::ResolvedHandlerArm],
+    return_arm: Option<&sentinel_resolve::ResolvedReturnArm>,
+    expected: Option<Type>,
+    env: &mut VarTypeEnv,
+    signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &mut Vec<SecretData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    konts: &mut Vec<KontData>,
+    _handle_span: &Span,
+) -> Result<(TypedExprKind, Type), TypeError> {
+    // Check the handle body without an expected type — the body's
+    // type seeds the outer type. (We could push `expected` down, but
+    // doing so would require coordinating with the arms; simpler to
+    // synthesize bottom-up and let the outer `coerce_to_expected`
+    // pass handle any T→?T widening.)
+    let body_typed = check_expr(
+        body,
+        None,
+        env,
+        signatures,
+        structs,
+        instances,
+        refs,
+        secrets,
+        struct_type_param_counts,
+        effect_decls,
+        konts,
+    )?;
+    let body_ty = body_typed.ty;
+
+    // Compute the outer type. With a return arm, the outer type is
+    // the return arm body's type (the arm rebinds `value_name` to
+    // `body_ty`). Without, the outer is body_ty (the identity
+    // `return v => v` default per ADR 0020 D4).
+    let (outer_ty, typed_return_arm) = if let Some(ra) = return_arm {
+        let saved = env.get(&ra.value_var_id).copied();
+        env.insert(ra.value_var_id, (body_ty, false));
+        let ra_body_typed = check_expr(
+            &ra.body,
+            expected,
+            env,
+            signatures,
+            structs,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            konts,
+        )?;
+        let ra_ty = ra_body_typed.ty;
+        match saved {
+            Some(prev) => {
+                env.insert(ra.value_var_id, prev);
+            }
+            None => {
+                env.remove(&ra.value_var_id);
+            }
+        }
+        (
+            ra_ty,
+            Some(Box::new(TypedReturnArm {
+                value_var_id: ra.value_var_id,
+                value_name: ra.value_name.clone(),
+                body: ra_body_typed,
+                span: ra.span.clone(),
+            })),
+        )
+    } else {
+        (body_ty, None)
+    };
+
+    // Walk each arm: bind params + kont in env, check arm body, then
+    // restore env to its prior state. Collect arms + handled-effect
+    // set.
+    let mut typed_arms: Vec<TypedHandlerArm> = Vec::with_capacity(arms.len());
+    let mut handled: Vec<(EffectId, usize)> = Vec::with_capacity(arms.len());
+    for arm in arms {
+        let effect_decl = &effect_decls[arm.effect_id.0 as usize];
+        let op = &effect_decl.ops[arm.op_index];
+        // Arm's param_var_ids = op params + kont. Expected length:
+        // op.params.len() + 1.
+        let expected_len = op.params.len() + 1;
+        if arm.param_var_ids.len() != expected_len {
+            return Err(TypeError::OperationArityMismatch {
+                effect_name: arm.effect_name.clone(),
+                op_name: arm.op_name.clone(),
+                expected: expected_len,
+                got: arm.param_var_ids.len(),
+                span: to_source_span(&arm.span),
+            });
+        }
+        // Save env entries we're about to overwrite so we can
+        // restore after the arm body.
+        let saved: Vec<(VarId, Option<(Type, bool)>)> = arm
+            .param_var_ids
+            .iter()
+            .map(|vid| (*vid, env.get(vid).copied()))
+            .collect();
+
+        // Bind op params with their declared types.
+        for (i, p) in op.params.iter().enumerate() {
+            env.insert(arm.param_var_ids[i], (p.ty, p.mutable));
+        }
+        // Bind the kont with Type::Kont(KontId) where KontData =
+        // (op.return_type, outer_ty).
+        let kont_id = intern_kont(konts, op.return_type, outer_ty);
+        let kont_vid = *arm
+            .param_var_ids
+            .last()
+            .expect("arity check guarantees at least one VarId");
+        env.insert(kont_vid, (Type::Kont(kont_id), false));
+
+        // Synthesize the arm body without pushing the outer type
+        // down — this lets the arm-mismatch surface as the more
+        // specific `HandlerArmTypeMismatch` rather than the
+        // generic `Mismatch` that `coerce_to_expected` would emit.
+        let arm_body_typed = check_expr(
+            &arm.body,
+            None,
+            env,
+            signatures,
+            structs,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            konts,
+        )?;
+
+        if arm_body_typed.ty != outer_ty {
+            return Err(TypeError::HandlerArmTypeMismatch {
+                effect_name: arm.effect_name.clone(),
+                op_name: arm.op_name.clone(),
+                expected: outer_ty,
+                got: arm_body_typed.ty,
+                span: to_source_span(&arm.body.span),
+            });
+        }
+
+        // Restore env entries.
+        for (vid, prev) in saved {
+            match prev {
+                Some(p) => {
+                    env.insert(vid, p);
+                }
+                None => {
+                    env.remove(&vid);
+                }
+            }
+        }
+
+        typed_arms.push(TypedHandlerArm {
+            effect_id: arm.effect_id,
+            op_index: arm.op_index,
+            effect_name: arm.effect_name.clone(),
+            op_name: arm.op_name.clone(),
+            op_span: arm.op_span.clone(),
+            param_var_ids: arm.param_var_ids.clone(),
+            param_names: arm.param_names.clone(),
+            kont_id,
+            body: arm_body_typed,
+            span: arm.span.clone(),
+        });
+        handled.push((arm.effect_id, arm.op_index));
+    }
+
+    Ok((
+        TypedExprKind::Handle {
+            body: Box::new(body_typed),
+            arms: typed_arms,
+            return_arm: typed_return_arm,
+            handled,
+        },
+        outer_ty,
+    ))
+}
+
+/// C3.4 / ADR 0020 D5: type-check `perform Effect.Op(args)`. Each
+/// arg is checked against the op's declared param type; the
+/// expression's type is the op's declared return type.
+#[allow(clippy::too_many_arguments)]
+fn check_perform_expr(
+    effect_id: EffectId,
+    op_index: usize,
+    effect_name: &str,
+    op_name: &str,
+    op_span: &Span,
+    args: &[ResolvedExpr],
+    env: &mut VarTypeEnv,
+    signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &mut Vec<SecretData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    konts: &mut Vec<KontData>,
+) -> Result<(TypedExprKind, Type), TypeError> {
+    let op = &effect_decls[effect_id.0 as usize].ops[op_index];
+    if args.len() != op.params.len() {
+        return Err(TypeError::OperationArityMismatch {
+            effect_name: effect_name.to_string(),
+            op_name: op_name.to_string(),
+            expected: op.params.len(),
+            got: args.len(),
+            span: to_source_span(op_span),
+        });
+    }
+    let mut typed_args = Vec::with_capacity(args.len());
+    for (i, arg) in args.iter().enumerate() {
+        let expected = Some(op.params[i].ty);
+        let typed = check_expr(
+            arg,
+            expected,
+            env,
+            signatures,
+            structs,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            konts,
+        )?;
+        if typed.ty != op.params[i].ty {
+            return Err(TypeError::Mismatch {
+                expected: op.params[i].ty,
+                got: typed.ty,
+                span: to_source_span(&arg.span),
+            });
+        }
+        typed_args.push(typed);
+    }
+    Ok((
+        TypedExprKind::Perform {
+            effect_id,
+            op_index,
+            effect_name: effect_name.to_string(),
+            op_name: op_name.to_string(),
+            op_span: op_span.clone(),
+            args: typed_args,
+        },
+        op.return_type,
+    ))
+}
+
+/// C3.4 / ADR 0020 D5: type-check `k(arg)` inside a handler arm.
+/// The kont VarId must have type `Type::Kont(KontId)` in env (set
+/// up by [`check_handle_expr`] when entering the arm body). The
+/// args' types are checked against the kont's `arg_ty`; the
+/// expression's type is `ret_ty`.
+#[allow(clippy::too_many_arguments)]
+fn check_resume_kont_expr(
+    kont: VarId,
+    callee_span: &Span,
+    args: &[ResolvedExpr],
+    env: &mut VarTypeEnv,
+    signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &mut Vec<SecretData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    konts: &mut Vec<KontData>,
+) -> Result<(TypedExprKind, Type), TypeError> {
+    let (kont_ty, _) = env
+        .get(&kont)
+        .copied()
+        .expect("resolve guarantees the kont VarId is bound");
+    let kont_id = match kont_ty {
+        Type::Kont(id) => id,
+        other => {
+            // Caller is treating a non-kont binding as if it were
+            // one — surface a Mismatch with a synthetic Kont type
+            // so the diagnostic shows the kind of confusion. The
+            // surface error is "non-kont called like a kont".
+            // Easier: piggyback on the existing mismatch shape.
+            return Err(TypeError::Mismatch {
+                expected: Type::Kont(KontId(u32::MAX)),
+                got: other,
+                span: to_source_span(callee_span),
+            });
+        }
+    };
+    let kont_data = &konts[kont_id.0 as usize];
+    let arg_ty = kont_data.arg_ty;
+    let ret_ty = kont_data.ret_ty;
+    // C3.4 minimum: konts always take exactly one arg (the value
+    // being resumed with). Multi-arg konts are a future ADR if
+    // ops grow tuple returns.
+    let expected_args: usize = 1;
+    if args.len() != expected_args {
+        return Err(TypeError::KontArityMismatch {
+            expected: expected_args,
+            got: args.len(),
+            span: to_source_span(callee_span),
+        });
+    }
+    let typed_arg = check_expr(
+        &args[0],
+        Some(arg_ty),
+        env,
+        signatures,
+        structs,
+        instances,
+        refs,
+        secrets,
+        struct_type_param_counts,
+        effect_decls,
+        konts,
+    )?;
+    if typed_arg.ty != arg_ty {
+        return Err(TypeError::Mismatch {
+            expected: arg_ty,
+            got: typed_arg.ty,
+            span: to_source_span(&args[0].span),
+        });
+    }
+    Ok((
+        TypedExprKind::ResumeKont {
+            kont,
+            callee_span: callee_span.clone(),
+            args: vec![typed_arg],
+            kont_id,
+        },
+        ret_ty,
+    ))
 }
 
 // =============================================================================
@@ -3988,6 +4739,30 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "sentinel::types::secret_in_ref_deref",
             "dereferencing a secret reference leaks via the memory side channel"
                 .to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::KontUsedAsValue { span } => (
+            "sentinel::types::kont_used_as_value",
+            "continuation binding can only be called, not used as a value".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::HandlerArmTypeMismatch { effect_name, op_name, expected, got, span } => (
+            "sentinel::types::handler_arm_type_mismatch",
+            format!(
+                "handler arm `{effect_name}.{op_name}` body returns {got} but the `handle` expression's type is {expected}"
+            ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::OperationArityMismatch { effect_name, op_name, expected, got, span } => (
+            "sentinel::types::operation_arity_mismatch",
+            format!(
+                "handler arm `{effect_name}.{op_name}` has {got} parameter(s) but expected {expected}"
+            ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::KontArityMismatch { expected, got, span } => (
+            "sentinel::types::kont_arity_mismatch",
+            format!("continuation resume call expected {expected} argument(s), got {got}"),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -5659,5 +6434,82 @@ fn main() -> i64 {
         let p = check_ok("fn main() -> i64 { 0 }");
         let main_sig = p.fn_signatures.iter().find(|s| s.name == "main").expect("main");
         assert!(main_sig.effect_row.is_empty());
+    }
+
+    // ----- C3.4 / ADR 0020 D5+D6: handle / perform / resume typing -----
+
+    #[test]
+    fn c34_handle_with_perform_typechecks() {
+        // Body performs Io.read (i64); arm calls k(42) which is
+        // i64; handle's outer type is i64.
+        let p = check_ok(
+            "effect Io { read() -> i64; }\
+             fn main() -> i64 {\
+                 handle perform Io.read() with { Io.read(k) => k(42) }\
+             }",
+        );
+        // Konts table should have one entry.
+        assert_eq!(p.konts.len(), 1);
+        assert_eq!(p.konts[0].arg_ty, Type::I64);
+        assert_eq!(p.konts[0].ret_ty, Type::I64);
+    }
+
+    #[test]
+    fn c34_handle_with_return_arm_typechecks() {
+        // `handle 42 with { return v => v * 2 }` — pure handle
+        // with only the return arm. Outer type is `i64` (the
+        // return arm's body, `v * 2`).
+        let _p = check_ok(
+            "fn main() -> i64 {\
+                 handle 42 with { return v => v * 2 }\
+             }",
+        );
+    }
+
+    #[test]
+    fn c34_handler_arm_type_mismatch_rejects() {
+        // Arm body type-mismatches the handle's outer type. Body
+        // is i64; arm produces bool (true). Surfaces
+        // HandlerArmTypeMismatch.
+        let err = check_err(
+            "effect Io { read() -> i64; }\
+             fn main() -> i64 {\
+                 handle 0 with { Io.read(k) => true }\
+             }",
+        );
+        assert!(
+            matches!(err, TypeError::HandlerArmTypeMismatch { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c34_kont_used_as_value_rejects() {
+        // Using k as a value (binding it via let) surfaces
+        // KontUsedAsValue.
+        let err = check_err(
+            "effect Io { read() -> i64; }\
+             fn main() -> i64 {\
+                 handle 0 with {\
+                     Io.read(k) => { let f: i64 = k; 42 }\
+                 }\
+             }",
+        );
+        assert!(
+            matches!(err, TypeError::KontUsedAsValue { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c34_perform_arg_type_mismatch_rejects() {
+        // Op Io.log takes an i64; passing bool surfaces a Mismatch.
+        let err = check_err(
+            "effect Io { log(msg: i64) -> i64; }\
+             fn main() -> i64 {\
+                 handle perform Io.log(true) with { Io.log(m, k) => k(0) }\
+             }",
+        );
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
     }
 }

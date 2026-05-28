@@ -726,3 +726,83 @@ fn pass_c33_go_no_go() {
     assert_eq!(r.stdout, "42\n");
     assert_eq!(r.exit, 0);
 }
+
+// ---- C3.4 / ADR 0020 D9: handler typing layer ----
+//
+// The handler surface parses, resolves, type-checks, and effect-
+// checks (Io is discharged), but codegen lands at C3.5/C3.6. We
+// can't yet run the c34 fixture end-to-end; instead the driver
+// test below asserts that `snc build` surfaces a clean
+// `handlers_not_yet_supported` codegen diagnostic instead of a
+// panic. End-to-end pass-test arrives at C3.7.
+
+fn build_ui_fixture(fixture: &str) -> std::process::Output {
+    let src = workspace_root().join("tests/ui").join(fixture);
+    let out_dir = build_dir();
+    std::fs::create_dir_all(&out_dir).expect("create build dir");
+    let exe = out_dir.join(PathBuf::from(fixture).with_extension(""));
+    Command::new(snc_binary())
+        .arg("build")
+        .arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("snc invocation failed")
+}
+
+#[test]
+fn c34_handle_perform_codegen_reports_handlers_not_yet_supported() {
+    // ADR 0020 D9: at C3.4 the handler surface type-checks, but
+    // codegen surfaces a clean diagnostic instead of panicking.
+    let out = build_ui_fixture("c34_handlers_codegen_not_yet.sentinel");
+    assert!(!out.status.success(), "snc build should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("handlers_not_yet_supported"),
+        "expected handlers_not_yet_supported diagnostic; got: {stderr}"
+    );
+}
+
+#[test]
+fn c34_perform_undefined_effect_rejects_at_resolve() {
+    let out = build_ui_fixture("c34_perform_undefined_effect.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("undefined_handler_effect"),
+        "expected undefined_handler_effect; got: {stderr}"
+    );
+}
+
+#[test]
+fn c34_handle_undefined_op_rejects_at_resolve() {
+    let out = build_ui_fixture("c34_handle_undefined_op.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("undefined_handler_op"),
+        "expected undefined_handler_op; got: {stderr}"
+    );
+}
+
+#[test]
+fn c34_handle_duplicate_arm_rejects_at_resolve() {
+    let out = build_ui_fixture("c34_handle_duplicate_arm.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("duplicate_handler_arm"),
+        "expected duplicate_handler_arm; got: {stderr}"
+    );
+}
+
+#[test]
+fn c34_kont_used_as_value_rejects_at_types() {
+    let out = build_ui_fixture("c34_kont_used_as_value.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("kont_used_as_value"),
+        "expected kont_used_as_value; got: {stderr}"
+    );
+}

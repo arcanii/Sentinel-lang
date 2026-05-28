@@ -83,6 +83,13 @@ pub enum TokenKind {
     /// at C3.0; rejected at type-check until D8 closure.
     #[token("perform")]
     Perform,
+    /// C3 / ADR 0020 D4 (C3.4): the `return v => body` arm inside
+    /// `handle ... with { ... }`. Reserved as a contextual keyword
+    /// only inside handler-arm position — outside handlers the
+    /// identifier `return` is currently unused by Sentinel (no
+    /// early-return statement at C3).
+    #[token("return")]
+    Return,
 
     #[token("+")]
     Plus,
@@ -143,6 +150,12 @@ pub enum TokenKind {
     Question,
     #[token("->")]
     Arrow,
+    /// C3 / ADR 0020 D4 (C3.4): the `=>` separator inside handler
+    /// arms (`Effect.op(...) => body` and `return v => body`).
+    /// Distinct from `->` (return-type arrow) and `==`
+    /// (equality); longest-match keeps them unambiguous.
+    #[token("=>")]
+    FatArrow,
 
     #[regex(r"[0-9]+")]
     IntLit,
@@ -817,6 +830,72 @@ mod tests {
                 TokenKind::LParen,
                 TokenKind::RParen,
             ]
+        );
+    }
+
+    // ----- C3.4 / ADR 0020 D4: handler-arm syntax tokens -----
+
+    #[test]
+    fn lex_fat_arrow() {
+        assert_eq!(kinds("=>"), vec![TokenKind::FatArrow]);
+    }
+
+    #[test]
+    fn lex_return_keyword() {
+        assert_eq!(kinds("return"), vec![TokenKind::Return]);
+    }
+
+    #[test]
+    fn lex_return_keyword_ident_prefix_regression() {
+        // `returning` / `returns` / `return_value` lex as Ident,
+        // not as keyword + suffix.
+        assert_eq!(kinds("returning"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("returns"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("return_value"), vec![TokenKind::Ident]);
+    }
+
+    #[test]
+    fn lex_handler_arm_skeleton() {
+        // `Io.read(k) => k(42)` — the D4 surface.
+        assert_eq!(
+            kinds("Io.read(k) => k(42)"),
+            vec![
+                TokenKind::Ident,
+                TokenKind::Dot,
+                TokenKind::Ident,
+                TokenKind::LParen,
+                TokenKind::Ident,
+                TokenKind::RParen,
+                TokenKind::FatArrow,
+                TokenKind::Ident,
+                TokenKind::LParen,
+                TokenKind::IntLit,
+                TokenKind::RParen,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_return_arm_skeleton() {
+        // `return v => v` — the optional return-arm surface.
+        assert_eq!(
+            kinds("return v => v"),
+            vec![
+                TokenKind::Return,
+                TokenKind::Ident,
+                TokenKind::FatArrow,
+                TokenKind::Ident,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_fat_arrow_vs_eq_eq_vs_eq() {
+        // `==` is longest among {=, ==, =>}; `=>` is its own token.
+        // The trio must lex unambiguously side-by-side.
+        assert_eq!(
+            kinds("= == =>"),
+            vec![TokenKind::Eq, TokenKind::EqEq, TokenKind::FatArrow]
         );
     }
 }

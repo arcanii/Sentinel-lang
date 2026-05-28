@@ -927,6 +927,33 @@ fn walk_expr(
             walk_expr_lvalue(target, ctx, errors, program);
             walk_expr(index, ctx, errors, program);
         }
+
+        // C3.4 / ADR 0020 D5: handle/perform/resume don't reach
+        // codegen at C3.4 minimum — borrow-checking them is a
+        // best-effort recursive walk so any borrow violations
+        // inside the bodies surface, but the kont binding itself
+        // is treated as Copy-ish (no move tracking for it). The
+        // proper handler-aware borrow check lands alongside
+        // codegen at C3.5/C3.6.
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            walk_expr(body, ctx, errors, program);
+            for arm in arms {
+                walk_expr(&arm.body, ctx, errors, program);
+            }
+            if let Some(ra) = return_arm {
+                walk_expr(&ra.body, ctx, errors, program);
+            }
+        }
+        TypedExprKind::Perform { args, .. } => {
+            for a in args {
+                walk_expr(a, ctx, errors, program);
+            }
+        }
+        TypedExprKind::ResumeKont { args, .. } => {
+            for a in args {
+                walk_expr(a, ctx, errors, program);
+            }
+        }
     }
 }
 
@@ -1120,6 +1147,13 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         // The secret qualifier is orthogonal to ownership;
         // borrow-check unwraps it before deciding.
         Type::Secret(id) => is_copy_type(program.secret_data(id).inner, program),
+        // C3.4 / ADR 0020 D5: konts are pointer-like (they reference
+        // heap-allocated frames at C3.5+) and never carry move
+        // semantics — they live and die inside their arm's scope.
+        // Treating them as Copy avoids spurious move tracking; the
+        // kont VarId is never reassigned or referenced as a value
+        // (KontUsedAsValue rejects that at type-check).
+        Type::Kont(_) => true,
     }
 }
 

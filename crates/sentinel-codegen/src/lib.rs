@@ -83,6 +83,18 @@ pub enum CodegenError {
         help("generic-fn monomorphization arrives at C1.7.5; for now only the builtin generics (unwrap_or, is_some, len) lower")
     )]
     GenericCallNotYetSupported { name: String },
+
+    /// C3.4 / ADR 0020 D9: `handle`, `perform`, and `k(...)` resume
+    /// calls parse + type-check at C3.4 but codegen lands at
+    /// C3.5/C3.6 (perform → C3.5, handle → C3.6). A program that
+    /// uses any of these surfaces this error from codegen and exits
+    /// cleanly rather than panicking.
+    #[error("handler runtime (`handle` / `perform` / continuation resume) is not yet lowered (lands at C3.5/C3.6)")]
+    #[diagnostic(
+        code(sentinel::codegen::handlers_not_yet_supported),
+        help("the type-checker accepts handle/perform but codegen lands at C3.5 (perform) / C3.6 (handle) per ADR 0020 D9")
+    )]
+    HandlersNotYetSupported,
 }
 
 /// Lower a [`TypedProgram`] to a native object file at `output`.
@@ -539,6 +551,11 @@ fn field_type_needs_drop_inner(
             }
             field_type_needs_drop_inner(program.secret_data(id).inner, program, seen)
         }
+        // C3.4 / ADR 0020 D5: konts never reach codegen at C3.4
+        // minimum — Handle/Perform/ResumeKont bail with
+        // HandlersNotYetSupported before drop computation. Defensive
+        // false here keeps borrow-check's recursive drop walks safe.
+        Type::Kont(_) => false,
     }
 }
 
@@ -624,6 +641,10 @@ fn llvm_basic_type<'ctx>(
         // Unreachable: the early-return at fn entry strips
         // Type::Secret. If it shows up here, that's a codegen bug.
         Type::Secret(_) => unreachable!("Type::Secret stripped at llvm_basic_type entry"),
+        // C3.4 / ADR 0020 D5: konts never reach codegen at C3.4 —
+        // Handle/Perform/ResumeKont return CodegenError::HandlersNotYetSupported
+        // before this lookup is consulted.
+        Type::Kont(_) => panic!("llvm_basic_type called on Type::Kont — handlers not lowered at C3.4 (ADR 0020 D9: codegen lands at C3.5/C3.6)"),
     }
 }
 
@@ -836,6 +857,33 @@ fn walk_expr_for_mono(
                 index, subst, program, instances, refs, visited, order, pending,
             );
         }
+        // C3.4 / ADR 0020 D5: handle/perform/resume never reach
+        // user-fn-call inspection because lower_expr bails before
+        // any concrete substitution. Defensive: walk subexpressions
+        // so the mono pass remains correct for any generic uses
+        // tucked inside arms — even though codegen later rejects.
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            walk_expr_for_mono(
+                body, subst, program, instances, refs, visited, order, pending,
+            );
+            for arm in arms {
+                walk_expr_for_mono(
+                    &arm.body, subst, program, instances, refs, visited, order, pending,
+                );
+            }
+            if let Some(ra) = return_arm {
+                walk_expr_for_mono(
+                    &ra.body, subst, program, instances, refs, visited, order, pending,
+                );
+            }
+        }
+        TypedExprKind::Perform { args, .. } | TypedExprKind::ResumeKont { args, .. } => {
+            for a in args {
+                walk_expr_for_mono(
+                    a, subst, program, instances, refs, visited, order, pending,
+                );
+            }
+        }
     }
 }
 
@@ -921,6 +969,10 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
             .get(id.0 as usize)
             .map(|d| format!("sec_{}", mangle_type(d.inner, program)))
             .unwrap_or_else(|| format!("sec{}", id.0)),
+        // C3.4 / ADR 0020 D5: konts never participate in
+        // monomorphization keys at C3.4 — handlers don't reach
+        // codegen until C3.5/C3.6. Defensive label only.
+        Type::Kont(id) => format!("kont{}", id.0),
     }
 }
 
@@ -949,6 +1001,8 @@ fn arg_contains_typeparam(
         // Future ADRs may relax for `secret <generic-T>` and need
         // a `secrets: &[SecretData]` parameter here.
         Type::Secret(_) => false,
+        // C3.4 / ADR 0020 D5: konts don't appear in mono keys.
+        Type::Kont(_) => false,
     }
 }
 
@@ -1000,6 +1054,9 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         // secrets before calling this. Reaching here is a bug.
         Type::Secret(_) => panic!(
             "llvm_int_type called on Type::Secret — strip via CodegenCtx::llvm_int_type"
+        ),
+        Type::Kont(_) => panic!(
+            "llvm_int_type called on Type::Kont — handlers not lowered at C3.4 (ADR 0020 D9)"
         ),
     }
 }
@@ -1415,6 +1472,11 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             }
             Type::Secret(_) => {
                 // Unreachable: stripped at fn entry. Defensive.
+            }
+            Type::Kont(_) => {
+                // C3.4 / ADR 0020 D5: konts never reach drop —
+                // Handle/Perform/ResumeKont bail at lower_expr.
+                // Defensive.
             }
         }
         Ok(())
@@ -2212,6 +2274,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             TypedExprKind::Index { target, index, elem_ty } => {
                 self.lower_index(target, index, *elem_ty, program)
             }
+            // C3.4 / ADR 0020 D9: handlers ship in C3.5 (perform)
+            // + C3.6 (handle). At C3.4 the type-checker accepts
+            // the surface but codegen surfaces a clean diagnostic
+            // and bails — the binary won't run but the program
+            // type-checks correctly.
+            TypedExprKind::Handle { .. }
+            | TypedExprKind::Perform { .. }
+            | TypedExprKind::ResumeKont { .. } => {
+                Err(CodegenError::HandlersNotYetSupported)
+            }
         }
     }
 
@@ -2287,6 +2359,24 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
         }
         TypedExprKind::Index { target, index, .. } => {
             find_var_name_in_expr(target, id).or_else(|| find_var_name_in_expr(index, id))
+        }
+        // C3.4 / ADR 0020 D5: defensive walk into handler bodies +
+        // perform args for binding-name lookup. These don't reach
+        // codegen at C3.4 (lower_expr bails) but the walk needs to
+        // be total.
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            find_var_name_in_expr(body, id)
+                .or_else(|| {
+                    arms.iter().find_map(|a| find_var_name_in_expr(&a.body, id))
+                })
+                .or_else(|| {
+                    return_arm
+                        .as_ref()
+                        .and_then(|ra| find_var_name_in_expr(&ra.body, id))
+                })
+        }
+        TypedExprKind::Perform { args, .. } | TypedExprKind::ResumeKont { args, .. } => {
+            args.iter().find_map(|a| find_var_name_in_expr(a, id))
         }
     }
 }

@@ -1,0 +1,16 @@
+// C3.4 / ADR 0020 D5: a continuation binding `k` is only valid as
+// a resume call. Using it as a value (here: `let f = k; ...`)
+// surfaces `sentinel::types::kont_used_as_value` at type-check.
+
+effect Io {
+    read() -> i64;
+}
+
+fn main() -> i64 {
+    handle 0 with {
+        Io.read(k) => {
+            let f: i64 = k;
+            42
+        }
+    }
+}
