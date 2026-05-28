@@ -83,6 +83,7 @@ C1.3. See STATE.md Section C.
 **Phase C3.6(a) — non-identity return arm per ADR 0020 D4: lower_handle binds return arm value + lowers body in pure_block; HandleContext carries return_arm so k(v)'s pure-unwrap path applies it per Phase B's deep-handler re-wrap — complete.**
 **Phase C3.6(b) — nested handles per ADR 0020 D3: handle_depth counter detects nesting; inner handles emit Kont*-typed merge values; switch default propagates un-caught op to outer's dispatch via the merge — complete.**
 **Phase C3.7 — handle body lift + phase-go fixtures + ADR 0020 → ACCEPTED-WITH-AMENDMENTS — complete. Phase C3 closes.**
+**Phase C4.0 — lexer keywords for classes / traits / delegation / structured concurrency per ADR 0021 D11 — complete.**
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -950,14 +951,15 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C4.0 — lexer for classes / traits / concurrency)
+### 0.2 Next session opening (C4.1 — class declarations + methods + init)
 
-Resume at **C4.0** per ADR 0021 D14. **Phase C3 closed: ADR
-0020 ACCEPTED-WITH-AMENDMENTS at C3.7 close.** **ADR 0021
-PROPOSED** opens Phase C4 with 14 D-decisions covering classes
-(D1-D3), traits + named impls (D4-D5), delegation (D6),
-structured concurrency + async-as-effect (D8-D9), and a 6-sub-
-phase split (D14). Sixteen sub-phases shipped across Phase C3. The bootstrap language surface at C3.7 close has the
+Resume at **C4.1** per ADR 0021 D14. **C4.0 closed: lexer
+reserves the 12 Phase C4 keywords.** ADR 0021 stays PROPOSED.
+Per the D14 sub-phase split, C4.1 lands the class+method+init
+surface end-to-end (AST + parser + resolve + types + codegen,
+parallel-tree mirror across crates). Estimate per ADR 0021:
+2-3 sessions. A detail ADR 0022 PROPOSED at C4.1 open covers
+the concrete surface (mirroring ADR 0013 for C1.4 structs). The bootstrap language surface at C3.7 close has the
 full memory-safety + secret-typing + effect-system trifecta
 from HANDOVER §6.2:
 
@@ -999,10 +1001,11 @@ What's deferred past Phase C3:
 For **Phase C4** per HANDOVER §6.2: classes + traits + named
 impls + delegation + structured concurrency. ADR 0021 is the
 phase kickoff (PROPOSED). The sub-phase plan from ADR 0021
-D14:
+D14 (C4.0 complete; six total):
 
-  - C4.0 lexer (1 session): class / trait / impl / init /
-    delegate / scope / spawn / await / Self / self keywords.
+  - C4.0 lexer (1 session, **DONE**): class / trait / impl /
+    init / delegate / scope / spawn / await / Self / self /
+    as / for keywords reserved.
   - C4.1 class + method + init (2-3 sessions): parallel-
     tree mirror across AST / parser / resolve / types /
     codegen + definite-assignment check.
@@ -1376,13 +1379,12 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last work: **ADR 0021 PROPOSED — Phase C4 kickoff
-    (classes + traits + delegation + structured concurrency;
-    closes ADR 0019 D9 async-as-effect deferral). Sub-phase
-    plan: C4.0 lexer → C4.5 close-out, 8-12 sessions.
-    Per ADR 0021 D14, the next code-bearing session opens
-    C4.0 — lexer additions for class/trait/impl/init/
-    delegate/scope/spawn/await/Self/self.**
+    Last sub-phase: **C4.0 — lexer keywords for Phase C4
+    (twelve new TokenKind variants: class / trait / impl /
+    init / delegate / scope / spawn / await / Self / self /
+    as / for; `Self` and `self` are case-distinguished tokens
+    SelfTy / SelfVal per ADR 0021 D2; `to` and `concurrent`
+    stay Idents — parser handles them positionally).**
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1393,15 +1395,16 @@ For pasting into a fresh chat to bootstrap context:
     seven sub-phases C3.0(a)/C3.0(b) + C3.1/C3.1b + C3.2(a)/
     C3.2(b) + C3.3 + C3.4)** + **Phase C3 RUNTIME layer (C3.4
     + C3.5(a/b/c/d/e) + C3.6(a/b) + C3.7) — all complete.
-    Phase C3 closes.** ADR 0017 ACCEPTED-WITH-AMENDMENTS;
-    ADR 0018 (Polonius migration plan) PROPOSED; **ADR 0019
-    ACCEPTED-WITH-AMENDMENTS at C3.3 close**; **ADR 0020
-    ACCEPTED-WITH-AMENDMENTS at C3.7 close** with all twelve
-    D-decisions exercised modulo D2 (multi-shot deferred per
-    amendment); **ADR 0021 PROPOSED** opens Phase C4 (classes
-    + traits + delegation + structured concurrency; 14 D-
-    decisions; 6 sub-phases; 8-12 sessions). 1075 active
-    workspace tests + 1 doctest.
+    Phase C3 closes.** Phase C4 in progress: **C4.0 (lexer)
+    landed**; C4.1-C4.5 remaining per ADR 0021 D14. ADR 0017
+    ACCEPTED-WITH-AMENDMENTS; ADR 0018 (Polonius migration
+    plan) PROPOSED; **ADR 0019 ACCEPTED-WITH-AMENDMENTS at
+    C3.3 close**; **ADR 0020 ACCEPTED-WITH-AMENDMENTS at C3.7
+    close** with all twelve D-decisions exercised modulo D2
+    (multi-shot deferred per amendment); **ADR 0021 PROPOSED**
+    opens Phase C4 (classes + traits + delegation + structured
+    concurrency; 14 D-decisions; 6 sub-phases; 8-12 sessions).
+    1093 active workspace tests + 1 doctest.
     **Thirty-two go/no-go programs run end-to-end + 1 UI rejection:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5

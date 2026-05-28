@@ -489,19 +489,19 @@ File` + `impl Bar as Writer for File` co-existing.
 
 Rough split per the C4 surface volume:
 
-| Sub  | Title                                                          | Estimate     |
-|------|----------------------------------------------------------------|--------------|
-| C4.0 | Lexer: class / trait / impl / init / delegate / scope / spawn  | 1 session    |
-|      | / await / Self / self keywords (D11).                          |              |
-| C4.1 | class declarations + methods + init + self per D1-D3.          | 2-3 sessions |
-|      | AST + parser + resolve + types + codegen (parallel-tree).      |              |
-| C4.2 | trait declarations + impl blocks (default + named) + dispatch  | 2-3 sessions |
-|      | per D4-D5. Witness-table generics extension.                   |              |
-| C4.3 | delegation per D6 — type-check + auto-forwarder codegen.       | 1 session    |
-| C4.4 | structured concurrency surface (scope / spawn / await) per     | 2-3 sessions |
-|      | D8-D9 + the Async effect + a runtime scheduler.                |              |
-| C4.5 | phase-go program + ADR PROPOSED → ACCEPTED + STATE/HANDOVER    | 0-1 sessions |
-|      | close-out.                                                     |              |
+| Sub  | Title                                                          | Estimate     | Status |
+|------|----------------------------------------------------------------|--------------|--------|
+| C4.0 | Lexer: class / trait / impl / init / delegate / scope / spawn  | 1 session    | **DONE** |
+|      | / await / Self / self / as / for keywords (D11).               |              |        |
+| C4.1 | class declarations + methods + init + self per D1-D3.          | 2-3 sessions |        |
+|      | AST + parser + resolve + types + codegen (parallel-tree).      |              |        |
+| C4.2 | trait declarations + impl blocks (default + named) + dispatch  | 2-3 sessions |        |
+|      | per D4-D5. Witness-table generics extension.                   |              |        |
+| C4.3 | delegation per D6 — type-check + auto-forwarder codegen.       | 1 session    |        |
+| C4.4 | structured concurrency surface (scope / spawn / await) per     | 2-3 sessions |        |
+|      | D8-D9 + the Async effect + a runtime scheduler.                |              |        |
+| C4.5 | phase-go program + ADR PROPOSED → ACCEPTED + STATE/HANDOVER    | 0-1 sessions |        |
+|      | close-out.                                                     |              |        |
 
 Total: 8-12 sessions across 6 sub-phases. C4.4 (structured
 concurrency + scheduler) carries the most risk; the scheduler

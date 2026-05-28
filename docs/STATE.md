@@ -12,7 +12,36 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **ADR 0021 PROPOSED: Phase C4 kickoff (classes + traits + delegation + structured concurrency).**
+Last updated: **C4.0 landed; lexer keywords for Phase C4.**
+ADR 0021 stays PROPOSED. Twelve new TokenKind variants reserve
+the Phase C4 surface: `class`, `trait`, `impl`, `init`,
+`delegate`, `scope`, `spawn`, `await`, `Self`, `self`, `as`,
+`for`. `Self` (SelfTy) and `self` (SelfVal) are distinct
+case-distinguished tokens per ADR 0021 D2's split between the
+implementing type and the receiver value. `to` (inside
+`delegate inner: T to Trait;`) and `concurrent` (inside
+`scope concurrent`) remain plain Idents — the parser
+recognises them positionally per the smallest-surface
+principle.
+
+The parser doesn't yet activate any of these — they're
+lexer-reserved at C4.0; the parser layer brings them online
+sub-phase by sub-phase per ADR 0021 D14:
+  - C4.1: class / init / Self / self.
+  - C4.2: trait / impl / as / for.
+  - C4.3: delegate.
+  - C4.4: scope / spawn / await.
+
+Workspace test delta from ADR 0021 PROPOSED: +18 (1093
+total) — +18 lexer tests (one per new keyword + an ident-
+prefix regression + skeleton sequence tests for class /
+trait / impl / delegate / scope+spawn+await surfaces).
+**Phase C4.0 closes here.** Next: **C4.1** — class
+declarations + methods + init constructor per ADR 0021 D1-
+D3 + the matching detail ADR 0022 PROPOSED at sub-phase
+open.
+
+Pre-C4.0 context: **ADR 0021 PROPOSED: Phase C4 kickoff (classes + traits + delegation + structured concurrency).**
 No code changes — this is the pre-flight design ADR for Phase
 C4 per the ADR-first norm. ADR 0021 carries 14 D-decisions:
 classes as struct+method+impl+delegation sugar (D1), method
