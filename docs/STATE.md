@@ -12,7 +12,58 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C3.6(b) landed; nested handles per ADR 0020 D3.**
+Last updated: **C3.7 landed; ADR 0020 → ACCEPTED-WITH-AMENDMENTS; Phase C3 closes.**
+ADR 0020 flips PROPOSED → ACCEPTED-WITH-AMENDMENTS with all
+eight sub-phases shipped (C3.4 + C3.5(a/b/c/d/e) + C3.6(a/b) +
+C3.7). The single amendment: **D2's multi-shot relaxation is
+deferred** indefinitely — Phase B's one-shot validation demos
+all passed, and the C3 bootstrap minimum doesn't surface a
+multi-shot use case. The upgrade path (deep-clone the frame
+chain + captured-state on each resume entry) stays mechanical.
+
+**C3.7 ships**:
+- `lower_handle`'s body restriction is **fully lifted**. Any
+  expression that produces a value is accepted — pure i64
+  bodies wrap via `sentinel_kont_pure` at the handle site so
+  the dispatch loop's PURE_RETURN switch case fires. The
+  previous Perform / Call-to-effecting / Handle gate goes
+  away. Empty arms (just a return arm) is permitted; the
+  merge phi takes its type from pure_val when arm_results is
+  empty.
+- The legacy `HandleBodyNotDirectPerform` codegen variant
+  remains in the error enum for backward-compat but is no
+  longer reachable from codegen.
+
+**Three new C3.7 fixtures**:
+- `c37_go_no_go.sentinel` (ADR 0020 D12 phase-go): do_work(42)
+  performs Io.log; handler resumes with msg + 1 = 43; do_work
+  computes x + logged = 42 + 43 = 85; print outputs "85\n";
+  exit 0.
+- `c37_handle_return.sentinel`: `handle 42 with { return v =>
+  v * 2 }` — pure body wrapped via sentinel_kont_pure; PURE_RETURN
+  switch case fires the return arm transform; exit 84.
+- `c37_perform_outside_handle.sentinel` (UI): bare `perform
+  Io.log(...)` in main; ADR 0019 D13's unhandled_effect
+  rejection fires (snc exit 1).
+
+Workspace test delta from C3.6(b) close: +3 (1075 total) — +2
+driver pass-tests (c37_go_no_go, c37_handle_return) + 1
+driver UI test (c37_perform_outside_handle).
+
+**Phase C3 closes here.** The handler-runtime layer is
+complete; the language surface now supports the full
+effect-system trifecta from HANDOVER §6.2: secret-typing
+(C3.1), effect rows + main-must-be-effect-free (C3.2/C3.3),
+and handler runtime with deep-handler one-shot continuations
+(C3.4 → C3.7). Twenty ADRs landed across Phases A, B, C0,
+C1, C2, C3.
+
+Next: **Phase C4** per HANDOVER §6.2 — traits + structured
+concurrency. ADR 0017's polonius migration (ADR 0018) is also
+queued as a Phase C2 follow-on, plus the documented Phase C2
+soundness gap (partial-move-through-field-projection) closure.
+
+Pre-C3.7 context: **C3.6(b) landed; nested handles per ADR 0020 D3.**
 ADR 0020 stays PROPOSED. `lower_handle`'s body restriction
 extends to also accept nested `Handle` expressions; an inner
 handle (detected via `CodegenCtx.handle_depth > 1`) emits

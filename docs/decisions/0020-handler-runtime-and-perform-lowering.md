@@ -1,12 +1,22 @@
 # ADR 0020: Handler runtime + `perform` lowering (closes ADR 0019 D8)
 
-Status: PROPOSED — to flip to ACCEPTED (or ACCEPTED-WITH-AMENDMENTS)
-as the handler sub-phases land. This ADR closes the D8 deferral
-from ADR 0019 — handler runtime + `perform Op(args)` semantics
-in the production bootstrap compiler. The substantive design
-call: which lowering strategy for `handle e with { ... }` —
-free-monad reification (Phase B's approach), CPS transform, or
-stack-saved continuations.
+Status: ACCEPTED-WITH-AMENDMENTS — closes the D8 deferral from
+ADR 0019. All eight sub-phases landed across C3.4 → C3.7 (14
+sessions actual vs ADR estimate "5-9 sessions"; the over-run
+is concentrated in C3.5 sub-phases where the frame-reification
+machinery surfaced). Eleven of twelve D-decisions exercised as
+drafted; **D2 amended**: multi-shot continuations (D2's
+relaxation path) shipped neither at C3.6(c) nor C3.7 — Phase B
+validation demos all worked one-shot, and the bootstrap
+production-shape language doesn't have a use case yet. The
+upgrade remains mechanical (deep-clone the kont chain +
+captured-state on resume entry) so promoting D2 to multi-shot
+is a follow-on perf ADR rather than a C3 deliverable.
+
+The substantive design call landed as drafted: which lowering
+strategy for `handle e with { ... }` — free-monad reification
+(Phase B's approach), CPS transform, or stack-saved
+continuations.
 
 **Sub-phase progress** (per D9 table):
 
@@ -95,9 +105,22 @@ stack-saved continuations.
     c36b_nested_handle_inner_full). +2 workspace tests (1072
     total).
   - **C3.6(c)** — multi-shot continuations per D2
-    relaxation (deep-clone-on-resume + sharing analysis).
-  - **C3.7** — polish + phase-go (c37 fixture per D12) +
-    ADR PROPOSED → ACCEPTED.
+    relaxation — **DEFERRED** (see Status field amendment).
+    The one-shot enforcement via `consumed` flag is
+    sufficient for the C3 bootstrap minimum. The upgrade
+    path (deep-clone the frame chain + captured-state on
+    each resume) stays mechanical.
+  - **C3.7** — polish + phase-go programs + ADR flip —
+    **SHIPPED**. `lower_handle`'s body restriction is fully
+    lifted (any expression accepted; pure i64 wrapped via
+    sentinel_kont_pure). Three new fixtures: the D12 phase-
+    go `c37_go_no_go.sentinel` (do_work(42) + handler msg+1
+    → 85, stdout/exit 0), `c37_handle_return.sentinel`
+    (`handle 42 with { return v => v * 2 }` → 84), and the
+    UI fixture `c37_perform_outside_handle.sentinel`
+    (unhandled effect rejection). +3 workspace tests (1075
+    total). **ADR 0020 PROPOSED → ACCEPTED-WITH-AMENDMENTS;
+    Phase C3 closes.**
 
 Date: 2026-05-28
 Related:
@@ -506,10 +529,10 @@ A rough split into 4-5 sub-phases:
 |      | handler re-wrap).                                              |              |        |
 | C3.6(b) | Nested handles — inner handle's switch default propagates     | 1 session    | **DONE** |
 |      | un-caught op kont to merge; outer's body dispatches on it.     |              |        |
-| C3.6(c) | Multi-shot continuations per D2 relaxation — deep-clone        | 1-2 sessions |        |
-|      | kont's frame chain on resume; sharing analysis for captures.   |              |        |
-| C3.7 | Polish + phase-go programs + STATE.md / HANDOVER refresh +     | 0-1 sessions |        |
-|      | ADR 0020 PROPOSED → ACCEPTED flip.                             |              |        |
+| C3.6(c) | Multi-shot continuations per D2 relaxation — deep-clone        | 1-2 sessions | **DEFERRED** |
+|      | kont's frame chain on resume; sharing analysis for captures.   |              | (D2 amend.) |
+| C3.7 | Polish + phase-go programs + STATE.md / HANDOVER refresh +     | 0-1 sessions | **DONE** |
+|      | ADR 0020 PROPOSED → ACCEPTED-WITH-AMENDMENTS flip.             |              |        |
 
 Total: 5-9 sessions across 4 sub-phases. The C3.5 + C3.6
 substantive halves cost the most; C3.4 (AST + parser) is
@@ -635,7 +658,7 @@ A rough split per the D9 table:
 | C3.5(e) | Chained effecting lets via resumers-can-perform               | 1-2 sessions | **DONE** |
 | C3.6(a) | Non-identity return arm (Phase B deep-handler re-wrap)        | 0-1 session  | **DONE** |
 | C3.6(b) | Nested handles (un-matched op propagates to outer)            | 1 session    | **DONE** |
-| C3.6(c) | Multi-shot continuations (D2 relaxation)                       | 1-2 sessions |        |
+| C3.6(c) | Multi-shot continuations (D2 relaxation)                       | 1-2 sessions | **DEFERRED** (D2 amend.) |
 | C3.7 | Polish + phase-go programs + ADR 0020 flip + STATE close       | 0-1 sessions |        |
 
 Honest total: 5-9 sessions across 4 sub-phases. The substantive
