@@ -12,7 +12,47 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C3.6(a) landed; non-identity return arms per ADR 0020 D4.**
+Last updated: **C3.6(b) landed; nested handles per ADR 0020 D3.**
+ADR 0020 stays PROPOSED. `lower_handle`'s body restriction
+extends to also accept nested `Handle` expressions; an inner
+handle (detected via `CodegenCtx.handle_depth > 1`) emits
+Kont*-typed merge values instead of i64 so the enclosing outer
+handle can dispatch on the result. Switch's default destination
+flips from `handle_unreachable` (top-level) to
+`handle_propagate` (nested), contributing the un-caught
+current_kont to the merge. Inner-handle arm bodies' i64 results
+get wrapped via `sentinel_kont_pure` before joining the merge;
+the pure-return switch case either passes current_kont through
+(no return arm) or consume_pure + apply + re-wrap (with return
+arm).
+
+**Nesting detection**: `CodegenCtx.handle_depth: u32` is
+incremented at `lower_handle` entry + decremented at exit.
+`is_nested = depth > 1`. A thin wrapper around
+`lower_handle_inner` ensures the decrement fires on the early-
+error path too.
+
+**Two new pass fixtures**:
+- `c36b_nested_handle_basic.sentinel`: do_both has chained
+  effecting lets {Io.read, Net.fetch}; inner catches Io
+  (k(7)), inner's propagate routes Net.fetch to outer, outer
+  catches Net (k(35)), 7 + 35 = 42.
+- `c36b_nested_handle_inner_full.sentinel`: inner catches Io
+  fully (k(15)), wraps via pure_kont, outer's PURE_RETURN
+  switch case unwraps; result + 27 = 42.
+
+**Still pending for C3.6(c) / C3.7**: multi-shot continuations
+(ADR 0020 D2 relaxation — needs deep-clone-on-resume + sharing
+analysis for captured state), non-i64-returning ops, embedded
+performs in chained-let RHSes, phase-go fixture per ADR 0020
+D12.
+
+Workspace test delta from C3.6(a) close: +2 (1072 total) — +2
+driver pass-tests (c36b_*). **Phase C3.6(b) closes here.**
+Next: C3.6(c) — multi-shot continuations per ADR 0020 D2, or
+skip to C3.7 polish + phase-go fixture.
+
+Pre-C3.6(b) context: **C3.6(a) landed; non-identity return arms per ADR 0020 D4.**
 ADR 0020 stays PROPOSED. `lower_handle` now actually uses the
 `return_arm` parameter: in the pure-return switch case, bind
 the return arm's value VarId to the unwrapped i64 + lower the

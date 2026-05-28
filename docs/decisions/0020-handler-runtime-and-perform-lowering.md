@@ -83,9 +83,17 @@ stack-saved continuations.
     (c36a_return_arm_transform,
     c36a_return_arm_after_resume). +2 workspace tests (1070
     total).
-  - **C3.6(b)** — nested handles (scoped frame ownership +
-    inner-handle bubble propagates to outer when inner
-    doesn't catch the op).
+  - **C3.6(b)** — nested handles per ADR 0020 D3 — **SHIPPED**.
+    `lower_handle`'s body restriction lifts to also accept
+    nested `Handle` expressions; `CodegenCtx.handle_depth`
+    counter detects nesting. Inner handles emit Kont*-typed
+    merge values (arms wrap via pure_kont; pure case passes
+    through or re-wraps after return arm); switch's default
+    routes to a propagate block that contributes the un-
+    caught current_kont to the merge. Two pass fixtures
+    (c36b_nested_handle_basic,
+    c36b_nested_handle_inner_full). +2 workspace tests (1072
+    total).
   - **C3.6(c)** — multi-shot continuations per D2
     relaxation (deep-clone-on-resume + sharing analysis).
   - **C3.7** — polish + phase-go (c37 fixture per D12) +
@@ -496,8 +504,8 @@ A rough split into 4-5 sub-phases:
 | C3.6(a) | Non-identity return arm — lower_handle pure-block applies     | 0-1 session  | **DONE** |
 |      | return arm body; k(v) pure-unwrap mirrors it (Phase B deep-    |              |        |
 |      | handler re-wrap).                                              |              |        |
-| C3.6(b) | Nested handles — inner switch propagates un-matched op_id     | 1 session    |        |
-|      | to outer handle's slot/loop_block.                             |              |        |
+| C3.6(b) | Nested handles — inner handle's switch default propagates     | 1 session    | **DONE** |
+|      | un-caught op kont to merge; outer's body dispatches on it.     |              |        |
 | C3.6(c) | Multi-shot continuations per D2 relaxation — deep-clone        | 1-2 sessions |        |
 |      | kont's frame chain on resume; sharing analysis for captures.   |              |        |
 | C3.7 | Polish + phase-go programs + STATE.md / HANDOVER refresh +     | 0-1 sessions |        |
@@ -626,7 +634,7 @@ A rough split per the D9 table:
 | C3.5(d) | Unified embedded-perform shape (binop / call-arg / etc.)      | 1 session    | **DONE** |
 | C3.5(e) | Chained effecting lets via resumers-can-perform               | 1-2 sessions | **DONE** |
 | C3.6(a) | Non-identity return arm (Phase B deep-handler re-wrap)        | 0-1 session  | **DONE** |
-| C3.6(b) | Nested handles (un-matched op propagates to outer)            | 1 session    |        |
+| C3.6(b) | Nested handles (un-matched op propagates to outer)            | 1 session    | **DONE** |
 | C3.6(c) | Multi-shot continuations (D2 relaxation)                       | 1-2 sessions |        |
 | C3.7 | Polish + phase-go programs + ADR 0020 flip + STATE close       | 0-1 sessions |        |
 

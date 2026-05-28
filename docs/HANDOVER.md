@@ -81,6 +81,7 @@ C1.3. See STATE.md Section C.
 **Phase C3.5(d) — unified embedded-perform shape per ADR 0020 D7: count_performs / find_unique_perform / substitute_perform_with_var walkers; supports binop / struct-lit / fn-call-arg / index / etc. with single embedded perform — complete.**
 **Phase C3.5(e) — chained effecting lets via resumer-can-perform per ADR 0020 D7: sentinel_kont_resume returns *mut SentinelKont (bubble-aware); handle becomes a dispatch loop with alloca'd current_kont_slot; compile_effecting_fn_with_chained_lets emits N per-let resumers — complete.**
 **Phase C3.6(a) — non-identity return arm per ADR 0020 D4: lower_handle binds return arm value + lowers body in pure_block; HandleContext carries return_arm so k(v)'s pure-unwrap path applies it per Phase B's deep-handler re-wrap — complete.**
+**Phase C3.6(b) — nested handles per ADR 0020 D3: handle_depth counter detects nesting; inner handles emit Kont*-typed merge values; switch default propagates un-caught op to outer's dispatch via the merge — complete.**
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -92,25 +93,27 @@ complete** as of C3.3 — ADR 0019 ACCEPTED-WITH-AMENDMENTS with
 all D-decisions exercised except D8 (handler runtime, deferred
 to ADR 0020) and D9 (async, deferred indefinitely). Phase C3
 runtime layer (ADR 0020) is **in flight**: sub-phases C3.4 +
-C3.5(a) + C3.5(b) + C3.5(c) + C3.5(d) + C3.5(e) + C3.6(a) all
-landed. The handler surface compiles and runs end-to-end for:
-direct-perform bodies, fn-call-that-performs bodies (effecting
-fn ABI returns Kont*), pure-bodied effecting fns (PURE_RETURN
-wrap), let-bound performs, any pure surrounding context with a
-single embedded perform (binop, struct-lit, fn-call-arg, index,
-etc.), chained effecting lets where each let's RHS is a direct
-perform / effecting call, and `return v => body` arms that
-transform the resumed/returned value per Phase B's deep-handler
-re-wrap. Five runtime symbols are in place: sentinel_perform_op,
-sentinel_kont_resume (now bubble-aware, returns Kont*),
-sentinel_kont_panic_resumed, sentinel_kont_pure +
-sentinel_kont_consume_pure, sentinel_kont_push. Still pending:
-nested handles (scoped frame ownership when inner handle's
-body emits an op the inner doesn't catch), multi-shot
-continuations, non-i64-returning ops, embedded performs inside
-chained-let RHSes (e.g., `let a = perform Op() + 1`). Pipeline
-at current close (unchanged since C3.3): parse → resolve →
-check → **effect_check** → borrow_check → codegen.
+C3.5(a) + C3.5(b) + C3.5(c) + C3.5(d) + C3.5(e) + C3.6(a) +
+C3.6(b) all landed. The handler surface compiles and runs end-
+to-end for: direct-perform bodies, fn-call-that-performs
+bodies (effecting fn ABI returns Kont*), pure-bodied effecting
+fns (PURE_RETURN wrap), let-bound performs, any pure
+surrounding context with a single embedded perform (binop,
+struct-lit, fn-call-arg, index, etc.), chained effecting lets
+where each let's RHS is a direct perform / effecting call,
+`return v => body` arms that transform the resumed/returned
+value per Phase B's deep-handler re-wrap, and **nested
+handles** where an inner handle's un-caught op propagates to
+the outer handle's dispatch via the inner's switch default →
+propagate-block → merge. Five runtime symbols are in place:
+sentinel_perform_op, sentinel_kont_resume (bubble-aware,
+returns Kont*), sentinel_kont_panic_resumed, sentinel_kont_pure
++ sentinel_kont_consume_pure, sentinel_kont_push. Still
+pending: multi-shot continuations (ADR 0020 D2 relaxation),
+non-i64-returning ops, embedded performs inside chained-let
+RHSes. Pipeline at current close (unchanged since C3.3):
+parse → resolve → check → **effect_check** → borrow_check →
+codegen.
 Phase C1 (type system per HANDOVER §6.2) is **complete** per ADR
 0011 (now ACCEPTED, 8 sub-phases, ADR's honest 5-6 month estimate
 beaten — actual elapsed across C1.0a through C1.7.4b was ~10-12
@@ -939,26 +942,18 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C3.6(b/c) — nested handles + multi-shot)
+### 0.2 Next session opening (C3.6(c) — multi-shot, or C3.7 close-out)
 
-Resume at **C3.6(b)** or **C3.6(c)** per ADR 0020. **C3.6(a)
-closed: non-identity return arms.** Fourteen sub-phases shipped
-across Phase C3. The handler surface now supports `return v =>
-body` arms uniformly, applied both at the outer handle's pure-
-return dispatch (pure-bodied effecting fn case) and at k(v)'s
-pure-unwrap (Phase B's deep-handler re-wrap).
+Resume at **C3.6(c)** or **C3.7** per ADR 0020. **C3.6(b)
+closed: nested handles.** Fifteen sub-phases shipped across
+Phase C3. The handler surface now supports nested handles
+where an inner handle's un-caught op propagates to the outer
+handle's dispatch — detected via `handle_depth > 1`; inner
+handles emit Kont*-typed merge values + a propagate-block on
+the switch's default.
 
 What's NOT yet running:
 
-  - **Nested handles**: each handle's frames are scoped to
-    itself; nesting requires reasoning about frame ownership
-    when an inner handle's body emits an op the inner
-    doesn't catch — needs to propagate the bubble to the
-    OUTER handle (which means inner's switch default case
-    bubbles to outer's `current_kont_slot` instead of
-    `unreachable`). Type-checking already supports the
-    partial-handle case via effect-row subtraction (ADR 0019
-    D2); codegen needs to follow.
   - **Multi-shot continuations** (ADR 0020 D2 relaxation):
     one-shot only enforced via `consumed` flag. Multi-shot
     needs deep-clone of the kont's frame chain on each
@@ -975,28 +970,56 @@ What's NOT yet running:
     The union case is achievable but needs additional
     machinery.
 
-For **C3.6(b) nested handles**: lower_handle's switch needs a
-"default propagation" case. When inner's switch sees an op_id
-not in its arms (and there's a parent on handle_stack), store
-the kont into parent's slot + branch to parent's loop_block.
-When no parent exists (top-level), keep `unreachable`. Tricky
-piece: the frames already accumulated by inner's resumes must
-flow through — those frames belong to the outer computation
-context.
-
 For **C3.6(c) multi-shot**: drop the `consumed` flag check;
 deep-clone the kont's frame chain on each resume entry.
 Resume's drain logic stays the same per-frame; we just run
 against a fresh copy. The captured-state pointers inside each
 frame need their own clones if mutable; for now restrict to
-immutable captures (i64 + copy types).
+immutable captures (i64 + copy types). Phase D+ if it's not
+needed for the C3.7 phase-go.
 
-After C3.6: C3.7 (phase-go fixture per ADR 0020 D12 + ADR 0020
-PROPOSED → ACCEPTED flip + close-out).
+For **C3.7 close-out**: build the phase-go fixture per ADR
+0020 D12 (do_work(42) performs Io.log; handler resumes with
+msg + 1 → 85). Plus the `c37_handle_return.sentinel` simple
+return-arm fixture (84). Plus the negative case
+`c37_perform_outside_handle.sentinel`. Then flip ADR 0020
+PROPOSED → ACCEPTED (or ACCEPTED-WITH-AMENDMENTS if
+appropriate) + STATE/HANDOVER close-out.
 
-**C3.6(a) retrospective** (this session): ADR 0020 D9
-estimates 1-2 sessions for all of C3.6 (return arms + nested +
-multi-shot). C3.6(a) alone was ~0.3 sessions — quick once the
+**C3.6(b) retrospective** (this session): ADR 0020 D9
+estimated 1 session for C3.6(b). Actual: ~0.4 sessions. The
+substantive piece was understanding what "inner emits Kont*"
+meant at the IR layer + how arms/pure/propagate paths each
+contribute Kont*s to the merge. Once the model was clear, the
+edit fell out: arms wrap their i64 via sentinel_kont_pure;
+pure-path passes current_kont through (or re-wraps after
+return arm); default routes to a propagate block. Design
+notes:
+
+  - **handle_depth counter vs handle_stack.len()**:
+    handle_stack is pushed AFTER body lowering, so its
+    .len() doesn't reflect "we're inside a handle's body
+    lowering". A separate counter incremented at entry +
+    decremented at exit gives the right reading during the
+    body-lowering recursion.
+  - **Wrap-then-unwrap cost**: nested handles allocate +
+    free more konts than necessary (each arm wraps i64 →
+    pure_kont; outer's pure-path consume_pures it). For C3
+    minimum perf budget this is acceptable; a future ADR
+    can revisit (e.g., elision when outer is statically
+    known not to need the wrap).
+  - **Type-check already supports this**: the partial-
+    handle case (body has more effects than the handler
+    catches) was already valid in the typing layer per
+    ADR 0019 D2. C3.6(b) is purely a codegen change.
+
+Workspace test delta: +2 tests (1072 total) — +2 driver
+pass-tests (c36b_nested_handle_basic,
+c36b_nested_handle_inner_full).
+
+**Pre-C3.6(b) — C3.6(a) retrospective**: ADR 0020 D9 estimates
+1-2 sessions for all of C3.6 (return arms + nested + multi-
+shot). C3.6(a) alone was ~0.3 sessions — quick once the
 `HandleContext` extension fell out. Design notes:
 
   - **Deep-handler re-wrap via k(v) path**: Phase B's `k :=
@@ -1014,8 +1037,8 @@ multi-shot). C3.6(a) alone was ~0.3 sessions — quick once the
     already typed during C3.4; codegen just lowers the
     existing TypedExpr.
 
-Workspace test delta: +2 tests (1070 total) — +2 driver
-pass-tests (c36a_return_arm_transform,
+Workspace test delta at C3.6(a) close: +2 tests (1070 total)
+— +2 driver pass-tests (c36a_return_arm_transform,
 c36a_return_arm_after_resume).
 
 **C3.5(e) retrospective** (this session): ADR 0020 D9
@@ -1304,12 +1327,11 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last sub-phase: **C3.6(a) — non-identity return arm per
-    ADR 0020 D4 (lower_handle binds return arm value + lowers
-    body in pure_block; HandleContext carries return_arm so
-    k(v)'s pure-unwrap path applies it per Phase B's deep-
-    handler re-wrap; HandleContext loses Copy in favour of
-    Clone since TypedReturnArm contains TypedExpr).**
+    Last sub-phase: **C3.6(b) — nested handles per ADR 0020 D3
+    (handle_depth counter detects nesting; inner handles emit
+    Kont*-typed merge values; switch default propagates
+    un-caught op_id to the merge so the outer handle's
+    dispatch loop catches it).**
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1321,22 +1343,22 @@ For pasting into a fresh chat to bootstrap context:
     C3.2(b) + C3.3 + C3.4) — all complete.** Phase C3 RUNTIME
     layer (handler codegen per ADR 0020 D9) in progress:
     **C3.5(a) + C3.5(b) + C3.5(c) + C3.5(d) + C3.5(e) +
-    C3.6(a) landed (restricted + effecting fn ABI + handle-
-    of-call + let-bound perform + unified embedded-perform
-    shape + chained effecting lets via resumer-can-perform +
-    non-identity return arms)**; C3.6(b) nested handles +
+    C3.6(a) + C3.6(b) landed (restricted + effecting fn ABI +
+    handle-of-call + let-bound perform + unified embedded-
+    perform shape + chained effecting lets via resumer-can-
+    perform + non-identity return arms + nested handles)**;
     C3.6(c) multi-shot + C3.7 (close-out) remaining. ADR 0017
     ACCEPTED-WITH-AMENDMENTS; ADR 0018 (Polonius migration
     plan) PROPOSED; **ADR 0019 ACCEPTED-WITH-AMENDMENTS at
     C3.3 close**; **ADR 0020 PROPOSED** with C3.4 +
-    C3.5(a/b/c/d/e) + C3.6(a) shipped (9 of 12 D-decisions
-    exercised: D2 one-shot, D3 deep-handler re-wrap, D4
-    surface + default-AND-non-identity return-arm, D5
-    AST+parser+resolve, D6 effect discharge, D7 all 5 runtime
-    symbols, D11 fn-main integration, partial D1 free-monad
-    lowering via frame-chain). 1070 active workspace tests + 1
-    doctest.
-    **Twenty-eight go/no-go programs run end-to-end:** c05_go_no_go
+    C3.5(a/b/c/d/e) + C3.6(a/b) shipped (10 of 12 D-decisions
+    exercised: D2 one-shot, D3 deep-handler re-wrap + nested-
+    handle propagation, D4 surface + default-AND-non-identity
+    return-arm, D5 AST+parser+resolve, D6 effect discharge,
+    D7 all 5 runtime symbols, D11 fn-main integration, partial
+    D1 free-monad lowering via frame-chain). 1072 active
+    workspace tests + 1 doctest.
+    **Thirty go/no-go programs run end-to-end:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
     nullable): "142"; c16_go_no_go (C1.6 array): "15";
@@ -1382,7 +1404,14 @@ For pasting into a fresh chat to bootstrap context:
     21 * 2 = 42): exit 42**; **c36a_return_arm_after_resume
     (C3.6(a) Phase B deep-handler re-wrap: handle's body
     performs, arm body is k(21), return arm fires on k(21)'s
-    pure-unwrap → 21 * 2 = 42): exit 42**, exit 0.
+    pure-unwrap → 21 * 2 = 42): exit 42**;
+    **c36b_nested_handle_basic (C3.6(b) inner catches Io,
+    outer catches Net; do_both performs both via chained
+    lets; inner's propagate-block routes Net.fetch out → 42):
+    exit 42**; **c36b_nested_handle_inner_full (C3.6(b)
+    inner catches Io fully; inner wraps arm value via pure_kont;
+    outer dispatches PURE_RETURN; result + 27 = 42): exit
+    42**, exit 0.
 
     Pipeline at C3.1: **parse_query → resolve_query →
     check_query → borrow_check_query → codegen** (unchanged
