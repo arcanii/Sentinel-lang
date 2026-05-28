@@ -91,6 +91,8 @@ C1.3. See STATE.md Section C.
 **Phase C4.2 (1/N) — trait + impl AST + parser per ADR 0023 D1+D3+D4 — complete.** Trait declarations + default-and-named impl blocks + `ImplName::method(args)` qualified calls parse end-to-end at AST + parser. Downstream resolve rejects with TraitDeclNotYet / ImplDeclNotYet / QualifiedCallNotYet diagnostics until C4.2 (2/N) lands the impl table + dispatch + codegen. +14 tests (1138 total).
 **Phase C4.2 (2/N) — resolve / types / codegen wiring + Path 1 + Path 2 dispatch per ADR 0023 D5+D6+D8+D9 — complete. ADR 0023 → ACCEPTED-WITH-AMENDMENTS.** Trait + impl declarations flow through the full pipeline. Receiver-typed dispatch (`s.write(10)` → default impl when class has no class-method `write`) and qualified-named dispatch (`Doubling::write(&mut s, 16)` → named impl) ship end-to-end. Three amendments at C4.2 close: A1 D5 Path 3 (bounded-generic dispatch) DEFERRED — needs `<W: Writer>` bounded-generic surface; A2 D9 witness-table values not emitted (scaffolding for Path 3); A3 D7 `Type::TraitSelf(TraitId)` interner SHIPPED but unused (params/returns don't reference Self, only positional via self_kind — mirrors C4.1 A2). +16 tests (1154 total). ADR 0023 D12 phase-go (FileSink with default + named Doubling Writer impls) runs at exit 42.
 **Phase C4.3 — delegation auto-forwarders per ADR 0021 D6 — complete.** `delegate field: T to Trait;` inside a class body synthesizes a default impl of `Trait` for the class that auto-forwards every trait method to `self.field.method(args)`. Synthesis happens entirely at the resolve layer — Pass 0e extension registers delegate impls alongside user impls (coherence collision = DuplicateDefaultImpl); Pass 3 (resolve_class_decl) adds the synthesized field; new Pass 4.5 synthesizes the per-trait-method auto-forwarder bodies. Types + codegen unchanged. No detail ADR — lands under ADR 0021 D6 + C4.0 D11 lexer reservation. +14 tests (1168 total). c43_go_no_go phase-go (Logger delegates Writer to FileSink; `l.write(42)` returns 42) runs at exit 42.
+**ADR 0024 PROPOSED — C4.4 structured concurrency surface + Async effect + runtime scheduler — docs-only.** Twelve D-decisions covering scope/spawn/await grammar (D1-D3), Type::Task interner (D4), Async built-in effect (D5), thread-per-spawn scheduler (D6), 5 new runtime symbols (D7), lowering (D8 + D9), out-of-scope (D10), lexer recap (D11), c44_go_no_go phase-go (D12), 2-sub-iteration split (D13). Key amendment to ADR 0021 D9: direct runtime API rather than async-as-effect (multi-shot continuations from ADR 0020 D2 would be required). User surface identical to the async-as-effect vision.
+**Phase C4.4 (1/N) — scope / spawn / await AST + parser per ADR 0024 D1+D2+D3 — complete.** Structured-concurrency surface parses end-to-end at AST + parser. Downstream resolve rejects with ScopeNotYet / SpawnNotYet / AwaitNotYet until C4.4 (2/N) lands the typing + runtime + codegen. +9 tests (1177 total). ADR 0024 stays PROPOSED.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1050,46 +1052,53 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C4.4 — structured concurrency + Async effect + scheduler)
+### 0.2 Next session opening (C4.4 (2/N) — types / runtime / codegen for scope / spawn / await)
 
-Resume at **C4.4 (structured concurrency)** per ADR 0021 D8 +
-D14. This is the largest single new runtime component since
-Phase A's broker — warrants writing **ADR 0024 PROPOSED**
-(scheduler + Async effect) at sub-phase open per the per-sub-
-phase ADR norm.
+Resume at **C4.4 (2/N)** per ADR 0024. **C4.4 (1/N) closed**:
+scope / spawn / await parse end-to-end at AST + parser;
+downstream resolve rejects with ScopeNotYet / SpawnNotYet /
+AwaitNotYet diagnostics. ADR 0024 PROPOSED at C4.4 open
+documents the design. The next iteration brings the typing +
+runtime + codegen + phase-go.
 
-**C4.3 closed**: delegation auto-forwarders synthesize at the
-resolve layer; `l.write(42)` routes through the synthesized
-`impl as Writer for Logger` to `self.writer.write(42)`. Types +
-codegen unchanged. The c43_go_no_go phase-go exits 42.
+**C4.4 (2/N) deliverables** (per ADR 0024 D4-D9 + D12):
 
-**C4.4 deliverables** (per ADR 0021 D8):
+  - **Types**: `Type::Task(TaskId)` interner extension (tenth
+    Copy+Hash-preserving variant) with `TaskData { result_ty:
+    Type }`. `Async` built-in effect auto-registered alongside
+    runtime fn builtins at resolve time. `spawn fn_name(args)`
+    typing: validates fn-call shape (per ADR 0024 D2
+    restriction); produces Task<T> where T is the call's
+    return type; requires the enclosing fn declares `! { Async }`.
+    `task.await` typing: requires Task<T> receiver; produces T.
+    `scope concurrent { ... }` typing: block-shaped; the body's
+    tail is the scope expression's value.
+  - **Runtime** (sentinel-runtime): five new symbols per ADR
+    0024 D7 — sentinel_task_spawn / _await / sentinel_scope_enter /
+    _exit / _register. Task + ScopeCtx structs. Thread-per-spawn
+    at C4.4 minimum (pthread_create + pthread_join); the
+    work-stealing scheduler is deferred per ADR 0024 D6.
+  - **Codegen** (per ADR 0024 D8): per-spawn-site wrapper fn
+    synthesis (C-ABI `void wrapper(*Task, *ArgsStorage)` that
+    unpacks args, calls the spawned fn, stores result in Task).
+    At spawn call site: alloc ArgsStorage on heap, pack args,
+    call sentinel_task_spawn(wrapper, args, size). At await
+    site: call sentinel_task_await(task_ptr). At scope entry:
+    sentinel_scope_enter(); at scope exit: sentinel_scope_exit()
+    auto-awaits remaining tasks.
+  - **Phase-go fixture**: `c44_go_no_go.sentinel` per ADR
+    0024 D12 — scope concurrent { let t = spawn double(21);
+    t.await } → exit 42.
+  - **UI fixtures**: c44_spawn_non_fn_call_rejected (D2
+    restriction), c44_spawn_without_async_effect_rejected
+    (D5 effect-row enforcement), c44_await_on_non_task_rejected.
 
-  - Surface: `scope concurrent { spawn expr; spawn expr; ... }`
-    creates a task-cancellation boundary; `task.await` blocks
-    until a spawned task produces a value.
-  - Lexer: `scope`, `spawn`, `await` keywords already reserved
-    at C4.0; `concurrent` is positional (an Ident token).
-  - AST: ExprKind::Scope { mode, body } + ExprKind::Spawn
-    { expr } + ExprKind::Await { task }.
-  - Resolve: pass-through with scope/spawn/await variants;
-    binding rules for spawned task values.
-  - Types: `Async` effect declaration auto-registered; Task<T>
-    intrinsic type (or special-cased monomorphic representation);
-    `spawn expr` requires `Async` in the surrounding effect row;
-    `task.await` produces `T` and discharges `Async`.
-  - Runtime: NEW work-stealing scheduler crate (substantial —
-    on par with sentinel-broker in scope). Per-thread worker
-    queues, task lifetime tracking, scope-bounded cancellation
-    propagation. Cancellation on early scope exit per ADR 0021
-    D8.
-  - Codegen: lower spawn to scheduler-submit calls; lower await
-    to scheduler-blocking-receive calls; scope { ... } emits a
-    cancellation barrier at exit.
-  - Phase-go: a producer/consumer fixture with `scope
-    concurrent` driving two spawn-then-await tasks.
-  - Estimate: 2-3 sessions per ADR 0021 D14.
-  - Detail ADR: **ADR 0024 PROPOSED** before any code.
+Per ADR 0024 D13, C4.4 closes with `c44_go_no_go` running
+end-to-end at exit 42 + ADR 0024 → ACCEPTED (or
+ACCEPTED-WITH-AMENDMENTS depending on which D-decisions ship
+as drafted; the thread-per-spawn vs work-stealing scheduler
+choice is the likely amendment if the surface lands cleanly
+otherwise).
 
 **Alternative — Path 3 bounded-generic follow-on** (per ADR
 0023 A1 amendment):
@@ -1550,21 +1559,20 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last work: **C4.3 — delegation auto-forwarders per ADR 0021
-    D6.** `delegate field: T to Trait;` inside a class body
-    synthesizes a default impl of Trait for the class that
-    auto-forwards every trait method to
-    `self.field.method(args)`. AST: DelegateDecl +
-    ClassDecl.delegates. Parser: parse_delegate_decl with `to`
-    recognised positionally as an Ident. Resolve: Pass 0e
-    extension registers delegate impls (coherence collision
-    fires DuplicateDefaultImpl); Pass 3 synthesizes the
-    delegate field; new Pass 4.5 builds the per-trait-method
-    auto-forwarder bodies. Types + codegen unchanged. No detail
-    ADR — lands under ADR 0021 D6 + C4.0 D11 lexer reservation.
-    +14 tests (1168 active workspace). c43_go_no_go phase-go
-    (Logger delegates Writer to FileSink; `l.write(42)`) exits
-    42.
+    Last work: **C4.4 (1/N) — scope / spawn / await AST + parser
+    landed per ADR 0024 D1+D2+D3.** ExprKind::Scope { mode:
+    Concurrent, body: Box<Block> } + ExprKind::Spawn
+    { call_expr } + ExprKind::Await { task_expr }. parse_scope_expr
+    (positional `concurrent` Ident) + parse_spawn_expr + postfix
+    `.await` dispatch in parse_postfix's Dot arm. Precedence:
+    prefix `spawn` looser than postfix `.await` (mirrors Rust).
+    ADR 0024 PROPOSED at C4.4 open: twelve D-decisions; key
+    amendment to ADR 0021 D9 = direct runtime API instead of
+    async-as-effect (multi-shot continuations deferred per ADR
+    0020 D2). Resolve rejects scope/spawn/await with three
+    NotYet diagnostics until C4.4 (2/N) brings types + runtime
+    (5 new symbols per ADR 0024 D7) + codegen. +9 tests (1177
+    active workspace).
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0

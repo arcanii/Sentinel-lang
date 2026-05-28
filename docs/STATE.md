@@ -12,13 +12,92 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C4.3: delegation auto-forwarders per ADR 0021 D6.**
-`delegate field: T to Trait;` inside a class body synthesizes a
-default impl of `Trait` for the class that auto-forwards every
-trait method to `self.field.method(args)`. The synthesis happens
-entirely at the resolve layer — types + codegen flow through the
-existing per-impl machinery (no changes). c43_go_no_go phase-go
-runs at exit 42. No detail ADR — C4.3 lands under ADR 0021 D6 +
+Last updated: **C4.4 (1/N): scope / spawn / await AST + parser
+landed per ADR 0024 D1+D2+D3.** ADR 0024 stays PROPOSED. First
+of the C4.4 sub-iterations: structured-concurrency surface
+parses end-to-end at AST + parser. Downstream resolve rejects
+with three new "not yet" diagnostics — ScopeNotYet /
+SpawnNotYet / AwaitNotYet — until C4.4 (2/N) brings up the
+typing layer + runtime (5 new symbols: sentinel_task_spawn,
+_await, sentinel_scope_enter, _exit, _register) + codegen
+per ADR 0024 D4-D9.
+
+**AST additions**:
+- `ExprKind::Scope { mode: ScopeMode, body: Box<Block> }` +
+  `ScopeMode::Concurrent` (only mode at C4.4 minimum per ADR
+  0024 D1; sequential / race / other modes reserved).
+- `ExprKind::Spawn { call_expr: Box<Expr> }` — prefix unary.
+  Restricted to fn-call shape at the typing layer per ADR
+  0024 D2; parser accepts any expression.
+- `ExprKind::Await { task_expr: Box<Expr> }` — postfix
+  `task.await` form.
+
+**Parser additions**:
+- `parse_scope_expr` invoked from `parse_atom` on
+  `TokenKind::Scope`. Requires positional `concurrent` Ident
+  (the C4.0 lexer keeps it as a plain Ident per the smallest-
+  surface principle) + a block body.
+- `parse_spawn_expr` invoked from `parse_atom` on
+  `TokenKind::Spawn`. Uses `parse_postfix` to consume the
+  call-shaped inner expression.
+- Postfix `.await` dispatch in `parse_postfix`'s Dot arm.
+  `TokenKind::Await` is reserved at C4.0, distinct from a
+  regular Ident.
+- Precedence: prefix `spawn` binds looser than postfix
+  `.await`, so `spawn fn(x).await` parses as `spawn
+  (fn(x).await)`. Explicit parens or a let-binding give the
+  `(spawn fn(x)).await` shape. Mirrors Rust's await-precedence
+  rule.
+
+**Resolve pass-through**: `ResolvedExprKind` gains
+`Scope` / `Spawn` / `Await` variants. Three new
+`ResolveError` variants: `ScopeNotYet`, `SpawnNotYet`,
+`AwaitNotYet` — all wired to clear help text pointing at
+C4.4 (2/N). Mirrors the C4.2 (1/N) pattern.
+
+**Types pass-through**: the new `ResolvedExprKind` variants
+are unreachable in practice at C4.4 (1/N) (resolve surfaces
+NotYet first). The arm panics if hit; C4.4 (2/N) replaces
+with real typing logic.
+
+Workspace test delta from C4.3 close: +9 (1177 total) — +6
+parser tests (scope block / scope-missing-concurrent / spawn
+fn-call / await postfix / await-on-parenthesized-spawn /
+scope-spawn-await-combined) + +3 resolve rejection tests.
+**Phase C4.4 (1/N) closes here.** Next: C4.4 (2/N) — types
+(Type::Task interner + Async built-in effect + spawn/await
+typing) + sentinel-runtime (5 new symbols + Task + ScopeCtx
+structs) + codegen (per-spawn wrapper synthesis + scope-enter/
+exit lowering) + c44_go_no_go phase-go.
+
+Pre-C4.4(1/N) context: **ADR 0024 PROPOSED: C4.4 structured
+concurrency surface + Async effect + runtime scheduler.**
+Twelve D-decisions covering the surface (D1-D3:
+scope/spawn/await grammar), typing (D4: Type::Task interner;
+D5: Async built-in effect), runtime (D6: thread-per-spawn at
+minimum; D7: five new runtime symbols), lowering (D8 + D9:
+scope-bounded auto-await on exit), out-of-scope deferrals
+(D10), lexer state (D11: no new tokens), phase-go (D12), and
+the sub-iteration split (D13).
+
+Key amendment to ADR 0021 D9 documented in ADR 0024 D6: at
+C4.4 minimum we ship a **direct runtime API** rather than
+async-as-effect via the C3 handler runtime — multi-shot
+continuations (ADR 0020 D2 deferred) would be required for
+the latter. The user-facing surface is identical; only the
+lowering strategy differs. Other key choices: thread-per-spawn
+(no work-stealing scheduler at minimum); fn-call-only spawn;
+Task<i64>-only at minimum. Estimated footprint ~1500 LOC
+across all layers.
+
+Pre-ADR-0024 context: **C4.3: delegation auto-forwarders per
+ADR 0021 D6.** `delegate field: T to Trait;` inside a class
+body synthesizes a default impl of `Trait` for the class that
+auto-forwards every trait method to
+`self.field.method(args)`. The synthesis happens entirely at
+the resolve layer — types + codegen flow through the existing
+per-impl machinery (no changes). c43_go_no_go phase-go runs
+at exit 42. No detail ADR — C4.3 lands under ADR 0021 D6 +
 the existing `delegate` lexer reservation from C4.0 D11.
 
 **AST additions**:
