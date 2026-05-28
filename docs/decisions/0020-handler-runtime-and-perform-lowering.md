@@ -72,9 +72,22 @@ stack-saved continuations.
     c35e_chained_perform_with_capture,
     c35e_chained_dependent_perform). +3 workspace tests
     (1068 total).
-  - **C3.6** — return arms with non-identity transforms +
-    nested handles + multi-shot continuations per D2
-    relaxation.
+  - **C3.6(a)** — non-identity return arm per ADR 0020 D4 —
+    **SHIPPED**. `lower_handle` actually uses the
+    `return_arm` parameter (was an underscore stub); the
+    pure-return switch case binds the value VarId + lowers
+    the body. `HandleContext` gains a cloned `return_arm`
+    field consulted by `lower_resume_kont`'s pure-unwrap
+    path so k(v)'s value applies the return arm per Phase
+    B's deep-handler re-wrap. Two pass fixtures
+    (c36a_return_arm_transform,
+    c36a_return_arm_after_resume). +2 workspace tests (1070
+    total).
+  - **C3.6(b)** — nested handles (scoped frame ownership +
+    inner-handle bubble propagates to outer when inner
+    doesn't catch the op).
+  - **C3.6(c)** — multi-shot continuations per D2
+    relaxation (deep-clone-on-resume + sharing analysis).
   - **C3.7** — polish + phase-go (c37 fixture per D12) +
     ADR PROPOSED → ACCEPTED.
 
@@ -480,9 +493,13 @@ A rough split into 4-5 sub-phases:
 | C3.5(e) | Chained effecting lets + multiple performs in tail —          | 1-2 sessions | **DONE** |
 |      | requires resumers-can-perform (runtime resume loop bubbles     |              |        |
 |      | non-pure-return result konts through remaining frames).        |              |        |
-| C3.6 | Codegen for `handle` — dispatch on label; resume call;         | 2-3 sessions |        |
-|      | sentinel_kont_resume runtime symbol. The substantive runtime   |              |        |
-|      | piece.                                                         |              |        |
+| C3.6(a) | Non-identity return arm — lower_handle pure-block applies     | 0-1 session  | **DONE** |
+|      | return arm body; k(v) pure-unwrap mirrors it (Phase B deep-    |              |        |
+|      | handler re-wrap).                                              |              |        |
+| C3.6(b) | Nested handles — inner switch propagates un-matched op_id     | 1 session    |        |
+|      | to outer handle's slot/loop_block.                             |              |        |
+| C3.6(c) | Multi-shot continuations per D2 relaxation — deep-clone        | 1-2 sessions |        |
+|      | kont's frame chain on resume; sharing analysis for captures.   |              |        |
 | C3.7 | Polish + phase-go programs + STATE.md / HANDOVER refresh +     | 0-1 sessions |        |
 |      | ADR 0020 PROPOSED → ACCEPTED flip.                             |              |        |
 
@@ -608,7 +625,9 @@ A rough split per the D9 table:
 | C3.5(c) | Let-bound perform via per-let resumer + sentinel_kont_push    | 1 session    | **DONE** |
 | C3.5(d) | Unified embedded-perform shape (binop / call-arg / etc.)      | 1 session    | **DONE** |
 | C3.5(e) | Chained effecting lets via resumers-can-perform               | 1-2 sessions | **DONE** |
-| C3.6 | Return arms + nested handles + multi-shot continuations         | 1-2 sessions |        |
+| C3.6(a) | Non-identity return arm (Phase B deep-handler re-wrap)        | 0-1 session  | **DONE** |
+| C3.6(b) | Nested handles (un-matched op propagates to outer)            | 1 session    |        |
+| C3.6(c) | Multi-shot continuations (D2 relaxation)                       | 1-2 sessions |        |
 | C3.7 | Polish + phase-go programs + ADR 0020 flip + STATE close       | 0-1 sessions |        |
 
 Honest total: 5-9 sessions across 4 sub-phases. The substantive

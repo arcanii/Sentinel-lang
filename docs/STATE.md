@@ -12,7 +12,51 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C3.5(e) landed; chained effecting lets via resumer-can-perform.**
+Last updated: **C3.6(a) landed; non-identity return arms per ADR 0020 D4.**
+ADR 0020 stays PROPOSED. `lower_handle` now actually uses the
+`return_arm` parameter: in the pure-return switch case, bind
+the return arm's value VarId to the unwrapped i64 + lower the
+body — its result flows to the handle's merge phi. Without a
+return arm, the unwrapped value flows directly (default
+identity `return v => v`).
+
+**Phase B parity via deep-handler re-wrap**: `HandleContext`
+grows a `return_arm: Option<TypedReturnArm>` field (cloned at
+`lower_handle` entry). `lower_resume_kont` consults this in
+its pure-unwrap path so k(v)'s value is the return-arm'd i64,
+not the raw resumed i64 — matching Phase B's `k := \v. handle
+(kont.resume v) with H` semantics where every continuation
+call re-wraps in the handler (return arm included). Without
+this k(v) treatment, the return arm would only fire when the
+body produces a value WITHOUT performing (pure-bodied
+effecting fn); the re-wrap extension makes the return arm fire
+uniformly whenever the resumed computation drains to a value.
+The `HandleContext` struct drops its `Copy` derive in favour
+of `Clone`; `lower_resume_kont` snapshots once + reuses for
+both pure and bubble branches.
+
+**Two new pass fixtures**:
+- `c36a_return_arm_transform.sentinel`: pure-bodied effecting
+  fn → outer pure-dispatch fires return arm → 21 * 2 = 42.
+- `c36a_return_arm_after_resume.sentinel`: handle's body
+  performs Io.read, arm body is `k(21)`, return arm is `v =>
+  v * 2` → k(21)'s pure-unwrap path applies the return arm →
+  21 * 2 = 42.
+
+**Still pending for C3.6 / C3.7**: nested handles (scoped
+frame ownership when an inner handle's body emits an op the
+inner doesn't catch — needs to propagate the bubble to the
+outer handle), multi-shot continuations (ADR 0020 D2
+relaxation — needs deep-clone-on-resume + sharing analysis),
+non-i64-returning ops, embedded performs in chained-let
+RHSes.
+
+Workspace test delta from C3.5(e) close: +2 (1070 total) — +2
+driver pass-tests (c36a_*). **Phase C3.6(a) closes here.**
+Next: C3.6(b) — nested handles per ADR 0020 D3, then C3.6(c)
+— multi-shot continuations per ADR 0020 D2.
+
+Pre-C3.6(a) context: **C3.5(e) landed; chained effecting lets via resumer-can-perform.**
 ADR 0020 stays PROPOSED. This sub-phase closes the
 resumers-can-perform gap from C3.5(c)/(d) — a `let v: i64 =
 perform Op` inside another resumer's body now bubbles its
