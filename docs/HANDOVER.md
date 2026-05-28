@@ -950,12 +950,14 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (Phase C4 — traits + structured concurrency)
+### 0.2 Next session opening (C4.0 — lexer for classes / traits / concurrency)
 
-Resume at **Phase C4** per HANDOVER §6.2. **Phase C3 closed:
-ADR 0020 ACCEPTED-WITH-AMENDMENTS at C3.7 close.** Sixteen
-sub-phases shipped across Phase C3 (typing layer + runtime
-layer). The bootstrap language surface at C3.7 close has the
+Resume at **C4.0** per ADR 0021 D14. **Phase C3 closed: ADR
+0020 ACCEPTED-WITH-AMENDMENTS at C3.7 close.** **ADR 0021
+PROPOSED** opens Phase C4 with 14 D-decisions covering classes
+(D1-D3), traits + named impls (D4-D5), delegation (D6),
+structured concurrency + async-as-effect (D8-D9), and a 6-sub-
+phase split (D14). Sixteen sub-phases shipped across Phase C3. The bootstrap language surface at C3.7 close has the
 full memory-safety + secret-typing + effect-system trifecta
 from HANDOVER §6.2:
 
@@ -994,12 +996,31 @@ What's deferred past Phase C3:
     soundness hole. Highest-priority post-C2 work on the
     borrow-check side.
 
-For **Phase C4** per HANDOVER §6.2: traits + delegation +
-structured concurrency. The handler runtime from C3.7 is the
-foundation for structured concurrency (async-as-effect was
-deferred at ADR 0019 D9; can revisit now). Traits + delegation
-land first as new ADRs; structured concurrency reuses ADR
-0020's free-monad runtime + extends with a scheduler.
+For **Phase C4** per HANDOVER §6.2: classes + traits + named
+impls + delegation + structured concurrency. ADR 0021 is the
+phase kickoff (PROPOSED). The sub-phase plan from ADR 0021
+D14:
+
+  - C4.0 lexer (1 session): class / trait / impl / init /
+    delegate / scope / spawn / await / Self / self keywords.
+  - C4.1 class + method + init (2-3 sessions): parallel-
+    tree mirror across AST / parser / resolve / types /
+    codegen + definite-assignment check.
+  - C4.2 traits + named impls (2-3 sessions): trait decls +
+    impl blocks (default + named) + witness-table dispatch.
+  - C4.3 delegation (1 session): auto-forwarder codegen for
+    `delegate inner: T to Trait`.
+  - C4.4 structured concurrency (2-3 sessions): Async effect
+    + scope/spawn/await surface + runtime scheduler
+    (substantial new runtime work; warrants ADR 0024 at
+    sub-phase open).
+  - C4.5 close-out (0-1 session): phase-go + ADR 0021
+    PROPOSED → ACCEPTED flip.
+
+Per-sub-phase ADRs follow ADR 0021: ADR 0022 (C4.1 surface),
+ADR 0023 (C4.2 surface + dispatch), ADR 0024 (C4.4
+scheduler + Async effect) — each PROPOSED at its sub-phase
+open.
 
 **C3.7 retrospective** (this session): ADR 0020 D9 estimated
 0-1 sessions for C3.7. Actual: ~0.3 sessions. The substantive
@@ -1355,12 +1376,13 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last sub-phase: **C3.7 — ADR 0020 PROPOSED → ACCEPTED-
-    WITH-AMENDMENTS at Phase C3 close (lower_handle body
-    restriction fully lifted; pure i64 bodies wrap via
-    sentinel_kont_pure; D12 phase-go fixture stdout "85" +
-    `handle 42 with { return v => v * 2 }` → 84 + UI
-    unhandled_effect negative).**
+    Last work: **ADR 0021 PROPOSED — Phase C4 kickoff
+    (classes + traits + delegation + structured concurrency;
+    closes ADR 0019 D9 async-as-effect deferral). Sub-phase
+    plan: C4.0 lexer → C4.5 close-out, 8-12 sessions.
+    Per ADR 0021 D14, the next code-bearing session opens
+    C4.0 — lexer additions for class/trait/impl/init/
+    delegate/scope/spawn/await/Self/self.**
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1376,7 +1398,10 @@ For pasting into a fresh chat to bootstrap context:
     ACCEPTED-WITH-AMENDMENTS at C3.3 close**; **ADR 0020
     ACCEPTED-WITH-AMENDMENTS at C3.7 close** with all twelve
     D-decisions exercised modulo D2 (multi-shot deferred per
-    amendment). 1075 active workspace tests + 1 doctest.
+    amendment); **ADR 0021 PROPOSED** opens Phase C4 (classes
+    + traits + delegation + structured concurrency; 14 D-
+    decisions; 6 sub-phases; 8-12 sessions). 1075 active
+    workspace tests + 1 doctest.
     **Thirty-two go/no-go programs run end-to-end + 1 UI rejection:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5

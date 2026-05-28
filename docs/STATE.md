@@ -12,7 +12,34 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C3.7 landed; ADR 0020 → ACCEPTED-WITH-AMENDMENTS; Phase C3 closes.**
+Last updated: **ADR 0021 PROPOSED: Phase C4 kickoff (classes + traits + delegation + structured concurrency).**
+No code changes — this is the pre-flight design ADR for Phase
+C4 per the ADR-first norm. ADR 0021 carries 14 D-decisions:
+classes as struct+method+impl+delegation sugar (D1), method
+declarations with `self: &Self` per ADR 0017 D6 (D2), `init`
+constructors with definite-assignment check (D3), trait decls
++ named implementations (D4 + D5), delegation auto-forwarder
+codegen (D6), scope-local coherence (D7), structured
+concurrency primitives `scope`/`spawn`/`await` (D8), async-as-
+effect via a runtime scheduler — closes ADR 0019 D9 (D9),
+deferred items: actors → C5, dynamic dispatch + default
+methods + trait inheritance (D10 + D12), ~10 new lexer
+keywords (D11), phase-go program (D13), 6-sub-phase split
+covering C4.0 lexer → C4.5 close-out (D14).
+
+The ADR commits to **named impls** (instead of Rust's orphan
+rule) + **delegation** (instead of class inheritance, per
+SENTINEL_DESIGN §7) + **async-as-effect via the ADR 0020
+free-monad runtime + a new work-stealing scheduler in C4.4.**
+The scheduler is the largest single new runtime component
+since Phase A's broker; ADR 0024 will carry that substantive
+design call at C4.4 open. Estimated total: 8-12 sessions
+across 6 sub-phases.
+
+Workspace test count unchanged (1075 + 1 doctest); no code
+shipped in this docs-only commit.
+
+Pre-ADR-0021 context: **C3.7 landed; ADR 0020 → ACCEPTED-WITH-AMENDMENTS; Phase C3 closes.**
 ADR 0020 flips PROPOSED → ACCEPTED-WITH-AMENDMENTS with all
 eight sub-phases shipped (C3.4 + C3.5(a/b/c/d/e) + C3.6(a/b) +
 C3.7). The single amendment: **D2's multi-shot relaxation is
