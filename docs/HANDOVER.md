@@ -77,6 +77,7 @@ C1.3. See STATE.md Section C.
 **Phase C3.4 — handler runtime typing layer per ADR 0020 D5+D6: AST + parser + resolve + Type::Kont interner + type-check + effect discharge; codegen lands at C3.5/C3.6 — complete.**
 **Phase C3.5(a) — restricted-case handler codegen per ADR 0020 D7: 3 new runtime symbols + lower Perform/ResumeKont/Handle (body must be a direct `perform`); end-to-end runnable for the inline case — complete.**
 **Phase C3.5(b) — effecting fn ABI + handle-of-call per ADR 0020 D7: effecting fns return Kont* at the IR level; sentinel_kont_pure wraps pure values via PURE_RETURN_OP_ID; handle codegen unified around a runtime switch — complete.**
+**Phase C3.5(c) — let-bound perform via per-let resumer fns + sentinel_kont_push per ADR 0020 D7: first piece of per-eval-site frame reification; SentinelKont grows a frame-chain; sentinel_kont_resume replays frames head→tail — complete.**
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -918,33 +919,32 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C3.5(c) — per-eval-site frame reification)
+### 0.2 Next session opening (C3.5(d) — frame reification for binop / if-cond / chained lets)
 
-Resume at **C3.5(c)** per ADR 0020. **C3.5(b) closed:
-effecting fn ABI + handle-of-call.** Ten sub-phases shipped
-across Phase C3 — C3.0(a)/C3.0(b) + C3.1/C3.1b + C3.2(a)/
-C3.2(b) + C3.3 (typing-layer close-out) + C3.4 (handler
-typing) + C3.5(a) (restricted-case codegen) + C3.5(b)
-(effecting fn ABI + handle-of-call). Programs can now use
-`handle do_work() with { ... }` with multi-arm dispatch via
-runtime switch on the kont's op_id. Effecting fns whose body
-is a pure expression still compile thanks to the
-`sentinel_kont_pure` wrap (op_id = PURE_RETURN_OP_ID;
-unwrapped by handle's switch). Three new pass-test fixtures
-cover the new shapes (c35b_handle_fn_call_body,
-c35b_handle_multi_arm, c35b_handle_pure_return).
+Resume at **C3.5(d)** per ADR 0020. **C3.5(c) closed: per-let
+frame reification.** Eleven sub-phases shipped across Phase
+C3 — C3.0(a)/C3.0(b) + C3.1/C3.1b + C3.2(a)/C3.2(b) + C3.3
+(typing-layer close-out) + C3.4 (handler typing) + C3.5(a)
+(restricted-case codegen) + C3.5(b) (effecting fn ABI +
+handle-of-call) + C3.5(c) (let-bound perform via per-let
+resumer fns). Programs can now use `let v: i64 = perform
+Op(); pure_tail` at the body of an effecting fn — codegen
+emits a per-let resumer fn + captured-state struct
+(holding fn params used in the tail), and the runtime's
+`sentinel_kont_resume` replays the frame chain head→tail
+on resume. Two new pass-test fixtures
+(`c35c_let_bound_perform`, `c35c_let_bound_perform_with_capture`).
 
 What's NOT yet running:
 
-  - **Let-bound perform**: `let v: i64 = perform Op(); v + 1`
-    surfaces `effecting_fn_body_not_direct` at codegen. Needs
-    the let-body's continuation captured into the kont via
-    per-evaluation-site frame reification.
-  - **Perform inside binop / index / field-access**: same
-    pattern — the surrounding evaluation frame must
-    reify itself into a captured-state struct + resumer fn.
+  - **Perform inside binop / index / field-access**: `perform
+    Op() + 1` surfaces `effecting_fn_body_not_direct` (the
+    surrounding evaluation frame isn't reified yet).
   - **If-cond perform**: `if perform Op() { ... } else { ... }`
-    where the cond performs — needs the branch frames reified.
+    where the cond performs — needs branch frames reified.
+  - **Chained effecting lets**: `let a = perform Op1(); let b
+    = perform Op2(); ...` — needs multiple frames pushed +
+    nested resumer compilation.
   - **Multi-shot continuations** (ADR 0020 D2): one-shot only.
 
 **C3.5(c) — frame reification at general evaluation sites.**
@@ -991,12 +991,50 @@ Phase B sidestepped this by representing every value as a
 `Value::Step(...)` sum at the interpreter level. The production
 compiler needs to commit to a scheme.
 
-**Estimated effort for C3.5(c)**: 1-2 sessions. Smaller than
-"vanilla C3.5" estimate because the runtime, perform site,
-effecting fn ABI, and handle dispatch already work — what
-remains is the call-site/eval-frame plumbing.
+**Estimated effort for C3.5(d)**: ~1 session. The infrastructure
+(SentinelFrame chain, sentinel_kont_push, resume's frame-replay
+loop, captured-state struct codegen) is in place; the work is
+extending the codegen detection from let-stmts to other
+"could-be-captured" sites (binop-RHS, if-cond, chained lets).
+Each new shape needs its own per-site resumer codegen.
 
-**C3.5(b) retrospective** (this session): the effecting fn
+**C3.5(c) retrospective** (this session): ADR 0020 D9
+estimated "1-2 sessions" for C3.5(c). Actual: ~1 session.
+The substantive piece was the per-let resumer fn codegen +
+captured-state struct layout. The runtime extensions
+(SentinelFrame, sentinel_kont_push, resume's drain loop) were
+small (~50 LOC added). The codegen for the let-shape was
+larger (~200 LOC: detect_let_shape + collect_captured_vars +
+walk_collect_var_refs + compile_effecting_fn_with_let). Design
+choices:
+
+  - **Pre-declare resumers in pass 1**, looked up by FnId in
+    `let_resumers: HashMap<FnId, (FunctionValue, Vec<VarId>)>`.
+    Avoids the lifetime gymnastics of holding a `&Module` in
+    CodegenCtx; CodegenCtx still owns just the FunctionValues
+    + captured-VarId lists.
+  - **Captured struct via byte-offset GEP**, not LLVM struct
+    type. Each captured var is an i64; the struct is `i64[N]`
+    on the heap, accessed via `i8`-indexed GEP at offsets
+    `0, 8, 16, ...`. Keeps the codegen layout-stable without
+    needing per-fn LLVM struct types.
+  - **Resumer signature uniform** `ptr (i64, ptr)` so every
+    `sentinel_kont_push` call site shares one fn-pointer type
+    on the runtime side. The resumer always returns a pure-
+    return kont at C3.5(c) MVP (resumers don't perform); nested
+    perform inside resumers lands at C3.5(d) / C3.6.
+  - **MVP restrictions**: single let-stmt only (no chains of
+    effecting lets); let-bound type must be i64; captured vars
+    are filtered to fn params only (no earlier let-bindings
+    since stmts.len() == 1).
+
+Workspace test delta from C3.5(b) close: +1 test (1062 total)
+— +2 driver pass-tests (c35c_let_bound_perform,
+c35c_let_bound_perform_with_capture), -1 driver UI test
+(c35b_effecting_fn_let_bound_perform was retired since the
+shape it asserted now succeeds).
+
+**Pre-C3.5(c) — C3.5(b) retrospective**: the effecting fn
 ABI piece took ~1 session within the original 1-2 session
 C3.5(b) budget. Three substantive design choices:
 
@@ -1174,12 +1212,12 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last sub-phase: **C3.5(b) — effecting fn ABI + handle-of-call
-    per ADR 0020 D7 (effecting fns now return Kont* at the IR
-    level; sentinel_kont_pure wraps pure values via
-    PURE_RETURN_OP_ID; handle codegen uses a runtime switch
-    with dedicated pure-return case; `handle do_work() with
-    { ... }` compiles and runs).**
+    Last sub-phase: **C3.5(c) — let-bound perform via per-let
+    resumer fns + sentinel_kont_push per ADR 0020 D7
+    (per-eval-site frame reification, first slice — let-stmts
+    only; SentinelKont grows a frame chain;
+    sentinel_kont_resume replays frames head→tail; captured
+    fn params via heap-allocated state struct).**
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1190,19 +1228,19 @@ For pasting into a fresh chat to bootstrap context:
     seven sub-phases C3.0(a)/C3.0(b) + C3.1/C3.1b + C3.2(a)/
     C3.2(b) + C3.3 + C3.4) — all complete.** Phase C3 RUNTIME
     layer (handler codegen per ADR 0020 D9) in progress:
-    **C3.5(a) + C3.5(b) landed (restricted + effecting fn ABI +
-    handle-of-call)**; C3.5(c) (general-case per-eval-site
-    frame reification) + C3.6 + C3.7 remaining. ADR 0017
-    ACCEPTED-WITH-AMENDMENTS; ADR 0018 (Polonius migration
-    plan) PROPOSED; **ADR 0019 ACCEPTED-WITH-AMENDMENTS at
-    C3.3 close**; **ADR 0020 PROPOSED** with C3.4 + C3.5(a/b)
-    shipped (7 of 12 D-decisions exercised: D2 one-shot
-    enforcement, D4 surface syntax, D5 AST+parser+resolve, D6
-    effect discharge, D7 runtime symbols, D11 fn-main
-    integration, partial D4 default `return v => v` via the
-    PURE_RETURN_OP_ID runtime wrap). 1061 active workspace
-    tests + 1 doctest.
-    **Eighteen go/no-go programs run end-to-end:** c05_go_no_go
+    **C3.5(a) + C3.5(b) + C3.5(c) landed (restricted + effecting
+    fn ABI + handle-of-call + let-bound perform via frame
+    reification)**; C3.5(d) (binop/if-cond/chained lets) + C3.6
+    + C3.7 remaining. ADR 0017 ACCEPTED-WITH-AMENDMENTS; ADR
+    0018 (Polonius migration plan) PROPOSED; **ADR 0019
+    ACCEPTED-WITH-AMENDMENTS at C3.3 close**; **ADR 0020
+    PROPOSED** with C3.4 + C3.5(a/b/c) shipped (8 of 12
+    D-decisions exercised: D2 one-shot, D4 surface + default
+    return-arm, D5 AST+parser+resolve, D6 effect discharge,
+    D7 all 5 runtime symbols, D11 fn-main integration, partial
+    D1 free-monad lowering via frame-chain). 1062 active
+    workspace tests + 1 doctest.
+    **Twenty go/no-go programs run end-to-end:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
     nullable): "142"; c16_go_no_go (C1.6 array): "15";
@@ -1218,13 +1256,18 @@ For pasting into a fresh chat to bootstrap context:
     + declassify-before-branch): "42"; c35_handle_inline_perform
     (C3.5(a) 0-arg handler runtime): exit 42;
     c35_handle_log_returns_msg (C3.5(a) 1-arg handler): exit 42;
-    **c35b_handle_fn_call_body (C3.5(b) effecting fn ABI; main
+    c35b_handle_fn_call_body (C3.5(b) effecting fn ABI; main
     calls do_work() that performs Io.read; handle dispatches
-    runtime switch): exit 42**; **c35b_handle_multi_arm (C3.5(b)
+    runtime switch): exit 42; c35b_handle_multi_arm (C3.5(b)
     Io.read + Io.write covered; switch picks Io.write arm):
-    exit 42**; **c35b_handle_pure_return (C3.5(b) effecting fn
+    exit 42; c35b_handle_pure_return (C3.5(b) effecting fn
     with pure body; sentinel_kont_pure wrap; handle unwraps):
-    exit 42**, exit 0.
+    exit 42; **c35c_let_bound_perform (C3.5(c) let-bound
+    perform; per-let resumer wraps result via sentinel_kont_pure;
+    handle drains the frame chain): exit 42**;
+    **c35c_let_bound_perform_with_capture (C3.5(c) tail
+    references fn param via heap-allocated captured-state struct;
+    resumer reloads it via GEP): exit 42**, exit 0.
 
     Pipeline at C3.1: **parse_query → resolve_query →
     check_query → borrow_check_query → codegen** (unchanged

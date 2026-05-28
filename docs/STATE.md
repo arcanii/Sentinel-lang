@@ -12,7 +12,75 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C3.5(b) landed; effecting fn ABI + handle-of-call.**
+Last updated: **C3.5(c) landed; let-bound perform via frame reification.**
+ADR 0020 stays PROPOSED. This sub-phase adds the FIRST piece of
+per-evaluation-site frame reification: an effecting fn whose body
+is a single let with effecting RHS + pure tail now compiles via
+codegen-emitted **per-let resumer fns** + **captured-state
+structs**. The fifth runtime symbol `sentinel_kont_push` lands;
+`sentinel_kont_resume` extends to **replay the frame chain in
+head→tail order** (innermost first) — each frame's resumer is
+called with the accumulated value, the result's pure-return arg
+becomes the next iteration's value, and the final unwrapped
+value is what resume returns.
+
+**Codegen pattern**: at compile time, codegen detects effecting
+fns where `body = { let v: T = effecting_rhs; pure_tail }`. For
+each match: walks the tail to collect referenced VarIds
+(excluding the let-bound), filters to fn params (MVP
+restriction), declares a per-let resumer fn `__resume_<fn>_let_<n>`
+with signature `ptr (i64 value, ptr captured)`. The resumer's
+body allocates stack slots for the let-bound var (filled from
+the resumed value) + each captured var (loaded from the
+captured-state struct via byte-offset GEP), lowers the tail
+expression normally, wraps the i64 result in
+`sentinel_kont_pure`, and returns. At the let-site in the
+parent fn, codegen allocates the captured struct via
+`sentinel_alloc(N*8)`, stores each fn param's value, lowers the
+RHS (perform / effecting call) to get a Kont*, calls
+`sentinel_kont_push(kont, resumer, captured)`, and returns the
+Kont*.
+
+**Runtime extension**: `SentinelKont` grows a `frames_head:
+*mut SentinelFrame` field at offset 24 (with 7-byte pad after
+the consumed flag for stable 8-byte alignment). New struct size
+is 32 bytes. `SentinelFrame` is a linked-list node holding
+`{ resumer, captured, next }`. `sentinel_perform_op` initialises
+`frames_head` to null. `sentinel_kont_push` allocates a new
+Frame, links into the kont's chain at head. `sentinel_kont_resume`
+walks the chain: for each frame, calls `resumer(value, captured)`
+to get a result Kont (a pure-return wrap at C3.5(c) MVP);
+unwraps the result's arg as the next value; frees the result
+kont, the captured ptr, and the frame itself; advances to next.
+After draining the chain, frees the original kont and returns
+the final accumulated value.
+
+**Three new pass fixtures**:
+`c35c_let_bound_perform.sentinel` (no captures: `let v = perform
+Io.read(); v + 1` → exit 42), and
+`c35c_let_bound_perform_with_capture.sentinel` (captures fn
+param `offset`: do_work(35) with handler resume(7) → 7 + 35 =
+42 → exit 42). The previous C3.5(b)-era UI fixture
+`c35b_effecting_fn_let_bound_perform.sentinel` (which asserted
+codegen rejection of let-bound performs) was retired since
+that shape now compiles + runs.
+
+**Still pending for C3.5(d) / C3.6**: perform-inside-binop
+(`perform Op() + 1`), perform-inside-if-cond
+(`if perform Op() { ... } else { ... }`), chained effecting
+lets (`let a = perform Op1(); let b = perform Op2(); ...`),
+return arms with non-identity transforms, nested handles,
+multi-shot continuations (ADR 0020 D2 relaxation).
+
+Workspace test delta from C3.5(b) close: +1 (1062 total) — +2
+driver pass-tests (c35c_*), -1 driver UI test (the c35b
+let-bound-perform rejection assertion was retired since that
+shape now succeeds). **Phase C3.5(c) closes here.** Next:
+C3.5(d) — extend frame reification to binop / if-cond / chained
+lets, then C3.6 (return arms, nested handles, multi-shot
+relaxation), then C3.7 (close-out).
+
+Pre-C3.5(c) context: **C3.5(b) landed; effecting fn ABI + handle-of-call.**
 ADR 0020 stays PROPOSED. This sub-phase extends the handler
 runtime so `handle do_work() with { ... }` (where do_work is
 declared `! { Io }` with body that's a direct perform OR a

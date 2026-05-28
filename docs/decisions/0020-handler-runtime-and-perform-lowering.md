@@ -36,17 +36,27 @@ stack-saved continuations.
     (c35b_handle_fn_call_body, c35b_handle_multi_arm,
     c35b_handle_pure_return). +3 workspace tests (1061
     total).
-  - **C3.5(c)** — per-evaluation-site frame reification +
-    5th runtime symbol (`sentinel_kont_push`) — next.
-    Required for let-bound perform, perform inside binop /
-    index / field-access, and other inline forms. Tagging
-    scheme for "value vs kont at each call site" still TBD;
-    likely a per-fn-instance "tagged-pointer" approach since
-    every effecting-context value already flows through ptr-
-    returning fns at this sub-phase.
-  - **C3.6** — additional handle features (return arms with
-    non-identity transformations; nested handles; multi-shot
-    continuations per D2 relaxation).
+  - **C3.5(c)** — let-bound perform via per-let resumer fns —
+    **SHIPPED**. First piece of per-evaluation-site frame
+    reification. The 5th runtime symbol (`sentinel_kont_push`)
+    lands; `sentinel_kont_resume` extends to replay the frame
+    chain head→tail (innermost first). SentinelKont grows a
+    `frames_head` linked-list pointer. Codegen detects
+    effecting fns matching `let v: i64 = effecting_rhs;
+    pure_tail`; emits a per-let resumer fn (signature `ptr
+    (i64, ptr)`) + a captured-state struct holding fn-param
+    values used in the tail. Two pass fixtures (c35c_let_bound_perform,
+    c35c_let_bound_perform_with_capture). +1 workspace test
+    (1062 total). Partial D1 (free-monad frame chain in place,
+    though replay is still restricted to non-performing
+    resumers).
+  - **C3.5(d)** — frame reification for binop / if-cond /
+    chained effecting lets — next. The infrastructure is in
+    place; each new shape needs its own per-site resumer
+    codegen.
+  - **C3.6** — return arms with non-identity transforms +
+    nested handles + multi-shot continuations per D2
+    relaxation.
   - **C3.7** — polish + phase-go (c37 fixture per D12) +
     ADR PROPOSED → ACCEPTED.
 
@@ -443,9 +453,11 @@ A rough split into 4-5 sub-phases:
 | C3.5(b) | Effecting fn ABI returns Kont*; handle accepts Call body +    | 1 session    | **DONE** |
 |      | runtime switch with PURE_RETURN_OP_ID case. Adds               |              |        |
 |      | sentinel_kont_pure + sentinel_kont_consume_pure.               |              |        |
-| C3.5(c) | Per-evaluation-site frame reification — let-bound perform,    | 1-2 sessions | next   |
-|      | perform inside binop / index / field-access. Adds              |              |        |
-|      | sentinel_kont_push.                                            |              |        |
+| C3.5(c) | Let-bound perform via per-let resumer fns + sentinel_kont_push| 1 session    | **DONE** |
+|      | + frame-replay loop in sentinel_kont_resume. Captured-state    |              |        |
+|      | struct on heap; resumer reloads via byte-offset GEP.           |              |        |
+| C3.5(d) | Frame reification for binop / if-cond / chained lets — same   | 1 session    | next   |
+|      | machinery, more codegen sites detected.                        |              |        |
 | C3.6 | Codegen for `handle` — dispatch on label; resume call;         | 2-3 sessions |        |
 |      | sentinel_kont_resume runtime symbol. The substantive runtime   |              |        |
 |      | piece.                                                         |              |        |
@@ -571,7 +583,8 @@ A rough split per the D9 table:
 | C3.4 | AST + parser + resolve mirror + effect discharge in type-check | 1-2 sessions | **DONE** |
 | C3.5(a) | Restricted-case codegen (direct-perform body) + 3 runtime symbols | 1 session    | **DONE** |
 | C3.5(b) | Effecting fn ABI + handle-of-call + PURE_RETURN switch case   | 1 session    | **DONE** |
-| C3.5(c) | Per-eval-site frame reification + sentinel_kont_push          | 1-2 sessions | next   |
+| C3.5(c) | Let-bound perform via per-let resumer + sentinel_kont_push    | 1 session    | **DONE** |
+| C3.5(d) | Frame reification for binop / if-cond / chained lets          | 1 session    | next   |
 | C3.6 | Return arms + nested handles + multi-shot continuations         | 1-2 sessions |        |
 | C3.7 | Polish + phase-go programs + ADR 0020 flip + STATE close       | 0-1 sessions |        |
 
