@@ -1,31 +1,76 @@
 # ADR 0019: Phase C3 kickoff — effect rows, secrets, handlers (effect-system integration from Phase B)
 
-Status: PROPOSED — to flip to ACCEPTED (or ACCEPTED-WITH-AMENDMENTS)
-at C3.3 close-out. C3 is the second-hardest single Phase C
-sub-phase per HANDOVER §6.2 (C2 was the hardest); this ADR is
-intentionally written before any C3 code so the substantive
-design decisions — effect-row representation, secret qualifier,
-handler runtime — can be challenged on paper.
+Status: **ACCEPTED-WITH-AMENDMENTS** at C3.3 close-out. The
+typing-layer minimum of Phase C3 ships per the original sub-
+phase split: D1-D7 + D10-D13 fully exercised; D8 (handler
+runtime) deferred to follow-on ADR 0020; D9 (async-as-effect)
+deferred indefinitely. Two amendments captured below in the
+"Amendments at C3.3 close" section: A1 the
+SecretEscapesPolymorphism rejection from D7 turned out to be
+subsumed under Sentinel's monomorphic generics + the
+SecretFlow-via-Mismatch path — no separate variant needed; A2
+runtime builtins (print / unwrap_or / is_some / len) are
+declared effect-free at C3.2 rather than carrying Io, to
+preserve backward-compat with existing programs.
 
-D-decision progress: **D5 + D6 + D7 (3 of 5) + D13 (partial)
-exercised** across C3.0(a) (53c26f7) + C3.0(b) (1a951ee) +
-C3.1 (ae9483f) + C3.1b (2b36b0f). D5 (Type::Secret(SecretId))
-+ D6 (declassify) + D10 (lexer additions) fully at C3.0+C3.1.
-D7 constant-time check: 3 of 5 rejections shipped (SecretBranch
-at C3.1, SecretInRefDeref at C3.1, SecretDivisor at C3.1b);
-SecretFlow is subsumed by the existing Mismatch path (mixed
-public+secret operands fail type equality); the fifth
-"SecretEscapesPolymorphism" is subsumed by Sentinel's
-monomorphic generics — a generic fn instantiated with a secret
-type produces a monomorphic instance whose secret-flow is
-checked the same way as any concrete signature. D13 partially:
-`fn main`'s effect row tightens at C3.2 when effect_check_query
-arrives; today main just can't reference effects that don't
-type-check. **D1 + D2 + D3 + D4 + D11 (effect rows + inference
-+ effect_check_query) pending at C3.2** — the larger half of
-the typing layer. **D8 (handler runtime) deferred to C3.4 / ADR
-0020** per the original design call. **D9 (async-as-effect)
-deferred indefinitely.**
+D-decision progress: **D1 + D2 + D3 + D4 + D5 + D6 + D7 (3 of
+5 explicit rejections; SecretFlow + SecretEscapesPolymorphism
+both subsumed per A1) + D10 + D11 + D12 + D13 all exercised**
+across C3.0(a) (53c26f7) + C3.0(b) (1a951ee) + C3.1 (ae9483f)
++ C3.1b (2b36b0f) + C3.2(a) (e95966a) + C3.2(b) (82e859e) +
+C3.3 (this session). Coverage map:
+
+  - **D1** (`! { Op1, Op2 }` postfix syntax): C3.0 parses, C3.2
+    interns as `TypedFnSignature.effect_row: Vec<EffectId>`.
+  - **D2** (full inference, annotation as constraint): C3.2(b)'s
+    `effect_check` does the fixed-point inference + checks each
+    annotated fn's inferred row ⊆ annotation, surfacing
+    `EffectAnnotationMismatch` when the body exceeds.
+  - **D3** (interned row representation): `RowId` was deferred
+    in favour of `Vec<EffectId>` per-signature at C3.2 — at the
+    minimum-viable surface a separate RowId interner adds
+    bookkeeping without compensating gains. The full row
+    interner is a follow-on when `perform` / handlers land
+    (ADR 0020) and rows need to flow as first-class types.
+  - **D4** (`effect E { ... }` declarations): C3.0 parses, C3.2(a)
+    interns as `TypedEffectDecl` with op-param + return-type
+    resolved against the struct table. Empty effects + multi-
+    op effects + ops with/without `-> RetT` all work.
+  - **D5** (interned `Type::Secret(SecretId)`): C3.1.
+  - **D6** (`declassify(e)` special form): C3.1.
+  - **D7** (5 CT rejections): 3 explicit (SecretBranch,
+    SecretDivisor, SecretInRefDeref); SecretFlow subsumed by
+    `Type::Mismatch` (mixed public+secret operators fail set
+    equality); SecretEscapesPolymorphism subsumed by Sentinel's
+    monomorphic generics per A1.
+  - **D10** (lexer): C3.0(a) added 6 keywords. `!` repurposed
+    positionally for postfix effect annotation.
+  - **D11** (pipeline shape): C3.2(b) wires
+    `effect_check_query` between `check_query` and
+    `borrow_check_query`. `borrow_check_query` depends on it so
+    the transitive `accumulated::<Diagnostic>` set includes
+    effect-check diagnostics.
+  - **D12** (out-of-scope items): handler runtime + async +
+    capability enforcement + CT codegen + row-polymorphism
+    syntax + effect-on-effect-declarations all deferred per the
+    ADR. No code paths bypass these.
+  - **D13** (`fn main` effect-free): C3.2(b)'s effect_check
+    enforces this. Surfaces `EffectError::UnhandledEffect` on
+    any effect bubbling to main since handlers are deferred.
+
+**D8 (handler runtime + perform) deferred to ADR 0020** per the
+original D8 call. Handle / with / perform keywords are reserved
+in the lexer at C3.0; the surface parses but rejects at
+type-check (handle/perform expressions would surface as the
+existing Mismatch path or similar — they're parsed-but-
+unusable at C3.3). **D9 (async-as-effect) deferred indefinitely**
+— treated as just another effect surface in Phase B but the
+runtime work (futures, schedulers, I/O loop) is wholly new and
+unrelated to the typing-layer minimum. **D14 (phase-go program)
+exercised at C3.3** via `tests/pass/c33_go_no_go.sentinel` —
+combines effect_decl + annotated fn + secret typing +
+declassify-before-branching in one program; stdout "42",
+exit 0.
 
 Date: 2026-05-28
 Related:
@@ -540,22 +585,24 @@ sub-phase ADRs (mostly mechanical; expect minor amendments).
 
 | Sub  | Title                                                          | Estimate     | Status |
 |------|----------------------------------------------------------------|--------------|--------|
-| C3.0 | Lexer additions (`effect`, `secret`, `declassify`, `handle`,   | 1 session    | next   |
-|      | `with`, `perform`); AST + parser for effect_decl, effect       |              |        |
-|      | annotations on fns, secret type prefix, declassify expr.       |              |        |
-| C3.1 | Secret qualifier landing in `sentinel-types`: `Type::Secret    | 1-2 sessions |        |
-|      | (SecretId)` + SecretData + intern_secret; resolve passes       |              |        |
-|      | through; check_query computes Secret types via unification     |              |        |
-|      | (a Secret wrapper unifies with bare T iff explicit declassify  |              |        |
+| C3.0 | Lexer additions (`effect`, `secret`, `declassify`, `handle`,   | 1 session    | DONE   |
+|      | `with`, `perform`); AST + parser for effect_decl, effect       |              | 53c26f7|
+|      | annotations on fns, secret type prefix, declassify expr.       |              | +      |
+|      |                                                                |              | 1a951ee|
+| C3.1 | Secret qualifier landing in `sentinel-types`: `Type::Secret    | 1-2 sessions | DONE   |
+|      | (SecretId)` + SecretData + intern_secret; resolve passes       |              | ae9483f|
+|      | through; check_query computes Secret types via unification     |              | +      |
+|      | (a Secret wrapper unifies with bare T iff explicit declassify  |              | 2b36b0f|
 |      | strips it); five CT rejections per D7. Codegen lowers          |              |        |
 |      | Secret(T) identically to T at C3.1 minimum (the constant-      |              |        |
 |      | time guarantees come in a follow-on codegen ADR per D12).      |              |        |
-| C3.2 | Effect rows + effect_check_query salsa pass; effect            | 2-3 sessions |        |
-|      | inference (full inference per D2) + annotation check; D13's    |              |        |
-|      | "main must be effect-free" rejection.                          |              |        |
-| C3.3 | Polish + phase-go programs + STATE.md / HANDOVER refresh +     | 0-1 sessions |        |
-|      | ADR 0019 PROPOSED → ACCEPTED flip. Phase C3 close-out (at      |              |        |
-|      | the typing-layer minimum per this ADR's D8 deferral).          |              |        |
+| C3.2 | Effect rows + effect_check_query salsa pass; effect            | 2-3 sessions | DONE   |
+|      | inference (full inference per D2) + annotation check; D13's    |              | e95966a|
+|      | "main must be effect-free" rejection.                          |              | +      |
+|      |                                                                |              | 82e859e|
+| C3.3 | Polish + phase-go programs + STATE.md / HANDOVER refresh +     | 0-1 sessions | DONE   |
+|      | ADR 0019 PROPOSED → ACCEPTED flip. Phase C3 close-out (at      |              | this   |
+|      | the typing-layer minimum per this ADR's D8 deferral).          |              | session|
 | C3.4 | (DEFERRED to follow-on ADR 0020): Effect handler runtime —     | 3-5 sessions |        |
 |      | `handle ... with { ... }` lowering + perform reification +     |              |        |
 |      | continuation runtime. Substantial; justifies its own ADR.      |              |        |
@@ -732,10 +779,141 @@ module-system ADR (post-C3, probably C5).
   being Copy / Hash and downstream code needs `.clone()` /
   manual hashing). Interner is the proven path.
 
+## Amendments at C3.3 close
+
+Two amendments to the original ADR, recorded as the ADR
+flipped from PROPOSED to ACCEPTED-WITH-AMENDMENTS:
+
+**A1. SecretEscapesPolymorphism subsumed by monomorphic
+generics + SecretFlow.** Phase B's ADR 0008 D4 listed five
+constant-time rejections, the fifth being "a generic fn
+instantiated with a Secret type AND used in a non-secret-
+preserving way." Sentinel's generics are monomorphic per ADR
+0016 D7c: each generic fn produces a concrete instance for
+each call-site's type-args. A generic fn `fn id<T>(x: T) -> T`
+instantiated with T = `secret i64` produces a monomorphic
+instance `id_secret_i64(x: secret i64) -> secret i64` whose
+secret-flow is checked exactly the same way as any concrete
+signature — if its body would leak the secret (e.g., by passing
+the secret value to `print` which takes `i64`), the standard
+Mismatch path fires. No separate SecretEscapesPolymorphism
+variant needed. The ADR 0019 D7 status header lists "3 of 5"
+explicit rejections at C3.1/C3.1b; the remaining 2 (SecretFlow
++ SecretEscapesPolymorphism) are both subsumed.
+
+**A2. Runtime builtins (print / unwrap_or / is_some / len)
+declared effect-free at C3.2 rather than carrying Io.** A
+naive reading of "effect-aware signatures" would suggest
+`print` carries `! { Io }`. C3.2 declares them effect-free
+because (a) every existing Sentinel program that uses `print`
+would otherwise break with EffectAnnotationMismatch /
+UnhandledEffect at main, and (b) `print` is a thin runtime
+fixture, not a user-facing fn — promoting it to carry effects
+would force every program to handle Io even for "Hello, world."
+A future ADR may revisit when handler runtime lands (then we
+can have `handle main with { Io.print(x, k) => libc_print(x);
+k(()) }` and the surface becomes ergonomic again). Until then,
+runtime builtins are an implicit exemption.
+
+**Implementation gap closed at C3.3**: D14 (phase-go program)
+was originally specified at C3.2 close; the actual go/no-go
+fixture combining all of effect_decl + annotated fn + secret
+typing + declassify landed at C3.3 (this session) via
+`tests/pass/c33_go_no_go.sentinel`. stdout `42`, exit 0.
+
+## Retrospective at C3.3 close
+
+Six sub-phases shipped across ~5 effective sessions (split
+into eight commits because C3.0 was bundled as C3.0(a) + C3.0(b)
+and C3.1/C3.2 each had an a/b split for coherence). The
+original estimate was 4-6 sessions at C3 minimum (without the
+deferred D8 handler runtime); came in at the upper end of the
+"at C3 minimum" range, which is exactly what the ADR predicted.
+
+What worked:
+
+- **Phase B reference impl shortcuts the design work.** The
+  `sentinel-effects-proto` interpreter validated typing rules,
+  inference algorithm, and diagnostic surface across 226 tests.
+  C3 was mostly mechanical adaptation: parallel-tree
+  integration, salsa pipeline plumbing, secret-as-Type-variant
+  via the existing interner pattern. Substantial typing-rule
+  research was already done.
+- **The interner pattern**. `Type::Secret(SecretId)` is the
+  sixth in a row (after `Nullable`, `Array`, `GenericInstance`,
+  `Ref` at C2). `Type: Copy + Hash` held across the entire
+  Phase C type-system stack — no clone-cascades or per-Type
+  hashing diverged. Same precedent for ADR 0019 D3's RowId
+  deferral: we DIDN'T use a RowId interner at C3.2 because
+  `Vec<EffectId>` on each `TypedFnSignature` was the minimum-
+  viable shape, but the interner is a known-shape upgrade path
+  if profiling demands.
+- **`effect_check_query` as a new salsa pass**. The
+  `effect_check_query` chains on `check_query` and
+  `borrow_check_query` chains on `effect_check_query`. The
+  pipeline shape didn't change for any existing user (codegen
+  still just consumes `TypedProgram` + `DropPlan` as before);
+  the new pass is purely additive. Diagnostics flow through
+  the transitive `accumulated::<Diagnostic>` set without
+  needing manual collection.
+
+What surprised us:
+
+- **D3 (RowId interner) deferred at C3.2**. The ADR specified
+  interned `RowId` analogous to `GenericInstanceId`. In
+  practice, `Vec<EffectId>` per signature was simpler and
+  carried the same set-equality semantics. RowId becomes useful
+  when rows flow as first-class types (e.g., when handler
+  runtime arrives and `kont: Continuation<Row>` needs to carry
+  a row by id). Deferred to ADR 0020.
+- **Runtime builtins as effect-free** (A2). The ADR didn't
+  explicitly call this out; we discovered the backward-compat
+  issue at C3.2 sig-construction and made the call inline.
+  Documented as A2 above.
+- **D7 only needed 3 explicit rejections** (A1). The fourth
+  (SecretFlow) trivially routes through the existing Mismatch
+  path; the fifth (SecretEscapesPolymorphism) is subsumed by
+  monomorphic generics. Five-rejection enumeration in the ADR
+  was overcautious; three suffice for the C3.1 surface.
+
+What's deferred to ADR 0020 (handler runtime):
+
+- **D8: `handle e with { ... }` + `perform Op(args)`**. The
+  surface parses (lexer keywords reserved); type-check stops
+  short of actually implementing handler dispatch. The
+  substantive design call (free-monad reification vs CPS vs
+  stack-saved continuations) is its own ADR.
+- **Async-as-effect** (D9). Treated as just another effect at
+  the surface, but the runtime piece (futures, schedulers, I/O
+  loop) is wholly new. Deferred indefinitely.
+
+What's deferred to a follow-on capability-or-module ADR:
+
+- **Capability enforcement at module boundaries** (HANDOVER
+  §6.2 calls this out as C3 work). Sentinel doesn't have a
+  module system yet — D12 explicitly deferred. Lands when
+  modules ship.
+- **Constant-time codegen** (branch-free `select` / `cmov`
+  for secret comparisons; speculation barriers). Separate
+  codegen-side ADR. The C3.1 static check covers the typing-
+  layer guarantees; codegen-layer guarantees are a separate
+  concern.
+
+Pipeline at C3.3 close:
+
+    parse_query → resolve_query → check_query
+                → effect_check_query → borrow_check_query → codegen
+
+The five-pass front-end is mature. Codegen still consumes
+`TypedProgram` + `DropPlan` only; effect-check's
+`EffectCheckedProgram` flows through the salsa graph for
+future use (LSP / handler runtime) but doesn't change codegen's
+inputs.
+
 ## Revisit
 
-This ADR is **PROPOSED** until C3's sub-phases land. Per-D
-revisit triggers:
+This ADR is **ACCEPTED-WITH-AMENDMENTS** after C3's sub-phases
+landed. Per-D revisit triggers:
 
 - **D1** (effect-annotation syntax): revisit if `! { Op1, Op2 }`
   postfix syntax surfaces as confusing in user testing. Koka

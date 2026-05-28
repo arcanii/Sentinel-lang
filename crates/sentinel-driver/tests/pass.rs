@@ -711,3 +711,18 @@ fn pass_c32_go_no_go() {
     assert_eq!(r.stdout, "42\n");
     assert_eq!(r.exit, 0);
 }
+
+// ---- C3.3 / ADR 0019: Phase C3 close-out phase-go ----
+
+#[test]
+fn pass_c33_go_no_go() {
+    // The Phase C3 close-out fixture: combines effect_decl + an
+    // annotated fn that isn't called from main (so D13 is OK)
+    // with secret typing + secret arithmetic + secret comparison
+    // + declassify before branching. Exercises D1+D4+D5+D6+D13.
+    // stored = guess = 42 (secret); doubled = 84 (secret); matched
+    // = true (secret); declassify(doubled) - 42 = 42.
+    let r = build_and_run("c33_go_no_go.sentinel");
+    assert_eq!(r.stdout, "42\n");
+    assert_eq!(r.exit, 0);
+}

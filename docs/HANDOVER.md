@@ -71,16 +71,22 @@ C1.3. See STATE.md Section C.
 **Phase C3.0(b) — AST + parser + resolve pass-through + types-layer rejection for effect_decl / effect_row / `secret T` / `declassify(e)` — complete.**
 **Phase C3.1 — secret typing: `Type::Secret(SecretId)` interner + `declassify(e)` + implicit `T → secret T` widening + 2 of 4 CT rejections (SecretBranch, SecretInRefDeref) — complete.**
 **Phase C3.1b — operator-secret-preserving rules + SecretDivisor — complete.**
+**Phase C3.2(a) — effect_decl + effect_row data model in resolve + types — complete.**
+**Phase C3.2(b) — sentinel-effect-check crate + effect_check_query salsa pass — complete.**
+**Phase C3.3 — typing-layer close-out: c33_go_no_go fixture + ADR 0019 → ACCEPTED-WITH-AMENDMENTS — complete. Phase C3 typing layer closes.**
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
 actual vs ADR 0017 D9 estimate "6-13 sessions" — low end of
 the range). ADR 0018 (Polonius migration plan) PROPOSED;
 records the plan only, no migration code yet. Phase C3 (effect
-system + secret typing per ADR 0019) is **in flight** — secret
-typing fully landed at C3.1 + C3.1b; effect rows +
-effect_check_query come at C3.2; ADR 0019 stays PROPOSED until
-C3.3 close-out.
+system + secret typing per ADR 0019) is **typing-layer
+complete** as of C3.3 (this session) — ADR 0019 ACCEPTED-
+WITH-AMENDMENTS with all D-decisions exercised except D8
+(handler runtime, deferred to ADR 0020) and D9 (async,
+deferred indefinitely). Six sub-phases shipped across ~5
+effective sessions. Pipeline at C3.3 close: parse →
+resolve → check → **effect_check** → borrow_check → codegen.
 Phase C1 (type system per HANDOVER §6.2) is **complete** per ADR
 0011 (now ACCEPTED, 8 sub-phases, ADR's honest 5-6 month estimate
 beaten — actual elapsed across C1.0a through C1.7.4b was ~10-12
@@ -794,26 +800,34 @@ per-crate breakdown.
                                                  code at C2.5;
                                                  ADR records the
                                                  plan only.
-  - 0019 phase-c3-kickoff-and-effects-plan       PROPOSED — Phase
-                                                 C3 effect-system
-                                                 integration from
-                                                 Phase B. 14 D-
-                                                 decisions. D5 +
-                                                 D6 + D7 (3 of 5
-                                                 rejections) + D10
+  - 0019 phase-c3-kickoff-and-effects-plan       ACCEPTED-WITH-
+                                                 AMENDMENTS — all
+                                                 14 D-decisions
                                                  exercised across
                                                  C3.0 + C3.1 +
-                                                 C3.1b. D13
-                                                 partially. D1 +
-                                                 D2 + D3 + D4 + D11
-                                                 (effect rows +
-                                                 effect_check_query)
-                                                 land at C3.2. D8
+                                                 C3.1b + C3.2 +
+                                                 C3.3. Two
+                                                 amendments at
+                                                 C3.3: A1
+                                                 SecretEscapesPolymorphism
+                                                 subsumed by
+                                                 monomorphic
+                                                 generics +
+                                                 SecretFlow-via-
+                                                 Mismatch; A2
+                                                 runtime builtins
+                                                 declared effect-
+                                                 free. D3 (RowId
+                                                 interner) and D8
                                                  (handler runtime)
-                                                 deferred to ADR
-                                                 0020. ADR flips
-                                                 ACCEPTED at C3.3
-                                                 close-out.
+                                                 both deferred —
+                                                 RowId becomes
+                                                 useful when
+                                                 handler runtime
+                                                 lands at ADR
+                                                 0020; D9 (async)
+                                                 deferred
+                                                 indefinitely.
 
 ### 0.1 Working norms (carry forward into Phase C3)
 
@@ -1072,24 +1086,25 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: 2b36b0f (feat(c3.1b): operator-secret-preserving
-    + SecretDivisor + phase-go). Last feat commit: same.
+    Local HEAD: pending C3.3 close-out (this session). Last
+    feat commit: 82e859e (feat(c3.2b): sentinel-effect-check
+    crate + effect_check_query).
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
     (bootstrap compiler MVP) + Phase C1 (full type system — all
     8 sub-phases C1.0 through C1.7) + Phase C2 (refs +
     mutability + lexical borrow check + RAII drop — all 6 sub-
-    phases C2.0.1 through C2.5) all complete. **Phase C3 in
-    flight: C3.0 (lexer + AST + parser for effect_decl /
-    effect_row / `secret T` / `declassify`) + C3.1 + C3.1b
-    (secret typing layer: Type::Secret(SecretId) interner +
-    declassify + implicit T→secret T widening + operator-secret-
-    preserving + 3 of 4 static CT rejections) landed.** ADR
-    0017 ACCEPTED-WITH-AMENDMENTS; ADR 0018 (Polonius migration
-    plan) PROPOSED; ADR 0019 (Phase C3 kickoff) PROPOSED. 989
-    active workspace tests + 1 doctest. **Twelve go/no-go
-    programs run end-to-end:** c05_go_no_go (C1.3 bool): "10";
+    phases C2.0.1 through C2.5) + **Phase C3 typing layer (all
+    six sub-phases C3.0(a)/C3.0(b) + C3.1 + C3.1b + C3.2(a) +
+    C3.2(b) + C3.3) — all complete.** Phase C3 RUNTIME layer
+    (handler runtime per D8) deferred to follow-on ADR 0020.
+    ADR 0017 ACCEPTED-WITH-AMENDMENTS; ADR 0018 (Polonius
+    migration plan) PROPOSED; **ADR 0019 ACCEPTED-WITH-
+    AMENDMENTS at C3.3 close** (typing layer; handler runtime
+    + async deferred). 1008 active workspace tests + 1 doctest.
+    **Thirteen go/no-go programs run end-to-end:** c05_go_no_go
+    (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
     nullable): "142"; c16_go_no_go (C1.6 array): "15";
     c17_go_no_go (C1.7 generics): "42"; c20_go_no_go (C2.0.2
@@ -1097,9 +1112,11 @@ For pasting into a fresh chat to bootstrap context:
     "168"; c22_go_no_go (C2.2 XOR alternation): "35";
     c23_go_no_go (C2.3 move semantics): "100"; c24_go_no_go
     (C2.4 RAII / drop): "160"; c25_go_no_go (C2.5 D14): "190";
-    **c31_go_no_go (C3.1 D5+D6+D7 secret + declassify +
-    operator-preserve + declassify-before-branch): "100"**,
-    exit 0.
+    c31_go_no_go (C3.1 D5+D6+D7 secret typing): "100";
+    c32_go_no_go (C3.2 D1+D2+D4+D13 effect rows + annotated fn
+    chain): "42"; **c33_go_no_go (C3.3 full Phase C3 typing-
+    layer surface: effect_decl + annotated fn + secret typing
+    + declassify-before-branch): "42"**, exit 0.
 
     Pipeline at C3.1: **parse_query → resolve_query →
     check_query → borrow_check_query → codegen** (unchanged
@@ -1165,23 +1182,34 @@ For pasting into a fresh chat to bootstrap context:
     `docs/borrow-check-limitations.md` (partial-move through
     field projection + drop ⇒ double-free).
 
-    **Next: C3.2** — effect rows in the typed AST + new
-    `sentinel-effect-check` crate + `effect_check_query` salsa
-    pass per ADR 0019 D11. Estimated 2-3 sessions. Will
-    introduce `RowId` / `EffectId` interner tables +
-    `TypedFnSignature.effect_row: RowId`. The salsa pass:
+    **Next: choose one of two paths.**
 
-      parse → resolve → check → **effect_check** → borrow_check
-              → codegen
+    **Path A — ADR 0020 (handler runtime)**, closing the D8
+    deferral from ADR 0019. The substantial design call:
+    lowering strategy for `handle e with { ... }` / `perform
+    Op(args)`. Phase B's prototype used free-monad-style frame
+    reification with one-shot continuations (`Cell<Option<...>>`
+    + `resume().take()`); the production compiler needs to
+    choose between (a) the same free-monad shape (heap-
+    allocated continuation frames + indirect dispatch), (b) a
+    CPS transform before codegen (more invasive but no runtime
+    overhead), or (c) stack-saved continuations (smallest
+    runtime, most assembly tricks). Estimated 3-5 sessions per
+    ADR 0019's D9 estimate.
 
-    Effect inference is full per ADR 0019 D2 (no mandatory
-    annotations); annotations on fn signatures act as
-    constraints checked against the inferred row. `fn main`
-    invariant tightens per D13 — main's effect row must be
-    empty (any unhandled effect bubbling to main rejects since
-    handlers are deferred per D8). After C3.2, C3.3 closes
-    Phase C3 (typing-layer minimum); handler runtime is
-    deferred to C3.4 / ADR 0020 per ADR 0019 D8.
+    **Path B — Phase C4 (traits + structured concurrency) per
+    HANDOVER §6.2.** "Most of this is 'reasonable language
+    design plumbing' rather than novel work, but the volume
+    is significant." Classes, traits with named impls,
+    delegation, actors. Pre-flight: ADR 0021 PROPOSED. C4 is
+    larger in volume but lower per-piece risk than the handler-
+    runtime ADR.
+
+    The handler-runtime path completes the original Phase B
+    effect-system vision (rows + handlers + secrets); the
+    traits-first path moves further along the language-feature
+    surface and lets `secret T` + `effect Io` integrate with
+    traits later. Either choice is defensible.
 
     Read in order:
       1. docs/HANDOVER.md §0 in full (now refreshed for C3.1
@@ -1211,19 +1239,20 @@ For pasting into a fresh chat to bootstrap context:
     Sanity check at session start:
       cargo build --workspace
       cargo clippy --workspace --all-targets -- -D warnings
-      cargo test --workspace                  # expect 989 passing
-      cargo run --bin snc -- build tests/pass/c31_go_no_go.sentinel -o /tmp/c31
-      /tmp/c31 && echo "exit=$?"              # expect "100" then "exit=0"
+      cargo test --workspace                  # expect 1008 passing
+      cargo run --bin snc -- build tests/pass/c33_go_no_go.sentinel -o /tmp/c33
+      /tmp/c33 && echo "exit=$?"              # expect "42" then "exit=0"
 
-    Resume at C3.2 per ADR 0019. First task: design the
-    sentinel-effect-check crate's surface — RowId/EffectId
-    interner tables, the effect-inference algorithm (port
-    from sentinel-effects-proto's `infer` returning
-    `(Subst, Ty, Row)`), and the EffectError variants
-    (EffectAnnotationMismatch + UnhandledEffect for D13).
-    Salsa-tracked query `effect_check_query(db, file) ->
-    Option<EffectCheckedProgram>`; pipeline wiring; new
-    diagnostic accumulator entries.
+    Resume at the chosen path (handler runtime ADR 0020 OR
+    Phase C4 traits ADR 0021). For the handler-runtime path,
+    first task: write ADR 0020 PROPOSED comparing the three
+    lowering strategies (free-monad reification / CPS / stack-
+    saved continuations) and picking one with rationale + a
+    sub-phase split. For the traits path: ADR 0021 PROPOSED
+    covering trait declaration syntax, impl-block syntax,
+    method resolution, default impls, generic-bound integration,
+    and the secret-T / effect-row interaction (e.g., can a
+    trait method declare an effect? declassify a secret?).
 
 ---
 

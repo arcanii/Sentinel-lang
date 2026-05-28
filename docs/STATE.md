@@ -12,7 +12,47 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C3.1 landed; secret typing complete; Phase C3
+Last updated: **C3.3 landed; Phase C3 typing-layer closes.**
+ADR 0019 flips PROPOSED → ACCEPTED-WITH-AMENDMENTS with
+D1+D2+D3+D4+D5+D6+D7+D10+D11+D12+D13+D14 all exercised. **D8
+(handler runtime) deferred to follow-on ADR 0020** per the
+original design call; **D9 (async-as-effect) deferred
+indefinitely**. Six sub-phases shipped: C3.0(a) lexer +
+C3.0(b) AST+parser+resolve + C3.1 secret typing + C3.1b
+operator-secret-preserving + C3.2(a) effect data model +
+C3.2(b) effect_check_query crate + C3.3 close-out (this
+session, including the phase-go fixture combining everything).
+**Pipeline at C3.3 close**: parse_query → resolve_query →
+check_query → **effect_check_query** → borrow_check_query →
+codegen. New `sentinel-effect-check` crate (~470 LOC) hosts
+the effect-check pass; `borrow_check_query` chains on
+`effect_check_query` so diagnostics flow transitively through
+the existing `accumulated::<Diagnostic>` set. **Two amendments
+at C3.3**: A1 the fifth Phase B SecretEscapesPolymorphism
+rejection is subsumed by Sentinel's monomorphic generics +
+SecretFlow-via-Mismatch (no separate variant needed); A2
+runtime builtins (print/unwrap_or/is_some/len) are declared
+effect-free at C3.2 to preserve backward-compat with existing
+programs that use `print`. **D3 (RowId interner) deferred to
+ADR 0020**: at the minimum-viable surface, `Vec<EffectId>` on
+each `TypedFnSignature.effect_row` was simpler than a separate
+row interner; the interner is a known-shape upgrade path when
+rows flow as first-class types (e.g., when handler runtime
+arrives + continuations carry rows). C3.3 phase-go fixture at
+`tests/pass/c33_go_no_go.sentinel` combines effect_decl +
+annotated fn (not called from main) + secret typing + secret
+arithmetic + declassify before branching — produces stdout
+`42`, exit 0. Workspace test delta from C3.1 close: +20
+(1008 total) — +5 resolve unit tests for effect resolution,
++6 types tests for effect-decl + effect-row signature
+threading, +8 effect-check unit tests, +1 driver pass-test
+(c32_go_no_go: "42") + 1 driver pass-test (c33_go_no_go:
+"42"). Phase C3 typing-layer **CLOSES**. Next: ADR 0020 for
+handler runtime (D8 deferral) **OR** Phase C4 traits +
+structured concurrency per HANDOVER §6.2. ADRs landed in C3:
+0019 (PROPOSED → ACCEPTED-WITH-AMENDMENTS at C3.3).
+
+Pre-C3.3 context: **C3.1 landed; secret typing complete; Phase C3
 in flight.** ADR 0019 (PROPOSED) kicked off Phase C3 — effect
 rows + secret qualifier + handler runtime per HANDOVER §6.2.
 Four sub-phases landed: C3.0(a) lexer (six new keywords:

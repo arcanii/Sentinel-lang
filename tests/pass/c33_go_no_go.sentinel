@@ -1,0 +1,44 @@
+// C3.3 phase-go per ADR 0019: the full C3 typing-layer surface
+// in one program. Combines effect declarations + effect-
+// annotated fn signatures + secret typing + declassify, all
+// while keeping `fn main` effect-free per D13.
+//
+// Exercises:
+//   - effect Io { ... } declaration (D4)
+//   - postfix `! { Io }` annotation on a fn signature (D1)
+//   - effect-check passes: maybe_log doesn't get called from
+//     main, so the Io effect doesn't bubble to main (D13 OK)
+//   - secret i64 param + implicit T -> secret T widening (D5)
+//   - operator-secret-preserving: secret + secret -> secret (D5)
+//   - declassify(e) strips secret (D6)
+//   - SecretBranch avoided via explicit declassify before `if`
+//
+// Computation:
+//   stored: secret i64 = 42, doubled: secret i64 = stored + stored = 84,
+//   matched: secret bool = stored == 42 (secret == int widens 42 → secret 42 → secret bool true)
+//   result = if declassify(matched) { declassify(doubled) - 42 } else { 0 }
+//          = 84 - 42 = 42
+//   print(result) -> "42", exit 0.
+effect Io {
+    log(msg: i64) -> i64;
+}
+
+fn maybe_log(x: i64) -> i64 ! { Io } {
+    x + 1
+}
+
+fn process(stored: secret i64, guess: secret i64) -> i64 {
+    let doubled: secret i64 = stored + stored;
+    let matched: secret bool = stored == guess;
+    if declassify(matched) {
+        declassify(doubled) - 42
+    } else {
+        0
+    }
+}
+
+fn main() -> i64 {
+    let s: secret i64 = 42;
+    let g: secret i64 = 42;
+    print(process(s, g))
+}
