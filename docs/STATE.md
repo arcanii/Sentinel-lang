@@ -12,7 +12,49 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C3.4 landed; handler runtime typing layer in.**
+Last updated: **C3.5(a) landed; first end-to-end handler runs.**
+ADR 0020 stays PROPOSED. The minimum-viable handler runtime
+ships here for the *restricted case* — a `handle` body that is
+a direct `perform Op(args)` (no fn-call-that-performs, no
+nested handles, no intervening evaluation frames). The
+**general case** (frame reification at every evaluation site)
+remains pending at C3.5(b) / C3.6. **Three new runtime
+symbols** in sentinel-runtime: `sentinel_perform_op(op_id: u32,
+arg: i64) -> *mut SentinelKont` allocates the kont +
+populates its tag and arg; `sentinel_kont_resume(kont, value)
+-> i64` flips the one-shot flag, frees the kont, and returns
+the value (no frame replay in restricted case);
+`sentinel_kont_panic_resumed() -> never` aborts on a second
+resume per ADR 0020 D2. The `SentinelKont` struct
+(`{ op_id: u32, _pad: u32, arg: i64, consumed: u8 }`, 24
+bytes / 8-byte aligned) is the on-heap payload; codegen reads
+its `arg` field via GEP at byte offset 8. **Codegen**:
+`lower_perform` emits a `sentinel_perform_op(op_id, arg)`
+call (op_id = `(EffectId.0 << 16) | op_index`);
+`lower_resume_kont` emits `sentinel_kont_resume(kont, value)`;
+`lower_handle` (restricted) statically picks the arm whose
+(effect_id, op_index) matches the body's Perform, lowers the
+body to get the kont*, binds the arm's op-param VarIds via
+GEP into the kont struct, binds the kont VarId, then lowers
+the arm body. `llvm_basic_type` for `Type::Kont` now returns
+a plain `ptr` (opaque). **Three test fixtures**:
+`c35_handle_inline_perform.sentinel` (0-arg op + k(42) →
+exit 42) and `c35_handle_log_returns_msg.sentinel` (1-arg op
+with msg = 7; arm body k(msg+35) → exit 42) both run
+end-to-end via snc. The previous c34 fixture (which uses
+do_work() as the handle body) now surfaces the more specific
+`handle_body_not_direct_perform` codegen diagnostic — the
+driver test was updated to match. Workspace test delta from
+C3.4 close: +6 (1058 total) — +4 sentinel-runtime (kont
+layout / initialisation / resume / round-trip); +2 driver
+pass-tests (c35_*). **Phase C3.5(a) closes here.** Next:
+C3.5(b) or C3.6 — frame reification at every evaluation
+site so `fn-calls-that-perform` and other non-inline
+handle bodies work end-to-end. Per ADR 0020 D9 estimate
+2-3 sessions total for the perform+handle codegen; ~1
+session already spent on the restricted case here.
+
+Pre-C3.5(a) context: **C3.4 landed; handler runtime typing layer in.**
 ADR 0020 stays PROPOSED (still in flight across C3.4-C3.7); the
 typing-layer pieces — AST, parser, resolve, type-check, effect-
 check — all ship here. Codegen for `handle` / `perform` /
