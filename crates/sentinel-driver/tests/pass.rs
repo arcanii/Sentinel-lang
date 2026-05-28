@@ -897,3 +897,38 @@ fn pass_c35c_let_bound_perform_with_capture() {
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
 }
+
+// ---- C3.5(d) / ADR 0020 D7: unified embedded-perform shape ----
+//
+// Effecting fns whose tail has a single embedded perform (binop,
+// pure fn-call arg, struct-lit field, index, etc.) now compile
+// via the same per-site reification machinery as C3.5(c). The
+// detect / substitute walker handles any pure surrounding
+// context; the resumer's substituted tail re-evaluates with the
+// resumed value bound to the placeholder VarId.
+
+#[test]
+fn pass_c35d_binop_with_perform() {
+    // tail = `perform Io.read() + 1`; resume(41) → 41 + 1 = 42.
+    let r = build_and_run("c35d_binop_with_perform.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35d_perform_with_capture_and_binop() {
+    // tail = `perform Io.read() * 2 + extra`; do_work(2),
+    // resume(20) → 20 * 2 + 2 = 42.
+    let r = build_and_run("c35d_perform_with_capture_and_binop.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35d_perform_in_call_arg() {
+    // tail = `double(perform Io.read())`; resume(21) →
+    // double(21) = 42.
+    let r = build_and_run("c35d_perform_in_call_arg.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}

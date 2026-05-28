@@ -1,0 +1,22 @@
+// C3.5(d) / ADR 0020 D7: unified embedded-perform shape. The
+// effecting fn's tail is `perform Io.read() + 1` — a binop with
+// the perform on the left side. Codegen detects the unique
+// perform, substitutes it with a placeholder Var, builds a
+// resumer fn `placeholder + 1`. main resumes with 41 → resumer
+// computes 41 + 1 = 42.
+//
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+}
+
+fn do_work() -> i64 ! { Io } {
+    perform Io.read() + 1
+}
+
+fn main() -> i64 {
+    handle do_work() with {
+        Io.read(k) => k(41)
+    }
+}

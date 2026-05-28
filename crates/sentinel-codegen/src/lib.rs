@@ -457,16 +457,26 @@ pub fn compile_to_object(
     // Pass 2: emit each user function body. (The runtime `print`
     // has no body — it's defined externally by sentinel-runtime.)
     {
-        // C3.5(c) / ADR 0020 D7: pre-declare per-let resumer fns
-        // for any user fn whose body matches the let-shape (single
-        // let with effecting RHS + pure tail). Each resumer's
-        // signature is uniform: `ptr (i64, ptr)` — the resumed
-        // value + opaque captured-state pointer; returns a Kont*
-        // wrapping the resumer's result. Captured VarIds are
-        // captured here so compile_fn can produce both the parent
-        // body and the resumer body from the same data.
+        // C3.5(c) + C3.5(d) / ADR 0020 D7: pre-declare per-fn
+        // resumer fns for any user fn whose body matches the
+        // let-shape (single let with effecting RHS) OR the
+        // embedded-perform shape (stmts.len() == 0 + tail has
+        // exactly one perform). The two shapes are disjoint;
+        // each fn matches at most one. Each resumer's signature
+        // is uniform: `ptr (i64, ptr)` — the resumed value +
+        // opaque captured-state pointer; returns a Kont* wrapping
+        // the resumer's result. Captured VarIds are captured here
+        // so compile_fn can produce both the parent body and the
+        // resumer body from the same data.
         let mut let_resumers: HashMap<FnId, (FunctionValue<'_>, Vec<VarId>)> =
             HashMap::new();
+        let mut embedded_perform_resumers: HashMap<
+            FnId,
+            (FunctionValue<'_>, Vec<VarId>, TypedExpr, VarId),
+        > = HashMap::new();
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty_local = context.i64_type();
+        let resumer_ty = ptr_ty.fn_type(&[i64_ty_local.into(), ptr_ty.into()], false);
         for fn_def in &program.fns {
             if !fn_def.type_params.is_empty() {
                 continue;
@@ -477,11 +487,20 @@ pub fn compile_to_object(
                     "__resume_{}_let_{}",
                     fn_def.name, info.let_id.0
                 );
-                let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
-                let i64_ty = context.i64_type();
-                let resumer_ty = ptr_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false);
                 let resumer_fn = module.add_function(&resumer_name, resumer_ty, None);
                 let_resumers.insert(fn_def.id, (resumer_fn, captured));
+            } else if let Some(info) = detect_embedded_perform_shape(fn_def, program) {
+                let resumer_name = format!("__resume_{}_embedded", fn_def.name);
+                let resumer_fn = module.add_function(&resumer_name, resumer_ty, None);
+                embedded_perform_resumers.insert(
+                    fn_def.id,
+                    (
+                        resumer_fn,
+                        info.captured,
+                        info.substituted_tail,
+                        info.placeholder_id,
+                    ),
+                );
             }
         }
 
@@ -502,6 +521,7 @@ pub fn compile_to_object(
             kont_consume_pure_fn,
             kont_push_fn,
             let_resumers,
+            embedded_perform_resumers,
             current_fn: None,
             current_fn_id: FnId(0), // placeholder; reset in compile_fn
             vars: HashMap::new(),
@@ -626,6 +646,15 @@ struct CodegenCtx<'ctx, 'plan> {
     /// look them up by FnId; emitted as a side-effect of
     /// compile_fn alongside the parent fn body.
     let_resumers: HashMap<FnId, (FunctionValue<'ctx>, Vec<VarId>)>,
+    /// C3.5(d) / ADR 0020 D7: per-fn resumer for the embedded-
+    /// perform shape — `stmts.len() == 0` and tail contains
+    /// exactly one Perform. The stored TypedExpr is the
+    /// substituted tail (perform replaced with Var(placeholder)),
+    /// emitted as the resumer body. The VarId is the synthetic
+    /// placeholder bound to the resumed value at the resumer's
+    /// entry.
+    embedded_perform_resumers:
+        HashMap<FnId, (FunctionValue<'ctx>, Vec<VarId>, TypedExpr, VarId)>,
     current_fn: Option<FunctionValue<'ctx>>,
     /// C2.4: the FnId of the fn currently being compiled. Used to
     /// look up the moved-source set from `drop_plan` at scope-exit
@@ -1349,6 +1378,24 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 );
             }
         }
+        // C3.5(d) / ADR 0020 D7: embedded-perform shape — stmts
+        // empty and tail contains exactly one perform somewhere
+        // (binop, struct-lit field, index, etc). The resumer
+        // body is the substituted tail with the perform replaced
+        // by Var(placeholder); the parent body lowers JUST the
+        // perform expression and pushes a frame.
+        if let Some((resumer_fn, captured, substituted_tail, placeholder_id)) =
+            self.embedded_perform_resumers.get(&fn_def.id).cloned()
+        {
+            return self.compile_effecting_fn_with_embedded_perform(
+                fn_def,
+                resumer_fn,
+                &captured,
+                &substituted_tail,
+                placeholder_id,
+                program,
+            );
+        }
 
         // C3.5(b) / ADR 0020 D7: validate that effecting fns
         // (non-empty effect_row) have the shape codegen can
@@ -1666,6 +1713,219 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .build_return(Some(&kont_val))
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
+        Ok(())
+    }
+
+    /// C3.5(d) / ADR 0020 D7: compile an effecting fn whose body
+    /// has shape `stmts.len() == 0` and tail contains exactly one
+    /// embedded perform. The resumer fn body is the substituted
+    /// tail (perform replaced with Var(placeholder)); the parent
+    /// fn body lowers JUST the unique perform expression, pushes
+    /// a frame referencing the resumer + captured-state struct,
+    /// and returns the resulting Kont*.
+    ///
+    /// Captured state holds the values of in-scope vars
+    /// referenced in the substituted tail (which excludes the
+    /// perform's own subtree). MVP-restricted to i64 captures.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_effecting_fn_with_embedded_perform(
+        &mut self,
+        fn_def: &TypedFnDef,
+        resumer_fn: FunctionValue<'ctx>,
+        captured_ids: &[VarId],
+        substituted_tail: &TypedExpr,
+        placeholder_id: VarId,
+        program: &TypedProgram,
+    ) -> Result<(), CodegenError> {
+        // --- Compile the resumer fn ---
+        let saved_fn = self.current_fn;
+        let saved_fn_id = self.current_fn_id;
+        let saved_vars = std::mem::take(&mut self.vars);
+        let saved_scope = std::mem::take(&mut self.scope_stack);
+
+        self.current_fn = Some(resumer_fn);
+        self.scope_stack.push(Vec::new());
+        let resumer_entry = self.context.append_basic_block(resumer_fn, "entry");
+        self.builder.position_at_end(resumer_entry);
+
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        let value_param = resumer_fn
+            .get_nth_param(0)
+            .expect("resumer has value param")
+            .into_int_value();
+        let captured_param = resumer_fn
+            .get_nth_param(1)
+            .expect("resumer has captured param")
+            .into_pointer_value();
+
+        // Bind the placeholder VarId to the resumed value.
+        let v_alloca = self
+            .builder
+            .build_alloca(i64_ty, "resumed_value")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_store(v_alloca, value_param)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.vars.insert(placeholder_id, (v_alloca, Type::I64));
+
+        // Load each captured field from the struct + alloca it.
+        for (i, cap_id) in captured_ids.iter().enumerate() {
+            let offset = i64_ty.const_int((i * 8) as u64, false);
+            let elem_ptr = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        i8_ty,
+                        captured_param,
+                        &[offset],
+                        &format!("cap_ptr_{}", i),
+                    )
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+            };
+            let elem_val = self
+                .builder
+                .build_load(i64_ty, elem_ptr, &format!("cap_load_{}", i))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let cap_alloca = self
+                .builder
+                .build_alloca(i64_ty, &format!("cap_{}", i))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(cap_alloca, elem_val)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(*cap_id, (cap_alloca, Type::I64));
+        }
+
+        // Lower the substituted tail. Result is i64 by MVP
+        // restriction (only i64-returning ops are accepted, so
+        // the placeholder + surrounding context produce i64).
+        let tail_val = self.lower_expr(substituted_tail, program)?.into_int_value();
+
+        // Wrap in a pure-return kont.
+        let pure_call = self
+            .builder
+            .build_call(self.kont_pure_fn, &[tail_val.into()], "pure_kont")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let pure_kont = pure_call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_kont_pure returns ptr");
+        self.builder
+            .build_return(Some(&pure_kont))
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Restore the parent fn's CodegenCtx state.
+        self.current_fn = saved_fn;
+        self.current_fn_id = saved_fn_id;
+        self.vars = saved_vars;
+        self.scope_stack = saved_scope;
+
+        // --- Compile the parent fn body ---
+        let parent_fn = *self
+            .fns
+            .get(&fn_def.id)
+            .expect("parent declared in pass 1");
+        self.current_fn = Some(parent_fn);
+        self.current_fn_id = fn_def.id;
+        self.vars.clear();
+        self.scope_stack.clear();
+        self.scope_stack.push(Vec::new());
+
+        let parent_entry = self.context.append_basic_block(parent_fn, "entry");
+        self.builder.position_at_end(parent_entry);
+
+        // Bind fn params.
+        for (i, param) in fn_def.params.iter().enumerate() {
+            let arg = parent_fn
+                .get_nth_param(i as u32)
+                .expect("param exists");
+            let llvm_ty = self.llvm_basic_type(param.ty);
+            let alloca = self
+                .builder
+                .build_alloca(llvm_ty, &param.name)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(alloca, arg)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(param.id, (alloca, param.ty));
+            self.scope_stack
+                .last_mut()
+                .expect("just pushed")
+                .push(param.id);
+        }
+
+        // Allocate the captured-state struct.
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let captured_ptr: PointerValue<'ctx> = if captured_ids.is_empty() {
+            ptr_ty.const_null()
+        } else {
+            let size = i64_ty.const_int((captured_ids.len() * 8) as u64, false);
+            let alloc_call = self
+                .builder
+                .build_call(self.alloc_fn, &[size.into()], "captured_alloc")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let ptr = alloc_call
+                .try_as_basic_value()
+                .left()
+                .expect("sentinel_alloc returns ptr")
+                .into_pointer_value();
+            for (i, cap_id) in captured_ids.iter().enumerate() {
+                let offset = i64_ty.const_int((i * 8) as u64, false);
+                let elem_ptr = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            i8_ty,
+                            ptr,
+                            &[offset],
+                            &format!("cap_store_ptr_{}", i),
+                        )
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                };
+                let (cap_alloca, _ty) = *self
+                    .vars
+                    .get(cap_id)
+                    .expect("captured var bound from fn params");
+                let cap_val = self
+                    .builder
+                    .build_load(i64_ty, cap_alloca, &format!("cap_read_{}", i))
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_store(elem_ptr, cap_val)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            }
+            ptr
+        };
+
+        // Find + lower the unique perform expression in the
+        // original (un-substituted) body. The perform's args
+        // reference fn params, which are bound in the env above.
+        let original_tail = &fn_def.body.tail;
+        let perform_expr = find_unique_perform(original_tail)
+            .expect("detect_embedded_perform_shape guarantees a unique perform");
+        let (effect_id, op_index, args) = match &perform_expr.kind {
+            TypedExprKind::Perform { effect_id, op_index, args, .. } => {
+                (*effect_id, *op_index, args.as_slice())
+            }
+            _ => unreachable!("find_unique_perform returns a Perform"),
+        };
+        let kont_val = self
+            .lower_perform(effect_id, op_index, args, program)?
+            .into_pointer_value();
+
+        // Push the captured frame.
+        let resumer_ptr = resumer_fn.as_global_value().as_pointer_value();
+        self.builder
+            .build_call(
+                self.kont_push_fn,
+                &[kont_val.into(), resumer_ptr.into(), captured_ptr.into()],
+                "",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Return the kont so the caller's handle catches it.
+        self.builder
+            .build_return(Some(&kont_val))
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
         Ok(())
     }
 
@@ -3318,6 +3578,403 @@ fn walk_collect_var_refs_stmt(kind: &TypedStmtKind, acc: &mut Vec<VarId>) {
         }
         TypedStmtKind::Expr(e) => walk_collect_var_refs(e, acc),
     }
+}
+
+/// C3.5(d) / ADR 0020 D7: count occurrences of `Perform` inside
+/// an expression's subtree. Used by `detect_embedded_perform_shape`
+/// to require exactly one perform in the body's tail — when the
+/// count is 1 the surrounding context can be reified as a single
+/// per-site resumer fn.
+fn count_performs(expr: &TypedExpr) -> usize {
+    match &expr.kind {
+        TypedExprKind::Perform { args, .. } => {
+            1 + args.iter().map(count_performs).sum::<usize>()
+        }
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::Var(_) => 0,
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner) => count_performs(inner),
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => count_performs(l) + count_performs(r),
+        TypedExprKind::Block(b) => {
+            b.stmts.iter().map(|s| count_performs_stmt(&s.kind)).sum::<usize>()
+                + count_performs(&b.tail)
+        }
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            count_performs(cond)
+                + then_branch
+                    .stmts
+                    .iter()
+                    .map(|s| count_performs_stmt(&s.kind))
+                    .sum::<usize>()
+                + count_performs(&then_branch.tail)
+                + else_branch
+                    .stmts
+                    .iter()
+                    .map(|s| count_performs_stmt(&s.kind))
+                    .sum::<usize>()
+                + count_performs(&else_branch.tail)
+        }
+        TypedExprKind::Call { args, .. } => args.iter().map(count_performs).sum(),
+        TypedExprKind::StructLit { fields, .. } => {
+            fields.iter().map(count_performs).sum()
+        }
+        TypedExprKind::FieldAccess { target, .. } => count_performs(target),
+        TypedExprKind::ArrayLit { elements, .. } => {
+            elements.iter().map(count_performs).sum()
+        }
+        TypedExprKind::Index { target, index, .. } => {
+            count_performs(target) + count_performs(index)
+        }
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            count_performs(body)
+                + arms.iter().map(|a| count_performs(&a.body)).sum::<usize>()
+                + return_arm
+                    .as_deref()
+                    .map_or(0, |ra| count_performs(&ra.body))
+        }
+        TypedExprKind::ResumeKont { args, .. } => args.iter().map(count_performs).sum(),
+    }
+}
+
+fn count_performs_stmt(kind: &TypedStmtKind) -> usize {
+    match kind {
+        TypedStmtKind::Let { value, .. } => count_performs(value),
+        TypedStmtKind::Assign { target, value } => {
+            count_performs(target) + count_performs(value)
+        }
+        TypedStmtKind::Expr(e) => count_performs(e),
+    }
+}
+
+/// C3.5(d) / ADR 0020 D7: locate the first Perform in
+/// pre-order. Used in tandem with `count_performs == 1` to find
+/// THE unique perform site that's being reified.
+fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
+    if matches!(expr.kind, TypedExprKind::Perform { .. }) {
+        return Some(expr);
+    }
+    match &expr.kind {
+        TypedExprKind::Perform { .. } => unreachable!("handled above"),
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::Var(_) => None,
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner) => find_unique_perform(inner),
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => {
+            find_unique_perform(l).or_else(|| find_unique_perform(r))
+        }
+        TypedExprKind::Block(b) => {
+            for s in &b.stmts {
+                if let Some(p) = find_unique_perform_stmt(&s.kind) {
+                    return Some(p);
+                }
+            }
+            find_unique_perform(&b.tail)
+        }
+        TypedExprKind::If { cond, then_branch, else_branch } => find_unique_perform(cond)
+            .or_else(|| {
+                then_branch
+                    .stmts
+                    .iter()
+                    .find_map(|s| find_unique_perform_stmt(&s.kind))
+                    .or_else(|| find_unique_perform(&then_branch.tail))
+            })
+            .or_else(|| {
+                else_branch
+                    .stmts
+                    .iter()
+                    .find_map(|s| find_unique_perform_stmt(&s.kind))
+                    .or_else(|| find_unique_perform(&else_branch.tail))
+            }),
+        TypedExprKind::Call { args, .. } => args.iter().find_map(find_unique_perform),
+        TypedExprKind::StructLit { fields, .. } => {
+            fields.iter().find_map(find_unique_perform)
+        }
+        TypedExprKind::FieldAccess { target, .. } => find_unique_perform(target),
+        TypedExprKind::ArrayLit { elements, .. } => {
+            elements.iter().find_map(find_unique_perform)
+        }
+        TypedExprKind::Index { target, index, .. } => {
+            find_unique_perform(target).or_else(|| find_unique_perform(index))
+        }
+        TypedExprKind::Handle { body, arms, return_arm, .. } => find_unique_perform(body)
+            .or_else(|| arms.iter().find_map(|a| find_unique_perform(&a.body)))
+            .or_else(|| {
+                return_arm
+                    .as_deref()
+                    .and_then(|ra| find_unique_perform(&ra.body))
+            }),
+        TypedExprKind::ResumeKont { args, .. } => args.iter().find_map(find_unique_perform),
+    }
+}
+
+fn find_unique_perform_stmt(kind: &TypedStmtKind) -> Option<&TypedExpr> {
+    match kind {
+        TypedStmtKind::Let { value, .. } => find_unique_perform(value),
+        TypedStmtKind::Assign { target, value } => {
+            find_unique_perform(target).or_else(|| find_unique_perform(value))
+        }
+        TypedStmtKind::Expr(e) => find_unique_perform(e),
+    }
+}
+
+/// C3.5(d) / ADR 0020 D7: clone an expression tree, replacing
+/// the unique `Perform` (caller's responsibility — assumes
+/// `count_performs == 1`) with a `Var(placeholder_id)` of the
+/// perform's return type. The resumer fn body uses the
+/// substituted tail; binding `placeholder_id` to the resumed
+/// value reconstitutes the original control flow.
+fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> TypedExpr {
+    if matches!(expr.kind, TypedExprKind::Perform { .. }) {
+        return TypedExpr {
+            kind: TypedExprKind::Var(placeholder_id),
+            span: expr.span.clone(),
+            ty: expr.ty,
+        };
+    }
+    let new_kind = match &expr.kind {
+        TypedExprKind::Perform { .. } => unreachable!("handled above"),
+        TypedExprKind::IntLit(n) => TypedExprKind::IntLit(*n),
+        TypedExprKind::BoolLit(b) => TypedExprKind::BoolLit(*b),
+        TypedExprKind::NullLit => TypedExprKind::NullLit,
+        TypedExprKind::Var(id) => TypedExprKind::Var(*id),
+        TypedExprKind::Unary(op, inner) => TypedExprKind::Unary(
+            *op,
+            Box::new(substitute_perform_with_var(inner, placeholder_id)),
+        ),
+        TypedExprKind::WidenToNullable(inner) => TypedExprKind::WidenToNullable(
+            Box::new(substitute_perform_with_var(inner, placeholder_id)),
+        ),
+        TypedExprKind::WidenToSecret(inner) => TypedExprKind::WidenToSecret(
+            Box::new(substitute_perform_with_var(inner, placeholder_id)),
+        ),
+        TypedExprKind::Declassify(inner) => TypedExprKind::Declassify(
+            Box::new(substitute_perform_with_var(inner, placeholder_id)),
+        ),
+        TypedExprKind::Binary(op, l, r) => TypedExprKind::Binary(
+            *op,
+            Box::new(substitute_perform_with_var(l, placeholder_id)),
+            Box::new(substitute_perform_with_var(r, placeholder_id)),
+        ),
+        TypedExprKind::Cmp(op, l, r) => TypedExprKind::Cmp(
+            *op,
+            Box::new(substitute_perform_with_var(l, placeholder_id)),
+            Box::new(substitute_perform_with_var(r, placeholder_id)),
+        ),
+        TypedExprKind::Logic(op, l, r) => TypedExprKind::Logic(
+            *op,
+            Box::new(substitute_perform_with_var(l, placeholder_id)),
+            Box::new(substitute_perform_with_var(r, placeholder_id)),
+        ),
+        TypedExprKind::Block(b) => {
+            let stmts: Vec<TypedStmt> = b
+                .stmts
+                .iter()
+                .map(|s| TypedStmt {
+                    kind: substitute_perform_with_var_stmt(&s.kind, placeholder_id),
+                    span: s.span.clone(),
+                })
+                .collect();
+            let tail = substitute_perform_with_var(&b.tail, placeholder_id);
+            TypedExprKind::Block(Box::new(TypedBlock {
+                stmts,
+                tail,
+                span: b.span.clone(),
+                ty: b.ty,
+            }))
+        }
+        TypedExprKind::If { cond, then_branch, else_branch } => TypedExprKind::If {
+            cond: Box::new(substitute_perform_with_var(cond, placeholder_id)),
+            then_branch: Box::new(substitute_block(then_branch, placeholder_id)),
+            else_branch: Box::new(substitute_block(else_branch, placeholder_id)),
+        },
+        TypedExprKind::Call { id, callee_span, args, type_args } => TypedExprKind::Call {
+            id: *id,
+            callee_span: callee_span.clone(),
+            args: args
+                .iter()
+                .map(|a| substitute_perform_with_var(a, placeholder_id))
+                .collect(),
+            type_args: type_args.clone(),
+        },
+        TypedExprKind::StructLit { id, name, name_span, fields } => {
+            TypedExprKind::StructLit {
+                id: *id,
+                name: name.clone(),
+                name_span: name_span.clone(),
+                fields: fields
+                    .iter()
+                    .map(|f| substitute_perform_with_var(f, placeholder_id))
+                    .collect(),
+            }
+        }
+        TypedExprKind::FieldAccess { target, field, field_span, field_index } => {
+            TypedExprKind::FieldAccess {
+                target: Box::new(substitute_perform_with_var(target, placeholder_id)),
+                field: field.clone(),
+                field_span: field_span.clone(),
+                field_index: *field_index,
+            }
+        }
+        TypedExprKind::ArrayLit { elem_ty, elements } => TypedExprKind::ArrayLit {
+            elem_ty: *elem_ty,
+            elements: elements
+                .iter()
+                .map(|e| substitute_perform_with_var(e, placeholder_id))
+                .collect(),
+        },
+        TypedExprKind::Index { target, index, elem_ty } => TypedExprKind::Index {
+            target: Box::new(substitute_perform_with_var(target, placeholder_id)),
+            index: Box::new(substitute_perform_with_var(index, placeholder_id)),
+            elem_ty: *elem_ty,
+        },
+        TypedExprKind::Handle { .. } | TypedExprKind::ResumeKont { .. } => {
+            // C3.5(d) MVP: the embedded-perform shape only fires
+            // when count_performs(tail) == 1. Substituting a
+            // Handle / ResumeKont preserves them as is — they
+            // have no perform inside (the count would exceed 1).
+            // Conservative: clone the kind unchanged.
+            return TypedExpr {
+                kind: clone_expr_kind(&expr.kind),
+                span: expr.span.clone(),
+                ty: expr.ty,
+            };
+        }
+    };
+    TypedExpr {
+        kind: new_kind,
+        span: expr.span.clone(),
+        ty: expr.ty,
+    }
+}
+
+fn substitute_perform_with_var_stmt(
+    kind: &TypedStmtKind,
+    placeholder_id: VarId,
+) -> TypedStmtKind {
+    match kind {
+        TypedStmtKind::Let { id, mutable, name, name_span, ty, value } => {
+            TypedStmtKind::Let {
+                id: *id,
+                mutable: *mutable,
+                name: name.clone(),
+                name_span: name_span.clone(),
+                ty: *ty,
+                value: substitute_perform_with_var(value, placeholder_id),
+            }
+        }
+        TypedStmtKind::Assign { target, value } => TypedStmtKind::Assign {
+            target: substitute_perform_with_var(target, placeholder_id),
+            value: substitute_perform_with_var(value, placeholder_id),
+        },
+        TypedStmtKind::Expr(e) => TypedStmtKind::Expr(substitute_perform_with_var(
+            e,
+            placeholder_id,
+        )),
+    }
+}
+
+fn substitute_block(b: &TypedBlock, placeholder_id: VarId) -> TypedBlock {
+    TypedBlock {
+        stmts: b
+            .stmts
+            .iter()
+            .map(|s| TypedStmt {
+                kind: substitute_perform_with_var_stmt(&s.kind, placeholder_id),
+                span: s.span.clone(),
+            })
+            .collect(),
+        tail: substitute_perform_with_var(&b.tail, placeholder_id),
+        span: b.span.clone(),
+        ty: b.ty,
+    }
+}
+
+/// Conservative clone of an expression kind that doesn't need
+/// substitution because it contains no Perform.
+fn clone_expr_kind(kind: &TypedExprKind) -> TypedExprKind {
+    kind.clone()
+}
+
+/// C3.5(d) / ADR 0020 D7: detect the unified "single embedded
+/// perform" body shape — `stmts.len() == 0` and the tail contains
+/// exactly one Perform anywhere in its tree. Covers binops,
+/// struct-lit fields, field-access targets, index ops, etc. (any
+/// pure surrounding context with a single perform "hole"). The
+/// resumer fn substitutes the perform with a placeholder Var and
+/// lowers the resulting expression.
+///
+/// Excludes shapes already handled at C3.5(a)/(b): a tail that
+/// IS a direct Perform (the trivial perform-at-tail case) and a
+/// tail that's a direct Call to an effecting fn. Both produce a
+/// Kont* directly without needing frame reification.
+///
+/// MVP-restricted to i64-returning ops (the placeholder's type
+/// is i64). Non-i64 ops + nested performs land at a follow-on
+/// sub-phase.
+struct EmbeddedPerformInfo {
+    captured: Vec<VarId>,
+    substituted_tail: TypedExpr,
+    placeholder_id: VarId,
+}
+
+fn detect_embedded_perform_shape(
+    fn_def: &TypedFnDef,
+    program: &TypedProgram,
+) -> Option<EmbeddedPerformInfo> {
+    let sig = program.signature(fn_def.id);
+    if sig.effect_row.is_empty() || sig.is_main {
+        return None;
+    }
+    if !fn_def.body.stmts.is_empty() {
+        return None;
+    }
+    let tail = &fn_def.body.tail;
+    // Skip shapes already covered by C3.5(a)/(b).
+    if matches!(tail.kind, TypedExprKind::Perform { .. }) {
+        return None;
+    }
+    if let TypedExprKind::Call { id, .. } = &tail.kind {
+        if !program.signature(*id).effect_row.is_empty() {
+            return None;
+        }
+    }
+    // Must have exactly one perform somewhere in the tail.
+    if count_performs(tail) != 1 {
+        return None;
+    }
+    let perform = find_unique_perform(tail)?;
+    if perform.ty != Type::I64 {
+        return None;
+    }
+    // Placeholder VarId is synthetic — codegen binds it in the
+    // resumer's env and consumes it in the substituted tail. A
+    // sentinel high value avoids collision with resolve-assigned
+    // VarIds (which start at 0 and grow with binding count).
+    let placeholder_id = VarId(u32::MAX);
+    let substituted_tail = substitute_perform_with_var(tail, placeholder_id);
+    // Captured vars = vars referenced in the substituted tail,
+    // excluding the placeholder.
+    let mut captured: Vec<VarId> = Vec::new();
+    walk_collect_var_refs(&substituted_tail, &mut captured);
+    let captured: Vec<VarId> =
+        captured.into_iter().filter(|id| *id != placeholder_id).collect();
+    Some(EmbeddedPerformInfo {
+        captured,
+        substituted_tail,
+        placeholder_id,
+    })
 }
 
 impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {

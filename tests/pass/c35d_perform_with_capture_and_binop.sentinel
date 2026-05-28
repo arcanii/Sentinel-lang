@@ -1,0 +1,23 @@
+// C3.5(d): embedded perform with a captured fn param around a
+// nested binop. do_work(extra: i64) body is `perform Io.read() *
+// 2 + extra`. The unique perform sits inside a nested binop;
+// the captured `extra` is loaded by the resumer.
+//
+// main: handle do_work(2) with { Io.read(k) => k(20) }.
+// Resumer: placeholder * 2 + 2 → 20 * 2 + 2 = 42.
+//
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+}
+
+fn do_work(extra: i64) -> i64 ! { Io } {
+    perform Io.read() * 2 + extra
+}
+
+fn main() -> i64 {
+    handle do_work(2) with {
+        Io.read(k) => k(20)
+    }
+}

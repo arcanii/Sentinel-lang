@@ -1,0 +1,27 @@
+// C3.5(d): embedded perform inside a pure fn call's argument.
+// do_work() body is `double(perform Io.read())` — the perform
+// is the single argument to a pure fn. The resumer evaluates
+// `double(placeholder)` which becomes the resumed value * 2.
+//
+// main: handle do_work() with { Io.read(k) => k(21) }.
+// Resumer: double(21) = 42.
+//
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+}
+
+fn double(x: i64) -> i64 {
+    x * 2
+}
+
+fn do_work() -> i64 ! { Io } {
+    double(perform Io.read())
+}
+
+fn main() -> i64 {
+    handle do_work() with {
+        Io.read(k) => k(21)
+    }
+}
