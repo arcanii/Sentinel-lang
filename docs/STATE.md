@@ -12,7 +12,64 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C3.5(a) landed; first end-to-end handler runs.**
+Last updated: **C3.5(b) landed; effecting fn ABI + handle-of-call.**
+ADR 0020 stays PROPOSED. This sub-phase extends the handler
+runtime so `handle do_work() with { ... }` (where do_work is
+declared `! { Io }` with body that's a direct perform OR a
+call to another effecting fn) compiles + runs end-to-end. The
+substantive piece: **effecting fns' LLVM ABI returns Kont*
+(opaque pointer)** instead of their declared Sentinel return
+type. The fn's declared type stays the same at the type-
+system layer for effect-row reasoning; only the IR shape
+changes. Two new runtime symbols round out the ABI:
+`sentinel_kont_pure(value)` wraps a pure value in a kont
+tagged with the reserved `PURE_RETURN_OP_ID = u32::MAX`
+(used when an effecting fn's body produces a value rather
+than performing — ADR 0020 D4's default `return v => v`
+expressed at the runtime layer); `sentinel_kont_consume_pure`
+unwraps it. **Handle codegen extends** to accept body=Call-
+to-effecting-fn (in addition to body=Perform) and emits a
+**runtime switch** on the kont's op_id with one case per
+arm plus the PURE_RETURN_OP_ID case. The static-arm-pick
+of C3.5(a) is gone — every handle now uses the switch
+uniformly, simplifying codegen.
+
+**Still pending for C3.5(c) / C3.6**: let-bound performs,
+perform-inside-binop, perform-inside-if-cond, and other
+forms that need per-evaluation-site **frame reification**
+(emitting a resumer fn + captured-state struct at each
+intermediate site so the kont can carry "rest of the
+computation" back through the call chain). Multi-shot
+continuations (ADR 0020 D2) are still one-shot only.
+
+Three new pass-test fixtures land: `c35b_handle_fn_call_body`
+(promoted from the C3.4-era tests/ui/c34_*: do_work() body is
+a direct perform; handle catches the kont, exit 42),
+`c35b_handle_multi_arm` (multi-op effect Io.{read, write}
+with the matching arm selected via runtime switch on op_id,
+exit 42), and `c35b_handle_pure_return` (effecting fn with
+pure body `41 + 1`; sentinel_kont_pure wraps; handle's
+PURE_RETURN_OP_ID switch case unwraps; exit 42). Plus one
+UI fixture `c35b_effecting_fn_let_bound_perform` asserting
+the new `effecting_fn_body_not_direct` codegen diagnostic
+when a let-bound perform appears (general case not yet
+ready). The previous C3.3 + C3.2 phase-go fixtures (c32, c33)
+have effecting fns with pure bodies (annotation-as-constraint
+demonstration); these now compile through the
+sentinel_kont_pure wrap path — no fixture rewrites needed.
+
+Workspace test delta from C3.5(a) close: +3 (1061 total) —
++4 driver pass-tests (c35b_*) + 1 driver UI test, -2 driver
+tests (c34 UI-style assertion removed since the fixture
+promotes to tests/pass/, and the c34 codegen-rejection test
+was retired). No new sentinel-runtime tests at this
+sub-phase (sentinel_kont_pure/consume_pure are exercised
+end-to-end through the c35b_handle_pure_return fixture).
+**Phase C3.5(b) closes here.** Next: C3.5(c) — per-
+evaluation-site frame reification (let-stmts, binops,
+if-cond) per ADR 0020 D7's `sentinel_kont_push` machinery.
+
+Pre-C3.5(b) context: **C3.5(a) landed; first end-to-end handler runs.**
 ADR 0020 stays PROPOSED. The minimum-viable handler runtime
 ships here for the *restricted case* — a `handle` body that is
 a direct `perform Op(args)` (no fn-call-that-performs, no

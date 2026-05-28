@@ -76,6 +76,7 @@ C1.3. See STATE.md Section C.
 **Phase C3.3 — typing-layer close-out: c33_go_no_go fixture + ADR 0019 → ACCEPTED-WITH-AMENDMENTS — complete. Phase C3 typing layer closes.**
 **Phase C3.4 — handler runtime typing layer per ADR 0020 D5+D6: AST + parser + resolve + Type::Kont interner + type-check + effect discharge; codegen lands at C3.5/C3.6 — complete.**
 **Phase C3.5(a) — restricted-case handler codegen per ADR 0020 D7: 3 new runtime symbols + lower Perform/ResumeKont/Handle (body must be a direct `perform`); end-to-end runnable for the inline case — complete.**
+**Phase C3.5(b) — effecting fn ABI + handle-of-call per ADR 0020 D7: effecting fns return Kont* at the IR level; sentinel_kont_pure wraps pure values via PURE_RETURN_OP_ID; handle codegen unified around a runtime switch — complete.**
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -917,35 +918,36 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C3.5(b) — frame reification + general-case handle)
+### 0.2 Next session opening (C3.5(c) — per-eval-site frame reification)
 
-Resume at **C3.5(b)** per ADR 0020. **C3.5(a) closed: first
-end-to-end handler runs.** Nine sub-phases shipped across
-Phase C3 — C3.0(a)/C3.0(b) + C3.1/C3.1b + C3.2(a)/C3.2(b) +
-C3.3 (typing-layer close-out) + C3.4 (handler typing) +
-C3.5(a) (restricted-case codegen). Programs whose handle body
-is a direct `perform Op(args)` compile and run via the new
-runtime symbols `sentinel_perform_op` / `sentinel_kont_resume`
-/ `sentinel_kont_panic_resumed`. Two driver pass-tests cover
-the 0-arg case (`c35_handle_inline_perform`) and the 1-arg
-case where the arm reads the kont's stored `arg` via GEP
-(`c35_handle_log_returns_msg`).
+Resume at **C3.5(c)** per ADR 0020. **C3.5(b) closed:
+effecting fn ABI + handle-of-call.** Ten sub-phases shipped
+across Phase C3 — C3.0(a)/C3.0(b) + C3.1/C3.1b + C3.2(a)/
+C3.2(b) + C3.3 (typing-layer close-out) + C3.4 (handler
+typing) + C3.5(a) (restricted-case codegen) + C3.5(b)
+(effecting fn ABI + handle-of-call). Programs can now use
+`handle do_work() with { ... }` with multi-arm dispatch via
+runtime switch on the kont's op_id. Effecting fns whose body
+is a pure expression still compile thanks to the
+`sentinel_kont_pure` wrap (op_id = PURE_RETURN_OP_ID;
+unwrapped by handle's switch). Three new pass-test fixtures
+cover the new shapes (c35b_handle_fn_call_body,
+c35b_handle_multi_arm, c35b_handle_pure_return).
 
 What's NOT yet running:
 
-  - **Fn-call-that-performs**: `handle do_work() with { ... }`
-    surfaces `handle_body_not_direct_perform` at codegen.
-    Needs frame reification at every fn-call site so the
-    callee's kont* propagates back up through the caller.
   - **Let-bound perform**: `let v: i64 = perform Op(); v + 1`
-    needs the let-body's continuation captured into the kont.
+    surfaces `effecting_fn_body_not_direct` at codegen. Needs
+    the let-body's continuation captured into the kont via
+    per-evaluation-site frame reification.
   - **Perform inside binop / index / field-access**: same
     pattern — the surrounding evaluation frame must
-    reify itself.
-  - **Multi-shot continuations** (ADR 0020 D2): one-shot only
-    at C3.5(a); upgrade is mechanical but tracked separately.
+    reify itself into a captured-state struct + resumer fn.
+  - **If-cond perform**: `if perform Op() { ... } else { ... }`
+    where the cond performs — needs the branch frames reified.
+  - **Multi-shot continuations** (ADR 0020 D2): one-shot only.
 
-**C3.5(b) — frame reification at general evaluation sites.**
+**C3.5(c) — frame reification at general evaluation sites.**
 Per ADR 0020 D7's `sentinel_kont_push` symbol. The substantive
 piece: every Sentinel fn call now returns either a value OR a
 kont* sentinel. Every "could-be-captured" evaluation frame
@@ -989,14 +991,47 @@ Phase B sidestepped this by representing every value as a
 `Value::Step(...)` sum at the interpreter level. The production
 compiler needs to commit to a scheme.
 
-**Estimated effort for C3.5(b)**: 1-2 sessions. Smaller than
-"vanilla C3.5" estimate because the runtime + perform site
-already work — what remains is the call-site/eval-frame
-plumbing. C3.6 is currently overlapping with C3.5(b) since
-handle codegen for the general case requires the same
-plumbing.
+**Estimated effort for C3.5(c)**: 1-2 sessions. Smaller than
+"vanilla C3.5" estimate because the runtime, perform site,
+effecting fn ABI, and handle dispatch already work — what
+remains is the call-site/eval-frame plumbing.
 
-**C3.5(a) retrospective** (this session): ADR 0020 D9
+**C3.5(b) retrospective** (this session): the effecting fn
+ABI piece took ~1 session within the original 1-2 session
+C3.5(b) budget. Three substantive design choices:
+
+  - **Effecting fn ABI returns Kont*** (plain ptr, no
+    struct). Avoids the calling-convention overhead of a
+    multi-value return on every call. Tradeoff: a wrap is
+    needed when the body is pure (handled via
+    sentinel_kont_pure + the PURE_RETURN_OP_ID sentinel).
+  - **Unified runtime switch in lower_handle**: the C3.5(a)
+    static arm dispatch was retired in favour of always
+    emitting a switch on the kont's op_id. Adds 4-5 LLVM
+    instructions per handle but simplifies codegen and
+    handles multi-arm cases naturally. The switch includes
+    a dedicated PURE_RETURN_OP_ID case that calls
+    sentinel_kont_consume_pure to unwrap pure values — the
+    runtime expression of ADR 0020 D4's default
+    `return v => v`.
+  - **Validation, not transformation**, for the limited
+    case. Effecting fns whose body's tail produces a kont
+    (Perform / Call-to-effecting / Block-thereof) lower
+    directly; pure tails get wrapped. Tails that mix
+    perform with surrounding pure context (e.g.,
+    `perform Op() + 1`) require frame reification and
+    surface `effecting_fn_body_not_direct` — deferred to
+    C3.5(c).
+
+Workspace test delta from C3.5(a) close: +3 tests (1061
+total). Three new pass fixtures (`c35b_handle_fn_call_body`,
+`c35b_handle_multi_arm`, `c35b_handle_pure_return`) + one
+UI fixture (`c35b_effecting_fn_let_bound_perform`); the
+previous c34 UI fixture (asserting codegen rejected
+do_work() bodies) was retired because that shape now
+compiles + runs end-to-end.
+
+**Pre-C3.5(b) — C3.5(a) retrospective**: ADR 0020 D9
 estimated "2-3 sessions" for the full C3.5. Actual for the
 restricted-case slice: ~1 session. Restriction shrank the
 problem: with handle body fixed to a direct Perform, the
@@ -1139,13 +1174,12 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last sub-phase: **C3.5(a) — restricted-case handler codegen
-    per ADR 0020 D7 (runtime symbols sentinel_perform_op /
-    sentinel_kont_resume / sentinel_kont_panic_resumed +
-    lower_perform / lower_resume_kont / lower_handle for the
-    direct-perform case; end-to-end runnable; general-case
-    frame reification + handle codegen still pending for
-    C3.5(b)/C3.6).**
+    Last sub-phase: **C3.5(b) — effecting fn ABI + handle-of-call
+    per ADR 0020 D7 (effecting fns now return Kont* at the IR
+    level; sentinel_kont_pure wraps pure values via
+    PURE_RETURN_OP_ID; handle codegen uses a runtime switch
+    with dedicated pure-return case; `handle do_work() with
+    { ... }` compiles and runs).**
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1155,17 +1189,20 @@ For pasting into a fresh chat to bootstrap context:
     phases C2.0.1 through C2.5) + **Phase C3 typing layer (all
     seven sub-phases C3.0(a)/C3.0(b) + C3.1/C3.1b + C3.2(a)/
     C3.2(b) + C3.3 + C3.4) — all complete.** Phase C3 RUNTIME
-    layer (handler codegen per ADR 0020 D9) in progress: **C3.5(a)
-    landed (restricted-case codegen + 3 runtime symbols)**;
-    C3.5(b) (frame reification + general handle) + C3.6 + C3.7
-    remaining. ADR 0017 ACCEPTED-WITH-AMENDMENTS; ADR 0018
-    (Polonius migration plan) PROPOSED; **ADR 0019 ACCEPTED-
-    WITH-AMENDMENTS at C3.3 close**; **ADR 0020 PROPOSED** with
-    C3.4 + C3.5(a) shipped (6 of 12 D-decisions exercised: D4
-    surface syntax, D5 AST+parser+resolve, D6 effect discharge,
-    D7 runtime symbols, D11 fn-main integration, D2 one-shot
-    enforcement). 1058 active workspace tests + 1 doctest.
-    **Fifteen go/no-go programs run end-to-end:** c05_go_no_go
+    layer (handler codegen per ADR 0020 D9) in progress:
+    **C3.5(a) + C3.5(b) landed (restricted + effecting fn ABI +
+    handle-of-call)**; C3.5(c) (general-case per-eval-site
+    frame reification) + C3.6 + C3.7 remaining. ADR 0017
+    ACCEPTED-WITH-AMENDMENTS; ADR 0018 (Polonius migration
+    plan) PROPOSED; **ADR 0019 ACCEPTED-WITH-AMENDMENTS at
+    C3.3 close**; **ADR 0020 PROPOSED** with C3.4 + C3.5(a/b)
+    shipped (7 of 12 D-decisions exercised: D2 one-shot
+    enforcement, D4 surface syntax, D5 AST+parser+resolve, D6
+    effect discharge, D7 runtime symbols, D11 fn-main
+    integration, partial D4 default `return v => v` via the
+    PURE_RETURN_OP_ID runtime wrap). 1061 active workspace
+    tests + 1 doctest.
+    **Eighteen go/no-go programs run end-to-end:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
     nullable): "142"; c16_go_no_go (C1.6 array): "15";
@@ -1178,10 +1215,16 @@ For pasting into a fresh chat to bootstrap context:
     c32_go_no_go (C3.2 D1+D2+D4+D13 effect rows + annotated fn
     chain): "42"; c33_go_no_go (C3.3 full Phase C3 typing-
     layer surface: effect_decl + annotated fn + secret typing
-    + declassify-before-branch): "42"; **c35_handle_inline_perform
-    (C3.5(a) 0-arg handler runtime): exit 42**;
-    **c35_handle_log_returns_msg (C3.5(a) 1-arg handler: msg
-    bound to perform's arg, k(msg+35)): exit 42**, exit 0.
+    + declassify-before-branch): "42"; c35_handle_inline_perform
+    (C3.5(a) 0-arg handler runtime): exit 42;
+    c35_handle_log_returns_msg (C3.5(a) 1-arg handler): exit 42;
+    **c35b_handle_fn_call_body (C3.5(b) effecting fn ABI; main
+    calls do_work() that performs Io.read; handle dispatches
+    runtime switch): exit 42**; **c35b_handle_multi_arm (C3.5(b)
+    Io.read + Io.write covered; switch picks Io.write arm):
+    exit 42**; **c35b_handle_pure_return (C3.5(b) effecting fn
+    with pure body; sentinel_kont_pure wrap; handle unwraps):
+    exit 42**, exit 0.
 
     Pipeline at C3.1: **parse_query → resolve_query →
     check_query → borrow_check_query → codegen** (unchanged

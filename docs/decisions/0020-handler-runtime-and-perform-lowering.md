@@ -19,20 +19,34 @@ stack-saved continuations.
     Exercised D2 (one-shot enforcement via `consumed` flag),
     D7 (3 runtime symbols: sentinel_perform_op +
     sentinel_kont_resume + sentinel_kont_panic_resumed). The
-    `handle` body is restricted to a direct `perform Op(args)`;
-    fn-calls-that-perform surface
-    `handle_body_not_direct_perform` until C3.5(b) ships frame
-    reification at general evaluation sites. Two driver pass-
-    tests (`c35_handle_inline_perform`, `c35_handle_log_returns_msg`)
-    run end-to-end. +6 workspace tests (1058 total).
-  - **C3.5(b)** — frame reification at general evaluation
-    sites + 4th runtime symbol (`sentinel_kont_push`) — next.
-    Required for fn-calls-that-perform, let-bound perform,
-    perform inside binop / index / field-access. Tagging
-    scheme (tagged-pointer vs multi-value return) still TBD.
-  - **C3.6** — codegen for `handle` with general body (uses
-    the runtime op_id switch + arm dispatch + frame-replay
-    resume).
+    `handle` body was restricted to a direct `perform Op(args)`.
+    Two driver pass-tests (`c35_handle_inline_perform`,
+    `c35_handle_log_returns_msg`) run end-to-end. +6 workspace
+    tests (1058 total).
+  - **C3.5(b)** — effecting fn ABI + handle-of-call —
+    **SHIPPED**. Effecting fns return Kont* at the IR level
+    (effecting fn ABI). `handle do_work() with { ... }` works
+    end-to-end via a runtime switch on the kont's op_id. Two
+    new runtime symbols: `sentinel_kont_pure(value)` wraps a
+    pure value via `PURE_RETURN_OP_ID = u32::MAX` (ADR 0020 D4's
+    default `return v => v` at the runtime layer);
+    `sentinel_kont_consume_pure(kont)` unwraps. The C3.5(a)
+    static-arm-pick was retired in favour of a unified
+    runtime switch. Three pass fixtures
+    (c35b_handle_fn_call_body, c35b_handle_multi_arm,
+    c35b_handle_pure_return). +3 workspace tests (1061
+    total).
+  - **C3.5(c)** — per-evaluation-site frame reification +
+    5th runtime symbol (`sentinel_kont_push`) — next.
+    Required for let-bound perform, perform inside binop /
+    index / field-access, and other inline forms. Tagging
+    scheme for "value vs kont at each call site" still TBD;
+    likely a per-fn-instance "tagged-pointer" approach since
+    every effecting-context value already flows through ptr-
+    returning fns at this sub-phase.
+  - **C3.6** — additional handle features (return arms with
+    non-identity transformations; nested handles; multi-shot
+    continuations per D2 relaxation).
   - **C3.7** — polish + phase-go (c37 fixture per D12) +
     ADR PROPOSED → ACCEPTED.
 
@@ -426,9 +440,12 @@ A rough split into 4-5 sub-phases:
 | C3.5(a) | Restricted-case codegen: `handle` body must be a direct       | 1 session    | **DONE** |
 |      | `perform Op(args)`. Runtime symbols sentinel_perform_op +      |              |        |
 |      | sentinel_kont_resume + sentinel_kont_panic_resumed.            |              |        |
-| C3.5(b) | Frame reification at general evaluation sites — fn-calls-     | 1-2 sessions | next   |
-|      | that-perform, let-bound perform, perform inside binop.         |              |        |
-|      | Adds sentinel_kont_push + tagged-return scheme.                |              |        |
+| C3.5(b) | Effecting fn ABI returns Kont*; handle accepts Call body +    | 1 session    | **DONE** |
+|      | runtime switch with PURE_RETURN_OP_ID case. Adds               |              |        |
+|      | sentinel_kont_pure + sentinel_kont_consume_pure.               |              |        |
+| C3.5(c) | Per-evaluation-site frame reification — let-bound perform,    | 1-2 sessions | next   |
+|      | perform inside binop / index / field-access. Adds              |              |        |
+|      | sentinel_kont_push.                                            |              |        |
 | C3.6 | Codegen for `handle` — dispatch on label; resume call;         | 2-3 sessions |        |
 |      | sentinel_kont_resume runtime symbol. The substantive runtime   |              |        |
 |      | piece.                                                         |              |        |
@@ -553,8 +570,9 @@ A rough split per the D9 table:
 |------|----------------------------------------------------------------|--------------|--------|
 | C3.4 | AST + parser + resolve mirror + effect discharge in type-check | 1-2 sessions | **DONE** |
 | C3.5(a) | Restricted-case codegen (direct-perform body) + 3 runtime symbols | 1 session    | **DONE** |
-| C3.5(b) | Frame reification at general evaluation sites + sentinel_kont_push | 1-2 sessions | next   |
-| C3.6 | Codegen for `handle` with general body + arm dispatch + replay  | 1-2 sessions |        |
+| C3.5(b) | Effecting fn ABI + handle-of-call + PURE_RETURN switch case   | 1 session    | **DONE** |
+| C3.5(c) | Per-eval-site frame reification + sentinel_kont_push          | 1-2 sessions | next   |
+| C3.6 | Return arms + nested handles + multi-shot continuations         | 1-2 sessions |        |
 | C3.7 | Polish + phase-go programs + ADR 0020 flip + STATE close       | 0-1 sessions |        |
 
 Honest total: 5-9 sessions across 4 sub-phases. The substantive
