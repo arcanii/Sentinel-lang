@@ -381,12 +381,19 @@ pub fn compile_to_object(
             None,
         )
     };
+    // C3.5(e) / ADR 0020 D7: sentinel_kont_resume returns a kont*
+    // (not i64). Either a PURE_RETURN_OP_ID wrap (the chain
+    // drained without bubbling — caller unwraps via
+    // sentinel_kont_consume_pure) or a fresh op-perform kont
+    // (a resumer in the chain performed; caller's enclosing
+    // handle re-dispatches per ADR 0020 D3 deep-handler
+    // semantics).
     let kont_resume_fn = {
         let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty = context.i64_type();
         module.add_function(
             "sentinel_kont_resume",
-            i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
+            ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
             None,
         )
     };
@@ -474,6 +481,13 @@ pub fn compile_to_object(
             FnId,
             (FunctionValue<'_>, Vec<VarId>, TypedExpr, VarId),
         > = HashMap::new();
+        // C3.5(e) / ADR 0020 D7: for chained effecting lets we
+        // pre-declare N resumer fns + the captures per resumer
+        // so compile_fn can emit each resumer's body in turn.
+        let mut chained_lets_resumers: HashMap<
+            FnId,
+            (Vec<FunctionValue<'_>>, Vec<Vec<VarId>>),
+        > = HashMap::new();
         let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
         let i64_ty_local = context.i64_type();
         let resumer_ty = ptr_ty.fn_type(&[i64_ty_local.into(), ptr_ty.into()], false);
@@ -501,6 +515,23 @@ pub fn compile_to_object(
                         info.placeholder_id,
                     ),
                 );
+            } else if let Some(info) = detect_chained_effecting_lets_shape(fn_def, program)
+            {
+                let mut resumer_fns = Vec::with_capacity(info.lets.len());
+                let mut captures_per_resumer = Vec::with_capacity(info.lets.len());
+                for (i, (let_id, _let_ty, _rhs)) in info.lets.iter().enumerate() {
+                    let resumer_name = format!(
+                        "__resume_{}_let_{}",
+                        fn_def.name, let_id.0
+                    );
+                    let resumer_fn =
+                        module.add_function(&resumer_name, resumer_ty, None);
+                    resumer_fns.push(resumer_fn);
+                    captures_per_resumer
+                        .push(compute_chained_lets_captures(&info, i));
+                }
+                chained_lets_resumers
+                    .insert(fn_def.id, (resumer_fns, captures_per_resumer));
             }
         }
 
@@ -522,6 +553,8 @@ pub fn compile_to_object(
             kont_push_fn,
             let_resumers,
             embedded_perform_resumers,
+            chained_lets_resumers,
+            handle_stack: Vec::new(),
             current_fn: None,
             current_fn_id: FnId(0), // placeholder; reset in compile_fn
             vars: HashMap::new(),
@@ -575,6 +608,18 @@ pub fn compile_to_object(
         })?;
 
     Ok(())
+}
+
+/// C3.5(e) / ADR 0020 D7: per-handle dispatch context recorded on
+/// [`CodegenCtx::handle_stack`] while lowering the arms. A `k(v)`
+/// call inside an arm body whose resume bubbles (returns a non-
+/// PURE_RETURN kont) stores the bubble kont into
+/// `current_kont_slot` and branches to `loop_block`, where the
+/// handle re-reads `current_kont_slot` + re-dispatches.
+#[derive(Clone, Copy)]
+struct HandleContext<'ctx> {
+    loop_block: inkwell::basic_block::BasicBlock<'ctx>,
+    current_kont_slot: PointerValue<'ctx>,
 }
 
 /// Per-function codegen state. See C1.1.2 docs in commit 9374edf
@@ -655,6 +700,24 @@ struct CodegenCtx<'ctx, 'plan> {
     /// entry.
     embedded_perform_resumers:
         HashMap<FnId, (FunctionValue<'ctx>, Vec<VarId>, TypedExpr, VarId)>,
+    /// C3.5(e) / ADR 0020 D7: per-fn N resumers for the chained-
+    /// effecting-lets shape — `stmts.len() >= 2`, every stmt is
+    /// `let v: i64 = perform Op(...)` (or call-to-effecting-fn),
+    /// tail is pure. Each entry is `(resumer_fns,
+    /// captures_per_resumer)` where both vectors have length N
+    /// (one entry per let). Resumer-i runs after let-i's RHS
+    /// resumes; its body emits `let_{i+1} = perform ...; ...; tail`
+    /// (the rest of the chain).
+    chained_lets_resumers:
+        HashMap<FnId, (Vec<FunctionValue<'ctx>>, Vec<Vec<VarId>>)>,
+    /// C3.5(e) / ADR 0020 D7: per-handle dispatch context, pushed
+    /// by [`Self::lower_handle`] and consulted by
+    /// [`Self::lower_resume_kont`] so a `k(v)` call site whose
+    /// resume bubbles can branch back to the enclosing handle's
+    /// dispatch loop. `loop_block` is the dispatch switch's parent
+    /// block; `current_kont_slot` is an alloca holding the kont
+    /// the switch reads next iteration.
+    handle_stack: Vec<HandleContext<'ctx>>,
     current_fn: Option<FunctionValue<'ctx>>,
     /// C2.4: the FnId of the fn currently being compiled. Used to
     /// look up the moved-source set from `drop_plan` at scope-exit
@@ -1396,6 +1459,24 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 program,
             );
         }
+        // C3.5(e) / ADR 0020 D7: chained-effecting-lets shape —
+        // stmts.len() >= 2, all effecting lets, pure tail. N
+        // resumer fns were pre-declared in pass 1; compile each
+        // body in turn (each resumer i emits a let_{i+1} + push
+        // resumer_{i+1}; the last resumer wraps the pure tail).
+        if let Some(info) = detect_chained_effecting_lets_shape(fn_def, program) {
+            if let Some((resumer_fns, captures_per_resumer)) =
+                self.chained_lets_resumers.get(&fn_def.id).cloned()
+            {
+                return self.compile_effecting_fn_with_chained_lets(
+                    fn_def,
+                    &info,
+                    &resumer_fns,
+                    &captures_per_resumer,
+                    program,
+                );
+            }
+        }
 
         // C3.5(b) / ADR 0020 D7: validate that effecting fns
         // (non-empty effect_row) have the shape codegen can
@@ -1927,6 +2008,275 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .build_return(Some(&kont_val))
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
         Ok(())
+    }
+
+    /// C3.5(e) / ADR 0020 D7: compile an effecting fn whose body
+    /// is a chain of N effecting lets followed by a pure tail.
+    /// Emits N+1 LLVM fns:
+    ///
+    /// 1. The parent fn (already declared in pass 1): builds the
+    ///    captured-state struct for resumer-0, lowers `lets[0]`'s
+    ///    RHS to a Kont*, pushes (resumer-0, captured) onto it,
+    ///    returns the Kont*.
+    /// 2. Resumer-i (i in 0..N-1, already declared in pass 1):
+    ///    binds `let_i` to its `value` param + each captured var
+    ///    from the captured struct, builds the captured struct
+    ///    for resumer-(i+1) (carrying forward let_i + any prior
+    ///    captures), lowers `lets[i+1]`'s RHS to a Kont*, pushes
+    ///    (resumer-(i+1), captured) onto it, returns the Kont*.
+    /// 3. Resumer-(N-1) (the last resumer, already declared):
+    ///    binds let_{N-1} + captures, lowers the pure tail
+    ///    expression, wraps via `sentinel_kont_pure`, returns
+    ///    the wrap.
+    ///
+    /// The runtime `sentinel_kont_resume` walks the frame chain
+    /// during a handle's `k(v)` call; when an intermediate
+    /// resumer returns a non-pure-return kont (a fresh
+    /// `perform` from inside resumer-i's emitted body), the
+    /// remaining frames migrate onto the new kont and the bubble
+    /// re-dispatches per ADR 0020 D3 deep-handler semantics.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_effecting_fn_with_chained_lets(
+        &mut self,
+        fn_def: &TypedFnDef,
+        info: &ChainedLetsShapeInfo<'_>,
+        resumer_fns: &[FunctionValue<'ctx>],
+        captures_per_resumer: &[Vec<VarId>],
+        program: &TypedProgram,
+    ) -> Result<(), CodegenError> {
+        let saved_fn = self.current_fn;
+        let saved_fn_id = self.current_fn_id;
+        let saved_vars = std::mem::take(&mut self.vars);
+        let saved_scope = std::mem::take(&mut self.scope_stack);
+
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        // --- Compile each resumer ---
+        for level in 0..info.lets.len() {
+            let resumer_fn = resumer_fns[level];
+            let (let_id, let_ty, _rhs) = info.lets[level];
+            let captures_in = &captures_per_resumer[level];
+
+            self.current_fn = Some(resumer_fn);
+            self.vars.clear();
+            self.scope_stack.clear();
+            self.scope_stack.push(Vec::new());
+
+            let entry = self.context.append_basic_block(resumer_fn, "entry");
+            self.builder.position_at_end(entry);
+
+            // Bind let_id to the resumed `value` param.
+            let value_param = resumer_fn
+                .get_nth_param(0)
+                .expect("resumer has value param")
+                .into_int_value();
+            let captured_param = resumer_fn
+                .get_nth_param(1)
+                .expect("resumer has captured param")
+                .into_pointer_value();
+
+            let v_alloca = self
+                .builder
+                .build_alloca(i64_ty, "resumed_value")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(v_alloca, value_param)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(let_id, (v_alloca, let_ty));
+
+            // Unpack captures from the struct.
+            for (i, cap_id) in captures_in.iter().enumerate() {
+                let offset = i64_ty.const_int((i * 8) as u64, false);
+                let elem_ptr = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            i8_ty,
+                            captured_param,
+                            &[offset],
+                            &format!("cap_ptr_{}", i),
+                        )
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                };
+                let elem_val = self
+                    .builder
+                    .build_load(i64_ty, elem_ptr, &format!("cap_load_{}", i))
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                let cap_alloca = self
+                    .builder
+                    .build_alloca(i64_ty, &format!("cap_{}", i))
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_store(cap_alloca, elem_val)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.vars.insert(*cap_id, (cap_alloca, Type::I64));
+            }
+
+            if level + 1 == info.lets.len() {
+                // Last resumer: lower the pure tail + wrap.
+                let tail_val =
+                    self.lower_expr(info.tail, program)?.into_int_value();
+                let pure_call = self
+                    .builder
+                    .build_call(self.kont_pure_fn, &[tail_val.into()], "pure_kont")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                let pure_kont = pure_call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("sentinel_kont_pure returns ptr");
+                self.builder
+                    .build_return(Some(&pure_kont))
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            } else {
+                // Non-last resumer: build captures for the next
+                // resumer, lower the next let's RHS (perform or
+                // call-to-effecting), push the next resumer,
+                // return the kont.
+                let captures_for_next = &captures_per_resumer[level + 1];
+                let next_captured_ptr = self
+                    .emit_chained_lets_captures_alloc(captures_for_next, i64_ty, i8_ty, ptr_ty)?;
+                let next_rhs = info.lets[level + 1].2;
+                let kont_val = self
+                    .lower_expr(next_rhs, program)?
+                    .into_pointer_value();
+                let next_resumer_ptr =
+                    resumer_fns[level + 1].as_global_value().as_pointer_value();
+                self.builder
+                    .build_call(
+                        self.kont_push_fn,
+                        &[
+                            kont_val.into(),
+                            next_resumer_ptr.into(),
+                            next_captured_ptr.into(),
+                        ],
+                        "",
+                    )
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_return(Some(&kont_val))
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            }
+        }
+
+        // Restore parent fn state.
+        self.current_fn = saved_fn;
+        self.current_fn_id = saved_fn_id;
+        self.vars = saved_vars;
+        self.scope_stack = saved_scope;
+
+        // --- Compile the parent fn body ---
+        let parent_fn = *self
+            .fns
+            .get(&fn_def.id)
+            .expect("parent declared in pass 1");
+        self.current_fn = Some(parent_fn);
+        self.current_fn_id = fn_def.id;
+        self.vars.clear();
+        self.scope_stack.clear();
+        self.scope_stack.push(Vec::new());
+
+        let parent_entry = self.context.append_basic_block(parent_fn, "entry");
+        self.builder.position_at_end(parent_entry);
+
+        // Bind fn params.
+        for (i, param) in fn_def.params.iter().enumerate() {
+            let arg = parent_fn
+                .get_nth_param(i as u32)
+                .expect("param exists");
+            let llvm_ty = self.llvm_basic_type(param.ty);
+            let alloca = self
+                .builder
+                .build_alloca(llvm_ty, &param.name)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(alloca, arg)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(param.id, (alloca, param.ty));
+            self.scope_stack
+                .last_mut()
+                .expect("just pushed")
+                .push(param.id);
+        }
+
+        // Build captures for resumer-0 + lower the first let's
+        // RHS to a kont + push (resumer-0, captures).
+        let captures_for_first = &captures_per_resumer[0];
+        let captured_ptr = self.emit_chained_lets_captures_alloc(
+            captures_for_first,
+            i64_ty,
+            i8_ty,
+            ptr_ty,
+        )?;
+        let first_rhs = info.lets[0].2;
+        let kont_val = self.lower_expr(first_rhs, program)?.into_pointer_value();
+        let resumer_0_ptr = resumer_fns[0].as_global_value().as_pointer_value();
+        self.builder
+            .build_call(
+                self.kont_push_fn,
+                &[
+                    kont_val.into(),
+                    resumer_0_ptr.into(),
+                    captured_ptr.into(),
+                ],
+                "",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_return(Some(&kont_val))
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(())
+    }
+
+    /// C3.5(e) helper: allocate a captured-state struct of i64
+    /// slots + populate from the corresponding currently-bound
+    /// allocas. Returns null if the capture set is empty (the
+    /// resumer ignores its captured param in that case).
+    fn emit_chained_lets_captures_alloc(
+        &mut self,
+        captures: &[VarId],
+        i64_ty: inkwell::types::IntType<'ctx>,
+        i8_ty: inkwell::types::IntType<'ctx>,
+        ptr_ty: inkwell::types::PointerType<'ctx>,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        if captures.is_empty() {
+            return Ok(ptr_ty.const_null());
+        }
+        let size = i64_ty.const_int((captures.len() * 8) as u64, false);
+        let alloc_call = self
+            .builder
+            .build_call(self.alloc_fn, &[size.into()], "captured_alloc")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let ptr = alloc_call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_alloc returns ptr")
+            .into_pointer_value();
+        for (i, cap_id) in captures.iter().enumerate() {
+            let offset = i64_ty.const_int((i * 8) as u64, false);
+            let elem_ptr = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        i8_ty,
+                        ptr,
+                        &[offset],
+                        &format!("cap_store_ptr_{}", i),
+                    )
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+            };
+            let (cap_alloca, _ty) = *self
+                .vars
+                .get(cap_id)
+                .expect("captured var bound from outer scope");
+            let cap_val = self
+                .builder
+                .build_load(i64_ty, cap_alloca, &format!("cap_read_{}", i))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(elem_ptr, cap_val)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
+        Ok(ptr)
     }
 
     fn lower_stmt(
@@ -3033,9 +3383,22 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             })
     }
 
-    /// C3.5(a) / ADR 0020 D7: lower `k(arg)` (a resume call) to
-    /// `sentinel_kont_resume(kont, arg)`. The runtime returns
-    /// `arg` directly in the restricted case (no frame replay).
+    /// C3.5(e) / ADR 0020 D7: lower `k(arg)` (a resume call) to
+    /// `sentinel_kont_resume(kont, arg)`. The runtime returns a
+    /// kont*; the caller branches on `op_id`:
+    ///   - `PURE_RETURN_OP_ID`: the chain drained pure — unwrap
+    ///     via `sentinel_kont_consume_pure` and use the i64 as
+    ///     the value of the `k(v)` expression.
+    ///   - any other op id: a resumer in the chain performed;
+    ///     bubble back to the enclosing handle's dispatch loop
+    ///     via the [`HandleContext`] pushed by
+    ///     [`Self::lower_handle`].
+    ///
+    /// After this fn returns, the builder is positioned at the
+    /// pure-path block and the BasicValueEnum is the unwrapped
+    /// i64. The bubble path is terminated by an unconditional
+    /// branch back to the loop block — its block doesn't fall
+    /// through to anything visible to the caller.
     fn lower_resume_kont(
         &mut self,
         kont: VarId,
@@ -3048,6 +3411,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("ResumeKont's VarId is bound by the surrounding Handle codegen");
         // Load the kont pointer (it was stored as a ptr-typed value).
         let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let i32_ty = self.context.i32_type();
         let kont_val = self
             .builder
             .build_load(ptr_ty, kont_ptr, "kont_load")
@@ -3060,23 +3424,85 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .build_call(
                 self.kont_resume_fn,
                 &[kont_val.into(), arg_v.into()],
-                "kont_resume",
+                "kv_result",
             )
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        call.try_as_basic_value()
+        let result_kont = call
+            .try_as_basic_value()
             .left()
             .ok_or_else(|| {
                 CodegenError::Builder(
                     "sentinel_kont_resume returned void unexpectedly".to_string(),
                 )
-            })
+            })?
+            .into_pointer_value();
+
+        // Read result's op_id (i32 at offset 0) — same byte-offset
+        // GEP scheme as lower_handle.
+        let op_id_val = self
+            .builder
+            .build_load(i32_ty, result_kont, "kv_op_id")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let pure_id = i32_ty.const_int(u32::MAX as u64, false);
+        let is_pure = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                op_id_val,
+                pure_id,
+                "kv_is_pure",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        let current_fn = self.current_fn.expect("inside compile_fn");
+        let pure_block = self.context.append_basic_block(current_fn, "kv_pure");
+        let bubble_block = self.context.append_basic_block(current_fn, "kv_bubble");
+        self.builder
+            .build_conditional_branch(is_pure, pure_block, bubble_block)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Bubble path: the enclosing handle's dispatch loop owns
+        // re-dispatching the new kont. Store + branch.
+        self.builder.position_at_end(bubble_block);
+        let handle_ctx = *self
+            .handle_stack
+            .last()
+            .expect("ResumeKont must be lowered inside a handle arm");
+        self.builder
+            .build_store(handle_ctx.current_kont_slot, result_kont)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_unconditional_branch(handle_ctx.loop_block)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Pure path: unwrap to i64. After this the builder stays
+        // positioned in pure_block; the i64 flows back as the
+        // value of k(v).
+        self.builder.position_at_end(pure_block);
+        let consume_call = self
+            .builder
+            .build_call(
+                self.kont_consume_pure_fn,
+                &[result_kont.into()],
+                "kv_pure_val",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        consume_call.try_as_basic_value().left().ok_or_else(|| {
+            CodegenError::Builder(
+                "sentinel_kont_consume_pure returned void unexpectedly".to_string(),
+            )
+        })
     }
 
-    /// C3.5(a) / ADR 0020 D7: lower `handle body with { arms }`
-    /// for the restricted case where `body` is a direct
-    /// `Perform`. Skips the runtime op_id switch because the
-    /// (effect_id, op_index) of the body is known statically —
-    /// codegen picks the matching arm at compile time.
+    /// C3.5(e) / ADR 0020 D7: lower `handle body with { arms }`
+    /// as a dispatch *loop*. The body produces an initial kont;
+    /// the loop reads `current_kont_slot`, switches on its
+    /// `op_id`, and runs the matching arm. A `k(v)` call inside
+    /// the arm that bubbles (resumer in the chain performed)
+    /// stores the bubble kont back into `current_kont_slot` and
+    /// branches to the top of the loop — re-dispatching per
+    /// ADR 0020 D3 deep-handler semantics.
     fn lower_handle(
         &mut self,
         body: &TypedExpr,
@@ -3104,27 +3530,46 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // For Perform: lower_perform emits sentinel_perform_op.
         // For Call to effecting fn: lower_call uses the fn's
         // new effecting-ABI signature (returns ptr).
-        let kont_ptr = self.lower_expr(body, program)?.into_pointer_value();
+        let initial_kont = self.lower_expr(body, program)?.into_pointer_value();
 
-        // Read the kont's op_id (i32 at offset 0) for the
-        // runtime switch.
         let i32_ty = self.context.i32_type();
-        let op_id_val = self
-            .builder
-            .build_load(i32_ty, kont_ptr, "kont_op_id")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?
-            .into_int_value();
-
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
         let current_fn = self.current_fn.expect("inside compile_fn");
-        let switch_block = self
+
+        // Allocate the dispatch slot for the current kont. Each
+        // loop iteration re-loads from this slot; bubble paths
+        // store the new kont here before branching back.
+        let current_kont_slot = self
             .builder
-            .get_insert_block()
-            .expect("inside a block");
+            .build_alloca(ptr_ty, "current_kont_slot")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_store(current_kont_slot, initial_kont)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        let loop_block = self.context.append_basic_block(current_fn, "handle_loop");
         let merge_block = self.context.append_basic_block(current_fn, "handle_merge");
         let unreachable_block = self
             .context
             .append_basic_block(current_fn, "handle_unreachable");
         let pure_block = self.context.append_basic_block(current_fn, "handle_pure");
+
+        self.builder
+            .build_unconditional_branch(loop_block)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Loop block: re-load current kont + read op_id + switch.
+        self.builder.position_at_end(loop_block);
+        let current_kont = self
+            .builder
+            .build_load(ptr_ty, current_kont_slot, "current_kont")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let op_id_val = self
+            .builder
+            .build_load(i32_ty, current_kont, "kont_op_id")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
 
         // One block per arm + a case-list for the switch. The
         // PURE_RETURN_OP_ID case (u32::MAX) goes to a dedicated
@@ -3150,8 +3595,6 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let pure_op_id_const = i32_ty.const_int(u32::MAX as u64, false);
         cases.push((pure_op_id_const, pure_block));
 
-        // Build the switch.
-        self.builder.position_at_end(switch_block);
         self.builder
             .build_switch(op_id_val, unreachable_block, &cases)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -3163,7 +3606,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .builder
             .build_call(
                 self.kont_consume_pure_fn,
-                &[kont_ptr.into()],
+                &[current_kont.into()],
                 "kont_pure_value",
             )
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -3179,6 +3622,14 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .build_unconditional_branch(merge_block)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
+        // Push the dispatch context so any k(v) call inside an
+        // arm body's lowering can branch back to loop_block on
+        // bubble (see [`Self::lower_resume_kont`]).
+        self.handle_stack.push(HandleContext {
+            loop_block,
+            current_kont_slot,
+        });
+
         // Lower each arm: bind op-params + kont, lower the
         // arm body, branch to merge. Collect (value, block) pairs
         // for the phi.
@@ -3186,7 +3637,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             Vec::with_capacity(arms.len());
         for (arm, arm_bb) in arms.iter().zip(arm_blocks.iter()) {
             self.builder.position_at_end(*arm_bb);
-            self.bind_handler_arm_params(arm, kont_ptr)?;
+            self.bind_handler_arm_params(arm, current_kont)?;
             let arm_val = self.lower_expr(&arm.body, program)?;
             let post_arm_block = self
                 .builder
@@ -3197,6 +3648,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
             arm_results.push((arm_val, post_arm_block));
         }
+
+        self.handle_stack.pop();
 
         // Unreachable: emit `unreachable` so LLVM can prune the
         // path. The type-check + effect-check should guarantee
@@ -3478,6 +3931,89 @@ fn detect_let_shape<'a>(
         rhs: value,
         tail: &fn_def.body.tail,
     })
+}
+
+/// C3.5(e) / ADR 0020 D7: chained effecting lets — `stmts.len() >=
+/// 2`, every stmt is `let v: i64 = <produces-kont>`, tail is pure.
+/// This is the shape that needs resumers-can-perform: resumer-i's
+/// body lowers to `let v_{i+1} = perform Op; ...; tail`, which
+/// itself performs and pushes another frame. The runtime
+/// `sentinel_kont_resume` bubbles up on non-pure-return result
+/// konts to make this work end-to-end.
+struct ChainedLetsShapeInfo<'a> {
+    lets: Vec<(VarId, Type, &'a TypedExpr)>,
+    tail: &'a TypedExpr,
+}
+
+fn detect_chained_effecting_lets_shape<'a>(
+    fn_def: &'a TypedFnDef,
+    program: &TypedProgram,
+) -> Option<ChainedLetsShapeInfo<'a>> {
+    let sig = program.signature(fn_def.id);
+    if sig.effect_row.is_empty() || sig.is_main {
+        return None;
+    }
+    // C3.5(c) covers stmts.len() == 1; C3.5(e) is the next step.
+    if fn_def.body.stmts.len() < 2 {
+        return None;
+    }
+    let mut lets = Vec::with_capacity(fn_def.body.stmts.len());
+    for stmt in &fn_def.body.stmts {
+        let (id, value, ty) = match &stmt.kind {
+            TypedStmtKind::Let { id, value, ty, .. } => (*id, value, *ty),
+            _ => return None,
+        };
+        // Each let's RHS must produce a Kont — direct Perform or
+        // Call to an effecting fn — so we can push the next
+        // resumer onto it.
+        if !tail_produces_kont(value, program) {
+            return None;
+        }
+        // MVP restriction (same as C3.5(c)/(d)): bound type is i64
+        // so the kont's single `arg` slot carries the resumed value.
+        if ty != Type::I64 {
+            return None;
+        }
+        lets.push((id, ty, value));
+    }
+    // Tail must be pure — no perform / resume nested in the final
+    // expression. Performs inside the tail would need additional
+    // frame reification on top of the chain (a follow-on sub-phase).
+    if expr_performs(&fn_def.body.tail) {
+        return None;
+    }
+    Some(ChainedLetsShapeInfo {
+        lets,
+        tail: &fn_def.body.tail,
+    })
+}
+
+/// C3.5(e) / ADR 0020 D7: captures needed by resumer-i in a
+/// chained-lets fn — the set of VarIds referenced anywhere in the
+/// body that resumer-i runs (the suffix `lets[i+1..]`'s RHSes +
+/// `tail`), minus the resumed-value let_id (which is the resumer's
+/// `value` param) and the future-bound let_ids (which are bound in
+/// deeper resumers, not captured from outer scope).
+fn compute_chained_lets_captures(
+    info: &ChainedLetsShapeInfo<'_>,
+    level: usize,
+) -> Vec<VarId> {
+    let mut refs: Vec<VarId> = Vec::new();
+    for j in (level + 1)..info.lets.len() {
+        walk_collect_var_refs(info.lets[j].2, &mut refs);
+    }
+    walk_collect_var_refs(info.tail, &mut refs);
+    let value_param_id = info.lets[level].0;
+    let mut deeper_let_ids: Vec<VarId> = info
+        .lets
+        .iter()
+        .skip(level + 1)
+        .map(|x| x.0)
+        .collect();
+    deeper_let_ids.push(value_param_id);
+    refs.into_iter()
+        .filter(|id| !deeper_let_ids.contains(id))
+        .collect()
 }
 
 /// C3.5(c) / ADR 0020 D7: walk a tail expression collecting the

@@ -26,13 +26,13 @@
 //!   - `sentinel_perform_op(op_id: u32, arg: i64) -> *mut SentinelKont`
 //!     allocates a continuation tagged with the operation's id +
 //!     its arg payload, then returns the pointer up the stack.
-//!   - `sentinel_kont_resume(kont, value) -> i64` resumes a
-//!     captured continuation with `value`. At C3.5(a) the
-//!     continuation has no captured frames (the perform must
-//!     appear as a direct child of a `handle` body), so resume
-//!     just frees the kont and returns the value. Frame
-//!     reification at general evaluation sites lands at C3.5(b)
-//!     / C3.6.
+//!   - `sentinel_kont_resume(kont, value) -> *mut SentinelKont`
+//!     resumes a captured continuation with `value`. C3.5(e)
+//!     widens the return type to a kont* so a resumer that
+//!     itself performs can bubble the new perform back to the
+//!     enclosing handler (deep-handler re-wrap per ADR 0020 D3).
+//!     The caller branches on `op_id`: `PURE_RETURN_OP_ID` means
+//!     unwrap to the final i64, anything else means re-dispatch.
 //!   - `sentinel_kont_panic_resumed() -> never` aborts cleanly
 //!     when a second resume happens (one-shot enforcement per
 //!     ADR 0020 D2).
@@ -255,10 +255,25 @@ pub extern "C" fn sentinel_kont_push(
 /// pushed (innermost) frame, which is what would have run first
 /// in the original execution. Each frame's resumer is called
 /// with the current value + its captured state; the resumer
-/// returns a *mut SentinelKont (either a pure-return wrap or, in
-/// future sub-phases, an op-perform kont for nested handlers).
-/// At C3.5(c) MVP all resumers wrap their result so this loop
-/// drains them all and returns the final unwrapped i64.
+/// returns a *mut SentinelKont (either a pure-return wrap or an
+/// op-perform kont for nested handlers).
+///
+/// **Return type**: `*mut SentinelKont`. The caller must inspect
+/// the result's `op_id` to decide what to do next:
+///   - `PURE_RETURN_OP_ID`: the chain drained without any
+///     intermediate perform; unwrap with
+///     [`sentinel_kont_consume_pure`] to recover the final value.
+///   - Any other op id: a resumer in the chain performed; the
+///     result kont is a fresh op-perform with the original kont's
+///     remaining frames spliced onto its chain tail. Caller's
+///     enclosing `handle` site re-dispatches per ADR 0020 D3's
+///     deep-handler semantics.
+///
+/// C3.5(e) / ADR 0020 D7: this is the bubble-aware variant. At
+/// C3.5(c)/(d) the runtime assumed every resumer returned a
+/// pure-return wrap; C3.5(e) lifts that restriction so chained
+/// effecting lets (a `let v = perform Op()` inside a resumer
+/// body) work end-to-end.
 ///
 /// Second resume on the same kont aborts via
 /// [`sentinel_kont_panic_resumed`].
@@ -267,10 +282,15 @@ pub extern "C" fn sentinel_kont_push(
 ///
 /// `kont` must point to a live `SentinelKont` returned by an
 /// earlier `sentinel_perform_op` invocation. After this call
-/// returns the kont is freed; the caller must not access it.
+/// returns the original `kont` is freed; the caller must not
+/// access it. The returned pointer is a *different* live kont
+/// that the caller now owns.
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn sentinel_kont_resume(kont: *mut SentinelKont, value: i64) -> i64 {
+pub extern "C" fn sentinel_kont_resume(
+    kont: *mut SentinelKont,
+    value: i64,
+) -> *mut SentinelKont {
     // SAFETY: caller guarantees `kont` is a live SentinelKont.
     let consumed = unsafe { (*kont).consumed };
     if consumed != 0 {
@@ -281,9 +301,10 @@ pub extern "C" fn sentinel_kont_resume(kont: *mut SentinelKont, value: i64) -> i
     }
 
     // Drain the frame chain. Each frame's resumer is called with
-    // the accumulated value; its returned kont must be a pure-
-    // return wrap at C3.5(c) MVP (nested perform inside resumers
-    // is C3.5(d)/C3.6 territory).
+    // the accumulated value; if the resumer returns a non-
+    // pure-return kont the chain bubbles up and the remaining
+    // frames migrate onto the bubble's chain tail (deep-handler
+    // re-wrap).
     let mut current_value = value;
     // SAFETY: read frames_head from the live kont.
     let mut current_frame = unsafe { (*kont).frames_head };
@@ -297,10 +318,49 @@ pub extern "C" fn sentinel_kont_resume(kont: *mut SentinelKont, value: i64) -> i
         // captured state through `captured` and returns a live
         // SentinelKont.
         let result_kont = unsafe { resumer(current_value, captured) };
-        // C3.5(c) MVP invariant: result_kont is a pure-return
-        // wrap with op_id = PURE_RETURN_OP_ID. Unwrap and
-        // continue to the next frame.
-        // SAFETY: contract above.
+        // SAFETY: result_kont is a live kont returned by the
+        // resumer; reading its op_id is well-defined.
+        let result_op_id = unsafe { (*result_kont).op_id };
+        if result_op_id != PURE_RETURN_OP_ID {
+            // C3.5(e): the resumer performed. Splice the
+            // remaining frames (current_frame.next onwards) onto
+            // result_kont's chain tail so they re-run after the
+            // bubble's eventual handler resume.
+            sentinel_free(captured);
+            sentinel_free(current_frame as *mut u8);
+            if !next.is_null() {
+                // SAFETY: result_kont's frames_head was just
+                // initialised by sentinel_perform_op (null) or
+                // augmented by codegen-emitted sentinel_kont_push
+                // calls inside the resumer.
+                let head = unsafe { (*result_kont).frames_head };
+                if head.is_null() {
+                    unsafe {
+                        (*result_kont).frames_head = next;
+                    }
+                } else {
+                    // Walk to the tail of result_kont's chain
+                    // and append `next`.
+                    let mut tail = head;
+                    loop {
+                        // SAFETY: tail is non-null on entry and
+                        // we break before stepping to null.
+                        let next_in_chain = unsafe { (*tail).next };
+                        if next_in_chain.is_null() {
+                            break;
+                        }
+                        tail = next_in_chain;
+                    }
+                    unsafe {
+                        (*tail).next = next;
+                    }
+                }
+            }
+            sentinel_free(kont as *mut u8);
+            return result_kont;
+        }
+        // Pure return — unwrap and continue.
+        // SAFETY: result_kont is a live pure-return kont.
         let unwrapped = unsafe { (*result_kont).arg };
         sentinel_free(result_kont as *mut u8);
         sentinel_free(captured);
@@ -310,7 +370,10 @@ pub extern "C" fn sentinel_kont_resume(kont: *mut SentinelKont, value: i64) -> i
     }
 
     sentinel_free(kont as *mut u8);
-    current_value
+    // The chain drained without a bubble. Wrap the final value
+    // in a pure-return kont so the caller's uniform unwrap-or-
+    // bubble check (op_id == PURE_RETURN_OP_ID) succeeds.
+    sentinel_kont_pure(current_value)
 }
 
 /// Abort with a clean diagnostic when a one-shot continuation is
@@ -419,26 +482,33 @@ mod tests {
             assert_eq!((*k).arg, 42);
             assert_eq!((*k).consumed, 0);
         }
-        // Resume to free; checked by next test.
-        let _ = sentinel_kont_resume(k, 0);
+        // Resume drains + frees the kont, returning a pure-wrap
+        // (since the chain is empty); consume to free the wrap.
+        let result = sentinel_kont_resume(k, 0);
+        let _ = sentinel_kont_consume_pure(result);
     }
 
     #[test]
     fn sentinel_kont_resume_returns_value_in_restricted_case() {
         let k = sentinel_perform_op(0, 100);
-        let v = sentinel_kont_resume(k, 99);
-        assert_eq!(v, 99);
-        // After resume the kont is freed; we cannot test for
-        // double-free without invoking abort, which is exercised
-        // separately by the one-shot enforcement test below
-        // (gated behind `#[ignore]` because abort is hard to
-        // observe under cargo test).
+        // C3.5(e): resume returns a kont*; the empty-chain case
+        // wraps the resumed value in a pure-return kont. Consume
+        // to unwrap.
+        let result = sentinel_kont_resume(k, 99);
+        assert!(!result.is_null());
+        // SAFETY: result is a live pure-return kont; op_id read
+        // is well-defined.
+        unsafe {
+            assert_eq!((*result).op_id, PURE_RETURN_OP_ID);
+        }
+        assert_eq!(sentinel_kont_consume_pure(result), 99);
     }
 
     #[test]
     fn sentinel_kont_round_trip_with_zero_arg() {
         let k = sentinel_perform_op(0, 0);
-        assert_eq!(sentinel_kont_resume(k, 0), 0);
+        let result = sentinel_kont_resume(k, 0);
+        assert_eq!(sentinel_kont_consume_pure(result), 0);
     }
 
     #[test]

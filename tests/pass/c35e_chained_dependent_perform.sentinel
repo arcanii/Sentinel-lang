@@ -1,0 +1,42 @@
+// C3.5(e) / ADR 0020 D7: chained effecting lets where the second
+// perform's arg references the first let's binding. Validates
+// that resumer-0's captures include `a` correctly (i.e., the
+// computed value of let_a flows into resumer-1's perform arg).
+// This exercises compute_chained_lets_captures' inclusion of
+// previously-bound let_ids when they're referenced by the
+// suffix of the chain.
+//
+// Trace: do_dependent body lowers as
+//   perform Io.twice(5) → K1 (arg=5)
+//   push resumer-0 onto K1
+//   return K1
+// Handle dispatches K1.op_id = Io.twice; arm body runs k(5+5)=k(10).
+// resume(K1, 10) → resumer-0:
+//   a = 10
+//   build captures-for-resumer-1 = { a }
+//   perform Io.twice(a=10) → K2 (arg=10)
+//   push resumer-1 onto K2
+//   return K2 (bubble)
+// Handle re-dispatches K2.op_id = Io.twice; arm body runs k(10+10)=k(20).
+// resume(K2, 20) → resumer-1:
+//   b = 20, captured a = 10
+//   tail = a + b + 12 = 10 + 20 + 12 = 42
+//   wrap pure → return
+//
+// Expected: exit code 42.
+
+effect Io {
+    twice(x: i64) -> i64;
+}
+
+fn do_dependent() -> i64 ! { Io } {
+    let a: i64 = perform Io.twice(5);
+    let b: i64 = perform Io.twice(a);
+    a + b + 12
+}
+
+fn main() -> i64 {
+    handle do_dependent() with {
+        Io.twice(x, k) => k(x + x)
+    }
+}

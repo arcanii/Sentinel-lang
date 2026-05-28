@@ -1,0 +1,24 @@
+// C3.5(e) / ADR 0020 D7: chained effecting lets where the
+// pure tail uses both let-bound vars + an outer fn param.
+// `base` is captured forward through both resumers — resumer-0's
+// captures struct holds base, resumer-1's captures struct holds
+// {base, a}, the final tail computes a + b + base.
+//
+// resume each Io.read with 11 → a=11, b=11, base=20,
+// 11 + 11 + 20 = 42. Exit 42.
+
+effect Io {
+    read() -> i64;
+}
+
+fn do_work(base: i64) -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    a + b + base
+}
+
+fn main() -> i64 {
+    handle do_work(20) with {
+        Io.read(k) => k(11)
+    }
+}

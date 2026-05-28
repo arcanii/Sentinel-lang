@@ -932,3 +932,43 @@ fn pass_c35d_perform_in_call_arg() {
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
 }
+
+// ============================================================================
+// C3.5(e) / ADR 0020 D7: chained effecting lets via resumers-can-perform.
+// Two or more `let v: i64 = perform Op` statements in sequence + a pure
+// tail. Resumer-i's body itself emits a perform (the next let's RHS),
+// returning a bubble kont that sentinel_kont_resume detects + propagates;
+// the handle's dispatch loop re-dispatches the bubble per ADR 0020 D3
+// deep-handler semantics. compile_effecting_fn_with_chained_lets emits N
+// resumer fns iteratively (one per let); the last resumer wraps the pure
+// tail via sentinel_kont_pure.
+// ============================================================================
+
+#[test]
+fn pass_c35e_chained_perform() {
+    // do_two: `let a = perform Io.read(); let b = perform Io.read();
+    // a + b`. Both resumes return 21 → a + b = 42.
+    let r = build_and_run("c35e_chained_perform.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35e_chained_perform_with_capture() {
+    // do_work(base): two chained performs + tail `a + b + base`.
+    // base = 20, each resume returns 11 → 11 + 11 + 20 = 42.
+    let r = build_and_run("c35e_chained_perform_with_capture.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35e_chained_dependent_perform() {
+    // do_dependent: second perform's arg references first let.
+    // a = 10 (twice 5), b = 20 (twice a), a + b + 12 = 42.
+    // Exercises that resumer-0 correctly captures `a` for use in
+    // resumer-1's perform arg.
+    let r = build_and_run("c35e_chained_dependent_perform.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}

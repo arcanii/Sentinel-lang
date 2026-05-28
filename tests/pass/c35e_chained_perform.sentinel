@@ -1,0 +1,25 @@
+// C3.5(e) / ADR 0020 D7: chained effecting lets. Two effecting
+// `let`s in sequence followed by a pure tail. The first let
+// emits a perform whose kont carries resumer-0; resumer-0's
+// body lowers a SECOND perform + push of resumer-1. The
+// runtime's sentinel_kont_resume bubbles non-pure-return result
+// konts so the handle's dispatch loop re-dispatches per
+// ADR 0020 D3 deep-handler semantics.
+//
+// Each Io.read resume returns 21 → a=21, b=21, a+b=42. Exit 42.
+
+effect Io {
+    read() -> i64;
+}
+
+fn do_two() -> i64 ! { Io } {
+    let a: i64 = perform Io.read();
+    let b: i64 = perform Io.read();
+    a + b
+}
+
+fn main() -> i64 {
+    handle do_two() with {
+        Io.read(k) => k(21)
+    }
+}
