@@ -43,12 +43,13 @@ use inkwell::{IntPredicate, OptimizationLevel};
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_resolve::{
-    EffectId, FnId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
+    ClassId, EffectId, FnId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
 };
+use sentinel_ast::SelfKind;
 use sentinel_types::{
-    ArrayElem, GenericInstanceData, GenericInstanceId, NullableInner, RefData, SecretData, Type,
-    TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedHandlerArm, TypedProgram,
-    TypedReturnArm, TypedStmt, TypedStmtKind, TypedStructDecl,
+    ArrayElem, ClassData, GenericInstanceData, GenericInstanceId, NullableInner, RefData,
+    SecretData, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedHandlerArm,
+    TypedProgram, TypedReturnArm, TypedStmt, TypedStmtKind, TypedStructDecl,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -196,6 +197,14 @@ pub fn compile_to_object(
     // payloads: declare all opaque types first, then set bodies.
     let mut struct_types: HashMap<StructId, StructType> = HashMap::new();
     let mut generic_struct_types: HashMap<GenericInstanceId, StructType> = HashMap::new();
+    // C4.1 / ADR 0022 D9: per-class LLVM struct types. Declared
+    // opaque alongside structs so field-type bodies can reference
+    // both struct and class names freely.
+    let mut class_types: HashMap<ClassId, StructType> = HashMap::new();
+    for cd in &program.class_decls {
+        let st = context.opaque_struct_type(&cd.name);
+        class_types.insert(cd.id, st);
+    }
     for sd in &program.structs {
         // Skip the generic struct decl itself — only concrete
         // instances get LLVM types.
@@ -233,7 +242,7 @@ pub fn compile_to_object(
         let field_tys: Vec<BasicTypeEnum> = sd
             .fields
             .iter()
-            .map(|f| llvm_basic_type(&context, f.ty, &struct_types, &generic_struct_types, &secrets))
+            .map(|f| llvm_basic_type(&context, f.ty, &struct_types, &generic_struct_types, &class_types, &secrets))
             .collect();
         let st = struct_types[&sd.id];
         st.set_body(&field_tys, false);
@@ -260,11 +269,24 @@ pub fn compile_to_object(
                     concrete,
                     &struct_types,
                     &generic_struct_types,
+                    &class_types,
                     &secrets,
                 )
             })
             .collect();
         let st = generic_struct_types[&GenericInstanceId(idx as u32)];
+        st.set_body(&field_tys, false);
+    }
+    // C4.1 / ADR 0022 D9: set class struct bodies. Field types
+    // can reference structs (incl. generic instances) + other
+    // classes — all already declared opaque above.
+    for cd in &program.class_decls {
+        let field_tys: Vec<BasicTypeEnum> = cd
+            .fields
+            .iter()
+            .map(|f| llvm_basic_type(&context, f.ty, &struct_types, &generic_struct_types, &class_types, &secrets))
+            .collect();
+        let st = class_types[&cd.id];
         st.set_body(&field_tys, false);
     }
 
@@ -284,9 +306,9 @@ pub fn compile_to_object(
         let param_types: Vec<_> = print_sig
             .param_types
             .iter()
-            .map(|t| llvm_basic_type(&context, *t, &struct_types, &generic_struct_types, &secrets).into())
+            .map(|t| llvm_basic_type(&context, *t, &struct_types, &generic_struct_types, &class_types, &secrets).into())
             .collect();
-        let fn_type = llvm_basic_type(&context, print_sig.return_type, &struct_types, &generic_struct_types, &secrets)
+        let fn_type = llvm_basic_type(&context, print_sig.return_type, &struct_types, &generic_struct_types, &class_types, &secrets)
             .fn_type(&param_types, false);
         module.add_function("sentinel_print", fn_type, None)
     };
@@ -313,7 +335,7 @@ pub fn compile_to_object(
         let param_types: Vec<_> = signature
             .param_types
             .iter()
-            .map(|t| llvm_basic_type(&context, *t, &struct_types, &generic_struct_types, &secrets).into())
+            .map(|t| llvm_basic_type(&context, *t, &struct_types, &generic_struct_types, &class_types, &secrets).into())
             .collect();
         // C3.5(b) / ADR 0020 D7: effecting fns (non-empty
         // effect_row) return a continuation pointer (Kont*)
@@ -331,7 +353,7 @@ pub fn compile_to_object(
                 .ptr_type(inkwell::AddressSpace::default())
                 .fn_type(&param_types, false)
         } else {
-            llvm_basic_type(&context, signature.return_type, &struct_types, &generic_struct_types, &secrets)
+            llvm_basic_type(&context, signature.return_type, &struct_types, &generic_struct_types, &class_types, &secrets)
                 .fn_type(&param_types, false)
         };
         let fn_value = module.add_function(&signature.name, fn_type, None);
@@ -440,6 +462,69 @@ pub fn compile_to_object(
     // on the consumed-twice path; that call is resolved at the
     // runtime crate's own link time.
 
+    // C4.1 / ADR 0022 D9: declare per-class init + method LLVM
+    // fns. Init takes `out_ptr: ptr` as the synthetic first arg
+    // (so the constructed class doesn't need to be returned by
+    // value across the ABI). Methods take `self_ptr: ptr` as the
+    // first arg. The mangled fn name is `ClassName__init` /
+    // `ClassName__method`.
+    let mut class_init_fns: HashMap<ClassId, FunctionValue> = HashMap::new();
+    let mut class_method_fns: HashMap<(ClassId, usize), FunctionValue> = HashMap::new();
+    let ptr_ty_global = context.ptr_type(inkwell::AddressSpace::default());
+    let void_ty_global = context.void_type();
+    for cd in &program.class_decls {
+        if let Some(init_def) = &cd.init {
+            let mut param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                vec![ptr_ty_global.into()];
+            for p in &init_def.params {
+                param_tys.push(
+                    llvm_basic_type(
+                        &context,
+                        p.ty,
+                        &struct_types,
+                        &generic_struct_types,
+                        &class_types,
+                        &secrets,
+                    )
+                    .into(),
+                );
+            }
+            let fn_type = void_ty_global.fn_type(&param_tys, false);
+            let mangled = format!("{}__init", cd.name);
+            let fn_value = module.add_function(&mangled, fn_type, None);
+            class_init_fns.insert(cd.id, fn_value);
+        }
+        for (m_idx, m) in cd.methods.iter().enumerate() {
+            let mut param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                vec![ptr_ty_global.into()];
+            for p in &m.params {
+                param_tys.push(
+                    llvm_basic_type(
+                        &context,
+                        p.ty,
+                        &struct_types,
+                        &generic_struct_types,
+                        &class_types,
+                        &secrets,
+                    )
+                    .into(),
+                );
+            }
+            let fn_type = llvm_basic_type(
+                &context,
+                m.return_type,
+                &struct_types,
+                &generic_struct_types,
+                &class_types,
+                &secrets,
+            )
+            .fn_type(&param_tys, false);
+            let mangled = format!("{}__{}", cd.name, m.name);
+            let fn_value = module.add_function(&mangled, fn_type, None);
+            class_method_fns.insert((cd.id, m_idx), fn_value);
+        }
+    }
+
     // C1.7.5 / ADR 0016 D7: mono_defs + the `instances` table were
     // already built above before pass 0 (so the LLVM struct types
     // for nested generic instances could be declared). Here we
@@ -453,9 +538,9 @@ pub fn compile_to_object(
         let param_types: Vec<_> = def
             .params
             .iter()
-            .map(|p| llvm_basic_type(&context, p.ty, &struct_types, &generic_struct_types, &secrets).into())
+            .map(|p| llvm_basic_type(&context, p.ty, &struct_types, &generic_struct_types, &class_types, &secrets).into())
             .collect();
-        let fn_type = llvm_basic_type(&context, def.return_type, &struct_types, &generic_struct_types, &secrets)
+        let fn_type = llvm_basic_type(&context, def.return_type, &struct_types, &generic_struct_types, &class_types, &secrets)
             .fn_type(&param_types, false);
         let fn_value = module.add_function(&mangled, fn_type, None);
         mono_fns.insert((*fn_id, args.clone()), fn_value);
@@ -542,6 +627,9 @@ pub fn compile_to_object(
             mono_fns,
             struct_types,
             generic_struct_types,
+            class_types,
+            class_init_fns,
+            class_method_fns,
             secrets,
             alloc_fn,
             panic_oob_fn,
@@ -575,6 +663,13 @@ pub fn compile_to_object(
         // it identically to a non-generic fn.
         for ((fn_id, args), def) in &mono_defs {
             cx.compile_mono_fn(*fn_id, args, def, program)?;
+        }
+        // C4.1 / ADR 0022 D9: emit each class's init + method
+        // bodies. The init body writes through out_ptr; methods
+        // read/write through self_ptr. Both use the standard
+        // lower_block machinery with self pre-bound in vars.
+        for cd in &program.class_decls {
+            cx.compile_class(cd, program)?;
         }
     }
 
@@ -654,6 +749,15 @@ struct CodegenCtx<'ctx, 'plan> {
     /// C1.7.4b / ADR 0016 D6: per-instance LLVM struct types,
     /// keyed by [`GenericInstanceId`]. Built in pass 0.
     generic_struct_types: HashMap<GenericInstanceId, StructType<'ctx>>,
+    /// C4.1 / ADR 0022 D9: per-class LLVM struct types. Built in
+    /// pass 0 alongside structs. Each class has exactly one LLVM
+    /// struct type; no generic classes at C4.1.
+    class_types: HashMap<ClassId, StructType<'ctx>>,
+    /// C4.1 / ADR 0022 D9: per-class init fn (FunctionValue) and
+    /// per-(class, method_index) method fn. Method index matches
+    /// the order in `ClassData::methods`.
+    class_init_fns: HashMap<ClassId, FunctionValue<'ctx>>,
+    class_method_fns: HashMap<(ClassId, usize), FunctionValue<'ctx>>,
     /// C3 / ADR 0019 D5 (C3.1): secrets table cloned from
     /// `TypedProgram.secrets` at codegen entry. Used to strip
     /// `Type::Secret(SecretId)` to its inner type — secrets lower
@@ -842,6 +946,21 @@ fn field_type_needs_drop_inner(
         // HandlersNotYetSupported before drop computation. Defensive
         // false here keeps borrow-check's recursive drop walks safe.
         Type::Kont(_) => false,
+        // C4.1 / ADR 0022 D9: class instances follow the same
+        // drop-needs rule as structs (recurse into fields).
+        Type::Class(id) => {
+            if (id.0 as usize) >= program.class_decls.len() {
+                return false;
+            }
+            seen.push(ty);
+            let decl = program.class_decl(id);
+            let any = decl
+                .fields
+                .iter()
+                .any(|f| field_type_needs_drop_inner(f.ty, program, seen));
+            seen.pop();
+            any
+        }
     }
 }
 
@@ -850,6 +969,7 @@ fn llvm_basic_type<'ctx>(
     ty: Type,
     struct_types: &HashMap<StructId, StructType<'ctx>>,
     generic_struct_types: &HashMap<GenericInstanceId, StructType<'ctx>>,
+    class_types: &HashMap<ClassId, StructType<'ctx>>,
     secrets: &[SecretData],
 ) -> BasicTypeEnum<'ctx> {
     // C3 / ADR 0019 D5 (C3.1): `secret T` lowers identically to T
@@ -872,6 +992,12 @@ fn llvm_basic_type<'ctx>(
             .get(&id)
             .expect("generic instance declared in pass 0"))
         .into(),
+        // C4.1 / ADR 0022 D9: class instances lower to LLVM
+        // struct types — declared in pass 0 alongside structs.
+        Type::Class(id) => (*class_types
+            .get(&id)
+            .expect("class declared in pass 0"))
+        .into(),
         Type::Nullable(inner) => {
             let valid_ty: BasicTypeEnum = context.bool_type().into();
             let payload_ty: BasicTypeEnum = match inner {
@@ -889,6 +1015,7 @@ fn llvm_basic_type<'ctx>(
                         inner.to_type(),
                         struct_types,
                         generic_struct_types,
+                        class_types,
                         secrets,
                     )
                 }
@@ -1171,6 +1298,27 @@ fn walk_expr_for_mono(
                 );
             }
         }
+        // C4.1: classes aren't generic at C4.1; walk children
+        // mechanically so any nested generic fn calls in
+        // class-instantiation arg expressions are still picked up
+        // by the worklist.
+        TypedExprKind::MethodCall { target, args, .. } => {
+            walk_expr_for_mono(
+                target, subst, program, instances, refs, visited, order, pending,
+            );
+            for a in args {
+                walk_expr_for_mono(
+                    a, subst, program, instances, refs, visited, order, pending,
+                );
+            }
+        }
+        TypedExprKind::ClassInit { args, .. } => {
+            for a in args {
+                walk_expr_for_mono(
+                    a, subst, program, instances, refs, visited, order, pending,
+                );
+            }
+        }
     }
 }
 
@@ -1260,6 +1408,12 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         // monomorphization keys at C3.4 — handlers don't reach
         // codegen until C3.5/C3.6. Defensive label only.
         Type::Kont(id) => format!("kont{}", id.0),
+        // C4.1 / ADR 0022 D9: render class types by name.
+        Type::Class(id) => program
+            .class_decls
+            .get(id.0 as usize)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| format!("class{}", id.0)),
     }
 }
 
@@ -1275,7 +1429,7 @@ fn arg_contains_typeparam(
 ) -> bool {
     match ty {
         Type::TypeParam(_) => true,
-        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => false,
+        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) | Type::Class(_) => false,
         Type::Nullable(ni) => arg_contains_typeparam(ni.to_type(), instances, refs),
         Type::Array(ae) => arg_contains_typeparam(ae.to_type(), instances, refs),
         Type::GenericInstance(id) => instances[id.0 as usize]
@@ -1345,6 +1499,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::Kont(_) => panic!(
             "llvm_int_type called on Type::Kont — handlers not lowered at C3.4 (ADR 0020 D9)"
         ),
+        Type::Class(_) => panic!("llvm_int_type called on non-int Type::Class"),
     }
 }
 
@@ -1355,6 +1510,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             ty,
             &self.struct_types,
             &self.generic_struct_types,
+            &self.class_types,
             &self.secrets,
         )
     }
@@ -1438,6 +1594,124 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         self.builder
             .build_return(Some(&body_val))
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(())
+    }
+
+    /// C4.1 / ADR 0022 D9: emit a class's init + method bodies.
+    /// Init has the synthetic `out_ptr` ABI — the first param is
+    /// a pointer to caller-provided storage; field writes inside
+    /// the body GEP into that storage. Methods receive `self_ptr`
+    /// as the first param; `self.field` reads/writes GEP into it.
+    fn compile_class(
+        &mut self,
+        cd: &ClassData,
+        program: &TypedProgram,
+    ) -> Result<(), CodegenError> {
+        // Init body.
+        if let Some(init_def) = &cd.init {
+            let fn_value = *self
+                .class_init_fns
+                .get(&cd.id)
+                .expect("declared in pass 1");
+            self.current_fn = Some(fn_value);
+            // class init bodies don't participate in DropPlan (no
+            // FnId entry); use a placeholder current_fn_id. The
+            // drop emission paths skip when no entry exists.
+            self.vars.clear();
+            self.scope_stack.clear();
+            let entry = self.context.append_basic_block(fn_value, "entry");
+            self.builder.position_at_end(entry);
+            self.scope_stack.push(Vec::new());
+
+            // self_ptr = first arg. Bind self_var_id directly to
+            // this pointer (no extra alloca + store) so field
+            // access GEPs against the actual class storage.
+            let self_ptr = fn_value
+                .get_nth_param(0)
+                .expect("out_ptr arg present")
+                .into_pointer_value();
+            self.vars.insert(init_def.self_var_id, (self_ptr, Type::Class(cd.id)));
+
+            // Init params get standard alloca + store treatment.
+            for (i, param) in init_def.params.iter().enumerate() {
+                let arg = fn_value
+                    .get_nth_param((i + 1) as u32)
+                    .expect("param exists");
+                let llvm_ty = self.llvm_basic_type(param.ty);
+                let alloca = self
+                    .builder
+                    .build_alloca(llvm_ty, &param.name)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_store(alloca, arg)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.vars.insert(param.id, (alloca, param.ty));
+                self.scope_stack
+                    .last_mut()
+                    .expect("just pushed")
+                    .push(param.id);
+            }
+
+            // Lower stmts only — init bodies use a trailing
+            // placeholder `0` per the C4.1 (1/N) workaround
+            // (block.tail Option arrives later). We DON'T lower
+            // the tail since it's just `0`.
+            for stmt in &init_def.body.stmts {
+                self.lower_stmt(stmt, program)?;
+            }
+            self.scope_stack.pop();
+            self.builder
+                .build_return(None)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
+
+        // Method bodies.
+        for (m_idx, m) in cd.methods.iter().enumerate() {
+            let fn_value = *self
+                .class_method_fns
+                .get(&(cd.id, m_idx))
+                .expect("declared in pass 1");
+            self.current_fn = Some(fn_value);
+            self.vars.clear();
+            self.scope_stack.clear();
+            let entry = self.context.append_basic_block(fn_value, "entry");
+            self.builder.position_at_end(entry);
+            self.scope_stack.push(Vec::new());
+
+            // self_ptr = first arg. Bind self_var_id directly.
+            let self_ptr = fn_value
+                .get_nth_param(0)
+                .expect("self_ptr present")
+                .into_pointer_value();
+            self.vars.insert(m.self_var_id, (self_ptr, Type::Class(cd.id)));
+
+            for (i, param) in m.params.iter().enumerate() {
+                let arg = fn_value
+                    .get_nth_param((i + 1) as u32)
+                    .expect("param exists");
+                let llvm_ty = self.llvm_basic_type(param.ty);
+                let alloca = self
+                    .builder
+                    .build_alloca(llvm_ty, &param.name)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_store(alloca, arg)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.vars.insert(param.id, (alloca, param.ty));
+                self.scope_stack
+                    .last_mut()
+                    .expect("just pushed")
+                    .push(param.id);
+            }
+            let body_val = self.lower_block(&m.body, program)?;
+            self.scope_stack.pop();
+            self.builder
+                .build_return(Some(&body_val))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            // Silence unused-var warnings on SelfKind for now.
+            let _ = m.self_kind;
+            let _ = SelfKind::Shared;
+        }
         Ok(())
     }
 
@@ -2548,6 +2822,12 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // Handle/Perform/ResumeKont bail at lower_expr.
                 // Defensive.
             }
+            Type::Class(_) => {
+                // C4.1 / ADR 0022 D9: class drop reuses struct
+                // recursive field drop machinery. Classes own
+                // their fields and follow the standard pattern.
+                self.emit_drop_struct_fields(ptr, ty, program)?;
+            }
         }
         Ok(())
     }
@@ -3358,6 +3638,61 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             TypedExprKind::Handle { body, arms, return_arm, .. } => {
                 self.lower_handle(body, arms, return_arm.as_deref(), program)
             }
+            // C4.1 / ADR 0022 D7: lower a postfix method call.
+            // Get the receiver pointer via lower_lvalue_ptr (the
+            // typed AST guarantees the target is an lvalue when
+            // class-typed; non-lvalue receivers are deferred).
+            // Emit a direct call to ClassName__method.
+            TypedExprKind::MethodCall { target, class_id, method_index, args, .. } => {
+                let self_ptr = self.lower_lvalue_ptr(target, program)?;
+                let method_fn = *self
+                    .class_method_fns
+                    .get(&(*class_id, *method_index))
+                    .expect("method fn declared in pass 1");
+                let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> =
+                    vec![self_ptr.into()];
+                for a in args {
+                    let v = self.lower_expr(a, program)?;
+                    call_args.push(v.into());
+                }
+                let call_site = self
+                    .builder
+                    .build_call(method_fn, &call_args, "methodcall")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                Ok(call_site
+                    .try_as_basic_value()
+                    .left()
+                    .expect("method returns a value"))
+            }
+            // C4.1 / ADR 0022 D5 + D9: lower `Name::init(args)`.
+            // Allocate an instance of the class struct on the
+            // stack, pass its pointer as out_ptr to the init fn,
+            // then load the now-constructed value.
+            TypedExprKind::ClassInit { id, args, .. } => {
+                let class_struct_ty = self.class_types[id];
+                let alloca = self
+                    .builder
+                    .build_alloca(class_struct_ty, "classinit")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                let init_fn = *self
+                    .class_init_fns
+                    .get(id)
+                    .expect("init fn declared in pass 1");
+                let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> =
+                    vec![alloca.into()];
+                for a in args {
+                    let v = self.lower_expr(a, program)?;
+                    call_args.push(v.into());
+                }
+                self.builder
+                    .build_call(init_fn, &call_args, "init")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                let loaded = self
+                    .builder
+                    .build_load(class_struct_ty, alloca, "initval")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                Ok(loaded)
+            }
         }
     }
 
@@ -4032,6 +4367,10 @@ fn expr_performs(expr: &TypedExpr) -> bool {
         TypedExprKind::Index { target, index, .. } => {
             expr_performs(target) || expr_performs(index)
         }
+        TypedExprKind::MethodCall { target, args, .. } => {
+            expr_performs(target) || args.iter().any(expr_performs)
+        }
+        TypedExprKind::ClassInit { args, .. } => args.iter().any(expr_performs),
     }
 }
 
@@ -4285,6 +4624,17 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
                 walk_collect_var_refs(a, acc);
             }
         }
+        TypedExprKind::MethodCall { target, args, .. } => {
+            walk_collect_var_refs(target, acc);
+            for a in args {
+                walk_collect_var_refs(a, acc);
+            }
+        }
+        TypedExprKind::ClassInit { args, .. } => {
+            for a in args {
+                walk_collect_var_refs(a, acc);
+            }
+        }
     }
 }
 
@@ -4358,6 +4708,10 @@ fn count_performs(expr: &TypedExpr) -> usize {
                     .map_or(0, |ra| count_performs(&ra.body))
         }
         TypedExprKind::ResumeKont { args, .. } => args.iter().map(count_performs).sum(),
+        TypedExprKind::MethodCall { target, args, .. } => {
+            count_performs(target) + args.iter().map(count_performs).sum::<usize>()
+        }
+        TypedExprKind::ClassInit { args, .. } => args.iter().map(count_performs).sum(),
     }
 }
 
@@ -4435,6 +4789,10 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
                     .and_then(|ra| find_unique_perform(&ra.body))
             }),
         TypedExprKind::ResumeKont { args, .. } => args.iter().find_map(find_unique_perform),
+        TypedExprKind::MethodCall { target, args, .. } => {
+            find_unique_perform(target).or_else(|| args.iter().find_map(find_unique_perform))
+        }
+        TypedExprKind::ClassInit { args, .. } => args.iter().find_map(find_unique_perform),
     }
 }
 
@@ -4558,12 +4916,16 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
             index: Box::new(substitute_perform_with_var(index, placeholder_id)),
             elem_ty: *elem_ty,
         },
-        TypedExprKind::Handle { .. } | TypedExprKind::ResumeKont { .. } => {
+        TypedExprKind::Handle { .. }
+        | TypedExprKind::ResumeKont { .. }
+        | TypedExprKind::MethodCall { .. }
+        | TypedExprKind::ClassInit { .. } => {
             // C3.5(d) MVP: the embedded-perform shape only fires
             // when count_performs(tail) == 1. Substituting a
-            // Handle / ResumeKont preserves them as is — they
-            // have no perform inside (the count would exceed 1).
-            // Conservative: clone the kind unchanged.
+            // Handle / ResumeKont / MethodCall / ClassInit
+            // preserves them as is — they don't have a perform
+            // inside (the count would exceed 1). Conservative:
+            // clone the kind unchanged.
             return TypedExpr {
                 kind: clone_expr_kind(&expr.kind),
                 span: expr.span.clone(),
@@ -4787,6 +5149,13 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
                 })
         }
         TypedExprKind::Perform { args, .. } | TypedExprKind::ResumeKont { args, .. } => {
+            args.iter().find_map(|a| find_var_name_in_expr(a, id))
+        }
+        TypedExprKind::MethodCall { target, args, .. } => {
+            find_var_name_in_expr(target, id)
+                .or_else(|| args.iter().find_map(|a| find_var_name_in_expr(a, id)))
+        }
+        TypedExprKind::ClassInit { args, .. } => {
             args.iter().find_map(|a| find_var_name_in_expr(a, id))
         }
     }

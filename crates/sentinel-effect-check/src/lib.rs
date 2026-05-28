@@ -352,6 +352,24 @@ fn walk_expr(
                 walk_expr(a, effective, acc);
             }
         }
+        // C4.1 / ADR 0022 D3: method calls walk the receiver +
+        // args. Method-effect propagation through the receiver's
+        // class method-effect table is a follow-on (matches the
+        // free-fn pattern via the class's method signature).
+        TypedExprKind::MethodCall { target, args, .. } => {
+            walk_expr(target, effective, acc);
+            for a in args {
+                walk_expr(a, effective, acc);
+            }
+        }
+        // C4.1 / ADR 0022 D5: `Name::init(args)` walks its args.
+        // The init's effect-row is empty at C4.1 (init has no
+        // effect annotation surface — D4); future ADR can extend.
+        TypedExprKind::ClassInit { args, .. } => {
+            for a in args {
+                walk_expr(a, effective, acc);
+            }
+        }
     }
 }
 

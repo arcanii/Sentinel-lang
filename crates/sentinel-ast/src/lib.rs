@@ -242,6 +242,29 @@ pub enum ExprKind {
         op: Spanned<String>,
         args: Vec<Expr>,
     },
+    /// Postfix method call `target.method(args)` per ADR 0022 D3 +
+    /// D7 (C4.1). The auto-ref rule at type-check time inserts the
+    /// matching `&target` / `&mut target` based on the method's
+    /// `self_kind`. The method name stays as a string here — the
+    /// type checker looks it up against the receiver's class type
+    /// in pass 2 (after fn / class signatures are populated).
+    MethodCall {
+        target: Box<Expr>,
+        method: String,
+        method_span: Span,
+        args: Vec<Expr>,
+    },
+    /// `Name::init(args)` class instantiation per ADR 0022 D5
+    /// (C4.1). The struct-literal syntax `Name { ... }` is
+    /// rejected for classes — every class flows through `init`
+    /// to enforce D4's no-half-constructed invariant. Resolve
+    /// validates the class name; type-check validates arg types
+    /// against the init signature.
+    ClassInit {
+        class_name: String,
+        class_name_span: Span,
+        args: Vec<Expr>,
+    },
 }
 
 /// A single operation arm inside a `handle ... with { ... }`
@@ -708,6 +731,20 @@ impl fmt::Display for ExprKind {
             }
             ExprKind::Perform { effect, op, args } => {
                 write!(f, "(perform {}.{}", effect.kind, op.kind)?;
+                for a in args {
+                    write!(f, " {}", a.kind)?;
+                }
+                write!(f, ")")
+            }
+            ExprKind::MethodCall { target, method, args, .. } => {
+                write!(f, "(. {} {}", target.kind, method)?;
+                for a in args {
+                    write!(f, " {}", a.kind)?;
+                }
+                write!(f, ")")
+            }
+            ExprKind::ClassInit { class_name, args, .. } => {
+                write!(f, "({class_name}::init")?;
                 for a in args {
                     write!(f, " {}", a.kind)?;
                 }

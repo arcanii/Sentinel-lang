@@ -30,8 +30,9 @@ use std::collections::{HashMap, HashSet};
 
 use salsa::Accumulator;
 use sentinel_ast::{
-    BinOp, Block, CmpOp, Expr, ExprKind, FnDef, HandlerArm, LogicOp, Program, ReturnArm, Span,
-    Spanned, Stmt, StmtKind, TypeExpr, TypeParam as AstTypeParam, UnaryOp,
+    BinOp, Block, ClassDecl, CmpOp, Expr, ExprKind, FnDef, HandlerArm, LogicOp, Program, ReturnArm,
+    SelfKind, Span, Spanned, Stmt, StmtKind, TypeExpr, TypeParam as AstTypeParam, UnaryOp,
+    Visibility,
 };
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 
@@ -77,6 +78,13 @@ pub const LEN_FN_ID: FnId = FnId(3);
 /// at 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StructId(pub u32);
+
+/// Identifier for a top-level class declaration per ADR 0022 D1
+/// (C4.1). Unique per-program; assigned in source order starting
+/// at 0. ClassId indexes into [`ResolvedProgram::classes`] /
+/// `TypedProgram::class_decls`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ClassId(pub u32);
 
 /// Position-indexed identifier for a generic type parameter
 /// inside the surrounding fn / struct, added at C1.7 per ADR
@@ -143,6 +151,12 @@ pub struct ResolvedProgram {
     /// signatures' effect-row annotations can reference effect
     /// names.
     pub effects: Vec<ResolvedEffectDecl>,
+    /// C4.1 / ADR 0022 D1: top-level class declarations. Each
+    /// carries its own [`ClassId`] matching its index here. The
+    /// class table is built alongside the struct table so type
+    /// annotations like `let p: Point = ...` can be resolved
+    /// against either.
+    pub classes: Vec<ResolvedClassDecl>,
     pub span: Span,
 }
 
@@ -205,6 +219,73 @@ pub struct ResolvedStructField {
     pub name: String,
     pub name_span: Span,
     pub ty: TypeExpr,
+    pub span: Span,
+}
+
+/// A class declaration after name resolution per ADR 0022 D1
+/// (C4.1). The [`ClassId`] matches its index in
+/// [`ResolvedProgram::classes`]. Field-type annotations and the
+/// init/method param/return types stay as [`TypeExpr`] (string-
+/// keyed) — sentinel-types resolves them at the typing pass,
+/// looking up names against the class table built here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedClassDecl {
+    pub id: ClassId,
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<ResolvedClassField>,
+    pub init: Option<ResolvedInitDef>,
+    pub methods: Vec<ResolvedMethodDef>,
+    pub span: Span,
+}
+
+/// A single class field after name resolution per ADR 0022 D2.
+/// Visibility is parsed and propagated but never enforced at C4.1
+/// (per D2 the enforcement substrate is Phase C5's module system).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedClassField {
+    pub visibility: Visibility,
+    pub name: String,
+    pub name_span: Span,
+    pub ty: TypeExpr,
+    pub span: Span,
+}
+
+/// The resolved `init(params) { body }` constructor of a class per
+/// ADR 0022 D4. The synthetic `self_var_id` is bound inside the
+/// body (so `self.field = expr` inside init resolves through the
+/// usual Var-lookup path).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedInitDef {
+    pub visibility: Visibility,
+    /// VarId of the synthetic `self` binding inside the init body.
+    /// Allocated by resolve so type-check + codegen don't need to
+    /// re-thread the receiver.
+    pub self_var_id: VarId,
+    pub params: Vec<ResolvedParam>,
+    pub body: ResolvedBlock,
+    pub span: Span,
+}
+
+/// A resolved method declaration per ADR 0022 D3. Methods take
+/// `self: &Self` or `self: &mut Self` as the implicit first
+/// parameter (captured here as `self_kind`); the explicit
+/// `params` exclude `self`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedMethodDef {
+    pub visibility: Visibility,
+    pub name: String,
+    pub name_span: Span,
+    pub self_kind: SelfKind,
+    /// VarId of the synthetic `self` binding inside the method
+    /// body, allocated by resolve.
+    pub self_var_id: VarId,
+    pub params: Vec<ResolvedParam>,
+    pub return_type: TypeExpr,
+    /// Effect-row annotation (each name → [`EffectId`]).
+    /// Empty for methods without an annotation.
+    pub effect_row: Vec<EffectId>,
+    pub body: ResolvedBlock,
     pub span: Span,
 }
 
@@ -405,6 +486,25 @@ pub enum ResolvedExprKind {
     ResumeKont {
         kont: VarId,
         callee_span: Span,
+        args: Vec<ResolvedExpr>,
+    },
+    /// C4.1 / ADR 0022 D3 + D7: postfix method call
+    /// `target.method(args)`. The method name stays as a string
+    /// here — type-check looks it up against the receiver's class
+    /// type and inserts the auto-ref of `target` per ADR 0021 D2.
+    MethodCall {
+        target: Box<ResolvedExpr>,
+        method: String,
+        method_span: Span,
+        args: Vec<ResolvedExpr>,
+    },
+    /// C4.1 / ADR 0022 D5: `Name::init(args)` class instantiation.
+    /// The class's [`ClassId`] is resolved here; arg-typechecking
+    /// against the init's params happens in type-check.
+    ClassInit {
+        id: ClassId,
+        name: String,
+        name_span: Span,
         args: Vec<ResolvedExpr>,
     },
 }
@@ -658,6 +758,75 @@ pub enum ResolveError {
         #[label("duplicate arm")]
         span: miette::SourceSpan,
     },
+
+    /// C4.1 / ADR 0022 D1: two `class` declarations share the
+    /// same name. Class names share a namespace with structs at
+    /// C4.1 — `struct Point` and `class Point` collide.
+    #[error("class `{name}` is already declared")]
+    #[diagnostic(
+        code(sentinel::resolve::redefined_class),
+        help("each class name must be unique within a program; class and struct names share a namespace at C4.1")
+    )]
+    RedefinedClass {
+        name: String,
+        #[label("redefinition here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.1 / ADR 0022 D5: `Name::init(args)` references an
+    /// unknown class. Surfaces at resolve when `Name` is not in
+    /// the class table.
+    #[error("undefined class `{name}` in `{name}::init(...)`")]
+    #[diagnostic(
+        code(sentinel::resolve::undefined_class),
+        help("declare it with `class {name} {{ ... }}` at the top level before this reference")
+    )]
+    UndefinedClass {
+        name: String,
+        #[label("no such class")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.1 / ADR 0022 D2: two `let` field declarations inside
+    /// the same class share a name.
+    #[error("class `{class_name}` declares field `{field_name}` twice")]
+    #[diagnostic(
+        code(sentinel::resolve::duplicate_class_field),
+        help("each field name must be unique within a class")
+    )]
+    DuplicateClassField {
+        class_name: String,
+        field_name: String,
+        #[label("redeclaration here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.1 / ADR 0022 D3: two methods inside the same class
+    /// share a name (no method overloading at C4.1 — D3).
+    #[error("class `{class_name}` declares method `{method_name}` twice")]
+    #[diagnostic(
+        code(sentinel::resolve::duplicate_class_method),
+        help("methods share a namespace per class at C4.1; no method overloading")
+    )]
+    DuplicateClassMethod {
+        class_name: String,
+        method_name: String,
+        #[label("redeclaration here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.1 / ADR 0022 D8: `self` (the value) appears outside a
+    /// class method or init body. Lexer reserves `self` from C4.0
+    /// onward; resolve enforces the in-class-context constraint.
+    #[error("`self` is only valid inside a class method or `init` body")]
+    #[diagnostic(
+        code(sentinel::resolve::self_outside_class_context),
+        help("the `self` receiver appears only as the implicit first parameter of a class method or `init` per ADR 0022 D8")
+    )]
+    SelfOutsideClassContext {
+        #[label("`self` used here")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -779,6 +948,23 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         });
     }
 
+    // C4.1 / ADR 0022 D1: collect class declarations. Class names
+    // share a namespace with structs — a class named `Point`
+    // collides with `struct Point`. ClassIds index into
+    // resolved_classes; field + method bodies are resolved in
+    // Pass 3 (after fn_table is populated, so methods can call
+    // free fns).
+    let mut class_table: HashMap<String, ClassId> = HashMap::new();
+    for (idx, cd) in program.classes.iter().enumerate() {
+        if struct_table.contains_key(&cd.name) || class_table.contains_key(&cd.name) {
+            return Err(ResolveError::RedefinedClass {
+                name: cd.name.clone(),
+                span: to_source_span(&cd.name_span),
+            });
+        }
+        class_table.insert(cd.name.clone(), ClassId(idx as u32));
+    }
+
     // Pre-register the runtime builtins. The runtime (and codegen
     // for C1.5's generic builtins) supplies them; user code can't
     // redefine them (that path errors as RedefinedFunction below).
@@ -869,6 +1055,29 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
             &fn_table,
             &signatures,
             &struct_table,
+            &class_table,
+            &effect_table,
+            &resolved_effects,
+            &mut next_var_id,
+        )?);
+    }
+
+    // Pass 3: resolve each class body (init + methods). Mirrors
+    // Pass 2 but threads a synthetic `self` binding into the
+    // body's scope per ADR 0022 D8. Per-class field name
+    // uniqueness is enforced here.
+    let mut resolved_classes = Vec::with_capacity(program.classes.len());
+    for cd in program.classes.iter() {
+        let class_id = *class_table
+            .get(&cd.name)
+            .expect("registered in Pass 0c");
+        resolved_classes.push(resolve_class_decl(
+            cd,
+            class_id,
+            &fn_table,
+            &signatures,
+            &struct_table,
+            &class_table,
             &effect_table,
             &resolved_effects,
             &mut next_var_id,
@@ -880,15 +1089,18 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         fn_signatures: signatures,
         structs: resolved_structs,
         effects: resolved_effects,
+        classes: resolved_classes,
         span: program.span.clone(),
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_fn(
     fn_def: &FnDef,
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
     struct_table: &HashMap<String, StructId>,
+    class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
     next_var_id: &mut u32,
@@ -941,6 +1153,7 @@ fn resolve_fn(
         fn_table,
         signatures,
         struct_table,
+        class_table,
         effect_table,
         effects,
         &mut vars,
@@ -957,6 +1170,177 @@ fn resolve_fn(
         effect_row,
         body,
         span: fn_def.span.clone(),
+    })
+}
+
+/// C4.1 / ADR 0022 D1: resolve a class declaration end-to-end —
+/// the field list (rejecting duplicate field names), the optional
+/// init body (binding the synthetic `self` VarId), and each
+/// method body (binding `self` per its self_kind).
+#[allow(clippy::too_many_arguments)]
+fn resolve_class_decl(
+    cd: &ClassDecl,
+    class_id: ClassId,
+    fn_table: &HashMap<String, FnId>,
+    signatures: &[FnSignature],
+    struct_table: &HashMap<String, StructId>,
+    class_table: &HashMap<String, ClassId>,
+    effect_table: &HashMap<String, EffectId>,
+    effects: &[ResolvedEffectDecl],
+    next_var_id: &mut u32,
+) -> Result<ResolvedClassDecl, ResolveError> {
+    // Field list: name uniqueness + type-expr carry-through.
+    let mut field_names: HashSet<String> = HashSet::new();
+    let mut fields: Vec<ResolvedClassField> = Vec::with_capacity(cd.fields.len());
+    for f in &cd.fields {
+        if !field_names.insert(f.name.clone()) {
+            return Err(ResolveError::DuplicateClassField {
+                class_name: cd.name.clone(),
+                field_name: f.name.clone(),
+                span: to_source_span(&f.name_span),
+            });
+        }
+        fields.push(ResolvedClassField {
+            visibility: f.visibility,
+            name: f.name.clone(),
+            name_span: f.name_span.clone(),
+            ty: f.ty.clone(),
+            span: f.span.clone(),
+        });
+    }
+
+    // Init body: bind `self` + params, resolve the trailing block.
+    let init = if let Some(init_def) = &cd.init {
+        let mut vars: HashMap<String, VarId> = HashMap::new();
+        let self_var_id = VarId(*next_var_id);
+        *next_var_id += 1;
+        vars.insert("self".to_string(), self_var_id);
+
+        let mut init_params = Vec::with_capacity(init_def.params.len());
+        for p in &init_def.params {
+            if vars.contains_key(&p.name) {
+                return Err(ResolveError::RedeclaredVariable {
+                    name: p.name.clone(),
+                    span: to_source_span(&p.span),
+                });
+            }
+            let vid = VarId(*next_var_id);
+            *next_var_id += 1;
+            vars.insert(p.name.clone(), vid);
+            init_params.push(ResolvedParam {
+                id: vid,
+                mutable: p.mutable,
+                name: p.name.clone(),
+                span: p.span.clone(),
+                ty: p.ty.clone(),
+            });
+        }
+        let body = resolve_block(
+            &init_def.body,
+            fn_table,
+            signatures,
+            struct_table,
+            class_table,
+            effect_table,
+            effects,
+            &mut vars,
+            next_var_id,
+        )?;
+        Some(ResolvedInitDef {
+            visibility: init_def.visibility,
+            self_var_id,
+            params: init_params,
+            body,
+            span: init_def.span.clone(),
+        })
+    } else {
+        None
+    };
+
+    // Methods: name uniqueness within the class + per-method body
+    // resolution with synthetic `self`.
+    let mut method_names: HashSet<String> = HashSet::new();
+    let mut methods: Vec<ResolvedMethodDef> = Vec::with_capacity(cd.methods.len());
+    for m in &cd.methods {
+        if !method_names.insert(m.name.clone()) {
+            return Err(ResolveError::DuplicateClassMethod {
+                class_name: cd.name.clone(),
+                method_name: m.name.clone(),
+                span: to_source_span(&m.name_span),
+            });
+        }
+        let mut vars: HashMap<String, VarId> = HashMap::new();
+        let self_var_id = VarId(*next_var_id);
+        *next_var_id += 1;
+        vars.insert("self".to_string(), self_var_id);
+
+        let mut m_params = Vec::with_capacity(m.params.len());
+        for p in &m.params {
+            if vars.contains_key(&p.name) {
+                return Err(ResolveError::RedeclaredVariable {
+                    name: p.name.clone(),
+                    span: to_source_span(&p.span),
+                });
+            }
+            let vid = VarId(*next_var_id);
+            *next_var_id += 1;
+            vars.insert(p.name.clone(), vid);
+            m_params.push(ResolvedParam {
+                id: vid,
+                mutable: p.mutable,
+                name: p.name.clone(),
+                span: p.span.clone(),
+                ty: p.ty.clone(),
+            });
+        }
+
+        // Resolve the effect-row annotation, mirroring resolve_fn.
+        let mut method_effect_row = Vec::with_capacity(m.effect_row.len());
+        for entry in &m.effect_row {
+            let eid = effect_table.get(&entry.kind).ok_or_else(|| {
+                ResolveError::UndefinedEffect {
+                    name: entry.kind.clone(),
+                    fn_name: format!("{}::{}", cd.name, m.name),
+                    span: to_source_span(&entry.span),
+                }
+            })?;
+            method_effect_row.push(*eid);
+        }
+
+        let body = resolve_block(
+            &m.body,
+            fn_table,
+            signatures,
+            struct_table,
+            class_table,
+            effect_table,
+            effects,
+            &mut vars,
+            next_var_id,
+        )?;
+
+        methods.push(ResolvedMethodDef {
+            visibility: m.visibility,
+            name: m.name.clone(),
+            name_span: m.name_span.clone(),
+            self_kind: m.self_kind,
+            self_var_id,
+            params: m_params,
+            return_type: m.return_type.clone(),
+            effect_row: method_effect_row,
+            body,
+            span: m.span.clone(),
+        });
+    }
+
+    Ok(ResolvedClassDecl {
+        id: class_id,
+        name: cd.name.clone(),
+        name_span: cd.name_span.clone(),
+        fields,
+        init,
+        methods,
+        span: cd.span.clone(),
     })
 }
 
@@ -990,6 +1374,7 @@ fn resolve_block(
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
     struct_table: &HashMap<String, StructId>,
+    class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
     vars: &mut HashMap<String, VarId>,
@@ -1002,6 +1387,7 @@ fn resolve_block(
             fn_table,
             signatures,
             struct_table,
+            class_table,
             effect_table,
             effects,
             vars,
@@ -1013,6 +1399,7 @@ fn resolve_block(
         fn_table,
         signatures,
         struct_table,
+        class_table,
         effect_table,
         effects,
         vars,
@@ -1031,6 +1418,7 @@ fn resolve_stmt(
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
     struct_table: &HashMap<String, StructId>,
+    class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
     vars: &mut HashMap<String, VarId>,
@@ -1047,6 +1435,7 @@ fn resolve_stmt(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1076,6 +1465,7 @@ fn resolve_stmt(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1086,6 +1476,7 @@ fn resolve_stmt(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1098,6 +1489,7 @@ fn resolve_stmt(
             fn_table,
             signatures,
             struct_table,
+            class_table,
             effect_table,
             effects,
             vars,
@@ -1113,6 +1505,7 @@ fn resolve_expr(
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
     struct_table: &HashMap<String, StructId>,
+    class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
     vars: &mut HashMap<String, VarId>,
@@ -1123,13 +1516,26 @@ fn resolve_expr(
         ExprKind::BoolLit(b) => ResolvedExprKind::BoolLit(*b),
         ExprKind::NullLit => ResolvedExprKind::NullLit,
         ExprKind::Var(name) => {
-            let id =
-                *vars
-                    .get(name)
-                    .ok_or_else(|| ResolveError::UndefinedVariable {
+            let id = match vars.get(name) {
+                Some(id) => *id,
+                None if name == "self" => {
+                    // C4.1 / ADR 0022 D8: `self` is only valid
+                    // inside class methods / init bodies. Per the
+                    // resolve pass's class context, `self` is
+                    // pre-bound there; outside, it surfaces as a
+                    // dedicated diagnostic instead of the generic
+                    // UndefinedVariable.
+                    return Err(ResolveError::SelfOutsideClassContext {
+                        span: to_source_span(&expr.span),
+                    });
+                }
+                None => {
+                    return Err(ResolveError::UndefinedVariable {
                         name: name.clone(),
                         span: to_source_span(&expr.span),
-                    })?;
+                    });
+                }
+            };
             ResolvedExprKind::Var(id)
         }
         ExprKind::Unary(op, inner) => ResolvedExprKind::Unary(
@@ -1139,6 +1545,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1151,6 +1558,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1161,6 +1569,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1174,6 +1583,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1184,6 +1594,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1197,6 +1608,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1207,6 +1619,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1219,6 +1632,7 @@ fn resolve_expr(
             fn_table,
             signatures,
             struct_table,
+            class_table,
             effect_table,
             effects,
             vars,
@@ -1230,6 +1644,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1240,6 +1655,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1250,6 +1666,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1276,6 +1693,7 @@ fn resolve_expr(
                         fn_table,
                         signatures,
                         struct_table,
+                        class_table,
                         effect_table,
                         effects,
                         vars,
@@ -1311,6 +1729,7 @@ fn resolve_expr(
                         fn_table,
                         signatures,
                         struct_table,
+                        class_table,
                         effect_table,
                         effects,
                         vars,
@@ -1339,6 +1758,7 @@ fn resolve_expr(
                     fn_table,
                     signatures,
                     struct_table,
+                    class_table,
                     effect_table,
                     effects,
                     vars,
@@ -1364,6 +1784,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1383,6 +1804,7 @@ fn resolve_expr(
                     fn_table,
                     signatures,
                     struct_table,
+                    class_table,
                     effect_table,
                     effects,
                     vars,
@@ -1397,6 +1819,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1407,6 +1830,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1426,6 +1850,7 @@ fn resolve_expr(
                 fn_table,
                 signatures,
                 struct_table,
+                class_table,
                 effect_table,
                 effects,
                 vars,
@@ -1440,6 +1865,7 @@ fn resolve_expr(
             fn_table,
             signatures,
             struct_table,
+            class_table,
             effect_table,
             effects,
             vars,
@@ -1452,11 +1878,80 @@ fn resolve_expr(
             fn_table,
             signatures,
             struct_table,
+            class_table,
             effect_table,
             effects,
             vars,
             next_var_id,
         )?,
+        ExprKind::MethodCall { target, method, method_span, args } => {
+            // C4.1 / ADR 0022 D3 + D7: resolve target + args; the
+            // method name stays a string. The typing layer looks
+            // it up against the receiver's class.
+            let target_r = resolve_expr(
+                target,
+                fn_table,
+                signatures,
+                struct_table,
+                class_table,
+                effect_table,
+                effects,
+                vars,
+                next_var_id,
+            )?;
+            let mut resolved_args = Vec::with_capacity(args.len());
+            for a in args {
+                resolved_args.push(resolve_expr(
+                    a,
+                    fn_table,
+                    signatures,
+                    struct_table,
+                    class_table,
+                    effect_table,
+                    effects,
+                    vars,
+                    next_var_id,
+                )?);
+            }
+            ResolvedExprKind::MethodCall {
+                target: Box::new(target_r),
+                method: method.clone(),
+                method_span: method_span.clone(),
+                args: resolved_args,
+            }
+        }
+        ExprKind::ClassInit { class_name, class_name_span, args } => {
+            // C4.1 / ADR 0022 D5: `Name::init(args)` — look up
+            // the class. Arity / param type checks are the typing
+            // layer's responsibility.
+            let id =
+                *class_table
+                    .get(class_name)
+                    .ok_or_else(|| ResolveError::UndefinedClass {
+                        name: class_name.clone(),
+                        span: to_source_span(class_name_span),
+                    })?;
+            let mut resolved_args = Vec::with_capacity(args.len());
+            for a in args {
+                resolved_args.push(resolve_expr(
+                    a,
+                    fn_table,
+                    signatures,
+                    struct_table,
+                    class_table,
+                    effect_table,
+                    effects,
+                    vars,
+                    next_var_id,
+                )?);
+            }
+            ResolvedExprKind::ClassInit {
+                id,
+                name: class_name.clone(),
+                name_span: class_name_span.clone(),
+                args: resolved_args,
+            }
+        }
     };
     Ok(Spanned { kind, span: expr.span.clone() })
 }
@@ -1473,6 +1968,7 @@ fn resolve_handle_expr(
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
     struct_table: &HashMap<String, StructId>,
+    class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
     vars: &mut HashMap<String, VarId>,
@@ -1483,6 +1979,7 @@ fn resolve_handle_expr(
         fn_table,
         signatures,
         struct_table,
+        class_table,
         effect_table,
         effects,
         vars,
@@ -1551,6 +2048,7 @@ fn resolve_handle_expr(
             fn_table,
             signatures,
             struct_table,
+            class_table,
             effect_table,
             effects,
             vars,
@@ -1583,6 +2081,7 @@ fn resolve_handle_expr(
             fn_table,
             signatures,
             struct_table,
+            class_table,
             effect_table,
             effects,
             vars,
@@ -1615,6 +2114,7 @@ fn resolve_perform_expr(
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
     struct_table: &HashMap<String, StructId>,
+    class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
     vars: &mut HashMap<String, VarId>,
@@ -1643,6 +2143,7 @@ fn resolve_perform_expr(
             fn_table,
             signatures,
             struct_table,
+            class_table,
             effect_table,
             effects,
             vars,
@@ -1785,6 +2286,31 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
             format!(
                 "duplicate handler arm for `{effect_name}.{op_name}` in this `handle`"
             ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::RedefinedClass { name, span } => (
+            "sentinel::resolve::redefined_class",
+            format!("class `{name}` is already declared"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::UndefinedClass { name, span } => (
+            "sentinel::resolve::undefined_class",
+            format!("undefined class `{name}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::DuplicateClassField { class_name, field_name, span } => (
+            "sentinel::resolve::duplicate_class_field",
+            format!("class `{class_name}` declares field `{field_name}` twice"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::DuplicateClassMethod { class_name, method_name, span } => (
+            "sentinel::resolve::duplicate_class_method",
+            format!("class `{class_name}` declares method `{method_name}` twice"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::SelfOutsideClassContext { span } => (
+            "sentinel::resolve::self_outside_class_context",
+            "`self` is only valid inside a class method or `init` body".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -2124,6 +2650,122 @@ mod tests {
         assert_eq!(t["A"], StructId(0));
         assert_eq!(t["B"], StructId(1));
         assert_eq!(t.len(), 2);
+    }
+
+    // ----- C4.1 (2/N): classes -----
+
+    #[test]
+    fn resolves_class_decl_assigns_id_zero() {
+        let p = resolve_ok(
+            "class Point { let x: i64; let y: i64; init(x: i64, y: i64) { self.x = x; self.y = y; 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.classes.len(), 1);
+        let c = &p.classes[0];
+        assert_eq!(c.id, ClassId(0));
+        assert_eq!(c.name, "Point");
+        assert_eq!(c.fields.len(), 2);
+        assert!(c.init.is_some());
+        assert!(c.methods.is_empty());
+    }
+
+    #[test]
+    fn resolves_class_init_call() {
+        let p = resolve_ok(
+            "class P { let x: i64; init(x: i64) { self.x = x; 0 } }\nfn main() -> i64 { let p = P::init(5); 0 }",
+        );
+        let main = p.main();
+        if let ResolvedStmtKind::Let { value, .. } = &main.body.stmts[0].kind {
+            assert!(matches!(
+                &value.kind,
+                ResolvedExprKind::ClassInit { id, name, args, .. }
+                    if *id == ClassId(0) && name == "P" && args.len() == 1
+            ));
+        } else {
+            panic!("expected let");
+        }
+    }
+
+    #[test]
+    fn resolves_method_call_postfix() {
+        let p = resolve_ok(
+            "class P { let x: i64; init(v: i64) { self.x = v; 0 } pub fn get(self: &Self) -> i64 { self.x } }\n\
+             fn main() -> i64 { let p = P::init(7); p.get() }",
+        );
+        let tail = &p.main().body.tail;
+        match &tail.kind {
+            ResolvedExprKind::MethodCall { method, args, .. } => {
+                assert_eq!(method, "get");
+                assert!(args.is_empty());
+            }
+            other => panic!("expected MethodCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redefined_class_errors() {
+        let err = resolve_err(
+            "class C { let x: i64; init(v: i64) { self.x = v; 0 } } class C { let y: i64; init(v: i64) { self.y = v; 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, ResolveError::RedefinedClass { ref name, .. } if name == "C"));
+    }
+
+    #[test]
+    fn class_struct_name_collision_errors() {
+        let err = resolve_err(
+            "struct Pt { x: i64 } class Pt { let y: i64; init(v: i64) { self.y = v; 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, ResolveError::RedefinedClass { ref name, .. } if name == "Pt"));
+    }
+
+    #[test]
+    fn undefined_class_in_init_call_errors() {
+        let err = resolve_err("fn main() -> i64 { Bogus::init(1); 0 }");
+        assert!(matches!(err, ResolveError::UndefinedClass { ref name, .. } if name == "Bogus"));
+    }
+
+    #[test]
+    fn duplicate_class_field_errors() {
+        let err = resolve_err(
+            "class P { let x: i64; let x: i64; init(v: i64) { self.x = v; 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::DuplicateClassField { ref class_name, ref field_name, .. }
+                if class_name == "P" && field_name == "x"
+        ));
+    }
+
+    #[test]
+    fn duplicate_class_method_errors() {
+        let err = resolve_err(
+            "class P { let x: i64; init(v: i64) { self.x = v; 0 } pub fn get(self: &Self) -> i64 { self.x } pub fn get(self: &Self) -> i64 { 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::DuplicateClassMethod { ref class_name, ref method_name, .. }
+                if class_name == "P" && method_name == "get"
+        ));
+    }
+
+    #[test]
+    fn self_outside_class_context_errors() {
+        let err = resolve_err("fn main() -> i64 { self }");
+        assert!(matches!(err, ResolveError::SelfOutsideClassContext { .. }));
+    }
+
+    #[test]
+    fn self_inside_method_resolves() {
+        // self.x inside a method body should resolve cleanly.
+        let p = resolve_ok(
+            "class P { let x: i64; init(v: i64) { self.x = v; 0 } pub fn get(self: &Self) -> i64 { self.x } }\nfn main() -> i64 { 0 }",
+        );
+        let c = &p.classes[0];
+        let m = &c.methods[0];
+        if let ResolvedExprKind::FieldAccess { target, .. } = &m.body.tail.kind {
+            assert!(matches!(target.kind, ResolvedExprKind::Var(_)));
+        } else {
+            panic!("expected FieldAccess");
+        }
     }
 
     // ----- C1.5: null literal + builtin registration -----

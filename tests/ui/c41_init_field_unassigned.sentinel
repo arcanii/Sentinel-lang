@@ -1,0 +1,17 @@
+// C4.1 (2/N) / ADR 0022 D4: definite-assignment rejection.
+// `init` declares two fields but only assigns one — the
+// type-check pass surfaces `InitFieldMaybeUnassigned` for the
+// missing field.
+//
+// Expected: snc rejects with `sentinel::types::init_field_maybe_unassigned`.
+
+class Pair {
+    let a: i64;
+    let b: i64;
+    pub init(a: i64) {
+        self.a = a;
+        0
+    }
+}
+
+fn main() -> i64 { 0 }

@@ -1071,3 +1071,43 @@ fn c37_perform_outside_handle_rejects_at_effect_check() {
         "expected unhandled_effect; got: {stderr}"
     );
 }
+
+// ============================================================================
+// C4.1 (2/N) / ADR 0022: class declarations + method calls + Name::init(args)
+// end-to-end. AST + parser landed at C4.1 (1/N); resolve / types / codegen
+// wiring + the postfix method-call + ClassInit-call forms land here.
+// ============================================================================
+
+#[test]
+fn pass_c41_class_basic() {
+    // Smallest end-to-end class: single field + init + one
+    // shared-self method. `Point::init(7).get()` ⇒ exit 7.
+    let r = build_and_run("c41_class_basic.sentinel");
+    assert_eq!(r.exit, 7);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c41_go_no_go() {
+    // ADR 0022 D11 phase-go: Point with manhattan + translate.
+    // p starts at (10, 20). translate(3, 9) updates to (13, 29)
+    // and returns self.manhattan() = 42.
+    let r = build_and_run("c41_go_no_go.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn c41_init_field_unassigned_rejects_at_type_check() {
+    // ADR 0022 D4: every declared field must be definite-assigned
+    // inside `init`. A class with two fields but only one
+    // `self.field = ...` surfaces the
+    // `sentinel::types::init_field_maybe_unassigned` diagnostic.
+    let out = build_ui_fixture("c41_init_field_unassigned.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("init_field_maybe_unassigned"),
+        "expected init_field_maybe_unassigned; got: {stderr}"
+    );
+}

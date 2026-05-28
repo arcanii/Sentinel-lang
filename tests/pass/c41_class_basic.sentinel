@@ -1,0 +1,22 @@
+// C4.1 (2/N) / ADR 0022: smallest end-to-end class fixture. A
+// single-field Point with init constructor + one shared-self
+// method. main constructs an instance + calls the method, then
+// uses the result as the exit code.
+//
+// Expected: exit code 7.
+
+class Point {
+    let x: i64;
+    pub init(x: i64) {
+        self.x = x;
+        0
+    }
+    pub fn get(self: &Self) -> i64 {
+        self.x
+    }
+}
+
+fn main() -> i64 {
+    let p: Point = Point::init(7);
+    p.get()
+}

@@ -27,9 +27,10 @@ use salsa::Accumulator;
 use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, Spanned, TypeExpr, TypeExprKind, UnaryOp};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
-    EffectId, FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef,
+    ClassId, EffectId, FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef,
     ResolvedProgram, ResolvedStmt, ResolvedStmtKind, StructId, TypeParamId, VarId,
 };
+use sentinel_ast::SelfKind;
 
 // =============================================================================
 // Type universe
@@ -105,6 +106,12 @@ pub enum Type {
     /// (Var, let-bind, arithmetic, ...) is rejected at type-check
     /// with [`TypeError::KontUsedAsValue`].
     Kont(KontId),
+    /// C4.1 / ADR 0022 D1: user-defined class type tagged by
+    /// [`ClassId`]. Nominal equality, same as `Struct`. The
+    /// underlying field + method signatures live in
+    /// `TypedProgram.class_decls`. Stays `Copy` (a `ClassId` is
+    /// just a `u32`).
+    Class(ClassId),
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -370,7 +377,15 @@ impl Type {
             // representable — NullableInner has no Secret variant
             // at C3.1 (depth-1 composition limit). Caller surfaces
             // the appropriate diagnostic.
-            Type::Array(_) | Type::Nullable(_) | Type::Secret(_) | Type::Kont(_) => None,
+            // C4.1: `?Class` deferred (NullableInner gains no Class
+            // variant at C4.1; `?Class` shows up naturally only when
+            // classes become storable in arrays / nullable
+            // wrappers).
+            Type::Array(_)
+            | Type::Nullable(_)
+            | Type::Secret(_)
+            | Type::Kont(_)
+            | Type::Class(_) => None,
         }
     }
 
@@ -400,7 +415,8 @@ impl Type {
             | Type::Nullable(_)
             | Type::Ref(_)
             | Type::Secret(_)
-            | Type::Kont(_) => None,
+            | Type::Kont(_)
+            | Type::Class(_) => None,
         }
     }
 
@@ -426,7 +442,10 @@ impl Type {
         refs: &mut Vec<RefData>,
     ) -> Type {
         match self {
-            Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => self,
+            // Classes (like structs) don't carry TypeParam payloads
+            // at C4.1 (generic classes deferred per ADR 0022 D1);
+            // substitution is the identity.
+            Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) | Type::Class(_) => self,
             Type::TypeParam(id) => {
                 let idx = id.0 as usize;
                 debug_assert!(
@@ -665,6 +684,10 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             }
             format!("<kont#{}>", id.0)
         }
+        Type::Class(id) => match program.and_then(|p| p.class_decls.get(id.0 as usize)) {
+            Some(c) => c.name.clone(),
+            None => format!("<class#{}>", id.0),
+        },
     }
 }
 
@@ -682,6 +705,7 @@ impl std::fmt::Display for Type {
             Type::Ref(id) => write!(f, "<ref#{}>", id.0),
             Type::Secret(id) => write!(f, "<secret#{}>", id.0),
             Type::Kont(id) => write!(f, "<kont#{}>", id.0),
+            Type::Class(id) => write!(f, "<class#{}>", id.0),
         }
     }
 }
@@ -705,9 +729,11 @@ type TypeParamScope = HashMap<String, TypeParamId>;
 /// are explicitly rejected — that closes at C1.7.4b. Type-param
 /// args inside Nullable / Array are supported (e.g., `?T` and `[T]`
 /// inside a generic fn body).
+#[allow(clippy::too_many_arguments)]
 fn resolve_type_expr(
     te: &TypeExpr,
     struct_table: &HashMap<String, StructId>,
+    class_table: &HashMap<String, ClassId>,
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -717,6 +743,7 @@ fn resolve_type_expr(
     resolve_type_expr_with_scope(
         te,
         struct_table,
+        class_table,
         &empty,
         instances,
         refs,
@@ -725,9 +752,11 @@ fn resolve_type_expr(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_type_expr_with_scope(
     te: &TypeExpr,
     struct_table: &HashMap<String, StructId>,
+    class_table: &HashMap<String, ClassId>,
     type_param_scope: &TypeParamScope,
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
@@ -737,7 +766,8 @@ fn resolve_type_expr_with_scope(
     match &te.kind {
         TypeExprKind::Ident(name) => {
             // ADR 0016 D9 lookup precedence: type-param scope first,
-            // then struct table, then primitives.
+            // then struct table, then class table per ADR 0022 D1,
+            // then primitives.
             if let Some(&tp_id) = type_param_scope.get(name) {
                 return Ok(Type::TypeParam(tp_id));
             }
@@ -760,6 +790,8 @@ fn resolve_type_expr_with_scope(
                             });
                         }
                         Ok(Type::Struct(id))
+                    } else if let Some(&cid) = class_table.get(other) {
+                        Ok(Type::Class(cid))
                     } else {
                         Err(TypeError::UnknownType {
                             name: other.to_string(),
@@ -777,6 +809,7 @@ fn resolve_type_expr_with_scope(
             let inner_ty = resolve_type_expr_with_scope(
                 inner,
                 struct_table,
+                class_table,
                 type_param_scope,
                 instances,
                 refs,
@@ -799,6 +832,7 @@ fn resolve_type_expr_with_scope(
             let inner_ty = resolve_type_expr_with_scope(
                 inner,
                 struct_table,
+                class_table,
                 type_param_scope,
                 instances,
                 refs,
@@ -824,6 +858,7 @@ fn resolve_type_expr_with_scope(
             let inner_ty = resolve_type_expr_with_scope(
                 inner,
                 struct_table,
+                class_table,
                 type_param_scope,
                 instances,
                 refs,
@@ -889,6 +924,7 @@ fn resolve_type_expr_with_scope(
                         resolved_args.push(resolve_type_expr_with_scope(
                             arg,
                             struct_table,
+                            class_table,
                             type_param_scope,
                             instances,
                             refs,
@@ -910,6 +946,7 @@ fn resolve_type_expr_with_scope(
             let inner_ty = resolve_type_expr_with_scope(
                 inner,
                 struct_table,
+                class_table,
                 type_param_scope,
                 instances,
                 refs,
@@ -965,6 +1002,10 @@ pub struct TypedProgram {
     /// [`secrets`]. Populated during type-check of `handle ...
     /// with { ... }` expressions.
     pub konts: Vec<KontData>,
+    /// C4.1 / ADR 0022 D1: class declarations with resolved field
+    /// types + init signature + method signatures. Each ClassId
+    /// matches its index here.
+    pub class_decls: Vec<ClassData>,
     pub span: Span,
 }
 
@@ -1010,6 +1051,13 @@ impl TypedProgram {
     /// from [`check`] / [`intern_kont`].
     pub fn kont_data(&self, id: KontId) -> &KontData {
         &self.konts[id.0 as usize]
+    }
+
+    /// Look up the [`ClassData`] for a class type per ADR 0022 D1
+    /// (C4.1). Panics on out-of-range — IDs only come from
+    /// [`check`].
+    pub fn class_decl(&self, id: ClassId) -> &ClassData {
+        &self.class_decls[id.0 as usize]
     }
 }
 
@@ -1258,6 +1306,33 @@ impl TypedExpr {
                     kont_id: *kont_id,
                 }
             }
+            // C4.1 / ADR 0022: classes aren't generic at C4.1 so
+            // substitution is just a deep-clone with the same
+            // ClassId. Once generic classes land, the class's
+            // ClassData expands its generic-instance interner and
+            // the substitution looks up the right monomorphic
+            // instance — mirroring the C1.7 generic-struct pattern.
+            TypedExprKind::MethodCall {
+                target,
+                class_id,
+                method_index,
+                method,
+                method_span,
+                args,
+            } => TypedExprKind::MethodCall {
+                target: Box::new(target.substitute(subst, instances, refs)),
+                class_id: *class_id,
+                method_index: *method_index,
+                method: method.clone(),
+                method_span: method_span.clone(),
+                args: args.iter().map(|a| a.substitute(subst, instances, refs)).collect(),
+            },
+            TypedExprKind::ClassInit { id, name, name_span, args } => TypedExprKind::ClassInit {
+                id: *id,
+                name: name.clone(),
+                name_span: name_span.clone(),
+                args: args.iter().map(|a| a.substitute(subst, instances, refs)).collect(),
+            },
         };
         TypedExpr {
             kind,
@@ -1297,6 +1372,82 @@ pub struct TypedStructField {
     pub name: String,
     pub name_span: Span,
     pub ty: Type,
+    pub span: Span,
+}
+
+/// C4.1 / ADR 0022 D1: a class declaration after type-check, with
+/// every field-type annotation resolved + the init signature and
+/// per-method signatures populated. ClassId matches its index in
+/// `TypedProgram::class_decls`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClassData {
+    pub id: ClassId,
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<TypedClassField>,
+    pub init: Option<TypedInitDef>,
+    pub methods: Vec<TypedMethodDef>,
+    pub span: Span,
+}
+
+impl ClassData {
+    /// Find a method by name. Returns the index into `methods`
+    /// (used by codegen to pick the right mangled fn name) or
+    /// `None` if no such method.
+    pub fn method_index(&self, name: &str) -> Option<usize> {
+        self.methods.iter().position(|m| m.name == name)
+    }
+
+    /// Find a field by name. Returns (index, type) or None.
+    pub fn field(&self, name: &str) -> Option<(usize, &TypedClassField)> {
+        self.fields
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.name == name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedClassField {
+    pub visibility: sentinel_ast::Visibility,
+    pub name: String,
+    pub name_span: Span,
+    pub ty: Type,
+    pub span: Span,
+}
+
+/// The type-checked `init(params)` constructor of a class per ADR
+/// 0022 D4. The body has been type-checked with a synthetic `self`
+/// binding; codegen emits an `out_ptr` ABI per D9.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedInitDef {
+    pub visibility: sentinel_ast::Visibility,
+    /// VarId of the synthetic `self` binding inside the init body.
+    /// Its type inside the body is `Type::Ref(&mut Class)` — at C4.1
+    /// we don't track partial-init separately; the dataflow check
+    /// runs before codegen.
+    pub self_var_id: VarId,
+    pub params: Vec<TypedParam>,
+    pub body: TypedBlock,
+    pub span: Span,
+}
+
+/// The type-checked method signature + body per ADR 0022 D3.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedMethodDef {
+    pub visibility: sentinel_ast::Visibility,
+    pub name: String,
+    pub name_span: Span,
+    pub self_kind: SelfKind,
+    /// VarId of the synthetic `self` binding inside the method.
+    /// Its type is `Type::Ref(&Class)` (shared) or
+    /// `Type::Ref(&mut Class)` (exclusive) per `self_kind`.
+    pub self_var_id: VarId,
+    pub params: Vec<TypedParam>,
+    pub return_type: Type,
+    /// Effect-row annotation as a sorted-dedup set of EffectIds.
+    pub effect_row: Vec<EffectId>,
+    pub body: TypedBlock,
     pub span: Span,
 }
 
@@ -1548,6 +1699,31 @@ pub enum TypedExprKind {
         callee_span: Span,
         args: Vec<TypedExpr>,
         kont_id: KontId,
+    },
+    /// C4.1 / ADR 0022 D3 + D7: method call `target.method(args)`.
+    /// `class_id` is the receiver's static class; `method_index`
+    /// is the index into the class's `methods` vec. Type-check has
+    /// already verified the method exists, the arg types match,
+    /// and the auto-ref of the receiver matches the method's
+    /// `self_kind`. The receiver in `target` is the original lvalue
+    /// expression (not pre-ref'd) — codegen emits the
+    /// `&target` / `&mut target` per the method's self_kind via
+    /// `lower_lvalue_ptr`.
+    MethodCall {
+        target: Box<TypedExpr>,
+        class_id: ClassId,
+        method_index: usize,
+        method: String,
+        method_span: Span,
+        args: Vec<TypedExpr>,
+    },
+    /// C4.1 / ADR 0022 D5: `Name::init(args)` class instantiation.
+    /// The outer node's `ty` is `Type::Class(class_id)`.
+    ClassInit {
+        id: ClassId,
+        name: String,
+        name_span: Span,
+        args: Vec<TypedExpr>,
     },
 }
 
@@ -2088,6 +2264,88 @@ pub enum TypeError {
         #[label("wrong number of resume arguments")]
         span: miette::SourceSpan,
     },
+
+    /// C4.1 / ADR 0022 D4: init body did not assign `self.field`
+    /// on every path before returning.
+    #[error("class `{class_name}` field `{field_name}` is not assigned by the end of `init`")]
+    #[diagnostic(
+        code(sentinel::types::init_field_maybe_unassigned),
+        help("every declared field must be definite-assigned inside `init` per ADR 0022 D4")
+    )]
+    InitFieldMaybeUnassigned {
+        class_name: String,
+        field_name: String,
+        #[label("field declared here")]
+        field_span: miette::SourceSpan,
+        #[label("init body ends here without assigning `{field_name}`")]
+        init_span: miette::SourceSpan,
+    },
+
+    /// C4.1 / ADR 0022 D5: a struct-literal expression targets a
+    /// class — `Name { field: value, ... }` for a class is
+    /// rejected to enforce D4's no-half-constructed invariant.
+    #[error("class `{name}` cannot be constructed with struct-literal syntax")]
+    #[diagnostic(
+        code(sentinel::types::class_construction_must_use_init),
+        help("call `{name}::init(args)` instead — classes use the init constructor per ADR 0022 D5")
+    )]
+    ClassConstructionMustUseInit {
+        name: String,
+        #[label("use `{name}::init(...)` here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.1 / ADR 0022 D3 + D7: a method call references a name
+    /// not declared on the receiver's class.
+    #[error("class `{class_name}` has no method `{method_name}`")]
+    #[diagnostic(
+        code(sentinel::types::method_not_found),
+        help("check the class declaration for available method names")
+    )]
+    MethodNotFound {
+        class_name: String,
+        method_name: String,
+        #[label("no such method")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.1 / ADR 0022 D7: postfix `.method(args)` on a receiver
+    /// whose static type isn't a class.
+    #[error("method call requires a class receiver (got `{got_ty}`)")]
+    #[diagnostic(
+        code(sentinel::types::method_call_on_non_class),
+        help("only class instances + class references support postfix method-call syntax at C4.1")
+    )]
+    MethodCallOnNonClass {
+        got_ty: String,
+        #[label("not a class receiver")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.1 / ADR 0022 D5: `Name::init(args)` was given the wrong
+    /// number of arguments.
+    #[error("class `{class_name}::init` expected {expected} argument(s), got {got}")]
+    #[diagnostic(code(sentinel::types::class_init_arity_mismatch))]
+    ClassInitArityMismatch {
+        class_name: String,
+        expected: usize,
+        got: usize,
+        #[label("wrong number of init arguments")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.1 / ADR 0022 D3: a method call passes the wrong number
+    /// of arguments (excluding the implicit `self`).
+    #[error("method `{class_name}.{method_name}` expected {expected} argument(s), got {got}")]
+    #[diagnostic(code(sentinel::types::method_arity_mismatch))]
+    MethodArityMismatch {
+        class_name: String,
+        method_name: String,
+        expected: usize,
+        got: usize,
+        #[label("wrong number of method arguments")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -2107,9 +2365,16 @@ pub enum TypeError {
 ///      now resolve cleanly against the struct table).
 ///   4. Type-check each fn body.
 pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
-    // Pass 0: struct name table + type-param counts.
+    // Pass 0: struct name table + type-param counts + class name
+    // table. Both tables must exist before Pass 1 so field /
+    // signature type-expressions can reference either.
     let struct_table: HashMap<String, StructId> =
         sentinel_resolve::struct_name_table(program);
+    let class_table: HashMap<String, ClassId> = program
+        .classes
+        .iter()
+        .map(|c| (c.name.clone(), c.id))
+        .collect();
     let struct_type_param_counts: HashMap<StructId, usize> = program
         .structs
         .iter()
@@ -2147,6 +2412,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             let ty = resolve_type_expr_with_scope(
                 &f.ty,
                 &struct_table,
+                &class_table,
                 &tp_scope,
                 &mut generic_instances,
                 &mut refs,
@@ -2198,6 +2464,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 let ty = resolve_type_expr_with_scope(
                     &p.ty,
                     &struct_table,
+                    &class_table,
                     &empty_tp_scope,
                     &mut generic_instances,
                     &mut refs,
@@ -2219,6 +2486,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 Some(rt) => resolve_type_expr_with_scope(
                     rt,
                     &struct_table,
+                    &class_table,
                     &empty_tp_scope,
                     &mut generic_instances,
                     &mut refs,
@@ -2342,6 +2610,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             param_types.push(resolve_type_expr_with_scope(
                 &param.ty,
                 &struct_table,
+                &class_table,
                 &tp_scope,
                 &mut generic_instances,
                 &mut refs,
@@ -2352,6 +2621,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         let return_type = resolve_type_expr_with_scope(
             &fn_def.return_type,
             &struct_table,
+            &class_table,
             &tp_scope,
             &mut generic_instances,
             &mut refs,
@@ -2382,6 +2652,129 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     // FnId(i) — matches ResolvedProgram's invariant.
     typed_signatures.sort_by_key(|s| s.id.0);
 
+    // C4.1 / ADR 0022 D1 (Pass 3.5): class signatures. Build the
+    // typed_class_decls vec with each class's resolved field
+    // types + init param types + method signatures. Bodies are
+    // populated in Pass 5 — at this point each init/method has a
+    // stub body so fn-body type-checking in Pass 4 can look up
+    // method signatures via `Type::Class(ClassId)` receivers.
+    let mut typed_class_decls: Vec<ClassData> =
+        Vec::with_capacity(program.classes.len());
+    for cd in &program.classes {
+        let empty_tp_scope: TypeParamScope = HashMap::new();
+        // Field types (no generics on classes at C4.1).
+        let mut fields = Vec::with_capacity(cd.fields.len());
+        for f in &cd.fields {
+            let ty = resolve_type_expr_with_scope(
+                &f.ty,
+                &struct_table,
+                &class_table,
+                &empty_tp_scope,
+                &mut generic_instances,
+                &mut refs,
+                &mut secrets,
+                &struct_type_param_counts,
+            )?;
+            fields.push(TypedClassField {
+                visibility: f.visibility,
+                name: f.name.clone(),
+                name_span: f.name_span.clone(),
+                ty,
+                span: f.span.clone(),
+            });
+        }
+        // Init params (no body yet).
+        let init = if let Some(init_def) = &cd.init {
+            let mut params = Vec::with_capacity(init_def.params.len());
+            for p in &init_def.params {
+                let ty = resolve_type_expr_with_scope(
+                    &p.ty,
+                    &struct_table,
+                    &class_table,
+                    &empty_tp_scope,
+                    &mut generic_instances,
+                    &mut refs,
+                    &mut secrets,
+                    &struct_type_param_counts,
+                )?;
+                params.push(TypedParam {
+                    id: p.id,
+                    mutable: p.mutable,
+                    name: p.name.clone(),
+                    span: p.span.clone(),
+                    ty,
+                });
+            }
+            Some(TypedInitDef {
+                visibility: init_def.visibility,
+                self_var_id: init_def.self_var_id,
+                params,
+                body: stub_block(init_def.body.span.clone()),
+                span: init_def.span.clone(),
+            })
+        } else {
+            None
+        };
+        // Method signatures (no bodies yet).
+        let mut methods = Vec::with_capacity(cd.methods.len());
+        for m in &cd.methods {
+            let mut params = Vec::with_capacity(m.params.len());
+            for p in &m.params {
+                let ty = resolve_type_expr_with_scope(
+                    &p.ty,
+                    &struct_table,
+                    &class_table,
+                    &empty_tp_scope,
+                    &mut generic_instances,
+                    &mut refs,
+                    &mut secrets,
+                    &struct_type_param_counts,
+                )?;
+                params.push(TypedParam {
+                    id: p.id,
+                    mutable: p.mutable,
+                    name: p.name.clone(),
+                    span: p.span.clone(),
+                    ty,
+                });
+            }
+            let return_type = resolve_type_expr_with_scope(
+                &m.return_type,
+                &struct_table,
+                &class_table,
+                &empty_tp_scope,
+                &mut generic_instances,
+                &mut refs,
+                &mut secrets,
+                &struct_type_param_counts,
+            )?;
+            let mut effect_row: Vec<EffectId> = m.effect_row.clone();
+            effect_row.sort_by_key(|e| e.0);
+            effect_row.dedup();
+            methods.push(TypedMethodDef {
+                visibility: m.visibility,
+                name: m.name.clone(),
+                name_span: m.name_span.clone(),
+                self_kind: m.self_kind,
+                self_var_id: m.self_var_id,
+                params,
+                return_type,
+                effect_row,
+                body: stub_block(m.body.span.clone()),
+                span: m.span.clone(),
+            });
+        }
+        typed_class_decls.push(ClassData {
+            id: cd.id,
+            name: cd.name.clone(),
+            name_span: cd.name_span.clone(),
+            fields,
+            init,
+            methods,
+            span: cd.span.clone(),
+        });
+    }
+
     // Pass 4: type-check each fn body. Any `Pair<i64, bool>` /
     // similar new instances that show up here (e.g., from let
     // annotations or generic call sites) are interned into
@@ -2398,6 +2791,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             fn_def,
             &typed_signatures,
             &typed_structs,
+            &typed_class_decls,
             &mut generic_instances,
             &mut refs,
             &mut secrets,
@@ -2405,6 +2799,142 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             &typed_effect_decls,
             &mut konts,
         )?);
+    }
+
+    // Pass 5: type-check each class body (init + methods),
+    // overwriting the stub bodies populated in Pass 3.5.
+    for cd in &program.classes {
+        let idx = cd.id.0 as usize;
+        // Init body.
+        let init = if let Some(init_def) = &cd.init {
+            let mut env: VarTypeEnv = VarTypeEnv::new();
+            // Self binding: bound directly as `Type::Class(cd.id)`
+            // with mutable=true. The "&mut Self" connotation is
+            // tracked by the mutable bit in env; field access /
+            // assignment work through the existing struct
+            // machinery (no extra deref). Codegen treats self's
+            // slot as the actual class storage pointer (init's
+            // `out_ptr`).
+            env.insert(init_def.self_var_id, (Type::Class(cd.id), true));
+            // Bind init params.
+            for tp in &typed_class_decls[idx]
+                .init
+                .as_ref()
+                .expect("init present")
+                .params
+            {
+                env.insert(tp.id, (tp.ty, tp.mutable));
+            }
+            let body = check_block(
+                &init_def.body,
+                None,
+                &mut env,
+                &typed_signatures,
+                &typed_structs,
+                &typed_class_decls,
+                &mut generic_instances,
+                &mut refs,
+                &mut secrets,
+                &struct_type_param_counts,
+                &typed_effect_decls,
+                &mut konts,
+            )?;
+            // C4.1 / ADR 0022 D4: definite-assignment (minimal at
+            // this iteration). Walk the body's stmts and the tail
+            // skip-recursively; collect the set of fields ever
+            // assigned via `self.field = expr`. Reject any field
+            // not in that set with InitFieldMaybeUnassigned.
+            // Branch-aware (if/else snapshot+merge) dataflow is a
+            // follow-on iteration; the C4.1 (2/N) minimum catches
+            // the obvious "field never written" case.
+            let assigned = collect_init_assigned_fields(
+                &body,
+                init_def.self_var_id,
+                &typed_class_decls[idx],
+            );
+            for f in &typed_class_decls[idx].fields {
+                if !assigned.contains(&f.name) {
+                    return Err(TypeError::InitFieldMaybeUnassigned {
+                        class_name: typed_class_decls[idx].name.clone(),
+                        field_name: f.name.clone(),
+                        field_span: to_source_span(&f.name_span),
+                        init_span: to_source_span(&init_def.body.span),
+                    });
+                }
+            }
+            Some(TypedInitDef {
+                visibility: init_def.visibility,
+                self_var_id: init_def.self_var_id,
+                params: typed_class_decls[idx]
+                    .init
+                    .as_ref()
+                    .expect("init present")
+                    .params
+                    .clone(),
+                body,
+                span: init_def.span.clone(),
+            })
+        } else {
+            None
+        };
+        // Method bodies.
+        let mut methods = Vec::with_capacity(cd.methods.len());
+        for (m_idx, m) in cd.methods.iter().enumerate() {
+            let sig = &typed_class_decls[idx].methods[m_idx];
+            let mut env: VarTypeEnv = VarTypeEnv::new();
+            // Self binding: bound directly as `Type::Class(cd.id)`
+            // with the mutable bit tracking `&Self` (false) vs
+            // `&mut Self` (true). Codegen treats self's slot as
+            // the class storage pointer (the method's first arg).
+            let mutable = matches!(m.self_kind, SelfKind::Exclusive);
+            env.insert(m.self_var_id, (Type::Class(cd.id), mutable));
+            for tp in &sig.params {
+                env.insert(tp.id, (tp.ty, tp.mutable));
+            }
+            let return_type = sig.return_type;
+            let body_expected =
+                if return_type.is_nullable() || return_type.is_generic_instance() {
+                    Some(return_type)
+                } else {
+                    None
+                };
+            let body = check_block(
+                &m.body,
+                body_expected,
+                &mut env,
+                &typed_signatures,
+                &typed_structs,
+                &typed_class_decls,
+                &mut generic_instances,
+                &mut refs,
+                &mut secrets,
+                &struct_type_param_counts,
+                &typed_effect_decls,
+                &mut konts,
+            )?;
+            if body.ty != return_type {
+                return Err(TypeError::ReturnTypeMismatch {
+                    name: format!("{}::{}", cd.name, m.name),
+                    expected: return_type,
+                    got: body.ty,
+                    span: to_source_span(&m.body.tail.span),
+                });
+            }
+            methods.push(TypedMethodDef {
+                visibility: m.visibility,
+                name: m.name.clone(),
+                name_span: m.name_span.clone(),
+                self_kind: m.self_kind,
+                self_var_id: m.self_var_id,
+                params: sig.params.clone(),
+                return_type,
+                effect_row: sig.effect_row.clone(),
+                body,
+                span: m.span.clone(),
+            });
+        }
+        typed_class_decls[idx].init = init;
+        typed_class_decls[idx].methods = methods;
     }
 
     Ok(TypedProgram {
@@ -2416,8 +2946,103 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         secrets,
         effect_decls: typed_effect_decls,
         konts,
+        class_decls: typed_class_decls,
         span: program.span.clone(),
     })
+}
+
+/// Produce a trivial `{ 0 }` block used as a stub for class init /
+/// method bodies during Pass 3.5 (signature population). Pass 5
+/// overwrites these with real type-checked bodies.
+fn stub_block(span: Span) -> TypedBlock {
+    TypedBlock {
+        stmts: vec![],
+        tail: TypedExpr {
+            kind: TypedExprKind::IntLit(0),
+            span: span.clone(),
+            ty: Type::I64,
+        },
+        span,
+        ty: Type::I64,
+    }
+}
+
+/// Walk a type-checked init body and return the set of field
+/// names assigned via `self.field = expr` somewhere in the body
+/// (any stmt or the tail). At C4.1 minimum this is a flat
+/// collection — if any if/else branch leaves a field unassigned,
+/// we accept it. Branch-aware merge is a follow-on iteration.
+fn collect_init_assigned_fields(
+    body: &TypedBlock,
+    self_var_id: VarId,
+    _class_data: &ClassData,
+) -> std::collections::HashSet<String> {
+    let mut acc: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stmt in &body.stmts {
+        collect_init_assigned_in_stmt(stmt, self_var_id, &mut acc);
+    }
+    collect_init_assigned_in_expr(&body.tail, self_var_id, &mut acc);
+    acc
+}
+
+fn collect_init_assigned_in_stmt(
+    stmt: &TypedStmt,
+    self_var_id: VarId,
+    acc: &mut std::collections::HashSet<String>,
+) {
+    match &stmt.kind {
+        TypedStmtKind::Assign { target, value } => {
+            collect_init_assigned_in_assign_target(target, self_var_id, acc);
+            collect_init_assigned_in_expr(value, self_var_id, acc);
+        }
+        TypedStmtKind::Let { value, .. } => {
+            collect_init_assigned_in_expr(value, self_var_id, acc);
+        }
+        TypedStmtKind::Expr(e) => {
+            collect_init_assigned_in_expr(e, self_var_id, acc);
+        }
+    }
+}
+
+fn collect_init_assigned_in_assign_target(
+    target: &TypedExpr,
+    self_var_id: VarId,
+    acc: &mut std::collections::HashSet<String>,
+) {
+    if let TypedExprKind::FieldAccess { target: inner, field, .. } = &target.kind {
+        if let TypedExprKind::Var(v) = &inner.kind {
+            if *v == self_var_id {
+                acc.insert(field.clone());
+            }
+        }
+    }
+}
+
+fn collect_init_assigned_in_expr(
+    expr: &TypedExpr,
+    self_var_id: VarId,
+    acc: &mut std::collections::HashSet<String>,
+) {
+    match &expr.kind {
+        TypedExprKind::Block(b) => {
+            for stmt in &b.stmts {
+                collect_init_assigned_in_stmt(stmt, self_var_id, acc);
+            }
+            collect_init_assigned_in_expr(&b.tail, self_var_id, acc);
+        }
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            collect_init_assigned_in_expr(cond, self_var_id, acc);
+            for stmt in &then_branch.stmts {
+                collect_init_assigned_in_stmt(stmt, self_var_id, acc);
+            }
+            collect_init_assigned_in_expr(&then_branch.tail, self_var_id, acc);
+            for stmt in &else_branch.stmts {
+                collect_init_assigned_in_stmt(stmt, self_var_id, acc);
+            }
+            collect_init_assigned_in_expr(&else_branch.tail, self_var_id, acc);
+        }
+        _ => {}
+    }
 }
 
 /// Walk the struct-field graph looking for cycles consisting of
@@ -2503,6 +3128,7 @@ fn check_fn(
     fn_def: &ResolvedFnDef,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -2555,6 +3181,7 @@ fn check_fn(
         &mut env,
         signatures,
         structs,
+        class_decls,
         instances,
         refs,
         secrets,
@@ -2627,6 +3254,7 @@ fn check_block(
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -2641,6 +3269,7 @@ fn check_block(
             env,
             signatures,
             structs,
+            class_decls,
             instances,
             refs,
             secrets,
@@ -2657,6 +3286,7 @@ fn check_block(
         env,
         signatures,
         structs,
+        class_decls,
         instances,
         refs,
         secrets,
@@ -2679,6 +3309,7 @@ fn check_stmt(
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -2694,9 +3325,11 @@ fn check_stmt(
             let expected = match ty_annot {
                 Some(annot) => {
                     let struct_table = struct_name_table_local(structs);
+                    let class_table = class_name_table_local(class_decls);
                     Some(resolve_type_expr(
                         annot,
                         &struct_table,
+                        &class_table,
                         instances,
                         refs,
                         secrets,
@@ -2711,6 +3344,7 @@ fn check_stmt(
                 env,
                 signatures,
                 structs,
+                class_decls,
                 instances,
                 refs,
                 secrets,
@@ -2755,6 +3389,7 @@ fn check_stmt(
                 env,
                 signatures,
                 structs,
+                class_decls,
                 instances,
                 refs,
                 secrets,
@@ -2768,6 +3403,7 @@ fn check_stmt(
                 env,
                 signatures,
                 structs,
+                class_decls,
                 instances,
                 refs,
                 secrets,
@@ -2794,6 +3430,7 @@ fn check_stmt(
             env,
             signatures,
             structs,
+            class_decls,
             instances,
             refs,
             secrets,
@@ -2955,6 +3592,13 @@ fn struct_name_table_local(structs: &[TypedStructDecl]) -> HashMap<String, Struc
     structs.iter().map(|s| (s.name.clone(), s.id)).collect()
 }
 
+/// C4.1 / ADR 0022 D1: build a class name → ClassId table from the
+/// in-progress typed class_decls. Used by `check_stmt`'s let-annotation
+/// path to resolve class names in type position.
+fn class_name_table_local(class_decls: &[ClassData]) -> HashMap<String, ClassId> {
+    class_decls.iter().map(|c| (c.name.clone(), c.id)).collect()
+}
+
 /// Apply ADR 0014 D3 widening / D2 null-literal context to a typed
 /// expression against an expected type. If `expected` is None, the
 /// expression's synthesized type passes through unchanged. If it's
@@ -3019,7 +3663,7 @@ fn try_substitute(
     refs: &[RefData],
 ) -> Option<Type> {
     match ty {
-        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => Some(ty),
+        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) | Type::Class(_) => Some(ty),
         Type::TypeParam(id) => subst.get(id.0 as usize).copied().flatten(),
         Type::Nullable(ni) => {
             let inner = try_substitute(ni.to_type(), subst, instances, refs)?;
@@ -3068,7 +3712,7 @@ fn contains_type_param(
         Type::TypeParam(_) => true,
         Type::Nullable(ni) => contains_type_param(ni.to_type(), instances, refs),
         Type::Array(ae) => contains_type_param(ae.to_type(), instances, refs),
-        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) => false,
+        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) | Type::Class(_) => false,
         Type::GenericInstance(id) => instances[id.0 as usize]
             .args
             .iter()
@@ -3196,6 +3840,7 @@ fn check_call(
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -3268,6 +3913,7 @@ fn check_call(
                 env,
                 signatures,
                 structs,
+                class_decls,
                 instances,
                 refs,
                 secrets,
@@ -3378,6 +4024,7 @@ fn check_expr(
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -3434,6 +4081,7 @@ fn check_expr(
                         env,
                         signatures,
                         structs,
+                        class_decls,
                         instances,
                         refs,
                         secrets,
@@ -3474,6 +4122,7 @@ fn check_expr(
                         env,
                         signatures,
                         structs,
+                        class_decls,
                         instances,
                         refs,
                         secrets,
@@ -3517,6 +4166,7 @@ fn check_expr(
                         env,
                         signatures,
                         structs,
+                        class_decls,
                         instances,
                         refs,
                         secrets,
@@ -3565,8 +4215,8 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             // C3 / ADR 0019 D5 + D7 (C3.1b): operator-secret-
             // preserving. Strip one layer of `secret` from both
             // sides, run the usual int-type check on the inners,
@@ -3635,10 +4285,10 @@ fn check_expr(
                 // The non-null side determines the expected ?T type.
                 // First, synthesize the non-null side.
                 let (non_null_side, non_null_expr, null_span) = if lhs_is_null {
-                    let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+                    let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
                     (r.ty, r, lhs.span.clone())
                 } else {
-                    let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+                    let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
                     (l.ty, l, rhs.span.clone())
                 };
                 // Non-null side must be Nullable for null-comparison.
@@ -3665,8 +4315,8 @@ fn check_expr(
                     ty: Type::Bool,
                 });
             }
-            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for comparisons. `secret T == secret T -> secret bool`
             // per Phase B ADR 0008 D4. Strip wrappers to check
@@ -3706,8 +4356,8 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Logic(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for logicals. Both operands must be the same bool-
             // shape (`bool` or `secret bool`); result preserves
@@ -3750,12 +4400,12 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Block(b) => {
-            let typed_block = check_block(b, expected, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let typed_block = check_block(b, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             let ty = typed_block.ty;
             (TypedExprKind::Block(Box::new(typed_block)), ty)
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
-            let cond_t = check_expr(cond, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let cond_t = check_expr(cond, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             // C3 / ADR 0019 D7 (C3.1) — SecretBranch: an
             // `if` condition with type `secret bool` would
             // leak via timing. Reject before the generic
@@ -3777,8 +4427,8 @@ fn check_expr(
             }
             // ADR 0014 D5: push the expected type down into both
             // branches so `null` in either branch can resolve.
-            let then_t = check_block(then_branch, expected, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
-            let else_t = check_block(else_branch, expected, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let then_t = check_block(then_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let else_t = check_block(else_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             if then_t.ty != else_t.ty {
                 return Err(TypeError::Mismatch {
                     expected: then_t.ty,
@@ -3804,6 +4454,7 @@ fn check_expr(
             env,
             signatures,
             structs,
+            class_decls,
             instances,
             refs,
             secrets,
@@ -3879,6 +4530,7 @@ fn check_expr(
                     env,
                     signatures,
                     structs,
+                    class_decls,
                     instances,
                     refs,
                     secrets,
@@ -3969,7 +4621,7 @@ fn check_expr(
                 // Type-check elements. First element synthesizes T
                 // if no expected; subsequent elements get T as
                 // expected (so widening / null work inside `[T]`).
-                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
                 let elem_ty = first.ty;
                 let mut typed = Vec::with_capacity(elems.len());
                 typed.push(first);
@@ -3980,6 +4632,7 @@ fn check_expr(
                         env,
                         signatures,
                         structs,
+                        class_decls,
                         instances,
                         refs,
                         secrets,
@@ -4011,7 +4664,7 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Index { target, index } => {
-            let target_t = check_expr(target, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let target_t = check_expr(target, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             let elem_ty = match target_t.ty {
                 Type::Array(ae) => ae,
                 other => {
@@ -4024,7 +4677,7 @@ fn check_expr(
             // Synthesize the index without pushdown so a non-int
             // index surfaces as the more-specific `IndexNotInt`
             // rather than a generic `Mismatch`.
-            let index_t = check_expr(index, None, env, signatures, structs, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let index_t = check_expr(index, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
             if index_t.ty != Type::I64 {
                 return Err(TypeError::IndexNotInt {
                     got: index_t.ty,
@@ -4047,6 +4700,7 @@ fn check_expr(
                 env,
                 signatures,
                 structs,
+                class_decls,
                 instances,
                 refs,
                 secrets,
@@ -4056,37 +4710,69 @@ fn check_expr(
             )?;
             // C1.7.4b / ADR 0016 D6: field access on a generic
             // instance substitutes the field type by the instance's
-            // type-args.
-            let (struct_id, type_args): (StructId, Vec<Type>) = match target_t.ty {
-                Type::Struct(id) => (id, Vec::new()),
-                Type::GenericInstance(gi_id) => {
-                    let inst = &instances[gi_id.0 as usize];
-                    (inst.struct_id, inst.args.clone())
-                }
-                other => {
-                    return Err(TypeError::FieldAccessOnNonStruct {
-                        got: other,
-                        span: to_source_span(&target.span),
-                    });
-                }
-            };
-            let decl = &structs[struct_id.0 as usize];
-            let (field_index, raw_field_ty) = decl
-                .fields
-                .iter()
-                .enumerate()
-                .find_map(|(i, df)| {
-                    if df.name == *field {
-                        Some((i, df.ty))
-                    } else {
-                        None
+            // type-args. C4.1 / ADR 0022 D6: field access also
+            // works on `Type::Class` — class fields share the
+            // same lookup machinery as struct fields. Resolves a
+            // (field_index, raw_field_ty) tuple per target type.
+            let (field_index, raw_field_ty, type_args): (usize, Type, Vec<Type>) =
+                match target_t.ty {
+                    Type::Struct(id) => {
+                        let decl = &structs[id.0 as usize];
+                        let (i, ty) = decl
+                            .fields
+                            .iter()
+                            .enumerate()
+                            .find_map(|(i, df)| {
+                                if df.name == *field {
+                                    Some((i, df.ty))
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or_else(|| TypeError::UnknownField {
+                                struct_name: decl.name.clone(),
+                                field: field.clone(),
+                                span: to_source_span(field_span),
+                            })?;
+                        (i, ty, Vec::new())
                     }
-                })
-                .ok_or_else(|| TypeError::UnknownField {
-                    struct_name: decl.name.clone(),
-                    field: field.clone(),
-                    span: to_source_span(field_span),
-                })?;
+                    Type::GenericInstance(gi_id) => {
+                        let inst = &instances[gi_id.0 as usize];
+                        let decl = &structs[inst.struct_id.0 as usize];
+                        let (i, ty) = decl
+                            .fields
+                            .iter()
+                            .enumerate()
+                            .find_map(|(i, df)| {
+                                if df.name == *field {
+                                    Some((i, df.ty))
+                                } else {
+                                    None
+                                }
+                            })
+                            .ok_or_else(|| TypeError::UnknownField {
+                                struct_name: decl.name.clone(),
+                                field: field.clone(),
+                                span: to_source_span(field_span),
+                            })?;
+                        (i, ty, inst.args.clone())
+                    }
+                    Type::Class(cid) => {
+                        let decl = &class_decls[cid.0 as usize];
+                        let (i, cf) = decl.field(field).ok_or_else(|| TypeError::UnknownField {
+                            struct_name: decl.name.clone(),
+                            field: field.clone(),
+                            span: to_source_span(field_span),
+                        })?;
+                        (i, cf.ty, Vec::new())
+                    }
+                    other => {
+                        return Err(TypeError::FieldAccessOnNonStruct {
+                            got: other,
+                            span: to_source_span(&target.span),
+                        });
+                    }
+                };
             let field_ty = if type_args.is_empty() {
                 raw_field_ty
             } else {
@@ -4112,6 +4798,7 @@ fn check_expr(
                 env,
                 signatures,
                 structs,
+                class_decls,
                 instances,
                 refs,
                 secrets,
@@ -4133,6 +4820,7 @@ fn check_expr(
             env,
             signatures,
             structs,
+            class_decls,
             instances,
             refs,
             secrets,
@@ -4159,6 +4847,7 @@ fn check_expr(
             env,
             signatures,
             structs,
+            class_decls,
             instances,
             refs,
             secrets,
@@ -4173,6 +4862,7 @@ fn check_expr(
             env,
             signatures,
             structs,
+            class_decls,
             instances,
             refs,
             secrets,
@@ -4180,6 +4870,42 @@ fn check_expr(
             effect_decls,
             konts,
         )?,
+        ResolvedExprKind::MethodCall { target, method, method_span, args } => {
+            check_method_call_expr(
+                target,
+                method,
+                method_span,
+                args,
+                env,
+                signatures,
+                structs,
+                class_decls,
+                instances,
+                refs,
+                secrets,
+                struct_type_param_counts,
+                effect_decls,
+                konts,
+            )?
+        }
+        ResolvedExprKind::ClassInit { id, name, name_span, args } => {
+            check_class_init_expr(
+                *id,
+                name,
+                name_span,
+                args,
+                env,
+                signatures,
+                structs,
+                class_decls,
+                instances,
+                refs,
+                secrets,
+                struct_type_param_counts,
+                effect_decls,
+                konts,
+            )?
+        }
     };
     let synth = TypedExpr { kind, span: expr.span.clone(), ty };
     // ADR 0014 D3: apply T→?T widening if the expected type is ?T and
@@ -4206,6 +4932,7 @@ fn check_handle_expr(
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -4225,6 +4952,7 @@ fn check_handle_expr(
         env,
         signatures,
         structs,
+        class_decls,
         instances,
         refs,
         secrets,
@@ -4247,6 +4975,7 @@ fn check_handle_expr(
             env,
             signatures,
             structs,
+            class_decls,
             instances,
             refs,
             secrets,
@@ -4327,6 +5056,7 @@ fn check_handle_expr(
             env,
             signatures,
             structs,
+            class_decls,
             instances,
             refs,
             secrets,
@@ -4397,6 +5127,7 @@ fn check_perform_expr(
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -4423,6 +5154,7 @@ fn check_perform_expr(
             env,
             signatures,
             structs,
+            class_decls,
             instances,
             refs,
             secrets,
@@ -4465,6 +5197,7 @@ fn check_resume_kont_expr(
     env: &mut VarTypeEnv,
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -4511,6 +5244,7 @@ fn check_resume_kont_expr(
         env,
         signatures,
         structs,
+        class_decls,
         instances,
         refs,
         secrets,
@@ -4533,6 +5267,189 @@ fn check_resume_kont_expr(
             kont_id,
         },
         ret_ty,
+    ))
+}
+
+/// C4.1 / ADR 0022 D3 + D7: type-check a postfix `target.method(args)`
+/// call. The receiver's type must reduce to `Type::Class(_)` (either
+/// directly or via auto-deref of `Type::Ref(&Class)` /
+/// `Type::Ref(&mut Class)`). The method's `self_kind` determines
+/// whether the auto-ref is shared or exclusive; methods that take
+/// `&mut Self` reject if the receiver's static type can't be made
+/// mutable.
+#[allow(clippy::too_many_arguments)]
+fn check_method_call_expr(
+    target: &ResolvedExpr,
+    method: &str,
+    method_span: &Span,
+    args: &[ResolvedExpr],
+    env: &mut VarTypeEnv,
+    signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &mut Vec<SecretData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    konts: &mut Vec<KontData>,
+) -> Result<(TypedExprKind, Type), TypeError> {
+    let target_typed = check_expr(
+        target,
+        None,
+        env,
+        signatures,
+        structs,
+        class_decls,
+        instances,
+        refs,
+        secrets,
+        struct_type_param_counts,
+        effect_decls,
+        konts,
+    )?;
+    // Resolve the receiver's underlying class. Auto-deref handles
+    // `&Class` and `&mut Class`.
+    let class_id = match target_typed.ty {
+        Type::Class(id) => id,
+        Type::Ref(rid) => match refs[rid.0 as usize].inner {
+            Type::Class(id) => id,
+            _ => {
+                return Err(TypeError::MethodCallOnNonClass {
+                    got_ty: type_display(target_typed.ty, None),
+                    span: to_source_span(method_span),
+                });
+            }
+        },
+        _ => {
+            return Err(TypeError::MethodCallOnNonClass {
+                got_ty: type_display(target_typed.ty, None),
+                span: to_source_span(method_span),
+            });
+        }
+    };
+    let class = &class_decls[class_id.0 as usize];
+    let method_index = class.method_index(method).ok_or_else(|| TypeError::MethodNotFound {
+        class_name: class.name.clone(),
+        method_name: method.to_string(),
+        span: to_source_span(method_span),
+    })?;
+    let m = &class.methods[method_index];
+    if args.len() != m.params.len() {
+        return Err(TypeError::MethodArityMismatch {
+            class_name: class.name.clone(),
+            method_name: method.to_string(),
+            expected: m.params.len(),
+            got: args.len(),
+            span: to_source_span(method_span),
+        });
+    }
+    let mut typed_args = Vec::with_capacity(args.len());
+    for (arg, param) in args.iter().zip(m.params.iter()) {
+        let arg_typed = check_expr(
+            arg,
+            Some(param.ty),
+            env,
+            signatures,
+            structs,
+            class_decls,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            konts,
+        )?;
+        if arg_typed.ty != param.ty {
+            return Err(TypeError::Mismatch {
+                expected: param.ty,
+                got: arg_typed.ty,
+                span: to_source_span(&arg.span),
+            });
+        }
+        typed_args.push(arg_typed);
+    }
+    let return_type = m.return_type;
+    Ok((
+        TypedExprKind::MethodCall {
+            target: Box::new(target_typed),
+            class_id,
+            method_index,
+            method: method.to_string(),
+            method_span: method_span.clone(),
+            args: typed_args,
+        },
+        return_type,
+    ))
+}
+
+/// C4.1 / ADR 0022 D5: type-check `Name::init(args)`. The class's
+/// signature has been populated in Pass 3.5; check_class_init
+/// validates the arg count + types against the init's param list.
+#[allow(clippy::too_many_arguments)]
+fn check_class_init_expr(
+    class_id: ClassId,
+    name: &str,
+    name_span: &Span,
+    args: &[ResolvedExpr],
+    env: &mut VarTypeEnv,
+    signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &mut Vec<SecretData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    konts: &mut Vec<KontData>,
+) -> Result<(TypedExprKind, Type), TypeError> {
+    let class = &class_decls[class_id.0 as usize];
+    let init_params: &[TypedParam] = class
+        .init
+        .as_ref()
+        .map(|i| i.params.as_slice())
+        .unwrap_or(&[]);
+    if args.len() != init_params.len() {
+        return Err(TypeError::ClassInitArityMismatch {
+            class_name: class.name.clone(),
+            expected: init_params.len(),
+            got: args.len(),
+            span: to_source_span(name_span),
+        });
+    }
+    let mut typed_args = Vec::with_capacity(args.len());
+    for (arg, param) in args.iter().zip(init_params.iter()) {
+        let arg_typed = check_expr(
+            arg,
+            Some(param.ty),
+            env,
+            signatures,
+            structs,
+            class_decls,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            konts,
+        )?;
+        if arg_typed.ty != param.ty {
+            return Err(TypeError::Mismatch {
+                expected: param.ty,
+                got: arg_typed.ty,
+                span: to_source_span(&arg.span),
+            });
+        }
+        typed_args.push(arg_typed);
+    }
+    Ok((
+        TypedExprKind::ClassInit {
+            id: class_id,
+            name: name.to_string(),
+            name_span: name_span.clone(),
+            args: typed_args,
+        },
+        Type::Class(class_id),
     ))
 }
 
@@ -4763,6 +5680,45 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::KontArityMismatch { expected, got, span } => (
             "sentinel::types::kont_arity_mismatch",
             format!("continuation resume call expected {expected} argument(s), got {got}"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::InitFieldMaybeUnassigned {
+            class_name,
+            field_name,
+            init_span,
+            ..
+        } => (
+            "sentinel::types::init_field_maybe_unassigned",
+            format!(
+                "class `{class_name}` field `{field_name}` is not assigned by the end of `init`"
+            ),
+            init_span.offset()..(init_span.offset() + init_span.len()),
+        ),
+        TypeError::ClassConstructionMustUseInit { name, span } => (
+            "sentinel::types::class_construction_must_use_init",
+            format!("class `{name}` cannot be constructed with struct-literal syntax"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::MethodNotFound { class_name, method_name, span } => (
+            "sentinel::types::method_not_found",
+            format!("class `{class_name}` has no method `{method_name}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::MethodCallOnNonClass { got_ty, span } => (
+            "sentinel::types::method_call_on_non_class",
+            format!("method call requires a class receiver (got `{got_ty}`)"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::ClassInitArityMismatch { class_name, expected, got, span } => (
+            "sentinel::types::class_init_arity_mismatch",
+            format!("class `{class_name}::init` expected {expected} argument(s), got {got}"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::MethodArityMismatch { class_name, method_name, expected, got, span } => (
+            "sentinel::types::method_arity_mismatch",
+            format!(
+                "method `{class_name}.{method_name}` expected {expected} argument(s), got {got}"
+            ),
             span.offset()..(span.offset() + span.len()),
         ),
     };

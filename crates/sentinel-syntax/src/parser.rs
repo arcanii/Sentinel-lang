@@ -2281,6 +2281,55 @@ impl<'a> Parser<'a> {
                             });
                         }
                     };
+                    // C4.1 / ADR 0022 D3 + D7: distinguish field
+                    // access `target.field` from method call
+                    // `target.method(args)`. Lookahead on `(`
+                    // promotes to MethodCall; otherwise FieldAccess.
+                    if self.peek_kind() == Some(TokenKind::LParen) {
+                        self.advance();
+                        let saved = self.allow_struct_lit;
+                        self.allow_struct_lit = true;
+                        let mut args = Vec::new();
+                        if self.peek_kind() != Some(TokenKind::RParen) {
+                            args.push(self.parse_expr()?);
+                            while self.peek_kind() == Some(TokenKind::Comma) {
+                                self.advance();
+                                if self.peek_kind() == Some(TokenKind::RParen) {
+                                    break;
+                                }
+                                args.push(self.parse_expr()?);
+                            }
+                        }
+                        self.allow_struct_lit = saved;
+                        let rparen_end = match self.peek_kind() {
+                            Some(TokenKind::RParen) => self.advance().expect("peeked").span.end,
+                            Some(other) => {
+                                let t = self.peek().expect("peeked");
+                                return Err(ParseError::UnexpectedToken {
+                                    got: format!("{other:?}"),
+                                    expected: "`,` or `)` in method-call arguments",
+                                    span: to_source_span(&t.span),
+                                });
+                            }
+                            None => {
+                                return Err(ParseError::UnexpectedEof {
+                                    expected: "`,` or `)` in method-call arguments",
+                                    span: to_source_span(&self.eof_span()),
+                                });
+                            }
+                        };
+                        let span = atom.span.start..rparen_end;
+                        atom = Spanned {
+                            kind: ExprKind::MethodCall {
+                                target: Box::new(atom),
+                                method: field,
+                                method_span: field_span,
+                                args,
+                            },
+                            span,
+                        };
+                        continue;
+                    }
                     let span = atom.span.start..field_span.end;
                     atom = Spanned {
                         kind: ExprKind::FieldAccess {
@@ -2467,6 +2516,91 @@ impl<'a> Parser<'a> {
             Some(TokenKind::Ident) => {
                 let name_span = self.advance().expect("peeked").span.clone();
                 let name = self.src[name_span.clone()].to_string();
+                // C4.1 / ADR 0022 D5: `Name::init(args)` class
+                // instantiation. The `::` token is followed by an
+                // `init` keyword (only init is supported at C4.1;
+                // associated fns arrive in a later sub-phase). The
+                // class-name lookup happens in resolve.
+                if self.peek_kind() == Some(TokenKind::ColonColon) {
+                    self.advance();
+                    match self.peek_kind() {
+                        Some(TokenKind::Init) => {
+                            self.advance();
+                        }
+                        Some(other) => {
+                            let t = self.peek().expect("peeked");
+                            return Err(ParseError::UnexpectedToken {
+                                got: format!("{other:?}"),
+                                expected: "`init` after `::` (associated fns deferred at C4.1 per ADR 0022 D5)",
+                                span: to_source_span(&t.span),
+                            });
+                        }
+                        None => {
+                            return Err(ParseError::UnexpectedEof {
+                                expected: "`init` after `::`",
+                                span: to_source_span(&self.eof_span()),
+                            });
+                        }
+                    }
+                    match self.peek_kind() {
+                        Some(TokenKind::LParen) => {
+                            self.advance();
+                        }
+                        Some(other) => {
+                            let t = self.peek().expect("peeked");
+                            return Err(ParseError::UnexpectedToken {
+                                got: format!("{other:?}"),
+                                expected: "`(` after `Name::init`",
+                                span: to_source_span(&t.span),
+                            });
+                        }
+                        None => {
+                            return Err(ParseError::UnexpectedEof {
+                                expected: "`(` after `Name::init`",
+                                span: to_source_span(&self.eof_span()),
+                            });
+                        }
+                    }
+                    let saved = self.allow_struct_lit;
+                    self.allow_struct_lit = true;
+                    let mut args = Vec::new();
+                    if self.peek_kind() != Some(TokenKind::RParen) {
+                        args.push(self.parse_expr()?);
+                        while self.peek_kind() == Some(TokenKind::Comma) {
+                            self.advance();
+                            if self.peek_kind() == Some(TokenKind::RParen) {
+                                break;
+                            }
+                            args.push(self.parse_expr()?);
+                        }
+                    }
+                    self.allow_struct_lit = saved;
+                    let rparen_end = match self.peek_kind() {
+                        Some(TokenKind::RParen) => self.advance().expect("peeked").span.end,
+                        Some(other) => {
+                            let t = self.peek().expect("peeked");
+                            return Err(ParseError::UnexpectedToken {
+                                got: format!("{other:?}"),
+                                expected: "`,` or `)` in init arguments",
+                                span: to_source_span(&t.span),
+                            });
+                        }
+                        None => {
+                            return Err(ParseError::UnexpectedEof {
+                                expected: "`,` or `)` in init arguments",
+                                span: to_source_span(&self.eof_span()),
+                            });
+                        }
+                    };
+                    return Ok(Spanned {
+                        kind: ExprKind::ClassInit {
+                            class_name: name,
+                            class_name_span: name_span.clone(),
+                            args,
+                        },
+                        span: name_span.start..rparen_end,
+                    });
+                }
                 // Lookahead: `Ident '('` = call; `Ident '{'` = struct
                 // literal (when allow_struct_lit is on per ADR 0013
                 // D3a); otherwise = Var.
@@ -3970,11 +4104,10 @@ mod tests {
 
     #[test]
     fn parse_class_decl_full_surface() {
-        // The C4.1 surface as parser-only at this iteration —
-        // method bodies use field reads + arithmetic, NOT
-        // method-on-method calls (the postfix `.method(args)`
-        // form lands in a follow-up sub-step alongside resolve/
-        // types/codegen wiring for class instantiation).
+        // C4.1 (2/N) — the ADR 0022 D11 phase-go shape: Point with
+        // manhattan + translate methods, where translate calls
+        // self.manhattan() via the new postfix method-call form
+        // (parsed as `ExprKind::MethodCall`).
         let src = r#"
             class Point {
                 let x: i64;
@@ -3990,7 +4123,7 @@ mod tests {
                 pub fn translate(self: &mut Self, dx: i64, dy: i64) -> i64 {
                     self.x = self.x + dx;
                     self.y = self.y + dy;
-                    self.x + self.y
+                    self.manhattan()
                 }
             }
             fn main() -> i64 { 0 }
@@ -4005,6 +4138,77 @@ mod tests {
         assert_eq!(c.methods[0].self_kind, SelfKind::Shared);
         assert_eq!(c.methods[1].name, "translate");
         assert_eq!(c.methods[1].self_kind, SelfKind::Exclusive);
+        // translate's body tail is `self.manhattan()` — a MethodCall.
+        assert!(matches!(
+            c.methods[1].body.tail.kind,
+            ExprKind::MethodCall { ref method, ref args, .. }
+                if method == "manhattan" && args.is_empty()
+        ));
+    }
+
+    #[test]
+    fn parse_class_init_call() {
+        // C4.1 (2/N) / ADR 0022 D5: `Name::init(args)`.
+        let src = "fn main() -> i64 { Point::init(3, 4); 0 }";
+        let p = parse_ok_program(src);
+        let main = &p.fns[0];
+        let stmt0 = &main.body.stmts[0];
+        if let StmtKind::Expr(e) = &stmt0.kind {
+            assert!(matches!(
+                &e.kind,
+                ExprKind::ClassInit { class_name, args, .. }
+                    if class_name == "Point" && args.len() == 2
+            ));
+        } else {
+            panic!("expected expr stmt");
+        }
+    }
+
+    #[test]
+    fn parse_method_call_postfix() {
+        // C4.1 (2/N) / ADR 0022 D3 + D7: postfix `.method(args)`.
+        let src = "fn main() -> i64 { let p = q.compute(1, 2); 0 }";
+        let p = parse_ok_program(src);
+        let main = &p.fns[0];
+        if let StmtKind::Let { value, .. } = &main.body.stmts[0].kind {
+            assert!(matches!(
+                &value.kind,
+                ExprKind::MethodCall { method, args, .. }
+                    if method == "compute" && args.len() == 2
+            ));
+        } else {
+            panic!("expected let stmt");
+        }
+    }
+
+    #[test]
+    fn parse_method_call_chains_with_field_access() {
+        // `obj.field.method()` should parse as MethodCall over
+        // a FieldAccess target.
+        let src = "fn main() -> i64 { x.inner.do_thing(); 0 }";
+        let p = parse_ok_program(src);
+        let main = &p.fns[0];
+        if let StmtKind::Expr(e) = &main.body.stmts[0].kind {
+            if let ExprKind::MethodCall { target, method, .. } = &e.kind {
+                assert_eq!(method, "do_thing");
+                assert!(matches!(
+                    &target.kind,
+                    ExprKind::FieldAccess { field, .. } if field == "inner"
+                ));
+            } else {
+                panic!("expected MethodCall");
+            }
+        } else {
+            panic!("expected expr stmt");
+        }
+    }
+
+    #[test]
+    fn parse_class_init_rejects_non_init() {
+        // C4.1 only supports `Name::init(...)`; other associated
+        // fn names are reserved for a later sub-phase.
+        let err = parse("fn main() -> i64 { Point::new(3) }").unwrap_err();
+        assert!(matches!(err, ParseError::UnexpectedToken { .. }));
     }
 
     #[test]

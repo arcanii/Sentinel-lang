@@ -954,6 +954,26 @@ fn walk_expr(
                 walk_expr(a, ctx, errors, program);
             }
         }
+        // C4.1 / ADR 0022 D3 + D7: method call. The receiver is
+        // walked as an lvalue (the auto-ref converts it to
+        // `&target` / `&mut target` at codegen). Each arg is
+        // walked as a normal expr. Borrow rules around the
+        // auto-ref will be tightened in a follow-on iteration —
+        // for now, treat the receiver as a read (the existing
+        // shared-borrow path).
+        TypedExprKind::MethodCall { target, args, .. } => {
+            walk_expr(target, ctx, errors, program);
+            for a in args {
+                walk_expr(a, ctx, errors, program);
+            }
+        }
+        // C4.1 / ADR 0022 D5: `Name::init(args)` is purely a
+        // value-producing expression — walk its args.
+        TypedExprKind::ClassInit { args, .. } => {
+            for a in args {
+                walk_expr(a, ctx, errors, program);
+            }
+        }
     }
 }
 
@@ -1141,7 +1161,8 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         Type::Struct(_)
         | Type::Array(_)
         | Type::GenericInstance(_)
-        | Type::TypeParam(_) => false,
+        | Type::TypeParam(_)
+        | Type::Class(_) => false,
         // C3 / ADR 0019 D5: Copy-ness of `secret T` follows the
         // inner type — `secret i64` is Copy; `secret Bag` is Move.
         // The secret qualifier is orthogonal to ownership;

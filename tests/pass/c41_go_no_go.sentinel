@@ -1,0 +1,33 @@
+// C4.1 (2/N) / ADR 0022 D11: phase-go program. Point class with
+// two fields + an init constructor + a shared-self `manhattan`
+// method + an exclusive-self `translate` method. Translate
+// modifies fields then calls self.manhattan() to compute the
+// updated distance.
+//
+// Trace: p starts at (10, 20). translate(3, 9) updates to (13,
+// 29) and returns manhattan = 13 + 29 = 42.
+//
+// Expected: exit code 42, no stdout.
+
+class Point {
+    let x: i64;
+    let y: i64;
+    pub init(x: i64, y: i64) {
+        self.x = x;
+        self.y = y;
+        0
+    }
+    pub fn manhattan(self: &Self) -> i64 {
+        self.x + self.y
+    }
+    pub fn translate(self: &mut Self, dx: i64, dy: i64) -> i64 {
+        self.x = self.x + dx;
+        self.y = self.y + dy;
+        self.manhattan()
+    }
+}
+
+fn main() -> i64 {
+    let mut p: Point = Point::init(10, 20);
+    p.translate(3, 9)
+}
