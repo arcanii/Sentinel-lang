@@ -414,6 +414,19 @@ pub fn compile_to_object(
             None,
         )
     };
+    // C3.5(c) / ADR 0020 D7: sentinel_kont_push pushes a captured
+    // evaluation frame onto a kont's chain. Used at every "could-
+    // be-captured" eval site (let-stmt with effecting RHS at
+    // C3.5(c); binops + if + index at later sub-phases).
+    let kont_push_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let void_ty = context.void_type();
+        module.add_function(
+            "sentinel_kont_push",
+            void_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), ptr_ty.into()], false),
+            None,
+        )
+    };
     // C3.5(a) note: we do NOT declare sentinel_kont_panic_resumed
     // at the module level — codegen never calls it directly. The
     // runtime's `sentinel_kont_resume` dispatches to it internally
@@ -444,6 +457,34 @@ pub fn compile_to_object(
     // Pass 2: emit each user function body. (The runtime `print`
     // has no body — it's defined externally by sentinel-runtime.)
     {
+        // C3.5(c) / ADR 0020 D7: pre-declare per-let resumer fns
+        // for any user fn whose body matches the let-shape (single
+        // let with effecting RHS + pure tail). Each resumer's
+        // signature is uniform: `ptr (i64, ptr)` — the resumed
+        // value + opaque captured-state pointer; returns a Kont*
+        // wrapping the resumer's result. Captured VarIds are
+        // captured here so compile_fn can produce both the parent
+        // body and the resumer body from the same data.
+        let mut let_resumers: HashMap<FnId, (FunctionValue<'_>, Vec<VarId>)> =
+            HashMap::new();
+        for fn_def in &program.fns {
+            if !fn_def.type_params.is_empty() {
+                continue;
+            }
+            if let Some(info) = detect_let_shape(fn_def, program) {
+                let captured = collect_captured_vars(info.tail, info.let_id);
+                let resumer_name = format!(
+                    "__resume_{}_let_{}",
+                    fn_def.name, info.let_id.0
+                );
+                let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+                let i64_ty = context.i64_type();
+                let resumer_ty = ptr_ty.fn_type(&[i64_ty.into(), ptr_ty.into()], false);
+                let resumer_fn = module.add_function(&resumer_name, resumer_ty, None);
+                let_resumers.insert(fn_def.id, (resumer_fn, captured));
+            }
+        }
+
         let mut cx = CodegenCtx {
             context: &context,
             builder,
@@ -459,6 +500,8 @@ pub fn compile_to_object(
             kont_resume_fn,
             kont_pure_fn,
             kont_consume_pure_fn,
+            kont_push_fn,
+            let_resumers,
             current_fn: None,
             current_fn_id: FnId(0), // placeholder; reset in compile_fn
             vars: HashMap::new(),
@@ -573,6 +616,16 @@ struct CodegenCtx<'ctx, 'plan> {
     /// invoked from handle codegen's runtime switch's "pure
     /// return" case.
     kont_consume_pure_fn: FunctionValue<'ctx>,
+    /// C3.5(c) / ADR 0020 D7: `sentinel_kont_push(kont, resumer,
+    /// captured)` adds a captured evaluation frame to the kont's
+    /// chain. Emitted at let-stmts whose RHS produces a kont.
+    kont_push_fn: FunctionValue<'ctx>,
+    /// C3.5(c) / ADR 0020 D7: per-fn resumer fn + captured-var
+    /// set for effecting fns matching the let-shape. Pre-
+    /// declared in compile_to_object's pass 1 so compile_fn can
+    /// look them up by FnId; emitted as a side-effect of
+    /// compile_fn alongside the parent fn body.
+    let_resumers: HashMap<FnId, (FunctionValue<'ctx>, Vec<VarId>)>,
     current_fn: Option<FunctionValue<'ctx>>,
     /// C2.4: the FnId of the fn currently being compiled. Used to
     /// look up the moved-source set from `drop_plan` at scope-exit
@@ -1282,6 +1335,21 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         fn_def: &TypedFnDef,
         program: &TypedProgram,
     ) -> Result<(), CodegenError> {
+        // C3.5(c) / ADR 0020 D7: special-case the let-shape of an
+        // effecting fn body. Single let with effecting RHS + pure
+        // tail uses per-let frame reification: codegen emits a
+        // resumer fn + captured-state struct so resume can replay
+        // the let-body. Fall back to the C3.5(b) path otherwise.
+        if let Some(info) = detect_let_shape(fn_def, program) {
+            if let Some((resumer_fn, captured)) =
+                self.let_resumers.get(&fn_def.id).cloned()
+            {
+                return self.compile_effecting_fn_with_let(
+                    fn_def, &info, resumer_fn, &captured, program,
+                );
+            }
+        }
+
         // C3.5(b) / ADR 0020 D7: validate that effecting fns
         // (non-empty effect_row) have the shape codegen can
         // lower at this sub-phase — body is a direct Perform,
@@ -1383,6 +1451,221 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .build_return(Some(&body_val))
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
         }
+        Ok(())
+    }
+
+    /// C3.5(c) / ADR 0020 D7: compile an effecting fn whose body
+    /// matches the let-shape (single let with effecting RHS +
+    /// pure tail). Emits two LLVM fns:
+    ///
+    /// 1. The parent fn (already declared in pass 1) with body:
+    ///    allocate the captured-state struct, store fn-param
+    ///    values, evaluate the let's effecting RHS to get a
+    ///    Kont*, push a frame onto it referencing the resumer +
+    ///    captured ptr, return the Kont*.
+    /// 2. The resumer fn (already declared in pass 1) with body:
+    ///    allocate stack slots for the let-bound var (filled
+    ///    from the resumed value param) and each captured var
+    ///    (loaded from the captured struct), lower the tail
+    ///    expression, wrap the i64 result in a pure-return
+    ///    Kont via sentinel_kont_pure, return the wrapped Kont.
+    ///
+    /// The captured struct is laid out as a sequence of i64
+    /// fields, one per captured VarId, at byte offsets 0, 8,
+    /// 16, ... Codegen uses i8-indexed GEP for layout stability.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_effecting_fn_with_let(
+        &mut self,
+        fn_def: &TypedFnDef,
+        info: &LetShapeInfo<'_>,
+        resumer_fn: FunctionValue<'ctx>,
+        captured_ids: &[VarId],
+        program: &TypedProgram,
+    ) -> Result<(), CodegenError> {
+        // --- Compile the resumer fn first ---
+        // Save the parent fn's context so we can restore after.
+        let saved_fn = self.current_fn;
+        let saved_fn_id = self.current_fn_id;
+        let saved_vars = std::mem::take(&mut self.vars);
+        let saved_scope = std::mem::take(&mut self.scope_stack);
+
+        self.current_fn = Some(resumer_fn);
+        self.scope_stack.push(Vec::new());
+        let resumer_entry = self.context.append_basic_block(resumer_fn, "entry");
+        self.builder.position_at_end(resumer_entry);
+
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        let value_param = resumer_fn
+            .get_nth_param(0)
+            .expect("resumer has value param")
+            .into_int_value();
+        let captured_param = resumer_fn
+            .get_nth_param(1)
+            .expect("resumer has captured param")
+            .into_pointer_value();
+
+        // Bind the let-bound VarId to the resumed value param.
+        let v_alloca = self
+            .builder
+            .build_alloca(i64_ty, "resumed_value")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_store(v_alloca, value_param)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.vars.insert(info.let_id, (v_alloca, info.let_ty));
+
+        // Load each captured field from the struct + alloca it.
+        // The struct is laid out as i64[N] starting at offset 0.
+        for (i, cap_id) in captured_ids.iter().enumerate() {
+            let offset = i64_ty.const_int((i * 8) as u64, false);
+            let elem_ptr = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        i8_ty,
+                        captured_param,
+                        &[offset],
+                        &format!("cap_ptr_{}", i),
+                    )
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+            };
+            let elem_val = self
+                .builder
+                .build_load(i64_ty, elem_ptr, &format!("cap_load_{}", i))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let cap_alloca = self
+                .builder
+                .build_alloca(i64_ty, &format!("cap_{}", i))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(cap_alloca, elem_val)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(*cap_id, (cap_alloca, Type::I64));
+        }
+
+        // Lower the tail expression. Result is an i64 per the
+        // detect_let_shape constraint.
+        let tail_val = self.lower_expr(info.tail, program)?.into_int_value();
+
+        // Wrap in a pure-return kont via sentinel_kont_pure.
+        let pure_call = self
+            .builder
+            .build_call(self.kont_pure_fn, &[tail_val.into()], "pure_kont")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let pure_kont = pure_call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_kont_pure returns ptr");
+        self.builder
+            .build_return(Some(&pure_kont))
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Restore the parent fn's CodegenCtx state.
+        self.current_fn = saved_fn;
+        self.current_fn_id = saved_fn_id;
+        self.vars = saved_vars;
+        self.scope_stack = saved_scope;
+
+        // --- Compile the parent fn body ---
+        let parent_fn = *self
+            .fns
+            .get(&fn_def.id)
+            .expect("parent declared in pass 1");
+        self.current_fn = Some(parent_fn);
+        self.current_fn_id = fn_def.id;
+        self.vars.clear();
+        self.scope_stack.clear();
+        self.scope_stack.push(Vec::new());
+
+        let parent_entry = self.context.append_basic_block(parent_fn, "entry");
+        self.builder.position_at_end(parent_entry);
+
+        // Bind fn params.
+        for (i, param) in fn_def.params.iter().enumerate() {
+            let arg = parent_fn
+                .get_nth_param(i as u32)
+                .expect("param exists");
+            let llvm_ty = self.llvm_basic_type(param.ty);
+            let alloca = self
+                .builder
+                .build_alloca(llvm_ty, &param.name)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(alloca, arg)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(param.id, (alloca, param.ty));
+            self.scope_stack
+                .last_mut()
+                .expect("just pushed")
+                .push(param.id);
+        }
+
+        // Allocate the captured-state struct (sentinel_alloc). If
+        // there are no captured vars, pass a null pointer to
+        // sentinel_kont_push — the resumer will receive null and
+        // ignore it.
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let captured_ptr: PointerValue<'ctx> = if captured_ids.is_empty() {
+            ptr_ty.const_null()
+        } else {
+            let size = i64_ty.const_int((captured_ids.len() * 8) as u64, false);
+            let alloc_call = self
+                .builder
+                .build_call(self.alloc_fn, &[size.into()], "captured_alloc")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let ptr = alloc_call
+                .try_as_basic_value()
+                .left()
+                .expect("sentinel_alloc returns ptr")
+                .into_pointer_value();
+            // Store each captured var's current value at the
+            // appropriate offset.
+            for (i, cap_id) in captured_ids.iter().enumerate() {
+                let offset = i64_ty.const_int((i * 8) as u64, false);
+                let elem_ptr = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            i8_ty,
+                            ptr,
+                            &[offset],
+                            &format!("cap_store_ptr_{}", i),
+                        )
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                };
+                let (cap_alloca, _ty) = *self
+                    .vars
+                    .get(cap_id)
+                    .expect("captured var bound from fn params");
+                let cap_val = self
+                    .builder
+                    .build_load(i64_ty, cap_alloca, &format!("cap_read_{}", i))
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_store(elem_ptr, cap_val)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            }
+            ptr
+        };
+
+        // Lower the let's RHS (perform OR call-to-effecting-fn).
+        // The result is a *mut SentinelKont.
+        let kont_val = self.lower_expr(info.rhs, program)?.into_pointer_value();
+
+        // Push the captured frame onto the kont's chain.
+        let resumer_ptr = resumer_fn.as_global_value().as_pointer_value();
+        self.builder
+            .build_call(
+                self.kont_push_fn,
+                &[kont_val.into(), resumer_ptr.into(), captured_ptr.into()],
+                "",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Return the kont so the caller's handle catches it.
+        self.builder
+            .build_return(Some(&kont_val))
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
         Ok(())
     }
 
@@ -2876,6 +3159,164 @@ fn tail_produces_kont(tail: &TypedExpr, program: &TypedProgram) -> bool {
                 && tail_produces_kont(&b.tail, program)
         }
         _ => false,
+    }
+}
+
+/// C3.5(c) / ADR 0020 D7: detect the "single-let-with-effecting-
+/// RHS + pure tail" shape of an effecting fn body. This shape is
+/// the simplest case where the perform sits in non-tail position
+/// — captured into a runtime frame so the kont's resume replays
+/// the let-body's evaluation context.
+///
+/// Returns Some with the let's VarId / Type / RHS expr / tail
+/// expr if the shape matches, otherwise None. Other body shapes
+/// go through the C3.5(b) "tail-produces-kont OR pure" path.
+struct LetShapeInfo<'a> {
+    let_id: VarId,
+    let_ty: Type,
+    rhs: &'a TypedExpr,
+    tail: &'a TypedExpr,
+}
+
+fn detect_let_shape<'a>(
+    fn_def: &'a TypedFnDef,
+    program: &TypedProgram,
+) -> Option<LetShapeInfo<'a>> {
+    let sig = program.signature(fn_def.id);
+    if sig.effect_row.is_empty() || sig.is_main {
+        return None;
+    }
+    if fn_def.body.stmts.len() != 1 {
+        return None;
+    }
+    let stmt = &fn_def.body.stmts[0];
+    let (let_id, value, ty) = match &stmt.kind {
+        TypedStmtKind::Let { id, value, ty, .. } => (*id, value, *ty),
+        _ => return None,
+    };
+    // RHS must produce a Kont — i.e., be a Perform or call-to-
+    // effecting-fn. The C3.5(b) tail_produces_kont helper checks
+    // exactly this.
+    if !tail_produces_kont(value, program) {
+        return None;
+    }
+    // Tail must be pure (no nested perform / resume). At MVP
+    // we don't yet handle chains of effecting lets.
+    if expr_performs(&fn_def.body.tail) {
+        return None;
+    }
+    // MVP restriction: the let-bound type is i64 (the only
+    // shape we know how to carry through a SentinelKont's
+    // single arg field). Multi-arg ops + non-i64 captures land
+    // at a follow-on sub-phase.
+    if ty != Type::I64 {
+        return None;
+    }
+    Some(LetShapeInfo {
+        let_id,
+        let_ty: ty,
+        rhs: value,
+        tail: &fn_def.body.tail,
+    })
+}
+
+/// C3.5(c) / ADR 0020 D7: walk a tail expression collecting the
+/// VarIds it references that need to be captured into the runtime
+/// frame so the resumer can re-evaluate the tail. Captured set
+/// excludes the let-bound VarId (filled from the resumed value at
+/// resume time) and excludes builtins / fn ids (those are
+/// resolved through fn_table, not vars). MVP-restricted to i64
+/// captures by the caller.
+fn collect_captured_vars(tail: &TypedExpr, let_id: VarId) -> Vec<VarId> {
+    let mut acc: Vec<VarId> = Vec::new();
+    walk_collect_var_refs(tail, &mut acc);
+    acc.into_iter()
+        .filter(|id| *id != let_id)
+        .collect()
+}
+
+fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
+    match &expr.kind {
+        TypedExprKind::Var(id) => {
+            if !acc.contains(id) {
+                acc.push(*id);
+            }
+        }
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit => {}
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner) => walk_collect_var_refs(inner, acc),
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => {
+            walk_collect_var_refs(l, acc);
+            walk_collect_var_refs(r, acc);
+        }
+        TypedExprKind::Block(b) => {
+            for s in &b.stmts {
+                walk_collect_var_refs_stmt(&s.kind, acc);
+            }
+            walk_collect_var_refs(&b.tail, acc);
+        }
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            walk_collect_var_refs(cond, acc);
+            for s in &then_branch.stmts {
+                walk_collect_var_refs_stmt(&s.kind, acc);
+            }
+            walk_collect_var_refs(&then_branch.tail, acc);
+            for s in &else_branch.stmts {
+                walk_collect_var_refs_stmt(&s.kind, acc);
+            }
+            walk_collect_var_refs(&else_branch.tail, acc);
+        }
+        TypedExprKind::Call { args, .. } => {
+            for a in args {
+                walk_collect_var_refs(a, acc);
+            }
+        }
+        TypedExprKind::StructLit { fields, .. } => {
+            for f in fields {
+                walk_collect_var_refs(f, acc);
+            }
+        }
+        TypedExprKind::FieldAccess { target, .. } => walk_collect_var_refs(target, acc),
+        TypedExprKind::ArrayLit { elements, .. } => {
+            for e in elements {
+                walk_collect_var_refs(e, acc);
+            }
+        }
+        TypedExprKind::Index { target, index, .. } => {
+            walk_collect_var_refs(target, acc);
+            walk_collect_var_refs(index, acc);
+        }
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            walk_collect_var_refs(body, acc);
+            for arm in arms {
+                walk_collect_var_refs(&arm.body, acc);
+            }
+            if let Some(ra) = return_arm.as_deref() {
+                walk_collect_var_refs(&ra.body, acc);
+            }
+        }
+        TypedExprKind::Perform { args, .. } | TypedExprKind::ResumeKont { args, .. } => {
+            for a in args {
+                walk_collect_var_refs(a, acc);
+            }
+        }
+    }
+}
+
+fn walk_collect_var_refs_stmt(kind: &TypedStmtKind, acc: &mut Vec<VarId>) {
+    match kind {
+        TypedStmtKind::Let { value, .. } => walk_collect_var_refs(value, acc),
+        TypedStmtKind::Assign { target, value } => {
+            walk_collect_var_refs(target, acc);
+            walk_collect_var_refs(value, acc);
+        }
+        TypedStmtKind::Expr(e) => walk_collect_var_refs(e, acc),
     }
 }
 

@@ -148,6 +148,39 @@ pub struct SentinelKont {
     /// One-shot enforcement per ADR 0020 D2. `0` = not yet
     /// resumed; `1` = consumed (second resume aborts).
     pub consumed: u8,
+    /// Padding so `frames_head` lands at a stable 8-byte offset.
+    pub _pad2: [u8; 7],
+    /// C3.5(c) / ADR 0020 D7: linked-list head of captured
+    /// evaluation frames. NULL when no frames have been pushed
+    /// (the C3.5(a)/(b) cases where `perform` is at tail
+    /// position with no surrounding context to reify). The list
+    /// is ordered innermost-first (head = most-recently-pushed
+    /// = closest to the perform site); replay walks head → tail
+    /// to evaluate frames in the order their original
+    /// computation would have run.
+    pub frames_head: *mut SentinelFrame,
+}
+
+/// C3.5(c) / ADR 0020 D7: a captured evaluation frame. Created
+/// at codegen-emitted `sentinel_kont_push` sites — each "could-
+/// be-captured" eval-frame position (let-body, in C3.5(c); more
+/// at follow-on sub-phases) emits one. `resumer` is a per-site
+/// function the compiler generated; `captured` is the heap-
+/// allocated struct holding the values of in-scope variables
+/// the resumer needs to re-evaluate its tail; `next` chains
+/// outwards from the perform site towards the handle.
+///
+/// Resumer ABI: takes the resumed value (i64) + the captured
+/// state pointer (opaque), returns a `*mut SentinelKont` so the
+/// resumer body can itself perform if needed. At C3.5(c) MVP
+/// the only resumers we emit are non-performing; they wrap their
+/// result via [`sentinel_kont_pure`].
+#[repr(C)]
+pub struct SentinelFrame {
+    pub resumer:
+        unsafe extern "C" fn(value: i64, captured: *mut u8) -> *mut SentinelKont,
+    pub captured: *mut u8,
+    pub next: *mut SentinelFrame,
 }
 
 /// Allocate a fresh continuation tagged with the operation's id.
@@ -175,16 +208,57 @@ pub extern "C" fn sentinel_perform_op(op_id: u32, arg: i64) -> *mut SentinelKont
         (*raw)._pad = 0;
         (*raw).arg = arg;
         (*raw).consumed = 0;
+        (*raw)._pad2 = [0; 7];
+        (*raw).frames_head = core::ptr::null_mut();
     }
     raw
 }
 
-/// Resume a captured continuation with `value`. At C3.5(a) the
-/// continuation has no captured frames — the perform sat
-/// directly inside the matching handle's body — so resume just
-/// flips the one-shot flag, frees the kont, and returns
-/// `value`. The general-case resume (replay the frames vector
-/// in reverse) lands at C3.5(b) / C3.6.
+/// C3.5(c) / ADR 0020 D7: push a captured evaluation frame onto
+/// the kont's chain. Called from codegen-emitted code at every
+/// "could-be-captured" evaluation site (let-stmts at C3.5(c);
+/// binops / if-cond / index / etc. at later sub-phases). The
+/// `resumer` is a free function the compiler emitted to re-
+/// evaluate the surrounding context given the resumed value;
+/// `captured` is a heap-allocated struct holding any in-scope
+/// values the resumer body references.
+///
+/// # Safety
+///
+/// `kont` must point to a live SentinelKont. The (`resumer`,
+/// `captured`) pair must match: the resumer must read its
+/// captured state through the pointer it expects. Memory
+/// management: this fn takes ownership of `captured`. The
+/// matching `sentinel_kont_resume` frees the captured pointer
+/// after the resumer returns.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn sentinel_kont_push(
+    kont: *mut SentinelKont,
+    resumer: unsafe extern "C" fn(value: i64, captured: *mut u8) -> *mut SentinelKont,
+    captured: *mut u8,
+) {
+    let frame_size = core::mem::size_of::<SentinelFrame>() as i64;
+    let frame = sentinel_alloc(frame_size) as *mut SentinelFrame;
+    // SAFETY: sentinel_alloc returns valid uninit memory of the
+    // requested size; we initialise every field below.
+    unsafe {
+        (*frame).resumer = resumer;
+        (*frame).captured = captured;
+        (*frame).next = (*kont).frames_head;
+        (*kont).frames_head = frame;
+    }
+}
+
+/// Resume a captured continuation with `value`. Walks the kont's
+/// frame chain in head→tail order — head is the most-recently-
+/// pushed (innermost) frame, which is what would have run first
+/// in the original execution. Each frame's resumer is called
+/// with the current value + its captured state; the resumer
+/// returns a *mut SentinelKont (either a pure-return wrap or, in
+/// future sub-phases, an op-perform kont for nested handlers).
+/// At C3.5(c) MVP all resumers wrap their result so this loop
+/// drains them all and returns the final unwrapped i64.
 ///
 /// Second resume on the same kont aborts via
 /// [`sentinel_kont_panic_resumed`].
@@ -194,14 +268,6 @@ pub extern "C" fn sentinel_perform_op(op_id: u32, arg: i64) -> *mut SentinelKont
 /// `kont` must point to a live `SentinelKont` returned by an
 /// earlier `sentinel_perform_op` invocation. After this call
 /// returns the kont is freed; the caller must not access it.
-///
-/// This function is invoked exclusively by codegen-emitted IR
-/// for `k(v)` resume calls inside handler arms; codegen always
-/// passes a freshly-allocated kont pointer. We deliberately do
-/// NOT mark this `unsafe` because the LLVM call site has no
-/// notion of unsafe blocks — the contract is "called only from
-/// codegen" and is enforced statically by the type checker's
-/// ResumeKont machinery (only kont-typed VarIds can flow here).
 #[no_mangle]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn sentinel_kont_resume(kont: *mut SentinelKont, value: i64) -> i64 {
@@ -213,11 +279,38 @@ pub extern "C" fn sentinel_kont_resume(kont: *mut SentinelKont, value: i64) -> i
     unsafe {
         (*kont).consumed = 1;
     }
-    // Restricted case: empty frames vector, so resume just frees
-    // and returns the value. The free is safe because the one-
-    // shot flag ensures no further reads.
+
+    // Drain the frame chain. Each frame's resumer is called with
+    // the accumulated value; its returned kont must be a pure-
+    // return wrap at C3.5(c) MVP (nested perform inside resumers
+    // is C3.5(d)/C3.6 territory).
+    let mut current_value = value;
+    // SAFETY: read frames_head from the live kont.
+    let mut current_frame = unsafe { (*kont).frames_head };
+    while !current_frame.is_null() {
+        // SAFETY: current_frame is non-null and was allocated by
+        // sentinel_kont_push from a live kont.
+        let (resumer, captured, next) = unsafe {
+            ((*current_frame).resumer, (*current_frame).captured, (*current_frame).next)
+        };
+        // SAFETY: codegen contract — the resumer reads its
+        // captured state through `captured` and returns a live
+        // SentinelKont.
+        let result_kont = unsafe { resumer(current_value, captured) };
+        // C3.5(c) MVP invariant: result_kont is a pure-return
+        // wrap with op_id = PURE_RETURN_OP_ID. Unwrap and
+        // continue to the next frame.
+        // SAFETY: contract above.
+        let unwrapped = unsafe { (*result_kont).arg };
+        sentinel_free(result_kont as *mut u8);
+        sentinel_free(captured);
+        sentinel_free(current_frame as *mut u8);
+        current_value = unwrapped;
+        current_frame = next;
+    }
+
     sentinel_free(kont as *mut u8);
-    value
+    current_value
 }
 
 /// Abort with a clean diagnostic when a one-shot continuation is
@@ -352,9 +445,10 @@ mod tests {
     fn sentinel_kont_struct_layout_is_stable() {
         // Layout invariant: codegen reads `op_id` via GEP at
         // offset 0 + `arg` at offset 8 (after the 4-byte op_id +
-        // 4-byte pad). Test ensures the struct doesn't drift
-        // beyond what codegen assumes.
-        assert_eq!(core::mem::size_of::<SentinelKont>(), 24);
+        // 4-byte pad). `frames_head` follows after `consumed: u8
+        // + _pad2: [u8; 7]` at offset 24, but codegen accesses
+        // it through sentinel_kont_push so the offset is opaque.
+        assert_eq!(core::mem::size_of::<SentinelKont>(), 32);
         assert_eq!(core::mem::align_of::<SentinelKont>(), 8);
     }
 }

@@ -1,0 +1,24 @@
+// C3.5(c) / ADR 0020 D7: let-bound perform where the tail
+// expression captures a fn param. do_work(offset: i64) computes
+// `let v: i64 = perform Io.read(); v + offset`. The captured-
+// state struct holds `offset` (a single i64); codegen stores it
+// at the let-site + reloads it inside the resumer.
+//
+// main: handle do_work(35) with { Io.read(k) => k(7) }
+//   → resume: v = 7, offset = 35 → v + offset = 42.
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+}
+
+fn do_work(offset: i64) -> i64 ! { Io } {
+    let v: i64 = perform Io.read();
+    v + offset
+}
+
+fn main() -> i64 {
+    handle do_work(35) with {
+        Io.read(k) => k(7)
+    }
+}

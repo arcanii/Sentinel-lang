@@ -863,17 +863,37 @@ fn pass_c35b_handle_pure_return() {
     assert_eq!(r.stdout, "");
 }
 
+// (Previously this asserted effecting_fn_body_not_direct for the
+// let-bound-perform fixture. At C3.5(c) that shape compiles + runs
+// via per-let resumer fns; the fixture has been promoted to
+// tests/pass/c35c_let_bound_perform.sentinel. The UI fixture itself
+// is removed since the shape it asserts is no longer rejected.)
+
+// ---- C3.5(c) / ADR 0020 D7: per-let frame reification ----
+//
+// An effecting fn whose body is a single let with effecting RHS +
+// pure tail uses codegen-emitted per-let resumer fns. The resumer
+// receives (resumed value, captured-state pointer) and computes
+// the let-body. sentinel_kont_push at the let-site adds the
+// resumer onto the kont's frame chain; sentinel_kont_resume
+// replays the chain on resume.
+
 #[test]
-fn c35b_effecting_fn_let_bound_perform_reports_not_direct() {
-    // An effecting fn that let-binds a perform result needs
-    // per-evaluation-site frame reification (capture the rest of
-    // the fn after the let). Surfaces effecting_fn_body_not_direct
-    // until C3.5(c) / C3.6 ship the general case.
-    let out = build_ui_fixture("c35b_effecting_fn_let_bound_perform.sentinel");
-    assert!(!out.status.success(), "snc build should fail");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("effecting_fn_body_not_direct"),
-        "expected effecting_fn_body_not_direct; got: {stderr}"
-    );
+fn pass_c35c_let_bound_perform() {
+    // do_work body: `let v: i64 = perform Io.read(); v + 1`.
+    // Resumer with no captures. main resumes with 41 → v = 41 →
+    // v + 1 = 42. Exit 42.
+    let r = build_and_run("c35c_let_bound_perform.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35c_let_bound_perform_with_capture() {
+    // do_work(offset) body captures `offset` into the runtime
+    // frame's captured-state struct. main calls do_work(35);
+    // resumes with 7; resumer computes 7 + 35 = 42.
+    let r = build_and_run("c35c_let_bound_perform_with_capture.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
 }

@@ -1,0 +1,24 @@
+// C3.5(c) / ADR 0020 D7: simplest let-bound perform with no
+// captures. do_work's body is `let v: i64 = perform Io.read();
+// v + 1`. Codegen emits a per-let resumer fn that takes the
+// resumed value as `v` and computes `v + 1`. The resumer is
+// pushed onto the kont via sentinel_kont_push at the let-site.
+// main's handle catches the kont, resumes with 41; the resumer
+// computes 41 + 1 = 42; the final value bubbles back.
+//
+// Expected: exit code 42, no stdout.
+
+effect Io {
+    read() -> i64;
+}
+
+fn do_work() -> i64 ! { Io } {
+    let v: i64 = perform Io.read();
+    v + 1
+}
+
+fn main() -> i64 {
+    handle do_work() with {
+        Io.read(k) => k(41)
+    }
+}
