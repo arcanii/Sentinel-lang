@@ -827,6 +827,50 @@ pub enum ResolveError {
         #[label("`self` used here")]
         span: miette::SourceSpan,
     },
+
+    /// C4.2 / ADR 0023 D5 Path 2: `ImplName::method(args)` qualified
+    /// call parses at C4.2 (1/N) but isn't resolvable until the
+    /// impl table lands at C4.2 (2/N). Surface a clear "not yet"
+    /// diagnostic in the meantime.
+    #[error("`Name::method(args)` qualified call is not yet supported (lands at C4.2 (2/N))")]
+    #[diagnostic(
+        code(sentinel::resolve::qualified_call_not_yet),
+        help("qualified calls dispatch via the impl table — wait for C4.2 (2/N) to bring up the resolve / types / codegen wiring per ADR 0023 D8")
+    )]
+    QualifiedCallNotYet {
+        #[label("qualified call here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.2 / ADR 0023 D1: trait declarations parse at C4.2 (1/N)
+    /// but the resolve / types / codegen wiring lands at C4.2
+    /// (2/N). Trait declarations that appear in the program
+    /// surface this diagnostic until then.
+    #[error("trait declarations are not yet supported (land at C4.2 (2/N))")]
+    #[diagnostic(
+        code(sentinel::resolve::trait_decl_not_yet),
+        help("trait declarations parse + AST-mirror at C4.2 (1/N); resolve / types / codegen wiring per ADR 0023 D8 lands at C4.2 (2/N)")
+    )]
+    TraitDeclNotYet {
+        name: String,
+        #[label("trait `{name}` declared here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.2 / ADR 0023 D3+D4: impl block declarations parse at
+    /// C4.2 (1/N) but the resolve / types / codegen wiring lands
+    /// at C4.2 (2/N).
+    #[error("impl declarations are not yet supported (land at C4.2 (2/N))")]
+    #[diagnostic(
+        code(sentinel::resolve::impl_decl_not_yet),
+        help("impl declarations parse + AST-mirror at C4.2 (1/N); the per-(scope, trait, type) impl table per ADR 0023 D8 lands at C4.2 (2/N)")
+    )]
+    ImplDeclNotYet {
+        trait_name: String,
+        type_name: String,
+        #[label("`impl ... as {trait_name} for {type_name}` here")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -842,6 +886,25 @@ pub enum ResolveError {
 /// reference struct types in their TypeExprs), then fns, then fn
 /// bodies.
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
+    // C4.2 (1/N) / ADR 0023 D8: reject trait + impl declarations
+    // until (2/N) brings up the impl table + per-trait method
+    // signatures. Parser-level surface is in; resolve / types /
+    // codegen wiring is the next iteration. Mirrors the C3.0
+    // EffectDeclNotYet pattern.
+    if let Some(td) = program.traits.first() {
+        return Err(ResolveError::TraitDeclNotYet {
+            name: td.name.clone(),
+            span: to_source_span(&td.name_span),
+        });
+    }
+    if let Some(id) = program.impls.first() {
+        return Err(ResolveError::ImplDeclNotYet {
+            trait_name: id.trait_name.clone(),
+            type_name: id.type_name.clone(),
+            span: to_source_span(&id.span),
+        });
+    }
+
     let mut next_fn_id: u32 = 0;
     let mut next_var_id: u32 = 0;
 
@@ -1952,6 +2015,13 @@ fn resolve_expr(
                 args: resolved_args,
             }
         }
+        ExprKind::QualifiedCall { .. } => {
+            // C4.2 (1/N) / ADR 0023 D8: parser ships the surface;
+            // resolve / types / codegen wiring lands at (2/N).
+            return Err(ResolveError::QualifiedCallNotYet {
+                span: to_source_span(&expr.span),
+            });
+        }
     };
     Ok(Spanned { kind, span: expr.span.clone() })
 }
@@ -2311,6 +2381,24 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
         ResolveError::SelfOutsideClassContext { span } => (
             "sentinel::resolve::self_outside_class_context",
             "`self` is only valid inside a class method or `init` body".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::QualifiedCallNotYet { span } => (
+            "sentinel::resolve::qualified_call_not_yet",
+            "`Name::method(args)` qualified call is not yet supported (lands at C4.2 (2/N))"
+                .to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::TraitDeclNotYet { name, span } => (
+            "sentinel::resolve::trait_decl_not_yet",
+            format!("trait `{name}` declaration is not yet supported (lands at C4.2 (2/N))"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::ImplDeclNotYet { trait_name, type_name, span } => (
+            "sentinel::resolve::impl_decl_not_yet",
+            format!(
+                "impl `... as {trait_name} for {type_name}` is not yet supported (lands at C4.2 (2/N))"
+            ),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -2766,6 +2854,34 @@ mod tests {
         } else {
             panic!("expected FieldAccess");
         }
+    }
+
+    // ----- C4.2 (1/N): trait + impl + qualified-call rejections -----
+
+    #[test]
+    fn trait_decl_rejected_at_resolve() {
+        let err = resolve_err(
+            "trait Writer { fn write(self: &mut Self, d: i64) -> i64; }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, ResolveError::TraitDeclNotYet { ref name, .. } if name == "Writer"));
+    }
+
+    #[test]
+    fn impl_decl_rejected_at_resolve() {
+        let err = resolve_err(
+            "impl as Writer for File { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::ImplDeclNotYet { ref trait_name, ref type_name, .. }
+                if trait_name == "Writer" && type_name == "File"
+        ));
+    }
+
+    #[test]
+    fn qualified_call_rejected_at_resolve() {
+        let err = resolve_err("fn main() -> i64 { Buffered::write(0, 1) }");
+        assert!(matches!(err, ResolveError::QualifiedCallNotYet { .. }));
     }
 
     // ----- C1.5: null literal + builtin registration -----

@@ -265,6 +265,21 @@ pub enum ExprKind {
         class_name_span: Span,
         args: Vec<Expr>,
     },
+    /// `ImplName::method(args)` qualified call per ADR 0023 D5
+    /// Path 2 (C4.2). Picks a specific named impl by name; the
+    /// first arg is the receiver (no auto-ref — the user passes
+    /// `&obj` / `&mut obj` explicitly). Disambiguated from
+    /// `Name::init` at parse time: if the second Ident is
+    /// `init`, produces `ClassInit`; otherwise produces this
+    /// variant. Resolve at C4.2 (1/N) leaves this untouched —
+    /// (2/N) brings up the impl table + dispatch.
+    QualifiedCall {
+        impl_name: String,
+        impl_name_span: Span,
+        method: String,
+        method_span: Span,
+        args: Vec<Expr>,
+    },
 }
 
 /// A single operation arm inside a `handle ... with { ... }`
@@ -381,6 +396,16 @@ pub struct Program {
     /// downstream passes light up incrementally in follow-on
     /// commits.
     pub classes: Vec<ClassDecl>,
+    /// Top-level trait declarations per ADR 0021 D4 + ADR 0023 D1
+    /// (C4.2). Always present (may be empty for pre-C4.2 programs).
+    /// Resolve / types / codegen at C4.2's first iteration leave
+    /// traits untouched — the AST + parser layer ships first.
+    pub traits: Vec<TraitDecl>,
+    /// Top-level impl declarations per ADR 0021 D5 + ADR 0023 D3+D4
+    /// (C4.2). Both default impls (no name) and named impls
+    /// (`impl Name as Trait for Type`) live in this vec; the
+    /// optional `name` field distinguishes.
+    pub impls: Vec<ImplDecl>,
     pub span: Span,
 }
 
@@ -556,6 +581,76 @@ pub struct InitDef {
 /// declare an `effect_row` exactly as free fns do.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MethodDef {
+    pub visibility: Visibility,
+    pub name: String,
+    pub name_span: Span,
+    pub self_kind: SelfKind,
+    pub params: Vec<Param>,
+    pub return_type: TypeExpr,
+    pub effect_row: Vec<Spanned<String>>,
+    pub body: Block,
+    pub span: Span,
+}
+
+/// A C4.2+ top-level trait declaration per ADR 0021 D4 + ADR
+/// 0023 D1: `trait Name { method_sig* }`. Trait methods declare
+/// signatures only (no default bodies at C4.2 minimum per ADR
+/// 0023 D2). Empty trait declarations are allowed structurally
+/// — they're marker traits at C4.2. Resolve / types / codegen
+/// at C4.2 (1/N) leave traits untouched; (2/N) brings them up.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TraitDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub methods: Vec<TraitMethodSig>,
+    pub span: Span,
+}
+
+/// A single method signature inside a trait declaration per ADR
+/// 0023 D2. Same shape as [`MethodDef`] but with no body —
+/// terminated by `;` at the source level. The first parameter
+/// is the mandatory `self: &Self` / `self: &mut Self` receiver
+/// per ADR 0022 D3.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TraitMethodSig {
+    pub name: String,
+    pub name_span: Span,
+    pub self_kind: SelfKind,
+    pub params: Vec<Param>,
+    pub return_type: TypeExpr,
+    pub effect_row: Vec<Spanned<String>>,
+    pub span: Span,
+}
+
+/// A C4.2+ top-level impl declaration per ADR 0021 D5 + ADR
+/// 0023 D3/D4: `impl name? as Trait for Type { method_def* }`.
+/// When `name` is `None`, this is the default impl for
+/// `(Trait, Type)` in the current scope. When `Some`, it's a
+/// named impl that coexists with the default + other named
+/// impls per ADR 0021 D7's scope-local coherence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ImplDecl {
+    /// `None` for the default impl; `Some(name)` for a named impl.
+    pub name: Option<String>,
+    /// Span of just the impl name when present, useful for
+    /// `DuplicateImplName` diagnostics.
+    pub name_span: Option<Span>,
+    pub trait_name: String,
+    pub trait_name_span: Span,
+    pub type_name: String,
+    pub type_name_span: Span,
+    pub methods: Vec<ImplMethodDef>,
+    pub span: Span,
+}
+
+/// A single method implementation inside an impl block per ADR
+/// 0023 D3. Same shape as [`MethodDef`] (visibility + self_kind +
+/// params + return_type + effect_row + body) but parsed in the
+/// context of an impl rather than a class. Stored separately so
+/// downstream passes can iterate impl methods without confusion
+/// with class methods.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ImplMethodDef {
     pub visibility: Visibility,
     pub name: String,
     pub name_span: Span,
@@ -745,6 +840,13 @@ impl fmt::Display for ExprKind {
             }
             ExprKind::ClassInit { class_name, args, .. } => {
                 write!(f, "({class_name}::init")?;
+                for a in args {
+                    write!(f, " {}", a.kind)?;
+                }
+                write!(f, ")")
+            }
+            ExprKind::QualifiedCall { impl_name, method, args, .. } => {
+                write!(f, "({impl_name}::{method}")?;
                 for a in args {
                     write!(f, " {}", a.kind)?;
                 }
@@ -1143,6 +1245,8 @@ mod tests {
             structs: vec![],
             effects: vec![],
             classes: vec![],
+            traits: vec![],
+            impls: vec![],
             span: 0..2,
         };
         assert_eq!(p.to_string(), "(fn main () -> i64 (block 42))");
@@ -1189,6 +1293,8 @@ mod tests {
             structs: vec![],
             effects: vec![],
             classes: vec![],
+            traits: vec![],
+            impls: vec![],
             span: 0..20,
         };
         assert_eq!(
@@ -1603,6 +1709,8 @@ mod tests {
             structs: vec![s],
             effects: vec![],
             classes: vec![],
+            traits: vec![],
+            impls: vec![],
             span: 0..30,
         };
         // Structs first, then fns.

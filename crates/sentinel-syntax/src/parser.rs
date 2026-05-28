@@ -48,9 +48,9 @@
 
 use sentinel_ast::{
     BinOp, Block, ClassDecl, ClassField, CmpOp, EffectDecl, Expr, ExprKind, FieldInit, FnDef,
-    HandlerArm, InitDef, LogicOp, MethodDef, OpDecl, Param, Program, ReturnArm, SelfKind, Span,
-    Spanned, Stmt, StmtKind, StructDecl, StructField, TypeExpr, TypeExprKind, TypeParam, UnaryOp,
-    Visibility,
+    HandlerArm, ImplDecl, ImplMethodDef, InitDef, LogicOp, MethodDef, OpDecl, Param, Program,
+    ReturnArm, SelfKind, Span, Spanned, Stmt, StmtKind, StructDecl, StructField, TraitDecl,
+    TraitMethodSig, TypeExpr, TypeExprKind, TypeParam, UnaryOp, Visibility,
 };
 
 use crate::{lex, LexError, TokenKind};
@@ -283,17 +283,21 @@ impl<'a> Parser<'a> {
         let mut structs = Vec::new();
         let mut effects = Vec::new();
         let mut classes = Vec::new();
+        let mut traits = Vec::new();
+        let mut impls = Vec::new();
         while self.peek().is_some() {
             match self.peek_kind() {
                 Some(TokenKind::Fn) => fns.push(self.parse_fn_def()?),
                 Some(TokenKind::Struct) => structs.push(self.parse_struct_decl()?),
                 Some(TokenKind::Effect) => effects.push(self.parse_effect_decl()?),
                 Some(TokenKind::Class) => classes.push(self.parse_class_decl()?),
+                Some(TokenKind::Trait) => traits.push(self.parse_trait_decl()?),
+                Some(TokenKind::Impl) => impls.push(self.parse_impl_decl()?),
                 Some(other) => {
                     let t = self.peek().expect("peeked");
                     return Err(ParseError::UnexpectedToken {
                         got: format!("{other:?}"),
-                        expected: "`fn`, `struct`, `effect`, or `class`",
+                        expected: "`fn`, `struct`, `effect`, `class`, `trait`, or `impl`",
                         span: to_source_span(&t.span),
                     });
                 }
@@ -304,6 +308,8 @@ impl<'a> Parser<'a> {
             && structs.is_empty()
             && effects.is_empty()
             && classes.is_empty()
+            && traits.is_empty()
+            && impls.is_empty()
         {
             return Err(ParseError::UnexpectedEof {
                 expected: "`fn` (programs are one or more function definitions)",
@@ -315,15 +321,21 @@ impl<'a> Parser<'a> {
         let struct_end = structs.last().map_or(0, |s| s.span.end);
         let effect_end = effects.last().map_or(0, |e| e.span.end);
         let class_end = classes.last().map_or(0, |c| c.span.end);
+        let trait_end = traits.last().map_or(0, |t| t.span.end);
+        let impl_end = impls.last().map_or(0, |i| i.span.end);
         let end = fn_end
             .max(struct_end)
             .max(effect_end)
-            .max(class_end);
+            .max(class_end)
+            .max(trait_end)
+            .max(impl_end);
         Ok(Program {
             fns,
             structs,
             effects,
             classes,
+            traits,
+            impls,
             span: start..end,
         })
     }
@@ -666,6 +678,521 @@ impl<'a> Parser<'a> {
             name_span,
             ty,
             span: let_start..semi_end,
+        })
+    }
+
+    /// Parse a C4.2 trait declaration per ADR 0021 D4 + ADR 0023
+    /// D1:
+    ///
+    /// ```text
+    /// trait_decl    = 'trait' Ident '{' method_sig* '}'
+    /// method_sig    = 'fn' Ident '(' self_param (',' param)* ')'
+    ///                 ('->' type_expr)? ('!' effect_row)? ';'
+    /// ```
+    ///
+    /// Empty trait declarations (`trait T {}`) are allowed
+    /// structurally — they're marker traits at C4.2.
+    fn parse_trait_decl(&mut self) -> Result<TraitDecl, ParseError> {
+        let trait_start = match self.peek_kind() {
+            Some(TokenKind::Trait) => self.advance().expect("peeked").span.start,
+            _ => unreachable!("called only after peek_kind() == Trait"),
+        };
+
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "trait name after `trait`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "trait name after `trait`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        match self.peek_kind() {
+            Some(TokenKind::LBrace) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`{` to open trait body",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`{` to open trait body",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let mut methods: Vec<TraitMethodSig> = Vec::new();
+        loop {
+            match self.peek_kind() {
+                Some(TokenKind::RBrace) => break,
+                Some(TokenKind::Fn) => {
+                    methods.push(self.parse_trait_method_sig()?);
+                }
+                Some(other) => {
+                    let t = self.peek().expect("peeked");
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{other:?}"),
+                        expected: "`fn` (trait method signature) or `}` to close trait body",
+                        span: to_source_span(&t.span),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "`fn` or `}` in trait body",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            }
+        }
+
+        let rbrace_end = self.advance().expect("RBrace").span.end;
+
+        Ok(TraitDecl {
+            name,
+            name_span,
+            methods,
+            span: trait_start..rbrace_end,
+        })
+    }
+
+    /// Parse a single trait method signature per ADR 0023 D2.
+    /// Same shape as a class method declaration except terminated
+    /// with `;` instead of a `block`.
+    fn parse_trait_method_sig(&mut self) -> Result<TraitMethodSig, ParseError> {
+        let fn_start = match self.peek_kind() {
+            Some(TokenKind::Fn) => self.advance().expect("peeked").span.start,
+            _ => unreachable!("called only after peek_kind() == Fn"),
+        };
+
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "trait method name after `fn`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "trait method name after `fn`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        match self.peek_kind() {
+            Some(TokenKind::LParen) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`(` after trait method name",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`(` after trait method name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let self_kind = self.parse_self_param()?;
+
+        let mut params = Vec::new();
+        if self.peek_kind() == Some(TokenKind::Comma) {
+            self.advance();
+            if self.peek_kind() != Some(TokenKind::RParen) {
+                params.push(self.parse_param()?);
+                while self.peek_kind() == Some(TokenKind::Comma) {
+                    self.advance();
+                    if self.peek_kind() == Some(TokenKind::RParen) {
+                        break;
+                    }
+                    params.push(self.parse_param()?);
+                }
+            }
+        }
+
+        match self.peek_kind() {
+            Some(TokenKind::RParen) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`,` or `)` in trait method parameter list",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`,` or `)` in trait method parameter list",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let return_type = self.parse_return_type()?;
+        let effect_row = self.parse_optional_effect_row()?;
+
+        let semi_end = match self.peek_kind() {
+            Some(TokenKind::Semi) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`;` after trait method signature (trait methods have no body at C4.2)",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`;` after trait method signature",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        Ok(TraitMethodSig {
+            name,
+            name_span,
+            self_kind,
+            params,
+            return_type,
+            effect_row,
+            span: fn_start..semi_end,
+        })
+    }
+
+    /// Parse a C4.2 impl declaration per ADR 0021 D5 + ADR 0023
+    /// D3+D4:
+    ///
+    /// ```text
+    /// impl_decl     = 'impl' Ident? 'as' trait_ident 'for' type_ident
+    ///                 '{' method_def* '}'
+    /// ```
+    ///
+    /// The optional `Ident` before `as` is the impl name; when
+    /// absent, the impl is the default for `(Trait, Type)` in
+    /// the current scope per ADR 0023 D3.
+    fn parse_impl_decl(&mut self) -> Result<ImplDecl, ParseError> {
+        let impl_start = match self.peek_kind() {
+            Some(TokenKind::Impl) => self.advance().expect("peeked").span.start,
+            _ => unreachable!("called only after peek_kind() == Impl"),
+        };
+
+        // Optional impl name: an Ident that is NOT followed by
+        // `as`-keyword-position. The parser disambiguates by
+        // checking: if the current Ident is followed by `as`, the
+        // Ident is the impl name; otherwise the current `as` should
+        // be at the front (which means no name). Since `as` is a
+        // distinct keyword (TokenKind::As) we can check directly.
+        let (name, name_span) = if let Some(TokenKind::Ident) = self.peek_kind() {
+            let t = self.peek().expect("peeked");
+            let span = t.span.clone();
+            let n = self.src[span.clone()].to_string();
+            self.advance();
+            (Some(n), Some(span))
+        } else {
+            (None, None)
+        };
+
+        // `as`
+        match self.peek_kind() {
+            Some(TokenKind::As) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`as` (impl Name? as Trait for Type)",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`as` after `impl`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        // Trait name (Ident).
+        let (trait_name, trait_name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let n = self.src[span.clone()].to_string();
+                self.advance();
+                (n, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "trait name after `as`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "trait name after `as`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        // `for`
+        match self.peek_kind() {
+            Some(TokenKind::For) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`for` (impl Trait for Type)",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`for` after trait name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        // Type name (Ident at C4.2 minimum — generic types deferred per
+        // ADR 0023 D3).
+        let (type_name, type_name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let n = self.src[span.clone()].to_string();
+                self.advance();
+                (n, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "type name after `for`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "type name after `for`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        // `{`
+        match self.peek_kind() {
+            Some(TokenKind::LBrace) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`{` to open impl body",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`{` to open impl body",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let mut methods: Vec<ImplMethodDef> = Vec::new();
+        while self.peek_kind() != Some(TokenKind::RBrace) {
+            // Optional `pub` visibility per ADR 0022 D2 / ADR 0023 D3.
+            let visibility = self.parse_optional_visibility();
+            match self.peek_kind() {
+                Some(TokenKind::Fn) => {
+                    methods.push(self.parse_impl_method_def(visibility)?);
+                }
+                Some(other) => {
+                    let t = self.peek().expect("peeked");
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{other:?}"),
+                        expected: "`fn` (impl method) or `}` to close impl body",
+                        span: to_source_span(&t.span),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "`fn` or `}` in impl body",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            }
+        }
+
+        let rbrace_end = self.advance().expect("peeked == RBrace").span.end;
+
+        Ok(ImplDecl {
+            name,
+            name_span,
+            trait_name,
+            trait_name_span,
+            type_name,
+            type_name_span,
+            methods,
+            span: impl_start..rbrace_end,
+        })
+    }
+
+    /// Parse a single impl method definition per ADR 0023 D3 —
+    /// identical shape to a class method (`parse_method_decl`)
+    /// but in an impl context. Visibility is already consumed by
+    /// the caller.
+    fn parse_impl_method_def(
+        &mut self,
+        visibility: Visibility,
+    ) -> Result<ImplMethodDef, ParseError> {
+        let fn_start = match self.peek_kind() {
+            Some(TokenKind::Fn) => self.advance().expect("peeked").span.start,
+            _ => unreachable!("called only after peek_kind() == Fn"),
+        };
+
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let n = self.src[span.clone()].to_string();
+                self.advance();
+                (n, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "impl method name after `fn`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "impl method name after `fn`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        match self.peek_kind() {
+            Some(TokenKind::LParen) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`(` after impl method name",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`(` after impl method name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let self_kind = self.parse_self_param()?;
+
+        let mut params = Vec::new();
+        if self.peek_kind() == Some(TokenKind::Comma) {
+            self.advance();
+            if self.peek_kind() != Some(TokenKind::RParen) {
+                params.push(self.parse_param()?);
+                while self.peek_kind() == Some(TokenKind::Comma) {
+                    self.advance();
+                    if self.peek_kind() == Some(TokenKind::RParen) {
+                        break;
+                    }
+                    params.push(self.parse_param()?);
+                }
+            }
+        }
+
+        match self.peek_kind() {
+            Some(TokenKind::RParen) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`,` or `)` in impl method parameter list",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`,` or `)` in impl method parameter list",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let return_type = self.parse_return_type()?;
+        let effect_row = self.parse_optional_effect_row()?;
+        let body = self.parse_block()?;
+        let end = body.span.end;
+
+        Ok(ImplMethodDef {
+            visibility,
+            name,
+            name_span,
+            self_kind,
+            params,
+            return_type,
+            effect_row,
+            body,
+            span: fn_start..end,
         })
     }
 
@@ -2517,31 +3044,44 @@ impl<'a> Parser<'a> {
                 let name_span = self.advance().expect("peeked").span.clone();
                 let name = self.src[name_span.clone()].to_string();
                 // C4.1 / ADR 0022 D5: `Name::init(args)` class
-                // instantiation. The `::` token is followed by an
-                // `init` keyword (only init is supported at C4.1;
-                // associated fns arrive in a later sub-phase). The
-                // class-name lookup happens in resolve.
+                // instantiation. C4.2 / ADR 0023 D5: `ImplName::method(args)`
+                // qualified call. The `::` separator is followed by
+                // either `init` (→ ClassInit) or an Ident (→
+                // QualifiedCall). Disambiguated at parse time by the
+                // token kind after `::`.
                 if self.peek_kind() == Some(TokenKind::ColonColon) {
                     self.advance();
-                    match self.peek_kind() {
-                        Some(TokenKind::Init) => {
+                    let is_init: bool;
+                    let (method_name, method_span) = match self.peek() {
+                        Some(t) if t.kind == TokenKind::Init => {
+                            is_init = true;
+                            let span = t.span.clone();
                             self.advance();
+                            ("init".to_string(), span)
                         }
-                        Some(other) => {
-                            let t = self.peek().expect("peeked");
+                        Some(t) if t.kind == TokenKind::Ident => {
+                            is_init = false;
+                            let span = t.span.clone();
+                            let n = self.src[span.clone()].to_string();
+                            self.advance();
+                            (n, span)
+                        }
+                        Some(t) => {
+                            let kind = t.kind;
+                            let span = t.span.clone();
                             return Err(ParseError::UnexpectedToken {
-                                got: format!("{other:?}"),
-                                expected: "`init` after `::` (associated fns deferred at C4.1 per ADR 0022 D5)",
-                                span: to_source_span(&t.span),
+                                got: format!("{kind:?}"),
+                                expected: "`init` or method name after `::`",
+                                span: to_source_span(&span),
                             });
                         }
                         None => {
                             return Err(ParseError::UnexpectedEof {
-                                expected: "`init` after `::`",
+                                expected: "`init` or method name after `::`",
                                 span: to_source_span(&self.eof_span()),
                             });
                         }
-                    }
+                    };
                     match self.peek_kind() {
                         Some(TokenKind::LParen) => {
                             self.advance();
@@ -2550,13 +3090,13 @@ impl<'a> Parser<'a> {
                             let t = self.peek().expect("peeked");
                             return Err(ParseError::UnexpectedToken {
                                 got: format!("{other:?}"),
-                                expected: "`(` after `Name::init`",
+                                expected: "`(` after `Name::method`",
                                 span: to_source_span(&t.span),
                             });
                         }
                         None => {
                             return Err(ParseError::UnexpectedEof {
-                                expected: "`(` after `Name::init`",
+                                expected: "`(` after `Name::method`",
                                 span: to_source_span(&self.eof_span()),
                             });
                         }
@@ -2581,23 +3121,34 @@ impl<'a> Parser<'a> {
                             let t = self.peek().expect("peeked");
                             return Err(ParseError::UnexpectedToken {
                                 got: format!("{other:?}"),
-                                expected: "`,` or `)` in init arguments",
+                                expected: "`,` or `)` in call arguments",
                                 span: to_source_span(&t.span),
                             });
                         }
                         None => {
                             return Err(ParseError::UnexpectedEof {
-                                expected: "`,` or `)` in init arguments",
+                                expected: "`,` or `)` in call arguments",
                                 span: to_source_span(&self.eof_span()),
                             });
                         }
                     };
-                    return Ok(Spanned {
-                        kind: ExprKind::ClassInit {
+                    let kind = if is_init {
+                        ExprKind::ClassInit {
                             class_name: name,
                             class_name_span: name_span.clone(),
                             args,
-                        },
+                        }
+                    } else {
+                        ExprKind::QualifiedCall {
+                            impl_name: name,
+                            impl_name_span: name_span.clone(),
+                            method: method_name,
+                            method_span,
+                            args,
+                        }
+                    };
+                    return Ok(Spanned {
+                        kind,
                         span: name_span.start..rparen_end,
                     });
                 }
@@ -3808,7 +4359,7 @@ mod tests {
         // Top level expects `fn` or `struct` (C1.4), not `let`.
         let err = parse("let x = 1;").unwrap_err();
         assert!(
-            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, `effect`, or `class`"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, `effect`, `class`, `trait`, or `impl`"),
             "got {err:?}"
         );
     }
@@ -3818,7 +4369,7 @@ mod tests {
         // Bare expressions at top level no longer parse — they're fn-body content now.
         let err = parse("42").unwrap_err();
         assert!(
-            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, `effect`, or `class`"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, `effect`, `class`, `trait`, or `impl`"),
             "got {err:?}"
         );
     }
@@ -4204,11 +4755,170 @@ mod tests {
     }
 
     #[test]
-    fn parse_class_init_rejects_non_init() {
-        // C4.1 only supports `Name::init(...)`; other associated
-        // fn names are reserved for a later sub-phase.
-        let err = parse("fn main() -> i64 { Point::new(3) }").unwrap_err();
+    fn parse_qualified_call_with_non_init_ident() {
+        // C4.2 (1/N) / ADR 0023 D5 Path 2: `ImplName::method(args)`
+        // qualified call. Promoted from C4.1's "non-init rejected"
+        // test now that QualifiedCall ships at C4.2 (1/N).
+        let p = parse_ok_program("fn main() -> i64 { Buffered::write(0, 1) }");
+        let main = &p.fns[0];
+        let tail = &main.body.tail;
+        assert!(matches!(
+            &tail.kind,
+            ExprKind::QualifiedCall { impl_name, method, args, .. }
+                if impl_name == "Buffered" && method == "write" && args.len() == 2
+        ));
+    }
+
+    // ----- C4.2 (1/N): trait + impl + qualified-call -----
+
+    #[test]
+    fn parse_trait_decl_empty() {
+        let p = parse_ok_program("trait Marker { }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.traits.len(), 1);
+        assert_eq!(p.traits[0].name, "Marker");
+        assert!(p.traits[0].methods.is_empty());
+    }
+
+    #[test]
+    fn parse_trait_decl_one_method() {
+        let p = parse_ok_program(
+            "trait Writer { fn write(self: &mut Self, data: i64) -> i64; }\nfn main() -> i64 { 0 }",
+        );
+        let t = &p.traits[0];
+        assert_eq!(t.name, "Writer");
+        assert_eq!(t.methods.len(), 1);
+        let m = &t.methods[0];
+        assert_eq!(m.name, "write");
+        assert_eq!(m.self_kind, SelfKind::Exclusive);
+        assert_eq!(m.params.len(), 1);
+        assert_eq!(m.params[0].name, "data");
+    }
+
+    #[test]
+    fn parse_trait_decl_two_methods() {
+        let p = parse_ok_program(
+            "trait Writer {\n  fn write(self: &mut Self, data: i64) -> i64;\n  fn flush(self: &mut Self) -> i64;\n}\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.traits[0].methods.len(), 2);
+        assert_eq!(p.traits[0].methods[0].name, "write");
+        assert_eq!(p.traits[0].methods[1].name, "flush");
+    }
+
+    #[test]
+    fn parse_trait_method_sig_requires_semi() {
+        // Body-with-block instead of `;` rejected.
+        let err = parse(
+            "trait T { fn f(self: &Self) -> i64 { 0 } }\nfn main() -> i64 { 0 }",
+        )
+        .unwrap_err();
         assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+    }
+
+    #[test]
+    fn parse_impl_decl_default_form() {
+        // `impl as Trait for Type { ... }` — no name, default impl.
+        let p = parse_ok_program(
+            "impl as Writer for File { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.impls.len(), 1);
+        let i = &p.impls[0];
+        assert_eq!(i.name, None);
+        assert_eq!(i.trait_name, "Writer");
+        assert_eq!(i.type_name, "File");
+        assert_eq!(i.methods.len(), 1);
+        assert_eq!(i.methods[0].name, "write");
+    }
+
+    #[test]
+    fn parse_impl_decl_named_form() {
+        // `impl Name as Trait for Type { ... }`.
+        let p = parse_ok_program(
+            "impl Buffered as Writer for File { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { 0 }",
+        );
+        let i = &p.impls[0];
+        assert_eq!(i.name.as_deref(), Some("Buffered"));
+        assert_eq!(i.trait_name, "Writer");
+        assert_eq!(i.type_name, "File");
+    }
+
+    #[test]
+    fn parse_impl_decl_pub_method() {
+        let p = parse_ok_program(
+            "impl as Writer for File { pub fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.impls[0].methods[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn parse_impl_decl_rejects_missing_as() {
+        // `impl Writer for File { ... }` (no `as`) — rejected at C4.2.
+        let err = parse(
+            "impl Writer for File { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { 0 }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+    }
+
+    #[test]
+    fn parse_impl_decl_rejects_missing_for() {
+        // `impl as Writer File { ... }` (no `for`) — rejected.
+        let err = parse(
+            "impl as Writer File { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { 0 }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::UnexpectedToken { .. }));
+    }
+
+    #[test]
+    fn parse_impl_with_two_methods() {
+        let p = parse_ok_program(
+            "impl as Writer for File {\n  fn write(self: &mut Self, d: i64) -> i64 { d }\n  fn flush(self: &mut Self) -> i64 { 0 }\n}\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.impls[0].methods.len(), 2);
+        assert_eq!(p.impls[0].methods[0].name, "write");
+        assert_eq!(p.impls[0].methods[1].name, "flush");
+    }
+
+    #[test]
+    fn parse_full_c42_surface() {
+        // ADR 0023 D12 phase-go shape: trait + class + default impl
+        // + named impl + main using both dispatch paths.
+        let src = r#"
+            trait Writer {
+                fn write(self: &mut Self, data: i64) -> i64;
+            }
+            class FileSink {
+                let count: i64;
+                pub init() {
+                    self.count = 0;
+                    0
+                }
+            }
+            impl as Writer for FileSink {
+                fn write(self: &mut Self, data: i64) -> i64 {
+                    self.count = self.count + data;
+                    self.count
+                }
+            }
+            impl Doubling as Writer for FileSink {
+                fn write(self: &mut Self, data: i64) -> i64 {
+                    self.count = self.count + data * 2;
+                    self.count
+                }
+            }
+            fn main() -> i64 {
+                let mut s: FileSink = FileSink::init();
+                let a: i64 = s.write(10);
+                let b: i64 = Doubling::write(&mut s, 16);
+                b
+            }
+        "#;
+        let p = parse_ok_program(src);
+        assert_eq!(p.traits.len(), 1);
+        assert_eq!(p.classes.len(), 1);
+        assert_eq!(p.impls.len(), 2);
+        assert_eq!(p.impls[0].name, None);
+        assert_eq!(p.impls[1].name.as_deref(), Some("Doubling"));
     }
 
     #[test]
