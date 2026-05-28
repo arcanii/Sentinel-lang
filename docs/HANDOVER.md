@@ -78,6 +78,7 @@ C1.3. See STATE.md Section C.
 **Phase C3.5(a) — restricted-case handler codegen per ADR 0020 D7: 3 new runtime symbols + lower Perform/ResumeKont/Handle (body must be a direct `perform`); end-to-end runnable for the inline case — complete.**
 **Phase C3.5(b) — effecting fn ABI + handle-of-call per ADR 0020 D7: effecting fns return Kont* at the IR level; sentinel_kont_pure wraps pure values via PURE_RETURN_OP_ID; handle codegen unified around a runtime switch — complete.**
 **Phase C3.5(c) — let-bound perform via per-let resumer fns + sentinel_kont_push per ADR 0020 D7: first piece of per-eval-site frame reification; SentinelKont grows a frame-chain; sentinel_kont_resume replays frames head→tail — complete.**
+**Phase C3.5(d) — unified embedded-perform shape per ADR 0020 D7: count_performs / find_unique_perform / substitute_perform_with_var walkers; supports binop / struct-lit / fn-call-arg / index / etc. with single embedded perform — complete.**
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -919,86 +920,92 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C3.5(d) — frame reification for binop / if-cond / chained lets)
+### 0.2 Next session opening (C3.5(e) / C3.6 — chained lets, return arms, multi-shot)
 
-Resume at **C3.5(d)** per ADR 0020. **C3.5(c) closed: per-let
-frame reification.** Eleven sub-phases shipped across Phase
-C3 — C3.0(a)/C3.0(b) + C3.1/C3.1b + C3.2(a)/C3.2(b) + C3.3
-(typing-layer close-out) + C3.4 (handler typing) + C3.5(a)
-(restricted-case codegen) + C3.5(b) (effecting fn ABI +
-handle-of-call) + C3.5(c) (let-bound perform via per-let
-resumer fns). Programs can now use `let v: i64 = perform
-Op(); pure_tail` at the body of an effecting fn — codegen
-emits a per-let resumer fn + captured-state struct
-(holding fn params used in the tail), and the runtime's
-`sentinel_kont_resume` replays the frame chain head→tail
-on resume. Two new pass-test fixtures
-(`c35c_let_bound_perform`, `c35c_let_bound_perform_with_capture`).
+Resume at **C3.5(e) or C3.6** per ADR 0020. **C3.5(d) closed:
+unified embedded-perform shape.** Twelve sub-phases shipped
+across Phase C3. Programs can now use `perform Op()` in any
+pure surrounding context within an effecting fn's tail (binop,
+struct-lit field, pure fn-call arg, field-access target,
+index, unary op, etc.) — codegen detects the unique perform,
+substitutes it with a placeholder Var, emits a resumer that
+re-evaluates the substituted tail with the placeholder bound
+to the resumed value.
 
 What's NOT yet running:
 
-  - **Perform inside binop / index / field-access**: `perform
-    Op() + 1` surfaces `effecting_fn_body_not_direct` (the
-    surrounding evaluation frame isn't reified yet).
-  - **If-cond perform**: `if perform Op() { ... } else { ... }`
-    where the cond performs — needs branch frames reified.
   - **Chained effecting lets**: `let a = perform Op1(); let b
-    = perform Op2(); ...` — needs multiple frames pushed +
-    nested resumer compilation.
-  - **Multi-shot continuations** (ADR 0020 D2): one-shot only.
+    = perform Op2(); ...` — needs *resumers-can-perform*
+    support. The runtime's resume loop currently assumes
+    every resumer returns a pure-return kont; a nested
+    perform inside a resumer returns a real op-perform kont
+    that needs to bubble back through the remaining frames.
+    Either: extend the resume loop to detect non-pure
+    results and re-package the remaining frames onto the
+    new kont, OR rewrite resumer codegen to itself emit
+    perform-site bubbles (mirroring effecting fn ABI).
+  - **Multiple performs in tail** (e.g.,
+    `perform Op1() + perform Op2()`): same machinery
+    needed — currently rejected because count_performs > 1.
+  - **Non-i64-returning ops**: placeholder type hardcoded
+    to i64. Needs a more general resumer ABI (e.g., always
+    pass an i64 + cast inside, or per-fn resumer types).
+  - **Return arms with non-identity transforms**
+    (ADR 0020 D4 generalisation): currently the runtime's
+    pure-return path always returns the value as-is; a
+    user-specified `return v => transform(v)` would need
+    additional dispatch.
+  - **Nested handles**: each handle's frames are scoped to
+    itself; nesting requires reasoning about frame ownership
+    when an inner handle resumes its kont and the outer
+    handle catches a bubbled effect.
+  - **Multi-shot continuations** (ADR 0020 D2 relaxation):
+    one-shot only enforced via `consumed` flag.
 
-**C3.5(c) — frame reification at general evaluation sites.**
-Per ADR 0020 D7's `sentinel_kont_push` symbol. The substantive
-piece: every Sentinel fn call now returns either a value OR a
-kont* sentinel. Every "could-be-captured" evaluation frame
-(let-body, if-branch, call-arg, binop-RHS, field-access,
-index, struct-lit fields, array-lit elements) emits a
-post-call check: if the callee returned a kont*, prepend my
-frame data to the kont chain and return the kont* up. If the
-callee returned a value, continue normally.
+The substantive choice for C3.5(e) is the resumers-can-perform
+mechanism. Once that lands, chained lets and multi-perform
+tails fall out naturally (the runtime resume loop handles
+non-pure results by extending the kont chain in flight).
+Estimate: 1-2 sessions.
 
-Concretely:
+For C3.6, the focus shifts from frame-reification machinery to
+handle features: return arms, nested handles, multi-shot.
+Each is a smaller piece independent of the others; could be
+combined or split across sessions.
 
-  1. Add `sentinel_kont_push(kont, frame_data)` to
-     `sentinel-runtime`. Frame data is a discriminated union
-     emitted by codegen — one variant per evaluation-frame
-     shape (LetBody, IfThen, IfElse, CallArg, BinOpRhs,
-     FieldGep, IndexLoad, StructLitField, ArrayLitElem at
-     minimum). Phase B's `Frame` enum had eight variants;
-     the production compiler will likely have similar.
-  2. Codegen wraps every fn-call site with: emit the call,
-     inspect the return value (tagged via a sentinel
-     pattern — either high-bit tag on a u64 OR a per-fn
-     additional return slot), and branch on "is kont".
-  3. `sentinel_kont_resume` extends to replay the captured
-     frames in reverse — each frame's `tag` selects the LLVM
-     fn that resumes it; the runtime invokes it with the
-     resumed value as the entry point.
+**C3.5(d) retrospective** (this session): ADR 0020 D9
+estimated "1 session" for C3.5(d). Actual: ~1 session. The
+unified approach (count_performs / find_unique_perform /
+substitute_perform_with_var walkers + detect_embedded_perform_shape)
+turned out to be a clean generalisation of C3.5(c)'s
+per-let approach — they share the resumer codegen pattern
+(alloca for placeholder + captureds; lower substituted body;
+wrap via sentinel_kont_pure). The substitution walker is
+~150 LOC of mechanical recursion through TypedExprKind variants.
+Design notes:
 
-The hardest part: deciding the value/kont tagging scheme. Two
-options on the table:
+  - **Disjoint shape detection**: let-shape (stmts.len() == 1
+    with effecting let-RHS) and embedded-shape (stmts.len()
+    == 0 with single embedded perform) don't overlap. compile_fn
+    dispatches to either path or falls back to the C3.5(b)
+    validate-and-lower path.
+  - **Per-shape resumer map**: each shape gets its own
+    HashMap entry. embedded_perform_resumers stores the
+    substituted tail (as TypedExpr) + placeholder VarId
+    alongside the resumer FunctionValue + captured VarIds.
+    Stored at pass-1 detection time so compile_fn doesn't
+    re-substitute.
+  - **Placeholder VarId = u32::MAX**: synthetic constant
+    chosen to avoid collision with resolve-assigned VarIds
+    (which grow from 0). Each compile_fn run binds the
+    placeholder in its own env; no cross-fn collision since
+    env is reset per compile_fn.
 
-  - **Tagged-pointer**: a Kont* always has a low bit set
-    (or aligned to 8 bytes with the LSB stolen). Values are
-    untagged. Cost: every value path has to clear the bit;
-    every kont path must set it.
-  - **Multi-value return**: each fn returns `{ i64 value, ptr
-    kont }` (or similar struct). Cost: ABI change for every
-    fn; calling convention overhead even for non-effecting
-    code paths.
+Workspace test delta: +3 tests (1065 total) — +3 driver
+pass-tests (c35d_binop_with_perform,
+c35d_perform_with_capture_and_binop, c35d_perform_in_call_arg).
 
-Phase B sidestepped this by representing every value as a
-`Value::Step(...)` sum at the interpreter level. The production
-compiler needs to commit to a scheme.
-
-**Estimated effort for C3.5(d)**: ~1 session. The infrastructure
-(SentinelFrame chain, sentinel_kont_push, resume's frame-replay
-loop, captured-state struct codegen) is in place; the work is
-extending the codegen detection from let-stmts to other
-"could-be-captured" sites (binop-RHS, if-cond, chained lets).
-Each new shape needs its own per-site resumer codegen.
-
-**C3.5(c) retrospective** (this session): ADR 0020 D9
+**Pre-C3.5(d) — C3.5(c) retrospective**: ADR 0020 D9
 estimated "1-2 sessions" for C3.5(c). Actual: ~1 session.
 The substantive piece was the per-let resumer fn codegen +
 captured-state struct layout. The runtime extensions
@@ -1212,12 +1219,12 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last sub-phase: **C3.5(c) — let-bound perform via per-let
-    resumer fns + sentinel_kont_push per ADR 0020 D7
-    (per-eval-site frame reification, first slice — let-stmts
-    only; SentinelKont grows a frame chain;
-    sentinel_kont_resume replays frames head→tail; captured
-    fn params via heap-allocated state struct).**
+    Last sub-phase: **C3.5(d) — unified embedded-perform shape
+    per ADR 0020 D7 (per-eval-site frame reification extended
+    to ANY pure surrounding context with a single embedded
+    perform — binop, struct-lit, fn-call arg, field-access,
+    index, etc.; substitute_perform_with_var walker emits a
+    resumer that re-evaluates the substituted tail).**
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1228,19 +1235,21 @@ For pasting into a fresh chat to bootstrap context:
     seven sub-phases C3.0(a)/C3.0(b) + C3.1/C3.1b + C3.2(a)/
     C3.2(b) + C3.3 + C3.4) — all complete.** Phase C3 RUNTIME
     layer (handler codegen per ADR 0020 D9) in progress:
-    **C3.5(a) + C3.5(b) + C3.5(c) landed (restricted + effecting
-    fn ABI + handle-of-call + let-bound perform via frame
-    reification)**; C3.5(d) (binop/if-cond/chained lets) + C3.6
-    + C3.7 remaining. ADR 0017 ACCEPTED-WITH-AMENDMENTS; ADR
-    0018 (Polonius migration plan) PROPOSED; **ADR 0019
-    ACCEPTED-WITH-AMENDMENTS at C3.3 close**; **ADR 0020
-    PROPOSED** with C3.4 + C3.5(a/b/c) shipped (8 of 12
-    D-decisions exercised: D2 one-shot, D4 surface + default
-    return-arm, D5 AST+parser+resolve, D6 effect discharge,
-    D7 all 5 runtime symbols, D11 fn-main integration, partial
-    D1 free-monad lowering via frame-chain). 1062 active
+    **C3.5(a) + C3.5(b) + C3.5(c) + C3.5(d) landed (restricted
+    + effecting fn ABI + handle-of-call + let-bound perform +
+    unified embedded-perform shape)**; C3.5(e) (chained lets
+    via resumers-can-perform) + C3.6 (return arms / nested
+    handles / multi-shot) + C3.7 (close-out) remaining. ADR
+    0017 ACCEPTED-WITH-AMENDMENTS; ADR 0018 (Polonius
+    migration plan) PROPOSED; **ADR 0019 ACCEPTED-WITH-
+    AMENDMENTS at C3.3 close**; **ADR 0020 PROPOSED** with
+    C3.4 + C3.5(a/b/c/d) shipped (8 of 12 D-decisions
+    exercised: D2 one-shot, D4 surface + default return-arm,
+    D5 AST+parser+resolve, D6 effect discharge, D7 all 5
+    runtime symbols, D11 fn-main integration, partial D1
+    free-monad lowering via frame-chain). 1065 active
     workspace tests + 1 doctest.
-    **Twenty go/no-go programs run end-to-end:** c05_go_no_go
+    **Twenty-three go/no-go programs run end-to-end:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
     nullable): "142"; c16_go_no_go (C1.6 array): "15";
@@ -1265,9 +1274,15 @@ For pasting into a fresh chat to bootstrap context:
     exit 42; **c35c_let_bound_perform (C3.5(c) let-bound
     perform; per-let resumer wraps result via sentinel_kont_pure;
     handle drains the frame chain): exit 42**;
-    **c35c_let_bound_perform_with_capture (C3.5(c) tail
+    c35c_let_bound_perform_with_capture (C3.5(c) tail
     references fn param via heap-allocated captured-state struct;
-    resumer reloads it via GEP): exit 42**, exit 0.
+    resumer reloads it via GEP): exit 42; **c35d_binop_with_perform
+    (C3.5(d) `perform Io.read() + 1` → resume(41) → 42): exit
+    42**; **c35d_perform_with_capture_and_binop (C3.5(d)
+    `perform Io.read() * 2 + extra` with captured fn param):
+    exit 42**; **c35d_perform_in_call_arg (C3.5(d)
+    `double(perform Io.read())` — perform inside pure fn-call
+    arg): exit 42**, exit 0.
 
     Pipeline at C3.1: **parse_query → resolve_query →
     check_query → borrow_check_query → codegen** (unchanged

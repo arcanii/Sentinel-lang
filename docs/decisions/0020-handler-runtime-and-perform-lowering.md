@@ -41,19 +41,27 @@ stack-saved continuations.
     reification. The 5th runtime symbol (`sentinel_kont_push`)
     lands; `sentinel_kont_resume` extends to replay the frame
     chain head→tail (innermost first). SentinelKont grows a
-    `frames_head` linked-list pointer. Codegen detects
-    effecting fns matching `let v: i64 = effecting_rhs;
-    pure_tail`; emits a per-let resumer fn (signature `ptr
-    (i64, ptr)`) + a captured-state struct holding fn-param
-    values used in the tail. Two pass fixtures (c35c_let_bound_perform,
-    c35c_let_bound_perform_with_capture). +1 workspace test
-    (1062 total). Partial D1 (free-monad frame chain in place,
-    though replay is still restricted to non-performing
-    resumers).
-  - **C3.5(d)** — frame reification for binop / if-cond /
-    chained effecting lets — next. The infrastructure is in
-    place; each new shape needs its own per-site resumer
-    codegen.
+    `frames_head` linked-list pointer. Two pass fixtures
+    (c35c_let_bound_perform, c35c_let_bound_perform_with_capture).
+    +1 workspace test (1062 total).
+  - **C3.5(d)** — unified embedded-perform shape — **SHIPPED**.
+    Generalises C3.5(c) to any pure surrounding context with
+    a single embedded perform (binop, struct-lit field, fn-
+    call arg, field-access target, index, etc.). Three new
+    walkers (count_performs / find_unique_perform /
+    substitute_perform_with_var) operate over the typed AST;
+    detect_embedded_perform_shape identifies the shape; a
+    new compile path emits the resumer with the substituted
+    tail. Three pass fixtures (c35d_binop_with_perform,
+    c35d_perform_with_capture_and_binop,
+    c35d_perform_in_call_arg). +3 workspace tests (1065
+    total).
+  - **C3.5(e)** — chained effecting lets + multiple performs
+    in tail — next. Requires resumers-can-perform: the
+    runtime resume loop currently assumes pure-return wraps;
+    nested perform inside a resumer returns a real op kont
+    that must bubble through remaining frames. Estimate
+    1-2 sessions.
   - **C3.6** — return arms with non-identity transforms +
     nested handles + multi-shot continuations per D2
     relaxation.
@@ -456,8 +464,12 @@ A rough split into 4-5 sub-phases:
 | C3.5(c) | Let-bound perform via per-let resumer fns + sentinel_kont_push| 1 session    | **DONE** |
 |      | + frame-replay loop in sentinel_kont_resume. Captured-state    |              |        |
 |      | struct on heap; resumer reloads via byte-offset GEP.           |              |        |
-| C3.5(d) | Frame reification for binop / if-cond / chained lets — same   | 1 session    | next   |
-|      | machinery, more codegen sites detected.                        |              |        |
+| C3.5(d) | Unified embedded-perform shape — single perform anywhere in   | 1 session    | **DONE** |
+|      | tail (binop, struct-lit, fn-call arg, field, index, ...).      |              |        |
+|      | Substitute-perform-with-Var walker; same resumer machinery.    |              |        |
+| C3.5(e) | Chained effecting lets + multiple performs in tail —          | 1-2 sessions | next   |
+|      | requires resumers-can-perform (runtime resume loop bubbles     |              |        |
+|      | non-pure-return result konts through remaining frames).        |              |        |
 | C3.6 | Codegen for `handle` — dispatch on label; resume call;         | 2-3 sessions |        |
 |      | sentinel_kont_resume runtime symbol. The substantive runtime   |              |        |
 |      | piece.                                                         |              |        |
@@ -584,7 +596,8 @@ A rough split per the D9 table:
 | C3.5(a) | Restricted-case codegen (direct-perform body) + 3 runtime symbols | 1 session    | **DONE** |
 | C3.5(b) | Effecting fn ABI + handle-of-call + PURE_RETURN switch case   | 1 session    | **DONE** |
 | C3.5(c) | Let-bound perform via per-let resumer + sentinel_kont_push    | 1 session    | **DONE** |
-| C3.5(d) | Frame reification for binop / if-cond / chained lets          | 1 session    | next   |
+| C3.5(d) | Unified embedded-perform shape (binop / call-arg / etc.)      | 1 session    | **DONE** |
+| C3.5(e) | Chained effecting lets via resumers-can-perform               | 1-2 sessions | next   |
 | C3.6 | Return arms + nested handles + multi-shot continuations         | 1-2 sessions |        |
 | C3.7 | Polish + phase-go programs + ADR 0020 flip + STATE close       | 0-1 sessions |        |
 

@@ -12,7 +12,74 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C3.5(c) landed; let-bound perform via frame reification.**
+Last updated: **C3.5(d) landed; unified embedded-perform shape.**
+ADR 0020 stays PROPOSED. This sub-phase generalises C3.5(c)'s
+per-let frame reification: an effecting fn whose tail contains
+**exactly one perform anywhere** in its tree (binop, pure fn-
+call arg, struct-lit field, field-access target, index, unary
+op, etc. — any pure surrounding context) now compiles via the
+same machinery. Codegen detects the shape, **substitutes the
+perform with a placeholder Var** in a clone of the tail, and
+emits a resumer fn that lowers the substituted tail with the
+placeholder bound to the resumed value.
+
+**Substitution machinery**: three new walkers cover the typed
+AST. `count_performs` returns the number of Perform expressions
+anywhere in the subtree (including nested in args). `find_unique_perform`
+returns a borrowed reference to the first Perform in pre-order
+(unique when count == 1). `substitute_perform_with_var` deep-
+clones the tree, replacing the Perform with `Var(placeholder_id)`.
+These traverse every TypedExprKind variant (binop, struct-lit,
+field-access, index, if, block, handle, ...) so the unified
+detection covers the entire pure-surrounding-context space.
+
+**Detection** (`detect_embedded_perform_shape`): the body has
+`stmts.len() == 0`, the tail isn't already a direct Perform or
+Call-to-effecting-fn (those are handled at C3.5(a)/(b)),
+contains exactly one perform whose return type is i64 (MVP
+restriction), and is fully effecting (`expr_performs(tail) ==
+true`). The shape and let-shape (C3.5(c)) are disjoint —
+let-shape requires stmts.len() == 1, embedded-shape requires
+stmts.len() == 0.
+
+**Codegen** (`compile_effecting_fn_with_embedded_perform`):
+mirrors `compile_effecting_fn_with_let` but the resumer body
+lowers the *substituted tail* instead of the original. The
+parent fn body locates the unique perform via
+`find_unique_perform`, lowers it directly via `lower_perform`,
+then pushes a frame referencing the resumer + captured-state
+struct. Captured VarIds are collected from the substituted tail
+(excluding the placeholder).
+
+**Three new pass fixtures**:
+- `c35d_binop_with_perform.sentinel`: `perform Io.read() + 1`
+  → resume(41) → 42.
+- `c35d_perform_with_capture_and_binop.sentinel`:
+  `perform Io.read() * 2 + extra` with `extra` captured from
+  fn param → do_work(2) + resume(20) → 42.
+- `c35d_perform_in_call_arg.sentinel`:
+  `double(perform Io.read())` where `double(x)` is a pure
+  user fn → resume(21) → double(21) = 42.
+
+**Still pending for C3.5(e) / C3.6**: chained effecting lets
+(`let a = perform Op1(); let b = perform Op2(); ...`) which
+require resumers-can-perform — the runtime's resume loop
+currently assumes pure-return wraps; nested perform inside a
+resumer needs a different bubble-up path. Multi-arg ops (kont
+struct's single `arg: i64` slot accommodates one value).
+Non-i64-returning ops (placeholder type is hardcoded i64).
+Return arms with non-identity transforms (ADR 0020 D4
+generalisation). Nested handles + multi-shot continuations
+(ADR 0020 D2 relaxation).
+
+Workspace test delta from C3.5(c) close: +3 (1065 total) — +3
+driver pass-tests (c35d_*). **Phase C3.5(d) closes here.**
+Next: C3.5(e) — chained effecting lets via resumer-can-perform
+support (requires runtime resume loop update for non-pure-
+return result konts) OR C3.6 polish (return arms / nested
+handles / multi-shot).
+
+Pre-C3.5(d) context: **C3.5(c) landed; let-bound perform via frame reification.**
 ADR 0020 stays PROPOSED. This sub-phase adds the FIRST piece of
 per-evaluation-site frame reification: an effecting fn whose body
 is a single let with effecting RHS + pure tail now compiles via
