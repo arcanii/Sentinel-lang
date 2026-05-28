@@ -28,6 +28,14 @@
 //! `a[i]`. No new keywords — the `len` builtin per D4 is registered
 //! by the resolve pass alongside `print` / `unwrap_or` / `is_some`.
 //!
+//! C4.0 adds (per ADR 0021 D11): twelve new keywords for the
+//! Phase C4 surface — `class`, `trait`, `impl`, `init`,
+//! `delegate`, `scope`, `spawn`, `await`, `Self`, `self`,
+//! `as`, `for`. Reserved at the lexer layer; the parser
+//! activates them per sub-phase per ADR 0021 D14 (C4.1 for
+//! class/init/Self/self; C4.2 for trait/impl/as/for; C4.3
+//! for delegate; C4.4 for scope/spawn/await).
+//!
 //! Whitespace and `//` line comments are skipped. ADR 0009 D4 picks
 //! hand-written recursive descent for the parser; the lexer uses
 //! `logos` because the regex-DFA payoff is purely positive at this
@@ -90,6 +98,58 @@ pub enum TokenKind {
     /// early-return statement at C3).
     #[token("return")]
     Return,
+
+    /// C4 / ADR 0021 D1 + D11: `class Name { ... }` declares a
+    /// struct + methods + impl + delegation group.
+    #[token("class")]
+    Class,
+    /// C4 / ADR 0021 D4 + D11: `trait Name { ... }` declares a
+    /// trait with method signatures.
+    #[token("trait")]
+    Trait,
+    /// C4 / ADR 0021 D5 + D11: `impl [Name as] Trait for Type
+    /// { ... }` declares a default or named implementation.
+    #[token("impl")]
+    Impl,
+    /// C4 / ADR 0021 D3 + D11: `init(args) { ... }` constructor
+    /// with definite-assignment check.
+    #[token("init")]
+    Init,
+    /// C4 / ADR 0021 D6 + D11: `delegate inner: T to Trait;`
+    /// inside a class body — auto-forwarder codegen at C4.3.
+    #[token("delegate")]
+    Delegate,
+    /// C4 / ADR 0021 D8 + D11: `scope concurrent { ... }` task-
+    /// cancellation boundary.
+    #[token("scope")]
+    Scope,
+    /// C4 / ADR 0021 D8 + D11: `spawn expr` creates a Task.
+    #[token("spawn")]
+    Spawn,
+    /// C4 / ADR 0021 D8 + D11: `task.await` blocks until the
+    /// task produces a value.
+    #[token("await")]
+    Await,
+    /// C4 / ADR 0021 D2 + D11: `Self` refers to the implementing
+    /// type inside method / trait bodies. Distinct from `self`
+    /// (the receiver binding) by case.
+    #[token("Self")]
+    SelfTy,
+    /// C4 / ADR 0021 D2 + D11: `self` is the receiver binding
+    /// inside method bodies (`fn foo(self: &Self, ...)`).
+    #[token("self")]
+    SelfVal,
+    /// C4 / ADR 0021 D5 + D11: the `as` connector inside
+    /// `impl Name as Trait for Type` named-implementation
+    /// syntax. Reserved keyword (no other use at C4 minimum).
+    #[token("as")]
+    As,
+    /// C4 / ADR 0021 D5 + D11: `for` connector inside `impl
+    /// [Name as] Trait for Type { ... }`. Reserved at C4.0;
+    /// the parser activates it at C4.2. (Future for-loop usage
+    /// reclaims this same keyword token.)
+    #[token("for")]
+    For,
 
     #[token("+")]
     Plus,
@@ -896,6 +956,212 @@ mod tests {
         assert_eq!(
             kinds("= == =>"),
             vec![TokenKind::Eq, TokenKind::EqEq, TokenKind::FatArrow]
+        );
+    }
+
+    // ========================================================================
+    // C4.0 / ADR 0021 D11: lexer keywords for Phase C4 — classes, traits,
+    // delegation, structured concurrency. Reserved at the lexer layer; the
+    // parser activates them per sub-phase per ADR 0021 D14.
+    // ========================================================================
+
+    #[test]
+    fn lex_class_keyword() {
+        assert_eq!(kinds("class"), vec![TokenKind::Class]);
+    }
+
+    #[test]
+    fn lex_trait_keyword() {
+        assert_eq!(kinds("trait"), vec![TokenKind::Trait]);
+    }
+
+    #[test]
+    fn lex_impl_keyword() {
+        assert_eq!(kinds("impl"), vec![TokenKind::Impl]);
+    }
+
+    #[test]
+    fn lex_init_keyword() {
+        assert_eq!(kinds("init"), vec![TokenKind::Init]);
+    }
+
+    #[test]
+    fn lex_delegate_keyword() {
+        assert_eq!(kinds("delegate"), vec![TokenKind::Delegate]);
+    }
+
+    #[test]
+    fn lex_scope_keyword() {
+        assert_eq!(kinds("scope"), vec![TokenKind::Scope]);
+    }
+
+    #[test]
+    fn lex_spawn_keyword() {
+        assert_eq!(kinds("spawn"), vec![TokenKind::Spawn]);
+    }
+
+    #[test]
+    fn lex_await_keyword() {
+        assert_eq!(kinds("await"), vec![TokenKind::Await]);
+    }
+
+    #[test]
+    fn lex_self_ty_keyword() {
+        // `Self` (capital S) refers to the implementing type.
+        assert_eq!(kinds("Self"), vec![TokenKind::SelfTy]);
+    }
+
+    #[test]
+    fn lex_self_val_keyword() {
+        // `self` (lower s) is the receiver binding.
+        assert_eq!(kinds("self"), vec![TokenKind::SelfVal]);
+    }
+
+    #[test]
+    fn lex_as_keyword() {
+        assert_eq!(kinds("as"), vec![TokenKind::As]);
+    }
+
+    #[test]
+    fn lex_for_keyword() {
+        assert_eq!(kinds("for"), vec![TokenKind::For]);
+    }
+
+    #[test]
+    fn lex_c4_keywords_ident_prefix_regression() {
+        // Identifier that *starts* with a C4 keyword lexes as a
+        // single Ident — not as keyword + suffix. Matches the
+        // C1.4 struct / C2 mut / C3 effect/secret/perform
+        // precedent.
+        assert_eq!(kinds("classroom"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("traitor"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("implementation"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("initial"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("delegated"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("scoped"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("spawned"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("awaiting"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("Selfish"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("selfish"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("ask"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("foreach"), vec![TokenKind::Ident]);
+    }
+
+    #[test]
+    fn lex_class_decl_skeleton() {
+        // `class Point { let x: i64; init(x: i64) { } }` — the
+        // C4.1 placeholder surface.
+        assert_eq!(
+            kinds("class Point { let x: i64; init(x: i64) { } }"),
+            vec![
+                TokenKind::Class,
+                TokenKind::Ident,
+                TokenKind::LBrace,
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Colon,
+                TokenKind::Ident,
+                TokenKind::Semi,
+                TokenKind::Init,
+                TokenKind::LParen,
+                TokenKind::Ident,
+                TokenKind::Colon,
+                TokenKind::Ident,
+                TokenKind::RParen,
+                TokenKind::LBrace,
+                TokenKind::RBrace,
+                TokenKind::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_trait_decl_skeleton() {
+        // `trait Writer { fn write(self: &mut Self) -> i64; }`
+        assert_eq!(
+            kinds("trait Writer { fn write(self: &mut Self) -> i64; }"),
+            vec![
+                TokenKind::Trait,
+                TokenKind::Ident,
+                TokenKind::LBrace,
+                TokenKind::Fn,
+                TokenKind::Ident,
+                TokenKind::LParen,
+                TokenKind::SelfVal,
+                TokenKind::Colon,
+                TokenKind::Amp,
+                TokenKind::Mut,
+                TokenKind::SelfTy,
+                TokenKind::RParen,
+                TokenKind::Arrow,
+                TokenKind::Ident,
+                TokenKind::Semi,
+                TokenKind::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_named_impl_skeleton() {
+        // `impl Logged as Writer for File { }` — C4.2 surface.
+        assert_eq!(
+            kinds("impl Logged as Writer for File { }"),
+            vec![
+                TokenKind::Impl,
+                TokenKind::Ident,
+                TokenKind::As,
+                TokenKind::Ident,
+                TokenKind::For,
+                TokenKind::Ident,
+                TokenKind::LBrace,
+                TokenKind::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_delegate_stmt_skeleton() {
+        // `delegate inner: FileWriter to Writer;` — C4.3 surface.
+        // Note: `to` is currently lexed as Ident; the parser
+        // recognises it positionally rather than as a keyword
+        // (per the smallest-surface principle).
+        assert_eq!(
+            kinds("delegate inner: FileWriter to Writer;"),
+            vec![
+                TokenKind::Delegate,
+                TokenKind::Ident,
+                TokenKind::Colon,
+                TokenKind::Ident,
+                TokenKind::Ident,
+                TokenKind::Ident,
+                TokenKind::Semi,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_scope_spawn_await_skeleton() {
+        // `scope concurrent { let t = spawn f(); t.await }` — C4.4.
+        // `concurrent` is currently an Ident (parser-positional).
+        assert_eq!(
+            kinds("scope concurrent { let t = spawn f(); t.await }"),
+            vec![
+                TokenKind::Scope,
+                TokenKind::Ident,
+                TokenKind::LBrace,
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Eq,
+                TokenKind::Spawn,
+                TokenKind::Ident,
+                TokenKind::LParen,
+                TokenKind::RParen,
+                TokenKind::Semi,
+                TokenKind::Ident,
+                TokenKind::Dot,
+                TokenKind::Await,
+                TokenKind::RBrace,
+            ]
         );
     }
 }
