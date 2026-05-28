@@ -37,7 +37,7 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicType, BasicTypeEnum, IntType, StructType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValueEnum, FunctionValue, IntValue, PointerValue,
+    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue,
 };
 use inkwell::{IntPredicate, OptimizationLevel};
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
@@ -100,16 +100,33 @@ pub enum CodegenError {
     /// supports only the restricted case where the `handle` body
     /// is a direct `perform Op(args)` expression — no fn-call-
     /// that-performs, no nested handles, no let-bound perform.
-    /// The general case requires frame reification at every
-    /// evaluation site and lands at C3.5(b) / C3.6.
+    /// At C3.5(b) the surface extends to allow Call-to-effecting-fn
+    /// bodies; general-case (let-bound perform, perform-in-binop,
+    /// ...) lands at C3.5(c) / C3.6.
     #[error(
-        "handle body must be a direct `perform Op(args)` at C3.5(a); fn-calls-that-perform and other indirect forms land at C3.5(b)/C3.6"
+        "handle body must be a direct `perform Op(args)` or a call to an effecting fn at C3.5(b); let-bound performs and other inline forms land at C3.5(c)/C3.6"
     )]
     #[diagnostic(
         code(sentinel::codegen::handle_body_not_direct_perform),
-        help("rewrite the handle body to inline the perform call, or wait for the general-case lowering at C3.5(b)/C3.6 per ADR 0020 D9")
+        help("rewrite the handle body to inline the perform call or call an effecting fn, or wait for general-case frame reification at C3.5(c)/C3.6 per ADR 0020 D9")
     )]
     HandleBodyNotDirectPerform,
+
+    /// C3.5(b) / ADR 0020 D7: an effecting fn (declared with a
+    /// non-empty `! { ... }` row) must have its body produce a
+    /// continuation pointer — meaning the tail expression must
+    /// be a direct `perform Op(args)` OR a call to another
+    /// effecting fn, and no intermediate statement may itself
+    /// perform. Per-evaluation-site frame reification lands at
+    /// C3.5(c) / C3.6.
+    #[error(
+        "effecting fn `{fn_name}` body must be a direct `perform` or call to another effecting fn at C3.5(b); let-bound performs and other inline forms land at C3.5(c)/C3.6"
+    )]
+    #[diagnostic(
+        code(sentinel::codegen::effecting_fn_body_not_direct),
+        help("simplify the body to inline the perform / effecting call, or wait for general-case frame reification at C3.5(c)/C3.6 per ADR 0020 D9")
+    )]
+    EffectingFnBodyNotDirect { fn_name: String },
 }
 
 /// Lower a [`TypedProgram`] to a native object file at `output`.
@@ -298,8 +315,21 @@ pub fn compile_to_object(
             .iter()
             .map(|t| llvm_basic_type(&context, *t, &struct_types, &generic_struct_types, &secrets).into())
             .collect();
+        // C3.5(b) / ADR 0020 D7: effecting fns (non-empty
+        // effect_row) return a continuation pointer (Kont*)
+        // instead of their declared Sentinel return type. The
+        // caller is always inside an enclosing `handle` (per
+        // ADR 0019 D13: main is pure), and the handle catches
+        // the kont. The fn's declared Sentinel return type is
+        // preserved at the type-system level for diagnostics
+        // and effect-row reasoning; only the IR shape changes.
         let fn_type = if signature.is_main {
             i32_type.fn_type(&param_types, false)
+        } else if !signature.effect_row.is_empty() {
+            // Effecting fn: return Kont* (opaque pointer).
+            context
+                .ptr_type(inkwell::AddressSpace::default())
+                .fn_type(&param_types, false)
         } else {
             llvm_basic_type(&context, signature.return_type, &struct_types, &generic_struct_types, &secrets)
                 .fn_type(&param_types, false)
@@ -360,6 +390,30 @@ pub fn compile_to_object(
             None,
         )
     };
+    // C3.5(b) / ADR 0020 D7: pure-return wrap + unwrap symbols.
+    // An effecting fn whose body happens to be a pure expression
+    // (the annotation said "may perform Io" but the body doesn't)
+    // wraps the value via sentinel_kont_pure so the caller's
+    // handle still receives a Kont*. Symmetric sentinel_kont_consume_pure
+    // unwraps the value at the handle's pure-return switch case.
+    let kont_pure_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        module.add_function(
+            "sentinel_kont_pure",
+            ptr_ty.fn_type(&[i64_ty.into()], false),
+            None,
+        )
+    };
+    let kont_consume_pure_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        module.add_function(
+            "sentinel_kont_consume_pure",
+            i64_ty.fn_type(&[ptr_ty.into()], false),
+            None,
+        )
+    };
     // C3.5(a) note: we do NOT declare sentinel_kont_panic_resumed
     // at the module level — codegen never calls it directly. The
     // runtime's `sentinel_kont_resume` dispatches to it internally
@@ -403,6 +457,8 @@ pub fn compile_to_object(
             free_fn,
             perform_op_fn,
             kont_resume_fn,
+            kont_pure_fn,
+            kont_consume_pure_fn,
             current_fn: None,
             current_fn_id: FnId(0), // placeholder; reset in compile_fn
             vars: HashMap::new(),
@@ -506,6 +562,17 @@ struct CodegenCtx<'ctx, 'plan> {
     /// C3.5(a) the restricted case means no captured frames —
     /// resume frees the kont and returns `value`.
     kont_resume_fn: FunctionValue<'ctx>,
+    /// C3.5(b) / ADR 0020 D7: `sentinel_kont_pure(value: i64)
+    /// -> ptr` wraps a pure value in a kont with op_id =
+    /// PURE_RETURN_OP_ID. Effecting fns whose body is pure still
+    /// have to return a Kont* per the new ABI; this is how.
+    kont_pure_fn: FunctionValue<'ctx>,
+    /// C3.5(b) / ADR 0020 D7: `sentinel_kont_consume_pure(kont:
+    /// ptr) -> i64` reads the wrapped value from a pure-return
+    /// kont and frees the kont. Symmetric to [`kont_pure_fn`];
+    /// invoked from handle codegen's runtime switch's "pure
+    /// return" case.
+    kont_consume_pure_fn: FunctionValue<'ctx>,
     current_fn: Option<FunctionValue<'ctx>>,
     /// C2.4: the FnId of the fn currently being compiled. Used to
     /// look up the moved-source set from `drop_plan` at scope-exit
@@ -1215,6 +1282,18 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         fn_def: &TypedFnDef,
         program: &TypedProgram,
     ) -> Result<(), CodegenError> {
+        // C3.5(b) / ADR 0020 D7: validate that effecting fns
+        // (non-empty effect_row) have the shape codegen can
+        // lower at this sub-phase — body is a direct Perform,
+        // a direct Call to another effecting fn, or a block
+        // whose tail meets the same constraint with no
+        // intermediate performing statement. Other forms need
+        // per-evaluation-site frame reification (C3.5(c) / C3.6).
+        let signature = program.signature(fn_def.id);
+        if !signature.effect_row.is_empty() {
+            validate_effecting_fn_body(fn_def, program)?;
+        }
+
         let fn_value = *self
             .fns
             .get(&fn_def.id)
@@ -1263,6 +1342,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         self.scope_stack.pop();
 
         let is_main = program.signature(fn_def.id).is_main;
+        let is_effecting = !program.signature(fn_def.id).effect_row.is_empty();
         if is_main {
             // main is required to return i64 per ADR 0012 D11; the
             // typed AST guarantees body_val is i64. Truncate to i32
@@ -1275,6 +1355,28 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
             self.builder
                 .build_return(Some(&exit))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        } else if is_effecting {
+            // C3.5(b) / ADR 0020 D7: effecting fn ABI returns
+            // Kont*. If body_val is already a pointer (tail was
+            // Perform or Call-to-effecting), return as is. If
+            // it's a value (pure tail), wrap via
+            // sentinel_kont_pure so the caller's handle still
+            // sees a kont (with op_id = PURE_RETURN_OP_ID).
+            let ret_val: BasicValueEnum<'ctx> = if body_val.is_pointer_value() {
+                body_val
+            } else {
+                let int_val = body_val.into_int_value();
+                let call = self
+                    .builder
+                    .build_call(self.kont_pure_fn, &[int_val.into()], "pure_kont")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                call.try_as_basic_value()
+                    .left()
+                    .expect("sentinel_kont_pure returns ptr")
+            };
+            self.builder
+                .build_return(Some(&ret_val))
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
         } else {
             self.builder
@@ -2439,50 +2541,172 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         _return_arm: Option<&TypedReturnArm>,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        // C3.5(a) restriction: the body must be a direct Perform.
-        // Wrap a Block whose tail is a Perform if any future
-        // surface needs that; for now reject everything else
-        // cleanly.
-        let (body_effect_id, body_op_index, body_args) = match &body.kind {
-            TypedExprKind::Perform { effect_id, op_index, args, .. } => {
-                (*effect_id, *op_index, args)
+        // C3.5(b) restriction: the body must be a direct Perform
+        // OR a call to an effecting fn. Both produce a Kont*
+        // IR value that the handle dispatches via runtime switch
+        // on the kont's op_id field. let-bound performs +
+        // arbitrary inline forms land at C3.5(c) / C3.6.
+        let is_supported = match &body.kind {
+            TypedExprKind::Perform { .. } => true,
+            TypedExprKind::Call { id, .. } => {
+                !program.signature(*id).effect_row.is_empty()
             }
-            _ => return Err(CodegenError::HandleBodyNotDirectPerform),
+            _ => false,
         };
+        if !is_supported {
+            return Err(CodegenError::HandleBodyNotDirectPerform);
+        }
 
-        // Pick the matching arm. ResolveError::DuplicateHandlerArm
-        // already rules out two arms covering the same op, so
-        // the find is unambiguous. We do not consult the return
-        // arm at C3.5(a): the body always raises an op, never
-        // produces a Pure value.
-        let arm = arms
+        // Lower the body — produces a Kont* (BasicValueEnum::Pointer).
+        // For Perform: lower_perform emits sentinel_perform_op.
+        // For Call to effecting fn: lower_call uses the fn's
+        // new effecting-ABI signature (returns ptr).
+        let kont_ptr = self.lower_expr(body, program)?.into_pointer_value();
+
+        // Read the kont's op_id (i32 at offset 0) for the
+        // runtime switch.
+        let i32_ty = self.context.i32_type();
+        let op_id_val = self
+            .builder
+            .build_load(i32_ty, kont_ptr, "kont_op_id")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+
+        let current_fn = self.current_fn.expect("inside compile_fn");
+        let switch_block = self
+            .builder
+            .get_insert_block()
+            .expect("inside a block");
+        let merge_block = self.context.append_basic_block(current_fn, "handle_merge");
+        let unreachable_block = self
+            .context
+            .append_basic_block(current_fn, "handle_unreachable");
+        let pure_block = self.context.append_basic_block(current_fn, "handle_pure");
+
+        // One block per arm + a case-list for the switch. The
+        // PURE_RETURN_OP_ID case (u32::MAX) goes to a dedicated
+        // pure-return block which unwraps the kont and branches
+        // straight to merge.
+        let arm_blocks: Vec<_> = arms
             .iter()
-            .find(|a| a.effect_id == body_effect_id && a.op_index == body_op_index)
-            .ok_or_else(|| {
-                CodegenError::Builder(
-                    "C3.5(a): handle body's op is not covered by any arm".to_string(),
-                )
-            })?;
+            .map(|_| self.context.append_basic_block(current_fn, "handle_arm"))
+            .collect();
+        let mut cases: Vec<(IntValue<'ctx>, _)> = arms
+            .iter()
+            .zip(arm_blocks.iter())
+            .map(|(a, bb)| {
+                let op_id = encode_op_id(a.effect_id, a.op_index);
+                (i32_ty.const_int(op_id as u64, false), *bb)
+            })
+            .collect();
+        // Pure-return tag handling per ADR 0020 D4's default
+        // `return v => v`. The body may have produced a pure
+        // value (effecting fn with pure tail wrapped via
+        // sentinel_kont_pure); we recover the value and branch
+        // to merge.
+        let pure_op_id_const = i32_ty.const_int(u32::MAX as u64, false);
+        cases.push((pure_op_id_const, pure_block));
 
-        // Lower the body — emits the perform call + returns the
-        // kont pointer. Note we lower via lower_perform directly
-        // to avoid the lower_expr dispatch going through the
-        // Perform arm again (it would work, but this is clearer).
-        let kont_ptr = self
-            .lower_perform(body_effect_id, body_op_index, body_args, program)?
-            .into_pointer_value();
+        // Build the switch.
+        self.builder.position_at_end(switch_block);
+        self.builder
+            .build_switch(op_id_val, unreachable_block, &cases)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
-        // Bind the arm's parameters. The arm's `param_var_ids`
-        // is [op_params..., kont]. For 0-arg ops the only entry
-        // is the kont. For 1-arg ops, position 0 binds to the
-        // op's arg value read from the kont struct.
-        let n_op_params = arm.param_var_ids.len() - 1;
+        // Pure-return block: call sentinel_kont_consume_pure to
+        // unwrap the value + free the kont, then branch to merge.
+        self.builder.position_at_end(pure_block);
+        let pure_call = self
+            .builder
+            .build_call(
+                self.kont_consume_pure_fn,
+                &[kont_ptr.into()],
+                "kont_pure_value",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let pure_val = pure_call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_kont_consume_pure returns i64");
+        let post_pure_block = self
+            .builder
+            .get_insert_block()
+            .expect("inside pure block");
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Lower each arm: bind op-params + kont, lower the
+        // arm body, branch to merge. Collect (value, block) pairs
+        // for the phi.
+        let mut arm_results: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            Vec::with_capacity(arms.len());
+        for (arm, arm_bb) in arms.iter().zip(arm_blocks.iter()) {
+            self.builder.position_at_end(*arm_bb);
+            self.bind_handler_arm_params(arm, kont_ptr)?;
+            let arm_val = self.lower_expr(&arm.body, program)?;
+            let post_arm_block = self
+                .builder
+                .get_insert_block()
+                .expect("inside arm block");
+            self.builder
+                .build_unconditional_branch(merge_block)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            arm_results.push((arm_val, post_arm_block));
+        }
+
+        // Unreachable: emit `unreachable` so LLVM can prune the
+        // path. The type-check + effect-check should guarantee
+        // every kont op_id matches some arm at runtime; if not
+        // we'd hit this and abort cleanly.
+        self.builder.position_at_end(unreachable_block);
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Merge: phi over arm results + the pure-return value.
+        // All arms produce the same Sentinel type per ADR 0020 D6,
+        // so the LLVM type matches; pure_val (i64) matches when
+        // the handle's outer type is i64 (the only op-return shape
+        // supported at C3.5(b)).
+        self.builder.position_at_end(merge_block);
+        let result_ty = arm_results[0].0.get_type();
+        let phi = self
+            .builder
+            .build_phi(result_ty, "handle_result")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let mut incoming: Vec<(&dyn BasicValue<'ctx>, _)> = arm_results
+            .iter()
+            .map(|(v, bb)| (v as &dyn BasicValue<'ctx>, *bb))
+            .collect();
+        incoming.push((&pure_val as &dyn BasicValue<'ctx>, post_pure_block));
+        phi.add_incoming(&incoming);
+        Ok(phi.as_basic_value())
+    }
+
+    /// C3.5(b): bind a handler arm's op-param VarIds (via GEP
+    /// reads from the kont struct's `arg` field) and the kont
+    /// VarId (holding the kont pointer). Allocas land in the
+    /// current builder block — the entry-block pattern used
+    /// elsewhere doesn't apply here because the switch we
+    /// already emitted is entry's terminator, and inserting
+    /// after a terminator would surface as an IR verification
+    /// failure. LLVM's mem2reg pass copes with non-entry
+    /// allocas; correctness is preserved.
+    fn bind_handler_arm_params(
+        &mut self,
+        arm: &TypedHandlerArm,
+        kont_ptr: PointerValue<'ctx>,
+    ) -> Result<(), CodegenError> {
         let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let n_op_params = arm.param_var_ids.len() - 1;
+
         if n_op_params >= 1 {
             // Read kont.arg via GEP at byte offset 8 (after
-            // op_id: i32 + _pad: i32). LLVM modern opaque
-            // pointers + i8-indexed GEP — we use struct GEP
-            // on the SentinelKont layout to keep this stable.
+            // op_id: i32 + _pad: i32). LLVM 15+ opaque
+            // pointers — we use i8-indexed GEP for layout
+            // stability with the SentinelKont struct.
             let i8_ty = self.context.i8_type();
             let arg_offset = i64_ty.const_int(8, false);
             let arg_ptr = unsafe {
@@ -2494,62 +2718,32 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .builder
                 .build_load(i64_ty, arg_ptr, "kont_arg")
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            // Allocate stack space for the op-param binding and
-            // store the loaded arg into it.
-            let alloca = {
-                let entry = self
-                    .current_fn
-                    .expect("inside compile_fn")
-                    .get_first_basic_block()
-                    .expect("entry block present");
-                let prev_block = self.builder.get_insert_block();
-                self.builder.position_at_end(entry);
-                let a = self
-                    .builder
-                    .build_alloca(i64_ty, "arm_param")
-                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
-                if let Some(bb) = prev_block {
-                    self.builder.position_at_end(bb);
-                }
-                a
-            };
+            let alloca = self
+                .builder
+                .build_alloca(i64_ty, "arm_param")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
             self.builder
                 .build_store(alloca, arg_val)
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
             self.vars.insert(arm.param_var_ids[0], (alloca, Type::I64));
         }
-        // Always bind the kont VarId (last param). Allocate
-        // stack space holding the kont pointer.
+
+        // Bind the kont VarId (last param). The store puts
+        // kont_ptr into the alloca slot.
         let kont_var_id = *arm
             .param_var_ids
             .last()
             .expect("type-check guarantees the kont VarId is present");
-        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
-        let kont_alloca = {
-            let entry = self
-                .current_fn
-                .expect("inside compile_fn")
-                .get_first_basic_block()
-                .expect("entry block present");
-            let prev_block = self.builder.get_insert_block();
-            self.builder.position_at_end(entry);
-            let a = self
-                .builder
-                .build_alloca(ptr_ty, "kont_var")
-                .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            if let Some(bb) = prev_block {
-                self.builder.position_at_end(bb);
-            }
-            a
-        };
+        let kont_alloca = self
+            .builder
+            .build_alloca(ptr_ty, "kont_var")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
         self.builder
             .build_store(kont_alloca, kont_ptr)
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        self.vars.insert(kont_var_id, (kont_alloca, Type::Kont(arm.kont_id)));
-
-        // Lower the arm body. Its result type matches the
-        // handle's outer type per ADR 0020 D6.
-        self.lower_expr(&arm.body, program)
+        self.vars
+            .insert(kont_var_id, (kont_alloca, Type::Kont(arm.kont_id)));
+        Ok(())
     }
 }
 
@@ -2559,6 +2753,130 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 /// beyond any plausible source-level limit.
 fn encode_op_id(effect_id: EffectId, op_index: usize) -> u32 {
     (effect_id.0 << 16) | ((op_index as u32) & 0xFFFF)
+}
+
+/// C3.5(b) / ADR 0020 D7: at this sub-phase an effecting fn's
+/// body must not contain a non-tail `perform` — frame reification
+/// at intermediate evaluation sites is not yet implemented.
+/// The tail expression can be either:
+///   - A `Perform` (lowers to sentinel_perform_op, returns Kont*).
+///   - A `Call` to another effecting fn (returns Kont* via the
+///     new ABI).
+///   - A pure expression (i64-valued; codegen wraps it via
+///     sentinel_kont_pure so the fn's effecting ABI is honoured).
+///   - A block whose tail recursively meets the same constraint.
+///
+/// Returns OK for shapes the current codegen can lower;
+/// otherwise surfaces `EffectingFnBodyNotDirect`. The general
+/// case (let-bound perform + arbitrary frame reification) lands
+/// at C3.5(c) / C3.6.
+fn validate_effecting_fn_body(
+    fn_def: &TypedFnDef,
+    program: &TypedProgram,
+) -> Result<(), CodegenError> {
+    // Statements at the top level (and inside nested blocks
+    // reached by the tail) must not themselves perform. The
+    // recursive walk in `expr_performs` covers nested blocks
+    // automatically.
+    for stmt in &fn_def.body.stmts {
+        if stmt_performs(&stmt.kind) {
+            return Err(CodegenError::EffectingFnBodyNotDirect {
+                fn_name: fn_def.name.clone(),
+            });
+        }
+    }
+    // Tail can be Perform, Call-to-effecting, or anything pure
+    // (no perform/resume inside). Validate accordingly: kont-
+    // producing OR fully-pure tails are both lowered (the latter
+    // wrapped via sentinel_kont_pure). A tail that mixes perform
+    // with surrounding pure context (e.g., `perform Op(...) + 1`)
+    // needs frame reification and is rejected.
+    let tail = &fn_def.body.tail;
+    if tail_produces_kont(tail, program) || !expr_performs(tail) {
+        Ok(())
+    } else {
+        Err(CodegenError::EffectingFnBodyNotDirect {
+            fn_name: fn_def.name.clone(),
+        })
+    }
+}
+
+fn stmt_performs(kind: &TypedStmtKind) -> bool {
+    match kind {
+        TypedStmtKind::Let { value, .. } => expr_performs(value),
+        TypedStmtKind::Assign { target, value } => {
+            expr_performs(target) || expr_performs(value)
+        }
+        TypedStmtKind::Expr(e) => expr_performs(e),
+    }
+}
+
+fn expr_performs(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::Perform { .. } | TypedExprKind::ResumeKont { .. } => true,
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            // A handle inside an effecting fn body is a sub-
+            // computation that discharges effects internally. We
+            // still walk the body in case it itself bubbles
+            // unhandled effects through (the arms / return arm
+            // type-check at the outer row already).
+            expr_performs(body)
+                || arms.iter().any(|a| expr_performs(&a.body))
+                || return_arm.as_deref().is_some_and(|ra| expr_performs(&ra.body))
+        }
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::Var(_) => false,
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner) => expr_performs(inner),
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => expr_performs(l) || expr_performs(r),
+        TypedExprKind::Block(b) => {
+            b.stmts.iter().any(|s| stmt_performs(&s.kind))
+                || expr_performs(&b.tail)
+        }
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            expr_performs(cond)
+                || then_branch.stmts.iter().any(|s| stmt_performs(&s.kind))
+                || expr_performs(&then_branch.tail)
+                || else_branch.stmts.iter().any(|s| stmt_performs(&s.kind))
+                || expr_performs(&else_branch.tail)
+        }
+        TypedExprKind::Call { args, .. } => args.iter().any(expr_performs),
+        TypedExprKind::StructLit { fields, .. } => fields.iter().any(expr_performs),
+        TypedExprKind::FieldAccess { target, .. } => expr_performs(target),
+        TypedExprKind::ArrayLit { elements, .. } => elements.iter().any(expr_performs),
+        TypedExprKind::Index { target, index, .. } => {
+            expr_performs(target) || expr_performs(index)
+        }
+    }
+}
+
+/// C3.5(b): does this tail expression produce a Kont* IR value
+/// (consistent with the effecting-fn ABI)? True for direct
+/// Perform OR Call-to-effecting-fn. False for everything else
+/// — those forms need per-eval-site frame reification.
+fn tail_produces_kont(tail: &TypedExpr, program: &TypedProgram) -> bool {
+    match &tail.kind {
+        TypedExprKind::Perform { .. } => true,
+        TypedExprKind::Call { id, .. } => {
+            let sig = program.signature(*id);
+            !sig.effect_row.is_empty()
+        }
+        // A block whose tail produces a kont is OK as long as its
+        // intermediate stmts don't perform. The compile_fn
+        // validation above runs stmt_performs on top-level stmts;
+        // for nested blocks we recurse.
+        TypedExprKind::Block(b) => {
+            !b.stmts.iter().any(|s| stmt_performs(&s.kind))
+                && tail_produces_kont(&b.tail, program)
+        }
+        _ => false,
+    }
 }
 
 impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {

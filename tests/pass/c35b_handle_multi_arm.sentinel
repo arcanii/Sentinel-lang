@@ -1,0 +1,23 @@
+// C3.5(b) / ADR 0020 D7: handle body is a Call to an effecting
+// fn that could raise either Io.read or Io.write — main's handle
+// dispatches the matching arm via a runtime switch on the kont's
+// op_id field. do_work's body actually raises Io.write(7); the
+// matching arm returns k(msg + 35) = 42.
+//
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+    write(msg: i64) -> i64;
+}
+
+fn do_work() -> i64 ! { Io } {
+    perform Io.write(7)
+}
+
+fn main() -> i64 {
+    handle do_work() with {
+        Io.read(k) => k(0),
+        Io.write(msg, k) => k(msg + 35)
+    }
+}

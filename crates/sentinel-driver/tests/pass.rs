@@ -750,21 +750,11 @@ fn build_ui_fixture(fixture: &str) -> std::process::Output {
         .expect("snc invocation failed")
 }
 
-#[test]
-fn c34_handle_with_fn_call_body_reports_not_direct_perform() {
-    // ADR 0020 D9: at C3.4 codegen rejected every Handle with
-    // HandlersNotYetSupported. At C3.5(a) the inline-perform case
-    // works end-to-end; the c34 fixture's `do_work()` body (a
-    // fn call that performs) is the general case still pending —
-    // it surfaces `handle_body_not_direct_perform` instead.
-    let out = build_ui_fixture("c34_handlers_codegen_not_yet.sentinel");
-    assert!(!out.status.success(), "snc build should fail");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("handle_body_not_direct_perform"),
-        "expected handle_body_not_direct_perform diagnostic; got: {stderr}"
-    );
-}
+// (Previously this asserted handle_body_not_direct_perform for the
+// `handle do_work() with { ... }` fixture. At C3.5(b) that shape
+// compiles + runs; the fixture has been promoted to tests/pass/
+// as `c35b_handle_fn_call_body.sentinel`. The driver test below
+// asserts the new runtime behavior instead.)
 
 #[test]
 fn c34_perform_undefined_effect_rejects_at_resolve() {
@@ -835,4 +825,55 @@ fn pass_c35_handle_log_returns_msg() {
     let r = build_and_run("c35_handle_log_returns_msg.sentinel");
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
+}
+
+// ---- C3.5(b) / ADR 0020 D7: effecting fn ABI ----
+//
+// Effecting fns (signature.effect_row non-empty) now return Kont*
+// at the LLVM ABI level. handle bodies can be a direct Perform OR
+// a Call to an effecting fn. A runtime switch on the kont's op_id
+// dispatches the matching arm.
+
+#[test]
+fn pass_c35b_handle_fn_call_body() {
+    // do_work() returns a Kont* via the effecting ABI; main's
+    // handle catches it. Exit code = 42 (the arm body's k(42)).
+    let r = build_and_run("c35b_handle_fn_call_body.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35b_handle_multi_arm() {
+    // Multi-arm dispatch: main's handle covers both Io.read and
+    // Io.write. do_work raises Io.write(7); the Io.write arm is
+    // selected at runtime; k(msg + 35) = 42.
+    let r = build_and_run("c35b_handle_multi_arm.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35b_handle_pure_return() {
+    // Pure-return path: do_work is declared effecting but body
+    // is the pure expression `41 + 1`. sentinel_kont_pure wraps
+    // the value; handle's PURE_RETURN_OP_ID switch case unwraps.
+    let r = build_and_run("c35b_handle_pure_return.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn c35b_effecting_fn_let_bound_perform_reports_not_direct() {
+    // An effecting fn that let-binds a perform result needs
+    // per-evaluation-site frame reification (capture the rest of
+    // the fn after the let). Surfaces effecting_fn_body_not_direct
+    // until C3.5(c) / C3.6 ship the general case.
+    let out = build_ui_fixture("c35b_effecting_fn_let_bound_perform.sentinel");
+    assert!(!out.status.success(), "snc build should fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("effecting_fn_body_not_direct"),
+        "expected effecting_fn_body_not_direct; got: {stderr}"
+    );
 }

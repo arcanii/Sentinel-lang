@@ -1,0 +1,21 @@
+// C3.5(b) / ADR 0020 D7: handle body is a Call to an effecting
+// fn (do_work has effect_row = { Io }, body is a direct perform).
+// Effecting fns' LLVM ABI returns Kont* so do_work's return
+// flows naturally to main's handle, which dispatches via a
+// runtime switch on the kont's op_id.
+//
+// Expected: exit code 42.
+
+effect Io {
+    read() -> i64;
+}
+
+fn do_work() -> i64 ! { Io } {
+    perform Io.read()
+}
+
+fn main() -> i64 {
+    handle do_work() with {
+        Io.read(k) => k(42)
+    }
+}

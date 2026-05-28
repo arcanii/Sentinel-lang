@@ -228,6 +228,53 @@ pub extern "C" fn sentinel_kont_panic_resumed() -> ! {
     std::process::abort();
 }
 
+/// C3.5(b) / ADR 0020 D7: wrap a pure value in a "pure return"
+/// continuation. Effecting fns (declared `! { ... }`) whose body
+/// happens to be pure — never reaches a perform — still need to
+/// match the effecting ABI (return a Kont*) so callers in handle
+/// bodies can dispatch uniformly. The kont uses the reserved tag
+/// [`PURE_RETURN_OP_ID`]; matching handle codegen unwraps the value
+/// via [`sentinel_kont_consume_pure`].
+///
+/// This is the "default return arm" of ADR 0020 D4 implemented at
+/// the runtime layer: when the handled computation produces a Pure
+/// value rather than performing, the handle's dispatch falls
+/// through to a copy of the inner value.
+#[no_mangle]
+pub extern "C" fn sentinel_kont_pure(value: i64) -> *mut SentinelKont {
+    sentinel_perform_op(PURE_RETURN_OP_ID, value)
+}
+
+/// C3.5(b) / ADR 0020 D7: read the wrapped value out of a "pure
+/// return" kont and free the kont. Symmetric to
+/// [`sentinel_kont_pure`]; called from handle codegen's switch
+/// when the body's tail produced a value rather than a perform.
+///
+/// # Safety
+///
+/// `kont` must be a live SentinelKont returned by
+/// [`sentinel_kont_pure`]. After this call the kont is freed.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn sentinel_kont_consume_pure(kont: *mut SentinelKont) -> i64 {
+    // SAFETY: caller guarantees `kont` is a live, pure-return
+    // SentinelKont. The one-shot flag is irrelevant — pure
+    // returns don't loop back through resume.
+    let value = unsafe { (*kont).arg };
+    sentinel_free(kont as *mut u8);
+    value
+}
+
+/// Reserved op_id sentinel used by [`sentinel_kont_pure`] and
+/// recognised by handle codegen's runtime switch as the "pure
+/// return" tag per ADR 0020 D4. The value is chosen to avoid
+/// any legitimately-encoded `(EffectId, op_index)` pair —
+/// codegen packs those into a 16/16 bit-split with
+/// `(EffectId.0 << 16) | op_index`, so EffectId == 0xFFFF +
+/// op_index == 0xFFFF would collide. In practice neither
+/// approaches that limit; this is a documented reservation.
+pub const PURE_RETURN_OP_ID: u32 = u32::MAX;
+
 /// Returns the crate name as a sanity-check that the build is wired up.
 pub fn crate_name() -> &'static str {
     "sentinel-runtime"
