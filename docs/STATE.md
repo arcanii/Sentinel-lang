@@ -12,7 +12,67 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **ADR 0023 PROPOSED: concrete C4.2 trait + impl
+Last updated: **C4.2 (1/N): trait + impl AST + parser landed per
+ADR 0023 D1+D3+D4.** ADR 0023 stays PROPOSED. First of the C4.2
+sub-iterations: trait declarations + impl blocks (default +
+named forms) + `ImplName::method(args)` qualified calls parse
+end-to-end at the AST + parser layer. Downstream resolve
+rejects them with three new "not yet" diagnostics —
+TraitDeclNotYet / ImplDeclNotYet / QualifiedCallNotYet — until
+C4.2 (2/N) brings up the impl table, dispatch, and codegen
+per ADR 0023 D8 + D9.
+
+**AST additions**:
+- `TraitDecl { name, methods, span }` + `TraitMethodSig
+  { name, self_kind, params, return_type, effect_row, span }`
+  alongside `Program.fns` / `.structs` / `.effects` /
+  `.classes`.
+- `ImplDecl { name: Option<String>, trait_name, type_name,
+  methods, span }` + `ImplMethodDef { visibility, name,
+  self_kind, params, return_type, effect_row, body, span }`.
+  `name: None` for default impls; `Some` for named impls.
+- `ExprKind::QualifiedCall { impl_name, impl_name_span,
+  method, method_span, args }` — disambiguated from
+  `ClassInit` at parse time by checking if the second Ident
+  after `::` is `init`.
+- `Program.traits: Vec<TraitDecl>` + `Program.impls:
+  Vec<ImplDecl>`.
+
+**Parser additions**: `parse_trait_decl` + `parse_trait_method_sig`
+(method signature terminated by `;`, no body). `parse_impl_decl`
+distinguishing default vs named via the optional `Ident` before
+`as`. `parse_impl_method_def` mirrors `parse_method_decl` from
+C4.1. The `parse_atom` Ident::method arm in C4.1 — which only
+accepted `Init` — now also accepts a generic Ident; the dispatch
+distinguishes `ClassInit` (second Ident = `init`) from
+`QualifiedCall` (second Ident = method name). Empty trait bodies
+(`trait T {}`) and method-bodies-instead-of-`;` get clear
+UnexpectedToken diagnostics.
+
+**Resolve pass-through**: at the start of `resolve()`, if
+`program.traits` or `program.impls` is non-empty, surface
+`TraitDeclNotYet` / `ImplDeclNotYet` (mirroring the C3.0
+EffectDeclNotYet pattern). Inside `resolve_expr`,
+`ExprKind::QualifiedCall` surfaces `QualifiedCallNotYet`.
+Three new ResolveError variants land — all wired to clear
+help text pointing at C4.2 (2/N) per ADR 0023 D8.
+
+Workspace test delta from C4.1 close: +14 (1138 total) — +11
+parser tests (trait empty / one-method / two-methods /
+method-requires-semi / impl default / impl named / impl pub /
+impl missing-as / impl missing-for / impl two-methods / full
+C4.2 surface) + +3 resolve rejection tests (TraitDeclNotYet,
+ImplDeclNotYet, QualifiedCallNotYet) + 1 promoted C4.1 test
+(parse_qualified_call_with_non_init_ident replaces the old
+parse_class_init_rejects_non_init).
+**Phase C4.2 (1/N) closes here.** Next: C4.2 (2/N) — resolve
+(TraitId + ImplId interners + per-scope impl table) + types
+(`Type::TraitSelf(TraitId)` interner extension + per-impl
+signature check + dispatch resolution per ADR 0023 D6) +
+codegen (per-impl LLVM fn mangling + witness-table machinery
++ Path 1 / Path 2 lowering) + c42_go_no_go phase-go.
+
+Pre-C4.2(1/N) context: **ADR 0023 PROPOSED: concrete C4.2 trait + impl
 surface.** No code changes — this is the C4.2 detail ADR
 mirroring ADR 0022 (C4.1 classes) within the larger Phase C4
 plan from ADR 0021. Twelve D-decisions cover trait declaration

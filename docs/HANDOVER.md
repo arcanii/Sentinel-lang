@@ -88,6 +88,7 @@ C1.3. See STATE.md Section C.
 **Phase C4.1 (2/N) — resolve / types / codegen wiring + postfix `.method(args)` + `Name::init(args)` per ADR 0022 D3+D5+D7+D9 — complete. Definite-assignment via flat any-assigned check (branch-aware merge deferred); ADR 0022 D11 phase-go (Point with manhattan/translate) runs end-to-end at exit 42.**
 **Phase C4.1 close — ADR 0022 → ACCEPTED-WITH-AMENDMENTS — complete. Phase C4.1 closes.** Two amendments: A1 D4 definite-assignment is partial (flat any-assigned, branch-aware merge + InitFieldReadBeforeAssign deferred); A2 D8 general `Self` in type position deferred (only positional `self: &Self` via parse_self_param).
 **ADR 0023 PROPOSED — concrete C4.2 trait + impl surface — docs-only.** Twelve D-decisions covering trait declarations (D1+D2), default + named impl block grammar (D3+D4), three dispatch paths (D5: receiver-typed + qualified-named + bounded-generic), method-call resolution (D6), `Self` resolution via `Type::TraitSelf(TraitId)` (D7), typing pipeline (D8: two new resolve passes + one new types pass), per-impl codegen with witness tables (D9), out-of-scope list (D10), lexer state recap (D11), and the c42_go_no_go phase-go (D12). Bounded-generic + named-impl pairing deferred at C4.2 minimum per D5/D10 amendment — defaults only for Path 3.
+**Phase C4.2 (1/N) — trait + impl AST + parser per ADR 0023 D1+D3+D4 — complete.** Trait declarations + default-and-named impl blocks + `ImplName::method(args)` qualified calls parse end-to-end at AST + parser. Downstream resolve rejects with TraitDeclNotYet / ImplDeclNotYet / QualifiedCallNotYet diagnostics until C4.2 (2/N) lands the impl table + dispatch + codegen. +14 tests (1138 total).
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1037,58 +1038,65 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C4.2 (1/N) — AST + parser for traits + impls)
+### 0.2 Next session opening (C4.2 (2/N) — resolve / types / codegen for traits + impls)
 
-Resume at **C4.2 (1/N)** per ADR 0023. **ADR 0023 PROPOSED**
-docs-only commit landed; the C4.2 trait + impl surface is
-spec'd across twelve D-decisions. The first C4.2 sub-iteration
-mirrors C4.1 (1/N): land AST + parser without downstream
-wiring so the surface parses end-to-end, then C4.2 (2/N)
-brings up resolve / types / codegen + the phase-go.
+Resume at **C4.2 (2/N)** per ADR 0023. **C4.2 (1/N) closed**:
+trait + impl AST + parser landed; downstream resolve rejects
+with three new "not yet" diagnostics (TraitDeclNotYet,
+ImplDeclNotYet, QualifiedCallNotYet). The next iteration
+brings the resolve / types / codegen wiring + the phase-go.
 
-**C4.2 (1/N) deliverables**:
+**C4.2 (2/N) deliverables**:
 
-  - **AST additions**:
-    - `TraitDecl { name, methods, span }` + `TraitMethodSig
-      { name, self_kind, params, return_type, effect_row,
-      span }` (sig only — no body, terminated with `;`).
-    - `ImplDecl { name: Option<String>, trait_name,
-      type_name, methods, span }` + `ImplMethodDef { name,
-      self_kind, params, return_type, effect_row, body,
-      span }` (same shape as MethodDef but stand-alone, not
-      inside a class).
-    - `ExprKind::QualifiedCall { impl_name, method, args }`
-      for the `ImplName::method(args)` form. Parsing tip:
-      reuse the C4.1 `Name::init` detector — if the second
-      Ident is `init`, produce `ClassInit`; otherwise
-      produce `QualifiedCall`.
-    - `Program.traits: Vec<TraitDecl>` +
-      `Program.impls: Vec<ImplDecl>` alongside
-      `Program.classes` / `.structs` / `.effects`.
-  - **Parser additions**:
-    - `parse_trait_decl` + `parse_trait_method_sig` (sig
-      ends with `;`, no body).
-    - `parse_impl_decl` distinguishing default vs named via
-      the optional `Ident` before `as`. The grammar is
-      `'impl' Ident? 'as' Ident 'for' Ident '{' methods '}'`.
-    - `parse_postfix` extension: `Ident::method(args)` →
-      QualifiedCall (the existing `Name::init` arm in
-      `parse_atom` distinguishes by checking if the second
-      Ident is `init`).
-    - Rejection paths: `EmptyTraitDecl` (allowed
-      structurally — marker traits work) is NOT a rejection;
-      missing `as` or `for` in impl decls surfaces as
-      `UnexpectedToken`.
-  - **Resolve pass-through**: classes / impls / traits AST
-    flow into `ResolvedProgram` slots that downstream
-    passes leave untouched. Per the C4.1 (1/N) pattern,
-    resolve at this iteration just propagates the AST
-    shape; type-check + codegen wait for (2/N).
+  - **Resolve**: `TraitId(u32)` + `ImplId(u32)` interners +
+    per-trait method-table (with name uniqueness +
+    `DuplicateTraitMethod` rejection) + per-(scope, trait,
+    type) impl table per ADR 0021 D7's scope-local
+    coherence. Default-impl uniqueness +
+    `DuplicateDefaultImpl` rejection; named-impl uniqueness
+    + `DuplicateImplName` rejection. ResolvedTraitDecl /
+    ResolvedImplDecl parallel-tree types. Drop the three
+    "not yet" rejections; route QualifiedCall via the impl
+    table (UndefinedImpl / UndefinedTraitMethod /
+    ImplMethodReceiverMismatch). Receiver-typed dispatch via
+    MethodCall on a class with a default-impl trait method
+    in scope (ADR 0023 D6 algorithm).
+  - **Types**: `Type::TraitSelf(TraitId)` interner extension
+    (the ninth Copy+Hash preserving interner). TraitData +
+    ImplData typed-program tables. Pass 0d builds the impl
+    table; pass 3c types trait method sigs; pass 3d types
+    impl signatures with completeness + signature-match
+    checks against the trait
+    (`ImplMethodSignatureMismatch`, `ImplMissingMethod`).
+    Pass 6 types impl method bodies. Bounded-generic
+    dispatch (D5 Path 3 default case) threading through the
+    C1.7.5 monomorphisation worklist. New TypeError
+    variants: `ImplMethodSignatureMismatch`,
+    `AmbiguousMethodCall`, `ImplMethodReceiverMismatch`,
+    `ImplMissingMethod`.
+  - **Codegen**: per-impl LLVM fn (mangled
+    `Name__Type__Trait__method` or
+    `default__Type__Trait__method`) + global witness-table
+    values per impl. Receiver-typed dispatch (Path 1):
+    direct call to default impl's mangled fn. Qualified-
+    named dispatch (Path 2): direct call to named impl's
+    mangled fn. Bounded-generic dispatch (Path 3 default
+    case): monomorphisation with witness-table GEP load +
+    indirect call.
+  - **Phase-go fixture**: `c42_go_no_go.sentinel` per ADR
+    0023 D12 — FileSink class with default + named
+    `Doubling` Writer impls; main calls both via
+    `s.write(10)` and `Doubling::write(&mut s, 16)` to
+    return 42.
+  - **UI fixtures**: c42_impl_missing_method,
+    c42_impl_method_sig_mismatch,
+    c42_duplicate_default_impl, c42_duplicate_impl_name.
 
 Per ADR 0023 D12, C4.2 closes with the
-`c42_go_no_go.sentinel` phase-go fixture (FileSink class
-with default + named `Doubling` impls of Writer; main calls
-both via receiver-typed and qualified-named dispatch).
+`c42_go_no_go.sentinel` phase-go fixture running end-to-end
+at exit 42 + ADR 0023 → ACCEPTED (or
+ACCEPTED-WITH-AMENDMENTS depending on which D-decisions ship
+as drafted).
 
 **C4.1 follow-ons remain available** (none blocking C4.2):
 
@@ -1530,23 +1538,19 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last work: **ADR 0023 PROPOSED — concrete C4.2 trait + impl
-    surface.** Docs-only commit detailing the C4.2 trait + impl
-    surface across twelve D-decisions: trait + impl block
-    grammar (D1-D4 including default + named impls), three
-    dispatch paths (D5: receiver-typed + qualified-named +
-    bounded-generic via witness tables, with the bounded-
-    generic + named-impl pairing deferred at C4.2 minimum),
-    method-call resolution algorithm (D6), `Self` resolution
-    in trait + impl contexts via the new `Type::TraitSelf(TraitId)`
-    interner variant (D7), the typing pipeline (D8: two new
-    resolve passes + one new types pass + one new bodies
-    pass), per-impl codegen with witness tables (D9),
-    out-of-scope items (D10), lexer state (D11 — no new
-    tokens at C4.2), and the c42_go_no_go phase-go (D12: trait
-    Writer with default + named `Doubling` impls on FileSink
-    class). C4.2 (1/N) — AST + parser — is the natural next
-    iteration; mirrors C4.1 (1/N) shape.
+    Last work: **C4.2 (1/N) — trait + impl AST + parser landed
+    per ADR 0023 D1+D3+D4.** TraitDecl / TraitMethodSig (sig
+    only, terminated by `;`) + ImplDecl with `name:
+    Option<String>` distinguishing default vs named +
+    ImplMethodDef. New ExprKind::QualifiedCall for
+    `ImplName::method(args)` — disambiguated from ClassInit at
+    parse time by checking if the second Ident after `::` is
+    `init`. parse_trait_decl + parse_trait_method_sig +
+    parse_impl_decl + parse_impl_method_def added. Resolve
+    rejects with three new diagnostics (TraitDeclNotYet,
+    ImplDeclNotYet, QualifiedCallNotYet) until C4.2 (2/N)
+    brings up the impl table + dispatch + codegen per ADR
+    0023 D8+D9. +14 tests (1138 active workspace).
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1568,9 +1572,14 @@ For pasting into a fresh chat to bootstrap context:
     concurrency; 14 D-decisions; 6 sub-phases; 8-12 sessions);
     **ADR 0022 PROPOSED** details C4.1 class surface (11 D-
     decisions; ~700-1000 LOC across AST + parser + resolve +
-    types + codegen). **C4.1 (1/N) + (2/N) landed**: AST +
-    parser + resolve + types + codegen all wired up end-to-
-    end. 1124 active workspace tests + 1 doctest.
+    types + codegen). **C4.1 (1/N) + (2/N) + close-out
+    landed**: AST + parser + resolve + types + codegen all
+    wired up end-to-end; ADR 0022 ACCEPTED-WITH-AMENDMENTS.
+    **ADR 0023 PROPOSED** at C4.2 open details the trait +
+    impl surface (12 D-decisions; ~750-1050 LOC). **C4.2
+    (1/N) landed**: AST + parser only; downstream resolve
+    rejects with three NotYet diagnostics. 1138 active
+    workspace tests + 1 doctest.
     **Thirty-three go/no-go programs run end-to-end + 2 UI rejections:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
