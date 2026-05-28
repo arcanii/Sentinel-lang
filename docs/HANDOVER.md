@@ -86,12 +86,25 @@ actual vs ADR 0017 D9 estimate "6-13 sessions" — low end of
 the range). ADR 0018 (Polonius migration plan) PROPOSED;
 records the plan only, no migration code yet. Phase C3 (effect
 system + secret typing per ADR 0019) is **typing-layer
-complete** as of C3.3 (this session) — ADR 0019 ACCEPTED-
-WITH-AMENDMENTS with all D-decisions exercised except D8
-(handler runtime, deferred to ADR 0020) and D9 (async,
-deferred indefinitely). Six sub-phases shipped across ~5
-effective sessions. Pipeline at C3.3 close: parse →
-resolve → check → **effect_check** → borrow_check → codegen.
+complete** as of C3.3 — ADR 0019 ACCEPTED-WITH-AMENDMENTS with
+all D-decisions exercised except D8 (handler runtime, deferred
+to ADR 0020) and D9 (async, deferred indefinitely). Phase C3
+runtime layer (ADR 0020) is **in flight**: sub-phases C3.4 +
+C3.5(a) + C3.5(b) + C3.5(c) + C3.5(d) all landed. The handler
+surface compiles and runs end-to-end for: direct-perform
+bodies, fn-call-that-performs bodies (effecting fn ABI returns
+Kont*), pure-bodied effecting fns (PURE_RETURN wrap), let-bound
+performs, and any pure surrounding context with a single
+embedded perform (binop, struct-lit, fn-call-arg, index, etc.).
+Five runtime symbols are in place: sentinel_perform_op,
+sentinel_kont_resume, sentinel_kont_panic_resumed,
+sentinel_kont_pure + sentinel_kont_consume_pure,
+sentinel_kont_push. Still pending: chained effecting lets
+(needs resumers-can-perform), return arms with non-identity
+transforms, nested handles, multi-shot continuations,
+non-i64-returning ops. Pipeline at current close (unchanged
+since C3.3): parse → resolve → check → **effect_check** →
+borrow_check → codegen.
 Phase C1 (type system per HANDOVER §6.2) is **complete** per ADR
 0011 (now ACCEPTED, 8 sub-phases, ADR's honest 5-6 month estimate
 beaten — actual elapsed across C1.0a through C1.7.4b was ~10-12
