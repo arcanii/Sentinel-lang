@@ -1,0 +1,32 @@
+// C4.2 (2/N) / ADR 0023 D12: smallest viable trait + default impl +
+// receiver-typed dispatch (Path 1) program. Trait Counter with one
+// `tick` method; class Tally with `count` field; default impl of
+// Counter for Tally adds n to count and returns the new count.
+//
+// Trace: t starts with count=0. t.tick(42) returns 42.
+//
+// Expected: exit code 42, no stdout.
+
+trait Counter {
+    fn tick(self: &mut Self, n: i64) -> i64;
+}
+
+class Tally {
+    let count: i64;
+    pub init() {
+        self.count = 0;
+        0
+    }
+}
+
+impl as Counter for Tally {
+    fn tick(self: &mut Self, n: i64) -> i64 {
+        self.count = self.count + n;
+        self.count
+    }
+}
+
+fn main() -> i64 {
+    let mut t: Tally = Tally::init();
+    t.tick(42)
+}

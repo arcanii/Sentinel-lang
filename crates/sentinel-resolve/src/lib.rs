@@ -86,6 +86,30 @@ pub struct StructId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClassId(pub u32);
 
+/// Identifier for a top-level trait declaration per ADR 0023 D1
+/// (C4.2). Unique per-program; assigned in source-encounter order
+/// starting at 0. TraitId indexes into [`ResolvedProgram::traits`]
+/// / `TypedProgram::trait_decls`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TraitId(pub u32);
+
+/// Identifier for a top-level impl declaration per ADR 0023 D3/D4
+/// (C4.2). Unique per-program; assigned in source-encounter order
+/// starting at 0. ImplId indexes into [`ResolvedProgram::impls`] /
+/// `TypedProgram::impl_decls`. Default and named impls share the
+/// ID space — the impl's `name: Option<String>` distinguishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ImplId(pub u32);
+
+/// C4.2 / ADR 0023 D3: the receiver type of an impl block. At C4.2
+/// minimum impls target concrete classes or structs; impl-for-
+/// generic and `impl<T>` are deferred per ADR 0023 D10.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImplTarget {
+    Class(ClassId),
+    Struct(StructId),
+}
+
 /// Position-indexed identifier for a generic type parameter
 /// inside the surrounding fn / struct, added at C1.7 per ADR
 /// 0016 D6c. Two distinct fns can each have `TypeParamId(0)`
@@ -157,6 +181,15 @@ pub struct ResolvedProgram {
     /// annotations like `let p: Point = ...` can be resolved
     /// against either.
     pub classes: Vec<ResolvedClassDecl>,
+    /// C4.2 / ADR 0023 D1: top-level trait declarations. Each
+    /// carries its own [`TraitId`] matching its index here. Trait
+    /// names share a namespace with classes and structs.
+    pub traits: Vec<ResolvedTraitDecl>,
+    /// C4.2 / ADR 0023 D3/D4: top-level impl declarations (default
+    /// and named). Each carries its own [`ImplId`] matching its
+    /// index here. The per-(trait, type, name?) uniqueness rules
+    /// are enforced at resolve time.
+    pub impls: Vec<ResolvedImplDecl>,
     pub span: Span,
 }
 
@@ -305,6 +338,87 @@ impl ResolvedProgram {
     pub fn signature(&self, id: FnId) -> &FnSignature {
         &self.fn_signatures[id.0 as usize]
     }
+}
+
+/// C4.2 / ADR 0023 D1: a trait declaration after name resolution.
+/// The [`TraitId`] matches its index in [`ResolvedProgram::traits`].
+/// Method signatures stay as [`TypeExpr`] (string-keyed) — sentinel-
+/// types resolves them at Pass 3c.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedTraitDecl {
+    pub id: TraitId,
+    pub name: String,
+    pub name_span: Span,
+    pub methods: Vec<ResolvedTraitMethodSig>,
+    pub span: Span,
+}
+
+/// C4.2 / ADR 0023 D2: a single method signature inside a trait
+/// declaration. Body-less — the signature alone is the contract.
+/// Default-method bodies are deferred per ADR 0023 D10. Params
+/// don't carry VarIds (trait method sigs have no body so no
+/// binding to reference) — Vec is used for the shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedTraitMethodSig {
+    pub name: String,
+    pub name_span: Span,
+    pub self_kind: SelfKind,
+    pub params: Vec<ResolvedTraitParam>,
+    pub return_type: TypeExpr,
+    /// Effect-row annotation (each name → [`EffectId`]).
+    pub effect_row: Vec<EffectId>,
+    pub span: Span,
+}
+
+/// C4.2 / ADR 0023 D2: a single param inside a trait method
+/// signature. Mirrors [`ResolvedParam`] but without a VarId — trait
+/// method sigs have no body so the params aren't bound anywhere.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedTraitParam {
+    pub mutable: bool,
+    pub name: String,
+    pub span: Span,
+    pub ty: TypeExpr,
+}
+
+/// C4.2 / ADR 0023 D3/D4: an impl block declaration after name
+/// resolution. The [`ImplId`] matches its index in
+/// [`ResolvedProgram::impls`]. Both default (`name: None`) and
+/// named (`name: Some(_)`) impls live in this vec; resolve has
+/// validated the (trait, type, name) uniqueness rules.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedImplDecl {
+    pub id: ImplId,
+    /// `None` for default impls; `Some(name)` for named impls.
+    pub name: Option<String>,
+    pub name_span: Option<Span>,
+    pub trait_id: TraitId,
+    pub trait_name: String,
+    pub trait_name_span: Span,
+    pub target: ImplTarget,
+    pub type_name: String,
+    pub type_name_span: Span,
+    pub methods: Vec<ResolvedImplMethodDef>,
+    pub span: Span,
+}
+
+/// C4.2 / ADR 0023 D3: an impl method after name resolution.
+/// Mirrors [`ResolvedMethodDef`] structurally: synthetic `self`
+/// VarId bound inside the body, effect-row resolved to EffectIds.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedImplMethodDef {
+    pub visibility: Visibility,
+    pub name: String,
+    pub name_span: Span,
+    pub self_kind: SelfKind,
+    /// VarId of the synthetic `self` binding inside the method
+    /// body, allocated by resolve.
+    pub self_var_id: VarId,
+    pub params: Vec<ResolvedParam>,
+    pub return_type: TypeExpr,
+    pub effect_row: Vec<EffectId>,
+    pub body: ResolvedBlock,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -505,6 +619,22 @@ pub enum ResolvedExprKind {
         id: ClassId,
         name: String,
         name_span: Span,
+        args: Vec<ResolvedExpr>,
+    },
+    /// C4.2 / ADR 0023 D5 Path 2: `ImplName::method(args)` qualified
+    /// call resolved to a specific named impl. The first arg is the
+    /// receiver — no auto-ref; the user passes `&obj` / `&mut obj`
+    /// explicitly. `impl_id` indexes into [`ResolvedProgram::impls`];
+    /// `method_index` indexes into the impl's `methods` vec.
+    /// Type-check validates the receiver type matches the impl's
+    /// `for Type` clause + arg arity/types against the method sig.
+    QualifiedCall {
+        impl_id: ImplId,
+        method_index: usize,
+        impl_name: String,
+        impl_name_span: Span,
+        method: String,
+        method_span: Span,
         args: Vec<ResolvedExpr>,
     },
 }
@@ -828,47 +958,124 @@ pub enum ResolveError {
         span: miette::SourceSpan,
     },
 
-    /// C4.2 / ADR 0023 D5 Path 2: `ImplName::method(args)` qualified
-    /// call parses at C4.2 (1/N) but isn't resolvable until the
-    /// impl table lands at C4.2 (2/N). Surface a clear "not yet"
-    /// diagnostic in the meantime.
-    #[error("`Name::method(args)` qualified call is not yet supported (lands at C4.2 (2/N))")]
+    /// C4.2 / ADR 0023 D1: two `trait` declarations share the same
+    /// name. Trait names share a namespace with classes and structs.
+    #[error("trait `{name}` is already declared")]
     #[diagnostic(
-        code(sentinel::resolve::qualified_call_not_yet),
-        help("qualified calls dispatch via the impl table — wait for C4.2 (2/N) to bring up the resolve / types / codegen wiring per ADR 0023 D8")
+        code(sentinel::resolve::redefined_trait),
+        help("each trait name must be unique within a program; trait, class, and struct names share a namespace at C4.2")
     )]
-    QualifiedCallNotYet {
-        #[label("qualified call here")]
-        span: miette::SourceSpan,
-    },
-
-    /// C4.2 / ADR 0023 D1: trait declarations parse at C4.2 (1/N)
-    /// but the resolve / types / codegen wiring lands at C4.2
-    /// (2/N). Trait declarations that appear in the program
-    /// surface this diagnostic until then.
-    #[error("trait declarations are not yet supported (land at C4.2 (2/N))")]
-    #[diagnostic(
-        code(sentinel::resolve::trait_decl_not_yet),
-        help("trait declarations parse + AST-mirror at C4.2 (1/N); resolve / types / codegen wiring per ADR 0023 D8 lands at C4.2 (2/N)")
-    )]
-    TraitDeclNotYet {
+    RedefinedTrait {
         name: String,
-        #[label("trait `{name}` declared here")]
+        #[label("redefinition here")]
         span: miette::SourceSpan,
     },
 
-    /// C4.2 / ADR 0023 D3+D4: impl block declarations parse at
-    /// C4.2 (1/N) but the resolve / types / codegen wiring lands
-    /// at C4.2 (2/N).
-    #[error("impl declarations are not yet supported (land at C4.2 (2/N))")]
+    /// C4.2 / ADR 0023 D2: two method signatures inside the same
+    /// trait share a name. No method overloading at C4.2.
+    #[error("trait `{trait_name}` declares method `{method_name}` twice")]
     #[diagnostic(
-        code(sentinel::resolve::impl_decl_not_yet),
-        help("impl declarations parse + AST-mirror at C4.2 (1/N); the per-(scope, trait, type) impl table per ADR 0023 D8 lands at C4.2 (2/N)")
+        code(sentinel::resolve::duplicate_trait_method),
+        help("methods share a namespace per trait at C4.2; no method overloading")
     )]
-    ImplDeclNotYet {
+    DuplicateTraitMethod {
+        trait_name: String,
+        method_name: String,
+        #[label("redeclaration here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.2 / ADR 0023 D3: `impl as Trait for Type` references an
+    /// unknown trait name. Surfaces at resolve when `Trait` is not
+    /// in the trait table.
+    #[error("undefined trait `{name}` in impl block")]
+    #[diagnostic(
+        code(sentinel::resolve::undefined_trait_for_impl),
+        help("declare it with `trait {name} {{ ... }}` at the top level before this reference")
+    )]
+    UndefinedTraitForImpl {
+        name: String,
+        #[label("no such trait")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.2 / ADR 0023 D3: `impl as Trait for Type` references an
+    /// unknown receiver type. Currently classes + structs are valid
+    /// targets; impl-for-generic is deferred per ADR 0023 D10.
+    #[error("undefined type `{name}` in impl block")]
+    #[diagnostic(
+        code(sentinel::resolve::undefined_type_for_impl),
+        help("the impl's `for Type` clause must name an existing class or struct; generic impl targets are deferred per ADR 0023 D10")
+    )]
+    UndefinedTypeForImpl {
+        name: String,
+        #[label("no such type")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.2 / ADR 0023 D8: two default impls of the same trait for
+    /// the same type in the same scope. Scope-local coherence per
+    /// ADR 0021 D7 forbids duplicates.
+    #[error(
+        "duplicate default impl of `{trait_name}` for `{type_name}` in this scope"
+    )]
+    #[diagnostic(
+        code(sentinel::resolve::duplicate_default_impl),
+        help("each (trait, type) pair may have at most one default impl per scope; use a named impl (`impl Name as Trait for Type`) to provide an alternative")
+    )]
+    DuplicateDefaultImpl {
         trait_name: String,
         type_name: String,
-        #[label("`impl ... as {trait_name} for {type_name}` here")]
+        #[label("duplicate default impl here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.2 / ADR 0023 D8: two named impls of the same trait for
+    /// the same type share a name within a scope.
+    #[error(
+        "duplicate impl name `{impl_name}` for `{trait_name}` on `{type_name}`"
+    )]
+    #[diagnostic(
+        code(sentinel::resolve::duplicate_impl_name),
+        help("each named impl of a (trait, type) pair must have a unique name within its scope")
+    )]
+    DuplicateImplName {
+        impl_name: String,
+        trait_name: String,
+        type_name: String,
+        #[label("duplicate impl name here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.2 / ADR 0023 D6: `ImplName::method(args)` references an
+    /// unknown impl name. Surfaces at resolve when `ImplName` is
+    /// not in the impl-name table.
+    #[error("undefined impl `{name}` in `{name}::{method}(...)`")]
+    #[diagnostic(
+        code(sentinel::resolve::undefined_impl),
+        help("declare it with `impl {name} as Trait for Type {{ ... }}` at the top level before this reference")
+    )]
+    UndefinedImpl {
+        name: String,
+        method: String,
+        #[label("no such impl")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.2 / ADR 0023 D6: `ImplName::method(...)` references a
+    /// method name that isn't declared on the impl's trait.
+    #[error(
+        "trait `{trait_name}` (impl `{impl_name}`) has no method `{method_name}`"
+    )]
+    #[diagnostic(
+        code(sentinel::resolve::undefined_trait_method),
+        help("check the trait declaration for the available method names")
+    )]
+    UndefinedTraitMethod {
+        impl_name: String,
+        trait_name: String,
+        method_name: String,
+        #[label("no such method on `{trait_name}`")]
         span: miette::SourceSpan,
     },
 }
@@ -886,25 +1093,6 @@ pub enum ResolveError {
 /// reference struct types in their TypeExprs), then fns, then fn
 /// bodies.
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
-    // C4.2 (1/N) / ADR 0023 D8: reject trait + impl declarations
-    // until (2/N) brings up the impl table + per-trait method
-    // signatures. Parser-level surface is in; resolve / types /
-    // codegen wiring is the next iteration. Mirrors the C3.0
-    // EffectDeclNotYet pattern.
-    if let Some(td) = program.traits.first() {
-        return Err(ResolveError::TraitDeclNotYet {
-            name: td.name.clone(),
-            span: to_source_span(&td.name_span),
-        });
-    }
-    if let Some(id) = program.impls.first() {
-        return Err(ResolveError::ImplDeclNotYet {
-            trait_name: id.trait_name.clone(),
-            type_name: id.type_name.clone(),
-            span: to_source_span(&id.span),
-        });
-    }
-
     let mut next_fn_id: u32 = 0;
     let mut next_var_id: u32 = 0;
 
@@ -1028,6 +1216,159 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         class_table.insert(cd.name.clone(), ClassId(idx as u32));
     }
 
+    // C4.2 / ADR 0023 D1 (Pass 0d): collect trait declarations.
+    // Trait names share a namespace with structs + classes. The
+    // method sigs themselves are resolved in Pass 4 below (we need
+    // effect_table available, which is built above; but method
+    // sig resolution is small enough to inline here once the
+    // namespace check is done).
+    let mut trait_table: HashMap<String, TraitId> = HashMap::new();
+    let mut resolved_traits: Vec<ResolvedTraitDecl> =
+        Vec::with_capacity(program.traits.len());
+    for (idx, td) in program.traits.iter().enumerate() {
+        if struct_table.contains_key(&td.name)
+            || class_table.contains_key(&td.name)
+            || trait_table.contains_key(&td.name)
+        {
+            return Err(ResolveError::RedefinedTrait {
+                name: td.name.clone(),
+                span: to_source_span(&td.name_span),
+            });
+        }
+        let id = TraitId(idx as u32);
+        trait_table.insert(td.name.clone(), id);
+        // Resolve method sigs inline. Each method's effect_row
+        // maps name → EffectId via effect_table (built above).
+        let mut method_names: HashSet<String> = HashSet::new();
+        let mut methods: Vec<ResolvedTraitMethodSig> =
+            Vec::with_capacity(td.methods.len());
+        for m in &td.methods {
+            if !method_names.insert(m.name.clone()) {
+                return Err(ResolveError::DuplicateTraitMethod {
+                    trait_name: td.name.clone(),
+                    method_name: m.name.clone(),
+                    span: to_source_span(&m.name_span),
+                });
+            }
+            let mut effect_row = Vec::with_capacity(m.effect_row.len());
+            for entry in &m.effect_row {
+                let eid = effect_table.get(&entry.kind).ok_or_else(|| {
+                    ResolveError::UndefinedEffect {
+                        name: entry.kind.clone(),
+                        fn_name: format!("{}::{}", td.name, m.name),
+                        span: to_source_span(&entry.span),
+                    }
+                })?;
+                effect_row.push(*eid);
+            }
+            let params: Vec<ResolvedTraitParam> = m
+                .params
+                .iter()
+                .map(|p| ResolvedTraitParam {
+                    mutable: p.mutable,
+                    name: p.name.clone(),
+                    span: p.span.clone(),
+                    ty: p.ty.clone(),
+                })
+                .collect();
+            methods.push(ResolvedTraitMethodSig {
+                name: m.name.clone(),
+                name_span: m.name_span.clone(),
+                self_kind: m.self_kind,
+                params,
+                return_type: m.return_type.clone(),
+                effect_row,
+                span: m.span.clone(),
+            });
+        }
+        resolved_traits.push(ResolvedTraitDecl {
+            id,
+            name: td.name.clone(),
+            name_span: td.name_span.clone(),
+            methods,
+            span: td.span.clone(),
+        });
+    }
+
+    // C4.2 / ADR 0023 D3/D4/D8 (Pass 0e): collect impl declarations
+    // + enforce scope-local coherence. Default impls keyed by
+    // (trait_id, target); named impls keyed by name. Bodies are
+    // resolved in Pass 4 below.
+    let mut impl_named_table: HashMap<String, ImplId> = HashMap::new();
+    let mut impl_default_table: HashMap<(TraitId, ImplTarget), ImplId> =
+        HashMap::new();
+    let mut impl_meta: Vec<(TraitId, ImplTarget)> =
+        Vec::with_capacity(program.impls.len());
+    for (idx, imp) in program.impls.iter().enumerate() {
+        let impl_id = ImplId(idx as u32);
+        let trait_id = *trait_table.get(&imp.trait_name).ok_or_else(|| {
+            ResolveError::UndefinedTraitForImpl {
+                name: imp.trait_name.clone(),
+                span: to_source_span(&imp.trait_name_span),
+            }
+        })?;
+        let target = if let Some(cid) = class_table.get(&imp.type_name) {
+            ImplTarget::Class(*cid)
+        } else if let Some(sid) = struct_table.get(&imp.type_name) {
+            ImplTarget::Struct(*sid)
+        } else {
+            return Err(ResolveError::UndefinedTypeForImpl {
+                name: imp.type_name.clone(),
+                span: to_source_span(&imp.type_name_span),
+            });
+        };
+        impl_meta.push((trait_id, target));
+        match &imp.name {
+            None => {
+                if impl_default_table.contains_key(&(trait_id, target)) {
+                    return Err(ResolveError::DuplicateDefaultImpl {
+                        trait_name: imp.trait_name.clone(),
+                        type_name: imp.type_name.clone(),
+                        span: to_source_span(&imp.span),
+                    });
+                }
+                impl_default_table.insert((trait_id, target), impl_id);
+            }
+            Some(name) => {
+                if impl_named_table.contains_key(name) {
+                    return Err(ResolveError::DuplicateImplName {
+                        impl_name: name.clone(),
+                        trait_name: imp.trait_name.clone(),
+                        type_name: imp.type_name.clone(),
+                        span: to_source_span(
+                            imp.name_span.as_ref().unwrap_or(&imp.span),
+                        ),
+                    });
+                }
+                impl_named_table.insert(name.clone(), impl_id);
+            }
+        }
+    }
+
+    // Side table: ImplId → its trait's method names in order.
+    // Used by `resolve_expr` to find the method_index for
+    // `ImplName::method(...)` qualified calls without re-walking
+    // the trait decl. Built from resolved_traits (above) +
+    // impl_meta (above).
+    let impl_to_trait_methods: HashMap<ImplId, (TraitId, Vec<String>)> =
+        impl_meta
+            .iter()
+            .enumerate()
+            .map(|(i, (tid, _))| {
+                let names: Vec<String> = resolved_traits[tid.0 as usize]
+                    .methods
+                    .iter()
+                    .map(|m| m.name.clone())
+                    .collect();
+                (ImplId(i as u32), (*tid, names))
+            })
+            .collect();
+
+    let impl_ctx = ImplCtx {
+        named: &impl_named_table,
+        to_trait_methods: &impl_to_trait_methods,
+    };
+
     // Pre-register the runtime builtins. The runtime (and codegen
     // for C1.5's generic builtins) supplies them; user code can't
     // redefine them (that path errors as RedefinedFunction below).
@@ -1121,6 +1462,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
             &class_table,
             &effect_table,
             &resolved_effects,
+            impl_ctx,
             &mut next_var_id,
         )?);
     }
@@ -1143,8 +1485,116 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
             &class_table,
             &effect_table,
             &resolved_effects,
+            impl_ctx,
             &mut next_var_id,
         )?);
+    }
+
+    // C4.2 / ADR 0023 D3 (Pass 4): resolve each impl block's
+    // method bodies. Mirrors Pass 3's per-method handling: bind a
+    // synthetic `self` VarId, bind params, resolve the body block.
+    let mut resolved_impls: Vec<ResolvedImplDecl> =
+        Vec::with_capacity(program.impls.len());
+    for (idx, imp) in program.impls.iter().enumerate() {
+        let impl_id = ImplId(idx as u32);
+        let (trait_id, target) = impl_meta[idx];
+        let mut method_names: HashSet<String> = HashSet::new();
+        let mut methods: Vec<ResolvedImplMethodDef> =
+            Vec::with_capacity(imp.methods.len());
+        for m in &imp.methods {
+            if !method_names.insert(m.name.clone()) {
+                // Two methods with the same name inside one impl
+                // block: reuse DuplicateClassMethod for parity. A
+                // dedicated DuplicateImplMethod variant could
+                // replace this in a future polish iteration.
+                return Err(ResolveError::DuplicateClassMethod {
+                    class_name: format!(
+                        "{}{} as {} for {}",
+                        imp.name.as_ref().map(|n| format!("{n} ")).unwrap_or_default(),
+                        "",
+                        imp.trait_name,
+                        imp.type_name,
+                    ),
+                    method_name: m.name.clone(),
+                    span: to_source_span(&m.name_span),
+                });
+            }
+            let mut vars: HashMap<String, VarId> = HashMap::new();
+            let self_var_id = VarId(next_var_id);
+            next_var_id += 1;
+            vars.insert("self".to_string(), self_var_id);
+
+            let mut m_params = Vec::with_capacity(m.params.len());
+            for p in &m.params {
+                if vars.contains_key(&p.name) {
+                    return Err(ResolveError::RedeclaredVariable {
+                        name: p.name.clone(),
+                        span: to_source_span(&p.span),
+                    });
+                }
+                let vid = VarId(next_var_id);
+                next_var_id += 1;
+                vars.insert(p.name.clone(), vid);
+                m_params.push(ResolvedParam {
+                    id: vid,
+                    mutable: p.mutable,
+                    name: p.name.clone(),
+                    span: p.span.clone(),
+                    ty: p.ty.clone(),
+                });
+            }
+            let mut method_effect_row = Vec::with_capacity(m.effect_row.len());
+            for entry in &m.effect_row {
+                let eid = effect_table.get(&entry.kind).ok_or_else(|| {
+                    ResolveError::UndefinedEffect {
+                        name: entry.kind.clone(),
+                        fn_name: format!(
+                            "impl {} for {} :: {}",
+                            imp.trait_name, imp.type_name, m.name
+                        ),
+                        span: to_source_span(&entry.span),
+                    }
+                })?;
+                method_effect_row.push(*eid);
+            }
+            let body = resolve_block(
+                &m.body,
+                &fn_table,
+                &signatures,
+                &struct_table,
+                &class_table,
+                &effect_table,
+                &resolved_effects,
+                impl_ctx,
+                &mut vars,
+                &mut next_var_id,
+            )?;
+            methods.push(ResolvedImplMethodDef {
+                visibility: m.visibility,
+                name: m.name.clone(),
+                name_span: m.name_span.clone(),
+                self_kind: m.self_kind,
+                self_var_id,
+                params: m_params,
+                return_type: m.return_type.clone(),
+                effect_row: method_effect_row,
+                body,
+                span: m.span.clone(),
+            });
+        }
+        resolved_impls.push(ResolvedImplDecl {
+            id: impl_id,
+            name: imp.name.clone(),
+            name_span: imp.name_span.clone(),
+            trait_id,
+            trait_name: imp.trait_name.clone(),
+            trait_name_span: imp.trait_name_span.clone(),
+            target,
+            type_name: imp.type_name.clone(),
+            type_name_span: imp.type_name_span.clone(),
+            methods,
+            span: imp.span.clone(),
+        });
     }
 
     Ok(ResolvedProgram {
@@ -1153,8 +1603,21 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         structs: resolved_structs,
         effects: resolved_effects,
         classes: resolved_classes,
+        traits: resolved_traits,
+        impls: resolved_impls,
         span: program.span.clone(),
     })
+}
+
+/// C4.2 / ADR 0023 D6: lookup tables for impl-name → impl + impl
+/// → (trait_id, method-names-in-order). Threaded through
+/// expression resolution so `ImplName::method(args)` qualified
+/// calls can be routed to the right impl + method index. Borrowed
+/// from the top-level `resolve()` state to avoid clone overhead.
+#[derive(Clone, Copy)]
+struct ImplCtx<'a> {
+    named: &'a HashMap<String, ImplId>,
+    to_trait_methods: &'a HashMap<ImplId, (TraitId, Vec<String>)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1166,6 +1629,7 @@ fn resolve_fn(
     class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
+    impls: ImplCtx<'_>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedFnDef, ResolveError> {
     let id = *fn_table
@@ -1219,6 +1683,7 @@ fn resolve_fn(
         class_table,
         effect_table,
         effects,
+        impls,
         &mut vars,
         next_var_id,
     )?;
@@ -1250,6 +1715,7 @@ fn resolve_class_decl(
     class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
+    impls: ImplCtx<'_>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedClassDecl, ResolveError> {
     // Field list: name uniqueness + type-expr carry-through.
@@ -1306,6 +1772,7 @@ fn resolve_class_decl(
             class_table,
             effect_table,
             effects,
+            impls,
             &mut vars,
             next_var_id,
         )?;
@@ -1378,6 +1845,7 @@ fn resolve_class_decl(
             class_table,
             effect_table,
             effects,
+            impls,
             &mut vars,
             next_var_id,
         )?;
@@ -1440,6 +1908,7 @@ fn resolve_block(
     class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
+    impls: ImplCtx<'_>,
     vars: &mut HashMap<String, VarId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedBlock, ResolveError> {
@@ -1453,6 +1922,7 @@ fn resolve_block(
             class_table,
             effect_table,
             effects,
+            impls,
             vars,
             next_var_id,
         )?);
@@ -1465,6 +1935,7 @@ fn resolve_block(
         class_table,
         effect_table,
         effects,
+        impls,
         vars,
         next_var_id,
     )?;
@@ -1484,6 +1955,7 @@ fn resolve_stmt(
     class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
+    impls: ImplCtx<'_>,
     vars: &mut HashMap<String, VarId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedStmt, ResolveError> {
@@ -1501,6 +1973,7 @@ fn resolve_stmt(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1531,6 +2004,7 @@ fn resolve_stmt(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1542,6 +2016,7 @@ fn resolve_stmt(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1555,6 +2030,7 @@ fn resolve_stmt(
             class_table,
             effect_table,
             effects,
+            impls,
             vars,
             next_var_id,
         )?),
@@ -1571,6 +2047,7 @@ fn resolve_expr(
     class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
+    impls: ImplCtx<'_>,
     vars: &mut HashMap<String, VarId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedExpr, ResolveError> {
@@ -1611,6 +2088,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?),
@@ -1624,6 +2102,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1635,6 +2114,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1649,6 +2129,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1660,6 +2141,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1674,6 +2156,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1685,6 +2168,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1698,6 +2182,7 @@ fn resolve_expr(
             class_table,
             effect_table,
             effects,
+            impls,
             vars,
             next_var_id,
         )?)),
@@ -1710,6 +2195,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1721,6 +2207,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1732,6 +2219,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1759,6 +2247,7 @@ fn resolve_expr(
                         class_table,
                         effect_table,
                         effects,
+                        impls,
                         vars,
                         next_var_id,
                     )?);
@@ -1795,6 +2284,7 @@ fn resolve_expr(
                         class_table,
                         effect_table,
                         effects,
+                        impls,
                         vars,
                         next_var_id,
                     )?);
@@ -1824,6 +2314,7 @@ fn resolve_expr(
                     class_table,
                     effect_table,
                     effects,
+                    impls,
                     vars,
                     next_var_id,
                 )?;
@@ -1850,6 +2341,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1870,6 +2362,7 @@ fn resolve_expr(
                     class_table,
                     effect_table,
                     effects,
+                    impls,
                     vars,
                     next_var_id,
                 )?);
@@ -1885,6 +2378,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1896,6 +2390,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1916,6 +2411,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1931,6 +2427,7 @@ fn resolve_expr(
             class_table,
             effect_table,
             effects,
+            impls,
             vars,
             next_var_id,
         )?,
@@ -1944,6 +2441,7 @@ fn resolve_expr(
             class_table,
             effect_table,
             effects,
+            impls,
             vars,
             next_var_id,
         )?,
@@ -1959,6 +2457,7 @@ fn resolve_expr(
                 class_table,
                 effect_table,
                 effects,
+                impls,
                 vars,
                 next_var_id,
             )?;
@@ -1972,6 +2471,7 @@ fn resolve_expr(
                     class_table,
                     effect_table,
                     effects,
+                    impls,
                     vars,
                     next_var_id,
                 )?);
@@ -2004,6 +2504,7 @@ fn resolve_expr(
                     class_table,
                     effect_table,
                     effects,
+                    impls,
                     vars,
                     next_var_id,
                 )?);
@@ -2015,12 +2516,63 @@ fn resolve_expr(
                 args: resolved_args,
             }
         }
-        ExprKind::QualifiedCall { .. } => {
-            // C4.2 (1/N) / ADR 0023 D8: parser ships the surface;
-            // resolve / types / codegen wiring lands at (2/N).
-            return Err(ResolveError::QualifiedCallNotYet {
-                span: to_source_span(&expr.span),
-            });
+        ExprKind::QualifiedCall {
+            impl_name,
+            impl_name_span,
+            method,
+            method_span,
+            args,
+        } => {
+            // C4.2 (2/N) / ADR 0023 D6 Path 2: route through the
+            // impl table. Find the named impl, then find the
+            // method's index on its trait's method list.
+            let impl_id = *impls.named.get(impl_name).ok_or_else(|| {
+                ResolveError::UndefinedImpl {
+                    name: impl_name.clone(),
+                    method: method.clone(),
+                    span: to_source_span(impl_name_span),
+                }
+            })?;
+            let (trait_id, method_names) = impls
+                .to_trait_methods
+                .get(&impl_id)
+                .expect("ImplId populated alongside trait method list");
+            let method_index = method_names
+                .iter()
+                .position(|n| n == method)
+                .ok_or_else(|| {
+                    let trait_name = format!("trait#{}", trait_id.0);
+                    ResolveError::UndefinedTraitMethod {
+                        impl_name: impl_name.clone(),
+                        trait_name,
+                        method_name: method.clone(),
+                        span: to_source_span(method_span),
+                    }
+                })?;
+            let mut resolved_args = Vec::with_capacity(args.len());
+            for a in args {
+                resolved_args.push(resolve_expr(
+                    a,
+                    fn_table,
+                    signatures,
+                    struct_table,
+                    class_table,
+                    effect_table,
+                    effects,
+                    impls,
+                    vars,
+                    next_var_id,
+                )?);
+            }
+            ResolvedExprKind::QualifiedCall {
+                impl_id,
+                method_index,
+                impl_name: impl_name.clone(),
+                impl_name_span: impl_name_span.clone(),
+                method: method.clone(),
+                method_span: method_span.clone(),
+                args: resolved_args,
+            }
         }
     };
     Ok(Spanned { kind, span: expr.span.clone() })
@@ -2041,6 +2593,7 @@ fn resolve_handle_expr(
     class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
+    impls: ImplCtx<'_>,
     vars: &mut HashMap<String, VarId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedExprKind, ResolveError> {
@@ -2052,6 +2605,7 @@ fn resolve_handle_expr(
         class_table,
         effect_table,
         effects,
+        impls,
         vars,
         next_var_id,
     )?;
@@ -2121,6 +2675,7 @@ fn resolve_handle_expr(
             class_table,
             effect_table,
             effects,
+            impls,
             vars,
             next_var_id,
         )?;
@@ -2154,6 +2709,7 @@ fn resolve_handle_expr(
             class_table,
             effect_table,
             effects,
+            impls,
             vars,
             next_var_id,
         )?;
@@ -2187,6 +2743,7 @@ fn resolve_perform_expr(
     class_table: &HashMap<String, ClassId>,
     effect_table: &HashMap<String, EffectId>,
     effects: &[ResolvedEffectDecl],
+    impls: ImplCtx<'_>,
     vars: &mut HashMap<String, VarId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedExprKind, ResolveError> {
@@ -2216,6 +2773,7 @@ fn resolve_perform_expr(
             class_table,
             effect_table,
             effects,
+            impls,
             vars,
             next_var_id,
         )?);
@@ -2383,21 +2941,67 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
             "`self` is only valid inside a class method or `init` body".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
-        ResolveError::QualifiedCallNotYet { span } => (
-            "sentinel::resolve::qualified_call_not_yet",
-            "`Name::method(args)` qualified call is not yet supported (lands at C4.2 (2/N))"
-                .to_string(),
+        ResolveError::RedefinedTrait { name, span } => (
+            "sentinel::resolve::redefined_trait",
+            format!("trait `{name}` is already declared"),
             span.offset()..(span.offset() + span.len()),
         ),
-        ResolveError::TraitDeclNotYet { name, span } => (
-            "sentinel::resolve::trait_decl_not_yet",
-            format!("trait `{name}` declaration is not yet supported (lands at C4.2 (2/N))"),
+        ResolveError::DuplicateTraitMethod {
+            trait_name,
+            method_name,
+            span,
+        } => (
+            "sentinel::resolve::duplicate_trait_method",
+            format!("trait `{trait_name}` declares method `{method_name}` twice"),
             span.offset()..(span.offset() + span.len()),
         ),
-        ResolveError::ImplDeclNotYet { trait_name, type_name, span } => (
-            "sentinel::resolve::impl_decl_not_yet",
+        ResolveError::UndefinedTraitForImpl { name, span } => (
+            "sentinel::resolve::undefined_trait_for_impl",
+            format!("undefined trait `{name}` in impl block"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::UndefinedTypeForImpl { name, span } => (
+            "sentinel::resolve::undefined_type_for_impl",
+            format!("undefined type `{name}` in impl block"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::DuplicateDefaultImpl {
+            trait_name,
+            type_name,
+            span,
+        } => (
+            "sentinel::resolve::duplicate_default_impl",
             format!(
-                "impl `... as {trait_name} for {type_name}` is not yet supported (lands at C4.2 (2/N))"
+                "duplicate default impl of `{trait_name}` for `{type_name}` in this scope"
+            ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::DuplicateImplName {
+            impl_name,
+            trait_name,
+            type_name,
+            span,
+        } => (
+            "sentinel::resolve::duplicate_impl_name",
+            format!(
+                "duplicate impl name `{impl_name}` for `{trait_name}` on `{type_name}`"
+            ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::UndefinedImpl { name, method, span } => (
+            "sentinel::resolve::undefined_impl",
+            format!("undefined impl `{name}` in `{name}::{method}(...)`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::UndefinedTraitMethod {
+            impl_name,
+            trait_name,
+            method_name,
+            span,
+        } => (
+            "sentinel::resolve::undefined_trait_method",
+            format!(
+                "trait `{trait_name}` (impl `{impl_name}`) has no method `{method_name}`"
             ),
             span.offset()..(span.offset() + span.len()),
         ),
@@ -2856,32 +3460,153 @@ mod tests {
         }
     }
 
-    // ----- C4.2 (1/N): trait + impl + qualified-call rejections -----
+    // ----- C4.2 (2/N): trait + impl + qualified-call positive +
+    //                    rejection paths -----
 
     #[test]
-    fn trait_decl_rejected_at_resolve() {
-        let err = resolve_err(
+    fn trait_decl_assigned_id() {
+        let p = resolve_ok(
             "trait Writer { fn write(self: &mut Self, d: i64) -> i64; }\nfn main() -> i64 { 0 }",
         );
-        assert!(matches!(err, ResolveError::TraitDeclNotYet { ref name, .. } if name == "Writer"));
+        assert_eq!(p.traits.len(), 1);
+        assert_eq!(p.traits[0].id, TraitId(0));
+        assert_eq!(p.traits[0].methods.len(), 1);
+        assert_eq!(p.traits[0].methods[0].name, "write");
     }
 
     #[test]
-    fn impl_decl_rejected_at_resolve() {
+    fn redefined_trait_errors() {
         let err = resolve_err(
-            "impl as Writer for File { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { 0 }",
+            "trait A {}\ntrait A {}\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, ResolveError::RedefinedTrait { ref name, .. } if name == "A"));
+    }
+
+    #[test]
+    fn trait_collides_with_class_namespace() {
+        let err = resolve_err(
+            "class Foo { let x: i64; init() { self.x = 0; 0 } }\ntrait Foo {}\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, ResolveError::RedefinedTrait { ref name, .. } if name == "Foo"));
+    }
+
+    #[test]
+    fn duplicate_trait_method_errors() {
+        let err = resolve_err(
+            "trait W { fn write(self: &mut Self, d: i64) -> i64; fn write(self: &mut Self, d: i64) -> i64; }\nfn main() -> i64 { 0 }",
         );
         assert!(matches!(
             err,
-            ResolveError::ImplDeclNotYet { ref trait_name, ref type_name, .. }
-                if trait_name == "Writer" && type_name == "File"
+            ResolveError::DuplicateTraitMethod { ref trait_name, ref method_name, .. }
+                if trait_name == "W" && method_name == "write"
         ));
     }
 
     #[test]
-    fn qualified_call_rejected_at_resolve() {
-        let err = resolve_err("fn main() -> i64 { Buffered::write(0, 1) }");
-        assert!(matches!(err, ResolveError::QualifiedCallNotYet { .. }));
+    fn default_impl_assigned_id() {
+        let p = resolve_ok(
+            "trait W { fn write(self: &mut Self, d: i64) -> i64; }\nclass F { let c: i64; init() { self.c = 0; 0 } }\nimpl as W for F { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.impls.len(), 1);
+        assert_eq!(p.impls[0].id, ImplId(0));
+        assert!(p.impls[0].name.is_none());
+        assert_eq!(p.impls[0].trait_id, TraitId(0));
+        assert!(matches!(p.impls[0].target, ImplTarget::Class(_)));
+        assert_eq!(p.impls[0].methods.len(), 1);
+        assert_eq!(p.impls[0].methods[0].name, "write");
+    }
+
+    #[test]
+    fn named_impl_assigned_id() {
+        let p = resolve_ok(
+            "trait W { fn write(self: &mut Self, d: i64) -> i64; }\nclass F { let c: i64; init() { self.c = 0; 0 } }\nimpl Doubling as W for F { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.impls[0].name.as_deref(), Some("Doubling"));
+    }
+
+    #[test]
+    fn undefined_trait_for_impl_errors() {
+        let err = resolve_err(
+            "class F { let c: i64; init() { self.c = 0; 0 } }\nimpl as Missing for F { fn x(self: &Self) -> i64 { 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::UndefinedTraitForImpl { ref name, .. } if name == "Missing"
+        ));
+    }
+
+    #[test]
+    fn undefined_type_for_impl_errors() {
+        let err = resolve_err(
+            "trait W { fn write(self: &mut Self, d: i64) -> i64; }\nimpl as W for Nope { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::UndefinedTypeForImpl { ref name, .. } if name == "Nope"
+        ));
+    }
+
+    #[test]
+    fn duplicate_default_impl_errors() {
+        let err = resolve_err(
+            "trait W { fn write(self: &mut Self, d: i64) -> i64; }\nclass F { let c: i64; init() { self.c = 0; 0 } }\nimpl as W for F { fn write(self: &mut Self, d: i64) -> i64 { d } }\nimpl as W for F { fn write(self: &mut Self, d: i64) -> i64 { d * 2 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::DuplicateDefaultImpl { ref trait_name, ref type_name, .. }
+                if trait_name == "W" && type_name == "F"
+        ));
+    }
+
+    #[test]
+    fn duplicate_impl_name_errors() {
+        let err = resolve_err(
+            "trait W { fn write(self: &mut Self, d: i64) -> i64; }\nclass F { let c: i64; init() { self.c = 0; 0 } }\nimpl Doubling as W for F { fn write(self: &mut Self, d: i64) -> i64 { d } }\nimpl Doubling as W for F { fn write(self: &mut Self, d: i64) -> i64 { d * 2 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::DuplicateImplName { ref impl_name, .. } if impl_name == "Doubling"
+        ));
+    }
+
+    #[test]
+    fn qualified_call_routes_through_impl() {
+        let p = resolve_ok(
+            "trait W { fn write(self: &mut Self, d: i64) -> i64; }\nclass F { let c: i64; init() { self.c = 0; 0 } }\nimpl Doubling as W for F { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { let mut s: F = F::init(); Doubling::write(&mut s, 16) }",
+        );
+        // The main body's tail should be a QualifiedCall referencing
+        // the Doubling impl (ImplId(0)) and method index 0 (write).
+        match &p.main().body.tail.kind {
+            ResolvedExprKind::QualifiedCall { impl_id, method_index, .. } => {
+                assert_eq!(*impl_id, ImplId(0));
+                assert_eq!(*method_index, 0);
+            }
+            other => panic!("expected QualifiedCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn undefined_impl_in_qualified_call_errors() {
+        let err = resolve_err(
+            "fn main() -> i64 { Nope::write(0) }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::UndefinedImpl { ref name, ref method, .. }
+                if name == "Nope" && method == "write"
+        ));
+    }
+
+    #[test]
+    fn undefined_trait_method_in_qualified_call_errors() {
+        let err = resolve_err(
+            "trait W { fn write(self: &mut Self, d: i64) -> i64; }\nclass F { let c: i64; init() { self.c = 0; 0 } }\nimpl Doubling as W for F { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { let mut s: F = F::init(); Doubling::missing(&mut s, 0) }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::UndefinedTraitMethod { ref impl_name, ref method_name, .. }
+                if impl_name == "Doubling" && method_name == "missing"
+        ));
     }
 
     // ----- C1.5: null literal + builtin registration -----

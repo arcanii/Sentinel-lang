@@ -1,0 +1,48 @@
+// C4.2 (2/N) / ADR 0023 D12: phase-go program. Trait Writer with
+// one method + class FileSink + default + named `Doubling` Writer
+// impls. main exercises both dispatch paths:
+//   - `s.write(10)` — receiver-typed dispatch via the default
+//     impl. FileSink has no class method `write`, so D6 step 1
+//     fails; step 2 finds the default impl of (Writer, FileSink)
+//     and routes through it.
+//   - `Doubling::write(&mut s, 16)` — qualified-named dispatch.
+//     Picks the named impl directly.
+//
+// Trace: s starts with count=0. s.write(10) sets count=10 and
+// returns 10 (a). Doubling::write(&mut s, 16) sets count = 10 +
+// 16*2 = 42 and returns 42 (b).
+//
+// Expected: exit code 42, no stdout.
+
+trait Writer {
+    fn write(self: &mut Self, data: i64) -> i64;
+}
+
+class FileSink {
+    let count: i64;
+    pub init() {
+        self.count = 0;
+        0
+    }
+}
+
+impl as Writer for FileSink {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        self.count = self.count + data;
+        self.count
+    }
+}
+
+impl Doubling as Writer for FileSink {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        self.count = self.count + data * 2;
+        self.count
+    }
+}
+
+fn main() -> i64 {
+    let mut s: FileSink = FileSink::init();
+    let a: i64 = s.write(10);
+    let b: i64 = Doubling::write(&mut s, 16);
+    b
+}

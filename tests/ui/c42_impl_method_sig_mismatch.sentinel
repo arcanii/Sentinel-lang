@@ -1,0 +1,26 @@
+// C4.2 (2/N) / ADR 0023 D8: an impl method whose signature
+// doesn't match the trait's (here the param type is `bool`
+// instead of the declared `i64`) surfaces
+// `ImplMethodSignatureMismatch` at type-check (Pass 3d).
+//
+// Expected: snc rejects with `sentinel::types::impl_method_signature_mismatch`.
+
+trait Writer {
+    fn write(self: &mut Self, data: i64) -> i64;
+}
+
+class FileSink {
+    let count: i64;
+    pub init() {
+        self.count = 0;
+        0
+    }
+}
+
+impl as Writer for FileSink {
+    fn write(self: &mut Self, data: bool) -> i64 {
+        self.count
+    }
+}
+
+fn main() -> i64 { 0 }

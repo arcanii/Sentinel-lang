@@ -1,0 +1,24 @@
+// C4.2 (2/N) / ADR 0023 D8: an impl block that omits a trait
+// method surfaces `ImplMissingMethod` at type-check (Pass 3d
+// completeness check). Default method bodies are deferred per
+// ADR 0023 D10, so every trait method must be supplied.
+//
+// Expected: snc rejects with `sentinel::types::impl_missing_method`.
+
+trait Writer {
+    fn write(self: &mut Self, data: i64) -> i64;
+}
+
+class FileSink {
+    let count: i64;
+    pub init() {
+        self.count = 0;
+        0
+    }
+}
+
+impl as Writer for FileSink {
+    // Missing `write` method.
+}
+
+fn main() -> i64 { 0 }

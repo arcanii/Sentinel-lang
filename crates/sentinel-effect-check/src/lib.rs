@@ -370,6 +370,22 @@ fn walk_expr(
                 walk_expr(a, effective, acc);
             }
         }
+        // C4.2 / ADR 0023 D5 Path 1: impl-method call (receiver-
+        // typed dispatch). Walk receiver + args; impl-method effect
+        // propagation is a follow-on like classes (D6).
+        TypedExprKind::ImplMethodCall { target, args, .. } => {
+            walk_expr(target, effective, acc);
+            for a in args {
+                walk_expr(a, effective, acc);
+            }
+        }
+        // C4.2 / ADR 0023 D5 Path 2: qualified-named call. args[0]
+        // is the receiver; args[1..] are the method args. Walk all.
+        TypedExprKind::QualifiedCall { args, .. } => {
+            for a in args {
+                walk_expr(a, effective, acc);
+            }
+        }
     }
 }
 

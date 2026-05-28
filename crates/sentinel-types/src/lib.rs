@@ -27,8 +27,9 @@ use salsa::Accumulator;
 use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, Spanned, TypeExpr, TypeExprKind, UnaryOp};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
-    ClassId, EffectId, FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef,
-    ResolvedProgram, ResolvedStmt, ResolvedStmtKind, StructId, TypeParamId, VarId,
+    ClassId, EffectId, FnId, ImplId, ImplTarget, ResolvedBlock, ResolvedExpr, ResolvedExprKind,
+    ResolvedFnDef, ResolvedProgram, ResolvedStmt, ResolvedStmtKind, StructId, TraitId,
+    TypeParamId, VarId,
 };
 use sentinel_ast::SelfKind;
 
@@ -112,6 +113,13 @@ pub enum Type {
     /// `TypedProgram.class_decls`. Stays `Copy` (a `ClassId` is
     /// just a `u32`).
     Class(ClassId),
+    /// C4.2 / ADR 0023 D7: the abstract implementing type `Self`
+    /// inside a trait method signature. Becomes concrete (either a
+    /// `Type::Class(_)` or `Type::Struct(_)`) at impl-signature
+    /// type-check via substitution against the impl's `for Type`
+    /// clause. Ninth interner-table-style variant; preserves
+    /// `Copy + Hash` (a `TraitId` is just a `u32`).
+    TraitSelf(TraitId),
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -385,7 +393,8 @@ impl Type {
             | Type::Nullable(_)
             | Type::Secret(_)
             | Type::Kont(_)
-            | Type::Class(_) => None,
+            | Type::Class(_)
+            | Type::TraitSelf(_) => None,
         }
     }
 
@@ -416,7 +425,8 @@ impl Type {
             | Type::Ref(_)
             | Type::Secret(_)
             | Type::Kont(_)
-            | Type::Class(_) => None,
+            | Type::Class(_)
+            | Type::TraitSelf(_) => None,
         }
     }
 
@@ -445,7 +455,12 @@ impl Type {
             // Classes (like structs) don't carry TypeParam payloads
             // at C4.1 (generic classes deferred per ADR 0022 D1);
             // substitution is the identity.
-            Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) | Type::Class(_) => self,
+            Type::I64
+            | Type::I32
+            | Type::Bool
+            | Type::Struct(_)
+            | Type::Class(_)
+            | Type::TraitSelf(_) => self,
             Type::TypeParam(id) => {
                 let idx = id.0 as usize;
                 debug_assert!(
@@ -688,6 +703,10 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             Some(c) => c.name.clone(),
             None => format!("<class#{}>", id.0),
         },
+        Type::TraitSelf(id) => match program.and_then(|p| p.trait_decls.get(id.0 as usize)) {
+            Some(t) => format!("Self ({})", t.name),
+            None => format!("<Self-trait#{}>", id.0),
+        },
     }
 }
 
@@ -706,6 +725,7 @@ impl std::fmt::Display for Type {
             Type::Secret(id) => write!(f, "<secret#{}>", id.0),
             Type::Kont(id) => write!(f, "<kont#{}>", id.0),
             Type::Class(id) => write!(f, "<class#{}>", id.0),
+            Type::TraitSelf(id) => write!(f, "<Self-trait#{}>", id.0),
         }
     }
 }
@@ -1006,6 +1026,17 @@ pub struct TypedProgram {
     /// types + init signature + method signatures. Each ClassId
     /// matches its index here.
     pub class_decls: Vec<ClassData>,
+    /// C4.2 / ADR 0023 D1: trait declarations with type-checked
+    /// method signatures. Each TraitId matches its index here.
+    /// Method sigs reference `Type::TraitSelf(self_trait_id)` for
+    /// `self`-typed positions; impl-sig type-check substitutes.
+    pub trait_decls: Vec<TraitData>,
+    /// C4.2 / ADR 0023 D3/D4: impl declarations with type-checked
+    /// method signatures + bodies. Each ImplId matches its index
+    /// here. The (trait_id, target, name) coherence is already
+    /// validated at resolve; types verifies completeness +
+    /// per-method signature match against the trait.
+    pub impl_decls: Vec<ImplData>,
     pub span: Span,
 }
 
@@ -1058,6 +1089,18 @@ impl TypedProgram {
     /// [`check`].
     pub fn class_decl(&self, id: ClassId) -> &ClassData {
         &self.class_decls[id.0 as usize]
+    }
+
+    /// Look up the [`TraitData`] for a trait per ADR 0023 D1
+    /// (C4.2). Panics on out-of-range.
+    pub fn trait_decl(&self, id: TraitId) -> &TraitData {
+        &self.trait_decls[id.0 as usize]
+    }
+
+    /// Look up the [`ImplData`] for an impl per ADR 0023 D3/D4
+    /// (C4.2). Panics on out-of-range.
+    pub fn impl_decl(&self, id: ImplId) -> &ImplData {
+        &self.impl_decls[id.0 as usize]
     }
 }
 
@@ -1333,6 +1376,38 @@ impl TypedExpr {
                 name_span: name_span.clone(),
                 args: args.iter().map(|a| a.substitute(subst, instances, refs)).collect(),
             },
+            // C4.2 / ADR 0023: impls aren't generic at C4.2 so
+            // substitution is just a deep-clone with same IDs.
+            TypedExprKind::ImplMethodCall {
+                target,
+                impl_id,
+                method_index,
+                method,
+                method_span,
+                args,
+            } => TypedExprKind::ImplMethodCall {
+                target: Box::new(target.substitute(subst, instances, refs)),
+                impl_id: *impl_id,
+                method_index: *method_index,
+                method: method.clone(),
+                method_span: method_span.clone(),
+                args: args.iter().map(|a| a.substitute(subst, instances, refs)).collect(),
+            },
+            TypedExprKind::QualifiedCall {
+                impl_id,
+                method_index,
+                impl_name,
+                method,
+                method_span,
+                args,
+            } => TypedExprKind::QualifiedCall {
+                impl_id: *impl_id,
+                method_index: *method_index,
+                impl_name: impl_name.clone(),
+                method: method.clone(),
+                method_span: method_span.clone(),
+                args: args.iter().map(|a| a.substitute(subst, instances, refs)).collect(),
+            },
         };
         TypedExpr {
             kind,
@@ -1446,6 +1521,82 @@ pub struct TypedMethodDef {
     pub params: Vec<TypedParam>,
     pub return_type: Type,
     /// Effect-row annotation as a sorted-dedup set of EffectIds.
+    pub effect_row: Vec<EffectId>,
+    pub body: TypedBlock,
+    pub span: Span,
+}
+
+/// C4.2 / ADR 0023 D1: a trait declaration after type-checking. The
+/// [`TraitId`] matches its index in [`TypedProgram::trait_decls`].
+/// Each method's params + return type have been resolved against the
+/// type-param-free top-level scope; positions referencing the
+/// implementing type use `Type::TraitSelf(self.id)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TraitData {
+    pub id: TraitId,
+    pub name: String,
+    pub name_span: Span,
+    pub methods: Vec<TypedTraitMethodSig>,
+    pub span: Span,
+}
+
+impl TraitData {
+    /// Find a method by name. Returns the index into `methods`.
+    pub fn method_index(&self, name: &str) -> Option<usize> {
+        self.methods.iter().position(|m| m.name == name)
+    }
+}
+
+/// C4.2 / ADR 0023 D2: a single type-checked method signature
+/// inside a trait. Mirrors [`TypedMethodDef`] minus the body.
+/// Param types and return type may reference `Type::TraitSelf(_)`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedTraitMethodSig {
+    pub name: String,
+    pub name_span: Span,
+    pub self_kind: SelfKind,
+    pub params: Vec<TypedParam>,
+    pub return_type: Type,
+    pub effect_row: Vec<EffectId>,
+    pub span: Span,
+}
+
+/// C4.2 / ADR 0023 D3/D4: an impl block after type-checking.
+/// Per-method signatures have been verified against the trait
+/// (completeness + signature equality with `Type::TraitSelf(_)`
+/// substituted to the impl's `for Type` clause).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ImplData {
+    pub id: ImplId,
+    /// `None` for the default impl; `Some(name)` for a named impl.
+    pub name: Option<String>,
+    pub trait_id: TraitId,
+    pub target: ImplTarget,
+    pub trait_name: String,
+    pub type_name: String,
+    pub methods: Vec<TypedImplMethodDef>,
+    pub span: Span,
+}
+
+impl ImplData {
+    /// Find a method by name. Returns the index into `methods`.
+    pub fn method_index(&self, name: &str) -> Option<usize> {
+        self.methods.iter().position(|m| m.name == name)
+    }
+}
+
+/// C4.2 / ADR 0023 D3: a type-checked impl method, structurally
+/// identical to [`TypedMethodDef`]. Stored separately so codegen
+/// can iterate impl methods distinctly from class methods.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedImplMethodDef {
+    pub visibility: sentinel_ast::Visibility,
+    pub name: String,
+    pub name_span: Span,
+    pub self_kind: SelfKind,
+    pub self_var_id: VarId,
+    pub params: Vec<TypedParam>,
+    pub return_type: Type,
     pub effect_row: Vec<EffectId>,
     pub body: TypedBlock,
     pub span: Span,
@@ -1723,6 +1874,32 @@ pub enum TypedExprKind {
         id: ClassId,
         name: String,
         name_span: Span,
+        args: Vec<TypedExpr>,
+    },
+    /// C4.2 / ADR 0023 D5 Path 1: receiver-typed dispatch — class
+    /// `s.write(10)` routed to a default-impl method when the
+    /// class itself has no such method. `impl_id` + `method_index`
+    /// pick out the impl method; `target` is the receiver lvalue
+    /// (codegen GEPs into its storage like a class MethodCall).
+    /// `args` excludes the receiver.
+    ImplMethodCall {
+        target: Box<TypedExpr>,
+        impl_id: ImplId,
+        method_index: usize,
+        method: String,
+        method_span: Span,
+        args: Vec<TypedExpr>,
+    },
+    /// C4.2 / ADR 0023 D5 Path 2: qualified-named dispatch —
+    /// `Doubling::write(&mut s, 16)`. `args[0]` is the receiver as
+    /// a ref-typed expression (not GEP'd); `args[1..]` are the
+    /// remaining declared params.
+    QualifiedCall {
+        impl_id: ImplId,
+        method_index: usize,
+        impl_name: String,
+        method: String,
+        method_span: Span,
         args: Vec<TypedExpr>,
     },
 }
@@ -2346,6 +2523,72 @@ pub enum TypeError {
         #[label("wrong number of method arguments")]
         span: miette::SourceSpan,
     },
+
+    /// C4.2 / ADR 0023 D8: an impl block omits a method declared on
+    /// its trait. Every trait method must be supplied (no default
+    /// bodies at C4.2 per D10).
+    #[error("impl of `{trait_name}` for `{type_name}` is missing method `{method_name}`")]
+    #[diagnostic(
+        code(sentinel::types::impl_missing_method),
+        help("supply a `fn {method_name}(...)` matching the trait signature; default method bodies are deferred per ADR 0023 D10")
+    )]
+    ImplMissingMethod {
+        trait_name: String,
+        type_name: String,
+        method_name: String,
+        #[label("impl block here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.2 / ADR 0023 D8: an impl method's signature doesn't match
+    /// the trait's after substituting `Self` → impl target.
+    #[error(
+        "impl method `{method_name}` for `{trait_name}` on `{type_name}` has a signature that doesn't match the trait"
+    )]
+    #[diagnostic(
+        code(sentinel::types::impl_method_signature_mismatch),
+        help("the impl method's params + return type (with `Self` substituted to `{type_name}`) must match the trait's signature exactly")
+    )]
+    ImplMethodSignatureMismatch {
+        trait_name: String,
+        type_name: String,
+        method_name: String,
+        #[label("signature mismatch here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.2 / ADR 0023 D6: a `obj.method(...)` call where the
+    /// receiver type has more than one default impl providing a
+    /// method by that name (across distinct traits).
+    #[error("ambiguous method call `{method_name}` on `{recv_ty}`")]
+    #[diagnostic(
+        code(sentinel::types::ambiguous_method_call),
+        help("multiple traits provide a default impl with method `{method_name}` on `{recv_ty}` — use the qualified form `ImplName::{method_name}(receiver, ...)` to disambiguate")
+    )]
+    AmbiguousMethodCall {
+        method_name: String,
+        recv_ty: String,
+        #[label("ambiguous method call here")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.2 / ADR 0023 D6: a `ImplName::method(receiver, ...)` call
+    /// where the receiver's type doesn't match the impl's `for
+    /// Type` clause (or a `&Type` / `&mut Type` ref to it).
+    #[error(
+        "impl `{impl_name}` (for `{type_name}`) doesn't apply to receiver type `{got_ty}`"
+    )]
+    #[diagnostic(
+        code(sentinel::types::impl_method_receiver_mismatch),
+        help("the first argument's type (after auto-deref) must match the impl's `for Type` clause")
+    )]
+    ImplMethodReceiverMismatch {
+        impl_name: String,
+        type_name: String,
+        got_ty: String,
+        #[label("receiver here")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -2775,6 +3018,186 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         });
     }
 
+    // C4.2 / ADR 0023 D8 Pass 3c: type-check trait method
+    // signatures. Each method's params + return type resolve
+    // against the standard (struct + class) lookup with `self`
+    // captured positionally per ADR 0022 A2. `Self` in general
+    // type position is deferred at C4.2 minimum (it carries
+    // through C4.1's amendment); only positional `self: &Self` /
+    // `self: &mut Self` via `self_kind` works.
+    let mut typed_trait_decls: Vec<TraitData> = Vec::with_capacity(program.traits.len());
+    for td in &program.traits {
+        let empty_tp_scope: TypeParamScope = HashMap::new();
+        let mut typed_methods: Vec<TypedTraitMethodSig> =
+            Vec::with_capacity(td.methods.len());
+        for m in &td.methods {
+            let mut params: Vec<TypedParam> = Vec::with_capacity(m.params.len());
+            for p in &m.params {
+                let ty = resolve_type_expr_with_scope(
+                    &p.ty,
+                    &struct_table,
+                    &class_table,
+                    &empty_tp_scope,
+                    &mut generic_instances,
+                    &mut refs,
+                    &mut secrets,
+                    &struct_type_param_counts,
+                )?;
+                // Trait method sigs have no VarIds for their
+                // params (no body). Use VarId(u32::MAX) as a
+                // sentinel — the typed AST exposes the param
+                // shape but doesn't bind anything env-wise.
+                params.push(TypedParam {
+                    id: VarId(u32::MAX),
+                    mutable: p.mutable,
+                    name: p.name.clone(),
+                    span: p.span.clone(),
+                    ty,
+                });
+            }
+            let return_type = resolve_type_expr_with_scope(
+                &m.return_type,
+                &struct_table,
+                &class_table,
+                &empty_tp_scope,
+                &mut generic_instances,
+                &mut refs,
+                &mut secrets,
+                &struct_type_param_counts,
+            )?;
+            let mut effect_row: Vec<EffectId> = m.effect_row.clone();
+            effect_row.sort_by_key(|e| e.0);
+            effect_row.dedup();
+            typed_methods.push(TypedTraitMethodSig {
+                name: m.name.clone(),
+                name_span: m.name_span.clone(),
+                self_kind: m.self_kind,
+                params,
+                return_type,
+                effect_row,
+                span: m.span.clone(),
+            });
+        }
+        typed_trait_decls.push(TraitData {
+            id: td.id,
+            name: td.name.clone(),
+            name_span: td.name_span.clone(),
+            methods: typed_methods,
+            span: td.span.clone(),
+        });
+    }
+
+    // C4.2 / ADR 0023 D8 Pass 3d: type-check impl signatures +
+    // verify completeness + signature match against the trait.
+    // Bodies use stub blocks for now; Pass 6 below overwrites
+    // them. The signature-match check is conservative: param
+    // count, per-param type equality, return type, effect-row,
+    // self_kind. `Self` in trait sigs collapses to the impl
+    // target's concrete type — at C4.2 minimum the sigs don't
+    // reference TraitSelf in params/returns (only positional via
+    // `self_kind`), so the check is direct equality.
+    let mut typed_impl_decls: Vec<ImplData> = Vec::with_capacity(program.impls.len());
+    for imp in &program.impls {
+        let empty_tp_scope: TypeParamScope = HashMap::new();
+        let trait_data = &typed_trait_decls[imp.trait_id.0 as usize];
+        let mut sigs_by_name: HashMap<String, TypedImplMethodDef> = HashMap::new();
+        for m in &imp.methods {
+            let mut params: Vec<TypedParam> = Vec::with_capacity(m.params.len());
+            for p in &m.params {
+                let ty = resolve_type_expr_with_scope(
+                    &p.ty,
+                    &struct_table,
+                    &class_table,
+                    &empty_tp_scope,
+                    &mut generic_instances,
+                    &mut refs,
+                    &mut secrets,
+                    &struct_type_param_counts,
+                )?;
+                params.push(TypedParam {
+                    id: p.id,
+                    mutable: p.mutable,
+                    name: p.name.clone(),
+                    span: p.span.clone(),
+                    ty,
+                });
+            }
+            let return_type = resolve_type_expr_with_scope(
+                &m.return_type,
+                &struct_table,
+                &class_table,
+                &empty_tp_scope,
+                &mut generic_instances,
+                &mut refs,
+                &mut secrets,
+                &struct_type_param_counts,
+            )?;
+            let mut effect_row: Vec<EffectId> = m.effect_row.clone();
+            effect_row.sort_by_key(|e| e.0);
+            effect_row.dedup();
+            sigs_by_name.insert(
+                m.name.clone(),
+                TypedImplMethodDef {
+                    visibility: m.visibility,
+                    name: m.name.clone(),
+                    name_span: m.name_span.clone(),
+                    self_kind: m.self_kind,
+                    self_var_id: m.self_var_id,
+                    params,
+                    return_type,
+                    effect_row,
+                    body: stub_block(m.body.span.clone()),
+                    span: m.span.clone(),
+                },
+            );
+        }
+        // Completeness: every trait method must be supplied.
+        for tm in &trait_data.methods {
+            if !sigs_by_name.contains_key(&tm.name) {
+                return Err(TypeError::ImplMissingMethod {
+                    trait_name: imp.trait_name.clone(),
+                    type_name: imp.type_name.clone(),
+                    method_name: tm.name.clone(),
+                    span: to_source_span(&imp.span),
+                });
+            }
+        }
+        // Per-method signature match (D8).
+        let mut ordered_methods: Vec<TypedImplMethodDef> =
+            Vec::with_capacity(trait_data.methods.len());
+        for tm in &trait_data.methods {
+            let im = sigs_by_name.remove(&tm.name).expect("checked above");
+            if im.self_kind != tm.self_kind
+                || im.params.len() != tm.params.len()
+                || im.return_type != tm.return_type
+                || im.effect_row != tm.effect_row
+                || im
+                    .params
+                    .iter()
+                    .zip(tm.params.iter())
+                    .any(|(a, b)| a.ty != b.ty)
+            {
+                return Err(TypeError::ImplMethodSignatureMismatch {
+                    trait_name: imp.trait_name.clone(),
+                    type_name: imp.type_name.clone(),
+                    method_name: tm.name.clone(),
+                    span: to_source_span(&im.name_span),
+                });
+            }
+            ordered_methods.push(im);
+        }
+        typed_impl_decls.push(ImplData {
+            id: imp.id,
+            name: imp.name.clone(),
+            trait_id: imp.trait_id,
+            target: imp.target,
+            trait_name: imp.trait_name.clone(),
+            type_name: imp.type_name.clone(),
+            methods: ordered_methods,
+            span: imp.span.clone(),
+        });
+    }
+
     // Pass 4: type-check each fn body. Any `Pair<i64, bool>` /
     // similar new instances that show up here (e.g., from let
     // annotations or generic call sites) are interned into
@@ -2797,6 +3220,8 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             &mut secrets,
             &struct_type_param_counts,
             &typed_effect_decls,
+            &typed_trait_decls,
+            &typed_impl_decls,
             &mut konts,
         )?);
     }
@@ -2837,6 +3262,8 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &mut secrets,
                 &struct_type_param_counts,
                 &typed_effect_decls,
+                &typed_trait_decls,
+                &typed_impl_decls,
                 &mut konts,
             )?;
             // C4.1 / ADR 0022 D4: definite-assignment (minimal at
@@ -2910,6 +3337,8 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &mut secrets,
                 &struct_type_param_counts,
                 &typed_effect_decls,
+                &typed_trait_decls,
+                &typed_impl_decls,
                 &mut konts,
             )?;
             if body.ty != return_type {
@@ -2937,6 +3366,76 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         typed_class_decls[idx].methods = methods;
     }
 
+    // C4.2 / ADR 0023 D8 Pass 6: type-check each impl method body.
+    // Mirrors Pass 5's class-method handling — bind synthetic self
+    // + params, check the body against the declared return type.
+    for imp in &program.impls {
+        let idx = imp.id.0 as usize;
+        let target_ty = match imp.target {
+            ImplTarget::Class(cid) => Type::Class(cid),
+            ImplTarget::Struct(sid) => Type::Struct(sid),
+        };
+        let mut new_methods = Vec::with_capacity(imp.methods.len());
+        for (m_idx, m) in imp.methods.iter().enumerate() {
+            let sig = &typed_impl_decls[idx].methods[m_idx];
+            let mut env: VarTypeEnv = VarTypeEnv::new();
+            let mutable = matches!(m.self_kind, SelfKind::Exclusive);
+            // Self binding: bound directly to the impl target's
+            // type, with mutable bit reflecting `self_kind`.
+            env.insert(m.self_var_id, (target_ty, mutable));
+            for tp in &sig.params {
+                env.insert(tp.id, (tp.ty, tp.mutable));
+            }
+            let return_type = sig.return_type;
+            let body_expected =
+                if return_type.is_nullable() || return_type.is_generic_instance() {
+                    Some(return_type)
+                } else {
+                    None
+                };
+            let body = check_block(
+                &m.body,
+                body_expected,
+                &mut env,
+                &typed_signatures,
+                &typed_structs,
+                &typed_class_decls,
+                &mut generic_instances,
+                &mut refs,
+                &mut secrets,
+                &struct_type_param_counts,
+                &typed_effect_decls,
+                &typed_trait_decls,
+                &typed_impl_decls,
+                &mut konts,
+            )?;
+            if body.ty != return_type {
+                return Err(TypeError::ReturnTypeMismatch {
+                    name: format!(
+                        "impl {} for {} :: {}",
+                        imp.trait_name, imp.type_name, m.name
+                    ),
+                    expected: return_type,
+                    got: body.ty,
+                    span: to_source_span(&m.body.tail.span),
+                });
+            }
+            new_methods.push(TypedImplMethodDef {
+                visibility: sig.visibility,
+                name: sig.name.clone(),
+                name_span: sig.name_span.clone(),
+                self_kind: sig.self_kind,
+                self_var_id: sig.self_var_id,
+                params: sig.params.clone(),
+                return_type,
+                effect_row: sig.effect_row.clone(),
+                body,
+                span: sig.span.clone(),
+            });
+        }
+        typed_impl_decls[idx].methods = new_methods;
+    }
+
     Ok(TypedProgram {
         fns: typed_fns,
         fn_signatures: typed_signatures,
@@ -2947,6 +3446,8 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_decls: typed_effect_decls,
         konts,
         class_decls: typed_class_decls,
+        trait_decls: typed_trait_decls,
+        impl_decls: typed_impl_decls,
         span: program.span.clone(),
     })
 }
@@ -3134,6 +3635,8 @@ fn check_fn(
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
 ) -> Result<TypedFnDef, TypeError> {
     // Pull our own signature.
@@ -3187,6 +3690,8 @@ fn check_fn(
         secrets,
         struct_type_param_counts,
         effect_decls,
+        trait_decls,
+        impl_decls,
         konts,
     )?;
 
@@ -3260,6 +3765,8 @@ fn check_block(
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
 ) -> Result<TypedBlock, TypeError> {
     let mut stmts = Vec::with_capacity(block.stmts.len());
@@ -3275,6 +3782,8 @@ fn check_block(
             secrets,
             struct_type_param_counts,
             effect_decls,
+            trait_decls,
+            impl_decls,
             konts,
         )?);
     }
@@ -3292,6 +3801,8 @@ fn check_block(
         secrets,
         struct_type_param_counts,
         effect_decls,
+        trait_decls,
+        impl_decls,
         konts,
     )?;
     let ty = tail.ty;
@@ -3315,6 +3826,8 @@ fn check_stmt(
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
 ) -> Result<TypedStmt, TypeError> {
     let kind = match &stmt.kind {
@@ -3350,6 +3863,8 @@ fn check_stmt(
                 secrets,
                 struct_type_param_counts,
                 effect_decls,
+                trait_decls,
+                impl_decls,
                 konts,
             )?;
             let ty = match (ty_annot, expected) {
@@ -3395,6 +3910,8 @@ fn check_stmt(
                 secrets,
                 struct_type_param_counts,
                 effect_decls,
+                trait_decls,
+                impl_decls,
                 konts,
             )?;
             let value_typed = check_expr(
@@ -3409,6 +3926,8 @@ fn check_stmt(
                 secrets,
                 struct_type_param_counts,
                 effect_decls,
+                trait_decls,
+                impl_decls,
                 konts,
             )?;
             if value_typed.ty != target_typed.ty {
@@ -3436,6 +3955,8 @@ fn check_stmt(
             secrets,
             struct_type_param_counts,
             effect_decls,
+            trait_decls,
+            impl_decls,
             konts,
         )?),
     };
@@ -3663,7 +4184,12 @@ fn try_substitute(
     refs: &[RefData],
 ) -> Option<Type> {
     match ty {
-        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) | Type::Class(_) => Some(ty),
+        Type::I64
+        | Type::I32
+        | Type::Bool
+        | Type::Struct(_)
+        | Type::Class(_)
+        | Type::TraitSelf(_) => Some(ty),
         Type::TypeParam(id) => subst.get(id.0 as usize).copied().flatten(),
         Type::Nullable(ni) => {
             let inner = try_substitute(ni.to_type(), subst, instances, refs)?;
@@ -3712,7 +4238,12 @@ fn contains_type_param(
         Type::TypeParam(_) => true,
         Type::Nullable(ni) => contains_type_param(ni.to_type(), instances, refs),
         Type::Array(ae) => contains_type_param(ae.to_type(), instances, refs),
-        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) | Type::Class(_) => false,
+        Type::I64
+        | Type::I32
+        | Type::Bool
+        | Type::Struct(_)
+        | Type::Class(_)
+        | Type::TraitSelf(_) => false,
         Type::GenericInstance(id) => instances[id.0 as usize]
             .args
             .iter()
@@ -3846,6 +4377,8 @@ fn check_call(
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
     call_span: &Span,
 ) -> Result<(TypedExprKind, Type), TypeError> {
@@ -3919,6 +4452,8 @@ fn check_call(
                 secrets,
                 struct_type_param_counts,
                 effect_decls,
+                trait_decls,
+                impl_decls,
                 konts,
             )?;
             // Validate the arg's type against the param (possibly
@@ -4030,6 +4565,8 @@ fn check_expr(
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
 ) -> Result<TypedExpr, TypeError> {
     // C1.5 / ADR 0014 D2: NullLit has no synthesis type — it MUST
@@ -4087,6 +4624,8 @@ fn check_expr(
                         secrets,
                         struct_type_param_counts,
                         effect_decls,
+                        trait_decls,
+                        impl_decls,
                         konts,
                     )?;
                     // Operand must be an lvalue.
@@ -4128,6 +4667,8 @@ fn check_expr(
                         secrets,
                         struct_type_param_counts,
                         effect_decls,
+                        trait_decls,
+                        impl_decls,
                         konts,
                     )?;
                     let inner_ty = match inner_t.ty {
@@ -4172,6 +4713,8 @@ fn check_expr(
                         secrets,
                         struct_type_param_counts,
                         effect_decls,
+                        trait_decls,
+                        impl_decls,
                         konts,
                     )?;
                     // C3 / ADR 0019 D5 (C3.1b): unary preserves
@@ -4215,8 +4758,8 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
             // C3 / ADR 0019 D5 + D7 (C3.1b): operator-secret-
             // preserving. Strip one layer of `secret` from both
             // sides, run the usual int-type check on the inners,
@@ -4285,10 +4828,10 @@ fn check_expr(
                 // The non-null side determines the expected ?T type.
                 // First, synthesize the non-null side.
                 let (non_null_side, non_null_expr, null_span) = if lhs_is_null {
-                    let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+                    let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
                     (r.ty, r, lhs.span.clone())
                 } else {
-                    let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+                    let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
                     (l.ty, l, rhs.span.clone())
                 };
                 // Non-null side must be Nullable for null-comparison.
@@ -4315,8 +4858,8 @@ fn check_expr(
                     ty: Type::Bool,
                 });
             }
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for comparisons. `secret T == secret T -> secret bool`
             // per Phase B ADR 0008 D4. Strip wrappers to check
@@ -4356,8 +4899,8 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Logic(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for logicals. Both operands must be the same bool-
             // shape (`bool` or `secret bool`); result preserves
@@ -4400,12 +4943,12 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Block(b) => {
-            let typed_block = check_block(b, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let typed_block = check_block(b, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
             let ty = typed_block.ty;
             (TypedExprKind::Block(Box::new(typed_block)), ty)
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
-            let cond_t = check_expr(cond, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let cond_t = check_expr(cond, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
             // C3 / ADR 0019 D7 (C3.1) — SecretBranch: an
             // `if` condition with type `secret bool` would
             // leak via timing. Reject before the generic
@@ -4427,8 +4970,8 @@ fn check_expr(
             }
             // ADR 0014 D5: push the expected type down into both
             // branches so `null` in either branch can resolve.
-            let then_t = check_block(then_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
-            let else_t = check_block(else_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let then_t = check_block(then_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let else_t = check_block(else_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
             if then_t.ty != else_t.ty {
                 return Err(TypeError::Mismatch {
                     expected: then_t.ty,
@@ -4460,6 +5003,8 @@ fn check_expr(
             secrets,
             struct_type_param_counts,
             effect_decls,
+            trait_decls,
+            impl_decls,
             konts,
             &expr.span,
         )?,
@@ -4536,6 +5081,8 @@ fn check_expr(
                     secrets,
                     struct_type_param_counts,
                     effect_decls,
+                    trait_decls,
+                    impl_decls,
                     konts,
                 )?;
                 if value_t.ty != expected_field_ty {
@@ -4621,7 +5168,7 @@ fn check_expr(
                 // Type-check elements. First element synthesizes T
                 // if no expected; subsequent elements get T as
                 // expected (so widening / null work inside `[T]`).
-                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
                 let elem_ty = first.ty;
                 let mut typed = Vec::with_capacity(elems.len());
                 typed.push(first);
@@ -4638,6 +5185,8 @@ fn check_expr(
                         secrets,
                         struct_type_param_counts,
                         effect_decls,
+                        trait_decls,
+                        impl_decls,
                         konts,
                     )?;
                     if t.ty != elem_ty {
@@ -4664,7 +5213,7 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Index { target, index } => {
-            let target_t = check_expr(target, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let target_t = check_expr(target, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
             let elem_ty = match target_t.ty {
                 Type::Array(ae) => ae,
                 other => {
@@ -4677,7 +5226,7 @@ fn check_expr(
             // Synthesize the index without pushdown so a non-int
             // index surfaces as the more-specific `IndexNotInt`
             // rather than a generic `Mismatch`.
-            let index_t = check_expr(index, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, konts)?;
+            let index_t = check_expr(index, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
             if index_t.ty != Type::I64 {
                 return Err(TypeError::IndexNotInt {
                     got: index_t.ty,
@@ -4706,6 +5255,8 @@ fn check_expr(
                 secrets,
                 struct_type_param_counts,
                 effect_decls,
+                trait_decls,
+                impl_decls,
                 konts,
             )?;
             // C1.7.4b / ADR 0016 D6: field access on a generic
@@ -4804,6 +5355,8 @@ fn check_expr(
                 secrets,
                 struct_type_param_counts,
                 effect_decls,
+                trait_decls,
+                impl_decls,
                 konts,
             )?;
             let (stripped, _was_secret) = inner_t.ty.strip_secret(secrets);
@@ -4826,6 +5379,8 @@ fn check_expr(
             secrets,
             struct_type_param_counts,
             effect_decls,
+            trait_decls,
+            impl_decls,
             konts,
             &expr.span,
         )?,
@@ -4853,6 +5408,8 @@ fn check_expr(
             secrets,
             struct_type_param_counts,
             effect_decls,
+            trait_decls,
+            impl_decls,
             konts,
         )?,
         ResolvedExprKind::ResumeKont { kont, callee_span, args } => check_resume_kont_expr(
@@ -4868,6 +5425,8 @@ fn check_expr(
             secrets,
             struct_type_param_counts,
             effect_decls,
+            trait_decls,
+            impl_decls,
             konts,
         )?,
         ResolvedExprKind::MethodCall { target, method, method_span, args } => {
@@ -4885,6 +5444,8 @@ fn check_expr(
                 secrets,
                 struct_type_param_counts,
                 effect_decls,
+                trait_decls,
+                impl_decls,
                 konts,
             )?
         }
@@ -4903,9 +5464,39 @@ fn check_expr(
                 secrets,
                 struct_type_param_counts,
                 effect_decls,
+                trait_decls,
+                impl_decls,
                 konts,
             )?
         }
+        ResolvedExprKind::QualifiedCall {
+            impl_id,
+            method_index,
+            impl_name,
+            method,
+            method_span,
+            args,
+            ..
+        } => check_qualified_call_expr(
+            *impl_id,
+            *method_index,
+            impl_name,
+            method,
+            method_span,
+            args,
+            env,
+            signatures,
+            structs,
+            class_decls,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            trait_decls,
+            impl_decls,
+            konts,
+        )?,
     };
     let synth = TypedExpr { kind, span: expr.span.clone(), ty };
     // ADR 0014 D3: apply T→?T widening if the expected type is ?T and
@@ -4938,6 +5529,8 @@ fn check_handle_expr(
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
     _handle_span: &Span,
 ) -> Result<(TypedExprKind, Type), TypeError> {
@@ -4958,6 +5551,8 @@ fn check_handle_expr(
         secrets,
         struct_type_param_counts,
         effect_decls,
+        trait_decls,
+        impl_decls,
         konts,
     )?;
     let body_ty = body_typed.ty;
@@ -4981,6 +5576,8 @@ fn check_handle_expr(
             secrets,
             struct_type_param_counts,
             effect_decls,
+            trait_decls,
+            impl_decls,
             konts,
         )?;
         let ra_ty = ra_body_typed.ty;
@@ -5062,6 +5659,8 @@ fn check_handle_expr(
             secrets,
             struct_type_param_counts,
             effect_decls,
+            trait_decls,
+            impl_decls,
             konts,
         )?;
 
@@ -5133,6 +5732,8 @@ fn check_perform_expr(
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let op = &effect_decls[effect_id.0 as usize].ops[op_index];
@@ -5160,6 +5761,8 @@ fn check_perform_expr(
             secrets,
             struct_type_param_counts,
             effect_decls,
+            trait_decls,
+            impl_decls,
             konts,
         )?;
         if typed.ty != op.params[i].ty {
@@ -5203,6 +5806,8 @@ fn check_resume_kont_expr(
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let (kont_ty, _) = env
@@ -5250,6 +5855,8 @@ fn check_resume_kont_expr(
         secrets,
         struct_type_param_counts,
         effect_decls,
+        trait_decls,
+        impl_decls,
         konts,
     )?;
     if typed_arg.ty != arg_ty {
@@ -5292,6 +5899,8 @@ fn check_method_call_expr(
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let target_typed = check_expr(
@@ -5306,21 +5915,15 @@ fn check_method_call_expr(
         secrets,
         struct_type_param_counts,
         effect_decls,
+        trait_decls,
+        impl_decls,
         konts,
     )?;
-    // Resolve the receiver's underlying class. Auto-deref handles
-    // `&Class` and `&mut Class`.
-    let class_id = match target_typed.ty {
-        Type::Class(id) => id,
-        Type::Ref(rid) => match refs[rid.0 as usize].inner {
-            Type::Class(id) => id,
-            _ => {
-                return Err(TypeError::MethodCallOnNonClass {
-                    got_ty: type_display(target_typed.ty, None),
-                    span: to_source_span(method_span),
-                });
-            }
-        },
+    // Auto-deref `&T` / `&mut T` to find the underlying nominal
+    // type for method lookup (D6 step 1 + step 2).
+    let recv_concrete = match target_typed.ty {
+        Type::Class(_) | Type::Struct(_) => target_typed.ty,
+        Type::Ref(rid) => refs[rid.0 as usize].inner,
         _ => {
             return Err(TypeError::MethodCallOnNonClass {
                 got_ty: type_display(target_typed.ty, None),
@@ -5328,59 +5931,151 @@ fn check_method_call_expr(
             });
         }
     };
-    let class = &class_decls[class_id.0 as usize];
-    let method_index = class.method_index(method).ok_or_else(|| TypeError::MethodNotFound {
-        class_name: class.name.clone(),
-        method_name: method.to_string(),
-        span: to_source_span(method_span),
-    })?;
-    let m = &class.methods[method_index];
-    if args.len() != m.params.len() {
-        return Err(TypeError::MethodArityMismatch {
-            class_name: class.name.clone(),
-            method_name: method.to_string(),
-            expected: m.params.len(),
-            got: args.len(),
-            span: to_source_span(method_span),
-        });
-    }
-    let mut typed_args = Vec::with_capacity(args.len());
-    for (arg, param) in args.iter().zip(m.params.iter()) {
-        let arg_typed = check_expr(
-            arg,
-            Some(param.ty),
-            env,
-            signatures,
-            structs,
-            class_decls,
-            instances,
-            refs,
-            secrets,
-            struct_type_param_counts,
-            effect_decls,
-            konts,
-        )?;
-        if arg_typed.ty != param.ty {
-            return Err(TypeError::Mismatch {
-                expected: param.ty,
-                got: arg_typed.ty,
-                span: to_source_span(&arg.span),
+    let impl_target = match recv_concrete {
+        Type::Class(cid) => ImplTarget::Class(cid),
+        Type::Struct(sid) => ImplTarget::Struct(sid),
+        _ => {
+            return Err(TypeError::MethodCallOnNonClass {
+                got_ty: type_display(target_typed.ty, None),
+                span: to_source_span(method_span),
             });
         }
-        typed_args.push(arg_typed);
+    };
+
+    // D6 step 1: class-method lookup (when receiver is a class).
+    if let Type::Class(class_id) = recv_concrete {
+        let class = &class_decls[class_id.0 as usize];
+        if let Some(method_index) = class.method_index(method) {
+            let m = &class.methods[method_index];
+            if args.len() != m.params.len() {
+                return Err(TypeError::MethodArityMismatch {
+                    class_name: class.name.clone(),
+                    method_name: method.to_string(),
+                    expected: m.params.len(),
+                    got: args.len(),
+                    span: to_source_span(method_span),
+                });
+            }
+            let mut typed_args = Vec::with_capacity(args.len());
+            for (arg, param) in args.iter().zip(m.params.iter()) {
+                let arg_typed = check_expr(
+                    arg,
+                    Some(param.ty),
+                    env,
+                    signatures,
+                    structs,
+                    class_decls,
+                    instances,
+                    refs,
+                    secrets,
+                    struct_type_param_counts,
+                    effect_decls,
+                    trait_decls,
+                    impl_decls,
+                    konts,
+                )?;
+                if arg_typed.ty != param.ty {
+                    return Err(TypeError::Mismatch {
+                        expected: param.ty,
+                        got: arg_typed.ty,
+                        span: to_source_span(&arg.span),
+                    });
+                }
+                typed_args.push(arg_typed);
+            }
+            let return_type = m.return_type;
+            return Ok((
+                TypedExprKind::MethodCall {
+                    target: Box::new(target_typed),
+                    class_id,
+                    method_index,
+                    method: method.to_string(),
+                    method_span: method_span.clone(),
+                    args: typed_args,
+                },
+                return_type,
+            ));
+        }
     }
-    let return_type = m.return_type;
-    Ok((
-        TypedExprKind::MethodCall {
-            target: Box::new(target_typed),
-            class_id,
-            method_index,
-            method: method.to_string(),
-            method_span: method_span.clone(),
-            args: typed_args,
-        },
-        return_type,
-    ))
+
+    // D6 step 2: default-impl lookup. Find every default impl
+    // whose `for Type` matches the receiver's nominal type AND
+    // whose trait declares a method named `method`. Exactly one
+    // match → ImplMethodCall. >1 → AmbiguousMethodCall. 0 →
+    // MethodNotFound.
+    let matches: Vec<(ImplId, usize)> = impl_decls
+        .iter()
+        .filter(|imp| imp.name.is_none() && imp.target == impl_target)
+        .filter_map(|imp| {
+            imp.method_index(method).map(|idx| (imp.id, idx))
+        })
+        .collect();
+    let recv_ty_disp = type_display(recv_concrete, None);
+    match matches.len() {
+        0 => Err(TypeError::MethodNotFound {
+            class_name: recv_ty_disp,
+            method_name: method.to_string(),
+            span: to_source_span(method_span),
+        }),
+        n if n > 1 => Err(TypeError::AmbiguousMethodCall {
+            method_name: method.to_string(),
+            recv_ty: recv_ty_disp,
+            span: to_source_span(method_span),
+        }),
+        _ => {
+            let (impl_id, method_index) = matches[0];
+            let imp = &impl_decls[impl_id.0 as usize];
+            let m = &imp.methods[method_index];
+            if args.len() != m.params.len() {
+                return Err(TypeError::MethodArityMismatch {
+                    class_name: imp.type_name.clone(),
+                    method_name: method.to_string(),
+                    expected: m.params.len(),
+                    got: args.len(),
+                    span: to_source_span(method_span),
+                });
+            }
+            let mut typed_args = Vec::with_capacity(args.len());
+            for (arg, param) in args.iter().zip(m.params.iter()) {
+                let arg_typed = check_expr(
+                    arg,
+                    Some(param.ty),
+                    env,
+                    signatures,
+                    structs,
+                    class_decls,
+                    instances,
+                    refs,
+                    secrets,
+                    struct_type_param_counts,
+                    effect_decls,
+                    trait_decls,
+                    impl_decls,
+                    konts,
+                )?;
+                if arg_typed.ty != param.ty {
+                    return Err(TypeError::Mismatch {
+                        expected: param.ty,
+                        got: arg_typed.ty,
+                        span: to_source_span(&arg.span),
+                    });
+                }
+                typed_args.push(arg_typed);
+            }
+            let return_type = m.return_type;
+            Ok((
+                TypedExprKind::ImplMethodCall {
+                    target: Box::new(target_typed),
+                    impl_id,
+                    method_index,
+                    method: method.to_string(),
+                    method_span: method_span.clone(),
+                    args: typed_args,
+                },
+                return_type,
+            ))
+        }
+    }
 }
 
 /// C4.1 / ADR 0022 D5: type-check `Name::init(args)`. The class's
@@ -5401,6 +6096,8 @@ fn check_class_init_expr(
     secrets: &mut Vec<SecretData>,
     struct_type_param_counts: &HashMap<StructId, usize>,
     effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let class = &class_decls[class_id.0 as usize];
@@ -5431,6 +6128,8 @@ fn check_class_init_expr(
             secrets,
             struct_type_param_counts,
             effect_decls,
+            trait_decls,
+            impl_decls,
             konts,
         )?;
         if arg_typed.ty != param.ty {
@@ -5450,6 +6149,123 @@ fn check_class_init_expr(
             args: typed_args,
         },
         Type::Class(class_id),
+    ))
+}
+
+/// C4.2 / ADR 0023 D5 Path 2 + D6: type-check
+/// `ImplName::method(receiver, args)`. The impl + method_index were
+/// resolved at resolve time. Verify the receiver (args[0])'s type
+/// is the impl target's type or a ref-to-it, then arity + per-arg
+/// type-check against the impl method's params.
+#[allow(clippy::too_many_arguments)]
+fn check_qualified_call_expr(
+    impl_id: ImplId,
+    method_index: usize,
+    impl_name: &str,
+    method: &str,
+    method_span: &Span,
+    args: &[ResolvedExpr],
+    env: &mut VarTypeEnv,
+    signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &mut Vec<SecretData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
+    konts: &mut Vec<KontData>,
+) -> Result<(TypedExprKind, Type), TypeError> {
+    let imp = &impl_decls[impl_id.0 as usize];
+    let m = &imp.methods[method_index];
+    // Expected total arg count = 1 (receiver) + method.params.len().
+    let expected_total = 1 + m.params.len();
+    if args.len() != expected_total {
+        return Err(TypeError::MethodArityMismatch {
+            class_name: imp.type_name.clone(),
+            method_name: method.to_string(),
+            expected: expected_total,
+            got: args.len(),
+            span: to_source_span(method_span),
+        });
+    }
+    // First arg = receiver. Its type after auto-deref must match
+    // the impl's target type, and its ref mutability must match
+    // self_kind.
+    let recv = check_expr(
+        &args[0],
+        None,
+        env,
+        signatures,
+        structs,
+        class_decls,
+        instances,
+        refs,
+        secrets,
+        struct_type_param_counts,
+        effect_decls,
+        trait_decls,
+        impl_decls,
+        konts,
+    )?;
+    let recv_concrete = match recv.ty {
+        Type::Ref(rid) => refs[rid.0 as usize].inner,
+        other => other,
+    };
+    let target_concrete = match imp.target {
+        ImplTarget::Class(cid) => Type::Class(cid),
+        ImplTarget::Struct(sid) => Type::Struct(sid),
+    };
+    if recv_concrete != target_concrete {
+        return Err(TypeError::ImplMethodReceiverMismatch {
+            impl_name: impl_name.to_string(),
+            type_name: imp.type_name.clone(),
+            got_ty: type_display(recv.ty, None),
+            span: to_source_span(&args[0].span),
+        });
+    }
+    // Type-check the remaining args against the method's params.
+    let mut typed_args = Vec::with_capacity(args.len());
+    typed_args.push(recv);
+    for (arg, param) in args[1..].iter().zip(m.params.iter()) {
+        let arg_typed = check_expr(
+            arg,
+            Some(param.ty),
+            env,
+            signatures,
+            structs,
+            class_decls,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            trait_decls,
+            impl_decls,
+            konts,
+        )?;
+        if arg_typed.ty != param.ty {
+            return Err(TypeError::Mismatch {
+                expected: param.ty,
+                got: arg_typed.ty,
+                span: to_source_span(&arg.span),
+            });
+        }
+        typed_args.push(arg_typed);
+    }
+    let return_type = m.return_type;
+    Ok((
+        TypedExprKind::QualifiedCall {
+            impl_id,
+            method_index,
+            impl_name: impl_name.to_string(),
+            method: method.to_string(),
+            method_span: method_span.clone(),
+            args: typed_args,
+        },
+        return_type,
     ))
 }
 
@@ -5718,6 +6534,47 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "sentinel::types::method_arity_mismatch",
             format!(
                 "method `{class_name}.{method_name}` expected {expected} argument(s), got {got}"
+            ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::ImplMissingMethod {
+            trait_name,
+            type_name,
+            method_name,
+            span,
+        } => (
+            "sentinel::types::impl_missing_method",
+            format!(
+                "impl of `{trait_name}` for `{type_name}` is missing method `{method_name}`"
+            ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::ImplMethodSignatureMismatch {
+            trait_name,
+            type_name,
+            method_name,
+            span,
+        } => (
+            "sentinel::types::impl_method_signature_mismatch",
+            format!(
+                "impl method `{method_name}` for `{trait_name}` on `{type_name}` has a signature that doesn't match the trait"
+            ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::AmbiguousMethodCall { method_name, recv_ty, span } => (
+            "sentinel::types::ambiguous_method_call",
+            format!("ambiguous method call `{method_name}` on `{recv_ty}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::ImplMethodReceiverMismatch {
+            impl_name,
+            type_name,
+            got_ty,
+            span,
+        } => (
+            "sentinel::types::impl_method_receiver_mismatch",
+            format!(
+                "impl `{impl_name}` (for `{type_name}`) doesn't apply to receiver type `{got_ty}`"
             ),
             span.offset()..(span.offset() + span.len()),
         ),

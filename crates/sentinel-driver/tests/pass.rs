@@ -1111,3 +1111,84 @@ fn c41_init_field_unassigned_rejects_at_type_check() {
         "expected init_field_maybe_unassigned; got: {stderr}"
     );
 }
+
+// ============================================================================
+// C4.2 (2/N) per ADR 0023: trait + impl wired through resolve /
+// types / codegen. Receiver-typed (Path 1) + qualified-named
+// (Path 2) dispatch end-to-end. Path 3 bounded-generic dispatch
+// is deferred (see ADR 0023 D5 amendment).
+// ============================================================================
+
+#[test]
+fn pass_c42_trait_basic() {
+    // Smallest trait + default impl + receiver-typed dispatch:
+    // `Tally::init().tick(42)` ⇒ exit 42.
+    let r = build_and_run("c42_trait_basic.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c42_go_no_go() {
+    // ADR 0023 D12 phase-go: FileSink with default + named
+    // `Doubling` Writer impls. main calls both via `s.write(10)`
+    // (receiver-typed) and `Doubling::write(&mut s, 16)`
+    // (qualified-named) to return 42.
+    let r = build_and_run("c42_go_no_go.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn c42_impl_missing_method_rejects_at_type_check() {
+    // ADR 0023 D8 completeness check: every trait method must be
+    // supplied. Default method bodies are deferred per ADR 0023
+    // D10.
+    let out = build_ui_fixture("c42_impl_missing_method.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("impl_missing_method"),
+        "expected impl_missing_method; got: {stderr}"
+    );
+}
+
+#[test]
+fn c42_impl_method_sig_mismatch_rejects_at_type_check() {
+    // ADR 0023 D8 per-method signature match. The impl method's
+    // param type differs from the trait's; type-check surfaces
+    // the dedicated diagnostic.
+    let out = build_ui_fixture("c42_impl_method_sig_mismatch.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("impl_method_signature_mismatch"),
+        "expected impl_method_signature_mismatch; got: {stderr}"
+    );
+}
+
+#[test]
+fn c42_duplicate_default_impl_rejects_at_resolve() {
+    // ADR 0023 D8 coherence: at most one default impl per
+    // (trait, type) per scope.
+    let out = build_ui_fixture("c42_duplicate_default_impl.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("duplicate_default_impl"),
+        "expected duplicate_default_impl; got: {stderr}"
+    );
+}
+
+#[test]
+fn c42_duplicate_impl_name_rejects_at_resolve() {
+    // ADR 0023 D8 coherence: named impls must have unique names
+    // within their scope.
+    let out = build_ui_fixture("c42_duplicate_impl_name.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("duplicate_impl_name"),
+        "expected duplicate_impl_name; got: {stderr}"
+    );
+}

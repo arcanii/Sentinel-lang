@@ -955,14 +955,14 @@ fn walk_expr(
             }
         }
         // C4.1 / ADR 0022 D3 + D7: method call. The receiver is
-        // walked as an lvalue (the auto-ref converts it to
-        // `&target` / `&mut target` at codegen). Each arg is
-        // walked as a normal expr. Borrow rules around the
-        // auto-ref will be tightened in a follow-on iteration —
-        // for now, treat the receiver as a read (the existing
-        // shared-borrow path).
+        // walked as an lvalue — the auto-ref produces `&target` /
+        // `&mut target` at codegen, which is a non-consuming read
+        // (refs are Copy). Same treatment as FieldAccess + Index.
+        // Without this, repeated method calls on a Move-typed
+        // receiver (e.g., two `s.write(...)`-style calls on a
+        // class instance) would surface use-after-move spuriously.
         TypedExprKind::MethodCall { target, args, .. } => {
-            walk_expr(target, ctx, errors, program);
+            walk_expr_lvalue(target, ctx, errors, program);
             for a in args {
                 walk_expr(a, ctx, errors, program);
             }
@@ -970,6 +970,21 @@ fn walk_expr(
         // C4.1 / ADR 0022 D5: `Name::init(args)` is purely a
         // value-producing expression — walk its args.
         TypedExprKind::ClassInit { args, .. } => {
+            for a in args {
+                walk_expr(a, ctx, errors, program);
+            }
+        }
+        // C4.2 / ADR 0023 D5 Path 1: receiver-typed dispatch. The
+        // receiver is non-consuming (auto-ref produces a borrow),
+        // mirroring the class MethodCall arm above.
+        TypedExprKind::ImplMethodCall { target, args, .. } => {
+            walk_expr_lvalue(target, ctx, errors, program);
+            for a in args {
+                walk_expr(a, ctx, errors, program);
+            }
+        }
+        // C4.2 / ADR 0023 D5 Path 2: args includes the receiver.
+        TypedExprKind::QualifiedCall { args, .. } => {
             for a in args {
                 walk_expr(a, ctx, errors, program);
             }
@@ -1162,7 +1177,13 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         | Type::Array(_)
         | Type::GenericInstance(_)
         | Type::TypeParam(_)
-        | Type::Class(_) => false,
+        | Type::Class(_)
+        // C4.2 / ADR 0023 D7: `Self` inside a trait method sig is
+        // abstract — borrow-check conservatively treats it as Move
+        // until impl-sig substitution resolves it (which happens
+        // before impl-method bodies are borrow-checked, so this arm
+        // is effectively unreachable in practice).
+        | Type::TraitSelf(_) => false,
         // C3 / ADR 0019 D5: Copy-ness of `secret T` follows the
         // inner type — `secret i64` is Copy; `secret Bag` is Move.
         // The secret qualifier is orthogonal to ownership;

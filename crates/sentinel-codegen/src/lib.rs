@@ -43,11 +43,11 @@ use inkwell::{IntPredicate, OptimizationLevel};
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_resolve::{
-    ClassId, EffectId, FnId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
+    ClassId, EffectId, FnId, ImplId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
-    ArrayElem, ClassData, GenericInstanceData, GenericInstanceId, NullableInner, RefData,
+    ArrayElem, ClassData, GenericInstanceData, GenericInstanceId, ImplData, NullableInner, RefData,
     SecretData, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedHandlerArm,
     TypedProgram, TypedReturnArm, TypedStmt, TypedStmtKind, TypedStructDecl,
 };
@@ -525,6 +525,48 @@ pub fn compile_to_object(
         }
     }
 
+    // C4.2 / ADR 0023 D9: declare per-impl method LLVM fns. The
+    // ABI mirrors class methods — `self_ptr: ptr` as the first
+    // arg, then the declared params. Mangling: default impls use
+    // `default__<Type>__<Trait>__<method>`; named impls use
+    // `<ImplName>__<Type>__<Trait>__<method>`.
+    let mut impl_method_fns: HashMap<(ImplId, usize), FunctionValue> = HashMap::new();
+    for imp in &program.impl_decls {
+        for (m_idx, m) in imp.methods.iter().enumerate() {
+            let mut param_tys: Vec<inkwell::types::BasicMetadataTypeEnum> =
+                vec![ptr_ty_global.into()];
+            for p in &m.params {
+                param_tys.push(
+                    llvm_basic_type(
+                        &context,
+                        p.ty,
+                        &struct_types,
+                        &generic_struct_types,
+                        &class_types,
+                        &secrets,
+                    )
+                    .into(),
+                );
+            }
+            let fn_type = llvm_basic_type(
+                &context,
+                m.return_type,
+                &struct_types,
+                &generic_struct_types,
+                &class_types,
+                &secrets,
+            )
+            .fn_type(&param_tys, false);
+            let prefix = imp.name.as_deref().unwrap_or("default");
+            let mangled = format!(
+                "{prefix}__{}__{}__{}",
+                imp.type_name, imp.trait_name, m.name
+            );
+            let fn_value = module.add_function(&mangled, fn_type, None);
+            impl_method_fns.insert((imp.id, m_idx), fn_value);
+        }
+    }
+
     // C1.7.5 / ADR 0016 D7: mono_defs + the `instances` table were
     // already built above before pass 0 (so the LLVM struct types
     // for nested generic instances could be declared). Here we
@@ -630,6 +672,7 @@ pub fn compile_to_object(
             class_types,
             class_init_fns,
             class_method_fns,
+            impl_method_fns,
             secrets,
             alloc_fn,
             panic_oob_fn,
@@ -670,6 +713,12 @@ pub fn compile_to_object(
         // lower_block machinery with self pre-bound in vars.
         for cd in &program.class_decls {
             cx.compile_class(cd, program)?;
+        }
+        // C4.2 / ADR 0023 D9: emit each impl's method bodies.
+        // Methods take self_ptr as the first param; lower the body
+        // identically to a class method.
+        for imp in &program.impl_decls {
+            cx.compile_impl(imp, program)?;
         }
     }
 
@@ -758,6 +807,13 @@ struct CodegenCtx<'ctx, 'plan> {
     /// the order in `ClassData::methods`.
     class_init_fns: HashMap<ClassId, FunctionValue<'ctx>>,
     class_method_fns: HashMap<(ClassId, usize), FunctionValue<'ctx>>,
+    /// C4.2 / ADR 0023 D9: per-(ImplId, method_index) impl method
+    /// fn. The method index matches the order in `ImplData::methods`
+    /// (which mirrors the trait's method order after Pass 3d
+    /// completeness check). Mangled name:
+    /// - default impls: `default__<Type>__<Trait>__<method>`
+    /// - named impls:   `<Name>__<Type>__<Trait>__<method>`
+    impl_method_fns: HashMap<(ImplId, usize), FunctionValue<'ctx>>,
     /// C3 / ADR 0019 D5 (C3.1): secrets table cloned from
     /// `TypedProgram.secrets` at codegen entry. Used to strip
     /// `Type::Secret(SecretId)` to its inner type — secrets lower
@@ -961,6 +1017,9 @@ fn field_type_needs_drop_inner(
             seen.pop();
             any
         }
+        // C4.2 / ADR 0023 D7: `Self` never reaches codegen — impl-
+        // sig substitution resolves it before bodies type-check.
+        Type::TraitSelf(_) => false,
     }
 }
 
@@ -1059,6 +1118,12 @@ fn llvm_basic_type<'ctx>(
         // via getelementptr at known offsets — codegen doesn't
         // need an LLVM-level struct type for it.
         Type::Kont(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
+        // C4.2: TraitSelf is impossible at codegen — impl-sig
+        // substitution resolves it to a concrete type before
+        // codegen sees it.
+        Type::TraitSelf(_) => {
+            unreachable!("Type::TraitSelf must be substituted before codegen")
+        }
     }
 }
 
@@ -1319,6 +1384,24 @@ fn walk_expr_for_mono(
                 );
             }
         }
+        // C4.2: impls aren't generic at C4.2 minimum; walk children.
+        TypedExprKind::ImplMethodCall { target, args, .. } => {
+            walk_expr_for_mono(
+                target, subst, program, instances, refs, visited, order, pending,
+            );
+            for a in args {
+                walk_expr_for_mono(
+                    a, subst, program, instances, refs, visited, order, pending,
+                );
+            }
+        }
+        TypedExprKind::QualifiedCall { args, .. } => {
+            for a in args {
+                walk_expr_for_mono(
+                    a, subst, program, instances, refs, visited, order, pending,
+                );
+            }
+        }
     }
 }
 
@@ -1414,6 +1497,8 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
             .get(id.0 as usize)
             .map(|c| c.name.clone())
             .unwrap_or_else(|| format!("class{}", id.0)),
+        // C4.2: TraitSelf doesn't reach mangling.
+        Type::TraitSelf(id) => format!("Self_trait{}", id.0),
     }
 }
 
@@ -1429,7 +1514,12 @@ fn arg_contains_typeparam(
 ) -> bool {
     match ty {
         Type::TypeParam(_) => true,
-        Type::I64 | Type::I32 | Type::Bool | Type::Struct(_) | Type::Class(_) => false,
+        Type::I64
+        | Type::I32
+        | Type::Bool
+        | Type::Struct(_)
+        | Type::Class(_)
+        | Type::TraitSelf(_) => false,
         Type::Nullable(ni) => arg_contains_typeparam(ni.to_type(), instances, refs),
         Type::Array(ae) => arg_contains_typeparam(ae.to_type(), instances, refs),
         Type::GenericInstance(id) => instances[id.0 as usize]
@@ -1500,6 +1590,9 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
             "llvm_int_type called on Type::Kont — handlers not lowered at C3.4 (ADR 0020 D9)"
         ),
         Type::Class(_) => panic!("llvm_int_type called on non-int Type::Class"),
+        Type::TraitSelf(_) => {
+            panic!("llvm_int_type called on Type::TraitSelf — must be substituted before codegen")
+        }
     }
 }
 
@@ -1711,6 +1804,71 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             // Silence unused-var warnings on SelfKind for now.
             let _ = m.self_kind;
             let _ = SelfKind::Shared;
+        }
+        Ok(())
+    }
+
+    /// C4.2 / ADR 0023 D9: emit each impl method's body. Mirrors
+    /// `compile_class`'s method-emission loop — bind self_ptr +
+    /// param allocas, lower the body via the standard machinery,
+    /// return the body value. At C4.2 minimum impls aren't
+    /// generic and methods aren't effecting, so the per-fn
+    /// frame-reification machinery from C3.5(c/d/e) doesn't
+    /// activate here.
+    fn compile_impl(
+        &mut self,
+        imp: &ImplData,
+        program: &TypedProgram,
+    ) -> Result<(), CodegenError> {
+        let target_ty = match imp.target {
+            sentinel_resolve::ImplTarget::Class(cid) => Type::Class(cid),
+            sentinel_resolve::ImplTarget::Struct(sid) => Type::Struct(sid),
+        };
+        for (m_idx, m) in imp.methods.iter().enumerate() {
+            let fn_value = *self
+                .impl_method_fns
+                .get(&(imp.id, m_idx))
+                .expect("declared in pass 1");
+            self.current_fn = Some(fn_value);
+            self.vars.clear();
+            self.scope_stack.clear();
+            let entry = self.context.append_basic_block(fn_value, "entry");
+            self.builder.position_at_end(entry);
+            self.scope_stack.push(Vec::new());
+
+            // self_ptr = first arg; bind directly (no extra
+            // alloca + store) so self.field reads/writes GEP
+            // straight into the receiver storage.
+            let self_ptr = fn_value
+                .get_nth_param(0)
+                .expect("self_ptr present")
+                .into_pointer_value();
+            self.vars.insert(m.self_var_id, (self_ptr, target_ty));
+
+            for (i, param) in m.params.iter().enumerate() {
+                let arg = fn_value
+                    .get_nth_param((i + 1) as u32)
+                    .expect("param exists");
+                let llvm_ty = self.llvm_basic_type(param.ty);
+                let alloca = self
+                    .builder
+                    .build_alloca(llvm_ty, &param.name)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_store(alloca, arg)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.vars.insert(param.id, (alloca, param.ty));
+                self.scope_stack
+                    .last_mut()
+                    .expect("just pushed")
+                    .push(param.id);
+            }
+            let body_val = self.lower_block(&m.body, program)?;
+            self.scope_stack.pop();
+            self.builder
+                .build_return(Some(&body_val))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let _ = m.self_kind;
         }
         Ok(())
     }
@@ -2828,6 +2986,9 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // their fields and follow the standard pattern.
                 self.emit_drop_struct_fields(ptr, ty, program)?;
             }
+            Type::TraitSelf(_) => {
+                // C4.2: unreachable post-substitution; defensive.
+            }
         }
         Ok(())
     }
@@ -3693,6 +3854,57 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 Ok(loaded)
             }
+            // C4.2 / ADR 0023 D5 Path 1 + D9: receiver-typed
+            // dispatch to a default impl method. Get the receiver
+            // pointer via lower_lvalue_ptr (same as class
+            // MethodCall) + direct call into the impl method's
+            // mangled fn.
+            TypedExprKind::ImplMethodCall { target, impl_id, method_index, args, .. } => {
+                let self_ptr = self.lower_lvalue_ptr(target, program)?;
+                let method_fn = *self
+                    .impl_method_fns
+                    .get(&(*impl_id, *method_index))
+                    .expect("impl method fn declared in pass 1");
+                let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> =
+                    vec![self_ptr.into()];
+                for a in args {
+                    let v = self.lower_expr(a, program)?;
+                    call_args.push(v.into());
+                }
+                let call_site = self
+                    .builder
+                    .build_call(method_fn, &call_args, "implmethodcall")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                Ok(call_site
+                    .try_as_basic_value()
+                    .left()
+                    .expect("impl method returns a value"))
+            }
+            // C4.2 / ADR 0023 D5 Path 2 + D9: qualified-named
+            // dispatch. args[0] is the receiver expression (a ref
+            // — lowered to a pointer); args[1..] are the declared
+            // params. Pass args[0]'s lowered ptr as self_ptr.
+            TypedExprKind::QualifiedCall { impl_id, method_index, args, .. } => {
+                let method_fn = *self
+                    .impl_method_fns
+                    .get(&(*impl_id, *method_index))
+                    .expect("impl method fn declared in pass 1");
+                let self_val = self.lower_expr(&args[0], program)?;
+                let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> =
+                    vec![self_val.into()];
+                for a in &args[1..] {
+                    let v = self.lower_expr(a, program)?;
+                    call_args.push(v.into());
+                }
+                let call_site = self
+                    .builder
+                    .build_call(method_fn, &call_args, "qualcall")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                Ok(call_site
+                    .try_as_basic_value()
+                    .left()
+                    .expect("qualified call returns a value"))
+            }
         }
     }
 
@@ -4371,6 +4583,10 @@ fn expr_performs(expr: &TypedExpr) -> bool {
             expr_performs(target) || args.iter().any(expr_performs)
         }
         TypedExprKind::ClassInit { args, .. } => args.iter().any(expr_performs),
+        TypedExprKind::ImplMethodCall { target, args, .. } => {
+            expr_performs(target) || args.iter().any(expr_performs)
+        }
+        TypedExprKind::QualifiedCall { args, .. } => args.iter().any(expr_performs),
     }
 }
 
@@ -4635,6 +4851,17 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
                 walk_collect_var_refs(a, acc);
             }
         }
+        TypedExprKind::ImplMethodCall { target, args, .. } => {
+            walk_collect_var_refs(target, acc);
+            for a in args {
+                walk_collect_var_refs(a, acc);
+            }
+        }
+        TypedExprKind::QualifiedCall { args, .. } => {
+            for a in args {
+                walk_collect_var_refs(a, acc);
+            }
+        }
     }
 }
 
@@ -4712,6 +4939,10 @@ fn count_performs(expr: &TypedExpr) -> usize {
             count_performs(target) + args.iter().map(count_performs).sum::<usize>()
         }
         TypedExprKind::ClassInit { args, .. } => args.iter().map(count_performs).sum(),
+        TypedExprKind::ImplMethodCall { target, args, .. } => {
+            count_performs(target) + args.iter().map(count_performs).sum::<usize>()
+        }
+        TypedExprKind::QualifiedCall { args, .. } => args.iter().map(count_performs).sum(),
     }
 }
 
@@ -4793,6 +5024,10 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
             find_unique_perform(target).or_else(|| args.iter().find_map(find_unique_perform))
         }
         TypedExprKind::ClassInit { args, .. } => args.iter().find_map(find_unique_perform),
+        TypedExprKind::ImplMethodCall { target, args, .. } => {
+            find_unique_perform(target).or_else(|| args.iter().find_map(find_unique_perform))
+        }
+        TypedExprKind::QualifiedCall { args, .. } => args.iter().find_map(find_unique_perform),
     }
 }
 
@@ -4919,7 +5154,9 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
         TypedExprKind::Handle { .. }
         | TypedExprKind::ResumeKont { .. }
         | TypedExprKind::MethodCall { .. }
-        | TypedExprKind::ClassInit { .. } => {
+        | TypedExprKind::ClassInit { .. }
+        | TypedExprKind::ImplMethodCall { .. }
+        | TypedExprKind::QualifiedCall { .. } => {
             // C3.5(d) MVP: the embedded-perform shape only fires
             // when count_performs(tail) == 1. Substituting a
             // Handle / ResumeKont / MethodCall / ClassInit
@@ -5156,6 +5393,13 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
                 .or_else(|| args.iter().find_map(|a| find_var_name_in_expr(a, id)))
         }
         TypedExprKind::ClassInit { args, .. } => {
+            args.iter().find_map(|a| find_var_name_in_expr(a, id))
+        }
+        TypedExprKind::ImplMethodCall { target, args, .. } => {
+            find_var_name_in_expr(target, id)
+                .or_else(|| args.iter().find_map(|a| find_var_name_in_expr(a, id)))
+        }
+        TypedExprKind::QualifiedCall { args, .. } => {
             args.iter().find_map(|a| find_var_name_in_expr(a, id))
         }
     }

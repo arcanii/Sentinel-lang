@@ -1,0 +1,31 @@
+// C4.2 (2/N) / ADR 0023 D8: two default impls of the same trait
+// for the same type are rejected at resolve (Pass 0e coherence
+// check). Scope-local coherence per ADR 0021 D7.
+//
+// Expected: snc rejects with `sentinel::resolve::duplicate_default_impl`.
+
+trait Writer {
+    fn write(self: &mut Self, data: i64) -> i64;
+}
+
+class FileSink {
+    let count: i64;
+    pub init() {
+        self.count = 0;
+        0
+    }
+}
+
+impl as Writer for FileSink {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        data
+    }
+}
+
+impl as Writer for FileSink {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        data * 2
+    }
+}
+
+fn main() -> i64 { 0 }
