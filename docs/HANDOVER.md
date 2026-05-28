@@ -67,12 +67,20 @@ C1.3. See STATE.md Section C.
 **Phase C2.3 — move semantics + use-after-move — complete.**
 **Phase C2.4 — RAII / drop + `sentinel_free` (closes the C1.6+ heap-leak deferral) — complete.**
 **Phase C2.5 — polish + Polonius migration plan + struct-field recursive drop + ADR 0017 → ACCEPTED-WITH-AMENDMENTS — complete. Phase C2 closes.**
+**Phase C3.0(a) — lexer: six new keywords (`effect`, `secret`, `declassify`, `handle`, `with`, `perform`) — complete.**
+**Phase C3.0(b) — AST + parser + resolve pass-through + types-layer rejection for effect_decl / effect_row / `secret T` / `declassify(e)` — complete.**
+**Phase C3.1 — secret typing: `Type::Secret(SecretId)` interner + `declassify(e)` + implicit `T → secret T` widening + 2 of 4 CT rejections (SecretBranch, SecretInRefDeref) — complete.**
+**Phase C3.1b — operator-secret-preserving rules + SecretDivisor — complete.**
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
 actual vs ADR 0017 D9 estimate "6-13 sessions" — low end of
 the range). ADR 0018 (Polonius migration plan) PROPOSED;
-records the plan only, no migration code yet.
+records the plan only, no migration code yet. Phase C3 (effect
+system + secret typing per ADR 0019) is **in flight** — secret
+typing fully landed at C3.1 + C3.1b; effect rows +
+effect_check_query come at C3.2; ADR 0019 stays PROPOSED until
+C3.3 close-out.
 Phase C1 (type system per HANDOVER §6.2) is **complete** per ADR
 0011 (now ACCEPTED, 8 sub-phases, ADR's honest 5-6 month estimate
 beaten — actual elapsed across C1.0a through C1.7.4b was ~10-12
@@ -786,6 +794,26 @@ per-crate breakdown.
                                                  code at C2.5;
                                                  ADR records the
                                                  plan only.
+  - 0019 phase-c3-kickoff-and-effects-plan       PROPOSED — Phase
+                                                 C3 effect-system
+                                                 integration from
+                                                 Phase B. 14 D-
+                                                 decisions. D5 +
+                                                 D6 + D7 (3 of 5
+                                                 rejections) + D10
+                                                 exercised across
+                                                 C3.0 + C3.1 +
+                                                 C3.1b. D13
+                                                 partially. D1 +
+                                                 D2 + D3 + D4 + D11
+                                                 (effect rows +
+                                                 effect_check_query)
+                                                 land at C3.2. D8
+                                                 (handler runtime)
+                                                 deferred to ADR
+                                                 0020. ADR flips
+                                                 ACCEPTED at C3.3
+                                                 close-out.
 
 ### 0.1 Working norms (carry forward into Phase C3)
 
@@ -1044,133 +1072,158 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: pending C2.5 commit (this session). Last feat
-    commit: 8d72679 (feat(c2.4): RAII / drop + sentinel_free;
-    closes C1.6+ heap leak).
+    Local HEAD: 2b36b0f (feat(c3.1b): operator-secret-preserving
+    + SecretDivisor + phase-go). Last feat commit: same.
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
     (bootstrap compiler MVP) + Phase C1 (full type system — all
-    8 sub-phases C1.0 through C1.7) + **Phase C2 (refs +
+    8 sub-phases C1.0 through C1.7) + Phase C2 (refs +
     mutability + lexical borrow check + RAII drop — all 6 sub-
-    phases C2.0.1 through C2.5) complete.** ADR 0017
-    ACCEPTED-WITH-AMENDMENTS; ADR 0018 (Polonius migration
-    plan) PROPOSED. 935 active workspace tests + 1 doctest.
-    **Eleven go/no-go programs run end-to-end:**
-    tests/pass/c05_go_no_go.sentinel (C1.3 bool): stdout "10",
-    exit 0; c14_go_no_go (C1.4 struct): "7"; c15_go_no_go
-    (C1.5 nullable): "142"; c16_go_no_go (C1.6 array): "15";
+    phases C2.0.1 through C2.5) all complete. **Phase C3 in
+    flight: C3.0 (lexer + AST + parser for effect_decl /
+    effect_row / `secret T` / `declassify`) + C3.1 + C3.1b
+    (secret typing layer: Type::Secret(SecretId) interner +
+    declassify + implicit T→secret T widening + operator-secret-
+    preserving + 3 of 4 static CT rejections) landed.** ADR
+    0017 ACCEPTED-WITH-AMENDMENTS; ADR 0018 (Polonius migration
+    plan) PROPOSED; ADR 0019 (Phase C3 kickoff) PROPOSED. 989
+    active workspace tests + 1 doctest. **Twelve go/no-go
+    programs run end-to-end:** c05_go_no_go (C1.3 bool): "10";
+    c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
+    nullable): "142"; c16_go_no_go (C1.6 array): "15";
     c17_go_no_go (C1.7 generics): "42"; c20_go_no_go (C2.0.2
     refs+mut+assign): "53"; c21_go_no_go (C2.1 shared-borrow):
     "168"; c22_go_no_go (C2.2 XOR alternation): "35";
     c23_go_no_go (C2.3 move semantics): "100"; c24_go_no_go
-    (C2.4 RAII / drop): "160"; **c25_go_no_go (C2.5 D14: XOR
-    + move + recursive field drop on Bag with [i64] field):
-    "190"**, exit 0.
+    (C2.4 RAII / drop): "160"; c25_go_no_go (C2.5 D14): "190";
+    **c31_go_no_go (C3.1 D5+D6+D7 secret + declassify +
+    operator-preserve + declassify-before-branch): "100"**,
+    exit 0.
 
-    Pipeline at C2 close: **parse_query → resolve_query →
-    check_query → borrow_check_query → codegen** with
-    diagnostics transitively accumulated; borrow_check_query
-    returns `(DropPlan, Vec<BorrowError>)` and codegen consumes
-    DropPlan to emit drops at scope exit. C2.5(a)'s recursive
-    field drop closes the C2.4 known gap: codegen now threads
-    `&TypedProgram` through `emit_scope_drops` →
-    `emit_drop_for_binding` → `emit_drop_struct_fields` so the
-    drop machinery can iterate `program.struct_decl(id).fields`
-    or `program.generic_instance(id).args` and recursively drop
-    heap-backed fields (Array, ?Struct, nested struct).
-    sentinel-runtime ships sentinel_alloc + sentinel_panic_oob
-    + sentinel_free. ADRs 0001-0014 + 0016 + 0017 ACCEPTED (or
-    ACCEPTED-WITH-AMENDMENTS); ADR 0015 ACCEPTED-WITH-
-    AMENDMENTS; **ADR 0017 ACCEPTED-WITH-AMENDMENTS at C2.5
-    close** (all 14 D-decisions exercised; three amendments:
-    A1 C2.4→C2.5(a) recursive-field-drop slip; A2 Polonius
-    plan shipped as standalone ADR 0018; A3 documented
-    partial-move-through-field-projection soundness gap);
-    **ADR 0018 PROPOSED** (Polonius migration plan, six D-
-    decisions; no migration code yet).
+    Pipeline at C3.1: **parse_query → resolve_query →
+    check_query → borrow_check_query → codegen** (unchanged
+    from C2.5; the effect_check_query slots between
+    check_query and borrow_check_query at C3.2 per ADR 0019
+    D11). Diagnostics transitively accumulated.
 
-    Borrow-checker state at C2.5 close: full ADR 0017 D6+D7+D8+D9
-    formulation. Eight `BorrowError` variants (OutlivesSource,
-    ReturnsLocalRef, MutableBorrowOfShared, SharedBorrowOfMutable,
-    BorrowConflict, WriteWhileBorrowed, ReadWhileMutBorrowed,
-    UseAfterMove). DropPlan: `{ moved_sources: BTreeMap<FnId,
-    BTreeSet<VarId>> }`. **Known soundness gap documented** in
-    `docs/borrow-check-limitations.md`: postfix `.field` on a
-    Move-typed binding is non-consuming per C2.3 design, so
-    `consume_arr(p.items)` followed by main's drop causes a
-    double-free (compiles clean; UB at runtime). Closure: per-
-    (VarId, FieldPath) move state in a follow-on sub-phase
-    (provisionally C2.6 or ADR 0019). Highest-priority post-C2
-    work on the borrow-check side.
-
-    Codegen drops at C2.5: scope_stack + current_fn_id +
-    free_fn; emit_scope_drops iterates current scope in
-    reverse declaration order, skipping moved + tail-returned
-    bindings; emit_drop_for_binding dispatches on Type — Array
-    → free data ptr; ?Struct → cond-branch free payload;
-    Struct + GenericInstance → emit_drop_struct_fields (new
-    at C2.5(a), iterates decl.fields, GEPs per field,
-    substitutes through inst.args for generic instances).
-    field_type_needs_drop(ty, program) helper short-circuits
-    pure-data fields + has a cycle guard via seen: Vec<Type>
-    so recursive structs via ?Struct don't infinite-loop.
-
-    Type universe at C2.5 close (unchanged from C2.0.2):
-    `{ I64, I32, Bool, Struct(StructId), Nullable(NullableInner),
+    Type universe at C3.1: `{ I64, I32, Bool,
+    Struct(StructId), Nullable(NullableInner),
     Array(ArrayElem), TypeParam(TypeParamId),
-    GenericInstance(GenericInstanceId), Ref(RefId) }`.
-    `refs: Vec<RefData>` interner on TypedProgram preserves
-    `Type: Copy`.
+    GenericInstance(GenericInstanceId), Ref(RefId),
+    Secret(SecretId) }`. `Type::Secret` is the sixth interner-
+    table ADR running (0014+0015+0016+0017+0019) preserving
+    `Type: Copy + Hash`. TypedProgram.secrets: Vec<SecretData>
+    where SecretData { inner: Type }. NullableInner + ArrayElem
+    do NOT gain Secret variants (`?secret T` / `[secret T]`
+    deferred to a follow-on ADR); the outer `secret ?T` /
+    `secret [T]` shapes work via the Type::Secret wrapper.
 
-    Lexer state (unchanged from C2.0.1): keywords `let, fn,
-    if, else, true, false, struct, null, mut`; punctuation
-    `+ - * / = ( ) { } [ ] , ; : . ? & ->` `== != < <= > >=
-    && || !`. `*` reused for deref; `&` reused for borrow-take
-    + ref-type prefix.
+    Operator-secret-preserving rules at C3.1b: `secret T op
+    secret T → secret T` for arithmetic (`+ - * /`); `secret
+    T == secret T → secret bool` for comparisons; `secret bool
+    && secret bool → secret bool` for logicals; unary `- !`
+    preserve. Mixed public + secret operands surface as
+    Mismatch (the Phase B "SecretFlow" property). Implicit `T
+    → secret T` widening at let-annotation / fn-arg / fn-
+    return boundaries via TypedExprKind::WidenToSecret
+    (mirrors C1.5 WidenToNullable). `declassify(e)` strips one
+    layer; idempotent on non-secret inputs per Phase B ADR
+    0008 D5.
 
-    **Next: Phase C3** — effect-system integration from Phase B
-    Sentinel-Mini per HANDOVER §6.2. Pre-flight: ADR 0019
-    PROPOSED covering effect-row representation in
-    sentinel-types, effect annotations on fn signatures (`!`
-    syntax), inference vs annotation, `secret T` qualifier
-    promotion, effect-handler lowering strategy.
+    Constant-time rejections at C3.1 (3 of 4 from ADR 0019
+    D7): SecretBranch (`if cond` where cond: secret bool — leaks
+    via timing); SecretDivisor (`a / b` where b is secret —
+    variable-time division leaks); SecretInRefDeref (`*r` where
+    r: secret &T — secret pointer leaks via cache side channel;
+    note: `& secret T` pointer-to-secret is allowed). The
+    fourth Phase B rejection (SecretEscapesPolymorphism) is
+    documented as subsumed under Sentinel's monomorphic
+    generics + SecretFlow — no separate variant needed.
+    Codegen lowers `Type::Secret(T)` identically to T at C3.1;
+    branch-free CT codegen (`select`/`cmov` for secret
+    comparisons, speculation barriers) is deferred per ADR
+    0019 D12 to a follow-on.
+
+    Lexer state at C3.1 (unchanged from C3.0(a)):
+    keywords `let, fn, if, else, true, false, struct, null,
+    mut, effect, secret, declassify, handle, with, perform`;
+    punctuation unchanged from C2.0.1.
+
+    Effect machinery at C3.1: `effect E { ... }` declarations +
+    postfix `! { Op1, Op2 }` annotations + `perform E.op(args)`
+    + `handle e with { ... }` all PARSE end-to-end but REJECT
+    AT RESOLVE with `EffectDeclNotYet` /
+    `EffectAnnotationNotYet`. The effect_check_query salsa
+    pass + new sentinel-effect-check crate land at C3.2.
+
+    Borrow-checker state at C3.1 (unchanged from C2.5):
+    parse_query → resolve_query → check_query →
+    borrow_check_query → codegen; eight `BorrowError` variants;
+    DropPlan; recursive struct-field drop at scope exit. Known
+    soundness gap documented in
+    `docs/borrow-check-limitations.md` (partial-move through
+    field projection + drop ⇒ double-free).
+
+    **Next: C3.2** — effect rows in the typed AST + new
+    `sentinel-effect-check` crate + `effect_check_query` salsa
+    pass per ADR 0019 D11. Estimated 2-3 sessions. Will
+    introduce `RowId` / `EffectId` interner tables +
+    `TypedFnSignature.effect_row: RowId`. The salsa pass:
+
+      parse → resolve → check → **effect_check** → borrow_check
+              → codegen
+
+    Effect inference is full per ADR 0019 D2 (no mandatory
+    annotations); annotations on fn signatures act as
+    constraints checked against the inferred row. `fn main`
+    invariant tightens per D13 — main's effect row must be
+    empty (any unhandled effect bubbling to main rejects since
+    handlers are deferred per D8). After C3.2, C3.3 closes
+    Phase C3 (typing-layer minimum); handler runtime is
+    deferred to C3.4 / ADR 0020 per ADR 0019 D8.
 
     Read in order:
-      1. docs/HANDOVER.md §0 in full (now refreshed for C2
-         close + C3 framing)
-      2. docs/decisions/0017-phase-c2-kickoff-and-region-plan.md
-         (the canonical C2 design — now ACCEPTED-WITH-
-         AMENDMENTS; check the "Amendments at C2.5 close" +
-         "Retrospective at C2.5 close" sections)
-      3. docs/decisions/0018-polonius-migration-plan.md (the
-         lexical → flow-sensitive borrow-check migration plan;
-         no code, no migration yet — empirical-friction
-         trigger per D1)
-      4. docs/borrow-check-limitations.md (the C2.5(c)
-         empirical scan — two known lexical over-rejections +
-         the partial-move-through-field-projection soundness
-         gap)
-      5. docs/STATE.md (last-updated banner — C2.5 landed;
-         Phase C2 closes. Previous C2.4 banner kept as pre-
-         C2.5 context)
+      1. docs/HANDOVER.md §0 in full (now refreshed for C3.1
+         close + C3.2 framing)
+      2. docs/decisions/0019-phase-c3-kickoff-and-effects-plan.md
+         (the canonical C3 design — still PROPOSED; check
+         status header + sub-phase split table)
+      3. docs/STATE.md (last-updated banner — C3.1 landed;
+         secret typing complete. Previous C2.5 banner kept as
+         pre-C3.1 context)
+      4. crates/sentinel-types/src/lib.rs — Type::Secret +
+         SecretData + intern_secret; coerce_to_expected
+         (T→secret T widening); check_expr's
+         Binary/Cmp/Logic/Unary arms for operator-preserving;
+         If arm for SecretBranch; Deref arm for SecretInRefDeref
+      5. crates/sentinel-codegen/src/lib.rs — llvm_basic_type
+         strips secrets at entry; WidenToSecret/Declassify
+         lower as identity
       6. docs/decisions/0002-effect-rows-in-mini.md through
          0008-secret-qualifier-and-constant-time.md — the
-         Phase B effect-system design that C3 absorbs
+         Phase B effect-system design that C3.2 absorbs (rows,
+         handlers, inference judgment)
       7. crates/sentinel-effects-proto/ — Phase B's research-
-         grade interpreter; reference impl for C3's
-         effect-system semantics
+         grade interpreter; reference impl for C3.2's
+         effect_check_query
 
     Sanity check at session start:
       cargo build --workspace
       cargo clippy --workspace --all-targets -- -D warnings
-      cargo test --workspace                  # expect 935 passing
-      cargo run --bin snc -- build tests/pass/c25_go_no_go.sentinel -o /tmp/c25
-      /tmp/c25 && echo "exit=$?"              # expect "190" then "exit=0"
+      cargo test --workspace                  # expect 989 passing
+      cargo run --bin snc -- build tests/pass/c31_go_no_go.sentinel -o /tmp/c31
+      /tmp/c31 && echo "exit=$?"              # expect "100" then "exit=0"
 
-    Resume at Phase C3 per HANDOVER §6.2. First task: write
-    ADR 0019 PROPOSED covering the concrete C3 surface
-    decisions. See HANDOVER §0.2 for the patterns to argue.
+    Resume at C3.2 per ADR 0019. First task: design the
+    sentinel-effect-check crate's surface — RowId/EffectId
+    interner tables, the effect-inference algorithm (port
+    from sentinel-effects-proto's `infer` returning
+    `(Subst, Ty, Row)`), and the EffectError variants
+    (EffectAnnotationMismatch + UnhandledEffect for D13).
+    Salsa-tracked query `effect_check_query(db, file) ->
+    Option<EffectCheckedProgram>`; pipeline wiring; new
+    diagnostic accumulator entries.
 
 ---
 

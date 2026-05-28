@@ -1,12 +1,31 @@
 # ADR 0019: Phase C3 kickoff — effect rows, secrets, handlers (effect-system integration from Phase B)
 
 Status: PROPOSED — to flip to ACCEPTED (or ACCEPTED-WITH-AMENDMENTS)
-as the C3 sub-phases land. C3 is the second-hardest single
-Phase C sub-phase per HANDOVER §6.2 (C2 was the hardest);
-this ADR is intentionally written before any C3 code so the
-substantive design decisions — effect-row representation,
-secret qualifier, handler runtime — can be challenged on
-paper.
+at C3.3 close-out. C3 is the second-hardest single Phase C
+sub-phase per HANDOVER §6.2 (C2 was the hardest); this ADR is
+intentionally written before any C3 code so the substantive
+design decisions — effect-row representation, secret qualifier,
+handler runtime — can be challenged on paper.
+
+D-decision progress: **D5 + D6 + D7 (3 of 5) + D13 (partial)
+exercised** across C3.0(a) (53c26f7) + C3.0(b) (1a951ee) +
+C3.1 (ae9483f) + C3.1b (2b36b0f). D5 (Type::Secret(SecretId))
++ D6 (declassify) + D10 (lexer additions) fully at C3.0+C3.1.
+D7 constant-time check: 3 of 5 rejections shipped (SecretBranch
+at C3.1, SecretInRefDeref at C3.1, SecretDivisor at C3.1b);
+SecretFlow is subsumed by the existing Mismatch path (mixed
+public+secret operands fail type equality); the fifth
+"SecretEscapesPolymorphism" is subsumed by Sentinel's
+monomorphic generics — a generic fn instantiated with a secret
+type produces a monomorphic instance whose secret-flow is
+checked the same way as any concrete signature. D13 partially:
+`fn main`'s effect row tightens at C3.2 when effect_check_query
+arrives; today main just can't reference effects that don't
+type-check. **D1 + D2 + D3 + D4 + D11 (effect rows + inference
++ effect_check_query) pending at C3.2** — the larger half of
+the typing layer. **D8 (handler runtime) deferred to C3.4 / ADR
+0020** per the original design call. **D9 (async-as-effect)
+deferred indefinitely.**
 
 Date: 2026-05-28
 Related:

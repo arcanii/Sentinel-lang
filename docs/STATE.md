@@ -12,7 +12,66 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C2.5 landed; Phase C2 closes.** ADR 0017
+Last updated: **C3.1 landed; secret typing complete; Phase C3
+in flight.** ADR 0019 (PROPOSED) kicked off Phase C3 — effect
+rows + secret qualifier + handler runtime per HANDOVER §6.2.
+Four sub-phases landed: C3.0(a) lexer (six new keywords:
+`effect`, `secret`, `declassify`, `handle`, `with`, `perform`),
+C3.0(b) AST + parser + resolve for the new surface, C3.1 the
+`Type::Secret(SecretId)` interner + declassify + implicit
+`T → secret T` widening at let/arg/return boundaries +
+2 of 4 static constant-time rejections (`SecretBranch`,
+`SecretInRefDeref`), and C3.1b the operator-secret-preserving
+rules + `SecretDivisor` rejection. The fifth Phase B
+"SecretEscapesPolymorphism" rejection is subsumed under
+Sentinel's monomorphic generics + SecretFlow-via-Mismatch
+(a generic fn instantiated with a secret type produces a
+monomorphic instance whose flow is checked the same way as any
+concrete signature — no separate variant needed). **`Type::Secret`
+is the sixth interner-table ADR running** (0014 D4 amendment +
+0015 D6 amendment + 0016 D6a + 0017 D11 + 0019 D5) preserving
+`Type: Copy + Hash`. `TypedProgram.secrets: Vec<SecretData>`
++ `secret_data(id)` accessor + `intern_secret` helper.
+Operator typing (`+ - * /`, `== != < <= > >=`, `&& ||`, unary
+`- !`) is **secret-preserving**: `secret T op secret T → secret T`
+(or `secret bool` for comparisons); mixed-public-secret operands
+surface as Mismatch (SecretFlow). `declassify(e)` strips one
+layer of Secret; idempotent on non-secret inputs per Phase B
+ADR 0008 D5. Codegen lowers `Type::Secret(T)` identically to
+T at C3.1; constant-time codegen (branch-free `select`/`cmov`,
+speculation barriers) is deferred per ADR 0019 D12.
+`TypedExprKind::WidenToSecret` + `Declassify` lower as identity.
+`llvm_basic_type` + borrow-check `is_copy_type` + codegen
+`emit_drop_for_binding` all strip secrets at entry (so
+`secret i64` is correctly Copy; `secret Bag` is Move; drop
+recursion sees through the wrapper). Eleven new TypeError
+variants total at C3.1 close (`SecretBranch`, `SecretDivisor`,
+`SecretInRefDeref` + the dormant `SecretNotYet` from C3.0; the
+others are Mismatch-routed). Effect declarations + effect-row
+annotations on fn signatures **parse but reject at resolve**
+with `EffectDeclNotYet` / `EffectAnnotationNotYet` — the
+effect_check_query salsa pass lands at C3.2. The C3.1 phase-go
+program at `tests/pass/c31_go_no_go.sentinel` (secret-typed
+check_password-style fn with secret arithmetic + secret
+comparison + declassify-before-branching) produces stdout
+`100\n`, exit 0. Two additional fixtures: c31_secret_typing
+(stdout "50" — implicit widen + declassify-then-arith), and the
+prior `tests/pass/c25_*` C2 fixtures still build + run.
+Workspace test delta from C2.5 baseline: +54 (989 total) —
++8 lexer (six C3 keywords + ident-prefix regression + surface-
+skeleton), +16 parser, +4 resolve (rejection arms), +14 types
+(+3 interner / +4 widening + declassify / +5 CT rejections +
+operator-preserve / +2 div), +2 driver pass-tests (c31_*).
+ADR 0019 stays PROPOSED — only the secret-typing slice (D5 +
+D6 + D7 mostly + D13 partially) of the 14 D-decisions is
+landed; ADR flips to ACCEPTED at C3.3 close-out alongside the
+effect_check_query work + main-must-be-effect-free invariant.
+**Phase C3.1 closes here.** Next: C3.2 — effect rows in the
+typed AST + new `sentinel-effect-check` crate +
+`effect_check_query` salsa pass. Estimated 2-3 sessions per
+the ADR 0019 sub-phase split table.
+
+Pre-C3.1 context: **C2.5 landed; Phase C2 closes.** ADR 0017
 flips PROPOSED → ACCEPTED-WITH-AMENDMENTS with all 14
 D-decisions exercised. Four C2.5 deliverables shipped: (a) the
 C2.4 recursive-field-drop gap closed; (b) the Polonius
