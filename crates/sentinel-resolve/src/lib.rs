@@ -1345,6 +1345,43 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         }
     }
 
+    // C4.3 / ADR 0021 D6 (Pass 0e extension): register delegate-
+    // synthesized impls. Each `delegate field: T to Trait;` inside
+    // a class body synthesizes a default impl of Trait for the
+    // enclosing class. The coherence check fires uniformly with
+    // user-written default impls; the body synthesis happens after
+    // user-impl bodies are resolved (Pass 4.5 below). Each
+    // delegate gets an ImplId starting right after the user-impl
+    // count.
+    let mut delegate_meta: Vec<(ImplId, ClassId, usize)> = Vec::new();
+    let mut next_impl_id_u32 = program.impls.len() as u32;
+    for cd in program.classes.iter() {
+        let class_id = *class_table
+            .get(&cd.name)
+            .expect("registered in Pass 0c");
+        for (d_idx, delegate) in cd.delegates.iter().enumerate() {
+            let trait_id = *trait_table.get(&delegate.trait_name).ok_or_else(|| {
+                ResolveError::UndefinedTraitForImpl {
+                    name: delegate.trait_name.clone(),
+                    span: to_source_span(&delegate.trait_name_span),
+                }
+            })?;
+            let target = ImplTarget::Class(class_id);
+            let impl_id = ImplId(next_impl_id_u32);
+            next_impl_id_u32 += 1;
+            if impl_default_table.contains_key(&(trait_id, target)) {
+                return Err(ResolveError::DuplicateDefaultImpl {
+                    trait_name: delegate.trait_name.clone(),
+                    type_name: cd.name.clone(),
+                    span: to_source_span(&delegate.span),
+                });
+            }
+            impl_default_table.insert((trait_id, target), impl_id);
+            impl_meta.push((trait_id, target));
+            delegate_meta.push((impl_id, class_id, d_idx));
+        }
+    }
+
     // Side table: ImplId → its trait's method names in order.
     // Used by `resolve_expr` to find the method_index for
     // `ImplName::method(...)` qualified calls without re-walking
@@ -1597,6 +1634,105 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         });
     }
 
+    // C4.3 / ADR 0021 D6 (Pass 4.5): synthesize delegate impl
+    // bodies. For each registered delegate, build a
+    // ResolvedImplDecl whose methods auto-forward to
+    // `self.field.method(args)` — one per trait method. The
+    // delegate-impl IDs were allocated in Pass 0e (extension);
+    // here we materialise the actual methods + bodies.
+    for (impl_id, class_id, d_idx) in &delegate_meta {
+        let cd = program
+            .classes
+            .iter()
+            .find(|c| {
+                class_table.get(&c.name).copied() == Some(*class_id)
+            })
+            .expect("class registered in Pass 0c");
+        let delegate = &cd.delegates[*d_idx];
+        let trait_id = *trait_table
+            .get(&delegate.trait_name)
+            .expect("validated in Pass 0e");
+        let trait_decl = &resolved_traits[trait_id.0 as usize];
+        let mut methods: Vec<ResolvedImplMethodDef> =
+            Vec::with_capacity(trait_decl.methods.len());
+        for tm in &trait_decl.methods {
+            let self_var_id = VarId(next_var_id);
+            next_var_id += 1;
+            let mut params: Vec<ResolvedParam> =
+                Vec::with_capacity(tm.params.len());
+            for p in &tm.params {
+                let pid = VarId(next_var_id);
+                next_var_id += 1;
+                params.push(ResolvedParam {
+                    id: pid,
+                    mutable: p.mutable,
+                    name: p.name.clone(),
+                    span: p.span.clone(),
+                    ty: p.ty.clone(),
+                });
+            }
+            // Synthesize body: `self.field.method(p1, p2, ...)`.
+            let self_ref = Spanned {
+                kind: ResolvedExprKind::Var(self_var_id),
+                span: delegate.span.clone(),
+            };
+            let field_access = Spanned {
+                kind: ResolvedExprKind::FieldAccess {
+                    target: Box::new(self_ref),
+                    field: delegate.field_name.clone(),
+                    field_span: delegate.field_name_span.clone(),
+                },
+                span: delegate.span.clone(),
+            };
+            let args: Vec<ResolvedExpr> = params
+                .iter()
+                .map(|p| Spanned {
+                    kind: ResolvedExprKind::Var(p.id),
+                    span: delegate.span.clone(),
+                })
+                .collect();
+            let method_call = Spanned {
+                kind: ResolvedExprKind::MethodCall {
+                    target: Box::new(field_access),
+                    method: tm.name.clone(),
+                    method_span: tm.name_span.clone(),
+                    args,
+                },
+                span: delegate.span.clone(),
+            };
+            let body = ResolvedBlock {
+                stmts: Vec::new(),
+                tail: method_call,
+                span: delegate.span.clone(),
+            };
+            methods.push(ResolvedImplMethodDef {
+                visibility: delegate.visibility,
+                name: tm.name.clone(),
+                name_span: tm.name_span.clone(),
+                self_kind: tm.self_kind,
+                self_var_id,
+                params,
+                return_type: tm.return_type.clone(),
+                effect_row: tm.effect_row.clone(),
+                body,
+                span: delegate.span.clone(),
+            });
+        }
+        resolved_impls.push(ResolvedImplDecl {
+            id: *impl_id,
+            name: None,
+            name_span: None,
+            trait_id,
+            trait_name: delegate.trait_name.clone(),
+            trait_name_span: delegate.trait_name_span.clone(),
+            target: ImplTarget::Class(*class_id),
+            type_name: cd.name.clone(),
+            type_name_span: cd.name_span.clone(),
+            methods,
+            span: delegate.span.clone(),
+        });
+    }
+
     Ok(ResolvedProgram {
         fns: resolved_fns,
         fn_signatures: signatures,
@@ -1719,8 +1855,14 @@ fn resolve_class_decl(
     next_var_id: &mut u32,
 ) -> Result<ResolvedClassDecl, ResolveError> {
     // Field list: name uniqueness + type-expr carry-through.
+    // C4.3 / ADR 0021 D6: delegations contribute synthesized
+    // fields here too — `delegate field: T to Trait;` produces a
+    // regular `field: T` slot alongside the auto-forwarder impl.
+    // Collisions between explicit fields + delegate fields fire
+    // the standard DuplicateClassField diagnostic.
     let mut field_names: HashSet<String> = HashSet::new();
-    let mut fields: Vec<ResolvedClassField> = Vec::with_capacity(cd.fields.len());
+    let mut fields: Vec<ResolvedClassField> =
+        Vec::with_capacity(cd.fields.len() + cd.delegates.len());
     for f in &cd.fields {
         if !field_names.insert(f.name.clone()) {
             return Err(ResolveError::DuplicateClassField {
@@ -1735,6 +1877,22 @@ fn resolve_class_decl(
             name_span: f.name_span.clone(),
             ty: f.ty.clone(),
             span: f.span.clone(),
+        });
+    }
+    for delegate in &cd.delegates {
+        if !field_names.insert(delegate.field_name.clone()) {
+            return Err(ResolveError::DuplicateClassField {
+                class_name: cd.name.clone(),
+                field_name: delegate.field_name.clone(),
+                span: to_source_span(&delegate.field_name_span),
+            });
+        }
+        fields.push(ResolvedClassField {
+            visibility: delegate.visibility,
+            name: delegate.field_name.clone(),
+            name_span: delegate.field_name_span.clone(),
+            ty: delegate.ty.clone(),
+            span: delegate.span.clone(),
         });
     }
 
@@ -3606,6 +3764,71 @@ mod tests {
             err,
             ResolveError::UndefinedTraitMethod { ref impl_name, ref method_name, .. }
                 if impl_name == "Doubling" && method_name == "missing"
+        ));
+    }
+
+    // ----- C4.3: delegate synthesis -----
+
+    #[test]
+    fn delegate_synthesizes_impl_and_field() {
+        // `delegate writer: F to W` inside class L synthesizes:
+        //   - a field `writer: F` on L
+        //   - a default impl of W for L with the auto-forwarder
+        let p = resolve_ok(
+            "trait W { fn write(self: &mut Self, d: i64) -> i64; }\nclass F { let c: i64; init() { self.c = 0; 0 } }\nimpl as W for F { fn write(self: &mut Self, d: i64) -> i64 { self.c = self.c + d; self.c } }\nclass L { delegate writer: F to W; init(w: F) { self.writer = w; 0 } }\nfn main() -> i64 { 0 }",
+        );
+        // Class L's resolved fields include the synthesized
+        // delegate field.
+        let l = p.classes.iter().find(|c| c.name == "L").expect("class L");
+        assert_eq!(l.fields.len(), 1);
+        assert_eq!(l.fields[0].name, "writer");
+        // resolved_impls has 2 entries: user `impl as W for F` +
+        // synthesized `impl as W for L` (from the delegate).
+        assert_eq!(p.impls.len(), 2);
+        let synth = p
+            .impls
+            .iter()
+            .find(|i| i.type_name == "L")
+            .expect("synthesized impl for L");
+        assert!(synth.name.is_none()); // default impl
+        assert_eq!(synth.methods.len(), 1);
+        assert_eq!(synth.methods[0].name, "write");
+    }
+
+    #[test]
+    fn delegate_collides_with_user_impl_errors() {
+        // Both an explicit `impl as W for L` AND a `delegate ... to W`
+        // would produce two default impls of (W, L). DuplicateDefaultImpl.
+        let err = resolve_err(
+            "trait W { fn write(self: &mut Self, d: i64) -> i64; }\nclass F { let c: i64; init() { self.c = 0; 0 } }\nimpl as W for F { fn write(self: &mut Self, d: i64) -> i64 { d } }\nclass L { delegate writer: F to W; init(w: F) { self.writer = w; 0 } }\nimpl as W for L { fn write(self: &mut Self, d: i64) -> i64 { d } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::DuplicateDefaultImpl { ref trait_name, ref type_name, .. }
+                if trait_name == "W" && type_name == "L"
+        ));
+    }
+
+    #[test]
+    fn delegate_to_undefined_trait_errors() {
+        let err = resolve_err(
+            "class L { delegate writer: i64 to Missing; init() { 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::UndefinedTraitForImpl { ref name, .. } if name == "Missing"
+        ));
+    }
+
+    #[test]
+    fn delegate_field_collides_with_let_field_errors() {
+        // Class declares `let writer: i64;` AND `delegate writer: F to W;`.
+        let err = resolve_err(
+            "trait W { fn write(self: &mut Self, d: i64) -> i64; }\nclass F { let c: i64; init() { self.c = 0; 0 } }\nimpl as W for F { fn write(self: &mut Self, d: i64) -> i64 { d } }\nclass L { let writer: i64; delegate writer: F to W; init() { self.writer = 0; 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(
+            err,
+            ResolveError::DuplicateClassField { ref field_name, .. } if field_name == "writer"
         ));
     }
 

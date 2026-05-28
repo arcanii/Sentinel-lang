@@ -1,0 +1,43 @@
+// C4.3 / ADR 0021 D6: phase-go program for delegation. Class
+// Logger delegates Writer to its inner FileSink field — the
+// compiler synthesizes a default `impl as Writer for Logger`
+// that auto-forwards `write` to `self.writer.write(data)`.
+//
+// Trace: l starts with writer.count=0. l.write(42) routes via
+// the synthesized impl → self.writer.write(42) → FileSink's
+// Writer impl sets count = 0 + 42 = 42. Exit 42.
+//
+// Expected: exit code 42, no stdout.
+
+trait Writer {
+    fn write(self: &mut Self, data: i64) -> i64;
+}
+
+class FileSink {
+    let count: i64;
+    pub init() {
+        self.count = 0;
+        0
+    }
+}
+
+impl as Writer for FileSink {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        self.count = self.count + data;
+        self.count
+    }
+}
+
+class Logger {
+    delegate writer: FileSink to Writer;
+    pub init(w: FileSink) {
+        self.writer = w;
+        0
+    }
+}
+
+fn main() -> i64 {
+    let s: FileSink = FileSink::init();
+    let mut l: Logger = Logger::init(s);
+    l.write(42)
+}

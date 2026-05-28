@@ -47,10 +47,10 @@
 //! until parser ergonomics demand it.
 
 use sentinel_ast::{
-    BinOp, Block, ClassDecl, ClassField, CmpOp, EffectDecl, Expr, ExprKind, FieldInit, FnDef,
-    HandlerArm, ImplDecl, ImplMethodDef, InitDef, LogicOp, MethodDef, OpDecl, Param, Program,
-    ReturnArm, SelfKind, Span, Spanned, Stmt, StmtKind, StructDecl, StructField, TraitDecl,
-    TraitMethodSig, TypeExpr, TypeExprKind, TypeParam, UnaryOp, Visibility,
+    BinOp, Block, ClassDecl, ClassField, CmpOp, DelegateDecl, EffectDecl, Expr, ExprKind,
+    FieldInit, FnDef, HandlerArm, ImplDecl, ImplMethodDef, InitDef, LogicOp, MethodDef, OpDecl,
+    Param, Program, ReturnArm, SelfKind, Span, Spanned, Stmt, StmtKind, StructDecl, StructField,
+    TraitDecl, TraitMethodSig, TypeExpr, TypeExprKind, TypeParam, UnaryOp, Visibility,
 };
 
 use crate::{lex, LexError, TokenKind};
@@ -529,6 +529,7 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         let mut init: Option<InitDef> = None;
         let mut methods = Vec::new();
+        let mut delegates: Vec<DelegateDecl> = Vec::new();
 
         while self.peek_kind() != Some(TokenKind::RBrace) {
             // Optional `pub` visibility prefix per ADR 0022 D2.
@@ -550,11 +551,14 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Fn) => {
                     methods.push(self.parse_method_decl(visibility)?);
                 }
+                Some(TokenKind::Delegate) => {
+                    delegates.push(self.parse_delegate_decl(visibility)?);
+                }
                 Some(other) => {
                     let t = self.peek().expect("peeked");
                     return Err(ParseError::UnexpectedToken {
                         got: format!("{other:?}"),
-                        expected: "`let`, `init`, or `fn` inside class body",
+                        expected: "`let`, `init`, `fn`, or `delegate` inside class body",
                         span: to_source_span(&t.span),
                     });
                 }
@@ -575,6 +579,7 @@ impl<'a> Parser<'a> {
             fields,
             init,
             methods,
+            delegates,
             span: class_start..rbrace_end,
         })
     }
@@ -678,6 +683,151 @@ impl<'a> Parser<'a> {
             name_span,
             ty,
             span: let_start..semi_end,
+        })
+    }
+
+    /// Parse a C4.3 delegation declaration inside a class body
+    /// per ADR 0021 D6:
+    ///
+    /// ```text
+    /// delegate_decl = 'delegate' Ident ':' type_expr 'to' Ident ';'
+    /// ```
+    ///
+    /// `to` is a positional Ident (per C4.0 lexer state — kept
+    /// as a plain Ident per the smallest-surface principle).
+    /// Optional `pub` prefix is consumed by
+    /// [`parse_optional_visibility`] before this is called.
+    /// Resolve synthesizes the auto-forwarder impl at name-
+    /// resolution time; downstream passes see a regular impl
+    /// block + field.
+    fn parse_delegate_decl(
+        &mut self,
+        visibility: Visibility,
+    ) -> Result<DelegateDecl, ParseError> {
+        let kw_start = match self.peek_kind() {
+            Some(TokenKind::Delegate) => self.advance().expect("peeked").span.start,
+            _ => unreachable!("called only after peek_kind() == Delegate"),
+        };
+
+        let (field_name, field_name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "field name after `delegate`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "field name after `delegate`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        match self.peek_kind() {
+            Some(TokenKind::Colon) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`:` after delegate field name",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`:` after delegate field name",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let ty = self.parse_type()?;
+
+        // Positional `to` keyword (a plain Ident at the lexer
+        // level per C4.0 D11).
+        match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident && &self.src[t.span.clone()] == "to" => {
+                self.advance();
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "`to` after delegate type",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`to` after delegate type",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let (trait_name, trait_name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "trait name after `to`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "trait name after `to`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        let semi_end = match self.peek_kind() {
+            Some(TokenKind::Semi) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`;` after delegate declaration",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`;` after delegate declaration",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        Ok(DelegateDecl {
+            visibility,
+            field_name,
+            field_name_span,
+            ty,
+            trait_name,
+            trait_name_span,
+            span: kw_start..semi_end,
         })
     }
 
@@ -4919,6 +5069,107 @@ mod tests {
         assert_eq!(p.impls.len(), 2);
         assert_eq!(p.impls[0].name, None);
         assert_eq!(p.impls[1].name.as_deref(), Some("Doubling"));
+    }
+
+    // ========================================================================
+    // C4.3 (delegation) tests per ADR 0021 D6. `delegate field: T to Trait;`
+    // inside a class body. `to` is recognised positionally (a plain Ident
+    // token per C4.0 D11).
+    // ========================================================================
+
+    #[test]
+    fn parse_class_decl_one_delegate() {
+        let p = parse_ok_program(
+            "class Logger { delegate writer: FileSink to Writer; init() { 0 } }\nfn main() -> i64 { 0 }",
+        );
+        let c = &p.classes[0];
+        assert_eq!(c.delegates.len(), 1);
+        let d = &c.delegates[0];
+        assert_eq!(d.field_name, "writer");
+        assert_eq!(d.ty.kind.to_string(), "FileSink");
+        assert_eq!(d.trait_name, "Writer");
+        assert_eq!(d.visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn parse_class_decl_pub_delegate() {
+        let p = parse_ok_program(
+            "class Logger { pub delegate writer: FileSink to Writer; init() { 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.classes[0].delegates[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn parse_class_decl_two_delegates() {
+        let p = parse_ok_program(
+            "class Pipe { delegate w: FileSink to Writer; delegate r: FileSrc to Reader; init() { 0 } }\nfn main() -> i64 { 0 }",
+        );
+        let c = &p.classes[0];
+        assert_eq!(c.delegates.len(), 2);
+        assert_eq!(c.delegates[0].field_name, "w");
+        assert_eq!(c.delegates[0].trait_name, "Writer");
+        assert_eq!(c.delegates[1].field_name, "r");
+        assert_eq!(c.delegates[1].trait_name, "Reader");
+    }
+
+    #[test]
+    fn parse_class_decl_delegate_missing_to_rejects() {
+        let err = parse(
+            "class Logger { delegate writer: FileSink Writer; init() { 0 } }\nfn main() -> i64 { 0 }",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if expected.contains("`to`")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_class_decl_delegate_missing_trait_rejects() {
+        let err = parse(
+            "class Logger { delegate writer: FileSink to ; init() { 0 } }\nfn main() -> i64 { 0 }",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if expected.contains("trait name after `to`")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_class_decl_delegate_missing_semi_rejects() {
+        let err = parse(
+            "class Logger { delegate writer: FileSink to Writer init() { 0 } }\nfn main() -> i64 { 0 }",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if expected.contains("`;` after delegate")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_class_decl_full_surface_with_delegate() {
+        // Mixed class items: field + delegate + init + method.
+        let p = parse_ok_program(
+            r#"
+            class Logger {
+                let count: i64;
+                delegate writer: FileSink to Writer;
+                init(w: FileSink) {
+                    self.count = 0;
+                    0
+                }
+                pub fn tally(self: &Self) -> i64 { self.count }
+            }
+            fn main() -> i64 { 0 }
+            "#,
+        );
+        let c = &p.classes[0];
+        assert_eq!(c.fields.len(), 1);
+        assert_eq!(c.delegates.len(), 1);
+        assert!(c.init.is_some());
+        assert_eq!(c.methods.len(), 1);
     }
 
     #[test]

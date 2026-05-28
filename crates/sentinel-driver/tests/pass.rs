@@ -1192,3 +1192,50 @@ fn c42_duplicate_impl_name_rejects_at_resolve() {
         "expected duplicate_impl_name; got: {stderr}"
     );
 }
+
+// ============================================================================
+// C4.3 per ADR 0021 D6: delegation. `delegate field: T to Trait;`
+// inside a class body synthesizes a default impl of Trait for the
+// class that auto-forwards every trait method to
+// `self.field.method(args)`. Resolved at name-resolution time; the
+// synthesized impl flows through types + codegen unchanged.
+// ============================================================================
+
+#[test]
+fn pass_c43_go_no_go() {
+    // ADR 0021 D6 phase-go: Logger delegates Writer to FileSink.
+    // `l.write(42)` routes via the synthesized default impl →
+    // `self.writer.write(42)` → FileSink's Writer impl writes 42
+    // and returns count = 42.
+    let r = build_and_run("c43_go_no_go.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn c43_delegate_collides_with_impl_rejects_at_resolve() {
+    // Coherence: both a delegate AND an explicit
+    // `impl as Trait for Class` synthesize default impls of the
+    // same (Trait, Class). DuplicateDefaultImpl fires.
+    let out = build_ui_fixture("c43_delegate_collides_with_impl.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("duplicate_default_impl"),
+        "expected duplicate_default_impl; got: {stderr}"
+    );
+}
+
+#[test]
+fn c43_delegate_undefined_trait_rejects_at_resolve() {
+    // `delegate field: T to UnknownTrait;` — the trait name
+    // resolves through the impl-trait lookup path; the same
+    // UndefinedTraitForImpl variant fires.
+    let out = build_ui_fixture("c43_delegate_undefined_trait.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("undefined_trait_for_impl"),
+        "expected undefined_trait_for_impl; got: {stderr}"
+    );
+}

@@ -543,6 +543,13 @@ pub struct ClassDecl {
     pub fields: Vec<ClassField>,
     pub init: Option<InitDef>,
     pub methods: Vec<MethodDef>,
+    /// C4.3 / ADR 0021 D6: delegation declarations. Each
+    /// `delegate field: T to Trait;` synthesizes a default impl
+    /// of `Trait` for the enclosing class that forwards every
+    /// trait method to `self.field.method(args)`. Resolved at
+    /// resolve time per the C4.3 design (treat delegation as
+    /// syntactic sugar over impl + field).
+    pub delegates: Vec<DelegateDecl>,
     pub span: Span,
 }
 
@@ -589,6 +596,35 @@ pub struct MethodDef {
     pub return_type: TypeExpr,
     pub effect_row: Vec<Spanned<String>>,
     pub body: Block,
+    pub span: Span,
+}
+
+/// A C4.3+ delegation declaration inside a class body per ADR
+/// 0021 D6: `('pub')? 'delegate' Ident ':' type 'to' Ident ';'`.
+/// Combines a field declaration (`field_name: ty`) with a trait
+/// auto-forwarding to that field. At resolve time, each delegate
+/// expands into:
+///   1. A regular [`ClassField`]-equivalent (the inner field).
+///   2. A synthesized default impl of `trait_name` for the
+///      enclosing class — one method per trait method, body
+///      `self.field_name.method(args)`.
+///
+/// `to` is a positional Ident (the C4.0 lexer keeps it as a plain
+/// Ident per the smallest-surface principle); the parser
+/// recognises it after the type-expression.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DelegateDecl {
+    pub visibility: Visibility,
+    /// Inner field name (e.g., `writer` in
+    /// `delegate writer: FileSink to Writer;`).
+    pub field_name: String,
+    pub field_name_span: Span,
+    /// The inner field's type (e.g., `FileSink`).
+    pub ty: TypeExpr,
+    /// The trait whose methods get auto-forwarded.
+    pub trait_name: String,
+    pub trait_name_span: Span,
+    /// Span covering the full `delegate ... ;` form.
     pub span: Span,
 }
 

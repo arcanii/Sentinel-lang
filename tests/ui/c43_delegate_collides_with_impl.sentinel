@@ -1,0 +1,40 @@
+// C4.3 / ADR 0021 D6 + D7 (scope-local coherence): a class with
+// both `delegate field: T to Trait` AND an explicit
+// `impl as Trait for Class` produces two default impls of
+// (Trait, Class). Coherence rejection.
+//
+// Expected: snc rejects with `sentinel::resolve::duplicate_default_impl`.
+
+trait Writer {
+    fn write(self: &mut Self, data: i64) -> i64;
+}
+
+class FileSink {
+    let count: i64;
+    pub init() {
+        self.count = 0;
+        0
+    }
+}
+
+impl as Writer for FileSink {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        data
+    }
+}
+
+class Logger {
+    delegate writer: FileSink to Writer;
+    pub init(w: FileSink) {
+        self.writer = w;
+        0
+    }
+}
+
+impl as Writer for Logger {
+    fn write(self: &mut Self, data: i64) -> i64 {
+        data
+    }
+}
+
+fn main() -> i64 { 0 }

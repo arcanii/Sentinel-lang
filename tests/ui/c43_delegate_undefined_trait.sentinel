@@ -1,0 +1,15 @@
+// C4.3 / ADR 0021 D6: `delegate field: T to UnknownTrait;` —
+// the trait name resolves through the same path as
+// `impl as Trait for ...`. Undefined trait rejection.
+//
+// Expected: snc rejects with `sentinel::resolve::undefined_trait_for_impl`.
+
+class Logger {
+    delegate writer: i64 to Missing;
+    pub init() {
+        self.writer = 0;
+        0
+    }
+}
+
+fn main() -> i64 { 0 }
