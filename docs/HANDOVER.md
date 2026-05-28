@@ -90,6 +90,7 @@ C1.3. See STATE.md Section C.
 **ADR 0023 PROPOSED — concrete C4.2 trait + impl surface — docs-only.** Twelve D-decisions covering trait declarations (D1+D2), default + named impl block grammar (D3+D4), three dispatch paths (D5: receiver-typed + qualified-named + bounded-generic), method-call resolution (D6), `Self` resolution via `Type::TraitSelf(TraitId)` (D7), typing pipeline (D8: two new resolve passes + one new types pass), per-impl codegen with witness tables (D9), out-of-scope list (D10), lexer state recap (D11), and the c42_go_no_go phase-go (D12). Bounded-generic + named-impl pairing deferred at C4.2 minimum per D5/D10 amendment — defaults only for Path 3.
 **Phase C4.2 (1/N) — trait + impl AST + parser per ADR 0023 D1+D3+D4 — complete.** Trait declarations + default-and-named impl blocks + `ImplName::method(args)` qualified calls parse end-to-end at AST + parser. Downstream resolve rejects with TraitDeclNotYet / ImplDeclNotYet / QualifiedCallNotYet diagnostics until C4.2 (2/N) lands the impl table + dispatch + codegen. +14 tests (1138 total).
 **Phase C4.2 (2/N) — resolve / types / codegen wiring + Path 1 + Path 2 dispatch per ADR 0023 D5+D6+D8+D9 — complete. ADR 0023 → ACCEPTED-WITH-AMENDMENTS.** Trait + impl declarations flow through the full pipeline. Receiver-typed dispatch (`s.write(10)` → default impl when class has no class-method `write`) and qualified-named dispatch (`Doubling::write(&mut s, 16)` → named impl) ship end-to-end. Three amendments at C4.2 close: A1 D5 Path 3 (bounded-generic dispatch) DEFERRED — needs `<W: Writer>` bounded-generic surface; A2 D9 witness-table values not emitted (scaffolding for Path 3); A3 D7 `Type::TraitSelf(TraitId)` interner SHIPPED but unused (params/returns don't reference Self, only positional via self_kind — mirrors C4.1 A2). +16 tests (1154 total). ADR 0023 D12 phase-go (FileSink with default + named Doubling Writer impls) runs at exit 42.
+**Phase C4.3 — delegation auto-forwarders per ADR 0021 D6 — complete.** `delegate field: T to Trait;` inside a class body synthesizes a default impl of `Trait` for the class that auto-forwards every trait method to `self.field.method(args)`. Synthesis happens entirely at the resolve layer — Pass 0e extension registers delegate impls alongside user impls (coherence collision = DuplicateDefaultImpl); Pass 3 (resolve_class_decl) adds the synthesized field; new Pass 4.5 synthesizes the per-trait-method auto-forwarder bodies. Types + codegen unchanged. No detail ADR — lands under ADR 0021 D6 + C4.0 D11 lexer reservation. +14 tests (1168 total). c43_go_no_go phase-go (Logger delegates Writer to FileSink; `l.write(42)` returns 42) runs at exit 42.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1049,58 +1050,62 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C4.3 — delegation OR Path 3 bounded-generic follow-on)
+### 0.2 Next session opening (C4.4 — structured concurrency + Async effect + scheduler)
 
-Resume at **C4.3 (delegation)** per ADR 0021 D6 + D14, or take
-the **Path 3 bounded-generic follow-on** per the ADR 0023 A1
-amendment. Both are defensible next steps; C4.3 is on the
-canonical phase sequence, and Path 3 fills the deferred slice
-of C4.2.
+Resume at **C4.4 (structured concurrency)** per ADR 0021 D8 +
+D14. This is the largest single new runtime component since
+Phase A's broker — warrants writing **ADR 0024 PROPOSED**
+(scheduler + Async effect) at sub-phase open per the per-sub-
+phase ADR norm.
 
-**C4.2 (2/N) closed**: receiver-typed (`s.write(10)`) and
-qualified-named (`Doubling::write(&mut s, 16)`) dispatch ship
-end-to-end. ADR 0023 → ACCEPTED-WITH-AMENDMENTS. The
-c42_go_no_go phase-go exits 42.
+**C4.3 closed**: delegation auto-forwarders synthesize at the
+resolve layer; `l.write(42)` routes through the synthesized
+`impl as Writer for Logger` to `self.writer.write(42)`. Types +
+codegen unchanged. The c43_go_no_go phase-go exits 42.
 
-**Option A — C4.3 delegation** (per ADR 0021 D6):
+**C4.4 deliverables** (per ADR 0021 D8):
 
-  - Surface: `delegate inner: T to Trait;` inside a class
-    body. Auto-forwards every Trait method to
-    `self.inner.method(...)`.
-  - Lexer: `delegate` keyword already reserved at C4.0; `to`
-    is positional (an Ident token recognised by the
-    delegation parser).
-  - Parser: `parse_class_decl` extension to recognise
-    `delegate` items alongside fields / init / methods.
-  - Resolve: ResolvedDelegateDecl. Per-delegation impl
-    expansion happens at types or codegen — TBD which layer
-    owns it.
-  - Codegen: synthesise one method per Trait method
-    forwarding to the delegate field. The shapes match Path
-    1 (receiver-typed) dispatch — direct call into the
-    delegate's `inner.method(args)`.
-  - Estimate: 1 session per ADR 0021 D14.
-  - Detail ADR: write **ADR 0024** PROPOSED at sub-phase
-    open per the per-sub-phase ADR norm.
+  - Surface: `scope concurrent { spawn expr; spawn expr; ... }`
+    creates a task-cancellation boundary; `task.await` blocks
+    until a spawned task produces a value.
+  - Lexer: `scope`, `spawn`, `await` keywords already reserved
+    at C4.0; `concurrent` is positional (an Ident token).
+  - AST: ExprKind::Scope { mode, body } + ExprKind::Spawn
+    { expr } + ExprKind::Await { task }.
+  - Resolve: pass-through with scope/spawn/await variants;
+    binding rules for spawned task values.
+  - Types: `Async` effect declaration auto-registered; Task<T>
+    intrinsic type (or special-cased monomorphic representation);
+    `spawn expr` requires `Async` in the surrounding effect row;
+    `task.await` produces `T` and discharges `Async`.
+  - Runtime: NEW work-stealing scheduler crate (substantial —
+    on par with sentinel-broker in scope). Per-thread worker
+    queues, task lifetime tracking, scope-bounded cancellation
+    propagation. Cancellation on early scope exit per ADR 0021
+    D8.
+  - Codegen: lower spawn to scheduler-submit calls; lower await
+    to scheduler-blocking-receive calls; scope { ... } emits a
+    cancellation barrier at exit.
+  - Phase-go: a producer/consumer fixture with `scope
+    concurrent` driving two spawn-then-await tasks.
+  - Estimate: 2-3 sessions per ADR 0021 D14.
+  - Detail ADR: **ADR 0024 PROPOSED** before any code.
 
-**Option B — Path 3 bounded-generic follow-on** (per ADR 0023
-A1 amendment):
+**Alternative — Path 3 bounded-generic follow-on** (per ADR
+0023 A1 amendment):
 
-  - Parser: `fn use_writer<W: Writer>(w: &mut W) -> i64` —
-    new `<T: Bound>` syntax in `parse_type_params`.
-  - AST: `TypeParam.bounds: Vec<Spanned<String>>` (or
-    similar).
+  - Parser: `fn use_writer<W: Writer>(w: &mut W) -> i64` — new
+    `<T: Bound>` syntax in `parse_type_params`.
+  - AST: `TypeParam.bounds: Vec<Spanned<String>>`.
   - Resolve: link bound name → TraitId.
-  - Types: bounded `Type::TypeParam` representation; the
-    bound is used at call sites to validate that the
-    concrete monomorphic instance satisfies the bound.
+  - Types: bounded `Type::TypeParam` representation; bound
+    used at call sites to validate that the concrete mono
+    instance satisfies the bound.
   - Codegen: per-instance witness-table GEP + indirect call
     OR (simpler) per-instance specialisation via the C1.7.5
     monomorphisation worklist with the trait's default impl
-    inlined at the call site. The witness-table emission
-    from ADR 0023 D9 lands here.
-  - Estimate: ~1 session (it's a focused extension of the
-    C1.7 monomorphisation machinery).
+    inlined at the call site.
+  - Estimate: ~1 session.
   - Detail ADR: amend ADR 0023 OR write a follow-on ADR.
 
 **C4.1 follow-ons remain available** (none blocking C4.3):
@@ -1545,29 +1550,21 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start.
-    Last work: **C4.2 (2/N) — resolve / types / codegen wired up
-    for traits + impls; ADR 0023 → ACCEPTED-WITH-AMENDMENTS.**
-    TraitId / ImplId interners + ImplTarget enum + ResolvedTraitDecl
-    / ResolvedImplDecl parallel-tree types + Pass 0d (trait sigs)
-    + Pass 0e (impl coherence: default by (TraitId, ImplTarget),
-    named by ImplName) + Pass 4 (impl bodies). Drops the three
-    NotYet rejections; QualifiedCall now routes through
-    impl_named_table → (ImplId, method_index). Types: Type::TraitSelf
-    + TraitData + ImplData + Pass 3c/3d/Pass 6; D6 method-call
-    algorithm extends class lookup with default-impl fallback;
-    new check_qualified_call_expr validates receiver type.
-    Codegen: per-impl LLVM fn declarations (mangled
-    `default__Type__Trait__method` or `Name__Type__Trait__method`)
-    + new compile_impl method-emission loop; ImplMethodCall +
-    QualifiedCall lower to direct calls. Borrow-check fix: class
-    MethodCall + ImplMethodCall receivers walk via
-    walk_expr_lvalue (non-consuming) — matches FieldAccess +
-    Index semantics. Three amendments: A1 D5 Path 3 (bounded-
-    generic dispatch) DEFERRED — needs `<W: Writer>` surface;
-    A2 D9 witness tables not emitted (scaffolding for Path 3);
-    A3 D7 Type::TraitSelf SHIPPED but unused at runtime.
-    +16 tests (1154 active workspace). c42_go_no_go phase-go
-    runs at exit 42.
+    Last work: **C4.3 — delegation auto-forwarders per ADR 0021
+    D6.** `delegate field: T to Trait;` inside a class body
+    synthesizes a default impl of Trait for the class that
+    auto-forwards every trait method to
+    `self.field.method(args)`. AST: DelegateDecl +
+    ClassDecl.delegates. Parser: parse_delegate_decl with `to`
+    recognised positionally as an Ident. Resolve: Pass 0e
+    extension registers delegate impls (coherence collision
+    fires DuplicateDefaultImpl); Pass 3 synthesizes the
+    delegate field; new Pass 4.5 builds the per-trait-method
+    auto-forwarder bodies. Types + codegen unchanged. No detail
+    ADR — lands under ADR 0021 D6 + C4.0 D11 lexer reservation.
+    +14 tests (1168 active workspace). c43_go_no_go phase-go
+    (Logger delegates Writer to FileSink; `l.write(42)`) exits
+    42.
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1597,7 +1594,7 @@ For pasting into a fresh chat to bootstrap context:
     types + codegen for traits + impls (Path 1 receiver-typed
     + Path 2 qualified-named dispatch). 1154 active workspace
     tests + 1 doctest.
-    **Thirty-four go/no-go programs run end-to-end + 6 UI rejections:** c05_go_no_go
+    **Thirty-five go/no-go programs run end-to-end + 8 UI rejections:** c05_go_no_go
     (C1.3 bool): "10";
     c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
     nullable): "142"; c16_go_no_go (C1.6 array): "15";
@@ -1679,7 +1676,16 @@ For pasting into a fresh chat to bootstrap context:
     (UI: two default impls of (Writer, FileSink) →
     duplicate_default_impl rejection): snc exit 1**;
     **c42_duplicate_impl_name (UI: two `Doubling` named impls
-    → duplicate_impl_name rejection): snc exit 1**, exit 0.
+    → duplicate_impl_name rejection): snc exit 1**;
+    **c43_go_no_go (C4.3 ADR 0021 D6 phase-go: Logger
+    delegates Writer to FileSink; `l.write(42)` routes through
+    the synthesized auto-forwarder → 42): exit 42**;
+    **c43_delegate_collides_with_impl (UI: delegate + explicit
+    impl both produce default impl of (Writer, Logger) →
+    duplicate_default_impl rejection): snc exit 1**;
+    **c43_delegate_undefined_trait (UI: `delegate field: T to
+    Missing;` → undefined_trait_for_impl rejection): snc exit
+    1**, exit 0.
 
     Pipeline at C3.1: **parse_query → resolve_query →
     check_query → borrow_check_query → codegen** (unchanged

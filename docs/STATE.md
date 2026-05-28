@@ -12,14 +12,84 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C4.2 (2/N): resolve / types / codegen wired up
-for traits + impls; `s.write(10)` + `Doubling::write(&mut s, 16)`
-ship end-to-end.** ADR 0023 → ACCEPTED-WITH-AMENDMENTS. Second
-of the C4.2 sub-iterations: trait + impl declarations flow
-through the full pipeline. Receiver-typed dispatch (Path 1) and
-qualified-named dispatch (Path 2) run end-to-end. Path 3
-bounded-generic dispatch is the amendment — DEFERRED pending
-`<W: Writer>` bounded-generic surface.
+Last updated: **C4.3: delegation auto-forwarders per ADR 0021 D6.**
+`delegate field: T to Trait;` inside a class body synthesizes a
+default impl of `Trait` for the class that auto-forwards every
+trait method to `self.field.method(args)`. The synthesis happens
+entirely at the resolve layer — types + codegen flow through the
+existing per-impl machinery (no changes). c43_go_no_go phase-go
+runs at exit 42. No detail ADR — C4.3 lands under ADR 0021 D6 +
+the existing `delegate` lexer reservation from C4.0 D11.
+
+**AST additions**:
+- `DelegateDecl { visibility, field_name, field_name_span, ty,
+  trait_name, trait_name_span, span }` — the surface form.
+- `ClassDecl.delegates: Vec<DelegateDecl>` alongside fields /
+  init / methods.
+
+**Parser additions**: `parse_delegate_decl` invoked from
+`parse_class_decl`'s loop on `TokenKind::Delegate`. Grammar:
+`('pub')? 'delegate' Ident ':' type 'to' Ident ';'`. `to` is a
+positional Ident (the lexer keeps it as a plain Ident per C4.0
+D11). Three new rejections fire via UnexpectedToken with clear
+"expected" text: missing `to`, missing trait name, missing `;`.
+
+**Resolve additions**: Pass 0e extension registers
+delegate-synthesized impls alongside user impls in
+`impl_default_table` — coherence collision between a delegate
+and a user `impl as Trait for Class` fires the existing
+DuplicateDefaultImpl rejection. Pass 3 (`resolve_class_decl`)
+extends the field-uniqueness loop to also walk delegates,
+adding a synthesized `ResolvedClassField` per delegate (with
+DuplicateClassField on collision against an explicit `let`
+field). Pass 4.5 (NEW) synthesizes the per-delegate
+`ResolvedImplDecl` — one ResolvedImplMethodDef per trait
+method, body = `self.field.method(args)` constructed as a
+`ResolvedExprKind::MethodCall` on a `FieldAccess` on `Var(self)`.
+Each synthesized method allocates a new self VarId + per-param
+VarIds via the shared `next_var_id` counter.
+
+**No types / codegen changes**: the synthesized
+ResolvedImplDecl flows through Pass 0d/3c/3d/Pass 6 (types)
+and Pass 1/compile_impl (codegen) without modification. The
+synthesized impl is indistinguishable from a user-written
+`impl as Trait for Class` from those layers' perspective.
+
+**Two new C4.3 fixtures + two UI fixtures**:
+- `c43_go_no_go.sentinel` (ADR 0021 D6 phase-go): Logger class
+  with `delegate writer: FileSink to Writer`; FileSink has the
+  default Writer impl. `l.write(42)` routes via the synthesized
+  forwarder to `self.writer.write(42)` → FileSink's Writer
+  impl → count = 42. Exit 42.
+- `c43_delegate_collides_with_impl.sentinel` (UI): Logger has
+  both `delegate writer: FileSink to Writer` AND
+  `impl as Writer for Logger` →
+  `sentinel::resolve::duplicate_default_impl`.
+- `c43_delegate_undefined_trait.sentinel` (UI): `delegate
+  field: T to Missing;` where Missing isn't declared →
+  `sentinel::resolve::undefined_trait_for_impl`.
+
+Workspace test delta from C4.2 close: +14 (1168 total) — +7
+parser tests (one-delegate / pub-delegate / two-delegates /
+missing-to / missing-trait / missing-semi / full-surface-with-
+delegate) + +4 resolve tests (synthesizes-impl-and-field /
+collides-with-user-impl / undefined-trait / field-collides-with-
+let) + +3 driver tests (c43_go_no_go + 2 UI rejections).
+**Phase C4.3 closes here.** Next: **Phase C4.4** — structured
+concurrency (scope/spawn/await + Async effect + work-stealing
+scheduler) per ADR 0021 D8 + D14. The scheduler warrants its
+own detail ADR (ADR 0024) at sub-phase open per the per-sub-
+phase ADR norm.
+
+Pre-C4.3 context: **C4.2 (2/N): resolve / types / codegen
+wired up for traits + impls; `s.write(10)` +
+`Doubling::write(&mut s, 16)` ship end-to-end.** ADR 0023 →
+ACCEPTED-WITH-AMENDMENTS. Second of the C4.2 sub-iterations:
+trait + impl declarations flow through the full pipeline.
+Receiver-typed dispatch (Path 1) and qualified-named dispatch
+(Path 2) run end-to-end. Path 3 bounded-generic dispatch is
+the amendment — DEFERRED pending `<W: Writer>` bounded-generic
+surface.
 
 **Resolve additions**: `TraitId(u32)` + `ImplId(u32)` interners.
 `ResolvedTraitDecl` / `ResolvedTraitMethodSig` /
