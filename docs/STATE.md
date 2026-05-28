@@ -12,12 +12,137 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C4.2 (1/N): trait + impl AST + parser landed per
-ADR 0023 D1+D3+D4.** ADR 0023 stays PROPOSED. First of the C4.2
-sub-iterations: trait declarations + impl blocks (default +
-named forms) + `ImplName::method(args)` qualified calls parse
-end-to-end at the AST + parser layer. Downstream resolve
-rejects them with three new "not yet" diagnostics —
+Last updated: **C4.2 (2/N): resolve / types / codegen wired up
+for traits + impls; `s.write(10)` + `Doubling::write(&mut s, 16)`
+ship end-to-end.** ADR 0023 → ACCEPTED-WITH-AMENDMENTS. Second
+of the C4.2 sub-iterations: trait + impl declarations flow
+through the full pipeline. Receiver-typed dispatch (Path 1) and
+qualified-named dispatch (Path 2) run end-to-end. Path 3
+bounded-generic dispatch is the amendment — DEFERRED pending
+`<W: Writer>` bounded-generic surface.
+
+**Resolve additions**: `TraitId(u32)` + `ImplId(u32)` interners.
+`ResolvedTraitDecl` / `ResolvedTraitMethodSig` /
+`ResolvedTraitParam` (sig-only params, no VarIds) /
+`ResolvedImplDecl` / `ResolvedImplMethodDef` parallel-tree
+types. `ImplTarget { Class(ClassId), Struct(StructId) }` for
+the impl's `for Type` clause. `ResolvedProgram.traits:
+Vec<ResolvedTraitDecl>` + `.impls: Vec<ResolvedImplDecl>`. Pass
+0d collects + resolves trait method sigs (DuplicateTraitMethod
+on collision). Pass 0e collects impl decls + enforces scope-
+local coherence — default impls keyed by `(TraitId, ImplTarget)`
+in `impl_default_table` with DuplicateDefaultImpl rejection;
+named impls keyed by name in `impl_named_table` with
+DuplicateImplName rejection. Pass 4 (new) resolves impl method
+bodies — binds synthetic `self` VarId + params. The three
+"not yet" rejections from C4.2 (1/N) are dropped; the
+QualifiedCall arm now routes through `impl_named_table` →
+`impl_to_trait_methods` to assign `(ImplId, method_index)` at
+resolve time. Eight new ResolveError variants: RedefinedTrait,
+DuplicateTraitMethod, UndefinedTraitForImpl,
+UndefinedTypeForImpl, DuplicateDefaultImpl, DuplicateImplName,
+UndefinedImpl, UndefinedTraitMethod.
+
+**Types additions**: `Type::TraitSelf(TraitId)` interner extension
+preserving the `Copy + Hash` invariant (ninth interner-table-
+style variant; 0014 / 0015 / 0016 / 0017 / 0019 / 0020 / 0022 /
+0023). `TraitData` + `TypedTraitMethodSig` / `ImplData` +
+`TypedImplMethodDef` on `TypedProgram.trait_decls` /
+`.impl_decls`. Pass 3c types trait method signatures — empty
+type-param scope (no generic traits at C4.2 minimum per ADR
+0023 D10). Pass 3d types impl signatures + verifies
+completeness (ImplMissingMethod) + per-method signature match
+(self_kind + params + return_type + effect_row —
+ImplMethodSignatureMismatch). Pass 6 types impl method bodies
+— binds `self` to the impl target's concrete type with mutable
+bit from self_kind. The D6 method-call algorithm extends
+`check_method_call_expr`: after class-method lookup fails,
+search default impls for the receiver type that provide method
+X. Exactly one match → ImplMethodCall; multiple →
+AmbiguousMethodCall; zero → MethodNotFound. The new
+`check_qualified_call_expr` validates the receiver (args[0]) is
+the impl target's type or a ref-thereof
+(ImplMethodReceiverMismatch) + arg arity/types. Two new
+`TypedExprKind` variants (ImplMethodCall + QualifiedCall) with
+substitute impls + walk methods updated across
+walk_expr_for_mono / count_performs / find_unique_perform /
+walk_collect_var_refs / find_var_name_in_expr. Four new
+TypeError variants: ImplMissingMethod,
+ImplMethodSignatureMismatch, AmbiguousMethodCall,
+ImplMethodReceiverMismatch.
+
+**Codegen additions**: per-impl LLVM fn declarations in pass 1
+(mangled `default__Type__Trait__method` for default impls or
+`Name__Type__Trait__method` for named impls); per-impl body
+compilation in pass 2 via the new `compile_impl` method
+(mirrors `compile_class`'s method-emission loop). Both
+ImplMethodCall and QualifiedCall lower to direct calls into
+the impl method's mangled fn. ImplMethodCall uses
+`lower_lvalue_ptr` on the receiver target (same as class
+MethodCall); QualifiedCall lowers `args[0]` as a value (the
+user wrote `&mut s`, which is already a pointer) and passes it
+as self_ptr. `impl_method_fns: HashMap<(ImplId, usize),
+FunctionValue>` field added to CodegenCtx. Witness-table
+machinery from ADR 0023 D9 is **DEFERRED** alongside Path 3:
+at C4.2 minimum only direct-call dispatch lands; witness
+tables are scaffolding for the bounded-generic dispatch path,
+which itself is deferred.
+
+**Borrow-check fix**: existing C4.1 MethodCall arm was walking
+the receiver via `walk_expr` (consuming), which would surface a
+spurious use-after-move when the same Move-typed receiver is
+referenced by multiple method calls. Switched to
+`walk_expr_lvalue` (non-consuming, matching FieldAccess +
+Index) — auto-ref produces `&target` / `&mut target` which is
+a Copy borrow, not a consuming move. The ImplMethodCall arm
+follows the same pattern.
+
+**Two new C4.2 pass fixtures + four UI fixtures**:
+- `c42_trait_basic.sentinel`: smallest trait + default impl +
+  receiver-typed dispatch (`Tally::init().tick(42)` → exit 42).
+- `c42_go_no_go.sentinel` (ADR 0023 D12 phase-go): trait Writer
+  with one method; class FileSink with init; default + named
+  Doubling Writer impls; `s.write(10)` dispatches via the
+  default impl (Path 1), `Doubling::write(&mut s, 16)` via the
+  named impl (Path 2). count = 10 + 32 = 42. Exit 42.
+- `c42_impl_missing_method.sentinel` (UI): impl block missing a
+  trait method → `sentinel::types::impl_missing_method`.
+- `c42_impl_method_sig_mismatch.sentinel` (UI): impl method's
+  param type differs from trait's →
+  `sentinel::types::impl_method_signature_mismatch`.
+- `c42_duplicate_default_impl.sentinel` (UI): two default impls
+  of (Writer, FileSink) →
+  `sentinel::resolve::duplicate_default_impl`.
+- `c42_duplicate_impl_name.sentinel` (UI): two `Doubling` named
+  impls → `sentinel::resolve::duplicate_impl_name`.
+
+**Amendments at C4.2 close**: A1 D5 Path 3 (bounded-generic
+dispatch via witness tables) DEFERRED — needs `<W: Writer>`
+bounded-generic syntax which is its own substantial surface
+(parser + AST + resolve + types + codegen). A2 D9 witness-
+table values not emitted — scaffolding for Path 3 which is
+deferred. A3 D7's `Type::TraitSelf(TraitId)` interner SHIPPED
+but unused at runtime — at C4.2 minimum trait method sigs
+don't reference `Self` in their params/returns (only positional
+`self: &Self` / `&mut Self` via self_kind, mirroring the C4.1
+A2 amendment). The interner is in place for the eventual
+`Self`-in-type-position lift.
+
+Workspace test delta from C4.1 close: +16 (1154 total) — +10
+resolve unit tests (positive impl/trait id assignment + 9
+rejection paths) + +6 driver tests (c42_trait_basic +
+c42_go_no_go + 4 UI rejection assertions). **Phase C4.2 (2/N)
+closes here.** ADR 0023 flips PROPOSED → ACCEPTED-WITH-
+AMENDMENTS. Next: **Phase C4.3** — delegation + auto-forwarder
+codegen per ADR 0021 D6, OR Path 3 bounded-generic follow-on
+(deferred amendment).
+
+Pre-C4.2(2/N) context: **C4.2 (1/N): trait + impl AST + parser
+landed per ADR 0023 D1+D3+D4.** ADR 0023 stays PROPOSED. First
+of the C4.2 sub-iterations: trait declarations + impl blocks
+(default + named forms) + `ImplName::method(args)` qualified
+calls parse end-to-end at the AST + parser layer. Downstream
+resolve rejects them with three new "not yet" diagnostics —
 TraitDeclNotYet / ImplDeclNotYet / QualifiedCallNotYet — until
 C4.2 (2/N) brings up the impl table, dispatch, and codegen
 per ADR 0023 D8 + D9.

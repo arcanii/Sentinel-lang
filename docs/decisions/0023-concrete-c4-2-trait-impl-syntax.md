@@ -1,10 +1,16 @@
 # ADR 0023: Concrete C4.2 trait + impl surface — declarations, dispatch, named impls
 
-Status: PROPOSED — to flip to ACCEPTED at C4.2 close. This ADR
-details the concrete surface syntax + dispatch rules for the
-Phase C4.2 trait sub-phase per ADR 0021 D4-D5 + D7. ADR 0021
-is the phase kickoff (PROPOSED); ADR 0023 mirrors the role of
-ADR 0022 (concrete C4.1 class syntax) within the larger phase.
+Status: ACCEPTED-WITH-AMENDMENTS — flipped at C4.2 (2/N) close.
+Receiver-typed dispatch (D5 Path 1) and qualified-named
+dispatch (D5 Path 2) ship end-to-end via direct LLVM-call
+lowering through per-impl mangled fns. Three amendments at
+C4.2 close (see "Amendments" section below): A1 D5 Path 3
+(bounded-generic dispatch via witness tables) DEFERRED — needs
+`<W: Writer>` bounded-generic surface; A2 D9 witness-table
+values not emitted (scaffolding for Path 3); A3 D7
+`Type::TraitSelf(TraitId)` interner SHIPPED but unused at
+runtime (params/returns at C4.2 don't reference `Self` —
+positional only via self_kind, mirroring C4.1 A2).
 
 Date: 2026-05-28
 Related:
@@ -595,9 +601,70 @@ full named-impl pairing when D5's `@`-form ships.
   only at C4.2; named-impl bounded generics land in a
   follow-on.
 
+## Amendments
+
+At C4.2 (2/N) close, ADR 0023 flipped PROPOSED →
+ACCEPTED-WITH-AMENDMENTS. The three amendments:
+
+**A1 — D5 Path 3 (bounded-generic dispatch via witness tables)
+DEFERRED.** Path 1 (receiver-typed) and Path 2 (qualified-named)
+ship end-to-end at C4.2 (2/N) via direct LLVM-call dispatch
+through per-impl mangled fns. Path 3 needs the `<W: Writer>`
+bounded-generic syntax — a substantial new surface (parser +
+AST + resolve + type-param-with-bound + types + monomorphisation
+extension) that's its own sub-iteration. Defers to a Phase C4
+follow-on or a Phase C5 amendment.
+
+**A2 — D9 witness-table values not emitted.** The witness-table
+struct types + global values are scaffolding for Path 3
+dispatch. With Path 3 deferred (A1), there's no consumer of the
+witness tables at C4.2 minimum — codegen ships direct-call
+dispatch only. The mangled fn naming is forward-compatible
+(adding witness tables later doesn't change per-impl symbol
+names).
+
+**A3 — D7 `Type::TraitSelf(TraitId)` interner SHIPPED but
+unused at runtime.** The interner-table-style variant lands in
+the typed-AST `Type` enum (preserving Copy+Hash). At C4.2
+minimum, trait method sigs don't reference `Self` in their
+params/returns — `self: &Self` and `self: &mut Self` are
+captured positionally via the `self_kind` field (mirroring the
+C4.1 A2 amendment that deferred general `Self` in type
+position). The interner is in place for the eventual lift; no
+substitution paths exercise it yet.
+
+These amendments don't block subsequent sub-phases. C4.3
+(delegation) and C4.4 (structured concurrency) compose with the
+shipped Path 1 + Path 2 dispatch without depending on Path 3.
+
+Other D-decisions all landed cleanly: D1 + D2 (trait grammar)
+exercised by the c42_trait_basic + c42_go_no_go fixtures + 9
+resolve/types rejection paths; D3 + D4 (default + named impl
+grammar) exercised by the same fixtures; D6 (method-call
+resolution algorithm) exercised by `s.write(10)` falling
+through class-method lookup to default-impl lookup, and by
+`Doubling::write(&mut s, 16)` routing through the named-impl
+table; D8 (typing pipeline) exercised by the new Pass 0d, 3c,
+3d, 6 — each producing the documented diagnostics;
+D10 (out-of-scope list) honored — default method bodies,
+supertraits, generic traits, `dyn Trait`, impl-for-generic,
+cross-module coherence, associated types, where-clauses all
+deferred; D11 (no new lexer tokens) — `trait`/`impl`/`as`/`for`
+reserved at C4.0 are the activated set; D12 (phase-go fixture)
+runs at exit 42.
+
+Implementation footprint vs estimate: ADR 0021 D14 estimated
+"2-3 sessions" for all of C4.2. Actual was ~2 sessions
+combined (~1 session each for C4.2 (1/N) parser layer and C4.2
+(2/N) resolve+types+codegen). The C4.1 → C4.2 amortisation was
+real — the typed-AST parallel-tree pattern + the `Type::Class`
++ `ClassData` precedent made the trait + impl shapes
+mechanical to mirror.
+
 ## Revisit
 
-This ADR is **PROPOSED** until C4.2 closes. Per-D revisit
+This ADR was **PROPOSED** until C4.2 close (now
+ACCEPTED-WITH-AMENDMENTS). Per-D revisit
 triggers:
 
 - **D1 (trait declaration grammar)**: revisit if user
