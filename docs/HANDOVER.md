@@ -915,103 +915,122 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (Phase C3 — effects integration from Phase B)
+### 0.2 Next session opening (C3.4 — handler runtime per ADR 0020)
 
-Resume at **Phase C3** per HANDOVER §6.2's implementation order.
-**Phase C2 closed at C2.5.** All six sub-phases shipped (C2.0.1
-+ C2.0.2 + C2.1 + C2.2 + C2.3 + C2.4 + C2.5 — seven feat/docs
-commits). ADR 0017 is ACCEPTED-WITH-AMENDMENTS; all 14 D-
-decisions exercised. The C2 type universe is `{ I64, I32, Bool,
-Struct, Nullable, Array, TypeParam, GenericInstance, Ref }`
-with `Type: Copy` preserved through the fifth interner-table
-ADR running. References (`&T` / `&mut T`) lower as LLVM opaque
-pointers; the lexical borrow checker enforces shared-XOR-
-mutable + use-after-move + drop-at-scope-exit. The C1.6+ heap
-leak closed at C2.4 + C2.5(a) (recursive field drop for
-struct + generic-instance bindings).
+Resume at **C3.4** per ADR 0020 (PROPOSED). **Phase C3 typing
+layer closed at C3.3.** All six sub-phases shipped (C3.0(a) +
+C3.0(b) + C3.1 + C3.1b + C3.2(a) + C3.2(b) + C3.3 — eight feat/
+docs commits). ADR 0019 is ACCEPTED-WITH-AMENDMENTS; all 14 D-
+decisions exercised. The C3 type universe is `{ I64, I32, Bool,
+Struct, Nullable, Array, TypeParam, GenericInstance, Ref,
+Secret }` with `Type: Copy + Hash` preserved through the sixth
+interner-table ADR running. Secret typing + effect rows + the
+new `sentinel-effect-check` crate slotted between `check_query`
+and `borrow_check_query`. The C3.3 phase-go fixture at
+`tests/pass/c33_go_no_go.sentinel` exercises the full surface
+end-to-end.
 
-Two C2 follow-ons are documented but deferred:
+Three C3 follow-ons are documented but deferred:
 
-  - **ADR 0018 (PROPOSED)**: Polonius migration plan. Three-
-    step rollout from lexical → flow-sensitive borrow checking
-    via polonius-engine 0.13. Trigger is empirical friction
-    (D1), not a calendar date. No migration code at C2.5; ADR
-    records the plan.
+  - **ADR 0020 (PROPOSED)**: handler runtime + `perform`
+    lowering. Twelve D-decisions. Picks free-monad-style frame
+    reification over CPS / stack-saved; deep + one-shot
+    handlers. No code yet; closes the ADR 0019 D8 deferral.
   - **Partial-move-through-field-projection soundness gap**:
-    postfix `.field` on a Move-typed binding is non-consuming;
-    `consume_arr(p.items)` followed by main's drop double-frees
-    the array. Documented in
-    `docs/borrow-check-limitations.md`. Closure: per-(VarId,
-    FieldPath) move state in C2.6 or ADR 0019. Highest-priority
-    post-C2 work on the borrow-check side.
+    still open from C2; postfix `.field` on a Move-typed
+    binding is non-consuming, leading to double-free at drop.
+    Documented in `docs/borrow-check-limitations.md`.
+  - **ADR 0018 (PROPOSED)**: Polonius migration plan, also
+    from C2. Trigger is empirical friction.
 
-**Phase C3 — effect-system integration from Phase B.** Per
-HANDOVER §6.2 ("Implementation Order Within Phase C"), C3
-absorbs Sentinel-Mini's effect-row machinery (Phase B) into
-the bootstrap compiler. The Phase B research-grade interpreter
-(`sentinel-effects-proto` crate, 226 tests) validated the
-effect-inference design across ADRs 0002-0008. Its lessons:
+**C3.4 — handler runtime AST + parser + type-check.** Per ADR
+0020 D9 the substantive work splits into four sub-phases:
+C3.4 (typing layer) → C3.5 (perform codegen) → C3.6 (handle
+codegen — the substantive runtime piece) → C3.7 (close-out).
+Estimated 5-9 sessions total. C3.4 is the first slice and the
+smallest of the four; it ships AST + parser + resolve mirror +
+effect discharge in the type checker. Codegen still rejects
+handle/perform at C3.4; that ships at C3.5 + C3.6.
 
-  - Row representation per ADR 0004 (Remy-style records with
-    open vs closed tails).
-  - Effect inference judgment per ADR 0005 (the `(Subst, Ty,
-    Row)` triple from `infer`, with default-close residual
-    rows per ADR 0006).
-  - Effect handler runtime per ADR 0007 (operation reification
-    + dispatch).
-  - Secret qualifier + constant-time check per ADR 0008 (the
-    `secret T` surface, the `declassify` form).
+C3.4 concrete steps:
 
-C3 ships the production-shape adaptation. Pre-flight work
-before any code: **write ADR 0019 PROPOSED** covering the
-concrete C3 surface decisions and the sub-phase split. Likely
-patterns to argue:
+  1. **AST** (`sentinel-ast`): add `ExprKind::Handle {
+     body: Box<Expr>, arms: Vec<HandlerArm>, return_arm:
+     Option<ReturnArm>, span }`, `ExprKind::Perform { effect:
+     Spanned<String>, op: Spanned<String>, args: Vec<Expr>,
+     span }`, `HandlerArm { effect, op, param_names, body,
+     span }`, `ReturnArm { value_name, body, span }`. The
+     `param_names` last entry is the continuation binding `k`.
+  2. **Parser** (`sentinel-syntax`): `parse_atom` adds
+     `Handle` + `Perform` keyword arms. New helpers
+     `parse_handler_arm` + `parse_return_arm`. Handler arm
+     syntax: `EffectName . OpName ( Ident (, Ident)* ) => expr`.
+     Return arm: `return Ident => expr`. Arms separated by
+     `,`; trailing `,` allowed. Handle body is a regular expr
+     (not necessarily a block).
+  3. **Resolve** (`sentinel-resolve`): mirror `Handle` +
+     `Perform`. Each handler arm's effect+op pair resolves to
+     `(EffectId, op_index)` where op_index is the position in
+     `ResolvedEffectDecl::ops`. New ResolveError variants:
+     `UndefinedHandlerEffect`, `UndefinedHandlerOp`,
+     `DuplicateHandlerArm` (same effect+op pair listed twice).
+     Handler-arm param names get VarIds from the existing
+     counter; the kont binding is the last param.
+  4. **Type-check** (`sentinel-types`): TypedExprKind::Handle
+     + Perform; effect discharge in `check_expr` per ADR 0020
+     D6. Handle removes the matched effects from the body's
+     inferred row; the handle-expr's outer row = body's row
+     MINUS the handled set. New EffectError variants:
+     `MissingHandler` (perform outside any handle covering
+     that effect — at C3.4 minimum, any `perform` is rejected
+     at type-check until C3.5/C3.6 codegen lands; this error
+     remains thereafter for genuinely unhandled performs),
+     `OperationArityMismatch`, `OperationNotInEffect`,
+     `HandlerArmTypeMismatch`. The handler-arm body's type
+     must equal the handle-expr's outer type (per arm); all
+     arms agree.
+  5. **Codegen** (`sentinel-codegen`): NO CODEGEN at C3.4.
+     `TypedExprKind::Handle` + `Perform` panic-unreachable
+     in `lower_expr` for now; the type-checker is supposed to
+     reject them. C3.5 + C3.6 close this.
+  6. **Tests**: a c34 fixture exercises the parse + type-check
+     path. Expected: parses OK, type-checks OK; if the program
+     reaches codegen, snc errors with the "not yet at C3.5"
+     codegen panic (or we wire a clean error). The
+     `tests/ui/c34_*.sentinel` fixtures verify the new
+     EffectError variants.
 
-  - **Effect-row representation in `sentinel-types`** — port
-    or reimplement the Phase B row machinery against the
-    parallel-tree `TypedProgram`. Open/closed/row-var
-    distinction; reuse C1.7's interner-pattern if `Row` needs
-    to stay `Copy`.
-  - **Effect annotations on fn signatures** —
-    `fn read() -> i64 ! Io` syntax (or whatever ADR 0019 picks).
-    Lexer additions (`!` already exists; pickup may need
-    disambiguation from logical-not).
-  - **Effect inference vs annotation** — Sentinel-Mini
-    inferred; ADR 0005 left D9 open about whether the
-    production compiler should require explicit annotations.
-    C3 picks one.
-  - **`secret T` qualifier** — promote from Phase B's
-    interpreter form to a type-system feature. The constant-
-    time check (ADR 0008) needs codegen support: branch-free
-    lowering of secret comparisons + secret-tainted reads.
-  - **Effect handlers** — `handle { ... } with { Read x => ... }`
-    surface from Phase B. Lowering strategy: trampoline /
-    delimited continuations / CPS transform. The simplest
-    correct lowering may be a CPS pass before codegen.
-  - **Out of scope at C3**: async (the effect-driven
-    coroutines story can wait); effect polymorphism via
-    explicit row-vars in user code (Sentinel-Mini supports it;
-    C3 may defer to a follow-on); effect inference across
-    monomorphisation boundaries (probably the C3 split point).
-
-**Pipeline at C2 close**:
+**Pipeline at C3.3 close**:
 
     parse_query → resolve_query → check_query →
-    borrow_check_query → codegen
+    effect_check_query → borrow_check_query → codegen
 
-C3 will add **effect_check_query** (likely between check_query
-and borrow_check_query, since effect inference informs typing).
-The salsa-query shape is the same five-pass pattern; new error
-accumulator entries (`EffectError`) flow through the
-Diagnostic interface.
+C3.4 doesn't change the pipeline; it extends the type-checker's
+work inside the existing `check_query` (effect discharge) +
+adds new variants in TypedExprKind. The
+`sentinel-effect-check` crate's `effect_check` will need a
+small update to handle the new TypedExprKind::Perform (treat
+it as introducing the op's effect into the body's inferred
+row) and `TypedExprKind::Handle` (discharge the handled
+effects).
 
-**Estimated effort for Phase C3**: similar to C2 in shape —
-the Phase B research-grade implementation gives us a working
-reference for the effect-system semantics, but the production-
-shape adaptation has its own work (parallel-tree integration,
-codegen lowering for handlers, secret-aware constant-time
-codegen). Probably 5-8 sessions across 4-5 sub-phases per the
-C1 + C2 cadence.
+**Estimated effort for C3.4**: 1-2 sessions per ADR 0020 D9.
+Smaller than C3.0(b) because the lexer keywords are reserved
++ the EffectId / op-index machinery from ADR 0019 D4 is
+already in place. The substantive work is the effect-
+discharge typing rule in check_expr.
+
+After C3.4: C3.5 (perform codegen — emit
+`sentinel_perform_op` + frame reification at evaluation
+sites) + C3.6 (handle codegen + `sentinel_kont_resume`) +
+C3.7 close-out. Total handler-runtime work ~5-9 sessions per
+the ADR 0020 D9 table.
+
+Alternative path (defer handler runtime): start **Phase C4**
+(traits + structured concurrency) per HANDOVER §6.2 with a new
+ADR 0021 PROPOSED. C4 is larger in volume but lower per-piece
+risk than the C3.4-C3.7 runtime work. Either choice is
+defensible.
 
 C2 retrospective (estimate vs actual): ADR 0017 D9 estimated
 "6-13 sessions across 5-6 sub-phases"; actual was ~6 sessions
@@ -1086,9 +1105,10 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: pending C3.3 close-out (this session). Last
-    feat commit: 82e859e (feat(c3.2b): sentinel-effect-check
-    crate + effect_check_query).
+    Local HEAD: 5209db0 (docs: ADR 0020 PROPOSED — handler
+    runtime + perform lowering). Last feat commit: 82e859e
+    (feat(c3.2b): sentinel-effect-check crate +
+    effect_check_query).
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
@@ -1182,34 +1202,42 @@ For pasting into a fresh chat to bootstrap context:
     `docs/borrow-check-limitations.md` (partial-move through
     field projection + drop ⇒ double-free).
 
-    **Next: choose one of two paths.**
+    **Next: C3.4** — implement the handler runtime per ADR
+    0020 (PROPOSED at session-end commit 5209db0). The design
+    ADR is in: ADR 0020 picks free-monad-style frame
+    reification (Phase B's approach) over CPS transform and
+    stack-saved continuations, with one-shot continuations and
+    deep handlers. Twelve D-decisions captured; sub-phase split
+    is C3.4 (AST + parser + type-check) → C3.5 (perform
+    codegen) → C3.6 (handle codegen — the substantive runtime
+    piece) → C3.7 (close-out). Estimated 5-9 sessions per the
+    ADR 0020 D9 table.
 
-    **Path A — ADR 0020 (handler runtime)**, closing the D8
-    deferral from ADR 0019. The substantial design call:
-    lowering strategy for `handle e with { ... }` / `perform
-    Op(args)`. Phase B's prototype used free-monad-style frame
-    reification with one-shot continuations (`Cell<Option<...>>`
-    + `resume().take()`); the production compiler needs to
-    choose between (a) the same free-monad shape (heap-
-    allocated continuation frames + indirect dispatch), (b) a
-    CPS transform before codegen (more invasive but no runtime
-    overhead), or (c) stack-saved continuations (smallest
-    runtime, most assembly tricks). Estimated 3-5 sessions per
-    ADR 0019's D9 estimate.
+    C3.4 concrete tasks (the next session's work):
+      1. AST: `ExprKind::Handle { body, arms, return_arm }`,
+         `ExprKind::Perform { effect, op, args }`,
+         `HandlerArm { effect, op, param_names, body }`,
+         `ReturnArm { value_name, body }`.
+      2. Parser: `parse_atom` adds `Handle` + `Perform`
+         keyword arms. New helpers `parse_handler_arm` +
+         `parse_return_arm`. Handle/with/perform lexer
+         keywords were reserved at C3.0(a).
+      3. Resolve: mirror `Handle` + `Perform` with EffectId /
+         op-index references (ResolvedProgram::effects already
+         has the indexing from C3.2(a)).
+      4. Type-check: TypedExprKind::Handle + Perform; effect
+         discharge in check_expr per ADR 0020 D6 (handle
+         removes the matched effects from the body's row).
+         New EffectError variants: MissingHandler,
+         OperationArityMismatch, OperationNotInEffect.
+         Continuation type representation (no codegen yet).
+      5. Tests + a c34 fixture (parses + type-checks a handle/
+         perform program; codegen rejection until C3.5).
 
-    **Path B — Phase C4 (traits + structured concurrency) per
-    HANDOVER §6.2.** "Most of this is 'reasonable language
-    design plumbing' rather than novel work, but the volume
-    is significant." Classes, traits with named impls,
-    delegation, actors. Pre-flight: ADR 0021 PROPOSED. C4 is
-    larger in volume but lower per-piece risk than the handler-
-    runtime ADR.
-
-    The handler-runtime path completes the original Phase B
-    effect-system vision (rows + handlers + secrets); the
-    traits-first path moves further along the language-feature
-    surface and lets `secret T` + `effect Io` integrate with
-    traits later. Either choice is defensible.
+    Alternative path (if you want to switch tracks): Phase C4
+    (traits + structured concurrency per HANDOVER §6.2). Larger
+    in volume; "reasonable language design plumbing" per the
+    handover. Pre-flight would be ADR 0021 PROPOSED.
 
     Read in order:
       1. docs/HANDOVER.md §0 in full (now refreshed for C3.1
