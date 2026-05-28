@@ -1,0 +1,17 @@
+// C3.5(a) / ADR 0020 D7: the handler arm receives the op's arg
+// via the kont struct's `arg` field (GEP at offset 8). Here the
+// program performs Io.log(7) and the arm resumes with `msg + 35`
+// where `msg` is bound to the arg (7). Expected exit code:
+// 7 + 35 = 42.
+//
+// Expected: exit code 42.
+
+effect Io {
+    log(msg: i64) -> i64;
+}
+
+fn main() -> i64 {
+    handle perform Io.log(7) with {
+        Io.log(msg, k) => k(msg + 35)
+    }
+}

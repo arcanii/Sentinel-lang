@@ -43,12 +43,12 @@ use inkwell::{IntPredicate, OptimizationLevel};
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_resolve::{
-    FnId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
+    EffectId, FnId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
 };
 use sentinel_types::{
     ArrayElem, GenericInstanceData, GenericInstanceId, NullableInner, RefData, SecretData, Type,
-    TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
-    TypedStructDecl,
+    TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedHandlerArm, TypedProgram,
+    TypedReturnArm, TypedStmt, TypedStmtKind, TypedStructDecl,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -95,6 +95,21 @@ pub enum CodegenError {
         help("the type-checker accepts handle/perform but codegen lands at C3.5 (perform) / C3.6 (handle) per ADR 0020 D9")
     )]
     HandlersNotYetSupported,
+
+    /// C3.5(a) / ADR 0020 D9: at C3.5(a) the handler codegen
+    /// supports only the restricted case where the `handle` body
+    /// is a direct `perform Op(args)` expression — no fn-call-
+    /// that-performs, no nested handles, no let-bound perform.
+    /// The general case requires frame reification at every
+    /// evaluation site and lands at C3.5(b) / C3.6.
+    #[error(
+        "handle body must be a direct `perform Op(args)` at C3.5(a); fn-calls-that-perform and other indirect forms land at C3.5(b)/C3.6"
+    )]
+    #[diagnostic(
+        code(sentinel::codegen::handle_body_not_direct_perform),
+        help("rewrite the handle body to inline the perform call, or wait for the general-case lowering at C3.5(b)/C3.6 per ADR 0020 D9")
+    )]
+    HandleBodyNotDirectPerform,
 }
 
 /// Lower a [`TypedProgram`] to a native object file at `output`.
@@ -321,6 +336,35 @@ pub fn compile_to_object(
             None,
         )
     };
+    // C3.5(a) / ADR 0020 D7: declare the handler-runtime symbols.
+    // The Kont struct layout (op_id: u32, _pad: u32, arg: i64,
+    // consumed: u8, total 24 bytes / 8-byte aligned) matches
+    // sentinel_runtime::SentinelKont and is asserted by a
+    // round-trip layout test there.
+    let perform_op_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        let i32_ty = context.i32_type();
+        module.add_function(
+            "sentinel_perform_op",
+            ptr_ty.fn_type(&[i32_ty.into(), i64_ty.into()], false),
+            None,
+        )
+    };
+    let kont_resume_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        module.add_function(
+            "sentinel_kont_resume",
+            i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
+            None,
+        )
+    };
+    // C3.5(a) note: we do NOT declare sentinel_kont_panic_resumed
+    // at the module level — codegen never calls it directly. The
+    // runtime's `sentinel_kont_resume` dispatches to it internally
+    // on the consumed-twice path; that call is resolved at the
+    // runtime crate's own link time.
 
     // C1.7.5 / ADR 0016 D7: mono_defs + the `instances` table were
     // already built above before pass 0 (so the LLVM struct types
@@ -357,6 +401,8 @@ pub fn compile_to_object(
             alloc_fn,
             panic_oob_fn,
             free_fn,
+            perform_op_fn,
+            kont_resume_fn,
             current_fn: None,
             current_fn_id: FnId(0), // placeholder; reset in compile_fn
             vars: HashMap::new(),
@@ -451,6 +497,15 @@ struct CodegenCtx<'ctx, 'plan> {
     /// function. Emitted at scope-exit for un-moved heap-backed
     /// bindings (closes the C1.6+ heap-leak deferral).
     free_fn: FunctionValue<'ctx>,
+    /// C3.5(a) / ADR 0020 D7: `sentinel_perform_op(op_id: i32,
+    /// arg: i64) -> ptr` allocates a Kont struct tagged with the
+    /// op id + its arg, returning the pointer to the caller.
+    perform_op_fn: FunctionValue<'ctx>,
+    /// C3.5(a) / ADR 0020 D7: `sentinel_kont_resume(kont: ptr,
+    /// value: i64) -> i64` resumes a captured continuation. At
+    /// C3.5(a) the restricted case means no captured frames —
+    /// resume frees the kont and returns `value`.
+    kont_resume_fn: FunctionValue<'ctx>,
     current_fn: Option<FunctionValue<'ctx>>,
     /// C2.4: the FnId of the fn currently being compiled. Used to
     /// look up the moved-source set from `drop_plan` at scope-exit
@@ -641,10 +696,11 @@ fn llvm_basic_type<'ctx>(
         // Unreachable: the early-return at fn entry strips
         // Type::Secret. If it shows up here, that's a codegen bug.
         Type::Secret(_) => unreachable!("Type::Secret stripped at llvm_basic_type entry"),
-        // C3.4 / ADR 0020 D5: konts never reach codegen at C3.4 —
-        // Handle/Perform/ResumeKont return CodegenError::HandlersNotYetSupported
-        // before this lookup is consulted.
-        Type::Kont(_) => panic!("llvm_basic_type called on Type::Kont — handlers not lowered at C3.4 (ADR 0020 D9: codegen lands at C3.5/C3.6)"),
+        // C3.5(a) / ADR 0020 D7: konts lower to opaque pointers.
+        // The underlying SentinelKont struct's fields are read
+        // via getelementptr at known offsets — codegen doesn't
+        // need an LLVM-level struct type for it.
+        Type::Kont(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
     }
 }
 
@@ -2274,18 +2330,238 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             TypedExprKind::Index { target, index, elem_ty } => {
                 self.lower_index(target, index, *elem_ty, program)
             }
-            // C3.4 / ADR 0020 D9: handlers ship in C3.5 (perform)
-            // + C3.6 (handle). At C3.4 the type-checker accepts
-            // the surface but codegen surfaces a clean diagnostic
-            // and bails — the binary won't run but the program
-            // type-checks correctly.
-            TypedExprKind::Handle { .. }
-            | TypedExprKind::Perform { .. }
-            | TypedExprKind::ResumeKont { .. } => {
-                Err(CodegenError::HandlersNotYetSupported)
+            // C3.5(a) / ADR 0020 D7: lower perform/resume/handle
+            // for the restricted case (handle body must be a
+            // direct Perform). The general case (fn-call-that-
+            // performs, frame reification at arbitrary eval
+            // sites) lands at C3.5(b) / C3.6.
+            TypedExprKind::Perform { effect_id, op_index, args, .. } => {
+                self.lower_perform(*effect_id, *op_index, args, program)
+            }
+            TypedExprKind::ResumeKont { kont, args, .. } => {
+                self.lower_resume_kont(*kont, args, program)
+            }
+            TypedExprKind::Handle { body, arms, return_arm, .. } => {
+                self.lower_handle(body, arms, return_arm.as_deref(), program)
             }
         }
     }
+
+    /// C3.5(a) / ADR 0020 D7: lower `perform Effect.Op(args)` to
+    /// a `sentinel_perform_op(op_id, arg)` call. Returns the
+    /// continuation pointer; the enclosing handle catches it.
+    /// At C3.5(a) only 0- or 1-arg ops are supported by codegen
+    /// (the runtime Kont struct's `arg: i64` field carries the
+    /// single value); multi-arg ops are flagged at type-check
+    /// already via `OperationArityMismatch` if they don't fit.
+    fn lower_perform(
+        &mut self,
+        effect_id: EffectId,
+        op_index: usize,
+        args: &[TypedExpr],
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let op_id = encode_op_id(effect_id, op_index);
+        let i32_ty = self.context.i32_type();
+        let i64_ty = self.context.i64_type();
+        let op_id_v = i32_ty.const_int(op_id as u64, false);
+        let arg_v: inkwell::values::IntValue<'ctx> = if args.is_empty() {
+            i64_ty.const_int(0, false)
+        } else {
+            // Single-arg case: lower the arg, expect i64.
+            self.lower_expr(&args[0], program)?.into_int_value()
+        };
+        let call = self
+            .builder
+            .build_call(
+                self.perform_op_fn,
+                &[op_id_v.into(), arg_v.into()],
+                "kont",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        call.try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                CodegenError::Builder(
+                    "sentinel_perform_op returned void unexpectedly".to_string(),
+                )
+            })
+    }
+
+    /// C3.5(a) / ADR 0020 D7: lower `k(arg)` (a resume call) to
+    /// `sentinel_kont_resume(kont, arg)`. The runtime returns
+    /// `arg` directly in the restricted case (no frame replay).
+    fn lower_resume_kont(
+        &mut self,
+        kont: VarId,
+        args: &[TypedExpr],
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let (kont_ptr, _kont_ty) = *self
+            .vars
+            .get(&kont)
+            .expect("ResumeKont's VarId is bound by the surrounding Handle codegen");
+        // Load the kont pointer (it was stored as a ptr-typed value).
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let kont_val = self
+            .builder
+            .build_load(ptr_ty, kont_ptr, "kont_load")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        // Lower the resume arg (must be i64 per the op's return type
+        // at C3.5(a)).
+        let arg_v = self.lower_expr(&args[0], program)?.into_int_value();
+        let call = self
+            .builder
+            .build_call(
+                self.kont_resume_fn,
+                &[kont_val.into(), arg_v.into()],
+                "kont_resume",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        call.try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                CodegenError::Builder(
+                    "sentinel_kont_resume returned void unexpectedly".to_string(),
+                )
+            })
+    }
+
+    /// C3.5(a) / ADR 0020 D7: lower `handle body with { arms }`
+    /// for the restricted case where `body` is a direct
+    /// `Perform`. Skips the runtime op_id switch because the
+    /// (effect_id, op_index) of the body is known statically —
+    /// codegen picks the matching arm at compile time.
+    fn lower_handle(
+        &mut self,
+        body: &TypedExpr,
+        arms: &[TypedHandlerArm],
+        _return_arm: Option<&TypedReturnArm>,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        // C3.5(a) restriction: the body must be a direct Perform.
+        // Wrap a Block whose tail is a Perform if any future
+        // surface needs that; for now reject everything else
+        // cleanly.
+        let (body_effect_id, body_op_index, body_args) = match &body.kind {
+            TypedExprKind::Perform { effect_id, op_index, args, .. } => {
+                (*effect_id, *op_index, args)
+            }
+            _ => return Err(CodegenError::HandleBodyNotDirectPerform),
+        };
+
+        // Pick the matching arm. ResolveError::DuplicateHandlerArm
+        // already rules out two arms covering the same op, so
+        // the find is unambiguous. We do not consult the return
+        // arm at C3.5(a): the body always raises an op, never
+        // produces a Pure value.
+        let arm = arms
+            .iter()
+            .find(|a| a.effect_id == body_effect_id && a.op_index == body_op_index)
+            .ok_or_else(|| {
+                CodegenError::Builder(
+                    "C3.5(a): handle body's op is not covered by any arm".to_string(),
+                )
+            })?;
+
+        // Lower the body — emits the perform call + returns the
+        // kont pointer. Note we lower via lower_perform directly
+        // to avoid the lower_expr dispatch going through the
+        // Perform arm again (it would work, but this is clearer).
+        let kont_ptr = self
+            .lower_perform(body_effect_id, body_op_index, body_args, program)?
+            .into_pointer_value();
+
+        // Bind the arm's parameters. The arm's `param_var_ids`
+        // is [op_params..., kont]. For 0-arg ops the only entry
+        // is the kont. For 1-arg ops, position 0 binds to the
+        // op's arg value read from the kont struct.
+        let n_op_params = arm.param_var_ids.len() - 1;
+        let i64_ty = self.context.i64_type();
+        if n_op_params >= 1 {
+            // Read kont.arg via GEP at byte offset 8 (after
+            // op_id: i32 + _pad: i32). LLVM modern opaque
+            // pointers + i8-indexed GEP — we use struct GEP
+            // on the SentinelKont layout to keep this stable.
+            let i8_ty = self.context.i8_type();
+            let arg_offset = i64_ty.const_int(8, false);
+            let arg_ptr = unsafe {
+                self.builder
+                    .build_in_bounds_gep(i8_ty, kont_ptr, &[arg_offset], "kont_arg_ptr")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+            };
+            let arg_val = self
+                .builder
+                .build_load(i64_ty, arg_ptr, "kont_arg")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            // Allocate stack space for the op-param binding and
+            // store the loaded arg into it.
+            let alloca = {
+                let entry = self
+                    .current_fn
+                    .expect("inside compile_fn")
+                    .get_first_basic_block()
+                    .expect("entry block present");
+                let prev_block = self.builder.get_insert_block();
+                self.builder.position_at_end(entry);
+                let a = self
+                    .builder
+                    .build_alloca(i64_ty, "arm_param")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                if let Some(bb) = prev_block {
+                    self.builder.position_at_end(bb);
+                }
+                a
+            };
+            self.builder
+                .build_store(alloca, arg_val)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(arm.param_var_ids[0], (alloca, Type::I64));
+        }
+        // Always bind the kont VarId (last param). Allocate
+        // stack space holding the kont pointer.
+        let kont_var_id = *arm
+            .param_var_ids
+            .last()
+            .expect("type-check guarantees the kont VarId is present");
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let kont_alloca = {
+            let entry = self
+                .current_fn
+                .expect("inside compile_fn")
+                .get_first_basic_block()
+                .expect("entry block present");
+            let prev_block = self.builder.get_insert_block();
+            self.builder.position_at_end(entry);
+            let a = self
+                .builder
+                .build_alloca(ptr_ty, "kont_var")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            if let Some(bb) = prev_block {
+                self.builder.position_at_end(bb);
+            }
+            a
+        };
+        self.builder
+            .build_store(kont_alloca, kont_ptr)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.vars.insert(kont_var_id, (kont_alloca, Type::Kont(arm.kont_id)));
+
+        // Lower the arm body. Its result type matches the
+        // handle's outer type per ADR 0020 D6.
+        self.lower_expr(&arm.body, program)
+    }
+}
+
+/// C3.5(a) / ADR 0020 D7: encode `(EffectId, op_index)` as a
+/// stable 32-bit op id for runtime tag dispatch. The bit-pack
+/// gives ~16M distinct effects and ~64K ops per effect — far
+/// beyond any plausible source-level limit.
+fn encode_op_id(effect_id: EffectId, op_index: usize) -> u32 {
+    (effect_id.0 << 16) | ((op_index as u32) & 0xFFFF)
+}
+
+impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
     /// Look up a binding's source name for use as an LLVM SSA debug
     /// name. See C1.1.2 commit 9374edf for the rationale.

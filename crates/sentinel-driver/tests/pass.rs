@@ -751,15 +751,18 @@ fn build_ui_fixture(fixture: &str) -> std::process::Output {
 }
 
 #[test]
-fn c34_handle_perform_codegen_reports_handlers_not_yet_supported() {
-    // ADR 0020 D9: at C3.4 the handler surface type-checks, but
-    // codegen surfaces a clean diagnostic instead of panicking.
+fn c34_handle_with_fn_call_body_reports_not_direct_perform() {
+    // ADR 0020 D9: at C3.4 codegen rejected every Handle with
+    // HandlersNotYetSupported. At C3.5(a) the inline-perform case
+    // works end-to-end; the c34 fixture's `do_work()` body (a
+    // fn call that performs) is the general case still pending —
+    // it surfaces `handle_body_not_direct_perform` instead.
     let out = build_ui_fixture("c34_handlers_codegen_not_yet.sentinel");
     assert!(!out.status.success(), "snc build should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("handlers_not_yet_supported"),
-        "expected handlers_not_yet_supported diagnostic; got: {stderr}"
+        stderr.contains("handle_body_not_direct_perform"),
+        "expected handle_body_not_direct_perform diagnostic; got: {stderr}"
     );
 }
 
@@ -805,4 +808,31 @@ fn c34_kont_used_as_value_rejects_at_types() {
         stderr.contains("kont_used_as_value"),
         "expected kont_used_as_value; got: {stderr}"
     );
+}
+
+// ---- C3.5(a) / ADR 0020 D7: handler runtime end-to-end ----
+//
+// The minimum-viable handler runtime is in. Programs whose
+// `handle` body is a direct `perform Op(args)` now compile, link
+// against the runtime symbols, and produce the resumed value.
+// General-case handle bodies (fn-call-that-performs, nested
+// perform, perform inside binop) still need frame reification
+// at every evaluation site — that's C3.5(b) / C3.6.
+
+#[test]
+fn pass_c35_handle_inline_perform() {
+    // body = perform Io.read() (0-arg op); arm body = k(42).
+    // No stdout; exit code = 42.
+    let r = build_and_run("c35_handle_inline_perform.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c35_handle_log_returns_msg() {
+    // body = perform Io.log(7) (1-arg op, msg bound to 7).
+    // arm body = k(msg + 35) = 42. Exit code = 42.
+    let r = build_and_run("c35_handle_log_returns_msg.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
 }

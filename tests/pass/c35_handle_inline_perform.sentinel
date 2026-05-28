@@ -1,0 +1,18 @@
+// C3.5(a) / ADR 0020 D7: the simplest handler runtime end-to-end.
+// `handle` body is a direct `perform Io.read()`; the handler arm
+// resumes the continuation with `42`. The runtime's
+// sentinel_kont_resume returns the value directly (no captured
+// frames yet — frame reification at general evaluation sites
+// lands at C3.5(b) / C3.6).
+//
+// Expected: exit code 42, no stdout.
+
+effect Io {
+    read() -> i64;
+}
+
+fn main() -> i64 {
+    handle perform Io.read() with {
+        Io.read(k) => k(42)
+    }
+}
