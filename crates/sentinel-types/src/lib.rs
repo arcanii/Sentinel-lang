@@ -27,8 +27,8 @@ use salsa::Accumulator;
 use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, TypeExpr, TypeExprKind, UnaryOp};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
-    FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef, ResolvedProgram,
-    ResolvedStmt, ResolvedStmtKind, StructId, TypeParamId, VarId,
+    EffectId, FnId, ResolvedBlock, ResolvedExpr, ResolvedExprKind, ResolvedFnDef,
+    ResolvedProgram, ResolvedStmt, ResolvedStmtKind, StructId, TypeParamId, VarId,
 };
 
 // =============================================================================
@@ -885,6 +885,13 @@ pub struct TypedProgram {
     /// `(inner: Type)`. Same scale + scheme as [`refs`] /
     /// [`generic_instances`].
     pub secrets: Vec<SecretData>,
+    /// C3 / ADR 0019 D4 (C3.2): top-level effect declarations with
+    /// type-checked op signatures. Each carries its
+    /// [`EffectId`] matching its index. The fn-signature
+    /// effect-row machinery (C3.2(b)) refers to effects by
+    /// EffectId. At C3.2 minimum ops are declared-but-not-
+    /// invocable (handler runtime is ADR 0020).
+    pub effect_decls: Vec<TypedEffectDecl>,
     pub span: Span,
 }
 
@@ -1167,8 +1174,40 @@ pub struct TypedFnSignature {
     pub type_params: Vec<TypedTypeParam>,
     pub param_types: Vec<Type>,
     pub return_type: Type,
+    /// C3 / ADR 0019 D1 (C3.2): the fn's effect-row annotation as
+    /// a sorted-dedup set of [`EffectId`]s. Empty for fns with no
+    /// annotation. The `effect_check_query` pass at C3.2(b)
+    /// validates this against the body's inferred row.
+    pub effect_row: Vec<EffectId>,
     pub is_main: bool,
     pub is_runtime: bool,
+}
+
+/// C3 / ADR 0019 D4 (C3.2): a top-level effect declaration after
+/// type-checking. Each op's param-type annotations have been
+/// resolved to concrete [`Type`]s. EffectId matches the index in
+/// `TypedProgram::effect_decls`. Ops have no runtime semantics
+/// at C3.2 — they're declared for the future handler runtime
+/// (ADR 0020).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedEffectDecl {
+    pub id: EffectId,
+    pub name: String,
+    pub name_span: Span,
+    pub ops: Vec<TypedOpDecl>,
+    pub span: Span,
+}
+
+/// C3 / ADR 0019 D4 (C3.2): a single operation declaration inside
+/// a [`TypedEffectDecl`]. Param types are concrete. Return type
+/// defaults to `i64` if the source didn't supply one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedOpDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<TypedParam>,
+    pub return_type: Type,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1860,6 +1899,69 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     // Pass 2: cycle detection.
     detect_struct_cycle(&typed_structs)?;
 
+    // C3 / ADR 0019 D4 (C3.2): type-check effect declarations.
+    // Each op's param-type annotations + return-type annotation
+    // resolve against the struct table. Effects can't be generic
+    // at C3.2 (no `<T>` on `effect E`) so the type-param scope
+    // is empty. EffectIds were assigned at resolve time; we
+    // preserve them here as the ResolvedProgram::effects index.
+    let mut typed_effect_decls: Vec<TypedEffectDecl> =
+        Vec::with_capacity(program.effects.len());
+    for ed in &program.effects {
+        let empty_tp_scope: TypeParamScope = HashMap::new();
+        let mut typed_ops = Vec::with_capacity(ed.ops.len());
+        for op in &ed.ops {
+            let mut typed_params = Vec::with_capacity(op.params.len());
+            for p in &op.params {
+                let ty = resolve_type_expr_with_scope(
+                    &p.ty,
+                    &struct_table,
+                    &empty_tp_scope,
+                    &mut generic_instances,
+                    &mut refs,
+                    &mut secrets,
+                    &struct_type_param_counts,
+                )?;
+                typed_params.push(TypedParam {
+                    id: p.id,
+                    mutable: p.mutable,
+                    name: p.name.clone(),
+                    span: p.span.clone(),
+                    ty,
+                });
+            }
+            // Return type defaults to `i64` if the source omitted
+            // `-> RetT` per ADR 0019 D4. Future: revisit when
+            // `unit` lands.
+            let return_type = match &op.return_type {
+                Some(rt) => resolve_type_expr_with_scope(
+                    rt,
+                    &struct_table,
+                    &empty_tp_scope,
+                    &mut generic_instances,
+                    &mut refs,
+                    &mut secrets,
+                    &struct_type_param_counts,
+                )?,
+                None => Type::I64,
+            };
+            typed_ops.push(TypedOpDecl {
+                name: op.name.clone(),
+                name_span: op.name_span.clone(),
+                params: typed_params,
+                return_type,
+                span: op.span.clone(),
+            });
+        }
+        typed_effect_decls.push(TypedEffectDecl {
+            id: ed.id,
+            name: ed.name.clone(),
+            name_span: ed.name_span.clone(),
+            ops: typed_ops,
+            span: ed.span.clone(),
+        });
+    }
+
     // Pass 3: fn signatures.
     let mut typed_signatures: Vec<TypedFnSignature> =
         Vec::with_capacity(program.fn_signatures.len());
@@ -1879,6 +1981,10 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         type_params: vec![],
         param_types: vec![Type::I64],
         return_type: Type::I64,
+        // C3.2(a): runtime builtins are treated as effect-free at
+        // C3.2 minimum so existing programs keep type-checking.
+        // A future ADR may promote `print` to carry `Io`.
+        effect_row: vec![],
         is_main: false,
         is_runtime: true,
     });
@@ -1895,6 +2001,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             Type::TypeParam(TypeParamId(0)),
         ],
         return_type: Type::TypeParam(TypeParamId(0)),
+        effect_row: vec![],
         is_main: false,
         is_runtime: true,
     });
@@ -1907,6 +2014,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         type_params: vec![builtin_type_param("T", 0)],
         param_types: vec![Type::Nullable(NullableInner::TypeParam(TypeParamId(0)))],
         return_type: Type::Bool,
+        effect_row: vec![],
         is_main: false,
         is_runtime: true,
     });
@@ -1919,6 +2027,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         type_params: vec![builtin_type_param("T", 0)],
         param_types: vec![Type::Array(ArrayElem::TypeParam(TypeParamId(0)))],
         return_type: Type::I64,
+        effect_row: vec![],
         is_main: false,
         is_runtime: true,
     });
@@ -1967,6 +2076,13 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             &mut secrets,
             &struct_type_param_counts,
         )?;
+        // C3 / ADR 0019 D1 (C3.2): sorted + dedup the effect-row
+        // entries so set-equality checks against the inferred row
+        // at C3.2(b)'s effect_check_query are O(n). Resolve has
+        // already validated that each effect name is declared.
+        let mut effect_row: Vec<EffectId> = fn_def.effect_row.clone();
+        effect_row.sort_by_key(|e| e.0);
+        effect_row.dedup();
         typed_signatures.push(TypedFnSignature {
             id: fn_def.id,
             name: resolved_sig.name.clone(),
@@ -1974,6 +2090,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             type_params: typed_type_params,
             param_types,
             return_type,
+            effect_row,
             is_main: resolved_sig.is_main,
             is_runtime: resolved_sig.is_runtime,
         });
@@ -2008,6 +2125,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         generic_instances,
         refs,
         secrets,
+        effect_decls: typed_effect_decls,
         span: program.span.clone(),
     })
 }
@@ -5477,5 +5595,69 @@ fn main() -> i64 {
         // secret — public divisor is fine.
         let p = check_ok("fn main() -> i64 { 10 / 2 }");
         assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    // ---- C3.2(a) / ADR 0019 D4: effect_decls type-check ----
+
+    #[test]
+    fn c32_effect_decl_type_checks_with_no_ops() {
+        let p = check_ok("effect Io { } fn main() -> i64 { 0 }");
+        assert_eq!(p.effect_decls.len(), 1);
+        assert!(p.effect_decls[0].ops.is_empty());
+        assert_eq!(p.effect_decls[0].name, "Io");
+    }
+
+    #[test]
+    fn c32_effect_decl_type_checks_op_signatures() {
+        // Op param + return types resolve against the struct table
+        // / primitives.
+        let p = check_ok(
+            "effect Net { send(payload: i64) -> i64; recv() -> bool; }\
+             fn main() -> i64 { 0 }",
+        );
+        let net = &p.effect_decls[0];
+        assert_eq!(net.ops.len(), 2);
+        assert_eq!(net.ops[0].name, "send");
+        assert_eq!(net.ops[0].params[0].ty, Type::I64);
+        assert_eq!(net.ops[0].return_type, Type::I64);
+        assert_eq!(net.ops[1].name, "recv");
+        assert!(net.ops[1].params.is_empty());
+        assert_eq!(net.ops[1].return_type, Type::Bool);
+    }
+
+    #[test]
+    fn c32_op_return_type_defaults_to_i64() {
+        // `recv()` (no -> RetT) gets `i64` default per ADR 0019 D4.
+        let p = check_ok(
+            "effect Io { recv(); } fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.effect_decls[0].ops[0].return_type, Type::I64);
+    }
+
+    #[test]
+    fn c32_op_unknown_type_errors() {
+        let err = check_err(
+            "effect Io { log(x: Nonexistent); } fn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::UnknownType { ref name, .. } if name == "Nonexistent"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c32_fn_with_effect_annotation_carries_effect_row_on_signature() {
+        let p = check_ok(
+            "effect Io { } fn run() -> i64 ! { Io } { 0 } fn main() -> i64 { 0 }",
+        );
+        let run_sig = p.fn_signatures.iter().find(|s| s.name == "run").expect("run");
+        assert_eq!(run_sig.effect_row, vec![EffectId(0)]);
+    }
+
+    #[test]
+    fn c32_fn_without_effect_annotation_has_empty_row() {
+        let p = check_ok("fn main() -> i64 { 0 }");
+        let main_sig = p.fn_signatures.iter().find(|s| s.name == "main").expect("main");
+        assert!(main_sig.effect_row.is_empty());
     }
 }

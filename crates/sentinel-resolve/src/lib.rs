@@ -26,7 +26,7 @@
 //! pipeline (per ADR 0011 D1, downstream stages of C1.0b's lex/
 //! parse retrofit).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use salsa::Accumulator;
 use sentinel_ast::{
@@ -137,8 +137,51 @@ pub struct ResolvedProgram {
     /// The struct table is built before fn signatures so fn
     /// parameters can reference struct names per ADR 0013 D4.
     pub structs: Vec<ResolvedStructDecl>,
+    /// C3 / ADR 0019 D4 (C3.2): top-level effect declarations.
+    /// Each carries its own [`EffectId`] matching its index here.
+    /// The effect table is built before fn signatures so fn
+    /// signatures' effect-row annotations can reference effect
+    /// names.
+    pub effects: Vec<ResolvedEffectDecl>,
     pub span: Span,
 }
+
+/// C3 / ADR 0019 D4 (C3.2): a top-level effect declaration after
+/// name resolution. Carries its [`EffectId`] (index into
+/// `ResolvedProgram::effects`) and the resolved operations.
+/// Operations don't get their own per-op IDs at C3.2 — the
+/// handler runtime that uses them lands at C3.4 / ADR 0020.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedEffectDecl {
+    pub id: EffectId,
+    pub name: String,
+    pub name_span: Span,
+    pub ops: Vec<ResolvedOpDecl>,
+    pub span: Span,
+}
+
+/// C3 / ADR 0019 D4 (C3.2): a single operation declaration inside
+/// an effect. Param types stay as [`TypeExpr`] (string-keyed) —
+/// sentinel-types resolves them at C3.2. Operations have no
+/// runtime semantics at C3.2; they're declared for the future
+/// handler runtime (ADR 0020).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedOpDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<ResolvedParam>,
+    /// Optional return type. `None` defaults to `i64` at type-
+    /// check per ADR 0019 D4.
+    pub return_type: Option<TypeExpr>,
+    pub span: Span,
+}
+
+/// Identifier for a top-level effect declaration per ADR 0019 D4
+/// (C3.2). Assigned in source-encounter order at resolve time;
+/// stable across cargo runs for a given program. EffectIds index
+/// into `ResolvedProgram::effects` and `TypedProgram::effect_decls`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EffectId(pub u32);
 
 /// A struct declaration after name resolution. The decl's
 /// [`StructId`] matches its index in [`ResolvedProgram::structs`].
@@ -197,6 +240,12 @@ pub struct ResolvedFnDef {
     /// Carried through from the AST for the type checker to consume
     /// at C1.2's check() pass.
     pub return_type: TypeExpr,
+    /// C3 / ADR 0019 D1 (C3.2): resolved effect-row annotation
+    /// (postfix `! { Op1, Op2 }` on the fn signature). Each entry
+    /// is the [`EffectId`] of the named effect. Empty for fns with
+    /// no annotation. The effect_check_query pass at C3.2 validates
+    /// the annotation against the inferred row.
+    pub effect_row: Vec<EffectId>,
     pub body: ResolvedBlock,
     pub span: Span,
 }
@@ -440,32 +489,47 @@ pub enum ResolveError {
         span: miette::SourceSpan,
     },
 
-    /// C3 / ADR 0019 D4 (C3.0): top-level `effect E { ... }`
-    /// declarations are parsed at C3.0 but not yet resolvable.
-    /// Effect-decl resolution + the effect-check query land at
-    /// C3.2 per ADR 0019's sub-phase split.
-    #[error("`effect` declarations are not yet supported (lands at C3.2)")]
+    /// C3 / ADR 0019 D4 (C3.2): two `effect` declarations share
+    /// the same name. Effect names share a namespace per the
+    /// current single-namespace model (revisit when modules
+    /// land).
+    #[error("effect `{name}` is already declared")]
     #[diagnostic(
-        code(sentinel::resolve::effect_decl_not_yet),
-        help("the effect-system typing layer ships at C3.1 (secret typing) and C3.2 (effect rows + effect_check_query) per ADR 0019")
+        code(sentinel::resolve::redefined_effect),
+        help("each effect name must be unique within a program")
     )]
-    EffectDeclNotYet {
-        #[label("effect declaration here")]
+    RedefinedEffect {
+        name: String,
+        #[label("redefinition here")]
         span: miette::SourceSpan,
     },
 
-    /// C3 / ADR 0019 D1 (C3.0): postfix `! { ... }` effect-row
-    /// annotations on fn signatures parse at C3.0 but are not yet
-    /// resolvable. Effect-row inference + annotation check land
-    /// at C3.2.
-    #[error("effect-row annotations on `fn` signatures are not yet supported (lands at C3.2)")]
+    /// C3 / ADR 0019 D1 (C3.2): a fn's postfix effect-row
+    /// annotation references an effect name that isn't declared
+    /// anywhere in the program.
+    #[error("undefined effect `{name}` in fn `{fn_name}`'s annotation")]
     #[diagnostic(
-        code(sentinel::resolve::effect_annotation_not_yet),
-        help("the effect_check_query lands at C3.2 per ADR 0019 D2 — at C3.0 the parser accepts the annotation but cannot yet check it")
+        code(sentinel::resolve::undefined_effect),
+        help("declare it at the top level with `effect {name} {{ ... }}` before this reference")
     )]
-    EffectAnnotationNotYet {
+    UndefinedEffect {
+        name: String,
         fn_name: String,
-        #[label("effect annotation on `{fn_name}`")]
+        #[label("no such effect")]
+        span: miette::SourceSpan,
+    },
+
+    /// C3 / ADR 0019 D4 (C3.2): two ops inside the same `effect`
+    /// declaration share the same name.
+    #[error("operation `{op_name}` is declared twice in `effect {effect_name}`")]
+    #[diagnostic(
+        code(sentinel::resolve::duplicate_effect_op),
+        help("each op name must be unique within its parent effect")
+    )]
+    DuplicateEffectOp {
+        effect_name: String,
+        op_name: String,
+        #[label("redefinition here")]
         span: miette::SourceSpan,
     },
 
@@ -496,29 +560,71 @@ pub enum ResolveError {
 /// reference struct types in their TypeExprs), then fns, then fn
 /// bodies.
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
-    // C3 / ADR 0019 D4 (C3.0 deferral): top-level `effect E { ... }`
-    // declarations parse at C3.0 but don't resolve until C3.2. If
-    // the source has any, fail fast — points to the first one.
-    if let Some(first) = program.effects.first() {
-        return Err(ResolveError::EffectDeclNotYet {
-            span: to_source_span(&first.name_span),
-        });
-    }
-
-    // C3 / ADR 0019 D1 (C3.0 deferral): postfix `! { ... }` effect-
-    // row annotations on fn signatures parse at C3.0 but don't
-    // resolve until C3.2. If any fn declares one, fail fast.
-    for fn_def in &program.fns {
-        if let Some(first) = fn_def.effect_row.first() {
-            return Err(ResolveError::EffectAnnotationNotYet {
-                fn_name: fn_def.name.clone(),
-                span: to_source_span(&first.span),
-            });
-        }
-    }
-
     let mut next_fn_id: u32 = 0;
     let mut next_var_id: u32 = 0;
+
+    // C3 / ADR 0019 D4 (C3.2): build the effect table first so fn
+    // signatures' effect-row annotations can reference effect
+    // names. EffectIds are assigned in source-encounter order;
+    // effect names share a namespace (RedefinedEffect on collision).
+    let mut effect_table: HashMap<String, EffectId> = HashMap::new();
+    let mut resolved_effects: Vec<ResolvedEffectDecl> =
+        Vec::with_capacity(program.effects.len());
+    for (idx, ed) in program.effects.iter().enumerate() {
+        if effect_table.contains_key(&ed.name) {
+            return Err(ResolveError::RedefinedEffect {
+                name: ed.name.clone(),
+                span: to_source_span(&ed.name_span),
+            });
+        }
+        let id = EffectId(idx as u32);
+        effect_table.insert(ed.name.clone(), id);
+        // Resolve each op's params + return-type (carried as
+        // TypeExpr until sentinel-types resolves them). Ops within
+        // an effect must have unique names.
+        let mut op_names: HashSet<String> = HashSet::new();
+        let mut ops = Vec::with_capacity(ed.ops.len());
+        for op in &ed.ops {
+            if !op_names.insert(op.name.clone()) {
+                return Err(ResolveError::DuplicateEffectOp {
+                    effect_name: ed.name.clone(),
+                    op_name: op.name.clone(),
+                    span: to_source_span(&op.name_span),
+                });
+            }
+            // Resolve op params — VarIds aren't strictly needed
+            // since ops don't have bodies at C3.2, but the params
+            // mirror the AST shape for future use (handler runtime
+            // at ADR 0020 binds them). Reuse the same next_var_id
+            // counter so IDs stay globally unique.
+            let mut params = Vec::with_capacity(op.params.len());
+            for p in &op.params {
+                let vid = VarId(next_var_id);
+                next_var_id += 1;
+                params.push(ResolvedParam {
+                    id: vid,
+                    mutable: p.mutable,
+                    name: p.name.clone(),
+                    span: p.span.clone(),
+                    ty: p.ty.clone(),
+                });
+            }
+            ops.push(ResolvedOpDecl {
+                name: op.name.clone(),
+                name_span: op.name_span.clone(),
+                params,
+                return_type: op.return_type.clone(),
+                span: op.span.clone(),
+            });
+        }
+        resolved_effects.push(ResolvedEffectDecl {
+            id,
+            name: ed.name.clone(),
+            name_span: ed.name_span.clone(),
+            ops,
+            span: ed.span.clone(),
+        });
+    }
 
     // Pass 0: collect struct declarations. Indexed by source order
     // (each struct's StructId matches its index in resolved_structs).
@@ -650,6 +756,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
             &fn_table,
             &signatures,
             &struct_table,
+            &effect_table,
             &mut next_var_id,
         )?);
     }
@@ -658,6 +765,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         fns: resolved_fns,
         fn_signatures: signatures,
         structs: resolved_structs,
+        effects: resolved_effects,
         span: program.span.clone(),
     })
 }
@@ -667,6 +775,7 @@ fn resolve_fn(
     fn_table: &HashMap<String, FnId>,
     signatures: &[FnSignature],
     struct_table: &HashMap<String, StructId>,
+    effect_table: &HashMap<String, EffectId>,
     next_var_id: &mut u32,
 ) -> Result<ResolvedFnDef, ResolveError> {
     let id = *fn_table
@@ -675,6 +784,21 @@ fn resolve_fn(
 
     // C1.7 / ADR 0016 D9: assign TypeParamIds + reject duplicates.
     let type_params = resolve_type_params(&fn_def.type_params)?;
+
+    // C3 / ADR 0019 D1 (C3.2): resolve the postfix effect-row
+    // annotation (each name → EffectId). Empty for fns without
+    // an annotation. UndefinedEffect on a typo'd name.
+    let mut effect_row = Vec::with_capacity(fn_def.effect_row.len());
+    for entry in &fn_def.effect_row {
+        let eid = effect_table.get(&entry.kind).ok_or_else(|| {
+            ResolveError::UndefinedEffect {
+                name: entry.kind.clone(),
+                fn_name: fn_def.name.clone(),
+                span: to_source_span(&entry.span),
+            }
+        })?;
+        effect_row.push(*eid);
+    }
 
     let mut vars: HashMap<String, VarId> = HashMap::new();
     let mut params = Vec::with_capacity(fn_def.params.len());
@@ -713,6 +837,7 @@ fn resolve_fn(
         type_params,
         params,
         return_type: fn_def.return_type.clone(),
+        effect_row,
         body,
         span: fn_def.span.clone(),
     })
@@ -1150,15 +1275,20 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
             format!("duplicate type parameter `{name}`"),
             span.offset()..(span.offset() + span.len()),
         ),
-        ResolveError::EffectDeclNotYet { span } => (
-            "sentinel::resolve::effect_decl_not_yet",
-            "`effect` declarations are not yet supported (lands at C3.2)".to_string(),
+        ResolveError::RedefinedEffect { name, span } => (
+            "sentinel::resolve::redefined_effect",
+            format!("effect `{name}` is already declared"),
             span.offset()..(span.offset() + span.len()),
         ),
-        ResolveError::EffectAnnotationNotYet { fn_name, span } => (
-            "sentinel::resolve::effect_annotation_not_yet",
+        ResolveError::UndefinedEffect { name, fn_name, span } => (
+            "sentinel::resolve::undefined_effect",
+            format!("undefined effect `{name}` in fn `{fn_name}`'s annotation"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::DuplicateEffectOp { effect_name, op_name, span } => (
+            "sentinel::resolve::duplicate_effect_op",
             format!(
-                "effect-row annotation on `{fn_name}` is not yet supported (lands at C3.2)"
+                "operation `{op_name}` is declared twice in `effect {effect_name}`"
             ),
             span.offset()..(span.offset() + span.len()),
         ),
@@ -1685,24 +1815,59 @@ mod tests {
         assert_eq!(p.signature(f.id).type_params_count, 0);
     }
 
-    // ---- C3 / ADR 0019 C3.0 deferrals: surface parses, resolve rejects ----
+    // ---- C3.2(a) / ADR 0019 D4 + D1: effect surface resolves ----
 
     #[test]
-    fn c30_effect_decl_is_rejected_at_resolve() {
-        let err = resolve_err(
+    fn c32_effect_decl_resolves() {
+        // Effect declarations now mirror into ResolvedProgram.effects.
+        let p = resolve_ok(
             "effect Io { log(msg: i64) -> i64; }\nfn main() -> i64 { 0 }",
         );
+        assert_eq!(p.effects.len(), 1);
+        assert_eq!(p.effects[0].name, "Io");
+        assert_eq!(p.effects[0].id, EffectId(0));
+        assert_eq!(p.effects[0].ops.len(), 1);
+        assert_eq!(p.effects[0].ops[0].name, "log");
+    }
+
+    #[test]
+    fn c32_redefined_effect_errors() {
+        let err = resolve_err(
+            "effect Io { } effect Io { } fn main() -> i64 { 0 }",
+        );
         assert!(
-            matches!(err, ResolveError::EffectDeclNotYet { .. }),
+            matches!(err, ResolveError::RedefinedEffect { ref name, .. } if name == "Io"),
             "got {err:?}"
         );
     }
 
     #[test]
-    fn c30_fn_effect_annotation_is_rejected_at_resolve() {
-        let err = resolve_err("fn main() -> i64 ! { Io } { 0 }");
+    fn c32_duplicate_effect_op_errors() {
+        let err = resolve_err(
+            "effect Io { log(x: i64); log(x: i64); }\nfn main() -> i64 { 0 }",
+        );
         assert!(
-            matches!(err, ResolveError::EffectAnnotationNotYet { ref fn_name, .. } if fn_name == "main"),
+            matches!(err, ResolveError::DuplicateEffectOp { ref effect_name, ref op_name, .. }
+                if effect_name == "Io" && op_name == "log"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn c32_fn_with_declared_effect_annotation_resolves() {
+        let p = resolve_ok(
+            "effect Io { } fn run() -> i64 ! { Io } { 0 } fn main() -> i64 { 0 }",
+        );
+        let run = p.fns.iter().find(|f| f.name == "run").expect("run");
+        assert_eq!(run.effect_row, vec![EffectId(0)]);
+    }
+
+    #[test]
+    fn c32_undefined_effect_in_fn_annotation_errors() {
+        let err = resolve_err("fn run() -> i64 ! { Io } { 0 }\nfn main() -> i64 { 0 }");
+        assert!(
+            matches!(err, ResolveError::UndefinedEffect { ref name, ref fn_name, .. }
+                if name == "Io" && fn_name == "run"),
             "got {err:?}"
         );
     }
