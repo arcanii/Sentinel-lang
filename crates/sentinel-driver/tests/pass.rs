@@ -696,3 +696,18 @@ fn pass_c31_go_no_go() {
     assert_eq!(r.stdout, "100\n");
     assert_eq!(r.exit, 0);
 }
+
+// ---- C3.2 / ADR 0019 D1+D2+D4+D13: effect rows + effect_check ----
+
+#[test]
+fn pass_c32_go_no_go() {
+    // ADR 0019 D1+D2+D4+D13 phase-go: effect declarations +
+    // annotated fn chain + main has no effects. effect Io declared;
+    // check_inner ! { Io } calls check_outer ! { Io } (annotation
+    // matches inferred row); main only calls pure_compute (no
+    // effects) so D13's "main must be effect-free" is satisfied.
+    // pure_compute(12) = 12 + 30 = 42.
+    let r = build_and_run("c32_go_no_go.sentinel");
+    assert_eq!(r.stdout, "42\n");
+    assert_eq!(r.exit, 0);
+}

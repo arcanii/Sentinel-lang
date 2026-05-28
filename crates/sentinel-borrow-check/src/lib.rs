@@ -1333,8 +1333,19 @@ fn to_source_span(span: &Span) -> miette::SourceSpan {
 /// 0017 D8); `None` if any errors fired. Diagnostics from upstream
 /// queries (parse / resolve / types) flow through transitively
 /// when callers ask for `borrow_check_query::accumulated::<Diagnostic>`.
+///
+/// C3 / ADR 0019 D11 (C3.2): chains on `effect_check_query` (which
+/// itself chains on `check_query`), so EffectError diagnostics
+/// surface in the borrow_check_query's transitive accumulated set.
+/// If effect-check fails, borrow-check short-circuits.
 #[salsa::tracked(return_ref)]
 pub fn borrow_check_query(db: &dyn SentinelDb, file: SourceFile) -> Option<DropPlan> {
+    // C3.2: ensure effect-check has passed (and accumulated any
+    // diagnostics) before we do borrow-check. The effect_check
+    // pass itself depends on check_query, so this transitively
+    // covers parse + resolve + check + effect_check upstream of
+    // borrow-check.
+    sentinel_effect_check::effect_check_query(db, file).as_ref()?;
     let typed = sentinel_types::check_query(db, file).as_ref()?;
     let (drop_plan, errors) = borrow_check(typed);
     if errors.is_empty() {

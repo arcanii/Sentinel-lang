@@ -1134,6 +1134,7 @@ dependencies = [
  "salsa",
  "sentinel-ast",
  "sentinel-base",
+ "sentinel-effect-check",
  "sentinel-resolve",
  "sentinel-syntax",
  "sentinel-types",
@@ -1178,6 +1179,21 @@ dependencies = [
  "sentinel-base",
  "sentinel-borrow-check",
  "sentinel-codegen",
+ "sentinel-resolve",
+ "sentinel-syntax",
+ "sentinel-types",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "sentinel-effect-check"
+version = "0.0.1"
+dependencies = [
+ "miette",
+ "salsa",
+ "sentinel-ast",
+ "sentinel-base",
  "sentinel-resolve",
  "sentinel-syntax",
  "sentinel-types",

@@ -15,6 +15,7 @@ members = [
     "crates/sentinel-resolve",
     "crates/sentinel-types",
     "crates/sentinel-borrow-check",
+    "crates/sentinel-effect-check",
     "crates/sentinel-hir",
     "crates/sentinel-mir",
     "crates/sentinel-codegen",

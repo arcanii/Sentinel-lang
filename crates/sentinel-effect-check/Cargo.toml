@@ -1,0 +1,27 @@
+[package]
+name        = "sentinel-effect-check"
+description = "Effect-row checker — per-fn inference + annotation satisfaction + main-must-be-effect-free per ADR 0019 D2/D13 (C3.2)"
+
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+sentinel-ast     = { path = "../sentinel-ast" }
+sentinel-base    = { path = "../sentinel-base" }
+sentinel-resolve = { path = "../sentinel-resolve" }
+sentinel-types   = { path = "../sentinel-types" }
+
+miette     = { workspace = true }
+salsa      = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+[dev-dependencies]
+sentinel-syntax = { path = "../sentinel-syntax" }
+
+[lints.rust]
+unsafe_code = "deny"

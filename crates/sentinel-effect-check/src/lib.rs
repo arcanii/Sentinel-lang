@@ -1,0 +1,511 @@
+//! sentinel-effect-check
+//!
+//! Effect-row checker per ADR 0019 D1 + D2 + D11 + D13 (Phase
+//! C3.2). The C3.0 surface accepts effect declarations + postfix
+//! `! { Op1, Op2 }` annotations on fn signatures; resolve mirrors
+//! them at C3.2(a); types interns them into
+//! `TypedProgram.effect_decls` + `TypedFnSignature.effect_row`.
+//! This crate runs the actual check:
+//!
+//!   1. For each fn, compute the **inferred effect row** = the
+//!      union of effects from every fn it calls. Use a fixed-
+//!      point pass — unannotated fns' rows only grow, so the
+//!      iteration converges in O(fn-count) steps.
+//!   2. For fns WITH an annotation: validate that the inferred
+//!      row ⊆ the annotation. If not, surface
+//!      `EffectError::EffectAnnotationMismatch` (the fn declares
+//!      it does effects `{A, B}` but actually performs `{A, B,
+//!      C}` — the annotation is lying).
+//!   3. **`fn main` invariant** per ADR 0019 D13: main's row
+//!      must be empty. Any effect bubbling to main rejects with
+//!      `EffectError::UnhandledEffect`. At C3.2 minimum (no
+//!      handlers yet per D8), this is the only way effects get
+//!      "discharged" — main can't have any.
+//!
+//! Runs as a new salsa-tracked query slotted between
+//! `check_query` and `borrow_check_query`:
+//!
+//! ```text
+//! parse_query → resolve_query → check_query → effect_check_query → borrow_check_query → codegen
+//! ```
+//!
+//! At C3.2 there's no `perform` (deferred to ADR 0020 alongside
+//! handler runtime), so the ONLY way for a fn to contribute
+//! effects to its inferred row is by calling another annotated
+//! fn. Runtime builtins (print / unwrap_or / is_some / len) are
+//! declared effect-free per the C3.2(a) sig-construction —
+//! future ADRs may promote them.
+//!
+//! ## Annotation as constraint, not declaration (D2)
+//!
+//! Per ADR 0019 D2, annotations are checked against inference,
+//! not the other way around. A fn declaring `! { Io }` whose
+//! body calls only effect-free fns is allowed: the annotation
+//! widens the row visible to callers (some future use of this
+//! fn body might actually perform Io). What's NOT allowed: a
+//! fn declaring `! { Io }` whose body calls an effect-bearing
+//! fn with `! { Net }` — the body has effect Net that the
+//! annotation doesn't list, so the annotation lies.
+
+use std::collections::{BTreeSet, HashMap};
+
+use salsa::Accumulator;
+use sentinel_ast::Span;
+use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
+use sentinel_resolve::{EffectId, FnId};
+use sentinel_types::{
+    TypedBlock, TypedExpr, TypedExprKind, TypedProgram, TypedStmt, TypedStmtKind,
+};
+
+/// Per-fn check error variants. Mirrors the ADR 0019 D2 +
+/// D13 constraint shape.
+#[derive(Debug, Clone, thiserror::Error, miette::Diagnostic)]
+pub enum EffectError {
+    /// A fn's annotated effect row doesn't cover what its body
+    /// inferred. `! { Io }` declared but body calls a fn with
+    /// `! { Net }` → the annotation is missing `Net`.
+    #[error(
+        "fn `{fn_name}` declared effect row `{declared}` but body uses `{got_extra}` too"
+    )]
+    #[diagnostic(
+        code(sentinel::effect::annotation_mismatch),
+        help(
+            "either widen the annotation to include the inferred effects, or wrap the offending call site in a handler (handlers land at ADR 0020)"
+        )
+    )]
+    EffectAnnotationMismatch {
+        fn_name: String,
+        /// The effects in the body's inferred row not covered
+        /// by the annotation. Rendered as a comma-separated list.
+        got_extra: String,
+        /// The annotation itself, rendered the same way.
+        declared: String,
+        #[label("annotated `! {{ {declared} }}` on `{fn_name}`")]
+        span: miette::SourceSpan,
+    },
+
+    /// `fn main` per ADR 0019 D13 must have an empty effect row;
+    /// any effect bubbling to main is unhandled at C3.2 (since
+    /// handlers are deferred per D8). Surfaces the FIRST effect
+    /// observed; future improvements can list all of them.
+    #[error("unhandled effect `{effect_name}` in `fn main`")]
+    #[diagnostic(
+        code(sentinel::effect::unhandled_effect),
+        help(
+            "main must be effect-free at C3.2 (handlers land at ADR 0020); refactor to push the effect call inside a handler"
+        )
+    )]
+    UnhandledEffect {
+        effect_name: String,
+        #[label("effect `{effect_name}` bubbles to here")]
+        span: miette::SourceSpan,
+    },
+}
+
+/// Effect-checked program. At C3.2 the only payload is the
+/// per-fn effective row (annotated, or inferred for unannotated
+/// fns) — useful for diagnostic display + future codegen rounds.
+///
+/// Stored as `BTreeMap` / `BTreeSet` rather than the more usual
+/// `HashMap` / `HashSet` so the type implements `Hash + Eq` for
+/// salsa-tracked caching (same pattern as `DropPlan` in
+/// sentinel-borrow-check).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+pub struct EffectCheckedProgram {
+    /// Effective row per FnId — the union of (annotated or
+    /// inferred) effects this fn contributes when called. For
+    /// annotated fns: equals the annotation. For unannotated:
+    /// equals the inferred row (= union of called fns' effective
+    /// rows). Empty `BTreeSet` for fns with no effects.
+    pub effective_rows: std::collections::BTreeMap<FnId, BTreeSet<EffectId>>,
+}
+
+/// Run the effect check. Returns the per-fn effective row map
+/// plus any errors. Errors don't stop the analysis: the row map
+/// is always populated so downstream passes can consult it even
+/// when a mismatch is reported.
+pub fn effect_check(program: &TypedProgram) -> (EffectCheckedProgram, Vec<EffectError>) {
+    let mut errors: Vec<EffectError> = Vec::new();
+
+    // Initialize: annotated fns get their annotation as the
+    // initial row; unannotated fns start with empty rows that
+    // grow during the fixed-point iteration. Runtime builtins
+    // also get their declared row (effect-free at C3.2 per the
+    // type-checker setup).
+    let mut effective: HashMap<FnId, BTreeSet<EffectId>> = HashMap::new();
+    for sig in &program.fn_signatures {
+        let row: BTreeSet<EffectId> = sig.effect_row.iter().copied().collect();
+        effective.insert(sig.id, row);
+    }
+
+    // Fixed-point: for each unannotated fn, set row = union of
+    // called fns' rows. Annotated fns stay frozen at their
+    // annotation. Iterations are bounded by the call-graph depth
+    // for unannotated cycles (all empty); for annotated callees,
+    // each unannotated caller picks up the annotation in one
+    // pass. Practical bound is fn-count + 1 sweeps.
+    let max_sweeps = program.fns.len() + 4;
+    for _ in 0..max_sweeps {
+        let mut changed = false;
+        for fn_def in &program.fns {
+            let sig = &program.fn_signatures[fn_def.id.0 as usize];
+            if !sig.effect_row.is_empty() {
+                // Annotated: trusted; row stays at the annotation.
+                continue;
+            }
+            let inferred = collect_inferred_row(&fn_def.body, &effective);
+            if effective.get(&fn_def.id) != Some(&inferred) {
+                effective.insert(fn_def.id, inferred);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Pass 2: for each annotated fn, check the inferred row
+    // (computed independently of the annotation) is ⊆ the
+    // annotation. The annotation is a CONSTRAINT, not a
+    // declaration — it says "the body must not use effects
+    // outside this set."
+    for fn_def in &program.fns {
+        let sig = &program.fn_signatures[fn_def.id.0 as usize];
+        if sig.effect_row.is_empty() {
+            continue;
+        }
+        let inferred = collect_inferred_row(&fn_def.body, &effective);
+        let annotation: BTreeSet<EffectId> = sig.effect_row.iter().copied().collect();
+        let extra: BTreeSet<EffectId> = inferred.difference(&annotation).copied().collect();
+        if !extra.is_empty() {
+            errors.push(EffectError::EffectAnnotationMismatch {
+                fn_name: sig.name.clone(),
+                got_extra: render_effect_set(&extra, program),
+                declared: render_effect_set(&annotation, program),
+                span: to_source_span(&fn_def.span),
+            });
+        }
+    }
+
+    // Pass 3: main must be effect-free per ADR 0019 D13. Surface
+    // the first effect that bubbles to it.
+    let main = program.main();
+    if let Some(main_row) = effective.get(&main.id) {
+        if let Some(&first) = main_row.iter().next() {
+            let effect_name = effect_name(first, program);
+            errors.push(EffectError::UnhandledEffect {
+                effect_name,
+                span: to_source_span(&main.name_span),
+            });
+        }
+    }
+
+    // Convert the working HashMap to a BTreeMap so the returned
+    // type can derive Eq + Hash (salsa-tracked return_ref needs
+    // both for cache invalidation).
+    let effective_rows = effective.into_iter().collect();
+    (EffectCheckedProgram { effective_rows }, errors)
+}
+
+/// Walk a typed block + every nested expression collecting each
+/// Call's callee FnId, and union the called fn's current
+/// effective row into the result.
+fn collect_inferred_row(
+    block: &TypedBlock,
+    effective: &HashMap<FnId, BTreeSet<EffectId>>,
+) -> BTreeSet<EffectId> {
+    let mut acc = BTreeSet::new();
+    walk_block(block, effective, &mut acc);
+    acc
+}
+
+fn walk_block(
+    block: &TypedBlock,
+    effective: &HashMap<FnId, BTreeSet<EffectId>>,
+    acc: &mut BTreeSet<EffectId>,
+) {
+    for stmt in &block.stmts {
+        walk_stmt(stmt, effective, acc);
+    }
+    walk_expr(&block.tail, effective, acc);
+}
+
+fn walk_stmt(
+    stmt: &TypedStmt,
+    effective: &HashMap<FnId, BTreeSet<EffectId>>,
+    acc: &mut BTreeSet<EffectId>,
+) {
+    match &stmt.kind {
+        TypedStmtKind::Let { value, .. } => walk_expr(value, effective, acc),
+        TypedStmtKind::Assign { target, value } => {
+            walk_expr(target, effective, acc);
+            walk_expr(value, effective, acc);
+        }
+        TypedStmtKind::Expr(e) => walk_expr(e, effective, acc),
+    }
+}
+
+fn walk_expr(
+    expr: &TypedExpr,
+    effective: &HashMap<FnId, BTreeSet<EffectId>>,
+    acc: &mut BTreeSet<EffectId>,
+) {
+    match &expr.kind {
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::Var(_) => {}
+
+        TypedExprKind::Call { id, args, .. } => {
+            // The substantive case: union the callee's effective
+            // row into the caller's accumulator.
+            if let Some(callee_row) = effective.get(id) {
+                acc.extend(callee_row.iter().copied());
+            }
+            for arg in args {
+                walk_expr(arg, effective, acc);
+            }
+        }
+
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner) => walk_expr(inner, effective, acc),
+
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => {
+            walk_expr(l, effective, acc);
+            walk_expr(r, effective, acc);
+        }
+
+        TypedExprKind::Block(b) => walk_block(b, effective, acc),
+
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            walk_expr(cond, effective, acc);
+            walk_block(then_branch, effective, acc);
+            walk_block(else_branch, effective, acc);
+        }
+
+        TypedExprKind::StructLit { fields, .. } => {
+            // Fields are TypedExpr values directly (declaration
+            // order); no inner Value wrapper.
+            for f in fields {
+                walk_expr(f, effective, acc);
+            }
+        }
+
+        TypedExprKind::FieldAccess { target, .. } => {
+            walk_expr(target, effective, acc);
+        }
+
+        TypedExprKind::ArrayLit { elements, .. } => {
+            for e in elements {
+                walk_expr(e, effective, acc);
+            }
+        }
+
+        TypedExprKind::Index { target, index, .. } => {
+            walk_expr(target, effective, acc);
+            walk_expr(index, effective, acc);
+        }
+    }
+}
+
+/// Render a set of EffectIds as a comma-separated list of
+/// declared names. Used in diagnostic strings.
+fn render_effect_set(set: &BTreeSet<EffectId>, program: &TypedProgram) -> String {
+    set.iter()
+        .map(|eid| effect_name(*eid, program))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Look up the source-declared name for an EffectId. Falls back
+/// to `<effect#N>` if out of range (defensive).
+fn effect_name(eid: EffectId, program: &TypedProgram) -> String {
+    program
+        .effect_decls
+        .get(eid.0 as usize)
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| format!("<effect#{}>", eid.0))
+}
+
+fn to_source_span(span: &Span) -> miette::SourceSpan {
+    (span.start, span.len()).into()
+}
+
+// =============================================================================
+// Salsa-tracked entry point.
+// =============================================================================
+
+/// C3.2 / ADR 0019 D11: salsa-tracked effect-check query. Slots
+/// between `check_query` and `borrow_check_query` in the
+/// pipeline. Consumes the TypedProgram + emits per-error
+/// diagnostics through the accumulator; returns the
+/// EffectCheckedProgram on success (or None if check or earlier
+/// passes errored out).
+#[salsa::tracked(return_ref)]
+pub fn effect_check_query(
+    db: &dyn SentinelDb,
+    file: SourceFile,
+) -> Option<EffectCheckedProgram> {
+    let program = sentinel_types::check_query(db, file).as_ref()?;
+    let (checked, errors) = effect_check(program);
+    for err in &errors {
+        effect_error_to_diagnostic(err).accumulate(db);
+    }
+    if errors.is_empty() {
+        Some(checked)
+    } else {
+        None
+    }
+}
+
+fn effect_error_to_diagnostic(err: &EffectError) -> Diagnostic {
+    let (code, message, span): (&'static str, String, std::ops::Range<usize>) = match err {
+        EffectError::EffectAnnotationMismatch {
+            fn_name,
+            got_extra,
+            declared,
+            span,
+        } => (
+            "sentinel::effect::annotation_mismatch",
+            format!(
+                "fn `{fn_name}` declared effect row `{declared}` but body uses `{got_extra}` too"
+            ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        EffectError::UnhandledEffect { effect_name, span } => (
+            "sentinel::effect::unhandled_effect",
+            format!("unhandled effect `{effect_name}` in `fn main`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+    };
+    Diagnostic {
+        stage: "effect",
+        severity: Severity::Error,
+        code,
+        message,
+        span,
+    }
+}
+
+/// Returns the crate name as a sanity-check that the build is wired up.
+pub fn crate_name() -> &'static str {
+    "sentinel-effect-check"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sentinel_resolve::resolve;
+    use sentinel_syntax::parse;
+    use sentinel_types::check;
+
+    fn check_program(src: &str) -> Result<(EffectCheckedProgram, Vec<EffectError>), String> {
+        let prog = parse(src).map_err(|e| format!("parse: {e:?}"))?;
+        let resolved = resolve(&prog).map_err(|e| format!("resolve: {e:?}"))?;
+        let typed = check(&resolved).map_err(|e| format!("check: {e:?}"))?;
+        Ok(effect_check(&typed))
+    }
+
+    #[test]
+    fn smoke() {
+        assert_eq!(crate_name(), "sentinel-effect-check");
+    }
+
+    #[test]
+    fn pure_program_has_no_errors() {
+        let (_, errors) = check_program("fn main() -> i64 { 0 }").unwrap();
+        assert!(errors.is_empty(), "got {errors:?}");
+    }
+
+    #[test]
+    fn unannotated_fn_calling_unannotated_is_pure() {
+        let (checked, errors) = check_program(
+            "fn helper() -> i64 { 7 }\nfn main() -> i64 { helper() }",
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "got {errors:?}");
+        // main's row should be empty.
+        let main_id = FnId(4); // print/unwrap/is_some/len + main
+        assert!(checked.effective_rows.get(&main_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn annotated_fn_with_empty_body_passes() {
+        // `! { Io }` annotation with empty inferred row is fine —
+        // annotations are constraints, not requirements.
+        let (_, errors) = check_program(
+            "effect Io { } fn run() -> i64 ! { Io } { 0 }\nfn main() -> i64 { 0 }",
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "got {errors:?}");
+    }
+
+    #[test]
+    fn calling_annotated_fn_from_main_rejects_unhandled() {
+        // main calls a fn that declares Io. main's row inflates
+        // to {Io}; ADR 0019 D13 rejects.
+        let (_, errors) = check_program(
+            "effect Io { } fn run() -> i64 ! { Io } { 0 }\nfn main() -> i64 { run() }",
+        )
+        .unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, EffectError::UnhandledEffect { effect_name, .. } if effect_name == "Io")),
+            "got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn annotation_mismatch_when_body_uses_unlisted_effect() {
+        // outer declares `! { Io }` but its body calls a fn
+        // with `! { Net }` — the annotation is missing Net.
+        let (_, errors) = check_program(
+            "effect Io { } effect Net { }\
+             fn net_op() -> i64 ! { Net } { 0 }\
+             fn outer() -> i64 ! { Io } { net_op() }\
+             fn main() -> i64 { 0 }",
+        )
+        .unwrap();
+        assert!(
+            errors.iter().any(|e| matches!(e, EffectError::EffectAnnotationMismatch { fn_name, .. } if fn_name == "outer")),
+            "got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn annotated_fn_chain_propagates_via_annotation() {
+        // outer (annotated `! { Io }`) calls inner (annotated
+        // `! { Io }`) — match, no error.
+        let (_, errors) = check_program(
+            "effect Io { }\
+             fn inner() -> i64 ! { Io } { 0 }\
+             fn outer() -> i64 ! { Io } { inner() }\
+             fn main() -> i64 { 0 }",
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "got {errors:?}");
+    }
+
+    #[test]
+    fn unannotated_intermediate_carries_effect_to_main() {
+        // bottom (annotated `! { Io }`) → middle (unannotated)
+        // → main. middle's inferred row = {Io}; main's inferred
+        // row = {Io}; main rejects with UnhandledEffect.
+        let (_, errors) = check_program(
+            "effect Io { }\
+             fn bottom() -> i64 ! { Io } { 0 }\
+             fn middle() -> i64 { bottom() }\
+             fn main() -> i64 { middle() }",
+        )
+        .unwrap();
+        assert!(
+            errors.iter().any(|e| matches!(e, EffectError::UnhandledEffect { .. })),
+            "got {errors:?}"
+        );
+    }
+}
