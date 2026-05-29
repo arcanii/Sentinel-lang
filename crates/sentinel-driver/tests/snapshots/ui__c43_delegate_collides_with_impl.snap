@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c43_delegate_collides_with_impl.sentinel\")"
+---
+sentinel::resolve::duplicate_default_impl
+
+  × duplicate default impl of `Writer` for `Logger` in this scope
+    ╭─[tests/ui/c43_delegate_collides_with_impl.sentinel:27:5]
+ 26 │ class Logger {
+ 27 │     delegate writer: FileSink to Writer;
+    ·     ──────────────────┬─────────────────
+    ·                       ╰── 
+ 28 │     pub init(w: FileSink) {
+    ╰────

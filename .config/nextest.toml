@@ -1,0 +1,24 @@
+# cargo-nextest configuration — ADR 0025 D11 / HANDOVER §6.4.
+#
+# The workspace test suite runs via `cargo nextest run --workspace`.
+# Doctests are NOT executed by nextest (a documented nextest
+# limitation), so the four-check suite keeps `cargo test --doc` as a
+# separate step. CI fails on any unblessed `insta` snapshot diff — the
+# UI tests under crates/*/tests/ui.rs render compiler diagnostics to
+# blessed snapshots so any regression in wording/span/help surfaces in
+# the diff.
+
+[profile.default]
+# The driver's pass/ui tests shell out to `snc`, which compiles and
+# cc-links via LLVM — individually slow. Warn (don't fail) on long
+# tests; kill only a genuine runaway (4 × 45s).
+slow-timeout = { period = "45s", terminal-after = 4 }
+# Show a failing test's output inline as it happens and again at the
+# end so the cause is not buried in the run.
+failure-output = "immediate-final"
+
+[profile.ci]
+# Deterministic CI: no flaky-retry masking; run the whole suite before
+# reporting failure so every break is visible in one pass.
+retries = 0
+fail-fast = false

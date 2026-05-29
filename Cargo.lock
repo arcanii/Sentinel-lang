@@ -1174,6 +1174,7 @@ dependencies = [
 name = "sentinel-driver"
 version = "0.0.1"
 dependencies = [
+ "insta",
  "miette",
  "salsa",
  "sentinel-base",

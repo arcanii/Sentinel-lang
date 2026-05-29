@@ -26,5 +26,10 @@ salsa      = { workspace = true }
 tracing    = { workspace = true }
 thiserror  = { workspace = true }
 
+[dev-dependencies]
+# UI-diagnostic snapshot tests (crates/sentinel-driver/tests/ui.rs)
+# per ADR 0025 D11 / HANDOVER §6.4.
+insta      = { workspace = true }
+
 [lints.rust]
 unsafe_code = "deny"

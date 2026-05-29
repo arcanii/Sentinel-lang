@@ -727,78 +727,15 @@ fn pass_c33_go_no_go() {
     assert_eq!(r.exit, 0);
 }
 
-// ---- C3.4 / ADR 0020 D9: handler typing layer ----
-//
-// The handler surface parses, resolves, type-checks, and effect-
-// checks (Io is discharged), but codegen lands at C3.5/C3.6. We
-// can't yet run the c34 fixture end-to-end; instead the driver
-// test below asserts that `snc build` surfaces a clean
-// `handlers_not_yet_supported` codegen diagnostic instead of a
-// panic. End-to-end pass-test arrives at C3.7.
-
-fn build_ui_fixture(fixture: &str) -> std::process::Output {
-    let src = workspace_root().join("tests/ui").join(fixture);
-    let out_dir = build_dir();
-    std::fs::create_dir_all(&out_dir).expect("create build dir");
-    let exe = out_dir.join(PathBuf::from(fixture).with_extension(""));
-    Command::new(snc_binary())
-        .arg("build")
-        .arg(&src)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("snc invocation failed")
-}
+// (The C3.4 handler-surface rejections — undefined effect/op,
+// duplicate arm, kont-used-as-value — are now UI snapshot tests in
+// crates/sentinel-driver/tests/ui.rs per ADR 0025 D11.)
 
 // (Previously this asserted handle_body_not_direct_perform for the
 // `handle do_work() with { ... }` fixture. At C3.5(b) that shape
 // compiles + runs; the fixture has been promoted to tests/pass/
 // as `c35b_handle_fn_call_body.sentinel`. The driver test below
 // asserts the new runtime behavior instead.)
-
-#[test]
-fn c34_perform_undefined_effect_rejects_at_resolve() {
-    let out = build_ui_fixture("c34_perform_undefined_effect.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("undefined_handler_effect"),
-        "expected undefined_handler_effect; got: {stderr}"
-    );
-}
-
-#[test]
-fn c34_handle_undefined_op_rejects_at_resolve() {
-    let out = build_ui_fixture("c34_handle_undefined_op.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("undefined_handler_op"),
-        "expected undefined_handler_op; got: {stderr}"
-    );
-}
-
-#[test]
-fn c34_handle_duplicate_arm_rejects_at_resolve() {
-    let out = build_ui_fixture("c34_handle_duplicate_arm.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("duplicate_handler_arm"),
-        "expected duplicate_handler_arm; got: {stderr}"
-    );
-}
-
-#[test]
-fn c34_kont_used_as_value_rejects_at_types() {
-    let out = build_ui_fixture("c34_kont_used_as_value.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("kont_used_as_value"),
-        "expected kont_used_as_value; got: {stderr}"
-    );
-}
 
 // ---- C3.5(a) / ADR 0020 D7: handler runtime end-to-end ----
 //
@@ -1058,20 +995,6 @@ fn pass_c37_handle_return() {
     assert_eq!(r.stdout, "");
 }
 
-#[test]
-fn c37_perform_outside_handle_rejects_at_effect_check() {
-    // ADR 0019 D13: `main` must be effect-free. A bare
-    // `perform Io.log(...)` in main with no wrapping handle
-    // surfaces `sentinel::effect::unhandled_effect`.
-    let out = build_ui_fixture("c37_perform_outside_handle.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("unhandled_effect"),
-        "expected unhandled_effect; got: {stderr}"
-    );
-}
-
 // ============================================================================
 // C4.1 (2/N) / ADR 0022: class declarations + method calls + Name::init(args)
 // end-to-end. AST + parser landed at C4.1 (1/N); resolve / types / codegen
@@ -1095,21 +1018,6 @@ fn pass_c41_go_no_go() {
     let r = build_and_run("c41_go_no_go.sentinel");
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
-}
-
-#[test]
-fn c41_init_field_unassigned_rejects_at_type_check() {
-    // ADR 0022 D4: every declared field must be definite-assigned
-    // inside `init`. A class with two fields but only one
-    // `self.field = ...` surfaces the
-    // `sentinel::types::init_field_maybe_unassigned` diagnostic.
-    let out = build_ui_fixture("c41_init_field_unassigned.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("init_field_maybe_unassigned"),
-        "expected init_field_maybe_unassigned; got: {stderr}"
-    );
 }
 
 // ============================================================================
@@ -1139,60 +1047,6 @@ fn pass_c42_go_no_go() {
     assert_eq!(r.stdout, "");
 }
 
-#[test]
-fn c42_impl_missing_method_rejects_at_type_check() {
-    // ADR 0023 D8 completeness check: every trait method must be
-    // supplied. Default method bodies are deferred per ADR 0023
-    // D10.
-    let out = build_ui_fixture("c42_impl_missing_method.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("impl_missing_method"),
-        "expected impl_missing_method; got: {stderr}"
-    );
-}
-
-#[test]
-fn c42_impl_method_sig_mismatch_rejects_at_type_check() {
-    // ADR 0023 D8 per-method signature match. The impl method's
-    // param type differs from the trait's; type-check surfaces
-    // the dedicated diagnostic.
-    let out = build_ui_fixture("c42_impl_method_sig_mismatch.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("impl_method_signature_mismatch"),
-        "expected impl_method_signature_mismatch; got: {stderr}"
-    );
-}
-
-#[test]
-fn c42_duplicate_default_impl_rejects_at_resolve() {
-    // ADR 0023 D8 coherence: at most one default impl per
-    // (trait, type) per scope.
-    let out = build_ui_fixture("c42_duplicate_default_impl.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("duplicate_default_impl"),
-        "expected duplicate_default_impl; got: {stderr}"
-    );
-}
-
-#[test]
-fn c42_duplicate_impl_name_rejects_at_resolve() {
-    // ADR 0023 D8 coherence: named impls must have unique names
-    // within their scope.
-    let out = build_ui_fixture("c42_duplicate_impl_name.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("duplicate_impl_name"),
-        "expected duplicate_impl_name; got: {stderr}"
-    );
-}
-
 // ============================================================================
 // C4.3 per ADR 0021 D6: delegation. `delegate field: T to Trait;`
 // inside a class body synthesizes a default impl of Trait for the
@@ -1212,34 +1066,6 @@ fn pass_c43_go_no_go() {
     assert_eq!(r.stdout, "");
 }
 
-#[test]
-fn c43_delegate_collides_with_impl_rejects_at_resolve() {
-    // Coherence: both a delegate AND an explicit
-    // `impl as Trait for Class` synthesize default impls of the
-    // same (Trait, Class). DuplicateDefaultImpl fires.
-    let out = build_ui_fixture("c43_delegate_collides_with_impl.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("duplicate_default_impl"),
-        "expected duplicate_default_impl; got: {stderr}"
-    );
-}
-
-#[test]
-fn c43_delegate_undefined_trait_rejects_at_resolve() {
-    // `delegate field: T to UnknownTrait;` — the trait name
-    // resolves through the impl-trait lookup path; the same
-    // UndefinedTraitForImpl variant fires.
-    let out = build_ui_fixture("c43_delegate_undefined_trait.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("undefined_trait_for_impl"),
-        "expected undefined_trait_for_impl; got: {stderr}"
-    );
-}
-
 // ----- C4.4 / ADR 0024: structured concurrency -----
 
 #[test]
@@ -1250,42 +1076,6 @@ fn pass_c44_go_no_go() {
     let r = build_and_run("c44_go_no_go.sentinel");
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
-}
-
-#[test]
-fn c44_spawn_non_fn_call_rejects() {
-    // ADR 0024 D2: spawn target must be a direct call.
-    let out = build_ui_fixture("c44_spawn_non_fn_call.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("spawn_must_be_call"),
-        "expected spawn_must_be_call; got: {stderr}"
-    );
-}
-
-#[test]
-fn c44_await_on_non_task_rejects() {
-    // ADR 0024 D3: `.await` receiver must be a Task<T>.
-    let out = build_ui_fixture("c44_await_on_non_task.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("await_on_non_task"),
-        "expected await_on_non_task; got: {stderr}"
-    );
-}
-
-#[test]
-fn c44_spawn_result_must_be_i64_rejects() {
-    // ADR 0024 D7: Task<T> restricted to Task<i64> at C4.4 minimum.
-    let out = build_ui_fixture("c44_spawn_result_must_be_i64.sentinel");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("spawn_result_must_be_i64"),
-        "expected spawn_result_must_be_i64; got: {stderr}"
-    );
 }
 
 // ----- C4.5 / ADR 0021 D13: full-surface phase-go close-out -----

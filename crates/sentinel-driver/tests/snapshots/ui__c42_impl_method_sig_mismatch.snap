@@ -1,0 +1,15 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c42_impl_method_sig_mismatch.sentinel\")"
+---
+sentinel::types::impl_method_signature_mismatch
+
+  × impl method `write` for `Writer` on `FileSink` has a signature that
+  │ doesn't match the trait
+    ╭─[tests/ui/c42_impl_method_sig_mismatch.sentinel:21:8]
+ 20 │ impl as Writer for FileSink {
+ 21 │     fn write(self: &mut Self, data: bool) -> i64 {
+    ·        ──┬──
+    ·          ╰── 
+ 22 │         self.count
+    ╰────

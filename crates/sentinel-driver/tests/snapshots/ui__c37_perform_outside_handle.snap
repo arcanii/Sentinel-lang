@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c37_perform_outside_handle.sentinel\")"
+---
+sentinel::effect::unhandled_effect
+
+  × unhandled effect `Io` in `fn main`
+    ╭─[tests/ui/c37_perform_outside_handle.sentinel:11:4]
+ 10 │ 
+ 11 │ fn main() -> i64 {
+    ·    ──┬─
+    ·      ╰── 
+ 12 │     perform Io.log(42)
+    ╰────

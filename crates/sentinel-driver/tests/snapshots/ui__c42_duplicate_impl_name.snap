@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c42_duplicate_impl_name.sentinel\")"
+---
+sentinel::resolve::duplicate_impl_name
+
+  × duplicate impl name `Doubling` for `Writer` on `FileSink`
+    ╭─[tests/ui/c42_duplicate_impl_name.sentinel:25:6]
+ 24 │ 
+ 25 │ impl Doubling as Writer for FileSink {
+    ·      ────┬───
+    ·          ╰── 
+ 26 │     fn write(self: &mut Self, data: i64) -> i64 {
+    ╰────

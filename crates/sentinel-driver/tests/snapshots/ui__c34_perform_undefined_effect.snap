@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c34_perform_undefined_effect.sentinel\")"
+---
+sentinel::resolve::undefined_handler_effect
+
+  × undefined effect `Io` in handler arm / perform
+   ╭─[tests/ui/c34_perform_undefined_effect.sentinel:5:13]
+ 4 │ fn main() -> i64 {
+ 5 │     perform Io.read()
+   ·             ─┬
+   ·              ╰── 
+ 6 │ }
+   ╰────

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c44_await_on_non_task.sentinel\")"
+---
+sentinel::types::await_on_non_task
+
+  × `.await` requires a `Task<T>` receiver (got `i64`)
+   ╭─[tests/ui/c44_await_on_non_task.sentinel:8:5]
+ 7 │     let x: i64 = 5;
+ 8 │     x.await
+   ·     ┬
+   ·     ╰── 
+ 9 │ }
+   ╰────

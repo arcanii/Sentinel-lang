@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c34_handle_undefined_op.sentinel\")"
+---
+sentinel::resolve::undefined_handler_op
+
+  × operation `write` is not declared in `effect Io`
+    ╭─[tests/ui/c34_handle_undefined_op.sentinel:10:24]
+  9 │ fn main() -> i64 {
+ 10 │     handle 0 with { Io.write(k) => k(1) }
+    ·                        ──┬──
+    ·                          ╰── 
+ 11 │ }
+    ╰────

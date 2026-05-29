@@ -1,0 +1,16 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c41_init_field_unassigned.sentinel\")"
+---
+sentinel::types::init_field_maybe_unassigned
+
+  × class `Pair` field `b` is not assigned by the end of `init`
+    ╭─[tests/ui/c41_init_field_unassigned.sentinel:11:22]
+ 10 │         let b: i64;
+ 11 │ ╭─▶     pub init(a: i64) {
+ 12 │ │           self.a = a;
+ 13 │ │           0
+ 14 │ ├─▶     }
+    · ╰──── 
+ 15 │     }
+    ╰────

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c44_spawn_non_fn_call.sentinel\")"
+---
+sentinel::types::spawn_must_be_call
+
+  × `spawn` requires a function-call target
+   ╭─[tests/ui/c44_spawn_non_fn_call.sentinel:8:19]
+ 7 │ fn main() -> i64 {
+ 8 │     let t = spawn 42;
+   ·                   ─┬
+   ·                    ╰── 
+ 9 │     0
+   ╰────

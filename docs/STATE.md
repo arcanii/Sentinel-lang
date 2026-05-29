@@ -26,13 +26,22 @@ capability — constant-time `secret` codegen (D3, the C5.2 security
 core) — which an HTTP server would leave unexercised; it still
 exercises classes/traits/delegation, effects+handlers, structured
 concurrency + a connection actor (D5), generics, and the broker
-(D4). See ADR 0025 `## C5.0 resolution`. **Still pending in C5.0:**
-test infra (D11 — `insta` UI snapshots + `cargo nextest`) and the
-reproducible-build audit (D8 — deterministic codegen). Then C5.1 =
-HIR/MIR stages (D2), C5.2 = constant-time secret codegen (D3); ADR
-0026 PROPOSED (C5.1/C5.2 surface) lands before the first C5.1 feat.
-Four-check suite green (~1191 active workspace; no code delta in
-this docs-only decision commit).
+(D4). See ADR 0025 `## C5.0 resolution`. **D11 test infra DONE:**
+`cargo nextest` adopted (`.config/nextest.toml`, default + ci
+profiles) + the 15 driver UI rejections (c34/c37/c41/c42/c43/c44)
+migrated from ad-hoc `stderr.contains(code)` to `insta` blessed
+full-diagnostic snapshots (`crates/sentinel-driver/tests/ui.rs` — snc
+is run from the workspace root with a relative path, so the snapshots
+are portable with zero normalization; a snapshot pins the entire
+what/why/how, not just the presence of a code). The 2 pure-syntax UI
+snapshots (lex/parse) remain in `sentinel-syntax/tests/ui.rs`.
+**Still pending in C5.0:** the reproducible-build audit (D8 —
+deterministic codegen). Then C5.1 = HIR/MIR stages (D2), C5.2 =
+constant-time secret codegen (D3); ADR 0026 PROPOSED (C5.1/C5.2
+surface) lands before the first C5.1 feat. Four-check suite green via
+`cargo nextest run --workspace` (1190 passed) + `cargo test --doc`;
+D11 is test-count-neutral (15 `pass.rs` UI fns removed, 15 `ui.rs`
+snapshot tests added).
 
 Pre-C5.0 context: **C4.5: Phase C4 close-out — ADR 0021 flips
 PROPOSED → ACCEPTED-WITH-AMENDMENTS; PHASE C4 CLOSES.** All six

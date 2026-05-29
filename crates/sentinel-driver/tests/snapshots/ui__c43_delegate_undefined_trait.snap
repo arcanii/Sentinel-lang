@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c43_delegate_undefined_trait.sentinel\")"
+---
+sentinel::resolve::undefined_trait_for_impl
+
+  × undefined trait `Missing` in impl block
+   ╭─[tests/ui/c43_delegate_undefined_trait.sentinel:8:29]
+ 7 │ class Logger {
+ 8 │     delegate writer: i64 to Missing;
+   ·                             ───┬───
+   ·                                ╰── 
+ 9 │     pub init() {
+   ╰────

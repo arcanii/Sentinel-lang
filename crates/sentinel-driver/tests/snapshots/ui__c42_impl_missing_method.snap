@@ -1,0 +1,15 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c42_impl_missing_method.sentinel\")"
+---
+sentinel::types::impl_missing_method
+
+  × impl of `Writer` for `FileSink` is missing method `write`
+    ╭─[tests/ui/c42_impl_missing_method.sentinel:20:1]
+ 19 │     
+ 20 │ ╭─▶ impl as Writer for FileSink {
+ 21 │ │       // Missing `write` method.
+ 22 │ ├─▶ }
+    · ╰──── 
+ 23 │     
+    ╰────

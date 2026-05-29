@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c34_handle_duplicate_arm.sentinel\")"
+---
+sentinel::resolve::duplicate_handler_arm
+
+  × duplicate handler arm for `Io.read` in this `handle`
+    ╭─[tests/ui/c34_handle_duplicate_arm.sentinel:10:41]
+  9 │ fn main() -> i64 {
+ 10 │     handle 0 with { Io.read(k) => k(1), Io.read(k) => k(2) }
+    ·                                         ─────────┬────────
+    ·                                                  ╰── 
+ 11 │ }
+    ╰────
