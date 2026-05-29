@@ -47,8 +47,12 @@ with `crates/sentinel-driver/tests/repro.rs` (compile-twice, diff the
 object; 5 fixtures) — a regression guard for the C5.1 HIR/MIR stages.
 **C5.0 COMPLETE** (D1/D13 + D6/D9 decision, D11 test infra, D8 repro
 audit). Next: C5.1 = HIR/MIR stages (D2), C5.2 = constant-time secret
-codegen (D3); **ADR 0026 PROPOSED (C5.1/C5.2 surface) lands before the
-first C5.1 feat commit** per the ADR-first norm. Four-check suite green
+codegen (D3). **ADR 0026 PROPOSED is drafted** (C5.1/C5.2 HIR/MIR
+pipeline + constant-time secret codegen — 10 D-decisions, 4-sub-phase
+split C5.1a→C5.2b: codegen re-targets `TypedProgram`→a desugared HIR,
+MIR is the SSA substrate for the constant-time verification, escape
+hatch documented). Next: **C5.1a** — `sentinel-hir` + `hir_query`
+desugar + migrate codegen to HIR. Four-check suite green
 via `cargo nextest run --workspace` + `cargo test --doc` (1195 tests:
 the C4-close ~1190 + 5 repro; D11 was test-count-neutral).
 
