@@ -34,10 +34,17 @@ behaviour) → the c51 bar + `repro.rs` hold by construction; reproducible
 builds (D8) fold in. Amendments: A1 (field-type asserts strengthen the
 "offsets" wording), A2 (named-struct layout pinned via a representative
 `{i64,i64}` struct, since lowering a real `Struct(id)` needs codegen's
-pass-0 cache). +4 tests (1231). Four-check green. **Next: developer-scope
-call** — LSP (ADR 0025 D10) or assemble the TLS 1.3 go/no-go (D13): both
-1.0 headline capabilities (constant-time `secret` compare + broker scope
-arenas) **and** a frozen `abi-v1` are now in hand.
+pass-0 cache). +4 tests (1231). Four-check green. **Next: the 1.0 go/no-go
+(ADR 0030 PROPOSED).** A readiness/scoping pass found the TLS-handshake-
+shaped close-bar program is an *assembly of proven patterns* (`c53_ct_eq`
+constant-time verify, `c4` class/trait/delegation, `c37` effects,
+recursion for iteration — all green) + modelling choices, **not** new
+machinery; **actors are descoped** from 1.0 (ADR 0030 D3, a deviation from
+C5.0 — a sequential handshake needs no mailbox), and bit shifts are a
+conditional JIT prerequisite (ADR 0027 A1, only if a reduced primitive
+needs them). Resume at go/no-go **(1/N)**: the skeleton (state machine +
+cipher trait + I/O effects + 4-stage flow, stubbed crypto). Closing the
+go/no-go (runs + passes D5) **declares Sentinel 1.0** and flips ADR 0025.
 
 Pre-D7(1/N) context: **C5.4 (2/N): the scope→arena codegen; ADR 0028 →
 ACCEPTED-WITH-AMENDMENTS.** Codegen routes a scope's non-escaping

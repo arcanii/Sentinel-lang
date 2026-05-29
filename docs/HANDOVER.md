@@ -112,6 +112,7 @@ C1.3. See STATE.md Section C.
 **ADR 0029 PROPOSED — stable ABI (D7) — docs-only.** Recommended + drafted as the next C5 sub-phase (no codegen hazard; a prerequisite for the go/no-go's runtime↔codegen link + Phase D self-hosting). Ten D-decisions: define + **document** (`docs/abi-v1.md`) + **freeze at `abi-v1`** + **test** the ABI — calling convention (D3: C ABI / SysV+AAPCS64; main→i32; ordinary fns by value; effecting fns→`*SentinelKont`; class init→out_ptr), the `Type`→LLVM **layout catalog** (D4: structs field-order, `[T]`=`{i64,ptr}`, `?primitive`=`{i1,T}`, `?Struct`=`{i1,ptr}`, ref/kont/task=opaque ptr, `secret T`≡`T`), **name mangling** (D5: `base__<tag>`, `arr_`/`opt_`/`ref_`/`sec_`, `Name__init`/`Name__method`/`Name__Type__Trait__method`), the **runtime-symbol contract** (D6: the ~18 `sentinel_*` + the `#[repr(C)]` `SentinelKont`/`Frame`/`Task`/`ScopeCtx` layouts), a **layout-stability test suite** (D7: extend the size/align asserts + DataLayout `Type`-layout asserts + mangling/symbol golden tests — the enforcement, drift→red test), versioning (D8: `abi-v1` freeze; reproducible builds folded in, already guarded by `repro.rs`; mangling length-prefixing is the one `abi-v2` soft-spot). **No emitted bytes change** → c51 bar holds by construction. Out of scope (D9): the separate-compilation linker/module surface (ADR 0025 D9, post-1.0), cross-arch beyond x86-64/aarch64, FFI header gen. Sub-phase split D7 (1/N) spec+struct/mangling/symbol tests, (2/N) `Type`-layout DataLayout asserts + flip. Next: **D7 (1/N)**.
 **Phase C5 D7 (1/N) — the stable-ABI spec + layout-stability tests (ADR 0029) — complete.** `docs/abi-v1.md` documents + **freezes** the ABI codegen already emits (calling convention, the `Type`→LLVM layout catalog, the `#[repr(C)]` runtime struct layouts, name mangling, the ~18 `sentinel_*` runtime-symbol contract), each cross-linked to its bootstrap source. Stability tests pin it so a drift turns a test red rather than silently miscompiling: `abi_v1_struct_layouts_are_stable` (size/align + `offset_of!` for `SentinelKont`/`Frame`/`Task`/`ScopeCtx`) + `abi_v1_runtime_symbol_set` (addresses of all 18 runtime symbols → rename/removal is a compile error) in sentinel-runtime; `abi_v1_mangling_is_stable` (golden strings for `mangle_type`/`mangle_mono_name`) in sentinel-codegen. **No emitted bytes change** (documents/tests existing behaviour) → c51 bar + `repro.rs` hold by construction; reproducible builds (D8) fold in. +3 tests (1230) (`0304a9c`). **ADR 0029 stays PROPOSED** (flip is at 2/N). Next: **D7 (2/N)** — the `Type`-layout DataLayout assertions (query the lowered LLVM type's size/align/field-offsets through the target `DataLayout`, assert the `abi-v1` values) + a negative "drift turns it red" check + the ADR flip. (May then move to LSP D10 or the TLS go/no-go.)
 **Phase C5 D7 (2/N) — `Type`-layout DataLayout assertions; ADR 0029 → ACCEPTED-WITH-AMENDMENTS. Phase C5 D7 (stable ABI) closes.** `abi_v1_type_layouts_via_datalayout` (sentinel-codegen) lowers each `Type` via the real `llvm_basic_type` and asserts its size / alignment / struct-field offsets **and field types** through the target `DataLayout` (same target setup as `compile_to_object`) — the concrete `abi-v1` §2 byte layouts (i1=1, i32=4, i64=8, `[T]`/`?T`=16 with the inner at offset 8, ptr=8). **Amendment A1:** field-type asserts were added beyond the ADR's "size+offsets" wording — equal-sized fields' *order* (e.g. `[T]`'s `{i64 len, ptr data}`) isn't pinned by offsets alone; the negative check (deliberately reordering the array fields) was verified to turn the test **red**, then reverted. **A2:** `Struct`/`Class`/`GenericInstance` layouts (which need codegen's pass-0 `struct_types` cache to lower a real `Type::Struct(id)`) are pinned via a representative `{i64,i64}` struct built as codegen builds user structs (`struct_type(fields, false)`); the cache-free arms (scalars, `[T]`, `?T`, ref/kont/task) go through `llvm_basic_type` directly. No emitted bytes change → c51 bar + `repro.rs` hold. +1 test (1231). Four-check green. **Next: developer-scope call** — LSP (ADR 0025 D10) or assemble the TLS 1.3 go/no-go (D13): both 1.0 headline capabilities (constant-time `secret` compare + broker scope arenas) **and** a frozen `abi-v1` are now in hand. Deferred (post-1.0, ADR 0029 D9): the separate-compilation linker/module surface, cross-arch beyond x86-64/aarch64, a length-prefixed mangling scheme (`abi-v2`).
+**ADR 0030 PROPOSED — the 1.0 go/no-go: a TLS-1.3-handshake-shaped program (D13) — docs-only.** Opened after a **readiness/scoping pass** against the current surface, which found the go/no-go is an *assembly of already-proven patterns* (constant-time `Finished` verify = `c53_ct_eq`; state machine + trait + delegation = `c4_go_no_go`; I/O-as-effects = `c37_go_no_go`; bounded iteration = recursion, verified working) + deliberate modelling choices, **not** a dependency on big new machinery. Nine D-decisions: the close-bar goal (D1: single-process single-file handshake — accept → ECDHE → HKDF → `Finished` verify — that compiles + runs + **passes D5 constant-time verification**; closing it = **Sentinel 1.0**); reduced handshake-shaped crypto over `secret` scalars at fixed sizes (D2: a Montgomery-ladder *step*, an HKDF-`expand`-shaped fixed mix, the `c53_ct_eq` compare — not real AES/X25519/SHA-256, which are ecosystem per §15.3); **D3 — descope the connection actor** (a *deviation* from C5.0 D5: a sequential single-process handshake needs no mailbox → drops the largest remaining language-design sub-phase off the 1.0 path; actors → post-1.0; **developer's call**); modelling choices (D4: bytes/labels→`i64`, secret material→`secret` scalars, iteration→recursion — no new surface); **shifts `<< >> ~` as a conditional JIT prerequisite** (D5: land ADR 0027 A1 only *iff* a reduced primitive needs them; the chosen shapes use only `+ - * & | ^`); the constant-time bar (D6: must pass `verify_constant_time` — the decisive 1.0 validation); out of scope (D7: real crypto, `u8`/byte type + string literals, actors, modules, cross-process, loops); phase-go (D8: `c5_go_no_go` fixture green + D5-clean → flip ADR 0025 → ACCEPTED); 3-sub split (D9: skeleton → CT primitives → close). Gaps found but non-blocking for the reduced program: no loops (recursion substitutes), no bytes/strings (model as `i64`), no shifts/`%` (reduced primitives avoid; `%` isn't even lexed), no `[secret T]` arrays (secret scalars). Next: **go/no-go (1/N)** — the skeleton (state machine + cipher trait + `Net`/error effects + 4-stage flow, stubbed crypto; compiles + runs).
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1887,17 +1888,28 @@ For pasting into a fresh chat to bootstrap context:
       layout pinned via a representative `{i64,i64}` struct (a real
       `Struct(id)` needs codegen's pass-0 cache). +1 test (1231).
 
-    RESUME AT: **developer-scope call — Phase C5 D7 (stable ABI) is CLOSED.**
-    The three 1.0 building blocks are now in hand: constant-time `secret`
-    (C5.2/C5.3, machine-verified), broker **scope arenas** (C5.4), and a
-    frozen, tested **`abi-v1`** (C5 D7). Natural next steps:
-      - **TLS 1.3 go/no-go** (ADR 0025 D13) — the 1.0 acceptance program;
-        large/multi-session, but everything it needs is now built.
-      - **LSP + tooling** (ADR 0025 D10) — populate `sentinel-lsp`
-        (diagnostics + go-to-definition via the salsa queries) + `snc`
-        polish (`--emit` IR/asm, check-only mode).
-      - **Actors** (ADR 0025 D5) — needs new `actor`/`receive` surface;
-        the larger language-design sub-phase.
+    RESUME AT: **the 1.0 go/no-go (1/N) — the skeleton** (ADR 0030 PROPOSED,
+    just drafted). Write `tests/pass/c5_go_no_go.sentinel`: a single-file
+    TLS-1.3-handshake-shaped program — a handshake state machine (class) +
+    a cipher-suite trait/impl + a `Net`/error `effect` (I/O-as-effects, the
+    `c37` shape) + the 4-stage control flow (accept → ECDHE → HKDF →
+    `Finished`) with **stubbed** crypto — that compiles + links + runs
+    end-to-end. Then (2/N) fill the constant-time primitives over `secret`
+    scalars (a Montgomery-ladder *step* + cswap, an HKDF-`expand`-shaped
+    fixed mix, the `c53_ct_eq` `Finished` verify) and make it **pass D5**
+    (`verify_constant_time` — the decisive 1.0 bar); then (3/N) close →
+    declare 1.0 + flip ADR 0025 → ACCEPTED.
+      Scoping verdict (ADR 0030 Context): the go/no-go is an ASSEMBLY of
+        proven patterns (c53_ct_eq verify, c4 class/trait/delegation, c37
+        effects, recursion for iteration — all green) + modelling choices,
+        NOT new machinery. Gaps are non-blocking for the reduced program.
+      Key decisions: **actors DESCOPED** from 1.0 (ADR 0030 D3, a deviation
+        from C5.0 — sequential handshake needs no mailbox; developer's call
+        to re-add). **Shifts `<< >> ~` are a conditional JIT prereq** (D5):
+        land ADR 0027 A1 only IF a reduced primitive needs them (the chosen
+        shapes use only `+ - * & | ^`). Model bytes/labels as `i64`, secret
+        material as `secret` scalars, iteration as recursion (D4).
+      Alternative if the developer redirects: LSP (ADR 0025 D10, tooling).
 
     DEFERRED (none blocking; recorded in ADRs): C5.2a/D4 constant-time
     EMISSION (branch-free arithmetic/bitwise already passes D5 on existing
@@ -1911,7 +1923,9 @@ For pasting into a fresh chat to bootstrap context:
     (bitwise). 0028 ACCEPTED-WITH-AMENDMENTS (broker; 1/N substrate + 2/N
     scope→arena codegen both shipped; A2 corrects the "UAF hole"). 0029
     ACCEPTED-WITH-AMENDMENTS (stable ABI; abi-v1 frozen + tested; A1 field-type
-    asserts, A2 representative named-struct layout).
+    asserts, A2 representative named-struct layout). 0030 PROPOSED (the 1.0
+    go/no-go — TLS-handshake-shaped; D3 descopes actors; scoping done; resume
+    at 1/N skeleton). 0025 flips → ACCEPTED when the go/no-go runs + passes D5.
     Optional C4 follow-ons (none blocking): work-stealing scheduler
     (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
     (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).
