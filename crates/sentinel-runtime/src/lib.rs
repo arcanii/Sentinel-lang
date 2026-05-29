@@ -117,6 +117,107 @@ pub extern "C" fn sentinel_free(ptr: *mut u8) {
     }
 }
 
+// ============================================================================
+// C5.4 / ADR 0028: broker-backed scope arenas (the substrate)
+// ============================================================================
+//
+// A process-wide Phase A `Broker` hosts one bump arena per Sentinel scope.
+// These C-ABI entry points are *additive* at C5.4 (1/N): codegen still
+// emits `sentinel_alloc` / `sentinel_free` (libc) and does NOT call these
+// yet, so compiled programs are byte-identical (the ADR 0026 c51 bar).
+// C5.4 (2/N) wires codegen to route a scope's non-escaping heap
+// allocations (those the borrow-check `DropPlan` frees at that scope exit,
+// hence provably non-escaping) into the scope's arena, replacing the N
+// per-binding `sentinel_free` calls with one `sentinel_arena_exit` —
+// a bump arena reclaims everything at once.
+
+use sentinel_broker::{ArenaHandle, Broker};
+use std::sync::OnceLock;
+
+/// Per-scope arena capacity used when codegen passes a non-positive hint.
+/// Generous so the substrate's tests + small programs fit; C5.4 (2/N) will
+/// size each arena from its scope's actual needs.
+const DEFAULT_ARENA_CAPACITY: usize = 1 << 20; // 1 MiB
+
+/// The process-wide broker. Lazily created on first arena use, so programs
+/// that never touch the arena path pay nothing.
+fn broker() -> &'static Broker {
+    static BROKER: OnceLock<Broker> = OnceLock::new();
+    BROKER.get_or_init(Broker::new)
+}
+
+/// Enter a scope arena: create a bump arena of `capacity` bytes (a
+/// non-positive `capacity` uses [`DEFAULT_ARENA_CAPACITY`]) and return an
+/// opaque handle to pass to [`sentinel_arena_alloc`] / [`sentinel_arena_exit`].
+#[no_mangle]
+pub extern "C" fn sentinel_arena_enter(capacity: i64) -> *mut core::ffi::c_void {
+    let cap = if capacity <= 0 {
+        DEFAULT_ARENA_CAPACITY
+    } else {
+        capacity as usize
+    };
+    let handle = broker().create_arena("scope", cap);
+    Box::into_raw(Box::new(handle)) as *mut core::ffi::c_void
+}
+
+/// Bump-allocate `size` bytes (16-byte aligned, matching libc malloc's
+/// guarantee) in the arena. Aborts on a null arena, a negative size, or
+/// arena exhaustion — a scope's bump arena has a fixed capacity and does
+/// not grow.
+///
+/// # Safety
+/// `arena` must be a live handle from [`sentinel_arena_enter`] that has not
+/// yet been passed to [`sentinel_arena_exit`].
+#[no_mangle]
+pub extern "C" fn sentinel_arena_alloc(arena: *mut core::ffi::c_void, size: i64) -> *mut u8 {
+    if arena.is_null() {
+        eprintln!("sentinel: arena_alloc on a null arena");
+        std::process::abort();
+    }
+    if size < 0 {
+        eprintln!("sentinel: bad arena_alloc size {size}");
+        std::process::abort();
+    }
+    // SAFETY: caller guarantees `arena` is a live handle from
+    // sentinel_arena_enter (not yet exited); we only borrow it.
+    let handle = unsafe { &*(arena as *const ArenaHandle) };
+    let layout = match std::alloc::Layout::from_size_align(size as usize, 16) {
+        Ok(l) => l,
+        Err(_) => {
+            eprintln!("sentinel: bad arena layout (size = {size})");
+            std::process::abort();
+        }
+    };
+    match handle.alloc_bytes(layout) {
+        Ok(p) => p.as_ptr(),
+        Err(e) => {
+            eprintln!("sentinel: arena allocation failed (size = {size}): {e}");
+            std::process::abort();
+        }
+    }
+}
+
+/// Exit a scope arena: destroy it, bulk-freeing every allocation made in
+/// it, and invalidate the handle. A null handle is a no-op.
+///
+/// # Safety
+/// `arena` must be a handle from [`sentinel_arena_enter`] that is exited at
+/// most once, and no pointer from [`sentinel_arena_alloc`] on it may be
+/// used afterwards.
+#[no_mangle]
+pub extern "C" fn sentinel_arena_exit(arena: *mut core::ffi::c_void) {
+    if arena.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees `arena` came from sentinel_arena_enter and
+    // is exited at most once; reclaim the Box.
+    let handle = unsafe { Box::from_raw(arena as *mut ArenaHandle) };
+    // Drop the broker's registered Arc, then the handle's Arc; the last
+    // drop runs BumpStrategy::drop, freeing the backing buffer.
+    let _ = broker().destroy_arena(handle.id());
+    drop(handle);
+}
+
 // =============================================================================
 // C3.5(a) / ADR 0020 D7: handler runtime
 // =============================================================================
@@ -716,6 +817,45 @@ mod tests {
     #[test]
     fn smoke() {
         assert_eq!(crate_name(), "sentinel-runtime");
+    }
+
+    // ---- C5.4 / ADR 0028: broker-backed scope arenas (the substrate) ----
+
+    #[test]
+    fn arena_enter_alloc_exit_round_trip() {
+        let arena = sentinel_arena_enter(4096);
+        assert!(!arena.is_null(), "enter returns a live handle");
+        let p = sentinel_arena_alloc(arena, 32);
+        assert!(!p.is_null(), "alloc returns usable memory");
+        // The bytes are writable + readable while the arena is live.
+        unsafe {
+            std::ptr::write_bytes(p, 0xCD, 32);
+            assert_eq!(*p, 0xCD);
+            assert_eq!(*p.add(31), 0xCD);
+        }
+        sentinel_arena_exit(arena); // bulk-frees the arena's backing buffer
+    }
+
+    #[test]
+    fn arena_alloc_is_16_byte_aligned() {
+        let arena = sentinel_arena_enter(0); // default capacity
+        let p = sentinel_arena_alloc(arena, 1);
+        assert_eq!(p as usize % 16, 0, "matches libc malloc's alignment guarantee");
+        sentinel_arena_exit(arena);
+    }
+
+    #[test]
+    fn arena_serves_distinct_allocations() {
+        let arena = sentinel_arena_enter(4096);
+        let a = sentinel_arena_alloc(arena, 16);
+        let b = sentinel_arena_alloc(arena, 16);
+        assert_ne!(a, b, "successive bump allocations are distinct");
+        sentinel_arena_exit(arena);
+    }
+
+    #[test]
+    fn arena_exit_on_null_is_a_no_op() {
+        sentinel_arena_exit(std::ptr::null_mut());
     }
 
     #[test]

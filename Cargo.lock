@@ -1262,6 +1262,7 @@ name = "sentinel-runtime"
 version = "0.0.1"
 dependencies = [
  "libc",
+ "sentinel-broker",
  "thiserror",
  "tracing",
 ]

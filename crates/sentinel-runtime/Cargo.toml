@@ -24,6 +24,10 @@ thiserror  = { workspace = true }
 # Sentinel programs link with the C runtime, so using libc malloc
 # directly (rather than Rust's allocator) avoids mixing allocators.
 libc       = "0.2"
+# C5.4 / ADR 0028: the Phase A broker backs the scope-arena C-ABI
+# (sentinel_arena_enter/alloc/exit). Additive at C5.4 (1/N) — codegen
+# does not call these yet.
+sentinel-broker = { path = "../sentinel-broker" }
 
 [lints.rust]
 unsafe_code = "allow"

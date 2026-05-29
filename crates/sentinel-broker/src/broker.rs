@@ -40,6 +40,19 @@ impl ArenaHandle {
         self.arena.alloc(value)
     }
 
+    /// Allocate raw, uninitialised bytes into this arena, returning the
+    /// raw pointer (see [`crate::Arena::alloc_bytes`]). C5.4 / ADR 0028 —
+    /// the bridge to the runtime's raw `sentinel_alloc`.
+    ///
+    /// # Errors
+    /// Returns [`BrokerError::OutOfMemory`] if the arena is full.
+    pub fn alloc_bytes(
+        &self,
+        layout: std::alloc::Layout,
+    ) -> Result<std::ptr::NonNull<u8>, BrokerError> {
+        self.arena.alloc_bytes(layout)
+    }
+
     /// Free a handle's slot, advancing the slot's generation.
     ///
     /// After this returns Ok, the handle becomes invalid; further

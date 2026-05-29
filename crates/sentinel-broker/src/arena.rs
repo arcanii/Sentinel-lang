@@ -6,6 +6,7 @@ use crate::handle::Handle;
 use crate::ids::{ArenaId, Generation, SlotIndex};
 use crate::strategy::{AllocStrategy, SlotPtr, StrategyKind};
 use std::alloc::Layout;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, Ordering, AtomicU64};
 use std::sync::Arc;
 
@@ -135,6 +136,36 @@ impl Arena {
         ))
     }
 
+    /// Allocate `layout.size()` raw, uninitialised bytes into this arena
+    /// and return the slot's raw pointer — no typed value is written and
+    /// no [`Handle`] is issued.
+    ///
+    /// C5.4 / ADR 0028: the bridge from the runtime's raw
+    /// `sentinel_alloc` (which must hand generated code a `*mut u8` to
+    /// index into) to the broker's arenas. The caller tracks the raw
+    /// pointer; reclamation is wholesale (destroy the arena / drop the
+    /// last `Arc`), matching a bump arena's bulk-free at scope exit, so
+    /// there is no per-pointer `free` — that is the whole point of the
+    /// scope→arena mapping.
+    ///
+    /// # Errors
+    /// Returns [`BrokerError::OutOfMemory`] if the strategy is full.
+    pub fn alloc_bytes(self: &Arc<Self>, layout: Layout) -> Result<NonNull<u8>, BrokerError> {
+        let allocated = self.strategy.alloc_raw(layout)?;
+        self.alloc_count.fetch_add(1, Ordering::Relaxed);
+        if let Some(r) = &self.recorder {
+            r.record(Event::Allocated {
+                arena: self.id,
+                slot: allocated.slot,
+                slot_generation: allocated.generation,
+                size: layout.size(),
+                align: layout.align(),
+                at_ns: r.now_ns(),
+            });
+        }
+        Ok(allocated.ptr)
+    }
+
     /// Free a slot, returning whether the strategy supports it.
     ///
     /// After this returns Ok, the supplied handle becomes invalid;
@@ -214,6 +245,26 @@ mod tests {
         let a = make_bump(1, 1024);
         let h = a.alloc(42_u64).unwrap();
         assert_eq!(*h.get().unwrap(), 42);
+    }
+
+    #[test]
+    fn alloc_bytes_returns_usable_aligned_memory() {
+        // C5.4 / ADR 0028: the raw-bytes path the runtime's
+        // `sentinel_alloc` bridges onto.
+        let a = make_bump(10, 4096);
+        let layout = Layout::from_size_align(64, 16).unwrap();
+        let p = a.alloc_bytes(layout).expect("alloc_bytes");
+        assert_eq!(p.as_ptr() as usize % 16, 0, "honours the requested alignment");
+        // The returned memory is writable + readable.
+        unsafe {
+            p.as_ptr().write_bytes(0xAB, 64);
+            assert_eq!(*p.as_ptr(), 0xAB);
+            assert_eq!(*p.as_ptr().add(63), 0xAB);
+        }
+        // Two raw allocations are distinct and both counted.
+        let q = a.alloc_bytes(layout).expect("second alloc_bytes");
+        assert_ne!(p.as_ptr(), q.as_ptr());
+        assert_eq!(a.alloc_count(), 2);
     }
 
     #[test]
