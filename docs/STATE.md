@@ -12,9 +12,25 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C5.2b (2/N): the D5 constant-time verification is wired
-into `snc` (ADR 0026 D5/D9).** `snc build` now runs the constant-time
-check: after `check_query`, the driver lowers the typed program to MIR
+Last updated: **C5.3 (1/N): lexer — bitwise `|` (`Pipe`) + `^` (`Caret`)
+tokens (ADR 0027 D2).** The first wave of the bitwise-operator surface
+(the prerequisite for the go/no-go's constant-time MAC verify): two new
+logos tokens (`|` → `Pipe`, `^` → `Caret`); longest-match keeps `||` →
+`PipePipe`, and the infix bitwise-and **reuses** the existing `&` (`Amp`)
+token, disambiguated from the borrow prefix by the parser's operand
+position at 2/N. No `<<`/`>>` tokens yet (C5.4 — they need the
+`>>`-vs-nested-generic-close split). +4 lexer tests (additive — the
+parser doesn't consume the tokens yet); four-check green (1212). **Next:
+C5.3 (2/N)** — the `& | ^` surface end-to-end: extend `BinOp`; parser
+precedence `&`>`^`>`|` between cmp and add; secret-preserving integer
+typing (mirroring C3.1b arithmetic); LLVM and/or/xor codegen (MIR + the
+D5 pass already cover bitwise as non-sinks) + `c53_bitwise` / `c53_ct_eq`
+fixtures; ADR 0027 flip.
+
+Pre-C5.3(1/N) context: **C5.2b (2/N): the D5 constant-time verification is
+wired into `snc` (ADR 0026 D5/D9).** `snc build` now runs the
+constant-time check: after `check_query`, the driver lowers the typed
+program to MIR
 (`lower_to_mir` — now a real pipeline consumer) and runs
 `verify_constant_time`; a `secret` reaching a conditional branch, a load
 index/address, or a division divisor is a `sentinel::mir::secret_leak`
