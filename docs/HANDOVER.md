@@ -1805,354 +1805,75 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    Local HEAD: verify with `git log -1` at session start
-    (expect the C4.5 close-out commit — combined phase-go +
-    ADR 0021 flip + STATE/HANDOVER close-out).
-    Last work: **C4.5 — Phase C4 close-out. ADR 0021 → ACCEPTED-
-    WITH-AMENDMENTS. PHASE C4 CLOSES** (all of C4.0–C4.5 shipped:
-    lexer, classes, traits+impls, delegation, structured
-    concurrency, close-out). C4.5 added the combined full-surface
-    phase-go `tests/pass/c4_go_no_go.sentinel` (class + methods +
-    init + trait + impl + delegation + scope/spawn/await in one
-    program; exit 42) + `c4_named_impl.sentinel` (two named impls
-    co-existing; exit 42). D13's `spawn lb.write(42)` was adapted
-    to spawn a free fn (spawn is fn-call-only per ADR 0024 D2 —
-    ADR 0021 amendment A2). ADR 0021 amendment A1: async-as-effect
-    (D9) superseded by ADR 0024's direct-runtime API (surface
-    identical). +2 driver pass-tests (~1191 active workspace).
-    Four-check suite green.
-    What remains: **Phase C5 → Sentinel 1.0** per HANDOVER §6.2 —
-    broker integration, constant-time secret codegen (deferred
-    from C3), cross-process, actors, stable ABI, reproducible
-    builds, LSP/tooling. (NOT "Phase D" — the roadmap after C4 is
-    C5.) **ADR 0025 PROPOSED is drafted** (14 D-decisions, 8-sub-
-    phase split C5.0–C5.8). **C5.0 COMPLETE:** go/no-go program
-    CHOSEN = single-process single-file TLS 1.3 handshake → D6
-    (cross-process) + D9 (modules) both post-1.0 (ADR 0025 `## C5.0
-    resolution`); D11 test infra landed (`cargo nextest` + `insta`
-    full-diagnostic UI snapshots); D8 repro audit found the C0–C4 build
-    already byte-identical across processes (locked in by
-    `tests/repro.rs`). **ADR 0026 PROPOSED drafted** (C5.1/C5.2 HIR/MIR
-    + constant-time; 10 D-decisions, split C5.1a→C5.2b). **C5.1a (1/N)
-    done** (thin HIR seam; codegen consumes `HirProgram`; behaviour-
-    preserving). **D3 escape hatch INVOKED** (codegen ~295 TypedExprKind
-    refs → thick-HIR migration is high-risk + not needed for 1.0
-    constant-time): codegen stays on the typed program, thick HIR +
-    codegen migration → post-1.0, **C5.1a closes at the seam**. **C5.1b
-    (1/N) done** — the `sentinel-mir` data model (minimal SSA/CFG;
-    secret-taint seed via `is_secret`; the 3 D5 sinks representable;
-    additive). **C5.1b (2/N) done** (`1a223c8`) — `lower_to_mir` lowers
-    typed fn bodies → MIR SSA (`if`/`&&`/`||` → `Branch` + merge
-    block-params; a var reassigned on one arm threaded through a merge
-    param; the 3 D5 sinks precise; the rest `Opaque`; top-level fns only).
-    **C5.2b (1/N) done** (`9bcc271`) — `verify_constant_time` rejects a
-    `secret` at a branch/load/div sink (`sentinel::mir::secret_leak`;
-    type-directed taint). **C5.2b (2/N) done** (`e81bdbf`) — D5 wired into
-    `snc` (gates codegen) + `c52_secret_leak` (UI) + `c52_secret_ct`
-    (branch-free, exit 42) fixtures; c51 bar holds. **Decision: defer
-    C5.2a/D4, do bitwise operators next** (the go/no-go's MAC verify needs
-    `^`/`|`; the surface has none). **Resume at C5.3 (ADR 0027 PROPOSED):**
-    bitwise `& | ^` **DONE** (`b3d1d48` lexer + `76bfea3` surface; ADR 0027
-    → ACCEPTED-WITH-AMENDMENTS, A1: `<< >> ~`/C5.4 deferred). `c53_ct_eq`
-    shows a real constant-time MAC-verify shape (XOR-accumulate+OR-reduce+
-    declassify) passing D5. **Broker integration (C5.4, ADR 0028
-    PROPOSED): (1/N) DONE** (`b49a5ef`) — the broker-arena substrate: a
-    public broker raw-bytes API (`Arena::alloc_bytes` → `NonNull<u8>`) +
-    runtime C-ABI `sentinel_arena_enter`/`_alloc`/`_exit` on a lazy
-    process-wide `Broker` (bump arenas; `_exit` frees the buffer);
-    additive + c51-safe (codegen untouched → objects byte-identical).
-    **Resume at C5.4 (2/N):** the scope→arena codegen — route a scope's
-    non-escaping heap allocs (the borrow-check `DropPlan`'s scope-exit set
-    = provably non-escaping) into a per-scope bump arena, replacing N
-    `sentinel_free`s with one `sentinel_arena_exit`; escaping values stay
-    on malloc. The careful UAF-sensitive part; do it fresh. Bitwise shifts
-    + D4 emission + ADR 0026 flip + full escape analysis remain deferred.
-    Per-sub-phase ADRs 0026+ at each open.
-    Optional C4 follow-ons (none blocking C5): work-stealing
-    scheduler (ADR 0024 A1), scope cancellation (A2), Task<T>/
-    spawn-args beyond i64 (A3), explicit `Task<T>` annotations
-    (A5), Path-3 bounded-generic dispatch (ADR 0023 A1).
+    (Rust workspace under crates/, building the `snc` bootstrap compiler.)
+    Local HEAD: verify with `git log -1` — expect f401854 (docs: c5.4 2/N
+    prep — verified UAF hole). Clean tree; 1226 tests. macOS + LLVM 18 only.
+    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.2/§0.3 + ADR 0028
+    (esp. the "C5.4 (2/N) implementation map" AND the ⚠ VERIFIED UAF HOLE
+    note — read before touching the scope→arena routing) + ADR 0026/0027.
+
+    PHASE C5 = productionize toward Sentinel 1.0. The headline 1.0
+    capability — **constant-time `secret` — is DELIVERED + machine-verified.**
+
+    Last session (all four-check green, feat+docs pairs):
+    - **C5.1b (2/N)** (`1a223c8`): `lower_to_mir` — typed fn bodies → MIR SSA
+      (`if`/`&&`/`||` → `Branch` + merge block-params; reassigned-on-one-arm
+      vars threaded; 3 D5 sinks precise; rest `Opaque`; free fns only).
+    - **C5.2b (1/N+2/N)** (`9bcc271`,`e81bdbf`): the **D5 constant-time
+      VERIFICATION** wired into `snc` (`verify_constant_time`; rejects a
+      `secret` at a branch / load index-or-address / division divisor →
+      `sentinel::mir::secret_leak`; taint is type-directed). Fixtures:
+      c52_secret_leak (UI: `secret bool && secret bool`), c52_secret_ct (pass).
+    - **C5.3 (1/N+2/N)** (`b3d1d48`,`76bfea3`): bitwise **`& | ^`** end-to-end
+      (lexer Pipe/Caret; BinOp BitAnd/BitOr/BitXor; precedence `&`>`^`>`|`
+      between cmp and add; secret-preserving integer typing — the `Binary`
+      pipeline is op-generic so resolve/types/MIR/D5 were unchanged; LLVM
+      and/or/xor). ADR 0027 ACCEPTED-WITH-AMENDMENTS (A1: `<< >> ~` deferred).
+      Fixtures: c53_bitwise (precedence), c53_ct_eq (a REAL constant-time
+      MAC-verify shape — XOR-accumulate+OR-reduce+declassify — passing D5).
+      `&` is now triple-purposed (borrow prefix / `&&` / `&` infix), split
+      by parser position.
+    - **C5.4 (1/N)** (`b49a5ef`): the broker-arena **SUBSTRATE** (ADR 0028
+      PROPOSED). Broker `Arena::alloc_bytes` → NonNull<u8> (exposes the
+      internal alloc_raw; the typed Handle<T> API can't); runtime
+      `sentinel_arena_enter`/`_alloc`(16-byte-aligned bump)/`_exit`(destroy
+      → frees buffer) on a process-wide lazy `Broker`. ADDITIVE + c51-safe
+      (codegen untouched → objects byte-identical); NOT called by codegen yet.
+
+    RESUME AT: **C5.4 (2/N) — the scope→arena CODEGEN** (route a scope's
+    non-escaping heap allocs into a bump arena; replace N per-binding
+    `sentinel_free` with one `sentinel_arena_exit`). UAF-SENSITIVE — a
+    use-after-free here CAN PASS THE TEST SUITE BY LUCK, so correctness must
+    come from reasoning.
+      ⚠ VERIFIED UAF HOLE (ADR 0028): routing "iff binding ∉ moved_sources"
+        is UNSAFE — `emit_scope_drops` frees iff (∉ moved) AND (≠ tail_returned),
+        checked SEPARATELY, and a tail-returned binding is NOT in moved_sources
+        (DropPlan.moved_sources finalised at borrow-check L626-628, before the
+        return-source check). So `fn make() -> [i64] { let a=[1,2,3]; a }`
+        would arena-free the RETURNED array at make's exit → UAF in the caller.
+      SAFE PATH: a small per-fn PRE-PASS computing emit_scope_drops's actual
+        free set (∉ moved AND not transitively tail-returned), route exactly
+        those; OR the deferred escape analysis (ADR 0026 D2). Narrow first
+        slice: `let x = [primitive array literal]`. One HashSet<VarId> drives
+        BOTH alloc-routing and free-skipping. Add a c54_scope_arena fixture.
+        Full design + touch points in ADR 0028's implementation map.
+      ALTERNATIVE (no hazard): a different C5 sub-phase — stable ABI
+        (ADR 0025 D7: spec doc + layout-stability tests) or LSP (D10).
+
+    DEFERRED (none blocking; recorded in ADRs): C5.2a/D4 constant-time
+    EMISSION (branch-free arithmetic/bitwise already passes D5 on existing
+    codegen → D4 likely scoped out of 1.0; ADR 0026 flips once settled);
+    bitwise SHIFTS `<< >> ~` (ADR 0027 A1; need the `>>`/nested-generic-close
+    split); `[secret T]` arrays (would activate the broker secret-memory
+    policy); full escape analysis; `scope budget(N)` surface; cross-process /
+    modules / actors — all post-1.0 per ADR 0025.
+
+    ADR STATUS: 0026 PROPOSED (C5.1/C5.2). 0027 ACCEPTED-WITH-AMENDMENTS
+    (bitwise). 0028 PROPOSED (broker; 1/N done, 2/N mapped + UAF found).
+    Optional C4 follow-ons (none blocking): work-stealing scheduler
+    (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
+    (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).
     Branch state: verify with `git status` at session start.
-
-    Phase A (broker) + Phase B (effects-proto) + Phase C0
-    (bootstrap compiler MVP) + Phase C1 (full type system — all
-    8 sub-phases C1.0 through C1.7) + Phase C2 (refs +
-    mutability + lexical borrow check + RAII drop — all 6 sub-
-    phases C2.0.1 through C2.5) + **Phase C3 typing layer (all
-    seven sub-phases C3.0(a)/C3.0(b) + C3.1/C3.1b + C3.2(a)/
-    C3.2(b) + C3.3 + C3.4)** + **Phase C3 RUNTIME layer (C3.4
-    + C3.5(a/b/c/d/e) + C3.6(a/b) + C3.7) — all complete.
-    Phase C3 closes.** Phase C4 in progress: **C4.0 (lexer)
-    landed**; C4.1-C4.5 remaining per ADR 0021 D14. ADR 0017
-    ACCEPTED-WITH-AMENDMENTS; ADR 0018 (Polonius migration
-    plan) PROPOSED; **ADR 0019 ACCEPTED-WITH-AMENDMENTS at
-    C3.3 close**; **ADR 0020 ACCEPTED-WITH-AMENDMENTS at C3.7
-    close** with all twelve D-decisions exercised modulo D2
-    (multi-shot deferred per amendment); **ADR 0021 PROPOSED**
-    opens Phase C4 (classes + traits + delegation + structured
-    concurrency; 14 D-decisions; 6 sub-phases; 8-12 sessions);
-    **ADR 0022 PROPOSED** details C4.1 class surface (11 D-
-    decisions; ~700-1000 LOC across AST + parser + resolve +
-    types + codegen). **C4.1 (1/N) + (2/N) + close-out
-    landed**: AST + parser + resolve + types + codegen all
-    wired up end-to-end; ADR 0022 ACCEPTED-WITH-AMENDMENTS.
-    **ADR 0023 ACCEPTED-WITH-AMENDMENTS at C4.2 (2/N) close**
-    after C4.2 (1/N) AST + parser + C4.2 (2/N) resolve +
-    types + codegen for traits + impls (Path 1 receiver-typed
-    + Path 2 qualified-named dispatch). 1154 active workspace
-    tests + 1 doctest.
-    **Thirty-five go/no-go programs run end-to-end + 8 UI rejections:** c05_go_no_go
-    (C1.3 bool): "10";
-    c14_go_no_go (C1.4 struct): "7"; c15_go_no_go (C1.5
-    nullable): "142"; c16_go_no_go (C1.6 array): "15";
-    c17_go_no_go (C1.7 generics): "42"; c20_go_no_go (C2.0.2
-    refs+mut+assign): "53"; c21_go_no_go (C2.1 shared-borrow):
-    "168"; c22_go_no_go (C2.2 XOR alternation): "35";
-    c23_go_no_go (C2.3 move semantics): "100"; c24_go_no_go
-    (C2.4 RAII / drop): "160"; c25_go_no_go (C2.5 D14): "190";
-    c31_go_no_go (C3.1 D5+D6+D7 secret typing): "100";
-    c32_go_no_go (C3.2 D1+D2+D4+D13 effect rows + annotated fn
-    chain): "42"; c33_go_no_go (C3.3 full Phase C3 typing-
-    layer surface: effect_decl + annotated fn + secret typing
-    + declassify-before-branch): "42"; c35_handle_inline_perform
-    (C3.5(a) 0-arg handler runtime): exit 42;
-    c35_handle_log_returns_msg (C3.5(a) 1-arg handler): exit 42;
-    c35b_handle_fn_call_body (C3.5(b) effecting fn ABI; main
-    calls do_work() that performs Io.read; handle dispatches
-    runtime switch): exit 42; c35b_handle_multi_arm (C3.5(b)
-    Io.read + Io.write covered; switch picks Io.write arm):
-    exit 42; c35b_handle_pure_return (C3.5(b) effecting fn
-    with pure body; sentinel_kont_pure wrap; handle unwraps):
-    exit 42; **c35c_let_bound_perform (C3.5(c) let-bound
-    perform; per-let resumer wraps result via sentinel_kont_pure;
-    handle drains the frame chain): exit 42**;
-    c35c_let_bound_perform_with_capture (C3.5(c) tail
-    references fn param via heap-allocated captured-state struct;
-    resumer reloads it via GEP): exit 42; **c35d_binop_with_perform
-    (C3.5(d) `perform Io.read() + 1` → resume(41) → 42): exit
-    42**; **c35d_perform_with_capture_and_binop (C3.5(d)
-    `perform Io.read() * 2 + extra` with captured fn param):
-    exit 42**; **c35d_perform_in_call_arg (C3.5(d)
-    `double(perform Io.read())` — perform inside pure fn-call
-    arg): exit 42**; **c35e_chained_perform (C3.5(e) two
-    chained effecting lets; resumer-0 performs the second let;
-    bubble re-dispatches; a + b = 42): exit 42**;
-    **c35e_chained_perform_with_capture (C3.5(e) two chained
-    lets + outer `base: i64` captured forward through both
-    resumers): exit 42**; **c35e_chained_dependent_perform
-    (C3.5(e) second perform's arg uses first let's binding —
-    captures-for-resumer-0 correctly includes a; a + b + 12 =
-    42): exit 42**; **c36a_return_arm_transform (C3.6(a) pure-
-    bodied effecting fn + return arm `return v => v * 2` →
-    21 * 2 = 42): exit 42**; **c36a_return_arm_after_resume
-    (C3.6(a) Phase B deep-handler re-wrap: handle's body
-    performs, arm body is k(21), return arm fires on k(21)'s
-    pure-unwrap → 21 * 2 = 42): exit 42**;
-    **c36b_nested_handle_basic (C3.6(b) inner catches Io,
-    outer catches Net; do_both performs both via chained
-    lets; inner's propagate-block routes Net.fetch out → 42):
-    exit 42**; **c36b_nested_handle_inner_full (C3.6(b)
-    inner catches Io fully; inner wraps arm value via pure_kont;
-    outer dispatches PURE_RETURN; result + 27 = 42): exit
-    42**; **c37_go_no_go (C3.7 ADR 0020 D12 phase-go:
-    do_work(42) performs Io.log; handler arm msg + 1; x +
-    logged = 85; print emits stdout): stdout "85\n", exit 0**;
-    **c37_handle_return (C3.7 `handle 42 with { return v =>
-    v * 2 }` — pure body wrapped via sentinel_kont_pure): exit
-    84**; **c37_perform_outside_handle (C3.7 UI: bare perform
-    in main → unhandled_effect rejection): snc exit 1**;
-    **c41_class_basic (C4.1 (2/N) smallest class:
-    `Point::init(7).get()` end-to-end): exit 7**; **c41_go_no_go
-    (C4.1 (2/N) ADR 0022 D11 phase-go: Point with manhattan
-    + translate methods; `let mut p = Point::init(10,20);
-    p.translate(3,9)` calls self.manhattan() to return
-    13+29=42): exit 42**; **c41_init_field_unassigned (C4.1
-    (2/N) UI: init doesn't assign declared field b →
-    init_field_maybe_unassigned rejection): snc exit 1**;
-    **c42_trait_basic (C4.2 (2/N) smallest trait + default
-    impl + Path 1 receiver-typed dispatch): exit 42**;
-    **c42_go_no_go (C4.2 (2/N) ADR 0023 D12 phase-go: trait
-    Writer + class FileSink + default + named Doubling impls;
-    `s.write(10)` Path 1 then `Doubling::write(&mut s, 16)`
-    Path 2 → count = 10 + 32 = 42): exit 42**;
-    **c42_impl_missing_method (UI: impl block missing trait
-    method → impl_missing_method rejection): snc exit 1**;
-    **c42_impl_method_sig_mismatch (UI: impl method param
-    type mismatches trait → impl_method_signature_mismatch
-    rejection): snc exit 1**; **c42_duplicate_default_impl
-    (UI: two default impls of (Writer, FileSink) →
-    duplicate_default_impl rejection): snc exit 1**;
-    **c42_duplicate_impl_name (UI: two `Doubling` named impls
-    → duplicate_impl_name rejection): snc exit 1**;
-    **c43_go_no_go (C4.3 ADR 0021 D6 phase-go: Logger
-    delegates Writer to FileSink; `l.write(42)` routes through
-    the synthesized auto-forwarder → 42): exit 42**;
-    **c43_delegate_collides_with_impl (UI: delegate + explicit
-    impl both produce default impl of (Writer, Logger) →
-    duplicate_default_impl rejection): snc exit 1**;
-    **c43_delegate_undefined_trait (UI: `delegate field: T to
-    Missing;` → undefined_trait_for_impl rejection): snc exit
-    1**, exit 0.
-
-    Pipeline at C3.1: **parse_query → resolve_query →
-    check_query → borrow_check_query → codegen** (unchanged
-    from C2.5; the effect_check_query slots between
-    check_query and borrow_check_query at C3.2 per ADR 0019
-    D11). Diagnostics transitively accumulated.
-
-    Type universe at C4.2 (2/N) close: `{ I64, I32, Bool,
-    Struct(StructId), Nullable(NullableInner),
-    Array(ArrayElem), TypeParam(TypeParamId),
-    GenericInstance(GenericInstanceId), Ref(RefId),
-    Secret(SecretId), Kont(KontId), Class(ClassId),
-    TraitSelf(TraitId) }`. `Type::TraitSelf` is the **ninth**
-    interner-table-style variant
-    (0014+0015+0016+0017+0019+0020+0022+0023) preserving
-    `Type: Copy + Hash`. At C4.2 minimum trait method sigs
-    don't reference TraitSelf in params/returns (positional
-    `self_kind` only) — the variant is in place for the
-    eventual `Self`-in-type-position lift. TypedProgram.trait_decls:
-    Vec<TraitData { methods }> indexes per-trait method sigs;
-    .impl_decls: Vec<ImplData { name?, trait_id, target,
-    methods }> indexes per-impl method bodies after
-    completeness + sig-match check.
-    TypedProgram.class_decls:
-    Vec<ClassData { fields, init, methods }> indexes per-
-    class signature + body populated during type-check.
-    TypedProgram.konts: Vec<KontData
-    { arg_ty: Type, ret_ty: Type }> indexes per-handler-arm
-    continuations populated during type-check.
-    TypedProgram.secrets: Vec<SecretData>
-    where SecretData { inner: Type }. NullableInner + ArrayElem
-    do NOT gain Secret variants (`?secret T` / `[secret T]`
-    deferred to a follow-on ADR); the outer `secret ?T` /
-    `secret [T]` shapes work via the Type::Secret wrapper.
-
-    Operator-secret-preserving rules at C3.1b: `secret T op
-    secret T → secret T` for arithmetic (`+ - * /`); `secret
-    T == secret T → secret bool` for comparisons; `secret bool
-    && secret bool → secret bool` for logicals; unary `- !`
-    preserve. Mixed public + secret operands surface as
-    Mismatch (the Phase B "SecretFlow" property). Implicit `T
-    → secret T` widening at let-annotation / fn-arg / fn-
-    return boundaries via TypedExprKind::WidenToSecret
-    (mirrors C1.5 WidenToNullable). `declassify(e)` strips one
-    layer; idempotent on non-secret inputs per Phase B ADR
-    0008 D5.
-
-    Constant-time rejections at C3.1 (3 of 4 from ADR 0019
-    D7): SecretBranch (`if cond` where cond: secret bool — leaks
-    via timing); SecretDivisor (`a / b` where b is secret —
-    variable-time division leaks); SecretInRefDeref (`*r` where
-    r: secret &T — secret pointer leaks via cache side channel;
-    note: `& secret T` pointer-to-secret is allowed). The
-    fourth Phase B rejection (SecretEscapesPolymorphism) is
-    documented as subsumed under Sentinel's monomorphic
-    generics + SecretFlow — no separate variant needed.
-    Codegen lowers `Type::Secret(T)` identically to T at C3.1;
-    branch-free CT codegen (`select`/`cmov` for secret
-    comparisons, speculation barriers) is deferred per ADR
-    0019 D12 to a follow-on.
-
-    Lexer state at C3.1 (unchanged from C3.0(a)):
-    keywords `let, fn, if, else, true, false, struct, null,
-    mut, effect, secret, declassify, handle, with, perform`;
-    punctuation unchanged from C2.0.1.
-
-    Effect machinery at C3.1: `effect E { ... }` declarations +
-    postfix `! { Op1, Op2 }` annotations + `perform E.op(args)`
-    + `handle e with { ... }` all PARSE end-to-end but REJECT
-    AT RESOLVE with `EffectDeclNotYet` /
-    `EffectAnnotationNotYet`. The effect_check_query salsa
-    pass + new sentinel-effect-check crate land at C3.2.
-
-    Borrow-checker state at C3.1 (unchanged from C2.5):
-    parse_query → resolve_query → check_query →
-    borrow_check_query → codegen; eight `BorrowError` variants;
-    DropPlan; recursive struct-field drop at scope exit. Known
-    soundness gap documented in
-    `docs/borrow-check-limitations.md` (partial-move through
-    field projection + drop ⇒ double-free).
-
-    **Next: C3.4** — implement the handler runtime per ADR
-    0020 (PROPOSED at session-end commit 5209db0). The design
-    ADR is in: ADR 0020 picks free-monad-style frame
-    reification (Phase B's approach) over CPS transform and
-    stack-saved continuations, with one-shot continuations and
-    deep handlers. Twelve D-decisions captured; sub-phase split
-    is C3.4 (AST + parser + type-check) → C3.5 (perform
-    codegen) → C3.6 (handle codegen — the substantive runtime
-    piece) → C3.7 (close-out). Estimated 5-9 sessions per the
-    ADR 0020 D9 table.
-
-    C3.4 concrete tasks (the next session's work):
-      1. AST: `ExprKind::Handle { body, arms, return_arm }`,
-         `ExprKind::Perform { effect, op, args }`,
-         `HandlerArm { effect, op, param_names, body }`,
-         `ReturnArm { value_name, body }`.
-      2. Parser: `parse_atom` adds `Handle` + `Perform`
-         keyword arms. New helpers `parse_handler_arm` +
-         `parse_return_arm`. Handle/with/perform lexer
-         keywords were reserved at C3.0(a).
-      3. Resolve: mirror `Handle` + `Perform` with EffectId /
-         op-index references (ResolvedProgram::effects already
-         has the indexing from C3.2(a)).
-      4. Type-check: TypedExprKind::Handle + Perform; effect
-         discharge in check_expr per ADR 0020 D6 (handle
-         removes the matched effects from the body's row).
-         New EffectError variants: MissingHandler,
-         OperationArityMismatch, OperationNotInEffect.
-         Continuation type representation (no codegen yet).
-      5. Tests + a c34 fixture (parses + type-checks a handle/
-         perform program; codegen rejection until C3.5).
-
-    Alternative path (if you want to switch tracks): Phase C4
-    (traits + structured concurrency per HANDOVER §6.2). Larger
-    in volume; "reasonable language design plumbing" per the
-    handover. Pre-flight would be ADR 0021 PROPOSED.
-
-    Read in order:
-      1. docs/HANDOVER.md §0 in full (now refreshed for C3.1
-         close + C3.2 framing)
-      2. docs/decisions/0019-phase-c3-kickoff-and-effects-plan.md
-         (the canonical C3 design — still PROPOSED; check
-         status header + sub-phase split table)
-      3. docs/STATE.md (last-updated banner — C3.1 landed;
-         secret typing complete. Previous C2.5 banner kept as
-         pre-C3.1 context)
-      4. crates/sentinel-types/src/lib.rs — Type::Secret +
-         SecretData + intern_secret; coerce_to_expected
-         (T→secret T widening); check_expr's
-         Binary/Cmp/Logic/Unary arms for operator-preserving;
-         If arm for SecretBranch; Deref arm for SecretInRefDeref
-      5. crates/sentinel-codegen/src/lib.rs — llvm_basic_type
-         strips secrets at entry; WidenToSecret/Declassify
-         lower as identity
-      6. docs/decisions/0002-effect-rows-in-mini.md through
-         0008-secret-qualifier-and-constant-time.md — the
-         Phase B effect-system design that C3.2 absorbs (rows,
-         handlers, inference judgment)
-      7. crates/sentinel-effects-proto/ — Phase B's research-
-         grade interpreter; reference impl for C3.2's
-         effect_check_query
-
-    Sanity check at session start:
-      cargo build --workspace
-      cargo clippy --workspace --all-targets -- -D warnings
-      cargo test --workspace                  # expect 1008 passing
-      cargo run --bin snc -- build tests/pass/c33_go_no_go.sentinel -o /tmp/c33
-      /tmp/c33 && echo "exit=$?"              # expect "42" then "exit=0"
-
-    Resume at the chosen path (handler runtime ADR 0020 OR
-    Phase C4 traits ADR 0021). For the handler-runtime path,
-    first task: write ADR 0020 PROPOSED comparing the three
-    lowering strategies (free-monad reification / CPS / stack-
-    saved continuations) and picking one with rationale + a
-    sub-phase split. For the traits path: ADR 0021 PROPOSED
-    covering trait declaration syntax, impl-block syntax,
-    method resolution, default impls, generic-bound integration,
-    and the secret-T / effect-row interaction (e.g., can a
-    trait method declare an effect? declassify a secret?).
 
 ---
 
