@@ -3882,6 +3882,12 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     BinOp::Sub => self.builder.build_int_sub(l, r, "sub"),
                     BinOp::Mul => self.builder.build_int_mul(l, r, "mul"),
                     BinOp::Div => self.builder.build_int_signed_div(l, r, "div"),
+                    // C5.3 / ADR 0027 D6: bitwise ops lower to the
+                    // data-independent LLVM bit instructions (`secret`
+                    // still lowers as its inner int — ADR 0019 D12).
+                    BinOp::BitAnd => self.builder.build_and(l, r, "and"),
+                    BinOp::BitOr => self.builder.build_or(l, r, "or"),
+                    BinOp::BitXor => self.builder.build_xor(l, r, "xor"),
                 };
                 result
                     .map(|v| v.into())

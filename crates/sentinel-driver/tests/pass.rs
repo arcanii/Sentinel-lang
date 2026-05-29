@@ -1110,3 +1110,18 @@ fn pass_c52_secret_ct() {
     // cond=1 picks x=42; declassify yields the exit code.
     assert_eq!(run_exit("c52_secret_ct.sentinel"), 42);
 }
+
+#[test]
+fn pass_c53_bitwise() {
+    // ADR 0027 D10 c53_bitwise: `5 & 6 ^ 3 | 8` == 15, pinning the
+    // `&` > `^` > `|` precedence (a misparse would give 5).
+    assert_eq!(run_exit("c53_bitwise.sentinel"), 15);
+}
+
+#[test]
+fn pass_c53_ct_eq() {
+    // ADR 0027 D10 c53_ct_eq: constant-time equality over secrets via
+    // XOR-accumulate + OR-reduce + declassify — compiles, runs, and
+    // PASSES the D5 verification. Comparing (42,7) to itself → 0; 42-0=42.
+    assert_eq!(run_exit("c53_ct_eq.sentinel"), 42);
+}

@@ -8458,6 +8458,38 @@ fn main() -> i64 {
         assert_eq!(p.main().body.ty, Type::I64);
     }
 
+    // ---- C5.3 / ADR 0027 D5: bitwise operators (secret-preserving) ----
+
+    #[test]
+    fn c53_bitwise_xor_secret_secret_ok() {
+        // `secret ^ secret -> secret`, declassified back to i64. Bitwise
+        // ops are constant-time, so a secret operand is fine (no leak).
+        let p = check_ok(
+            "fn f(a: secret i64, b: secret i64) -> i64 { declassify(a ^ b) }\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.main().return_type, Type::I64);
+    }
+
+    #[test]
+    fn c53_bitwise_secret_public_mismatch() {
+        // `secret ^ public` cannot implicitly mix (the SecretFlow rule,
+        // exactly as for arithmetic) — surfaces as a Mismatch.
+        let err = check_err(
+            "fn f(a: secret i64, b: i64) -> i64 { declassify(a ^ b) }\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn c53_bitwise_on_bool_rejected() {
+        // Bitwise ops are integer-only; `&`/`|`/`^` on `bool` is a
+        // Mismatch — `&&` / `||` remain the boolean operators.
+        let err = check_err("fn main() -> i64 { let r = true & true; 0 }");
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
     // ---- C3.2(a) / ADR 0019 D4: effect_decls type-check ----
 
     #[test]

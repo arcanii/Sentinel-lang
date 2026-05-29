@@ -1,0 +1,19 @@
+// C5.3 / ADR 0027 D10 (c53_ct_eq): a constant-time equality over scalar
+// `secret`s — XOR each pair, OR-reduce, then declassify the accumulator
+// (0 iff every pair was equal). Branch-free, so it PASSES the D5
+// constant-time verification: no secret reaches a branch / memory index /
+// divisor. This is the real shape of the go/no-go's `Finished` MAC
+// verify, replacing the C5.2b arithmetic masked-select stand-in.
+fn ct_eq(a0: secret i64, a1: secret i64, b0: secret i64, b1: secret i64) -> i64 {
+    let d0 = a0 ^ b0;
+    let d1 = a1 ^ b1;
+    declassify(d0 | d1)
+}
+
+fn main() -> i64 {
+    let x0: secret i64 = 42;
+    let x1: secret i64 = 7;
+    // Compare (x0, x1) against itself → accumulator 0; 42 - 0 = 42.
+    let diff = ct_eq(x0, x1, x0, x1);
+    42 - diff
+}

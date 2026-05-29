@@ -38,6 +38,14 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    /// C5.3 / ADR 0027: bitwise AND `&` (infix; the borrow prefix reuses
+    /// the same token, disambiguated by parser position). Data-independent
+    /// latency — a constant-time operation on `secret` values.
+    BitAnd,
+    /// C5.3 / ADR 0027: bitwise OR `|`. Constant-time.
+    BitOr,
+    /// C5.3 / ADR 0027: bitwise XOR `^`. Constant-time.
+    BitXor,
 }
 
 impl BinOp {
@@ -47,6 +55,9 @@ impl BinOp {
             BinOp::Sub => "-",
             BinOp::Mul => "*",
             BinOp::Div => "/",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
         }
     }
 }

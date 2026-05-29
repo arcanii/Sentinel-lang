@@ -2719,12 +2719,12 @@ impl<'a> Parser<'a> {
     /// per ADR 0012 D6. A second comparison operator is rejected at
     /// parse time as [`ParseError::ChainedComparison`].
     fn parse_cmp(&mut self) -> Result<Expr, ParseError> {
-        let lhs = self.parse_add()?;
+        let lhs = self.parse_bitor()?;
         let Some(op) = cmp_op_from_token(self.peek_kind()) else {
             return Ok(lhs);
         };
         self.advance();
-        let rhs = self.parse_add()?;
+        let rhs = self.parse_bitor()?;
         // Reject a chained comparison: `a < b < c` — the third atom
         // would imply a second cmp op next.
         if let Some(t) = self.peek() {
@@ -2899,6 +2899,56 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    // C5.3 / ADR 0027 D3: bitwise precedence sits between comparison
+    // (looser) and additive (tighter), with `&` binding tightest and `|`
+    // loosest — the Rust ordering. Three left-associative levels:
+    // `parse_bitor` → `parse_bitxor` → `parse_bitand` → `parse_add`.
+
+    fn parse_bitor(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_bitxor()?;
+        while self.peek_kind() == Some(TokenKind::Pipe) {
+            self.advance();
+            let rhs = self.parse_bitxor()?;
+            let span = lhs.span.start..rhs.span.end;
+            lhs = Spanned {
+                kind: ExprKind::Binary(BinOp::BitOr, Box::new(lhs), Box::new(rhs)),
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn parse_bitxor(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_bitand()?;
+        while self.peek_kind() == Some(TokenKind::Caret) {
+            self.advance();
+            let rhs = self.parse_bitand()?;
+            let span = lhs.span.start..rhs.span.end;
+            lhs = Spanned {
+                kind: ExprKind::Binary(BinOp::BitXor, Box::new(lhs), Box::new(rhs)),
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn parse_bitand(&mut self) -> Result<Expr, ParseError> {
+        // Infix `&` is bitwise-and. A *prefix* `&` (borrow) has already
+        // been consumed by `parse_unary` while building each operand, so
+        // an `&` seen here is unambiguously infix.
+        let mut lhs = self.parse_add()?;
+        while self.peek_kind() == Some(TokenKind::Amp) {
+            self.advance();
+            let rhs = self.parse_add()?;
+            let span = lhs.span.start..rhs.span.end;
+            lhs = Spanned {
+                kind: ExprKind::Binary(BinOp::BitAnd, Box::new(lhs), Box::new(rhs)),
+                span,
+            };
+        }
+        Ok(lhs)
     }
 
     fn parse_add(&mut self) -> Result<Expr, ParseError> {
@@ -4136,6 +4186,30 @@ mod tests {
     #[test]
     fn parse_all_four_operators() {
         assert_eq!(pretty("1 + 2 - 3 * 4 / 5"), "(- (+ 1 2) (/ (* 3 4) 5))");
+    }
+
+    #[test]
+    fn parse_bitwise_precedence() {
+        // C5.3 / ADR 0027 D3: `&` > `^` > `|`.
+        assert_eq!(pretty("5 & 6 ^ 3 | 8"), "(| (^ (& 5 6) 3) 8)");
+    }
+
+    #[test]
+    fn parse_bitand_binds_looser_than_arithmetic() {
+        // Additive is tighter than `&`, so `1 + 2 & 3` is `(1 + 2) & 3`.
+        assert_eq!(pretty("1 + 2 & 3"), "(& (+ 1 2) 3)");
+    }
+
+    #[test]
+    fn parse_bitor_is_left_associative() {
+        assert_eq!(pretty("1 | 2 | 3"), "(| (| 1 2) 3)");
+    }
+
+    #[test]
+    fn parse_infix_amp_is_bitand_not_borrow() {
+        // After a complete left operand, `&` is infix bitwise-and; a
+        // prefix `&` (borrow) only appears at the start of an operand.
+        assert_eq!(pretty("a & b"), "(& a b)");
     }
 
     #[test]
