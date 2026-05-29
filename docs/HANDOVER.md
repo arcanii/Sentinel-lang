@@ -117,6 +117,7 @@ C1.3. See STATE.md Section C.
 **Phase C5 go/no-go (2/N) — constant-time crypto over secrets; the close bar is MET (ADR 0030 D8) — complete.** `tests/pass/c5_go_no_go.sentinel` now does real **constant-time** crypto over `secret` scalars: a Montgomery-ladder step + branch-free `cswap` (`mask = sec(0) - bit`), an HKDF-`expand`-shaped mix via the `Kdf` trait, and the `c53_ct_eq` `Finished` verify (XOR-accumulate + `declassify`). It **passes the D5 constant-time check** (`verify_constant_time` gates `snc build`) and runs to exit 42 — the headline 1.0 capability (express + *prove* constant-time crypto) exercised end-to-end. Constant-time by construction: every secret op is `+ - * ^ & |` (no D5 sink), the lone `declassify` is the `Finished` accumulator, no secret reaches a branch/index/divisor (verified the secret typing is live — a deliberate secret array index is rejected at type-check). **Ergonomic finding:** C3.1b makes a mixed secret/public op a type error (no in-expression widening), so constant-time code lifts public constants/labels into the secret domain first — here via a `sec(x) { let s: secret i64 = x; s }` helper (widening happens only at a `let` with a `secret` annotation, not at a return). 1232 tests (`e5a40e9`). **ADR 0030 stays PROPOSED.** Next: **go/no-go (3/N) — the formal 1.0 declaration** (flip ADR 0025 → ACCEPTED + declare Sentinel 1.0). **That milestone call is intentionally left to the developer**; the substantive close bar (program runs + passes D5) is met.
 **🎉 SENTINEL 1.0 (2026-05-30) — go/no-go (3/N); Phase C5 + Phase C close.** The developer declared 1.0: **ADR 0025 (Phase C5 kickoff) + ADR 0030 (go/no-go) → ACCEPTED-WITH-AMENDMENTS.** The close bar was met (the constant-time TLS-handshake go/no-go runs + passes D5). The 1.0 language = full types + witness-table generics + borrow check + RAII + `secret`/effect typing + handler runtime + classes/traits/delegation + structured concurrency + **machine-verified constant-time `secret`** + bitwise `& | ^` + broker scope arenas + a frozen `abi-v1`; single-process, single-file, loop-free-by-design. 1232 tests, four-check green. Scoped out of 1.0 (analysed follow-ons): constant-time *emission* (ADR 0026 D4), shifts `<< >> ~` (ADR 0027 A1), actors (ADR 0030 D3), LSP (ADR 0025 D10), `[secret T]` arrays, modules, cross-process, a `u8` type, loops, full escape analysis. **Next: Phase D — self-hosting (ADR 0031 PROPOSED).** ⚠ Self-hosting is a *major* multi-stage effort: the 1.0 language has no strings / file I/O / growable collections / modules, all of which a compiler-in-Sentinel needs, so **Phase D opens with a language + stdlib build-out, NOT lexer-in-Sentinel** — see ADR 0031's honest readiness assessment + staged path.
 **ADR 0031 PROPOSED — Phase D kickoff: self-hosting — docs-only.** Opens the project's largest phase. **Honest readiness verdict:** the 1.0 language *cannot* self-host yet — verified gaps (none at 1.0): no sum types / `match` (an AST is a sum type — the biggest blocker), no strings / `char` / byte type (a compiler is text processing), no growable collections (`Vec`/`Map` — only fixed `[T]`), no file I/O (only `sentinel_print`), no modules/multi-file, no loops (recursion-only). **Strategy (D2):** language+stdlib build-out FIRST, then incremental self-host, keeping the Rust `snc` as the **reference oracle** (every Sentinel-written stage differentially validated against it on the fixture corpus), converging on a **bootstrap fixed-point** (the Sentinel compiler compiles itself byte-identically — which is *why* C5 shipped `abi-v1` + reproducible builds). **Prerequisite roadmap (D4, each its own ADR):** sum types + `match` → strings + byte type → growable collections → file I/O (stdlib) → modules → loops; also retires the thick-HIR/MIR migration + full escape analysis + shifts. **Self-host sequence (D5):** lexer → parser → resolve → types → HIR/MIR → codegen, in Sentinel, each matching the Rust stage before replacing it. **First sub-phase D.1 = sum types + pattern matching** (its own PROPOSED ADR next — the foundational AST-enabler; a C1–C4-style type-system + codegen feature). No timeline promise; Phase D is plausibly the longest phase. Next: **Phase D.1 (sum types + `match`)** — write its kickoff ADR, then implement.
+**ADR 0032 PROPOSED + Phase D.1 (1/N) — sum types + pattern matching: the kickoff + lexer.** ADR 0032 designs `enum`/`match` end-to-end (12 D-decisions): surface (`enum Name { V, V(T), V(T,T) }` + `Name::Variant(args)` + exhaustive `match s { Pat => e }`); `Type::Enum` interner variant; the abi-v1 layout **`{ i32 tag, ptr payload }`** heap-boxed (necessary for *recursive* enums — the AST case — reusing the `?Struct` rationale + drop path); `match` → LLVM `switch`; RAII payload drop; the constant-time guard (a secret-tagged match is a branch sink; no `secret enum` at MVP); generic enums (`Option`/`Result`) a fast-follow via mono (D9); MVP out-of-scope (named-field variants, or-/nested patterns, guards). **D.1 (1/N) ships the lexer:** two new logos keyword tokens (`enum`, `match`); `=>`/`::`/`_`-as-`Ident` already exist, so the lexer surface is complete. Additive (parser consumes at 2/N). +3 lexer tests (1235) (`87e955c`). Four-check green. Next: **D.1 (2/N)** — AST + parser (`EnumDecl`, `ExprKind::Match`, `Pattern`; `parse_enum_decl`/`parse_match`).
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1823,8 +1824,8 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the Phase D kickoff docs commit
-    (Sentinel 1.0 declared; ADR 0031 PROPOSED). Clean tree; 1232 tests. macOS + LLVM 18 only.
+    Local HEAD: verify with `git log -1` — expect the D.1 (1/N) docs commit
+    (atop feat 87e955c enum/match lexer; 1.0 declared). Clean tree; 1235 tests. macOS + LLVM 18.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.2/§0.3 + ADR 0028
     (esp. the "C5.4 (2/N) implementation map" AND the ⚠ VERIFIED UAF HOLE
     note — read before touching the scope→arena routing) + ADR 0026/0027.
@@ -1892,27 +1893,25 @@ For pasting into a fresh chat to bootstrap context:
       layout pinned via a representative `{i64,i64}` struct (a real
       `Struct(id)` needs codegen's pass-0 cache). +1 test (1231).
 
-    RESUME AT: **Phase D.1 — sum types + pattern matching** (the first
-    self-hosting prerequisite; ADR 0031 PROPOSED just opened Phase D).
-    **Sentinel 1.0 is DECLARED** (ADR 0025 + 0030 → ACCEPTED; the
-    constant-time go/no-go runs + passes D5; 1232 tests, four-check green).
-    Phase D = self-hosting. **Honest verdict (ADR 0031 D2): the 1.0
-    language cannot self-host yet** — no sum types/`match` (an AST is a sum
-    type — the biggest blocker), no strings/byte type, no growable
-    collections, no file I/O, no modules, no loops. So Phase D opens with a
-    language/stdlib build-out, not compiler code, keeping the Rust `snc` as
-    the differential oracle and converging on a byte-identical bootstrap
-    fixed-point (the point of C5's `abi-v1` + reproducible builds).
-      NEXT CONCRETE STEP: write the **Phase D.1 kickoff ADR (0032) — sum
-        types + pattern matching** (interner variant + exhaustiveness check
-        + `match` lowering; a C1–C4-style type-system + codegen feature),
-        then implement it ADR-first / feat+docs / four-check like every
-        prior sub-phase. Prerequisite order after D.1 (ADR 0031 D4): strings
-        + byte type → growable collections → file I/O (stdlib) → modules →
-        loops. Then the self-host port (D5): lexer → parser → … → codegen,
-        each in Sentinel, differentially validated against the Rust stage.
-      Independent post-1.0 tracks (may interleave, don't gate self-hosting):
-        LSP (ADR 0025 D10), actors (ADR 0030 D3).
+    RESUME AT: **Phase D.1 (2/N) — AST + parser for `enum` + `match`.**
+    Context: **Sentinel 1.0 is DECLARED** (ADR 0025 + 0030 → ACCEPTED);
+    Phase D (self-hosting) is underway and opens with a language/stdlib
+    build-out (ADR 0031); the first prerequisite is sum types + pattern
+    matching (ADR 0032). D.1 (1/N) shipped the **lexer** (`enum` + `match`
+    tokens; `87e955c`). (2/N) is the AST + parser per ADR 0032 D8: add
+    `EnumDecl`, `ExprKind::Match { scrutinee, arms }`, `MatchArm`,
+    `Pattern { Variant(enum, var, bindings) | Wildcard }`, and
+    `parse_enum_decl` / `parse_match` (arms comma-separated; `Name::Variant
+    (binds)` construction reuses `::`; `_` wildcard is an `Ident`).
+      Then (3/N) resolve + types (`Type::Enum` interner variant +
+        `EnumData`/`VariantData`; construction + match type-check +
+        **exhaustiveness**: NonExhaustiveMatch / UnknownVariant); (4/N)
+        codegen — the abi-v1 `{ i32 tag, ptr payload }` heap-boxed layout
+        (recursive-enum-safe, ?Struct-style), `match`→`switch`, RAII
+        payload drop, abi-v1 entry + `c5d1_enum` fixture, ADR flip; (D.1b)
+        generic enums (Option/Result) via mono.
+      After D.1: strings + byte type → growable collections → file I/O
+        (stdlib) → modules → loops (ADR 0031 D4), then the self-host port.
 
     DEFERRED (none blocking; recorded in ADRs): C5.2a/D4 constant-time
     EMISSION (branch-free arithmetic/bitwise already passes D5 on existing
@@ -1931,7 +1930,8 @@ For pasting into a fresh chat to bootstrap context:
     0030 **ACCEPTED-WITH-AMENDMENTS** (the 1.0 go/no-go — runs + passes D5;
     3/N declared 1.0). 0031 **PROPOSED** (Phase D kickoff — self-hosting;
     honest readiness verdict + the language/stdlib prerequisite roadmap;
-    first sub-phase D.1 = sum types + `match`).
+    first sub-phase D.1 = sum types + `match`). 0032 **PROPOSED** (D.1 sum
+    types + pattern matching; 1/N lexer done, resume at 2/N AST+parser).
     Optional C4 follow-ons (none blocking): work-stealing scheduler
     (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
     (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).

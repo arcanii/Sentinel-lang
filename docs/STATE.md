@@ -14,7 +14,17 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **🎉 SENTINEL 1.0 (2026-05-30) — Phase C5 + Phase C close.**
+Last updated: **Phase D.1 (1/N): lexer — `enum` + `match` tokens (ADR 0032).**
+Post-1.0, **Phase D (self-hosting) is underway.** Per ADR 0031, it opens
+with a language/stdlib build-out; the first prerequisite is **sum types +
+pattern matching** (ADR 0032 — an AST is a sum type, the biggest
+self-hosting blocker). D.1 (1/N) adds the two new logos keyword tokens
+(`enum`, `match`); `=>`/`::`/`_`-as-`Ident` already exist, so the lexer
+surface is complete. Additive — the parser consumes them at D.1 (2/N), so
+nothing downstream changes. +3 tests (1235). Four-check green. Next: **D.1
+(2/N)** — AST + parser (`enum` decl, `match` expr, patterns).
+
+Pre-D.1(1/N) context: **🎉 SENTINEL 1.0 (2026-05-30) — Phase C5 + Phase C close.**
 The 1.0 go/no-go (`tests/pass/c5_go_no_go.sentinel`, a constant-time
 TLS-1.3-handshake-shaped program) runs and **passes the D5 constant-time
 verification** — the close bar (ADR 0030 D8) is met — so 1.0 is declared:
