@@ -110,6 +110,7 @@ C1.3. See STATE.md Section C.
 **Phase C5.4 (1/N) — broker-arena substrate (ADR 0028) — complete.** The Phase A broker backs a scope-arena C-ABI in the runtime. Finding: the broker is a safe *handle* allocator (bump bulk-frees, `free` unimplemented; slab fixed-size) with no public raw pointer, so a drop-in `sentinel_alloc` doesn't fit — added a public raw-bytes API (`Arena::alloc_bytes`/`ArenaHandle::alloc_bytes` → `NonNull<u8>`, exposing the strategy's `alloc_raw`). Runtime: a process-wide lazy `Broker` + `sentinel_arena_enter` (create bump arena) / `sentinel_arena_alloc` (16-byte-aligned bump alloc) / `sentinel_arena_exit` (`destroy_arena` + drop → `BumpStrategy::drop` frees the backing buffer). **Additive + c51-safe**: codegen still emits `sentinel_alloc`/`sentinel_free` (libc) and does NOT call the arena fns yet → objects byte-identical. (The ADR's "runtime-only" was slightly off — a small broker API addition was needed — and the malloc-replacement framing was set aside: the broker is arena-, not malloc-, shaped.) +5 tests (1226 total) (`b49a5ef`). ADR 0028 stays PROPOSED. Next: **C5.4 (2/N)** — the scope→arena codegen: route a scope's non-escaping heap allocations (those the borrow-check `DropPlan` frees at that scope exit, hence provably non-escaping) into the scope arena, replacing N per-binding `sentinel_free`s with one `sentinel_arena_exit`. The careful (UAF-sensitive) part — do it fresh; full escape analysis stays post-1.0 (ADR 0026 D2).
 **Phase C5.4 (2/N) — the scope→arena codegen; ADR 0028 → ACCEPTED-WITH-AMENDMENTS. Phase C5.4 closes.** Codegen routes a scope's **non-escaping** primitive array-literal heap buffers into a broker bump arena (`sentinel_arena_enter`/`_alloc`) and replaces that scope's per-binding `sentinel_free`s with **one** `sentinel_arena_exit` at scope exit. A program-wide `compute_arena_routed` pre-pass produces a `HashSet<VarId>` = *exactly* the bindings `emit_scope_drops` frees (`∉ moved ∧ ≠ tail_returned_var(&block.tail)`), restricted to `let x = [i64/i32/bool array literal]` in **non-generic, non-effecting fns**; that **one set drives both** the alloc-routing (`lower_stmt`→`lower_array_lit`) and the free-skip (`emit_scope_drops`), so they cannot diverge. The per-scope arena handle lives in a new `ScopeFrame` (replacing the bare `Vec<VarId>`; a `push` method keeps the 12 push sites unchanged), created **lazily** on first routed alloc → scopes routing nothing stay byte-identical. **Airtight argument:** the routed set is a strict *subset* of the proven-non-escaping free set, so routing is as safe as today's free (same bindings, lifetime, point; bulk vs individual). **Verified by reasoning + disassembly** (routed scopes emit `arena_enter`/`_alloc`/`_exit` + **zero** `sentinel_free`/`_alloc`; moved/returned arrays stay on libc — a single negative case `c24_moved_array_no_double_free` confirms) + the c24/c25 array-RAII guards. **Amendment A2 — ADR 0028's "verified UAF hole" was wrong about the mechanism:** a tail-returned array (`fn make() -> [i64] { let a=[1,2,3]; a }`) **IS** in `moved_sources` (the borrow checker walks the tail `Var` as a *consuming move* before snapshotting the `DropPlan`; empirically dumped), so `∉ moved` alone already excludes returned arrays — the `tail_returned` half is belt-and-suspenders for heap types, kept anyway to mirror `emit_scope_drops` exactly. +1 fixture (`c54_scope_arena` — body-scope + nested-block arenas, exit 42); 1227 tests (`8e7b38f`). Four-check green. Deferred (post-1.0): per-scope arena *sizing* (capacity 0 → runtime 1 MiB default), routing in methods/generics/effecting fns, non-primitive-element arrays, `scope budget(N)` surface, full escape analysis (ADR 0026 D2). **Next: developer-scope call** — assemble the TLS go/no-go (constant-time compare + scope arenas now both in hand), or another C5 productionization sub-phase (stable ABI ADR 0025 D7 / LSP D10).
 **ADR 0029 PROPOSED — stable ABI (D7) — docs-only.** Recommended + drafted as the next C5 sub-phase (no codegen hazard; a prerequisite for the go/no-go's runtime↔codegen link + Phase D self-hosting). Ten D-decisions: define + **document** (`docs/abi-v1.md`) + **freeze at `abi-v1`** + **test** the ABI — calling convention (D3: C ABI / SysV+AAPCS64; main→i32; ordinary fns by value; effecting fns→`*SentinelKont`; class init→out_ptr), the `Type`→LLVM **layout catalog** (D4: structs field-order, `[T]`=`{i64,ptr}`, `?primitive`=`{i1,T}`, `?Struct`=`{i1,ptr}`, ref/kont/task=opaque ptr, `secret T`≡`T`), **name mangling** (D5: `base__<tag>`, `arr_`/`opt_`/`ref_`/`sec_`, `Name__init`/`Name__method`/`Name__Type__Trait__method`), the **runtime-symbol contract** (D6: the ~18 `sentinel_*` + the `#[repr(C)]` `SentinelKont`/`Frame`/`Task`/`ScopeCtx` layouts), a **layout-stability test suite** (D7: extend the size/align asserts + DataLayout `Type`-layout asserts + mangling/symbol golden tests — the enforcement, drift→red test), versioning (D8: `abi-v1` freeze; reproducible builds folded in, already guarded by `repro.rs`; mangling length-prefixing is the one `abi-v2` soft-spot). **No emitted bytes change** → c51 bar holds by construction. Out of scope (D9): the separate-compilation linker/module surface (ADR 0025 D9, post-1.0), cross-arch beyond x86-64/aarch64, FFI header gen. Sub-phase split D7 (1/N) spec+struct/mangling/symbol tests, (2/N) `Type`-layout DataLayout asserts + flip. Next: **D7 (1/N)**.
+**Phase C5 D7 (1/N) — the stable-ABI spec + layout-stability tests (ADR 0029) — complete.** `docs/abi-v1.md` documents + **freezes** the ABI codegen already emits (calling convention, the `Type`→LLVM layout catalog, the `#[repr(C)]` runtime struct layouts, name mangling, the ~18 `sentinel_*` runtime-symbol contract), each cross-linked to its bootstrap source. Stability tests pin it so a drift turns a test red rather than silently miscompiling: `abi_v1_struct_layouts_are_stable` (size/align + `offset_of!` for `SentinelKont`/`Frame`/`Task`/`ScopeCtx`) + `abi_v1_runtime_symbol_set` (addresses of all 18 runtime symbols → rename/removal is a compile error) in sentinel-runtime; `abi_v1_mangling_is_stable` (golden strings for `mangle_type`/`mangle_mono_name`) in sentinel-codegen. **No emitted bytes change** (documents/tests existing behaviour) → c51 bar + `repro.rs` hold by construction; reproducible builds (D8) fold in. +3 tests (1230) (`0304a9c`). **ADR 0029 stays PROPOSED** (flip is at 2/N). Next: **D7 (2/N)** — the `Type`-layout DataLayout assertions (query the lowered LLVM type's size/align/field-offsets through the target `DataLayout`, assert the `abi-v1` values) + a negative "drift turns it red" check + the ADR flip. (May then move to LSP D10 or the TLS go/no-go.)
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1816,8 +1817,8 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the C5.4 (2/N) docs commit
-    (atop feat 8e7b38f scope→arena). Clean tree; 1227 tests. macOS + LLVM 18 only.
+    Local HEAD: verify with `git log -1` — expect the C5 D7 (1/N) docs commit
+    (atop feat 0304a9c abi-v1 spec+tests). Clean tree; 1230 tests. macOS + LLVM 18 only.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.2/§0.3 + ADR 0028
     (esp. the "C5.4 (2/N) implementation map" AND the ⚠ VERIFIED UAF HOLE
     note — read before touching the scope→arena routing) + ADR 0026/0027.
@@ -1865,19 +1866,32 @@ For pasting into a fresh chat to bootstrap context:
       empirically dumped), so `∉ moved` alone already excludes returned
       arrays — both checks kept anyway to mirror emit_scope_drops (ADR 0028
       amendment A2). 1227 tests, four-check green.
+    - **C5 D7 (1/N)** (`0304a9c` + docs): the stable-ABI spec + layout-
+      stability tests (ADR 0029, recommended next sub-phase: no codegen
+      hazard, prerequisite for the go/no-go link + Phase D). `docs/abi-v1.md`
+      documents + freezes the ABI codegen already emits (calling convention,
+      `Type`→LLVM layout catalog, `#[repr(C)]` runtime structs, mangling, the
+      ~18 `sentinel_*` symbols), cross-linked to source. Tests pin it (drift→
+      red): `abi_v1_struct_layouts_are_stable` + `abi_v1_runtime_symbol_set`
+      (sentinel-runtime), `abi_v1_mangling_is_stable` (sentinel-codegen). No
+      emitted bytes change → c51 bar holds. ADR 0029 stays PROPOSED (flip at
+      2/N). +3 tests (1230).
 
-    RESUME AT: **developer-scope call — Phase C5.4 is CLOSED.** Both 1.0
-    headline capabilities are now in hand (constant-time `secret` compare +
-    broker scope arenas), so the natural next step is **assembling the TLS
-    1.3 handshake go/no-go** (ADR 0025 C5.0); OR another C5 productionization
-    sub-phase — **stable ABI** (ADR 0025 D7: spec doc + layout-stability
-    tests, no hazard) or **LSP** (D10).
-      Historical UAF note (kept for context, now CORRECTED — see ADR 0028 A2):
-        the prep claimed routing "iff ∉ moved_sources" would arena-free a
-        RETURNED array `fn make() -> [i64] { let a=[1,2,3]; a }`. It would
-        not — `a` IS in moved_sources. The shipped predicate replicates
-        `emit_scope_drops` exactly (`∉ moved ∧ ≠ tail_returned`), a strict
-        subset of the proven-non-escaping free set.
+    RESUME AT: **C5 D7 (2/N) — the `Type`-layout DataLayout assertions + ADR
+    0029 flip.** For each `Type` constructor, query the lowered LLVM type's
+    size / align / struct-field offsets through the target `DataLayout` and
+    assert the `abi-v1` values (docs/abi-v1.md §2) — so an accidental
+    reorder/repack/width change fails a test. Add a negative "drift turns it
+    red" check (deliberately perturb a layout, see red, revert), then flip
+    ADR 0029 → ACCEPTED-WITH-AMENDMENTS. After D7 closes: **developer-scope
+    call** — LSP (ADR 0025 D10) or assemble the TLS 1.3 go/no-go (D13; both
+    1.0 headline capabilities — constant-time compare + scope arenas — and
+    now a frozen ABI are in hand).
+      Note: codegen exposes layouts via `llvm_basic_type`; the target
+      `TargetMachine`/`DataLayout` is already built in `compile_to_object`.
+      A codegen unit test can lower each `Type` and query
+      `target_data.get_abi_size(&llvm_ty)` / `get_abi_alignment` /
+      `offset_of_element`.
 
     DEFERRED (none blocking; recorded in ADRs): C5.2a/D4 constant-time
     EMISSION (branch-free arithmetic/bitwise already passes D5 on existing
@@ -1889,7 +1903,8 @@ For pasting into a fresh chat to bootstrap context:
 
     ADR STATUS: 0026 PROPOSED (C5.1/C5.2). 0027 ACCEPTED-WITH-AMENDMENTS
     (bitwise). 0028 ACCEPTED-WITH-AMENDMENTS (broker; 1/N substrate + 2/N
-    scope→arena codegen both shipped; A2 corrects the "UAF hole").
+    scope→arena codegen both shipped; A2 corrects the "UAF hole"). 0029
+    PROPOSED (stable ABI; D7 1/N spec+tests done, 2/N = DataLayout asserts + flip).
     Optional C4 follow-ons (none blocking): work-stealing scheduler
     (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
     (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).

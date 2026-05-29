@@ -12,35 +12,38 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C5.4 (2/N): the scope→arena codegen; ADR 0028 →
-ACCEPTED-WITH-AMENDMENTS.** Codegen now routes a scope's **non-escaping**
-primitive array-literal heap buffers into a broker bump arena
-(`sentinel_arena_enter`/`_alloc`) and replaces that scope's per-binding
-`sentinel_free`s with **one** `sentinel_arena_exit` at scope exit. The
-routed set is computed once (`compute_arena_routed`) as a *strict subset*
-of `emit_scope_drops`'s actual free set — `let x = [primitive array
-literal]` AND `x ∉ moved_sources` AND `x ≠ tail_returned_var(&block.tail)`,
-over non-generic non-effecting fns — so a routed binding is one the borrow
-checker already proved is dropped (non-escaping) at that exact scope exit.
-**One `HashSet<VarId>` drives both** the alloc-routing (`lower_stmt` →
-`lower_array_lit`) and the free-skip (`emit_scope_drops`), so they cannot
-diverge; the per-scope arena handle lives in a new `ScopeFrame` (replacing
-the bare `Vec<VarId>`), created **lazily** on first routed alloc so scopes
-that route nothing stay byte-identical. **UAF-safety from reasoning, not
-green tests** (a UAF here can pass by luck): verified by disassembly —
-routed scopes emit `arena_enter`/`_alloc`/`_exit` and **zero**
-`sentinel_free`/`_alloc`; moved/escaping/returned arrays stay on libc — and
-guarded by the c24/c25 array-RAII fixtures. **Finding (amends ADR 0028's
-"verified UAF hole"):** a tail-returned array such as
-`fn make() -> [i64] { let a = [1,2,3]; a }` **is** in `moved_sources`
-(the borrow checker walks the tail `Var` as a *consuming move* before
-snapshotting the `DropPlan`), so `∉ moved` alone already excludes returned
-arrays — but both checks are kept to mirror `emit_scope_drops` exactly.
-+1 fixture (`c54_scope_arena`, body-scope + nested-block arenas, exit 42);
-1227 tests. Four-check green. **Next:** assemble the TLS go/no-go, or a
-further C5 sub-phase (stable ABI / LSP); deferred follow-ons unchanged
-(per-scope arena *sizing*, methods/generics/effecting-fn routing, full
-escape analysis, `scope budget(N)` surface — all post-1.0).
+Last updated: **C5 D7 (1/N): the stable-ABI spec + layout-stability tests
+(ADR 0029; PROPOSED).** `docs/abi-v1.md` now documents + **freezes** the
+ABI codegen already emits — the C calling convention (`main`→i32;
+effecting fns→`*SentinelKont`; class init→`out_ptr`), the `Type`→LLVM
+**layout catalog** (`[T]`=`{i64,ptr}`, `?Struct`=`{i1,ptr}`,
+`?primitive`=`{i1,T}`, struct fields in decl order, ref/kont/task=opaque
+ptr, `secret T`≡`T`), the `#[repr(C)]` runtime struct layouts
+(`SentinelKont`/`Frame`/`Task`/`ScopeCtx`), the name-mangling scheme, and
+the ~18 `sentinel_*` runtime-symbol contract — each cross-linked to where
+it is realised. **Layout-stability tests pin it so a drift turns a test
+red, not a silent miscompile:** runtime struct size/align/`offset_of!`
+asserts + a symbol-set address test (`abi_v1_*` in sentinel-runtime) and
+codegen mangling golden strings (`abi_v1_mangling_is_stable`). **No
+emitted bytes change** (documents + tests existing behaviour) → the c51
+bar + `repro.rs` hold by construction. Reproducible builds (D8) fold in
+(already byte-identical). +3 tests (1230). Four-check green. ADR 0029
+stays **PROPOSED**; the flip + the `Type`-layout DataLayout assertions are
+**D7 (2/N)**.
+
+Pre-D7(1/N) context: **C5.4 (2/N): the scope→arena codegen; ADR 0028 →
+ACCEPTED-WITH-AMENDMENTS.** Codegen routes a scope's non-escaping
+primitive array-literal heap buffers into a broker bump arena and replaces
+that scope's per-binding `sentinel_free`s with one `sentinel_arena_exit`.
+The routed set = *exactly* `emit_scope_drops`'s free set (`∉ moved ∧
+≠ tail_returned`, narrowed to `let x = [primitive array literal]` in
+non-generic non-effecting fns); one `HashSet<VarId>` drives both routing +
+free-skip; the per-scope arena handle lives in a new `ScopeFrame`, lazily
+created. UAF-safe by reasoning (routed ⊆ proven-non-escaping free set),
+verified by disassembly + the c24/c25 guards. (Amends ADR 0028's "UAF
+hole": a tail-returned array IS in `moved_sources`, so `∉ moved` alone
+already excludes returned arrays; both checks kept to mirror
+`emit_scope_drops`.) +1 fixture (`c54_scope_arena`, exit 42); 1227 tests.
 
 Pre-C5.4(2/N) context: **C5.4 (1/N): the broker-arena substrate (ADR
 0028).** The Phase A broker backs a scope-arena C-ABI in the runtime.

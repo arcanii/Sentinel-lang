@@ -2,8 +2,18 @@
 
 Status: PROPOSED — the next C5 productionization sub-phase ADR under ADR
 0025 (Phase C5 kickoff) D7, mirroring how ADRs 0026/0027/0028 detailed
-earlier C5 sub-phases. Flips to ACCEPTED(-WITH-AMENDMENTS) as the
-sub-phase lands, recording deviations as numbered amendments.
+earlier C5 sub-phases. Flips to ACCEPTED(-WITH-AMENDMENTS) at D7 (2/N),
+recording deviations as numbered amendments.
+
+**D7 (1/N) update (2026-05-29) — DELIVERED.** Per the D11 split: the spec
+doc + the runtime-struct / mangling / symbol-set stability tests shipped.
+`docs/abi-v1.md` documents + freezes the ABI (D2–D6), each item
+cross-linked to its bootstrap source. Tests: `abi_v1_struct_layouts_are_stable`
++ `abi_v1_runtime_symbol_set` (sentinel-runtime) and
+`abi_v1_mangling_is_stable` (sentinel-codegen). No emitted bytes change
+(documents/tests existing behaviour); +3 tests (1230), four-check green.
+**Stays PROPOSED** — the `Type`-layout DataLayout assertions (D7) and the
+status flip are **D7 (2/N)**.
 
 **Numbering note.** ADR 0025 D14 penciled "ADR 0029 (stable ABI +
 reproducible builds — D7+D8)" under the original numbering; the bitwise
