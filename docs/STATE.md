@@ -12,7 +12,26 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C5.3 (2/N): bitwise `& | ^` end-to-end; ADR 0027 →
+Last updated: **C5.4 (1/N): the broker-arena substrate (ADR 0028).** The
+Phase A broker now backs a scope-arena C-ABI in the runtime — the
+foundation for routing Sentinel scopes onto broker bump arenas.
+**Finding that shaped it:** the broker is a safe *handle* allocator
+(bump bulk-frees / slab fixed-size) with no public raw pointer, so a
+drop-in `sentinel_alloc` doesn't fit; instead a public raw-bytes API was
+added (`Arena::alloc_bytes` → `NonNull<u8>`, exposing the strategy's
+`alloc_raw`), and the runtime gained `sentinel_arena_enter` (create a
+bump arena) / `sentinel_arena_alloc` (16-byte-aligned bump alloc) /
+`sentinel_arena_exit` (destroy → `BumpStrategy::drop` frees the buffer),
+on a process-wide lazy `Broker`. **Additive + c51-safe:** codegen still
+emits `sentinel_alloc`/`sentinel_free` (libc) and does NOT call the arena
+fns yet, so objects stay byte-identical. +5 tests (1226). Four-check
+green. **Next: C5.4 (2/N)** — the scope→arena codegen: route a scope's
+**non-escaping** heap allocations (exactly the bindings the borrow-check
+`DropPlan` frees at that scope exit, hence provably non-escaping) into the
+scope arena, replacing N per-binding `sentinel_free`s with one
+`sentinel_arena_exit`; full escape analysis stays post-1.0 (ADR 0026 D2).
+
+Pre-C5.4(1/N) context: **C5.3 (2/N): bitwise `& | ^` end-to-end; ADR 0027 →
 ACCEPTED-WITH-AMENDMENTS.** The bitwise operators now compile and run.
 The surface was *small* because the `Binary` pipeline is op-generic:
 resolve passes `BinOp` through, the type checker's Binary handler is

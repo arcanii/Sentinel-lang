@@ -107,6 +107,7 @@ C1.3. See STATE.md Section C.
 **Phase C5.3 (1/N) — lexer: bitwise `|` (`Pipe`) + `^` (`Caret`) tokens — complete.** First wave of the bitwise surface per ADR 0027 D2: two new logos tokens; longest-match keeps `||` → `PipePipe`; the infix bitwise-and **reuses** `&` (`Amp`), to be disambiguated from the borrow prefix by parser position at 2/N. No `<<`/`>>` (C5.4 — the `>>`/nested-generic-close split). +4 lexer tests (longest-match `|`/`||` + `&`/`&&` regressions + packed bitwise); additive (parser doesn't consume them yet); four-check green (1212) (`b3d1d48`). Next: **C5.3 (2/N)** — `& | ^` end-to-end: extend `BinOp` (Display + all exhaustive matches in one pass); parser precedence ladder gains `parse_bitor`/`parse_bitxor`/`parse_bitand` between `parse_cmp` and `parse_add`; secret-preserving integer typing mirroring C3.1b (no new TypeError/SecretXxx); codegen and/or/xor; MIR+D5 unchanged (Binary arm op-generic, bitwise non-sink) + `c53_bitwise`/`c53_ct_eq` fixtures; ADR 0027 flip.
 **Phase C5.3 (2/N) — bitwise `& | ^` surface end-to-end. ADR 0027 → ACCEPTED-WITH-AMENDMENTS.** The operators compile + run. Surface was small because the `Binary` pipeline is op-generic (resolve passes `BinOp` through; types' Binary handler op-agnostic except the `Div`→`SecretDivisor` check; `lower_to_mir`/D5 handle `Binary` generically) — so only AST + parser + codegen changed. AST: `BinOp` += `BitAnd`/`BitOr`/`BitXor` (+ symbol(); no new ExprKind/TypedExprKind/MirOp). Parser: levels `parse_bitor`→`parse_bitxor`→`parse_bitand` between cmp and add (`&`>`^`>`|`); infix `&` = bit-and, prefix `&` = borrow (positional). Types: NO change — inherits C3.1b secret-preserving integer rule (mixed secret/public → Mismatch; bool → Mismatch); **no new SecretXxx** (bitwise is constant-time, the sanctioned secret computation). Codegen: LLVM and/or/xor. MIR+D5: unchanged (bitwise non-sink). Fixtures: `c53_bitwise` (`5 & 6 ^ 3 | 8`==15) + `c53_ct_eq` (constant-time equality over secrets — XOR-accumulate+OR-reduce+declassify — compiles, runs, passes D5; the go/no-go MAC-verify shape). +9 tests (1221 total) (`76bfea3`). **ADR 0027 amendment A1:** `<< >> ~` (C5.4) deferred — the constant-time compare needs only `^`/`|`; shifts (with the `>>`/generic-close split) are a follow-on if the go/no-go computes hashes in-language. Next: **developer-scope call** — C5.4 shifts, OR begin assembling the TLS go/no-go (constant-time compare now writable), OR another C5 productionization sub-phase.
 **ADR 0028 PROPOSED — broker integration (D4) — docs-only.** Developer chose broker integration as the next productionization sub-phase (**C5.4**). Finding that shaped it: the Phase A broker is an *arena* allocator (bump = bulk-free / `free` unimplemented; slab = fixed-size slots; typed `Handle<T>`) that does **not** fit a drop-in `sentinel_alloc` (arbitrary-size, individual-free, raw `*u8`); and there's no secret heap data yet (`[secret T]` unrepresentable) so the secret-memory policy is scaffold. ADR 0028's design (10 D-decisions): map Sentinel scopes → broker bump arenas so individual free becomes scope-exit **bulk** free (D1/D2), reusing the borrow-check **`DropPlan`** (moved=escapes vs dropped-at-scope-exit=safe-to-arena) so **no new escape analysis** is needed (D3); ship a **runtime-only foundation first** (C5.4 (1/N), D4): process-wide `Broker` backing `sentinel_alloc`/`free` via a size-classed slab pool + ptr→handle registry — **c51-safe because codegen is untouched** (objects byte-identical) — unlocking budgets/recording/stats; then the **scope→arena codegen** (C5.4 (2/N), D3, may defer post-1.0). Budgets = the go/no-go hook (`within_budget`; a `scope budget(N)` surface deferred — D5). Secret-policy scaffold (D6). Numbering: ADR 0025 D14's "0027 = broker" superseded (0027 = bitwise; broker = **0028**); the bitwise *shift* wave (ADR 0027 A1) is unnumbered-deferred, not C5.4. Next: **C5.4 (1/N)** — the runtime-only broker foundation.
+**Phase C5.4 (1/N) — broker-arena substrate (ADR 0028) — complete.** The Phase A broker backs a scope-arena C-ABI in the runtime. Finding: the broker is a safe *handle* allocator (bump bulk-frees, `free` unimplemented; slab fixed-size) with no public raw pointer, so a drop-in `sentinel_alloc` doesn't fit — added a public raw-bytes API (`Arena::alloc_bytes`/`ArenaHandle::alloc_bytes` → `NonNull<u8>`, exposing the strategy's `alloc_raw`). Runtime: a process-wide lazy `Broker` + `sentinel_arena_enter` (create bump arena) / `sentinel_arena_alloc` (16-byte-aligned bump alloc) / `sentinel_arena_exit` (`destroy_arena` + drop → `BumpStrategy::drop` frees the backing buffer). **Additive + c51-safe**: codegen still emits `sentinel_alloc`/`sentinel_free` (libc) and does NOT call the arena fns yet → objects byte-identical. (The ADR's "runtime-only" was slightly off — a small broker API addition was needed — and the malloc-replacement framing was set aside: the broker is arena-, not malloc-, shaped.) +5 tests (1226 total) (`b49a5ef`). ADR 0028 stays PROPOSED. Next: **C5.4 (2/N)** — the scope→arena codegen: route a scope's non-escaping heap allocations (those the borrow-check `DropPlan` frees at that scope exit, hence provably non-escaping) into the scope arena, replacing N per-binding `sentinel_free`s with one `sentinel_arena_exit`. The careful (UAF-sensitive) part — do it fresh; full escape analysis stays post-1.0 (ADR 0026 D2).
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1155,17 +1156,25 @@ New norms learned during Phase B and Phase C:
 > `c53_bitwise` + `c53_ct_eq` (the real constant-time MAC-verify shape
 > passing D5); **ADR 0027 → ACCEPTED-WITH-AMENDMENTS** (A1: `<< >> ~`/C5.4
 > deferred). **The fork is resolved (with the developer): broker
-> integration next (C5.4, ADR 0028 PROPOSED).** **Resume at C5.4 (1/N):**
-> the runtime-only broker foundation — a process-wide `Broker` backing
-> `sentinel_alloc`/`sentinel_free` via a size-classed slab pool + a global
-> ptr→`Handle` registry (so individual free still works), thread-safe (the
-> C4.4 runtime spawns), unlocking `within_budget` / recording / stats.
-> **c51-safe**: codegen is untouched (same C-ABI symbols) so objects stay
-> byte-identical. Then **C5.4 (2/N):** the scope→arena codegen — place
-> non-escaping scope-local allocs (per the borrow-check `DropPlan`) in
-> per-scope bump arenas reset at scope exit; optional `scope budget`
-> surface — which may defer post-1.0. The bitwise shift wave (`<< >> ~`,
-> ADR 0027 A1) + D4 constant-time emission + the ADR 0026 flip all remain
+> integration next (C5.4, ADR 0028 PROPOSED).** **C5.4 (1/N) is DONE** —
+> the broker-arena substrate: a public broker raw-bytes API
+> (`Arena::alloc_bytes` → `NonNull<u8>`, exposing the strategy's
+> `alloc_raw`) + runtime C-ABI `sentinel_arena_enter`/`_alloc`/`_exit` on
+> a process-wide lazy `Broker` (bump arenas; `_exit` destroys → frees the
+> backing buffer). Additive + c51-safe (codegen untouched → objects
+> byte-identical). Refinements vs the ADR: not "runtime-only" (a small
+> broker API was added), and the malloc-replacement framing (slab pool /
+> ptr→handle registry) was dropped — the broker is arena-, not malloc-,
+> shaped. **Resume at C5.4 (2/N):** the scope→arena codegen — route a
+> scope's **non-escaping** heap allocations (exactly the bindings the
+> borrow-check `DropPlan` frees at that scope exit, hence provably
+> non-escaping) into a per-scope bump arena via the new C-ABI, replacing N
+> per-binding `sentinel_free`s with one `sentinel_arena_exit`;
+> escaping/returned values stay on `sentinel_alloc` (malloc). This is the
+> careful, UAF-sensitive part — keep the alloc-route/free-skip bookkeeping
+> consistent; do it fresh. An optional `scope budget` surface + full
+> escape analysis stay post-1.0. The bitwise shift wave (`<< >> ~`,
+> ADR 0027 A1) + D4 constant-time emission + the ADR 0026 flip remain
 > deferred follow-ons. Per-sub-phase ADRs 0026+ at each open.
 >
 > **Available C4 follow-ons** (none blocking C5): work-stealing
@@ -1841,14 +1850,19 @@ For pasting into a fresh chat to bootstrap context:
     bitwise `& | ^` **DONE** (`b3d1d48` lexer + `76bfea3` surface; ADR 0027
     → ACCEPTED-WITH-AMENDMENTS, A1: `<< >> ~`/C5.4 deferred). `c53_ct_eq`
     shows a real constant-time MAC-verify shape (XOR-accumulate+OR-reduce+
-    declassify) passing D5. **Broker integration chosen next (C5.4,
-    ADR 0028 PROPOSED).** **Resume at C5.4 (1/N):** runtime-only broker
-    foundation — process-wide `Broker` backing `sentinel_alloc`/`free`
-    (size-classed slab pool + ptr→handle registry, thread-safe); c51-safe
-    (codegen untouched → objects byte-identical); unlocks budgets/
-    recording/stats. Then C5.4 (2/N): scope→arena codegen via the
-    borrow-check `DropPlan` (may defer post-1.0). Bitwise shifts + D4
-    emission + ADR 0026 flip remain deferred. Per-sub-phase ADRs 0026+.
+    declassify) passing D5. **Broker integration (C5.4, ADR 0028
+    PROPOSED): (1/N) DONE** (`b49a5ef`) — the broker-arena substrate: a
+    public broker raw-bytes API (`Arena::alloc_bytes` → `NonNull<u8>`) +
+    runtime C-ABI `sentinel_arena_enter`/`_alloc`/`_exit` on a lazy
+    process-wide `Broker` (bump arenas; `_exit` frees the buffer);
+    additive + c51-safe (codegen untouched → objects byte-identical).
+    **Resume at C5.4 (2/N):** the scope→arena codegen — route a scope's
+    non-escaping heap allocs (the borrow-check `DropPlan`'s scope-exit set
+    = provably non-escaping) into a per-scope bump arena, replacing N
+    `sentinel_free`s with one `sentinel_arena_exit`; escaping values stay
+    on malloc. The careful UAF-sensitive part; do it fresh. Bitwise shifts
+    + D4 emission + ADR 0026 flip + full escape analysis remain deferred.
+    Per-sub-phase ADRs 0026+ at each open.
     Optional C4 follow-ons (none blocking C5): work-stealing
     scheduler (ADR 0024 A1), scope cancellation (A2), Task<T>/
     spawn-args beyond i64 (A3), explicit `Task<T>` annotations

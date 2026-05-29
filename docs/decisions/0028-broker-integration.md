@@ -5,6 +5,21 @@ kickoff) D4, mirroring how ADR 0026/0027 detailed earlier C5 sub-phases.
 Flips to ACCEPTED(-WITH-AMENDMENTS) as C5.4 lands, recording deviations
 as numbered amendments.
 
+**C5.4 (1/N) update (2026-05-29).** Two refinements from building the
+substrate: (1) **D4 was not quite "runtime-only"** — the broker is a safe
+*handle* allocator that exposes no raw pointer, so a public raw-bytes API
+was added (`Arena::alloc_bytes`/`ArenaHandle::alloc_bytes -> NonNull<u8>`,
+surfacing the strategy's internal `alloc_raw`); it stays **c51-safe**
+because codegen is untouched (objects byte-identical). The substrate
+shipped as the bump-arena C-ABI (`sentinel_arena_enter`/`_alloc`/`_exit`),
+*additive* — the malloc-replacement framing (slab pool / bump-no-op-free)
+was set aside as the wrong shape (the broker is arena-, not malloc-,
+shaped). (2) **D3 confirmed feasible without new escape analysis** — a
+binding the borrow-check `DropPlan` frees at a scope exit is *provably
+non-escaping*, so C5.4 (2/N) routes exactly those allocations into the
+scope arena (the narrow-but-safe slice); the full escape analysis stays
+post-1.0 (ADR 0026 D2). Next: C5.4 (2/N) — the scope→arena codegen.
+
 Date: 2026-05-29
 Related:
   - **0025** (Phase C5 kickoff — PROPOSED): D4 (broker integration) is the
