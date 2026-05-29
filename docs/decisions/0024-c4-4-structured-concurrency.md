@@ -1,13 +1,51 @@
 # ADR 0024: C4.4 — structured concurrency (scope / spawn / await) + Async effect + runtime scheduler
 
-Status: PROPOSED — to flip to ACCEPTED (or ACCEPTED-WITH-AMENDMENTS)
-at C4.4 close. This ADR details the surface syntax + typing
-rules + runtime architecture for Phase C4.4 per ADR 0021 D8 +
-D9. The scheduler is the largest new runtime component since
-Phase A's broker; this ADR carries the substantive design call
-mirroring the role of ADR 0020 for the C3 handler runtime.
+Status: **ACCEPTED-WITH-AMENDMENTS** (flipped at C4.4 close —
+see "Amendments at C4.4 close" below). This ADR details the
+surface syntax + typing rules + runtime architecture for Phase
+C4.4 per ADR 0021 D8 + D9. The scheduler is the largest new
+runtime component since Phase A's broker; this ADR carries the
+substantive design call mirroring the role of ADR 0020 for the
+C3 handler runtime. C4.4 (1/N) shipped the parser surface; C4.4
+(2/N) shipped the typing layer + runtime symbols + codegen +
+the c44_go_no_go phase-go (exit 42). Phase C4.4 + Phase C4 close.
 
 Date: 2026-05-29
+
+## Amendments at C4.4 close
+
+- **A1 (D6) — thread-per-spawn shipped; work-stealing deferred.**
+  `spawn` lowers to `std::thread::spawn` via `sentinel_task_spawn`.
+  The fiber-based work-stealing pool remains a post-C4 perf
+  follow-on; the user surface is unchanged when it lands.
+- **A2 (D9) — cancellation on early scope exit deferred.**
+  `sentinel_scope_exit` auto-awaits on the normal-exit path only.
+- **A3 (D7) — Task<T> + spawn args restricted to i64.** Both the
+  result type AND the spawned fn's argument types are i64 at C4.4
+  minimum (the wrapper packs/unpacks i64 slots). Broader T needs
+  runtime type-erasure or per-type variants.
+- **A4 (D5) — Async effect-row discipline SHIPPED (not deferred).**
+  spawn/await contribute `Async`; `scope concurrent` discharges
+  it; a spawn/await outside a scope bubbles `Async` to `main` and
+  is rejected. Two implementation deviations: (a) `Async` is
+  auto-registered *after* user effects (not at `EffectId(0)` as
+  D5's wording suggested) so user EffectIds stay stable; (b) an
+  Async-only fn keeps the value-returning ABI rather than the C3
+  handler `Kont*` ABI — the codegen `uses_kont_abi` helper
+  excludes Async, since Async is a direct-runtime marker, not a
+  perform/handler effect.
+- **A5 (D4) — explicit `Task<T>` type-position annotations
+  deferred.** `let t: Task<i64> = spawn …` is not yet supported
+  (`resolve_type_expr` doesn't thread the `tasks` interner);
+  `let t = spawn …` infers the type from the RHS. The phase-go
+  uses inference. Mechanical to add later.
+- **Runtime correctness fix (D7/D9).** The `SentinelTask._pad`
+  slot became an `owned` flag: `sentinel_scope_register` sets it,
+  `sentinel_task_await` frees the struct only when *not* owned,
+  and `sentinel_scope_exit` reclaims owned tasks. This closes a
+  double-free / use-after-free that the C4.4 (2/N runtime)
+  symbols had when a Task was both explicitly awaited AND
+  auto-awaited by its scope — the exact phase-go shape.
 Related:
   - **0021** (Phase C4 kickoff — PROPOSED): the umbrella ADR.
     D8 picks `scope concurrent { ... } + spawn expr + .await`

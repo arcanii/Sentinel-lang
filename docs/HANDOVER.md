@@ -94,6 +94,7 @@ C1.3. See STATE.md Section C.
 **ADR 0024 PROPOSED — C4.4 structured concurrency surface + Async effect + runtime scheduler — docs-only.** Twelve D-decisions covering scope/spawn/await grammar (D1-D3), Type::Task interner (D4), Async built-in effect (D5), thread-per-spawn scheduler (D6), 5 new runtime symbols (D7), lowering (D8 + D9), out-of-scope (D10), lexer recap (D11), c44_go_no_go phase-go (D12), 2-sub-iteration split (D13). Key amendment to ADR 0021 D9: direct runtime API rather than async-as-effect (multi-shot continuations from ADR 0020 D2 would be required). User surface identical to the async-as-effect vision.
 **Phase C4.4 (1/N) — scope / spawn / await AST + parser per ADR 0024 D1+D2+D3 — complete.** Structured-concurrency surface parses end-to-end at AST + parser. Downstream resolve rejects with ScopeNotYet / SpawnNotYet / AwaitNotYet until C4.4 (2/N) lands the typing + runtime + codegen. +9 tests (1177 total). ADR 0024 stays PROPOSED.
 **Phase C4.4 (2/N runtime) — sentinel-runtime symbols per ADR 0024 D6+D7 — complete.** Thread-per-spawn substrate ships: sentinel_task_spawn / sentinel_task_await / sentinel_scope_enter / sentinel_scope_exit / sentinel_scope_register + SentinelTask (32-byte C-stable struct) + SentinelScopeCtx. Uses std::thread internally; real work-stealing scheduler is a deferred follow-on per ADR 0024 D6. Cancellation on early scope exit DEFERRED per ADR 0024 D9. +6 runtime tests (1182 total active workspace). ADR 0024 stays PROPOSED. The typing layer + codegen wiring + c44_go_no_go phase-go land in a follow-on iteration.
+**Phase C4.4 (2/N) — types + codegen + phase-go per ADR 0024 D4+D5+D8 — complete. ADR 0024 → ACCEPTED-WITH-AMENDMENTS. Phase C4.4 + Phase C4 close.** The `scope concurrent { spawn fn(args); expr.await }` surface compiles + runs end-to-end. Types: `Type::Task(TaskId)` (tenth interner variant) + `TaskData` + `intern_task` + `TypedProgram.tasks` threaded through check_expr; `TypedExprKind::Scope/Spawn/Await`; spawn validates a Call target returning i64 (Task<i64>-only per D7), await requires a `Type::Task` receiver; 3 TypeErrors (SpawnMustBeCall / SpawnResultMustBeI64 / AwaitOnNonTask). Resolve: scope/spawn/await pass-through (NotYet dropped); built-in `Async` effect auto-registered (appended after user effects — deviation from D5's "EffectId(0)"). Effect-check: spawn/await contribute Async; `scope concurrent` discharges Async (handler-style); spawn/await outside a scope bubbles Async to main → rejected (D5 discipline SHIPPED). Codegen: 5 runtime externs + per-spawn-target wrapper synthesized in a compile_to_object pre-walk (before CodegenCtx — it lacks `&Module`); lower scope/spawn/await; Async-only fns keep the value ABI not the C3 Kont* ABI (`uses_kont_abi` excludes Async). Runtime fix: `_pad` → `owned` flag so explicit `.await` inside a scope is safe against the scope's exit-time auto-await (closes a UAF/double-free in the C4.4 2/N symbols). +1 pass fixture (c44_go_no_go exit 42) + 3 UI fixtures + 2 effect-check tests + 1 runtime test (~1188 total active workspace). Amendments A1 (work-stealing deferred), A2 (cancellation deferred), A3 (Task<i64> + i64 args only), A4 (Async discipline shipped, 2 deviations), A5 (explicit `Task<T>` annotations deferred — use inference). Four-check suite green.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1072,13 +1073,34 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C4.4 (2/N) — types + codegen for scope / spawn / await)
+### 0.2 Next session opening (C4.5 close-out → Phase D)
 
-Resume at **C4.4 (2/N)** per ADR 0024. **C4.4 (1/N) closed**
-(parser surface) + **C4.4 (2/N runtime) closed** (5 new C-ABI
-runtime symbols + SentinelTask/ScopeCtx structs; 13 runtime
-tests passing). What remains: **types layer + codegen + phase-
-go fixture**.
+> **C4.4 (2/N) is COMPLETE** (types + codegen + phase-go;
+> ADR 0024 ACCEPTED-WITH-AMENDMENTS; Phase C4.4 + Phase C4
+> close). The detailed C4.4 (2/N) punch list that used to live
+> here is retained below for historical reference, but every
+> item shipped — do NOT re-do it. The wrapper-synthesis
+> sticking point was resolved exactly as the prior-art note
+> below predicted (pre-walk in `compile_to_object` before
+> `CodegenCtx`).
+>
+> **Resume at C4.5 close-out**: flip ADR 0021 (Phase C4
+> kickoff) PROPOSED → ACCEPTED — C4.0 (lexer), C4.1 (classes),
+> C4.2 (traits + impls), C4.3 (delegation), C4.4 (structured
+> concurrency) all shipped. C4.5 is a docs-only sub-phase per
+> ADR 0021 D14 (0–1 session). Then start **Phase D** per
+> HANDOVER §6.2 with a new ADR.
+>
+> **Available C4 follow-ons** (none blocking): work-stealing
+> scheduler (ADR 0024 A1), scope cancellation (A2), `Task<T>`
+> for T≠i64 + non-i64 spawn args (A3), explicit `Task<T>`
+> type-position annotations via threading `tasks` through
+> `resolve_type_expr` (A5), Path-3 bounded-generic dispatch
+> (ADR 0023 A1), Polonius migration (ADR 0018), and the
+> partial-move-through-field-projection soundness gap
+> (`docs/borrow-check-limitations.md`).
+>
+> Historical C4.4 (2/N) punch list (all shipped) follows.
 
 **Prior-art reference**: the prior session attempted the
 types+codegen layer end-to-end and rolled back the partial
@@ -1693,28 +1715,29 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start
-    (expect: edf758c "feat(c4.4 2/N runtime): structured-
-    concurrency runtime symbols per ADR 0024 D6+D7").
-    Last work: **C4.4 (2/N runtime) — sentinel-runtime
-    structured-concurrency substrate landed.** Five new C-ABI
-    runtime symbols (sentinel_task_spawn / _await /
-    sentinel_scope_enter / _exit / _register) + SentinelTask
-    (32-byte C-stable struct) + SentinelScopeCtx. Thread-per-
-    spawn implementation using std::thread internally — real
-    work-stealing scheduler deferred per ADR 0024 D6. +6
-    runtime tests (1182 active workspace).
-    What remains for C4.4 (2/N) close: **types layer**
-    (Type::Task interner + spawn/await/scope typing + 3 new
-    TypeError variants), **codegen** (5 runtime fn externs +
-    per-spawn-fn wrapper synthesis via compile_to_object
-    pre-walk + lower Spawn/Await/Scope in lower_expr),
-    **c44_go_no_go phase-go fixture**, and ADR 0024 →
-    ACCEPTED-WITH-AMENDMENTS flip. See §0.2 for the detailed
-    deliverables + lessons from the prior attempt (rolled
-    back due to incomplete codegen wrapper synthesis).
-    ADR 0024 stays PROPOSED.
-    Branch state: verify with `git status` at session start
-    (working tree should be clean from edf758c).
+    (expect the C4.4 (2/N) feat + docs commits — types + codegen
+    + phase-go for structured concurrency).
+    Last work: **C4.4 (2/N) — structured-concurrency typing +
+    codegen + phase-go landed. ADR 0024 → ACCEPTED-WITH-
+    AMENDMENTS. Phase C4.4 + Phase C4 CLOSE.** `scope concurrent
+    { let t = spawn double(21); t.await }` compiles + runs at
+    exit 42. Type::Task interner + spawn/await/scope typing +
+    Async effect (auto-registered after user effects; spawn/await
+    contribute Async, `scope` discharges it) + 5 codegen runtime
+    externs + per-spawn-target wrapper synthesis (compile_to_object
+    pre-walk) + scope/spawn/await lowering. Runtime fix: `_pad`
+    → `owned` flag closes a UAF between explicit `.await` and the
+    scope's auto-await. Async-only fns keep the value ABI (not the
+    C3 Kont* ABI) via `uses_kont_abi`. +1 pass + 3 UI fixtures
+    (~1188 active workspace). Four-check suite green.
+    What remains: **Phase C4.5 close-out** — flip ADR 0021
+    (Phase C4 kickoff) PROPOSED → ACCEPTED now that all of C4.0–
+    C4.4 shipped. Then **Phase D** per HANDOVER §6.2. Optional
+    C4 follow-ons (none blocking): work-stealing scheduler
+    (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args
+    beyond i64 (A3), explicit `Task<T>` annotations (A5),
+    Path-3 bounded-generic dispatch (ADR 0023 A1).
+    Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0
     (bootstrap compiler MVP) + Phase C1 (full type system — all

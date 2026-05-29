@@ -1,0 +1,28 @@
+// C4.4 / ADR 0024 D12: phase-go program for structured
+// concurrency. `main` opens a `scope concurrent` block, spawns
+// `double(21)` as a concurrent task (an OS thread at C4.4
+// minimum per ADR 0024 D6), then awaits its result.
+//
+// Trace: spawn double(21) runs `21 * 2 = 42` on a worker thread;
+// `t.await` joins the thread + reads 42; the scope's tail value
+// (42) becomes the scope expression's value; main returns it.
+// The scope discharges the Async effect (ADR 0024 D5) so main
+// stays effect-free. Exit 42.
+//
+// Note: `t`'s type is inferred as `Task<i64>` from the spawn RHS
+// (explicit `Task<T>` type-position annotations are a deferred
+// follow-on per the ADR 0024 close-out amendment).
+//
+// Expected: exit code 42, no stdout.
+
+fn double(x: i64) -> i64 ! { Async } {
+    x * 2
+}
+
+fn main() -> i64 {
+    let result: i64 = scope concurrent {
+        let t = spawn double(21);
+        t.await
+    };
+    result
+}

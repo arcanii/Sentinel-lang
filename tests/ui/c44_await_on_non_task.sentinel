@@ -1,0 +1,9 @@
+// C4.4 / ADR 0024 D3: `.await` requires a `Task<T>` receiver.
+// Awaiting a plain `i64` is rejected with AwaitOnNonTask.
+//
+// Expected: compile error `sentinel::types::await_on_non_task`.
+
+fn main() -> i64 {
+    let x: i64 = 5;
+    x.await
+}

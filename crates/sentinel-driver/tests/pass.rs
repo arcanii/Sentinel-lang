@@ -1239,3 +1239,51 @@ fn c43_delegate_undefined_trait_rejects_at_resolve() {
         "expected undefined_trait_for_impl; got: {stderr}"
     );
 }
+
+// ----- C4.4 / ADR 0024: structured concurrency -----
+
+#[test]
+fn pass_c44_go_no_go() {
+    // ADR 0024 D12 phase-go: main opens `scope concurrent`, spawns
+    // `double(21)` on a worker thread, awaits the result (42). The
+    // scope discharges the Async effect so main stays effect-free.
+    let r = build_and_run("c44_go_no_go.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn c44_spawn_non_fn_call_rejects() {
+    // ADR 0024 D2: spawn target must be a direct call.
+    let out = build_ui_fixture("c44_spawn_non_fn_call.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("spawn_must_be_call"),
+        "expected spawn_must_be_call; got: {stderr}"
+    );
+}
+
+#[test]
+fn c44_await_on_non_task_rejects() {
+    // ADR 0024 D3: `.await` receiver must be a Task<T>.
+    let out = build_ui_fixture("c44_await_on_non_task.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("await_on_non_task"),
+        "expected await_on_non_task; got: {stderr}"
+    );
+}
+
+#[test]
+fn c44_spawn_result_must_be_i64_rejects() {
+    // ADR 0024 D7: Task<T> restricted to Task<i64> at C4.4 minimum.
+    let out = build_ui_fixture("c44_spawn_result_must_be_i64.sentinel");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("spawn_result_must_be_i64"),
+        "expected spawn_result_must_be_i64; got: {stderr}"
+    );
+}

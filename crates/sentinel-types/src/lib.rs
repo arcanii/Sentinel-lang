@@ -120,6 +120,16 @@ pub enum Type {
     /// clause. Ninth interner-table-style variant; preserves
     /// `Copy + Hash` (a `TraitId` is just a `u32`).
     TraitSelf(TraitId),
+    /// C4.4 / ADR 0024 D4: `Task<T>` — the handle to a spawned
+    /// concurrent task. The [`TaskId`] indexes into
+    /// `TypedProgram.tasks`, where `TaskData { result_ty }` lives.
+    /// Tenth interner-table-style variant; preserves `Copy + Hash`
+    /// (a `TaskId` is just a `u32`). At C4.4 minimum `result_ty` is
+    /// restricted to `I64` per ADR 0024 D7, so in practice the
+    /// `tasks` table holds at most one entry — but the interner
+    /// indirection keeps the generalisation path open + matches the
+    /// `Kont` / `Secret` / `Ref` precedent.
+    Task(TaskId),
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -151,6 +161,24 @@ pub struct KontId(pub u32);
 pub struct KontData {
     pub arg_ty: Type,
     pub ret_ty: Type,
+}
+
+/// Identifier for an interned task type per ADR 0024 D4 (C4.4).
+/// Assigned in source-encounter order during type-check of `spawn`
+/// expressions; same scheme as [`KontId`] / [`SecretId`] /
+/// [`RefId`] / [`GenericInstanceId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TaskId(pub u32);
+
+/// The underlying data of a [`Type::Task`] per ADR 0024 D4.
+/// `result_ty` = the type the spawned fn produces (the value
+/// `task.await` evaluates to). Owned by [`TypedProgram::tasks`].
+/// At C4.4 minimum `result_ty` is always [`Type::I64`] per ADR
+/// 0024 D7 (broader result types deferred); the field is kept
+/// general so the generalisation is a runtime-only change.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TaskData {
+    pub result_ty: Type,
 }
 
 /// The underlying data of a [`Type::Secret`]. Owned by
@@ -393,6 +421,7 @@ impl Type {
             | Type::Nullable(_)
             | Type::Secret(_)
             | Type::Kont(_)
+            | Type::Task(_)
             | Type::Class(_)
             | Type::TraitSelf(_) => None,
         }
@@ -425,6 +454,7 @@ impl Type {
             | Type::Ref(_)
             | Type::Secret(_)
             | Type::Kont(_)
+            | Type::Task(_)
             | Type::Class(_)
             | Type::TraitSelf(_) => None,
         }
@@ -536,6 +566,13 @@ impl Type {
                 // lands per ADR 0020 D10.
                 self
             }
+            Type::Task(_) => {
+                // C4.4 / ADR 0024 D4: `Task<T>` is `Task<i64>` at
+                // C4.4 minimum — no TypeParam payload to substitute.
+                // Pass through unchanged (generic tasks deferred per
+                // ADR 0024 D10).
+                self
+            }
         }
     }
 
@@ -633,6 +670,21 @@ pub fn intern_kont(konts: &mut Vec<KontData>, arg_ty: Type, ret_ty: Type) -> Kon
     id
 }
 
+/// Intern a `result_ty` into `tasks`, returning its [`TaskId`] per
+/// ADR 0024 D4 (C4.4). Linear search; at C4.4 minimum `result_ty`
+/// is always `I64` so the table holds at most one entry. Mirrors
+/// [`intern_kont`]'s shape.
+pub fn intern_task(tasks: &mut Vec<TaskData>, result_ty: Type) -> TaskId {
+    for (idx, existing) in tasks.iter().enumerate() {
+        if existing.result_ty == result_ty {
+            return TaskId(idx as u32);
+        }
+    }
+    let id = TaskId(tasks.len() as u32);
+    tasks.push(TaskData { result_ty });
+    id
+}
+
 /// Format a [`Type`] for display, looking up the struct name when
 /// the type is `Struct(StructId)`. Pass `None` when no program is
 /// available (e.g. error rendering in tests) — struct types render
@@ -699,6 +751,14 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             }
             format!("<kont#{}>", id.0)
         }
+        Type::Task(id) => {
+            if let Some(p) = program {
+                if let Some(data) = p.tasks.get(id.0 as usize) {
+                    return format!("Task<{}>", type_display(data.result_ty, program));
+                }
+            }
+            format!("<task#{}>", id.0)
+        }
         Type::Class(id) => match program.and_then(|p| p.class_decls.get(id.0 as usize)) {
             Some(c) => c.name.clone(),
             None => format!("<class#{}>", id.0),
@@ -724,6 +784,7 @@ impl std::fmt::Display for Type {
             Type::Ref(id) => write!(f, "<ref#{}>", id.0),
             Type::Secret(id) => write!(f, "<secret#{}>", id.0),
             Type::Kont(id) => write!(f, "<kont#{}>", id.0),
+            Type::Task(id) => write!(f, "<task#{}>", id.0),
             Type::Class(id) => write!(f, "<class#{}>", id.0),
             Type::TraitSelf(id) => write!(f, "<Self-trait#{}>", id.0),
         }
@@ -1022,6 +1083,12 @@ pub struct TypedProgram {
     /// [`secrets`]. Populated during type-check of `handle ...
     /// with { ... }` expressions.
     pub konts: Vec<KontData>,
+    /// C4.4 / ADR 0024 D4: interned task types. Each
+    /// `Type::Task(id)` indexes this vector to recover
+    /// `(result_ty)`. Populated during type-check of `spawn`
+    /// expressions; at C4.4 minimum holds at most one entry
+    /// (`Task<i64>`) per the D7 result-type restriction.
+    pub tasks: Vec<TaskData>,
     /// C4.1 / ADR 0022 D1: class declarations with resolved field
     /// types + init signature + method signatures. Each ClassId
     /// matches its index here.
@@ -1082,6 +1149,13 @@ impl TypedProgram {
     /// from [`check`] / [`intern_kont`].
     pub fn kont_data(&self, id: KontId) -> &KontData {
         &self.konts[id.0 as usize]
+    }
+
+    /// Look up the `(result_ty)` for a task type per ADR 0024 D4
+    /// (C4.4). Panics on out-of-range — IDs only come from [`check`]
+    /// / [`intern_task`].
+    pub fn task_data(&self, id: TaskId) -> &TaskData {
+        &self.tasks[id.0 as usize]
     }
 
     /// Look up the [`ClassData`] for a class type per ADR 0022 D1
@@ -1407,6 +1481,22 @@ impl TypedExpr {
                 method: method.clone(),
                 method_span: method_span.clone(),
                 args: args.iter().map(|a| a.substitute(subst, instances, refs)).collect(),
+            },
+            // C4.4 / ADR 0024: `Task<T>` is `Task<i64>` at C4.4
+            // minimum (no TypeParam payload), so the task_id survives
+            // substitution unchanged — only the subexpressions need
+            // the deep-clone.
+            TypedExprKind::Scope { mode, body } => TypedExprKind::Scope {
+                mode: *mode,
+                body: Box::new(body.substitute(subst, instances, refs)),
+            },
+            TypedExprKind::Spawn { call, task_id } => TypedExprKind::Spawn {
+                call: Box::new(call.substitute(subst, instances, refs)),
+                task_id: *task_id,
+            },
+            TypedExprKind::Await { task_expr, task_id } => TypedExprKind::Await {
+                task_expr: Box::new(task_expr.substitute(subst, instances, refs)),
+                task_id: *task_id,
             },
         };
         TypedExpr {
@@ -1901,6 +1991,28 @@ pub enum TypedExprKind {
         method: String,
         method_span: Span,
         args: Vec<TypedExpr>,
+    },
+    /// C4.4 / ADR 0024 D1: `scope concurrent { ... }`. The block's
+    /// value is its tail; codegen wraps the body in
+    /// scope_enter / scope_exit per ADR 0024 D8.
+    Scope {
+        mode: sentinel_ast::ScopeMode,
+        body: Box<TypedBlock>,
+    },
+    /// C4.4 / ADR 0024 D2: `spawn fn_name(args)`. `call` is the
+    /// validated inner [`TypedExprKind::Call`]; `task_id` interns
+    /// `Task<result_ty>` (result_ty restricted to `I64` at C4.4
+    /// minimum per D7). The outer node's `ty` is `Type::Task(task_id)`.
+    Spawn {
+        call: Box<TypedExpr>,
+        task_id: TaskId,
+    },
+    /// C4.4 / ADR 0024 D3: `task.await`. `task_expr` is a
+    /// `Type::Task`-typed receiver; the outer node's `ty` is the
+    /// interned [`TaskData::result_ty`].
+    Await {
+        task_expr: Box<TypedExpr>,
+        task_id: TaskId,
     },
 }
 
@@ -2589,6 +2701,46 @@ pub enum TypeError {
         #[label("receiver here")]
         span: miette::SourceSpan,
     },
+
+    /// C4.4 / ADR 0024 D2: `spawn expr` where `expr` is not a
+    /// direct function call. At C4.4 minimum the spawn target must
+    /// be a `fn_name(args)` call (arbitrary spawnable expressions
+    /// are deferred per ADR 0024 D10).
+    #[error("`spawn` requires a function-call target")]
+    #[diagnostic(
+        code(sentinel::types::spawn_must_be_call),
+        help("at C4.4 minimum `spawn` takes a direct call like `spawn double(21)`; blocks / method calls / closures are deferred per ADR 0024 D10")
+    )]
+    SpawnMustBeCall {
+        #[label("not a function call")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.4 / ADR 0024 D7: a spawned fn's return type isn't `i64`.
+    /// `Task<T>` is restricted to `Task<i64>` at C4.4 minimum.
+    #[error("`spawn` target must return `i64` (got `{got}`)")]
+    #[diagnostic(
+        code(sentinel::types::spawn_result_must_be_i64),
+        help("at C4.4 minimum `Task<T>` is restricted to `Task<i64>` per ADR 0024 D7; broader result types are deferred")
+    )]
+    SpawnResultMustBeI64 {
+        got: Type,
+        #[label("spawned call returns a non-i64 type")]
+        span: miette::SourceSpan,
+    },
+
+    /// C4.4 / ADR 0024 D3: `.await` applied to a non-`Task<T>`
+    /// receiver.
+    #[error("`.await` requires a `Task<T>` receiver (got `{got}`)")]
+    #[diagnostic(
+        code(sentinel::types::await_on_non_task),
+        help("`.await` may only be applied to the result of a `spawn` (a `Task<T>` value)")
+    )]
+    AwaitOnNonTask {
+        got: Type,
+        #[label("not a Task")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -3207,6 +3359,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     // Starts empty; populated whenever check_expr enters a
     // `handle ... with { ... }` and interns a kont per arm.
     let mut konts: Vec<KontData> = Vec::new();
+    let mut tasks: Vec<TaskData> = Vec::new();
 
     let mut typed_fns = Vec::with_capacity(program.fns.len());
     for fn_def in &program.fns {
@@ -3223,6 +3376,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             &typed_trait_decls,
             &typed_impl_decls,
             &mut konts,
+            &mut tasks,
         )?);
     }
 
@@ -3265,6 +3419,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &typed_trait_decls,
                 &typed_impl_decls,
                 &mut konts,
+                &mut tasks,
             )?;
             // C4.1 / ADR 0022 D4: definite-assignment (minimal at
             // this iteration). Walk the body's stmts and the tail
@@ -3340,6 +3495,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &typed_trait_decls,
                 &typed_impl_decls,
                 &mut konts,
+                &mut tasks,
             )?;
             if body.ty != return_type {
                 return Err(TypeError::ReturnTypeMismatch {
@@ -3408,6 +3564,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &typed_trait_decls,
                 &typed_impl_decls,
                 &mut konts,
+                &mut tasks,
             )?;
             if body.ty != return_type {
                 return Err(TypeError::ReturnTypeMismatch {
@@ -3445,6 +3602,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         secrets,
         effect_decls: typed_effect_decls,
         konts,
+        tasks,
         class_decls: typed_class_decls,
         trait_decls: typed_trait_decls,
         impl_decls: typed_impl_decls,
@@ -3638,6 +3796,7 @@ fn check_fn(
     trait_decls: &[TraitData],
     impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
 ) -> Result<TypedFnDef, TypeError> {
     // Pull our own signature.
     let signature = &signatures[fn_def.id.0 as usize];
@@ -3693,6 +3852,7 @@ fn check_fn(
         trait_decls,
         impl_decls,
         konts,
+        tasks,
     )?;
 
     if body.ty != return_type {
@@ -3768,6 +3928,7 @@ fn check_block(
     trait_decls: &[TraitData],
     impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
 ) -> Result<TypedBlock, TypeError> {
     let mut stmts = Vec::with_capacity(block.stmts.len());
     for stmt in &block.stmts {
@@ -3785,6 +3946,7 @@ fn check_block(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
         )?);
     }
     // Only the tail receives the expected-type pushdown (the block's
@@ -3804,6 +3966,7 @@ fn check_block(
         trait_decls,
         impl_decls,
         konts,
+        tasks,
     )?;
     let ty = tail.ty;
     Ok(TypedBlock {
@@ -3829,6 +3992,7 @@ fn check_stmt(
     trait_decls: &[TraitData],
     impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
 ) -> Result<TypedStmt, TypeError> {
     let kind = match &stmt.kind {
         ResolvedStmtKind::Let { id, mutable, name, name_span, ty_annot, value } => {
@@ -3866,6 +4030,7 @@ fn check_stmt(
                 trait_decls,
                 impl_decls,
                 konts,
+                tasks,
             )?;
             let ty = match (ty_annot, expected) {
                 (Some(_), Some(annotated)) => {
@@ -3913,6 +4078,7 @@ fn check_stmt(
                 trait_decls,
                 impl_decls,
                 konts,
+                tasks,
             )?;
             let value_typed = check_expr(
                 value,
@@ -3929,6 +4095,7 @@ fn check_stmt(
                 trait_decls,
                 impl_decls,
                 konts,
+                tasks,
             )?;
             if value_typed.ty != target_typed.ty {
                 return Err(TypeError::Mismatch {
@@ -3958,6 +4125,7 @@ fn check_stmt(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
         )?),
     };
     Ok(TypedStmt { kind, span: stmt.span.clone() })
@@ -4223,6 +4391,8 @@ fn try_substitute(
         // C3.4 / ADR 0020 D5: konts never compose with generics at
         // C3.4 minimum (no effect polymorphism per D10).
         Type::Kont(_) => Some(ty),
+        // C4.4 / ADR 0024 D4: `Task<i64>` carries no TypeParam.
+        Type::Task(_) => Some(ty),
     }
 }
 
@@ -4256,6 +4426,8 @@ fn contains_type_param(
         // C3.4 / ADR 0020 D5: konts don't carry TypeParams at C3.4
         // minimum.
         Type::Kont(_) => false,
+        // C4.4 / ADR 0024 D4: `Task<i64>` carries no TypeParam.
+        Type::Task(_) => false,
     }
 }
 
@@ -4380,6 +4552,7 @@ fn check_call(
     trait_decls: &[TraitData],
     impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
     call_span: &Span,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let signature = &signatures[id.0 as usize];
@@ -4455,6 +4628,7 @@ fn check_call(
                 trait_decls,
                 impl_decls,
                 konts,
+                tasks,
             )?;
             // Validate the arg's type against the param (possibly
             // refining subst with any new TypeParam bindings).
@@ -4568,6 +4742,7 @@ fn check_expr(
     trait_decls: &[TraitData],
     impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
 ) -> Result<TypedExpr, TypeError> {
     // C1.5 / ADR 0014 D2: NullLit has no synthesis type — it MUST
     // see an expected `?T` context to type-check.
@@ -4627,6 +4802,7 @@ fn check_expr(
                         trait_decls,
                         impl_decls,
                         konts,
+                        tasks,
                     )?;
                     // Operand must be an lvalue.
                     if !is_lvalue(&inner_t) {
@@ -4670,6 +4846,7 @@ fn check_expr(
                         trait_decls,
                         impl_decls,
                         konts,
+                        tasks,
                     )?;
                     let inner_ty = match inner_t.ty {
                         Type::Ref(id) => refs[id.0 as usize].inner,
@@ -4716,6 +4893,7 @@ fn check_expr(
                         trait_decls,
                         impl_decls,
                         konts,
+                        tasks,
                     )?;
                     // C3 / ADR 0019 D5 (C3.1b): unary preserves
                     // the secret qualifier — `-secret_x` is
@@ -4758,8 +4936,8 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D5 + D7 (C3.1b): operator-secret-
             // preserving. Strip one layer of `secret` from both
             // sides, run the usual int-type check on the inners,
@@ -4828,10 +5006,10 @@ fn check_expr(
                 // The non-null side determines the expected ?T type.
                 // First, synthesize the non-null side.
                 let (non_null_side, non_null_expr, null_span) = if lhs_is_null {
-                    let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+                    let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
                     (r.ty, r, lhs.span.clone())
                 } else {
-                    let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+                    let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
                     (l.ty, l, rhs.span.clone())
                 };
                 // Non-null side must be Nullable for null-comparison.
@@ -4858,8 +5036,8 @@ fn check_expr(
                     ty: Type::Bool,
                 });
             }
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for comparisons. `secret T == secret T -> secret bool`
             // per Phase B ADR 0008 D4. Strip wrappers to check
@@ -4899,8 +5077,8 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Logic(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for logicals. Both operands must be the same bool-
             // shape (`bool` or `secret bool`); result preserves
@@ -4943,12 +5121,12 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Block(b) => {
-            let typed_block = check_block(b, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let typed_block = check_block(b, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let ty = typed_block.ty;
             (TypedExprKind::Block(Box::new(typed_block)), ty)
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
-            let cond_t = check_expr(cond, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let cond_t = check_expr(cond, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D7 (C3.1) — SecretBranch: an
             // `if` condition with type `secret bool` would
             // leak via timing. Reject before the generic
@@ -4970,8 +5148,8 @@ fn check_expr(
             }
             // ADR 0014 D5: push the expected type down into both
             // branches so `null` in either branch can resolve.
-            let then_t = check_block(then_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
-            let else_t = check_block(else_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let then_t = check_block(then_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let else_t = check_block(else_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             if then_t.ty != else_t.ty {
                 return Err(TypeError::Mismatch {
                     expected: then_t.ty,
@@ -5006,6 +5184,7 @@ fn check_expr(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
             &expr.span,
         )?,
         ResolvedExprKind::StructLit { id, name, name_span, fields } => {
@@ -5084,6 +5263,7 @@ fn check_expr(
                     trait_decls,
                     impl_decls,
                     konts,
+                    tasks,
                 )?;
                 if value_t.ty != expected_field_ty {
                     return Err(TypeError::Mismatch {
@@ -5168,7 +5348,7 @@ fn check_expr(
                 // Type-check elements. First element synthesizes T
                 // if no expected; subsequent elements get T as
                 // expected (so widening / null work inside `[T]`).
-                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
                 let elem_ty = first.ty;
                 let mut typed = Vec::with_capacity(elems.len());
                 typed.push(first);
@@ -5188,6 +5368,7 @@ fn check_expr(
                         trait_decls,
                         impl_decls,
                         konts,
+                        tasks,
                     )?;
                     if t.ty != elem_ty {
                         return Err(TypeError::Mismatch {
@@ -5213,7 +5394,7 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Index { target, index } => {
-            let target_t = check_expr(target, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let target_t = check_expr(target, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let elem_ty = match target_t.ty {
                 Type::Array(ae) => ae,
                 other => {
@@ -5226,7 +5407,7 @@ fn check_expr(
             // Synthesize the index without pushdown so a non-int
             // index surfaces as the more-specific `IndexNotInt`
             // rather than a generic `Mismatch`.
-            let index_t = check_expr(index, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts)?;
+            let index_t = check_expr(index, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             if index_t.ty != Type::I64 {
                 return Err(TypeError::IndexNotInt {
                     got: index_t.ty,
@@ -5258,6 +5439,7 @@ fn check_expr(
                 trait_decls,
                 impl_decls,
                 konts,
+                tasks,
             )?;
             // C1.7.4b / ADR 0016 D6: field access on a generic
             // instance substitutes the field type by the instance's
@@ -5358,6 +5540,7 @@ fn check_expr(
                 trait_decls,
                 impl_decls,
                 konts,
+                tasks,
             )?;
             let (stripped, _was_secret) = inner_t.ty.strip_secret(secrets);
             (
@@ -5382,6 +5565,7 @@ fn check_expr(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
             &expr.span,
         )?,
         ResolvedExprKind::Perform {
@@ -5411,6 +5595,7 @@ fn check_expr(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
         )?,
         ResolvedExprKind::ResumeKont { kont, callee_span, args } => check_resume_kont_expr(
             *kont,
@@ -5428,6 +5613,7 @@ fn check_expr(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
         )?,
         ResolvedExprKind::MethodCall { target, method, method_span, args } => {
             check_method_call_expr(
@@ -5447,6 +5633,7 @@ fn check_expr(
                 trait_decls,
                 impl_decls,
                 konts,
+                tasks,
             )?
         }
         ResolvedExprKind::ClassInit { id, name, name_span, args } => {
@@ -5467,6 +5654,7 @@ fn check_expr(
                 trait_decls,
                 impl_decls,
                 konts,
+                tasks,
             )?
         }
         ResolvedExprKind::QualifiedCall {
@@ -5496,16 +5684,59 @@ fn check_expr(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
         )?,
-        // C4.4 (1/N) / ADR 0024: scope/spawn/await are pass-
-        // through at resolve but surface ScopeNotYet/SpawnNotYet/
-        // AwaitNotYet there — these arms are unreachable in
-        // practice at C4.4 (1/N). C4.4 (2/N) brings the typing
-        // layer + runtime + codegen up; these arms light up then.
-        ResolvedExprKind::Scope { .. }
-        | ResolvedExprKind::Spawn { .. }
-        | ResolvedExprKind::Await { .. } => {
-            unreachable!("ResolvedExprKind::Scope/Spawn/Await unreachable at C4.4 (1/N) — resolve surfaces NotYet")
+        // C4.4 / ADR 0024 D1: `scope concurrent { ... }` types as
+        // its body's tail (like a plain block). The concurrency
+        // contract (auto-await on exit) is a codegen concern.
+        ResolvedExprKind::Scope { mode, body } => {
+            let typed_block = check_block(body, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let ty = typed_block.ty;
+            (
+                TypedExprKind::Scope { mode: *mode, body: Box::new(typed_block) },
+                ty,
+            )
+        }
+        // C4.4 / ADR 0024 D2 + D7: `spawn fn(args)` — the target
+        // must be a direct call (D2); its return type is restricted
+        // to i64 (D7); the result is `Task<i64>`.
+        ResolvedExprKind::Spawn { call_expr } => {
+            if !matches!(call_expr.kind, ResolvedExprKind::Call { .. }) {
+                return Err(TypeError::SpawnMustBeCall {
+                    span: to_source_span(&call_expr.span),
+                });
+            }
+            let typed_call = check_expr(call_expr, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            if typed_call.ty != Type::I64 {
+                return Err(TypeError::SpawnResultMustBeI64 {
+                    got: typed_call.ty,
+                    span: to_source_span(&call_expr.span),
+                });
+            }
+            let task_id = intern_task(tasks, Type::I64);
+            (
+                TypedExprKind::Spawn { call: Box::new(typed_call), task_id },
+                Type::Task(task_id),
+            )
+        }
+        // C4.4 / ADR 0024 D3: `task.await` — receiver must be a
+        // `Task<T>`; the result type is the interned result_ty.
+        ResolvedExprKind::Await { task_expr } => {
+            let typed_task = check_expr(task_expr, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let task_id = match typed_task.ty {
+                Type::Task(tid) => tid,
+                other => {
+                    return Err(TypeError::AwaitOnNonTask {
+                        got: other,
+                        span: to_source_span(&task_expr.span),
+                    });
+                }
+            };
+            let result_ty = tasks[task_id.0 as usize].result_ty;
+            (
+                TypedExprKind::Await { task_expr: Box::new(typed_task), task_id },
+                result_ty,
+            )
         }
     };
     let synth = TypedExpr { kind, span: expr.span.clone(), ty };
@@ -5542,6 +5773,7 @@ fn check_handle_expr(
     trait_decls: &[TraitData],
     impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
     _handle_span: &Span,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     // Check the handle body without an expected type — the body's
@@ -5564,6 +5796,7 @@ fn check_handle_expr(
         trait_decls,
         impl_decls,
         konts,
+        tasks,
     )?;
     let body_ty = body_typed.ty;
 
@@ -5589,6 +5822,7 @@ fn check_handle_expr(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
         )?;
         let ra_ty = ra_body_typed.ty;
         match saved {
@@ -5672,6 +5906,7 @@ fn check_handle_expr(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
         )?;
 
         if arm_body_typed.ty != outer_ty {
@@ -5745,6 +5980,7 @@ fn check_perform_expr(
     trait_decls: &[TraitData],
     impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let op = &effect_decls[effect_id.0 as usize].ops[op_index];
     if args.len() != op.params.len() {
@@ -5774,6 +6010,7 @@ fn check_perform_expr(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
         )?;
         if typed.ty != op.params[i].ty {
             return Err(TypeError::Mismatch {
@@ -5819,6 +6056,7 @@ fn check_resume_kont_expr(
     trait_decls: &[TraitData],
     impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let (kont_ty, _) = env
         .get(&kont)
@@ -5868,6 +6106,7 @@ fn check_resume_kont_expr(
         trait_decls,
         impl_decls,
         konts,
+        tasks,
     )?;
     if typed_arg.ty != arg_ty {
         return Err(TypeError::Mismatch {
@@ -5912,6 +6151,7 @@ fn check_method_call_expr(
     trait_decls: &[TraitData],
     impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let target_typed = check_expr(
         target,
@@ -5928,6 +6168,7 @@ fn check_method_call_expr(
         trait_decls,
         impl_decls,
         konts,
+        tasks,
     )?;
     // Auto-deref `&T` / `&mut T` to find the underlying nominal
     // type for method lookup (D6 step 1 + step 2).
@@ -5983,6 +6224,7 @@ fn check_method_call_expr(
                     trait_decls,
                     impl_decls,
                     konts,
+                    tasks,
                 )?;
                 if arg_typed.ty != param.ty {
                     return Err(TypeError::Mismatch {
@@ -6062,6 +6304,7 @@ fn check_method_call_expr(
                     trait_decls,
                     impl_decls,
                     konts,
+                    tasks,
                 )?;
                 if arg_typed.ty != param.ty {
                     return Err(TypeError::Mismatch {
@@ -6109,6 +6352,7 @@ fn check_class_init_expr(
     trait_decls: &[TraitData],
     impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let class = &class_decls[class_id.0 as usize];
     let init_params: &[TypedParam] = class
@@ -6141,6 +6385,7 @@ fn check_class_init_expr(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
         )?;
         if arg_typed.ty != param.ty {
             return Err(TypeError::Mismatch {
@@ -6187,6 +6432,7 @@ fn check_qualified_call_expr(
     trait_decls: &[TraitData],
     impl_decls: &[ImplData],
     konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
 ) -> Result<(TypedExprKind, Type), TypeError> {
     let imp = &impl_decls[impl_id.0 as usize];
     let m = &imp.methods[method_index];
@@ -6219,6 +6465,7 @@ fn check_qualified_call_expr(
         trait_decls,
         impl_decls,
         konts,
+        tasks,
     )?;
     let recv_concrete = match recv.ty {
         Type::Ref(rid) => refs[rid.0 as usize].inner,
@@ -6255,6 +6502,7 @@ fn check_qualified_call_expr(
             trait_decls,
             impl_decls,
             konts,
+            tasks,
         )?;
         if arg_typed.ty != param.ty {
             return Err(TypeError::Mismatch {
@@ -6586,6 +6834,21 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             format!(
                 "impl `{impl_name}` (for `{type_name}`) doesn't apply to receiver type `{got_ty}`"
             ),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::SpawnMustBeCall { span } => (
+            "sentinel::types::spawn_must_be_call",
+            "`spawn` requires a function-call target".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::SpawnResultMustBeI64 { got, span } => (
+            "sentinel::types::spawn_result_must_be_i64",
+            format!("`spawn` target must return `i64` (got `{got}`)"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::AwaitOnNonTask { got, span } => (
+            "sentinel::types::await_on_non_task",
+            format!("`.await` requires a `Task<T>` receiver (got `{got}`)"),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -8200,9 +8463,13 @@ fn main() -> i64 {
     #[test]
     fn c32_effect_decl_type_checks_with_no_ops() {
         let p = check_ok("effect Io { } fn main() -> i64 { 0 }");
-        assert_eq!(p.effect_decls.len(), 1);
+        // C4.4 / ADR 0024 D5: the built-in `Async` effect is
+        // auto-registered after user effects (Io at 0, Async at 1).
+        assert_eq!(p.effect_decls.len(), 2);
         assert!(p.effect_decls[0].ops.is_empty());
         assert_eq!(p.effect_decls[0].name, "Io");
+        assert_eq!(p.effect_decls[1].name, "Async");
+        assert!(p.effect_decls[1].ops.is_empty());
     }
 
     #[test]

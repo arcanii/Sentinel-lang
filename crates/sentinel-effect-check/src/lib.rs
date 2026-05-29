@@ -127,6 +127,18 @@ pub struct EffectCheckedProgram {
 pub fn effect_check(program: &TypedProgram) -> (EffectCheckedProgram, Vec<EffectError>) {
     let mut errors: Vec<EffectError> = Vec::new();
 
+    // C4.4 / ADR 0024 D5: the built-in `Async` effect's id (resolve
+    // auto-registers it). `spawn` / `.await` contribute Async to a
+    // fn's inferred row; a `scope concurrent { ... }` block
+    // discharges it (like a handler discharges its handled effects).
+    // `None` only if a program somehow lacks the auto-registered
+    // Async — defensive; in practice always `Some`.
+    let async_id: Option<EffectId> = program
+        .effect_decls
+        .iter()
+        .position(|d| d.name == "Async")
+        .map(|i| EffectId(i as u32));
+
     // Initialize: annotated fns get their annotation as the
     // initial row; unannotated fns start with empty rows that
     // grow during the fixed-point iteration. Runtime builtins
@@ -153,7 +165,7 @@ pub fn effect_check(program: &TypedProgram) -> (EffectCheckedProgram, Vec<Effect
                 // Annotated: trusted; row stays at the annotation.
                 continue;
             }
-            let inferred = collect_inferred_row(&fn_def.body, &effective);
+            let inferred = collect_inferred_row(&fn_def.body, &effective, async_id);
             if effective.get(&fn_def.id) != Some(&inferred) {
                 effective.insert(fn_def.id, inferred);
                 changed = true;
@@ -174,7 +186,7 @@ pub fn effect_check(program: &TypedProgram) -> (EffectCheckedProgram, Vec<Effect
         if sig.effect_row.is_empty() {
             continue;
         }
-        let inferred = collect_inferred_row(&fn_def.body, &effective);
+        let inferred = collect_inferred_row(&fn_def.body, &effective, async_id);
         let annotation: BTreeSet<EffectId> = sig.effect_row.iter().copied().collect();
         let extra: BTreeSet<EffectId> = inferred.difference(&annotation).copied().collect();
         if !extra.is_empty() {
@@ -213,41 +225,45 @@ pub fn effect_check(program: &TypedProgram) -> (EffectCheckedProgram, Vec<Effect
 fn collect_inferred_row(
     block: &TypedBlock,
     effective: &HashMap<FnId, BTreeSet<EffectId>>,
+    async_id: Option<EffectId>,
 ) -> BTreeSet<EffectId> {
     let mut acc = BTreeSet::new();
-    walk_block(block, effective, &mut acc);
+    walk_block(block, effective, async_id, &mut acc);
     acc
 }
 
 fn walk_block(
     block: &TypedBlock,
     effective: &HashMap<FnId, BTreeSet<EffectId>>,
+    async_id: Option<EffectId>,
     acc: &mut BTreeSet<EffectId>,
 ) {
     for stmt in &block.stmts {
-        walk_stmt(stmt, effective, acc);
+        walk_stmt(stmt, effective, async_id, acc);
     }
-    walk_expr(&block.tail, effective, acc);
+    walk_expr(&block.tail, effective, async_id, acc);
 }
 
 fn walk_stmt(
     stmt: &TypedStmt,
     effective: &HashMap<FnId, BTreeSet<EffectId>>,
+    async_id: Option<EffectId>,
     acc: &mut BTreeSet<EffectId>,
 ) {
     match &stmt.kind {
-        TypedStmtKind::Let { value, .. } => walk_expr(value, effective, acc),
+        TypedStmtKind::Let { value, .. } => walk_expr(value, effective, async_id, acc),
         TypedStmtKind::Assign { target, value } => {
-            walk_expr(target, effective, acc);
-            walk_expr(value, effective, acc);
+            walk_expr(target, effective, async_id, acc);
+            walk_expr(value, effective, async_id, acc);
         }
-        TypedStmtKind::Expr(e) => walk_expr(e, effective, acc),
+        TypedStmtKind::Expr(e) => walk_expr(e, effective, async_id, acc),
     }
 }
 
 fn walk_expr(
     expr: &TypedExpr,
     effective: &HashMap<FnId, BTreeSet<EffectId>>,
+    async_id: Option<EffectId>,
     acc: &mut BTreeSet<EffectId>,
 ) {
     match &expr.kind {
@@ -263,51 +279,51 @@ fn walk_expr(
                 acc.extend(callee_row.iter().copied());
             }
             for arg in args {
-                walk_expr(arg, effective, acc);
+                walk_expr(arg, effective, async_id, acc);
             }
         }
 
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
-        | TypedExprKind::Declassify(inner) => walk_expr(inner, effective, acc),
+        | TypedExprKind::Declassify(inner) => walk_expr(inner, effective, async_id, acc),
 
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
         | TypedExprKind::Logic(_, l, r) => {
-            walk_expr(l, effective, acc);
-            walk_expr(r, effective, acc);
+            walk_expr(l, effective, async_id, acc);
+            walk_expr(r, effective, async_id, acc);
         }
 
-        TypedExprKind::Block(b) => walk_block(b, effective, acc),
+        TypedExprKind::Block(b) => walk_block(b, effective, async_id, acc),
 
         TypedExprKind::If { cond, then_branch, else_branch } => {
-            walk_expr(cond, effective, acc);
-            walk_block(then_branch, effective, acc);
-            walk_block(else_branch, effective, acc);
+            walk_expr(cond, effective, async_id, acc);
+            walk_block(then_branch, effective, async_id, acc);
+            walk_block(else_branch, effective, async_id, acc);
         }
 
         TypedExprKind::StructLit { fields, .. } => {
             // Fields are TypedExpr values directly (declaration
             // order); no inner Value wrapper.
             for f in fields {
-                walk_expr(f, effective, acc);
+                walk_expr(f, effective, async_id, acc);
             }
         }
 
         TypedExprKind::FieldAccess { target, .. } => {
-            walk_expr(target, effective, acc);
+            walk_expr(target, effective, async_id, acc);
         }
 
         TypedExprKind::ArrayLit { elements, .. } => {
             for e in elements {
-                walk_expr(e, effective, acc);
+                walk_expr(e, effective, async_id, acc);
             }
         }
 
         TypedExprKind::Index { target, index, .. } => {
-            walk_expr(target, effective, acc);
-            walk_expr(index, effective, acc);
+            walk_expr(target, effective, async_id, acc);
+            walk_expr(index, effective, async_id, acc);
         }
 
         // C3.4 / ADR 0020 D6: handle removes the handled (Effect,
@@ -317,17 +333,17 @@ fn walk_expr(
         // return arm bodies contribute their own effects normally.
         TypedExprKind::Handle { body, arms, return_arm, handled } => {
             let mut body_row = BTreeSet::new();
-            walk_expr(body, effective, &mut body_row);
+            walk_expr(body, effective, async_id, &mut body_row);
             let handled_effects: BTreeSet<EffectId> =
                 handled.iter().map(|(eid, _)| *eid).collect();
             for eid in body_row.difference(&handled_effects) {
                 acc.insert(*eid);
             }
             for arm in arms {
-                walk_expr(&arm.body, effective, acc);
+                walk_expr(&arm.body, effective, async_id, acc);
             }
             if let Some(ra) = return_arm {
-                walk_expr(&ra.body, effective, acc);
+                walk_expr(&ra.body, effective, async_id, acc);
             }
         }
 
@@ -339,7 +355,7 @@ fn walk_expr(
         TypedExprKind::Perform { effect_id, args, .. } => {
             acc.insert(*effect_id);
             for a in args {
-                walk_expr(a, effective, acc);
+                walk_expr(a, effective, async_id, acc);
             }
         }
 
@@ -349,7 +365,7 @@ fn walk_expr(
         // doesn't perform additional ops.
         TypedExprKind::ResumeKont { args, .. } => {
             for a in args {
-                walk_expr(a, effective, acc);
+                walk_expr(a, effective, async_id, acc);
             }
         }
         // C4.1 / ADR 0022 D3: method calls walk the receiver +
@@ -357,9 +373,9 @@ fn walk_expr(
         // class method-effect table is a follow-on (matches the
         // free-fn pattern via the class's method signature).
         TypedExprKind::MethodCall { target, args, .. } => {
-            walk_expr(target, effective, acc);
+            walk_expr(target, effective, async_id, acc);
             for a in args {
-                walk_expr(a, effective, acc);
+                walk_expr(a, effective, async_id, acc);
             }
         }
         // C4.1 / ADR 0022 D5: `Name::init(args)` walks its args.
@@ -367,24 +383,58 @@ fn walk_expr(
         // effect annotation surface — D4); future ADR can extend.
         TypedExprKind::ClassInit { args, .. } => {
             for a in args {
-                walk_expr(a, effective, acc);
+                walk_expr(a, effective, async_id, acc);
             }
         }
         // C4.2 / ADR 0023 D5 Path 1: impl-method call (receiver-
         // typed dispatch). Walk receiver + args; impl-method effect
         // propagation is a follow-on like classes (D6).
         TypedExprKind::ImplMethodCall { target, args, .. } => {
-            walk_expr(target, effective, acc);
+            walk_expr(target, effective, async_id, acc);
             for a in args {
-                walk_expr(a, effective, acc);
+                walk_expr(a, effective, async_id, acc);
             }
         }
         // C4.2 / ADR 0023 D5 Path 2: qualified-named call. args[0]
         // is the receiver; args[1..] are the method args. Walk all.
         TypedExprKind::QualifiedCall { args, .. } => {
             for a in args {
-                walk_expr(a, effective, acc);
+                walk_expr(a, effective, async_id, acc);
             }
+        }
+
+        // C4.4 / ADR 0024 D5: `scope concurrent { ... }` discharges
+        // the Async effect (the structured-concurrency analogue of a
+        // handler discharging its handled effects). Other effects in
+        // the body flow through per ADR 0024 D10 ("no special
+        // handling of mixed effects").
+        TypedExprKind::Scope { body, .. } => {
+            let mut body_row = BTreeSet::new();
+            walk_block(body, effective, async_id, &mut body_row);
+            if let Some(aid) = async_id {
+                body_row.remove(&aid);
+            }
+            acc.extend(body_row);
+        }
+
+        // C4.4 / ADR 0024 D5: `spawn fn(args)` contributes Async to
+        // the enclosing row (so a fn that spawns must declare
+        // `! { Async }` unless inside a discharging scope) + walks
+        // the call so the spawned fn's own effects propagate too.
+        TypedExprKind::Spawn { call, .. } => {
+            if let Some(aid) = async_id {
+                acc.insert(aid);
+            }
+            walk_expr(call, effective, async_id, acc);
+        }
+
+        // C4.4 / ADR 0024 D5: `.await` likewise contributes Async +
+        // walks the awaited Task expression.
+        TypedExprKind::Await { task_expr, .. } => {
+            if let Some(aid) = async_id {
+                acc.insert(aid);
+            }
+            walk_expr(task_expr, effective, async_id, acc);
         }
     }
 }
@@ -640,5 +690,36 @@ mod tests {
         )
         .unwrap();
         assert!(errors.is_empty(), "got {errors:?}");
+    }
+
+    // ----- C4.4 / ADR 0024 D5: scope discharges Async -----
+
+    #[test]
+    fn scope_concurrent_discharges_async_so_main_is_pure() {
+        // spawn + await contribute Async to the body's row; the
+        // `scope concurrent { ... }` discharges it, so main's
+        // effective row is empty and ADR 0019 D13 is satisfied.
+        let (_, errors) = check_program(
+            "fn double(x: i64) -> i64 ! { Async } { x * 2 }\n\
+             fn main() -> i64 { scope concurrent { let t = spawn double(21); t.await } }",
+        )
+        .unwrap();
+        assert!(errors.is_empty(), "got {errors:?}");
+    }
+
+    #[test]
+    fn spawn_outside_scope_bubbles_async_to_main() {
+        // No discharging `scope` — Async bubbles to main and ADR
+        // 0019 D13 rejects. This is what makes the Async marker
+        // load-bearing per ADR 0024 D5.
+        let (_, errors) = check_program(
+            "fn double(x: i64) -> i64 ! { Async } { x * 2 }\n\
+             fn main() -> i64 { let t = spawn double(21); t.await }",
+        )
+        .unwrap();
+        assert!(
+            errors.iter().any(|e| matches!(e, EffectError::UnhandledEffect { effect_name, .. } if effect_name == "Async")),
+            "got {errors:?}"
+        );
     }
 }

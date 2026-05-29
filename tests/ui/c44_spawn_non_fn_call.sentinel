@@ -1,0 +1,10 @@
+// C4.4 / ADR 0024 D2: `spawn` requires a direct function-call
+// target. Spawning a non-call expression (here an integer
+// literal) is rejected with SpawnMustBeCall.
+//
+// Expected: compile error `sentinel::types::spawn_must_be_call`.
+
+fn main() -> i64 {
+    let t = spawn 42;
+    0
+}

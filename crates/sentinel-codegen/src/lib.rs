@@ -48,8 +48,8 @@ use sentinel_resolve::{
 use sentinel_ast::SelfKind;
 use sentinel_types::{
     ArrayElem, ClassData, GenericInstanceData, GenericInstanceId, ImplData, NullableInner, RefData,
-    SecretData, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedHandlerArm,
-    TypedProgram, TypedReturnArm, TypedStmt, TypedStmtKind, TypedStructDecl,
+    SecretData, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedFnSignature,
+    TypedHandlerArm, TypedProgram, TypedReturnArm, TypedStmt, TypedStmtKind, TypedStructDecl,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -347,8 +347,9 @@ pub fn compile_to_object(
         // and effect-row reasoning; only the IR shape changes.
         let fn_type = if signature.is_main {
             i32_type.fn_type(&param_types, false)
-        } else if !signature.effect_row.is_empty() {
-            // Effecting fn: return Kont* (opaque pointer).
+        } else if uses_kont_abi(signature, program) {
+            // Effecting fn: return Kont* (opaque pointer). Async-
+            // only fns are excluded (direct-runtime, not handler).
             context
                 .ptr_type(inkwell::AddressSpace::default())
                 .fn_type(&param_types, false)
@@ -461,6 +462,55 @@ pub fn compile_to_object(
     // runtime's `sentinel_kont_resume` dispatches to it internally
     // on the consumed-twice path; that call is resolved at the
     // runtime crate's own link time.
+
+    // C4.4 / ADR 0024 D7: declare the structured-concurrency runtime
+    // symbols. Task* / ScopeCtx* are opaque `ptr` to codegen; the
+    // layouts live in sentinel-runtime (SentinelTask / SentinelScopeCtx).
+    let task_spawn_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        // sentinel_task_spawn(wrapper: ptr, args: ptr, args_size: i64) -> *Task
+        module.add_function(
+            "sentinel_task_spawn",
+            ptr_ty.fn_type(&[ptr_ty.into(), ptr_ty.into(), i64_ty.into()], false),
+            None,
+        )
+    };
+    let task_await_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        // sentinel_task_await(task: ptr) -> i64
+        module.add_function(
+            "sentinel_task_await",
+            i64_ty.fn_type(&[ptr_ty.into()], false),
+            None,
+        )
+    };
+    let scope_enter_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        // sentinel_scope_enter() -> *ScopeCtx
+        module.add_function("sentinel_scope_enter", ptr_ty.fn_type(&[], false), None)
+    };
+    let scope_register_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let void_ty = context.void_type();
+        // sentinel_scope_register(scope: ptr, task: ptr) -> void
+        module.add_function(
+            "sentinel_scope_register",
+            void_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false),
+            None,
+        )
+    };
+    let scope_exit_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let void_ty = context.void_type();
+        // sentinel_scope_exit(scope: ptr) -> void
+        module.add_function(
+            "sentinel_scope_exit",
+            void_ty.fn_type(&[ptr_ty.into()], false),
+            None,
+        )
+    };
 
     // C4.1 / ADR 0022 D9: declare per-class init + method LLVM
     // fns. Init takes `out_ptr: ptr` as the synthetic first arg
@@ -662,6 +712,88 @@ pub fn compile_to_object(
             }
         }
 
+        // C4.4 / ADR 0024 D8: synthesize one spawn-wrapper per
+        // unique spawn-target FnId. This MUST run here — before
+        // CodegenCtx is created — because wrapper synthesis needs a
+        // `&module` reference + a fresh builder, and CodegenCtx
+        // doesn't hold `&module`. Each wrapper is
+        //   void __spawn_wrapper_<id>(*Task task, *u8 args)
+        // which unpacks i64 args from `args` (8-byte slots), calls
+        // the target fn, stores the result into task->result
+        // (offset 0) + sets task->done (offset 8). Args are i64 at
+        // C4.4 minimum (matches the Task<i64> result restriction).
+        let mut spawn_wrappers: HashMap<FnId, FunctionValue> = HashMap::new();
+        {
+            let mut targets: Vec<FnId> = Vec::new();
+            for fn_def in &program.fns {
+                if fn_def.type_params.is_empty() {
+                    collect_spawn_targets_block(&fn_def.body, &mut targets);
+                }
+            }
+            targets.sort_by_key(|f| f.0);
+            targets.dedup();
+            let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+            let i64_ty = context.i64_type();
+            let i32_ty = context.i32_type();
+            let i8_ty = context.i8_type();
+            let void_ty = context.void_type();
+            for fn_id in targets {
+                let target_fn = *fns
+                    .get(&fn_id)
+                    .expect("spawn target fn declared in pass 1");
+                let n_args = program.signature(fn_id).param_types.len();
+                let wrapper = module.add_function(
+                    &format!("__spawn_wrapper_{}", fn_id.0),
+                    void_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false),
+                    None,
+                );
+                let entry = context.append_basic_block(wrapper, "entry");
+                let wb = context.create_builder();
+                wb.position_at_end(entry);
+                let task_ptr = wrapper
+                    .get_nth_param(0)
+                    .expect("wrapper task param")
+                    .into_pointer_value();
+                let args_ptr = wrapper
+                    .get_nth_param(1)
+                    .expect("wrapper args param")
+                    .into_pointer_value();
+                let mut call_args = Vec::with_capacity(n_args);
+                for i in 0..n_args {
+                    let offset = i64_ty.const_int((i * 8) as u64, false);
+                    let slot = unsafe {
+                        wb.build_in_bounds_gep(i8_ty, args_ptr, &[offset], &format!("arg_slot_{i}"))
+                            .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    };
+                    let val = wb
+                        .build_load(i64_ty, slot, &format!("arg_{i}"))
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    call_args.push(val.into());
+                }
+                let call = wb
+                    .build_call(target_fn, &call_args, "spawn_call")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                let result = call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("spawn target returns i64");
+                // task->result at offset 0.
+                wb.build_store(task_ptr, result)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                // task->done = 1 at offset 8.
+                let done_off = i64_ty.const_int(8, false);
+                let done_slot = unsafe {
+                    wb.build_in_bounds_gep(i8_ty, task_ptr, &[done_off], "done_slot")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                };
+                wb.build_store(done_slot, i32_ty.const_int(1, false))
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                wb.build_return(None)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                spawn_wrappers.insert(fn_id, wrapper);
+            }
+        }
+
         let mut cx = CodegenCtx {
             context: &context,
             builder,
@@ -682,6 +814,13 @@ pub fn compile_to_object(
             kont_pure_fn,
             kont_consume_pure_fn,
             kont_push_fn,
+            task_spawn_fn,
+            task_await_fn,
+            scope_enter_fn,
+            scope_register_fn,
+            scope_exit_fn,
+            spawn_wrappers,
+            current_scope: None,
             let_resumers,
             embedded_perform_resumers,
             chained_lets_resumers,
@@ -854,6 +993,32 @@ struct CodegenCtx<'ctx, 'plan> {
     /// captured)` adds a captured evaluation frame to the kont's
     /// chain. Emitted at let-stmts whose RHS produces a kont.
     kont_push_fn: FunctionValue<'ctx>,
+    /// C4.4 / ADR 0024 D7: `sentinel_task_spawn(wrapper, args,
+    /// size) -> *Task` spawns an OS thread running `wrapper`.
+    task_spawn_fn: FunctionValue<'ctx>,
+    /// C4.4 / ADR 0024 D7: `sentinel_task_await(task) -> i64`
+    /// joins + reads the spawned fn's result.
+    task_await_fn: FunctionValue<'ctx>,
+    /// C4.4 / ADR 0024 D7: `sentinel_scope_enter() -> *ScopeCtx`.
+    scope_enter_fn: FunctionValue<'ctx>,
+    /// C4.4 / ADR 0024 D7: `sentinel_scope_register(scope, task)`
+    /// transfers task ownership to the enclosing scope.
+    scope_register_fn: FunctionValue<'ctx>,
+    /// C4.4 / ADR 0024 D7: `sentinel_scope_exit(scope)` auto-awaits
+    /// + frees the scope's owned tasks.
+    scope_exit_fn: FunctionValue<'ctx>,
+    /// C4.4 / ADR 0024 D8: per-spawn-target wrapper fns, keyed by
+    /// the spawned fn's FnId. One wrapper per unique target (not
+    /// per spawn site). Synthesized in `compile_to_object`'s
+    /// pre-walk (BEFORE this struct exists — wrapper emission needs
+    /// `&module`, which CodegenCtx doesn't hold); looked up at each
+    /// spawn site to pass as the `sentinel_task_spawn` fn pointer.
+    spawn_wrappers: HashMap<FnId, FunctionValue<'ctx>>,
+    /// C4.4 / ADR 0024 D8: the enclosing `scope concurrent`'s
+    /// ScopeCtx*, if any. `Some` while lowering a scope body so
+    /// each `spawn` inside also calls `sentinel_scope_register`.
+    /// Saved + restored around nested scopes.
+    current_scope: Option<PointerValue<'ctx>>,
     /// C3.5(c) / ADR 0020 D7: per-fn resumer fn + captured-var
     /// set for effecting fns matching the let-shape. Pre-
     /// declared in compile_to_object's pass 1 so compile_fn can
@@ -943,6 +1108,106 @@ fn field_type_needs_drop(ty: Type, program: &TypedProgram) -> bool {
     field_type_needs_drop_inner(ty, program, &mut Vec::new())
 }
 
+/// C4.4 / ADR 0024 D8: collect the FnId of every `spawn fn(args)`
+/// target reachable in a block. One wrapper is synthesized per
+/// unique target (deduped by the caller). The type checker
+/// guarantees a `Spawn`'s inner is a `Call`, so non-Call inners
+/// are ignored defensively.
+fn collect_spawn_targets_block(block: &TypedBlock, acc: &mut Vec<FnId>) {
+    for stmt in &block.stmts {
+        match &stmt.kind {
+            TypedStmtKind::Let { value, .. } => collect_spawn_targets_expr(value, acc),
+            TypedStmtKind::Assign { target, value } => {
+                collect_spawn_targets_expr(target, acc);
+                collect_spawn_targets_expr(value, acc);
+            }
+            TypedStmtKind::Expr(e) => collect_spawn_targets_expr(e, acc),
+        }
+    }
+    collect_spawn_targets_expr(&block.tail, acc);
+}
+
+fn collect_spawn_targets_expr(expr: &TypedExpr, acc: &mut Vec<FnId>) {
+    match &expr.kind {
+        TypedExprKind::Spawn { call, .. } => {
+            if let TypedExprKind::Call { id, args, .. } = &call.kind {
+                acc.push(*id);
+                for a in args {
+                    collect_spawn_targets_expr(a, acc);
+                }
+            }
+        }
+        TypedExprKind::Scope { body, .. } => collect_spawn_targets_block(body, acc),
+        TypedExprKind::Await { task_expr, .. } => collect_spawn_targets_expr(task_expr, acc),
+        TypedExprKind::Block(b) => collect_spawn_targets_block(b, acc),
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            collect_spawn_targets_expr(cond, acc);
+            collect_spawn_targets_block(then_branch, acc);
+            collect_spawn_targets_block(else_branch, acc);
+        }
+        TypedExprKind::Call { args, .. } => {
+            for a in args {
+                collect_spawn_targets_expr(a, acc);
+            }
+        }
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner) => collect_spawn_targets_expr(inner, acc),
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => {
+            collect_spawn_targets_expr(l, acc);
+            collect_spawn_targets_expr(r, acc);
+        }
+        TypedExprKind::StructLit { fields, .. } => {
+            for f in fields {
+                collect_spawn_targets_expr(f, acc);
+            }
+        }
+        TypedExprKind::FieldAccess { target, .. } => collect_spawn_targets_expr(target, acc),
+        TypedExprKind::ArrayLit { elements, .. } => {
+            for e in elements {
+                collect_spawn_targets_expr(e, acc);
+            }
+        }
+        TypedExprKind::Index { target, index, .. } => {
+            collect_spawn_targets_expr(target, acc);
+            collect_spawn_targets_expr(index, acc);
+        }
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            collect_spawn_targets_expr(body, acc);
+            for arm in arms {
+                collect_spawn_targets_expr(&arm.body, acc);
+            }
+            if let Some(ra) = return_arm {
+                collect_spawn_targets_expr(&ra.body, acc);
+            }
+        }
+        TypedExprKind::Perform { args, .. } | TypedExprKind::ResumeKont { args, .. } => {
+            for a in args {
+                collect_spawn_targets_expr(a, acc);
+            }
+        }
+        TypedExprKind::MethodCall { target, args, .. }
+        | TypedExprKind::ImplMethodCall { target, args, .. } => {
+            collect_spawn_targets_expr(target, acc);
+            for a in args {
+                collect_spawn_targets_expr(a, acc);
+            }
+        }
+        TypedExprKind::ClassInit { args, .. } | TypedExprKind::QualifiedCall { args, .. } => {
+            for a in args {
+                collect_spawn_targets_expr(a, acc);
+            }
+        }
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::Var(_) => {}
+    }
+}
+
 fn field_type_needs_drop_inner(
     ty: Type,
     program: &TypedProgram,
@@ -1002,6 +1267,11 @@ fn field_type_needs_drop_inner(
         // HandlersNotYetSupported before drop computation. Defensive
         // false here keeps borrow-check's recursive drop walks safe.
         Type::Kont(_) => false,
+        // C4.4 / ADR 0024 D8: Task cleanup is the runtime's job
+        // (sentinel_task_await / sentinel_scope_exit free the Task);
+        // no codegen-emitted drop. A Task value held past its scope
+        // is reclaimed at scope_exit.
+        Type::Task(_) => false,
         // C4.1 / ADR 0022 D9: class instances follow the same
         // drop-needs rule as structs (recurse into fields).
         Type::Class(id) => {
@@ -1118,6 +1388,9 @@ fn llvm_basic_type<'ctx>(
         // via getelementptr at known offsets — codegen doesn't
         // need an LLVM-level struct type for it.
         Type::Kont(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
+        // C4.4 / ADR 0024 D8: Task lowers to an opaque pointer
+        // (*SentinelTask); the runtime owns the struct layout.
+        Type::Task(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
         // C4.2: TraitSelf is impossible at codegen — impl-sig
         // substitution resolves it to a concrete type before
         // codegen sees it.
@@ -1402,6 +1675,17 @@ fn walk_expr_for_mono(
                 );
             }
         }
+        // C4.4 / ADR 0024: recurse into concurrency-form children so
+        // nested generic-call instantiations are still collected.
+        TypedExprKind::Scope { body, .. } => walk_block_for_mono(
+            body, subst, program, instances, refs, visited, order, pending,
+        ),
+        TypedExprKind::Spawn { call, .. } => walk_expr_for_mono(
+            call, subst, program, instances, refs, visited, order, pending,
+        ),
+        TypedExprKind::Await { task_expr, .. } => walk_expr_for_mono(
+            task_expr, subst, program, instances, refs, visited, order, pending,
+        ),
     }
 }
 
@@ -1491,6 +1775,9 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         // monomorphization keys at C3.4 — handlers don't reach
         // codegen until C3.5/C3.6. Defensive label only.
         Type::Kont(id) => format!("kont{}", id.0),
+        // C4.4 / ADR 0024: Task<i64> carries no TypeParam so it
+        // never appears in a mono key; defensive label only.
+        Type::Task(id) => format!("task{}", id.0),
         // C4.1 / ADR 0022 D9: render class types by name.
         Type::Class(id) => program
             .class_decls
@@ -1534,6 +1821,8 @@ fn arg_contains_typeparam(
         Type::Secret(_) => false,
         // C3.4 / ADR 0020 D5: konts don't appear in mono keys.
         Type::Kont(_) => false,
+        // C4.4 / ADR 0024: Task<i64> carries no TypeParam.
+        Type::Task(_) => false,
     }
 }
 
@@ -1589,6 +1878,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::Kont(_) => panic!(
             "llvm_int_type called on Type::Kont — handlers not lowered at C3.4 (ADR 0020 D9)"
         ),
+        Type::Task(_) => panic!("llvm_int_type called on non-int Type::Task"),
         Type::Class(_) => panic!("llvm_int_type called on non-int Type::Class"),
         Type::TraitSelf(_) => {
             panic!("llvm_int_type called on Type::TraitSelf — must be substituted before codegen")
@@ -1937,7 +2227,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // intermediate performing statement. Other forms need
         // per-evaluation-site frame reification (C3.5(c) / C3.6).
         let signature = program.signature(fn_def.id);
-        if !signature.effect_row.is_empty() {
+        if uses_kont_abi(signature, program) {
             validate_effecting_fn_body(fn_def, program)?;
         }
 
@@ -1989,7 +2279,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         self.scope_stack.pop();
 
         let is_main = program.signature(fn_def.id).is_main;
-        let is_effecting = !program.signature(fn_def.id).effect_row.is_empty();
+        let is_effecting = uses_kont_abi(program.signature(fn_def.id), program);
         if is_main {
             // main is required to return i64 per ADR 0012 D11; the
             // typed AST guarantees body_val is i64. Truncate to i32
@@ -2980,6 +3270,11 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // Handle/Perform/ResumeKont bail at lower_expr.
                 // Defensive.
             }
+            Type::Task(_) => {
+                // C4.4 / ADR 0024 D8: Task cleanup is the runtime's
+                // job (sentinel_task_await / sentinel_scope_exit
+                // free the Task). No codegen-emitted drop.
+            }
             Type::Class(_) => {
                 // C4.1 / ADR 0022 D9: class drop reuses struct
                 // recursive field drop machinery. Classes own
@@ -3905,6 +4200,101 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .left()
                     .expect("qualified call returns a value"))
             }
+
+            // C4.4 / ADR 0024 D8: `scope concurrent { ... }`.
+            // scope_enter → lower body (current_scope set so inner
+            // spawns register) → scope_exit (auto-await + free owned
+            // tasks). The block's tail value is the scope's value.
+            TypedExprKind::Scope { body, .. } => {
+                let enter = self
+                    .builder
+                    .build_call(self.scope_enter_fn, &[], "scope_enter")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                let scope_ptr = enter
+                    .try_as_basic_value()
+                    .left()
+                    .expect("scope_enter returns *ScopeCtx")
+                    .into_pointer_value();
+                let prev_scope = self.current_scope;
+                self.current_scope = Some(scope_ptr);
+                let body_val = self.lower_block(body, program)?;
+                self.current_scope = prev_scope;
+                self.builder
+                    .build_call(self.scope_exit_fn, &[scope_ptr.into()], "scope_exit")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                Ok(body_val)
+            }
+
+            // C4.4 / ADR 0024 D8: `spawn fn(args)`. Pack args into a
+            // heap buffer (one i64 slot each), call sentinel_task_spawn
+            // with the per-target wrapper, and (if inside a scope)
+            // register the Task so the scope owns + auto-awaits it.
+            TypedExprKind::Spawn { call, .. } => {
+                let (callee_id, call_args_exprs) = match &call.kind {
+                    TypedExprKind::Call { id, args, .. } => (*id, args),
+                    _ => unreachable!("type-check guarantees spawn target is a Call"),
+                };
+                let i64_ty = self.context.i64_type();
+                let i8_ty = self.context.i8_type();
+                let n = call_args_exprs.len();
+                // n*8 bytes (i64 slots); at least 8 so alloc(0) is
+                // never requested for a zero-arg target.
+                let size_v = i64_ty.const_int((n.max(1) * 8) as u64, false);
+                let args_storage = self.alloc_call(size_v)?;
+                for (i, arg) in call_args_exprs.iter().enumerate() {
+                    let v = self.lower_expr(arg, program)?;
+                    let off = i64_ty.const_int((i * 8) as u64, false);
+                    let slot = unsafe {
+                        self.builder
+                            .build_in_bounds_gep(i8_ty, args_storage, &[off], "spawn_arg")
+                            .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    };
+                    self.builder
+                        .build_store(slot, v)
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                }
+                let wrapper = *self
+                    .spawn_wrappers
+                    .get(&callee_id)
+                    .expect("spawn wrapper synthesized in pre-walk");
+                let wrapper_ptr = wrapper.as_global_value().as_pointer_value();
+                let spawn_call = self
+                    .builder
+                    .build_call(
+                        self.task_spawn_fn,
+                        &[wrapper_ptr.into(), args_storage.into(), size_v.into()],
+                        "task_spawn",
+                    )
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                let task_ptr = spawn_call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("task_spawn returns *Task");
+                if let Some(scope) = self.current_scope {
+                    self.builder
+                        .build_call(
+                            self.scope_register_fn,
+                            &[scope.into(), task_ptr.into()],
+                            "scope_register",
+                        )
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                }
+                Ok(task_ptr)
+            }
+
+            // C4.4 / ADR 0024 D8: `task.await` — join + read result.
+            TypedExprKind::Await { task_expr, .. } => {
+                let task_val = self.lower_expr(task_expr, program)?;
+                let task_ptr = task_val.into_pointer_value();
+                let await_call = self
+                    .builder
+                    .build_call(self.task_await_fn, &[task_ptr.into()], "task_await")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                Ok(await_call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("task_await returns i64"))
+            }
         }
     }
 
@@ -4587,7 +4977,33 @@ fn expr_performs(expr: &TypedExpr) -> bool {
             expr_performs(target) || args.iter().any(expr_performs)
         }
         TypedExprKind::QualifiedCall { args, .. } => args.iter().any(expr_performs),
+        // C4.4 / ADR 0024: concurrency forms aren't performs; recurse
+        // so a nested perform would still surface (none compose at
+        // C4.4 minimum, but the walk stays total + future-proof).
+        TypedExprKind::Scope { body, .. } => {
+            body.stmts.iter().any(|s| stmt_performs(&s.kind)) || expr_performs(&body.tail)
+        }
+        TypedExprKind::Spawn { call, .. } => expr_performs(call),
+        TypedExprKind::Await { task_expr, .. } => expr_performs(task_expr),
     }
+}
+
+/// C4.4 / ADR 0024 D8: does this fn use the effecting-fn `Kont*`
+/// ABI? The C3 handler runtime gives any fn with a non-empty
+/// effect row a `Kont*`-returning ABI (so a `handle f() with {..}`
+/// caller receives a continuation). The `Async` effect is
+/// different: it's a direct-runtime marker (spawn/await lower to
+/// runtime calls, never `handle`), so a fn declaring ONLY `Async`
+/// keeps the plain value-returning ABI. Returns true iff the row
+/// contains a perform-effect (any effect other than `Async`).
+fn uses_kont_abi(sig: &TypedFnSignature, program: &TypedProgram) -> bool {
+    sig.effect_row.iter().any(|eid| {
+        program
+            .effect_decls
+            .get(eid.0 as usize)
+            .map(|d| d.name != "Async")
+            .unwrap_or(true)
+    })
 }
 
 /// C3.5(b): does this tail expression produce a Kont* IR value
@@ -4599,7 +5015,7 @@ fn tail_produces_kont(tail: &TypedExpr, program: &TypedProgram) -> bool {
         TypedExprKind::Perform { .. } => true,
         TypedExprKind::Call { id, .. } => {
             let sig = program.signature(*id);
-            !sig.effect_row.is_empty()
+            uses_kont_abi(sig, program)
         }
         // A block whose tail produces a kont is OK as long as its
         // intermediate stmts don't perform. The compile_fn
@@ -4634,7 +5050,7 @@ fn detect_let_shape<'a>(
     program: &TypedProgram,
 ) -> Option<LetShapeInfo<'a>> {
     let sig = program.signature(fn_def.id);
-    if sig.effect_row.is_empty() || sig.is_main {
+    if !uses_kont_abi(sig, program) || sig.is_main {
         return None;
     }
     if fn_def.body.stmts.len() != 1 {
@@ -4688,7 +5104,7 @@ fn detect_chained_effecting_lets_shape<'a>(
     program: &TypedProgram,
 ) -> Option<ChainedLetsShapeInfo<'a>> {
     let sig = program.signature(fn_def.id);
-    if sig.effect_row.is_empty() || sig.is_main {
+    if !uses_kont_abi(sig, program) || sig.is_main {
         return None;
     }
     // C3.5(c) covers stmts.len() == 1; C3.5(e) is the next step.
@@ -4862,6 +5278,15 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
                 walk_collect_var_refs(a, acc);
             }
         }
+        // C4.4 / ADR 0024: recurse into concurrency-form children.
+        TypedExprKind::Scope { body, .. } => {
+            for s in &body.stmts {
+                walk_collect_var_refs_stmt(&s.kind, acc);
+            }
+            walk_collect_var_refs(&body.tail, acc);
+        }
+        TypedExprKind::Spawn { call, .. } => walk_collect_var_refs(call, acc),
+        TypedExprKind::Await { task_expr, .. } => walk_collect_var_refs(task_expr, acc),
     }
 }
 
@@ -4943,6 +5368,13 @@ fn count_performs(expr: &TypedExpr) -> usize {
             count_performs(target) + args.iter().map(count_performs).sum::<usize>()
         }
         TypedExprKind::QualifiedCall { args, .. } => args.iter().map(count_performs).sum(),
+        // C4.4 / ADR 0024: recurse into concurrency-form children.
+        TypedExprKind::Scope { body, .. } => {
+            body.stmts.iter().map(|s| count_performs_stmt(&s.kind)).sum::<usize>()
+                + count_performs(&body.tail)
+        }
+        TypedExprKind::Spawn { call, .. } => count_performs(call),
+        TypedExprKind::Await { task_expr, .. } => count_performs(task_expr),
     }
 }
 
@@ -5028,6 +5460,14 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
             find_unique_perform(target).or_else(|| args.iter().find_map(find_unique_perform))
         }
         TypedExprKind::QualifiedCall { args, .. } => args.iter().find_map(find_unique_perform),
+        // C4.4 / ADR 0024: recurse into concurrency-form children.
+        TypedExprKind::Scope { body, .. } => body
+            .stmts
+            .iter()
+            .find_map(|s| find_unique_perform_stmt(&s.kind))
+            .or_else(|| find_unique_perform(&body.tail)),
+        TypedExprKind::Spawn { call, .. } => find_unique_perform(call),
+        TypedExprKind::Await { task_expr, .. } => find_unique_perform(task_expr),
     }
 }
 
@@ -5156,7 +5596,13 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
         | TypedExprKind::MethodCall { .. }
         | TypedExprKind::ClassInit { .. }
         | TypedExprKind::ImplMethodCall { .. }
-        | TypedExprKind::QualifiedCall { .. } => {
+        | TypedExprKind::QualifiedCall { .. }
+        // C4.4 / ADR 0024: concurrency forms never embed a
+        // substitutable perform at C4.4 minimum (count would
+        // exceed 1) — clone them unchanged like the group above.
+        | TypedExprKind::Scope { .. }
+        | TypedExprKind::Spawn { .. }
+        | TypedExprKind::Await { .. } => {
             // C3.5(d) MVP: the embedded-perform shape only fires
             // when count_performs(tail) == 1. Substituting a
             // Handle / ResumeKont / MethodCall / ClassInit
@@ -5252,7 +5698,7 @@ fn detect_embedded_perform_shape(
     program: &TypedProgram,
 ) -> Option<EmbeddedPerformInfo> {
     let sig = program.signature(fn_def.id);
-    if sig.effect_row.is_empty() || sig.is_main {
+    if !uses_kont_abi(sig, program) || sig.is_main {
         return None;
     }
     if !fn_def.body.stmts.is_empty() {
@@ -5264,7 +5710,7 @@ fn detect_embedded_perform_shape(
         return None;
     }
     if let TypedExprKind::Call { id, .. } = &tail.kind {
-        if !program.signature(*id).effect_row.is_empty() {
+        if uses_kont_abi(program.signature(*id), program) {
             return None;
         }
     }
@@ -5402,6 +5848,10 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
         TypedExprKind::QualifiedCall { args, .. } => {
             args.iter().find_map(|a| find_var_name_in_expr(a, id))
         }
+        // C4.4 / ADR 0024: recurse into concurrency-form children.
+        TypedExprKind::Scope { body, .. } => find_var_name_in_block(body, id),
+        TypedExprKind::Spawn { call, .. } => find_var_name_in_expr(call, id),
+        TypedExprKind::Await { task_expr, .. } => find_var_name_in_expr(task_expr, id),
     }
 }
 

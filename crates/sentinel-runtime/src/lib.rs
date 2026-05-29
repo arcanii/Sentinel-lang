@@ -474,7 +474,16 @@ type WrapperFn = unsafe extern "C" fn(task: *mut SentinelTask, args: *mut u8);
 pub struct SentinelTask {
     pub result: i64,
     pub done: u32,
-    pub _pad: u32,
+    /// C4.4 / ADR 0024 D9: ownership flag. `0` = standalone (the
+    /// awaiter reclaims the Task struct in `sentinel_task_await`);
+    /// `1` = owned by a `scope concurrent` (set by
+    /// `sentinel_scope_register`; the scope reclaims the struct at
+    /// `sentinel_scope_exit`, so `await` only joins + reads). This
+    /// resolves the double-ownership hazard between an explicit
+    /// `.await` and the scope's auto-await without changing the
+    /// 32-byte layout (it occupies the former `_pad` slot at
+    /// offset 12).
+    pub owned: u32,
     /// Pointer to a heap-allocated Box<Option<JoinHandle<()>>>.
     /// Wrapped in a struct field so the layout stays C-stable.
     pub join_handle_ptr: *mut JoinHandleBox,
@@ -527,7 +536,7 @@ pub extern "C" fn sentinel_task_spawn(
     let task_box = Box::new(SentinelTask {
         result: 0,
         done: 0,
-        _pad: 0,
+        owned: 0,
         join_handle_ptr: join_ptr,
         args_free_ptr: args_storage,
     });
@@ -556,14 +565,26 @@ pub extern "C" fn sentinel_task_spawn(
     task_ptr
 }
 
-/// ADR 0024 D7: join the task's OS thread, read the result,
-/// free the Task. Returns the spawned fn's return value (i64 at
-/// C4.4 minimum per the result_ty restriction).
+/// ADR 0024 D7 + D9: join the task's OS thread, read the result,
+/// release the thread handle + args buffer. Returns the spawned
+/// fn's return value (i64 at C4.4 minimum per the result_ty
+/// restriction).
+///
+/// Idempotent + double-ownership safe per the `owned` flag:
+///   - The join handle + args buffer are released on first call
+///     and nulled, so a second call (e.g. the scope's auto-await
+///     after an explicit `.await`) is a no-op join.
+///   - The Task struct is reclaimed here ONLY for standalone tasks
+///     (`owned == 0`). A scope-owned task (`owned == 1`, set by
+///     `sentinel_scope_register`) is reclaimed by
+///     `sentinel_scope_exit` instead — this is what makes an
+///     explicit `.await` inside a `scope concurrent { ... }` safe
+///     against the scope's exit-time auto-await.
 ///
 /// # Safety
 ///
-/// `task` must be a Task* returned by `sentinel_task_spawn` (or
-/// `sentinel_scope_register`); double-await is undefined.
+/// `task` must be a Task* returned by `sentinel_task_spawn`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn sentinel_task_await(task: *mut SentinelTask) -> i64 {
     if task.is_null() {
@@ -577,15 +598,21 @@ pub extern "C" fn sentinel_task_await(task: *mut SentinelTask) -> i64 {
             if let Some(handle) = join_box.handle {
                 let _ = handle.join();
             }
-            // Box dropped at end of scope; JoinHandleBox freed.
+            // JoinHandleBox freed; null the slot so a re-await
+            // (scope auto-await) skips the join.
+            (*task).join_handle_ptr = std::ptr::null_mut();
         }
-        let result = (*task).result;
         let args = (*task).args_free_ptr;
         if !args.is_null() {
             libc::free(args as *mut libc::c_void);
+            (*task).args_free_ptr = std::ptr::null_mut();
         }
-        // Reclaim + drop the Task box.
-        let _ = Box::from_raw(task);
+        let result = (*task).result;
+        if (*task).owned == 0 {
+            // Standalone task (no owning scope): reclaim the struct
+            // now. Scope-owned tasks are freed by sentinel_scope_exit.
+            let _ = Box::from_raw(task);
+        }
         result
     }
 }
@@ -609,6 +636,7 @@ pub extern "C" fn sentinel_scope_enter() -> *mut SentinelScopeCtx {
 ///
 /// `scope` must be a ScopeCtx* returned by `sentinel_scope_enter`;
 /// `task` must be a live Task* returned by `sentinel_task_spawn`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn sentinel_scope_register(
     scope: *mut SentinelScopeCtx,
@@ -620,6 +648,11 @@ pub extern "C" fn sentinel_scope_register(
     // SAFETY: scope.registry_ptr is live per the enter/exit
     // contract; pushing to its Vec is well-defined.
     unsafe {
+        // C4.4 / ADR 0024 D9: transfer Task-struct ownership to the
+        // scope so an explicit `.await` joins+reads without freeing
+        // the struct (the scope frees it at exit). Resolves the
+        // double-free between explicit await + auto-await.
+        (*task).owned = 1;
         let registry = (*scope).registry_ptr;
         if !registry.is_null() {
             (*registry).tasks.push(task);
@@ -627,15 +660,18 @@ pub extern "C" fn sentinel_scope_register(
     }
 }
 
-/// ADR 0024 D7 + D9: exit the scope. Auto-awaits any Task in the
-/// registry that hasn't already been awaited (we detect this via
-/// the Task's join_handle_ptr being non-null — `sentinel_task_await`
-/// frees the JoinHandleBox + the Task itself, so an awaited Task
-/// is invalid memory). At C4.4 minimum we track per-scope tasks
-/// explicitly; calling await on a task removes it from the
-/// registry would be cleaner — TODO for a future iteration.
-/// For now we just iterate the registry; tasks already freed by
-/// explicit await will be skipped via a per-task "awaited" flag.
+/// ADR 0024 D7 + D9: exit the scope. The scope OWNS every Task
+/// registered in it (`owned == 1`), so this is the single point
+/// that reclaims their structs. For each registered task:
+///   1. `sentinel_task_await` joins the thread + reads the result
+///      if it hasn't already been awaited (idempotent: a second
+///      await is a no-op join since the handle slot was nulled).
+///      Because the task is `owned`, await does NOT free the
+///      struct.
+///   2. Then we reclaim the Task struct itself.
+///
+/// This makes an explicit `.await` inside the scope safe against
+/// this exit-time pass: no UAF, no double-free, no leak.
 ///
 /// Cancellation on early exit is DEFERRED per ADR 0024 D9 — at
 /// C4.4 minimum this function only runs on the normal-exit path.
@@ -643,13 +679,14 @@ pub extern "C" fn sentinel_scope_register(
 /// # Safety
 ///
 /// `scope` must be a ScopeCtx* returned by `sentinel_scope_enter`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn sentinel_scope_exit(scope: *mut SentinelScopeCtx) {
     if scope.is_null() {
         return;
     }
-    // SAFETY: reclaim the scope's heap allocation + auto-await
-    // any tasks the user didn't explicitly await.
+    // SAFETY: reclaim the scope's heap allocation + auto-await +
+    // free any tasks the scope owns.
     unsafe {
         let scope_box = Box::from_raw(scope);
         if !scope_box.registry_ptr.is_null() {
@@ -658,19 +695,10 @@ pub extern "C" fn sentinel_scope_exit(scope: *mut SentinelScopeCtx) {
                 if task_ptr.is_null() {
                     continue;
                 }
-                // A task whose join_handle_ptr is null was
-                // already awaited (and freed) — skip. But since
-                // we don't track per-task "awaited" status
-                // cleanly at C4.4 minimum, this is a best-effort
-                // check that may UB on already-freed Tasks.
-                // Mitigation: at C4.4 minimum tests always
-                // explicitly await tasks; auto-await is a future
-                // safety net.
-                let join_ptr = (*task_ptr).join_handle_ptr;
-                if join_ptr.is_null() {
-                    continue;
-                }
+                // Join + read if not already awaited (owned, so the
+                // struct survives the await), then reclaim it.
                 let _ = sentinel_task_await(task_ptr);
+                let _ = Box::from_raw(task_ptr);
             }
         }
     }
@@ -834,6 +862,26 @@ mod tests {
         sentinel_scope_exit(scope);
         // No way to assert directly that the thread joined, but
         // the test would deadlock or panic if Auto-await missed.
+    }
+
+    #[test]
+    fn scope_explicit_await_then_exit_is_safe() {
+        // The phase-go pattern (ADR 0024 D12): spawn + register +
+        // EXPLICIT await + scope_exit. Before the `owned` flag, the
+        // scope's exit-time auto-await would UAF / double-free the
+        // already-awaited Task. Now await joins+reads without
+        // freeing an owned task, and scope_exit reclaims it.
+        let scope = sentinel_scope_enter();
+        let args = sentinel_alloc(8);
+        unsafe {
+            *(args as *mut i64) = 21;
+        }
+        let task = sentinel_task_spawn(test_wrapper_double, args, 8);
+        sentinel_scope_register(scope, task);
+        let result = sentinel_task_await(task);
+        assert_eq!(result, 42);
+        // Must not double-free / UAF the explicitly-awaited task.
+        sentinel_scope_exit(scope);
     }
 
     #[test]

@@ -12,27 +12,57 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C4.4 (2/N runtime): sentinel-runtime
-structured-concurrency substrate landed per ADR 0024 D6+D7.**
-ADR 0024 stays PROPOSED. Five new C-ABI runtime symbols ship
-in isolation: sentinel_task_spawn / sentinel_task_await /
-sentinel_scope_enter / sentinel_scope_exit /
-sentinel_scope_register. SentinelTask is a 32-byte C-stable
-struct holding `{ result: i64, done: u32, _pad: u32,
-join_handle_ptr, args_free_ptr }`; SentinelScopeCtx wraps a
-heap-allocated ScopeRegistry tracking in-flight tasks.
-Thread-per-spawn implementation using std::thread internally
-— real work-stealing scheduler is the deferred follow-on per
-ADR 0024 D6. Cancellation on early scope exit DEFERRED per
-ADR 0024 D9. The runtime substrate ships in isolation so the
-typing + codegen wiring can land cleanly in a follow-on
-iteration without surface churn.
+Last updated: **C4.4 (2/N): structured-concurrency typing +
+codegen + phase-go landed per ADR 0024 D4+D5+D8.** ADR 0024
+flips PROPOSED → ACCEPTED-WITH-AMENDMENTS; **Phase C4.4 closes
+and Phase C4 closes.** The `scope concurrent { spawn fn(args);
+expr.await }` surface compiles + runs end-to-end on a thread-
+per-spawn runtime. Pieces:
+- **Types**: `Type::Task(TaskId)` (tenth interner variant) +
+  `TaskData { result_ty }` + `intern_task` + `TypedProgram.tasks`;
+  `TypedExprKind::Scope/Spawn/Await`; spawn validates a Call
+  target returning `i64` (Task<i64>-only per D7); await requires
+  a `Type::Task` receiver. Three `TypeError`s: SpawnMustBeCall /
+  SpawnResultMustBeI64 / AwaitOnNonTask.
+- **Resolve**: scope/spawn/await pass-through (NotYet dropped);
+  the built-in **`Async`** effect is auto-registered (appended
+  after user effects, so user EffectIds stay stable — a
+  deviation from ADR 0024 D5's "EffectId(0)" wording).
+- **Effect-check**: spawn/await contribute `Async` to a fn's
+  inferred row; `scope concurrent` **discharges** `Async` (like
+  a handler discharges its handled effects) so a scoped program
+  keeps `main` effect-free, while a spawn/await outside a scope
+  bubbles `Async` to `main` and is rejected (D5 discipline,
+  shipped not deferred).
+- **Codegen**: 5 runtime externs + a per-spawn-target wrapper
+  synthesized in a `compile_to_object` pre-walk (before
+  CodegenCtx exists — it lacks `&Module`); lower scope
+  (enter/exit + `current_scope` save/restore), spawn (pack i64
+  args + task_spawn + scope_register), await (task_await). An
+  Async-only fn keeps the value-returning ABI rather than the
+  C3 handler `Kont*` ABI (`uses_kont_abi` excludes Async).
+- **Runtime fix**: the `_pad` field becomes an `owned` flag so
+  an explicit `.await` inside a scope is safe against the
+  scope's exit-time auto-await (scope owns + frees the Task;
+  await only joins+reads when owned). Closes a documented UAF
+  in the C4.4 (2/N runtime) symbols.
+
+Deferred (ADR 0024 amendments): work-stealing scheduler (A1,
+thread-per-spawn shipped); cancellation on early scope exit
+(A2); `Task<T>` for T≠i64 + spawn args beyond i64 (A3); explicit
+`Task<T>` type-position annotations (use inference — A5).
+
+Phase-go `tests/pass/c44_go_no_go.sentinel` (`scope concurrent
+{ let t = spawn double(21); t.await }`) exits 42; +3 UI fixtures
+pin the typing rejections. Full four-check suite green.
 
 **Runtime additions** (sentinel-runtime/src/lib.rs):
-- `SentinelTask { result: i64, done: u32, _pad: u32,
+- `SentinelTask { result: i64, done: u32, owned: u32,
   join_handle_ptr: *JoinHandleBox, args_free_ptr: *u8 }` —
-  32 bytes / 8-byte aligned. Stable-layout test pins the
-  size for ABI compat with codegen.
+  32 bytes / 8-byte aligned (the C4.4 (2/N) close repurposed
+  the former `_pad` slot as `owned`: 1 = a scope owns + frees
+  the Task, so `.await` only joins+reads). Stable-layout test
+  pins the size for ABI compat with codegen.
 - `SentinelScopeCtx { registry_ptr: *ScopeRegistry }` +
   `ScopeRegistry { tasks: Vec<*mut SentinelTask> }`.
 - Five `#[no_mangle] pub extern "C"` fns per ADR 0024 D7:

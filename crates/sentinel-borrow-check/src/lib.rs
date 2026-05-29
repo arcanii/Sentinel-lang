@@ -989,6 +989,24 @@ fn walk_expr(
                 walk_expr(a, ctx, errors, program);
             }
         }
+        // C4.4 / ADR 0024: `scope concurrent { ... }` is a nested
+        // block — push/pop a scope and walk its contents.
+        TypedExprKind::Scope { body, .. } => {
+            ctx.push_scope();
+            walk_block_contents(body, ctx, errors, program);
+            ctx.pop_scope();
+        }
+        // `spawn fn(args)` walks the inner call; its args are moved
+        // into the task (spawned fns take owned args per D10), so
+        // the normal Call walk (consuming for user fns) is correct.
+        TypedExprKind::Spawn { call, .. } => {
+            walk_expr(call, ctx, errors, program);
+        }
+        // `task.await` reads the Task receiver. Task is Copy
+        // (is_copy_type), so this is a non-consuming liveness read.
+        TypedExprKind::Await { task_expr, .. } => {
+            walk_expr(task_expr, ctx, errors, program);
+        }
     }
 }
 
@@ -1196,6 +1214,11 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         // kont VarId is never reassigned or referenced as a value
         // (KontUsedAsValue rejects that at type-check).
         Type::Kont(_) => true,
+        // C4.4 / ADR 0024: a Task handle is pointer-like + reclaimed
+        // by the runtime (await / scope_exit), not by codegen drop.
+        // Treat it as Copy to avoid spurious move tracking — double-
+        // await is idempotent-safe at the runtime (the `owned` flag).
+        Type::Task(_) => true,
     }
 }
 

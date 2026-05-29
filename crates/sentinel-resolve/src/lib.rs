@@ -1094,49 +1094,6 @@ pub enum ResolveError {
         #[label("no such method on `{trait_name}`")]
         span: miette::SourceSpan,
     },
-
-    /// C4.4 / ADR 0024 D1 (C4.4 1/N): `scope concurrent {{ ... }}`
-    /// parses at C4.4 (1/N) but the typing layer + runtime + codegen
-    /// land at C4.4 (2/N). Pass-through diagnostic in the meantime.
-    #[error(
-        "`scope concurrent {{ ... }}` is not yet supported (lands at C4.4 (2/N))"
-    )]
-    #[diagnostic(
-        code(sentinel::resolve::scope_not_yet),
-        help("scope blocks parse + AST-mirror at C4.4 (1/N); the runtime scheduler + codegen per ADR 0024 D6-D8 lands at C4.4 (2/N)")
-    )]
-    ScopeNotYet {
-        #[label("scope block here")]
-        span: miette::SourceSpan,
-    },
-
-    /// C4.4 / ADR 0024 D2 (C4.4 1/N): `spawn fn(args)` parses at
-    /// C4.4 (1/N) but the runtime + codegen lands at C4.4 (2/N).
-    #[error(
-        "`spawn expr` is not yet supported (lands at C4.4 (2/N))"
-    )]
-    #[diagnostic(
-        code(sentinel::resolve::spawn_not_yet),
-        help("`spawn fn_name(args)` parses + AST-mirrors at C4.4 (1/N); the runtime task-spawn + codegen per ADR 0024 D6-D8 lands at C4.4 (2/N)")
-    )]
-    SpawnNotYet {
-        #[label("spawn here")]
-        span: miette::SourceSpan,
-    },
-
-    /// C4.4 / ADR 0024 D3 (C4.4 1/N): `task.await` parses at C4.4
-    /// (1/N) but the runtime + codegen lands at C4.4 (2/N).
-    #[error(
-        "`task.await` is not yet supported (lands at C4.4 (2/N))"
-    )]
-    #[diagnostic(
-        code(sentinel::resolve::await_not_yet),
-        help("`task.await` parses + AST-mirrors at C4.4 (1/N); the runtime task-await + codegen per ADR 0024 D6-D8 lands at C4.4 (2/N)")
-    )]
-    AwaitNotYet {
-        #[label("await here")]
-        span: miette::SourceSpan,
-    },
 }
 
 // =============================================================================
@@ -1217,6 +1174,32 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
             span: ed.span.clone(),
         });
     }
+
+    // C4.4 / ADR 0024 D5: auto-register the built-in `Async` effect
+    // so fns that touch `spawn` / `.await` can declare `! { Async }`.
+    // It declares no ops at C4.4 minimum — the marker alone drives
+    // the effect-row discipline (effect-check makes spawn/await
+    // contribute Async; `scope concurrent` discharges it). Registered
+    // *after* user effects so user-declared EffectIds stay stable
+    // (deviation from ADR 0024 D5's "EffectId(0)" suggestion — the
+    // id is an internal detail; what matters is that `Async`
+    // resolves). A user effect literally named `Async` collides
+    // with the reserved built-in.
+    if let Some(ed) = program.effects.iter().find(|e| e.name == "Async") {
+        return Err(ResolveError::RedefinedEffect {
+            name: "Async".to_string(),
+            span: to_source_span(&ed.name_span),
+        });
+    }
+    let async_id = EffectId(resolved_effects.len() as u32);
+    effect_table.insert("Async".to_string(), async_id);
+    resolved_effects.push(ResolvedEffectDecl {
+        id: async_id,
+        name: "Async".to_string(),
+        name_span: 0..0,
+        ops: Vec::new(),
+        span: 0..0,
+    });
 
     // Pass 0: collect struct declarations. Indexed by source order
     // (each struct's StructId matches its index in resolved_structs).
@@ -2791,22 +2774,67 @@ fn resolve_expr(
                 args: resolved_args,
             }
         }
-        ExprKind::Scope { .. } => {
-            // C4.4 (1/N) / ADR 0024 D13: parser ships the surface;
-            // runtime + codegen wiring lands at (2/N).
-            return Err(ResolveError::ScopeNotYet {
-                span: to_source_span(&expr.span),
-            });
+        ExprKind::Scope { mode, body } => {
+            // C4.4 (2/N) / ADR 0024 D1: pass-through. Scope is a
+            // plain block at resolve time (flat var scoping like
+            // ExprKind::Block); the typing + runtime contract lands
+            // in types + codegen.
+            let resolved_body = resolve_block(
+                body,
+                fn_table,
+                signatures,
+                struct_table,
+                class_table,
+                effect_table,
+                effects,
+                impls,
+                vars,
+                next_var_id,
+            )?;
+            ResolvedExprKind::Scope {
+                mode: *mode,
+                body: Box::new(resolved_body),
+            }
         }
-        ExprKind::Spawn { .. } => {
-            return Err(ResolveError::SpawnNotYet {
-                span: to_source_span(&expr.span),
-            });
+        ExprKind::Spawn { call_expr } => {
+            // C4.4 (2/N) / ADR 0024 D2: pass-through. The
+            // call-shape restriction is validated at the types
+            // layer (SpawnMustBeCall).
+            let resolved_call = resolve_expr(
+                call_expr,
+                fn_table,
+                signatures,
+                struct_table,
+                class_table,
+                effect_table,
+                effects,
+                impls,
+                vars,
+                next_var_id,
+            )?;
+            ResolvedExprKind::Spawn {
+                call_expr: Box::new(resolved_call),
+            }
         }
-        ExprKind::Await { .. } => {
-            return Err(ResolveError::AwaitNotYet {
-                span: to_source_span(&expr.span),
-            });
+        ExprKind::Await { task_expr } => {
+            // C4.4 (2/N) / ADR 0024 D3: pass-through. The
+            // Task<T>-receiver check lands at the types layer
+            // (AwaitOnNonTask).
+            let resolved_task = resolve_expr(
+                task_expr,
+                fn_table,
+                signatures,
+                struct_table,
+                class_table,
+                effect_table,
+                effects,
+                impls,
+                vars,
+                next_var_id,
+            )?;
+            ResolvedExprKind::Await {
+                task_expr: Box::new(resolved_task),
+            }
         }
     };
     Ok(Spanned { kind, span: expr.span.clone() })
@@ -3237,21 +3265,6 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
             format!(
                 "trait `{trait_name}` (impl `{impl_name}`) has no method `{method_name}`"
             ),
-            span.offset()..(span.offset() + span.len()),
-        ),
-        ResolveError::ScopeNotYet { span } => (
-            "sentinel::resolve::scope_not_yet",
-            "`scope concurrent { ... }` is not yet supported (lands at C4.4 (2/N))".to_string(),
-            span.offset()..(span.offset() + span.len()),
-        ),
-        ResolveError::SpawnNotYet { span } => (
-            "sentinel::resolve::spawn_not_yet",
-            "`spawn expr` is not yet supported (lands at C4.4 (2/N))".to_string(),
-            span.offset()..(span.offset() + span.len()),
-        ),
-        ResolveError::AwaitNotYet { span } => (
-            "sentinel::resolve::await_not_yet",
-            "`task.await` is not yet supported (lands at C4.4 (2/N))".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -3911,30 +3924,41 @@ mod tests {
         ));
     }
 
-    // ----- C4.4 (1/N): scope/spawn/await NotYet rejection -----
+    // ----- C4.4 (2/N): scope/spawn/await resolve pass-through -----
 
     #[test]
-    fn scope_concurrent_rejected_at_resolve() {
-        let err = resolve_err(
-            "fn main() -> i64 { scope concurrent { 42 } }",
-        );
-        assert!(matches!(err, ResolveError::ScopeNotYet { .. }));
+    fn scope_concurrent_resolves() {
+        let prog = resolve_ok("fn main() -> i64 { scope concurrent { 42 } }");
+        let main = &prog.fns[prog.fns.len() - 1];
+        assert!(matches!(
+            main.body.tail.kind,
+            ResolvedExprKind::Scope { .. }
+        ));
     }
 
     #[test]
-    fn spawn_rejected_at_resolve() {
-        let err = resolve_err(
-            "fn double(x: i64) -> i64 { x * 2 }\nfn main() -> i64 { spawn double(21); 0 }",
+    fn spawn_resolves() {
+        let prog = resolve_ok(
+            "fn double(x: i64) -> i64 ! { Async } { x * 2 }\nfn main() -> i64 { spawn double(21); 0 }",
         );
-        assert!(matches!(err, ResolveError::SpawnNotYet { .. }));
+        // The spawn is the first stmt of main's body.
+        let main = &prog.fns[prog.fns.len() - 1];
+        let first = &main.body.stmts[0];
+        assert!(matches!(
+            first.kind,
+            ResolvedStmtKind::Expr(ref e) if matches!(e.kind, ResolvedExprKind::Spawn { .. })
+        ));
     }
 
     #[test]
-    fn await_rejected_at_resolve() {
-        let err = resolve_err(
-            "fn main() -> i64 { let t = 0; t.await }",
-        );
-        assert!(matches!(err, ResolveError::AwaitNotYet { .. }));
+    fn await_resolves() {
+        // `t.await` resolves as a pass-through Await over a Var.
+        let prog = resolve_ok("fn main() -> i64 { let t = 0; t.await }");
+        let main = &prog.fns[prog.fns.len() - 1];
+        assert!(matches!(
+            main.body.tail.kind,
+            ResolvedExprKind::Await { .. }
+        ));
     }
 
     #[test]
@@ -4136,11 +4160,17 @@ mod tests {
         let p = resolve_ok(
             "effect Io { log(msg: i64) -> i64; }\nfn main() -> i64 { 0 }",
         );
-        assert_eq!(p.effects.len(), 1);
+        // C4.4 / ADR 0024 D5: the built-in `Async` effect is
+        // auto-registered after user effects, so the table holds
+        // `Io` (id 0) + `Async` (id 1).
+        assert_eq!(p.effects.len(), 2);
         assert_eq!(p.effects[0].name, "Io");
         assert_eq!(p.effects[0].id, EffectId(0));
         assert_eq!(p.effects[0].ops.len(), 1);
         assert_eq!(p.effects[0].ops[0].name, "log");
+        assert_eq!(p.effects[1].name, "Async");
+        assert_eq!(p.effects[1].id, EffectId(1));
+        assert!(p.effects[1].ops.is_empty());
     }
 
     #[test]
