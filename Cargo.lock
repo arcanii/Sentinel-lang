@@ -1235,8 +1235,8 @@ dependencies = [
 name = "sentinel-mir"
 version = "0.0.1"
 dependencies = [
- "thiserror",
- "tracing",
+ "sentinel-ast",
+ "sentinel-types",
 ]
 
 [[package]]

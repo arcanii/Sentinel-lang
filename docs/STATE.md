@@ -12,7 +12,26 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C5.1a (1/N): the HIR pipeline stage is introduced
+Last updated: **C5.1b (1/N): the MIR data model lands (ADR 0026 D2).**
+`sentinel-mir` is no longer a stub — it defines a minimal SSA/CFG IR
+(`MirProgram` / `MirFunction` / `MirBlock` with SSA block parameters as
+the phi-equivalent / `MirInst` / `MirOp` / `MirTerminator` / `MirValue`)
+built to host the C5.2 D5 constant-time verification. Each SSA value
+carries its `Type`, so secrecy reads straight off `Type::Secret(_)`
+(`MirFunction::is_secret` — the taint seed); the three D5 sinks are
+representable (a `Branch` condition, a `Load` index, a `Binary` Div/Rem
+operand), and every non-secret-relevant construct funnels through
+`MirOp::Opaque` / `MirTerminator::Unreachable` carrying its operands so
+taint stays sound. **Data model only this increment** — additive,
+nothing consumes MIR yet (zero regression risk; codegen stays on the
+typed program per the C5.1 escape hatch). Test-count-neutral (the
+`sentinel-mir` stub smoke test replaced by a hand-built secret-branch
+SSA test). Four-check green via `cargo nextest run --workspace` (1195) +
+`cargo test --doc`. **Next: C5.1b (2/N)** — lower typed function bodies
+→ MIR SSA (`lower_to_mir`); then C5.2 = the D5 verification pass over
+this IR (+ D4 constant-time emission as a codegen pass).
+
+Pre-C5.1b context: **C5.1a (1/N): the HIR pipeline stage is introduced
 (ADR 0026 D1+D3).** Per ADR 0009 §6.1 the pipeline is `types → hir →
 mir → codegen`; C0–C4 short-circuited `types → codegen`. This increment
 stands up `sentinel-hir` as a real stage between the type checker and
