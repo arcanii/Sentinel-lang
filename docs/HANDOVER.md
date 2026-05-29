@@ -1094,15 +1094,18 @@ New norms learned during Phase B and Phase C:
 > secret codegen (deferred from C3 per ADR 0019 D12). Sentinel's
 > 1.0 release is at C5 close. **ADR 0025 PROPOSED is drafted**
 > (`docs/decisions/0025-phase-c5-kickoff-and-productionization-plan.md`)
-> — 14 D-decisions + an 8-sub-phase split (C5.0–C5.8). Resume at
-> **C5.0**: pick the concrete 1.0 go/no-go program (a TLS
-> handshake / HTTP server per D1/D13 — it pins which workstreams
-> are 1.0-minimum and resolves the D6 cross-process / D9 module-
-> system scope-open questions), stand up `insta` + `nextest` test
-> infra (D11), and do the reproducible-build audit (D8). Then
-> C5.1 = the HIR/MIR stages (D2), C5.2 = constant-time codegen
-> (D3, the security core). Per-sub-phase ADRs 0026+ land at each
-> open per the ADR-first norm.
+> — 14 D-decisions + an 8-sub-phase split (C5.0–C5.8). **C5.0 is
+> in progress: the go/no-go program is CHOSEN** — a single-process,
+> single-file TLS 1.3 handshake (ADR 0025 `## C5.0 resolution`). It
+> pins **D6 (cross-process) → post-1.0** and **D9 (modules) →
+> post-1.0** (the handshake is self-contained + fits one file), and
+> forces the headline constant-time `secret` capability (D3) an HTTP
+> server would leave unexercised. **Still pending in C5.0:** `insta`
+> UI snapshots + `cargo nextest` (D11) and the reproducible-build
+> audit (D8 — deterministic codegen). Then C5.1 = the HIR/MIR stages
+> (D2), C5.2 = constant-time codegen (D3, the security core). **ADR
+> 0026 PROPOSED** (C5.1/C5.2 HIR/MIR + constant-time surface) lands
+> before the first C5.1 feat commit, per the ADR-first norm.
 >
 > **Available C4 follow-ons** (none blocking C5): work-stealing
 > scheduler (ADR 0024 A1), scope cancellation (A2), `Task<T>`
@@ -1748,11 +1751,13 @@ For pasting into a fresh chat to bootstrap context:
     from C3), cross-process, actors, stable ABI, reproducible
     builds, LSP/tooling. (NOT "Phase D" — the roadmap after C4 is
     C5.) **ADR 0025 PROPOSED is drafted** (14 D-decisions, 8-sub-
-    phase split C5.0–C5.8). Resume at **C5.0**: pick the 1.0
-    go/no-go program (TLS/HTTP — pins minimum scope), `insta` +
-    `nextest` test infra, reproducible-build audit. Then C5.1
-    HIR/MIR, C5.2 constant-time codegen (the security core).
-    Per-sub-phase ADRs 0026+ at each open.
+    phase split C5.0–C5.8). **C5.0 in progress:** go/no-go program
+    CHOSEN = single-process single-file TLS 1.3 handshake → D6
+    (cross-process) + D9 (modules) both post-1.0 (ADR 0025 `## C5.0
+    resolution`). Pending in C5.0: `insta`+`nextest` infra (D11),
+    reproducible-build audit (D8). Then C5.1 HIR/MIR (D2), C5.2
+    constant-time codegen (D3, security core); ADR 0026 PROPOSED
+    before first C5.1 feat. Per-sub-phase ADRs 0026+ at each open.
     Optional C4 follow-ons (none blocking C5): work-stealing
     scheduler (ADR 0024 A1), scope cancellation (A2), Task<T>/
     spawn-args beyond i64 (A3), explicit `Task<T>` annotations

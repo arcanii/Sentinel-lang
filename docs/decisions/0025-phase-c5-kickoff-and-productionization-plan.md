@@ -10,6 +10,10 @@ It also absorbs the items prior phases deferred *to* C5: actors
 D12), and constant-time secret codegen (ADR 0019 D12 / ADR 0008).
 **Phase C5 close = Phase C close = Sentinel 1.0.**
 
+**C5.0 update (2026-05-29):** the go/no-go program is now chosen and
+D1/D6/D9/D13 are pinned — see **## C5.0 resolution** below. Status
+stays PROPOSED (it flips to ACCEPTED-WITH-AMENDMENTS at C5 close).
+
 Date: 2026-05-29
 Related:
   - **0001** (staged validation — ACCEPTED): the umbrella. C5 is
@@ -208,6 +212,9 @@ location qualifiers stay out of scope (D12). This is the riskiest
 integration (broker × actors × OS boundary); de-risk by keeping it
 optional for the 1.0 bar.
 
+**[Resolved at C5.0 — single-process subset at 1.0; cross-process is
+a post-1.0 follow-on. See ## C5.0 resolution.]**
+
 ### D7. Stable ABI definition.
 
 Define + document + version a stable ABI for compiled artifacts:
@@ -243,6 +250,9 @@ resolve + separate-compilation units keyed to the D7 ABI. If a
 single file suffices for the go/no-go, modules become a **post-1.0
 follow-on**. Flagged honestly rather than pre-decided — this is the
 biggest scope swing in C5.
+
+**[Resolved at C5.0 — a single (large) file suffices for the go/no-go;
+the module system is a post-1.0 follow-on. See ## C5.0 resolution.]**
 
 ### D10. LSP + tooling polish.
 
@@ -281,6 +291,9 @@ if D9 lands — modules). Picked concretely at C5.0 open. Smaller
 per-workstream phase-gos (`c5_secret_ct`, `c5_broker_arena`,
 `c5_actor_*`, etc.) land with each sub-phase, as in C1-C4.
 
+**[Resolved at C5.0 — a single-process, single-file TLS 1.3 handshake
+(server-flavoured). See ## C5.0 resolution.]**
+
 ### D14. Per-sub-phase ADRs.
 
 Like ADR 0021 → 0022/0023/0024, each substantive C5 sub-phase gets
@@ -305,8 +318,8 @@ the riskiest integrations gated behind it.
 | C5.3 | Broker integration (D4) — alloc → arenas + budgets.          | medium | 1-2 sessions|
 | C5.4 | Stable ABI definition + layout-stability suite (D7).         | medium | 1-2 sessions|
 | C5.5 | Actors, single-process (D5).                                 | medium | 2-3 sessions|
-| C5.6 | (Conditional) modules / separate compilation (D9) and/or     | high   | 2-4 sessions|
-|      | cross-process (D6) — only if the go/no-go program needs them.|        |             |
+| C5.6 | ~~Modules (D9) / cross-process (D6)~~ — RESOLVED post-1.0 at  | —      | post-1.0    |
+|      | C5.0; off the 1.0 path (opt. single-process actor hardening). |        |             |
 | C5.7 | LSP minimum + `snc`/tooling polish (D10); perf benchmark     | medium | 1-2 sessions|
 |      | harness (§6.5).                                              |        |             |
 | C5.8 | The 1.0 go/no-go program (D13); Phase C close; ADR 0025 +    | —      | 1-2 sessions|
@@ -317,6 +330,68 @@ dominated by C5.1/C5.2 (the novel MIR + constant-time work) and the
 conditional C5.6. The HANDOVER §6.2 "month 15-18" budget is 3
 months; the band reflects genuine uncertainty in the MIR refactor
 and the D9/D6 scope swing.
+
+## C5.0 resolution (2026-05-29) — D1/D13/D6/D9 pinned
+
+**Go/no-go program (D1/D13): a single-process, single-file TLS 1.3
+handshake** (server-flavoured: accept → ECDHE key exchange → HKDF key
+schedule → `Finished` MAC verify). Chosen over an HTTP server because:
+
+1. **It forces the headline 1.0 capability — constant-time `secret`
+   (D3).** TLS is secret-dense: the ECDHE shared secret, the derived
+   traffic keys, and the `Finished` MAC comparison must all run in
+   constant time. The close bar must validate Sentinel's single most
+   novel, most-deferred (ADR 0008 → 0019 D12) guarantee *at runtime*;
+   an HTTP server is secret-sparse and would leave D3 unexercised by
+   the go/no-go. This is the decisive factor.
+2. **It still exercises the rest of the §15.1 1.0 surface naturally:**
+   classes/traits/delegation (handshake state machine + a cipher-suite
+   trait), effects + handlers (socket I/O + errors as effects),
+   structured concurrency + actors (D5 — a connection actor driving
+   the state machine; `scope`/`spawn` for independent crypto),
+   witness-table generics, the broker (D4 — secret-memory policy for
+   key material + a scoped budget on the handshake arena), and the
+   nullability/bounds/region core over the record buffers.
+3. **It is plausibly single-process and fits one (large) file**, which
+   is what lets the two riskiest workstreams drop off the 1.0 path.
+
+**D6 (cross-process) — RESOLVED: post-1.0.** A handshake is a
+self-contained computation; `@shared`, cross-process actors/arenas,
+and capability-enforcement-at-the-process-boundary are *not* required
+for the 1.0 bar. C5 ships the **single-process subset**; cross-process
+is a post-1.0 follow-on. This removes the riskiest integration
+(broker × actors × OS boundary) from the 1.0 critical path.
+
+**D9 (modules / separate compilation) — RESOLVED: post-1.0.** The
+handshake + its crypto + state machine fit a single compilation unit.
+**No module system at 1.0**; `mod`/`use` + a resolve-layer module
+graph + separate-compilation units keyed to the D7 ABI become a
+post-1.0 follow-on. This is the largest single scope reduction in C5
+(~800-2000 LOC of module work + ~500-1500 LOC of cross-process work
+leave the 1.0 path).
+
+**Consequences for the sub-phase plan:**
+- **C5.6 (conditional modules/cross-process) leaves the 1.0 path.**
+  Neither D6 nor D9 is 1.0-minimum; the slot is dropped (or, if time
+  allows, repurposed as single-process actor hardening). The total
+  band narrows toward the low end (~11-16 sessions) now that the
+  D6/D9 swing resolves downward.
+- **D5 actors stay in (C5.5)** — the connection actor is part of the
+  go/no-go's single-process mailbox surface.
+- **Crypto scoping (honest):** the go/no-go is TLS-handshake-*shaped*,
+  not a production cipher suite. The crypto is modelled at the Sentinel
+  level as `secret`-typed constant-time operations over fixed-size
+  arrays (e.g. a constant-time `Finished`/MAC comparison, an
+  HKDF-`expand`-shaped derivation, a Montgomery-ladder step over
+  `secret` words) — enough to *force* D3's constant-time codegen +
+  verification, not to ship optimised AES/X25519. Full stdlib crypto
+  (incl. Argon2id, §15.1) is ecosystem work per §15.3 ("libraries
+  belong in the ecosystem, not the language"); the language-level
+  forcing function is "can Sentinel *express* constant-time crypto and
+  *prove* it constant-time," which the reduced primitives satisfy.
+
+D2 (HIR/MIR) and D3 (constant-time) are unaffected by this resolution —
+both are 1.0-minimum regardless and remain C5.1/C5.2.
 
 ## Reasoning
 
@@ -405,7 +480,9 @@ PROPOSED until Phase C5 closes. Per-D revisit triggers:
   chosen — it re-scopes D6/D9 and pins 1.0-minimum.
 - **D2**: revisit at C5.1 — if the MIR refactor threatens the
   budget, invoke the escape hatch (codegen sub-pass) via amendment.
-- **D6/D9**: revisit at C5.0/C5.6 — in vs post-1.0 per the program.
+- **D6/D9**: **RESOLVED at C5.0 → both post-1.0** (the single-process,
+  single-file TLS handshake go/no-go needs neither). Revisit only if
+  the go/no-go program's scope changes.
 - **D7**: revisit when the first multi-unit/separate-compilation
   need arises; the ABI must be frozen before Phase D.
 

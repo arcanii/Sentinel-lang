@@ -12,7 +12,29 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C4.5: Phase C4 close-out — ADR 0021 flips
+Last updated: **C5.0 (in progress): Phase C5 kickoff — the 1.0
+go/no-go program is CHOSEN.** Per ADR 0025 D1/D13 the Phase C /
+Sentinel-1.0 close bar is a **single-process, single-file TLS 1.3
+handshake** (server-flavoured: ECDHE → HKDF key schedule →
+constant-time `Finished` MAC verify). This pins the two scoping-
+open questions: **D6 (cross-process) → post-1.0** and **D9 (module
+system) → post-1.0** — the handshake is self-contained and fits one
+file, so `@shared`/cross-process and `mod`/`use`/separate-compilation
+both leave the 1.0 path (the largest scope reduction in C5).
+Rationale: TLS is secret-dense, so it forces the headline 1.0
+capability — constant-time `secret` codegen (D3, the C5.2 security
+core) — which an HTTP server would leave unexercised; it still
+exercises classes/traits/delegation, effects+handlers, structured
+concurrency + a connection actor (D5), generics, and the broker
+(D4). See ADR 0025 `## C5.0 resolution`. **Still pending in C5.0:**
+test infra (D11 — `insta` UI snapshots + `cargo nextest`) and the
+reproducible-build audit (D8 — deterministic codegen). Then C5.1 =
+HIR/MIR stages (D2), C5.2 = constant-time secret codegen (D3); ADR
+0026 PROPOSED (C5.1/C5.2 surface) lands before the first C5.1 feat.
+Four-check suite green (~1191 active workspace; no code delta in
+this docs-only decision commit).
+
+Pre-C5.0 context: **C4.5: Phase C4 close-out — ADR 0021 flips
 PROPOSED → ACCEPTED-WITH-AMENDMENTS; PHASE C4 CLOSES.** All six
 sub-phases shipped (C4.0 lexer, C4.1 classes, C4.2 traits+impls,
 C4.3 delegation, C4.4 structured concurrency, C4.5 close-out).
