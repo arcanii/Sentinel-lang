@@ -28,13 +28,15 @@ a branch-free masked select over secrets (`c*a + (1-c)*b`) compiles,
 runs, **passes** D5, exits 42. The **c51 behaviour-preservation bar
 holds**: every existing pass/ui fixture is unchanged and the
 `tests/repro.rs` objects stay byte-identical (D5 runs before, and gates,
-an unchanged codegen). +2 tests (1208). Four-check green. **Next: C5.2a**
-— D4 constant-time *emission* (a codegen pass: branch-free select +
-ADR 0008 speculation barriers, x86-64/aarch64). Open question to settle
-first: whether the 1.0 go/no-go even needs D4, since a branch-free
-*arithmetic* primitive already passes D5 on the existing codegen (the
-surface has no bitwise / `select` ops). ADR 0026 stays PROPOSED (it flips
-once C5.2a lands or is consciously scoped out of 1.0).
+an unchanged codegen). +2 tests (1208). Four-check green. **Next: C5.3** —
+bitwise operators (`& | ^`, then `<< >> ~`) per **ADR 0027 (PROPOSED)**,
+the prerequisite surface for the go/no-go's constant-time `Finished` MAC
+verify (an XOR-accumulate compare, which needs `^`/`|`). The C5.2a/D4
+emission open question is resolved by **deferring D4**: a branch-free
+*arithmetic* primitive already passes D5 on the existing codegen, and the
+constant-time idioms are bitwise, so the bitwise surface comes first and
+D4's branch-free-select/barriers are pushed behind it (likely post-1.0).
+ADR 0026 stays PROPOSED.
 
 Pre-C5.2b(2/N) context: **C5.2b (1/N): the D5 constant-time verification
 pass (ADR 0026 D5).** `verify_constant_time(&MirProgram) -> Vec<SecretLeak>` is the
