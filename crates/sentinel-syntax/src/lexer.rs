@@ -186,6 +186,15 @@ pub enum TokenKind {
     Amp,
     #[token("||")]
     PipePipe,
+    /// C5.3 / ADR 0027 D2: bitwise-or `|` (infix). Lexes after `||`
+    /// per logos longest-match — mirrors the `&&` / `&` pairing.
+    /// (Infix bitwise-and reuses `Amp` above, disambiguated from the
+    /// borrow prefix by the parser's operand position.)
+    #[token("|")]
+    Pipe,
+    /// C5.3 / ADR 0027 D2: bitwise-xor `^` (infix).
+    #[token("^")]
+    Caret,
     #[token("(")]
     LParen,
     #[token(")")]
@@ -546,6 +555,49 @@ mod tests {
         assert_eq!(
             kinds("&& || !"),
             vec![TokenKind::AmpAmp, TokenKind::PipePipe, TokenKind::Bang]
+        );
+    }
+
+    #[test]
+    fn lex_bitwise_ops() {
+        // C5.3 / ADR 0027 D2: `&` (reused), `|`, `^`. Infix bit-and is
+        // the same `Amp` token as the borrow prefix.
+        assert_eq!(
+            kinds("& | ^"),
+            vec![TokenKind::Amp, TokenKind::Pipe, TokenKind::Caret]
+        );
+    }
+
+    #[test]
+    fn lex_longest_match_pipe_vs_pipepipe() {
+        // `||` is one token; `| |` is two single `|`s.
+        assert_eq!(kinds("||"), vec![TokenKind::PipePipe]);
+        assert_eq!(kinds("|"), vec![TokenKind::Pipe]);
+        assert_eq!(kinds("| |"), vec![TokenKind::Pipe, TokenKind::Pipe]);
+    }
+
+    #[test]
+    fn lex_longest_match_amp_vs_ampamp() {
+        // Regression now that `&` is also infix bit-and: a single `&`
+        // still lexes as `Amp`, `&&` still as `AmpAmp`.
+        assert_eq!(kinds("&"), vec![TokenKind::Amp]);
+        assert_eq!(kinds("&&"), vec![TokenKind::AmpAmp]);
+    }
+
+    #[test]
+    fn lex_bitwise_packed_against_atoms() {
+        // No whitespace — the precedence-climbing parser's common case.
+        assert_eq!(
+            kinds("a^b|c&d"),
+            vec![
+                TokenKind::Ident,
+                TokenKind::Caret,
+                TokenKind::Ident,
+                TokenKind::Pipe,
+                TokenKind::Ident,
+                TokenKind::Amp,
+                TokenKind::Ident,
+            ]
         );
     }
 
