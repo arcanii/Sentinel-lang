@@ -106,6 +106,7 @@ C1.3. See STATE.md Section C.
 **ADR 0027 PROPOSED — bitwise operators (`& | ^`, then `<< >> ~`) — docs-only.** Decision (with the developer): do bitwise operators next, **deferring C5.2a/D4** — the go/no-go's constant-time `Finished` MAC verify is an XOR-accumulate compare that needs `^`/`|`, and the surface has none (`BinOp` = only Add/Sub/Mul/Div). Ten D-decisions: target `& | ^ << >> ~` in two waves (D1) — **C5.3 = `& | ^`** (token-clean: new `Pipe`/`Caret`, reuse `Amp` as infix bit-and with prefix `&` still borrow — D2; Rust precedence `&`>`^`>`|` between cmp and add, ladder gains parse_bitor/bitxor/bitand — D3); extend `BinOp` (no new ExprKind/TypedExprKind/MirOp variants — D4); secret-preserving integer-only typing mirroring C3.1b arithmetic, **no new SecretXxx rejection** (bitwise is constant-time, the *sanctioned* secret computation — D5); LLVM and/or/xor codegen (D6); **MIR + D5 need no change** (the `Binary` arm is op-generic; bitwise ops are non-sinks — D7); **C5.4 = `<< >> ~`** with the `>>`-vs-nested-generic-close split (Rust-style: the type-arg parser splits `Shr` into two `>` — D9). Out of scope (D8): shifts/complement at C5.3, rotate, bitwise-on-bool, compound-assign, `[secret T]` arrays (the flat ArrayElem subset has no Secret variant — a separate deferred surface). Phase-go (D10): `c53_bitwise` + `c53_ct_eq` (a real XOR-accumulate constant-time equality over scalar secrets that passes D5 — upgrading the C5.2b faked masked-select). Next: **C5.3 (1/N)** — lexer (`Pipe` + `Caret` tokens).
 **Phase C5.3 (1/N) — lexer: bitwise `|` (`Pipe`) + `^` (`Caret`) tokens — complete.** First wave of the bitwise surface per ADR 0027 D2: two new logos tokens; longest-match keeps `||` → `PipePipe`; the infix bitwise-and **reuses** `&` (`Amp`), to be disambiguated from the borrow prefix by parser position at 2/N. No `<<`/`>>` (C5.4 — the `>>`/nested-generic-close split). +4 lexer tests (longest-match `|`/`||` + `&`/`&&` regressions + packed bitwise); additive (parser doesn't consume them yet); four-check green (1212) (`b3d1d48`). Next: **C5.3 (2/N)** — `& | ^` end-to-end: extend `BinOp` (Display + all exhaustive matches in one pass); parser precedence ladder gains `parse_bitor`/`parse_bitxor`/`parse_bitand` between `parse_cmp` and `parse_add`; secret-preserving integer typing mirroring C3.1b (no new TypeError/SecretXxx); codegen and/or/xor; MIR+D5 unchanged (Binary arm op-generic, bitwise non-sink) + `c53_bitwise`/`c53_ct_eq` fixtures; ADR 0027 flip.
 **Phase C5.3 (2/N) — bitwise `& | ^` surface end-to-end. ADR 0027 → ACCEPTED-WITH-AMENDMENTS.** The operators compile + run. Surface was small because the `Binary` pipeline is op-generic (resolve passes `BinOp` through; types' Binary handler op-agnostic except the `Div`→`SecretDivisor` check; `lower_to_mir`/D5 handle `Binary` generically) — so only AST + parser + codegen changed. AST: `BinOp` += `BitAnd`/`BitOr`/`BitXor` (+ symbol(); no new ExprKind/TypedExprKind/MirOp). Parser: levels `parse_bitor`→`parse_bitxor`→`parse_bitand` between cmp and add (`&`>`^`>`|`); infix `&` = bit-and, prefix `&` = borrow (positional). Types: NO change — inherits C3.1b secret-preserving integer rule (mixed secret/public → Mismatch; bool → Mismatch); **no new SecretXxx** (bitwise is constant-time, the sanctioned secret computation). Codegen: LLVM and/or/xor. MIR+D5: unchanged (bitwise non-sink). Fixtures: `c53_bitwise` (`5 & 6 ^ 3 | 8`==15) + `c53_ct_eq` (constant-time equality over secrets — XOR-accumulate+OR-reduce+declassify — compiles, runs, passes D5; the go/no-go MAC-verify shape). +9 tests (1221 total) (`76bfea3`). **ADR 0027 amendment A1:** `<< >> ~` (C5.4) deferred — the constant-time compare needs only `^`/`|`; shifts (with the `>>`/generic-close split) are a follow-on if the go/no-go computes hashes in-language. Next: **developer-scope call** — C5.4 shifts, OR begin assembling the TLS go/no-go (constant-time compare now writable), OR another C5 productionization sub-phase.
+**ADR 0028 PROPOSED — broker integration (D4) — docs-only.** Developer chose broker integration as the next productionization sub-phase (**C5.4**). Finding that shaped it: the Phase A broker is an *arena* allocator (bump = bulk-free / `free` unimplemented; slab = fixed-size slots; typed `Handle<T>`) that does **not** fit a drop-in `sentinel_alloc` (arbitrary-size, individual-free, raw `*u8`); and there's no secret heap data yet (`[secret T]` unrepresentable) so the secret-memory policy is scaffold. ADR 0028's design (10 D-decisions): map Sentinel scopes → broker bump arenas so individual free becomes scope-exit **bulk** free (D1/D2), reusing the borrow-check **`DropPlan`** (moved=escapes vs dropped-at-scope-exit=safe-to-arena) so **no new escape analysis** is needed (D3); ship a **runtime-only foundation first** (C5.4 (1/N), D4): process-wide `Broker` backing `sentinel_alloc`/`free` via a size-classed slab pool + ptr→handle registry — **c51-safe because codegen is untouched** (objects byte-identical) — unlocking budgets/recording/stats; then the **scope→arena codegen** (C5.4 (2/N), D3, may defer post-1.0). Budgets = the go/no-go hook (`within_budget`; a `scope budget(N)` surface deferred — D5). Secret-policy scaffold (D6). Numbering: ADR 0025 D14's "0027 = broker" superseded (0027 = bitwise; broker = **0028**); the bitwise *shift* wave (ADR 0027 A1) is unnumbered-deferred, not C5.4. Next: **C5.4 (1/N)** — the runtime-only broker foundation.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1153,13 +1154,19 @@ New norms learned during Phase B and Phase C:
 > and/or/xor; types/MIR/D5 unchanged — `Binary` is op-generic), with
 > `c53_bitwise` + `c53_ct_eq` (the real constant-time MAC-verify shape
 > passing D5); **ADR 0027 → ACCEPTED-WITH-AMENDMENTS** (A1: `<< >> ~`/C5.4
-> deferred). **Resume at a developer-scope fork:** (a) **C5.4** =
-> `<< >> ~` (with the `>>`-vs-generic-close split) — only if the go/no-go
-> computes hashes in-language; (b) **begin the TLS go/no-go** itself (its
-> constant-time compare is now writable); or (c) another C5
-> productionization sub-phase (broker integration, …). D4 emission + the
-> ADR 0026 flip remain pending behind whichever path is chosen.
-> Per-sub-phase ADRs 0026+ at each open.
+> deferred). **The fork is resolved (with the developer): broker
+> integration next (C5.4, ADR 0028 PROPOSED).** **Resume at C5.4 (1/N):**
+> the runtime-only broker foundation — a process-wide `Broker` backing
+> `sentinel_alloc`/`sentinel_free` via a size-classed slab pool + a global
+> ptr→`Handle` registry (so individual free still works), thread-safe (the
+> C4.4 runtime spawns), unlocking `within_budget` / recording / stats.
+> **c51-safe**: codegen is untouched (same C-ABI symbols) so objects stay
+> byte-identical. Then **C5.4 (2/N):** the scope→arena codegen — place
+> non-escaping scope-local allocs (per the borrow-check `DropPlan`) in
+> per-scope bump arenas reset at scope exit; optional `scope budget`
+> surface — which may defer post-1.0. The bitwise shift wave (`<< >> ~`,
+> ADR 0027 A1) + D4 constant-time emission + the ADR 0026 flip all remain
+> deferred follow-ons. Per-sub-phase ADRs 0026+ at each open.
 >
 > **Available C4 follow-ons** (none blocking C5): work-stealing
 > scheduler (ADR 0024 A1), scope cancellation (A2), `Task<T>`
@@ -1834,11 +1841,14 @@ For pasting into a fresh chat to bootstrap context:
     bitwise `& | ^` **DONE** (`b3d1d48` lexer + `76bfea3` surface; ADR 0027
     → ACCEPTED-WITH-AMENDMENTS, A1: `<< >> ~`/C5.4 deferred). `c53_ct_eq`
     shows a real constant-time MAC-verify shape (XOR-accumulate+OR-reduce+
-    declassify) passing D5. **Resume at a developer-scope fork:** C5.4
-    shifts (only if hashes are computed in-language), OR begin the TLS
-    go/no-go (constant-time compare now writable), OR another C5
-    productionization sub-phase. D4 emission + ADR 0026 flip pending.
-    Per-sub-phase ADRs 0026+ at each open.
+    declassify) passing D5. **Broker integration chosen next (C5.4,
+    ADR 0028 PROPOSED).** **Resume at C5.4 (1/N):** runtime-only broker
+    foundation — process-wide `Broker` backing `sentinel_alloc`/`free`
+    (size-classed slab pool + ptr→handle registry, thread-safe); c51-safe
+    (codegen untouched → objects byte-identical); unlocks budgets/
+    recording/stats. Then C5.4 (2/N): scope→arena codegen via the
+    borrow-check `DropPlan` (may defer post-1.0). Bitwise shifts + D4
+    emission + ADR 0026 flip remain deferred. Per-sub-phase ADRs 0026+.
     Optional C4 follow-ons (none blocking C5): work-stealing
     scheduler (ADR 0024 A1), scope cancellation (A2), Task<T>/
     spawn-args beyond i64 (A3), explicit `Task<T>` annotations

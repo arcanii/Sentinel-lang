@@ -14,7 +14,11 @@ D9) — which carries the `>>`-vs-nested-generic-close split — is a
 **follow-on**, taken only if the go/no-go's hash *computation* lands
 in-language; its constant-time *compare* (the security core) needs only
 `^`/`|`, which shipped. All other D-decisions (D1's `& | ^` half,
-D2–D8, the C5.3 rows of D10) landed as specified.
+D2–D8, the C5.3 rows of D10) landed as specified. **Numbering: the "C5.4"
+label this ADR uses for the shift wave is superseded** — the broker
+sub-phase took C5.4 / ADR 0028, so the `<< >> ~` wave is an *unnumbered*
+deferred follow-on (do it under this ADR's D9 when/if the go/no-go's hash
+computation needs shifts).
 
 Date: 2026-05-29
 Related:

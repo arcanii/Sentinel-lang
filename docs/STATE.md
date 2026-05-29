@@ -34,11 +34,19 @@ constant-time equality over secrets (XOR-accumulate + OR-reduce +
 `Finished` MAC-verify shape, replacing the C5.2b arithmetic stand-in).
 **ADR 0027 → ACCEPTED-WITH-AMENDMENTS** (A1: the `<< >> ~` wave / C5.4 is
 a deferred follow-on — the constant-time *compare* needs only `^`/`|`).
-+9 tests (1221). Four-check green. **Next:** either **C5.4** (`<< >> ~`,
-if the go/no-go computes hashes in-language — carries the `>>`/generic
-split) or begin assembling the **TLS go/no-go** itself now that the
-constant-time compare is writable, or another C5 productionization
-sub-phase — a developer-scope call.
++9 tests (1221). Four-check green. **Next: C5.4 — broker integration
+(D4), per ADR 0028 (PROPOSED).** (Chosen by the developer over shifts /
+go/no-go assembly.) Reading the broker + runtime showed the broker is an
+*arena* allocator — bump bulk-free / slab fixed-size / typed handles —
+that does **not** fit a drop-in `sentinel_alloc` (arbitrary-size,
+individual-free, raw `*u8`); ADR 0028 instead maps Sentinel scopes →
+arenas via the borrow-check `DropPlan` (no new escape analysis), shipping
+a **runtime-only broker foundation first** (C5.4 (1/N) — c51-safe, since
+codegen is untouched and objects stay byte-identical) then the
+scope→arena codegen (C5.4 (2/N), may defer post-1.0). Numbering: the
+bitwise *shift* wave `<< >> ~` (ADR 0027 A1) is an *unnumbered* deferred
+follow-on (not C5.4); ADR 0025 D14's "ADR 0027 = broker" is superseded
+(0027 = bitwise; broker = 0028).
 
 Pre-C5.3(2/N) context: **C5.3 (1/N): lexer — bitwise `|` (`Pipe`) + `^`
 (`Caret`) tokens (ADR 0027 D2).** The first wave of the bitwise-operator
