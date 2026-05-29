@@ -10,8 +10,14 @@ license.workspace      = true
 repository.workspace   = true
 
 [dependencies]
-tracing    = { workspace = true }
-thiserror  = { workspace = true }
+sentinel-types        = { path = "../sentinel-types" }
+sentinel-borrow-check = { path = "../sentinel-borrow-check" }
+
+[dev-dependencies]
+# Exercising `lower_to_hir` end-to-end needs a real `TypedProgram`,
+# which is not `Default`-constructible — build one via the pipeline.
+sentinel-syntax  = { path = "../sentinel-syntax" }
+sentinel-resolve = { path = "../sentinel-resolve" }
 
 [lints.rust]
 unsafe_code = "deny"

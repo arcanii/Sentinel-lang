@@ -1163,6 +1163,7 @@ dependencies = [
  "miette",
  "sentinel-ast",
  "sentinel-borrow-check",
+ "sentinel-hir",
  "sentinel-resolve",
  "sentinel-syntax",
  "sentinel-types",
@@ -1180,6 +1181,7 @@ dependencies = [
  "sentinel-base",
  "sentinel-borrow-check",
  "sentinel-codegen",
+ "sentinel-hir",
  "sentinel-resolve",
  "sentinel-syntax",
  "sentinel-types",
@@ -1215,8 +1217,10 @@ dependencies = [
 name = "sentinel-hir"
 version = "0.0.1"
 dependencies = [
- "thiserror",
- "tracing",
+ "sentinel-borrow-check",
+ "sentinel-resolve",
+ "sentinel-syntax",
+ "sentinel-types",
 ]
 
 [[package]]

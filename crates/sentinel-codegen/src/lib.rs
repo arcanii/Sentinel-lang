@@ -42,6 +42,7 @@ use inkwell::values::{
 use inkwell::{IntPredicate, OptimizationLevel};
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
+use sentinel_hir::HirProgram;
 use sentinel_resolve::{
     ClassId, EffectId, FnId, ImplId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
 };
@@ -130,20 +131,28 @@ pub enum CodegenError {
     EffectingFnBodyNotDirect { fn_name: String },
 }
 
-/// Lower a [`TypedProgram`] to a native object file at `output`.
+/// Lower an [`HirProgram`] to a native object file at `output`.
 /// The emitted module exports `main` (i32-returning, the C ABI
 /// entry); the runtime symbol `sentinel_print` is pre-declared in
 /// pass 1.
 ///
-/// C2.4: `drop_plan` carries per-fn moved-source info from the
-/// borrow checker. Codegen consults it at scope exit to skip
-/// dropping bindings that have been moved away (the destination
-/// owns + drops them). See [`DropPlan`] in sentinel-borrow-check.
-pub fn compile_to_object(
-    program: &TypedProgram,
-    drop_plan: &DropPlan,
-    output: &Path,
-) -> Result<(), CodegenError> {
+/// C5.1a / ADR 0026 D3: codegen now consumes the HIR rather than the
+/// `TypedProgram` + `DropPlan` separately. At this increment the HIR is
+/// a thin bundle of the two (see the `sentinel-hir` crate); codegen
+/// still lowers the type-checked program directly via
+/// [`HirProgram::program`] and consults the drop plan via
+/// [`HirProgram::drop_plan`]. Later C5.1a increments move the desugaring
+/// (dispatch resolution, monomorphic materialisation, explicit drops)
+/// into the HIR, shrinking these direct reads.
+///
+/// C2.4: the drop plan carries per-fn moved-source info from the borrow
+/// checker. Codegen consults it at scope exit to skip dropping bindings
+/// that have been moved away (the destination owns + drops them). See
+/// [`DropPlan`] in sentinel-borrow-check.
+pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenError> {
+    let program = hir.program();
+    let drop_plan = hir.drop_plan();
+
     let context = Context::create();
     let module = context.create_module("sentinel");
     let builder = context.create_builder();
@@ -5884,13 +5893,14 @@ mod tests {
         let prog = parse(src).expect("parse");
         let resolved = resolve(&prog).expect("resolve");
         let typed = check(&resolved).expect("check");
-        // C2.4: compile_to_object now takes a DropPlan. For
-        // codegen unit tests we use an empty plan — equivalent
-        // to "no moves recorded", so every heap-backed binding
-        // gets dropped at scope exit (which is the conservative
-        // default and exercises the drop emission code path).
+        // C2.4: codegen consults a DropPlan. For codegen unit tests we
+        // use an empty plan — equivalent to "no moves recorded", so
+        // every heap-backed binding gets dropped at scope exit (the
+        // conservative default, which exercises the drop emission path).
+        // C5.1a / ADR 0026 D3: codegen now consumes the HIR bundle.
         let drop_plan = DropPlan::default();
-        compile_to_object(&typed, &drop_plan, &out_path())
+        let hir = sentinel_hir::lower_to_hir(&typed, &drop_plan);
+        compile_to_object(&hir, &out_path())
     }
 
     fn out_path() -> std::path::PathBuf {

@@ -147,9 +147,13 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     };
     let object_path = exe_path.with_extension("o");
 
-    // C2.4 / ADR 0017 D8: pass DropPlan to codegen so it emits
-    // drop calls at scope-exit for un-moved heap-backed bindings.
-    if let Err(err) = sentinel_codegen::compile_to_object(typed, drop_plan, &object_path) {
+    // C5.1a / ADR 0026 D1+D3: the pipeline middle. Lower the
+    // type-checked program + its DropPlan (C2.4 / ADR 0017 D8: scope-
+    // exit drops for un-moved heap-backed bindings) into the HIR, then
+    // hand the HIR to codegen. At this increment `lower_to_hir` is the
+    // identity bundle; desugaring fills in across later C5.1a steps.
+    let hir = sentinel_hir::lower_to_hir(typed, drop_plan);
+    if let Err(err) = sentinel_codegen::compile_to_object(&hir, &object_path) {
         let report = Report::new(err).with_source_code(NamedSource::new(path, src));
         eprintln!("{report:?}");
         return ExitCode::from(1);

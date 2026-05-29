@@ -12,6 +12,7 @@ repository.workspace   = true
 [dependencies]
 sentinel-ast          = { path = "../sentinel-ast" }
 sentinel-borrow-check = { path = "../sentinel-borrow-check" }
+sentinel-hir          = { path = "../sentinel-hir" }
 sentinel-resolve      = { path = "../sentinel-resolve" }
 sentinel-types        = { path = "../sentinel-types" }
 

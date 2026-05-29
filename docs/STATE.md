@@ -12,8 +12,30 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C5.0 (in progress): Phase C5 kickoff — the 1.0
-go/no-go program is CHOSEN.** Per ADR 0025 D1/D13 the Phase C /
+Last updated: **C5.1a (1/N): the HIR pipeline stage is introduced
+(ADR 0026 D1+D3).** Per ADR 0009 §6.1 the pipeline is `types → hir →
+mir → codegen`; C0–C4 short-circuited `types → codegen`. This increment
+stands up `sentinel-hir` as a real stage between the type checker and
+codegen: a pure `lower_to_hir(&TypedProgram, &DropPlan) -> HirProgram`
+the driver calls after borrow-check, with `compile_to_object` now
+consuming `&HirProgram`. At this increment the HIR is a thin borrowing
+**bundle** of the typed program + drop plan (no desugaring yet), so the
+migration is **behaviour-preserving by construction**: all 1195 tests
+pass and every `tests/repro.rs` object stays byte-identical (the
+ADR 0026 D9 `c51` bar). Desugaring — dispatch resolution, monomorphic
+materialisation, explicit drops (folding in the `DropPlan`) — lands in
+later C5.1a increments, each *thickening* the HIR + *thinning* codegen
+while holding that bar. `lower_to_hir` stays a pure fn (not
+salsa-tracked), matching codegen's non-salsa status (ADR 0011 C1.0c);
+salsa-tracking is deferred until the HIR is a self-contained owned
+structure (ADR 0026 D1 amendment). Test-count-neutral (the
+`sentinel-hir` stub's smoke test replaced by a `lower_to_hir`
+round-trip). Four-check green via `cargo nextest run --workspace`
+(1195) + `cargo test --doc`. **Next: C5.1a (2/N)** — fold the `DropPlan`
+into the HIR as explicit drop statements (the first real desugar).
+
+Pre-C5.1a context: **C5.0 (complete) + ADR 0026 PROPOSED — Phase C5
+kickoff; the 1.0 go/no-go program is CHOSEN.** Per ADR 0025 D1/D13 the Phase C /
 Sentinel-1.0 close bar is a **single-process, single-file TLS 1.3
 handshake** (server-flavoured: ECDHE → HKDF key schedule →
 constant-time `Finished` MAC verify). This pins the two scoping-
