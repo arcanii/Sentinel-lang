@@ -1,0 +1,68 @@
+// C4 / ADR 0021 D13: the full Phase C4 surface in one program —
+// class + methods + init + trait + named impl + delegation +
+// structured concurrency, composed end-to-end.
+//
+// Adapted from the literal D13 spec: that version wrote
+// `spawn lb.write(42)`, but ADR 0024 D2 restricts `spawn` to a
+// direct function call (a method call hits SpawnMustBeCall). So
+// the spawned work is a free fn `buffered_write` that drives the
+// class / trait / delegation surface on the worker thread, and
+// `main` wraps it in `scope concurrent` + `.await`.
+//
+// Trace: buffered_write(42) builds a LoggingBuffer (inner Buffer
+// total=0, log_count=0); `lb.write(42)` routes through the
+// delegate-synthesized `impl as Writer for LoggingBuffer` to
+// `self.inner.write(42)` → Buffer's Writer impl sets total =
+// 0 + 42 = 42 and returns it; `lb.count()` returns log_count = 0;
+// 42 + 0 = 42. The scope spawns it on a thread + awaits 42.
+//
+// Exercises: class decl (D1), `&mut Self` + `&Self` methods (D2),
+// init constructor (D3), trait + impl (D4 + D5), delegation (D6),
+// scope + spawn + await (D8).
+//
+// Expected: exit code 42, no stdout.
+
+trait Writer {
+    fn write(self: &mut Self, n: i64) -> i64;
+}
+
+class Buffer {
+    let total: i64;
+    pub init() {
+        self.total = 0;
+        0
+    }
+}
+
+impl as Writer for Buffer {
+    fn write(self: &mut Self, n: i64) -> i64 {
+        self.total = self.total + n;
+        self.total
+    }
+}
+
+class LoggingBuffer {
+    delegate inner: Buffer to Writer;
+    let log_count: i64;
+    pub init() {
+        self.inner = Buffer::init();
+        self.log_count = 0;
+        0
+    }
+    pub fn count(self: &Self) -> i64 {
+        self.log_count
+    }
+}
+
+fn buffered_write(n: i64) -> i64 {
+    let mut lb: LoggingBuffer = LoggingBuffer::init();
+    let w: i64 = lb.write(n);
+    w + lb.count()
+}
+
+fn main() -> i64 {
+    scope concurrent {
+        let t = spawn buffered_write(42);
+        t.await
+    }
+}

@@ -1287,3 +1287,27 @@ fn c44_spawn_result_must_be_i64_rejects() {
         "expected spawn_result_must_be_i64; got: {stderr}"
     );
 }
+
+// ----- C4.5 / ADR 0021 D13: full-surface phase-go close-out -----
+
+#[test]
+fn pass_c4_go_no_go() {
+    // ADR 0021 D13 phase-go: class + methods + init + trait + impl
+    // + delegation + scope/spawn/await composed in one program.
+    // `spawn buffered_write(42)` runs the class/delegation surface
+    // on a worker thread; the delegate forwards lb.write(42) to the
+    // inner Buffer's Writer impl → 42; + lb.count() (0) = 42.
+    let r = build_and_run("c4_go_no_go.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn pass_c4_named_impl() {
+    // ADR 0021 D13 secondary smoke: two named impls of (Writer,
+    // Counter) co-exist, dispatched via qualified calls.
+    // Plus::write(9) → 9; Times::write(11) → 9 + 33 = 42.
+    let r = build_and_run("c4_named_impl.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}

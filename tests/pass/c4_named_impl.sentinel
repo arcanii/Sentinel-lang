@@ -1,0 +1,44 @@
+// C4 / ADR 0021 D13 (secondary smoke): two NAMED impls of the
+// same (trait, type) co-existing, dispatched via qualified calls.
+// c42_go_no_go covers default + one named impl; this pins the
+// case where a type has multiple named impls of one trait and no
+// default impl — coherence allows it because named impls are
+// distinguished by name (only default impls collide per ADR 0023
+// D7's DuplicateDefaultImpl).
+//
+// Trace: c.v starts 0. Plus::write(&mut c, 9) → v = 0 + 9 = 9.
+// Times::write(&mut c, 11) → v = 9 + 11*3 = 42.
+//
+// Expected: exit code 42, no stdout.
+
+trait Writer {
+    fn write(self: &mut Self, n: i64) -> i64;
+}
+
+class Counter {
+    let v: i64;
+    pub init() {
+        self.v = 0;
+        0
+    }
+}
+
+impl Plus as Writer for Counter {
+    fn write(self: &mut Self, n: i64) -> i64 {
+        self.v = self.v + n;
+        self.v
+    }
+}
+
+impl Times as Writer for Counter {
+    fn write(self: &mut Self, n: i64) -> i64 {
+        self.v = self.v + n * 3;
+        self.v
+    }
+}
+
+fn main() -> i64 {
+    let mut c: Counter = Counter::init();
+    let a: i64 = Plus::write(&mut c, 9);
+    Times::write(&mut c, 11)
+}

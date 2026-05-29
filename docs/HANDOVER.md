@@ -95,6 +95,7 @@ C1.3. See STATE.md Section C.
 **Phase C4.4 (1/N) — scope / spawn / await AST + parser per ADR 0024 D1+D2+D3 — complete.** Structured-concurrency surface parses end-to-end at AST + parser. Downstream resolve rejects with ScopeNotYet / SpawnNotYet / AwaitNotYet until C4.4 (2/N) lands the typing + runtime + codegen. +9 tests (1177 total). ADR 0024 stays PROPOSED.
 **Phase C4.4 (2/N runtime) — sentinel-runtime symbols per ADR 0024 D6+D7 — complete.** Thread-per-spawn substrate ships: sentinel_task_spawn / sentinel_task_await / sentinel_scope_enter / sentinel_scope_exit / sentinel_scope_register + SentinelTask (32-byte C-stable struct) + SentinelScopeCtx. Uses std::thread internally; real work-stealing scheduler is a deferred follow-on per ADR 0024 D6. Cancellation on early scope exit DEFERRED per ADR 0024 D9. +6 runtime tests (1182 total active workspace). ADR 0024 stays PROPOSED. The typing layer + codegen wiring + c44_go_no_go phase-go land in a follow-on iteration.
 **Phase C4.4 (2/N) — types + codegen + phase-go per ADR 0024 D4+D5+D8 — complete. ADR 0024 → ACCEPTED-WITH-AMENDMENTS. Phase C4.4 + Phase C4 close.** The `scope concurrent { spawn fn(args); expr.await }` surface compiles + runs end-to-end. Types: `Type::Task(TaskId)` (tenth interner variant) + `TaskData` + `intern_task` + `TypedProgram.tasks` threaded through check_expr; `TypedExprKind::Scope/Spawn/Await`; spawn validates a Call target returning i64 (Task<i64>-only per D7), await requires a `Type::Task` receiver; 3 TypeErrors (SpawnMustBeCall / SpawnResultMustBeI64 / AwaitOnNonTask). Resolve: scope/spawn/await pass-through (NotYet dropped); built-in `Async` effect auto-registered (appended after user effects — deviation from D5's "EffectId(0)"). Effect-check: spawn/await contribute Async; `scope concurrent` discharges Async (handler-style); spawn/await outside a scope bubbles Async to main → rejected (D5 discipline SHIPPED). Codegen: 5 runtime externs + per-spawn-target wrapper synthesized in a compile_to_object pre-walk (before CodegenCtx — it lacks `&Module`); lower scope/spawn/await; Async-only fns keep the value ABI not the C3 Kont* ABI (`uses_kont_abi` excludes Async). Runtime fix: `_pad` → `owned` flag so explicit `.await` inside a scope is safe against the scope's exit-time auto-await (closes a UAF/double-free in the C4.4 2/N symbols). +1 pass fixture (c44_go_no_go exit 42) + 3 UI fixtures + 2 effect-check tests + 1 runtime test (~1188 total active workspace). Amendments A1 (work-stealing deferred), A2 (cancellation deferred), A3 (Task<i64> + i64 args only), A4 (Async discipline shipped, 2 deviations), A5 (explicit `Task<T>` annotations deferred — use inference). Four-check suite green.
+**Phase C4.5 — close-out per ADR 0021 D13+D14 — complete. ADR 0021 → ACCEPTED-WITH-AMENDMENTS. Phase C4 closes.** Combined full-surface phase-go `tests/pass/c4_go_no_go.sentinel` (class + `&mut Self`/`&Self` methods + init + trait + impl + delegation + scope/spawn/await in one program; exit 42) + `tests/pass/c4_named_impl.sentinel` (two named impls of one (trait,type) co-existing via qualified calls; exit 42). The D13 phase-go's `spawn lb.write(42)` (a method call) was adapted to spawn a free fn `buffered_write` that drives the class/delegation surface on the worker thread, since ADR 0024 D2 restricts spawn to a direct fn call (ADR 0021 amendment A2). ADR 0021 amendments: A1 (D9 async-as-effect superseded by ADR 0024's direct-runtime API — surface identical, lowering differs), A2 (D13 phase-go adapted), A3 (per-sub-phase amendments roll-up), A4 (D14 estimate beaten), D10/D12 out-of-scope confirmed (actors → C5). +2 driver pass-tests (123 driver pass; ~1191 total active workspace). Docs-only sub-phase. Four-check suite green. **Next: Phase C5** (broker integration + cross-process + actors + stable ABI + tooling per HANDOVER §6.2; Sentinel 1.0 at C5 close) — write ADR 0025 PROPOSED at kickoff.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1073,25 +1074,28 @@ New norms learned during Phase B and Phase C:
   strings inside a bash heredoc can mangle terminals); cargo
   test -p <crate> after each patch.
 
-### 0.2 Next session opening (C4.5 close-out → Phase D)
+### 0.2 Next session opening (Phase C5 kickoff)
 
-> **C4.4 (2/N) is COMPLETE** (types + codegen + phase-go;
-> ADR 0024 ACCEPTED-WITH-AMENDMENTS; Phase C4.4 + Phase C4
-> close). The detailed C4.4 (2/N) punch list that used to live
-> here is retained below for historical reference, but every
-> item shipped — do NOT re-do it. The wrapper-synthesis
-> sticking point was resolved exactly as the prior-art note
-> below predicted (pre-walk in `compile_to_object` before
-> `CodegenCtx`).
+> **Phase C4 is COMPLETE — all of C4.0 through C4.5 shipped;
+> ADR 0021 ACCEPTED-WITH-AMENDMENTS.** C4.4 (2/N) landed the
+> structured-concurrency types + codegen + phase-go (ADR 0024);
+> C4.5 closed Phase C4 with the combined full-surface phase-go
+> (`tests/pass/c4_go_no_go.sentinel` — class + trait + impl +
+> delegation + scope/spawn/await, exit 42) + `c4_named_impl`
+> (two named impls co-existing) + the ADR 0021 flip. The
+> detailed C4.4 (2/N) punch list retained below is HISTORICAL —
+> every item shipped; do NOT re-do it.
 >
-> **Resume at C4.5 close-out**: flip ADR 0021 (Phase C4
-> kickoff) PROPOSED → ACCEPTED — C4.0 (lexer), C4.1 (classes),
-> C4.2 (traits + impls), C4.3 (delegation), C4.4 (structured
-> concurrency) all shipped. C4.5 is a docs-only sub-phase per
-> ADR 0021 D14 (0–1 session). Then start **Phase D** per
-> HANDOVER §6.2 with a new ADR.
+> **Resume at Phase C5 kickoff** per HANDOVER §6.2 (NOT "Phase
+> D" — the roadmap after C4 is C5 per ADR 0021's close): broker
+> integration, cross-process safety, reproducible-build
+> guarantees, stable ABI definition, LSP/tooling polish, plus
+> **actors** (deferred from C4 per ADR 0021 D10). Sentinel's 1.0
+> release is at C5 close. Pre-flight: write **ADR 0025 PROPOSED**
+> (Phase C5 kickoff) before the first feat commit, per the
+> ADR-first norm.
 >
-> **Available C4 follow-ons** (none blocking): work-stealing
+> **Available C4 follow-ons** (none blocking C5): work-stealing
 > scheduler (ADR 0024 A1), scope cancellation (A2), `Task<T>`
 > for T≠i64 + non-i64 spawn args (A3), explicit `Task<T>`
 > type-position annotations via threading `tasks` through
@@ -1715,28 +1719,31 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     Local HEAD: verify with `git log -1` at session start
-    (expect the C4.4 (2/N) feat + docs commits — types + codegen
-    + phase-go for structured concurrency).
-    Last work: **C4.4 (2/N) — structured-concurrency typing +
-    codegen + phase-go landed. ADR 0024 → ACCEPTED-WITH-
-    AMENDMENTS. Phase C4.4 + Phase C4 CLOSE.** `scope concurrent
-    { let t = spawn double(21); t.await }` compiles + runs at
-    exit 42. Type::Task interner + spawn/await/scope typing +
-    Async effect (auto-registered after user effects; spawn/await
-    contribute Async, `scope` discharges it) + 5 codegen runtime
-    externs + per-spawn-target wrapper synthesis (compile_to_object
-    pre-walk) + scope/spawn/await lowering. Runtime fix: `_pad`
-    → `owned` flag closes a UAF between explicit `.await` and the
-    scope's auto-await. Async-only fns keep the value ABI (not the
-    C3 Kont* ABI) via `uses_kont_abi`. +1 pass + 3 UI fixtures
-    (~1188 active workspace). Four-check suite green.
-    What remains: **Phase C4.5 close-out** — flip ADR 0021
-    (Phase C4 kickoff) PROPOSED → ACCEPTED now that all of C4.0–
-    C4.4 shipped. Then **Phase D** per HANDOVER §6.2. Optional
-    C4 follow-ons (none blocking): work-stealing scheduler
-    (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args
-    beyond i64 (A3), explicit `Task<T>` annotations (A5),
-    Path-3 bounded-generic dispatch (ADR 0023 A1).
+    (expect the C4.5 close-out commit — combined phase-go +
+    ADR 0021 flip + STATE/HANDOVER close-out).
+    Last work: **C4.5 — Phase C4 close-out. ADR 0021 → ACCEPTED-
+    WITH-AMENDMENTS. PHASE C4 CLOSES** (all of C4.0–C4.5 shipped:
+    lexer, classes, traits+impls, delegation, structured
+    concurrency, close-out). C4.5 added the combined full-surface
+    phase-go `tests/pass/c4_go_no_go.sentinel` (class + methods +
+    init + trait + impl + delegation + scope/spawn/await in one
+    program; exit 42) + `c4_named_impl.sentinel` (two named impls
+    co-existing; exit 42). D13's `spawn lb.write(42)` was adapted
+    to spawn a free fn (spawn is fn-call-only per ADR 0024 D2 —
+    ADR 0021 amendment A2). ADR 0021 amendment A1: async-as-effect
+    (D9) superseded by ADR 0024's direct-runtime API (surface
+    identical). +2 driver pass-tests (~1191 active workspace).
+    Four-check suite green.
+    What remains: **Phase C5 kickoff** per HANDOVER §6.2 — broker
+    integration, cross-process safety, reproducible builds, stable
+    ABI, LSP/tooling polish, and actors (deferred from C4 per
+    ADR 0021 D10). Sentinel 1.0 releases at C5 close. Write
+    **ADR 0025 PROPOSED** (Phase C5 kickoff) before the first feat
+    commit. (NOT "Phase D" — the roadmap after C4 is C5.)
+    Optional C4 follow-ons (none blocking C5): work-stealing
+    scheduler (ADR 0024 A1), scope cancellation (A2), Task<T>/
+    spawn-args beyond i64 (A3), explicit `Task<T>` annotations
+    (A5), Path-3 bounded-generic dispatch (ADR 0023 A1).
     Branch state: verify with `git status` at session start.
 
     Phase A (broker) + Phase B (effects-proto) + Phase C0

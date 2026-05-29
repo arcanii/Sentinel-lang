@@ -12,12 +12,27 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C4.4 (2/N): structured-concurrency typing +
-codegen + phase-go landed per ADR 0024 D4+D5+D8.** ADR 0024
-flips PROPOSED → ACCEPTED-WITH-AMENDMENTS; **Phase C4.4 closes
-and Phase C4 closes.** The `scope concurrent { spawn fn(args);
-expr.await }` surface compiles + runs end-to-end on a thread-
-per-spawn runtime. Pieces:
+Last updated: **C4.5: Phase C4 close-out — ADR 0021 flips
+PROPOSED → ACCEPTED-WITH-AMENDMENTS; PHASE C4 CLOSES.** All six
+sub-phases shipped (C4.0 lexer, C4.1 classes, C4.2 traits+impls,
+C4.3 delegation, C4.4 structured concurrency, C4.5 close-out).
+C4.5 added the combined full-surface phase-go
+`tests/pass/c4_go_no_go.sentinel` (class + `&mut Self`/`&Self`
+methods + init + trait + impl + delegation + scope/spawn/await
+in one program; exit 42) + `tests/pass/c4_named_impl.sentinel`
+(two named impls of one (trait,type) co-existing via qualified
+calls; exit 42). ADR 0021 D13's `spawn lb.write(42)` was adapted
+to spawn a free fn (spawn is fn-call-only per ADR 0024 D2 —
+amendment A2); ADR 0021 A1 records async-as-effect (D9)
+superseded by ADR 0024's direct-runtime API (surface identical).
+**Next: Phase C5** (broker integration + cross-process + actors
++ stable ABI + tooling per HANDOVER §6.2; Sentinel 1.0 at C5
+close). Four-check suite green (~1191 active workspace).
+
+The substantive structured-concurrency landing was **C4.4 (2/N)**
+per ADR 0024 D4+D5+D8 — `scope concurrent { spawn fn(args);
+expr.await }` compiles + runs end-to-end on a thread-per-spawn
+runtime. Pieces:
 - **Types**: `Type::Task(TaskId)` (tenth interner variant) +
   `TaskData { result_ty }` + `intern_task` + `TypedProgram.tasks`;
   `TypedExprKind::Scope/Spawn/Await`; spawn validates a Call

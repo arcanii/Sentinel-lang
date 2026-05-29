@@ -1,14 +1,16 @@
 # ADR 0021: Phase C4 kickoff — classes, traits, delegation, structured concurrency
 
-Status: PROPOSED — to flip to ACCEPTED (or ACCEPTED-WITH-
-AMENDMENTS) as Phase C4's sub-phases land. This ADR opens
-Phase C4 per HANDOVER §6.2's month-12-15 budget: "classes,
-traits with named implementations, delegation, structured
-concurrency, actors. Most of this is 'reasonable language
-design plumbing' rather than novel work, but the volume is
-significant." Phase C3 closed at C3.7 with ADR 0020 ACCEPTED-
-WITH-AMENDMENTS; the handler runtime is the foundation for
-async-as-effect (deferred at ADR 0019 D9) which C4 picks up.
+Status: **ACCEPTED-WITH-AMENDMENTS** (flipped at C4.5 close — all
+six sub-phases C4.0–C4.5 shipped; see "Amendments at C4.5 close"
+below). This ADR opened Phase C4 per HANDOVER §6.2's month-12-15
+budget: "classes, traits with named implementations, delegation,
+structured concurrency, actors. Most of this is 'reasonable
+language design plumbing' rather than novel work, but the volume
+is significant." Phase C3 closed at C3.7 with ADR 0020 ACCEPTED-
+WITH-AMENDMENTS; the handler runtime was the intended foundation
+for async-as-effect (deferred at ADR 0019 D9) — though C4.4 in
+the end took the direct-runtime-API route (see A1 below). **Phase
+C4 closes; next is Phase C5 per HANDOVER §6.2.**
 
 Date: 2026-05-28
 Related:
@@ -93,6 +95,51 @@ The C3.7 lexer state going into ADR 0021:
     , ; ( ) { } [ ] -> => & |`.
   - The Phase B prototype used `class`, `trait`, `impl`, etc.;
     none reserved at C3.7. C4.0 lexer adds them per D11.
+
+## Amendments at C4.5 close
+
+All six sub-phases shipped (C4.0 lexer, C4.1 classes per ADR 0022,
+C4.2 traits + impls per ADR 0023, C4.3 delegation, C4.4 structured
+concurrency per ADR 0024, C4.5 close-out). The umbrella plan held;
+the substantive amendments:
+
+- **A1 (D8 + D9) — direct-runtime API, not async-as-effect.** D9
+  envisioned `spawn`/`await` as Async *operations* dispatched
+  through the C3 handler runtime. ADR 0024 amended this to a
+  **direct runtime API** (`sentinel_task_spawn` / `_await` /
+  `sentinel_scope_*` + a thread-per-spawn runtime) because the
+  clean handler-based model needs multi-shot continuations, which
+  ADR 0020 D2 deferred indefinitely. The user surface
+  (`scope concurrent` / `spawn` / `.await` / `Task<T>`) is exactly
+  as D8 specified; only the lowering differs. `Async` survives as a
+  typing-layer marker effect that `scope concurrent` discharges.
+  Async-as-effect remains the future path once multi-shot lands.
+- **A2 (D13 phase-go) — spawn target is a free fn, not a method.**
+  The literal D13 program wrote `spawn lb.write(42)`, but ADR 0024
+  D2 restricts `spawn` to a direct function call (a method call
+  hits `SpawnMustBeCall`). The shipped `tests/pass/c4_go_no_go.sentinel`
+  keeps the full class + trait + impl + delegation + concurrency
+  surface but spawns a free fn `buffered_write` that drives the
+  class/delegation surface on the worker thread. A second smoke
+  `tests/pass/c4_named_impl.sentinel` pins two named impls of one
+  (trait, type) co-existing.
+- **A3 (per-sub-phase amendments roll-up).** Each sub-phase ADR
+  carries its own amendments, all in force here: ADR 0022 (C4.1 —
+  definite-assignment is flat any-assigned; general `Self` in type
+  position deferred); ADR 0023 (C4.2 — Path 3 bounded-generic
+  dispatch deferred; witness-table *values* not emitted, only
+  scaffolding); ADR 0024 (C4.4 — thread-per-spawn not work-
+  stealing; no cancellation; `Task<i64>` + i64 spawn-args only;
+  explicit `Task<T>` annotations deferred).
+- **A4 (D14 estimate).** Estimated 8–12 sessions across 6 sub-
+  phases; actual was materially fewer (the parallel-tree +
+  ADR-first + salsa-pipeline scaffolding kept compounding, as in
+  C1). C4.4's scheduler — flagged as the wildcard — landed as the
+  simpler thread-per-spawn baseline per A1.
+- **D10 / D12 out-of-scope confirmed.** Actors stay deferred to
+  Phase C5; cross-process / GPU / `@numa` qualifiers remain out of
+  scope. C4 delivered the single-process trait + class +
+  structured-concurrency surface as planned.
 
 ## Decision
 
