@@ -1,0 +1,23 @@
+// C5.4 (2/N) / ADR 0028: scope -> arena codegen. A non-escaping array
+// allocated in a scope has its heap buffer bump-allocated in a broker
+// bump arena and bulk-freed by ONE sentinel_arena_exit at scope exit,
+// replacing the per-binding sentinel_free. Behaviour is identical to
+// the libc path (the c51 bar): each array is allocated, read, and
+// reclaimed at the same point with the same lifetime.
+//
+// `xs` is routed into main's body-scope arena (non-escaping: read via
+// index, never moved or returned). `ys` is routed into the inner
+// block's own arena and reclaimed at the inner-block exit (a distinct
+// scope, a distinct arena). Both are read before their scope's arena
+// is exited, so there is no use-after-free.
+//
+// xs[0]+xs[1]+xs[2] = 1+2+3 = 6; inner ys[0]+ys[1] = 10+20 = 30;
+// 6 + 30 + 6 = 42 -> exit 42.
+fn main() -> i64 {
+    let xs: [i64] = [1, 2, 3];
+    let inner: i64 = {
+        let ys: [i64] = [10, 20];
+        ys[0] + ys[1]
+    };
+    xs[0] + xs[1] + xs[2] + inner + 6
+}

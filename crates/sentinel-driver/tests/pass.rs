@@ -1125,3 +1125,15 @@ fn pass_c53_ct_eq() {
     // PASSES the D5 verification. Comparing (42,7) to itself → 0; 42-0=42.
     assert_eq!(run_exit("c53_ct_eq.sentinel"), 42);
 }
+
+#[test]
+fn pass_c54_scope_arena() {
+    // ADR 0028 D9 c54_scope_arena: the scope→arena codegen. A
+    // non-escaping primitive array's heap buffer is bump-allocated in
+    // the broker arena (verified: main emits sentinel_arena_enter/_alloc
+    // and ZERO sentinel_free/_alloc) and bulk-freed by one
+    // sentinel_arena_exit at scope exit. Body-scope arena (`xs`) +
+    // nested-block arena (`ys`); 6 + 30 + 6 = 42, behaviour identical
+    // to the libc path.
+    assert_eq!(run_exit("c54_scope_arena.sentinel"), 42);
+}

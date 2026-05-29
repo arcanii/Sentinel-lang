@@ -398,6 +398,39 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             None,
         )
     };
+    // C5.4 (2/N) / ADR 0028: declare the broker scope-arena symbols.
+    // `sentinel_arena_enter(capacity: i64) -> *arena` creates a bump
+    // arena (capacity 0 → runtime default); `sentinel_arena_alloc(arena,
+    // size: i64) -> *u8` bump-allocates within it; `sentinel_arena_exit(
+    // arena)` destroys it, bulk-freeing every allocation at once. These
+    // back the scope→arena routing of non-escaping array allocations.
+    let arena_enter_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        module.add_function(
+            "sentinel_arena_enter",
+            ptr_ty.fn_type(&[i64_ty.into()], false),
+            None,
+        )
+    };
+    let arena_alloc_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        module.add_function(
+            "sentinel_arena_alloc",
+            ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
+            None,
+        )
+    };
+    let arena_exit_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let void_ty = context.void_type();
+        module.add_function(
+            "sentinel_arena_exit",
+            void_ty.fn_type(&[ptr_ty.into()], false),
+            None,
+        )
+    };
     // C3.5(a) / ADR 0020 D7: declare the handler-runtime symbols.
     // The Kont struct layout (op_id: u32, _pad: u32, arg: i64,
     // consumed: u8, total 24 bytes / 8-byte aligned) matches
@@ -803,6 +836,11 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             }
         }
 
+        // C5.4 (2/N) / ADR 0028: compute the arena-routing set once, up
+        // front, from the typed program + the borrow-check DropPlan
+        // (both available here). Drives alloc-routing AND free-skipping.
+        let arena_routed = compute_arena_routed(program, drop_plan);
+
         let mut cx = CodegenCtx {
             context: &context,
             builder,
@@ -818,6 +856,9 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             alloc_fn,
             panic_oob_fn,
             free_fn,
+            arena_enter_fn,
+            arena_alloc_fn,
+            arena_exit_fn,
             perform_op_fn,
             kont_resume_fn,
             kont_pure_fn,
@@ -840,6 +881,8 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             vars: HashMap::new(),
             scope_stack: Vec::new(),
             drop_plan,
+            arena_routed,
+            array_route_active: false,
         };
         for fn_def in &program.fns {
             // C1.7.4a / ADR 0016 D7: skip generic fn bodies; their
@@ -923,6 +966,32 @@ struct HandleContext<'ctx> {
     return_arm: Option<TypedReturnArm>,
 }
 
+/// C2.4 / ADR 0017 D8: one lexical scope's drop state. `vars` is the
+/// ordered list of VarIds declared in the scope; drop emission walks it
+/// in reverse.
+///
+/// C5.4 (2/N) / ADR 0028: `arena` is the scope's broker bump arena
+/// handle (the `*mut c_void` returned by `sentinel_arena_enter`),
+/// created *lazily* on the first arena-routed allocation in the scope
+/// (`None` if the scope routes nothing, so unused scopes cost nothing
+/// and stay byte-identical). At scope exit a single `sentinel_arena_exit`
+/// bulk-frees it — replacing the per-binding `sentinel_free`s of exactly
+/// the arena-routed bindings (the [`CodegenCtx::arena_routed`] set drives
+/// both the routing and the free-skip, so they cannot diverge).
+#[derive(Default, Clone)]
+struct ScopeFrame<'ctx> {
+    vars: Vec<VarId>,
+    arena: Option<PointerValue<'ctx>>,
+}
+
+impl<'ctx> ScopeFrame<'ctx> {
+    /// Record a binding declared in this scope. Keeps every existing
+    /// `scope_stack.last_mut().push(id)` call site working unchanged.
+    fn push(&mut self, id: VarId) {
+        self.vars.push(id);
+    }
+}
+
 /// Per-function codegen state. See C1.1.2 docs in commit 9374edf
 /// for the lifetime / dropping rationale. C1.3 stores both the
 /// alloca pointer AND its [`Type`] per binding so `build_load` can
@@ -978,6 +1047,17 @@ struct CodegenCtx<'ctx, 'plan> {
     /// function. Emitted at scope-exit for un-moved heap-backed
     /// bindings (closes the C1.6+ heap-leak deferral).
     free_fn: FunctionValue<'ctx>,
+    /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
+    /// creates a per-scope broker bump arena (capacity 0 → default).
+    arena_enter_fn: FunctionValue<'ctx>,
+    /// C5.4 (2/N) / ADR 0028: `sentinel_arena_alloc(*arena, i64) -> *u8`
+    /// bump-allocates an arena-routed binding's heap buffer.
+    arena_alloc_fn: FunctionValue<'ctx>,
+    /// C5.4 (2/N) / ADR 0028: `sentinel_arena_exit(*arena)` destroys a
+    /// scope's arena, bulk-freeing every allocation made in it. Emitted
+    /// once per scope that routed ≥1 allocation, replacing that scope's
+    /// per-binding `sentinel_free`s.
+    arena_exit_fn: FunctionValue<'ctx>,
     /// C3.5(a) / ADR 0020 D7: `sentinel_perform_op(op_id: i32,
     /// arg: i64) -> ptr` allocates a Kont struct tagged with the
     /// op id + its arg, returning the pointer to the caller.
@@ -1077,17 +1157,35 @@ struct CodegenCtx<'ctx, 'plan> {
     /// drop emission.
     current_fn_id: FnId,
     vars: HashMap<VarId, (PointerValue<'ctx>, Type)>,
-    /// C2.4 / ADR 0017 D8: stack of scopes; each scope is the
+    /// C2.4 / ADR 0017 D8: stack of scopes; each scope holds the
     /// ordered list of VarIds declared in it. At scope exit
     /// (block-pop, fn return), the codegen iterates these in
     /// reverse to emit drop calls for heap-backed bindings that
     /// weren't moved.
-    scope_stack: Vec<Vec<VarId>>,
+    scope_stack: Vec<ScopeFrame<'ctx>>,
     /// C2.4: per-fn moved-source sets from the borrow checker.
     /// Codegen looks up `current_fn_id` to determine which
     /// bindings should be skipped at scope-exit drop emission
     /// (the destination of the move owns the value now).
     drop_plan: &'plan DropPlan,
+    /// C5.4 (2/N) / ADR 0028: the program-wide set of binding VarIds
+    /// whose heap allocation is routed into a scope arena instead of
+    /// libc `sentinel_alloc`/`free`. Computed once up front by
+    /// [`compute_arena_routed`] = exactly the bindings `emit_scope_drops`
+    /// would `sentinel_free` (`∉ moved ∧ ≠ tail_returned`), restricted to
+    /// `let x = [primitive array literal]` in non-generic, non-effecting
+    /// fns. This *one* set drives BOTH the alloc-routing ([`lower_stmt`])
+    /// and the free-skip ([`emit_scope_drops`]) so they cannot diverge.
+    /// VarIds are globally unique, so a single program-wide set is
+    /// unambiguous regardless of which fn is being compiled.
+    arena_routed: HashSet<VarId>,
+    /// C5.4 (2/N) / ADR 0028: transient flag set by [`lower_stmt`] while
+    /// lowering the RHS of an arena-routed `let x = [array literal]`, so
+    /// [`Self::lower_array_lit`] routes the data buffer's allocation to
+    /// the current scope's arena. Consumed (reset to false) by
+    /// `lower_array_lit` before it lowers the elements, so a nested array
+    /// literal in an element does not inherit the routing.
+    array_route_active: bool,
 }
 
 /// Map a Sentinel [`Type`] to its LLVM `BasicTypeEnum`. C1.5
@@ -1954,7 +2052,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         self.builder.position_at_end(entry);
 
         // C2.4: scope 0 for params (same as compile_fn).
-        self.scope_stack.push(Vec::new());
+        self.scope_stack.push(ScopeFrame::default());
 
         for (i, param) in def.params.iter().enumerate() {
             let arg = fn_value
@@ -2013,7 +2111,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             self.scope_stack.clear();
             let entry = self.context.append_basic_block(fn_value, "entry");
             self.builder.position_at_end(entry);
-            self.scope_stack.push(Vec::new());
+            self.scope_stack.push(ScopeFrame::default());
 
             // self_ptr = first arg. Bind self_var_id directly to
             // this pointer (no extra alloca + store) so field
@@ -2068,7 +2166,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             self.scope_stack.clear();
             let entry = self.context.append_basic_block(fn_value, "entry");
             self.builder.position_at_end(entry);
-            self.scope_stack.push(Vec::new());
+            self.scope_stack.push(ScopeFrame::default());
 
             // self_ptr = first arg. Bind self_var_id directly.
             let self_ptr = fn_value
@@ -2133,7 +2231,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             self.scope_stack.clear();
             let entry = self.context.append_basic_block(fn_value, "entry");
             self.builder.position_at_end(entry);
-            self.scope_stack.push(Vec::new());
+            self.scope_stack.push(ScopeFrame::default());
 
             // self_ptr = first arg; bind directly (no extra
             // alloca + store) so self.field reads/writes GEP
@@ -2256,7 +2354,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // body pushes scope 1, etc. At fn return, scope 0 (params)
         // gets drop emission too — moved-source set will skip
         // params that were passed-through.
-        self.scope_stack.push(Vec::new());
+        self.scope_stack.push(ScopeFrame::default());
 
         for (i, param) in fn_def.params.iter().enumerate() {
             let arg = fn_value
@@ -2368,7 +2466,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let saved_scope = std::mem::take(&mut self.scope_stack);
 
         self.current_fn = Some(resumer_fn);
-        self.scope_stack.push(Vec::new());
+        self.scope_stack.push(ScopeFrame::default());
         let resumer_entry = self.context.append_basic_block(resumer_fn, "entry");
         self.builder.position_at_end(resumer_entry);
 
@@ -2453,7 +2551,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         self.current_fn_id = fn_def.id;
         self.vars.clear();
         self.scope_stack.clear();
-        self.scope_stack.push(Vec::new());
+        self.scope_stack.push(ScopeFrame::default());
 
         let parent_entry = self.context.append_basic_block(parent_fn, "entry");
         self.builder.position_at_end(parent_entry);
@@ -2575,7 +2673,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let saved_scope = std::mem::take(&mut self.scope_stack);
 
         self.current_fn = Some(resumer_fn);
-        self.scope_stack.push(Vec::new());
+        self.scope_stack.push(ScopeFrame::default());
         let resumer_entry = self.context.append_basic_block(resumer_fn, "entry");
         self.builder.position_at_end(resumer_entry);
 
@@ -2660,7 +2758,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         self.current_fn_id = fn_def.id;
         self.vars.clear();
         self.scope_stack.clear();
-        self.scope_stack.push(Vec::new());
+        self.scope_stack.push(ScopeFrame::default());
 
         let parent_entry = self.context.append_basic_block(parent_fn, "entry");
         self.builder.position_at_end(parent_entry);
@@ -2812,7 +2910,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             self.current_fn = Some(resumer_fn);
             self.vars.clear();
             self.scope_stack.clear();
-            self.scope_stack.push(Vec::new());
+            self.scope_stack.push(ScopeFrame::default());
 
             let entry = self.context.append_basic_block(resumer_fn, "entry");
             self.builder.position_at_end(entry);
@@ -2924,7 +3022,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         self.current_fn_id = fn_def.id;
         self.vars.clear();
         self.scope_stack.clear();
-        self.scope_stack.push(Vec::new());
+        self.scope_stack.push(ScopeFrame::default());
 
         let parent_entry = self.context.append_basic_block(parent_fn, "entry");
         self.builder.position_at_end(parent_entry);
@@ -3036,7 +3134,15 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     ) -> Result<(), CodegenError> {
         match &stmt.kind {
             TypedStmtKind::Let { id, name, ty, value, .. } => {
+                // C5.4 (2/N) / ADR 0028: if this binding is arena-routed
+                // and its RHS is an array literal, signal `lower_array_lit`
+                // to bump-allocate the data buffer in the current scope's
+                // arena instead of libc. `lower_array_lit` consumes the
+                // flag before lowering elements; reset here too defensively.
+                self.array_route_active = self.arena_routed.contains(id)
+                    && matches!(value.kind, TypedExprKind::ArrayLit { .. });
                 let v = self.lower_expr(value, program)?;
+                self.array_route_active = false;
                 let llvm_ty = self.llvm_basic_type(*ty);
                 let alloca = self
                     .builder
@@ -3130,7 +3236,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // Drops fire at the bottom (after the tail evaluates)
         // for any heap-backed binding in this scope that wasn't
         // moved away.
-        self.scope_stack.push(Vec::new());
+        self.scope_stack.push(ScopeFrame::default());
         for stmt in &block.stmts {
             self.lower_stmt(stmt, program)?;
         }
@@ -3167,11 +3273,21 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .cloned()
             .unwrap_or_default();
         let moved = self.drop_plan.moved_sources_for(self.current_fn_id);
-        for &id in scope.iter().rev() {
+        for &id in scope.vars.iter().rev() {
             if Some(id) == tail_returned {
                 continue;
             }
             if moved.contains(&id) {
+                continue;
+            }
+            // C5.4 (2/N) / ADR 0028: arena-routed bindings (a strict
+            // subset of the frees that would happen here — see
+            // [`compute_arena_routed`]) had their heap buffer placed in
+            // this scope's arena; the single `sentinel_arena_exit` below
+            // bulk-frees them, so skip the per-binding `sentinel_free`.
+            // Routing and free-skip are driven by the same `arena_routed`
+            // set, so they cannot diverge (no leak, no double-free).
+            if self.arena_routed.contains(&id) {
                 continue;
             }
             let (ptr, ty) = match self.vars.get(&id) {
@@ -3179,6 +3295,15 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 None => continue,
             };
             self.emit_drop_for_binding(ptr, ty, program)?;
+        }
+        // C5.4 (2/N) / ADR 0028: if this scope lazily created an arena
+        // (i.e. routed ≥1 allocation), bulk-free it in one call. The
+        // handle was captured when the arena was entered, on a block
+        // that dominates this exit point, so it is valid here.
+        if let Some(handle) = scope.arena {
+            self.builder
+                .build_call(self.arena_exit_fn, &[handle.into()], "")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
         }
         Ok(())
     }
@@ -3532,6 +3657,62 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(ret.into_pointer_value())
     }
 
+    /// C5.4 (2/N) / ADR 0028: bump-allocate `size` bytes in the current
+    /// scope's broker arena, returning the pointer. The arena is created
+    /// lazily on first use ([`Self::current_scope_arena`]) and bulk-freed
+    /// by the scope's `sentinel_arena_exit` in `emit_scope_drops`.
+    fn arena_alloc_call(&mut self, size: IntValue<'ctx>) -> Result<PointerValue<'ctx>, CodegenError> {
+        let handle = self.current_scope_arena()?;
+        let call = self
+            .builder
+            .build_call(self.arena_alloc_fn, &[handle.into(), size.into()], "arena_alloc")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let ret = call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                CodegenError::Builder("sentinel_arena_alloc returned void".to_string())
+            })?;
+        Ok(ret.into_pointer_value())
+    }
+
+    /// C5.4 (2/N) / ADR 0028: get-or-create the current (top-of-stack)
+    /// scope's broker bump arena handle. Created lazily on the first
+    /// arena-routed allocation in the scope — so a scope that routes
+    /// nothing emits no `sentinel_arena_enter`/`_exit` and stays
+    /// byte-identical — and stored in the scope's [`ScopeFrame`] so
+    /// `emit_scope_drops` can exit exactly the same handle. Capacity 0
+    /// asks the runtime for its default arena size.
+    ///
+    /// The enter call is emitted at the first routed alloc, which is a
+    /// direct statement on the scope's sequential block spine; the exit
+    /// is emitted at the scope's end on that same spine. The enter block
+    /// therefore dominates the exit (and every alloc), so the returned
+    /// SSA handle is valid at all its uses.
+    fn current_scope_arena(&mut self) -> Result<PointerValue<'ctx>, CodegenError> {
+        if let Some(frame) = self.scope_stack.last() {
+            if let Some(handle) = frame.arena {
+                return Ok(handle);
+            }
+        }
+        let cap = self.context.i64_type().const_zero();
+        let call = self
+            .builder
+            .build_call(self.arena_enter_fn, &[cap.into()], "arena_enter")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let handle = call
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| {
+                CodegenError::Builder("sentinel_arena_enter returned void".to_string())
+            })?
+            .into_pointer_value();
+        if let Some(frame) = self.scope_stack.last_mut() {
+            frame.arena = Some(handle);
+        }
+        Ok(handle)
+    }
+
     /// Lower `is_some(x: ?T) -> bool` per ADR 0014 D9. Inline:
     /// extract the discriminator field (i1 valid) from the `?T`
     /// struct value.
@@ -3575,6 +3756,12 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         array_ty: Type,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        // C5.4 (2/N) / ADR 0028: consume the routing flag set by
+        // `lower_stmt` for an arena-routed `let x = [array]`. Take it
+        // before lowering elements so a nested array literal in an
+        // element cannot inherit the routing.
+        let route_to_arena = std::mem::take(&mut self.array_route_active);
+
         let i64_type = self.context.i64_type();
         let n = elements.len() as u64;
         let len_val = i64_type.const_int(n, false);
@@ -3598,7 +3785,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // pointer per the C standard). We pass it through; reading
         // from an empty array would already be a bounds-check
         // failure.
-        let data_ptr = self.alloc_call(total_size)?;
+        //
+        // C5.4 (2/N) / ADR 0028: an arena-routed binding's data buffer
+        // is bump-allocated in the current scope's arena (reclaimed by
+        // the scope's `sentinel_arena_exit`, which replaces this
+        // binding's skipped `sentinel_free`). Otherwise libc as before.
+        let data_ptr = if route_to_arena {
+            self.arena_alloc_call(total_size)?
+        } else {
+            self.alloc_call(total_size)?
+        };
 
         // Store each element: GEP to elem-i, store.
         for (i, elem) in elements.iter().enumerate() {
@@ -5881,6 +6077,121 @@ fn tail_returned_var(tail: &TypedExpr) -> Option<VarId> {
         TypedExprKind::Block(b) => tail_returned_var(&b.tail),
         _ => None,
     }
+}
+
+/// C5.4 (2/N) / ADR 0028: compute the program-wide set of binding
+/// VarIds whose heap allocation is routed into a per-scope broker bump
+/// arena (and whose individual `sentinel_free` is therefore skipped, the
+/// arena reset reclaiming it instead).
+///
+/// **Safety bar (the airtight argument).** The routed set is, by
+/// construction, a *subset of exactly what [`CodegenCtx::emit_scope_drops`]
+/// already frees* at scope exit: a binding `x` is routed iff it is a
+/// `let x = [primitive array literal]` (element type i64/i32/bool — so
+/// the only heap footprint is the one `{len,data}` data buffer that the
+/// `Type::Array` drop frees) AND `x ∉ moved_sources(fn)` AND
+/// `Some(x) != tail_returned_var(&B.tail)` for `x`'s declaring block `B`.
+/// Those last two are the *same* predicate `emit_scope_drops` uses, so a
+/// routed binding is one the borrow checker already proved is dropped
+/// (non-escaping) at that exact scope exit. Routing is therefore as safe
+/// as today's per-binding free — same bindings, same lifetime, same
+/// point, bulk vs individual — and a returned/moved array (which *is*
+/// recorded in `moved_sources`; see the note below) is never routed.
+///
+/// **Note on `moved_sources`.** A tail-returned array such as
+/// `fn make() -> [i64] { let a = [1,2,3]; a }` *is* in `moved_sources`:
+/// the borrow checker walks the tail `Var(a)` as a consuming move
+/// (arrays are Move-typed) before snapshotting the DropPlan, so `∉ moved`
+/// alone already excludes it. The `tail_returned` half of the predicate
+/// is kept regardless, so the routed set matches `emit_scope_drops`
+/// exactly under any reading.
+///
+/// Scope is deliberately narrow for this first slice: only non-generic
+/// (`type_params` empty), non-effecting (`!uses_kont_abi`) free
+/// functions, which always lower via the standard `lower_block` +
+/// `emit_scope_drops` path. Methods, generics, effecting fns, and
+/// non-primitive-element arrays keep the unchanged libc path. VarIds are
+/// globally unique, so one program-wide set is queried per binding
+/// without ambiguity.
+fn compute_arena_routed(program: &TypedProgram, drop_plan: &DropPlan) -> HashSet<VarId> {
+    let mut routed = HashSet::new();
+    for fn_def in &program.fns {
+        if !fn_def.type_params.is_empty() {
+            continue;
+        }
+        if uses_kont_abi(program.signature(fn_def.id), program) {
+            continue;
+        }
+        let moved = drop_plan.moved_sources_for(fn_def.id);
+        collect_routed_block(&fn_def.body, moved, &mut routed);
+    }
+    routed
+}
+
+/// Walk one lexical scope (a [`TypedBlock`]) collecting arena-routable
+/// `let` bindings, then recurse into nested scopes. Mirrors exactly how
+/// `lower_block` + `emit_scope_drops` treat the block: a direct `let`'s
+/// binding is freed at *this* block's exit unless it is moved out or is
+/// this block's tail value, so the routing predicate is evaluated
+/// against this same block's `tail_returned_var(&block.tail)`.
+fn collect_routed_block(
+    block: &TypedBlock,
+    moved: &std::collections::BTreeSet<VarId>,
+    routed: &mut HashSet<VarId>,
+) {
+    let tail_var = tail_returned_var(&block.tail);
+    for stmt in &block.stmts {
+        match &stmt.kind {
+            TypedStmtKind::Let { id, ty, value, .. } => {
+                if is_primitive_array_lit(value, *ty)
+                    && !moved.contains(id)
+                    && Some(*id) != tail_var
+                {
+                    routed.insert(*id);
+                }
+                // A nested scope may live inside the RHS (e.g. a block
+                // expression); recurse so its routable lets are found.
+                collect_routed_expr(value, moved, routed);
+            }
+            TypedStmtKind::Assign { value, .. } => collect_routed_expr(value, moved, routed),
+            TypedStmtKind::Expr(e) => collect_routed_expr(e, moved, routed),
+        }
+    }
+    collect_routed_expr(&block.tail, moved, routed);
+}
+
+/// Recurse into the block-bearing expression forms (`{ ... }` and `if`),
+/// where `lower_block` opens further scopes. Other expression kinds are
+/// not descended into for this first slice — any array literal buried in
+/// them simply stays on the unchanged libc path (conservatively
+/// un-routed, never mis-routed).
+fn collect_routed_expr(
+    expr: &TypedExpr,
+    moved: &std::collections::BTreeSet<VarId>,
+    routed: &mut HashSet<VarId>,
+) {
+    match &expr.kind {
+        TypedExprKind::Block(b) => collect_routed_block(b, moved, routed),
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            collect_routed_expr(cond, moved, routed);
+            collect_routed_block(then_branch, moved, routed);
+            collect_routed_block(else_branch, moved, routed);
+        }
+        _ => {}
+    }
+}
+
+/// Is `value` a `[primitive array literal]` whose binding type is an
+/// array of i64/i32/bool? Restricting to primitive element types keeps
+/// the routed footprint to exactly one heap buffer (the `{len,data}`
+/// data pointer) with exactly one `Type::Array` drop, so the arena reset
+/// reclaims precisely what the skipped `sentinel_free` would have.
+fn is_primitive_array_lit(value: &TypedExpr, ty: Type) -> bool {
+    matches!(value.kind, TypedExprKind::ArrayLit { .. })
+        && matches!(
+            ty,
+            Type::Array(ArrayElem::I64) | Type::Array(ArrayElem::I32) | Type::Array(ArrayElem::Bool)
+        )
 }
 
 /// Returns the crate name as a sanity-check that the build is wired up.
