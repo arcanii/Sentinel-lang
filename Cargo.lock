@@ -1235,10 +1235,12 @@ dependencies = [
 name = "sentinel-mir"
 version = "0.0.1"
 dependencies = [
+ "miette",
  "sentinel-ast",
  "sentinel-resolve",
  "sentinel-syntax",
  "sentinel-types",
+ "thiserror",
 ]
 
 [[package]]

@@ -15,6 +15,11 @@ sentinel-types   = { path = "../sentinel-types" }
 # `lower_to_mir` keys its SSA variable environment by `VarId`.
 sentinel-resolve = { path = "../sentinel-resolve" }
 
+# The D5 constant-time verification emits a `sentinel::mir::secret_leak`
+# what/why/how diagnostic (rendered by the driver).
+miette     = { workspace = true }
+thiserror  = { workspace = true }
+
 [dev-dependencies]
 # Exercising `lower_to_mir` end-to-end needs a real `TypedProgram`,
 # which is not `Default`-constructible — build one through the pipeline

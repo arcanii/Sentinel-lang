@@ -57,7 +57,7 @@
 //! consumer; the driver will call it as `lower_to_mir(hir.program())`
 //! once D5 lands.
 
-use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
+use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, UnaryOp};
 use sentinel_resolve::VarId;
 use sentinel_types::{
     Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
@@ -126,6 +126,9 @@ pub struct MirBlock {
 pub struct MirInst {
     pub dest: MirValue,
     pub op: MirOp,
+    /// The source span of the operation, so the D5 `secret_leak`
+    /// diagnostic can point at a leaking `Load` / `Binary(Div)` sink.
+    pub span: Span,
 }
 
 /// The value-producing operations.
@@ -168,13 +171,15 @@ pub enum MirTerminator {
         args: Vec<MirValue>,
     },
     /// Conditional branch. A `secret` `cond` is a D5 leak (secret-
-    /// dependent control flow).
+    /// dependent control flow). `span` points at the condition's source
+    /// (an `if` cond, or the short-circuited operand of `&&`/`||`).
     Branch {
         cond: MirValue,
         then_blk: MirBlockId,
         then_args: Vec<MirValue>,
         else_blk: MirBlockId,
         else_args: Vec<MirValue>,
+        span: Span,
     },
     /// Return an optional value.
     Return(Option<MirValue>),
@@ -257,11 +262,12 @@ impl FnBuilder {
         id
     }
 
-    /// Append an instruction to the current block; returns its `dest`.
-    fn emit(&mut self, op: MirOp, ty: Type) -> MirValue {
+    /// Append an instruction (with its source span) to the current
+    /// block; returns its `dest`.
+    fn emit(&mut self, op: MirOp, ty: Type, span: Span) -> MirValue {
         let dest = self.new_value(ty);
         let cur = self.current.0 as usize;
-        self.blocks[cur].insts.push(MirInst { dest, op });
+        self.blocks[cur].insts.push(MirInst { dest, op, span });
         dest
     }
 
@@ -306,10 +312,10 @@ impl FnBuilder {
     /// Look up a variable's current SSA value. Unbound is a no-op-safe
     /// fallback (well-typed bodies always bind before use) so lowering
     /// stays total.
-    fn lookup_var(&mut self, id: VarId, ty: Type) -> MirValue {
+    fn lookup_var(&mut self, id: VarId, ty: Type, span: Span) -> MirValue {
         match self.var_defs.get(&id) {
             Some(&v) => v,
-            None => self.emit(MirOp::Opaque(Vec::new()), ty),
+            None => self.emit(MirOp::Opaque(Vec::new()), ty, span),
         }
     }
 }
@@ -358,7 +364,7 @@ impl FnBuilder {
                     // out of scope per ADR 0017 D12, so no secret address
                     // is hidden here).
                     _ => {
-                        self.emit(MirOp::Opaque(vec![v]), target.ty);
+                        self.emit(MirOp::Opaque(vec![v]), target.ty, target.span.clone());
                     }
                 }
             }
@@ -370,11 +376,16 @@ impl FnBuilder {
 
     fn lower_expr(&mut self, program: &TypedProgram, e: &TypedExpr) -> MirValue {
         let ty = e.ty;
+        // Each instruction records its expression's span so the D5
+        // `secret_leak` diagnostic can point at the sink. (Control-flow
+        // arms use the condition's span instead — see `lower_if` /
+        // `lower_logic` — so `span` is unused there.)
+        let span = e.span.clone();
         match &e.kind {
             // ---- constants + variables -------------------------------
-            TypedExprKind::IntLit(n) => self.emit(MirOp::ConstInt(*n), ty),
-            TypedExprKind::BoolLit(b) => self.emit(MirOp::ConstBool(*b), ty),
-            TypedExprKind::Var(id) => self.lookup_var(*id, ty),
+            TypedExprKind::IntLit(n) => self.emit(MirOp::ConstInt(*n), ty, span),
+            TypedExprKind::BoolLit(b) => self.emit(MirOp::ConstBool(*b), ty, span),
+            TypedExprKind::Var(id) => self.lookup_var(*id, ty, span),
 
             // ---- secret-relevant arithmetic / comparison -------------
             TypedExprKind::Unary(op, inner) => {
@@ -383,8 +394,8 @@ impl FnBuilder {
                     // `*p` is a memory load; model it as a `Load` so the
                     // D5 pass can flag a secret pointer (the
                     // `SecretInRefDeref` class of leak).
-                    UnaryOp::Deref => self.emit(MirOp::Load { base: v, index: None }, ty),
-                    _ => self.emit(MirOp::Unary(*op, v), ty),
+                    UnaryOp::Deref => self.emit(MirOp::Load { base: v, index: None }, ty, span),
+                    _ => self.emit(MirOp::Unary(*op, v), ty, span),
                 }
             }
             TypedExprKind::Binary(op, l, r) => {
@@ -392,28 +403,28 @@ impl FnBuilder {
                 let vr = self.lower_expr(program, r);
                 // `Div` is the variable-latency op; a secret divisor `vr`
                 // is the D5 leak the pass reads off this instruction.
-                self.emit(MirOp::Binary(*op, vl, vr), ty)
+                self.emit(MirOp::Binary(*op, vl, vr), ty, span)
             }
             TypedExprKind::Cmp(op, l, r) => {
                 let vl = self.lower_expr(program, l);
                 let vr = self.lower_expr(program, r);
-                self.emit(MirOp::Compare(*op, vl, vr), ty)
+                self.emit(MirOp::Compare(*op, vl, vr), ty, span)
             }
             TypedExprKind::Logic(op, l, r) => self.lower_logic(program, *op, l, r, ty),
 
             // ---- the secret qualifier itself -------------------------
             TypedExprKind::Declassify(inner) => {
                 let v = self.lower_expr(program, inner);
-                self.emit(MirOp::Declassify(v), ty)
+                self.emit(MirOp::Declassify(v), ty, span)
             }
             // `T → secret T` / `T → ?T` widening is identity at runtime;
             // carry the operand and let the result type speak (the
             // `secret`/`?` bit lives on `ty`).
             TypedExprKind::WidenToSecret(inner) | TypedExprKind::WidenToNullable(inner) => {
                 let v = self.lower_expr(program, inner);
-                self.emit(MirOp::Opaque(vec![v]), ty)
+                self.emit(MirOp::Opaque(vec![v]), ty, span)
             }
-            TypedExprKind::NullLit => self.emit(MirOp::Opaque(Vec::new()), ty),
+            TypedExprKind::NullLit => self.emit(MirOp::Opaque(Vec::new()), ty, span),
 
             // ---- control flow ----------------------------------------
             TypedExprKind::Block(b) => self.lower_block(program, b),
@@ -428,37 +439,37 @@ impl FnBuilder {
                 let arg_vals: Vec<MirValue> =
                     args.iter().map(|a| self.lower_expr(program, a)).collect();
                 let callee = program.signature(*id).name.clone();
-                self.emit(MirOp::Call { callee, args: arg_vals }, ty)
+                self.emit(MirOp::Call { callee, args: arg_vals }, ty, span)
             }
             TypedExprKind::Index { target, index, .. } => {
                 let base = self.lower_expr(program, target);
                 let idx = self.lower_expr(program, index);
                 // A secret `index` is the D5 leak (secret-dependent
                 // address) the pass reads off this load.
-                self.emit(MirOp::Load { base, index: Some(idx) }, ty)
+                self.emit(MirOp::Load { base, index: Some(idx) }, ty, span)
             }
 
             // ---- everything else → Opaque (operands carried) ---------
             TypedExprKind::StructLit { fields, .. } => {
                 let vals: Vec<MirValue> =
                     fields.iter().map(|f| self.lower_expr(program, f)).collect();
-                self.emit(MirOp::Opaque(vals), ty)
+                self.emit(MirOp::Opaque(vals), ty, span)
             }
             TypedExprKind::FieldAccess { target, .. } => {
                 let v = self.lower_expr(program, target);
-                self.emit(MirOp::Opaque(vec![v]), ty)
+                self.emit(MirOp::Opaque(vec![v]), ty, span)
             }
             TypedExprKind::ArrayLit { elements, .. } => {
                 let vals: Vec<MirValue> =
                     elements.iter().map(|el| self.lower_expr(program, el)).collect();
-                self.emit(MirOp::Opaque(vals), ty)
+                self.emit(MirOp::Opaque(vals), ty, span)
             }
             // Receiver + args: a method/impl-method call.
             TypedExprKind::MethodCall { target, args, .. }
             | TypedExprKind::ImplMethodCall { target, args, .. } => {
                 let mut vals = vec![self.lower_expr(program, target)];
                 vals.extend(args.iter().map(|a| self.lower_expr(program, a)));
-                self.emit(MirOp::Opaque(vals), ty)
+                self.emit(MirOp::Opaque(vals), ty, span)
             }
             // Args-only forms (the receiver, if any, is already in `args`).
             TypedExprKind::QualifiedCall { args, .. }
@@ -467,7 +478,7 @@ impl FnBuilder {
             | TypedExprKind::ResumeKont { args, .. } => {
                 let vals: Vec<MirValue> =
                     args.iter().map(|a| self.lower_expr(program, a)).collect();
-                self.emit(MirOp::Opaque(vals), ty)
+                self.emit(MirOp::Opaque(vals), ty, span)
             }
             // A handler's arms bind their own (handler-scoped) `VarId`s
             // that this walk does not model, so lower only the body — its
@@ -476,7 +487,7 @@ impl FnBuilder {
             // constant-time path.)
             TypedExprKind::Handle { body, .. } => {
                 let v = self.lower_expr(program, body);
-                self.emit(MirOp::Opaque(vec![v]), ty)
+                self.emit(MirOp::Opaque(vec![v]), ty, span)
             }
             // `scope concurrent { .. }` is value-transparent (its value is
             // the body's tail); lower the block inline so any nested
@@ -484,11 +495,11 @@ impl FnBuilder {
             TypedExprKind::Scope { body, .. } => self.lower_block(program, body),
             TypedExprKind::Spawn { call, .. } => {
                 let v = self.lower_expr(program, call);
-                self.emit(MirOp::Opaque(vec![v]), ty)
+                self.emit(MirOp::Opaque(vec![v]), ty, span)
             }
             TypedExprKind::Await { task_expr, .. } => {
                 let v = self.lower_expr(program, task_expr);
-                self.emit(MirOp::Opaque(vec![v]), ty)
+                self.emit(MirOp::Opaque(vec![v]), ty, span)
             }
         }
     }
@@ -518,6 +529,7 @@ impl FnBuilder {
                 then_args: Vec::new(),
                 else_blk,
                 else_args: Vec::new(),
+                span: cond.span.clone(),
             },
         );
 
@@ -602,6 +614,7 @@ impl FnBuilder {
                 then_args: Vec::new(),
                 else_blk,
                 else_args: Vec::new(),
+                span: l.span.clone(),
             },
         );
 
@@ -613,7 +626,7 @@ impl FnBuilder {
         let rhs_exit = self.current;
 
         self.current = short_blk;
-        let short_val = self.emit(MirOp::ConstBool(matches!(op, LogicOp::Or)), ty);
+        let short_val = self.emit(MirOp::ConstBool(matches!(op, LogicOp::Or)), ty, l.span.clone());
 
         let merge = self.new_block();
         let result = self.add_param(merge, ty);
@@ -634,6 +647,118 @@ impl FnBuilder {
         self.current = merge;
         result
     }
+}
+
+// =============================================================================
+// D5 — the constant-time verification pass (C5.2, ADR 0026 D5)
+// =============================================================================
+
+/// Which timing-observable sink a `secret` value reached — the three
+/// constant-time sinks of ADR 0026 D5 (`SinkKind::MemoryIndex` and
+/// `MemoryAddress` are the two ways a [`MirOp::Load`] can leak).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkKind {
+    /// The condition of a conditional branch — secret-dependent control
+    /// flow (an `if`, or a `&&` / `||` short-circuit).
+    Branch,
+    /// The index of a memory load (`a[i]`) — a secret-dependent address.
+    MemoryIndex,
+    /// The base pointer of a load (`*p`) — a secret pointer.
+    MemoryAddress,
+    /// The divisor of an integer division — a variable-latency operation.
+    Division,
+}
+
+impl std::fmt::Display for SinkKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SinkKind::Branch => "a conditional branch",
+            SinkKind::MemoryIndex => "a memory index",
+            SinkKind::MemoryAddress => "a memory address",
+            SinkKind::Division => "a variable-latency division",
+        })
+    }
+}
+
+/// A `secret` value reached a timing-observable sink: the
+/// `sentinel::mir::secret_leak` constant-time violation (ADR 0026 D5).
+/// The driver renders this as a what/why/how diagnostic.
+#[derive(Debug, Clone, thiserror::Error, miette::Diagnostic)]
+#[error("a `secret` value reaches {sink}, which would leak it via timing")]
+#[diagnostic(
+    code(sentinel::mir::secret_leak),
+    help(
+        "a secret must not influence control flow, a memory address, or a \
+         variable-latency instruction; restructure to be branch-free (e.g. a \
+         masked select) or `declassify` the value first if the leak is acceptable"
+    )
+)]
+pub struct SecretLeak {
+    /// Which sink the secret reached (interpolated into the message).
+    pub sink: SinkKind,
+    #[label("secret value reaches the sink here")]
+    pub span: miette::SourceSpan,
+}
+
+fn secret_leak(sink: SinkKind, span: &Span) -> SecretLeak {
+    SecretLeak {
+        sink,
+        span: (span.start, span.len()).into(),
+    }
+}
+
+/// Verify the constant-time discipline over a lowered program
+/// (ADR 0026 D5): no `secret` value may reach the condition of a
+/// conditional branch, the index or base address of a memory load, or
+/// the divisor of an integer division. Returns one [`SecretLeak`] per
+/// violation — an empty result means the program is constant-time at the
+/// MIR level. This is the machine-checkable expression of ADR 0008's
+/// guarantee, and the first consumer of [`lower_to_mir`].
+///
+/// **Taint oracle.** Each SSA value carries its [`Type`], and the type
+/// checker's operator-secret-preserving rules already computed the taint
+/// fixpoint — a value's type is `secret` iff a source-reachable operand
+/// was, with `declassify` clearing it and function-signature boundaries
+/// respected. So the pass reads taint straight off the type
+/// ([`MirFunction::is_secret`]) and inspects each sink; no separate
+/// def-use propagation is needed here. (That standalone forward
+/// propagation only becomes necessary once MIR is lowered from
+/// *post-optimisation* code, where the optimiser may have produced a
+/// secret-derived value the type no longer marks — a **post-1.0** form,
+/// recorded as an amendment to ADR 0026 D5. At 1.0 the additional leak
+/// this pass catches over the C3.1 source rejections is the
+/// `secret bool && secret bool` short-circuit, which type-checks because
+/// `SecretBranch` only rejects `if`.)
+pub fn verify_constant_time(program: &MirProgram) -> Vec<SecretLeak> {
+    let mut leaks = Vec::new();
+    for f in &program.functions {
+        for block in &f.blocks {
+            for inst in &block.insts {
+                match &inst.op {
+                    MirOp::Load { base, index } => {
+                        if let Some(idx) = index {
+                            if f.is_secret(*idx) {
+                                leaks.push(secret_leak(SinkKind::MemoryIndex, &inst.span));
+                            }
+                        }
+                        if f.is_secret(*base) {
+                            leaks.push(secret_leak(SinkKind::MemoryAddress, &inst.span));
+                        }
+                    }
+                    MirOp::Binary(BinOp::Div, _, divisor) if f.is_secret(*divisor) => {
+                        leaks.push(secret_leak(SinkKind::Division, &inst.span));
+                    }
+                    _ => {}
+                }
+            }
+            if let MirTerminator::Branch { cond, span, .. } = &block.term {
+                if f.is_secret(*cond) {
+                    leaks.push(secret_leak(SinkKind::Branch, span));
+                }
+            }
+        }
+    }
+    leaks
 }
 
 #[cfg(test)]
@@ -664,6 +789,7 @@ mod tests {
                         then_args: vec![],
                         else_blk: MirBlockId(2),
                         else_args: vec![],
+                        span: 0..0,
                     },
                 },
                 // blk1: v1 = 1; return v1
@@ -672,6 +798,7 @@ mod tests {
                     insts: vec![MirInst {
                         dest: MirValue(1),
                         op: MirOp::ConstInt(1),
+                        span: 0..0,
                     }],
                     term: MirTerminator::Return(Some(MirValue(1))),
                 },
@@ -681,6 +808,7 @@ mod tests {
                     insts: vec![MirInst {
                         dest: MirValue(2),
                         op: MirOp::ConstInt(0),
+                        span: 0..0,
                     }],
                     term: MirTerminator::Return(Some(MirValue(2))),
                 },
@@ -699,6 +827,11 @@ mod tests {
             }
             _ => panic!("entry block should end in a branch"),
         }
+
+        // And the D5 pass flags exactly this one secret-conditional branch.
+        let leaks = verify_constant_time(&MirProgram { functions: vec![f] });
+        assert_eq!(leaks.len(), 1);
+        assert_eq!(leaks[0].sink, SinkKind::Branch);
     }
 
     // ---- lower_to_mir (C5.1b 2/N) -------------------------------------
@@ -865,5 +998,94 @@ mod tests {
             assert!(merge.params.contains(ret), "the tail `x` reads a merge param");
             assert_eq!(*ret, merge.params[1], "...the reconciled-variable param");
         }
+    }
+
+    // ---- verify_constant_time (C5.2 / D5) -----------------------------
+
+    #[test]
+    fn verify_flags_a_secret_short_circuit() {
+        // `secret bool && secret bool` type-checks — `SecretBranch` only
+        // rejects `if` — and lowers to a secret-conditional Branch, so D5
+        // catches the leak the source rejections miss.
+        let p = lower(concat!(
+            "fn leaky(a: secret bool, b: secret bool) -> secret bool { a && b }\n",
+            "fn main() -> i64 { 0 }"
+        ));
+        let leaks = verify_constant_time(&p);
+        assert!(
+            leaks.iter().any(|l| l.sink == SinkKind::Branch),
+            "a secret && short-circuit is a branch leak"
+        );
+    }
+
+    #[test]
+    fn verify_passes_branch_free_secret_arithmetic() {
+        // A branch-free masked select over secrets (`c*a + (1-c)*b`) has no
+        // sink at all, so it is constant-time and D5 accepts it.
+        let p = lower(concat!(
+            "fn ct_select(c: secret i64, a: secret i64, b: secret i64) -> secret i64 {\n",
+            "  let one: secret i64 = 1;\n",
+            "  c * a + (one - c) * b\n",
+            "}\n",
+            "fn main() -> i64 { 0 }"
+        ));
+        assert!(
+            verify_constant_time(&p).is_empty(),
+            "branch-free secret arithmetic is constant-time"
+        );
+    }
+
+    #[test]
+    fn verify_passes_after_declassify() {
+        // `declassify` clears the secret, so the following `/` is public.
+        let p = lower(
+            "fn f(a: secret i64, b: i64) -> i64 { declassify(a) / b }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            verify_constant_time(&p).is_empty(),
+            "a declassified value is no longer a secret at the `/`"
+        );
+    }
+
+    #[test]
+    fn verify_flags_hand_built_secret_divisor_and_index() {
+        // A secret divisor / index is *type-rejected* at the source
+        // (SecretDivisor / IndexNotInt), so build the MIR by hand to prove
+        // the pass inspects those two sinks (the ones an optimiser could
+        // reintroduce below the type level).
+        let secret = Type::Secret(SecretId(0));
+        // v0: secret (the divisor + the index); v1: const; v2: div result;
+        // v3: opaque base; v4: load result.
+        let f = MirFunction {
+            name: "h".to_string(),
+            value_tys: vec![secret, Type::I64, Type::I64, Type::I64, Type::I64],
+            entry: MirBlockId(0),
+            ret_ty: Type::I64,
+            blocks: vec![MirBlock {
+                params: vec![MirValue(0)],
+                insts: vec![
+                    MirInst { dest: MirValue(1), op: MirOp::ConstInt(10), span: 0..0 },
+                    // v2 = 10 / secret  → a secret divisor.
+                    MirInst {
+                        dest: MirValue(2),
+                        op: MirOp::Binary(BinOp::Div, MirValue(1), MirValue(0)),
+                        span: 0..0,
+                    },
+                    // v3 = (opaque array base), v4 = base[secret] → secret index.
+                    MirInst { dest: MirValue(3), op: MirOp::Opaque(vec![]), span: 0..0 },
+                    MirInst {
+                        dest: MirValue(4),
+                        op: MirOp::Load { base: MirValue(3), index: Some(MirValue(0)) },
+                        span: 0..0,
+                    },
+                ],
+                term: MirTerminator::Return(Some(MirValue(4))),
+            }],
+        };
+        let leaks = verify_constant_time(&MirProgram { functions: vec![f] });
+        assert!(leaks.iter().any(|l| l.sink == SinkKind::Division), "secret divisor");
+        assert!(leaks.iter().any(|l| l.sink == SinkKind::MemoryIndex), "secret index");
+        // The opaque base is not secret, so no MemoryAddress leak.
+        assert!(!leaks.iter().any(|l| l.sink == SinkKind::MemoryAddress));
     }
 }
