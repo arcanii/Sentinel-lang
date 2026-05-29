@@ -42,9 +42,15 @@ recursion for iteration — all green) + modelling choices, **not** new
 machinery; **actors are descoped** from 1.0 (ADR 0030 D3, a deviation from
 C5.0 — a sequential handshake needs no mailbox), and bit shifts are a
 conditional JIT prerequisite (ADR 0027 A1, only if a reduced primitive
-needs them). Resume at go/no-go **(1/N)**: the skeleton (state machine +
-cipher trait + I/O effects + 4-stage flow, stubbed crypto). Closing the
-go/no-go (runs + passes D5) **declares Sentinel 1.0** and flips ADR 0025.
+needs them). **go/no-go (1/N) is DONE** — `tests/pass/c5_go_no_go.sentinel`,
+the handshake skeleton (state-machine class + `Kdf` cipher trait/impl +
+`Net` I/O effect + handler + the 4-stage flow, stubbed crypto), compiles
++ runs to exit 42 (it compiled on the first try — confirming the scoping
+verdict). Resume at go/no-go **(2/N)**: fill the constant-time primitives
+over `secret` scalars (a Montgomery-ladder step + an HKDF-expand-shaped
+mix + the `c53_ct_eq` `Finished` verify) and make it **pass the D5
+constant-time check** — the decisive 1.0 validation. Closing the go/no-go
+(runs + passes D5) **declares Sentinel 1.0** and flips ADR 0025.
 
 Pre-D7(1/N) context: **C5.4 (2/N): the scope→arena codegen; ADR 0028 →
 ACCEPTED-WITH-AMENDMENTS.** Codegen routes a scope's non-escaping

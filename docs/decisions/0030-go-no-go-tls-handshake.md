@@ -23,6 +23,16 @@ Related:
   - **0028 / 0029** (broker scope arenas / stable ABI): the runtime
     substrate the program links against — both shipped.
 
+**(1/N) update (2026-05-30) — DELIVERED.** The skeleton (D9 1/N) shipped:
+`tests/pass/c5_go_no_go.sentinel` composes the state-machine class + the
+`Kdf` cipher-suite trait/impl (receiver-typed dispatch) + the `Net` I/O
+effect + handler + the 4-stage flow with **stubbed** crypto, and runs
+end-to-end to exit 42. It **compiled on the first try** — empirical
+confirmation of the scoping verdict that the go/no-go is an assembly of
+proven patterns. +1 test (1232), four-check green. **Stays PROPOSED** —
+(2/N) fills the constant-time primitives over `secret` scalars and makes
+the program **pass D5** (D6); closing that declares 1.0.
+
 ## Context — the scoping pass (2026-05-30)
 
 Before opening this sub-phase, the handshake was sketched against the
