@@ -1,0 +1,87 @@
+// C5 go/no-go (1/N) — a TLS-1.3-handshake-shaped skeleton (ADR 0030).
+// This is the 1.0 close-bar program; (1/N) is the structural skeleton
+// with STUBBED crypto, (2/N) fills the constant-time primitives over
+// `secret` scalars (a Montgomery-ladder step + an HKDF-expand-shaped mix
+// + the c53_ct_eq `Finished` verify) and makes it pass the D5 check.
+//
+// Stages: accept/recv (I/O as a `Net` effect, the c37 shape) -> ECDHE
+// (a state-machine method) -> HKDF (cipher-suite trait dispatch) ->
+// `Finished` verify (stub). Exit 42 iff the `Finished` MAC verifies.
+//
+// Trace: handler resumes recv with 5 → peer_share = 5; ecdhe 5*9 = 45;
+// derive 45+3 = 48; finished_diff(48, 48) = 0; 42 - 0 = 42.
+//
+// Expected: exit code 42, no stdout.
+
+// Network I/O modelled as an effect. `recv` carries a dummy request word
+// so it matches the proven single-arg op shape (ADR 0020).
+effect Net {
+    recv(req: i64) -> i64;
+}
+
+// Cipher-suite trait: the HKDF-expand-shaped derive step (stubbed).
+trait Kdf {
+    fn derive(self: &Self, shared: i64, label: i64) -> i64;
+}
+
+class Suite {
+    let id: i64;
+    pub init() {
+        self.id = 1;
+        0
+    }
+}
+
+impl as Kdf for Suite {
+    fn derive(self: &Self, shared: i64, label: i64) -> i64 {
+        // HKDF-expand-shaped fixed mix (stub; constant-time version 2/N).
+        shared + label
+    }
+}
+
+// Handshake state machine.
+class Handshake {
+    let shared: i64;
+    pub init() {
+        self.shared = 0;
+        0
+    }
+    // ECDHE: derive the shared secret from the peer share + our scalar
+    // (stub for a Montgomery-ladder step; real version 2/N).
+    pub fn ecdhe(self: &mut Self, peer_share: i64, our_scalar: i64) -> i64 {
+        self.shared = peer_share * our_scalar;
+        self.shared
+    }
+}
+
+// `Finished` verify (stub; the c53_ct_eq constant-time compare lands
+// in 2/N). 0 = the MACs matched.
+fn finished_diff(computed: i64, received: i64) -> i64 {
+    computed - received
+}
+
+// recv as a direct-perform effecting fn (the c37 shape).
+fn recv_client_share() -> i64 ! { Net } {
+    perform Net.recv(0)
+}
+
+fn main() -> i64 {
+    // Stage 1 — accept/recv (I/O as effect): the client's key share.
+    let peer_share: i64 = handle recv_client_share() with {
+        Net.recv(req, k) => k(5)
+    };
+
+    // Stage 2 — ECDHE: shared secret from the peer share + our scalar.
+    let mut hs: Handshake = Handshake::init();
+    let shared: i64 = hs.ecdhe(peer_share, 9);
+
+    // Stage 3 — HKDF: derive the traffic key via the cipher suite.
+    let suite: Suite = Suite::init();
+    let key: i64 = suite.derive(shared, 3);
+
+    // Stage 4 — Finished verify (stub: 0 = match).
+    let diff: i64 = finished_diff(key, 48);
+
+    // Exit 42 iff the handshake's Finished step verified.
+    42 - diff
+}

@@ -1137,3 +1137,14 @@ fn pass_c54_scope_arena() {
     // to the libc path.
     assert_eq!(run_exit("c54_scope_arena.sentinel"), 42);
 }
+
+#[test]
+fn pass_c5_go_no_go() {
+    // ADR 0030 D8 (1/N): the 1.0 go/no-go — a TLS-1.3-handshake-shaped
+    // skeleton. Exercises class state machine + cipher-suite trait
+    // dispatch + I/O-as-effects + the 4-stage flow (accept → ECDHE →
+    // HKDF → Finished), with stubbed crypto; (2/N) fills the
+    // constant-time primitives over `secret` scalars. recv resumes 5 →
+    // ecdhe 5*9=45 → derive 45+3=48 → finished_diff(48,48)=0 → 42-0=42.
+    assert_eq!(run_exit("c5_go_no_go.sentinel"), 42);
+}
