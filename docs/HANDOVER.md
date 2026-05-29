@@ -100,6 +100,7 @@ C1.3. See STATE.md Section C.
 **ADR 0026 PROPOSED — C5.1/C5.2 HIR/MIR pipeline + constant-time secret codegen — docs-only.** Ten D-decisions: HIR desugar stage (`hir_query` — dispatch-resolved + monomorphic + drops-explicit + secret-preserved; D1), minimal SSA MIR (`mir_query`; D2), codegen re-targets `TypedProgram`→HIR with MIR as the analysis substrate + a documented escape hatch if the re-target over-runs (D3), constant-time secret emission (branch-free select + ADR 0008 speculation barriers; x86-64/aarch64; D4), the MIR constant-time verification pass (taint-track secrets in SSA, `sentinel::mir::secret_leak` diagnostic; D5), secret taint representation (D7), out-of-scope (D8: full opt suite, codegen-consumes-MIR SSA lowering, oblivious secret indexing), phase-go (D9: `c51` behaviour-preservation across the whole pass suite + `c52_secret_ct` + `c52_secret_leak`), 4-sub-phase split C5.1a→C5.2b (D10).
 **Phase C5.1a (1/N) — HIR pipeline seam introduced; ADR 0026 D3 escape hatch INVOKED — complete.** `sentinel-hir` is now a real stage: a pure `lower_to_hir(&TypedProgram, &DropPlan) -> HirProgram` the driver calls after borrow-check, with `compile_to_object` consuming `&HirProgram` (a thin borrowing bundle of the typed program + drop plan at this increment). Behaviour-preserving by construction — all 1195 tests pass + every `tests/repro.rs` object byte-identical (`cdbc483`). The **D3 escape hatch was then INVOKED** (decided with the developer): codegen couples to the typed tree at ~295 `TypedExprKind` / 342 `TypedExpr` refs across 90 signatures, so a *thick*-HIR migration is a multi-session high-risk rewrite not required for the 1.0 constant-time-`secret` capability. Codegen STAYS on the typed program (via the seam, `HirProgram::program()`); the thick HIR desugar (dispatch/mono/explicit-drops) + the codegen-consumes-HIR migration are **post-1.0** (still Phase-D-valuable); **C5.1a closes at the seam**. Next: **C5.1b** — `sentinel-mir` + `mir_query`, an SSA/CFG lowered from the typed program (via the seam) for the C5.2 D5 constant-time verification; then C5.2 constant-time emission (D4, a codegen pass) + verification (D5).
 **Phase C5.1b (1/N) — MIR data model (minimal SSA/CFG) — complete.** `sentinel-mir` is no longer a stub: `MirProgram` / `MirFunction` / `MirBlock` (SSA block-params = the phi-equivalent) / `MirInst` / `MirOp` / `MirTerminator` / `MirValue`, built to host the C5.2 D5 constant-time verification. Each SSA value carries its `Type`, so secrecy reads off `Type::Secret(_)` (`MirFunction::is_secret` — the taint seed); the three D5 sinks are representable (a `Branch` condition, a `Load` index, a `Binary` Div/Rem operand); non-secret-relevant constructs funnel through `MirOp::Opaque` / `MirTerminator::Unreachable` carrying their operands so taint stays sound. Additive — nothing consumes MIR yet (codegen stays on the typed program per the escape hatch); zero regression risk; 1195 tests green (`1b0a10d`). Next: **C5.1b (2/N)** — `lower_to_mir` (typed fn bodies → MIR SSA); then C5.2 = D5 verification + D4 constant-time emission (codegen pass).
+**Phase C5.1b (2/N) — `lower_to_mir`: typed fn bodies → MIR SSA — complete.** `sentinel-mir` now lowers each free function's type-checked body into a `MirFunction` in SSA/CFG form. No loops in the surface ⇒ the CFG is a DAG and SSA falls out of one structured walk (no dominance-frontier phi placement): `if`/`&&`/`||` → `MirTerminator::Branch` into fresh blocks reconciled at a merge block via SSA block-params, with a variable reassigned on one arm threaded through a merge param (deterministic, `VarId`-sorted `BTreeMap` env). `&&`/`||` lower as control flow because `secret bool && secret bool` type-checks (`SecretBranch` only rejects `if`) — a short-circuit branch on a secret is the leak the C5.2 D5 pass must see. The three D5 sinks lower precisely (`if`/short-circuit cond → `Branch`; `a[i]`/`*p` → `MirOp::Load` so a secret index *or* address is visible; `a / b` → `Binary(Div)`); `declassify(e)` → `MirOp::Declassify` (the one taint sink); everything else → `MirOp::Opaque` carrying its operands so taint can't vanish. Scope: top-level fns only (class/impl/init method bodies a mechanical follow-on); generic defs as-is (`TypeParam` is never secret); no monomorphisation (MIR is analysis-only per the D3 escape hatch). Additive — nothing consumes MIR yet (the D5 pass at C5.2 is its first consumer; the driver will call `lower_to_mir(hir.program())` then); zero regression risk; codegen stays on the typed program. +7 lowering tests (1202 total) (`1a223c8`). ADR 0026 stays PROPOSED (flips at C5.2 close). Next: **C5.2** — D5 constant-time verification (`sentinel::mir::secret_leak`) + D4 constant-time emission (codegen pass) — the 1.0 headline.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1123,12 +1124,18 @@ New norms learned during Phase B and Phase C:
 > `MirFunction` / `MirBlock` with SSA block-params / `MirOp` /
 > `MirTerminator`), every value carrying its `Type` so secrecy reads off
 > `Type::Secret(_)` (`is_secret`), the three D5 sinks representable, the
-> rest via `Opaque`; additive (nothing consumes MIR yet). **Resume at
-> C5.1b (2/N):** `lower_to_mir` — lower typed fn bodies → MIR SSA
-> (`if`/control-flow → CFG blocks + block-params; secret-relevant ops
-> precise, the rest `Opaque`). Then C5.2 = the D5 verification pass over
-> the MIR (`sentinel::mir::secret_leak`) + D4 constant-time emission as a
-> codegen pass — the 1.0 headline.
+> rest via `Opaque`; additive (nothing consumes MIR yet). **C5.1b (2/N)
+> is then DONE** — `lower_to_mir` lowers typed fn bodies → MIR SSA
+> (`if`/`&&`/`||` → `Branch` + merge block-params; a variable reassigned
+> on one arm threaded through a merge param; the three D5 sinks precise —
+> `Branch` cond / `Load` index+address / `Binary(Div)` — and `declassify`
+> → `MirOp::Declassify`, the rest `Opaque`); top-level fns only; still
+> additive (nothing consumes MIR yet). **Resume at C5.2:** the D5
+> constant-time verification pass over the MIR (taint-propagate `secret`,
+> reject a tainted value at a branch/load/div sink →
+> `sentinel::mir::secret_leak`) + D4 constant-time emission as a codegen
+> pass — the 1.0 headline. The D5 pass is `lower_to_mir`'s first consumer;
+> wire it into the driver as `lower_to_mir(hir.program())` then.
 >
 > **Available C4 follow-ons** (none blocking C5): work-stealing
 > scheduler (ADR 0024 A1), scope cancellation (A2), `Task<T>`
@@ -1789,10 +1796,14 @@ For pasting into a fresh chat to bootstrap context:
     codegen migration → post-1.0, **C5.1a closes at the seam**. **C5.1b
     (1/N) done** — the `sentinel-mir` data model (minimal SSA/CFG;
     secret-taint seed via `is_secret`; the 3 D5 sinks representable;
-    additive). **Resume at C5.1b (2/N):** `lower_to_mir` — typed fn
-    bodies → MIR SSA (control-flow → blocks + block-params). Then C5.2 =
-    D5 verification (`sentinel::mir::secret_leak`) + D4 constant-time
-    emission (codegen pass). Per-sub-phase ADRs 0026+ at each open.
+    additive). **C5.1b (2/N) done** (`1a223c8`) — `lower_to_mir` lowers
+    typed fn bodies → MIR SSA (`if`/`&&`/`||` → `Branch` + merge
+    block-params; a var reassigned on one arm threaded through a merge
+    param; the 3 D5 sinks precise; the rest `Opaque`; top-level fns only;
+    still additive — D5 is its first consumer). **Resume at C5.2:** the D5
+    constant-time verification pass over the MIR
+    (`sentinel::mir::secret_leak`) + D4 constant-time emission (codegen
+    pass). Per-sub-phase ADRs 0026+ at each open.
     Optional C4 follow-ons (none blocking C5): work-stealing
     scheduler (ADR 0024 A1), scope cancellation (A2), Task<T>/
     spawn-args beyond i64 (A3), explicit `Task<T>` annotations

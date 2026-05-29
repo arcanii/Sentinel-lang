@@ -12,24 +12,48 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C5.1b (1/N): the MIR data model lands (ADR 0026 D2).**
-`sentinel-mir` is no longer a stub — it defines a minimal SSA/CFG IR
-(`MirProgram` / `MirFunction` / `MirBlock` with SSA block parameters as
-the phi-equivalent / `MirInst` / `MirOp` / `MirTerminator` / `MirValue`)
-built to host the C5.2 D5 constant-time verification. Each SSA value
-carries its `Type`, so secrecy reads straight off `Type::Secret(_)`
-(`MirFunction::is_secret` — the taint seed); the three D5 sinks are
-representable (a `Branch` condition, a `Load` index, a `Binary` Div/Rem
-operand), and every non-secret-relevant construct funnels through
-`MirOp::Opaque` / `MirTerminator::Unreachable` carrying its operands so
-taint stays sound. **Data model only this increment** — additive,
-nothing consumes MIR yet (zero regression risk; codegen stays on the
-typed program per the C5.1 escape hatch). Test-count-neutral (the
-`sentinel-mir` stub smoke test replaced by a hand-built secret-branch
-SSA test). Four-check green via `cargo nextest run --workspace` (1195) +
-`cargo test --doc`. **Next: C5.1b (2/N)** — lower typed function bodies
-→ MIR SSA (`lower_to_mir`); then C5.2 = the D5 verification pass over
-this IR (+ D4 constant-time emission as a codegen pass).
+Last updated: **C5.1b (2/N): `lower_to_mir` — typed fn bodies → MIR SSA
+(ADR 0026 D2).** `sentinel-mir` now lowers each free function's
+type-checked body into a `MirFunction` in SSA/CFG form. Sentinel has only
+*structured* control flow and no loops, so the CFG is a DAG and SSA falls
+out of one structured walk (no dominance-frontier phi placement): `if` /
+`&&` / `||` become `MirTerminator::Branch` edges into fresh blocks that
+reconcile at a merge block via SSA block-params (the phi-equivalent), and
+a variable reassigned on one arm is threaded through a merge param
+(deterministic, `VarId`-sorted via a `BTreeMap` env). `&&`/`||` are
+control flow because `secret bool && secret bool` type-checks
+(`SecretBranch` only rejects `if`) — a short-circuit branch on a secret is
+a leak the C5.2 D5 pass must see. The three D5 sinks lower precisely (an
+`if`/short-circuit condition → `Branch`; `a[i]` / `*p` → `MirOp::Load` so
+a secret index *or* address is visible; `a / b` → `Binary(Div)`) and
+`declassify(e)` → `MirOp::Declassify` (the one taint sink); everything
+else → `MirOp::Opaque` carrying its operands so taint can't vanish.
+Scope: top-level fns only (class/impl/init method bodies are a mechanical
+follow-on); generic defs lowered as-is (`TypeParam` is never secret); no
+monomorphisation (MIR is analysis-only per the D3 escape hatch).
+**Additive** — nothing consumes MIR yet (the D5 verification at C5.2 is
+its first consumer; the driver will call `lower_to_mir(hir.program())`
+then); zero regression risk; codegen stays on the typed program. +7
+lowering tests (1202). Four-check green via `cargo nextest run
+--workspace` (1202) + `cargo test --doc`. **Next: C5.2** — the D5
+constant-time verification pass over this MIR
+(`sentinel::mir::secret_leak`) + D4 constant-time emission (a codegen
+pass) — the 1.0 headline.
+
+Pre-C5.1b(2/N) context: **C5.1b (1/N): the MIR data model lands (ADR 0026
+D2).** `sentinel-mir` is no longer a stub — it defines a minimal SSA/CFG
+IR (`MirProgram` / `MirFunction` / `MirBlock` with SSA block parameters
+as the phi-equivalent / `MirInst` / `MirOp` / `MirTerminator` /
+`MirValue`) built to host the C5.2 D5 constant-time verification. Each
+SSA value carries its `Type`, so secrecy reads straight off
+`Type::Secret(_)` (`MirFunction::is_secret` — the taint seed); the three
+D5 sinks are representable (a `Branch` condition, a `Load` index, a
+`Binary` Div/Rem operand), and every non-secret-relevant construct
+funnels through `MirOp::Opaque` / `MirTerminator::Unreachable` carrying
+its operands so taint stays sound. **Data model only that increment** —
+additive, nothing consumed MIR yet. Test-count-neutral (the
+`sentinel-mir` stub smoke test replaced by a hand-built secret-branch SSA
+test). Four-check green (1195).
 
 Pre-C5.1b context: **C5.1a (1/N): the HIR pipeline stage is introduced
 (ADR 0026 D1+D3).** Per ADR 0009 §6.1 the pipeline is `types → hir →
