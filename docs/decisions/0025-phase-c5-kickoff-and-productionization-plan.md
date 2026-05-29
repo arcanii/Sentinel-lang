@@ -1,14 +1,46 @@
 # ADR 0025: Phase C5 kickoff — productionization to 1.0 (broker integration, constant-time codegen, actors, stable ABI, tooling)
 
-Status: PROPOSED — to flip to ACCEPTED (or ACCEPTED-WITH-
-AMENDMENTS) as Phase C5's sub-phases land. This ADR opens the
-final bootstrap-compiler phase per HANDOVER §6.2's month-15-18
-budget: "broker integration, cross-process safety, reproducible-
-build guarantees, stable ABI definition, LSP and tooling polish."
-It also absorbs the items prior phases deferred *to* C5: actors
-(ADR 0021 D10), cross-process / location qualifiers (ADR 0021
-D12), and constant-time secret codegen (ADR 0019 D12 / ADR 0008).
-**Phase C5 close = Phase C close = Sentinel 1.0.**
+Status: **ACCEPTED-WITH-AMENDMENTS — Phase C5 closes; Phase C closes;
+Sentinel 1.0 is declared (2026-05-30).** This ADR opened the final
+bootstrap-compiler phase per HANDOVER §6.2's month-15-18 budget: "broker
+integration, cross-process safety, reproducible-build guarantees, stable
+ABI definition, LSP and tooling polish." **Phase C5 close = Phase C close
+= Sentinel 1.0.**
+
+**## C5 close / 1.0 (2026-05-30).** The go/no-go acceptance program runs
+and **passes the constant-time verification** — the close bar (ADR 0030
+D8) is met — so 1.0 is declared. Sub-phase outcomes (per-sub-phase ADRs
+carry the detail):
+  - **D2/D3 — HIR/MIR + constant-time `secret` (ADR 0026):** SHIPPED. The
+    headline 1.0 guarantee is delivered + machine-verified (the MIR D5
+    pass rejects a `secret` at a branch / load index|address / divisor).
+    **Amendment:** D4 constant-time *emission* (branch-free `select`/`cmov`
+    + ADR 0008 speculation barriers) was **scoped out of 1.0** — branch-free
+    arithmetic/bitwise already passes D5 — so D4 + the ADR 0026 flip remain
+    post-1.0. Bitwise `& | ^` shipped (ADR 0027); the shift wave `<< >> ~`
+    (ADR 0027 A1) is deferred.
+  - **D4 — broker integration (ADR 0028):** SHIPPED. Scope-local
+    non-escaping allocations route into broker bump arenas (scope-exit bulk
+    free); the full escape analysis stays post-1.0.
+  - **D5 — actors:** **DESCOPED from 1.0** (ADR 0030 D3) — a sequential
+    single-process handshake needs no mailbox; the `actor`/`receive`
+    surface is a post-1.0 follow-on. The 1.0 concurrency story is the C4.4
+    structured-concurrency surface.
+  - **D6 cross-process / D9 modules:** RESOLVED post-1.0 at C5.0.
+  - **D7 — stable ABI (ADR 0029):** SHIPPED. `abi-v1` defined, frozen,
+    layout-tested (`docs/abi-v1.md`).
+  - **D8 — reproducible builds:** SHIPPED at C5.0 (byte-identical;
+    `repro.rs`).
+  - **D10 — LSP + tooling:** **deferred** — a post-1.0 polish item; does
+    not gate the close bar.
+  - **D13 — the go/no-go (ADR 0030):** SHIPPED — a constant-time
+    TLS-1.3-handshake-shaped program that runs + passes D5.
+
+  **Net 1.0 surface:** single-process, single-file, loop-free-by-design
+  (recursion substitutes), with the full type system + generics + borrow
+  check + RAII + secret/effect typing + handler runtime + classes / traits
+  / delegation + structured concurrency + machine-verified constant-time
+  `secret` + a frozen ABI. **Next: Phase D (self-hosting)** — see ADR 0031.
 
 **C5.0 update (2026-05-29):** the go/no-go program is now chosen and
 D1/D6/D9/D13 are pinned — see **## C5.0 resolution** below. Status

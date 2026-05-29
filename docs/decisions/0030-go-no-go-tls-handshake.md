@@ -1,11 +1,18 @@
 # ADR 0030: The 1.0 go/no-go — a TLS-1.3-handshake-shaped program (D13)
 
-Status: PROPOSED — the C5 **close-bar** sub-phase ADR under ADR 0025
+Status: **ACCEPTED-WITH-AMENDMENTS — the close bar is met; Sentinel 1.0 is
+declared (2026-05-30).** The C5 **close-bar** sub-phase ADR under ADR 0025
 (Phase C5 kickoff) D1/D13, opened after a readiness/scoping pass against
-the current surface. Flips to ACCEPTED(-WITH-AMENDMENTS) when the program
-runs + passes the D5 constant-time check; closing it **is Sentinel 1.0**
-(Phase C complete). Per ADR 0025 D14's per-sub-phase ADR pattern; numbers
-indicative.
+the current surface. The program runs + **passes the D5 constant-time
+check**, so 1.0 is declared. Amendments: **A1** — the connection actor was
+descoped from 1.0 (D3, developer-endorsed). **A2** — bytes/labels are
+modelled as `i64`, secret material as `secret` scalars, iteration as
+recursion (D4); a `sec` widening helper lifts public constants into the
+secret domain (C3.1b makes a mixed secret/public op a type error). **A3**
+— the shift-wave prerequisite (D5) was **not** needed: the reduced
+primitives use only `+ - * ^ & |`. **(3/N) — DELIVERED (2026-05-30):**
+Sentinel 1.0 declared; ADR 0025 → ACCEPTED. Per ADR 0025 D14's
+per-sub-phase ADR pattern; numbers indicative.
 
 Date: 2026-05-30
 Related:

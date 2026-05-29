@@ -5,14 +5,39 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-The workspace has two complete Phase A/B crates plus the in-progress
-Phase C bootstrap compiler. Phase A is the broker (production-shape
-memory subsystem), Phase B is sentinel-effects-proto (Sentinel-Mini,
-research-grade interpreter), Phase C populates the remaining
-sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
-has a lexer; the other nine compiler crates remain scaffold stubs.
+The workspace has the complete Phase A broker (production-shape memory
+subsystem) + the Phase B sentinel-effects-proto (Sentinel-Mini,
+research-grade interpreter) + the **complete Phase C bootstrap compiler**:
+every sentinel-* crate per ADR 0009 is populated (syntax/ast/resolve/
+types/borrow-check/effect-check/hir/mir/codegen/runtime/driver), lowering
+the full Sentinel language to native code via LLVM 18. **Phase C closed at
+Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
+next phase is **D (self-hosting)**.
 
-Last updated: **C5 D7: the stable ABI — `abi-v1` defined, frozen, and
+Last updated: **🎉 SENTINEL 1.0 (2026-05-30) — Phase C5 + Phase C close.**
+The 1.0 go/no-go (`tests/pass/c5_go_no_go.sentinel`, a constant-time
+TLS-1.3-handshake-shaped program) runs and **passes the D5 constant-time
+verification** — the close bar (ADR 0030 D8) is met — so 1.0 is declared:
+**ADR 0025 (Phase C5 kickoff) and ADR 0030 (go/no-go) → ACCEPTED-WITH-AMENDMENTS.**
+The 1.0 language: the full type system + witness-table generics, references
++ lexical borrow check + RAII drop, `secret` typing + effect rows + the
+algebraic-effect handler runtime, classes/traits/impls/delegation +
+structured concurrency, **machine-verified constant-time `secret`** (the
+headline guarantee — the MIR D5 pass rejects a `secret` at a branch /
+index|address / divisor), bitwise `& | ^`, broker-backed scope arenas, and
+a frozen, layout-tested **`abi-v1`**. Single-process, single-file,
+loop-free-by-design (recursion substitutes). 1232 tests, four-check green.
+**Scoped out of 1.0** (post-1.0 follow-ons, all analysed): constant-time
+*emission* (cmov/speculation barriers — branch-free code already passes
+D5; ADR 0026 D4), bitwise shifts `<< >> ~` (ADR 0027 A1), actors (ADR 0030
+D3), LSP/tooling (ADR 0025 D10), `[secret T]` arrays, modules/multi-file,
+cross-process, a `u8`/byte type, loops, the full escape analysis. **Next:
+Phase D — self-hosting (ADR 0031);** ⚠ self-hosting is a *major* multi-stage
+effort — the 1.0 language has no strings / file I/O / growable collections
+/ modules, all of which a compiler-in-Sentinel needs first, so Phase D
+opens with a language/stdlib build-out, not lexer-in-Sentinel (see ADR 0031).
+
+Pre-1.0 context: **C5 D7: the stable ABI — `abi-v1` defined, frozen, and
 tested; ADR 0029 → ACCEPTED-WITH-AMENDMENTS. Phase C5 D7 closes.**
 `docs/abi-v1.md` documents + **freezes** the ABI codegen already emits —
 the C calling convention (`main`→i32; effecting fns→`*SentinelKont`; class
