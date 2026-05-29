@@ -1140,11 +1140,14 @@ fn pass_c54_scope_arena() {
 
 #[test]
 fn pass_c5_go_no_go() {
-    // ADR 0030 D8 (1/N): the 1.0 go/no-go — a TLS-1.3-handshake-shaped
-    // skeleton. Exercises class state machine + cipher-suite trait
-    // dispatch + I/O-as-effects + the 4-stage flow (accept → ECDHE →
-    // HKDF → Finished), with stubbed crypto; (2/N) fills the
-    // constant-time primitives over `secret` scalars. recv resumes 5 →
-    // ecdhe 5*9=45 → derive 45+3=48 → finished_diff(48,48)=0 → 42-0=42.
+    // ADR 0030 D8 (2/N): the 1.0 close-bar program — a
+    // TLS-1.3-handshake-shaped program whose crypto is real constant-time
+    // computation over `secret` scalars (a Montgomery-ladder step + cswap,
+    // an HKDF-expand-shaped mix via the cipher-suite trait, the c53_ct_eq
+    // `Finished` verify). It builds ONLY if it passes the D5 constant-time
+    // check (no secret reaches a branch / index / divisor) — the decisive
+    // 1.0 validation — and runs to exit 42 (successful handshake →
+    // Finished accumulator 0 → 42 - 0). Exercises class + trait dispatch +
+    // I/O-as-effects + constant-time `secret` end-to-end.
     assert_eq!(run_exit("c5_go_no_go.sentinel"), 42);
 }

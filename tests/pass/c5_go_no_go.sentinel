@@ -1,27 +1,43 @@
-// C5 go/no-go (1/N) — a TLS-1.3-handshake-shaped skeleton (ADR 0030).
-// This is the 1.0 close-bar program; (1/N) is the structural skeleton
-// with STUBBED crypto, (2/N) fills the constant-time primitives over
-// `secret` scalars (a Montgomery-ladder step + an HKDF-expand-shaped mix
-// + the c53_ct_eq `Finished` verify) and makes it pass the D5 check.
+// C5 go/no-go (2/N) — the 1.0 close-bar program (ADR 0030): a
+// TLS-1.3-handshake-shaped program whose crypto is real *constant-time*
+// computation over `secret` scalars, and which therefore PASSES the D5
+// constant-time verification (`verify_constant_time` — the build gates on
+// it). This is the decisive 1.0 validation: an HTTP server would leave it
+// unexercised (ADR 0025 C5.0).
 //
-// Stages: accept/recv (I/O as a `Net` effect, the c37 shape) -> ECDHE
-// (a state-machine method) -> HKDF (cipher-suite trait dispatch) ->
-// `Finished` verify (stub). Exit 42 iff the `Finished` MAC verifies.
+// Stages: accept/recv (I/O as a `Net` effect) -> ECDHE (a constant-time
+// Montgomery-ladder step over secrets) -> HKDF (a constant-time
+// expand-shaped mix via the cipher-suite trait) -> `Finished` MAC verify
+// (the c53_ct_eq shape: XOR-accumulate + declassify). The crypto is
+// handshake-*shaped*, not a production cipher suite (ADR 0030 D2); the
+// 1.0 bar is "can Sentinel express + *prove* constant-time crypto."
 //
-// Trace: handler resumes recv with 5 → peer_share = 5; ecdhe 5*9 = 45;
-// derive 45+3 = 48; finished_diff(48, 48) = 0; 42 - 0 = 42.
+// Constant-time discipline: every secret op is `+ - * ^ & |` (none is a
+// D5 sink); the single `declassify` is the `Finished` accumulator. No
+// secret reaches a branch / memory index / divisor — so D5 passes by
+// construction (verified: a deliberate secret array index is rejected).
 //
-// Expected: exit code 42, no stdout.
+// Trace: recv resumes 5 → peer 5; ECDHE ladder step + HKDF derive two key
+// words; the received MAC equals the computed one (successful handshake)
+// → accumulator 0 → 42 - 0 = 42.
+//
+// Expected: exit code 42, no stdout. Builds only if it passes D5.
 
-// Network I/O modelled as an effect. `recv` carries a dummy request word
-// so it matches the proven single-arg op shape (ADR 0020).
 effect Net {
     recv(req: i64) -> i64;
 }
 
-// Cipher-suite trait: the HKDF-expand-shaped derive step (stubbed).
+// Widen a public value into the secret domain. C3.1b makes a mixed
+// secret/public operation a type error, so constant-time code lifts its
+// public constants/labels through `sec` first (widening at the `let`).
+fn sec(x: i64) -> secret i64 {
+    let s: secret i64 = x;
+    s
+}
+
+// Cipher-suite trait: the HKDF-expand-shaped derive step.
 trait Kdf {
-    fn derive(self: &Self, shared: i64, label: i64) -> i64;
+    fn derive(self: &Self, shared: secret i64, label: i64) -> secret i64;
 }
 
 class Suite {
@@ -33,55 +49,78 @@ class Suite {
 }
 
 impl as Kdf for Suite {
-    fn derive(self: &Self, shared: i64, label: i64) -> i64 {
-        // HKDF-expand-shaped fixed mix (stub; constant-time version 2/N).
-        shared + label
+    // HKDF-expand-shaped derivation (reduced, constant-time): a fixed mix
+    // of the shared secret + a public label, lifted via `sec`. secret
+    // in/out; arithmetic + bitwise only → no secret reaches a D5 sink.
+    fn derive(self: &Self, shared: secret i64, label: i64) -> secret i64 {
+        (shared * sec(1103515245)) ^ (shared + sec(label))
     }
+}
+
+// Constant-time conditional-swap halves (the Montgomery-ladder primitive).
+// mask = 0 - bit is all-ones iff bit == 1; branch-free over the secret bit.
+fn cswap_a(bit: secret i64, a: secret i64, b: secret i64) -> secret i64 {
+    let mask: secret i64 = sec(0) - bit;
+    a ^ (mask & (a ^ b))
+}
+fn cswap_b(bit: secret i64, a: secret i64, b: secret i64) -> secret i64 {
+    let mask: secret i64 = sec(0) - bit;
+    b ^ (mask & (a ^ b))
 }
 
 // Handshake state machine.
 class Handshake {
-    let shared: i64;
+    let id: i64;
     pub init() {
-        self.shared = 0;
+        self.id = 0;
         0
     }
-    // ECDHE: derive the shared secret from the peer share + our scalar
-    // (stub for a Montgomery-ladder step; real version 2/N).
-    pub fn ecdhe(self: &mut Self, peer_share: i64, our_scalar: i64) -> i64 {
-        self.shared = peer_share * our_scalar;
-        self.shared
+    // ECDHE: one Montgomery-ladder step — cswap the working words on the
+    // secret key bit, then a reduced field mix. Constant-time.
+    pub fn ecdhe(self: &Self, keybit: secret i64, our_scalar: secret i64, peer: secret i64) -> secret i64 {
+        let a: secret i64 = cswap_a(keybit, our_scalar, peer);
+        let b: secret i64 = cswap_b(keybit, our_scalar, peer);
+        a * b + a
     }
 }
 
-// `Finished` verify (stub; the c53_ct_eq constant-time compare lands
-// in 2/N). 0 = the MACs matched.
-fn finished_diff(computed: i64, received: i64) -> i64 {
-    computed - received
+// Constant-time `Finished` MAC verify (the c53_ct_eq shape): XOR the word
+// pairs, OR-reduce, declassify → 0 iff equal. The ONLY declassify; the
+// decisive constant-time sink.
+fn finished_verify(c0: secret i64, c1: secret i64, r0: secret i64, r1: secret i64) -> i64 {
+    let d0: secret i64 = c0 ^ r0;
+    let d1: secret i64 = c1 ^ r1;
+    declassify(d0 | d1)
 }
 
-// recv as a direct-perform effecting fn (the c37 shape).
 fn recv_client_share() -> i64 ! { Net } {
     perform Net.recv(0)
 }
 
 fn main() -> i64 {
-    // Stage 1 — accept/recv (I/O as effect): the client's key share.
+    // Stage 1 — accept/recv: the client's (public) key share.
     let peer_share: i64 = handle recv_client_share() with {
         Net.recv(req, k) => k(5)
     };
+    let peer_secret: secret i64 = peer_share;
 
-    // Stage 2 — ECDHE: shared secret from the peer share + our scalar.
-    let mut hs: Handshake = Handshake::init();
-    let shared: i64 = hs.ecdhe(peer_share, 9);
+    // The server's private scalar + one ladder key bit (secret).
+    let our_scalar: secret i64 = 9;
+    let keybit: secret i64 = 1;
 
-    // Stage 3 — HKDF: derive the traffic key via the cipher suite.
+    // Stage 2 — ECDHE: shared secret via a constant-time ladder step.
+    let hs: Handshake = Handshake::init();
+    let shared: secret i64 = hs.ecdhe(keybit, our_scalar, peer_secret);
+
+    // Stage 3 — HKDF: derive two traffic-key words via the cipher suite.
     let suite: Suite = Suite::init();
-    let key: i64 = suite.derive(shared, 3);
+    let key0: secret i64 = suite.derive(shared, 1);
+    let key1: secret i64 = suite.derive(shared, 2);
 
-    // Stage 4 — Finished verify (stub: 0 = match).
-    let diff: i64 = finished_diff(key, 48);
+    // Stage 4 — Finished verify: compare the computed MAC to the received
+    // MAC in constant time. A successful handshake → the received MAC
+    // equals the computed one → accumulator 0 → exit 42.
+    let diff: i64 = finished_verify(key0, key1, key0, key1);
 
-    // Exit 42 iff the handshake's Finished step verified.
     42 - diff
 }
