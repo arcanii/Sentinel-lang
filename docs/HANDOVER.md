@@ -105,6 +105,7 @@ C1.3. See STATE.md Section C.
 **Phase C5.2b (2/N) — the D5 verification is wired into `snc` + c52 phase-go — complete.** `snc build` runs the constant-time check: after `check_query` the driver lowers the typed program to MIR (`lower_to_mir` — now a real pipeline consumer) and runs `verify_constant_time`; a `secret` reaching a conditional branch / load index|address / division divisor is a `sentinel::mir::secret_leak` compile error (exit 1) gating codegen. (Codegen still consumes the typed program via the HIR seam per the D3 escape hatch; MIR stays analysis-only.) Fixtures (ADR 0026 D9): `c52_secret_leak` (UI) — `secret bool && secret bool` type-checks (`SecretBranch` only rejects `if`) but lowers to a secret short-circuit `Branch` → rejected (`insta` snapshot, label on the short-circuited operand); `c52_secret_ct` (pass) — a branch-free masked select over secrets (`c*a + (1-c)*b`) compiles, runs, **passes** D5, exit 42. **c51 bar holds**: existing pass/ui fixtures unchanged + `tests/repro.rs` byte-identical (D5 runs before, and gates, an unchanged codegen). +2 tests (1208 total) (`e81bdbf`). ADR 0026 stays PROPOSED. Next: **C5.2a** — D4 constant-time *emission* (codegen pass: branch-free select + ADR 0008 speculation barriers, x86-64/aarch64); **open question: does the 1.0 go/no-go even need D4?** A branch-free *arithmetic* primitive already passes D5 on the existing codegen (no bitwise/`select` ops in the surface), so D4 may be scoped out of 1.0 — settle with the developer before building it. ADR 0026 flips once C5.2a lands or is consciously scoped out.
 **ADR 0027 PROPOSED — bitwise operators (`& | ^`, then `<< >> ~`) — docs-only.** Decision (with the developer): do bitwise operators next, **deferring C5.2a/D4** — the go/no-go's constant-time `Finished` MAC verify is an XOR-accumulate compare that needs `^`/`|`, and the surface has none (`BinOp` = only Add/Sub/Mul/Div). Ten D-decisions: target `& | ^ << >> ~` in two waves (D1) — **C5.3 = `& | ^`** (token-clean: new `Pipe`/`Caret`, reuse `Amp` as infix bit-and with prefix `&` still borrow — D2; Rust precedence `&`>`^`>`|` between cmp and add, ladder gains parse_bitor/bitxor/bitand — D3); extend `BinOp` (no new ExprKind/TypedExprKind/MirOp variants — D4); secret-preserving integer-only typing mirroring C3.1b arithmetic, **no new SecretXxx rejection** (bitwise is constant-time, the *sanctioned* secret computation — D5); LLVM and/or/xor codegen (D6); **MIR + D5 need no change** (the `Binary` arm is op-generic; bitwise ops are non-sinks — D7); **C5.4 = `<< >> ~`** with the `>>`-vs-nested-generic-close split (Rust-style: the type-arg parser splits `Shr` into two `>` — D9). Out of scope (D8): shifts/complement at C5.3, rotate, bitwise-on-bool, compound-assign, `[secret T]` arrays (the flat ArrayElem subset has no Secret variant — a separate deferred surface). Phase-go (D10): `c53_bitwise` + `c53_ct_eq` (a real XOR-accumulate constant-time equality over scalar secrets that passes D5 — upgrading the C5.2b faked masked-select). Next: **C5.3 (1/N)** — lexer (`Pipe` + `Caret` tokens).
 **Phase C5.3 (1/N) — lexer: bitwise `|` (`Pipe`) + `^` (`Caret`) tokens — complete.** First wave of the bitwise surface per ADR 0027 D2: two new logos tokens; longest-match keeps `||` → `PipePipe`; the infix bitwise-and **reuses** `&` (`Amp`), to be disambiguated from the borrow prefix by parser position at 2/N. No `<<`/`>>` (C5.4 — the `>>`/nested-generic-close split). +4 lexer tests (longest-match `|`/`||` + `&`/`&&` regressions + packed bitwise); additive (parser doesn't consume them yet); four-check green (1212) (`b3d1d48`). Next: **C5.3 (2/N)** — `& | ^` end-to-end: extend `BinOp` (Display + all exhaustive matches in one pass); parser precedence ladder gains `parse_bitor`/`parse_bitxor`/`parse_bitand` between `parse_cmp` and `parse_add`; secret-preserving integer typing mirroring C3.1b (no new TypeError/SecretXxx); codegen and/or/xor; MIR+D5 unchanged (Binary arm op-generic, bitwise non-sink) + `c53_bitwise`/`c53_ct_eq` fixtures; ADR 0027 flip.
+**Phase C5.3 (2/N) — bitwise `& | ^` surface end-to-end. ADR 0027 → ACCEPTED-WITH-AMENDMENTS.** The operators compile + run. Surface was small because the `Binary` pipeline is op-generic (resolve passes `BinOp` through; types' Binary handler op-agnostic except the `Div`→`SecretDivisor` check; `lower_to_mir`/D5 handle `Binary` generically) — so only AST + parser + codegen changed. AST: `BinOp` += `BitAnd`/`BitOr`/`BitXor` (+ symbol(); no new ExprKind/TypedExprKind/MirOp). Parser: levels `parse_bitor`→`parse_bitxor`→`parse_bitand` between cmp and add (`&`>`^`>`|`); infix `&` = bit-and, prefix `&` = borrow (positional). Types: NO change — inherits C3.1b secret-preserving integer rule (mixed secret/public → Mismatch; bool → Mismatch); **no new SecretXxx** (bitwise is constant-time, the sanctioned secret computation). Codegen: LLVM and/or/xor. MIR+D5: unchanged (bitwise non-sink). Fixtures: `c53_bitwise` (`5 & 6 ^ 3 | 8`==15) + `c53_ct_eq` (constant-time equality over secrets — XOR-accumulate+OR-reduce+declassify — compiles, runs, passes D5; the go/no-go MAC-verify shape). +9 tests (1221 total) (`76bfea3`). **ADR 0027 amendment A1:** `<< >> ~` (C5.4) deferred — the constant-time compare needs only `^`/`|`; shifts (with the `>>`/generic-close split) are a follow-on if the go/no-go computes hashes in-language. Next: **developer-scope call** — C5.4 shifts, OR begin assembling the TLS go/no-go (constant-time compare now writable), OR another C5 productionization sub-phase.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1147,16 +1148,18 @@ New norms learned during Phase B and Phase C:
 > resolved (with the developer): defer D4 and do bitwise operators next**
 > — the go/no-go's constant-time `Finished` MAC verify is an XOR-accumulate
 > compare that needs `^`/`|`, and the surface has none. **C5.3 (1/N) lexer
-> is DONE** (`Pipe`+`Caret` tokens, additive). **Resume at C5.3 (2/N)
-> (per ADR 0027):** the `& | ^` surface end-to-end — extend `BinOp`
-> (Display + every exhaustive match in one pass); the parser precedence
-> ladder gains `parse_bitor`/`parse_bitxor`/`parse_bitand` between
-> `parse_cmp` and `parse_add` (`&`>`^`>`|`); secret-preserving integer
-> typing mirroring C3.1b (no new TypeError); codegen and/or/xor; MIR+D5
-> unchanged (the Binary arm is op-generic, bitwise is a non-sink) +
-> `c53_bitwise`/`c53_ct_eq` fixtures; ADR 0027 flip. Then **C5.4** =
-> `<< >> ~` (with the `>>`/generic-close split). D4 emission stays pushed
-> behind these (likely post-1.0); ADR 0026 flips at its own close.
+> is DONE** (`Pipe`+`Caret` tokens, additive). **C5.3 (2/N) is then DONE**
+> — `& | ^` end-to-end (AST `BinOp` + parser precedence + codegen
+> and/or/xor; types/MIR/D5 unchanged — `Binary` is op-generic), with
+> `c53_bitwise` + `c53_ct_eq` (the real constant-time MAC-verify shape
+> passing D5); **ADR 0027 → ACCEPTED-WITH-AMENDMENTS** (A1: `<< >> ~`/C5.4
+> deferred). **Resume at a developer-scope fork:** (a) **C5.4** =
+> `<< >> ~` (with the `>>`-vs-generic-close split) — only if the go/no-go
+> computes hashes in-language; (b) **begin the TLS go/no-go** itself (its
+> constant-time compare is now writable); or (c) another C5
+> productionization sub-phase (broker integration, …). D4 emission + the
+> ADR 0026 flip remain pending behind whichever path is chosen.
+> Per-sub-phase ADRs 0026+ at each open.
 >
 > **Available C4 follow-ons** (none blocking C5): work-stealing
 > scheduler (ADR 0024 A1), scope cancellation (A2), `Task<T>`
@@ -1828,12 +1831,14 @@ For pasting into a fresh chat to bootstrap context:
     (branch-free, exit 42) fixtures; c51 bar holds. **Decision: defer
     C5.2a/D4, do bitwise operators next** (the go/no-go's MAC verify needs
     `^`/`|`; the surface has none). **Resume at C5.3 (ADR 0027 PROPOSED):**
-    bitwise `& | ^`: **(1/N) lexer done** (`b3d1d48`; `Pipe`+`Caret`).
-    **Resume at C5.3 (2/N):** the surface end-to-end (extend `BinOp`;
-    precedence `&`>`^`>`|` via parse_bitor/xor/and; secret-preserving
-    typing mirroring C3.1b; and/or/xor codegen; MIR+D5 already cover it) +
-    `c53_*` fixtures; ADR 0027 flip. Then C5.4 `<< >> ~`. Per-sub-phase
-    ADRs 0026+ at each open.
+    bitwise `& | ^` **DONE** (`b3d1d48` lexer + `76bfea3` surface; ADR 0027
+    → ACCEPTED-WITH-AMENDMENTS, A1: `<< >> ~`/C5.4 deferred). `c53_ct_eq`
+    shows a real constant-time MAC-verify shape (XOR-accumulate+OR-reduce+
+    declassify) passing D5. **Resume at a developer-scope fork:** C5.4
+    shifts (only if hashes are computed in-language), OR begin the TLS
+    go/no-go (constant-time compare now writable), OR another C5
+    productionization sub-phase. D4 emission + ADR 0026 flip pending.
+    Per-sub-phase ADRs 0026+ at each open.
     Optional C4 follow-ons (none blocking C5): work-stealing
     scheduler (ADR 0024 A1), scope cancellation (A2), Task<T>/
     spawn-args beyond i64 (A3), explicit `Task<T>` annotations

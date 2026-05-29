@@ -1,11 +1,20 @@
 # ADR 0027: Bitwise operators (`& | ^`, then `<< >> ~`) for constant-time crypto
 
-Status: PROPOSED — a concrete-surface ADR (mirroring ADR 0012/0013) that
-adds integer bitwise operators, the prerequisite surface for the C5.0
-go/no-go's constant-time `Finished` MAC verify (ADR 0025 D3/D13) and the
-canonical way to compute on `secret` values (ADR 0008). Flips to
-ACCEPTED(-WITH-AMENDMENTS) as the C5.3 sub-phase lands, recording
-deviations as numbered amendments.
+Status: ACCEPTED-WITH-AMENDMENTS (C5.3 closed 2026-05-29) — a
+concrete-surface ADR (mirroring ADR 0012/0013) that adds integer bitwise
+operators, the prerequisite surface for the C5.0 go/no-go's constant-time
+`Finished` MAC verify (ADR 0025 D3/D13) and the canonical way to compute
+on `secret` values (ADR 0008).
+
+**Amendment A1 (C5.3 close): the `<< >> ~` wave (C5.4) is deferred.**
+C5.3 shipped the token-clean, go/no-go-critical trio `& | ^` end-to-end
+(lexer → parser → codegen; types / MIR / the D5 pass needed no change —
+they handle `Binary` generically). The shift + complement wave (C5.4,
+D9) — which carries the `>>`-vs-nested-generic-close split — is a
+**follow-on**, taken only if the go/no-go's hash *computation* lands
+in-language; its constant-time *compare* (the security core) needs only
+`^`/`|`, which shipped. All other D-decisions (D1's `& | ^` half,
+D2–D8, the C5.3 rows of D10) landed as specified.
 
 Date: 2026-05-29
 Related:

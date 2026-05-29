@@ -12,9 +12,38 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C5.3 (1/N): lexer — bitwise `|` (`Pipe`) + `^` (`Caret`)
-tokens (ADR 0027 D2).** The first wave of the bitwise-operator surface
-(the prerequisite for the go/no-go's constant-time MAC verify): two new
+Last updated: **C5.3 (2/N): bitwise `& | ^` end-to-end; ADR 0027 →
+ACCEPTED-WITH-AMENDMENTS.** The bitwise operators now compile and run.
+The surface was *small* because the `Binary` pipeline is op-generic:
+resolve passes `BinOp` through, the type checker's Binary handler is
+op-agnostic (only `Div` is special-cased for `SecretDivisor`), and
+`lower_to_mir` / the D5 pass treat `Binary` generically — so only AST +
+parser + codegen changed. **AST:** `BinOp` gains `BitAnd`/`BitOr`/`BitXor`
+(no new `ExprKind`/`TypedExprKind`/`MirOp` variants). **Parser:** three
+left-assoc levels `parse_bitor`→`parse_bitxor`→`parse_bitand` between
+`parse_cmp` and `parse_add` (Rust order `&`>`^`>`|`); infix `&` is
+bit-and, prefix `&` is borrow (positional, unambiguous). **Types:** no
+change — bitwise inherits the C3.1b secret-preserving integer rule
+(`secret op secret → secret`; mixed → `Mismatch`; `bool` rejected), and
+**no new `SecretXxx` rejection** since bitwise is the *sanctioned*
+constant-time secret computation. **Codegen:** LLVM `and`/`or`/`xor`.
+**MIR + D5:** unchanged (bitwise is a non-sink). Fixtures: `c53_bitwise`
+(`5 & 6 ^ 3 | 8` == 15, pins precedence); **`c53_ct_eq`** — a real
+constant-time equality over secrets (XOR-accumulate + OR-reduce +
+`declassify`) that compiles, runs, and **passes** D5 (the go/no-go's
+`Finished` MAC-verify shape, replacing the C5.2b arithmetic stand-in).
+**ADR 0027 → ACCEPTED-WITH-AMENDMENTS** (A1: the `<< >> ~` wave / C5.4 is
+a deferred follow-on — the constant-time *compare* needs only `^`/`|`).
++9 tests (1221). Four-check green. **Next:** either **C5.4** (`<< >> ~`,
+if the go/no-go computes hashes in-language — carries the `>>`/generic
+split) or begin assembling the **TLS go/no-go** itself now that the
+constant-time compare is writable, or another C5 productionization
+sub-phase — a developer-scope call.
+
+Pre-C5.3(2/N) context: **C5.3 (1/N): lexer — bitwise `|` (`Pipe`) + `^`
+(`Caret`) tokens (ADR 0027 D2).** The first wave of the bitwise-operator
+surface (the prerequisite for the go/no-go's constant-time MAC verify):
+two new
 logos tokens (`|` → `Pipe`, `^` → `Caret`); longest-match keeps `||` →
 `PipePipe`, and the infix bitwise-and **reuses** the existing `&` (`Amp`)
 token, disambiguated from the borrow prefix by the parser's operand
