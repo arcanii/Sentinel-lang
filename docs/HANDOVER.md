@@ -116,6 +116,7 @@ C1.3. See STATE.md Section C.
 **Phase C5 go/no-go (1/N) — the TLS-handshake-shaped skeleton (ADR 0030) — complete.** `tests/pass/c5_go_no_go.sentinel` composes the full surface the go/no-go needs in one single-file program — a handshake state-machine `class` (`&mut Self` `ecdhe` method + init) + a `Kdf` cipher-suite `trait`/`impl` (receiver-typed `suite.derive` dispatch) + a `Net` I/O `effect` + `handle … with` + the 4-stage flow (accept/recv → ECDHE → HKDF → `Finished`) — with **stubbed** crypto, and runs end-to-end to **exit 42** (handler resumes recv→5; 5*9=45; 45+3=48; finished_diff(48,48)=0; 42-0=42). **It compiled on the first try** — empirical confirmation of ADR 0030's scoping verdict (the go/no-go is an assembly of proven patterns, not new machinery). +1 test (1232) (`9e2ef6a`). **ADR 0030 stays PROPOSED.** Next: **go/no-go (2/N)** — fill the constant-time primitives over `secret` scalars (a Montgomery-ladder step + cswap, an HKDF-`expand`-shaped fixed mix, the `c53_ct_eq` `Finished` verify) and make the program **pass the D5 constant-time check** (`verify_constant_time`) — the decisive 1.0 validation; land ADR 0027 A1 (shifts) first *iff* a primitive needs it. Then (3/N): close → **declare Sentinel 1.0** + flip ADR 0025 → ACCEPTED.
 **Phase C5 go/no-go (2/N) — constant-time crypto over secrets; the close bar is MET (ADR 0030 D8) — complete.** `tests/pass/c5_go_no_go.sentinel` now does real **constant-time** crypto over `secret` scalars: a Montgomery-ladder step + branch-free `cswap` (`mask = sec(0) - bit`), an HKDF-`expand`-shaped mix via the `Kdf` trait, and the `c53_ct_eq` `Finished` verify (XOR-accumulate + `declassify`). It **passes the D5 constant-time check** (`verify_constant_time` gates `snc build`) and runs to exit 42 — the headline 1.0 capability (express + *prove* constant-time crypto) exercised end-to-end. Constant-time by construction: every secret op is `+ - * ^ & |` (no D5 sink), the lone `declassify` is the `Finished` accumulator, no secret reaches a branch/index/divisor (verified the secret typing is live — a deliberate secret array index is rejected at type-check). **Ergonomic finding:** C3.1b makes a mixed secret/public op a type error (no in-expression widening), so constant-time code lifts public constants/labels into the secret domain first — here via a `sec(x) { let s: secret i64 = x; s }` helper (widening happens only at a `let` with a `secret` annotation, not at a return). 1232 tests (`e5a40e9`). **ADR 0030 stays PROPOSED.** Next: **go/no-go (3/N) — the formal 1.0 declaration** (flip ADR 0025 → ACCEPTED + declare Sentinel 1.0). **That milestone call is intentionally left to the developer**; the substantive close bar (program runs + passes D5) is met.
 **🎉 SENTINEL 1.0 (2026-05-30) — go/no-go (3/N); Phase C5 + Phase C close.** The developer declared 1.0: **ADR 0025 (Phase C5 kickoff) + ADR 0030 (go/no-go) → ACCEPTED-WITH-AMENDMENTS.** The close bar was met (the constant-time TLS-handshake go/no-go runs + passes D5). The 1.0 language = full types + witness-table generics + borrow check + RAII + `secret`/effect typing + handler runtime + classes/traits/delegation + structured concurrency + **machine-verified constant-time `secret`** + bitwise `& | ^` + broker scope arenas + a frozen `abi-v1`; single-process, single-file, loop-free-by-design. 1232 tests, four-check green. Scoped out of 1.0 (analysed follow-ons): constant-time *emission* (ADR 0026 D4), shifts `<< >> ~` (ADR 0027 A1), actors (ADR 0030 D3), LSP (ADR 0025 D10), `[secret T]` arrays, modules, cross-process, a `u8` type, loops, full escape analysis. **Next: Phase D — self-hosting (ADR 0031 PROPOSED).** ⚠ Self-hosting is a *major* multi-stage effort: the 1.0 language has no strings / file I/O / growable collections / modules, all of which a compiler-in-Sentinel needs, so **Phase D opens with a language + stdlib build-out, NOT lexer-in-Sentinel** — see ADR 0031's honest readiness assessment + staged path.
+**ADR 0031 PROPOSED — Phase D kickoff: self-hosting — docs-only.** Opens the project's largest phase. **Honest readiness verdict:** the 1.0 language *cannot* self-host yet — verified gaps (none at 1.0): no sum types / `match` (an AST is a sum type — the biggest blocker), no strings / `char` / byte type (a compiler is text processing), no growable collections (`Vec`/`Map` — only fixed `[T]`), no file I/O (only `sentinel_print`), no modules/multi-file, no loops (recursion-only). **Strategy (D2):** language+stdlib build-out FIRST, then incremental self-host, keeping the Rust `snc` as the **reference oracle** (every Sentinel-written stage differentially validated against it on the fixture corpus), converging on a **bootstrap fixed-point** (the Sentinel compiler compiles itself byte-identically — which is *why* C5 shipped `abi-v1` + reproducible builds). **Prerequisite roadmap (D4, each its own ADR):** sum types + `match` → strings + byte type → growable collections → file I/O (stdlib) → modules → loops; also retires the thick-HIR/MIR migration + full escape analysis + shifts. **Self-host sequence (D5):** lexer → parser → resolve → types → HIR/MIR → codegen, in Sentinel, each matching the Rust stage before replacing it. **First sub-phase D.1 = sum types + pattern matching** (its own PROPOSED ADR next — the foundational AST-enabler; a C1–C4-style type-system + codegen feature). No timeline promise; Phase D is plausibly the longest phase. Next: **Phase D.1 (sum types + `match`)** — write its kickoff ADR, then implement.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1822,8 +1823,8 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the go/no-go (2/N) docs commit
-    (atop feat e5a40e9 constant-time crypto). Clean tree; 1232 tests. macOS + LLVM 18 only.
+    Local HEAD: verify with `git log -1` — expect the Phase D kickoff docs commit
+    (Sentinel 1.0 declared; ADR 0031 PROPOSED). Clean tree; 1232 tests. macOS + LLVM 18 only.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.2/§0.3 + ADR 0028
     (esp. the "C5.4 (2/N) implementation map" AND the ⚠ VERIFIED UAF HOLE
     note — read before touching the scope→arena routing) + ADR 0026/0027.
@@ -1891,26 +1892,27 @@ For pasting into a fresh chat to bootstrap context:
       layout pinned via a representative `{i64,i64}` struct (a real
       `Struct(id)` needs codegen's pass-0 cache). +1 test (1231).
 
-    RESUME AT: **the 1.0 go/no-go (3/N) — the formal Sentinel 1.0
-    declaration.** The substantive close bar is **MET**: (1/N) skeleton +
-    (2/N) constant-time crypto both shipped — `tests/pass/c5_go_no_go.sentinel`
-    is a TLS-handshake-shaped program with real constant-time crypto over
-    `secret` scalars (Montgomery step + cswap, HKDF mix, `c53_ct_eq`
-    `Finished` verify) that **passes the D5 check** + runs to exit 42
-    (`e5a40e9`). (3/N) is just the milestone ceremony: **flip ADR 0025 →
-    ACCEPTED-WITH-AMENDMENTS + declare Sentinel 1.0** (update STATE/HANDOVER
-    headline). **This call is intentionally left to the developer** — it is
-    a momentous, mostly-irreversible-in-spirit milestone, so the assistant
-    stopped at "close bar met" rather than declaring 1.0 unilaterally.
-      To declare 1.0: flip ADR 0025 (the Phase C5 kickoff) and ADR 0030 to
-        ACCEPTED, set the STATE banner headline to "Sentinel 1.0", and roll
-        up the C5 amendments. Optional polish before/after 1.0: LSP
-        (ADR 0025 D10), a `u8`/byte type, actors (ADR 0030 D3), bitwise
-        shifts (ADR 0027 A1) — none gate the close bar.
-      Key decisions (ADR 0030): **actors DESCOPED** from 1.0 (D3, developer
-        endorsed); bytes/labels modelled as `i64`, secret material as
-        `secret` scalars, iteration as recursion (D4).
-      Alternative if the developer redirects: LSP (ADR 0025 D10, tooling).
+    RESUME AT: **Phase D.1 — sum types + pattern matching** (the first
+    self-hosting prerequisite; ADR 0031 PROPOSED just opened Phase D).
+    **Sentinel 1.0 is DECLARED** (ADR 0025 + 0030 → ACCEPTED; the
+    constant-time go/no-go runs + passes D5; 1232 tests, four-check green).
+    Phase D = self-hosting. **Honest verdict (ADR 0031 D2): the 1.0
+    language cannot self-host yet** — no sum types/`match` (an AST is a sum
+    type — the biggest blocker), no strings/byte type, no growable
+    collections, no file I/O, no modules, no loops. So Phase D opens with a
+    language/stdlib build-out, not compiler code, keeping the Rust `snc` as
+    the differential oracle and converging on a byte-identical bootstrap
+    fixed-point (the point of C5's `abi-v1` + reproducible builds).
+      NEXT CONCRETE STEP: write the **Phase D.1 kickoff ADR (0032) — sum
+        types + pattern matching** (interner variant + exhaustiveness check
+        + `match` lowering; a C1–C4-style type-system + codegen feature),
+        then implement it ADR-first / feat+docs / four-check like every
+        prior sub-phase. Prerequisite order after D.1 (ADR 0031 D4): strings
+        + byte type → growable collections → file I/O (stdlib) → modules →
+        loops. Then the self-host port (D5): lexer → parser → … → codegen,
+        each in Sentinel, differentially validated against the Rust stage.
+      Independent post-1.0 tracks (may interleave, don't gate self-hosting):
+        LSP (ADR 0025 D10), actors (ADR 0030 D3).
 
     DEFERRED (none blocking; recorded in ADRs): C5.2a/D4 constant-time
     EMISSION (branch-free arithmetic/bitwise already passes D5 on existing
@@ -1920,15 +1922,16 @@ For pasting into a fresh chat to bootstrap context:
     policy); full escape analysis; `scope budget(N)` surface; cross-process /
     modules / actors — all post-1.0 per ADR 0025.
 
-    ADR STATUS: 0026 PROPOSED (C5.1/C5.2). 0027 ACCEPTED-WITH-AMENDMENTS
-    (bitwise). 0028 ACCEPTED-WITH-AMENDMENTS (broker; 1/N substrate + 2/N
-    scope→arena codegen both shipped; A2 corrects the "UAF hole"). 0029
-    ACCEPTED-WITH-AMENDMENTS (stable ABI; abi-v1 frozen + tested; A1 field-type
-    asserts, A2 representative named-struct layout). 0030 PROPOSED (the 1.0
-    go/no-go — TLS-handshake-shaped; D3 descopes actors; 1/N + 2/N DONE —
-    constant-time crypto over secrets, **passes D5**, exit 42; the close bar
-    is MET). 3/N = the formal 1.0 declaration (flip ADR 0025 + 0030 →
-    ACCEPTED) — **left to the developer** as a milestone call.
+    ADR STATUS: 0025 **ACCEPTED-WITH-AMENDMENTS** (Phase C5 kickoff — closed
+    at Sentinel 1.0; C5 sub-phase roll-up). 0026 PROPOSED (C5.1/C5.2; flips
+    when the deferred D4 emission/HIR-MIR migration lands post-1.0). 0027
+    ACCEPTED-WITH-AMENDMENTS (bitwise; shifts deferred). 0028
+    ACCEPTED-WITH-AMENDMENTS (broker scope arenas; A2 corrects the "UAF
+    hole"). 0029 ACCEPTED-WITH-AMENDMENTS (stable abi-v1; frozen + tested).
+    0030 **ACCEPTED-WITH-AMENDMENTS** (the 1.0 go/no-go — runs + passes D5;
+    3/N declared 1.0). 0031 **PROPOSED** (Phase D kickoff — self-hosting;
+    honest readiness verdict + the language/stdlib prerequisite roadmap;
+    first sub-phase D.1 = sum types + `match`).
     Optional C4 follow-ons (none blocking): work-stealing scheduler
     (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
     (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).
