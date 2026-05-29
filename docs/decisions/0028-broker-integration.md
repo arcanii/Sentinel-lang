@@ -29,16 +29,30 @@ correctness must come from *reasoning*, not green tests.
 
   - **Airtight argument (the safety bar).** Route binding `x`'s
     allocation into a scope arena *iff* `x` is in that scope's
-    `DropPlan` scope-exit free set (`x ∉ moved_sources_for(fn)`), and
-    reset the arena at that *same* `emit_scope_drops` point. Then the
-    arena reset replaces *exactly* the per-binding `sentinel_free`s the
-    borrow checker already proved safe at that point — same lifetime,
-    same point, bulk vs individual — so it is as safe as today's frees
-    (it inherits, but does not worsen, the documented C2 partial-move
-    soundness gap). The single hard invariant: **the set of
-    arena-routed allocations must equal the set of frees skipped** —
-    drive both from one per-scope `HashSet<VarId>` (written at
-    alloc-routing, read at free-skipping) so they cannot diverge.
+    `emit_scope_drops` **actual free set**, and reset the arena at that
+    *same* point. Then the arena reset replaces *exactly* the per-binding
+    `sentinel_free`s the borrow checker already proved safe there — same
+    lifetime, same point, bulk vs individual — as safe as today's frees
+    (inheriting, not worsening, the documented C2 partial-move gap). One
+    hard invariant: **arena-routed allocations == frees skipped**, driven
+    by a single `HashSet<VarId>` so they cannot diverge.
+  - **⚠ Verified UAF hole — the predicate is NOT `x ∉ moved_sources`.**
+    `emit_scope_drops` frees a binding iff `∉ moved_sources` **AND**
+    `≠ tail_returned`; the two are checked *separately* (codegen
+    ~L3170-3176), and a **tail-returned binding is NOT in
+    `moved_sources`** — `DropPlan.moved_sources` is finalised
+    (borrow-check L626-628) *before* the return-source check, with
+    tail-returns handled via the separate `tail_returned_var` path. So
+    routing on `∉ moved` alone would arena-free a **returned** array
+    (`fn make() -> [i64] { let a = [1,2,3]; a }`) at `make`'s exit → UAF
+    in the caller (and it may pass tests by luck). The safe predicate is
+    the *actual* free set = `∉ moved ∧ not (transitively) tail-returned`,
+    which is **not locally known at the `let`**. So C5.4 (2/N) needs
+    either (a) a small **pre-pass** computing, per fn, the heap `let`
+    bindings that `emit_scope_drops` actually frees (∉moved and never a
+    propagating block tail) and routes exactly those, or (b) the deferred
+    escape analysis (ADR 0026 D2). The `∉ moved`-only shortcut is unsafe;
+    do not ship it.
   - **Narrow first slice.** Only `let x = <array literal>` where `x` is
     non-escaping: array literals call `sentinel_alloc` directly for
     their `{len,data}` data (codegen ~line 1606), so routing *that*
