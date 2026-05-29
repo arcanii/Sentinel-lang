@@ -33,6 +33,26 @@ proven patterns. +1 test (1232), four-check green. **Stays PROPOSED** —
 (2/N) fills the constant-time primitives over `secret` scalars and makes
 the program **pass D5** (D6); closing that declares 1.0.
 
+**(2/N) update (2026-05-30) — DELIVERED; the close bar is MET.** The
+stubs were replaced with real constant-time crypto over `secret` scalars
+— a Montgomery-ladder step + branch-free `cswap` (`mask = sec(0) - bit`),
+an HKDF-expand-shaped mix via the `Kdf` trait, and the `c53_ct_eq`
+`Finished` verify — and the program **passes the D5 constant-time check**
+(`verify_constant_time` gates the build) and runs to exit 42. Every
+secret op is `+ - * ^ & |` (no D5 sink); the lone `declassify` is the
+`Finished` accumulator (D6 satisfied by construction; verified the secret
+typing is live — a deliberate secret array index is rejected at
+type-check). One ergonomic finding, recorded for the spec: **C3.1b makes
+a mixed secret/public operation a type error** (no in-expression
+widening), so constant-time code lifts public constants/labels into the
+secret domain first — here via a `sec(x) { let s: secret i64 = x; s }`
+helper (widening happens only at a `let` with a `secret` annotation, not
+at a return). +0 net tests (the `c5_go_no_go` fixture evolved from the
+1/N skeleton; 1232). **The D8 close bar (runs + passes D5) is now met.**
+**(3/N) — declaring Sentinel 1.0 + flipping ADR 0025 → ACCEPTED — is the
+developer's call and is intentionally left to them**; this ADR stays
+PROPOSED until that decision.
+
 ## Context — the scoping pass (2026-05-30)
 
 Before opening this sub-phase, the handshake was sketched against the

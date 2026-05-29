@@ -42,15 +42,19 @@ recursion for iteration — all green) + modelling choices, **not** new
 machinery; **actors are descoped** from 1.0 (ADR 0030 D3, a deviation from
 C5.0 — a sequential handshake needs no mailbox), and bit shifts are a
 conditional JIT prerequisite (ADR 0027 A1, only if a reduced primitive
-needs them). **go/no-go (1/N) is DONE** — `tests/pass/c5_go_no_go.sentinel`,
-the handshake skeleton (state-machine class + `Kdf` cipher trait/impl +
-`Net` I/O effect + handler + the 4-stage flow, stubbed crypto), compiles
-+ runs to exit 42 (it compiled on the first try — confirming the scoping
-verdict). Resume at go/no-go **(2/N)**: fill the constant-time primitives
-over `secret` scalars (a Montgomery-ladder step + an HKDF-expand-shaped
-mix + the `c53_ct_eq` `Finished` verify) and make it **pass the D5
-constant-time check** — the decisive 1.0 validation. Closing the go/no-go
-(runs + passes D5) **declares Sentinel 1.0** and flips ADR 0025.
+needs them). **go/no-go (1/N + 2/N) are DONE — the close bar is MET.**
+`tests/pass/c5_go_no_go.sentinel` is now the full handshake program with
+real **constant-time** crypto over `secret` scalars — a Montgomery-ladder
+step + branch-free `cswap`, an HKDF-expand-shaped mix via the `Kdf` trait,
+and the `c53_ct_eq` `Finished` verify — and it **passes the D5
+constant-time check** (`verify_constant_time` gates the build) + runs to
+exit 42. The headline 1.0 capability (express + *prove* constant-time
+crypto) is exercised end-to-end. Ergonomic finding: C3.1b makes a mixed
+secret/public op a type error, so constant-time code lifts public
+constants via a `sec` widening helper. **Resume at go/no-go (3/N): the
+formal 1.0 declaration** — flip ADR 0025 → ACCEPTED + declare Sentinel
+1.0. That call is **intentionally left to the developer** (a momentous,
+milestone decision); the substantive close bar (runs + passes D5) is met.
 
 Pre-D7(1/N) context: **C5.4 (2/N): the scope→arena codegen; ADR 0028 →
 ACCEPTED-WITH-AMENDMENTS.** Codegen routes a scope's non-escaping
