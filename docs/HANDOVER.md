@@ -102,6 +102,7 @@ C1.3. See STATE.md Section C.
 **Phase C5.1b (1/N) — MIR data model (minimal SSA/CFG) — complete.** `sentinel-mir` is no longer a stub: `MirProgram` / `MirFunction` / `MirBlock` (SSA block-params = the phi-equivalent) / `MirInst` / `MirOp` / `MirTerminator` / `MirValue`, built to host the C5.2 D5 constant-time verification. Each SSA value carries its `Type`, so secrecy reads off `Type::Secret(_)` (`MirFunction::is_secret` — the taint seed); the three D5 sinks are representable (a `Branch` condition, a `Load` index, a `Binary` Div/Rem operand); non-secret-relevant constructs funnel through `MirOp::Opaque` / `MirTerminator::Unreachable` carrying their operands so taint stays sound. Additive — nothing consumes MIR yet (codegen stays on the typed program per the escape hatch); zero regression risk; 1195 tests green (`1b0a10d`). Next: **C5.1b (2/N)** — `lower_to_mir` (typed fn bodies → MIR SSA); then C5.2 = D5 verification + D4 constant-time emission (codegen pass).
 **Phase C5.1b (2/N) — `lower_to_mir`: typed fn bodies → MIR SSA — complete.** `sentinel-mir` now lowers each free function's type-checked body into a `MirFunction` in SSA/CFG form. No loops in the surface ⇒ the CFG is a DAG and SSA falls out of one structured walk (no dominance-frontier phi placement): `if`/`&&`/`||` → `MirTerminator::Branch` into fresh blocks reconciled at a merge block via SSA block-params, with a variable reassigned on one arm threaded through a merge param (deterministic, `VarId`-sorted `BTreeMap` env). `&&`/`||` lower as control flow because `secret bool && secret bool` type-checks (`SecretBranch` only rejects `if`) — a short-circuit branch on a secret is the leak the C5.2 D5 pass must see. The three D5 sinks lower precisely (`if`/short-circuit cond → `Branch`; `a[i]`/`*p` → `MirOp::Load` so a secret index *or* address is visible; `a / b` → `Binary(Div)`); `declassify(e)` → `MirOp::Declassify` (the one taint sink); everything else → `MirOp::Opaque` carrying its operands so taint can't vanish. Scope: top-level fns only (class/impl/init method bodies a mechanical follow-on); generic defs as-is (`TypeParam` is never secret); no monomorphisation (MIR is analysis-only per the D3 escape hatch). Additive — nothing consumes MIR yet (the D5 pass at C5.2 is its first consumer; the driver will call `lower_to_mir(hir.program())` then); zero regression risk; codegen stays on the typed program. +7 lowering tests (1202 total) (`1a223c8`). ADR 0026 stays PROPOSED (flips at C5.2 close). Next: **C5.2** — D5 constant-time verification (`sentinel::mir::secret_leak`) + D4 constant-time emission (codegen pass) — the 1.0 headline.
 **Phase C5.2b (1/N) — the D5 constant-time verification pass — complete.** `verify_constant_time(&MirProgram) -> Vec<SecretLeak>` is the first consumer of `lower_to_mir` and the machine-checkable form of ADR 0008's guarantee: it rejects any `secret` value reaching a conditional-branch condition, a load index/address, or a division divisor, emitting a `sentinel::mir::secret_leak` what/why/how diagnostic (`SinkKind` names the sink). **Taint oracle:** each SSA value carries its `Type`, and the type checker's operator-secret-preserving rules already computed the taint fixpoint (`declassify` clears; fn-signature boundaries respected), so the pass reads taint off the type (`is_secret`) and inspects each sink — no separate def-use propagation at the typed-program level (the ADR's forward propagation is only needed once MIR is lowered from *post-optimisation* code → post-1.0; recorded as a **D5 amendment**). The one leak this catches beyond the C3.1 source rejections is `secret bool && secret bool` (a secret short-circuit `Branch`), which type-checks because `SecretBranch` only rejects `if`. MIR data model gains a `span` on `MirInst` + `MirTerminator::Branch`, threaded in `lower_to_mir`, so the diagnostic points at source. Additive — not yet wired into the driver (C5.2b (2/N)); zero regression risk. +4 verify tests (1206 total) (`9bcc271`). ADR 0026 stays PROPOSED. Next: **C5.2b (2/N)** — wire D5 into the driver (a real `secret_leak` compile error) + `c52_secret_leak` (UI snapshot) + `c52_secret_ct` (branch-free masked-select pass) fixtures.
+**Phase C5.2b (2/N) — the D5 verification is wired into `snc` + c52 phase-go — complete.** `snc build` runs the constant-time check: after `check_query` the driver lowers the typed program to MIR (`lower_to_mir` — now a real pipeline consumer) and runs `verify_constant_time`; a `secret` reaching a conditional branch / load index|address / division divisor is a `sentinel::mir::secret_leak` compile error (exit 1) gating codegen. (Codegen still consumes the typed program via the HIR seam per the D3 escape hatch; MIR stays analysis-only.) Fixtures (ADR 0026 D9): `c52_secret_leak` (UI) — `secret bool && secret bool` type-checks (`SecretBranch` only rejects `if`) but lowers to a secret short-circuit `Branch` → rejected (`insta` snapshot, label on the short-circuited operand); `c52_secret_ct` (pass) — a branch-free masked select over secrets (`c*a + (1-c)*b`) compiles, runs, **passes** D5, exit 42. **c51 bar holds**: existing pass/ui fixtures unchanged + `tests/repro.rs` byte-identical (D5 runs before, and gates, an unchanged codegen). +2 tests (1208 total) (`e81bdbf`). ADR 0026 stays PROPOSED. Next: **C5.2a** — D4 constant-time *emission* (codegen pass: branch-free select + ADR 0008 speculation barriers, x86-64/aarch64); **open question: does the 1.0 go/no-go even need D4?** A branch-free *arithmetic* primitive already passes D5 on the existing codegen (no bitwise/`select` ops in the surface), so D4 may be scoped out of 1.0 — settle with the developer before building it. ADR 0026 flips once C5.2a lands or is consciously scoped out.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1136,14 +1137,17 @@ New norms learned during Phase B and Phase C:
 > taint: each value's `Type` already carries the fixpoint, so the pass
 > reads `is_secret` and inspects the branch/load/div sinks →
 > `sentinel::mir::secret_leak`), additive (not yet driver-wired).
-> **Resume at C5.2b (2/N):** wire D5 into the driver after `check_query`
-> (`lower_to_mir(hir.program())` → `verify_constant_time` → render
-> `secret_leak` + exit 1) + the `c52_secret_leak` (UI snapshot) and
-> `c52_secret_ct` (branch-free masked-select, pass) fixtures. Then C5.2a =
-> D4 constant-time *emission* (a codegen pass: branch-free select +
-> ADR 0008 speculation barriers) — assess whether the go/no-go even needs
-> it, since a branch-free *arithmetic* primitive already passes D5 on the
-> existing codegen (no bitwise/`select` ops in the surface).
+> **C5.2b (2/N) is then DONE** — D5 is wired into `snc` (after
+> `check_query`: `lower_to_mir` → `verify_constant_time` → render
+> `secret_leak` + exit 1, gating codegen) with the `c52_secret_leak` (UI)
+> and `c52_secret_ct` (branch-free masked-select, pass) fixtures; the c51
+> bar holds (`repro.rs` byte-identical). **Resume at C5.2a:** D4
+> constant-time *emission* (a codegen pass: branch-free select + ADR 0008
+> speculation barriers, x86-64/aarch64) — but **first settle the open
+> question**: whether the 1.0 go/no-go needs D4 at all, since a branch-free
+> *arithmetic* primitive already compiles + passes D5 on the existing
+> codegen (the surface has no bitwise / `select` ops). If D4 is scoped out
+> of 1.0, C5.2 closes and ADR 0026 flips to ACCEPTED-WITH-AMENDMENTS.
 >
 > **Available C4 follow-ons** (none blocking C5): work-stealing
 > scheduler (ADR 0024 A1), scope cancellation (A2), `Task<T>`
@@ -1810,10 +1814,13 @@ For pasting into a fresh chat to bootstrap context:
     param; the 3 D5 sinks precise; the rest `Opaque`; top-level fns only).
     **C5.2b (1/N) done** (`9bcc271`) — `verify_constant_time` rejects a
     `secret` at a branch/load/div sink (`sentinel::mir::secret_leak`;
-    type-directed taint), additive (not yet driver-wired). **Resume at
-    C5.2b (2/N):** wire D5 into the driver + `c52_secret_leak` (UI) +
-    `c52_secret_ct` (branch-free masked-select, pass) fixtures; then C5.2a
-    = D4 constant-time emission. Per-sub-phase ADRs 0026+ at each open.
+    type-directed taint). **C5.2b (2/N) done** (`e81bdbf`) — D5 wired into
+    `snc` (gates codegen) + `c52_secret_leak` (UI) + `c52_secret_ct`
+    (branch-free, exit 42) fixtures; c51 bar holds. **Resume at C5.2a:**
+    D4 constant-time emission (codegen pass) — first settle whether the
+    go/no-go even needs it (a branch-free arithmetic primitive already
+    passes D5); if scoped out, C5.2 closes + ADR 0026 flips. Per-sub-phase
+    ADRs 0026+ at each open.
     Optional C4 follow-ons (none blocking C5): work-stealing
     scheduler (ADR 0024 A1), scope cancellation (A2), Task<T>/
     spawn-args beyond i64 (A3), explicit `Task<T>` annotations

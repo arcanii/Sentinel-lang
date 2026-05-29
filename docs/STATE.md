@@ -12,8 +12,32 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C5.2b (1/N): the D5 constant-time verification pass (ADR
-0026 D5).** `verify_constant_time(&MirProgram) -> Vec<SecretLeak>` is the
+Last updated: **C5.2b (2/N): the D5 constant-time verification is wired
+into `snc` (ADR 0026 D5/D9).** `snc build` now runs the constant-time
+check: after `check_query`, the driver lowers the typed program to MIR
+(`lower_to_mir` — now a real pipeline consumer) and runs
+`verify_constant_time`; a `secret` reaching a conditional branch, a load
+index/address, or a division divisor is a `sentinel::mir::secret_leak`
+compile error (exit 1) that gates codegen. (Codegen still consumes the
+typed program via the HIR seam per the D3 escape hatch; MIR stays
+analysis-only.) Two phase-go fixtures (D9): **`c52_secret_leak`** (UI) —
+`secret bool && secret bool` type-checks (`SecretBranch` only rejects
+`if`) but lowers to a secret short-circuit `Branch`, rejected with an
+`insta` snapshot of the rendered diagnostic; **`c52_secret_ct`** (pass) —
+a branch-free masked select over secrets (`c*a + (1-c)*b`) compiles,
+runs, **passes** D5, exits 42. The **c51 behaviour-preservation bar
+holds**: every existing pass/ui fixture is unchanged and the
+`tests/repro.rs` objects stay byte-identical (D5 runs before, and gates,
+an unchanged codegen). +2 tests (1208). Four-check green. **Next: C5.2a**
+— D4 constant-time *emission* (a codegen pass: branch-free select +
+ADR 0008 speculation barriers, x86-64/aarch64). Open question to settle
+first: whether the 1.0 go/no-go even needs D4, since a branch-free
+*arithmetic* primitive already passes D5 on the existing codegen (the
+surface has no bitwise / `select` ops). ADR 0026 stays PROPOSED (it flips
+once C5.2a lands or is consciously scoped out of 1.0).
+
+Pre-C5.2b(2/N) context: **C5.2b (1/N): the D5 constant-time verification
+pass (ADR 0026 D5).** `verify_constant_time(&MirProgram) -> Vec<SecretLeak>` is the
 first consumer of `lower_to_mir` and the machine-checkable form of ADR
 0008's guarantee: it rejects any `secret` value that reaches a
 conditional-branch condition, a load index/address, or a division
