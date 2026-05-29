@@ -35,13 +35,22 @@ is run from the workspace root with a relative path, so the snapshots
 are portable with zero normalization; a snapshot pins the entire
 what/why/how, not just the presence of a code). The 2 pure-syntax UI
 snapshots (lex/parse) remain in `sentinel-syntax/tests/ui.rs`.
-**Still pending in C5.0:** the reproducible-build audit (D8 —
-deterministic codegen). Then C5.1 = HIR/MIR stages (D2), C5.2 =
-constant-time secret codegen (D3); ADR 0026 PROPOSED (C5.1/C5.2
-surface) lands before the first C5.1 feat. Four-check suite green via
-`cargo nextest run --workspace` (1190 passed) + `cargo test --doc`;
-D11 is test-count-neutral (15 `pass.rs` UI fns removed, 15 `ui.rs`
-snapshot tests added).
+**D8 reproducible-build audit DONE:** empirically verified the entire
+C0–C4 codegen surface is byte-identical across independent `snc`
+processes (full C4 program, generics monomorphization, handler/capture
+fixtures, nested handles, RAII drop) — codegen's `std::HashMap`s are
+all lookup tables (emission walks source-ordered `Vec`s), mach-O
+objects carry no timestamp, and LLVM lowers identical IR identically,
+so the ADR's proposed HashMap→BTreeMap conversion is unnecessary at the
+current surface (the std maps stay; the test is the guard). Locked in
+with `crates/sentinel-driver/tests/repro.rs` (compile-twice, diff the
+object; 5 fixtures) — a regression guard for the C5.1 HIR/MIR stages.
+**C5.0 COMPLETE** (D1/D13 + D6/D9 decision, D11 test infra, D8 repro
+audit). Next: C5.1 = HIR/MIR stages (D2), C5.2 = constant-time secret
+codegen (D3); **ADR 0026 PROPOSED (C5.1/C5.2 surface) lands before the
+first C5.1 feat commit** per the ADR-first norm. Four-check suite green
+via `cargo nextest run --workspace` + `cargo test --doc` (1195 tests:
+the C4-close ~1190 + 5 repro; D11 was test-count-neutral).
 
 Pre-C5.0 context: **C4.5: Phase C4 close-out — ADR 0021 flips
 PROPOSED → ACCEPTED-WITH-AMENDMENTS; PHASE C4 CLOSES.** All six

@@ -1095,17 +1095,20 @@ New norms learned during Phase B and Phase C:
 > 1.0 release is at C5 close. **ADR 0025 PROPOSED is drafted**
 > (`docs/decisions/0025-phase-c5-kickoff-and-productionization-plan.md`)
 > — 14 D-decisions + an 8-sub-phase split (C5.0–C5.8). **C5.0 is
-> in progress: the go/no-go program is CHOSEN** — a single-process,
-> single-file TLS 1.3 handshake (ADR 0025 `## C5.0 resolution`). It
+> COMPLETE:** the go/no-go program is CHOSEN — a single-process,
+> single-file TLS 1.3 handshake (ADR 0025 `## C5.0 resolution`) — which
 > pins **D6 (cross-process) → post-1.0** and **D9 (modules) →
-> post-1.0** (the handshake is self-contained + fits one file), and
+> post-1.0** (the handshake is self-contained + fits one file) and
 > forces the headline constant-time `secret` capability (D3) an HTTP
-> server would leave unexercised. **Still pending in C5.0:** `insta`
-> UI snapshots + `cargo nextest` (D11) and the reproducible-build
-> audit (D8 — deterministic codegen). Then C5.1 = the HIR/MIR stages
-> (D2), C5.2 = constant-time codegen (D3, the security core). **ADR
-> 0026 PROPOSED** (C5.1/C5.2 HIR/MIR + constant-time surface) lands
-> before the first C5.1 feat commit, per the ADR-first norm.
+> server would leave unexercised; **D11** test infra landed (`cargo
+> nextest` + `insta` full-diagnostic UI snapshots, replacing the ad-hoc
+> `stderr.contains` checks); and the **D8** reproducible-build audit
+> found the C0–C4 build already byte-identical across independent `snc`
+> processes (locked in by `crates/sentinel-driver/tests/repro.rs`).
+> **Resume at the C5.1 boundary:** write **ADR 0026 PROPOSED** (the
+> C5.1/C5.2 HIR/MIR + constant-time surface) BEFORE the first C5.1 feat
+> commit per the ADR-first norm; then C5.1 = the HIR/MIR stages (D2),
+> C5.2 = constant-time secret codegen (D3, the security core).
 >
 > **Available C4 follow-ons** (none blocking C5): work-stealing
 > scheduler (ADR 0024 A1), scope cancellation (A2), `Task<T>`
@@ -1751,13 +1754,16 @@ For pasting into a fresh chat to bootstrap context:
     from C3), cross-process, actors, stable ABI, reproducible
     builds, LSP/tooling. (NOT "Phase D" — the roadmap after C4 is
     C5.) **ADR 0025 PROPOSED is drafted** (14 D-decisions, 8-sub-
-    phase split C5.0–C5.8). **C5.0 in progress:** go/no-go program
+    phase split C5.0–C5.8). **C5.0 COMPLETE:** go/no-go program
     CHOSEN = single-process single-file TLS 1.3 handshake → D6
     (cross-process) + D9 (modules) both post-1.0 (ADR 0025 `## C5.0
-    resolution`). Pending in C5.0: `insta`+`nextest` infra (D11),
-    reproducible-build audit (D8). Then C5.1 HIR/MIR (D2), C5.2
-    constant-time codegen (D3, security core); ADR 0026 PROPOSED
-    before first C5.1 feat. Per-sub-phase ADRs 0026+ at each open.
+    resolution`); D11 test infra landed (`cargo nextest` + `insta`
+    full-diagnostic UI snapshots); D8 repro audit found the C0–C4 build
+    already byte-identical across processes (locked in by
+    `tests/repro.rs`). **Resume at the C5.1 boundary:** write ADR 0026
+    PROPOSED (C5.1/C5.2 HIR/MIR + constant-time surface) BEFORE the
+    first C5.1 feat; then C5.1 HIR/MIR (D2), C5.2 constant-time secret
+    codegen (D3, security core). Per-sub-phase ADRs 0026+ at each open.
     Optional C4 follow-ons (none blocking C5): work-stealing
     scheduler (ADR 0024 A1), scope cancellation (A2), Task<T>/
     spawn-args beyond i64 (A3), explicit `Task<T>` annotations

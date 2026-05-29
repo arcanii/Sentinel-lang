@@ -12,7 +12,7 @@
 # The driver's pass/ui tests shell out to `snc`, which compiles and
 # cc-links via LLVM — individually slow. Warn (don't fail) on long
 # tests; kill only a genuine runaway (4 × 45s).
-slow-timeout = { period = "45s", terminal-after = 4 }
+slow-timeout = { period = "45s", terminate-after = 4 }
 # Show a failing test's output inline as it happens and again at the
 # end so the cause is not buried in the run.
 failure-output = "immediate-final"

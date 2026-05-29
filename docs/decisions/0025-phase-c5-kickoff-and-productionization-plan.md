@@ -239,6 +239,19 @@ deterministic mode); add a "compile twice, diff the object"
 regression test. This is a **hard prerequisite for Phase D**'s
 byte-identical fixed-point go/no-go, so it lands early (C5.0).
 
+**[Resolved at C5.0 — the audit found the C0–C4 build already
+reproducible: codegen's `std::HashMap`s are all lookup tables (IR is
+emitted by walking source-ordered `Vec`s), mach-O objects embed no
+timestamp, and LLVM lowers identical IR identically. Verified
+byte-identical across independent `snc` processes for the full C4
+surface, generics monomorphization, handler/capture fixtures, nested
+handles, and RAII drop. The proposed HashMap→BTreeMap / strip-timestamp
+/ LLVM-deterministic-mode changes are therefore unnecessary at the
+current surface; the regression test (`crates/sentinel-driver/tests/
+repro.rs`, compile-twice + diff over 5 fixtures) is the durable guard
+and will catch any emission-order-sensitive map iteration introduced
+by the C5.1 HIR/MIR stages.]**
+
 ### D9. Module system / separate compilation. (Scoping-open.)
 
 ADR 0009 §6.1 lists "name resolution, module graph"; C0-C4 is
