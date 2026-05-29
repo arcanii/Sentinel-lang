@@ -1236,6 +1236,8 @@ name = "sentinel-mir"
 version = "0.0.1"
 dependencies = [
  "sentinel-ast",
+ "sentinel-resolve",
+ "sentinel-syntax",
  "sentinel-types",
 ]
 
