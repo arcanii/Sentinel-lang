@@ -202,6 +202,25 @@ after the constant-time emission/opts, or with the relevant LLVM passes
 pinned; D6/Reasoning). It is the machine-checkable expression of ADR
 0008's guarantee.
 
+**[C5.2b amendment — taint is type-directed at 1.0 (2026-05-29).**
+`verify_constant_time` shipped (C5.2b 1/N) as the first consumer of
+`lower_to_mir`. Because MIR is lowered from the *typed* program (the D3
+escape-hatch reality, not post-opt code), the forward def-use propagation
+above is **already computed by the type checker**: operator-secret-
+preserving typing means a value's `Type` is `secret` iff a source-
+reachable operand was — with `declassify` clearing it and function-
+signature boundaries respected — so the pass reads taint straight off
+each value's type (`MirFunction::is_secret`) and inspects the three sinks
+(branch condition, load index/address, division divisor), with no
+standalone propagation pass. The explicit forward propagation becomes
+necessary only once MIR is lowered from *post-optimisation* code (where
+the optimiser may produce a secret-derived value the type no longer
+marks) — **post-1.0** (D8). At 1.0 the one leak this catches beyond the
+C3.1 source rejections is `secret bool && secret bool` / `||` (a secret
+short-circuit `Branch`), which type-checks because `SecretBranch` only
+rejects `if`. Mutable indexing is out of scope (ADR 0017 D12), so the
+store-address half of "load/store" above is not reachable yet.]
+
 ### D6. Target architecture.
 
 x86-64 + aarch64 — the brew-LLVM18 targets (working norm). Barrier

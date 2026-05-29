@@ -12,7 +12,31 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C5.1b (2/N): `lower_to_mir` — typed fn bodies → MIR SSA
+Last updated: **C5.2b (1/N): the D5 constant-time verification pass (ADR
+0026 D5).** `verify_constant_time(&MirProgram) -> Vec<SecretLeak>` is the
+first consumer of `lower_to_mir` and the machine-checkable form of ADR
+0008's guarantee: it rejects any `secret` value that reaches a
+conditional-branch condition, a load index/address, or a division
+divisor, emitting a `sentinel::mir::secret_leak` what/why/how diagnostic
+(a `SinkKind` names which sink). **Taint oracle:** each SSA value carries
+its `Type`, and the type checker's operator-secret-preserving rules
+already computed the taint fixpoint (`declassify` clears it; fn-signature
+boundaries respected), so the pass reads taint straight off the type
+(`is_secret`) and inspects each sink — no separate def-use propagation is
+needed at the typed-program level (the ADR's forward propagation is only
+needed once MIR is lowered from *post-optimisation* code — post-1.0; a D5
+amendment). The one leak this catches over the C3.1 source rejections is
+`secret bool && secret bool` (a secret short-circuit `Branch`), which
+type-checks because `SecretBranch` only rejects `if`. The MIR data model
+gains a `span` on `MirInst` + `MirTerminator::Branch` (the sink-bearing
+nodes), threaded in `lower_to_mir`, so the diagnostic points at source.
+**Additive** — not yet wired into the driver (C5.2b (2/N) does that + the
+`c52_*` fixtures); zero regression risk. +4 verify tests (1206).
+Four-check green. **Next: C5.2b (2/N)** — wire D5 into the driver (a real
+`secret_leak` compile error) + `c52_secret_leak` (UI) + `c52_secret_ct`
+(a branch-free masked select, pass) fixtures.
+
+Pre-C5.2b(1/N) context: **C5.1b (2/N): `lower_to_mir` — typed fn bodies → MIR SSA
 (ADR 0026 D2).** `sentinel-mir` now lowers each free function's
 type-checked body into a `MirFunction` in SSA/CFG form. Sentinel has only
 *structured* control flow and no loops, so the CFG is a DAG and SSA falls
