@@ -150,6 +150,17 @@ pub enum TokenKind {
     /// reclaims this same keyword token.)
     #[token("for")]
     For,
+    /// Phase D.1 / ADR 0032: `enum Name { V1, V2(T), … }` declares a
+    /// sum type (tagged union). Additive at D.1 (1/N) — the parser
+    /// consumes it at (2/N).
+    #[token("enum")]
+    Enum,
+    /// Phase D.1 / ADR 0032: `match scrutinee { Pat => expr, … }` —
+    /// exhaustive pattern matching. The `=>` arm separator reuses
+    /// [`TokenKind::FatArrow`]; `::` reuses [`TokenKind::ColonColon`];
+    /// the `_` wildcard lexes as an `Ident`.
+    #[token("match")]
+    Match,
 
     #[token("+")]
     Plus,
@@ -1031,6 +1042,62 @@ mod tests {
     #[test]
     fn lex_trait_keyword() {
         assert_eq!(kinds("trait"), vec![TokenKind::Trait]);
+    }
+
+    #[test]
+    fn lex_enum_match_keywords() {
+        // Phase D.1 / ADR 0032: the two new keywords.
+        assert_eq!(kinds("enum"), vec![TokenKind::Enum]);
+        assert_eq!(kinds("match"), vec![TokenKind::Match]);
+    }
+
+    #[test]
+    fn lex_enum_match_decl_shape() {
+        // A representative `enum` decl head + a `match` arm head, showing
+        // the new keywords compose with the existing `::` / `=>` / `_`
+        // (the `_` wildcard lexes as an Ident) — the surface (2/N) parses.
+        assert_eq!(
+            kinds("enum Shape { Circle(i64) }"),
+            vec![
+                TokenKind::Enum,
+                TokenKind::Ident,   // Shape
+                TokenKind::LBrace,
+                TokenKind::Ident,   // Circle
+                TokenKind::LParen,
+                TokenKind::Ident,   // i64 (a type name lexes as Ident)
+                TokenKind::RParen,
+                TokenKind::RBrace,
+            ]
+        );
+        assert_eq!(
+            kinds("match s { Shape::Circle(r) => r, _ => 0 }"),
+            vec![
+                TokenKind::Match,
+                TokenKind::Ident,        // s
+                TokenKind::LBrace,
+                TokenKind::Ident,        // Shape
+                TokenKind::ColonColon,
+                TokenKind::Ident,        // Circle
+                TokenKind::LParen,
+                TokenKind::Ident,        // r
+                TokenKind::RParen,
+                TokenKind::FatArrow,
+                TokenKind::Ident,        // r
+                TokenKind::Comma,
+                TokenKind::Ident,        // _ (wildcard lexes as Ident)
+                TokenKind::FatArrow,
+                TokenKind::IntLit,       // 0
+                TokenKind::RBrace,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_enum_match_ident_prefix_regression() {
+        // Identifiers that merely start with the keywords are not split.
+        assert_eq!(kinds("enumerate"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("matcher"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("matches"), vec![TokenKind::Ident]);
     }
 
     #[test]
