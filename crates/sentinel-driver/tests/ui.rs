@@ -106,3 +106,6 @@ ui_snapshot!(c43_delegate_undefined_trait, "c43_delegate_undefined_trait.sentine
 ui_snapshot!(c44_spawn_non_fn_call, "c44_spawn_non_fn_call.sentinel");
 ui_snapshot!(c44_await_on_non_task, "c44_await_on_non_task.sentinel");
 ui_snapshot!(c44_spawn_result_must_be_i64, "c44_spawn_result_must_be_i64.sentinel");
+
+// ---- C5.2 constant-time verification rejection (the MIR D5 pass) ----
+ui_snapshot!(c52_secret_leak, "c52_secret_leak.sentinel");

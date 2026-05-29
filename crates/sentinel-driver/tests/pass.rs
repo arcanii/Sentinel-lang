@@ -1101,3 +1101,12 @@ fn pass_c4_named_impl() {
     assert_eq!(r.exit, 42);
     assert_eq!(r.stdout, "");
 }
+
+#[test]
+fn pass_c52_secret_ct() {
+    // ADR 0026 D9 c52_secret_ct: a branch-free constant-time masked
+    // select over secrets (`c*a + (1-c)*b`) compiles, runs, and PASSES
+    // the D5 verification (no secret reaches a branch / index / divisor).
+    // cond=1 picks x=42; declassify yields the exit code.
+    assert_eq!(run_exit("c52_secret_ct.sentinel"), 42);
+}

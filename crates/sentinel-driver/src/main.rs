@@ -141,6 +141,24 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
         None => return ExitCode::from(1),
     };
 
+    // C5.2 / ADR 0026 D5: the constant-time verification. Lower the typed
+    // program to analysis MIR and reject any `secret` value that reaches a
+    // conditional branch, a memory index/address, or a division divisor —
+    // the machine-checkable form of ADR 0008's guarantee, gating codegen.
+    // (Codegen still consumes the typed program via the HIR seam per the
+    // D3 escape hatch; MIR is analysis-only, so this sits between
+    // type-check and codegen.) `lower_to_mir` borrows `typed`, returning
+    // an owned MirProgram, so `typed` stays usable for the HIR below.
+    let mir = sentinel_mir::lower_to_mir(typed);
+    let leaks = sentinel_mir::verify_constant_time(&mir);
+    if !leaks.is_empty() {
+        for leak in leaks {
+            let report = Report::new(leak).with_source_code(NamedSource::new(path, src.clone()));
+            eprintln!("{report:?}");
+        }
+        return ExitCode::from(1);
+    }
+
     let exe_path: PathBuf = match output {
         Some(o) => PathBuf::from(o),
         None => PathBuf::from(path).with_extension(""),

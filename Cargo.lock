@@ -1182,6 +1182,7 @@ dependencies = [
  "sentinel-borrow-check",
  "sentinel-codegen",
  "sentinel-hir",
+ "sentinel-mir",
  "sentinel-resolve",
  "sentinel-syntax",
  "sentinel-types",
