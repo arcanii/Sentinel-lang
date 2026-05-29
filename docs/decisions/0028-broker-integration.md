@@ -18,7 +18,48 @@ shaped). (2) **D3 confirmed feasible without new escape analysis** — a
 binding the borrow-check `DropPlan` frees at a scope exit is *provably
 non-escaping*, so C5.4 (2/N) routes exactly those allocations into the
 scope arena (the narrow-but-safe slice); the full escape analysis stays
-post-1.0 (ADR 0026 D2). Next: C5.4 (2/N) — the scope→arena codegen.
+post-1.0 (ADR 0026 D2).
+
+**C5.4 (2/N) implementation map + safety bar (from a codegen
+examination, recorded so a fresh session moves fast).** The change is
+*sprawling and UAF-sensitive*, so it is deliberately **not** done at the
+tail of a long session — a use-after-free here can pass the entire test
+suite by luck (freed memory frequently still reads correctly), so
+correctness must come from *reasoning*, not green tests.
+
+  - **Airtight argument (the safety bar).** Route binding `x`'s
+    allocation into a scope arena *iff* `x` is in that scope's
+    `DropPlan` scope-exit free set (`x ∉ moved_sources_for(fn)`), and
+    reset the arena at that *same* `emit_scope_drops` point. Then the
+    arena reset replaces *exactly* the per-binding `sentinel_free`s the
+    borrow checker already proved safe at that point — same lifetime,
+    same point, bulk vs individual — so it is as safe as today's frees
+    (it inherits, but does not worsen, the documented C2 partial-move
+    soundness gap). The single hard invariant: **the set of
+    arena-routed allocations must equal the set of frees skipped** —
+    drive both from one per-scope `HashSet<VarId>` (written at
+    alloc-routing, read at free-skipping) so they cannot diverge.
+  - **Narrow first slice.** Only `let x = <array literal>` where `x` is
+    non-escaping: array literals call `sentinel_alloc` directly for
+    their `{len,data}` data (codegen ~line 1606), so routing *that*
+    call to `sentinel_arena_alloc` puts `x`'s data in the arena.
+    `let x = some_fn()` (data allocated elsewhere), moved/returned
+    (escaping) values, and `?Struct`/nested-heap-field types keep
+    `sentinel_alloc`/`sentinel_free` unchanged. `x` is `let` and
+    dropped in the *same* scope (`scope_stack.last()`), so the arena is
+    that scope's.
+  - **Touch points.** `scope_stack: Vec<Vec<VarId>>` is pushed/popped at
+    8+ sites (fn bodies ~1957/1980, blocks, branches, handler arms,
+    captured frames); create the arena *lazily* (first routed alloc in a
+    scope) so unused scopes cost nothing; thread a "current arena +
+    routed set" alongside `scope_stack`; `emit_scope_drops` (~3159) skips
+    routed bindings and emits one `sentinel_arena_exit`. Changing
+    codegen alters emitted objects vs history, so the `c51` bar becomes
+    "every `tests/pass` fixture keeps exit/stdout" (a UAF/double-free
+    would crash or corrupt many array/RAII fixtures — c16/c24/c25 — so
+    they are the regression guard, with the airtight argument as the
+    primary assurance). Add a `c54_scope_arena` fixture (allocate, use,
+    drop an array in a scope; correct value out).
 
 Date: 2026-05-29
 Related:

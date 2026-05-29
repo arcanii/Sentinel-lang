@@ -1172,10 +1172,15 @@ New norms learned during Phase B and Phase C:
 > per-binding `sentinel_free`s with one `sentinel_arena_exit`;
 > escaping/returned values stay on `sentinel_alloc` (malloc). This is the
 > careful, UAF-sensitive part — keep the alloc-route/free-skip bookkeeping
-> consistent; do it fresh. An optional `scope budget` surface + full
-> escape analysis stay post-1.0. The bitwise shift wave (`<< >> ~`,
-> ADR 0027 A1) + D4 constant-time emission + the ADR 0026 flip remain
-> deferred follow-ons. Per-sub-phase ADRs 0026+ at each open.
+> consistent (one per-scope `HashSet<VarId>` drives both); **do it
+> fresh.** **ADR 0028 now carries a full C5.4 (2/N) implementation map +
+> the UAF-safety bar — read it first** (the airtight argument, the narrow
+> `let x = [array literal]` slice, the 8+ `scope_stack` touch points, and
+> why a UAF here can pass tests so correctness must come from reasoning,
+> not green suites). An optional `scope budget` surface + full escape
+> analysis stay post-1.0. The bitwise shift wave (`<< >> ~`, ADR 0027 A1)
+> + D4 constant-time emission + the ADR 0026 flip remain deferred
+> follow-ons. Per-sub-phase ADRs 0026+ at each open.
 >
 > **Available C4 follow-ons** (none blocking C5): work-stealing
 > scheduler (ADR 0024 A1), scope cancellation (A2), `Task<T>`
