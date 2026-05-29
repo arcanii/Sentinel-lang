@@ -935,6 +935,83 @@ mod tests {
         assert_eq!(core::mem::align_of::<SentinelKont>(), 8);
     }
 
+    // ===== C5 D7 / ADR 0029: abi-v1 stability =====
+    //
+    // These pin the runtime↔codegen ABI boundary documented in
+    // docs/abi-v1.md §3 + §5. A drift in a struct layout, a field
+    // offset, or the runtime-symbol set turns one of these red — by
+    // design, so an accidental ABI break is a failing test, not a
+    // silent miscompile. Update docs/abi-v1.md in the same commit as
+    // any intentional change here.
+
+    #[test]
+    fn abi_v1_struct_layouts_are_stable() {
+        use core::mem::{align_of, offset_of, size_of};
+
+        // SentinelKont (abi-v1 §3): 32 / 8; codegen GEPs op_id@0, arg@8.
+        assert_eq!(size_of::<SentinelKont>(), 32);
+        assert_eq!(align_of::<SentinelKont>(), 8);
+        assert_eq!(offset_of!(SentinelKont, op_id), 0);
+        assert_eq!(offset_of!(SentinelKont, arg), 8);
+        assert_eq!(offset_of!(SentinelKont, consumed), 16);
+        assert_eq!(offset_of!(SentinelKont, frames_head), 24);
+
+        // SentinelFrame (§3): 3 pointers, 24 / 8.
+        assert_eq!(size_of::<SentinelFrame>(), 24);
+        assert_eq!(align_of::<SentinelFrame>(), 8);
+        assert_eq!(offset_of!(SentinelFrame, resumer), 0);
+        assert_eq!(offset_of!(SentinelFrame, captured), 8);
+        assert_eq!(offset_of!(SentinelFrame, next), 16);
+
+        // SentinelTask (§3): 32 / 8; `owned` at offset 12 (ADR 0024 D9).
+        assert_eq!(size_of::<SentinelTask>(), 32);
+        assert_eq!(align_of::<SentinelTask>(), 8);
+        assert_eq!(offset_of!(SentinelTask, result), 0);
+        assert_eq!(offset_of!(SentinelTask, done), 8);
+        assert_eq!(offset_of!(SentinelTask, owned), 12);
+        assert_eq!(offset_of!(SentinelTask, join_handle_ptr), 16);
+        assert_eq!(offset_of!(SentinelTask, args_free_ptr), 24);
+
+        // SentinelScopeCtx (§3): one pointer, 8 / 8.
+        assert_eq!(size_of::<SentinelScopeCtx>(), 8);
+        assert_eq!(align_of::<SentinelScopeCtx>(), 8);
+        assert_eq!(offset_of!(SentinelScopeCtx, registry_ptr), 0);
+    }
+
+    #[test]
+    fn abi_v1_runtime_symbol_set() {
+        // The exact set of runtime symbols codegen links against
+        // (docs/abi-v1.md §5). Referencing each by name forces a
+        // compile error if any is renamed or removed — pinning the
+        // symbol contract on the definition side. Includes the
+        // runtime-internal sentinel_kont_panic_resumed (not codegen-
+        // declared, but part of the runtime's link-time contract).
+        // Cast through `*const ()` (clippy's preferred fn-pointer form).
+        let symbols: &[*const ()] = &[
+            sentinel_print as *const (),
+            sentinel_alloc as *const (),
+            sentinel_free as *const (),
+            sentinel_panic_oob as *const (),
+            sentinel_arena_enter as *const (),
+            sentinel_arena_alloc as *const (),
+            sentinel_arena_exit as *const (),
+            sentinel_perform_op as *const (),
+            sentinel_kont_resume as *const (),
+            sentinel_kont_pure as *const (),
+            sentinel_kont_consume_pure as *const (),
+            sentinel_kont_push as *const (),
+            sentinel_kont_panic_resumed as *const (),
+            sentinel_task_spawn as *const (),
+            sentinel_task_await as *const (),
+            sentinel_scope_enter as *const (),
+            sentinel_scope_register as *const (),
+            sentinel_scope_exit as *const (),
+        ];
+        // 18 symbols: 17 codegen-declared + sentinel_kont_panic_resumed.
+        assert_eq!(symbols.len(), 18);
+        assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
+    }
+
     // ----- C4.4 / ADR 0024 D7: structured concurrency runtime -----
 
     /// Simple test wrapper: receives no args; writes 42 to the

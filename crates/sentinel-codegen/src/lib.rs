@@ -6229,6 +6229,54 @@ mod tests {
         assert_eq!(crate_name(), "sentinel-codegen");
     }
 
+    // ===== C5 D7 / ADR 0029: abi-v1 name-mangling stability =====
+    //
+    // Golden-string asserts pinning the mangling scheme documented in
+    // docs/abi-v1.md §4. A drift in a type tag, the `__` separator, or
+    // the mono-name composition turns these red. Update docs/abi-v1.md
+    // in the same commit as any intentional change.
+    #[test]
+    fn abi_v1_mangling_is_stable() {
+        // A real TypedProgram so struct-name lookups resolve. `Pair` is
+        // the first user struct → StructId(0).
+        let prog = parse("struct Pair { a: i64, b: i64 } fn main() -> i64 { 0 }").expect("parse");
+        let resolved = resolve(&prog).expect("resolve");
+        let typed = check(&resolved).expect("check");
+
+        // Type tags (mangle_type).
+        assert_eq!(mangle_type(Type::I64, &typed), "i64");
+        assert_eq!(mangle_type(Type::I32, &typed), "i32");
+        assert_eq!(mangle_type(Type::Bool, &typed), "bool");
+        assert_eq!(mangle_type(Type::Struct(StructId(0)), &typed), "Pair");
+        // Array tag recurses on the element type.
+        assert_eq!(mangle_type(Type::Array(ArrayElem::I64), &typed), "arr_i64");
+        assert_eq!(mangle_type(Type::Array(ArrayElem::Bool), &typed), "arr_bool");
+        assert_eq!(
+            mangle_type(Type::Array(ArrayElem::Struct(StructId(0))), &typed),
+            "arr_Pair"
+        );
+        // Nullable tag recurses on the inner type.
+        assert_eq!(mangle_type(Type::Nullable(NullableInner::I64), &typed), "opt_i64");
+        assert_eq!(
+            mangle_type(Type::Nullable(NullableInner::Struct(StructId(0))), &typed),
+            "opt_Pair"
+        );
+
+        // Monomorphic-instance composition (mangle_mono_name): base name,
+        // then `__` + each type-arg tag, in order.
+        assert_eq!(mangle_mono_name("id", &[Type::I64], &typed), "id__i64");
+        assert_eq!(
+            mangle_mono_name("pick", &[Type::I64, Type::Bool], &typed),
+            "pick__i64__bool"
+        );
+        assert_eq!(
+            mangle_mono_name("wrap", &[Type::Array(ArrayElem::I64)], &typed),
+            "wrap__arr_i64"
+        );
+        // Zero type-args → the bare base name (a non-generic fn).
+        assert_eq!(mangle_mono_name("main", &[], &typed), "main");
+    }
+
     #[test]
     fn target_init_does_not_panic() {
         Target::initialize_native(&InitializationConfig::default()).expect("initialize native");
