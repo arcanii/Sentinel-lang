@@ -213,8 +213,12 @@ A drift in any layout / mangling / symbol must turn a test **red**:
 - **Runtime-symbol set (§5)** — a `sentinel-runtime` test that takes the
   address of every documented symbol (`abi_v1_runtime_symbol_set`), so a
   rename/removal is a compile error on the definition side.
-- **`Type` data layout (§2)** — DataLayout size/offset assertions land in
-  D7 (2/N) (ADR 0029).
+- **`Type` data layout (§2)** — `abi_v1_type_layouts_via_datalayout`
+  (sentinel-codegen) lowers each `Type` via `llvm_basic_type` and asserts
+  its size / alignment / struct-field offsets **and field types** through
+  the target `DataLayout` (field types pin the order, which equal-sized
+  offsets alone cannot). Verified to turn red on a deliberately-introduced
+  field reorder, then reverted.
 - **Determinism (§6)** — `repro.rs`.
 
 ---

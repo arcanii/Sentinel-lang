@@ -12,24 +12,32 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C5 D7 (1/N): the stable-ABI spec + layout-stability tests
-(ADR 0029; PROPOSED).** `docs/abi-v1.md` now documents + **freezes** the
-ABI codegen already emits — the C calling convention (`main`→i32;
-effecting fns→`*SentinelKont`; class init→`out_ptr`), the `Type`→LLVM
-**layout catalog** (`[T]`=`{i64,ptr}`, `?Struct`=`{i1,ptr}`,
-`?primitive`=`{i1,T}`, struct fields in decl order, ref/kont/task=opaque
-ptr, `secret T`≡`T`), the `#[repr(C)]` runtime struct layouts
-(`SentinelKont`/`Frame`/`Task`/`ScopeCtx`), the name-mangling scheme, and
-the ~18 `sentinel_*` runtime-symbol contract — each cross-linked to where
-it is realised. **Layout-stability tests pin it so a drift turns a test
-red, not a silent miscompile:** runtime struct size/align/`offset_of!`
-asserts + a symbol-set address test (`abi_v1_*` in sentinel-runtime) and
-codegen mangling golden strings (`abi_v1_mangling_is_stable`). **No
-emitted bytes change** (documents + tests existing behaviour) → the c51
-bar + `repro.rs` hold by construction. Reproducible builds (D8) fold in
-(already byte-identical). +3 tests (1230). Four-check green. ADR 0029
-stays **PROPOSED**; the flip + the `Type`-layout DataLayout assertions are
-**D7 (2/N)**.
+Last updated: **C5 D7: the stable ABI — `abi-v1` defined, frozen, and
+tested; ADR 0029 → ACCEPTED-WITH-AMENDMENTS. Phase C5 D7 closes.**
+`docs/abi-v1.md` documents + **freezes** the ABI codegen already emits —
+the C calling convention (`main`→i32; effecting fns→`*SentinelKont`; class
+init→`out_ptr`), the `Type`→LLVM **layout catalog** (`[T]`=`{i64,ptr}`,
+`?Struct`=`{i1,ptr}`, `?primitive`=`{i1,T}`, struct fields in decl order,
+ref/kont/task=opaque ptr, `secret T`≡`T`), the `#[repr(C)]` runtime struct
+layouts (`SentinelKont`/`Frame`/`Task`/`ScopeCtx`), the name-mangling
+scheme, and the ~18 `sentinel_*` runtime-symbol contract — each
+cross-linked to where it is realised. **Layout-stability tests pin it so a
+drift turns a test red, not a silent miscompile** (1/N): runtime struct
+size/align/`offset_of!` asserts + a symbol-set address test (`abi_v1_*` in
+sentinel-runtime) + codegen mangling golden strings; (2/N) the
+`Type`-layout DataLayout assertions (`abi_v1_type_layouts_via_datalayout`)
+that lower each `Type` via `llvm_basic_type` and assert size / align /
+field offsets **+ field types** (the latter pins field *order*, which
+equal-sized offsets cannot) — verified to go red on a deliberate reorder,
+then reverted. **No emitted bytes change** (documents + tests existing
+behaviour) → the c51 bar + `repro.rs` hold by construction; reproducible
+builds (D8) fold in. Amendments: A1 (field-type asserts strengthen the
+"offsets" wording), A2 (named-struct layout pinned via a representative
+`{i64,i64}` struct, since lowering a real `Struct(id)` needs codegen's
+pass-0 cache). +4 tests (1231). Four-check green. **Next: developer-scope
+call** — LSP (ADR 0025 D10) or assemble the TLS 1.3 go/no-go (D13): both
+1.0 headline capabilities (constant-time `secret` compare + broker scope
+arenas) **and** a frozen `abi-v1` are now in hand.
 
 Pre-D7(1/N) context: **C5.4 (2/N): the scope→arena codegen; ADR 0028 →
 ACCEPTED-WITH-AMENDMENTS.** Codegen routes a scope's non-escaping

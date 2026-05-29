@@ -1,9 +1,10 @@
 # ADR 0029: Stable ABI (D7) — define, document, freeze, and test `abi-v1`
 
-Status: PROPOSED — the next C5 productionization sub-phase ADR under ADR
-0025 (Phase C5 kickoff) D7, mirroring how ADRs 0026/0027/0028 detailed
-earlier C5 sub-phases. Flips to ACCEPTED(-WITH-AMENDMENTS) at D7 (2/N),
-recording deviations as numbered amendments.
+Status: ACCEPTED-WITH-AMENDMENTS — the C5 productionization sub-phase ADR
+under ADR 0025 (Phase C5 kickoff) D7, mirroring how ADRs 0026/0027/0028
+detailed earlier C5 sub-phases. D7 (1/N) (spec + struct/mangling/symbol
+tests) and D7 (2/N) (the `Type`-layout DataLayout assertions) both landed;
+amendments recorded below.
 
 **D7 (1/N) update (2026-05-29) — DELIVERED.** Per the D11 split: the spec
 doc + the runtime-struct / mangling / symbol-set stability tests shipped.
@@ -12,8 +13,30 @@ cross-linked to its bootstrap source. Tests: `abi_v1_struct_layouts_are_stable`
 + `abi_v1_runtime_symbol_set` (sentinel-runtime) and
 `abi_v1_mangling_is_stable` (sentinel-codegen). No emitted bytes change
 (documents/tests existing behaviour); +3 tests (1230), four-check green.
-**Stays PROPOSED** — the `Type`-layout DataLayout assertions (D7) and the
-status flip are **D7 (2/N)**.
+
+**D7 (2/N) update (2026-05-30) — DELIVERED; ADR ACCEPTED.** The
+`Type`-layout DataLayout assertions landed
+(`abi_v1_type_layouts_via_datalayout`, sentinel-codegen): each `Type` is
+lowered via the real `llvm_basic_type` and its size / alignment /
+struct-field offsets asserted through the target `DataLayout` (D7).
++1 test (1231), four-check green. Amendments:
+
+  - **A1 — field-type asserts added (a strengthening, not a deviation).**
+    D7's wording was "size/alignment + field offsets." Offsets alone do
+    *not* pin field **order** when fields are equal-sized (e.g. `[T]`'s
+    `{i64 len, ptr data}` — both 8 bytes — would survive a len↔data swap
+    with identical offsets). The test therefore also asserts each field's
+    *type* at its index, pinning the order. Verified to turn **red** on a
+    deliberately-introduced array-field reorder (D10's negative check),
+    then reverted.
+  - **A2 — named-struct layout tested via a representative struct.**
+    `Struct`/`Class`/`GenericInstance` layouts need codegen's pass-0
+    `struct_types` cache to lower a real `Type::Struct(id)`; rather than
+    run pass 0 in a unit test, the named-struct rule (fields in decl
+    order, non-packed) is pinned via a representative `{i64, i64}` struct
+    built exactly as codegen builds user structs (`struct_type(fields,
+    false)`). The arms that *do* lower without the cache (scalars, `[T]`,
+    `?T`, ref/kont/task) go through `llvm_basic_type` directly.
 
 **Numbering note.** ADR 0025 D14 penciled "ADR 0029 (stable ABI +
 reproducible builds — D7+D8)" under the original numbering; the bitwise
