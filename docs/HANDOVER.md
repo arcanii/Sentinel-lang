@@ -95,7 +95,7 @@ C1.3. See STATE.md Section C.
 **Phase C4.4 (1/N) — scope / spawn / await AST + parser per ADR 0024 D1+D2+D3 — complete.** Structured-concurrency surface parses end-to-end at AST + parser. Downstream resolve rejects with ScopeNotYet / SpawnNotYet / AwaitNotYet until C4.4 (2/N) lands the typing + runtime + codegen. +9 tests (1177 total). ADR 0024 stays PROPOSED.
 **Phase C4.4 (2/N runtime) — sentinel-runtime symbols per ADR 0024 D6+D7 — complete.** Thread-per-spawn substrate ships: sentinel_task_spawn / sentinel_task_await / sentinel_scope_enter / sentinel_scope_exit / sentinel_scope_register + SentinelTask (32-byte C-stable struct) + SentinelScopeCtx. Uses std::thread internally; real work-stealing scheduler is a deferred follow-on per ADR 0024 D6. Cancellation on early scope exit DEFERRED per ADR 0024 D9. +6 runtime tests (1182 total active workspace). ADR 0024 stays PROPOSED. The typing layer + codegen wiring + c44_go_no_go phase-go land in a follow-on iteration.
 **Phase C4.4 (2/N) — types + codegen + phase-go per ADR 0024 D4+D5+D8 — complete. ADR 0024 → ACCEPTED-WITH-AMENDMENTS. Phase C4.4 + Phase C4 close.** The `scope concurrent { spawn fn(args); expr.await }` surface compiles + runs end-to-end. Types: `Type::Task(TaskId)` (tenth interner variant) + `TaskData` + `intern_task` + `TypedProgram.tasks` threaded through check_expr; `TypedExprKind::Scope/Spawn/Await`; spawn validates a Call target returning i64 (Task<i64>-only per D7), await requires a `Type::Task` receiver; 3 TypeErrors (SpawnMustBeCall / SpawnResultMustBeI64 / AwaitOnNonTask). Resolve: scope/spawn/await pass-through (NotYet dropped); built-in `Async` effect auto-registered (appended after user effects — deviation from D5's "EffectId(0)"). Effect-check: spawn/await contribute Async; `scope concurrent` discharges Async (handler-style); spawn/await outside a scope bubbles Async to main → rejected (D5 discipline SHIPPED). Codegen: 5 runtime externs + per-spawn-target wrapper synthesized in a compile_to_object pre-walk (before CodegenCtx — it lacks `&Module`); lower scope/spawn/await; Async-only fns keep the value ABI not the C3 Kont* ABI (`uses_kont_abi` excludes Async). Runtime fix: `_pad` → `owned` flag so explicit `.await` inside a scope is safe against the scope's exit-time auto-await (closes a UAF/double-free in the C4.4 2/N symbols). +1 pass fixture (c44_go_no_go exit 42) + 3 UI fixtures + 2 effect-check tests + 1 runtime test (~1188 total active workspace). Amendments A1 (work-stealing deferred), A2 (cancellation deferred), A3 (Task<i64> + i64 args only), A4 (Async discipline shipped, 2 deviations), A5 (explicit `Task<T>` annotations deferred — use inference). Four-check suite green.
-**Phase C4.5 — close-out per ADR 0021 D13+D14 — complete. ADR 0021 → ACCEPTED-WITH-AMENDMENTS. Phase C4 closes.** Combined full-surface phase-go `tests/pass/c4_go_no_go.sentinel` (class + `&mut Self`/`&Self` methods + init + trait + impl + delegation + scope/spawn/await in one program; exit 42) + `tests/pass/c4_named_impl.sentinel` (two named impls of one (trait,type) co-existing via qualified calls; exit 42). The D13 phase-go's `spawn lb.write(42)` (a method call) was adapted to spawn a free fn `buffered_write` that drives the class/delegation surface on the worker thread, since ADR 0024 D2 restricts spawn to a direct fn call (ADR 0021 amendment A2). ADR 0021 amendments: A1 (D9 async-as-effect superseded by ADR 0024's direct-runtime API — surface identical, lowering differs), A2 (D13 phase-go adapted), A3 (per-sub-phase amendments roll-up), A4 (D14 estimate beaten), D10/D12 out-of-scope confirmed (actors → C5). +2 driver pass-tests (123 driver pass; ~1191 total active workspace). Docs-only sub-phase. Four-check suite green. **Next: Phase C5** (broker integration + cross-process + actors + stable ABI + tooling per HANDOVER §6.2; Sentinel 1.0 at C5 close) — write ADR 0025 PROPOSED at kickoff.
+**Phase C4.5 — close-out per ADR 0021 D13+D14 — complete. ADR 0021 → ACCEPTED-WITH-AMENDMENTS. Phase C4 closes.** Combined full-surface phase-go `tests/pass/c4_go_no_go.sentinel` (class + `&mut Self`/`&Self` methods + init + trait + impl + delegation + scope/spawn/await in one program; exit 42) + `tests/pass/c4_named_impl.sentinel` (two named impls of one (trait,type) co-existing via qualified calls; exit 42). The D13 phase-go's `spawn lb.write(42)` (a method call) was adapted to spawn a free fn `buffered_write` that drives the class/delegation surface on the worker thread, since ADR 0024 D2 restricts spawn to a direct fn call (ADR 0021 amendment A2). ADR 0021 amendments: A1 (D9 async-as-effect superseded by ADR 0024's direct-runtime API — surface identical, lowering differs), A2 (D13 phase-go adapted), A3 (per-sub-phase amendments roll-up), A4 (D14 estimate beaten), D10/D12 out-of-scope confirmed (actors → C5). +2 driver pass-tests (123 driver pass; ~1191 total active workspace). Docs-only sub-phase. Four-check suite green. **Next: Phase C5 → Sentinel 1.0** (broker integration + constant-time secret codegen + cross-process + actors + stable ABI + reproducible builds + tooling per HANDOVER §6.2). **ADR 0025 PROPOSED drafted** (Phase C5 kickoff / productionization plan — 14 D-decisions, 8-sub-phase split; resume at C5.0).
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1090,10 +1090,19 @@ New norms learned during Phase B and Phase C:
 > D" — the roadmap after C4 is C5 per ADR 0021's close): broker
 > integration, cross-process safety, reproducible-build
 > guarantees, stable ABI definition, LSP/tooling polish, plus
-> **actors** (deferred from C4 per ADR 0021 D10). Sentinel's 1.0
-> release is at C5 close. Pre-flight: write **ADR 0025 PROPOSED**
-> (Phase C5 kickoff) before the first feat commit, per the
-> ADR-first norm.
+> **actors** (deferred from C4 per ADR 0021 D10) + constant-time
+> secret codegen (deferred from C3 per ADR 0019 D12). Sentinel's
+> 1.0 release is at C5 close. **ADR 0025 PROPOSED is drafted**
+> (`docs/decisions/0025-phase-c5-kickoff-and-productionization-plan.md`)
+> — 14 D-decisions + an 8-sub-phase split (C5.0–C5.8). Resume at
+> **C5.0**: pick the concrete 1.0 go/no-go program (a TLS
+> handshake / HTTP server per D1/D13 — it pins which workstreams
+> are 1.0-minimum and resolves the D6 cross-process / D9 module-
+> system scope-open questions), stand up `insta` + `nextest` test
+> infra (D11), and do the reproducible-build audit (D8). Then
+> C5.1 = the HIR/MIR stages (D2), C5.2 = constant-time codegen
+> (D3, the security core). Per-sub-phase ADRs 0026+ land at each
+> open per the ADR-first norm.
 >
 > **Available C4 follow-ons** (none blocking C5): work-stealing
 > scheduler (ADR 0024 A1), scope cancellation (A2), `Task<T>`
@@ -1734,12 +1743,16 @@ For pasting into a fresh chat to bootstrap context:
     (D9) superseded by ADR 0024's direct-runtime API (surface
     identical). +2 driver pass-tests (~1191 active workspace).
     Four-check suite green.
-    What remains: **Phase C5 kickoff** per HANDOVER §6.2 — broker
-    integration, cross-process safety, reproducible builds, stable
-    ABI, LSP/tooling polish, and actors (deferred from C4 per
-    ADR 0021 D10). Sentinel 1.0 releases at C5 close. Write
-    **ADR 0025 PROPOSED** (Phase C5 kickoff) before the first feat
-    commit. (NOT "Phase D" — the roadmap after C4 is C5.)
+    What remains: **Phase C5 → Sentinel 1.0** per HANDOVER §6.2 —
+    broker integration, constant-time secret codegen (deferred
+    from C3), cross-process, actors, stable ABI, reproducible
+    builds, LSP/tooling. (NOT "Phase D" — the roadmap after C4 is
+    C5.) **ADR 0025 PROPOSED is drafted** (14 D-decisions, 8-sub-
+    phase split C5.0–C5.8). Resume at **C5.0**: pick the 1.0
+    go/no-go program (TLS/HTTP — pins minimum scope), `insta` +
+    `nextest` test infra, reproducible-build audit. Then C5.1
+    HIR/MIR, C5.2 constant-time codegen (the security core).
+    Per-sub-phase ADRs 0026+ at each open.
     Optional C4 follow-ons (none blocking C5): work-stealing
     scheduler (ADR 0024 A1), scope cancellation (A2), Task<T>/
     spawn-args beyond i64 (A3), explicit `Task<T>` annotations
