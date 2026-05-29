@@ -12,9 +12,38 @@ research-grade interpreter), Phase C populates the remaining
 sentinel-* compiler crates per ADR 0009. As of C0.0, sentinel-syntax
 has a lexer; the other nine compiler crates remain scaffold stubs.
 
-Last updated: **C5.4 (1/N): the broker-arena substrate (ADR 0028).** The
-Phase A broker now backs a scope-arena C-ABI in the runtime — the
-foundation for routing Sentinel scopes onto broker bump arenas.
+Last updated: **C5.4 (2/N): the scope→arena codegen; ADR 0028 →
+ACCEPTED-WITH-AMENDMENTS.** Codegen now routes a scope's **non-escaping**
+primitive array-literal heap buffers into a broker bump arena
+(`sentinel_arena_enter`/`_alloc`) and replaces that scope's per-binding
+`sentinel_free`s with **one** `sentinel_arena_exit` at scope exit. The
+routed set is computed once (`compute_arena_routed`) as a *strict subset*
+of `emit_scope_drops`'s actual free set — `let x = [primitive array
+literal]` AND `x ∉ moved_sources` AND `x ≠ tail_returned_var(&block.tail)`,
+over non-generic non-effecting fns — so a routed binding is one the borrow
+checker already proved is dropped (non-escaping) at that exact scope exit.
+**One `HashSet<VarId>` drives both** the alloc-routing (`lower_stmt` →
+`lower_array_lit`) and the free-skip (`emit_scope_drops`), so they cannot
+diverge; the per-scope arena handle lives in a new `ScopeFrame` (replacing
+the bare `Vec<VarId>`), created **lazily** on first routed alloc so scopes
+that route nothing stay byte-identical. **UAF-safety from reasoning, not
+green tests** (a UAF here can pass by luck): verified by disassembly —
+routed scopes emit `arena_enter`/`_alloc`/`_exit` and **zero**
+`sentinel_free`/`_alloc`; moved/escaping/returned arrays stay on libc — and
+guarded by the c24/c25 array-RAII fixtures. **Finding (amends ADR 0028's
+"verified UAF hole"):** a tail-returned array such as
+`fn make() -> [i64] { let a = [1,2,3]; a }` **is** in `moved_sources`
+(the borrow checker walks the tail `Var` as a *consuming move* before
+snapshotting the `DropPlan`), so `∉ moved` alone already excludes returned
+arrays — but both checks are kept to mirror `emit_scope_drops` exactly.
++1 fixture (`c54_scope_arena`, body-scope + nested-block arenas, exit 42);
+1227 tests. Four-check green. **Next:** assemble the TLS go/no-go, or a
+further C5 sub-phase (stable ABI / LSP); deferred follow-ons unchanged
+(per-scope arena *sizing*, methods/generics/effecting-fn routing, full
+escape analysis, `scope budget(N)` surface — all post-1.0).
+
+Pre-C5.4(2/N) context: **C5.4 (1/N): the broker-arena substrate (ADR
+0028).** The Phase A broker backs a scope-arena C-ABI in the runtime.
 **Finding that shaped it:** the broker is a safe *handle* allocator
 (bump bulk-frees / slab fixed-size) with no public raw pointer, so a
 drop-in `sentinel_alloc` doesn't fit; instead a public raw-bytes API was
@@ -22,14 +51,8 @@ added (`Arena::alloc_bytes` → `NonNull<u8>`, exposing the strategy's
 `alloc_raw`), and the runtime gained `sentinel_arena_enter` (create a
 bump arena) / `sentinel_arena_alloc` (16-byte-aligned bump alloc) /
 `sentinel_arena_exit` (destroy → `BumpStrategy::drop` frees the buffer),
-on a process-wide lazy `Broker`. **Additive + c51-safe:** codegen still
-emits `sentinel_alloc`/`sentinel_free` (libc) and does NOT call the arena
-fns yet, so objects stay byte-identical. +5 tests (1226). Four-check
-green. **Next: C5.4 (2/N)** — the scope→arena codegen: route a scope's
-**non-escaping** heap allocations (exactly the bindings the borrow-check
-`DropPlan` frees at that scope exit, hence provably non-escaping) into the
-scope arena, replacing N per-binding `sentinel_free`s with one
-`sentinel_arena_exit`; full escape analysis stays post-1.0 (ADR 0026 D2).
+on a process-wide lazy `Broker`. Additive + c51-safe: codegen was
+untouched (+5 tests, 1226). C5.4 (2/N) above wired codegen to call them.
 
 Pre-C5.4(1/N) context: **C5.3 (2/N): bitwise `& | ^` end-to-end; ADR 0027 →
 ACCEPTED-WITH-AMENDMENTS.** The bitwise operators now compile and run.

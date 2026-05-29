@@ -1,9 +1,10 @@
 # ADR 0028: Broker integration (D4) — route the runtime heap through the Phase A broker
 
-Status: PROPOSED — the C5.4 sub-phase ADR under ADR 0025 (Phase C5
-kickoff) D4, mirroring how ADR 0026/0027 detailed earlier C5 sub-phases.
-Flips to ACCEPTED(-WITH-AMENDMENTS) as C5.4 lands, recording deviations
-as numbered amendments.
+Status: ACCEPTED-WITH-AMENDMENTS — the C5.4 sub-phase ADR under ADR 0025
+(Phase C5 kickoff) D4, mirroring how ADR 0026/0027 detailed earlier C5
+sub-phases. C5.4 (1/N) (broker-arena substrate) and C5.4 (2/N)
+(scope→arena codegen) both landed; deviations are recorded as numbered
+amendments below.
 
 **C5.4 (1/N) update (2026-05-29).** Two refinements from building the
 substrate: (1) **D4 was not quite "runtime-only"** — the broker is a safe
@@ -19,6 +20,55 @@ binding the borrow-check `DropPlan` frees at a scope exit is *provably
 non-escaping*, so C5.4 (2/N) routes exactly those allocations into the
 scope arena (the narrow-but-safe slice); the full escape analysis stays
 post-1.0 (ADR 0026 D2).
+
+**C5.4 (2/N) update (2026-05-29) — DELIVERED.** The scope→arena codegen
+shipped per the implementation map below, with one correction to the
+"verified UAF hole" analysis. Amendments:
+
+  - **A1 (mechanism shipped).** Codegen routes a scope's non-escaping
+    primitive array-literal heap buffers into a broker bump arena and
+    replaces that scope's per-binding `sentinel_free`s with one
+    `sentinel_arena_exit`. A program-wide `compute_arena_routed` pre-pass
+    produces a `HashSet<VarId>` = *exactly* the bindings `emit_scope_drops`
+    frees (`∉ moved ∧ ≠ tail_returned`), restricted to `let x = [i64/i32/
+    bool array literal]` in **non-generic, non-effecting fns**. That one
+    set drives both the alloc-routing (`lower_stmt`→`lower_array_lit`) and
+    the free-skip (`emit_scope_drops`); the per-scope arena handle lives
+    in a new `ScopeFrame` (replacing the bare `Vec<VarId>`), created
+    *lazily* on first routed alloc (scopes routing nothing stay
+    byte-identical). The airtight argument held: the routed set is a
+    strict *subset* of the proven-non-escaping free set, so routing is as
+    safe as today's free. Verified by disassembly (routed scopes emit
+    `arena_enter`/`_alloc`/`_exit` + zero `sentinel_free`/`_alloc`; moved
+    arrays stay on libc) + the c24/c25 array-RAII guards. +1 fixture
+    (`c54_scope_arena`); 1227 tests, four-check green.
+
+  - **A2 (⚠ the "verified UAF hole" was WRONG about the mechanism).**
+    The bullet below claims a tail-returned array like
+    `fn make() -> [i64] { let a = [1,2,3]; a }` is **NOT** in
+    `moved_sources` (so `∉ moved`-alone would arena-free it → UAF).
+    Empirically (DropPlan dumped) it **IS** in `moved_sources` =
+    `{a}`: `walk_block_contents` walks the tail `Var(a)` as a *consuming
+    move* (arrays are Move-typed) into `moved_sources_union` **before** the
+    L626-628 snapshot — the codegen comment at lib.rs L3138 already noted
+    this ("the move tracking will mark it in `moved_sources`, but we also
+    conservatively guard here"). So `∉ moved` alone already excludes
+    returned/moved arrays; the `tail_returned` half is **belt-and-
+    suspenders for heap types**, not the load-bearing exclusion. The
+    delivered predicate keeps **both** checks regardless — matching
+    `emit_scope_drops` exactly is the cleanest correctness argument and
+    costs nothing. (The conclusion "don't ship `∉ moved` alone" was over-
+    cautious but harmless; the safe predicate shipped either way.)
+
+  - **A3 (scope narrowed, deferrals unchanged).** Per-scope arena *sizing*
+    (capacity 0 → runtime default 1 MiB; array literals are
+    source-enumerated so this never realistically overflows, and overrun
+    aborts loudly rather than corrupting), routing in methods / generics /
+    effecting fns, non-primitive-element arrays, and the `scope budget(N)`
+    surface all stay post-1.0, as does full escape analysis (ADR 0026 D2).
+
+The implementation map + safety bar that guided the work are retained
+below (now historical); read A1/A2 first.
 
 **C5.4 (2/N) implementation map + safety bar (from a codegen
 examination, recorded so a fresh session moves fast).** The change is

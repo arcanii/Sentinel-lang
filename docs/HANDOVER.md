@@ -108,6 +108,7 @@ C1.3. See STATE.md Section C.
 **Phase C5.3 (2/N) — bitwise `& | ^` surface end-to-end. ADR 0027 → ACCEPTED-WITH-AMENDMENTS.** The operators compile + run. Surface was small because the `Binary` pipeline is op-generic (resolve passes `BinOp` through; types' Binary handler op-agnostic except the `Div`→`SecretDivisor` check; `lower_to_mir`/D5 handle `Binary` generically) — so only AST + parser + codegen changed. AST: `BinOp` += `BitAnd`/`BitOr`/`BitXor` (+ symbol(); no new ExprKind/TypedExprKind/MirOp). Parser: levels `parse_bitor`→`parse_bitxor`→`parse_bitand` between cmp and add (`&`>`^`>`|`); infix `&` = bit-and, prefix `&` = borrow (positional). Types: NO change — inherits C3.1b secret-preserving integer rule (mixed secret/public → Mismatch; bool → Mismatch); **no new SecretXxx** (bitwise is constant-time, the sanctioned secret computation). Codegen: LLVM and/or/xor. MIR+D5: unchanged (bitwise non-sink). Fixtures: `c53_bitwise` (`5 & 6 ^ 3 | 8`==15) + `c53_ct_eq` (constant-time equality over secrets — XOR-accumulate+OR-reduce+declassify — compiles, runs, passes D5; the go/no-go MAC-verify shape). +9 tests (1221 total) (`76bfea3`). **ADR 0027 amendment A1:** `<< >> ~` (C5.4) deferred — the constant-time compare needs only `^`/`|`; shifts (with the `>>`/generic-close split) are a follow-on if the go/no-go computes hashes in-language. Next: **developer-scope call** — C5.4 shifts, OR begin assembling the TLS go/no-go (constant-time compare now writable), OR another C5 productionization sub-phase.
 **ADR 0028 PROPOSED — broker integration (D4) — docs-only.** Developer chose broker integration as the next productionization sub-phase (**C5.4**). Finding that shaped it: the Phase A broker is an *arena* allocator (bump = bulk-free / `free` unimplemented; slab = fixed-size slots; typed `Handle<T>`) that does **not** fit a drop-in `sentinel_alloc` (arbitrary-size, individual-free, raw `*u8`); and there's no secret heap data yet (`[secret T]` unrepresentable) so the secret-memory policy is scaffold. ADR 0028's design (10 D-decisions): map Sentinel scopes → broker bump arenas so individual free becomes scope-exit **bulk** free (D1/D2), reusing the borrow-check **`DropPlan`** (moved=escapes vs dropped-at-scope-exit=safe-to-arena) so **no new escape analysis** is needed (D3); ship a **runtime-only foundation first** (C5.4 (1/N), D4): process-wide `Broker` backing `sentinel_alloc`/`free` via a size-classed slab pool + ptr→handle registry — **c51-safe because codegen is untouched** (objects byte-identical) — unlocking budgets/recording/stats; then the **scope→arena codegen** (C5.4 (2/N), D3, may defer post-1.0). Budgets = the go/no-go hook (`within_budget`; a `scope budget(N)` surface deferred — D5). Secret-policy scaffold (D6). Numbering: ADR 0025 D14's "0027 = broker" superseded (0027 = bitwise; broker = **0028**); the bitwise *shift* wave (ADR 0027 A1) is unnumbered-deferred, not C5.4. Next: **C5.4 (1/N)** — the runtime-only broker foundation.
 **Phase C5.4 (1/N) — broker-arena substrate (ADR 0028) — complete.** The Phase A broker backs a scope-arena C-ABI in the runtime. Finding: the broker is a safe *handle* allocator (bump bulk-frees, `free` unimplemented; slab fixed-size) with no public raw pointer, so a drop-in `sentinel_alloc` doesn't fit — added a public raw-bytes API (`Arena::alloc_bytes`/`ArenaHandle::alloc_bytes` → `NonNull<u8>`, exposing the strategy's `alloc_raw`). Runtime: a process-wide lazy `Broker` + `sentinel_arena_enter` (create bump arena) / `sentinel_arena_alloc` (16-byte-aligned bump alloc) / `sentinel_arena_exit` (`destroy_arena` + drop → `BumpStrategy::drop` frees the backing buffer). **Additive + c51-safe**: codegen still emits `sentinel_alloc`/`sentinel_free` (libc) and does NOT call the arena fns yet → objects byte-identical. (The ADR's "runtime-only" was slightly off — a small broker API addition was needed — and the malloc-replacement framing was set aside: the broker is arena-, not malloc-, shaped.) +5 tests (1226 total) (`b49a5ef`). ADR 0028 stays PROPOSED. Next: **C5.4 (2/N)** — the scope→arena codegen: route a scope's non-escaping heap allocations (those the borrow-check `DropPlan` frees at that scope exit, hence provably non-escaping) into the scope arena, replacing N per-binding `sentinel_free`s with one `sentinel_arena_exit`. The careful (UAF-sensitive) part — do it fresh; full escape analysis stays post-1.0 (ADR 0026 D2).
+**Phase C5.4 (2/N) — the scope→arena codegen; ADR 0028 → ACCEPTED-WITH-AMENDMENTS. Phase C5.4 closes.** Codegen routes a scope's **non-escaping** primitive array-literal heap buffers into a broker bump arena (`sentinel_arena_enter`/`_alloc`) and replaces that scope's per-binding `sentinel_free`s with **one** `sentinel_arena_exit` at scope exit. A program-wide `compute_arena_routed` pre-pass produces a `HashSet<VarId>` = *exactly* the bindings `emit_scope_drops` frees (`∉ moved ∧ ≠ tail_returned_var(&block.tail)`), restricted to `let x = [i64/i32/bool array literal]` in **non-generic, non-effecting fns**; that **one set drives both** the alloc-routing (`lower_stmt`→`lower_array_lit`) and the free-skip (`emit_scope_drops`), so they cannot diverge. The per-scope arena handle lives in a new `ScopeFrame` (replacing the bare `Vec<VarId>`; a `push` method keeps the 12 push sites unchanged), created **lazily** on first routed alloc → scopes routing nothing stay byte-identical. **Airtight argument:** the routed set is a strict *subset* of the proven-non-escaping free set, so routing is as safe as today's free (same bindings, lifetime, point; bulk vs individual). **Verified by reasoning + disassembly** (routed scopes emit `arena_enter`/`_alloc`/`_exit` + **zero** `sentinel_free`/`_alloc`; moved/returned arrays stay on libc — a single negative case `c24_moved_array_no_double_free` confirms) + the c24/c25 array-RAII guards. **Amendment A2 — ADR 0028's "verified UAF hole" was wrong about the mechanism:** a tail-returned array (`fn make() -> [i64] { let a=[1,2,3]; a }`) **IS** in `moved_sources` (the borrow checker walks the tail `Var` as a *consuming move* before snapshotting the `DropPlan`; empirically dumped), so `∉ moved` alone already excludes returned arrays — the `tail_returned` half is belt-and-suspenders for heap types, kept anyway to mirror `emit_scope_drops` exactly. +1 fixture (`c54_scope_arena` — body-scope + nested-block arenas, exit 42); 1227 tests (`8e7b38f`). Four-check green. Deferred (post-1.0): per-scope arena *sizing* (capacity 0 → runtime 1 MiB default), routing in methods/generics/effecting fns, non-primitive-element arrays, `scope budget(N)` surface, full escape analysis (ADR 0026 D2). **Next: developer-scope call** — assemble the TLS go/no-go (constant-time compare + scope arenas now both in hand), or another C5 productionization sub-phase (stable ABI ADR 0025 D7 / LSP D10).
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1165,22 +1166,30 @@ New norms learned during Phase B and Phase C:
 > byte-identical). Refinements vs the ADR: not "runtime-only" (a small
 > broker API was added), and the malloc-replacement framing (slab pool /
 > ptr→handle registry) was dropped — the broker is arena-, not malloc-,
-> shaped. **Resume at C5.4 (2/N):** the scope→arena codegen — route a
-> scope's **non-escaping** heap allocations (exactly the bindings the
-> borrow-check `DropPlan` frees at that scope exit, hence provably
-> non-escaping) into a per-scope bump arena via the new C-ABI, replacing N
-> per-binding `sentinel_free`s with one `sentinel_arena_exit`;
-> escaping/returned values stay on `sentinel_alloc` (malloc). This is the
-> careful, UAF-sensitive part — keep the alloc-route/free-skip bookkeeping
-> consistent (one per-scope `HashSet<VarId>` drives both); **do it
-> fresh.** **ADR 0028 now carries a full C5.4 (2/N) implementation map +
-> the UAF-safety bar — read it first** (the airtight argument, the narrow
-> `let x = [array literal]` slice, the 8+ `scope_stack` touch points, and
-> why a UAF here can pass tests so correctness must come from reasoning,
-> not green suites). An optional `scope budget` surface + full escape
-> analysis stay post-1.0. The bitwise shift wave (`<< >> ~`, ADR 0027 A1)
-> + D4 constant-time emission + the ADR 0026 flip remain deferred
-> follow-ons. Per-sub-phase ADRs 0026+ at each open.
+> shaped. **C5.4 (2/N) is then DONE — Phase C5.4 closes; ADR 0028 →
+> ACCEPTED-WITH-AMENDMENTS.** The scope→arena codegen routes a scope's
+> non-escaping primitive array-literal heap buffers into a per-scope
+> broker bump arena and replaces that scope's per-binding `sentinel_free`s
+> with one `sentinel_arena_exit`; escaping/moved/returned values stay on
+> `sentinel_alloc` (libc). A `compute_arena_routed` pre-pass produces a
+> single `HashSet<VarId>` = exactly `emit_scope_drops`'s free set
+> (`∉ moved ∧ ≠ tail_returned_var(&block.tail)`), narrowed to
+> `let x = [i64/i32/bool array literal]` in non-generic non-effecting fns;
+> that one set drives both alloc-routing and free-skip, and the per-scope
+> arena handle lives in a new `ScopeFrame` created lazily. UAF-safety came
+> from reasoning (routed ⊆ proven-non-escaping free set) + disassembly +
+> the c24/c25 guards + `c54_scope_arena`. **Amendment A2: the prep's
+> "verified UAF hole" was wrong** — a tail-returned array IS in
+> `moved_sources` (the borrow checker walks the tail `Var` as a consuming
+> move before the L626 snapshot; empirically dumped), so `∉ moved` alone
+> already excludes returned arrays (both checks kept anyway to mirror
+> `emit_scope_drops`). **Resume at a developer-scope call:** assemble the
+> TLS 1.3 go/no-go (constant-time compare + scope arenas both in hand), or
+> another C5 sub-phase — stable ABI (ADR 0025 D7) or LSP (D10). Deferred
+> (post-1.0): per-scope arena *sizing*, routing in methods/generics/
+> effecting fns, `scope budget` surface, full escape analysis; the bitwise
+> shift wave (`<< >> ~`, ADR 0027 A1) + D4 constant-time emission + the
+> ADR 0026 flip remain deferred follow-ons.
 >
 > **Available C4 follow-ons** (none blocking C5): work-stealing
 > scheduler (ADR 0024 A1), scope cancellation (A2), `Task<T>`
@@ -1806,8 +1815,8 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect f401854 (docs: c5.4 2/N
-    prep — verified UAF hole). Clean tree; 1226 tests. macOS + LLVM 18 only.
+    Local HEAD: verify with `git log -1` — expect the C5.4 (2/N) docs commit
+    (atop feat 8e7b38f scope→arena). Clean tree; 1227 tests. macOS + LLVM 18 only.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.2/§0.3 + ADR 0028
     (esp. the "C5.4 (2/N) implementation map" AND the ⚠ VERIFIED UAF HOLE
     note — read before touching the scope→arena routing) + ADR 0026/0027.
@@ -1833,32 +1842,41 @@ For pasting into a fresh chat to bootstrap context:
       MAC-verify shape — XOR-accumulate+OR-reduce+declassify — passing D5).
       `&` is now triple-purposed (borrow prefix / `&&` / `&` infix), split
       by parser position.
-    - **C5.4 (1/N)** (`b49a5ef`): the broker-arena **SUBSTRATE** (ADR 0028
-      PROPOSED). Broker `Arena::alloc_bytes` → NonNull<u8> (exposes the
-      internal alloc_raw; the typed Handle<T> API can't); runtime
+    - **C5.4 (1/N)** (`b49a5ef`): the broker-arena **SUBSTRATE** (ADR 0028).
+      Broker `Arena::alloc_bytes` → NonNull<u8> (exposes the internal
+      alloc_raw; the typed Handle<T> API can't); runtime
       `sentinel_arena_enter`/`_alloc`(16-byte-aligned bump)/`_exit`(destroy
       → frees buffer) on a process-wide lazy `Broker`. ADDITIVE + c51-safe
       (codegen untouched → objects byte-identical); NOT called by codegen yet.
+    - **C5.4 (2/N)** (`8e7b38f` + docs): the scope→arena **CODEGEN**;
+      ADR 0028 → ACCEPTED-WITH-AMENDMENTS; Phase C5.4 closes. Codegen routes
+      a scope's non-escaping primitive array-literal heap buffers into a
+      broker bump arena and replaces that scope's per-binding
+      `sentinel_free`s with ONE `sentinel_arena_exit`. `compute_arena_routed`
+      pre-pass = `HashSet<VarId>` of EXACTLY `emit_scope_drops`'s free set
+      (`∉ moved ∧ ≠ tail_returned_var(&block.tail)`), narrowed to
+      `let x = [i64/i32/bool array literal]` in non-generic non-effecting
+      fns; one set drives alloc-routing + free-skip; per-scope arena handle
+      in a new `ScopeFrame`, lazily created. Verified by disassembly + the
+      c24/c25 guards + `c54_scope_arena`. ⚠ **The "VERIFIED UAF HOLE" below
+      was WRONG**: a tail-returned array IS in moved_sources (borrow checker
+      walks the tail Var as a consuming move before the L626 snapshot;
+      empirically dumped), so `∉ moved` alone already excludes returned
+      arrays — both checks kept anyway to mirror emit_scope_drops (ADR 0028
+      amendment A2). 1227 tests, four-check green.
 
-    RESUME AT: **C5.4 (2/N) — the scope→arena CODEGEN** (route a scope's
-    non-escaping heap allocs into a bump arena; replace N per-binding
-    `sentinel_free` with one `sentinel_arena_exit`). UAF-SENSITIVE — a
-    use-after-free here CAN PASS THE TEST SUITE BY LUCK, so correctness must
-    come from reasoning.
-      ⚠ VERIFIED UAF HOLE (ADR 0028): routing "iff binding ∉ moved_sources"
-        is UNSAFE — `emit_scope_drops` frees iff (∉ moved) AND (≠ tail_returned),
-        checked SEPARATELY, and a tail-returned binding is NOT in moved_sources
-        (DropPlan.moved_sources finalised at borrow-check L626-628, before the
-        return-source check). So `fn make() -> [i64] { let a=[1,2,3]; a }`
-        would arena-free the RETURNED array at make's exit → UAF in the caller.
-      SAFE PATH: a small per-fn PRE-PASS computing emit_scope_drops's actual
-        free set (∉ moved AND not transitively tail-returned), route exactly
-        those; OR the deferred escape analysis (ADR 0026 D2). Narrow first
-        slice: `let x = [primitive array literal]`. One HashSet<VarId> drives
-        BOTH alloc-routing and free-skipping. Add a c54_scope_arena fixture.
-        Full design + touch points in ADR 0028's implementation map.
-      ALTERNATIVE (no hazard): a different C5 sub-phase — stable ABI
-        (ADR 0025 D7: spec doc + layout-stability tests) or LSP (D10).
+    RESUME AT: **developer-scope call — Phase C5.4 is CLOSED.** Both 1.0
+    headline capabilities are now in hand (constant-time `secret` compare +
+    broker scope arenas), so the natural next step is **assembling the TLS
+    1.3 handshake go/no-go** (ADR 0025 C5.0); OR another C5 productionization
+    sub-phase — **stable ABI** (ADR 0025 D7: spec doc + layout-stability
+    tests, no hazard) or **LSP** (D10).
+      Historical UAF note (kept for context, now CORRECTED — see ADR 0028 A2):
+        the prep claimed routing "iff ∉ moved_sources" would arena-free a
+        RETURNED array `fn make() -> [i64] { let a=[1,2,3]; a }`. It would
+        not — `a` IS in moved_sources. The shipped predicate replicates
+        `emit_scope_drops` exactly (`∉ moved ∧ ≠ tail_returned`), a strict
+        subset of the proven-non-escaping free set.
 
     DEFERRED (none blocking; recorded in ADRs): C5.2a/D4 constant-time
     EMISSION (branch-free arithmetic/bitwise already passes D5 on existing
@@ -1869,7 +1887,8 @@ For pasting into a fresh chat to bootstrap context:
     modules / actors — all post-1.0 per ADR 0025.
 
     ADR STATUS: 0026 PROPOSED (C5.1/C5.2). 0027 ACCEPTED-WITH-AMENDMENTS
-    (bitwise). 0028 PROPOSED (broker; 1/N done, 2/N mapped + UAF found).
+    (bitwise). 0028 ACCEPTED-WITH-AMENDMENTS (broker; 1/N substrate + 2/N
+    scope→arena codegen both shipped; A2 corrects the "UAF hole").
     Optional C4 follow-ons (none blocking): work-stealing scheduler
     (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
     (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).
