@@ -6277,6 +6277,99 @@ mod tests {
         assert_eq!(mangle_mono_name("main", &[], &typed), "main");
     }
 
+    // ===== C5 D7 (2/N) / ADR 0029: abi-v1 Type-layout stability =====
+    //
+    // For each `Type` constructor, lower it via the real `llvm_basic_type`
+    // and assert its size / alignment / struct-field offsets through the
+    // target `DataLayout` — the concrete byte layout docs/abi-v1.md §2
+    // freezes. A reorder / repack / width change turns this red. Both 1.0
+    // targets (x86-64, aarch64) are LP64 so the values are identical.
+    #[test]
+    fn abi_v1_type_layouts_via_datalayout() {
+        use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
+        use inkwell::OptimizationLevel;
+        use sentinel_types::{KontId, RefId, TaskId};
+
+        // Same target setup as `compile_to_object`.
+        Target::initialize_native(&InitializationConfig::default()).expect("init native");
+        let triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&triple).expect("target from triple");
+        let tm = target
+            .create_target_machine(
+                &triple,
+                &TargetMachine::get_host_cpu_name().to_string(),
+                &TargetMachine::get_host_cpu_features().to_string(),
+                OptimizationLevel::None,
+                RelocMode::PIC,
+                CodeModel::Default,
+            )
+            .expect("target machine");
+        let td = tm.get_target_data();
+
+        let ctx = Context::create();
+        let structs = HashMap::new();
+        let gi = HashMap::new();
+        let classes = HashMap::new();
+        let secrets: Vec<SecretData> = Vec::new();
+        let lower = |ty: Type| llvm_basic_type(&ctx, ty, &structs, &gi, &classes, &secrets);
+
+        // Scalars (§2).
+        assert_eq!(td.get_abi_size(&lower(Type::Bool).into_int_type()), 1);
+        assert_eq!(td.get_abi_size(&lower(Type::I32).into_int_type()), 4);
+        assert_eq!(td.get_abi_alignment(&lower(Type::I32).into_int_type()), 4);
+        assert_eq!(td.get_abi_size(&lower(Type::I64).into_int_type()), 8);
+        assert_eq!(td.get_abi_alignment(&lower(Type::I64).into_int_type()), 8);
+
+        // `[T]` = `{ i64 len, ptr data }`: 16 bytes, align 8, data @ 8.
+        // Field types pin the *order* (len before data) — offsets alone
+        // can't, since both fields are 8 bytes.
+        let arr = lower(Type::Array(ArrayElem::I64)).into_struct_type();
+        assert_eq!(arr.count_fields(), 2);
+        assert!(!arr.is_packed());
+        assert_eq!(td.get_abi_size(&arr), 16);
+        assert_eq!(td.get_abi_alignment(&arr), 8);
+        assert_eq!(td.offset_of_element(&arr, 0), Some(0));
+        assert_eq!(td.offset_of_element(&arr, 1), Some(8));
+        assert_eq!(arr.get_field_type_at_index(0).unwrap().into_int_type().get_bit_width(), 64);
+        assert!(matches!(arr.get_field_type_at_index(1).unwrap(), BasicTypeEnum::PointerType(_)));
+
+        // `?primitive` = `{ i1 valid, i64 }`: i64 lands @ 8 by alignment.
+        let opt = lower(Type::Nullable(NullableInner::I64)).into_struct_type();
+        assert_eq!(opt.count_fields(), 2);
+        assert!(!opt.is_packed());
+        assert_eq!(td.get_abi_size(&opt), 16);
+        assert_eq!(td.offset_of_element(&opt, 0), Some(0));
+        assert_eq!(td.offset_of_element(&opt, 1), Some(8));
+        assert_eq!(opt.get_field_type_at_index(0).unwrap().into_int_type().get_bit_width(), 1);
+        assert_eq!(opt.get_field_type_at_index(1).unwrap().into_int_type().get_bit_width(), 64);
+
+        // `?Struct` = `{ i1 valid, ptr payload }` (payload is a heap ptr).
+        let opt_s = lower(Type::Nullable(NullableInner::Struct(StructId(0)))).into_struct_type();
+        assert_eq!(opt_s.count_fields(), 2);
+        assert_eq!(td.get_abi_size(&opt_s), 16);
+        assert_eq!(td.offset_of_element(&opt_s, 1), Some(8));
+        assert_eq!(opt_s.get_field_type_at_index(0).unwrap().into_int_type().get_bit_width(), 1);
+        assert!(matches!(opt_s.get_field_type_at_index(1).unwrap(), BasicTypeEnum::PointerType(_)));
+
+        // `&T` / `Kont` / `Task` all lower to an opaque `ptr` (8 bytes).
+        let r = lower(Type::Ref(RefId(0)));
+        let k = lower(Type::Kont(KontId(0)));
+        let t = lower(Type::Task(TaskId(0)));
+        assert!(matches!(r, BasicTypeEnum::PointerType(_)));
+        assert!(matches!(k, BasicTypeEnum::PointerType(_)));
+        assert!(matches!(t, BasicTypeEnum::PointerType(_)));
+        assert_eq!(td.get_abi_size(&r.into_pointer_type()), 8);
+        assert_eq!(td.get_abi_alignment(&t.into_pointer_type()), 8);
+
+        // Named struct: fields in declaration order, non-packed — a 2×i64
+        // struct lays out at {0, 8} / 16 bytes, the shape codegen builds
+        // for user structs via `context.struct_type(fields, false)`.
+        let pair = ctx.struct_type(&[ctx.i64_type().into(), ctx.i64_type().into()], false);
+        assert_eq!(td.get_abi_size(&pair), 16);
+        assert_eq!(td.offset_of_element(&pair, 0), Some(0));
+        assert_eq!(td.offset_of_element(&pair, 1), Some(8));
+    }
+
     #[test]
     fn target_init_does_not_panic() {
         Target::initialize_native(&InitializationConfig::default()).expect("initialize native");
