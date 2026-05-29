@@ -22,17 +22,25 @@ consuming `&HirProgram`. At this increment the HIR is a thin borrowing
 **bundle** of the typed program + drop plan (no desugaring yet), so the
 migration is **behaviour-preserving by construction**: all 1195 tests
 pass and every `tests/repro.rs` object stays byte-identical (the
-ADR 0026 D9 `c51` bar). Desugaring — dispatch resolution, monomorphic
-materialisation, explicit drops (folding in the `DropPlan`) — lands in
-later C5.1a increments, each *thickening* the HIR + *thinning* codegen
-while holding that bar. `lower_to_hir` stays a pure fn (not
-salsa-tracked), matching codegen's non-salsa status (ADR 0011 C1.0c);
-salsa-tracking is deferred until the HIR is a self-contained owned
-structure (ADR 0026 D1 amendment). Test-count-neutral (the
-`sentinel-hir` stub's smoke test replaced by a `lower_to_hir`
-round-trip). Four-check green via `cargo nextest run --workspace`
-(1195) + `cargo test --doc`. **Next: C5.1a (2/N)** — fold the `DropPlan`
-into the HIR as explicit drop statements (the first real desugar).
+ADR 0026 D9 `c51` bar). `lower_to_hir` stays a pure fn (not
+salsa-tracked), matching codegen's non-salsa status (ADR 0011 C1.0c).
+Test-count-neutral (the `sentinel-hir` stub's smoke test replaced by a
+`lower_to_hir` round-trip). Four-check green via `cargo nextest run
+--workspace` (1195) + `cargo test --doc`.
+
+**C5.1 escape hatch INVOKED (ADR 0026 D1/D3 amendment, decided with the
+developer).** Codegen couples to the typed tree at ~295 `TypedExprKind`
+/ 342 `TypedExpr` refs across 90 signatures (28 expr variants) —
+migrating it to a *thick* HIR is a multi-session, high-risk rewrite of
+nearly the whole backend, and it is **not required** for the 1.0
+constant-time-`secret` capability. So codegen STAYS on the typed program
+(reached via this seam, `HirProgram::program()`); the thick HIR desugar
+(dispatch resolution, monomorphisation, explicit drops) + the
+codegen-consumes-HIR migration are **post-1.0** (still Phase-D-valuable).
+**C5.1a closes at the seam.** **Next: C5.1b** — `sentinel-mir` +
+`mir_query`, an SSA/CFG lowered from the typed program (via the seam)
+that hosts the C5.2 D5 constant-time verification; then C5.2 =
+constant-time emission (D4, a codegen pass) + the D5 verification.
 
 Pre-C5.1a context: **C5.0 (complete) + ADR 0026 PROPOSED — Phase C5
 kickoff; the 1.0 go/no-go program is CHOSEN.** Per ADR 0025 D1/D13 the Phase C /

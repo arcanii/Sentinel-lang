@@ -8,6 +8,14 @@ core of Phase C5**: it stands up the pipeline middle ADR 0009 §6.1
 specified and finally gives `secret` runtime teeth (ADR 0008 →
 ADR 0019 D12, twice deferred).
 
+**C5.1 update (2026-05-29): the D3 escape hatch is INVOKED** (decided
+with the developer, evidence-grounded — see the D3 tag). For 1.0,
+codegen stays on the typed program (via the thin C5.1a HIR seam), MIR
+lowers from the typed program for the D5 verification, and constant-time
+emission is a codegen pass; the *thick* HIR desugar (D1) and the
+codegen-consumes-HIR migration (D3 default) are deferred **post-1.0**.
+The 1.0 bar — constant-time `secret` (D4+D5) — is unchanged.
+
 Date: 2026-05-29
 Related:
   - **0025** (Phase C5 kickoff — PROPOSED): D2 (stand up HIR + MIR),
@@ -100,6 +108,12 @@ HIR keeps the C3 effecting-fn `Kont*` ABI shape (ADR 0020) and the
 C4.4 task/scope/spawn/await forms — the desugar must round-trip every
 C0–C4 program with identical runtime behaviour (D9).
 
+**[C5.1 amendment — the HIR *desugar* (dispatch resolution,
+monomorphisation, explicit drops) is DEFERRED post-1.0.** C5.1a (1/N)
+shipped only the thin HIR *seam* (codegen consumes an `HirProgram`
+bundle via `program()` / `drop_plan()`); the thick desugared HIR above
+is post-1.0. See the D3 escape-hatch tag for the evidence + rationale.]
+
 ### D2. MIR stage — `sentinel-mir` + `mir_query`.
 
 Lower HIR function bodies to a **minimal SSA/CFG**: basic blocks of
@@ -133,6 +147,19 @@ verification, and implement constant-time emission (D4) as a codegen
 sub-pass. The *capabilities* (D4 + D5) are the 1.0 bar; the pipeline
 shape is not. Invoking the hatch is an amendment at C5.1/C5.2 close, not
 a silent deviation.
+
+**[C5.1 amendment — ESCAPE HATCH INVOKED (2026-05-29).** Evidence:
+codegen couples to the typed tree at ~295 `TypedExprKind` / 342
+`TypedExpr` references across 90 signatures (28 expr variants) — a
+thick-HIR migration is a multi-session, high-risk rewrite of nearly the
+whole 6272-line backend, and it is **not required** for the 1.0
+constant-time capability. Decided with the developer: codegen STAYS on
+the typed program (reached via the thin C5.1a seam,
+`HirProgram::program()`); MIR (D2) lowers from the typed program for the
+D5 verification; constant-time emission (D4) is a codegen pass. The
+thick-HIR desugar (D1) + codegen-consumes-HIR/MIR migration are
+**post-1.0** (they remain Phase-D-valuable). C5.1a closes at the seam;
+the remaining C5 work is C5.1b (MIR) → C5.2 (constant-time).]
 
 ### D4. Constant-time secret emission (the headline, C5.2).
 
@@ -225,9 +252,12 @@ standing C2/C3 follow-ons remain deferred.
 
 | Sub   | Title                                                           | Risk   | Est.        |
 |-------|-----------------------------------------------------------------|--------|-------------|
-| C5.1a | `sentinel-hir` + `hir_query` (desugar); migrate codegen to HIR. | high   | 1-2 sessions|
-| C5.1b | `sentinel-mir` + `mir_query` (SSA/CFG) + bounds-check-elision    | high   | 1-2 sessions|
-|       | annotation scaffold. `c51` behaviour-preservation holds.        |        |             |
+| C5.1a | HIR *seam* only — `lower_to_hir` + codegen consumes `HirProgram`. | low    | DONE (1/N)  |
+|       | Thick HIR *desugar* + codegen migration → post-1.0 (escape hatch;|        |             |
+|       | see the D1/D3 amendments).                                       |        |             |
+| C5.1b | `sentinel-mir` + `mir_query` — SSA/CFG lowered from the typed     | high   | 1-2 sessions|
+|       | program (via the seam) for the D5 verification + bounds-check    |        |             |
+|       | elision scaffold.                                               |        |             |
 | C5.2a | Constant-time emission (D4): branch-free select, secret-op       | high   | 1-2 sessions|
 |       | shielding, ADR 0008 speculation barriers (x86-64 + aarch64).    |        |             |
 | C5.2b | D5 verification pass + `secret_leak` diagnostic + phase-go       | medium | 1 session   |
