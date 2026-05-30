@@ -38,6 +38,43 @@ Additive — resolve rejects `enum`s (`EnumDeclNotYet`) + `match`
 types** — `Type::Enum` interner variant, variant construction + `match`
 type-check + **exhaustiveness**.
 
+**(3/N) update (2026-05-30) — DELIVERED.** The **type layer** lands;
+`enum` + `match` now type-check end to end (codegen rejects until 4/N).
+- **resolve:** `EnumId` + `ResolvedEnumDecl`/`ResolvedVariantDecl` on
+  `ResolvedProgram.enums` (a Pass-0 enum table with struct/class/trait
+  namespace-collision checks → `RedefinedEnum`/`DuplicateVariant`);
+  `Name::Variant(args)` / `Name::Variant()` construction **disambiguated**
+  from `ImplName::method` / `Class::init` (when the name is an enum →
+  `ResolvedExprKind::EnumConstruct`); `match` → `ResolvedExprKind::Match`
+  with `ResolvedPattern` + per-arm binding `VarId` scoping (snapshot/restore
+  of `vars`, like handler-arm params; `_` slots get a VarId but aren't in
+  scope; duplicate binding names → `DuplicatePatternBinding`). The
+  `EnumDeclNotYet`/`MatchNotYet` rejections are dropped. `ImplCtx` grew an
+  `enum_table` (no signature churn).
+- **types:** `Type::Enum(EnumId)` (the eleventh interner-style variant) +
+  `EnumData`/`VariantData` + `TypedProgram.enums` + `enum_data` accessor;
+  enum names resolve in type position (`resolve_type_expr` precedence
+  struct→class→enum→primitive). `EnumConstruct` type-checks (variant lookup,
+  payload arity + per-arg coercion → `Type::Enum`); `match` type-checks
+  (scrutinee is an enum; arms typed + unified; pattern bindings typed from
+  payloads; **exhaustiveness** — every variant or a `_`). Five new
+  `TypeError`s: `UnknownVariant`, `VariantPayloadArityMismatch`,
+  `MatchScrutineeNotEnum`, `NonExhaustiveMatch`, `MatchArmTypeMismatch`.
+  **Directly-recursive enums type-check** (the AST enabler — heap-boxed
+  payloads per D4 need no nullable indirection, unlike recursive structs).
+- **downstream (forced by the new Resolved/Typed variants):** codegen's
+  `llvm_basic_type` lowers `Type::Enum` to the `{ i32 tag, ptr payload }`
+  abi-v1 layout (so enum-typed **signatures lower**) + `mangle_type` renders
+  by name; construction/`match` *expression* codegen rejects cleanly with
+  `CodegenError::EnumCodegenNotYet` (the pre-pass walkers recurse; drop is a
+  no-op gated by `needs_drop=false`). MIR → `Opaque` carrying operands
+  (taint-safe; no `secret enum` so a match tag is never secret). effect-check
+  + borrow-check pass-through walks (enum is Move; match arms move-merge like
+  `if`). So `enum`/`match` **type-check but codegen rejects until (4/N)**.
++27 tests (1265), four-check green. Next: **(4/N) codegen** — the
+`{tag,ptr}` construction + `switch` lowering + recursive payload drop +
+abi-v1 enum-layout entry + `c5d1_enum` pass fixture; ADR flips to ACCEPTED.
+
 ## Context
 
 Self-hosting (ADR 0031) is blocked first and foremost on **sum types**:

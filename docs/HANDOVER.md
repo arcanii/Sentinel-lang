@@ -119,6 +119,7 @@ C1.3. See STATE.md Section C.
 **ADR 0031 PROPOSED — Phase D kickoff: self-hosting — docs-only.** Opens the project's largest phase. **Honest readiness verdict:** the 1.0 language *cannot* self-host yet — verified gaps (none at 1.0): no sum types / `match` (an AST is a sum type — the biggest blocker), no strings / `char` / byte type (a compiler is text processing), no growable collections (`Vec`/`Map` — only fixed `[T]`), no file I/O (only `sentinel_print`), no modules/multi-file, no loops (recursion-only). **Strategy (D2):** language+stdlib build-out FIRST, then incremental self-host, keeping the Rust `snc` as the **reference oracle** (every Sentinel-written stage differentially validated against it on the fixture corpus), converging on a **bootstrap fixed-point** (the Sentinel compiler compiles itself byte-identically — which is *why* C5 shipped `abi-v1` + reproducible builds). **Prerequisite roadmap (D4, each its own ADR):** sum types + `match` → strings + byte type → growable collections → file I/O (stdlib) → modules → loops; also retires the thick-HIR/MIR migration + full escape analysis + shifts. **Self-host sequence (D5):** lexer → parser → resolve → types → HIR/MIR → codegen, in Sentinel, each matching the Rust stage before replacing it. **First sub-phase D.1 = sum types + pattern matching** (its own PROPOSED ADR next — the foundational AST-enabler; a C1–C4-style type-system + codegen feature). No timeline promise; Phase D is plausibly the longest phase. Next: **Phase D.1 (sum types + `match`)** — write its kickoff ADR, then implement.
 **ADR 0032 PROPOSED + Phase D.1 (1/N) — sum types + pattern matching: the kickoff + lexer.** ADR 0032 designs `enum`/`match` end-to-end (12 D-decisions): surface (`enum Name { V, V(T), V(T,T) }` + `Name::Variant(args)` + exhaustive `match s { Pat => e }`); `Type::Enum` interner variant; the abi-v1 layout **`{ i32 tag, ptr payload }`** heap-boxed (necessary for *recursive* enums — the AST case — reusing the `?Struct` rationale + drop path); `match` → LLVM `switch`; RAII payload drop; the constant-time guard (a secret-tagged match is a branch sink; no `secret enum` at MVP); generic enums (`Option`/`Result`) a fast-follow via mono (D9); MVP out-of-scope (named-field variants, or-/nested patterns, guards). **D.1 (1/N) ships the lexer:** two new logos keyword tokens (`enum`, `match`); `=>`/`::`/`_`-as-`Ident` already exist, so the lexer surface is complete. Additive (parser consumes at 2/N). +3 lexer tests (1235) (`87e955c`). Four-check green. Next: **D.1 (2/N)** — AST + parser (`EnumDecl`, `ExprKind::Match`, `Pattern`; `parse_enum_decl`/`parse_match`).
 **Phase D.1 (2/N) — enum + match AST + parser; resolve rejects (NotYet) — complete.** Per ADR 0032 D8. **AST** (sentinel-ast): `EnumDecl` + `VariantDecl` (unit + positional-tuple-payload variants) on `Program.enums`; `ExprKind::Match { scrutinee, arms }` + `MatchArm` + `Pattern` (qualified `Enum::Variant(binds)` + `_` wildcard); the s-expr `Display` covers both. **Parser** (sentinel-syntax): top-level `enum` dispatch + `parse_enum_decl`/`parse_variant`; `match` dispatched in `parse_expr` alongside `if`, with `parse_match_expr`/`parse_match_arm`/`parse_pattern`/`parse_pattern_binding` (scrutinee forbids struct literals like the if-cond; arms comma-separated; `=>`/`::`/`_` reuse existing tokens). **Additive**: resolve rejects non-empty `enums` (`EnumDeclNotYet`) + `match` (`MatchNotYet`) until 3/N; **blast radius contained to ast+syntax+resolve** (downstream crates match the resolved/typed parallel trees, which gain no `Match` variant — confirmed by build). +7 tests (1242) (`e368a72`). Four-check green. Next: **D.1 (3/N) — resolve + types**: the `Type::Enum` interner variant (+ `EnumData`/`VariantData`), variant construction + `match` type-check + **exhaustiveness** (NonExhaustiveMatch / UnknownVariant); then (4/N) codegen (`{tag,ptr}` layout + `switch` + drop + abi-v1 entry + `c5d1_enum`), (D.1b) generic enums.
+**Phase D.1 (3/N) — enum + match the type layer; `enum`/`match` now TYPE-CHECK end to end (codegen rejects until 4/N) — complete.** Per ADR 0032 D8 (the resolve + types slice). **resolve**: `EnumId` + `ResolvedEnumDecl`/`ResolvedVariantDecl` on `ResolvedProgram.enums`; a Pass-0 enum table (names share the type namespace with structs/classes/traits → `RedefinedEnum`; in-enum dup → `DuplicateVariant`); the `Name::Variant(args)`/`Name::Variant()` construction is **disambiguated** from `ImplName::method` / `Class::init` *at resolve* (the AST parses all three as `QualifiedCall`/`ClassInit`; when the leading name is an enum → `ResolvedExprKind::EnumConstruct`); `match` → `ResolvedExprKind::Match` + `ResolvedPattern`/`ResolvedMatchArm` with per-arm payload-binding `VarId`s scoped into the arm body only (snapshot/restore of `vars`, mirroring `resolve_handle_expr`; `_` slots get a VarId but stay out of scope; same-name twice → `DuplicatePatternBinding`); the `EnumDeclNotYet`/`MatchNotYet` rejections are dropped. `ImplCtx` grew an `enum_table` field (Copy bundle — no per-fn signature churn). **types**: `Type::Enum(EnumId)` (the 11th interner-style `Copy`-`Type` variant) + `EnumData`/`VariantData` + `TypedProgram.enums` + `enum_data` accessor; the `Type::Enum` cascade got real-or-rejecting arms across every exhaustive `Type` match (`type_display`/`Display`/`to_nullable_inner`/`to_array_elem`/`substitute`/`try_substitute`/`contains_type_param`); enum names resolve in **type position** (`resolve_type_expr` precedence struct→class→enum→primitive — threaded a new `enum_table` param to its ~20 call sites); `EnumConstruct` type-checks (variant→index, payload arity + per-arg coercion → `Type::Enum`); `match` type-checks (scrutinee is `Type::Enum`; arm bodies checked with `expected` pushed down + unified; pattern bindings typed from variant payloads + bound in env with save/restore; **exhaustiveness** = every variant covered or a `_`). Five new `TypeError`s: `UnknownVariant`, `VariantPayloadArityMismatch`, `MatchScrutineeNotEnum`, `NonExhaustiveMatch`, `MatchArmTypeMismatch`. **Directly-recursive enums type-check** (the AST enabler — heap-boxed payloads per ADR 0032 D4 need no nullable indirection, unlike recursive structs; verified). **downstream** (the new `Resolved`/`Typed` `Match`+`EnumConstruct` variants forced coordinated arms — the C1.3.2-4 cascade): codegen's `llvm_basic_type` lowers `Type::Enum` → the abi-v1 `{ i32 tag, ptr payload }` (heap-boxed/recursive-safe, ?Struct-style) so **enum-typed signatures lower**, `mangle_type` renders by name; the construction/`match` *expression* lowering rejects with a clean `CodegenError::EnumCodegenNotYet` (the ~8 pre-pass walkers recurse into children so they don't panic; drop is a no-op gated by `field_type_needs_drop=false`). MIR → `MirOp::Opaque` carrying operands (taint-safe; no `secret enum` ⇒ a match tag is never secret — the D7 sink is a future guard). effect-check + borrow-check pass-through walks (enum is **Move** — owns its heap payload; `match` arms move-merge like `if`/`else`). So `enum`/`match` **type-check but codegen rejects until (4/N)**. +27 tests (1265) incl. a `c5d1_non_exhaustive_match` UI snapshot. Four-check green. Next: **D.1 (4/N)** — codegen: the `{tag,ptr}` construction (alloc payload + set tag) + `match`→LLVM `switch` (D5) + recursive payload drop (D6) + the abi-v1 enum-layout entry + stability test + the `c5d1_enum` pass fixture; **ADR 0032 flips to ACCEPTED**. Then (D.1b) generic enums (`Option`/`Result`) via mono.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1825,11 +1826,12 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the D.1 (2/N) docs commit
-    (atop feat e368a72 enum/match AST+parser; 1.0 declared). Clean tree; 1242 tests. macOS + LLVM 18.
-    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.2/§0.3 + ADR 0028
-    (esp. the "C5.4 (2/N) implementation map" AND the ⚠ VERIFIED UAF HOLE
-    note — read before touching the scope→arena routing) + ADR 0026/0027.
+    Local HEAD: verify with `git log -1` — expect the D.1 (3/N) docs commit
+    (atop the D.1 (3/N) feat: enum/match type layer; 1.0 declared). Clean
+    tree; 1265 tests. macOS + LLVM 18.
+    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.2/§0.3 + ADR 0032
+    (THE task ADR — all 12 D-decisions + the 1/N..3/N updates) + ADR 0031
+    (why Phase D opens with a language build-out).
 
     PHASE C5 = productionize toward Sentinel 1.0. The headline 1.0
     capability — **constant-time `secret` — is DELIVERED + machine-verified.**
@@ -1894,33 +1896,45 @@ For pasting into a fresh chat to bootstrap context:
       layout pinned via a representative `{i64,i64}` struct (a real
       `Struct(id)` needs codegen's pass-0 cache). +1 test (1231).
 
-    RESUME AT: **Phase D.1 (3/N) — resolve + types for `enum` + `match`.**
+    RESUME AT: **Phase D.1 (4/N) — codegen for `enum` + `match`.**
     Context: **Sentinel 1.0 is DECLARED**; Phase D (self-hosting) opens with
     a language/stdlib build-out (ADR 0031); first prerequisite is sum types
     + pattern matching (ADR 0032). DONE: (1/N) lexer (`87e955c`), (2/N) AST
-    + parser + resolve-reject (`e368a72`) — `enum`/`match` parse; resolve
-    rejects with `EnumDeclNotYet`/`MatchNotYet`. (3/N) wires the type layer:
-      - `Type::Enum(EnumId)` interner variant (+ `EnumData { name, variants:
-        Vec<VariantData> }`, `VariantData { name, payloads: Vec<Type> }`,
-        `intern_enum`, `TypedProgram.enums`) — the Copy-`Type` + interner
-        pattern (mirror Struct/Class).
-      - resolve: assign `EnumId`/`VariantId`; **disambiguate `Name::Variant
-        (args)`** construction from `Class::init`/`QualifiedCall` (Name is an
-        enum → variant ctor); resolve match patterns to (enum, variant) +
-        scope the pattern bindings; drop the `EnumDeclNotYet`/`MatchNotYet`
-        rejections.
-      - types: type-check construction (payload arity/types) + `match`
-        (scrutinee is an enum; arms cover the variants — **exhaustiveness**;
-        NonExhaustiveMatch / UnknownVariant / MatchArmTypeMismatch; arm
-        bindings typed from the variant payloads). This forces new
-        `ResolvedExprKind::Match`/`EnumConstruct` + `TypedExprKind`
-        variants → downstream codegen/mir/etc. get (rejecting) arms until
-        (4/N).
-      Then (4/N) codegen — the abi-v1 `{ i32 tag, ptr payload }` heap-boxed
-        layout (recursive-enum-safe, ?Struct-style), `match`→`switch`, RAII
-        payload drop, abi-v1 entry + `c5d1_enum` fixture, ADR flip; (D.1b)
-        generic enums (Option/Result) via mono.
-      After D.1: strings + byte type → growable collections → file I/O
+    + parser + resolve-reject (`e368a72`), (3/N) the **type layer** —
+    `enum`/`match` now TYPE-CHECK end to end; codegen rejects with
+    `CodegenError::EnumCodegenNotYet` until (4/N). (3/N) shipped:
+    `Type::Enum(EnumId)` + `EnumData`/`VariantData` + `TypedProgram.enums`
+    (the cascade got arms across every exhaustive `Type` match);
+    `ResolvedExprKind::EnumConstruct`/`Match` + `TypedExprKind` mirrors;
+    resolve disambiguation of `Name::Variant(args)`/`()` + match-pattern
+    binding scoping; construction + match type-check with **exhaustiveness**
+    (5 new TypeErrors); enum names usable in type position; **directly-
+    recursive enums type-check** (the AST enabler); `llvm_basic_type` lowers
+    `Type::Enum` → `{ i32 tag, ptr payload }` so signatures lower; MIR/effect/
+    borrow pass-through (enum is Move). +27 tests (1265), incl. a
+    `c5d1_non_exhaustive_match` UI snapshot.
+    (4/N) is the **codegen** slice (the high-risk step — do it fresh, ADR
+    0032 D5/D6/D8):
+      - Construction `EnumConstruct`: `sentinel_alloc` the payload struct
+        (the active variant's fields), store the args, set `{ tag = variant
+        index, payload = ptr }` (`null` payload for unit variants). The
+        layout (`{i32,ptr}`) already lowers via `llvm_basic_type`.
+      - `match` → LLVM **`switch`** on the loaded `tag` into one block per
+        arm (reuse the `if`-merge machinery for arm results); each arm block
+        loads the payload ptr, GEP/loads the bound fields into the pattern
+        bindings' locals, lowers the arm body. Exhaustiveness is guaranteed
+        at type-check, so a non-`_` switch needs no default (emit
+        `unreachable`, as the bounds-check path does); `_` is the default.
+      - Drop (D6): flip `field_type_needs_drop_inner`(`Enum`)→true + make
+        `emit_drop_for_binding`(`Enum`) free the payload by active variant
+        (recurse-drop the variant's heap fields, then `sentinel_free` the
+        payload) — structurally the `?Struct` drop arm dispatched on the tag.
+      - abi-v1: add the enum `{i32,ptr}` layout entry to `docs/abi-v1.md` §2
+        + a stability test; the `tests/pass/c5d1_enum.sentinel` phase-go
+        (the Shape/area example constructed + matched, computed exit code).
+      - **Flip ADR 0032 → ACCEPTED(-WITH-AMENDMENTS).**
+      Then (D.1b) generic enums (`Option`/`Result`) via mono (ADR 0016 reuse).
+    After D.1: strings + byte type → growable collections → file I/O
         (stdlib) → modules → loops (ADR 0031 D4), then the self-host port.
 
     DEFERRED (none blocking; recorded in ADRs): C5.2a/D4 constant-time
@@ -1941,8 +1955,9 @@ For pasting into a fresh chat to bootstrap context:
     3/N declared 1.0). 0031 **PROPOSED** (Phase D kickoff — self-hosting;
     honest readiness verdict + the language/stdlib prerequisite roadmap;
     first sub-phase D.1 = sum types + `match`). 0032 **PROPOSED** (D.1 sum
-    types + pattern matching; 1/N lexer + 2/N AST+parser+resolve-reject done,
-    resume at 3/N resolve+types — Type::Enum + match-check + exhaustiveness).
+    types + pattern matching; 1/N lexer + 2/N AST+parser + 3/N type layer
+    done — `enum`/`match` TYPE-CHECK, codegen rejects; resume at 4/N codegen
+    — `{tag,ptr}` construction + `switch` + drop + `c5d1_enum`; ADR flips).
     Optional C4 follow-ons (none blocking): work-stealing scheduler
     (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
     (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).
