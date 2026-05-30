@@ -166,6 +166,28 @@ partial-move tracking for enum payloads) — a proper sub-phase, **bigger than
 shipped MVP behavior. (Recorded so the naive drop-fn approach is not
 re-attempted.)
 
+**Leak characterization (empirical, via `leaks --atExit`).** The box-free
+debt is **narrower than first stated** — the earlier "an AST leaks per node"
+was *wrong*. Measured with macOS `MallocStackLogging=1 leaks --atExit`:
+- **recursive-consume walk** — `match` + recurse-with-move on *all* children
+  (`sum(Node(l,r)) = sum(l)+sum(r)`, the standard AST-evaluator shape):
+  **0 leaks**. Every box is freed exactly once at the scope exit of the fn
+  that consumed (matched-and-moved) it.
+- **flat enum** (`c5d1_enum`): **0 leaks**.
+- **bind-but-ignore** a payload (`Node(l,r) => 5`, never using `l`/`r`):
+  **leaks** the ignored child boxes (2 boxes / 32 B in the 2-leaf example).
+- **drop-without-match** (a `let`-bound enum dropped without being matched):
+  box-free frees the top box but leaks its children.
+
+So the standard "build an AST, then fully walk it by matching + recursing on
+every child" is **already leak-free** under (4/N); the leak is confined to
+*not consuming* a payload (ignore a binding, or drop an enum unmatched). This
+de-escalates the urgency of the ownership-model follow-on — it is a
+*completeness* fix (leak-free in **all** patterns), not a self-hosting
+blocker. **Bonus:** `leaks --atExit` makes the eventual ownership-model fix
+**verifiable** (leak-count *and* double-free both observable), removing the
+main risk that made it daunting.
+
 ## Context
 
 Self-hosting (ADR 0031) is blocked first and foremost on **sum types**:
