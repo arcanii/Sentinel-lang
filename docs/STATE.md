@@ -48,9 +48,23 @@ for non-match paths) — a coordinated borrow-check + drop-plan + codegen
 change, deferred (recorded in ADR 0032 A1 follow-up; code stays at box-free).
 A2 — inline-small-enum optimisation deferred. A3 — generic enums
 (`Option`/`Result`) → **D.1b**. +29 tests across 3/N+4/N (1268), four-check
-green; c51 bar + `repro.rs` hold. Next: **D.1b** (generic enums via mono,
-bundle the payload-ownership model) OR the next ADR 0031 D4 prerequisite
-(strings + a byte type, or growable collections).
+green; c51 bar + `repro.rs` hold. **Phase D.1 (sum types + `match`) MVP
+closes.**
+
+**Next: Phase D.2 — strings + a byte (`u8`) type (ADR 0033 PROPOSED).** Per
+the ADR 0031 D4 roadmap (sum types → **strings + byte type** → collections →
+…), and because a self-hosted lexer's input is text. **ADR 0033 designs it:**
+a string **IS a `[u8]`** (byte array — maximal reuse of the C1.6 array
+machinery: `len`/index/drop/move/escape/arena all apply unchanged), plus a
+`u8` integer-scalar primitive, char literals `'a'` (→ `u8`, with escapes),
+string literals `"…"` (→ `[u8]`, heap-copied from a global constant so they
+drop uniformly), and the lexer's core ops (`s[i]`, `len`, a `str_eq`
+builtin, `u8`↔`i64` conversions). 4-sub-phase split (lexer → AST/parser →
+`Type::U8` + the cascade → codegen/runtime). Resume at **D.2 (1/N)** — the
+lexer (`u8` keyword + char/string literals + escapes; additive). After D.2:
+growable collections → file I/O → modules → loops (ADR 0031 D4), then the
+self-host port. (D.1b generic enums + the enum payload-ownership/leak-
+completeness fix remain available follow-ons.)
 
 Pre-D.1(1/N) context: **🎉 SENTINEL 1.0 (2026-05-30) — Phase C5 + Phase C close.**
 The 1.0 go/no-go (`tests/pass/c5_go_no_go.sentinel`, a constant-time
