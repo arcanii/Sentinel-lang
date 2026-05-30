@@ -1834,76 +1834,54 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the D.1 (4/N) docs commit
-    (atop the D.1 (4/N) feat: enum/match codegen; D.1 MVP closed; 1.0
-    declared). Clean tree; 1268 tests. macOS + LLVM 18.
-    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.2/§0.3 + ADR 0032
-    (THE D.1 ADR — all 12 D-decisions + the 1/N..4/N updates + amendments)
-    + ADR 0031 (why Phase D opens with a language build-out + the
-    prerequisite roadmap).
+    Local HEAD: verify with `git log -1` — expect `86b7f9c` (docs: ADR 0034
+    PROPOSED — D.3 growable-collections kickoff), atop the D.2 (4/N) feat+docs
+    (`891ec98`/`3e0c0de`: strings + `u8` MVP closed, ADR 0033 ACCEPTED).
+    Clean tree; 1311 tests; four-check green. macOS + LLVM 18.
+    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0034**
+    (THE D.3 task ADR — growable collections, PROPOSED; 10 D-decisions +
+    the 3-sub-phase split) + ADR 0033/0032 (the D.2/D.1 precedents this
+    mirrors — `Type::U8`/`Type::Enum` cascades, the (2/N) reject + (3/N)
+    cascade discipline) + ADR 0031 (why Phase D opens with a language
+    build-out + the prerequisite roadmap).
 
-    PHASE C5 = productionize toward Sentinel 1.0. The headline 1.0
-    capability — **constant-time `secret` — is DELIVERED + machine-verified.**
+    PHASE D = self-hosting (post-1.0; ADR 0031). Opens with a
+    language/stdlib build-out, keeping the Rust `snc` as the differential
+    oracle, converging on a byte-identical bootstrap fixed-point. **1.0 is
+    DECLARED**; the headline 1.0 capability — constant-time `secret` — is
+    delivered + machine-verified.
 
-    Last session (all four-check green, feat+docs pairs):
-    - **C5.1b (2/N)** (`1a223c8`): `lower_to_mir` — typed fn bodies → MIR SSA
-      (`if`/`&&`/`||` → `Branch` + merge block-params; reassigned-on-one-arm
-      vars threaded; 3 D5 sinks precise; rest `Opaque`; free fns only).
-    - **C5.2b (1/N+2/N)** (`9bcc271`,`e81bdbf`): the **D5 constant-time
-      VERIFICATION** wired into `snc` (`verify_constant_time`; rejects a
-      `secret` at a branch / load index-or-address / division divisor →
-      `sentinel::mir::secret_leak`; taint is type-directed). Fixtures:
-      c52_secret_leak (UI: `secret bool && secret bool`), c52_secret_ct (pass).
-    - **C5.3 (1/N+2/N)** (`b3d1d48`,`76bfea3`): bitwise **`& | ^`** end-to-end
-      (lexer Pipe/Caret; BinOp BitAnd/BitOr/BitXor; precedence `&`>`^`>`|`
-      between cmp and add; secret-preserving integer typing — the `Binary`
-      pipeline is op-generic so resolve/types/MIR/D5 were unchanged; LLVM
-      and/or/xor). ADR 0027 ACCEPTED-WITH-AMENDMENTS (A1: `<< >> ~` deferred).
-      Fixtures: c53_bitwise (precedence), c53_ct_eq (a REAL constant-time
-      MAC-verify shape — XOR-accumulate+OR-reduce+declassify — passing D5).
-      `&` is now triple-purposed (borrow prefix / `&&` / `&` infix), split
-      by parser position.
-    - **C5.4 (1/N)** (`b49a5ef`): the broker-arena **SUBSTRATE** (ADR 0028).
-      Broker `Arena::alloc_bytes` → NonNull<u8> (exposes the internal
-      alloc_raw; the typed Handle<T> API can't); runtime
-      `sentinel_arena_enter`/`_alloc`(16-byte-aligned bump)/`_exit`(destroy
-      → frees buffer) on a process-wide lazy `Broker`. ADDITIVE + c51-safe
-      (codegen untouched → objects byte-identical); NOT called by codegen yet.
-    - **C5.4 (2/N)** (`8e7b38f` + docs): the scope→arena **CODEGEN**;
-      ADR 0028 → ACCEPTED-WITH-AMENDMENTS; Phase C5.4 closes. Codegen routes
-      a scope's non-escaping primitive array-literal heap buffers into a
-      broker bump arena and replaces that scope's per-binding
-      `sentinel_free`s with ONE `sentinel_arena_exit`. `compute_arena_routed`
-      pre-pass = `HashSet<VarId>` of EXACTLY `emit_scope_drops`'s free set
-      (`∉ moved ∧ ≠ tail_returned_var(&block.tail)`), narrowed to
-      `let x = [i64/i32/bool array literal]` in non-generic non-effecting
-      fns; one set drives alloc-routing + free-skip; per-scope arena handle
-      in a new `ScopeFrame`, lazily created. Verified by disassembly + the
-      c24/c25 guards + `c54_scope_arena`. ⚠ **The "VERIFIED UAF HOLE" below
-      was WRONG**: a tail-returned array IS in moved_sources (borrow checker
-      walks the tail Var as a consuming move before the L626 snapshot;
-      empirically dumped), so `∉ moved` alone already excludes returned
-      arrays — both checks kept anyway to mirror emit_scope_drops (ADR 0028
-      amendment A2). 1227 tests, four-check green.
-    - **C5 D7 (1/N)** (`0304a9c` + docs): the stable-ABI spec + layout-
-      stability tests (ADR 0029, recommended next sub-phase: no codegen
-      hazard, prerequisite for the go/no-go link + Phase D). `docs/abi-v1.md`
-      documents + freezes the ABI codegen already emits (calling convention,
-      `Type`→LLVM layout catalog, `#[repr(C)]` runtime structs, mangling, the
-      ~18 `sentinel_*` symbols), cross-linked to source. Tests pin it (drift→
-      red): `abi_v1_struct_layouts_are_stable` + `abi_v1_runtime_symbol_set`
-      (sentinel-runtime), `abi_v1_mangling_is_stable` (sentinel-codegen). No
-      emitted bytes change → c51 bar holds. ADR 0029 stays PROPOSED (flip at
-      2/N). +3 tests (1230).
-    - **C5 D7 (2/N)** (`ad2cf29` + docs): the `Type`-layout DataLayout
-      assertions; ADR 0029 → ACCEPTED-WITH-AMENDMENTS; Phase C5 D7 (stable
-      ABI) closes. `abi_v1_type_layouts_via_datalayout` lowers each `Type`
-      via `llvm_basic_type` + asserts size/align/field-offsets **and field
-      types** through the target `DataLayout`. A1: field-type asserts added
-      (pin field *order*, which equal-sized offsets can't) — negative check
-      (reorder array fields → red) verified + reverted. A2: named-struct
-      layout pinned via a representative `{i64,i64}` struct (a real
-      `Struct(id)` needs codegen's pass-0 cache). +1 test (1231).
+    Recent sessions (all four-check green, feat+docs pairs):
+    - **D.1 — sum types (`enum`) + pattern matching (`match`)** MVP COMPLETE
+      (ADR 0032 → ACCEPTED-WITH-AMENDMENTS): (1/N) lexer (`87e955c`), (2/N)
+      AST + parser (`e368a72`), (3/N) the type layer — `Type::Enum(EnumId)` +
+      construction + `match` type-check + **exhaustiveness** (`6381b21`),
+      (4/N) codegen — `{i32 tag, ptr payload}` + an LLVM `switch` + box-free
+      drop + `c5d1_enum` exit 42 (`cf44e9b`). ⚠ DEBT (A1): recursive-enum
+      payload-field drop is box-free only — leak-free for the standard
+      recursive-consume walk (verified via `leaks`), leaks only on
+      bind-and-ignore / unmatched-drop; the real fix is the payload-ownership
+      model (NOT drop fns alone — those double-free), bundle w/ D.1b. See
+      [[sentinel_d1_enum_surface]].
+    - **D.2 — strings + a `u8` byte type** MVP COMPLETE (ADR 0033 →
+      ACCEPTED-WITH-AMENDMENTS): (1/N) lexer `StringLit`/`CharLit` (`21ff065`),
+      (2/N) AST + parser + the parse-time escape decoder (`f310f15`), (3/N) the
+      type layer — `Type::U8` + the cascade + `ArrayElem::U8`; char→`u8`,
+      string→`[u8]`; `str_eq`/conversion builtins typed; the op-generic
+      pipeline absorbs `u8` via one `is_int` change; codegen rejected the
+      literals until 4/N (`56f69f0`), (4/N) codegen + runtime — `i8` +
+      `udiv`/unsigned-compare; string heap-copy via byte-stores;
+      `sentinel_str_eq`; `zext`/`trunc` conversions; `abi-v1` `u8` entry;
+      `c5d2_strings` + `c5d2_u8_unsigned` phase-gos at exit 42, **0 leaks**
+      (`891ec98`). A string IS a `[u8]`; `u8` IS `i8`. ⚠ builtins are now
+      `FnId(0..=6)` → user fns start at 7; inline string-lit ARGS to borrowing
+      builtins leak (the pre-existing temp-drop gap — bind them). See
+      [[sentinel_d2_strings_surface]].
+    - **ADR 0034 PROPOSED** (`86b7f9c`): Phase D.3 kickoff — growable
+      collections. A `Vec<T>` is `[T]` + capacity + mutation
+      (`Type::Vec(VecElem)` mirrors `Type::Array(ArrayElem)`); `String` =
+      `Vec<u8>`; `push(&mut v, x)` is the first heap-mutation primitive; no
+      new generics / no lexer-parser change. 1311 tests.
 
     RESUME AT: **Phase D.3 (1/N) — growable collections (ADR 0034 PROPOSED):
     `Type::Vec(VecElem)` + the cascade + `vec_new`/`push`/`len` + growth
