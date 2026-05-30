@@ -1,10 +1,16 @@
 # ADR 0033: Phase D.2 — strings + a byte (`u8`) type
 
-Status: PROPOSED — the second Phase D sub-phase ADR under ADR 0031 (Phase D
-kickoff) D4 item 2. After sum types (D.1 / ADR 0032), strings + a byte type
-are the next self-hosting prerequisite: a compiler's input is **text**, so a
-lexer-in-Sentinel cannot start without a way to hold, index, and compare
-source bytes. Flips to ACCEPTED(-WITH-AMENDMENTS) as the sub-phase lands.
+Status: **ACCEPTED-WITH-AMENDMENTS** (2026-05-31) — the second Phase D
+sub-phase ADR under ADR 0031 (Phase D kickoff) D4 item 2. After sum types
+(D.1 / ADR 0032), strings + a byte type are the next self-hosting
+prerequisite: a compiler's input is **text**, so a lexer-in-Sentinel cannot
+start without a way to hold, index, and compare source bytes. **Delivered
+across (1/N)–(4/N): char/string literals + a `u8` byte type compile + run end
+to end, leak-free.** Amendments at close (see the (4/N) update): **A1** string
+literals heap-copy via direct byte-stores, not a private global + `memcpy`
+(`CodegenCtx` holds no `&Module`); **A2** inline string-literal *arguments* to
+borrowing builtins inherit the pre-existing general temporary-drop gap (bound
+variables are leak-free).
 
 Date: 2026-05-30
 Related:
@@ -89,6 +95,50 @@ codegen + runtime — the `i8` char constant, the string-literal global
 `[N x i8]` + heap copy, `sentinel_str_eq`, the `zext`/`trunc` conversions,
 `abi-v1` `u8` entry + `c5d2_strings` phase-go (leak-free via `leaks --atExit`);
 ADR flip.
+
+**(4/N) update (2026-05-31) — DELIVERED (`891ec98`); D.2 closes,
+ACCEPTED-WITH-AMENDMENTS.** Codegen + runtime land; char/string literals + the
+byte builtins **compile and run end to end**. Codegen: a char literal is an
+`i8` constant; a string literal **heap-copies** its decoded bytes
+(`sentinel_alloc(N)` + N `i8` stores) into an owned `[u8]` that drops/moves via
+the existing array paths; `u8` lowers to `i8` with **unsigned** ops (`udiv` +
+unsigned `icmp` predicates — a byte `≥ 0x80` compares large, not negative);
+`u8_to_i64` is a `zext`, `i64_to_u8` a `trunc`; `str_eq` calls the new runtime
+`sentinel_str_eq(ptr, i64, ptr, i64) -> i1`. The (3/N) `StringCodegenNotYet`
+rejects are replaced by real lowering. Runtime: `sentinel_str_eq` (equal length
++ byte-wise equality; Rust `extern "C" -> bool` lowers to `i1 zeroext`, matching
+codegen's `i1` decl); its `[u8]` args are **borrowed** (the C2.3 runtime-builtin
+rule, like `len`), so `str_eq` does not free them — the caller's bindings drop
+them. `abi-v1`: `u8` → `i8` (size 1, align 1, mangles `u8`; `[u8]` → `arr_u8`,
+same `{i64,ptr}` layout); `sentinel_str_eq` joins the symbol contract (19);
+doc + layout/mangling/symbol tests pin it. **Verified empirically** (exit-code +
+`leaks --atExit`): `c5d2_strings` parses the 2-digit source "42" → exit 42, **0
+leaks**; `c5d2_u8_unsigned` pins the unsigned paths (`200 > 100`, `200 / 100 ==
+2`) → exit 42, **0 leaks**; the c51 repro bar holds. +2 pass fixtures (**1311**),
+four-check green.
+
+**Amendments.** **A1 — string-literal heap copy via direct byte-stores, not a
+global.** D6 specified a private global `[N x i8]` + `memcpy`; codegen instead
+stores the N constant bytes directly into the `sentinel_alloc`'d buffer,
+because `CodegenCtx` holds no `&Module` to add a global from a lowering method
+(the same constraint that pre-walks spawn wrappers). The owned-heap-copy
+semantics — the actual requirement (uniform drop/move, no global-free hazard) —
+are **identical**; string literals are short, so the per-byte stores are
+negligible. The global (rodata + a single `memcpy`) is a measured optimisation
+deferred behind threading module access into the ctx. **A2 — inline
+string-literal *arguments* to borrowing builtins leak (pre-existing, not
+D.2-introduced).** A string literal passed *inline* as a `str_eq` / `len`
+argument is a heap `[u8]` temporary that is never freed — the **general
+temporary-drop gap** (verified: `len([i64-array])` temporaries leak identically
+when they become unreachable), tied to the deferred full escape analysis (ADR
+0026 D2, post-1.0). **Bound variables are leak-free** (dropped at scope exit via
+the array path), which is how a real lexer holds its source + keyword `[u8]`s;
+the phase-go binds every literal. A future `&[u8]` builtin signature (vs the
+by-value `[u8]` of D5) is the cleaner long-term form for non-consuming compares.
+**A3 — `str_eq` args are borrowed, not consumed.** D5's `str_eq(a: [u8], b:
+[u8])` reads by-value, but the borrow checker's C2.3 runtime-builtin rule treats
+the args non-consumingly (like `len`), so `a`/`b` stay usable after the call and
+`str_eq` must *not* free them.
 
 ## Context
 

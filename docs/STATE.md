@@ -14,10 +14,32 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D.1 — sum types (`enum`) + pattern matching (`match`)
-MVP — COMPLETE (4/N; ADR 0032 → ACCEPTED-WITH-AMENDMENTS).** Post-1.0,
-**Phase D (self-hosting) is underway.** Per ADR 0031 it opens with a
-language/stdlib build-out; the first prerequisite — **sum types + `match`**
+Last updated: **Phase D.2 — strings + a byte (`u8`) type MVP — COMPLETE
+(1/N–4/N; ADR 0033 → ACCEPTED-WITH-AMENDMENTS).** Post-1.0, **Phase D
+(self-hosting) is underway** (ADR 0031 — a language/stdlib build-out). After
+D.1 (sum types + `match`), the second prerequisite — **strings + a `u8` byte
+type** (a compiler's input is text) — now compiles + runs end to end,
+leak-free. A string **IS a `[u8]`** (byte array — full reuse of the C1.6 array
+machinery); `u8` is an integer-scalar primitive (→ LLVM `i8`, unsigned ops);
+char literals `'a'` (→ `u8`), string literals `"…"` (→ `[u8]`, heap-copied +
+owned), byte indexing, a `str_eq` byte-matcher, and `u8`↔`i64` conversions.
+**(1/N)** lexer (escape-aware `StringLit`/`CharLit`); **(2/N)** AST + parser
+(`ExprKind::CharLit`/`StringLit` + the parse-time escape decoder; resolve
+rejected `NotYet`); **(3/N)** the type layer (`Type::U8` + the cascade +
+`ArrayElem::U8`; char→`u8`, string→`[u8]`; `str_eq`/conversion builtins typed;
+op-generic pipeline absorbs `u8` via one `is_int` change; codegen rejected the
+literals + builtins until 4/N); **(4/N)** codegen + runtime (`i8` char const;
+string heap-copy via direct byte-stores; `udiv`/unsigned compares; `zext`/
+`trunc` conversions; `sentinel_str_eq` runtime; `abi-v1` `u8` entry;
+`c5d2_strings` phase-go at exit 42, 0 leaks). Amendments: **A1** string heap
+copy via byte-stores not a global (no `&Module` in `CodegenCtx`); **A2** inline
+string-literal args to borrowing builtins inherit the pre-existing
+temporary-drop gap (bound vars are leak-free); **A3** `str_eq` args are
+borrowed not consumed. 1311 tests, four-check green. **Phase D.2 MVP closes.**
+
+Pre-D.2 context: **Phase D.1 — sum types (`enum`) + pattern matching
+(`match`) MVP — COMPLETE (4/N; ADR 0032 → ACCEPTED-WITH-AMENDMENTS).** The
+first self-hosting prerequisite — **sum types + `match`**
 (an AST is a sum type, the biggest self-hosting blocker) — now compiles +
 runs end to end. (1/N) lexer; (2/N) AST + parser; (3/N) the type layer
 (`Type::Enum(EnumId)` — the 11th interner-style variant — + `EnumData`/
@@ -86,13 +108,24 @@ inherits the secret rules. Three builtins typed — `str_eq([u8],[u8]) → bool`
 `u8` → `i8` (a real `u8` fn body compiles) but **rejects char/string literals
 + the three builtin calls** until (4/N) (the enum-(3/N) codegen-rejects
 discipline; verified clean — exit 1, no panic). Additive, +13 tests (1309),
-four-check green. Resume at **D.2 (4/N)** — codegen + runtime: the `i8` char
-constant, the string-literal global `[N x i8]` + heap copy, `sentinel_str_eq`,
-the `zext`/`trunc` conversions, `abi-v1` `u8` entry + `c5d2_strings` phase-go
-(leak-free via `leaks --atExit`); ADR 0033 flip. After D.2:
-growable collections → file I/O → modules → loops (ADR 0031 D4), then the
-self-host port. (D.1b generic enums + the enum payload-ownership/leak-
-completeness fix remain available follow-ons.)
+four-check green. **D.2 (4/N) shipped (`891ec98`) — Phase D.2 MVP closes,
+ADR 0033 ACCEPTED-WITH-AMENDMENTS:** codegen + runtime. A char literal is an
+`i8` const; a string literal heap-copies its bytes (`sentinel_alloc` + N `i8`
+stores — A1: direct stores, not a global, since `CodegenCtx` has no `&Module`)
+into an owned `[u8]` that drops via the array path; `u8` lowers to `i8` with
+**unsigned** ops (`udiv` + unsigned `icmp`); `u8_to_i64`=`zext`,
+`i64_to_u8`=`trunc`; `str_eq` calls the new runtime `sentinel_str_eq`
+(`[u8]` args borrowed, not consumed — A3). `abi-v1` gains the `u8` entry +
+`sentinel_str_eq` (19 symbols), pinned by tests. Verified via `leaks --atExit`:
+`c5d2_strings` (parse "42"→42) + `c5d2_u8_unsigned` (unsigned div/compare) both
+exit 42, **0 leaks**; the c51 repro bar holds. A2: inline string-literal args
+to borrowing builtins inherit the pre-existing temporary-drop gap (bound vars
+are leak-free). +2 pass fixtures (**1311**), four-check green.
+**Next: collections** (a growable, nominal `String`/`Vec`) → file I/O →
+modules → loops (ADR 0031 D4), then the self-host port (lexer → parser → … in
+Sentinel, differentially validated against the Rust `snc` oracle). (D.1b
+generic enums + the enum payload-ownership/leak-completeness fix remain
+available follow-ons.)
 
 Pre-D.1(1/N) context: **🎉 SENTINEL 1.0 (2026-05-30) — Phase C5 + Phase C close.**
 The 1.0 go/no-go (`tests/pass/c5_go_no_go.sentinel`, a constant-time
