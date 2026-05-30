@@ -14,37 +14,37 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D.1 (3/N): sum types + pattern matching — the type
-layer (ADR 0032).** Post-1.0, **Phase D (self-hosting) is underway.** Per
-ADR 0031 it opens with a language/stdlib build-out; the first prerequisite
-is **sum types + pattern matching** (ADR 0032 — an AST is a sum type, the
-biggest self-hosting blocker). (1/N) added the lexer tokens; (2/N) the
-**AST + parser** (`EnumDecl`/`VariantDecl` on `Program.enums`;
-`ExprKind::Match` + `Pattern`). **(3/N) lands the type layer — `enum` +
-`match` now TYPE-CHECK end to end (codegen rejects until 4/N).**
-**resolve:** `EnumId` + `ResolvedEnumDecl`/`ResolvedVariantDecl` on
-`ResolvedProgram.enums` (Pass-0 enum table + namespace checks →
-`RedefinedEnum`/`DuplicateVariant`); `Name::Variant(args)`/`()` construction
-**disambiguated** from impl-method/class-init → `ResolvedExprKind::EnumConstruct`;
-`match` → `ResolvedExprKind::Match` + `ResolvedPattern` with per-arm binding
-`VarId` scoping (snapshot/restore like handler arms; `DuplicatePatternBinding`);
-`EnumDeclNotYet`/`MatchNotYet` dropped. **types:** `Type::Enum(EnumId)` (the
-11th interner-style variant) + `EnumData`/`VariantData` + `TypedProgram.enums`;
-enum names resolve in type position (struct→class→enum→primitive); construction
-type-check (variant lookup + payload arity/types → `Type::Enum`) + `match`
-type-check (scrutinee-is-enum; arm-body unification; payload-typed bindings;
-**exhaustiveness**). Five new `TypeError`s (`UnknownVariant`,
-`VariantPayloadArityMismatch`, `MatchScrutineeNotEnum`, `NonExhaustiveMatch`,
-`MatchArmTypeMismatch`). **Directly-recursive enums type-check** (the AST
-enabler — heap-boxed payloads need no nullable indirection). **downstream:**
-codegen `llvm_basic_type` lowers `Type::Enum` → `{ i32 tag, ptr payload }`
-(enum-typed signatures lower) + `mangle_type` by name; construction/`match`
-*expressions* reject with `CodegenError::EnumCodegenNotYet`; MIR → `Opaque`
-(taint-safe); effect-check/borrow-check pass-through (enum is Move; arms
-move-merge like `if`). +27 tests (1265), incl. a `NonExhaustiveMatch` UI
-snapshot. Four-check green. Next: **D.1 (4/N)** — codegen (`{tag,ptr}`
-construction + `switch` + recursive drop + abi-v1 entry + `c5d1_enum`); ADR
-0032 flips to ACCEPTED.
+Last updated: **Phase D.1 — sum types (`enum`) + pattern matching (`match`)
+MVP — COMPLETE (4/N; ADR 0032 → ACCEPTED-WITH-AMENDMENTS).** Post-1.0,
+**Phase D (self-hosting) is underway.** Per ADR 0031 it opens with a
+language/stdlib build-out; the first prerequisite — **sum types + `match`**
+(an AST is a sum type, the biggest self-hosting blocker) — now compiles +
+runs end to end. (1/N) lexer; (2/N) AST + parser; (3/N) the type layer
+(`Type::Enum(EnumId)` — the 11th interner-style variant — + `EnumData`/
+`VariantData` + `TypedProgram.enums`; `ResolvedExprKind`/`TypedExprKind`
+`EnumConstruct`+`Match`; resolve disambiguation of `Name::Variant(args)`
+construction from impl-method/class-init + match-pattern binding scoping;
+construction + `match` type-check with **exhaustiveness** — 5 new
+`TypeError`s; enum names usable in type position; **directly-recursive
+enums type-check** — the AST enabler). **(4/N) lands codegen:** construction
+lowers to the abi-v1 `{ i32 tag, ptr payload }` (heap-boxed payload via
+`sentinel_alloc`, `null` for unit variants); `match` → an LLVM `switch` on
+the tag into per-arm blocks (GEP/load payload bindings into locals; arm
+results reconcile at a merge block; `_` = default, else `unreachable` —
+exhaustiveness is type-checked); scope-exit drop frees the payload box (if
+non-null). Bare `Enum::Variant` unit construction parses (matches ADR D2 +
+the pattern surface). abi-v1 §2 gains the enum layout entry + a stability
+assertion. Phase-go `tests/pass/c5d1_enum.sentinel` (Shape constructed +
+`match`ed, exit 42). **Amendments:** A1 — drop is box-free only; recursive
+*payload-field* drop (needs synthesized per-enum drop fns — inline
+expansion of a recursive enum's drop is infinite) deferred (leaks, not
+UAF; move/escape paths verified double-free-safe). A2 — the
+inline-small-enum optimisation stays a follow-on (every enum heap-boxes).
+A3 — generic enums (`Option`/`Result`) are the immediate follow-on
+**D.1b**. +29 tests across 3/N+4/N (1268), four-check green; c51 bar +
+`repro.rs` hold (enum paths additive). Next: **D.1b** (generic enums via
+mono) OR the next ADR 0031 D4 prerequisite (strings + a byte type, or
+growable collections).
 
 Pre-D.1(1/N) context: **🎉 SENTINEL 1.0 (2026-05-30) — Phase C5 + Phase C close.**
 The 1.0 go/no-go (`tests/pass/c5_go_no_go.sentinel`, a constant-time

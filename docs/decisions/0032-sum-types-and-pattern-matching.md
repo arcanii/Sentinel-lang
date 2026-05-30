@@ -1,10 +1,13 @@
 # ADR 0032: Phase D.1 — sum types (`enum`) + pattern matching (`match`)
 
-Status: PROPOSED — the first Phase D sub-phase ADR under ADR 0031 (Phase D
-kickoff) D4/D7. Sum types + `match` are the foundational self-hosting
-prerequisite (an AST, a token stream, and `Result` are all sum types) and
-a major general-purpose language feature in their own right. Flips to
-ACCEPTED(-WITH-AMENDMENTS) as the sub-phase lands.
+Status: **ACCEPTED-WITH-AMENDMENTS** — the first Phase D sub-phase ADR
+under ADR 0031 (Phase D kickoff) D4/D7. Sum types + `match` are the
+foundational self-hosting prerequisite (an AST, a token stream, and
+`Result` are all sum types) and a major general-purpose language feature
+in their own right. The MVP (concrete enums) landed across 1/N–4/N (lexer
+→ AST/parser → resolve+types → codegen); the (4/N) update below records
+the close + the amendments. Generic enums (`Option`/`Result`, D9) are the
+immediate follow-on (D.1b).
 
 Date: 2026-05-30
 Related:
@@ -74,6 +77,58 @@ type-check + **exhaustiveness**.
 +27 tests (1265), four-check green. Next: **(4/N) codegen** — the
 `{tag,ptr}` construction + `switch` lowering + recursive payload drop +
 abi-v1 enum-layout entry + `c5d1_enum` pass fixture; ADR flips to ACCEPTED.
+
+**(4/N) update (2026-05-30) — DELIVERED; ADR → ACCEPTED-WITH-AMENDMENTS;
+D.1 MVP closes.** `enum`/`match` now compile + run end to end.
+- **construction (D4):** `lower_enum_construct` builds the `{ i32 tag, ptr
+  payload }` value — heap-box (`sentinel_alloc`) a struct of the variant's
+  payload fields and store the args, `null` payload for unit variants; tag
+  = variant discriminant. `llvm_basic_type` already lowered `Type::Enum` →
+  `{i32,ptr}` at (3/N). `enum_payload_struct_type` is the single source of
+  truth for the payload layout (shared by construct / match / drop).
+- **`match` (D5):** `lower_match` extracts the tag + payload ptr, emits an
+  LLVM `switch` into one block per variant arm (each GEP/loads the payload
+  fields into the bindings' alloca slots, lowers the body), reconciles arm
+  results through a result alloca at a merge block (the `if`-merge
+  machinery). `_` is the switch default; with no `_` the default is
+  `unreachable` (exhaustiveness is a type-check guarantee — no runtime
+  fallback). Unit-variant arms bind nothing.
+- **drop (D6) — AMENDMENT A1:** scope-exit drop of an enum loads the
+  `{tag,ptr}` and `sentinel_free`s the payload if non-null (the `?Struct`
+  drop arm with a null test for the validity bit); `field_type_needs_drop`
+  is true iff some variant carries a payload (pure-unit enums stay
+  drop-free). **Recursive *payload-field* drop is deferred** (a heap-typed
+  payload / a recursive enum leaks its nested boxes here): inline expansion
+  of a recursive enum's drop is infinite, so it needs synthesized per-enum
+  drop *functions* — a measured follow-on. Leaks only (no UAF/double-free);
+  verified the move/escape paths are double-free-safe (a returned enum
+  escapes the callee; a value moved into a fn is freed once, by the
+  callee).
+- **surface:** bare `Enum::Variant` (unit) *construction* now parses (a
+  small `parse_postfix` branch: `Name::Seg` with no `(` → a 0-arg
+  `QualifiedCall`, which resolve maps to a unit `EnumConstruct` when `Name`
+  is an enum) — matching ADR D2 + the pattern surface. (No regression: bare
+  `Name::method` for a non-enum, previously a parse error, is now a resolve
+  error — no test depended on the parse error.)
+- **abi-v1:** §2 gains the `Enum` = `{ i32 tag, ptr payload }` layout entry
+  + a `abi_v1_type_layouts_via_datalayout` assertion (16 bytes, align 8,
+  tag@0 / ptr@8, field types pin the order). The `EnumCodegenNotYet` reject
+  (3/N) is removed.
+- **c51 bar holds:** existing pass/UI fixtures unchanged + `repro.rs`
+  byte-identical (the enum paths are additive; no existing emission
+  changes). Phase-go `tests/pass/c5d1_enum.sentinel` (Shape `Unit` +
+  `Circle(i64)` + `Rect(i64,i64)`, constructed + `match`ed, exit 42).
++2 tests (1268: the `c5d1_enum` pass fixture + the abi-v1 enum-layout
+assertion). Four-check green.
+
+**Amendments roll-up:** A1 — drop is box-free only; recursive payload-field
+drop (synthesized per-enum drop fns) deferred (leaks, not UAF). A2 — the
+inline-small-non-recursive-enum optimisation (`{ tag, [maxpayload x i8] }`,
+D4) stays a post-MVP follow-on (every enum value heap-allocates its
+payload). A3 — D9 generic enums (`Option`/`Result`) are the immediate
+follow-on **D.1b**, not in this ADR's MVP. A4 — D10 out-of-scope list
+(named-field variants, or-/nested/guard/literal patterns, `secret enum`)
+confirmed deferred.
 
 ## Context
 

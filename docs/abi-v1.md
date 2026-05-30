@@ -58,11 +58,17 @@ The in-memory layout of every `Type` constructor. All layouts are
 | `secret T` | **identical layout to `T`** — secrets are register/stack scalars; constant-time codegen does not change layout (ADR 0019 D5/D12) |
 | `Kont` | opaque `ptr` to a `SentinelKont` (§3) |
 | `Task` | opaque `ptr` to a `SentinelTask` (§3) |
+| `Enum(id)` (sum type) | `{ i32 tag, ptr payload }` — `tag` is the variant discriminant (source order); `payload` points at a heap-allocated struct of the active variant's payload fields, or is `null` for a unit variant — ADR 0032 D4 |
 
 **Element-type tracking.** `[T]` and `?T` track their element/payload
 `Type` at the `sentinel-types` level (e.g. `TypedExprKind::ArrayLit` /
 `Index`), not in the LLVM type — LLVM sees only `{ i64, ptr }` / the
 opaque `ptr`. Indexing recovers the element type from the typed AST.
+Likewise an `Enum`'s per-variant payload field types live in
+`TypedProgram::enums` (`EnumData`/`VariantData`), not the LLVM type —
+LLVM sees only `{ i32, ptr }`. Construction (`EnumConstruct`) and `match`
+recover the heap payload's struct shape from the variant's declared
+payloads (`enum_payload_struct_type` in codegen) to box / GEP it.
 
 ---
 
