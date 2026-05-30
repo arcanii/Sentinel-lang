@@ -1151,3 +1151,16 @@ fn pass_c5_go_no_go() {
     // I/O-as-effects + constant-time `secret` end-to-end.
     assert_eq!(run_exit("c5_go_no_go.sentinel"), 42);
 }
+
+#[test]
+fn pass_c5d1_enum() {
+    // ADR 0032 D11 (4/N) phase-go: sum types (`enum`) + pattern matching
+    // (`match`) end to end. A non-generic `Shape` enum with a unit variant
+    // + tuple-payload variants (arity 1 + 2), constructed (bare unit +
+    // positional payloads) and `match`ed (every arm, with payload
+    // bindings). Exercises the `{ i32 tag, ptr payload }` layout, the
+    // `switch` lowering, payload-binding loads, and scope-exit drop of the
+    // heap-boxed payloads. area(Unit)=0 + area(Circle(2))=12 +
+    // area(Rect(5,6))=30 = exit 42.
+    assert_eq!(run_exit("c5d1_enum.sentinel"), 42);
+}

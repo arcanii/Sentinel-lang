@@ -44,13 +44,15 @@ use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_hir::HirProgram;
 use sentinel_resolve::{
-    ClassId, EffectId, FnId, ImplId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID, UNWRAP_OR_FN_ID,
+    ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID,
+    UNWRAP_OR_FN_ID,
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
     ArrayElem, ClassData, GenericInstanceData, GenericInstanceId, ImplData, NullableInner, RefData,
     SecretData, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedFnSignature,
-    TypedHandlerArm, TypedProgram, TypedReturnArm, TypedStmt, TypedStmtKind, TypedStructDecl,
+    TypedHandlerArm, TypedMatchArm, TypedPattern, TypedProgram, TypedReturnArm, TypedStmt,
+    TypedStmtKind, TypedStructDecl,
 };
 
 #[derive(Debug, thiserror::Error, miette::Diagnostic)]
@@ -97,19 +99,6 @@ pub enum CodegenError {
         help("the type-checker accepts handle/perform but codegen lands at C3.5 (perform) / C3.6 (handle) per ADR 0020 D9")
     )]
     HandlersNotYetSupported,
-
-    /// Phase D.1 / ADR 0032 (3/N): `enum` construction and `match`
-    /// parse and type-check (with exhaustiveness) at D.1 (3/N), but
-    /// their codegen — the `{ i32 tag, ptr payload }` layout, the
-    /// `switch` lowering, and recursive payload drop — lands at D.1
-    /// (4/N). Enum-typed signatures DO lower (`llvm_basic_type` handles
-    /// `Type::Enum`); only construction/match expressions reject here.
-    #[error("`enum` construction / `match` codegen is not yet lowered (lands at D.1 (4/N))")]
-    #[diagnostic(
-        code(sentinel::codegen::enum_codegen_not_yet),
-        help("the type-checker accepts enum construction + `match` (D.1 (3/N)); codegen — `{{tag,ptr}}` layout + `switch` + drop — lands at D.1 (4/N) per ADR 0032")
-    )]
-    EnumCodegenNotYet,
 
     /// C3.5(a) / ADR 0020 D9: at C3.5(a) the handler codegen
     /// supports only the restricted case where the `handle` body
@@ -1405,13 +1394,22 @@ fn field_type_needs_drop_inner(
         // no codegen-emitted drop. A Task value held past its scope
         // is reclaimed at scope_exit.
         Type::Task(_) => false,
-        // Phase D.1 / ADR 0032 D6: an enum owns its heap-boxed payload
-        // and WILL need recursive drop — but that lands at D.1 (4/N)
-        // alongside construction codegen. At (3/N) an enum value can
-        // never be constructed (construction rejects with
-        // `EnumCodegenNotYet`), so no payload is ever allocated; report
-        // "no drop" here so the drop walks stay safe until (4/N).
-        Type::Enum(_) => false,
+        // Phase D.1 / ADR 0032 D6 (4/N): an enum owns its heap-boxed
+        // payload, so it needs drop (free the payload box) iff *some*
+        // variant carries a payload — a pure-unit enum (every variant
+        // `null`-payloaded, C-enum-style) allocates nothing and stays
+        // drop-free. No recursion here (so no cycle hazard for
+        // recursive enums); the per-variant payload-field recursion is
+        // a follow-on (needs synthesized drop fns — see
+        // `emit_drop_for_binding`).
+        Type::Enum(id) => {
+            (id.0 as usize) < program.enums.len()
+                && program
+                    .enum_data(id)
+                    .variants
+                    .iter()
+                    .any(|v| !v.payloads.is_empty())
+        }
         // C4.1 / ADR 0022 D9: class instances follow the same
         // drop-needs rule as structs (recurse into fields).
         Type::Class(id) => {
@@ -3489,13 +3487,44 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 self.emit_drop_struct_fields(ptr, ty, program)?;
             }
             Type::Enum(_) => {
-                // Phase D.1 / ADR 0032 D6: an enum's recursive payload
-                // drop (free the heap payload by active variant) lands
-                // at D.1 (4/N) with construction codegen. At (3/N) an
-                // enum value is never constructed (construction
-                // rejects), so this arm is unreachable for a runnable
-                // program — and `field_type_needs_drop_inner` returns
-                // false for enums, so it is not scheduled. No-op.
+                // Phase D.1 / ADR 0032 D6 (4/N): an enum owns its
+                // heap-boxed payload. Load the `{ i32 tag, ptr payload }`;
+                // if the payload is non-null, `sentinel_free` it. This
+                // is the `?Struct` drop arm with a null-pointer test in
+                // place of the validity bit. Recursive *payload-field*
+                // drop (for heap-typed payloads / recursive enums, which
+                // would leak nested boxes here) is a measured follow-on:
+                // it needs synthesized per-enum drop fns, since inline
+                // expansion of a recursive enum's drop is infinite.
+                let llvm_ty = self.llvm_basic_type(ty);
+                let val = self
+                    .builder
+                    .build_load(llvm_ty, ptr, "drop_enum")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_struct_value();
+                let payload = self
+                    .builder
+                    .build_extract_value(val, 1, "drop_enum_payload")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_pointer_value();
+                let is_null = self
+                    .builder
+                    .build_is_null(payload, "drop_enum_isnull")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                let current_fn = self.current_fn.expect("current_fn set");
+                let free_block = self.context.append_basic_block(current_fn, "drop_enum_free");
+                let after_block = self.context.append_basic_block(current_fn, "drop_enum_after");
+                self.builder
+                    .build_conditional_branch(is_null, after_block, free_block)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder.position_at_end(free_block);
+                self.builder
+                    .build_call(self.free_fn, &[payload.into()], "")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_unconditional_branch(after_block)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder.position_at_end(after_block);
             }
             Type::TraitSelf(_) => {
                 // C4.2: unreachable post-substitution; defensive.
@@ -3642,6 +3671,219 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .build_load(llvm_result_ty, result, "ifresult_val")
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
         Ok(loaded)
+    }
+
+    /// Phase D.1 / ADR 0032 D4: the LLVM type of a variant's heap-boxed
+    /// payload — an anonymous struct `{ field0, field1, … }` of the
+    /// variant's (already-resolved) payload types. The single source of
+    /// truth for the payload layout, shared by construction (stores into
+    /// it), `match` (GEP/loads out of it), and drop. Empty / zero-field
+    /// for a unit variant (which is never heap-allocated).
+    fn enum_payload_struct_type(
+        &self,
+        enum_id: EnumId,
+        variant_index: usize,
+        program: &TypedProgram,
+    ) -> StructType<'ctx> {
+        let variant = &program.enum_data(enum_id).variants[variant_index];
+        let field_tys: Vec<BasicTypeEnum> =
+            variant.payloads.iter().map(|t| self.llvm_basic_type(*t)).collect();
+        self.context.struct_type(&field_tys, false)
+    }
+
+    /// Phase D.1 / ADR 0032 D4: lower `Enum::Variant(args)` to the abi-v1
+    /// `{ i32 tag, ptr payload }` value. The payload is a heap-boxed
+    /// struct of the variant's payload fields (`null` for unit variants
+    /// — no allocation); the tag is the variant's discriminant (source
+    /// order). Heap-boxing (reusing `sentinel_alloc` like `?Struct`)
+    /// keeps recursive enums representable.
+    fn lower_enum_construct(
+        &mut self,
+        enum_id: EnumId,
+        variant_index: usize,
+        args: &[TypedExpr],
+        enum_ty: Type,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let enum_struct_ty = self.llvm_basic_type(enum_ty).into_struct_type(); // { i32, ptr }
+        let i32_ty = self.context.i32_type();
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        // Payload pointer: null for unit variants; otherwise build the
+        // payload struct value from the args and heap-box it.
+        let payload_ptr: PointerValue<'ctx> = if args.is_empty() {
+            ptr_ty.const_null()
+        } else {
+            let payload_struct_ty =
+                self.enum_payload_struct_type(enum_id, variant_index, program);
+            let mut agg = payload_struct_ty.get_undef();
+            for (i, a) in args.iter().enumerate() {
+                let v = self.lower_expr(a, program)?;
+                agg = self
+                    .builder
+                    .build_insert_value(agg, v, i as u32, "enum_payload")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_struct_value();
+            }
+            let size = payload_struct_ty.size_of().expect("payload struct is sized");
+            let raw = self.alloc_call(size)?;
+            self.builder
+                .build_store(raw, agg)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            raw
+        };
+
+        let tag = i32_ty.const_int(variant_index as u64, false);
+        let agg = enum_struct_ty.get_undef();
+        let agg = self
+            .builder
+            .build_insert_value(agg, tag, 0, "enum_tag")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_struct_value();
+        let agg = self
+            .builder
+            .build_insert_value(agg, payload_ptr, 1, "enum_box")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_struct_value();
+        Ok(agg.into())
+    }
+
+    /// Phase D.1 / ADR 0032 D5: lower `match scrutinee { arms }` to an
+    /// LLVM `switch` on the scrutinee's tag. Each variant arm gets its
+    /// own block (binds the payload fields into the pattern bindings'
+    /// locals, lowers the arm body); arm results reconcile through a
+    /// result alloca at a merge block (the `if`-merge machinery). The
+    /// `_` wildcard is the switch default; with no wildcard the default
+    /// is `unreachable` — exhaustiveness is a type-check guarantee
+    /// (ADR 0032 D2), so the switch needs no runtime fallback.
+    fn lower_match(
+        &mut self,
+        scrutinee: &TypedExpr,
+        enum_id: EnumId,
+        arms: &[TypedMatchArm],
+        result_ty: Type,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let scrut = self.lower_expr(scrutinee, program)?.into_struct_value();
+        let tag = self
+            .builder
+            .build_extract_value(scrut, 0, "match_tag")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let payload_ptr = self
+            .builder
+            .build_extract_value(scrut, 1, "match_payload")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+
+        let current_fn = self.current_fn.expect("current_fn set");
+        let i32_ty = self.context.i32_type();
+        let llvm_result_ty = self.llvm_basic_type(result_ty);
+        let result = self
+            .builder
+            .build_alloca(llvm_result_ty, "matchresult")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let merge_bb = self.context.append_basic_block(current_fn, "matchmerge");
+        let default_bb = self.context.append_basic_block(current_fn, "matchdefault");
+
+        // One block per variant arm; the wildcard (if any) is the
+        // switch default.
+        let mut cases: Vec<(IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+        let mut variant_arms: Vec<(inkwell::basic_block::BasicBlock<'ctx>, &TypedMatchArm)> =
+            Vec::new();
+        let mut wildcard_arm: Option<&TypedMatchArm> = None;
+        for arm in arms {
+            match &arm.pattern {
+                TypedPattern::Variant { variant_index, .. } => {
+                    let bb = self.context.append_basic_block(current_fn, "matcharm");
+                    cases.push((i32_ty.const_int(*variant_index as u64, false), bb));
+                    variant_arms.push((bb, arm));
+                }
+                TypedPattern::Wildcard(_) => wildcard_arm = Some(arm),
+            }
+        }
+
+        self.builder
+            .build_switch(tag, default_bb, &cases)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Lower each variant arm: bind payloads, lower body, store, branch.
+        for (bb, arm) in &variant_arms {
+            self.builder.position_at_end(*bb);
+            if let TypedPattern::Variant { variant_index, bindings, .. } = &arm.pattern {
+                self.bind_pattern_payloads(payload_ptr, enum_id, *variant_index, bindings, program)?;
+            }
+            let v = self.lower_expr(&arm.body, program)?;
+            self.builder
+                .build_store(result, v)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
+
+        // Default block: the wildcard body, or `unreachable`.
+        self.builder.position_at_end(default_bb);
+        if let Some(arm) = wildcard_arm {
+            let v = self.lower_expr(&arm.body, program)?;
+            self.builder
+                .build_store(result, v)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        } else {
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
+
+        self.builder.position_at_end(merge_bb);
+        let loaded = self
+            .builder
+            .build_load(llvm_result_ty, result, "matchresult_val")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(loaded)
+    }
+
+    /// Phase D.1 / ADR 0032 D5: bind a variant pattern's payload fields
+    /// into the arm's locals. GEP/loads each field of the heap-boxed
+    /// payload into a fresh alloca slot keyed by the binding's `VarId`,
+    /// so the arm body's `Var(binding)` reads it. Unit patterns (no
+    /// bindings) are a no-op. `_` slots still get a slot (positional —
+    /// never read, LLVM elides them).
+    fn bind_pattern_payloads(
+        &mut self,
+        payload_ptr: PointerValue<'ctx>,
+        enum_id: EnumId,
+        variant_index: usize,
+        bindings: &[sentinel_types::TypedPatternBinding],
+        program: &TypedProgram,
+    ) -> Result<(), CodegenError> {
+        if bindings.is_empty() {
+            return Ok(());
+        }
+        let payload_struct_ty = self.enum_payload_struct_type(enum_id, variant_index, program);
+        for (i, b) in bindings.iter().enumerate() {
+            let field_ptr = self
+                .builder
+                .build_struct_gep(payload_struct_ty, payload_ptr, i as u32, "enum_field_ptr")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let field_ty = self.llvm_basic_type(b.ty);
+            let val = self
+                .builder
+                .build_load(field_ty, field_ptr, "enum_field")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            let slot = self
+                .builder
+                .build_alloca(field_ty, &b.name)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_store(slot, val)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.vars.insert(b.var_id, (slot, b.ty));
+        }
+        Ok(())
     }
 
     /// Short-circuit lowering for `lhs && rhs`. Evaluates `lhs`; if
@@ -4589,16 +4831,14 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .expect("task_await returns i64"))
             }
 
-            // Phase D.1 / ADR 0032 (3/N): enum construction + `match`
-            // type-check (with exhaustiveness) but their codegen — the
-            // `{ i32 tag, ptr payload }` layout, `switch` lowering, and
-            // recursive payload drop — lands at D.1 (4/N). Reject
-            // cleanly (a compile error, not a panic), mirroring how
-            // handler runtime gated codegen between C3.4 and C3.5.
-            // (Enum-typed signatures still lower — `llvm_basic_type`
-            // handles `Type::Enum` — so only these expressions reject.)
-            TypedExprKind::EnumConstruct { .. } | TypedExprKind::Match { .. } => {
-                Err(CodegenError::EnumCodegenNotYet)
+            // Phase D.1 / ADR 0032 (4/N): enum construction lowers to
+            // the `{ i32 tag, ptr payload }` layout (D4); `match` lowers
+            // to an LLVM `switch` on the tag (D5).
+            TypedExprKind::EnumConstruct { enum_id, variant_index, args, .. } => {
+                self.lower_enum_construct(*enum_id, *variant_index, args, expr.ty, program)
+            }
+            TypedExprKind::Match { scrutinee, enum_id, arms } => {
+                self.lower_match(scrutinee, *enum_id, arms, expr.ty, program)
             }
         }
     }
@@ -6486,6 +6726,21 @@ mod tests {
         assert_eq!(td.offset_of_element(&opt_s, 1), Some(8));
         assert_eq!(opt_s.get_field_type_at_index(0).unwrap().into_int_type().get_bit_width(), 1);
         assert!(matches!(opt_s.get_field_type_at_index(1).unwrap(), BasicTypeEnum::PointerType(_)));
+
+        // `Enum` = `{ i32 tag, ptr payload }` (ADR 0032 D4): tag @ 0
+        // (4 bytes), payload ptr @ 8 (4 bytes padding after the i32 tag),
+        // 16 bytes total, align 8. Field types pin the order (i32 tag
+        // before ptr payload). `llvm_basic_type` builds this without
+        // consulting the enum table, so any EnumId lowers identically.
+        let en = lower(Type::Enum(EnumId(0))).into_struct_type();
+        assert_eq!(en.count_fields(), 2);
+        assert!(!en.is_packed());
+        assert_eq!(td.get_abi_size(&en), 16);
+        assert_eq!(td.get_abi_alignment(&en), 8);
+        assert_eq!(td.offset_of_element(&en, 0), Some(0));
+        assert_eq!(td.offset_of_element(&en, 1), Some(8));
+        assert_eq!(en.get_field_type_at_index(0).unwrap().into_int_type().get_bit_width(), 32);
+        assert!(matches!(en.get_field_type_at_index(1).unwrap(), BasicTypeEnum::PointerType(_)));
 
         // `&T` / `Kont` / `Task` all lower to an opaque `ptr` (8 bytes).
         let r = lower(Type::Ref(RefId(0)));

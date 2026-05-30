@@ -1,0 +1,27 @@
+// Phase D.1 / ADR 0032 D11 (4/N) phase-go: a non-generic sum type with
+// unit + tuple-payload variants, constructed (bare unit + positional
+// payloads) and `match`ed (every arm, with payload bindings), returning
+// a computed exit code. Exercises the whole D.1 pipeline end to end:
+// the `{ i32 tag, ptr payload }` layout, the `switch` lowering, the
+// payload-binding loads, and scope-exit drop of the heap-boxed payloads.
+enum Shape {
+    Unit,
+    Circle(i64),
+    Rect(i64, i64),
+}
+
+fn area(s: Shape) -> i64 {
+    match s {
+        Shape::Unit => 0,
+        Shape::Circle(r) => r * r * 3,
+        Shape::Rect(w, h) => w * h,
+    }
+}
+
+fn main() -> i64 {
+    let u = Shape::Unit;        // bare unit construction (null payload)
+    let c = Shape::Circle(2);   // payload arity 1  -> area 12
+    let r = Shape::Rect(5, 6);  // payload arity 2  -> area 30
+    // 0 + 12 + 30 = 42; each value is moved into `area` exactly once.
+    area(u) + area(c) + area(r)
+}

@@ -3801,57 +3801,56 @@ impl<'a> Parser<'a> {
                             });
                         }
                     };
-                    match self.peek_kind() {
-                        Some(TokenKind::LParen) => {
-                            self.advance();
-                        }
-                        Some(other) => {
-                            let t = self.peek().expect("peeked");
-                            return Err(ParseError::UnexpectedToken {
-                                got: format!("{other:?}"),
-                                expected: "`(` after `Name::method`",
-                                span: to_source_span(&t.span),
-                            });
-                        }
-                        None => {
-                            return Err(ParseError::UnexpectedEof {
-                                expected: "`(` after `Name::method`",
-                                span: to_source_span(&self.eof_span()),
-                            });
-                        }
-                    }
-                    let saved = self.allow_struct_lit;
-                    self.allow_struct_lit = true;
-                    let mut args = Vec::new();
-                    if self.peek_kind() != Some(TokenKind::RParen) {
-                        args.push(self.parse_expr()?);
-                        while self.peek_kind() == Some(TokenKind::Comma) {
-                            self.advance();
-                            if self.peek_kind() == Some(TokenKind::RParen) {
-                                break;
-                            }
+                    // `(args)` present → `Name::init(args)` class init or
+                    // `Name::method(args)` qualified call / `Enum::Variant
+                    // (args)` payload construction. Absent → bare
+                    // `Enum::Variant` *unit* construction (ADR 0032 D2) —
+                    // the `::` path with no call. The bare form is
+                    // disambiguated at resolve: when `Name` is an enum it
+                    // becomes an `EnumConstruct` (0-arg variant); otherwise
+                    // (a bare method reference, which has no meaning) it
+                    // surfaces a resolve error.
+                    let has_parens = self.peek_kind() == Some(TokenKind::LParen);
+                    let (args, end) = if has_parens {
+                        self.advance();
+                        let saved = self.allow_struct_lit;
+                        self.allow_struct_lit = true;
+                        let mut args = Vec::new();
+                        if self.peek_kind() != Some(TokenKind::RParen) {
                             args.push(self.parse_expr()?);
+                            while self.peek_kind() == Some(TokenKind::Comma) {
+                                self.advance();
+                                if self.peek_kind() == Some(TokenKind::RParen) {
+                                    break;
+                                }
+                                args.push(self.parse_expr()?);
+                            }
                         }
-                    }
-                    self.allow_struct_lit = saved;
-                    let rparen_end = match self.peek_kind() {
-                        Some(TokenKind::RParen) => self.advance().expect("peeked").span.end,
-                        Some(other) => {
-                            let t = self.peek().expect("peeked");
-                            return Err(ParseError::UnexpectedToken {
-                                got: format!("{other:?}"),
-                                expected: "`,` or `)` in call arguments",
-                                span: to_source_span(&t.span),
-                            });
-                        }
-                        None => {
-                            return Err(ParseError::UnexpectedEof {
-                                expected: "`,` or `)` in call arguments",
-                                span: to_source_span(&self.eof_span()),
-                            });
-                        }
+                        self.allow_struct_lit = saved;
+                        let rparen_end = match self.peek_kind() {
+                            Some(TokenKind::RParen) => self.advance().expect("peeked").span.end,
+                            Some(other) => {
+                                let t = self.peek().expect("peeked");
+                                return Err(ParseError::UnexpectedToken {
+                                    got: format!("{other:?}"),
+                                    expected: "`,` or `)` in call arguments",
+                                    span: to_source_span(&t.span),
+                                });
+                            }
+                            None => {
+                                return Err(ParseError::UnexpectedEof {
+                                    expected: "`,` or `)` in call arguments",
+                                    span: to_source_span(&self.eof_span()),
+                                });
+                            }
+                        };
+                        (args, rparen_end)
+                    } else {
+                        (Vec::new(), method_span.end)
                     };
-                    let kind = if is_init {
+                    // Bare `Name::init` (no parens) is NOT a class init —
+                    // only the parenthesised form flows through `init`.
+                    let kind = if is_init && has_parens {
                         ExprKind::ClassInit {
                             class_name: name,
                             class_name_span: name_span.clone(),
@@ -3868,7 +3867,7 @@ impl<'a> Parser<'a> {
                     };
                     return Ok(Spanned {
                         kind,
-                        span: name_span.start..rparen_end,
+                        span: name_span.start..end,
                     });
                 }
                 // Lookahead: `Ident '('` = call; `Ident '{'` = struct
