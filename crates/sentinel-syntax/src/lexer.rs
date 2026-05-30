@@ -246,6 +246,25 @@ pub enum TokenKind {
     #[regex(r"[0-9]+")]
     IntLit,
 
+    /// Phase D.2 / ADR 0033 D2 (1/N): a string literal `"..."`. The
+    /// regex *recognises* the literal (a `\`-escaped char or any
+    /// non-`"`/non-`\`/non-newline char, between quotes) without
+    /// *decoding* it — like [`IntLit`], the byte value is recovered
+    /// from the span at parse time (D.2 (2/N)). Excluding a raw
+    /// newline makes an unterminated string fail fast rather than
+    /// swallow the rest of the line. A string literal types to `[u8]`
+    /// (a string IS a byte array — ADR 0033 D3).
+    #[regex(r#""([^"\\\n]|\\.)*""#)]
+    StringLit,
+
+    /// Phase D.2 / ADR 0033 D2 (1/N): a char/byte literal `'a'` — a
+    /// `u8` of the byte value. Same recognise-not-decode contract as
+    /// [`StringLit`]; the parser validates it is exactly one logical
+    /// byte (rejecting `''` / `'ab'`) and decodes the escape. Escapes:
+    /// `\n \t \r \0 \\ \' \xHH` (ADR 0033 D2).
+    #[regex(r"'([^'\\\n]|\\.)*'")]
+    CharLit,
+
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident,
 }
@@ -1322,6 +1341,71 @@ mod tests {
                 TokenKind::Await,
                 TokenKind::RBrace,
             ]
+        );
+    }
+
+    // ----- Phase D.2 (1/N) / ADR 0033: string + char literals -----
+
+    #[test]
+    fn lex_string_literal() {
+        assert_eq!(kinds(r#""abc""#), vec![TokenKind::StringLit]);
+        assert_eq!(kinds(r#""""#), vec![TokenKind::StringLit]); // empty string
+    }
+
+    #[test]
+    fn lex_string_literal_with_escapes() {
+        // `\"` and `\\` do not terminate the string; `\n`, `\xHH` are body.
+        assert_eq!(kinds(r#""a\"b""#), vec![TokenKind::StringLit]);
+        assert_eq!(kinds(r#""line\ntab\t\\end""#), vec![TokenKind::StringLit]);
+        assert_eq!(kinds(r#""hex\x41z""#), vec![TokenKind::StringLit]);
+    }
+
+    #[test]
+    fn lex_adjacent_strings_do_not_span() {
+        // The closing quote of the first string is not swallowed.
+        assert_eq!(
+            kinds(r#""a" + "b""#),
+            vec![TokenKind::StringLit, TokenKind::Plus, TokenKind::StringLit]
+        );
+    }
+
+    #[test]
+    fn lex_char_literal() {
+        assert_eq!(kinds("'a'"), vec![TokenKind::CharLit]);
+        assert_eq!(kinds(r"'\n'"), vec![TokenKind::CharLit]);
+        assert_eq!(kinds(r"'\''"), vec![TokenKind::CharLit]); // escaped quote
+        assert_eq!(kinds(r"'\x41'"), vec![TokenKind::CharLit]);
+    }
+
+    #[test]
+    fn lex_string_in_let() {
+        // `let kw = "let";` — a string literal mid-statement.
+        assert_eq!(
+            kinds(r#"let kw = "let";"#),
+            vec![
+                TokenKind::Let,
+                TokenKind::Ident,
+                TokenKind::Eq,
+                TokenKind::StringLit,
+                TokenKind::Semi,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_u8_is_an_ident_not_a_keyword() {
+        // `u8` lexes as an Ident (recognised as a primitive type name at
+        // the types layer, like `i64`/`i32`/`bool` — no keyword token).
+        assert_eq!(kinds("u8"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("u8_to_i64"), vec![TokenKind::Ident]); // longest match
+    }
+
+    #[test]
+    fn lex_char_arithmetic_shape() {
+        // `c - '0'` — the lexer pieces a char literal into an expression.
+        assert_eq!(
+            kinds("c - '0'"),
+            vec![TokenKind::Ident, TokenKind::Minus, TokenKind::CharLit]
         );
     }
 }
