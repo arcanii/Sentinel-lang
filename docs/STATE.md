@@ -121,7 +121,19 @@ into an owned `[u8]` that drops via the array path; `u8` lowers to `i8` with
 exit 42, **0 leaks**; the c51 repro bar holds. A2: inline string-literal args
 to borrowing builtins inherit the pre-existing temporary-drop gap (bound vars
 are leak-free). +2 pass fixtures (**1311**), four-check green.
-**Next: collections** (a growable, nominal `String`/`Vec`) → file I/O →
+**Next: Phase D.3 — growable collections (ADR 0034 PROPOSED).** Per ADR 0031
+D4 item 3. The load-bearing lever: **a `Vec<T>` is `[T]` plus capacity +
+mutation** — `Type::Vec(VecElem)` mirrors `Type::Array(ArrayElem)` (the same
+flat element subset, `{i64 len, i64 cap, ptr data}`, element-generic builtins),
+so it reuses the array index/bounds-check/move/drop machinery with **no new
+generics + no lexer/parser change**; **`String` = `Vec<u8>`** (a growable byte
+buffer — the 0033 "a string is its bytes" lever). New: capacity + growth
+(`realloc`), `push(&mut v, x)` (the first heap-mutation primitive, over the
+existing `&mut` + borrow check), `vec_new`/`len`/`v[i]`. 3-sub-phase split
+(1/N type+codegen+runtime+drop for primitive-element Vecs → 2/N `v[i]`/`pop`/
+the `Vec<u8>`→`[u8]` bridge → 3/N close). Out of scope: a `Map`, droppable-
+element `Vec` drop, `Vec`-in-generics, iterators/`for`, broker-backing (the
+bump arena can't `realloc`). After D.3: file I/O →
 modules → loops (ADR 0031 D4), then the self-host port (lexer → parser → … in
 Sentinel, differentially validated against the Rust `snc` oracle). (D.1b
 generic enums + the enum payload-ownership/leak-completeness fix remain
