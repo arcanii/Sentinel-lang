@@ -1,0 +1,48 @@
+// Phase D.2 / ADR 0033 D9: the strings + `u8` phase-go. Classify and
+// compare bytes the way a lexer does — char-literal `u8` comparison
+// (`is_digit`), explicit `u8`↔`i64` conversion (`digit_val`), string
+// literals as `[u8]`, byte indexing (`s[i] -> u8`), and the `str_eq`
+// byte-array matcher — then return a computed exit code (the
+// "exit-code-is-the-answer" convention).
+//
+// This parses the 2-digit source "42" into the integer 42, gated on
+// every byte operation being correct. Leak-free by construction: every
+// `[u8]` is a *bound* variable (dropped at scope exit via the array
+// drop path); the conversions/comparisons are on `u8` Copy scalars.
+// (An inline string-literal *argument* would inherit the pre-existing
+// general temporary-drop gap — bind it first, as a real lexer does.)
+
+fn is_digit(c: u8) -> bool {
+    c >= '0' && c <= '9'
+}
+
+fn digit_val(c: u8) -> i64 {
+    u8_to_i64(c) - u8_to_i64('0')
+}
+
+fn main() -> i64 {
+    let src: [u8] = "42";
+
+    let tens: u8 = src[0]; // '4'
+    let ones: u8 = src[1]; // '2'
+
+    // Parse the two digits: 4 * 10 + 2 = 42.
+    let value: i64 = digit_val(tens) * 10 + digit_val(ones);
+
+    // Keyword-match a couple of bound [u8]s with str_eq.
+    let kw: [u8] = "let";
+    let kw_same: [u8] = "let";
+    let kw_other: [u8] = "fn";
+
+    // Exit 42 iff: both source bytes classify as digits, the equal
+    // keywords compare equal, and the different keywords compare unequal.
+    if is_digit(tens) && is_digit(ones) && str_eq(kw, kw_same) {
+        if str_eq(kw, kw_other) {
+            0
+        } else {
+            value
+        }
+    } else {
+        0
+    }
+}

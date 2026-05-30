@@ -1,0 +1,21 @@
+// Phase D.2 / ADR 0033 D6: `u8` is UNSIGNED — a byte with the high bit
+// set must behave as a large value, not a negative one. This pins both
+// unsigned codegen paths that the ASCII phase-go does not reach:
+//
+//   - unsigned comparison: 200 > 100 is true (a signed `i8` would read
+//     200 as -56, making `-56 > 100` false);
+//   - unsigned division (`udiv`): 200 / 100 == 2 (signed `sdiv` of
+//     -56 / 100 would be 0).
+//
+// Exit 42 iff both unsigned operations are correct.
+fn main() -> i64 {
+    let big: u8 = i64_to_u8(200);
+    let small: u8 = i64_to_u8(100);
+    let q: u8 = big / small; // udiv → 2
+
+    if big > small && u8_to_i64(q) == 2 {
+        42
+    } else {
+        0
+    }
+}

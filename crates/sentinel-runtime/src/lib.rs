@@ -117,6 +117,38 @@ pub extern "C" fn sentinel_free(ptr: *mut u8) {
     }
 }
 
+/// Byte-wise equality of two `[u8]` slices — the `str_eq` builtin
+/// (D.2 / ADR 0033 D5; the lexer's keyword/identifier matcher). Equal
+/// length AND equal bytes. Returns a C `bool`, which Rust's `extern
+/// "C"` ABI lowers to `i1 zeroext` — matching codegen's `i1`-returning
+/// declaration (the result is used directly as a Sentinel `bool`).
+///
+/// # Safety
+///
+/// When the corresponding length is `> 0`, `a` / `b` must point to at
+/// least `a_len` / `b_len` readable bytes — guaranteed by the `{ i64
+/// len, ptr data }` array representation of any live `[u8]`, whose
+/// backing buffer the borrow checker keeps alive across the call. A
+/// null pointer is only valid alongside a zero length.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_str_eq(a: *const u8, a_len: i64, b: *const u8, b_len: i64) -> bool {
+    if a_len != b_len {
+        return false;
+    }
+    if a_len <= 0 {
+        // Equal lengths that are empty (or defensively negative) — two
+        // zero-length slices are equal and there is nothing to read.
+        return true;
+    }
+    let n = a_len as usize;
+    // SAFETY: lengths are equal and positive, so both pointers are
+    // non-null and readable for `n` bytes per the contract above.
+    let a_slice = unsafe { std::slice::from_raw_parts(a, n) };
+    let b_slice = unsafe { std::slice::from_raw_parts(b, n) };
+    a_slice == b_slice
+}
+
 // ============================================================================
 // C5.4 / ADR 0028: broker-backed scope arenas (the substrate)
 // ============================================================================
@@ -991,6 +1023,7 @@ mod tests {
             sentinel_print as *const (),
             sentinel_alloc as *const (),
             sentinel_free as *const (),
+            sentinel_str_eq as *const (),
             sentinel_panic_oob as *const (),
             sentinel_arena_enter as *const (),
             sentinel_arena_alloc as *const (),
@@ -1007,8 +1040,9 @@ mod tests {
             sentinel_scope_register as *const (),
             sentinel_scope_exit as *const (),
         ];
-        // 18 symbols: 17 codegen-declared + sentinel_kont_panic_resumed.
-        assert_eq!(symbols.len(), 18);
+        // 19 symbols: 18 codegen-declared (incl. D.2's sentinel_str_eq)
+        // + sentinel_kont_panic_resumed.
+        assert_eq!(symbols.len(), 19);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 

@@ -1164,3 +1164,25 @@ fn pass_c5d1_enum() {
     // area(Rect(5,6))=30 = exit 42.
     assert_eq!(run_exit("c5d1_enum.sentinel"), 42);
 }
+
+#[test]
+fn pass_c5d2_strings() {
+    // ADR 0033 D9 (4/N) phase-go: strings + a `u8` byte type end to end.
+    // Char-literal `u8` comparison (`is_digit`), explicit `u8`↔`i64`
+    // conversion (`digit_val`), string literals as `[u8]` (heap-copied,
+    // owned, droppable), byte indexing (`s[i] -> u8`), and the `str_eq`
+    // byte-array matcher. Parses the 2-digit source "42" into the
+    // integer 42, gated on every byte op being correct. Every `[u8]` is
+    // a bound variable → leak-free (verified separately via
+    // `leaks --atExit`). digit_val('4')*10 + digit_val('2') = 42.
+    assert_eq!(run_exit("c5d2_strings.sentinel"), 42);
+}
+
+#[test]
+fn pass_c5d2_u8_unsigned() {
+    // ADR 0033 D6: `u8` is unsigned — pins the two unsigned codegen
+    // paths the ASCII phase-go doesn't reach. A byte ≥ 0x80 compares as
+    // large (200 > 100, not signed -56 > 100) and `/` is `udiv`
+    // (200 / 100 == 2, not signed 0). Exit 42 iff both are correct.
+    assert_eq!(run_exit("c5d2_u8_unsigned.sentinel"), 42);
+}

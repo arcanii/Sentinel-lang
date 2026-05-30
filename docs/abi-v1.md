@@ -50,6 +50,7 @@ The in-memory layout of every `Type` constructor. All layouts are
 | `bool` | `i1` |
 | `i32` | `i32` |
 | `i64` | `i64` |
+| `u8` | `i8` (unsigned — signedness lives in the ops: `udiv` / unsigned `icmp`, not the type) — ADR 0033 D4/D6 |
 | `Struct(id)` / `GenericInstance(id)` / `Class(id)` | a **named LLVM struct**, fields in **declaration order** (no reordering) |
 | `[T]` (`Array`) | `{ i64 len, ptr data }` — ADR 0015 D1 |
 | `?P` where `P` is primitive | `{ i1 valid, P }` (inline) — ADR 0015 D11 |
@@ -170,6 +171,7 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_print` | `(i64) -> i64` (prints, returns 0) | I/O |
 | `sentinel_alloc` | `(i64 size) -> ptr` | heap (libc malloc) |
 | `sentinel_free` | `(ptr) -> void` | heap (libc free) |
+| `sentinel_str_eq` | `(ptr a, i64 a_len, ptr b, i64 b_len) -> i1` | strings — `[u8]` byte-equality (ADR 0033 D5) |
 | `sentinel_panic_oob` | `(i64 idx, i64 len) -> void` | bounds-check trap |
 | `sentinel_arena_enter` | `(i64 capacity) -> ptr` | scope arena (ADR 0028) |
 | `sentinel_arena_alloc` | `(ptr arena, i64 size) -> ptr` | scope arena |

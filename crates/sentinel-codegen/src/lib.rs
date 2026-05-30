@@ -413,6 +413,21 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             None,
         )
     };
+    // D.2 / ADR 0033 D5: declare `sentinel_str_eq(ptr, i64, ptr, i64)
+    // -> i1` for the `str_eq` byte-array-equality builtin.
+    let str_eq_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        let bool_ty = context.bool_type();
+        module.add_function(
+            "sentinel_str_eq",
+            bool_ty.fn_type(
+                &[ptr_ty.into(), i64_ty.into(), ptr_ty.into(), i64_ty.into()],
+                false,
+            ),
+            None,
+        )
+    };
     // C5.4 (2/N) / ADR 0028: declare the broker scope-arena symbols.
     // `sentinel_arena_enter(capacity: i64) -> *arena` creates a bump
     // arena (capacity 0 → runtime default); `sentinel_arena_alloc(arena,
@@ -871,6 +886,7 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             alloc_fn,
             panic_oob_fn,
             free_fn,
+            str_eq_fn,
             arena_enter_fn,
             arena_alloc_fn,
             arena_exit_fn,
@@ -1062,6 +1078,10 @@ struct CodegenCtx<'ctx, 'plan> {
     /// function. Emitted at scope-exit for un-moved heap-backed
     /// bindings (closes the C1.6+ heap-leak deferral).
     free_fn: FunctionValue<'ctx>,
+    /// D.2 / ADR 0033 D5: `sentinel_str_eq(a: ptr, a_len: i64, b: ptr,
+    /// b_len: i64) -> i1` — equal length + byte-wise array equality,
+    /// the lexer's keyword/identifier matcher.
+    str_eq_fn: FunctionValue<'ctx>,
     /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
     /// creates a per-scope broker bump arena (capacity 0 → default).
     arena_enter_fn: FunctionValue<'ctx>,
@@ -4185,6 +4205,104 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(with_data.into_struct_value().into())
     }
 
+    /// D.2 / ADR 0033 D6: lower a string literal to an owned `[u8]`.
+    /// The decoded bytes are **heap-copied** (`sentinel_alloc(N)` + N
+    /// constant `i8` stores) into a fresh buffer, so the result is
+    /// indistinguishable from any other array literal — drop / move /
+    /// escape / arena "just work" via the existing `[T]` paths, with no
+    /// global-free hazard. (D6's private global `[N x i8]` + `memcpy` is
+    /// a measured optimisation deferred here because `CodegenCtx` holds
+    /// no `&Module` to add a global from a lowering method; the
+    /// owned-heap-copy semantics — the actual requirement — are
+    /// identical, and string literals are short.)
+    fn lower_string_lit(
+        &self,
+        bytes: &[u8],
+        array_ty: Type,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_type = self.context.i64_type();
+        let i8_type = self.context.i8_type();
+        let n = bytes.len() as u64;
+        let len_val = i64_type.const_int(n, false);
+
+        // sizeof(u8) == 1, so the data buffer is exactly N bytes.
+        let data_ptr = self.alloc_call(len_val)?;
+
+        for (i, b) in bytes.iter().enumerate() {
+            let idx = i64_type.const_int(i as u64, false);
+            let byte_ptr = unsafe {
+                self.builder
+                    .build_gep(i8_type, data_ptr, &[idx], &format!("str_byte_{i}"))
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+            };
+            self.builder
+                .build_store(byte_ptr, i8_type.const_int(u64::from(*b), false))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
+
+        // Build the { i64 len, ptr data } array struct value (abi-v1 `[T]`).
+        let struct_ty = match self.llvm_basic_type(array_ty) {
+            BasicTypeEnum::StructType(st) => st,
+            _ => unreachable!("[u8] lowers to a {{ i64, ptr }} struct type"),
+        };
+        let agg = struct_ty.get_undef();
+        let with_len = self
+            .builder
+            .build_insert_value(agg, len_val, 0, "str_with_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let with_data = self
+            .builder
+            .build_insert_value(with_len, data_ptr, 1, "str_with_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(with_data.into_struct_value().into())
+    }
+
+    /// D.2 / ADR 0033 D5: lower `str_eq(a, b)` to a call to the runtime
+    /// `sentinel_str_eq(a_ptr, a_len, b_ptr, b_len) -> i1` (equal length
+    /// + byte-wise equality). Both args are `[u8]` = `{ i64 len, ptr
+    /// data }`; extract the two fields from each struct value.
+    fn lower_str_eq(
+        &mut self,
+        a: &TypedExpr,
+        b: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let a_val = self.lower_expr(a, program)?.into_struct_value();
+        let b_val = self.lower_expr(b, program)?.into_struct_value();
+        let a_len = self
+            .builder
+            .build_extract_value(a_val, 0, "a_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let a_ptr = self
+            .builder
+            .build_extract_value(a_val, 1, "a_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let b_len = self
+            .builder
+            .build_extract_value(b_val, 0, "b_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let b_ptr = self
+            .builder
+            .build_extract_value(b_val, 1, "b_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let call = self
+            .builder
+            .build_call(
+                self.str_eq_fn,
+                &[a_ptr.into(), a_len.into(), b_ptr.into(), b_len.into()],
+                "str_eq",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_str_eq returns i1"))
+    }
+
     /// Lower an array indexing `target[index]` per ADR 0015 D3 with
     /// bounds checking per D10. Emits the conditional branch on
     /// `0 <= idx < len`; the false branch calls
@@ -4368,14 +4486,15 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 let llvm_ty = self.llvm_int_type(expr.ty);
                 Ok(llvm_ty.const_int(*n as u64, true).into())
             }
-            // D.2 / ADR 0033 D6: char/string literals type-check (`u8` /
-            // `[u8]`) but their lowering — `i8` char constant, the
-            // string-literal global `[N x i8]` + heap copy — lands at
-            // D.2 (4/N). Reject cleanly until then (mirrors the enum
-            // (3/N) codegen-rejects-until-(4/N) discipline).
-            TypedExprKind::CharLit(_) | TypedExprKind::StringLit(_) => {
-                Err(CodegenError::StringCodegenNotYetSupported)
+            // D.2 / ADR 0033 D6: a char literal is an `i8` constant of
+            // the byte value (no allocation).
+            TypedExprKind::CharLit(b) => {
+                Ok(self.context.i8_type().const_int(u64::from(*b), false).into())
             }
+            // D.2 / ADR 0033 D6: a string literal emits a private global
+            // `[N x i8]` constant + heap-copies it so the `[u8]` is owned
+            // and drops/moves uniformly with any array.
+            TypedExprKind::StringLit(bytes) => self.lower_string_lit(bytes, expr.ty),
             TypedExprKind::BoolLit(b) => Ok(self
                 .context
                 .bool_type()
@@ -4439,10 +4558,17 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             TypedExprKind::Binary(op, lhs, rhs) => {
                 let l = self.lower_expr(lhs, program)?.into_int_value();
                 let r = self.lower_expr(rhs, program)?.into_int_value();
+                // D.2 / ADR 0033 D6: `u8` is unsigned — `/` is `udiv`
+                // (add/sub/mul/bitwise are sign-agnostic in two's
+                // complement). Both operands share a type (type-checked).
+                let is_unsigned = matches!(self.strip_secret(lhs.ty), Type::U8);
                 let result = match op {
                     BinOp::Add => self.builder.build_int_add(l, r, "add"),
                     BinOp::Sub => self.builder.build_int_sub(l, r, "sub"),
                     BinOp::Mul => self.builder.build_int_mul(l, r, "mul"),
+                    BinOp::Div if is_unsigned => {
+                        self.builder.build_int_unsigned_div(l, r, "udiv")
+                    }
                     BinOp::Div => self.builder.build_int_signed_div(l, r, "div"),
                     // C5.3 / ADR 0027 D6: bitwise ops lower to the
                     // data-independent LLVM bit instructions (`secret`
@@ -4463,12 +4589,21 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // unreachable here for nullable values.
                 let lhs_is_nullable = lhs.ty.is_nullable();
                 let rhs_is_nullable = rhs.ty.is_nullable();
+                // D.2 / ADR 0033 D6: `u8` is unsigned, so the ordered
+                // comparisons use unsigned predicates (a byte ≥ 0x80
+                // must compare as large, not negative). Eq/Ne are
+                // sign-agnostic; nullable operands only ever use Eq/Ne.
+                let is_unsigned = matches!(self.strip_secret(lhs.ty), Type::U8);
                 let predicate = match op {
                     CmpOp::Eq => IntPredicate::EQ,
                     CmpOp::Ne => IntPredicate::NE,
+                    CmpOp::Lt if is_unsigned => IntPredicate::ULT,
                     CmpOp::Lt => IntPredicate::SLT,
+                    CmpOp::Le if is_unsigned => IntPredicate::ULE,
                     CmpOp::Le => IntPredicate::SLE,
+                    CmpOp::Gt if is_unsigned => IntPredicate::UGT,
                     CmpOp::Gt => IntPredicate::SGT,
+                    CmpOp::Ge if is_unsigned => IntPredicate::UGE,
                     CmpOp::Ge => IntPredicate::SGE,
                 };
                 if lhs_is_nullable || rhs_is_nullable {
@@ -4525,11 +4660,27 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 if *id == LEN_FN_ID {
                     return self.lower_len(&args[0], program);
                 }
-                // D.2 / ADR 0033 D5: the byte-string builtins type-check
-                // at (3/N) but their runtime (`sentinel_str_eq`, the
-                // `zext`/`trunc` conversions) lands at D.2 (4/N).
-                if *id == STR_EQ_FN_ID || *id == U8_TO_I64_FN_ID || *id == I64_TO_U8_FN_ID {
-                    return Err(CodegenError::StringCodegenNotYetSupported);
+                // D.2 / ADR 0033 D5/D6: the byte-string builtins. The
+                // width conversions are a `zext` (u8 → i64) / `trunc`
+                // (i64 → u8); `str_eq` calls the runtime byte-compare.
+                if *id == U8_TO_I64_FN_ID {
+                    let v = self.lower_expr(&args[0], program)?.into_int_value();
+                    return self
+                        .builder
+                        .build_int_z_extend(v, self.context.i64_type(), "u8_to_i64")
+                        .map(|x| x.into())
+                        .map_err(|e| CodegenError::Builder(e.to_string()));
+                }
+                if *id == I64_TO_U8_FN_ID {
+                    let v = self.lower_expr(&args[0], program)?.into_int_value();
+                    return self
+                        .builder
+                        .build_int_truncate(v, self.context.i8_type(), "i64_to_u8")
+                        .map(|x| x.into())
+                        .map_err(|e| CodegenError::Builder(e.to_string()));
+                }
+                if *id == STR_EQ_FN_ID {
+                    return self.lower_str_eq(&args[0], &args[1], program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted
@@ -6684,10 +6835,13 @@ mod tests {
         assert_eq!(mangle_type(Type::I64, &typed), "i64");
         assert_eq!(mangle_type(Type::I32, &typed), "i32");
         assert_eq!(mangle_type(Type::Bool, &typed), "bool");
+        // D.2 / ADR 0033 D4: `u8` mangles `u8`; `[u8]` (the string) → `arr_u8`.
+        assert_eq!(mangle_type(Type::U8, &typed), "u8");
         assert_eq!(mangle_type(Type::Struct(StructId(0)), &typed), "Pair");
         // Array tag recurses on the element type.
         assert_eq!(mangle_type(Type::Array(ArrayElem::I64), &typed), "arr_i64");
         assert_eq!(mangle_type(Type::Array(ArrayElem::Bool), &typed), "arr_bool");
+        assert_eq!(mangle_type(Type::Array(ArrayElem::U8), &typed), "arr_u8");
         assert_eq!(
             mangle_type(Type::Array(ArrayElem::Struct(StructId(0))), &typed),
             "arr_Pair"
@@ -6756,6 +6910,19 @@ mod tests {
         assert_eq!(td.get_abi_alignment(&lower(Type::I32).into_int_type()), 4);
         assert_eq!(td.get_abi_size(&lower(Type::I64).into_int_type()), 8);
         assert_eq!(td.get_abi_alignment(&lower(Type::I64).into_int_type()), 8);
+        // D.2 / ADR 0033 D4: `u8` → LLVM `i8`, size 1, align 1, width 8.
+        assert_eq!(lower(Type::U8).into_int_type().get_bit_width(), 8);
+        assert_eq!(td.get_abi_size(&lower(Type::U8).into_int_type()), 1);
+        assert_eq!(td.get_abi_alignment(&lower(Type::U8).into_int_type()), 1);
+
+        // D.2 / ADR 0033 D3: a string IS a `[u8]` — same `{ i64 len, ptr
+        // data }` 16-byte layout as any array (the element width lives in
+        // the heap buffer, not the struct).
+        let str_arr = lower(Type::Array(ArrayElem::U8)).into_struct_type();
+        assert_eq!(str_arr.count_fields(), 2);
+        assert_eq!(td.get_abi_size(&str_arr), 16);
+        assert_eq!(td.get_abi_alignment(&str_arr), 8);
+        assert_eq!(td.offset_of_element(&str_arr, 1), Some(8));
 
         // `[T]` = `{ i64 len, ptr data }`: 16 bytes, align 8, data @ 8.
         // Field types pin the *order* (len before data) — offsets alone
