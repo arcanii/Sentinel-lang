@@ -35,16 +35,22 @@ exhaustiveness is type-checked); scope-exit drop frees the payload box (if
 non-null). Bare `Enum::Variant` unit construction parses (matches ADR D2 +
 the pattern surface). abi-v1 §2 gains the enum layout entry + a stability
 assertion. Phase-go `tests/pass/c5d1_enum.sentinel` (Shape constructed +
-`match`ed, exit 42). **Amendments:** A1 — drop is box-free only; recursive
-*payload-field* drop (needs synthesized per-enum drop fns — inline
-expansion of a recursive enum's drop is infinite) deferred (leaks, not
-UAF; move/escape paths verified double-free-safe). A2 — the
-inline-small-enum optimisation stays a follow-on (every enum heap-boxes).
-A3 — generic enums (`Option`/`Result`) are the immediate follow-on
-**D.1b**. +29 tests across 3/N+4/N (1268), four-check green; c51 bar +
-`repro.rs` hold (enum paths additive). Next: **D.1b** (generic enums via
-mono) OR the next ADR 0031 D4 prerequisite (strings + a byte type, or
-growable collections).
+`match`ed, exit 42). **Amendments:** A1 — drop is **box-free only** (a
+recursive enum / heap-typed payload leaks its nested boxes; leak-safe, NO
+UAF). A (5/N) follow-up investigation proved the naive recursive fix —
+synthesized per-enum drop *fns* alone — **double-frees** (a `match`-bound
+payload is moved into a consumer while the scrutinee is also dropped → the
+box freed twice; a `Tree` aborts at exit 133, empirically). The correct fix
+is the **payload-ownership model** (`match` consumes the scrutinee, bindings
+own the payload fields, the `match` frees the box, bindings are
+drop-plan-registered + dropped at arm-scope exit, then drop fns are sound
+for non-match paths) — a coordinated borrow-check + drop-plan + codegen
+change, deferred (recorded in ADR 0032 A1 follow-up; code stays at box-free).
+A2 — inline-small-enum optimisation deferred. A3 — generic enums
+(`Option`/`Result`) → **D.1b**. +29 tests across 3/N+4/N (1268), four-check
+green; c51 bar + `repro.rs` hold. Next: **D.1b** (generic enums via mono,
+bundle the payload-ownership model) OR the next ADR 0031 D4 prerequisite
+(strings + a byte type, or growable collections).
 
 Pre-D.1(1/N) context: **🎉 SENTINEL 1.0 (2026-05-30) — Phase C5 + Phase C close.**
 The 1.0 go/no-go (`tests/pass/c5_go_no_go.sentinel`, a constant-time

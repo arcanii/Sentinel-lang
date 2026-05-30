@@ -121,14 +121,50 @@ D.1 MVP closes.** `enum`/`match` now compile + run end to end.
 +2 tests (1268: the `c5d1_enum` pass fixture + the abi-v1 enum-layout
 assertion). Four-check green.
 
-**Amendments roll-up:** A1 — drop is box-free only; recursive payload-field
-drop (synthesized per-enum drop fns) deferred (leaks, not UAF). A2 — the
+**Amendments roll-up:** A1 — drop is **box-free only** (free the payload box
+if non-null; no recursion into payload fields). A recursive enum / heap-
+typed payload **leaks** its nested boxes — a leak, *not* a UAF/double-free
+(verified: move + escape paths free each box once). **A2** — the
 inline-small-non-recursive-enum optimisation (`{ tag, [maxpayload x i8] }`,
 D4) stays a post-MVP follow-on (every enum value heap-allocates its
-payload). A3 — D9 generic enums (`Option`/`Result`) are the immediate
-follow-on **D.1b**, not in this ADR's MVP. A4 — D10 out-of-scope list
+payload). **A3** — D9 generic enums (`Option`/`Result`) are the immediate
+follow-on **D.1b**, not in this ADR's MVP. **A4** — D10 out-of-scope list
 (named-field variants, or-/nested/guard/literal patterns, `secret enum`)
 confirmed deferred.
+
+### A1 follow-up investigation (2026-05-30): recursive drop needs the **payload-ownership model**, not just drop fns
+
+A first attempt at full recursive drop — synthesizing a per-enum
+`drop_<Enum>(ptr)` *function* (so a recursive enum's drop is a runtime
+function *call*, not infinite inline expansion) and having it recurse-drop
+the active variant's payload fields — was built and then **reverted: it
+double-frees** (empirically, a `Tree` sum aborts with exit 133). The bug is
+an **ownership** one, not a codegen one: `match t { Node(l, r) => sum(l) +
+sum(r) }` binds `l`/`r` by *loading* the child `{tag,ptr}` out of `t`'s
+payload and then *moves* them into `sum(...)`, which frees their boxes — but
+`t` is also (non-consumingly read by the match, hence) dropped at scope
+exit, and a recurse-dropping `drop_Tree(t)` then frees the **same** child
+boxes again.
+
+The correct fix is the **payload-ownership model** (the Rust semantics):
+1. `match` **consumes** the scrutinee (a partial move) — so it is *not*
+   dropped at the enclosing scope (today the borrow check reads it
+   non-consumingly).
+2. A by-value pattern binding **takes ownership** of its payload field; the
+   `match` frees the payload **box** (its fields having moved into the
+   bindings) but does *not* recurse-drop the fields.
+3. Each binding is registered in the **drop plan** as an arm-scoped local,
+   so an *un-moved* binding is dropped at arm-scope exit (and a moved one is
+   skipped) — reusing `emit_scope_drops` + the borrow-check moved-set.
+4. The synthesized per-enum `drop_<Enum>` fn is then sound, used for the
+   *non-match* drop paths (a `let`-bound, never-matched enum; an un-moved
+   binding) where no partial move occurred.
+
+This is a **coordinated borrow-check + drop-plan + codegen change** (real
+partial-move tracking for enum payloads) — a proper sub-phase, **bigger than
+"add drop fns"**. It is deferred under A1; box-free (leak-safe) is the
+shipped MVP behavior. (Recorded so the naive drop-fn approach is not
+re-attempted.)
 
 ## Context
 
