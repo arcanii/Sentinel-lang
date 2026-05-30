@@ -60,8 +60,11 @@ machinery: `len`/index/drop/move/escape/arena all apply unchanged), plus a
 string literals `"…"` (→ `[u8]`, heap-copied from a global constant so they
 drop uniformly), and the lexer's core ops (`s[i]`, `len`, a `str_eq`
 builtin, `u8`↔`i64` conversions). 4-sub-phase split (lexer → AST/parser →
-`Type::U8` + the cascade → codegen/runtime). Resume at **D.2 (1/N)** — the
-lexer (`u8` keyword + char/string literals + escapes; additive). After D.2:
+`Type::U8` + the cascade → codegen/runtime). **D.2 (1/N) shipped:** the lexer
+recognises char + string literals (escape-aware; `u8` lexes as an `Ident`,
+no keyword token) — additive, +7 tests (1275), four-check green. Resume at
+**D.2 (2/N)** — AST + parser (`ExprKind::CharLit`/`StringLit`; `u8` in
+`TypeExpr`). After D.2:
 growable collections → file I/O → modules → loops (ADR 0031 D4), then the
 self-host port. (D.1b generic enums + the enum payload-ownership/leak-
 completeness fix remain available follow-ons.)

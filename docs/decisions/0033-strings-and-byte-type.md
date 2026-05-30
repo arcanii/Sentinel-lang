@@ -26,6 +26,18 @@ Related:
     it inherits the secret-preserving operator rules + bitwise ops with no
     new typing surface (D4).
 
+**(1/N) update (2026-05-30) — DELIVERED.** The lexer recognises **string
+literals** `"…"` and **char literals** `'…'` (logos regexes that handle
+`\`-escapes — `\"`/`\'`/`\\`/`\n`/`\xHH` — and exclude raw newlines so an
+unterminated literal fails fast; recognise-not-decode, like `IntLit`, so the
+byte value is recovered at parse time). Confirmed **`u8` lexes as an
+`Ident`** (recognised as a type name at the types layer, like `i64`/`i32`/
+`bool` — no keyword token needed), so (1/N) is *only* the two literal
+tokens. Additive — the parser consumes them at (2/N); the new `TokenKind`s
+cascade nowhere (no exhaustive `TokenKind` match downstream). +7 lexer tests
+(1275), four-check green. Next: **(2/N)** AST + parser
+(`ExprKind::CharLit`/`StringLit`; `u8` in `TypeExpr`).
+
 ## Context
 
 Of the remaining Phase D prerequisites (ADR 0031 D4), **strings + a byte
@@ -160,8 +172,9 @@ likewise iff `?u8` is wanted (deferred — D8; `u8` is added to the exhaustive
 
 | Sub        | Title                                                          | Risk   |
 |------------|----------------------------------------------------------------|--------|
-| D.2 (1/N)  | lexer — `u8` keyword; char literals `'…'`; string literals     | low    |
-|            | `"…"` (+ escapes). Additive (parser consumes at 2/N).         |        |
+| D.2 (1/N)  | lexer — char literals `'…'`; string literals `"…"` (+         | low    |
+|            | escapes). `u8` lexes as an `Ident` (a type name, like         |        |
+|            | `i64`) — **no keyword token**. Additive (parser consumes 2/N). |        |
 | D.2 (2/N)  | AST + parser — `ExprKind::CharLit(u8)` + `StringLit(Vec<u8>)`; | medium |
 |            | `u8` in `TypeExpr`. Resolve pass-through; types reject (NotYet)|        |
 |            | until 3/N.                                                     |        |
