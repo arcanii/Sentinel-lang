@@ -26,6 +26,18 @@ Related:
     path syntax): `Type::Enum(EnumId)` is the next interner variant;
     construction `Enum::Variant(args)` reuses the `Class::init` `::` form.
 
+**(1/N + 2/N) update (2026-05-30) — DELIVERED.** (1/N) shipped the lexer
+(`enum`/`match` tokens). (2/N) shipped the **AST + parser**: `EnumDecl` +
+`VariantDecl` on `Program.enums`; `ExprKind::Match` + `MatchArm` +
+`Pattern` (qualified `Enum::Variant(binds)` + `_`); `parse_enum_decl` +
+`parse_match_expr` + pattern parsing (the s-expr `Display` covers them).
+Additive — resolve rejects `enum`s (`EnumDeclNotYet`) + `match`
+(`MatchNotYet`) until (3/N); the blast radius stayed in ast+syntax+resolve
+(downstream crates match the resolved/typed trees, which gain no `Match`).
++10 tests across 1/N+2/N (1242), four-check green. Next: **(3/N) resolve +
+types** — `Type::Enum` interner variant, variant construction + `match`
+type-check + **exhaustiveness**.
+
 ## Context
 
 Self-hosting (ADR 0031) is blocked first and foremost on **sum types**:

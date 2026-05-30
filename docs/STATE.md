@@ -14,15 +14,22 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D.1 (1/N): lexer — `enum` + `match` tokens (ADR 0032).**
-Post-1.0, **Phase D (self-hosting) is underway.** Per ADR 0031, it opens
-with a language/stdlib build-out; the first prerequisite is **sum types +
-pattern matching** (ADR 0032 — an AST is a sum type, the biggest
-self-hosting blocker). D.1 (1/N) adds the two new logos keyword tokens
-(`enum`, `match`); `=>`/`::`/`_`-as-`Ident` already exist, so the lexer
-surface is complete. Additive — the parser consumes them at D.1 (2/N), so
-nothing downstream changes. +3 tests (1235). Four-check green. Next: **D.1
-(2/N)** — AST + parser (`enum` decl, `match` expr, patterns).
+Last updated: **Phase D.1 (1/N + 2/N): sum types + pattern matching —
+lexer + AST + parser (ADR 0032).** Post-1.0, **Phase D (self-hosting) is
+underway.** Per ADR 0031 it opens with a language/stdlib build-out; the
+first prerequisite is **sum types + pattern matching** (ADR 0032 — an AST
+is a sum type, the biggest self-hosting blocker). (1/N) added the `enum` +
+`match` lexer tokens. (2/N) added the **AST + parser**: `EnumDecl` /
+`VariantDecl` on `Program.enums` (unit + tuple-payload variants);
+`ExprKind::Match` + `MatchArm` + `Pattern` (qualified `Enum::Variant(binds)`
++ `_` wildcard); `parse_enum_decl` + `parse_match_expr` + pattern parsing
+(`=>`/`::`/`_` reuse existing tokens; the s-expr `Display` covers them).
+**Additive** — resolve rejects `enum`s (`EnumDeclNotYet`) + `match`
+(`MatchNotYet`) until (3/N); the blast radius stayed in ast+syntax+resolve
+(downstream crates match the resolved/typed trees, which gain no `Match`
+variant). +10 tests (1242). Four-check green. Next: **D.1 (3/N)** — resolve
++ types: the `Type::Enum` interner variant, variant construction +
+`match` type-check + **exhaustiveness**.
 
 Pre-D.1(1/N) context: **🎉 SENTINEL 1.0 (2026-05-30) — Phase C5 + Phase C close.**
 The 1.0 go/no-go (`tests/pass/c5_go_no_go.sentinel`, a constant-time
