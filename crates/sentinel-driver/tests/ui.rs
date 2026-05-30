@@ -109,3 +109,6 @@ ui_snapshot!(c44_spawn_result_must_be_i64, "c44_spawn_result_must_be_i64.sentine
 
 // ---- C5.2 constant-time verification rejection (the MIR D5 pass) ----
 ui_snapshot!(c52_secret_leak, "c52_secret_leak.sentinel");
+
+// ---- D.1 (3/N) sum-type / match rejection (types exhaustiveness) ----
+ui_snapshot!(c5d1_non_exhaustive_match, "c5d1_non_exhaustive_match.sentinel");

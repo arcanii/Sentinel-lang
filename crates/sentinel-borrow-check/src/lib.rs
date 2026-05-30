@@ -1007,6 +1007,37 @@ fn walk_expr(
         TypedExprKind::Await { task_expr, .. } => {
             walk_expr(task_expr, ctx, errors, program);
         }
+        // Phase D.1 / ADR 0032 (3/N): variant construction moves its
+        // payload args into the new enum value — a consuming walk,
+        // like a struct literal / user-fn call.
+        TypedExprKind::EnumConstruct { args, .. } => {
+            for a in args {
+                walk_expr(a, ctx, errors, program);
+            }
+        }
+        // Phase D.1 / ADR 0032 (3/N): `match` reads the scrutinee
+        // (its tag + payload projections — a non-consuming read at
+        // the MVP, like a postfix receiver) and runs exactly one arm.
+        // Mirror the `if` branch-merge: walk each arm in isolation
+        // from a shared move snapshot, then union their moved sets
+        // (moved in any arm → conservatively moved after). Pattern
+        // bindings are fresh arm-scoped VarIds; the move maps treat
+        // an unseen VarId as live, so they need no pre-registration.
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            walk_expr_lvalue(scrutinee, ctx, errors, program);
+            let snapshot_moved = ctx.moved.clone();
+            let mut union_moved = snapshot_moved.clone();
+            for arm in arms {
+                ctx.moved = snapshot_moved.clone();
+                ctx.push_scope();
+                walk_expr(&arm.body, ctx, errors, program);
+                ctx.pop_scope();
+                for (id, span) in std::mem::take(&mut ctx.moved) {
+                    union_moved.entry(id).or_insert(span);
+                }
+            }
+            ctx.moved = union_moved;
+        }
     }
 }
 
@@ -1196,6 +1227,9 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         | Type::GenericInstance(_)
         | Type::TypeParam(_)
         | Type::Class(_)
+        // Phase D.1 / ADR 0032 D6: an enum owns its heap-boxed
+        // payload, so it is Move (consumed on read), like a struct.
+        | Type::Enum(_)
         // C4.2 / ADR 0023 D7: `Self` inside a trait method sig is
         // abstract — borrow-check conservatively treats it as Move
         // until impl-sig substitution resolves it (which happens

@@ -501,6 +501,28 @@ impl FnBuilder {
                 let v = self.lower_expr(program, task_expr);
                 self.emit(MirOp::Opaque(vec![v]), ty, span)
             }
+            // Phase D.1 / ADR 0032 (3/N): enum construction carries its
+            // payload args; `match` carries the scrutinee + every arm
+            // body. Both funnel through `Opaque` so any secret operand
+            // stays in the taint graph. There is no `secret enum` at the
+            // MVP, so a `match` tag is never itself secret (the D7
+            // secret-tag-branch sink is a future guard); operands are
+            // carried for soundness. Pattern bindings are arm-scoped
+            // `VarId`s this walk doesn't model — `lookup_var` resolves
+            // them to `Opaque`, so arm bodies lower without panicking.
+            // Real `{tag,ptr}` + `switch` lowering is codegen's at (4/N).
+            TypedExprKind::EnumConstruct { args, .. } => {
+                let vals: Vec<MirValue> =
+                    args.iter().map(|a| self.lower_expr(program, a)).collect();
+                self.emit(MirOp::Opaque(vals), ty, span)
+            }
+            TypedExprKind::Match { scrutinee, arms, .. } => {
+                let mut vals = vec![self.lower_expr(program, scrutinee)];
+                for arm in arms {
+                    vals.push(self.lower_expr(program, &arm.body));
+                }
+                self.emit(MirOp::Opaque(vals), ty, span)
+            }
         }
     }
 

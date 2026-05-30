@@ -30,9 +30,9 @@ use std::collections::{HashMap, HashSet};
 
 use salsa::Accumulator;
 use sentinel_ast::{
-    BinOp, Block, ClassDecl, CmpOp, Expr, ExprKind, FnDef, HandlerArm, LogicOp, Program, ReturnArm,
-    SelfKind, Span, Spanned, Stmt, StmtKind, TypeExpr, TypeParam as AstTypeParam, UnaryOp,
-    Visibility,
+    BinOp, Block, ClassDecl, CmpOp, Expr, ExprKind, FnDef, HandlerArm, LogicOp, MatchArm, Pattern,
+    Program, ReturnArm, SelfKind, Span, Spanned, Stmt, StmtKind, TypeExpr,
+    TypeParam as AstTypeParam, UnaryOp, Visibility,
 };
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 
@@ -118,6 +118,14 @@ pub enum ImplTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeParamId(pub u32);
 
+/// Phase D.1 / ADR 0032 D3: identifier for a top-level sum-type
+/// (`enum`) declaration. Assigned in source-encounter order at
+/// resolve time; stable across cargo runs for a given program.
+/// EnumIds index into `ResolvedProgram::enums` and
+/// `TypedProgram::enums`. Mirrors [`StructId`] / [`ClassId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EnumId(pub u32);
+
 /// A function's signature as needed by call-site resolution and
 /// arity-checking. Stored on the resolved program for codegen to
 /// consult without re-walking source.
@@ -190,6 +198,39 @@ pub struct ResolvedProgram {
     /// index here. The per-(trait, type, name?) uniqueness rules
     /// are enforced at resolve time.
     pub impls: Vec<ResolvedImplDecl>,
+    /// Phase D.1 / ADR 0032: top-level sum-type (`enum`)
+    /// declarations. Each carries its own [`EnumId`] matching its
+    /// index here. Enum names share the type namespace with structs,
+    /// classes, and traits. Variant payload types stay as
+    /// [`TypeExpr`] (string-keyed) — sentinel-types resolves them.
+    pub enums: Vec<ResolvedEnumDecl>,
+    pub span: Span,
+}
+
+/// Phase D.1 / ADR 0032: an `enum` declaration after name
+/// resolution. The [`EnumId`] matches its index in
+/// [`ResolvedProgram::enums`]. Variant payload-type annotations stay
+/// as [`TypeExpr`] (string-keyed) — sentinel-types resolves them at
+/// the typing pass, looking enum names up against the table built
+/// here. Non-generic at the D.1 MVP (ADR 0032 D9).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedEnumDecl {
+    pub id: EnumId,
+    pub name: String,
+    pub name_span: Span,
+    pub variants: Vec<ResolvedVariantDecl>,
+    pub span: Span,
+}
+
+/// Phase D.1 / ADR 0032: one variant of a [`ResolvedEnumDecl`]. The
+/// variant's index in the parent's `variants` vec is its
+/// discriminant (source order). `payloads` is empty for a unit
+/// variant, else the positional payload-field type annotations.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedVariantDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub payloads: Vec<TypeExpr>,
     pub span: Span,
 }
 
@@ -653,6 +694,80 @@ pub enum ResolvedExprKind {
     Await {
         task_expr: Box<ResolvedExpr>,
     },
+    /// Phase D.1 / ADR 0032 (3/N): sum-type variant construction
+    /// `Enum::Variant(args)` (payload) or `Enum::Variant()` (unit).
+    /// Disambiguated *here* in resolve from `ImplName::method` /
+    /// `Class::init` (the AST parses all three as
+    /// [`ExprKind::QualifiedCall`] / [`ExprKind::ClassInit`]): when
+    /// the leading name resolves to an enum in the enum table, it is
+    /// variant construction. The variant *name* stays as a string —
+    /// the type checker resolves it to a variant index, validates the
+    /// payload arity + types, and gives the node `Type::Enum(enum_id)`
+    /// (emitting `UnknownVariant` / `VariantPayloadArityMismatch` on
+    /// failure).
+    EnumConstruct {
+        enum_id: EnumId,
+        enum_name: String,
+        variant_name: String,
+        variant_span: Span,
+        args: Vec<ResolvedExpr>,
+    },
+    /// Phase D.1 / ADR 0032 (3/N): `match scrutinee { arm, … }`. Each
+    /// arm's pattern bindings are assigned [`VarId`]s here and scoped
+    /// into that arm's body only (snapshot/restore of `vars`, like
+    /// handler-arm params). The type checker resolves each pattern's
+    /// variant against the scrutinee's enum, types the bindings from
+    /// the variant payloads, checks arm-body unification, and enforces
+    /// exhaustiveness.
+    Match {
+        scrutinee: Box<ResolvedExpr>,
+        arms: Vec<ResolvedMatchArm>,
+    },
+}
+
+/// Phase D.1 / ADR 0032 (3/N): one resolved `match` arm —
+/// `pattern => body`. The body has been resolved with the pattern's
+/// bindings in scope.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedMatchArm {
+    pub pattern: ResolvedPattern,
+    pub body: ResolvedExpr,
+    pub span: Span,
+}
+
+/// Phase D.1 / ADR 0032 (3/N): a resolved `match`-arm pattern. The
+/// enum + variant names stay as strings — the type checker resolves
+/// them against the scrutinee's enum (so a pattern naming the wrong
+/// enum / a non-enum scrutinee surfaces as a `TypeError`). The MVP
+/// supports a qualified variant pattern and the `_` wildcard
+/// (ADR 0032 D10).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ResolvedPattern {
+    /// `Enum::Variant` (unit) / `Enum::Variant(b1, b2)` (binds the
+    /// payload positionally).
+    Variant {
+        enum_name: String,
+        enum_name_span: Span,
+        variant_name: String,
+        variant_span: Span,
+        bindings: Vec<ResolvedPatternBinding>,
+        span: Span,
+    },
+    /// The `_` wildcard (catch-all; covers all remaining variants).
+    Wildcard(Span),
+}
+
+/// Phase D.1 / ADR 0032 (3/N): one positional binding inside a
+/// variant pattern. Every payload slot gets a [`VarId`] (so codegen
+/// can load the slot positionally), but only a named (non-`_`)
+/// binding is inserted into the arm-body scope. The type checker
+/// binds `var_id`'s env type from the matched variant's payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedPatternBinding {
+    pub var_id: VarId,
+    /// Source name; `"_"` for a wildcard binding (not in scope).
+    pub name: String,
+    pub span: Span,
 }
 
 /// C3.4 / ADR 0020 D5: a resolved handler arm. Each arm's effect+op
@@ -755,23 +870,44 @@ pub enum ResolveError {
         span: miette::SourceSpan,
     },
 
-    #[error("`enum` declarations are not supported yet (Phase D.1)")]
+    /// Phase D.1 / ADR 0032 (3/N): enum names share the type
+    /// namespace with structs, classes, and traits.
+    #[error("`{name}` is already declared")]
     #[diagnostic(
-        code(sentinel::resolve::enum_decl_not_yet),
-        help("`enum`s parse at Phase D.1 (2/N); the type layer (`Type::Enum`) lands at D.1 (3/N) — ADR 0032")
+        code(sentinel::resolve::redefined_enum),
+        help("enum names share a namespace with structs, classes, and traits — pick a unique name")
     )]
-    EnumDeclNotYet {
-        #[label("`enum` not yet resolvable")]
+    RedefinedEnum {
+        name: String,
+        #[label("redefinition here")]
         span: miette::SourceSpan,
     },
 
-    #[error("`match` is not supported yet (Phase D.1)")]
+    /// Phase D.1 / ADR 0032 (3/N): two variants of one enum share a
+    /// name.
+    #[error("enum `{enum_name}` has a duplicate variant `{variant_name}`")]
     #[diagnostic(
-        code(sentinel::resolve::match_not_yet),
-        help("`match` parses at Phase D.1 (2/N); the type layer (construction + match check + exhaustiveness) lands at D.1 (3/N) — ADR 0032")
+        code(sentinel::resolve::duplicate_variant),
+        help("variant names must be unique within their enum")
     )]
-    MatchNotYet {
-        #[label("`match` not yet resolvable")]
+    DuplicateVariant {
+        enum_name: String,
+        variant_name: String,
+        #[label("duplicate variant")]
+        span: miette::SourceSpan,
+    },
+
+    /// Phase D.1 / ADR 0032 (3/N): a `match`-arm pattern binds the
+    /// same name twice (e.g. `Pair::Both(x, x)`). MVP keeps bindings
+    /// linear within a pattern, matching the let/handler-param rule.
+    #[error("pattern binds `{name}` more than once")]
+    #[diagnostic(
+        code(sentinel::resolve::duplicate_pattern_binding),
+        help("each payload binding in a pattern needs a distinct name (use `_` to ignore a slot)")
+    )]
+    DuplicatePatternBinding {
+        name: String,
+        #[label("`{name}` already bound in this pattern")]
         span: miette::SourceSpan,
     },
 
@@ -1129,15 +1265,6 @@ pub enum ResolveError {
 /// reference struct types in their TypeExprs), then fns, then fn
 /// bodies.
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
-    // Phase D.1 (2/N) / ADR 0032: `enum` declarations parse but are not
-    // yet resolvable — the type layer (`Type::Enum`, variant
-    // construction, match check + exhaustiveness) lands at D.1 (3/N).
-    if let Some(ed) = program.enums.first() {
-        return Err(ResolveError::EnumDeclNotYet {
-            span: to_source_span(&ed.name_span),
-        });
-    }
-
     let mut next_fn_id: u32 = 0;
     let mut next_var_id: u32 = 0;
 
@@ -1361,6 +1488,56 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         });
     }
 
+    // Phase D.1 / ADR 0032 (3/N) (Pass 0d.5): collect enum
+    // declarations. Enum names share the type namespace with structs,
+    // classes, and traits (an `enum Point` collides with any of
+    // them). EnumIds index into resolved_enums. Variant names must be
+    // unique within their enum; payload types stay as TypeExpr (the
+    // type checker resolves them). The table is built before the impl
+    // pass so `impl_ctx` can carry it into expression resolution for
+    // the `Enum::Variant(args)` construction disambiguation.
+    let mut enum_table: HashMap<String, EnumId> = HashMap::new();
+    let mut resolved_enums: Vec<ResolvedEnumDecl> =
+        Vec::with_capacity(program.enums.len());
+    for (idx, ed) in program.enums.iter().enumerate() {
+        if struct_table.contains_key(&ed.name)
+            || class_table.contains_key(&ed.name)
+            || trait_table.contains_key(&ed.name)
+            || enum_table.contains_key(&ed.name)
+        {
+            return Err(ResolveError::RedefinedEnum {
+                name: ed.name.clone(),
+                span: to_source_span(&ed.name_span),
+            });
+        }
+        let id = EnumId(idx as u32);
+        enum_table.insert(ed.name.clone(), id);
+        let mut variant_names: HashSet<String> = HashSet::new();
+        let mut variants = Vec::with_capacity(ed.variants.len());
+        for v in &ed.variants {
+            if !variant_names.insert(v.name.clone()) {
+                return Err(ResolveError::DuplicateVariant {
+                    enum_name: ed.name.clone(),
+                    variant_name: v.name.clone(),
+                    span: to_source_span(&v.name_span),
+                });
+            }
+            variants.push(ResolvedVariantDecl {
+                name: v.name.clone(),
+                name_span: v.name_span.clone(),
+                payloads: v.payloads.clone(),
+                span: v.span.clone(),
+            });
+        }
+        resolved_enums.push(ResolvedEnumDecl {
+            id,
+            name: ed.name.clone(),
+            name_span: ed.name_span.clone(),
+            variants,
+            span: ed.span.clone(),
+        });
+    }
+
     // C4.2 / ADR 0023 D3/D4/D8 (Pass 0e): collect impl declarations
     // + enforce scope-local coherence. Default impls keyed by
     // (trait_id, target); named impls keyed by name. Bodies are
@@ -1475,6 +1652,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     let impl_ctx = ImplCtx {
         named: &impl_named_table,
         to_trait_methods: &impl_to_trait_methods,
+        enum_table: &enum_table,
     };
 
     // Pre-register the runtime builtins. The runtime (and codegen
@@ -1812,6 +1990,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         classes: resolved_classes,
         traits: resolved_traits,
         impls: resolved_impls,
+        enums: resolved_enums,
         span: program.span.clone(),
     })
 }
@@ -1825,6 +2004,13 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
 struct ImplCtx<'a> {
     named: &'a HashMap<String, ImplId>,
     to_trait_methods: &'a HashMap<ImplId, (TraitId, Vec<String>)>,
+    /// Phase D.1 / ADR 0032 (3/N): enum name → [`EnumId`] table,
+    /// threaded alongside the impl tables so `Enum::Variant(args)`
+    /// construction disambiguates from `ImplName::method(args)` /
+    /// `Class::init(args)` during expression resolution. (Despite the
+    /// `ImplCtx` name, this bundle is the general name-resolution
+    /// context carried into `resolve_expr`.)
+    enum_table: &'a HashMap<String, EnumId>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2713,6 +2899,29 @@ fn resolve_expr(
             }
         }
         ExprKind::ClassInit { class_name, class_name_span, args } => {
+            // Phase D.1 / ADR 0032 (3/N): an enum with a variant
+            // literally named `init` — `Enum::init(args)` parses as
+            // ClassInit, but is variant construction. Disambiguate
+            // before the class lookup (enums share the name table).
+            if let Some(&enum_id) = impls.enum_table.get(class_name) {
+                let mut resolved_args = Vec::with_capacity(args.len());
+                for a in args {
+                    resolved_args.push(resolve_expr(
+                        a, fn_table, signatures, struct_table, class_table,
+                        effect_table, effects, impls, vars, next_var_id,
+                    )?);
+                }
+                return Ok(Spanned {
+                    kind: ResolvedExprKind::EnumConstruct {
+                        enum_id,
+                        enum_name: class_name.clone(),
+                        variant_name: "init".to_string(),
+                        variant_span: class_name_span.clone(),
+                        args: resolved_args,
+                    },
+                    span: expr.span.clone(),
+                });
+            }
             // C4.1 / ADR 0022 D5: `Name::init(args)` — look up
             // the class. Arity / param type checks are the typing
             // layer's responsibility.
@@ -2752,6 +2961,29 @@ fn resolve_expr(
             method_span,
             args,
         } => {
+            // Phase D.1 / ADR 0032 (3/N): if the leading name is an
+            // enum, `Enum::Variant(args)` is variant construction, not
+            // an impl-method qualified call. The type checker
+            // validates the variant name + payload arity/types.
+            if let Some(&enum_id) = impls.enum_table.get(impl_name) {
+                let mut resolved_args = Vec::with_capacity(args.len());
+                for a in args {
+                    resolved_args.push(resolve_expr(
+                        a, fn_table, signatures, struct_table, class_table,
+                        effect_table, effects, impls, vars, next_var_id,
+                    )?);
+                }
+                return Ok(Spanned {
+                    kind: ResolvedExprKind::EnumConstruct {
+                        enum_id,
+                        enum_name: impl_name.clone(),
+                        variant_name: method.clone(),
+                        variant_span: method_span.clone(),
+                        args: resolved_args,
+                    },
+                    span: expr.span.clone(),
+                });
+            }
             // C4.2 (2/N) / ADR 0023 D6 Path 2: route through the
             // impl table. Find the named impl, then find the
             // method's index on its trait's method list.
@@ -2865,16 +3097,124 @@ fn resolve_expr(
                 task_expr: Box::new(resolved_task),
             }
         }
-        ExprKind::Match { .. } => {
-            // Phase D.1 (2/N) / ADR 0032: the parser produces `match`,
-            // but the type layer (Type::Enum + construction + match
-            // type-check + exhaustiveness) lands at D.1 (3/N).
-            return Err(ResolveError::MatchNotYet {
-                span: to_source_span(&expr.span),
-            });
-        }
+        ExprKind::Match { scrutinee, arms } => resolve_match_expr(
+            scrutinee,
+            arms,
+            fn_table,
+            signatures,
+            struct_table,
+            class_table,
+            effect_table,
+            effects,
+            impls,
+            vars,
+            next_var_id,
+        )?,
     };
     Ok(Spanned { kind, span: expr.span.clone() })
+}
+
+/// Phase D.1 / ADR 0032 (3/N): resolve `match scrutinee { arms }`.
+/// The scrutinee resolves in the enclosing scope. Each arm's pattern
+/// bindings get fresh [`VarId`]s scoped into that arm's body only
+/// (snapshot/restore of `vars`, mirroring handler-arm params in
+/// [`resolve_handle_expr`]); `_`-named binding slots still get a
+/// VarId (for positional codegen) but are not inserted into scope.
+/// Enum + variant *names* stay as strings — the type checker resolves
+/// them against the scrutinee's enum and enforces exhaustiveness.
+#[allow(clippy::too_many_arguments)]
+fn resolve_match_expr(
+    scrutinee: &Expr,
+    arms: &[MatchArm],
+    fn_table: &HashMap<String, FnId>,
+    signatures: &[FnSignature],
+    struct_table: &HashMap<String, StructId>,
+    class_table: &HashMap<String, ClassId>,
+    effect_table: &HashMap<String, EffectId>,
+    effects: &[ResolvedEffectDecl],
+    impls: ImplCtx<'_>,
+    vars: &mut HashMap<String, VarId>,
+    next_var_id: &mut u32,
+) -> Result<ResolvedExprKind, ResolveError> {
+    let scrutinee_r = resolve_expr(
+        scrutinee, fn_table, signatures, struct_table, class_table,
+        effect_table, effects, impls, vars, next_var_id,
+    )?;
+
+    let mut resolved_arms = Vec::with_capacity(arms.len());
+    for arm in arms {
+        match &arm.pattern {
+            Pattern::Variant {
+                enum_name,
+                enum_name_span,
+                variant,
+                variant_span,
+                bindings,
+                span: pat_span,
+            } => {
+                // Bind the pattern's payload slots in a child scope so
+                // they don't leak past this arm's body. Each slot gets
+                // a VarId; `_` is given a (throwaway) VarId but is not
+                // inserted into `vars` (so it cannot be referenced).
+                let saved_vars = vars.clone();
+                let mut seen: HashSet<String> = HashSet::new();
+                let mut resolved_bindings = Vec::with_capacity(bindings.len());
+                for b in bindings {
+                    let vid = VarId(*next_var_id);
+                    *next_var_id += 1;
+                    if b.kind != "_" {
+                        if !seen.insert(b.kind.clone()) {
+                            return Err(ResolveError::DuplicatePatternBinding {
+                                name: b.kind.clone(),
+                                span: to_source_span(&b.span),
+                            });
+                        }
+                        vars.insert(b.kind.clone(), vid);
+                    }
+                    resolved_bindings.push(ResolvedPatternBinding {
+                        var_id: vid,
+                        name: b.kind.clone(),
+                        span: b.span.clone(),
+                    });
+                }
+                let body = resolve_expr(
+                    &arm.body, fn_table, signatures, struct_table, class_table,
+                    effect_table, effects, impls, vars, next_var_id,
+                )?;
+                *vars = saved_vars;
+                resolved_arms.push(ResolvedMatchArm {
+                    pattern: ResolvedPattern::Variant {
+                        enum_name: enum_name.clone(),
+                        enum_name_span: enum_name_span.clone(),
+                        variant_name: variant.clone(),
+                        variant_span: variant_span.clone(),
+                        bindings: resolved_bindings,
+                        span: pat_span.clone(),
+                    },
+                    body,
+                    span: arm.span.clone(),
+                });
+            }
+            Pattern::Wildcard(wspan) => {
+                // No bindings — the body resolves in the enclosing
+                // scope unchanged.
+                let body = resolve_expr(
+                    &arm.body, fn_table, signatures, struct_table, class_table,
+                    effect_table, effects, impls, vars, next_var_id,
+                )?;
+                resolved_arms.push(ResolvedMatchArm {
+                    pattern: ResolvedPattern::Wildcard(wspan.clone()),
+                    body,
+                    span: arm.span.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(ResolvedExprKind::Match {
+        scrutinee: Box::new(scrutinee_r),
+        arms: resolved_arms,
+    })
 }
 
 /// C3.4 / ADR 0020 D5: resolve `handle body with { arms }`.
@@ -3156,14 +3496,19 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
             format!("function `{name}` is already declared"),
             span.offset()..(span.offset() + span.len()),
         ),
-        ResolveError::EnumDeclNotYet { span } => (
-            "sentinel::resolve::enum_decl_not_yet",
-            "`enum` declarations are not supported yet (Phase D.1)".to_string(),
+        ResolveError::RedefinedEnum { name, span } => (
+            "sentinel::resolve::redefined_enum",
+            format!("`{name}` is already declared"),
             span.offset()..(span.offset() + span.len()),
         ),
-        ResolveError::MatchNotYet { span } => (
-            "sentinel::resolve::match_not_yet",
-            "`match` is not supported yet (Phase D.1)".to_string(),
+        ResolveError::DuplicateVariant { enum_name, variant_name, span } => (
+            "sentinel::resolve::duplicate_variant",
+            format!("enum `{enum_name}` has a duplicate variant `{variant_name}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::DuplicatePatternBinding { name, span } => (
+            "sentinel::resolve::duplicate_pattern_binding",
+            format!("pattern binds `{name}` more than once"),
             span.offset()..(span.offset() + span.len()),
         ),
         ResolveError::MissingMain => (
@@ -4395,19 +4740,149 @@ mod tests {
         }
     }
 
-    // ----- Phase D.1 (2/N) / ADR 0032: enum + match rejected until 3/N -----
+    // ----- Phase D.1 (3/N) / ADR 0032: enum + match resolve -----
 
     #[test]
-    fn enum_decl_rejected_not_yet() {
-        let err = resolve_err("enum Color { Red, Green }\nfn main() -> i64 { 0 }");
-        assert!(matches!(err, ResolveError::EnumDeclNotYet { .. }));
+    fn enum_decl_resolves_with_variants() {
+        let p = resolve_ok("enum Color { Red, Green, Rgb(i64, i64, i64) }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.enums.len(), 1);
+        let e = &p.enums[0];
+        assert_eq!(e.name, "Color");
+        assert_eq!(e.id, EnumId(0));
+        assert_eq!(e.variants.len(), 3);
+        assert_eq!(e.variants[0].name, "Red");
+        assert!(e.variants[0].payloads.is_empty());
+        assert_eq!(e.variants[2].name, "Rgb");
+        assert_eq!(e.variants[2].payloads.len(), 3);
     }
 
     #[test]
-    fn match_expr_rejected_not_yet() {
-        // No enum decl is needed — the `match` itself is the not-yet
-        // construct (rejected before its children resolve).
-        let err = resolve_err("fn f(s: i64) -> i64 { match s { _ => 0 } }\nfn main() -> i64 { 0 }");
-        assert!(matches!(err, ResolveError::MatchNotYet { .. }));
+    fn enum_name_collides_with_struct() {
+        let err = resolve_err("struct Color { x: i64 }\nenum Color { Red }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, ResolveError::RedefinedEnum { .. }));
+    }
+
+    #[test]
+    fn duplicate_variant_rejected() {
+        let err = resolve_err("enum Color { Red, Red }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, ResolveError::DuplicateVariant { .. }));
+    }
+
+    #[test]
+    fn payload_variant_construction_resolves_to_enum_construct() {
+        // `Color::Rgb(1,2,3)` parses as a QualifiedCall but resolves
+        // to EnumConstruct because `Color` is an enum.
+        let p = resolve_ok(
+            "enum Color { Red, Rgb(i64, i64, i64) }\n\
+             fn main() -> i64 { let c = Color::Rgb(1, 2, 3); 0 }",
+        );
+        let main = p.main();
+        match &main.body.stmts[0].kind {
+            ResolvedStmtKind::Let { value, .. } => match &value.kind {
+                ResolvedExprKind::EnumConstruct { enum_id, variant_name, args, .. } => {
+                    assert_eq!(*enum_id, EnumId(0));
+                    assert_eq!(variant_name, "Rgb");
+                    assert_eq!(args.len(), 3);
+                }
+                other => panic!("expected EnumConstruct, got {other:?}"),
+            },
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unit_variant_construction_via_empty_parens_resolves() {
+        let p = resolve_ok(
+            "enum Color { Red, Green }\n\
+             fn main() -> i64 { let c = Color::Red(); 0 }",
+        );
+        let main = p.main();
+        match &main.body.stmts[0].kind {
+            ResolvedStmtKind::Let { value, .. } => match &value.kind {
+                ResolvedExprKind::EnumConstruct { variant_name, args, .. } => {
+                    assert_eq!(variant_name, "Red");
+                    assert!(args.is_empty());
+                }
+                other => panic!("expected EnumConstruct, got {other:?}"),
+            },
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_resolves_with_arms_and_bindings() {
+        let p = resolve_ok(
+            "enum Shape { Unit, Circle(i64), Rect(i64, i64) }\n\
+             fn area(s: Shape) -> i64 {\n\
+                match s {\n\
+                    Shape::Unit => 0,\n\
+                    Shape::Circle(r) => r,\n\
+                    Shape::Rect(w, h) => w,\n\
+                }\n\
+             }\n\
+             fn main() -> i64 { 0 }",
+        );
+        let area = p.fns.iter().find(|f| f.name == "area").expect("area fn");
+        match &area.body.tail.kind {
+            ResolvedExprKind::Match { arms, .. } => {
+                assert_eq!(arms.len(), 3);
+                // Each variant pattern carries its bindings.
+                match &arms[1].pattern {
+                    ResolvedPattern::Variant { variant_name, bindings, .. } => {
+                        assert_eq!(variant_name, "Circle");
+                        assert_eq!(bindings.len(), 1);
+                        assert_eq!(bindings[0].name, "r");
+                    }
+                    other => panic!("expected Variant pattern, got {other:?}"),
+                }
+            }
+            other => panic!("expected Match, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_binding_is_scoped_to_its_arm_only() {
+        // `r` from the Circle arm must not leak into a later
+        // reference outside the match — it resolves as undefined.
+        let err = resolve_err(
+            "enum Shape { Circle(i64), Square(i64) }\n\
+             fn f(s: Shape) -> i64 {\n\
+                let x = match s { Shape::Circle(r) => r, Shape::Square(q) => q };\n\
+                r\n\
+             }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, ResolveError::UndefinedVariable { .. }));
+    }
+
+    #[test]
+    fn duplicate_pattern_binding_rejected() {
+        let err = resolve_err(
+            "enum Pair { Both(i64, i64) }\n\
+             fn f(p: Pair) -> i64 { match p { Pair::Both(x, x) => x } }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, ResolveError::DuplicatePatternBinding { .. }));
+    }
+
+    #[test]
+    fn wildcard_binding_not_in_scope() {
+        // `_` slots get a VarId but aren't referenceable.
+        let p = resolve_ok(
+            "enum Shape { Circle(i64) }\n\
+             fn f(s: Shape) -> i64 { match s { Shape::Circle(_) => 0 } }\n\
+             fn main() -> i64 { 0 }",
+        );
+        let f = p.fns.iter().find(|f| f.name == "f").expect("f fn");
+        match &f.body.tail.kind {
+            ResolvedExprKind::Match { arms, .. } => match &arms[0].pattern {
+                ResolvedPattern::Variant { bindings, .. } => {
+                    assert_eq!(bindings.len(), 1);
+                    assert_eq!(bindings[0].name, "_");
+                }
+                other => panic!("expected Variant, got {other:?}"),
+            },
+            other => panic!("expected Match, got {other:?}"),
+        }
     }
 }

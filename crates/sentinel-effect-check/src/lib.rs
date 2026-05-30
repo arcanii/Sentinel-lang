@@ -436,6 +436,22 @@ fn walk_expr(
             }
             walk_expr(task_expr, effective, async_id, acc);
         }
+
+        // Phase D.1 / ADR 0032 (3/N): enum construction + `match`
+        // introduce no effect of their own; they propagate whatever
+        // their subexpressions carry. Construction walks its payload
+        // args; `match` walks the scrutinee + each arm body.
+        TypedExprKind::EnumConstruct { args, .. } => {
+            for a in args {
+                walk_expr(a, effective, async_id, acc);
+            }
+        }
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            walk_expr(scrutinee, effective, async_id, acc);
+            for arm in arms {
+                walk_expr(&arm.body, effective, async_id, acc);
+            }
+        }
     }
 }
 

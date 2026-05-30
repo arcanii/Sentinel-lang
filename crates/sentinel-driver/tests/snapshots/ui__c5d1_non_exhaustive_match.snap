@@ -1,0 +1,16 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c5d1_non_exhaustive_match.sentinel\")"
+---
+sentinel::types::non_exhaustive_match
+
+  × non-exhaustive `match` on `Color`: missing Blue
+    ╭─[tests/ui/c5d1_non_exhaustive_match.sentinel:12:5]
+ 11 │     fn name_code(c: Color) -> i64 {
+ 12 │ ╭─▶     match c {
+ 13 │ │           Color::Red => 1,
+ 14 │ │           Color::Green => 2,
+ 15 │ ├─▶     }
+    · ╰──── 
+ 16 │     }
+    ╰────

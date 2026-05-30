@@ -1,0 +1,20 @@
+// Phase D.1 / ADR 0032 (3/N): a `match` that omits a variant and has
+// no `_` wildcard is rejected at type-check with NonExhaustiveMatch —
+// the exhaustiveness guarantee that makes the (4/N) `switch` lowering
+// need no runtime fallback. `Blue` is uncovered here.
+enum Color {
+    Red,
+    Green,
+    Blue,
+}
+
+fn name_code(c: Color) -> i64 {
+    match c {
+        Color::Red => 1,
+        Color::Green => 2,
+    }
+}
+
+fn main() -> i64 {
+    name_code(Color::Red())
+}

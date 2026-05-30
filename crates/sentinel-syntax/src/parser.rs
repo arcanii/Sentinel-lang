@@ -462,8 +462,8 @@ impl<'a> Parser<'a> {
     /// ```
     ///
     /// Non-generic at the D.1 MVP (generic enums are a fast-follow per
-    /// ADR 0032 D9). Additive — resolve rejects `enum`s with
-    /// `EnumDeclNotYet` until D.1 (3/N).
+    /// ADR 0032 D9). Resolve + types check `enum`s at D.1 (3/N); codegen
+    /// lowers construction + `match` at D.1 (4/N).
     fn parse_enum_decl(&mut self) -> Result<EnumDecl, ParseError> {
         let enum_start = match self.peek_kind() {
             Some(TokenKind::Enum) => self.advance().expect("peeked").span.start,

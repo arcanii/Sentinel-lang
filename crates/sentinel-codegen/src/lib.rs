@@ -98,6 +98,19 @@ pub enum CodegenError {
     )]
     HandlersNotYetSupported,
 
+    /// Phase D.1 / ADR 0032 (3/N): `enum` construction and `match`
+    /// parse and type-check (with exhaustiveness) at D.1 (3/N), but
+    /// their codegen — the `{ i32 tag, ptr payload }` layout, the
+    /// `switch` lowering, and recursive payload drop — lands at D.1
+    /// (4/N). Enum-typed signatures DO lower (`llvm_basic_type` handles
+    /// `Type::Enum`); only construction/match expressions reject here.
+    #[error("`enum` construction / `match` codegen is not yet lowered (lands at D.1 (4/N))")]
+    #[diagnostic(
+        code(sentinel::codegen::enum_codegen_not_yet),
+        help("the type-checker accepts enum construction + `match` (D.1 (3/N)); codegen — `{{tag,ptr}}` layout + `switch` + drop — lands at D.1 (4/N) per ADR 0032")
+    )]
+    EnumCodegenNotYet,
+
     /// C3.5(a) / ADR 0020 D9: at C3.5(a) the handler codegen
     /// supports only the restricted case where the `handle` body
     /// is a direct `perform Op(args)` expression — no fn-call-
@@ -1246,6 +1259,19 @@ fn collect_spawn_targets_expr(expr: &TypedExpr, acc: &mut Vec<FnId>) {
         }
         TypedExprKind::Scope { body, .. } => collect_spawn_targets_block(body, acc),
         TypedExprKind::Await { task_expr, .. } => collect_spawn_targets_expr(task_expr, acc),
+        // Phase D.1 / ADR 0032 (3/N): recurse into construction args +
+        // the scrutinee / arm bodies (a `spawn` could nest inside).
+        TypedExprKind::EnumConstruct { args, .. } => {
+            for a in args {
+                collect_spawn_targets_expr(a, acc);
+            }
+        }
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            collect_spawn_targets_expr(scrutinee, acc);
+            for arm in arms {
+                collect_spawn_targets_expr(&arm.body, acc);
+            }
+        }
         TypedExprKind::Block(b) => collect_spawn_targets_block(b, acc),
         TypedExprKind::If { cond, then_branch, else_branch } => {
             collect_spawn_targets_expr(cond, acc);
@@ -1379,6 +1405,13 @@ fn field_type_needs_drop_inner(
         // no codegen-emitted drop. A Task value held past its scope
         // is reclaimed at scope_exit.
         Type::Task(_) => false,
+        // Phase D.1 / ADR 0032 D6: an enum owns its heap-boxed payload
+        // and WILL need recursive drop — but that lands at D.1 (4/N)
+        // alongside construction codegen. At (3/N) an enum value can
+        // never be constructed (construction rejects with
+        // `EnumCodegenNotYet`), so no payload is ever allocated; report
+        // "no drop" here so the drop walks stay safe until (4/N).
+        Type::Enum(_) => false,
         // C4.1 / ADR 0022 D9: class instances follow the same
         // drop-needs rule as structs (recurse into fields).
         Type::Class(id) => {
@@ -1498,6 +1531,20 @@ fn llvm_basic_type<'ctx>(
         // C4.4 / ADR 0024 D8: Task lowers to an opaque pointer
         // (*SentinelTask); the runtime owns the struct layout.
         Type::Task(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
+        // Phase D.1 / ADR 0032 D4: an enum lowers to the abi-v1
+        // `{ i32 tag, ptr payload }` — a 4-byte discriminant (variant
+        // index, source order) + an opaque pointer to a heap-allocated
+        // struct of the active variant's payload fields (`null` for a
+        // unit variant). Heap-boxing the payload (like `?Struct`) is
+        // what makes *recursive* enums representable (an AST node
+        // references itself). This lets enum-typed signatures lower at
+        // D.1 (3/N); construction + `match` lowering land at (4/N).
+        Type::Enum(_) => {
+            let tag_ty: BasicTypeEnum = context.i32_type().into();
+            let payload_ty: BasicTypeEnum =
+                context.ptr_type(inkwell::AddressSpace::default()).into();
+            context.struct_type(&[tag_ty, payload_ty], false).into()
+        }
         // C4.2: TraitSelf is impossible at codegen — impl-sig
         // substitution resolves it to a concrete type before
         // codegen sees it.
@@ -1793,6 +1840,20 @@ fn walk_expr_for_mono(
         TypedExprKind::Await { task_expr, .. } => walk_expr_for_mono(
             task_expr, subst, program, instances, refs, visited, order, pending,
         ),
+        // Phase D.1 / ADR 0032 (3/N): enums are non-generic at the MVP,
+        // but a construction arg / arm body could still contain a
+        // generic call to monomorphise — recurse into the children.
+        TypedExprKind::EnumConstruct { args, .. } => {
+            for a in args {
+                walk_expr_for_mono(a, subst, program, instances, refs, visited, order, pending);
+            }
+        }
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            walk_expr_for_mono(scrutinee, subst, program, instances, refs, visited, order, pending);
+            for arm in arms {
+                walk_expr_for_mono(&arm.body, subst, program, instances, refs, visited, order, pending);
+            }
+        }
     }
 }
 
@@ -1891,6 +1952,15 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
             .get(id.0 as usize)
             .map(|c| c.name.clone())
             .unwrap_or_else(|| format!("class{}", id.0)),
+        // Phase D.1 / ADR 0032 D5: render enum types by name (so an
+        // enum-typed fn signature mangles to a stable, readable symbol;
+        // enums are non-generic at the MVP so this never appears in a
+        // mono key).
+        Type::Enum(id) => program
+            .enums
+            .get(id.0 as usize)
+            .map(|e| e.name.clone())
+            .unwrap_or_else(|| format!("enum{}", id.0)),
         // C4.2: TraitSelf doesn't reach mangling.
         Type::TraitSelf(id) => format!("Self_trait{}", id.0),
     }
@@ -1913,6 +1983,8 @@ fn arg_contains_typeparam(
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
+        // Phase D.1 / ADR 0032: enums are non-generic at the MVP.
+        | Type::Enum(_)
         | Type::TraitSelf(_) => false,
         Type::Nullable(ni) => arg_contains_typeparam(ni.to_type(), instances, refs),
         Type::Array(ae) => arg_contains_typeparam(ae.to_type(), instances, refs),
@@ -1987,6 +2059,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         ),
         Type::Task(_) => panic!("llvm_int_type called on non-int Type::Task"),
         Type::Class(_) => panic!("llvm_int_type called on non-int Type::Class"),
+        Type::Enum(_) => panic!("llvm_int_type called on non-int Type::Enum"),
         Type::TraitSelf(_) => {
             panic!("llvm_int_type called on Type::TraitSelf — must be substituted before codegen")
         }
@@ -3415,6 +3488,15 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // their fields and follow the standard pattern.
                 self.emit_drop_struct_fields(ptr, ty, program)?;
             }
+            Type::Enum(_) => {
+                // Phase D.1 / ADR 0032 D6: an enum's recursive payload
+                // drop (free the heap payload by active variant) lands
+                // at D.1 (4/N) with construction codegen. At (3/N) an
+                // enum value is never constructed (construction
+                // rejects), so this arm is unreachable for a runnable
+                // program — and `field_type_needs_drop_inner` returns
+                // false for enums, so it is not scheduled. No-op.
+            }
             Type::TraitSelf(_) => {
                 // C4.2: unreachable post-substitution; defensive.
             }
@@ -4506,6 +4588,18 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .left()
                     .expect("task_await returns i64"))
             }
+
+            // Phase D.1 / ADR 0032 (3/N): enum construction + `match`
+            // type-check (with exhaustiveness) but their codegen — the
+            // `{ i32 tag, ptr payload }` layout, `switch` lowering, and
+            // recursive payload drop — lands at D.1 (4/N). Reject
+            // cleanly (a compile error, not a panic), mirroring how
+            // handler runtime gated codegen between C3.4 and C3.5.
+            // (Enum-typed signatures still lower — `llvm_basic_type`
+            // handles `Type::Enum` — so only these expressions reject.)
+            TypedExprKind::EnumConstruct { .. } | TypedExprKind::Match { .. } => {
+                Err(CodegenError::EnumCodegenNotYet)
+            }
         }
     }
 
@@ -5196,6 +5290,12 @@ fn expr_performs(expr: &TypedExpr) -> bool {
         }
         TypedExprKind::Spawn { call, .. } => expr_performs(call),
         TypedExprKind::Await { task_expr, .. } => expr_performs(task_expr),
+        // Phase D.1 / ADR 0032 (3/N): a perform could nest in a
+        // construction arg / scrutinee / arm body.
+        TypedExprKind::EnumConstruct { args, .. } => args.iter().any(expr_performs),
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            expr_performs(scrutinee) || arms.iter().any(|a| expr_performs(&a.body))
+        }
     }
 }
 
@@ -5498,6 +5598,19 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
         }
         TypedExprKind::Spawn { call, .. } => walk_collect_var_refs(call, acc),
         TypedExprKind::Await { task_expr, .. } => walk_collect_var_refs(task_expr, acc),
+        // Phase D.1 / ADR 0032 (3/N): collect var refs from the
+        // construction args / scrutinee / arm bodies.
+        TypedExprKind::EnumConstruct { args, .. } => {
+            for a in args {
+                walk_collect_var_refs(a, acc);
+            }
+        }
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            walk_collect_var_refs(scrutinee, acc);
+            for arm in arms {
+                walk_collect_var_refs(&arm.body, acc);
+            }
+        }
     }
 }
 
@@ -5586,6 +5699,12 @@ fn count_performs(expr: &TypedExpr) -> usize {
         }
         TypedExprKind::Spawn { call, .. } => count_performs(call),
         TypedExprKind::Await { task_expr, .. } => count_performs(task_expr),
+        // Phase D.1 / ADR 0032 (3/N): sum performs across the
+        // construction args / scrutinee / arm bodies.
+        TypedExprKind::EnumConstruct { args, .. } => args.iter().map(count_performs).sum(),
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            count_performs(scrutinee) + arms.iter().map(|a| count_performs(&a.body)).sum::<usize>()
+        }
     }
 }
 
@@ -5679,6 +5798,11 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
             .or_else(|| find_unique_perform(&body.tail)),
         TypedExprKind::Spawn { call, .. } => find_unique_perform(call),
         TypedExprKind::Await { task_expr, .. } => find_unique_perform(task_expr),
+        // Phase D.1 / ADR 0032 (3/N): search the construction args /
+        // scrutinee / arm bodies for the unique embedded perform.
+        TypedExprKind::EnumConstruct { args, .. } => args.iter().find_map(find_unique_perform),
+        TypedExprKind::Match { scrutinee, arms, .. } => find_unique_perform(scrutinee)
+            .or_else(|| arms.iter().find_map(|a| find_unique_perform(&a.body))),
     }
 }
 
@@ -5813,7 +5937,12 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
         // exceed 1) — clone them unchanged like the group above.
         | TypedExprKind::Scope { .. }
         | TypedExprKind::Spawn { .. }
-        | TypedExprKind::Await { .. } => {
+        | TypedExprKind::Await { .. }
+        // Phase D.1 / ADR 0032 (3/N): an enum construction / `match`
+        // never embeds a single substitutable perform at the MVP
+        // (count would exceed 1); clone unchanged like the group.
+        | TypedExprKind::EnumConstruct { .. }
+        | TypedExprKind::Match { .. } => {
             // C3.5(d) MVP: the embedded-perform shape only fires
             // when count_performs(tail) == 1. Substituting a
             // Handle / ResumeKont / MethodCall / ClassInit
@@ -6063,6 +6192,13 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
         TypedExprKind::Scope { body, .. } => find_var_name_in_block(body, id),
         TypedExprKind::Spawn { call, .. } => find_var_name_in_expr(call, id),
         TypedExprKind::Await { task_expr, .. } => find_var_name_in_expr(task_expr, id),
+        // Phase D.1 / ADR 0032 (3/N): search construction args /
+        // scrutinee / arm bodies for the var's source name.
+        TypedExprKind::EnumConstruct { args, .. } => {
+            args.iter().find_map(|a| find_var_name_in_expr(a, id))
+        }
+        TypedExprKind::Match { scrutinee, arms, .. } => find_var_name_in_expr(scrutinee, id)
+            .or_else(|| arms.iter().find_map(|a| find_var_name_in_expr(&a.body, id))),
     }
 }
 

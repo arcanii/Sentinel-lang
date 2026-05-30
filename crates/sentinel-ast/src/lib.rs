@@ -320,9 +320,9 @@ pub enum ExprKind {
     },
     /// Phase D.1 / ADR 0032: `match scrutinee { pat => body, … }` —
     /// exhaustive pattern matching over a sum type. An expression (all
-    /// arms share a result type, like `if`). The parser produces this at
-    /// D.1 (2/N); resolve rejects it with `ResolveError::MatchNotYet`
-    /// until D.1 (3/N) wires the type layer.
+    /// arms share a result type, like `if`). Resolve + types check it at
+    /// D.1 (3/N) (`ResolvedExprKind::Match` → `TypedExprKind::Match` with
+    /// exhaustiveness); codegen lowers it to a `switch` at D.1 (4/N).
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
@@ -462,9 +462,9 @@ pub struct Program {
     /// optional `name` field distinguishes.
     pub impls: Vec<ImplDecl>,
     /// Phase D.1 / ADR 0032: top-level sum-type (`enum`) declarations.
-    /// Always present (may be empty for pre-D.1 programs). The parser
-    /// produces these at D.1 (2/N); resolve rejects any non-empty `enums`
-    /// with `ResolveError::EnumDeclNotYet` until D.1 (3/N).
+    /// Always present (may be empty for pre-D.1 programs). Resolve builds
+    /// the enum table + types interns `Type::Enum` at D.1 (3/N); codegen
+    /// lowers construction + `match` at D.1 (4/N).
     pub enums: Vec<EnumDecl>,
     pub span: Span,
 }
@@ -556,9 +556,8 @@ pub struct StructField {
 /// Phase D.1 / ADR 0032: a top-level sum-type (enum) declaration —
 /// `enum Name { V1, V2(T), V3(T1, T2) }`. Variants are unit or carry a
 /// positional tuple payload. Non-generic at the D.1 MVP (generic enums
-/// are a fast-follow per ADR 0032 D9). The parser produces this at D.1
-/// (2/N); resolve rejects any non-empty `enums` with
-/// `ResolveError::EnumDeclNotYet` until D.1 (3/N) wires the type layer.
+/// are a fast-follow per ADR 0032 D9). Resolve assigns its [`EnumId`] +
+/// types interns `Type::Enum` at D.1 (3/N); codegen lowers it at (4/N).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EnumDecl {
     pub name: String,

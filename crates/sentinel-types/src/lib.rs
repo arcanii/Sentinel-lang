@@ -27,9 +27,9 @@ use salsa::Accumulator;
 use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, Spanned, TypeExpr, TypeExprKind, UnaryOp};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
-    ClassId, EffectId, FnId, ImplId, ImplTarget, ResolvedBlock, ResolvedExpr, ResolvedExprKind,
-    ResolvedFnDef, ResolvedProgram, ResolvedStmt, ResolvedStmtKind, StructId, TraitId,
-    TypeParamId, VarId,
+    ClassId, EffectId, EnumId, FnId, ImplId, ImplTarget, ResolvedBlock, ResolvedExpr,
+    ResolvedExprKind, ResolvedFnDef, ResolvedPattern, ResolvedProgram, ResolvedStmt,
+    ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId,
 };
 use sentinel_ast::SelfKind;
 
@@ -130,6 +130,15 @@ pub enum Type {
     /// indirection keeps the generalisation path open + matches the
     /// `Kont` / `Secret` / `Ref` precedent.
     Task(TaskId),
+    /// Phase D.1 / ADR 0032 D3: a user-defined sum type (`enum`)
+    /// tagged by [`EnumId`]. Nominal equality, same as `Struct` /
+    /// `Class` (two enums with identical variants are distinct
+    /// types). The underlying variant + payload data lives in
+    /// `TypedProgram.enums`. Eleventh interner-table-style variant;
+    /// preserves `Copy + Hash` (an `EnumId` is just a `u32`).
+    /// Non-generic at the D.1 MVP (generic enums are D.1b per
+    /// ADR 0032 D9).
+    Enum(EnumId),
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -179,6 +188,43 @@ pub struct TaskId(pub u32);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TaskData {
     pub result_ty: Type,
+}
+
+/// Phase D.1 / ADR 0032 D3: the underlying data of a [`Type::Enum`].
+/// Owned by [`TypedProgram::enums`] (the [`EnumId`] indexes that
+/// vec); nominal, like [`ClassData`]. Variant payload types are
+/// already resolved to concrete [`Type`]s here (the type checker
+/// resolves the resolve-stage `TypeExpr`s against the program's
+/// name tables). Non-generic at the D.1 MVP (ADR 0032 D9).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EnumData {
+    pub id: EnumId,
+    pub name: String,
+    pub name_span: Span,
+    pub variants: Vec<VariantData>,
+}
+
+impl EnumData {
+    /// Find a variant by name, returning `(index, data)`. The index
+    /// is the variant's discriminant (source order). `None` if no
+    /// such variant — the caller surfaces [`TypeError::UnknownVariant`].
+    pub fn variant(&self, name: &str) -> Option<(usize, &VariantData)> {
+        self.variants
+            .iter()
+            .enumerate()
+            .find(|(_, v)| v.name == name)
+    }
+}
+
+/// Phase D.1 / ADR 0032 D3: one variant of an [`EnumData`]. `payloads`
+/// is empty for a unit variant, else the positional payload-field
+/// types (already resolved). The variant's index in
+/// [`EnumData::variants`] is its discriminant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VariantData {
+    pub name: String,
+    pub name_span: Span,
+    pub payloads: Vec<Type>,
 }
 
 /// The underlying data of a [`Type::Secret`]. Owned by
@@ -423,7 +469,11 @@ impl Type {
             | Type::Kont(_)
             | Type::Task(_)
             | Type::Class(_)
-            | Type::TraitSelf(_) => None,
+            | Type::TraitSelf(_)
+            // Phase D.1 / ADR 0032: `?Enum` is out of scope at the MVP
+            // (NullableInner gains no Enum variant) — `?Enum` shows up
+            // only when enums become storable in nullable wrappers.
+            | Type::Enum(_) => None,
         }
     }
 
@@ -456,7 +506,10 @@ impl Type {
             | Type::Kont(_)
             | Type::Task(_)
             | Type::Class(_)
-            | Type::TraitSelf(_) => None,
+            | Type::TraitSelf(_)
+            // Phase D.1 / ADR 0032: `[Enum]` is out of scope at the MVP
+            // (ArrayElem gains no Enum variant).
+            | Type::Enum(_) => None,
         }
     }
 
@@ -490,7 +543,10 @@ impl Type {
             | Type::Bool
             | Type::Struct(_)
             | Type::Class(_)
-            | Type::TraitSelf(_) => self,
+            | Type::TraitSelf(_)
+            // Phase D.1 / ADR 0032: enums are non-generic at the MVP —
+            // no TypeParam payload, so substitution is the identity.
+            | Type::Enum(_) => self,
             Type::TypeParam(id) => {
                 let idx = id.0 as usize;
                 debug_assert!(
@@ -767,6 +823,10 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             Some(t) => format!("Self ({})", t.name),
             None => format!("<Self-trait#{}>", id.0),
         },
+        Type::Enum(id) => match program.and_then(|p| p.enums.get(id.0 as usize)) {
+            Some(e) => e.name.clone(),
+            None => format!("<enum#{}>", id.0),
+        },
     }
 }
 
@@ -787,6 +847,7 @@ impl std::fmt::Display for Type {
             Type::Task(id) => write!(f, "<task#{}>", id.0),
             Type::Class(id) => write!(f, "<class#{}>", id.0),
             Type::TraitSelf(id) => write!(f, "<Self-trait#{}>", id.0),
+            Type::Enum(id) => write!(f, "<enum#{}>", id.0),
         }
     }
 }
@@ -815,6 +876,7 @@ fn resolve_type_expr(
     te: &TypeExpr,
     struct_table: &HashMap<String, StructId>,
     class_table: &HashMap<String, ClassId>,
+    enum_table: &HashMap<String, EnumId>,
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -825,6 +887,7 @@ fn resolve_type_expr(
         te,
         struct_table,
         class_table,
+        enum_table,
         &empty,
         instances,
         refs,
@@ -838,6 +901,7 @@ fn resolve_type_expr_with_scope(
     te: &TypeExpr,
     struct_table: &HashMap<String, StructId>,
     class_table: &HashMap<String, ClassId>,
+    enum_table: &HashMap<String, EnumId>,
     type_param_scope: &TypeParamScope,
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
@@ -873,6 +937,13 @@ fn resolve_type_expr_with_scope(
                         Ok(Type::Struct(id))
                     } else if let Some(&cid) = class_table.get(other) {
                         Ok(Type::Class(cid))
+                    } else if let Some(&eid) = enum_table.get(other) {
+                        // Phase D.1 / ADR 0032: enum names are usable
+                        // in type position (e.g. `fn area(s: Shape)`).
+                        // Lookup precedence is struct → class → enum →
+                        // primitive (names are unique across these
+                        // namespaces, so order only affects diagnostics).
+                        Ok(Type::Enum(eid))
                     } else {
                         Err(TypeError::UnknownType {
                             name: other.to_string(),
@@ -891,6 +962,7 @@ fn resolve_type_expr_with_scope(
                 inner,
                 struct_table,
                 class_table,
+                enum_table,
                 type_param_scope,
                 instances,
                 refs,
@@ -914,6 +986,7 @@ fn resolve_type_expr_with_scope(
                 inner,
                 struct_table,
                 class_table,
+                enum_table,
                 type_param_scope,
                 instances,
                 refs,
@@ -940,6 +1013,7 @@ fn resolve_type_expr_with_scope(
                 inner,
                 struct_table,
                 class_table,
+                enum_table,
                 type_param_scope,
                 instances,
                 refs,
@@ -1006,6 +1080,7 @@ fn resolve_type_expr_with_scope(
                             arg,
                             struct_table,
                             class_table,
+                            enum_table,
                             type_param_scope,
                             instances,
                             refs,
@@ -1028,6 +1103,7 @@ fn resolve_type_expr_with_scope(
                 inner,
                 struct_table,
                 class_table,
+                enum_table,
                 type_param_scope,
                 instances,
                 refs,
@@ -1104,6 +1180,10 @@ pub struct TypedProgram {
     /// validated at resolve; types verifies completeness +
     /// per-method signature match against the trait.
     pub impl_decls: Vec<ImplData>,
+    /// Phase D.1 / ADR 0032 D3: enum declarations with resolved
+    /// variant payload types. Each [`EnumId`] matches its index here.
+    /// Built from `ResolvedProgram::enums`.
+    pub enums: Vec<EnumData>,
     pub span: Span,
 }
 
@@ -1175,6 +1255,12 @@ impl TypedProgram {
     /// (C4.2). Panics on out-of-range.
     pub fn impl_decl(&self, id: ImplId) -> &ImplData {
         &self.impl_decls[id.0 as usize]
+    }
+
+    /// Look up the [`EnumData`] for an enum type per ADR 0032 D3
+    /// (D.1). Panics on out-of-range — IDs only come from [`check`].
+    pub fn enum_data(&self, id: EnumId) -> &EnumData {
+        &self.enums[id.0 as usize]
     }
 }
 
@@ -1497,6 +1583,54 @@ impl TypedExpr {
             TypedExprKind::Await { task_expr, task_id } => TypedExprKind::Await {
                 task_expr: Box::new(task_expr.substitute(subst, instances, refs)),
                 task_id: *task_id,
+            },
+            // Phase D.1 / ADR 0032: enums are non-generic at the MVP
+            // (no TypeParam payloads), so the enum_id / variant_index
+            // survive substitution unchanged — only the subexpressions
+            // (args / scrutinee / arm bodies / binding types) need the
+            // deep-clone. Mirrors the non-generic Class/Task arms.
+            TypedExprKind::EnumConstruct {
+                enum_id,
+                variant_index,
+                enum_name,
+                variant_name,
+                args,
+            } => TypedExprKind::EnumConstruct {
+                enum_id: *enum_id,
+                variant_index: *variant_index,
+                enum_name: enum_name.clone(),
+                variant_name: variant_name.clone(),
+                args: args.iter().map(|a| a.substitute(subst, instances, refs)).collect(),
+            },
+            TypedExprKind::Match { scrutinee, enum_id, arms } => TypedExprKind::Match {
+                scrutinee: Box::new(scrutinee.substitute(subst, instances, refs)),
+                enum_id: *enum_id,
+                arms: arms
+                    .iter()
+                    .map(|a| TypedMatchArm {
+                        pattern: match &a.pattern {
+                            TypedPattern::Variant { variant_index, variant_name, bindings, span } => {
+                                TypedPattern::Variant {
+                                    variant_index: *variant_index,
+                                    variant_name: variant_name.clone(),
+                                    bindings: bindings
+                                        .iter()
+                                        .map(|b| TypedPatternBinding {
+                                            var_id: b.var_id,
+                                            name: b.name.clone(),
+                                            ty: b.ty.substitute(subst, instances, refs),
+                                            span: b.span.clone(),
+                                        })
+                                        .collect(),
+                                    span: span.clone(),
+                                }
+                            }
+                            TypedPattern::Wildcard(s) => TypedPattern::Wildcard(s.clone()),
+                        },
+                        body: a.body.substitute(subst, instances, refs),
+                        span: a.span.clone(),
+                    })
+                    .collect(),
             },
         };
         TypedExpr {
@@ -2014,6 +2148,70 @@ pub enum TypedExprKind {
         task_expr: Box<TypedExpr>,
         task_id: TaskId,
     },
+    /// Phase D.1 / ADR 0032 (3/N): sum-type variant construction
+    /// `Enum::Variant(args)`. The variant has been resolved to
+    /// `variant_index` (its discriminant) against the enum's variant
+    /// list, and `args` checked against the variant's payload types.
+    /// The outer node's `ty` is `Type::Enum(enum_id)`. Codegen at
+    /// D.1 (4/N) lowers this to the `{ i32 tag, ptr payload }`
+    /// layout; at (3/N) codegen rejects it.
+    EnumConstruct {
+        enum_id: EnumId,
+        variant_index: usize,
+        enum_name: String,
+        variant_name: String,
+        args: Vec<TypedExpr>,
+    },
+    /// Phase D.1 / ADR 0032 (3/N): `match scrutinee { arms }`. The
+    /// scrutinee is `Type::Enum(enum_id)`; the arms cover every
+    /// variant (or include a wildcard) — exhaustiveness is a
+    /// type-check guarantee (ADR 0032 D2/D5). Each arm's body has
+    /// been checked against the outer expression's type (`ty`). At
+    /// D.1 (4/N) codegen lowers this to an LLVM `switch` on the tag;
+    /// at (3/N) codegen rejects it.
+    Match {
+        scrutinee: Box<TypedExpr>,
+        enum_id: EnumId,
+        arms: Vec<TypedMatchArm>,
+    },
+}
+
+/// Phase D.1 / ADR 0032 (3/N): a type-checked `match` arm. The
+/// pattern has been resolved to a variant index (or wildcard) and
+/// its bindings typed from the matched variant's payloads; the body
+/// has been checked against the outer `match` expression's type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedMatchArm {
+    pub pattern: TypedPattern,
+    pub body: TypedExpr,
+    pub span: Span,
+}
+
+/// Phase D.1 / ADR 0032 (3/N): a type-checked `match`-arm pattern.
+/// The variant is resolved to its index; each binding carries the
+/// [`VarId`] it was scoped to plus the payload [`Type`] it binds
+/// (so codegen can load + type the payload slot positionally).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TypedPattern {
+    Variant {
+        variant_index: usize,
+        variant_name: String,
+        /// One entry per payload slot, in order: the binding VarId +
+        /// its payload type. A `_` binding keeps its VarId (unused).
+        bindings: Vec<TypedPatternBinding>,
+        span: Span,
+    },
+    Wildcard(Span),
+}
+
+/// Phase D.1 / ADR 0032 (3/N): one positional binding of a variant
+/// pattern, typed from the matched variant's payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypedPatternBinding {
+    pub var_id: VarId,
+    pub name: String,
+    pub ty: Type,
+    pub span: Span,
 }
 
 /// C3.4 / ADR 0020 D5: a type-checked handler arm. The arm's
@@ -2741,6 +2939,68 @@ pub enum TypeError {
         #[label("not a Task")]
         span: miette::SourceSpan,
     },
+
+    /// Phase D.1 / ADR 0032 (3/N): `Enum::Variant` names a variant
+    /// that the enum doesn't declare (construction or pattern).
+    #[error("enum `{enum_name}` has no variant `{variant_name}`")]
+    #[diagnostic(code(sentinel::types::unknown_variant))]
+    UnknownVariant {
+        enum_name: String,
+        variant_name: String,
+        #[label("no such variant on {enum_name}")]
+        span: miette::SourceSpan,
+    },
+
+    /// Phase D.1 / ADR 0032 (3/N): a variant construction or pattern
+    /// supplies the wrong number of payload values / bindings.
+    #[error("variant `{enum_name}::{variant_name}` takes {expected} payload(s), got {got}")]
+    #[diagnostic(code(sentinel::types::variant_payload_arity_mismatch))]
+    VariantPayloadArityMismatch {
+        enum_name: String,
+        variant_name: String,
+        expected: usize,
+        got: usize,
+        #[label("wrong number of payloads")]
+        span: miette::SourceSpan,
+    },
+
+    /// Phase D.1 / ADR 0032 (3/N): the scrutinee of a `match` is not
+    /// an `enum` type.
+    #[error("`match` requires an enum scrutinee (got `{got}`)")]
+    #[diagnostic(
+        code(sentinel::types::match_scrutinee_not_enum),
+        help("`match` at the D.1 MVP works over `enum` values; the scrutinee must be an enum")
+    )]
+    MatchScrutineeNotEnum {
+        got: Type,
+        #[label("not an enum")]
+        span: miette::SourceSpan,
+    },
+
+    /// Phase D.1 / ADR 0032 (3/N) D2: a `match` doesn't cover every
+    /// variant of its scrutinee's enum, and has no `_` arm.
+    #[error("non-exhaustive `match` on `{enum_name}`: missing {}", missing.join(", "))]
+    #[diagnostic(
+        code(sentinel::types::non_exhaustive_match),
+        help("add an arm for each missing variant, or a `_` wildcard arm")
+    )]
+    NonExhaustiveMatch {
+        enum_name: String,
+        missing: Vec<String>,
+        #[label("not all variants are covered")]
+        span: miette::SourceSpan,
+    },
+
+    /// Phase D.1 / ADR 0032 (3/N): two `match` arms produce different
+    /// types (`match` is an expression — all arms share a type).
+    #[error("`match` arms have incompatible types: expected {expected}, found {got}")]
+    #[diagnostic(code(sentinel::types::match_arm_type_mismatch))]
+    MatchArmTypeMismatch {
+        expected: Type,
+        got: Type,
+        #[label("expected {expected}, found {got}")]
+        span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -2770,6 +3030,13 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         .iter()
         .map(|c| (c.name.clone(), c.id))
         .collect();
+    // Phase D.1 / ADR 0032 (3/N): enum name table, so variant payload
+    // types + fn-signature / let annotations can reference enum names.
+    let enum_table: HashMap<String, EnumId> = program
+        .enums
+        .iter()
+        .map(|e| (e.name.clone(), e.id))
+        .collect();
     let struct_type_param_counts: HashMap<StructId, usize> = program
         .structs
         .iter()
@@ -2778,6 +3045,44 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
     let mut generic_instances: Vec<GenericInstanceData> = Vec::new();
     let mut refs: Vec<RefData> = Vec::new();
     let mut secrets: Vec<SecretData> = Vec::new();
+
+    // Pass 0.5 / ADR 0032 (3/N): resolve enum variant payload types.
+    // Each payload `TypeExpr` is resolved against the name tables (so
+    // a payload may be a primitive, struct, class, or another enum —
+    // including this enum itself: directly-recursive enums are sound
+    // because the layout is heap-boxed per ADR 0032 D4, so unlike
+    // structs they need no nullable indirection). The EnumId is the
+    // index in `typed_enums`.
+    let mut typed_enums: Vec<EnumData> = Vec::with_capacity(program.enums.len());
+    for ed in &program.enums {
+        let mut variants = Vec::with_capacity(ed.variants.len());
+        for v in &ed.variants {
+            let mut payloads = Vec::with_capacity(v.payloads.len());
+            for p in &v.payloads {
+                payloads.push(resolve_type_expr(
+                    p,
+                    &struct_table,
+                    &class_table,
+                    &enum_table,
+                    &mut generic_instances,
+                    &mut refs,
+                    &mut secrets,
+                    &struct_type_param_counts,
+                )?);
+            }
+            variants.push(VariantData {
+                name: v.name.clone(),
+                name_span: v.name_span.clone(),
+                payloads,
+            });
+        }
+        typed_enums.push(EnumData {
+            id: ed.id,
+            name: ed.name.clone(),
+            name_span: ed.name_span.clone(),
+            variants,
+        });
+    }
 
     // Pass 1: resolve struct field types. C1.7.4b / ADR 0016 D2 /
     // D6: generic structs are now supported; their fields can
@@ -2808,6 +3113,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &f.ty,
                 &struct_table,
                 &class_table,
+                &enum_table,
                 &tp_scope,
                 &mut generic_instances,
                 &mut refs,
@@ -2860,6 +3166,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                     &p.ty,
                     &struct_table,
                     &class_table,
+                    &enum_table,
                     &empty_tp_scope,
                     &mut generic_instances,
                     &mut refs,
@@ -2882,6 +3189,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                     rt,
                     &struct_table,
                     &class_table,
+                    &enum_table,
                     &empty_tp_scope,
                     &mut generic_instances,
                     &mut refs,
@@ -3006,6 +3314,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &param.ty,
                 &struct_table,
                 &class_table,
+                &enum_table,
                 &tp_scope,
                 &mut generic_instances,
                 &mut refs,
@@ -3017,6 +3326,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             &fn_def.return_type,
             &struct_table,
             &class_table,
+            &enum_table,
             &tp_scope,
             &mut generic_instances,
             &mut refs,
@@ -3064,6 +3374,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &f.ty,
                 &struct_table,
                 &class_table,
+                &enum_table,
                 &empty_tp_scope,
                 &mut generic_instances,
                 &mut refs,
@@ -3086,6 +3397,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                     &p.ty,
                     &struct_table,
                     &class_table,
+                    &enum_table,
                     &empty_tp_scope,
                     &mut generic_instances,
                     &mut refs,
@@ -3119,6 +3431,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                     &p.ty,
                     &struct_table,
                     &class_table,
+                    &enum_table,
                     &empty_tp_scope,
                     &mut generic_instances,
                     &mut refs,
@@ -3137,6 +3450,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &m.return_type,
                 &struct_table,
                 &class_table,
+                &enum_table,
                 &empty_tp_scope,
                 &mut generic_instances,
                 &mut refs,
@@ -3189,6 +3503,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                     &p.ty,
                     &struct_table,
                     &class_table,
+                    &enum_table,
                     &empty_tp_scope,
                     &mut generic_instances,
                     &mut refs,
@@ -3211,6 +3526,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &m.return_type,
                 &struct_table,
                 &class_table,
+                &enum_table,
                 &empty_tp_scope,
                 &mut generic_instances,
                 &mut refs,
@@ -3260,6 +3576,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                     &p.ty,
                     &struct_table,
                     &class_table,
+                    &enum_table,
                     &empty_tp_scope,
                     &mut generic_instances,
                     &mut refs,
@@ -3278,6 +3595,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &m.return_type,
                 &struct_table,
                 &class_table,
+                &enum_table,
                 &empty_tp_scope,
                 &mut generic_instances,
                 &mut refs,
@@ -3368,6 +3686,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             &typed_signatures,
             &typed_structs,
             &typed_class_decls,
+            &typed_enums,
             &mut generic_instances,
             &mut refs,
             &mut secrets,
@@ -3411,6 +3730,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &typed_signatures,
                 &typed_structs,
                 &typed_class_decls,
+                &typed_enums,
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
@@ -3487,6 +3807,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &typed_signatures,
                 &typed_structs,
                 &typed_class_decls,
+                &typed_enums,
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
@@ -3556,6 +3877,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 &typed_signatures,
                 &typed_structs,
                 &typed_class_decls,
+                &typed_enums,
                 &mut generic_instances,
                 &mut refs,
                 &mut secrets,
@@ -3606,6 +3928,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         class_decls: typed_class_decls,
         trait_decls: typed_trait_decls,
         impl_decls: typed_impl_decls,
+        enums: typed_enums,
         span: program.span.clone(),
     })
 }
@@ -3788,6 +4111,7 @@ fn check_fn(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     class_decls: &[ClassData],
+    enums: &[EnumData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -3844,6 +4168,7 @@ fn check_fn(
         signatures,
         structs,
         class_decls,
+        enums,
         instances,
         refs,
         secrets,
@@ -3920,6 +4245,7 @@ fn check_block(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     class_decls: &[ClassData],
+    enums: &[EnumData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -3938,6 +4264,7 @@ fn check_block(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -3958,6 +4285,7 @@ fn check_block(
         signatures,
         structs,
         class_decls,
+        enums,
         instances,
         refs,
         secrets,
@@ -3984,6 +4312,7 @@ fn check_stmt(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     class_decls: &[ClassData],
+    enums: &[EnumData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -4003,10 +4332,12 @@ fn check_stmt(
                 Some(annot) => {
                     let struct_table = struct_name_table_local(structs);
                     let class_table = class_name_table_local(class_decls);
+                    let enum_table = enum_name_table_local(enums);
                     Some(resolve_type_expr(
                         annot,
                         &struct_table,
                         &class_table,
+                        &enum_table,
                         instances,
                         refs,
                         secrets,
@@ -4022,6 +4353,7 @@ fn check_stmt(
                 signatures,
                 structs,
                 class_decls,
+                enums,
                 instances,
                 refs,
                 secrets,
@@ -4070,6 +4402,7 @@ fn check_stmt(
                 signatures,
                 structs,
                 class_decls,
+                enums,
                 instances,
                 refs,
                 secrets,
@@ -4087,6 +4420,7 @@ fn check_stmt(
                 signatures,
                 structs,
                 class_decls,
+                enums,
                 instances,
                 refs,
                 secrets,
@@ -4117,6 +4451,7 @@ fn check_stmt(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -4288,6 +4623,13 @@ fn class_name_table_local(class_decls: &[ClassData]) -> HashMap<String, ClassId>
     class_decls.iter().map(|c| (c.name.clone(), c.id)).collect()
 }
 
+/// Phase D.1 / ADR 0032 (3/N): build an enum name → EnumId table from
+/// the typed enum decls. Used by `check_stmt`'s let-annotation path to
+/// resolve enum names in type position.
+fn enum_name_table_local(enums: &[EnumData]) -> HashMap<String, EnumId> {
+    enums.iter().map(|e| (e.name.clone(), e.id)).collect()
+}
+
 /// Apply ADR 0014 D3 widening / D2 null-literal context to a typed
 /// expression against an expected type. If `expected` is None, the
 /// expression's synthesized type passes through unchanged. If it's
@@ -4357,7 +4699,9 @@ fn try_substitute(
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
-        | Type::TraitSelf(_) => Some(ty),
+        | Type::TraitSelf(_)
+        // Phase D.1 / ADR 0032: enums carry no TypeParam at the MVP.
+        | Type::Enum(_) => Some(ty),
         Type::TypeParam(id) => subst.get(id.0 as usize).copied().flatten(),
         Type::Nullable(ni) => {
             let inner = try_substitute(ni.to_type(), subst, instances, refs)?;
@@ -4413,7 +4757,9 @@ fn contains_type_param(
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
-        | Type::TraitSelf(_) => false,
+        | Type::TraitSelf(_)
+        // Phase D.1 / ADR 0032: enums carry no TypeParam at the MVP.
+        | Type::Enum(_) => false,
         Type::GenericInstance(id) => instances[id.0 as usize]
             .args
             .iter()
@@ -4544,6 +4890,7 @@ fn check_call(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     class_decls: &[ClassData],
+    enums: &[EnumData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -4620,6 +4967,7 @@ fn check_call(
                 signatures,
                 structs,
                 class_decls,
+                enums,
                 instances,
                 refs,
                 secrets,
@@ -4734,6 +5082,7 @@ fn check_expr(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     class_decls: &[ClassData],
+    enums: &[EnumData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -4794,6 +5143,7 @@ fn check_expr(
                         signatures,
                         structs,
                         class_decls,
+                        enums,
                         instances,
                         refs,
                         secrets,
@@ -4838,6 +5188,7 @@ fn check_expr(
                         signatures,
                         structs,
                         class_decls,
+                        enums,
                         instances,
                         refs,
                         secrets,
@@ -4885,6 +5236,7 @@ fn check_expr(
                         signatures,
                         structs,
                         class_decls,
+                        enums,
                         instances,
                         refs,
                         secrets,
@@ -4936,8 +5288,8 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D5 + D7 (C3.1b): operator-secret-
             // preserving. Strip one layer of `secret` from both
             // sides, run the usual int-type check on the inners,
@@ -5006,10 +5358,10 @@ fn check_expr(
                 // The non-null side determines the expected ?T type.
                 // First, synthesize the non-null side.
                 let (non_null_side, non_null_expr, null_span) = if lhs_is_null {
-                    let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+                    let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
                     (r.ty, r, lhs.span.clone())
                 } else {
-                    let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+                    let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
                     (l.ty, l, rhs.span.clone())
                 };
                 // Non-null side must be Nullable for null-comparison.
@@ -5036,8 +5388,8 @@ fn check_expr(
                     ty: Type::Bool,
                 });
             }
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for comparisons. `secret T == secret T -> secret bool`
             // per Phase B ADR 0008 D4. Strip wrappers to check
@@ -5077,8 +5429,8 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Logic(op, lhs, rhs) => {
-            let l = check_expr(lhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
-            let r = check_expr(rhs, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let l = check_expr(lhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for logicals. Both operands must be the same bool-
             // shape (`bool` or `secret bool`); result preserves
@@ -5121,12 +5473,12 @@ fn check_expr(
             )
         }
         ResolvedExprKind::Block(b) => {
-            let typed_block = check_block(b, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let typed_block = check_block(b, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let ty = typed_block.ty;
             (TypedExprKind::Block(Box::new(typed_block)), ty)
         }
         ResolvedExprKind::If { cond, then_branch, else_branch } => {
-            let cond_t = check_expr(cond, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let cond_t = check_expr(cond, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D7 (C3.1) — SecretBranch: an
             // `if` condition with type `secret bool` would
             // leak via timing. Reject before the generic
@@ -5148,8 +5500,8 @@ fn check_expr(
             }
             // ADR 0014 D5: push the expected type down into both
             // branches so `null` in either branch can resolve.
-            let then_t = check_block(then_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
-            let else_t = check_block(else_branch, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let then_t = check_block(then_branch, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let else_t = check_block(else_branch, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             if then_t.ty != else_t.ty {
                 return Err(TypeError::Mismatch {
                     expected: then_t.ty,
@@ -5176,6 +5528,7 @@ fn check_expr(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -5255,6 +5608,7 @@ fn check_expr(
                     signatures,
                     structs,
                     class_decls,
+                    enums,
                     instances,
                     refs,
                     secrets,
@@ -5348,7 +5702,7 @@ fn check_expr(
                 // Type-check elements. First element synthesizes T
                 // if no expected; subsequent elements get T as
                 // expected (so widening / null work inside `[T]`).
-                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+                let first = check_expr(&elems[0], expected_elem, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
                 let elem_ty = first.ty;
                 let mut typed = Vec::with_capacity(elems.len());
                 typed.push(first);
@@ -5360,6 +5714,7 @@ fn check_expr(
                         signatures,
                         structs,
                         class_decls,
+                        enums,
                         instances,
                         refs,
                         secrets,
@@ -5394,7 +5749,7 @@ fn check_expr(
             }
         }
         ResolvedExprKind::Index { target, index } => {
-            let target_t = check_expr(target, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let target_t = check_expr(target, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let elem_ty = match target_t.ty {
                 Type::Array(ae) => ae,
                 other => {
@@ -5407,7 +5762,7 @@ fn check_expr(
             // Synthesize the index without pushdown so a non-int
             // index surfaces as the more-specific `IndexNotInt`
             // rather than a generic `Mismatch`.
-            let index_t = check_expr(index, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let index_t = check_expr(index, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             if index_t.ty != Type::I64 {
                 return Err(TypeError::IndexNotInt {
                     got: index_t.ty,
@@ -5431,6 +5786,7 @@ fn check_expr(
                 signatures,
                 structs,
                 class_decls,
+                enums,
                 instances,
                 refs,
                 secrets,
@@ -5532,6 +5888,7 @@ fn check_expr(
                 signatures,
                 structs,
                 class_decls,
+                enums,
                 instances,
                 refs,
                 secrets,
@@ -5557,6 +5914,7 @@ fn check_expr(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -5587,6 +5945,7 @@ fn check_expr(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -5605,6 +5964,7 @@ fn check_expr(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -5625,6 +5985,7 @@ fn check_expr(
                 signatures,
                 structs,
                 class_decls,
+                enums,
                 instances,
                 refs,
                 secrets,
@@ -5646,6 +6007,7 @@ fn check_expr(
                 signatures,
                 structs,
                 class_decls,
+                enums,
                 instances,
                 refs,
                 secrets,
@@ -5676,6 +6038,7 @@ fn check_expr(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -5690,7 +6053,7 @@ fn check_expr(
         // its body's tail (like a plain block). The concurrency
         // contract (auto-await on exit) is a codegen concern.
         ResolvedExprKind::Scope { mode, body } => {
-            let typed_block = check_block(body, expected, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let typed_block = check_block(body, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let ty = typed_block.ty;
             (
                 TypedExprKind::Scope { mode: *mode, body: Box::new(typed_block) },
@@ -5706,7 +6069,7 @@ fn check_expr(
                     span: to_source_span(&call_expr.span),
                 });
             }
-            let typed_call = check_expr(call_expr, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let typed_call = check_expr(call_expr, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             if typed_call.ty != Type::I64 {
                 return Err(TypeError::SpawnResultMustBeI64 {
                     got: typed_call.ty,
@@ -5722,7 +6085,7 @@ fn check_expr(
         // C4.4 / ADR 0024 D3: `task.await` — receiver must be a
         // `Task<T>`; the result type is the interned result_ty.
         ResolvedExprKind::Await { task_expr } => {
-            let typed_task = check_expr(task_expr, None, env, signatures, structs, class_decls, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
+            let typed_task = check_expr(task_expr, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let task_id = match typed_task.ty {
                 Type::Task(tid) => tid,
                 other => {
@@ -5738,6 +6101,55 @@ fn check_expr(
                 result_ty,
             )
         }
+        // Phase D.1 / ADR 0032 (3/N): sum-type variant construction.
+        ResolvedExprKind::EnumConstruct {
+            enum_id,
+            enum_name,
+            variant_name,
+            variant_span,
+            args,
+        } => check_enum_construct_expr(
+            *enum_id,
+            enum_name,
+            variant_name,
+            variant_span,
+            args,
+            env,
+            signatures,
+            structs,
+            class_decls,
+            enums,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            trait_decls,
+            impl_decls,
+            konts,
+            tasks,
+        )?,
+        // Phase D.1 / ADR 0032 (3/N): `match` with exhaustiveness.
+        ResolvedExprKind::Match { scrutinee, arms } => check_match_expr(
+            scrutinee,
+            arms,
+            expected,
+            env,
+            signatures,
+            structs,
+            class_decls,
+            enums,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            trait_decls,
+            impl_decls,
+            konts,
+            tasks,
+            &expr.span,
+        )?,
     };
     let synth = TypedExpr { kind, span: expr.span.clone(), ty };
     // ADR 0014 D3: apply T→?T widening if the expected type is ?T and
@@ -5765,6 +6177,7 @@ fn check_handle_expr(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     class_decls: &[ClassData],
+    enums: &[EnumData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -5788,6 +6201,7 @@ fn check_handle_expr(
         signatures,
         structs,
         class_decls,
+        enums,
         instances,
         refs,
         secrets,
@@ -5814,6 +6228,7 @@ fn check_handle_expr(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -5898,6 +6313,7 @@ fn check_handle_expr(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -5972,6 +6388,7 @@ fn check_perform_expr(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     class_decls: &[ClassData],
+    enums: &[EnumData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -6002,6 +6419,7 @@ fn check_perform_expr(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -6048,6 +6466,7 @@ fn check_resume_kont_expr(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     class_decls: &[ClassData],
+    enums: &[EnumData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -6098,6 +6517,7 @@ fn check_resume_kont_expr(
         signatures,
         structs,
         class_decls,
+        enums,
         instances,
         refs,
         secrets,
@@ -6143,6 +6563,7 @@ fn check_method_call_expr(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     class_decls: &[ClassData],
+    enums: &[EnumData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -6160,6 +6581,7 @@ fn check_method_call_expr(
         signatures,
         structs,
         class_decls,
+        enums,
         instances,
         refs,
         secrets,
@@ -6216,6 +6638,7 @@ fn check_method_call_expr(
                     signatures,
                     structs,
                     class_decls,
+                    enums,
                     instances,
                     refs,
                     secrets,
@@ -6296,6 +6719,7 @@ fn check_method_call_expr(
                     signatures,
                     structs,
                     class_decls,
+                    enums,
                     instances,
                     refs,
                     secrets,
@@ -6344,6 +6768,7 @@ fn check_class_init_expr(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     class_decls: &[ClassData],
+    enums: &[EnumData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -6377,6 +6802,7 @@ fn check_class_init_expr(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -6407,6 +6833,332 @@ fn check_class_init_expr(
     ))
 }
 
+/// Phase D.1 / ADR 0032 (3/N): type-check `Enum::Variant(args)`
+/// construction. The enum was resolved at resolve time; here we
+/// resolve the variant *name* to its index, check the payload arity,
+/// and check each arg against the variant's payload type (pushing the
+/// payload type down so `T → secret T` / `T → ?T` widening applies,
+/// like a class-init arg). The result type is `Type::Enum(enum_id)`.
+#[allow(clippy::too_many_arguments)]
+fn check_enum_construct_expr(
+    enum_id: EnumId,
+    enum_name: &str,
+    variant_name: &str,
+    variant_span: &Span,
+    args: &[ResolvedExpr],
+    env: &mut VarTypeEnv,
+    signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
+    enums: &[EnumData],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &mut Vec<SecretData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
+    konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
+) -> Result<(TypedExprKind, Type), TypeError> {
+    // Resolve the variant to its index + payload types. Clone the
+    // payloads (cheap — `Type: Copy`) so we don't hold a borrow of
+    // `enums` across the `check_expr` calls below (which also need it).
+    let (variant_index, payloads): (usize, Vec<Type>) = {
+        let ed = &enums[enum_id.0 as usize];
+        match ed.variant(variant_name) {
+            Some((idx, v)) => (idx, v.payloads.clone()),
+            None => {
+                return Err(TypeError::UnknownVariant {
+                    enum_name: ed.name.clone(),
+                    variant_name: variant_name.to_string(),
+                    span: to_source_span(variant_span),
+                });
+            }
+        }
+    };
+    if args.len() != payloads.len() {
+        return Err(TypeError::VariantPayloadArityMismatch {
+            enum_name: enum_name.to_string(),
+            variant_name: variant_name.to_string(),
+            expected: payloads.len(),
+            got: args.len(),
+            span: to_source_span(variant_span),
+        });
+    }
+    let mut typed_args = Vec::with_capacity(args.len());
+    for (arg, payload_ty) in args.iter().zip(payloads.iter()) {
+        let arg_typed = check_expr(
+            arg,
+            Some(*payload_ty),
+            env,
+            signatures,
+            structs,
+            class_decls,
+            enums,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            trait_decls,
+            impl_decls,
+            konts,
+            tasks,
+        )?;
+        if arg_typed.ty != *payload_ty {
+            return Err(TypeError::Mismatch {
+                expected: *payload_ty,
+                got: arg_typed.ty,
+                span: to_source_span(&arg.span),
+            });
+        }
+        typed_args.push(arg_typed);
+    }
+    Ok((
+        TypedExprKind::EnumConstruct {
+            enum_id,
+            variant_index,
+            enum_name: enum_name.to_string(),
+            variant_name: variant_name.to_string(),
+            args: typed_args,
+        },
+        Type::Enum(enum_id),
+    ))
+}
+
+/// Phase D.1 / ADR 0032 (3/N): type-check a `match` expression. The
+/// scrutinee must be an enum; each arm pattern is resolved against
+/// that enum (variant index + payload-typed bindings scoped into the
+/// arm body), all arm bodies unify to one result type, and the arm
+/// set must be exhaustive (cover every variant, or include `_`).
+#[allow(clippy::too_many_arguments)]
+fn check_match_expr(
+    scrutinee: &ResolvedExpr,
+    arms: &[sentinel_resolve::ResolvedMatchArm],
+    expected: Option<Type>,
+    env: &mut VarTypeEnv,
+    signatures: &[TypedFnSignature],
+    structs: &[TypedStructDecl],
+    class_decls: &[ClassData],
+    enums: &[EnumData],
+    instances: &mut Vec<GenericInstanceData>,
+    refs: &mut Vec<RefData>,
+    secrets: &mut Vec<SecretData>,
+    struct_type_param_counts: &HashMap<StructId, usize>,
+    effect_decls: &[TypedEffectDecl],
+    trait_decls: &[TraitData],
+    impl_decls: &[ImplData],
+    konts: &mut Vec<KontData>,
+    tasks: &mut Vec<TaskData>,
+    match_span: &Span,
+) -> Result<(TypedExprKind, Type), TypeError> {
+    // 1. The scrutinee must be an enum (no `secret enum` / `?enum` /
+    //    `&enum` at the MVP — a bare `Type::Enum`).
+    let scrutinee_typed = check_expr(
+        scrutinee,
+        None,
+        env,
+        signatures,
+        structs,
+        class_decls,
+        enums,
+        instances,
+        refs,
+        secrets,
+        struct_type_param_counts,
+        effect_decls,
+        trait_decls,
+        impl_decls,
+        konts,
+        tasks,
+    )?;
+    let enum_id = match scrutinee_typed.ty {
+        Type::Enum(eid) => eid,
+        other => {
+            return Err(TypeError::MatchScrutineeNotEnum {
+                got: other,
+                span: to_source_span(&scrutinee.span),
+            });
+        }
+    };
+    // Snapshot the enum's name + per-variant (name, payloads) so we
+    // don't hold a borrow of `enums` across the arm `check_expr`s.
+    let (enum_name, variants): (String, Vec<(String, Vec<Type>)>) = {
+        let ed = &enums[enum_id.0 as usize];
+        (
+            ed.name.clone(),
+            ed.variants.iter().map(|v| (v.name.clone(), v.payloads.clone())).collect(),
+        )
+    };
+
+    let mut covered = vec![false; variants.len()];
+    let mut has_wildcard = false;
+    let mut result_ty: Option<Type> = None;
+    let mut typed_arms = Vec::with_capacity(arms.len());
+
+    for arm in arms {
+        // Resolve the pattern to a typed pattern (variant index +
+        // payload-typed bindings), recording coverage.
+        let typed_pattern = match &arm.pattern {
+            ResolvedPattern::Variant {
+                enum_name: pat_enum,
+                variant_name,
+                variant_span,
+                bindings,
+                span: pat_span,
+                ..
+            } => {
+                // The pattern must name the scrutinee's enum + a real
+                // variant of it.
+                let variant_index = if *pat_enum == enum_name {
+                    variants.iter().position(|(n, _)| n == variant_name)
+                } else {
+                    None
+                };
+                let variant_index = variant_index.ok_or_else(|| TypeError::UnknownVariant {
+                    enum_name: enum_name.clone(),
+                    variant_name: variant_name.clone(),
+                    span: to_source_span(variant_span),
+                })?;
+                let payloads = &variants[variant_index].1;
+                if bindings.len() != payloads.len() {
+                    return Err(TypeError::VariantPayloadArityMismatch {
+                        enum_name: enum_name.clone(),
+                        variant_name: variant_name.clone(),
+                        expected: payloads.len(),
+                        got: bindings.len(),
+                        span: to_source_span(pat_span),
+                    });
+                }
+                covered[variant_index] = true;
+                let typed_bindings: Vec<TypedPatternBinding> = bindings
+                    .iter()
+                    .zip(payloads.iter())
+                    .map(|(b, ty)| TypedPatternBinding {
+                        var_id: b.var_id,
+                        name: b.name.clone(),
+                        ty: *ty,
+                        span: b.span.clone(),
+                    })
+                    .collect();
+                TypedPattern::Variant {
+                    variant_index,
+                    variant_name: variant_name.clone(),
+                    bindings: typed_bindings,
+                    span: pat_span.clone(),
+                }
+            }
+            ResolvedPattern::Wildcard(wspan) => {
+                has_wildcard = true;
+                TypedPattern::Wildcard(wspan.clone())
+            }
+        };
+
+        // Bind the pattern's payload bindings into env for the arm
+        // body, snapshotting + restoring like handler-arm params.
+        let saved: Vec<(VarId, Option<(Type, bool)>)> = match &typed_pattern {
+            TypedPattern::Variant { bindings, .. } => {
+                bindings.iter().map(|b| (b.var_id, env.get(&b.var_id).copied())).collect()
+            }
+            TypedPattern::Wildcard(_) => Vec::new(),
+        };
+        if let TypedPattern::Variant { bindings, .. } = &typed_pattern {
+            for b in bindings {
+                env.insert(b.var_id, (b.ty, false));
+            }
+        }
+
+        // Check the arm body with the expected type pushed down (so
+        // `null` / secret widening resolves per arm, like `if`).
+        let body_typed = check_expr(
+            &arm.body,
+            expected,
+            env,
+            signatures,
+            structs,
+            class_decls,
+            enums,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            trait_decls,
+            impl_decls,
+            konts,
+            tasks,
+        )?;
+
+        for (vid, prev) in saved {
+            match prev {
+                Some(p) => {
+                    env.insert(vid, p);
+                }
+                None => {
+                    env.remove(&vid);
+                }
+            }
+        }
+
+        // All arms must produce the same type. When `expected` is
+        // Some, each arm already coerced to it (a mismatch surfaces as
+        // the generic `Mismatch` inside the arm); the explicit check
+        // below catches divergence in the inferred (`expected == None`)
+        // case, like `if`'s then/else equality.
+        match result_ty {
+            None => result_ty = Some(body_typed.ty),
+            Some(rt) => {
+                if body_typed.ty != rt {
+                    return Err(TypeError::MatchArmTypeMismatch {
+                        expected: rt,
+                        got: body_typed.ty,
+                        span: to_source_span(&arm.body.span),
+                    });
+                }
+            }
+        }
+
+        typed_arms.push(TypedMatchArm {
+            pattern: typed_pattern,
+            body: body_typed,
+            span: arm.span.clone(),
+        });
+    }
+
+    // Exhaustiveness (ADR 0032 D2): every variant covered, or a `_`.
+    if !has_wildcard {
+        let missing: Vec<String> = covered
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !**c)
+            .map(|(i, _)| variants[i].0.clone())
+            .collect();
+        if !missing.is_empty() {
+            return Err(TypeError::NonExhaustiveMatch {
+                enum_name,
+                missing,
+                span: to_source_span(match_span),
+            });
+        }
+    }
+
+    // `result_ty` is None only for a zero-arm match — which, for a
+    // non-empty enum, already failed exhaustiveness above. The
+    // remaining (empty-enum) case is unconstructable; default to i64
+    // (the node is dead, and codegen rejects `match` at (3/N) anyway).
+    let result_ty = result_ty.unwrap_or(Type::I64);
+
+    Ok((
+        TypedExprKind::Match {
+            scrutinee: Box::new(scrutinee_typed),
+            enum_id,
+            arms: typed_arms,
+        },
+        result_ty,
+    ))
+}
+
 /// C4.2 / ADR 0023 D5 Path 2 + D6: type-check
 /// `ImplName::method(receiver, args)`. The impl + method_index were
 /// resolved at resolve time. Verify the receiver (args[0])'s type
@@ -6424,6 +7176,7 @@ fn check_qualified_call_expr(
     signatures: &[TypedFnSignature],
     structs: &[TypedStructDecl],
     class_decls: &[ClassData],
+    enums: &[EnumData],
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,
     secrets: &mut Vec<SecretData>,
@@ -6457,6 +7210,7 @@ fn check_qualified_call_expr(
         signatures,
         structs,
         class_decls,
+        enums,
         instances,
         refs,
         secrets,
@@ -6494,6 +7248,7 @@ fn check_qualified_call_expr(
             signatures,
             structs,
             class_decls,
+            enums,
             instances,
             refs,
             secrets,
@@ -6849,6 +7604,37 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::AwaitOnNonTask { got, span } => (
             "sentinel::types::await_on_non_task",
             format!("`.await` requires a `Task<T>` receiver (got `{got}`)"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::UnknownVariant { enum_name, variant_name, span } => (
+            "sentinel::types::unknown_variant",
+            format!("enum `{enum_name}` has no variant `{variant_name}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::VariantPayloadArityMismatch {
+            enum_name,
+            variant_name,
+            expected,
+            got,
+            span,
+        } => (
+            "sentinel::types::variant_payload_arity_mismatch",
+            format!("variant `{enum_name}::{variant_name}` takes {expected} payload(s), got {got}"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::MatchScrutineeNotEnum { got, span } => (
+            "sentinel::types::match_scrutinee_not_enum",
+            format!("`match` requires an enum scrutinee (got `{got}`)"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::NonExhaustiveMatch { enum_name, missing, span } => (
+            "sentinel::types::non_exhaustive_match",
+            format!("non-exhaustive `match` on `{enum_name}`: missing {}", missing.join(", ")),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::MatchArmTypeMismatch { expected, got, span } => (
+            "sentinel::types::match_arm_type_mismatch",
+            format!("`match` arms have incompatible types: expected {expected}, found {got}"),
             span.offset()..(span.offset() + span.len()),
         ),
     };
@@ -8633,5 +9419,265 @@ fn main() -> i64 {
              }",
         );
         assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    // ----- Phase D.1 (3/N) / ADR 0032: enum + match type-check -----
+
+    #[test]
+    fn enum_decl_typechecks_with_resolved_payloads() {
+        let p = check_ok(
+            "enum Shape { Unit, Circle(i64), Rect(i64, i64) }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.enums.len(), 1);
+        let e = &p.enums[0];
+        assert_eq!(e.name, "Shape");
+        assert_eq!(e.variants.len(), 3);
+        assert!(e.variants[0].payloads.is_empty());
+        assert_eq!(e.variants[1].payloads, vec![Type::I64]);
+        assert_eq!(e.variants[2].payloads, vec![Type::I64, Type::I64]);
+    }
+
+    #[test]
+    fn enum_name_usable_as_param_type() {
+        // `fn area(s: Shape)` — enum name resolves in type position.
+        let p = check_ok(
+            "enum Shape { Unit, Circle(i64) }\n\
+             fn area(s: Shape) -> i64 { 0 }\n\
+             fn main() -> i64 { 0 }",
+        );
+        let area = p.fns.iter().find(|f| f.name == "area").expect("area");
+        assert!(matches!(area.params[0].ty, Type::Enum(_)));
+    }
+
+    #[test]
+    fn payload_construction_types_to_enum() {
+        let p = check_ok(
+            "enum Shape { Unit, Circle(i64), Rect(i64, i64) }\n\
+             fn main() -> i64 { let s = Shape::Rect(3, 4); 0 }",
+        );
+        // The let-bound value has type Type::Enum.
+        let main = p.main();
+        match &main.body.stmts[0].kind {
+            TypedStmtKind::Let { ty, value, .. } => {
+                assert!(matches!(ty, Type::Enum(_)));
+                match &value.kind {
+                    TypedExprKind::EnumConstruct { variant_index, args, .. } => {
+                        assert_eq!(*variant_index, 2); // Rect is the 3rd variant
+                        assert_eq!(args.len(), 2);
+                    }
+                    other => panic!("expected EnumConstruct, got {other:?}"),
+                }
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unit_construction_types_to_enum() {
+        let p = check_ok(
+            "enum Shape { Unit, Circle(i64) }\n\
+             fn main() -> i64 { let s = Shape::Unit(); 0 }",
+        );
+        let main = p.main();
+        match &main.body.stmts[0].kind {
+            TypedStmtKind::Let { value, .. } => match &value.kind {
+                TypedExprKind::EnumConstruct { variant_index, args, .. } => {
+                    assert_eq!(*variant_index, 0);
+                    assert!(args.is_empty());
+                }
+                other => panic!("expected EnumConstruct, got {other:?}"),
+            },
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_variant_rejected() {
+        let err = check_err(
+            "enum Shape { Unit, Circle(i64) }\n\
+             fn main() -> i64 { let s = Shape::Square(1); 0 }",
+        );
+        assert!(matches!(err, TypeError::UnknownVariant { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn variant_payload_arity_mismatch_rejected() {
+        let err = check_err(
+            "enum Shape { Circle(i64) }\n\
+             fn main() -> i64 { let s = Shape::Circle(1, 2); 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::VariantPayloadArityMismatch { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn variant_payload_type_mismatch_rejected() {
+        let err = check_err(
+            "enum Shape { Circle(i64) }\n\
+             fn main() -> i64 { let s = Shape::Circle(true); 0 }",
+        );
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn exhaustive_match_typechecks_and_binds_payloads() {
+        let p = check_ok(
+            "enum Shape { Unit, Circle(i64), Rect(i64, i64) }\n\
+             fn area(s: Shape) -> i64 {\n\
+                match s {\n\
+                    Shape::Unit => 0,\n\
+                    Shape::Circle(r) => r * r * 3,\n\
+                    Shape::Rect(w, h) => w * h,\n\
+                }\n\
+             }\n\
+             fn main() -> i64 { area(Shape::Circle(2)) }",
+        );
+        let area = p.fns.iter().find(|f| f.name == "area").expect("area");
+        match &area.body.tail.kind {
+            TypedExprKind::Match { arms, .. } => {
+                assert_eq!(arms.len(), 3);
+                // The Circle arm binds `r: i64`.
+                match &arms[1].pattern {
+                    TypedPattern::Variant { variant_index, bindings, .. } => {
+                        assert_eq!(*variant_index, 1);
+                        assert_eq!(bindings.len(), 1);
+                        assert_eq!(bindings[0].ty, Type::I64);
+                    }
+                    other => panic!("expected Variant, got {other:?}"),
+                }
+            }
+            other => panic!("expected Match, got {other:?}"),
+        }
+        // The match expression types to i64 (all arms produce i64).
+        match &area.body.tail.kind {
+            TypedExprKind::Match { .. } => {}
+            _ => unreachable!(),
+        }
+        assert_eq!(area.body.tail.ty, Type::I64);
+    }
+
+    #[test]
+    fn wildcard_match_is_exhaustive() {
+        let p = check_ok(
+            "enum Color { Red, Green, Blue }\n\
+             fn f(c: Color) -> i64 { match c { Color::Red => 1, _ => 0 } }\n\
+             fn main() -> i64 { 0 }",
+        );
+        let f = p.fns.iter().find(|f| f.name == "f").expect("f");
+        assert!(matches!(f.body.tail.kind, TypedExprKind::Match { .. }));
+    }
+
+    #[test]
+    fn non_exhaustive_match_rejected() {
+        let err = check_err(
+            "enum Color { Red, Green, Blue }\n\
+             fn f(c: Color) -> i64 { match c { Color::Red => 1, Color::Green => 2 } }\n\
+             fn main() -> i64 { 0 }",
+        );
+        match err {
+            TypeError::NonExhaustiveMatch { ref missing, .. } => {
+                assert_eq!(missing, &vec!["Blue".to_string()]);
+            }
+            other => panic!("expected NonExhaustiveMatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn match_scrutinee_not_enum_rejected() {
+        let err = check_err(
+            "fn f(x: i64) -> i64 { match x { _ => 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::MatchScrutineeNotEnum { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn match_arm_type_mismatch_rejected() {
+        // Arms must share a result type: bool vs i64.
+        let err = check_err(
+            "enum Color { Red, Green }\n\
+             fn f(c: Color) -> i64 { let x = match c { Color::Red => true, Color::Green => 0 }; 0 }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::MatchArmTypeMismatch { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn match_pattern_arity_mismatch_rejected() {
+        let err = check_err(
+            "enum Shape { Rect(i64, i64) }\n\
+             fn f(s: Shape) -> i64 { match s { Shape::Rect(w) => w } }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::VariantPayloadArityMismatch { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn match_pattern_binding_typed_and_usable() {
+        // A bound payload is usable at its payload type in the arm body.
+        let p = check_ok(
+            "enum Box { Val(i64) }\n\
+             fn unwrap(b: Box) -> i64 { match b { Box::Val(n) => n + 1 } }\n\
+             fn main() -> i64 { unwrap(Box::Val(41)) }",
+        );
+        assert_eq!(p.main().body.tail.ty, Type::I64);
+    }
+
+    #[test]
+    fn recursive_enum_typechecks() {
+        // The headline D.1 enabler: a directly-recursive enum (an AST
+        // node references itself) type-checks — heap-boxed payloads
+        // (ADR 0032 D4) make this sound, so unlike a recursive struct
+        // it needs no nullable indirection.
+        let p = check_ok(
+            "enum Tree { Leaf(i64), Node(Tree, Tree) }\n\
+             fn d(x: Tree) -> i64 { match x { Tree::Leaf(v) => v, Tree::Node(l, r) => 1 } }\n\
+             fn main() -> i64 { 0 }",
+        );
+        let e = &p.enums[0];
+        assert_eq!(e.name, "Tree");
+        // The Node variant's payloads are both the enum itself.
+        assert_eq!(e.variants[1].payloads, vec![Type::Enum(e.id), Type::Enum(e.id)]);
+    }
+
+    #[test]
+    fn pattern_naming_wrong_enum_rejected() {
+        // A pattern that names a different enum than the scrutinee's
+        // surfaces as UnknownVariant against the scrutinee's enum.
+        let err = check_err(
+            "enum Shape { Circle(i64) }\n\
+             enum Color { Red }\n\
+             fn f(s: Shape) -> i64 { match s { Color::Red => 0, Shape::Circle(r) => r } }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::UnknownVariant { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn match_payload_widens_into_secret_arm_via_let() {
+        // Arm bodies coerce to the expected (let-annotated) type.
+        let p = check_ok(
+            "enum Color { Red, Green }\n\
+             fn f(c: Color) -> i64 {\n\
+                let x: i64 = match c { Color::Red => 1, Color::Green => 2 };\n\
+                x\n\
+             }\n\
+             fn main() -> i64 { 0 }",
+        );
+        let f = p.fns.iter().find(|f| f.name == "f").expect("f");
+        match &f.body.stmts[0].kind {
+            TypedStmtKind::Let { ty, .. } => assert_eq!(*ty, Type::I64),
+            other => panic!("expected Let, got {other:?}"),
+        }
     }
 }
