@@ -74,9 +74,22 @@ one byte** (`''`/`'ab'`/multi-byte rejected) and rejecting a bad escape (2 new
 until 3/N — so `ResolvedExprKind` gains **no new variant** and the typed-tree
 crates (types/codegen/mir/borrow/effect) are untouched; blast radius stays in
 **ast + syntax + resolve**. Additive, +21 tests (1296), four-check green.
-Resume at **D.2 (3/N)** — the type layer (`Type::U8` + the cascade across
-every exhaustive `Type` match + `ArrayElem::U8`; char → `u8`, string → `[u8]`;
-`str_eq` + conversion builtins typed; resolve → typed mirrors). After D.2:
+**D.2 (3/N) shipped (`56f69f0`):** the type layer. `Type::U8` (a primitive,
+no interner) cascades across every exhaustive `Type` match (types + codegen
+`i8`/`mangle` + borrow `is_copy` + the drop groups); `ArrayElem::U8` is the
+one new array element (`[u8]` IS the string). char → `u8`, string → `[u8]`;
+`ResolvedExprKind`/`TypedExprKind` gain `CharLit`/`StringLit`. `u8` reuses the
+op-generic `Binary`/`Cmp`/bitwise + secret pipelines with one change
+(`is_int += U8`); mixed-width `u8 + i64` stays a `Mismatch`; `secret u8`
+inherits the secret rules. Three builtins typed — `str_eq([u8],[u8]) → bool`,
+`u8_to_i64`/`i64_to_u8` (`FnId(4..=6)`; user fns shift +3). Codegen lowers
+`u8` → `i8` (a real `u8` fn body compiles) but **rejects char/string literals
++ the three builtin calls** until (4/N) (the enum-(3/N) codegen-rejects
+discipline; verified clean — exit 1, no panic). Additive, +13 tests (1309),
+four-check green. Resume at **D.2 (4/N)** — codegen + runtime: the `i8` char
+constant, the string-literal global `[N x i8]` + heap copy, `sentinel_str_eq`,
+the `zext`/`trunc` conversions, `abi-v1` `u8` entry + `c5d2_strings` phase-go
+(leak-free via `leaks --atExit`); ADR 0033 flip. After D.2:
 growable collections → file I/O → modules → loops (ADR 0031 D4), then the
 self-host port. (D.1b generic enums + the enum payload-ownership/leak-
 completeness fix remain available follow-ons.)

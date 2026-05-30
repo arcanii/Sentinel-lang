@@ -60,6 +60,36 @@ layer — `Type::U8` + the cascade across every exhaustive `Type` match +
 `ArrayElem::U8`; char → `u8`, string → `[u8]`; `str_eq` + conversion builtins
 typed; resolve → typed mirrors.
 
+**(3/N) update (2026-05-30) — DELIVERED (`56f69f0`).** The type layer lands;
+char/string now **type-check** end to end. `Type::U8` is a new **primitive**
+`Type` variant (no interner — like `I32`/`Bool`) that cascades across every
+exhaustive `Type` match (types' `is_int`/`to_array_elem`/`to_nullable_inner`
+→ `None`/`substitute`/`try_substitute`/`contains_type_param`/`type_display`/
+`Display`; codegen `llvm_basic_type`→`i8`/`llvm_int_type`→`i8`/`mangle`→`u8`;
+borrow `is_copy`→Copy + the needs-drop/no-drop groups). **`ArrayElem::U8`** is
+the one genuinely new array element (`[u8]` IS the string). `u8` resolves in
+type position like `i64`. `ResolvedExprKind`/`TypedExprKind` gain
+`CharLit(u8)`/`StringLit(Vec<u8>)`; char → `u8`, string →
+`Type::Array(ArrayElem::U8)`. The op-generic `Binary`/`Cmp`/bitwise + secret
+pipelines absorb `u8` with **one change** (`is_int += U8`) — mixed-width
+`u8 + i64` stays a `Mismatch` (the existing `l.ty != r.ty` operand check), and
+`secret u8` inherits the secret-preserving rules for free (D4 confirmed). The
+**three builtins are typed** (concrete, non-generic): `str_eq([u8],[u8]) →
+bool`, `u8_to_i64(u8) → i64`, `i64_to_u8(i64) → u8` (`FnId(4..=6)`; user fns
+shift +3). resolve drops the (2/N) `CharStringLitNotYet` reject; mir lowers
+literals to `Opaque` (public constants, taint-safe); effect/borrow treat them
+as pure leaves (a string's `[u8]` drops via its binding's type). **Codegen
+lowers `u8` to `i8`** (so a real `u8` fn body — `c + c` — compiles to an
+object, exit 0) but **rejects char/string literals + the three builtin calls**
+(`CodegenError::StringCodegenNotYetSupported`) until (4/N) — the enum-(3/N)
+codegen-rejects discipline (verified: a string program type-checks then
+rejects cleanly at codegen, exit 1, no panic). +13 tests (1309; +12 type-layer
+unit + the `c5d2_mixed_width` UI snapshot), four-check green. Next: **(4/N)**
+codegen + runtime — the `i8` char constant, the string-literal global
+`[N x i8]` + heap copy, `sentinel_str_eq`, the `zext`/`trunc` conversions,
+`abi-v1` `u8` entry + `c5d2_strings` phase-go (leak-free via `leaks --atExit`);
+ADR flip.
+
 ## Context
 
 Of the remaining Phase D prerequisites (ADR 0031 D4), **strings + a byte
