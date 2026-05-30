@@ -44,8 +44,8 @@ use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_hir::HirProgram;
 use sentinel_resolve::{
-    ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, IS_SOME_FN_ID, LEN_FN_ID,
-    UNWRAP_OR_FN_ID,
+    ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID,
+    LEN_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
@@ -99,6 +99,19 @@ pub enum CodegenError {
         help("the type-checker accepts handle/perform but codegen lands at C3.5 (perform) / C3.6 (handle) per ADR 0020 D9")
     )]
     HandlersNotYetSupported,
+
+    /// D.2 / ADR 0033 D6: char/string literals type-check at D.2 (3/N)
+    /// (`u8` / `[u8]`) but codegen — the `i8` char constant, the
+    /// string-literal global `[N x i8]` + heap copy, `sentinel_str_eq`,
+    /// the `u8`↔`i64` conversions — lands at D.2 (4/N). A program that
+    /// uses a char/string literal surfaces this from codegen and exits
+    /// cleanly rather than panicking.
+    #[error("char/string literals are not yet lowered (lands at D.2 (4/N))")]
+    #[diagnostic(
+        code(sentinel::codegen::string_codegen_not_yet_supported),
+        help("the type-checker accepts char/string literals (typed `u8` / `[u8]`) but codegen lands at D.2 (4/N) per ADR 0033 D6")
+    )]
+    StringCodegenNotYetSupported,
 
     /// C3.5(a) / ADR 0020 D9: at C3.5(a) the handler codegen
     /// supports only the restricted case where the `handle` body
@@ -1326,6 +1339,8 @@ fn collect_spawn_targets_expr(expr: &TypedExpr, acc: &mut Vec<FnId>) {
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => {}
     }
 }
@@ -1373,7 +1388,8 @@ fn field_type_needs_drop_inner(
             seen.pop();
             any
         }
-        Type::Nullable(_) | Type::I64 | Type::I32 | Type::Bool | Type::Ref(_) => false,
+        // Phase D.2 / ADR 0033 D4: a `u8` scalar has no heap payload.
+        Type::Nullable(_) | Type::I64 | Type::I32 | Type::U8 | Type::Bool | Type::Ref(_) => false,
         Type::TypeParam(_) => false,
         // C3 / ADR 0019 D5 (C3.1): drop semantics of `secret T`
         // follow the inner — secrets don't introduce new heap
@@ -1451,6 +1467,9 @@ fn llvm_basic_type<'ctx>(
         Type::Bool => context.bool_type().into(),
         Type::I32 => context.i32_type().into(),
         Type::I64 => context.i64_type().into(),
+        // Phase D.2 / ADR 0033 D6: `u8` lowers to LLVM `i8` (signedness
+        // lives in the ops — `udiv`/unsigned compares — not the type).
+        Type::U8 => context.i8_type().into(),
         Type::Struct(id) => (*struct_types
             .get(&id)
             .expect("struct declared in pass 0"))
@@ -1669,6 +1688,8 @@ fn walk_expr_for_mono(
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => {}
         TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
@@ -1883,6 +1904,9 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         Type::I64 => "i64".to_string(),
         Type::I32 => "i32".to_string(),
         Type::Bool => "bool".to_string(),
+        // Phase D.2 / ADR 0033 D4: `u8` mangles as `u8` (so `[u8]`
+        // mangles `arr_u8` via the Array arm below).
+        Type::U8 => "u8".to_string(),
         Type::Struct(id) => program
             .structs
             .get(id.0 as usize)
@@ -1978,6 +2002,8 @@ fn arg_contains_typeparam(
         Type::TypeParam(_) => true,
         Type::I64
         | Type::I32
+        // Phase D.2 / ADR 0033 D4: `u8` carries no TypeParam.
+        | Type::U8
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -2031,6 +2057,8 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::Bool => context.bool_type(),
         Type::I32 => context.i32_type(),
         Type::I64 => context.i64_type(),
+        // Phase D.2 / ADR 0033 D6: `u8` is an int type → LLVM `i8`.
+        Type::U8 => context.i8_type(),
         Type::Struct(_) => panic!("llvm_int_type called on non-int Type::Struct"),
         Type::Nullable(_) => panic!("llvm_int_type called on non-int Type::Nullable"),
         Type::Array(_) => panic!("llvm_int_type called on non-int Type::Array"),
@@ -3460,7 +3488,13 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // nested generic instances.
                 self.emit_drop_struct_fields(ptr, ty, program)?;
             }
-            Type::Nullable(_) | Type::I64 | Type::I32 | Type::Bool | Type::Ref(_) => {
+            Type::Nullable(_)
+            | Type::I64
+            | Type::I32
+            // Phase D.2 / ADR 0033 D4: a `u8` byte has no heap data.
+            | Type::U8
+            | Type::Bool
+            | Type::Ref(_) => {
                 // Primitives + refs + nullable-of-primitive: no
                 // heap data to free.
             }
@@ -4334,6 +4368,14 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 let llvm_ty = self.llvm_int_type(expr.ty);
                 Ok(llvm_ty.const_int(*n as u64, true).into())
             }
+            // D.2 / ADR 0033 D6: char/string literals type-check (`u8` /
+            // `[u8]`) but their lowering — `i8` char constant, the
+            // string-literal global `[N x i8]` + heap copy — lands at
+            // D.2 (4/N). Reject cleanly until then (mirrors the enum
+            // (3/N) codegen-rejects-until-(4/N) discipline).
+            TypedExprKind::CharLit(_) | TypedExprKind::StringLit(_) => {
+                Err(CodegenError::StringCodegenNotYetSupported)
+            }
             TypedExprKind::BoolLit(b) => Ok(self
                 .context
                 .bool_type()
@@ -4482,6 +4524,12 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
                 if *id == LEN_FN_ID {
                     return self.lower_len(&args[0], program);
+                }
+                // D.2 / ADR 0033 D5: the byte-string builtins type-check
+                // at (3/N) but their runtime (`sentinel_str_eq`, the
+                // `zext`/`trunc` conversions) lands at D.2 (4/N).
+                if *id == STR_EQ_FN_ID || *id == U8_TO_I64_FN_ID || *id == I64_TO_U8_FN_ID {
+                    return Err(CodegenError::StringCodegenNotYetSupported);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted
@@ -5488,6 +5536,8 @@ fn expr_performs(expr: &TypedExpr) -> bool {
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => false,
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
@@ -5745,7 +5795,9 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
         }
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
-        | TypedExprKind::NullLit => {}
+        | TypedExprKind::NullLit
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_) => {}
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
@@ -5878,6 +5930,8 @@ fn count_performs(expr: &TypedExpr) -> usize {
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => 0,
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
@@ -5970,6 +6024,8 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => None,
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
@@ -6075,6 +6131,9 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
         TypedExprKind::IntLit(n) => TypedExprKind::IntLit(*n),
         TypedExprKind::BoolLit(b) => TypedExprKind::BoolLit(*b),
         TypedExprKind::NullLit => TypedExprKind::NullLit,
+        // D.2 / ADR 0033: literal bytes carry no perform — clone as-is.
+        TypedExprKind::CharLit(b) => TypedExprKind::CharLit(*b),
+        TypedExprKind::StringLit(bytes) => TypedExprKind::StringLit(bytes.clone()),
         TypedExprKind::Var(id) => TypedExprKind::Var(*id),
         TypedExprKind::Unary(op, inner) => TypedExprKind::Unary(
             *op,
@@ -6365,6 +6424,8 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => None,
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)

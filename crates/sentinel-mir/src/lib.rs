@@ -385,6 +385,12 @@ impl FnBuilder {
             // ---- constants + variables -------------------------------
             TypedExprKind::IntLit(n) => self.emit(MirOp::ConstInt(*n), ty, span),
             TypedExprKind::BoolLit(b) => self.emit(MirOp::ConstBool(*b), ty, span),
+            // D.2 / ADR 0033: char/string literals are public constants
+            // (never secret) — model as Opaque with no operands so taint
+            // can't flow in (MIR is the constant-time analysis substrate).
+            TypedExprKind::CharLit(_) | TypedExprKind::StringLit(_) => {
+                self.emit(MirOp::Opaque(Vec::new()), ty, span)
+            }
             TypedExprKind::Var(id) => self.lookup_var(*id, ty, span),
 
             // ---- secret-relevant arithmetic / comparison -------------

@@ -777,7 +777,12 @@ fn walk_expr(
         // Leaves — no children.
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
-        | TypedExprKind::NullLit => {}
+        | TypedExprKind::NullLit
+        // D.2 / ADR 0033: char/string literals have no sub-expressions
+        // (the bytes are literal — no variable is read/moved). A string's
+        // owned `[u8]` is dropped via its binding's type, like any array.
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_) => {}
 
         // Ref-typed Var reads trigger the C2.1 use-after-scope
         // check. Non-ref Var reads trigger the C2.2 read-while-
@@ -1220,7 +1225,10 @@ fn place_name(ctx: &FnCtx, id: VarId) -> String {
 /// tracking (field-disjoint moves) per the module-doc rationale.
 fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
     match ty {
-        Type::I64 | Type::I32 | Type::Bool | Type::Ref(_) => true,
+        // Phase D.2 / ADR 0033 D4: `u8` is a 1-byte Copy scalar (a
+        // `[u8]` string is `Type::Array(_)` below → Move, owning a heap
+        // buffer like any array).
+        Type::I64 | Type::I32 | Type::U8 | Type::Bool | Type::Ref(_) => true,
         Type::Nullable(inner) => is_copy_nullable_inner(inner),
         Type::Struct(_)
         | Type::Array(_)
@@ -2053,7 +2061,8 @@ mod tests {
         let typed = check(&resolved).expect("check");
         let (plan, errors) = borrow_check(&typed);
         assert!(errors.is_empty(), "got {errors:?}");
-        // main's fn_id: print + 3 builtins + consume + main = FnId(5).
+        // main's fn_id: 7 runtime builtins + consume + main = FnId(8)
+        // (looked up by name, so robust to the builtin count).
         let main = typed.fns.iter().find(|f| f.name == "main").unwrap();
         let moved = plan.moved_sources_for(main.id);
         // p's VarId is 0 (first binding in main).

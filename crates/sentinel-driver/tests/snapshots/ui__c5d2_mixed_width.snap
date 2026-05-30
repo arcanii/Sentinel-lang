@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c5d2_mixed_width.sentinel\")"
+---
+sentinel::types::mismatch
+
+  × type mismatch: expected u8, found i64
+   ╭─[tests/ui/c5d2_mixed_width.sentinel:8:9]
+ 7 │ fn bump(c: u8) -> u8 {
+ 8 │     c + 5
+   ·         ┬
+   ·         ╰── 
+ 9 │ }
+   ╰────

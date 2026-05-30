@@ -112,3 +112,6 @@ ui_snapshot!(c52_secret_leak, "c52_secret_leak.sentinel");
 
 // ---- D.1 (3/N) sum-type / match rejection (types exhaustiveness) ----
 ui_snapshot!(c5d1_non_exhaustive_match, "c5d1_non_exhaustive_match.sentinel");
+
+// ---- D.2 (3/N) u8 mixed-width rejection (types) ----
+ui_snapshot!(c5d2_mixed_width, "c5d2_mixed_width.sentinel");

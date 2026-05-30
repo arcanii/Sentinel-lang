@@ -56,6 +56,15 @@ use sentinel_ast::SelfKind;
 pub enum Type {
     I64,
     I32,
+    /// Phase D.2 / ADR 0033 D4: `u8` — an 8-bit **unsigned** integer
+    /// scalar (the byte). A primitive `Type` variant with no interner
+    /// table (like `I64`/`I32`/`Bool`); lowers to LLVM `i8`. It is a
+    /// full integer for the op-generic `Binary`/`Cmp`/bitwise + secret
+    /// pipelines (unsignedness affects only codegen — `udiv`/unsigned
+    /// compares — not types); mixed-width arithmetic with `i32`/`i64`
+    /// stays a `Mismatch` (explicit `u8_to_i64`/`i64_to_u8` convert).
+    /// A string literal is a `[u8]` (`Array(ArrayElem::U8)`) — ADR D3.
+    U8,
     Bool,
     Struct(StructId),
     /// `?T` per ADR 0014 D1. Payload is the inner base type.
@@ -352,6 +361,10 @@ pub enum ArrayElem {
     I64,
     I32,
     Bool,
+    /// Phase D.2 / ADR 0033 D3: `[u8]` — the byte-array element of a
+    /// string. The one genuinely new `ArrayElem` for D.2 (a string
+    /// literal types to `Type::Array(ArrayElem::U8)`).
+    U8,
     Struct(StructId),
     /// `[T]` where T is a generic type parameter (only meaningful
     /// inside a generic fn body). C1.7 / ADR 0016 D6b.
@@ -369,6 +382,7 @@ impl ArrayElem {
             ArrayElem::I64 => Type::I64,
             ArrayElem::I32 => Type::I32,
             ArrayElem::Bool => Type::Bool,
+            ArrayElem::U8 => Type::U8,
             ArrayElem::Struct(id) => Type::Struct(id),
             ArrayElem::TypeParam(id) => Type::TypeParam(id),
             ArrayElem::GenericInstance(id) => Type::GenericInstance(id),
@@ -397,11 +411,15 @@ impl ArrayElem {
 }
 
 impl Type {
-    /// `true` if this is a signed-integer type (`I32` or `I64`).
+    /// `true` if this is an integer type (`I32`, `I64`, or `U8`).
     /// Used to gate arithmetic-operator typing rules — comparisons
     /// accept any integer type but logicals require [`Type::Bool`].
+    /// Phase D.2 / ADR 0033 D4: `U8` joins the integers so the
+    /// op-generic `Binary` pipeline types `u8` arithmetic + bitwise
+    /// with no other change (mixed-width is still caught by the
+    /// `l.ty != r.ty` operand check).
     pub fn is_int(self) -> bool {
-        matches!(self, Type::I32 | Type::I64)
+        matches!(self, Type::I32 | Type::I64 | Type::U8)
     }
 
     /// `true` if this is a struct type — either a non-generic
@@ -463,7 +481,11 @@ impl Type {
             // variant at C4.1; `?Class` shows up naturally only when
             // classes become storable in arrays / nullable
             // wrappers).
-            Type::Array(_)
+            // Phase D.2 / ADR 0033 D3 + D8: `?u8` is out of scope at the
+            // MVP (NullableInner gains no U8 variant); `u8` is added to
+            // the exhaustive `Type` matches regardless.
+            Type::U8
+            | Type::Array(_)
             | Type::Nullable(_)
             | Type::Secret(_)
             | Type::Kont(_)
@@ -490,6 +512,9 @@ impl Type {
             Type::I64 => Some(ArrayElem::I64),
             Type::I32 => Some(ArrayElem::I32),
             Type::Bool => Some(ArrayElem::Bool),
+            // Phase D.2 / ADR 0033 D3: `[u8]` IS the string type, so
+            // `u8` must demote to an array element.
+            Type::U8 => Some(ArrayElem::U8),
             Type::Struct(id) => Some(ArrayElem::Struct(id)),
             Type::TypeParam(id) => Some(ArrayElem::TypeParam(id)),
             Type::GenericInstance(id) => Some(ArrayElem::GenericInstance(id)),
@@ -540,6 +565,9 @@ impl Type {
             // substitution is the identity.
             Type::I64
             | Type::I32
+            // Phase D.2 / ADR 0033 D4: `u8` is a scalar primitive with
+            // no TypeParam payload — substitution is the identity.
+            | Type::U8
             | Type::Bool
             | Type::Struct(_)
             | Type::Class(_)
@@ -750,6 +778,7 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
         Type::I64 => "i64".to_string(),
         Type::I32 => "i32".to_string(),
         Type::Bool => "bool".to_string(),
+        Type::U8 => "u8".to_string(),
         Type::Struct(id) => match program.and_then(|p| p.structs.get(id.0 as usize)) {
             Some(s) => s.name.clone(),
             None => format!("<struct#{}>", id.0),
@@ -836,6 +865,7 @@ impl std::fmt::Display for Type {
             Type::I64 => write!(f, "i64"),
             Type::I32 => write!(f, "i32"),
             Type::Bool => write!(f, "bool"),
+            Type::U8 => write!(f, "u8"),
             Type::Struct(id) => write!(f, "<struct#{}>", id.0),
             Type::Nullable(inner) => write!(f, "?{}", inner.to_type()),
             Type::Array(elem) => write!(f, "[{}]", elem.to_type()),
@@ -920,6 +950,11 @@ fn resolve_type_expr_with_scope(
                 "i64" => Ok(Type::I64),
                 "i32" => Ok(Type::I32),
                 "bool" => Ok(Type::Bool),
+                // Phase D.2 / ADR 0033 D4: `u8` is a primitive type name
+                // (no keyword token; lexes as an Ident), recognised here
+                // like `i64`/`i32`/`bool`. `[u8]` flows through the array
+                // type-expr path, which demotes via `to_array_elem`.
+                "u8" => Ok(Type::U8),
                 other => {
                     if let Some(&id) = struct_table.get(other) {
                         // ADR 0016 D3: a bare struct name used in
@@ -1040,7 +1075,9 @@ fn resolve_type_expr_with_scope(
                 });
             }
             match name.as_str() {
-                "i64" | "i32" | "bool" => Err(TypeError::TypeArgsOnNonGeneric {
+                // Phase D.2 / ADR 0033 D4: `u8<...>` is rejected like any
+                // other non-generic primitive.
+                "i64" | "i32" | "bool" | "u8" => Err(TypeError::TypeArgsOnNonGeneric {
                     type_name: name.clone(),
                     span: to_source_span(&te.span),
                 }),
@@ -1376,6 +1413,9 @@ impl TypedExpr {
             TypedExprKind::IntLit(n) => TypedExprKind::IntLit(*n),
             TypedExprKind::BoolLit(b) => TypedExprKind::BoolLit(*b),
             TypedExprKind::NullLit => TypedExprKind::NullLit,
+            // D.2 / ADR 0033: literal bytes carry no TypeParam — identity.
+            TypedExprKind::CharLit(b) => TypedExprKind::CharLit(*b),
+            TypedExprKind::StringLit(bytes) => TypedExprKind::StringLit(bytes.clone()),
             TypedExprKind::WidenToNullable(inner) => TypedExprKind::WidenToNullable(
                 Box::new(inner.substitute(subst, instances, refs)),
             ),
@@ -1959,6 +1999,15 @@ pub enum TypedExprKind {
     /// [`Type::Nullable`]; the inner type comes from bidirectional
     /// checking against the expected context.
     NullLit,
+    /// D.2 / ADR 0033 D2: a char/byte literal — the decoded byte.
+    /// Always carries [`Type::U8`]. Codegen lowers it to an `i8`
+    /// constant at D.2 (4/N) (it rejects until then).
+    CharLit(u8),
+    /// D.2 / ADR 0033 D2: a string literal — the decoded bytes.
+    /// Always carries `[u8]` (`Type::Array(ArrayElem::U8)`). Codegen
+    /// lowers it to a private global `[N x i8]` + heap copy so it
+    /// drops/moves like any array (D6) at D.2 (4/N).
+    StringLit(Vec<u8>),
     /// Implicit `T → ?T` widening per ADR 0014 D3. Wraps a `T`-typed
     /// expression so that the outer node carries `?T`. Codegen
     /// lowers this as constructing the `{ i1 true, T payload }`
@@ -3280,6 +3329,48 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         type_params: vec![builtin_type_param("T", 0)],
         param_types: vec![Type::Array(ArrayElem::TypeParam(TypeParamId(0)))],
         return_type: Type::I64,
+        effect_row: vec![],
+        is_main: false,
+        is_runtime: true,
+    });
+    // D.2 / ADR 0033 D5: the byte-string builtins — non-generic
+    // concrete signatures (no type_params). Calls type-check at D.2
+    // (3/N); codegen lowers them at (4/N).
+    let str_eq_sig = &program.fn_signatures[4];
+    typed_signatures.push(TypedFnSignature {
+        id: str_eq_sig.id,
+        name: str_eq_sig.name.clone(),
+        name_span: str_eq_sig.name_span.clone(),
+        // `str_eq(a: [u8], b: [u8]) -> bool`.
+        type_params: vec![],
+        param_types: vec![Type::Array(ArrayElem::U8), Type::Array(ArrayElem::U8)],
+        return_type: Type::Bool,
+        effect_row: vec![],
+        is_main: false,
+        is_runtime: true,
+    });
+    let u8_to_i64_sig = &program.fn_signatures[5];
+    typed_signatures.push(TypedFnSignature {
+        id: u8_to_i64_sig.id,
+        name: u8_to_i64_sig.name.clone(),
+        name_span: u8_to_i64_sig.name_span.clone(),
+        // `u8_to_i64(b: u8) -> i64` (zero-extend).
+        type_params: vec![],
+        param_types: vec![Type::U8],
+        return_type: Type::I64,
+        effect_row: vec![],
+        is_main: false,
+        is_runtime: true,
+    });
+    let i64_to_u8_sig = &program.fn_signatures[6];
+    typed_signatures.push(TypedFnSignature {
+        id: i64_to_u8_sig.id,
+        name: i64_to_u8_sig.name.clone(),
+        name_span: i64_to_u8_sig.name_span.clone(),
+        // `i64_to_u8(n: i64) -> u8` (truncate).
+        type_params: vec![],
+        param_types: vec![Type::I64],
+        return_type: Type::U8,
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
@@ -4696,6 +4787,7 @@ fn try_substitute(
     match ty {
         Type::I64
         | Type::I32
+        | Type::U8
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -4754,6 +4846,7 @@ fn contains_type_param(
         Type::Array(ae) => contains_type_param(ae.to_type(), instances, refs),
         Type::I64
         | Type::I32
+        | Type::U8
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -5112,6 +5205,15 @@ fn check_expr(
         ResolvedExprKind::IntLit(n) => (TypedExprKind::IntLit(*n), Type::I64),
         ResolvedExprKind::BoolLit(b) => (TypedExprKind::BoolLit(*b), Type::Bool),
         ResolvedExprKind::NullLit => unreachable!("handled above"),
+        // D.2 / ADR 0033 D2 + D3: a char literal IS a `u8` byte; a
+        // string literal IS a `[u8]` (the bytes carry verbatim — the
+        // array machinery handles len/index/drop/move). No new typing
+        // surface beyond the literal's own type.
+        ResolvedExprKind::CharLit(b) => (TypedExprKind::CharLit(*b), Type::U8),
+        ResolvedExprKind::StringLit(bytes) => (
+            TypedExprKind::StringLit(bytes.clone()),
+            Type::Array(ArrayElem::U8),
+        ),
         ResolvedExprKind::Var(id) => {
             let (ty, _mutable) = *env
                 .get(id)
@@ -7684,15 +7786,20 @@ mod tests {
         let main = p.main();
         assert_eq!(main.return_type, Type::I64);
         assert_eq!(main.body.ty, Type::I64);
-        // Signature table at C1.6: FnId(0)=print, (1)=unwrap_or,
-        // (2)=is_some, (3)=len, (4)=main. The generic builtins
-        // occupy FnId(1..=3) per ADR 0014 D9 + ADR 0015 D4.
+        // Signature table: FnId(0)=print, (1)=unwrap_or, (2)=is_some,
+        // (3)=len, (4)=str_eq, (5)=u8_to_i64, (6)=i64_to_u8 (D.2 / ADR
+        // 0033 D5), (7)=main. The generic builtins occupy FnId(1..=3)
+        // per ADR 0014 D9 + ADR 0015 D4; the byte-string builtins
+        // FnId(4..=6) per ADR 0033 D5.
         assert_eq!(p.fn_signatures[0].name, "print");
         assert_eq!(p.fn_signatures[0].param_types, vec![Type::I64]);
         assert_eq!(p.fn_signatures[1].name, "unwrap_or");
         assert_eq!(p.fn_signatures[2].name, "is_some");
         assert_eq!(p.fn_signatures[3].name, "len");
-        assert_eq!(p.fn_signatures[4].name, "main");
+        assert_eq!(p.fn_signatures[4].name, "str_eq");
+        assert_eq!(p.fn_signatures[5].name, "u8_to_i64");
+        assert_eq!(p.fn_signatures[6].name, "i64_to_u8");
+        assert_eq!(p.fn_signatures[7].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 
@@ -9679,5 +9786,105 @@ fn main() -> i64 {
             TypedStmtKind::Let { ty, .. } => assert_eq!(*ty, Type::I64),
             other => panic!("expected Let, got {other:?}"),
         }
+    }
+
+    // ----- D.2 / ADR 0033: u8 + char/string literals + byte builtins -----
+
+    /// The type of the tail expression of fn `name`'s body.
+    fn fn_body_ty(p: &TypedProgram, name: &str) -> Type {
+        p.fns.iter().find(|f| f.name == name).expect("fn").body.ty
+    }
+
+    #[test]
+    fn char_lit_types_to_u8() {
+        let p = check_ok("fn f() -> u8 { 'A' }\nfn main() -> i64 { 0 }");
+        assert_eq!(fn_body_ty(&p, "f"), Type::U8);
+    }
+
+    #[test]
+    fn string_lit_types_to_byte_array() {
+        // ADR 0033 D3: a string IS a `[u8]`.
+        let p = check_ok("fn f() -> [u8] { \"let\" }\nfn main() -> i64 { 0 }");
+        assert_eq!(fn_body_ty(&p, "f"), Type::Array(ArrayElem::U8));
+    }
+
+    #[test]
+    fn u8_arithmetic_types_to_u8() {
+        // `'9' - '0'` — the lexer's digit-value idiom — is `u8`.
+        let p = check_ok("fn f() -> u8 { '9' - '0' }\nfn main() -> i64 { 0 }");
+        assert_eq!(fn_body_ty(&p, "f"), Type::U8);
+    }
+
+    #[test]
+    fn u8_comparison_types_to_bool() {
+        // `'a' <= c && c <= 'z'` shape: a u8 comparison yields bool.
+        let p = check_ok("fn f() -> bool { 'a' < 'z' }\nfn main() -> i64 { 0 }");
+        assert_eq!(fn_body_ty(&p, "f"), Type::Bool);
+    }
+
+    #[test]
+    fn u8_bitwise_types_to_u8() {
+        // ADR 0033 D4: bitwise reuses the op-generic `Binary` pipeline.
+        let p = check_ok("fn f() -> u8 { 'A' & '_' }\nfn main() -> i64 { 0 }");
+        assert_eq!(fn_body_ty(&p, "f"), Type::U8);
+    }
+
+    #[test]
+    fn mixed_width_u8_plus_i64_rejected() {
+        // ADR 0033 D4: no implicit width mixing — `u8 + i64` is a Mismatch
+        // (the `l.ty != r.ty` operand check; `'a'` is u8, `5` is i64).
+        let err = check_err("fn f() -> u8 { 'a' + 5 }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn u8_has_no_implicit_widening_to_i64() {
+        // A bare `u8` is not an `i64` — the explicit `u8_to_i64` is required.
+        let err = check_err("fn f(c: u8) -> i64 { c }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, TypeError::ReturnTypeMismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn index_into_byte_array_yields_u8() {
+        // `s[i]` over a `[u8]` is a `u8` (reuses the C1.6 Index rule).
+        let p = check_ok("fn first(s: [u8]) -> u8 { s[0] }\nfn main() -> i64 { 0 }");
+        assert_eq!(fn_body_ty(&p, "first"), Type::U8);
+    }
+
+    #[test]
+    fn str_eq_builtin_typechecks() {
+        let p = check_ok(
+            "fn cmp(a: [u8], b: [u8]) -> bool { str_eq(a, b) }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "cmp"), Type::Bool);
+    }
+
+    #[test]
+    fn conversion_builtins_typecheck() {
+        let p = check_ok(
+            "fn widen(c: u8) -> i64 { u8_to_i64(c) }\n\
+             fn narrow(n: i64) -> u8 { i64_to_u8(n) }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "widen"), Type::I64);
+        assert_eq!(fn_body_ty(&p, "narrow"), Type::U8);
+    }
+
+    #[test]
+    fn str_eq_rejects_non_byte_array_arg() {
+        // `str_eq` is concrete `[u8]` — an `[i64]` arg is a CallArgMismatch.
+        let err = check_err(
+            "fn bad(a: [i64], b: [u8]) -> bool { str_eq(a, b) }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::CallArgMismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn secret_u8_is_representable() {
+        // ADR 0033 D4: `secret u8` inherits the secret-preserving rules.
+        let p = check_ok(
+            "fn f(c: secret u8) -> secret u8 { c }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(fn_body_ty(&p, "f"), Type::Secret(_)));
     }
 }

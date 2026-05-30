@@ -1,0 +1,13 @@
+// Phase D.2 / ADR 0033 D4: `u8` and `i64` do not mix arithmetically.
+// There is no implicit width conversion — the explicit `u8_to_i64` /
+// `i64_to_u8` builtins convert between them. Here `c` is a `u8` and the
+// literal `5` is an `i64`, so `c + 5` is a type Mismatch (the operands
+// must share an integer type), mirroring the existing `i32` / `i64`
+// width discipline.
+fn bump(c: u8) -> u8 {
+    c + 5
+}
+
+fn main() -> i64 {
+    0
+}

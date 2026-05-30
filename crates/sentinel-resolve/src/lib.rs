@@ -73,6 +73,21 @@ pub const IS_SOME_FN_ID: FnId = FnId(2);
 /// `{ i64 len, T* data }` array representation.
 pub const LEN_FN_ID: FnId = FnId(3);
 
+/// D.2 / ADR 0033 D5: `str_eq(a: [u8], b: [u8]) -> bool` — byte-wise
+/// array equality (the lexer's keyword/identifier matcher). A
+/// non-generic runtime builtin; codegen lowers it to a runtime
+/// `sentinel_str_eq` at D.2 (4/N) (rejects until then).
+pub const STR_EQ_FN_ID: FnId = FnId(4);
+
+/// D.2 / ADR 0033 D5: `u8_to_i64(b: u8) -> i64` — explicit
+/// zero-extend (mixed-width arithmetic is rejected, so the lexer
+/// converts a digit byte to an integer explicitly). Codegen at (4/N).
+pub const U8_TO_I64_FN_ID: FnId = FnId(5);
+
+/// D.2 / ADR 0033 D5: `i64_to_u8(n: i64) -> u8` — explicit truncate
+/// (index/byte construction). Codegen at (4/N).
+pub const I64_TO_U8_FN_ID: FnId = FnId(6);
+
 /// Identifier for a struct declaration. Added at C1.4 per ADR 0013
 /// D4 / D5; unique per-program, assigned in source order starting
 /// at 0.
@@ -551,6 +566,14 @@ pub enum ResolvedExprKind {
     /// Null literal per ADR 0014 D2. Added at C1.5. The type is
     /// resolved bidirectionally at the type-check stage.
     NullLit,
+    /// D.2 / ADR 0033 D2: a char/byte literal — the decoded byte.
+    /// Mirrors AST's [`sentinel_ast::ExprKind::CharLit`]; types to
+    /// `Type::U8` at D.2 (3/N).
+    CharLit(u8),
+    /// D.2 / ADR 0033 D2: a string literal — the decoded bytes.
+    /// Mirrors AST's [`sentinel_ast::ExprKind::StringLit`]; types to
+    /// `[u8]` (`Type::Array(ArrayElem::U8)`) at D.2 (3/N).
+    StringLit(Vec<u8>),
     /// Variable reference, resolved to a binding's [`VarId`].
     Var(VarId),
     Unary(UnaryOp, Box<ResolvedExpr>),
@@ -1014,22 +1037,6 @@ pub enum ResolveError {
     )]
     DeclassifyNotYet {
         #[label("declassify expression here")]
-        span: miette::SourceSpan,
-    },
-
-    /// D.2 / ADR 0033 D2 (2/N): char/string literals parse + decode at
-    /// (2/N) but are not yet resolvable — the type layer (`Type::U8`,
-    /// char → `u8`, string → `[u8]`) lands at D.2 (3/N). Rejecting here
-    /// (rather than passing through) keeps `ResolvedExprKind` — and
-    /// every downstream typed-tree crate — untouched until (3/N), the
-    /// same shape as the enum/`match` (2/N) `NotYet` reject.
-    #[error("char/string literals are not supported yet (Phase D.2)")]
-    #[diagnostic(
-        code(sentinel::resolve::char_string_lit_not_yet),
-        help("`'c'` / `\"...\"` parse at Phase D.2 (2/N); the type layer (`Type::U8`, char → `u8`, string → `[u8]`) lands at D.2 (3/N) — ADR 0033")
-    )]
-    CharStringLitNotYet {
-        #[label("byte/string literal not yet resolvable")]
         span: miette::SourceSpan,
     },
 
@@ -1717,14 +1724,52 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         is_runtime: true,
     };
     next_fn_id += 1;
+    // D.2 / ADR 0033 D5: the byte-string builtins. Non-generic
+    // (concrete `[u8]`/`u8`/`i64` signatures, typed in sentinel-types);
+    // codegen lowers them at D.2 (4/N).
+    let str_eq_sig = FnSignature {
+        id: FnId(next_fn_id),
+        name: "str_eq".to_string(),
+        name_span: None,
+        arity: 2,
+        type_params_count: 0,
+        is_main: false,
+        is_runtime: true,
+    };
+    next_fn_id += 1;
+    let u8_to_i64_sig = FnSignature {
+        id: FnId(next_fn_id),
+        name: "u8_to_i64".to_string(),
+        name_span: None,
+        arity: 1,
+        type_params_count: 0,
+        is_main: false,
+        is_runtime: true,
+    };
+    next_fn_id += 1;
+    let i64_to_u8_sig = FnSignature {
+        id: FnId(next_fn_id),
+        name: "i64_to_u8".to_string(),
+        name_span: None,
+        arity: 1,
+        type_params_count: 0,
+        is_main: false,
+        is_runtime: true,
+    };
+    next_fn_id += 1;
 
     let mut fn_table: HashMap<String, FnId> = HashMap::new();
-    let mut signatures: Vec<FnSignature> =
-        vec![print_sig, unwrap_or_sig, is_some_sig, len_sig];
+    let mut signatures: Vec<FnSignature> = vec![
+        print_sig, unwrap_or_sig, is_some_sig, len_sig, str_eq_sig, u8_to_i64_sig,
+        i64_to_u8_sig,
+    ];
     fn_table.insert("print".to_string(), PRINT_FN_ID);
     fn_table.insert("unwrap_or".to_string(), UNWRAP_OR_FN_ID);
     fn_table.insert("is_some".to_string(), IS_SOME_FN_ID);
     fn_table.insert("len".to_string(), LEN_FN_ID);
+    fn_table.insert("str_eq".to_string(), STR_EQ_FN_ID);
+    fn_table.insert("u8_to_i64".to_string(), U8_TO_I64_FN_ID);
+    fn_table.insert("i64_to_u8".to_string(), I64_TO_U8_FN_ID);
 
     // Pass 1: collect every fn into the table.
     for fn_def in &program.fns {
@@ -2486,16 +2531,11 @@ fn resolve_expr(
         ExprKind::IntLit(n) => ResolvedExprKind::IntLit(*n),
         ExprKind::BoolLit(b) => ResolvedExprKind::BoolLit(*b),
         ExprKind::NullLit => ResolvedExprKind::NullLit,
-        ExprKind::CharLit(_) | ExprKind::StringLit(_) => {
-            // D.2 / ADR 0033 D2 (2/N): the parser decodes char/string
-            // literals, but the type layer (`Type::U8`, char → `u8`,
-            // string → `[u8]`) lands at D.2 (3/N). Reject here so
-            // `ResolvedExprKind` gains no new variant until then — the
-            // enum/`match` (2/N) reject shape.
-            return Err(ResolveError::CharStringLitNotYet {
-                span: to_source_span(&expr.span),
-            });
-        }
+        // D.2 / ADR 0033 (3/N): char/string literals now flow through —
+        // the bytes carry verbatim from the AST; the type checker assigns
+        // char → `u8`, string → `[u8]`.
+        ExprKind::CharLit(b) => ResolvedExprKind::CharLit(*b),
+        ExprKind::StringLit(bytes) => ResolvedExprKind::StringLit(bytes.clone()),
         ExprKind::Var(name) => {
             let id = match vars.get(name) {
                 Some(id) => *id,
@@ -3579,11 +3619,6 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
             "`declassify(...)` is not yet supported (lands at C3.1)".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
-        ResolveError::CharStringLitNotYet { span } => (
-            "sentinel::resolve::char_string_lit_not_yet",
-            "char/string literals are not supported yet (Phase D.2)".to_string(),
-            span.offset()..(span.offset() + span.len()),
-        ),
         ResolveError::UndefinedHandlerEffect { name, span } => (
             "sentinel::resolve::undefined_handler_effect",
             format!("undefined effect `{name}` in handler arm / perform"),
@@ -3734,8 +3769,9 @@ mod tests {
         assert_eq!(p.main().name, "main");
         assert!(p.main().signature(&p).is_main);
         // FnId(0) = print, FnId(1) = unwrap_or, FnId(2) = is_some,
-        // FnId(3) = len, FnId(4) = main (the first user fn).
-        assert_eq!(p.main().id, FnId(4));
+        // FnId(3) = len, FnId(4..=6) = str_eq/u8_to_i64/i64_to_u8 (D.2),
+        // FnId(7) = main (the first user fn).
+        assert_eq!(p.main().id, FnId(7));
         assert_eq!(p.fn_signatures[0].name, "print");
         assert!(p.fn_signatures[0].is_runtime);
     }
@@ -3775,11 +3811,12 @@ mod tests {
             },
             other => panic!("expected Binary, got {other:?}"),
         }
-        // FnId(0) = print, FnId(1) = unwrap_or, FnId(2) = is_some,
-        // FnId(3) = len, FnId(4) = double (first user fn), FnId(5) = main.
+        // FnId(0..=6) = the 7 runtime builtins (print, unwrap_or,
+        // is_some, len, str_eq, u8_to_i64, i64_to_u8); FnId(7) = double
+        // (first user fn), FnId(8) = main.
         let main = p.main();
         match &main.body.tail.kind {
-            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(4)),
+            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(7)),
             other => panic!("expected Call, got {other:?}"),
         }
     }
@@ -4917,19 +4954,30 @@ mod tests {
         }
     }
 
-    // ----- D.2 (2/N) / ADR 0033 D2: char/string literals rejected until 3/N -----
+    // ----- D.2 (3/N) / ADR 0033 D2: char/string literals now resolve -----
 
     #[test]
-    fn char_lit_rejected_not_yet() {
-        // The literal parses + decodes; resolve rejects it (the type
-        // layer `Type::U8` lands at D.2 (3/N)).
-        let err = resolve_err("fn main() -> i64 { let c = 'a'; 0 }");
-        assert!(matches!(err, ResolveError::CharStringLitNotYet { .. }), "got {err:?}");
+    fn char_lit_resolves() {
+        // D.2 (3/N): the decoded byte carries through resolve verbatim
+        // (no longer rejected — the type layer assigns `u8`).
+        let p = resolve_ok("fn main() -> i64 { let c = 'a'; 0 }");
+        match &p.main().body.stmts[0].kind {
+            ResolvedStmtKind::Let { value, .. } => {
+                assert!(matches!(value.kind, ResolvedExprKind::CharLit(97)), "got {:?}", value.kind);
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
     }
 
     #[test]
-    fn string_lit_rejected_not_yet() {
-        let err = resolve_err("fn main() -> i64 { let s = \"hi\"; 0 }");
-        assert!(matches!(err, ResolveError::CharStringLitNotYet { .. }), "got {err:?}");
+    fn string_lit_resolves() {
+        let p = resolve_ok("fn main() -> i64 { let s = \"hi\"; 0 }");
+        match &p.main().body.stmts[0].kind {
+            ResolvedStmtKind::Let { value, .. } => match &value.kind {
+                ResolvedExprKind::StringLit(bytes) => assert_eq!(bytes, &vec![104, 105]),
+                other => panic!("expected StringLit, got {other:?}"),
+            },
+            other => panic!("expected Let, got {other:?}"),
+        }
     }
 }
