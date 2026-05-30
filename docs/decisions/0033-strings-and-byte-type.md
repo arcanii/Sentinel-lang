@@ -38,6 +38,28 @@ cascade nowhere (no exhaustive `TokenKind` match downstream). +7 lexer tests
 (1275), four-check green. Next: **(2/N)** AST + parser
 (`ExprKind::CharLit`/`StringLit`; `u8` in `TypeExpr`).
 
+**(2/N) update (2026-05-30) — DELIVERED (`f310f15`).** The AST + parser
+land. `ExprKind` gains **`CharLit(u8)`** + **`StringLit(Vec<u8>)`** carrying
+the *decoded* bytes (a string IS a `[u8]` — D3), with s-expr `Display` arms
+`(char N)` / `(string b0 b1 …)`. The parser **decodes the span at parse
+time** (like `IntLit`): strip the quotes by byte index, process the escapes
+`\n \t \r \0 \\ \' \"` and `\xHH` (two hex digits → one byte) into the bytes;
+non-escape bytes (including multi-byte UTF-8) pass through verbatim, so a
+string is exactly its UTF-8 source bytes. A char literal must decode to
+**exactly one byte** — `''` / `'ab'` / a multi-byte source char are rejected
+(`CharLitNotSingleByte`); an unknown escape or a malformed `\x` (non-hex or
+< 2 digits) is rejected (`InvalidEscape`). **`u8` needed no type-parser
+change** — it already parses as a `TypeExpr` `Ident`, and `[u8]` / `u8` in
+param/return position are parse-confirmed by test. Resolve **rejects**
+char/string literals with a `CharStringLitNotYet` `NotYet` diagnostic (the
+enum/`match` (2/N) shape) — so **`ResolvedExprKind` gains no new variant** and
+every downstream typed-tree crate (types/codegen/mir/borrow/effect) is
+untouched; the blast radius stays in **ast + syntax + resolve**. Additive
+end-to-end. +21 tests (1296), four-check green. Next: **(3/N)** the type
+layer — `Type::U8` + the cascade across every exhaustive `Type` match +
+`ArrayElem::U8`; char → `u8`, string → `[u8]`; `str_eq` + conversion builtins
+typed; resolve → typed mirrors.
+
 ## Context
 
 Of the remaining Phase D prerequisites (ADR 0031 D4), **strings + a byte

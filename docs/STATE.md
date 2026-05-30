@@ -62,9 +62,21 @@ drop uniformly), and the lexer's core ops (`s[i]`, `len`, a `str_eq`
 builtin, `u8`↔`i64` conversions). 4-sub-phase split (lexer → AST/parser →
 `Type::U8` + the cascade → codegen/runtime). **D.2 (1/N) shipped:** the lexer
 recognises char + string literals (escape-aware; `u8` lexes as an `Ident`,
-no keyword token) — additive, +7 tests (1275), four-check green. Resume at
-**D.2 (2/N)** — AST + parser (`ExprKind::CharLit`/`StringLit`; `u8` in
-`TypeExpr`). After D.2:
+no keyword token) — additive, +7 tests (1275), four-check green. **D.2 (2/N)
+shipped (`f310f15`):** the AST + parser. `ExprKind` gains `CharLit(u8)` +
+`StringLit(Vec<u8>)` carrying the **decoded** bytes (a string IS a `[u8]`),
+with s-expr `Display` arms; the parser decodes the span at parse time (strip
+quotes, process escapes `\n \t \r \0 \\ \' \"` + `\xHH` → bytes; non-escape
+bytes incl. multi-byte UTF-8 pass through), validating a char is **exactly
+one byte** (`''`/`'ab'`/multi-byte rejected) and rejecting a bad escape (2 new
+`ParseError`s). `u8` needed **no type-parser change** (already a `TypeExpr`
+`Ident`). Resolve **rejects** char/string literals (`CharStringLitNotYet`)
+until 3/N — so `ResolvedExprKind` gains **no new variant** and the typed-tree
+crates (types/codegen/mir/borrow/effect) are untouched; blast radius stays in
+**ast + syntax + resolve**. Additive, +21 tests (1296), four-check green.
+Resume at **D.2 (3/N)** — the type layer (`Type::U8` + the cascade across
+every exhaustive `Type` match + `ArrayElem::U8`; char → `u8`, string → `[u8]`;
+`str_eq` + conversion builtins typed; resolve → typed mirrors). After D.2:
 growable collections → file I/O → modules → loops (ADR 0031 D4), then the
 self-host port. (D.1b generic enums + the enum payload-ownership/leak-
 completeness fix remain available follow-ons.)
