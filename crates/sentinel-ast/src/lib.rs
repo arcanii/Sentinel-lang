@@ -172,6 +172,13 @@ impl UnaryOp {
 /// C1.6 adds [`ExprKind::ArrayLit`] (`[e1, e2, …]` per ADR 0015 D2)
 /// and [`ExprKind::Index`] (postfix `a[i]` per D3; binds as part of
 /// the postfix chain alongside `.field`).
+///
+/// D.2 adds [`ExprKind::CharLit`] (`'a'` → a `u8` byte) and
+/// [`ExprKind::StringLit`] (`"abc"` → a `[u8]` byte array) per ADR
+/// 0033 D2. Both carry the *decoded* bytes (escapes already
+/// processed at parse time, like [`ExprKind::IntLit`] decodes its
+/// span); the type layer (`Type::U8`, char → `u8`, string → `[u8]`)
+/// lands at D.2 (3/N).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExprKind {
     IntLit(i64),
@@ -179,6 +186,18 @@ pub enum ExprKind {
     /// The `null` keyword literal per ADR 0014 D2. The type checker
     /// resolves its `?T` type from the surrounding context.
     NullLit,
+    /// D.2 / ADR 0033 D2: a char/byte literal `'a'`. The payload is
+    /// the single decoded byte (escapes `\n \t \r \0 \\ \' \" \xHH`
+    /// resolved by the parser; a char literal is exactly one byte —
+    /// the parser rejects `''` / `'ab'` / multi-byte source chars).
+    /// Types to `u8` at D.2 (3/N).
+    CharLit(u8),
+    /// D.2 / ADR 0033 D2: a string literal `"abc"`. The payload is
+    /// the decoded byte sequence (the UTF-8 source bytes with the
+    /// same escapes plus `\"`). A string IS a `[u8]` (ADR 0033 D3),
+    /// so this types to `[u8]` and reuses the array machinery at
+    /// D.2 (3/N)+(4/N).
+    StringLit(Vec<u8>),
     Var(String),
     Unary(UnaryOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
@@ -908,6 +927,16 @@ impl fmt::Display for ExprKind {
             ExprKind::IntLit(n) => write!(f, "{n}"),
             ExprKind::BoolLit(b) => write!(f, "{b}"),
             ExprKind::NullLit => write!(f, "null"),
+            // D.2 / ADR 0033 D2: literals render as their decoded
+            // bytes — a string IS a `[u8]`, so the bytes are the truth.
+            ExprKind::CharLit(b) => write!(f, "(char {b})"),
+            ExprKind::StringLit(bytes) => {
+                write!(f, "(string")?;
+                for b in bytes {
+                    write!(f, " {b}")?;
+                }
+                write!(f, ")")
+            }
             ExprKind::Var(name) => write!(f, "{name}"),
             ExprKind::Unary(op, inner) => write!(f, "({} {})", op.symbol(), inner.kind),
             ExprKind::Binary(op, lhs, rhs) => {
@@ -1249,6 +1278,23 @@ mod tests {
     #[test]
     fn display_int_lit() {
         assert_eq!(lit(42, 0..2).to_string(), "42");
+    }
+
+    #[test]
+    fn display_char_lit() {
+        // D.2 / ADR 0033 D2: a char literal renders its decoded byte.
+        let e = Spanned { kind: ExprKind::CharLit(b'A'), span: 0..3 };
+        assert_eq!(e.to_string(), "(char 65)");
+    }
+
+    #[test]
+    fn display_string_lit() {
+        // D.2 / ADR 0033 D2: a string literal renders its decoded bytes
+        // (`"let"` → 108 101 116). An empty string renders `(string)`.
+        let e = Spanned { kind: ExprKind::StringLit(vec![108, 101, 116]), span: 0..5 };
+        assert_eq!(e.to_string(), "(string 108 101 116)");
+        let empty = Spanned { kind: ExprKind::StringLit(vec![]), span: 0..2 };
+        assert_eq!(empty.to_string(), "(string)");
     }
 
     #[test]

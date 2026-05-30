@@ -1017,6 +1017,22 @@ pub enum ResolveError {
         span: miette::SourceSpan,
     },
 
+    /// D.2 / ADR 0033 D2 (2/N): char/string literals parse + decode at
+    /// (2/N) but are not yet resolvable — the type layer (`Type::U8`,
+    /// char → `u8`, string → `[u8]`) lands at D.2 (3/N). Rejecting here
+    /// (rather than passing through) keeps `ResolvedExprKind` — and
+    /// every downstream typed-tree crate — untouched until (3/N), the
+    /// same shape as the enum/`match` (2/N) `NotYet` reject.
+    #[error("char/string literals are not supported yet (Phase D.2)")]
+    #[diagnostic(
+        code(sentinel::resolve::char_string_lit_not_yet),
+        help("`'c'` / `\"...\"` parse at Phase D.2 (2/N); the type layer (`Type::U8`, char → `u8`, string → `[u8]`) lands at D.2 (3/N) — ADR 0033")
+    )]
+    CharStringLitNotYet {
+        #[label("byte/string literal not yet resolvable")]
+        span: miette::SourceSpan,
+    },
+
     /// C3.4 / ADR 0020 D5: a `handle` arm or `perform` expression
     /// references an effect name that isn't declared anywhere in
     /// the program.
@@ -2470,6 +2486,16 @@ fn resolve_expr(
         ExprKind::IntLit(n) => ResolvedExprKind::IntLit(*n),
         ExprKind::BoolLit(b) => ResolvedExprKind::BoolLit(*b),
         ExprKind::NullLit => ResolvedExprKind::NullLit,
+        ExprKind::CharLit(_) | ExprKind::StringLit(_) => {
+            // D.2 / ADR 0033 D2 (2/N): the parser decodes char/string
+            // literals, but the type layer (`Type::U8`, char → `u8`,
+            // string → `[u8]`) lands at D.2 (3/N). Reject here so
+            // `ResolvedExprKind` gains no new variant until then — the
+            // enum/`match` (2/N) reject shape.
+            return Err(ResolveError::CharStringLitNotYet {
+                span: to_source_span(&expr.span),
+            });
+        }
         ExprKind::Var(name) => {
             let id = match vars.get(name) {
                 Some(id) => *id,
@@ -3551,6 +3577,11 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
         ResolveError::DeclassifyNotYet { span } => (
             "sentinel::resolve::declassify_not_yet",
             "`declassify(...)` is not yet supported (lands at C3.1)".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::CharStringLitNotYet { span } => (
+            "sentinel::resolve::char_string_lit_not_yet",
+            "char/string literals are not supported yet (Phase D.2)".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         ResolveError::UndefinedHandlerEffect { name, span } => (
@@ -4884,5 +4915,21 @@ mod tests {
             },
             other => panic!("expected Match, got {other:?}"),
         }
+    }
+
+    // ----- D.2 (2/N) / ADR 0033 D2: char/string literals rejected until 3/N -----
+
+    #[test]
+    fn char_lit_rejected_not_yet() {
+        // The literal parses + decodes; resolve rejects it (the type
+        // layer `Type::U8` lands at D.2 (3/N)).
+        let err = resolve_err("fn main() -> i64 { let c = 'a'; 0 }");
+        assert!(matches!(err, ResolveError::CharStringLitNotYet { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn string_lit_rejected_not_yet() {
+        let err = resolve_err("fn main() -> i64 { let s = \"hi\"; 0 }");
+        assert!(matches!(err, ResolveError::CharStringLitNotYet { .. }), "got {err:?}");
     }
 }

@@ -178,6 +178,37 @@ pub enum ParseError {
         #[label("second `init` here")]
         span: miette::SourceSpan,
     },
+
+    /// D.2 / ADR 0033 D2: a char/byte literal `'…'` must decode to
+    /// exactly one byte. `''` (empty), `'ab'` (too many), and a
+    /// multi-byte source character are all rejected — char literals
+    /// are single-byte at this MVP (no Unicode code points — D8).
+    #[error("char literal `{text}` must contain exactly one byte")]
+    #[diagnostic(
+        code(sentinel::parse::char_lit_not_single_byte),
+        help("a char literal is a single `u8` byte per ADR 0033 D2; use a string literal `\"…\"` for more than one byte")
+    )]
+    CharLitNotSingleByte {
+        text: String,
+        #[label("not a single byte")]
+        span: miette::SourceSpan,
+    },
+
+    /// D.2 / ADR 0033 D2: an invalid escape sequence in a char or
+    /// string literal. The valid escapes are `\n \t \r \0 \\ \' \"`
+    /// and `\xHH` (two hex digits); an unknown escape letter or a
+    /// malformed `\x` (non-hex or fewer than two digits) is rejected
+    /// at parse time, where the span bytes are first decoded.
+    #[error("invalid escape sequence in literal `{text}`")]
+    #[diagnostic(
+        code(sentinel::parse::invalid_escape),
+        help("valid escapes are \\n \\t \\r \\0 \\\\ \\' \\\" and \\xHH (two hex digits) per ADR 0033 D2")
+    )]
+    InvalidEscape {
+        text: String,
+        #[label("invalid escape here")]
+        span: miette::SourceSpan,
+    },
 }
 
 /// Parse a Sentinel source string into a [`Program`] — zero or
@@ -3636,6 +3667,41 @@ impl<'a> Parser<'a> {
                 })?;
                 Ok(Spanned { kind: ExprKind::IntLit(n), span })
             }
+            Some(TokenKind::StringLit) => {
+                // D.2 / ADR 0033 D2: decode `"..."` into its bytes. Like
+                // `IntLit`, the value is recovered from the span at parse
+                // time (the lexer only *recognised* the literal). The two
+                // surrounding `"` are ASCII (1 byte each), so strip them
+                // by byte index before decoding the escapes.
+                let span = self.advance().expect("peeked").span.clone();
+                let text = &self.src[span.clone()];
+                let inner = &text.as_bytes()[1..text.len() - 1];
+                let bytes = decode_byte_literal(inner).map_err(|()| ParseError::InvalidEscape {
+                    text: text.to_string(),
+                    span: to_source_span(&span),
+                })?;
+                Ok(Spanned { kind: ExprKind::StringLit(bytes), span })
+            }
+            Some(TokenKind::CharLit) => {
+                // D.2 / ADR 0033 D2: decode `'c'` into its single byte.
+                // Same span-strip + escape-decode as a string, then
+                // enforce the single-byte rule (`''` / `'ab'` / a
+                // multi-byte source char are rejected — bytes only).
+                let span = self.advance().expect("peeked").span.clone();
+                let text = &self.src[span.clone()];
+                let inner = &text.as_bytes()[1..text.len() - 1];
+                let bytes = decode_byte_literal(inner).map_err(|()| ParseError::InvalidEscape {
+                    text: text.to_string(),
+                    span: to_source_span(&span),
+                })?;
+                if bytes.len() != 1 {
+                    return Err(ParseError::CharLitNotSingleByte {
+                        text: text.to_string(),
+                        span: to_source_span(&span),
+                    });
+                }
+                Ok(Spanned { kind: ExprKind::CharLit(bytes[0]), span })
+            }
             Some(TokenKind::True) => {
                 let span = self.advance().expect("peeked").span.clone();
                 Ok(Spanned { kind: ExprKind::BoolLit(true), span })
@@ -4504,6 +4570,61 @@ impl<'a> Parser<'a> {
 
 fn to_source_span(span: &Span) -> miette::SourceSpan {
     (span.start, span.len()).into()
+}
+
+/// D.2 / ADR 0033 D2: decode the interior bytes of a char/string
+/// literal — the source bytes *between* the quotes — into the bytes
+/// the literal denotes, processing escape sequences. Non-escape bytes
+/// (including multi-byte UTF-8) pass through verbatim, so a string IS
+/// its UTF-8 source bytes (ADR 0033 D3). The recognised escapes are
+/// `\n \t \r \0 \\ \' \"` and `\xHH` (two hex digits → one byte).
+///
+/// Returns `Err(())` on an invalid escape (an unknown escape letter,
+/// a non-hex or short `\x`, or a dangling `\`); the caller attaches
+/// the literal's span. The lexer's regex already guarantees a `\` is
+/// followed by at least one char, but the bounds are checked anyway
+/// so this is panic-free for any input.
+fn decode_byte_literal(inner: &[u8]) -> Result<Vec<u8>, ()> {
+    let mut out = Vec::with_capacity(inner.len());
+    let mut i = 0;
+    while i < inner.len() {
+        if inner[i] != b'\\' {
+            out.push(inner[i]);
+            i += 1;
+            continue;
+        }
+        // An escape: `inner[i]` is `\`; the next byte selects the kind.
+        match *inner.get(i + 1).ok_or(())? {
+            b'n' => out.push(b'\n'),
+            b't' => out.push(b'\t'),
+            b'r' => out.push(b'\r'),
+            b'0' => out.push(0),
+            b'\\' => out.push(b'\\'),
+            b'\'' => out.push(b'\''),
+            b'"' => out.push(b'"'),
+            b'x' => {
+                // `\xHH` — exactly two hex digits → one byte.
+                let hi = hex_digit(*inner.get(i + 2).ok_or(())?).ok_or(())?;
+                let lo = hex_digit(*inner.get(i + 3).ok_or(())?).ok_or(())?;
+                out.push(hi * 16 + lo);
+                i += 2; // consume the two hex digits (plus the +2 below)
+            }
+            _ => return Err(()),
+        }
+        i += 2; // consume the `\` and the selector byte
+    }
+    Ok(out)
+}
+
+/// D.2 / ADR 0033 D2: the value of a single hex digit byte, or `None`
+/// if `b` is not `[0-9a-fA-F]`.
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Map a comparison-operator [`TokenKind`] to its [`CmpOp`].
@@ -6224,6 +6345,144 @@ mod tests {
     #[test]
     fn parse_array_index_with_var() {
         assert_eq!(pretty("a[i]"), "(index a i)");
+    }
+
+    // ----- D.2 / ADR 0033 D2: char + string literals (decode) -----
+
+    #[test]
+    fn parse_char_lit_basic() {
+        // The decoded byte is the character's ASCII value.
+        assert_eq!(pretty("'a'"), "(char 97)");
+        assert_eq!(pretty("'A'"), "(char 65)");
+        assert_eq!(pretty("'0'"), "(char 48)");
+        assert_eq!(pretty("' '"), "(char 32)");
+    }
+
+    #[test]
+    fn parse_char_lit_escapes() {
+        // Every recognised non-hex escape decodes to its byte (the char
+        // surface needs `\'`; `\"` is exercised in the string tests).
+        assert_eq!(pretty(r"'\n'"), "(char 10)");
+        assert_eq!(pretty(r"'\t'"), "(char 9)");
+        assert_eq!(pretty(r"'\r'"), "(char 13)");
+        assert_eq!(pretty(r"'\0'"), "(char 0)");
+        assert_eq!(pretty(r"'\\'"), "(char 92)");
+        assert_eq!(pretty(r"'\''"), "(char 39)");
+    }
+
+    #[test]
+    fn parse_char_lit_hex_escape() {
+        // `\xHH` — two hex digits → one byte; case-insensitive; the full
+        // 0..=255 range is reachable (beyond what a bare ASCII char gives).
+        assert_eq!(pretty(r"'\x41'"), "(char 65)");
+        assert_eq!(pretty(r"'\x00'"), "(char 0)");
+        assert_eq!(pretty(r"'\xff'"), "(char 255)");
+        assert_eq!(pretty(r"'\xFF'"), "(char 255)");
+        assert_eq!(pretty(r"'\x7e'"), "(char 126)");
+    }
+
+    #[test]
+    fn parse_char_lit_digit_arithmetic_shape() {
+        // The lexer's `c - '0'` idiom: char literals inside an expression.
+        assert_eq!(pretty("'7' - '0'"), "(- (char 55) (char 48))");
+    }
+
+    #[test]
+    fn parse_char_lit_empty_rejected() {
+        // `''` decodes to zero bytes — a char must be exactly one byte.
+        let err = parse_expr("''").unwrap_err();
+        assert!(matches!(err, ParseError::CharLitNotSingleByte { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_char_lit_multi_byte_rejected() {
+        // Two ASCII bytes — a char is exactly one byte.
+        let err = parse_expr("'ab'").unwrap_err();
+        assert!(matches!(err, ParseError::CharLitNotSingleByte { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_char_lit_multibyte_utf8_rejected() {
+        // `'é'` is two UTF-8 bytes (0xC3 0xA9) — rejected (single-byte
+        // only; no Unicode code points at this MVP — ADR 0033 D8).
+        let err = parse_expr("'é'").unwrap_err();
+        assert!(matches!(err, ParseError::CharLitNotSingleByte { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_char_lit_unknown_escape_rejected() {
+        let err = parse_expr(r"'\q'").unwrap_err();
+        assert!(matches!(err, ParseError::InvalidEscape { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_char_lit_short_hex_escape_rejected() {
+        // `\x` with fewer than two hex digits.
+        let err = parse_expr(r"'\x4'").unwrap_err();
+        assert!(matches!(err, ParseError::InvalidEscape { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_char_lit_non_hex_escape_rejected() {
+        // `\x` with non-hex digits.
+        let err = parse_expr(r"'\xZZ'").unwrap_err();
+        assert!(matches!(err, ParseError::InvalidEscape { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_string_lit_basic() {
+        // The decoded bytes ARE the string (`"let"` → l e t = 108 101 116).
+        assert_eq!(pretty(r#""let""#), "(string 108 101 116)");
+    }
+
+    #[test]
+    fn parse_string_lit_empty() {
+        assert_eq!(pretty(r#""""#), "(string)");
+    }
+
+    #[test]
+    fn parse_string_lit_escapes() {
+        // Escapes decode inside strings too, including `\"` and `\xHH`.
+        assert_eq!(pretty(r#""a\nb""#), "(string 97 10 98)");
+        assert_eq!(pretty(r#""\x41\x42""#), "(string 65 66)");
+        assert_eq!(pretty(r#""a\"b""#), "(string 97 34 98)");
+    }
+
+    #[test]
+    fn parse_string_lit_utf8_bytes() {
+        // A multi-byte source char is kept as its UTF-8 bytes — a string
+        // IS its UTF-8 bytes (ADR 0033 D3). `é` = 0xC3 0xA9 = 195 169.
+        assert_eq!(pretty(r#""é""#), "(string 195 169)");
+    }
+
+    #[test]
+    fn parse_string_lit_bad_escape_rejected() {
+        // A malformed `\x` inside a string is rejected at parse time.
+        let err = parse_expr(r#""ab\x""#).unwrap_err();
+        assert!(matches!(err, ParseError::InvalidEscape { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_string_lit_in_let() {
+        // The `let s = "let";` shape — a string literal as a let value.
+        let block = parse_block_str(r#"{ let s = "let"; s }"#).expect("parse");
+        match &block.stmts[0].kind {
+            StmtKind::Let { value, .. } => {
+                assert_eq!(value.kind.to_string(), "(string 108 101 116)");
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_u8_in_type_position() {
+        // D.2 / ADR 0033 D2 (2/N): `u8` is a plain `TypeExpr` Ident (no
+        // keyword token, no type-parser change) — usable as a param
+        // type, return type, and array element `[u8]`. It resolves to
+        // `Type::U8` at D.2 (3/N); here it must simply parse.
+        let p = parse_ok_program("fn first(s: [u8]) -> u8 { s[0] }");
+        assert_eq!(p.fns[0].params[0].ty.kind.to_string(), "[u8]");
+        assert_eq!(p.fns[0].return_type.kind.to_string(), "u8");
     }
 
     #[test]

@@ -157,6 +157,20 @@ fn parse_error_to_diagnostic(err: &ParseError) -> Diagnostic {
             message: format!("class `{class_name}` declares multiple `init` constructors"),
             span: span.offset()..(span.offset() + span.len()),
         },
+        ParseError::CharLitNotSingleByte { text, span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::char_lit_not_single_byte",
+            message: format!("char literal `{text}` must contain exactly one byte"),
+            span: span.offset()..(span.offset() + span.len()),
+        },
+        ParseError::InvalidEscape { text, span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::invalid_escape",
+            message: format!("invalid escape sequence in literal `{text}`"),
+            span: span.offset()..(span.offset() + span.len()),
+        },
     }
 }
 
