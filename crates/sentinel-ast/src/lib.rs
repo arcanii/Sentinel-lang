@@ -318,6 +318,15 @@ pub enum ExprKind {
     Await {
         task_expr: Box<Expr>,
     },
+    /// Phase D.1 / ADR 0032: `match scrutinee { pat => body, … }` —
+    /// exhaustive pattern matching over a sum type. An expression (all
+    /// arms share a result type, like `if`). The parser produces this at
+    /// D.1 (2/N); resolve rejects it with `ResolveError::MatchNotYet`
+    /// until D.1 (3/N) wires the type layer.
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
 }
 
 /// C4.4 / ADR 0024 D1: scope-mode tag. Only `Concurrent` ships
@@ -452,6 +461,11 @@ pub struct Program {
     /// (`impl Name as Trait for Type`) live in this vec; the
     /// optional `name` field distinguishes.
     pub impls: Vec<ImplDecl>,
+    /// Phase D.1 / ADR 0032: top-level sum-type (`enum`) declarations.
+    /// Always present (may be empty for pre-D.1 programs). The parser
+    /// produces these at D.1 (2/N); resolve rejects any non-empty `enums`
+    /// with `ResolveError::EnumDeclNotYet` until D.1 (3/N).
+    pub enums: Vec<EnumDecl>,
     pub span: Span,
 }
 
@@ -537,6 +551,59 @@ pub struct StructField {
     pub name_span: Span,
     pub ty: TypeExpr,
     pub span: Span,
+}
+
+/// Phase D.1 / ADR 0032: a top-level sum-type (enum) declaration —
+/// `enum Name { V1, V2(T), V3(T1, T2) }`. Variants are unit or carry a
+/// positional tuple payload. Non-generic at the D.1 MVP (generic enums
+/// are a fast-follow per ADR 0032 D9). The parser produces this at D.1
+/// (2/N); resolve rejects any non-empty `enums` with
+/// `ResolveError::EnumDeclNotYet` until D.1 (3/N) wires the type layer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EnumDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub variants: Vec<VariantDecl>,
+    pub span: Span,
+}
+
+/// Phase D.1 / ADR 0032: one variant of an [`EnumDecl`]. `payloads` is
+/// empty for a unit variant, else the positional payload field types.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VariantDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub payloads: Vec<TypeExpr>,
+    pub span: Span,
+}
+
+/// Phase D.1 / ADR 0032: one arm of a `match` expression —
+/// `pattern => body`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub body: Expr,
+    pub span: Span,
+}
+
+/// Phase D.1 / ADR 0032: a `match`-arm pattern. The D.1 MVP supports a
+/// qualified variant pattern (`Enum::Variant` / `Enum::Variant(b1, b2)`,
+/// binding the payload positionally) and the `_` wildcard. Nested / or-
+/// / literal patterns are out of scope per ADR 0032 D10.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Pattern {
+    /// `Enum::Variant` (unit) or `Enum::Variant(b1, b2)` (binds the
+    /// payload fields positionally; a binding may be `_`).
+    Variant {
+        enum_name: String,
+        enum_name_span: Span,
+        variant: String,
+        variant_span: Span,
+        bindings: Vec<Spanned<String>>,
+        span: Span,
+    },
+    /// The `_` wildcard (catch-all).
+    Wildcard(Span),
 }
 
 /// A C3.0+ top-level effect declaration per ADR 0019 D4:
@@ -946,6 +1013,23 @@ impl fmt::Display for ExprKind {
             ExprKind::Await { task_expr } => {
                 write!(f, "(await {})", task_expr.kind)
             }
+            ExprKind::Match { scrutinee, arms } => {
+                write!(f, "(match {}", scrutinee.kind)?;
+                for arm in arms {
+                    write!(f, " (")?;
+                    match &arm.pattern {
+                        Pattern::Variant { enum_name, variant, bindings, .. } => {
+                            write!(f, "{enum_name}::{variant}")?;
+                            for b in bindings {
+                                write!(f, " {}", b.kind)?;
+                            }
+                        }
+                        Pattern::Wildcard(_) => write!(f, "_")?,
+                    }
+                    write!(f, " {})", arm.body.kind)?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -1341,6 +1425,7 @@ mod tests {
             classes: vec![],
             traits: vec![],
             impls: vec![],
+            enums: vec![],
             span: 0..2,
         };
         assert_eq!(p.to_string(), "(fn main () -> i64 (block 42))");
@@ -1389,6 +1474,7 @@ mod tests {
             classes: vec![],
             traits: vec![],
             impls: vec![],
+            enums: vec![],
             span: 0..20,
         };
         assert_eq!(
@@ -1805,6 +1891,7 @@ mod tests {
             classes: vec![],
             traits: vec![],
             impls: vec![],
+            enums: vec![],
             span: 0..30,
         };
         // Structs first, then fns.

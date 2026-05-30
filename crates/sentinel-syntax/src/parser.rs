@@ -47,10 +47,11 @@
 //! until parser ergonomics demand it.
 
 use sentinel_ast::{
-    BinOp, Block, ClassDecl, ClassField, CmpOp, DelegateDecl, EffectDecl, Expr, ExprKind,
-    FieldInit, FnDef, HandlerArm, ImplDecl, ImplMethodDef, InitDef, LogicOp, MethodDef, OpDecl,
-    Param, Program, ReturnArm, SelfKind, Span, Spanned, Stmt, StmtKind, StructDecl, StructField,
-    TraitDecl, TraitMethodSig, TypeExpr, TypeExprKind, TypeParam, UnaryOp, Visibility,
+    BinOp, Block, ClassDecl, ClassField, CmpOp, DelegateDecl, EffectDecl, EnumDecl, Expr, ExprKind,
+    FieldInit, FnDef, HandlerArm, ImplDecl, ImplMethodDef, InitDef, LogicOp, MatchArm, MethodDef,
+    OpDecl, Param, Pattern, Program, ReturnArm, SelfKind, Span, Spanned, Stmt, StmtKind, StructDecl,
+    StructField, TraitDecl, TraitMethodSig, TypeExpr, TypeExprKind, TypeParam, UnaryOp,
+    VariantDecl, Visibility,
 };
 
 use crate::{lex, LexError, TokenKind};
@@ -285,6 +286,7 @@ impl<'a> Parser<'a> {
         let mut classes = Vec::new();
         let mut traits = Vec::new();
         let mut impls = Vec::new();
+        let mut enums = Vec::new();
         while self.peek().is_some() {
             match self.peek_kind() {
                 Some(TokenKind::Fn) => fns.push(self.parse_fn_def()?),
@@ -293,11 +295,13 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Class) => classes.push(self.parse_class_decl()?),
                 Some(TokenKind::Trait) => traits.push(self.parse_trait_decl()?),
                 Some(TokenKind::Impl) => impls.push(self.parse_impl_decl()?),
+                // Phase D.1 / ADR 0032: top-level `enum` declarations.
+                Some(TokenKind::Enum) => enums.push(self.parse_enum_decl()?),
                 Some(other) => {
                     let t = self.peek().expect("peeked");
                     return Err(ParseError::UnexpectedToken {
                         got: format!("{other:?}"),
-                        expected: "`fn`, `struct`, `effect`, `class`, `trait`, or `impl`",
+                        expected: "`fn`, `struct`, `effect`, `class`, `trait`, `impl`, or `enum`",
                         span: to_source_span(&t.span),
                     });
                 }
@@ -310,6 +314,7 @@ impl<'a> Parser<'a> {
             && classes.is_empty()
             && traits.is_empty()
             && impls.is_empty()
+            && enums.is_empty()
         {
             return Err(ParseError::UnexpectedEof {
                 expected: "`fn` (programs are one or more function definitions)",
@@ -323,12 +328,14 @@ impl<'a> Parser<'a> {
         let class_end = classes.last().map_or(0, |c| c.span.end);
         let trait_end = traits.last().map_or(0, |t| t.span.end);
         let impl_end = impls.last().map_or(0, |i| i.span.end);
+        let enum_end = enums.last().map_or(0, |e| e.span.end);
         let end = fn_end
             .max(struct_end)
             .max(effect_end)
             .max(class_end)
             .max(trait_end)
-            .max(impl_end);
+            .max(impl_end)
+            .max(enum_end);
         Ok(Program {
             fns,
             structs,
@@ -336,6 +343,7 @@ impl<'a> Parser<'a> {
             classes,
             traits,
             impls,
+            enums,
             span: start..end,
         })
     }
@@ -442,6 +450,174 @@ impl<'a> Parser<'a> {
             type_params,
             fields,
             span: struct_start..rbrace_end,
+        })
+    }
+
+    /// Phase D.1 / ADR 0032: parse a top-level enum declaration:
+    ///
+    /// ```text
+    /// enum_decl    = 'enum' Ident '{' variant_list '}'
+    /// variant_list = (variant (',' variant)*)? ','?
+    /// variant      = Ident ('(' type (',' type)* ')')?
+    /// ```
+    ///
+    /// Non-generic at the D.1 MVP (generic enums are a fast-follow per
+    /// ADR 0032 D9). Additive — resolve rejects `enum`s with
+    /// `EnumDeclNotYet` until D.1 (3/N).
+    fn parse_enum_decl(&mut self) -> Result<EnumDecl, ParseError> {
+        let enum_start = match self.peek_kind() {
+            Some(TokenKind::Enum) => self.advance().expect("peeked").span.start,
+            _ => unreachable!("called only after peek_kind() == Enum"),
+        };
+
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "enum name after `enum`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "enum name after `enum`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        match self.peek_kind() {
+            Some(TokenKind::LBrace) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`{` to open enum body",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`{` to open enum body",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let mut variants = Vec::new();
+        if self.peek_kind() != Some(TokenKind::RBrace) {
+            variants.push(self.parse_variant()?);
+            while self.peek_kind() == Some(TokenKind::Comma) {
+                self.advance();
+                if self.peek_kind() == Some(TokenKind::RBrace) {
+                    break; // trailing comma allowed
+                }
+                variants.push(self.parse_variant()?);
+            }
+        }
+
+        let rbrace_end = match self.peek_kind() {
+            Some(TokenKind::RBrace) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`,` or `}` in enum body",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`,` or `}` in enum body",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        Ok(EnumDecl {
+            name,
+            name_span,
+            variants,
+            span: enum_start..rbrace_end,
+        })
+    }
+
+    /// Parse one enum variant: `Ident` (unit) or
+    /// `Ident '(' type (',' type)* ')'` (positional tuple payload).
+    fn parse_variant(&mut self) -> Result<VariantDecl, ParseError> {
+        let (name, name_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let name = self.src[span.clone()].to_string();
+                self.advance();
+                (name, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "variant name in enum body",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "variant name in enum body",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        let v_start = name_span.start;
+        let mut end = name_span.end;
+        let mut payloads = Vec::new();
+        if self.peek_kind() == Some(TokenKind::LParen) {
+            self.advance();
+            if self.peek_kind() != Some(TokenKind::RParen) {
+                payloads.push(self.parse_type()?);
+                while self.peek_kind() == Some(TokenKind::Comma) {
+                    self.advance();
+                    if self.peek_kind() == Some(TokenKind::RParen) {
+                        break; // trailing comma allowed
+                    }
+                    payloads.push(self.parse_type()?);
+                }
+            }
+            end = match self.peek_kind() {
+                Some(TokenKind::RParen) => self.advance().expect("peeked").span.end,
+                Some(other) => {
+                    let t = self.peek().expect("peeked");
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{other:?}"),
+                        expected: "`,` or `)` in variant payload",
+                        span: to_source_span(&t.span),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "`,` or `)` in variant payload",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            };
+        }
+
+        Ok(VariantDecl {
+            name,
+            name_span,
+            payloads,
+            span: v_start..end,
         })
     }
 
@@ -2681,6 +2857,11 @@ impl<'a> Parser<'a> {
         if self.peek_kind() == Some(TokenKind::If) {
             return self.parse_if();
         }
+        // Phase D.1 / ADR 0032: `match` is a control-flow expression,
+        // dispatched here alongside `if`.
+        if self.peek_kind() == Some(TokenKind::Match) {
+            return self.parse_match_expr();
+        }
         self.parse_or()
     }
 
@@ -2789,6 +2970,257 @@ impl<'a> Parser<'a> {
             },
             span: if_start..end,
         })
+    }
+
+    /// Phase D.1 / ADR 0032: `match scrutinee { pat => body, … }`. The
+    /// scrutinee forbids struct literals (like the if-condition) so
+    /// `match x { … }` is unambiguous. Arms are comma-separated; a
+    /// trailing comma is allowed.
+    fn parse_match_expr(&mut self) -> Result<Expr, ParseError> {
+        let match_start = self.advance().expect("checked `match`").span.start;
+
+        let saved = self.allow_struct_lit;
+        self.allow_struct_lit = false;
+        let scrutinee = self.parse_expr()?;
+        self.allow_struct_lit = saved;
+
+        match self.peek_kind() {
+            Some(TokenKind::LBrace) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`{` to open match body",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`{` to open match body",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let mut arms = Vec::new();
+        if self.peek_kind() != Some(TokenKind::RBrace) {
+            arms.push(self.parse_match_arm()?);
+            while self.peek_kind() == Some(TokenKind::Comma) {
+                self.advance();
+                if self.peek_kind() == Some(TokenKind::RBrace) {
+                    break; // trailing comma allowed
+                }
+                arms.push(self.parse_match_arm()?);
+            }
+        }
+
+        let rbrace_end = match self.peek_kind() {
+            Some(TokenKind::RBrace) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`,` or `}` in match body",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`,` or `}` in match body",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        Ok(Spanned {
+            kind: ExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms,
+            },
+            span: match_start..rbrace_end,
+        })
+    }
+
+    /// `match_arm = pattern '=>' expr`.
+    fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
+        let pattern = self.parse_pattern()?;
+        let arm_start = match &pattern {
+            Pattern::Variant { span, .. } => span.start,
+            Pattern::Wildcard(span) => span.start,
+        };
+        match self.peek_kind() {
+            Some(TokenKind::FatArrow) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`=>` after a match pattern",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`=>` after a match pattern",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+        let body = self.parse_expr()?;
+        let end = body.span.end;
+        Ok(MatchArm { pattern, body, span: arm_start..end })
+    }
+
+    /// `pattern = '_' | Ident '::' Ident ('(' binding (',' binding)* ')')?`
+    /// — the `_` wildcard or a qualified variant pattern (bindings
+    /// positional; a binding may itself be `_`). Per ADR 0032 D10,
+    /// nested / or- / literal patterns are out of scope.
+    fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let (head, head_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let text = self.src[span.clone()].to_string();
+                self.advance();
+                (text, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "a match pattern (`_` or `Enum::Variant`)",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "a match pattern (`_` or `Enum::Variant`)",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        // The `_` wildcard (lexes as an Ident).
+        if head == "_" {
+            return Ok(Pattern::Wildcard(head_span));
+        }
+
+        // Qualified variant pattern: `Enum::Variant` (+ optional bindings).
+        match self.peek_kind() {
+            Some(TokenKind::ColonColon) => {
+                self.advance();
+            }
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`::` after the enum name in a variant pattern",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`::` after the enum name in a variant pattern",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        }
+
+        let (variant, variant_span) = match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let text = self.src[span.clone()].to_string();
+                self.advance();
+                (text, span)
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "a variant name after `::`",
+                    span: to_source_span(&span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "a variant name after `::`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+
+        let p_start = head_span.start;
+        let mut end = variant_span.end;
+        let mut bindings = Vec::new();
+        if self.peek_kind() == Some(TokenKind::LParen) {
+            self.advance();
+            if self.peek_kind() != Some(TokenKind::RParen) {
+                bindings.push(self.parse_pattern_binding()?);
+                while self.peek_kind() == Some(TokenKind::Comma) {
+                    self.advance();
+                    if self.peek_kind() == Some(TokenKind::RParen) {
+                        break; // trailing comma allowed
+                    }
+                    bindings.push(self.parse_pattern_binding()?);
+                }
+            }
+            end = match self.peek_kind() {
+                Some(TokenKind::RParen) => self.advance().expect("peeked").span.end,
+                Some(other) => {
+                    let t = self.peek().expect("peeked");
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{other:?}"),
+                        expected: "`,` or `)` in variant-pattern bindings",
+                        span: to_source_span(&t.span),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "`,` or `)` in variant-pattern bindings",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            };
+        }
+
+        Ok(Pattern::Variant {
+            enum_name: head,
+            enum_name_span: head_span,
+            variant,
+            variant_span,
+            bindings,
+            span: p_start..end,
+        })
+    }
+
+    /// A single positional binding inside a variant pattern — an `Ident`
+    /// (which may be `_`).
+    fn parse_pattern_binding(&mut self) -> Result<Spanned<String>, ParseError> {
+        match self.peek() {
+            Some(t) if t.kind == TokenKind::Ident => {
+                let span = t.span.clone();
+                let text = self.src[span.clone()].to_string();
+                self.advance();
+                Ok(Spanned { kind: text, span })
+            }
+            Some(t) => {
+                let kind = t.kind;
+                let span = t.span.clone();
+                Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "a binding name in a variant pattern",
+                    span: to_source_span(&span),
+                })
+            }
+            None => Err(ParseError::UnexpectedEof {
+                expected: "a binding name in a variant pattern",
+                span: to_source_span(&self.eof_span()),
+            }),
+        }
     }
 
     fn parse_block(&mut self) -> Result<Block, ParseError> {
@@ -4670,7 +5102,7 @@ mod tests {
         // Top level expects `fn` or `struct` (C1.4), not `let`.
         let err = parse("let x = 1;").unwrap_err();
         assert!(
-            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, `effect`, `class`, `trait`, or `impl`"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, `effect`, `class`, `trait`, `impl`, or `enum`"),
             "got {err:?}"
         );
     }
@@ -4680,7 +5112,7 @@ mod tests {
         // Bare expressions at top level no longer parse — they're fn-body content now.
         let err = parse("42").unwrap_err();
         assert!(
-            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, `effect`, `class`, `trait`, or `impl`"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, `effect`, `class`, `trait`, `impl`, or `enum`"),
             "got {err:?}"
         );
     }
@@ -6525,5 +6957,63 @@ mod tests {
             p.fns[0].body.tail.kind.to_string(),
             "(handle (do_work) (arm Io.read (k) 1))"
         );
+    }
+
+    // ===== Phase D.1 / ADR 0032: enum declarations + match expressions =====
+
+    #[test]
+    fn parse_enum_decl_unit_and_payload_variants() {
+        let p = parse_ok_program(
+            "enum Shape { Unit, Circle(i64), Rect(i64, i64) }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.enums.len(), 1);
+        let e = &p.enums[0];
+        assert_eq!(e.name, "Shape");
+        assert_eq!(e.variants.len(), 3);
+        assert_eq!(e.variants[0].name, "Unit");
+        assert!(e.variants[0].payloads.is_empty());
+        assert_eq!(e.variants[1].name, "Circle");
+        assert_eq!(e.variants[1].payloads.len(), 1);
+        assert_eq!(e.variants[2].name, "Rect");
+        assert_eq!(e.variants[2].payloads.len(), 2);
+    }
+
+    #[test]
+    fn parse_enum_trailing_commas_allowed() {
+        // Trailing comma after the last variant AND inside a payload list.
+        let p = parse_ok_program("enum E { A, B(i64,), }\nfn main() -> i64 { 0 }");
+        assert_eq!(p.enums[0].variants.len(), 2);
+        assert_eq!(p.enums[0].variants[1].payloads.len(), 1);
+    }
+
+    #[test]
+    fn parse_match_variants_and_wildcard() {
+        let p = parse_ok_program(
+            "fn area(s: Shape) -> i64 { match s { Shape::Circle(r) => r, Shape::Rect(w, h) => w, _ => 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(
+            p.fns[0].body.tail.kind.to_string(),
+            "(match s (Shape::Circle r r) (Shape::Rect w h w) (_ 0))"
+        );
+    }
+
+    #[test]
+    fn parse_match_unit_variants() {
+        let p = parse_ok_program(
+            "fn f(c: Color) -> i64 { match c { Color::Red => 1, Color::Blue => 2 } }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(
+            p.fns[0].body.tail.kind.to_string(),
+            "(match c (Color::Red 1) (Color::Blue 2))"
+        );
+    }
+
+    #[test]
+    fn parse_match_missing_fat_arrow_errors() {
+        // `Shape::Circle(r) 0` — the `=>` is missing.
+        assert!(parse(
+            "fn f(s: Shape) -> i64 { match s { Shape::Circle(r) 0 } }\nfn main() -> i64 { 0 }"
+        )
+        .is_err());
     }
 }

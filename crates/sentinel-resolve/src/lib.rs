@@ -755,6 +755,26 @@ pub enum ResolveError {
         span: miette::SourceSpan,
     },
 
+    #[error("`enum` declarations are not supported yet (Phase D.1)")]
+    #[diagnostic(
+        code(sentinel::resolve::enum_decl_not_yet),
+        help("`enum`s parse at Phase D.1 (2/N); the type layer (`Type::Enum`) lands at D.1 (3/N) — ADR 0032")
+    )]
+    EnumDeclNotYet {
+        #[label("`enum` not yet resolvable")]
+        span: miette::SourceSpan,
+    },
+
+    #[error("`match` is not supported yet (Phase D.1)")]
+    #[diagnostic(
+        code(sentinel::resolve::match_not_yet),
+        help("`match` parses at Phase D.1 (2/N); the type layer (construction + match check + exhaustiveness) lands at D.1 (3/N) — ADR 0032")
+    )]
+    MatchNotYet {
+        #[label("`match` not yet resolvable")]
+        span: miette::SourceSpan,
+    },
+
     #[error("program has no `main` function")]
     #[diagnostic(
         code(sentinel::resolve::missing_main),
@@ -1109,6 +1129,15 @@ pub enum ResolveError {
 /// reference struct types in their TypeExprs), then fns, then fn
 /// bodies.
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
+    // Phase D.1 (2/N) / ADR 0032: `enum` declarations parse but are not
+    // yet resolvable — the type layer (`Type::Enum`, variant
+    // construction, match check + exhaustiveness) lands at D.1 (3/N).
+    if let Some(ed) = program.enums.first() {
+        return Err(ResolveError::EnumDeclNotYet {
+            span: to_source_span(&ed.name_span),
+        });
+    }
+
     let mut next_fn_id: u32 = 0;
     let mut next_var_id: u32 = 0;
 
@@ -2836,6 +2865,14 @@ fn resolve_expr(
                 task_expr: Box::new(resolved_task),
             }
         }
+        ExprKind::Match { .. } => {
+            // Phase D.1 (2/N) / ADR 0032: the parser produces `match`,
+            // but the type layer (Type::Enum + construction + match
+            // type-check + exhaustiveness) lands at D.1 (3/N).
+            return Err(ResolveError::MatchNotYet {
+                span: to_source_span(&expr.span),
+            });
+        }
     };
     Ok(Spanned { kind, span: expr.span.clone() })
 }
@@ -3117,6 +3154,16 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
         ResolveError::RedefinedFunction { name, span } => (
             "sentinel::resolve::redefined_function",
             format!("function `{name}` is already declared"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::EnumDeclNotYet { span } => (
+            "sentinel::resolve::enum_decl_not_yet",
+            "`enum` declarations are not supported yet (Phase D.1)".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::MatchNotYet { span } => (
+            "sentinel::resolve::match_not_yet",
+            "`match` is not supported yet (Phase D.1)".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         ResolveError::MissingMain => (
@@ -4346,5 +4393,21 @@ mod tests {
             ResolvedExprKind::Handle { return_arm: Some(_), .. } => {}
             other => panic!("expected Handle with return arm, got {other:?}"),
         }
+    }
+
+    // ----- Phase D.1 (2/N) / ADR 0032: enum + match rejected until 3/N -----
+
+    #[test]
+    fn enum_decl_rejected_not_yet() {
+        let err = resolve_err("enum Color { Red, Green }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, ResolveError::EnumDeclNotYet { .. }));
+    }
+
+    #[test]
+    fn match_expr_rejected_not_yet() {
+        // No enum decl is needed — the `match` itself is the not-yet
+        // construct (rejected before its children resolve).
+        let err = resolve_err("fn f(s: i64) -> i64 { match s { _ => 0 } }\nfn main() -> i64 { 0 }");
+        assert!(matches!(err, ResolveError::MatchNotYet { .. }));
     }
 }
