@@ -138,6 +138,8 @@ C1.3. See STATE.md Section C.
 **Phase D.4 (1/N) — file I/O: `read_file` + `write_file` end to end — complete (`2c530f6`). ADR 0035 stays PROPOSED ((1/N) landed; the 3 open design points resolved at the proposed defaults).** Per ADR 0035: file I/O = **runtime builtins** (like `print`), NOT algebraic effects (D2). **`read_file(path: [u8]) -> [u8]`** reads a whole file into a fresh owned byte array; **`write_file(path: [u8], data: [u8]) -> i64`** creates/truncates + writes (returns 0); both **panic on failure** (D5). Typed as non-generic `[u8]` builtins (the `str_eq` template); dispatched in `lower_call`. **Runtime (Amendment A1):** uses Rust `std::fs::read`/`write` (the runtime is a Rust crate linking `std`), NOT raw libc `fopen`/`fread` (D6's sketch); `read_file` **copies** the bytes into a `sentinel_alloc`'d (libc-malloc) buffer so the caller's `Type::Array` scope-exit drop frees it. Paths build a Unix `OsStr` from raw `[u8]` (non-UTF-8 OK), aborting on an embedded NUL. **ABI (A2):** `sentinel_read_file(path_ptr, path_len, out_len: *i64) -> data_ptr` (out-param for the count); `sentinel_write_file(path_ptr, path_len, data_ptr, data_len) -> i64`; `write_file`'s args borrowed (ADR 0033 A3). abi-v1 now **22** symbols. Builtins FnId 0..=12 (read_file=11, write_file=12; main 11→13 — fixed the hardcoded-FnId test sites). **Verified** (exit-code + `leaks --atExit`): a write-then-read-back round-trip (`str_eq` + a `back[i]` byte spot-check + `len`), exact-byte fidelity, the missing-file abort (exit 134, clear message); phase-go `c5d4_file_io` round-trips "hello" → **exit 5, 0 leaks** (the harness removes the temp file). +5 tests (**1339 total**), four-check green. ⚠ inline string-literal ARGS to read_file/write_file leak (the ADR 0033 A2 temp-drop gap — bind paths/payloads). DEFERRED: (2/N) `print_bytes` (stdout) + the ADR flip; (D8) recoverable errors / `Io` effect row / streaming / `read_stdin` / directories. **Phase D.4 (1/N) lands.** Next: **D.4 (2/N)** — `print_bytes` + close.
 
 **Phase D.4 (2/N) — `print_bytes` (stdout) — the file-I/O MVP is COMPLETE (`fb1b51b`). ADR 0035 → ACCEPTED-WITH-AMENDMENTS.** **`print_bytes(data: [u8]) -> i64`** writes a byte array to stdout — the byte/string companion to `print` (one i64). The `write_file` template minus the path: a runtime builtin (FnId 13; main 13→14), arg borrowed (ADR 0033 A3), backed by `sentinel_print_bytes(data_ptr, data_len)` (abi-v1 now **23** symbols). **Amendment B1:** writes **exactly** `data_len` bytes — NO added newline (unlike `print`'s `println!`) — then **flushes** stdout, so the bytes are visible before the C-ABI `main` return and interleave correctly with `print` (shared `std::io::stdout`; `od -c`-verified: `print_bytes("AB"); print(7); print_bytes("AB")` → `AB7\nAB`). **Verified** (exit + stdout + `leaks --atExit`): the comprehensive phase-go `c5d4_file_io` now round-trips a file (write → read → `str_eq` + `back[i]` + `len`) AND `print_bytes` the read-back content, asserting **both exit 5 AND stdout "hello"**, 0 leaks. +2 type-layer tests (**1341 total**), four-check green. **Phase D.4 MVP closes; ADR 0035 ACCEPTED-WITH-AMENDMENTS** (read_file + write_file + print_bytes; recoverable errors / `Io` effect row / streaming / `read_stdin` / directories stay deferred per D8). Next: **D.5** — the next ADR 0031 D4 prerequisite (#5 modules or #6 loops; dev picks — loops recommended as smaller + unblocking iteration), then the self-host port.
+
+**ADR 0036 PROPOSED — Phase D.5 kickoff: loops (`while`) — docs-only.** Per ADR 0031 D4 item 6 (the dev chose loops over #5 modules). The surface has been recursion-only by design since 1.0; a compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want bounded, stack-safe iteration. ADR 0036 designs it (10 D-decisions). **Load-bearing calls: (D3) a loop is a STATEMENT** — `StmtKind::While { cond, body }` alongside `Let`/`Assign`/`Expr`, NOT an expression (a loop has no value; Sentinel has no unit type, so an expression form would force a synthetic `i64` 0). **(D4) `while` lowers to the first BACKWARD CFG branch** — three blocks `loop_cond` / `loop_body` / `loop_after` with a back-edge body→cond (all prior control flow — `if`/`match` — merged *forward* into a tree CFG). **(D5) per-iteration drop** — the body is a `lower_block` scope, so its bindings drop each iteration via the back-edge (a body that allocates each pass is leak-free, not accumulating — the load-bearing correctness property). **(D8, the key risk) the loop-carried move rule** — the borrow checker walks the body once but it runs N times, so moving an *outer* binding inside the body is a use-after-move on re-entry; proposed: conservatively **reject moving an outer Move-typed binding in a `while` body**. **Surface (D2):** `while <bool> { <body> }`; loop-carried state is a `let mut` outside + `Assign` inside (`i = i + 1`); `cond` must be `bool`. NO new `Type`, no cascade, no FnId-shift (not a builtin). `while` is a NEW lexer token (`for` is taken by `impl … for …`). **2-sub-phase split (D9):** (1/N) `while` (token + parser + `StmtKind::While` + bool-cond rule + the D8 move rule + back-edge codegen + per-iteration drop); (2/N) `break`/`continue` (branch to loop_after/loop_cond + a loop-target stack). Out of scope (D8): `for` / ranges / iterators, labeled break, `break`-with-value / loop-as-expression, do-while, a termination check (`while true {}` is well-formed). **3 OPEN DESIGN POINTS (settle before (1/N)):** (1) the loop-carried move rule (conservative reject vs. dataflow), (2) break/continue → (2/N), (3) while-as-statement. Next: **D.5 (1/N)** — settle the open points, then `while` end to end.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1844,20 +1846,19 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **D.4 (2/N) docs**
-    commit, atop `fb1b51b` (feat(d.4 2/N): print_bytes — file-I/O MVP
-    complete) + the D.4 (1/N) feat+docs (`2c530f6`/`e564902`) + the ADR
-    0035 kickoff (`8166459`). Clean tree; **1341 tests**; four-check green
-    via `cargo nextest run --workspace` + `cargo test --doc --workspace` +
-    `cargo clippy --workspace --all-targets -- -D warnings` (+ `cargo
-    build`). macOS + LLVM 18.
-    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0031**
-    (the Phase D roadmap — D4 items #5 modules / #6 loops are what's left
-    before the self-host port) + ADR 0035 (the now-complete D.4 file-I/O
-    ADR — ACCEPTED-WITH-AMENDMENTS) + ADR 0032/0033/0034 (the D.1–D.3
-    precedents — the `Type` cascade, the builtin-signature + FnId-shift +
-    runtime-symbol discipline) + ADR 0020 (effects/handlers — why
-    I/O does NOT use them, D2)
+    Local HEAD: verify with `git log -1` — expect the **ADR 0036 PROPOSED**
+    docs commit (D.5 loops kickoff), atop the D.4 (2/N) feat+docs
+    (`fb1b51b`/`7450ad2` — the file-I/O MVP) + the D.4 (1/N) feat+docs
+    (`2c530f6`/`e564902`). Clean tree; **1341 tests** (D.5 is design-only so
+    far — no code yet); four-check green via `cargo nextest run --workspace`
+    + `cargo test --doc --workspace` + `cargo clippy --workspace
+    --all-targets -- -D warnings` (+ `cargo build`). macOS + LLVM 18.
+    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0036**
+    (THE D.5 task ADR — loops, PROPOSED; read its **3 OPEN DESIGN POINTS** +
+    D8 the loop-carried move rule, the key risk) + ADR 0031 (the Phase D
+    roadmap) + the C1.3 `if`/`lower_if` codegen (the basic-block precedent
+    `while` extends with a back-edge) + ADR 0017 (RAII drop — the body
+    scope drops per-iteration, D5)
     + auto-memory sentinel_d3_collections_surface.
 
     PHASE D = self-hosting (post-1.0; ADR 0031). Opens with a
@@ -1911,30 +1912,35 @@ For pasting into a fresh chat to bootstrap context:
       VecElementNotSupported). 1324 tests. See
       [[sentinel_d3_collections_surface]].
 
-    RESUME AT: **Phase D.5 — the next ADR 0031 D4 prerequisite: #5 modules
-    OR #6 loops (DEV PICKS the sequencing; write the kickoff ADR 0036
-    PROPOSED first).** D.4 (file I/O) is **COMPLETE** — (1/N)
-    `read_file`/`write_file` (`2c530f6`), (2/N) `print_bytes`
-    (`fb1b51b`); ADR 0035 ACCEPTED-WITH-AMENDMENTS; `c5d4_file_io` exit 5 /
-    stdout "hello" / 0 leaks; 1341 tests. Builtins are now FnId 0..=13
-    (…read_file 11, write_file 12, print_bytes 13; main 14). **Two
-    prerequisites remain before the self-host port (ADR 0031 D4/D5):**
-      - **#6 loops (`while` / `for`)** — *recommended next*: smaller +
-        unblocks the iteration-heavy compiler passes (the surface has been
-        recursion-only by design; ADR 0031 notes deep-recursion / no-early-
-        break is a real constraint). A focused parser + lowering addition
-        (a loop is a back-edge in the CFG + a condition block), no new
-        `Type`. Likely the lower-risk, higher-leverage of the two.
-      - **#5 modules / multi-file (`mod` / `use`)** — bigger: a resolve-layer
-        module graph + separate-compilation units keyed to `abi-v1`
-        (ADR 0025 D9). A compiler is many files, so it's needed eventually,
-        but it's a larger lift than loops.
-    Both are "normal" language sub-phases (ADR-first, feat+docs, four-check).
-    **Recommend loops first** (smaller, unblocks iteration), but the dev
-    chooses. Either way: write the kickoff ADR (0036) PROPOSED first (the
-    design call + sub-phase split), then implement. Read ADR 0031 (D4/D5
-    roadmap) first. After both: the self-host port (D5 — lexer → parser →
-    … in Sentinel, differentially validated against the Rust `snc` oracle).
+    RESUME AT: **Phase D.5 (1/N) — loops: the `while` loop (ADR 0036
+    PROPOSED — settle its 3 OPEN DESIGN POINTS first, then implement).**
+    D.4 (file I/O) is **COMPLETE** (read_file/write_file/print_bytes; ADR
+    0035 ACCEPTED; 1341 tests; builtins FnId 0..=13, main 14). The dev chose
+    **loops** (over #5 modules); **ADR 0036 is now WRITTEN (PROPOSED)**.
+    Load-bearing calls: **a loop is a STATEMENT** (`StmtKind::While { cond,
+    body }`, not an expression — no loop value; Sentinel has no unit), and
+    `while` lowers to the **first backward CFG branch** (cond → body → cond
+    back-edge; all prior control flow was forward-merging). `for` is
+    DEFERRED (needs ranges/iterators; the `for` keyword is already `impl …
+    for …`). **3 OPEN DESIGN POINTS (ADR 0036 tail) to settle before
+    (1/N):** (1) **the loop-carried move rule** (D8 — the key risk: the
+    borrow checker walks the body once but it runs N times, so a move of an
+    *outer* binding inside the body is a use-after-move on re-entry;
+    proposed: conservatively REJECT moving an outer Move-typed binding in a
+    `while` body; confirm vs. a dataflow fixpoint); (2) `break`/`continue` →
+    (2/N), not (1/N) (confirm); (3) while-as-statement (confirm vs. a
+    synthetic-`i64`-0 expression). **(1/N) plan:** `while` lexer token (NEW;
+    `for` is taken) + parser (statement position, like the `Let`/`Expr`
+    stmts) + `StmtKind::While` (AST + resolved + typed) + the bool-cond type
+    rule + the D8 borrow-check move rule + the back-edge codegen (3 blocks:
+    loop_cond / loop_body / loop_after, body via `lower_block` so its scope
+    **drops per iteration** — D5, the leak-free property) + a phase-go
+    `c5d5_loops` (a counter loop computing a result + a body that allocates
+    each pass, leak-free via `leaks --atExit`). **(2/N):** `break` /
+    `continue` (branch to loop_after / loop_cond; a loop-target stack).
+    Read ADR 0036 (esp. D8 + the OPEN DESIGN POINTS) + the C1.3 `lower_if` /
+    `lower_block` / `emit_scope_drops` codegen (the template) first. After
+    loops: **#5 modules**, then the self-host port (D5).
 
     CARRIED-FORWARD DEBT (not blocking D.3): **D.1 A1 — recursive-enum
     payload drop is box-free only** (leak-free for the standard
@@ -2003,6 +2009,14 @@ For pasting into a fresh chat to bootstrap context:
     read ABI) + B1 (print_bytes: exact bytes, no newline, flushed). Builtins
     FnId 0..=13. DEFERRED (D8): recoverable errors / `Io` effect row /
     streaming / `read_stdin` / directories).
+    0036 **PROPOSED** (D.5 loops kickoff — a `while` loop. (D3) a loop is a
+    STATEMENT (`StmtKind::While`), not an expression; (D4) the first
+    backward CFG branch (cond→body→cond); (D5) per-iteration body-scope
+    drop; (D8, the key risk) the loop-carried move rule — reject moving an
+    outer Move-typed binding inside a `while` body. No new `Type` / no
+    FnId-shift; `while` is a new lexer token (`for` is taken by `impl … for
+    …`, deferred). 2-sub-phase split: (1/N) `while`, (2/N) `break`/
+    `continue`. 3 OPEN DESIGN POINTS; flips as D.5 lands).
     Optional C4 follow-ons (none blocking): work-stealing scheduler
     (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
     (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).

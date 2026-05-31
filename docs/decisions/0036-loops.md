@@ -1,0 +1,248 @@
+# ADR 0036: Phase D.5 — loops (`while`)
+
+Status: PROPOSED — the fifth Phase D sub-phase ADR under ADR 0031 (Phase D
+kickoff) D4 item 6. After sum types (D.1), strings + a byte type (D.2), growable
+collections (D.3), and file I/O (D.4), **loops** are next: the surface has been
+**recursion-only by design** since 1.0, but a compiler's iteration-heavy passes
+(scanning a byte buffer, walking a token `Vec`, draining a work-list) are awkward
++ stack-bounded as recursion (deep recursion, no early break). Flips to
+ACCEPTED(-WITH-AMENDMENTS) as the sub-phases land.
+
+Date: 2026-05-31
+Related:
+  - **0031** (Phase D kickoff): D4 item 6 names "loops — `while`/`for` (the
+    surface has been recursion-only by design); likely wanted for the compiler's
+    iteration-heavy passes." Chosen as D.5 ahead of #5 modules (the smaller,
+    higher-leverage of the two remaining prerequisites).
+  - **C1.3 `if`** (the control-flow precedent): `if` is an *expression*
+    (`ExprKind::If`) lowered to basic blocks (`lower_if`) — a cond block + then /
+    else blocks reconciling **forward** at a merge block. A `while` reuses the
+    block machinery but introduces the **first backward branch** (a CFG
+    back-edge), so it is a **statement**, not an expression (D3).
+  - **0017** (refs / mutability / borrow check / RAII drop): the loop body is a
+    scope; its bindings drop **per iteration** (D5), and the borrow checker's
+    move tracking must account for the back-edge — a binding moved in the body is
+    moved on the *next* iteration (D8, the key risk).
+  - **0028** (broker scope arenas): a loop body that allocates (e.g. `let w =
+    read_word();` each pass) frees per iteration via the existing scope-exit
+    drop; no arena change.
+
+## Context
+
+Of the remaining Phase D prerequisites (ADR 0031 D4), **loops** are the smaller,
+higher-leverage one (vs. #5 modules). The 1.0 + D.1–D.4 language expresses
+iteration only as **recursion** (verified at 1.0): a lexer scanning bytes, a
+parser draining a token `Vec`, a symbol-table walk — all recurse. That is
+stack-bounded (deep inputs overflow), has no early break, and is awkward for the
+mutate-a-counter / drain-a-work-list patterns a compiler is built from.
+
+This sub-phase adds a **`while` loop** — a condition-gated, statement-level loop
+with a per-iteration body scope — and defers `for` (D8: `for` needs ranges or
+iterators, and the `for` keyword is already taken by `impl Trait for Type`, so a
+for-loop is contextual). `while` + a manual index (`let mut i = 0; while i <
+len(v) { …; i = i + 1; }`) covers the compiler's iteration needs.
+
+The unifying decision is **a loop is a statement with a backward branch** — it
+reuses the `if` basic-block + the block-scope drop machinery, adding only the
+back-edge (cond → body → cond) and the borrow-checker's loop-carried move rule.
+The genuinely new pieces are the **back-edge codegen** (the first non-forward
+CFG) and the **loop-carried move check** (D8).
+
+## Decision
+
+### D1. Goal.
+
+Add a `while` loop, end to end (lexer → parser → AST → resolve → types →
+borrow-check → codegen), executing a body block repeatedly while a `bool`
+condition holds, with **per-iteration drop** of the body's bindings. Enough to
+write the iteration-heavy passes a self-hosted lexer/parser need.
+
+### D2. Surface syntax.
+
+```sentinel
+fn sum_to(n: i64) -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 1;
+    while i <= n {            // condition is any bool expression
+        total = total + i;   // mutate loop-carried state (Assign, C2.2)
+        i = i + 1;
+    }
+    total                     // 1 + 2 + ... + n
+}
+
+fn count_bytes(src: [u8]) -> i64 {
+    let mut i: i64 = 0;
+    while i < len(src) {
+        // a per-iteration binding: dropped each pass (D5)
+        let b: u8 = src[i];
+        i = i + 1;
+    }
+    i
+}
+```
+
+  - **`while <cond> { <body> }`** — a **statement** (not an expression; D3).
+    `cond` is any `bool`-typed expression (the C1.3 bool machinery); `body` is a
+    block, run repeatedly while `cond` is true, its tail value **discarded** each
+    iteration (like a `StmtKind::Expr`).
+  - **Loop-carried state** is a `let mut` declared **outside** the loop, mutated
+    by `Assign` (`i = i + 1`) — the existing C2.2 assignment machinery drives
+    termination. A `let` **inside** the body is per-iteration (D5).
+  - **`for` is deferred** (D8): it needs ranges/iterators, and the `for` token is
+    already `impl … for …`.
+
+### D3. A loop is a statement, not an expression.
+
+`if` is an *expression* (it yields the chosen branch's value, reconciled at a
+forward merge). A `while` loop has **no meaningful value** — it runs zero-or-more
+times for effect. Sentinel has no unit type, so making `while` an expression
+would force a synthetic value (e.g. `i64` 0), awkward as a block tail. Instead,
+`while` is a new **`StmtKind::While { cond, body }`** alongside `Let` / `Assign`
+/ `Expr` (statements already exist). The body block's tail value is discarded
+each iteration (exactly as `StmtKind::Expr` discards its expression's value).
+**Loop-as-expression / `break`-with-value is deferred** (D8).
+
+### D4. Codegen — the first backward branch.
+
+`while` lowers to three basic blocks (reusing the `if`/`lower_block` machinery,
+adding the back-edge):
+
+  - **`loop_cond`** — evaluate `cond` (an `i1`); conditional-branch to `loop_body`
+    (true) or `loop_after` (false). The entry block unconditionally branches here.
+  - **`loop_body`** — lower the body as a **scoped block** (`lower_block`: push
+    scope, lower stmts + tail, **emit scope drops**, pop), then an **unconditional
+    branch back to `loop_cond`** — the **back-edge**. This is the first
+    non-forward branch in codegen (all prior control flow — `if` / `match` —
+    merges forward into a tree-shaped CFG).
+  - **`loop_after`** — control continues after the loop.
+
+Per-binding allocas are created once (in the fn entry, the existing convention),
+so a loop-body `let`'s slot is reused each iteration; the *value* is recreated +
+dropped each pass.
+
+### D5. Per-iteration drop (load-bearing).
+
+The body is lowered via `lower_block`, which pushes a scope and calls
+`emit_scope_drops` at the body's end. Those drop calls are emitted **once** in
+`loop_body`'s IR but **execute every iteration** (control re-enters `loop_body`
+via the back-edge). So a body that allocates — `let w: [u8] = read_file(p);`, a
+`let v: Vec<i64> = …; push(…)`, a string literal — **frees its heap each
+iteration**, with no accumulation: leak-free under `leaks --atExit`. This is the
+load-bearing correctness property and the primary thing the phase-go verifies (a
+loop body that allocates N times leaks nothing). Loop-carried bindings (declared
+*outside* the loop) are **not** dropped per iteration — they drop at their own
+(outer) scope exit, as today.
+
+### D6. Termination via mutation.
+
+A `while` reuses C2.2 `Assign`: the loop var is a `let mut` outside the loop, and
+the body mutates it (`i = i + 1`) so `cond` eventually goes false. No new
+mutation surface. An infinite loop (`while true { }`) is well-formed (it just
+never terminates) — the type checker does not prove termination.
+
+### D7. Types.
+
+`cond` must be `bool` (else a `Mismatch` / a focused `WhileCondNotBool`,
+mirroring `if`'s condition rule). The body block type-checks normally; its value
+type is **discarded** (no constraint — unlike `if`, whose arms must reconcile).
+The `while` statement itself has no type (it is a `StmtKind`, not an expr). Adds
+no new `Type` variant and no cascade.
+
+### D8. Borrow check — the loop-carried move rule (the key risk).
+
+A loop body is a scope, so borrows taken inside it are transient (cleared at
+statement boundaries, C2.2) — no change there. The **subtle** interaction is
+**moves across the back-edge**: the borrow checker walks the body **once**
+(linearly), but the body runs **repeatedly**. A body that **moves** a binding
+declared *outside* the loop is sound on iteration 1 but a **use-after-move** on
+iteration 2 (the binding was consumed last pass). A single linear walk catches a
+move-then-use *within* one body pass, but **not** a move on a late line +
+re-entry. So the borrow checker must treat **a move of an outer binding inside a
+loop body as a use-after-move** — conservatively, **reject moving an
+outer-scope (Move-typed) binding inside a `while` body** (it would be consumed
+on re-entry), surfacing `UseAfterMove` / a focused `MoveInLoopBody`. Bindings
+declared *inside* the body are fine (fresh each iteration). This rule is the
+genuinely new borrow-check surface and the main correctness risk — the phase-go
++ UI fixtures must cover both the rejected (move-outer-in-loop) and accepted
+(copy reads, inner-binding moves, loop-carried `Assign`) cases.
+
+### D9. Pipeline / sub-phase split.
+
+| Sub        | Title                                                          | Risk   |
+|------------|----------------------------------------------------------------|--------|
+| D.5 (1/N)  | `while` — `while` lexer token + parser (statement position) +  | medium |
+|            | `StmtKind::While` (AST + resolved + typed) + the `bool`-cond   |        |
+|            | type rule + the borrow-check loop-carried-move rule (D8) +     |        |
+|            | the back-edge codegen + per-iteration drop. End to end.        |        |
+| D.5 (2/N)  | `break` / `continue` — branch to the current loop's            | medium |
+|            | `loop_after` / `loop_cond`; a loop-target stack for nesting.   |        |
+
+### D10. Phase-go + fixture.
+
+`tests/pass/c5d5_loops.sentinel`: a `while` loop computing a result via a mutated
+counter (e.g. sum 1..=N, or `push` into a `Vec` in a loop then `len`/index it),
+returning a computed exit code; **plus a body that allocates each iteration**
+(e.g. builds a `[u8]`/`Vec` per pass) **verified leak-free via `leaks --atExit`**
+(D5 — the heap is freed each iteration, not accumulated). Plus a type-layer unit
+corpus (`while` with a non-`bool` cond → reject; a loop-carried `Assign`
+type-checks) and a borrow UI fixture (moving an outer binding inside a `while`
+body → the D8 rejection).
+
+## Reasoning
+
+**Why `while`-as-a-statement, not an expression.** `if` yields a value because
+both arms produce one and they reconcile; a loop runs 0..N times and has no
+natural value (no unit type to give it). A statement avoids inventing one and
+matches the existing `Let`/`Assign`/`Expr` statement forms. Loop-as-expression /
+`break`-with-value is a later refinement gated on need.
+
+**Why `while` only (defer `for`).** `for` needs ranges (no range type) or
+iterators (deferred, ADR 0034 D8), and the `for` keyword already means `impl
+Trait for Type`, so a for-loop is contextual to parse. `while` + a manual index
+expresses every iteration the compiler needs; `for` is sugar on top, added once
+ranges/iterators exist.
+
+**Why the loop-carried move rule matters.** It is the one place the
+single-pass borrow checker's assumptions break under a back-edge: a value moved
+"after" its use textually is moved "before" it on the next iteration. Rejecting
+moves of outer bindings inside a loop body is the conservative, sound, minimal
+rule (Rust's borrow checker reaches the same conclusion via a more precise
+dataflow; the conservative rule is the right MVP).
+
+## Consequences
+
+### Positive
+- Bounded, early-exitable (with (2/N) `break`) iteration lands — the lexer's
+  byte scan + the parser's token drain become natural + stack-safe, with maximal
+  reuse of the `if` basic-block + block-scope-drop machinery.
+- The first backward CFG branch, cleanly scoped to one construct.
+
+### Negative
+- The first non-tree CFG (a back-edge) + the loop-carried move rule (a real,
+  if conservative, new borrow-check surface) — the medium risk.
+- `for` / `break` / `continue` / loop-as-expression deferred; `while true {}`
+  is a non-terminating-but-well-formed program (no termination check).
+
+### Neutral
+- No new `Type` variant, no `Type`-match cascade (a `StmtKind`, a bool cond, a
+  discarded body value). No `FnId`-shift (no new builtin).
+
+## Revisit
+
+PROPOSED until D.5 closes. Triggers:
+- **D8**: if the conservative loop-carried-move rule rejects a real self-host
+  pattern, refine toward a dataflow (move-state fixpoint over the body) check.
+- **D8 (2/N)**: `break` / `continue` (and later labeled break / `break`-with-
+  value) when a self-host pass needs early exit.
+- **D2**: `for` (+ ranges / iterators) once the iterator protocol is designed.
+
+## OPEN DESIGN POINTS (settle before D.5 (1/N))
+
+1. **Loop-carried move rule (D8).** Proposed: **reject moving an outer-scope
+   Move-typed binding inside a `while` body** (conservative, sound). Confirm vs.
+   a more precise dataflow check (bigger).
+2. **`break` / `continue` scope (D9).** Proposed: **(2/N)**, not (1/N) — keep
+   (1/N) to the core loop + the back-edge + the move rule. Confirm (a lexer can
+   loop with a `mut` flag + condition until (2/N)).
+3. **`while`-as-statement (D3).** Proposed: a `StmtKind::While` (no loop value).
+   Confirm vs. an expression yielding a synthetic `i64` 0.
