@@ -1,48 +1,48 @@
-// D.3 (1/N) / ADR 0034: growable collections — `Vec<T>`.
+// D.3 / ADR 0034: growable collections — `Vec<T>` (the complete MVP).
 //
-// Exercises the growable-vector MVP end to end:
-//   - a `Vec<i64>` built by repeated `push` (forcing several `realloc`
-//     growths: cap 0 -> 1 -> 2 -> 4 -> 8 across 6 pushes),
-//   - a `Vec<u8>` built by char-literal pushes (sizeof(T) == 1),
-//   - a `Vec<i64>` *moved out* of a helper fn (the returned-Vec escape
-//     path: the buffer is not freed in `build_digits`, it transfers to
-//     the caller, which frees it),
-//   - `len(v)` — the length builtin, overloaded to accept a `Vec<T>` as
-//     well as a `[T]`.
+// (1/N) vec_new / push / len + realloc growth + scope-exit drop;
+// (2/N) v[i] element read, pop, the `Vec<u8>` -> `[u8]` bridge
+// (vec_to_array + str_eq), and `String` = `Vec<u8>`.
 //
-// Every `Vec`'s heap buffer is freed at its owning scope's exit drop, so
-// the program is leak-free under `leaks --atExit` (the realloc'd buffer
-// is a single libc allocation; `vec_new`'s empty `{0,0,null}` frees as a
-// no-op). `v[i]` element read + `pop` + the `Vec<u8>`->`[u8]` bridge are
-// D.3 (2/N), so this fixture verifies via `len` (push N -> len == N).
+// Mirrors the self-hosting lexer use case: accumulate an identifier's
+// bytes into a `String` (= `Vec<u8>`), read them back with `v[i]`,
+// bridge to a `[u8]`, and `str_eq` it against a keyword. Plus a
+// `Vec<i64>` push / index / pop / len corpus and a `Vec` moved out of a
+// helper (the escape path). Every `Vec` / array buffer is freed at its
+// owning scope's exit, so the program is leak-free under
+// `leaks --atExit` (verified separately).
 //
-// Exit = len(nums) * 10 + len(bytes) + len(digits)
-//      =       6     * 10 +     4     +      3       = 67.
+// Exit = n0 + last + remaining + matched + first_is_l
+//      = 10 +  40  +     3     +    1    +     1       = 55.
 
-fn build_digits() -> Vec<i64> {
+fn build_nums() -> Vec<i64> {
     let mut v: Vec<i64> = vec_new();
-    push(&mut v, 11);
-    push(&mut v, 22);
-    push(&mut v, 33);
+    push(&mut v, 10);
+    push(&mut v, 20);
+    push(&mut v, 30);
     v
 }
 
 fn main() -> i64 {
-    let mut nums: Vec<i64> = vec_new();
-    push(&mut nums, 1);
-    push(&mut nums, 2);
-    push(&mut nums, 3);
-    push(&mut nums, 4);
-    push(&mut nums, 5);
-    push(&mut nums, 6);
+    // Vec<i64>: moved out of a helper, then push / index / pop / len.
+    let mut nums: Vec<i64> = build_nums();
+    push(&mut nums, 40);              // [10, 20, 30, 40]
+    let n0: i64 = nums[0];            // 10 (index read)
+    let last: i64 = pop(&mut nums);   // 40 (len now 3)
+    let remaining: i64 = len(nums);   // 3
 
-    let mut bytes: Vec<u8> = vec_new();
-    push(&mut bytes, 'l');
-    push(&mut bytes, 'e');
-    push(&mut bytes, 't');
-    push(&mut bytes, '!');
+    // String = Vec<u8>: accumulate "let", read a byte back, bridge to a
+    // [u8], and str_eq against a keyword literal (bound, so leak-free).
+    let mut word: String = vec_new();
+    push(&mut word, 'l');
+    push(&mut word, 'e');
+    push(&mut word, 't');
+    let c0: u8 = word[0];             // 'l' (Vec<u8> index read)
+    let arr: [u8] = vec_to_array(word);
+    let kw: [u8] = "let";
 
-    let digits: Vec<i64> = build_digits();
+    let matched: i64 = if str_eq(arr, kw) { 1 } else { 0 };
+    let first_is_l: i64 = if c0 == 'l' { 1 } else { 0 };
 
-    len(nums) * 10 + len(bytes) + len(digits)
+    n0 + last + remaining + matched + first_is_l
 }

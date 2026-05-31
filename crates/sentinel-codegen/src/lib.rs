@@ -45,7 +45,8 @@ use sentinel_borrow_check::DropPlan;
 use sentinel_hir::HirProgram;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID,
-    LEN_FN_ID, PUSH_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID,
+    LEN_FN_ID, POP_FN_ID, PUSH_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
+    VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
@@ -4533,6 +4534,151 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(i64_type.const_zero().into())
     }
 
+    /// D.3 (2/N) / ADR 0034 D5: lower `pop(&mut v) -> T`. Loads `len`
+    /// from the `&mut Vec`; if the `Vec` is empty (`len == 0`) panics via
+    /// `sentinel_panic_oob` (like an out-of-bounds index); otherwise
+    /// decrements `len`, loads `data[len-1]`, stores the new `len`, and
+    /// returns the element. The buffer is not shrunk (capacity is
+    /// retained). `elem_ty` is the concrete element (the call's
+    /// `type_args[0]`).
+    fn lower_pop(
+        &mut self,
+        vec_ref: &TypedExpr,
+        elem_ty: Type,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        let vec_ptr = self.lower_expr(vec_ref, program)?.into_pointer_value();
+        let vec_ty = match vec_ref.ty {
+            Type::Ref(id) => program.refs[id.0 as usize].inner,
+            _ => unreachable!("pop's arg is typed &mut Vec<T>"),
+        };
+        let vec_struct_ty = match self.llvm_basic_type(vec_ty) {
+            BasicTypeEnum::StructType(st) => st,
+            _ => unreachable!("Vec lowers to a struct type"),
+        };
+        let len_ptr = self
+            .builder
+            .build_struct_gep(vec_struct_ty, vec_ptr, 0, "vec_len_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let data_field_ptr = self
+            .builder
+            .build_struct_gep(vec_struct_ty, vec_ptr, 2, "vec_data_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let len = self
+            .builder
+            .build_load(i64_type, len_ptr, "vec_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        // The popped index is len - 1; if that is < 0 the Vec is empty.
+        let new_len = self
+            .builder
+            .build_int_sub(len, i64_type.const_int(1, false), "pop_idx")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let nonempty = self
+            .builder
+            .build_int_compare(IntPredicate::SGE, new_len, i64_type.const_zero(), "vec_nonempty")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let current_fn = self.current_fn.expect("current_fn set");
+        let ok_bb = self.context.append_basic_block(current_fn, "pop_ok");
+        let empty_bb = self.context.append_basic_block(current_fn, "pop_empty");
+        self.builder
+            .build_conditional_branch(nonempty, ok_bb, empty_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Empty: reuse the OOB trap (idx = -1, len = 0), then unreachable.
+        self.builder.position_at_end(empty_bb);
+        self.builder
+            .build_call(self.panic_oob_fn, &[new_len.into(), len.into()], "")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // OK: load data[new_len], store the decremented len, return it.
+        self.builder.position_at_end(ok_bb);
+        let data = self
+            .builder
+            .build_load(ptr_type, data_field_ptr, "vec_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let elem_llvm_ty = self.llvm_basic_type(elem_ty);
+        let elem_ptr = unsafe {
+            self.builder
+                .build_gep(elem_llvm_ty, data, &[new_len], "pop_slot")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?
+        };
+        let elem_val = self
+            .builder
+            .build_load(elem_llvm_ty, elem_ptr, "pop_load")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_store(len_ptr, new_len)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(elem_val)
+    }
+
+    /// D.3 (2/N) / ADR 0034 D5: lower `vec_to_array(v) -> [T]` — the
+    /// `Vec<T>` -> `[T]` bridge. Copies the live `len` elements of `v`
+    /// into a fresh heap buffer and builds an owned `[T]` `{ i64 len,
+    /// ptr data }`. Non-consuming: `v` keeps its own buffer (the array
+    /// is an independent copy), so both drop their buffers at scope exit
+    /// (leak-free). `elem_ty` is the concrete element (`type_args[0]`).
+    fn lower_vec_to_array(
+        &mut self,
+        vec_expr: &TypedExpr,
+        elem_ty: Type,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        let vec_val = self.lower_expr(vec_expr, program)?.into_struct_value();
+        let len = self
+            .builder
+            .build_extract_value(vec_val, 0, "vec_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let src = self
+            .builder
+            .build_extract_value(vec_val, 2, "vec_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+
+        // Allocate len * sizeof(T) and memcpy the live prefix. (Align 1
+        // is always valid; an empty Vec copies 0 bytes — the llvm.memcpy
+        // intrinsic with length 0 is a no-op even for a null source.)
+        let elem_llvm_ty = self.llvm_basic_type(elem_ty);
+        let elem_size = elem_llvm_ty
+            .size_of()
+            .expect("non-void basic types have a known size");
+        let total_size = self
+            .builder
+            .build_int_mul(len, elem_size, "arr_size")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let dest = self.alloc_call(total_size)?;
+        self.builder
+            .build_memcpy(dest, 1, src, 1, total_size)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Build the `[T]` array struct `{ i64 len, ptr data }` (abi-v1).
+        let arr_struct_ty = self
+            .context
+            .struct_type(&[i64_type.into(), ptr_type.into()], false);
+        let agg = arr_struct_ty.get_undef();
+        let with_len = self
+            .builder
+            .build_insert_value(agg, len, 0, "arr_with_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let with_data = self
+            .builder
+            .build_insert_value(with_len, dest, 1, "arr_with_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(with_data.into_struct_value().into())
+    }
+
     /// Lower an array indexing `target[index]` per ADR 0015 D3 with
     /// bounds checking per D10. Emits the conditional branch on
     /// `0 <= idx < len`; the false branch calls
@@ -4547,14 +4693,23 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
         let array_val = self.lower_expr(target, program)?.into_struct_value();
         let idx = self.lower_expr(index, program)?.into_int_value();
+        // `len` is field 0 for both `[T]` (`{len,data}`) and `Vec<T>`
+        // (`{len,cap,data}`). The data pointer is field 1 for an array
+        // but field 2 for a `Vec` (the capacity sits between) — D.3
+        // (2/N) / ADR 0034 D3. Key on the target's (secret-stripped)
+        // type.
+        let data_field: u32 = match self.strip_secret(target.ty) {
+            Type::Vec(_) => 2,
+            _ => 1,
+        };
         let len = self
             .builder
-            .build_extract_value(array_val, 0, "arr_len")
+            .build_extract_value(array_val, 0, "coll_len")
             .map_err(|e| CodegenError::Builder(e.to_string()))?
             .into_int_value();
         let data_ptr = self
             .builder
-            .build_extract_value(array_val, 1, "arr_data")
+            .build_extract_value(array_val, data_field, "coll_data")
             .map_err(|e| CodegenError::Builder(e.to_string()))?
             .into_pointer_value();
 
@@ -4922,6 +5077,14 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
                 if *id == PUSH_FN_ID {
                     return self.lower_push(&args[0], &args[1], type_args[0], program);
+                }
+                // D.3 (2/N): pop removes+returns the last element; the
+                // bridge copies a Vec's live elements into a fresh [T].
+                if *id == POP_FN_ID {
+                    return self.lower_pop(&args[0], type_args[0], program);
+                }
+                if *id == VEC_TO_ARRAY_FN_ID {
+                    return self.lower_vec_to_array(&args[0], type_args[0], program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted

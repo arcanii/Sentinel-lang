@@ -1189,13 +1189,12 @@ fn pass_c5d2_u8_unsigned() {
 
 #[test]
 fn pass_c5d3_collections() {
-    // ADR 0034 D9/D10 (1/N) phase-go: growable `Vec<T>` end to end.
-    // A `Vec<i64>` grown across 6 pushes (multiple `realloc` growths), a
-    // `Vec<u8>` built from char-literal pushes, and a `Vec<i64>` moved
-    // out of a helper (the returned-Vec escape path). Verified via `len`
-    // (push N -> len == N; `v[i]` / `pop` / the Vec<u8>->[u8] bridge are
-    // D.3 (2/N)). Every Vec buffer is freed at its scope-exit drop —
-    // leak-free under `leaks --atExit` (verified separately).
-    // len(nums)*10 + len(bytes) + len(digits) = 6*10 + 4 + 3 = 67.
-    assert_eq!(run_exit("c5d3_collections.sentinel"), 67);
+    // ADR 0034 D9/D10 phase-go: the growable `Vec<T>` MVP end to end.
+    // (1/N) vec_new / push / len + realloc growth + drop + a Vec moved
+    // out of a helper (escape); (2/N) `v[i]` (on Vec<i64> and Vec<u8>),
+    // `pop`, the `Vec<u8>` -> `[u8]` bridge (vec_to_array + str_eq), and
+    // `String` = `Vec<u8>`. Every Vec/array buffer is freed at scope exit
+    // — leak-free under `leaks --atExit` (verified separately).
+    // n0 + last + remaining + matched + first_is_l = 10+40+3+1+1 = 55.
+    assert_eq!(run_exit("c5d3_collections.sentinel"), 55);
 }

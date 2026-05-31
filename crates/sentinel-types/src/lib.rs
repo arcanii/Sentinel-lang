@@ -1077,6 +1077,15 @@ fn resolve_type_expr_with_scope(
                 // like `i64`/`i32`/`bool`. `[u8]` flows through the array
                 // type-expr path, which demotes via `to_array_elem`.
                 "u8" => Ok(Type::U8),
+                // Phase D.3 (2/N) / ADR 0034 D5 (Amendment A1): `String`
+                // is a thin alias for `Vec<u8>` — a growable byte buffer,
+                // not a separate nominal type. Recognised now that the
+                // `Vec<u8>` -> `[u8]` bridge (`vec_to_array`) makes a
+                // built `String` usable against keyword `[u8]`s. (A string
+                // *literal* is still a `[u8]`; converting one to a
+                // `String` is a `vec_new` + `push` build until a
+                // `[u8]` -> `Vec<u8>` direction lands.)
+                "String" => Ok(Type::Vec(VecElem::U8)),
                 other => {
                     if let Some(&id) = struct_table.get(other) {
                         // ADR 0016 D3: a bare struct name used in
@@ -3579,6 +3588,35 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         type_params: vec![builtin_type_param("T", 0)],
         param_types: vec![push_mut_vec_ref, Type::TypeParam(TypeParamId(0))],
         return_type: Type::I64,
+        effect_row: vec![],
+        is_main: false,
+        is_runtime: true,
+    });
+    // D.3 (2/N) / ADR 0034 D5: `pop<T>(&mut Vec<T>) -> T` and
+    // `vec_to_array<T>(Vec<T>) -> [T]`. Both flow the uniform generic
+    // path; `pop`'s `&mut Vec<T>` is an interned mutable Ref like push's.
+    let pop_sig = &program.fn_signatures[9];
+    let pop_mut_vec_ref =
+        Type::Ref(intern_ref(&mut refs, true, Type::Vec(VecElem::TypeParam(TypeParamId(0)))));
+    typed_signatures.push(TypedFnSignature {
+        id: pop_sig.id,
+        name: pop_sig.name.clone(),
+        name_span: pop_sig.name_span.clone(),
+        type_params: vec![builtin_type_param("T", 0)],
+        param_types: vec![pop_mut_vec_ref],
+        return_type: Type::TypeParam(TypeParamId(0)),
+        effect_row: vec![],
+        is_main: false,
+        is_runtime: true,
+    });
+    let vec_to_array_sig = &program.fn_signatures[10];
+    typed_signatures.push(TypedFnSignature {
+        id: vec_to_array_sig.id,
+        name: vec_to_array_sig.name.clone(),
+        name_span: vec_to_array_sig.name_span.clone(),
+        type_params: vec![builtin_type_param("T", 0)],
+        param_types: vec![Type::Vec(VecElem::TypeParam(TypeParamId(0)))],
+        return_type: Type::Array(ArrayElem::TypeParam(TypeParamId(0))),
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
@@ -6195,6 +6233,16 @@ fn check_expr(
             let target_t = check_expr(target, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let elem_ty = match target_t.ty {
                 Type::Array(ae) => ae,
+                // Phase D.3 (2/N) / ADR 0034 D5: `v[i]` on a `Vec<T>`
+                // reuses the C1.6 bounds-checked Index. `VecElem` is the
+                // same flat subset as `ArrayElem`, so the element demotes
+                // to an `ArrayElem` for the typed node (codegen reads the
+                // data pointer from the Vec's field 2 vs the array's
+                // field 1, keyed on the target type).
+                Type::Vec(ve) => ve
+                    .to_type()
+                    .to_array_elem()
+                    .expect("VecElem variants are a subset of ArrayElem"),
                 other => {
                     return Err(TypeError::IndexOnNonArray {
                         got: other,
@@ -8135,10 +8183,11 @@ mod tests {
         assert_eq!(main.body.ty, Type::I64);
         // Signature table: FnId(0)=print, (1)=unwrap_or, (2)=is_some,
         // (3)=len, (4)=str_eq, (5)=u8_to_i64, (6)=i64_to_u8 (D.2 / ADR
-        // 0033 D5), (7)=vec_new, (8)=push (D.3 / ADR 0034 D5), (9)=main.
-        // The generic builtins occupy FnId(1..=3) per ADR 0014 D9 + ADR
-        // 0015 D4; the byte-string builtins FnId(4..=6) per ADR 0033 D5;
-        // the collection builtins FnId(7..=8) per ADR 0034 D5.
+        // 0033 D5), (7)=vec_new, (8)=push, (9)=pop, (10)=vec_to_array
+        // (D.3 / ADR 0034 D5), (11)=main. The generic builtins occupy
+        // FnId(1..=3) per ADR 0014 D9 + ADR 0015 D4; the byte-string
+        // builtins FnId(4..=6) per ADR 0033 D5; the collection builtins
+        // FnId(7..=10) per ADR 0034 D5.
         assert_eq!(p.fn_signatures[0].name, "print");
         assert_eq!(p.fn_signatures[0].param_types, vec![Type::I64]);
         assert_eq!(p.fn_signatures[1].name, "unwrap_or");
@@ -8149,7 +8198,9 @@ mod tests {
         assert_eq!(p.fn_signatures[6].name, "i64_to_u8");
         assert_eq!(p.fn_signatures[7].name, "vec_new");
         assert_eq!(p.fn_signatures[8].name, "push");
-        assert_eq!(p.fn_signatures[9].name, "main");
+        assert_eq!(p.fn_signatures[9].name, "pop");
+        assert_eq!(p.fn_signatures[10].name, "vec_to_array");
+        assert_eq!(p.fn_signatures[11].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 
@@ -10373,5 +10424,92 @@ fn main() -> i64 {
             matches!(err, TypeError::TypeArgCountMismatch { .. }),
             "got {err:?}"
         );
+    }
+
+    // ----- D.3 (2/N): v[i] + pop + the Vec->[u8] bridge + String -----
+
+    #[test]
+    fn vec_index_yields_element() {
+        // ADR 0034 D5: `v[i]` on a `Vec<i64>` reuses the Index rule and
+        // yields the element type.
+        let p = check_ok(
+            "fn f() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 7); v[0] }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::I64);
+    }
+
+    #[test]
+    fn vec_u8_index_yields_u8() {
+        let p = check_ok(
+            "fn f() -> u8 { let mut v: Vec<u8> = vec_new(); push(&mut v, 'a'); v[0] }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::U8);
+    }
+
+    #[test]
+    fn index_on_non_collection_still_rejected() {
+        // The Vec arm must not loosen the array/Vec-only Index rule.
+        let err = check_err("fn main() -> i64 { let x: i64 = 5; x[0] }");
+        assert!(matches!(err, TypeError::IndexOnNonArray { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn pop_typechecks_and_returns_element() {
+        // ADR 0034 D5: `pop<T>(&mut Vec<T>) -> T`.
+        let p = check_ok(
+            "fn f() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 1); pop(&mut v) }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::I64);
+    }
+
+    #[test]
+    fn pop_on_immutable_vec_rejected() {
+        // `pop` takes `&mut v`, so `v` must be `let mut`.
+        let err = check_err(
+            "fn main() -> i64 { let v: Vec<i64> = vec_new(); pop(&mut v); 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::BorrowMutOfImmutable { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn vec_to_array_yields_array_of_element() {
+        // ADR 0034 D5: the `Vec<T>` -> `[T]` bridge.
+        let p = check_ok(
+            "fn f() -> [u8] { let mut v: Vec<u8> = vec_new(); push(&mut v, 'a'); vec_to_array(v) }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::Array(ArrayElem::U8));
+    }
+
+    #[test]
+    fn vec_to_array_then_str_eq_typechecks() {
+        // The bridge lets a built `Vec<u8>` be `str_eq`'d against a `[u8]`.
+        let p = check_ok(
+            "fn f(kw: [u8]) -> bool { let mut v: Vec<u8> = vec_new(); push(&mut v, 'l'); str_eq(vec_to_array(v), kw) }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::Bool);
+    }
+
+    #[test]
+    fn string_alias_resolves_to_vec_u8() {
+        // ADR 0034 D5 (Amendment A1): `String` is `Vec<u8>`.
+        let p = check_ok("fn f() -> String { vec_new() }\nfn main() -> i64 { 0 }");
+        assert_eq!(fn_body_ty(&p, "f"), Type::Vec(VecElem::U8));
+    }
+
+    #[test]
+    fn string_param_accepts_vec_ops() {
+        // A `String` parameter is a `Vec<u8>` — `len` (overloaded) applies.
+        let p = check_ok(
+            "fn f(s: String) -> i64 { len(s) }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::I64);
     }
 }
