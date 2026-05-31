@@ -14,9 +14,36 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D.4 — file I/O via a minimal stdlib — MVP COMPLETE
-(1/N + 2/N; ADR 0035 → ACCEPTED-WITH-AMENDMENTS).** Post-1.0, **Phase D
-(self-hosting) is underway** (ADR 0031 — a language/stdlib build-out). The fourth
+Last updated: **Phase D.5 — loops (`while`) — (1/N) COMPLETE (ADR 0036
+PROPOSED; (1/N) landed).** Post-1.0, **Phase D (self-hosting) is underway**
+(ADR 0031 — a language/stdlib build-out). After D.1 (sum types), D.2 (strings +
+`u8`), D.3 (growable `Vec<T>`), and D.4 (file I/O), the surface had been
+**recursion-only by design**; **D.5 adds the `while` loop** — a compiler's
+iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want bounded,
+stack-safe iteration. **(1/N)** lands `while <cond> { <body> }` end to end through
+the whole pipeline. Load-bearing calls: **a loop is a STATEMENT**
+(`StmtKind::While`, not an expression — no loop value; Sentinel has no unit type);
+`while` lowers to the **first backward CFG branch** (loop_cond → loop_body →
+loop_after, body→cond back-edge; all prior control flow merged forward); the body
+is a `lower_block` scope, so its bindings **drop per-iteration** (a body that
+allocates each pass is leak-free). The **loop-carried move rule** (the key
+borrow-check addition): moving an *outer* Move-typed binding inside the cond/body
+is a use-after-move on re-entry — rejected (`MovedInLoopBody`); a body-local
+binding is fresh each pass; loop-carried `Assign`/`&mut` are fine. **Stack-safe:**
+body allocas (`let`/`if`/`match` results) are hoisted to the function entry block
+inside loops (a `loop_depth` flag), so a 2M-iteration body-`let` loop doesn't
+overflow; non-loop codegen stays byte-identical (the c51 bar holds). `while` is a
+new lexer token (`for` is taken by `impl … for …`); a statement-only body
+synthesises a discarded unit tail. **No new `Type`, no cascade, no FnId-shift.**
+Phase-go `tests/pass/c5d5_loops.sentinel` (a counter loop summing 1..=10, a `Vec`
+built by `push`ing in a loop, a body allocating a `[u8]` each of 100 passes) runs
+at **exit 67, 0 leaks** (`leaks --atExit`). DEFERRED (ADR 0036 D8): `break` /
+`continue` (D.5 (2/N)), `for` / ranges / iterators, labeled break,
+`break`-with-value / loop-as-expression, a termination check. **1350 tests,
+four-check green. Phase D.5 (1/N) lands.**
+
+Pre-D.5 context: **Phase D.4 — file I/O via a minimal stdlib — MVP COMPLETE
+(1/N + 2/N; ADR 0035 → ACCEPTED-WITH-AMENDMENTS).** The fourth
 prerequisite — **file I/O** — now compiles + runs end to end, leak-free: a
 self-hosting compiler can read its source + write its artifact. **File I/O =
 runtime builtins** (like `print`), **NOT** the algebraic-effect/handler machinery

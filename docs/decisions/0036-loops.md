@@ -1,12 +1,14 @@
 # ADR 0036: Phase D.5 — loops (`while`)
 
-Status: PROPOSED — the fifth Phase D sub-phase ADR under ADR 0031 (Phase D
-kickoff) D4 item 6. After sum types (D.1), strings + a byte type (D.2), growable
-collections (D.3), and file I/O (D.4), **loops** are next: the surface has been
-**recursion-only by design** since 1.0, but a compiler's iteration-heavy passes
-(scanning a byte buffer, walking a token `Vec`, draining a work-list) are awkward
-+ stack-bounded as recursion (deep recursion, no early break). Flips to
-ACCEPTED(-WITH-AMENDMENTS) as the sub-phases land.
+Status: PROPOSED (D.5 **(1/N) landed** — the `while` loop end to end; the 3 OPEN
+DESIGN POINTS were resolved at the proposed defaults; see Amendments). The fifth
+Phase D sub-phase ADR under ADR 0031 (Phase D kickoff) D4 item 6. After sum types
+(D.1), strings + a byte type (D.2), growable collections (D.3), and file I/O
+(D.4), **loops** are next: the surface has been **recursion-only by design** since
+1.0, but a compiler's iteration-heavy passes (scanning a byte buffer, walking a
+token `Vec`, draining a work-list) are awkward + stack-bounded as recursion (deep
+recursion, no early break). Flips to ACCEPTED-WITH-AMENDMENTS when D.5 (2/N)
+closes (`break` / `continue`).
 
 Date: 2026-05-31
 Related:
@@ -227,6 +229,52 @@ dataflow; the conservative rule is the right MVP).
 - No new `Type` variant, no `Type`-match cascade (a `StmtKind`, a bool cond, a
   discarded body value). No `FnId`-shift (no new builtin).
 
+## Amendments
+
+The ADR stays PROPOSED until D.5 (2/N) (`break` / `continue`) closes, then flips
+to ACCEPTED-WITH-AMENDMENTS.
+
+### D.5 (1/N) — `while` (landed)
+
+End to end through the whole pipeline; phase-go `tests/pass/c5d5_loops.sentinel`
+(a counter loop, a `Vec` built by `push`ing in a loop, and a body allocating each
+iteration) runs at exit 67, leak-free. The 3 OPEN DESIGN POINTS were **resolved at
+the proposed defaults**: the loop-carried move rule is the conservative reject
+(`MovedInLoopBody`); `break`/`continue` are (2/N); a loop is a `StmtKind::While`.
+Deviations / details discovered during implementation:
+
+- **A1 — a statement-only body synthesises a discarded unit tail.** Sentinel
+  blocks require a trailing expression (ADR 0010 D6), but a loop body runs for
+  effect and usually has none (`while c { i = i + 1; }`). The `while`-body parser
+  (`parse_loop_body`, a `parse_block_inner(allow_stmt_only=true)`) accepts a body
+  with no trailing expression and synthesises a unit tail (`0`, discarded each
+  iteration), so the body stays a regular `Block` reusing `check_block` /
+  `lower_block`. A body that *does* end with an expression keeps it (still
+  discarded).
+- **A2 — stack-safety via entry-block alloca hoisting (the load-bearing codegen
+  fix).** D4's "the body alloca is reused each iteration" only holds if the
+  `alloca` is in the function **entry block**. A body `let`'s `alloca` emitted
+  *inline* in `loop_body` executes every iteration, allocating a fresh stack slot
+  each pass (LLVM `alloca` is not freed until function return) — at large N the
+  stack overflows (empirically: a 2,000,000-iteration body-`let` loop SIGSEGVs).
+  Fix: a `loop_depth` counter (bumped around `lower_block(while-body)`); when
+  `> 0`, per-binding allocas (`let`, `if`-result, `match`-result) are placed at
+  the top of the entry block (executed once, the slot reused) via a
+  `binding_alloca` helper. Non-loop codegen (`loop_depth == 0`) keeps the inline
+  `alloca`, so it is **byte-identical** to pre-D.5 (the c51 repro bar holds).
+  Loop-carried-state loops (no body `let`) never had the issue; with the hoist,
+  body-allocating loops are stack-safe too.
+- **B (the D8 rule) — `MovedInLoopBody`.** A new `BorrowError`: moving an outer
+  Move-typed binding inside a `while` cond/body is rejected (the conservative
+  loop-carried move rule). Implemented by snapshotting the in-scope bindings +
+  the moved set before the loop and flagging any outer binding newly moved in the
+  cond/body. Verified: rejects `consume(p)` for an outer `p`, accepts an
+  inner-binding move + loop-carried `Assign` / `push(&mut v)`.
+
+Deferred to (2/N): `break` / `continue` (branch to `loop_after` / `loop_cond`; a
+loop-target stack for nesting). Still deferred (D8): `for` / ranges / iterators,
+labeled break, `break`-with-value / loop-as-expression, a termination check.
+
 ## Revisit
 
 PROPOSED until D.5 closes. Triggers:
@@ -236,13 +284,10 @@ PROPOSED until D.5 closes. Triggers:
   value) when a self-host pass needs early exit.
 - **D2**: `for` (+ ranges / iterators) once the iterator protocol is designed.
 
-## OPEN DESIGN POINTS (settle before D.5 (1/N))
+## OPEN DESIGN POINTS — RESOLVED (at the proposed defaults, D.5 (1/N))
 
-1. **Loop-carried move rule (D8).** Proposed: **reject moving an outer-scope
-   Move-typed binding inside a `while` body** (conservative, sound). Confirm vs.
-   a more precise dataflow check (bigger).
-2. **`break` / `continue` scope (D9).** Proposed: **(2/N)**, not (1/N) — keep
-   (1/N) to the core loop + the back-edge + the move rule. Confirm (a lexer can
-   loop with a `mut` flag + condition until (2/N)).
-3. **`while`-as-statement (D3).** Proposed: a `StmtKind::While` (no loop value).
-   Confirm vs. an expression yielding a synthetic `i64` 0.
+1. **Loop-carried move rule (D8).** → **reject moving an outer-scope Move-typed
+   binding inside a `while` body** (conservative, sound; `MovedInLoopBody`). A
+   precise dataflow check is a future refinement.
+2. **`break` / `continue` scope (D9).** → **(2/N)**, not (1/N).
+3. **`while`-as-statement (D3).** → a `StmtKind::While` (no loop value).
