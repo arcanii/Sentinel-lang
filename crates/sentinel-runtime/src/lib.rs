@@ -257,6 +257,35 @@ pub extern "C" fn sentinel_write_file(
     0
 }
 
+/// Write `data`'s bytes to stdout — the byte/string companion to
+/// `print` (which writes one i64). D.4 (2/N) / ADR 0035 D4 —
+/// `print_bytes(data) -> i64` (returns 0). Writes exactly `data_len`
+/// bytes with **no added newline** (the caller includes any); flushes so
+/// the bytes are visible before the program exits via its C-ABI `main`
+/// return (and interleave correctly with `print`'s `println!`, which
+/// shares this stdout). Aborts on a write error.
+///
+/// # Safety
+/// When `data_len > 0`, `data` must point to `data_len` readable bytes
+/// (guaranteed by codegen's `{ len, ptr }` call shape).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_print_bytes(data: *const u8, data_len: i64) -> i64 {
+    use std::io::Write;
+    let bytes: &[u8] = if data_len <= 0 {
+        &[]
+    } else {
+        // SAFETY: caller guarantees `data_len` readable bytes at `data`.
+        unsafe { std::slice::from_raw_parts(data, data_len as usize) }
+    };
+    let mut out = std::io::stdout();
+    if out.write_all(bytes).and_then(|()| out.flush()).is_err() {
+        eprintln!("sentinel: print_bytes failed: stdout write error");
+        std::process::abort();
+    }
+    0
+}
+
 /// Byte-wise equality of two `[u8]` slices — the `str_eq` builtin
 /// (D.2 / ADR 0033 D5; the lexer's keyword/identifier matcher). Equal
 /// length AND equal bytes. Returns a C `bool`, which Rust's `extern
@@ -1166,6 +1195,7 @@ mod tests {
             sentinel_realloc as *const (),
             sentinel_read_file as *const (),
             sentinel_write_file as *const (),
+            sentinel_print_bytes as *const (),
             sentinel_str_eq as *const (),
             sentinel_panic_oob as *const (),
             sentinel_arena_enter as *const (),
@@ -1183,10 +1213,11 @@ mod tests {
             sentinel_scope_register as *const (),
             sentinel_scope_exit as *const (),
         ];
-        // 22 symbols: 21 codegen-declared (incl. D.2's sentinel_str_eq,
+        // 23 symbols: 22 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
-        // sentinel_write_file) + sentinel_kont_panic_resumed.
-        assert_eq!(symbols.len(), 22);
+        // sentinel_write_file / sentinel_print_bytes) +
+        // sentinel_kont_panic_resumed.
+        assert_eq!(symbols.len(), 23);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 

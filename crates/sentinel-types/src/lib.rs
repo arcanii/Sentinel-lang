@@ -3650,6 +3650,20 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         is_main: false,
         is_runtime: true,
     });
+    // D.4 (2/N) / ADR 0035 D4: `print_bytes([u8]) -> i64` — write a byte
+    // array to stdout (the byte/string companion to `print`).
+    let print_bytes_sig = &program.fn_signatures[13];
+    typed_signatures.push(TypedFnSignature {
+        id: print_bytes_sig.id,
+        name: print_bytes_sig.name.clone(),
+        name_span: print_bytes_sig.name_span.clone(),
+        type_params: vec![],
+        param_types: vec![Type::Array(ArrayElem::U8)],
+        return_type: Type::I64,
+        effect_row: vec![],
+        is_main: false,
+        is_runtime: true,
+    });
 
     for fn_def in &program.fns {
         let resolved_sig = &program.fn_signatures[fn_def.id.0 as usize];
@@ -8213,11 +8227,12 @@ mod tests {
         // Signature table: FnId(0)=print, (1)=unwrap_or, (2)=is_some,
         // (3)=len, (4)=str_eq, (5)=u8_to_i64, (6)=i64_to_u8 (D.2 / ADR
         // 0033 D5), (7)=vec_new, (8)=push, (9)=pop, (10)=vec_to_array
-        // (D.3 / ADR 0034 D5), (11)=read_file, (12)=write_file (D.4 / ADR
-        // 0035 D4), (13)=main. The generic builtins occupy FnId(1..=3)
-        // per ADR 0014 D9 + ADR 0015 D4; the byte-string builtins
-        // FnId(4..=6) per ADR 0033 D5; the collection builtins FnId(7..=10)
-        // per ADR 0034 D5; the file-I/O builtins FnId(11..=12) per ADR 0035.
+        // (D.3 / ADR 0034 D5), (11)=read_file, (12)=write_file,
+        // (13)=print_bytes (D.4 / ADR 0035 D4), (14)=main. The generic
+        // builtins occupy FnId(1..=3) per ADR 0014 D9 + ADR 0015 D4; the
+        // byte-string builtins FnId(4..=6) per ADR 0033 D5; the collection
+        // builtins FnId(7..=10) per ADR 0034 D5; the file-I/O builtins
+        // FnId(11..=13) per ADR 0035.
         assert_eq!(p.fn_signatures[0].name, "print");
         assert_eq!(p.fn_signatures[0].param_types, vec![Type::I64]);
         assert_eq!(p.fn_signatures[1].name, "unwrap_or");
@@ -8232,7 +8247,8 @@ mod tests {
         assert_eq!(p.fn_signatures[10].name, "vec_to_array");
         assert_eq!(p.fn_signatures[11].name, "read_file");
         assert_eq!(p.fn_signatures[12].name, "write_file");
-        assert_eq!(p.fn_signatures[13].name, "main");
+        assert_eq!(p.fn_signatures[13].name, "print_bytes");
+        assert_eq!(p.fn_signatures[14].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 
@@ -10580,6 +10596,22 @@ fn main() -> i64 {
         let err = check_err(
             "fn f(p: [i64], d: [u8]) -> i64 { write_file(p, d) }\nfn main() -> i64 { 0 }",
         );
+        assert!(matches!(err, TypeError::CallArgMismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn print_bytes_typechecks() {
+        // D.4 (2/N) / ADR 0035 D4: `print_bytes([u8]) -> i64`.
+        let p = check_ok(
+            "fn f(s: [u8]) -> i64 { print_bytes(s) }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::I64);
+    }
+
+    #[test]
+    fn print_bytes_rejects_non_byte_array() {
+        // The arg is concrete `[u8]` — an i64 is a CallArgMismatch.
+        let err = check_err("fn main() -> i64 { print_bytes(5) }");
         assert!(matches!(err, TypeError::CallArgMismatch { .. }), "got {err:?}");
     }
 }

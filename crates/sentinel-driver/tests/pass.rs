@@ -1201,16 +1201,19 @@ fn pass_c5d3_collections() {
 
 #[test]
 fn pass_c5d4_file_io() {
-    // ADR 0035 D9/D10 (1/N) phase-go: file I/O round-trip. `write_file`
-    // a known payload to a temp path, `read_file` it back, and verify the
-    // bytes survived (str_eq + a `back[i]` spot-check + len). File I/O is
-    // a pair of runtime builtins (ADR 0035 D2), panic-on-failure (D5).
-    // Leak-free under `leaks --atExit` (verified separately). Exit =
-    // len("hello") = 5. The fixture's temp path is removed before + after
-    // so the test is hermetic + repeatable.
+    // ADR 0035 D9/D10 phase-go: the file-I/O MVP end to end. `write_file`
+    // a payload to a temp path, `read_file` it back, verify the bytes
+    // survived (str_eq + a `back[i]` spot-check + len), and `print_bytes`
+    // the read-back content to stdout. File I/O is runtime builtins
+    // (ADR 0035 D2), panic-on-failure (D5). Leak-free under `leaks
+    // --atExit` (verified separately). Exit = len("hello") = 5; stdout =
+    // "hello" (print_bytes writes exactly the bytes, no newline). The
+    // temp path is removed before + after so the test is hermetic.
     let tmp = std::path::Path::new("/tmp/sentinel_c5d4_io.txt");
     let _ = std::fs::remove_file(tmp);
-    assert_eq!(run_exit("c5d4_file_io.sentinel"), 5);
+    let r = build_and_run("c5d4_file_io.sentinel");
+    assert_eq!(r.exit, 5);
+    assert_eq!(r.stdout, "hello"); // print_bytes(back), no trailing newline
     // The fixture must have created the file (write_file ran).
     assert!(tmp.exists(), "c5d4 fixture should have written the temp file");
     let _ = std::fs::remove_file(tmp);

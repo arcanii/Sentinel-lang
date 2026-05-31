@@ -574,11 +574,12 @@ mod tests {
         )
         .unwrap();
         assert!(errors.is_empty(), "got {errors:?}");
-        // main's row should be empty. FnId(0..=12) = the 13 runtime
+        // main's row should be empty. FnId(0..=13) = the 14 runtime
         // builtins (print/unwrap_or/is_some/len + D.2's str_eq/
         // u8_to_i64/i64_to_u8 + D.3's vec_new/push/pop/vec_to_array +
-        // D.4's read_file/write_file); FnId(13) = helper, FnId(14) = main.
-        let main_id = FnId(14);
+        // D.4's read_file/write_file/print_bytes); FnId(14) = helper,
+        // FnId(15) = main.
+        let main_id = FnId(15);
         assert!(checked.effective_rows.get(&main_id).unwrap().is_empty());
     }
 

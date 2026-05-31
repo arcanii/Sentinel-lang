@@ -45,8 +45,8 @@ use sentinel_borrow_check::DropPlan;
 use sentinel_hir::HirProgram;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID,
-    LEN_FN_ID, POP_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID,
-    UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
+    LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID,
+    U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
@@ -464,6 +464,17 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
                 &[ptr_ty.into(), i64_ty.into(), ptr_ty.into(), i64_ty.into()],
                 false,
             ),
+            None,
+        )
+    };
+    // D.4 (2/N) / ADR 0035 D4: `sentinel_print_bytes(data_ptr, data_len)
+    // -> i64` writes a `[u8]` to stdout (the byte companion to `print`).
+    let print_bytes_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        module.add_function(
+            "sentinel_print_bytes",
+            i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
             None,
         )
     };
@@ -929,6 +940,7 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             realloc_fn,
             read_file_fn,
             write_file_fn,
+            print_bytes_fn,
             arena_enter_fn,
             arena_alloc_fn,
             arena_exit_fn,
@@ -1135,6 +1147,9 @@ struct CodegenCtx<'ctx, 'plan> {
     /// D.4 / ADR 0035 D6: `sentinel_write_file(path_ptr, path_len,
     /// data_ptr, data_len) -> i64` — create/truncate + write a file.
     write_file_fn: FunctionValue<'ctx>,
+    /// D.4 (2/N) / ADR 0035 D4: `sentinel_print_bytes(data_ptr, data_len)
+    /// -> i64` — write a `[u8]` to stdout (byte companion to `print`).
+    print_bytes_fn: FunctionValue<'ctx>,
     /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
     /// creates a per-scope broker bump arena (capacity 0 → default).
     arena_enter_fn: FunctionValue<'ctx>,
@@ -4519,6 +4534,40 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("sentinel_write_file returns i64"))
     }
 
+    /// D.4 (2/N) / ADR 0035 D4/D7: lower `print_bytes(data) -> i64`.
+    /// Extracts the `[u8]`'s `{ len, ptr }` and calls
+    /// `sentinel_print_bytes` (write to stdout, return 0). The arg is
+    /// borrowed (the ADR 0033 A3 runtime-builtin rule).
+    fn lower_print_bytes(
+        &mut self,
+        data: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let data_val = self.lower_expr(data, program)?.into_struct_value();
+        let data_len = self
+            .builder
+            .build_extract_value(data_val, 0, "pb_data_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let data_ptr = self
+            .builder
+            .build_extract_value(data_val, 1, "pb_data_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let call = self
+            .builder
+            .build_call(
+                self.print_bytes_fn,
+                &[data_ptr.into(), data_len.into()],
+                "print_bytes",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_print_bytes returns i64"))
+    }
+
     /// D.3 / ADR 0034 D7: lower `vec_new() -> Vec<T>` to an empty vector
     /// value `{ i64 len = 0, i64 cap = 0, ptr data = null }`. No
     /// allocation happens until the first `push` (`realloc(null, …)` ==
@@ -5246,6 +5295,9 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
                 if *id == WRITE_FILE_FN_ID {
                     return self.lower_write_file(&args[0], &args[1], program);
+                }
+                if *id == PRINT_BYTES_FN_ID {
+                    return self.lower_print_bytes(&args[0], program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted

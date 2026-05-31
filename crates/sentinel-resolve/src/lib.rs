@@ -127,6 +127,12 @@ pub const READ_FILE_FN_ID: FnId = FnId(11);
 /// `sentinel_write_file`; its args are borrowed (the ADR 0033 A3 rule).
 pub const WRITE_FILE_FN_ID: FnId = FnId(12);
 
+/// D.4 (2/N) / ADR 0035 D4: `print_bytes(data: [u8]) -> i64` — write
+/// `data`'s bytes to stdout (the byte/string companion to `print`).
+/// Returns 0; no added newline. Lowers to `sentinel_print_bytes`; its
+/// arg is borrowed (the ADR 0033 A3 rule).
+pub const PRINT_BYTES_FN_ID: FnId = FnId(13);
+
 /// Identifier for a struct declaration. Added at C1.4 per ADR 0013
 /// D4 / D5; unique per-program, assigned in source order starting
 /// at 0.
@@ -1864,12 +1870,22 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         is_runtime: true,
     };
     next_fn_id += 1;
+    let print_bytes_sig = FnSignature {
+        id: FnId(next_fn_id),
+        name: "print_bytes".to_string(),
+        name_span: None,
+        arity: 1,
+        type_params_count: 0,
+        is_main: false,
+        is_runtime: true,
+    };
+    next_fn_id += 1;
 
     let mut fn_table: HashMap<String, FnId> = HashMap::new();
     let mut signatures: Vec<FnSignature> = vec![
         print_sig, unwrap_or_sig, is_some_sig, len_sig, str_eq_sig, u8_to_i64_sig,
         i64_to_u8_sig, vec_new_sig, push_sig, pop_sig, vec_to_array_sig, read_file_sig,
-        write_file_sig,
+        write_file_sig, print_bytes_sig,
     ];
     fn_table.insert("print".to_string(), PRINT_FN_ID);
     fn_table.insert("unwrap_or".to_string(), UNWRAP_OR_FN_ID);
@@ -1884,6 +1900,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     fn_table.insert("vec_to_array".to_string(), VEC_TO_ARRAY_FN_ID);
     fn_table.insert("read_file".to_string(), READ_FILE_FN_ID);
     fn_table.insert("write_file".to_string(), WRITE_FILE_FN_ID);
+    fn_table.insert("print_bytes".to_string(), PRINT_BYTES_FN_ID);
 
     // Pass 1: collect every fn into the table.
     for fn_def in &program.fns {
@@ -3885,9 +3902,9 @@ mod tests {
         // FnId(0) = print, FnId(1) = unwrap_or, FnId(2) = is_some,
         // FnId(3) = len, FnId(4..=6) = str_eq/u8_to_i64/i64_to_u8 (D.2),
         // FnId(7..=10) = vec_new/push/pop/vec_to_array (D.3),
-        // FnId(11..=12) = read_file/write_file (D.4), FnId(13) = main
-        // (the first user fn).
-        assert_eq!(p.main().id, FnId(13));
+        // FnId(11..=13) = read_file/write_file/print_bytes (D.4),
+        // FnId(14) = main (the first user fn).
+        assert_eq!(p.main().id, FnId(14));
         assert_eq!(p.fn_signatures[0].name, "print");
         assert!(p.fn_signatures[0].is_runtime);
     }
@@ -3927,13 +3944,13 @@ mod tests {
             },
             other => panic!("expected Binary, got {other:?}"),
         }
-        // FnId(0..=12) = the 13 runtime builtins (print, unwrap_or,
+        // FnId(0..=13) = the 14 runtime builtins (print, unwrap_or,
         // is_some, len, str_eq, u8_to_i64, i64_to_u8, vec_new, push, pop,
-        // vec_to_array, read_file, write_file); FnId(13) = double (first
-        // user fn), FnId(14) = main.
+        // vec_to_array, read_file, write_file, print_bytes); FnId(14) =
+        // double (first user fn), FnId(15) = main.
         let main = p.main();
         match &main.body.tail.kind {
-            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(13)),
+            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(14)),
             other => panic!("expected Call, got {other:?}"),
         }
     }
