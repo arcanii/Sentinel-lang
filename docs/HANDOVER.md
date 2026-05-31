@@ -132,6 +132,8 @@ C1.3. See STATE.md Section C.
 **Phase D.3 (1/N) — growable `Vec<T>`: `Type::Vec` + `vec_new`/`push`/`len` end to end — complete (`a64883c`). ADR 0034 stays PROPOSED (3-sub-phase split; (1/N) Amendments recorded).** Per ADR 0034 D9 (1/N): a growable, owned, mutable `Vec<T>` — `[T]` plus a capacity field + mutation. **types:** `Type::Vec(VecElem)` (the flat element subset mirroring `ArrayElem`) + the full exhaustive-`Type`-match cascade (`substitute` / `try_substitute` / `contains_type_param` / `unify_one` — the last gets an explicit `(Vec,Vec)` arm so generic inference binds the element — plus `Display`, the `to_nullable_inner` / `to_array_elem` None groups, and `is_vec` / `to_vec_elem`); `resolve_type_expr` recognises `Vec<T>` as a builtin generic (flat element via `to_vec_elem`, else the new `VecElementNotSupported`); `vec_new<T>() -> Vec<T>` (element pinned from the binding / return annotation — the body-tail expected-type seeding extended to `Vec`) and `push<T>(&mut Vec<T>, T) -> i64` type through the **uniform generic-call path** (no special-casing), while `len` gets a contained `check_call` overload over `[T]` + `Vec<T>` (the `[T]` error path preserved exactly). **codegen:** `Vec` → `{ i64 len, i64 cap, ptr data }` (data is **field 2**); `lower_vec_new` builds `{0,0,null}`; `lower_push` loads the `&mut Vec`, grows via `sentinel_realloc` to `max(1, cap*2)*sizeof(T)` when `len==cap` (the grow block stores cap+data back, the continuation re-loads — no PHI), writes `data[len]=x`, bumps `len`; drop frees field 2 (null-safe); `len` reuses the field-0 extract. **runtime:** one new symbol `sentinel_realloc` (libc realloc; `realloc(null,n)==malloc` serves the first push). **borrow-check:** a `&mut Vec` builtin arg registers a **mutable borrow** (extends the ADR 0033 A3 runtime-builtin-arg rule to references), so `push` participates in shared-XOR-mutable and a non-`mut` `Vec` push is rejected (`BorrowMutOfImmutable`); `Vec` is **Move**. Builtins shift the FnId base (vec_new=7, push=8; main 7→9 — fixed the hardcoded-FnId test sites in resolve / effect-check / borrow-check / types). **abi-v1:** §2 `Vec` layout (`{i64,i64,ptr}`, 24/8, data@16) + §4 `vec_` mangling + §5 `sentinel_realloc` (now **20** symbols); `abi_v1_type_layouts_via_datalayout` + `abi_v1_runtime_symbol_set` pin it. **Amendments (ADR 0034):** A1 `String`=`Vec<u8>` deferred to (2/N) with the bridge; A2 return-type pushdown extended to `Vec`; A3 `len` overload special-case; A4 `sentinel_realloc` (not `sentinel_vec_grow`); A5 `VecElementNotSupported`; arena routing unchanged (a `Vec` init is a `Call`, not an `ArrayLit`, so `is_primitive_array_lit` already excludes it). **Verified** (exit-code + `leaks --atExit`): `tests/pass/c5d3_collections` builds a multi-growth `Vec<i64>` (6 pushes), a char-pushed `Vec<u8>`, and a `Vec` moved out of a helper (the escape path) → **exit 67, 0 leaks**; +13 tests (**1324 total**), four-check green. DEFERRED: (2/N) `v[i]` (the `Index` node carries `ArrayElem` + hard-codes the field-1 data ptr — real typed-tree + codegen work) + `pop` + the `Vec<u8>`→`[u8]` bridge + the `String` alias; (3/N) the richer phase-go + the ADR flip; (D8) droppable-element `Vec` drop. **Phase D.3 (1/N) lands.** Next: **D.3 (2/N)**.
 
 **Phase D.3 (2/N) — `Vec` `v[i]` / `pop` / the `Vec<u8>`->`[u8]` bridge / `String` — the growable-`Vec` MVP is COMPLETE (`8430b0a`). ADR 0034 → ACCEPTED-WITH-AMENDMENTS.** Folded in the thin (3/N) close (comprehensive phase-go + ADR flip), since these four pieces exhaust the D.3 MVP (the rest is D8-deferred) and the abi-v1 Vec entry already landed in (1/N). **`v[i]`:** reuses the C1.6 bounds-checked `Index` with NO new typed node — the type checker accepts a `Vec` target (its `VecElem` demotes to the structurally identical `ArrayElem` for the node), and `lower_index` reads the data pointer from **field 2** (`Vec`) vs **field 1** (array), keyed on the secret-stripped target type; `len` (field 0) + the OOB trap are reused verbatim. **`pop<T>(&mut Vec<T>) -> T`** and **`vec_to_array<T>(Vec<T>) -> [T]`** (the bridge) are new builtins (FnId 9 / 10; main 9→11) flowing the uniform generic-call path like `push`: `pop` decrements `len` (buffer retained) and traps on empty; `vec_to_array` is non-consuming (`memcpy`s the live `len*sizeof(T)` bytes into a fresh `sentinel_alloc`'d `[T]`, so the Vec + array own independent buffers — both freed), keeping `str_eq`'s `[u8]` surface unchanged. **`String` = `Vec<u8>`** (Amendment A1 resolved): the bare name resolves to `Type::Vec(VecElem::U8)` in `resolve_type_expr`; a string *literal* is still a `[u8]` (so `let s: String = "hi"` is a Mismatch — build via `vec_new`+`push`; the bridge closes the loop the other way). **Amendments B1** (`v[i]` reuses Index, no `VecIndex` node — no typed-tree cascade), **B2** (`pop`/`vec_to_array` uniform-path builtins), **B3** (`String` alias). **Verified** (exit-code + `leaks --atExit`): `v[i]` reads + OOB trap, `pop` + empty-pop trap (exit 134), the bridge (positive + negative `str_eq`, non-consuming, empty), `String` build; the comprehensive `c5d3_collections` (`Vec<i64>` push/index/pop/len + escape; `String` "let" built/indexed/bridged/`str_eq`'d) runs at **exit 55, 0 leaks**. +9 type-layer tests (**1334 total**), four-check green. **Phase D.3 MVP closes; ADR 0034 ACCEPTED-WITH-AMENDMENTS.** Next: **D.4 — file I/O (ADR 0031 D4 item 4; ADR 0035 to be written).**
+
+**ADR 0035 PROPOSED — Phase D.4 kickoff: file I/O via a minimal stdlib (`read_file` / `write_file`) — docs-only.** Per ADR 0031 D4 item 4 — a self-hosting compiler must read its source + write its artifact, and the only runtime I/O is `sentinel_print(i64)`. ADR 0035 designs it (10 D-decisions). **Load-bearing call (D2): file I/O = runtime builtins (like `print`), NOT the algebraic-effect/handler machinery** — ADR 0020 effects are *resumable user computations* (a `handle` arm resumes via `k`); OS I/O is irreversible side effects, and the effect-check forbids an effectful `main` + provides no runtime handler, so an `Io` effect would force a `handle` whose arm *still* calls a syscall builtin (pure ceremony). This **amends ADR 0031 D4's "effects + handlers" framing**; the effect-ROW promotion (`print`/I/O → `! { Io }`) stays a deferred orthogonal concern (D3). **Surface (D4):** `read_file(path: [u8]) -> [u8]` (whole file → owned byte array, reusing the `{len,ptr}` array machinery), `write_file(path: [u8], data: [u8]) -> i64` (create/truncate), `print_bytes([u8]) -> i64` (stdout) — all builtins in the `print`/`str_eq` mould, backed by new libc `sentinel_read_file`/`sentinel_write_file`/`sentinel_print_bytes` wrappers joining `abi-v1` §5. **Error model (D5):** panic-on-failure (abort like OOB/bad-alloc); a recoverable `?[u8]`/`Result` is deferred (wants D.1b generic enums). Paths are `[u8]`, NUL-terminated by the wrapper; `write_file`/`print_bytes` borrow their args (the ADR 0033 A3 rule). **2-sub-phase split (D9):** (1/N) `read_file`+`write_file` + the 2 runtime symbols + a write-then-read-back round-trip phase-go; (2/N) close — `print_bytes` + abi-v1 + ADR flip. Out of scope (D8): recoverable errors, the `Io` effect row, streaming/handles/`seek`/`fd`s, `read_stdin`, directories/`stat`, append, `Vec<u8>`-return, `secret` I/O. **3 OPEN DESIGN POINTS (settle before (1/N)):** (1) effects-vs-builtins (proposed: builtins), (2) error model (proposed: panic), (3) MVP surface (proposed: read_file+write_file, +`print_bytes` in 2/N; is `read_stdin` in?). Next: **D.4 (1/N)** — settle the open points, then `read_file`+`write_file` end to end.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1838,18 +1840,21 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **D.3 (2/N) docs**
-    commit, atop `8430b0a` (feat(d.3 2/N): Vec v[i]/pop/the bridge/String
-    — MVP complete), the `d1cb1b7` immutable-diagnostic fix, and the D.3
-    (1/N) feat+docs (`a64883c`/`cab32f1`). Clean tree; **1334 tests**;
-    four-check green via `cargo nextest run --workspace` + `cargo test --doc
-    --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
-    (+ `cargo build`). macOS + LLVM 18.
-    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0031**
-    (the Phase D roadmap — what's next after D.3) + ADR 0034
-    (the now-complete D.3 ADR — ACCEPTED-WITH-AMENDMENTS; its Amendments
-    A1–A5 + B1–B3 capture the load-bearing Vec decisions) + ADR 0032/0033
-    (the D.1/D.2 precedents — the cascade + FnId-shift discipline)
+    Local HEAD: verify with `git log -1` — expect the **ADR 0035 PROPOSED**
+    docs commit (D.4 file-I/O kickoff), atop the D.3 (2/N) feat+docs
+    (`8430b0a`/`f16dc0c` — the growable-Vec MVP), the `d1cb1b7`
+    immutable-diagnostic fix, and the D.3 (1/N) feat+docs
+    (`a64883c`/`cab32f1`). Clean tree; **1334 tests** (D.4 is design-only so
+    far — no code yet); four-check green via `cargo nextest run --workspace`
+    + `cargo test --doc --workspace` + `cargo clippy --workspace
+    --all-targets -- -D warnings` (+ `cargo build`). macOS + LLVM 18.
+    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0035**
+    (THE D.4 task ADR — file I/O, PROPOSED; read its **3 OPEN DESIGN POINTS**
+    + the runtime-builtins-not-effects reframe of ADR 0031 D4) + ADR 0031
+    (the Phase D roadmap) + ADR 0033/0034 (the D.2/D.3 builtin-signature +
+    FnId-shift + runtime-symbol precedents this mirrors — `print`/`str_eq`/
+    `sentinel_realloc` are the template) + ADR 0020 (effects/handlers — why
+    I/O does NOT use them, D2)
     + auto-memory sentinel_d3_collections_surface.
 
     PHASE D = self-hosting (post-1.0; ADR 0031). Opens with a
@@ -1903,25 +1908,32 @@ For pasting into a fresh chat to bootstrap context:
       VecElementNotSupported). 1324 tests. See
       [[sentinel_d3_collections_surface]].
 
-    RESUME AT: **Phase D.4 — file I/O via a minimal stdlib (ADR 0031 D4
-    item 4; write ADR 0035 PROPOSED first).** D.3 (growable `Vec<T>`) is
-    **COMPLETE** — (1/N) `vec_new`/`push`/`len` + the `sentinel_realloc`
-    growth runtime + `&mut Vec` borrow + drop (`a64883c`); (2/N) `v[i]` /
-    `pop` / the `Vec<u8>`->`[u8]` bridge (`vec_to_array`) / `String` =
-    `Vec<u8>` + the comprehensive `c5d3` phase-go (`8430b0a`); ADR 0034 →
-    ACCEPTED-WITH-AMENDMENTS, `c5d3_collections` exit 55 / 0 leaks; 1334
-    tests. (Builtins are now FnId 0..=10: …push, pop, vec_to_array;
-    user fns start at 11.) Per ADR 0031 D4 the next prerequisite is **file
-    I/O**: read source / write artifacts, modelled as **effects + handlers
-    over real OS syscalls in the runtime** — so it leans on the C3.x effect
-    machinery (`effect` / `handle` / `perform`, ADR 0020) + a new
-    `sentinel_*` syscall-wrapper symbol set joining `abi-v1`, rather than
-    the `Type`-cascade work of D.1–D.3. The **ADR 0035 design call** (the
-    effect shape for `read_file` / `write`, the error model, the stdlib
-    surface) is the first task — settle it (ADR-first) before code. After
-    I/O: modules (D4 #5), then loops (D4 #6 — the iteration-heavy passes
-    want them), then the self-host port (D5). Read ADR 0031 (D4/D5 roadmap)
-    + ADR 0020 (effects/handlers — the I/O substrate) first.
+    RESUME AT: **Phase D.4 (1/N) — file I/O: `read_file` + `write_file`
+    (ADR 0035 PROPOSED — settle its 3 OPEN DESIGN POINTS first, then
+    implement).** D.3 (growable `Vec<T>`) is **COMPLETE** ((1/N)
+    `vec_new`/`push`/`len`+growth, (2/N) `v[i]`/`pop`/the bridge/`String`;
+    ADR 0034 ACCEPTED; `8430b0a`/`f16dc0c`; 1334 tests). **ADR 0035 is now
+    WRITTEN (PROPOSED)** — the D.4 design. Load-bearing call: **file I/O =
+    runtime builtins (like `print`), NOT the algebraic-effect/handler
+    machinery** (ADR 0020 effects are *resumable user computations*; OS I/O
+    is irreversible side effects, and the effect-check forbids an effectful
+    `main` + has no runtime handler — so an `Io` effect would force a
+    `handle` whose arm still calls a syscall builtin). This **amends
+    ADR 0031 D4's "effects + handlers" framing**. **Settle the 3 OPEN DESIGN
+    POINTS (ADR 0035 tail) before (1/N):** (1) effects-vs-builtins (proposed:
+    builtins — confirm); (2) error model (proposed: panic-on-failure, since a
+    recoverable `Result` wants D.1b generic enums; confirm); (3) MVP surface
+    (proposed: `read_file([u8])->[u8]` + `write_file([u8],[u8])->i64`, with
+    `print_bytes` in (2/N); confirm whether `read_stdin` belongs). **(1/N)
+    plan:** `read_file` + `write_file` as runtime builtins (the `print` /
+    `str_eq` template: builtin sig in types, `FnId` register in resolve —
+    another FnId-shift — dispatch in `lower_call`, new `sentinel_read_file` /
+    `sentinel_write_file` libc wrappers joining `abi-v1` §5 + the symbol-set
+    test) + a write-then-read-back round-trip phase-go `c5d4_file_io` (a
+    temp path under `target/`, leak-free via `leaks --atExit`). **(2/N)
+    closes:** `print_bytes` (stdout) + ADR flip. Read ADR 0035 (esp. the
+    OPEN DESIGN POINTS + D2/D5) + ADR 0033 (the `str_eq` builtin + runtime-
+    symbol precedent — the closest template) first.
 
     CARRIED-FORWARD DEBT (not blocking D.3): **D.1 A1 — recursive-enum
     payload drop is box-free only** (leak-free for the standard
@@ -1979,6 +1991,12 @@ For pasting into a fresh chat to bootstrap context:
     Amendments A1–A5 (1/N) + B1–B3 (2/N) in the ADR. Builtins FnId 0..=10.
     DEFERRED (D8): `Map`, droppable-element `Vec` drop, generic-fn `Vec`,
     `with_capacity`/`insert`/slicing/iterators, `secret Vec`, broker-backing).
+    0035 **PROPOSED** (D.4 file I/O kickoff — `read_file`/`write_file`/
+    `print_bytes` as runtime builtins like `print`, NOT algebraic effects
+    (D2 amends ADR 0031 D4's "effects + handlers"); panic-on-failure error
+    model (D5); paths + content are `[u8]`; new `sentinel_*` libc wrappers
+    join abi-v1. 2-sub-phase split; 3 OPEN DESIGN POINTS to settle before
+    (1/N); flips as D.4 lands).
     Optional C4 follow-ons (none blocking): work-stealing scheduler
     (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
     (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).
