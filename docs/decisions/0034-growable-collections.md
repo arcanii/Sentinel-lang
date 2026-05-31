@@ -1,14 +1,16 @@
 # ADR 0034: Phase D.3 — growable collections (`Vec<T>`; `String` = `Vec<u8>`)
 
-Status: PROPOSED (D.3 **(1/N) landed** — `Type::Vec` + `vec_new`/`push`/`len`
-end to end; see Amendments). The third Phase D sub-phase ADR under ADR 0031
-(Phase D kickoff) D4 item 3. After sum types (D.1 / ADR 0032) and strings + a
-byte type (D.2 / ADR 0033), **growable collections** are next: a lexer
-accumulates an identifier/number byte-by-byte and a parser accumulates a list of
-tokens / AST nodes, neither of which the fixed-size `[T]` array can express (no
-`push`, no growth). Stays PROPOSED until D.3 (3/N) closes, then flips to
-ACCEPTED-WITH-AMENDMENTS; sub-phase deviations are recorded under Amendments as
-they land.
+Status: **ACCEPTED-WITH-AMENDMENTS** — the growable-`Vec<T>` MVP is complete
+(D.3 (1/N) `Type::Vec` + `vec_new`/`push`/`len`; D.3 (2/N) `v[i]` + `pop` + the
+`Vec<u8>`→`[u8]` bridge + `String` = `Vec<u8>`), compiling + running end to end,
+leak-free. The third Phase D sub-phase ADR under ADR 0031 (Phase D kickoff) D4
+item 3. After sum types (D.1 / ADR 0032) and strings + a byte type (D.2 / ADR
+0033), **growable collections** landed: a lexer accumulates an identifier/number
+byte-by-byte and a parser accumulates a list of tokens / AST nodes, neither of
+which the fixed-size `[T]` array can express (no `push`, no growth). Deviations
+from this ADR's letter are recorded under Amendments; the out-of-scope items
+(D8 — a `Map`, droppable-element `Vec` drop, `Vec`-in-generic-fns, etc.) remain
+future work.
 
 Date: 2026-05-31
 Related:
@@ -332,6 +334,43 @@ Deferred to (2/N): `v[i]` element read (the `Index` node carries `ArrayElem` and
 `lower_index` hard-codes the field-1 array data pointer — real typed-tree +
 codegen work, not a trivial reuse), `pop`, the `Vec<u8>`→`[u8]` bridge, and the
 `String` alias (A1). Deferred to (3/N): the `c5d3` phase-go close + this flip.
+
+### D.3 (2/N) — `v[i]` + `pop` + the bridge + `String` (landed, MVP complete)
+
+This sub-phase folded in the thin (3/N) "close" (the comprehensive phase-go + the
+ADR flip), since `v[i]` + `pop` + the bridge + `String` exhaust the D.3 MVP
+surface (everything else is D8-deferred) and the `abi-v1` `Vec` entry already
+landed in (1/N). `tests/pass/c5d3_collections.sentinel` is now the comprehensive
+phase-go (a `Vec<i64>` push/index/pop/len + escape, and a `String` "let" built /
+indexed / bridged / `str_eq`'d), exit 55, **0 leaks** under `leaks --atExit`.
+
+- **B1 — `v[i]` reuses the `Index` node (no new typed variant).** D5 lists `v[i]`
+  as reuse; the lighter realisation chosen: since `VecElem` and `ArrayElem` are
+  the identical flat subset, a `Vec` index demotes its element to an `ArrayElem`
+  for the existing `TypedExprKind::Index`, and `lower_index` picks the data
+  pointer field from the (secret-stripped) target type — **field 2** for a `Vec`
+  vs **field 1** for an array. No `VecIndex` node, so no typed-tree cascade
+  (mir / hir / borrow-check / substitute all unchanged). `len` (field 0) and the
+  C1.6 bounds-check + OOB trap are reused verbatim.
+- **B2 — `pop` / `vec_to_array` are new builtins via the uniform path.** Both
+  generic over `T`; `pop<T>(&mut Vec<T>) -> T` (its `&mut Vec<T>` an interned
+  mutable Ref like `push`'s) and `vec_to_array<T>(Vec<T>) -> [T]` flow the same
+  uniform generic-call inference as `vec_new`/`push` (the `(Vec,Vec)` /
+  `(Ref,Ref)` `unify_one` arms). `pop` decrements `len` (the buffer is retained,
+  not shrunk) and traps on empty via `sentinel_panic_oob` (idx −1, len 0).
+  `vec_to_array` is **non-consuming** (borrows the Vec per the ADR 0033 A3 rule)
+  and `memcpy`s the live `len * sizeof(T)` bytes into a fresh `sentinel_alloc`'d
+  `[T]`, so the Vec and the array own independent buffers (both freed at scope
+  exit). The bridge keeps `str_eq`'s `[u8]`/`[u8]` surface unchanged (vs.
+  overloading `str_eq` on `Vec<u8>`).
+- **B3 — `String` = `Vec<u8>` (Amendment A1 resolved).** The bare type name
+  `String` resolves to `Type::Vec(VecElem::U8)` in `resolve_type_expr`'s Ident
+  arm. A string *literal* is still a `[u8]` (so `let s: String = "hi"` is a
+  Mismatch); building a `String` is `vec_new` + `push` (a `[u8]` -> `Vec<u8>`
+  direction is future work). The `vec_to_array` bridge closes the loop the other
+  way (a built `String` -> `[u8]` for keyword comparison).
+- **FnId base.** `pop` / `vec_to_array` are builtins FnId 9 / 10, so user fns now
+  start at FnId 11 (main 9 -> 11); the hardcoded-FnId test sites shifted again.
 
 ## Revisit
 

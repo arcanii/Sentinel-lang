@@ -14,9 +14,30 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D.3 — growable collections (`Vec<T>`) — (1/N) COMPLETE
-(ADR 0034 PROPOSED; (1/N) landed).** Post-1.0, **Phase D (self-hosting) is
-underway** (ADR 0031 — a language/stdlib build-out). After D.1 (sum types +
+Last updated: **Phase D.3 — growable collections (`Vec<T>`) — MVP COMPLETE
+(1/N + 2/N; ADR 0034 → ACCEPTED-WITH-AMENDMENTS).** Post-1.0, **Phase D
+(self-hosting) is underway** (ADR 0031 — a language/stdlib build-out). The third
+prerequisite — **growable collections** — now compiles + runs end to end,
+leak-free. A `Vec<T>` IS `[T]` + a capacity field + mutation
+(`Type::Vec(VecElem)` mirrors `Type::Array(ArrayElem)`; `{ i64 len, i64 cap, ptr
+data }`, data is field 2). **(1/N)** landed `vec_new`/`push`/`len` + the
+`sentinel_realloc` growth runtime + `&mut Vec` mutable-borrow + primitive-element
+drop. **(2/N)** lands `v[i]` (reusing the C1.6 bounds-checked Index — `lower_index`
+keys the data field on the target type), `pop<T>(&mut Vec<T>) -> T` (decrement
+`len`, trap on empty), the **`Vec<u8>`→`[u8]` bridge** `vec_to_array<T>(Vec<T>) ->
+[T]` (non-consuming `memcpy` so a built string can be `str_eq`'d against a
+keyword), and **`String` = `Vec<u8>`** (Amendment A1). `vec_new`/`push`/`pop`/
+`vec_to_array` all type through the uniform generic-call path; builtins are now
+FnId 0..=10 (main → 11). Phase-go `tests/pass/c5d3_collections.sentinel`
+(`Vec<i64>` push/index/pop/len + escape; `String` "let" built/indexed/bridged/
+`str_eq`'d) runs at **exit 55, 0 leaks** (`leaks --atExit`). DEFERRED (ADR 0034
+D8): a `Map`/`HashMap`, droppable-element `Vec` drop (`Vec<Struct>`/`Vec<[u8]>`),
+`Vec`-in-generic-fns, `with_capacity`/`insert`/`remove`/slicing/iterators/`for`,
+`secret Vec`, broker-backing. **1334 tests, four-check green. Phase D.3 MVP
+closes.**
+
+Pre-2/N context: **D.3 (1/N)** landed `Type::Vec(VecElem)` + the cascade +
+`vec_new`/`push`/`len` end to end (the growable Vec foundation). After D.1 (sum types +
 `match`) and D.2 (strings + `u8`), the third prerequisite — **growable
 collections** (a lexer's token buffer + a parser's node lists need growth the
 fixed `[T]` array can't express) — opens. **D.3 (1/N)** lands a growable,

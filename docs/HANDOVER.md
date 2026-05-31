@@ -130,6 +130,8 @@ C1.3. See STATE.md Section C.
 **ADR 0034 PROPOSED — Phase D.3 kickoff: growable collections (`Vec<T>`; `String` = `Vec<u8>`) — docs-only.** Per ADR 0031 D4 item 3 — a lexer accumulates an identifier byte-by-byte and a parser accumulates token/node lists, neither expressible with the fixed `[T]` array (no `push`/growth). ADR 0034 designs it end-to-end (10 D-decisions): the load-bearing lever is **a `Vec<T>` is `[T]` plus capacity + mutation** — `Type::Vec(VecElem)` mirrors `Type::Array(ArrayElem)` exactly (the same flat element subset `I64`/`I32`/`Bool`/`U8`/`Struct`, an `abi-v1` `{ i64 len, i64 cap, ptr data }` layout, element-generic builtins that recover `T` from the typed arg like array-index/`len` already do), so it **reuses the array index/bounds-check/move/drop machinery with NO new monomorphisation and NO lexer/parser change** (`Vec<u8>` already parses as a `Generic { name: "Vec", args: [u8] }` TypeExpr; the types layer recognises the name). **`String` = `Vec<u8>`** (a growable byte buffer — the 0033 "a string is its bytes" lever; not a separate nominal type). New pieces: a **capacity field + growth** (`push` reallocs `max(1, cap*2)` on overflow — libc `realloc`, NOT the broker bump arena which can't realloc); **`push(&mut v, x)`** — the **first heap-mutation primitive**, reusing `&mut T` + the C2.2 shared-XOR-mutable rule; `vec_new()` (element type inferred from the binding annotation, like `null`'s `?T`); `len(v)` (extend the existing builtin to `Vec`); `v[i]` (reuse the C1.6 bounds-checked `Index`). `Vec<T>` is a **builtin generic** (like `[T]`), NOT a `class Vec<T>` (generic classes deferred, ADR 0022 D1). Drop frees the buffer; **primitive-element `Vec` (`Vec<u8>`/`Vec<i64>`) is leak-free**, droppable-element `Vec` (`Vec<Struct>`/`Vec<[u8]>` recursive element drop) is **deferred** (the enum-A1-shaped follow-on). One new runtime symbol (`sentinel_vec_grow`/`realloc`). **3-sub-phase split (D9):** (1/N) `Type::Vec` + the cascade + `vec_new`/`push`/`len` typed + codegen + growth runtime + `&mut Vec` borrow + primitive-element drop (end to end — a growable `Vec<u8>`/`Vec<i64>`); (2/N) `v[i]` + `pop` + the `Vec<u8>`→`[u8]` bridge (`str_eq` a built string against a keyword); (3/N) close — `c5d3_collections` phase-go (leak-free via `leaks --atExit`) + `abi-v1` `Vec` entry + ADR flip. Out of scope (D8): a `Map`/`HashMap` (its own ADR), droppable-element `Vec` drop, `Vec`-in-generic-fns (`VecElem::TypeParam`), `with_capacity`/`insert`/`remove`/slicing/iterators/`for`, a `?T`-returning `pop`, `secret Vec`, broker-backing. Next: **D.3 (1/N)** — `Type::Vec` + the cascade + `vec_new`/`push`/`len` end to end.
 
 **Phase D.3 (1/N) — growable `Vec<T>`: `Type::Vec` + `vec_new`/`push`/`len` end to end — complete (`a64883c`). ADR 0034 stays PROPOSED (3-sub-phase split; (1/N) Amendments recorded).** Per ADR 0034 D9 (1/N): a growable, owned, mutable `Vec<T>` — `[T]` plus a capacity field + mutation. **types:** `Type::Vec(VecElem)` (the flat element subset mirroring `ArrayElem`) + the full exhaustive-`Type`-match cascade (`substitute` / `try_substitute` / `contains_type_param` / `unify_one` — the last gets an explicit `(Vec,Vec)` arm so generic inference binds the element — plus `Display`, the `to_nullable_inner` / `to_array_elem` None groups, and `is_vec` / `to_vec_elem`); `resolve_type_expr` recognises `Vec<T>` as a builtin generic (flat element via `to_vec_elem`, else the new `VecElementNotSupported`); `vec_new<T>() -> Vec<T>` (element pinned from the binding / return annotation — the body-tail expected-type seeding extended to `Vec`) and `push<T>(&mut Vec<T>, T) -> i64` type through the **uniform generic-call path** (no special-casing), while `len` gets a contained `check_call` overload over `[T]` + `Vec<T>` (the `[T]` error path preserved exactly). **codegen:** `Vec` → `{ i64 len, i64 cap, ptr data }` (data is **field 2**); `lower_vec_new` builds `{0,0,null}`; `lower_push` loads the `&mut Vec`, grows via `sentinel_realloc` to `max(1, cap*2)*sizeof(T)` when `len==cap` (the grow block stores cap+data back, the continuation re-loads — no PHI), writes `data[len]=x`, bumps `len`; drop frees field 2 (null-safe); `len` reuses the field-0 extract. **runtime:** one new symbol `sentinel_realloc` (libc realloc; `realloc(null,n)==malloc` serves the first push). **borrow-check:** a `&mut Vec` builtin arg registers a **mutable borrow** (extends the ADR 0033 A3 runtime-builtin-arg rule to references), so `push` participates in shared-XOR-mutable and a non-`mut` `Vec` push is rejected (`BorrowMutOfImmutable`); `Vec` is **Move**. Builtins shift the FnId base (vec_new=7, push=8; main 7→9 — fixed the hardcoded-FnId test sites in resolve / effect-check / borrow-check / types). **abi-v1:** §2 `Vec` layout (`{i64,i64,ptr}`, 24/8, data@16) + §4 `vec_` mangling + §5 `sentinel_realloc` (now **20** symbols); `abi_v1_type_layouts_via_datalayout` + `abi_v1_runtime_symbol_set` pin it. **Amendments (ADR 0034):** A1 `String`=`Vec<u8>` deferred to (2/N) with the bridge; A2 return-type pushdown extended to `Vec`; A3 `len` overload special-case; A4 `sentinel_realloc` (not `sentinel_vec_grow`); A5 `VecElementNotSupported`; arena routing unchanged (a `Vec` init is a `Call`, not an `ArrayLit`, so `is_primitive_array_lit` already excludes it). **Verified** (exit-code + `leaks --atExit`): `tests/pass/c5d3_collections` builds a multi-growth `Vec<i64>` (6 pushes), a char-pushed `Vec<u8>`, and a `Vec` moved out of a helper (the escape path) → **exit 67, 0 leaks**; +13 tests (**1324 total**), four-check green. DEFERRED: (2/N) `v[i]` (the `Index` node carries `ArrayElem` + hard-codes the field-1 data ptr — real typed-tree + codegen work) + `pop` + the `Vec<u8>`→`[u8]` bridge + the `String` alias; (3/N) the richer phase-go + the ADR flip; (D8) droppable-element `Vec` drop. **Phase D.3 (1/N) lands.** Next: **D.3 (2/N)**.
+
+**Phase D.3 (2/N) — `Vec` `v[i]` / `pop` / the `Vec<u8>`->`[u8]` bridge / `String` — the growable-`Vec` MVP is COMPLETE (`8430b0a`). ADR 0034 → ACCEPTED-WITH-AMENDMENTS.** Folded in the thin (3/N) close (comprehensive phase-go + ADR flip), since these four pieces exhaust the D.3 MVP (the rest is D8-deferred) and the abi-v1 Vec entry already landed in (1/N). **`v[i]`:** reuses the C1.6 bounds-checked `Index` with NO new typed node — the type checker accepts a `Vec` target (its `VecElem` demotes to the structurally identical `ArrayElem` for the node), and `lower_index` reads the data pointer from **field 2** (`Vec`) vs **field 1** (array), keyed on the secret-stripped target type; `len` (field 0) + the OOB trap are reused verbatim. **`pop<T>(&mut Vec<T>) -> T`** and **`vec_to_array<T>(Vec<T>) -> [T]`** (the bridge) are new builtins (FnId 9 / 10; main 9→11) flowing the uniform generic-call path like `push`: `pop` decrements `len` (buffer retained) and traps on empty; `vec_to_array` is non-consuming (`memcpy`s the live `len*sizeof(T)` bytes into a fresh `sentinel_alloc`'d `[T]`, so the Vec + array own independent buffers — both freed), keeping `str_eq`'s `[u8]` surface unchanged. **`String` = `Vec<u8>`** (Amendment A1 resolved): the bare name resolves to `Type::Vec(VecElem::U8)` in `resolve_type_expr`; a string *literal* is still a `[u8]` (so `let s: String = "hi"` is a Mismatch — build via `vec_new`+`push`; the bridge closes the loop the other way). **Amendments B1** (`v[i]` reuses Index, no `VecIndex` node — no typed-tree cascade), **B2** (`pop`/`vec_to_array` uniform-path builtins), **B3** (`String` alias). **Verified** (exit-code + `leaks --atExit`): `v[i]` reads + OOB trap, `pop` + empty-pop trap (exit 134), the bridge (positive + negative `str_eq`, non-consuming, empty), `String` build; the comprehensive `c5d3_collections` (`Vec<i64>` push/index/pop/len + escape; `String` "let" built/indexed/bridged/`str_eq`'d) runs at **exit 55, 0 leaks**. +9 type-layer tests (**1334 total**), four-check green. **Phase D.3 MVP closes; ADR 0034 ACCEPTED-WITH-AMENDMENTS.** Next: **D.4 — file I/O (ADR 0031 D4 item 4; ADR 0035 to be written).**
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1836,18 +1838,18 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **D.3 (1/N) docs**
-    commit, atop `a64883c` (feat(d.3 1/N): growable Vec<T> — vec_new/push/
-    len end to end), which sits atop ADR 0034 PROPOSED (`86b7f9c`) + the
-    D.2 (4/N) feat+docs (`891ec98`/`3e0c0de`). Clean tree; **1324 tests**;
+    Local HEAD: verify with `git log -1` — expect the **D.3 (2/N) docs**
+    commit, atop `8430b0a` (feat(d.3 2/N): Vec v[i]/pop/the bridge/String
+    — MVP complete), the `d1cb1b7` immutable-diagnostic fix, and the D.3
+    (1/N) feat+docs (`a64883c`/`cab32f1`). Clean tree; **1334 tests**;
     four-check green via `cargo nextest run --workspace` + `cargo test --doc
     --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
-    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0034**
-    (THE D.3 task ADR — growable collections; **(1/N) landed**, read its
-    Amendments + the 3-sub-phase split) + ADR 0033/0032 (the D.2/D.1
-    precedents — `Type::U8`/`Type::Enum` cascades, the FnId-shift discipline)
-    + ADR 0031 (why Phase D opens with a language build-out + the roadmap)
+    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0031**
+    (the Phase D roadmap — what's next after D.3) + ADR 0034
+    (the now-complete D.3 ADR — ACCEPTED-WITH-AMENDMENTS; its Amendments
+    A1–A5 + B1–B3 capture the load-bearing Vec decisions) + ADR 0032/0033
+    (the D.1/D.2 precedents — the cascade + FnId-shift discipline)
     + auto-memory sentinel_d3_collections_surface.
 
     PHASE D = self-hosting (post-1.0; ADR 0031). Opens with a
@@ -1901,38 +1903,25 @@ For pasting into a fresh chat to bootstrap context:
       VecElementNotSupported). 1324 tests. See
       [[sentinel_d3_collections_surface]].
 
-    RESUME AT: **Phase D.3 (2/N) — `v[i]` element read + `pop` + the
-    `Vec<u8>`->`[u8]` bridge + the `String` alias (ADR 0034 PROPOSED, (1/N)
-    landed).** (1/N) shipped a growable `Vec<T>` end to end — `Type::Vec` +
-    the cascade, `vec_new`/`push`/`len`, the `sentinel_realloc` growth
-    runtime, `&mut Vec` mutable-borrow, primitive-element drop; `c5d3` at
-    exit 67, 0 leaks (`a64883c`). **(2/N) plan (ADR 0034 D9, the medium-risk
-    row):**
-      - **`v[i]` element read** — reuse the C1.6 `Index` bounds-checked
-        GEP+load, but NOT a trivial reuse: the typed `Index` node carries
-        `elem_ty: ArrayElem` and `lower_index` hard-codes the data pointer at
-        struct **field 1** (array), whereas a `Vec`'s data is **field 2**. So
-        `v[i]` needs (a) the type checker to type a `Vec` index (recovering a
-        `VecElem`), (b) the typed `Index` node to carry a Vec element (or a
-        new `VecIndex` node), and (c) `lower_index` to choose field 1 (array)
-        vs field 2 (Vec) from the target type.
-      - **`pop(&mut v) -> T`** — remove + return the last element (panic on
-        empty, like an OOB index; a `?T`-returning `pop` is deferred). A
-        second `&mut Vec` builtin; the borrow rule is already in place.
-      - **`Vec<u8>`->`[u8]` bridge** — a `vec_to_array(v) -> [u8]` copying the
-        live `len` bytes into a fresh `[u8]` so a built string can be
-        `str_eq`'d against a keyword `[u8]` (ADR 0034 D5); or extend `str_eq`
-        to accept `Vec<u8>` (the bridge keeps `str_eq`'s surface unchanged).
-      - **`String` = `Vec<u8>` alias** (Amendment A1) — recognise the bare
-        name `String` -> `Type::Vec(VecElem::U8)` in `resolve_type_expr`'s
-        Ident arm now that the bridge makes it ergonomic; settle the
-        `let s: String = "hi"` story (needs a `[u8]`->`Vec<u8>` direction, or
-        `String` stays a `vec_new`+`push` build).
-    Then **(3/N)** closes: a richer `c5d3` phase-go (build a `Vec<u8>`, read
-    it back with `v[i]`, bridge + `str_eq` a keyword) + the ADR 0034 flip to
-    ACCEPTED-WITH-AMENDMENTS. Read ADR 0034 (esp. its Amendments) + the
-    [[sentinel_d3_collections_surface]] memory first. `v[i]` is mostly the
-    field-offset delta; do it first as it makes the (2/N) phase-go richer.
+    RESUME AT: **Phase D.4 — file I/O via a minimal stdlib (ADR 0031 D4
+    item 4; write ADR 0035 PROPOSED first).** D.3 (growable `Vec<T>`) is
+    **COMPLETE** — (1/N) `vec_new`/`push`/`len` + the `sentinel_realloc`
+    growth runtime + `&mut Vec` borrow + drop (`a64883c`); (2/N) `v[i]` /
+    `pop` / the `Vec<u8>`->`[u8]` bridge (`vec_to_array`) / `String` =
+    `Vec<u8>` + the comprehensive `c5d3` phase-go (`8430b0a`); ADR 0034 →
+    ACCEPTED-WITH-AMENDMENTS, `c5d3_collections` exit 55 / 0 leaks; 1334
+    tests. (Builtins are now FnId 0..=10: …push, pop, vec_to_array;
+    user fns start at 11.) Per ADR 0031 D4 the next prerequisite is **file
+    I/O**: read source / write artifacts, modelled as **effects + handlers
+    over real OS syscalls in the runtime** — so it leans on the C3.x effect
+    machinery (`effect` / `handle` / `perform`, ADR 0020) + a new
+    `sentinel_*` syscall-wrapper symbol set joining `abi-v1`, rather than
+    the `Type`-cascade work of D.1–D.3. The **ADR 0035 design call** (the
+    effect shape for `read_file` / `write`, the error model, the stdlib
+    surface) is the first task — settle it (ADR-first) before code. After
+    I/O: modules (D4 #5), then loops (D4 #6 — the iteration-heavy passes
+    want them), then the self-host port (D5). Read ADR 0031 (D4/D5 roadmap)
+    + ADR 0020 (effects/handlers — the I/O substrate) first.
 
     CARRIED-FORWARD DEBT (not blocking D.3): **D.1 A1 — recursive-enum
     payload drop is box-free only** (leak-free for the standard
@@ -1978,15 +1967,18 @@ For pasting into a fresh chat to bootstrap context:
     string heap copy via direct byte-stores not a global (`CodegenCtx` lacks
     `&Module`). A2: inline string-literal args to borrowing builtins inherit
     the pre-existing temporary-drop gap; bound vars are leak-free. A3: `str_eq`
-    args borrowed not consumed). 0034 **PROPOSED, D.3 (1/N) landed** (growable
-    collections: `Vec<T>` is `[T]` + capacity + mutation, `Type::Vec(VecElem)`
-    mirrors `Type::Array(ArrayElem)`, `String` = `Vec<u8>`; no new generics /
-    no lexer-parser change; `push(&mut v, x)` is the first heap-mutation
-    primitive. **(1/N)** shipped `Type::Vec` + cascade + `vec_new`/`push`/`len`
-    + `sentinel_realloc` growth + `&mut Vec` borrow + primitive-element drop,
-    end to end (`a64883c`, c5d3 exit 67 / 0 leaks); Amendments A1–A5 recorded
-    in the ADR. Stays PROPOSED until (3/N) closes — (2/N) `v[i]`/`pop`/the
-    bridge/the `String` alias, (3/N) the phase-go close + flip).
+    args borrowed not consumed). 0034 **ACCEPTED-WITH-AMENDMENTS** (D.3
+    growable collections — the MVP is complete: `Vec<T>` is `[T]` + capacity
+    + mutation, `Type::Vec(VecElem)` mirrors `Type::Array(ArrayElem)`,
+    `String` = `Vec<u8>`; no new generics / no lexer-parser change.
+    **(1/N)** `Type::Vec` + cascade + `vec_new`/`push`/`len` +
+    `sentinel_realloc` growth + `&mut Vec` borrow + drop (`a64883c`);
+    **(2/N)** `v[i]` (reuses Index, field-2 data ptr) + `pop` +
+    `vec_to_array` (the `Vec<u8>`->`[u8]` bridge) + `String` + the
+    comprehensive `c5d3` phase-go (`8430b0a`, exit 55 / 0 leaks).
+    Amendments A1–A5 (1/N) + B1–B3 (2/N) in the ADR. Builtins FnId 0..=10.
+    DEFERRED (D8): `Map`, droppable-element `Vec` drop, generic-fn `Vec`,
+    `with_capacity`/`insert`/slicing/iterators, `secret Vec`, broker-backing).
     Optional C4 follow-ons (none blocking): work-stealing scheduler
     (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
     (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).
