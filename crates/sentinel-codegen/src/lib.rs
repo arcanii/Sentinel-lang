@@ -968,6 +968,7 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             drop_plan,
             arena_routed,
             array_route_active: false,
+            loop_depth: 0,
         };
         for fn_def in &program.fns {
             // C1.7.4a / ADR 0016 D7: skip generic fn bodies; their
@@ -1289,6 +1290,14 @@ struct CodegenCtx<'ctx, 'plan> {
     /// `lower_array_lit` before it lowers the elements, so a nested array
     /// literal in an element does not inherit the routing.
     array_route_active: bool,
+    /// Phase D.5 / ADR 0036 D4: how many `while` bodies enclose the
+    /// current lowering point. When > 0, per-binding allocas are placed
+    /// in the function **entry block** (executed once) rather than inline
+    /// in the loop body (where they would run — and grow the stack — every
+    /// iteration, overflowing at large iteration counts). Bumped around
+    /// `lower_block(while-body)`. Zero for non-loop code, so that codegen
+    /// is byte-identical to pre-D.5 (the c51 repro bar).
+    loop_depth: u32,
 }
 
 /// Map a Sentinel [`Type`] to its LLVM `BasicTypeEnum`. C1.5
@@ -1330,6 +1339,11 @@ fn collect_spawn_targets_block(block: &TypedBlock, acc: &mut Vec<FnId>) {
             TypedStmtKind::Assign { target, value } => {
                 collect_spawn_targets_expr(target, acc);
                 collect_spawn_targets_expr(value, acc);
+            }
+            // Phase D.5 / ADR 0036: recurse into the loop's cond + body.
+            TypedStmtKind::While { cond, body } => {
+                collect_spawn_targets_expr(cond, acc);
+                collect_spawn_targets_block(body, acc);
             }
             TypedStmtKind::Expr(e) => collect_spawn_targets_expr(e, acc),
         }
@@ -1758,6 +1772,16 @@ fn walk_block_for_mono(
                 );
                 walk_expr_for_mono(
                     value, subst, program, instances, refs, visited, order, pending,
+                );
+            }
+            // Phase D.5 / ADR 0036: walk the loop's cond + body so any
+            // generic call inside is monomorphised.
+            TypedStmtKind::While { cond, body } => {
+                walk_expr_for_mono(
+                    cond, subst, program, instances, refs, visited, order, pending,
+                );
+                walk_block_for_mono(
+                    body, subst, program, instances, refs, visited, order, pending,
                 );
             }
             TypedStmtKind::Expr(e) => walk_expr_for_mono(
@@ -3333,6 +3357,37 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(ptr)
     }
 
+    /// Phase D.5 / ADR 0036 D4: allocate a stack slot for a binding /
+    /// result value. Inside a `while` body (`loop_depth > 0`) the alloca
+    /// is placed at the TOP of the function's entry block — executed once,
+    /// the slot reused each iteration — so the stack does not grow per
+    /// iteration (a loop body's inline alloca would, overflowing at large
+    /// counts). Outside any loop it is built inline, byte-identical to
+    /// pre-D.5 codegen.
+    fn binding_alloca(
+        &self,
+        llvm_ty: BasicTypeEnum<'ctx>,
+        name: &str,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        if self.loop_depth == 0 {
+            return self
+                .builder
+                .build_alloca(llvm_ty, name)
+                .map_err(|e| CodegenError::Builder(e.to_string()));
+        }
+        let current_fn = self.current_fn.expect("current_fn set");
+        let entry = current_fn
+            .get_first_basic_block()
+            .expect("fn has an entry block");
+        let tmp = self.context.create_builder();
+        match entry.get_first_instruction() {
+            Some(first) => tmp.position_before(&first),
+            None => tmp.position_at_end(entry),
+        }
+        tmp.build_alloca(llvm_ty, name)
+            .map_err(|e| CodegenError::Builder(e.to_string()))
+    }
+
     fn lower_stmt(
         &mut self,
         stmt: &TypedStmt,
@@ -3350,10 +3405,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 let v = self.lower_expr(value, program)?;
                 self.array_route_active = false;
                 let llvm_ty = self.llvm_basic_type(*ty);
-                let alloca = self
-                    .builder
-                    .build_alloca(llvm_ty, name)
-                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                // D.5 / ADR 0036 D4: hoist to the entry block inside loops.
+                let alloca = self.binding_alloca(llvm_ty, name)?;
                 self.builder
                     .build_store(alloca, v)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
@@ -3373,6 +3426,48 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 self.builder
                     .build_store(ptr, v)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            }
+            TypedStmtKind::While { cond, body } => {
+                // Phase D.5 / ADR 0036 D4: the first backward CFG branch.
+                // Three blocks: loop_cond evaluates the condition and
+                // branches to loop_body (true) or loop_after (false);
+                // loop_body lowers the body as a scoped block — so its
+                // bindings drop PER ITERATION (ADR 0036 D5, the leak-free
+                // property) — then branches back to loop_cond (the
+                // back-edge). All prior control flow merged forward.
+                debug_assert_eq!(cond.ty, Type::Bool);
+                let current_fn = self.current_fn.expect("current_fn set by compile_fn");
+                let cond_bb = self.context.append_basic_block(current_fn, "loop_cond");
+                let body_bb = self.context.append_basic_block(current_fn, "loop_body");
+                let after_bb = self.context.append_basic_block(current_fn, "loop_after");
+
+                // Enter the loop: branch into the condition.
+                self.builder
+                    .build_unconditional_branch(cond_bb)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+                // Condition block.
+                self.builder.position_at_end(cond_bb);
+                let cond_i1 = self.lower_expr(cond, program)?.into_int_value();
+                self.builder
+                    .build_conditional_branch(cond_i1, body_bb, after_bb)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+                // Body block (its value is discarded; lower_block emits
+                // the per-iteration scope drops), then the back-edge.
+                // `loop_depth` makes body allocas hoist to the entry block
+                // (D4) so the stack does not grow per iteration.
+                self.builder.position_at_end(body_bb);
+                self.loop_depth += 1;
+                let body_result = self.lower_block(body, program);
+                self.loop_depth -= 1;
+                let _ = body_result?;
+                self.builder
+                    .build_unconditional_branch(cond_bb)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+                // Continue after the loop.
+                self.builder.position_at_end(after_bb);
             }
             TypedStmtKind::Expr(e) => {
                 let _ = self.lower_expr(e, program)?;
@@ -3807,10 +3902,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         // type (struct + primitives).
         let result_ty = then_branch.ty;
         let llvm_result_ty = self.llvm_basic_type(result_ty);
-        let result = self
-            .builder
-            .build_alloca(llvm_result_ty, "ifresult")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        // D.5 / ADR 0036 D4: hoist to the entry block inside loops.
+        let result = self.binding_alloca(llvm_result_ty, "ifresult")?;
 
         self.builder
             .build_conditional_branch(cond_i1, then_bb, else_bb)
@@ -3948,10 +4041,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         let current_fn = self.current_fn.expect("current_fn set");
         let i32_ty = self.context.i32_type();
         let llvm_result_ty = self.llvm_basic_type(result_ty);
-        let result = self
-            .builder
-            .build_alloca(llvm_result_ty, "matchresult")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        // D.5 / ADR 0036 D4: hoist to the entry block inside loops.
+        let result = self.binding_alloca(llvm_result_ty, "matchresult")?;
         let merge_bb = self.context.append_basic_block(current_fn, "matchmerge");
         let default_bb = self.context.append_basic_block(current_fn, "matchdefault");
 
@@ -6284,6 +6375,11 @@ fn stmt_performs(kind: &TypedStmtKind) -> bool {
         TypedStmtKind::Assign { target, value } => {
             expr_performs(target) || expr_performs(value)
         }
+        TypedStmtKind::While { cond, body } => {
+            expr_performs(cond)
+                || body.stmts.iter().any(|s| stmt_performs(&s.kind))
+                || expr_performs(&body.tail)
+        }
         TypedStmtKind::Expr(e) => expr_performs(e),
     }
 }
@@ -6681,6 +6777,13 @@ fn walk_collect_var_refs_stmt(kind: &TypedStmtKind, acc: &mut Vec<VarId>) {
             walk_collect_var_refs(target, acc);
             walk_collect_var_refs(value, acc);
         }
+        TypedStmtKind::While { cond, body } => {
+            walk_collect_var_refs(cond, acc);
+            for s in &body.stmts {
+                walk_collect_var_refs_stmt(&s.kind, acc);
+            }
+            walk_collect_var_refs(&body.tail, acc);
+        }
         TypedStmtKind::Expr(e) => walk_collect_var_refs(e, acc),
     }
 }
@@ -6775,6 +6878,15 @@ fn count_performs_stmt(kind: &TypedStmtKind) -> usize {
         TypedStmtKind::Let { value, .. } => count_performs(value),
         TypedStmtKind::Assign { target, value } => {
             count_performs(target) + count_performs(value)
+        }
+        TypedStmtKind::While { cond, body } => {
+            count_performs(cond)
+                + body
+                    .stmts
+                    .iter()
+                    .map(|s| count_performs_stmt(&s.kind))
+                    .sum::<usize>()
+                + count_performs(&body.tail)
         }
         TypedStmtKind::Expr(e) => count_performs(e),
     }
@@ -6876,6 +6988,9 @@ fn find_unique_perform_stmt(kind: &TypedStmtKind) -> Option<&TypedExpr> {
         TypedStmtKind::Assign { target, value } => {
             find_unique_perform(target).or_else(|| find_unique_perform(value))
         }
+        TypedStmtKind::While { cond, body } => find_unique_perform(cond)
+            .or_else(|| body.stmts.iter().find_map(|s| find_unique_perform_stmt(&s.kind)))
+            .or_else(|| find_unique_perform(&body.tail)),
         TypedStmtKind::Expr(e) => find_unique_perform(e),
     }
 }
@@ -7048,6 +7163,10 @@ fn substitute_perform_with_var_stmt(
         TypedStmtKind::Assign { target, value } => TypedStmtKind::Assign {
             target: substitute_perform_with_var(target, placeholder_id),
             value: substitute_perform_with_var(value, placeholder_id),
+        },
+        TypedStmtKind::While { cond, body } => TypedStmtKind::While {
+            cond: substitute_perform_with_var(cond, placeholder_id),
+            body: Box::new(substitute_block(body, placeholder_id)),
         },
         TypedStmtKind::Expr(e) => TypedStmtKind::Expr(substitute_perform_with_var(
             e,
@@ -7359,6 +7478,15 @@ fn collect_routed_block(
                 collect_routed_expr(value, moved, routed);
             }
             TypedStmtKind::Assign { value, .. } => collect_routed_expr(value, moved, routed),
+            // Phase D.5 / ADR 0036: do NOT arena-route bindings inside a
+            // loop body. They are allocated + freed PER ITERATION; routing
+            // them into a scope arena would risk accumulating one
+            // allocation per iteration before the bulk free. The
+            // conservative choice keeps the per-iteration libc free
+            // (emit_scope_drops) — the routed set stays a subset of the
+            // freed set, preserving the C5.4 routing-safety invariant.
+            // Recurse into the condition's nested exprs only.
+            TypedStmtKind::While { cond, .. } => collect_routed_expr(cond, moved, routed),
             TypedStmtKind::Expr(e) => collect_routed_expr(e, moved, routed),
         }
     }

@@ -1218,3 +1218,15 @@ fn pass_c5d4_file_io() {
     assert!(tmp.exists(), "c5d4 fixture should have written the temp file");
     let _ = std::fs::remove_file(tmp);
 }
+
+#[test]
+fn pass_c5d5_loops() {
+    // ADR 0036 D9/D10 (1/N) phase-go: the `while` loop end to end. A
+    // counter loop (sum 1..=10), a Vec built by pushing in a loop +
+    // len/index, and a body that allocates a [u8] each iteration (100x).
+    // `while` is a statement lowering to a backward CFG branch; the body
+    // drops per-iteration (ADR 0036 D5) — leak-free under `leaks --atExit`
+    // (verified separately) — and body allocas hoist to the entry block so
+    // the stack does not grow per pass. Exit = 55 + 5 + 4 + 3 = 67.
+    assert_eq!(run_exit("c5d5_loops.sentinel"), 67);
+}

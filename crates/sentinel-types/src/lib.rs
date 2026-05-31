@@ -1563,6 +1563,10 @@ impl TypedStmt {
                 target: target.substitute(subst, instances, refs),
                 value: value.substitute(subst, instances, refs),
             },
+            TypedStmtKind::While { cond, body } => TypedStmtKind::While {
+                cond: cond.substitute(subst, instances, refs),
+                body: Box::new(body.substitute(subst, instances, refs)),
+            },
             TypedStmtKind::Expr(e) => TypedStmtKind::Expr(e.substitute(subst, instances, refs)),
         };
         TypedStmt { kind, span: self.span.clone() }
@@ -2146,6 +2150,14 @@ pub enum TypedStmtKind {
     Assign {
         target: TypedExpr,
         value: TypedExpr,
+    },
+    /// Phase D.5 / ADR 0036 D3: `while <cond> { <body> }`. `cond` is
+    /// `bool`-typed (validated here); the body block type-checks with
+    /// its value discarded each iteration. The body's bindings drop
+    /// per-iteration at codegen (ADR 0036 D5).
+    While {
+        cond: TypedExpr,
+        body: Box<TypedBlock>,
     },
     Expr(TypedExpr),
 }
@@ -4380,6 +4392,16 @@ fn collect_init_assigned_in_stmt(
         TypedStmtKind::Let { value, .. } => {
             collect_init_assigned_in_expr(value, self_var_id, acc);
         }
+        TypedStmtKind::While { cond, body } => {
+            // Phase D.5 / ADR 0036: a `while` body may assign `self.f`
+            // (in a class init); recurse into the cond + body like the
+            // If/Block forms.
+            collect_init_assigned_in_expr(cond, self_var_id, acc);
+            for s in &body.stmts {
+                collect_init_assigned_in_stmt(s, self_var_id, acc);
+            }
+            collect_init_assigned_in_expr(&body.tail, self_var_id, acc);
+        }
         TypedStmtKind::Expr(e) => {
             collect_init_assigned_in_expr(e, self_var_id, acc);
         }
@@ -4891,6 +4913,67 @@ fn check_stmt(
             TypedStmtKind::Assign {
                 target: target_typed,
                 value: value_typed,
+            }
+        }
+        ResolvedStmtKind::While { cond, body } => {
+            // Phase D.5 / ADR 0036 D7: the condition must be `bool`
+            // (mirrors `if`). A `secret bool` condition leaks via timing
+            // (ADR 0019 D7 SecretBranch) — reject before the generic
+            // Mismatch. The body block type-checks with no expected type
+            // (its value is discarded each iteration, D3).
+            let cond_t = check_expr(
+                cond,
+                None,
+                env,
+                signatures,
+                structs,
+                class_decls,
+                enums,
+                instances,
+                refs,
+                secrets,
+                struct_type_param_counts,
+                effect_decls,
+                trait_decls,
+                impl_decls,
+                konts,
+                tasks,
+            )?;
+            if let Type::Secret(sid) = cond_t.ty {
+                if secrets[sid.0 as usize].inner == Type::Bool {
+                    return Err(TypeError::SecretBranch {
+                        span: to_source_span(&cond.span),
+                    });
+                }
+            }
+            if cond_t.ty != Type::Bool {
+                return Err(TypeError::Mismatch {
+                    expected: Type::Bool,
+                    got: cond_t.ty,
+                    span: to_source_span(&cond.span),
+                });
+            }
+            let body_t = check_block(
+                body,
+                None,
+                env,
+                signatures,
+                structs,
+                class_decls,
+                enums,
+                instances,
+                refs,
+                secrets,
+                struct_type_param_counts,
+                effect_decls,
+                trait_decls,
+                impl_decls,
+                konts,
+                tasks,
+            )?;
+            TypedStmtKind::While {
+                cond: cond_t,
+                body: Box::new(body_t),
             }
         }
         ResolvedStmtKind::Expr(e) => TypedStmtKind::Expr(check_expr(
@@ -10613,5 +10696,33 @@ fn main() -> i64 {
         // The arg is concrete `[u8]` — an i64 is a CallArgMismatch.
         let err = check_err("fn main() -> i64 { print_bytes(5) }");
         assert!(matches!(err, TypeError::CallArgMismatch { .. }), "got {err:?}");
+    }
+
+    // ----- D.5 / ADR 0036: loops (`while`) -----
+
+    #[test]
+    fn while_loop_typechecks() {
+        // ADR 0036 D7: a `while` with a bool condition + a mutated
+        // loop-carried counter type-checks (the body's value is discarded).
+        let _ = check_ok(
+            "fn main() -> i64 { let mut i: i64 = 0; while i < 5 { i = i + 1; } i }",
+        );
+    }
+
+    #[test]
+    fn while_statement_only_body_typechecks() {
+        // ADR 0036 D3: a statement-only `while` body (no tail) is valid
+        // (the parser synthesises a discarded unit tail).
+        let _ = check_ok("fn main() -> i64 { let mut i: i64 = 0; while i < 1 { i = i + 1; } 0 }");
+    }
+
+    #[test]
+    fn while_cond_must_be_bool() {
+        // ADR 0036 D7: the condition must be `bool` (mirrors `if`).
+        let err = check_err("fn main() -> i64 { while 1 { } 0 }");
+        assert!(
+            matches!(err, TypeError::Mismatch { expected: Type::Bool, got: Type::I64, .. }),
+            "got {err:?}"
+        );
     }
 }

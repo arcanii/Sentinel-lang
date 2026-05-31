@@ -256,6 +256,13 @@ fn walk_stmt(
             walk_expr(target, effective, async_id, acc);
             walk_expr(value, effective, async_id, acc);
         }
+        TypedStmtKind::While { cond, body } => {
+            // Phase D.5 / ADR 0036: the loop's effects are its
+            // condition's + its body's (collected once — the effect row
+            // is a set, so iteration count is irrelevant).
+            walk_expr(cond, effective, async_id, acc);
+            walk_block(body, effective, async_id, acc);
+        }
         TypedStmtKind::Expr(e) => walk_expr(e, effective, async_id, acc),
     }
 }

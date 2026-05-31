@@ -435,6 +435,15 @@ pub enum StmtKind {
         target: Expr,
         value: Expr,
     },
+    /// Phase D.5 / ADR 0036 D3: `while <cond> { <body> }` — a loop
+    /// statement (NOT an expression; a loop has no value). `cond` is a
+    /// `bool` expression; `body` is run repeatedly while it holds, its
+    /// tail value discarded each iteration. `break` / `continue` are
+    /// D.5 (2/N).
+    While {
+        cond: Expr,
+        body: Box<Block>,
+    },
     Expr(Expr),
 }
 
@@ -1090,6 +1099,9 @@ impl fmt::Display for StmtKind {
             }
             StmtKind::Assign { target, value } => {
                 write!(f, "(assign {} {})", target.kind, value.kind)
+            }
+            StmtKind::While { cond, body } => {
+                write!(f, "(while {} {})", cond.kind, body)
             }
             StmtKind::Expr(e) => write!(f, "{};", e.kind),
         }

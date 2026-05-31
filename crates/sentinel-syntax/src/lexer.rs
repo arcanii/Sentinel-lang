@@ -150,6 +150,11 @@ pub enum TokenKind {
     /// reclaims this same keyword token.)
     #[token("for")]
     For,
+    /// Phase D.5 / ADR 0036: `while <cond> { <body> }` — the loop
+    /// keyword. A new token (`for` is already taken by the impl
+    /// connector). Parses in statement position to a `StmtKind::While`.
+    #[token("while")]
+    While,
     /// Phase D.1 / ADR 0032: `enum Name { V1, V2(T), … }` declares a
     /// sum type (tagged union). Additive at D.1 (1/N) — the parser
     /// consumes it at (2/N).

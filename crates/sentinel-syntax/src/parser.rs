@@ -3255,6 +3255,20 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_block(&mut self) -> Result<Block, ParseError> {
+        self.parse_block_inner(false)
+    }
+
+    /// Phase D.5 / ADR 0036 D3: parse a `while` body — a block that may
+    /// be statement-only (no trailing tail expression). A regular block
+    /// (ADR 0010 D6) requires a tail; a loop body runs for effect, so a
+    /// missing tail is synthesised as the unit value `0` (discarded each
+    /// iteration). A body that *does* end with an expression keeps it as
+    /// the (still-discarded) tail.
+    fn parse_loop_body(&mut self) -> Result<Block, ParseError> {
+        self.parse_block_inner(true)
+    }
+
+    fn parse_block_inner(&mut self, allow_stmt_only: bool) -> Result<Block, ParseError> {
         let lbrace_start = match self.peek_kind() {
             Some(TokenKind::LBrace) => self.advance().expect("peeked").span.start,
             Some(other) => {
@@ -3283,7 +3297,22 @@ impl<'a> Parser<'a> {
                     });
                 }
                 Some(TokenKind::RBrace) => {
-                    // ADR 0010 D6: no empty blocks — a trailing expression is required.
+                    // Phase D.5 / ADR 0036 D3: a `while` body may be
+                    // statement-only — synthesise a discarded unit tail
+                    // (`0`) at the closing brace. A regular block still
+                    // requires a trailing expression (ADR 0010 D6).
+                    if allow_stmt_only {
+                        let rbrace_end = self.advance().expect("peeked").span.end;
+                        let tail = Spanned {
+                            kind: ExprKind::IntLit(0),
+                            span: rbrace_end..rbrace_end,
+                        };
+                        return Ok(Block {
+                            stmts,
+                            tail,
+                            span: lbrace_start..rbrace_end,
+                        });
+                    }
                     let t = self.peek().expect("peeked");
                     return Err(ParseError::UnexpectedToken {
                         got: "RBrace".to_string(),
@@ -3294,6 +3323,24 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Let) => {
                     let stmt = self.parse_let_stmt()?;
                     stmts.push(stmt);
+                }
+                Some(TokenKind::While) => {
+                    // Phase D.5 / ADR 0036: `while <cond> { <body> }` — a
+                    // loop statement. Forbid struct literals in the
+                    // condition (like `if`) so `while x { ... }` is
+                    // unambiguous. No trailing `;` (the body's `}` ends
+                    // the statement).
+                    let while_start = self.advance().expect("checked `while`").span.start;
+                    let saved = self.allow_struct_lit;
+                    self.allow_struct_lit = false;
+                    let cond = self.parse_expr()?;
+                    self.allow_struct_lit = saved;
+                    let body = self.parse_loop_body()?;
+                    let span = while_start..body.span.end;
+                    stmts.push(Spanned {
+                        kind: StmtKind::While { cond, body: Box::new(body) },
+                        span,
+                    });
                 }
                 Some(_) => {
                     let expr = self.parse_expr()?;
@@ -4865,6 +4912,30 @@ mod tests {
             other => panic!("expected Let, got {other:?}"),
         }
         assert_eq!(p.tail.kind.to_string(), "x");
+    }
+
+    #[test]
+    fn parse_while_statement() {
+        // ADR 0036 D2/D3: `while <cond> { <body> }` parses to a
+        // `StmtKind::While` (a statement, not an expression).
+        let p = parse_block_ok("while i < 3 { x = x + 1; } 0");
+        assert_eq!(p.stmts.len(), 1);
+        match &p.stmts[0].kind {
+            StmtKind::While { body, .. } => {
+                // The body has the one assignment statement.
+                assert_eq!(body.stmts.len(), 1);
+            }
+            other => panic!("expected While, got {other:?}"),
+        }
+        assert_eq!(p.tail.kind.to_string(), "0");
+    }
+
+    #[test]
+    fn parse_while_statement_only_body() {
+        // ADR 0036 D3: a statement-only `while` body (no trailing tail)
+        // parses — the tail is synthesised.
+        let p = parse_block_ok("while c { y = 1; } 0");
+        assert!(matches!(&p.stmts[0].kind, StmtKind::While { .. }));
     }
 
     #[test]

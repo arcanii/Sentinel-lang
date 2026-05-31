@@ -303,6 +303,25 @@ pub enum BorrowError {
         #[label("used here after move")]
         use_span: miette::SourceSpan,
     },
+
+    /// Phase D.5 / ADR 0036 D8: a Move-classified binding declared
+    /// OUTSIDE a `while` loop is moved INSIDE its condition or body.
+    /// The borrow checker walks the body once, but the loop runs
+    /// repeatedly — so the move is a use-after-move on the *next*
+    /// iteration. Rejected conservatively; a binding declared *inside*
+    /// the body is fresh each iteration and may be moved freely.
+    #[error("cannot move out of `{binding_name}` inside a `while` loop")]
+    #[diagnostic(
+        code(sentinel::borrow::moved_in_loop_body),
+        help("`{binding_name}` is declared outside the loop, so moving it leaves it consumed on the next iteration; move a binding declared inside the body, or borrow (`&{binding_name}`) instead")
+    )]
+    MovedInLoopBody {
+        binding_name: String,
+        #[label("`{binding_name}` declared here, outside the loop")]
+        decl_span: miette::SourceSpan,
+        #[label("moved here inside the loop")]
+        move_span: miette::SourceSpan,
+    },
 }
 
 // =============================================================================
@@ -720,6 +739,52 @@ fn walk_stmt(
                     }
                 }
                 ctx.promote_transients(ctx.current_depth());
+            }
+            ctx.clear_transients();
+        }
+        TypedStmtKind::While { cond, body } => {
+            // Phase D.5 / ADR 0036 D8: the loop-carried move rule. The
+            // condition + body run repeatedly, but the borrow checker
+            // walks them once. Snapshot the in-scope (outer) bindings +
+            // the already-moved set; after walking, any OUTER binding
+            // newly moved in the cond/body is a use-after-move on the
+            // next iteration — reject it (`MovedInLoopBody`). A binding
+            // declared INSIDE the body is fresh each iteration (fine).
+            let outer_vars: std::collections::HashSet<VarId> =
+                ctx.var_in_scope.keys().copied().collect();
+            let moved_before: std::collections::HashSet<VarId> =
+                ctx.moved.keys().copied().collect();
+
+            // The condition is evaluated each iteration; its transient
+            // borrows die before the body runs.
+            walk_expr(cond, ctx, errors, program);
+            ctx.clear_transients();
+
+            // The body is its own scope (per-iteration bindings).
+            ctx.push_scope();
+            walk_block_contents(body, ctx, errors, program);
+            ctx.pop_scope();
+
+            // Flag outer bindings newly moved in the cond/body
+            // (deterministic order for stable diagnostics).
+            let mut carried: Vec<(VarId, Span)> = ctx
+                .moved
+                .iter()
+                .filter(|(id, _)| !moved_before.contains(id) && outer_vars.contains(id))
+                .map(|(id, span)| (*id, span.clone()))
+                .collect();
+            carried.sort_by_key(|(id, _)| id.0);
+            for (id, move_span) in carried {
+                let decl_span = ctx
+                    .var_info
+                    .get(&id)
+                    .map(|vi| vi.span.clone())
+                    .unwrap_or_else(|| move_span.clone());
+                errors.push(BorrowError::MovedInLoopBody {
+                    binding_name: place_name(ctx, id),
+                    decl_span: to_source_span(&decl_span),
+                    move_span: to_source_span(&move_span),
+                });
             }
             ctx.clear_transients();
         }
@@ -1575,6 +1640,11 @@ fn borrow_error_to_diagnostic(err: &BorrowError) -> Diagnostic {
             format!("use of moved binding `{binding_name}`"),
             use_span.offset()..(use_span.offset() + use_span.len()),
         ),
+        BorrowError::MovedInLoopBody { binding_name, move_span, .. } => (
+            "sentinel::borrow::moved_in_loop_body",
+            format!("cannot move out of `{binding_name}` inside a `while` loop"),
+            move_span.offset()..(move_span.offset() + move_span.len()),
+        ),
     };
     Diagnostic {
         stage: "borrow",
@@ -2009,6 +2079,44 @@ mod tests {
         assert!(
             matches!(&errs[0], BorrowError::UseAfterMove { binding_name, .. } if binding_name == "p"),
             "got {errs:?}"
+        );
+    }
+
+    // ----- D.5 / ADR 0036 D8: the loop-carried move rule -----
+
+    #[test]
+    fn while_loop_carried_move_rejected() {
+        // Moving an OUTER binding (`p`) inside a `while` body is a
+        // use-after-move on the next iteration — rejected.
+        let errs = borrow_check_err(
+            "struct P { x: i64 } fn consume(p: P) -> i64 { p.x } \
+             fn main() -> i64 { let p: P = P { x: 5 }; let mut i: i64 = 0; \
+             while i < 3 { consume(p); i = i + 1; } 0 }",
+        );
+        assert!(
+            matches!(&errs[0], BorrowError::MovedInLoopBody { binding_name, .. } if binding_name == "p"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn while_inner_binding_move_ok() {
+        // A binding declared INSIDE the body is fresh each iteration, so
+        // moving it is fine (no loop-carried move).
+        borrow_check_ok(
+            "struct P { x: i64 } fn consume(p: P) -> i64 { p.x } \
+             fn main() -> i64 { let mut i: i64 = 0; \
+             while i < 3 { let q: P = P { x: 1 }; consume(q); i = i + 1; } 0 }",
+        );
+    }
+
+    #[test]
+    fn while_loop_carried_mutation_ok() {
+        // Mutating an outer `let mut` via `Assign` (the termination
+        // pattern) is not a move — accepted.
+        borrow_check_ok(
+            "fn main() -> i64 { let mut total: i64 = 0; let mut i: i64 = 0; \
+             while i < 5 { total = total + i; i = i + 1; } total }",
         );
     }
 

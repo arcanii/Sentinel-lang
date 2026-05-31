@@ -598,6 +598,13 @@ pub enum ResolvedStmtKind {
         target: ResolvedExpr,
         value: ResolvedExpr,
     },
+    /// Phase D.5 / ADR 0036 D3: `while <cond> { <body> }`. The body is
+    /// its own lexical scope (per-iteration bindings). `break` /
+    /// `continue` are D.5 (2/N).
+    While {
+        cond: ResolvedExpr,
+        body: Box<ResolvedBlock>,
+    },
     Expr(ResolvedExpr),
 }
 
@@ -2628,6 +2635,39 @@ fn resolve_stmt(
                 next_var_id,
             )?;
             ResolvedStmtKind::Assign { target, value }
+        }
+        StmtKind::While { cond, body } => {
+            // Phase D.5 / ADR 0036 D3: resolve the condition in the outer
+            // scope, then the body in its own scope (snapshot/restore
+            // `vars` so per-iteration bindings don't leak past the loop —
+            // the match-arm scoping pattern).
+            let cond = resolve_expr(
+                cond,
+                fn_table,
+                signatures,
+                struct_table,
+                class_table,
+                effect_table,
+                effects,
+                impls,
+                vars,
+                next_var_id,
+            )?;
+            let saved_vars = vars.clone();
+            let body = resolve_block(
+                body,
+                fn_table,
+                signatures,
+                struct_table,
+                class_table,
+                effect_table,
+                effects,
+                impls,
+                vars,
+                next_var_id,
+            )?;
+            *vars = saved_vars;
+            ResolvedStmtKind::While { cond, body: Box::new(body) }
         }
         StmtKind::Expr(e) => ResolvedStmtKind::Expr(resolve_expr(
             e,

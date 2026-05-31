@@ -368,6 +368,16 @@ impl FnBuilder {
                     }
                 }
             }
+            TypedStmtKind::While { cond, body } => {
+                // Phase D.5 / ADR 0036: the flat taint IR lowers the
+                // condition + the body once (a `while` cond is non-secret
+                // — `secret bool` is rejected at type-check, ADR 0019 D7);
+                // the body's stmts + tail flow taint to any sinks they
+                // contain. The loop structure adds no new taint path a
+                // single pass misses.
+                self.lower_expr(program, cond);
+                self.lower_block(program, body);
+            }
             TypedStmtKind::Expr(e) => {
                 self.lower_expr(program, e);
             }
