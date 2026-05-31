@@ -3621,6 +3621,35 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         is_main: false,
         is_runtime: true,
     });
+    // D.4 / ADR 0035 D4/D7: the file-I/O builtins — non-generic concrete
+    // `[u8]` signatures (no type_params), like `str_eq`. Paths + content
+    // are byte arrays. `read_file([u8]) -> [u8]`, `write_file([u8], [u8])
+    // -> i64`. Codegen lowers them to `sentinel_read_file` /
+    // `sentinel_write_file` (D.4 (1/N)); they panic on I/O failure.
+    let read_file_sig = &program.fn_signatures[11];
+    typed_signatures.push(TypedFnSignature {
+        id: read_file_sig.id,
+        name: read_file_sig.name.clone(),
+        name_span: read_file_sig.name_span.clone(),
+        type_params: vec![],
+        param_types: vec![Type::Array(ArrayElem::U8)],
+        return_type: Type::Array(ArrayElem::U8),
+        effect_row: vec![],
+        is_main: false,
+        is_runtime: true,
+    });
+    let write_file_sig = &program.fn_signatures[12];
+    typed_signatures.push(TypedFnSignature {
+        id: write_file_sig.id,
+        name: write_file_sig.name.clone(),
+        name_span: write_file_sig.name_span.clone(),
+        type_params: vec![],
+        param_types: vec![Type::Array(ArrayElem::U8), Type::Array(ArrayElem::U8)],
+        return_type: Type::I64,
+        effect_row: vec![],
+        is_main: false,
+        is_runtime: true,
+    });
 
     for fn_def in &program.fns {
         let resolved_sig = &program.fn_signatures[fn_def.id.0 as usize];
@@ -8184,10 +8213,11 @@ mod tests {
         // Signature table: FnId(0)=print, (1)=unwrap_or, (2)=is_some,
         // (3)=len, (4)=str_eq, (5)=u8_to_i64, (6)=i64_to_u8 (D.2 / ADR
         // 0033 D5), (7)=vec_new, (8)=push, (9)=pop, (10)=vec_to_array
-        // (D.3 / ADR 0034 D5), (11)=main. The generic builtins occupy
-        // FnId(1..=3) per ADR 0014 D9 + ADR 0015 D4; the byte-string
-        // builtins FnId(4..=6) per ADR 0033 D5; the collection builtins
-        // FnId(7..=10) per ADR 0034 D5.
+        // (D.3 / ADR 0034 D5), (11)=read_file, (12)=write_file (D.4 / ADR
+        // 0035 D4), (13)=main. The generic builtins occupy FnId(1..=3)
+        // per ADR 0014 D9 + ADR 0015 D4; the byte-string builtins
+        // FnId(4..=6) per ADR 0033 D5; the collection builtins FnId(7..=10)
+        // per ADR 0034 D5; the file-I/O builtins FnId(11..=12) per ADR 0035.
         assert_eq!(p.fn_signatures[0].name, "print");
         assert_eq!(p.fn_signatures[0].param_types, vec![Type::I64]);
         assert_eq!(p.fn_signatures[1].name, "unwrap_or");
@@ -8200,7 +8230,9 @@ mod tests {
         assert_eq!(p.fn_signatures[8].name, "push");
         assert_eq!(p.fn_signatures[9].name, "pop");
         assert_eq!(p.fn_signatures[10].name, "vec_to_array");
-        assert_eq!(p.fn_signatures[11].name, "main");
+        assert_eq!(p.fn_signatures[11].name, "read_file");
+        assert_eq!(p.fn_signatures[12].name, "write_file");
+        assert_eq!(p.fn_signatures[13].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 
@@ -10511,5 +10543,43 @@ fn main() -> i64 {
             "fn f(s: String) -> i64 { len(s) }\nfn main() -> i64 { 0 }",
         );
         assert_eq!(fn_body_ty(&p, "f"), Type::I64);
+    }
+
+    // ----- D.4 / ADR 0035: file I/O (read_file / write_file) -----
+
+    #[test]
+    fn read_file_typechecks() {
+        // ADR 0035 D4: `read_file([u8]) -> [u8]`.
+        let p = check_ok(
+            "fn f(path: [u8]) -> [u8] { read_file(path) }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::Array(ArrayElem::U8));
+    }
+
+    #[test]
+    fn write_file_typechecks() {
+        // ADR 0035 D4: `write_file([u8], [u8]) -> i64` (statement-shaped).
+        let p = check_ok(
+            "fn f(path: [u8], data: [u8]) -> i64 { write_file(path, data) }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::I64);
+    }
+
+    #[test]
+    fn read_file_rejects_non_byte_array_arg() {
+        // The path is concrete `[u8]` — an i64 arg is a CallArgMismatch
+        // (same shape as `str_eq`'s arg check).
+        let err = check_err("fn main() -> i64 { let x: [u8] = read_file(5); 0 }");
+        assert!(matches!(err, TypeError::CallArgMismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn write_file_rejects_wrong_arg_type() {
+        // `write_file([i64], [u8])` — the path must be `[u8]`.
+        let err = check_err(
+            "fn f(p: [i64], d: [u8]) -> i64 { write_file(p, d) }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::CallArgMismatch { .. }), "got {err:?}");
     }
 }

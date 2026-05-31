@@ -1198,3 +1198,20 @@ fn pass_c5d3_collections() {
     // n0 + last + remaining + matched + first_is_l = 10+40+3+1+1 = 55.
     assert_eq!(run_exit("c5d3_collections.sentinel"), 55);
 }
+
+#[test]
+fn pass_c5d4_file_io() {
+    // ADR 0035 D9/D10 (1/N) phase-go: file I/O round-trip. `write_file`
+    // a known payload to a temp path, `read_file` it back, and verify the
+    // bytes survived (str_eq + a `back[i]` spot-check + len). File I/O is
+    // a pair of runtime builtins (ADR 0035 D2), panic-on-failure (D5).
+    // Leak-free under `leaks --atExit` (verified separately). Exit =
+    // len("hello") = 5. The fixture's temp path is removed before + after
+    // so the test is hermetic + repeatable.
+    let tmp = std::path::Path::new("/tmp/sentinel_c5d4_io.txt");
+    let _ = std::fs::remove_file(tmp);
+    assert_eq!(run_exit("c5d4_file_io.sentinel"), 5);
+    // The fixture must have created the file (write_file ran).
+    assert!(tmp.exists(), "c5d4 fixture should have written the temp file");
+    let _ = std::fs::remove_file(tmp);
+}

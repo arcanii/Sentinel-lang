@@ -45,8 +45,8 @@ use sentinel_borrow_check::DropPlan;
 use sentinel_hir::HirProgram;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID,
-    LEN_FN_ID, POP_FN_ID, PUSH_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
-    VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
+    LEN_FN_ID, POP_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID,
+    UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
@@ -438,6 +438,32 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
         module.add_function(
             "sentinel_realloc",
             ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
+            None,
+        )
+    };
+    // D.4 / ADR 0035 D6: declare the file-I/O runtime symbols.
+    // `sentinel_read_file(path_ptr, path_len, out_len: *i64) -> data_ptr`
+    // returns the freshly-allocated `[u8]` buffer + writes its length to
+    // `out_len`; `sentinel_write_file(path_ptr, path_len, data_ptr,
+    // data_len) -> i64` writes a file. Both abort on I/O failure.
+    let read_file_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        module.add_function(
+            "sentinel_read_file",
+            ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), ptr_ty.into()], false),
+            None,
+        )
+    };
+    let write_file_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        module.add_function(
+            "sentinel_write_file",
+            i64_ty.fn_type(
+                &[ptr_ty.into(), i64_ty.into(), ptr_ty.into(), i64_ty.into()],
+                false,
+            ),
             None,
         )
     };
@@ -901,6 +927,8 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             free_fn,
             str_eq_fn,
             realloc_fn,
+            read_file_fn,
+            write_file_fn,
             arena_enter_fn,
             arena_alloc_fn,
             arena_exit_fn,
@@ -1100,6 +1128,13 @@ struct CodegenCtx<'ctx, 'plan> {
     /// `Vec`'s data buffer in `push` (and serves the first push, since
     /// `realloc(null, n) == malloc(n)`).
     realloc_fn: FunctionValue<'ctx>,
+    /// D.4 / ADR 0035 D6: `sentinel_read_file(path_ptr, path_len,
+    /// out_len: *i64) -> data_ptr` — read a whole file into a fresh
+    /// `[u8]` buffer (length written to `*out_len`).
+    read_file_fn: FunctionValue<'ctx>,
+    /// D.4 / ADR 0035 D6: `sentinel_write_file(path_ptr, path_len,
+    /// data_ptr, data_len) -> i64` — create/truncate + write a file.
+    write_file_fn: FunctionValue<'ctx>,
     /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
     /// creates a per-scope broker bump arena (capacity 0 → default).
     arena_enter_fn: FunctionValue<'ctx>,
@@ -4368,6 +4403,122 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("sentinel_str_eq returns i1"))
     }
 
+    /// D.4 / ADR 0035 D4/D7: lower `read_file(path) -> [u8]`. Extracts
+    /// the path's `{ len, ptr }`, calls `sentinel_read_file(path_ptr,
+    /// path_len, &out_len)` (which `sentinel_alloc`s the buffer + writes
+    /// the byte count to `out_len`, or aborts on failure), and assembles
+    /// the owned `[u8]` `{ out_len, data }` struct (freed at scope-exit
+    /// drop via the array path).
+    fn lower_read_file(
+        &mut self,
+        path: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        let path_val = self.lower_expr(path, program)?.into_struct_value();
+        let path_len = self
+            .builder
+            .build_extract_value(path_val, 0, "path_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let path_ptr = self
+            .builder
+            .build_extract_value(path_val, 1, "path_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+
+        // Out-param slot for the byte count (ADR 0035 D6 ABI (a)).
+        let out_len_slot = self
+            .builder
+            .build_alloca(i64_type, "read_file_len_slot")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let data_ptr = self
+            .builder
+            .build_call(
+                self.read_file_fn,
+                &[path_ptr.into(), path_len.into(), out_len_slot.into()],
+                "read_file",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_read_file returns ptr")
+            .into_pointer_value();
+        let len = self
+            .builder
+            .build_load(i64_type, out_len_slot, "read_file_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+
+        // Assemble the `[u8]` array struct `{ i64 len, ptr data }`.
+        let arr_struct_ty = self
+            .context
+            .struct_type(&[i64_type.into(), ptr_type.into()], false);
+        let agg = arr_struct_ty.get_undef();
+        let with_len = self
+            .builder
+            .build_insert_value(agg, len, 0, "rf_with_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let with_data = self
+            .builder
+            .build_insert_value(with_len, data_ptr, 1, "rf_with_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(with_data.into_struct_value().into())
+    }
+
+    /// D.4 / ADR 0035 D4/D7: lower `write_file(path, data) -> i64`.
+    /// Extracts `{ len, ptr }` from both `[u8]` args and calls
+    /// `sentinel_write_file` (which aborts on failure, else returns 0).
+    /// Both args are borrowed (the ADR 0033 A3 runtime-builtin rule).
+    fn lower_write_file(
+        &mut self,
+        path: &TypedExpr,
+        data: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let path_val = self.lower_expr(path, program)?.into_struct_value();
+        let path_len = self
+            .builder
+            .build_extract_value(path_val, 0, "path_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let path_ptr = self
+            .builder
+            .build_extract_value(path_val, 1, "path_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let data_val = self.lower_expr(data, program)?.into_struct_value();
+        let data_len = self
+            .builder
+            .build_extract_value(data_val, 0, "wf_data_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let data_ptr = self
+            .builder
+            .build_extract_value(data_val, 1, "wf_data_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let call = self
+            .builder
+            .build_call(
+                self.write_file_fn,
+                &[
+                    path_ptr.into(),
+                    path_len.into(),
+                    data_ptr.into(),
+                    data_len.into(),
+                ],
+                "write_file",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_write_file returns i64"))
+    }
+
     /// D.3 / ADR 0034 D7: lower `vec_new() -> Vec<T>` to an empty vector
     /// value `{ i64 len = 0, i64 cap = 0, ptr data = null }`. No
     /// allocation happens until the first `push` (`realloc(null, …)` ==
@@ -5085,6 +5236,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
                 if *id == VEC_TO_ARRAY_FN_ID {
                     return self.lower_vec_to_array(&args[0], type_args[0], program);
+                }
+                // D.4 / ADR 0035: file I/O — read a whole file into a
+                // fresh [u8]; write a [u8] to a file. Runtime builtins
+                // (like str_eq), backed by sentinel_read_file /
+                // sentinel_write_file (which abort on I/O failure).
+                if *id == READ_FILE_FN_ID {
+                    return self.lower_read_file(&args[0], program);
+                }
+                if *id == WRITE_FILE_FN_ID {
+                    return self.lower_write_file(&args[0], &args[1], program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted

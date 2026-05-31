@@ -1,0 +1,31 @@
+// D.4 (1/N) / ADR 0035: file I/O — `read_file` + `write_file` round-trip.
+//
+// Writes a known payload to a temp file with `write_file`, reads it back
+// with `read_file`, and verifies the bytes survived: `str_eq` against the
+// original, a `back[i]` byte spot-check, and the length. File I/O is a
+// pair of runtime builtins (ADR 0035 D2 — not algebraic effects), and an
+// open/read/write failure aborts (D5, panic-on-failure).
+//
+// Every `[u8]` here is a bound variable, so all buffers (the read result
+// + the literals) drop at scope exit -> leak-free under `leaks --atExit`.
+// The pass harness removes the temp file before + after the run.
+//
+// Exit = len(back) when the round-trip + checks pass = 5 ("hello").
+
+fn main() -> i64 {
+    let path: [u8] = "/tmp/sentinel_c5d4_io.txt";
+    let payload: [u8] = "hello";
+
+    write_file(path, payload);
+    let back: [u8] = read_file(path);
+
+    let same: bool = str_eq(back, payload);
+    let first_is_h: bool = back[0] == 'h';
+    let n: i64 = len(back);
+
+    if same {
+        if first_is_h { n } else { 0 }
+    } else {
+        0
+    }
+}

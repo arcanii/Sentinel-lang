@@ -155,6 +155,108 @@ pub extern "C" fn sentinel_realloc(ptr: *mut u8, new_size: i64) -> *mut u8 {
     new_ptr
 }
 
+/// Build an `OsString` path from a length-prefixed Sentinel `[u8]`.
+/// D.4 / ADR 0035 D4: Sentinel paths are byte arrays (not NUL-
+/// terminated). Aborts on an embedded NUL (a path can't contain one;
+/// defensive, not a security model). Unix-only (the macOS target —
+/// `OsStrExt::from_bytes` takes raw bytes, so non-UTF-8 paths are fine).
+///
+/// # Safety
+/// When `len > 0`, `ptr` must point to `len` readable bytes.
+unsafe fn path_from_bytes(ptr: *const u8, len: i64, op: &str) -> std::ffi::OsString {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes: &[u8] = if len <= 0 {
+        &[]
+    } else {
+        // SAFETY: caller guarantees `len` readable bytes at `ptr`.
+        unsafe { std::slice::from_raw_parts(ptr, len as usize) }
+    };
+    if bytes.contains(&0) {
+        eprintln!("sentinel: {op} failed: path contains an embedded NUL byte");
+        std::process::abort();
+    }
+    std::ffi::OsStr::from_bytes(bytes).to_os_string()
+}
+
+/// Read the entire file at `path` (a `[u8]`) into a fresh heap buffer
+/// and return it as a `[u8]` `{ len, data }`: the data pointer is the
+/// return value and the byte count is written to `*out_len`. D.4 / ADR
+/// 0035 D4/D6 — `read_file(path) -> [u8]`, a runtime builtin (not an
+/// algebraic effect; ADR 0035 D2). The buffer is `sentinel_alloc`'d
+/// (libc `malloc`) so the caller's scope-exit drop frees it with
+/// `sentinel_free`. **Aborts** on any open/read failure (ADR 0035 D5 —
+/// panic-on-failure; a recoverable `?[u8]`/`Result` is deferred).
+///
+/// # Safety
+/// `path` must point to `path_len` readable bytes; `out_len` must point
+/// to a writable `i64`. Both are guaranteed by codegen's call shape.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_read_file(
+    path: *const u8,
+    path_len: i64,
+    out_len: *mut i64,
+) -> *mut u8 {
+    // SAFETY: contract above.
+    let os_path = unsafe { path_from_bytes(path, path_len, "read_file") };
+    let data = match std::fs::read(&os_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!(
+                "sentinel: read_file failed: {}: {e}",
+                std::path::Path::new(&os_path).display()
+            );
+            std::process::abort();
+        }
+    };
+    let n = data.len();
+    // Copy into a libc-malloc'd buffer so scope-exit drop can free it.
+    let buf = sentinel_alloc(n as i64);
+    if n > 0 {
+        // SAFETY: `buf` has `n` bytes (sentinel_alloc aborts on failure);
+        // `data` has `n` bytes; the regions don't overlap.
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf, n) };
+    }
+    // SAFETY: caller passed a writable `i64` slot.
+    unsafe { *out_len = n as i64 };
+    buf
+}
+
+/// Write all `data_len` bytes of `data` (a `[u8]`) to the file at
+/// `path`, creating or truncating it. D.4 / ADR 0035 D4 —
+/// `write_file(path, data) -> i64` (returns 0). **Aborts** on any
+/// open/write failure (ADR 0035 D5). `data` is borrowed (the ADR 0033
+/// A3 runtime-builtin rule), not freed.
+///
+/// # Safety
+/// `path` / `data` must point to `path_len` / `data_len` readable bytes
+/// (guaranteed by codegen's call shape).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_write_file(
+    path: *const u8,
+    path_len: i64,
+    data: *const u8,
+    data_len: i64,
+) -> i64 {
+    // SAFETY: contract above.
+    let os_path = unsafe { path_from_bytes(path, path_len, "write_file") };
+    let bytes: &[u8] = if data_len <= 0 {
+        &[]
+    } else {
+        // SAFETY: caller guarantees `data_len` readable bytes at `data`.
+        unsafe { std::slice::from_raw_parts(data, data_len as usize) }
+    };
+    if let Err(e) = std::fs::write(&os_path, bytes) {
+        eprintln!(
+            "sentinel: write_file failed: {}: {e}",
+            std::path::Path::new(&os_path).display()
+        );
+        std::process::abort();
+    }
+    0
+}
+
 /// Byte-wise equality of two `[u8]` slices — the `str_eq` builtin
 /// (D.2 / ADR 0033 D5; the lexer's keyword/identifier matcher). Equal
 /// length AND equal bytes. Returns a C `bool`, which Rust's `extern
@@ -1062,6 +1164,8 @@ mod tests {
             sentinel_alloc as *const (),
             sentinel_free as *const (),
             sentinel_realloc as *const (),
+            sentinel_read_file as *const (),
+            sentinel_write_file as *const (),
             sentinel_str_eq as *const (),
             sentinel_panic_oob as *const (),
             sentinel_arena_enter as *const (),
@@ -1079,9 +1183,10 @@ mod tests {
             sentinel_scope_register as *const (),
             sentinel_scope_exit as *const (),
         ];
-        // 20 symbols: 19 codegen-declared (incl. D.2's sentinel_str_eq
-        // + D.3's sentinel_realloc) + sentinel_kont_panic_resumed.
-        assert_eq!(symbols.len(), 20);
+        // 22 symbols: 21 codegen-declared (incl. D.2's sentinel_str_eq,
+        // D.3's sentinel_realloc, D.4's sentinel_read_file /
+        // sentinel_write_file) + sentinel_kont_panic_resumed.
+        assert_eq!(symbols.len(), 22);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 

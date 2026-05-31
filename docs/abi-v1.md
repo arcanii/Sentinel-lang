@@ -176,6 +176,8 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_alloc` | `(i64 size) -> ptr` | heap (libc malloc) |
 | `sentinel_free` | `(ptr) -> void` | heap (libc free) |
 | `sentinel_realloc` | `(ptr, i64 new_size) -> ptr` | heap (libc realloc) — grows a `Vec<T>` buffer in `push`; `realloc(null, n) == malloc(n)` serves the first push (ADR 0034 D7) |
+| `sentinel_read_file` | `(ptr path, i64 path_len, ptr out_len) -> ptr data` | file I/O — read a whole file into a fresh `[u8]` (data returned, byte count written to `*out_len`); aborts on failure (ADR 0035 D4/D6) |
+| `sentinel_write_file` | `(ptr path, i64 path_len, ptr data, i64 data_len) -> i64` | file I/O — create/truncate + write a file; aborts on failure (ADR 0035 D4/D6) |
 | `sentinel_str_eq` | `(ptr a, i64 a_len, ptr b, i64 b_len) -> i1` | strings — `[u8]` byte-equality (ADR 0033 D5) |
 | `sentinel_panic_oob` | `(i64 idx, i64 len) -> void` | bounds-check trap |
 | `sentinel_arena_enter` | `(i64 capacity) -> ptr` | scope arena (ADR 0028) |

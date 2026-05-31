@@ -2089,7 +2089,7 @@ mod tests {
         let typed = check(&resolved).expect("check");
         let (plan, errors) = borrow_check(&typed);
         assert!(errors.is_empty(), "got {errors:?}");
-        // main's fn_id: 11 runtime builtins + consume + main = FnId(12)
+        // main's fn_id: 13 runtime builtins + consume + main = FnId(14)
         // (looked up by name, so robust to the builtin count).
         let main = typed.fns.iter().find(|f| f.name == "main").unwrap();
         let moved = plan.moved_sources_for(main.id);
