@@ -53,6 +53,7 @@ The in-memory layout of every `Type` constructor. All layouts are
 | `u8` | `i8` (unsigned — signedness lives in the ops: `udiv` / unsigned `icmp`, not the type) — ADR 0033 D4/D6 |
 | `Struct(id)` / `GenericInstance(id)` / `Class(id)` | a **named LLVM struct**, fields in **declaration order** (no reordering) |
 | `[T]` (`Array`) | `{ i64 len, ptr data }` — ADR 0015 D1 |
+| `Vec<T>` (`Vec`) | `{ i64 len, i64 cap, ptr data }` — the `[T]` layout with a capacity field inserted, so `data` is **field 2** (offset 16); 24 bytes, align 8. `data` points at a heap buffer of `cap * sizeof(T)` bytes, the first `len` live; grown by `sentinel_realloc` (§5). `String` = `Vec<u8>` (deferred to D.3 (2/N)). — ADR 0034 D3 |
 | `?P` where `P` is primitive | `{ i1 valid, P }` (inline) — ADR 0015 D11 |
 | `?Struct` / `?GenericInstance` | `{ i1 valid, ptr payload }`, `payload` points at a heap-allocated value — ADR 0015 D11 |
 | `&T` / `&mut T` (`Ref`) | opaque `ptr` (LLVM 15+ opaque pointers) — ADR 0017 D11 |
@@ -61,10 +62,12 @@ The in-memory layout of every `Type` constructor. All layouts are
 | `Task` | opaque `ptr` to a `SentinelTask` (§3) |
 | `Enum(id)` (sum type) | `{ i32 tag, ptr payload }` — `tag` is the variant discriminant (source order); `payload` points at a heap-allocated struct of the active variant's payload fields, or is `null` for a unit variant — ADR 0032 D4 |
 
-**Element-type tracking.** `[T]` and `?T` track their element/payload
-`Type` at the `sentinel-types` level (e.g. `TypedExprKind::ArrayLit` /
-`Index`), not in the LLVM type — LLVM sees only `{ i64, ptr }` / the
-opaque `ptr`. Indexing recovers the element type from the typed AST.
+**Element-type tracking.** `[T]`, `Vec<T>`, and `?T` track their
+element/payload `Type` at the `sentinel-types` level (e.g.
+`TypedExprKind::ArrayLit` / `Index`, and a `Vec`-typed binding / the
+`push` call's `type_args`), not in the LLVM type — LLVM sees only
+`{ i64, ptr }` / `{ i64, i64, ptr }` / the opaque `ptr`. Indexing /
+`push` recover the element type from the typed AST.
 Likewise an `Enum`'s per-variant payload field types live in
 `TypedProgram::enums` (`EnumData`/`VariantData`), not the LLVM type —
 LLVM sees only `{ i32, ptr }`. Construction (`EnumConstruct`) and `match`
@@ -144,6 +147,7 @@ External symbol names for emitted functions. Source of truth:
 | `Struct` / `Class` | the declared name |
 | `?T` (`Nullable`) | `opt_<tag(T)>` |
 | `[T]` (`Array`) | `arr_<tag(T)>` |
+| `Vec<T>` (`Vec`) | `vec_<tag(T)>` |
 | `&T` / `&mut T` | `ref_<tag(T)>` / `refmut_<tag(T)>` |
 | `GenericInstance` | `<Base>_<tag(arg)>_<tag(arg)>…` |
 | `secret T` | `sec_<tag(T)>` |
@@ -171,6 +175,7 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_print` | `(i64) -> i64` (prints, returns 0) | I/O |
 | `sentinel_alloc` | `(i64 size) -> ptr` | heap (libc malloc) |
 | `sentinel_free` | `(ptr) -> void` | heap (libc free) |
+| `sentinel_realloc` | `(ptr, i64 new_size) -> ptr` | heap (libc realloc) — grows a `Vec<T>` buffer in `push`; `realloc(null, n) == malloc(n)` serves the first push (ADR 0034 D7) |
 | `sentinel_str_eq` | `(ptr a, i64 a_len, ptr b, i64 b_len) -> i1` | strings — `[u8]` byte-equality (ADR 0033 D5) |
 | `sentinel_panic_oob` | `(i64 idx, i64 len) -> void` | bounds-check trap |
 | `sentinel_arena_enter` | `(i64 capacity) -> ptr` | scope arena (ADR 0028) |

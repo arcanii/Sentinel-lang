@@ -45,7 +45,7 @@ use sentinel_borrow_check::DropPlan;
 use sentinel_hir::HirProgram;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID,
-    LEN_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
+    LEN_FN_ID, PUSH_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID,
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
@@ -425,6 +425,18 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
                 &[ptr_ty.into(), i64_ty.into(), ptr_ty.into(), i64_ty.into()],
                 false,
             ),
+            None,
+        )
+    };
+    // D.3 / ADR 0034 D7: declare `sentinel_realloc(ptr, i64) -> ptr`
+    // for growing a `Vec`'s data buffer in `push` (and the first
+    // allocation, since `realloc(null, n) == malloc(n)`).
+    let realloc_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let i64_ty = context.i64_type();
+        module.add_function(
+            "sentinel_realloc",
+            ptr_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
             None,
         )
     };
@@ -887,6 +899,7 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             panic_oob_fn,
             free_fn,
             str_eq_fn,
+            realloc_fn,
             arena_enter_fn,
             arena_alloc_fn,
             arena_exit_fn,
@@ -1082,6 +1095,10 @@ struct CodegenCtx<'ctx, 'plan> {
     /// b_len: i64) -> i1` — equal length + byte-wise array equality,
     /// the lexer's keyword/identifier matcher.
     str_eq_fn: FunctionValue<'ctx>,
+    /// D.3 / ADR 0034 D7: `sentinel_realloc(ptr, i64) -> ptr` — grows a
+    /// `Vec`'s data buffer in `push` (and serves the first push, since
+    /// `realloc(null, n) == malloc(n)`).
+    realloc_fn: FunctionValue<'ctx>,
     /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
     /// creates a per-scope broker bump arena (capacity 0 → default).
     arena_enter_fn: FunctionValue<'ctx>,
@@ -1379,6 +1396,9 @@ fn field_type_needs_drop_inner(
     }
     match ty {
         Type::Array(_) => true,
+        // Phase D.3 / ADR 0034 D7: a `Vec<T>` owns a heap buffer, so it
+        // always needs a scope-exit drop (the buffer free), like `[T]`.
+        Type::Vec(_) => true,
         Type::Nullable(NullableInner::Struct(_))
         | Type::Nullable(NullableInner::GenericInstance(_)) => true,
         Type::Struct(id) => {
@@ -1539,6 +1559,19 @@ fn llvm_basic_type<'ctx>(
             let data_ty: BasicTypeEnum =
                 context.ptr_type(inkwell::AddressSpace::default()).into();
             context.struct_type(&[len_ty, data_ty], false).into()
+        }
+        Type::Vec(_) => {
+            // Phase D.3 / ADR 0034 D3: `Vec<T>` lowers as `{ i64 len,
+            // i64 cap, ptr data }` — the `[T]` layout (`{ i64 len, ptr
+            // data }`) with a capacity field inserted, so the data
+            // pointer is FIELD 2 (not field 1 like an array). Element
+            // type is tracked at the Sentinel-types level; LLVM sees an
+            // opaque pointer.
+            let len_ty: BasicTypeEnum = context.i64_type().into();
+            let cap_ty: BasicTypeEnum = context.i64_type().into();
+            let data_ty: BasicTypeEnum =
+                context.ptr_type(inkwell::AddressSpace::default()).into();
+            context.struct_type(&[len_ty, cap_ty, data_ty], false).into()
         }
         Type::Ref(_) => {
             // C2 / ADR 0017 D11: references lower to LLVM opaque
@@ -1934,6 +1967,7 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
             .unwrap_or_else(|| format!("struct{}", id.0)),
         Type::Nullable(inner) => format!("opt_{}", mangle_type(inner.to_type(), program)),
         Type::Array(elem) => format!("arr_{}", mangle_type(elem.to_type(), program)),
+        Type::Vec(elem) => format!("vec_{}", mangle_type(elem.to_type(), program)),
         Type::Ref(id) => {
             // C2 / ADR 0017 D11: render `&T` as `ref_T`, `&mut T`
             // as `refmut_T`. Internal-only mangling — debug
@@ -2032,6 +2066,7 @@ fn arg_contains_typeparam(
         | Type::TraitSelf(_) => false,
         Type::Nullable(ni) => arg_contains_typeparam(ni.to_type(), instances, refs),
         Type::Array(ae) => arg_contains_typeparam(ae.to_type(), instances, refs),
+        Type::Vec(ve) => arg_contains_typeparam(ve.to_type(), instances, refs),
         Type::GenericInstance(id) => instances[id.0 as usize]
             .args
             .iter()
@@ -2082,6 +2117,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::Struct(_) => panic!("llvm_int_type called on non-int Type::Struct"),
         Type::Nullable(_) => panic!("llvm_int_type called on non-int Type::Nullable"),
         Type::Array(_) => panic!("llvm_int_type called on non-int Type::Array"),
+        Type::Vec(_) => panic!("llvm_int_type called on non-int Type::Vec"),
         Type::GenericInstance(_) => {
             panic!("llvm_int_type called on non-int Type::GenericInstance")
         }
@@ -3463,6 +3499,34 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .build_call(self.free_fn, &[data.into()], "")
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
             }
+            Type::Vec(_) => {
+                // Phase D.3 / ADR 0034 D7: `Vec<T>` is `{ i64 len, i64
+                // cap, ptr data }`. Free the data buffer — the data
+                // pointer is FIELD 2 (the capacity field is inserted
+                // before it). `sentinel_free(null)` is a safe no-op, so
+                // an unpushed `Vec` (data == null, from `vec_new`'s
+                // `{ 0, 0, null }`) drops cleanly with no null guard.
+                // For a `Vec` of PRIMITIVE elements (`u8`/`i64`/`i32`/
+                // `bool` — the D.3 MVP, incl. the 2/N `String` =
+                // `Vec<u8>`) this is leak-free: no element owns heap.
+                // Per-element recursive drop for droppable elements
+                // (`Vec<Struct>` / `Vec<[u8]>`) is deferred (ADR 0034
+                // D8, the enum-A1-shaped follow-on).
+                let llvm_ty = self.llvm_basic_type(ty);
+                let val = self
+                    .builder
+                    .build_load(llvm_ty, ptr, "drop_vec")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_struct_value();
+                let data = self
+                    .builder
+                    .build_extract_value(val, 2, "drop_vec_data")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?
+                    .into_pointer_value();
+                self.builder
+                    .build_call(self.free_fn, &[data.into()], "")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            }
             Type::Nullable(NullableInner::Struct(_))
             | Type::Nullable(NullableInner::GenericInstance(_)) => {
                 // `?Struct` / `?GenericInstance` is `{ i1 valid,
@@ -4303,6 +4367,172 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("sentinel_str_eq returns i1"))
     }
 
+    /// D.3 / ADR 0034 D7: lower `vec_new() -> Vec<T>` to an empty vector
+    /// value `{ i64 len = 0, i64 cap = 0, ptr data = null }`. No
+    /// allocation happens until the first `push` (`realloc(null, …)` ==
+    /// `malloc`). `vec_ty` is the concrete `Type::Vec(_)` from the call
+    /// expression (its element pinned from the binding annotation at
+    /// type-check).
+    fn lower_vec_new(&self, vec_ty: Type) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let struct_ty = match self.llvm_basic_type(vec_ty) {
+            BasicTypeEnum::StructType(st) => st,
+            _ => unreachable!("Vec lowers to a {{ i64, i64, ptr }} struct type"),
+        };
+        let zero = self.context.i64_type().const_zero();
+        let null_ptr = self
+            .context
+            .ptr_type(inkwell::AddressSpace::default())
+            .const_null();
+        Ok(struct_ty
+            .const_named_struct(&[zero.into(), zero.into(), null_ptr.into()])
+            .into())
+    }
+
+    /// D.3 / ADR 0034 D7: lower `push(&mut v, x)`. Loads the `Vec`'s
+    /// `{ len, cap, data }` through the `&mut Vec` pointer; grows the
+    /// buffer (`sentinel_realloc` to `max(1, cap*2) * sizeof(T)`) when
+    /// `len == cap`; writes `data[len] = x`; bumps `len`. Returns i64 0
+    /// (a statement-shaped builtin). `elem_ty` is the concrete element
+    /// type (the call's `type_args[0]`), used for `sizeof(T)`.
+    ///
+    /// The grow path stores the new `cap` + `data` back into the Vec's
+    /// fields, so the continuation re-loads `data` from field 2 and gets
+    /// the live buffer in both the grow and no-grow paths — no PHI node.
+    fn lower_push(
+        &mut self,
+        vec_ref: &TypedExpr,
+        elem: &TypedExpr,
+        elem_ty: Type,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        // `&mut v` lowers to the pointer to v's `{ len, cap, data }`
+        // storage; recover the `Vec<T>` pointee type for the field GEPs.
+        let vec_ptr = self.lower_expr(vec_ref, program)?.into_pointer_value();
+        let vec_ty = match vec_ref.ty {
+            Type::Ref(id) => program.refs[id.0 as usize].inner,
+            _ => unreachable!("push's first arg is typed &mut Vec<T>"),
+        };
+        let vec_struct_ty = match self.llvm_basic_type(vec_ty) {
+            BasicTypeEnum::StructType(st) => st,
+            _ => unreachable!("Vec lowers to a struct type"),
+        };
+        let len_ptr = self
+            .builder
+            .build_struct_gep(vec_struct_ty, vec_ptr, 0, "vec_len_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let cap_ptr = self
+            .builder
+            .build_struct_gep(vec_struct_ty, vec_ptr, 1, "vec_cap_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let data_field_ptr = self
+            .builder
+            .build_struct_gep(vec_struct_ty, vec_ptr, 2, "vec_data_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // Evaluate the element value before the grow branch (left-to-
+        // right arg order: `&mut v` then `x`, then the append logic).
+        let elem_val = self.lower_expr(elem, program)?;
+        let elem_llvm_ty = self.llvm_basic_type(elem_ty);
+        let elem_size = elem_llvm_ty
+            .size_of()
+            .expect("non-void basic types have a known size");
+
+        let len = self
+            .builder
+            .build_load(i64_type, len_ptr, "vec_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let cap = self
+            .builder
+            .build_load(i64_type, cap_ptr, "vec_cap")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+
+        // Grow iff len == cap.
+        let need_grow = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, len, cap, "need_grow")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let current_fn = self.current_fn.expect("current_fn set");
+        let grow_bb = self.context.append_basic_block(current_fn, "push_grow");
+        let cont_bb = self.context.append_basic_block(current_fn, "push_cont");
+        self.builder
+            .build_conditional_branch(need_grow, grow_bb, cont_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // grow_bb: new_cap = max(1, cap*2); realloc; store cap + data.
+        self.builder.position_at_end(grow_bb);
+        let old_data = self
+            .builder
+            .build_load(ptr_type, data_field_ptr, "old_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let cap_x2 = self
+            .builder
+            .build_int_mul(cap, i64_type.const_int(2, false), "cap_x2")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let cap_is_zero = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, cap, i64_type.const_zero(), "cap_is_zero")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let new_cap = self
+            .builder
+            .build_select(cap_is_zero, i64_type.const_int(1, false), cap_x2, "new_cap")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let new_size = self
+            .builder
+            .build_int_mul(new_cap, elem_size, "new_size")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let new_data = self
+            .builder
+            .build_call(self.realloc_fn, &[old_data.into(), new_size.into()], "vec_grow")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_realloc returns ptr")
+            .into_pointer_value();
+        self.builder
+            .build_store(cap_ptr, new_cap)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_store(data_field_ptr, new_data)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_unconditional_branch(cont_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // cont_bb: data[len] = x; len += 1. Re-load data so we pick up
+        // the grown buffer (grow path) or the existing one (no-grow).
+        self.builder.position_at_end(cont_bb);
+        let data = self
+            .builder
+            .build_load(ptr_type, data_field_ptr, "vec_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let elem_slot = unsafe {
+            self.builder
+                .build_gep(elem_llvm_ty, data, &[len], "push_slot")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?
+        };
+        self.builder
+            .build_store(elem_slot, elem_val)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let new_len = self
+            .builder
+            .build_int_add(len, i64_type.const_int(1, false), "new_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_store(len_ptr, new_len)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        // `push` is statement-shaped (like `print`): yields i64 0.
+        Ok(i64_type.const_zero().into())
+    }
+
     /// Lower an array indexing `target[index]` per ADR 0015 D3 with
     /// bounds checking per D10. Emits the conditional branch on
     /// `0 <= idx < len`; the false branch calls
@@ -4681,6 +4911,17 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
                 if *id == STR_EQ_FN_ID {
                     return self.lower_str_eq(&args[0], &args[1], program);
+                }
+                // D.3 / ADR 0034 D7: the growable-collection builtins.
+                // `vec_new` builds an empty `{ 0, 0, null }`; `push`
+                // loads the `&mut Vec` storage, grows it if `len == cap`,
+                // writes the element, and bumps `len`. `type_args[0]` is
+                // the concrete element type (for `sizeof(T)`).
+                if *id == VEC_NEW_FN_ID {
+                    return self.lower_vec_new(expr.ty);
+                }
+                if *id == PUSH_FN_ID {
+                    return self.lower_push(&args[0], &args[1], type_args[0], program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted
@@ -6879,7 +7120,7 @@ mod tests {
     fn abi_v1_type_layouts_via_datalayout() {
         use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
         use inkwell::OptimizationLevel;
-        use sentinel_types::{KontId, RefId, TaskId};
+        use sentinel_types::{KontId, RefId, TaskId, VecElem};
 
         // Same target setup as `compile_to_object`.
         Target::initialize_native(&InitializationConfig::default()).expect("init native");
@@ -6969,6 +7210,29 @@ mod tests {
         assert_eq!(td.offset_of_element(&en, 1), Some(8));
         assert_eq!(en.get_field_type_at_index(0).unwrap().into_int_type().get_bit_width(), 32);
         assert!(matches!(en.get_field_type_at_index(1).unwrap(), BasicTypeEnum::PointerType(_)));
+
+        // `Vec<T>` = `{ i64 len, i64 cap, ptr data }` (ADR 0034 D3): the
+        // `[T]` layout with a capacity field inserted, so 24 bytes, align
+        // 8, and the data pointer is FIELD 2 @ offset 16 (not field 1 @ 8
+        // like an array). The element width lives in the heap buffer, so
+        // any element type lowers to the same struct. Field types pin the
+        // order (i64 len, i64 cap, then ptr data).
+        let vec = lower(Type::Vec(VecElem::I64)).into_struct_type();
+        assert_eq!(vec.count_fields(), 3);
+        assert!(!vec.is_packed());
+        assert_eq!(td.get_abi_size(&vec), 24);
+        assert_eq!(td.get_abi_alignment(&vec), 8);
+        assert_eq!(td.offset_of_element(&vec, 0), Some(0));
+        assert_eq!(td.offset_of_element(&vec, 1), Some(8));
+        assert_eq!(td.offset_of_element(&vec, 2), Some(16));
+        assert_eq!(vec.get_field_type_at_index(0).unwrap().into_int_type().get_bit_width(), 64);
+        assert_eq!(vec.get_field_type_at_index(1).unwrap().into_int_type().get_bit_width(), 64);
+        assert!(matches!(vec.get_field_type_at_index(2).unwrap(), BasicTypeEnum::PointerType(_)));
+        // A `Vec<u8>` (the future `String`) lowers to the same struct —
+        // element width is in the heap buffer, not the header.
+        let vec_u8 = lower(Type::Vec(VecElem::U8)).into_struct_type();
+        assert_eq!(vec_u8.count_fields(), 3);
+        assert_eq!(td.get_abi_size(&vec_u8), 24);
 
         // `&T` / `Kont` / `Task` all lower to an opaque `ptr` (8 bytes).
         let r = lower(Type::Ref(RefId(0)));

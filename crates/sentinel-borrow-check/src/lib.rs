@@ -896,7 +896,32 @@ fn walk_expr(
             let signature = program.signature(*id);
             if signature.is_runtime {
                 for arg in args {
-                    walk_expr_lvalue(arg, ctx, errors, program);
+                    match &arg.kind {
+                        // D.3 / ADR 0034 D6: a `&mut`/`&` reference
+                        // argument to a runtime builtin (e.g. the
+                        // `&mut v` of `push(&mut v, x)`) IS a borrow and
+                        // must register through the normal Ref/RefMut
+                        // path — so a `push` participates in the
+                        // shared-XOR-mutable rule (mutable borrow of v).
+                        // This extends the ADR 0033 A3 "builtin args are
+                        // borrowed, not consumed" rule: an explicit
+                        // reference arg is a borrow (mutable for `&mut`),
+                        // not a non-consuming by-value read. No existing
+                        // builtin takes a reference arg, so this only
+                        // affects `push`.
+                        TypedExprKind::Unary(UnaryOp::Ref, _)
+                        | TypedExprKind::Unary(UnaryOp::RefMut, _) => {
+                            walk_expr(arg, ctx, errors, program);
+                        }
+                        // Every other runtime-builtin arg (e.g. `len(a)`,
+                        // `str_eq(a, b)`, and `push`'s by-value element
+                        // `x`) stays a non-consuming lvalue read. NB: a
+                        // Move-typed `push` element (Vec<Struct>) is
+                        // actually consumed; that's deferred with
+                        // droppable-element Vecs (ADR 0034 D8), and the
+                        // MVP's primitive elements are Copy.
+                        _ => walk_expr_lvalue(arg, ctx, errors, program),
+                    }
                 }
             } else {
                 for arg in args {
@@ -1232,6 +1257,9 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         Type::Nullable(inner) => is_copy_nullable_inner(inner),
         Type::Struct(_)
         | Type::Array(_)
+        // Phase D.3 / ADR 0034 D3: a `Vec<T>` owns its heap buffer, so
+        // it is Move (consumed on read), exactly like an array `[T]`.
+        | Type::Vec(_)
         | Type::GenericInstance(_)
         | Type::TypeParam(_)
         | Type::Class(_)
@@ -2061,7 +2089,7 @@ mod tests {
         let typed = check(&resolved).expect("check");
         let (plan, errors) = borrow_check(&typed);
         assert!(errors.is_empty(), "got {errors:?}");
-        // main's fn_id: 7 runtime builtins + consume + main = FnId(8)
+        // main's fn_id: 9 runtime builtins + consume + main = FnId(10)
         // (looked up by name, so robust to the builtin count).
         let main = typed.fns.iter().find(|f| f.name == "main").unwrap();
         let moved = plan.moved_sources_for(main.id);

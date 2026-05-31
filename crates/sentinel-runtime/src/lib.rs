@@ -117,6 +117,44 @@ pub extern "C" fn sentinel_free(ptr: *mut u8) {
     }
 }
 
+/// Resize a heap buffer previously returned by [`sentinel_alloc`] /
+/// [`sentinel_realloc`] (or null) to `new_size` bytes, preserving its
+/// contents up to the smaller of the old and new sizes. D.3 / ADR 0034
+/// D7: the one new runtime symbol backing growable `Vec<T>` — `push`
+/// calls it to grow the data buffer (`realloc` to `max(1, cap*2) *
+/// sizeof(T)` bytes) when `len == cap`. Wraps libc `realloc` directly
+/// for the same reason as `sentinel_alloc`/`free`: the emitted programs
+/// link with the C runtime, so the buffer must be realloc/free-able by
+/// the same allocator.
+///
+/// `realloc(NULL, n)` is defined to behave as `malloc(n)`, so this also
+/// serves the *first* `push` (an empty `Vec` has `data == null`, `cap ==
+/// 0`): codegen grows `0 -> max(1, 0) == 1` and calls this with a null
+/// `ptr`. Aborts on allocation failure or a negative size, matching
+/// [`sentinel_alloc`].
+///
+/// # Safety
+///
+/// `ptr` must have been returned by an earlier `sentinel_alloc` /
+/// `sentinel_realloc` (or be null), and not since freed. The borrow
+/// checker keeps the owning `Vec` live across the call.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_realloc(ptr: *mut u8, new_size: i64) -> *mut u8 {
+    if new_size < 0 {
+        eprintln!("sentinel: bad realloc size {new_size}");
+        std::process::abort();
+    }
+    // SAFETY: ptr is from our allocator or null (realloc(NULL, n) ==
+    // malloc(n)); new_size is non-negative. We check for null below.
+    let new_ptr = unsafe { libc::realloc(ptr as *mut libc::c_void, new_size as usize) } as *mut u8;
+    if new_ptr.is_null() && new_size != 0 {
+        eprintln!("sentinel: reallocation failed (new_size = {new_size})");
+        std::process::abort();
+    }
+    new_ptr
+}
+
 /// Byte-wise equality of two `[u8]` slices — the `str_eq` builtin
 /// (D.2 / ADR 0033 D5; the lexer's keyword/identifier matcher). Equal
 /// length AND equal bytes. Returns a C `bool`, which Rust's `extern
@@ -1023,6 +1061,7 @@ mod tests {
             sentinel_print as *const (),
             sentinel_alloc as *const (),
             sentinel_free as *const (),
+            sentinel_realloc as *const (),
             sentinel_str_eq as *const (),
             sentinel_panic_oob as *const (),
             sentinel_arena_enter as *const (),
@@ -1040,9 +1079,9 @@ mod tests {
             sentinel_scope_register as *const (),
             sentinel_scope_exit as *const (),
         ];
-        // 19 symbols: 18 codegen-declared (incl. D.2's sentinel_str_eq)
-        // + sentinel_kont_panic_resumed.
-        assert_eq!(symbols.len(), 19);
+        // 20 symbols: 19 codegen-declared (incl. D.2's sentinel_str_eq
+        // + D.3's sentinel_realloc) + sentinel_kont_panic_resumed.
+        assert_eq!(symbols.len(), 20);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 

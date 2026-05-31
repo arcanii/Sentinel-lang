@@ -29,7 +29,7 @@ use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, ImplTarget, ResolvedBlock, ResolvedExpr,
     ResolvedExprKind, ResolvedFnDef, ResolvedPattern, ResolvedProgram, ResolvedStmt,
-    ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId,
+    ResolvedStmtKind, StructId, TraitId, TypeParamId, VarId, LEN_FN_ID,
 };
 use sentinel_ast::SelfKind;
 
@@ -71,6 +71,19 @@ pub enum Type {
     Nullable(NullableInner),
     /// `[T]` per ADR 0015 D1. Payload is the element type.
     Array(ArrayElem),
+    /// Phase D.3 / ADR 0034 D3: a growable, owned, mutable vector
+    /// `Vec<T>`. Payload is the element type ([`VecElem`], the same
+    /// flat subset as [`ArrayElem`]). A `Vec<T>` is `[T]` *plus a
+    /// capacity field and mutation* — it lowers to the abi-v1
+    /// `{ i64 len, i64 cap, ptr data }` (the `[T]` layout with a
+    /// capacity inserted) and reuses the array element-typing / move /
+    /// drop machinery, adding only growth (`realloc`) + `push`. It is
+    /// **Move** (owns its heap buffer), like `Array`. Non-generic at
+    /// the D.3 MVP (`Vec` inside a generic fn body — `VecElem::
+    /// TypeParam` — is deferred, alongside the array deferral; ADR
+    /// 0034 D8). `String` = `Vec<u8>` is deferred to D.3 (2/N) with
+    /// the `[u8]`↔`Vec<u8>` bridge (ADR 0034 D5).
+    Vec(VecElem),
     /// Abstract type parameter in the body of a generic fn or
     /// generic struct per ADR 0016 D6. The [`TypeParamId`] (re-
     /// exported from `sentinel_resolve`) is scoped to the
@@ -410,6 +423,61 @@ impl ArrayElem {
     }
 }
 
+/// The base types that can appear inside a `Vec<T>` per ADR 0034 D3.
+/// The **same flat subset** as [`ArrayElem`] (primitives + structs, no
+/// Nullable, no Array, no Vec) — a `Vec<T>` mirrors `[T]`'s element
+/// model so it reuses the array element-typing machinery. `Vec<Vec<T>>`
+/// and `Vec<[T]>` nesting are deferred alongside the `[[T]]` deferral
+/// (ADR 0034 D8 / the ADR 0015 D6 depth-1 limit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VecElem {
+    I64,
+    I32,
+    Bool,
+    /// `Vec<u8>` — the growable byte buffer (the D.3 (2/N) `String`).
+    U8,
+    Struct(StructId),
+    /// `Vec<T>` where T is a generic type parameter (only meaningful
+    /// inside a generic fn body). Deferred at the D.3 MVP per ADR 0034
+    /// D8, but the variant exists so the element subset matches
+    /// `ArrayElem` exactly (the cascade groups Vec with Array).
+    TypeParam(TypeParamId),
+    /// `Vec<Foo<args>>` — vector of a generic-struct instance.
+    GenericInstance(GenericInstanceId),
+}
+
+impl VecElem {
+    /// Promote to the corresponding [`Type`]. Mirrors
+    /// [`ArrayElem::to_type`].
+    pub fn to_type(self) -> Type {
+        match self {
+            VecElem::I64 => Type::I64,
+            VecElem::I32 => Type::I32,
+            VecElem::Bool => Type::Bool,
+            VecElem::U8 => Type::U8,
+            VecElem::Struct(id) => Type::Struct(id),
+            VecElem::TypeParam(id) => Type::TypeParam(id),
+            VecElem::GenericInstance(id) => Type::GenericInstance(id),
+        }
+    }
+
+    /// Apply a TypeParam substitution to this VecElem, mirroring
+    /// [`ArrayElem::substitute`]: substitute through the promoted
+    /// `Type`, then demote back to the flat subset (falling back to
+    /// `self` if substitution would introduce a deferred nesting).
+    pub fn substitute(
+        self,
+        subst: &[Type],
+        instances: &mut Vec<GenericInstanceData>,
+        refs: &mut Vec<RefData>,
+    ) -> VecElem {
+        self.to_type()
+            .substitute(subst, instances, refs)
+            .to_vec_elem()
+            .unwrap_or(self)
+    }
+}
+
 impl Type {
     /// `true` if this is an integer type (`I32`, `I64`, or `U8`).
     /// Used to gate arithmetic-operator typing rules — comparisons
@@ -438,6 +506,12 @@ impl Type {
     /// `true` if this is an array type (`[T]`).
     pub fn is_array(self) -> bool {
         matches!(self, Type::Array(_))
+    }
+
+    /// `true` if this is a growable-vector type (`Vec<T>`). Phase D.3
+    /// / ADR 0034 D3.
+    pub fn is_vec(self) -> bool {
+        matches!(self, Type::Vec(_))
     }
 
     /// `true` if this is a generic type parameter (`T`, `U`, …).
@@ -495,7 +569,10 @@ impl Type {
             // Phase D.1 / ADR 0032: `?Enum` is out of scope at the MVP
             // (NullableInner gains no Enum variant) — `?Enum` shows up
             // only when enums become storable in nullable wrappers.
-            | Type::Enum(_) => None,
+            | Type::Enum(_)
+            // Phase D.3 / ADR 0034 D8: `?Vec<T>` is out of scope
+            // (NullableInner gains no Vec variant).
+            | Type::Vec(_) => None,
         }
     }
 
@@ -534,6 +611,39 @@ impl Type {
             | Type::TraitSelf(_)
             // Phase D.1 / ADR 0032: `[Enum]` is out of scope at the MVP
             // (ArrayElem gains no Enum variant).
+            | Type::Enum(_)
+            // Phase D.3 / ADR 0034 D8: `[Vec<T>]` (array-of-vec) is out
+            // of scope — VecElem/ArrayElem are the flat subset, no
+            // collection nesting at the MVP.
+            | Type::Vec(_) => None,
+        }
+    }
+
+    /// Try to demote this Type to a [`VecElem`] for use as the element
+    /// of a `Vec`. Mirrors [`Type::to_array_elem`]: returns `None` for
+    /// every type outside the flat subset (Array, Vec, Nullable, Ref,
+    /// and the rest), so `Vec<[T]>` / `Vec<Vec<T>>` / `Vec<?T>` /
+    /// `Vec<&T>` are rejected at resolve-type-expr time (ADR 0034 D8).
+    pub fn to_vec_elem(self) -> Option<VecElem> {
+        match self {
+            Type::I64 => Some(VecElem::I64),
+            Type::I32 => Some(VecElem::I32),
+            Type::Bool => Some(VecElem::Bool),
+            // Phase D.3 / ADR 0034 D5: `Vec<u8>` is the growable byte
+            // buffer (the D.3 (2/N) `String`).
+            Type::U8 => Some(VecElem::U8),
+            Type::Struct(id) => Some(VecElem::Struct(id)),
+            Type::TypeParam(id) => Some(VecElem::TypeParam(id)),
+            Type::GenericInstance(id) => Some(VecElem::GenericInstance(id)),
+            Type::Array(_)
+            | Type::Vec(_)
+            | Type::Nullable(_)
+            | Type::Ref(_)
+            | Type::Secret(_)
+            | Type::Kont(_)
+            | Type::Task(_)
+            | Type::Class(_)
+            | Type::TraitSelf(_)
             | Type::Enum(_) => None,
         }
     }
@@ -603,6 +713,16 @@ impl Type {
                 match new_inner.to_array_elem() {
                     Some(new_ae) => Type::Array(new_ae),
                     None => Type::Array(ae),
+                }
+            }
+            // Phase D.3 / ADR 0034: substitute through a Vec's element,
+            // mirroring the Array arm exactly.
+            Type::Vec(ve) => {
+                let inner = ve.to_type();
+                let new_inner = inner.substitute(subst, instances, refs);
+                match new_inner.to_vec_elem() {
+                    Some(new_ve) => Type::Vec(new_ve),
+                    None => Type::Vec(ve),
                 }
             }
             Type::GenericInstance(id) => {
@@ -785,6 +905,7 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
         },
         Type::Nullable(inner) => format!("?{}", type_display(inner.to_type(), program)),
         Type::Array(elem) => format!("[{}]", type_display(elem.to_type(), program)),
+        Type::Vec(elem) => format!("Vec<{}>", type_display(elem.to_type(), program)),
         Type::TypeParam(id) => format!("<T#{}>", id.0),
         Type::GenericInstance(id) => {
             if let Some(p) = program {
@@ -869,6 +990,7 @@ impl std::fmt::Display for Type {
             Type::Struct(id) => write!(f, "<struct#{}>", id.0),
             Type::Nullable(inner) => write!(f, "?{}", inner.to_type()),
             Type::Array(elem) => write!(f, "[{}]", elem.to_type()),
+            Type::Vec(elem) => write!(f, "Vec<{}>", elem.to_type()),
             Type::TypeParam(id) => write!(f, "<T#{}>", id.0),
             Type::GenericInstance(id) => write!(f, "<gi#{}>", id.0),
             Type::Ref(id) => write!(f, "<ref#{}>", id.0),
@@ -1081,6 +1203,42 @@ fn resolve_type_expr_with_scope(
                     type_name: name.clone(),
                     span: to_source_span(&te.span),
                 }),
+                // Phase D.3 / ADR 0034 D2: `Vec<T>` is a builtin generic
+                // type (not a user `class Vec<T>`). Exactly one type
+                // argument, whose resolved type must be in the flat
+                // VecElem subset (primitives + structs). This is the only
+                // generic name resolved here that isn't a user struct.
+                // (`String` = `Vec<u8>` is deferred to D.3 (2/N) with the
+                // `[u8]`<->`Vec<u8>` bridge — ADR 0034 D5.)
+                "Vec" => {
+                    if args.len() != 1 {
+                        return Err(TypeError::TypeArgCountMismatch {
+                            type_name: "Vec".to_string(),
+                            expected: 1,
+                            found: args.len(),
+                            span: to_source_span(&te.span),
+                        });
+                    }
+                    let elem_ty = resolve_type_expr_with_scope(
+                        &args[0],
+                        struct_table,
+                        class_table,
+                        enum_table,
+                        type_param_scope,
+                        instances,
+                        refs,
+                        secrets,
+                        struct_type_param_counts,
+                    )?;
+                    match elem_ty.to_vec_elem() {
+                        Some(ve) => Ok(Type::Vec(ve)),
+                        // Vec<[T]> / Vec<Vec<T>> / Vec<?T> / Vec<&T>:
+                        // outside the flat subset, deferred (D8).
+                        None => Err(TypeError::VecElementNotSupported {
+                            span: to_source_span(&te.span),
+                        }),
+                    }
+                }
                 other => {
                     let struct_id = match struct_table.get(other) {
                         Some(&id) => id,
@@ -2447,6 +2605,20 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// Phase D.3 / ADR 0034 D8: a `Vec<T>` element must be in the flat
+    /// subset (primitives or a struct). `Vec<Vec<T>>`, `Vec<[T]>`,
+    /// `Vec<?T>`, and `Vec<&T>` are deferred — the same depth-1 limit
+    /// as `[T]`'s `ArrayElem`.
+    #[error("`Vec<T>` element type is not supported at the D.3 MVP")]
+    #[diagnostic(
+        code(sentinel::types::vec_element_not_supported),
+        help("a Vec element must be a primitive (i64/i32/bool/u8) or a struct; collection / nullable / reference element types are deferred to a future ADR")
+    )]
+    VecElementNotSupported {
+        #[label("unsupported Vec element type here")]
+        span: miette::SourceSpan,
+    },
+
     /// C1.7 / ADR 0016 D11: `fn main` cannot be generic (the C ABI
     /// is monomorphic; main is the program entry point).
     #[error("`fn main` cannot have type parameters")]
@@ -3375,6 +3547,42 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         is_main: false,
         is_runtime: true,
     });
+    // D.3 / ADR 0034 D5: the growable-collection builtins. Generic over
+    // the element T; typed through the uniform generic-call inference
+    // path (no special-casing in `check_call`, unlike `len`):
+    //   - `vec_new<T>() -> Vec<T>` — T is inferred by seeding the subst
+    //     from the expected return type (the binding annotation), the
+    //     same bidirectional pushdown that types `null` / empty arrays.
+    //   - `push<T>(v: &mut Vec<T>, x: T) -> i64` — T is bound by
+    //     unifying the `&mut Vec<T>` param against the `&mut Vec<i64>`
+    //     argument (the new `(Vec, Vec)` arm in `unify_one` recurses to
+    //     the element). The `&mut Vec<T>` is an interned mutable Ref.
+    let vec_new_sig = &program.fn_signatures[7];
+    typed_signatures.push(TypedFnSignature {
+        id: vec_new_sig.id,
+        name: vec_new_sig.name.clone(),
+        name_span: vec_new_sig.name_span.clone(),
+        type_params: vec![builtin_type_param("T", 0)],
+        param_types: vec![],
+        return_type: Type::Vec(VecElem::TypeParam(TypeParamId(0))),
+        effect_row: vec![],
+        is_main: false,
+        is_runtime: true,
+    });
+    let push_sig = &program.fn_signatures[8];
+    let push_mut_vec_ref =
+        Type::Ref(intern_ref(&mut refs, true, Type::Vec(VecElem::TypeParam(TypeParamId(0)))));
+    typed_signatures.push(TypedFnSignature {
+        id: push_sig.id,
+        name: push_sig.name.clone(),
+        name_span: push_sig.name_span.clone(),
+        type_params: vec![builtin_type_param("T", 0)],
+        param_types: vec![push_mut_vec_ref, Type::TypeParam(TypeParamId(0))],
+        return_type: Type::I64,
+        effect_row: vec![],
+        is_main: false,
+        is_runtime: true,
+    });
 
     for fn_def in &program.fns {
         let resolved_sig = &program.fn_signatures[fn_def.id.0 as usize];
@@ -3886,7 +4094,14 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             }
             let return_type = sig.return_type;
             let body_expected =
-                if return_type.is_nullable() || return_type.is_generic_instance() {
+                if return_type.is_nullable()
+                    || return_type.is_generic_instance()
+                    // D.3 / ADR 0034 D5: push a `Vec<T>` return type down
+                    // into the body tail so `fn f() -> Vec<i64> { vec_new() }`
+                    // infers vec_new's element (the same seeding `?T`/null
+                    // and generic struct literals use).
+                    || return_type.is_vec()
+                {
                     Some(return_type)
                 } else {
                     None
@@ -3956,7 +4171,14 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             }
             let return_type = sig.return_type;
             let body_expected =
-                if return_type.is_nullable() || return_type.is_generic_instance() {
+                if return_type.is_nullable()
+                    || return_type.is_generic_instance()
+                    // D.3 / ADR 0034 D5: push a `Vec<T>` return type down
+                    // into the body tail so `fn f() -> Vec<i64> { vec_new() }`
+                    // infers vec_new's element (the same seeding `?T`/null
+                    // and generic struct literals use).
+                    || return_type.is_vec()
+                {
                     Some(return_type)
                 } else {
                     None
@@ -4241,13 +4463,17 @@ fn check_fn(
     // ADR 0014 D5: push the declared return type down into the body
     // so NullLit / T→?T widening at the tail can resolve against it.
     // We only push for the type-shapes that actually NEED context:
-    // nullables (per ADR 0014 D5) and generic-struct instances (per
+    // nullables (per ADR 0014 D5), generic-struct instances (per
     // ADR 0016 D6 — the literal `Pair { ... }` inside `make_pair<A, B>`
-    // can't synthesise its own type args). Other returns synthesise
-    // freely so the more specific ReturnTypeMismatch fires on
-    // primitive shape errors.
+    // can't synthesise its own type args), and `Vec<T>` (per ADR 0034
+    // D5 — `vec_new()` in tail position can't synthesise its element).
+    // Other returns synthesise freely so the more specific
+    // ReturnTypeMismatch fires on primitive shape errors.
     let body_expected =
-        if return_type.is_nullable() || return_type.is_generic_instance() {
+        if return_type.is_nullable()
+            || return_type.is_generic_instance()
+            || return_type.is_vec()
+        {
             Some(return_type)
         } else {
             None
@@ -4803,6 +5029,11 @@ fn try_substitute(
             let inner = try_substitute(ae.to_type(), subst, instances, refs)?;
             inner.to_array_elem().map(Type::Array)
         }
+        // Phase D.3 / ADR 0034: concrete iff the element is fully bound.
+        Type::Vec(ve) => {
+            let inner = try_substitute(ve.to_type(), subst, instances, refs)?;
+            inner.to_vec_elem().map(Type::Vec)
+        }
         Type::GenericInstance(id) => {
             // Concrete only if every arg is concrete (under
             // current subst). Doesn't re-intern — that's the
@@ -4844,6 +5075,9 @@ fn contains_type_param(
         Type::TypeParam(_) => true,
         Type::Nullable(ni) => contains_type_param(ni.to_type(), instances, refs),
         Type::Array(ae) => contains_type_param(ae.to_type(), instances, refs),
+        // Phase D.3 / ADR 0034: a Vec mentions a TypeParam iff its
+        // element does (mirrors the Array arm).
+        Type::Vec(ve) => contains_type_param(ve.to_type(), instances, refs),
         Type::I64
         | Type::I32
         | Type::U8
@@ -4917,6 +5151,16 @@ fn unify_one(
             unify_one(p.to_type(), a.to_type(), subst, instances, refs)
         }
         (Type::Array(p), Type::Array(a)) => {
+            unify_one(p.to_type(), a.to_type(), subst, instances, refs)
+        }
+        // Phase D.3 / ADR 0034: unify a Vec's element so e.g.
+        // `vec_new<T>() -> Vec<T>` binds T from the expected `Vec<i64>`,
+        // and `push<T>(&mut Vec<T>, T)` binds T from the `&mut Vec<i64>`
+        // arg. WITHOUT this explicit arm the `(p, a) if p == a` wildcard
+        // below would reject `Vec<T>` vs `Vec<i64>` as a Mismatch and the
+        // TypeParam would never bind — the inference path the Vec
+        // builtins depend on.
+        (Type::Vec(p), Type::Vec(a)) => {
             unify_one(p.to_type(), a.to_type(), subst, instances, refs)
         }
         (Type::GenericInstance(p_id), Type::GenericInstance(a_id)) => {
@@ -5003,6 +5247,55 @@ fn check_call(
         "resolve guarantees arity match for FnId({})",
         id.0
     );
+
+    // D.3 / ADR 0034 D5: `len` is the one builtin overloaded over both
+    // `[T]` and `Vec<T>` (both "a collection with a length"). The uniform
+    // generic-call path below unifies a single `[T]` param shape, so a
+    // `Vec<T>` argument would be rejected as a Mismatch — resolve `len`
+    // here instead. Behaviour for an `[T]` argument is preserved exactly,
+    // including the `Mismatch` error on a non-collection arg (the
+    // `len_on_non_array_errors` test pins `Mismatch { got: i64 }`).
+    if id == LEN_FN_ID {
+        let typed = check_expr(
+            &args[0],
+            None,
+            env,
+            signatures,
+            structs,
+            class_decls,
+            enums,
+            instances,
+            refs,
+            secrets,
+            struct_type_param_counts,
+            effect_decls,
+            trait_decls,
+            impl_decls,
+            konts,
+            tasks,
+        )?;
+        let elem = match typed.ty {
+            Type::Array(ae) => ae.to_type(),
+            Type::Vec(ve) => ve.to_type(),
+            other => {
+                return Err(TypeError::Mismatch {
+                    expected: Type::Array(ArrayElem::TypeParam(TypeParamId(0))),
+                    got: other,
+                    span: to_source_span(&args[0].span),
+                });
+            }
+        };
+        return Ok((
+            TypedExprKind::Call {
+                id,
+                callee_span: callee_span.clone(),
+                args: vec![typed],
+                type_args: vec![elem],
+            },
+            Type::I64,
+        ));
+    }
+
     let n_type_params = signature.type_params.len();
     let mut subst: Vec<Option<Type>> = vec![None; n_type_params];
     let mut typed_args: Vec<Option<TypedExpr>> = (0..arity).map(|_| None).collect();
@@ -7475,6 +7768,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "nested array types `[[T]]` are not allowed at C1.6".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::VecElementNotSupported { span } => (
+            "sentinel::types::vec_element_not_supported",
+            "`Vec<T>` element type is not supported at the D.3 MVP".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::GenericMain { span } => (
             "sentinel::types::generic_main",
             "`fn main` cannot have type parameters".to_string(),
@@ -7788,9 +8086,10 @@ mod tests {
         assert_eq!(main.body.ty, Type::I64);
         // Signature table: FnId(0)=print, (1)=unwrap_or, (2)=is_some,
         // (3)=len, (4)=str_eq, (5)=u8_to_i64, (6)=i64_to_u8 (D.2 / ADR
-        // 0033 D5), (7)=main. The generic builtins occupy FnId(1..=3)
-        // per ADR 0014 D9 + ADR 0015 D4; the byte-string builtins
-        // FnId(4..=6) per ADR 0033 D5.
+        // 0033 D5), (7)=vec_new, (8)=push (D.3 / ADR 0034 D5), (9)=main.
+        // The generic builtins occupy FnId(1..=3) per ADR 0014 D9 + ADR
+        // 0015 D4; the byte-string builtins FnId(4..=6) per ADR 0033 D5;
+        // the collection builtins FnId(7..=8) per ADR 0034 D5.
         assert_eq!(p.fn_signatures[0].name, "print");
         assert_eq!(p.fn_signatures[0].param_types, vec![Type::I64]);
         assert_eq!(p.fn_signatures[1].name, "unwrap_or");
@@ -7799,7 +8098,9 @@ mod tests {
         assert_eq!(p.fn_signatures[4].name, "str_eq");
         assert_eq!(p.fn_signatures[5].name, "u8_to_i64");
         assert_eq!(p.fn_signatures[6].name, "i64_to_u8");
-        assert_eq!(p.fn_signatures[7].name, "main");
+        assert_eq!(p.fn_signatures[7].name, "vec_new");
+        assert_eq!(p.fn_signatures[8].name, "push");
+        assert_eq!(p.fn_signatures[9].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 
@@ -9886,5 +10187,124 @@ fn main() -> i64 {
             "fn f(c: secret u8) -> secret u8 { c }\nfn main() -> i64 { 0 }",
         );
         assert!(matches!(fn_body_ty(&p, "f"), Type::Secret(_)));
+    }
+
+    // ----- D.3 / ADR 0034: growable collections (`Vec<T>`) -----
+
+    #[test]
+    fn vec_new_infers_element_from_return_type() {
+        // ADR 0034 D5: `vec_new<T>() -> Vec<T>` — T pinned from the
+        // expected return type (the same bidirectional seeding as `null`).
+        let p = check_ok("fn f() -> Vec<i64> { vec_new() }\nfn main() -> i64 { 0 }");
+        assert_eq!(fn_body_ty(&p, "f"), Type::Vec(VecElem::I64));
+    }
+
+    #[test]
+    fn vec_new_infers_u8_element() {
+        // ADR 0034 D5: `Vec<u8>` (the future `String`) — element `u8`.
+        let p = check_ok("fn f() -> Vec<u8> { vec_new() }\nfn main() -> i64 { 0 }");
+        assert_eq!(fn_body_ty(&p, "f"), Type::Vec(VecElem::U8));
+    }
+
+    #[test]
+    fn vec_new_infers_element_from_let_annotation() {
+        // The let-annotation pushdown also pins the element (as for `[]`).
+        let p = check_ok("fn main() -> i64 { let v: Vec<i64> = vec_new(); 0 }");
+        match &p.main().body.stmts[0].kind {
+            TypedStmtKind::Let { ty, .. } => assert_eq!(*ty, Type::Vec(VecElem::I64)),
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vec_new_without_annotation_is_ambiguous() {
+        // No annotation, no args → T cannot be inferred (like `null` / `[]`).
+        let err = check_err("fn main() -> i64 { let v = vec_new(); 0 }");
+        assert!(matches!(err, TypeError::AmbiguousTypeArg { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn push_typechecks_and_returns_i64() {
+        // ADR 0034 D5: `push<T>(&mut Vec<T>, T) -> i64` — T bound from
+        // the `&mut Vec<i64>` arg; the call is statement-shaped (i64).
+        let p = check_ok(
+            "fn f() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 5) }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::I64);
+    }
+
+    #[test]
+    fn push_element_type_mismatch_rejected() {
+        // Pushing a `bool` into a `Vec<i64>`: T is bound to i64 by the
+        // `&mut Vec<i64>` arg, then to bool by the element → conflict.
+        let err = check_err(
+            "fn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, true); 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::TypeArgInferenceConflict { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn len_accepts_vec() {
+        // ADR 0034 D5: `len` is overloaded over `[T]` and `Vec<T>`.
+        let p = check_ok(
+            "fn f() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 1); len(v) }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::I64);
+    }
+
+    #[test]
+    fn push_on_immutable_vec_rejected() {
+        // ADR 0034 D6: `push` takes `&mut v`, so `v` must be `let mut`.
+        let err = check_err(
+            "fn main() -> i64 { let v: Vec<i64> = vec_new(); push(&mut v, 1); 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::BorrowMutOfImmutable { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn vec_of_struct_element_typechecks() {
+        // ADR 0034 D3: a struct is in the flat VecElem subset.
+        let p = check_ok(
+            "struct P { x: i64 }\nfn f() -> Vec<P> { vec_new() }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(fn_body_ty(&p, "f"), Type::Vec(VecElem::Struct(_))));
+    }
+
+    #[test]
+    fn vec_of_array_element_rejected() {
+        // ADR 0034 D8: `Vec<[i64]>` is outside the flat subset (deferred).
+        let err = check_err("fn main() -> i64 { let v: Vec<[i64]> = vec_new(); 0 }");
+        assert!(
+            matches!(err, TypeError::VecElementNotSupported { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nested_vec_element_rejected() {
+        // ADR 0034 D8: `Vec<Vec<i64>>` nesting is deferred.
+        let err = check_err("fn main() -> i64 { let v: Vec<Vec<i64>> = vec_new(); 0 }");
+        assert!(
+            matches!(err, TypeError::VecElementNotSupported { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn vec_wrong_type_arg_count_rejected() {
+        // `Vec<i64, bool>` — `Vec` takes exactly one type argument.
+        let err = check_err("fn main() -> i64 { let v: Vec<i64, bool> = vec_new(); 0 }");
+        assert!(
+            matches!(err, TypeError::TypeArgCountMismatch { .. }),
+            "got {err:?}"
+        );
     }
 }

@@ -88,6 +88,21 @@ pub const U8_TO_I64_FN_ID: FnId = FnId(5);
 /// (index/byte construction). Codegen at (4/N).
 pub const I64_TO_U8_FN_ID: FnId = FnId(6);
 
+/// D.3 / ADR 0034 D5: `vec_new<T>() -> Vec<T>` — an empty growable
+/// vector (`{ len: 0, cap: 0, data: null }`; no allocation). Generic
+/// over the element T, which is inferred from the binding's annotation
+/// (the same bidirectional pushdown as `null`'s `?T` / an empty array
+/// literal). Codegen builds the `{ 0, 0, null }` struct at D.3 (1/N).
+pub const VEC_NEW_FN_ID: FnId = FnId(7);
+
+/// D.3 / ADR 0034 D5: `push<T>(v: &mut Vec<T>, x: T) -> i64` — append
+/// `x` to `v`, growing the heap buffer (`realloc` to `max(1, cap*2)`)
+/// when `len == cap`. The first heap-mutation primitive; takes `v` by
+/// `&mut` so it participates in the shared-XOR-mutable borrow rule.
+/// Returns `i64` 0 (a statement-shaped builtin like `print`). Codegen
+/// at D.3 (1/N).
+pub const PUSH_FN_ID: FnId = FnId(8);
+
 /// Identifier for a struct declaration. Added at C1.4 per ADR 0013
 /// D4 / D5; unique per-program, assigned in source order starting
 /// at 0.
@@ -1757,11 +1772,35 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         is_runtime: true,
     };
     next_fn_id += 1;
+    // D.3 / ADR 0034 D5: the growable-collection builtins. Generic over
+    // the element T (`type_params_count: 1`), typed in sentinel-types
+    // via the uniform generic-call inference path (vec_new's T pinned
+    // from the binding annotation; push's from the `&mut Vec<T>` arg).
+    let vec_new_sig = FnSignature {
+        id: FnId(next_fn_id),
+        name: "vec_new".to_string(),
+        name_span: None,
+        arity: 0,
+        type_params_count: 1,
+        is_main: false,
+        is_runtime: true,
+    };
+    next_fn_id += 1;
+    let push_sig = FnSignature {
+        id: FnId(next_fn_id),
+        name: "push".to_string(),
+        name_span: None,
+        arity: 2,
+        type_params_count: 1,
+        is_main: false,
+        is_runtime: true,
+    };
+    next_fn_id += 1;
 
     let mut fn_table: HashMap<String, FnId> = HashMap::new();
     let mut signatures: Vec<FnSignature> = vec![
         print_sig, unwrap_or_sig, is_some_sig, len_sig, str_eq_sig, u8_to_i64_sig,
-        i64_to_u8_sig,
+        i64_to_u8_sig, vec_new_sig, push_sig,
     ];
     fn_table.insert("print".to_string(), PRINT_FN_ID);
     fn_table.insert("unwrap_or".to_string(), UNWRAP_OR_FN_ID);
@@ -1770,6 +1809,8 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     fn_table.insert("str_eq".to_string(), STR_EQ_FN_ID);
     fn_table.insert("u8_to_i64".to_string(), U8_TO_I64_FN_ID);
     fn_table.insert("i64_to_u8".to_string(), I64_TO_U8_FN_ID);
+    fn_table.insert("vec_new".to_string(), VEC_NEW_FN_ID);
+    fn_table.insert("push".to_string(), PUSH_FN_ID);
 
     // Pass 1: collect every fn into the table.
     for fn_def in &program.fns {
@@ -3770,8 +3811,9 @@ mod tests {
         assert!(p.main().signature(&p).is_main);
         // FnId(0) = print, FnId(1) = unwrap_or, FnId(2) = is_some,
         // FnId(3) = len, FnId(4..=6) = str_eq/u8_to_i64/i64_to_u8 (D.2),
-        // FnId(7) = main (the first user fn).
-        assert_eq!(p.main().id, FnId(7));
+        // FnId(7..=8) = vec_new/push (D.3), FnId(9) = main (the first
+        // user fn).
+        assert_eq!(p.main().id, FnId(9));
         assert_eq!(p.fn_signatures[0].name, "print");
         assert!(p.fn_signatures[0].is_runtime);
     }
@@ -3811,12 +3853,12 @@ mod tests {
             },
             other => panic!("expected Binary, got {other:?}"),
         }
-        // FnId(0..=6) = the 7 runtime builtins (print, unwrap_or,
-        // is_some, len, str_eq, u8_to_i64, i64_to_u8); FnId(7) = double
-        // (first user fn), FnId(8) = main.
+        // FnId(0..=8) = the 9 runtime builtins (print, unwrap_or,
+        // is_some, len, str_eq, u8_to_i64, i64_to_u8, vec_new, push);
+        // FnId(9) = double (first user fn), FnId(10) = main.
         let main = p.main();
         match &main.body.tail.kind {
-            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(7)),
+            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(9)),
             other => panic!("expected Call, got {other:?}"),
         }
     }

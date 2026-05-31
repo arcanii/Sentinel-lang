@@ -1,0 +1,48 @@
+// D.3 (1/N) / ADR 0034: growable collections — `Vec<T>`.
+//
+// Exercises the growable-vector MVP end to end:
+//   - a `Vec<i64>` built by repeated `push` (forcing several `realloc`
+//     growths: cap 0 -> 1 -> 2 -> 4 -> 8 across 6 pushes),
+//   - a `Vec<u8>` built by char-literal pushes (sizeof(T) == 1),
+//   - a `Vec<i64>` *moved out* of a helper fn (the returned-Vec escape
+//     path: the buffer is not freed in `build_digits`, it transfers to
+//     the caller, which frees it),
+//   - `len(v)` — the length builtin, overloaded to accept a `Vec<T>` as
+//     well as a `[T]`.
+//
+// Every `Vec`'s heap buffer is freed at its owning scope's exit drop, so
+// the program is leak-free under `leaks --atExit` (the realloc'd buffer
+// is a single libc allocation; `vec_new`'s empty `{0,0,null}` frees as a
+// no-op). `v[i]` element read + `pop` + the `Vec<u8>`->`[u8]` bridge are
+// D.3 (2/N), so this fixture verifies via `len` (push N -> len == N).
+//
+// Exit = len(nums) * 10 + len(bytes) + len(digits)
+//      =       6     * 10 +     4     +      3       = 67.
+
+fn build_digits() -> Vec<i64> {
+    let mut v: Vec<i64> = vec_new();
+    push(&mut v, 11);
+    push(&mut v, 22);
+    push(&mut v, 33);
+    v
+}
+
+fn main() -> i64 {
+    let mut nums: Vec<i64> = vec_new();
+    push(&mut nums, 1);
+    push(&mut nums, 2);
+    push(&mut nums, 3);
+    push(&mut nums, 4);
+    push(&mut nums, 5);
+    push(&mut nums, 6);
+
+    let mut bytes: Vec<u8> = vec_new();
+    push(&mut bytes, 'l');
+    push(&mut bytes, 'e');
+    push(&mut bytes, 't');
+    push(&mut bytes, '!');
+
+    let digits: Vec<i64> = build_digits();
+
+    len(nums) * 10 + len(bytes) + len(digits)
+}

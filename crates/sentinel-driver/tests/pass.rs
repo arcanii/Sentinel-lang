@@ -1186,3 +1186,16 @@ fn pass_c5d2_u8_unsigned() {
     // (200 / 100 == 2, not signed 0). Exit 42 iff both are correct.
     assert_eq!(run_exit("c5d2_u8_unsigned.sentinel"), 42);
 }
+
+#[test]
+fn pass_c5d3_collections() {
+    // ADR 0034 D9/D10 (1/N) phase-go: growable `Vec<T>` end to end.
+    // A `Vec<i64>` grown across 6 pushes (multiple `realloc` growths), a
+    // `Vec<u8>` built from char-literal pushes, and a `Vec<i64>` moved
+    // out of a helper (the returned-Vec escape path). Verified via `len`
+    // (push N -> len == N; `v[i]` / `pop` / the Vec<u8>->[u8] bridge are
+    // D.3 (2/N)). Every Vec buffer is freed at its scope-exit drop —
+    // leak-free under `leaks --atExit` (verified separately).
+    // len(nums)*10 + len(bytes) + len(digits) = 6*10 + 4 + 3 = 67.
+    assert_eq!(run_exit("c5d3_collections.sentinel"), 67);
+}
