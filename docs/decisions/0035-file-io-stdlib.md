@@ -1,14 +1,15 @@
 # ADR 0035: Phase D.4 — file I/O via a minimal stdlib (`read_file` / `write_file`)
 
-Status: PROPOSED (D.4 **(1/N) landed** — `read_file` + `write_file` end to end;
-the 3 OPEN DESIGN POINTS were resolved at the proposed defaults; see
-Amendments). The fourth Phase D sub-phase ADR under ADR 0031 (Phase D kickoff)
-D4 item 4. After sum types (D.1 / ADR 0032), strings + a byte type (D.2 / ADR
-0033), and growable collections (D.3 / ADR 0034), **file I/O** is next: a
-self-hosting compiler must **read its source file** and **write its output
-artifact**, and the 1.0 + D.1–D.3 language has no I/O beyond `sentinel_print`
-(one i64 to stdout). Flips to ACCEPTED-WITH-AMENDMENTS when D.4 (2/N) closes
-(`print_bytes` + the flip).
+Status: **ACCEPTED-WITH-AMENDMENTS** — the file-I/O MVP is complete (D.4 (1/N)
+`read_file` + `write_file`; D.4 (2/N) `print_bytes`), compiling + running end to
+end, leak-free. The 3 OPEN DESIGN POINTS were resolved at the proposed defaults;
+deviations are recorded under Amendments. The fourth Phase D sub-phase ADR under
+ADR 0031 (Phase D kickoff) D4 item 4. After sum types (D.1 / ADR 0032), strings +
+a byte type (D.2 / ADR 0033), and growable collections (D.3 / ADR 0034), **file
+I/O** landed: a self-hosting compiler can now **read its source file** and
+**write its output artifact** (the 1.0 + D.1–D.3 language had no I/O beyond
+`sentinel_print`). Out-of-scope items (D8 — a recoverable error model, the `Io`
+effect row, streaming / handles, `read_stdin`, directories) remain future work.
 
 Date: 2026-05-31
 Related:
@@ -296,6 +297,26 @@ deferred). Deviations from this ADR's letter:
 - **Leak gotcha (inherited).** Inline string-literal *arguments* to `read_file` /
   `write_file` leak the temp (the pre-existing ADR 0033 A2 temporary-drop gap) —
   the phase-go binds every path/payload, as a real driver would.
+
+### D.4 (2/N) — `print_bytes` (landed, MVP complete)
+
+`print_bytes(data: [u8]) -> i64` writes a byte array to stdout — the byte/string
+companion to `print` (one i64). The `write_file` template minus the path:
+`sentinel_print_bytes(data_ptr, data_len)`, a runtime builtin (FnId 13; main 13
+-> 14), arg borrowed (ADR 0033 A3). abi-v1 now 23 symbols.
+
+- **B1 — exact bytes, no added newline, explicit flush.** `print_bytes` writes
+  exactly `data_len` bytes (unlike `print`, which appends `\n`); the caller
+  includes any newline. The runtime `write_all`s then **flushes** stdout, so the
+  bytes are visible before the program exits via its C-ABI `main` return and
+  interleave correctly with `print`'s `println!` (shared `std::io::stdout`) —
+  verified with `od -c` (`print_bytes("AB"); print(7); print_bytes("AB")` →
+  `AB7\nAB`). The whole-program flush behaviour that already makes `print`'s
+  output reach a piped stdout (the `c04_print_*` tests) covers this too.
+- **MVP complete.** `read_file` + `write_file` + `print_bytes` close the D.4
+  surface (D1/D4); everything else is D8-deferred. The comprehensive phase-go
+  `c5d4_file_io` round-trips a file AND `print_bytes` the read-back content,
+  asserting **both** exit 5 AND stdout `"hello"`, 0 leaks.
 
 ## Revisit
 

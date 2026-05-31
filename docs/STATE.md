@@ -14,9 +14,33 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D.4 — file I/O via a minimal stdlib — (1/N) COMPLETE
-(ADR 0035 PROPOSED; (1/N) landed).** Post-1.0, **Phase D (self-hosting) is
-underway** (ADR 0031 — a language/stdlib build-out). After D.1 (sum types), D.2
+Last updated: **Phase D.4 — file I/O via a minimal stdlib — MVP COMPLETE
+(1/N + 2/N; ADR 0035 → ACCEPTED-WITH-AMENDMENTS).** Post-1.0, **Phase D
+(self-hosting) is underway** (ADR 0031 — a language/stdlib build-out). The fourth
+prerequisite — **file I/O** — now compiles + runs end to end, leak-free: a
+self-hosting compiler can read its source + write its artifact. **File I/O =
+runtime builtins** (like `print`), **NOT** the algebraic-effect/handler machinery
+(ADR 0035 D2 — effects are resumable user computations; OS I/O is irreversible
+side effects, and the effect-check forbids an effectful `main`; this amends
+ADR 0031 D4's "effects + handlers" framing). **(1/N)** landed
+**`read_file([u8]) -> [u8]`** (read a whole file into an owned byte array;
+`std::fs::read` + copy into a `sentinel_alloc`'d buffer freed at scope-exit drop;
+count via out-param) and **`write_file([u8], [u8]) -> i64`** (create/truncate +
+write). **(2/N)** lands **`print_bytes([u8]) -> i64`** (write a `[u8]` to stdout —
+the byte companion to `print`; exact bytes, no newline, flushed). All three are
+non-generic `[u8]` runtime builtins (the `str_eq` template), **panic-on-failure**
+(D5), backed by `std::fs`-based `sentinel_read_file` / `sentinel_write_file` /
+`sentinel_print_bytes` (abi-v1 now 23 symbols). Builtins are FnId 0..=13
+(read_file=11, write_file=12, print_bytes=13; main → 14). Phase-go
+`tests/pass/c5d4_file_io.sentinel` round-trips a file (write → read → `str_eq` + a
+`back[i]` check + `len`) AND `print_bytes` the content → **exit 5, stdout
+"hello", 0 leaks** (`leaks --atExit`); a missing file aborts (exit 134). DEFERRED
+(ADR 0035 D8): a recoverable error model (`?[u8]`/`Result`), the `Io` effect-row
+promotion, streaming / file handles / `seek`, `read_stdin`, directories / `stat`,
+append, `secret` I/O. **1341 tests, four-check green. Phase D.4 MVP closes.**
+
+Pre-D.4 context: **Phase D.4 (1/N)** landed `read_file` + `write_file`; the
+fourth prerequisite. After D.1 (sum types), D.2
 (strings + `u8`), and D.3 (growable `Vec<T>`), the fourth prerequisite — **file
 I/O** — opens: a self-hosting compiler must read its source + write its
 artifact. **File I/O = runtime builtins** (like `print`), **NOT** the
