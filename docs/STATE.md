@@ -14,9 +14,33 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D.3 — growable collections (`Vec<T>`) — MVP COMPLETE
-(1/N + 2/N; ADR 0034 → ACCEPTED-WITH-AMENDMENTS).** Post-1.0, **Phase D
-(self-hosting) is underway** (ADR 0031 — a language/stdlib build-out). The third
+Last updated: **Phase D.4 — file I/O via a minimal stdlib — (1/N) COMPLETE
+(ADR 0035 PROPOSED; (1/N) landed).** Post-1.0, **Phase D (self-hosting) is
+underway** (ADR 0031 — a language/stdlib build-out). After D.1 (sum types), D.2
+(strings + `u8`), and D.3 (growable `Vec<T>`), the fourth prerequisite — **file
+I/O** — opens: a self-hosting compiler must read its source + write its
+artifact. **File I/O = runtime builtins** (like `print`), **NOT** the
+algebraic-effect/handler machinery (ADR 0035 D2 — effects are resumable user
+computations; OS I/O is irreversible side effects, and the effect-check forbids
+an effectful `main`; this amends ADR 0031 D4's "effects + handlers" framing).
+**(1/N)** lands **`read_file(path: [u8]) -> [u8]`** (read a whole file into an
+owned byte array — the runtime `std::fs::read`s it, copies into a
+`sentinel_alloc`'d buffer freed at scope-exit drop, returns the count via an
+out-param) and **`write_file(path: [u8], data: [u8]) -> i64`** (create/truncate
++ write; args borrowed). Both are non-generic `[u8]` runtime builtins (the
+`str_eq` template), **panic-on-failure** (ADR 0035 D5; abort like OOB/bad-alloc),
+backed by new libc-/`std::fs`-based `sentinel_read_file` / `sentinel_write_file`
+symbols (abi-v1 now 22 symbols). Builtins are now FnId 0..=12 (read_file=11,
+write_file=12; main → 13). Phase-go `tests/pass/c5d4_file_io.sentinel` round-trips
+"hello" (write → read → `str_eq` + a `back[i]` byte check + `len`) at **exit 5, 0
+leaks** (`leaks --atExit`); the missing-file abort exits 134 with a clear
+message. DEFERRED (ADR 0035 D8): a recoverable error model (`?[u8]`/`Result`),
+the `Io` effect-row promotion, streaming / file handles / `seek`, `read_stdin`,
+directories / `stat`, append, `secret` I/O. **1339 tests, four-check green. Phase
+D.4 (1/N) lands** (`print_bytes` + the ADR flip are (2/N)).
+
+Pre-D.4 context: **Phase D.3 — growable collections (`Vec<T>`) — MVP COMPLETE
+(1/N + 2/N; ADR 0034 → ACCEPTED-WITH-AMENDMENTS).** The third
 prerequisite — **growable collections** — now compiles + runs end to end,
 leak-free. A `Vec<T>` IS `[T]` + a capacity field + mutation
 (`Type::Vec(VecElem)` mirrors `Type::Array(ArrayElem)`; `{ i64 len, i64 cap, ptr

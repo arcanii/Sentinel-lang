@@ -1,12 +1,14 @@
 # ADR 0035: Phase D.4 — file I/O via a minimal stdlib (`read_file` / `write_file`)
 
-Status: PROPOSED — the fourth Phase D sub-phase ADR under ADR 0031 (Phase D
-kickoff) D4 item 4. After sum types (D.1 / ADR 0032), strings + a byte type
-(D.2 / ADR 0033), and growable collections (D.3 / ADR 0034), **file I/O** is
-next: a self-hosting compiler must **read its source file** and **write its
-output artifact**, and the 1.0 + D.1–D.3 language has no I/O beyond
-`sentinel_print` (one i64 to stdout). Flips to ACCEPTED(-WITH-AMENDMENTS) as the
-sub-phases land.
+Status: PROPOSED (D.4 **(1/N) landed** — `read_file` + `write_file` end to end;
+the 3 OPEN DESIGN POINTS were resolved at the proposed defaults; see
+Amendments). The fourth Phase D sub-phase ADR under ADR 0031 (Phase D kickoff)
+D4 item 4. After sum types (D.1 / ADR 0032), strings + a byte type (D.2 / ADR
+0033), and growable collections (D.3 / ADR 0034), **file I/O** is next: a
+self-hosting compiler must **read its source file** and **write its output
+artifact**, and the 1.0 + D.1–D.3 language has no I/O beyond `sentinel_print`
+(one i64 to stdout). Flips to ACCEPTED-WITH-AMENDMENTS when D.4 (2/N) closes
+(`print_bytes` + the flip).
 
 Date: 2026-05-31
 Related:
@@ -262,6 +264,39 @@ syscall-ABI layer.
 - No effect-row change (I/O builtins stay effect-free like `print`), so existing
   programs + an effect-free `main` keep type-checking unchanged.
 
+## Amendments
+
+Recorded as the sub-phases land; the ADR stays PROPOSED until D.4 (2/N) closes,
+then flips to ACCEPTED-WITH-AMENDMENTS.
+
+### D.4 (1/N) — `read_file` + `write_file` (landed)
+
+End to end: a write-then-read-back round-trip + exact-byte fidelity + the
+missing-file abort, leak-free under `leaks --atExit`
+(`tests/pass/c5d4_file_io.sentinel`, exit 5). The 3 OPEN DESIGN POINTS were
+**resolved at the proposed defaults** (effects-vs-builtins → builtins; error
+model → panic-on-failure; surface → `read_file` + `write_file`, `read_stdin`
+deferred). Deviations from this ADR's letter:
+
+- **A1 — the runtime uses Rust `std::fs`, not raw libc `fopen`/`fread`.** D6
+  sketched `fopen`/`fread`/`fwrite`/`fclose`; the implementation uses
+  `std::fs::read` / `std::fs::write` (the runtime is a Rust crate that already
+  links `std`), which is simpler + handles the error/size/EOF cases. `read_file`
+  then **copies** the bytes into a `sentinel_alloc`'d (libc-`malloc`) buffer so
+  the caller's scope-exit `Type::Array` drop frees it with `sentinel_free` (the
+  buffer must be libc-owned; the one extra copy is acceptable). Paths build a
+  Unix `OsStr` from the raw `[u8]` (non-UTF-8 paths OK), aborting on an embedded
+  NUL.
+- **A2 — ABI option (a) chosen.** `sentinel_read_file(path_ptr, path_len,
+  out_len: *mut i64) -> data_ptr` (return the buffer, write the count to the
+  out-param), per the D6 recommendation — no struct-return ABI.
+- **`print_bytes` deferred to (2/N)** (the close), with the abi-v1 flip.
+- **FnId base.** `read_file` / `write_file` are builtins FnId 11 / 12; user fns
+  now start at FnId 13 (main 11 -> 13); the hardcoded-FnId test sites shifted.
+- **Leak gotcha (inherited).** Inline string-literal *arguments* to `read_file` /
+  `write_file` leak the temp (the pre-existing ADR 0033 A2 temporary-drop gap) —
+  the phase-go binds every path/payload, as a real driver would.
+
 ## Revisit
 
 PROPOSED until D.4 closes. Triggers:
@@ -274,14 +309,14 @@ PROPOSED until D.4 closes. Triggers:
 - **D8**: bring `read_stdin` / directories / `stat` forward as the self-host
   driver needs them.
 
-## OPEN DESIGN POINTS (settle before D.4 (1/N))
+## OPEN DESIGN POINTS — RESOLVED (at the proposed defaults, D.4 (1/N))
 
-1. **Effects-vs-builtins (D2).** This ADR proposes **runtime builtins**, amending
-   ADR 0031 D4's "effects + handlers." Confirm (or, if a runtime-provided `Io`
-   handler is wanted, that is a much larger sub-phase — flag it).
-2. **Error model (D5).** Proposed: **panic-on-failure** for the MVP. Confirm vs.
-   blocking the whole phase on a recoverable `?[u8]` / `Result` (which pulls in
-   D.1b).
-3. **MVP surface (D4/D8).** Proposed: `read_file` + `write_file` (+ `print_bytes`
-   in (2/N)). Confirm whether `read_stdin` belongs in the MVP (a self-host driver
-   may read source from a path, not stdin).
+All three were resolved at the proposed defaults when (1/N) landed:
+
+1. **Effects-vs-builtins (D2).** → **runtime builtins** (amending ADR 0031 D4's
+   "effects + handlers"). A runtime-provided `Io` handler would be a much larger
+   sub-phase; deferred (D3).
+2. **Error model (D5).** → **panic-on-failure** for the MVP. A recoverable
+   `?[u8]` / `Result` is deferred (it pulls in D.1b generic enums).
+3. **MVP surface (D4/D8).** → `read_file` + `write_file` (1/N), `print_bytes`
+   (2/N). `read_stdin` deferred (a self-host driver reads source from a path).
