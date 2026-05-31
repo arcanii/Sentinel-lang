@@ -1,11 +1,14 @@
 # ADR 0034: Phase D.3 — growable collections (`Vec<T>`; `String` = `Vec<u8>`)
 
-Status: PROPOSED — the third Phase D sub-phase ADR under ADR 0031 (Phase D
-kickoff) D4 item 3. After sum types (D.1 / ADR 0032) and strings + a byte type
-(D.2 / ADR 0033), **growable collections** are next: a lexer accumulates an
-identifier/number byte-by-byte and a parser accumulates a list of tokens / AST
-nodes, neither of which the fixed-size `[T]` array can express (no `push`, no
-growth). Flips to ACCEPTED(-WITH-AMENDMENTS) as the sub-phases land.
+Status: PROPOSED (D.3 **(1/N) landed** — `Type::Vec` + `vec_new`/`push`/`len`
+end to end; see Amendments). The third Phase D sub-phase ADR under ADR 0031
+(Phase D kickoff) D4 item 3. After sum types (D.1 / ADR 0032) and strings + a
+byte type (D.2 / ADR 0033), **growable collections** are next: a lexer
+accumulates an identifier/number byte-by-byte and a parser accumulates a list of
+tokens / AST nodes, neither of which the fixed-size `[T]` array can express (no
+`push`, no growth). Stays PROPOSED until D.3 (3/N) closes, then flips to
+ACCEPTED-WITH-AMENDMENTS; sub-phase deviations are recorded under Amendments as
+they land.
 
 Date: 2026-05-31
 Related:
@@ -276,6 +279,59 @@ reason. A broker growth-arena is a measured later optimisation.
 ### Neutral
 - No effect on existing programs (additive; `repro.rs` byte-identical for pre-D.3
   fixtures — an unused `Vec` runtime declaration emits nothing).
+
+## Amendments
+
+Recorded as the sub-phases land; the ADR stays PROPOSED until D.3 (3/N) closes,
+then flips to ACCEPTED-WITH-AMENDMENTS.
+
+### D.3 (1/N) — `Type::Vec` + `vec_new` / `push` / `len` (landed)
+
+End to end: a growable `Vec<u8>` / `Vec<i64>` builds + measures, leak-free under
+`leaks --atExit` (`tests/pass/c5d3_collections.sentinel`, exit 67). Deviations
+from this ADR's letter:
+
+- **A1 — `String` deferred to (2/N).** D5 recommends `String` = `Vec<u8>` as a
+  thin alias. Confirmed but deferred: in (1/N) a string literal still types to
+  `[u8]` and the `[u8]`↔`Vec<u8>` bridge is (2/N), so recognising the `String`
+  name now would make `let s: String = "hi"` a `Mismatch`. The alias lands in
+  (2/N) alongside the bridge so `String` is ergonomic the moment it appears.
+  (1/N) is plain `Vec<u8>` / `Vec<i64>`.
+- **A2 — return-type pushdown extended to `Vec`.** `vec_new()` infers its
+  element from the expected type. The body-tail expected-type seeding (which fed
+  `null` / generic struct literals) only fired for `Nullable` / `GenericInstance`
+  return types; `Type::Vec` was added (three sites: free fn / method / trait
+  method) so `fn f() -> Vec<i64> { vec_new() }` infers, matching the `let`-
+  annotation path.
+- **A3 — `len` overload is a contained special-case.** D5's "reuse / extend
+  `len`" is an early `id == LEN_FN_ID` branch in `check_call` accepting `[T]` or
+  `Vec<T>` (the uniform generic path unifies one param shape only). The `[T]`
+  behaviour — including the `Mismatch` on a non-collection arg — is preserved
+  exactly. `vec_new` / `push` need NO special-case: they flow through the uniform
+  path (an explicit `(Vec, Vec)` arm in `unify_one` binds the element).
+- **A4 — `sentinel_realloc`, not `sentinel_vec_grow`.** D7 offered a Vec-specific
+  grow helper OR a realloc extern; the plainer `sentinel_realloc(ptr, new_size)
+  -> ptr` was chosen (codegen computes `max(1, cap*2) * sizeof(T)` inline).
+  `realloc(null, n) == malloc(n)` also serves the first push, so there is no
+  separate first-allocation path.
+- **A5 — `VecElementNotSupported`.** A new `TypeError` rejects a non-flat `Vec`
+  element (`Vec<[T]>` / `Vec<Vec<T>>` / `Vec<?T>` / `Vec<&T>`) — the `Vec`
+  analogue of `NestedArray`, enforcing the D8 flat-subset deferral.
+- **Arena routing — no change needed.** A `Vec` binding's initialiser is a
+  `vec_new()` `Call`, not an `ArrayLit`, so `compute_arena_routed`'s
+  `is_primitive_array_lit` gate already excludes every `Vec` — D3's "a `Vec`
+  reallocs, the bump arena cannot" holds for free, with no edit to the routing
+  predicate (and its UAF-safety invariant is untouched).
+- **`&mut Vec` borrow.** D6 confirmed: the runtime-builtin-arg rule (ADR 0033
+  A3) was extended so a `&`/`&mut` reference argument to a builtin registers a
+  borrow (mutable for `&mut`) via the normal `Ref`/`RefMut` path, not a
+  non-consuming by-value read. `push` thus participates in shared-XOR-mutable;
+  a non-`mut` `Vec` is rejected (`BorrowMutOfImmutable`).
+
+Deferred to (2/N): `v[i]` element read (the `Index` node carries `ArrayElem` and
+`lower_index` hard-codes the field-1 array data pointer — real typed-tree +
+codegen work, not a trivial reuse), `pop`, the `Vec<u8>`→`[u8]` bridge, and the
+`String` alias (A1). Deferred to (3/N): the `c5d3` phase-go close + this flip.
 
 ## Revisit
 

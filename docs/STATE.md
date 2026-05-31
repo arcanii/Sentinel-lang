@@ -14,9 +14,39 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D.2 — strings + a byte (`u8`) type MVP — COMPLETE
-(1/N–4/N; ADR 0033 → ACCEPTED-WITH-AMENDMENTS).** Post-1.0, **Phase D
-(self-hosting) is underway** (ADR 0031 — a language/stdlib build-out). After
+Last updated: **Phase D.3 — growable collections (`Vec<T>`) — (1/N) COMPLETE
+(ADR 0034 PROPOSED; (1/N) landed).** Post-1.0, **Phase D (self-hosting) is
+underway** (ADR 0031 — a language/stdlib build-out). After D.1 (sum types +
+`match`) and D.2 (strings + `u8`), the third prerequisite — **growable
+collections** (a lexer's token buffer + a parser's node lists need growth the
+fixed `[T]` array can't express) — opens. **D.3 (1/N)** lands a growable,
+owned, mutable **`Vec<T>`** end to end: a `Vec<T>` **IS `[T]` plus a capacity
+field + mutation** (`Type::Vec(VecElem)` mirrors `Type::Array(ArrayElem)`,
+reusing the array element-typing / move / drop machinery), lowering to abi-v1
+`{ i64 len, i64 cap, ptr data }` (the data pointer is **field 2**). Builtins:
+**`vec_new<T>() -> Vec<T>`** (empty `{0,0,null}`; element inferred from the
+binding / return-type annotation, like `null`'s `?T`), **`push<T>(&mut Vec<T>,
+T) -> i64`** (append + grow via the new **`sentinel_realloc`** runtime symbol to
+`max(1, cap*2)*sizeof(T)` when `len==cap` — the first heap-mutation primitive,
+taking `&mut`), and **`len`** overloaded over `[T]` and `Vec<T>`. `vec_new` /
+`push` type through the **uniform generic-call path** (an explicit `(Vec,Vec)`
+arm in `unify_one` binds the element); the cascade adds `Type::Vec` across every
+exhaustive `Type` match; `Vec` is **Move** + needs-drop (frees the field-2
+buffer, null-safe). A `&mut Vec` builtin arg registers a **mutable borrow**
+(extends ADR 0033 A3); a non-`mut` `Vec` push is rejected. Builtins shift the
+FnId base (vec_new=7, push=8; main 7→9). **Amendments (ADR 0034):** A1
+`String`=`Vec<u8>` deferred to (2/N) with the bridge; A2 return-type pushdown
+extended to `Vec`; A3 `len` overload is a contained `check_call` special-case;
+A4 `sentinel_realloc` (not a Vec-specific grow fn); A5 `VecElementNotSupported`
+rejects non-flat elements; arena routing needs no change (a `Vec` init is a
+`Call`, not an `ArrayLit`). Phase-go `tests/pass/c5d3_collections.sentinel`
+(multi-growth `Vec<i64>`, char-pushed `Vec<u8>`, a `Vec` moved out of a helper)
+runs at **exit 67, 0 leaks** (`leaks --atExit`). DEFERRED to (2/N): `v[i]` /
+`pop` / the `Vec<u8>`→`[u8]` bridge / the `String` alias; to (3/N): the phase-go
+close + ADR flip. **1324 tests, four-check green. Phase D.3 (1/N) lands.**
+
+Pre-D.3 context: **Phase D.2 — strings + a byte (`u8`) type MVP — COMPLETE
+(1/N–4/N; ADR 0033 → ACCEPTED-WITH-AMENDMENTS).** After
 D.1 (sum types + `match`), the second prerequisite — **strings + a `u8` byte
 type** (a compiler's input is text) — now compiles + runs end to end,
 leak-free. A string **IS a `[u8]`** (byte array — full reuse of the C1.6 array
