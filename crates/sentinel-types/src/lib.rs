@@ -4013,6 +4013,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             // slot as the actual class storage pointer (init's
             // `out_ptr`).
             env.insert(init_def.self_var_id, (Type::Class(cd.id), true));
+            env.record_name(init_def.self_var_id, "self");
             // Bind init params.
             for tp in &typed_class_decls[idx]
                 .init
@@ -4021,6 +4022,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
                 .params
             {
                 env.insert(tp.id, (tp.ty, tp.mutable));
+                env.record_name(tp.id, tp.name.clone());
             }
             let body = check_block(
                 &init_def.body,
@@ -4089,8 +4091,10 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             // the class storage pointer (the method's first arg).
             let mutable = matches!(m.self_kind, SelfKind::Exclusive);
             env.insert(m.self_var_id, (Type::Class(cd.id), mutable));
+            env.record_name(m.self_var_id, "self");
             for tp in &sig.params {
                 env.insert(tp.id, (tp.ty, tp.mutable));
+                env.record_name(tp.id, tp.name.clone());
             }
             let return_type = sig.return_type;
             let body_expected =
@@ -4166,8 +4170,10 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             // Self binding: bound directly to the impl target's
             // type, with mutable bit reflecting `self_kind`.
             env.insert(m.self_var_id, (target_ty, mutable));
+            env.record_name(m.self_var_id, "self");
             for tp in &sig.params {
                 env.insert(tp.id, (tp.ty, tp.mutable));
+                env.record_name(tp.id, tp.name.clone());
             }
             let return_type = sig.return_type;
             let body_expected =
@@ -4457,6 +4463,7 @@ fn check_fn(
     let mut env: VarTypeEnv = VarTypeEnv::new();
     for tp in &params {
         env.insert(tp.id, (tp.ty, tp.mutable));
+        env.record_name(tp.id, tp.name.clone());
     }
 
     let return_type = signature.return_type;
@@ -4528,13 +4535,56 @@ fn check_fn(
     })
 }
 
-/// Per-fn type environment: VarId → (Type, mutable). Inside a
-/// generic-fn body the value type may be `Type::TypeParam(_)`;
-/// concrete substitution happens at the caller. The `mutable` bit
-/// (C2 / ADR 0017 D2) records whether the binding was declared
-/// with `let mut` / `mut param` — the type checker reads it for
-/// `&mut x` and `x = v;` validation.
-type VarTypeEnv = std::collections::HashMap<VarId, (Type, bool)>;
+/// Per-fn type environment: VarId → (Type, mutable), plus the
+/// binding's source name for diagnostics. Inside a generic-fn body
+/// the value type may be `Type::TypeParam(_)`; concrete substitution
+/// happens at the caller. The `mutable` bit (C2 / ADR 0017 D2) records
+/// whether the binding was declared with `let mut` / `mut param` — the
+/// type checker reads it for `&mut x` and `x = v;` validation.
+///
+/// The struct `Deref`s to the inner `VarId → (Type, mutable)` map, so
+/// every `env.insert` / `env.get` / `env.remove` call works unchanged;
+/// the parallel `names` map is populated at binding sites and read by
+/// the `BorrowMutOfImmutable` / `AssignToImmutable` diagnostics so they
+/// can name the offending binding (a `VarId`'s name is stable, so
+/// `names` is write-once and untouched by the scoped save/restore of
+/// the type map).
+#[derive(Default)]
+struct VarTypeEnv {
+    types: std::collections::HashMap<VarId, (Type, bool)>,
+    names: std::collections::HashMap<VarId, String>,
+}
+
+impl VarTypeEnv {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a binding's source name for diagnostics. Called at every
+    /// binding site (params, `let`s, `self`, `match` bindings) so an
+    /// `&mut`-of-immutable / assign-to-immutable error can name it.
+    fn record_name(&mut self, id: VarId, name: impl Into<String>) {
+        self.names.insert(id, name.into());
+    }
+
+    /// The binding's source name, if recorded.
+    fn name_of(&self, id: VarId) -> Option<&str> {
+        self.names.get(&id).map(String::as_str)
+    }
+}
+
+impl std::ops::Deref for VarTypeEnv {
+    type Target = std::collections::HashMap<VarId, (Type, bool)>;
+    fn deref(&self) -> &Self::Target {
+        &self.types
+    }
+}
+
+impl std::ops::DerefMut for VarTypeEnv {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.types
+    }
+}
 
 // `build_struct_type_param_counts` lived here briefly as a
 // helper but was inlined into the few sites that needed it; the
@@ -4696,6 +4746,7 @@ fn check_stmt(
                 _ => value_typed.ty,
             };
             env.insert(*id, (ty, *mutable));
+            env.record_name(*id, name.clone());
             TypedStmtKind::Let {
                 id: *id,
                 mutable: *mutable,
@@ -4832,7 +4883,7 @@ fn check_mutable_borrow_target(
                 .expect("VarId in scope per resolve invariants");
             if !mutable {
                 return Err(TypeError::BorrowMutOfImmutable {
-                    name: "x".to_string(),
+                    name: env.name_of(*id).unwrap_or("<binding>").to_string(),
                     span: to_source_span(&target.span),
                 });
             }
@@ -4882,15 +4933,12 @@ fn check_mutable_lvalue(
                 .copied()
                 .expect("VarId in scope per resolve invariants");
             if !mutable {
-                let name = "x".to_string();
-                // We don't have the binding's source name here
-                // without an additional lookup table; surfacing a
-                // placeholder keeps the diagnostic compiling. The
-                // codegen / driver layer already has the name from
-                // [`TypedExprKind::Var`] in the value layer, but
-                // for type-error context we use a placeholder.
+                // The binding's source name is recorded in `env.names`
+                // at its binding site (param / `let` / `self` / `match`
+                // binding); fall back only for synthetic bindings with
+                // no source name.
                 return Err(TypeError::AssignToImmutable {
-                    name,
+                    name: env.name_of(*id).unwrap_or("<binding>").to_string(),
                     span: to_source_span(&target.span),
                 });
             }
@@ -7461,6 +7509,7 @@ fn check_match_expr(
         if let TypedPattern::Variant { bindings, .. } = &typed_pattern {
             for b in bindings {
                 env.insert(b.var_id, (b.ty, false));
+                env.record_name(b.var_id, b.name.clone());
             }
         }
 
@@ -8518,12 +8567,28 @@ fn main() -> i64 {
     #[test]
     fn borrow_mut_of_immutable_rejected() {
         let err = check_err(
-            "fn f() -> i64 { let x: i64 = 5; let r: &mut i64 = &mut x; *r }\nfn main() -> i64 { 0 }",
+            "fn f() -> i64 { let counter: i64 = 5; let r: &mut i64 = &mut counter; *r }\nfn main() -> i64 { 0 }",
         );
-        assert!(
-            matches!(err, TypeError::BorrowMutOfImmutable { .. }),
-            "got {err:?}"
+        // The diagnostic must name the actual binding — regression guard:
+        // this used to hardcode `x` regardless of the real name (a
+        // distinctive name here would have passed the old placeholder).
+        match err {
+            TypeError::BorrowMutOfImmutable { name, .. } => assert_eq!(name, "counter"),
+            other => panic!("expected BorrowMutOfImmutable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn borrow_mut_of_immutable_param_names_the_binding() {
+        // An immutable fn parameter: `&mut p` names `p` (params record
+        // their source name in the type env alongside the type/mut bit).
+        let err = check_err(
+            "fn f(p: i64) -> i64 { let r: &mut i64 = &mut p; *r }\nfn main() -> i64 { 0 }",
         );
+        match err {
+            TypeError::BorrowMutOfImmutable { name, .. } => assert_eq!(name, "p"),
+            other => panic!("expected BorrowMutOfImmutable, got {other:?}"),
+        }
     }
 
     #[test]
@@ -8537,12 +8602,14 @@ fn main() -> i64 {
     #[test]
     fn assign_to_immutable_rejected() {
         let err = check_err(
-            "fn f() -> i64 { let x: i64 = 5; x = 7; x }\nfn main() -> i64 { 0 }",
+            "fn f() -> i64 { let total: i64 = 5; total = 7; total }\nfn main() -> i64 { 0 }",
         );
-        assert!(
-            matches!(err, TypeError::AssignToImmutable { .. }),
-            "got {err:?}"
-        );
+        // Same regression guard as the borrow case: the assign-to-
+        // immutable diagnostic names the real binding, not a placeholder.
+        match err {
+            TypeError::AssignToImmutable { name, .. } => assert_eq!(name, "total"),
+            other => panic!("expected AssignToImmutable, got {other:?}"),
+        }
     }
 
     #[test]
