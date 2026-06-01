@@ -320,17 +320,32 @@ impl<'a> Parser<'a> {
         let mut impls = Vec::new();
         let mut enums = Vec::new();
         while self.peek().is_some() {
+            // Phase D.6 (1/N) / ADR 0037 D3: an optional `pub` precedes a
+            // top-level item, exporting it across modules. Allowed on the
+            // importable items (`fn`/`struct`/`enum`/`trait`/`effect`, D2);
+            // `pub` on `use` (re-export) / `class` / `impl` is rejected at
+            // the MVP (deferred, ADR 0037 D8).
+            let visibility = self.parse_optional_visibility();
             match self.peek_kind() {
                 // Phase D.6 (1/N) / ADR 0037: top-level `use a::b::Item;`.
-                Some(TokenKind::Use) => uses.push(self.parse_use_decl()?),
-                Some(TokenKind::Fn) => fns.push(self.parse_fn_def()?),
-                Some(TokenKind::Struct) => structs.push(self.parse_struct_decl()?),
-                Some(TokenKind::Effect) => effects.push(self.parse_effect_decl()?),
-                Some(TokenKind::Class) => classes.push(self.parse_class_decl()?),
-                Some(TokenKind::Trait) => traits.push(self.parse_trait_decl()?),
-                Some(TokenKind::Impl) => impls.push(self.parse_impl_decl()?),
+                Some(TokenKind::Use) => {
+                    self.reject_top_level_pub(visibility, "use")?;
+                    uses.push(self.parse_use_decl()?);
+                }
+                Some(TokenKind::Fn) => fns.push(self.parse_fn_def(visibility)?),
+                Some(TokenKind::Struct) => structs.push(self.parse_struct_decl(visibility)?),
+                Some(TokenKind::Effect) => effects.push(self.parse_effect_decl(visibility)?),
+                Some(TokenKind::Class) => {
+                    self.reject_top_level_pub(visibility, "class")?;
+                    classes.push(self.parse_class_decl()?);
+                }
+                Some(TokenKind::Trait) => traits.push(self.parse_trait_decl(visibility)?),
+                Some(TokenKind::Impl) => {
+                    self.reject_top_level_pub(visibility, "impl")?;
+                    impls.push(self.parse_impl_decl()?);
+                }
                 // Phase D.1 / ADR 0032: top-level `enum` declarations.
-                Some(TokenKind::Enum) => enums.push(self.parse_enum_decl()?),
+                Some(TokenKind::Enum) => enums.push(self.parse_enum_decl(visibility)?),
                 Some(other) => {
                     let t = self.peek().expect("peeked");
                     return Err(ParseError::UnexpectedToken {
@@ -467,7 +482,7 @@ impl<'a> Parser<'a> {
     /// field_list   = (field (',' field)*)? ','?
     /// field        = Ident ':' type
     /// ```
-    fn parse_struct_decl(&mut self) -> Result<StructDecl, ParseError> {
+    fn parse_struct_decl(&mut self, visibility: Visibility) -> Result<StructDecl, ParseError> {
         let struct_start = match self.peek_kind() {
             Some(TokenKind::Struct) => self.advance().expect("peeked").span.start,
             _ => unreachable!("called only after peek_kind() == Struct"),
@@ -557,6 +572,7 @@ impl<'a> Parser<'a> {
         };
 
         Ok(StructDecl {
+            visibility,
             name,
             name_span,
             type_params,
@@ -576,7 +592,7 @@ impl<'a> Parser<'a> {
     /// Non-generic at the D.1 MVP (generic enums are a fast-follow per
     /// ADR 0032 D9). Resolve + types check `enum`s at D.1 (3/N); codegen
     /// lowers construction + `match` at D.1 (4/N).
-    fn parse_enum_decl(&mut self) -> Result<EnumDecl, ParseError> {
+    fn parse_enum_decl(&mut self, visibility: Visibility) -> Result<EnumDecl, ParseError> {
         let enum_start = match self.peek_kind() {
             Some(TokenKind::Enum) => self.advance().expect("peeked").span.start,
             _ => unreachable!("called only after peek_kind() == Enum"),
@@ -657,6 +673,7 @@ impl<'a> Parser<'a> {
         };
 
         Ok(EnumDecl {
+            visibility,
             name,
             name_span,
             variants,
@@ -886,6 +903,27 @@ impl<'a> Parser<'a> {
             }
         }
         Visibility::Private
+    }
+
+    /// Phase D.6 (1/N) / ADR 0037 D3: reject a `pub` that precedes a
+    /// top-level item which does not take visibility at the MVP — `use`
+    /// (a `pub use` re-export), `class`, or `impl` (deferred, ADR 0037 D8).
+    /// `pub` on `fn`/`struct`/`enum`/`trait`/`effect` is accepted (D2). The
+    /// span points at the item keyword following the consumed `pub`.
+    fn reject_top_level_pub(
+        &self,
+        visibility: Visibility,
+        item: &'static str,
+    ) -> Result<(), ParseError> {
+        if visibility == Visibility::Public {
+            let span = self.peek().map(|t| t.span.clone()).unwrap_or_else(|| self.eof_span());
+            return Err(ParseError::UnexpectedToken {
+                got: format!("pub {item}"),
+                expected: "`pub` only on `fn` / `struct` / `enum` / `trait` / `effect`",
+                span: to_source_span(&span),
+            });
+        }
+        Ok(())
     }
 
     /// Parse a single field declaration inside a class body:
@@ -1199,7 +1237,7 @@ impl<'a> Parser<'a> {
     ///
     /// Empty trait declarations (`trait T {}`) are allowed
     /// structurally — they're marker traits at C4.2.
-    fn parse_trait_decl(&mut self) -> Result<TraitDecl, ParseError> {
+    fn parse_trait_decl(&mut self, visibility: Visibility) -> Result<TraitDecl, ParseError> {
         let trait_start = match self.peek_kind() {
             Some(TokenKind::Trait) => self.advance().expect("peeked").span.start,
             _ => unreachable!("called only after peek_kind() == Trait"),
@@ -1276,6 +1314,7 @@ impl<'a> Parser<'a> {
         let rbrace_end = self.advance().expect("RBrace").span.end;
 
         Ok(TraitDecl {
+            visibility,
             name,
             name_span,
             methods,
@@ -2101,7 +2140,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_fn_def(&mut self) -> Result<FnDef, ParseError> {
+    fn parse_fn_def(&mut self, visibility: Visibility) -> Result<FnDef, ParseError> {
         let fn_start = match self.peek_kind() {
             Some(TokenKind::Fn) => self.advance().expect("peeked").span.start,
             Some(other) => {
@@ -2223,6 +2262,7 @@ impl<'a> Parser<'a> {
         let end = body.span.end;
 
         Ok(FnDef {
+            visibility,
             name,
             name_span,
             type_params,
@@ -2339,7 +2379,7 @@ impl<'a> Parser<'a> {
     /// ```
     ///
     /// Empty effect declarations (zero ops) are allowed.
-    fn parse_effect_decl(&mut self) -> Result<EffectDecl, ParseError> {
+    fn parse_effect_decl(&mut self, visibility: Visibility) -> Result<EffectDecl, ParseError> {
         let effect_start = match self.peek_kind() {
             Some(TokenKind::Effect) => self.advance().expect("peeked").span.start,
             _ => unreachable!("called only after peek_kind() == Effect"),
@@ -2417,6 +2457,7 @@ impl<'a> Parser<'a> {
         let end = self.advance().expect("RBrace peeked").span.end;
 
         Ok(EffectDecl {
+            visibility,
             name,
             name_span,
             ops,
@@ -5365,6 +5406,37 @@ mod tests {
         assert!(matches!(
             err,
             ParseError::UnexpectedToken { expected, .. } if expected == "`;` after a `use` import"
+        ));
+    }
+
+    #[test]
+    fn parse_top_level_pub_visibility() {
+        // ADR 0037 D3: `pub` on a top-level item records Public; bare items
+        // are Private. (`pub` is a contextual keyword — Ident "pub" — as
+        // since C4.1; here it precedes a top-level item.)
+        let p = parse_ok_program(
+            "pub fn add(a: i64, b: i64) -> i64 { a + b }\n\
+             struct P { x: i64 }\n\
+             pub enum E { A }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.fns[0].name, "add");
+        assert_eq!(p.fns[0].visibility, Visibility::Public);
+        assert_eq!(p.fns[1].name, "main");
+        assert_eq!(p.fns[1].visibility, Visibility::Private);
+        assert_eq!(p.structs[0].visibility, Visibility::Private);
+        assert_eq!(p.enums[0].visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn parse_pub_on_use_is_rejected() {
+        // `pub use` (a re-export) is deferred (ADR 0037 D8) — rejected so
+        // it can't silently look exported.
+        let err = parse("pub use a::b; fn main() -> i64 { 0 }").unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::UnexpectedToken { expected, .. }
+                if expected == "`pub` only on `fn` / `struct` / `enum` / `trait` / `effect`"
         ));
     }
 

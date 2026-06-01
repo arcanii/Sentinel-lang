@@ -538,6 +538,11 @@ pub struct Program {
 /// list.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FnDef {
+    /// Phase D.6 (1/N) / ADR 0037 D3: `pub` exports this item across
+    /// modules (file-as-module visibility); un-`pub` is module-private.
+    /// A no-op single-file (nothing imports it); enforced at resolve when
+    /// a `use` crosses a module boundary.
+    pub visibility: Visibility,
     pub name: String,
     pub name_span: Span,
     /// Generic type-parameter list per ADR 0016 D1. Empty for
@@ -582,6 +587,9 @@ pub struct Param {
 /// between the name and the body.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StructDecl {
+    /// Phase D.6 (1/N) / ADR 0037 D3: `pub` exports this type across
+    /// modules; un-`pub` is module-private. No-op single-file.
+    pub visibility: Visibility,
     pub name: String,
     pub name_span: Span,
     /// Generic type-parameter list per ADR 0016 D2. Empty for
@@ -621,6 +629,9 @@ pub struct StructField {
 /// types interns `Type::Enum` at D.1 (3/N); codegen lowers it at (4/N).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EnumDecl {
+    /// Phase D.6 (1/N) / ADR 0037 D3: `pub` exports this type across
+    /// modules; un-`pub` is module-private. No-op single-file.
+    pub visibility: Visibility,
     pub name: String,
     pub name_span: Span,
     pub variants: Vec<VariantDecl>,
@@ -674,6 +685,9 @@ pub enum Pattern {
 /// Empty effect declarations (no ops) are allowed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EffectDecl {
+    /// Phase D.6 (1/N) / ADR 0037 D3: `pub` exports this effect across
+    /// modules; un-`pub` is module-private. No-op single-file.
+    pub visibility: Visibility,
     pub name: String,
     pub name_span: Span,
     pub ops: Vec<OpDecl>,
@@ -809,6 +823,9 @@ pub struct DelegateDecl {
 /// at C4.2 (1/N) leave traits untouched; (2/N) brings them up.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TraitDecl {
+    /// Phase D.6 (1/N) / ADR 0037 D3: `pub` exports this trait across
+    /// modules; un-`pub` is module-private. No-op single-file.
+    pub visibility: Visibility,
     pub name: String,
     pub name_span: Span,
     pub methods: Vec<TraitMethodSig>,
@@ -1504,6 +1521,7 @@ mod tests {
     fn main_fn(tail: Expr) -> FnDef {
         let body_span = tail.span.clone();
         FnDef {
+            visibility: Visibility::Private,
             name: "main".to_string(),
             name_span: 0..4,
             type_params: vec![],
@@ -1534,6 +1552,7 @@ mod tests {
     #[test]
     fn display_program_two_fns() {
         let double = FnDef {
+            visibility: Visibility::Private,
             name: "double".to_string(),
             name_span: 0..6,
             type_params: vec![],
@@ -1593,6 +1612,7 @@ mod tests {
     #[test]
     fn display_fn_def_multi_params() {
         let f = FnDef {
+            visibility: Visibility::Private,
             name: "add".to_string(),
             name_span: 0..3,
             type_params: vec![],
@@ -1709,6 +1729,7 @@ mod tests {
     #[test]
     fn display_struct_decl_with_two_fields() {
         let s = StructDecl {
+            visibility: Visibility::Private,
             name: "Point".to_string(),
             name_span: 7..12,
             type_params: vec![],
@@ -1734,6 +1755,7 @@ mod tests {
     #[test]
     fn display_struct_decl_empty() {
         let s = StructDecl {
+            visibility: Visibility::Private,
             name: "Empty".to_string(),
             name_span: 7..12,
             type_params: vec![],
@@ -1974,6 +1996,7 @@ mod tests {
     #[test]
     fn display_program_with_struct_and_fn() {
         let s = StructDecl {
+            visibility: Visibility::Private,
             name: "P".to_string(),
             name_span: 7..8,
             type_params: vec![],
