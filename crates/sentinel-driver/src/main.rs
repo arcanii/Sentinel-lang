@@ -115,21 +115,29 @@ fn run_parse(path: &str) -> ExitCode {
     }
 }
 
+/// Phase D.6 (1/N) / ADR 0037 D3: one discovered module — its module
+/// path relative to the source root + its parsed AST.
+struct DiscoveredModule {
+    path: Vec<String>,
+    program: Program,
+}
+
 /// Phase D.6 (1/N) / ADR 0037 D3: discover the module graph reachable
 /// from `entry` by following `use` edges. File-as-module: a `use
 /// a::b::Item;` references module `a::b`, whose file is
 /// `<root>/a/b.sentinel` — the **source root** is the entry file's
 /// directory (ADR 0037 open point 3), and the **last** path segment is
 /// the imported item, not part of the module path (point 4). Import
-/// cycles are fine (a `visited` set; point 1). Returns the sorted module
-/// paths of the NON-entry modules reached — empty for a single-file
-/// program — or a human-readable error when a `use`d module's file is
+/// cycles are fine (a `visited` set; point 1). Returns the full graph
+/// (entry module FIRST, then the reached modules) with each module's
+/// parsed `Program` — or an **empty** vec for a single-file program (no
+/// `use`), or a human-readable error when a `use`d module's file is
 /// missing (ModuleNotFound).
 ///
 /// Parsing the entry is lenient: a parse error there yields "no modules"
 /// so the main Salsa pipeline renders the proper diagnostic rather than
 /// this discovery pass duplicating it.
-fn discover_module_graph(entry: &Path) -> Result<Vec<Vec<String>>, String> {
+fn discover_module_graph(entry: &Path) -> Result<Vec<DiscoveredModule>, String> {
     let root = entry.parent().unwrap_or_else(|| Path::new("."));
     let entry_stem = entry
         .file_stem()
@@ -148,22 +156,24 @@ fn discover_module_graph(entry: &Path) -> Result<Vec<Vec<String>>, String> {
     }
 
     let mut visited: BTreeSet<Vec<String>> = BTreeSet::new();
-    visited.insert(vec![entry_stem]);
-    let mut reached: BTreeSet<Vec<String>> = BTreeSet::new();
-    // (module_path, program) work-list; seed with the entry's imports.
-    let mut stack: Vec<Program> = vec![entry_prog];
-    while let Some(program) = stack.pop() {
-        for u in &program.uses {
-            // The parser guarantees ≥ 2 segments; the module path is all
-            // but the last (the imported item).
-            if u.path.len() < 2 {
-                continue;
-            }
-            let module: Vec<String> = u.path[..u.path.len() - 1].to_vec();
+    visited.insert(vec![entry_stem.clone()]);
+    // The entry module is first; reached modules are appended (BFS over
+    // `out`, scanning each module's `use` edges as we go).
+    let mut out: Vec<DiscoveredModule> =
+        vec![DiscoveredModule { path: vec![entry_stem], program: entry_prog }];
+    let mut scan = 0;
+    while scan < out.len() {
+        let modules: Vec<Vec<String>> = out[scan]
+            .program
+            .uses
+            .iter()
+            .filter(|u| u.path.len() >= 2)
+            .map(|u| u.path[..u.path.len() - 1].to_vec())
+            .collect();
+        for module in modules {
             if !visited.insert(module.clone()) {
                 continue; // already seen — a cycle is fine.
             }
-            reached.insert(module.clone());
             let mut file = root.to_path_buf();
             for seg in &module {
                 file.push(seg);
@@ -178,13 +188,14 @@ fn discover_module_graph(entry: &Path) -> Result<Vec<Vec<String>>, String> {
             }
             let src = std::fs::read_to_string(&file)
                 .map_err(|e| format!("cannot read module `{}`: {e}", file.display()))?;
-            let prog = sentinel_syntax::parse(&src).map_err(|e| {
+            let program = sentinel_syntax::parse(&src).map_err(|e| {
                 format!("parse error in module `{}`: {e:?}", module.join("::"))
             })?;
-            stack.push(prog);
+            out.push(DiscoveredModule { path: module, program });
         }
+        scan += 1;
     }
-    Ok(reached.into_iter().collect())
+    Ok(out)
 }
 
 fn run_build(path: &str, output: Option<&str>) -> ExitCode {
@@ -201,17 +212,33 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     // missing `use`d file is surfaced here as ModuleNotFound).
     match discover_module_graph(Path::new(path)) {
         Ok(modules) if !modules.is_empty() => {
-            let names: Vec<String> = modules.iter().map(|m| m.join("::")).collect();
+            // Validate every `use` import against the graph — cross-module
+            // visibility (`pub`), unknown items, and missing modules — so a
+            // bad import is a clear diagnostic now, before any compilation.
+            let units: Vec<sentinel_resolve::ModuleUnit> = modules
+                .iter()
+                .map(|m| sentinel_resolve::ModuleUnit { path: m.path.clone(), program: &m.program })
+                .collect();
+            if let Err(e) = sentinel_resolve::resolve_imports(&units) {
+                eprintln!("snc: {e}");
+                return ExitCode::from(1);
+            }
+            // Imports are valid. Multi-module COMPILATION (per-unit codegen
+            // + module-qualified symbols + multi-object link) is the next
+            // D.6 (1/N) increment; report + gate honestly until then. The
+            // entry module is `modules[0]`; the rest are its imports.
+            let imported: Vec<String> =
+                modules.iter().skip(1).map(|m| m.path.join("::")).collect();
             eprintln!(
                 "snc: multi-module compilation is not yet supported \
-                 (Phase D.6 (1/N) is wiring per-unit resolve + separate \
-                 codegen per ADR 0037)."
+                 (Phase D.6 (1/N) is wiring per-unit codegen + link per \
+                 ADR 0037); imports validated OK."
             );
             eprintln!(
                 "snc: `{}` reaches {} imported module(s): {}",
                 path,
-                names.len(),
-                names.join(", ")
+                imported.len(),
+                imported.join(", ")
             );
             return ExitCode::from(1);
         }

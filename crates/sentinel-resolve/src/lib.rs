@@ -1113,6 +1113,50 @@ pub enum ResolveError {
         span: miette::SourceSpan,
     },
 
+    /// Phase D.6 (1/N) / ADR 0037 D3: a `use path::Item;` names a module
+    /// (`path`) that is not in the module graph reached from the entry.
+    /// (Discovery normally catches a missing module FILE first; this is
+    /// the resolve-layer guard.)
+    #[error("module `{module}` not found")]
+    #[diagnostic(
+        code(sentinel::resolve::module_not_found),
+        help("file-as-module: `use a::b::Item;` expects a module `a::b` (file `a/b.sentinel`) relative to the source root")
+    )]
+    ModuleNotFound {
+        module: String,
+        #[label("no such module")]
+        span: miette::SourceSpan,
+    },
+
+    /// Phase D.6 (1/N) / ADR 0037 D3: a `use path::Item;` imports an item
+    /// that exists in the target module but is not `pub` — module-private
+    /// items are not visible across modules.
+    #[error("`{item}` is private to module `{module}`")]
+    #[diagnostic(
+        code(sentinel::resolve::private_item),
+        help("only `pub` items are importable across modules; add `pub` to the item's declaration in its module")
+    )]
+    PrivateItem {
+        item: String,
+        module: String,
+        #[label("private item imported here")]
+        span: miette::SourceSpan,
+    },
+
+    /// Phase D.6 (1/N) / ADR 0037 D3: a `use path::Item;` names an item
+    /// (`Item`) that does not exist in the target module.
+    #[error("module `{module}` has no item `{item}`")]
+    #[diagnostic(
+        code(sentinel::resolve::unknown_import),
+        help("the last `::` segment of a `use` is the imported item; check the name + that the module declares it")
+    )]
+    UnknownImport {
+        item: String,
+        module: String,
+        #[label("no such item in that module")]
+        span: miette::SourceSpan,
+    },
+
     /// C3.4 / ADR 0020 D5: a `handle` arm or `perform` expression
     /// references an effect name that isn't declared anywhere in
     /// the program.
@@ -1351,6 +1395,83 @@ pub enum ResolveError {
 // =============================================================================
 // resolve() — pure-function entry point
 // =============================================================================
+
+/// Phase D.6 (1/N) / ADR 0037 D3: one discovered module — its module
+/// path relative to the source root (e.g. `["util", "math"]`) plus its
+/// parsed AST. The driver builds these from `discover_module_graph`.
+pub struct ModuleUnit<'a> {
+    pub path: Vec<String>,
+    pub program: &'a Program,
+}
+
+/// Phase D.6 (1/N) / ADR 0037 D3: validate every module's `use` imports
+/// against the module graph. Each `use a::b::Item;` must name a module
+/// `a::b` present in `modules` that declares a **`pub`** item `Item` —
+/// the cross-module visibility gate (file-as-module: un-`pub` items are
+/// module-private). Errors fast: `ModuleNotFound` / `UnknownImport` /
+/// `PrivateItem`. (The qualification + reference rewrite that merges the
+/// graph into one `Program` — the lower-risk Path A — builds on this;
+/// true per-unit resolve is deferred to a later sub-phase per ADR 0037.)
+pub fn resolve_imports(modules: &[ModuleUnit]) -> Result<(), ResolveError> {
+    for unit in modules {
+        for u in &unit.program.uses {
+            // Parser guarantees ≥ 2 segments: the module is all but the
+            // last segment; the last is the imported item (open point 4).
+            let item = u.path.last().expect("use path has ≥ 1 segment");
+            let module_path = &u.path[..u.path.len() - 1];
+            let target = match modules.iter().find(|m| m.path.as_slice() == module_path) {
+                Some(t) => t,
+                None => {
+                    return Err(ResolveError::ModuleNotFound {
+                        module: module_path.join("::"),
+                        span: to_source_span(&u.span),
+                    });
+                }
+            };
+            match pub_item_visibility(target.program, item) {
+                None => {
+                    return Err(ResolveError::UnknownImport {
+                        item: item.clone(),
+                        module: module_path.join("::"),
+                        span: to_source_span(&u.span),
+                    });
+                }
+                Some(false) => {
+                    return Err(ResolveError::PrivateItem {
+                        item: item.clone(),
+                        module: module_path.join("::"),
+                        span: to_source_span(&u.span),
+                    });
+                }
+                Some(true) => {} // `pub` — visible across modules.
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `program` declares a top-level item named `name`, and if so
+/// whether it is `pub`. `None` = no such item. Scans the importable item
+/// kinds (fn / struct / enum / trait / effect — ADR 0037 D2).
+fn pub_item_visibility(program: &Program, name: &str) -> Option<bool> {
+    let is_pub = |v: sentinel_ast::Visibility| v == sentinel_ast::Visibility::Public;
+    if let Some(f) = program.fns.iter().find(|f| f.name == name) {
+        return Some(is_pub(f.visibility));
+    }
+    if let Some(s) = program.structs.iter().find(|s| s.name == name) {
+        return Some(is_pub(s.visibility));
+    }
+    if let Some(e) = program.enums.iter().find(|e| e.name == name) {
+        return Some(is_pub(e.visibility));
+    }
+    if let Some(t) = program.traits.iter().find(|t| t.name == name) {
+        return Some(is_pub(t.visibility));
+    }
+    if let Some(ef) = program.effects.iter().find(|ef| ef.name == name) {
+        return Some(is_pub(ef.visibility));
+    }
+    None
+}
 
 /// Resolve a [`Program`] to a [`ResolvedProgram`]. Fails fast on
 /// the first error encountered, matching the C0 codegen pass's
@@ -3833,6 +3954,21 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
             "`use` imports are not yet wired (modules land in Phase D.6)".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        ResolveError::ModuleNotFound { module, span } => (
+            "sentinel::resolve::module_not_found",
+            format!("module `{module}` not found"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::PrivateItem { item, module, span } => (
+            "sentinel::resolve::private_item",
+            format!("`{item}` is private to module `{module}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        ResolveError::UnknownImport { item, module, span } => (
+            "sentinel::resolve::unknown_import",
+            format!("module `{module}` has no item `{item}`"),
+            span.offset()..(span.offset() + span.len()),
+        ),
         ResolveError::UndefinedHandlerEffect { name, span } => (
             "sentinel::resolve::undefined_handler_effect",
             format!("undefined effect `{name}` in handler arm / perform"),
@@ -3984,6 +4120,63 @@ mod tests {
         assert!(matches!(err, ResolveError::UseDeclNotYet { .. }), "got {err:?}");
         // No `use` → resolves fine (regression guard).
         let _ = resolve_ok("fn main() -> i64 { 0 }");
+    }
+
+    // ----- D.6 (1/N) / ADR 0037 D3: cross-module import visibility -----
+
+    #[test]
+    fn resolve_imports_accepts_pub_item() {
+        let util = parse("pub fn add(a: i64, b: i64) -> i64 { a + b }").expect("parse");
+        let main = parse("use util::add; fn main() -> i64 { 0 }").expect("parse");
+        let modules = vec![
+            ModuleUnit { path: vec!["util".to_string()], program: &util },
+            ModuleUnit { path: vec!["main".to_string()], program: &main },
+        ];
+        resolve_imports(&modules).expect("a `pub` import resolves");
+    }
+
+    #[test]
+    fn resolve_imports_rejects_private_item() {
+        // `add` is not `pub` → module-private → PrivateItem.
+        let util = parse("fn add(a: i64, b: i64) -> i64 { a + b }").expect("parse");
+        let main = parse("use util::add; fn main() -> i64 { 0 }").expect("parse");
+        let modules = vec![
+            ModuleUnit { path: vec!["util".to_string()], program: &util },
+            ModuleUnit { path: vec!["main".to_string()], program: &main },
+        ];
+        let err = resolve_imports(&modules).expect_err("private import rejected");
+        assert!(
+            matches!(&err, ResolveError::PrivateItem { item, module, .. }
+                if item == "add" && module == "util"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_imports_rejects_unknown_item() {
+        let util = parse("pub fn other() -> i64 { 0 }").expect("parse");
+        let main = parse("use util::add; fn main() -> i64 { 0 }").expect("parse");
+        let modules = vec![
+            ModuleUnit { path: vec!["util".to_string()], program: &util },
+            ModuleUnit { path: vec!["main".to_string()], program: &main },
+        ];
+        let err = resolve_imports(&modules).expect_err("unknown import rejected");
+        assert!(
+            matches!(&err, ResolveError::UnknownImport { item, .. } if item == "add"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_imports_rejects_missing_module() {
+        // No `util` module in the graph → ModuleNotFound.
+        let main = parse("use util::add; fn main() -> i64 { 0 }").expect("parse");
+        let modules = vec![ModuleUnit { path: vec!["main".to_string()], program: &main }];
+        let err = resolve_imports(&modules).expect_err("missing module rejected");
+        assert!(
+            matches!(&err, ResolveError::ModuleNotFound { module, .. } if module == "util"),
+            "got {err:?}"
+        );
     }
 
     // ----- positive paths -----

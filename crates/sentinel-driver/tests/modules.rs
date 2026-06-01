@@ -41,12 +41,12 @@ fn build(entry: PathBuf) -> (bool, String) {
 }
 
 #[test]
-fn multi_module_build_is_gated_with_discovered_modules() {
-    // `use util::add;` → module `util` (file `util.sentinel`); a sibling
-    // module is discovered, and multi-module compilation is gated (the
-    // next increment wires per-unit resolve + separate codegen).
+fn multi_module_build_validates_imports_then_gates() {
+    // `use util::add;` → module `util` (file `util.sentinel`). The `pub`
+    // import validates, then multi-module *compilation* is gated (per-unit
+    // codegen + link is the next increment).
     let dir = temp_project("multi");
-    write(dir.join("util.sentinel"), "fn add(a: i64, b: i64) -> i64 { a + b }\n");
+    write(dir.join("util.sentinel"), "pub fn add(a: i64, b: i64) -> i64 { a + b }\n");
     write(dir.join("main.sentinel"), "use util::add;\nfn main() -> i64 { 0 }\n");
     let (ok, stderr) = build(dir.join("main.sentinel"));
     assert!(!ok, "multi-module build should be gated (non-zero exit); stderr:\n{stderr}");
@@ -62,13 +62,28 @@ fn nested_module_path_maps_to_subdirectory() {
     // ADR 0037 open point 4: `use util::math::add;` → module `util::math`
     // → file `util/math.sentinel` (the last segment, `add`, is the item).
     let dir = temp_project("nested");
-    write(dir.join("util/math.sentinel"), "fn add(a: i64, b: i64) -> i64 { a + b }\n");
+    write(dir.join("util/math.sentinel"), "pub fn add(a: i64, b: i64) -> i64 { a + b }\n");
     write(dir.join("main.sentinel"), "use util::math::add;\nfn main() -> i64 { 0 }\n");
     let (ok, stderr) = build(dir.join("main.sentinel"));
     assert!(!ok, "still gated; stderr:\n{stderr}");
     assert!(
         stderr.contains("util::math"),
         "the nested module path should resolve to util/math.sentinel; stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn import_of_private_item_is_rejected() {
+    // ADR 0037 D3: importing a non-`pub` item is a visibility error,
+    // surfaced before the compilation gate.
+    let dir = temp_project("private");
+    write(dir.join("util.sentinel"), "fn add(a: i64, b: i64) -> i64 { a + b }\n");
+    write(dir.join("main.sentinel"), "use util::add;\nfn main() -> i64 { 0 }\n");
+    let (ok, stderr) = build(dir.join("main.sentinel"));
+    assert!(!ok, "a private import should fail the build; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("private to module `util`"),
+        "expected a PrivateItem error naming `util`; stderr:\n{stderr}"
     );
 }
 
