@@ -1932,11 +1932,15 @@ For pasting into a fresh chat to bootstrap context:
     cycles fine); a missing `use`d file → ModuleNotFound; single-file
     unaffected; a discovered multi-module graph is REPORTED + GATED at the
     driver pending per-unit wiring. `discover_module_graph` in
-    sentinel-driver/main.rs; tests in `tests/modules.rs`. 1369 tests, green.
+    sentinel-driver/main.rs; tests in `tests/modules.rs`.
+    (iii) **top-level `pub`** (`26dfb5a`) — `visibility: Visibility` on
+    FnDef/StructDecl/EnumDecl/TraitDecl/EffectDecl, parsed from a `pub`
+    before the item (`pub` on use/class/impl rejected); recorded but
+    UNENFORCED single-file (the C4.1 no-op). 1371 tests, green.
     **RESUME HERE → the remaining D.6 (1/N): make `use` actually compile** —
     per-unit resolve consuming the graph (cross-module refs resolve to a
-    target module + item; **top-level `pub`** + visibility enforcement —
-    NOT yet parsed, fold it in here) → per-unit type-check against imported
+    target module + item; cross-module **visibility ENFORCEMENT** now that
+    `pub` parses — un-`pub` import → PrivateItem) → per-unit type-check against imported
     **signatures** → per-unit codegen (one LLVM module per unit, imported
     callees as extern symbols) + **module-qualified length-prefixed
     mangling** (the `abi-v1` amendment, D7 — update the frozen mangling
