@@ -1935,22 +1935,33 @@ For pasting into a fresh chat to bootstrap context:
     sentinel-driver/main.rs; tests in `tests/modules.rs`.
     (iii) **top-level `pub`** (`26dfb5a`) — `visibility: Visibility` on
     FnDef/StructDecl/EnumDecl/TraitDecl/EffectDecl, parsed from a `pub`
-    before the item (`pub` on use/class/impl rejected); recorded but
-    UNENFORCED single-file (the C4.1 no-op). 1371 tests, green.
-    **RESUME HERE → the remaining D.6 (1/N): make `use` actually compile** —
-    per-unit resolve consuming the graph (cross-module refs resolve to a
-    target module + item; cross-module **visibility ENFORCEMENT** now that
-    `pub` parses — un-`pub` import → PrivateItem) → per-unit type-check against imported
-    **signatures** → per-unit codegen (one LLVM module per unit, imported
-    callees as extern symbols) + **module-qualified length-prefixed
-    mangling** (the `abi-v1` amendment, D7 — update the frozen mangling
-    tests) → **multi-object link** (`cc` all `.o` + runtime) → replace the
-    driver multi-module gate with the real pipeline. The 4 OPEN DESIGN
-    POINTS are SETTLED (owner-confirmed): allow cycles; AMEND `abi-v1` (not
-    `abi-v2`); source root = entry's dir; `use a::b::c` = item `c` in module
-    `a::b`. **Settled decisions (with the language owner):** module surface =
-    file-as-module + `use` (no `mod` blocks; `pub` gates visibility); model =
-    **TRUE separate compilation** (per-unit `.o`, link-time symbols).
+    before the item (`pub` on use/class/impl rejected); the C4.1 no-op
+    single-file.
+    (iv) **cross-module import resolution + visibility** (`fe9d110`) —
+    sentinel-resolve `ModuleUnit` + `resolve_imports`: each `use a::b::Item`
+    must name a graph module `a::b` declaring a `pub` `Item`, else
+    `ModuleNotFound`/`UnknownImport`/`PrivateItem`. `discover_module_graph`
+    now carries each module's `Program` (entry first); the driver validates
+    imports BEFORE the multi-module gate. 1376 tests, green.
+    **ARCHITECTURE DECISION (owner, this session): take the lower-risk
+    PATH A** — whole-graph front-end + per-unit codegen/link — and reach true
+    per-unit resolve EVENTUALLY (folded into the (3/N) caching sub-phase).
+    **RESUME HERE → make `use` actually compile (Path A):** merge the
+    discovered graph into ONE `Program` — qualify each module's top-level
+    names (e.g. `util::add` → a unique mangled symbol; entry `main` stays
+    `main`) + rewrite references per module scope (own items + `use`d-pub
+    imports; builtins/locals untouched) — then run the EXISTING
+    resolve/types/codegen pipeline on the merged program (reuses it almost
+    unchanged = the low risk). The merge logic belongs in sentinel-resolve
+    (testable; `resolve_imports` already validates + can return the import
+    map). First slice = cross-module FN calls (defer cross-module
+    types/generics). MVP can emit ONE object first (fast win); per-unit
+    object emission + module-qualified `abi-v1` mangling (D7 amendment +
+    frozen tests) + multi-object link is the immediate follow-up. Replace
+    the driver multi-module gate with this. 4 OPEN POINTS SETTLED (allow
+    cycles; AMEND `abi-v1`; source root = entry dir; `use a::b::c` = item
+    `c` in module `a::b`). Module surface = file-as-module + `use` (no `mod`;
+    `pub` gates). See ADR 0037 "Implementation notes".
     **ADR 0037 — settled decisions (with the language owner):** (a) **module
     surface = file-as-module + `use`** — a file *is* a module, its path
     relative to the source root (the entry file's dir) *is* its module path;
