@@ -1098,6 +1098,21 @@ pub enum ResolveError {
         span: miette::SourceSpan,
     },
 
+    /// Phase D.6 (1/N) / ADR 0037: a top-level `use` import parses, but
+    /// the resolve-layer module graph + multi-file discovery that gives it
+    /// meaning land in the D.6 (1/N) resolve increment. Until then a
+    /// non-empty `use` set is rejected here, so single-file programs (no
+    /// `use`) are unaffected and multi-file ones fail honestly.
+    #[error("`use` imports are not yet wired (modules land in Phase D.6)")]
+    #[diagnostic(
+        code(sentinel::resolve::use_decl_not_yet),
+        help("multi-file modules (file-as-module + `use`) are landing in Phase D.6 per ADR 0037; the front-end parses `use` ahead of the resolve module graph")
+    )]
+    UseDeclNotYet {
+        #[label("`use` import here")]
+        span: miette::SourceSpan,
+    },
+
     /// C3.4 / ADR 0020 D5: a `handle` arm or `perform` expression
     /// references an effect name that isn't declared anywhere in
     /// the program.
@@ -1346,6 +1361,18 @@ pub enum ResolveError {
 /// reference struct types in their TypeExprs), then fns, then fn
 /// bodies.
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
+    // Phase D.6 (1/N) / ADR 0037: the front-end parses top-level `use`
+    // imports, but the module graph + multi-file discovery that resolve
+    // them land in the D.6 (1/N) resolve increment. Until then, reject a
+    // non-empty `use` set so single-file programs (no `use`) are
+    // unaffected and multi-file ones fail honestly rather than silently
+    // dropping the import.
+    if let Some(first_use) = program.uses.first() {
+        return Err(ResolveError::UseDeclNotYet {
+            span: to_source_span(&first_use.span),
+        });
+    }
+
     let mut next_fn_id: u32 = 0;
     let mut next_var_id: u32 = 0;
 
@@ -3801,6 +3828,11 @@ fn resolve_error_to_diagnostic(err: &ResolveError) -> Diagnostic {
             "`declassify(...)` is not yet supported (lands at C3.1)".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        ResolveError::UseDeclNotYet { span } => (
+            "sentinel::resolve::use_decl_not_yet",
+            "`use` imports are not yet wired (modules land in Phase D.6)".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
         ResolveError::UndefinedHandlerEffect { name, span } => (
             "sentinel::resolve::undefined_handler_effect",
             format!("undefined effect `{name}` in handler arm / perform"),
@@ -3940,6 +3972,18 @@ mod tests {
     #[test]
     fn smoke() {
         assert_eq!(crate_name(), "sentinel-resolve");
+    }
+
+    #[test]
+    fn use_import_is_gated_until_d6_module_graph() {
+        // Phase D.6 (1/N) / ADR 0037: `use` parses but resolve gates it
+        // until the module-graph increment — a non-empty `use` set is a
+        // focused `UseDeclNotYet`. Single-file programs (no `use`) are
+        // unaffected.
+        let err = resolve_err("use util::math::add; fn main() -> i64 { 0 }");
+        assert!(matches!(err, ResolveError::UseDeclNotYet { .. }), "got {err:?}");
+        // No `use` → resolves fine (regression guard).
+        let _ = resolve_ok("fn main() -> i64 { 0 }");
     }
 
     // ----- positive paths -----

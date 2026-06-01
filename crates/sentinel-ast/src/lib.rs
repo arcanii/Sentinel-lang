@@ -469,8 +469,32 @@ pub type Stmt = Spanned<StmtKind>;
 /// types, codegen) needs to walk them in a specific order anyway
 /// (struct table built before fn signatures, which are built before
 /// fn bodies). Source order within each category is preserved.
+/// Phase D.6 (1/N) / ADR 0037 D2: a top-level `use a::b::Item;` import.
+/// `path` is the full `::`-separated segment list as written, INCLUDING
+/// the trailing item (e.g. `["lex", "token", "Token"]`); resolve splits
+/// it into the module path + the imported item (the last segment is the
+/// item — ADR 0037 open point 4). File-as-module: the leading segments
+/// name a file relative to the source root (`lex/token.sentinel`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UseDecl {
+    pub path: Vec<String>,
+    pub span: Span,
+}
+
+impl fmt::Display for UseDecl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(use {})", self.path.join("::"))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Program {
+    /// Phase D.6 (1/N) / ADR 0037: top-level `use` imports. Always
+    /// present (empty for single-file programs). Resolve rejects a
+    /// non-empty `uses` with `UseDeclNotYet` until the D.6 (1/N) resolve
+    /// increment wires the module graph; single-file programs are
+    /// unaffected.
+    pub uses: Vec<UseDecl>,
     pub fns: Vec<FnDef>,
     /// Top-level struct declarations per ADR 0013 D1. Always present
     /// (may be empty for C0/C1.3-compatible programs).
@@ -1167,6 +1191,13 @@ impl fmt::Display for Stmt {
 impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
+        for u in &self.uses {
+            if !first {
+                writeln!(f)?;
+            }
+            first = false;
+            write!(f, "{u}")?;
+        }
         for e in &self.effects {
             if !first {
                 writeln!(f)?;
@@ -1487,6 +1518,7 @@ mod tests {
     #[test]
     fn display_program_one_main() {
         let p = Program {
+            uses: vec![],
             fns: vec![main_fn(lit(42, 0..2))],
             structs: vec![],
             effects: vec![],
@@ -1536,6 +1568,7 @@ mod tests {
             span: 0..9,
         });
         let p = Program {
+            uses: vec![],
             fns: vec![double, main],
             structs: vec![],
             effects: vec![],
@@ -1953,6 +1986,7 @@ mod tests {
             span: 0..19,
         };
         let p = Program {
+            uses: vec![],
             fns: vec![main_fn(lit(7, 0..1))],
             structs: vec![s],
             effects: vec![],

@@ -165,6 +165,12 @@ pub enum TokenKind {
     /// in statement position to a `StmtKind::Continue`.
     #[token("continue")]
     Continue,
+    /// Phase D.6 (1/N) / ADR 0037 D2: `use a::b::Item;` — import a `pub`
+    /// item from another module (file-as-module). A reserved keyword token
+    /// (the top-level dispatch is token-based); parses to a `UseDecl`.
+    /// (`pub` stays a contextual keyword — an `Ident` "pub" — as since C4.1.)
+    #[token("use")]
+    Use,
     /// Phase D.1 / ADR 0032: `enum Name { V1, V2(T), … }` declares a
     /// sum type (tagged union). Additive at D.1 (1/N) — the parser
     /// consumes it at (2/N).
@@ -1205,6 +1211,27 @@ mod tests {
         assert_eq!(kinds("breakage"), vec![TokenKind::Ident]);
         assert_eq!(kinds("continues"), vec![TokenKind::Ident]);
         assert_eq!(kinds("continued"), vec![TokenKind::Ident]);
+    }
+
+    #[test]
+    fn lex_use_keyword() {
+        // Phase D.6 (1/N) / ADR 0037: `use` is a reserved keyword; the
+        // import shape `use a::b::C` lexes path segments around `::`.
+        assert_eq!(kinds("use"), vec![TokenKind::Use]);
+        assert_eq!(
+            kinds("use a::b::C"),
+            vec![
+                TokenKind::Use,
+                TokenKind::Ident,
+                TokenKind::ColonColon,
+                TokenKind::Ident,
+                TokenKind::ColonColon,
+                TokenKind::Ident,
+            ]
+        );
+        // Maximal munch: `useful` / `used` are a single Ident.
+        assert_eq!(kinds("useful"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("used"), vec![TokenKind::Ident]);
     }
 
     #[test]

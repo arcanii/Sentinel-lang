@@ -51,7 +51,7 @@ use sentinel_ast::{
     FieldInit, FnDef, HandlerArm, ImplDecl, ImplMethodDef, InitDef, LogicOp, MatchArm, MethodDef,
     OpDecl, Param, Pattern, Program, ReturnArm, SelfKind, Span, Spanned, Stmt, StmtKind, StructDecl,
     StructField, TraitDecl, TraitMethodSig, TypeExpr, TypeExprKind, TypeParam, UnaryOp,
-    VariantDecl, Visibility,
+    UseDecl, VariantDecl, Visibility,
 };
 
 use crate::{lex, LexError, TokenKind};
@@ -311,6 +311,7 @@ impl<'a> Parser<'a> {
 
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
         let start = self.peek().map_or(0, |t| t.span.start);
+        let mut uses = Vec::new();
         let mut fns = Vec::new();
         let mut structs = Vec::new();
         let mut effects = Vec::new();
@@ -320,6 +321,8 @@ impl<'a> Parser<'a> {
         let mut enums = Vec::new();
         while self.peek().is_some() {
             match self.peek_kind() {
+                // Phase D.6 (1/N) / ADR 0037: top-level `use a::b::Item;`.
+                Some(TokenKind::Use) => uses.push(self.parse_use_decl()?),
                 Some(TokenKind::Fn) => fns.push(self.parse_fn_def()?),
                 Some(TokenKind::Struct) => structs.push(self.parse_struct_decl()?),
                 Some(TokenKind::Effect) => effects.push(self.parse_effect_decl()?),
@@ -332,7 +335,7 @@ impl<'a> Parser<'a> {
                     let t = self.peek().expect("peeked");
                     return Err(ParseError::UnexpectedToken {
                         got: format!("{other:?}"),
-                        expected: "`fn`, `struct`, `effect`, `class`, `trait`, `impl`, or `enum`",
+                        expected: "`use`, `fn`, `struct`, `effect`, `class`, `trait`, `impl`, or `enum`",
                         span: to_source_span(&t.span),
                     });
                 }
@@ -368,6 +371,7 @@ impl<'a> Parser<'a> {
             .max(impl_end)
             .max(enum_end);
         Ok(Program {
+            uses,
             fns,
             structs,
             effects,
@@ -377,6 +381,83 @@ impl<'a> Parser<'a> {
             enums,
             span: start..end,
         })
+    }
+
+    /// Phase D.6 (1/N) / ADR 0037 D2: parse a top-level import
+    /// `use a::b::Item;` — one or more `::`-separated identifier segments
+    /// followed by `;`. The whole segment list (including the trailing
+    /// item) is stored as written; resolve splits module path from item
+    /// (the last segment is the item). No globs / groups / aliases at the
+    /// MVP (ADR 0037 D8).
+    fn parse_use_decl(&mut self) -> Result<UseDecl, ParseError> {
+        let use_start = match self.peek_kind() {
+            Some(TokenKind::Use) => self.advance().expect("peeked").span.start,
+            _ => unreachable!("called only after peek_kind() == Use"),
+        };
+        let mut path = Vec::new();
+        // First segment.
+        let first = self.peek().ok_or_else(|| ParseError::UnexpectedEof {
+            expected: "identifier after `use`",
+            span: to_source_span(&self.eof_span()),
+        })?;
+        if first.kind != TokenKind::Ident {
+            let kind = first.kind;
+            let span = first.span.clone();
+            return Err(ParseError::UnexpectedToken {
+                got: format!("{kind:?}"),
+                expected: "identifier after `use`",
+                span: to_source_span(&span),
+            });
+        }
+        path.push(self.src[first.span.clone()].to_string());
+        self.advance();
+        // Subsequent `:: Ident` segments.
+        while self.peek_kind() == Some(TokenKind::ColonColon) {
+            self.advance();
+            let seg = self.peek().ok_or_else(|| ParseError::UnexpectedEof {
+                expected: "identifier after `::` in a `use` path",
+                span: to_source_span(&self.eof_span()),
+            })?;
+            if seg.kind != TokenKind::Ident {
+                let kind = seg.kind;
+                let span = seg.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "identifier after `::` in a `use` path",
+                    span: to_source_span(&span),
+                });
+            }
+            path.push(self.src[seg.span.clone()].to_string());
+            self.advance();
+        }
+        // A bare `use foo;` (single segment, no item to import) is
+        // meaningless under file-as-module (you import an item, not a
+        // module); require at least `module::item` (≥ 2 segments).
+        if path.len() < 2 {
+            return Err(ParseError::UnexpectedToken {
+                got: "`;`".to_string(),
+                expected: "`::` then an item name (`use module::Item;`)",
+                span: to_source_span(&(use_start..use_start + 3)),
+            });
+        }
+        let semi_end = match self.peek_kind() {
+            Some(TokenKind::Semi) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`;` after a `use` import",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`;` after a `use` import",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+        Ok(UseDecl { path, span: use_start..semi_end })
     }
 
     /// Parse a top-level struct declaration per ADR 0013 D1:
@@ -5252,6 +5333,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_use_decls_before_fns() {
+        // ADR 0037 D2: top-level `use a::b::Item;` imports parse into
+        // `Program.uses`, ahead of the fns; the full path (incl. the
+        // trailing item) is stored as written.
+        let p = parse_ok_program(
+            "use util::math::add; use util::Pair; fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.uses.len(), 2);
+        assert_eq!(p.uses[0].path, vec!["util", "math", "add"]);
+        assert_eq!(p.uses[1].path, vec!["util", "Pair"]);
+        assert_eq!(p.uses[0].to_string(), "(use util::math::add)");
+        assert_eq!(p.fns.len(), 1);
+    }
+
+    #[test]
+    fn parse_use_requires_module_and_item() {
+        // A bare `use foo;` is rejected — file-as-module imports an item
+        // (`module::Item`), not a module (ADR 0037 D2 MVP).
+        let err = parse("use foo; fn main() -> i64 { 0 }").unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::UnexpectedToken { expected, .. }
+                if expected == "`::` then an item name (`use module::Item;`)"
+        ));
+    }
+
+    #[test]
+    fn parse_use_requires_semicolon() {
+        let err = parse("use a::b fn main() -> i64 { 0 }").unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::UnexpectedToken { expected, .. } if expected == "`;` after a `use` import"
+        ));
+    }
+
+    #[test]
     fn parse_fn_with_one_param() {
         let p = parse_ok_program("fn double(x: i64) -> i64 { x * 2 }");
         assert_eq!(p.fns[0].name, "double");
@@ -5356,7 +5473,7 @@ mod tests {
         // Top level expects `fn` or `struct` (C1.4), not `let`.
         let err = parse("let x = 1;").unwrap_err();
         assert!(
-            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, `effect`, `class`, `trait`, `impl`, or `enum`"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`use`, `fn`, `struct`, `effect`, `class`, `trait`, `impl`, or `enum`"),
             "got {err:?}"
         );
     }
@@ -5366,7 +5483,7 @@ mod tests {
         // Bare expressions at top level no longer parse — they're fn-body content now.
         let err = parse("42").unwrap_err();
         assert!(
-            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`fn`, `struct`, `effect`, `class`, `trait`, `impl`, or `enum`"),
+            matches!(&err, ParseError::UnexpectedToken { expected, .. } if *expected == "`use`, `fn`, `struct`, `effect`, `class`, `trait`, `impl`, or `enum`"),
             "got {err:?}"
         );
     }
