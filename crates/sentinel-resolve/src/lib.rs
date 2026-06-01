@@ -30,9 +30,10 @@ use std::collections::{HashMap, HashSet};
 
 use salsa::Accumulator;
 use sentinel_ast::{
-    BinOp, Block, ClassDecl, CmpOp, Expr, ExprKind, FnDef, HandlerArm, LogicOp, MatchArm, Pattern,
-    Program, ReturnArm, SelfKind, Span, Spanned, Stmt, StmtKind, TypeExpr,
-    TypeParam as AstTypeParam, UnaryOp, Visibility,
+    BinOp, Block, ClassDecl, CmpOp, EffectDecl, EnumDecl, Expr, ExprKind, FnDef, HandlerArm,
+    ImplDecl, LogicOp, MatchArm, Param, Pattern, Program, ReturnArm, SelfKind, Span, Spanned, Stmt,
+    StmtKind, StructDecl, TraitDecl, TypeExpr, TypeExprKind, TypeParam as AstTypeParam, UnaryOp,
+    Visibility,
 };
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 
@@ -1473,22 +1474,39 @@ fn pub_item_visibility(program: &Program, name: &str) -> Option<bool> {
     None
 }
 
+/// Whether `program` declares a top-level item named `name` of a kind
+/// that [`merge_modules`] module-qualifies this slice — a fn, struct, or
+/// enum. Trait / effect / class names are NOT qualified yet, so an import
+/// of one stays out of the rename map (its reference is left unqualified
+/// to resolve against the concatenated decl). Existence + visibility are
+/// already gated by [`resolve_imports`].
+fn is_qualified_kind(program: &Program, name: &str) -> bool {
+    program.fns.iter().any(|f| f.name == name)
+        || program.structs.iter().any(|s| s.name == name)
+        || program.enums.iter().any(|e| e.name == name)
+}
+
 /// Phase D.6 (1/N) / ADR 0037 (Path A): merge a discovered module graph
 /// into ONE [`Program`] the existing single-file pipeline can compile.
-/// Each module's top-level **function** names are qualified by module
-/// path (`util::add` → the symbol `util$add`, using `$` — not a valid
-/// Sentinel identifier char, so collision-free) so same-named privates
-/// across modules don't clash; call references are rewritten per module
-/// scope (own fns + `use`d-pub imports; builtins / locals untouched). The
-/// entry module (`modules[0]`)'s `main` keeps the symbol `main`. Imports
-/// are validated first via [`resolve_imports`] (visibility / existence).
+/// Each module's top-level **function, struct, and enum** names are
+/// qualified by module path (`util::add` → the symbol `util$add`, using
+/// `$` — not a valid Sentinel identifier char, so collision-free) so
+/// same-named privates across modules don't clash; **every reference** —
+/// call callees, struct literals, enum construction / patterns, and type
+/// annotations (params / returns / fields / variant payloads / `let`
+/// types) — is rewritten per module scope (own items + `use`d-pub
+/// imports; builtins / type parameters / locals untouched). The entry
+/// module (`modules[0]`)'s `main` keeps the symbol `main`. Imports are
+/// validated first via [`resolve_imports`] (visibility / existence).
 ///
-/// First slice = cross-module FUNCTION calls. Structs / enums / traits /
-/// effects are concatenated as-is — NOT yet module-qualified, so
-/// cross-module types + their reference rewrite are the immediate
-/// follow-up; a same-named collision among them surfaces as the usual
-/// resolve error. Spans point into per-module source (multi-module error
-/// spans are approximate until per-unit compilation lands).
+/// Slice scope = cross-module FUNCTIONS + DATA TYPES (structs / enums).
+/// Traits / effects / classes are still concatenated with their *names*
+/// unqualified (cross-module trait/effect *use* is the next increment), so
+/// a same-named trait/effect/class across modules collides as before —
+/// but their bodies' references to qualified structs/enums ARE rewritten,
+/// so an `impl`/class/effect over a cross-module data type works. Spans
+/// point into per-module source (multi-module error spans are approximate
+/// until per-unit compilation lands).
 pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
     resolve_imports(modules)?; // visibility / existence gate — errors fast.
 
@@ -1505,8 +1523,12 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
         let is_entry = idx == 0;
         let prefix = unit.path.join("$");
 
-        // Build this module's name → qualified-symbol map: its own fns,
-        // plus the `use`d imports (validated above).
+        // Build this module's name → qualified-symbol map: its own
+        // qualified-kind items (fns + structs + enums), plus the `use`d
+        // imports of those kinds (validated above). Traits / effects /
+        // classes are NOT qualified this slice (their names stay as-is),
+        // so they're deliberately absent from the map — a reference to one
+        // is left untouched.
         let mut rename: HashMap<String, String> = HashMap::new();
         for f in &unit.program.fns {
             let qualified = if is_entry && f.name == "main" {
@@ -1516,27 +1538,76 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
             };
             rename.insert(f.name.clone(), qualified);
         }
+        for s in &unit.program.structs {
+            rename.insert(s.name.clone(), format!("{prefix}${}", s.name));
+        }
+        for e in &unit.program.enums {
+            rename.insert(e.name.clone(), format!("{prefix}${}", e.name));
+        }
         for u in &unit.program.uses {
             let item = u.path.last().expect("validated: ≥ 1 segment");
             let module_path = &u.path[..u.path.len() - 1];
-            rename.insert(item.clone(), format!("{}${}", module_path.join("$"), item));
+            // Only fn/struct/enum imports are module-qualified this slice;
+            // a trait/effect/class import is left unqualified (its decl
+            // name is too), so it resolves against the concatenated item.
+            let imports_qualified_kind = modules
+                .iter()
+                .find(|m| m.path.as_slice() == module_path)
+                .is_some_and(|m| is_qualified_kind(m.program, item));
+            if imports_qualified_kind {
+                rename.insert(item.clone(), format!("{}${}", module_path.join("$"), item));
+            }
         }
 
         for f in &unit.program.fns {
             let mut nf = f.clone();
             nf.name = rename.get(&f.name).cloned().unwrap_or_else(|| f.name.clone());
-            rewrite_block(&mut nf.body, &rename);
+            rewrite_fn_def(&mut nf, &rename);
             span_end = span_end.max(nf.span.end);
             fns.push(nf);
         }
-        // Non-fn items: concatenated as-is at the first slice (not yet
-        // module-qualified — cross-module types are the follow-up).
-        structs.extend(unit.program.structs.iter().cloned());
-        effects.extend(unit.program.effects.iter().cloned());
-        classes.extend(unit.program.classes.iter().cloned());
-        traits.extend(unit.program.traits.iter().cloned());
-        impls.extend(unit.program.impls.iter().cloned());
-        enums.extend(unit.program.enums.iter().cloned());
+        for s in &unit.program.structs {
+            let mut ns = s.clone();
+            ns.name = rename.get(&s.name).cloned().unwrap_or_else(|| s.name.clone());
+            rewrite_struct_decl(&mut ns, &rename);
+            span_end = span_end.max(ns.span.end);
+            structs.push(ns);
+        }
+        for e in &unit.program.enums {
+            let mut ne = e.clone();
+            ne.name = rename.get(&e.name).cloned().unwrap_or_else(|| e.name.clone());
+            rewrite_enum_decl(&mut ne, &rename);
+            span_end = span_end.max(ne.span.end);
+            enums.push(ne);
+        }
+        // Trait / effect / class / impl names are NOT qualified this slice,
+        // but their *bodies* may reference qualified structs/enums (a field
+        // type, a method signature, an `impl … for <cross-module type>`),
+        // so each is cloned and reference-rewritten with this module's map.
+        for t in &unit.program.traits {
+            let mut nt = t.clone();
+            rewrite_trait_decl(&mut nt, &rename);
+            span_end = span_end.max(nt.span.end);
+            traits.push(nt);
+        }
+        for ef in &unit.program.effects {
+            let mut nef = ef.clone();
+            rewrite_effect_decl(&mut nef, &rename);
+            span_end = span_end.max(nef.span.end);
+            effects.push(nef);
+        }
+        for c in &unit.program.classes {
+            let mut nc = c.clone();
+            rewrite_class_decl(&mut nc, &rename);
+            span_end = span_end.max(nc.span.end);
+            classes.push(nc);
+        }
+        for i in &unit.program.impls {
+            let mut ni = i.clone();
+            rewrite_impl_decl(&mut ni, &rename);
+            span_end = span_end.max(ni.span.end);
+            impls.push(ni);
+        }
     }
 
     Ok(Program {
@@ -1552,36 +1623,201 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
     })
 }
 
-/// Rewrite call references in a block per the module's `rename` map
-/// (Phase D.6 (1/N) / ADR 0037 Path A). See [`merge_modules`].
-fn rewrite_block(block: &mut Block, rename: &HashMap<String, String>) {
-    for stmt in &mut block.stmts {
-        rewrite_stmt(stmt, rename);
-    }
-    rewrite_expr(&mut block.tail, rename);
+/// A per-module rewrite context for [`merge_modules`] (Phase D.6 (1/N) /
+/// ADR 0037 Path A): the module's name → module-qualified-symbol map plus
+/// the type-parameter names currently in scope. A generic parameter `T`
+/// shadows any same-named top-level item, so it is NEVER qualified — only
+/// `tparams` differs between a decl and the surrounding module.
+struct Renamer<'a> {
+    rename: &'a HashMap<String, String>,
+    tparams: HashSet<String>,
 }
 
-fn rewrite_stmt(stmt: &mut Stmt, rename: &HashMap<String, String>) {
+impl<'a> Renamer<'a> {
+    /// A renamer with no type parameters in scope — the common case
+    /// (enums / traits / effects / classes / impls are non-generic at
+    /// this slice).
+    fn new(rename: &'a HashMap<String, String>) -> Self {
+        Renamer { rename, tparams: HashSet::new() }
+    }
+
+    /// A renamer whose `tparams` are the names of `params` — the generic
+    /// parameters of the enclosing fn / struct, which must not be
+    /// qualified even if a top-level item shares the name.
+    fn with_type_params(rename: &'a HashMap<String, String>, params: &[AstTypeParam]) -> Self {
+        Renamer { rename, tparams: params.iter().map(|p| p.name.clone()).collect() }
+    }
+
+    /// Rewrite `name` in place to its module-qualified symbol, unless it
+    /// is an in-scope type parameter (never qualified) or absent from the
+    /// map (a builtin / primitive / unqualified-kind item / local — left
+    /// as written).
+    fn apply(&self, name: &mut String) {
+        if self.tparams.contains(name.as_str()) {
+            return;
+        }
+        if let Some(qualified) = self.rename.get(name.as_str()) {
+            *name = qualified.clone();
+        }
+    }
+}
+
+// --- per-declaration walkers ------------------------------------------------
+
+/// Rewrite a function's signature (param + return types) and body. The
+/// fn's own `type_params` shadow same-named top-level items throughout.
+fn rewrite_fn_def(f: &mut FnDef, rename: &HashMap<String, String>) {
+    let r = Renamer::with_type_params(rename, &f.type_params);
+    rewrite_params(&mut f.params, &r);
+    rewrite_type_expr(&mut f.return_type, &r);
+    rewrite_block(&mut f.body, &r);
+}
+
+/// Rewrite a struct's field types. The struct's own `type_params` are in
+/// scope (a generic field `value: T` must not be qualified).
+fn rewrite_struct_decl(s: &mut StructDecl, rename: &HashMap<String, String>) {
+    let r = Renamer::with_type_params(rename, &s.type_params);
+    for field in &mut s.fields {
+        rewrite_type_expr(&mut field.ty, &r);
+    }
+}
+
+/// Rewrite an enum's variant payload types. Enums are non-generic at the
+/// D.1 MVP, so no type parameters are in scope.
+fn rewrite_enum_decl(e: &mut EnumDecl, rename: &HashMap<String, String>) {
+    let r = Renamer::new(rename);
+    for variant in &mut e.variants {
+        for payload in &mut variant.payloads {
+            rewrite_type_expr(payload, &r);
+        }
+    }
+}
+
+/// Rewrite a trait's method signatures (the trait name itself is not
+/// qualified this slice).
+fn rewrite_trait_decl(t: &mut TraitDecl, rename: &HashMap<String, String>) {
+    let r = Renamer::new(rename);
+    for m in &mut t.methods {
+        rewrite_params(&mut m.params, &r);
+        rewrite_type_expr(&mut m.return_type, &r);
+    }
+}
+
+/// Rewrite an effect's operation signatures (param + optional return
+/// types; the effect name itself is not qualified this slice).
+fn rewrite_effect_decl(ef: &mut EffectDecl, rename: &HashMap<String, String>) {
+    let r = Renamer::new(rename);
+    for op in &mut ef.ops {
+        rewrite_params(&mut op.params, &r);
+        if let Some(rt) = &mut op.return_type {
+            rewrite_type_expr(rt, &r);
+        }
+    }
+}
+
+/// Rewrite a class's field types, init, methods, and delegate field types
+/// (the class + trait names are not qualified this slice). Classes are
+/// non-generic at the MVP, so no type parameters are in scope.
+fn rewrite_class_decl(c: &mut ClassDecl, rename: &HashMap<String, String>) {
+    let r = Renamer::new(rename);
+    for field in &mut c.fields {
+        rewrite_type_expr(&mut field.ty, &r);
+    }
+    if let Some(init) = &mut c.init {
+        rewrite_params(&mut init.params, &r);
+        rewrite_block(&mut init.body, &r);
+    }
+    for m in &mut c.methods {
+        rewrite_params(&mut m.params, &r);
+        rewrite_type_expr(&mut m.return_type, &r);
+        rewrite_block(&mut m.body, &r);
+    }
+    for d in &mut c.delegates {
+        rewrite_type_expr(&mut d.ty, &r);
+    }
+}
+
+/// Rewrite an impl block: the impl'd `type_name` (so an `impl … for
+/// <cross-module struct/enum>` finds its qualified type) and each method
+/// body + signature. `trait_name` is left untouched (traits are not
+/// qualified this slice).
+fn rewrite_impl_decl(i: &mut ImplDecl, rename: &HashMap<String, String>) {
+    let r = Renamer::new(rename);
+    r.apply(&mut i.type_name);
+    for m in &mut i.methods {
+        rewrite_params(&mut m.params, &r);
+        rewrite_type_expr(&mut m.return_type, &r);
+        rewrite_block(&mut m.body, &r);
+    }
+}
+
+fn rewrite_params(params: &mut [Param], r: &Renamer) {
+    for p in params {
+        rewrite_type_expr(&mut p.ty, r);
+    }
+}
+
+/// Rewrite the named types inside a type expression — `Ident`s and the
+/// `Generic` head — recursing through the `?T` / `[T]` / `&T` / `secret T`
+/// wrappers and generic arguments. Exhaustive (no wildcard) so a new
+/// `TypeExprKind` can't silently escape qualification.
+fn rewrite_type_expr(ty: &mut TypeExpr, r: &Renamer) {
+    match &mut ty.kind {
+        TypeExprKind::Ident(name) => r.apply(name),
+        TypeExprKind::Nullable(inner)
+        | TypeExprKind::Array(inner)
+        | TypeExprKind::Secret(inner) => rewrite_type_expr(inner, r),
+        TypeExprKind::Ref { inner, .. } => rewrite_type_expr(inner, r),
+        TypeExprKind::Generic { name, args, .. } => {
+            r.apply(name);
+            for a in args {
+                rewrite_type_expr(a, r);
+            }
+        }
+    }
+}
+
+// --- body walkers (call callees, type-naming exprs, `let` annotations) ------
+
+/// Rewrite references in a block per the module's [`Renamer`]
+/// (Phase D.6 (1/N) / ADR 0037 Path A). See [`merge_modules`].
+fn rewrite_block(block: &mut Block, r: &Renamer) {
+    for stmt in &mut block.stmts {
+        rewrite_stmt(stmt, r);
+    }
+    rewrite_expr(&mut block.tail, r);
+}
+
+fn rewrite_stmt(stmt: &mut Stmt, r: &Renamer) {
     match &mut stmt.kind {
-        StmtKind::Let { value, .. } => rewrite_expr(value, rename),
+        StmtKind::Let { ty_annot, value, .. } => {
+            if let Some(t) = ty_annot {
+                rewrite_type_expr(t, r);
+            }
+            rewrite_expr(value, r);
+        }
         StmtKind::Assign { target, value } => {
-            rewrite_expr(target, rename);
-            rewrite_expr(value, rename);
+            rewrite_expr(target, r);
+            rewrite_expr(value, r);
         }
         StmtKind::While { cond, body } => {
-            rewrite_expr(cond, rename);
-            rewrite_block(body, rename);
+            rewrite_expr(cond, r);
+            rewrite_block(body, r);
         }
         StmtKind::Break | StmtKind::Continue => {}
-        StmtKind::Expr(e) => rewrite_expr(e, rename),
+        StmtKind::Expr(e) => rewrite_expr(e, r),
     }
 }
 
-/// Exhaustive (no wildcard) so the compiler guarantees every sub-expression
-/// is recursed into — a missed variant would leave a nested cross-module
-/// call un-rewritten. Only `Call` callees are rewritten; every other
-/// variant just recurses into its sub-expressions.
-fn rewrite_expr(expr: &mut Expr, rename: &HashMap<String, String>) {
+/// Exhaustive (no wildcard) so the compiler guarantees every
+/// sub-expression is recursed into — a missed variant would leave a
+/// nested cross-module reference un-rewritten. Rewrites the names that can
+/// denote a qualified item: `Call` callees (fns), `StructLit` names
+/// (structs), `QualifiedCall` / `ClassInit` heads (enum construction /
+/// class init — a named-impl head isn't in the map, so it's left alone),
+/// and `match` variant patterns (enum names). Every other variant just
+/// recurses.
+fn rewrite_expr(expr: &mut Expr, r: &Renamer) {
     match &mut expr.kind {
         ExprKind::IntLit(_)
         | ExprKind::BoolLit(_)
@@ -1589,74 +1825,96 @@ fn rewrite_expr(expr: &mut Expr, rename: &HashMap<String, String>) {
         | ExprKind::CharLit(_)
         | ExprKind::StringLit(_)
         | ExprKind::Var(_) => {}
-        ExprKind::Unary(_, e) | ExprKind::Declassify(e) => rewrite_expr(e, rename),
-        ExprKind::Binary(_, l, r) | ExprKind::Cmp(_, l, r) | ExprKind::Logic(_, l, r) => {
-            rewrite_expr(l, rename);
-            rewrite_expr(r, rename);
+        ExprKind::Unary(_, e) | ExprKind::Declassify(e) => rewrite_expr(e, r),
+        ExprKind::Binary(_, lhs, rhs) | ExprKind::Cmp(_, lhs, rhs) | ExprKind::Logic(_, lhs, rhs) => {
+            rewrite_expr(lhs, r);
+            rewrite_expr(rhs, r);
         }
-        ExprKind::Block(b) => rewrite_block(b, rename),
+        ExprKind::Block(b) => rewrite_block(b, r),
         ExprKind::If { cond, then_branch, else_branch } => {
-            rewrite_expr(cond, rename);
-            rewrite_block(then_branch, rename);
-            rewrite_block(else_branch, rename);
+            rewrite_expr(cond, r);
+            rewrite_block(then_branch, r);
+            rewrite_block(else_branch, r);
         }
         ExprKind::Call { callee, args, .. } => {
-            if let Some(qualified) = rename.get(callee) {
-                *callee = qualified.clone();
-            }
+            r.apply(callee);
             for a in args {
-                rewrite_expr(a, rename);
+                rewrite_expr(a, r);
             }
         }
-        ExprKind::StructLit { fields, .. } => {
+        ExprKind::StructLit { name, fields, .. } => {
+            r.apply(name);
             for f in fields {
-                rewrite_expr(&mut f.value, rename);
+                rewrite_expr(&mut f.value, r);
             }
         }
-        ExprKind::FieldAccess { target, .. } => rewrite_expr(target, rename),
+        ExprKind::FieldAccess { target, .. } => rewrite_expr(target, r),
         ExprKind::ArrayLit(elems) => {
             for e in elems {
-                rewrite_expr(e, rename);
+                rewrite_expr(e, r);
             }
         }
         ExprKind::Index { target, index } => {
-            rewrite_expr(target, rename);
-            rewrite_expr(index, rename);
+            rewrite_expr(target, r);
+            rewrite_expr(index, r);
         }
         ExprKind::Handle { body, arms, return_arm } => {
-            rewrite_expr(body, rename);
+            rewrite_expr(body, r);
             for arm in arms {
-                rewrite_expr(&mut arm.body, rename);
+                rewrite_expr(&mut arm.body, r);
             }
             if let Some(ra) = return_arm {
-                rewrite_expr(&mut ra.body, rename);
+                rewrite_expr(&mut ra.body, r);
             }
         }
         ExprKind::Perform { args, .. } => {
             for a in args {
-                rewrite_expr(a, rename);
+                rewrite_expr(a, r);
             }
         }
         ExprKind::MethodCall { target, args, .. } => {
-            rewrite_expr(target, rename);
+            rewrite_expr(target, r);
             for a in args {
-                rewrite_expr(a, rename);
+                rewrite_expr(a, r);
             }
         }
-        ExprKind::ClassInit { args, .. } | ExprKind::QualifiedCall { args, .. } => {
+        // `ClassInit` heads a class init or an `Enum::init` variant;
+        // `QualifiedCall` heads enum variant construction when the name is
+        // an enum (→ qualified) and a named-impl call otherwise (the impl
+        // name isn't in the map → left alone). `apply` rewrites only names
+        // actually in the map, so each case lands correctly.
+        ExprKind::ClassInit { class_name, args, .. } => {
+            r.apply(class_name);
             for a in args {
-                rewrite_expr(a, rename);
+                rewrite_expr(a, r);
             }
         }
-        ExprKind::Scope { body, .. } => rewrite_block(body, rename),
-        ExprKind::Spawn { call_expr } => rewrite_expr(call_expr, rename),
-        ExprKind::Await { task_expr } => rewrite_expr(task_expr, rename),
+        ExprKind::QualifiedCall { impl_name, args, .. } => {
+            r.apply(impl_name);
+            for a in args {
+                rewrite_expr(a, r);
+            }
+        }
+        ExprKind::Scope { body, .. } => rewrite_block(body, r),
+        ExprKind::Spawn { call_expr } => rewrite_expr(call_expr, r),
+        ExprKind::Await { task_expr } => rewrite_expr(task_expr, r),
         ExprKind::Match { scrutinee, arms } => {
-            rewrite_expr(scrutinee, rename);
+            rewrite_expr(scrutinee, r);
             for arm in arms {
-                rewrite_expr(&mut arm.body, rename);
+                rewrite_pattern(&mut arm.pattern, r);
+                rewrite_expr(&mut arm.body, r);
             }
         }
+    }
+}
+
+/// Rewrite the enum name in a `match` variant pattern (so a pattern over a
+/// cross-module enum names its qualified type). The wildcard binds no
+/// type. Exhaustive over [`Pattern`].
+fn rewrite_pattern(pat: &mut Pattern, r: &Renamer) {
+    match pat {
+        Pattern::Variant { enum_name, .. } => r.apply(enum_name),
+        Pattern::Wildcard(_) => {}
     }
 }
 
@@ -4391,6 +4649,84 @@ mod tests {
             other => panic!("expected a Call tail, got {other:?}"),
         }
         assert!(merged.uses.is_empty(), "uses are resolved into the merge");
+    }
+
+    #[test]
+    fn merge_modules_qualifies_struct_and_rewrites_type_refs() {
+        // A `pub struct` crosses the boundary: `geo`'s `Point` becomes
+        // `geo$Point`, and the entry's references — the `let` annotation
+        // AND the struct-literal head — are both rewritten to it.
+        let main =
+            parse("use geo::Point; fn main() -> i64 { let p: Point = Point { x: 1, y: 2 }; p.x }")
+                .expect("parse");
+        let geo = parse("pub struct Point { x: i64, y: i64 }").expect("parse");
+        let modules = vec![
+            ModuleUnit { path: vec!["main".to_string()], program: &main }, // entry first
+            ModuleUnit { path: vec!["geo".to_string()], program: &geo },
+        ];
+        let merged = merge_modules(&modules).expect("merge");
+
+        let struct_names: Vec<&str> = merged.structs.iter().map(|s| s.name.as_str()).collect();
+        assert!(struct_names.contains(&"geo$Point"), "struct is qualified; {struct_names:?}");
+
+        let main_fn = merged.fns.iter().find(|f| f.name == "main").expect("main fn");
+        match &main_fn.body.stmts[0].kind {
+            StmtKind::Let { ty_annot: Some(ty), value, .. } => {
+                assert!(
+                    matches!(&ty.kind, TypeExprKind::Ident(n) if n == "geo$Point"),
+                    "the `let` annotation is rewritten; got {:?}",
+                    ty.kind
+                );
+                match &value.kind {
+                    ExprKind::StructLit { name, .. } => {
+                        assert_eq!(name, "geo$Point", "the struct-literal head is rewritten");
+                    }
+                    other => panic!("expected a StructLit value, got {other:?}"),
+                }
+            }
+            other => panic!("expected a typed Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_modules_qualifies_enum_and_rewrites_construction_and_pattern() {
+        // A `pub enum` crosses the boundary: `shape`'s `Shape` becomes
+        // `shape$Shape`; the entry's construction (a `QualifiedCall` head)
+        // AND a `match` variant pattern's enum name are both rewritten.
+        let main = parse(
+            "use shape::Shape; fn main() -> i64 { let s: Shape = Shape::Circle(3); \
+             match s { Shape::Circle(r) => r, _ => 0 } }",
+        )
+        .expect("parse");
+        let shape = parse("pub enum Shape { Circle(i64), Square(i64) }").expect("parse");
+        let modules = vec![
+            ModuleUnit { path: vec!["main".to_string()], program: &main }, // entry first
+            ModuleUnit { path: vec!["shape".to_string()], program: &shape },
+        ];
+        let merged = merge_modules(&modules).expect("merge");
+
+        let enum_names: Vec<&str> = merged.enums.iter().map(|e| e.name.as_str()).collect();
+        assert!(enum_names.contains(&"shape$Shape"), "enum is qualified; {enum_names:?}");
+
+        let main_fn = merged.fns.iter().find(|f| f.name == "main").expect("main fn");
+        match &main_fn.body.stmts[0].kind {
+            StmtKind::Let { value, .. } => match &value.kind {
+                ExprKind::QualifiedCall { impl_name, .. } => {
+                    assert_eq!(impl_name, "shape$Shape", "enum-construction head rewritten");
+                }
+                other => panic!("expected a QualifiedCall value, got {other:?}"),
+            },
+            other => panic!("expected a Let, got {other:?}"),
+        }
+        match &main_fn.body.tail.kind {
+            ExprKind::Match { arms, .. } => match &arms[0].pattern {
+                Pattern::Variant { enum_name, .. } => {
+                    assert_eq!(enum_name, "shape$Shape", "match-pattern enum name rewritten");
+                }
+                other => panic!("expected a Variant pattern, got {other:?}"),
+            },
+            other => panic!("expected a Match tail, got {other:?}"),
+        }
     }
 
     // ----- positive paths -----

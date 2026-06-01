@@ -117,3 +117,101 @@ fn use_of_missing_module_is_module_not_found() {
         "expected a ModuleNotFound naming `absent`; stderr:\n{stderr}"
     );
 }
+
+// --- D.6 cross-module TYPES (structs + enums) -------------------------------
+// merge_modules now qualifies struct + enum names by module path and
+// rewrites every type reference (annotations, struct literals, enum
+// construction / patterns, fn signatures), so a `pub` data type can cross
+// a module boundary and same-named types coexist.
+
+#[test]
+fn cross_module_struct_compiles_and_runs() {
+    // A `pub struct` defined in `geo` is imported into the entry and used
+    // as a `let` annotation, a struct literal, and a cross-module fn arg;
+    // `geo::sum` reads its fields. Point{30,12} -> 30+12 -> exit 42.
+    let dir = temp_project("xstruct");
+    write(
+        dir.join("geo.sentinel"),
+        "pub struct Point { x: i64, y: i64 }\npub fn sum(p: Point) -> i64 { p.x + p.y }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use geo::Point;\nuse geo::sum;\n\
+         fn main() -> i64 {\n    let p: Point = Point { x: 30, y: 12 };\n    sum(p)\n}\n",
+    );
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
+}
+
+#[test]
+fn cross_module_enum_with_match_compiles_and_runs() {
+    // A `pub enum` crosses the boundary: the entry constructs its variants
+    // (`Shape::Circle(3)` / `Shape::Square(5)`) and `shape::area` matches
+    // over the qualified enum. 3*3*3 + 5*5 = 27 + 25 -> exit 52.
+    let dir = temp_project("xenum");
+    write(
+        dir.join("shape.sentinel"),
+        "pub enum Shape { Circle(i64), Square(i64) }\n\
+         pub fn area(s: Shape) -> i64 {\n\
+         \x20   match s {\n\
+         \x20       Shape::Circle(r) => r * r * 3,\n\
+         \x20       Shape::Square(side) => side * side,\n\
+         \x20   }\n\
+         }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use shape::Shape;\nuse shape::area;\n\
+         fn main() -> i64 {\n\
+         \x20   let c: Shape = Shape::Circle(3);\n\
+         \x20   let sq: Shape = Shape::Square(5);\n\
+         \x20   area(c) + area(sq)\n\
+         }\n",
+    );
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 52);
+}
+
+#[test]
+fn same_named_structs_across_modules_do_not_collide() {
+    // The struct analog of the private-fn collision test: modules `a` and
+    // `b` each declare a private `struct Item` with DIFFERENT fields. They
+    // must coexist after qualification (`a$Item` vs `b$Item`); each fn
+    // builds its own. from_a()=2, from_b()=40 -> exit 42.
+    let dir = temp_project("xcollide");
+    write(
+        dir.join("a.sentinel"),
+        "struct Item { v: i64 }\npub fn from_a() -> i64 { let it: Item = Item { v: 2 }; it.v }\n",
+    );
+    write(
+        dir.join("b.sentinel"),
+        "struct Item { w: i64 }\npub fn from_b() -> i64 { let it: Item = Item { w: 40 }; it.w }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use a::from_a;\nuse b::from_b;\nfn main() -> i64 { from_a() + from_b() }\n",
+    );
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
+}
+
+#[test]
+fn cross_module_struct_as_field_type_compiles_and_runs() {
+    // Three modules deep: `inner::Inner` is used as a FIELD TYPE inside
+    // `outer::Outer` (so the field's TypeExpr must be qualified across the
+    // boundary), and the entry constructs the nested literal + reads
+    // `o.inner.n`. Outer{Inner{40},2} -> 40+2 -> exit 42.
+    let dir = temp_project("xfield");
+    write(dir.join("inner.sentinel"), "pub struct Inner { n: i64 }\n");
+    write(
+        dir.join("outer.sentinel"),
+        "use inner::Inner;\npub struct Outer { inner: Inner, extra: i64 }\n\
+         pub fn total(o: Outer) -> i64 { o.inner.n + o.extra }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use outer::Outer;\nuse outer::total;\nuse inner::Inner;\n\
+         fn main() -> i64 {\n\
+         \x20   let o: Outer = Outer { inner: Inner { n: 40 }, extra: 2 };\n\
+         \x20   total(o)\n\
+         }\n",
+    );
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
+}
