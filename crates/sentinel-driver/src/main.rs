@@ -212,35 +212,22 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     // missing `use`d file is surfaced here as ModuleNotFound).
     match discover_module_graph(Path::new(path)) {
         Ok(modules) if !modules.is_empty() => {
-            // Validate every `use` import against the graph — cross-module
-            // visibility (`pub`), unknown items, and missing modules — so a
-            // bad import is a clear diagnostic now, before any compilation.
+            // Multi-file (Path A): merge the graph into one `Program` —
+            // qualify each module's fns + rewrite cross-module references,
+            // enforcing `use`/`pub` visibility — then compile it. (Per-unit
+            // object emission + module-qualified mangling + multi-object
+            // link is the follow-up; this first slice emits one object.)
             let units: Vec<sentinel_resolve::ModuleUnit> = modules
                 .iter()
                 .map(|m| sentinel_resolve::ModuleUnit { path: m.path.clone(), program: &m.program })
                 .collect();
-            if let Err(e) = sentinel_resolve::resolve_imports(&units) {
-                eprintln!("snc: {e}");
-                return ExitCode::from(1);
-            }
-            // Imports are valid. Multi-module COMPILATION (per-unit codegen
-            // + module-qualified symbols + multi-object link) is the next
-            // D.6 (1/N) increment; report + gate honestly until then. The
-            // entry module is `modules[0]`; the rest are its imports.
-            let imported: Vec<String> =
-                modules.iter().skip(1).map(|m| m.path.join("::")).collect();
-            eprintln!(
-                "snc: multi-module compilation is not yet supported \
-                 (Phase D.6 (1/N) is wiring per-unit codegen + link per \
-                 ADR 0037); imports validated OK."
-            );
-            eprintln!(
-                "snc: `{}` reaches {} imported module(s): {}",
-                path,
-                imported.len(),
-                imported.join(", ")
-            );
-            return ExitCode::from(1);
+            return match sentinel_resolve::merge_modules(&units) {
+                Ok(merged) => run_build_merged(merged, path, output),
+                Err(e) => {
+                    eprintln!("snc: {e}");
+                    ExitCode::from(1)
+                }
+            };
         }
         Ok(_) => {} // single-file: fall through to the existing pipeline.
         Err(msg) => {
@@ -307,6 +294,65 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
         return ExitCode::from(1);
     }
 
+    match link(&object_path, &exe_path) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            eprintln!("snc: link failed: {msg}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Phase D.6 (1/N) / ADR 0037 (Path A): compile a MERGED multi-module
+/// program (one `Program` from `merge_modules`) through the pipeline via
+/// direct calls — the merged program is synthesized, not a single
+/// `SourceFile`, so it bypasses the Salsa query layer. First slice emits
+/// ONE object (per-unit objects + module-qualified mangling + multi-object
+/// link are the follow-up). Errors are reported by message; span-accurate
+/// multi-source diagnostics + effect-check parity are follow-ups (the
+/// merged program's spans point into per-module sources).
+fn run_build_merged(merged: Program, path: &str, output: Option<&str>) -> ExitCode {
+    let resolved = match sentinel_resolve::resolve(&merged) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let typed = match sentinel_types::check(&resolved) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let (drop_plan, borrow_errors) = sentinel_borrow_check::borrow_check(&typed);
+    if !borrow_errors.is_empty() {
+        for e in &borrow_errors {
+            eprintln!("snc: {e}");
+        }
+        return ExitCode::from(1);
+    }
+    // C5.2 / ADR 0026: the constant-time verification gates codegen.
+    let mir = sentinel_mir::lower_to_mir(&typed);
+    let leaks = sentinel_mir::verify_constant_time(&mir);
+    if !leaks.is_empty() {
+        for leak in &leaks {
+            eprintln!("snc: {leak}");
+        }
+        return ExitCode::from(1);
+    }
+
+    let exe_path: PathBuf = match output {
+        Some(o) => PathBuf::from(o),
+        None => PathBuf::from(path).with_extension(""),
+    };
+    let object_path = exe_path.with_extension("o");
+    let hir = sentinel_hir::lower_to_hir(&typed, &drop_plan);
+    if let Err(err) = sentinel_codegen::compile_to_object(&hir, &object_path) {
+        eprintln!("snc: codegen failed: {err}");
+        return ExitCode::from(1);
+    }
     match link(&object_path, &exe_path) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {

@@ -28,7 +28,8 @@ fn write(path: PathBuf, contents: &str) {
     std::fs::write(path, contents).expect("write source file");
 }
 
-/// Run `snc build <entry>` and return (success, stderr).
+/// Run `snc build <entry>` (output next to the entry) and return
+/// (success, stderr).
 fn build(entry: PathBuf) -> (bool, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_snc"))
         .arg("build")
@@ -40,36 +41,52 @@ fn build(entry: PathBuf) -> (bool, String) {
     (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
-#[test]
-fn multi_module_build_validates_imports_then_gates() {
-    // `use util::add;` → module `util` (file `util.sentinel`). The `pub`
-    // import validates, then multi-module *compilation* is gated (per-unit
-    // codegen + link is the next increment).
-    let dir = temp_project("multi");
-    write(dir.join("util.sentinel"), "pub fn add(a: i64, b: i64) -> i64 { a + b }\n");
-    write(dir.join("main.sentinel"), "use util::add;\nfn main() -> i64 { 0 }\n");
-    let (ok, stderr) = build(dir.join("main.sentinel"));
-    assert!(!ok, "multi-module build should be gated (non-zero exit); stderr:\n{stderr}");
-    assert!(
-        stderr.contains("multi-module compilation is not yet supported"),
-        "expected the multi-module gate message; stderr:\n{stderr}"
-    );
-    assert!(stderr.contains("util"), "should name the discovered module; stderr:\n{stderr}");
+/// Build `entry`, assert it compiled, run the binary, and return its exit
+/// code (the program's tail value, the "exit-code-is-the-answer" rule).
+fn build_and_run(entry: PathBuf) -> i32 {
+    let (ok, stderr) = build(entry.clone());
+    assert!(ok, "expected a successful multi-file build; stderr:\n{stderr}");
+    let exe = entry.with_extension("");
+    let run = Command::new(&exe).output().expect("run compiled binary");
+    run.status.code().expect("process exited normally")
 }
 
 #[test]
-fn nested_module_path_maps_to_subdirectory() {
+fn cross_module_call_compiles_and_runs() {
+    // The payoff: `use util::add;` + a cross-module call compiles to a
+    // binary and runs. add(2, 3) -> exit 5.
+    let dir = temp_project("multi");
+    write(dir.join("util.sentinel"), "pub fn add(a: i64, b: i64) -> i64 { a + b }\n");
+    write(dir.join("main.sentinel"), "use util::add;\nfn main() -> i64 { add(2, 3) }\n");
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 5);
+}
+
+#[test]
+fn nested_module_path_compiles_and_runs() {
     // ADR 0037 open point 4: `use util::math::add;` → module `util::math`
     // → file `util/math.sentinel` (the last segment, `add`, is the item).
     let dir = temp_project("nested");
     write(dir.join("util/math.sentinel"), "pub fn add(a: i64, b: i64) -> i64 { a + b }\n");
-    write(dir.join("main.sentinel"), "use util::math::add;\nfn main() -> i64 { 0 }\n");
-    let (ok, stderr) = build(dir.join("main.sentinel"));
-    assert!(!ok, "still gated; stderr:\n{stderr}");
-    assert!(
-        stderr.contains("util::math"),
-        "the nested module path should resolve to util/math.sentinel; stderr:\n{stderr}"
+    write(dir.join("main.sentinel"), "use util::math::add;\nfn main() -> i64 { add(10, 5) }\n");
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 15);
+}
+
+#[test]
+fn private_names_across_modules_do_not_collide() {
+    // The point of qualification: two modules each declare a private
+    // `helper`; they must not clash, and a `pub fn` calls its OWN module's
+    // private. util::compute(4) = helper(4)*10 + 1 = 41; main's own
+    // (unused) `helper` returns 99.
+    let dir = temp_project("collide");
+    write(
+        dir.join("util.sentinel"),
+        "pub fn compute(x: i64) -> i64 { helper(x) + 1 }\nfn helper(x: i64) -> i64 { x * 10 }\n",
     );
+    write(
+        dir.join("main.sentinel"),
+        "use util::compute;\nfn helper() -> i64 { 99 }\nfn main() -> i64 { compute(4) }\n",
+    );
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 41);
 }
 
 #[test]

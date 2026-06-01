@@ -1473,6 +1473,193 @@ fn pub_item_visibility(program: &Program, name: &str) -> Option<bool> {
     None
 }
 
+/// Phase D.6 (1/N) / ADR 0037 (Path A): merge a discovered module graph
+/// into ONE [`Program`] the existing single-file pipeline can compile.
+/// Each module's top-level **function** names are qualified by module
+/// path (`util::add` → the symbol `util$add`, using `$` — not a valid
+/// Sentinel identifier char, so collision-free) so same-named privates
+/// across modules don't clash; call references are rewritten per module
+/// scope (own fns + `use`d-pub imports; builtins / locals untouched). The
+/// entry module (`modules[0]`)'s `main` keeps the symbol `main`. Imports
+/// are validated first via [`resolve_imports`] (visibility / existence).
+///
+/// First slice = cross-module FUNCTION calls. Structs / enums / traits /
+/// effects are concatenated as-is — NOT yet module-qualified, so
+/// cross-module types + their reference rewrite are the immediate
+/// follow-up; a same-named collision among them surfaces as the usual
+/// resolve error. Spans point into per-module source (multi-module error
+/// spans are approximate until per-unit compilation lands).
+pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
+    resolve_imports(modules)?; // visibility / existence gate — errors fast.
+
+    let mut fns = Vec::new();
+    let mut structs = Vec::new();
+    let mut effects = Vec::new();
+    let mut classes = Vec::new();
+    let mut traits = Vec::new();
+    let mut impls = Vec::new();
+    let mut enums = Vec::new();
+    let mut span_end = 0usize;
+
+    for (idx, unit) in modules.iter().enumerate() {
+        let is_entry = idx == 0;
+        let prefix = unit.path.join("$");
+
+        // Build this module's name → qualified-symbol map: its own fns,
+        // plus the `use`d imports (validated above).
+        let mut rename: HashMap<String, String> = HashMap::new();
+        for f in &unit.program.fns {
+            let qualified = if is_entry && f.name == "main" {
+                "main".to_string()
+            } else {
+                format!("{prefix}${}", f.name)
+            };
+            rename.insert(f.name.clone(), qualified);
+        }
+        for u in &unit.program.uses {
+            let item = u.path.last().expect("validated: ≥ 1 segment");
+            let module_path = &u.path[..u.path.len() - 1];
+            rename.insert(item.clone(), format!("{}${}", module_path.join("$"), item));
+        }
+
+        for f in &unit.program.fns {
+            let mut nf = f.clone();
+            nf.name = rename.get(&f.name).cloned().unwrap_or_else(|| f.name.clone());
+            rewrite_block(&mut nf.body, &rename);
+            span_end = span_end.max(nf.span.end);
+            fns.push(nf);
+        }
+        // Non-fn items: concatenated as-is at the first slice (not yet
+        // module-qualified — cross-module types are the follow-up).
+        structs.extend(unit.program.structs.iter().cloned());
+        effects.extend(unit.program.effects.iter().cloned());
+        classes.extend(unit.program.classes.iter().cloned());
+        traits.extend(unit.program.traits.iter().cloned());
+        impls.extend(unit.program.impls.iter().cloned());
+        enums.extend(unit.program.enums.iter().cloned());
+    }
+
+    Ok(Program {
+        uses: Vec::new(),
+        fns,
+        structs,
+        effects,
+        classes,
+        traits,
+        impls,
+        enums,
+        span: 0..span_end,
+    })
+}
+
+/// Rewrite call references in a block per the module's `rename` map
+/// (Phase D.6 (1/N) / ADR 0037 Path A). See [`merge_modules`].
+fn rewrite_block(block: &mut Block, rename: &HashMap<String, String>) {
+    for stmt in &mut block.stmts {
+        rewrite_stmt(stmt, rename);
+    }
+    rewrite_expr(&mut block.tail, rename);
+}
+
+fn rewrite_stmt(stmt: &mut Stmt, rename: &HashMap<String, String>) {
+    match &mut stmt.kind {
+        StmtKind::Let { value, .. } => rewrite_expr(value, rename),
+        StmtKind::Assign { target, value } => {
+            rewrite_expr(target, rename);
+            rewrite_expr(value, rename);
+        }
+        StmtKind::While { cond, body } => {
+            rewrite_expr(cond, rename);
+            rewrite_block(body, rename);
+        }
+        StmtKind::Break | StmtKind::Continue => {}
+        StmtKind::Expr(e) => rewrite_expr(e, rename),
+    }
+}
+
+/// Exhaustive (no wildcard) so the compiler guarantees every sub-expression
+/// is recursed into — a missed variant would leave a nested cross-module
+/// call un-rewritten. Only `Call` callees are rewritten; every other
+/// variant just recurses into its sub-expressions.
+fn rewrite_expr(expr: &mut Expr, rename: &HashMap<String, String>) {
+    match &mut expr.kind {
+        ExprKind::IntLit(_)
+        | ExprKind::BoolLit(_)
+        | ExprKind::NullLit
+        | ExprKind::CharLit(_)
+        | ExprKind::StringLit(_)
+        | ExprKind::Var(_) => {}
+        ExprKind::Unary(_, e) | ExprKind::Declassify(e) => rewrite_expr(e, rename),
+        ExprKind::Binary(_, l, r) | ExprKind::Cmp(_, l, r) | ExprKind::Logic(_, l, r) => {
+            rewrite_expr(l, rename);
+            rewrite_expr(r, rename);
+        }
+        ExprKind::Block(b) => rewrite_block(b, rename),
+        ExprKind::If { cond, then_branch, else_branch } => {
+            rewrite_expr(cond, rename);
+            rewrite_block(then_branch, rename);
+            rewrite_block(else_branch, rename);
+        }
+        ExprKind::Call { callee, args, .. } => {
+            if let Some(qualified) = rename.get(callee) {
+                *callee = qualified.clone();
+            }
+            for a in args {
+                rewrite_expr(a, rename);
+            }
+        }
+        ExprKind::StructLit { fields, .. } => {
+            for f in fields {
+                rewrite_expr(&mut f.value, rename);
+            }
+        }
+        ExprKind::FieldAccess { target, .. } => rewrite_expr(target, rename),
+        ExprKind::ArrayLit(elems) => {
+            for e in elems {
+                rewrite_expr(e, rename);
+            }
+        }
+        ExprKind::Index { target, index } => {
+            rewrite_expr(target, rename);
+            rewrite_expr(index, rename);
+        }
+        ExprKind::Handle { body, arms, return_arm } => {
+            rewrite_expr(body, rename);
+            for arm in arms {
+                rewrite_expr(&mut arm.body, rename);
+            }
+            if let Some(ra) = return_arm {
+                rewrite_expr(&mut ra.body, rename);
+            }
+        }
+        ExprKind::Perform { args, .. } => {
+            for a in args {
+                rewrite_expr(a, rename);
+            }
+        }
+        ExprKind::MethodCall { target, args, .. } => {
+            rewrite_expr(target, rename);
+            for a in args {
+                rewrite_expr(a, rename);
+            }
+        }
+        ExprKind::ClassInit { args, .. } | ExprKind::QualifiedCall { args, .. } => {
+            for a in args {
+                rewrite_expr(a, rename);
+            }
+        }
+        ExprKind::Scope { body, .. } => rewrite_block(body, rename),
+        ExprKind::Spawn { call_expr } => rewrite_expr(call_expr, rename),
+        ExprKind::Await { task_expr } => rewrite_expr(task_expr, rename),
+        ExprKind::Match { scrutinee, arms } => {
+            rewrite_expr(scrutinee, rename);
+            for arm in arms {
+                rewrite_expr(&mut arm.body, rename);
+            }
+        }
+    }
+}
+
 /// Resolve a [`Program`] to a [`ResolvedProgram`]. Fails fast on
 /// the first error encountered, matching the C0 codegen pass's
 /// existing diagnostic shape. Multi-error accumulation is a future
@@ -4177,6 +4364,33 @@ mod tests {
             matches!(&err, ResolveError::ModuleNotFound { module, .. } if module == "util"),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn merge_modules_qualifies_fns_and_rewrites_cross_module_call() {
+        // Path A: merge the graph into one Program — util's `add` becomes
+        // `util$add`; the entry's `main` keeps its symbol; main's call to
+        // the imported `add` is rewritten to the qualified `util$add`.
+        let main = parse("use util::add; fn main() -> i64 { add(2, 3) }").expect("parse");
+        let util = parse("pub fn add(a: i64, b: i64) -> i64 { a + b }").expect("parse");
+        let modules = vec![
+            ModuleUnit { path: vec!["main".to_string()], program: &main }, // entry first
+            ModuleUnit { path: vec!["util".to_string()], program: &util },
+        ];
+        let merged = merge_modules(&modules).expect("merge");
+
+        let names: Vec<&str> = merged.fns.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"util$add"), "util's fn is qualified; names: {names:?}");
+        assert!(names.contains(&"main"), "the entry's main keeps its symbol; names: {names:?}");
+
+        let main_fn = merged.fns.iter().find(|f| f.name == "main").expect("main fn");
+        match &main_fn.body.tail.kind {
+            ExprKind::Call { callee, .. } => {
+                assert_eq!(callee, "util$add", "the cross-module call is rewritten");
+            }
+            other => panic!("expected a Call tail, got {other:?}"),
+        }
+        assert!(merged.uses.is_empty(), "uses are resolved into the merge");
     }
 
     // ----- positive paths -----
