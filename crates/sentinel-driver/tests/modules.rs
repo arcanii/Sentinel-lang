@@ -215,3 +215,86 @@ fn cross_module_struct_as_field_type_compiles_and_runs() {
     );
     assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
 }
+
+// --- D.6 cross-module TRAITS / EFFECTS / CLASSES ----------------------------
+// merge_modules now qualifies trait / effect / class / named-impl names too
+// and rewrites their reference sites (impl `as Trait for Type` heads,
+// `perform`/`handle` effect names, effect rows, delegate trait names), so a
+// `pub` trait/effect crosses a boundary and same-named ones coexist.
+
+#[test]
+fn cross_module_trait_compiles_and_runs() {
+    // A `pub trait` defined in `counter` is imported into `tally`, which
+    // impls it for its own class and dispatches `t.tick(42)` via the
+    // receiver-typed default impl. The trait ref (`impl as Counter …`)
+    // must resolve to the qualified `counter$Counter`. run(42) -> exit 42.
+    let dir = temp_project("xtrait");
+    write(
+        dir.join("counter.sentinel"),
+        "pub trait Counter {\n    fn tick(self: &mut Self, n: i64) -> i64;\n}\n",
+    );
+    write(
+        dir.join("tally.sentinel"),
+        "use counter::Counter;\n\
+         class Tally {\n    let count: i64;\n    pub init() { self.count = 0; 0 }\n}\n\
+         impl as Counter for Tally {\n\
+         \x20   fn tick(self: &mut Self, n: i64) -> i64 { self.count = self.count + n; self.count }\n\
+         }\n\
+         pub fn run(n: i64) -> i64 { let mut t: Tally = Tally::init(); t.tick(n) }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use tally::run;\nfn main() -> i64 { run(42) }\n",
+    );
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
+}
+
+#[test]
+fn same_named_classes_across_modules_do_not_collide() {
+    // Classes can't be `pub` (module-local), but same-named ones in two
+    // modules must coexist after qualification (`a$Holder` vs `b$Holder`),
+    // each with its own `init` + method. from_a()=2, from_b()=40 -> exit 42.
+    let dir = temp_project("xclass");
+    write(
+        dir.join("a.sentinel"),
+        "class Holder { let v: i64; pub init() { self.v = 2; 0 } \
+         pub fn get(self: &Self) -> i64 { self.v } }\n\
+         pub fn from_a() -> i64 { let h: Holder = Holder::init(); h.get() }\n",
+    );
+    write(
+        dir.join("b.sentinel"),
+        "class Holder { let w: i64; pub init() { self.w = 40; 0 } \
+         pub fn get(self: &Self) -> i64 { self.w } }\n\
+         pub fn from_b() -> i64 { let h: Holder = Holder::init(); h.get() }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use a::from_a;\nuse b::from_b;\nfn main() -> i64 { from_a() + from_b() }\n",
+    );
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
+}
+
+#[test]
+fn cross_module_effect_compiles_and_runs() {
+    // A `pub effect` crosses the boundary: `io::source` performs `Io.read`
+    // (its effect row + perform name qualify to `io$Io`), and the entry
+    // `handle`s the same qualified effect, resuming with 42 -> exit 42.
+    // (The merged path skips effect-check, but a well-formed effectful
+    // program still resolves + lowers + runs.)
+    let dir = temp_project("xeffect");
+    write(
+        dir.join("io.sentinel"),
+        "pub effect Io {\n    read() -> i64;\n}\n\
+         pub fn source() -> i64 ! { Io } { perform Io.read() }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use io::Io;\nuse io::source;\n\
+         fn main() -> i64 {\n\
+         \x20   handle source() with {\n\
+         \x20       Io.read(k) => k(42)\n\
+         \x20   }\n\
+         }\n",
+    );
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
+}

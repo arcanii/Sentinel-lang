@@ -1474,39 +1474,28 @@ fn pub_item_visibility(program: &Program, name: &str) -> Option<bool> {
     None
 }
 
-/// Whether `program` declares a top-level item named `name` of a kind
-/// that [`merge_modules`] module-qualifies this slice — a fn, struct, or
-/// enum. Trait / effect / class names are NOT qualified yet, so an import
-/// of one stays out of the rename map (its reference is left unqualified
-/// to resolve against the concatenated decl). Existence + visibility are
-/// already gated by [`resolve_imports`].
-fn is_qualified_kind(program: &Program, name: &str) -> bool {
-    program.fns.iter().any(|f| f.name == name)
-        || program.structs.iter().any(|s| s.name == name)
-        || program.enums.iter().any(|e| e.name == name)
-}
-
 /// Phase D.6 (1/N) / ADR 0037 (Path A): merge a discovered module graph
 /// into ONE [`Program`] the existing single-file pipeline can compile.
-/// Each module's top-level **function, struct, and enum** names are
-/// qualified by module path (`util::add` → the symbol `util$add`, using
-/// `$` — not a valid Sentinel identifier char, so collision-free) so
-/// same-named privates across modules don't clash; **every reference** —
-/// call callees, struct literals, enum construction / patterns, and type
-/// annotations (params / returns / fields / variant payloads / `let`
-/// types) — is rewritten per module scope (own items + `use`d-pub
-/// imports; builtins / type parameters / locals untouched). The entry
-/// module (`modules[0]`)'s `main` keeps the symbol `main`. Imports are
-/// validated first via [`resolve_imports`] (visibility / existence).
+/// **Every** top-level item — fn, struct, enum, trait, effect, class, and
+/// named impl — has its name qualified by module path (`util::add` → the
+/// symbol `util$add`, using `$`, not a valid Sentinel identifier char, so
+/// collision-free), so same-named items across modules never clash; and
+/// **every reference** is rewritten per module scope: call callees, struct
+/// literals, enum construction / patterns, `impl … as Trait for Type`
+/// heads, `perform`/`handle` effect names, fn/method effect rows, delegate
+/// trait names, and all type annotations (params / returns / fields /
+/// variant payloads / `let` types). Own items + `use`d-pub imports are
+/// qualified; builtins / primitives / type parameters / locals are left
+/// untouched. The entry module (`modules[0]`)'s `main` keeps the symbol
+/// `main`. Imports are validated first via [`resolve_imports`]
+/// (visibility / existence).
 ///
-/// Slice scope = cross-module FUNCTIONS + DATA TYPES (structs / enums).
-/// Traits / effects / classes are still concatenated with their *names*
-/// unqualified (cross-module trait/effect *use* is the next increment), so
-/// a same-named trait/effect/class across modules collides as before —
-/// but their bodies' references to qualified structs/enums ARE rewritten,
-/// so an `impl`/class/effect over a cross-module data type works. Spans
-/// point into per-module source (multi-module error spans are approximate
-/// until per-unit compilation lands).
+/// What this enables: cross-module FUNCTIONS, DATA TYPES (structs / enums),
+/// TRAITS, EFFECTS, and CLASSES — a `pub` item of any of those kinds can be
+/// imported + used across a file boundary, and same-named items coexist.
+/// (Cross-module GENERICS are (2/N); per-unit separate compilation is the
+/// follow-up back end.) Spans point into per-module source (multi-module
+/// error spans are approximate until per-unit compilation lands).
 pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
     resolve_imports(modules)?; // visibility / existence gate — errors fast.
 
@@ -1523,12 +1512,14 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
         let is_entry = idx == 0;
         let prefix = unit.path.join("$");
 
-        // Build this module's name → qualified-symbol map: its own
-        // qualified-kind items (fns + structs + enums), plus the `use`d
-        // imports of those kinds (validated above). Traits / effects /
-        // classes are NOT qualified this slice (their names stay as-is),
-        // so they're deliberately absent from the map — a reference to one
-        // is left untouched.
+        // Build this module's name → qualified-symbol map. EVERY top-level
+        // item is qualified by module path — fns, structs, enums, traits,
+        // effects, classes, AND named impls — so same-named items across
+        // modules never clash; only the entry's `main` keeps its symbol.
+        // `use`d imports map to their defining module's qualified symbol
+        // (resolve_imports already gated existence + visibility, and every
+        // importable kind is qualified). Builtins / primitives / type params
+        // / locals are absent from the map → left untouched at the rewrite.
         let mut rename: HashMap<String, String> = HashMap::new();
         for f in &unit.program.fns {
             let qualified = if is_entry && f.name == "main" {
@@ -1544,21 +1535,28 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
         for e in &unit.program.enums {
             rename.insert(e.name.clone(), format!("{prefix}${}", e.name));
         }
+        for t in &unit.program.traits {
+            rename.insert(t.name.clone(), format!("{prefix}${}", t.name));
+        }
+        for ef in &unit.program.effects {
+            rename.insert(ef.name.clone(), format!("{prefix}${}", ef.name));
+        }
+        for c in &unit.program.classes {
+            rename.insert(c.name.clone(), format!("{prefix}${}", c.name));
+        }
+        for i in &unit.program.impls {
+            if let Some(n) = &i.name {
+                rename.insert(n.clone(), format!("{prefix}${n}"));
+            }
+        }
         for u in &unit.program.uses {
             let item = u.path.last().expect("validated: ≥ 1 segment");
             let module_path = &u.path[..u.path.len() - 1];
-            // Only fn/struct/enum imports are module-qualified this slice;
-            // a trait/effect/class import is left unqualified (its decl
-            // name is too), so it resolves against the concatenated item.
-            let imports_qualified_kind = modules
-                .iter()
-                .find(|m| m.path.as_slice() == module_path)
-                .is_some_and(|m| is_qualified_kind(m.program, item));
-            if imports_qualified_kind {
-                rename.insert(item.clone(), format!("{}${}", module_path.join("$"), item));
-            }
+            rename.insert(item.clone(), format!("{}${}", module_path.join("$"), item));
         }
 
+        // Clone + qualify each declaration's name, then reference-rewrite its
+        // body + signature with this module's map.
         for f in &unit.program.fns {
             let mut nf = f.clone();
             nf.name = rename.get(&f.name).cloned().unwrap_or_else(|| f.name.clone());
@@ -1580,30 +1578,32 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
             span_end = span_end.max(ne.span.end);
             enums.push(ne);
         }
-        // Trait / effect / class / impl names are NOT qualified this slice,
-        // but their *bodies* may reference qualified structs/enums (a field
-        // type, a method signature, an `impl … for <cross-module type>`),
-        // so each is cloned and reference-rewritten with this module's map.
         for t in &unit.program.traits {
             let mut nt = t.clone();
+            nt.name = rename.get(&t.name).cloned().unwrap_or_else(|| t.name.clone());
             rewrite_trait_decl(&mut nt, &rename);
             span_end = span_end.max(nt.span.end);
             traits.push(nt);
         }
         for ef in &unit.program.effects {
             let mut nef = ef.clone();
+            nef.name = rename.get(&ef.name).cloned().unwrap_or_else(|| ef.name.clone());
             rewrite_effect_decl(&mut nef, &rename);
             span_end = span_end.max(nef.span.end);
             effects.push(nef);
         }
         for c in &unit.program.classes {
             let mut nc = c.clone();
+            nc.name = rename.get(&c.name).cloned().unwrap_or_else(|| c.name.clone());
             rewrite_class_decl(&mut nc, &rename);
             span_end = span_end.max(nc.span.end);
             classes.push(nc);
         }
         for i in &unit.program.impls {
             let mut ni = i.clone();
+            if let Some(n) = &i.name {
+                ni.name = Some(rename.get(n).cloned().unwrap_or_else(|| n.clone()));
+            }
             rewrite_impl_decl(&mut ni, &rename);
             span_end = span_end.max(ni.span.end);
             impls.push(ni);
@@ -1670,7 +1670,16 @@ fn rewrite_fn_def(f: &mut FnDef, rename: &HashMap<String, String>) {
     let r = Renamer::with_type_params(rename, &f.type_params);
     rewrite_params(&mut f.params, &r);
     rewrite_type_expr(&mut f.return_type, &r);
+    rewrite_effect_row(&mut f.effect_row, &r);
     rewrite_block(&mut f.body, &r);
+}
+
+/// Rewrite the effect names in a postfix effect-row annotation
+/// (`! { Net, Io }`) — each entry names a (now module-qualified) effect.
+fn rewrite_effect_row(row: &mut [Spanned<String>], r: &Renamer) {
+    for entry in row {
+        r.apply(&mut entry.kind);
+    }
 }
 
 /// Rewrite a struct's field types. The struct's own `type_params` are in
@@ -1693,18 +1702,20 @@ fn rewrite_enum_decl(e: &mut EnumDecl, rename: &HashMap<String, String>) {
     }
 }
 
-/// Rewrite a trait's method signatures (the trait name itself is not
-/// qualified this slice).
+/// Rewrite a trait's method signatures (param + return types + effect
+/// rows). The trait's own name is qualified by the merge loop.
 fn rewrite_trait_decl(t: &mut TraitDecl, rename: &HashMap<String, String>) {
     let r = Renamer::new(rename);
     for m in &mut t.methods {
         rewrite_params(&mut m.params, &r);
         rewrite_type_expr(&mut m.return_type, &r);
+        rewrite_effect_row(&mut m.effect_row, &r);
     }
 }
 
 /// Rewrite an effect's operation signatures (param + optional return
-/// types; the effect name itself is not qualified this slice).
+/// types). The effect's own name is qualified by the merge loop; op names
+/// stay (they are scoped within the effect, like enum variants).
 fn rewrite_effect_decl(ef: &mut EffectDecl, rename: &HashMap<String, String>) {
     let r = Renamer::new(rename);
     for op in &mut ef.ops {
@@ -1715,9 +1726,10 @@ fn rewrite_effect_decl(ef: &mut EffectDecl, rename: &HashMap<String, String>) {
     }
 }
 
-/// Rewrite a class's field types, init, methods, and delegate field types
-/// (the class + trait names are not qualified this slice). Classes are
-/// non-generic at the MVP, so no type parameters are in scope.
+/// Rewrite a class's field types, init, methods (sig + effect row + body),
+/// and delegate field types + forwarded trait names. The class's own name
+/// is qualified by the merge loop. Classes are non-generic at the MVP, so
+/// no type parameters are in scope.
 fn rewrite_class_decl(c: &mut ClassDecl, rename: &HashMap<String, String>) {
     let r = Renamer::new(rename);
     for field in &mut c.fields {
@@ -1730,23 +1742,27 @@ fn rewrite_class_decl(c: &mut ClassDecl, rename: &HashMap<String, String>) {
     for m in &mut c.methods {
         rewrite_params(&mut m.params, &r);
         rewrite_type_expr(&mut m.return_type, &r);
+        rewrite_effect_row(&mut m.effect_row, &r);
         rewrite_block(&mut m.body, &r);
     }
     for d in &mut c.delegates {
         rewrite_type_expr(&mut d.ty, &r);
+        r.apply(&mut d.trait_name);
     }
 }
 
-/// Rewrite an impl block: the impl'd `type_name` (so an `impl … for
-/// <cross-module struct/enum>` finds its qualified type) and each method
-/// body + signature. `trait_name` is left untouched (traits are not
-/// qualified this slice).
+/// Rewrite an impl block: the impl'd `type_name` AND the `trait_name` (so
+/// an `impl … as <trait> for <type>` finds both qualified decls) plus each
+/// method's sig + effect row + body. The impl's own (optional) name is
+/// qualified by the merge loop.
 fn rewrite_impl_decl(i: &mut ImplDecl, rename: &HashMap<String, String>) {
     let r = Renamer::new(rename);
     r.apply(&mut i.type_name);
+    r.apply(&mut i.trait_name);
     for m in &mut i.methods {
         rewrite_params(&mut m.params, &r);
         rewrite_type_expr(&mut m.return_type, &r);
+        rewrite_effect_row(&mut m.effect_row, &r);
         rewrite_block(&mut m.body, &r);
     }
 }
@@ -1861,13 +1877,18 @@ fn rewrite_expr(expr: &mut Expr, r: &Renamer) {
         ExprKind::Handle { body, arms, return_arm } => {
             rewrite_expr(body, r);
             for arm in arms {
+                // `Effect.op(..) => body`: the handled effect's name is
+                // qualified (the op name is scoped within it, like a variant).
+                r.apply(&mut arm.effect.kind);
                 rewrite_expr(&mut arm.body, r);
             }
             if let Some(ra) = return_arm {
                 rewrite_expr(&mut ra.body, r);
             }
         }
-        ExprKind::Perform { args, .. } => {
+        ExprKind::Perform { effect, args, .. } => {
+            // `perform Effect.op(args)`: qualify the performed effect's name.
+            r.apply(&mut effect.kind);
             for a in args {
                 rewrite_expr(a, r);
             }
@@ -4726,6 +4747,64 @@ mod tests {
                 other => panic!("expected a Variant pattern, got {other:?}"),
             },
             other => panic!("expected a Match tail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_modules_qualifies_trait_and_rewrites_impl_ref() {
+        // A `pub trait` crosses the boundary: `t`'s `Show` becomes `t$Show`;
+        // the entry's `impl as Show for Widget` head is rewritten to the
+        // imported qualified trait (and the impl'd class to `main$Widget`).
+        let main = parse(
+            "use t::Show; class Widget { let v: i64; pub init() { self.v = 0; 0 } } \
+             impl as Show for Widget { fn show(self: &Self) -> i64 { self.v } } \
+             fn main() -> i64 { 0 }",
+        )
+        .expect("parse");
+        let t = parse("pub trait Show { fn show(self: &Self) -> i64; }").expect("parse");
+        let modules = vec![
+            ModuleUnit { path: vec!["main".to_string()], program: &main }, // entry first
+            ModuleUnit { path: vec!["t".to_string()], program: &t },
+        ];
+        let merged = merge_modules(&modules).expect("merge");
+
+        let trait_names: Vec<&str> = merged.traits.iter().map(|t| t.name.as_str()).collect();
+        assert!(trait_names.contains(&"t$Show"), "trait is qualified; {trait_names:?}");
+
+        let imp = merged
+            .impls
+            .iter()
+            .find(|i| i.type_name == "main$Widget")
+            .expect("the impl for the qualified class");
+        assert_eq!(imp.trait_name, "t$Show", "impl trait_name → the imported qualified trait");
+    }
+
+    #[test]
+    fn merge_modules_qualifies_effect_and_rewrites_perform_and_row() {
+        // A `pub effect` crosses the boundary: `e`'s `Io` becomes `e$Io`; the
+        // entry's `! { Io }` effect row AND the `perform Io.read()` head are
+        // both rewritten to the imported qualified effect.
+        let main = parse(
+            "use e::Io; fn run() -> i64 ! { Io } { perform Io.read() } fn main() -> i64 { 0 }",
+        )
+        .expect("parse");
+        let e = parse("pub effect Io { read() -> i64; }").expect("parse");
+        let modules = vec![
+            ModuleUnit { path: vec!["main".to_string()], program: &main }, // entry first
+            ModuleUnit { path: vec!["e".to_string()], program: &e },
+        ];
+        let merged = merge_modules(&modules).expect("merge");
+
+        let effect_names: Vec<&str> = merged.effects.iter().map(|x| x.name.as_str()).collect();
+        assert!(effect_names.contains(&"e$Io"), "effect is qualified; {effect_names:?}");
+
+        let run = merged.fns.iter().find(|f| f.name == "main$run").expect("run fn");
+        assert_eq!(run.effect_row[0].kind, "e$Io", "the effect row entry is rewritten");
+        match &run.body.tail.kind {
+            ExprKind::Perform { effect, .. } => {
+                assert_eq!(effect.kind, "e$Io", "the perform effect name is rewritten");
+            }
+            other => panic!("expected a Perform tail, got {other:?}"),
         }
     }
 
