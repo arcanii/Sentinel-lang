@@ -1916,12 +1916,37 @@ For pasting into a fresh chat to bootstrap context:
       VecElementNotSupported). 1324 tests. See
       [[sentinel_d3_collections_surface]].
 
-    RESUME AT: **Phase D.6 (1/N) — modules / multi-file, per the new
-    ADR 0037 (PROPOSED, docs-only this session).** Modules is the **last**
-    ADR 0031 D4 language prerequisite before the lexer→parser→… self-host port
-    (D5). **Phase D.5 — loops — is COMPLETE** (ADR 0036 → ACCEPTED-WITH-
-    AMENDMENTS: (1/N) `while` + (2/N) `break`/`continue`; phase-gos exit 67 +
-    115, 0 leaks; 1361 tests) — full recap in [[sentinel_d5_loops_surface]].
+    RESUME AT: **Phase D.6 (1/N) — modules / multi-file — IN PROGRESS, per
+    ADR 0037.** Modules is the **last** ADR 0031 D4 language prerequisite
+    before the lexer→parser→… self-host port (D5). **Phase D.5 — loops — is
+    COMPLETE** (ADR 0036 → ACCEPTED-WITH-AMENDMENTS: (1/N) `while` + (2/N)
+    `break`/`continue`; exit 67 + 115, 0 leaks) — recap in
+    [[sentinel_d5_loops_surface]].
+    **D.6 (1/N) PROGRESS (2 increments committed this session):**
+    (i) **front-end** (`d02f4a3`) — reserved `use` lexer keyword + `UseDecl`
+    AST + `Program.uses` + parser (`use a::b::Item;`, ≥2 segments, `;`);
+    resolve gates a non-empty `uses` with `UseDeclNotYet` (backstop).
+    (ii) **module-graph discovery** (`e7db419`) — the DRIVER follows `use`
+    edges from the entry, mapping `use a::b::Item` → module `a::b` → file
+    `<root>/a/b.sentinel` (source root = entry's dir; last segment = item;
+    cycles fine); a missing `use`d file → ModuleNotFound; single-file
+    unaffected; a discovered multi-module graph is REPORTED + GATED at the
+    driver pending per-unit wiring. `discover_module_graph` in
+    sentinel-driver/main.rs; tests in `tests/modules.rs`. 1369 tests, green.
+    **RESUME HERE → the remaining D.6 (1/N): make `use` actually compile** —
+    per-unit resolve consuming the graph (cross-module refs resolve to a
+    target module + item; **top-level `pub`** + visibility enforcement —
+    NOT yet parsed, fold it in here) → per-unit type-check against imported
+    **signatures** → per-unit codegen (one LLVM module per unit, imported
+    callees as extern symbols) + **module-qualified length-prefixed
+    mangling** (the `abi-v1` amendment, D7 — update the frozen mangling
+    tests) → **multi-object link** (`cc` all `.o` + runtime) → replace the
+    driver multi-module gate with the real pipeline. The 4 OPEN DESIGN
+    POINTS are SETTLED (owner-confirmed): allow cycles; AMEND `abi-v1` (not
+    `abi-v2`); source root = entry's dir; `use a::b::c` = item `c` in module
+    `a::b`. **Settled decisions (with the language owner):** module surface =
+    file-as-module + `use` (no `mod` blocks; `pub` gates visibility); model =
+    **TRUE separate compilation** (per-unit `.o`, link-time symbols).
     **ADR 0037 — settled decisions (with the language owner):** (a) **module
     surface = file-as-module + `use`** — a file *is* a module, its path
     relative to the source root (the entry file's dir) *is* its module path;
@@ -1947,12 +1972,11 @@ For pasting into a fresh chat to bootstrap context:
     **(3/N)** incremental caching (Salsa) + per-unit `.o` repro. Emit/link
     today: parse→…→codegen to ONE LLVM module `"sentinel"` → ONE `.o` → `cc`
     links it + `libsentinel_runtime.a` (`compile_to_object` in
-    sentinel-codegen; `link()` in sentinel-driver/main.rs). **D.6 (1/N) plan:**
-    read **ADR 0037** end to end (esp. D3 resolve graph, D5 codegen-per-unit,
-    D7 mangling, the 4 OPEN DESIGN POINTS) + the emit/link path above +
-    ADR 0029 (the frozen `abi-v1` mangling/symbol tests you'll amend). The 4
-    open points (import cycles; amend vs `abi-v2`; source root; `use` path
-    resolution) settle at (1/N). See [[sentinel_d5_loops_surface]].
+    sentinel-codegen; `link()` in sentinel-driver/main.rs). **Before coding:**
+    re-read **ADR 0037** (esp. D3 resolve graph, D5 codegen-per-unit, D6
+    cross-module generics → (2/N), D7 mangling) + the emit/link path above +
+    **ADR 0029** (the frozen `abi-v1` mangling/symbol tests the D7 amendment
+    must update in the same commit). See [[sentinel_d5_loops_surface]].
 
     CARRIED-FORWARD DEBT (not blocking D.3): **D.1 A1 — recursive-enum
     payload drop is box-free only** (leak-free for the standard
