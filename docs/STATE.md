@@ -50,21 +50,27 @@ at **exit 115** — both **0 leaks** (`leaks --atExit`; verified incl. nested lo
 DEFERRED (ADR 0036 D8): `for` / ranges / iterators, labeled break,
 `break`-with-value / loop-as-expression, a termination check. **1361 tests,
 four-check green. Phase D.5 COMPLETE.** Now in progress: **#5 modules
-(Phase D.6, ADR 0037)** — file-as-module + `use` + **true separate
-compilation**, the last ADR 0031 D4 prerequisite before the self-host port.
-**D.6 (1/N) — 4 increments landed (green), via the lower-risk PATH A**
-(whole-graph front-end + per-unit codegen/link; true per-unit resolve
-deferred to (3/N) caching — owner-chosen): (1) the `use` front-end (lexer
-keyword + `UseDecl` AST + parser); (2) **module-graph discovery** (the
-driver follows `use` edges to files — source root = entry's dir,
-`use a::b::Item` → `a/b.sentinel`, ModuleNotFound on a missing file); (3)
-**top-level `pub`** (visibility on the 5 exportable decls); (4)
-**cross-module import resolution + visibility** (`resolve_imports`:
-`PrivateItem`/`UnknownImport`/`ModuleNotFound`; the driver validates `use`
-imports against the graph). Single-file unaffected; multi-module is
-validated then gated. REMAINING (1/N): merge/qualify the graph into one
-`Program` → existing pipeline → (then per-unit objects + module-qualified
-`abi-v1` mangling + multi-object link) to make `use` actually compile.
+(Phase D.6, ADR 0037)** — file-as-module + `use`, the last ADR 0031 D4
+prerequisite before the self-host port. **Multi-file Sentinel now compiles
++ runs** (cross-module `pub fn` calls, collision-free module-qualified
+names, `use`/`pub` visibility) via the lower-risk Path A merge; per-unit
+separate-compilation back end (objects + mangling + link) is the follow-up.
+**D.6 (1/N) — MULTI-FILE COMPILES + RUNS (green), via the lower-risk
+PATH A** (whole-graph front-end + merge → existing pipeline; true per-unit
+resolve/codegen deferred — owner-chosen). 5 increments: (1) `use` front-end;
+(2) **module-graph discovery** (driver follows `use` edges to files —
+source root = entry's dir, `use a::b::Item` → `a/b.sentinel`,
+ModuleNotFound); (3) **top-level `pub`**; (4) **import resolution +
+visibility** (`PrivateItem`/`UnknownImport`/`ModuleNotFound`); (5) **the
+merge** (`merge_modules`: qualify fn names by module path `util::add` →
+`util$add`, rewrite cross-module + own call refs per module scope, keep the
+entry's `main`) → the EXISTING pipeline compiles the merged program → one
+object → link. **Verified end-to-end:** a cross-module `pub fn` call
+(exit 5); same-named PRIVATE `helper`s in two modules coexist (qualified,
+exit 41, 0 leaks); private import → PrivateItem. Single-file unaffected.
+FOLLOW-UPS (still (1/N)/(2/N)): per-unit objects + module-qualified
+`abi-v1` mangling + multi-object link (true separate compilation back end);
+cross-module types/generics; effect-check parity for the merged path.
 
 Pre-D.5 context: **Phase D.4 — file I/O via a minimal stdlib — MVP COMPLETE
 (1/N + 2/N; ADR 0035 → ACCEPTED-WITH-AMENDMENTS).** The fourth

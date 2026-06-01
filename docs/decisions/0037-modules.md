@@ -1,8 +1,15 @@
 # ADR 0037: Phase D.6 — modules / multi-file (file-as-module + separate compilation)
 
-Status: PROPOSED — **D.6 (1/N) IN PROGRESS** (the front-end + module-graph
-discovery have landed green; the per-unit resolve/codegen/link core is next — see
-## Implementation notes). The sixth and **last** Phase D language prerequisite
+Status: PROPOSED — **D.6 (1/N) IN PROGRESS; multi-file now COMPILES + RUNS**
+(via the lower-risk Path A merge — owner-chosen: whole-graph front-end + merge
+into one `Program` → existing pipeline; true per-unit separate-compilation back
+end deferred). Landed green: `use` front-end, module-graph discovery, top-level
+`pub`, import resolution + visibility, and the merge (`merge_modules`) — a
+cross-module `pub fn` call compiles + runs (exit 5), same-named privates across
+modules coexist (exit 41, 0 leaks). FOLLOW-UPS: per-unit objects +
+module-qualified `abi-v1` mangling + multi-object link (the true separate-comp
+back end); cross-module types/generics; effect-check parity. See ## Implementation
+notes. The sixth and **last** Phase D language prerequisite
 under ADR 0031 (Phase D kickoff) D4 item 5, before the self-host port (D5). After
 sum types (D.1), strings + a byte type (D.2), growable collections (D.3), file I/O
 (D.4), and loops (D.5), the surface has been **single-file by design** since 1.0

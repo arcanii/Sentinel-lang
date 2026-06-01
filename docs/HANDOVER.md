@@ -1946,22 +1946,30 @@ For pasting into a fresh chat to bootstrap context:
     **ARCHITECTURE DECISION (owner, this session): take the lower-risk
     PATH A** — whole-graph front-end + per-unit codegen/link — and reach true
     per-unit resolve EVENTUALLY (folded into the (3/N) caching sub-phase).
-    **RESUME HERE → make `use` actually compile (Path A):** merge the
-    discovered graph into ONE `Program` — qualify each module's top-level
-    names (e.g. `util::add` → a unique mangled symbol; entry `main` stays
-    `main`) + rewrite references per module scope (own items + `use`d-pub
-    imports; builtins/locals untouched) — then run the EXISTING
-    resolve/types/codegen pipeline on the merged program (reuses it almost
-    unchanged = the low risk). The merge logic belongs in sentinel-resolve
-    (testable; `resolve_imports` already validates + can return the import
-    map). First slice = cross-module FN calls (defer cross-module
-    types/generics). MVP can emit ONE object first (fast win); per-unit
-    object emission + module-qualified `abi-v1` mangling (D7 amendment +
-    frozen tests) + multi-object link is the immediate follow-up. Replace
-    the driver multi-module gate with this. 4 OPEN POINTS SETTLED (allow
-    cycles; AMEND `abi-v1`; source root = entry dir; `use a::b::c` = item
-    `c` in module `a::b`). Module surface = file-as-module + `use` (no `mod`;
-    `pub` gates). See ADR 0037 "Implementation notes".
+    (v) **the merge — MULTI-FILE COMPILES + RUNS** (`db9b6e4`) —
+    `sentinel_resolve::merge_modules` merges the graph into ONE `Program`:
+    qualifies each module's fn names by module path (`util::add` → symbol
+    `util$add`; `$` is collision-free) + rewrites cross-module + own call
+    refs per module scope (an exhaustive, compiler-checked `rewrite_expr`
+    walk) + keeps the entry's `main`; the driver compiles the merged program
+    via direct pipeline calls (`run_build_merged`) → one object → link.
+    VERIFIED end-to-end: cross-module `pub fn` call (exit 5); same-named
+    private `helper`s in two modules coexist (exit 41, 0 leaks); private
+    import → PrivateItem. 1378 tests, green.
+    **RESUME HERE → D.6 follow-ups (multi-file already works):**
+    (a) **true separate-compilation back end** — per-unit object emission
+    (one `.o` per module) + **module-qualified length-prefixed `abi-v1`
+    mangling** (the D7 amendment + the frozen `abi_v1_mangling_is_stable`
+    test update) + **multi-object link**, replacing the single-object merge
+    emit. (b) **cross-module TYPES** — qualify + rewrite struct/enum/trait
+    references (today only fn names are qualified; non-fn items are
+    concatenated as-is, so a cross-module type or a same-named struct across
+    modules isn't handled — see merge_modules' first-slice scope). (c)
+    **effect-check parity** for the merged path (`run_build_merged` skips
+    effect-check — the driver lacks that dep; a multi-file effectful `main`
+    isn't yet rejected) + span-accurate multi-source diagnostics. (d)
+    cross-module **generics** ((2/N): `linkonce_odr`). (e) true per-unit
+    resolve → (3/N) caching. ADR 0037 "Implementation notes" has the design.
     **ADR 0037 — settled decisions (with the language owner):** (a) **module
     surface = file-as-module + `use`** — a file *is* a module, its path
     relative to the source root (the entry file's dir) *is* its module path;
