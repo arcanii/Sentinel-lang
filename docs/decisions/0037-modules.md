@@ -4,12 +4,17 @@ Status: PROPOSED — **D.6 (1/N) IN PROGRESS; multi-file now COMPILES + RUNS**
 (via the lower-risk Path A merge — owner-chosen: whole-graph front-end + merge
 into one `Program` → existing pipeline; true per-unit separate-compilation back
 end deferred). Landed green: `use` front-end, module-graph discovery, top-level
-`pub`, import resolution + visibility, and the merge (`merge_modules`) — a
-cross-module `pub fn` call compiles + runs (exit 5), same-named privates across
-modules coexist (exit 41, 0 leaks). FOLLOW-UPS: per-unit objects +
-module-qualified `abi-v1` mangling + multi-object link (the true separate-comp
-back end); cross-module types/generics; effect-check parity. See ## Implementation
-notes. The sixth and **last** Phase D language prerequisite
+`pub`, import resolution + visibility, the merge (`merge_modules`), and
+**cross-module types** — `merge_modules` qualifies fn + struct + enum names by
+module path and rewrites every call/type reference (signatures, `let`
+annotations, struct literals, enum construction/patterns) via a per-module
+`Renamer`. Verified: a cross-module `pub fn` call (exit 5), same-named privates
+coexist (exit 41, 0 leaks), a cross-module `pub struct` (exit 42), a
+cross-module `pub enum` + `match` (exit 52), same-named structs across modules
+coexist (exit 42), a 3-module-deep cross-module struct field (exit 42).
+FOLLOW-UPS: per-unit objects + module-qualified `abi-v1` mangling + multi-object
+link (the true separate-comp back end); cross-module trait/effect/class *use* +
+generics; effect-check parity. See ## Implementation notes. The sixth and **last** Phase D language prerequisite
 under ADR 0031 (Phase D kickoff) D4 item 5, before the self-host port (D5). After
 sum types (D.1), strings + a byte type (D.2), growable collections (D.3), file I/O
 (D.4), and loops (D.5), the surface has been **single-file by design** since 1.0
@@ -327,6 +332,28 @@ B called from module A → two `.o` + link → runs). Cross-module **types**
 D6); incremental per-unit caching is (3/N). The whole-program
 `collect_mono_instantiations` only needs touching once generics cross units (2/N),
 so (1/N) can keep it per-entry-module for the non-generic slice.
+
+**Path A realization of cross-module types (landed, `3571ec2`).** Because Path A
+merges the graph into one `Program` rather than compiling units independently,
+cross-module types are realized by **name-qualification + reference-rewrite in
+`merge_modules`**, not by D5's per-unit layout imports + extern symbols. Each
+module's struct + enum *declaration* names are qualified by module path
+(`geo::Point` → `geo$Point`, the same collision-free `$` scheme as fns), and a
+per-module `Renamer` (the name→qualified map plus the in-scope type-parameter
+set, which is never qualified) rewrites **every** type reference: all signature
+`TypeExpr`s (fn params/returns, struct fields, enum variant payloads,
+trait/effect op sigs, class fields/methods/init, impl method sigs + the impl's
+for-type, delegate types), `let` annotations, struct literals, enum construction
+(`QualifiedCall`/`ClassInit` heads), and `match` variant patterns. The walks are
+exhaustive (no wildcard arm), so a new `ExprKind`/`TypeExprKind`/`Pattern`
+variant is a compile error rather than a silently un-rewritten reference. **Slice
+scope = structs + enums** (the AST essentials for the self-host port);
+trait/effect/class *names* are still concatenated unqualified (cross-module
+trait/effect *use* is the next increment — their bodies' refs to qualified
+structs/enums ARE rewritten, so an `impl`/class/effect over a cross-module data
+type works, but two modules' same-named traits/effects/classes still collide).
+The true per-unit back end (D5) will re-derive these symbols through the
+module-qualified `abi-v1` mangling (D7) instead of the `$` scheme.
 
 ## Revisit
 
