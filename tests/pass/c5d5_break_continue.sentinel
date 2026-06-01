@@ -1,0 +1,72 @@
+// D.5 (2/N) / ADR 0036 D9: loops close — `break` + `continue`.
+//
+// `break` / `continue` are STATEMENTS (`StmtKind::Break` / `Continue`,
+// payload-free) that branch to the innermost enclosing loop's `loop_after`
+// (break) / `loop_cond` (continue). A loop-target stack in codegen carries
+// the targets for nesting; the type checker rejects either outside a loop.
+//
+// Because `if` is an expression that requires an `else` and a tail (ADR
+// 0010/0013), a conditional `break`/`continue` uses the tail idiom
+// `if c { break; 0 } else { 0 };` — the `0`s are discarded.
+//
+// THE load-bearing property (parts 3 + 4): a `break`/`continue` that fires
+// while a body-scope heap binding is LIVE must drop it before branching —
+// branching skips `lower_block`'s end-of-body scope drops, so without the
+// drains-before-branch this would leak. Parts 3 + 4 allocate a `[u8]` each
+// iteration and break/continue with it live; leak-free under `leaks
+// --atExit` (no accumulation across the 10 iterations).
+//
+// Exit = total + evens + hits + cont_hits = 15 + 30 + 30 + 40 = 115.
+//   - total    = 15: sum 1..=5 then `break` (while-true loop).
+//   - evens    = 30: sum the even j in 1..=10, `continue` past the odds.
+//   - hits      = 30: len("tok")=3, ten iterations, `break` on the last
+//                     with the per-iteration `[u8]` still live.
+//   - cont_hits = 40: len("word")=4, ten iterations, `continue` on the odd
+//                     ones with the per-iteration `[u8]` still live.
+
+fn main() -> i64 {
+    // 1. break: sum 1.. and break once it exceeds 5  ->  1+2+3+4+5 = 15.
+    let mut total: i64 = 0;
+    let mut i: i64 = 1;
+    while true {
+        if i > 5 { break; 0 } else { 0 };
+        total = total + i;
+        i = i + 1;
+    }
+
+    // 2. continue: sum the even values of j in 1..=10, skipping odds.
+    let mut evens: i64 = 0;
+    let mut j: i64 = 0;
+    while j < 10 {
+        j = j + 1;
+        if (j / 2) * 2 != j { continue; 0 } else { 0 };
+        evens = evens + j;
+    }
+
+    // 3. LEAK-CRITICAL (break): a `[u8]` allocated each pass, then `break`
+    //    on the last iteration while it is still live -> must be dropped
+    //    before branching to loop_after.
+    let mut k: i64 = 0;
+    let mut hits: i64 = 0;
+    while k < 100 {
+        let s: [u8] = "tok";
+        hits = hits + len(s);
+        if k == 9 { break; 0 } else { 0 };
+        k = k + 1;
+    }
+
+    // 4. LEAK-CRITICAL (continue): a `[u8]` allocated each pass, then
+    //    `continue` on the odd iterations while it is still live -> must be
+    //    dropped before branching to loop_cond.
+    let mut m: i64 = 0;
+    let mut cont_hits: i64 = 0;
+    while m < 10 {
+        m = m + 1;
+        let w: [u8] = "word";
+        cont_hits = cont_hits + len(w);
+        if (m / 2) * 2 != m { continue; 0 } else { 0 };
+        m = m + 0;
+    }
+
+    total + evens + hits + cont_hits
+}

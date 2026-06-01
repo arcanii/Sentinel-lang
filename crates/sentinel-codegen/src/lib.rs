@@ -969,6 +969,7 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             arena_routed,
             array_route_active: false,
             loop_depth: 0,
+            loop_targets: Vec::new(),
         };
         for fn_def in &program.fns {
             // C1.7.4a / ADR 0016 D7: skip generic fn bodies; their
@@ -1076,6 +1077,27 @@ impl<'ctx> ScopeFrame<'ctx> {
     fn push(&mut self, id: VarId) {
         self.vars.push(id);
     }
+}
+
+/// Phase D.5 (2/N) / ADR 0036 D9: the branch targets + scope floor of an
+/// enclosing `while` loop, for lowering `break` / `continue`. Pushed onto
+/// [`CodegenCtx::loop_targets`] when entering a `while` body and popped on
+/// exit; `break` / `continue` read the top of the stack — the innermost
+/// loop (there are no loop labels at D.5). `Copy` since every field is.
+#[derive(Clone, Copy)]
+struct LoopTarget<'ctx> {
+    /// `loop_cond` — `continue` branches here (re-evaluate the condition).
+    cond_bb: inkwell::basic_block::BasicBlock<'ctx>,
+    /// `loop_after` — `break` branches here (exit the loop).
+    after_bb: inkwell::basic_block::BasicBlock<'ctx>,
+    /// `scope_stack.len()` captured the instant before the body scope is
+    /// pushed (i.e. the body frame's index). `break` / `continue` drain
+    /// every frame at index `>= scope_floor` — the body scope plus any
+    /// nested `if` / block scopes between it and the branch — BEFORE
+    /// branching, so the per-iteration drops still run on the early-exit
+    /// path. Without this a body-scope heap binding live at the `break`
+    /// leaks (the load-bearing (2/N) correctness property).
+    scope_floor: usize,
 }
 
 /// Per-function codegen state. See C1.1.2 docs in commit 9374edf
@@ -1298,6 +1320,13 @@ struct CodegenCtx<'ctx, 'plan> {
     /// `lower_block(while-body)`. Zero for non-loop code, so that codegen
     /// is byte-identical to pre-D.5 (the c51 repro bar).
     loop_depth: u32,
+    /// Phase D.5 (2/N) / ADR 0036 D9: stack of enclosing `while` loops'
+    /// branch targets ([`LoopTarget`]). Pushed entering a `while` body,
+    /// popped on exit; `break` / `continue` lower against the top (the
+    /// innermost loop). Empty outside any loop — the type checker has
+    /// already rejected `break` / `continue` there, so `lower_stmt` can
+    /// assume a non-empty stack at those arms.
+    loop_targets: Vec<LoopTarget<'ctx>>,
 }
 
 /// Map a Sentinel [`Type`] to its LLVM `BasicTypeEnum`. C1.5
@@ -1345,6 +1374,8 @@ fn collect_spawn_targets_block(block: &TypedBlock, acc: &mut Vec<FnId>) {
                 collect_spawn_targets_expr(cond, acc);
                 collect_spawn_targets_block(body, acc);
             }
+            // D.5 (2/N): payload-free loop control — no spawn target.
+            TypedStmtKind::Break | TypedStmtKind::Continue => {}
             TypedStmtKind::Expr(e) => collect_spawn_targets_expr(e, acc),
         }
     }
@@ -1784,6 +1815,8 @@ fn walk_block_for_mono(
                     body, subst, program, instances, refs, visited, order, pending,
                 );
             }
+            // D.5 (2/N): payload-free loop control — no generic call.
+            TypedStmtKind::Break | TypedStmtKind::Continue => {}
             TypedStmtKind::Expr(e) => walk_expr_for_mono(
                 e, subst, program, instances, refs, visited, order, pending,
             ),
@@ -3458,9 +3491,20 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // `loop_depth` makes body allocas hoist to the entry block
                 // (D4) so the stack does not grow per iteration.
                 self.builder.position_at_end(body_bb);
+                // D.5 (2/N) / ADR 0036 D9: register this loop's branch
+                // targets so `break` / `continue` in the body lower against
+                // them. `scope_floor` is the body frame's index — captured
+                // NOW, before lower_block pushes it — so break/continue
+                // drain every frame `>= scope_floor` before branching.
+                self.loop_targets.push(LoopTarget {
+                    cond_bb,
+                    after_bb,
+                    scope_floor: self.scope_stack.len(),
+                });
                 self.loop_depth += 1;
                 let body_result = self.lower_block(body, program);
                 self.loop_depth -= 1;
+                self.loop_targets.pop();
                 let _ = body_result?;
                 self.builder
                     .build_unconditional_branch(cond_bb)
@@ -3468,6 +3512,43 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
 
                 // Continue after the loop.
                 self.builder.position_at_end(after_bb);
+            }
+            TypedStmtKind::Break | TypedStmtKind::Continue => {
+                // Phase D.5 (2/N) / ADR 0036 D9: branch out of (`break` →
+                // `loop_after`) or around (`continue` → `loop_cond`) the
+                // innermost enclosing loop. The type checker guarantees we
+                // are inside one, so `loop_targets` is non-empty.
+                let target = *self
+                    .loop_targets
+                    .last()
+                    .expect("break/continue inside a loop (type-check invariant)");
+                let dest_bb = if matches!(stmt.kind, TypedStmtKind::Break) {
+                    target.after_bb
+                } else {
+                    target.cond_bb
+                };
+                // THE load-bearing (2/N) property: emit the per-iteration
+                // drops for every scope frame from the current top down to
+                // the loop body BEFORE branching. The branch to loop_after
+                // / loop_cond skips lower_block's end-of-body
+                // `emit_scope_drops`, so a body-scope heap binding live here
+                // would otherwise leak. (This is exactly the body-end exit
+                // drop, just emitted early — the fn-return early-exit shape,
+                // ADR 0017.)
+                self.emit_loop_exit_drops(target.scope_floor, program)?;
+                let current_fn = self.current_fn.expect("current_fn set by compile_fn");
+                self.builder
+                    .build_unconditional_branch(dest_bb)
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                // The branch terminates the current block. Any code after
+                // `break;` / `continue;` in this block — a statement-only
+                // body's synthesised unit tail, a dead trailing statement,
+                // the if-arm store/merge in `lower_if` — is unreachable;
+                // park the builder on a fresh block so we never append to a
+                // terminated block. It has no live predecessors, so LLVM
+                // discards it.
+                let dead_bb = self.context.append_basic_block(current_fn, "after_loopctl");
+                self.builder.position_at_end(dead_bb);
             }
             TypedStmtKind::Expr(e) => {
                 let _ = self.lower_expr(e, program)?;
@@ -3551,18 +3632,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(val)
     }
 
-    /// C2.4 / ADR 0017 D8: emit drop calls for un-moved heap-
-    /// backed bindings declared in the current (top-of-stack)
-    /// scope. Iterates in reverse declaration order per Rust
-    /// convention. Skips:
-    ///   - Bindings in [`DropPlan::moved_sources_for`] for the
-    ///     current fn (the consumer owns + drops them).
-    ///   - The binding returned via the tail expression (if the
-    ///     tail is a Var(id)) — passed via `tail_returned`.
-    ///
-    /// C2.5(a): now takes `program` so [`emit_drop_struct_fields`]
-    /// can resolve struct decls + generic-instance args to recurse
-    /// through heap-backed fields.
+    /// C2.4 / ADR 0017 D8: emit drop calls for the un-moved heap-backed
+    /// bindings of the current (top-of-stack) scope. The body lives in
+    /// [`Self::emit_frame_drops`] (split out at D.5 (2/N) so `break` /
+    /// `continue` can drain several frames at once).
     fn emit_scope_drops(
         &mut self,
         tail_returned: Option<VarId>,
@@ -3573,6 +3646,29 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .last()
             .cloned()
             .unwrap_or_default();
+        self.emit_frame_drops(&scope, tail_returned, program)
+    }
+
+    /// C2.4 / ADR 0017 D8: emit the drop calls for one scope `frame` —
+    /// the per-binding `sentinel_free`s (reverse declaration order) plus
+    /// the scope's single `sentinel_arena_exit` if it lazily created an
+    /// arena. Iterates in reverse declaration order per Rust convention.
+    /// Skips:
+    ///   - Bindings in [`DropPlan::moved_sources_for`] for the current fn
+    ///     (the consumer owns + drops them).
+    ///   - The binding returned via the tail expression (if the tail is a
+    ///     `Var(id)`) — passed via `tail_returned`.
+    ///   - Arena-routed bindings (bulk-freed by the arena exit below).
+    ///
+    /// C2.5(a): takes `program` so [`emit_drop_struct_fields`] can resolve
+    /// struct decls + generic-instance args to recurse through heap-backed
+    /// fields.
+    fn emit_frame_drops(
+        &mut self,
+        scope: &ScopeFrame<'ctx>,
+        tail_returned: Option<VarId>,
+        program: &TypedProgram,
+    ) -> Result<(), CodegenError> {
         let moved = self.drop_plan.moved_sources_for(self.current_fn_id);
         for &id in scope.vars.iter().rev() {
             if Some(id) == tail_returned {
@@ -3605,6 +3701,33 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             self.builder
                 .build_call(self.arena_exit_fn, &[handle.into()], "")
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Phase D.5 (2/N) / ADR 0036 D9: drop every scope frame from the
+    /// current top down to (and including) the loop-body frame at
+    /// `scope_floor`, innermost first. Used by `break` / `continue` so the
+    /// per-iteration drops still run on the early-exit path: branching to
+    /// `loop_after` / `loop_cond` skips `lower_block`'s end-of-body
+    /// `emit_scope_drops` for the body scope (and for any nested `if` /
+    /// block scopes between it and the branch). No value is returned
+    /// through a loop-control branch, so nothing is tail-exempted (`None`).
+    ///
+    /// The frames are NOT popped here — static lowering of the (now-dead)
+    /// remainder of each block still pops them via their own `lower_block`,
+    /// emitting a second, unreachable set of drops into the `after_loopctl`
+    /// block. Each runtime path therefore frees a given binding exactly
+    /// once (the early-exit drop here, or the body-end drop on fall-through
+    /// — mutually exclusive blocks).
+    fn emit_loop_exit_drops(
+        &mut self,
+        scope_floor: usize,
+        program: &TypedProgram,
+    ) -> Result<(), CodegenError> {
+        for i in (scope_floor..self.scope_stack.len()).rev() {
+            let frame = self.scope_stack[i].clone();
+            self.emit_frame_drops(&frame, None, program)?;
         }
         Ok(())
     }
@@ -6380,6 +6503,8 @@ fn stmt_performs(kind: &TypedStmtKind) -> bool {
                 || body.stmts.iter().any(|s| stmt_performs(&s.kind))
                 || expr_performs(&body.tail)
         }
+        // D.5 (2/N): payload-free loop control performs no effect.
+        TypedStmtKind::Break | TypedStmtKind::Continue => false,
         TypedStmtKind::Expr(e) => expr_performs(e),
     }
 }
@@ -6784,6 +6909,8 @@ fn walk_collect_var_refs_stmt(kind: &TypedStmtKind, acc: &mut Vec<VarId>) {
             }
             walk_collect_var_refs(&body.tail, acc);
         }
+        // D.5 (2/N): payload-free loop control references no var.
+        TypedStmtKind::Break | TypedStmtKind::Continue => {}
         TypedStmtKind::Expr(e) => walk_collect_var_refs(e, acc),
     }
 }
@@ -6888,6 +7015,8 @@ fn count_performs_stmt(kind: &TypedStmtKind) -> usize {
                     .sum::<usize>()
                 + count_performs(&body.tail)
         }
+        // D.5 (2/N): payload-free loop control contains no `perform`.
+        TypedStmtKind::Break | TypedStmtKind::Continue => 0,
         TypedStmtKind::Expr(e) => count_performs(e),
     }
 }
@@ -6991,6 +7120,8 @@ fn find_unique_perform_stmt(kind: &TypedStmtKind) -> Option<&TypedExpr> {
         TypedStmtKind::While { cond, body } => find_unique_perform(cond)
             .or_else(|| body.stmts.iter().find_map(|s| find_unique_perform_stmt(&s.kind)))
             .or_else(|| find_unique_perform(&body.tail)),
+        // D.5 (2/N): payload-free loop control contains no `perform`.
+        TypedStmtKind::Break | TypedStmtKind::Continue => None,
         TypedStmtKind::Expr(e) => find_unique_perform(e),
     }
 }
@@ -7168,6 +7299,9 @@ fn substitute_perform_with_var_stmt(
             cond: substitute_perform_with_var(cond, placeholder_id),
             body: Box::new(substitute_block(body, placeholder_id)),
         },
+        // D.5 (2/N): payload-free loop control — identity substitution.
+        TypedStmtKind::Break => TypedStmtKind::Break,
+        TypedStmtKind::Continue => TypedStmtKind::Continue,
         TypedStmtKind::Expr(e) => TypedStmtKind::Expr(substitute_perform_with_var(
             e,
             placeholder_id,
@@ -7487,6 +7621,8 @@ fn collect_routed_block(
             // freed set, preserving the C5.4 routing-safety invariant.
             // Recurse into the condition's nested exprs only.
             TypedStmtKind::While { cond, .. } => collect_routed_expr(cond, moved, routed),
+            // D.5 (2/N): payload-free loop control routes nothing.
+            TypedStmtKind::Break | TypedStmtKind::Continue => {}
             TypedStmtKind::Expr(e) => collect_routed_expr(e, moved, routed),
         }
     }

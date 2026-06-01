@@ -438,12 +438,21 @@ pub enum StmtKind {
     /// Phase D.5 / ADR 0036 D3: `while <cond> { <body> }` — a loop
     /// statement (NOT an expression; a loop has no value). `cond` is a
     /// `bool` expression; `body` is run repeatedly while it holds, its
-    /// tail value discarded each iteration. `break` / `continue` are
-    /// D.5 (2/N).
+    /// tail value discarded each iteration.
     While {
         cond: Expr,
         body: Box<Block>,
     },
+    /// Phase D.5 (2/N) / ADR 0036 D9: `break;` — exit the innermost
+    /// enclosing `while` loop (codegen branches to its `loop_after`). A
+    /// payload-free statement: no labels, no break-with-value (both
+    /// deferred, D8). Rejected outside any loop at type-check (D7).
+    Break,
+    /// Phase D.5 (2/N) / ADR 0036 D9: `continue;` — skip to the next
+    /// iteration of the innermost enclosing `while` loop (codegen
+    /// branches to its `loop_cond`). Payload-free; rejected outside any
+    /// loop at type-check (D7).
+    Continue,
     Expr(Expr),
 }
 
@@ -1103,6 +1112,8 @@ impl fmt::Display for StmtKind {
             StmtKind::While { cond, body } => {
                 write!(f, "(while {} {})", cond.kind, body)
             }
+            StmtKind::Break => write!(f, "(break)"),
+            StmtKind::Continue => write!(f, "(continue)"),
             StmtKind::Expr(e) => write!(f, "{};", e.kind),
         }
     }

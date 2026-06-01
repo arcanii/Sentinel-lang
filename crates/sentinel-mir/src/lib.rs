@@ -378,6 +378,11 @@ impl FnBuilder {
                 self.lower_expr(program, cond);
                 self.lower_block(program, body);
             }
+            // Phase D.5 (2/N) / ADR 0036 D9: `break` / `continue` carry no
+            // expression and reach no sink — the flat taint IR has nothing
+            // to lower (the loop structure they redirect adds no taint path
+            // a single body pass misses, as for `While` above).
+            TypedStmtKind::Break | TypedStmtKind::Continue => {}
             TypedStmtKind::Expr(e) => {
                 self.lower_expr(program, e);
             }

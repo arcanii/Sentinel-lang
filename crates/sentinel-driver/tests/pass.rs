@@ -1230,3 +1230,17 @@ fn pass_c5d5_loops() {
     // the stack does not grow per pass. Exit = 55 + 5 + 4 + 3 = 67.
     assert_eq!(run_exit("c5d5_loops.sentinel"), 67);
 }
+
+#[test]
+fn pass_c5d5_break_continue() {
+    // ADR 0036 D9/D10 (2/N) phase-go: `break` + `continue` end to end.
+    // `break` exits the innermost loop (sum 1..=5 then break -> 15);
+    // `continue` skips to the next iteration (sum even j in 1..=10 -> 30);
+    // and — the load-bearing property — a `break`/`continue` that fires
+    // while a per-iteration `[u8]` is live drops it BEFORE branching, so
+    // the body's heap is freed each pass (hits 30 + cont_hits 40). Codegen
+    // drains every scope frame down to the loop body before the branch;
+    // leak-free under `leaks --atExit` (verified separately). Exit =
+    // 15 + 30 + 30 + 40 = 115.
+    assert_eq!(run_exit("c5d5_break_continue.sentinel"), 115);
+}

@@ -1567,6 +1567,9 @@ impl TypedStmt {
                 cond: cond.substitute(subst, instances, refs),
                 body: Box::new(body.substitute(subst, instances, refs)),
             },
+            // D.5 (2/N): payload-free loop control carries no TypeParam.
+            TypedStmtKind::Break => TypedStmtKind::Break,
+            TypedStmtKind::Continue => TypedStmtKind::Continue,
             TypedStmtKind::Expr(e) => TypedStmtKind::Expr(e.substitute(subst, instances, refs)),
         };
         TypedStmt { kind, span: self.span.clone() }
@@ -2159,6 +2162,15 @@ pub enum TypedStmtKind {
         cond: TypedExpr,
         body: Box<TypedBlock>,
     },
+    /// Phase D.5 (2/N) / ADR 0036 D9: `break;` — exit the innermost
+    /// enclosing `while` loop. The type checker has already verified
+    /// (via the env's loop-nesting depth) that this sits inside a loop;
+    /// codegen branches to that loop's `loop_after`.
+    Break,
+    /// Phase D.5 (2/N) / ADR 0036 D9: `continue;` — next iteration of
+    /// the innermost enclosing `while` loop; codegen branches to its
+    /// `loop_cond`.
+    Continue,
     Expr(TypedExpr),
 }
 
@@ -2890,6 +2902,22 @@ pub enum TypeError {
     )]
     SecretBranch {
         #[label("secret-typed condition here")]
+        span: miette::SourceSpan,
+    },
+
+    /// Phase D.5 (2/N) / ADR 0036 D9: `break` / `continue` appeared
+    /// outside any enclosing `while` loop. There is no `loop_after` /
+    /// `loop_cond` to branch to, so it is rejected here (the env's
+    /// loop-nesting depth is zero at this point). `kw` is the offending
+    /// keyword (`"break"` or `"continue"`).
+    #[error("`{kw}` used outside of a loop")]
+    #[diagnostic(
+        code(sentinel::types::loop_control_outside_loop),
+        help("`break` and `continue` may only appear inside a `while` loop body")
+    )]
+    LoopControlOutsideLoop {
+        kw: &'static str,
+        #[label("`{kw}` is not inside a `while` loop")]
         span: miette::SourceSpan,
     },
 
@@ -4402,6 +4430,8 @@ fn collect_init_assigned_in_stmt(
             }
             collect_init_assigned_in_expr(&body.tail, self_var_id, acc);
         }
+        // D.5 (2/N): payload-free loop control assigns no `self.field`.
+        TypedStmtKind::Break | TypedStmtKind::Continue => {}
         TypedStmtKind::Expr(e) => {
             collect_init_assigned_in_expr(e, self_var_id, acc);
         }
@@ -4656,6 +4686,15 @@ fn check_fn(
 struct VarTypeEnv {
     types: std::collections::HashMap<VarId, (Type, bool)>,
     names: std::collections::HashMap<VarId, String>,
+    /// Phase D.5 (2/N) / ADR 0036 D9: how many `while` bodies enclose the
+    /// statement currently being checked. Incremented around a `while`
+    /// body (`enter_loop`/`exit_loop`), so `break`/`continue` are legal
+    /// iff `> 0` (`in_loop`). With no labels at D.5, the target is always
+    /// the innermost loop, so a nonzero depth is the whole validity rule.
+    /// A fresh env is built per fn, so this resets at every fn boundary
+    /// (you cannot `break` out of a fn into an enclosing loop). Not part
+    /// of the scope save/restore — only the `types` map is snapshot.
+    loop_depth: u32,
 }
 
 impl VarTypeEnv {
@@ -4673,6 +4712,23 @@ impl VarTypeEnv {
     /// The binding's source name, if recorded.
     fn name_of(&self, id: VarId) -> Option<&str> {
         self.names.get(&id).map(String::as_str)
+    }
+
+    /// Phase D.5 (2/N) / ADR 0036 D9: enter a `while` body — bump the
+    /// loop-nesting depth so `break`/`continue` inside it are legal.
+    fn enter_loop(&mut self) {
+        self.loop_depth += 1;
+    }
+
+    /// Leave a `while` body — restore the enclosing loop-nesting depth.
+    fn exit_loop(&mut self) {
+        self.loop_depth -= 1;
+    }
+
+    /// Whether the statement being checked is inside at least one
+    /// enclosing `while` loop (so `break`/`continue` are legal here).
+    fn in_loop(&self) -> bool {
+        self.loop_depth > 0
     }
 }
 
@@ -4953,7 +5009,13 @@ fn check_stmt(
                     span: to_source_span(&cond.span),
                 });
             }
-            let body_t = check_block(
+            // Phase D.5 (2/N) / ADR 0036 D9: bump the loop-nesting depth
+            // around the body so `break`/`continue` inside it (including
+            // inside nested `if`/`match` blocks, which thread the same
+            // `env`) are accepted; restore it afterwards (even on error,
+            // so sibling code sees the right depth).
+            env.enter_loop();
+            let body_result = check_block(
                 body,
                 None,
                 env,
@@ -4970,11 +5032,36 @@ fn check_stmt(
                 impl_decls,
                 konts,
                 tasks,
-            )?;
+            );
+            env.exit_loop();
+            let body_t = body_result?;
             TypedStmtKind::While {
                 cond: cond_t,
                 body: Box::new(body_t),
             }
+        }
+        // Phase D.5 (2/N) / ADR 0036 D9: `break`/`continue` are legal only
+        // inside a `while` body (else there is no `loop_after`/`loop_cond`
+        // to branch to at codegen). The env's loop-nesting depth — bumped
+        // around every `while` body above — is the whole rule (no labels,
+        // so the target is always the innermost loop).
+        ResolvedStmtKind::Break => {
+            if !env.in_loop() {
+                return Err(TypeError::LoopControlOutsideLoop {
+                    kw: "break",
+                    span: to_source_span(&stmt.span),
+                });
+            }
+            TypedStmtKind::Break
+        }
+        ResolvedStmtKind::Continue => {
+            if !env.in_loop() {
+                return Err(TypeError::LoopControlOutsideLoop {
+                    kw: "continue",
+                    span: to_source_span(&stmt.span),
+                });
+            }
+            TypedStmtKind::Continue
         }
         ResolvedStmtKind::Expr(e) => TypedStmtKind::Expr(check_expr(
             e,
@@ -8099,6 +8186,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "`if` on a `secret bool` condition would leak via timing".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::LoopControlOutsideLoop { kw, span } => (
+            "sentinel::types::loop_control_outside_loop",
+            format!("`{kw}` used outside of a loop"),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::SecretDivisor { span } => (
             "sentinel::types::secret_divisor",
             "variable-time division by a `secret` value leaks via timing".to_string(),
@@ -10722,6 +10814,77 @@ fn main() -> i64 {
         let err = check_err("fn main() -> i64 { while 1 { } 0 }");
         assert!(
             matches!(err, TypeError::Mismatch { expected: Type::Bool, got: Type::I64, .. }),
+            "got {err:?}"
+        );
+    }
+
+    // ----- D.5 (2/N) / ADR 0036 D9: break / continue -----
+
+    #[test]
+    fn break_and_continue_inside_loop_typecheck() {
+        // ADR 0036 D9: `break;` / `continue;` are legal inside a `while`
+        // body (env loop-depth > 0). (`while true` so the body is the
+        // only exit; the `if` uses the tail idiom — `if` requires `else`
+        // + a tail, ADR 0010/0013.)
+        let _ = check_ok(
+            "fn main() -> i64 { \
+                let mut i: i64 = 0; \
+                while true { \
+                    if i >= 5 { break; 0 } else { 0 }; \
+                    if i == 2 { continue; 0 } else { 0 }; \
+                    i = i + 1; \
+                } \
+                i \
+            }",
+        );
+    }
+
+    #[test]
+    fn break_inside_nested_if_in_loop_typechecks() {
+        // The loop-nesting depth threads through nested `if` blocks (they
+        // share the same `env`), so a `break` inside an `if` inside the
+        // `while` body is accepted.
+        let _ = check_ok(
+            "fn main() -> i64 { \
+                let mut i: i64 = 0; \
+                while i < 10 { \
+                    if i == 5 { break; 0 } else { 0 }; \
+                    i = i + 1; \
+                } \
+                i \
+            }",
+        );
+    }
+
+    #[test]
+    fn break_outside_loop_rejected() {
+        // ADR 0036 D9: `break` at fn-body level (no enclosing loop) →
+        // LoopControlOutsideLoop, naming the keyword.
+        let err = check_err("fn main() -> i64 { break; 0 }");
+        assert!(
+            matches!(err, TypeError::LoopControlOutsideLoop { kw: "break", .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn continue_outside_loop_rejected() {
+        let err = check_err("fn main() -> i64 { continue; 0 }");
+        assert!(
+            matches!(err, TypeError::LoopControlOutsideLoop { kw: "continue", .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn break_after_loop_rejected() {
+        // The loop-nesting depth is restored at the end of the `while`
+        // body (`exit_loop`), so a `break` AFTER the loop is out of a loop.
+        let err = check_err(
+            "fn main() -> i64 { let mut i: i64 = 0; while i < 1 { i = i + 1; } break; 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::LoopControlOutsideLoop { kw: "break", .. }),
             "got {err:?}"
         );
     }

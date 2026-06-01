@@ -599,12 +599,18 @@ pub enum ResolvedStmtKind {
         value: ResolvedExpr,
     },
     /// Phase D.5 / ADR 0036 D3: `while <cond> { <body> }`. The body is
-    /// its own lexical scope (per-iteration bindings). `break` /
-    /// `continue` are D.5 (2/N).
+    /// its own lexical scope (per-iteration bindings).
     While {
         cond: ResolvedExpr,
         body: Box<ResolvedBlock>,
     },
+    /// Phase D.5 (2/N) / ADR 0036 D9: `break;` — exit the innermost
+    /// enclosing `while` loop. Payload-free, so resolution is the
+    /// identity; loop membership is validated at type-check (D7).
+    Break,
+    /// Phase D.5 (2/N) / ADR 0036 D9: `continue;` — next iteration of
+    /// the innermost enclosing `while` loop. Payload-free.
+    Continue,
     Expr(ResolvedExpr),
 }
 
@@ -2669,6 +2675,11 @@ fn resolve_stmt(
             *vars = saved_vars;
             ResolvedStmtKind::While { cond, body: Box::new(body) }
         }
+        // Phase D.5 (2/N) / ADR 0036 D9: payload-free loop control —
+        // nothing to resolve. The type checker rejects them outside a
+        // loop (D7); the borrow checker treats them as no-ops.
+        StmtKind::Break => ResolvedStmtKind::Break,
+        StmtKind::Continue => ResolvedStmtKind::Continue,
         StmtKind::Expr(e) => ResolvedStmtKind::Expr(resolve_expr(
             e,
             fn_table,

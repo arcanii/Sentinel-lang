@@ -3342,6 +3342,37 @@ impl<'a> Parser<'a> {
                         span,
                     });
                 }
+                Some(kw @ (TokenKind::Break | TokenKind::Continue)) => {
+                    // Phase D.5 (2/N) / ADR 0036 D9: `break;` / `continue;`
+                    // — payload-free loop-control statements (exit /
+                    // next-iteration of the innermost enclosing `while`).
+                    // Each requires a `;`. Whether it is actually inside a
+                    // loop is a type-check concern (D7), not a syntactic one.
+                    let start = self.advance().expect("checked break/continue").span.start;
+                    let semi_end = match self.peek_kind() {
+                        Some(TokenKind::Semi) => self.advance().expect("peeked").span.end,
+                        Some(other) => {
+                            let t = self.peek().expect("peeked");
+                            return Err(ParseError::UnexpectedToken {
+                                got: format!("{other:?}"),
+                                expected: "`;` after `break` / `continue`",
+                                span: to_source_span(&t.span),
+                            });
+                        }
+                        None => {
+                            return Err(ParseError::UnexpectedEof {
+                                expected: "`;` after `break` / `continue`",
+                                span: to_source_span(&self.eof_span()),
+                            });
+                        }
+                    };
+                    let kind = if kw == TokenKind::Break {
+                        StmtKind::Break
+                    } else {
+                        StmtKind::Continue
+                    };
+                    stmts.push(Spanned { kind, span: start..semi_end });
+                }
                 Some(_) => {
                     let expr = self.parse_expr()?;
                     // C2 / ADR 0017 D2: assignment statement
@@ -4936,6 +4967,38 @@ mod tests {
         // parses — the tail is synthesised.
         let p = parse_block_ok("while c { y = 1; } 0");
         assert!(matches!(&p.stmts[0].kind, StmtKind::While { .. }));
+    }
+
+    #[test]
+    fn parse_break_and_continue_statements() {
+        // ADR 0036 D9: `break;` / `continue;` parse to payload-free
+        // `StmtKind::Break` / `StmtKind::Continue` statements. (Loop
+        // membership is checked at type-check time, not here, so they
+        // parse fine even at top level.)
+        let p = parse_block_ok("break; continue; 0");
+        assert_eq!(p.stmts.len(), 2);
+        assert!(matches!(&p.stmts[0].kind, StmtKind::Break));
+        assert!(matches!(&p.stmts[1].kind, StmtKind::Continue));
+        assert_eq!(p.tail.kind.to_string(), "0");
+    }
+
+    #[test]
+    fn parse_break_continue_pretty() {
+        assert_eq!(
+            pretty_block("while c { break; continue; } 0"),
+            "(block (while c (block (break) (continue) 0)) 0)"
+        );
+    }
+
+    #[test]
+    fn parse_break_without_semi_is_error() {
+        // `break` is a statement terminated by `;` (it is not an
+        // expression / tail). A bare `break` before `}` is rejected.
+        let err = parse_block_err("while c { break }");
+        assert!(matches!(
+            err,
+            ParseError::UnexpectedToken { expected, .. } if expected == "`;` after `break` / `continue`"
+        ));
     }
 
     #[test]

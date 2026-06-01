@@ -263,6 +263,9 @@ fn walk_stmt(
             walk_expr(cond, effective, async_id, acc);
             walk_block(body, effective, async_id, acc);
         }
+        // Phase D.5 (2/N) / ADR 0036 D9: `break` / `continue` perform no
+        // effect and contain no sub-expression — nothing to collect.
+        TypedStmtKind::Break | TypedStmtKind::Continue => {}
         TypedStmtKind::Expr(e) => walk_expr(e, effective, async_id, acc),
     }
 }

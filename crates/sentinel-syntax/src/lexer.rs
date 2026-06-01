@@ -155,6 +155,16 @@ pub enum TokenKind {
     /// connector). Parses in statement position to a `StmtKind::While`.
     #[token("while")]
     While,
+    /// Phase D.5 (2/N) / ADR 0036 D9: `break;` — exit the innermost
+    /// enclosing `while` loop. A new keyword token; parses in statement
+    /// position to a `StmtKind::Break`.
+    #[token("break")]
+    Break,
+    /// Phase D.5 (2/N) / ADR 0036 D9: `continue;` — next iteration of
+    /// the innermost enclosing `while` loop. A new keyword token; parses
+    /// in statement position to a `StmtKind::Continue`.
+    #[token("continue")]
+    Continue,
     /// Phase D.1 / ADR 0032: `enum Name { V1, V2(T), … }` declares a
     /// sum type (tagged union). Additive at D.1 (1/N) — the parser
     /// consumes it at (2/N).
@@ -1174,6 +1184,27 @@ mod tests {
     #[test]
     fn lex_for_keyword() {
         assert_eq!(kinds("for"), vec![TokenKind::For]);
+    }
+
+    #[test]
+    fn lex_loop_control_keywords() {
+        // Phase D.5 (2/N) / ADR 0036: the two loop-control keywords.
+        assert_eq!(kinds("while break continue"), vec![
+            TokenKind::While,
+            TokenKind::Break,
+            TokenKind::Continue,
+        ]);
+    }
+
+    #[test]
+    fn lex_loop_control_keyword_ident_prefix_regression() {
+        // Identifiers that merely *start* with `break` / `continue` lex
+        // as a single Ident — not keyword + suffix (the established
+        // maximal-munch precedent for every other keyword).
+        assert_eq!(kinds("breaks"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("breakage"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("continues"), vec![TokenKind::Ident]);
+        assert_eq!(kinds("continued"), vec![TokenKind::Ident]);
     }
 
     #[test]

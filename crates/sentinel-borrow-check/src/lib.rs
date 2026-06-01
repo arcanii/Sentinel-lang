@@ -788,6 +788,13 @@ fn walk_stmt(
             }
             ctx.clear_transients();
         }
+        // Phase D.5 (2/N) / ADR 0036 D9: `break` / `continue` reference no
+        // place and move nothing, so there is no borrow to check and
+        // nothing to add to the moved set — the `MovedInLoopBody` snapshot
+        // around the enclosing `while` (above) is unaffected. (Their
+        // codegen DOES drop the body scope before branching, but that is a
+        // drop, not a move, so it does not concern the borrow checker.)
+        TypedStmtKind::Break | TypedStmtKind::Continue => {}
         TypedStmtKind::Expr(e) => {
             walk_expr(e, ctx, errors, program);
             ctx.clear_transients();
