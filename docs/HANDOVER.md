@@ -142,6 +142,8 @@ C1.3. See STATE.md Section C.
 **ADR 0036 PROPOSED — Phase D.5 kickoff: loops (`while`) — docs-only.** Per ADR 0031 D4 item 6 (the dev chose loops over #5 modules). The surface has been recursion-only by design since 1.0; a compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want bounded, stack-safe iteration. ADR 0036 designs it (10 D-decisions). **Load-bearing calls: (D3) a loop is a STATEMENT** — `StmtKind::While { cond, body }` alongside `Let`/`Assign`/`Expr`, NOT an expression (a loop has no value; Sentinel has no unit type, so an expression form would force a synthetic `i64` 0). **(D4) `while` lowers to the first BACKWARD CFG branch** — three blocks `loop_cond` / `loop_body` / `loop_after` with a back-edge body→cond (all prior control flow — `if`/`match` — merged *forward* into a tree CFG). **(D5) per-iteration drop** — the body is a `lower_block` scope, so its bindings drop each iteration via the back-edge (a body that allocates each pass is leak-free, not accumulating — the load-bearing correctness property). **(D8, the key risk) the loop-carried move rule** — the borrow checker walks the body once but it runs N times, so moving an *outer* binding inside the body is a use-after-move on re-entry; proposed: conservatively **reject moving an outer Move-typed binding in a `while` body**. **Surface (D2):** `while <bool> { <body> }`; loop-carried state is a `let mut` outside + `Assign` inside (`i = i + 1`); `cond` must be `bool`. NO new `Type`, no cascade, no FnId-shift (not a builtin). `while` is a NEW lexer token (`for` is taken by `impl … for …`). **2-sub-phase split (D9):** (1/N) `while` (token + parser + `StmtKind::While` + bool-cond rule + the D8 move rule + back-edge codegen + per-iteration drop); (2/N) `break`/`continue` (branch to loop_after/loop_cond + a loop-target stack). Out of scope (D8): `for` / ranges / iterators, labeled break, `break`-with-value / loop-as-expression, do-while, a termination check (`while true {}` is well-formed). **3 OPEN DESIGN POINTS (settle before (1/N)):** (1) the loop-carried move rule (conservative reject vs. dataflow), (2) break/continue → (2/N), (3) while-as-statement. Next: **D.5 (1/N)** — settle the open points, then `while` end to end.
 
 **Phase D.5 (1/N) — the `while` loop — end to end — complete (`adec9c3`). ADR 0036 stays PROPOSED ((1/N) landed; the 3 open design points resolved at the proposed defaults).** A `while` loop through the WHOLE pipeline. **(D3) a loop is a STATEMENT** (`StmtKind::While { cond, body }`, not an expression — no loop value, no unit type): lexer (new `while` token; `for` is taken by `impl … for …`), parser (statement position; `parse_loop_body` = `parse_block_inner(allow_stmt_only=true)` synthesises a discarded unit tail for a statement-only body — Amendment A1, since Sentinel blocks require a tail per ADR 0010 D6; struct lits forbidden in the cond like `if`), AST/resolve (body scope, snapshot/restore vars)/types (cond must be `bool`; `secret bool` → SecretBranch; body value discarded) + the StmtKind cascade across mir/effect-check/codegen (8 codegen walk sites + lower_stmt). **(D4) the FIRST backward CFG branch:** `lower_stmt::While` emits `loop_cond`/`loop_body`/`loop_after` with a back-edge body→cond; the body lowers via `lower_block` so its bindings **drop per-iteration** (D5 — a body allocating each pass is leak-free). **(D8, the key risk) the loop-carried move rule:** moving an *outer* Move-typed binding inside the cond/body is a use-after-move on re-entry → rejected (`MovedInLoopBody`, a new BorrowError); implemented by snapshotting in-scope + moved sets before the loop and flagging any outer binding newly moved. A body-local move is fine; loop-carried `Assign`/`push(&mut v)` are fine. **Amendment A2 (load-bearing codegen fix): entry-block alloca hoisting.** A body `alloca` emitted inline in `loop_body` runs every iteration → stack grows → overflow at large N (verified: a 2M-iteration body-`let` loop SIGSEGV'd). Fix: a `loop_depth` counter (bumped around `lower_block(while-body)`); when >0, per-binding allocas (`let`/`if`-result/`match`-result) go to the fn entry block (executed once, slot reused) via `binding_alloca`. Non-loop codegen (`loop_depth==0`) keeps the inline alloca → **byte-identical** to pre-D.5 (c51 bar holds). **No new `Type`, no `Type` cascade, no FnId-shift.** **Verified** (exit + `leaks --atExit`): counter loop, Vec-built-in-loop, body-allocating loop (leak-free), 2M-iteration loop (no overflow), zero-iteration loops, loop-carried-move rejection; phase-go `c5d5_loops` → **exit 67, 0 leaks**. +9 tests (3 type + 3 borrow + 2 parser + the fixture; **1350 total**), four-check green. DEFERRED: (2/N) `break`/`continue` + the ADR flip; (D8) `for`/ranges/iterators, labeled break, `break`-with-value, termination check. **Phase D.5 (1/N) lands.** Next: **D.5 (2/N)** — `break`/`continue` + close.
+
+**Phase D.5 (2/N) — `break` / `continue` — end to end — complete. ADR 0036 → ACCEPTED-WITH-AMENDMENTS (D.5 closed).** Loops gain early exit / skip. **`break` / `continue` are payload-free STATEMENTS** (`StmtKind::Break`/`Continue` alongside `While`; new `break`/`continue` lexer keywords) branching to the innermost enclosing loop's `loop_after` (break) / `loop_cond` (continue). Pipeline: lexer tokens (+ ident-prefix regression) → AST/resolve/types/mir/effect-check/borrow/codegen StmtKind cascade (the resolve/mir/effect-check/borrow arms are no-ops — no sub-expr, no move, no effect). **(C2) the loop-target STACK:** a `LoopTarget { cond_bb, after_bb, scope_floor }` pushed onto `CodegenCtx::loop_targets` entering a `while` body, popped on exit; `break`/`continue` read the top (innermost — no labels). **(C1) the load-bearing drains-before-branch:** a break/continue branches out of the *middle* of the body, skipping `lower_block`'s end-of-body `emit_scope_drops`, so codegen **drops every scope frame from the top down to the loop body BEFORE branching** — `emit_loop_exit_drops(scope_floor)` (the body scope + any nested `if`/block scopes, innermost first; `scope_floor` = the body frame's index captured at loop entry). `emit_scope_drops` was split into a per-frame `emit_frame_drops` to share the logic. Each runtime path frees a binding exactly once (early-exit drop, or body-end drop on fall-through — mutually exclusive blocks); **verified leak-free** with a `[u8]` live across a break AND a continue, incl. a nested inner loop (inner break drains only the inner scope). **(C3) first mid-block divergence:** Sentinel has no early `return`, so break/continue is the first construct to terminate a block mid-stream — the statically-lowered, now-dead remainder parks on a fresh `after_loopctl` block (never append to a terminated block; covers a stmt-only body's synth unit tail + `lower_if`'s store/merge). **(C4) out-of-loop rejection:** `break`/`continue` outside any loop → `TypeError::LoopControlOutsideLoop` (names the kw), via a `loop_depth: u32` on `VarTypeEnv` (bumped around a `while` body — threads through nested `if`/`match`; legal iff `>0`; fresh per fn so no break across a fn). **(C5) ergonomic note:** a *conditional* break uses the tail idiom `if c { break; 0 } else { 0 };` (`if` requires `else` + a tail per ADR 0010/0013 — pre-existing, not break's fault; cleaner ergonomics is a Revisit). **No new `Type`, no cascade beyond the StmtKind arms, no FnId-shift.** Phase-go `c5d5_break_continue` (break-terminated sum 15 + continue-filtered evens 30 + two loops that break/continue with a `[u8]` live, 30+40) → **exit 115, 0 leaks**; `c5d5_loops` still exit 67. +11 tests (5 type + 3 parser + 2 lexer + the fixture; **1361 total**), four-check green. **Phase D.5 COMPLETE.** Next: **#5 modules** (ADR 0031 D4 — the last prerequisite before the self-host port).
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1848,19 +1850,18 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **D.5 (1/N) docs**
-    commit, atop `adec9c3` (feat(d.5 1/N): the while loop — end to end) +
-    the ADR 0036 kickoff (`65904eb`) + the D.4 (2/N) feat+docs
-    (`fb1b51b`/`7450ad2`). Clean tree; **1350 tests**; four-check green via
-    `cargo nextest run --workspace` + `cargo test --doc --workspace` +
-    `cargo clippy --workspace --all-targets -- -D warnings` (+ `cargo
-    build`). macOS + LLVM 18.
-    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0036**
-    (THE D.5 task ADR — loops; **(1/N) landed**, read its Amendments;
-    (2/N) = `break`/`continue`) + ADR 0031 (the Phase D roadmap — modules
-    is the last prerequisite after loops) + the C1.3 `if`/`lower_if` +
-    `lower_block` codegen (the basic-block + per-iteration-drop precedent
-    `while` extends) + auto-memory sentinel_d5_loops_surface.
+    Local HEAD: verify with `git log -1` — expect the **D.5 (2/N) docs**
+    commit, atop the **D.5 (2/N) feat** (`break`/`continue` — end to end),
+    atop the D.5 (1/N) docs + `adec9c3` (feat(d.5 1/N): the while loop). Clean
+    tree; **1361 tests**; four-check green via `cargo nextest run --workspace`
+    + `cargo test --doc --workspace` + `cargo clippy --workspace
+    --all-targets -- -D warnings` (+ `cargo build`). macOS + LLVM 18.
+    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0031**
+    (THE next-task roadmap — Phase D prerequisites; **#5 modules** is the last
+    one before the self-host port, RESUME AT below) + **ADR 0036** (loops —
+    now ACCEPTED-WITH-AMENDMENTS; (1/N) `while` + (2/N) `break`/`continue`, read
+    its Amendments incl. the (2/N) C-series) + auto-memory
+    sentinel_d5_loops_surface.
 
     PHASE D = self-hosting (post-1.0; ADR 0031). Opens with a
     language/stdlib build-out, keeping the Rust `snc` as the differential
@@ -1913,38 +1914,40 @@ For pasting into a fresh chat to bootstrap context:
       VecElementNotSupported). 1324 tests. See
       [[sentinel_d3_collections_surface]].
 
-    RESUME AT: **Phase D.5 (2/N) — loops close: `break` + `continue` + the
-    ADR 0036 flip to ACCEPTED-WITH-AMENDMENTS.** D.5 (1/N) is **COMPLETE** —
-    the `while` loop end to end (`adec9c3`): lexer (`while` token) + parser
-    (statement position; `parse_loop_body` synthesises a unit tail for a
-    statement-only body) + `StmtKind::While` (AST/resolved/typed + the
-    StmtKind cascade across mir/effect-check/codegen) + the bool-cond type
-    rule + the **loop-carried move rule** (`MovedInLoopBody`, ADR 0036 D8) +
-    the **back-edge codegen** (loop_cond/loop_body/loop_after; body via
-    `lower_block` so it drops per-iteration) + **entry-block alloca hoisting**
-    (a `loop_depth` flag — body allocas go to the fn entry so the stack
-    doesn't grow per pass; non-loop codegen byte-identical). Phase-go
-    `c5d5_loops` exit 67 / 0 leaks; 1350 tests. The 3 open design points
-    resolved at the proposed defaults. No new `Type` / no FnId-shift.
-    **(2/N) plan — `break` / `continue`:** new lexer tokens (`break`,
-    `continue`) + `StmtKind::Break`/`Continue` (statements, like `while`) +
-    the StmtKind cascade (resolve/types/mir/effect-check/borrow/codegen — a
-    new cascade like `while`'s) + **type-check rejects `break`/`continue`
-    OUTSIDE a loop** (a focused error) + **codegen branches to the current
-    loop's `loop_after` (break) / `loop_cond` (continue)** — needs a
-    **loop-target STACK** in `CodegenCtx` (push (cond_bb, after_bb) when
-    entering a `while` body, pop on exit; `break`/`continue` read the top).
-    **Borrow-check subtlety:** an early `break` makes the body's tail-drops
-    not run for that path — but `lower_block`'s `emit_scope_drops` is at the
-    body block's end, so a `break` that branches away SKIPS those drops →
-    potential LEAK. So `break` codegen must emit the enclosing body scope's
-    drops before branching to `loop_after` (mirror how `return`/tail handles
-    early scope exit — check how the fn-return path drops, ADR 0017). This
-    is the key (2/N) risk. Then flip ADR 0036 → ACCEPTED-WITH-AMENDMENTS.
-    Read ADR 0036 (esp. its Amendments + D8) + the `while` codegen
-    (`lower_stmt::While` + `binding_alloca` + `emit_scope_drops`) first.
-    After loops: **#5 modules** (ADR 0031 D4 — the last prerequisite), then
-    the self-host port (D5). See [[sentinel_d5_loops_surface]].
+    RESUME AT: **#5 modules** (ADR 0031 D4 — the **last** language
+    prerequisite before the lexer→parser→… self-host port). **Phase D.5 —
+    loops — is COMPLETE** (ADR 0036 → ACCEPTED-WITH-AMENDMENTS): (1/N) the
+    `while` loop (`adec9c3`) + (2/N) `break` / `continue` (this session).
+    **D.5 (2/N) recap — `break` / `continue`:** payload-free **statements**
+    (`StmtKind::Break`/`Continue`, new `break`/`continue` lexer keywords)
+    branching to the innermost enclosing loop's `loop_after` (break) /
+    `loop_cond` (continue) via a **loop-target STACK**
+    (`CodegenCtx::loop_targets`; top = innermost — no labels). THE load-
+    bearing call (the (2/N) risk, resolved): a break/continue branches out of
+    the *middle* of the body, skipping `lower_block`'s end-of-body
+    `emit_scope_drops`, so codegen **drains every scope frame down to the loop
+    body BEFORE branching** — `emit_loop_exit_drops(scope_floor)` (where
+    `scope_floor` = the body frame's index, captured at loop entry), draining
+    the body scope + any nested `if`/block scopes, innermost first. To share
+    the drop logic, `emit_scope_drops` was split into a per-frame
+    `emit_frame_drops`. Each runtime path frees a binding exactly once (early-
+    exit drop here, or body-end drop on fall-through — mutually exclusive
+    blocks); verified leak-free with a `[u8]` live across a break AND a
+    continue, incl. a nested inner loop. **First mid-block divergence** (no
+    early `return` in Sentinel) → the dead remainder parks on an
+    `after_loopctl` block (so we never append to a terminated block — covers a
+    stmt-only body's synth unit tail + `lower_if`'s store/merge). **Out-of-loop
+    `break`/`continue` rejected** (`TypeError::LoopControlOutsideLoop`) via a
+    `loop_depth: u32` on `VarTypeEnv` (bumped around a `while` body; legal iff
+    `>0`; fresh per fn). Cascade no-ops in resolve/mir/effect-check/borrow.
+    Ergonomic note: a *conditional* break uses the tail idiom `if c { break; 0
+    } else { 0 };` (`if` requires `else` + a tail — pre-existing, not break's
+    fault; a cleaner ergonomics is a Revisit, ADR 0036 (2/N) C5). No new
+    `Type` / no FnId-shift; `break`/`continue` are new lexer tokens. Phase-go
+    `c5d5_break_continue.sentinel` exit 115 / 0 leaks; `c5d5_loops` still 67;
+    1361 tests. **#5 modules plan:** read **ADR 0031 D4** (the module surface);
+    it's the last prerequisite before the self-host port (D5). See
+    [[sentinel_d5_loops_surface]].
 
     CARRIED-FORWARD DEBT (not blocking D.3): **D.1 A1 — recursive-enum
     payload drop is box-free only** (leak-free for the standard
@@ -2013,19 +2016,26 @@ For pasting into a fresh chat to bootstrap context:
     read ABI) + B1 (print_bytes: exact bytes, no newline, flushed). Builtins
     FnId 0..=13. DEFERRED (D8): recoverable errors / `Io` effect row /
     streaming / `read_stdin` / directories).
-    0036 **PROPOSED, D.5 (1/N) landed** (D.5 loops — a `while` loop. (D3) a
-    loop is a STATEMENT (`StmtKind::While`), not an expression; (D4) the
-    first backward CFG branch (cond→body→cond); (D5) per-iteration
-    body-scope drop; (D8, the key rule) the loop-carried move rule — reject
-    moving an outer Move-typed binding inside a `while` body
-    (`MovedInLoopBody`). **(1/N)** shipped `while` end to end (`adec9c3`,
-    c5d5 exit 67 / 0 leaks; 1350 tests); the 3 open design points resolved
-    at the proposed defaults; Amendments A1 (statement-only body → synthesised
-    unit tail) + A2 (entry-block alloca hoisting via `loop_depth` — body
-    allocas don't grow the stack; non-loop codegen byte-identical). No new
-    `Type` / no FnId-shift; `while` is a new lexer token. Stays PROPOSED
-    until (2/N) closes — `break`/`continue` + the flip. `for`/ranges/
-    iterators deferred (D8)).
+    0036 **ACCEPTED-WITH-AMENDMENTS** (D.5 loops — `while` + `break`/
+    `continue`. (D3) a loop is a STATEMENT (`StmtKind::While`/`Break`/
+    `Continue`), not an expression; (D4) the first backward CFG branch
+    (cond→body→cond); (D5) per-iteration body-scope drop; (D8) the loop-
+    carried move rule — reject moving an outer Move-typed binding inside a
+    `while` body (`MovedInLoopBody`). **(1/N)** shipped `while` end to end
+    (`adec9c3`, c5d5_loops exit 67); Amendments A1 (stmt-only body →
+    synthesised unit tail) + A2 (entry-block alloca hoist via `loop_depth`).
+    **(2/N)** shipped `break`/`continue` (this session) — payload-free
+    statements branching to the innermost loop's `loop_after`/`loop_cond` via
+    a loop-target stack; the load-bearing **drains-before-branch** (drop every
+    scope frame down to the loop body before branching — `emit_loop_exit_drops`
+    /`emit_frame_drops`; leak-free with a heap binding live at the branch);
+    first mid-block divergence parks on an `after_loopctl` dead block;
+    out-of-loop rejection (`LoopControlOutsideLoop`) via a `loop_depth` on the
+    type env. Amendments C1–C5 (C5 = the conditional-break tail-idiom
+    ergonomic note). c5d5_break_continue exit 115 / 0 leaks; 1361 tests. No new
+    `Type` / no FnId-shift; `break`/`continue` are new lexer tokens. DEFERRED
+    (D8): `for`/ranges/iterators, labeled break, `break`-with-value /
+    loop-as-expression, a termination check).
     Optional C4 follow-ons (none blocking): work-stealing scheduler
     (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
     (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).

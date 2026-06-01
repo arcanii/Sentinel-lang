@@ -1,14 +1,14 @@
 # ADR 0036: Phase D.5 — loops (`while`)
 
-Status: PROPOSED (D.5 **(1/N) landed** — the `while` loop end to end; the 3 OPEN
-DESIGN POINTS were resolved at the proposed defaults; see Amendments). The fifth
-Phase D sub-phase ADR under ADR 0031 (Phase D kickoff) D4 item 6. After sum types
-(D.1), strings + a byte type (D.2), growable collections (D.3), and file I/O
-(D.4), **loops** are next: the surface has been **recursion-only by design** since
-1.0, but a compiler's iteration-heavy passes (scanning a byte buffer, walking a
-token `Vec`, draining a work-list) are awkward + stack-bounded as recursion (deep
-recursion, no early break). Flips to ACCEPTED-WITH-AMENDMENTS when D.5 (2/N)
-closes (`break` / `continue`).
+Status: ACCEPTED-WITH-AMENDMENTS (D.5 **(1/N)** the `while` loop + **(2/N)**
+`break` / `continue` both landed end to end; the 3 OPEN DESIGN POINTS were
+resolved at the proposed defaults; see Amendments). The fifth Phase D sub-phase
+ADR under ADR 0031 (Phase D kickoff) D4 item 6. After sum types (D.1), strings + a
+byte type (D.2), growable collections (D.3), and file I/O (D.4), **loops** are
+next: the surface has been **recursion-only by design** since 1.0, but a
+compiler's iteration-heavy passes (scanning a byte buffer, walking a token `Vec`,
+draining a work-list) are awkward + stack-bounded as recursion (deep recursion,
+no early break — now fixed by `break`).
 
 Date: 2026-05-31
 Related:
@@ -222,8 +222,8 @@ dataflow; the conservative rule is the right MVP).
 ### Negative
 - The first non-tree CFG (a back-edge) + the loop-carried move rule (a real,
   if conservative, new borrow-check surface) — the medium risk.
-- `for` / `break` / `continue` / loop-as-expression deferred; `while true {}`
-  is a non-terminating-but-well-formed program (no termination check).
+- `for` / loop-as-expression / labeled break deferred; `while true {}` is a
+  non-terminating-but-well-formed program (no termination check).
 
 ### Neutral
 - No new `Type` variant, no `Type`-match cascade (a `StmtKind`, a bool cond, a
@@ -231,8 +231,8 @@ dataflow; the conservative rule is the right MVP).
 
 ## Amendments
 
-The ADR stays PROPOSED until D.5 (2/N) (`break` / `continue`) closes, then flips
-to ACCEPTED-WITH-AMENDMENTS.
+D.5 landed in two sub-phases: **(1/N)** the `while` loop, **(2/N)** `break` /
+`continue`. With (2/N) closed the ADR is **ACCEPTED-WITH-AMENDMENTS**.
 
 ### D.5 (1/N) — `while` (landed)
 
@@ -271,23 +271,81 @@ Deviations / details discovered during implementation:
   cond/body. Verified: rejects `consume(p)` for an outer `p`, accepts an
   inner-binding move + loop-carried `Assign` / `push(&mut v)`.
 
-Deferred to (2/N): `break` / `continue` (branch to `loop_after` / `loop_cond`; a
-loop-target stack for nesting). Still deferred (D8): `for` / ranges / iterators,
-labeled break, `break`-with-value / loop-as-expression, a termination check.
+### D.5 (2/N) — `break` / `continue` (landed)
+
+End to end through the whole pipeline; phase-go `tests/pass/c5d5_break_continue.sentinel`
+(a `break`-terminated sum, a `continue`-filtered sum, and two loops that allocate
+a `[u8]` each iteration and break / continue with it live) runs at exit 115,
+leak-free under `leaks --atExit`. `break` / `continue` are payload-free
+**statements** (`StmtKind::Break` / `Continue`, new `break` / `continue` lexer
+keywords) branching to the innermost enclosing loop's `loop_after` / `loop_cond`.
+No new `Type`, no `FnId`-shift. Deviations / details discovered during
+implementation:
+
+- **C1 — drains-before-branch (the load-bearing (2/N) property).** A `break` /
+  `continue` branches *out of the middle* of the body block, skipping
+  `lower_block`'s end-of-body `emit_scope_drops`. So before the branch, codegen
+  drops **every scope frame from the current top down to the loop body** (the body
+  scope plus any nested `if` / block scopes between it and the branch), innermost
+  first — exactly the body-end drop, emitted early (the fn-return early-exit
+  shape, ADR 0017). Without it a body-scope heap binding live at the `break` leaks.
+  Implemented by splitting `emit_scope_drops` into a per-frame `emit_frame_drops`
+  and adding `emit_loop_exit_drops(scope_floor)`; each runtime path frees a given
+  binding exactly once (the early-exit drop, or the body-end drop on fall-through —
+  mutually exclusive blocks). Verified leak-free with a heap binding live across
+  both a `break` and a `continue`, including in a nested inner loop.
+- **C2 — the loop-target stack + `scope_floor`.** A `LoopTarget { cond_bb,
+  after_bb, scope_floor }` is pushed onto `CodegenCtx::loop_targets` entering a
+  `while` body and popped on exit; `break` / `continue` read the top (the innermost
+  loop — no labels at D.5). `scope_floor` is `scope_stack.len()` captured the
+  instant before the body scope is pushed, so the drain bounds `[scope_floor ..]`
+  cover exactly this loop's body + nested scopes and never the enclosing loop's
+  (verified: an inner `break` in a nested loop drops only the inner scope).
+- **C3 — the first mid-block divergence needs a dead block.** Sentinel has no early
+  `return`, so `break` / `continue` is the first construct that terminates a block
+  mid-stream. After the branch, codegen parks the builder on a fresh
+  `after_loopctl` block (no live predecessors; LLVM discards it) so the
+  statically-lowered, now-unreachable remainder of the block — a statement-only
+  body's synthesised unit tail, a dead trailing statement, `lower_if`'s
+  store-to-result + merge branch — never appends to a terminated block.
+- **C4 — out-of-loop rejection via the type env's loop depth.** `break` /
+  `continue` outside any loop is a `TypeError::LoopControlOutsideLoop` (naming the
+  keyword). Tracked by a `loop_depth: u32` on `VarTypeEnv` (already threaded
+  through every checker, incl. nested `if` / `match` blocks), bumped around a
+  `while` body; legal iff `> 0`. A fresh env per fn resets it at every fn boundary
+  (no `break` across a fn). The borrow checker is unaffected (loop control moves
+  nothing); the mir / effect-check / resolve cascades are no-ops.
+- **C5 — usage ergonomics (a noted limitation, not a (2/N) blocker).** Because
+  `if` is an expression that requires an `else` and a tail (ADR 0010 D6 / 0013
+  D3a), a *conditional* `break` / `continue` uses the tail idiom `if c { break; 0 }
+  else { 0 };` — the `0`s are discarded. This is a pre-existing property of
+  Sentinel's statement-position `if` (any conditional side-effect needs it), not
+  something `break` introduces. A cleaner ergonomics — a statement-level `if`
+  without `else`, or `break` / `continue` as a tail (diverging) expression — is a
+  Revisit, gated on a self-host pass finding the idiom too noisy.
+
+Still deferred (D8): `for` / ranges / iterators, labeled break, `break`-with-value
+/ loop-as-expression, a termination check.
 
 ## Revisit
 
-PROPOSED until D.5 closes. Triggers:
+ACCEPTED-WITH-AMENDMENTS (D.5 closed). Triggers:
 - **D8**: if the conservative loop-carried-move rule rejects a real self-host
   pattern, refine toward a dataflow (move-state fixpoint over the body) check.
-- **D8 (2/N)**: `break` / `continue` (and later labeled break / `break`-with-
-  value) when a self-host pass needs early exit.
+- **(2/N) C5**: if the conditional-`break` tail idiom (`if c { break; 0 } else {
+  0 };`) proves too noisy in a self-host pass, add a statement-level `if` (no
+  `else`) or make `break` / `continue` a tail (diverging) expression.
+- **labeled break / `break`-with-value**: when a self-host pass needs to exit an
+  *outer* loop or carry a value out (loop-as-expression).
 - **D2**: `for` (+ ranges / iterators) once the iterator protocol is designed.
 
-## OPEN DESIGN POINTS — RESOLVED (at the proposed defaults, D.5 (1/N))
+## OPEN DESIGN POINTS — RESOLVED (at the proposed defaults)
 
 1. **Loop-carried move rule (D8).** → **reject moving an outer-scope Move-typed
-   binding inside a `while` body** (conservative, sound; `MovedInLoopBody`). A
-   precise dataflow check is a future refinement.
-2. **`break` / `continue` scope (D9).** → **(2/N)**, not (1/N).
+   binding inside a `while` body** (conservative, sound; `MovedInLoopBody`, D.5
+   (1/N)). A precise dataflow check is a future refinement.
+2. **`break` / `continue` scope (D9).** → **(2/N)** (landed): payload-free
+   statements branching to the innermost loop's `loop_after` / `loop_cond` via a
+   loop-target stack; rejected outside a loop; drops-before-branch keeps the body
+   scope leak-free.
 3. **`while`-as-statement (D3).** → a `StmtKind::While` (no loop value).

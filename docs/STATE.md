@@ -14,33 +14,42 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D.5 — loops (`while`) — (1/N) COMPLETE (ADR 0036
-PROPOSED; (1/N) landed).** Post-1.0, **Phase D (self-hosting) is underway**
-(ADR 0031 — a language/stdlib build-out). After D.1 (sum types), D.2 (strings +
-`u8`), D.3 (growable `Vec<T>`), and D.4 (file I/O), the surface had been
-**recursion-only by design**; **D.5 adds the `while` loop** — a compiler's
-iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want bounded,
-stack-safe iteration. **(1/N)** lands `while <cond> { <body> }` end to end through
-the whole pipeline. Load-bearing calls: **a loop is a STATEMENT**
-(`StmtKind::While`, not an expression — no loop value; Sentinel has no unit type);
-`while` lowers to the **first backward CFG branch** (loop_cond → loop_body →
-loop_after, body→cond back-edge; all prior control flow merged forward); the body
-is a `lower_block` scope, so its bindings **drop per-iteration** (a body that
-allocates each pass is leak-free). The **loop-carried move rule** (the key
-borrow-check addition): moving an *outer* Move-typed binding inside the cond/body
-is a use-after-move on re-entry — rejected (`MovedInLoopBody`); a body-local
-binding is fresh each pass; loop-carried `Assign`/`&mut` are fine. **Stack-safe:**
-body allocas (`let`/`if`/`match` results) are hoisted to the function entry block
-inside loops (a `loop_depth` flag), so a 2M-iteration body-`let` loop doesn't
-overflow; non-loop codegen stays byte-identical (the c51 bar holds). `while` is a
-new lexer token (`for` is taken by `impl … for …`); a statement-only body
-synthesises a discarded unit tail. **No new `Type`, no cascade, no FnId-shift.**
-Phase-go `tests/pass/c5d5_loops.sentinel` (a counter loop summing 1..=10, a `Vec`
-built by `push`ing in a loop, a body allocating a `[u8]` each of 100 passes) runs
-at **exit 67, 0 leaks** (`leaks --atExit`). DEFERRED (ADR 0036 D8): `break` /
-`continue` (D.5 (2/N)), `for` / ranges / iterators, labeled break,
-`break`-with-value / loop-as-expression, a termination check. **1350 tests,
-four-check green. Phase D.5 (1/N) lands.**
+Last updated: **Phase D.5 — loops (`while` + `break`/`continue`) — COMPLETE
+(ADR 0036 → ACCEPTED-WITH-AMENDMENTS; (1/N) + (2/N) landed).** Post-1.0, **Phase D
+(self-hosting) is underway** (ADR 0031 — a language/stdlib build-out). After D.1
+(sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4 (file I/O),
+the surface had been **recursion-only by design**; **D.5 adds loops** — a
+compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want
+bounded, stack-safe iteration with early exit. **(1/N)** landed `while <cond> {
+<body> }`: **a loop is a STATEMENT** (`StmtKind::While`, not an expression — no
+loop value; Sentinel has no unit type), lowering to the **first backward CFG
+branch** (loop_cond → loop_body → loop_after, body→cond back-edge); the body is a
+`lower_block` scope, so its bindings **drop per-iteration** (a body that allocates
+each pass is leak-free); the **loop-carried move rule** rejects moving an *outer*
+Move-typed binding inside the cond/body (`MovedInLoopBody`); body allocas are
+**hoisted to the entry block** inside loops (a `loop_depth` flag — a 2M-iteration
+body-`let` loop is stack-safe; non-loop codegen byte-identical, the c51 bar holds).
+**(2/N)** lands **`break` / `continue`** — payload-free **statements**
+(`StmtKind::Break`/`Continue`, new `break`/`continue` lexer keywords) branching to
+the innermost enclosing loop's `loop_after` / `loop_cond` via a **loop-target
+stack** (`CodegenCtx::loop_targets`, the innermost loop = top; no labels). Load-
+bearing (2/N) call: a `break`/`continue` branches out of the *middle* of the body,
+skipping `lower_block`'s end-of-body drops, so codegen **drains every scope frame
+down to the loop body BEFORE branching** (`emit_loop_exit_drops` over a
+`scope_floor` — the body scope + any nested `if`/block scopes), keeping a heap
+binding live at the branch leak-free (the fn-return early-exit shape, ADR 0017).
+Since Sentinel has no early `return`, this is the **first mid-block divergence** —
+the dead remainder is parked on an `after_loopctl` block. **Out of a loop**,
+`break`/`continue` is rejected (`LoopControlOutsideLoop`) via a `loop_depth` on the
+type env. Ergonomic note: a *conditional* break uses the tail idiom `if c { break;
+0 } else { 0 };` (`if` requires `else` + a tail — pre-existing, not break's fault).
+**No new `Type`, no cascade, no FnId-shift.** Phase-gos: `c5d5_loops.sentinel`
+(while baseline) at **exit 67**; `c5d5_break_continue.sentinel` (break-terminated
+sum + continue-filtered sum + two loops that break / continue with a `[u8]` live)
+at **exit 115** — both **0 leaks** (`leaks --atExit`; verified incl. nested loops).
+DEFERRED (ADR 0036 D8): `for` / ranges / iterators, labeled break,
+`break`-with-value / loop-as-expression, a termination check. **1361 tests,
+four-check green. Phase D.5 COMPLETE.**
 
 Pre-D.5 context: **Phase D.4 — file I/O via a minimal stdlib — MVP COMPLETE
 (1/N + 2/N; ADR 0035 → ACCEPTED-WITH-AMENDMENTS).** The fourth
