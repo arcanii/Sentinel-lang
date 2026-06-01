@@ -1,11 +1,15 @@
 # ADR 0037: Phase D.6 — modules / multi-file (file-as-module + separate compilation)
 
-Status: PROPOSED (docs-only kickoff). The sixth and **last** Phase D language
-prerequisite under ADR 0031 (Phase D kickoff) D4 item 5, before the self-host port
-(D5). After sum types (D.1), strings + a byte type (D.2), growable collections
-(D.3), file I/O (D.4), and loops (D.5), the surface has been **single-file by
-design** since 1.0 (ADR 0025 D9) — but a compiler is many files. D.6 makes Sentinel
-multi-file. Flips to ACCEPTED-WITH-AMENDMENTS when the MVP sub-phases land.
+Status: PROPOSED — **D.6 (1/N) IN PROGRESS** (the front-end + module-graph
+discovery have landed green; the per-unit resolve/codegen/link core is next — see
+## Implementation notes). The sixth and **last** Phase D language prerequisite
+under ADR 0031 (Phase D kickoff) D4 item 5, before the self-host port (D5). After
+sum types (D.1), strings + a byte type (D.2), growable collections (D.3), file I/O
+(D.4), and loops (D.5), the surface has been **single-file by design** since 1.0
+(ADR 0025 D9) — but a compiler is many files. D.6 makes Sentinel multi-file. Flips
+to ACCEPTED-WITH-AMENDMENTS when the MVP sub-phases land. The 4 OPEN DESIGN POINTS
+are SETTLED (owner-confirmed): allow import cycles; AMEND `abi-v1` (not `abi-v2`);
+source root = the entry file's directory; `use a::b::c` = item `c` in module `a::b`.
 
 Date: 2026-06-01
 Related:
@@ -260,6 +264,62 @@ separate compilation sound — and it must be frozen + tested like the rest of
 - No new runtime `sentinel_*` symbols (modules are a front-end + linking concern, not
   a runtime one). The mangling change touches the ABI doc + tests but adds no
   runtime surface.
+
+## Implementation notes — D.6 (1/N) core (the worked-out design)
+
+D.6 (1/N) is being built in green increments. **Landed:** the `use` front-end +
+top-level `pub` (parser) + the driver's `discover_module_graph` (follows `use`
+edges → files; ModuleNotFound; cycles allowed). **Remaining = the per-unit core,**
+designed below after reading the resolve/codegen internals. It is a **cohesive
+change** (resolve + types + codegen + link together) — `use` does not compile until
+all four land — so it is one focused effort, not a stack of independently-green
+steps. Sequencing within it:
+
+1. **Expose the graph + a global pub-signature pass.** `discover_module_graph`
+   returns the parsed `Program` per module. A pre-pass collects each module's
+   `pub` item **signatures** + their module-qualified symbols into an exports
+   table keyed by `(module_path, item_name)`. (Cheap — signatures, not bodies.)
+
+2. **Per-module resolve against imports — the extern-fn-in-FnId-space model.** Add
+   `resolve_module(program, imports) -> ResolvedProgram` (`resolve()` becomes the
+   `imports == []` case, preserving single-file). The least-cascade representation:
+   a cross-module call stays an ordinary `ResolvedExprKind::Call { id: FnId }`. Each
+   imported fn is registered in **this module's** FnId space (after builtins) with
+   its signature from the exports table, but marked **extern** (a
+   `link_symbol: String` + `origin: Vec<String>` on the resolved fn / signature; no
+   body). The module's own fns follow. So `fn_signatures[id]` covers builtins +
+   imported externs + own fns; a call to an imported name resolves to its extern
+   FnId — **no new expr variant, no expr-cascade**. Visibility (`pub`, now parsed)
+   is enforced here: importing a non-`pub` item → `PrivateItem`; a `use` of an
+   absent item → `UnknownImport`.
+
+3. **Per-module type-check** runs unchanged against the per-module
+   `fn_signatures` (externs included) — extern fns are just signatures, so
+   cross-module calls type-check normally.
+
+4. **Per-module codegen + module-qualified mangling (the `abi-v1` D7 amendment).**
+   Codegen's `fns: HashMap<FnId, FunctionValue>` works **uniformly**: an extern
+   FnId becomes a *declaration* (external linkage, the module-qualified
+   `link_symbol`) instead of a definition; a local `pub` fn is *defined* under its
+   module-qualified symbol so other units' externs resolve at link. `main` stays
+   `main`; private fns keep local linkage. Calls via FnId are unchanged. The
+   mangling is **length-prefixed + module-qualified** (Itanium-ish:
+   `_S<len><seg>…<len><item>`) so `a::b::f` and `a_b::f` can't collide — frozen
+   per `abi-v1`, so the `abi_v1_mangling_is_stable` golden test +
+   `docs/abi-v1.md` update **in the same commit**.
+
+5. **Driver orchestration + link.** Drive per-module resolve→types→codegen (one
+   `.o` each), then `cc` all `.o` + `libsentinel_runtime.a` (entry module owns
+   `main`; deterministic, path-sorted link order for repro). Replace the current
+   multi-module gate with this pipeline.
+
+**Scope the first vertical slice to cross-module FN calls** (a `pub fn` in module
+B called from module A → two `.o` + link → runs). Cross-module **types**
+(`struct`/`enum` imports — layout-only, no symbol) and cross-module
+**trait/impl/effect** follow within (1/N); **generics** are (2/N) (`linkonce_odr`,
+D6); incremental per-unit caching is (3/N). The whole-program
+`collect_mono_instantiations` only needs touching once generics cross units (2/N),
+so (1/N) can keep it per-entry-module for the non-generic slice.
 
 ## Revisit
 
