@@ -32,12 +32,14 @@
 //! from every front-end stage including borrow check transitively
 //! accumulate on borrow_check_query.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use miette::{LabeledSpan, MietteDiagnostic, NamedSource, Report, Severity as MietteSeverity, SourceSpan};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_borrow_check::borrow_check_query;
+use sentinel_syntax::Program;
 use sentinel_types::check_query;
 
 /// The concrete Salsa database for the snc driver. Per ADR 0011 D1
@@ -113,11 +115,112 @@ fn run_parse(path: &str) -> ExitCode {
     }
 }
 
+/// Phase D.6 (1/N) / ADR 0037 D3: discover the module graph reachable
+/// from `entry` by following `use` edges. File-as-module: a `use
+/// a::b::Item;` references module `a::b`, whose file is
+/// `<root>/a/b.sentinel` — the **source root** is the entry file's
+/// directory (ADR 0037 open point 3), and the **last** path segment is
+/// the imported item, not part of the module path (point 4). Import
+/// cycles are fine (a `visited` set; point 1). Returns the sorted module
+/// paths of the NON-entry modules reached — empty for a single-file
+/// program — or a human-readable error when a `use`d module's file is
+/// missing (ModuleNotFound).
+///
+/// Parsing the entry is lenient: a parse error there yields "no modules"
+/// so the main Salsa pipeline renders the proper diagnostic rather than
+/// this discovery pass duplicating it.
+fn discover_module_graph(entry: &Path) -> Result<Vec<Vec<String>>, String> {
+    let root = entry.parent().unwrap_or_else(|| Path::new("."));
+    let entry_stem = entry
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let entry_src = std::fs::read_to_string(entry)
+        .map_err(|e| format!("cannot read `{}`: {e}", entry.display()))?;
+    let entry_prog = match sentinel_syntax::parse(&entry_src) {
+        Ok(p) => p,
+        // Defer to the main pipeline for a proper parse diagnostic.
+        Err(_) => return Ok(Vec::new()),
+    };
+    if entry_prog.uses.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut visited: BTreeSet<Vec<String>> = BTreeSet::new();
+    visited.insert(vec![entry_stem]);
+    let mut reached: BTreeSet<Vec<String>> = BTreeSet::new();
+    // (module_path, program) work-list; seed with the entry's imports.
+    let mut stack: Vec<Program> = vec![entry_prog];
+    while let Some(program) = stack.pop() {
+        for u in &program.uses {
+            // The parser guarantees ≥ 2 segments; the module path is all
+            // but the last (the imported item).
+            if u.path.len() < 2 {
+                continue;
+            }
+            let module: Vec<String> = u.path[..u.path.len() - 1].to_vec();
+            if !visited.insert(module.clone()) {
+                continue; // already seen — a cycle is fine.
+            }
+            reached.insert(module.clone());
+            let mut file = root.to_path_buf();
+            for seg in &module {
+                file.push(seg);
+            }
+            file.set_extension("sentinel");
+            if !file.is_file() {
+                return Err(format!(
+                    "module `{}` not found (expected file `{}`)",
+                    module.join("::"),
+                    file.display()
+                ));
+            }
+            let src = std::fs::read_to_string(&file)
+                .map_err(|e| format!("cannot read module `{}`: {e}", file.display()))?;
+            let prog = sentinel_syntax::parse(&src).map_err(|e| {
+                format!("parse error in module `{}`: {e:?}", module.join("::"))
+            })?;
+            stack.push(prog);
+        }
+    }
+    Ok(reached.into_iter().collect())
+}
+
 fn run_build(path: &str, output: Option<&str>) -> ExitCode {
     let src = match read_source(path) {
         Ok(s) => s,
         Err(code) => return code,
     };
+
+    // Phase D.6 (1/N) / ADR 0037: discover the module graph by following
+    // `use` edges. A single-file program (no `use`) compiles exactly as
+    // before. Multi-module compilation — per-unit resolve + separate
+    // codegen + link — lands in the next D.6 (1/N) increment; until then a
+    // discovered multi-module graph is reported + gated honestly (and a
+    // missing `use`d file is surfaced here as ModuleNotFound).
+    match discover_module_graph(Path::new(path)) {
+        Ok(modules) if !modules.is_empty() => {
+            let names: Vec<String> = modules.iter().map(|m| m.join("::")).collect();
+            eprintln!(
+                "snc: multi-module compilation is not yet supported \
+                 (Phase D.6 (1/N) is wiring per-unit resolve + separate \
+                 codegen per ADR 0037)."
+            );
+            eprintln!(
+                "snc: `{}` reaches {} imported module(s): {}",
+                path,
+                names.len(),
+                names.join(", ")
+            );
+            return ExitCode::from(1);
+        }
+        Ok(_) => {} // single-file: fall through to the existing pipeline.
+        Err(msg) => {
+            eprintln!("snc: {msg}");
+            return ExitCode::from(1);
+        }
+    }
     let db = SentinelDatabase::default();
     let file = SourceFile::new(&db, path.to_string(), src.clone());
     // Pipeline: parse_query → resolve_query → check_query →
