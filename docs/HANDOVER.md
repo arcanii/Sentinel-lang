@@ -144,6 +144,8 @@ C1.3. See STATE.md Section C.
 **Phase D.5 (1/N) — the `while` loop — end to end — complete (`adec9c3`). ADR 0036 stays PROPOSED ((1/N) landed; the 3 open design points resolved at the proposed defaults).** A `while` loop through the WHOLE pipeline. **(D3) a loop is a STATEMENT** (`StmtKind::While { cond, body }`, not an expression — no loop value, no unit type): lexer (new `while` token; `for` is taken by `impl … for …`), parser (statement position; `parse_loop_body` = `parse_block_inner(allow_stmt_only=true)` synthesises a discarded unit tail for a statement-only body — Amendment A1, since Sentinel blocks require a tail per ADR 0010 D6; struct lits forbidden in the cond like `if`), AST/resolve (body scope, snapshot/restore vars)/types (cond must be `bool`; `secret bool` → SecretBranch; body value discarded) + the StmtKind cascade across mir/effect-check/codegen (8 codegen walk sites + lower_stmt). **(D4) the FIRST backward CFG branch:** `lower_stmt::While` emits `loop_cond`/`loop_body`/`loop_after` with a back-edge body→cond; the body lowers via `lower_block` so its bindings **drop per-iteration** (D5 — a body allocating each pass is leak-free). **(D8, the key risk) the loop-carried move rule:** moving an *outer* Move-typed binding inside the cond/body is a use-after-move on re-entry → rejected (`MovedInLoopBody`, a new BorrowError); implemented by snapshotting in-scope + moved sets before the loop and flagging any outer binding newly moved. A body-local move is fine; loop-carried `Assign`/`push(&mut v)` are fine. **Amendment A2 (load-bearing codegen fix): entry-block alloca hoisting.** A body `alloca` emitted inline in `loop_body` runs every iteration → stack grows → overflow at large N (verified: a 2M-iteration body-`let` loop SIGSEGV'd). Fix: a `loop_depth` counter (bumped around `lower_block(while-body)`); when >0, per-binding allocas (`let`/`if`-result/`match`-result) go to the fn entry block (executed once, slot reused) via `binding_alloca`. Non-loop codegen (`loop_depth==0`) keeps the inline alloca → **byte-identical** to pre-D.5 (c51 bar holds). **No new `Type`, no `Type` cascade, no FnId-shift.** **Verified** (exit + `leaks --atExit`): counter loop, Vec-built-in-loop, body-allocating loop (leak-free), 2M-iteration loop (no overflow), zero-iteration loops, loop-carried-move rejection; phase-go `c5d5_loops` → **exit 67, 0 leaks**. +9 tests (3 type + 3 borrow + 2 parser + the fixture; **1350 total**), four-check green. DEFERRED: (2/N) `break`/`continue` + the ADR flip; (D8) `for`/ranges/iterators, labeled break, `break`-with-value, termination check. **Phase D.5 (1/N) lands.** Next: **D.5 (2/N)** — `break`/`continue` + close.
 
 **Phase D.5 (2/N) — `break` / `continue` — end to end — complete. ADR 0036 → ACCEPTED-WITH-AMENDMENTS (D.5 closed).** Loops gain early exit / skip. **`break` / `continue` are payload-free STATEMENTS** (`StmtKind::Break`/`Continue` alongside `While`; new `break`/`continue` lexer keywords) branching to the innermost enclosing loop's `loop_after` (break) / `loop_cond` (continue). Pipeline: lexer tokens (+ ident-prefix regression) → AST/resolve/types/mir/effect-check/borrow/codegen StmtKind cascade (the resolve/mir/effect-check/borrow arms are no-ops — no sub-expr, no move, no effect). **(C2) the loop-target STACK:** a `LoopTarget { cond_bb, after_bb, scope_floor }` pushed onto `CodegenCtx::loop_targets` entering a `while` body, popped on exit; `break`/`continue` read the top (innermost — no labels). **(C1) the load-bearing drains-before-branch:** a break/continue branches out of the *middle* of the body, skipping `lower_block`'s end-of-body `emit_scope_drops`, so codegen **drops every scope frame from the top down to the loop body BEFORE branching** — `emit_loop_exit_drops(scope_floor)` (the body scope + any nested `if`/block scopes, innermost first; `scope_floor` = the body frame's index captured at loop entry). `emit_scope_drops` was split into a per-frame `emit_frame_drops` to share the logic. Each runtime path frees a binding exactly once (early-exit drop, or body-end drop on fall-through — mutually exclusive blocks); **verified leak-free** with a `[u8]` live across a break AND a continue, incl. a nested inner loop (inner break drains only the inner scope). **(C3) first mid-block divergence:** Sentinel has no early `return`, so break/continue is the first construct to terminate a block mid-stream — the statically-lowered, now-dead remainder parks on a fresh `after_loopctl` block (never append to a terminated block; covers a stmt-only body's synth unit tail + `lower_if`'s store/merge). **(C4) out-of-loop rejection:** `break`/`continue` outside any loop → `TypeError::LoopControlOutsideLoop` (names the kw), via a `loop_depth: u32` on `VarTypeEnv` (bumped around a `while` body — threads through nested `if`/`match`; legal iff `>0`; fresh per fn so no break across a fn). **(C5) ergonomic note:** a *conditional* break uses the tail idiom `if c { break; 0 } else { 0 };` (`if` requires `else` + a tail per ADR 0010/0013 — pre-existing, not break's fault; cleaner ergonomics is a Revisit). **No new `Type`, no cascade beyond the StmtKind arms, no FnId-shift.** Phase-go `c5d5_break_continue` (break-terminated sum 15 + continue-filtered evens 30 + two loops that break/continue with a `[u8]` live, 30+40) → **exit 115, 0 leaks**; `c5d5_loops` still exit 67. +11 tests (5 type + 3 parser + 2 lexer + the fixture; **1361 total**), four-check green. **Phase D.5 COMPLETE.** Next: **#5 modules** (ADR 0031 D4 — the last prerequisite before the self-host port).
+
+**ADR 0037 PROPOSED — Phase D.6 kickoff: modules / multi-file — docs-only.** The sixth and **last** ADR 0031 D4 prerequisite before the self-host port. Two decisions settled with the language owner: **(1) module surface = file-as-module + `use`** — a file IS a module, its path relative to the source root (the entry file's dir) IS its module path; `use a::b::Item;` imports a `pub` item; `pub` (parsed since C4.1, a no-op) becomes the cross-module visibility gate; NO `mod` blocks (the Go/Python shape, not Rust's in-file tree). **(2) compilation model = TRUE separate compilation** (NOT a whole-program multi-file merge) — each module compiles to its own `.o` independently, cross-module refs resolved at LINK time via stable `abi-v1`-keyed symbols. **The biggest architectural D-change:** it breaks 3 whole-program codegen assumptions — `collect_mono_instantiations` (whole-program generic-instance discovery), the single `fns: HashMap<FnId, FunctionValue>` map, and `self.fns.get(&id)` call resolution — and makes cross-unit symbols ABI surface (the current bare-source-name mangling is single-file-only + not collision-free → D7 = a module-qualified, length-prefixed `abi-v1` mangling amendment, test-enforced). **Sub-phase split (D9):** **(1/N)** surface + resolve module graph (per-unit ID spaces + namespaces + visibility) + per-unit type-check against imported signatures + **non-generic** separate compilation (per-unit `.o`, module-qualified mangling, extern-symbol cross-module calls + types, deterministic link); **(2/N)** **cross-module generics** (per-unit instantiation + `linkonce_odr` dedup — the C++ template model) + cross-module trait/impl methods; **(3/N)** incremental caching (Salsa) + per-unit `.o` repro. NO new runtime `sentinel_*` symbols (a front-end + linking concern). 4 OPEN DESIGN POINTS (settle at (1/N)): import cycles (lean allow); amend `abi-v1` vs bump `abi-v2` (lean amend); source root = entry-file dir; `use a::b::c` = item `c` in module `a::b`. Next: **D.6 (1/N)** — implement the surface + resolve graph + non-generic separate compilation.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1914,40 +1916,43 @@ For pasting into a fresh chat to bootstrap context:
       VecElementNotSupported). 1324 tests. See
       [[sentinel_d3_collections_surface]].
 
-    RESUME AT: **#5 modules** (ADR 0031 D4 — the **last** language
-    prerequisite before the lexer→parser→… self-host port). **Phase D.5 —
-    loops — is COMPLETE** (ADR 0036 → ACCEPTED-WITH-AMENDMENTS): (1/N) the
-    `while` loop (`adec9c3`) + (2/N) `break` / `continue` (this session).
-    **D.5 (2/N) recap — `break` / `continue`:** payload-free **statements**
-    (`StmtKind::Break`/`Continue`, new `break`/`continue` lexer keywords)
-    branching to the innermost enclosing loop's `loop_after` (break) /
-    `loop_cond` (continue) via a **loop-target STACK**
-    (`CodegenCtx::loop_targets`; top = innermost — no labels). THE load-
-    bearing call (the (2/N) risk, resolved): a break/continue branches out of
-    the *middle* of the body, skipping `lower_block`'s end-of-body
-    `emit_scope_drops`, so codegen **drains every scope frame down to the loop
-    body BEFORE branching** — `emit_loop_exit_drops(scope_floor)` (where
-    `scope_floor` = the body frame's index, captured at loop entry), draining
-    the body scope + any nested `if`/block scopes, innermost first. To share
-    the drop logic, `emit_scope_drops` was split into a per-frame
-    `emit_frame_drops`. Each runtime path frees a binding exactly once (early-
-    exit drop here, or body-end drop on fall-through — mutually exclusive
-    blocks); verified leak-free with a `[u8]` live across a break AND a
-    continue, incl. a nested inner loop. **First mid-block divergence** (no
-    early `return` in Sentinel) → the dead remainder parks on an
-    `after_loopctl` block (so we never append to a terminated block — covers a
-    stmt-only body's synth unit tail + `lower_if`'s store/merge). **Out-of-loop
-    `break`/`continue` rejected** (`TypeError::LoopControlOutsideLoop`) via a
-    `loop_depth: u32` on `VarTypeEnv` (bumped around a `while` body; legal iff
-    `>0`; fresh per fn). Cascade no-ops in resolve/mir/effect-check/borrow.
-    Ergonomic note: a *conditional* break uses the tail idiom `if c { break; 0
-    } else { 0 };` (`if` requires `else` + a tail — pre-existing, not break's
-    fault; a cleaner ergonomics is a Revisit, ADR 0036 (2/N) C5). No new
-    `Type` / no FnId-shift; `break`/`continue` are new lexer tokens. Phase-go
-    `c5d5_break_continue.sentinel` exit 115 / 0 leaks; `c5d5_loops` still 67;
-    1361 tests. **#5 modules plan:** read **ADR 0031 D4** (the module surface);
-    it's the last prerequisite before the self-host port (D5). See
-    [[sentinel_d5_loops_surface]].
+    RESUME AT: **Phase D.6 (1/N) — modules / multi-file, per the new
+    ADR 0037 (PROPOSED, docs-only this session).** Modules is the **last**
+    ADR 0031 D4 language prerequisite before the lexer→parser→… self-host port
+    (D5). **Phase D.5 — loops — is COMPLETE** (ADR 0036 → ACCEPTED-WITH-
+    AMENDMENTS: (1/N) `while` + (2/N) `break`/`continue`; phase-gos exit 67 +
+    115, 0 leaks; 1361 tests) — full recap in [[sentinel_d5_loops_surface]].
+    **ADR 0037 — settled decisions (with the language owner):** (a) **module
+    surface = file-as-module + `use`** — a file *is* a module, its path
+    relative to the source root (the entry file's dir) *is* its module path;
+    `use a::b::Item;` imports a `pub` item; `pub` (parsed since C4.1, a no-op)
+    becomes the visibility gate; NO `mod` blocks. (b) **compilation model =
+    TRUE separate compilation** (not whole-program merge) — each module → its
+    own `.o`, cross-module refs resolved at link via stable `abi-v1`-keyed
+    symbols. **Why it's the biggest D-change:** it breaks 3 whole-program
+    codegen assumptions — `collect_mono_instantiations` (whole-program mono
+    discovery), the single `fns: HashMap<FnId, FunctionValue>` map, and
+    `self.fns.get(&id)` call resolution (a cross-unit callee is unknown) — and
+    turns cross-unit symbols into ABI surface (the bare-source-name mangling is
+    single-file-only + not collision-free; D7 = a module-qualified,
+    length-prefixed `abi-v1` mangling amendment). **Sub-phase split (ADR 0037
+    D9):** **(1/N)** the surface (`use` token + parse + top-level `pub`) + the
+    resolve **module graph** (discover files by following `use`; per-unit ID
+    spaces + namespaces; visibility) + per-unit type-check against imported
+    **signatures** + **non-generic** separate compilation (per-unit `.o`,
+    module-qualified mangling, extern-symbol cross-module calls + types,
+    deterministic link); **(2/N)** **cross-module generics** (per-unit
+    instantiation + `linkonce_odr` dedup — the C++ template model; `pub`
+    generic bodies cross the boundary) + cross-module trait/impl methods;
+    **(3/N)** incremental caching (Salsa) + per-unit `.o` repro. Emit/link
+    today: parse→…→codegen to ONE LLVM module `"sentinel"` → ONE `.o` → `cc`
+    links it + `libsentinel_runtime.a` (`compile_to_object` in
+    sentinel-codegen; `link()` in sentinel-driver/main.rs). **D.6 (1/N) plan:**
+    read **ADR 0037** end to end (esp. D3 resolve graph, D5 codegen-per-unit,
+    D7 mangling, the 4 OPEN DESIGN POINTS) + the emit/link path above +
+    ADR 0029 (the frozen `abi-v1` mangling/symbol tests you'll amend). The 4
+    open points (import cycles; amend vs `abi-v2`; source root; `use` path
+    resolution) settle at (1/N). See [[sentinel_d5_loops_surface]].
 
     CARRIED-FORWARD DEBT (not blocking D.3): **D.1 A1 — recursive-enum
     payload drop is box-free only** (leak-free for the standard

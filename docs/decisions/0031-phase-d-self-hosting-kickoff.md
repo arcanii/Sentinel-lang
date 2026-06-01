@@ -118,7 +118,11 @@ sequenced by how much it unblocks:
      modelled as effects + handlers over real OS syscalls in the runtime.
   5. **Modules / multi-file** (ADR 0025 D9, deferred from 1.0) — `mod`/
      `use` + a resolve-layer module graph + separate-compilation units
-     keyed to `abi-v1`. A compiler is many files.
+     keyed to `abi-v1`. A compiler is many files. **→ ADR 0037 (PROPOSED):**
+     refined to **file-as-module + `use`** (a file *is* a module; no `mod`
+     blocks) with **true separate compilation** (per-unit objects, link-time
+     symbol resolution, module-qualified `abi-v1` mangling) — the last
+     prerequisite before D5.
   6. **Loops** — `while`/`for` (the surface has been recursion-only by
      design); likely wanted for the compiler's iteration-heavy passes.
 

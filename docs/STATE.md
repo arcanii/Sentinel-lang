@@ -49,7 +49,11 @@ sum + continue-filtered sum + two loops that break / continue with a `[u8]` live
 at **exit 115** — both **0 leaks** (`leaks --atExit`; verified incl. nested loops).
 DEFERRED (ADR 0036 D8): `for` / ranges / iterators, labeled break,
 `break`-with-value / loop-as-expression, a termination check. **1361 tests,
-four-check green. Phase D.5 COMPLETE.**
+four-check green. Phase D.5 COMPLETE.** Next: **#5 modules** — **ADR 0037
+PROPOSED** (docs-only kickoff): file-as-module + `use` + `pub`, with **true
+separate compilation** (per-unit objects, link-time symbol resolution, a
+module-qualified `abi-v1` mangling amendment) — the last ADR 0031 D4
+prerequisite before the self-host port.
 
 Pre-D.5 context: **Phase D.4 — file I/O via a minimal stdlib — MVP COMPLETE
 (1/N + 2/N; ADR 0035 → ACCEPTED-WITH-AMENDMENTS).** The fourth
