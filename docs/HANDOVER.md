@@ -145,7 +145,7 @@ C1.3. See STATE.md Section C.
 
 **Phase D.5 (2/N) — `break` / `continue` — end to end — complete. ADR 0036 → ACCEPTED-WITH-AMENDMENTS (D.5 closed).** Loops gain early exit / skip. **`break` / `continue` are payload-free STATEMENTS** (`StmtKind::Break`/`Continue` alongside `While`; new `break`/`continue` lexer keywords) branching to the innermost enclosing loop's `loop_after` (break) / `loop_cond` (continue). Pipeline: lexer tokens (+ ident-prefix regression) → AST/resolve/types/mir/effect-check/borrow/codegen StmtKind cascade (the resolve/mir/effect-check/borrow arms are no-ops — no sub-expr, no move, no effect). **(C2) the loop-target STACK:** a `LoopTarget { cond_bb, after_bb, scope_floor }` pushed onto `CodegenCtx::loop_targets` entering a `while` body, popped on exit; `break`/`continue` read the top (innermost — no labels). **(C1) the load-bearing drains-before-branch:** a break/continue branches out of the *middle* of the body, skipping `lower_block`'s end-of-body `emit_scope_drops`, so codegen **drops every scope frame from the top down to the loop body BEFORE branching** — `emit_loop_exit_drops(scope_floor)` (the body scope + any nested `if`/block scopes, innermost first; `scope_floor` = the body frame's index captured at loop entry). `emit_scope_drops` was split into a per-frame `emit_frame_drops` to share the logic. Each runtime path frees a binding exactly once (early-exit drop, or body-end drop on fall-through — mutually exclusive blocks); **verified leak-free** with a `[u8]` live across a break AND a continue, incl. a nested inner loop (inner break drains only the inner scope). **(C3) first mid-block divergence:** Sentinel has no early `return`, so break/continue is the first construct to terminate a block mid-stream — the statically-lowered, now-dead remainder parks on a fresh `after_loopctl` block (never append to a terminated block; covers a stmt-only body's synth unit tail + `lower_if`'s store/merge). **(C4) out-of-loop rejection:** `break`/`continue` outside any loop → `TypeError::LoopControlOutsideLoop` (names the kw), via a `loop_depth: u32` on `VarTypeEnv` (bumped around a `while` body — threads through nested `if`/`match`; legal iff `>0`; fresh per fn so no break across a fn). **(C5) ergonomic note:** a *conditional* break uses the tail idiom `if c { break; 0 } else { 0 };` (`if` requires `else` + a tail per ADR 0010/0013 — pre-existing, not break's fault; cleaner ergonomics is a Revisit). **No new `Type`, no cascade beyond the StmtKind arms, no FnId-shift.** Phase-go `c5d5_break_continue` (break-terminated sum 15 + continue-filtered evens 30 + two loops that break/continue with a `[u8]` live, 30+40) → **exit 115, 0 leaks**; `c5d5_loops` still exit 67. +11 tests (5 type + 3 parser + 2 lexer + the fixture; **1361 total**), four-check green. **Phase D.5 COMPLETE.** Next: **#5 modules** (ADR 0031 D4 — the last prerequisite before the self-host port).
 
-**ADR 0037 PROPOSED — Phase D.6 kickoff: modules / multi-file — docs-only.** The sixth and **last** ADR 0031 D4 prerequisite before the self-host port. Two decisions settled with the language owner: **(1) module surface = file-as-module + `use`** — a file IS a module, its path relative to the source root (the entry file's dir) IS its module path; `use a::b::Item;` imports a `pub` item; `pub` (parsed since C4.1, a no-op) becomes the cross-module visibility gate; NO `mod` blocks (the Go/Python shape, not Rust's in-file tree). **(2) compilation model = TRUE separate compilation** (NOT a whole-program multi-file merge) — each module compiles to its own `.o` independently, cross-module refs resolved at LINK time via stable `abi-v1`-keyed symbols. **The biggest architectural D-change:** it breaks 3 whole-program codegen assumptions — `collect_mono_instantiations` (whole-program generic-instance discovery), the single `fns: HashMap<FnId, FunctionValue>` map, and `self.fns.get(&id)` call resolution — and makes cross-unit symbols ABI surface (the current bare-source-name mangling is single-file-only + not collision-free → D7 = a module-qualified, length-prefixed `abi-v1` mangling amendment, test-enforced). **Sub-phase split (D9):** **(1/N)** surface + resolve module graph (per-unit ID spaces + namespaces + visibility) + per-unit type-check against imported signatures + **non-generic** separate compilation (per-unit `.o`, module-qualified mangling, extern-symbol cross-module calls + types, deterministic link); **(2/N)** **cross-module generics** (per-unit instantiation + `linkonce_odr` dedup — the C++ template model) + cross-module trait/impl methods; **(3/N)** incremental caching (Salsa) + per-unit `.o` repro. NO new runtime `sentinel_*` symbols (a front-end + linking concern). 4 OPEN DESIGN POINTS (settle at (1/N)): import cycles (lean allow); amend `abi-v1` vs bump `abi-v2` (lean amend); source root = entry-file dir; `use a::b::c` = item `c` in module `a::b`. **D.6 (1/N) IN PROGRESS (multi-file COMPILES + RUNS, via the owner-chosen lower-risk Path A merge, not yet true per-unit separate compilation):** `use` front-end + module-graph discovery + top-level `pub` + import resolution/visibility + the merge (`merge_modules` qualifies fn/struct/enum names by module path + rewrites all call/type references → existing pipeline → one object → link). Cross-module `pub fn`/`pub struct`/`pub enum` (incl. `match`) all compile + run; same-named structs across modules coexist. FOLLOW-UPS: the true per-unit back end (objects + module-qualified `abi-v1` mangling + multi-object link); cross-module trait/effect/class *use* + generics; effect-check parity. See §0.3 RESUME-AT + ADR 0037 Implementation notes.
+**ADR 0037 PROPOSED — Phase D.6 kickoff: modules / multi-file — docs-only.** The sixth and **last** ADR 0031 D4 prerequisite before the self-host port. Two decisions settled with the language owner: **(1) module surface = file-as-module + `use`** — a file IS a module, its path relative to the source root (the entry file's dir) IS its module path; `use a::b::Item;` imports a `pub` item; `pub` (parsed since C4.1, a no-op) becomes the cross-module visibility gate; NO `mod` blocks (the Go/Python shape, not Rust's in-file tree). **(2) compilation model = TRUE separate compilation** (NOT a whole-program multi-file merge) — each module compiles to its own `.o` independently, cross-module refs resolved at LINK time via stable `abi-v1`-keyed symbols. **The biggest architectural D-change:** it breaks 3 whole-program codegen assumptions — `collect_mono_instantiations` (whole-program generic-instance discovery), the single `fns: HashMap<FnId, FunctionValue>` map, and `self.fns.get(&id)` call resolution — and makes cross-unit symbols ABI surface (the current bare-source-name mangling is single-file-only + not collision-free → D7 = a module-qualified, length-prefixed `abi-v1` mangling amendment, test-enforced). **Sub-phase split (D9):** **(1/N)** surface + resolve module graph (per-unit ID spaces + namespaces + visibility) + per-unit type-check against imported signatures + **non-generic** separate compilation (per-unit `.o`, module-qualified mangling, extern-symbol cross-module calls + types, deterministic link); **(2/N)** **cross-module generics** (per-unit instantiation + `linkonce_odr` dedup — the C++ template model) + cross-module trait/impl methods; **(3/N)** incremental caching (Salsa) + per-unit `.o` repro. NO new runtime `sentinel_*` symbols (a front-end + linking concern). 4 OPEN DESIGN POINTS (settle at (1/N)): import cycles (lean allow); amend `abi-v1` vs bump `abi-v2` (lean amend); source root = entry-file dir; `use a::b::c` = item `c` in module `a::b`. **D.6 (1/N) IN PROGRESS (multi-file COMPILES + RUNS, via the owner-chosen lower-risk Path A merge, not yet true per-unit separate compilation):** `use` front-end + module-graph discovery + top-level `pub` + import resolution/visibility + the merge (`merge_modules` qualifies EVERY top-level item's name by module path — fn/struct/enum/trait/effect/class/named-impl — + rewrites all call/type/trait/effect references via a per-module `Renamer` → existing pipeline → one object → link). Cross-module `pub fn`/`pub struct`/`pub enum`+`match`/`pub trait`/`pub effect` all compile + run, and same-named items across modules coexist. FOLLOW-UPS: the true per-unit back end (objects + module-qualified `abi-v1` mangling + multi-object link); cross-module generics; effect-check parity. See §0.3 RESUME-AT + ADR 0037 Implementation notes.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1852,13 +1852,13 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **D.6 cross-module-types
-    docs** commit, atop the **cross-module-types feat** (`3571ec2`: qualify +
-    rewrite struct/enum refs in the merge), atop `c84f9d0` (docs: multi-file
-    compiles) + `db9b6e4` (feat: the merge). Clean tree; **1384 tests**;
-    four-check green via `cargo nextest run --workspace` + `cargo test --doc
-    --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
-    (+ `cargo build`). macOS + LLVM 18.
+    Local HEAD: verify with `git log -1` — expect the **D.6 cross-module
+    traits/effects/classes docs** commit, atop its feat (`7fd7817`: qualify
+    all decl kinds), atop the **cross-module-types feat+docs** (`3571ec2` +
+    its docs: struct/enum refs), atop `db9b6e4`/`c84f9d0` (the merge). Clean
+    tree; **1389 tests**; four-check green via `cargo nextest run --workspace`
+    + `cargo test --doc --workspace` + `cargo clippy --workspace
+    --all-targets -- -D warnings` (+ `cargo build`). macOS + LLVM 18.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0031**
     (THE next-task roadmap — Phase D prerequisites; **#5 modules** is the last
     one before the self-host port, RESUME AT below) + **ADR 0037** (modules —
@@ -1971,21 +1971,35 @@ For pasting into a fresh chat to bootstrap context:
     cross-module `pub enum` + `match` (exit 52); same-named `struct Item`s
     across modules coexist (exit 42); a cross-module struct as another
     module's field type, 3 modules deep (exit 42). 1384 tests, green.
-    **RESUME HERE → D.6 follow-ups (multi-file + cross-module types work):**
-    (a) **true separate-compilation back end** — per-unit object emission
-    (one `.o` per module) + **module-qualified length-prefixed `abi-v1`
-    mangling** (the D7 amendment + the frozen `abi_v1_mangling_is_stable`
-    test update) + **multi-object link**, replacing the single-object merge
-    emit. (b) **cross-module trait/effect/class USE** — qualify their *names*
-    too + rewrite `impl … as Trait`/`perform`/`ClassInit` refs, so a trait /
-    effect / class crosses a module (today their names stay unqualified →
-    same-named-across-modules still collides; only their refs to qualified
-    structs/enums are rewritten). (c) **effect-check parity** for the merged
-    path (`run_build_merged` skips effect-check — the driver lacks that dep; a
-    multi-file effectful `main` isn't yet rejected) + span-accurate
-    multi-source diagnostics. (d) cross-module **generics** ((2/N):
-    `linkonce_odr`). (e) true per-unit resolve → (3/N) caching. ADR 0037
-    "Implementation notes" has the design.
+    (vii) **cross-module TRAITS / EFFECTS / CLASSES** (`7fd7817`) — the same
+    `Renamer` now also qualifies trait + effect + class + named-impl names
+    (so EVERY top-level item kind is qualified; same-named ones coexist) +
+    rewrites their refs: `impl as Trait for Type` heads (both names),
+    `perform`/`handle` effect names, fn/method/trait/impl effect rows
+    (`! { Net, Io }`), delegate `to Trait` names, and named-impl
+    `QualifiedCall` heads. Op + method names stay unqualified (scoped within
+    their effect/trait). The import gate (`is_qualified_kind`) is dropped —
+    every validated `use` maps to its qualified symbol. VERIFIED end-to-end: a
+    cross-module `pub trait` impl'd + dispatched (exit 42); same-named
+    `class`es coexist (exit 42); a cross-module `pub effect` performed in one
+    module + handled in the entry through the handler runtime (exit 42). 1389
+    tests, green.
+    **RESUME HERE → D.6 follow-ups (multi-file + ALL cross-module item kinds
+    work):**
+    (a) **true separate-compilation back end** (the headline) — per-unit
+    object emission (one `.o` per module) + **module-qualified length-prefixed
+    `abi-v1` mangling** (the D7 amendment + the frozen
+    `abi_v1_mangling_is_stable` test update) + **multi-object link**, replacing
+    the single-object merge emit. (b) **cross-module GENERICS** — under Path
+    A's whole-program merge `collect_mono_instantiations` runs over the merged
+    program so a cross-module generic instance MIGHT already work (untested —
+    verify + add a fixture); the true per-unit story is (2/N) (`linkonce_odr`,
+    ADR 0037 D6). (c) **effect-check parity** for the merged path
+    (`run_build_merged` skips effect-check — the driver lacks that dep; a
+    multi-file UNHANDLED-effect `main` isn't yet rejected, though a well-formed
+    effectful program runs) + span-accurate multi-source diagnostics. (d) true
+    per-unit resolve → (3/N) caching. ADR 0037 "Implementation notes" has the
+    design.
     **ADR 0037 — settled decisions (with the language owner):** (a) **module
     surface = file-as-module + `use`** — a file *is* a module, its path
     relative to the source root (the entry file's dir) *is* its module path;
