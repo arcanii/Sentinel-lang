@@ -1,10 +1,15 @@
 # ADR 0039: Phase D self-host port — (2/N) parser-in-Sentinel
 
-Status: PROPOSED — the second sub-phase of the self-host port (ADR 0031 D5 /
-ADR 0038 D9), after the lexer (1/N, ADR 0038 ACCEPTED-WITH-AMENDMENTS). Ports the
-**parser** to Sentinel: tokens → AST, differentially validated against the Rust
-`snc` oracle over the fixture corpus. The compiler's **largest** stage, so it is
-explicitly sub-sliced (D6). Flips to ACCEPTED-WITH-AMENDMENTS as its slices land.
+Status: **ACCEPTED-WITH-AMENDMENTS** — the second sub-phase of the self-host port
+(ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N). Ports the **parser** to
+Sentinel: tokens → AST, differentially validated against the Rust `snc` oracle.
+The compiler's **largest** stage, so it is explicitly sub-sliced (D6). **(2a) has
+LANDED:** the `snc ast` oracle (A1) + the recursive-AST drop gate (A2) + the
+parser-structure de-risk (A3) + `selfhost/parser.sentinel`, a recursive-descent
+expression parser that matches `snc ast` for integer arithmetic (precedence,
+parens, left-assoc, multi-fn) — `tests/selfhost_parse.rs`, leak-free. Remaining
+slices (2b)–(2d) per D6 grow it toward the full corpus; the ADR flips fully as
+they close. See ## Amendments.
 
 ## Amendments (in progress — (2a) landing)
 
