@@ -14,11 +14,13 @@
 //! is what the dump pins, so seeds mixing every level, and chaining postfix
 //! over calls/qcalls/arrays, prove the whole grammar. Increment-4 adds `if`
 //! expressions (with mandatory `else` and `else if` chains) and brace blocks
-//! `{ <expr> }`, which are statement-free for now (just a tail). Struct
-//! literals, `match`, perform/handle, and the statement plus decl grammar grow
-//! the parser (and this corpus) in the later (2b)-(2d) slices toward the full
-//! `tests/pass` plus `tests/ui` set, the way `tests/selfhost_lex.rs` covers the
-//! corpus for `snc lex`.
+//! `{ <expr> }`, which are statement-free for now (just a tail). Increment-5
+//! adds `match <scrutinee> { pat => body, ... }` with `_` and qualified-variant
+//! patterns (positional bindings, themselves possibly `_`). Struct literals,
+//! perform/handle, and the statement plus decl grammar grow the parser (and
+//! this corpus) in the later (2b)-(2d) slices toward the full `tests/pass` plus
+//! `tests/ui` set, the way `tests/selfhost_lex.rs` covers the corpus for
+//! `snc lex`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -137,6 +139,17 @@ const SEEDS: &[&str] = &[
     "fn ba() -> i64 { { 5 } }\n",
     "fn bb() -> i64 { g(if c { 1 } else { 2 }) }\n",
     "fn bc() -> i64 { [if c { 1 } else { 2 }, 3] }\n",
+    // (increment-5) match: variants, bindings, wildcard, nesting, expr bodies.
+    "fn ma() -> i64 { match x { A::B => 1, A::C => 2, _ => 0 } }\n",
+    "fn mb() -> i64 { match x { E::Some(v) => v, E::None => 0 } }\n",
+    "fn mc() -> i64 { match p { Pair::Of(a, b) => a + b, _ => 0 } }\n",
+    "fn md() -> i64 { match g(x) { R::Ok(v) => v, _ => 0 } }\n",
+    "fn me2() -> i64 { match x { E::P(_, b) => b, _ => 0 } }\n",
+    "fn mf2() -> i64 { match x { A::B => if c { 1 } else { 2 }, _ => g(3) } }\n",
+    "fn mh() -> i64 { match x { A::B => match y { C::D => 1, _ => 2 }, _ => 0 } }\n",
+    "fn mi() -> i64 { g(match x { A::B => 1, _ => 0 }) }\n",
+    "fn mj() -> i64 { match x { Color::Red => 1, _ => 0, } }\n",
+    "fn mk() -> i64 { match parse(t) { Node::Bin(op, l, r) => eval(l) + eval(r), Node::Leaf(v) => v, _ => 0 } }\n",
 ];
 
 #[test]
