@@ -387,6 +387,29 @@ close. See ## Amendments.
   `pub` method, `trait`+`impl`+`struct` interleaving) match `snc ast`; leak-free
   under `leaks --atExit`; a new `tests/ast.rs` golden pins the impl dump. Next:
   (2d-7) `class` decls — the last decl kind.
+- **A21 — (2d-7): `class` decls (the last decl kind).** `class Name { let f: T;
+  init(p: T) { … } fn m(self: &Self) -> R { … } delegate g: T to Tr; }` →
+  `(class Name (field f <type>) … (init (<params>) <block>)? (method m <self>
+  (<params>) <ret> <block>) … (delegate g <type> Tr) …)`. 🔑 **The class AST
+  BUCKETS items** (fields / init / methods / delegates each in their own vec), so
+  the dump emits them **grouped in that fixed order — NOT source order** (unlike
+  every other decl, which dumps inline in scan order). The Sentinel parser
+  therefore scans the body **once, routing each item's dump into a per-kind
+  `Vec<u8>` buffer** (`fbuf`/`ibuf`/`mbuf`/`dbuf`), then concatenates the four
+  buffers in order (`vec_to_array` into the main `out`) — a method-before-field
+  source order still dumps field-first. Oracle: `Item` gains a `Class` variant +
+  `dump_class` (reuses `dump_method_sig` + `dump_block`). Parser: tokenizer tag
+  `class`(56) + `is_kw_class` / `is_kw_delegate` (`init` / `delegate` lex as plain
+  idents — slice-compared; `to` is a positional ident); `dump_class_decl` +
+  `dump_class_items` (dispatch `let`/`fn`/`init`/`delegate`, skip per-item `pub`)
+  + `dump_class_field` / `dump_class_init` / `dump_class_delegate`; `dump_item`
+  gains the class arm — **completing the top-level decl dispatch**. Verified: 192
+  differential seeds (8 new — fields/init/methods/delegates, empty, `pub` items,
+  non-canonical order, multi-decl interleaving) match `snc ast`; leak-free under
+  `leaks --atExit`; a new `tests/ast.rs` golden pins the class dump (incl. the
+  bucketing). **Every top-level decl kind now parses.** Next: (2d-8) — validate
+  the Sentinel parser against `snc ast` over the full `tests/pass` + `tests/ui`
+  corpus, then close the ADR.
 
 Date: 2026-06-02
 Related:

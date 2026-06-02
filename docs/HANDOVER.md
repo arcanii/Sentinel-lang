@@ -1878,21 +1878,21 @@ For pasting into a fresh chat to bootstrap context:
     (`1b7d17c`), increment-1 docs (`7870bed`) + feat (`0e84f36`), atop the (2a)
     docs (`c7ebc39`) + parser feat (`8d6aa6e`) + `snc ast` oracle (`7f10740`) +
     recursive-AST drop gate + ADR 0039, atop the lexer (1/N) + the D.6
-    cross-module work. Clean tree; **1408 tests** (the (2b)/(2c)/(2d) seeds expand
-    the single `selfhost_parse` differential test in place; now 184 seeds — plus
+    cross-module work. Clean tree; **1409 tests** (the (2b)/(2c)/(2d) seeds expand
+    the single `selfhost_parse` differential test in place; now 192 seeds — plus
     new `tests/ast.rs` goldens for the source-order `use` + `struct` + `enum` +
-    `effect` + `trait` + `impl` dumps); four-check green
+    `effect` + `trait` + `impl` + `class` dumps); four-check green
     via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0039**
     (THE active task — self-host port (2/N) the parser, ACCEPTED-WITH-AMENDMENTS;
     (2a) + (2b) the full expression grammar + (2c) statements/types/fn-defs landed —
-    the fn-level grammar is COMPLETE; **(2d) is UNDERWAY** — (2d-1, A15) `use` +
-    dispatch, (2d-2, A16) `struct`, (2d-3, A17) `enum`, (2d-4, A18) `effect`,
-    (2d-5, A19) `trait`, (2d-6, A20) `impl` decls landed; RESUME AT below =
-    (2d-7) `class` decls (the LAST decl kind — fields/init/methods/delegates,
-    bucketed), then (2d-8) the full-corpus differential + the ADR 0039 close) +
+    the fn-level grammar is COMPLETE; **(2d) is UNDERWAY** — (2d-1..7, A15–A21)
+    `use` + dispatch / `struct` / `enum` / `effect` / `trait` / `impl` / `class`
+    all landed, so EVERY top-level decl kind now parses; RESUME AT below = (2d-8)
+    — validate the Sentinel parser against `snc ast` over the full tests/pass +
+    tests/ui corpus, then close ADR 0039) +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
