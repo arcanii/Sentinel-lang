@@ -289,6 +289,14 @@ const SEEDS: &[&str] = &[
     "trait Multi { fn f(self: &Self, a: i64, b: secret [u8]) -> Vec<i64>; }\nfn main() -> i64 { 0 }\n",
     "trait Eff { fn go(self: &mut Self) -> i64 ! { Net, Log }; }\nfn main() -> i64 { 0 }\n",
     "enum E { A }\ntrait T { fn m(self: &Self) -> i64; }\nstruct S { x: i64 }\nfn main() -> i64 { 0 }\n",
+    // (2d-6) `impl` decls — default (`_` name) + named, empty, multi-method with
+    // bodies, a `pub` method, and trait+impl+struct interleaving.
+    "impl as Writer for FileSink { fn write(self: &mut Self, n: i64) -> i64 { n } }\nfn main() -> i64 { 0 }\n",
+    "impl Doubling as Writer for FileSink { fn write(self: &mut Self, n: i64) -> i64 { n + n } }\nfn main() -> i64 { 0 }\n",
+    "impl as Marker for Thing {}\nfn main() -> i64 { 0 }\n",
+    "impl as W for S { fn a(self: &Self) -> i64 { 1 } fn b(self: &mut Self, x: i64) -> i64 { let y = x + 1; y } }\nfn main() -> i64 { 0 }\n",
+    "impl as W for S { pub fn a(self: &Self) -> i64 { 1 } }\nfn main() -> i64 { 0 }\n",
+    "trait Writer { fn write(self: &mut Self, n: i64) -> i64; }\nimpl as Writer for FileSink { fn write(self: &mut Self, n: i64) -> i64 { n } }\nstruct FileSink { fd: i64 }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]

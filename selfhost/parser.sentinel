@@ -391,6 +391,19 @@ fn is_kw_trait(src: &[u8], start: i64, end: i64) -> bool {
         && (*src)[start + 2] == 'a' && (*src)[start + 3] == 'i' && (*src)[start + 4] == 't'
 }
 
+fn is_kw_impl(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 4 && (*src)[start] == 'i' && (*src)[start + 1] == 'm'
+        && (*src)[start + 2] == 'p' && (*src)[start + 3] == 'l'
+}
+
+fn is_kw_as(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 2 && (*src)[start] == 'a' && (*src)[start + 1] == 's'
+}
+
+fn is_kw_for(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 3 && (*src)[start] == 'f' && (*src)[start + 1] == 'o' && (*src)[start + 2] == 'r'
+}
+
 // Append the decimal rendering of `x` (>= 0) to `out`.
 fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
     if x == 0 {
@@ -527,6 +540,12 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
                 57
             } else if is_kw_trait(src, start, ie) {
                 54
+            } else if is_kw_impl(src, start, ie) {
+                55
+            } else if is_kw_as(src, start, ie) {
+                60
+            } else if is_kw_for(src, start, ie) {
+                61
             } else {
                 2
             };
@@ -2128,6 +2147,70 @@ fn dump_trait_methods(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64
     }
 }
 
+// (2d-6) `impl Name? as Trait for Type { fn m(self: &Self, …) -> R { … } … }` →
+// `(impl <name-or-_> Trait Type (method m <self> (<params>) <ret> <block>) …)`.
+// The optional impl name is present iff the token after `impl` is NOT `as` (60);
+// a default impl dumps `_` in the name slot. The name is resolved to a `[u8]`
+// value FIRST (a slice or the literal `"_"`) so the emit is a single
+// `append_str` — a two-borrowing-arm `if` would trip the A2 borrow quirk. Impl
+// methods carry a body (vs trait sigs). The leading `impl` is at the cursor.
+fn dump_impl_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let has_name: bool = (*k)[*cur] != 60;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    if has_name {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    *cur = *cur + 1;
+    let tr_s: i64 = (*s)[*cur];
+    let tr_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let ty_s: i64 = (*s)[*cur];
+    let ty_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let imname: [u8] = if has_name {
+        slice_of(src, nm_s, nm_e)
+    } else {
+        "_"
+    };
+    append_str(out, "(impl ");
+    append_str(out, imname);
+    push(out, ' ');
+    append_slice(out, src, tr_s, tr_e);
+    push(out, ' ');
+    append_slice(out, src, ty_s, ty_e);
+    dump_impl_methods(out, k, s, e, src, cur);
+    push(out, ')');
+    0
+}
+
+// Parse + dump impl methods up to and consuming the closing `}` (tag 7): each
+// `[pub] fn … { body }` → ` (method … <ret> <block>)`. An optional per-method
+// `pub` (tag 59) is parsed-and-skipped; the body is parsed via parse_block.
+fn dump_impl_methods(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 59 {
+        *cur = *cur + 1;
+        dump_impl_methods(out, k, s, e, src, cur)
+    } else {
+        dump_method_head(out, k, s, e, src, cur);
+        let mbody: Expr = parse_block(k, s, e, src, cur);
+        push(out, ' ');
+        dump_expr(out, mbody);
+        push(out, ')');
+        dump_impl_methods(out, k, s, e, src, cur)
+    }
+}
+
 // Dispatch one top-level decl on its leading token (2d). A SINGLE helper that
 // re-passes the ref params to the per-kind dumpers, so main has ONE borrow site:
 // sibling `if`-tail `&mut` borrows of a *local* (`&mut out` / `&mut cur` in
@@ -2153,6 +2236,8 @@ fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
         dump_effect_decl(out, k, s, e, src, cur)
     } else if lead == 54 {
         dump_trait_decl(out, k, s, e, src, cur)
+    } else if lead == 55 {
+        dump_impl_decl(out, k, s, e, src, cur)
     } else {
         dump_fn_decl(out, k, s, e, src, cur)
     }

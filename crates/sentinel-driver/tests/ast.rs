@@ -131,3 +131,18 @@ fn ast_dump_trait_decls() {
          (fn main () i64 (block (int 0)))\n"
     );
 }
+
+#[test]
+fn ast_dump_impl_decls() {
+    // (2d-6) a default impl dumps `_` in the name slot, a named impl its name;
+    // impl methods carry a body block (vs trait sigs).
+    assert_eq!(
+        ast_dump(
+            "impls",
+            "impl as Writer for FileSink { fn write(self: &mut Self, n: i64) -> i64 { n } }\nimpl Doubling as Writer for FileSink { fn write(self: &mut Self, n: i64) -> i64 { n + n } }\nfn main() -> i64 { 0 }\n"
+        ),
+        "(impl _ Writer FileSink (method write exclusive ((param n i64)) i64 (block (var n))))\n\
+         (impl Doubling Writer FileSink (method write exclusive ((param n i64)) i64 (block (binop + (var n) (var n)))))\n\
+         (fn main () i64 (block (int 0)))\n"
+    );
+}

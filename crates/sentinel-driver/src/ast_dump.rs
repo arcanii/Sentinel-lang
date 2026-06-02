@@ -18,8 +18,8 @@
 //!
 //! (2d-1, this increment): `use a::b::Item;` → `(use a b Item)`.
 
-use sentinel_ast::{Block, EffectDecl, EnumDecl, Expr, ExprKind, FnDef, Param, Pattern, Program,
-    SelfKind, Stmt, StmtKind, StructDecl, TraitDecl, TypeExpr, TypeExprKind, UseDecl};
+use sentinel_ast::{Block, EffectDecl, EnumDecl, Expr, ExprKind, FnDef, ImplDecl, Param, Pattern,
+    Program, SelfKind, Stmt, StmtKind, StructDecl, TraitDecl, TypeExpr, TypeExprKind, UseDecl};
 
 /// One top-level declaration, tagged for the source-order re-collation in
 /// [`dump`]. Grows a variant per (2d) increment as each decl kind lands.
@@ -30,6 +30,7 @@ enum Item<'a> {
     Enum(&'a EnumDecl),
     Effect(&'a EffectDecl),
     Trait(&'a TraitDecl),
+    Impl(&'a ImplDecl),
 }
 
 /// The `self` receiver kind as a bare dump word.
@@ -38,6 +39,26 @@ fn self_kind_word(k: SelfKind) -> &'static str {
         SelfKind::Shared => "shared",
         SelfKind::Exclusive => "exclusive",
     }
+}
+
+/// The shared method head — `(method name <shared|exclusive> (<params>) <ret>`
+/// (no leading space, no closing paren). Callers prepend ` ` and append `)` (a
+/// trait sig) or ` <block>)` (an impl / class method body).
+fn dump_method_sig(name: &str, self_kind: SelfKind, params: &[Param], return_type: &TypeExpr,
+    out: &mut String) {
+    out.push_str("(method ");
+    out.push_str(name);
+    out.push(' ');
+    out.push_str(self_kind_word(self_kind));
+    out.push_str(" (");
+    for (i, p) in params.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        dump_param(p, out);
+    }
+    out.push_str(") ");
+    dump_type(return_type, out);
 }
 
 /// Canonical S-expression dump of `program` — every top-level decl in source
@@ -63,6 +84,9 @@ pub fn dump(program: &Program) -> String {
     for tr in &program.traits {
         items.push((tr.span.start, Item::Trait(tr)));
     }
+    for im in &program.impls {
+        items.push((im.span.start, Item::Impl(im)));
+    }
     items.sort_by_key(|(start, _)| *start);
 
     let mut out = String::new();
@@ -79,6 +103,7 @@ pub fn dump(program: &Program) -> String {
             Item::Enum(en) => dump_enum(en, &mut out),
             Item::Effect(ef) => dump_effect(ef, &mut out),
             Item::Trait(tr) => dump_trait(tr, &mut out),
+            Item::Impl(im) => dump_impl(im, &mut out),
         }
     }
     out.push('\n');
@@ -163,19 +188,32 @@ fn dump_trait(t: &TraitDecl, out: &mut String) {
     out.push_str("(trait ");
     out.push_str(&t.name);
     for m in &t.methods {
-        out.push_str(" (method ");
-        out.push_str(&m.name);
         out.push(' ');
-        out.push_str(self_kind_word(m.self_kind));
-        out.push_str(" (");
-        for (i, p) in m.params.iter().enumerate() {
-            if i > 0 {
-                out.push(' ');
-            }
-            dump_param(p, out);
-        }
-        out.push_str(") ");
-        dump_type(&m.return_type, out);
+        dump_method_sig(&m.name, m.self_kind, &m.params, &m.return_type, out);
+        out.push(')');
+    }
+    out.push(')');
+}
+
+/// `impl Name? as Trait for Type { fn m(self: &Self, …) -> R { … } … }` →
+/// `(impl <name-or-_> Trait Type (method m <self> (<params>) <ret> <block>) …)`.
+/// A default impl (no name) dumps `_` in the name slot; impl methods carry a
+/// body (vs trait sigs).
+fn dump_impl(i: &ImplDecl, out: &mut String) {
+    out.push_str("(impl ");
+    match &i.name {
+        Some(n) => out.push_str(n),
+        None => out.push('_'),
+    }
+    out.push(' ');
+    out.push_str(&i.trait_name);
+    out.push(' ');
+    out.push_str(&i.type_name);
+    for m in &i.methods {
+        out.push(' ');
+        dump_method_sig(&m.name, m.self_kind, &m.params, &m.return_type, out);
+        out.push(' ');
+        dump_block(&m.body, out);
         out.push(')');
     }
     out.push(')');
