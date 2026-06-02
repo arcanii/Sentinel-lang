@@ -21,15 +21,15 @@
 //! block by a context-free `{ Ident :` lookahead (so the head seeds below must
 //! keep parsing the head as a condition, not a struct literal). Increment-7 adds
 //! the effect / concurrency leaf forms: `declassify(e)`, `perform Eff.op(args)`,
-//! `scope concurrent { block }`, `spawn <call>`, and the `.await` postfix (the
-//! scope/while bodies stay statement-free until (2c)). Increment-8 adds `handle
-//! <body> with { Eff.op(params) => arm, ... return v => arm }` — which CLOSES the
-//! expression grammar (every `ExprKind` the oracle emits): handler-arm params are
-//! parsed but not dumped, and the optional `return` arm dumps last regardless of
-//! source order. The statement plus decl grammar grows the parser (and this
-//! corpus) in the later (2c)-(2d) slices toward the full `tests/pass` plus
-//! `tests/ui` set, the way `tests/selfhost_lex.rs` covers the corpus for
-//! `snc lex`.
+//! `scope concurrent { block }`, `spawn <call>`, and the `.await` postfix.
+//! Increment-8 adds `handle <body> with { ... }` — which CLOSES the expression
+//! grammar (every `ExprKind` the oracle emits). (2c-1) then turns a block into a
+//! real `{ <stmt>* <tail> }`: `let` (un-annotated for now), assignment, `while`,
+//! `break`, `continue`, and expr-statements (a statement-only `while` body keeps
+//! the synthesized `(int 0)` tail). `let` type annotations, fn definitions, and
+//! the top-level decl grammar grow the parser (and this corpus) in the later
+//! (2c)-(2d) slices toward the full `tests/pass` plus `tests/ui` set, the way
+//! `tests/selfhost_lex.rs` covers the corpus for `snc lex`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -198,6 +198,20 @@ const SEEDS: &[&str] = &[
     // composed with the rest of the grammar.
     "fn hg() -> i64 { g(handle b with { E.op(k) => declassify(s) }) }\n",
     "fn hh() -> i64 { handle perform Net.recv() with { Net.recv(k) => 5, return v => v + 1 } }\n",
+    // (2c-1) statements: let (un-annotated), assign, while, break, continue, expr-stmt.
+    "fn la() -> i64 { let x = 5; x }\n",
+    "fn lb() -> i64 { let mut y = 0; y }\n",
+    "fn lc() -> i64 { let a = 1; let b = 2; a + b }\n",
+    "fn as2() -> i64 { x = 5; x }\n",
+    "fn es() -> i64 { g(1); h(2); 0 }\n",
+    "fn wa() -> i64 { while c { x = x + 1; } 0 }\n",
+    "fn wb2() -> i64 { while i < n { break; } 0 }\n",
+    "fn wc2() -> i64 { while c { continue; } 0 }\n",
+    // statement-only while body keeps the synthesized (int 0) tail.
+    "fn wd() -> i64 { let mut s = 0; while i < n { s = s + i; } s }\n",
+    // statements inside an if-branch / nested.
+    "fn ni() -> i64 { if c { let x = 1; x } else { 2 } }\n",
+    "fn nx() -> i64 { let mut s = 0; while i < n { s = s + g(i); spawn w(i); } declassify(s) }\n",
 ];
 
 #[test]

@@ -41,9 +41,17 @@
 //     expression grammar. Handler-arm params are parsed but NOT dumped; the optional
 //     `return` arm is kept SEPARATE (a `&mut Ret` out-param) so it dumps LAST
 //     regardless of where it appears among the arms.
-// Still to come: (2c) statements + fns-with-params/blocks; (2d) the top-level
-// decls. Self-contained (its own minimal tokenizer); sharing the full lexer via a
-// D.6 module is a follow-on.
+// (2c) statements + fn defs:
+//   (2c-1): a block is now `{ <stmt>* <tail> }` → `(block <stmt>... <tail>)`. The
+//     statements: `let [mut] name = e` → `(let [mut] name _ e)` (the `_` is the
+//     not-yet-supported type annotation — (2c-2)); `target = e` → `(assign t e)`;
+//     `while cond { body }` → `(while cond (block ...))`; `break` → `(break)`;
+//     `continue` → `(continue)`; an expr-stmt → `(expr e)`. The block tail is filled
+//     via a `&mut Expr` out-param (default `(int 0)` = the oracle's synth unit tail
+//     for a statement-only `while` body). The fn body is now a real block.
+// Still to come: (2c-2) `let` type annotations + a `parse_type`; (2c-3) fn defs with
+// params / return type / effect row; (2d) the top-level decls. Self-contained (its
+// own minimal tokenizer); sharing the full lexer via a D.6 module is a follow-on.
 //
 // Sentinel idioms (ADR 0038 A2 / ADR 0039 A3 / A4): a recursive `Expr` enum
 // returned BY VALUE + consuming-dumped (no `Vec<Expr>`); variadic lists are a
@@ -60,7 +68,7 @@
 // 11 * 12 / | 13 == 14 != 15 < 16 <= 17 > 18 >= | 19 && 20 || 21 | 22 ^ 23 &
 // 24 ! 25 = | 26 . 27 [ 28 ] 29 , 30 :: 31 : | 32 if 33 else 34 match 35 => |
 // 36 declassify 37 perform 38 scope 39 spawn 40 await 41 handle 42 with
-// 43 return.
+// 43 return | 44 ; 45 let 46 mut 47 while 48 break 49 continue.
 // Expr op-codes (internal; the dump emits node names + operator symbols):
 // binop 1 + 2 - 3 * 4 / 5 & 6 | 7 ^ ; cmp 8 == 9 != 10 < 11 <= 12 > 13 >= ;
 // logic 14 && 15 || ; unary 1 - 2 !.
@@ -80,7 +88,7 @@ enum Expr {
     ClassInit([u8], Args),
     Array(Args),
     If(Expr, Expr, Expr),
-    BlockE(Expr),
+    Block(Stmts, Expr),
     Match(Expr, Arms),
     StructLit([u8], Fields),
     Declassify(Expr),
@@ -89,6 +97,12 @@ enum Expr {
     Spawn(Expr),
     Await(Expr),
     Handle(Expr, HArms, Ret),
+    // A NULLARY stand-in for a block's synthesized unit tail (a statement-only
+    // `while` body), dumped as `(int 0)` exactly like the oracle's synth
+    // `IntLit(0)`. Nullary on purpose: it is the `&mut Expr` tail default, and
+    // assigning the real tail through that ref does NOT free the old value — a
+    // boxed `Int(0)` default would leak, a nullary one cannot.
+    SynthZero,
 }
 
 // `handle` support (ADR 0039 A11). Handler arms are a cons-list of (effect, op,
@@ -103,6 +117,23 @@ enum HArms {
 enum Ret {
     NoRet,
     YesRet([u8], Expr),
+}
+
+// Statements (ADR 0039 A12) — a block is a `Stmts` cons-list + a tail `Expr`.
+// SLet's mut flag is a bool; the type annotation is added at (2c-2) (dumped `_`
+// for now). SWhile's body is a block.
+enum Stmts {
+    SEnd,
+    SCell(Stmt, Stmts),
+}
+
+enum Stmt {
+    SLet(bool, [u8], Expr),
+    SAssign(Expr, Expr),
+    SWhile(Expr, Expr),
+    SBreak,
+    SContinue,
+    SExpr(Expr),
 }
 
 // Cons-list of arguments (call / method args). A second enum, mutually recursive
@@ -250,6 +281,31 @@ fn is_kw_return(src: &[u8], start: i64, end: i64) -> bool {
         && (*src)[start + 5] == 'n'
 }
 
+// Statement keywords (tagged in the tokenizer so the block loop dispatches them).
+fn is_kw_let(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 3 && (*src)[start] == 'l' && (*src)[start + 1] == 'e' && (*src)[start + 2] == 't'
+}
+
+fn is_kw_mut(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 3 && (*src)[start] == 'm' && (*src)[start + 1] == 'u' && (*src)[start + 2] == 't'
+}
+
+fn is_kw_while(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 5 && (*src)[start] == 'w' && (*src)[start + 1] == 'h'
+        && (*src)[start + 2] == 'i' && (*src)[start + 3] == 'l' && (*src)[start + 4] == 'e'
+}
+
+fn is_kw_break(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 5 && (*src)[start] == 'b' && (*src)[start + 1] == 'r'
+        && (*src)[start + 2] == 'e' && (*src)[start + 3] == 'a' && (*src)[start + 4] == 'k'
+}
+
+fn is_kw_continue(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 8 && (*src)[start] == 'c' && (*src)[start + 1] == 'o'
+        && (*src)[start + 2] == 'n' && (*src)[start + 3] == 't' && (*src)[start + 4] == 'i'
+        && (*src)[start + 5] == 'n' && (*src)[start + 6] == 'u' && (*src)[start + 7] == 'e'
+}
+
 // Append the decimal rendering of `x` (>= 0) to `out`.
 fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
     if x == 0 {
@@ -362,6 +418,16 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
                 42
             } else if is_kw_return(src, start, ie) {
                 43
+            } else if is_kw_let(src, start, ie) {
+                45
+            } else if is_kw_mut(src, start, ie) {
+                46
+            } else if is_kw_while(src, start, ie) {
+                47
+            } else if is_kw_break(src, start, ie) {
+                48
+            } else if is_kw_continue(src, start, ie) {
+                49
             } else {
                 2
             };
@@ -427,6 +493,8 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
                 29
             } else if b == ':' {
                 if nx == ':' { 30 } else { 31 }
+            } else if b == ';' {
+                44
             } else {
                 0
             };
@@ -919,13 +987,85 @@ fn parse_fields(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut 
     }
 }
 
-// A statement-free brace block `{ <expr> }` (statements arrive at (2c)). Returns
-// the block wrapper; dumps as `(block <tail>)`.
+// A brace block `{ <stmt>* <tail> }` → `(block <stmt>... <tail>)`. The opening
+// `{` is consumed here; `parse_stmts` consumes the closing `}` and fills the tail
+// (via a `&mut Expr` out-param). A statement-only block (no tail expr — e.g. a
+// `while` body) keeps the default `(int 0)` tail, exactly matching the oracle's
+// synthesised unit tail; a regular block always finds a tail. (No
+// `allow_stmt_only` distinction is needed on clean input.)
 fn parse_block(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
     *cur = *cur + 1;
-    let bt: Expr = parse_expr(k, s, e, src, cur);
+    let mut btail: Expr = Expr::SynthZero;
+    let bstmts: Stmts = parse_stmts(k, s, e, src, cur, &mut btail);
+    Expr::Block(bstmts, btail)
+}
+
+// Parse statements up to and consuming the closing `}` (tag 7). The tail
+// expression (a trailing expr not followed by `;` or `=`) is written into
+// `*tail` and ends the list.
+fn parse_stmts(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, tail: &mut Expr) -> Stmts {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        Stmts::SEnd
+    } else if t == 45 {
+        let sl: Stmt = parse_let(k, s, e, src, cur);
+        let r1: Stmts = parse_stmts(k, s, e, src, cur, tail);
+        Stmts::SCell(sl, r1)
+    } else if t == 47 {
+        *cur = *cur + 1;
+        let wc: Expr = parse_expr(k, s, e, src, cur);
+        let wb: Expr = parse_block(k, s, e, src, cur);
+        let r2: Stmts = parse_stmts(k, s, e, src, cur, tail);
+        Stmts::SCell(Stmt::SWhile(wc, wb), r2)
+    } else if t == 48 {
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let r3: Stmts = parse_stmts(k, s, e, src, cur, tail);
+        Stmts::SCell(Stmt::SBreak, r3)
+    } else if t == 49 {
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let r4: Stmts = parse_stmts(k, s, e, src, cur, tail);
+        Stmts::SCell(Stmt::SContinue, r4)
+    } else {
+        let ex: Expr = parse_expr(k, s, e, src, cur);
+        if (*k)[*cur] == 25 {
+            *cur = *cur + 1;
+            let av: Expr = parse_expr(k, s, e, src, cur);
+            *cur = *cur + 1;
+            let r5: Stmts = parse_stmts(k, s, e, src, cur, tail);
+            Stmts::SCell(Stmt::SAssign(ex, av), r5)
+        } else if (*k)[*cur] == 44 {
+            *cur = *cur + 1;
+            let r6: Stmts = parse_stmts(k, s, e, src, cur, tail);
+            Stmts::SCell(Stmt::SExpr(ex), r6)
+        } else {
+            *cur = *cur + 1;
+            *tail = ex;
+            Stmts::SEnd
+        }
+    }
+}
+
+// `let [mut] <name> = <value> ;` — the optional `: type` annotation lands at
+// (2c-2); for now `let` is un-annotated (the dump emits `_`).
+fn parse_let(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Stmt {
     *cur = *cur + 1;
-    Expr::BlockE(bt)
+    let lmut: bool = (*k)[*cur] == 46;
+    if lmut {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    let lns: i64 = (*s)[*cur];
+    let lne: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let lv: Expr = parse_expr(k, s, e, src, cur);
+    *cur = *cur + 1;
+    Stmt::SLet(lmut, slice_of(src, lns, lne), lv)
 }
 
 // `if <cond> { <then> } else { <else> }` — `else` is mandatory (Sentinel has no
@@ -937,7 +1077,7 @@ fn parse_if(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64)
     let thn: Expr = parse_block(k, s, e, src, cur);
     *cur = *cur + 1;
     let els: Expr = if (*k)[*cur] == 32 {
-        Expr::BlockE(parse_if(k, s, e, src, cur))
+        Expr::Block(Stmts::SEnd, parse_if(k, s, e, src, cur))
     } else {
         parse_block(k, s, e, src, cur)
     };
@@ -952,6 +1092,68 @@ fn dump_args(out: &mut Vec<u8>, a: Args) -> i64 {
             push(out, ' ');
             dump_expr(out, h);
             dump_args(out, t);
+            0
+        },
+    }
+}
+
+// Consuming dump of a statement cons-list: each statement prefixed by ` `.
+fn dump_stmts(out: &mut Vec<u8>, st: Stmts) -> i64 {
+    match st {
+        Stmts::SEnd => 0,
+        Stmts::SCell(one, rest) => {
+            push(out, ' ');
+            dump_stmt(out, one);
+            dump_stmts(out, rest);
+            0
+        },
+    }
+}
+
+fn dump_stmt(out: &mut Vec<u8>, s: Stmt) -> i64 {
+    match s {
+        Stmt::SLet(lmf, lnm, lval) => {
+            append_str(out, "(let ");
+            if lmf {
+                append_str(out, "mut ");
+                0
+            } else {
+                0
+            };
+            append_str(out, lnm);
+            append_str(out, " _ ");
+            dump_expr(out, lval);
+            push(out, ')');
+            0
+        },
+        Stmt::SAssign(atgt, aval) => {
+            append_str(out, "(assign ");
+            dump_expr(out, atgt);
+            push(out, ' ');
+            dump_expr(out, aval);
+            push(out, ')');
+            0
+        },
+        Stmt::SWhile(wcond, wbody) => {
+            append_str(out, "(while ");
+            dump_expr(out, wcond);
+            push(out, ' ');
+            dump_expr(out, wbody);
+            push(out, ')');
+            0
+        },
+        Stmt::SBreak => {
+            append_str(out, "(break)");
+            0
+        },
+        Stmt::SContinue => {
+            append_str(out, "(continue)");
+            0
+        },
+        Stmt::SExpr(sx) => {
+            append_str(out, "(expr ");
+            dump_expr(out, sx);
+            push(out, ')');
             0
         },
     }
@@ -1112,10 +1314,16 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
             push(out, ')');
             0
         },
-        Expr::BlockE(be) => {
-            append_str(out, "(block ");
-            dump_expr(out, be);
+        Expr::Block(bstmts, btail) => {
+            append_str(out, "(block");
+            dump_stmts(out, bstmts);
+            push(out, ' ');
+            dump_expr(out, btail);
             push(out, ')');
+            0
+        },
+        Expr::SynthZero => {
+            append_str(out, "(int 0)");
             0
         },
         Expr::Match(mscr, marms) => {
@@ -1303,16 +1511,16 @@ fn main() -> i64 {
         let ret_s: i64 = starts[cur];
         let ret_e: i64 = ends[cur];
         cur = cur + 1;
-        cur = cur + 1;
-        let body: Expr = parse_expr(&kinds, &starts, &ends, &src, &mut cur);
-        cur = cur + 1;
+        // The body is now a real block (statements + tail); parse_block consumes
+        // both braces and produces the `(block ...)` node.
+        let body: Expr = parse_block(&kinds, &starts, &ends, &src, &mut cur);
         append_str(&mut out, "(fn ");
         append_slice(&mut out, &src, name_s, name_e);
         append_str(&mut out, " () ");
         append_slice(&mut out, &src, ret_s, ret_e);
-        append_str(&mut out, " (block ");
+        append_str(&mut out, " ");
         dump_expr(&mut out, body);
-        append_str(&mut out, "))");
+        append_str(&mut out, ")");
     }
     push(&mut out, '\n');
     let arr: [u8] = vec_to_array(out);
