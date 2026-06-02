@@ -13,10 +13,10 @@ UNDERWAY** — D6's "full expressions" slice is itself sub-sliced (it spans ~28
 ladder + scalar atom leaves, **increment-2 (A5)** landed function calls + the
 postfix chain (field / index / method), **increment-3 (A6)** landed the `::`
 paths (qualified call / class init / unit construction) + array literals,
-**increment-4 (A7)** landed `if`-expressions + brace blocks, and **increment-5
-(A8)** landed `match` expressions + patterns. Remaining (2b) increments + slices
-(2c)–(2d) per D6 grow it toward the full corpus; the ADR flips fully as they close.
-See ## Amendments.
+**increment-4 (A7)** landed `if`-expressions + brace blocks, **increment-5 (A8)**
+landed `match` expressions + patterns, and **increment-6 (A9)** landed struct
+literals. Remaining (2b) increments + slices (2c)–(2d) per D6 grow it toward the
+full corpus; the ADR flips fully as they close. See ## Amendments.
 
 ## Amendments (in progress — (2a) + (2b) landing)
 
@@ -151,6 +151,33 @@ See ## Amendments.
   => eval(l) + eval(r), … }`) match `snc ast`; leak-free under `leaks --atExit`.
   **Still deferred to later (2b) increments:** struct literals (need the Rust
   `allow_struct_lit` flag), perform/handle, scope/spawn/await, declassify.
+- **A9 — (2b) increment-6: struct literals, via a context-free lookahead (revises
+  the `allow_struct_lit` framing).** `Name { f1: e1, f2: e2 }` →
+  `(struct-lit Name (field f1 e1) (field f2 e2))`. **The disambiguation is the
+  story.** The Rust parser threads a stateful `allow_struct_lit` flag through the
+  *whole* expression descent — set `false` while parsing an `if`/`while`/`match`
+  head so `if x { … }` reads `x` as the condition (not `x { … }` as a struct lit),
+  re-enabled inside `(`/`[`/arg/body positions. Porting that flag means threading a
+  `bool` through ~19 parse functions. **The port instead uses a context-free
+  lookahead: `{ Ident :`** (a brace, an identifier, then a **single** colon) — which
+  *only ever* begins a struct literal, because no block / match-body / if-body can
+  start with a single-colon `Ident :` (no statement form is `name :`; variant
+  patterns use `::`, not `:`). So on all **clean-parsing** input the lookahead
+  produces the identical AST to the flag, with **no threading** — the same
+  "different implementation, byte-identical output" trade the lexer (1/N) made
+  (direct emission vs a `Token` enum). Verified directly that heads stay
+  conditions: `if x { P { a: 1 } } else { Q { b: 2 } }`, `match s { St::A => P { v:
+  1 }, … }`, `(P { x: 1 }).x`. `Expr` gains `StructLit([u8], Fields)`; new
+  `Fields = FieldEnd | FieldCell([u8], Expr, Fields)` (the proven cons-list shape);
+  `parse_fields` parses `name : value` pairs up to the closing `}`; no tokenizer
+  change (`:` is already tag 31). **Documented limitation:** an **empty** struct
+  literal `Name {}` is deferred — it has no `field :` to key on, and `{}` collides
+  with an empty `match` / `while` body; the `allow_struct_lit` flag is the eventual
+  fix iff the full corpus needs empty struct literals. Verified: 88 differential
+  seeds (single/multi-field, expr values, nested structs, structs in call args /
+  arrays, trailing comma, head-disambiguation) match `snc ast`; leak-free under
+  `leaks --atExit`. **Still deferred to later (2b) increments:** perform/handle,
+  scope/spawn/await, declassify.
 
 Date: 2026-06-02
 Related:
