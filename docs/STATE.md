@@ -15,7 +15,7 @@ Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2b)
-increment-2: function calls + the postfix chain (ADR 0039 A5).** Movement 1 (the
+increment-3: `::` paths + array literals (ADR 0039 A6).** Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for
@@ -54,14 +54,20 @@ unary `- !`, parens — plus the scalar atom leaves (integer / `true` / `false` 
 calls `f(args)` → `(call …)` (an atom case; the callee is a name) + the POSTFIX
 chain — field `t.field` → `(field …)`, index `t[i]` → `(index …)`, method
 `t.m(args)` → `(method …)` — applied left-to-right via a new `parse_postfix`
-layer. `Expr` gained `Bool`/`Null`/`Var([u8])`/`Unary` + a unified
-`Binary(op-code, …)` (inc-1), then `Call`/`Method`/`Field`/`Index` (inc-2);
-argument lists are a **second mutually-recursive cons-list enum**
-`Args = End | Cell(Expr, Args)` (since `Vec<non-primitive>` is unsupported —
-de-risked by a probe). The diff corpus grew to **45 seeds** (every operator level
-+ calls + postfix chains like `a.b(c)[d].e`), all matching `snc ast`, leak-free.
-Remaining: **(2b) later increments** — `::` paths (qualified-call/class-init/enum
-construction), struct/array lits, `if`/`match`, perform/handle,
+layer. **(2b) increment-3 (ADR 0039 A6):** the identifier-prefixed `::` paths in
+`parse_atom` — qualified call `A::b(args)` → `(qcall …)`, class init
+`Name::init(args)` → `(class-init …)`, and paren-less `Enum::Variant` (a qcall with
+empty args; enum-vs-impl is a resolve concern) — plus array literals
+`[e1, e2, …]` → `(array …)` (atom-position `[`, distinct from the postfix index
+`[`). `Expr` gained `Bool`/`Null`/`Var([u8])`/`Unary` + a unified
+`Binary(op-code, …)` (inc-1), then `Call`/`Method`/`Field`/`Index` (inc-2), then
+`Qcall`/`ClassInit`/`Array` (inc-3); argument + element lists are a **second
+mutually-recursive cons-list enum** `Args = End | Cell(Expr, Args)` (since
+`Vec<non-primitive>` is unsupported — de-risked by a probe), `parse_args`
+generalised with a terminator-tag param. The diff corpus grew to **59 seeds**
+(every operator level + calls + postfix chains like `a.b(c)[d].e` + `::` paths +
+arrays + deep nests), all matching `snc ast`, leak-free. Remaining: **(2b) later
+increments** — struct literals, `if`/`match`, perform/handle,
 scope/spawn/await/declassify; then **(2c)** statements + fns-with-params/blocks,
 **(2d)** the top-level decls — each growing the parser + its diff corpus toward
 the full `tests/pass` + `tests/ui` set. Recap of the movement-1 close:

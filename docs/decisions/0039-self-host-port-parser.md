@@ -10,10 +10,11 @@ expression parser that matches `snc ast` for integer arithmetic (precedence,
 parens, left-assoc, multi-fn) — `tests/selfhost_parse.rs`, leak-free. **(2b) is now
 UNDERWAY** — D6's "full expressions" slice is itself sub-sliced (it spans ~28
 `ExprKind` variants); **increment-1 (A4)** landed the complete operator-precedence
-ladder + scalar atom leaves, and **increment-2 (A5)** landed function calls + the
-postfix chain (field / index / method). Remaining (2b) increments + slices (2c)–(2d)
-per D6 grow it toward the full corpus; the ADR flips fully as they close. See
-## Amendments.
+ladder + scalar atom leaves, **increment-2 (A5)** landed function calls + the
+postfix chain (field / index / method), and **increment-3 (A6)** landed the `::`
+paths (qualified call / class init / unit construction) + array literals. Remaining
+(2b) increments + slices (2c)–(2d) per D6 grow it toward the full corpus; the ADR
+flips fully as they close. See ## Amendments.
 
 ## Amendments (in progress — (2a) + (2b) landing)
 
@@ -85,6 +86,26 @@ per D6 grow it toward the full corpus; the ADR flips fully as they close. See
   `snc ast`; leak-free under `leaks --atExit`. **Still deferred to later (2b)
   increments:** the `::` paths (qualified-call / class-init / enum construction),
   struct + array literals, `if`/`match`, perform/handle, scope/spawn/await/declassify.
+- **A6 — (2b) increment-3: the `::` paths + array literals.** Adds the
+  identifier-prefixed `::` forms (parsed in `parse_atom` after an ident) and array
+  literals, all reusing A5's `Args` cons-list. `Name::method(args)` →
+  `(qcall Name method …)`; `Name::init(args)` → `(class-init Name …)` (the **`init`
+  name with parens** is the only class-init form); a **paren-less** `Name::tail`
+  (e.g. bare enum-unit construction `Enum::Variant`) → a qualified call with empty
+  args — the enum-vs-impl meaning is a *resolve* concern, so the parser emits a
+  uniform `(qcall …)`, matching the Rust parser exactly. An **atom-position `[`** is
+  an array literal `[e1, e2, …]` → `(array …)`, distinct from the **post-atom `[`**
+  index operator (A5) by position (`parse_atom` vs `parse_postfix_rest`). `Expr` gains
+  `Qcall([u8], [u8], Args)` / `ClassInit([u8], Args)` / `Array(Args)`; `parse_args` is
+  generalised with a **terminator-tag** param (`)`=5 for call args, `]`=28 for array
+  elements); the tokenizer gains `::` (30) + `:` (31); an `is_kw_init` slice-compare
+  picks `init` (the self-contained tokenizer has no `init` keyword). Verified: 59
+  differential seeds (qcall with/without args/parens, class-init with/without args,
+  bare-init→qcall, arrays empty/expr-elems, array-then-index `[1,2][0]`, deep nests
+  like `g(A::b(x), [1, h(3)], Point::init(y, z))` and `[A::b(), c.d][0].e`) match
+  `snc ast`; leak-free under `leaks --atExit`. **Still deferred to later (2b)
+  increments:** struct literals, `if`/`match`, perform/handle,
+  scope/spawn/await/declassify.
 
 Date: 2026-06-02
 Related:
