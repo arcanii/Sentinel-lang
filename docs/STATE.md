@@ -18,9 +18,12 @@ Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) the PARSER i
 COMPLETE (ADR 0039 → ACCEPTED, A1–A22).** `selfhost/parser.sentinel` matches the
 `snc ast` oracle over EVERY clean-parsing fixture in `tests/pass` + `tests/ui`
 (139/139), leak-free — the parser-stage phase-go. (2d-8, A22) closed the full
-corpus (`//` comments, prefix `*`/`&`/`&mut` unary, char + string literals); the
-next port stage is **resolve** (its own ADR). Movement 1 (the language/stdlib
-build-out,
+corpus (`//` comments, prefix `*`/`&`/`&mut` unary, char + string literals). The
+next port stage, **resolve, is now OPEN — ADR 0040 PROPOSED** (the plan:
+cons-list symbol tables + a `snc resolve` ID-bearing oracle, sub-sliced 3a–3e,
+with the scope snapshot/restore as the key probe); the next concrete step is the
+`snc resolve` oracle + the (3a) parse→AST→resolve skeleton. Movement 1 (the
+language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for
 self-hosting is cleared**. Movement 2 ports `snc` to Sentinel stage by stage, each

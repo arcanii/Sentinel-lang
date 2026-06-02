@@ -1885,8 +1885,12 @@ For pasting into a fresh chat to bootstrap context:
     (the (2/N) parser — **now ACCEPTED / COMPLETE**: (2a)+(2b) the full expression
     grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the
     full-corpus close — `selfhost/parser.sentinel` matches `snc ast` over every
-    clean-parsing fixture, leak-free; **RESUME AT below = the NEXT port stage,
-    resolve — its own ADR (write it PROPOSED first)**) +
+    clean-parsing fixture, leak-free) + **ADR 0040** (the NEXT port stage,
+    **resolve — PROPOSED**: the plan to port name-resolution to Sentinel —
+    cons-list symbol tables + a `snc resolve` ID-bearing oracle, sub-sliced
+    3a–3e, scope snapshot/restore = the key probe; **RESUME AT = (3a)** — build
+    the `snc resolve` oracle + `run_resolve` + the parse→AST→resolve skeleton +
+    the fn table, the first seed diff) +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
