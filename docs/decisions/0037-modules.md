@@ -15,10 +15,13 @@ Verified: a cross-module `pub fn` (exit 5), same-named privates coexist
 enum` + `match` (exit 52), same-named structs coexist (exit 42), a 3-deep
 cross-module struct field (exit 42), a cross-module `pub trait` impl'd +
 dispatched (exit 42), same-named classes coexist (exit 42), a cross-module `pub
-effect` performed + handled through the handler runtime (exit 42). FOLLOW-UPS:
+effect` performed + handled through the handler runtime (exit 42), and
+cross-module GENERICS (a `Box<i64>` struct, an `id<T>` fn, `Pair`/`make_pair`/`fst`
+— instantiated in a different module than defined, exit 42; they work for free
+because Path A's whole-program mono runs over the merged graph). FOLLOW-UPS:
 per-unit objects + module-qualified `abi-v1` mangling + multi-object link (the
-true separate-comp back end); cross-module generics; effect-check parity. See ##
-Implementation notes. The sixth and **last** Phase D language prerequisite
+true separate-comp back end, incl. per-unit `linkonce_odr` generics);
+effect-check parity. See ## Implementation notes. The sixth and **last** Phase D language prerequisite
 under ADR 0031 (Phase D kickoff) D4 item 5, before the self-host port (D5). After
 sum types (D.1), strings + a byte type (D.2), growable collections (D.3), file I/O
 (D.4), and loops (D.5), the surface has been **single-file by design** since 1.0
@@ -360,12 +363,15 @@ Op names and method names stay unqualified (scoped within their effect / trait,
 like enum variants). The walks are exhaustive (no wildcard arm), so a new
 `ExprKind` / `TypeExprKind` / `Pattern` variant is a compile error rather than a
 silently un-rewritten reference. **So a `pub` item of any kind crosses a module
-boundary and same-named items coexist.** Still outstanding under Path A:
-cross-module **generics** (mono runs whole-program over the merged graph, so a
-cross-module instance may already work — untested) and effect-check parity (the
-merged path skips effect-check). The true per-unit back end (D5) will re-derive
-these symbols through the module-qualified `abi-v1` mangling (D7) instead of the
-`$` scheme.
+boundary and same-named items coexist.** Cross-module **generics** also work for
+free (verified, `53a9aba`): `collect_mono_instantiations` runs whole-program over
+the merged graph, so a generic instantiated in a different module than its
+definition is monomorphised + emitted like any single-file instance (the
+`Renamer` rewrites `TypeExprKind::Generic` heads + args; type params are never
+qualified). Still outstanding under Path A: effect-check parity (the merged path
+skips effect-check). The true per-unit back end (D5) will re-derive these symbols
+through the module-qualified `abi-v1` mangling (D7) instead of the `$` scheme, and
+add the per-unit `linkonce_odr` generic-dedup story (ADR 0037 (2/N)).
 
 ## Revisit
 
