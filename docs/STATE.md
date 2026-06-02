@@ -15,7 +15,7 @@ Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2b)
-increment-1: full operator-precedence expressions (ADR 0039 A4).** Movement 1 (the
+increment-2: function calls + the postfix chain (ADR 0039 A5).** Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for
@@ -44,20 +44,27 @@ arrays + `src` via `(*r)[i]` deref-index + a `&mut i64` cursor; left-assoc folds
 via recursion (a param accumulator — a loop one trips the moved-in-loop rule).
 Also locked: the recursive-AST drop gate (`selfhost_ast_drop.sentinel`, 0 leaks).
 **(2b) is now UNDERWAY** — D6's "full expressions" slice is itself sub-sliced
-(~28 `ExprKind` variants); **(2b) increment-1 has LANDED (ADR 0039 A4):** the
-parser now covers the **complete operator-precedence ladder** mirroring the Rust
+(~28 `ExprKind` variants); **increments 1 + 2 have LANDED.** **(2b) increment-1
+(ADR 0039 A4):** the **complete operator-precedence ladder** mirroring the Rust
 parser (`expr → or → and → cmp → bitor → bitxor → bitand → add → mul → unary →
-atom`) — logical `|| &&`, the six non-associative comparisons `== != < <= > >=`,
-bitwise `| ^ &`, additive `+ -`, multiplicative `* /`, prefix unary `- !`, parens
-— plus the scalar atom leaves (integer / `true` / `false` / `null` literals +
-variable refs). `Expr` gained `Bool`/`Null`/`Var([u8])`/`Unary` + a unified
-`Binary(op-code, …)` (the i64 op-code encodes dump category + symbol); the diff
-corpus grew to **26 seeds** (every level + two interleaving the whole ladder),
-all matching `snc ast`, leak-free. Remaining: **(2b) later increments** — postfix
-(call/index/field/method), `if`/`match`, struct/array lits, perform/handle,
-qualified-call/class-init/scope/spawn/await/declassify; then **(2c)** statements +
-fns-with-params/blocks, **(2d)** the top-level decls — each growing the parser +
-its diff corpus toward the full `tests/pass` + `tests/ui` set. Recap of the movement-1 close:
+postfix → atom`) — logical `|| &&`, the six non-associative comparisons
+`== != < <= > >=`, bitwise `| ^ &`, additive `+ -`, multiplicative `* /`, prefix
+unary `- !`, parens — plus the scalar atom leaves (integer / `true` / `false` /
+`null` literals + variable refs). **(2b) increment-2 (ADR 0039 A5):** function
+calls `f(args)` → `(call …)` (an atom case; the callee is a name) + the POSTFIX
+chain — field `t.field` → `(field …)`, index `t[i]` → `(index …)`, method
+`t.m(args)` → `(method …)` — applied left-to-right via a new `parse_postfix`
+layer. `Expr` gained `Bool`/`Null`/`Var([u8])`/`Unary` + a unified
+`Binary(op-code, …)` (inc-1), then `Call`/`Method`/`Field`/`Index` (inc-2);
+argument lists are a **second mutually-recursive cons-list enum**
+`Args = End | Cell(Expr, Args)` (since `Vec<non-primitive>` is unsupported —
+de-risked by a probe). The diff corpus grew to **45 seeds** (every operator level
++ calls + postfix chains like `a.b(c)[d].e`), all matching `snc ast`, leak-free.
+Remaining: **(2b) later increments** — `::` paths (qualified-call/class-init/enum
+construction), struct/array lits, `if`/`match`, perform/handle,
+scope/spawn/await/declassify; then **(2c)** statements + fns-with-params/blocks,
+**(2d)** the top-level decls — each growing the parser + its diff corpus toward
+the full `tests/pass` + `tests/ui` set. Recap of the movement-1 close:
 after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
 (file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
 compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want

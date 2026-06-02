@@ -9,10 +9,11 @@ parser-structure de-risk (A3) + `selfhost/parser.sentinel`, a recursive-descent
 expression parser that matches `snc ast` for integer arithmetic (precedence,
 parens, left-assoc, multi-fn) — `tests/selfhost_parse.rs`, leak-free. **(2b) is now
 UNDERWAY** — D6's "full expressions" slice is itself sub-sliced (it spans ~28
-`ExprKind` variants); **increment-1 (A4) has LANDED:** the complete
-operator-precedence ladder + scalar atom leaves. Remaining (2b) increments + slices
-(2c)–(2d) per D6 grow it toward the full corpus; the ADR flips fully as they close.
-See ## Amendments.
+`ExprKind` variants); **increment-1 (A4)** landed the complete operator-precedence
+ladder + scalar atom leaves, and **increment-2 (A5)** landed function calls + the
+postfix chain (field / index / method). Remaining (2b) increments + slices (2c)–(2d)
+per D6 grow it toward the full corpus; the ADR flips fully as they close. See
+## Amendments.
 
 ## Amendments (in progress — (2a) + (2b) landing)
 
@@ -63,6 +64,27 @@ See ## Amendments.
   postfix (call / index / field / method), `if`/`match` expressions, struct/array
   literals, perform/handle, qualified-call / class-init / scope / spawn / await /
   declassify — i.e. every `Expr` form that is not a pure operator/atom.
+- **A5 — (2b) increment-2: function calls + the postfix chain.** Adds, mirroring
+  the Rust parser, free calls `f(args)` → `(call f …)` (an *atom* case — the callee
+  is a name, not an expr; only a postfix `.m(args)` calls a value) and the **postfix
+  chain** applied left-to-right over an atom: field `t.field` → `(field t field)`,
+  index `t[i]` → `(index t i)`, method `t.m(args)` → `(method t m …)`. A new
+  `parse_postfix` layer sits between `parse_unary` and `parse_atom`. **The data-model
+  call (revises D4):** an **argument list is variadic**, and `Vec<non-primitive>` is
+  unsupported (A3), so args are a **second enum `Args = End | Cell(Expr, Args)`,
+  mutually recursive with `Expr`** (`Expr` gains `Call([u8], Args)` /
+  `Method(Expr, [u8], Args)` / `Field(Expr, [u8])` / `Index(Expr, Expr)`).
+  This extends A2's drop gate (a *single* self-recursive enum) to **two
+  mutually-recursive enums + enum-typed payloads** — DE-RISKED by a probe first
+  (build → consuming-dump → `leaks`: compiles, correct, 0 leaks) before the parser
+  was grown, the same probe-first discipline as A3. `parse_args` builds the cons-list
+  head-first by recursion and consumes the closing `)`; the postfix chain folds via
+  `parse_postfix_rest` accumulator recursion (a loop accumulator trips moved-in-loop);
+  the tokenizer gains `.` `[` `]` `,` (tags 26–29). Verified: 45 differential seeds
+  (incl. chains `a.b(c)[d].e`, `x.foo(1).bar[k].baz(y, z)`, nested-arg calls) match
+  `snc ast`; leak-free under `leaks --atExit`. **Still deferred to later (2b)
+  increments:** the `::` paths (qualified-call / class-init / enum construction),
+  struct + array literals, `if`/`match`, perform/handle, scope/spawn/await/declassify.
 
 Date: 2026-06-02
 Related:
