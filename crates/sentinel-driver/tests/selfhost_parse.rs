@@ -19,11 +19,13 @@
 //! patterns (positional bindings, themselves possibly `_`). Increment-6 adds
 //! struct literals `Name { f: v, ... }`, disambiguated from an if/match head's
 //! block by a context-free `{ Ident :` lookahead (so the head seeds below must
-//! keep parsing the head as a condition, not a struct literal). perform/handle,
-//! scope/spawn/await, declassify, and the statement plus decl grammar grow the
-//! parser (and this corpus) in the later (2b)-(2d) slices toward the full
-//! `tests/pass` plus `tests/ui` set, the way `tests/selfhost_lex.rs` covers the
-//! corpus for `snc lex`.
+//! keep parsing the head as a condition, not a struct literal). Increment-7 adds
+//! the effect / concurrency leaf forms: `declassify(e)`, `perform Eff.op(args)`,
+//! `scope concurrent { block }`, `spawn <call>`, and the `.await` postfix (the
+//! scope/while bodies stay statement-free until (2c)). `handle ... with { arms }`
+//! and the statement plus decl grammar grow the parser (and this corpus) in the
+//! later (2b)-(2d) slices toward the full `tests/pass` plus `tests/ui` set, the
+//! way `tests/selfhost_lex.rs` covers the corpus for `snc lex`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -165,6 +167,22 @@ const SEEDS: &[&str] = &[
     "fn sh() -> i64 { if x { P { a: 1 } } else { Q { b: 2 } } }\n",
     "fn si() -> i64 { (P { x: 1 }).x }\n",
     "fn sj() -> i64 { match s { St::A => P { v: 1 }, _ => Q { v: 2 } } }\n",
+    // (increment-7) declassify / perform / scope / spawn / .await.
+    "fn da() -> i64 { declassify(s) }\n",
+    "fn db() -> i64 { declassify(a + b) }\n",
+    "fn pe() -> i64 { perform Net.recv() }\n",
+    "fn pf() -> i64 { perform Net.send(x, y) }\n",
+    "fn sk() -> i64 { scope concurrent { 42 } }\n",
+    "fn sl() -> i64 { scope concurrent { h.await } }\n",
+    "fn sp() -> i64 { spawn worker(x) }\n",
+    "fn aw() -> i64 { t.await }\n",
+    "fn aw2() -> i64 { spawn f(x).await }\n",
+    // (increment-7) composed with the rest of the expression grammar.
+    "fn cp() -> i64 { g(perform E.op(1)) }\n",
+    "fn cq() -> i64 { declassify(x) + perform E.op() }\n",
+    "fn cr() -> bool { match s { St::Done => declassify(perform Tls.verify(mac)), _ => false } }\n",
+    "fn cs() -> i64 { if ready { spawn w(x) } else { compute().await } }\n",
+    "fn ct() -> i64 { scope concurrent { declassify(perform Net.recv()) } }\n",
 ];
 
 #[test]
