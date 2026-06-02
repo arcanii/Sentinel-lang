@@ -18,10 +18,11 @@ dispatched (exit 42), same-named classes coexist (exit 42), a cross-module `pub
 effect` performed + handled through the handler runtime (exit 42), and
 cross-module GENERICS (a `Box<i64>` struct, an `id<T>` fn, `Pair`/`make_pair`/`fst`
 — instantiated in a different module than defined, exit 42; they work for free
-because Path A's whole-program mono runs over the merged graph). FOLLOW-UPS:
-per-unit objects + module-qualified `abi-v1` mangling + multi-object link (the
-true separate-comp back end, incl. per-unit `linkonce_odr` generics);
-effect-check parity. See ## Implementation notes. The sixth and **last** Phase D language prerequisite
+because Path A's whole-program mono runs over the merged graph), and effect-check
+parity (the merged path now rejects a multi-file `main` with an unhandled effect).
+FOLLOW-UPS: per-unit objects + module-qualified `abi-v1` mangling + multi-object
+link (the true separate-comp back end, incl. per-unit `linkonce_odr` generics);
+span-accurate multi-source diagnostics. See ## Implementation notes. The sixth and **last** Phase D language prerequisite
 under ADR 0031 (Phase D kickoff) D4 item 5, before the self-host port (D5). After
 sum types (D.1), strings + a byte type (D.2), growable collections (D.3), file I/O
 (D.4), and loops (D.5), the surface has been **single-file by design** since 1.0
@@ -368,8 +369,14 @@ free (verified, `53a9aba`): `collect_mono_instantiations` runs whole-program ove
 the merged graph, so a generic instantiated in a different module than its
 definition is monomorphised + emitted like any single-file instance (the
 `Renamer` rewrites `TypeExprKind::Generic` heads + args; type params are never
-qualified). Still outstanding under Path A: effect-check parity (the merged path
-skips effect-check). The true per-unit back end (D5) will re-derive these symbols
+qualified). **Effect-check parity** is also done (`7af1dce`): `run_build_merged`
+calls the pure `sentinel_effect_check::effect_check(&typed)` between type-check and
+borrow-check — the single-file path gets this from `borrow_check_query` chaining
+on `effect_check_query`, but the merged path calls the pure passes directly, so it
+must invoke effect-check itself — so a multi-file `main` with an unhandled effect
+is rejected, not miscompiled. Still outstanding under Path A: span-accurate
+multi-source diagnostics (the merged path reports by message; spans point into
+per-module sources). The true per-unit back end (D5) will re-derive these symbols
 through the module-qualified `abi-v1` mangling (D7) instead of the `$` scheme, and
 add the per-unit `linkonce_odr` generic-dedup story (ADR 0037 (2/N)).
 

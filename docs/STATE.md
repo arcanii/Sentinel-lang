@@ -73,14 +73,19 @@ in-scope type parameters); (7) **cross-module TRAITS / EFFECTS / CLASSES**
 (qualifies trait/effect/class/named-impl names too + rewrites their refs:
 `impl as Trait for Type` heads, `perform`/`handle` effect names,
 fn/method effect rows, delegate trait names) — so EVERY top-level item kind
-is module-qualified and same-named items coexist. **Verified end-to-end:** a
-cross-module `pub fn` (exit 5); same-named private `helper`s coexist
-(exit 41, 0 leaks); private import → PrivateItem; a cross-module `pub
-struct` (exit 42); a cross-module `pub enum` + `match` (exit 52);
-same-named `struct Item`s coexist (exit 42); a 3-deep cross-module struct
-field (exit 42); a cross-module `pub trait` impl'd + dispatched (exit 42);
-same-named `class`es coexist (exit 42); a cross-module `pub effect`
-performed + handled through the handler runtime (exit 42); and
+is module-qualified and same-named items coexist; (8) **effect-check parity**
+for the merged path (`run_build_merged` now calls the pure
+`sentinel_effect_check::effect_check` between type-check and borrow-check —
+the salsa chain's `borrow_check_query`→`effect_check_query` order — so a
+multi-file `main` with an unhandled effect is rejected, not miscompiled).
+**Verified end-to-end:** a cross-module `pub fn` (exit 5); same-named private
+`helper`s coexist (exit 41, 0 leaks); private import → PrivateItem; a
+cross-module `pub struct` (exit 42); a cross-module `pub enum` + `match`
+(exit 52); same-named `struct Item`s coexist (exit 42); a 3-deep
+cross-module struct field (exit 42); a cross-module `pub trait` impl'd +
+dispatched (exit 42); same-named `class`es coexist (exit 42); a cross-module
+`pub effect` performed + handled through the handler runtime (exit 42); an
+UNHANDLED cross-module effect in `main` → rejected (UnhandledEffect); and
 **cross-module GENERICS** (a `Box<i64>` struct, an `id<T>` fn, and
 `Pair`/`make_pair`/`fst` — all instantiated in a different module than
 their definition, exit 42) — they work for free because Path A's
@@ -88,7 +93,8 @@ whole-program `collect_mono_instantiations` runs over the merged graph.
 Single-file unaffected. FOLLOW-UPS (still (1/N)/(2/N)): per-unit objects +
 module-qualified `abi-v1` mangling + multi-object link (true separate
 compilation back end — incl. the per-unit `linkonce_odr` generic story,
-ADR 0037 (2/N)); effect-check parity for the merged path.
+ADR 0037 (2/N)); span-accurate multi-source diagnostics (the merged path
+reports by message).
 
 Pre-D.5 context: **Phase D.4 — file I/O via a minimal stdlib — MVP COMPLETE
 (1/N + 2/N; ADR 0035 → ACCEPTED-WITH-AMENDMENTS).** The fourth
