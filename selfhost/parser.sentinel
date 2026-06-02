@@ -36,8 +36,12 @@
 //     `(declassify e)`; `perform Eff.op(args)` → `(perform Eff op args...)`;
 //     `scope concurrent { block }` → `(scope (block ...))`; `spawn <call>` →
 //     `(spawn ...)`; and the `.await` POSTFIX → `(await target)`.
-// Still to come (later (2b) increments / (2c) / (2d)): `handle ... with { arms }`
-// (closes (2b)); then statements + fns-with-params/blocks; then the top-level
+//   increment-8: `handle <body> with { Eff.op(params) => arm, ... return v => arm }`
+//     → `(handle body (arm Eff op armbody)... (return v body))` — CLOSES the
+//     expression grammar. Handler-arm params are parsed but NOT dumped; the optional
+//     `return` arm is kept SEPARATE (a `&mut Ret` out-param) so it dumps LAST
+//     regardless of where it appears among the arms.
+// Still to come: (2c) statements + fns-with-params/blocks; (2d) the top-level
 // decls. Self-contained (its own minimal tokenizer); sharing the full lexer via a
 // D.6 module is a follow-on.
 //
@@ -55,7 +59,8 @@
 // Token tags (internal): 1 Int 2 Ident 3 fn | 4 ( 5 ) 6 { 7 } 8 -> | 9 + 10 -
 // 11 * 12 / | 13 == 14 != 15 < 16 <= 17 > 18 >= | 19 && 20 || 21 | 22 ^ 23 &
 // 24 ! 25 = | 26 . 27 [ 28 ] 29 , 30 :: 31 : | 32 if 33 else 34 match 35 => |
-// 36 declassify 37 perform 38 scope 39 spawn 40 await.
+// 36 declassify 37 perform 38 scope 39 spawn 40 await 41 handle 42 with
+// 43 return.
 // Expr op-codes (internal; the dump emits node names + operator symbols):
 // binop 1 + 2 - 3 * 4 / 5 & 6 | 7 ^ ; cmp 8 == 9 != 10 < 11 <= 12 > 13 >= ;
 // logic 14 && 15 || ; unary 1 - 2 !.
@@ -83,6 +88,21 @@ enum Expr {
     Scope(Expr),
     Spawn(Expr),
     Await(Expr),
+    Handle(Expr, HArms, Ret),
+}
+
+// `handle` support (ADR 0039 A11). Handler arms are a cons-list of (effect, op,
+// body) — the params are parsed but NOT dumped. The optional `return v => body`
+// arm is kept SEPARATE (it dumps last, regardless of source order), filled via a
+// `&mut Ret` out-param threaded through the arm parse (the Rust `return_arm`).
+enum HArms {
+    HEnd,
+    HCell([u8], [u8], Expr, HArms),
+}
+
+enum Ret {
+    NoRet,
+    YesRet([u8], Expr),
 }
 
 // Cons-list of arguments (call / method args). A second enum, mutually recursive
@@ -213,6 +233,23 @@ fn is_kw_await(src: &[u8], start: i64, end: i64) -> bool {
         && (*src)[start + 2] == 'a' && (*src)[start + 3] == 'i' && (*src)[start + 4] == 't'
 }
 
+fn is_kw_handle(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 6 && (*src)[start] == 'h' && (*src)[start + 1] == 'a'
+        && (*src)[start + 2] == 'n' && (*src)[start + 3] == 'd' && (*src)[start + 4] == 'l'
+        && (*src)[start + 5] == 'e'
+}
+
+fn is_kw_with(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 4 && (*src)[start] == 'w' && (*src)[start + 1] == 'i'
+        && (*src)[start + 2] == 't' && (*src)[start + 3] == 'h'
+}
+
+fn is_kw_return(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 6 && (*src)[start] == 'r' && (*src)[start + 1] == 'e'
+        && (*src)[start + 2] == 't' && (*src)[start + 3] == 'u' && (*src)[start + 4] == 'r'
+        && (*src)[start + 5] == 'n'
+}
+
 // Append the decimal rendering of `x` (>= 0) to `out`.
 fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
     if x == 0 {
@@ -319,6 +356,12 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
                 39
             } else if is_kw_await(src, start, ie) {
                 40
+            } else if is_kw_handle(src, start, ie) {
+                41
+            } else if is_kw_with(src, start, ie) {
+                42
+            } else if is_kw_return(src, start, ie) {
+                43
             } else {
                 2
             };
@@ -507,9 +550,65 @@ fn parse_atom(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i6
         *cur = *cur + 1;
         let scall: Expr = parse_postfix(k, s, e, src, cur);
         Expr::Spawn(scall)
+    } else if tag == 41 {
+        // `handle <body> with { arms }`.
+        parse_handle(k, s, e, src, cur)
     } else {
         *cur = *cur + 1;
         Expr::Int(0)
+    }
+}
+
+// `handle <body> with { Eff.op(params) => arm, ... return v => arm }`. Handler
+// arms accumulate into an `HArms` list (params parsed but dropped); the single
+// optional `return` arm is filled into `ret` so it can dump LAST regardless of
+// where it appears in the source.
+fn parse_handle(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    *cur = *cur + 1;
+    let hbody: Expr = parse_expr(k, s, e, src, cur);
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let mut hret: Ret = Ret::NoRet;
+    let harms: HArms = parse_harms(k, s, e, src, cur, &mut hret);
+    Expr::Handle(hbody, harms, hret)
+}
+
+fn parse_harms(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, ret: &mut Ret) -> HArms {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        HArms::HEnd
+    } else if t == 29 {
+        *cur = *cur + 1;
+        parse_harms(k, s, e, src, cur, ret)
+    } else if t == 43 {
+        // `return <name> => <body>` — kept separate so it dumps last.
+        *cur = *cur + 1;
+        let rns: i64 = (*s)[*cur];
+        let rne: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let rbody: Expr = parse_expr(k, s, e, src, cur);
+        *ret = Ret::YesRet(slice_of(src, rns, rne), rbody);
+        parse_harms(k, s, e, src, cur, ret)
+    } else {
+        // `Effect.op(params) => body` — the params are skipped (not dumped).
+        let hes: i64 = (*s)[*cur];
+        let hee: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let hos: i64 = (*s)[*cur];
+        let hoe: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        while (*k)[*cur] != 5 {
+            *cur = *cur + 1;
+        }
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let hbody: Expr = parse_expr(k, s, e, src, cur);
+        let hrest: HArms = parse_harms(k, s, e, src, cur, ret);
+        HArms::HCell(slice_of(src, hes, hee), slice_of(src, hos, hoe), hbody, hrest)
     }
 }
 
@@ -1063,6 +1162,47 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         Expr::Await(aw) => {
             append_str(out, "(await ");
             dump_expr(out, aw);
+            push(out, ')');
+            0
+        },
+        Expr::Handle(hb, ha, hr) => {
+            append_str(out, "(handle ");
+            dump_expr(out, hb);
+            dump_harms(out, ha);
+            dump_ret(out, hr);
+            push(out, ')');
+            0
+        },
+    }
+}
+
+// Consuming dump of the handler-arm list: each ` (arm <effect> <op> <body>)`.
+fn dump_harms(out: &mut Vec<u8>, a: HArms) -> i64 {
+    match a {
+        HArms::HEnd => 0,
+        HArms::HCell(hef, hop, hbody, hrest) => {
+            append_str(out, " (arm ");
+            append_str(out, hef);
+            push(out, ' ');
+            append_str(out, hop);
+            push(out, ' ');
+            dump_expr(out, hbody);
+            push(out, ')');
+            dump_harms(out, hrest);
+            0
+        },
+    }
+}
+
+// Consuming dump of the optional return arm: ` (return <name> <body>)`.
+fn dump_ret(out: &mut Vec<u8>, r: Ret) -> i64 {
+    match r {
+        Ret::NoRet => 0,
+        Ret::YesRet(rnm, rbody) => {
+            append_str(out, " (return ");
+            append_str(out, rnm);
+            push(out, ' ');
+            dump_expr(out, rbody);
             push(out, ')');
             0
         },

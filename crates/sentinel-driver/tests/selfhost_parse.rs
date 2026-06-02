@@ -22,10 +22,14 @@
 //! keep parsing the head as a condition, not a struct literal). Increment-7 adds
 //! the effect / concurrency leaf forms: `declassify(e)`, `perform Eff.op(args)`,
 //! `scope concurrent { block }`, `spawn <call>`, and the `.await` postfix (the
-//! scope/while bodies stay statement-free until (2c)). `handle ... with { arms }`
-//! and the statement plus decl grammar grow the parser (and this corpus) in the
-//! later (2b)-(2d) slices toward the full `tests/pass` plus `tests/ui` set, the
-//! way `tests/selfhost_lex.rs` covers the corpus for `snc lex`.
+//! scope/while bodies stay statement-free until (2c)). Increment-8 adds `handle
+//! <body> with { Eff.op(params) => arm, ... return v => arm }` — which CLOSES the
+//! expression grammar (every `ExprKind` the oracle emits): handler-arm params are
+//! parsed but not dumped, and the optional `return` arm dumps last regardless of
+//! source order. The statement plus decl grammar grows the parser (and this
+//! corpus) in the later (2c)-(2d) slices toward the full `tests/pass` plus
+//! `tests/ui` set, the way `tests/selfhost_lex.rs` covers the corpus for
+//! `snc lex`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -183,6 +187,17 @@ const SEEDS: &[&str] = &[
     "fn cr() -> bool { match s { St::Done => declassify(perform Tls.verify(mac)), _ => false } }\n",
     "fn cs() -> i64 { if ready { spawn w(x) } else { compute().await } }\n",
     "fn ct() -> i64 { scope concurrent { declassify(perform Net.recv()) } }\n",
+    // (increment-8) handle — closes the expression grammar.
+    "fn ha() -> i64 { handle compute() with { Net.recv(k) => 5 } }\n",
+    "fn hb() -> i64 { handle b with { Net.recv(k) => 1, Net.send(v, k) => 2 } }\n",
+    "fn hc() -> i64 { handle b with { E.op(k) => 1, return v => v } }\n",
+    "fn hd() -> i64 { handle b with { return v => v } }\n",
+    "fn he2() -> i64 { handle b with { E.op() => 1 } }\n",
+    // return NOT last in source still dumps last (the &mut Ret separation).
+    "fn hf() -> i64 { handle b with { return v => v, E.op(k) => 1 } }\n",
+    // composed with the rest of the grammar.
+    "fn hg() -> i64 { g(handle b with { E.op(k) => declassify(s) }) }\n",
+    "fn hh() -> i64 { handle perform Net.recv() with { Net.recv(k) => 5, return v => v + 1 } }\n",
 ];
 
 #[test]
