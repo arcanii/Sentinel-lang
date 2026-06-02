@@ -336,6 +336,19 @@ close. See ## Amendments.
   `Bin(Node, Node)`, `struct`+`enum`+`fn` source-order interleaving) match `snc
   ast`; leak-free under `leaks --atExit`; a new `tests/ast.rs` golden pins the
   enum dump. Next: (2d-4) `effect` decls.
+- **A18 — (2d-4): `effect` decls.** `effect Name { op(p: T) -> R; … }` →
+  `(effect Name (op op (<params>) <ret>) …)`; an op's params dump like fn params;
+  a **missing** op return type dumps `_` (reusing the `TyOpt` / `dump_tyopt`
+  `let`-annotation convention). Empty → `(effect Name)`. Oracle: `Item` gains an
+  `Effect` variant + `dump_effect`. Parser: tokenizer tag `effect`(57) +
+  `is_kw_effect`; `dump_effect_decl` + a recursive `dump_ops` (reuses
+  `parse_params`; the optional `-> ret` parses into a `TyOpt` exactly like
+  `parse_let`, sidestepping a two-borrowing-arm `if`; the `;` terminators are
+  skipped); `dump_item` gains the effect arm. Verified: 172 differential seeds (6
+  new — ops with/without params + return type, empty, trailing `;`,
+  `effect`+`struct`+`fn`-with-effect-row interleaving) match `snc ast`; leak-free
+  under `leaks --atExit`; a new `tests/ast.rs` golden pins the effect dump. Next:
+  (2d-5) `trait` decls.
 
 Date: 2026-06-02
 Related:
