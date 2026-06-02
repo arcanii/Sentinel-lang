@@ -24,12 +24,14 @@
 //! `scope concurrent { block }`, `spawn <call>`, and the `.await` postfix.
 //! Increment-8 adds `handle <body> with { ... }` — which CLOSES the expression
 //! grammar (every `ExprKind` the oracle emits). (2c-1) then turns a block into a
-//! real `{ <stmt>* <tail> }`: `let` (un-annotated for now), assignment, `while`,
-//! `break`, `continue`, and expr-statements (a statement-only `while` body keeps
-//! the synthesized `(int 0)` tail). `let` type annotations, fn definitions, and
-//! the top-level decl grammar grow the parser (and this corpus) in the later
-//! (2c)-(2d) slices toward the full `tests/pass` plus `tests/ui` set, the way
-//! `tests/selfhost_lex.rs` covers the corpus for `snc lex`.
+//! real `{ <stmt>* <tail> }`: `let`, assignment, `while`, `break`, `continue`,
+//! and expr-statements (a statement-only `while` body keeps the synthesized
+//! `(int 0)` tail). (2c-2) adds the optional `let` type annotation via a
+//! `parse_type` covering `Ident` / `Ident<args>` / `[T]` / `?T` / `&T` / `&mut T`
+//! / `secret T` (and nesting). Fn definitions and the top-level decl grammar grow
+//! the parser (and this corpus) in the later (2c)-(2d) slices toward the full
+//! `tests/pass` plus `tests/ui` set, the way `tests/selfhost_lex.rs` covers the
+//! corpus for `snc lex`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -212,6 +214,21 @@ const SEEDS: &[&str] = &[
     // statements inside an if-branch / nested.
     "fn ni() -> i64 { if c { let x = 1; x } else { 2 } }\n",
     "fn nx() -> i64 { let mut s = 0; while i < n { s = s + g(i); spawn w(i); } declassify(s) }\n",
+    // (2c-2) let type annotations + parse_type (ident, array, generic, nullable,
+    // ref/refmut, secret, and nesting).
+    "fn ta() -> i64 { let x: i64 = 5; x }\n",
+    "fn tb() -> i64 { let mut y: bool = true; 0 }\n",
+    "fn tc() -> i64 { let a: [u8] = s; 0 }\n",
+    "fn td() -> i64 { let v: Vec<i64> = w; 0 }\n",
+    "fn te() -> i64 { let p: ?Point = null; 0 }\n",
+    "fn tf() -> i64 { let r: &i64 = x; 0 }\n",
+    "fn tg() -> i64 { let r: &mut i64 = x; 0 }\n",
+    "fn th() -> i64 { let sx: secret i64 = x; 0 }\n",
+    "fn ti() -> i64 { let m: Vec<[u8]> = x; 0 }\n",
+    "fn tj() -> i64 { let b: Box<Vec<i64>> = x; 0 }\n",
+    "fn tk() -> i64 { let mp: Map<i64, [u8]> = x; 0 }\n",
+    "fn tl() -> i64 { let sa: secret [u8] = x; 0 }\n",
+    "fn tm() -> i64 { let x = 5; let y: i64 = x; y }\n",
 ];
 
 #[test]
