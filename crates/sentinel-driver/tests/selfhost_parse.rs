@@ -28,10 +28,13 @@
 //! and expr-statements (a statement-only `while` body keeps the synthesized
 //! `(int 0)` tail). (2c-2) adds the optional `let` type annotation via a
 //! `parse_type` covering `Ident` / `Ident<args>` / `[T]` / `?T` / `&T` / `&mut T`
-//! / `secret T` (and nesting). Fn definitions and the top-level decl grammar grow
-//! the parser (and this corpus) in the later (2c)-(2d) slices toward the full
-//! `tests/pass` plus `tests/ui` set, the way `tests/selfhost_lex.rs` covers the
-//! corpus for `snc lex`.
+//! / `secret T` (and nesting). (2c-3) adds full `fn` definitions: a param list
+//! `( [mut] name: T, … )` → `(param [mut] name <type>)`, a `-> TYPE` return type
+//! (routed through `parse_type`), and — parsed but NOT dumped, matching the
+//! oracle — generic type-params `<…>` and the postfix effect row `! { … }`. The
+//! top-level decl grammar grows the parser (and this corpus) in the (2d) slice
+//! toward the full `tests/pass` plus `tests/ui` set, the way
+//! `tests/selfhost_lex.rs` covers the corpus for `snc lex`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -229,6 +232,21 @@ const SEEDS: &[&str] = &[
     "fn tk() -> i64 { let mp: Map<i64, [u8]> = x; 0 }\n",
     "fn tl() -> i64 { let sa: secret [u8] = x; 0 }\n",
     "fn tm() -> i64 { let x = 5; let y: i64 = x; y }\n",
+    // (2c-3) fn definitions: params, mut params, complex return types.
+    "fn add(a: i64, b: i64) -> i64 { a + b }\n",
+    "fn fm(mut x: i64) -> i64 { x = x + 1; x }\n",
+    "fn gr() -> [u8] { s }\n",
+    "fn hv(v: Vec<i64>) -> i64 { len(v) }\n",
+    "fn wp(p: &mut Point) -> i64 { 0 }\n",
+    "fn ctf(s: secret i64) -> secret i64 { s }\n",
+    "fn nf() -> ?Point { null }\n",
+    // (2c-3) generic type-params + effect row are parsed but NOT dumped.
+    "fn idf<T>(x: T) -> T { x }\n",
+    "fn prf<K, V>(k: K, v: V) -> i64 { 0 }\n",
+    "fn rf() -> i64 ! { Net } { perform Net.recv() }\n",
+    // (2c-3) multi-fn programs with params.
+    "fn add2(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { add2(1, 2) }\n",
+    "fn hdl<T>(s: secret [u8], n: i64) -> Vec<i64> ! { Net, Log } { let mut acc: i64 = 0; while i < n { acc = acc + g(i); } w }\n",
 ];
 
 #[test]

@@ -54,9 +54,17 @@
 //     `&T`/`&mut T` → `(ref …)`/`(refmut …)`, `?T` → `(opt …)`, `[T]` → `(arr …)`,
 //     `Ident` → the name, `Ident<args>` → `(generic name args…)` (nested generics
 //     close fine — `>>` lexes as two `>`). New tokens: `?` (50) + `secret` (51).
-// Still to come: (2c-3) fn defs with params / return type / effect row; (2d) the
-// top-level decls. Self-contained (its own minimal tokenizer); sharing the full
-// lexer via a D.6 module is a follow-on.
+//   (2c-3): `fn` DEFINITIONS — params `( [mut] name: T, … )` → `(param [mut] name
+//     <type>)` per param, the `-> TYPE` return type (now via `parse_type`, so a
+//     non-Ident return like `[u8]` dumps right). Generic type-params `<…>` and the
+//     postfix effect row `! { … }` are parsed-and-SKIPPED (the dump emits neither).
+//     The full fn dump is `(fn name (<param>…) <ret> <block>)`. CLOSES the
+//     fn-level grammar — every `Stmt` / `Expr` / `TypeExpr` / `Pattern` + the fn
+//     header now parse.
+// Still to come: (2d) the top-level decls (struct / enum / trait / impl / class /
+// effect / use) + completing `snc ast`'s Program dumper for them. Self-contained
+// (its own minimal tokenizer); sharing the full lexer via a D.6 module is a
+// follow-on.
 //
 // Sentinel idioms (ADR 0038 A2 / ADR 0039 A3 / A4): a recursive `Expr` enum
 // returned BY VALUE + consuming-dumped (no `Vec<Expr>`); variadic lists are a
@@ -161,6 +169,14 @@ enum TyArgs {
 enum TyOpt {
     NoTy,
     SomeTy(TypeE),
+}
+
+// fn-definition parameters (ADR 0039 A14): a cons-list of (mutable, name, type).
+// Generic type-params and the effect row are parsed-and-skipped (the `snc ast`
+// dump emits neither).
+enum Params {
+    PEnd,
+    PCell(bool, [u8], TypeE, Params),
 }
 
 // Cons-list of arguments (call / method args). A second enum, mutually recursive
@@ -1170,6 +1186,66 @@ fn parse_type_args(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &m
     }
 }
 
+// Parse a fn parameter list (`[mut] name : type`, comma-separated) up to and
+// consuming the closing `)` (tag 5). The opening `(` is already consumed.
+fn parse_params(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Params {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        Params::PEnd
+    } else if t == 29 {
+        *cur = *cur + 1;
+        parse_params(k, s, e, src, cur)
+    } else {
+        let pm: bool = (*k)[*cur] == 46;
+        if pm {
+            *cur = *cur + 1;
+            0
+        } else {
+            0
+        };
+        let pns: i64 = (*s)[*cur];
+        let pne: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let pty: TypeE = parse_type(k, s, e, src, cur);
+        let prest: Params = parse_params(k, s, e, src, cur);
+        Params::PCell(pm, slice_of(src, pns, pne), pty, prest)
+    }
+}
+
+// Skip a generic type-parameter list `<...>` (cur at the `<`, tag 15), balancing
+// nested `<`/`>` — the `snc ast` dump emits no type params, so they are consumed
+// but not stored.
+fn skip_type_params(k: &Vec<i64>, cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let mut depth: i64 = 1;
+    while depth > 0 {
+        let t: i64 = (*k)[*cur];
+        depth = if t == 15 {
+            depth + 1
+        } else if t == 17 {
+            depth - 1
+        } else {
+            depth
+        };
+        *cur = *cur + 1;
+    }
+    0
+}
+
+// Skip a fn effect row `! { Eff, ... }` (cur at the `!`, tag 24); the dump omits
+// it. The body is labels + commas — no nested braces — so skip to the `}`.
+fn skip_effect_row(k: &Vec<i64>, cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    while (*k)[*cur] != 7 {
+        *cur = *cur + 1;
+    }
+    *cur = *cur + 1;
+    0
+}
+
 // `if <cond> { <then> } else { <else> }` — `else` is mandatory (Sentinel has no
 // bare `if`); `else if` chains by wrapping the inner `if` in a block, matching
 // the Rust parser.
@@ -1268,6 +1344,48 @@ fn dump_targs(out: &mut Vec<u8>, a: TyArgs) -> i64 {
             push(out, ' ');
             dump_type(out, h);
             dump_targs(out, t);
+            0
+        },
+    }
+}
+
+// One parameter: `(param [mut] <name> <type>)`.
+fn dump_param_body(out: &mut Vec<u8>, pm: bool, pn: [u8], pt: TypeE) -> i64 {
+    append_str(out, "(param ");
+    if pm {
+        append_str(out, "mut ");
+        0
+    } else {
+        0
+    };
+    append_str(out, pn);
+    push(out, ' ');
+    dump_type(out, pt);
+    push(out, ')');
+    0
+}
+
+// The parameter list inside `( )`: params are space-SEPARATED (the first has no
+// leading space — it sits right after the list's open paren), so the first param
+// dumps here and the rest go through `dump_params_rest`.
+fn dump_params(out: &mut Vec<u8>, ps: Params) -> i64 {
+    match ps {
+        Params::PEnd => 0,
+        Params::PCell(pm, pn, pt, rest) => {
+            dump_param_body(out, pm, pn, pt);
+            dump_params_rest(out, rest);
+            0
+        },
+    }
+}
+
+fn dump_params_rest(out: &mut Vec<u8>, ps: Params) -> i64 {
+    match ps {
+        Params::PEnd => 0,
+        Params::PCell(pm, pn, pt, rest) => {
+            push(out, ' ');
+            dump_param_body(out, pm, pn, pt);
+            dump_params_rest(out, rest);
             0
         },
     }
@@ -1678,24 +1796,35 @@ fn main() -> i64 {
             0
         };
         firstfn = false;
-        // fn header: `fn` NAME `(` `)` `->` TYPE `{`
+        // fn header: `fn` NAME `<type-params>?` `(` params `)` `->` TYPE
+        // `! { effect-row }?` { body }
         cur = cur + 1;
         let name_s: i64 = starts[cur];
         let name_e: i64 = ends[cur];
         cur = cur + 1;
+        // Optional generic type-param list (parsed-and-skipped — not dumped).
+        if kinds[cur] == 15 {
+            skip_type_params(&kinds, &mut cur)
+        } else {
+            0
+        };
         cur = cur + 1;
+        let params: Params = parse_params(&kinds, &starts, &ends, &src, &mut cur);
         cur = cur + 1;
-        cur = cur + 1;
-        let ret_s: i64 = starts[cur];
-        let ret_e: i64 = ends[cur];
-        cur = cur + 1;
-        // The body is now a real block (statements + tail); parse_block consumes
-        // both braces and produces the `(block ...)` node.
+        let rty: TypeE = parse_type(&kinds, &starts, &ends, &src, &mut cur);
+        // Optional postfix effect row (parsed-and-skipped — not dumped).
+        if kinds[cur] == 24 {
+            skip_effect_row(&kinds, &mut cur)
+        } else {
+            0
+        };
         let body: Expr = parse_block(&kinds, &starts, &ends, &src, &mut cur);
         append_str(&mut out, "(fn ");
         append_slice(&mut out, &src, name_s, name_e);
-        append_str(&mut out, " () ");
-        append_slice(&mut out, &src, ret_s, ret_e);
+        append_str(&mut out, " (");
+        dump_params(&mut out, params);
+        append_str(&mut out, ") ");
+        dump_type(&mut out, rty);
         append_str(&mut out, " ");
         dump_expr(&mut out, body);
         append_str(&mut out, ")");
