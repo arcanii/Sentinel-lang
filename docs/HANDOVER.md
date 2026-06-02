@@ -2024,26 +2024,29 @@ For pasting into a fresh chat to bootstrap context:
     compute-then-emit-once); A3 lex-error parity deferred (the one `@` fixture is
     excluded); A4 reads a fixed `./input.sentinel` (no argv yet — the test sets
     the cwd).
-    **RESUME HERE → SELF-HOST PORT (2/N): the PARSER — ADR 0039 PROPOSED (read
-    it first).** Designed; now implement, starting with slice **(2a)**:
-    (1) **refactor `selfhost/lexer.sentinel` to RETURN a token stream** —
+    **RESUME HERE → SELF-HOST PORT (2/N): the PARSER — ADR 0039 PROPOSED, (2a)
+    UNDERWAY.** ✅ **(2a) gate DONE** — the recursive-AST drop gate
+    (`tests/pass/selfhost_ast_drop.sentinel`, exit 11, 0 leaks) confirms a
+    recursive-enum AST (i64/`[u8]`/recursive payloads) builds + consuming-walks +
+    drops leak-free, so **no D.1b fix is needed first** (ADR 0039 D4 cleared).
+    REMAINING (2a):
+    (1) **`snc ast <file>`** — a complete, regular S-expr canonical AST dump in
+    the Rust driver (the existing `snc parse` `Display` OMITS
+    enums/traits/impls/classes, so a FRESH dump; golden-test it; D2). The
+    parser's target.
+    (2) **refactor `selfhost/lexer.sentinel` to RETURN a token stream** —
     struct-of-arrays of scalars (`kinds`/`starts`/`ends`: `Vec<i64>`, lexemes
     re-sliced from `src`; D3 — dodges the D.3 `Vec<struct-with-[u8]>` drop gap),
-    keeping its (1/N) dump so `tests/selfhost_lex.rs` stays green;
-    (2) add **`snc ast <file>`** to the Rust driver — a complete, regular
-    S-expr-style canonical AST dump (the existing `snc parse` `Display` OMITS
-    enums/traits/impls/classes, so a fresh complete dump; golden-test it; D2);
-    (3) **the recursive-AST drop gate** — build a hand-made AST in Sentinel
-    (recursive enums + array payloads), dump + drop it, confirm leak-/UAF-free
-    (ADR 0032 A1's box-free recursive drop is UNTESTED at AST scale; if it leaks,
-    land D.1b payload-ownership FIRST);
-    (4) a minimal **expression** parser (literals + precedence binary/unary) +
-    `selfhost/parser.sentinel` emitting the canonical dump + a seed differential
-    test. Then (2b) full exprs, (2c) stmts+fns, (2d) the decls (D6). Reuse the
-    A2 quirk-workarounds (flat per-fn var namespace; deep-`if` tail-borrow).
-    Back-end-agnostic (Path A merge); Rust `snc` stays the oracle. **Before
-    coding: read ADR 0039** (D2 oracle, D3 token model, D4 the drop risk, D6
-    slices).
+    keeping its (1/N) dump so `tests/selfhost_lex.rs` stays green.
+    (3) a minimal **expression** parser (literals + precedence binary/unary,
+    wrapped in `fn main`) + `selfhost/parser.sentinel` building an `Expr` enum +
+    a CONSUMING recursive dump (the gate's proven shape) matching `snc ast` +
+    a seed differential test (mirror `tests/selfhost_lex.rs`).
+    Then (2b) full exprs, (2c) stmts+fns, (2d) the decls (ADR 0039 D6). Reuse
+    the A2 quirk-workarounds (flat per-fn var namespace → unique branch locals;
+    deep-`if` tail-borrow → compute-then-emit-once) + the new quirk: **match arms
+    need comma separators even with block bodies**. Back-end-agnostic (Path A
+    merge); Rust `snc` stays the oracle. **Before coding: read ADR 0039.**
     **ADR 0037 — settled decisions (with the language owner):** (a) **module
     surface = file-as-module + `use`** — a file *is* a module, its path
     relative to the source root (the entry file's dir) *is* its module path;
