@@ -16,11 +16,14 @@
 //! expressions (with mandatory `else` and `else if` chains) and brace blocks
 //! `{ <expr> }`, which are statement-free for now (just a tail). Increment-5
 //! adds `match <scrutinee> { pat => body, ... }` with `_` and qualified-variant
-//! patterns (positional bindings, themselves possibly `_`). Struct literals,
-//! perform/handle, and the statement plus decl grammar grow the parser (and
-//! this corpus) in the later (2b)-(2d) slices toward the full `tests/pass` plus
-//! `tests/ui` set, the way `tests/selfhost_lex.rs` covers the corpus for
-//! `snc lex`.
+//! patterns (positional bindings, themselves possibly `_`). Increment-6 adds
+//! struct literals `Name { f: v, ... }`, disambiguated from an if/match head's
+//! block by a context-free `{ Ident :` lookahead (so the head seeds below must
+//! keep parsing the head as a condition, not a struct literal). perform/handle,
+//! scope/spawn/await, declassify, and the statement plus decl grammar grow the
+//! parser (and this corpus) in the later (2b)-(2d) slices toward the full
+//! `tests/pass` plus `tests/ui` set, the way `tests/selfhost_lex.rs` covers the
+//! corpus for `snc lex`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -150,6 +153,18 @@ const SEEDS: &[&str] = &[
     "fn mi() -> i64 { g(match x { A::B => 1, _ => 0 }) }\n",
     "fn mj() -> i64 { match x { Color::Red => 1, _ => 0, } }\n",
     "fn mk() -> i64 { match parse(t) { Node::Bin(op, l, r) => eval(l) + eval(r), Node::Leaf(v) => v, _ => 0 } }\n",
+    // (increment-6) struct literals: single/multi field, expr values, nested.
+    "fn sa() -> i64 { Point { x: 1, y: 2 } }\n",
+    "fn sb() -> i64 { Wrapper { v: 42 } }\n",
+    "fn sc() -> i64 { P { x: a + 1, y: g(2) } }\n",
+    "fn sd() -> i64 { Outer { inner: Inner { y: 2 } } }\n",
+    "fn se2() -> i64 { g(Point { x: 1 }) }\n",
+    "fn sf2() -> i64 { [P { a: 1 }, Q { b: 2 }] }\n",
+    "fn sg() -> i64 { P { x: 1, } }\n",
+    // (increment-6) struct-lit-vs-block disambiguation (heads stay conditions).
+    "fn sh() -> i64 { if x { P { a: 1 } } else { Q { b: 2 } } }\n",
+    "fn si() -> i64 { (P { x: 1 }).x }\n",
+    "fn sj() -> i64 { match s { St::A => P { v: 1 }, _ => Q { v: 2 } } }\n",
 ];
 
 #[test]

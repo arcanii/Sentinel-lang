@@ -26,10 +26,16 @@
 //     dispatched at the top of parse_expr; arms comma-separated, bodies are exprs);
 //     patterns are `_` → `(pat _)` or `Enum::Variant(b1, b2)` → `(pat Enum Variant
 //     b1 b2)` with a positional binding cons-list.
-// Still to come (later (2b) increments / (2c) / (2d)): struct literals, perform /
-// handle, scope / spawn / await, declassify; then statements + fns-with-params/
-// blocks; then the top-level decls. Self-contained (its own minimal tokenizer);
-// sharing the full lexer via a D.6 module is a follow-on.
+//   increment-6: struct literals `Name { f1: e1, f2: e2 }` → `(struct-lit Name
+//     (field f1 e1) (field f2 e2))`. Disambiguated from an if/match/while head's
+//     block by a context-free `{ Ident :` lookahead (a block never starts with a
+//     single-colon `Ident :`), avoiding the Rust parser's `allow_struct_lit` flag.
+//     ⚠ an EMPTY struct literal `Name {}` is deferred (no `field :` to key on; it
+//     collides with an empty match / while body — the flag is the eventual fix).
+// Still to come (later (2b) increments / (2c) / (2d)): perform / handle, scope /
+// spawn / await, declassify; then statements + fns-with-params/blocks; then the
+// top-level decls. Self-contained (its own minimal tokenizer); sharing the full
+// lexer via a D.6 module is a follow-on.
 //
 // Sentinel idioms (ADR 0038 A2 / ADR 0039 A3 / A4): a recursive `Expr` enum
 // returned BY VALUE + consuming-dumped (no `Vec<Expr>`); variadic lists are a
@@ -66,6 +72,7 @@ enum Expr {
     If(Expr, Expr, Expr),
     BlockE(Expr),
     Match(Expr, Arms),
+    StructLit([u8], Fields),
 }
 
 // Cons-list of arguments (call / method args). A second enum, mutually recursive
@@ -91,6 +98,12 @@ enum Pattern {
 enum Binds {
     BindEnd,
     BindCell([u8], Binds),
+}
+
+// Struct-literal field list (ADR 0039 A9): a cons-list of (name, value).
+enum Fields {
+    FieldEnd,
+    FieldCell([u8], Expr, Fields),
 }
 
 fn is_space(c: u8) -> bool {
@@ -391,6 +404,15 @@ fn parse_atom(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i6
             *cur = *cur + 1;
             let cargs: Args = parse_args(k, s, e, src, cur, 5);
             Expr::Call(slice_of(src, vst, ven), cargs)
+        } else if (*k)[*cur] == 6 && (*k)[*cur + 1] == 2 && (*k)[*cur + 2] == 31 {
+            // `Name { field : ... }` — a struct literal. The `{ Ident :`
+            // lookahead is the disambiguation (vs the Rust parser's
+            // `allow_struct_lit` flag): `{ Ident :` only ever begins a struct
+            // literal — a block / match-body / if-body never starts with a
+            // single-colon `Ident :` — so it is context-free on clean input.
+            *cur = *cur + 1;
+            let sfields: Fields = parse_fields(k, s, e, src, cur);
+            Expr::StructLit(slice_of(src, vst, ven), sfields)
         } else {
             Expr::Var(slice_of(src, vst, ven))
         }
@@ -691,6 +713,27 @@ fn parse_binds(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i
     }
 }
 
+// Parse struct-literal fields (`name : value`, comma-separated) up to and
+// consuming the closing `}` (tag 7). The opening `{` is already consumed.
+fn parse_fields(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Fields {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        Fields::FieldEnd
+    } else if t == 29 {
+        *cur = *cur + 1;
+        parse_fields(k, s, e, src, cur)
+    } else {
+        let fnm_s: i64 = (*s)[*cur];
+        let fnm_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let fval: Expr = parse_expr(k, s, e, src, cur);
+        let frest: Fields = parse_fields(k, s, e, src, cur);
+        Fields::FieldCell(slice_of(src, fnm_s, fnm_e), fval, frest)
+    }
+}
+
 // A statement-free brace block `{ <expr> }` (statements arrive at (2c)). Returns
 // the block wrapper; dumps as `(block <tail>)`.
 fn parse_block(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
@@ -895,6 +938,29 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
             dump_expr(out, mscr);
             dump_arms(out, marms);
             push(out, ')');
+            0
+        },
+        Expr::StructLit(sn, sf) => {
+            append_str(out, "(struct-lit ");
+            append_str(out, sn);
+            dump_fields(out, sf);
+            push(out, ')');
+            0
+        },
+    }
+}
+
+// Consuming dump of a struct-literal field list: each ` (field <name> <value>)`.
+fn dump_fields(out: &mut Vec<u8>, f: Fields) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fv, fr) => {
+            append_str(out, " (field ");
+            append_str(out, fnm);
+            push(out, ' ');
+            dump_expr(out, fv);
+            push(out, ')');
+            dump_fields(out, fr);
             0
         },
     }
