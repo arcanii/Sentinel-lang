@@ -19,7 +19,7 @@
 //! (2d-1, this increment): `use a::b::Item;` → `(use a b Item)`.
 
 use sentinel_ast::{Block, EffectDecl, EnumDecl, Expr, ExprKind, FnDef, Param, Pattern, Program,
-    Stmt, StmtKind, StructDecl, TypeExpr, TypeExprKind, UseDecl};
+    SelfKind, Stmt, StmtKind, StructDecl, TraitDecl, TypeExpr, TypeExprKind, UseDecl};
 
 /// One top-level declaration, tagged for the source-order re-collation in
 /// [`dump`]. Grows a variant per (2d) increment as each decl kind lands.
@@ -29,6 +29,15 @@ enum Item<'a> {
     Struct(&'a StructDecl),
     Enum(&'a EnumDecl),
     Effect(&'a EffectDecl),
+    Trait(&'a TraitDecl),
+}
+
+/// The `self` receiver kind as a bare dump word.
+fn self_kind_word(k: SelfKind) -> &'static str {
+    match k {
+        SelfKind::Shared => "shared",
+        SelfKind::Exclusive => "exclusive",
+    }
 }
 
 /// Canonical S-expression dump of `program` — every top-level decl in source
@@ -51,6 +60,9 @@ pub fn dump(program: &Program) -> String {
     for ef in &program.effects {
         items.push((ef.span.start, Item::Effect(ef)));
     }
+    for tr in &program.traits {
+        items.push((tr.span.start, Item::Trait(tr)));
+    }
     items.sort_by_key(|(start, _)| *start);
 
     let mut out = String::new();
@@ -66,6 +78,7 @@ pub fn dump(program: &Program) -> String {
             Item::Struct(s) => dump_struct(s, &mut out),
             Item::Enum(en) => dump_enum(en, &mut out),
             Item::Effect(ef) => dump_effect(ef, &mut out),
+            Item::Trait(tr) => dump_trait(tr, &mut out),
         }
     }
     out.push('\n');
@@ -137,6 +150,32 @@ fn dump_effect(e: &EffectDecl, out: &mut String) {
             Some(t) => dump_type(t, out),
             None => out.push('_'),
         }
+        out.push(')');
+    }
+    out.push(')');
+}
+
+/// `trait Name { fn m(self: &Self, p: T) -> R; … }` → `(trait Name (method m
+/// <shared|exclusive> (<params>) <ret>) …)`. Trait method sigs have no body; the
+/// non-self params dump like fn params; `self` dumps as its kind word, the
+/// effect row is omitted. Empty → `(trait Name)`.
+fn dump_trait(t: &TraitDecl, out: &mut String) {
+    out.push_str("(trait ");
+    out.push_str(&t.name);
+    for m in &t.methods {
+        out.push_str(" (method ");
+        out.push_str(&m.name);
+        out.push(' ');
+        out.push_str(self_kind_word(m.self_kind));
+        out.push_str(" (");
+        for (i, p) in m.params.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            dump_param(p, out);
+        }
+        out.push_str(") ");
+        dump_type(&m.return_type, out);
         out.push(')');
     }
     out.push(')');

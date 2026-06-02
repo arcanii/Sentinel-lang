@@ -386,6 +386,11 @@ fn is_kw_effect(src: &[u8], start: i64, end: i64) -> bool {
         && (*src)[start + 5] == 't'
 }
 
+fn is_kw_trait(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 5 && (*src)[start] == 't' && (*src)[start + 1] == 'r'
+        && (*src)[start + 2] == 'a' && (*src)[start + 3] == 'i' && (*src)[start + 4] == 't'
+}
+
 // Append the decimal rendering of `x` (>= 0) to `out`.
 fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
     if x == 0 {
@@ -520,6 +525,8 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
                 53
             } else if is_kw_effect(src, start, ie) {
                 57
+            } else if is_kw_trait(src, start, ie) {
+                54
             } else {
                 2
             };
@@ -1286,6 +1293,25 @@ fn skip_effect_row(k: &Vec<i64>, cur: &mut i64) -> i64 {
     0
 }
 
+// (2d-5) Consume a method's mandatory `self : & [mut] Self` receiver clause (cur
+// at `self`) and return whether it is exclusive (`&mut Self`). `self` / `Self`
+// lex as plain idents here, so consume positionally: ident `:`(31) `&`(23)
+// `[mut(46)]` ident. Used by trait / impl / class method headers.
+fn parse_self_kind(k: &Vec<i64>, cur: &mut i64) -> bool {
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let excl: bool = (*k)[*cur] == 46;
+    if excl {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    *cur = *cur + 1;
+    excl
+}
+
 // `if <cond> { <then> } else { <else> }` — `else` is mandatory (Sentinel has no
 // bare `if`); `else if` chains by wrapping the inner `if` in a block, matching
 // the Rust parser.
@@ -2032,6 +2058,76 @@ fn dump_ops(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[
     }
 }
 
+// (2d-5) Parse a method header `fn name ( self:&[mut]Self [, params] ) -> ret
+// [! { eff }]` (cur at `fn`) and emit ` (method name <shared|exclusive>
+// (<params>) <ret>` — NO closing paren (the caller adds `)` for a trait sig, or
+// ` <block>)` for an impl/class method). The self receiver is consumed by
+// parse_self_kind; parse_params then consumes the rest of the list (it skips a
+// leading `,` and ends on `)`, so it handles both `(self: &Self)` and
+// `(self: &Self, x: T)`). The effect row is parsed-and-skipped. Shared by trait
+// (2d-5) / impl (2d-6) / class (2d-7) methods.
+fn dump_method_head(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let mn_s: i64 = (*s)[*cur];
+    let mn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let excl: bool = parse_self_kind(k, cur);
+    let mparams: Params = parse_params(k, s, e, src, cur);
+    *cur = *cur + 1;
+    let mret: TypeE = parse_type(k, s, e, src, cur);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    let skw: [u8] = if excl {
+        "exclusive"
+    } else {
+        "shared"
+    };
+    append_str(out, " (method ");
+    append_slice(out, src, mn_s, mn_e);
+    push(out, ' ');
+    append_str(out, skw);
+    append_str(out, " (");
+    dump_params(out, mparams);
+    append_str(out, ") ");
+    dump_type(out, mret);
+    0
+}
+
+// (2d-5) `trait Name { fn m(self: &Self, …) -> R; … }` → `(trait Name (method m
+// <self> (<params>) <ret>) …)`. Trait method sigs have NO body (`;`-terminated).
+// The leading `trait` is at the cursor.
+fn dump_trait_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    append_str(out, "(trait ");
+    append_slice(out, src, nm_s, nm_e);
+    dump_trait_methods(out, k, s, e, src, cur);
+    push(out, ')');
+    0
+}
+
+// Parse + dump trait method sigs up to and consuming the closing `}` (tag 7):
+// each `fn … ;` → ` (method …)`. The `;` after each sig is consumed here.
+fn dump_trait_methods(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else {
+        dump_method_head(out, k, s, e, src, cur);
+        *cur = *cur + 1;
+        push(out, ')');
+        dump_trait_methods(out, k, s, e, src, cur)
+    }
+}
+
 // Dispatch one top-level decl on its leading token (2d). A SINGLE helper that
 // re-passes the ref params to the per-kind dumpers, so main has ONE borrow site:
 // sibling `if`-tail `&mut` borrows of a *local* (`&mut out` / `&mut cur` in
@@ -2055,6 +2151,8 @@ fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
         dump_enum_decl(out, k, s, e, src, cur)
     } else if lead == 57 {
         dump_effect_decl(out, k, s, e, src, cur)
+    } else if lead == 54 {
+        dump_trait_decl(out, k, s, e, src, cur)
     } else {
         dump_fn_decl(out, k, s, e, src, cur)
     }

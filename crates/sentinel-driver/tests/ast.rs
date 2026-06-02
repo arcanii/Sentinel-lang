@@ -115,3 +115,19 @@ fn ast_dump_effect_decls() {
          (fn main () i64 (block (int 0)))\n"
     );
 }
+
+#[test]
+fn ast_dump_trait_decls() {
+    // (2d-5) trait method sigs (no body): `self` dumps as shared/exclusive, the
+    // non-self params dump like fn params, the effect row is omitted; empty →
+    // `(trait Name)`.
+    assert_eq!(
+        ast_dump(
+            "traits",
+            "trait Writer { fn write(self: &mut Self, n: i64) -> i64; fn cap(self: &Self) -> i64; }\ntrait Marker {}\nfn main() -> i64 { 0 }\n"
+        ),
+        "(trait Writer (method write exclusive ((param n i64)) i64) (method cap shared () i64))\n\
+         (trait Marker)\n\
+         (fn main () i64 (block (int 0)))\n"
+    );
+}

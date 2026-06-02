@@ -281,6 +281,14 @@ const SEEDS: &[&str] = &[
     "effect E { a(); b() -> bool; c(x: secret i64); }\nfn main() -> i64 { 0 }\n",
     "effect Tls { verify(mac: [u8]) -> bool }\nfn main() -> i64 { 0 }\n",
     "effect Net { recv() -> i64; }\nstruct S { x: i64 }\nfn handler() -> i64 ! { Net } { perform Net.recv() }\nfn main() -> i64 { 0 }\n",
+    // (2d-5) `trait` decls — &Self / &mut Self receivers (shared/exclusive), extra
+    // params, complex return types, effect-row methods, empty, and interleaving.
+    "trait Writer { fn write(self: &mut Self, n: i64) -> i64; fn cap(self: &Self) -> i64; }\nfn main() -> i64 { 0 }\n",
+    "trait Marker {}\nfn main() -> i64 { 0 }\n",
+    "trait Reader { fn read(self: &Self) -> [u8]; }\nfn main() -> i64 { 0 }\n",
+    "trait Multi { fn f(self: &Self, a: i64, b: secret [u8]) -> Vec<i64>; }\nfn main() -> i64 { 0 }\n",
+    "trait Eff { fn go(self: &mut Self) -> i64 ! { Net, Log }; }\nfn main() -> i64 { 0 }\n",
+    "enum E { A }\ntrait T { fn m(self: &Self) -> i64; }\nstruct S { x: i64 }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]
