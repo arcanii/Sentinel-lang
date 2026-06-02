@@ -14,9 +14,12 @@
 //     `t.field`, indexing `t[i]`, and method calls `t.m(args)` — chained left to
 //     right over an atom. Argument lists are a cons-list (`Args`), since
 //     `Vec<non-primitive>` is unsupported.
-// Still to come (later (2b) increments / (2c) / (2d)): `::` paths (qualified
-// call / class init / enum construction), struct + array literals, `if` / `match`,
-// perform / handle, scope / spawn / await, declassify; then statements +
+//   increment-3: the `::` paths after an identifier — qualified call
+//     `Impl::method(args)` → `(qcall ...)`, class init `Name::init(args)` →
+//     `(class-init ...)`, and bare/unit `Enum::Variant` (a paren-less qcall) — plus
+//     array literals `[e1, e2, ...]` → `(array ...)`. All reuse the `Args` list.
+// Still to come (later (2b) increments / (2c) / (2d)): struct literals, `if` /
+// `match`, perform / handle, scope / spawn / await, declassify; then statements +
 // fns-with-params/blocks; then the top-level decls. Self-contained (its own
 // minimal tokenizer); sharing the full lexer via a D.6 module is a follow-on.
 //
@@ -33,7 +36,7 @@
 //
 // Token tags (internal): 1 Int 2 Ident 3 fn | 4 ( 5 ) 6 { 7 } 8 -> | 9 + 10 -
 // 11 * 12 / | 13 == 14 != 15 < 16 <= 17 > 18 >= | 19 && 20 || 21 | 22 ^ 23 &
-// 24 ! 25 = | 26 . 27 [ 28 ] 29 ,.
+// 24 ! 25 = | 26 . 27 [ 28 ] 29 , 30 :: 31 :.
 // Expr op-codes (internal; the dump emits node names + operator symbols):
 // binop 1 + 2 - 3 * 4 / 5 & 6 | 7 ^ ; cmp 8 == 9 != 10 < 11 <= 12 > 13 >= ;
 // logic 14 && 15 || ; unary 1 - 2 !.
@@ -49,6 +52,9 @@ enum Expr {
     Method(Expr, [u8], Args),
     Field(Expr, [u8]),
     Index(Expr, Expr),
+    Qcall([u8], [u8], Args),
+    ClassInit([u8], Args),
+    Array(Args),
 }
 
 // Cons-list of arguments (call / method args). A second enum, mutually recursive
@@ -94,6 +100,14 @@ fn is_kw_false(src: &[u8], start: i64, end: i64) -> bool {
 fn is_kw_null(src: &[u8], start: i64, end: i64) -> bool {
     end - start == 4 && (*src)[start] == 'n' && (*src)[start + 1] == 'u'
         && (*src)[start + 2] == 'l' && (*src)[start + 3] == 'l'
+}
+
+// After `::`, the name `init` (with parens) is class instantiation; any other
+// name (or bare `init`) is a qualified call. The lexer has no `init` keyword in
+// this self-contained tokenizer, so compare the slice in place.
+fn is_kw_init(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 4 && (*src)[start] == 'i' && (*src)[start + 1] == 'n'
+        && (*src)[start + 2] == 'i' && (*src)[start + 3] == 't'
 }
 
 // Append the decimal rendering of `x` (>= 0) to `out`.
@@ -208,6 +222,7 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
                 || (b == '>' && nx == '=')
                 || (b == '&' && nx == '&')
                 || (b == '|' && nx == '|')
+                || (b == ':' && nx == ':')
                 || (b == '-' && nx == '>');
             let tg: i64 = if b == '+' {
                 9
@@ -247,6 +262,8 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
                 28
             } else if b == ',' {
                 29
+            } else if b == ':' {
+                if nx == ':' { 30 } else { 31 }
             } else {
                 0
             };
@@ -291,34 +308,61 @@ fn parse_atom(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i6
             Expr::Bool(false)
         } else if is_kw_null(src, vst, ven) {
             Expr::Null
+        } else if (*k)[*cur] == 30 {
+            // `Name::tail ...` — qualified call / class init / unit construction.
+            // `Name::init(args)` is a class init; everything else (incl. bare
+            // `Name::Variant` with no parens) is a qualified call.
+            *cur = *cur + 1;
+            let mst: i64 = (*s)[*cur];
+            let men: i64 = (*e)[*cur];
+            let isinit: bool = is_kw_init(src, mst, men);
+            *cur = *cur + 1;
+            if (*k)[*cur] == 4 {
+                *cur = *cur + 1;
+                let qargs: Args = parse_args(k, s, e, src, cur, 5);
+                if isinit {
+                    Expr::ClassInit(slice_of(src, vst, ven), qargs)
+                } else {
+                    Expr::Qcall(slice_of(src, vst, ven), slice_of(src, mst, men), qargs)
+                }
+            } else {
+                Expr::Qcall(slice_of(src, vst, ven), slice_of(src, mst, men), Args::End)
+            }
         } else if (*k)[*cur] == 4 {
             // `name(args)` — a free function call (the callee is a name, not an
             // expr; only postfix `.m(args)` calls a value).
             *cur = *cur + 1;
-            let cargs: Args = parse_args(k, s, e, src, cur);
+            let cargs: Args = parse_args(k, s, e, src, cur, 5);
             Expr::Call(slice_of(src, vst, ven), cargs)
         } else {
             Expr::Var(slice_of(src, vst, ven))
         }
+    } else if tag == 27 {
+        // `[e1, e2, ...]` — array literal (an atom-position `[`; a post-atom `[`
+        // is the index operator, handled in parse_postfix_rest).
+        *cur = *cur + 1;
+        let aelems: Args = parse_args(k, s, e, src, cur, 28);
+        Expr::Array(aelems)
     } else {
         *cur = *cur + 1;
         Expr::Int(0)
     }
 }
 
-// Parse a comma-separated argument list, the opening `(` already consumed, and
-// consume the closing `)`. Builds the cons-list head-first via recursion.
-fn parse_args(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Args {
+// Parse a comma-separated expression list, the opening bracket already consumed,
+// up to and consuming the closing-bracket token `term` (`)`=5 for call args,
+// `]`=28 for array elements). Builds the cons-list head-first via recursion.
+fn parse_args(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, term: i64) -> Args {
     let t: i64 = (*k)[*cur];
-    if t == 5 {
+    if t == term {
         *cur = *cur + 1;
         Args::End
     } else if t == 29 {
         *cur = *cur + 1;
-        parse_args(k, s, e, src, cur)
+        parse_args(k, s, e, src, cur, term)
     } else {
         let head: Expr = parse_expr(k, s, e, src, cur);
-        let tail: Args = parse_args(k, s, e, src, cur);
+        let tail: Args = parse_args(k, s, e, src, cur, term);
         Args::Cell(head, tail)
     }
 }
@@ -339,7 +383,7 @@ fn parse_postfix_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur:
         *cur = *cur + 1;
         if (*k)[*cur] == 4 {
             *cur = *cur + 1;
-            let margs: Args = parse_args(k, s, e, src, cur);
+            let margs: Args = parse_args(k, s, e, src, cur, 5);
             parse_postfix_rest(k, s, e, src, cur, Expr::Method(acc, slice_of(src, fs, fe), margs))
         } else {
             parse_postfix_rest(k, s, e, src, cur, Expr::Field(acc, slice_of(src, fs, fe)))
@@ -642,6 +686,28 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
             dump_expr(out, it);
             push(out, ' ');
             dump_expr(out, ii);
+            push(out, ')');
+            0
+        },
+        Expr::Qcall(qi, qm, qa) => {
+            append_str(out, "(qcall ");
+            append_str(out, qi);
+            push(out, ' ');
+            append_str(out, qm);
+            dump_args(out, qa);
+            push(out, ')');
+            0
+        },
+        Expr::ClassInit(ci, cia) => {
+            append_str(out, "(class-init ");
+            append_str(out, ci);
+            dump_args(out, cia);
+            push(out, ')');
+            0
+        },
+        Expr::Array(ae) => {
+            append_str(out, "(array");
+            dump_args(out, ae);
             push(out, ')');
             0
         },

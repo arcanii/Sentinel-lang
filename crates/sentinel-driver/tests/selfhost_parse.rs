@@ -7,13 +7,16 @@
 //! multiplicative, prefix unary, parens) plus the scalar atom leaves (integer,
 //! `true`, `false`, `null` literals, variable refs). Increment-2 adds function
 //! calls `f(args)` and the postfix chain: field `t.field`, index `t[i]`, and
-//! method `t.m(args)`. The tree shape (not source order) is what the dump pins,
-//! so seeds mixing every level, and chaining postfix over calls, prove the
-//! whole grammar. The `::` paths, struct and array literals, `if`/`match`,
-//! perform/handle, and the statement plus decl grammar grow the parser (and
-//! this corpus) in the later (2b)-(2d) slices toward the full `tests/pass` plus
-//! `tests/ui` set, the way `tests/selfhost_lex.rs` covers the corpus for
-//! `snc lex`.
+//! method `t.m(args)`. Increment-3 adds the `::` paths after an identifier
+//! (qualified call `A::b(args)`, class init `Name::init(args)`, and the
+//! paren-less unit form `Enum::Variant`) plus array literals `[e1, e2, ...]`,
+//! all reusing the argument-list cons-list. The tree shape (not source order)
+//! is what the dump pins, so seeds mixing every level, and chaining postfix
+//! over calls/qcalls/arrays, prove the whole grammar. Struct literals,
+//! `if`/`match`, perform/handle, and the statement plus decl grammar grow the
+//! parser (and this corpus) in the later (2b)-(2d) slices toward the full
+//! `tests/pass` plus `tests/ui` set, the way `tests/selfhost_lex.rs` covers the
+//! corpus for `snc lex`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -104,6 +107,24 @@ const SEEDS: &[&str] = &[
     "fn ck() -> i64 { a[0] + b.c }\n",
     "fn cl() -> i64 { -a.b + !c[0] }\n",
     "fn cm() -> i64 { x.foo(1).bar[k].baz(y, z) }\n",
+    // (increment-3) `::` paths: qualified call, class init, unit construction.
+    "fn qa() -> i64 { A::b() }\n",
+    "fn qb() -> i64 { A::b(1, 2) }\n",
+    "fn qc() -> i64 { Color::Red }\n",
+    "fn qd() -> i64 { Point::init(1, 2) }\n",
+    "fn qe() -> i64 { Empty::init() }\n",
+    "fn qf() -> i64 { Foo::init }\n",
+    // (increment-3) array literals (incl. empty, expr elems, then postfix index).
+    "fn ar() -> i64 { [1, 2, 3] }\n",
+    "fn ae() -> i64 { [] }\n",
+    "fn ax() -> i64 { [a + 1, b * 2] }\n",
+    "fn ai() -> i64 { [1, 2][0] }\n",
+    "fn ao() -> i64 { [1][0] + 2 }\n",
+    // (increment-3) interaction with postfix / calls / each other.
+    "fn qg() -> i64 { A::b().c }\n",
+    "fn qh() -> i64 { f(A::b(), [1, 2]) }\n",
+    "fn qi() -> i64 { g(A::b(x), [1, h(3)], Point::init(y, z)) }\n",
+    "fn qj() -> i64 { [A::b(), c.d][0].e }\n",
 ];
 
 #[test]
