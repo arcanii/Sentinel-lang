@@ -14,8 +14,8 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2b)
-increment-7: declassify / perform / scope / spawn / await (ADR 0039 A10).**
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2b) the
+full EXPRESSION grammar COMPLETE; increment-8 `handle` (ADR 0039 A11).**
 Movement 1 (the language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for
@@ -83,11 +83,19 @@ increment-7 (ADR 0039 A10):** the effect / concurrency leaf forms — `declassif
 `scope concurrent { block }` → `(scope (block …))`, `spawn <call>` → `(spawn …)`,
 and the `.await` **postfix** → `(await target)`; `Expr` gained
 `Declassify`/`Perform`/`Scope`/`Spawn`/`Await` + five keyword tags (scope/while
-bodies stay statement-free until (2c)). The diff corpus grew to **102 seeds** (all
-of the above + composites), all matching `snc ast`, leak-free. Remaining: **(2b)
-`handle`** (closes the expression grammar); then **(2c)** statements +
-fns-with-params/blocks, **(2d)** the top-level decls — each growing the parser + its
-diff corpus toward the full `tests/pass` + `tests/ui` set. Recap of the movement-1 close:
+bodies stay statement-free until (2c)). **(2b) increment-8 (ADR 0039 A11):**
+`handle <body> with { Eff.op(params) => arm, … return v => arm }` →
+`(handle body (arm Eff op armbody)… (return v body))` — handler-arm params parsed
+but NOT dumped; the optional `return` arm kept SEPARATE (a `&mut Ret` out-param,
+the first non-primitive `&mut` assignment in the port — de-risked by a probe) so it
+dumps LAST regardless of source order; `Expr` gained `Handle` + the `HArms`/`Ret`
+enums. **This CLOSES the (2b) expression grammar** — every `ExprKind` the oracle
+emits now parses. The diff corpus is **110 seeds** (the full expression surface +
+composites), all matching `snc ast`, leak-free. Remaining: **(2c)** statements
+(`let`/assign/`while`/`break`/`continue`/expr-stmt — turning the statement-free
+`BlockE` into a real block) + `fn`-with-params/return-type/effect-row, **(2d)** the
+top-level decls — each growing the parser + its diff corpus toward the full
+`tests/pass` + `tests/ui` set. Recap of the movement-1 close:
 after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
 (file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
 compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want

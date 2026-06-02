@@ -15,10 +15,12 @@ postfix chain (field / index / method), **increment-3 (A6)** landed the `::`
 paths (qualified call / class init / unit construction) + array literals,
 **increment-4 (A7)** landed `if`-expressions + brace blocks, **increment-5 (A8)**
 landed `match` expressions + patterns, **increment-6 (A9)** landed struct
-literals, and **increment-7 (A10)** landed the effect/concurrency leaf forms
-(`declassify` / `perform` / `scope` / `spawn` / `.await`). Remaining (2b): just
-`handle` (closes the expression grammar); then slices (2c)–(2d) per D6 grow it
-toward the full corpus; the ADR flips fully as they close. See ## Amendments.
+literals, **increment-7 (A10)** landed the effect/concurrency leaf forms
+(`declassify` / `perform` / `scope` / `spawn` / `.await`), and **increment-8 (A11)**
+landed `handle` — **closing the (2b) expression grammar** (every `ExprKind` the
+oracle emits now parses). Remaining: slices (2c) statements + fns and (2d) the
+top-level decls per D6 grow it toward the full corpus; the ADR flips fully as they
+close. See ## Amendments.
 
 ## Amendments (in progress — (2a) + (2b) landing)
 
@@ -198,6 +200,29 @@ toward the full corpus; the ADR flips fully as they close. See ## Amendments.
   compute().await }`, `scope concurrent { declassify(perform Net.recv()) }`) match
   `snc ast`; leak-free under `leaks --atExit`. **Remaining in (2b):** only
   `handle … with { arms }` — which closes the expression grammar.
+- **A11 — (2b) increment-8: `handle` — closes the expression grammar.**
+  `handle <body> with { Eff.op(params) => arm, … return v => arm }` →
+  `(handle body (arm Eff op armbody)… (return v body))` (a `parse_atom` keyword
+  case). **Two subtleties, both handled faithfully:** (i) the handler arm's
+  **params are parsed but NOT dumped** (skipped to the closing `)`; the dump is
+  just `(arm Eff op body)`); (ii) the optional `return v => body` arm is kept
+  **separate** from the handler-arm list and **dumps LAST** regardless of its
+  source position — the arm parse fills a **`&mut Ret` out-param** when it sees
+  `return` (mirroring the Rust `return_arm`). The out-param **assigns an enum value
+  through a `&mut` ref** (`*ret = Ret::YesRet(…)`) — the first non-primitive `&mut`
+  assignment in the port (the cursor is `&mut i64`); **de-risked by a probe** (it
+  compiles, runs, and is leak-free; `return`-not-last verified to still dump last).
+  `Expr` gains `Handle(Expr, HArms, Ret)`; new `HArms = HEnd | HCell([u8], [u8],
+  Expr, HArms)` and `Ret = NoRet | YesRet([u8], Expr)`; three keyword tags
+  (`handle` 41 / `with` 42 / `return` 43). Verified: 110 differential seeds (single/
+  multi-arm handlers, return arms incl. return-not-last + empty params, composed
+  forms like `g(handle …)` and `handle perform … with …`) match `snc ast`;
+  leak-free under `leaks --atExit`. **(2b) the full expression grammar is COMPLETE**
+  — operators, atoms, calls, postfix, `::` paths, arrays, `if`/blocks,
+  `match`/patterns, struct literals, declassify/perform/scope/spawn/await, handle.
+  **Next: (2c)** statements (`let` / assign / `while` / `break` / `continue` /
+  expr-stmt — turning the statement-free `BlockE` into a real block) + `fn`
+  definitions with params/return-type/effect-row; then **(2d)** the top-level decls.
 
 Date: 2026-06-02
 Related:
