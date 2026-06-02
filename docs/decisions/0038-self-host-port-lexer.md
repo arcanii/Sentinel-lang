@@ -1,12 +1,38 @@
 # ADR 0038: Phase D self-host port (movement 2) — kickoff + (1/N) lexer-in-Sentinel
 
-Status: PROPOSED — opens **movement 2** of Phase D (ADR 0031 D5): porting the
-`snc` compiler to Sentinel, stage by stage, each differentially validated against
-the Rust `snc` oracle, converging on the bootstrap fixed-point. This ADR opens the
-port and designs its **first sub-phase — the lexer**; each later stage (parser →
-resolve → types → HIR/MIR → codegen) gets its own ADR. Flips to
-ACCEPTED-WITH-AMENDMENTS when the lexer sub-phase lands (the Sentinel lexer matches
-the Rust lexer on the whole fixture corpus).
+Status: **ACCEPTED-WITH-AMENDMENTS** — opens **movement 2** of Phase D (ADR 0031
+D5): porting the `snc` compiler to Sentinel, stage by stage, each differentially
+validated against the Rust `snc` oracle, converging on the bootstrap fixed-point.
+This ADR opens the port and designs its **first sub-phase — the lexer**, which has
+**LANDED**: `snc lex` (the oracle) + `selfhost/lexer.sentinel` (all 69 `TokenKind`s)
++ a corpus-wide differential test — the Sentinel lexer matches `snc lex` on every
+clean-lexing fixture (139/139 in `tests/pass` + `tests/ui`). Each later stage
+(parser → resolve → types → HIR/MIR → codegen) gets its own ADR. See ## Amendments.
+
+## Amendments (at lexer (1/N) close)
+
+- **A1 — direct emission, no Token enum (D7).** (1/N) emits the canonical dump
+  *directly* into an output `Vec<u8>` rather than building a `Token` enum +
+  `Vec<Token>` as D7 sketched. The dump is the contract; the internal token model
+  is deferred to (2/N), where the parser actually needs the lexer to *return* a
+  token list. Smaller, and it validates the hard part (spans / longest-match /
+  keyword classification) without the extra machinery.
+- **A2 — Sentinel-language workarounds the port surfaced.** Two quirks of the
+  current language shaped the implementation (and are noted for future ergonomics):
+  (i) a **flat per-fn variable namespace** — no shadowing or re-declaration, even
+  across disjoint `if`-arms — so each branch uses uniquely-named locals; (ii) a
+  deep `if`-chain with a borrowing call (`emit`) in each arm's **tail position**
+  makes the lexical borrow checker treat the sibling `&mut Vec` borrows as
+  overlapping, so the operator dispatch computes the kind + length first and emits
+  in a single statement. Neither is a blocker; both are candidates for later
+  language polish.
+- **A3 — lex-error parity deferred (D6/D8).** The differential corpus excludes the
+  one deliberate lex-error fixture (`tests/ui/lex_invalid_char.sentinel`, `let x =
+  @`); (1/N) validates happy-path token production. Lexer error parity (bad escapes,
+  unterminated literals, invalid bytes) is a follow-on slice.
+- **A4 — input via a fixed relative path.** With no argv access yet, the Sentinel
+  lexer reads `./input.sentinel`; the differential test stages each fixture there +
+  runs the lexer with that cwd. An argv/stdin surface is a later convenience.
 
 Date: 2026-06-02
 Related:

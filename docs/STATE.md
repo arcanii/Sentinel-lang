@@ -14,15 +14,21 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — OPENING (ADR 0038
-PROPOSED).** Movement 1 (the language/stdlib build-out, ADR 0031 D2) is
-**complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3 `Vec<T>`, D.4 file
-I/O, D.5 loops, D.6 modules — so **the language gate for self-hosting is cleared**.
-Movement 2 ports `snc` to Sentinel stage by stage, each **differentially validated
-against the Rust `snc` oracle** (ADR 0031 D5); the **first sub-phase is the
-lexer-in-Sentinel** (ADR 0038: a `snc lex` token-dump oracle + a `selfhost/`
-`.sentinel` tree + a corpus diff; the Rust `snc` stays the production compiler +
-oracle until the bootstrap fixed-point bakes). Recap of the movement-1 close:
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (1/N) LEXER COMPLETE
+(ADR 0038 → ACCEPTED-WITH-AMENDMENTS).** Movement 1 (the language/stdlib build-out,
+ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
+`Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for
+self-hosting is cleared**. Movement 2 ports `snc` to Sentinel stage by stage, each
+**differentially validated against the Rust `snc` oracle** (ADR 0031 D5). **(1/N)
+the LEXER has landed:** `snc lex <file>` (the oracle — a canonical token dump) +
+`selfhost/lexer.sentinel` (the FIRST compiler stage in Sentinel, reproducing all 69
+`TokenKind`s) + a corpus-wide differential test asserting the Sentinel lexer's dump
+equals `snc lex` for **every clean-lexing fixture (139/139** in `tests/pass` +
+`tests/ui`; the lone deliberate lex-error fixture is excluded — error parity is a
+follow-on). It dogfoods the post-1.0 language (`[u8]`/`u8`, `Vec`, `read_file`/
+`print_bytes`, `while`). The Rust `snc` stays the production compiler + oracle until
+the bootstrap fixed-point bakes. NEXT: **(2/N) the parser** (`snc parse` is the
+oracle; the lexer grows to return a token list). Recap of the movement-1 close:
 after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
 (file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
 compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want
