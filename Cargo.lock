@@ -1178,6 +1178,7 @@ dependencies = [
  "insta",
  "miette",
  "salsa",
+ "sentinel-ast",
  "sentinel-base",
  "sentinel-borrow-check",
  "sentinel-codegen",

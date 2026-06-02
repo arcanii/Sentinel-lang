@@ -32,6 +32,8 @@
 //! from every front-end stage including borrow check transitively
 //! accumulate on borrow_check_query.
 
+mod ast_dump;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -64,6 +66,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.as_slice() {
         [_, cmd, path] if cmd == "lex" => run_lex(path),
+        [_, cmd, path] if cmd == "ast" => run_ast(path),
         [_, cmd, path] if cmd == "parse" => run_parse(path),
         [_, cmd, path] if cmd == "build" => run_build(path, None),
         [_, cmd, path, flag, output] if cmd == "build" && flag == "-o" => {
@@ -89,6 +92,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("usage:");
     eprintln!("    snc lex <file>                   lex and dump the token stream (self-host oracle)");
+    eprintln!("    snc ast <file>                   parse and dump the canonical AST (self-host oracle)");
     eprintln!("    snc parse <file>                 lex, parse, and pretty-print the program");
     eprintln!("    snc build <file> [-o <output>]   compile and link to an executable");
     eprintln!("    snc help                         show this message");
@@ -152,6 +156,30 @@ fn is_value_bearing(kind: TokenKind) -> bool {
         kind,
         TokenKind::Ident | TokenKind::IntLit | TokenKind::StringLit | TokenKind::CharLit
     )
+}
+
+/// Phase D self-host port (2/N) / ADR 0039 D2: the parser differential
+/// oracle. Parse `path` and print the canonical S-expression AST dump
+/// (`ast_dump`) the Sentinel-written parser must reproduce byte-for-byte.
+/// Distinct from `snc parse` (the human pretty-print). A dev surface, not
+/// `abi-v1`; pinned by a golden test.
+fn run_ast(path: &str) -> ExitCode {
+    let src = match read_source(path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let db = SentinelDatabase::default();
+    let file = SourceFile::new(&db, path.to_string(), src.clone());
+    let program_opt = sentinel_syntax::parse_query(&db, file);
+    let diags = sentinel_syntax::parse_query::accumulated::<Diagnostic>(&db, file);
+    render_diagnostics(&diags, path, &src);
+    match program_opt {
+        Some(program) => {
+            print!("{}", ast_dump::dump(program));
+            ExitCode::SUCCESS
+        }
+        None => ExitCode::from(1),
+    }
 }
 
 fn run_parse(path: &str) -> ExitCode {
