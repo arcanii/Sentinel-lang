@@ -297,6 +297,18 @@ const SEEDS: &[&str] = &[
     "impl as W for S { fn a(self: &Self) -> i64 { 1 } fn b(self: &mut Self, x: i64) -> i64 { let y = x + 1; y } }\nfn main() -> i64 { 0 }\n",
     "impl as W for S { pub fn a(self: &Self) -> i64 { 1 } }\nfn main() -> i64 { 0 }\n",
     "trait Writer { fn write(self: &mut Self, n: i64) -> i64; }\nimpl as Writer for FileSink { fn write(self: &mut Self, n: i64) -> i64 { n } }\nstruct FileSink { fd: i64 }\nfn main() -> i64 { 0 }\n",
+    // (2d-7) `class` decls — fields/init/methods/delegates BUCKET in the AST, so
+    // they dump grouped in that fixed order (NOT source order). The `Weird` seed
+    // (method before field in source) proves the bucketing; `pub` items + empty
+    // + interleaving covered too.
+    "class Point { let x: i64; let y: i64; init(a: i64, b: i64) { let p = a; p } fn sum(self: &Self) -> i64 { 0 } }\nfn main() -> i64 { 0 }\n",
+    "class Empty {}\nfn main() -> i64 { 0 }\n",
+    "class Wrap { let inner: FileSink; delegate w: FileSink to Writer; }\nfn main() -> i64 { 0 }\n",
+    "class C { let v: i64; init(n: i64) { n } }\nfn main() -> i64 { 0 }\n",
+    "class M { fn a(self: &Self) -> i64 { 1 } fn b(self: &mut Self, x: i64) -> i64 { x } }\nfn main() -> i64 { 0 }\n",
+    "class Pub { pub let x: i64; pub fn get(self: &Self) -> i64 { 0 } }\nfn main() -> i64 { 0 }\n",
+    "class Weird { fn m(self: &Self) -> i64 { 0 } let x: i64; }\nfn main() -> i64 { 0 }\n",
+    "struct S { a: i64 }\nclass C { let x: i64; init(n: i64) { n } }\ntrait T { fn f(self: &Self) -> i64; }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]

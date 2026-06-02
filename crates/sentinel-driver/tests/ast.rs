@@ -146,3 +146,20 @@ fn ast_dump_impl_decls() {
          (fn main () i64 (block (int 0)))\n"
     );
 }
+
+#[test]
+fn ast_dump_class_decls() {
+    // (2d-7) class items bucket: fields, then init, then methods, then delegates
+    // — regardless of source order. The `Weird` class writes a method before a
+    // field, but the dump still emits the field first (the bucketing).
+    assert_eq!(
+        ast_dump(
+            "classes",
+            "class Point { let x: i64; init(a: i64) { a } fn sum(self: &Self) -> i64 { 0 } delegate w: FileSink to Writer; }\nclass Weird { fn m(self: &Self) -> i64 { 0 } let x: i64; }\nclass Empty {}\nfn main() -> i64 { 0 }\n"
+        ),
+        "(class Point (field x i64) (init ((param a i64)) (block (var a))) (method sum shared () i64 (block (int 0))) (delegate w FileSink Writer))\n\
+         (class Weird (field x i64) (method m shared () i64 (block (int 0))))\n\
+         (class Empty)\n\
+         (fn main () i64 (block (int 0)))\n"
+    );
+}

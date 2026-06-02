@@ -18,8 +18,9 @@
 //!
 //! (2d-1, this increment): `use a::b::Item;` → `(use a b Item)`.
 
-use sentinel_ast::{Block, EffectDecl, EnumDecl, Expr, ExprKind, FnDef, ImplDecl, Param, Pattern,
-    Program, SelfKind, Stmt, StmtKind, StructDecl, TraitDecl, TypeExpr, TypeExprKind, UseDecl};
+use sentinel_ast::{Block, ClassDecl, EffectDecl, EnumDecl, Expr, ExprKind, FnDef, ImplDecl, Param,
+    Pattern, Program, SelfKind, Stmt, StmtKind, StructDecl, TraitDecl, TypeExpr, TypeExprKind,
+    UseDecl};
 
 /// One top-level declaration, tagged for the source-order re-collation in
 /// [`dump`]. Grows a variant per (2d) increment as each decl kind lands.
@@ -31,6 +32,7 @@ enum Item<'a> {
     Effect(&'a EffectDecl),
     Trait(&'a TraitDecl),
     Impl(&'a ImplDecl),
+    Class(&'a ClassDecl),
 }
 
 /// The `self` receiver kind as a bare dump word.
@@ -87,6 +89,9 @@ pub fn dump(program: &Program) -> String {
     for im in &program.impls {
         items.push((im.span.start, Item::Impl(im)));
     }
+    for c in &program.classes {
+        items.push((c.span.start, Item::Class(c)));
+    }
     items.sort_by_key(|(start, _)| *start);
 
     let mut out = String::new();
@@ -104,6 +109,7 @@ pub fn dump(program: &Program) -> String {
             Item::Effect(ef) => dump_effect(ef, &mut out),
             Item::Trait(tr) => dump_trait(tr, &mut out),
             Item::Impl(im) => dump_impl(im, &mut out),
+            Item::Class(c) => dump_class(c, &mut out),
         }
     }
     out.push('\n');
@@ -214,6 +220,53 @@ fn dump_impl(i: &ImplDecl, out: &mut String) {
         dump_method_sig(&m.name, m.self_kind, &m.params, &m.return_type, out);
         out.push(' ');
         dump_block(&m.body, out);
+        out.push(')');
+    }
+    out.push(')');
+}
+
+/// `class Name { let f: T; init(p: T) { … } fn m(self: &Self) -> R { … }
+/// delegate g: T to Tr; }` → `(class Name (field f <type>) … (init (<params>)
+/// <block>)? (method m <self> (<params>) <ret> <block>) … (delegate g <type>
+/// Tr) …)`. Class items are **bucketed** in the AST (fields / init / methods /
+/// delegates), so they dump in that fixed order regardless of source order;
+/// visibility is omitted. Empty → `(class Name)`.
+fn dump_class(c: &ClassDecl, out: &mut String) {
+    out.push_str("(class ");
+    out.push_str(&c.name);
+    for f in &c.fields {
+        out.push_str(" (field ");
+        out.push_str(&f.name);
+        out.push(' ');
+        dump_type(&f.ty, out);
+        out.push(')');
+    }
+    if let Some(init) = &c.init {
+        out.push_str(" (init (");
+        for (i, p) in init.params.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            dump_param(p, out);
+        }
+        out.push_str(") ");
+        dump_block(&init.body, out);
+        out.push(')');
+    }
+    for m in &c.methods {
+        out.push(' ');
+        dump_method_sig(&m.name, m.self_kind, &m.params, &m.return_type, out);
+        out.push(' ');
+        dump_block(&m.body, out);
+        out.push(')');
+    }
+    for d in &c.delegates {
+        out.push_str(" (delegate ");
+        out.push_str(&d.field_name);
+        out.push(' ');
+        dump_type(&d.ty, out);
+        out.push(' ');
+        out.push_str(&d.trait_name);
         out.push(')');
     }
     out.push(')');

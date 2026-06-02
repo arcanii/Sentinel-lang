@@ -404,6 +404,19 @@ fn is_kw_for(src: &[u8], start: i64, end: i64) -> bool {
     end - start == 3 && (*src)[start] == 'f' && (*src)[start + 1] == 'o' && (*src)[start + 2] == 'r'
 }
 
+fn is_kw_class(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 5 && (*src)[start] == 'c' && (*src)[start + 1] == 'l'
+        && (*src)[start + 2] == 'a' && (*src)[start + 3] == 's' && (*src)[start + 4] == 's'
+}
+
+// `delegate` is a class-body keyword that lexes as a plain ident here (like
+// `init`); recognised by slice-compare inside the class item dispatch.
+fn is_kw_delegate(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 8 && (*src)[start] == 'd' && (*src)[start + 1] == 'e'
+        && (*src)[start + 2] == 'l' && (*src)[start + 3] == 'e' && (*src)[start + 4] == 'g'
+        && (*src)[start + 5] == 'a' && (*src)[start + 6] == 't' && (*src)[start + 7] == 'e'
+}
+
 // Append the decimal rendering of `x` (>= 0) to `out`.
 fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
     if x == 0 {
@@ -546,6 +559,8 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
                 60
             } else if is_kw_for(src, start, ie) {
                 61
+            } else if is_kw_class(src, start, ie) {
+                56
             } else {
                 2
             };
@@ -2211,13 +2226,132 @@ fn dump_impl_methods(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>
     }
 }
 
+// (2d-7) `class Name { let f: T; init(p: T){…} fn m(self…){…} delegate g: T to
+// Tr; }` → `(class Name (field f <type>)… (init (<params>) <block>)? (method
+// …)… (delegate g <type> Tr)…)`. 🔑 The class AST BUCKETS items (fields / init /
+// methods / delegates), so the dump emits them GROUPED in that fixed order —
+// NOT source order (unlike every other decl, which dumps inline as it scans).
+// So we scan the body ONCE, routing each item's dump into a per-kind `Vec<u8>`
+// buffer, then concatenate the four buffers in order. The leading `class` is at
+// the cursor.
+fn dump_class_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let mut fbuf: Vec<u8> = vec_new();
+    let mut ibuf: Vec<u8> = vec_new();
+    let mut mbuf: Vec<u8> = vec_new();
+    let mut dbuf: Vec<u8> = vec_new();
+    dump_class_items(&mut fbuf, &mut ibuf, &mut mbuf, &mut dbuf, k, s, e, src, cur);
+    append_str(out, "(class ");
+    append_slice(out, src, nm_s, nm_e);
+    append_str(out, vec_to_array(fbuf));
+    append_str(out, vec_to_array(ibuf));
+    append_str(out, vec_to_array(mbuf));
+    append_str(out, vec_to_array(dbuf));
+    push(out, ')');
+    0
+}
+
+// Scan class items up to and consuming the closing `}` (tag 7), routing each
+// into its per-kind buffer: `let`→fields, `init`→init, `fn`→methods,
+// `delegate`→delegates (`init`/`delegate` lex as plain idents — slice-compared).
+// An optional per-item `pub` (tag 59) is skipped.
+fn dump_class_items(fbuf: &mut Vec<u8>, ibuf: &mut Vec<u8>, mbuf: &mut Vec<u8>, dbuf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    if (*k)[*cur] == 59 {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 45 {
+        dump_class_field(fbuf, k, s, e, src, cur);
+        dump_class_items(fbuf, ibuf, mbuf, dbuf, k, s, e, src, cur)
+    } else if t == 3 {
+        dump_method_head(mbuf, k, s, e, src, cur);
+        let cmbody: Expr = parse_block(k, s, e, src, cur);
+        push(mbuf, ' ');
+        dump_expr(mbuf, cmbody);
+        push(mbuf, ')');
+        dump_class_items(fbuf, ibuf, mbuf, dbuf, k, s, e, src, cur)
+    } else if is_kw_init(src, (*s)[*cur], (*e)[*cur]) {
+        dump_class_init(ibuf, k, s, e, src, cur);
+        dump_class_items(fbuf, ibuf, mbuf, dbuf, k, s, e, src, cur)
+    } else {
+        dump_class_delegate(dbuf, k, s, e, src, cur);
+        dump_class_items(fbuf, ibuf, mbuf, dbuf, k, s, e, src, cur)
+    }
+}
+
+// A class field `let name : type ;` → ` (field name <type>)`.
+fn dump_class_field(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let fn_s: i64 = (*s)[*cur];
+    let fn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let fty: TypeE = parse_type(k, s, e, src, cur);
+    *cur = *cur + 1;
+    append_str(buf, " (field ");
+    append_slice(buf, src, fn_s, fn_e);
+    push(buf, ' ');
+    dump_type(buf, fty);
+    push(buf, ')');
+    0
+}
+
+// A class `init ( params ) { body }` → ` (init (<params>) <block>)` (no self,
+// no return type).
+fn dump_class_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let iparams: Params = parse_params(k, s, e, src, cur);
+    let ibody: Expr = parse_block(k, s, e, src, cur);
+    append_str(buf, " (init (");
+    dump_params(buf, iparams);
+    append_str(buf, ") ");
+    dump_expr(buf, ibody);
+    push(buf, ')');
+    0
+}
+
+// A class `delegate field : type to Trait ;` → ` (delegate field <type> Trait)`
+// (`to` is a positional ident).
+fn dump_class_delegate(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let fn_s: i64 = (*s)[*cur];
+    let fn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let dty: TypeE = parse_type(k, s, e, src, cur);
+    *cur = *cur + 1;
+    let tr_s: i64 = (*s)[*cur];
+    let tr_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    append_str(buf, " (delegate ");
+    append_slice(buf, src, fn_s, fn_e);
+    push(buf, ' ');
+    dump_type(buf, dty);
+    push(buf, ' ');
+    append_slice(buf, src, tr_s, tr_e);
+    push(buf, ')');
+    0
+}
+
 // Dispatch one top-level decl on its leading token (2d). A SINGLE helper that
 // re-passes the ref params to the per-kind dumpers, so main has ONE borrow site:
 // sibling `if`-tail `&mut` borrows of a *local* (`&mut out` / `&mut cur` in
 // main) conflict under the lexical borrow checker (ADR 0038 A2), but re-passing
 // a `&mut` *param* across if-tails is fine (cf. parse_postfix_rest). An optional
-// `pub` prefix is parsed-and-skipped (the dump omits visibility). `use` = 58;
-// everything else is a `fn` until later (2d) increments add struct/enum/…/class.
+// `pub` prefix is parsed-and-skipped (the dump omits visibility). Leading tags:
+// use=58, struct=52, enum=53, effect=57, trait=54, impl=55, class=56; else fn.
 fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     if (*k)[*cur] == 59 {
         *cur = *cur + 1;
@@ -2238,6 +2372,8 @@ fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
         dump_trait_decl(out, k, s, e, src, cur)
     } else if lead == 55 {
         dump_impl_decl(out, k, s, e, src, cur)
+    } else if lead == 56 {
+        dump_class_decl(out, k, s, e, src, cur)
     } else {
         dump_fn_decl(out, k, s, e, src, cur)
     }
