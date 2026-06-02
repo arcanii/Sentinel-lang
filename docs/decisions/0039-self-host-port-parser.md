@@ -287,6 +287,30 @@ close. See ## Amendments.
   handler) match `snc ast`; leak-free. **This closes the fn-level grammar.** Next:
   (2d) the top-level decls (struct / enum / trait / impl / class / effect / use) +
   completing `snc ast`'s `Program` dumper for them — the last parser slice.
+- **A15 — (2d-1): `use` decls + the top-level-decl dispatch (opens slice (2d)).**
+  `use a::b::Item;` → `(use a b Item)` (each path segment space-separated).
+  **The oracle now dumps every decl in SOURCE ORDER.** The parsed `Program`
+  buckets decls into per-kind `Vec`s (uses / fns / structs / …), losing
+  cross-kind source order; `ast_dump::dump` re-collates them into one list
+  **sorted by span start** — exactly the order the Sentinel parser emits them as
+  it scans the token stream top-to-bottom (so the Sentinel side needs no
+  bucketing across top-level decls; it just dumps each as it parses). A tagged
+  `Item` enum drives the dispatch (it grows a variant per (2d) increment). On the
+  parser side, `main`'s fn-only loop becomes a `dump_item` dispatcher on the
+  leading token (`use`=58, else `fn`); the fn body is factored into
+  `dump_fn_decl`, and `dump_use_decl` emits the path inline. **An optional `pub`
+  prefix is parsed-and-skipped** (the dump omits visibility, like fn generics /
+  effect rows) — matching `parse_program`'s `parse_optional_visibility`. ⚠ The
+  dispatch lives in a **single `dump_item` helper** that re-passes the ref params
+  to the per-kind dumpers, because **sibling `if`-tail `&mut` borrows of a
+  *local* conflict** under the lexical borrow checker (the ADR 0038 A2 quirk:
+  `&mut out` / `&mut cur` in two arms read as overlapping) — but **re-passing a
+  `&mut` *param* across if-tails is fine** (the proven `parse_postfix_rest`
+  shape). New tokenizer tags `use`(58) + `pub`(59) + `is_kw_use` / `is_kw_pub`
+  (52–61 reserved for the decl keywords). Verified: 152 differential seeds (4 new
+  `use` seeds, incl. multi-`use` + fn) match `snc ast`; leak-free under `leaks
+  --atExit`; a new `tests/ast.rs` golden pins the source-order `use` dump. Next:
+  (2d-2) `struct` decls.
 
 Date: 2026-06-02
 Related:

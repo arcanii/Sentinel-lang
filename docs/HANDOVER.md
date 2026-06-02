@@ -1865,8 +1865,10 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host PARSER (2c-3)
-    docs** commit, atop its feat (`feat(selfhost): parser (2c-3) — fn definitions`,
+    Local HEAD: verify with `git log -1` — expect the **self-host PARSER (2d-1)
+    docs** commit, atop its feat (`feat(selfhost): parser (2d-1) — use decls +
+    top-level decl dispatch`, `debaa24`), atop the (2c-3) docs (`2b61793`) + feat
+    (`feat(selfhost): parser (2c-3) — fn definitions`,
     `b2a9c3b`), atop the (2c-2) docs (`dc2b153`) + feat (`5f47546`), the (2c-1) docs
     (`f650896`) + feat (`b293c62`), the (2b) increment-8 docs (`40c9978`) + feat
     (`189990e`), increment-7 docs (`9b440d6`) + feat (`af76636`), increment-6 docs
@@ -1876,15 +1878,18 @@ For pasting into a fresh chat to bootstrap context:
     (`1b7d17c`), increment-1 docs (`7870bed`) + feat (`0e84f36`), atop the (2a)
     docs (`c7ebc39`) + parser feat (`8d6aa6e`) + `snc ast` oracle (`7f10740`) +
     recursive-AST drop gate + ADR 0039, atop the lexer (1/N) + the D.6
-    cross-module work. Clean tree; **1402 tests** (the (2b)/(2c) seeds expanded
-    the single `selfhost_parse` differential test in place — no new test fns; now
-    148 seeds); four-check green via `cargo nextest run --workspace` + `cargo test
+    cross-module work. Clean tree; **1403 tests** (the (2b)/(2c)/(2d) seeds expand
+    the single `selfhost_parse` differential test in place; now 152 seeds — plus
+    a new `tests/ast.rs` golden for the source-order `use` dump); four-check green
+    via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0039**
     (THE active task — self-host port (2/N) the parser, ACCEPTED-WITH-AMENDMENTS;
     (2a) + (2b) the full expression grammar + (2c) statements/types/fn-defs landed —
-    the fn-level grammar is COMPLETE; RESUME AT below = (2d) top-level decls) +
+    the fn-level grammar is COMPLETE; **(2d) is UNDERWAY** — (2d-1, A15) `use` decls
+    + the top-level-decl dispatch landed; RESUME AT below = (2d-2) `struct` decls,
+    then enum / effect / trait / impl / class) +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
