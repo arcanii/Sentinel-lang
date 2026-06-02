@@ -349,6 +349,27 @@ close. See ## Amendments.
   `effect`+`struct`+`fn`-with-effect-row interleaving) match `snc ast`; leak-free
   under `leaks --atExit`; a new `tests/ast.rs` golden pins the effect dump. Next:
   (2d-5) `trait` decls.
+- **A19 — (2d-5): `trait` decls + the method machinery.** `trait Name { fn
+  m(self: &Self, p: T) -> R; … }` → `(trait Name (method m <shared|exclusive>
+  (<params>) <ret>) …)`. Trait method sigs have **no body** (`;`-terminated); the
+  `self` receiver dumps as its kind word (`shared`/`exclusive`), the non-self
+  params dump like fn params, the effect row is omitted. Empty → `(trait Name)`.
+  **Introduces the method machinery shared by impl (2d-6) + class (2d-7):** (i)
+  `parse_self_kind` consumes `self : & [mut] Self` **positionally** (`self` /
+  `Self` lex as plain idents in the self-contained tokenizer) and returns whether
+  it is exclusive; (ii) `dump_method_head` parses `fn name ( self [, params] ) ->
+  ret [! {eff}]` and emits ` (method name <self> (<params>) <ret>` with **no
+  closing paren** — the caller adds `)` (trait) or ` <block>)` (impl/class). 🔑
+  After the self receiver, **`parse_params` consumes the rest of the list** (it
+  already skips a leading `,` and ends on `)`, so it handles both `(self: &Self)`
+  and `(self: &Self, x: T)` with no special-casing). Oracle: `Item` gains a
+  `Trait` variant + `dump_trait` + a `self_kind_word`. Parser: tokenizer tag
+  `trait`(54) + `is_kw_trait`; `dump_trait_decl` + `dump_trait_methods`;
+  `dump_item` gains the trait arm. Verified: 178 differential seeds (6 new —
+  `&Self`/`&mut Self` receivers, extra params, complex returns, effect-row
+  methods, empty, `enum`+`trait`+`struct` interleaving) match `snc ast`; leak-free
+  under `leaks --atExit`; a new `tests/ast.rs` golden pins the trait dump. Next:
+  (2d-6) `impl` decls.
 
 Date: 2026-06-02
 Related:

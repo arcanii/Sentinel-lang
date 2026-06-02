@@ -14,10 +14,10 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2d-4):
-`effect` decls (ADR 0039 A18) — the (2d) top-level-decl slice is underway (`use` +
-`struct` + `enum` + `effect` landed); the fn-LEVEL grammar (2c) is complete.**
-Movement 1 (the language/stdlib build-out,
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2d-5):
+`trait` decls + method sigs (ADR 0039 A19) — the (2d) top-level-decl slice is
+underway (`use` + `struct` + `enum` + `effect` + `trait` landed); the fn-LEVEL
+grammar (2c) is complete.** Movement 1 (the language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for
 self-hosting is cleared**. Movement 2 ports `snc` to Sentinel stage by stage, each
@@ -127,10 +127,13 @@ inline. **(2d-3) (A17):** `enum Name { V1, V2(T), … }` →
 `(enum Name (variant V1) (variant V2 <type>) …)` (unit vs positional-payload
 variants; empty → `(enum Name)`; non-generic). **(2d-4) (A18):** `effect Name {
 op(p: T) -> R; … }` → `(effect Name (op op (<params>) <ret>) …)` (a missing op
-return dumps `_`, reusing `TyOpt`; empty → `(effect Name)`). 172 seeds match `snc
-ast`, leak-free. Remaining: **trait / impl / class** + then growing the diff
-corpus toward the full `tests/pass` + `tests/ui` set. Recap of the movement-1
-close:
+return dumps `_`, reusing `TyOpt`; empty → `(effect Name)`). **(2d-5) (A19):**
+`trait Name { fn m(self: &Self, …) -> R; … }` → `(trait Name (method m
+<shared|exclusive> (<params>) <ret>) …)` (sigs have no body; `self` dumps as its
+kind word; introduces `parse_self_kind` + `dump_method_head`, shared by
+impl/class). 178 seeds match `snc ast`, leak-free. Remaining: **impl / class** +
+then growing the diff corpus toward the full `tests/pass` + `tests/ui` set. Recap
+of the movement-1 close:
 after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
 (file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
 compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want
