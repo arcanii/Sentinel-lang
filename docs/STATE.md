@@ -14,11 +14,17 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D.5 — loops (`while` + `break`/`continue`) — COMPLETE
-(ADR 0036 → ACCEPTED-WITH-AMENDMENTS; (1/N) + (2/N) landed).** Post-1.0, **Phase D
-(self-hosting) is underway** (ADR 0031 — a language/stdlib build-out). After D.1
-(sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4 (file I/O),
-the surface had been **recursion-only by design**; **D.5 adds loops** — a
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — OPENING (ADR 0038
+PROPOSED).** Movement 1 (the language/stdlib build-out, ADR 0031 D2) is
+**complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3 `Vec<T>`, D.4 file
+I/O, D.5 loops, D.6 modules — so **the language gate for self-hosting is cleared**.
+Movement 2 ports `snc` to Sentinel stage by stage, each **differentially validated
+against the Rust `snc` oracle** (ADR 0031 D5); the **first sub-phase is the
+lexer-in-Sentinel** (ADR 0038: a `snc lex` token-dump oracle + a `selfhost/`
+`.sentinel` tree + a corpus diff; the Rust `snc` stays the production compiler +
+oracle until the bootstrap fixed-point bakes). Recap of the movement-1 close:
+after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
+(file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
 compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want
 bounded, stack-safe iteration with early exit. **(1/N)** landed `while <cond> {
 <body> }`: **a loop is a STATEMENT** (`StmtKind::While`, not an expression — no
@@ -90,11 +96,15 @@ UNHANDLED cross-module effect in `main` → rejected (UnhandledEffect); and
 `Pair`/`make_pair`/`fst` — all instantiated in a different module than
 their definition, exit 42) — they work for free because Path A's
 whole-program `collect_mono_instantiations` runs over the merged graph.
-Single-file unaffected. FOLLOW-UPS (still (1/N)/(2/N)): per-unit objects +
-module-qualified `abi-v1` mangling + multi-object link (true separate
-compilation back end — incl. the per-unit `linkonce_odr` generic story,
-ADR 0037 (2/N)); span-accurate multi-source diagnostics (the merged path
-reports by message).
+Single-file unaffected. The merged path is **complete + sound**; its two
+remaining follow-ups are now **independent deferred tracks, not blockers** for
+self-hosting: the per-unit separate-compilation back end (per-unit objects +
+module-qualified `abi-v1` mangling + multi-object link + the per-unit
+`linkonce_odr` generic story, ADR 0037 (2/N)) and span-accurate multi-source
+diagnostics (the merged path reports by message). With D.6 done, **movement 1's
+language gate is cleared** and **movement 2 (the self-host port) opens — ADR 0038
+PROPOSED** (first sub-phase: lexer-in-Sentinel; the port is back-end-agnostic, so
+it builds on the Path A merge and does not wait on the per-unit back end).
 
 Pre-D.5 context: **Phase D.4 — file I/O via a minimal stdlib — MVP COMPLETE
 (1/N + 2/N; ADR 0035 → ACCEPTED-WITH-AMENDMENTS).** The fourth
