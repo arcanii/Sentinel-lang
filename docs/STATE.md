@@ -27,8 +27,11 @@ equals `snc lex` for **every clean-lexing fixture (139/139** in `tests/pass` +
 `tests/ui`; the lone deliberate lex-error fixture is excluded — error parity is a
 follow-on). It dogfoods the post-1.0 language (`[u8]`/`u8`, `Vec`, `read_file`/
 `print_bytes`, `while`). The Rust `snc` stays the production compiler + oracle until
-the bootstrap fixed-point bakes. NEXT: **(2/N) the parser** (`snc parse` is the
-oracle; the lexer grows to return a token list). Recap of the movement-1 close:
+the bootstrap fixed-point bakes. NEXT: **(2/N) the parser — ADR 0039 PROPOSED**
+(oracle = a new complete `snc ast` canonical dump, since `snc parse`'s `Display`
+omits enums/traits/impls/classes; the lexer grows to RETURN a token stream;
+sub-sliced (2a)–(2d); first gate = validate recursive-AST drop, the ADR 0032 A1
+debt, at AST scale). Recap of the movement-1 close:
 after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
 (file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
 compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want

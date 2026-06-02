@@ -1,0 +1,177 @@
+# ADR 0039: Phase D self-host port — (2/N) parser-in-Sentinel
+
+Status: PROPOSED — the second sub-phase of the self-host port (ADR 0031 D5 /
+ADR 0038 D9), after the lexer (1/N, ADR 0038 ACCEPTED-WITH-AMENDMENTS). Ports the
+**parser** to Sentinel: tokens → AST, differentially validated against the Rust
+`snc` oracle over the fixture corpus. The compiler's **largest** stage, so it is
+explicitly sub-sliced (D6). Flips to ACCEPTED-WITH-AMENDMENTS as its slices land.
+
+Date: 2026-06-02
+Related:
+  - **0038** (self-host port kickoff + lexer): establishes the **differential-
+    oracle method** (a canonical `snc <stage>` dump the Sentinel stage reproduces
+    byte-for-byte, diffed over `tests/pass` + `tests/ui`) and the `selfhost/`
+    tree. This ADR is the next stage under that method. Reuses A2's hard-won
+    Sentinel-language workarounds (flat per-fn var namespace; deep-`if` tail-borrow).
+  - **0031** (Phase D kickoff): D5 stage order lexer → **parser** → resolve → … .
+  - **0032** (sum types + `match`): the AST is modelled as Sentinel recursive
+    enums; **D.1 amendment A1's recursive-enum drop is box-free only** — an AST is
+    deeply recursive, so this sub-phase must validate that building + dropping a
+    real AST is leak-/UAF-safe (a first-slice gate, D6).
+  - **0009 §6 / D4**: the Rust parser is hand-written recursive descent; the
+    Sentinel port mirrors it (a token cursor + precedence-climbing for expressions).
+
+## Context
+
+The lexer (1/N) proved the differential-oracle method end-to-end: `snc lex` dumps
+the token stream, `selfhost/lexer.sentinel` reproduces it, and a corpus test
+asserts byte-identical output (139/139 clean fixtures). The parser is the next
+stage — and the **biggest single stage** of the compiler: it consumes the token
+stream and builds the full AST (`sentinel-ast`: `ExprKind` ~30 variants,
+`StmtKind`, the seven top-level decl kinds, `TypeExpr`, `Pattern`). Two facts
+shape the design:
+
+  1. **The existing `snc parse` is NOT a complete oracle.** It pretty-prints the
+     AST via the `Display` impls (a readable S-expression: `(fn add (a: i64 b: i64)
+     -> i64 (block (+ a b)))`), but `Program`'s `Display` only serializes `uses` /
+     `effects` / `structs` / `fns` — it **silently omits** enums, traits, impls,
+     and classes. A differential oracle must cover the **whole** AST deterministically.
+  2. **The lexer (1/N) emits a dump; it does not return tokens.** Per ADR 0038 A1,
+     the token model was deferred. The parser needs the lexer to **return a token
+     stream**, so (2/N) opens with that refactor.
+
+## Decision
+
+### D1. Goal.
+
+Port the parser to Sentinel: `selfhost/parser.sentinel` consumes the token stream
+from `selfhost/lexer.sentinel` and builds the AST, emitting a **canonical AST
+dump** byte-identical to a Rust `snc` oracle over the corpus. Each later stage
+(resolve → …) remains its own ADR.
+
+### D2. The oracle — a complete canonical AST dump (`snc ast <file>`).
+
+Add a Rust subcommand `snc ast <file>` that parses and emits a **complete,
+deterministic, S-expression-style** dump of the whole `Program` — every decl kind
+(fn / struct / enum / trait / impl / class / effect / use), every `Stmt`, `Expr`,
+`TypeExpr`, and `Pattern`. It reuses the *style* of the existing `Display` but is
+**complete** (covers the omitted decl kinds) and **purpose-built for
+reproducibility** from Sentinel (regular, fully-parenthesized, no
+context-dependent spacing). The existing `snc parse` Display is left as-is (a
+human affordance); `snc ast` is the machine oracle. Like `snc lex`'s dump, it is a
+**dev/validation surface, not `abi-v1`** — freely amendable. Pinned by a golden
+test; the Sentinel parser diffs against it.
+
+*(Alternative considered: extend the `Display` impls to completeness and match them
+directly. Rejected for (2/N): the Display has context-dependent formatting that is
+fiddly to reproduce exactly, and changing it risks existing readers. A fresh,
+regular dump is cleaner — same call ADR 0038 made for `snc lex`.)*
+
+### D3. The token model + lexer refactor (opens (2a)).
+
+Refactor `selfhost/lexer.sentinel` to **return a token stream** rather than only
+printing. To sidestep the D.3 "primitive-element drop" limitation (a
+`Vec<struct-with-a-[u8]-field>` would not drop the inner array), the stream is
+**struct-of-arrays of scalars**: `kinds: Vec<i64>` (integer tag per token),
+`starts: Vec<i64>`, `ends: Vec<i64>`. A token is `(kinds[i], starts[i], ends[i])`;
+the parser re-slices `src[start..end]` from the source `[u8]` when it needs a
+lexeme (identifier text, literal bytes). Kind **tags are internal** to the Sentinel
+compiler (the canonical dump uses kind/node **names**, never tags, so the two
+implementations needn't agree on numbering). The lexer keeps its (1/N) dumping
+ability (lex → stream → dump) so `tests/selfhost_lex.rs` stays green.
+
+### D4. The AST model in Sentinel.
+
+Model the AST as Sentinel enums + structs mirroring `sentinel-ast`: an `ExprKind`
+enum (recursive — `Expr` payloads hold `Expr`s), `StmtKind`, the decl structs, a
+`TypeExpr` enum, a `Pattern` enum. **Recursive-enum risk (ADR 0032 A1):** the AST
+is the deepest recursive structure the language has hosted; D.1 A1's box-free
+recursive-enum drop is leak-free for the standard consume walk but is **untested
+at AST scale**. So **(2a) includes a recursive-AST build → dump → drop validation**
+(`leaks --atExit`) as a gate *before* the full parser is built — if it leaks or
+UAFs, the D.1b payload-ownership fix is pulled in first. Payloads that are arrays
+(e.g. an `Ident`'s name `[u8]`, a `Call`'s arg list) interact with the same drop
+path; the validation must exercise them.
+
+### D5. Recursive-descent structure.
+
+Mirror the Rust parser (ADR 0009 D4): a token **cursor** (an index into the
+struct-of-arrays stream) + hand-written recursive descent, with
+**precedence-climbing** for the expression grammar (the Rust parser's
+`parse_add`/`parse_mul`/… ladder + the C5.3 bitwise levels). Reuses ADR 0038 A2's
+workarounds (unique per-fn locals; keep borrowing calls out of deep-`if` tails).
+
+### D6. Sub-slicing (the parser is big — staged, each oracle-validated).
+
+| Slice  | Scope                                                                 |
+|--------|-----------------------------------------------------------------------|
+| (2a)   | lexer-returns-tokens refactor + the AST-enum scaffold + the recursive-|
+|        | AST drop validation + a minimal **expression** parser (literals +     |
+|        | precedence binary/unary) + `snc ast` (canonical dump) + a seed diff.  |
+| (2b)   | full **expressions** (call, field, index, `if`, `match`, struct lit,  |
+|        | method/qualified call, perform/handle, …).                            |
+| (2c)   | **statements + `fn` definitions** (block, `let`, assign, `while`,     |
+|        | `break`/`continue`, params, return type, effect row).                 |
+| (2d)   | the remaining **top-level decls** (struct / enum / trait / impl /     |
+|        | class / effect / `use`) — and the oracle's completeness (D2).         |
+
+Coverage grows from a seed fixture set toward the **full corpus**; the slice lands
+only when its dump matches `snc ast` for its share of `tests/pass` + `tests/ui`.
+
+### D7. Out of scope.
+
+Resolve and later stages (own ADRs); **parser ERROR/diagnostic parity** (happy-path
+AST production first, as with the lexer — ADR 0038 D6); performance. The Sentinel
+parser may organise into multiple `selfhost/*.sentinel` files (dogfooding D.6
+modules) as it grows.
+
+### D8. Phase-go.
+
+`selfhost/parser.sentinel` (compiled by `snc`) emits a canonical AST dump
+**byte-identical** to `snc ast` for every clean-parsing fixture in `tests/pass` +
+`tests/ui` (a differential test, mirroring `tests/selfhost_lex.rs`), with the
+recursive-AST drop validation leak-clean.
+
+## Reasoning
+
+**Why a fresh `snc ast` dump, not the existing `Display`.** The Display is
+incomplete (omits four decl kinds) and context-formatted; a regular, complete dump
+is both correct and far easier to reproduce from Sentinel — the same trade ADR 0038
+made for `snc lex`, now proven.
+
+**Why validate recursive-AST drop first.** The parser is large; discovering a
+recursive-enum drop defect *after* building it would be expensive. A small early
+gate (build a hand-made AST, dump it, drop it, check `leaks`) de-risks the whole
+sub-phase and tells us early whether D.1b must come first.
+
+**Why struct-of-arrays tokens.** It keeps the token stream within D.3's
+primitive-element `Vec` drop guarantee (no `Vec<struct-with-heap>` leak), needs no
+new language feature, and re-slicing lexemes from `src` is cheap.
+
+## Consequences
+
+### Positive
+- The second compiler stage in Sentinel, oracle-validated — momentum on the port.
+- A complete `snc ast` dump is a reusable tool + the substrate for the resolve
+  stage's oracle later.
+- Forces (and validates) the recursive-enum machinery at real scale — useful
+  signal for the rest of the port.
+
+### Negative
+- The largest stage; multiple slices; the recursive-enum drop debt may surface and
+  pull D.1b onto the critical path.
+
+### Neutral
+- The Rust `snc` stays the production compiler + oracle throughout (ADR 0031 D6).
+  `snc ast` adds a dev surface, not ABI.
+
+## Revisit
+
+PROPOSED until (2a) lands, then ACCEPTED-WITH-AMENDMENTS as slices close. Triggers:
+- **D4 recursive drop**: if AST drop leaks/UAFs, land the D.1b payload-ownership
+  fix before continuing the parser.
+- **D2 dump format**: refine the canonical S-expr if it proves awkward to emit from
+  Sentinel (it is a dev contract, freely amendable).
+- **D3 token model**: if `Vec<scalar-struct>` turns out to work cleanly, prefer a
+  `Token` struct over struct-of-arrays for readability.
+- **D6 ordering**: reorder slices if a later one is needed to validate an earlier.
