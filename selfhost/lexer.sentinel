@@ -1,0 +1,390 @@
+// Phase D self-host port (1/N) / ADR 0038: the Sentinel lexer.
+//
+// Reads `input.sentinel` from the current directory, tokenizes it, and
+// prints the SAME canonical token dump as the Rust `snc lex` oracle
+// (ADR 0038 D4): one line per token `<KIND> <start> <end> [<lexeme>]`
+// (KIND = the variant name; spans = byte offsets; lexeme only for the
+// value-bearing variants Ident/IntLit/StringLit/CharLit), then `EOF`.
+//
+// The differential test diffs this output against `snc lex` over the
+// fixture corpus. This dogfoods the post-1.0 language: `[u8]`/`u8` (D.2),
+// `Vec` (D.3), `read_file`/`print_bytes` (D.4), `while` (D.5). It emits
+// directly into an output `Vec<u8>` (no Token enum / Vec<Token> yet — the
+// parser sub-phase (2/N) will have the lexer return a token list).
+//
+// (1/N) scope: clean-lexing input only — lexer ERROR parity (bad escapes,
+// unterminated literals) is a follow-on; reading a relative `input.sentinel`
+// (the test sets the cwd) stands in until argv access exists.
+
+fn is_space(c: u8) -> bool {
+    c == ' ' || c == '\t' || c == '\r' || c == '\n'
+}
+
+fn is_digit(c: u8) -> bool {
+    c >= '0' && c <= '9'
+}
+
+fn is_ident_start(c: u8) -> bool {
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+
+fn is_ident_cont(c: u8) -> bool {
+    is_ident_start(c) || is_digit(c)
+}
+
+// Append the decimal rendering of `x` (>= 0) to `out`.
+fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
+    if x == 0 {
+        push(out, '0');
+        0
+    } else {
+        // Collect least-significant digit first, then emit reversed.
+        let mut digits: Vec<u8> = vec_new();
+        let mut v: i64 = x;
+        while v > 0 {
+            let d: i64 = v - (v / 10) * 10;
+            push(&mut digits, i64_to_u8(48 + d));
+            v = v / 10;
+        }
+        let dn: i64 = len(digits);
+        let mut i: i64 = dn - 1;
+        while i >= 0 {
+            push(out, digits[i]);
+            i = i - 1;
+        }
+        0
+    }
+}
+
+// Append `<kind> <start> <end>` (no newline, no lexeme) to `out`.
+fn emit_head(out: &mut Vec<u8>, kind: [u8], start: i64, end: i64) -> i64 {
+    let kn: i64 = len(kind);
+    let mut i: i64 = 0;
+    while i < kn {
+        push(out, kind[i]);
+        i = i + 1;
+    }
+    push(out, ' ');
+    append_int(out, start);
+    push(out, ' ');
+    append_int(out, end);
+    0
+}
+
+// Emit a non-value token line (`<kind> <start> <end>\n`); returns `end`
+// as the lexer's new position so a dispatch arm can tail-call it.
+fn emit_simple(out: &mut Vec<u8>, kind: [u8], start: i64, end: i64) -> i64 {
+    emit_head(out, kind, start, end);
+    push(out, '\n');
+    end
+}
+
+// Map an identifier slice to its keyword KIND name, or "Ident" if it is
+// not a keyword. Mirrors the Rust lexer's keyword set (35 keywords).
+fn ident_kind(slice: [u8]) -> [u8] {
+    if str_eq(slice, "let") {
+        "Let"
+    } else if str_eq(slice, "fn") {
+        "Fn"
+    } else if str_eq(slice, "if") {
+        "If"
+    } else if str_eq(slice, "else") {
+        "Else"
+    } else if str_eq(slice, "true") {
+        "True"
+    } else if str_eq(slice, "false") {
+        "False"
+    } else if str_eq(slice, "struct") {
+        "Struct"
+    } else if str_eq(slice, "null") {
+        "Null"
+    } else if str_eq(slice, "mut") {
+        "Mut"
+    } else if str_eq(slice, "effect") {
+        "Effect"
+    } else if str_eq(slice, "secret") {
+        "Secret"
+    } else if str_eq(slice, "declassify") {
+        "Declassify"
+    } else if str_eq(slice, "handle") {
+        "Handle"
+    } else if str_eq(slice, "with") {
+        "With"
+    } else if str_eq(slice, "perform") {
+        "Perform"
+    } else if str_eq(slice, "return") {
+        "Return"
+    } else if str_eq(slice, "class") {
+        "Class"
+    } else if str_eq(slice, "trait") {
+        "Trait"
+    } else if str_eq(slice, "impl") {
+        "Impl"
+    } else if str_eq(slice, "init") {
+        "Init"
+    } else if str_eq(slice, "delegate") {
+        "Delegate"
+    } else if str_eq(slice, "scope") {
+        "Scope"
+    } else if str_eq(slice, "spawn") {
+        "Spawn"
+    } else if str_eq(slice, "await") {
+        "Await"
+    } else if str_eq(slice, "Self") {
+        "SelfTy"
+    } else if str_eq(slice, "self") {
+        "SelfVal"
+    } else if str_eq(slice, "as") {
+        "As"
+    } else if str_eq(slice, "for") {
+        "For"
+    } else if str_eq(slice, "while") {
+        "While"
+    } else if str_eq(slice, "break") {
+        "Break"
+    } else if str_eq(slice, "continue") {
+        "Continue"
+    } else if str_eq(slice, "use") {
+        "Use"
+    } else if str_eq(slice, "enum") {
+        "Enum"
+    } else if str_eq(slice, "match") {
+        "Match"
+    } else {
+        "Ident"
+    }
+}
+
+fn main() -> i64 {
+    let path: [u8] = "input.sentinel";
+    let src: [u8] = read_file(path);
+    let n: i64 = len(src);
+    let mut out: Vec<u8> = vec_new();
+    let mut pos: i64 = 0;
+
+    while pos < n {
+        let b: u8 = src[pos];
+        let start: i64 = pos;
+        // Sentinel uses a FLAT per-fn variable namespace (no shadowing / no
+        // re-declaration, even across disjoint `if`-arms), so each branch's
+        // locals get distinct names (ce / de / ie / se / he ...).
+        pos = if is_space(b) {
+            start + 1
+        } else if b == '/' && start + 1 < n && src[start + 1] == '/' {
+            // `//` line comment: skip to (but not past) the newline, which
+            // the whitespace branch consumes next iteration.
+            let mut ce: i64 = start + 2;
+            while ce < n && src[ce] != '\n' {
+                ce = ce + 1;
+            }
+            ce
+        } else if is_digit(b) {
+            let mut de: i64 = start;
+            while de < n && is_digit(src[de]) {
+                de = de + 1;
+            }
+            emit_head(&mut out, "IntLit", start, de);
+            push(&mut out, ' ');
+            let mut dq: i64 = start;
+            while dq < de {
+                push(&mut out, src[dq]);
+                dq = dq + 1;
+            }
+            push(&mut out, '\n');
+            de
+        } else if is_ident_start(b) {
+            let mut ie: i64 = start;
+            while ie < n && is_ident_cont(src[ie]) {
+                ie = ie + 1;
+            }
+            // Build the slice once for keyword classification.
+            let mut isv: Vec<u8> = vec_new();
+            let mut iq: i64 = start;
+            while iq < ie {
+                push(&mut isv, src[iq]);
+                iq = iq + 1;
+            }
+            let islice: [u8] = vec_to_array(isv);
+            let iname: [u8] = ident_kind(islice);
+            let iis: bool = str_eq(iname, "Ident");
+            emit_head(&mut out, iname, start, ie);
+            if iis {
+                push(&mut out, ' ');
+                let mut iq2: i64 = start;
+                while iq2 < ie {
+                    push(&mut out, src[iq2]);
+                    iq2 = iq2 + 1;
+                }
+                0
+            } else {
+                0
+            };
+            push(&mut out, '\n');
+            ie
+        } else if b == '"' {
+            let mut se: i64 = start + 1;
+            let mut sopen: bool = true;
+            while se < n && sopen {
+                let sc: u8 = src[se];
+                se = if sc == '\\' {
+                    se + 2
+                } else if sc == '"' {
+                    sopen = false;
+                    se + 1
+                } else {
+                    se + 1
+                };
+            }
+            emit_head(&mut out, "StringLit", start, se);
+            push(&mut out, ' ');
+            let mut sq: i64 = start;
+            while sq < se {
+                push(&mut out, src[sq]);
+                sq = sq + 1;
+            }
+            push(&mut out, '\n');
+            se
+        } else if b == '\'' {
+            let mut he: i64 = start + 1;
+            let mut hopen: bool = true;
+            while he < n && hopen {
+                let hc: u8 = src[he];
+                he = if hc == '\\' {
+                    he + 2
+                } else if hc == '\'' {
+                    hopen = false;
+                    he + 1
+                } else {
+                    he + 1
+                };
+            }
+            emit_head(&mut out, "CharLit", start, he);
+            push(&mut out, ' ');
+            let mut hq: i64 = start;
+            while hq < he {
+                push(&mut out, src[hq]);
+                hq = hq + 1;
+            }
+            push(&mut out, '\n');
+            he
+        } else {
+            // Operators + punctuation. Compute the kind + length FIRST, then
+            // emit in ONE statement: a deep if-chain with `emit_simple` in
+            // each arm's tail position makes the lexical borrow checker treat
+            // the sibling `&mut out` borrows as overlapping, so the single
+            // borrow is kept out of the branching.
+            let has2: bool = start + 1 < n;
+            let nx: u8 = if has2 {
+                src[start + 1]
+            } else {
+                '\0'
+            };
+            let two: bool = (b == '=' && (nx == '=' || nx == '>'))
+                || (b == '-' && nx == '>')
+                || (b == '!' && nx == '=')
+                || (b == '<' && nx == '=')
+                || (b == '>' && nx == '=')
+                || (b == '&' && nx == '&')
+                || (b == '|' && nx == '|')
+                || (b == ':' && nx == ':');
+            let oplen: i64 = if two {
+                2
+            } else {
+                1
+            };
+            let opkind: [u8] = if b == '=' {
+                if nx == '=' {
+                    "EqEq"
+                } else if nx == '>' {
+                    "FatArrow"
+                } else {
+                    "Eq"
+                }
+            } else if b == '-' {
+                if nx == '>' {
+                    "Arrow"
+                } else {
+                    "Minus"
+                }
+            } else if b == '!' {
+                if nx == '=' {
+                    "BangEq"
+                } else {
+                    "Bang"
+                }
+            } else if b == '<' {
+                if nx == '=' {
+                    "LtEq"
+                } else {
+                    "Lt"
+                }
+            } else if b == '>' {
+                if nx == '=' {
+                    "GtEq"
+                } else {
+                    "Gt"
+                }
+            } else if b == '&' {
+                if nx == '&' {
+                    "AmpAmp"
+                } else {
+                    "Amp"
+                }
+            } else if b == '|' {
+                if nx == '|' {
+                    "PipePipe"
+                } else {
+                    "Pipe"
+                }
+            } else if b == ':' {
+                if nx == ':' {
+                    "ColonColon"
+                } else {
+                    "Colon"
+                }
+            } else if b == '+' {
+                "Plus"
+            } else if b == '*' {
+                "Star"
+            } else if b == '/' {
+                "Slash"
+            } else if b == '^' {
+                "Caret"
+            } else if b == '(' {
+                "LParen"
+            } else if b == ')' {
+                "RParen"
+            } else if b == '{' {
+                "LBrace"
+            } else if b == '}' {
+                "RBrace"
+            } else if b == '[' {
+                "LBracket"
+            } else if b == ']' {
+                "RBracket"
+            } else if b == ',' {
+                "Comma"
+            } else if b == ';' {
+                "Semi"
+            } else if b == '.' {
+                "Dot"
+            } else if b == '?' {
+                "Question"
+            } else {
+                // Unknown byte: only reachable on malformed input, which is
+                // out of (1/N) scope — clean fixtures never hit this.
+                "Unknown"
+            };
+            emit_simple(&mut out, opkind, start, start + oplen);
+            start + oplen
+        };
+    }
+
+    push(&mut out, 'E');
+    push(&mut out, 'O');
+    push(&mut out, 'F');
+    push(&mut out, '\n');
+    let arr: [u8] = vec_to_array(out);
+    print_bytes(arr);
+    0
+}
