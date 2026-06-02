@@ -12,9 +12,11 @@
 //! paren-less unit form `Enum::Variant`) plus array literals `[e1, e2, ...]`,
 //! all reusing the argument-list cons-list. The tree shape (not source order)
 //! is what the dump pins, so seeds mixing every level, and chaining postfix
-//! over calls/qcalls/arrays, prove the whole grammar. Struct literals,
-//! `if`/`match`, perform/handle, and the statement plus decl grammar grow the
-//! parser (and this corpus) in the later (2b)-(2d) slices toward the full
+//! over calls/qcalls/arrays, prove the whole grammar. Increment-4 adds `if`
+//! expressions (with mandatory `else` and `else if` chains) and brace blocks
+//! `{ <expr> }`, which are statement-free for now (just a tail). Struct
+//! literals, `match`, perform/handle, and the statement plus decl grammar grow
+//! the parser (and this corpus) in the later (2b)-(2d) slices toward the full
 //! `tests/pass` plus `tests/ui` set, the way `tests/selfhost_lex.rs` covers the
 //! corpus for `snc lex`.
 
@@ -125,6 +127,16 @@ const SEEDS: &[&str] = &[
     "fn qh() -> i64 { f(A::b(), [1, 2]) }\n",
     "fn qi() -> i64 { g(A::b(x), [1, h(3)], Point::init(y, z)) }\n",
     "fn qj() -> i64 { [A::b(), c.d][0].e }\n",
+    // (increment-4) if-expressions: basic, with cond exprs, else-if chains.
+    "fn ia() -> i64 { if c { 1 } else { 2 } }\n",
+    "fn ib() -> i64 { if a < b { a } else { b } }\n",
+    "fn ic() -> i64 { if x { 1 } else if y { 2 } else { 3 } }\n",
+    "fn id() -> i64 { if a && b { 1 + 2 } else { 3 * 4 } }\n",
+    "fn ie() -> i64 { if c { if d { 1 } else { 2 } } else { 3 } }\n",
+    // (increment-4) brace blocks + if interacting with calls/arrays.
+    "fn ba() -> i64 { { 5 } }\n",
+    "fn bb() -> i64 { g(if c { 1 } else { 2 }) }\n",
+    "fn bc() -> i64 { [if c { 1 } else { 2 }, 3] }\n",
 ];
 
 #[test]
