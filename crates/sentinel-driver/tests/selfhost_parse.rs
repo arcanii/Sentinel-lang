@@ -1,16 +1,19 @@
 //! Phase D self-host port (2b) / ADR 0039 D8: the parser differential test.
 //! Compile `selfhost/parser.sentinel` with the Rust `snc`, then assert its
 //! canonical AST dump is byte-identical to `snc ast` for a seed set of
-//! programs. The (2b) increment-1 seeds are paramless fns whose body is an
-//! expression over the COMPLETE operator-precedence ladder — `|| && | ^ & ==
-//! != < <= > >= + - * /`, prefix unary `- !`, parens — plus the scalar atom
-//! leaves (integer / `true` / `false` / `null` literals + variable refs). The
-//! tree shape (not source order) is what the dump pins, so a single seed
-//! mixing every level proves the whole ladder. Calls, field/index/method,
-//! `if`/`match`, struct/array literals, perform/handle, and the statement +
-//! decl grammar grow the parser (and this corpus) in the later (2b)–(2d)
-//! slices toward the full `tests/pass` + `tests/ui` set, the way
-//! `tests/selfhost_lex.rs` covers the whole corpus for `snc lex`.
+//! programs. The (2b) seeds are paramless fns whose body is an expression over
+//! the surface landed so far. Increment-1 covers the COMPLETE
+//! operator-precedence ladder (logical, comparison, bitwise, additive,
+//! multiplicative, prefix unary, parens) plus the scalar atom leaves (integer,
+//! `true`, `false`, `null` literals, variable refs). Increment-2 adds function
+//! calls `f(args)` and the postfix chain: field `t.field`, index `t[i]`, and
+//! method `t.m(args)`. The tree shape (not source order) is what the dump pins,
+//! so seeds mixing every level, and chaining postfix over calls, prove the
+//! whole grammar. The `::` paths, struct and array literals, `if`/`match`,
+//! perform/handle, and the statement plus decl grammar grow the parser (and
+//! this corpus) in the later (2b)-(2d) slices toward the full `tests/pass` plus
+//! `tests/ui` set, the way `tests/selfhost_lex.rs` covers the corpus for
+//! `snc lex`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -80,6 +83,27 @@ const SEEDS: &[&str] = &[
     // Every precedence level interleaved in one expression.
     "fn mx() -> bool { 1 + 2 * 3 < 4 | 5 && 6 == 7 }\n",
     "fn mx2() -> bool { a && b || c == d & e + f * g }\n",
+    // (increment-2) function calls — zero/one/many args, expr args, nesting.
+    "fn ca() -> i64 { g() }\n",
+    "fn cb() -> i64 { g(1) }\n",
+    "fn cc() -> i64 { g(1, 2) }\n",
+    "fn cd() -> i64 { g(a + 1, b * 2) }\n",
+    "fn ce() -> i64 { g(h(1)) }\n",
+    "fn cf() -> i64 { p(q(r(s(1)))) }\n",
+    // (increment-2) postfix: field, index, method.
+    "fn pa() -> i64 { x.y }\n",
+    "fn pb() -> i64 { a.b.c }\n",
+    "fn ix() -> i64 { a[0] }\n",
+    "fn iy() -> i64 { a[i + 1] }\n",
+    "fn me() -> i64 { x.foo() }\n",
+    "fn mg() -> i64 { x.foo(1, 2) }\n",
+    // (increment-2) chained postfix + interaction with operators/unary.
+    "fn ch() -> i64 { a.b(c)[d].e }\n",
+    "fn ci() -> i64 { g(1).h(2) }\n",
+    "fn cj() -> i64 { f(1) + g(2) * 3 }\n",
+    "fn ck() -> i64 { a[0] + b.c }\n",
+    "fn cl() -> i64 { -a.b + !c[0] }\n",
+    "fn cm() -> i64 { x.foo(1).bar[k].baz(y, z) }\n",
 ];
 
 #[test]
