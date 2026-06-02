@@ -1878,18 +1878,19 @@ For pasting into a fresh chat to bootstrap context:
     (`1b7d17c`), increment-1 docs (`7870bed`) + feat (`0e84f36`), atop the (2a)
     docs (`c7ebc39`) + parser feat (`8d6aa6e`) + `snc ast` oracle (`7f10740`) +
     recursive-AST drop gate + ADR 0039, atop the lexer (1/N) + the D.6
-    cross-module work. Clean tree; **1403 tests** (the (2b)/(2c)/(2d) seeds expand
-    the single `selfhost_parse` differential test in place; now 152 seeds — plus
-    a new `tests/ast.rs` golden for the source-order `use` dump); four-check green
+    cross-module work. Clean tree; **1404 tests** (the (2b)/(2c)/(2d) seeds expand
+    the single `selfhost_parse` differential test in place; now 159 seeds — plus
+    new `tests/ast.rs` goldens for the source-order `use` + `struct` dumps);
+    four-check green
     via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0039**
     (THE active task — self-host port (2/N) the parser, ACCEPTED-WITH-AMENDMENTS;
     (2a) + (2b) the full expression grammar + (2c) statements/types/fn-defs landed —
-    the fn-level grammar is COMPLETE; **(2d) is UNDERWAY** — (2d-1, A15) `use` decls
-    + the top-level-decl dispatch landed; RESUME AT below = (2d-2) `struct` decls,
-    then enum / effect / trait / impl / class) +
+    the fn-level grammar is COMPLETE; **(2d) is UNDERWAY** — (2d-1, A15) `use` +
+    the top-level-decl dispatch + (2d-2, A16) `struct` decls landed; RESUME AT
+    below = (2d-3) `enum` decls, then effect / trait / impl / class) +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host

@@ -14,9 +14,9 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2d-1):
-`use` decls + the top-level-decl dispatch (ADR 0039 A15) — opens the (2d)
-top-level-decl slice; the fn-LEVEL grammar (2c) is complete.** Movement 1 (the
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2d-2):
+`struct` decls (ADR 0039 A16) — the (2d) top-level-decl slice is underway (`use`
++ `struct` landed); the fn-LEVEL grammar (2c) is complete.** Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for
@@ -120,9 +120,12 @@ dispatch. The oracle now dumps every decl in **source order** (the parsed
 `Program` is kind-bucketed, so `dump` re-sorts the decls by span start — the
 order the Sentinel parser emits them as it scans); `main`'s fn-only loop becomes
 a `dump_item` dispatcher on the leading token (an optional `pub` is
-parsed-and-skipped). 152 seeds match `snc ast`, leak-free. Remaining: **struct /
-enum / effect / trait / impl / class** + then growing the diff corpus toward the
-full `tests/pass` + `tests/ui` set. Recap of the movement-1 close:
+parsed-and-skipped). **(2d-2) (A16):** `struct Name { f: T, … }` →
+`(struct Name (field f <type>) …)` (empty → `(struct Name)`; field types via
+`parse_type`); a recursive `dump_struct_fields` parses + dumps each `name : type`
+inline. 159 seeds match `snc ast`, leak-free. Remaining: **enum / effect / trait
+/ impl / class** + then growing the diff corpus toward the full `tests/pass` +
+`tests/ui` set. Recap of the movement-1 close:
 after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
 (file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
 compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want

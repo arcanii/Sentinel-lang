@@ -311,6 +311,18 @@ close. See ## Amendments.
   `use` seeds, incl. multi-`use` + fn) match `snc ast`; leak-free under `leaks
   --atExit`; a new `tests/ast.rs` golden pins the source-order `use` dump. Next:
   (2d-2) `struct` decls.
+- **A16 — (2d-2): `struct` decls.** `struct Name <T>? { f: T, … }` →
+  `(struct Name (field f <type>) …)`; empty → `(struct Name)`. Generic
+  type-params + visibility omitted (as the fn dump omits them); field types route
+  through `parse_type` / `dump_type`. Oracle: `Item` gains a `Struct` variant +
+  `dump_struct`. Parser: tokenizer tag `struct`(52) + `is_kw_struct`;
+  `dump_struct_decl` + a recursive `dump_struct_fields` that **parses + dumps each
+  `name : type` inline** (consuming the closing `}`, comma-skipping — no AST node,
+  mirroring `dump_use_decl`); `dump_item` gains the struct arm. Verified: 159
+  differential seeds (7 new — fields, empty, trailing comma, complex field types
+  incl. `?`/`&`/`secret`/nested generics, source-order `struct`/`fn`
+  interleaving) match `snc ast`; leak-free under `leaks --atExit`; a new
+  `tests/ast.rs` golden pins the struct dump. Next: (2d-3) `enum` decls.
 
 Date: 2026-06-02
 Related:
