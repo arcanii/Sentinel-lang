@@ -273,6 +273,14 @@ const SEEDS: &[&str] = &[
     "enum Trail { A, B, }\nfn main() -> i64 { 0 }\n",
     "enum Node { Leaf(i64), Bin(Node, Node) }\nfn main() -> i64 { 0 }\n",
     "struct S { x: i64 }\nenum E { A(S), B }\nfn f() -> i64 { 1 }\nfn main() -> i64 { 0 }\n",
+    // (2d-4) `effect` decls — ops with/without params + return type (missing
+    // return dumps `_`), empty, trailing `;`, and interleaving with struct/fn.
+    "effect Net { recv() -> i64; send(x: i64, y: [u8]) -> i64; }\nfn main() -> i64 { 0 }\n",
+    "effect Log { write(msg: [u8]); }\nfn main() -> i64 { 0 }\n",
+    "effect Empty {}\nfn main() -> i64 { 0 }\n",
+    "effect E { a(); b() -> bool; c(x: secret i64); }\nfn main() -> i64 { 0 }\n",
+    "effect Tls { verify(mac: [u8]) -> bool }\nfn main() -> i64 { 0 }\n",
+    "effect Net { recv() -> i64; }\nstruct S { x: i64 }\nfn handler() -> i64 ! { Net } { perform Net.recv() }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]

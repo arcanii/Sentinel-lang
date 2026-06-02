@@ -99,3 +99,19 @@ fn ast_dump_enum_decls() {
          (fn main () i64 (block (int 0)))\n"
     );
 }
+
+#[test]
+fn ast_dump_effect_decls() {
+    // (2d-4) ops dump like fn decls inside the effect; a missing op return type
+    // dumps `_`; empty → `(effect Name)`.
+    assert_eq!(
+        ast_dump(
+            "effects",
+            "effect Net { recv() -> i64; send(x: i64, y: [u8]) -> i64; }\neffect Log { write(msg: [u8]); }\neffect Empty {}\nfn main() -> i64 { 0 }\n"
+        ),
+        "(effect Net (op recv () i64) (op send ((param x i64) (param y (arr u8))) i64))\n\
+         (effect Log (op write ((param msg (arr u8))) _))\n\
+         (effect Empty)\n\
+         (fn main () i64 (block (int 0)))\n"
+    );
+}

@@ -380,6 +380,12 @@ fn is_kw_enum(src: &[u8], start: i64, end: i64) -> bool {
         && (*src)[start + 2] == 'u' && (*src)[start + 3] == 'm'
 }
 
+fn is_kw_effect(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 6 && (*src)[start] == 'e' && (*src)[start + 1] == 'f'
+        && (*src)[start + 2] == 'f' && (*src)[start + 3] == 'e' && (*src)[start + 4] == 'c'
+        && (*src)[start + 5] == 't'
+}
+
 // Append the decimal rendering of `x` (>= 0) to `out`.
 fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
     if x == 0 {
@@ -512,6 +518,8 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
                 52
             } else if is_kw_enum(src, start, ie) {
                 53
+            } else if is_kw_effect(src, start, ie) {
+                57
             } else {
                 2
             };
@@ -1973,6 +1981,57 @@ fn dump_payloads(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, sr
     }
 }
 
+// (2d-4) `effect Name { op(p: T) -> R; … }` → `(effect Name (op op (<params>)
+// <ret>) …)`. An op's params dump like fn params; a MISSING return type dumps `_`
+// (reusing `TyOpt` / `dump_tyopt`, the `let`-annotation convention). The leading
+// `effect` is at the cursor.
+fn dump_effect_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    append_str(out, "(effect ");
+    append_slice(out, src, nm_s, nm_e);
+    dump_ops(out, k, s, e, src, cur);
+    push(out, ')');
+    0
+}
+
+// Parse + dump effect ops up to and consuming the closing `}` (tag 7): each
+// `name(params) [-> ret] ;?` → ` (op name (<params>) <ret-or-_>)`; the `;`
+// terminators are skipped.
+fn dump_ops(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 44 {
+        *cur = *cur + 1;
+        dump_ops(out, k, s, e, src, cur)
+    } else {
+        let on_s: i64 = (*s)[*cur];
+        let on_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let oparams: Params = parse_params(k, s, e, src, cur);
+        let oret: TyOpt = if (*k)[*cur] == 8 {
+            *cur = *cur + 1;
+            TyOpt::SomeTy(parse_type(k, s, e, src, cur))
+        } else {
+            TyOpt::NoTy
+        };
+        append_str(out, " (op ");
+        append_slice(out, src, on_s, on_e);
+        append_str(out, " (");
+        dump_params(out, oparams);
+        append_str(out, ") ");
+        dump_tyopt(out, oret);
+        push(out, ')');
+        dump_ops(out, k, s, e, src, cur)
+    }
+}
+
 // Dispatch one top-level decl on its leading token (2d). A SINGLE helper that
 // re-passes the ref params to the per-kind dumpers, so main has ONE borrow site:
 // sibling `if`-tail `&mut` borrows of a *local* (`&mut out` / `&mut cur` in
@@ -1994,6 +2053,8 @@ fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
         dump_struct_decl(out, k, s, e, src, cur)
     } else if lead == 53 {
         dump_enum_decl(out, k, s, e, src, cur)
+    } else if lead == 57 {
+        dump_effect_decl(out, k, s, e, src, cur)
     } else {
         dump_fn_decl(out, k, s, e, src, cur)
     }

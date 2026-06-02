@@ -18,8 +18,8 @@
 //!
 //! (2d-1, this increment): `use a::b::Item;` → `(use a b Item)`.
 
-use sentinel_ast::{Block, EnumDecl, Expr, ExprKind, FnDef, Param, Pattern, Program, Stmt, StmtKind,
-    StructDecl, TypeExpr, TypeExprKind, UseDecl};
+use sentinel_ast::{Block, EffectDecl, EnumDecl, Expr, ExprKind, FnDef, Param, Pattern, Program,
+    Stmt, StmtKind, StructDecl, TypeExpr, TypeExprKind, UseDecl};
 
 /// One top-level declaration, tagged for the source-order re-collation in
 /// [`dump`]. Grows a variant per (2d) increment as each decl kind lands.
@@ -28,6 +28,7 @@ enum Item<'a> {
     Fn(&'a FnDef),
     Struct(&'a StructDecl),
     Enum(&'a EnumDecl),
+    Effect(&'a EffectDecl),
 }
 
 /// Canonical S-expression dump of `program` — every top-level decl in source
@@ -47,6 +48,9 @@ pub fn dump(program: &Program) -> String {
     for en in &program.enums {
         items.push((en.span.start, Item::Enum(en)));
     }
+    for ef in &program.effects {
+        items.push((ef.span.start, Item::Effect(ef)));
+    }
     items.sort_by_key(|(start, _)| *start);
 
     let mut out = String::new();
@@ -61,6 +65,7 @@ pub fn dump(program: &Program) -> String {
             Item::Fn(f) => dump_fn(f, &mut out),
             Item::Struct(s) => dump_struct(s, &mut out),
             Item::Enum(en) => dump_enum(en, &mut out),
+            Item::Effect(ef) => dump_effect(ef, &mut out),
         }
     }
     out.push('\n');
@@ -105,6 +110,32 @@ fn dump_enum(e: &EnumDecl, out: &mut String) {
         for p in &v.payloads {
             out.push(' ');
             dump_type(p, out);
+        }
+        out.push(')');
+    }
+    out.push(')');
+}
+
+/// `effect Name { op(p: T) -> R; … }` → `(effect Name (op op (<params>) <ret>)
+/// …)`. An op's params dump like fn params; a **missing** return type dumps `_`
+/// (matching the `let`/`TyOpt` convention). Empty → `(effect Name)`.
+fn dump_effect(e: &EffectDecl, out: &mut String) {
+    out.push_str("(effect ");
+    out.push_str(&e.name);
+    for op in &e.ops {
+        out.push_str(" (op ");
+        out.push_str(&op.name);
+        out.push_str(" (");
+        for (i, p) in op.params.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            dump_param(p, out);
+        }
+        out.push_str(") ");
+        match &op.return_type {
+            Some(t) => dump_type(t, out),
+            None => out.push('_'),
         }
         out.push(')');
     }
