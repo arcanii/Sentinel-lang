@@ -19,10 +19,12 @@ literals, **increment-7 (A10)** landed the effect/concurrency leaf forms
 (`declassify` / `perform` / `scope` / `spawn` / `.await`), and **increment-8 (A11)**
 landed `handle` — **closing the (2b) expression grammar** (every `ExprKind` the
 oracle emits now parses). **(2c) is now UNDERWAY:** **(2c-1, A12)** landed the
-statement grammar (a real `Block` of statements + tail), and **(2c-2, A13)** landed
-`let` type annotations + a `parse_type`. Remaining in (2c): `fn` definitions with
-params/return type/effect row (2c-3); then (2d) the top-level decls. The ADR flips
-fully as they close. See ## Amendments.
+statement grammar (a real `Block` of statements + tail), **(2c-2, A13)** landed
+`let` type annotations + a `parse_type`, and **(2c-3, A14)** landed `fn` definitions
+— **closing the (2c) fn-level grammar** (every `Stmt` / `Expr` / `TypeExpr` /
+`Pattern` + the fn header now parse). Remaining: **(2d)** the top-level decls
+(struct / enum / trait / impl / class / effect / use). The ADR flips fully as they
+close. See ## Amendments.
 
 ## Amendments (in progress — (2a) + (2b) landing)
 
@@ -263,6 +265,28 @@ fully as they close. See ## Amendments.
   `&T`/`&mut T`, `secret T`, `secret [u8]`, mixed annotated/un-annotated lets) match
   `snc ast`; leak-free. **Next:** (2c-3) `fn` definitions (params/return-type/effect
   row — reusing `parse_type`); then (2d) the top-level decls.
+- **A14 — (2c-3): `fn` definitions (closes the fn-level grammar).** `main`'s
+  hard-coded paramless `fn NAME() -> TYPE` header is replaced by a real fn parse:
+  `fn name <type-params>? ( [mut] p: T, … ) -> RET ! { eff, … }? { body }` →
+  `(fn name ((param [mut] p <type>) …) <ret> <block>)`. The param list is a `Params`
+  cons-list; **the param-list dump has no leading space before the first param**
+  (it sits right after the list's open paren), so a first/rest split
+  (`dump_params` + `dump_params_rest` over a shared `dump_param_body`). The `-> RET`
+  return type now routes through `parse_type`/`dump_type` (so a non-`Ident` return
+  like `[u8]`/`?T`/`Vec<T>`/`secret T` dumps right — it was previously dumped raw via
+  `append_slice`). **Generic type-params `<…>` and the postfix effect row `! { … }`
+  are parsed-and-SKIPPED** — `dump_fn` emits neither (confirmed against
+  `ast_dump.rs`); `skip_type_params` is depth-balanced over `<`/`>`, `skip_effect_row`
+  skips to the `}`. No new tokens. **⚠ Sentinel-`if`-is-an-expression reminder:**
+  `skip_type_params` first used statement-only `if` branches + a bare `if` (no
+  `else`) → a compile error ("blocks must end with an expression"); rewrote it as
+  `depth = if … { depth+1 } else if … { depth-1 } else { depth }` inside a `while
+  depth > 0` loop. Verified: 148 differential seeds (params single/multi/`mut`,
+  `[u8]`/`?T`/`Vec<T>`/`secret` return types, ref params, generic fns,
+  effect-row fns, multi-fn programs, a composite generic+secret+effect+statements
+  handler) match `snc ast`; leak-free. **This closes the fn-level grammar.** Next:
+  (2d) the top-level decls (struct / enum / trait / impl / class / effect / use) +
+  completing `snc ast`'s `Program` dumper for them — the last parser slice.
 
 Date: 2026-06-02
 Related:

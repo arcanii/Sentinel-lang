@@ -14,9 +14,9 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2c-2):
-`let` type annotations + a `parse_type` (ADR 0039 A13); (2b) the full expression
-grammar + (2c-1) statements COMPLETE.** Movement 1 (the language/stdlib build-out,
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2c-3):
+`fn` definitions (ADR 0039 A14) — the fn-LEVEL grammar is COMPLETE; only the
+top-level decls (2d) remain.** Movement 1 (the language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for
 self-hosting is cleared**. Movement 2 ports `snc` to Sentinel stage by stage, each
@@ -105,9 +105,16 @@ name <type> e)` (vs `_`), via a `parse_type` mirroring the Rust one — `secret 
 `Ident<args>` → `(generic name args…)`; nested generics close without a `>>` split
 (the tokenizer has no `>>`, so `Vec<Box<i64>>` lexes two `Gt`). New recursive
 `TypeE` enum + `TyArgs` cons-list + a `TyOpt`; new tokens `?` (50) + `secret` (51).
-The diff corpus is **135 seeds**, all matching `snc ast`, leak-free. Remaining:
-**(2c-3)** `fn` definitions with params/return-type/effect-row; **(2d)** the
-top-level decls — each growing the parser + its diff corpus toward the full
+The diff corpus is **135 seeds**, all matching `snc ast`, leak-free. **(2c-3) (ADR
+0039 A14):** full `fn` definitions — `fn name <T>? ( [mut] p: T, … ) -> RET ! { eff
+}? { body }` → `(fn name ((param [mut] p <type>) …) <ret> <block>)`; the return type
+now routes through `parse_type` (so `[u8]`/`?T`/`Vec<T>` returns dump right); generic
+type-params + the effect row are parsed-and-SKIPPED (the dump emits neither). New
+`Params` enum. **This CLOSES the (2c) fn-level grammar** — every
+`Stmt`/`Expr`/`TypeExpr`/`Pattern` + the fn header now parse. The diff corpus is
+**148 seeds**, all matching `snc ast`, leak-free. Remaining: **(2d)** the top-level
+decls (struct/enum/trait/impl/class/effect/use) + completing `snc ast`'s `Program`
+dumper for them — the last parser slice, growing the diff corpus toward the full
 `tests/pass` + `tests/ui` set. Recap of the movement-1 close:
 after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
 (file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
