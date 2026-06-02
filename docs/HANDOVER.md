@@ -1865,34 +1865,28 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host PARSER (2d-1)
-    docs** commit, atop its feat (`feat(selfhost): parser (2d-1) — use decls +
-    top-level decl dispatch`, `debaa24`), atop the (2c-3) docs (`2b61793`) + feat
-    (`feat(selfhost): parser (2c-3) — fn definitions`,
-    `b2a9c3b`), atop the (2c-2) docs (`dc2b153`) + feat (`5f47546`), the (2c-1) docs
-    (`f650896`) + feat (`b293c62`), the (2b) increment-8 docs (`40c9978`) + feat
-    (`189990e`), increment-7 docs (`9b440d6`) + feat (`af76636`), increment-6 docs
-    (`d700018`) + feat (`4935335`), increment-5 docs (`a19fe70`) + feat
-    (`6e89d2a`), increment-4 docs (`3c69fe5`) + feat (`4837622`), increment-3 docs
-    (`352f88d`) + feat (`aa3307a`), increment-2 docs (`82b728c`) + feat
-    (`1b7d17c`), increment-1 docs (`7870bed`) + feat (`0e84f36`), atop the (2a)
-    docs (`c7ebc39`) + parser feat (`8d6aa6e`) + `snc ast` oracle (`7f10740`) +
-    recursive-AST drop gate + ADR 0039, atop the lexer (1/N) + the D.6
-    cross-module work. Clean tree; **1409 tests** (the (2b)/(2c)/(2d) seeds expand
-    the single `selfhost_parse` differential test in place; now 192 seeds — plus
-    new `tests/ast.rs` goldens for the source-order `use` + `struct` + `enum` +
-    `effect` + `trait` + `impl` + `class` dumps); four-check green
-    via `cargo nextest run --workspace` + `cargo test
+    Local HEAD: verify with `git log -1` — expect the **self-host PARSER (2d-8)
+    docs** commit (the parser-stage close), atop its feat
+    (`feat(selfhost): parser (2d-8) — close the full corpus`, `d2da83c`), atop the
+    feat+docs pairs for (2d-7) `class` (`447d9ab`) … (2d-1) `use` + dispatch
+    (`debaa24`), the (2c) fn-level grammar ((2c-3) `b2a9c3b` … (2c-1) `b293c62`),
+    the (2b) full-expression increments (`189990e` … `0e84f36`), the (2a) parser
+    feat (`8d6aa6e`) + `snc ast` oracle (`7f10740`) + recursive-AST drop gate +
+    ADR 0039, atop the lexer (1/N) + the D.6 cross-module work. (Run `git log
+    --oneline -40` for the full chain.) Clean tree; **1410 tests** — the curated
+    `selfhost_parse` seeds (192) + a new corpus differential
+    (`sentinel_parser_matches_oracle_on_corpus`, the D8 phase-go: the Sentinel
+    parser vs `snc ast` over all 139 clean-parsing `tests/pass`+`tests/ui`
+    fixtures) + `tests/ast.rs` goldens for every decl kind; four-check green via
+    `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0039**
-    (THE active task — self-host port (2/N) the parser, ACCEPTED-WITH-AMENDMENTS;
-    (2a) + (2b) the full expression grammar + (2c) statements/types/fn-defs landed —
-    the fn-level grammar is COMPLETE; **(2d) is UNDERWAY** — (2d-1..7, A15–A21)
-    `use` + dispatch / `struct` / `enum` / `effect` / `trait` / `impl` / `class`
-    all landed, so EVERY top-level decl kind now parses; RESUME AT below = (2d-8)
-    — validate the Sentinel parser against `snc ast` over the full tests/pass +
-    tests/ui corpus, then close ADR 0039) +
+    (the (2/N) parser — **now ACCEPTED / COMPLETE**: (2a)+(2b) the full expression
+    grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the
+    full-corpus close — `selfhost/parser.sentinel` matches `snc ast` over every
+    clean-parsing fixture, leak-free; **RESUME AT below = the NEXT port stage,
+    resolve — its own ADR (write it PROPOSED first)**) +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
@@ -1950,8 +1944,10 @@ For pasting into a fresh chat to bootstrap context:
       VecElementNotSupported). 1324 tests. See
       [[sentinel_d3_collections_surface]].
 
-    RESUME AT: **Phase D.6 (1/N) — modules / multi-file — IN PROGRESS, per
-    ADR 0037.** Modules is the **last** ADR 0031 D4 language prerequisite
+    HISTORICAL (movement-1 close — SUPERSEDED; the current resume point is at
+    the TOP of §0.3 above = the parser stage is COMPLETE, next is resolve):
+    **Phase D.6 (1/N) — modules / multi-file — per
+    ADR 0037.** Modules was the **last** ADR 0031 D4 language prerequisite
     before the lexer→parser→… self-host port (D5). **Phase D.5 — loops — is
     COMPLETE** (ADR 0036 → ACCEPTED-WITH-AMENDMENTS: (1/N) `while` + (2/N)
     `break`/`continue`; exit 67 + 115, 0 leaks) — recap in

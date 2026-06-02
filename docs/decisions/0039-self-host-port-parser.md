@@ -22,11 +22,17 @@ oracle emits now parses). **(2c) is now UNDERWAY:** **(2c-1, A12)** landed the
 statement grammar (a real `Block` of statements + tail), **(2c-2, A13)** landed
 `let` type annotations + a `parse_type`, and **(2c-3, A14)** landed `fn` definitions
 — **closing the (2c) fn-level grammar** (every `Stmt` / `Expr` / `TypeExpr` /
-`Pattern` + the fn header now parse). Remaining: **(2d)** the top-level decls
-(struct / enum / trait / impl / class / effect / use). The ADR flips fully as they
-close. See ## Amendments.
+`Pattern` + the fn header now parse). **(2d) landed the top-level decls** —
+**(2d-1, A15)** `use` + the source-order decl dispatch, **(2d-2..7, A16–A21)**
+`struct` / `enum` / `effect` / `trait` / `impl` / `class` — then **(2d-8, A22)**
+closed the **full corpus** (`//` comments, the prefix `*` / `&` / `&mut` unary
+operators, char + string literals), so the Sentinel parser now matches `snc ast`
+over **every clean-parsing fixture in `tests/pass` + `tests/ui` (139/139)**,
+leak-free (the D8 phase-go). **The (2/N) PARSER stage is COMPLETE.** The next
+port stage is **resolve** (its own ADR); the Rust `snc` stays the production
+compiler + oracle until the bootstrap fixed-point bakes. See ## Amendments.
 
-## Amendments (in progress — (2a) + (2b) landing)
+## Amendments
 
 - **A1 — `snc ast` oracle landed (D2).** A `snc ast <file>` subcommand
   (`run_ast` + `crates/sentinel-driver/src/ast_dump.rs`) emits a complete,
@@ -410,6 +416,33 @@ close. See ## Amendments.
   bucketing). **Every top-level decl kind now parses.** Next: (2d-8) — validate
   the Sentinel parser against `snc ast` over the full `tests/pass` + `tests/ui`
   corpus, then close the ADR.
+- **A22 — (2d-8): close the full corpus (the parser-stage phase-go, D8).** The
+  Sentinel parser now matches `snc ast` over **every clean-parsing fixture in
+  `tests/pass` + `tests/ui` (139/139)**, leak-free. The seed corpus had exercised
+  the grammar, but the self-contained tokenizer/parser (it does not yet share the
+  (1/N) lexer) still lacked four things the full corpus uses; all four closed:
+  (i) **`//` line comments** — skipped in the tokenizer (they were lexed as two
+  `/`, derailing the parse; this alone took 27 → 119 matching fixtures); (ii) the
+  **prefix `*` (deref) / `&` / `&mut` (address-of) unary operators** —
+  `parse_unary` gains tags 11 / 23 (with a `mut` lookahead), the `Unary` dump maps
+  op-codes 3/4/5 → `*` / `&` / `&mut` (distinct from the *infix* multiply / bitand
+  at the same tokens, which stay in `parse_mul`/`parse_bitand`); (iii) **char
+  literals** `'c'` → `(char N)` and (iv) **string literals** `"s"` → `(str b…)` —
+  scanned in the tokenizer (tags 62/63, `\`-escape-aware spans mirroring
+  `lexer.sentinel`) and **decoded at parse time** per ADR 0033 D2 (`\n \t \r \0
+  \\ \' \" \xHH`) via `decode_byte_at` / `decode_string` + `hex_val`; `Expr` gains
+  `Char(i64)` / `Str([u8])`. ⚠ **LEAK FIXED in-flight:** the `Str` dump arm only
+  *indexed* its `[u8]`, never consuming it (1 leak / 16 bytes per string literal)
+  — extracted `dump_str_body` which takes the bytes **by value** so they drop at
+  fn exit (mirroring how the `Var` arm's `append_str` moves its `[u8]` in + frees
+  it); a full leak sweep is **0 leaks across all 139 fixtures**. The new
+  `sentinel_parser_matches_oracle_on_corpus` test runs the parser vs `snc ast`
+  over the corpus, **skipping the two deliberate negative fixtures** the oracle
+  rejects (`lex_invalid_char`, `parse_unbalanced_paren` — parser ERROR parity is
+  out of scope, D7). Four-check green; 1410 tests. **This closes the (2/N) PARSER
+  stage** — every `tests/pass` + `tests/ui` program parses byte-identically to the
+  oracle. Next port stage: **resolve** (its own ADR). The Rust `snc` stays the
+  production compiler + oracle until the bootstrap fixed-point bakes.
 
 Date: 2026-06-02
 Related:
@@ -572,11 +605,20 @@ new language feature, and re-slicing lexemes from `src` is cheap.
 
 ## Revisit
 
-PROPOSED until (2a) lands, then ACCEPTED-WITH-AMENDMENTS as slices close. Triggers:
-- **D4 recursive drop**: if AST drop leaks/UAFs, land the D.1b payload-ownership
-  fix before continuing the parser.
-- **D2 dump format**: refine the canonical S-expr if it proves awkward to emit from
-  Sentinel (it is a dev contract, freely amendable).
-- **D3 token model**: if `Vec<scalar-struct>` turns out to work cleanly, prefer a
-  `Token` struct over struct-of-arrays for readability.
-- **D6 ordering**: reorder slices if a later one is needed to validate an earlier.
+PROPOSED → ACCEPTED-WITH-AMENDMENTS as the slices landed → **the (2/N) PARSER
+stage is now COMPLETE** ((2a)–(2d), A1–A22): `selfhost/parser.sentinel` matches
+`snc ast` over every clean-parsing fixture in `tests/pass` + `tests/ui`
+(139/139), leak-free. The amendments stand as the record; no open triggers remain
+for this ADR. Resolved triggers, for the record:
+- **D4 recursive drop**: held leak-free at AST scale (A2) + across the full corpus
+  (A22) — the D.1b payload-ownership fix was **not** needed for the parser.
+- **D2 dump format**: the canonical S-expr was reproduced from Sentinel without a
+  format change (only additive node kinds as slices landed).
+- **D3 token model**: the struct-of-arrays token stream + `(*r)[i]` deref-indexing
+  held throughout; no `Token` struct was needed.
+- **D6 ordering**: the slices landed in the planned order (2a → 2b → 2c → 2d), no
+  reordering required.
+
+The next port stage is **resolve** (its own ADR); the lexer-sharing refactor
+(`selfhost/parser.sentinel` consuming the (1/N) lexer via a D.6 module, rather
+than its own self-contained tokenizer) remains an optional follow-on.
