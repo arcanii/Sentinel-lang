@@ -370,6 +370,23 @@ close. See ## Amendments.
   methods, empty, `enum`+`trait`+`struct` interleaving) match `snc ast`; leak-free
   under `leaks --atExit`; a new `tests/ast.rs` golden pins the trait dump. Next:
   (2d-6) `impl` decls.
+- **A20 — (2d-6): `impl` decls.** `impl Name? as Trait for Type { fn m(self:
+  &Self, …) -> R { … } … }` → `(impl <name-or-_> Trait Type (method m <self>
+  (<params>) <ret> <block>) …)`. A **default impl** (no name) dumps `_` in the
+  name slot; impl methods carry a **body** block (vs trait sigs). The optional
+  impl name is present **iff the token after `impl` is not `as`**. Oracle: the
+  shared `dump_method_sig` (the `(method name <self> (<params>) <ret>` head, no
+  closing paren) is factored out of `dump_trait` and reused by `dump_impl`; `Item`
+  gains an `Impl` variant + `dump_impl`. Parser: tokenizer tags `impl`(55) +
+  `as`(60) + `for`(61) + `is_kw_impl`/`as`/`for`; `dump_impl_decl` (⚠ the name is
+  resolved to a `[u8]` **value first** — a `slice_of` or the literal `"_"` — so
+  the emit is one `append_str`; a two-borrowing-arm `if` would trip the A2 quirk)
+  + `dump_impl_methods` (reuses `dump_method_head` + a `parse_block` body; an
+  optional per-method `pub` is skipped); `dump_item` gains the impl arm. Verified:
+  184 differential seeds (6 new — default/named/empty impls, multi-method bodies,
+  `pub` method, `trait`+`impl`+`struct` interleaving) match `snc ast`; leak-free
+  under `leaks --atExit`; a new `tests/ast.rs` golden pins the impl dump. Next:
+  (2d-7) `class` decls — the last decl kind.
 
 Date: 2026-06-02
 Related:
