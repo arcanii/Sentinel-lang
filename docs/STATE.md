@@ -27,15 +27,21 @@ equals `snc lex` for **every clean-lexing fixture (139/139** in `tests/pass` +
 `tests/ui`; the lone deliberate lex-error fixture is excluded — error parity is a
 follow-on). It dogfoods the post-1.0 language (`[u8]`/`u8`, `Vec`, `read_file`/
 `print_bytes`, `while`). The Rust `snc` stays the production compiler + oracle until
-the bootstrap fixed-point bakes. NEXT: **(2/N) the parser — ADR 0039 PROPOSED; (2a) UNDERWAY.** The first (2a)
-gate — **validate recursive-AST drop at AST scale (the ADR 0032 A1 debt) — PASSED**
-(`selfhost_ast_drop.sentinel`: a recursive `Node` enum with i64/`[u8]`/recursive
-payloads built, consuming-walked, dropped — 0 leaks), so the parser approach is
-viable **without** the D.1b payload-ownership fix. Remaining (2a): a `snc ast`
-canonical dump oracle (a new one — `snc parse`'s `Display` omits
-enums/traits/impls/classes), the lexer growing to RETURN a token stream
-(struct-of-arrays `Vec<i64>`), and a minimal expression parser + a seed
-differential test. Sub-sliced (2a)–(2d). Recap of the movement-1 close:
+the bootstrap fixed-point bakes. NEXT: **(2/N) the parser — ADR 0039 PROPOSED; (2a) UNDERWAY.** Two (2a)
+de-risks PASSED + the oracle landed: **(i)** the recursive-AST drop gate
+(`selfhost_ast_drop.sentinel`, 0 leaks) — recursive-enum ASTs build/walk/drop
+leak-free, so **no D.1b fix needed**; **(ii)** the **`snc ast` canonical-dump
+oracle** (`run_ast` + `ast_dump.rs`, golden-tested) — a complete regular S-expr
+form, e.g. `(fn main () i64 (block (binop + (int 1) (binop * (int 2) (int 3)))))`,
+the parser's byte-for-byte target (a fresh dump, since `snc parse`'s `Display`
+omits enums/traits/impls/classes); **(iii)** the **parser STRUCTURE de-risked**
+via probes — `Vec<non-primitive>` is unsupported (so the AST is a recursive `Expr`
+enum returned by value, consuming-dumped — not an arena), and refs index via
+**explicit `(*r)[i]`** (auto `r[i]` fails), the enabler that lets recursive-descent
+helpers share the token arrays + `src` by ref + a `&mut i64` cursor. Remaining
+(2a): refactor the lexer to fill token arrays + a minimal expression parser
+(`selfhost/parser.sentinel`) matching `snc ast`. Sub-sliced (2a)–(2d). Recap of
+the movement-1 close:
 after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
 (file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
 compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want

@@ -6,6 +6,33 @@ ADR 0038 D9), after the lexer (1/N, ADR 0038 ACCEPTED-WITH-AMENDMENTS). Ports th
 `snc` oracle over the fixture corpus. The compiler's **largest** stage, so it is
 explicitly sub-sliced (D6). Flips to ACCEPTED-WITH-AMENDMENTS as its slices land.
 
+## Amendments (in progress — (2a) landing)
+
+- **A1 — `snc ast` oracle landed (D2).** A `snc ast <file>` subcommand
+  (`run_ast` + `crates/sentinel-driver/src/ast_dump.rs`) emits a complete,
+  regular, fully-tagged S-expr dump (e.g. `(fn main () i64 (block (binop + (int
+  1) (binop * (int 2) (int 3)))))`), golden-tested (`tests/ast.rs`); covers the
+  function-level grammar (fns + all exprs/stmts/types/patterns), non-fn decls in
+  (2d).
+- **A2 — recursive-AST drop gate PASSED (D4 cleared).** A recursive-enum AST
+  (i64/`[u8]`/recursive payloads) builds + consuming-`match`-walks + drops
+  leak-free at AST scale (`tests/pass/selfhost_ast_drop.sentinel`, 0 leaks) — so
+  the parser needs **no D.1b payload-ownership fix first**.
+- **A3 — parser structure, settled by probe (revises D3/D5).** Two current-Sentinel
+  realities shape the build:
+  - **`Vec<non-primitive>` is unsupported** (`Vec<Expr>` / `Vec<struct>` →
+    `vec_element_not_supported`). So D3's struct-of-arrays applies only to the
+    *token stream* (`Vec<i64>`); the **AST is a recursive `Expr` enum returned BY
+    VALUE** from parse fns (not an arena/`Vec` of nodes), dumped by a consuming
+    recursive `match` (A2's shape).
+  - **Refs are not auto-indexable** (`r[i]` on `&Vec`/`&[u8]` →
+    `index_on_non_array`), **but explicit deref `(*r)[i]` works** (verified on
+    `&Vec<i64>` + `&[u8]`). This is the enabler for D5's recursive descent:
+    helpers share the token arrays + `src` by **shared ref + `(*x)[i]`**, with a
+    **`&mut i64` cursor**. (Without it the parser would have been blocked on a
+    language gap; explicit deref avoids needing one.)
+  - Minor: **`match` arms need comma separators even with block bodies**.
+
 Date: 2026-06-02
 Related:
   - **0038** (self-host port kickoff + lexer): establishes the **differential-

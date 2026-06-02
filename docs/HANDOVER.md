@@ -2029,24 +2029,34 @@ For pasting into a fresh chat to bootstrap context:
     (`tests/pass/selfhost_ast_drop.sentinel`, exit 11, 0 leaks) confirms a
     recursive-enum AST (i64/`[u8]`/recursive payloads) builds + consuming-walks +
     drops leak-free, so **no D.1b fix is needed first** (ADR 0039 D4 cleared).
+    ✅ **(2a) ORACLE DONE** — `snc ast <file>` (`run_ast` + `ast_dump.rs`, golden-
+    tested in `tests/ast.rs`) prints a complete regular S-expr dump, e.g.
+    `(fn main () i64 (block (binop + (int 1) (binop * (int 2) (int 3)))))`. Node
+    names not tags; the parser's byte-for-byte target.
+    🔑 **PARSER STRUCTURE DE-RISKED (probe findings — critical for the build):**
+    - `Vec<non-primitive>` is UNSUPPORTED (`Vec<Expr>`/`Vec<struct>` →
+      `vec_element_not_supported`) → NO arena / value-stack of nodes; the AST is a
+      **recursive `Expr` enum returned BY VALUE**, dumped by a CONSUMING recursive
+      `match` (the gate's leak-free shape).
+    - refs aren't auto-indexable (`r[i]` fails) BUT **explicit deref `(*r)[i]`
+      WORKS** on `&Vec<i64>` and `&[u8]` (verified). THIS is the enabler:
+      recursive-descent helpers share the token arrays + `src` by **`&Vec<i64>` /
+      `&[u8]` shared refs + `(*x)[i]`**, advancing a **`&mut i64` cursor**.
     REMAINING (2a):
-    (1) **`snc ast <file>`** — a complete, regular S-expr canonical AST dump in
-    the Rust driver (the existing `snc parse` `Display` OMITS
-    enums/traits/impls/classes, so a FRESH dump; golden-test it; D2). The
-    parser's target.
-    (2) **refactor `selfhost/lexer.sentinel` to RETURN a token stream** —
-    struct-of-arrays of scalars (`kinds`/`starts`/`ends`: `Vec<i64>`, lexemes
-    re-sliced from `src`; D3 — dodges the D.3 `Vec<struct-with-[u8]>` drop gap),
-    keeping its (1/N) dump so `tests/selfhost_lex.rs` stays green.
-    (3) a minimal **expression** parser (literals + precedence binary/unary,
-    wrapped in `fn main`) + `selfhost/parser.sentinel` building an `Expr` enum +
-    a CONSUMING recursive dump (the gate's proven shape) matching `snc ast` +
-    a seed differential test (mirror `tests/selfhost_lex.rs`).
-    Then (2b) full exprs, (2c) stmts+fns, (2d) the decls (ADR 0039 D6). Reuse
-    the A2 quirk-workarounds (flat per-fn var namespace → unique branch locals;
-    deep-`if` tail-borrow → compute-then-emit-once) + the new quirk: **match arms
-    need comma separators even with block bodies**. Back-end-agnostic (Path A
-    merge); Rust `snc` stays the oracle. **Before coding: read ADR 0039.**
+    (1) **refactor `selfhost/lexer.sentinel` to fill token arrays** — `&mut
+    Vec<i64>` kinds/starts/ends (tags internal; lexemes re-sliced from `src` via
+    `(*src)[i]`), keeping its (1/N) dump so `tests/selfhost_lex.rs` stays green
+    (likely a D.6 module `use`d by the parser, or copy minimal lexing for (2a)).
+    (2) minimal **expression** parser in `selfhost/parser.sentinel`: parse fns take
+    `&Vec<i64>` arrays + `&[u8]` src + `&mut i64` cursor, index via `(*x)[i]`, build
+    a recursive `Expr` enum (returned by value), precedence-climbing, wrapped in
+    `fn main`; CONSUMING recursive dump matching `snc ast`; seed diff test (mirror
+    `tests/selfhost_lex.rs`).
+    Then (2b) full exprs, (2c) stmts+fns, (2d) the decls (ADR 0039 D6). Reuse the
+    A2 quirk-workarounds + the new ones: **match arms need comma separators even
+    with block bodies**; **index refs via `(*r)[i]`, not `r[i]`**. Back-end-
+    agnostic (Path A merge); Rust `snc` stays the oracle. **Before coding: read
+    ADR 0039 + its Amendments.**
     **ADR 0037 — settled decisions (with the language owner):** (a) **module
     surface = file-as-module + `use`** — a file *is* a module, its path
     relative to the source root (the entry file's dir) *is* its module path;
