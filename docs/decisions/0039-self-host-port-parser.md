@@ -14,9 +14,11 @@ ladder + scalar atom leaves, **increment-2 (A5)** landed function calls + the
 postfix chain (field / index / method), **increment-3 (A6)** landed the `::`
 paths (qualified call / class init / unit construction) + array literals,
 **increment-4 (A7)** landed `if`-expressions + brace blocks, **increment-5 (A8)**
-landed `match` expressions + patterns, and **increment-6 (A9)** landed struct
-literals. Remaining (2b) increments + slices (2c)–(2d) per D6 grow it toward the
-full corpus; the ADR flips fully as they close. See ## Amendments.
+landed `match` expressions + patterns, **increment-6 (A9)** landed struct
+literals, and **increment-7 (A10)** landed the effect/concurrency leaf forms
+(`declassify` / `perform` / `scope` / `spawn` / `.await`). Remaining (2b): just
+`handle` (closes the expression grammar); then slices (2c)–(2d) per D6 grow it
+toward the full corpus; the ADR flips fully as they close. See ## Amendments.
 
 ## Amendments (in progress — (2a) + (2b) landing)
 
@@ -178,6 +180,24 @@ full corpus; the ADR flips fully as they close. See ## Amendments.
   arrays, trailing comma, head-disambiguation) match `snc ast`; leak-free under
   `leaks --atExit`. **Still deferred to later (2b) increments:** perform/handle,
   scope/spawn/await, declassify.
+- **A10 — (2b) increment-7: the effect / concurrency leaf forms.**
+  `declassify(e)` → `(declassify e)`; `perform Eff.op(args)` →
+  `(perform Eff op args…)`; `scope concurrent { block }` → `(scope (block …))`;
+  `spawn <postfix>` → `(spawn …)`; and the `.await` **postfix** → `(await target)`.
+  `declassify` / `perform` / `scope` / `spawn` are keyword-led atom cases in
+  `parse_atom` (`scope` skips the positional `concurrent` ident then `parse_block`;
+  `spawn` parses its target via `parse_postfix`; `perform` reuses `parse_args`);
+  `.await` is checked right after the `.` in `parse_postfix_rest`, before the
+  field/method dispatch. Five new keyword tags (36–40) + `is_kw_*` helpers; `Expr`
+  gains `Declassify(Expr)` / `Perform([u8], [u8], Args)` / `Scope(Expr)` /
+  `Spawn(Expr)` / `Await(Expr)`. **The `scope` (and `while`) body stays
+  statement-free** until (2c): a body with a `;`-separated statement — and the `;`
+  token itself — is (2c) territory, so the seeds use statement-free bodies.
+  Verified: 102 differential seeds (each form alone + composed, e.g. a `match` arm
+  `declassify(perform Tls.verify(mac))`, `if ready { spawn w(x) } else {
+  compute().await }`, `scope concurrent { declassify(perform Net.recv()) }`) match
+  `snc ast`; leak-free under `leaks --atExit`. **Remaining in (2b):** only
+  `handle … with { arms }` — which closes the expression grammar.
 
 Date: 2026-06-02
 Related:
