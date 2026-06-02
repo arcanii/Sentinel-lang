@@ -7,11 +7,14 @@ The compiler's **largest** stage, so it is explicitly sub-sliced (D6). **(2a) ha
 LANDED:** the `snc ast` oracle (A1) + the recursive-AST drop gate (A2) + the
 parser-structure de-risk (A3) + `selfhost/parser.sentinel`, a recursive-descent
 expression parser that matches `snc ast` for integer arithmetic (precedence,
-parens, left-assoc, multi-fn) — `tests/selfhost_parse.rs`, leak-free. Remaining
-slices (2b)–(2d) per D6 grow it toward the full corpus; the ADR flips fully as
-they close. See ## Amendments.
+parens, left-assoc, multi-fn) — `tests/selfhost_parse.rs`, leak-free. **(2b) is now
+UNDERWAY** — D6's "full expressions" slice is itself sub-sliced (it spans ~28
+`ExprKind` variants); **increment-1 (A4) has LANDED:** the complete
+operator-precedence ladder + scalar atom leaves. Remaining (2b) increments + slices
+(2c)–(2d) per D6 grow it toward the full corpus; the ADR flips fully as they close.
+See ## Amendments.
 
-## Amendments (in progress — (2a) landing)
+## Amendments (in progress — (2a) + (2b) landing)
 
 - **A1 — `snc ast` oracle landed (D2).** A `snc ast <file>` subcommand
   (`run_ast` + `crates/sentinel-driver/src/ast_dump.rs`) emits a complete,
@@ -37,6 +40,29 @@ they close. See ## Amendments.
     **`&mut i64` cursor**. (Without it the parser would have been blocked on a
     language gap; explicit deref avoids needing one.)
   - Minor: **`match` arms need comma separators even with block bodies**.
+- **A4 — (2b) increment-1: the full operator-precedence expression grammar
+  (D6 "full expressions", sub-sliced).** D6's (2b) row lists the whole expression
+  surface (call / field / index / `if` / `match` / struct-lit / method+qualified
+  call / perform / handle / …); rather than land it in one step, (2b) is sub-sliced.
+  **Increment-1** grows `selfhost/parser.sentinel` from (2a)'s integer arithmetic to
+  the **complete operator-precedence ladder**, mirroring the Rust parser exactly
+  (`parse_expr → or → and → cmp → bitor → bitxor → bitand → add → mul → unary →
+  atom`) so the AST *tree shape* — hence the `snc ast` dump — matches byte-for-byte:
+  logical `|| &&` (short-circuit precedence), the six **non-associative**
+  comparisons `== != < <= > >=`, bitwise `| ^ &` (`&`>`^`>`|`), additive `+ -`,
+  multiplicative `* /`, prefix unary `- !`, parens — plus the **scalar atom leaves**:
+  integer / `true` / `false` / `null` literals + variable references. The `Expr`
+  enum gains `Bool(bool)` / `Null` / `Var([u8])` / `Unary(i64, Expr)` and a unified
+  `Binary(i64, Expr, Expr)` whose i64 **op-code** encodes both the dump category
+  (`binop`/`cmp`/`logic`) and the symbol; the consuming dump maps it back.
+  `true`/`false`/`null` lex as identifiers but parse to the literal nodes the oracle
+  emits (in-place byte compare, no allocation), **never** `(var …)`. The internal
+  tokenizer is extended to longest-match all the new operators. Verified: 26
+  differential seeds (every level, incl. two interleaving the whole ladder) match
+  `snc ast`; leak-free under `leaks --atExit`. **Deferred to later (2b) increments:**
+  postfix (call / index / field / method), `if`/`match` expressions, struct/array
+  literals, perform/handle, qualified-call / class-init / scope / spawn / await /
+  declassify — i.e. every `Expr` form that is not a pure operator/atom.
 
 Date: 2026-06-02
 Related:

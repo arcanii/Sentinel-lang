@@ -14,8 +14,9 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (1/N) LEXER COMPLETE
-(ADR 0038 → ACCEPTED-WITH-AMENDMENTS).** Movement 1 (the language/stdlib build-out,
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2b)
+increment-1: full operator-precedence expressions (ADR 0039 A4).** Movement 1 (the
+language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for
 self-hosting is cleared**. Movement 2 ports `snc` to Sentinel stage by stage, each
@@ -42,9 +43,21 @@ returned by value + consuming-dumped (no `Vec<Expr>`); helpers share the token
 arrays + `src` via `(*r)[i]` deref-index + a `&mut i64` cursor; left-assoc folds
 via recursion (a param accumulator — a loop one trips the moved-in-loop rule).
 Also locked: the recursive-AST drop gate (`selfhost_ast_drop.sentinel`, 0 leaks).
-Remaining: **(2b)** full expressions (vars/calls/if/match/…), **(2c)** statements
-+ fns, **(2d)** the decls — each growing the parser + its diff corpus toward the
-full `tests/pass` + `tests/ui` set. Recap of the movement-1 close:
+**(2b) is now UNDERWAY** — D6's "full expressions" slice is itself sub-sliced
+(~28 `ExprKind` variants); **(2b) increment-1 has LANDED (ADR 0039 A4):** the
+parser now covers the **complete operator-precedence ladder** mirroring the Rust
+parser (`expr → or → and → cmp → bitor → bitxor → bitand → add → mul → unary →
+atom`) — logical `|| &&`, the six non-associative comparisons `== != < <= > >=`,
+bitwise `| ^ &`, additive `+ -`, multiplicative `* /`, prefix unary `- !`, parens
+— plus the scalar atom leaves (integer / `true` / `false` / `null` literals +
+variable refs). `Expr` gained `Bool`/`Null`/`Var([u8])`/`Unary` + a unified
+`Binary(op-code, …)` (the i64 op-code encodes dump category + symbol); the diff
+corpus grew to **26 seeds** (every level + two interleaving the whole ladder),
+all matching `snc ast`, leak-free. Remaining: **(2b) later increments** — postfix
+(call/index/field/method), `if`/`match`, struct/array lits, perform/handle,
+qualified-call/class-init/scope/spawn/await/declassify; then **(2c)** statements +
+fns-with-params/blocks, **(2d)** the top-level decls — each growing the parser +
+its diff corpus toward the full `tests/pass` + `tests/ui` set. Recap of the movement-1 close:
 after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
 (file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
 compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want

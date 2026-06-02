@@ -148,6 +148,7 @@ C1.3. See STATE.md Section C.
 **ADR 0037 PROPOSED — Phase D.6 kickoff: modules / multi-file — docs-only.** The sixth and **last** ADR 0031 D4 prerequisite before the self-host port. Two decisions settled with the language owner: **(1) module surface = file-as-module + `use`** — a file IS a module, its path relative to the source root (the entry file's dir) IS its module path; `use a::b::Item;` imports a `pub` item; `pub` (parsed since C4.1, a no-op) becomes the cross-module visibility gate; NO `mod` blocks (the Go/Python shape, not Rust's in-file tree). **(2) compilation model = TRUE separate compilation** (NOT a whole-program multi-file merge) — each module compiles to its own `.o` independently, cross-module refs resolved at LINK time via stable `abi-v1`-keyed symbols. **The biggest architectural D-change:** it breaks 3 whole-program codegen assumptions — `collect_mono_instantiations` (whole-program generic-instance discovery), the single `fns: HashMap<FnId, FunctionValue>` map, and `self.fns.get(&id)` call resolution — and makes cross-unit symbols ABI surface (the current bare-source-name mangling is single-file-only + not collision-free → D7 = a module-qualified, length-prefixed `abi-v1` mangling amendment, test-enforced). **Sub-phase split (D9):** **(1/N)** surface + resolve module graph (per-unit ID spaces + namespaces + visibility) + per-unit type-check against imported signatures + **non-generic** separate compilation (per-unit `.o`, module-qualified mangling, extern-symbol cross-module calls + types, deterministic link); **(2/N)** **cross-module generics** (per-unit instantiation + `linkonce_odr` dedup — the C++ template model) + cross-module trait/impl methods; **(3/N)** incremental caching (Salsa) + per-unit `.o` repro. NO new runtime `sentinel_*` symbols (a front-end + linking concern). 4 OPEN DESIGN POINTS (settle at (1/N)): import cycles (lean allow); amend `abi-v1` vs bump `abi-v2` (lean amend); source root = entry-file dir; `use a::b::c` = item `c` in module `a::b`. **D.6 (1/N) IN PROGRESS (multi-file COMPILES + RUNS, via the owner-chosen lower-risk Path A merge, not yet true per-unit separate compilation):** `use` front-end + module-graph discovery + top-level `pub` + import resolution/visibility + the merge (`merge_modules` qualifies EVERY top-level item's name by module path — fn/struct/enum/trait/effect/class/named-impl — + rewrites all call/type/trait/effect references via a per-module `Renamer` → existing pipeline → one object → link). Cross-module `pub fn`/`pub struct`/`pub enum`+`match`/`pub trait`/`pub effect` all compile + run, same-named items across modules coexist, cross-module GENERICS work (whole-program mono over the merged graph), and the merged path runs effect-check (an unhandled-effect `main` is rejected). FOLLOW-UPS: the true per-unit back end (objects + module-qualified `abi-v1` mangling + multi-object link, incl. per-unit `linkonce_odr` generics); span-accurate multi-source diagnostics. The language gate for the self-host port (D5) is effectively cleared. See §0.3 RESUME-AT + ADR 0037 Implementation notes.
 **ADR 0038 → ACCEPTED-WITH-AMENDMENTS — Phase D movement 2: the self-host port — kickoff + (1/N) lexer-in-Sentinel COMPLETE.** Movement 1 (the language/stdlib build-out, ADR 0031 D2: D.1 sum types → D.6 modules) is **complete**, so the self-hosting gate is cleared and **movement 2** (ADR 0031 D5 — port `snc` to Sentinel stage by stage, each differentially validated against the Rust `snc` oracle) opened. **(1/N) the LEXER landed:** `snc lex` (oracle) + `selfhost/lexer.sentinel` (the first compiler stage in Sentinel, all 69 `TokenKind`s) + a corpus differential test (139/139 clean-lexing fixtures match `snc lex`). Amendments: A1 direct dump emission (no Token enum yet — (2/N) adds the token list); A2 worked around two Sentinel quirks (flat per-fn var namespace; deep-if tail `&mut` borrow conflict); A3 lex-error parity deferred; A4 reads a fixed `input.sentinel` (no argv yet). **The differential-oracle method (D2):** the Rust `snc` gains a canonical stage-dump subcommand per ported stage; the Sentinel stage emits the byte-identical dump; a test diffs both over the `tests/pass` + `tests/ui` corpus. **First sub-phase (D3–D7) = the lexer:** add `snc lex <file>` (a line-oriented token dump `<KIND> <start> <end> [<lexeme>]`, variant *names* not discriminants — D4); write `selfhost/lexer.sentinel` (a new `selfhost/` `.sentinel` tree, growing into a D.6 module graph — D5) reproducing the Rust lexer's 69-variant `TokenKind` stream; a differential test asserts a corpus-wide match (D10). **Back-end-agnostic (Related/D8):** the port is Sentinel *source*, indifferent to merge vs per-unit objects, so it builds on the Path A merge and does NOT gate on the per-unit back end (ADR 0037 follow-up). Out of scope at (1/N): parser+ stages (each its own ADR), lexer *error* parity (follow-on), perf. Indicative split (D9): lexer → parser → resolve → types → HIR/MIR → codegen, each with its own oracle dump. The Rust `snc` stays the production compiler + oracle until the bootstrap fixed-point bakes (ADR 0031 D6). Next: **self-host port (2/N) — the parser** (`snc parse` is the oracle; grow `selfhost/lexer.sentinel` to RETURN a token list the parser consumes; its own ADR).
 **ADR 0039 → ACCEPTED-WITH-AMENDMENTS — Phase D self-host port (2/N): the parser-in-Sentinel; (2a) LANDED.** The compiler's biggest stage, so it is explicitly sub-sliced. **Oracle (D2):** the existing `snc parse` `Display` is NOT complete (`Program`'s `Display` omits enums/traits/impls/classes), so add a new `snc ast <file>` — a complete, regular, S-expression-style canonical AST dump (every decl/stmt/expr/type/pattern; node *names* not tags; golden-tested; a dev surface, not abi-v1), which the Sentinel parser reproduces byte-for-byte (diffed over the corpus). **Token model (D3):** refactor `selfhost/lexer.sentinel` to RETURN a token stream as **struct-of-arrays of scalars** (`kinds`/`starts`/`ends`: `Vec<i64>`; lexemes re-sliced from `src`) — dodges the D.3 `Vec<struct-with-[u8]>` drop gap; tags stay internal; the lexer keeps its (1/N) dump so its test stays green. **AST model (D4):** Sentinel recursive enums/structs mirroring `sentinel-ast` — ⚠ the AST is the deepest recursive structure yet, and ADR 0032 A1's box-free recursive-enum drop is UNTESTED at AST scale, so **(2a) gates on a recursive-AST build→dump→drop `leaks` validation** (if it leaks/UAFs, land D.1b payload-ownership first). **Recursive descent (D5)** mirrors the Rust parser (token cursor + precedence-climbing). **Sub-slices (D6):** (2a) lexer-returns-tokens + AST scaffold + drop-validation + minimal expr parser + `snc ast` + seed diff; (2b) full expressions; (2c) statements + fns; (2d) the remaining decls + oracle completeness. Out of scope: resolve+, parser ERROR parity (happy-path first), perf. Reuses ADR 0038 A2 quirk-workarounds (flat per-fn namespace; deep-`if` tail-borrow). **(2a) LANDED** (amendments A1–A3): A1 `snc ast` oracle (run_ast + ast_dump.rs, golden-tested); A2 recursive-AST drop gate (selfhost_ast_drop.sentinel, 0 leaks — no D.1b needed); A3 parser structure settled by probe — `Vec<non-primitive>` unsupported (AST = recursive `Expr` enum returned by value + consuming-dumped, NOT an arena), refs index via explicit `(*r)[i]` (auto `r[i]` fails; the recursion enabler), left-assoc folds via recursion not loops (moved-in-loop rule), match arms need commas. `selfhost/parser.sentinel` (the 2nd Sentinel stage) parses paramless `fn`-bodied integer arithmetic → matches `snc ast` (tests/selfhost_parse.rs, 5 seeds, leak-free). Next: **(2b)** full expressions (vars/calls/if/match/struct-lit/…), then (2c) stmts+fns, (2d) decls — each growing the parser + diff corpus toward the full tests/pass+tests/ui set.
+**Phase D self-host port (2/N) parser — (2b) increment-1: full operator-precedence expressions — complete (`0e84f36`). ADR 0039 amendment A4.** D6's "(2b) full expressions" row spans ~28 `ExprKind` variants, so (2b) is itself sub-sliced; **increment-1** grows `selfhost/parser.sentinel` from (2a)'s integer arithmetic to the **complete operator-precedence ladder**, mirroring the Rust parser exactly (`parse_expr → or → and → cmp → bitor → bitxor → bitand → add → mul → unary → atom`) so the AST *tree shape* — hence the `snc ast` dump — matches byte-for-byte. New surface vs (2a): logical `|| &&` (short-circuit precedence), the six **non-associative** comparisons `== != < <= > >=`, bitwise `| ^ &` (`&`>`^`>`|`), prefix unary `- !`, and the **scalar atom leaves** — integer / `true` / `false` / `null` literals + variable references (plus the existing int + parens). The `Expr` enum gains `Bool(bool)` / `Null` / `Var([u8])` / `Unary(i64, Expr)` + a unified `Binary(i64, Expr, Expr)` whose i64 **op-code** encodes both the dump category (`binop`/`cmp`/`logic`) and the operator symbol; the consuming recursive dump maps it back. `true`/`false`/`null` lex as identifiers but parse to the literal nodes the oracle emits (in-place byte compare, no allocation), **never** `(var …)`. The internal tokenizer is extended to longest-match all the new operators (`==`/`=`, `!=`/`!`, `<=` `>=` `&&` `||` plus `| ^ &`), keeping `->` + the (2a) set. Reuses every proven idiom (ADR 0038 A2 / ADR 0039 A3): recursive `Expr` by value + consuming `match` (no `Vec<Expr>`); shared token arrays + `src` indexed via `(*r)[i]`; a `&mut i64` cursor; left-assoc folds via `parse_X_rest` accumulator recursion (a loop accumulator trips moved-in-loop); flat per-fn unique locals; the dump computes prefix+symbol as `[u8]` values FIRST then emits (sibling `&mut out` borrows in `if` tails read as overlapping). **Verified:** the differential test now diffs **26 seeds** spanning every precedence level (incl. two interleaving the whole ladder) against `snc ast` — all byte-identical; leak-free under `leaks --atExit` (the recursive `Var` / `Unary` / `Binary` payloads drop via the consuming dump). **1402 tests, four-check green.** **Deferred to later (2b) increments:** postfix (call / index / field / method), `if`/`match` expressions, struct/array literals, perform/handle, qualified-call / class-init / scope / spawn / await / declassify; then (2c) statements + fns-with-params/blocks, (2d) the top-level decls.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1854,20 +1855,23 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **D.6 cross-module
-    self-host PARSER (2a) docs** commit, atop the parser feat (`feat(selfhost):
-    the parser in Sentinel`) + the `snc ast` oracle (`7f10740`) + the
-    recursive-AST drop gate (`95f4120`) + ADR 0039 (`c5e07b7`), atop the lexer
-    (1/N) (`01dc18c`/`87b2b38`/`01519dd`) + the D.6 cross-module work. Clean
-    tree; **1402 tests**; four-check green via `cargo nextest run --workspace`
-    + `cargo test --doc --workspace` + `cargo clippy --workspace
-    --all-targets -- -D warnings` (+ `cargo build`). macOS + LLVM 18.
+    Local HEAD: verify with `git log -1` — expect the **self-host PARSER (2b)
+    increment-1 docs** commit, atop its feat (`feat(selfhost): parser (2b) —
+    full operator-precedence expressions`, `0e84f36`), atop the (2a) docs
+    (`c7ebc39`) + parser feat (`8d6aa6e`) + `snc ast` oracle (`7f10740`) +
+    recursive-AST drop gate + ADR 0039, atop the lexer (1/N) + the D.6
+    cross-module work. Clean tree; **1402 tests** (the (2b) seeds expanded the
+    single `selfhost_parse` differential test in place — no new test fns);
+    four-check green via `cargo nextest run --workspace` + `cargo test --doc
+    --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
+    (+ `cargo build`). macOS + LLVM 18.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0039**
-    (THE active task — self-host port (2/N) the parser, PROPOSED; RESUME AT
-    below) + **ADR 0038** (the port's (1/N) lexer — DONE — + the differential-
-    oracle method the parser reuses) + **ADR 0031** (the Phase D roadmap —
-    movement 1 complete; D5 = the self-host sequence) + auto-memory
-    sentinel_selfhost_port (+ sentinel_d6_modules_surface for the Path A merge).
+    (THE active task — self-host port (2/N) the parser, ACCEPTED-WITH-AMENDMENTS;
+    (2a) + (2b)-increment-1 landed; RESUME AT below) + **ADR 0038** (the port's
+    (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
+    **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
+    sequence) + auto-memory sentinel_selfhost_port (+ sentinel_d6_modules_surface
+    for the Path A merge).
 
     PHASE D = self-hosting (post-1.0; ADR 0031). Opens with a
     language/stdlib build-out, keeping the Rust `snc` as the differential
@@ -2025,31 +2029,42 @@ For pasting into a fresh chat to bootstrap context:
     excluded); A4 reads a fixed `./input.sentinel` (no argv yet — the test sets
     the cwd).
     **SELF-HOST PORT (2/N): the PARSER — ADR 0039 ACCEPTED-WITH-AMENDMENTS; (2a)
-    LANDED.** ✅ `snc ast` oracle (`run_ast`+`ast_dump.rs`, golden `tests/ast.rs`)
-    → the regular S-expr target, e.g. `(fn main () i64 (block (binop + (int 1)
-    (binop * (int 2) (int 3)))))`. ✅ recursive-AST drop gate
-    (`tests/pass/selfhost_ast_drop.sentinel`, 0 leaks → no D.1b needed). ✅
-    `selfhost/parser.sentinel` (the 2nd Sentinel stage) parses paramless
-    `fn`-bodied integer arithmetic (precedence/parens/left-assoc/multi-fn) →
-    matches `snc ast` (`tests/selfhost_parse.rs`, 5 seeds, leak-free).
-    🔑 **PROVEN STRUCTURE (reuse for (2b)+):** recursive `Expr` enum returned BY
-    VALUE + CONSUMING recursive `match` dump (`Vec<non-primitive>` is unsupported,
-    so NO arena/value-stack); recursive-descent helpers share the token arrays +
-    `src` as `&Vec<i64>`/`&[u8]` indexed via **`(*r)[i]`** (auto `r[i]` fails) with
-    a **`&mut i64` cursor**; left-assoc folds via **recursion** (a param
-    accumulator — a loop one trips the moved-in-loop rule); match arms
-    comma-separated. parser.sentinel is self-contained (its own minimal tokenizer);
-    sharing the full lexer via a D.6 module is a follow-on.
-    **RESUME HERE → (2b) FULL EXPRESSIONS.** Grow `Expr` + the parser to vars,
-    calls, `if`, `match`, struct-lit, field/index, method/qualified calls,
-    unary, bool/char/string/null lits, etc. (every `ExprKind` `snc ast` dumps),
-    + grow the seed corpus toward real `tests/pass` programs. Then (2c) statements
-    + fns-with-params/stmts/blocks, (2d) the top-level decls (struct/enum/trait/
-    impl/class/effect/use) + complete `snc ast`'s Program dumper for them (D6).
-    The goal: `selfhost/parser.sentinel` matches `snc ast` over the whole
-    `tests/pass` + `tests/ui` corpus (D8), like the lexer does for `snc lex`.
-    Back-end-agnostic (Path A merge); Rust `snc` stays the oracle. **Before
-    coding: read ADR 0039 + its Amendments A1–A3.**
+    + (2b)-increment-1 LANDED.** ✅ `snc ast` oracle (`run_ast`+`ast_dump.rs`,
+    golden `tests/ast.rs`) → the regular S-expr target, e.g. `(fn main () i64
+    (block (binop + (int 1) (binop * (int 2) (int 3)))))`. ✅ recursive-AST drop
+    gate (`tests/pass/selfhost_ast_drop.sentinel`, 0 leaks → no D.1b needed). ✅
+    `selfhost/parser.sentinel` (the 2nd Sentinel stage). **(2a):** paramless
+    `fn`-bodied integer arithmetic (precedence/parens/left-assoc/multi-fn). **(2b)
+    increment-1 (A4):** the COMPLETE operator-precedence ladder mirroring the Rust
+    parser (`expr → or → and → cmp → bitor → bitxor → bitand → add → mul → unary →
+    atom`) — `|| &&`, the six non-assoc comparisons `== != < <= > >=`, bitwise
+    `| ^ &`, prefix unary `- !`, + the scalar atom leaves (int / `true` / `false` /
+    `null` lits + variable refs). `Expr` gained `Bool`/`Null`/`Var([u8])`/`Unary` +
+    a unified `Binary(op-code,…)` (the i64 op-code encodes dump category + symbol).
+    Matches `snc ast` over **26 seeds** (`tests/selfhost_parse.rs`, every level +
+    two interleaving the whole ladder), leak-free.
+    🔑 **PROVEN STRUCTURE (reuse for the rest of (2b)+):** recursive `Expr` enum
+    returned BY VALUE + CONSUMING recursive `match` dump (`Vec<non-primitive>` is
+    unsupported, so NO arena/value-stack); recursive-descent helpers share the
+    token arrays + `src` as `&Vec<i64>`/`&[u8]` indexed via **`(*r)[i]`** (auto
+    `r[i]` fails) with a **`&mut i64` cursor**; left-assoc folds via **recursion**
+    (`parse_X` + `parse_X_rest(acc)` — a loop accumulator trips moved-in-loop);
+    match arms comma-separated; flat per-fn unique locals; the dump computes
+    prefix+symbol as `[u8]` values FIRST then emits (sibling `&mut out` borrows in
+    `if` tails read as overlapping). parser.sentinel is self-contained (its own
+    minimal tokenizer); sharing the full lexer via a D.6 module is a follow-on.
+    **RESUME HERE → (2b) LATER INCREMENTS (the non-operator expressions).** Grow
+    `Expr` + the parser to the rest of `ExprKind`: postfix (call `f(args)`, index
+    `a[i]`, field `a.b`, method `a.m(args)`), `if`/`match` (dispatched at the top
+    of `parse_expr`; blocks-with-statements overlap (2c)), struct-lit `Name { f: v }`,
+    array-lit `[a, b]`, `perform`/`handle`, qualified-call `Impl::m(args)` /
+    class-init, `scope`/`spawn`/`await`, `declassify` — each growing the seed corpus
+    toward real `tests/pass` programs. Then (2c) statements + fns-with-params/blocks,
+    (2d) the top-level decls (struct/enum/trait/impl/class/effect/use) + complete
+    `snc ast`'s Program dumper for them (D6). The goal: `selfhost/parser.sentinel`
+    matches `snc ast` over the whole `tests/pass` + `tests/ui` corpus (D8), like the
+    lexer does for `snc lex`. Back-end-agnostic (Path A merge); Rust `snc` stays the
+    oracle. **Before coding: read ADR 0039 + its Amendments A1–A4.**
     **ADR 0037 — settled decisions (with the language owner):** (a) **module
     surface = file-as-module + `use`** — a file *is* a module, its path
     relative to the source root (the entry file's dir) *is* its module path;
