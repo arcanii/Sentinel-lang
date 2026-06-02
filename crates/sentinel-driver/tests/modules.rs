@@ -298,3 +298,56 @@ fn cross_module_effect_compiles_and_runs() {
     );
     assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
 }
+
+// --- D.6 cross-module GENERICS (Path A whole-program mono) -------------------
+// Under Path A the merged graph is one Program, so `collect_mono_instantiations`
+// runs whole-program and a generic instantiated in a *different* module than its
+// definition is discovered + emitted like any single-file instance. These pin
+// that it works (the true per-unit `linkonce_odr` story is ADR 0037 (2/N)).
+
+#[test]
+fn cross_module_generic_struct_compiles_and_runs() {
+    // `pub struct Box<T>` defined in `boxmod`, instantiated `Box<i64>` in the
+    // entry (annotation + literal + field access). Box{42} -> 42 -> exit 42.
+    let dir = temp_project("xgenstruct");
+    write(dir.join("boxmod.sentinel"), "pub struct Box<T> { value: T }\n");
+    write(
+        dir.join("main.sentinel"),
+        "use boxmod::Box;\n\
+         fn main() -> i64 { let b: Box<i64> = Box { value: 42 }; b.value }\n",
+    );
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
+}
+
+#[test]
+fn cross_module_generic_fn_compiles_and_runs() {
+    // `pub fn id<T>` defined in `gen`, instantiated at i64 from the entry.
+    // The whole-program mono pass must emit `gen$id` for i64. id(42) -> 42.
+    let dir = temp_project("xgenfn");
+    write(dir.join("gen.sentinel"), "pub fn id<T>(x: T) -> T { x }\n");
+    write(
+        dir.join("main.sentinel"),
+        "use gen::id;\nfn main() -> i64 { id(42) }\n",
+    );
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
+}
+
+#[test]
+fn cross_module_generic_fns_over_generic_struct_compile_and_run() {
+    // Multi-param generics across the boundary: `Pair<A, B>` + `make_pair` +
+    // `fst` in `pairmod`, instantiated `Pair<i64, i64>` from the entry.
+    // fst(make_pair(42, 99)) -> 42 -> exit 42.
+    let dir = temp_project("xgenpair");
+    write(
+        dir.join("pairmod.sentinel"),
+        "pub struct Pair<A, B> { first: A, second: B }\n\
+         pub fn make_pair<A, B>(a: A, b: B) -> Pair<A, B> { Pair { first: a, second: b } }\n\
+         pub fn fst<A, B>(p: Pair<A, B>) -> A { p.first }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use pairmod::Pair;\nuse pairmod::make_pair;\nuse pairmod::fst;\n\
+         fn main() -> i64 { let p: Pair<i64, i64> = make_pair(42, 99); fst(p) }\n",
+    );
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
+}
