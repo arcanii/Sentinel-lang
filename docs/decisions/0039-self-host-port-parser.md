@@ -18,8 +18,10 @@ landed `match` expressions + patterns, **increment-6 (A9)** landed struct
 literals, **increment-7 (A10)** landed the effect/concurrency leaf forms
 (`declassify` / `perform` / `scope` / `spawn` / `.await`), and **increment-8 (A11)**
 landed `handle` — **closing the (2b) expression grammar** (every `ExprKind` the
-oracle emits now parses). Remaining: slices (2c) statements + fns and (2d) the
-top-level decls per D6 grow it toward the full corpus; the ADR flips fully as they
+oracle emits now parses). **(2c) is now UNDERWAY:** **(2c-1, A12)** landed the
+statement grammar (a real `Block` of statements + tail). Remaining in (2c): `let`
+type annotations + a `parse_type` (2c-2), then `fn` definitions with params/return
+type/effect row (2c-3); then (2d) the top-level decls. The ADR flips fully as they
 close. See ## Amendments.
 
 ## Amendments (in progress — (2a) + (2b) landing)
@@ -223,6 +225,29 @@ close. See ## Amendments.
   **Next: (2c)** statements (`let` / assign / `while` / `break` / `continue` /
   expr-stmt — turning the statement-free `BlockE` into a real block) + `fn`
   definitions with params/return-type/effect-row; then **(2d)** the top-level decls.
+- **A12 — (2c-1): the statement grammar + real blocks (opens slice (2c)).** A block
+  is now `{ <stmt>* <tail> }` → `(block <stmt>… <tail>)`. Statements: `let [mut]
+  name = e` → `(let [mut] name _ e)` (the `_` is the type annotation, added at
+  (2c-2)); `target = e` → `(assign target e)`; `while cond { body }` → `(while cond
+  (block …))`; `break` → `(break)`; `continue` → `(continue)`; an expr-statement →
+  `(expr e)`. The block loop (`parse_stmts`) mirrors `parse_block_inner`: dispatch
+  `let`/`while`/`break`/`continue` by keyword tag, else parse an expr and classify
+  by what follows (`=` → assign-stmt, `;` → expr-stmt, else → the tail). **The block
+  tail is written into a `&mut Expr` out-param** (the A11 technique), whose default
+  is a **nullary `Expr::SynthZero`** that dumps `(int 0)` — exactly the oracle's
+  synthesised unit tail for a statement-only `while` body. **⚠ Leak found + fixed
+  in-flight:** the tail default was first `Expr::Int(0)`, whose `i64` payload is
+  heap-**boxed**, and `*tail = ex` through the `&mut` ref does **not** free the old
+  enum (consistent with A11, where `NoRet` is nullary), so the boxed `Int(0)` leaked
+  once per overwritten tail (`leaks --atExit`: 2 leaks / 32 bytes). A **nullary**
+  default (no box) is leak-free and dumps identically — recorded as a reusable
+  rule: a `&mut Enum` out-param's default must be a payload-free variant. `Expr`
+  `BlockE(Expr)` → `Block(Stmts, Expr)` + `SynthZero`; new `Stmts`/`Stmt` enums; the
+  fn body is now a real block. New tokens: `;` (44) + `let`/`mut`/`while`/`break`/
+  `continue` (45–49). Verified: 122 differential seeds (let/assign/expr-stmt, `while`
+  with break/continue/assign bodies, statement-only `while` bodies, nested
+  statements, composites) match `snc ast`; leak-free. **Next:** (2c-2) `let` type
+  annotations + `parse_type`; (2c-3) `fn` definitions.
 
 Date: 2026-06-02
 Related:

@@ -14,9 +14,9 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2b) the
-full EXPRESSION grammar COMPLETE; increment-8 `handle` (ADR 0039 A11).**
-Movement 1 (the language/stdlib build-out,
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2c-1):
+statements + real blocks (ADR 0039 A12); (2b) the full expression grammar is
+COMPLETE.** Movement 1 (the language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for
 self-hosting is cleared**. Movement 2 ports `snc` to Sentinel stage by stage, each
@@ -90,12 +90,19 @@ but NOT dumped; the optional `return` arm kept SEPARATE (a `&mut Ret` out-param,
 the first non-primitive `&mut` assignment in the port — de-risked by a probe) so it
 dumps LAST regardless of source order; `Expr` gained `Handle` + the `HArms`/`Ret`
 enums. **This CLOSES the (2b) expression grammar** — every `ExprKind` the oracle
-emits now parses. The diff corpus is **110 seeds** (the full expression surface +
-composites), all matching `snc ast`, leak-free. Remaining: **(2c)** statements
-(`let`/assign/`while`/`break`/`continue`/expr-stmt — turning the statement-free
-`BlockE` into a real block) + `fn`-with-params/return-type/effect-row, **(2d)** the
-top-level decls — each growing the parser + its diff corpus toward the full
-`tests/pass` + `tests/ui` set. Recap of the movement-1 close:
+emits now parses. **(2c-1) (ADR 0039 A12):** a block is now a real `{ <stmt>*
+<tail> }` → `(block <stmt>… <tail>)` — `let [mut] name = e` → `(let [mut] name _ e)`
+(`_` = the type annotation, added at (2c-2)), `target = e` → `(assign …)`, `while
+cond { body }` → `(while …)`, `break`/`continue` → `(break)`/`(continue)`, an
+expr-statement → `(expr e)`; the fn body is now a real block. The block tail is a
+`&mut Expr` out-param defaulting to a **nullary** `SynthZero` that dumps `(int 0)`
+(the synth unit tail for a statement-only `while` body — a boxed `Int(0)` default
+leaked, since `*tail = e` doesn't free the old enum). `Expr` gained `Block(Stmts,
+Expr)`/`SynthZero` + new `Stmts`/`Stmt` enums; new tokens `;` + let/mut/while/break/
+continue. The diff corpus is **122 seeds**, all matching `snc ast`, leak-free.
+Remaining: **(2c-2)** `let` type annotations + a `parse_type`; **(2c-3)** `fn`
+definitions with params/return-type/effect-row; **(2d)** the top-level decls — each
+growing the parser + its diff corpus toward the full `tests/pass` + `tests/ui` set. Recap of the movement-1 close:
 after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
 (file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
 compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want
