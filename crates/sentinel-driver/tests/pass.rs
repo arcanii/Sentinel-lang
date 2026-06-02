@@ -1244,3 +1244,17 @@ fn pass_c5d5_break_continue() {
     // 15 + 30 + 30 + 40 = 115.
     assert_eq!(run_exit("c5d5_break_continue.sentinel"), 115);
 }
+
+#[test]
+fn pass_selfhost_ast_drop() {
+    // ADR 0039 D4: the self-host parser's recursive-AST drop gate. A
+    // recursive-enum `Node` (i64 + `[u8]` + recursive payloads) built, walked
+    // by a CONSUMING recursive `match` (the parser's dump shape), and dropped
+    // — leak-free under `leaks --atExit` (verified separately), confirming
+    // ADR 0032 A1's box-free recursive-enum drop holds at AST scale (so the
+    // parser needs no D.1b payload-ownership fix first). dump of
+    // Pair(Name "ab", Pair(Lit 1, Name "cd")) = "(Nab(LNcd))" -> exit 11.
+    let r = build_and_run("selfhost_ast_drop.sentinel");
+    assert_eq!(r.exit, 11);
+    assert_eq!(r.stdout, "(Nab(LNcd))");
+}

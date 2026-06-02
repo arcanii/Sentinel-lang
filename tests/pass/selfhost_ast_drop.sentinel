@@ -1,0 +1,66 @@
+// Phase D self-host port (2a) / ADR 0039 D4: the recursive-AST drop gate.
+//
+// Build a recursive-enum AST (a `Node` with i64, `[u8]`, AND recursive
+// payloads — the shape an AST node takes), walk it with a CONSUMING recursive
+// `match` (the parser's dump shape: each arm MOVES its payloads, recursing),
+// and let it drop. This pins ADR 0032 A1's box-free recursive-enum drop as
+// leak-free AT AST SCALE — so the self-host parser can build + dump an AST
+// without first landing the D.1b payload-ownership fix.
+//
+// Leak-free under `leaks --atExit` (verified separately — the consuming walk
+// frees every payload box + array). dump of
+//   Pair(Name "ab", Pair(Lit 1, Name "cd"))
+// is "(Nab(LNcd))" (11 bytes): stdout = that, exit = 11.
+
+enum Node {
+    Lit(i64),
+    Name([u8]),
+    Pair(Node, Node),
+}
+
+fn append_str(out: &mut Vec<u8>, s: [u8]) -> i64 {
+    let n: i64 = len(s);
+    let mut i: i64 = 0;
+    while i < n {
+        push(out, s[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// Consuming recursive walk: `match` moves each payload, recursing into and
+// freeing the whole tree.
+fn dump(out: &mut Vec<u8>, node: Node) -> i64 {
+    match node {
+        Node::Lit(v) => {
+            push(out, 'L');
+            0
+        },
+        Node::Name(s) => {
+            push(out, 'N');
+            append_str(out, s);
+            0
+        },
+        Node::Pair(l, r) => {
+            push(out, '(');
+            dump(out, l);
+            dump(out, r);
+            push(out, ')');
+            0
+        },
+    }
+}
+
+fn build() -> Node {
+    Node::Pair(Node::Name("ab"), Node::Pair(Node::Lit(1), Node::Name("cd")))
+}
+
+fn main() -> i64 {
+    let mut out: Vec<u8> = vec_new();
+    let root: Node = build();
+    dump(&mut out, root);
+    let result: i64 = len(out);
+    let arr: [u8] = vec_to_array(out);
+    print_bytes(arr);
+    result
+}
