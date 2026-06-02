@@ -1,29 +1,44 @@
-// Phase D self-host port (2a) / ADR 0039: the parser-in-Sentinel — minimal
-// expression slice. Reads `input.sentinel`, tokenizes it, recursive-descent
-// parses each `fn NAME() -> TYPE { <expr> }` into an `Expr` AST, and prints
-// the SAME canonical S-expression dump as the Rust `snc ast` oracle
-// (ADR 0039 D2), e.g. `(fn main () i64 (block (binop + (int 1) (binop * (int
-// 2) (int 3)))))`.
+// Phase D self-host port (2b) / ADR 0039: the parser-in-Sentinel — the full
+// operator-precedence expression slice. Reads `input.sentinel`, tokenizes it,
+// recursive-descent parses each `fn NAME() -> TYPE { <expr> }` into an `Expr`
+// AST, and prints the SAME canonical S-expression dump as the Rust `snc ast`
+// oracle (ADR 0039 D2), e.g. `(fn main () i64 (block (binop + (int 1) (binop *
+// (int 2) (int 3)))))`.
 //
-// (2a) scope: paramless fns whose body is an integer arithmetic expression
-// (`+ - * /` with precedence + parens). Vars, params, statements, calls, and
-// the other expr/decl kinds grow in (2b)–(2d). Self-contained (its own
-// minimal tokenizer); factoring the full lexer into a shared D.6 module is a
-// follow-on.
+// (2b) increment-1 scope: paramless fns whose body is an expression over the
+// COMPLETE operator-precedence ladder mirroring the Rust parser — `||`, `&&`,
+// the six comparisons (`== != < <= > >=`, non-associative), bitwise `| ^ &`,
+// additive `+ -`, multiplicative `* /`, prefix unary `- !`, and parenthesized
+// subexpressions — plus the scalar atom leaves: integer / `true` / `false` /
+// `null` literals and variable references. Calls, field/index/method,
+// `if`/`match`, struct/array literals, perform/handle, and the statement + decl
+// grammar grow the parser in the next (2b)-(2d) slices. Self-contained (its own
+// minimal tokenizer); sharing the full lexer via a D.6 module is a follow-on.
 //
-// Sentinel idioms this leans on (ADR 0038 A2 / ADR 0039 A3): a recursive
-// `Expr` enum returned BY VALUE + consuming-dumped (no `Vec<Expr>`); shared
-// refs indexed via `(*r)[i]` (not `r[i]`) so helpers share the token arrays +
-// `src`; a `&mut i64` cursor; left-assoc folds via RECURSION (a param
-// accumulator — a loop accumulator would trip the moved-in-loop rule); a flat
-// per-fn variable namespace (unique local names); comma-separated `match` arms.
+// Sentinel idioms (ADR 0038 A2 / ADR 0039 A3): a recursive `Expr` enum returned
+// BY VALUE + consuming-dumped (no `Vec<Expr>`); shared refs indexed via
+// `(*r)[i]` (auto `r[i]` fails on a ref); a `&mut i64` cursor; left-assoc folds
+// via RECURSION (`parse_X` + `parse_X_rest(acc)` threading the accumulator as a
+// PARAM — a `while`-loop accumulator trips the moved-in-loop rule); a flat
+// per-fn variable namespace (unique local names even across disjoint `if`-arms);
+// comma-separated `match` arms; the dump's deep `if`-chains compute the prefix +
+// symbol as `[u8]` values FIRST, then emit (sibling `&mut out` borrows in `if`
+// tails read as overlapping).
 //
-// Token tags (internal): 1 Int, 2 Ident, 3 fn, 4 ( 5 ) 6 { 7 } 8 -> 9 + 10 -
-// 11 * 12 /.
+// Token tags (internal): 1 Int 2 Ident 3 fn | 4 ( 5 ) 6 { 7 } 8 -> | 9 + 10 -
+// 11 * 12 / | 13 == 14 != 15 < 16 <= 17 > 18 >= | 19 && 20 || 21 | 22 ^ 23 &
+// 24 ! 25 =.
+// Expr op-codes (internal; the dump emits node names + operator symbols):
+// binop 1 + 2 - 3 * 4 / 5 & 6 | 7 ^ ; cmp 8 == 9 != 10 < 11 <= 12 > 13 >= ;
+// logic 14 && 15 || ; unary 1 - 2 !.
 
 enum Expr {
     Int(i64),
-    Bin(u8, Expr, Expr),
+    Bool(bool),
+    Null,
+    Var([u8]),
+    Unary(i64, Expr),
+    Binary(i64, Expr, Expr),
 }
 
 fn is_space(c: u8) -> bool {
@@ -44,6 +59,24 @@ fn is_ident_cont(c: u8) -> bool {
 
 fn is_fn_kw(src: &[u8], start: i64, end: i64) -> bool {
     end - start == 2 && (*src)[start] == 'f' && (*src)[start + 1] == 'n'
+}
+
+// Keyword-atom recognition (mirrors `is_fn_kw` — byte-compare in place, no
+// allocation): `true` / `false` / `null` lex as identifiers but parse to the
+// `BoolLit` / `NullLit` nodes the oracle emits, NOT to `(var ...)`.
+fn is_kw_true(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 4 && (*src)[start] == 't' && (*src)[start + 1] == 'r'
+        && (*src)[start + 2] == 'u' && (*src)[start + 3] == 'e'
+}
+
+fn is_kw_false(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 5 && (*src)[start] == 'f' && (*src)[start + 1] == 'a'
+        && (*src)[start + 2] == 'l' && (*src)[start + 3] == 's' && (*src)[start + 4] == 'e'
+}
+
+fn is_kw_null(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 4 && (*src)[start] == 'n' && (*src)[start + 1] == 'u'
+        && (*src)[start + 2] == 'l' && (*src)[start + 3] == 'l'
 }
 
 // Append the decimal rendering of `x` (>= 0) to `out`.
@@ -90,6 +123,18 @@ fn append_slice(out: &mut Vec<u8>, src: &[u8], start: i64, end: i64) -> i64 {
     0
 }
 
+// Copy `src[start..end]` into a fresh owned `[u8]` (an identifier's text for
+// the `Var` node — the consuming dump frees it).
+fn slice_of(src: &[u8], start: i64, end: i64) -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    let mut i: i64 = start;
+    while i < end {
+        push(&mut v, (*src)[i]);
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
 // Parse the decimal integer in `src[start..end]`.
 fn parse_int(src: &[u8], start: i64, end: i64) -> i64 {
     let mut acc: i64 = 0;
@@ -132,15 +177,43 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
             push(ends, ie);
             ie
         } else {
-            let two: bool = b == '-' && start + 1 < n && (*src)[start + 1] == '>';
+            // Operators + punctuation, longest-match. Compute kind + length
+            // FIRST (the `if`-chain yields plain i64s), then push in one go.
+            let has2: bool = start + 1 < n;
+            let nx: u8 = if has2 {
+                (*src)[start + 1]
+            } else {
+                '\0'
+            };
+            let two: bool = (b == '=' && nx == '=')
+                || (b == '!' && nx == '=')
+                || (b == '<' && nx == '=')
+                || (b == '>' && nx == '=')
+                || (b == '&' && nx == '&')
+                || (b == '|' && nx == '|')
+                || (b == '-' && nx == '>');
             let tg: i64 = if b == '+' {
                 9
             } else if b == '-' {
-                if two { 8 } else { 10 }
+                if nx == '>' { 8 } else { 10 }
             } else if b == '*' {
                 11
             } else if b == '/' {
                 12
+            } else if b == '=' {
+                if nx == '=' { 13 } else { 25 }
+            } else if b == '!' {
+                if nx == '=' { 14 } else { 24 }
+            } else if b == '<' {
+                if nx == '=' { 16 } else { 15 }
+            } else if b == '>' {
+                if nx == '=' { 18 } else { 17 }
+            } else if b == '&' {
+                if nx == '&' { 19 } else { 23 }
+            } else if b == '|' {
+                if nx == '|' { 20 } else { 21 }
+            } else if b == '^' {
+                22
             } else if b == '(' {
                 4
             } else if b == ')' {
@@ -152,7 +225,11 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
             } else {
                 0
             };
-            let adv: i64 = if two { 2 } else { 1 };
+            let adv: i64 = if two {
+                2
+            } else {
+                1
+            };
             push(kinds, tg);
             push(starts, start);
             push(ends, start + adv);
@@ -162,62 +239,193 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
     0
 }
 
-fn parse_primary(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+// --- the precedence ladder (mirrors the Rust parser exactly) ---------------
+// parse_expr -> or -> and -> cmp -> bitor -> bitxor -> bitand -> add -> mul ->
+// unary -> atom. Left-assoc levels fold via `parse_X` + `parse_X_rest(acc)`.
+
+fn parse_atom(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
     let tag: i64 = (*k)[*cur];
     if tag == 1 {
-        let st: i64 = (*s)[*cur];
-        let en: i64 = (*e)[*cur];
+        let ist: i64 = (*s)[*cur];
+        let ien: i64 = (*e)[*cur];
         *cur = *cur + 1;
-        Expr::Int(parse_int(src, st, en))
+        Expr::Int(parse_int(src, ist, ien))
     } else if tag == 4 {
         *cur = *cur + 1;
-        let inner: Expr = parse_add(k, s, e, src, cur);
+        let pin: Expr = parse_expr(k, s, e, src, cur);
         *cur = *cur + 1;
-        inner
+        pin
+    } else if tag == 2 {
+        let vst: i64 = (*s)[*cur];
+        let ven: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        if is_kw_true(src, vst, ven) {
+            Expr::Bool(true)
+        } else if is_kw_false(src, vst, ven) {
+            Expr::Bool(false)
+        } else if is_kw_null(src, vst, ven) {
+            Expr::Null
+        } else {
+            Expr::Var(slice_of(src, vst, ven))
+        }
     } else {
         *cur = *cur + 1;
         Expr::Int(0)
     }
 }
 
+fn parse_unary(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let utag: i64 = (*k)[*cur];
+    if utag == 10 {
+        *cur = *cur + 1;
+        let nu: Expr = parse_unary(k, s, e, src, cur);
+        Expr::Unary(1, nu)
+    } else if utag == 24 {
+        *cur = *cur + 1;
+        let bu: Expr = parse_unary(k, s, e, src, cur);
+        Expr::Unary(2, bu)
+    } else {
+        parse_atom(k, s, e, src, cur)
+    }
+}
+
 fn parse_mul(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
-    let left: Expr = parse_primary(k, s, e, src, cur);
-    parse_mul_rest(k, s, e, src, cur, left)
+    let lhs: Expr = parse_unary(k, s, e, src, cur);
+    parse_mul_rest(k, s, e, src, cur, lhs)
 }
 
 fn parse_mul_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
-    let tag: i64 = (*k)[*cur];
-    if tag == 11 {
+    let tg: i64 = (*k)[*cur];
+    if tg == 11 {
         *cur = *cur + 1;
-        let right: Expr = parse_primary(k, s, e, src, cur);
-        parse_mul_rest(k, s, e, src, cur, Expr::Bin('*', acc, right))
-    } else if tag == 12 {
+        let ra: Expr = parse_unary(k, s, e, src, cur);
+        parse_mul_rest(k, s, e, src, cur, Expr::Binary(3, acc, ra))
+    } else if tg == 12 {
         *cur = *cur + 1;
-        let rd: Expr = parse_primary(k, s, e, src, cur);
-        parse_mul_rest(k, s, e, src, cur, Expr::Bin('/', acc, rd))
+        let rb: Expr = parse_unary(k, s, e, src, cur);
+        parse_mul_rest(k, s, e, src, cur, Expr::Binary(4, acc, rb))
     } else {
         acc
     }
 }
 
 fn parse_add(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
-    let left: Expr = parse_mul(k, s, e, src, cur);
-    parse_add_rest(k, s, e, src, cur, left)
+    let lhs: Expr = parse_mul(k, s, e, src, cur);
+    parse_add_rest(k, s, e, src, cur, lhs)
 }
 
 fn parse_add_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
-    let tag: i64 = (*k)[*cur];
-    if tag == 9 {
+    let tg: i64 = (*k)[*cur];
+    if tg == 9 {
         *cur = *cur + 1;
-        let right: Expr = parse_mul(k, s, e, src, cur);
-        parse_add_rest(k, s, e, src, cur, Expr::Bin('+', acc, right))
-    } else if tag == 10 {
+        let ra: Expr = parse_mul(k, s, e, src, cur);
+        parse_add_rest(k, s, e, src, cur, Expr::Binary(1, acc, ra))
+    } else if tg == 10 {
         *cur = *cur + 1;
-        let rs: Expr = parse_mul(k, s, e, src, cur);
-        parse_add_rest(k, s, e, src, cur, Expr::Bin('-', acc, rs))
+        let rb: Expr = parse_mul(k, s, e, src, cur);
+        parse_add_rest(k, s, e, src, cur, Expr::Binary(2, acc, rb))
     } else {
         acc
     }
+}
+
+fn parse_bitand(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_add(k, s, e, src, cur);
+    parse_bitand_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_bitand_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 23 {
+        *cur = *cur + 1;
+        let rr: Expr = parse_add(k, s, e, src, cur);
+        parse_bitand_rest(k, s, e, src, cur, Expr::Binary(5, acc, rr))
+    } else {
+        acc
+    }
+}
+
+fn parse_bitxor(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_bitand(k, s, e, src, cur);
+    parse_bitxor_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_bitxor_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 22 {
+        *cur = *cur + 1;
+        let rr: Expr = parse_bitand(k, s, e, src, cur);
+        parse_bitxor_rest(k, s, e, src, cur, Expr::Binary(7, acc, rr))
+    } else {
+        acc
+    }
+}
+
+fn parse_bitor(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_bitxor(k, s, e, src, cur);
+    parse_bitor_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_bitor_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 21 {
+        *cur = *cur + 1;
+        let rr: Expr = parse_bitxor(k, s, e, src, cur);
+        parse_bitor_rest(k, s, e, src, cur, Expr::Binary(6, acc, rr))
+    } else {
+        acc
+    }
+}
+
+// Comparison is non-associative (a single optional `cmp_op`, no `_rest`); the
+// token tag (13..=18) maps to the op-code (8..=13) by subtracting 5.
+fn parse_cmp(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_bitor(k, s, e, src, cur);
+    let tg: i64 = (*k)[*cur];
+    if tg >= 13 && tg <= 18 {
+        let op: i64 = tg - 5;
+        *cur = *cur + 1;
+        let rhs: Expr = parse_bitor(k, s, e, src, cur);
+        Expr::Binary(op, lhs, rhs)
+    } else {
+        lhs
+    }
+}
+
+fn parse_and(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_cmp(k, s, e, src, cur);
+    parse_and_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_and_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 19 {
+        *cur = *cur + 1;
+        let rr: Expr = parse_cmp(k, s, e, src, cur);
+        parse_and_rest(k, s, e, src, cur, Expr::Binary(14, acc, rr))
+    } else {
+        acc
+    }
+}
+
+fn parse_or(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_and(k, s, e, src, cur);
+    parse_or_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_or_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 20 {
+        *cur = *cur + 1;
+        let rr: Expr = parse_and(k, s, e, src, cur);
+        parse_or_rest(k, s, e, src, cur, Expr::Binary(15, acc, rr))
+    } else {
+        acc
+    }
+}
+
+fn parse_expr(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    parse_or(k, s, e, src, cur)
 }
 
 // Consuming recursive dump matching `snc ast`.
@@ -229,9 +437,81 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
             push(out, ')');
             0
         },
-        Expr::Bin(op, l, r) => {
-            append_str(out, "(binop ");
-            push(out, op);
+        Expr::Bool(bv) => {
+            let blit: [u8] = if bv {
+                "(bool true)"
+            } else {
+                "(bool false)"
+            };
+            append_str(out, blit);
+            0
+        },
+        Expr::Null => {
+            append_str(out, "(null)");
+            0
+        },
+        Expr::Var(nm) => {
+            append_str(out, "(var ");
+            append_str(out, nm);
+            push(out, ')');
+            0
+        },
+        Expr::Unary(uop, inner) => {
+            append_str(out, "(unary ");
+            let usym: [u8] = if uop == 1 {
+                "-"
+            } else {
+                "!"
+            };
+            append_str(out, usym);
+            push(out, ' ');
+            dump_expr(out, inner);
+            push(out, ')');
+            0
+        },
+        Expr::Binary(bop, l, r) => {
+            push(out, '(');
+            let pfx: [u8] = if bop <= 7 {
+                "binop"
+            } else if bop <= 13 {
+                "cmp"
+            } else {
+                "logic"
+            };
+            append_str(out, pfx);
+            push(out, ' ');
+            let bsym: [u8] = if bop == 1 {
+                "+"
+            } else if bop == 2 {
+                "-"
+            } else if bop == 3 {
+                "*"
+            } else if bop == 4 {
+                "/"
+            } else if bop == 5 {
+                "&"
+            } else if bop == 6 {
+                "|"
+            } else if bop == 7 {
+                "^"
+            } else if bop == 8 {
+                "=="
+            } else if bop == 9 {
+                "!="
+            } else if bop == 10 {
+                "<"
+            } else if bop == 11 {
+                "<="
+            } else if bop == 12 {
+                ">"
+            } else if bop == 13 {
+                ">="
+            } else if bop == 14 {
+                "&&"
+            } else {
+                "||"
+            };
+            append_str(out, bsym);
             push(out, ' ');
             dump_expr(out, l);
             push(out, ' ');
@@ -274,7 +554,7 @@ fn main() -> i64 {
         let ret_e: i64 = ends[cur];
         cur = cur + 1;
         cur = cur + 1;
-        let body: Expr = parse_add(&kinds, &starts, &ends, &src, &mut cur);
+        let body: Expr = parse_expr(&kinds, &starts, &ends, &src, &mut cur);
         cur = cur + 1;
         append_str(&mut out, "(fn ");
         append_slice(&mut out, &src, name_s, name_e);
