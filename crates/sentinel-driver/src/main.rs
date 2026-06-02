@@ -326,6 +326,19 @@ fn run_build_merged(merged: Program, path: &str, output: Option<&str>) -> ExitCo
             return ExitCode::from(1);
         }
     };
+    // C3 / ADR 0019 D13: effect-check parity for the merged path. The
+    // single-file pipeline runs this via `borrow_check_query` chaining on
+    // `effect_check_query` (salsa); the merged path calls the pure passes
+    // directly, so it must invoke `effect_check` itself — else a multi-file
+    // `main` with an unhandled effect would slip through to codegen. Matches
+    // the salsa order: effect-check sits between type-check and borrow-check.
+    let (_effect_checked, effect_errors) = sentinel_effect_check::effect_check(&typed);
+    if !effect_errors.is_empty() {
+        for e in &effect_errors {
+            eprintln!("snc: {e}");
+        }
+        return ExitCode::from(1);
+    }
     let (drop_plan, borrow_errors) = sentinel_borrow_check::borrow_check(&typed);
     if !borrow_errors.is_empty() {
         for e in &borrow_errors {

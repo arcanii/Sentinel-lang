@@ -17,6 +17,7 @@ path = "src/main.rs"
 sentinel-base         = { path = "../sentinel-base" }
 sentinel-borrow-check = { path = "../sentinel-borrow-check" }
 sentinel-codegen      = { path = "../sentinel-codegen" }
+sentinel-effect-check = { path = "../sentinel-effect-check" }
 sentinel-hir          = { path = "../sentinel-hir" }
 sentinel-mir          = { path = "../sentinel-mir" }
 sentinel-resolve      = { path = "../sentinel-resolve" }

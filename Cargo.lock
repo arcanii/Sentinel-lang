@@ -1181,6 +1181,7 @@ dependencies = [
  "sentinel-base",
  "sentinel-borrow-check",
  "sentinel-codegen",
+ "sentinel-effect-check",
  "sentinel-hir",
  "sentinel-mir",
  "sentinel-resolve",

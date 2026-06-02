@@ -299,6 +299,33 @@ fn cross_module_effect_compiles_and_runs() {
     assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
 }
 
+#[test]
+fn cross_module_unhandled_effect_in_main_is_rejected() {
+    // Effect-check parity for the merged path: `main` calls the effecting
+    // `io::source` WITHOUT a `handle`, so `Io` bubbles unhandled to `main` —
+    // rejected (ADR 0019 D13). Before effect-check was wired into the merged
+    // path this slipped through to codegen; now it's a clean build failure.
+    let dir = temp_project("xeffect_unhandled");
+    write(
+        dir.join("io.sentinel"),
+        "pub effect Io {\n    read() -> i64;\n}\n\
+         pub fn source() -> i64 ! { Io } { perform Io.read() }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use io::source;\nfn main() -> i64 { source() }\n",
+    );
+    let (ok, stderr) = build(dir.join("main.sentinel"));
+    assert!(
+        !ok,
+        "an unhandled effect in main should fail the merged build; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unhandled effect"),
+        "expected an UnhandledEffect diagnostic; stderr:\n{stderr}"
+    );
+}
+
 // --- D.6 cross-module GENERICS (Path A whole-program mono) -------------------
 // Under Path A the merged graph is one Program, so `collect_mono_instantiations`
 // runs whole-program and a generic instantiated in a *different* module than its
