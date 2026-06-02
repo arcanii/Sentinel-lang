@@ -323,6 +323,19 @@ close. See ## Amendments.
   incl. `?`/`&`/`secret`/nested generics, source-order `struct`/`fn`
   interleaving) match `snc ast`; leak-free under `leaks --atExit`; a new
   `tests/ast.rs` golden pins the struct dump. Next: (2d-3) `enum` decls.
+- **A17 — (2d-3): `enum` decls.** `enum Name { V1, V2(T), … }` →
+  `(enum Name (variant V1) (variant V2 <type>) …)`; a unit variant has no payload
+  types, a payload variant lists them positionally; empty → `(enum Name)`. Enums
+  are **non-generic** (no type-params to skip — `enum Name<T>` doesn't parse in
+  the Rust oracle either); payload types route through `parse_type`. Oracle:
+  `Item` gains an `Enum` variant + `dump_enum`. Parser: tokenizer tag `enum`(53) +
+  `is_kw_enum`; `dump_enum_decl` + a recursive `dump_variants` (name + optional
+  payload list) + `dump_payloads` (parse + dump each positional type inline);
+  `dump_item` gains the enum arm. Verified: 166 differential seeds (7 new —
+  unit/payload variants, empty, trailing comma, recursive payloads like
+  `Bin(Node, Node)`, `struct`+`enum`+`fn` source-order interleaving) match `snc
+  ast`; leak-free under `leaks --atExit`; a new `tests/ast.rs` golden pins the
+  enum dump. Next: (2d-4) `effect` decls.
 
 Date: 2026-06-02
 Related:
