@@ -32,12 +32,17 @@
 //! `( [mut] name: T, … )` → `(param [mut] name <type>)`, a `-> TYPE` return type
 //! (routed through `parse_type`), and — parsed but NOT dumped, matching the
 //! oracle — generic type-params `<…>` and the postfix effect row `! { … }`.
-//! (2d) opens the top-level decl grammar: (2d-1) adds `use a::b::Item;` →
-//! `(use a b Item)`, dumped in source order before the fns (the oracle re-sorts
-//! its kind-bucketed `Program` by span; the Sentinel parser emits decls as it
-//! scans). The top-level decl grammar grows the parser (and this corpus) across
-//! (2d) toward the full `tests/pass` plus `tests/ui` set, the way
-//! `tests/selfhost_lex.rs` covers the corpus for `snc lex`.
+//! (2d) adds the top-level decl grammar — `use` / `struct` / `enum` / `effect`
+//! / `trait` / `impl` / `class` (dumped in source order; the oracle re-sorts its
+//! kind-bucketed `Program` by span, the Sentinel parser emits decls as it
+//! scans). (2d-8) then closes the gaps to the **full corpus**: `//` line
+//! comments, the prefix `*` (deref) / `&` / `&mut` (address-of) unary operators,
+//! and char / string literals (`'c'` → `(char N)`, `"s"` → `(str b…)`, escapes
+//! decoded per ADR 0033 D2). Beyond the curated `SEEDS` above,
+//! [`sentinel_parser_matches_oracle_on_corpus`] is the parser-stage phase-go: it
+//! runs the Sentinel parser against `snc ast` over every clean-parsing fixture
+//! in `tests/pass` + `tests/ui`, the way `tests/selfhost_lex.rs` covers the
+//! corpus for `snc lex`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -350,6 +355,87 @@ fn sentinel_parser_matches_oracle_on_seeds() {
         "the Sentinel parser diverged from `snc ast` on {}/{} seed(s):\n{}",
         mismatches.len(),
         SEEDS.len(),
+        mismatches.join("\n")
+    );
+}
+
+/// Every `*.sentinel` fixture in `tests/pass` + `tests/ui` (sorted).
+fn collect_fixtures() -> Vec<PathBuf> {
+    let root = workspace_root();
+    let mut fixtures = Vec::new();
+    for sub in ["tests/pass", "tests/ui"] {
+        for entry in std::fs::read_dir(root.join(sub)).expect("read fixture dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) == Some("sentinel") {
+                fixtures.push(path);
+            }
+        }
+    }
+    fixtures.sort();
+    fixtures
+}
+
+/// (2d-8) The corpus-wide differential — the parser-stage phase-go (ADR 0039
+/// D8), mirroring `tests/selfhost_lex.rs`. For every fixture where the Rust
+/// `snc ast` oracle succeeds (a clean-parsing fixture), assert the Sentinel
+/// parser's dump is byte-identical. Fixtures the oracle rejects — the two
+/// deliberate negative fixtures `lex_invalid_char.sentinel` (a lex error) and
+/// `parse_unbalanced_paren.sentinel` (a parse error) — are skipped: parser
+/// ERROR parity is out of scope (happy-path AST production first, ADR 0039 D7),
+/// so the Sentinel parser is only run where the oracle produced a full dump.
+#[test]
+fn sentinel_parser_matches_oracle_on_corpus() {
+    let tmp = std::env::temp_dir().join(format!("snc_selfhost_parse_corpus_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let parser = build_sentinel_parser(&tmp);
+
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+
+    let fixtures = collect_fixtures();
+    assert!(fixtures.len() > 100, "expected a substantial corpus, got {}", fixtures.len());
+
+    let mut clean = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+    for fixture in &fixtures {
+        let bytes = std::fs::read(fixture).expect("read fixture");
+        std::fs::write(&input, &bytes).expect("stage input");
+
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("ast")
+            .arg(&input)
+            .output()
+            .expect("run snc ast");
+        // Skip fixtures the oracle rejects (negative / parse-error fixtures) —
+        // the Sentinel parser only mirrors happy-path AST production.
+        if !oracle.status.success() {
+            continue;
+        }
+        clean += 1;
+
+        let sentinel = Command::new(&parser)
+            .current_dir(&work)
+            .output()
+            .expect("run the Sentinel parser");
+
+        if oracle.stdout != sentinel.stdout {
+            mismatches.push(format!(
+                "  {} (oracle {} bytes vs sentinel {} bytes)",
+                fixture.file_name().unwrap().to_string_lossy(),
+                oracle.stdout.len(),
+                sentinel.stdout.len()
+            ));
+        }
+    }
+
+    assert!(clean > 100, "expected >100 clean-parsing fixtures, got {clean}");
+    assert!(
+        mismatches.is_empty(),
+        "the Sentinel parser diverged from `snc ast` on {}/{} clean-parsing fixture(s):\n{}",
+        mismatches.len(),
+        clean,
         mismatches.join("\n")
     );
 }
