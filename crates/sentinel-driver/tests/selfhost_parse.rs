@@ -31,9 +31,12 @@
 //! / `secret T` (and nesting). (2c-3) adds full `fn` definitions: a param list
 //! `( [mut] name: T, … )` → `(param [mut] name <type>)`, a `-> TYPE` return type
 //! (routed through `parse_type`), and — parsed but NOT dumped, matching the
-//! oracle — generic type-params `<…>` and the postfix effect row `! { … }`. The
-//! top-level decl grammar grows the parser (and this corpus) in the (2d) slice
-//! toward the full `tests/pass` plus `tests/ui` set, the way
+//! oracle — generic type-params `<…>` and the postfix effect row `! { … }`.
+//! (2d) opens the top-level decl grammar: (2d-1) adds `use a::b::Item;` →
+//! `(use a b Item)`, dumped in source order before the fns (the oracle re-sorts
+//! its kind-bucketed `Program` by span; the Sentinel parser emits decls as it
+//! scans). The top-level decl grammar grows the parser (and this corpus) across
+//! (2d) toward the full `tests/pass` plus `tests/ui` set, the way
 //! `tests/selfhost_lex.rs` covers the corpus for `snc lex`.
 
 use std::path::{Path, PathBuf};
@@ -247,6 +250,11 @@ const SEEDS: &[&str] = &[
     // (2c-3) multi-fn programs with params.
     "fn add2(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { add2(1, 2) }\n",
     "fn hdl<T>(s: secret [u8], n: i64) -> Vec<i64> ! { Net, Log } { let mut acc: i64 = 0; while i < n { acc = acc + g(i); } w }\n",
+    // (2d-1) `use` imports — dumped `(use seg…)` in source order, before the fns.
+    "use a::b::Item;\nfn main() -> i64 { 0 }\n",
+    "use std::io::File;\nfn main() -> i64 { 1 }\n",
+    "use a::b::c::d::Thing;\nfn f() -> i64 { 2 }\n",
+    "use a::b::C;\nuse d::e::F;\nfn main() -> i64 { add(1, 2) }\n",
 ];
 
 #[test]

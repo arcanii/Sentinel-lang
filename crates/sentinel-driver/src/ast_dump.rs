@@ -8,27 +8,63 @@
 //! *names* (never numeric tags) are emitted. A dev/validation surface, NOT
 //! `abi-v1` — freely amendable; pinned by a golden test.
 //!
-//! (2a) scope: the function-level grammar — `fn` defs + every `Stmt` / `Expr`
-//! / `TypeExpr` / `Pattern`. Top-level non-fn decls (struct / enum / trait /
-//! impl / class / effect / use) are dumped in (2d); for now `dump_program`
-//! emits the fns (the seed fixtures are fn-only).
+//! (2a)–(2c) scope: the function-level grammar — `fn` defs + every `Stmt` /
+//! `Expr` / `TypeExpr` / `Pattern`. (2d) extends `dump` to the remaining
+//! top-level decl kinds (use / struct / enum / effect / trait / impl / class),
+//! landed one kind per increment. **Decls dump in source order** — the parsed
+//! `Program` buckets decls by kind (separate `Vec`s), so `dump` re-collapses
+//! them into a single list sorted by span start, which is exactly the order the
+//! Sentinel parser emits them as it scans the token stream top-to-bottom.
+//!
+//! (2d-1, this increment): `use a::b::Item;` → `(use a b Item)`.
 
 use sentinel_ast::{Block, Expr, ExprKind, FnDef, Param, Pattern, Program, Stmt, StmtKind, TypeExpr,
-    TypeExprKind};
+    TypeExprKind, UseDecl};
 
-/// Canonical S-expression dump of `program` (newline-separated fns).
+/// One top-level declaration, tagged for the source-order re-collation in
+/// [`dump`]. Grows a variant per (2d) increment as each decl kind lands.
+enum Item<'a> {
+    Use(&'a UseDecl),
+    Fn(&'a FnDef),
+}
+
+/// Canonical S-expression dump of `program` — every top-level decl in source
+/// order (newline-separated). The parser buckets decls by kind, so we re-sort
+/// by span start to recover the source order the Sentinel parser produces.
 pub fn dump(program: &Program) -> String {
+    let mut items: Vec<(usize, Item)> = Vec::new();
+    for u in &program.uses {
+        items.push((u.span.start, Item::Use(u)));
+    }
+    for f in &program.fns {
+        items.push((f.span.start, Item::Fn(f)));
+    }
+    items.sort_by_key(|(start, _)| *start);
+
     let mut out = String::new();
     let mut first = true;
-    for f in &program.fns {
+    for (_, item) in items {
         if !first {
             out.push('\n');
         }
         first = false;
-        dump_fn(f, &mut out);
+        match item {
+            Item::Use(u) => dump_use(u, &mut out),
+            Item::Fn(f) => dump_fn(f, &mut out),
+        }
     }
     out.push('\n');
     out
+}
+
+/// `use a::b::Item;` → `(use a b Item)` (each path segment space-separated).
+fn dump_use(u: &UseDecl, out: &mut String) {
+    out.push_str("(use");
+    for seg in &u.path {
+        out.push(' ');
+        out.push_str(seg);
+    }
+    out.push(')');
 }
 
 fn dump_fn(f: &FnDef, out: &mut String) {

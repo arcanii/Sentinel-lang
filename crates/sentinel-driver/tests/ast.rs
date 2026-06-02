@@ -53,3 +53,17 @@ fn ast_dump_params_let_call() {
          (fn main () i64 (block (let x i64 (int 5)) (call add (var x) (int 2))))\n"
     );
 }
+
+#[test]
+fn ast_dump_use_decls_source_order() {
+    // (2d-1) `use a::b::Item;` → `(use a b Item)`, each segment space-separated.
+    // Decls dump in source order (uses before the fn here); the `Program` is
+    // kind-bucketed, so `dump` re-sorts by span start to recover it.
+    assert_eq!(
+        ast_dump(
+            "uses",
+            "use a::b::Item;\nuse std::io::File;\nfn main() -> i64 { 0 }\n"
+        ),
+        "(use a b Item)\n(use std io File)\n(fn main () i64 (block (int 0)))\n"
+    );
+}
