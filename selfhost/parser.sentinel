@@ -369,6 +369,12 @@ fn is_kw_pub(src: &[u8], start: i64, end: i64) -> bool {
     end - start == 3 && (*src)[start] == 'p' && (*src)[start + 1] == 'u' && (*src)[start + 2] == 'b'
 }
 
+fn is_kw_struct(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 6 && (*src)[start] == 's' && (*src)[start + 1] == 't'
+        && (*src)[start + 2] == 'r' && (*src)[start + 3] == 'u' && (*src)[start + 4] == 'c'
+        && (*src)[start + 5] == 't'
+}
+
 // Append the decimal rendering of `x` (>= 0) to `out`.
 fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
     if x == 0 {
@@ -497,6 +503,8 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
                 58
             } else if is_kw_pub(src, start, ie) {
                 59
+            } else if is_kw_struct(src, start, ie) {
+                52
             } else {
                 2
             };
@@ -1848,6 +1856,53 @@ fn dump_fn_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
     0
 }
 
+// (2d-2) `struct Name <T>? { f: T, … }` → `(struct Name (field f <type>) …)`.
+// Generic type-params parsed-and-skipped; fields are parsed+dumped inline (a
+// field is just `name : type` — no AST node needed). The leading `struct` is at
+// the cursor.
+fn dump_struct_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    if (*k)[*cur] == 15 {
+        skip_type_params(k, cur)
+    } else {
+        0
+    };
+    *cur = *cur + 1;
+    append_str(out, "(struct ");
+    append_slice(out, src, nm_s, nm_e);
+    dump_struct_fields(out, k, s, e, src, cur);
+    push(out, ')');
+    0
+}
+
+// Parse + dump struct fields up to and consuming the closing `}` (tag 7): each
+// `name : type` → ` (field name <type>)`; commas skipped, trailing comma fine.
+fn dump_struct_fields(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        dump_struct_fields(out, k, s, e, src, cur)
+    } else {
+        let fnm_s: i64 = (*s)[*cur];
+        let fnm_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let fty: TypeE = parse_type(k, s, e, src, cur);
+        append_str(out, " (field ");
+        append_slice(out, src, fnm_s, fnm_e);
+        push(out, ' ');
+        dump_type(out, fty);
+        push(out, ')');
+        dump_struct_fields(out, k, s, e, src, cur)
+    }
+}
+
 // Dispatch one top-level decl on its leading token (2d). A SINGLE helper that
 // re-passes the ref params to the per-kind dumpers, so main has ONE borrow site:
 // sibling `if`-tail `&mut` borrows of a *local* (`&mut out` / `&mut cur` in
@@ -1865,6 +1920,8 @@ fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
     let lead: i64 = (*k)[*cur];
     if lead == 58 {
         dump_use_decl(out, k, s, e, src, cur)
+    } else if lead == 52 {
+        dump_struct_decl(out, k, s, e, src, cur)
     } else {
         dump_fn_decl(out, k, s, e, src, cur)
     }

@@ -67,3 +67,19 @@ fn ast_dump_use_decls_source_order() {
         "(use a b Item)\n(use std io File)\n(fn main () i64 (block (int 0)))\n"
     );
 }
+
+#[test]
+fn ast_dump_struct_decls() {
+    // (2d-2) `struct Name { f: T, … }` → `(struct Name (field f <type>) …)`;
+    // empty → `(struct Name)`; field types route through `dump_type`.
+    assert_eq!(
+        ast_dump(
+            "structs",
+            "struct Point { x: i64, y: i64 }\nstruct Empty {}\nstruct Bag { items: Vec<i64>, tag: [u8] }\nfn main() -> i64 { 0 }\n"
+        ),
+        "(struct Point (field x i64) (field y i64))\n\
+         (struct Empty)\n\
+         (struct Bag (field items (generic Vec i64)) (field tag (arr u8)))\n\
+         (fn main () i64 (block (int 0)))\n"
+    );
+}

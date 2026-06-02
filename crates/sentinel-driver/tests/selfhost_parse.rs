@@ -255,6 +255,15 @@ const SEEDS: &[&str] = &[
     "use std::io::File;\nfn main() -> i64 { 1 }\n",
     "use a::b::c::d::Thing;\nfn f() -> i64 { 2 }\n",
     "use a::b::C;\nuse d::e::F;\nfn main() -> i64 { add(1, 2) }\n",
+    // (2d-2) `struct` decls — fields (name: type via parse_type), empty, trailing
+    // comma, generics skipped, and source-order interleaving with fns.
+    "struct Point { x: i64, y: i64 }\nfn main() -> i64 { 0 }\n",
+    "struct Empty {}\nfn main() -> i64 { 0 }\n",
+    "struct One { v: i64 }\nfn main() -> i64 { 0 }\n",
+    "struct Bag { items: Vec<i64>, tag: [u8] }\nfn main() -> i64 { 0 }\n",
+    "struct TrailC { a: i64, b: bool, }\nfn main() -> i64 { 0 }\n",
+    "struct S { p: ?Point, r: &i64, m: secret [u8], n: Map<i64, Vec<u8>> }\nfn main() -> i64 { 0 }\n",
+    "struct A { x: i64 }\nfn f() -> i64 { 1 }\nstruct B { y: bool }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]

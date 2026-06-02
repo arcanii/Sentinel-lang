@@ -18,14 +18,15 @@
 //!
 //! (2d-1, this increment): `use a::b::Item;` → `(use a b Item)`.
 
-use sentinel_ast::{Block, Expr, ExprKind, FnDef, Param, Pattern, Program, Stmt, StmtKind, TypeExpr,
-    TypeExprKind, UseDecl};
+use sentinel_ast::{Block, Expr, ExprKind, FnDef, Param, Pattern, Program, Stmt, StmtKind,
+    StructDecl, TypeExpr, TypeExprKind, UseDecl};
 
 /// One top-level declaration, tagged for the source-order re-collation in
 /// [`dump`]. Grows a variant per (2d) increment as each decl kind lands.
 enum Item<'a> {
     Use(&'a UseDecl),
     Fn(&'a FnDef),
+    Struct(&'a StructDecl),
 }
 
 /// Canonical S-expression dump of `program` — every top-level decl in source
@@ -39,6 +40,9 @@ pub fn dump(program: &Program) -> String {
     for f in &program.fns {
         items.push((f.span.start, Item::Fn(f)));
     }
+    for s in &program.structs {
+        items.push((s.span.start, Item::Struct(s)));
+    }
     items.sort_by_key(|(start, _)| *start);
 
     let mut out = String::new();
@@ -51,6 +55,7 @@ pub fn dump(program: &Program) -> String {
         match item {
             Item::Use(u) => dump_use(u, &mut out),
             Item::Fn(f) => dump_fn(f, &mut out),
+            Item::Struct(s) => dump_struct(s, &mut out),
         }
     }
     out.push('\n');
@@ -63,6 +68,22 @@ fn dump_use(u: &UseDecl, out: &mut String) {
     for seg in &u.path {
         out.push(' ');
         out.push_str(seg);
+    }
+    out.push(')');
+}
+
+/// `struct Name { f: T, … }` → `(struct Name (field f <type>) …)` — generic
+/// type-params + visibility omitted (as `dump_fn` omits them). Empty → `(struct
+/// Name)`.
+fn dump_struct(s: &StructDecl, out: &mut String) {
+    out.push_str("(struct ");
+    out.push_str(&s.name);
+    for f in &s.fields {
+        out.push_str(" (field ");
+        out.push_str(&f.name);
+        out.push(' ');
+        dump_type(&f.ty, out);
+        out.push(')');
     }
     out.push(')');
 }
