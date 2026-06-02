@@ -19,10 +19,10 @@ literals, **increment-7 (A10)** landed the effect/concurrency leaf forms
 (`declassify` / `perform` / `scope` / `spawn` / `.await`), and **increment-8 (A11)**
 landed `handle` — **closing the (2b) expression grammar** (every `ExprKind` the
 oracle emits now parses). **(2c) is now UNDERWAY:** **(2c-1, A12)** landed the
-statement grammar (a real `Block` of statements + tail). Remaining in (2c): `let`
-type annotations + a `parse_type` (2c-2), then `fn` definitions with params/return
-type/effect row (2c-3); then (2d) the top-level decls. The ADR flips fully as they
-close. See ## Amendments.
+statement grammar (a real `Block` of statements + tail), and **(2c-2, A13)** landed
+`let` type annotations + a `parse_type`. Remaining in (2c): `fn` definitions with
+params/return type/effect row (2c-3); then (2d) the top-level decls. The ADR flips
+fully as they close. See ## Amendments.
 
 ## Amendments (in progress — (2a) + (2b) landing)
 
@@ -248,6 +248,21 @@ close. See ## Amendments.
   with break/continue/assign bodies, statement-only `while` bodies, nested
   statements, composites) match `snc ast`; leak-free. **Next:** (2c-2) `let` type
   annotations + `parse_type`; (2c-3) `fn` definitions.
+- **A13 — (2c-2): `let` type annotations + a `parse_type`.** The optional `: type`
+  on a `let` → `(let [mut] name <type> e)` (vs `_`). `parse_type` mirrors the Rust
+  one: `secret T` → `(secret T)`, `&T`/`&mut T` → `(ref T)`/`(refmut T)`, `?T` →
+  `(opt T)`, `[T]` → `(arr T)`, `Ident` → the name, `Ident<args>` →
+  `(generic Ident args…)` (the generic arg list is a cons-list terminated by `>`).
+  **Nested generics close without a `>>` split:** the tokenizer has no `>>`, so
+  `Vec<Box<i64>>` lexes its trailing `>>` as two `Gt` tokens and each `>` closes one
+  level (the Rust parser needs an explicit `Shr`-into-two-`>` split; the port
+  sidesteps it). New recursive `TypeE` enum + `TyArgs` cons-list + a `TyOpt`
+  (`NoTy`/`SomeTy`); `Stmt::SLet` gains the `TyOpt` field. New tokens: `?` (50) + the
+  `secret` keyword (51). Verified: 135 differential seeds (i64/bool idents, `[u8]`
+  arrays, `Vec<i64>`/`Map<i64,[u8]>`/`Box<Vec<i64>>` generics incl. nesting, `?T`,
+  `&T`/`&mut T`, `secret T`, `secret [u8]`, mixed annotated/un-annotated lets) match
+  `snc ast`; leak-free. **Next:** (2c-3) `fn` definitions (params/return-type/effect
+  row — reusing `parse_type`); then (2d) the top-level decls.
 
 Date: 2026-06-02
 Related:
