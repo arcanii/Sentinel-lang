@@ -15,7 +15,7 @@ Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) PARSER (2b)
-increment-3: `::` paths + array literals (ADR 0039 A6).** Movement 1 (the
+increment-4: `if`-expressions + brace blocks (ADR 0039 A7).** Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for
@@ -61,16 +61,21 @@ empty args; enum-vs-impl is a resolve concern) — plus array literals
 `[e1, e2, …]` → `(array …)` (atom-position `[`, distinct from the postfix index
 `[`). `Expr` gained `Bool`/`Null`/`Var([u8])`/`Unary` + a unified
 `Binary(op-code, …)` (inc-1), then `Call`/`Method`/`Field`/`Index` (inc-2), then
-`Qcall`/`ClassInit`/`Array` (inc-3); argument + element lists are a **second
-mutually-recursive cons-list enum** `Args = End | Cell(Expr, Args)` (since
-`Vec<non-primitive>` is unsupported — de-risked by a probe), `parse_args`
-generalised with a terminator-tag param. The diff corpus grew to **59 seeds**
-(every operator level + calls + postfix chains like `a.b(c)[d].e` + `::` paths +
-arrays + deep nests), all matching `snc ast`, leak-free. Remaining: **(2b) later
-increments** — struct literals, `if`/`match`, perform/handle,
-scope/spawn/await/declassify; then **(2c)** statements + fns-with-params/blocks,
-**(2d)** the top-level decls — each growing the parser + its diff corpus toward
-the full `tests/pass` + `tests/ui` set. Recap of the movement-1 close:
+`Qcall`/`ClassInit`/`Array` (inc-3), then `If`/`BlockE` (inc-4); argument + element
+lists are a **second mutually-recursive cons-list enum** `Args = End | Cell(Expr,
+Args)` (since `Vec<non-primitive>` is unsupported — de-risked by a probe),
+`parse_args` generalised with a terminator-tag param. **(2b) increment-4 (ADR 0039
+A7):** `if <cond> { <then> } else { <else> }` → `(if cond (block then) (block
+else))` — dispatched at the TOP of `parse_expr` (a full expression, never an
+operator operand), `else` mandatory, `else if` chains — plus brace blocks
+`{ <expr> }` → `(block …)`; blocks are statement-FREE for now (just a tail; `if`
+/ `else` tagged in the tokenizer). The diff corpus grew to **68 seeds** (every
+operator level + calls + postfix chains + `::` paths + arrays + `if`/`else if` +
+blocks + deep nests), all matching `snc ast`, leak-free. Remaining: **(2b) later
+increments** — `match`, struct literals, perform/handle, scope/spawn/await,
+declassify; then **(2c)** statements + fns-with-params/blocks, **(2d)** the
+top-level decls — each growing the parser + its diff corpus toward the full
+`tests/pass` + `tests/ui` set. Recap of the movement-1 close:
 after D.1 (sum types), D.2 (strings + `u8`), D.3 (growable `Vec<T>`), and D.4
 (file I/O), the surface had been **recursion-only by design**; **D.5 adds loops** — a
 compiler's iteration-heavy passes (scan a byte buffer, drain a token `Vec`) want

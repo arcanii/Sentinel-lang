@@ -11,10 +11,11 @@ parens, left-assoc, multi-fn) — `tests/selfhost_parse.rs`, leak-free. **(2b) i
 UNDERWAY** — D6's "full expressions" slice is itself sub-sliced (it spans ~28
 `ExprKind` variants); **increment-1 (A4)** landed the complete operator-precedence
 ladder + scalar atom leaves, **increment-2 (A5)** landed function calls + the
-postfix chain (field / index / method), and **increment-3 (A6)** landed the `::`
-paths (qualified call / class init / unit construction) + array literals. Remaining
-(2b) increments + slices (2c)–(2d) per D6 grow it toward the full corpus; the ADR
-flips fully as they close. See ## Amendments.
+postfix chain (field / index / method), **increment-3 (A6)** landed the `::`
+paths (qualified call / class init / unit construction) + array literals, and
+**increment-4 (A7)** landed `if`-expressions + brace blocks. Remaining (2b)
+increments + slices (2c)–(2d) per D6 grow it toward the full corpus; the ADR flips
+fully as they close. See ## Amendments.
 
 ## Amendments (in progress — (2a) + (2b) landing)
 
@@ -106,6 +107,27 @@ flips fully as they close. See ## Amendments.
   `snc ast`; leak-free under `leaks --atExit`. **Still deferred to later (2b)
   increments:** struct literals, `if`/`match`, perform/handle,
   scope/spawn/await/declassify.
+- **A7 — (2b) increment-4: `if`-expressions + brace blocks.** Adds the first
+  **control-flow expression** and the **block** machinery. `if <cond> { <then> }
+  else { <else> }` → `(if cond (block then) (block else))`; a brace block
+  `{ <expr> }` → `(block expr)`. `if` is dispatched at the **top of `parse_expr`**
+  (so it is a full expression, never an operator operand — matching the Rust
+  parser, where `parse_add`'s operand is `parse_mul`, not `parse_expr`); `else` is
+  **mandatory** (Sentinel has no bare `if`), and `else if` chains by wrapping the
+  inner `if` in a block (matching the oracle's `Block { stmts: [], tail: inner_if }`).
+  A brace block is also an atom case (`parse_atom` on `{`). **Blocks are
+  statement-FREE for now** — `BlockE(Expr)` holds just the tail; the full
+  statement list (let / assign / while / break / continue / expr-stmt) lands at
+  (2c), at which point `BlockE` grows a statement cons-list. `if` / `else` are
+  **tagged in the tokenizer** (32 / 33) like `fn` (new `is_kw_if` / `is_kw_else`
+  slice-compares), so the parser dispatches + consumes them by tag. `Expr` gains
+  `If(Expr, Expr, Expr)` + `BlockE(Expr)`; `parse_block` + `parse_if` (the latter
+  recursing for `else if`). Verified: 68 differential seeds (basic `if`, cond
+  exprs, `else if` chains, nested `if`, brace blocks, `if` inside call args / array
+  elements) match `snc ast`; leak-free under `leaks --atExit`. **Still deferred to
+  later (2b) increments:** `match` (the last control-flow expr — adds a `Pattern`
+  enum + `parse_pattern` + arms), struct literals (need the Rust `allow_struct_lit`
+  flag), perform/handle, scope/spawn/await, declassify.
 
 Date: 2026-06-02
 Related:
