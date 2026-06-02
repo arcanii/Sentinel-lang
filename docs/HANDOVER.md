@@ -152,6 +152,7 @@ C1.3. See STATE.md Section C.
 **Phase D self-host port (2/N) parser — (2b) increment-2: function calls + the postfix chain — complete (`1b7d17c`). ADR 0039 amendment A5.** Adds, mirroring the Rust parser, free calls `f(args)` → `(call f …)` (an *atom* case — the callee is a NAME, not an expr; only a postfix `.m(args)` calls a value) and the **postfix chain** applied left-to-right over an atom: field `t.field` → `(field t field)`, index `t[i]` → `(index t i)`, method `t.m(args)` → `(method t m …)`. A new `parse_postfix` layer sits between `parse_unary` and `parse_atom` (`parse_unary` now falls through to it). **The data-model call:** an argument list is variadic and `Vec<non-primitive>` is unsupported, so args are a **second enum `Args = End | Cell(Expr, Args)`, mutually recursive with `Expr`** (`Expr` gains `Call([u8], Args)` / `Method(Expr, [u8], Args)` / `Field(Expr, [u8])` / `Index(Expr, Expr)`) — extending (2a)'s single-self-recursive-enum drop gate to **two mutually-recursive enums + enum-typed payloads**, which was **DE-RISKED by a probe first** (build → consuming-dump → `leaks`: compiles, correct, 0 leaks) before growing the parser, the same probe-first discipline as the (2a) structure work. `parse_args` builds the cons-list head-first by recursion + consumes the closing `)`; the postfix chain folds via `parse_postfix_rest` accumulator recursion (a loop accumulator trips moved-in-loop); the tokenizer gains `.` `[` `]` `,` (tags 26–29). **Verified:** the differential test now diffs **45 seeds** — calls (zero/one/many/expr/nested args), field/index/method, and chains like `a.b(c)[d].e` and `x.foo(1).bar[k].baz(y, z)` — all byte-identical to `snc ast`; leak-free under `leaks --atExit` (the `Args` cons-list + nested `Expr`s drop via the consuming dump). **1402 tests, four-check green.** **Still deferred to later (2b) increments:** the `::` paths (qualified-call / class-init / enum construction), struct + array literals, `if`/`match`, perform/handle, scope/spawn/await/declassify; then (2c) statements + fns-with-params/blocks, (2d) the top-level decls.
 **Phase D self-host port (2/N) parser — (2b) increment-3: `::` paths + array literals — complete (`aa3307a`). ADR 0039 amendment A6.** Adds the identifier-prefixed `::` forms (parsed in `parse_atom` after an ident) + array literals, all reusing A5's `Args` cons-list: `Name::method(args)` → `(qcall Name method …)`; `Name::init(args)` → `(class-init Name …)` (the `init` name **with parens** is the only class-init form); a **paren-less** `Name::tail` (e.g. bare enum-unit `Enum::Variant`) → a qualified call with empty args — the enum-vs-impl meaning is a *resolve* concern, so the parser emits a uniform `(qcall …)` (matching the Rust parser). An **atom-position `[`** is an array literal `[e1, e2, …]` → `(array …)`, distinct from the **post-atom `[`** index operator (A5) by position (`parse_atom` vs `parse_postfix_rest`). `Expr` gains `Qcall([u8], [u8], Args)` / `ClassInit([u8], Args)` / `Array(Args)`; `parse_args` is generalised with a **terminator-tag** param (`)`=5 for call args, `]`=28 for array elements); the tokenizer gains `::` (30) + `:` (31); an `is_kw_init` slice-compare picks `init` (the self-contained tokenizer has no `init` keyword). **Verified:** the differential test now diffs **59 seeds** — qcall (with/without args/parens), class-init (with/without args), bare-init→qcall, arrays (empty/expr elems), array-then-index `[1,2][0]`, and deep nests like `g(A::b(x), [1, h(3)], Point::init(y, z))` and `[A::b(), c.d][0].e` — all byte-identical to `snc ast`; leak-free under `leaks --atExit`. **1402 tests, four-check green.** **Still deferred to later (2b) increments:** struct literals, `if`/`match`, perform/handle, scope/spawn/await/declassify; then (2c) statements + fns-with-params/blocks, (2d) the top-level decls.
 **Phase D self-host port (2/N) parser — (2b) increment-4: `if`-expressions + brace blocks — complete (`4837622`). ADR 0039 amendment A7.** Adds the first **control-flow expression** + the **block** machinery: `if <cond> { <then> } else { <else> }` → `(if cond (block then) (block else))`, and a brace block `{ <expr> }` → `(block expr)`. `if` is dispatched at the **TOP of `parse_expr`** (so it is a full expression, never an operator operand — matching the Rust parser, whose `parse_add` operand is `parse_mul`, not `parse_expr`); `else` is **mandatory** (Sentinel has no bare `if`), and `else if` chains by wrapping the inner `if` in a block (matching the oracle). A brace block is also a `parse_atom` case. **Blocks are statement-FREE for now** — `BlockE(Expr)` holds just the tail; the full statement list lands at (2c), when `BlockE` grows a statement cons-list. `if` / `else` are **tagged in the tokenizer** (32 / 33) like `fn` (new `is_kw_if` / `is_kw_else`), so the parser dispatches + consumes them by tag. `Expr` gains `If(Expr, Expr, Expr)` + `BlockE(Expr)`; `parse_block` + `parse_if` (recursing for `else if`). **Verified:** the differential test now diffs **68 seeds** — basic `if`, cond exprs, `else if` chains, nested `if`, brace blocks, and `if` inside call args / array elements — all byte-identical to `snc ast`; leak-free under `leaks --atExit`. **1402 tests, four-check green.** **Still deferred to later (2b) increments:** `match` (the last control-flow expr — adds a `Pattern` enum + `parse_pattern` + arms), struct literals (need the Rust `allow_struct_lit` flag), perform/handle, scope/spawn/await, declassify.
+**Phase D self-host port (2/N) parser — (2b) increment-5: `match` expressions + patterns — complete (`6e89d2a`). ADR 0039 amendment A8.** Adds the last control-flow expression: `match <scrutinee> { pat => body, … }` → `(match scrut (arm pat body)…)`, dispatched at the **top of `parse_expr`** alongside `if` (a `match` keyword tag); arms comma-separated (trailing comma allowed); arm **bodies are expressions** (`parse_expr`, not blocks — matching the Rust `parse_match_arm`). Patterns are the `_` wildcard → `(pat _)` or a qualified variant `Enum::Variant` with an optional **positional binding list** → `(pat Enum Variant b1 b2)` (each binding an ident, itself possibly `_`). **The data model is the deepest mutual recursion yet — four enums in a cycle** (`Expr → Arms → {Pattern → Binds, Expr}`): `Expr` gains `Match(Expr, Arms)`; new `Arms = ArmEnd | ArmCell(Pattern, Expr, Arms)`, `Pattern = PatWild | PatVariant([u8], [u8], Binds)`, `Binds = BindEnd | BindCell([u8], Binds)` — **de-risked by a probe first** (build → consuming-dump → `leaks`: 0 leaks), as with A5's `Args`. `parse_match` / `parse_arms` / `parse_pattern` / `parse_binds` build them by recursion (the cons-lists consume their closing bracket); the tokenizer gains the `match` keyword (34) + `=>` FatArrow (35) + `is_kw_match` / `is_wildcard`. **Verified:** the differential test now diffs **78 seeds** — multi-arm, single/multi/wildcard bindings, match-on-call scrutinee, if/match/call arm bodies, nested `match`, `match` in call args, trailing comma, and an AST-walker shape `match parse(t) { Node::Bin(op, l, r) => eval(l) + eval(r), … }` — all byte-identical to `snc ast`; leak-free under `leaks --atExit`. **1402 tests, four-check green.** **Still deferred to later (2b) increments:** struct literals (need the Rust `allow_struct_lit` flag), perform/handle, scope/spawn/await, declassify.
 Phase C2 (regions + refs + mutability + borrow check + RAII drop
 per HANDOVER §6.2 / §6.3) is **complete** per ADR 0017 (now
 ACCEPTED-WITH-AMENDMENTS, 6 sub-phases, ~6 effective sessions
@@ -1859,20 +1860,21 @@ For pasting into a fresh chat to bootstrap context:
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
     Local HEAD: verify with `git log -1` — expect the **self-host PARSER (2b)
-    increment-4 docs** commit, atop its feat (`feat(selfhost): parser (2b)
-    increment-4 — if-expressions + brace blocks`, `4837622`), atop the (2b)
-    increment-3 docs (`352f88d`) + feat (`aa3307a`), increment-2 docs (`82b728c`)
-    + feat (`1b7d17c`), increment-1 docs (`7870bed`) + feat (`0e84f36`), atop the
-    (2a) docs (`c7ebc39`) + parser feat (`8d6aa6e`) + `snc ast` oracle (`7f10740`)
-    + recursive-AST drop gate + ADR 0039, atop the lexer (1/N) + the D.6
+    increment-5 docs** commit, atop its feat (`feat(selfhost): parser (2b)
+    increment-5 — match expressions + patterns`, `6e89d2a`), atop the (2b)
+    increment-4 docs (`3c69fe5`) + feat (`4837622`), increment-3 docs (`352f88d`)
+    + feat (`aa3307a`), increment-2 docs (`82b728c`) + feat (`1b7d17c`),
+    increment-1 docs (`7870bed`) + feat (`0e84f36`), atop the (2a) docs
+    (`c7ebc39`) + parser feat (`8d6aa6e`) + `snc ast` oracle (`7f10740`) +
+    recursive-AST drop gate + ADR 0039, atop the lexer (1/N) + the D.6
     cross-module work. Clean tree; **1402 tests** (the (2b) seeds expanded the
-    single `selfhost_parse` differential test in place — no new test fns; now 68
+    single `selfhost_parse` differential test in place — no new test fns; now 78
     seeds); four-check green via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0039**
     (THE active task — self-host port (2/N) the parser, ACCEPTED-WITH-AMENDMENTS;
-    (2a) + (2b) increments 1–4 landed; RESUME AT below) + **ADR 0038** (the port's
+    (2a) + (2b) increments 1–5 landed; RESUME AT below) + **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
     sequence) + auto-memory sentinel_selfhost_port (+ sentinel_d6_modules_surface
@@ -2034,7 +2036,7 @@ For pasting into a fresh chat to bootstrap context:
     excluded); A4 reads a fixed `./input.sentinel` (no argv yet — the test sets
     the cwd).
     **SELF-HOST PORT (2/N): the PARSER — ADR 0039 ACCEPTED-WITH-AMENDMENTS; (2a)
-    + (2b) increments 1–4 LANDED.** ✅ `snc ast` oracle (`run_ast`+`ast_dump.rs`,
+    + (2b) increments 1–5 LANDED.** ✅ `snc ast` oracle (`run_ast`+`ast_dump.rs`,
     golden `tests/ast.rs`) → the regular S-expr target, e.g. `(fn main () i64
     (block (binop + (int 1) (binop * (int 2) (int 3)))))`. ✅ recursive-AST drop
     gate (`tests/pass/selfhost_ast_drop.sentinel`, 0 leaks → no D.1b needed). ✅
@@ -2065,7 +2067,15 @@ For pasting into a fresh chat to bootstrap context:
     chains — plus brace blocks `{ <expr> }` → `(block …)`. `Expr` gained `If` +
     `BlockE` (a statement-FREE block = just its tail; statements at (2c)); `if` /
     `else` tagged in the tokenizer (32 / 33). Matches `snc ast` over **68 seeds**
-    (now incl. `if`/`else if` chains, nested `if`, blocks), leak-free.
+    (now incl. `if`/`else if` chains, nested `if`, blocks), leak-free. **(2b)
+    increment-5 (A8):** `match <scrut> { pat => body, … }` → `(match scrut (arm pat
+    body)…)` — also dispatched at the top of `parse_expr` (a `match` keyword tag);
+    arm bodies are exprs; patterns are `_` → `(pat _)` or `Enum::Variant(b1, b2)` →
+    `(pat Enum Variant b1 b2)`. The deepest mutual recursion yet — four enums
+    (`Expr → Arms → {Pattern → Binds, Expr}`, de-risked by a probe); `Expr` gained
+    `Match` + the `Arms`/`Pattern`/`Binds` enums; tokenizer gained `match` (34) +
+    `=>` (35). Matches `snc ast` over **78 seeds** (now incl. `match`/patterns +
+    an AST-walker shape), leak-free.
     🔑 **PROVEN STRUCTURE (reuse for the rest of (2b)+):** recursive `Expr` enum
     returned BY VALUE + CONSUMING recursive `match` dump (`Vec<non-primitive>` is
     unsupported, so NO arena/value-stack); recursive-descent helpers share the
@@ -2078,17 +2088,15 @@ For pasting into a fresh chat to bootstrap context:
     minimal tokenizer); sharing the full lexer via a D.6 module is a follow-on.
     **RESUME HERE → (2b) NEXT INCREMENT (the remaining expressions).** Grow `Expr`
     + the parser to the rest of `ExprKind` (operators + calls + postfix + `::` paths
-    + arrays + `if`/blocks already done): **`match`** is the natural next — also
-    dispatched at the TOP of `parse_expr` (tag a `match` keyword like `if`/`else`);
-    `match <scrut> { pat => body, … }` → `(match scrut (arm pat body)…)`, arms
-    comma-separated, bodies are exprs (`parse_expr`, not blocks). It adds a
-    **`Pattern`** enum + `parse_pattern` (the `_` wildcard → `(pat _)`, or a
-    qualified variant `Enum::Variant(b1, b2)` → `(pat Enum Variant b1 b2)` with a
-    positional binding cons-list) + an arm cons-list. Then struct literals
-    `Name { f: v }` (need the Rust `allow_struct_lit` flag to disambiguate `if x
-    { … }` — now relevant since `if` exists), `perform`/`handle`,
-    `scope`/`spawn`/`await`, `declassify` — each growing the seed corpus toward real
-    `tests/pass` programs. Then (2c) statements + fns-with-params/blocks,
+    + arrays + `if`/blocks + `match` already done): **struct literals** `Name { f1:
+    e1, f2: e2 }` → `(struct-lit Name (field f1 e1) (field f2 e2))` are the natural
+    next — the FIRST construct needing the Rust parser's **`allow_struct_lit` flag**
+    (a `bool` threaded through the descent, set false while parsing an `if`/`while`/
+    `match` head so `if x { … }` reads `x` as the cond not `x { … }` as a struct
+    lit, re-enabled inside `(`/`[`/arg positions). A field init is `Ident : expr`.
+    Then `perform`/`handle` (effect ops + handler arms), `scope`/`spawn`/`await`
+    (structured concurrency), `declassify(e)` — each growing the seed corpus toward
+    real `tests/pass` programs. Then (2c) statements + fns-with-params/blocks,
     (2d) the top-level decls (struct/enum/trait/impl/class/effect/use) + complete
     `snc ast`'s Program dumper for them (D6). The goal: `selfhost/parser.sentinel`
     matches `snc ast` over the whole `tests/pass` + `tests/ui` corpus (D8), like the

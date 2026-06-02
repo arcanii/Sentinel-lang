@@ -12,10 +12,11 @@ UNDERWAY** — D6's "full expressions" slice is itself sub-sliced (it spans ~28
 `ExprKind` variants); **increment-1 (A4)** landed the complete operator-precedence
 ladder + scalar atom leaves, **increment-2 (A5)** landed function calls + the
 postfix chain (field / index / method), **increment-3 (A6)** landed the `::`
-paths (qualified call / class init / unit construction) + array literals, and
-**increment-4 (A7)** landed `if`-expressions + brace blocks. Remaining (2b)
-increments + slices (2c)–(2d) per D6 grow it toward the full corpus; the ADR flips
-fully as they close. See ## Amendments.
+paths (qualified call / class init / unit construction) + array literals,
+**increment-4 (A7)** landed `if`-expressions + brace blocks, and **increment-5
+(A8)** landed `match` expressions + patterns. Remaining (2b) increments + slices
+(2c)–(2d) per D6 grow it toward the full corpus; the ADR flips fully as they close.
+See ## Amendments.
 
 ## Amendments (in progress — (2a) + (2b) landing)
 
@@ -128,6 +129,28 @@ fully as they close. See ## Amendments.
   later (2b) increments:** `match` (the last control-flow expr — adds a `Pattern`
   enum + `parse_pattern` + arms), struct literals (need the Rust `allow_struct_lit`
   flag), perform/handle, scope/spawn/await, declassify.
+- **A8 — (2b) increment-5: `match` expressions + patterns.** Adds the last
+  control-flow expression. `match <scrutinee> { pat => body, … }` →
+  `(match scrut (arm pat body)…)`, dispatched at the **top of `parse_expr`**
+  alongside `if` (a `match` keyword tag); arms comma-separated (trailing comma
+  allowed); arm **bodies are expressions** (`parse_expr`, not blocks — matching the
+  Rust `parse_match_arm`). Patterns are the `_` wildcard → `(pat _)` or a qualified
+  variant `Enum::Variant` with an optional **positional binding list** →
+  `(pat Enum Variant b1 b2)` (each binding an ident, itself possibly `_`). **The
+  data model is the deepest mutual recursion yet — four enums in a cycle**
+  (`Expr → Arms → {Pattern → Binds, Expr}`): `Expr` gains `Match(Expr, Arms)`; new
+  `Arms = ArmEnd | ArmCell(Pattern, Expr, Arms)`, `Pattern = PatWild |
+  PatVariant([u8], [u8], Binds)`, `Binds = BindEnd | BindCell([u8], Binds)` —
+  **de-risked by a probe first** (build → consuming-dump → `leaks`: 0 leaks), as with
+  A5's `Args`. `parse_match` / `parse_arms` / `parse_pattern` / `parse_binds` build
+  them by recursion (the cons-lists consume their closing bracket); the tokenizer
+  gains the `match` keyword (34) + `=>` FatArrow (35) + `is_kw_match` / `is_wildcard`.
+  Verified: 78 differential seeds (multi-arm, single/multi/wildcard bindings,
+  match-on-call scrutinee, if/match/call arm bodies, nested `match`, `match` in call
+  args, trailing comma, and an AST-walker shape `match parse(t) { Node::Bin(op, l, r)
+  => eval(l) + eval(r), … }`) match `snc ast`; leak-free under `leaks --atExit`.
+  **Still deferred to later (2b) increments:** struct literals (need the Rust
+  `allow_struct_lit` flag), perform/handle, scope/spawn/await, declassify.
 
 Date: 2026-06-02
 Related:
