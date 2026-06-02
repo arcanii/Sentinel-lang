@@ -375,6 +375,11 @@ fn is_kw_struct(src: &[u8], start: i64, end: i64) -> bool {
         && (*src)[start + 5] == 't'
 }
 
+fn is_kw_enum(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 4 && (*src)[start] == 'e' && (*src)[start + 1] == 'n'
+        && (*src)[start + 2] == 'u' && (*src)[start + 3] == 'm'
+}
+
 // Append the decimal rendering of `x` (>= 0) to `out`.
 fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
     if x == 0 {
@@ -505,6 +510,8 @@ fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, end
                 59
             } else if is_kw_struct(src, start, ie) {
                 52
+            } else if is_kw_enum(src, start, ie) {
+                53
             } else {
                 2
             };
@@ -1903,6 +1910,69 @@ fn dump_struct_fields(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64
     }
 }
 
+// (2d-3) `enum Name { V1, V2(T), … }` → `(enum Name (variant V1) (variant V2
+// <type>) …)`. Enums are non-generic (no type-params to skip); a variant is a
+// name + an optional positional payload-type list. The leading `enum` is at the
+// cursor.
+fn dump_enum_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    append_str(out, "(enum ");
+    append_slice(out, src, nm_s, nm_e);
+    dump_variants(out, k, s, e, src, cur);
+    push(out, ')');
+    0
+}
+
+// Parse + dump enum variants up to and consuming the closing `}` (tag 7): each
+// `Name` or `Name(T, …)` → ` (variant Name <ptype>…)`; commas skipped.
+fn dump_variants(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        dump_variants(out, k, s, e, src, cur)
+    } else {
+        let vn_s: i64 = (*s)[*cur];
+        let vn_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        append_str(out, " (variant ");
+        append_slice(out, src, vn_s, vn_e);
+        if (*k)[*cur] == 4 {
+            *cur = *cur + 1;
+            dump_payloads(out, k, s, e, src, cur);
+            0
+        } else {
+            0
+        };
+        push(out, ')');
+        dump_variants(out, k, s, e, src, cur)
+    }
+}
+
+// Parse + dump a variant's positional payload types up to and consuming the
+// closing `)` (tag 5): each ` <type>`.
+fn dump_payloads(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        dump_payloads(out, k, s, e, src, cur)
+    } else {
+        let pty: TypeE = parse_type(k, s, e, src, cur);
+        push(out, ' ');
+        dump_type(out, pty);
+        dump_payloads(out, k, s, e, src, cur)
+    }
+}
+
 // Dispatch one top-level decl on its leading token (2d). A SINGLE helper that
 // re-passes the ref params to the per-kind dumpers, so main has ONE borrow site:
 // sibling `if`-tail `&mut` borrows of a *local* (`&mut out` / `&mut cur` in
@@ -1922,6 +1992,8 @@ fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
         dump_use_decl(out, k, s, e, src, cur)
     } else if lead == 52 {
         dump_struct_decl(out, k, s, e, src, cur)
+    } else if lead == 53 {
+        dump_enum_decl(out, k, s, e, src, cur)
     } else {
         dump_fn_decl(out, k, s, e, src, cur)
     }

@@ -83,3 +83,19 @@ fn ast_dump_struct_decls() {
          (fn main () i64 (block (int 0)))\n"
     );
 }
+
+#[test]
+fn ast_dump_enum_decls() {
+    // (2d-3) unit variants → `(variant V)`; payload variants list positional
+    // types; empty → `(enum Name)`.
+    assert_eq!(
+        ast_dump(
+            "enums",
+            "enum Color { Red, Green, Blue }\nenum Mix { A, B(i64, [u8]), C(Vec<i64>) }\nenum E {}\nfn main() -> i64 { 0 }\n"
+        ),
+        "(enum Color (variant Red) (variant Green) (variant Blue))\n\
+         (enum Mix (variant A) (variant B i64 (arr u8)) (variant C (generic Vec i64)))\n\
+         (enum E)\n\
+         (fn main () i64 (block (int 0)))\n"
+    );
+}

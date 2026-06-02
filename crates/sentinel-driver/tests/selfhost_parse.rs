@@ -264,6 +264,15 @@ const SEEDS: &[&str] = &[
     "struct TrailC { a: i64, b: bool, }\nfn main() -> i64 { 0 }\n",
     "struct S { p: ?Point, r: &i64, m: secret [u8], n: Map<i64, Vec<u8>> }\nfn main() -> i64 { 0 }\n",
     "struct A { x: i64 }\nfn f() -> i64 { 1 }\nstruct B { y: bool }\nfn main() -> i64 { 0 }\n",
+    // (2d-3) `enum` decls — unit + payload variants, empty, trailing comma,
+    // recursive payloads, and interleaving with struct/fn.
+    "enum Color { Red, Green, Blue }\nfn main() -> i64 { 0 }\n",
+    "enum Opt { None, Some(i64) }\nfn main() -> i64 { 0 }\n",
+    "enum E {}\nfn main() -> i64 { 0 }\n",
+    "enum Mix { A, B(i64, [u8]), C(Vec<i64>) }\nfn main() -> i64 { 0 }\n",
+    "enum Trail { A, B, }\nfn main() -> i64 { 0 }\n",
+    "enum Node { Leaf(i64), Bin(Node, Node) }\nfn main() -> i64 { 0 }\n",
+    "struct S { x: i64 }\nenum E { A(S), B }\nfn f() -> i64 { 1 }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]

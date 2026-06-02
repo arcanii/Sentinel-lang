@@ -18,7 +18,7 @@
 //!
 //! (2d-1, this increment): `use a::b::Item;` → `(use a b Item)`.
 
-use sentinel_ast::{Block, Expr, ExprKind, FnDef, Param, Pattern, Program, Stmt, StmtKind,
+use sentinel_ast::{Block, EnumDecl, Expr, ExprKind, FnDef, Param, Pattern, Program, Stmt, StmtKind,
     StructDecl, TypeExpr, TypeExprKind, UseDecl};
 
 /// One top-level declaration, tagged for the source-order re-collation in
@@ -27,6 +27,7 @@ enum Item<'a> {
     Use(&'a UseDecl),
     Fn(&'a FnDef),
     Struct(&'a StructDecl),
+    Enum(&'a EnumDecl),
 }
 
 /// Canonical S-expression dump of `program` — every top-level decl in source
@@ -43,6 +44,9 @@ pub fn dump(program: &Program) -> String {
     for s in &program.structs {
         items.push((s.span.start, Item::Struct(s)));
     }
+    for en in &program.enums {
+        items.push((en.span.start, Item::Enum(en)));
+    }
     items.sort_by_key(|(start, _)| *start);
 
     let mut out = String::new();
@@ -56,6 +60,7 @@ pub fn dump(program: &Program) -> String {
             Item::Use(u) => dump_use(u, &mut out),
             Item::Fn(f) => dump_fn(f, &mut out),
             Item::Struct(s) => dump_struct(s, &mut out),
+            Item::Enum(en) => dump_enum(en, &mut out),
         }
     }
     out.push('\n');
@@ -83,6 +88,24 @@ fn dump_struct(s: &StructDecl, out: &mut String) {
         out.push_str(&f.name);
         out.push(' ');
         dump_type(&f.ty, out);
+        out.push(')');
+    }
+    out.push(')');
+}
+
+/// `enum Name { V1, V2(T), … }` → `(enum Name (variant V1) (variant V2 <type>)
+/// …)` — a unit variant has no payload types, a payload variant lists them
+/// positionally. Empty → `(enum Name)`.
+fn dump_enum(e: &EnumDecl, out: &mut String) {
+    out.push_str("(enum ");
+    out.push_str(&e.name);
+    for v in &e.variants {
+        out.push_str(" (variant ");
+        out.push_str(&v.name);
+        for p in &v.payloads {
+            out.push(' ');
+            dump_type(p, out);
+        }
         out.push(')');
     }
     out.push(')');
