@@ -39,7 +39,7 @@ use std::process::{Command, ExitCode};
 use miette::{LabeledSpan, MietteDiagnostic, NamedSource, Report, Severity as MietteSeverity, SourceSpan};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_borrow_check::borrow_check_query;
-use sentinel_syntax::Program;
+use sentinel_syntax::{Program, TokenKind};
 use sentinel_types::check_query;
 
 /// The concrete Salsa database for the snc driver. Per ADR 0011 D1
@@ -63,6 +63,7 @@ impl SentinelDb for SentinelDatabase {}
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.as_slice() {
+        [_, cmd, path] if cmd == "lex" => run_lex(path),
         [_, cmd, path] if cmd == "parse" => run_parse(path),
         [_, cmd, path] if cmd == "build" => run_build(path, None),
         [_, cmd, path, flag, output] if cmd == "build" && flag == "-o" => {
@@ -87,11 +88,70 @@ fn print_usage() {
     eprintln!("snc — Sentinel compiler (C1.0b)");
     eprintln!();
     eprintln!("usage:");
+    eprintln!("    snc lex <file>                   lex and dump the token stream (self-host oracle)");
     eprintln!("    snc parse <file>                 lex, parse, and pretty-print the program");
     eprintln!("    snc build <file> [-o <output>]   compile and link to an executable");
     eprintln!("    snc help                         show this message");
     eprintln!();
     eprintln!("programs are one or more `fn` definitions; `main` is the entry point.");
+}
+
+/// Phase D self-host port (1/N) / ADR 0038 D3+D4: the lexer differential
+/// oracle. Lex `path` and print the **canonical token dump** the
+/// Sentinel-written lexer (`selfhost/lexer.sentinel`) must reproduce
+/// byte-for-byte. One line per token:
+///
+/// ```text
+/// <KIND> <start> <end> [<lexeme>]
+/// ```
+///
+/// where `<KIND>` is the `TokenKind` variant *name* (so the two lexers
+/// need not agree on enum discriminant order), `<start>`/`<end>` are byte
+/// offsets, and `<lexeme>` (the raw source slice) is present only for the
+/// value-bearing variants (`Ident` / `IntLit` / `StringLit` / `CharLit`).
+/// A trailing `EOF` line terminates the dump. A clean lex exits 0; any
+/// `LexError` is printed to stderr and exits 1 (the dump still covers the
+/// tokens that lexed). The format is a dev/validation surface, NOT
+/// `abi-v1` — but it is pinned by a golden test so it can't drift under
+/// the Sentinel lexer.
+fn run_lex(path: &str) -> ExitCode {
+    let src = match read_source(path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let (tokens, errors) = sentinel_syntax::lex(&src);
+    let mut out = String::new();
+    for t in &tokens {
+        let kind = format!("{:?}", t.kind);
+        let (start, end) = (t.span.start, t.span.end);
+        if is_value_bearing(t.kind) {
+            // Safe slice: token spans fall on byte boundaries of valid
+            // UTF-8 source, and the literal regexes forbid raw newlines,
+            // so the lexeme never breaks the line-oriented format.
+            out.push_str(&format!("{kind} {start} {end} {}\n", &src[t.span.clone()]));
+        } else {
+            out.push_str(&format!("{kind} {start} {end}\n"));
+        }
+    }
+    out.push_str("EOF\n");
+    print!("{out}");
+    if !errors.is_empty() {
+        for e in &errors {
+            eprintln!("snc: {e}");
+        }
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
+/// Whether a token carries source text beyond its kind + span — i.e. two
+/// tokens of this kind at the same span length can still differ. Only
+/// these emit a `<lexeme>` field in the dump (ADR 0038 D4).
+fn is_value_bearing(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident | TokenKind::IntLit | TokenKind::StringLit | TokenKind::CharLit
+    )
 }
 
 fn run_parse(path: &str) -> ExitCode {
