@@ -21,8 +21,15 @@ COMPLETE (ADR 0039 → ACCEPTED, A1–A22).** `selfhost/parser.sentinel` matches
 corpus (`//` comments, prefix `*`/`&`/`&mut` unary, char + string literals). The
 next port stage, **resolve, is now OPEN — ADR 0040 PROPOSED** (the plan:
 cons-list symbol tables + a `snc resolve` ID-bearing oracle, sub-sliced 3a–3e,
-with the scope snapshot/restore as the key probe); the next concrete step is the
-`snc resolve` oracle + the (3a) parse→AST→resolve skeleton. Movement 1 (the
+with the scope snapshot/restore as the key probe). **The (3a) oracle has LANDED:**
+`snc resolve <file>` (`run_resolve` + `resolve_dump.rs`) dumps the
+`ResolvedProgram` as the `snc ast` form extended with the resolved IDs
+(`(var #N)` / `(call #14 …)` / `(struct-lit #N …)` / `(qcall-impl …)` /
+`(enum-construct …)`…; builtins are FnId 0–13, user fns #14+; the built-in
+`Async` effect emits deterministically last) — robust over the corpus (0 panics
+/ 141), 4 goldens. **NEXT = the (3a) Sentinel side:** `selfhost/resolve.sentinel`
+(parse→AST→resolve→dump skeleton + a cons-list fn table + a flat scope) + the
+seed diff. Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for

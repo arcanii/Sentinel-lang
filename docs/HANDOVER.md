@@ -1886,11 +1886,17 @@ For pasting into a fresh chat to bootstrap context:
     grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the
     full-corpus close — `selfhost/parser.sentinel` matches `snc ast` over every
     clean-parsing fixture, leak-free) + **ADR 0040** (the NEXT port stage,
-    **resolve — PROPOSED**: the plan to port name-resolution to Sentinel —
-    cons-list symbol tables + a `snc resolve` ID-bearing oracle, sub-sliced
-    3a–3e, scope snapshot/restore = the key probe; **RESUME AT = (3a)** — build
-    the `snc resolve` oracle + `run_resolve` + the parse→AST→resolve skeleton +
-    the fn table, the first seed diff) +
+    **resolve — PROPOSED**: port name-resolution to Sentinel — cons-list symbol
+    tables + a `snc resolve` ID-bearing oracle, sub-sliced 3a–3e, scope
+    snapshot/restore = the key probe. **The (3a) ORACLE has LANDED** (`eba2fb4`):
+    `snc resolve` (`run_resolve` + `resolve_dump.rs`) = the `snc ast` form +
+    resolved IDs (`(var #N)`/`(call #14 …)`/`(struct-lit #N …)`/`(qcall-impl …)`;
+    builtins FnId 0–13, user fns #14+; built-in `Async` effect emits last),
+    0 panics/141, 4 goldens. **RESUME AT = the (3a) Sentinel side:** build
+    `selfhost/resolve.sentinel` (probe parse-sharing — D.6 module vs
+    self-contained, ADR 0040 D3; then the parse→AST→resolve→dump skeleton +
+    cons-list fn table + flat scope) + a seed differential vs `snc resolve`;
+    then the ADR flips to ACCEPTED-WITH-AMENDMENTS) +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
