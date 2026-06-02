@@ -300,7 +300,7 @@ fn dump_param(p: &Param, out: &mut String) {
     out.push(')');
 }
 
-fn dump_type(t: &TypeExpr, out: &mut String) {
+pub(crate) fn dump_type(t: &TypeExpr, out: &mut String) {
     match &t.kind {
         TypeExprKind::Ident(name) => out.push_str(name),
         TypeExprKind::Nullable(inner) => {
