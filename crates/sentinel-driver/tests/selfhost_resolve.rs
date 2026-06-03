@@ -7,8 +7,10 @@
 //! comparisons + unary + variable references over the params (the body is a
 //! block). VarIds are GLOBAL (never reset across fns); builtins occupy FnId
 //! 0..=13 so user fns start at #14; the built-in `Async` effect dumps last.
-//! `let` bindings (a scope that grows during the body walk) are milestone-2;
-//! the decl tables + the `::`-path disambiguation are slices (3b)–(3d). The
+//! MILESTONE-2 (A3): `let` bindings — the binding set is pre-scanned from the
+//! body tokens into the (immutable) scope so a `let` resolves its own VarId by
+//! name (continuing after the params), with `mut` + optional type annotations.
+//! The decl tables + the `::`-path disambiguation are slices (3b)–(3d); the
 //! corpus differential is the phase-go (D9) and lands once those close.
 
 use std::path::{Path, PathBuf};
@@ -59,6 +61,16 @@ const SEEDS: &[&str] = &[
     "fn h(a: i64, b: i64, c: i64) -> i64 { a + b * c - a }\nfn main() -> i64 { h(1, 2, 3) }\n",
     "fn neg(x: i64) -> i64 { -x }\nfn main() -> i64 { neg(5) }\n",
     "fn mut_p(mut x: i64) -> i64 { x }\nfn main() -> i64 { mut_p(1) }\n",
+    // milestone-2: `let` bindings — VarIds continue after the params (global +
+    // sequential), `mut` + type annotations, a let value referencing earlier
+    // bindings, lets mixed with params + calls across fns.
+    "fn main() -> i64 { let x: i64 = 5; let y = x + 1; y }\n",
+    "fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { let z = add(1, 2); z }\n",
+    "fn main() -> i64 { let mut s = 0; s }\n",
+    "fn main() -> i64 { let mut acc: i64 = 0; let n: i64 = 5; acc + n }\n",
+    "fn f(p: i64) -> i64 { let q = p + 1; let r = q * 2; r }\nfn main() -> i64 { f(3) }\n",
+    "fn add(a: i64, b: i64) -> i64 { let s = a + b; s }\nfn main() -> i64 { add(1, 2) }\n",
+    "fn g(x: i64) -> i64 { x }\nfn main() -> i64 { let a = g(1); let b = g(a); let c = g(b); c }\n",
 ];
 
 #[test]

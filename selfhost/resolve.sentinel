@@ -500,11 +500,21 @@ fn dump_rstmts(out: &mut Vec<u8>, st: Stmts, src: &[u8], scs: &Vec<i64>, sce: &V
 fn dump_rstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], scs: &Vec<i64>, sce: &Vec<i64>, base: i64, ufs: &Vec<i64>, ufe: &Vec<i64>, gb: &mut Vec<u8>) -> i64 {
     match s {
         Stmt::SLet(lmf, lnm, lty, lval) => {
-            // MILESTONE-2: a `let` binds (grows the scope). m-1 has no `let`
-            // seed; emit a placeholder (varid -1) + sink the name + the optional
-            // type, resolve the value. Wired for real in m-2.
-            append_str(out, "(let #-1 ");
+            // The let's binding is already in the (pre-scanned) scope; its varid
+            // is the unique name's scope index. The value resolves in the same
+            // scope (a self-/forward-reference is a resolve error → never a clean
+            // seed). Format: `(let #vid [mut] <ty-or-_> <value>)`.
+            let lvid: i64 = sc_lookup(src, scs, sce, base, &lnm);
             sink_name(gb, lnm);
+            append_str(out, "(let #");
+            append_int(out, lvid);
+            push(out, ' ');
+            if lmf {
+                append_str(out, "mut ");
+                0
+            } else {
+                0
+            };
             dump_rtyopt(out, lty);
             push(out, ' ');
             dump_rexpr(out, lval, src, scs, sce, base, ufs, ufe, gb);
@@ -670,6 +680,43 @@ fn emit_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     }
 }
 
+// MILESTONE-2: pre-scan a fn body's tokens (cur_start at the body `{`) for its
+// `let` bindings, pushing each name's src slice to the scope IN SOURCE ORDER
+// (after the params) — so the body can then be resolved with the scope IMMUTABLE
+// (a `let` binds during the walk, but pre-scanning makes the whole binding set
+// present up front). Brace-balanced to the matching `}`; the flat per-fn
+// namespace means nested-block `let`s share the fn scope. `let`s resolve their
+// own varid by name lookup (redeclaration is rejected by resolve, so unique).
+fn scan_lets(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, cur_start: i64, scs: &mut Vec<i64>, sce: &mut Vec<i64>) -> i64 {
+    let mut i: i64 = cur_start + 1;
+    let mut depth: i64 = 1;
+    while depth > 0 {
+        let t: i64 = (*k)[i];
+        if t == 6 {
+            depth = depth + 1;
+            0
+        } else if t == 7 {
+            depth = depth - 1;
+            0
+        } else if t == 45 {
+            let mut ni: i64 = i + 1;
+            if (*k)[ni] == 46 {
+                ni = ni + 1;
+                0
+            } else {
+                0
+            };
+            push(scs, (*s)[ni]);
+            push(sce, (*e)[ni]);
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
 fn main() -> i64 {
     let path: [u8] = "input.sentinel";
     let src: [u8] = read_file(path);
@@ -756,6 +803,9 @@ fn main() -> i64 {
         } else {
             0
         };
+        // m-2: pre-scan the body's `let` bindings into the scope (after the
+        // params) so the body resolves against the complete, immutable scope.
+        scan_lets(&kinds, &starts, &ends, cur, &mut scs, &mut sce);
         let body: Expr = parse_block(&kinds, &starts, &ends, &src, &mut cur);
         dump_type(&mut out, rty);
         push(&mut out, ' ');
