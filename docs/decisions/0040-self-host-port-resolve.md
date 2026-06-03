@@ -2,15 +2,16 @@
 
 Status: **ACCEPTED-WITH-AMENDMENTS** — the third sub-phase of the self-host port
 (ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039
-→ ACCEPTED). **(3a) m-1+m-2 + (3b-1) + (3b-2) + (3b-3) have LANDED** (A2–A6):
+→ ACCEPTED). **(3a) m-1+m-2 + (3b-1..3b-4) have LANDED** (A2–A7):
 `selfhost/resolve.sentinel`, the third compiler stage in Sentinel, name-resolves
 the fn-body grammar (paramful fns + every expression form + `let`) **and now the
-top-level decl walk + the struct, enum & effect tables (struct-lit `#id`,
-`enum-construct`, `perform #E op_index`)** (the symbol tables bundled in an
-`&mut RCtx` struct), matching `snc resolve` (A1's flat-`Vec` model, the parser
-imported as a D.6 module). The ADR flips fully as the remaining slices (3b-4–3e:
-the class/trait/impl tables + the rest of the `::`-path disambiguation,
-match/while/handle scoping, the full corpus) close.
+top-level decl walk + the struct, enum, effect, trait & impl tables (struct-lit
+`#id`, `enum-construct`, `perform #E op_index`, `qcall-impl #I method_index`, with
+method bodies binding a synthetic `self` + GROUP-ordered VarIds)** (the symbol
+tables bundled in an `&mut RCtx` struct), matching `snc resolve` (A1's flat-`Vec`
+model, the parser imported as a D.6 module). The ADR flips fully as the remaining
+slices (3b-5–3e: the class table + `class-init`/`resume-kont`, match/while/handle
+scoping, the full corpus) close.
 Ports the **resolve** stage to Sentinel: the parsed AST → a name-resolved program
 (every identifier reference bound to an integer ID), differentially validated
 against a Rust `snc` oracle over the `tests/pass` + `tests/ui` corpus. Flips to
@@ -208,6 +209,50 @@ oracle (3a) has landed; the Sentinel side builds on the corrected model. See
     leak-free under `leaks --atExit`; four-check green. (No `handle` seeds —
     handler-arm + return VarIds are (3c).) Next: (3b-4) trait + impl + the
     `qcall-impl` split (method bodies + synthetic `self`).
+- **A7 — (3b-4): trait + impl tables + heads (method bodies + `self`) + the
+  `qcall-impl` split; the GROUP-ORDER VarId rearchitecture.** The first decl kind
+  with method *bodies* — and it forced the deepest correction so far.
+  - **⚠ Method-body VarIds are GROUP-ordered, NOT source-ordered (the
+    rearchitecture, (3b-4a)).** The Rust resolver resolves **every fn body before
+    any impl/class method body** (lib.rs:2559), so a fn declared *after* an impl
+    still gets *lower* VarIds (verified: `main`'s `let p`=#0 vs an earlier impl's
+    `self`=#1). The dump, though, is **source order**. So `varid = scope-array
+    index` (the model through (3b-3)) no longer holds. Corrected to **explicit
+    stored VarIds**: the scope gains a parallel `scv` array; `sc_lookup` returns
+    `scv[i]`; `base` is now purely an array-index floor isolating an item's
+    bindings. A single `nextvid` counter is the active VarId source, **loaded
+    per item** from a per-group saved counter — `fnvid` (the fn region, starting
+    `voff`) and `implvid` (the impl region, starting `voff + total-fn-bindings`).
+    The fn-binding total is counted in pass 1 (a `:` at depth 0 = a fn param; a
+    `let` at depth >=1 under a fn item = a fn let — a `citem` "current item kind"
+    flag attributes body `let`s to fns vs impl/class methods). This also retired
+    the (3b-3) phantom slots — the effect-op-param offset is now just `fnvid`'s
+    `voff` start. (3b-4a) is behavior-preserving (the 39 prior seeds unchanged).
+  - **trait heads ((3b-4b), pure syntax):** `(trait #id Name (method name <kind>
+    (params) ret)...)` — trait method sigs have NO bodies and their params dump
+    **without** VarIds (reusing `emit_op_params`); `self` shows only as the
+    shared/exclusive kind word. A pass-1 sub-scan `scan_trait_methods` records each
+    trait's ordered method-name list (for `method_index`).
+  - **impl heads + method bodies ((3b-4b)):** `(impl #id name #trait_id Trait
+    struct#tid Type (method #selfvid name <kind> (params) ret <block>)...)`. Each
+    method **binds a synthetic `self`** first (its VarId from the impl-region
+    counter — the `self` token's src slice pushed to the method's scope so
+    `self.field` resolves), then its params (with VarIds, `emit_params`), then the
+    body `let`s, all against that method's scope (floor = the scope length at
+    method start). The impl head reads its `trait_id` (the stored trait-name slice
+    -> `trait_lookup_slice`) + its `struct#tid` target (`struct_lookup_slice`).
+  - **`qcall-impl` (the `Qcall` else-branch, mirror lib.rs:3852):** not an enum ->
+    a named impl — `Impl::method(args)` -> `(qcall-impl #I method_index ImplName
+    method args)`, where `method_index` is the method's position in the impl's
+    trait's method list (`impl_lookup` -> the impl's trait slice ->
+    `trait_lookup_slice` -> `method_index_in_trait`).
+  - Verified: 7 new differential seeds (trait+impl+qcall, the group-order VarId
+    offset with a fn before an impl, multi-method + per-method `self` + a method
+    `let`, `method_index` on the 2nd method, two impls of one trait on two structs,
+    `&mut Self`, a trait with no impl; 46 total) match `snc resolve`; leak-free;
+    four-check green. (3b-4a) was committed separately (behavior-preserving).
+    Next: (3b-5) class + `class-init` + `resume-kont` (the class group slots
+    *before* impls in VarId order).
 
 ## Context
 

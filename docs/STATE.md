@@ -15,17 +15,19 @@ Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (3/N) RESOLVE is at
-(3b-3)** (ADR 0040 A4–A6): `selfhost/resolve.sentinel` now walks the TOP-LEVEL
+(3b-4)** (ADR 0040 A4–A7): `selfhost/resolve.sentinel` now walks the TOP-LEVEL
 decls (a brace-depth pass-1 scan + a source-order pass-2 dispatch) and resolves
-THREE decl kinds end to end — `(struct #id …)` + struct-lit `#id`; `(enum #id Name
-(variant …))` + the `Enum::Variant` → `(enum-construct #E …)` split (enum table
-checked FIRST); and `(effect #id Name (op …))` + `perform` →
-`(perform #E op_index Eff op args)` — with the symbol tables bundled in an
-`&mut RCtx` struct (the A4 probe). ⚠ effect op params consume GLOBAL VarIds
-(reproduced as phantom scope slots so fn VarIds offset correctly). 39 differential
-seeds match `snc resolve`, leak-free; four-check green (1415 tests). NEXT = (3b-4)
-trait+impl + `qcall-impl` (method bodies + `self`). The prior banner (the (2/N)
-PARSER, COMPLETE, ADR 0039 → ACCEPTED, A1–A22) stands below.
+FIVE decl kinds end to end — struct (`struct-lit #id`), enum (`enum-construct`),
+effect (`perform #E op_index`), and now **trait + impl** (`(trait #id …)` /
+`(impl #id … (method #selfvid …))` heads with method BODIES binding a synthetic
+`self`, + `Impl::method(args)` → `(qcall-impl #I method_index …)`) — with the
+symbol tables bundled in an `&mut RCtx` struct. ⚠ **method-body VarIds are
+GROUP-ordered** (all fns resolve before any impl method), so varid ≠ scope index —
+the scope stores EXPLICIT varids, the impl region counts from
+`voff + total-fn-bindings`. 46 differential seeds match `snc resolve`, leak-free;
+four-check green (1415 tests). NEXT = (3b-5) class + `class-init` + `resume-kont`.
+The prior banner (the (2/N) PARSER, COMPLETE, ADR 0039 → ACCEPTED, A1–A22) stands
+below.
 
 Prior banner: **(2/N) the PARSER is
 COMPLETE (ADR 0039 → ACCEPTED, A1–A22).** `selfhost/parser.sentinel` matches the
@@ -83,9 +85,19 @@ params consume GLOBAL VarIds** in the Rust resolver (before any fn body), so eve
 fn's VarIds are OFFSET by the total effect-op-param count regardless of source
 order — reproduced with **phantom scope slots** (one dummy entry per op param,
 below every fn's `base`, never looked up). **39 differential seeds match `snc
-resolve`, leak-free.** **NEXT =
-(3b-4)** trait+impl/qcall-impl (method bodies + `self`), (3b-5) class/class-init +
-resume-kont, (3c) match/while/handle (the D5 truncation restore for arm scopes),
+resolve`, leak-free.** **(3b-4) (A7) added trait + impl** — `(trait #id …)` heads
+(sigs, no bodies) + `(impl #id name #trait_id Trait struct#tid Type (method
+#selfvid …))` heads with method BODIES (a synthetic `self` VarId, then params,
+then body lets) + the `Qcall` else-branch → `(qcall-impl #I method_index ImplName
+method args)` (method_index = the method's position in the impl's trait's methods).
+⚠ **method-body VarIds are GROUP-ordered** (the Rust resolver resolves ALL fn
+bodies before ANY impl method, lib.rs:2559), so `varid ≠ scope-array index` — the
+scope now stores EXPLICIT varids (`scv`), the fn region counts from `voff` and the
+impl region from `voff + total-fn-bindings` (the (3b-4a) rearchitecture retired the
+(3b-3) phantom slots). **46 differential seeds match `snc resolve`, leak-free.**
+**NEXT =
+(3b-5)** class/class-init + resume-kont (the class group slots BEFORE impls in
+VarId order), (3c) match/while/handle (the D5 truncation restore for arm scopes),
 (3e) full corpus.
 Movement 1 (the
 language/stdlib build-out,
