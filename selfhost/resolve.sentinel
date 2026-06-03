@@ -69,9 +69,16 @@ use parser::append_slice;
 // the current fn's scope floor. Threaded as `&mut RCtx`. (The name `garbage` sink
 // is a SEPARATE `gb` param — a `Vec` field cannot be moved out of a struct.)
 struct RCtx {
-    scs: Vec<i64>,   // scope: binding name-slice starts (varid = index)
+    scs: Vec<i64>,   // scope: binding name-slice starts
     sce: Vec<i64>,   // scope: binding name-slice ends
-    base: i64,       // the current fn's scope floor (sc_lookup stops here)
+    scv: Vec<i64>,   // scope: binding VarId (EXPLICIT — varid ≠ array index, since
+                     //   method-body VarIds are assigned in GROUP order [fns then
+                     //   impls] while the scope array is built in source order)
+    base: i64,       // the current item's scope floor (an ARRAY index; sc_lookup
+                     //   scans [base, top) to isolate this item's bindings)
+    nextvid: i64,    // the ACTIVE VarId counter (loaded from fnvid/implvid per item)
+    voff: i64,       // effect-op-param count = the fn-region VarId base
+    fnvid: i64,      // saved fn-region VarId counter (starts voff)
     ufs: Vec<i64>,   // user-fn table: name-slice starts (FnId = 14 + index)
     ufe: Vec<i64>,   // user-fn table: name-slice ends
     sts: Vec<i64>,   // struct table: name-slice starts (StructId = index)
@@ -198,8 +205,9 @@ fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     }
 }
 
-// Resolve a variable name to its VarId — newest-first (high→low) over this fn's
-// scope range `[base, top)`; the varid is the binding's scope index. -1 if absent.
+// Resolve a variable name to its VarId — newest-first (high→low) over this item's
+// scope range `[base, top)` (array indices); returns the binding's STORED VarId
+// (`scv`), or -1 if absent.
 fn sc_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     let top: i64 = len((*c).scs);
     let mut i: i64 = top - 1;
@@ -207,7 +215,7 @@ fn sc_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     while i >= (*c).base {
         if found == 0 - 1 {
             if name_eq_src(src, (*c).scs[i], (*c).sce[i], q) {
-                found = i;
+                found = (*c).scv[i];
                 0
             } else {
                 0
@@ -1042,9 +1050,11 @@ fn emit_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
         *cur = *cur + 1;
         *cur = *cur + 1;
         let pty: TypeE = parse_type(k, s, e, src, cur);
-        let vid: i64 = len((*c).scs);
+        let vid: i64 = (*c).nextvid;
+        (*c).nextvid = (*c).nextvid + 1;
         push(&mut (*c).scs, ns);
         push(&mut (*c).sce, ne);
+        push(&mut (*c).scv, vid);
         append_str(out, "(param #");
         append_int(out, vid);
         push(out, ' ');
@@ -1088,8 +1098,14 @@ fn scan_lets(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, cur_start: i64, c: &mut R
             } else {
                 0
             };
+            // A `let` binds in source (pre-scan) order, after the params; assign
+            // its VarId from the active counter (nextvid) now, so the body resolves
+            // it to the right id.
+            let lvid: i64 = (*c).nextvid;
+            (*c).nextvid = (*c).nextvid + 1;
             push(&mut (*c).scs, (*s)[ni]);
             push(&mut (*c).sce, (*e)[ni]);
+            push(&mut (*c).scv, lvid);
             0
         } else {
             0
@@ -1100,13 +1116,12 @@ fn scan_lets(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, cur_start: i64, c: &mut R
 }
 
 // PASS-1 effect-op scan (cur_start at the effect body `{`): for each op `name(
-// params) [-> ret];`, record `(eid, op-name-slice)` in the flat op list, AND push
-// one PHANTOM scope slot per op param. The Rust resolver assigns effect op params
-// global VarIds during effect-table construction — BEFORE any fn body (lib.rs:2000)
-// — so every fn's VarIds are offset by the total effect-op-param count. The
-// phantoms (pushed before pass 2) sit below every fn's `base`, so they shift the
-// scope indices (= VarIds) without ever being looked up. An op name = an ident at
-// paren-depth 0 followed by `(`; a `:` (tag 31) at paren-depth ≥1 = one op param.
+// params) [-> ret];`, record `(eid, op-name-slice)` in the flat op list, AND count
+// its params into `voff`. The Rust resolver assigns effect op params global VarIds
+// during effect-table construction — BEFORE any fn body (lib.rs:2000) — so the
+// fn-region VarId counter starts at `voff` (the total effect-op-param count). An op
+// name = an ident at paren-depth 0 followed by `(`; a `:` (tag 31) at
+// paren-depth ≥1 = one op param.
 fn scan_ops_of(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, eid: i64, cur_start: i64, c: &mut RCtx) -> i64 {
     let mut i: i64 = cur_start + 1;
     let mut bdepth: i64 = 1;
@@ -1126,9 +1141,9 @@ fn scan_ops_of(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, eid: i64, cur_start: i6
             pdepth = pdepth - 1;
             0
         } else if t == 31 {
-            // a param annotation `:` → one effect op param → a phantom VarId slot
-            push(&mut (*c).scs, 0);
-            push(&mut (*c).sce, 0);
+            // a param annotation `:` → one effect op param → bump the fn-region
+            // VarId base `voff` (these consume the FIRST global VarIds; lib.rs:2000)
+            (*c).voff = (*c).voff + 1;
             0
         } else if pdepth == 0 {
             // an op name = an ident (tag 2) immediately followed by `(`
@@ -1222,8 +1237,11 @@ fn resolve_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
         (*c).effct = (*c).effct + 1;
         0
     } else {
+        // fn: VarIds come from the fn-region counter (load → resolve → save).
         let fid: i64 = (*c).fnct;
+        (*c).nextvid = (*c).fnvid;
         resolve_fn(out, k, s, e, src, cur, c, gb, fid);
+        (*c).fnvid = (*c).nextvid;
         (*c).fnct = (*c).fnct + 1;
         0
     }
@@ -1242,7 +1260,11 @@ fn main() -> i64 {
     let mut ctx: RCtx = RCtx {
         scs: vec_new(),
         sce: vec_new(),
+        scv: vec_new(),
         base: 0,
+        nextvid: 0,
+        voff: 0,
+        fnvid: 0,
         ufs: vec_new(),
         ufe: vec_new(),
         sts: vec_new(),
@@ -1308,6 +1330,9 @@ fn main() -> i64 {
         };
         p1 = p1 + 1;
     }
+
+    // The fn-region VarId counter starts after the effect op params (voff).
+    ctx.fnvid = ctx.voff;
 
     // The name garbage sink (a STANDALONE Vec — a struct field can't be moved
     // out for vec_to_array) + the output buffer.
