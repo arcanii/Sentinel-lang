@@ -185,6 +185,21 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
   not — a possible Sentinel drop-glue/param-count bug worth a minimal repro.) Reverted
   to the clean (4c-2) state; (4c-1)/(4c-2) stay committed. The WIP is preserved
   out-of-tree for the next attempt.
+  - **Update (a 2nd attempt, also reverted; the simple hypotheses were RED HERRINGS).**
+    Restructuring `dump_exp` to a straight `match ex` (no both-arms move; the `_` arm
+    single-consumes a temp) was byte-correct but **still leaked**. **Five minimal
+    probes ruled out every quick cause** — a 6-param recursive consuming-dump is clean
+    (NOT the param count), a `match`-with-temp-leaf is clean, an If-cond-via-a-separate-fn
+    is clean, and **mutual recursion is clean**. The leak's stack is `main → type_item →
+    parse_block`: the parsed body `Expr` tree is not freed when routed through
+    `dump_exp` (but IS through `dump_texpr` — 4c-2 clean). So it's a Sentinel drop-glue
+    bug specific to the **full file's larger mutual-recursion group**, not minimally
+    reproducible. **Next-session options:** (a) thread `exp` through `dump_texpr` ITSELF
+    (one self-recursive walker, no new mutually-recursive fn) — the widen-before-emit
+    then needs **per-arm** handling on the widen-able leaves (you can't wrap after
+    emit); or (b) grow the probe toward the real file (add the ctx params, more
+    mutual-recursion edges) until it leaks, isolate the trigger, and **escalate as a
+    Sentinel compiler bug**.
 
 ## Context
 
