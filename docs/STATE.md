@@ -15,15 +15,17 @@ Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (3/N) RESOLVE is at
-(3b-2)** (ADR 0040 A4/A5): `selfhost/resolve.sentinel` now walks the TOP-LEVEL
+(3b-3)** (ADR 0040 A4–A6): `selfhost/resolve.sentinel` now walks the TOP-LEVEL
 decls (a brace-depth pass-1 scan + a source-order pass-2 dispatch) and resolves
-the first TWO decl kinds end to end — `(struct #id …)` + struct-lit `#id`, and
-`(enum #id Name (variant …))` + the `Enum::Variant` → `(enum-construct #E …)`
-split (the enum table checked FIRST) — with the symbol tables bundled in an
-`&mut RCtx` struct (the A4 probe). 30 differential seeds match `snc resolve`,
-leak-free; four-check green (1415 tests). NEXT = (3b-3) the effect table +
-`perform` `op_index`. The prior banner (the (2/N) PARSER, COMPLETE, ADR 0039 →
-ACCEPTED, A1–A22) stands below.
+THREE decl kinds end to end — `(struct #id …)` + struct-lit `#id`; `(enum #id Name
+(variant …))` + the `Enum::Variant` → `(enum-construct #E …)` split (enum table
+checked FIRST); and `(effect #id Name (op …))` + `perform` →
+`(perform #E op_index Eff op args)` — with the symbol tables bundled in an
+`&mut RCtx` struct (the A4 probe). ⚠ effect op params consume GLOBAL VarIds
+(reproduced as phantom scope slots so fn VarIds offset correctly). 39 differential
+seeds match `snc resolve`, leak-free; four-check green (1415 tests). NEXT = (3b-4)
+trait+impl + `qcall-impl` (method bodies + `self`). The prior banner (the (2/N)
+PARSER, COMPLETE, ADR 0039 → ACCEPTED, A1–A22) stands below.
 
 Prior banner: **(2/N) the PARSER is
 COMPLETE (ADR 0039 → ACCEPTED, A1–A22).** `selfhost/parser.sentinel` matches the
@@ -73,10 +75,16 @@ no VarId). **(3b-2) (A5) added the enum table** — `(enum #id Name (variant V
 <payloads>…)…)` heads (EnumId is its OWN source-order namespace, coexisting with
 struct ids) + the `Enum::Variant` → `(enum-construct #E Enum Variant args)` split
 (the enum table checked FIRST in BOTH the parser's uniform `Qcall` and `ClassInit`
-arms; purely additive — one more `RCtx` table, zero new params). **30 differential
-seeds match `snc resolve`, leak-free.** **NEXT =
-(3b-3)** effect/perform (op_index = scan the effect's ops), then (3b-4)
-trait+impl/qcall-impl (method bodies + `self`), (3b-5) class/class-init +
+arms; purely additive — one more `RCtx` table, zero new params). **(3b-3) (A6)
+added the effect table** — `(effect #id Name (op name (params) ret)…)` heads (user
+effects in source order, `Async` last) + `perform` → `(perform #E op_index Eff op
+args)` (op_index = the op's position in the effect's op list). ⚠ **effect op
+params consume GLOBAL VarIds** in the Rust resolver (before any fn body), so every
+fn's VarIds are OFFSET by the total effect-op-param count regardless of source
+order — reproduced with **phantom scope slots** (one dummy entry per op param,
+below every fn's `base`, never looked up). **39 differential seeds match `snc
+resolve`, leak-free.** **NEXT =
+(3b-4)** trait+impl/qcall-impl (method bodies + `self`), (3b-5) class/class-init +
 resume-kont, (3c) match/while/handle (the D5 truncation restore for arm scopes),
 (3e) full corpus.
 Movement 1 (the

@@ -1865,11 +1865,11 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3b-2)
-    docs** commit (`docs(selfhost): resolve (3b-2) — enum + enum-construct (A5)`),
-    atop its feat (`feat(selfhost): resolve (3b-2) — enum table + enum-construct`),
-    the (3b-1) docs (`9117d07`) + feat (`64b82b9`), the (3a) m-2 docs (`7daa66f`)
-    + feat (`80a201d`),
+    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3b-3)
+    docs** commit (`docs(selfhost): resolve (3b-3) — effect + perform (A6)`),
+    atop its feat (`feat(selfhost): resolve (3b-3) — effect table + perform`),
+    the (3b-2) docs (`7b2e8c7`) + feat (`b80c84e`), the (3b-1) docs (`9117d07`) +
+    feat (`64b82b9`), the (3a) m-2 docs (`7daa66f`) + feat (`80a201d`),
     the (3a) m-1 docs (`352b1ce`) + feat (`06f9241`), the parser AST-exposure
     refactor (`20046e9`), the agent-protocol + probe-correction docs (`8a35328`),
     the `snc resolve` oracle docs (`227ad6d`) + feat (`eba2fb4`) + ADR 0040; atop
@@ -1880,8 +1880,8 @@ For pasting into a fresh chat to bootstrap context:
     tree; **1415 tests** — the `selfhost_parse` seeds (192) + the parser corpus
     differential (the D8 phase-go: all 139 clean-parsing fixtures) + `tests/ast.rs`
     goldens + the `snc resolve` oracle goldens (`tests/resolve.rs`) + the resolve
-    seed differential (`tests/selfhost_resolve.rs`, **30 seeds: 17 (3a) m-1+m-2 +
-    6 (3b-1) struct + 7 (3b-2) enum**);
+    seed differential (`tests/selfhost_resolve.rs`, **39 seeds: 17 (3a) m-1+m-2 +
+    6 (3b-1) struct + 7 (3b-2) enum + 9 (3b-3) effect/perform**);
     four-check green via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
@@ -1927,9 +1927,21 @@ For pasting into a fresh chat to bootstrap context:
     `(enum-construct #E Enum Variant args)` split (enum table checked FIRST in BOTH
     the `Qcall` and `ClassInit` arms; mirror
     `crates/sentinel-resolve/src/lib.rs:3763–3899`). 30 seeds (+7 enum), leak-free.
-    **RESUME AT = (3b-3)** — the effect table + `(effect #id Name (op …))` heads +
-    `(perform #E op_index Eff op args)`
-    (op_index = scan the effect's ops), then (3b-4) trait+impl/`qcall-impl` (method
+    **(3b-3) LANDED** (effect): the effect table (`efs`/`efe`/`effct`) + a flat op
+    list (`efoo`/`efos`/`efoe`) in `RCtx` + `(effect #id Name (op name (params)
+    ret)…)` heads (user effects in source order, `Async` last) + `perform` →
+    `(perform #E op_index Eff op args)` (op_index = the op's position in the
+    effect's op list). ⚠ **effect op params consume GLOBAL VarIds** in the Rust
+    resolver (before any fn body, lib.rs:2000), so every fn's VarIds are OFFSET by
+    the total effect-op-param count — INDEPENDENT of source order — reproduced with
+    PHANTOM scope slots (`scan_ops_of` pushes one dummy entry per op param, below
+    every fn's `base`, never looked up). 39 seeds (+9 effect/perform), leak-free.
+    **RESUME AT = (3b-4)** — the trait + impl tables + `(qcall-impl #I method_index
+    ImplName method args)` (the parser's `Qcall` else-branch; `method_index` = scan
+    the impl's trait's method names). ⚠ This is the FIRST decl kind with METHOD
+    BODIES → a synthetic `self` VarId per method (`(method #selfvarid …)`) = a NEW
+    idiom (bind `self` first, then params, then resolve the body; probe-settle if
+    needed). Trait method sigs have NO bodies; (method
     bodies + synthetic `self` — a new idiom; `method_index` = scan the impl's
     trait's methods), (3b-5) class/`class-init` + `resume-kont` (a Call whose
     callee is an in-scope var), (3c) match/while/handle (the D5 truncation restore

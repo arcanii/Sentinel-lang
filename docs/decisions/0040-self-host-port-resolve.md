@@ -2,15 +2,15 @@
 
 Status: **ACCEPTED-WITH-AMENDMENTS** — the third sub-phase of the self-host port
 (ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039
-→ ACCEPTED). **(3a) m-1+m-2 + (3b-1) + (3b-2) have LANDED** (A2–A5):
+→ ACCEPTED). **(3a) m-1+m-2 + (3b-1) + (3b-2) + (3b-3) have LANDED** (A2–A6):
 `selfhost/resolve.sentinel`, the third compiler stage in Sentinel, name-resolves
 the fn-body grammar (paramful fns + every expression form + `let`) **and now the
-top-level decl walk + the struct & enum tables (struct-lit `#id`,
-`enum-construct`)** (the symbol tables bundled in an `&mut RCtx` struct), matching
-`snc resolve` (A1's flat-`Vec` model, the parser imported as a D.6 module). The
-ADR flips fully as the remaining slices (3b-3–3e: the effect/class/trait/impl
-tables + the rest of the `::`-path disambiguation, match/while/handle scoping, the
-full corpus) close.
+top-level decl walk + the struct, enum & effect tables (struct-lit `#id`,
+`enum-construct`, `perform #E op_index`)** (the symbol tables bundled in an
+`&mut RCtx` struct), matching `snc resolve` (A1's flat-`Vec` model, the parser
+imported as a D.6 module). The ADR flips fully as the remaining slices (3b-4–3e:
+the class/trait/impl tables + the rest of the `::`-path disambiguation,
+match/while/handle scoping, the full corpus) close.
 Ports the **resolve** stage to Sentinel: the parsed AST → a name-resolved program
 (every identifier reference bound to an integer ID), differentially validated
 against a Rust `snc` oracle over the `tests/pass` + `tests/ui` corpus. Flips to
@@ -176,6 +176,38 @@ oracle (3a) has landed; the Sentinel side builds on the corrected model. See
   construct with/without args, struct+enum ID-namespace coexistence, two enums,
   an enum after a fn; 30 total) match `snc resolve`; leak-free; four-check green.
   Next: (3b-3) the effect table + `(effect #id …)` + the `perform` `op_index`.
+- **A6 — (3b-3): the effect table + `(effect #id …)` heads + the `perform`
+  `op_index`; the effect-op-param VarId offset.** The effect table (`efs`/`efe` +
+  the `effct` source-order counter) and a **flat op list** (`efoo`/`efos`/`efoe` —
+  one entry per op, tagged with its owner EffectId) register at pass-1 depth 0
+  (`effect` = tag 57; a sub-scan `scan_ops_of` walks the effect body). Pass 2
+  dispatches `effect` → `resolve_effect`, dumping `(effect #id Name (op name
+  (params) ret)…)` — op params dump **without** VarIds (`(param [mut] name
+  <type>)`, like trait params; resolve_dump.rs:500), a missing return type → `_`.
+  User effects dump in **source order** interleaved with the other decls; the
+  built-in `Async` still dumps **last** (id = the user-effect count). The
+  **`perform`** disambiguation mirrors `resolve_perform_expr` (lib.rs:4250):
+  `perform Eff.op(args)` → `(perform #E op_index Eff op args)`, where `op_index` is
+  the op's position in the effect's op list (a linear scan of `efoo`/`efos`/`efoe`
+  filtered to `eid`).
+  - **⚠ The effect-op-param VarId offset (the subtle part).** The Rust resolver
+    assigns **global VarIds** to effect op params during effect-table construction
+    (lib.rs:2000) — *before* any fn body — so **every fn's param/`let` VarIds are
+    offset by the total effect-op-param count**, and (verified) this is
+    **independent of source order** (a fn declared *before* an effect is still
+    offset). The flat-scope model reproduces this exactly with **phantom scope
+    slots**: `scan_ops_of` pushes one dummy `(0,0)` entry per op param (a `:` at
+    paren-depth ≥1) into the scope arrays during pass 1, so the first real fn
+    binding lands at index = the offset. The phantoms sit **below every fn's
+    `base`**, so `sc_lookup` never reaches them — they shift the indices (= VarIds)
+    without ever matching. (Effect op params are *not* dumped with their VarIds, so
+    only the offset is observable.)
+  - Verified: 9 new differential seeds (effects with 0/1/2-param ops, no-ret ops,
+    `perform` with the right `op_index`, the VarId offset on fns before/after/
+    between effects, struct+effect coexistence; 39 total) match `snc resolve`;
+    leak-free under `leaks --atExit`; four-check green. (No `handle` seeds —
+    handler-arm + return VarIds are (3c).) Next: (3b-4) trait + impl + the
+    `qcall-impl` split (method bodies + synthetic `self`).
 
 ## Context
 
