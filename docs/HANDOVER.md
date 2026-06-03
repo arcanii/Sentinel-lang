@@ -1873,11 +1873,12 @@ For pasting into a fresh chat to bootstrap context:
     the (2b) full-expression increments (`189990e` … `0e84f36`), the (2a) parser
     feat (`8d6aa6e`) + `snc ast` oracle (`7f10740`) + recursive-AST drop gate +
     ADR 0039, atop the lexer (1/N) + the D.6 cross-module work. (Run `git log
-    --oneline -40` for the full chain.) Clean tree; **1410 tests** — the curated
-    `selfhost_parse` seeds (192) + a new corpus differential
-    (`sentinel_parser_matches_oracle_on_corpus`, the D8 phase-go: the Sentinel
-    parser vs `snc ast` over all 139 clean-parsing `tests/pass`+`tests/ui`
-    fixtures) + `tests/ast.rs` goldens for every decl kind; four-check green via
+    --oneline -40` for the full chain.) Clean tree; **1415 tests** — the curated
+    `selfhost_parse` seeds (192) + the parser corpus differential
+    (`sentinel_parser_matches_oracle_on_corpus`, the D8 phase-go: all 139
+    clean-parsing fixtures) + `tests/ast.rs` goldens + the new `snc resolve`
+    oracle goldens (`tests/resolve.rs`) + the resolve seed differential
+    (`tests/selfhost_resolve.rs`, 10 m-1 seeds); four-check green via
     `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
@@ -1885,10 +1886,11 @@ For pasting into a fresh chat to bootstrap context:
     (the (2/N) parser — **now ACCEPTED / COMPLETE**: (2a)+(2b) the full expression
     grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the
     full-corpus close — `selfhost/parser.sentinel` matches `snc ast` over every
-    clean-parsing fixture, leak-free) + **ADR 0040** (the NEXT port stage,
-    **resolve — PROPOSED**: port name-resolution to Sentinel — cons-list symbol
-    tables + a `snc resolve` ID-bearing oracle, sub-sliced 3a–3e, scope
-    snapshot/restore = the key probe. **The (3a) ORACLE has LANDED** (`eba2fb4`):
+    clean-parsing fixture, leak-free) + **ADR 0040** (the active port stage,
+    **resolve — ACCEPTED-WITH-AMENDMENTS; (3a) m-1 LANDED**: name-resolution to
+    Sentinel via FLAT parallel-`Vec` symbol tables (A1 corrected the original
+    cons-list plan) + a `snc resolve` ID-bearing oracle, sub-sliced 3a–3e. **The
+    (3a) ORACLE landed** (`eba2fb4`):
     `snc resolve` (`run_resolve` + `resolve_dump.rs`) = the `snc ast` form +
     resolved IDs (`(var #N)`/`(call #14 …)`/`(struct-lit #N …)`/`(qcall-impl …)`;
     builtins FnId 0–13, user fns #14+; built-in `Async` effect emits last),
@@ -1899,18 +1901,17 @@ For pasting into a fresh chat to bootstrap context:
     a `&`-ref enum `match` aliases the heap → double-free on reuse; partial
     cons-cell `truncate` leaks) → use **flat parallel-`Vec` arrays + a packed-name
     byte blob, integer-indexed, length-truncation restore** (the parser's
-    token-array idiom; prototyped leak-clean / 100-arm loop). **The parser is now
-    EXPOSED** (`20046e9`): `pub` on the 14 AST enums + the parse-entry fns
-    (no-op single-file; corpus test green). **RESUME AT = WRITE
-    `selfhost/resolve.sentinel` — (3a) milestone-1 (params + vars + calls +
-    arithmetic + blocks; `let` deferred to m-2 — the scope must grow during the
-    body walk vs the probe's frozen scope):** a 2-pass driver (pass 1 = flat-pool
-    fn-table, 14 builtins #0–13 + user fns #14+; pass 2 per-fn = parse header +
-    `parse_block` body → `(fn #id name (<params #varid>) <ret> <body>)` + the
-    `(effect #N Async)` tail), reusing the probe's proven flat-pool / name-sink /
-    reclaim idioms (full plan in the auto-memory). ⚠ varids are GLOBAL (never
-    reset). Then 3b decl tables, 3c match/while/handle (D5 truncation restore),
-    3d decl heads, 3e full corpus; THEN flip ADR 0040 →
+    token-array idiom; prototyped leak-clean / 100-arm loop). **(3a) m-1 LANDED**
+    (`20046e9` parser-exposed + `06f9241` resolve.sentinel): the THIRD Sentinel
+    stage `use`s the parser as a D.6 module + name-resolves paramful fns + free
+    calls + arithmetic + var refs → matches `snc resolve` (10 seeds, leak-free,
+    compiled first try). **RESUME AT = m-2 `let`** — a `let` binds DURING the body
+    walk, so the scope must grow then (vs m-1's per-fn scope built from the params
+    + read immutably); settle the growing-scope mechanism by a quick probe
+    (pre-scan the body TOKENS for the binding set → pre-build the immutable scope,
+    OR thread a `&mut` growing scope). ⚠ varids are GLOBAL (never reset). Then 3b
+    decl tables + `::`-disambiguation, 3c match/while/handle (D5 truncation
+    restore), 3d decl heads, 3e full corpus; THEN flip ADR 0040 →
     ACCEPTED-WITH-AMENDMENTS) +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +

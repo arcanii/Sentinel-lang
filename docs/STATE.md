@@ -35,17 +35,19 @@ CONFIRMED (resolve.sentinel can `use` the parser's AST via a D.6 module), and
 reuse; partial cons-cell `truncate` leaks) — replaced by **flat parallel-`Vec`
 arrays + a packed-name byte blob, integer-indexed, length-truncation restore**
 (the parser's token-array idiom; prototyped leak-clean over a 100-arm loop).
-**The parser is now EXPOSED for import** (`20046e9`): `pub` on the 14 AST enums +
-the parse-entry fns (`tokenize` / `parse_params` / `parse_type` / `parse_block` /
-…) — a no-op single-file, so the parser corpus test stays green;
-`selfhost/resolve.sentinel` will `use parser::…`. **NEXT = write
-`selfhost/resolve.sentinel` (3a milestone-1: params + vars + calls + arithmetic +
-blocks; `let` deferred to m-2 since the scope must grow during the body walk):**
-a 2-pass driver (pass 1 builds a flat-pool fn-table — 14 builtins #0–13 + user
-fns #14+; pass 2 per-fn parses the header + `parse_block` body, emits `(fn #id
-name (<params with #varid>) <ret> <resolved-body>)`, then the `(effect #N Async)`
-tail) — reusing the probe's proven flat-pool + name-sink + reclaim idioms. Movement
-1 (the
+**(3a) milestone-1 has LANDED** — `selfhost/resolve.sentinel` (`06f9241`), the
+**THIRD compiler stage in Sentinel**, `use`s `parser.sentinel` as a **D.6 module**
+(the A1-confirmed parse-sharing: import the parser's `Expr` + parse fns, walk the
+AST by value), name-resolves it, and matches `snc resolve` for paramful fns +
+free calls + arithmetic + comparisons + unary + var refs. A 2-pass driver (pass 1
+= flat-`Vec` user-fn table, builtins #0–13 + user fns #14+; pass 2 per-fn = parse
+header → `(param #varid …)` + scope, `parse_block` body → 1-phase consuming
+`dump_rexpr`, then the `(effect #N Async)` tail) on A1's corrected flat-`Vec`
+model (src-slice keys, varid = scope index, names sunk to a reclaimed `garbage`).
+**Compiled first try; 10 differential seeds match, leak-free.** **NEXT = m-2
+`let`** (the scope grows during the body walk — a quick probe settles the
+growing-scope mechanism), then (3b) decl tables + `::`-disambiguation, (3c)
+match/while/handle, (3d) decl heads, (3e) full corpus. Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for

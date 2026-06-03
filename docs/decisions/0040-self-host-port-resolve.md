@@ -1,7 +1,12 @@
 # ADR 0040: Phase D self-host port — (3/N) resolve-in-Sentinel
 
-Status: **PROPOSED** — the third sub-phase of the self-host port (ADR 0031 D5 /
-ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039 → ACCEPTED).
+Status: **ACCEPTED-WITH-AMENDMENTS** — the third sub-phase of the self-host port
+(ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039
+→ ACCEPTED). **(3a) milestone-1 has LANDED** (A2): `selfhost/resolve.sentinel`,
+the third compiler stage in Sentinel, name-resolves paramful fns + free calls +
+arithmetic + var refs and matches `snc resolve` (A1's flat-`Vec` model, the
+parser imported as a D.6 module). The ADR flips fully as the remaining slices
+(m-2 `let`, 3b–3e) close.
 Ports the **resolve** stage to Sentinel: the parsed AST → a name-resolved program
 (every identifier reference bound to an integer ID), differentially validated
 against a Rust `snc` oracle over the `tests/pass` + `tests/ui` corpus. Flips to
@@ -56,6 +61,33 @@ oracle (3a) has landed; the Sentinel side builds on the corrected model. See
   - **(3a) ORACLE landed** (`eba2fb4`): `snc resolve` + `resolve_dump.rs`. The
     Sentinel side ((3a) skeleton, then 3b–3e) builds on the corrected flat-`Vec`
     model; the ADR flips to ACCEPTED-WITH-AMENDMENTS when (3a) lands.
+- **A2 — (3a) milestone-1: `selfhost/resolve.sentinel` (the third Sentinel
+  stage).** The parser is `pub`-exposed (`20046e9`: `pub` on the 14 AST enums +
+  the parse-entry fns — a no-op single-file, so the parser corpus test stays
+  green), and `resolve.sentinel` (`06f9241`) **`use`s it as a D.6 module** (the
+  A1/D3 parse-sharing — import the parser's `Expr` + parse fns, walk the AST by
+  value; no self-contained copy). **Milestone-1 scope:** paramful fns + free
+  calls + arithmetic + comparisons + unary + variable references over the params.
+  A **2-pass driver** — pass 1 builds the user-fn table (src slices; user fn *k* →
+  FnId `14+k`) + the user-effect count; pass 2 per-fn parses the header (emitting
+  each param `(param #varid [mut] name <type>)` + pushing its src slice to the
+  scope) + `parse_block` body, then a **1-phase consuming `dump_rexpr`** (all ~26
+  `Expr` arms: `Var` → `(var #varid)` via `sc_lookup`, `Call` → `(call #fnid …)`
+  via `fn_lookup` [builtin-id else user table], the rest pass-through-resolved),
+  then the `(effect #N Async)` tail. **Realizes A1's corrected model:** the fn
+  table + scope are flat parallel `Vec<i64>` arrays keyed by **src slices** (no
+  cons-lists); **varid = scope index** (global + sequential = push order, no id
+  array); each resolved-away `Var`/`Call` owned `[u8]` name is `sink_name`'d into
+  a `garbage` `Vec` that `main` reclaims (the only leak-free `[u8]` disposal).
+  **Compiled first try.** Verified: 10 differential seeds (multi-fn global VarIds,
+  builtins, unary, `mut` params) match `snc resolve`
+  (`tests/selfhost_resolve.rs`); leak-free under `leaks --atExit`; four-check
+  green, 1415 tests. **Next: m-2 `let`** — a `let` binds DURING the body walk, so
+  the scope must grow then (vs m-1's per-fn scope built from the params + read
+  immutably); settle the growing-scope mechanism (pre-scan body tokens for the
+  binding set, or thread a `&mut` growing scope) by a quick probe. Then (3b) the
+  decl tables + the `::`-path disambiguation, (3c) match/while/handle (the D5
+  length-truncation restore), (3d) decl heads, (3e) the full corpus (D9).
 
 ## Context
 
