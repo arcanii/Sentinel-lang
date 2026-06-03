@@ -15,11 +15,23 @@ Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (4/N) TYPES is OPEN; ADR
-0041 → ACCEPTED-WITH-AMENDMENTS; (4a) the `snc types` oracle + the two design probes
-(A1) LANDED.** Types is the **biggest/hardest port stage** (the Rust `sentinel-types`
-is **10,891 lines, ~1.8× resolve**: HM-ish inference, method/trait dispatch,
-secret-type propagation, match exhaustiveness; effect-check is a SEPARATE crate, out
-of scope). **(4a) ships the ORACLE + de-risks the Sentinel build:** `snc types <file>`
+0041 → ACCEPTED-WITH-AMENDMENTS; (4a) oracle + probes (A1/A2) + (4b) m-1 the SCALAR
+skeleton (A3) LANDED.** Types is the **biggest/hardest port stage** (the Rust
+`sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish inference, method/trait
+dispatch, secret-type propagation, match exhaustiveness; effect-check is a SEPARATE
+crate, out of scope). **(4b) m-1 (A3): `selfhost/types.sentinel`, the FOURTH Sentinel
+stage** — type-checks paramful `fn`s over the SCALAR grammar (int/bool lits, var refs,
+unary, binop/cmp/logic, `if`, blocks, `let` annotated+inferred, calls) emitting the
+`snc types` dump byte-for-byte; **matches the oracle on 32 corpus fixtures + 18 seeds**
+(`sentinel_typer_matches_oracle_on_seeds`), leak-free, compiled FIRST TRY. ⚠ **D3
+REFINED → self-contained** (NOT module-reuse of resolve): resolve's `RCtx` can't be
+extended with type fields across a module boundary, so `types.sentinel` is one clean
+`TyCtx` (resolve's name-blob scope + fn table + the verified D4 type interner + the
+append-only env), importing only the **parser**. KEY: `dump_texpr` RETURNS each
+node's type handle + `close_ty` appends ` :<type>`; pass 1 pre-scans `ufret` (fn
+return types) so forward-ref calls type right. NEXT = **(4c)** compound types
+(struct-lit + field-index, arrays + index, `Vec`, nullable + `WidenToNullable`).
+**(4a) shipped the ORACLE + de-risked the Sentinel build:** `snc types <file>`
 (driver `run_types` + `types_dump.rs`, parse → resolve → `check` → dump) emits the
 `snc resolve` S-expr form **extended with each expression node's inferred `Type`** (a
 trailing ` :<type>` via `type_display`) **+ the type-resolved disambiguations** — the
@@ -37,12 +49,12 @@ structural equality = integer `==`; recursive render/subst), with the VarId→ty
 **APPEND-ONLY** (`env[vid]=h` is a hard `IndexAssignNotSupported`; index-READ is fine)
 + 3 reusable interner gotchas (byte-literal push needs a char lit; nested `&mut ctx`
 in one call → bind inner first; inline `print_bytes(vec_to_array(v))` leaks → bind
-`let arr`); **D3** — `types.sentinel` will **`use` `resolve.sentinel` as a D.6 module**
-(a 3-deep chain + diamond import + cross-module `&mut struct` helper reuse, all
-verified leak-free) → share the symbol tables, don't re-resolve inline. **Four-check
-green (1421 tests).** NEXT = **(4b)** the Sentinel `types.sentinel` skeleton (the
-scalar grammar) on the confirmed `TyCtx` interner + the resolve-as-a-module reuse. The
-prior banner (the (3/N) RESOLVE, COMPLETE, ADR 0040 → ACCEPTED) stands below.
+`let arr`); **D3** — module-reuse of `resolve.sentinel` was probe-VERIFIED viable (a
+3-deep chain + diamond import) but **refined at the (4b) build to self-contained**
+(A3): resolve's `RCtx` can't be extended with type fields across a module boundary, so
+`types.sentinel` is one clean `TyCtx` importing only the parser. **Four-check green
+(1422 tests).** The prior banner (the (3/N) RESOLVE, COMPLETE, ADR 0040 → ACCEPTED)
+stands below.
 
 Prior banner: **(3/N) RESOLVE is
 COMPLETE; ADR 0040 → ACCEPTED** (A2–A12): `selfhost/resolve.sentinel`, the third

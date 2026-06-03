@@ -86,8 +86,49 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
   resolve)**; 5 goldens (`tests/types.rs`) pin params/call, let-inference,
   struct-lit+field-index, nullable-widen, and method-dispatch. A dev surface, not
   `abi-v1`. **ADR flips to ACCEPTED-WITH-AMENDMENTS.** Next: (4b) the Sentinel
-  `types.sentinel` skeleton (the scalar grammar) on the A1-confirmed `TyCtx` interner
-  + the resolve-as-a-module reuse.
+  `types.sentinel` skeleton (the scalar grammar) on the A1-confirmed `TyCtx` interner.
+- **A3 — (4b) milestone-1: `selfhost/types.sentinel`, the FOURTH Sentinel stage (the
+  scalar skeleton).** The first Sentinel-side increment. Type-checks paramful `fn`s
+  over the **scalar grammar** — int/bool literals, var refs, unary, binop/cmp/logic,
+  `if`, blocks, `let` (annotated + inferred), and calls (user fns + scalar builtins) —
+  emitting the `snc types` dump byte-for-byte. **Matches the oracle on 32 corpus
+  fixtures** (every pure-scalar one) **+ 18 seeds** (`sentinel_typer_matches_oracle_on_seeds`),
+  leak-free; compiled FIRST TRY.
+  - **⚠ D3 REFINED → self-contained (NOT module-reuse).** The ADR's lean (a)
+    (`types.sentinel` `use`s `resolve.sentinel`'s machinery) was reconsidered at the
+    build and **dropped in favour of self-contained** (D3 option (b), inline): the
+    types stage needs a type interner + a VarId→type env, and **resolve's `RCtx`
+    cannot be extended with type fields across a module boundary** (Sentinel has no
+    struct-spread / inheritance), so reuse would force **two-context threading**
+    (`&mut RCtx` for names + `&mut TCtx` for types) through the whole deep walk —
+    clunky and error-prone. Self-contained gives ONE clean `TyCtx` (resolve's
+    name-blob scope + fn table + the type interner + the env). The duplication
+    (resolve's pass-1/lookup idioms, re-expressed) is mechanical and resolve is frozen
+    (ACCEPTED), so the maintenance risk is low. The Revisit's D3 trigger explicitly
+    sanctions this (“if reusing resolve's helpers … fights … fall to inline
+    re-resolve (b)”) — the fight here is the struct-extension limit, not Move/borrow.
+    `types.sentinel` `use`s only the **parser** (the AST enums + `tokenize` /
+    `parse_block` / `parse_type` / `parse_params` / `skip_*` / `append_*`).
+  - **The `TyCtx` bundle + the verified D4 interner.** One `struct TyCtx` of `Vec<i64>`
+    fields: the hash-consed type interner (`tk`/`ta`/`tb` — A1's exact verified
+    idiom, scalars 0–3 below `BASE=100`, compounds interned); the **append-only**
+    VarId→type env (`env`, pushed in VarId order by `bind_src`/`bind_name` — never
+    index-assigned); resolve's name-blob scope (`nb`/`scs`/`sce`/`scv`/`base`); the
+    fn table (`ufs`/`ufe` name slices + **`ufret`** return-type handles). `render_type`
+    walks handles to the structural text; `type_of_typeexpr` interns a parsed `TypeE`
+    → handle (all compound arms implemented, only scalars exercised at m-1).
+  - **The key structural delta from resolve: `dump_texpr` RETURNS the node's type
+    handle** (resolve's `dump_r*` returned nothing) and `close_ty` appends ` :<type>`
+    before the node's `)`, so a parent uses its children's types (a binop's type =
+    its operands'; cmp/logic → bool; a block → its tail; a call → the callee's
+    return). The `let` shows its inferred type (resolve's `_`), bound DURING-WALK
+    (value first → its type → the let's VarId/type).
+  - **Forward-ref-safe calls:** pass 1 (the brace-depth fn scan) also **pre-scans each
+    fn's return-type handle** into `ufret` (`scan_fn_ret` skips the header to the
+    `-> ret`), so a call to a later-defined fn types correctly. Next: **(4c)**
+    compound types — the interner's compound arms exercised (struct-lit + field-index,
+    arrays + index, `Vec`, nullable + `WidenToNullable`) — then (4d) secret … (4i) the
+    full-corpus phase-go.
 
 ## Context
 
