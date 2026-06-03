@@ -35,10 +35,17 @@ CONFIRMED (resolve.sentinel can `use` the parser's AST via a D.6 module), and
 reuse; partial cons-cell `truncate` leaks) — replaced by **flat parallel-`Vec`
 arrays + a packed-name byte blob, integer-indexed, length-truncation restore**
 (the parser's token-array idiom; prototyped leak-clean over a 100-arm loop).
-**NEXT = the (3a) Sentinel side:** refactor `parser.sentinel` to `pub` its `Expr`
-+ a parse entry, then `selfhost/resolve.sentinel` (parse → walk → flat-`Vec` fn
-table + flat scope → `(var #N)`/`(call #N)` + the `(effect #N Async)` tail) + the
-seed diff. Movement 1 (the
+**The parser is now EXPOSED for import** (`20046e9`): `pub` on the 14 AST enums +
+the parse-entry fns (`tokenize` / `parse_params` / `parse_type` / `parse_block` /
+…) — a no-op single-file, so the parser corpus test stays green;
+`selfhost/resolve.sentinel` will `use parser::…`. **NEXT = write
+`selfhost/resolve.sentinel` (3a milestone-1: params + vars + calls + arithmetic +
+blocks; `let` deferred to m-2 since the scope must grow during the body walk):**
+a 2-pass driver (pass 1 builds a flat-pool fn-table — 14 builtins #0–13 + user
+fns #14+; pass 2 per-fn parses the header + `parse_block` body, emits `(fn #id
+name (<params with #varid>) <ret> <resolved-body>)`, then the `(effect #N Async)`
+tail) — reusing the probe's proven flat-pool + name-sink + reclaim idioms. Movement
+1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for

@@ -1899,12 +1899,19 @@ For pasting into a fresh chat to bootstrap context:
     a `&`-ref enum `match` aliases the heap → double-free on reuse; partial
     cons-cell `truncate` leaks) → use **flat parallel-`Vec` arrays + a packed-name
     byte blob, integer-indexed, length-truncation restore** (the parser's
-    token-array idiom; prototyped leak-clean / 100-arm loop). **RESUME AT = the
-    (3a) Sentinel side:** refactor `parser.sentinel` to `pub` its `Expr` + a parse
-    entry, then `selfhost/resolve.sentinel` (parse → walk the AST → flat-`Vec` fn
-    table [builtins 0–13, user fns 14+] + flat scope → `(var #N)`/`(call #N)` +
-    the `(effect #N Async)` tail) + a seed diff vs `snc resolve`; then ADR 0040
-    flips to ACCEPTED-WITH-AMENDMENTS) +
+    token-array idiom; prototyped leak-clean / 100-arm loop). **The parser is now
+    EXPOSED** (`20046e9`): `pub` on the 14 AST enums + the parse-entry fns
+    (no-op single-file; corpus test green). **RESUME AT = WRITE
+    `selfhost/resolve.sentinel` — (3a) milestone-1 (params + vars + calls +
+    arithmetic + blocks; `let` deferred to m-2 — the scope must grow during the
+    body walk vs the probe's frozen scope):** a 2-pass driver (pass 1 = flat-pool
+    fn-table, 14 builtins #0–13 + user fns #14+; pass 2 per-fn = parse header +
+    `parse_block` body → `(fn #id name (<params #varid>) <ret> <body>)` + the
+    `(effect #N Async)` tail), reusing the probe's proven flat-pool / name-sink /
+    reclaim idioms (full plan in the auto-memory). ⚠ varids are GLOBAL (never
+    reset). Then 3b decl tables, 3c match/while/handle (D5 truncation restore),
+    3d decl heads, 3e full corpus; THEN flip ADR 0040 →
+    ACCEPTED-WITH-AMENDMENTS) +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
