@@ -34,6 +34,7 @@
 
 mod ast_dump;
 mod resolve_dump;
+mod types_dump;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -69,6 +70,7 @@ fn main() -> ExitCode {
         [_, cmd, path] if cmd == "lex" => run_lex(path),
         [_, cmd, path] if cmd == "ast" => run_ast(path),
         [_, cmd, path] if cmd == "resolve" => run_resolve(path),
+        [_, cmd, path] if cmd == "types" => run_types(path),
         [_, cmd, path] if cmd == "parse" => run_parse(path),
         [_, cmd, path] if cmd == "build" => run_build(path, None),
         [_, cmd, path, flag, output] if cmd == "build" && flag == "-o" => {
@@ -209,6 +211,43 @@ fn run_resolve(path: &str) -> ExitCode {
     match sentinel_resolve::resolve(program) {
         Ok(resolved) => {
             print!("{}", resolve_dump::dump(&resolved));
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("snc: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Phase D self-host port (4/N) / ADR 0041 D2: `snc types <file>` — the
+/// types differential oracle. Runs parse → resolve → `check` and prints
+/// the canonical typed-program dump (`types_dump::dump`) the Sentinel
+/// types stage reproduces. Mirrors `run_resolve` + one `check` call.
+fn run_types(path: &str) -> ExitCode {
+    let src = match read_source(path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let db = SentinelDatabase::default();
+    let file = SourceFile::new(&db, path.to_string(), src.clone());
+    let program_opt = sentinel_syntax::parse_query(&db, file);
+    let diags = sentinel_syntax::parse_query::accumulated::<Diagnostic>(&db, file);
+    render_diagnostics(&diags, path, &src);
+    let program = match program_opt {
+        Some(p) => p,
+        None => return ExitCode::from(1),
+    };
+    let resolved = match sentinel_resolve::resolve(program) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match sentinel_types::check(&resolved) {
+        Ok(typed) => {
+            print!("{}", types_dump::dump(&typed));
             ExitCode::SUCCESS
         }
         Err(e) => {
