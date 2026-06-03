@@ -2,12 +2,14 @@
 
 Status: **ACCEPTED-WITH-AMENDMENTS** — the third sub-phase of the self-host port
 (ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039
-→ ACCEPTED). **(3a) milestones 1+2 have LANDED** (A2, A3):
+→ ACCEPTED). **(3a) m-1+m-2 + (3b-1) have LANDED** (A2, A3, A4):
 `selfhost/resolve.sentinel`, the third compiler stage in Sentinel, name-resolves
-the fn-body grammar (paramful fns + every expression form + `let`) and matches
-`snc resolve` (A1's flat-`Vec` model, the parser imported as a D.6 module). The
-ADR flips fully as the remaining slices (3b–3e: the decl tables, the `::`-path
-disambiguation, match/while/handle scoping, the full corpus) close.
+the fn-body grammar (paramful fns + every expression form + `let`) **and now the
+top-level decl walk + the struct table + struct-lit `#id`** (the symbol tables
+bundled in an `&mut RCtx` struct), matching `snc resolve` (A1's flat-`Vec` model,
+the parser imported as a D.6 module). The ADR flips fully as the remaining slices
+(3b-2–3e: the enum/effect/class/trait/impl tables + the `::`-path disambiguation,
+match/while/handle scoping, the full corpus) close.
 Ports the **resolve** stage to Sentinel: the parsed AST → a name-resolved program
 (every identifier reference bound to an integer ID), differentially validated
 against a Rust `snc` oracle over the `tests/pass` + `tests/ui` corpus. Flips to
@@ -108,6 +110,50 @@ oracle (3a) has landed; the Sentinel side builds on the corrected model. See
   fn-body grammar** (params + every expression form + `let`); next: (3b) the decl
   symbol tables + the `::`-path disambiguation (`qcall` → `qcall-impl` /
   `class-init` / `enum-construct`).
+- **A4 — (3b-1): top-level decl dispatch + the struct table + struct-lit `#id`;
+  the `RCtx` symbol-table bundle.** (3b) opens by restructuring both passes to
+  walk TOP-LEVEL DECLS (not just fns), then adding the first decl kind end to end.
+  - **The `RCtx` bundle (a de-risking probe, A4-probe).** Resolve needs ~7 parallel
+    symbol tables live during the deep expression walk; threading them as
+    individual params through ~25 mutually-recursive functions is unworkable.
+    A throwaway probe (per `docs/agent-protocol.md`) settled that **a Sentinel
+    `struct` holding multiple `Vec<i64>`/`Vec<u8>` fields, passed `&mut RCtx`
+    through the recursive walk, supports `push(&mut (*c).f, x)` / `len((*c).f)` /
+    `(*c).f[i]` and cross-field read+write in one statement, leak-free** (the whole
+    struct drops cleanly). So the tables are **bundled in `struct RCtx`** (scope
+    `scs`/`sce` + `base`, fn table `ufs`/`ufe`, struct table `sts`/`ste`, the
+    per-kind ID counters `fnct`/`structct`), threaded as one `&mut RCtx` — cutting
+    the per-function param list from 9 to ~5 and growing by **zero** as later
+    slices add tables. Two probe-confirmed rules became hard conventions: **(i)**
+    field access through the ref is ALWAYS `(*c).field` (bare `c.field` is rejected
+    through a ref; bare on a local is fine), and a read-only helper STILL takes
+    `&mut RCtx` (there is **no `&mut`→`&` auto-reborrow** — passing `&mut RCtx`
+    where `&RCtx` is expected is a compile error); **(ii)** a `Vec` field must
+    NEVER be moved out of the struct (`vec_to_array((*c).f)` then a struct drop
+    SIGTRAPs) — so the name `garbage` sink stays a STANDALONE `&mut Vec<u8>` param
+    `gb` (preserving A1/A2's proven `[u8]` disposal exactly), and only the tables
+    move into `RCtx`.
+  - **Pass 1 is now a BRACE-DEPTH scan.** The m-1/m-2 naive scan counted *every*
+    `fn`/`effect` token; that breaks once decls have method bodies. The new pass 1
+    tracks brace depth and registers a decl only at **depth 0** (top level), so a
+    method `fn` inside a trait/impl/class body is not mistaken for a top-level fn
+    (the `!{eff}` row's balanced braces don't fool it). It builds the user-fn table
+    (FnId 14+), the struct table (StructId 0+, source order), and the user-effect
+    count in one pass.
+  - **Pass 2 dispatches on the lead token** (mirroring the parser's `dump_item`):
+    a single `resolve_item` helper re-passes the `&mut` params (main's local
+    `&mut`s would conflict across sibling-`if` tails, ADR 0038 A2) to `resolve_fn`
+    or `resolve_struct`, advancing the matching ID counter. Decls dump in **source
+    order interleaved with fns** (matching the oracle's span re-sort), and a struct
+    decl consumes **no VarId** (the global scope index numbering flows past it).
+  - **struct end to end:** `(struct #id Name (field name <type>)…)` heads (pure
+    syntax — field types need no resolution) + `(struct-lit #id Name (field …))`
+    via a `struct_lookup`. Verified: 6 new differential seeds (struct + struct-lit
+    + field access, multi-struct source-order StructIds, a struct after a fn, a
+    `Vec<i64>` field, global VarIds across the struct; 23 total) match `snc
+    resolve`; leak-free under `leaks --atExit`; four-check green. Next: (3b-2) the
+    enum table + `(enum #id …)` + the `Enum::Variant`/`Enum::init` →
+    `enum-construct` split (the enum table is checked FIRST in both `::` arms).
 
 ## Context
 

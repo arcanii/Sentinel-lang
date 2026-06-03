@@ -14,7 +14,16 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (2/N) the PARSER is
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (3/N) RESOLVE is at
+(3b-1)** (ADR 0040 A4): `selfhost/resolve.sentinel` now walks the TOP-LEVEL decls
+(a brace-depth pass-1 scan + a source-order pass-2 dispatch) and resolves the
+first decl kind end to end — `(struct #id Name (field …))` heads + struct-lit
+`#id` — with the symbol tables bundled in an `&mut RCtx` struct (the A4 probe).
+23 differential seeds match `snc resolve`, leak-free; four-check green (1415
+tests). NEXT = (3b-2) the enum table + `enum-construct`. The prior banner (the
+(2/N) PARSER, COMPLETE, ADR 0039 → ACCEPTED, A1–A22) stands below.
+
+Prior banner: **(2/N) the PARSER is
 COMPLETE (ADR 0039 → ACCEPTED, A1–A22).** `selfhost/parser.sentinel` matches the
 `snc ast` oracle over EVERY clean-parsing fixture in `tests/pass` + `tests/ui`
 (139/139), leak-free — the parser-stage phase-go. (2d-8, A22) closed the full
@@ -49,10 +58,21 @@ model (src-slice keys, varid = scope index, names sunk to a reclaimed `garbage`)
 during the walk, but the leak-free design wants the scope frozen first), so a
 `let` resolves its own VarId by name; `(let #vid [mut] <ty> <value>)`, VarIds
 continuing after the params. **17 differential seeds match `snc resolve`,
-leak-free; (3a) is feature-complete for the fn-body grammar.** **NEXT = (3b)** the
-decl symbol tables + the `::`-path disambiguation (`qcall` → `qcall-impl` /
-`class-init` / `enum-construct`), then (3c) match/while/handle (the D5 truncation
-restore), (3d) decl heads, (3e) full corpus. Movement 1 (the
+leak-free; (3a) is feature-complete for the fn-body grammar.** **(3b-1) (A4) then
+opened the decl walk** — both passes now handle top-level decls (pass 1 a
+brace-depth scan so method `fn`s inside trait/impl/class bodies are not counted as
+top-level fns; pass 2 a source-order dispatch, `resolve_item`), the symbol tables
+are bundled in an **`&mut RCtx`** struct (A4 probe — a Sentinel struct of `Vec`
+fields supports `push`/`len`/index through the ref + cross-field read+write,
+leak-free; always `(*c).field`; no `&mut`→`&` reborrow; never move a `Vec` field
+out), and the first decl kind lands end to end: `(struct #id Name (field …))`
+heads (source order, interleaved with fns) + struct-lit `#id` (a struct consumes
+no VarId). **23 differential seeds match `snc resolve`, leak-free.** **NEXT =
+(3b-2)** the enum table + `(enum #id …)` + the `Enum::Variant`/`Enum::init` →
+`enum-construct` split, then (3b-3) effect/perform, (3b-4) trait+impl/qcall-impl
+(method bodies + `self`), (3b-5) class/class-init + resume-kont, (3c)
+match/while/handle (the D5 truncation restore for arm scopes), (3e) full corpus.
+Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for

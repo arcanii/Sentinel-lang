@@ -1865,20 +1865,22 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3a)
-    m-2 docs** commit (`docs(selfhost): resolve (3a) m-2 — let bindings (A3)`,
-    `7daa66f`), atop its feat (`feat(selfhost): resolve (3a) m-2 — let bindings`,
-    `80a201d`), the (3a) m-1 docs (`352b1ce`) + feat (`06f9241`), the parser
-    AST-exposure refactor (`20046e9`), the agent-protocol + probe-correction docs
-    (`8a35328`), the `snc resolve` oracle docs (`227ad6d`) + feat (`eba2fb4`) +
-    ADR 0040; atop the COMPLETE parser stage — (2d-8) `d2da83c` … (2d-1)
+    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3b-1)
+    docs** commit (`docs(selfhost): resolve (3b-1) — struct decls + RCtx (A4)`),
+    atop its feat (`feat(selfhost): resolve (3b-1) — struct decls + struct-lit;
+    RCtx bundle`, `64b82b9`), the (3a) m-2 docs (`7daa66f`) + feat (`80a201d`),
+    the (3a) m-1 docs (`352b1ce`) + feat (`06f9241`), the parser AST-exposure
+    refactor (`20046e9`), the agent-protocol + probe-correction docs (`8a35328`),
+    the `snc resolve` oracle docs (`227ad6d`) + feat (`eba2fb4`) + ADR 0040; atop
+    the COMPLETE parser stage — (2d-8) `d2da83c` … (2d-1)
     `debaa24`, (2c) `b2a9c3b`…, (2b) `189990e`…`0e84f36`, (2a) `8d6aa6e` +
     `snc ast` oracle `7f10740` + ADR 0039 — atop the lexer (1/N) + the D.6
     cross-module work. (Run `git log --oneline -50` for the full chain.) Clean
     tree; **1415 tests** — the `selfhost_parse` seeds (192) + the parser corpus
     differential (the D8 phase-go: all 139 clean-parsing fixtures) + `tests/ast.rs`
     goldens + the `snc resolve` oracle goldens (`tests/resolve.rs`) + the resolve
-    seed differential (`tests/selfhost_resolve.rs`, **17 m-1+m-2 seeds**);
+    seed differential (`tests/selfhost_resolve.rs`, **23 seeds: 17 (3a) m-1+m-2 +
+    6 (3b-1) struct**);
     four-check green via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
@@ -1907,14 +1909,27 @@ For pasting into a fresh chat to bootstrap context:
     fn-body grammar (paramful fns + every expr form + `let`) → matches `snc
     resolve` (17 seeds, leak-free, compiled first try); m-2 `let` pre-scans the
     body tokens for the binding set into the immutable scope. ⚠ varids are GLOBAL
-    (never reset). **RESUME AT = (3b)** — the decl symbol tables (struct/enum/
-    class/trait/impl/effect, flat src-slice tables like the fn table) + the
-    `::`-path disambiguation (the parser emits a uniform `qcall`/`class-init`;
-    resolve splits → `enum-construct` [leading name is an enum, checked first] /
-    `class-init` / `qcall-impl` [named impl, `method_index` = scan the impl's
-    trait's methods] / `perform` / `struct-lit`), then 3c match/while/handle (the
-    D5 truncation restore for arm scopes), 3d decl heads w/ IDs, 3e the full
-    corpus (the D9 phase-go → ADR 0040 fully ACCEPTED)) +
+    (never reset). **(3b-1) LANDED** (`64b82b9`): the top-level decl walk (pass 1 a
+    BRACE-DEPTH scan — depth 0 = top level, so method `fn`s inside trait/impl/class
+    bodies are not counted as top-level fns; pass 2 a source-order dispatch
+    `resolve_item`) + the first decl kind end to end — `(struct #id Name
+    (field …))` heads (source order, interleaved with fns) + struct-lit `#id` (a
+    struct consumes no VarId). **The symbol tables are now bundled in an `&mut
+    RCtx` struct** (A4 probe: a Sentinel struct of `Vec` fields supports
+    `push`/`len`/index through the ref + cross-field read+write, leak-free — ALWAYS
+    `(*c).field`; NO `&mut`→`&` auto-reborrow [a read-only helper still takes `&mut
+    RCtx`]; NEVER move a `Vec` field out [SIGTRAP on the next struct drop], so the
+    name `garbage` sink stays a standalone `&mut Vec<u8>` param). 23 seeds (17 + 6
+    struct), leak-free. **RESUME AT = (3b-2)** — the enum table + `(enum #id …)`
+    heads + the `Enum::Variant`/`Enum::init` → `enum-construct` split (the enum
+    table is checked FIRST in BOTH the `Qcall` and `ClassInit` arms; mirror
+    `crates/sentinel-resolve/src/lib.rs:3763–3899`), then (3b-3) effect/`perform`
+    (op_index = scan the effect's ops), (3b-4) trait+impl/`qcall-impl` (method
+    bodies + synthetic `self` — a new idiom; `method_index` = scan the impl's
+    trait's methods), (3b-5) class/`class-init` + `resume-kont` (a Call whose
+    callee is an in-scope var), (3c) match/while/handle (the D5 truncation restore
+    for arm scopes), (3e) the full corpus (the D9 phase-go → ADR 0040 fully
+    ACCEPTED). Add each decl kind's table to `RCtx` (zero new params). +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
