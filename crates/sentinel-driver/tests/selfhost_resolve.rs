@@ -22,8 +22,10 @@
 //! split (method bodies bind a synthetic `self`; method-body VarIds are
 //! GROUP-ordered — all fns before any impl). (3b-5) (A8): the class table →
 //! `(class #id … (init #selfvid …)? (method …)…)` heads + `class-init` +
-//! `resume-kont` — completing (3b) (every decl kind + every `::` form). The corpus
-//! differential ((3c) scoping + (3e)) is the phase-go (D9).
+//! `resume-kont` — completing (3b) (every decl kind + every `::` form). (3c): the
+//! SCOPED bodies — `match` arm-pattern payload bindings + `while` — with the D5
+//! length-truncation snapshot/restore (a name-blob scope + during-walk binding);
+//! `handle` follows. The full-corpus differential (3e) is the phase-go (D9).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -149,6 +151,15 @@ const SEEDS: &[&str] = &[
     "class Point { let x: i64; let y: i64; pub init(x: i64, y: i64) { self.x = x; self.y = y; 0 } pub fn manhattan(self: &Self) -> i64 { self.x + self.y } pub fn translate(self: &mut Self, dx: i64, dy: i64) -> i64 { self.x = self.x + dx; self.y = self.y + dy; self.manhattan() } }\nfn main() -> i64 { let mut p = Point::init(10, 20); p.translate(3, 9) }\n",
     "fn main() -> i64 { let k = 5; k(3) }\n",
     "class Two { let a: i64; let b: i64; init(x: i64) { self.a = x; self.b = x; 0 } fn sum(self: &Self) -> i64 { let s = self.a + self.b; s } }\nfn main() -> i64 { let t = Two::init(7); 0 }\n",
+    // (3c) match + while: scoped bindings via length-truncation. match arm
+    // payloads bind sequential VarIds (across arms) but each arm is popped after
+    // (a payload name reused in two arms gets distinct VarIds). Bindings are
+    // DURING-WALK: `let b = match …{E::A(x)=>x}` binds x (lower VarId) before b.
+    "enum E { A(i64), B(i64, i64) }\nfn f(e: E) -> i64 { match e { E::A(x) => x, E::B(p, q) => p + q, _ => 0 } }\nfn main() -> i64 { 0 }\n",
+    "enum E { A(i64) }\nfn f(e: E) -> i64 { let a = 1; let b = match e { E::A(x) => x, _ => 0 }; let c = 3; a + b + c }\nfn main() -> i64 { 0 }\n",
+    "enum Opt { None, Some(i64) }\nfn unwrap(o: Opt) -> i64 { match o { Opt::Some(v) => v, Opt::None => 0 } }\nfn main() -> i64 { unwrap(Opt::Some(5)) }\n",
+    "enum E { A(i64), B(i64, i64) }\nfn f(e: E) -> i64 { match e { E::A(x) => x, E::B(x, y) => x + y, _ => 0 } }\nfn main() -> i64 { 0 }\n",
+    "fn f(n: i64) -> i64 { let mut i = 0; while i < n { let t = i; i = t + 1; } i }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]

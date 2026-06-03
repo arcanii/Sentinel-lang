@@ -31,8 +31,15 @@
 //    `Call` whose callee is an in-scope var → `(resume-kont #vid …)`, the scope
 //    checked BEFORE the fn table). The class group is resolved BEFORE impls, so
 //    `classvid` counts from `voff + total-fn-bindings` and `implvid` continues
-//    after it. (3b) is COMPLETE — every decl kind + every `::` form. NEXT: (3c)
-//    match/while/handle arm-scoped bindings (the D5 length-truncation restore).
+//    after it. (3b) is COMPLETE — every decl kind + every `::` form.
+//  * (3c) match/while: the SCOPED bodies. The scope is a NAME BLOB (`nb`) — body
+//    bindings (let/match-payload) come from the AST as owned `[u8]`, pushed into
+//    the blob — and bindings are DURING-WALK (a `let`'s value resolves + binds its
+//    nested vars BEFORE the let var). `match` arm payloads bind sequential VarIds
+//    then **truncate** (D5 length-truncation: pop the scope back to a pre-arm mark
+//    — visibility restored, VarIds stay sequential). `while` works via during-walk
+//    (no truncation needed — names are unique per fn). NEXT: handle (needs the
+//    parser to STORE handler-arm params — currently parsed-and-dropped).
 //
 // PROVEN SENTINEL IDIOMS (ADR 0040 A1/A4 probes; reused):
 //  * Symbol tables + the local scope are FLAT parallel `Vec<i64>` arrays keyed
@@ -675,25 +682,39 @@ fn dump_rargs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut RCtx, gb: &mut Vec
     }
 }
 
-// A binding payload that is dropped (handler/match bindings) — sink its bytes.
-fn sink_binds(gb: &mut Vec<u8>, b: Binds) -> i64 {
+// (3c) A match-arm pattern's payload bindings: each binds a fresh VarId (in
+// source order) into the arm's scope + dumps ` #vid`. The names' bytes are routed
+// into the blob by bind_name (which also disposes the AST `[u8]`).
+fn dump_rbinds(out: &mut Vec<u8>, b: Binds, c: &mut RCtx) -> i64 {
     match b {
         Binds::BindEnd => 0,
         Binds::BindCell(nm, rest) => {
-            sink_name(gb, nm);
-            sink_binds(gb, rest);
+            let bvid: i64 = (*c).nextvid;
+            (*c).nextvid = (*c).nextvid + 1;
+            bind_name(c, nm, bvid);
+            append_str(out, " #");
+            append_int(out, bvid);
+            dump_rbinds(out, rest, c);
             0
         },
     }
 }
 
-fn sink_pat(gb: &mut Vec<u8>, p: Pattern) -> i64 {
+// `_` → `(pat _)`; `Enum::Variant(b1,…)` → `(pat Enum Variant #vid…)` (the enum +
+// variant names are emitted, which disposes them; the payloads bind VarIds).
+fn dump_rpat(out: &mut Vec<u8>, p: Pattern, c: &mut RCtx) -> i64 {
     match p {
-        Pattern::PatWild => 0,
+        Pattern::PatWild => {
+            append_str(out, "(pat _)");
+            0
+        },
         Pattern::PatVariant(en, vn, bs) => {
-            sink_name(gb, en);
-            sink_name(gb, vn);
-            sink_binds(gb, bs);
+            append_str(out, "(pat ");
+            append_str(out, en);
+            push(out, ' ');
+            append_str(out, vn);
+            dump_rbinds(out, bs, c);
+            push(out, ')');
             0
         },
     }
@@ -1115,13 +1136,19 @@ fn dump_rtyopt(out: &mut Vec<u8>, ty: TyOpt) -> i64 {
 }
 
 // match arms (3c — placeholder): resolve the body, sink the pattern bindings.
+// (3c) Each match arm: snapshot the scope, dump the pattern (binding its payload
+// VarIds), resolve the body (which sees the payloads), then TRUNCATE the scope
+// back (the payloads are scoped to this arm only; VarIds stay sequential).
 fn dump_rarms(out: &mut Vec<u8>, a: Arms, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
     match a {
         Arms::ArmEnd => 0,
         Arms::ArmCell(ap, abody, arest) => {
             append_str(out, " (arm ");
-            sink_pat(gb, ap);
+            let mark: i64 = len((*c).scs);
+            dump_rpat(out, ap, c);
+            push(out, ' ');
             dump_rexpr(out, abody, src, c, gb);
+            truncate_scope(c, mark);
             push(out, ')');
             dump_rarms(out, arest, src, c, gb);
             0
