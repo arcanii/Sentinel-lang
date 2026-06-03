@@ -9,10 +9,13 @@
 //
 // SLICE STATUS (ADR 0040 D8):
 //  * (3a) m-1+m-2: paramful fns + every expression form + `let`. DONE.
-//  * (3b-1): top-level decl dispatch + the struct table + struct-lit `#id`. The
-//    decl/`::`-path forms still pending (enum/effect/class/trait/impl + the
-//    qcall-impl / class-init / enum-construct / perform split) keep their
-//    compile-safe, leak-free pass-through arms until slices (3b-2)–(3b-5).
+//  * (3b-1): top-level decl dispatch + the struct table + struct-lit `#id`.
+//  * (3b-2): the enum table + `(enum #id Name (variant …))` heads + the
+//    `Enum::Variant` / `Enum::init` → `(enum-construct #E …)` split (the enum
+//    table is checked FIRST in both the `Qcall` and `ClassInit` arms). The
+//    remaining decl/`::`-path forms (effect/class/trait/impl + the qcall-impl /
+//    class-init / perform split) keep their compile-safe, leak-free pass-through
+//    arms until slices (3b-3)–(3b-5).
 //
 // PROVEN SENTINEL IDIOMS (ADR 0040 A1/A4 probes; reused):
 //  * Symbol tables + the local scope are FLAT parallel `Vec<i64>` arrays keyed
@@ -69,8 +72,11 @@ struct RCtx {
     ufe: Vec<i64>,   // user-fn table: name-slice ends
     sts: Vec<i64>,   // struct table: name-slice starts (StructId = index)
     ste: Vec<i64>,   // struct table: name-slice ends
+    ens: Vec<i64>,   // enum table: name-slice starts (EnumId = index)
+    ene: Vec<i64>,   // enum table: name-slice ends
     fnct: i64,       // next user-fn index (pass-2 source-order counter)
     structct: i64,   // next struct index (pass-2 source-order counter)
+    enumct: i64,     // next enum index (pass-2 source-order counter)
 }
 
 // --- name comparison --------------------------------------------------------
@@ -213,6 +219,28 @@ fn struct_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     while i < n {
         if found == 0 - 1 {
             if name_eq_src(src, (*c).sts[i], (*c).ste[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Resolve an enum name to its EnumId (its index in the enum table), or -1.
+fn enum_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
+    let n: i64 = len((*c).ens);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if name_eq_src(src, (*c).ens[i], (*c).ene[i], q) {
                 found = i;
                 0
             } else {
@@ -429,20 +457,53 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Ve
             0
         },
         Expr::Qcall(qi, qm, qa) => {
-            append_str(out, "(qcall ");
-            append_str(out, qi);
-            push(out, ' ');
-            append_str(out, qm);
-            dump_rargs(out, qa, src, c, gb);
-            push(out, ')');
-            0
+            // `Name::method(args)` / paren-less `Name::Variant`. Resolve splits on
+            // the leading name: an enum (checked FIRST, mirror lib.rs:3830) →
+            // `(enum-construct #E Enum Variant args)`; else the `(qcall …)`
+            // placeholder until (3b-4) makes it `(qcall-impl …)`.
+            let qeid: i64 = enum_lookup(c, src, &qi);
+            if qeid >= 0 {
+                append_str(out, "(enum-construct #");
+                append_int(out, qeid);
+                push(out, ' ');
+                append_str(out, qi);
+                push(out, ' ');
+                append_str(out, qm);
+                dump_rargs(out, qa, src, c, gb);
+                push(out, ')');
+                0
+            } else {
+                append_str(out, "(qcall ");
+                append_str(out, qi);
+                push(out, ' ');
+                append_str(out, qm);
+                dump_rargs(out, qa, src, c, gb);
+                push(out, ')');
+                0
+            }
         },
         Expr::ClassInit(ci, cia) => {
-            append_str(out, "(class-init ");
-            append_str(out, ci);
-            dump_rargs(out, cia, src, c, gb);
-            push(out, ')');
-            0
+            // `Name::init(args)`. An enum named `Name` (checked FIRST, mirror
+            // lib.rs:3768) → `(enum-construct #E Name init args)` (unreachable on
+            // clean fixtures — the parser rejects an `init` enum variant — but
+            // faithful); else the `(class-init …)` placeholder until (3b-5).
+            let ceid: i64 = enum_lookup(c, src, &ci);
+            if ceid >= 0 {
+                append_str(out, "(enum-construct #");
+                append_int(out, ceid);
+                push(out, ' ');
+                append_str(out, ci);
+                append_str(out, " init");
+                dump_rargs(out, cia, src, c, gb);
+                push(out, ')');
+                0
+            } else {
+                append_str(out, "(class-init ");
+                append_str(out, ci);
+                dump_rargs(out, cia, src, c, gb);
+                push(out, ')');
+                0
+            }
         },
         Expr::Array(ae) => {
             append_str(out, "(array");
@@ -722,6 +783,66 @@ fn resolve_struct(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, s
     0
 }
 
+// --- enum decl head (3b-2): `(enum #id Name (variant V <payloads>)…)` ---------
+// Pure syntax (payload types need no resolution); mirrors the parser's
+// dump_enum_decl / dump_variants / dump_payloads, prefixed with the EnumId.
+fn dump_renum_payloads(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        dump_renum_payloads(out, k, s, e, src, cur)
+    } else {
+        let pty: TypeE = parse_type(k, s, e, src, cur);
+        push(out, ' ');
+        dump_type(out, pty);
+        dump_renum_payloads(out, k, s, e, src, cur)
+    }
+}
+
+fn dump_renum_variants(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        dump_renum_variants(out, k, s, e, src, cur)
+    } else {
+        let vn_s: i64 = (*s)[*cur];
+        let vn_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        append_str(out, " (variant ");
+        append_slice(out, src, vn_s, vn_e);
+        if (*k)[*cur] == 4 {
+            *cur = *cur + 1;
+            dump_renum_payloads(out, k, s, e, src, cur);
+            0
+        } else {
+            0
+        };
+        push(out, ')');
+        dump_renum_variants(out, k, s, e, src, cur)
+    }
+}
+
+fn resolve_enum(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, eid: i64) -> i64 {
+    *cur = *cur + 1;            // skip `enum`
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;           // skip `{` (enums are non-generic)
+    append_str(out, "(enum #");
+    append_int(out, eid);
+    push(out, ' ');
+    append_slice(out, src, nm_s, nm_e);
+    dump_renum_variants(out, k, s, e, src, cur);
+    push(out, ')');
+    0
+}
+
 // --- fn header: parse + emit the param list, building the scope -------------
 // `[mut] name : type` comma-separated up to `)` (already past the `(`). Each
 // param → ` (param #vid [mut] name <type>)` (no leading space before the first)
@@ -869,6 +990,11 @@ fn resolve_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
         resolve_struct(out, k, s, e, src, cur, sid);
         (*c).structct = (*c).structct + 1;
         0
+    } else if lead == 53 {
+        let eid: i64 = (*c).enumct;
+        resolve_enum(out, k, s, e, src, cur, eid);
+        (*c).enumct = (*c).enumct + 1;
+        0
     } else {
         let fid: i64 = (*c).fnct;
         resolve_fn(out, k, s, e, src, cur, c, gb, fid);
@@ -895,8 +1021,11 @@ fn main() -> i64 {
         ufe: vec_new(),
         sts: vec_new(),
         ste: vec_new(),
+        ens: vec_new(),
+        ene: vec_new(),
         fnct: 0,
         structct: 0,
+        enumct: 0,
     };
 
     // Pass 1: top-level decl scan (BRACE-DEPTH aware so method `fn`s inside
@@ -923,6 +1052,10 @@ fn main() -> i64 {
             } else if t1 == 52 {
                 push(&mut ctx.sts, starts[p1 + 1]);
                 push(&mut ctx.ste, ends[p1 + 1]);
+                0
+            } else if t1 == 53 {
+                push(&mut ctx.ens, starts[p1 + 1]);
+                push(&mut ctx.ene, ends[p1 + 1]);
                 0
             } else if t1 == 57 {
                 ecount = ecount + 1;

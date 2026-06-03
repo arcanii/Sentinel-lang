@@ -13,8 +13,10 @@
 //! (3b-1) (A4): top-level decl dispatch (a brace-depth pass-1 scan + a source-
 //! order pass-2 walk) + the struct symbol table → `(struct #id Name (field …))`
 //! heads + struct-lit `#id`; the symbol tables are bundled in a `RCtx` struct
-//! threaded as `&mut RCtx` (the A4 probe). The remaining `::`-path / decl forms
-//! are slices (3b-2)–(3b-5); the corpus differential is the phase-go (D9).
+//! threaded as `&mut RCtx` (the A4 probe). (3b-2) (A5): the enum table →
+//! `(enum #id Name (variant …))` heads + the `Enum::Variant` → `enum-construct`
+//! split (the enum table is checked FIRST). The remaining `::`-path / decl forms
+//! are slices (3b-3)–(3b-5); the corpus differential is the phase-go (D9).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -85,6 +87,18 @@ const SEEDS: &[&str] = &[
     "struct Pair { a: i64, b: i64 }\nfn mk(x: i64, y: i64) -> Pair { Pair { a: x, b: y } }\nfn main() -> i64 { let p = mk(3, 4); p.a + p.b }\n",
     "struct Empty { z: bool }\nstruct Wrap { inner: i64 }\nfn main() -> i64 { let w = Wrap { inner: 9 }; w.inner }\n",
     "struct Nested { v: Vec<i64> }\nfn main() -> i64 { 0 }\n",
+    // (3b-2): the enum table + `(enum #id Name (variant …))` heads + the
+    // `Enum::Variant(args)` → `(enum-construct #E Enum Variant args)` split (the
+    // enum table is checked FIRST in the parser's uniform `Qcall`/`ClassInit`).
+    // EnumId is its own source-order namespace (an enum #0 coexists with a struct
+    // #0); variant payloads dump as types; a construct consumes no VarId.
+    "enum Color { Red, Green, Blue }\nfn main() -> i64 { let c = Color::Red; 0 }\n",
+    "enum Opt { None, Some(i64) }\nfn main() -> i64 { let x = Opt::Some(5); let y = Opt::None; 0 }\n",
+    "struct S { a: i64 }\nenum En { X, Y(bool, i64) }\nfn main() -> i64 { let e = En::Y(true, 3); 0 }\n",
+    "enum A { P }\nenum B { Q, R(i64) }\nfn main() -> i64 { let p = A::P; let r = B::R(9); 0 }\n",
+    "enum Tri { One, Two, Three }\nfn pick(n: i64) -> Tri { Tri::Two }\nfn main() -> i64 { let t = pick(1); 0 }\n",
+    "enum Wrap { W(i64) }\nfn main() -> i64 { let w = Wrap::W(1 + 2); 0 }\n",
+    "fn main() -> i64 { 0 }\nenum Late { L, M(bool) }\n",
 ];
 
 #[test]
