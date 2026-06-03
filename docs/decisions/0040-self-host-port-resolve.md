@@ -9,6 +9,54 @@ ACCEPTED-WITH-AMENDMENTS as the slices land (the same cadence as ADR 0039). See
 ## Decision for the sub-slice plan, ## Reasoning for the data-model call, and the
 key Sentinel-language risk (the scope snapshot/restore) flagged in D5.
 
+⚠ **Amended PRE-BUILD by agent-driven probes (A1, 2026-06-03):** the proposed
+**cons-list symbol tables + scopes (D4/D5) are UNUSABLE** in Sentinel and are
+**corrected to flat parallel-`Vec` arrays** (the parser's token-array idiom). The
+oracle (3a) has landed; the Sentinel side builds on the corrected model. See
+## Amendments.
+
+## Amendments
+
+- **A1 — agent-driven de-risking probes (pre-build): D3 confirmed; D4 + D5
+  CORRECTED to flat parallel-`Vec`.** Three parallel throwaway probes (per
+  `docs/agent-protocol.md`) settled the open design questions before the build —
+  and overturned the cons-list data-model the Decision proposed.
+  - **D3 (parse-sharing): CONFIRMED.** A D.6 module can `pub enum Ast {…}`
+    (self-referential, e.g. `Bin(Ast, Ast)`) + a `pub fn` returning it; another
+    module `use`s both, calls it, and **recursively consuming-`match`es the AST by
+    value across the module boundary**, leak-free. So `selfhost/resolve.sentinel`
+    will `use parser::Expr` + a `pub` parse-returning-AST entry from a refactored
+    `parser.sentinel` (no self-contained AST copy).
+  - **D4 + D5 (symbol tables + scope): CORRECTED — flat parallel-`Vec`, NOT
+    cons-lists.** Three hard Sentinel constraints make cons-list tables/scopes
+    unusable: **(i)** you **cannot `match` on a `&enum`** (`match_scrutinee_not_enum`)
+    → a read-only cons-list walk is impossible, every traversal must *consume*;
+    **(ii)** **`match *t` on a `&`-ref recursive enum deep-copies the cell and the
+    copy *aliases* the original's heap** → a *reused* table double-frees on the
+    second lookup (SIGABRT); **(iii)** partial-consume (`truncate`) of cons cells
+    built in a different stack frame **leaks** their boxes (consistent with the
+    known D.1b box-free-only recursive-enum-drop limitation — bind-and-ignore /
+    partial consume). **Corrected model (proven leak-clean over a 100-arm loop):**
+    every symbol table AND the local scope is **flat parallel `Vec<i64>` arrays +
+    a packed-name `[u8]` blob** (or `src` slice `(start,end)` indices — zero copy),
+    **integer-indexed**, with the live **count/length threaded as an explicit
+    `i64`** (never `len` on a ref — `len` rejects a `&Vec`). This is exactly
+    `parser.sentinel`'s token-array idiom. **Scope snapshot/restore =
+    length-truncation:** O(1) snapshot (record the count), O(added) restore (`pop`
+    the arm's bindings off the parallel `Vec`s) — D5 mechanism (a) on `Vec`s. The
+    (3a) resolve mini-pipeline (flat fn-table + flat scope + a parallel `RExpr`
+    enum + consuming dump) was prototyped end-to-end and emits the exact expected
+    dump leak-free.
+  - **Reusable disposal rule (bites every later stage):** an owned `[u8]` is freed
+    ONLY by pushing its bytes into a `Vec` reclaimed via `vec_to_array` (the
+    `print_bytes` / kept-binding chain) — a consuming `match` does NOT free a
+    `[u8]` payload, and `len` / indexing don't either. So resolve stores names as
+    `src` slice indices, never an owned `[u8]` per binding. (`scope` is also a
+    reserved keyword — don't name a binding `scope`.)
+  - **(3a) ORACLE landed** (`eba2fb4`): `snc resolve` + `resolve_dump.rs`. The
+    Sentinel side ((3a) skeleton, then 3b–3e) builds on the corrected flat-`Vec`
+    model; the ADR flips to ACCEPTED-WITH-AMENDMENTS when (3a) lands.
+
 ## Context
 
 The lexer (1/N) and parser (2/N) proved the **differential-oracle method** end to

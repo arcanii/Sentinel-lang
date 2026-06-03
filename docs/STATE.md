@@ -27,8 +27,17 @@ with the scope snapshot/restore as the key probe). **The (3a) oracle has LANDED:
 (`(var #N)` / `(call #14 …)` / `(struct-lit #N …)` / `(qcall-impl …)` /
 `(enum-construct …)`…; builtins are FnId 0–13, user fns #14+; the built-in
 `Async` effect emits deterministically last) — robust over the corpus (0 panics
-/ 141), 4 goldens. **NEXT = the (3a) Sentinel side:** `selfhost/resolve.sentinel`
-(parse→AST→resolve→dump skeleton + a cons-list fn table + a flat scope) + the
+/ 141), 4 goldens. **Then 3 parallel AGENT PROBES (ADR 0040 A1; see
+`docs/agent-protocol.md`) settled the design PRE-BUILD** — D3 parse-sharing
+CONFIRMED (resolve.sentinel can `use` the parser's AST via a D.6 module), and
+**D4/D5 CORRECTED: the cons-list symbol tables/scopes are unusable** (can't
+`match` a `&enum`; a `&`-ref enum `match` aliases the heap → double-free on
+reuse; partial cons-cell `truncate` leaks) — replaced by **flat parallel-`Vec`
+arrays + a packed-name byte blob, integer-indexed, length-truncation restore**
+(the parser's token-array idiom; prototyped leak-clean over a 100-arm loop).
+**NEXT = the (3a) Sentinel side:** refactor `parser.sentinel` to `pub` its `Expr`
++ a parse entry, then `selfhost/resolve.sentinel` (parse → walk → flat-`Vec` fn
+table + flat scope → `(var #N)`/`(call #N)` + the `(effect #N Async)` tail) + the
 seed diff. Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3

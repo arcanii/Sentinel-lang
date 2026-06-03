@@ -1892,11 +1892,19 @@ For pasting into a fresh chat to bootstrap context:
     `snc resolve` (`run_resolve` + `resolve_dump.rs`) = the `snc ast` form +
     resolved IDs (`(var #N)`/`(call #14 …)`/`(struct-lit #N …)`/`(qcall-impl …)`;
     builtins FnId 0–13, user fns #14+; built-in `Async` effect emits last),
-    0 panics/141, 4 goldens. **RESUME AT = the (3a) Sentinel side:** build
-    `selfhost/resolve.sentinel` (probe parse-sharing — D.6 module vs
-    self-contained, ADR 0040 D3; then the parse→AST→resolve→dump skeleton +
-    cons-list fn table + flat scope) + a seed differential vs `snc resolve`;
-    then the ADR flips to ACCEPTED-WITH-AMENDMENTS) +
+    0 panics/141, 4 goldens. **3 parallel AGENT PROBES then settled the design
+    (ADR 0040 A1; `docs/agent-protocol.md`):** D3 parse-sharing CONFIRMED
+    (resolve.sentinel can `use` the parser's AST via a D.6 module); **D4/D5
+    CORRECTED — cons-list tables/scopes are UNUSABLE** (can't `match` a `&enum`;
+    a `&`-ref enum `match` aliases the heap → double-free on reuse; partial
+    cons-cell `truncate` leaks) → use **flat parallel-`Vec` arrays + a packed-name
+    byte blob, integer-indexed, length-truncation restore** (the parser's
+    token-array idiom; prototyped leak-clean / 100-arm loop). **RESUME AT = the
+    (3a) Sentinel side:** refactor `parser.sentinel` to `pub` its `Expr` + a parse
+    entry, then `selfhost/resolve.sentinel` (parse → walk the AST → flat-`Vec` fn
+    table [builtins 0–13, user fns 14+] + flat scope → `(var #N)`/`(call #N)` +
+    the `(effect #N Async)` tail) + a seed diff vs `snc resolve`; then ADR 0040
+    flips to ACCEPTED-WITH-AMENDMENTS) +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
