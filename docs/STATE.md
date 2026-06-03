@@ -44,10 +44,15 @@ free calls + arithmetic + comparisons + unary + var refs. A 2-pass driver (pass 
 header → `(param #varid …)` + scope, `parse_block` body → 1-phase consuming
 `dump_rexpr`, then the `(effect #N Async)` tail) on A1's corrected flat-`Vec`
 model (src-slice keys, varid = scope index, names sunk to a reclaimed `garbage`).
-**Compiled first try; 10 differential seeds match, leak-free.** **NEXT = m-2
-`let`** (the scope grows during the body walk — a quick probe settles the
-growing-scope mechanism), then (3b) decl tables + `::`-disambiguation, (3c)
-match/while/handle, (3d) decl heads, (3e) full corpus. Movement 1 (the
+**Compiled first try.** **(3a) m-2 (A3) then added `let`** — the binding set is
+**pre-scanned** from the body tokens into the immutable scope (a `let` binds
+during the walk, but the leak-free design wants the scope frozen first), so a
+`let` resolves its own VarId by name; `(let #vid [mut] <ty> <value>)`, VarIds
+continuing after the params. **17 differential seeds match `snc resolve`,
+leak-free; (3a) is feature-complete for the fn-body grammar.** **NEXT = (3b)** the
+decl symbol tables + the `::`-path disambiguation (`qcall` → `qcall-impl` /
+`class-init` / `enum-construct`), then (3c) match/while/handle (the D5 truncation
+restore), (3d) decl heads, (3e) full corpus. Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
 `Vec<T>`, D.4 file I/O, D.5 loops, D.6 modules — so **the language gate for

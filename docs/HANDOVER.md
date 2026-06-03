@@ -1901,17 +1901,17 @@ For pasting into a fresh chat to bootstrap context:
     a `&`-ref enum `match` aliases the heap → double-free on reuse; partial
     cons-cell `truncate` leaks) → use **flat parallel-`Vec` arrays + a packed-name
     byte blob, integer-indexed, length-truncation restore** (the parser's
-    token-array idiom; prototyped leak-clean / 100-arm loop). **(3a) m-1 LANDED**
-    (`20046e9` parser-exposed + `06f9241` resolve.sentinel): the THIRD Sentinel
-    stage `use`s the parser as a D.6 module + name-resolves paramful fns + free
-    calls + arithmetic + var refs → matches `snc resolve` (10 seeds, leak-free,
-    compiled first try). **RESUME AT = m-2 `let`** — a `let` binds DURING the body
-    walk, so the scope must grow then (vs m-1's per-fn scope built from the params
-    + read immutably); settle the growing-scope mechanism by a quick probe
-    (pre-scan the body TOKENS for the binding set → pre-build the immutable scope,
-    OR thread a `&mut` growing scope). ⚠ varids are GLOBAL (never reset). Then 3b
-    decl tables + `::`-disambiguation, 3c match/while/handle (D5 truncation
-    restore), 3d decl heads, 3e full corpus; THEN flip ADR 0040 →
+    token-array idiom; prototyped leak-clean / 100-arm loop). **(3a) m-1 + m-2
+    LANDED** (`20046e9` parser-exposed, `06f9241` m-1, `80a201d` m-2 `let`): the
+    THIRD Sentinel stage `use`s the parser as a D.6 module + name-resolves the
+    fn-body grammar (paramful fns + every expr form + `let`) → matches `snc
+    resolve` (17 seeds, leak-free, compiled first try); m-2 `let` pre-scans the
+    body tokens for the binding set into the immutable scope. ⚠ varids are GLOBAL
+    (never reset). **RESUME AT = (3b)** — the decl symbol tables (struct/enum/
+    class/trait/impl/effect) + the `::`-path disambiguation (`qcall` →
+    `qcall-impl` / `class-init` / `enum-construct`, needs the enum/class/impl
+    tables), then 3c match/while/handle (D5 truncation restore), 3d decl heads,
+    3e full corpus; THEN flip ADR 0040 →
     ACCEPTED-WITH-AMENDMENTS) +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +

@@ -2,11 +2,12 @@
 
 Status: **ACCEPTED-WITH-AMENDMENTS** — the third sub-phase of the self-host port
 (ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039
-→ ACCEPTED). **(3a) milestone-1 has LANDED** (A2): `selfhost/resolve.sentinel`,
-the third compiler stage in Sentinel, name-resolves paramful fns + free calls +
-arithmetic + var refs and matches `snc resolve` (A1's flat-`Vec` model, the
-parser imported as a D.6 module). The ADR flips fully as the remaining slices
-(m-2 `let`, 3b–3e) close.
+→ ACCEPTED). **(3a) milestones 1+2 have LANDED** (A2, A3):
+`selfhost/resolve.sentinel`, the third compiler stage in Sentinel, name-resolves
+the fn-body grammar (paramful fns + every expression form + `let`) and matches
+`snc resolve` (A1's flat-`Vec` model, the parser imported as a D.6 module). The
+ADR flips fully as the remaining slices (3b–3e: the decl tables, the `::`-path
+disambiguation, match/while/handle scoping, the full corpus) close.
 Ports the **resolve** stage to Sentinel: the parsed AST → a name-resolved program
 (every identifier reference bound to an integer ID), differentially validated
 against a Rust `snc` oracle over the `tests/pass` + `tests/ui` corpus. Flips to
@@ -88,6 +89,25 @@ oracle (3a) has landed; the Sentinel side builds on the corrected model. See
   binding set, or thread a `&mut` growing scope) by a quick probe. Then (3b) the
   decl tables + the `::`-path disambiguation, (3c) match/while/handle (the D5
   length-truncation restore), (3d) decl heads, (3e) the full corpus (D9).
+- **A3 — (3a) milestone-2: `let` bindings.** `resolve.sentinel` now resolves
+  `let` statements → `(let #vid [mut] <ty-or-_> <value>)`, VarIds continuing after
+  the params (global + sequential). **The wrinkle:** a `let` binds DURING the body
+  walk, but the leak-free design (A1) wants the scope IMMUTABLE during the walk.
+  **Resolved by PRE-SCANNING** the body tokens for its `let` binding set
+  (`scan_lets`: brace-balanced from the body `{`, each `let [mut] <name>` → the
+  name's src slice pushed to the scope after the params, in source order — the
+  flat per-fn namespace means nested-block `let`s share the fn scope), so the body
+  resolves against the complete, immutable scope. A `let` resolves its OWN VarId
+  by **name lookup** (`sc_lookup`) — redeclaration is a resolve error, so the name
+  is unique; the value resolves in the same scope (a self-/forward-reference is a
+  resolve error → never a clean seed, so the pre-scan's "let visible to its own
+  value" never bites). Verified: 7 new differential seeds (`let` + `mut` + type
+  annotations, let values referencing earlier bindings, lets mixed with params +
+  calls across fns; 17 total) match `snc resolve`; leak-free; the m-1 no-`let`
+  seeds unaffected; four-check green. **(3a) is now feature-complete for the
+  fn-body grammar** (params + every expression form + `let`); next: (3b) the decl
+  symbol tables + the `::`-path disambiguation (`qcall` → `qcall-impl` /
+  `class-init` / `enum-construct`).
 
 ## Context
 
