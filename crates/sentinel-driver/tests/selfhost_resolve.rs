@@ -10,8 +10,11 @@
 //! MILESTONE-2 (A3): `let` bindings — the binding set is pre-scanned from the
 //! body tokens into the (immutable) scope so a `let` resolves its own VarId by
 //! name (continuing after the params), with `mut` + optional type annotations.
-//! The decl tables + the `::`-path disambiguation are slices (3b)–(3d); the
-//! corpus differential is the phase-go (D9) and lands once those close.
+//! (3b-1) (A4): top-level decl dispatch (a brace-depth pass-1 scan + a source-
+//! order pass-2 walk) + the struct symbol table → `(struct #id Name (field …))`
+//! heads + struct-lit `#id`; the symbol tables are bundled in a `RCtx` struct
+//! threaded as `&mut RCtx` (the A4 probe). The remaining `::`-path / decl forms
+//! are slices (3b-2)–(3b-5); the corpus differential is the phase-go (D9).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -71,6 +74,17 @@ const SEEDS: &[&str] = &[
     "fn f(p: i64) -> i64 { let q = p + 1; let r = q * 2; r }\nfn main() -> i64 { f(3) }\n",
     "fn add(a: i64, b: i64) -> i64 { let s = a + b; s }\nfn main() -> i64 { add(1, 2) }\n",
     "fn g(x: i64) -> i64 { x }\nfn main() -> i64 { let a = g(1); let b = g(a); let c = g(b); c }\n",
+    // (3b-1): top-level decl dispatch + the struct table + struct-lit `#id`.
+    // Structs dump `(struct #id Name (field ...))` in SOURCE ORDER interleaved
+    // with fns; struct-lit gains its StructId; VarIds still flow globally across
+    // fns (the struct decl consumes no varid). Multiple structs prove the
+    // source-order StructId counter; a `Vec<i64>` field proves field-type dump.
+    "struct Point { x: i64, y: i64 }\nfn main() -> i64 { let p = Point { x: 1, y: 2 }; 0 }\n",
+    "fn main() -> i64 { 0 }\nstruct S { a: i64 }\nstruct T { b: bool, c: i64 }\n",
+    "struct V { n: i64 }\nfn get(v: V) -> i64 { v.n }\nfn main() -> i64 { let q = V { n: 7 }; get(q) }\n",
+    "struct Pair { a: i64, b: i64 }\nfn mk(x: i64, y: i64) -> Pair { Pair { a: x, b: y } }\nfn main() -> i64 { let p = mk(3, 4); p.a + p.b }\n",
+    "struct Empty { z: bool }\nstruct Wrap { inner: i64 }\nfn main() -> i64 { let w = Wrap { inner: 9 }; w.inner }\n",
+    "struct Nested { v: Vec<i64> }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]

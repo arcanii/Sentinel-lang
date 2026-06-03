@@ -3,30 +3,37 @@
 // build the AST, then NAME-RESOLVES it (every identifier → an integer ID) and
 // prints the SAME canonical resolved dump as the Rust `snc resolve` oracle
 // (ADR 0040 D2): the `snc ast` S-expr extended with the resolved IDs, e.g.
-//   (fn #14 add ((param #0 a i64) (param #1 b i64)) i64 (block (binop + (var #0) (var #1))))
-//   (fn #15 main () i64 (block (call #14 (int 1) (int 2))))
+//   (struct #0 Point (field x i64) (field y i64))
+//   (fn #14 main () i64 (block (let #0 _ (struct-lit #0 Point (field x (int 1)) (field y (int 2)))) (int 0)))
 //   (effect #0 Async)
 //
-// MILESTONE-1 scope (ADR 0040 A2/D8): paramful fns + free calls + arithmetic +
-// var refs + blocks. `let` bindings are MILESTONE-2 — they grow the scope DURING
-// the body walk (vs m-1's per-fn scope built from the params then read
-// immutably), so the m-1 dump_rstmt SLet arm is best-effort (no m-1 seed has a
-// `let`). The remaining decl/expr forms (struct/enum/…/match/handle, and the
-// `::`-path disambiguation into qcall-impl / class-init / enum-construct) need
-// the decl symbol tables — slices (3b)–(3d); their arms here are compile-safe +
-// leak-free placeholders until then.
+// SLICE STATUS (ADR 0040 D8):
+//  * (3a) m-1+m-2: paramful fns + every expression form + `let`. DONE.
+//  * (3b-1): top-level decl dispatch + the struct table + struct-lit `#id`. The
+//    decl/`::`-path forms still pending (enum/effect/class/trait/impl + the
+//    qcall-impl / class-init / enum-construct / perform split) keep their
+//    compile-safe, leak-free pass-through arms until slices (3b-2)–(3b-5).
 //
-// PROVEN SENTINEL IDIOMS (ADR 0040 A1 probes; reused):
+// PROVEN SENTINEL IDIOMS (ADR 0040 A1/A4 probes; reused):
 //  * Symbol tables + the local scope are FLAT parallel `Vec<i64>` arrays keyed
 //    by SRC SLICES (start,end into `src`) — NOT cons-lists (you can't `match` a
 //    `&enum`; a `&`-ref enum match aliases the heap → double-free on reuse).
-//    `len(*v)` works via explicit deref on `&Vec` / `&mut Vec`.
+//  * THE TABLES ARE BUNDLED IN A `RCtx` STRUCT threaded as `&mut RCtx` (A4
+//    probe). Field access through the ref is ALWAYS `(*c).field` (bare `c.field`
+//    is rejected through a ref); a read-only helper STILL takes `&mut RCtx`
+//    (there is NO `&mut`→`&` auto-reborrow). `push(&mut (*c).f, x)` / `len((*c).f)`
+//    / `(*c).f[i]` all work; cross-field read+write in one statement is allowed.
+//    NEVER move a `Vec` field out of the struct (`vec_to_array((*c).f)` then a
+//    struct drop SIGTRAPs) — the name `garbage` sink therefore stays a STANDALONE
+//    `&mut Vec<u8>` param `gb`, reclaimed by `main`'s `vec_to_array`.
 //  * varids are GLOBAL + sequential = push order, so a binding's varid is just
-//    its index in the scope arrays (no separate id array needed).
+//    its index in the scope arrays (no separate id array needed). `base` (the
+//    current fn's scope floor) lives in `RCtx`, set once per fn.
 //  * An owned `[u8]` (the parser's `Var`/`Call` NAME payloads) is freed ONLY by
 //    routing its bytes into a `Vec` reclaimed via `vec_to_array` — so each
-//    resolved-away name is `sink_name`'d into `garbage`, which `main` reclaims
-//    last. The consuming `match` frees the enum boxes but NOT a `[u8]` payload.
+//    resolved-away name is `sink_name`'d into `gb`, which `main` reclaims last.
+//  * Pass 1 is a BRACE-DEPTH scan (depth 0 = top level) so method `fn`s inside
+//    trait/impl/class bodies are NOT mistaken for top-level fns.
 
 use parser::Expr;
 use parser::Args;
@@ -49,6 +56,22 @@ use parser::dump_type;
 use parser::append_str;
 use parser::append_int;
 use parser::append_slice;
+
+// The resolve context: every symbol table + the local scope, as flat parallel
+// `Vec<i64>` arrays keyed by `src` slices, plus the per-kind decl ID counters and
+// the current fn's scope floor. Threaded as `&mut RCtx`. (The name `garbage` sink
+// is a SEPARATE `gb` param — a `Vec` field cannot be moved out of a struct.)
+struct RCtx {
+    scs: Vec<i64>,   // scope: binding name-slice starts (varid = index)
+    sce: Vec<i64>,   // scope: binding name-slice ends
+    base: i64,       // the current fn's scope floor (sc_lookup stops here)
+    ufs: Vec<i64>,   // user-fn table: name-slice starts (FnId = 14 + index)
+    ufe: Vec<i64>,   // user-fn table: name-slice ends
+    sts: Vec<i64>,   // struct table: name-slice starts (StructId = index)
+    ste: Vec<i64>,   // struct table: name-slice ends
+    fnct: i64,       // next user-fn index (pass-2 source-order counter)
+    structct: i64,   // next struct index (pass-2 source-order counter)
+}
 
 // --- name comparison --------------------------------------------------------
 
@@ -133,17 +156,17 @@ fn builtin_id(q: &[u8]) -> i64 {
 
 // Resolve a call name to a FnId: a builtin (0..=13), else a user fn (14 + its
 // index in the user-fn table), else -1.
-fn fn_lookup(src: &[u8], ufs: &Vec<i64>, ufe: &Vec<i64>, q: &[u8]) -> i64 {
+fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     let b: i64 = builtin_id(q);
     if b >= 0 {
         b
     } else {
-        let n: i64 = len(*ufs);
+        let n: i64 = len((*c).ufs);
         let mut i: i64 = 0;
         let mut found: i64 = 0 - 1;
         while i < n {
             if found == 0 - 1 {
-                if name_eq_src(src, (*ufs)[i], (*ufe)[i], q) {
+                if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
                     found = 14 + i;
                     0
                 } else {
@@ -161,13 +184,13 @@ fn fn_lookup(src: &[u8], ufs: &Vec<i64>, ufe: &Vec<i64>, q: &[u8]) -> i64 {
 
 // Resolve a variable name to its VarId — newest-first (high→low) over this fn's
 // scope range `[base, top)`; the varid is the binding's scope index. -1 if absent.
-fn sc_lookup(src: &[u8], scs: &Vec<i64>, sce: &Vec<i64>, base: i64, q: &[u8]) -> i64 {
-    let top: i64 = len(*scs);
+fn sc_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
+    let top: i64 = len((*c).scs);
     let mut i: i64 = top - 1;
     let mut found: i64 = 0 - 1;
-    while i >= base {
+    while i >= (*c).base {
         if found == 0 - 1 {
-            if name_eq_src(src, (*scs)[i], (*sce)[i], q) {
+            if name_eq_src(src, (*c).scs[i], (*c).sce[i], q) {
                 found = i;
                 0
             } else {
@@ -182,13 +205,35 @@ fn sc_lookup(src: &[u8], scs: &Vec<i64>, sce: &Vec<i64>, base: i64, q: &[u8]) ->
     found
 }
 
-// Route a discarded owned name's bytes into `garbage` so the `[u8]` is freed
-// when `main` reclaims `garbage` (vec_to_array) — the leak-free disposal.
-fn sink_name(garbage: &mut Vec<u8>, name: [u8]) -> i64 {
+// Resolve a struct name to its StructId (its index in the struct table), or -1.
+fn struct_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
+    let n: i64 = len((*c).sts);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if name_eq_src(src, (*c).sts[i], (*c).ste[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Route a discarded owned name's bytes into `gb` so the `[u8]` is freed when
+// `main` reclaims `gb` (vec_to_array) — the leak-free disposal.
+fn sink_name(gb: &mut Vec<u8>, name: [u8]) -> i64 {
     let n: i64 = len(name);
     let mut i: i64 = 0;
     while i < n {
-        push(garbage, name[i]);
+        push(gb, name[i]);
         i = i + 1;
     }
     0
@@ -196,13 +241,13 @@ fn sink_name(garbage: &mut Vec<u8>, name: [u8]) -> i64 {
 
 // --- resolved dump (1-phase consuming map: Expr → resolved S-expr) -----------
 
-fn dump_rargs(out: &mut Vec<u8>, a: Args, src: &[u8], scs: &Vec<i64>, sce: &Vec<i64>, base: i64, ufs: &Vec<i64>, ufe: &Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+fn dump_rargs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
     match a {
         Args::End => 0,
         Args::Cell(hd, tl) => {
             push(out, ' ');
-            dump_rexpr(out, hd, src, scs, sce, base, ufs, ufe, gb);
-            dump_rargs(out, tl, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, hd, src, c, gb);
+            dump_rargs(out, tl, src, c, gb);
             0
         },
     }
@@ -232,7 +277,7 @@ fn sink_pat(gb: &mut Vec<u8>, p: Pattern) -> i64 {
     }
 }
 
-fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], scs: &Vec<i64>, sce: &Vec<i64>, base: i64, ufs: &Vec<i64>, ufe: &Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
     match ex {
         Expr::Int(nv) => {
             append_str(out, "(int ");
@@ -273,7 +318,7 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], scs: &Vec<i64>, sce: &Vec
             0
         },
         Expr::Var(nm) => {
-            let vid: i64 = sc_lookup(src, scs, sce, base, &nm);
+            let vid: i64 = sc_lookup(c, src, &nm);
             sink_name(gb, nm);
             append_str(out, "(var #");
             append_int(out, vid);
@@ -295,7 +340,7 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], scs: &Vec<i64>, sce: &Vec
             };
             append_str(out, usym);
             push(out, ' ');
-            dump_rexpr(out, inner, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, inner, src, c, gb);
             push(out, ')');
             0
         },
@@ -343,33 +388,33 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], scs: &Vec<i64>, sce: &Vec
             };
             append_str(out, bsym);
             push(out, ' ');
-            dump_rexpr(out, l, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, l, src, c, gb);
             push(out, ' ');
-            dump_rexpr(out, r, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, r, src, c, gb);
             push(out, ')');
             0
         },
         Expr::Call(cn, ca) => {
-            let fid: i64 = fn_lookup(src, ufs, ufe, &cn);
+            let fid: i64 = fn_lookup(c, src, &cn);
             sink_name(gb, cn);
             append_str(out, "(call #");
             append_int(out, fid);
-            dump_rargs(out, ca, src, scs, sce, base, ufs, ufe, gb);
+            dump_rargs(out, ca, src, c, gb);
             push(out, ')');
             0
         },
         Expr::Method(mt, mn, ma) => {
             append_str(out, "(method ");
-            dump_rexpr(out, mt, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, mt, src, c, gb);
             push(out, ' ');
             append_str(out, mn);
-            dump_rargs(out, ma, src, scs, sce, base, ufs, ufe, gb);
+            dump_rargs(out, ma, src, c, gb);
             push(out, ')');
             0
         },
         Expr::Field(ft, fdn) => {
             append_str(out, "(field ");
-            dump_rexpr(out, ft, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, ft, src, c, gb);
             push(out, ' ');
             append_str(out, fdn);
             push(out, ')');
@@ -377,9 +422,9 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], scs: &Vec<i64>, sce: &Vec
         },
         Expr::Index(it, ii) => {
             append_str(out, "(index ");
-            dump_rexpr(out, it, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, it, src, c, gb);
             push(out, ' ');
-            dump_rexpr(out, ii, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, ii, src, c, gb);
             push(out, ')');
             0
         },
@@ -388,38 +433,38 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], scs: &Vec<i64>, sce: &Vec
             append_str(out, qi);
             push(out, ' ');
             append_str(out, qm);
-            dump_rargs(out, qa, src, scs, sce, base, ufs, ufe, gb);
+            dump_rargs(out, qa, src, c, gb);
             push(out, ')');
             0
         },
         Expr::ClassInit(ci, cia) => {
             append_str(out, "(class-init ");
             append_str(out, ci);
-            dump_rargs(out, cia, src, scs, sce, base, ufs, ufe, gb);
+            dump_rargs(out, cia, src, c, gb);
             push(out, ')');
             0
         },
         Expr::Array(ae) => {
             append_str(out, "(array");
-            dump_rargs(out, ae, src, scs, sce, base, ufs, ufe, gb);
+            dump_rargs(out, ae, src, c, gb);
             push(out, ')');
             0
         },
         Expr::If(ic, it2, ie2) => {
             append_str(out, "(if ");
-            dump_rexpr(out, ic, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, ic, src, c, gb);
             push(out, ' ');
-            dump_rexpr(out, it2, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, it2, src, c, gb);
             push(out, ' ');
-            dump_rexpr(out, ie2, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, ie2, src, c, gb);
             push(out, ')');
             0
         },
         Expr::Block(bstmts, btail) => {
             append_str(out, "(block");
-            dump_rstmts(out, bstmts, src, scs, sce, base, ufs, ufe, gb);
+            dump_rstmts(out, bstmts, src, c, gb);
             push(out, ' ');
-            dump_rexpr(out, btail, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, btail, src, c, gb);
             push(out, ')');
             0
         },
@@ -429,21 +474,24 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], scs: &Vec<i64>, sce: &Vec
         },
         Expr::Match(mscr, marms) => {
             append_str(out, "(match ");
-            dump_rexpr(out, mscr, src, scs, sce, base, ufs, ufe, gb);
-            dump_rarms(out, marms, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, mscr, src, c, gb);
+            dump_rarms(out, marms, src, c, gb);
             push(out, ')');
             0
         },
         Expr::StructLit(sn, sf) => {
-            append_str(out, "(struct-lit ");
+            let sid: i64 = struct_lookup(c, src, &sn);
+            append_str(out, "(struct-lit #");
+            append_int(out, sid);
+            push(out, ' ');
             append_str(out, sn);
-            dump_rfields(out, sf, src, scs, sce, base, ufs, ufe, gb);
+            dump_rfields(out, sf, src, c, gb);
             push(out, ')');
             0
         },
         Expr::Declassify(di) => {
             append_str(out, "(declassify ");
-            dump_rexpr(out, di, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, di, src, c, gb);
             push(out, ')');
             0
         },
@@ -452,59 +500,59 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], scs: &Vec<i64>, sce: &Vec
             append_str(out, pe);
             push(out, ' ');
             append_str(out, po);
-            dump_rargs(out, pa, src, scs, sce, base, ufs, ufe, gb);
+            dump_rargs(out, pa, src, c, gb);
             push(out, ')');
             0
         },
         Expr::Scope(sb) => {
             append_str(out, "(scope ");
-            dump_rexpr(out, sb, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, sb, src, c, gb);
             push(out, ')');
             0
         },
         Expr::Spawn(sc) => {
             append_str(out, "(spawn ");
-            dump_rexpr(out, sc, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, sc, src, c, gb);
             push(out, ')');
             0
         },
         Expr::Await(aw) => {
             append_str(out, "(await ");
-            dump_rexpr(out, aw, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, aw, src, c, gb);
             push(out, ')');
             0
         },
         Expr::Handle(hb, ha, hr) => {
             append_str(out, "(handle ");
-            dump_rexpr(out, hb, src, scs, sce, base, ufs, ufe, gb);
-            dump_rharms(out, ha, src, scs, sce, base, ufs, ufe, gb);
-            dump_rret(out, hr, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, hb, src, c, gb);
+            dump_rharms(out, ha, src, c, gb);
+            dump_rret(out, hr, src, c, gb);
             push(out, ')');
             0
         },
     }
 }
 
-fn dump_rstmts(out: &mut Vec<u8>, st: Stmts, src: &[u8], scs: &Vec<i64>, sce: &Vec<i64>, base: i64, ufs: &Vec<i64>, ufe: &Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+fn dump_rstmts(out: &mut Vec<u8>, st: Stmts, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
     match st {
         Stmts::SEnd => 0,
         Stmts::SCell(one, rest) => {
             push(out, ' ');
-            dump_rstmt(out, one, src, scs, sce, base, ufs, ufe, gb);
-            dump_rstmts(out, rest, src, scs, sce, base, ufs, ufe, gb);
+            dump_rstmt(out, one, src, c, gb);
+            dump_rstmts(out, rest, src, c, gb);
             0
         },
     }
 }
 
-fn dump_rstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], scs: &Vec<i64>, sce: &Vec<i64>, base: i64, ufs: &Vec<i64>, ufe: &Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+fn dump_rstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
     match s {
         Stmt::SLet(lmf, lnm, lty, lval) => {
             // The let's binding is already in the (pre-scanned) scope; its varid
             // is the unique name's scope index. The value resolves in the same
             // scope (a self-/forward-reference is a resolve error → never a clean
             // seed). Format: `(let #vid [mut] <ty-or-_> <value>)`.
-            let lvid: i64 = sc_lookup(src, scs, sce, base, &lnm);
+            let lvid: i64 = sc_lookup(c, src, &lnm);
             sink_name(gb, lnm);
             append_str(out, "(let #");
             append_int(out, lvid);
@@ -517,23 +565,23 @@ fn dump_rstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], scs: &Vec<i64>, sce: &Vec<
             };
             dump_rtyopt(out, lty);
             push(out, ' ');
-            dump_rexpr(out, lval, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, lval, src, c, gb);
             push(out, ')');
             0
         },
         Stmt::SAssign(atgt, aval) => {
             append_str(out, "(assign ");
-            dump_rexpr(out, atgt, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, atgt, src, c, gb);
             push(out, ' ');
-            dump_rexpr(out, aval, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, aval, src, c, gb);
             push(out, ')');
             0
         },
         Stmt::SWhile(wcond, wbody) => {
             append_str(out, "(while ");
-            dump_rexpr(out, wcond, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, wcond, src, c, gb);
             push(out, ' ');
-            dump_rexpr(out, wbody, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, wbody, src, c, gb);
             push(out, ')');
             0
         },
@@ -547,7 +595,7 @@ fn dump_rstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], scs: &Vec<i64>, sce: &Vec<
         },
         Stmt::SExpr(sx) => {
             append_str(out, "(expr ");
-            dump_rexpr(out, sx, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, sx, src, c, gb);
             push(out, ')');
             0
         },
@@ -569,36 +617,36 @@ fn dump_rtyopt(out: &mut Vec<u8>, ty: TyOpt) -> i64 {
 }
 
 // match arms (3c — placeholder): resolve the body, sink the pattern bindings.
-fn dump_rarms(out: &mut Vec<u8>, a: Arms, src: &[u8], scs: &Vec<i64>, sce: &Vec<i64>, base: i64, ufs: &Vec<i64>, ufe: &Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+fn dump_rarms(out: &mut Vec<u8>, a: Arms, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
     match a {
         Arms::ArmEnd => 0,
         Arms::ArmCell(ap, abody, arest) => {
             append_str(out, " (arm ");
             sink_pat(gb, ap);
-            dump_rexpr(out, abody, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, abody, src, c, gb);
             push(out, ')');
-            dump_rarms(out, arest, src, scs, sce, base, ufs, ufe, gb);
+            dump_rarms(out, arest, src, c, gb);
             0
         },
     }
 }
 
-fn dump_rfields(out: &mut Vec<u8>, f: Fields, src: &[u8], scs: &Vec<i64>, sce: &Vec<i64>, base: i64, ufs: &Vec<i64>, ufe: &Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+fn dump_rfields(out: &mut Vec<u8>, f: Fields, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
     match f {
         Fields::FieldEnd => 0,
         Fields::FieldCell(fnm, fv, fr) => {
             append_str(out, " (field ");
             append_str(out, fnm);
             push(out, ' ');
-            dump_rexpr(out, fv, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, fv, src, c, gb);
             push(out, ')');
-            dump_rfields(out, fr, src, scs, sce, base, ufs, ufe, gb);
+            dump_rfields(out, fr, src, c, gb);
             0
         },
     }
 }
 
-fn dump_rharms(out: &mut Vec<u8>, a: HArms, src: &[u8], scs: &Vec<i64>, sce: &Vec<i64>, base: i64, ufs: &Vec<i64>, ufe: &Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+fn dump_rharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
     match a {
         HArms::HEnd => 0,
         HArms::HCell(hef, hop, hbody, hrest) => {
@@ -607,25 +655,71 @@ fn dump_rharms(out: &mut Vec<u8>, a: HArms, src: &[u8], scs: &Vec<i64>, sce: &Ve
             push(out, ' ');
             append_str(out, hop);
             push(out, ' ');
-            dump_rexpr(out, hbody, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, hbody, src, c, gb);
             push(out, ')');
-            dump_rharms(out, hrest, src, scs, sce, base, ufs, ufe, gb);
+            dump_rharms(out, hrest, src, c, gb);
             0
         },
     }
 }
 
-fn dump_rret(out: &mut Vec<u8>, r: Ret, src: &[u8], scs: &Vec<i64>, sce: &Vec<i64>, base: i64, ufs: &Vec<i64>, ufe: &Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+fn dump_rret(out: &mut Vec<u8>, r: Ret, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
     match r {
         Ret::NoRet => 0,
         Ret::YesRet(rnm, rbody) => {
             append_str(out, " (return ");
             sink_name(gb, rnm);
-            dump_rexpr(out, rbody, src, scs, sce, base, ufs, ufe, gb);
+            dump_rexpr(out, rbody, src, c, gb);
             push(out, ')');
             0
         },
     }
+}
+
+// --- struct decl head (3b-1): `(struct #id Name (field name <type>)…)` --------
+// Pure syntax (field types need no resolution); mirrors the parser's
+// dump_struct_fields but prefixed with the resolved StructId.
+fn dump_rstruct_fields(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        dump_rstruct_fields(out, k, s, e, src, cur)
+    } else {
+        let fnm_s: i64 = (*s)[*cur];
+        let fnm_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let fty: TypeE = parse_type(k, s, e, src, cur);
+        append_str(out, " (field ");
+        append_slice(out, src, fnm_s, fnm_e);
+        push(out, ' ');
+        dump_type(out, fty);
+        push(out, ')');
+        dump_rstruct_fields(out, k, s, e, src, cur)
+    }
+}
+
+fn resolve_struct(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, sid: i64) -> i64 {
+    *cur = *cur + 1;             // skip `struct`
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    if (*k)[*cur] == 15 {
+        skip_type_params(k, cur)
+    } else {
+        0
+    };
+    *cur = *cur + 1;            // skip `{`
+    append_str(out, "(struct #");
+    append_int(out, sid);
+    push(out, ' ');
+    append_slice(out, src, nm_s, nm_e);
+    dump_rstruct_fields(out, k, s, e, src, cur);
+    push(out, ')');
+    0
 }
 
 // --- fn header: parse + emit the param list, building the scope -------------
@@ -633,14 +727,14 @@ fn dump_rret(out: &mut Vec<u8>, r: Ret, src: &[u8], scs: &Vec<i64>, sce: &Vec<i6
 // param → ` (param #vid [mut] name <type>)` (no leading space before the first)
 // + its src-slice name pushed to the scope (varid = scope index). The names live
 // in `src`, so nothing is consumed/sunk here.
-fn emit_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, scs: &mut Vec<i64>, sce: &mut Vec<i64>, first: bool) -> i64 {
+fn emit_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, first: bool) -> i64 {
     let t: i64 = (*k)[*cur];
     if t == 5 {
         *cur = *cur + 1;
         0
     } else if t == 29 {
         *cur = *cur + 1;
-        emit_params(out, k, s, e, src, cur, scs, sce, first)
+        emit_params(out, k, s, e, src, cur, c, first)
     } else {
         if first {
             0
@@ -660,9 +754,9 @@ fn emit_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
         *cur = *cur + 1;
         *cur = *cur + 1;
         let pty: TypeE = parse_type(k, s, e, src, cur);
-        let vid: i64 = len(*scs);
-        push(scs, ns);
-        push(sce, ne);
+        let vid: i64 = len((*c).scs);
+        push(&mut (*c).scs, ns);
+        push(&mut (*c).sce, ne);
         append_str(out, "(param #");
         append_int(out, vid);
         push(out, ' ');
@@ -676,7 +770,7 @@ fn emit_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
         push(out, ' ');
         dump_type(out, pty);
         push(out, ')');
-        emit_params(out, k, s, e, src, cur, scs, sce, false)
+        emit_params(out, k, s, e, src, cur, c, false)
     }
 }
 
@@ -687,7 +781,7 @@ fn emit_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
 // present up front). Brace-balanced to the matching `}`; the flat per-fn
 // namespace means nested-block `let`s share the fn scope. `let`s resolve their
 // own varid by name lookup (redeclaration is rejected by resolve, so unique).
-fn scan_lets(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, cur_start: i64, scs: &mut Vec<i64>, sce: &mut Vec<i64>) -> i64 {
+fn scan_lets(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, cur_start: i64, c: &mut RCtx) -> i64 {
     let mut i: i64 = cur_start + 1;
     let mut depth: i64 = 1;
     while depth > 0 {
@@ -706,8 +800,8 @@ fn scan_lets(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, cur_start: i64, scs: &mut
             } else {
                 0
             };
-            push(scs, (*s)[ni]);
-            push(sce, (*e)[ni]);
+            push(&mut (*c).scs, (*s)[ni]);
+            push(&mut (*c).sce, (*e)[ni]);
             0
         } else {
             0
@@ -715,6 +809,72 @@ fn scan_lets(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, cur_start: i64, scs: &mut
         i = i + 1;
     }
     0
+}
+
+// Resolve + dump one top-level `fn` (cur at the `fn` token) as
+// `(fn #id name (<params>) <ret> <block>)`, FnId = 14 + fnidx. Builds this fn's
+// scope from the params + pre-scanned `let`s, then resolves the body against it.
+fn resolve_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, gb: &mut Vec<u8>, fnidx: i64) -> i64 {
+    *cur = *cur + 1;            // skip `fn`
+    let name_s: i64 = (*s)[*cur];
+    let name_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    if (*k)[*cur] == 15 {
+        skip_type_params(k, cur)
+    } else {
+        0
+    };
+    *cur = *cur + 1;           // skip `(`
+    (*c).base = len((*c).scs);
+    append_str(out, "(fn #");
+    append_int(out, 14 + fnidx);
+    push(out, ' ');
+    append_slice(out, src, name_s, name_e);
+    append_str(out, " (");
+    emit_params(out, k, s, e, src, cur, c, true);
+    append_str(out, ") ");
+    *cur = *cur + 1;           // skip `->`
+    let rty: TypeE = parse_type(k, s, e, src, cur);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    // m-2: pre-scan the body's `let` bindings into the scope (after the params)
+    // so the body resolves against the complete, immutable scope.
+    scan_lets(k, s, e, *cur, c);
+    let body: Expr = parse_block(k, s, e, src, cur);
+    dump_type(out, rty);
+    push(out, ' ');
+    dump_rexpr(out, body, src, c, gb);
+    push(out, ')');
+    0
+}
+
+// Dispatch one top-level decl on its leading token (after an optional `pub`),
+// mirroring the parser's `dump_item`. A SINGLE helper re-passing the `&mut`
+// PARAMS — main has only local `&mut`s (out / cur / ctx), whose sibling-if-tail
+// borrows would conflict (ADR 0038 A2). (3b-1) handles struct + fn; the other
+// decl kinds land in (3b-2)..(3b-5).
+fn resolve_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    if (*k)[*cur] == 59 {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    let lead: i64 = (*k)[*cur];
+    if lead == 52 {
+        let sid: i64 = (*c).structct;
+        resolve_struct(out, k, s, e, src, cur, sid);
+        (*c).structct = (*c).structct + 1;
+        0
+    } else {
+        let fid: i64 = (*c).fnct;
+        resolve_fn(out, k, s, e, src, cur, c, gb, fid);
+        (*c).fnct = (*c).fnct + 1;
+        0
+    }
 }
 
 fn main() -> i64 {
@@ -727,24 +887,49 @@ fn main() -> i64 {
     tokenize(&src, n, &mut kinds, &mut starts, &mut ends);
     let ntok: i64 = len(kinds);
 
-    // Pass 1: user-fn table (src slices; user fn k → id 14+k) + the user-effect
-    // count (the built-in `Async` effect's id). m-1 is top-level fns only, so a
-    // `fn`(3) token's successor is always a top-level fn name; `effect`(57)
-    // counts user effects.
-    let mut ufs: Vec<i64> = vec_new();
-    let mut ufe: Vec<i64> = vec_new();
+    let mut ctx: RCtx = RCtx {
+        scs: vec_new(),
+        sce: vec_new(),
+        base: 0,
+        ufs: vec_new(),
+        ufe: vec_new(),
+        sts: vec_new(),
+        ste: vec_new(),
+        fnct: 0,
+        structct: 0,
+    };
+
+    // Pass 1: top-level decl scan (BRACE-DEPTH aware so method `fn`s inside
+    // trait/impl/class bodies are NOT counted as top-level fns). Builds the
+    // user-fn table (FnId 14+), the struct table (StructId 0+), and the
+    // user-effect count (the `Async` effect's id). At depth 0 the only tokens
+    // are decl headers, so a keyword there is always a top-level decl lead.
+    let mut depth: i64 = 0;
     let mut ecount: i64 = 0;
     let mut p1: i64 = 0;
     while p1 < ntok {
-        if kinds[p1] == 3 {
-            push(&mut ufs, starts[p1 + 1]);
-            push(&mut ufe, ends[p1 + 1]);
+        let t1: i64 = kinds[p1];
+        if t1 == 6 {
+            depth = depth + 1;
             0
-        } else {
+        } else if t1 == 7 {
+            depth = depth - 1;
             0
-        };
-        if kinds[p1] == 57 {
-            ecount = ecount + 1;
+        } else if depth == 0 {
+            if t1 == 3 {
+                push(&mut ctx.ufs, starts[p1 + 1]);
+                push(&mut ctx.ufe, ends[p1 + 1]);
+                0
+            } else if t1 == 52 {
+                push(&mut ctx.sts, starts[p1 + 1]);
+                push(&mut ctx.ste, ends[p1 + 1]);
+                0
+            } else if t1 == 57 {
+                ecount = ecount + 1;
+                0
+            } else {
+                0
+            };
             0
         } else {
             0
@@ -752,66 +937,23 @@ fn main() -> i64 {
         p1 = p1 + 1;
     }
 
-    // The scope arrays (grow across fns; per-fn lookups respect a `base` floor)
-    // + the name garbage sink.
-    let mut scs: Vec<i64> = vec_new();
-    let mut sce: Vec<i64> = vec_new();
+    // The name garbage sink (a STANDALONE Vec — a struct field can't be moved
+    // out for vec_to_array) + the output buffer.
     let mut garbage: Vec<u8> = vec_new();
     let mut out: Vec<u8> = vec_new();
 
-    // Pass 2: resolve + dump each fn in source order.
+    // Pass 2: resolve + dump each top-level item in source order.
     let mut cur: i64 = 0;
-    let mut fnidx: i64 = 0;
-    let mut firstfn: bool = true;
+    let mut firstitem: bool = true;
     while cur < ntok {
-        if firstfn {
+        if firstitem {
             0
         } else {
             push(&mut out, '\n');
             0
         };
-        firstfn = false;
-        if kinds[cur] == 59 {
-            cur = cur + 1;
-            0
-        } else {
-            0
-        };
-        // `fn` NAME `<…>?` `(` params `)` `->` RET `! {…}?` { body }
-        cur = cur + 1;
-        let name_s: i64 = starts[cur];
-        let name_e: i64 = ends[cur];
-        cur = cur + 1;
-        if kinds[cur] == 15 {
-            skip_type_params(&kinds, &mut cur)
-        } else {
-            0
-        };
-        cur = cur + 1;
-        let base: i64 = len(scs);
-        append_str(&mut out, "(fn #");
-        append_int(&mut out, 14 + fnidx);
-        push(&mut out, ' ');
-        append_slice(&mut out, &src, name_s, name_e);
-        append_str(&mut out, " (");
-        emit_params(&mut out, &kinds, &starts, &ends, &src, &mut cur, &mut scs, &mut sce, true);
-        append_str(&mut out, ") ");
-        cur = cur + 1;
-        let rty: TypeE = parse_type(&kinds, &starts, &ends, &src, &mut cur);
-        if kinds[cur] == 24 {
-            skip_effect_row(&kinds, &mut cur)
-        } else {
-            0
-        };
-        // m-2: pre-scan the body's `let` bindings into the scope (after the
-        // params) so the body resolves against the complete, immutable scope.
-        scan_lets(&kinds, &starts, &ends, cur, &mut scs, &mut sce);
-        let body: Expr = parse_block(&kinds, &starts, &ends, &src, &mut cur);
-        dump_type(&mut out, rty);
-        push(&mut out, ' ');
-        dump_rexpr(&mut out, body, &src, &scs, &sce, base, &ufs, &ufe, &mut garbage);
-        push(&mut out, ')');
-        fnidx = fnidx + 1;
+        firstitem = false;
+        resolve_item(&mut out, &kinds, &starts, &ends, &src, &mut cur, &mut ctx, &mut garbage);
     }
 
     // The built-in `Async` effect (id = the user-effect count) dumps LAST.
