@@ -17,8 +17,11 @@
 //! `(enum #id Name (variant …))` heads + the `Enum::Variant` → `enum-construct`
 //! split (the enum table is checked FIRST). (3b-3) (A6): the effect table →
 //! `(effect #id …)` heads + `perform` → `(perform #E op_index …)`; effect op
-//! params consume global VarIds (reproduced as phantom scope slots). The remaining
-//! `::`-path / decl forms are slices (3b-4)/(3b-5); the corpus is the phase-go (D9).
+//! params consume global VarIds. (3b-4) (A7): the trait + impl tables →
+//! `(trait #id …)` / `(impl #id … (method #selfvid …))` heads + the `qcall-impl`
+//! split (method bodies bind a synthetic `self`; method-body VarIds are
+//! GROUP-ordered — all fns before any impl). Class forms are (3b-5); the corpus is
+//! the phase-go (D9).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -117,6 +120,21 @@ const SEEDS: &[&str] = &[
     "fn p(x: i64) -> i64 { x }\neffect Ev { op(a: i64, b: i64); }\nfn q(y: i64) -> i64 { y }\nfn main() -> i64 { 0 }\n",
     "effect Two { a(x: i64) -> i64; b(y: i64) -> i64; }\nfn doit() -> i64 ! { Two } { perform Two.b(5) }\nfn main() -> i64 { 0 }\n",
     "struct S { n: i64 }\neffect Ef { go(s: i64) -> i64; }\nfn use_it(p: i64) -> i64 ! { Ef } { perform Ef.go(p) }\nfn main() -> i64 { 0 }\n",
+    // (3b-4): the trait + impl tables + `(trait #id …)` heads (sigs, no bodies) +
+    // `(impl #id name #trait_id Trait struct#tid Type (method #selfvid …))` heads
+    // with method BODIES (synthetic `self` VarId) + `Impl::method(args)` →
+    // `(qcall-impl #I method_index ImplName method args)`. THE KEY SUBTLETY:
+    // method-body VarIds are GROUP-ordered (all fns resolve before any impl
+    // method), so the impl-region VarIds start at `voff + total-fn-bindings` — a
+    // fn AFTER an impl in source still gets the LOWER VarIds (the resolver does
+    // explicit-VarId bookkeeping, not scope-index = VarId).
+    "struct P { x: i64 }\ntrait Show { fn show(self: &Self) -> i64; }\nimpl Sh as Show for P { fn show(self: &Self) -> i64 { self.x } }\nfn main() -> i64 { let p = P { x: 5 }; Sh::show(p) }\n",
+    "struct P { x: i64 }\nfn helper(a: i64) -> i64 { a }\ntrait T { fn m(self: &Self, y: i64) -> i64; }\nimpl I as T for P { fn m(self: &Self, y: i64) -> i64 { self.x + y } }\nfn main() -> i64 { 0 }\n",
+    "struct P { x: i64 }\ntrait T { fn a(self: &Self) -> i64; fn b(self: &Self, n: i64) -> i64; }\nimpl I1 as T for P { fn a(self: &Self) -> i64 { self.x } fn b(self: &Self, n: i64) -> i64 { let t = n; self.x + t } }\nfn main() -> i64 { 0 }\n",
+    "struct P { x: i64 }\ntrait T { fn a(self: &Self) -> i64; fn b(self: &Self) -> i64; }\nimpl I as T for P { fn a(self: &Self) -> i64 { 1 } fn b(self: &Self) -> i64 { 2 } }\nfn main() -> i64 { let p = P { x: 0 }; I::b(p) }\n",
+    "trait Greet { fn hi(self: &Self) -> i64; }\nfn main() -> i64 { 0 }\n",
+    "struct A { v: i64 }\nstruct B { w: i64 }\ntrait T { fn get(self: &Self) -> i64; }\nimpl IA as T for A { fn get(self: &Self) -> i64 { self.v } }\nimpl IB as T for B { fn get(self: &Self) -> i64 { self.w } }\nfn main() -> i64 { let a = A { v: 1 }; let b = B { w: 2 }; IA::get(a) + IB::get(b) }\n",
+    "struct P { x: i64 }\ntrait T { fn m(self: &mut Self) -> i64; }\nimpl I as T for P { fn m(self: &mut Self) -> i64 { self.x } }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]

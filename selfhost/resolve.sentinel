@@ -14,12 +14,16 @@
 //    `Enum::Variant` / `Enum::init` → `(enum-construct #E …)` split (the enum
 //    table is checked FIRST in both the `Qcall` and `ClassInit` arms).
 //  * (3b-3): the effect table + `(effect #id Name (op name (params) ret)…)` heads
-//    + `perform` → `(perform #E op_index Eff op args)`. ⚠ effect op params consume
-//    GLOBAL VarIds in the Rust resolver (before any fn body) → reproduced as
-//    PHANTOM scope slots (scan_ops_of) so every fn's VarIds are offset correctly.
-//    The remaining decl/`::`-path forms (class/trait/impl + the qcall-impl /
-//    class-init split) keep their compile-safe, leak-free pass-through arms until
-//    slices (3b-4)–(3b-5).
+//    + `perform` → `(perform #E op_index Eff op args)`.
+//  * (3b-4): the trait + impl tables + `(trait #id …)` heads (sigs, no bodies) +
+//    `(impl #id name #trait_id Trait struct#tid Type (method #selfvid …))` heads
+//    (method BODIES with a synthetic `self` VarId) + the `Qcall` else-branch →
+//    `(qcall-impl #I method_index ImplName method args)` (method_index = scan the
+//    impl's trait's methods). ⚠ VARIDS ARE GROUP-ORDERED: the Rust resolver
+//    resolves ALL fn bodies before ANY impl method body, so varid ≠ scope index —
+//    the scope stores EXPLICIT varids (`scv`), the fn region counts from `voff`,
+//    and the impl region (`implvid`) counts from `voff + total-fn-bindings`.
+//    The class forms (`class-init`, class decl) land in (3b-5).
 //
 // PROVEN SENTINEL IDIOMS (ADR 0040 A1/A4 probes; reused):
 //  * Symbol tables + the local scope are FLAT parallel `Vec<i64>` arrays keyed
@@ -90,10 +94,22 @@ struct RCtx {
     efoo: Vec<i64>,  // effect-op list: owner EffectId (one entry per op)
     efos: Vec<i64>,  // effect-op list: op name-slice starts
     efoe: Vec<i64>,  // effect-op list: op name-slice ends
+    trs: Vec<i64>,   // trait table: name-slice starts (TraitId = index)
+    tre: Vec<i64>,   // trait table: name-slice ends
+    trmo: Vec<i64>,  // trait-method list: owner TraitId (one entry per method)
+    trms: Vec<i64>,  // trait-method list: method name-slice starts
+    trme: Vec<i64>,  // trait-method list: method name-slice ends
+    imns: Vec<i64>,  // impl table: impl name-slice starts (ImplId = index; a
+    imne: Vec<i64>,  //   default/unnamed impl gets a 0,0 slot — never name-matched)
+    imts: Vec<i64>,  // impl table: the impl's trait name-slice starts
+    imte: Vec<i64>,  // impl table: the impl's trait name-slice ends
+    implvid: i64,    // saved impl-region VarId counter (starts voff + fn-bind total)
     fnct: i64,       // next user-fn index (pass-2 source-order counter)
     structct: i64,   // next struct index (pass-2 source-order counter)
     enumct: i64,     // next enum index (pass-2 source-order counter)
     effct: i64,      // next effect index (pass-2 source-order counter)
+    traitct: i64,    // next trait index (pass-2 source-order counter)
+    implct: i64,     // next impl index (pass-2 source-order counter)
 }
 
 // --- name comparison --------------------------------------------------------
@@ -130,6 +146,28 @@ fn name_eq_lit(q: &[u8], lit: [u8]) -> bool {
         let mut ok: bool = true;
         while i < ln {
             if (*q)[i] != lit[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Compare two `src` slices `src[as_..ae]` and `src[bs..be]` for byte-equality.
+fn slice_eq_src(src: &[u8], as_: i64, ae: i64, bs: i64, be: i64) -> bool {
+    let la: i64 = ae - as_;
+    let lb: i64 = be - bs;
+    if la != lb {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < la {
+            if (*src)[as_ + i] != (*src)[bs + i] {
                 ok = false;
                 0
             } else {
@@ -251,6 +289,29 @@ fn struct_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     found
 }
 
+// Resolve a struct by a `src` SLICE (an impl's stored target type name) to its
+// StructId, or -1 (used for the `impl … for Type` target tag).
+fn struct_lookup_slice(c: &mut RCtx, src: &[u8], ts: i64, te: i64) -> i64 {
+    let n: i64 = len((*c).sts);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if slice_eq_src(src, (*c).sts[i], (*c).ste[i], ts, te) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
 // Resolve an enum name to its EnumId (its index in the enum table), or -1.
 fn enum_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     let n: i64 = len((*c).ens);
@@ -324,6 +385,121 @@ fn op_index_lookup(c: &mut RCtx, src: &[u8], eid: i64, q: &[u8]) -> i64 {
         i = i + 1;
     }
     found
+}
+
+// Resolve a trait name to its TraitId (its index in the trait table), or -1.
+fn trait_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
+    let n: i64 = len((*c).trs);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if name_eq_src(src, (*c).trs[i], (*c).tre[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Resolve a trait by a `src` SLICE (an impl's stored trait name) to its TraitId.
+fn trait_lookup_slice(c: &mut RCtx, src: &[u8], ts: i64, te: i64) -> i64 {
+    let n: i64 = len((*c).trs);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if slice_eq_src(src, (*c).trs[i], (*c).tre[i], ts, te) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Resolve a (named) impl to its ImplId (its index in the impl table), or -1.
+fn impl_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
+    let n: i64 = len((*c).imns);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if name_eq_src(src, (*c).imns[i], (*c).imne[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// method_index = the position of method `q` among trait `tid`'s methods (a linear
+// scan of the flat trait-method list, counting only entries owned by `tid`, in
+// source order). -1 if absent. Mirrors lib.rs:3863 (method_names `.position(…)`).
+fn method_index_in_trait(c: &mut RCtx, src: &[u8], tid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).trmo);
+    let mut i: i64 = 0;
+    let mut pos: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if (*c).trmo[i] == tid {
+                if name_eq_src(src, (*c).trms[i], (*c).trme[i], q) {
+                    found = pos;
+                    0
+                } else {
+                    0
+                };
+                pos = pos + 1;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Consume a method's mandatory `self : & [mut] Self` receiver (cur at `self`) and
+// return whether it is exclusive (`&mut Self`). Mirrors the parser's
+// parse_self_kind: `self`(ident) `:`(31) `&`(23) `[mut(46)]` `Self`(ident).
+fn rparse_self_kind(k: &Vec<i64>, cur: &mut i64) -> bool {
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let excl: bool = (*k)[*cur] == 46;
+    if excl {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    *cur = *cur + 1;
+    excl
 }
 
 // Route a discarded owned name's bytes into `gb` so the `[u8]` is freed when
@@ -544,7 +720,20 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Ve
                 push(out, ')');
                 0
             } else {
-                append_str(out, "(qcall ");
+                // a named impl: `Impl::method(args)` → `(qcall-impl #I
+                // method_index ImplName method args)` (mirror lib.rs:3852). The
+                // impl's trait (its stored trait-name slice → TraitId) gives the
+                // method's index in that trait's method list.
+                let iidx: i64 = impl_lookup(c, src, &qi);
+                let its: i64 = (*c).imts[iidx];
+                let ite: i64 = (*c).imte[iidx];
+                let qtid: i64 = trait_lookup_slice(c, src, its, ite);
+                let qmidx: i64 = method_index_in_trait(c, src, qtid, &qm);
+                append_str(out, "(qcall-impl #");
+                append_int(out, iidx);
+                push(out, ' ');
+                append_int(out, qmidx);
+                push(out, ' ');
                 append_str(out, qi);
                 push(out, ' ');
                 append_str(out, qm);
@@ -1018,6 +1207,180 @@ fn resolve_effect(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, s
     0
 }
 
+// --- trait decl head (3b-4): `(trait #id Name (method name <kind> (params) ret)…)`
+// Pure syntax — trait method sigs have NO bodies and their params dump WITHOUT
+// VarIds (`(param name type)`, reusing emit_op_params). `self` is shown only via
+// the shared/exclusive kind word, not as a param. Mirrors the parser's
+// dump_trait_decl / dump_method_head.
+fn rtrait_method_head(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;           // skip `fn`
+    let mn_s: i64 = (*s)[*cur];
+    let mn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;           // skip `(`
+    let excl: bool = rparse_self_kind(k, cur);
+    let skw: [u8] = if excl {
+        "exclusive"
+    } else {
+        "shared"
+    };
+    append_str(out, " (method ");
+    append_slice(out, src, mn_s, mn_e);
+    push(out, ' ');
+    append_str(out, skw);
+    append_str(out, " (");
+    emit_op_params(out, k, s, e, src, cur, true);
+    append_str(out, ") ");
+    *cur = *cur + 1;           // skip `->`
+    let mret: TypeE = parse_type(k, s, e, src, cur);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    dump_type(out, mret);
+    0
+}
+
+fn dump_rtrait_methods(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else {
+        rtrait_method_head(out, k, s, e, src, cur);
+        *cur = *cur + 1;       // skip `;`
+        push(out, ')');
+        dump_rtrait_methods(out, k, s, e, src, cur)
+    }
+}
+
+fn resolve_trait(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, tid: i64) -> i64 {
+    *cur = *cur + 1;           // skip `trait`
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;           // skip `{`
+    append_str(out, "(trait #");
+    append_int(out, tid);
+    push(out, ' ');
+    append_slice(out, src, nm_s, nm_e);
+    dump_rtrait_methods(out, k, s, e, src, cur);
+    push(out, ')');
+    0
+}
+
+// --- impl decl head (3b-4): `(impl #id name #trait_id TraitName struct#tid Type
+// (method #selfvid name <kind> (params) ret <block>)…)`. Impl methods HAVE bodies
+// → a synthetic `self` VarId (bound first, from the impl-region counter) + the
+// params + body lets, all resolved against this method's scope. Mirrors the
+// parser's dump_impl_decl + lib.rs's impl-method body resolution.
+fn rimpl_method(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    (*c).base = len((*c).scs);   // this method's scope floor
+    *cur = *cur + 1;             // skip `fn`
+    let mn_s: i64 = (*s)[*cur];
+    let mn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;             // skip `(`
+    let self_s: i64 = (*s)[*cur];   // the `self` receiver token
+    let self_e: i64 = (*e)[*cur];
+    let excl: bool = rparse_self_kind(k, cur);
+    let selfvid: i64 = (*c).nextvid;
+    (*c).nextvid = (*c).nextvid + 1;
+    push(&mut (*c).scs, self_s);
+    push(&mut (*c).sce, self_e);
+    push(&mut (*c).scv, selfvid);
+    let skw: [u8] = if excl {
+        "exclusive"
+    } else {
+        "shared"
+    };
+    append_str(out, " (method #");
+    append_int(out, selfvid);
+    push(out, ' ');
+    append_slice(out, src, mn_s, mn_e);
+    push(out, ' ');
+    append_str(out, skw);
+    append_str(out, " (");
+    emit_params(out, k, s, e, src, cur, c, true);
+    append_str(out, ") ");
+    *cur = *cur + 1;             // skip `->`
+    let mret: TypeE = parse_type(k, s, e, src, cur);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    scan_lets(k, s, e, *cur, c);
+    let mbody: Expr = parse_block(k, s, e, src, cur);
+    dump_type(out, mret);
+    push(out, ' ');
+    dump_rexpr(out, mbody, src, c, gb);
+    push(out, ')');
+    0
+}
+
+fn resolve_impl_methods(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 59 {
+        *cur = *cur + 1;         // skip a per-method `pub`
+        resolve_impl_methods(out, k, s, e, src, cur, c, gb)
+    } else {
+        rimpl_method(out, k, s, e, src, cur, c, gb);
+        resolve_impl_methods(out, k, s, e, src, cur, c, gb)
+    }
+}
+
+fn resolve_impl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, gb: &mut Vec<u8>, impl_id: i64) -> i64 {
+    *cur = *cur + 1;             // skip `impl`
+    let has_name: bool = (*k)[*cur] != 60;   // a name is present iff next is not `as`
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    if has_name {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    *cur = *cur + 1;             // skip `as`
+    let tr_s: i64 = (*s)[*cur];
+    let tr_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // consume trait name
+    *cur = *cur + 1;             // skip `for`
+    let ty_s: i64 = (*s)[*cur];
+    let ty_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // consume type name
+    *cur = *cur + 1;             // skip `{`
+    let tid: i64 = trait_lookup_slice(c, src, tr_s, tr_e);
+    let sid: i64 = struct_lookup_slice(c, src, ty_s, ty_e);
+    append_str(out, "(impl #");
+    append_int(out, impl_id);
+    push(out, ' ');
+    if has_name {
+        append_slice(out, src, nm_s, nm_e);
+        0
+    } else {
+        push(out, '_');
+        0
+    };
+    push(out, ' ');
+    push(out, '#');
+    append_int(out, tid);
+    push(out, ' ');
+    append_slice(out, src, tr_s, tr_e);
+    push(out, ' ');
+    append_str(out, "struct#");
+    append_int(out, sid);
+    push(out, ' ');
+    append_slice(out, src, ty_s, ty_e);
+    resolve_impl_methods(out, k, s, e, src, cur, c, gb);
+    push(out, ')');
+    0
+}
+
 // --- fn header: parse + emit the param list, building the scope -------------
 // `[mut] name : type` comma-separated up to `)` (already past the `(`). Each
 // param → ` (param #vid [mut] name <type>)` (no leading space before the first)
@@ -1168,6 +1531,35 @@ fn scan_ops_of(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, eid: i64, cur_start: i6
     0
 }
 
+// PASS-1 trait-method scan (cur_start at the trait body `{`): record `(tid,
+// method-name-slice)` for each method sig in the flat trait-method list (used for
+// `qcall-impl`'s method_index). A trait method sig is `fn name(self…) -> R;` —
+// each `fn` (tag 3) in the body → its name is the next token. (Method sigs have no
+// bodies, and the `!{eff}` row contains no `fn`, so every `fn` here is a method.)
+fn scan_trait_methods(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, tid: i64, cur_start: i64, c: &mut RCtx) -> i64 {
+    let mut i: i64 = cur_start + 1;
+    let mut bdepth: i64 = 1;
+    while bdepth > 0 {
+        let t: i64 = (*k)[i];
+        if t == 6 {
+            bdepth = bdepth + 1;
+            0
+        } else if t == 7 {
+            bdepth = bdepth - 1;
+            0
+        } else if t == 3 {
+            push(&mut (*c).trmo, tid);
+            push(&mut (*c).trms, (*s)[i + 1]);
+            push(&mut (*c).trme, (*e)[i + 1]);
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
 // Resolve + dump one top-level `fn` (cur at the `fn` token) as
 // `(fn #id name (<params>) <ret> <block>)`, FnId = 14 + fnidx. Builds this fn's
 // scope from the params + pre-scanned `let`s, then resolves the body against it.
@@ -1236,6 +1628,19 @@ fn resolve_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
         resolve_effect(out, k, s, e, src, cur, efid);
         (*c).effct = (*c).effct + 1;
         0
+    } else if lead == 54 {
+        let tid: i64 = (*c).traitct;
+        resolve_trait(out, k, s, e, src, cur, tid);
+        (*c).traitct = (*c).traitct + 1;
+        0
+    } else if lead == 55 {
+        // impl: method VarIds come from the impl-region counter (load → save).
+        let iid: i64 = (*c).implct;
+        (*c).nextvid = (*c).implvid;
+        resolve_impl(out, k, s, e, src, cur, c, gb, iid);
+        (*c).implvid = (*c).nextvid;
+        (*c).implct = (*c).implct + 1;
+        0
     } else {
         // fn: VarIds come from the fn-region counter (load → resolve → save).
         let fid: i64 = (*c).fnct;
@@ -1276,10 +1681,22 @@ fn main() -> i64 {
         efoo: vec_new(),
         efos: vec_new(),
         efoe: vec_new(),
+        trs: vec_new(),
+        tre: vec_new(),
+        trmo: vec_new(),
+        trms: vec_new(),
+        trme: vec_new(),
+        imns: vec_new(),
+        imne: vec_new(),
+        imts: vec_new(),
+        imte: vec_new(),
+        implvid: 0,
         fnct: 0,
         structct: 0,
         enumct: 0,
         effct: 0,
+        traitct: 0,
+        implct: 0,
     };
 
     // Pass 1: top-level decl scan (BRACE-DEPTH aware so method `fn`s inside
@@ -1287,8 +1704,15 @@ fn main() -> i64 {
     // user-fn table (FnId 14+), the struct table (StructId 0+), and the
     // user-effect count (the `Async` effect's id). At depth 0 the only tokens
     // are decl headers, so a keyword there is always a top-level decl lead.
+    // `citem` = the current top-level item kind (set on a depth-0 decl lead), used
+    // to attribute body `let`s to fns vs impl/class methods. `fnparams`/`fnlets`
+    // accumulate the total fn-region binding count (a `:` at depth 0 is a fn param;
+    // a `let` at depth ≥1 under a fn item is a fn let) → the impl-region VarId base.
     let mut depth: i64 = 0;
     let mut ecount: i64 = 0;
+    let mut citem: i64 = 0;
+    let mut fnparams: i64 = 0;
+    let mut fnlets: i64 = 0;
     let mut p1: i64 = 0;
     while p1 < ntok {
         let t1: i64 = kinds[p1];
@@ -1298,24 +1722,76 @@ fn main() -> i64 {
         } else if t1 == 7 {
             depth = depth - 1;
             0
+        } else if t1 == 31 {
+            if depth == 0 {
+                fnparams = fnparams + 1;
+                0
+            } else {
+                0
+            };
+            0
+        } else if t1 == 45 {
+            if depth >= 1 {
+                if citem == 3 {
+                    fnlets = fnlets + 1;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
         } else if depth == 0 {
             if t1 == 3 {
+                citem = 3;
                 push(&mut ctx.ufs, starts[p1 + 1]);
                 push(&mut ctx.ufe, ends[p1 + 1]);
                 0
             } else if t1 == 52 {
+                citem = 52;
                 push(&mut ctx.sts, starts[p1 + 1]);
                 push(&mut ctx.ste, ends[p1 + 1]);
                 0
             } else if t1 == 53 {
+                citem = 53;
                 push(&mut ctx.ens, starts[p1 + 1]);
                 push(&mut ctx.ene, ends[p1 + 1]);
                 0
+            } else if t1 == 54 {
+                // Register the trait name (TraitId = source order) + scan its
+                // method sigs into the flat trait-method list. Body `{` is at p1+2.
+                citem = 54;
+                let tid1: i64 = len(ctx.trs);
+                push(&mut ctx.trs, starts[p1 + 1]);
+                push(&mut ctx.tre, ends[p1 + 1]);
+                scan_trait_methods(&kinds, &starts, &ends, tid1, p1 + 2, &mut ctx);
+                0
+            } else if t1 == 55 {
+                // Register the impl: its name (or a 0,0 never-matched slot for a
+                // default `impl as …`) + the impl's trait name slice. The header is
+                // `impl [Name as]? Trait for Type {` — Name present iff p1+1 ≠ `as`.
+                citem = 55;
+                if kinds[p1 + 1] != 60 {
+                    push(&mut ctx.imns, starts[p1 + 1]);
+                    push(&mut ctx.imne, ends[p1 + 1]);
+                    push(&mut ctx.imts, starts[p1 + 3]);
+                    push(&mut ctx.imte, ends[p1 + 3]);
+                    0
+                } else {
+                    push(&mut ctx.imns, 0);
+                    push(&mut ctx.imne, 0);
+                    push(&mut ctx.imts, starts[p1 + 2]);
+                    push(&mut ctx.imte, ends[p1 + 2]);
+                    0
+                };
+                0
             } else if t1 == 57 {
-                // Register the effect name (EffectId = ecount, source order) +
-                // scan its ops (records the op list AND pushes phantom scope slots
-                // for the op params — see scan_ops_of). The body `{` is at p1+2
-                // (`effect Name {` — effects are non-generic).
+                // Register the effect name (EffectId = ecount, source order) + scan
+                // its ops (records the op list AND counts the op params into voff —
+                // see scan_ops_of). The body `{` is at p1+2 (effects non-generic).
+                citem = 57;
                 push(&mut ctx.efs, starts[p1 + 1]);
                 push(&mut ctx.efe, ends[p1 + 1]);
                 scan_ops_of(&kinds, &starts, &ends, ecount, p1 + 2, &mut ctx);
@@ -1331,8 +1807,11 @@ fn main() -> i64 {
         p1 = p1 + 1;
     }
 
-    // The fn-region VarId counter starts after the effect op params (voff).
+    // The fn-region VarId counter starts after the effect op params (voff); the
+    // impl-region counter starts after ALL fn bindings (the Rust resolver resolves
+    // every fn body before any impl method body — lib.rs:2559).
     ctx.fnvid = ctx.voff;
+    ctx.implvid = ctx.voff + fnparams + fnlets;
 
     // The name garbage sink (a STANDALONE Vec — a struct field can't be moved
     // out for vec_to_array) + the output buffer.
