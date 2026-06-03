@@ -14,7 +14,37 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (3/N) RESOLVE is
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (4/N) TYPES is OPEN; ADR
+0041 → ACCEPTED-WITH-AMENDMENTS; (4a) the `snc types` oracle + the two design probes
+(A1) LANDED.** Types is the **biggest/hardest port stage** (the Rust `sentinel-types`
+is **10,891 lines, ~1.8× resolve**: HM-ish inference, method/trait dispatch,
+secret-type propagation, match exhaustiveness; effect-check is a SEPARATE crate, out
+of scope). **(4a) ships the ORACLE + de-risks the Sentinel build:** `snc types <file>`
+(driver `run_types` + `types_dump.rs`, parse → resolve → `check` → dump) emits the
+`snc resolve` S-expr form **extended with each expression node's inferred `Type`** (a
+trailing ` :<type>` via `type_display`) **+ the type-resolved disambiguations** — the
+resolver's uniform `(method …)` split by receiver type into `(method #classid <idx>
+…)` / `(impl-method …)`, the synthesized `(widen-null …)`/`(widen-secret …)`
+coercions, the `let`'s inferred type (replacing resolve's `_`), and the computed
+`field_index`/`variant_index`/generic `(targs …)`. **Robust: 0 panics across all 141
+corpus fixtures** (123 type cleanly, 18 oracle-rejected → skipped by the differential,
+as resolve); 5 goldens (`tests/types.rs`) pin params/call, let-inference,
+struct-lit+field-index, nullable-widen, method-dispatch. **Two parallel design probes
+(A1) settled + EMPIRICALLY VERIFIED the Sentinel-side model PRE-BUILD** (orchestrator
+re-ran each `snc build`+run+`leaks` → **0 leaks** apiece): **D4** — a `Type` is an
+**integer type-handle into a flat hash-consed interner** (parallel `Vec<i64>` arrays;
+structural equality = integer `==`; recursive render/subst), with the VarId→type env
+**APPEND-ONLY** (`env[vid]=h` is a hard `IndexAssignNotSupported`; index-READ is fine)
++ 3 reusable interner gotchas (byte-literal push needs a char lit; nested `&mut ctx`
+in one call → bind inner first; inline `print_bytes(vec_to_array(v))` leaks → bind
+`let arr`); **D3** — `types.sentinel` will **`use` `resolve.sentinel` as a D.6 module**
+(a 3-deep chain + diamond import + cross-module `&mut struct` helper reuse, all
+verified leak-free) → share the symbol tables, don't re-resolve inline. **Four-check
+green (1421 tests).** NEXT = **(4b)** the Sentinel `types.sentinel` skeleton (the
+scalar grammar) on the confirmed `TyCtx` interner + the resolve-as-a-module reuse. The
+prior banner (the (3/N) RESOLVE, COMPLETE, ADR 0040 → ACCEPTED) stands below.
+
+Prior banner: **(3/N) RESOLVE is
 COMPLETE; ADR 0040 → ACCEPTED** (A2–A12): `selfhost/resolve.sentinel`, the third
 compiler stage in Sentinel, name-resolves the **entire expression + decl grammar**
 — every decl kind + every `::`-path form (struct-lit / enum-construct / perform /
@@ -27,19 +57,11 @@ class field + a synthesised forwarding `impl` whose ImplIds/VarIds continue the
 impl region). **`sentinel_resolver_matches_oracle_on_corpus` matches `snc resolve`
 byte-for-byte over the ENTIRE clean-resolving `tests/pass`+`tests/ui` corpus (132
 fixtures, the D9 phase-go), leak-free.** The one cross-stage edit: the parser
-STORES handler-arm params (`snc ast` byte-unchanged). **Four-check green (1416
-tests).** NEXT = the next port stage = **types** (its own ADR — write PROPOSED
-first). The prior banner (the (2/N) PARSER, COMPLETE, ADR 0039 → ACCEPTED, A1–A22)
-stands below.
+STORES handler-arm params (`snc ast` byte-unchanged). NEXT was the **types** stage
+(now open — see the top banner). The (2/N) PARSER (COMPLETE, ADR 0039 → ACCEPTED,
+A1–A22) detail follows.
 
-Prior banner: **(2/N) the PARSER is
-COMPLETE (ADR 0039 → ACCEPTED, A1–A22).** `selfhost/parser.sentinel` matches the
-`snc ast` oracle over EVERY clean-parsing fixture in `tests/pass` + `tests/ui`
-(139/139), leak-free — the parser-stage phase-go. (2d-8, A22) closed the full
-corpus (`//` comments, prefix `*`/`&`/`&mut` unary, char + string literals). The
-next port stage, **resolve, is now OPEN — ADR 0040 PROPOSED** (the plan:
-cons-list symbol tables + a `snc resolve` ID-bearing oracle, sub-sliced 3a–3e,
-with the scope snapshot/restore as the key probe). **The (3a) oracle has LANDED:**
+Earlier: **The (3a) resolve oracle LANDED:**
 `snc resolve <file>` (`run_resolve` + `resolve_dump.rs`) dumps the
 `ResolvedProgram` as the `snc ast` form extended with the resolved IDs
 (`(var #N)` / `(call #14 …)` / `(struct-lit #N …)` / `(qcall-impl …)` /

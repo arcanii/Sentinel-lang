@@ -1865,10 +1865,10 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE COMPLETE
-    docs** commit (`docs(selfhost): resolve COMPLETE — delegate synthesis; ADR 0040
-    ACCEPTED`, `bbada41`), atop the delegate-synthesis feat (`feat(selfhost):
-    resolve delegate-impl synthesis — (3/N) RESOLVE COMPLETE`, `9da6c12`), the (3e) docs
+    Local HEAD: verify with `git log -1` — expect the **self-host TYPES (4a) docs**
+    commit (`docs(selfhost): ADR 0041 (4a) + probes A1`), atop the **`snc types`
+    oracle feat** (`feat(selfhost): snc types oracle — (4a)`, `c52aef9`), atop the
+    RESOLVE-COMPLETE docs (`bbada41`) + delegate-synthesis feat (`9da6c12`), the (3e) docs
     (`496a0ca`) + feat (`1c8eb97`), the (3c) docs (`c1e3527`) + the (3e)-finding
     docs (`f650fa5`), the (3c) handle feat (`c38960a`), the
     (3c) match/while feat (`b6749e3`) + the (3c-a) blob-scope refactor (`072f841`),
@@ -1884,17 +1884,27 @@ For pasting into a fresh chat to bootstrap context:
     `debaa24`, (2c) `b2a9c3b`…, (2b) `189990e`…`0e84f36`, (2a) `8d6aa6e` +
     `snc ast` oracle `7f10740` + ADR 0039 — atop the lexer (1/N) + the D.6
     cross-module work. (Run `git log --oneline -50` for the full chain.) Clean
-    tree; **1416 tests** — the `selfhost_parse` seeds (192) + the parser corpus
+    tree; **1421 tests** — the `selfhost_parse` seeds (192) + the parser corpus
     differential (the D8 phase-go: all 139 clean-parsing fixtures) + `tests/ast.rs`
     goldens + the `snc resolve` oracle goldens (`tests/resolve.rs`) + the resolve
     seed differential (`tests/selfhost_resolve.rs`, **61 seeds**) + the **resolve
     CORPUS differential `sentinel_resolver_matches_oracle_on_corpus` (the D9
-    phase-go: all 132 clean-resolving fixtures, incl. delegates)**;
+    phase-go: all 132 clean-resolving fixtures, incl. delegates)** + the **`snc
+    types` oracle goldens (`tests/types.rs`, 5 — the new (4a) types surface)**;
     four-check green via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`).
     macOS + LLVM 18.
-    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0039**
+    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0041**
+    (the ACTIVE port stage — **types (4/N)**, ACCEPTED-WITH-AMENDMENTS; (4a) the
+    `snc types` oracle + the **D3/D4 design probes (A1)** landed + empirically
+    verified leak-free: D4 a `Type` is an **integer type-handle into a flat
+    hash-consed interner** (parallel `Vec<i64>`; equality = `==`; recursive
+    render/subst; the VarId→type env is **append-only** — `env[vid]=h` is
+    `IndexAssignNotSupported`), D3 `types.sentinel` will **`use` `resolve.sentinel`
+    as a D.6 module** (3-deep chain + diamond import verified); NEXT = **(4b)** the
+    Sentinel `types.sentinel` skeleton — the scalar grammar — on the confirmed
+    `TyCtx` interner) + the just-COMPLETED **ADR 0040** (resolve, ACCEPTED) + **ADR 0039**
     (the (2/N) parser — **now ACCEPTED / COMPLETE**: (2a)+(2b) the full expression
     grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the
     full-corpus close — `selfhost/parser.sentinel` matches `snc ast` over every
