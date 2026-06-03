@@ -630,7 +630,7 @@ fn dump_targs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Ve
         Args::End => 0,
         Args::Cell(x, rest) => {
             push(out, ' ');
-            dump_texpr(out, x, src, c, gb);
+            dump_texpr(out, x, 0 - 1, src, c, gb);
             dump_targs(out, rest, src, c, gb)
         },
     }
@@ -644,7 +644,7 @@ fn dump_array_elems(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &
         Args::End => 0,
         Args::Cell(x, rest) => {
             push(out, ' ');
-            let t0: i64 = dump_texpr(out, x, src, c, gb);
+            let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
             dump_targs(out, rest, src, c, gb);
             t0
         },
@@ -725,7 +725,7 @@ fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx
         Args::End => 0 - 1,
         Args::Cell(x, rest) => {
             push(out, ' ');
-            let t0: i64 = dump_texpr(out, x, src, c, gb);
+            let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
             dump_targs(out, rest, src, c, gb);
             t0
         },
@@ -734,43 +734,112 @@ fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx
 
 // (4c-1) struct-literal fields: emit each field's VALUE positionally (the names
 // are dropped — the typed StructLit is nameless/positional). Source order.
-fn dump_sfields(out: &mut Vec<u8>, f: Fields, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match f {
         Fields::FieldEnd => 0,
         Fields::FieldCell(fnm, fval, rest) => {
+            // Each field VALUE is coerced to the field's DECLARED type — a `?T` field
+            // widens a `T` value / types a bare `null`. Look up the type by name
+            // BEFORE `fnm` is sunk.
+            let ftype: i64 = field_type(c, sid, &fnm);
             sink_name(gb, fnm);
             push(out, ' ');
-            dump_texpr(out, fval, src, c, gb);
-            dump_sfields(out, rest, src, c, gb)
+            dump_texpr(out, fval, ftype, src, c, gb);
+            dump_sfields(out, rest, sid, src, c, gb)
         },
     }
 }
 
-fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// --- (4c-3) nullable widening (ADR 0014 D3) ---------------------------------
+
+// True iff `exp` is a nullable type `?T` (interner kind 4). -1 / scalars → false.
+fn exp_nullable(c: &mut TyCtx, exp: i64) -> bool {
+    if exp < tbase() {
+        false
+    } else {
+        (*c).tk[exp - tbase()] == 4
+    }
+}
+
+// Should a value of natural type `nt` widen to the expectation `exp`? — iff `exp`
+// is `?T` and `nt` is its inner `T` (the implicit `T → ?T` coercion).
+fn want_widen(c: &mut TyCtx, exp: i64, nt: i64) -> bool {
+    if exp_nullable(c, exp) {
+        nullable_inner_of(c, exp) == nt
+    } else {
+        false
+    }
+}
+
+// Emit a `(widen-null ` prefix iff a value of natural type `nt` widens to `exp`;
+// return whether it did (so the caller closes the wrapper after the node).
+fn widen_pre(out: &mut Vec<u8>, exp: i64, nt: i64, c: &mut TyCtx) -> bool {
+    let w: bool = want_widen(c, exp, nt);
+    if w {
+        append_str(out, "(widen-null ");
+        0
+    } else {
+        0
+    };
+    w
+}
+
+// Close a widened node: append ` :?T)` iff `w`; return the node's resulting type
+// (`exp` when widened, else the natural `nt`).
+fn widen_post(out: &mut Vec<u8>, w: bool, exp: i64, nt: i64, c: &mut TyCtx) -> i64 {
+    if w {
+        close_ty(out, exp, c);
+        exp
+    } else {
+        nt
+    }
+}
+
+// Splice a composite already emitted into `tmp` (natural type `nt`) into `out`,
+// wrapping it in `(widen-null … :?T)` iff a `?nt` is expected. Consumes `tmp`. Used
+// where the node's type is known only AFTER its children synthesize — the wrapper
+// must precede the node, so the node is built in a temp first.
+fn widen_splice(out: &mut Vec<u8>, tmp: Vec<u8>, exp: i64, nt: i64, c: &mut TyCtx) -> i64 {
+    let w: bool = widen_pre(out, exp, nt, c);
+    append_str(out, vec_to_array(tmp));
+    widen_post(out, w, exp, nt, c)
+}
+
+fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match ex {
         Expr::Int(nv) => {
+            let w: bool = widen_pre(out, exp, 0, c);
             append_str(out, "(int ");
             append_int(out, nv);
             close_ty(out, 0, c);
-            0
+            widen_post(out, w, exp, 0, c)
         },
         Expr::Bool(bv) => {
+            let w: bool = widen_pre(out, exp, 2, c);
             if bv {
                 append_str(out, "(bool true")
             } else {
                 append_str(out, "(bool false")
             };
             close_ty(out, 2, c);
-            2
+            widen_post(out, w, exp, 2, c)
+        },
+        // (4c-3) `null` carries no syntactic type; its type IS the expectation `exp`
+        // (a `?T`), threaded from the let annotation / field / cmp-operand / branch.
+        Expr::Null => {
+            append_str(out, "(null");
+            close_ty(out, exp, c);
+            exp
         },
         Expr::Var(nm) => {
             let vid: i64 = sc_lookup(c, &nm);
             sink_name(gb, nm);
             let ty: i64 = env_get(c, vid);
+            let w: bool = widen_pre(out, exp, ty, c);
             append_str(out, "(var #");
             append_int(out, vid);
             close_ty(out, ty, c);
-            ty
+            widen_post(out, w, exp, ty, c)
         },
         Expr::Unary(uop, inner) => {
             append_str(out, "(unary ");
@@ -787,7 +856,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut V
             };
             append_str(out, usym);
             push(out, ' ');
-            let it: i64 = dump_texpr(out, inner, src, c, gb);
+            let it: i64 = dump_texpr(out, inner, 0 - 1, src, c, gb);
             // `!` -> bool; arithmetic/deref unary -> the operand type.
             let rt: i64 = if uop == 2 {
                 2
@@ -798,7 +867,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut V
             rt
         },
         Expr::Binary(bop, l, r) => {
-            push(out, '(');
+            // The result type is known only AFTER the operands synthesize, but a
+            // `(widen-null …)` wrapper must PRECEDE the node — so build the binop into
+            // a temp buffer, then splice with the optional wrapper (`maybe_double`'s
+            // `a * 2 : i64` widens to `?i64` in a `?i64`-returning branch).
+            let mut tmp: Vec<u8> = vec_new();
+            push(&mut tmp, '(');
             let pfx: [u8] = if bop <= 7 {
                 "binop"
             } else if bop <= 13 {
@@ -806,8 +880,8 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut V
             } else {
                 "logic"
             };
-            append_str(out, pfx);
-            push(out, ' ');
+            append_str(&mut tmp, pfx);
+            push(&mut tmp, ' ');
             let bsym: [u8] = if bop == 1 {
                 "+"
             } else if bop == 2 {
@@ -839,27 +913,38 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut V
             } else {
                 "||"
             };
-            append_str(out, bsym);
-            push(out, ' ');
-            let lt: i64 = dump_texpr(out, l, src, c, gb);
-            push(out, ' ');
-            let rt: i64 = dump_texpr(out, r, src, c, gb);
+            append_str(&mut tmp, bsym);
+            push(&mut tmp, ' ');
+            let lt: i64 = dump_texpr(&mut tmp, l, 0 - 1, src, c, gb);
+            push(&mut tmp, ' ');
+            // `==`/`!=` (bop 8/9): the right operand inherits the left's type, so
+            // `x == null` types the `null` as `x`'s `?T` (ADR 0014 D7).
+            let rexp: i64 = if bop == 8 {
+                lt
+            } else if bop == 9 {
+                lt
+            } else {
+                0 - 1
+            };
+            let rt: i64 = dump_texpr(&mut tmp, r, rexp, src, c, gb);
             // binop (<=7) preserves the operand type; cmp/logic -> bool.
             let resty: i64 = if bop <= 7 {
                 lt
             } else {
                 2
             };
-            close_ty(out, resty, c);
-            resty
+            close_ty(&mut tmp, resty, c);
+            widen_splice(out, tmp, exp, resty, c)
         },
         Expr::If(cnd, thn, els) => {
             append_str(out, "(if ");
-            dump_texpr(out, cnd, src, c, gb);
+            dump_texpr(out, cnd, 0 - 1, src, c, gb);
             push(out, ' ');
-            let tt: i64 = dump_texpr(out, thn, src, c, gb);
+            // Both branches inherit the `if`'s expectation, so a `?T`-returning `if`
+            // widens each branch's tail (and the `if`'s type is that branch type).
+            let tt: i64 = dump_texpr(out, thn, exp, src, c, gb);
             push(out, ' ');
-            dump_texpr(out, els, src, c, gb);
+            dump_texpr(out, els, exp, src, c, gb);
             close_ty(out, tt, c);
             tt
         },
@@ -867,7 +952,8 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut V
             append_str(out, "(block");
             dump_tstmts(out, stmts, src, c, gb);
             push(out, ' ');
-            let tt: i64 = dump_texpr(out, tail, src, c, gb);
+            // The block's value is its tail — thread the expectation through to it.
+            let tt: i64 = dump_texpr(out, tail, exp, src, c, gb);
             close_ty(out, tt, c);
             tt
         },
@@ -889,9 +975,10 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut V
             rt
         },
         Expr::SynthZero => {
+            let w: bool = widen_pre(out, exp, 0, c);
             append_str(out, "(int 0");
             close_ty(out, 0, c);
-            0
+            widen_post(out, w, exp, 0, c)
         },
         // (4c-1) struct literal — positional field VALUES in declaration order
         // (the corpus writes fields in decl order, so source order = decl order;
@@ -904,7 +991,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut V
             append_int(out, sid);
             push(out, ' ');
             append_str(out, snm);
-            dump_sfields(out, fields, src, c, gb);
+            dump_sfields(out, fields, sid, src, c, gb);
             close_ty(out, sty, c);
             sty
         },
@@ -913,7 +1000,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut V
         // index (for codegen's GEP) + the field type.
         Expr::Field(ft, fdn) => {
             append_str(out, "(field ");
-            let tty: i64 = dump_texpr(out, ft, src, c, gb);
+            let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
             push(out, ' ');
             let sid: i64 = struct_of_handle(c, tty);
             let fidx: i64 = field_index(c, sid, &fdn);
@@ -938,9 +1025,9 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut V
         // element type is the array's inner.
         Expr::Index(it, ii) => {
             append_str(out, "(index ");
-            let tty: i64 = dump_texpr(out, it, src, c, gb);
+            let tty: i64 = dump_texpr(out, it, 0 - 1, src, c, gb);
             push(out, ' ');
-            dump_texpr(out, ii, src, c, gb);
+            dump_texpr(out, ii, 0 - 1, src, c, gb);
             let ety: i64 = array_elem_of(c, tty);
             close_ty(out, ety, c);
             ety
@@ -970,15 +1057,21 @@ fn dump_tstmts(out: &mut Vec<u8>, st: Stmts, src: &[u8], c: &mut TyCtx, gb: &mut
 fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match s {
         Stmt::SLet(lmf, lnm, lty, lval) => {
-            // DURING-WALK binding: resolve the VALUE first (it may bind nested
-            // vars), into a temp buffer, capturing its type; THEN take the let's
-            // VarId; the let's type is the annotation if present, else inferred
-            // from the value. Format: `(let #vid [mut] <type> <value>)`.
+            // DURING-WALK binding: take the let's expected type from its annotation
+            // FIRST (so a `?T` let widens a `T` value / types a `null`), resolve the
+            // VALUE against it into a temp buffer (it may bind nested vars), THEN take
+            // the let's VarId. The let's type is the annotation if present, else the
+            // value's inferred type. Format: `(let #vid [mut] <type> <value>)`.
             let mut vbuf: Vec<u8> = vec_new();
-            let valty: i64 = dump_texpr(&mut vbuf, lval, src, c, gb);
+            let letexp: i64 = tyopt_exp(c, lty, gb);
+            let valty: i64 = dump_texpr(&mut vbuf, lval, letexp, src, c, gb);
             let lvid: i64 = (*c).nextvid;
             (*c).nextvid = (*c).nextvid + 1;
-            let letty: i64 = type_of_tyopt(c, lty, valty, gb);
+            let letty: i64 = if letexp == 0 - 1 {
+                valty
+            } else {
+                letexp
+            };
             bind_name(c, lnm, lvid, letty);
             append_str(out, "(let #");
             append_int(out, lvid);
@@ -996,17 +1089,17 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
         },
         Stmt::SAssign(atgt, aval) => {
             append_str(out, "(assign ");
-            dump_texpr(out, atgt, src, c, gb);
+            dump_texpr(out, atgt, 0 - 1, src, c, gb);
             push(out, ' ');
-            dump_texpr(out, aval, src, c, gb);
+            dump_texpr(out, aval, 0 - 1, src, c, gb);
             push(out, ')');
             0
         },
         Stmt::SWhile(wcond, wbody) => {
             append_str(out, "(while ");
-            dump_texpr(out, wcond, src, c, gb);
+            dump_texpr(out, wcond, 0 - 1, src, c, gb);
             push(out, ' ');
-            dump_texpr(out, wbody, src, c, gb);
+            dump_texpr(out, wbody, 0 - 1, src, c, gb);
             push(out, ')');
             0
         },
@@ -1020,18 +1113,19 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
         },
         Stmt::SExpr(sx) => {
             append_str(out, "(expr ");
-            dump_texpr(out, sx, src, c, gb);
+            dump_texpr(out, sx, 0 - 1, src, c, gb);
             push(out, ')');
             0
         },
     }
 }
 
-// The `let`'s type: the annotation if present (consuming the `TyOpt`), else the
-// inferred value type `valty`.
-fn type_of_tyopt(c: &mut TyCtx, ty: TyOpt, valty: i64, gb: &mut Vec<u8>) -> i64 {
+// The let's annotation type as an EXPECTATION (consuming the `TyOpt`): the interned
+// annotation handle if present, else -1 (no expectation → the value's type is
+// inferred). Taken before the value is walked, so a `?T` annotation widens the value.
+fn tyopt_exp(c: &mut TyCtx, ty: TyOpt, gb: &mut Vec<u8>) -> i64 {
     match ty {
-        TyOpt::NoTy => valty,
+        TyOpt::NoTy => 0 - 1,
         TyOpt::SomeTy(t) => type_of_typeexpr(c, t, gb),
     }
 }
@@ -1120,7 +1214,9 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     let body: Expr = parse_block(k, s, e, src, cur);
     render_type(out, rty, c);
     push(out, ' ');
-    dump_texpr(out, body, src, c, gb);
+    // The fn return type is the body's expectation — a `?T`-returning fn widens its
+    // tail (`dump_texpr` on the body `Block` threads `rty` to the tail).
+    dump_texpr(out, body, rty, src, c, gb);
     push(out, ')');
     0
 }

@@ -3,12 +3,14 @@
 //! D.6 module) with the Rust `snc`, then assert its canonical typed-AST dump is
 //! byte-identical to `snc types` for a seed set of programs.
 //!
-//! MILESTONE-1 (4b): the SCALAR skeleton. Paramful `fn`s over the scalar grammar —
-//! int/bool literals, var refs, unary, binop/cmp/logic, `if`, blocks, `let` with
-//! type inference, and calls (user fns + scalar builtins) — each expression node
-//! annotated with its inferred `Type` (a trailing ` :<type>`); the `let`'s inferred
-//! type replaces resolve's `_`. The full-corpus differential (4i) is the phase-go
-//! (D9); compound types / decls / dispatch land at 4c..4h.
+//! (4b) the SCALAR skeleton + (4c) COMPOUND types. Paramful `fn`s over the scalar
+//! grammar (int/bool literals, var refs, unary, binop/cmp/logic, `if`, blocks, `let`
+//! with inference, calls) PLUS structs (struct-lit + field access), arrays (literal +
+//! index + the generic `len`), and (4c-3) nullable (`?T` + `null` + the implicit
+//! `T → ?T` widening via expected-type threading through `dump_texpr`) — each
+//! expression node annotated with its inferred `Type` (a trailing ` :<type>`); the
+//! `let`'s inferred type replaces resolve's `_`. The full-corpus differential (4i) is
+//! the phase-go (D9); secret / enum / dispatch / generics land at 4d..4h.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -80,6 +82,19 @@ const SEEDS: &[&str] = &[
     // generic `len` builtin (with its inferred `(targs T)`).
     "fn main() -> i64 { let a = [10, 20, 30]; a[1] + len(a) }\n",
     "fn sum_two(a: [i64]) -> i64 { a[0] + a[1] }\nfn main() -> i64 { sum_two([5, 6]) }\n",
+    // (4c-3) nullable: `?T` annotation, `null` literal (typed from context), the
+    // implicit `T → ?T` widening (`widen-null`), `is_some` / `unwrap_or`, and
+    // `x == null` (the operand-type-sharing cmp).
+    "fn main() -> i64 { let x: ?i64 = null; if is_some(x) { 1 } else { 0 } }\n",
+    "fn main() -> i64 { let x: ?i64 = 42; unwrap_or(x, 0) }\n",
+    "fn main() -> i64 { let x: ?i64 = null; if x == null { 1 } else { 0 } }\n",
+    // widening at a struct-field boundary (`?i64` field, `i64` literal value) +
+    // nullable-field access.
+    "struct P { a: ?i64, b: i64 }\nfn main() -> i64 { let p = P { a: 5, b: 8 }; unwrap_or(p.a, 0) + p.b }\n",
+    // widening through a `?T`-returning fn (the if-branch / block-tail threading):
+    // the `* 2` branch widens `i64 → ?i64`, the `null` branch types from the return.
+    "fn md(x: ?i64) -> ?i64 { if is_some(x) { unwrap_or(x, 0) * 2 } else { null } }\nfn main() -> i64 { let v: ?i64 = 5; unwrap_or(md(v), 0) }\n",
+    "fn first(x: ?i64) -> ?i64 { x }\nfn main() -> i64 { let n: ?i64 = null; unwrap_or(first(n), 7) }\n",
 ];
 
 #[test]
