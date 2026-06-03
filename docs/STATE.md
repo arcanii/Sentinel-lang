@@ -15,13 +15,15 @@ Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (3/N) RESOLVE is at
-(3b-1)** (ADR 0040 A4): `selfhost/resolve.sentinel` now walks the TOP-LEVEL decls
-(a brace-depth pass-1 scan + a source-order pass-2 dispatch) and resolves the
-first decl kind end to end — `(struct #id Name (field …))` heads + struct-lit
-`#id` — with the symbol tables bundled in an `&mut RCtx` struct (the A4 probe).
-23 differential seeds match `snc resolve`, leak-free; four-check green (1415
-tests). NEXT = (3b-2) the enum table + `enum-construct`. The prior banner (the
-(2/N) PARSER, COMPLETE, ADR 0039 → ACCEPTED, A1–A22) stands below.
+(3b-2)** (ADR 0040 A4/A5): `selfhost/resolve.sentinel` now walks the TOP-LEVEL
+decls (a brace-depth pass-1 scan + a source-order pass-2 dispatch) and resolves
+the first TWO decl kinds end to end — `(struct #id …)` + struct-lit `#id`, and
+`(enum #id Name (variant …))` + the `Enum::Variant` → `(enum-construct #E …)`
+split (the enum table checked FIRST) — with the symbol tables bundled in an
+`&mut RCtx` struct (the A4 probe). 30 differential seeds match `snc resolve`,
+leak-free; four-check green (1415 tests). NEXT = (3b-3) the effect table +
+`perform` `op_index`. The prior banner (the (2/N) PARSER, COMPLETE, ADR 0039 →
+ACCEPTED, A1–A22) stands below.
 
 Prior banner: **(2/N) the PARSER is
 COMPLETE (ADR 0039 → ACCEPTED, A1–A22).** `selfhost/parser.sentinel` matches the
@@ -67,11 +69,16 @@ fields supports `push`/`len`/index through the ref + cross-field read+write,
 leak-free; always `(*c).field`; no `&mut`→`&` reborrow; never move a `Vec` field
 out), and the first decl kind lands end to end: `(struct #id Name (field …))`
 heads (source order, interleaved with fns) + struct-lit `#id` (a struct consumes
-no VarId). **23 differential seeds match `snc resolve`, leak-free.** **NEXT =
-(3b-2)** the enum table + `(enum #id …)` + the `Enum::Variant`/`Enum::init` →
-`enum-construct` split, then (3b-3) effect/perform, (3b-4) trait+impl/qcall-impl
-(method bodies + `self`), (3b-5) class/class-init + resume-kont, (3c)
-match/while/handle (the D5 truncation restore for arm scopes), (3e) full corpus.
+no VarId). **(3b-2) (A5) added the enum table** — `(enum #id Name (variant V
+<payloads>…)…)` heads (EnumId is its OWN source-order namespace, coexisting with
+struct ids) + the `Enum::Variant` → `(enum-construct #E Enum Variant args)` split
+(the enum table checked FIRST in BOTH the parser's uniform `Qcall` and `ClassInit`
+arms; purely additive — one more `RCtx` table, zero new params). **30 differential
+seeds match `snc resolve`, leak-free.** **NEXT =
+(3b-3)** effect/perform (op_index = scan the effect's ops), then (3b-4)
+trait+impl/qcall-impl (method bodies + `self`), (3b-5) class/class-init +
+resume-kont, (3c) match/while/handle (the D5 truncation restore for arm scopes),
+(3e) full corpus.
 Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3

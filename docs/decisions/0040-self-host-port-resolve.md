@@ -2,14 +2,15 @@
 
 Status: **ACCEPTED-WITH-AMENDMENTS** — the third sub-phase of the self-host port
 (ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039
-→ ACCEPTED). **(3a) m-1+m-2 + (3b-1) have LANDED** (A2, A3, A4):
+→ ACCEPTED). **(3a) m-1+m-2 + (3b-1) + (3b-2) have LANDED** (A2–A5):
 `selfhost/resolve.sentinel`, the third compiler stage in Sentinel, name-resolves
 the fn-body grammar (paramful fns + every expression form + `let`) **and now the
-top-level decl walk + the struct table + struct-lit `#id`** (the symbol tables
-bundled in an `&mut RCtx` struct), matching `snc resolve` (A1's flat-`Vec` model,
-the parser imported as a D.6 module). The ADR flips fully as the remaining slices
-(3b-2–3e: the enum/effect/class/trait/impl tables + the `::`-path disambiguation,
-match/while/handle scoping, the full corpus) close.
+top-level decl walk + the struct & enum tables (struct-lit `#id`,
+`enum-construct`)** (the symbol tables bundled in an `&mut RCtx` struct), matching
+`snc resolve` (A1's flat-`Vec` model, the parser imported as a D.6 module). The
+ADR flips fully as the remaining slices (3b-3–3e: the effect/class/trait/impl
+tables + the rest of the `::`-path disambiguation, match/while/handle scoping, the
+full corpus) close.
 Ports the **resolve** stage to Sentinel: the parsed AST → a name-resolved program
 (every identifier reference bound to an integer ID), differentially validated
 against a Rust `snc` oracle over the `tests/pass` + `tests/ui` corpus. Flips to
@@ -154,6 +155,27 @@ oracle (3a) has landed; the Sentinel side builds on the corrected model. See
     resolve`; leak-free under `leaks --atExit`; four-check green. Next: (3b-2) the
     enum table + `(enum #id …)` + the `Enum::Variant`/`Enum::init` →
     `enum-construct` split (the enum table is checked FIRST in both `::` arms).
+- **A5 — (3b-2): the enum table + `(enum #id …)` heads + the `enum-construct`
+  split.** The second decl kind, end to end, on the (3b-1) machinery — purely
+  additive (one more table in `RCtx`, zero new params). The **enum table**
+  (`ens`/`ene` + the `enumct` source-order counter) registers at pass-1 depth 0
+  (`enum` = tag 53); pass 2 dispatches `enum` → `resolve_enum`, dumping `(enum #id
+  Name (variant V <payloads>…)…)` (pure syntax — payload types need no resolution;
+  mirrors the parser's `dump_enum_decl`/`dump_variants`/`dump_payloads`).
+  **EnumId is its OWN source-order namespace** (an `enum #0` coexists with a
+  `struct #0` — each kind counts independently), and an enum decl consumes **no
+  VarId**. The **disambiguation** mirrors `lib.rs:3763–3899`: the parser emits a
+  uniform `Expr::Qcall` (`Name::method(args)` / paren-less `Name::Variant`) and
+  `Expr::ClassInit` (`Name::init(args)`); resolve checks the enum table **FIRST**
+  in BOTH arms — if the leading name is an enum, `Qcall` →
+  `(enum-construct #E Enum Variant args)` and `ClassInit` →
+  `(enum-construct #E Enum init args)` (the latter is **unreachable on clean
+  fixtures** — the parser rejects an `init` enum *variant* — but kept faithful);
+  else they keep their `(qcall …)` / `(class-init …)` placeholders until (3b-4)
+  / (3b-5). Verified: 7 new differential seeds (enum heads with/without payloads,
+  construct with/without args, struct+enum ID-namespace coexistence, two enums,
+  an enum after a fn; 30 total) match `snc resolve`; leak-free; four-check green.
+  Next: (3b-3) the effect table + `(effect #id …)` + the `perform` `op_index`.
 
 ## Context
 
