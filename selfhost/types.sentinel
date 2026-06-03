@@ -1,0 +1,955 @@
+// selfhost/types.sentinel — the FOURTH compiler stage in Sentinel (ADR 0041).
+//
+// (4b) milestone-1: the SCALAR skeleton. Type-checks paramful `fn`s over the
+// scalar grammar (int/bool lits, var refs, unary, binop/cmp/logic, `if`, blocks,
+// `let` with inference, calls) and emits the `snc types` dump — the `snc resolve`
+// S-expr EXTENDED with each expression node's inferred Type (a trailing ` :<type>`)
+// — byte-for-byte. Differentially validated against `snc types` (the oracle in
+// crates/sentinel-driver/src/types_dump.rs).
+//
+// ARCHITECTURE (ADR 0041 D3, refined at the build — see the ADR A3 amendment): the
+// types stage needs ALL of resolve's name-binding machinery PLUS a type interner +
+// a VarId->type env, and resolve's `RCtx` cannot be extended with type fields across
+// a module boundary (and two-context threading is clunky). So `types.sentinel` is
+// SELF-CONTAINED with one `TyCtx` bundle (resolve's name tables + the type interner
+// + the env), importing only the PARSER (the AST + parse fns). It reuses resolve's
+// IDIOMS as its own code.
+//
+// THE TYPE REPRESENTATION (ADR 0041 D4, probe-verified A1): a `Type` is an integer
+// "type-handle". Scalars are fixed codes below BASE (i64=0/i32=1/bool=2/u8=3);
+// compound types are interned into the flat parallel `tk`/`ta`/`tb` arrays
+// (handle = BASE + index), hash-consed so structural equality is integer `==`.
+// `render_type` walks handles to the structural text (the `type_display` form);
+// the VarId->type env is APPEND-ONLY (`env[vid] = h` is IndexAssignNotSupported —
+// push in VarId order, index-read).
+
+use parser::Expr;
+use parser::Stmts;
+use parser::Stmt;
+use parser::TypeE;
+use parser::TyArgs;
+use parser::TyOpt;
+use parser::Args;
+use parser::tokenize;
+use parser::parse_block;
+use parser::parse_type;
+use parser::skip_type_params;
+use parser::skip_effect_row;
+use parser::append_int;
+use parser::append_str;
+use parser::append_slice;
+
+// The type-check context: the type interner + the VarId->type env + the scope
+// (name blob) + the user-fn table. One `&mut TyCtx` threaded through the walk
+// (field access ALWAYS `(*c).field`; never move a Vec field out).
+struct TyCtx {
+    // --- type interner (handles >= BASE index these; hash-consed) ---
+    tk: Vec<i64>,    // compound kind tag: 1 Array / 2 Ref / 3 Secret / 4 Nullable
+    ta: Vec<i64>,    // payload A: inner-handle (Array/Secret/Nullable) | mut-flag (Ref)
+    tb: Vec<i64>,    // payload B: inner-handle (Ref)
+    // --- VarId -> type env (append-only, vid-indexed; vid == push order) ---
+    env: Vec<i64>,
+    // --- scope: name blob + slices + VarIds (resolve's NAME-BLOB model) ---
+    nb: Vec<u8>,
+    scs: Vec<i64>,
+    sce: Vec<i64>,
+    scv: Vec<i64>,
+    base: i64,       // the current item's scope floor (array index)
+    nextvid: i64,    // the active VarId counter
+    // --- user-fn table: name slices (FnId = 14 + idx) + return-type handle ---
+    ufs: Vec<i64>,
+    ufe: Vec<i64>,
+    ufret: Vec<i64>,
+}
+
+fn tbase() -> i64 { 100 }
+
+// --- name comparison (resolve idioms) ---------------------------------------
+
+fn name_eq_src(src: &[u8], st: i64, en: i64, q: &[u8]) -> bool {
+    let qn: i64 = len(*q);
+    if en - st != qn {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < qn {
+            if (*src)[st + i] != (*q)[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+fn name_eq_lit(q: &[u8], lit: [u8]) -> bool {
+    let qn: i64 = len(*q);
+    let ln: i64 = len(lit);
+    if qn != ln {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < ln {
+            if (*q)[i] != lit[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Compare a blob slice `nb[st..en]` to the query name `q`.
+fn blob_eq(c: &mut TyCtx, st: i64, en: i64, q: &[u8]) -> bool {
+    let qn: i64 = len(*q);
+    if en - st != qn {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < qn {
+            if (*c).nb[st + i] != (*q)[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Sink a discarded owned `[u8]` (a resolved-away name) into the garbage Vec.
+fn sink_name(gb: &mut Vec<u8>, name: [u8]) -> i64 {
+    let n: i64 = len(name);
+    let mut i: i64 = 0;
+    while i < n {
+        push(gb, name[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// --- the type interner (ADR 0041 D4) ----------------------------------------
+
+// Hash-cons: linear-scan for `(kind, a, b)`; return the existing handle else
+// append. Structurally-equal types share a handle → equality is integer `==`.
+fn intern_type(c: &mut TyCtx, kind: i64, a: i64, b: i64) -> i64 {
+    let n: i64 = len((*c).tk);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if (*c).tk[i] == kind {
+                if (*c).ta[i] == a {
+                    if (*c).tb[i] == b {
+                        found = tbase() + i;
+                        0
+                    } else {
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if found == 0 - 1 {
+        push(&mut (*c).tk, kind);
+        push(&mut (*c).ta, a);
+        push(&mut (*c).tb, b);
+        tbase() + n
+    } else {
+        found
+    }
+}
+
+fn mk_array(c: &mut TyCtx, inner: i64) -> i64 { intern_type(c, 1, inner, 0) }
+fn mk_ref(c: &mut TyCtx, m: i64, inner: i64) -> i64 { intern_type(c, 2, m, inner) }
+fn mk_secret(c: &mut TyCtx, inner: i64) -> i64 { intern_type(c, 3, inner, 0) }
+fn mk_nullable(c: &mut TyCtx, inner: i64) -> i64 { intern_type(c, 4, inner, 0) }
+
+// Scalar codes: i64=0, i32=1, bool=2, u8=3. -1 if `q` is not a scalar name.
+fn scalar_code(q: &[u8]) -> i64 {
+    if name_eq_lit(q, "i64") {
+        0
+    } else if name_eq_lit(q, "i32") {
+        1
+    } else if name_eq_lit(q, "bool") {
+        2
+    } else if name_eq_lit(q, "u8") {
+        3
+    } else {
+        0 - 1
+    }
+}
+
+// Render a scalar handle (< BASE) structurally.
+fn render_scalar(out: &mut Vec<u8>, h: i64) -> i64 {
+    if h == 0 {
+        append_str(out, "i64")
+    } else if h == 1 {
+        append_str(out, "i32")
+    } else if h == 2 {
+        append_str(out, "bool")
+    } else if h == 3 {
+        append_str(out, "u8")
+    } else {
+        append_str(out, "?T")
+    }
+}
+
+// Render a type handle structurally — the `type_display` form (no interner IDs).
+fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
+    if h < tbase() {
+        render_scalar(out, h)
+    } else {
+        let idx: i64 = h - tbase();
+        let k: i64 = (*c).tk[idx];
+        let a: i64 = (*c).ta[idx];
+        let b: i64 = (*c).tb[idx];
+        if k == 1 {
+            push(out, '[');
+            render_type(out, a, c);
+            push(out, ']');
+            0
+        } else if k == 2 {
+            push(out, '&');
+            if a == 1 {
+                append_str(out, "mut ")
+            } else {
+                0
+            };
+            render_type(out, b, c);
+            0
+        } else if k == 3 {
+            append_str(out, "secret ");
+            render_type(out, a, c);
+            0
+        } else if k == 4 {
+            push(out, '?');
+            render_type(out, a, c);
+            0
+        } else {
+            append_str(out, "??")
+        }
+    }
+}
+
+// A `TypeE` (surface type AST) -> a type handle (interning compounds). Consumes
+// the `TypeE` (disposing any owned name `[u8]` into `gb`). At m-1 only scalars are
+// validated; a non-scalar `TIdent` (a struct/enum/class name) defaults to i64
+// (the decl tables land at 4c).
+fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
+    match t {
+        TypeE::TIdent(nm) => {
+            let sc: i64 = scalar_code(&nm);
+            sink_name(gb, nm);
+            if sc >= 0 {
+                sc
+            } else {
+                0
+            }
+        },
+        TypeE::TNullable(inner) => {
+            let ih: i64 = type_of_typeexpr(c, inner, gb);
+            mk_nullable(c, ih)
+        },
+        TypeE::TArray(inner) => {
+            let ih: i64 = type_of_typeexpr(c, inner, gb);
+            mk_array(c, ih)
+        },
+        TypeE::TRef(inner) => {
+            let ih: i64 = type_of_typeexpr(c, inner, gb);
+            mk_ref(c, 0, ih)
+        },
+        TypeE::TRefMut(inner) => {
+            let ih: i64 = type_of_typeexpr(c, inner, gb);
+            mk_ref(c, 1, ih)
+        },
+        TypeE::TSecret(inner) => {
+            let ih: i64 = type_of_typeexpr(c, inner, gb);
+            mk_secret(c, ih)
+        },
+        TypeE::TGeneric(gn, ga) => {
+            // m-1: generic types (Vec<T>, Name<args>) land at 4c/4h. Dispose the
+            // name + the arg list; default to i64.
+            sink_name(gb, gn);
+            dispose_tyargs(c, ga, gb);
+            0
+        },
+    }
+}
+
+// Consume a `TyArgs` cons-list (disposing its `TypeE`s) — m-1 placeholder.
+fn dispose_tyargs(c: &mut TyCtx, a: TyArgs, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        TyArgs::TAEnd => 0,
+        TyArgs::TACell(t, rest) => {
+            type_of_typeexpr(c, t, gb);
+            dispose_tyargs(c, rest, gb)
+        },
+    }
+}
+
+// --- the builtin / user-fn return-type tables -------------------------------
+
+// The 14 runtime builtins -> FnId (0..=13), or -1.
+fn builtin_id(q: &[u8]) -> i64 {
+    if name_eq_lit(q, "print") {
+        0
+    } else if name_eq_lit(q, "unwrap_or") {
+        1
+    } else if name_eq_lit(q, "is_some") {
+        2
+    } else if name_eq_lit(q, "len") {
+        3
+    } else if name_eq_lit(q, "str_eq") {
+        4
+    } else if name_eq_lit(q, "u8_to_i64") {
+        5
+    } else if name_eq_lit(q, "i64_to_u8") {
+        6
+    } else if name_eq_lit(q, "vec_new") {
+        7
+    } else if name_eq_lit(q, "push") {
+        8
+    } else if name_eq_lit(q, "pop") {
+        9
+    } else if name_eq_lit(q, "vec_to_array") {
+        10
+    } else if name_eq_lit(q, "read_file") {
+        11
+    } else if name_eq_lit(q, "write_file") {
+        12
+    } else if name_eq_lit(q, "print_bytes") {
+        13
+    } else {
+        0 - 1
+    }
+}
+
+// A builtin FnId -> its return-type handle (the scalar-returning ones; the
+// generic/array ones land at 4c/4h, defaulting to i64 for m-1).
+fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
+    if fid == 2 {
+        2
+    } else if fid == 3 {
+        0
+    } else if fid == 4 {
+        2
+    } else if fid == 5 {
+        0
+    } else if fid == 6 {
+        3
+    } else {
+        0
+    }
+}
+
+// Resolve a call name to a FnId: a builtin (0..=13), else a user fn (14 + idx),
+// else -1.
+fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
+    let b: i64 = builtin_id(q);
+    if b >= 0 {
+        b
+    } else {
+        let n: i64 = len((*c).ufs);
+        let mut i: i64 = 0;
+        let mut found: i64 = 0 - 1;
+        while i < n {
+            if found == 0 - 1 {
+                if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
+                    found = 14 + i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        found
+    }
+}
+
+// The return-type handle for a resolved FnId.
+fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
+    if fid < 14 {
+        builtin_ret(c, fid)
+    } else {
+        (*c).ufret[fid - 14]
+    }
+}
+
+// --- scope + env ------------------------------------------------------------
+
+// Resolve a variable name to its VarId — newest-first over `[base, top)`; -1 if
+// absent.
+fn sc_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let top: i64 = len((*c).scs);
+    let mut i: i64 = top - 1;
+    let mut found: i64 = 0 - 1;
+    while i >= (*c).base {
+        if found == 0 - 1 {
+            if blob_eq(c, (*c).scs[i], (*c).sce[i], q) {
+                found = (*c).scv[i];
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i - 1;
+    }
+    found
+}
+
+// Read a VarId's type from the append-only env (vid == push order).
+fn env_get(c: &mut TyCtx, vid: i64) -> i64 {
+    (*c).env[vid]
+}
+
+// Bind a name given as a `src` slice (a param): copy its bytes into the blob,
+// record the scope entry (slice + VarId) AND push its type into the env. Called
+// in VarId order, so the push lands at index `vid`.
+fn bind_src(c: &mut TyCtx, src: &[u8], ns: i64, ne: i64, vid: i64, ty: i64) -> i64 {
+    let st: i64 = len((*c).nb);
+    let mut i: i64 = ns;
+    while i < ne {
+        push(&mut (*c).nb, (*src)[i]);
+        i = i + 1;
+    }
+    push(&mut (*c).scs, st);
+    push(&mut (*c).sce, st + (ne - ns));
+    push(&mut (*c).scv, vid);
+    push(&mut (*c).env, ty);
+    0
+}
+
+// Bind a name given as an owned `[u8]` (a `let`): push its bytes into the blob
+// (which also DISPOSES the `[u8]`), record the scope entry + env type.
+fn bind_name(c: &mut TyCtx, name: [u8], vid: i64, ty: i64) -> i64 {
+    let st: i64 = len((*c).nb);
+    let n: i64 = len(name);
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut (*c).nb, name[i]);
+        i = i + 1;
+    }
+    push(&mut (*c).scs, st);
+    push(&mut (*c).sce, st + n);
+    push(&mut (*c).scv, vid);
+    push(&mut (*c).env, ty);
+    0
+}
+
+// --- the typed dump (1-phase consuming map: Expr -> typed S-expr) ------------
+//
+// Each `dump_t*` for an expression RETURNS the node's inferred type handle and
+// appends ` :<type>` before its closing paren (`close_ty`), so a parent can use a
+// child's type. (Resolve's `dump_r*` returned nothing — types threads the type
+// up.)
+
+// Close a typed expression node: ` :<type>)`.
+fn close_ty(out: &mut Vec<u8>, ty: i64, c: &mut TyCtx) -> i64 {
+    append_str(out, " :");
+    render_type(out, ty, c);
+    push(out, ')');
+    0
+}
+
+fn dump_targs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(x, rest) => {
+            push(out, ' ');
+            dump_texpr(out, x, src, c, gb);
+            dump_targs(out, rest, src, c, gb)
+        },
+    }
+}
+
+fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match ex {
+        Expr::Int(nv) => {
+            append_str(out, "(int ");
+            append_int(out, nv);
+            close_ty(out, 0, c);
+            0
+        },
+        Expr::Bool(bv) => {
+            if bv {
+                append_str(out, "(bool true")
+            } else {
+                append_str(out, "(bool false")
+            };
+            close_ty(out, 2, c);
+            2
+        },
+        Expr::Var(nm) => {
+            let vid: i64 = sc_lookup(c, &nm);
+            sink_name(gb, nm);
+            let ty: i64 = env_get(c, vid);
+            append_str(out, "(var #");
+            append_int(out, vid);
+            close_ty(out, ty, c);
+            ty
+        },
+        Expr::Unary(uop, inner) => {
+            append_str(out, "(unary ");
+            let usym: [u8] = if uop == 1 {
+                "-"
+            } else if uop == 2 {
+                "!"
+            } else if uop == 3 {
+                "*"
+            } else if uop == 4 {
+                "&"
+            } else {
+                "&mut"
+            };
+            append_str(out, usym);
+            push(out, ' ');
+            let it: i64 = dump_texpr(out, inner, src, c, gb);
+            // `!` -> bool; arithmetic/deref unary -> the operand type.
+            let rt: i64 = if uop == 2 {
+                2
+            } else {
+                it
+            };
+            close_ty(out, rt, c);
+            rt
+        },
+        Expr::Binary(bop, l, r) => {
+            push(out, '(');
+            let pfx: [u8] = if bop <= 7 {
+                "binop"
+            } else if bop <= 13 {
+                "cmp"
+            } else {
+                "logic"
+            };
+            append_str(out, pfx);
+            push(out, ' ');
+            let bsym: [u8] = if bop == 1 {
+                "+"
+            } else if bop == 2 {
+                "-"
+            } else if bop == 3 {
+                "*"
+            } else if bop == 4 {
+                "/"
+            } else if bop == 5 {
+                "&"
+            } else if bop == 6 {
+                "|"
+            } else if bop == 7 {
+                "^"
+            } else if bop == 8 {
+                "=="
+            } else if bop == 9 {
+                "!="
+            } else if bop == 10 {
+                "<"
+            } else if bop == 11 {
+                "<="
+            } else if bop == 12 {
+                ">"
+            } else if bop == 13 {
+                ">="
+            } else if bop == 14 {
+                "&&"
+            } else {
+                "||"
+            };
+            append_str(out, bsym);
+            push(out, ' ');
+            let lt: i64 = dump_texpr(out, l, src, c, gb);
+            push(out, ' ');
+            let rt: i64 = dump_texpr(out, r, src, c, gb);
+            // binop (<=7) preserves the operand type; cmp/logic -> bool.
+            let resty: i64 = if bop <= 7 {
+                lt
+            } else {
+                2
+            };
+            close_ty(out, resty, c);
+            resty
+        },
+        Expr::If(cnd, thn, els) => {
+            append_str(out, "(if ");
+            dump_texpr(out, cnd, src, c, gb);
+            push(out, ' ');
+            let tt: i64 = dump_texpr(out, thn, src, c, gb);
+            push(out, ' ');
+            dump_texpr(out, els, src, c, gb);
+            close_ty(out, tt, c);
+            tt
+        },
+        Expr::Block(stmts, tail) => {
+            append_str(out, "(block");
+            dump_tstmts(out, stmts, src, c, gb);
+            push(out, ' ');
+            let tt: i64 = dump_texpr(out, tail, src, c, gb);
+            close_ty(out, tt, c);
+            tt
+        },
+        Expr::Call(cn, ca) => {
+            let fid: i64 = fn_lookup(c, src, &cn);
+            sink_name(gb, cn);
+            let rt: i64 = fn_ret(c, fid);
+            append_str(out, "(call #");
+            append_int(out, fid);
+            dump_targs(out, ca, src, c, gb);
+            close_ty(out, rt, c);
+            rt
+        },
+        Expr::SynthZero => {
+            append_str(out, "(int 0");
+            close_ty(out, 0, c);
+            0
+        },
+        // m-1: the remaining Expr variants (Null/Char/Str/Method/Field/Index/
+        // Qcall/ClassInit/Array/Match/StructLit/Declassify/Perform/Scope/Spawn/
+        // Await/Handle) land at 4c..4g. A defensive catch-all keeps the match
+        // exhaustive without crashing on an out-of-(m-1)-scope fixture.
+        _ => {
+            append_str(out, "(UNHANDLED");
+            close_ty(out, 0, c);
+            0
+        },
+    }
+}
+
+fn dump_tstmts(out: &mut Vec<u8>, st: Stmts, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match st {
+        Stmts::SEnd => 0,
+        Stmts::SCell(s, rest) => {
+            push(out, ' ');
+            dump_tstmt(out, s, src, c, gb);
+            dump_tstmts(out, rest, src, c, gb)
+        },
+    }
+}
+
+fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match s {
+        Stmt::SLet(lmf, lnm, lty, lval) => {
+            // DURING-WALK binding: resolve the VALUE first (it may bind nested
+            // vars), into a temp buffer, capturing its type; THEN take the let's
+            // VarId; the let's type is the annotation if present, else inferred
+            // from the value. Format: `(let #vid [mut] <type> <value>)`.
+            let mut vbuf: Vec<u8> = vec_new();
+            let valty: i64 = dump_texpr(&mut vbuf, lval, src, c, gb);
+            let lvid: i64 = (*c).nextvid;
+            (*c).nextvid = (*c).nextvid + 1;
+            let letty: i64 = type_of_tyopt(c, lty, valty, gb);
+            bind_name(c, lnm, lvid, letty);
+            append_str(out, "(let #");
+            append_int(out, lvid);
+            push(out, ' ');
+            if lmf {
+                append_str(out, "mut ")
+            } else {
+                0
+            };
+            render_type(out, letty, c);
+            push(out, ' ');
+            append_str(out, vec_to_array(vbuf));
+            push(out, ')');
+            0
+        },
+        Stmt::SAssign(atgt, aval) => {
+            append_str(out, "(assign ");
+            dump_texpr(out, atgt, src, c, gb);
+            push(out, ' ');
+            dump_texpr(out, aval, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Stmt::SWhile(wcond, wbody) => {
+            append_str(out, "(while ");
+            dump_texpr(out, wcond, src, c, gb);
+            push(out, ' ');
+            dump_texpr(out, wbody, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Stmt::SBreak => {
+            append_str(out, "(break)");
+            0
+        },
+        Stmt::SContinue => {
+            append_str(out, "(continue)");
+            0
+        },
+        Stmt::SExpr(sx) => {
+            append_str(out, "(expr ");
+            dump_texpr(out, sx, src, c, gb);
+            push(out, ')');
+            0
+        },
+    }
+}
+
+// The `let`'s type: the annotation if present (consuming the `TyOpt`), else the
+// inferred value type `valty`.
+fn type_of_tyopt(c: &mut TyCtx, ty: TyOpt, valty: i64, gb: &mut Vec<u8>) -> i64 {
+    match ty {
+        TyOpt::NoTy => valty,
+        TyOpt::SomeTy(t) => type_of_typeexpr(c, t, gb),
+    }
+}
+
+// --- fn header parse --------------------------------------------------------
+
+// Parse + emit a fn's params from tokens (mirrors resolve's `emit_params`): each
+// `(param #vid [mut] <name> <type>)`, binding the param's VarId + its type in the
+// env. Ends on `)` (kind 5); skips `,` (kind 29). `first` suppresses the leading
+// space.
+fn emit_tparams(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, first: bool) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        emit_tparams(out, k, s, e, src, cur, c, gb, first)
+    } else {
+        if first {
+            0
+        } else {
+            push(out, ' ');
+            0
+        };
+        let pm: bool = (*k)[*cur] == 46;
+        if pm {
+            *cur = *cur + 1;
+            0
+        } else {
+            0
+        };
+        let ns: i64 = (*s)[*cur];
+        let ne: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let pte: TypeE = parse_type(k, s, e, src, cur);
+        let pty: i64 = type_of_typeexpr(c, pte, gb);
+        let vid: i64 = (*c).nextvid;
+        (*c).nextvid = (*c).nextvid + 1;
+        bind_src(c, src, ns, ne, vid, pty);
+        append_str(out, "(param #");
+        append_int(out, vid);
+        push(out, ' ');
+        if pm {
+            append_str(out, "mut ")
+        } else {
+            0
+        };
+        append_slice(out, src, ns, ne);
+        push(out, ' ');
+        render_type(out, pty, c);
+        push(out, ')');
+        emit_tparams(out, k, s, e, src, cur, c, gb, false)
+    }
+}
+
+// Type-check one top-level `fn`, emitting `(fn #id name (params) <ret> <block>)`.
+fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, fnidx: i64) -> i64 {
+    *cur = *cur + 1;            // skip `fn`
+    let name_s: i64 = (*s)[*cur];
+    let name_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    if (*k)[*cur] == 15 {
+        skip_type_params(k, cur)
+    } else {
+        0
+    };
+    *cur = *cur + 1;           // skip `(`
+    (*c).base = len((*c).scs);
+    append_str(out, "(fn #");
+    append_int(out, 14 + fnidx);
+    push(out, ' ');
+    append_slice(out, src, name_s, name_e);
+    append_str(out, " (");
+    emit_tparams(out, k, s, e, src, cur, c, gb, true);
+    append_str(out, ") ");
+    *cur = *cur + 1;           // skip `->`
+    let rte: TypeE = parse_type(k, s, e, src, cur);
+    let rty: i64 = type_of_typeexpr(c, rte, gb);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    let body: Expr = parse_block(k, s, e, src, cur);
+    render_type(out, rty, c);
+    push(out, ' ');
+    dump_texpr(out, body, src, c, gb);
+    push(out, ')');
+    0
+}
+
+// PASS-1 signature scan: position a cursor at the `fn` token `p1` and parse just
+// its return-type handle (skip `fn` name [<...>] `(...)` `->`, parse_type). Used
+// to fill `ufret` so a call to a forward-declared fn types correctly.
+fn scan_fn_ret(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut cur: i64 = p1 + 1;     // at name
+    cur = cur + 1;                 // skip name
+    if (*k)[cur] == 15 {
+        skip_type_params(k, &mut cur)
+    } else {
+        0
+    };
+    cur = cur + 1;                 // skip `(`
+    skip_tparams(k, s, e, src, &mut cur, c, gb);
+    cur = cur + 1;                 // skip `->`
+    let rte: TypeE = parse_type(k, s, e, src, &mut cur);
+    type_of_typeexpr(c, rte, gb)
+}
+
+// Skip a param list (no emit, no bind) — mirrors `emit_tparams`'s token walk,
+// disposing each param type. Ends past `)`.
+fn skip_tparams(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        skip_tparams(k, s, e, src, cur, c, gb)
+    } else {
+        let pm: bool = (*k)[*cur] == 46;
+        if pm {
+            *cur = *cur + 1;
+            0
+        } else {
+            0
+        };
+        *cur = *cur + 1;           // skip name
+        *cur = *cur + 1;           // skip `:`
+        let pte: TypeE = parse_type(k, s, e, src, cur);
+        type_of_typeexpr(c, pte, gb);
+        skip_tparams(k, s, e, src, cur, c, gb)
+    }
+}
+
+fn main() -> i64 {
+    let path: [u8] = "input.sentinel";
+    let src: [u8] = read_file(path);
+    let n: i64 = len(src);
+    let mut kinds: Vec<i64> = vec_new();
+    let mut starts: Vec<i64> = vec_new();
+    let mut ends: Vec<i64> = vec_new();
+    tokenize(&src, n, &mut kinds, &mut starts, &mut ends);
+    let ntok: i64 = len(kinds);
+
+    let mut ctx: TyCtx = TyCtx {
+        tk: vec_new(),
+        ta: vec_new(),
+        tb: vec_new(),
+        env: vec_new(),
+        nb: vec_new(),
+        scs: vec_new(),
+        sce: vec_new(),
+        scv: vec_new(),
+        base: 0,
+        nextvid: 0,
+        ufs: vec_new(),
+        ufe: vec_new(),
+        ufret: vec_new(),
+    };
+    let mut garbage: Vec<u8> = vec_new();
+    let mut out: Vec<u8> = vec_new();
+
+    // Pass 1: brace-depth scan. Record top-level `fn` names (FnId 14+) + their
+    // return-type handles; count user effects (the `Async` effect's id).
+    let mut depth: i64 = 0;
+    let mut ecount: i64 = 0;
+    let mut itempos: Vec<i64> = vec_new();
+    let mut p1: i64 = 0;
+    while p1 < ntok {
+        let t1: i64 = kinds[p1];
+        if t1 == 6 {
+            depth = depth + 1;
+            0
+        } else if t1 == 7 {
+            depth = depth - 1;
+            0
+        } else if depth == 0 {
+            if t1 == 3 {
+                push(&mut itempos, p1);
+                push(&mut ctx.ufs, starts[p1 + 1]);
+                push(&mut ctx.ufe, ends[p1 + 1]);
+                let rh: i64 = scan_fn_ret(&kinds, &starts, &ends, &src, p1, &mut ctx, &mut garbage);
+                push(&mut ctx.ufret, rh);
+                0
+            } else if t1 == 57 {
+                ecount = ecount + 1;
+                0
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        p1 = p1 + 1;
+    }
+
+    // Pass 2: type-check each fn in source order (fns-only at m-1, so VarIds are
+    // simple source order).
+    let nf: i64 = len(itempos);
+    let mut fi: i64 = 0;
+    let mut first_item: bool = true;
+    while fi < nf {
+        if first_item {
+            first_item = false;
+            0
+        } else {
+            push(&mut out, '\n');
+            0
+        };
+        let mut cur: i64 = itempos[fi];
+        type_fn(&mut out, &kinds, &starts, &ends, &src, &mut cur, &mut ctx, &mut garbage, fi);
+        fi = fi + 1;
+    }
+
+    // The built-in `Async` effect (id = user-effect count) dumps last.
+    if first_item {
+        0
+    } else {
+        push(&mut out, '\n');
+        0
+    };
+    append_str(&mut out, "(effect #");
+    append_int(&mut out, ecount);
+    append_str(&mut out, " Async)");
+    push(&mut out, '\n');
+
+    let arr: [u8] = vec_to_array(out);
+    print_bytes(arr);
+    let _g: [u8] = vec_to_array(garbage);
+    0
+}
