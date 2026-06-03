@@ -1865,10 +1865,11 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host TYPES (4b) m-1 docs**
-    commit (`docs(selfhost): ADR 0041 A3 — (4b) m-1 scalar skeleton`), atop the
-    **`types.sentinel` m-1 feat** (`feat(selfhost): types.sentinel (4b) m-1 scalar
-    skeleton`), atop the (4a) oracle docs (`cf44020`) + feat (`c52aef9`), atop the
+    Local HEAD: verify with `git log -1` — expect the **self-host TYPES (4c-1/4c-2)
+    docs** commit (`docs(selfhost): ADR 0041 A4 — (4c) structs + arrays`), atop the
+    **structs+arrays feat** (`feat(selfhost): types.sentinel (4c) structs + arrays`),
+    atop the (4b) m-1 docs (`cf04226`) + feat (`62d1a5f`), the (4a) oracle docs
+    (`cf44020`) + feat (`c52aef9`), atop the
     RESOLVE-COMPLETE docs (`bbada41`) + delegate-synthesis feat (`9da6c12`), the (3e) docs
     (`496a0ca`) + feat (`1c8eb97`), the (3c) docs (`c1e3527`) + the (3e)-finding
     docs (`f650fa5`), the (3c) handle feat (`c38960a`), the
@@ -1906,11 +1907,14 @@ For pasting into a fresh chat to bootstrap context:
     `IndexAssignNotSupported`), D3 `types.sentinel` will **`use` `resolve.sentinel`
     as a D.6 module** (verified) but **refined at the (4b) build to SELF-CONTAINED**
     (A3 — resolve's `RCtx` can't be extended with type fields across a module
-    boundary); **(4b) m-1 the SCALAR skeleton LANDED** (`selfhost/types.sentinel`, the
-    4th Sentinel stage — matches the oracle on 32 corpus fixtures + 18 seeds,
-    leak-free, compiled first try); NEXT = **(4c)** compound types (struct-lit +
-    field-index, arrays, `Vec`, nullable + `WidenToNullable`)) + the just-COMPLETED
-    **ADR 0040** (resolve, ACCEPTED) + **ADR 0039**
+    boundary); **(4b) m-1 SCALAR + (4c-1) STRUCTS + (4c-2) ARRAYS LANDED (A3/A4)**
+    (`selfhost/types.sentinel`, the 4th Sentinel stage — matches the oracle on 54
+    corpus fixtures + 24 seeds, leak-free; a 3-pass `main` names→sigs/fields→emit;
+    the `Struct` interner kind rendered via a struct-name blob `snb`; struct-lit +
+    field-access `field_index`; arrays + the generic-builtin `(targs T)` for `len`);
+    NEXT = **(4c-3)** nullable (`?T` + null + `WidenToNullable`, needs expected-type
+    threading), then (4d) secret, (4e) enum/match, (4f) class/method-dispatch) + the
+    just-COMPLETED **ADR 0040** (resolve, ACCEPTED) + **ADR 0039**
     (the (2/N) parser — **now ACCEPTED / COMPLETE**: (2a)+(2b) the full expression
     grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the
     full-corpus close — `selfhost/parser.sentinel` matches `snc ast` over every

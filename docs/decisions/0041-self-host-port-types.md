@@ -129,6 +129,38 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
     compound types — the interner's compound arms exercised (struct-lit + field-index,
     arrays + index, `Vec`, nullable + `WidenToNullable`) — then (4d) secret … (4i) the
     full-corpus phase-go.
+- **A4 — (4c-1) structs + (4c-2) arrays: the first compound types.** Exercises the
+  A1-verified interner's compound arms end to end. **Matches the oracle on 54 corpus
+  fixtures** (40 after structs, 54 after arrays — up from 32), leak-free.
+  - **The 3-pass restructure.** `main` now scans top-level NAMES first (pass 1: `fn` →
+    `ufs`/`ufe`; `struct` → names copied into a **struct-name blob `snb`** + `sts`/`ste`;
+    `itempos`/`itemkind`), THEN resolves signatures + field types (pass 1.5: fn returns
+    `ufret`; struct fields → the field table `fldo`/`flds`/`flde`/`fldty`) — names-first
+    so a field/return type referencing ANY struct resolves — THEN emits in source order
+    (pass 2), dispatching via a single **`type_item`** helper (re-passing the `&mut`
+    params — sibling-`if`-tail `&mut`-of-local borrows conflict, ADR 0038 A2). Structs
+    consume no VarId, so VarIds still flow only through fns (source order; no group-order
+    needed until classes/impls at 4f).
+  - **The `Struct` type (interner kind 6).** Rendered via the struct-name blob `snb`
+    (so `render_type` needs no `src` threading — the names live in `c`). `type_of_typeexpr`
+    resolves a non-scalar `TIdent` to `mk_struct(StructId)`. **⚠ bug fixed in-flight:**
+    the struct/field tables key on `snb`, but the lookups first reused `blob_eq` (which
+    reads the SCOPE blob `nb`) → an `snb`-offset read into the small/empty `nb`
+    out-of-bounded (`idx=0 len=0`); added a dedicated **`snb_eq`**. (Reusable rule: a
+    blob comparator is hardwired to ONE blob — the scope blob and the decl-name blob
+    need separate comparators.)
+  - **struct-lit + field-access.** `(struct-lit #sid Name <v0> <v1>… :Name)` — positional
+    VALUES in **declaration order** (the corpus writes fields in decl order, so source
+    order = decl order; a name-keyed reorder is a follow-up if a fixture needs it).
+    `(field <target :Struct> name <field_index> :fty)` — the field's decl index + type,
+    looked up in the field table.
+  - **(4c-2) arrays:** `(array <e…> :[T])` (T from the first element; empty-array
+    context-typing is a follow-up) + `(index <t :[T]> <i :i64> :T)`. **+ the generic-
+    builtin `(targs T)` mechanism:** `len`/`unwrap_or`/`is_some` are generic over their
+    element/inner; since `(targs T)` PRECEDES the args in the output but T is inferred
+    FROM the args, the args dump to a temp buffer first, then `(targs T)` + the spliced
+    args (`unwrap_or`'s result type IS its inferred T). Next: **(4c-3)** nullable
+    (`?T` + null + `WidenToNullable` — needs expected-type threading) then (4d) secret.
 
 ## Context
 
