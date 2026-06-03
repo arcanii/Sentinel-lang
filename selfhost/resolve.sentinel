@@ -82,8 +82,14 @@ use parser::append_slice;
 // the current fn's scope floor. Threaded as `&mut RCtx`. (The name `garbage` sink
 // is a SEPARATE `gb` param — a `Vec` field cannot be moved out of a struct.)
 struct RCtx {
-    scs: Vec<i64>,   // scope: binding name-slice starts
-    sce: Vec<i64>,   // scope: binding name-slice ends
+    nb: Vec<u8>,     // scope NAME BLOB — every binding's name bytes (params copy
+                     //   their src bytes in; body bindings [let/match/handler] push
+                     //   their AST `[u8]` bytes in, which also DISPOSES them). The
+                     //   blob is reclaimed (vec_to_array) by main. Body bindings
+                     //   come from the AST as owned `[u8]`, not token src slices, so
+                     //   the scope can't key on `src` indices like the decl tables.
+    scs: Vec<i64>,   // scope: binding name-slice starts (offsets into `nb`)
+    sce: Vec<i64>,   // scope: binding name-slice ends (offsets into `nb`)
     scv: Vec<i64>,   // scope: binding VarId (EXPLICIT — varid ≠ array index, since
                      //   method-body VarIds are assigned in GROUP order [fns then
                      //   impls] while the scope array is built in source order)
@@ -266,23 +272,10 @@ fn sc_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     let mut found: i64 = 0 - 1;
     while i >= (*c).base {
         if found == 0 - 1 {
-            // A `-1` slot is a synthetic `self` binding (a class init has no `self`
-            // receiver token) — match it by the literal name `self`.
-            if (*c).scs[i] == 0 - 1 {
-                if name_eq_lit(q, "self") {
-                    found = (*c).scv[i];
-                    0
-                } else {
-                    0
-                };
+            if blob_eq(c, (*c).scs[i], (*c).sce[i], q) {
+                found = (*c).scv[i];
                 0
             } else {
-                if name_eq_src(src, (*c).scs[i], (*c).sce[i], q) {
-                    found = (*c).scv[i];
-                    0
-                } else {
-                    0
-                };
                 0
             };
             0
@@ -593,6 +586,77 @@ fn sink_name(gb: &mut Vec<u8>, name: [u8]) -> i64 {
     while i < n {
         push(gb, name[i]);
         i = i + 1;
+    }
+    0
+}
+
+// --- scope binding (the name blob) ------------------------------------------
+
+// Bind a name given as a `src` slice (a param / a `self:` receiver token): copy
+// its bytes into the blob, record the binding (blob slice + VarId).
+fn bind_src(c: &mut RCtx, src: &[u8], ns: i64, ne: i64, vid: i64) -> i64 {
+    let st: i64 = len((*c).nb);
+    let mut i: i64 = ns;
+    while i < ne {
+        push(&mut (*c).nb, (*src)[i]);
+        i = i + 1;
+    }
+    push(&mut (*c).scs, st);
+    push(&mut (*c).sce, st + (ne - ns));
+    push(&mut (*c).scv, vid);
+    0
+}
+
+// Bind a name given as an owned `[u8]` (a `let` / match-payload / handler-param /
+// `init` self): push its bytes into the blob (which also DISPOSES the `[u8]`),
+// record the binding.
+fn bind_name(c: &mut RCtx, name: [u8], vid: i64) -> i64 {
+    let st: i64 = len((*c).nb);
+    let n: i64 = len(name);
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut (*c).nb, name[i]);
+        i = i + 1;
+    }
+    push(&mut (*c).scs, st);
+    push(&mut (*c).sce, st + n);
+    push(&mut (*c).scv, vid);
+    0
+}
+
+// Compare a blob slice `nb[st..en]` to the query name `q`.
+fn blob_eq(c: &mut RCtx, st: i64, en: i64, q: &[u8]) -> bool {
+    let qn: i64 = len(*q);
+    if en - st != qn {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < qn {
+            if (*c).nb[st + i] != (*q)[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// D5 scope snapshot/restore = length truncation: pop the scope arrays back to
+// `mark` (an array length recorded before a scoped region — a match arm, `while`
+// body, handler arm, or return arm). The VarId counter (`nextvid`) is NOT reset
+// (VarIds stay globally sequential); only VISIBILITY is restored. The blob bytes
+// stay (reclaimed by main); only the scope refs are popped.
+fn truncate_scope(c: &mut RCtx, mark: i64) -> i64 {
+    let mut t: i64 = len((*c).scs);
+    while t > mark {
+        pop(&mut (*c).scs);
+        pop(&mut (*c).sce);
+        pop(&mut (*c).scv);
+        t = t - 1;
     }
     0
 }
@@ -978,12 +1042,16 @@ fn dump_rstmts(out: &mut Vec<u8>, st: Stmts, src: &[u8], c: &mut RCtx, gb: &mut 
 fn dump_rstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
     match s {
         Stmt::SLet(lmf, lnm, lty, lval) => {
-            // The let's binding is already in the (pre-scanned) scope; its varid
-            // is the unique name's scope index. The value resolves in the same
-            // scope (a self-/forward-reference is a resolve error → never a clean
-            // seed). Format: `(let #vid [mut] <ty-or-_> <value>)`.
-            let lvid: i64 = sc_lookup(c, src, &lnm);
-            sink_name(gb, lnm);
+            // DURING-WALK binding (mirror the Rust source-order walk): resolve the
+            // VALUE first — it may bind nested vars (a `match`/`if` in the value),
+            // which take the lower VarIds — THEN bind the `let` var. So the value is
+            // dumped into a temp buffer, the let's VarId is taken AFTER, and the
+            // value is spliced in. Format: `(let #vid [mut] <ty-or-_> <value>)`.
+            let mut vbuf: Vec<u8> = vec_new();
+            dump_rexpr(&mut vbuf, lval, src, c, gb);
+            let lvid: i64 = (*c).nextvid;
+            (*c).nextvid = (*c).nextvid + 1;
+            bind_name(c, lnm, lvid);
             append_str(out, "(let #");
             append_int(out, lvid);
             push(out, ' ');
@@ -995,7 +1063,7 @@ fn dump_rstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut RCtx, gb: &mut Vec
             };
             dump_rtyopt(out, lty);
             push(out, ' ');
-            dump_rexpr(out, lval, src, c, gb);
+            append_str(out, vec_to_array(vbuf));
             push(out, ')');
             0
         },
@@ -1387,9 +1455,7 @@ fn rimpl_method(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
     let excl: bool = rparse_self_kind(k, cur);
     let selfvid: i64 = (*c).nextvid;
     (*c).nextvid = (*c).nextvid + 1;
-    push(&mut (*c).scs, self_s);
-    push(&mut (*c).sce, self_e);
-    push(&mut (*c).scv, selfvid);
+    bind_src(c, src, self_s, self_e, selfvid);
     let skw: [u8] = if excl {
         "exclusive"
     } else {
@@ -1411,7 +1477,6 @@ fn rimpl_method(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
     } else {
         0
     };
-    scan_lets(k, s, e, *cur, c);
     let mbody: Expr = parse_block(k, s, e, src, cur);
     dump_type(out, mret);
     push(out, ' ');
@@ -1523,18 +1588,15 @@ fn rclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     (*c).base = len((*c).scs);   // this init's scope floor
     *cur = *cur + 1;             // skip `init`
     *cur = *cur + 1;             // skip `(`
-    // The init's `self` is SYNTHETIC (no receiver token) → a sentinel `-1` slot.
+    // The init's `self` is SYNTHETIC (no receiver token) → bind the literal name.
     let selfvid: i64 = (*c).nextvid;
     (*c).nextvid = (*c).nextvid + 1;
-    push(&mut (*c).scs, 0 - 1);
-    push(&mut (*c).sce, 0 - 1);
-    push(&mut (*c).scv, selfvid);
+    bind_name(c, "self", selfvid);
     append_str(buf, " (init #");
     append_int(buf, selfvid);
     append_str(buf, " (");
     emit_params(buf, k, s, e, src, cur, c, true);
     append_str(buf, ") ");
-    scan_lets(k, s, e, *cur, c);
     let ibody: Expr = parse_block(k, s, e, src, cur);
     dump_rexpr(buf, ibody, src, c, gb);
     push(buf, ')');
@@ -1634,9 +1696,7 @@ fn emit_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
         let pty: TypeE = parse_type(k, s, e, src, cur);
         let vid: i64 = (*c).nextvid;
         (*c).nextvid = (*c).nextvid + 1;
-        push(&mut (*c).scs, ns);
-        push(&mut (*c).sce, ne);
-        push(&mut (*c).scv, vid);
+        bind_src(c, src, ns, ne, vid);
         append_str(out, "(param #");
         append_int(out, vid);
         push(out, ' ');
@@ -1652,49 +1712,6 @@ fn emit_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
         push(out, ')');
         emit_params(out, k, s, e, src, cur, c, false)
     }
-}
-
-// MILESTONE-2: pre-scan a fn body's tokens (cur_start at the body `{`) for its
-// `let` bindings, pushing each name's src slice to the scope IN SOURCE ORDER
-// (after the params) — so the body can then be resolved with the scope IMMUTABLE
-// (a `let` binds during the walk, but pre-scanning makes the whole binding set
-// present up front). Brace-balanced to the matching `}`; the flat per-fn
-// namespace means nested-block `let`s share the fn scope. `let`s resolve their
-// own varid by name lookup (redeclaration is rejected by resolve, so unique).
-fn scan_lets(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, cur_start: i64, c: &mut RCtx) -> i64 {
-    let mut i: i64 = cur_start + 1;
-    let mut depth: i64 = 1;
-    while depth > 0 {
-        let t: i64 = (*k)[i];
-        if t == 6 {
-            depth = depth + 1;
-            0
-        } else if t == 7 {
-            depth = depth - 1;
-            0
-        } else if t == 45 {
-            let mut ni: i64 = i + 1;
-            if (*k)[ni] == 46 {
-                ni = ni + 1;
-                0
-            } else {
-                0
-            };
-            // A `let` binds in source (pre-scan) order, after the params; assign
-            // its VarId from the active counter (nextvid) now, so the body resolves
-            // it to the right id.
-            let lvid: i64 = (*c).nextvid;
-            (*c).nextvid = (*c).nextvid + 1;
-            push(&mut (*c).scs, (*s)[ni]);
-            push(&mut (*c).sce, (*e)[ni]);
-            push(&mut (*c).scv, lvid);
-            0
-        } else {
-            0
-        };
-        i = i + 1;
-    }
-    0
 }
 
 // PASS-1 effect-op scan (cur_start at the effect body `{`): for each op `name(
@@ -1874,9 +1891,6 @@ fn resolve_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: 
     } else {
         0
     };
-    // m-2: pre-scan the body's `let` bindings into the scope (after the params)
-    // so the body resolves against the complete, immutable scope.
-    scan_lets(k, s, e, *cur, c);
     let body: Expr = parse_block(k, s, e, src, cur);
     dump_type(out, rty);
     push(out, ' ');
@@ -1956,6 +1970,7 @@ fn main() -> i64 {
     let ntok: i64 = len(kinds);
 
     let mut ctx: RCtx = RCtx {
+        nb: vec_new(),
         scs: vec_new(),
         sce: vec_new(),
         scv: vec_new(),
