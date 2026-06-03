@@ -233,13 +233,12 @@ fn collect_fixtures() -> Vec<PathBuf> {
 }
 
 /// ADR 0040 D9 — the phase-go: `selfhost/resolve.sentinel` matches `snc resolve`
-/// byte-for-byte over every clean-RESOLVING `tests/pass` + `tests/ui` fixture.
-/// Skipped: fixtures the oracle rejects (parse-/resolve-error fixtures — the
-/// Sentinel resolver only mirrors happy-path resolution, like the parser test),
-/// and `delegate`-bearing classes (the Rust resolver SYNTHESISES a forwarding
-/// `impl` per delegate, which `resolve.sentinel` does not yet generate — the lone
-/// remaining (3e) gap; 2 clean fixtures). `use` fixtures are excluded naturally
-/// (the Rust resolve rejects a non-empty `uses` with `UseDeclNotYet`).
+/// byte-for-byte over **every** clean-RESOLVING `tests/pass` + `tests/ui` fixture
+/// (including `delegate`-bearing classes — the synthesised forwarding impls).
+/// Skipped only: fixtures the oracle rejects (parse-/resolve-error fixtures — the
+/// Sentinel resolver mirrors happy-path resolution, like the parser test); `use`
+/// fixtures are among those (the Rust resolve rejects a non-empty `uses` with
+/// `UseDeclNotYet`).
 #[test]
 fn sentinel_resolver_matches_oracle_on_corpus() {
     let tmp =
@@ -259,10 +258,6 @@ fn sentinel_resolver_matches_oracle_on_corpus() {
     let mut mismatches: Vec<String> = Vec::new();
     for fixture in &fixtures {
         let bytes = std::fs::read(fixture).expect("read fixture");
-        // Skip the delegate-synthesis gap (documented above).
-        if bytes.windows(9).any(|w| w == b"delegate ") {
-            continue;
-        }
         std::fs::write(&input, &bytes).expect("stage input");
 
         let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))

@@ -50,9 +50,14 @@
 //    emits in source order. This computes each region's base from the prior
 //    region's FINAL counter — NO binding-count precompute (the old token-counting
 //    MISSED match/handler/return fn-region bindings → a wrong class base). Matches
-//    `snc resolve` over the whole clean-resolving corpus (130 fixtures, the D9
-//    phase-go). ⚠ ONE gap: a `class` with a `delegate` → the Rust resolver
-//    SYNTHESISES a forwarding `impl` (2 fixtures) — not yet generated here.
+//    `snc resolve` over the whole clean-resolving corpus (the D9 phase-go).
+//  * delegate-impl synthesis (A12): a `class C { delegate f: T to Tr; }` → a FIELD
+//    `(field f T)` (a delegate-field bucket, after the explicit fields) + a
+//    SYNTHESISED forwarding `(impl #id _ #trait_id Tr class#cid C (method #selfvid
+//    m … (block (method (field (var #selfvid) f) m (var #pvid)…))))` per trait
+//    method (re-walked from the trait's sigs) — ImplIds + VarIds AFTER all user
+//    impls, emitted at the class's source index. **The corpus differential now
+//    covers the ENTIRE clean-resolving corpus (132 fixtures) — ADR 0040 ACCEPTED.**
 //
 // PROVEN SENTINEL IDIOMS (ADR 0040 A1/A4 probes; reused):
 //  * Symbol tables + the local scope are FLAT parallel `Vec<i64>` arrays keyed
@@ -131,9 +136,16 @@ struct RCtx {
     efoe: Vec<i64>,  // effect-op list: op name-slice ends
     trs: Vec<i64>,   // trait table: name-slice starts (TraitId = index)
     tre: Vec<i64>,   // trait table: name-slice ends
+    trpos: Vec<i64>, // trait table: the trait keyword's token index (for delegate
+                     //   synthesis — re-walk the trait's method sigs by TraitId)
     trmo: Vec<i64>,  // trait-method list: owner TraitId (one entry per method)
     trms: Vec<i64>,  // trait-method list: method name-slice starts
     trme: Vec<i64>,  // trait-method list: method name-slice ends
+    dgcid: Vec<i64>, // delegate records: owning ClassId (one entry per delegate)
+    dgfs: Vec<i64>,  // delegate records: the delegate FIELD name-slice starts
+    dgfe: Vec<i64>,  // delegate records: the delegate FIELD name-slice ends
+    dgts: Vec<i64>,  // delegate records: the delegated-to TRAIT name-slice starts
+    dgte: Vec<i64>,  // delegate records: the delegated-to TRAIT name-slice ends
     imns: Vec<i64>,  // impl table: impl name-slice starts (ImplId = index; a
     imne: Vec<i64>,  //   default/unnamed impl gets a 0,0 slot — never name-matched)
     imts: Vec<i64>,  // impl table: the impl's trait name-slice starts
@@ -1688,19 +1700,37 @@ fn rclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     0
 }
 
-// Advance past a `delegate field : type to Trait ;` (the resolve dump omits it).
-fn rclass_delegate_skip(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+// A `delegate field : type to Trait ;` becomes (1) a class FIELD `(field field
+// type)` (emitted into the delegate-field bucket, AFTER the explicit fields) and
+// (2) a recorded delegate (owning ClassId + the field + trait name slices) that
+// drives the synthesised forwarding `impl` (ADR 0040 A12). Mirrors the Rust
+// resolver's delegate→field + delegate-impl synthesis.
+fn rclass_delegate(dfbuf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, cid: i64) -> i64 {
     *cur = *cur + 1;             // skip `delegate`
-    *cur = *cur + 1;             // field name
+    let fn_s: i64 = (*s)[*cur];
+    let fn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // past field name
     *cur = *cur + 1;             // skip `:`
-    let _dty: TypeE = parse_type(k, s, e, src, cur);
+    let dty: TypeE = parse_type(k, s, e, src, cur);
     *cur = *cur + 1;             // skip `to`
-    *cur = *cur + 1;             // trait name
+    let tr_s: i64 = (*s)[*cur];
+    let tr_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // past trait name
     *cur = *cur + 1;             // skip `;`
+    append_str(dfbuf, " (field ");
+    append_slice(dfbuf, src, fn_s, fn_e);
+    push(dfbuf, ' ');
+    dump_type(dfbuf, dty);
+    push(dfbuf, ')');
+    push(&mut (*c).dgcid, cid);
+    push(&mut (*c).dgfs, fn_s);
+    push(&mut (*c).dgfe, fn_e);
+    push(&mut (*c).dgts, tr_s);
+    push(&mut (*c).dgte, tr_e);
     0
 }
 
-fn dump_rclass_items(fbuf: &mut Vec<u8>, ibuf: &mut Vec<u8>, mbuf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+fn dump_rclass_items(fbuf: &mut Vec<u8>, dfbuf: &mut Vec<u8>, ibuf: &mut Vec<u8>, mbuf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, gb: &mut Vec<u8>, cid: i64) -> i64 {
     if (*k)[*cur] == 59 {
         *cur = *cur + 1;         // skip a per-item `pub`
         0
@@ -1713,16 +1743,16 @@ fn dump_rclass_items(fbuf: &mut Vec<u8>, ibuf: &mut Vec<u8>, mbuf: &mut Vec<u8>,
         0
     } else if t == 45 {
         rclass_field(fbuf, k, s, e, src, cur);
-        dump_rclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb)
+        dump_rclass_items(fbuf, dfbuf, ibuf, mbuf, k, s, e, src, cur, c, gb, cid)
     } else if t == 3 {
         rimpl_method(mbuf, k, s, e, src, cur, c, gb);
-        dump_rclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb)
+        dump_rclass_items(fbuf, dfbuf, ibuf, mbuf, k, s, e, src, cur, c, gb, cid)
     } else if is_init_slice(src, (*s)[*cur], (*e)[*cur]) {
         rclass_init(ibuf, k, s, e, src, cur, c, gb);
-        dump_rclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb)
+        dump_rclass_items(fbuf, dfbuf, ibuf, mbuf, k, s, e, src, cur, c, gb, cid)
     } else {
-        rclass_delegate_skip(k, s, e, src, cur);
-        dump_rclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb)
+        rclass_delegate(dfbuf, k, s, e, src, cur, c, cid);
+        dump_rclass_items(fbuf, dfbuf, ibuf, mbuf, k, s, e, src, cur, c, gb, cid)
     }
 }
 
@@ -1733,17 +1763,110 @@ fn resolve_class(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, sr
     *cur = *cur + 1;
     *cur = *cur + 1;             // skip `{`
     let mut fbuf: Vec<u8> = vec_new();
+    let mut dfbuf: Vec<u8> = vec_new();
     let mut ibuf: Vec<u8> = vec_new();
     let mut mbuf: Vec<u8> = vec_new();
-    dump_rclass_items(&mut fbuf, &mut ibuf, &mut mbuf, k, s, e, src, cur, c, gb);
+    dump_rclass_items(&mut fbuf, &mut dfbuf, &mut ibuf, &mut mbuf, k, s, e, src, cur, c, gb, cid);
     append_str(out, "(class #");
     append_int(out, cid);
     push(out, ' ');
     append_slice(out, src, nm_s, nm_e);
     append_str(out, vec_to_array(fbuf));
+    append_str(out, vec_to_array(dfbuf));
     append_str(out, vec_to_array(ibuf));
     append_str(out, vec_to_array(mbuf));
     push(out, ')');
+    0
+}
+
+// --- delegate-impl synthesis (ADR 0040 A12) ---------------------------------
+// A `class C { delegate f: T to Tr; }` makes the Rust resolver SYNTHESISE a
+// forwarding `impl _ as Tr for C` whose every method (taken from Tr's sig) is
+// `fn m(self, p…) { self.f.m(p…) }`. The synthesised impls get ImplIds + VarIds
+// AFTER all user impls. Here: re-walk the trait's method sigs and emit each as a
+// forwarding `(method #selfvid m <kind> (params) ret (block (method (field
+// (var #selfvid) f) m (var #pvid)…)))`.
+fn synth_method(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, field_s: i64, field_e: i64) -> i64 {
+    *cur = *cur + 1;             // skip `fn`
+    let mn_s: i64 = (*s)[*cur];
+    let mn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // method name
+    *cur = *cur + 1;             // skip `(`
+    let excl: bool = rparse_self_kind(k, cur);
+    let selfvid: i64 = (*c).nextvid;
+    (*c).nextvid = (*c).nextvid + 1;
+    let skw: [u8] = if excl {
+        "exclusive"
+    } else {
+        "shared"
+    };
+    append_str(buf, " (method #");
+    append_int(buf, selfvid);
+    push(buf, ' ');
+    append_slice(buf, src, mn_s, mn_e);
+    push(buf, ' ');
+    append_str(buf, skw);
+    append_str(buf, " (");
+    let pv0: i64 = (*c).nextvid;
+    emit_params(buf, k, s, e, src, cur, c, true);
+    let pvn: i64 = (*c).nextvid;
+    append_str(buf, ") ");
+    *cur = *cur + 1;             // skip `->`
+    let mret: TypeE = parse_type(k, s, e, src, cur);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    dump_type(buf, mret);
+    // the forwarding body: `(block (method (field (var #selfvid) f) m (var #p)…))`
+    append_str(buf, " (block (method (field (var #");
+    append_int(buf, selfvid);
+    append_str(buf, ") ");
+    append_slice(buf, src, field_s, field_e);
+    append_str(buf, ") ");
+    append_slice(buf, src, mn_s, mn_e);
+    let mut pv: i64 = pv0;
+    while pv < pvn {
+        append_str(buf, " (var #");
+        append_int(buf, pv);
+        push(buf, ')');
+        pv = pv + 1;
+    }
+    append_str(buf, ")))");
+    0
+}
+
+fn synth_trait_methods(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, field_s: i64, field_e: i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        0
+    } else {
+        synth_method(buf, k, s, e, src, cur, c, field_s, field_e);
+        *cur = *cur + 1;         // skip `;`
+        synth_trait_methods(buf, k, s, e, src, cur, c, field_s, field_e)
+    }
+}
+
+fn synth_delegate_impl(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], c: &mut RCtx, class_id: i64, field_s: i64, field_e: i64, trait_s: i64, trait_e: i64, impl_id: i64) -> i64 {
+    let trait_id: i64 = trait_lookup_slice(c, src, trait_s, trait_e);
+    let cn_s: i64 = (*c).cls[class_id];
+    let cn_e: i64 = (*c).cle[class_id];
+    append_str(buf, "(impl #");
+    append_int(buf, impl_id);
+    append_str(buf, " _ #");
+    append_int(buf, trait_id);
+    push(buf, ' ');
+    append_slice(buf, src, trait_s, trait_e);
+    append_str(buf, " class#");
+    append_int(buf, class_id);
+    push(buf, ' ');
+    append_slice(buf, src, cn_s, cn_e);
+    // re-walk the trait body's method sigs (`trait Name { … }` — body `{` at +2).
+    let tpos: i64 = (*c).trpos[trait_id];
+    let mut tcur: i64 = tpos + 3;
+    synth_trait_methods(buf, k, s, e, src, &mut tcur, c, field_s, field_e);
+    push(buf, ')');
     0
 }
 
@@ -2010,9 +2133,15 @@ fn main() -> i64 {
         efoe: vec_new(),
         trs: vec_new(),
         tre: vec_new(),
+        trpos: vec_new(),
         trmo: vec_new(),
         trms: vec_new(),
         trme: vec_new(),
+        dgcid: vec_new(),
+        dgfs: vec_new(),
+        dgfe: vec_new(),
+        dgts: vec_new(),
+        dgte: vec_new(),
         imns: vec_new(),
         imne: vec_new(),
         imts: vec_new(),
@@ -2079,6 +2208,7 @@ fn main() -> i64 {
                 let tid1: i64 = len(ctx.trs);
                 push(&mut ctx.trs, starts[p1 + 1]);
                 push(&mut ctx.tre, ends[p1 + 1]);
+                push(&mut ctx.trpos, p1);
                 scan_trait_methods(&kinds, &starts, &ends, tid1, p1 + 2, &mut ctx);
                 0
             } else if t1 == 55 {
@@ -2205,20 +2335,32 @@ fn main() -> i64 {
         ic = ic + 1;
     }
 
-    // EMIT in source order: for each source index, find its record (every item is
-    // resolved exactly once, so a record always exists) and splice its `itembuf`
-    // slice into `out`.
-    let mut out: Vec<u8> = vec_new();
-    let nrec: i64 = len(rsrc);
-    let mut si: i64 = 0;
-    let mut firstitem: bool = true;
-    while si < nitems {
-        let mut j: i64 = 0;
-        let mut found: i64 = 0 - 1;
-        while j < nrec {
-            if found == 0 - 1 {
-                if rsrc[j] == si {
-                    found = j;
+    // Group D: SYNTHESISE delegate impls (ADR 0040 A12) — ImplIds + VarIds continue
+    // AFTER all user impls (still the impl region). Each synth impl is recorded at
+    // its owning class's source index, so it emits right after the class.
+    let nuser: i64 = len(ctx.imns);
+    let ndel: i64 = len(ctx.dgcid);
+    let mut idd: i64 = 0;
+    while idd < ndel {
+        let dcid: i64 = ctx.dgcid[idd];
+        let dfs: i64 = ctx.dgfs[idd];
+        let dfe: i64 = ctx.dgfe[idd];
+        let dts: i64 = ctx.dgts[idd];
+        let dte: i64 = ctx.dgte[idd];
+        // The owning class's source index = the (dcid)-th class item.
+        let mut csrc: i64 = 0 - 1;
+        let mut seen: i64 = 0;
+        let mut q: i64 = 0;
+        while q < nitems {
+            if csrc == 0 - 1 {
+                if itemkind[q] == 56 {
+                    if seen == dcid {
+                        csrc = q;
+                        0
+                    } else {
+                        0
+                    };
+                    seen = seen + 1;
                     0
                 } else {
                     0
@@ -2227,20 +2369,45 @@ fn main() -> i64 {
             } else {
                 0
             };
-            j = j + 1;
+            q = q + 1;
         }
-        if firstitem {
-            0
-        } else {
-            push(&mut out, '\n');
-            0
-        };
-        firstitem = false;
-        let mut bi: i64 = rbs[found];
-        let bend: i64 = rbe[found];
-        while bi < bend {
-            push(&mut out, itembuf[bi]);
-            bi = bi + 1;
+        let bsd: i64 = len(itembuf);
+        synth_delegate_impl(&mut itembuf, &kinds, &starts, &ends, &src, &mut ctx, dcid, dfs, dfe, dts, dte, nuser + idd);
+        push(&mut rsrc, csrc);
+        push(&mut rbs, bsd);
+        push(&mut rbe, len(itembuf));
+        idd = idd + 1;
+    }
+
+    // EMIT in source order: for each source index, splice ALL its records (a class
+    // with a delegate has its class record + a synthesised-impl record at the same
+    // index — class first, since it was recorded earlier).
+    let mut out: Vec<u8> = vec_new();
+    let nrec: i64 = len(rsrc);
+    let mut si: i64 = 0;
+    let mut firstitem: bool = true;
+    while si < nitems {
+        let mut j: i64 = 0;
+        while j < nrec {
+            if rsrc[j] == si {
+                if firstitem {
+                    0
+                } else {
+                    push(&mut out, '\n');
+                    0
+                };
+                firstitem = false;
+                let mut bi: i64 = rbs[j];
+                let bend: i64 = rbe[j];
+                while bi < bend {
+                    push(&mut out, itembuf[bi]);
+                    bi = bi + 1;
+                }
+                0
+            } else {
+                0
+            };
+            j = j + 1;
         }
         si = si + 1;
     }
