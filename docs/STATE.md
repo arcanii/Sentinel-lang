@@ -16,27 +16,34 @@ next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (4/N) TYPES is OPEN; ADR
 0041 → ACCEPTED-WITH-AMENDMENTS; (4a) oracle + probes + (4b) m-1 SCALAR + (4c-1/4c-2)
-STRUCTS + ARRAYS (A1–A4) LANDED.** Types is the **biggest/hardest port stage** (the
-Rust `sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish inference,
-method/trait dispatch, secret-type propagation, match exhaustiveness; effect-check is
-a SEPARATE crate, out of scope). **`selfhost/types.sentinel`, the FOURTH Sentinel
-stage**, type-checks the SCALAR grammar (m-1) + **structs (4c-1)** (decl tables +
-struct-lit + field-access `field_index`, the `Struct` interner kind rendered via a
-struct-name blob) + **arrays (4c-2)** (lit + index + the generic-builtin `(targs T)`
-mechanism for `len`) emitting the `snc types` dump byte-for-byte; **matches the oracle
-on 54 corpus fixtures + 24 seeds** (`sentinel_typer_matches_oracle_on_seeds`),
-leak-free. ⚠ **D3 REFINED → self-contained** (NOT module-reuse of resolve): resolve's
-`RCtx` can't be extended with type fields across a module boundary, so `types.sentinel`
-is one clean `TyCtx` (resolve's name-blob scope + fn table + the verified D4 type
-interner + the append-only env), importing only the **parser**. KEY: `dump_texpr`
-RETURNS each node's type handle + `close_ty` appends ` :<type>`; a 3-pass `main`
+STRUCTS + ARRAYS + (4c-3) NULLABLE (A1–A6) LANDED.** Types is the **biggest/hardest
+port stage** (the Rust `sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish
+inference, method/trait dispatch, secret-type propagation, match exhaustiveness;
+effect-check is a SEPARATE crate, out of scope). **`selfhost/types.sentinel`, the
+FOURTH Sentinel stage**, type-checks the SCALAR grammar (m-1) + **structs (4c-1)**
+(decl tables + struct-lit + field-access `field_index`, the `Struct` interner kind
+rendered via a struct-name blob) + **arrays (4c-2)** (lit + index + the
+generic-builtin `(targs T)` mechanism for `len`) + **nullable (4c-3)** (`?T` + `null`
++ the implicit `T → ?T` widening, `widen-null`) emitting the `snc types` dump
+byte-for-byte; **matches the oracle on 61 corpus fixtures + 30 seeds**
+(`sentinel_typer_matches_oracle_on_seeds`), leak-free. ⚠ **D3 REFINED →
+self-contained** (NOT module-reuse of resolve): resolve's `RCtx` can't be extended
+with type fields across a module boundary, so `types.sentinel` is one clean `TyCtx`
+(resolve's name-blob scope + fn table + the verified D4 type interner + the
+append-only env), importing only the **parser**. KEY: `dump_texpr` RETURNS each
+node's type handle + `close_ty` appends ` :<type>`; a 3-pass `main`
 (names → sigs/fields → emit) so forward struct/fn refs resolve; ⚠ the struct/field
 tables key on a separate `snb` blob (NOT the scope blob `nb` — a dedicated `snb_eq`).
-NEXT = **(4c-3)** nullable (`?T` + null + `WidenToNullable` — needs expected-type
-threading) — ⚠ **ATTEMPTED + REVERTED (A5): logic works (61 fixtures) but a separate
-6-param `dump_exp` recursion LEAKS the consumed Expr tree; fix = thread `exp` through
-the 5-param `dump_texpr` itself, not a separate fn** — then (4d) secret, (4e)
-enum/match, (4f) class/method-dispatch, …
+**(4c-3) NULLABLE resolved the ADR 0041 A5 leak via path (a): the expected type
+`exp` is threaded through `dump_texpr` ITSELF** (one self-recursive walker — a 6th
+param, `-1` = none — never a SEPARATE mutually-recursive consumer, which leaked the
+Move-enum it destructured; the reusable Sentinel finding in A6). Leaves widen inline
+(`widen_pre`/`widen_post`); `Binary` builds in a temp then `widen_splice`s the
+wrapper; `null` types from `exp`; `If`/`Block` thread `exp`; threading points = fn
+return / `let` annotation (`tyopt_exp`) / struct field / `==`/`!=` operand. NEXT =
+**(4d) secret** (`WidenToSecret` + the secret-preserving operator rules +
+`declassify` — reuses the 4c-3 widen-threading machinery for `T → secret T`), then
+(4e) enum/match, (4f) class/method-dispatch, …
 **(4a) shipped the ORACLE + de-risked the Sentinel build:** `snc types <file>`
 (driver `run_types` + `types_dump.rs`, parse → resolve → `check` → dump) emits the
 `snc resolve` S-expr form **extended with each expression node's inferred `Type`** (a

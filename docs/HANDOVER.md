@@ -1865,9 +1865,11 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host TYPES (4c-1/4c-2)
-    docs** commit (`docs(selfhost): ADR 0041 A4 — (4c) structs + arrays`), atop the
-    **structs+arrays feat** (`feat(selfhost): types.sentinel (4c) structs + arrays`),
+    Local HEAD: verify with `git log -1` — expect the **self-host TYPES (4c-3)
+    nullable docs** commit (`docs(selfhost): ADR 0041 A6 — (4c-3) nullable landed`),
+    atop the **(4c-3) nullable feat** (`3071038`, `feat(selfhost): types.sentinel
+    (4c-3) nullable — ?T + null + WidenToNullable`), atop the (4c-1/4c-2)
+    structs+arrays docs (`3bd271c`/`9285649`/`b456d8c`) + feat (`fa20025`),
     atop the (4b) m-1 docs (`cf04226`) + feat (`62d1a5f`), the (4a) oracle docs
     (`cf44020`) + feat (`c52aef9`), atop the
     RESOLVE-COMPLETE docs (`bbada41`) + delegate-synthesis feat (`9da6c12`), the (3e) docs
@@ -1893,7 +1895,8 @@ For pasting into a fresh chat to bootstrap context:
     CORPUS differential `sentinel_resolver_matches_oracle_on_corpus` (the D9
     phase-go: all 132 clean-resolving fixtures, incl. delegates)** + the **`snc
     types` oracle goldens (`tests/types.rs`, 5)** + the **types seed differential
-    (`tests/selfhost_types.rs`, 18 scalar seeds — the new (4b) m-1 Sentinel stage)**;
+    (`tests/selfhost_types.rs`, 30 seeds — scalar + structs/arrays + (4c-3)
+    nullable; the Sentinel typer matches `snc types` on 61 corpus fixtures too)**;
     four-check green via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`).
@@ -1907,17 +1910,20 @@ For pasting into a fresh chat to bootstrap context:
     `IndexAssignNotSupported`), D3 `types.sentinel` will **`use` `resolve.sentinel`
     as a D.6 module** (verified) but **refined at the (4b) build to SELF-CONTAINED**
     (A3 — resolve's `RCtx` can't be extended with type fields across a module
-    boundary); **(4b) m-1 SCALAR + (4c-1) STRUCTS + (4c-2) ARRAYS LANDED (A3/A4)**
-    (`selfhost/types.sentinel`, the 4th Sentinel stage — matches the oracle on 54
-    corpus fixtures + 24 seeds, leak-free; a 3-pass `main` names→sigs/fields→emit;
-    the `Struct` interner kind rendered via a struct-name blob `snb`; struct-lit +
-    field-access `field_index`; arrays + the generic-builtin `(targs T)` for `len`);
-    NEXT = **(4c-3)** nullable (`?T` + null + `WidenToNullable`, needs expected-type
-    threading) — ⚠ **ATTEMPTED + REVERTED (ADR 0041 A5): the LOGIC works (61 fixtures)
-    but a SEPARATE 6-param `dump_exp` recursion LEAKS the consumed Expr tree;** the
-    fix is to thread `exp` THROUGH the 5-param `dump_texpr` itself (leak-free), NOT a
-    separate fn — WIP at `/tmp/types_4c3_nullable_LEAKS.sentinel`; then (4d) secret,
-    (4e) enum/match, (4f) class/method-dispatch) + the
+    boundary); **(4b) m-1 SCALAR + (4c-1) STRUCTS + (4c-2) ARRAYS + (4c-3) NULLABLE
+    LANDED (A3/A4/A6)** (`selfhost/types.sentinel`, the 4th Sentinel stage — matches
+    the oracle on 61 corpus fixtures + 30 seeds, leak-free; a 3-pass `main`
+    names→sigs/fields→emit; the `Struct` interner kind rendered via a struct-name
+    blob `snb`; struct-lit + field-access `field_index`; arrays + the generic-builtin
+    `(targs T)` for `len`; **(4c-3) `?T` + `null` + the `T → ?T` widening
+    (`widen-null`) via the expected type threaded through `dump_texpr` ITSELF — the
+    ADR 0041 A6 path-(a) fix that RESOLVED the A5 leak** [a SEPARATE recursive
+    Expr-consumer leaks the Move-enum where one self-recursive walker does not; the
+    reusable finding]; leaves widen inline, `Binary` via a temp + `widen_splice`,
+    threading points = fn return / `let` annotation / struct field / `==`-operand);
+    NEXT = **(4d) secret** (`WidenToSecret` + secret-preserving operator rules +
+    `declassify` — reuses the 4c-3 widen-threading machinery), then (4e) enum/match,
+    (4f) class/method-dispatch) + the
     just-COMPLETED **ADR 0040** (resolve, ACCEPTED) + **ADR 0039**
     (the (2/N) parser — **now ACCEPTED / COMPLETE**: (2a)+(2b) the full expression
     grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the

@@ -200,6 +200,48 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
     emit); or (b) grow the probe toward the real file (add the ctx params, more
     mutual-recursion edges) until it leaks, isolate the trigger, and **escalate as a
     Sentinel compiler bug**.
+- **A6 — (4c-3) nullable LANDED via path (a); the A5 leak is RESOLVED.** Took
+  option (a): **threaded the expected-type `exp` through `dump_texpr` ITSELF** (a 6th
+  param, `-1` = no expectation) and **deleted the separate `dump_exp`** — so the whole
+  walk is ONE self-recursive fn (the proven-leak-free 4c-2 shape), never a second
+  mutually-recursive consumer. **Matches `snc types` byte-for-byte on 61 corpus
+  fixtures** (up from 54 — the +7 are every clean nullable fixture: `c15_null_literal`
+  / `c15_widen` / `c15_eq_null` / `c15_nullable_struct_field` / `c15_go_no_go` /
+  `c15_maybe_compose` / `c16_linked_list_node`) **+ 30 seeds** (+6 nullable), **leak-free
+  across all 61** (a full `leaks --atExit` sweep), **zero regressions** vs the 4c-2
+  baseline (a build-both-and-diff-the-match-sets check). Four-check green (1422 tests).
+  - **The widen mechanism (the "can't wrap after emit" constraint).** A `(widen-null
+    … :?T)` wrapper PRECEDES its inner node, but a node's natural type is sometimes
+    known only AFTER its children synthesize — so there are two emit shapes, both
+    keyed on `want_widen(exp, nt)` (true iff `exp` is `?T` and `nt` is its inner):
+    **(i) inline** for leaves whose type is known up front (`Int`=i64, `Bool`=bool,
+    `Var`=its env type, `SynthZero`=i64): `widen_pre` emits the prefix, the node emits,
+    `widen_post` appends ` :?T)` and returns the widened type; **(ii) temp-splice** for
+    `Binary` (result type = the operands'): build the binop into a temp `Vec<u8>`, then
+    `widen_splice` prepends the wrapper iff needed. `null` is neither — its type simply
+    IS `exp`. `If`/`Block` THREAD `exp` (to both branches / the tail); every other child
+    recursion passes `-1`.
+  - **The threading points** (where a non-`-1` `exp` originates): the **fn return** →
+    body `Block` tail (`type_fn`); the **`let` annotation** (`tyopt_exp` — taken BEFORE
+    the value is walked, replacing `type_of_tyopt`, so the value sees the `?T`
+    expectation; the let's type is the annotation if present else the inferred value
+    type); each **struct field** (its declared type, looked up by name in `dump_sfields`
+    — which now takes the `StructId`); the **`==`/`!=` right operand** (inherits the
+    left operand's type, so `x == null` types the `null` as `x`'s `?T`, ADR 0014 D7).
+  - **⚠ The reusable Sentinel finding (supersedes A5's open question).** A recursive
+    consuming-dump that THREADS an extra `&mut`-carried param is leak-free **as the file's
+    single self-recursive walker** but LEAKS its consumed Move-enum **as a second
+    fn mutually-recursive with the first** (the A5 `dump_exp` ↔ `dump_texpr` pair) — a
+    Sentinel drop-glue bug that resisted minimisation (A5's five probes). **The robust
+    idiom: never add a parallel recursive Expr-consumer; extend the existing walker's
+    signature instead.** (The escalation in A5 option (b) is unnecessary now that (a)
+    works, but the bug itself remains real — worth a dev note if a future stage is
+    forced into a second mutually-recursive consumer.) Call-arg widening is NOT
+    exercised by the corpus (every nullable call passes a `?T` var, never a bare `T`
+    literal) and is left unimplemented; add it (needs the callee's param types) only if
+    a fixture demands it. **Next: (4d) secret** (`WidenToSecret` + the secret-preserving
+    operator rules + `declassify`) — reuses this exact widen-threading machinery for the
+    `T → secret T` coercion.
 
 ## Context
 
