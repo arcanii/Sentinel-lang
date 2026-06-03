@@ -23,9 +23,11 @@
 //! GROUP-ordered — all fns before any impl). (3b-5) (A8): the class table →
 //! `(class #id … (init #selfvid …)? (method …)…)` heads + `class-init` +
 //! `resume-kont` — completing (3b) (every decl kind + every `::` form). (3c): the
-//! SCOPED bodies — `match` arm-pattern payload bindings + `while` — with the D5
-//! length-truncation snapshot/restore (a name-blob scope + during-walk binding);
-//! `handle` follows. The full-corpus differential (3e) is the phase-go (D9).
+//! SCOPED bodies — `match` arm-pattern payload bindings, `while`, and `handle`
+//! (handler-arm params + the return arm) — with the D5 length-truncation
+//! snapshot/restore (a name-blob scope + during-walk binding). (3c) closes the
+//! whole expression/decl grammar. The full-corpus differential (3e) is the
+//! phase-go (D9).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -160,6 +162,15 @@ const SEEDS: &[&str] = &[
     "enum Opt { None, Some(i64) }\nfn unwrap(o: Opt) -> i64 { match o { Opt::Some(v) => v, Opt::None => 0 } }\nfn main() -> i64 { unwrap(Opt::Some(5)) }\n",
     "enum E { A(i64), B(i64, i64) }\nfn f(e: E) -> i64 { match e { E::A(x) => x, E::B(x, y) => x + y, _ => 0 } }\nfn main() -> i64 { 0 }\n",
     "fn f(n: i64) -> i64 { let mut i = 0; while i < n { let t = i; i = t + 1; } i }\nfn main() -> i64 { 0 }\n",
+    // (3c) handle: handler-arm params + the return arm bind VarIds scoped to their
+    // arm (truncated after) → `(arm #eid op_index Eff op (#vids) body)` /
+    // `(return #vid body)`. (Needed a parser change: handler-arm params were
+    // parsed-and-dropped; now stored as a Binds.) The return arm dumps last + its
+    // VarId comes after the handler arms regardless of source order.
+    "effect Log { emit(msg: i64) -> i64; }\nfn doit() -> i64 ! { Log } { perform Log.emit(42) }\nfn main() -> i64 { handle doit() with { Log.emit(m) => 0, return v => v } }\n",
+    "effect St { get() -> i64; put(v: i64); }\nfn run() -> i64 ! { St } { perform St.get() }\nfn main() -> i64 { handle run() with { St.get() => 1, St.put(x) => 2, return r => r } }\n",
+    "effect Log { emit(msg: i64) -> i64; }\nfn doit() -> i64 ! { Log } { perform Log.emit(1) }\nfn main() -> i64 { handle doit() with { return v => v, Log.emit(m) => m } }\n",
+    "effect Log { emit(msg: i64) -> i64; }\nfn doit() -> i64 ! { Log } { perform Log.emit(1) }\nfn main() -> i64 { let a = 5; let b = handle doit() with { Log.emit(m) => m, return v => v }; a + b }\n",
 ];
 
 #[test]
