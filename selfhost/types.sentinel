@@ -750,38 +750,73 @@ fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, src: &[u8], c: &mut TyCt
     }
 }
 
-// --- (4c-3) nullable widening (ADR 0014 D3) ---------------------------------
+// --- (4c-3 / 4d) implicit widening — nullable `?T` (ADR 0014 D3) + secret
+//     `secret T` (ADR 0019 D5) -----------------------------------------------
 
-// True iff `exp` is a nullable type `?T` (interner kind 4). -1 / scalars → false.
-fn exp_nullable(c: &mut TyCtx, exp: i64) -> bool {
+// The widen KIND for a value of natural type `nt` meeting expectation `exp`:
+//   0 = none, 1 = `widen-null` (`?nt` expected), 2 = `widen-secret` (`secret nt`
+//   expected). `exp` of -1 / a scalar / any non-coercing compound → 0. Both `?T`
+//   (kind 4) and `secret T` (kind 3) store the inner `T` in payload A (`ta`).
+fn widen_kind(c: &mut TyCtx, exp: i64, nt: i64) -> i64 {
     if exp < tbase() {
-        false
+        0
     } else {
-        (*c).tk[exp - tbase()] == 4
+        let k: i64 = (*c).tk[exp - tbase()];
+        if k == 4 {
+            if (*c).ta[exp - tbase()] == nt {
+                1
+            } else {
+                0
+            }
+        } else if k == 3 {
+            if (*c).ta[exp - tbase()] == nt {
+                2
+            } else {
+                0
+            }
+        } else {
+            0
+        }
     }
 }
 
-// Should a value of natural type `nt` widen to the expectation `exp`? — iff `exp`
-// is `?T` and `nt` is its inner `T` (the implicit `T → ?T` coercion).
-fn want_widen(c: &mut TyCtx, exp: i64, nt: i64) -> bool {
-    if exp_nullable(c, exp) {
-        nullable_inner_of(c, exp) == nt
-    } else {
+// True iff `h` is a secret type `secret T` (interner kind 3).
+fn is_secret(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
         false
+    } else {
+        (*c).tk[h - tbase()] == 3
     }
 }
 
-// Emit a `(widen-null ` prefix iff a value of natural type `nt` widens to `exp`;
-// return whether it did (so the caller closes the wrapper after the node).
+// Strip one `secret` layer: `secret T` → `T`; any other type unchanged. Used by
+// `declassify` (D6) and the secret-preserving cmp/logic result type (D5b).
+fn strip_secret(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        h
+    } else if (*c).tk[h - tbase()] == 3 {
+        (*c).ta[h - tbase()]
+    } else {
+        h
+    }
+}
+
+// Emit the widen prefix iff a value of natural type `nt` widens to `exp` — `?T` →
+// `(widen-null `, `secret T` → `(widen-secret `; return whether it did (so the
+// caller closes the wrapper after the node via `widen_post` — `close_ty` renders
+// `:?T` / `:secret T` from `exp` itself, so the suffix needs no kind).
 fn widen_pre(out: &mut Vec<u8>, exp: i64, nt: i64, c: &mut TyCtx) -> bool {
-    let w: bool = want_widen(c, exp, nt);
-    if w {
+    let wk: i64 = widen_kind(c, exp, nt);
+    if wk == 1 {
         append_str(out, "(widen-null ");
+        0
+    } else if wk == 2 {
+        append_str(out, "(widen-secret ");
         0
     } else {
         0
     };
-    w
+    wk != 0
 }
 
 // Close a widened node: append ` :?T)` iff `w`; return the node's resulting type
@@ -927,9 +962,15 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0 - 1
             };
             let rt: i64 = dump_texpr(&mut tmp, r, rexp, src, c, gb);
-            // binop (<=7) preserves the operand type; cmp/logic -> bool.
+            // arithmetic (<=7) preserves the operand type — so a secret operand makes
+            // the result secret automatically (`lt` is already `secret T`). cmp/logic
+            // -> bool, but secret-preserving: a secret operand → `secret bool` (ADR
+            // 0019 D5b; mixed public+secret is rejected upstream, so the left
+            // operand's secrecy is the pair's).
             let resty: i64 = if bop <= 7 {
                 lt
+            } else if is_secret(c, lt) {
+                mk_secret(c, 2)
             } else {
                 2
             };
@@ -1032,9 +1073,19 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             close_ty(out, ety, c);
             ety
         },
-        // The remaining Expr variants (Null/Char/Str/Method/Qcall/ClassInit/Match/
-        // Declassify/Perform/Scope/Spawn/Await/Handle) land at 4c-3..4g. A defensive
-        // catch-all keeps the match exhaustive.
+        // (4d) `declassify(e)` strips one secret layer: `secret T → T` (ADR 0019 D6).
+        // The inner is synthesized with no expectation; the node's type is its stripped
+        // type. `(declassify <inner :secret T> :T)`.
+        Expr::Declassify(di) => {
+            append_str(out, "(declassify ");
+            let it: i64 = dump_texpr(out, di, 0 - 1, src, c, gb);
+            let rt: i64 = strip_secret(c, it);
+            close_ty(out, rt, c);
+            rt
+        },
+        // The remaining Expr variants (Char/Str/Method/Qcall/ClassInit/Match/
+        // Perform/Scope/Spawn/Await/Handle) land at 4e..4g. A defensive catch-all
+        // keeps the match exhaustive.
         _ => {
             append_str(out, "(UNHANDLED");
             close_ty(out, 0, c);

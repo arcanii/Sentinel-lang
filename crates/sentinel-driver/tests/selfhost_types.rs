@@ -6,11 +6,13 @@
 //! (4b) the SCALAR skeleton + (4c) COMPOUND types. Paramful `fn`s over the scalar
 //! grammar (int/bool literals, var refs, unary, binop/cmp/logic, `if`, blocks, `let`
 //! with inference, calls) PLUS structs (struct-lit + field access), arrays (literal +
-//! index + the generic `len`), and (4c-3) nullable (`?T` + `null` + the implicit
-//! `T → ?T` widening via expected-type threading through `dump_texpr`) — each
-//! expression node annotated with its inferred `Type` (a trailing ` :<type>`); the
-//! `let`'s inferred type replaces resolve's `_`. The full-corpus differential (4i) is
-//! the phase-go (D9); secret / enum / dispatch / generics land at 4d..4h.
+//! index + the generic `len`), (4c-3) nullable (`?T` + `null` + the implicit
+//! `T → ?T` widening via expected-type threading through `dump_texpr`), and (4d)
+//! secret (`secret T` + `declassify` + the `T → secret T` widening + the
+//! secret-preserving operators) — each expression node annotated with its inferred
+//! `Type` (a trailing ` :<type>`); the `let`'s inferred type replaces resolve's `_`.
+//! The full-corpus differential (4i) is the phase-go (D9); enum / dispatch / generics
+//! land at 4e..4h.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -95,6 +97,15 @@ const SEEDS: &[&str] = &[
     // the `* 2` branch widens `i64 → ?i64`, the `null` branch types from the return.
     "fn md(x: ?i64) -> ?i64 { if is_some(x) { unwrap_or(x, 0) * 2 } else { null } }\nfn main() -> i64 { let v: ?i64 = 5; unwrap_or(md(v), 0) }\n",
     "fn first(x: ?i64) -> ?i64 { x }\nfn main() -> i64 { let n: ?i64 = null; unwrap_or(first(n), 7) }\n",
+    // (4d) secret: `secret T` annotation, the implicit `T → secret T` widening
+    // (`widen-secret`), `declassify` (strips one secret layer), and the
+    // secret-preserving operators (`secret + secret → secret`, `secret == secret →
+    // secret bool`, `secret && secret → secret bool`, bitwise `^`).
+    "fn unwrap(s: secret i64) -> i64 { declassify(s) }\nfn main() -> i64 { let p: secret i64 = 42; declassify(p) }\n",
+    "fn add(a: secret i64, b: secret i64) -> secret i64 { a + b }\nfn main() -> i64 { let x: secret i64 = 1; let y: secret i64 = 2; declassify(add(x, y)) }\n",
+    "fn eq(a: secret i64, b: secret i64) -> secret bool { a == b }\nfn main() -> i64 { let x: secret i64 = 5; if declassify(eq(x, x)) { 1 } else { 0 } }\n",
+    "fn both(a: secret bool, b: secret bool) -> secret bool { a && b }\nfn main() -> i64 { 0 }\n",
+    "fn main() -> i64 { let s: secret i64 = 7; let t: secret i64 = s ^ s; declassify(t) }\n",
 ];
 
 #[test]
