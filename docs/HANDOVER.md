@@ -1865,9 +1865,11 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3c)
-    docs** commit (`docs(selfhost): resolve (3c) — scoped bodies complete`), atop
-    the (3c) handle feat (`feat(selfhost): resolve (3c) handle …`, `c38960a`), the
+    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3e)
+    docs** commit (`docs(selfhost): resolve (3e) — corpus phase-go (A11)`), atop
+    the (3e) feat (`feat(selfhost): resolve (3e) group-order resolution + corpus
+    phase-go`, `1c8eb97`), the (3c) docs (`c1e3527`) + the (3e)-finding docs
+    (`f650fa5`), the (3c) handle feat (`c38960a`), the
     (3c) match/while feat (`b6749e3`) + the (3c-a) blob-scope refactor (`072f841`),
     the (3b-5) docs (`546b798`) + feat (`249a9e4`), the (3b-4) docs (`7bdcb6d`) +
     feat (`8eba1a6`) + the (3b-4a) VarId-refactor (`ef237a1`), the (3b-3) docs
@@ -1888,7 +1890,9 @@ For pasting into a fresh chat to bootstrap context:
     5 (3c) match/while + 4 (3c) handle**);
     four-check green via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
-    (+ `cargo build`). macOS + LLVM 18.
+    (+ `cargo build`). **1416 tests** (the resolve corpus differential
+    `sentinel_resolver_matches_oracle_on_corpus` = the D9 phase-go, 130 fixtures).
+    macOS + LLVM 18.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0039**
     (the (2/N) parser — **now ACCEPTED / COMPLETE**: (2a)+(2b) the full expression
     grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the
@@ -1985,27 +1989,28 @@ For pasting into a fresh chat to bootstrap context:
     the parser's `HArms::HCell` now STORES the handler-arm params (a `Binds`, via
     `parse_binds`); `dump_harms` still OMITS them (disposed into a throwaway) so
     `snc ast` is byte-unchanged (parser corpus + seed tests stay green). 61 seeds
-    (+5 match/while +4 handle), leak-free. **RESUME AT = (3e)** — the FULL-CORPUS
-    differential (the D9 phase-go → ADR 0040 fully ACCEPTED): wire a corpus test
-    mirroring `tests/selfhost_parse.rs`'s `sentinel_parser_matches_oracle_on_corpus`
-    (run `snc resolve` + the Sentinel resolver over every clean-RESOLVING
-    `tests/pass`+`tests/ui` fixture, diff). **A broad spot-check already matches
-    129/130** (skipping `use`/delegate). ⚠ **THE ONE BUG = the FIRST (3e) fix
-    (`c5_go_no_go`):** the class/impl VarId BASE is precomputed in pass 1 by
-    TOKEN-COUNTING fn/class bindings (`fnparams`=depth-0 `:`, `fnlets`=depth-≥1
-    `let`, `scan_class_bindings`), which MISSES match-arm payloads / handler-arm
-    params / the `return` var (the 3c forms). So a fn body with a binding
-    `match`/`handle` makes the class base too LOW → all class/impl VarIds shift
-    (c5_go_no_go: a `handle` in a fn → off by 2). **FIX: drop the token-counting,
-    use GROUP-ORDER RESOLUTION** — resolve all fns (advancing `fnvid`), set
-    `classvid = fnvid`, resolve all classes, set `implvid = classvid`, resolve all
-    impls; EMIT each item into a per-item buffer tagged with its source index, then
-    concatenate in source order (no `Vec<Vec>` — one `itembuf` + parallel
-    `(src_idx,start,end)` records, linear-scan emit). This fixes the base AND
-    removes the fragile counting (the 61 seeds + 129/130 corpus stay green). ⚠
-    OTHER (3e) gaps: **delegate-impl synthesis** (`class … delegate f: T to Tr;` →
-    the Rust resolver SYNTHESISES an `(impl …)`; resolve.sentinel SKIPS delegates —
-    4 fixtures) + span-accurate / by-message diagnostics. +
+    (+5 match/while +4 handle), leak-free. **(3e) LANDED — the corpus PHASE-GO is
+    GREEN.** GROUP-ORDER resolution + the full-corpus differential. The class/impl
+    VarId base WAS precomputed by TOKEN-COUNTING fn/class bindings, which MISSED the
+    3c forms (match payloads / handler params / `return` var) → a fn body with a
+    binding `match`/`handle` made the class base too LOW (c5_go_no_go: a `handle` in
+    a fn → off by 2). **FIXED by GROUP-ORDER RESOLUTION:** pass 1 only COLLECTS items
+    (token pos + kind; `fnparams`/`fnlets`/`scan_class_bindings`/`classtot` all
+    DELETED); pass 2 resolves three groups — all fns (advancing `fnvid`) → `classvid
+    = fnvid` → all classes → `implvid = classvid` → all impls — so each region's base
+    is the prior's FINAL counter (exact, includes the 3c bindings). Each item's dump
+    is BUFFERED into one `itembuf` tagged with its source index `(src_idx,start,end)`;
+    the emit walks source indices + splices the slices in order (no `Vec<Vec>`). New
+    test `sentinel_resolver_matches_oracle_on_corpus` (mirrors the parser's) matches
+    `snc resolve` over **130** clean-resolving fixtures, leak-free. **RESUME AT =
+    delegate-impl synthesis** (the LONE gap → ADR 0040 fully ACCEPTED): a `class C {
+    delegate f: T to Tr; }` makes the Rust resolver SYNTHESISE `impl _ as Tr for C {
+    fn m(self,…) { self.f.m(…) } }` (one per delegate, methods from the trait, an
+    ImplId AFTER the user impls, span-ordered near the class, VarIds continuing the
+    impl region) — see `tests/pass/c43_go_no_go.sentinel` + `c4_go_no_go.sentinel`
+    (the 2 clean fixtures). Synthesising impls with NO source tokens in the
+    group-order/source-emit framework is the focused follow-up. Then the next port
+    stage = **types** (its own ADR — write PROPOSED first). +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host

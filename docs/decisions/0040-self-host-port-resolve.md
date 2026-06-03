@@ -2,19 +2,20 @@
 
 Status: **ACCEPTED-WITH-AMENDMENTS** — the third sub-phase of the self-host port
 (ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039
-→ ACCEPTED). **(3a) m-1+m-2 + (3b) + (3c) COMPLETE have LANDED** (A2–A10):
-`selfhost/resolve.sentinel`, the third compiler stage in Sentinel, name-resolves
-the fn-body grammar (paramful fns + every expression form + `let`) **+ the ENTIRE
-top-level decl walk + `::`-path disambiguation** — struct/enum/effect/trait/impl/
-class tables → all decl heads + `struct-lit #id` / `enum-construct` /
-`perform #E op_index` / `qcall-impl #I method_index` / `class-init #C` /
-`resume-kont`, with method/init bodies binding `self` + GROUP-ordered VarIds (fns,
-then classes, then impls) — **+ the SCOPED bodies (3c)** — `match` arm payloads,
-`while`, `handle` (handler-arm params + the return arm) via a name-blob scope +
-during-walk binding + D5 length-truncation — the symbol tables bundled in an
-`&mut RCtx` struct, matching `snc resolve` over 61 seeds (A1's flat-`Vec` model,
-the parser imported as a D.6 module). The ADR flips fully as the last slice —
-**(3e)** the full-corpus differential — closes.
+→ ACCEPTED). **(3a) + (3b) + (3c) COMPLETE + the (3e) corpus phase-go GREEN have
+LANDED** (A2–A11): `selfhost/resolve.sentinel`, the third compiler stage in
+Sentinel, name-resolves the fn-body grammar (paramful fns + every expression form
++ `let`) **+ the ENTIRE top-level decl walk + `::`-path disambiguation** — struct/
+enum/effect/trait/impl/class tables → all decl heads + `struct-lit #id` /
+`enum-construct` / `perform #E op_index` / `qcall-impl #I method_index` /
+`class-init #C` / `resume-kont`, with method/init bodies binding `self` +
+GROUP-ordered VarIds (fns, then classes, then impls) — **+ the SCOPED bodies (3c)**
+(`match` / `while` / `handle`) via a name-blob scope + during-walk binding + D5
+length-truncation — the symbol tables bundled in an `&mut RCtx` struct, **(3e)
+GROUP-ORDER resolution + a corpus differential matching `snc resolve` over 130
+clean-resolving `tests/pass`+`tests/ui` fixtures** (the D9 phase-go), leak-free.
+The LONE remaining gap is **delegate-impl synthesis** (2 fixtures); once it lands,
+the ADR flips to fully ACCEPTED.
 Ports the **resolve** stage to Sentinel: the parsed AST → a name-resolved program
 (every identifier reference bound to an integer ID), differentially validated
 against a Rust `snc` oracle over the `tests/pass` + `tests/ui` corpus. Flips to
@@ -367,6 +368,37 @@ oracle (3a) has landed; the Sentinel side builds on the corrected model. See
     (The committed (3c) is correct for its 61 seeds — none combine a class/impl
     with a binding `match`/`handle` in a fn body — and for 129/130 corpus
     fixtures; the base fix is the first (3e) task.)
+- **A11 — (3e): GROUP-ORDER resolution + the corpus phase-go (D9). (3/N) RESOLVE is
+  essentially COMPLETE.** The base-computation fix (foreseen in A10) + the
+  full-corpus differential test.
+  - **Group-order resolution (the fix).** Pass 1 no longer token-counts fn/class
+    bindings (the `fnparams`/`fnlets`/`scan_class_bindings` machinery is DELETED) —
+    it only COLLECTS each top-level item's `(token pos, kind)`. Pass 2 resolves in
+    THREE groups (mirroring lib.rs:2559): all fns (advancing `fnvid`), then
+    `classvid = fnvid`, all classes (advancing `classvid`), then `implvid =
+    classvid`, all impls — so each region's base is the prior region's FINAL
+    counter, computed exactly (it now includes match/handler/return fn-region
+    bindings). Each item's dump is BUFFERED into one `itembuf` tagged with its
+    source index `(src_idx, start, end)`; the final emit walks source indices and
+    splices the slices in order (no `Vec<Vec<u8>>` — one buffer + parallel records,
+    linear-scan emit). `c5_go_no_go` now matches.
+  - **The corpus phase-go (D9).** `sentinel_resolver_matches_oracle_on_corpus`
+    (mirroring the parser's corpus test) runs `snc resolve` + the Sentinel resolver
+    over every `tests/pass`+`tests/ui` fixture and asserts byte-identical output for
+    the clean-resolving set. **130 fixtures match, leak-free** — the third compiler
+    stage in Sentinel now reproduces the Rust resolver over essentially the whole
+    corpus. Skipped: oracle-rejected fixtures (parse-/resolve-error — happy-path
+    only, like the parser test); `use` fixtures (the Rust resolve rejects them);
+    and **2 `delegate` fixtures** — the LONE remaining gap.
+  - **The one remaining gap: delegate-impl synthesis.** A `class C { delegate f: T
+    to Tr; }` makes the Rust resolver SYNTHESISE a forwarding `impl _ as Tr for C {
+    fn m(self,…) { self.f.m(…) } }` (one per delegate, methods from the trait, an
+    ImplId after the user impls, span-ordered near the class). `resolve.sentinel`
+    skips delegates, so these 2 fixtures are excluded from the phase-go. Synthesising
+    them — generating impls with no source tokens, in the group-order/source-emit
+    framework — is the final (3e) increment (a focused follow-up). **With that, ADR
+    0040 flips to fully ACCEPTED.** Until then: ACCEPTED-WITH-AMENDMENTS, the
+    resolve stage matching `snc resolve` over the entire non-delegate corpus.
 
 ## Context
 
