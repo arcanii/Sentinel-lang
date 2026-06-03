@@ -89,7 +89,7 @@
 // binop 1 + 2 - 3 * 4 / 5 & 6 | 7 ^ ; cmp 8 == 9 != 10 < 11 <= 12 > 13 >= ;
 // logic 14 && 15 || ; unary 1 - 2 !.
 
-enum Expr {
+pub enum Expr {
     Int(i64),
     Bool(bool),
     Null,
@@ -127,12 +127,12 @@ enum Expr {
 // body) — the params are parsed but NOT dumped. The optional `return v => body`
 // arm is kept SEPARATE (it dumps last, regardless of source order), filled via a
 // `&mut Ret` out-param threaded through the arm parse (the Rust `return_arm`).
-enum HArms {
+pub enum HArms {
     HEnd,
     HCell([u8], [u8], Expr, HArms),
 }
 
-enum Ret {
+pub enum Ret {
     NoRet,
     YesRet([u8], Expr),
 }
@@ -140,12 +140,12 @@ enum Ret {
 // Statements (ADR 0039 A12) — a block is a `Stmts` cons-list + a tail `Expr`.
 // SLet's mut flag is a bool; the type annotation is added at (2c-2) (dumped `_`
 // for now). SWhile's body is a block.
-enum Stmts {
+pub enum Stmts {
     SEnd,
     SCell(Stmt, Stmts),
 }
 
-enum Stmt {
+pub enum Stmt {
     SLet(bool, [u8], TyOpt, Expr),
     SAssign(Expr, Expr),
     SWhile(Expr, Expr),
@@ -156,7 +156,7 @@ enum Stmt {
 
 // Type expressions (ADR 0039 A13) — mirrors `sentinel-ast`'s `TypeExpr`. The
 // optional `let` annotation is a `TyOpt`; generic args are a `TyArgs` cons-list.
-enum TypeE {
+pub enum TypeE {
     TIdent([u8]),
     TNullable(TypeE),
     TArray(TypeE),
@@ -166,12 +166,12 @@ enum TypeE {
     TGeneric([u8], TyArgs),
 }
 
-enum TyArgs {
+pub enum TyArgs {
     TAEnd,
     TACell(TypeE, TyArgs),
 }
 
-enum TyOpt {
+pub enum TyOpt {
     NoTy,
     SomeTy(TypeE),
 }
@@ -179,14 +179,14 @@ enum TyOpt {
 // fn-definition parameters (ADR 0039 A14): a cons-list of (mutable, name, type).
 // Generic type-params and the effect row are parsed-and-skipped (the `snc ast`
 // dump emits neither).
-enum Params {
+pub enum Params {
     PEnd,
     PCell(bool, [u8], TypeE, Params),
 }
 
 // Cons-list of arguments (call / method args). A second enum, mutually recursive
 // with `Expr`, because `Vec<non-primitive>` is unsupported (ADR 0039 A3).
-enum Args {
+pub enum Args {
     End,
     Cell(Expr, Args),
 }
@@ -194,23 +194,23 @@ enum Args {
 // `match` support (ADR 0039 A8). Arms are a cons-list of (pattern, body); a
 // pattern is the `_` wildcard or a qualified variant with a positional binding
 // cons-list. All mutually recursive with `Expr` (de-risked by a probe).
-enum Arms {
+pub enum Arms {
     ArmEnd,
     ArmCell(Pattern, Expr, Arms),
 }
 
-enum Pattern {
+pub enum Pattern {
     PatWild,
     PatVariant([u8], [u8], Binds),
 }
 
-enum Binds {
+pub enum Binds {
     BindEnd,
     BindCell([u8], Binds),
 }
 
 // Struct-literal field list (ADR 0039 A9): a cons-list of (name, value).
-enum Fields {
+pub enum Fields {
     FieldEnd,
     FieldCell([u8], Expr, Fields),
 }
@@ -421,7 +421,7 @@ fn is_kw_delegate(src: &[u8], start: i64, end: i64) -> bool {
 }
 
 // Append the decimal rendering of `x` (>= 0) to `out`.
-fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
+pub fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
     if x == 0 {
         push(out, '0');
         0
@@ -444,7 +444,7 @@ fn append_int(out: &mut Vec<u8>, x: i64) -> i64 {
 }
 
 // Append the literal bytes of `s` (moved in + consumed) to `out`.
-fn append_str(out: &mut Vec<u8>, s: [u8]) -> i64 {
+pub fn append_str(out: &mut Vec<u8>, s: [u8]) -> i64 {
     let n: i64 = len(s);
     let mut i: i64 = 0;
     while i < n {
@@ -470,7 +470,7 @@ fn dump_str_body(out: &mut Vec<u8>, sb: [u8]) -> i64 {
 }
 
 // Append `src[start..end]` (via deref-index) to `out`.
-fn append_slice(out: &mut Vec<u8>, src: &[u8], start: i64, end: i64) -> i64 {
+pub fn append_slice(out: &mut Vec<u8>, src: &[u8], start: i64, end: i64) -> i64 {
     let mut i: i64 = start;
     while i < end {
         push(out, (*src)[i]);
@@ -568,7 +568,7 @@ fn decode_string(src: &[u8], cs: i64, ce: i64) -> [u8] {
     vec_to_array(v)
 }
 
-fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, ends: &mut Vec<i64>) -> i64 {
+pub fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>, ends: &mut Vec<i64>) -> i64 {
     let mut pos: i64 = 0;
     while pos < n {
         let b: u8 = (*src)[pos];
@@ -1288,7 +1288,7 @@ fn parse_fields(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut 
 // `while` body) keeps the default `(int 0)` tail, exactly matching the oracle's
 // synthesised unit tail; a regular block always finds a tail. (No
 // `allow_stmt_only` distinction is needed on clean input.)
-fn parse_block(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+pub fn parse_block(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
     *cur = *cur + 1;
     let mut btail: Expr = Expr::SynthZero;
     let bstmts: Stmts = parse_stmts(k, s, e, src, cur, &mut btail);
@@ -1371,7 +1371,7 @@ fn parse_let(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64
 
 // A type expression. `secret T` / `&T` / `&mut T` / `?T` / `[T]` / `Ident` /
 // `Ident<args>`, mirroring the Rust `parse_type`.
-fn parse_type(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> TypeE {
+pub fn parse_type(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> TypeE {
     let t: i64 = (*k)[*cur];
     if t == 51 {
         *cur = *cur + 1;
@@ -1429,7 +1429,7 @@ fn parse_type_args(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &m
 
 // Parse a fn parameter list (`[mut] name : type`, comma-separated) up to and
 // consuming the closing `)` (tag 5). The opening `(` is already consumed.
-fn parse_params(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Params {
+pub fn parse_params(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Params {
     let t: i64 = (*k)[*cur];
     if t == 5 {
         *cur = *cur + 1;
@@ -1458,7 +1458,7 @@ fn parse_params(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut 
 // Skip a generic type-parameter list `<...>` (cur at the `<`, tag 15), balancing
 // nested `<`/`>` — the `snc ast` dump emits no type params, so they are consumed
 // but not stored.
-fn skip_type_params(k: &Vec<i64>, cur: &mut i64) -> i64 {
+pub fn skip_type_params(k: &Vec<i64>, cur: &mut i64) -> i64 {
     *cur = *cur + 1;
     let mut depth: i64 = 1;
     while depth > 0 {
@@ -1477,7 +1477,7 @@ fn skip_type_params(k: &Vec<i64>, cur: &mut i64) -> i64 {
 
 // Skip a fn effect row `! { Eff, ... }` (cur at the `!`, tag 24); the dump omits
 // it. The body is labels + commas — no nested braces — so skip to the `}`.
-fn skip_effect_row(k: &Vec<i64>, cur: &mut i64) -> i64 {
+pub fn skip_effect_row(k: &Vec<i64>, cur: &mut i64) -> i64 {
     *cur = *cur + 1;
     *cur = *cur + 1;
     while (*k)[*cur] != 7 {
@@ -1550,7 +1550,7 @@ fn dump_tyopt(out: &mut Vec<u8>, ty: TyOpt) -> i64 {
 }
 
 // Consuming dump of a type expression, matching `snc ast`'s dump_type.
-fn dump_type(out: &mut Vec<u8>, ty: TypeE) -> i64 {
+pub fn dump_type(out: &mut Vec<u8>, ty: TypeE) -> i64 {
     match ty {
         TypeE::TIdent(nm) => {
             append_str(out, nm);
