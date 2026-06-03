@@ -2,16 +2,17 @@
 
 Status: **ACCEPTED-WITH-AMENDMENTS** — the third sub-phase of the self-host port
 (ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039
-→ ACCEPTED). **(3a) m-1+m-2 + (3b-1..3b-4) have LANDED** (A2–A7):
+→ ACCEPTED). **(3a) m-1+m-2 + (3b) COMPLETE have LANDED** (A2–A8):
 `selfhost/resolve.sentinel`, the third compiler stage in Sentinel, name-resolves
-the fn-body grammar (paramful fns + every expression form + `let`) **and now the
-top-level decl walk + the struct, enum, effect, trait & impl tables (struct-lit
-`#id`, `enum-construct`, `perform #E op_index`, `qcall-impl #I method_index`, with
-method bodies binding a synthetic `self` + GROUP-ordered VarIds)** (the symbol
-tables bundled in an `&mut RCtx` struct), matching `snc resolve` (A1's flat-`Vec`
-model, the parser imported as a D.6 module). The ADR flips fully as the remaining
-slices (3b-5–3e: the class table + `class-init`/`resume-kont`, match/while/handle
-scoping, the full corpus) close.
+the fn-body grammar (paramful fns + every expression form + `let`) **and the
+ENTIRE top-level decl walk + `::`-path disambiguation** — struct/enum/effect/
+trait/impl/class tables → all decl heads + `struct-lit #id` / `enum-construct` /
+`perform #E op_index` / `qcall-impl #I method_index` / `class-init #C` /
+`resume-kont`, with method/init bodies binding `self` + GROUP-ordered VarIds (fns,
+then classes, then impls) — the symbol tables bundled in an `&mut RCtx` struct,
+matching `snc resolve` over 52 seeds (A1's flat-`Vec` model, the parser imported
+as a D.6 module). The ADR flips fully as the remaining slices (3c the
+match/while/handle arm-scoping + 3e the full corpus) close.
 Ports the **resolve** stage to Sentinel: the parsed AST → a name-resolved program
 (every identifier reference bound to an integer ID), differentially validated
 against a Rust `snc` oracle over the `tests/pass` + `tests/ui` corpus. Flips to
@@ -253,6 +254,42 @@ oracle (3a) has landed; the Sentinel side builds on the corrected model. See
     four-check green. (3b-4a) was committed separately (behavior-preserving).
     Next: (3b-5) class + `class-init` + `resume-kont` (the class group slots
     *before* impls in VarId order).
+- **A8 — (3b-5): class + `class-init` + `resume-kont` — (3b) COMPLETE.** The last
+  decl kind, plus the two remaining expression disambiguations.
+  - **class heads:** `(class #id Name (field …) (init #selfvid (params) <block>)?
+    (method #selfvid name <kind> (params) ret <block>)…)`. The class AST **buckets**
+    items, so the dump emits them GROUPED (fields, then init, then methods) — a
+    scan-once-into-per-kind-`Vec<u8>`-buffers-then-concatenate, mirroring the
+    parser's `dump_class_decl` (a single `dump_rclass_items` helper re-passing the
+    `&mut` buffer params, per the A2 borrow quirk). Init + method **bodies** bind a
+    `self`: a method's reuses the (3b-4) `rimpl_method` (its `self:` receiver
+    token), but an **init's `self` is SYNTHETIC** (`init(x,y)` has no receiver) —
+    bound via a **`-1` sentinel scope slot** that `sc_lookup` matches by the
+    literal name `self`. **Delegates are SKIPPED** (the resolve dump omits them;
+    they synthesise impls — a (3e) follow-up; the corpus has 4 delegate fixtures).
+  - **class-region VarIds:** the class group is resolved **before impls** (and
+    after fns), so `classvid` starts at `voff + total-fn-bindings` and `implvid`
+    continues after it (`+ classtot`, the class init/method binding total counted
+    in pass 1 by `scan_class_bindings`). **Within a class, VarIds are bucket-order
+    (init-first)** — the corpus always writes init before methods, so a single
+    source-order `classvid` flow suffices (D7 happy-path; a method-before-init
+    class would need a two-counter split, noted).
+  - **`class-init` (the `ClassInit` else-branch, mirror lib.rs:3790):** not an
+    enum → `Name::init(args)` → `(class-init #C Name args)`. **impl-on-class
+    target:** the impl target tag checks the class table FIRST (lib.rs:2253) →
+    `class#cid`, else `struct#sid`.
+  - **`resume-kont` (mirror lib.rs:3516):** a `Call` whose callee resolves to an
+    in-scope VarId (the scope checked **before** the fn table) is a
+    continuation-resume → `(resume-kont #vid args)` (a let-bound name called, or a
+    handler `k`).
+  - Verified: 6 new differential seeds (a class with field+init+method+class-init,
+    the fn→class→impl VarId group order, an impl on a class, the full c41 `Point`
+    class [2 fields, init, 2 methods incl. `&mut self` + a `self.method()` call],
+    `resume-kont`, an init+method each with a `let`; **52 total**) match `snc
+    resolve`; leak-free; four-check green. **(3b) is COMPLETE** — every decl kind +
+    every `::` disambiguation. Next: (3c) the scoped bodies (`match` arm-pattern
+    bindings, `while`, `handle` handler-arm params + return arm) — the D5
+    length-truncation snapshot/restore for arm scopes.
 
 ## Context
 

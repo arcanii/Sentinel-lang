@@ -14,20 +14,22 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (3/N) RESOLVE is at
-(3b-4)** (ADR 0040 A4–A7): `selfhost/resolve.sentinel` now walks the TOP-LEVEL
-decls (a brace-depth pass-1 scan + a source-order pass-2 dispatch) and resolves
-FIVE decl kinds end to end — struct (`struct-lit #id`), enum (`enum-construct`),
-effect (`perform #E op_index`), and now **trait + impl** (`(trait #id …)` /
-`(impl #id … (method #selfvid …))` heads with method BODIES binding a synthetic
-`self`, + `Impl::method(args)` → `(qcall-impl #I method_index …)`) — with the
-symbol tables bundled in an `&mut RCtx` struct. ⚠ **method-body VarIds are
-GROUP-ordered** (all fns resolve before any impl method), so varid ≠ scope index —
-the scope stores EXPLICIT varids, the impl region counts from
-`voff + total-fn-bindings`. 46 differential seeds match `snc resolve`, leak-free;
-four-check green (1415 tests). NEXT = (3b-5) class + `class-init` + `resume-kont`.
-The prior banner (the (2/N) PARSER, COMPLETE, ADR 0039 → ACCEPTED, A1–A22) stands
-below.
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (3/N) RESOLVE: (3b) is
+COMPLETE** (ADR 0040 A4–A8): `selfhost/resolve.sentinel` walks the TOP-LEVEL decls
+(a brace-depth pass-1 scan + a source-order pass-2 dispatch) and resolves **every
+decl kind + every `::`-path form** — struct (`struct-lit #id`), enum
+(`enum-construct`), effect (`perform #E op_index`), trait + impl
+(`(impl #id … (method #selfvid …))`, `qcall-impl #I method_index`), and class
+(`(class #id … (init #selfvid …)? (method …)…)`, `class-init #C`) — plus
+`resume-kont` — with method/init bodies binding `self` and the symbol tables
+bundled in an `&mut RCtx` struct. ⚠ **method-body VarIds are GROUP-ordered** (the
+Rust resolver resolves all fns, then classes, then impls), so varid ≠ scope index:
+the scope stores EXPLICIT varids and the regions count fn (`voff`) → class
+(`+ total-fn-bindings`) → impl (`+ total-class-bindings`). **52 differential seeds
+match `snc resolve`, leak-free; four-check green (1415 tests).** NEXT = (3c)
+match/while/handle arm-scoped bindings (the D5 length-truncation restore), then
+(3e) the full-corpus differential (the D9 phase-go). The prior banner (the (2/N)
+PARSER, COMPLETE, ADR 0039 → ACCEPTED, A1–A22) stands below.
 
 Prior banner: **(2/N) the PARSER is
 COMPLETE (ADR 0039 → ACCEPTED, A1–A22).** `selfhost/parser.sentinel` matches the
@@ -94,11 +96,17 @@ method args)` (method_index = the method's position in the impl's trait's method
 bodies before ANY impl method, lib.rs:2559), so `varid ≠ scope-array index` — the
 scope now stores EXPLICIT varids (`scv`), the fn region counts from `voff` and the
 impl region from `voff + total-fn-bindings` (the (3b-4a) rearchitecture retired the
-(3b-3) phantom slots). **46 differential seeds match `snc resolve`, leak-free.**
+(3b-3) phantom slots). **(3b-5) (A8) added class + closed (3b)** — `(class #id Name
+(field …) (init #selfvid (params) <block>)? (method #selfvid …)…)` heads (BUCKETED
+fields/init/methods, init+method bodies binding `self` — the init's a synthetic
+`-1` sentinel matched by name) + `(class-init #C Name args)` + `resume-kont` (a
+`Call` whose callee is an in-scope var, scope checked BEFORE the fn table). The
+class group resolves BEFORE impls, so `classvid` counts from `voff +
+total-fn-bindings` and `implvid` from `+ total-class-bindings`. **52 differential
+seeds match `snc resolve`, leak-free. (3b) is COMPLETE.**
 **NEXT =
-(3b-5)** class/class-init + resume-kont (the class group slots BEFORE impls in
-VarId order), (3c) match/while/handle (the D5 truncation restore for arm scopes),
-(3e) full corpus.
+(3c)** match/while/handle (the D5 length-truncation restore for arm scopes),
+(3e) full corpus (the D9 phase-go).
 Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3

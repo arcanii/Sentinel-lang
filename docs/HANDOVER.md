@@ -1865,13 +1865,14 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3b-4)
-    docs** commit (`docs(selfhost): resolve (3b-4) — trait+impl+qcall-impl (A7)`),
-    atop the (3b-4b) feat (`feat(selfhost): resolve (3b-4b) — trait + impl +
-    qcall-impl`, `8eba1a6`) + the (3b-4a) VarId-refactor (`refactor(selfhost):
-    resolve (3b-4a) …`, `ef237a1`), the (3b-3) docs (`b50dd45`) + feat (`4f6305f`),
-    the (3b-2) docs (`7b2e8c7`) + feat (`b80c84e`), the (3b-1) docs (`9117d07`) +
-    feat (`64b82b9`), the (3a) m-2 docs (`7daa66f`) + feat (`80a201d`),
+    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3b-5)
+    docs** commit (`docs(selfhost): resolve (3b-5) — class + (3b) complete (A8)`),
+    atop the (3b-5) feat (`feat(selfhost): resolve (3b-5) — class + class-init +
+    resume-kont; (3b) DONE`, `249a9e4`), the (3b-4) docs (`7bdcb6d`) + feat
+    (`8eba1a6`) + the (3b-4a) VarId-refactor (`ef237a1`), the (3b-3) docs
+    (`b50dd45`) + feat (`4f6305f`), the (3b-2) docs (`7b2e8c7`) + feat (`b80c84e`),
+    the (3b-1) docs (`9117d07`) + feat (`64b82b9`), the (3a) m-2 docs (`7daa66f`) +
+    feat (`80a201d`),
     the (3a) m-1 docs (`352b1ce`) + feat (`06f9241`), the parser AST-exposure
     refactor (`20046e9`), the agent-protocol + probe-correction docs (`8a35328`),
     the `snc resolve` oracle docs (`227ad6d`) + feat (`eba2fb4`) + ADR 0040; atop
@@ -1882,9 +1883,9 @@ For pasting into a fresh chat to bootstrap context:
     tree; **1415 tests** — the `selfhost_parse` seeds (192) + the parser corpus
     differential (the D8 phase-go: all 139 clean-parsing fixtures) + `tests/ast.rs`
     goldens + the `snc resolve` oracle goldens (`tests/resolve.rs`) + the resolve
-    seed differential (`tests/selfhost_resolve.rs`, **46 seeds: 17 (3a) m-1+m-2 +
+    seed differential (`tests/selfhost_resolve.rs`, **52 seeds: 17 (3a) m-1+m-2 +
     6 (3b-1) struct + 7 (3b-2) enum + 9 (3b-3) effect/perform + 7 (3b-4)
-    trait/impl/qcall**);
+    trait/impl/qcall + 6 (3b-5) class/class-init/resume-kont**);
     four-check green via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
@@ -1953,20 +1954,34 @@ For pasting into a fresh chat to bootstrap context:
     region from `voff`, impl region (`implvid`) from `voff + total-fn-bindings`
     (counted in pass 1: a `:` at depth 0 = a fn param, a `let` at depth ≥1 under a
     fn = a fn let, via a `citem` flag). This retired the (3b-3) phantom slots. 46
-    seeds (+7 trait/impl/qcall), leak-free. **RESUME AT = (3b-5)** — the **class**
-    table + `(class #id Name (field …) (init #selfvid …)? (method #selfvid …))`
-    heads (fields + init + methods, BODIES with `self`, mirror the parser's
-    class-item BUCKETING into fields/init/methods/delegates) + the `ClassInit`
-    else-branch → `(class-init #C Name args)` (an enum is checked FIRST) + the
-    `resume-kont` case (a `Call` whose callee is an in-scope var →
-    `(resume-kont #vid …)`, scope checked before the fn table). ⚠ classes slot in
-    the VarId GROUP order BEFORE impls (class base = `voff + total-fn-bindings`,
-    impl base = that + total-class-method-bindings — extend the pass-1 counting).
-    A class target on an `impl` needs `class#tid` (add `class_lookup_slice`; the
-    impl-target dump currently hardcodes `struct#`). Then (3c)
-    match/while/handle (the D5 truncation restore
-    for arm scopes), (3e) the full corpus (the D9 phase-go → ADR 0040 fully
-    ACCEPTED). Add each decl kind's table to `RCtx` (zero new params). +
+    seeds (+7 trait/impl/qcall), leak-free. **(3b-5) LANDED — (3b) is COMPLETE**
+    (class + class-init + resume-kont): `(class #id Name (field …) (init #selfvid
+    (params) <block>)? (method #selfvid …)…)` heads — BUCKETED (fields, then init,
+    then methods; scan-once-into-per-kind-buffers, mirror the parser) with
+    init+method BODIES binding `self` (a method's reuses `rimpl_method`'s receiver
+    token; an INIT's `self` is SYNTHETIC → a `-1` sentinel scope slot matched by
+    the literal name `self`); **delegates are SKIPPED** (the resolve dump omits
+    them — a (3e) follow-up; 4 corpus fixtures) + `(class-init #C Name args)` (the
+    `ClassInit` else-branch, enum checked FIRST) + `resume-kont` (a `Call` whose
+    callee is an in-scope var → `(resume-kont #vid …)`, scope checked BEFORE the fn
+    table). The class group resolves BEFORE impls → `classvid` = `voff +
+    total-fn-bindings`, `implvid` = `+ total-class-bindings` (`scan_class_bindings`
+    counts the class init/method bindings in pass 1); within a class VarIds are
+    bucket-order (init-first; the corpus always writes init before methods). An
+    `impl … for <class>` dumps `class#cid` (class table checked FIRST). 52 seeds
+    (+6 class/class-init/resume-kont, incl. the full c41 `Point` class), leak-free.
+    **RESUME AT = (3c)** — the SCOPED bodies: `match` arm-pattern bindings, `while`,
+    `handle` (handler-arm params + the return arm). ⚠ these need the **D5
+    length-truncation snapshot/restore**: a binding scoped to ONE arm must not leak
+    past it, so record the scope length before the arm + truncate (`pop` scs/sce/
+    scv) back after — pre-scanning (the `let` trick) does NOT work for per-arm
+    scopes. Handler arms + the return arm dump VarIds (`(arm #eid op_index Eff op
+    (#paramvids) body)`, `(return #vid body)`) — mirror resolve_dump.rs:342. `match`
+    arm patterns bind the variant payloads (`(pat Enum Variant #vid…)` —
+    resolve_dump.rs:444). Then (3e) the full-corpus differential (the D9 phase-go →
+    ADR 0040 fully ACCEPTED) — wire a corpus test mirroring
+    `tests/selfhost_parse.rs`, handle delegate-impl synthesis + by-message
+    diagnostics as they surface. +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
