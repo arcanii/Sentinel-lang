@@ -30,6 +30,7 @@ use parser::TypeE;
 use parser::TyArgs;
 use parser::TyOpt;
 use parser::Args;
+use parser::Fields;
 use parser::tokenize;
 use parser::parse_block;
 use parser::parse_type;
@@ -60,6 +61,16 @@ struct TyCtx {
     ufs: Vec<i64>,
     ufe: Vec<i64>,
     ufret: Vec<i64>,
+    // --- struct table: names live in `snb` (a struct-name blob, so render_type
+    //     needs no `src`); StructId = index. `sts`/`ste` = blob offsets. ---
+    snb: Vec<u8>,
+    sts: Vec<i64>,
+    ste: Vec<i64>,
+    // --- field table (flat, one entry per struct field, in StructId order) ---
+    fldo: Vec<i64>,   // owner StructId
+    flds: Vec<i64>,   // field-name blob start (into `snb`)
+    flde: Vec<i64>,   // field-name blob end
+    fldty: Vec<i64>,  // field type handle
 }
 
 fn tbase() -> i64 { 100 }
@@ -117,6 +128,28 @@ fn blob_eq(c: &mut TyCtx, st: i64, en: i64, q: &[u8]) -> bool {
         let mut ok: bool = true;
         while i < qn {
             if (*c).nb[st + i] != (*q)[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Compare a struct-name-blob slice `snb[st..en]` to the query name `q` (the
+// struct/field tables key on `snb`, NOT the scope blob `nb`).
+fn snb_eq(c: &mut TyCtx, st: i64, en: i64, q: &[u8]) -> bool {
+    let qn: i64 = len(*q);
+    if en - st != qn {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < qn {
+            if (*c).snb[st + i] != (*q)[i] {
                 ok = false;
                 0
             } else {
@@ -247,10 +280,115 @@ fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
             push(out, '?');
             render_type(out, a, c);
             0
+        } else if k == 6 {
+            // Struct: render its name from the struct-name blob (a = StructId).
+            let bs: i64 = (*c).sts[a];
+            let be: i64 = (*c).ste[a];
+            let mut bi: i64 = bs;
+            while bi < be {
+                push(out, (*c).snb[bi]);
+                bi = bi + 1;
+            }
+            0
         } else {
             append_str(out, "??")
         }
     }
+}
+
+fn mk_struct(c: &mut TyCtx, sid: i64) -> i64 { intern_type(c, 6, sid, 0) }
+
+// Resolve a struct name (a query `[u8]`) to its StructId (its index in the struct
+// table), or -1. Compares against the struct-name blob.
+fn struct_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).sts);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if snb_eq(c, (*c).sts[i], (*c).ste[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The StructId underlying a type handle (a struct type, kind 6), or -1.
+fn struct_of_handle(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0 - 1
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 6 {
+            (*c).ta[idx]
+        } else {
+            0 - 1
+        }
+    }
+}
+
+// The field index (0-based, decl order) of field `q` in struct `sid`, or -1.
+fn field_index(c: &mut TyCtx, sid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).fldo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).fldo[i] == sid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).flds[i], (*c).flde[i], q) {
+                    found = idx;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The type handle of field `q` in struct `sid`, or -1.
+fn field_type(c: &mut TyCtx, sid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).fldo);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).fldo[i] == sid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).flds[i], (*c).flde[i], q) {
+                    found = (*c).fldty[i];
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
 }
 
 // A `TypeE` (surface type AST) -> a type handle (interning compounds). Consumes
@@ -261,9 +399,16 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
     match t {
         TypeE::TIdent(nm) => {
             let sc: i64 = scalar_code(&nm);
+            let sid: i64 = if sc >= 0 {
+                0 - 1
+            } else {
+                struct_lookup(c, &nm)
+            };
             sink_name(gb, nm);
             if sc >= 0 {
                 sc
+            } else if sid >= 0 {
+                mk_struct(c, sid)
             } else {
                 0
             }
@@ -491,6 +636,116 @@ fn dump_targs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Ve
     }
 }
 
+// (4c-2) array-literal elements: dump every element; RETURN the first element's
+// type (the inferred array element type). Empty → i64 default (a context-typed
+// follow-up). The first is dumped here; the rest reuse `dump_targs`.
+fn dump_array_elems(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(x, rest) => {
+            push(out, ' ');
+            let t0: i64 = dump_texpr(out, x, src, c, gb);
+            dump_targs(out, rest, src, c, gb);
+            t0
+        },
+    }
+}
+
+// The element type of an array type handle (kind 1), or i64 default.
+fn array_elem_of(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 1 {
+            (*c).ta[idx]
+        } else {
+            0
+        }
+    }
+}
+
+// The inner type of a nullable handle (kind 4), or i64 default.
+fn nullable_inner_of(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 4 {
+            (*c).ta[idx]
+        } else {
+            0
+        }
+    }
+}
+
+// Generic builtins that emit `(targs T)`: unwrap_or (#1), is_some (#2), len (#3).
+// (vec_new/push/pop/vec_to_array land with Vec.)
+fn is_generic_builtin(fid: i64) -> bool {
+    fid == 1 || fid == 2 || fid == 3
+}
+
+// The inferred type-arg T for a generic builtin, from its first arg's type.
+fn targ_of_builtin(c: &mut TyCtx, fid: i64, firstty: i64) -> i64 {
+    if fid == 3 {
+        array_elem_of(c, firstty)
+    } else if fid == 1 {
+        nullable_inner_of(c, firstty)
+    } else if fid == 2 {
+        nullable_inner_of(c, firstty)
+    } else {
+        0
+    }
+}
+
+// Dump a generic-builtin call's `(targs T)` + args. Args go to a temp buffer
+// first (T is inferred from the first arg, but `(targs T)` precedes the args in
+// the output). Returns the call's result type.
+fn dump_gcall(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut abuf: Vec<u8> = vec_new();
+    let firstty: i64 = dump_args_capture_first(&mut abuf, ca, src, c, gb);
+    let targ: i64 = targ_of_builtin(c, fid, firstty);
+    append_str(out, " (targs ");
+    render_type(out, targ, c);
+    push(out, ')');
+    append_str(out, vec_to_array(abuf));
+    // result type: unwrap_or -> T; is_some -> bool; len -> i64.
+    if fid == 1 {
+        targ
+    } else if fid == 2 {
+        2
+    } else {
+        0
+    }
+}
+
+// Dump all call args into `out`, returning the FIRST arg's type (-1 if none).
+fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        Args::End => 0 - 1,
+        Args::Cell(x, rest) => {
+            push(out, ' ');
+            let t0: i64 = dump_texpr(out, x, src, c, gb);
+            dump_targs(out, rest, src, c, gb);
+            t0
+        },
+    }
+}
+
+// (4c-1) struct-literal fields: emit each field's VALUE positionally (the names
+// are dropped — the typed StructLit is nameless/positional). Source order.
+fn dump_sfields(out: &mut Vec<u8>, f: Fields, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fval, rest) => {
+            sink_name(gb, fnm);
+            push(out, ' ');
+            dump_texpr(out, fval, src, c, gb);
+            dump_sfields(out, rest, src, c, gb)
+        },
+    }
+}
+
 fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match ex {
         Expr::Int(nv) => {
@@ -619,10 +874,17 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut V
         Expr::Call(cn, ca) => {
             let fid: i64 = fn_lookup(c, src, &cn);
             sink_name(gb, cn);
-            let rt: i64 = fn_ret(c, fid);
             append_str(out, "(call #");
             append_int(out, fid);
-            dump_targs(out, ca, src, c, gb);
+            // Generic builtins (e.g. `len: <T>([T]) -> i64`) emit `(targs T)`
+            // before the args; T is inferred from the first arg, so the args are
+            // dumped to a temp buffer first. The return type may depend on T.
+            let rt: i64 = if is_generic_builtin(fid) {
+                dump_gcall(out, fid, ca, src, c, gb)
+            } else {
+                dump_targs(out, ca, src, c, gb);
+                fn_ret(c, fid)
+            };
             close_ty(out, rt, c);
             rt
         },
@@ -631,10 +893,61 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut TyCtx, gb: &mut V
             close_ty(out, 0, c);
             0
         },
-        // m-1: the remaining Expr variants (Null/Char/Str/Method/Field/Index/
-        // Qcall/ClassInit/Array/Match/StructLit/Declassify/Perform/Scope/Spawn/
-        // Await/Handle) land at 4c..4g. A defensive catch-all keeps the match
-        // exhaustive without crashing on an out-of-(m-1)-scope fixture.
+        // (4c-1) struct literal — positional field VALUES in declaration order
+        // (the corpus writes fields in decl order, so source order = decl order;
+        // a reorder is a follow-up if a fixture needs it). The node's type is the
+        // struct. `(struct-lit #sid Name <v0> <v1>… :Name)`.
+        Expr::StructLit(snm, fields) => {
+            let sid: i64 = struct_lookup(c, &snm);
+            let sty: i64 = mk_struct(c, sid);
+            append_str(out, "(struct-lit #");
+            append_int(out, sid);
+            push(out, ' ');
+            append_str(out, snm);
+            dump_sfields(out, fields, src, c, gb);
+            close_ty(out, sty, c);
+            sty
+        },
+        // (4c-1) field access — `(field <target :Struct> name <field_index> :fty)`.
+        // The target's type is a struct; types computes the field's declaration
+        // index (for codegen's GEP) + the field type.
+        Expr::Field(ft, fdn) => {
+            append_str(out, "(field ");
+            let tty: i64 = dump_texpr(out, ft, src, c, gb);
+            push(out, ' ');
+            let sid: i64 = struct_of_handle(c, tty);
+            let fidx: i64 = field_index(c, sid, &fdn);
+            let fty: i64 = field_type(c, sid, &fdn);
+            append_str(out, fdn);
+            push(out, ' ');
+            append_int(out, fidx);
+            close_ty(out, fty, c);
+            fty
+        },
+        // (4c-2) array literal — `(array <e0> <e1>… :[T])`. The element type is
+        // inferred from the first element (empty arrays need the expected type — a
+        // follow-up); the node's type is `[T]`.
+        Expr::Array(elems) => {
+            append_str(out, "(array");
+            let ety: i64 = dump_array_elems(out, elems, src, c, gb);
+            let aty: i64 = mk_array(c, ety);
+            close_ty(out, aty, c);
+            aty
+        },
+        // (4c-2) postfix index — `(index <target :[T]> <index :i64> :T)`. The
+        // element type is the array's inner.
+        Expr::Index(it, ii) => {
+            append_str(out, "(index ");
+            let tty: i64 = dump_texpr(out, it, src, c, gb);
+            push(out, ' ');
+            dump_texpr(out, ii, src, c, gb);
+            let ety: i64 = array_elem_of(c, tty);
+            close_ty(out, ety, c);
+            ety
+        },
+        // The remaining Expr variants (Null/Char/Str/Method/Qcall/ClassInit/Match/
+        // Declassify/Perform/Scope/Spawn/Await/Handle) land at 4c-3..4g. A defensive
+        // catch-all keeps the match exhaustive.
         _ => {
             append_str(out, "(UNHANDLED");
             close_ty(out, 0, c);
@@ -856,6 +1169,103 @@ fn skip_tparams(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut 
     }
 }
 
+// (4c-1) emit a struct decl head from the struct + field tables:
+// `(struct #sid Name (field name <type>)…)`.
+fn type_struct(out: &mut Vec<u8>, c: &mut TyCtx, sid: i64) -> i64 {
+    append_str(out, "(struct #");
+    append_int(out, sid);
+    push(out, ' ');
+    let ns: i64 = (*c).sts[sid];
+    let ne: i64 = (*c).ste[sid];
+    let mut bi: i64 = ns;
+    while bi < ne {
+        push(out, (*c).snb[bi]);
+        bi = bi + 1;
+    }
+    let nf: i64 = len((*c).fldo);
+    let mut i: i64 = 0;
+    while i < nf {
+        if (*c).fldo[i] == sid {
+            append_str(out, " (field ");
+            let fs: i64 = (*c).flds[i];
+            let fe: i64 = (*c).flde[i];
+            let mut fi2: i64 = fs;
+            while fi2 < fe {
+                push(out, (*c).snb[fi2]);
+                fi2 = fi2 + 1;
+            }
+            push(out, ' ');
+            let fh: i64 = (*c).fldty[i];
+            render_type(out, fh, c);
+            push(out, ')');
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    push(out, ')');
+    0
+}
+
+// PASS-1.5 struct-field scan: record each field `(StructId, name, type-handle)`
+// into the field table. Runs after ALL struct NAMES are registered (pass 1), so
+// a field type referencing another struct resolves.
+fn scan_struct_fields(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, sid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut cur: i64 = p1 + 1;     // at name
+    cur = cur + 1;                 // skip name
+    if (*k)[cur] == 15 {
+        skip_type_params(k, &mut cur)
+    } else {
+        0
+    };
+    cur = cur + 1;                 // skip `{`
+    scan_fields_loop(k, s, e, src, &mut cur, sid, c, gb)
+}
+
+fn scan_fields_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, sid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        scan_fields_loop(k, s, e, src, cur, sid, c, gb)
+    } else {
+        let fnm_s: i64 = (*s)[*cur];
+        let fnm_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;           // skip name
+        *cur = *cur + 1;           // skip `:`
+        let fte: TypeE = parse_type(k, s, e, src, cur);
+        let fth: i64 = type_of_typeexpr(c, fte, gb);
+        let bst: i64 = len((*c).snb);
+        let mut bi: i64 = fnm_s;
+        while bi < fnm_e {
+            push(&mut (*c).snb, (*src)[bi]);
+            bi = bi + 1;
+        }
+        push(&mut (*c).fldo, sid);
+        push(&mut (*c).flds, bst);
+        push(&mut (*c).flde, bst + (fnm_e - fnm_s));
+        push(&mut (*c).fldty, fth);
+        scan_fields_loop(k, s, e, src, cur, sid, c, gb)
+    }
+}
+
+// Dispatch one top-level item on its kind (a SINGLE helper re-passing the `&mut`
+// PARAMS — main's local `&mut out`/`&mut ctx` would conflict across sibling-if
+// tails, ADR 0038 A2). `idx` = the fn index (FnId-14) or the StructId.
+fn type_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>, kind: i64, pos: i64, idx: i64) -> i64 {
+    if kind == 3 {
+        let mut cur: i64 = pos;
+        type_fn(out, k, s, e, src, &mut cur, c, gb, idx)
+    } else if kind == 52 {
+        type_struct(out, c, idx)
+    } else {
+        0
+    }
+}
+
 fn main() -> i64 {
     let path: [u8] = "input.sentinel";
     let src: [u8] = read_file(path);
@@ -880,15 +1290,25 @@ fn main() -> i64 {
         ufs: vec_new(),
         ufe: vec_new(),
         ufret: vec_new(),
+        snb: vec_new(),
+        sts: vec_new(),
+        ste: vec_new(),
+        fldo: vec_new(),
+        flds: vec_new(),
+        flde: vec_new(),
+        fldty: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();
     let mut out: Vec<u8> = vec_new();
 
-    // Pass 1: brace-depth scan. Record top-level `fn` names (FnId 14+) + their
-    // return-type handles; count user effects (the `Async` effect's id).
+    // Pass 1: brace-depth scan. Record top-level item NAMES only — `fn` (FnId 14+,
+    // names in `ufs`/`ufe`) + `struct` (StructId, names copied into `snb`/`sts`/`ste`)
+    // — in source order (`itempos`/`itemkind`); count user effects. NAMES first so
+    // pass-1.5 field/return types (which may reference any struct) all resolve.
     let mut depth: i64 = 0;
     let mut ecount: i64 = 0;
     let mut itempos: Vec<i64> = vec_new();
+    let mut itemkind: Vec<i64> = vec_new();
     let mut p1: i64 = 0;
     while p1 < ntok {
         let t1: i64 = kinds[p1];
@@ -901,10 +1321,23 @@ fn main() -> i64 {
         } else if depth == 0 {
             if t1 == 3 {
                 push(&mut itempos, p1);
+                push(&mut itemkind, 3);
                 push(&mut ctx.ufs, starts[p1 + 1]);
                 push(&mut ctx.ufe, ends[p1 + 1]);
-                let rh: i64 = scan_fn_ret(&kinds, &starts, &ends, &src, p1, &mut ctx, &mut garbage);
-                push(&mut ctx.ufret, rh);
+                0
+            } else if t1 == 52 {
+                push(&mut itempos, p1);
+                push(&mut itemkind, 52);
+                let nss: i64 = starts[p1 + 1];
+                let nen: i64 = ends[p1 + 1];
+                let nst: i64 = len(ctx.snb);
+                let mut nbi: i64 = nss;
+                while nbi < nen {
+                    push(&mut ctx.snb, src[nbi]);
+                    nbi = nbi + 1;
+                }
+                push(&mut ctx.sts, nst);
+                push(&mut ctx.ste, nst + (nen - nss));
                 0
             } else if t1 == 57 {
                 ecount = ecount + 1;
@@ -918,12 +1351,33 @@ fn main() -> i64 {
         p1 = p1 + 1;
     }
 
-    // Pass 2: type-check each fn in source order (fns-only at m-1, so VarIds are
-    // simple source order).
-    let nf: i64 = len(itempos);
+    // Pass 1.5: resolve fn return types (`ufret`, fn source order) + struct fields,
+    // now that all top-level NAMES are registered.
+    let ni: i64 = len(itempos);
+    let mut q: i64 = 0;
+    let mut sc2: i64 = 0;
+    while q < ni {
+        if itemkind[q] == 3 {
+            let rh: i64 = scan_fn_ret(&kinds, &starts, &ends, &src, itempos[q], &mut ctx, &mut garbage);
+            push(&mut ctx.ufret, rh);
+            0
+        } else if itemkind[q] == 52 {
+            scan_struct_fields(&kinds, &starts, &ends, &src, itempos[q], sc2, &mut ctx, &mut garbage);
+            sc2 = sc2 + 1;
+            0
+        } else {
+            0
+        };
+        q = q + 1;
+    }
+
+    // Pass 2: emit each top-level item in source order, dispatching on kind. Only
+    // fns bind VarIds (structs consume none), so VarIds flow in fn source order.
     let mut fi: i64 = 0;
     let mut first_item: bool = true;
-    while fi < nf {
+    let mut fnct: i64 = 0;
+    let mut sc3: i64 = 0;
+    while fi < ni {
         if first_item {
             first_item = false;
             0
@@ -931,8 +1385,20 @@ fn main() -> i64 {
             push(&mut out, '\n');
             0
         };
-        let mut cur: i64 = itempos[fi];
-        type_fn(&mut out, &kinds, &starts, &ends, &src, &mut cur, &mut ctx, &mut garbage, fi);
+        let kd: i64 = itemkind[fi];
+        let idx: i64 = if kd == 3 {
+            fnct
+        } else {
+            sc3
+        };
+        type_item(&mut out, &kinds, &starts, &ends, &src, &mut ctx, &mut garbage, kd, itempos[fi], idx);
+        if kd == 3 {
+            fnct = fnct + 1;
+            0
+        } else {
+            sc3 = sc3 + 1;
+            0
+        };
         fi = fi + 1;
     }
 

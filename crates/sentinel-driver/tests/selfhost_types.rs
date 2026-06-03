@@ -70,6 +70,16 @@ const SEEDS: &[&str] = &[
     // logical operators -> bool.
     "fn both(a: bool, b: bool) -> bool { a && b }\nfn main() -> i64 { 0 }\n",
     "fn main() -> i64 { let t = true || false; if t { 1 } else { 0 } }\n",
+    // (4c-1) structs: decl head (with structural field types), struct-lit
+    // (positional values typed `:StructName`), field access (with `field_index`).
+    "struct Box { v: i64 }\nfn main() -> i64 { let b = Box { v: 42 }; b.v }\n",
+    "struct Tagged { value: i64, valid: bool }\nfn main() -> i64 { let t = Tagged { value: 5, valid: true }; if t.valid { t.value } else { 0 } }\n",
+    "struct Inner { x: i64 }\nstruct Outer { inner: Inner, y: i64 }\nfn main() -> i64 { let o = Outer { inner: Inner { x: 7 }, y: 3 }; o.inner.x + o.y }\n",
+    "struct Point { x: i64, y: i64 }\nfn manhattan(p: Point) -> i64 { p.x + p.y }\nfn main() -> i64 { let p = Point { x: 3, y: 4 }; manhattan(p) }\n",
+    // (4c-2) arrays: literal (typed `:[T]`), postfix index (`:T`), and the
+    // generic `len` builtin (with its inferred `(targs T)`).
+    "fn main() -> i64 { let a = [10, 20, 30]; a[1] + len(a) }\n",
+    "fn sum_two(a: [i64]) -> i64 { a[0] + a[1] }\nfn main() -> i64 { sum_two([5, 6]) }\n",
 ];
 
 #[test]
