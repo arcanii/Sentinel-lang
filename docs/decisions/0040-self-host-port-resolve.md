@@ -2,17 +2,19 @@
 
 Status: **ACCEPTED-WITH-AMENDMENTS** — the third sub-phase of the self-host port
 (ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039
-→ ACCEPTED). **(3a) m-1+m-2 + (3b) COMPLETE have LANDED** (A2–A8):
+→ ACCEPTED). **(3a) m-1+m-2 + (3b) + (3c) COMPLETE have LANDED** (A2–A10):
 `selfhost/resolve.sentinel`, the third compiler stage in Sentinel, name-resolves
-the fn-body grammar (paramful fns + every expression form + `let`) **and the
-ENTIRE top-level decl walk + `::`-path disambiguation** — struct/enum/effect/
-trait/impl/class tables → all decl heads + `struct-lit #id` / `enum-construct` /
+the fn-body grammar (paramful fns + every expression form + `let`) **+ the ENTIRE
+top-level decl walk + `::`-path disambiguation** — struct/enum/effect/trait/impl/
+class tables → all decl heads + `struct-lit #id` / `enum-construct` /
 `perform #E op_index` / `qcall-impl #I method_index` / `class-init #C` /
 `resume-kont`, with method/init bodies binding `self` + GROUP-ordered VarIds (fns,
-then classes, then impls) — the symbol tables bundled in an `&mut RCtx` struct,
-matching `snc resolve` over 52 seeds (A1's flat-`Vec` model, the parser imported
-as a D.6 module). The ADR flips fully as the remaining slices (3c the
-match/while/handle arm-scoping + 3e the full corpus) close.
+then classes, then impls) — **+ the SCOPED bodies (3c)** — `match` arm payloads,
+`while`, `handle` (handler-arm params + the return arm) via a name-blob scope +
+during-walk binding + D5 length-truncation — the symbol tables bundled in an
+`&mut RCtx` struct, matching `snc resolve` over 61 seeds (A1's flat-`Vec` model,
+the parser imported as a D.6 module). The ADR flips fully as the last slice —
+**(3e)** the full-corpus differential — closes.
 Ports the **resolve** stage to Sentinel: the parsed AST → a name-resolved program
 (every identifier reference bound to an integer ID), differentially validated
 against a Rust `snc` oracle over the `tests/pass` + `tests/ui` corpus. Flips to
@@ -290,6 +292,61 @@ oracle (3a) has landed; the Sentinel side builds on the corrected model. See
     every `::` disambiguation. Next: (3c) the scoped bodies (`match` arm-pattern
     bindings, `while`, `handle` handler-arm params + return arm) — the D5
     length-truncation snapshot/restore for arm scopes.
+- **A9 — (3c) match + while: the scoped bodies + the D5 truncation.** Two oracle
+  facts reshaped the scope model (probe-confirmed before the build):
+  - **Bindings are DURING-WALK, in source order (not pre-scanned).** Verified:
+    `let b = match e { E::A(x) => x }` resolves the match VALUE first — binding `x`
+    to the LOWER VarId — then `b` (e.g. `x`=#2, `b`=#3). The (3a) `let` pre-scan
+    (which assigned all `let` VarIds up front) cannot express that interleaving.
+    Switched to during-walk: `dump_rstmt`'s `SLet` resolves the value into a temp
+    buffer FIRST, takes the let's VarId AFTER, then binds it (`scan_lets` removed).
+  - **The scope is a NAME BLOB.** Body bindings (lets, match payloads) come from
+    the AST as owned `[u8]`, not token src slices, so the scope can't key on `src`
+    indices (the decl tables still do). Every binding's name bytes are copied into
+    `ctx.nb` (params copy their src bytes; body bindings push their `[u8]`, which
+    also DISPOSES them); the scope stores blob offsets + the VarId; `sc_lookup`
+    compares against the blob (`blob_eq`). The blob is freed by `ctx`'s drop (a
+    struct field — never moved out). (This (3c-a) rearchitecture was committed
+    separately, behavior-preserving over the 52 prior seeds; the init `self` `-1`
+    sentinel folded away into a literal `"self"` blob binding.)
+  - **D5 length-truncation.** A `match` arm dumps `(pat Enum Variant #vid…)` —
+    each payload binds a fresh VarId (sequential ACROSS arms — *not* reset) — then
+    the arm body resolves against them, then **`truncate_scope`** pops the scope
+    back to the pre-arm mark (visibility restored; the VarId counter persists). So
+    a payload name reused in two arms gets DISTINCT VarIds, and arm 2 doesn't see
+    arm 1's payloads. `while` needs no truncation (Sentinel's flat per-fn namespace
+    makes every name unique, so a stale in-scope binding is never re-referenced) —
+    during-walk binding alone matches the oracle.
+  - Verified: 5 new differential seeds (match with 0/1/2-payload variants +
+    wildcard, the interleaved `let`+`match` VarId order, a payload name reused in
+    two arms, a `while` body `let`; **57 total**) match `snc resolve`; leak-free;
+    four-check green. Next: (3c) `handle` — needs a parser change (the parser
+    currently parses-and-DROPS handler-arm params; resolve needs them to bind the
+    arm-param VarIds).
+- **A10 — (3c) handle: handler-arm params + the return arm — (3c) COMPLETE.**
+  - **A parser change (the one cross-stage edit of this phase).** The parser
+    (`selfhost/parser.sentinel`) parsed-and-DROPPED handler-arm params; resolve
+    needs them. `HArms::HCell` gains a `Binds` (the param name-list, parsed via the
+    existing `parse_binds`); `dump_harms` STILL omits them (the `snc ast` form has
+    no handler params) by disposing the `Binds` into a throwaway buffer — so the
+    parser stage's `snc ast` output is byte-unchanged (the parser corpus + seed
+    tests stay green) and leak-free.
+  - **resolve.** Each handler arm → `(arm #eid op_index Eff op (#paramvids) body)`
+    (mirror resolve_dump.rs:342): `effect_lookup` + `op_index_lookup` give the IDs;
+    the params bind VarIds (scoped to the arm via `truncate_scope`). The optional
+    `return v => body` arm → `(return #vid body)`. The return arm's VarId comes
+    AFTER the handler arms regardless of source order (the parser keeps it separate;
+    resolve dumps arms then return). Handler params + the return var consume the fn
+    region's VarIds during the walk.
+  - Verified: 4 new differential seeds (a handler arm + return, a 2-arm handler
+    with a param + return, a return arm written BEFORE the handler arm in source, a
+    `handle` in a `let` value; **61 total**) match `snc resolve`; leak-free;
+    four-check green; the parser corpus + seed tests stay green. **(3c) is
+    COMPLETE** — the full expression + decl grammar resolves. Next: **(3e)** the
+    full-corpus differential (the D9 phase-go → ADR 0040 fully ACCEPTED): wire a
+    corpus test mirroring `tests/selfhost_parse.rs`, and handle the remaining gaps
+    (delegate-impl synthesis; span-accurate / by-message diagnostics) as they
+    surface.
 
 ## Context
 

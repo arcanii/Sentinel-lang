@@ -1865,11 +1865,12 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3b-5)
-    docs** commit (`docs(selfhost): resolve (3b-5) — class + (3b) complete (A8)`),
-    atop the (3b-5) feat (`feat(selfhost): resolve (3b-5) — class + class-init +
-    resume-kont; (3b) DONE`, `249a9e4`), the (3b-4) docs (`7bdcb6d`) + feat
-    (`8eba1a6`) + the (3b-4a) VarId-refactor (`ef237a1`), the (3b-3) docs
+    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3c)
+    docs** commit (`docs(selfhost): resolve (3c) — scoped bodies complete`), atop
+    the (3c) handle feat (`feat(selfhost): resolve (3c) handle …`, `c38960a`), the
+    (3c) match/while feat (`b6749e3`) + the (3c-a) blob-scope refactor (`072f841`),
+    the (3b-5) docs (`546b798`) + feat (`249a9e4`), the (3b-4) docs (`7bdcb6d`) +
+    feat (`8eba1a6`) + the (3b-4a) VarId-refactor (`ef237a1`), the (3b-3) docs
     (`b50dd45`) + feat (`4f6305f`), the (3b-2) docs (`7b2e8c7`) + feat (`b80c84e`),
     the (3b-1) docs (`9117d07`) + feat (`64b82b9`), the (3a) m-2 docs (`7daa66f`) +
     feat (`80a201d`),
@@ -1883,9 +1884,8 @@ For pasting into a fresh chat to bootstrap context:
     tree; **1415 tests** — the `selfhost_parse` seeds (192) + the parser corpus
     differential (the D8 phase-go: all 139 clean-parsing fixtures) + `tests/ast.rs`
     goldens + the `snc resolve` oracle goldens (`tests/resolve.rs`) + the resolve
-    seed differential (`tests/selfhost_resolve.rs`, **52 seeds: 17 (3a) m-1+m-2 +
-    6 (3b-1) struct + 7 (3b-2) enum + 9 (3b-3) effect/perform + 7 (3b-4)
-    trait/impl/qcall + 6 (3b-5) class/class-init/resume-kont**);
+    seed differential (`tests/selfhost_resolve.rs`, **61 seeds: 52 (3a)+(3b) +
+    5 (3c) match/while + 4 (3c) handle**);
     four-check green via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
@@ -1970,18 +1970,32 @@ For pasting into a fresh chat to bootstrap context:
     bucket-order (init-first; the corpus always writes init before methods). An
     `impl … for <class>` dumps `class#cid` (class table checked FIRST). 52 seeds
     (+6 class/class-init/resume-kont, incl. the full c41 `Point` class), leak-free.
-    **RESUME AT = (3c)** — the SCOPED bodies: `match` arm-pattern bindings, `while`,
-    `handle` (handler-arm params + the return arm). ⚠ these need the **D5
-    length-truncation snapshot/restore**: a binding scoped to ONE arm must not leak
-    past it, so record the scope length before the arm + truncate (`pop` scs/sce/
-    scv) back after — pre-scanning (the `let` trick) does NOT work for per-arm
-    scopes. Handler arms + the return arm dump VarIds (`(arm #eid op_index Eff op
-    (#paramvids) body)`, `(return #vid body)`) — mirror resolve_dump.rs:342. `match`
-    arm patterns bind the variant payloads (`(pat Enum Variant #vid…)` —
-    resolve_dump.rs:444). Then (3e) the full-corpus differential (the D9 phase-go →
-    ADR 0040 fully ACCEPTED) — wire a corpus test mirroring
-    `tests/selfhost_parse.rs`, handle delegate-impl synthesis + by-message
-    diagnostics as they surface. +
+    **(3c) LANDED — the full grammar resolves.** The SCOPED bodies (`match` arm
+    payloads, `while`, `handle` handler-arm params + the return arm). TWO model
+    corrections (probe-confirmed): (1) bindings are **DURING-WALK** in source order
+    — a `let b = match e {E::A(x)=>x}` binds `x` (lower VarId) before `b`, so the
+    (3a) `let` pre-scan was replaced (the value resolves into a temp buffer, the
+    let's VarId is taken AFTER); (2) the scope is a **NAME BLOB** (`ctx.nb`) —
+    body bindings come from the AST as owned `[u8]`, not token src slices, so their
+    bytes are pushed into the blob (which also disposes them) + the scope stores
+    blob offsets. Arm scopes use **D5 length-truncation** (`truncate_scope` pops
+    scs/sce/scv to a pre-arm mark; VarIds stay globally sequential — a payload name
+    reused in two arms gets DISTINCT VarIds). `while` needs no truncation (flat
+    per-fn namespace → names unique). `handle` needed ONE cross-stage parser edit:
+    the parser's `HArms::HCell` now STORES the handler-arm params (a `Binds`, via
+    `parse_binds`); `dump_harms` still OMITS them (disposed into a throwaway) so
+    `snc ast` is byte-unchanged (parser corpus + seed tests stay green). 61 seeds
+    (+5 match/while +4 handle), leak-free. **RESUME AT = (3e)** — the FULL-CORPUS
+    differential (the D9 phase-go → ADR 0040 fully ACCEPTED): wire a corpus test
+    mirroring `tests/selfhost_parse.rs`'s `sentinel_parser_matches_oracle_on_corpus`
+    (run `snc resolve` + the Sentinel resolver over every clean-RESOLVING
+    `tests/pass`+`tests/ui` fixture, diff). ⚠ KNOWN GAPS to close as they surface:
+    **delegate-impl synthesis** (a `class` with `delegate f: T to Tr;` → the Rust
+    resolver SYNTHESISES a `(impl …)` for the class; resolve.sentinel currently
+    SKIPS delegates — 4 corpus fixtures), and **span-accurate / by-message
+    diagnostics** (the corpus test only covers clean-resolving fixtures, like the
+    parser's). A spot-check already passed 15/15 clean `(3b)`-only fixtures; the
+    match/while/handle + class-delegate fixtures are the remaining corpus surface. +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host

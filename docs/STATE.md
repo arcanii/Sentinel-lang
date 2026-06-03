@@ -14,22 +14,21 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (3/N) RESOLVE: (3b) is
-COMPLETE** (ADR 0040 A4–A8): `selfhost/resolve.sentinel` walks the TOP-LEVEL decls
-(a brace-depth pass-1 scan + a source-order pass-2 dispatch) and resolves **every
-decl kind + every `::`-path form** — struct (`struct-lit #id`), enum
-(`enum-construct`), effect (`perform #E op_index`), trait + impl
-(`(impl #id … (method #selfvid …))`, `qcall-impl #I method_index`), and class
-(`(class #id … (init #selfvid …)? (method …)…)`, `class-init #C`) — plus
-`resume-kont` — with method/init bodies binding `self` and the symbol tables
-bundled in an `&mut RCtx` struct. ⚠ **method-body VarIds are GROUP-ordered** (the
-Rust resolver resolves all fns, then classes, then impls), so varid ≠ scope index:
-the scope stores EXPLICIT varids and the regions count fn (`voff`) → class
-(`+ total-fn-bindings`) → impl (`+ total-class-bindings`). **52 differential seeds
-match `snc resolve`, leak-free; four-check green (1415 tests).** NEXT = (3c)
-match/while/handle arm-scoped bindings (the D5 length-truncation restore), then
-(3e) the full-corpus differential (the D9 phase-go). The prior banner (the (2/N)
-PARSER, COMPLETE, ADR 0039 → ACCEPTED, A1–A22) stands below.
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (3/N) RESOLVE: (3b) +
+(3c) are COMPLETE** (ADR 0040 A4–A10): `selfhost/resolve.sentinel` resolves the
+**entire expression + decl grammar** — every decl kind + every `::`-path form
+(struct-lit / enum-construct / perform / qcall-impl / class-init / resume-kont,
+with method/init bodies binding `self`) **and the SCOPED bodies (3c)**: `match`
+arm-pattern payloads, `while`, and `handle` (handler-arm params + the return arm),
+via a **name-blob scope + during-walk binding + D5 length-truncation** (snapshot
+the scope length before an arm, pop back after — visibility restored, VarIds stay
+globally sequential). ⚠ **method-body VarIds are GROUP-ordered** (fns → classes →
+impls); the scope stores EXPLICIT varids. The one cross-stage edit: the parser now
+STORES handler-arm params (a `Binds`) — `snc ast` output byte-unchanged. **61
+differential seeds match `snc resolve`, leak-free; four-check green (1415 tests);
+the parser corpus + seed tests stay green.** NEXT = **(3e)** the full-corpus
+differential (the D9 phase-go → ADR 0040 fully ACCEPTED). The prior banner (the
+(2/N) PARSER, COMPLETE, ADR 0039 → ACCEPTED, A1–A22) stands below.
 
 Prior banner: **(2/N) the PARSER is
 COMPLETE (ADR 0039 → ACCEPTED, A1–A22).** `selfhost/parser.sentinel` matches the
@@ -103,10 +102,17 @@ fields/init/methods, init+method bodies binding `self` — the init's a syntheti
 `Call` whose callee is an in-scope var, scope checked BEFORE the fn table). The
 class group resolves BEFORE impls, so `classvid` counts from `voff +
 total-fn-bindings` and `implvid` from `+ total-class-bindings`. **52 differential
-seeds match `snc resolve`, leak-free. (3b) is COMPLETE.**
-**NEXT =
-(3c)** match/while/handle (the D5 length-truncation restore for arm scopes),
-(3e) full corpus (the D9 phase-go).
+seeds match `snc resolve`, leak-free. (3b) is COMPLETE.** **(3c) (A9/A10) then
+closed the SCOPED bodies** — `match` arm payloads, `while`, `handle` (handler-arm
+params + the return arm). Two model corrections (probe-confirmed): bindings are
+DURING-WALK in source order (a `let b = match …{E::A(x)=>x}` binds `x` to the lower
+VarId, then `b`), and the scope is a **NAME BLOB** (body bindings come from the AST
+as owned `[u8]`, not token slices — their bytes are pushed into `ctx.nb`). Arm
+scopes use **D5 length-truncation** (`truncate_scope` pops the scope to a pre-arm
+mark; VarIds stay sequential). `handle` needed one cross-stage parser edit (the
+parser now STORES handler-arm params as a `Binds`; `snc ast` byte-unchanged). **61
+differential seeds match `snc resolve`, leak-free. (3c) is COMPLETE — the full
+grammar resolves.** **NEXT = (3e)** the full-corpus differential (the D9 phase-go).
 Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3
