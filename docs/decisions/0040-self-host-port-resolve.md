@@ -347,6 +347,26 @@ oracle (3a) has landed; the Sentinel side builds on the corrected model. See
     corpus test mirroring `tests/selfhost_parse.rs`, and handle the remaining gaps
     (delegate-impl synthesis; span-accurate / by-message diagnostics) as they
     surface.
+  - **(3e) preview + the ONE bug it surfaces (THE key (3e) fix).** A broad corpus
+    spot-check (every clean-resolving `tests/pass`+`tests/ui` fixture except `use`
+    / delegate) already matches **129/130**. The single mismatch — `c5_go_no_go` —
+    pinpoints a real flaw in the **class/impl VarId base computation**: it's
+    precomputed in pass 1 by **token-counting** fn/class bindings (`fnparams` =
+    depth-0 `:`, `fnlets` = depth-≥1 `let`s, `scan_class_bindings`), which MISSES
+    the *other* fn-region binding forms — **match-arm payloads, handler-arm params,
+    and the `return` var** (introduced in 3c). So when a fn/method body contains a
+    `match`/`handle` that binds, the class base (`voff + total-fn-bindings`) is too
+    LOW, and every class/impl VarId shifts (c5_go_no_go: a `handle` in a fn → off
+    by 2 = its handler param + return var). **The fix (for (3e)) is to drop the
+    token-counting entirely and use GROUP-ORDER RESOLUTION:** resolve all fns first
+    (advancing `fnvid`), set `classvid = fnvid`, resolve all classes, set
+    `implvid = classvid`, resolve all impls — emitting each item into a per-item
+    buffer tagged with its source index, then concatenating in source order (no
+    `Vec<Vec<u8>>` — one `itembuf` + parallel `(src_idx, start, end)` records,
+    linear-scan emit). This both fixes the base AND removes the fragile counting.
+    (The committed (3c) is correct for its 61 seeds — none combine a class/impl
+    with a binding `match`/`handle` in a fn body — and for 129/130 corpus
+    fixtures; the base fix is the first (3e) task.)
 
 ## Context
 

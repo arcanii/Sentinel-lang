@@ -1989,13 +1989,23 @@ For pasting into a fresh chat to bootstrap context:
     differential (the D9 phase-go → ADR 0040 fully ACCEPTED): wire a corpus test
     mirroring `tests/selfhost_parse.rs`'s `sentinel_parser_matches_oracle_on_corpus`
     (run `snc resolve` + the Sentinel resolver over every clean-RESOLVING
-    `tests/pass`+`tests/ui` fixture, diff). ⚠ KNOWN GAPS to close as they surface:
-    **delegate-impl synthesis** (a `class` with `delegate f: T to Tr;` → the Rust
-    resolver SYNTHESISES a `(impl …)` for the class; resolve.sentinel currently
-    SKIPS delegates — 4 corpus fixtures), and **span-accurate / by-message
-    diagnostics** (the corpus test only covers clean-resolving fixtures, like the
-    parser's). A spot-check already passed 15/15 clean `(3b)`-only fixtures; the
-    match/while/handle + class-delegate fixtures are the remaining corpus surface. +
+    `tests/pass`+`tests/ui` fixture, diff). **A broad spot-check already matches
+    129/130** (skipping `use`/delegate). ⚠ **THE ONE BUG = the FIRST (3e) fix
+    (`c5_go_no_go`):** the class/impl VarId BASE is precomputed in pass 1 by
+    TOKEN-COUNTING fn/class bindings (`fnparams`=depth-0 `:`, `fnlets`=depth-≥1
+    `let`, `scan_class_bindings`), which MISSES match-arm payloads / handler-arm
+    params / the `return` var (the 3c forms). So a fn body with a binding
+    `match`/`handle` makes the class base too LOW → all class/impl VarIds shift
+    (c5_go_no_go: a `handle` in a fn → off by 2). **FIX: drop the token-counting,
+    use GROUP-ORDER RESOLUTION** — resolve all fns (advancing `fnvid`), set
+    `classvid = fnvid`, resolve all classes, set `implvid = classvid`, resolve all
+    impls; EMIT each item into a per-item buffer tagged with its source index, then
+    concatenate in source order (no `Vec<Vec>` — one `itembuf` + parallel
+    `(src_idx,start,end)` records, linear-scan emit). This fixes the base AND
+    removes the fragile counting (the 61 seeds + 129/130 corpus stay green). ⚠
+    OTHER (3e) gaps: **delegate-impl synthesis** (`class … delegate f: T to Tr;` →
+    the Rust resolver SYNTHESISES an `(impl …)`; resolve.sentinel SKIPS delegates —
+    4 fixtures) + span-accurate / by-message diagnostics. +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
