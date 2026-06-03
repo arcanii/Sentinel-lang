@@ -12,10 +12,14 @@
 //  * (3b-1): top-level decl dispatch + the struct table + struct-lit `#id`.
 //  * (3b-2): the enum table + `(enum #id Name (variant …))` heads + the
 //    `Enum::Variant` / `Enum::init` → `(enum-construct #E …)` split (the enum
-//    table is checked FIRST in both the `Qcall` and `ClassInit` arms). The
-//    remaining decl/`::`-path forms (effect/class/trait/impl + the qcall-impl /
-//    class-init / perform split) keep their compile-safe, leak-free pass-through
-//    arms until slices (3b-3)–(3b-5).
+//    table is checked FIRST in both the `Qcall` and `ClassInit` arms).
+//  * (3b-3): the effect table + `(effect #id Name (op name (params) ret)…)` heads
+//    + `perform` → `(perform #E op_index Eff op args)`. ⚠ effect op params consume
+//    GLOBAL VarIds in the Rust resolver (before any fn body) → reproduced as
+//    PHANTOM scope slots (scan_ops_of) so every fn's VarIds are offset correctly.
+//    The remaining decl/`::`-path forms (class/trait/impl + the qcall-impl /
+//    class-init split) keep their compile-safe, leak-free pass-through arms until
+//    slices (3b-4)–(3b-5).
 //
 // PROVEN SENTINEL IDIOMS (ADR 0040 A1/A4 probes; reused):
 //  * Symbol tables + the local scope are FLAT parallel `Vec<i64>` arrays keyed
@@ -74,9 +78,15 @@ struct RCtx {
     ste: Vec<i64>,   // struct table: name-slice ends
     ens: Vec<i64>,   // enum table: name-slice starts (EnumId = index)
     ene: Vec<i64>,   // enum table: name-slice ends
+    efs: Vec<i64>,   // effect table: name-slice starts (EffectId = index)
+    efe: Vec<i64>,   // effect table: name-slice ends
+    efoo: Vec<i64>,  // effect-op list: owner EffectId (one entry per op)
+    efos: Vec<i64>,  // effect-op list: op name-slice starts
+    efoe: Vec<i64>,  // effect-op list: op name-slice ends
     fnct: i64,       // next user-fn index (pass-2 source-order counter)
     structct: i64,   // next struct index (pass-2 source-order counter)
     enumct: i64,     // next enum index (pass-2 source-order counter)
+    effct: i64,      // next effect index (pass-2 source-order counter)
 }
 
 // --- name comparison --------------------------------------------------------
@@ -242,6 +252,59 @@ fn enum_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
         if found == 0 - 1 {
             if name_eq_src(src, (*c).ens[i], (*c).ene[i], q) {
                 found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Resolve an effect name to its EffectId (its index in the effect table), or -1.
+fn effect_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
+    let n: i64 = len((*c).efs);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if name_eq_src(src, (*c).efs[i], (*c).efe[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// op_index = the position of op `q` among effect `eid`'s ops (a linear scan of
+// the flat op list, counting only entries owned by `eid`, in source order). -1 if
+// absent. Mirrors lib.rs:4258 (the effect_decl.ops `.position(…)`).
+fn op_index_lookup(c: &mut RCtx, src: &[u8], eid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).efoo);
+    let mut i: i64 = 0;
+    let mut pos: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if (*c).efoo[i] == eid {
+                if name_eq_src(src, (*c).efos[i], (*c).efoe[i], q) {
+                    found = pos;
+                    0
+                } else {
+                    0
+                };
+                pos = pos + 1;
                 0
             } else {
                 0
@@ -557,7 +620,16 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Ve
             0
         },
         Expr::Perform(pe, po, pa) => {
-            append_str(out, "(perform ");
+            // `perform Eff.op(args)` → `(perform #E op_index Eff op args)` (mirror
+            // resolve_perform_expr, lib.rs:4250). op_index = the op's position in
+            // the effect's op list.
+            let peid: i64 = effect_lookup(c, src, &pe);
+            let poidx: i64 = op_index_lookup(c, src, peid, &po);
+            append_str(out, "(perform #");
+            append_int(out, peid);
+            push(out, ' ');
+            append_int(out, poidx);
+            push(out, ' ');
             append_str(out, pe);
             push(out, ' ');
             append_str(out, po);
@@ -843,6 +915,101 @@ fn resolve_enum(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
     0
 }
 
+// --- effect decl head (3b-3): `(effect #id Name (op name (params) ret)…)` ------
+// Pure syntax — effect op params dump WITHOUT VarIds (`(param [mut] name <type>)`,
+// like trait params; resolve_dump.rs:500). The op params DO consume global
+// VarIds in the Rust resolver (lib.rs:2000) → reproduced as phantom scope slots
+// (see scan_ops_of). Mirrors the parser's dump_effect_decl / dump_ops; an op's
+// missing return type dumps `_`.
+fn emit_op_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, first: bool) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        emit_op_params(out, k, s, e, src, cur, first)
+    } else {
+        if first {
+            0
+        } else {
+            push(out, ' ');
+            0
+        };
+        let pm: bool = (*k)[*cur] == 46;
+        if pm {
+            *cur = *cur + 1;
+            0
+        } else {
+            0
+        };
+        let ns: i64 = (*s)[*cur];
+        let ne: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let pty: TypeE = parse_type(k, s, e, src, cur);
+        append_str(out, "(param ");
+        if pm {
+            append_str(out, "mut ");
+            0
+        } else {
+            0
+        };
+        append_slice(out, src, ns, ne);
+        push(out, ' ');
+        dump_type(out, pty);
+        push(out, ')');
+        emit_op_params(out, k, s, e, src, cur, false)
+    }
+}
+
+fn dump_reffect_ops(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 44 {
+        *cur = *cur + 1;
+        dump_reffect_ops(out, k, s, e, src, cur)
+    } else {
+        let on_s: i64 = (*s)[*cur];
+        let on_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;           // skip `(`
+        append_str(out, " (op ");
+        append_slice(out, src, on_s, on_e);
+        append_str(out, " (");
+        emit_op_params(out, k, s, e, src, cur, true);
+        append_str(out, ") ");
+        if (*k)[*cur] == 8 {
+            *cur = *cur + 1;
+            let rt: TypeE = parse_type(k, s, e, src, cur);
+            dump_type(out, rt);
+            0
+        } else {
+            push(out, '_');
+            0
+        };
+        push(out, ')');
+        dump_reffect_ops(out, k, s, e, src, cur)
+    }
+}
+
+fn resolve_effect(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, eid: i64) -> i64 {
+    *cur = *cur + 1;            // skip `effect`
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;           // skip `{`
+    append_str(out, "(effect #");
+    append_int(out, eid);
+    push(out, ' ');
+    append_slice(out, src, nm_s, nm_e);
+    dump_reffect_ops(out, k, s, e, src, cur);
+    push(out, ')');
+    0
+}
+
 // --- fn header: parse + emit the param list, building the scope -------------
 // `[mut] name : type` comma-separated up to `)` (already past the `(`). Each
 // param → ` (param #vid [mut] name <type>)` (no leading space before the first)
@@ -932,6 +1099,60 @@ fn scan_lets(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, cur_start: i64, c: &mut R
     0
 }
 
+// PASS-1 effect-op scan (cur_start at the effect body `{`): for each op `name(
+// params) [-> ret];`, record `(eid, op-name-slice)` in the flat op list, AND push
+// one PHANTOM scope slot per op param. The Rust resolver assigns effect op params
+// global VarIds during effect-table construction — BEFORE any fn body (lib.rs:2000)
+// — so every fn's VarIds are offset by the total effect-op-param count. The
+// phantoms (pushed before pass 2) sit below every fn's `base`, so they shift the
+// scope indices (= VarIds) without ever being looked up. An op name = an ident at
+// paren-depth 0 followed by `(`; a `:` (tag 31) at paren-depth ≥1 = one op param.
+fn scan_ops_of(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, eid: i64, cur_start: i64, c: &mut RCtx) -> i64 {
+    let mut i: i64 = cur_start + 1;
+    let mut bdepth: i64 = 1;
+    let mut pdepth: i64 = 0;
+    while bdepth > 0 {
+        let t: i64 = (*k)[i];
+        if t == 6 {
+            bdepth = bdepth + 1;
+            0
+        } else if t == 7 {
+            bdepth = bdepth - 1;
+            0
+        } else if t == 4 {
+            pdepth = pdepth + 1;
+            0
+        } else if t == 5 {
+            pdepth = pdepth - 1;
+            0
+        } else if t == 31 {
+            // a param annotation `:` → one effect op param → a phantom VarId slot
+            push(&mut (*c).scs, 0);
+            push(&mut (*c).sce, 0);
+            0
+        } else if pdepth == 0 {
+            // an op name = an ident (tag 2) immediately followed by `(`
+            if t == 2 {
+                if (*k)[i + 1] == 4 {
+                    push(&mut (*c).efoo, eid);
+                    push(&mut (*c).efos, (*s)[i]);
+                    push(&mut (*c).efoe, (*e)[i]);
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
 // Resolve + dump one top-level `fn` (cur at the `fn` token) as
 // `(fn #id name (<params>) <ret> <block>)`, FnId = 14 + fnidx. Builds this fn's
 // scope from the params + pre-scanned `let`s, then resolves the body against it.
@@ -995,6 +1216,11 @@ fn resolve_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
         resolve_enum(out, k, s, e, src, cur, eid);
         (*c).enumct = (*c).enumct + 1;
         0
+    } else if lead == 57 {
+        let efid: i64 = (*c).effct;
+        resolve_effect(out, k, s, e, src, cur, efid);
+        (*c).effct = (*c).effct + 1;
+        0
     } else {
         let fid: i64 = (*c).fnct;
         resolve_fn(out, k, s, e, src, cur, c, gb, fid);
@@ -1023,9 +1249,15 @@ fn main() -> i64 {
         ste: vec_new(),
         ens: vec_new(),
         ene: vec_new(),
+        efs: vec_new(),
+        efe: vec_new(),
+        efoo: vec_new(),
+        efos: vec_new(),
+        efoe: vec_new(),
         fnct: 0,
         structct: 0,
         enumct: 0,
+        effct: 0,
     };
 
     // Pass 1: top-level decl scan (BRACE-DEPTH aware so method `fn`s inside
@@ -1058,6 +1290,13 @@ fn main() -> i64 {
                 push(&mut ctx.ene, ends[p1 + 1]);
                 0
             } else if t1 == 57 {
+                // Register the effect name (EffectId = ecount, source order) +
+                // scan its ops (records the op list AND pushes phantom scope slots
+                // for the op params — see scan_ops_of). The body `{` is at p1+2
+                // (`effect Name {` — effects are non-generic).
+                push(&mut ctx.efs, starts[p1 + 1]);
+                push(&mut ctx.efe, ends[p1 + 1]);
+                scan_ops_of(&kinds, &starts, &ends, ecount, p1 + 2, &mut ctx);
                 ecount = ecount + 1;
                 0
             } else {

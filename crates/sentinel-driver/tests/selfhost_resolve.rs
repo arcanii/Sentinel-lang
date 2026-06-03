@@ -15,8 +15,10 @@
 //! heads + struct-lit `#id`; the symbol tables are bundled in a `RCtx` struct
 //! threaded as `&mut RCtx` (the A4 probe). (3b-2) (A5): the enum table →
 //! `(enum #id Name (variant …))` heads + the `Enum::Variant` → `enum-construct`
-//! split (the enum table is checked FIRST). The remaining `::`-path / decl forms
-//! are slices (3b-3)–(3b-5); the corpus differential is the phase-go (D9).
+//! split (the enum table is checked FIRST). (3b-3) (A6): the effect table →
+//! `(effect #id …)` heads + `perform` → `(perform #E op_index …)`; effect op
+//! params consume global VarIds (reproduced as phantom scope slots). The remaining
+//! `::`-path / decl forms are slices (3b-4)/(3b-5); the corpus is the phase-go (D9).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -99,6 +101,22 @@ const SEEDS: &[&str] = &[
     "enum Tri { One, Two, Three }\nfn pick(n: i64) -> Tri { Tri::Two }\nfn main() -> i64 { let t = pick(1); 0 }\n",
     "enum Wrap { W(i64) }\nfn main() -> i64 { let w = Wrap::W(1 + 2); 0 }\n",
     "fn main() -> i64 { 0 }\nenum Late { L, M(bool) }\n",
+    // (3b-3): the effect table + `(effect #id Name (op name (params) ret)…)` heads
+    // + `perform` → `(perform #E op_index Eff op args)`. The KEY subtlety: effect
+    // op params consume GLOBAL VarIds in the Rust resolver (during effect-table
+    // construction, before any fn body), so every fn's param/let VarIds are OFFSET
+    // by the total effect-op-param count — regardless of source order. The Sentinel
+    // side reproduces this with phantom scope slots. (No `handle` here — handler-arm
+    // VarIds are (3c).)
+    "effect State { get() -> i64; put(v: i64); }\nfn main() -> i64 { 0 }\n",
+    "effect A { op1() -> i64; }\neffect B { op2(x: i64) -> i64; }\nfn f() -> i64 ! { B } { perform B.op2(7) }\nfn main() -> i64 { 0 }\n",
+    "effect Log { emit(msg: i64) -> i64; }\nfn f(a: i64) -> i64 { a }\nfn main() -> i64 { f(3) }\n",
+    "effect St { get() -> i64; put(v: i64); }\nfn g(x: i64) -> i64 { let y = x; y }\nfn main() -> i64 { g(1) }\n",
+    "effect E { ping() -> i64; }\nfn h(a: i64) -> i64 { a }\nfn main() -> i64 { h(1) }\n",
+    "fn f(a: i64) -> i64 { a }\neffect Log { emit(msg: i64) -> i64; }\nfn main() -> i64 { f(3) }\n",
+    "fn p(x: i64) -> i64 { x }\neffect Ev { op(a: i64, b: i64); }\nfn q(y: i64) -> i64 { y }\nfn main() -> i64 { 0 }\n",
+    "effect Two { a(x: i64) -> i64; b(y: i64) -> i64; }\nfn doit() -> i64 ! { Two } { perform Two.b(5) }\nfn main() -> i64 { 0 }\n",
+    "struct S { n: i64 }\neffect Ef { go(s: i64) -> i64; }\nfn use_it(p: i64) -> i64 ! { Ef } { perform Ef.go(p) }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]
