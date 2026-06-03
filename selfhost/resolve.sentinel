@@ -41,7 +41,18 @@
 //    (no truncation needed — names are unique per fn). `handle` arms +
 //    `return v` arm bind VarIds (truncated after) → `(arm #eid op_index Eff op
 //    (#vids) body)` / `(return #vid body)` (the parser now STORES handler-arm
-//    params as a `Binds`). (3c) closes the full grammar; NEXT = (3e) the corpus.
+//    params as a `Binds`). (3c) closes the full grammar.
+//  * (3e) GROUP-ORDER resolution + the corpus phase-go. The Rust resolver resolves
+//    EVERY fn body, then class methods, then impl methods (lib.rs:2559) — so the
+//    VarId regions chain. Pass 1 only COLLECTS items (token pos + kind); pass 2
+//    resolves in THREE groups (fns → `classvid = fnvid`; classes → `implvid =
+//    classvid`; impls), BUFFERING each item's dump tagged by its source index, then
+//    emits in source order. This computes each region's base from the prior
+//    region's FINAL counter — NO binding-count precompute (the old token-counting
+//    MISSED match/handler/return fn-region bindings → a wrong class base). Matches
+//    `snc resolve` over the whole clean-resolving corpus (130 fixtures, the D9
+//    phase-go). ⚠ ONE gap: a `class` with a `delegate` → the Rust resolver
+//    SYNTHESISES a forwarding `impl` (2 fixtures) — not yet generated here.
 //
 // PROVEN SENTINEL IDIOMS (ADR 0040 A1/A4 probes; reused):
 //  * Symbol tables + the local scope are FLAT parallel `Vec<i64>` arrays keyed
@@ -129,9 +140,8 @@ struct RCtx {
     imte: Vec<i64>,  // impl table: the impl's trait name-slice ends
     cls: Vec<i64>,   // class table: name-slice starts (ClassId = index)
     cle: Vec<i64>,   // class table: name-slice ends
-    classvid: i64,   // saved class-region VarId counter (starts voff + fn-bind total)
-    classtot: i64,   // total class-method+init binding count (for the impl base)
-    implvid: i64,    // saved impl-region VarId counter (after the fn + class regions)
+    classvid: i64,   // saved class-region VarId counter (= fnvid after ALL fns)
+    implvid: i64,    // saved impl-region VarId counter (= classvid after ALL classes)
     fnct: i64,       // next user-fn index (pass-2 source-order counter)
     structct: i64,   // next struct index (pass-2 source-order counter)
     enumct: i64,     // next enum index (pass-2 source-order counter)
@@ -1871,72 +1881,6 @@ fn scan_trait_methods(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, tid: i64, cur_st
     0
 }
 
-// PASS-1 class-binding count (cur_start at the class body `{`): accumulate this
-// class's init + method binding count into `classtot` (→ the impl-region VarId
-// base, since the class group is resolved BEFORE impls). A `:` at paren-depth ≥1 =
-// an init/method param (incl. a method's `self:`); a `let` at brace-depth ≥2 = an
-// init/method body let (brace-depth 1 = a field, no VarId); an `init` ident at the
-// item level = the synthetic init `self` (+1). Fields + delegates bind no VarIds.
-fn scan_class_bindings(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur_start: i64, c: &mut RCtx) -> i64 {
-    let mut i: i64 = cur_start + 1;
-    let mut bdepth: i64 = 1;
-    let mut pdepth: i64 = 0;
-    while bdepth > 0 {
-        let t: i64 = (*k)[i];
-        if t == 6 {
-            bdepth = bdepth + 1;
-            0
-        } else if t == 7 {
-            bdepth = bdepth - 1;
-            0
-        } else if t == 4 {
-            pdepth = pdepth + 1;
-            0
-        } else if t == 5 {
-            pdepth = pdepth - 1;
-            0
-        } else if t == 31 {
-            if pdepth >= 1 {
-                (*c).classtot = (*c).classtot + 1;
-                0
-            } else {
-                0
-            };
-            0
-        } else if t == 45 {
-            if bdepth >= 2 {
-                (*c).classtot = (*c).classtot + 1;
-                0
-            } else {
-                0
-            };
-            0
-        } else if t == 2 {
-            if pdepth == 0 {
-                if is_init_slice(src, (*s)[i], (*e)[i]) {
-                    if (*k)[i + 1] == 4 {
-                        (*c).classtot = (*c).classtot + 1;
-                        0
-                    } else {
-                        0
-                    };
-                    0
-                } else {
-                    0
-                };
-                0
-            } else {
-                0
-            };
-            0
-        } else {
-            0
-        };
-        i = i + 1;
-    }
-    0
-}
-
 // Resolve + dump one top-level `fn` (cur at the `fn` token) as
 // `(fn #id name (<params>) <ret> <block>)`, FnId = 14 + fnidx. Builds this fn's
 // scope from the params + pre-scanned `let`s, then resolves the body against it.
@@ -2076,7 +2020,6 @@ fn main() -> i64 {
         cls: vec_new(),
         cle: vec_new(),
         classvid: 0,
-        classtot: 0,
         implvid: 0,
         fnct: 0,
         structct: 0,
@@ -2098,9 +2041,8 @@ fn main() -> i64 {
     // a `let` at depth ≥1 under a fn item is a fn let) → the impl-region VarId base.
     let mut depth: i64 = 0;
     let mut ecount: i64 = 0;
-    let mut citem: i64 = 0;
-    let mut fnparams: i64 = 0;
-    let mut fnlets: i64 = 0;
+    let mut itempos: Vec<i64> = vec_new();
+    let mut itemkind: Vec<i64> = vec_new();
     let mut p1: i64 = 0;
     while p1 < ntok {
         let t1: i64 = kinds[p1];
@@ -2110,47 +2052,30 @@ fn main() -> i64 {
         } else if t1 == 7 {
             depth = depth - 1;
             0
-        } else if t1 == 31 {
-            if depth == 0 {
-                fnparams = fnparams + 1;
-                0
-            } else {
-                0
-            };
-            0
-        } else if t1 == 45 {
-            if depth >= 1 {
-                if citem == 3 {
-                    fnlets = fnlets + 1;
-                    0
-                } else {
-                    0
-                };
-                0
-            } else {
-                0
-            };
-            0
         } else if depth == 0 {
             if t1 == 3 {
-                citem = 3;
+                push(&mut itempos, p1);
+                push(&mut itemkind, t1);
                 push(&mut ctx.ufs, starts[p1 + 1]);
                 push(&mut ctx.ufe, ends[p1 + 1]);
                 0
             } else if t1 == 52 {
-                citem = 52;
+                push(&mut itempos, p1);
+                push(&mut itemkind, t1);
                 push(&mut ctx.sts, starts[p1 + 1]);
                 push(&mut ctx.ste, ends[p1 + 1]);
                 0
             } else if t1 == 53 {
-                citem = 53;
+                push(&mut itempos, p1);
+                push(&mut itemkind, t1);
                 push(&mut ctx.ens, starts[p1 + 1]);
                 push(&mut ctx.ene, ends[p1 + 1]);
                 0
             } else if t1 == 54 {
                 // Register the trait name (TraitId = source order) + scan its
                 // method sigs into the flat trait-method list. Body `{` is at p1+2.
-                citem = 54;
+                push(&mut itempos, p1);
+                push(&mut itemkind, t1);
                 let tid1: i64 = len(ctx.trs);
                 push(&mut ctx.trs, starts[p1 + 1]);
                 push(&mut ctx.tre, ends[p1 + 1]);
@@ -2160,7 +2085,8 @@ fn main() -> i64 {
                 // Register the impl: its name (or a 0,0 never-matched slot for a
                 // default `impl as …`) + the impl's trait name slice. The header is
                 // `impl [Name as]? Trait for Type {` — Name present iff p1+1 ≠ `as`.
-                citem = 55;
+                push(&mut itempos, p1);
+                push(&mut itemkind, t1);
                 if kinds[p1 + 1] != 60 {
                     push(&mut ctx.imns, starts[p1 + 1]);
                     push(&mut ctx.imne, ends[p1 + 1]);
@@ -2176,18 +2102,19 @@ fn main() -> i64 {
                 };
                 0
             } else if t1 == 56 {
-                // Register the class name (ClassId = source order) + count its
-                // init/method bindings into classtot. Body `{` is at p1+2.
-                citem = 56;
+                // Register the class name (ClassId = source order). Body `{`
+                // is at p1+2 (group-order resolution computes the VarId base).
+                push(&mut itempos, p1);
+                push(&mut itemkind, t1);
                 push(&mut ctx.cls, starts[p1 + 1]);
                 push(&mut ctx.cle, ends[p1 + 1]);
-                scan_class_bindings(&kinds, &starts, &ends, &src, p1 + 2, &mut ctx);
                 0
             } else if t1 == 57 {
                 // Register the effect name (EffectId = ecount, source order) + scan
                 // its ops (records the op list AND counts the op params into voff —
                 // see scan_ops_of). The body `{` is at p1+2 (effects non-generic).
-                citem = 57;
+                push(&mut itempos, p1);
+                push(&mut itemkind, t1);
                 push(&mut ctx.efs, starts[p1 + 1]);
                 push(&mut ctx.efe, ends[p1 + 1]);
                 scan_ops_of(&kinds, &starts, &ends, ecount, p1 + 2, &mut ctx);
@@ -2203,23 +2130,105 @@ fn main() -> i64 {
         p1 = p1 + 1;
     }
 
-    // The VarId regions, in the Rust resolver's body-resolution order (lib.rs:2559
-    // — every fn body, then class methods, then impl methods): fn region starts at
-    // `voff` (after the effect op params); class region after ALL fn bindings; impl
-    // region after the fn + class regions.
+    // Pass 2 — GROUP-ORDER resolution. The Rust resolver resolves EVERY fn body,
+    // then class methods, then impl methods (lib.rs:2559); the dump is source
+    // order. So resolve in three groups (their VarId regions chain — each region's
+    // base is the prior region's FINAL counter, so no binding count is precomputed)
+    // but BUFFER each item's dump tagged with its source index, then emit in source
+    // order. `itembuf` holds all dumps; `rsrc`/`rbs`/`rbe` record each resolved
+    // item's (source index, blob start, blob end). The fn region starts at `voff`
+    // (after the effect op params).
     ctx.fnvid = ctx.voff;
-    ctx.classvid = ctx.voff + fnparams + fnlets;
-    ctx.implvid = ctx.voff + fnparams + fnlets + ctx.classtot;
-
-    // The name garbage sink (a STANDALONE Vec — a struct field can't be moved
-    // out for vec_to_array) + the output buffer.
     let mut garbage: Vec<u8> = vec_new();
-    let mut out: Vec<u8> = vec_new();
+    let mut itembuf: Vec<u8> = vec_new();
+    let mut rsrc: Vec<i64> = vec_new();
+    let mut rbs: Vec<i64> = vec_new();
+    let mut rbe: Vec<i64> = vec_new();
+    let nitems: i64 = len(itemkind);
 
-    // Pass 2: resolve + dump each top-level item in source order.
-    let mut cur: i64 = 0;
+    // Group A: structs/enums/effects/traits + FNS (everything except class/impl),
+    // in source order. Fns advance `fnvid`; the no-VarId decls don't touch it.
+    let mut ia: i64 = 0;
+    while ia < nitems {
+        let ka: i64 = itemkind[ia];
+        if ka == 56 {
+            0
+        } else if ka == 55 {
+            0
+        } else {
+            let mut cura: i64 = itempos[ia];
+            let bsa: i64 = len(itembuf);
+            resolve_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut cura, &mut ctx, &mut garbage);
+            push(&mut rsrc, ia);
+            push(&mut rbs, bsa);
+            push(&mut rbe, len(itembuf));
+            0
+        };
+        ia = ia + 1;
+    }
+    // The class region begins where the fn region ended.
+    ctx.classvid = ctx.fnvid;
+
+    // Group B: classes, in source order. Advance `classvid`.
+    let mut ib: i64 = 0;
+    while ib < nitems {
+        if itemkind[ib] == 56 {
+            let mut curb: i64 = itempos[ib];
+            let bsb: i64 = len(itembuf);
+            resolve_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut curb, &mut ctx, &mut garbage);
+            push(&mut rsrc, ib);
+            push(&mut rbs, bsb);
+            push(&mut rbe, len(itembuf));
+            0
+        } else {
+            0
+        };
+        ib = ib + 1;
+    }
+    // The impl region begins where the class region ended.
+    ctx.implvid = ctx.classvid;
+
+    // Group C: impls, in source order. Advance `implvid`.
+    let mut ic: i64 = 0;
+    while ic < nitems {
+        if itemkind[ic] == 55 {
+            let mut curc: i64 = itempos[ic];
+            let bsc: i64 = len(itembuf);
+            resolve_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut curc, &mut ctx, &mut garbage);
+            push(&mut rsrc, ic);
+            push(&mut rbs, bsc);
+            push(&mut rbe, len(itembuf));
+            0
+        } else {
+            0
+        };
+        ic = ic + 1;
+    }
+
+    // EMIT in source order: for each source index, find its record (every item is
+    // resolved exactly once, so a record always exists) and splice its `itembuf`
+    // slice into `out`.
+    let mut out: Vec<u8> = vec_new();
+    let nrec: i64 = len(rsrc);
+    let mut si: i64 = 0;
     let mut firstitem: bool = true;
-    while cur < ntok {
+    while si < nitems {
+        let mut j: i64 = 0;
+        let mut found: i64 = 0 - 1;
+        while j < nrec {
+            if found == 0 - 1 {
+                if rsrc[j] == si {
+                    found = j;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            j = j + 1;
+        }
         if firstitem {
             0
         } else {
@@ -2227,7 +2236,13 @@ fn main() -> i64 {
             0
         };
         firstitem = false;
-        resolve_item(&mut out, &kinds, &starts, &ends, &src, &mut cur, &mut ctx, &mut garbage);
+        let mut bi: i64 = rbs[found];
+        let bend: i64 = rbe[found];
+        while bi < bend {
+            push(&mut out, itembuf[bi]);
+            bi = bi + 1;
+        }
+        si = si + 1;
     }
 
     // The built-in `Async` effect (id = the user-effect count) dumps LAST.
@@ -2239,7 +2254,8 @@ fn main() -> i64 {
 
     let arr: [u8] = vec_to_array(out);
     print_bytes(arr);
-    // Reclaim the name garbage (frees the resolved-away [u8] names) as a final act.
+    // Reclaim the buffers (free the resolved-away [u8] names) as a final act.
+    let _it: [u8] = vec_to_array(itembuf);
     let _g: [u8] = vec_to_array(garbage);
     0
 }

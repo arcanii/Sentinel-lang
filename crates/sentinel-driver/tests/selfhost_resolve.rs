@@ -115,8 +115,8 @@ const SEEDS: &[&str] = &[
     // op params consume GLOBAL VarIds in the Rust resolver (during effect-table
     // construction, before any fn body), so every fn's param/let VarIds are OFFSET
     // by the total effect-op-param count — regardless of source order. The Sentinel
-    // side reproduces this with phantom scope slots. (No `handle` here — handler-arm
-    // VarIds are (3c).)
+    // side reproduces this by starting the fn-region VarId counter at that offset
+    // (`voff`). (No `handle` here — handler-arm VarIds are (3c).)
     "effect State { get() -> i64; put(v: i64); }\nfn main() -> i64 { 0 }\n",
     "effect A { op1() -> i64; }\neffect B { op2(x: i64) -> i64; }\nfn f() -> i64 ! { B } { perform B.op2(7) }\nfn main() -> i64 { 0 }\n",
     "effect Log { emit(msg: i64) -> i64; }\nfn f(a: i64) -> i64 { a }\nfn main() -> i64 { f(3) }\n",
@@ -212,6 +212,91 @@ fn sentinel_resolver_matches_oracle_on_seeds() {
         "the Sentinel resolver diverged from `snc resolve` on {}/{} seed(s):\n{}",
         mismatches.len(),
         SEEDS.len(),
+        mismatches.join("\n")
+    );
+}
+
+/// All `tests/pass` + `tests/ui` `.sentinel` fixtures (sorted).
+fn collect_fixtures() -> Vec<PathBuf> {
+    let root = workspace_root();
+    let mut fixtures = Vec::new();
+    for sub in ["tests/pass", "tests/ui"] {
+        for entry in std::fs::read_dir(root.join(sub)).expect("read fixture dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) == Some("sentinel") {
+                fixtures.push(path);
+            }
+        }
+    }
+    fixtures.sort();
+    fixtures
+}
+
+/// ADR 0040 D9 — the phase-go: `selfhost/resolve.sentinel` matches `snc resolve`
+/// byte-for-byte over every clean-RESOLVING `tests/pass` + `tests/ui` fixture.
+/// Skipped: fixtures the oracle rejects (parse-/resolve-error fixtures — the
+/// Sentinel resolver only mirrors happy-path resolution, like the parser test),
+/// and `delegate`-bearing classes (the Rust resolver SYNTHESISES a forwarding
+/// `impl` per delegate, which `resolve.sentinel` does not yet generate — the lone
+/// remaining (3e) gap; 2 clean fixtures). `use` fixtures are excluded naturally
+/// (the Rust resolve rejects a non-empty `uses` with `UseDeclNotYet`).
+#[test]
+fn sentinel_resolver_matches_oracle_on_corpus() {
+    let tmp =
+        std::env::temp_dir().join(format!("snc_selfhost_resolve_corpus_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let resolver = build_sentinel_resolver(&tmp);
+
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+
+    let fixtures = collect_fixtures();
+    assert!(fixtures.len() > 100, "expected a substantial corpus, got {}", fixtures.len());
+
+    let mut clean = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+    for fixture in &fixtures {
+        let bytes = std::fs::read(fixture).expect("read fixture");
+        // Skip the delegate-synthesis gap (documented above).
+        if bytes.windows(9).any(|w| w == b"delegate ") {
+            continue;
+        }
+        std::fs::write(&input, &bytes).expect("stage input");
+
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("resolve")
+            .arg(&input)
+            .output()
+            .expect("run snc resolve");
+        // Skip fixtures the oracle rejects (parse-/resolve-error fixtures).
+        if !oracle.status.success() {
+            continue;
+        }
+        clean += 1;
+
+        let sentinel = Command::new(&resolver)
+            .current_dir(&work)
+            .output()
+            .expect("run the Sentinel resolver");
+
+        if oracle.stdout != sentinel.stdout {
+            mismatches.push(format!(
+                "  {} (oracle {} bytes vs sentinel {} bytes)",
+                fixture.file_name().unwrap().to_string_lossy(),
+                oracle.stdout.len(),
+                sentinel.stdout.len()
+            ));
+        }
+    }
+
+    assert!(clean > 100, "expected >100 clean-resolving fixtures, got {clean}");
+    assert!(
+        mismatches.is_empty(),
+        "the Sentinel resolver diverged from `snc resolve` on {}/{} clean-resolving fixture(s):\n{}",
+        mismatches.len(),
+        clean,
         mismatches.join("\n")
     );
 }
