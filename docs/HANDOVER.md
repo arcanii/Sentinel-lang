@@ -1913,7 +1913,11 @@ For pasting into a fresh chat to bootstrap context:
     the `Struct` interner kind rendered via a struct-name blob `snb`; struct-lit +
     field-access `field_index`; arrays + the generic-builtin `(targs T)` for `len`);
     NEXT = **(4c-3)** nullable (`?T` + null + `WidenToNullable`, needs expected-type
-    threading), then (4d) secret, (4e) enum/match, (4f) class/method-dispatch) + the
+    threading) — ⚠ **ATTEMPTED + REVERTED (ADR 0041 A5): the LOGIC works (61 fixtures)
+    but a SEPARATE 6-param `dump_exp` recursion LEAKS the consumed Expr tree;** the
+    fix is to thread `exp` THROUGH the 5-param `dump_texpr` itself (leak-free), NOT a
+    separate fn — WIP at `/tmp/types_4c3_nullable_LEAKS.sentinel`; then (4d) secret,
+    (4e) enum/match, (4f) class/method-dispatch) + the
     just-COMPLETED **ADR 0040** (resolve, ACCEPTED) + **ADR 0039**
     (the (2/N) parser — **now ACCEPTED / COMPLETE**: (2a)+(2b) the full expression
     grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the

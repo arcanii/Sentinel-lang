@@ -161,6 +161,30 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
     FROM the args, the args dump to a temp buffer first, then `(targs T)` + the spliced
     args (`unwrap_or`'s result type IS its inferred T). Next: **(4c-3)** nullable
     (`?T` + null + `WidenToNullable` — needs expected-type threading) then (4d) secret.
+- **A5 — (4c-3) nullable ATTEMPTED + REVERTED; a Sentinel leak gotcha found (the
+  LOGIC works, the code shape leaks).** The expected-type-threading logic was
+  correct — `null`'s type taken from the expectation, `(widen-null …)` inserted where
+  a `T` value meets a `?T` expectation (let value / struct field / fn return /
+  if-branch), the cmp-operand sharing its type so `x == null` infers null — and it
+  **matched the oracle on 61 corpus fixtures** (+7: every c15 nullable incl.
+  `maybe_compose`'s if-branch-under-`?T` threading, `eq_null`'s cmp-null, and
+  `linked_list_node`'s recursive `?Node`). **But it LEAKED** (208 bytes — the consumed
+  `If` Expr AST tree not dropped). **⚠ ROOT CAUSE (a reusable Sentinel finding): a
+  SEPARATE recursive dump fn with an EXTRA param leaks the Move-enum it consumes.**
+  The attempt added a `dump_exp(out, ex, exp, src, c, gb)` (6 params, threading the
+  expected type) ALONGSIDE `dump_texpr` (5 params); `dump_texpr`'s recursion is
+  leak-free, but `dump_exp`'s recursion leaked the `Expr` tree it destructured
+  (confirmed — the leaked blocks form the If→Block→Null tree; a non-nullable `if`
+  routed through `dump_texpr` is clean). Workarounds (unconditional single-consume; a
+  top-level `if exp_nullable { match ex } else { dump_texpr(ex) }` delegation) fixed
+  the scalar leaf-temp leak but not the nullable-`if` recursion. **The fix (deferred
+  to the next session): thread `exp` THROUGH `dump_texpr` ITSELF** (add the param to
+  the proven-leak-free walker + use it in the Null/If/Block/Binary-right arms + a
+  widen at the let/field/return boundaries) — NOT a separate recursive fn. (Or first
+  probe why a 6-param recursive fn leaks its consumed enum where the 5-param one does
+  not — a possible Sentinel drop-glue/param-count bug worth a minimal repro.) Reverted
+  to the clean (4c-2) state; (4c-1)/(4c-2) stay committed. The WIP is preserved
+  out-of-tree for the next attempt.
 
 ## Context
 

@@ -33,7 +33,10 @@ RETURNS each node's type handle + `close_ty` appends ` :<type>`; a 3-pass `main`
 (names → sigs/fields → emit) so forward struct/fn refs resolve; ⚠ the struct/field
 tables key on a separate `snb` blob (NOT the scope blob `nb` — a dedicated `snb_eq`).
 NEXT = **(4c-3)** nullable (`?T` + null + `WidenToNullable` — needs expected-type
-threading) then (4d) secret, (4e) enum/match, (4f) class/method-dispatch, …
+threading) — ⚠ **ATTEMPTED + REVERTED (A5): logic works (61 fixtures) but a separate
+6-param `dump_exp` recursion LEAKS the consumed Expr tree; fix = thread `exp` through
+the 5-param `dump_texpr` itself, not a separate fn** — then (4d) secret, (4e)
+enum/match, (4f) class/method-dispatch, …
 **(4a) shipped the ORACLE + de-risked the Sentinel build:** `snc types <file>`
 (driver `run_types` + `types_dump.rs`, parse → resolve → `check` → dump) emits the
 `snc resolve` S-expr form **extended with each expression node's inferred `Type`** (a
