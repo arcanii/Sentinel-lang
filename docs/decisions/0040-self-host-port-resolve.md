@@ -1,21 +1,21 @@
 # ADR 0040: Phase D self-host port — (3/N) resolve-in-Sentinel
 
-Status: **ACCEPTED-WITH-AMENDMENTS** — the third sub-phase of the self-host port
-(ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039
-→ ACCEPTED). **(3a) + (3b) + (3c) COMPLETE + the (3e) corpus phase-go GREEN have
-LANDED** (A2–A11): `selfhost/resolve.sentinel`, the third compiler stage in
-Sentinel, name-resolves the fn-body grammar (paramful fns + every expression form
-+ `let`) **+ the ENTIRE top-level decl walk + `::`-path disambiguation** — struct/
-enum/effect/trait/impl/class tables → all decl heads + `struct-lit #id` /
-`enum-construct` / `perform #E op_index` / `qcall-impl #I method_index` /
-`class-init #C` / `resume-kont`, with method/init bodies binding `self` +
-GROUP-ordered VarIds (fns, then classes, then impls) — **+ the SCOPED bodies (3c)**
-(`match` / `while` / `handle`) via a name-blob scope + during-walk binding + D5
-length-truncation — the symbol tables bundled in an `&mut RCtx` struct, **(3e)
-GROUP-ORDER resolution + a corpus differential matching `snc resolve` over 130
-clean-resolving `tests/pass`+`tests/ui` fixtures** (the D9 phase-go), leak-free.
-The LONE remaining gap is **delegate-impl synthesis** (2 fixtures); once it lands,
-the ADR flips to fully ACCEPTED.
+Status: **ACCEPTED** — the third sub-phase of the self-host port (ADR 0031 D5 /
+ADR 0038 D9), after the lexer (1/N) and the parser (2/N, ADR 0039 → ACCEPTED).
+**COMPLETE (A2–A12): the resolve stage is ported.** `selfhost/resolve.sentinel`,
+the third compiler stage in Sentinel, name-resolves the fn-body grammar (paramful
+fns + every expression form + `let`) **+ the ENTIRE top-level decl walk + `::`-path
+disambiguation** — struct/enum/effect/trait/impl/class tables → all decl heads +
+`struct-lit #id` / `enum-construct` / `perform #E op_index` /
+`qcall-impl #I method_index` / `class-init #C` / `resume-kont`, with method/init
+bodies binding `self` + GROUP-ordered VarIds (fns, then classes, then impls) — **+
+the SCOPED bodies (3c)** (`match` / `while` / `handle`) via a name-blob scope +
+during-walk binding + D5 length-truncation — **+ delegate-impl synthesis** (a
+`delegate` → a class field + a synthesised forwarding `impl`) — the symbol tables
+bundled in an `&mut RCtx` struct, **GROUP-ORDER resolution + a corpus differential
+matching `snc resolve` byte-for-byte over the ENTIRE clean-resolving
+`tests/pass`+`tests/ui` corpus (132 fixtures, the D9 phase-go), leak-free.** The
+next port stage is **types** (its own ADR).
 Ports the **resolve** stage to Sentinel: the parsed AST → a name-resolved program
 (every identifier reference bound to an integer ID), differentially validated
 against a Rust `snc` oracle over the `tests/pass` + `tests/ui` corpus. Flips to
@@ -399,6 +399,30 @@ oracle (3a) has landed; the Sentinel side builds on the corrected model. See
     framework — is the final (3e) increment (a focused follow-up). **With that, ADR
     0040 flips to fully ACCEPTED.** Until then: ACCEPTED-WITH-AMENDMENTS, the
     resolve stage matching `snc resolve` over the entire non-delegate corpus.
+- **A12 — delegate-impl synthesis: (3/N) RESOLVE is COMPLETE; ADR 0040 → fully
+  ACCEPTED.** The last increment. A `class C { delegate f: T to Tr; }` produces
+  TWO things, both now generated:
+  - **A class FIELD.** The delegate becomes `(field f T)`, emitted into a separate
+    delegate-field bucket placed AFTER the explicit-field bucket (verified: the
+    explicit fields dump first regardless of source order). `rclass_delegate`
+    replaces the old skip — it emits the field and RECORDS the delegate (owning
+    `ClassId` + the field + trait name slices).
+  - **A synthesised forwarding `impl`.** After all user impls (a "group D" in the
+    group-order pass — so the ImplIds + VarIds CONTINUE the impl region), each
+    recorded delegate becomes `(impl #id _ #trait_id Tr class#cid C (method
+    #selfvid m <kind> (params) ret (block (method (field (var #selfvid) f) m
+    (var #pvid)…)))…)`. The methods are taken from the trait's sigs — re-walked
+    from the trait's token position (`trpos[trait_id]`, recorded in pass 1) via
+    `synth_method` (which reuses `emit_params` for the param VarIds, then emits the
+    `self.f.m(params)` forwarding body by VarId). The synth impl is recorded at its
+    owning class's source index, so the EMIT (now splicing ALL records per source
+    index) places it right after the class.
+  - Verified: both clean delegate fixtures (`c43_go_no_go`, `c4_go_no_go`) match
+    `snc resolve`, leak-free; the corpus differential test drops its delegate skip
+    and now covers **the ENTIRE clean-resolving corpus (132 fixtures)**; four-check
+    green (1416 tests). **The third compiler stage in Sentinel reproduces the Rust
+    resolver over the whole corpus — ADR 0040 is fully ACCEPTED.** Next port stage:
+    **types** (its own ADR — PROPOSED first).
 
 ## Context
 

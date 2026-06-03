@@ -14,25 +14,23 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (3/N) RESOLVE: the
-corpus PHASE-GO is GREEN** (ADR 0040 A4–A11): `selfhost/resolve.sentinel` resolves
-the **entire expression + decl grammar** — every decl kind + every `::`-path form
-(struct-lit / enum-construct / perform / qcall-impl / class-init / resume-kont,
-method/init bodies binding `self`) **+ the SCOPED bodies (3c)** (`match` / `while`
-/ `handle`) via a name-blob scope + during-walk binding + D5 length-truncation —
-and **(3e) GROUP-ORDER resolution** (resolve all fns → `classvid = fnvid` → all
-classes → `implvid = classvid` → all impls; emit per-item buffers in source order,
-so each VarId region's base is the prior region's final counter — no
-binding-count precompute). **`sentinel_resolver_matches_oracle_on_corpus` matches
-`snc resolve` byte-for-byte over 130 clean-resolving `tests/pass`+`tests/ui`
-fixtures, leak-free** (the D9 phase-go). The one cross-stage edit: the parser
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (3/N) RESOLVE is
+COMPLETE; ADR 0040 → ACCEPTED** (A2–A12): `selfhost/resolve.sentinel`, the third
+compiler stage in Sentinel, name-resolves the **entire expression + decl grammar**
+— every decl kind + every `::`-path form (struct-lit / enum-construct / perform /
+qcall-impl / class-init / resume-kont, method/init bodies binding `self`) **+ the
+SCOPED bodies (3c)** (`match` / `while` / `handle`) via a name-blob scope +
+during-walk binding + D5 length-truncation — **+ GROUP-ORDER resolution** (resolve
+all fns → `classvid = fnvid` → all classes → `implvid = classvid` → all impls; emit
+per-item buffers in source order) **+ delegate-impl synthesis** (a `delegate` → a
+class field + a synthesised forwarding `impl` whose ImplIds/VarIds continue the
+impl region). **`sentinel_resolver_matches_oracle_on_corpus` matches `snc resolve`
+byte-for-byte over the ENTIRE clean-resolving `tests/pass`+`tests/ui` corpus (132
+fixtures, the D9 phase-go), leak-free.** The one cross-stage edit: the parser
 STORES handler-arm params (`snc ast` byte-unchanged). **Four-check green (1416
-tests).** ⚠ The LONE remaining gap is **delegate-impl synthesis** (a `class` with
-`delegate f: T to Tr;` → the Rust resolver SYNTHESISES a forwarding `impl`; 2
-fixtures) — the final (3e) increment, after which **ADR 0040 → fully ACCEPTED**.
-NEXT = delegate synthesis, then the next port stage = **types** (its own ADR —
-write PROPOSED first). The prior banner (the (2/N) PARSER, COMPLETE, ADR 0039 →
-ACCEPTED, A1–A22) stands below.
+tests).** NEXT = the next port stage = **types** (its own ADR — write PROPOSED
+first). The prior banner (the (2/N) PARSER, COMPLETE, ADR 0039 → ACCEPTED, A1–A22)
+stands below.
 
 Prior banner: **(2/N) the PARSER is
 COMPLETE (ADR 0039 → ACCEPTED, A1–A22).** `selfhost/parser.sentinel` matches the
@@ -121,9 +119,14 @@ phase-go** — the class/impl VarId base was wrongly token-counted (missing the 
 match/handler/return fn-region bindings; c5_go_no_go: a `handle` in a fn → off by
 2); fixed by resolving in three groups (fns → classes → impls; each region's base
 = the prior's FINAL counter) + emitting per-item buffers in source order. **The
-corpus differential matches `snc resolve` over 130 fixtures, leak-free.** ⚠ ONE
-gap: delegate-impl synthesis (2 fixtures). **NEXT = delegate synthesis → ADR 0040
-fully ACCEPTED, then the types stage (its own ADR).**
+corpus differential matches `snc resolve` over 130 fixtures, leak-free.** **(A12)
+then closed delegate-impl synthesis** — a `class C { delegate f: T to Tr; }` →
+`(field f T)` (a delegate-field bucket after the explicit fields) + a SYNTHESISED
+forwarding `(impl _ as Tr for C { fn m(self,…) { self.f.m(…) } })` per trait method
+(re-walked from the trait sigs; ImplIds + VarIds continue the impl region; emitted
+at the class's source index). **The corpus differential now covers the ENTIRE
+clean-resolving corpus (132 fixtures); ADR 0040 → ACCEPTED. (3/N) RESOLVE is
+COMPLETE.** **NEXT = the types stage (its own ADR — write PROPOSED first).**
 Movement 1 (the
 language/stdlib build-out,
 ADR 0031 D2) is **complete** — D.1 sum types + `match`, D.2 strings + `u8`, D.3

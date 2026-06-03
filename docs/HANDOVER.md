@@ -1865,11 +1865,12 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3e)
-    docs** commit (`docs(selfhost): resolve (3e) — corpus phase-go (A11)`), atop
-    the (3e) feat (`feat(selfhost): resolve (3e) group-order resolution + corpus
-    phase-go`, `1c8eb97`), the (3c) docs (`c1e3527`) + the (3e)-finding docs
-    (`f650fa5`), the (3c) handle feat (`c38960a`), the
+    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE COMPLETE
+    docs** commit (`docs(selfhost): resolve COMPLETE — delegate synthesis; ADR 0040
+    ACCEPTED`), atop the delegate-synthesis feat (`feat(selfhost): resolve
+    delegate-impl synthesis — (3/N) RESOLVE COMPLETE`, `9da6c12`), the (3e) docs
+    (`496a0ca`) + feat (`1c8eb97`), the (3c) docs (`c1e3527`) + the (3e)-finding
+    docs (`f650fa5`), the (3c) handle feat (`c38960a`), the
     (3c) match/while feat (`b6749e3`) + the (3c-a) blob-scope refactor (`072f841`),
     the (3b-5) docs (`546b798`) + feat (`249a9e4`), the (3b-4) docs (`7bdcb6d`) +
     feat (`8eba1a6`) + the (3b-4a) VarId-refactor (`ef237a1`), the (3b-3) docs
@@ -2002,15 +2003,21 @@ For pasting into a fresh chat to bootstrap context:
     is BUFFERED into one `itembuf` tagged with its source index `(src_idx,start,end)`;
     the emit walks source indices + splices the slices in order (no `Vec<Vec>`). New
     test `sentinel_resolver_matches_oracle_on_corpus` (mirrors the parser's) matches
-    `snc resolve` over **130** clean-resolving fixtures, leak-free. **RESUME AT =
-    delegate-impl synthesis** (the LONE gap → ADR 0040 fully ACCEPTED): a `class C {
-    delegate f: T to Tr; }` makes the Rust resolver SYNTHESISE `impl _ as Tr for C {
-    fn m(self,…) { self.f.m(…) } }` (one per delegate, methods from the trait, an
-    ImplId AFTER the user impls, span-ordered near the class, VarIds continuing the
-    impl region) — see `tests/pass/c43_go_no_go.sentinel` + `c4_go_no_go.sentinel`
-    (the 2 clean fixtures). Synthesising impls with NO source tokens in the
-    group-order/source-emit framework is the focused follow-up. Then the next port
-    stage = **types** (its own ADR — write PROPOSED first). +
+    `snc resolve` over the clean-resolving corpus, leak-free. **DELEGATE-IMPL
+    SYNTHESIS THEN CLOSED (A12) — (3/N) RESOLVE is COMPLETE; ADR 0040 → ACCEPTED.** A
+    `class C { delegate f: T to Tr; }` → (1) a class FIELD `(field f T)` (a
+    delegate-field bucket AFTER the explicit fields) + (2) a SYNTHESISED forwarding
+    `(impl _ as Tr for C { fn m(self,…) { self.f.m(…) } })` per trait method
+    (re-walked from `trpos[trait_id]`; a "group D" after the user impls so the
+    ImplIds + VarIds CONTINUE the impl region; recorded at the class's source index
+    so the emit — now splicing ALL records per source index — places it right after
+    the class). **The corpus differential now covers the ENTIRE clean-resolving
+    corpus (132 fixtures), leak-free.** **RESUME AT = the TYPES stage** (the next
+    port stage; its own ADR — write PROPOSED first): port `crates/sentinel-types`
+    to Sentinel, add a `snc types` ID/Type-bearing oracle (the `snc resolve` form +
+    resolved types), differentially validate over the corpus. resolve.sentinel's
+    `RCtx` + group-order + name-blob + the parser-as-D.6-module pattern carry
+    forward. +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
