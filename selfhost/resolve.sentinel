@@ -23,7 +23,16 @@
 //    resolves ALL fn bodies before ANY impl method body, so varid ≠ scope index —
 //    the scope stores EXPLICIT varids (`scv`), the fn region counts from `voff`,
 //    and the impl region (`implvid`) counts from `voff + total-fn-bindings`.
-//    The class forms (`class-init`, class decl) land in (3b-5).
+//  * (3b-5): the class table + `(class #id Name (field …) (init #selfvid (params)
+//    <block>)? (method #selfvid …)…)` heads — BUCKETED (fields, then init, then
+//    methods; mirror the parser) with init/method BODIES (the init's `self` is a
+//    synthetic `-1` sentinel matched by name; methods reuse rimpl_method) — + the
+//    `ClassInit` else-branch → `(class-init #C Name args)` + `resume-kont` (a
+//    `Call` whose callee is an in-scope var → `(resume-kont #vid …)`, the scope
+//    checked BEFORE the fn table). The class group is resolved BEFORE impls, so
+//    `classvid` counts from `voff + total-fn-bindings` and `implvid` continues
+//    after it. (3b) is COMPLETE — every decl kind + every `::` form. NEXT: (3c)
+//    match/while/handle arm-scoped bindings (the D5 length-truncation restore).
 //
 // PROVEN SENTINEL IDIOMS (ADR 0040 A1/A4 probes; reused):
 //  * Symbol tables + the local scope are FLAT parallel `Vec<i64>` arrays keyed
@@ -103,13 +112,18 @@ struct RCtx {
     imne: Vec<i64>,  //   default/unnamed impl gets a 0,0 slot — never name-matched)
     imts: Vec<i64>,  // impl table: the impl's trait name-slice starts
     imte: Vec<i64>,  // impl table: the impl's trait name-slice ends
-    implvid: i64,    // saved impl-region VarId counter (starts voff + fn-bind total)
+    cls: Vec<i64>,   // class table: name-slice starts (ClassId = index)
+    cle: Vec<i64>,   // class table: name-slice ends
+    classvid: i64,   // saved class-region VarId counter (starts voff + fn-bind total)
+    classtot: i64,   // total class-method+init binding count (for the impl base)
+    implvid: i64,    // saved impl-region VarId counter (after the fn + class regions)
     fnct: i64,       // next user-fn index (pass-2 source-order counter)
     structct: i64,   // next struct index (pass-2 source-order counter)
     enumct: i64,     // next enum index (pass-2 source-order counter)
     effct: i64,      // next effect index (pass-2 source-order counter)
     traitct: i64,    // next trait index (pass-2 source-order counter)
     implct: i64,     // next impl index (pass-2 source-order counter)
+    classct: i64,    // next class index (pass-2 source-order counter)
 }
 
 // --- name comparison --------------------------------------------------------
@@ -252,10 +266,23 @@ fn sc_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     let mut found: i64 = 0 - 1;
     while i >= (*c).base {
         if found == 0 - 1 {
-            if name_eq_src(src, (*c).scs[i], (*c).sce[i], q) {
-                found = (*c).scv[i];
+            // A `-1` slot is a synthetic `self` binding (a class init has no `self`
+            // receiver token) — match it by the literal name `self`.
+            if (*c).scs[i] == 0 - 1 {
+                if name_eq_lit(q, "self") {
+                    found = (*c).scv[i];
+                    0
+                } else {
+                    0
+                };
                 0
             } else {
+                if name_eq_src(src, (*c).scs[i], (*c).sce[i], q) {
+                    found = (*c).scv[i];
+                    0
+                } else {
+                    0
+                };
                 0
             };
             0
@@ -310,6 +337,62 @@ fn struct_lookup_slice(c: &mut RCtx, src: &[u8], ts: i64, te: i64) -> i64 {
         i = i + 1;
     }
     found
+}
+
+// Resolve a class name to its ClassId (its index in the class table), or -1.
+fn class_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
+    let n: i64 = len((*c).cls);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if name_eq_src(src, (*c).cls[i], (*c).cle[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Resolve a class by a `src` SLICE (an impl's target type name) to its ClassId,
+// or -1. The Rust resolver checks the class table BEFORE the struct table
+// (lib.rs:2253), so `impl … for Type` prefers a class target.
+fn class_lookup_slice(c: &mut RCtx, src: &[u8], ts: i64, te: i64) -> i64 {
+    let n: i64 = len((*c).cls);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if slice_eq_src(src, (*c).cls[i], (*c).cle[i], ts, te) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Is the `src` slice the literal keyword `init`? (Class init constructors lex as a
+// plain `init` ident; the dispatch slice-compares it.)
+fn is_init_slice(src: &[u8], st: i64, en: i64) -> bool {
+    if en - st != 4 {
+        false
+    } else {
+        ((*src)[st] == 'i') && ((*src)[st + 1] == 'n') && ((*src)[st + 2] == 'i') && ((*src)[st + 3] == 't')
+    }
 }
 
 // Resolve an enum name to its EnumId (its index in the enum table), or -1.
@@ -670,13 +753,25 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Ve
             0
         },
         Expr::Call(cn, ca) => {
-            let fid: i64 = fn_lookup(c, src, &cn);
-            sink_name(gb, cn);
-            append_str(out, "(call #");
-            append_int(out, fid);
-            dump_rargs(out, ca, src, c, gb);
-            push(out, ')');
-            0
+            // A callee that resolves to an in-scope VarId is a continuation-resume
+            // `k(arg)` (vars shadow fns — mirror lib.rs:3516); else a free-fn call.
+            let kid: i64 = sc_lookup(c, src, &cn);
+            if kid >= 0 {
+                sink_name(gb, cn);
+                append_str(out, "(resume-kont #");
+                append_int(out, kid);
+                dump_rargs(out, ca, src, c, gb);
+                push(out, ')');
+                0
+            } else {
+                let fid: i64 = fn_lookup(c, src, &cn);
+                sink_name(gb, cn);
+                append_str(out, "(call #");
+                append_int(out, fid);
+                dump_rargs(out, ca, src, c, gb);
+                push(out, ')');
+                0
+            }
         },
         Expr::Method(mt, mn, ma) => {
             append_str(out, "(method ");
@@ -758,7 +853,12 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Ve
                 push(out, ')');
                 0
             } else {
-                append_str(out, "(class-init ");
+                // `Name::init(args)` → `(class-init #C Name args)` (mirror
+                // lib.rs:3790).
+                let cidx: i64 = class_lookup(c, src, &ci);
+                append_str(out, "(class-init #");
+                append_int(out, cidx);
+                push(out, ' ');
                 append_str(out, ci);
                 dump_rargs(out, cia, src, c, gb);
                 push(out, ')');
@@ -1355,7 +1455,20 @@ fn resolve_impl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
     *cur = *cur + 1;             // consume type name
     *cur = *cur + 1;             // skip `{`
     let tid: i64 = trait_lookup_slice(c, src, tr_s, tr_e);
-    let sid: i64 = struct_lookup_slice(c, src, ty_s, ty_e);
+    // The target type: a class (checked FIRST, lib.rs:2253) → `class#cid`, else a
+    // struct → `struct#sid`. Resolve the tag to one `[u8]` first (a two-borrowing-
+    // arm `if` on `out` would trip the A2 borrow quirk).
+    let cid: i64 = class_lookup_slice(c, src, ty_s, ty_e);
+    let tgtkw: [u8] = if cid >= 0 {
+        "class#"
+    } else {
+        "struct#"
+    };
+    let tgtid: i64 = if cid >= 0 {
+        cid
+    } else {
+        struct_lookup_slice(c, src, ty_s, ty_e)
+    };
     append_str(out, "(impl #");
     append_int(out, impl_id);
     push(out, ' ');
@@ -1372,11 +1485,117 @@ fn resolve_impl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
     push(out, ' ');
     append_slice(out, src, tr_s, tr_e);
     push(out, ' ');
-    append_str(out, "struct#");
-    append_int(out, sid);
+    append_str(out, tgtkw);
+    append_int(out, tgtid);
     push(out, ' ');
     append_slice(out, src, ty_s, ty_e);
     resolve_impl_methods(out, k, s, e, src, cur, c, gb);
+    push(out, ')');
+    0
+}
+
+// --- class decl head (3b-5): `(class #id Name (field …) (init #selfvid (params)
+// <block>)? (method #selfvid …)…)`. The class AST BUCKETS items, so the dump emits
+// them GROUPED (fields, then init, then methods) — scan once into per-kind
+// buffers, then concatenate (mirrors the parser's dump_class_decl). Init + method
+// BODIES bind a synthetic/receiver `self` (the init's is sentinel `-1`; a method's
+// reuses rimpl_method's `self`-token binding). Delegates are SKIPPED (the resolve
+// dump omits them — they synthesise impls separately; ADR 0040 D7 / a (3e)
+// follow-up). VarIds flow init-first (the corpus always writes init before
+// methods).
+fn rclass_field(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;             // skip `let`
+    let fn_s: i64 = (*s)[*cur];
+    let fn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;             // skip `:`
+    let fty: TypeE = parse_type(k, s, e, src, cur);
+    *cur = *cur + 1;             // skip `;`
+    append_str(buf, " (field ");
+    append_slice(buf, src, fn_s, fn_e);
+    push(buf, ' ');
+    dump_type(buf, fty);
+    push(buf, ')');
+    0
+}
+
+fn rclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    (*c).base = len((*c).scs);   // this init's scope floor
+    *cur = *cur + 1;             // skip `init`
+    *cur = *cur + 1;             // skip `(`
+    // The init's `self` is SYNTHETIC (no receiver token) → a sentinel `-1` slot.
+    let selfvid: i64 = (*c).nextvid;
+    (*c).nextvid = (*c).nextvid + 1;
+    push(&mut (*c).scs, 0 - 1);
+    push(&mut (*c).sce, 0 - 1);
+    push(&mut (*c).scv, selfvid);
+    append_str(buf, " (init #");
+    append_int(buf, selfvid);
+    append_str(buf, " (");
+    emit_params(buf, k, s, e, src, cur, c, true);
+    append_str(buf, ") ");
+    scan_lets(k, s, e, *cur, c);
+    let ibody: Expr = parse_block(k, s, e, src, cur);
+    dump_rexpr(buf, ibody, src, c, gb);
+    push(buf, ')');
+    0
+}
+
+// Advance past a `delegate field : type to Trait ;` (the resolve dump omits it).
+fn rclass_delegate_skip(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;             // skip `delegate`
+    *cur = *cur + 1;             // field name
+    *cur = *cur + 1;             // skip `:`
+    let _dty: TypeE = parse_type(k, s, e, src, cur);
+    *cur = *cur + 1;             // skip `to`
+    *cur = *cur + 1;             // trait name
+    *cur = *cur + 1;             // skip `;`
+    0
+}
+
+fn dump_rclass_items(fbuf: &mut Vec<u8>, ibuf: &mut Vec<u8>, mbuf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    if (*k)[*cur] == 59 {
+        *cur = *cur + 1;         // skip a per-item `pub`
+        0
+    } else {
+        0
+    };
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 45 {
+        rclass_field(fbuf, k, s, e, src, cur);
+        dump_rclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb)
+    } else if t == 3 {
+        rimpl_method(mbuf, k, s, e, src, cur, c, gb);
+        dump_rclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb)
+    } else if is_init_slice(src, (*s)[*cur], (*e)[*cur]) {
+        rclass_init(ibuf, k, s, e, src, cur, c, gb);
+        dump_rclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb)
+    } else {
+        rclass_delegate_skip(k, s, e, src, cur);
+        dump_rclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb)
+    }
+}
+
+fn resolve_class(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, gb: &mut Vec<u8>, cid: i64) -> i64 {
+    *cur = *cur + 1;             // skip `class`
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;             // skip `{`
+    let mut fbuf: Vec<u8> = vec_new();
+    let mut ibuf: Vec<u8> = vec_new();
+    let mut mbuf: Vec<u8> = vec_new();
+    dump_rclass_items(&mut fbuf, &mut ibuf, &mut mbuf, k, s, e, src, cur, c, gb);
+    append_str(out, "(class #");
+    append_int(out, cid);
+    push(out, ' ');
+    append_slice(out, src, nm_s, nm_e);
+    append_str(out, vec_to_array(fbuf));
+    append_str(out, vec_to_array(ibuf));
+    append_str(out, vec_to_array(mbuf));
     push(out, ')');
     0
 }
@@ -1560,6 +1779,72 @@ fn scan_trait_methods(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, tid: i64, cur_st
     0
 }
 
+// PASS-1 class-binding count (cur_start at the class body `{`): accumulate this
+// class's init + method binding count into `classtot` (→ the impl-region VarId
+// base, since the class group is resolved BEFORE impls). A `:` at paren-depth ≥1 =
+// an init/method param (incl. a method's `self:`); a `let` at brace-depth ≥2 = an
+// init/method body let (brace-depth 1 = a field, no VarId); an `init` ident at the
+// item level = the synthetic init `self` (+1). Fields + delegates bind no VarIds.
+fn scan_class_bindings(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur_start: i64, c: &mut RCtx) -> i64 {
+    let mut i: i64 = cur_start + 1;
+    let mut bdepth: i64 = 1;
+    let mut pdepth: i64 = 0;
+    while bdepth > 0 {
+        let t: i64 = (*k)[i];
+        if t == 6 {
+            bdepth = bdepth + 1;
+            0
+        } else if t == 7 {
+            bdepth = bdepth - 1;
+            0
+        } else if t == 4 {
+            pdepth = pdepth + 1;
+            0
+        } else if t == 5 {
+            pdepth = pdepth - 1;
+            0
+        } else if t == 31 {
+            if pdepth >= 1 {
+                (*c).classtot = (*c).classtot + 1;
+                0
+            } else {
+                0
+            };
+            0
+        } else if t == 45 {
+            if bdepth >= 2 {
+                (*c).classtot = (*c).classtot + 1;
+                0
+            } else {
+                0
+            };
+            0
+        } else if t == 2 {
+            if pdepth == 0 {
+                if is_init_slice(src, (*s)[i], (*e)[i]) {
+                    if (*k)[i + 1] == 4 {
+                        (*c).classtot = (*c).classtot + 1;
+                        0
+                    } else {
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
 // Resolve + dump one top-level `fn` (cur at the `fn` token) as
 // `(fn #id name (<params>) <ret> <block>)`, FnId = 14 + fnidx. Builds this fn's
 // scope from the params + pre-scanned `let`s, then resolves the body against it.
@@ -1641,6 +1926,14 @@ fn resolve_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
         (*c).implvid = (*c).nextvid;
         (*c).implct = (*c).implct + 1;
         0
+    } else if lead == 56 {
+        // class: init/method VarIds come from the class-region counter.
+        let cid: i64 = (*c).classct;
+        (*c).nextvid = (*c).classvid;
+        resolve_class(out, k, s, e, src, cur, c, gb, cid);
+        (*c).classvid = (*c).nextvid;
+        (*c).classct = (*c).classct + 1;
+        0
     } else {
         // fn: VarIds come from the fn-region counter (load → resolve → save).
         let fid: i64 = (*c).fnct;
@@ -1690,6 +1983,10 @@ fn main() -> i64 {
         imne: vec_new(),
         imts: vec_new(),
         imte: vec_new(),
+        cls: vec_new(),
+        cle: vec_new(),
+        classvid: 0,
+        classtot: 0,
         implvid: 0,
         fnct: 0,
         structct: 0,
@@ -1697,6 +1994,7 @@ fn main() -> i64 {
         effct: 0,
         traitct: 0,
         implct: 0,
+        classct: 0,
     };
 
     // Pass 1: top-level decl scan (BRACE-DEPTH aware so method `fn`s inside
@@ -1787,6 +2085,14 @@ fn main() -> i64 {
                     0
                 };
                 0
+            } else if t1 == 56 {
+                // Register the class name (ClassId = source order) + count its
+                // init/method bindings into classtot. Body `{` is at p1+2.
+                citem = 56;
+                push(&mut ctx.cls, starts[p1 + 1]);
+                push(&mut ctx.cle, ends[p1 + 1]);
+                scan_class_bindings(&kinds, &starts, &ends, &src, p1 + 2, &mut ctx);
+                0
             } else if t1 == 57 {
                 // Register the effect name (EffectId = ecount, source order) + scan
                 // its ops (records the op list AND counts the op params into voff —
@@ -1807,11 +2113,13 @@ fn main() -> i64 {
         p1 = p1 + 1;
     }
 
-    // The fn-region VarId counter starts after the effect op params (voff); the
-    // impl-region counter starts after ALL fn bindings (the Rust resolver resolves
-    // every fn body before any impl method body — lib.rs:2559).
+    // The VarId regions, in the Rust resolver's body-resolution order (lib.rs:2559
+    // — every fn body, then class methods, then impl methods): fn region starts at
+    // `voff` (after the effect op params); class region after ALL fn bindings; impl
+    // region after the fn + class regions.
     ctx.fnvid = ctx.voff;
-    ctx.implvid = ctx.voff + fnparams + fnlets;
+    ctx.classvid = ctx.voff + fnparams + fnlets;
+    ctx.implvid = ctx.voff + fnparams + fnlets + ctx.classtot;
 
     // The name garbage sink (a STANDALONE Vec — a struct field can't be moved
     // out for vec_to_array) + the output buffer.

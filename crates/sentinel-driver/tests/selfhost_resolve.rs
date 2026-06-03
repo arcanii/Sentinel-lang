@@ -20,8 +20,10 @@
 //! params consume global VarIds. (3b-4) (A7): the trait + impl tables →
 //! `(trait #id …)` / `(impl #id … (method #selfvid …))` heads + the `qcall-impl`
 //! split (method bodies bind a synthetic `self`; method-body VarIds are
-//! GROUP-ordered — all fns before any impl). Class forms are (3b-5); the corpus is
-//! the phase-go (D9).
+//! GROUP-ordered — all fns before any impl). (3b-5) (A8): the class table →
+//! `(class #id … (init #selfvid …)? (method …)…)` heads + `class-init` +
+//! `resume-kont` — completing (3b) (every decl kind + every `::` form). The corpus
+//! differential ((3c) scoping + (3e)) is the phase-go (D9).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -135,6 +137,18 @@ const SEEDS: &[&str] = &[
     "trait Greet { fn hi(self: &Self) -> i64; }\nfn main() -> i64 { 0 }\n",
     "struct A { v: i64 }\nstruct B { w: i64 }\ntrait T { fn get(self: &Self) -> i64; }\nimpl IA as T for A { fn get(self: &Self) -> i64 { self.v } }\nimpl IB as T for B { fn get(self: &Self) -> i64 { self.w } }\nfn main() -> i64 { let a = A { v: 1 }; let b = B { w: 2 }; IA::get(a) + IB::get(b) }\n",
     "struct P { x: i64 }\ntrait T { fn m(self: &mut Self) -> i64; }\nimpl I as T for P { fn m(self: &mut Self) -> i64 { self.x } }\nfn main() -> i64 { 0 }\n",
+    // (3b-5): the class table + `(class #id Name (field …) (init #selfvid …)?
+    // (method #selfvid …)…)` heads (BUCKETED fields/init/methods, init+method
+    // BODIES binding `self` — the init's is a synthetic sentinel) + `Name::init` →
+    // `(class-init #C Name args)` + `resume-kont` (a let-bound name called). VarId
+    // group order: fns, then classes (`classvid` from `voff + total-fn-bindings`),
+    // then impls — verified by a fn + class + impl in one program.
+    "class Counter { let n: i64; init(start: i64) { self.n = start; 0 } fn get(self: &Self) -> i64 { self.n } }\nfn main() -> i64 { let c = Counter::init(5); 0 }\n",
+    "struct S { v: i64 }\nfn fnc(a: i64) -> i64 { a }\nclass C { let m: i64; init(p: i64) { self.m = p; 0 } fn go(self: &Self) -> i64 { self.m } }\ntrait T { fn t(self: &Self) -> i64; }\nimpl I as T for S { fn t(self: &Self) -> i64 { self.v } }\nfn main() -> i64 { 0 }\n",
+    "class K { let z: i64; init() { self.z = 0; 0 } }\ntrait T { fn f(self: &Self) -> i64; }\nimpl I as T for K { fn f(self: &Self) -> i64 { self.z } }\nfn main() -> i64 { 0 }\n",
+    "class Point { let x: i64; let y: i64; pub init(x: i64, y: i64) { self.x = x; self.y = y; 0 } pub fn manhattan(self: &Self) -> i64 { self.x + self.y } pub fn translate(self: &mut Self, dx: i64, dy: i64) -> i64 { self.x = self.x + dx; self.y = self.y + dy; self.manhattan() } }\nfn main() -> i64 { let mut p = Point::init(10, 20); p.translate(3, 9) }\n",
+    "fn main() -> i64 { let k = 5; k(3) }\n",
+    "class Two { let a: i64; let b: i64; init(x: i64) { self.a = x; self.b = x; 0 } fn sum(self: &Self) -> i64 { let s = self.a + self.b; s } }\nfn main() -> i64 { let t = Two::init(7); 0 }\n",
 ];
 
 #[test]
