@@ -1865,21 +1865,21 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host PARSER (2d-8)
-    docs** commit (the parser-stage close), atop its feat
-    (`feat(selfhost): parser (2d-8) — close the full corpus`, `d2da83c`), atop the
-    feat+docs pairs for (2d-7) `class` (`447d9ab`) … (2d-1) `use` + dispatch
-    (`debaa24`), the (2c) fn-level grammar ((2c-3) `b2a9c3b` … (2c-1) `b293c62`),
-    the (2b) full-expression increments (`189990e` … `0e84f36`), the (2a) parser
-    feat (`8d6aa6e`) + `snc ast` oracle (`7f10740`) + recursive-AST drop gate +
-    ADR 0039, atop the lexer (1/N) + the D.6 cross-module work. (Run `git log
-    --oneline -40` for the full chain.) Clean tree; **1415 tests** — the curated
-    `selfhost_parse` seeds (192) + the parser corpus differential
-    (`sentinel_parser_matches_oracle_on_corpus`, the D8 phase-go: all 139
-    clean-parsing fixtures) + `tests/ast.rs` goldens + the new `snc resolve`
-    oracle goldens (`tests/resolve.rs`) + the resolve seed differential
-    (`tests/selfhost_resolve.rs`, 10 m-1 seeds); four-check green via
-    `cargo nextest run --workspace` + `cargo test
+    Local HEAD: verify with `git log -1` — expect the **self-host RESOLVE (3a)
+    m-2 docs** commit (`docs(selfhost): resolve (3a) m-2 — let bindings (A3)`,
+    `7daa66f`), atop its feat (`feat(selfhost): resolve (3a) m-2 — let bindings`,
+    `80a201d`), the (3a) m-1 docs (`352b1ce`) + feat (`06f9241`), the parser
+    AST-exposure refactor (`20046e9`), the agent-protocol + probe-correction docs
+    (`8a35328`), the `snc resolve` oracle docs (`227ad6d`) + feat (`eba2fb4`) +
+    ADR 0040; atop the COMPLETE parser stage — (2d-8) `d2da83c` … (2d-1)
+    `debaa24`, (2c) `b2a9c3b`…, (2b) `189990e`…`0e84f36`, (2a) `8d6aa6e` +
+    `snc ast` oracle `7f10740` + ADR 0039 — atop the lexer (1/N) + the D.6
+    cross-module work. (Run `git log --oneline -50` for the full chain.) Clean
+    tree; **1415 tests** — the `selfhost_parse` seeds (192) + the parser corpus
+    differential (the D8 phase-go: all 139 clean-parsing fixtures) + `tests/ast.rs`
+    goldens + the `snc resolve` oracle goldens (`tests/resolve.rs`) + the resolve
+    seed differential (`tests/selfhost_resolve.rs`, **17 m-1+m-2 seeds**);
+    four-check green via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`). macOS + LLVM 18.
     READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0039**
@@ -1887,8 +1887,8 @@ For pasting into a fresh chat to bootstrap context:
     grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the
     full-corpus close — `selfhost/parser.sentinel` matches `snc ast` over every
     clean-parsing fixture, leak-free) + **ADR 0040** (the active port stage,
-    **resolve — ACCEPTED-WITH-AMENDMENTS; (3a) m-1 LANDED**: name-resolution to
-    Sentinel via FLAT parallel-`Vec` symbol tables (A1 corrected the original
+    **resolve — ACCEPTED-WITH-AMENDMENTS; (3a) m-1 + m-2 LANDED**: name-resolution
+    to Sentinel via FLAT parallel-`Vec` symbol tables (A1 corrected the original
     cons-list plan) + a `snc resolve` ID-bearing oracle, sub-sliced 3a–3e. **The
     (3a) ORACLE landed** (`eba2fb4`):
     `snc resolve` (`run_resolve` + `resolve_dump.rs`) = the `snc ast` form +
@@ -1908,11 +1908,13 @@ For pasting into a fresh chat to bootstrap context:
     resolve` (17 seeds, leak-free, compiled first try); m-2 `let` pre-scans the
     body tokens for the binding set into the immutable scope. ⚠ varids are GLOBAL
     (never reset). **RESUME AT = (3b)** — the decl symbol tables (struct/enum/
-    class/trait/impl/effect) + the `::`-path disambiguation (`qcall` →
-    `qcall-impl` / `class-init` / `enum-construct`, needs the enum/class/impl
-    tables), then 3c match/while/handle (D5 truncation restore), 3d decl heads,
-    3e full corpus; THEN flip ADR 0040 →
-    ACCEPTED-WITH-AMENDMENTS) +
+    class/trait/impl/effect, flat src-slice tables like the fn table) + the
+    `::`-path disambiguation (the parser emits a uniform `qcall`/`class-init`;
+    resolve splits → `enum-construct` [leading name is an enum, checked first] /
+    `class-init` / `qcall-impl` [named impl, `method_index` = scan the impl's
+    trait's methods] / `perform` / `struct-lit`), then 3c match/while/handle (the
+    D5 truncation restore for arm scopes), 3d decl heads w/ IDs, 3e the full
+    corpus (the D9 phase-go → ADR 0040 fully ACCEPTED)) +
     **ADR 0038** (the port's
     (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
     **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
