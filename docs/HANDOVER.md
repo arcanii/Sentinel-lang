@@ -1865,10 +1865,12 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host TYPES (4f core)
-    docs** commit (`docs(selfhost): ADR 0041 A9 — (4f) classes/traits/impls landed`),
-    atop the **(4f) classes+traits+impls feat** (`58748e9`, `feat(selfhost):
-    types.sentinel (4f) classes + traits + impls`), atop the (4e) enum/match docs
+    Local HEAD: verify with `git log -1` — expect the **self-host TYPES (4f-delegate)
+    docs** commit (`docs(selfhost): ADR 0041 A10 — (4f) complete (delegates)`), atop
+    the **(4f-delegate) feat** (`5ba3948`, `feat(selfhost): types.sentinel
+    (4f-delegate) forwarding-impl synthesis`), atop the **(4f core) docs** (`b70aef9`)
+    + **feat** (`58748e9`, `feat(selfhost): types.sentinel (4f) classes + traits +
+    impls`), atop the (4e) enum/match docs
     (`ea4ed98`) + feat (`37887b9`), the (4d) secret docs (`386d0da`) + feat
     (`b7706b9`), the (4c-3) nullable docs (`f409e2c`) + feat (`3071038`), atop
     the (4c-1/4c-2) structs+arrays docs (`3bd271c`) + feat
@@ -1897,9 +1899,9 @@ For pasting into a fresh chat to bootstrap context:
     CORPUS differential `sentinel_resolver_matches_oracle_on_corpus` (the D9
     phase-go: all 132 clean-resolving fixtures, incl. delegates)** + the **`snc
     types` oracle goldens (`tests/types.rs`, 5)** + the **types seed differential
-    (`tests/selfhost_types.rs`, 44 seeds — scalar + structs/arrays + (4c-3)
-    nullable + (4d) secret + (4e) enum/match + (4f) classes/traits/impls; the Sentinel
-    typer matches `snc types` on 84 corpus fixtures too)**;
+    (`tests/selfhost_types.rs`, 45 seeds — scalar + structs/arrays + (4c-3)
+    nullable + (4d) secret + (4e) enum/match + (4f) classes/traits/impls+delegates; the
+    Sentinel typer matches `snc types` on 85 corpus fixtures too)**;
     four-check green via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`).
@@ -1914,9 +1916,9 @@ For pasting into a fresh chat to bootstrap context:
     as a D.6 module** (verified) but **refined at the (4b) build to SELF-CONTAINED**
     (A3 — resolve's `RCtx` can't be extended with type fields across a module
     boundary); **(4b) m-1 SCALAR + (4c-1) STRUCTS + (4c-2) ARRAYS + (4c-3) NULLABLE +
-    (4d) SECRET + (4e) ENUM/MATCH + (4f core) CLASSES/TRAITS/IMPLS LANDED
-    (A3/A4/A6/A7/A8/A9)** (`selfhost/types.sentinel`, the 4th Sentinel stage — matches
-    the oracle on 84 corpus fixtures + 44 seeds, leak-free; a 3-pass
+    (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES LANDED
+    (A3/A4/A6–A10)** (`selfhost/types.sentinel`, the 4th Sentinel stage — matches
+    the oracle on 85 corpus fixtures + 45 seeds, leak-free; a 3-pass
     `main` names→sigs/fields→emit; the `Struct` interner kind via a struct-name blob
     `snb`; struct-lit + field-access `field_index`; arrays + the generic-builtin
     `(targs T)` for `len`; **(4c-3) `?T` + `null` + the `T → ?T` widening
@@ -1939,9 +1941,10 @@ For pasting into a fresh chat to bootstrap context:
     interner kind 8) + the method-dispatch split (own `(method #cid …)` / default-impl
     `(impl-method #iid …)` / named `(qcall-impl …)`) + `self`/class-field typing +
     `&`/`&mut`/`*` ref typing (a BONUS that unlocked the c20–c22 ref+borrow set + c25);
-    ⚠ delegate-impl synthesis (c43) is a (4f-delegate) follow-up (≈150 lines of
-    source-less forwarding-impl emission — current build degrades c43 to a leak-free
-    mismatch)]); NEXT = **(4f-delegate)** then **(4g) effects**) + the
+    + (4f-delegate, A10) delegate-impl synthesis (a `delegate f: T to Tr` synthesises a
+    forwarding `impl _ as Tr for C` in group D, after user impls; each method forwards to
+    `self.f.m(args)`); **(4f) COMPLETE]); NEXT = (4g) effects/handlers** (`Perform`
+    op-return typing, `Handle`+`Kont` interning, `ResumeKont`)) + the
     just-COMPLETED **ADR 0040** (resolve, ACCEPTED) + **ADR 0039**
     (the (2/N) parser — **now ACCEPTED / COMPLETE**: (2a)+(2b) the full expression
     grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the

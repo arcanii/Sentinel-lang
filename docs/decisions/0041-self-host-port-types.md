@@ -361,6 +361,26 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
     it is a self-contained **(4f-delegate)** follow-up. The current build SKIPS delegates
     and degrades `c43` gracefully (a leak-free mismatch). **Next: (4f-delegate)** then
     **(4g) effects/handlers**, (4h) generics, (4i) the full-corpus phase-go.
+- **A10 — (4f-delegate) forwarding-impl synthesis LANDED; (4f) is COMPLETE.** Matches
+  `snc types` on **85 corpus fixtures** (+1 `c43_go_no_go`, the delegation phase-go) **+
+  45 seeds** (+1 delegate), **leak-free across all 85**, **zero regressions**. The
+  delegate (`delegate f: T to Tr;`) now: **(1)** adds a class FIELD in pass-1.5 (so
+  `self.f` resolves in the init + synth bodies) + records the delegate (owner class,
+  field name/index/type, trait); **(2)** registers the synth impls in the impl table
+  BEFORE pass-2 (ImplId continues after user impls — an unnamed `impl _` → a 0,0 name
+  slot — so the `c.m(…)` dispatch in a fn body finds the synth impl via
+  `impl_for_class`); **(3)** emits the delegate field in the class decl (a `dfbuf`
+  bucket, after explicit fields); **(4) group D** (after group C) synthesises each
+  forwarding impl into `itembuf`, **recorded at the owning class's source index** (so it
+  splices right after the class), VarIds continuing the impl region. Each method
+  (re-walked from the trait's sigs via the stored `trpos`) forwards to `self.f.m(params)`
+  — a method-dispatch on the delegate field built DIRECTLY (the same own/impl split;
+  `self`+params get fresh group-D VarIds; the forwarding args read their types from the
+  env). ⚠ The method-name `[u8]` (built from a `src` slice for the dispatch lookups)
+  must be `sink_name`d after the lookups (an owned `[u8]` merely indexed/borrowed leaks).
+  **(4f) classes/traits/impls — including delegation — is COMPLETE. Next: (4g)
+  effects/handlers** (`Perform` op-return typing, `Handle` + `Kont` interning), (4h)
+  generics, (4i) the full-corpus phase-go.
 
 ## Context
 
