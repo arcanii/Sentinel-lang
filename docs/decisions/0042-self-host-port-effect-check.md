@@ -1,8 +1,11 @@
 # ADR 0042: Phase D self-host port — (5/N) effect-check-in-Sentinel
 
-Status: **PROPOSED** — the fifth sub-phase of the self-host port (ADR 0031 D5 /
+Status: **ACCEPTED** — the fifth sub-phase of the self-host port (ADR 0031 D5 /
 ADR 0038 D9), after the lexer (1/N), parser (2/N, ADR 0039 → ACCEPTED), resolve
-(3/N, ADR 0040 → ACCEPTED), and types (4/N, ADR 0041 → ACCEPTED). Ports the
+(3/N, ADR 0040 → ACCEPTED), and types (4/N, ADR 0041 → ACCEPTED). **COMPLETE (A1+A2):
+`selfhost/effects.sentinel` matches `snc effects` byte-for-byte over the ENTIRE
+clean-effect corpus (122/122 fixtures, `sentinel_effect_checker_matches_oracle_on_corpus`
+— the D8 phase-go), leak-free.** Ports the
 **effect-check** analysis pass to Sentinel: the type-checked program → each fn's
 **effective effect row** (the union of the effects it performs, after handler/scope
 discharge), with the annotation-as-constraint + `main`-must-be-empty invariants —
@@ -48,6 +51,41 @@ WITHOUT `Vec` index-assign). See ## Revisit.
     row). **NEXT: the Sentinel `selfhost/effects.sentinel` (5a, second half)** — the
     self-contained fn/effect tables + the annotation re-scan + the bitmask fixed-point +
     the dump, on the simple call-graph + annotation cases.
+
+- **A2 — the Sentinel `selfhost/effects.sentinel` LANDED; ADR 0042 → ACCEPTED, the
+  EFFECT-CHECK STAGE (5/N) is COMPLETE.** The fifth Sentinel compiler stage matches
+  `snc effects` BYTE-FOR-BYTE over the ENTIRE clean-effect corpus — **122/122 fixtures**
+  (`sentinel_effect_checker_matches_oracle_on_corpus`, the D8 phase-go) + 5 seeds,
+  leak-free (full `leaks --atExit` sweep 122/122), 0 regressions (`fa1eeb6`). **(5a) +
+  (5b) converged in a SINGLE build** (+1 fix) — the smallest/fastest stage since the
+  lexer, exactly as scoped. **D3 CONFIRMED self-contained:** imports only the parser;
+  re-derives the fn table (top-level `fn` names, FnId 14+) + effect table (`effect`
+  names, EffectId 0+) via a brace-depth pass-1, re-scans each fn's `! { … }` annotation
+  (the parser skips it), and walks each body once.
+  - **The precompute / fixed-point split (the D4 model, realised):** a precompute pass
+    (`walk_eff`, the typer's consuming-`match` shape but ACCUMULATING into an `&mut i64`
+    own-mask + appending call edges, threading the enclosing-`disch`arge mask down)
+    records, per fn, its own-effect mask + its `(callee, site-discharge)` edges; the
+    fixed-point (`fixpoint`/`sweep`/`infer_row`/`rows_eq`, the A1 probe shape) is then
+    pure bit ops, rebuilding the rows `Vec<i64>` each sweep by recursion. Avoids
+    re-parsing across sweeps + the index-assign/loop-reassign bans.
+  - **⚠ NO scope machinery needed (a simplification over resolve/types):** a `Call`
+    records an edge iff its callee resolves in the user-fn table; a builtin (effect-free)
+    OR a continuation `k` (a kont) both MISS the table → no edge — which is exactly the
+    correct effect outcome (builtins + konts contribute no own effect). The resolve
+    Call-vs-ResumeKont split falls out of the table miss, so the effect-checker needs no
+    local scope (the corpus has no fn-name/local-name collision; a pathological shadow
+    would, deferred).
+  - **⚠ discharge faithfully:** `Handle` walks its arms FIRST (consuming them) to get the
+    handled mask, THEN the body with `disch | handled` (effect order is a set, so
+    arms-first is fine); `Scope` adds Async to the body's discharge; arms + the return arm
+    use the OUTER discharge. The `! { Async }` annotation resolves to EffectId = `len(efs)`
+    (not a user effect) via a literal `src_eq_lit` check — the one fix the build needed.
+  - ⚠ idioms: bit-not via `^ (0-1)` + `2^eid` via `bitof`'s multiply loop (no `~`/`<<`);
+    every owned `[u8]` in the consumed AST is sunk (`sink_typee`/`sink_binds`/
+    `sink_pattern`/`sink_tyopt` + `sink_name`) — the full leak sweep is 0/122. **NEXT:
+    (6/N) — the next self-host stage** (ADR 0038 D5: borrow-check, or HIR/MIR → codegen —
+    an owner/own-judgment sequencing call, its own kickoff ADR).
 
 ## Decision
 

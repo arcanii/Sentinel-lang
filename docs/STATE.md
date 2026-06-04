@@ -21,13 +21,16 @@ EFFECTS/HANDLERS + (4h) GENERICS + (4i) CHAR/STRING + Vec<T> + CONCURRENCY + THE
 FULL-CORPUS PHASE-GO (A1–A13) ALL LANDED.** `selfhost/types.sentinel` matches `snc
 types` byte-for-byte over the ENTIRE clean-typing corpus (**123/123 fixtures**,
 `sentinel_typer_matches_oracle_on_corpus`), leak-free, 0 regressions — the 4th Sentinel
-stage is DONE. **(5/N) EFFECT-CHECK is now OPEN — ADR 0042 PROPOSED** (owner-chosen over
-borrow-check/HIR-MIR/codegen; the smallest stage since the lexer, 758 lines): the `snc
-effects` oracle (`run_effects` + `effects_dump.rs`, dumping each fn's effective effect
-row) + the **D4 bitmask-fixed-point probe** (effect rows as i64 bitmasks; the
-rebuild-per-sweep fixed-point via recursion — no index-assign — verified leak-free) have
-landed; 122 clean-effect corpus fixtures are the (5b) phase-go target. NEXT = the Sentinel
-`selfhost/effects.sentinel` (5a). Types is the **biggest/hardest
+stage is DONE. **(5/N) EFFECT-CHECK is COMPLETE — ADR 0042 → ACCEPTED** (owner-chosen
+over borrow-check/HIR-MIR/codegen; the smallest stage since the lexer, 758 lines):
+the `snc effects` oracle (`run_effects` + `effects_dump.rs`) + `selfhost/effects.sentinel`
+(the 5th Sentinel stage — self-contained; effect rows as i64 BITMASKS, a precompute walk
+recording call-graph edges + own-effect masks, the rebuild-per-sweep fixed-point via
+recursion, handler/scope discharge) match `snc effects` byte-for-byte over the ENTIRE
+clean-effect corpus (**122/122 fixtures**, `sentinel_effect_checker_matches_oracle_on_corpus`),
+leak-free, 0 regressions; (5a)+(5b) converged in one build. The port now has **lexer +
+parser + resolve + types + effect-check** all done. NEXT = **(6/N)** the next self-host
+stage (ADR 0038 D5: borrow-check or HIR/MIR → codegen). Types is the **biggest/hardest
 port stage** (the Rust `sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish
 inference, method/trait dispatch, secret-type propagation, match exhaustiveness;
 effect-check is a SEPARATE crate, out of scope). **`selfhost/types.sentinel`, the

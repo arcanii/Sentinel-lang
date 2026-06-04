@@ -1861,56 +1861,40 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 
 ### 0.3 Quick-status block for session start
 
-> **NEXT = (5/N) THE NEXT SELF-HOST STAGE.** **The TYPES stage (4/N, ADR 0041) is
-> COMPLETE — ADR 0041 → ACCEPTED.** `selfhost/types.sentinel` matches `snc types`
-> byte-for-byte over the ENTIRE clean-typing corpus — **123/123 fixtures**
-> (`sentinel_typer_matches_oracle_on_corpus`, the D9 phase-go) + 64 seeds, leak-free,
-> 0 regressions. So the port now has **lexer (1/N) + parser (2/N) + resolve (3/N) +
-> types (4/N)** all done, each differentially validated against the Rust `snc` oracle.
+> **NEXT = (6/N) THE NEXT SELF-HOST STAGE.** **The EFFECT-CHECK stage (5/N, ADR 0042) is
+> COMPLETE — ADR 0042 → ACCEPTED.** `selfhost/effects.sentinel` matches `snc effects`
+> byte-for-byte over the ENTIRE clean-effect corpus — **122/122 fixtures**
+> (`sentinel_effect_checker_matches_oracle_on_corpus`, the D8 phase-go) + 5 seeds,
+> leak-free, 0 regressions. The port now has **lexer (1/N) + parser (2/N) + resolve
+> (3/N) + types (4/N) + effect-check (5/N)** all done — the entire front end + the two
+> analysis passes' first member, each differentially validated against the Rust `snc`.
 >
-> **(4h)+(4i) (this session)** closed the stage. (4h) generics (`a21cc94`): the
-> `TypeParam` (kind 9, `<T#idx>`) + `GenericInstance` (kind 10, `Decl<a, b>`,
-> hash-consed on StructId + arg CONTENT) interner kinds, a per-decl type-param scope
-> (`tp_setup`/`tp_lookup`/`tp_reset`, `tpb` blob), the fn-sig table (`scan_fn_sig`), and
-> `unify_one` bidirectional inference (`dump_generic_call` → `(targs …)` + `subst_type`)
-> + generic struct-lit/field substitution. (4i) the full-corpus close: **char/string**
-> (`26fb029` — `Char`→`u8`/`Str`→`[u8]` arms), **`Vec<T>` typing** (`cf1d070` — kind 11
-> + vec_new/push/pop/index/len/vec_to_array, the `String`=`Vec<u8>` alias,
-> `read_file`→`[u8]`), and **concurrency + a delegate-field-order fix + the phase-go
-> test** (`05892f4` — kind 12 `Task<T>` + `scope`/`spawn`/`.await`; delegate fields
-> append after regular fields via `register_delegate_fields`).
+> **(5/N) this session** (ADR 0042, owner-chosen over borrow-check/HIR-MIR/codegen — the
+> smallest stage since the lexer, 758 lines): the `snc effects` oracle (`8b55a5f`), the
+> D4 bitmask-fixed-point probe (A1), and `selfhost/effects.sentinel` (`fa1eeb6` — (5a)+(5b)
+> converged in one build). Each user fn's effective effect row = (its `! { … }`
+> annotation if non-empty) else the union of callees' rows + own perform/spawn/await,
+> minus handler/scope discharge → `(fn #<id> <name> <effect-name>…)`. **Self-contained**
+> (parser only); effect rows are **i64 bitmasks** (union `|`, discharge `& (mask ^ -1)`,
+> `bitof` for `2^eid` — no `~`/`<<`); a **precompute walk** records call-graph edges +
+> own-masks, the **rebuild-per-sweep fixed-point via recursion** is pure bit ops. ⚠ key
+> findings: **no scope machinery needed** (a `Call` whose callee misses the user-fn
+> table — a builtin or a kont `k` — yields no edge, the correct effect outcome, so the
+> resolve Call-vs-ResumeKont split falls out for free); `Handle` walks arms-first to get
+> the handled mask then the body with `disch|handled`; the `! { Async }` annotation
+> resolves to EffectId `len(efs)` (the built-in, not a user effect) via `src_eq_lit`.
 >
-> **(5/N) EFFECT-CHECK is now OPEN — ADR 0042 PROPOSED** (the owner picked it over
-> borrow-check/HIR-MIR/codegen: smallest-since-the-lexer at 758 lines, next in the ADR
-> 0031 D5 order, cleanest output to differential-dump). **The oracle + the central
-> probe have landed THIS session:**
-> - **`snc effects` oracle** (`8b55a5f` — `run_effects` + `effects_dump.rs`): dumps each
->   user fn's effective effect row, one line `(fn #<id> <name> <effect-name>…)` in FnId
->   order (effects by name in EffectId order; empty row → `(fn #N name)`; builtins
->   omitted). Exits NONZERO on any error incl. effect errors → the differential skips
->   rejects. 4 goldens (`tests/effects.rs`). **122 clean-effect corpus fixtures** = the
->   (5b) phase-go target (1 effect-error fixture `c37_perform_outside_handle` skipped;
->   18 type-rejected).
-> - **D4 probe SETTLED** (ADR 0042 A1, `/tmp/probe_ec`, leak-free): an effect row = an
->   **i64 BITMASK** (union `|`, discharge `x & (mask ^ -1)` — bit-not via `^ -1`, no `~`);
->   the fixed-point **REBUILDS the per-fn rows `Vec<i64>` each sweep via RECURSION**
->   (`fixpoint(rows) -> rows` — Vec index-assign + loop-reassignment-of-a-Move-binding
->   are both forbidden; recursion + a fresh pushed Vec sidesteps both; `Vec<i64>`
->   auto-drops, and ⚠ `vec_to_array` is `Vec<u8>`-only so don't call it on `Vec<i64>`).
->
-> **NEXT = the Sentinel `selfhost/effects.sentinel` (5a, second half), then (5b).** Per
-> ADR 0042: D3 lean-(a) **self-contained** (import only `parser.sentinel`; re-derive the
-> fn table + effect table [incl. the appended `Async`, id = user-effect count] + each
-> fn's annotation by RE-SCANNING the `! { … }` row the parser skips + walk each body for
-> the call graph), then the bitmask fixed-point (the probe shape) + the dump. The walk
-> (`collect_inferred`, the `dump_texpr` consuming-`match` shape but ACCUMULATING a mask):
-> Call→`| rows[callee]`, Perform→`| (1<<eid)`, Spawn/Await→`| (1<<async)`,
-> Scope→`walk(body) & ~async`, Handle→`(walk(body) & ~handled) | walk(arms…)`, else
-> structural. ⚠ resolve's Call-vs-ResumeKont split matters (a kont contributes no own
-> effect). Build/run/leak via `/tmp/tb` (stage `parser.sentinel` + `effects.sentinel`;
-> diff vs `snc effects`); add seeds; full-corpus phase-go
-> `sentinel_effect_checker_matches_oracle_on_corpus` (D8) closes the stage → ADR 0042
-> ACCEPTED. The four norms are unchanged (below).
+> **(6/N) is a fresh stage — its own kickoff ADR (the 0039/0040/0041/0042 cadence).** Per
+> ADR 0038 D5 the remaining stages are **borrow-check** (2227 lines — the other analysis
+> pass; produces the DropPlan/move analysis codegen consumes; a `snc borrow` dump of that
+> structure) and **HIR/MIR → codegen** (HIR thin at 101 lines, MIR 1134, codegen 8263 —
+> the transform toward the object + the bootstrap fixed-point). ⚠ The pick (borrow-check
+> next, continuing the analysis-pass order, vs jumping to the transform half) is a genuine
+> sequencing call — **decide with the owner**, as (5/N) was. The probe + data-model
+> approach carries over (flat pools / bitmasks / consuming-`match` walks; an analysis
+> pass dumps its computed structure + skips rejects, a transform dumps its lowered form).
+> No open in-flight slice — a clean stage boundary. The `/tmp/tb` build/run/leak workflow
+> + the four norms are unchanged (below).
 
 For pasting into a fresh chat to bootstrap context:
 
