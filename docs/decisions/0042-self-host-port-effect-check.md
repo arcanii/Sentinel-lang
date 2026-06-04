@@ -20,6 +20,35 @@ before the (5a) consumer build:** **D3** (how the Sentinel stage obtains its
 resolved/typed input) and **D4** (the effect-row representation + the fixed-point
 WITHOUT `Vec` index-assign). See ## Revisit.
 
+## Amendments
+
+- **A1 — the D4 probe SETTLED + the `snc effects` oracle LANDED (5a, first half).**
+  **D4 (the bitmask fixed-point) is EMPIRICALLY VERIFIED** (`/tmp/probe_ec`, orchestrator-run
+  — compiled, ran, leak-checked clean): effect rows as i64 BITMASKS with the
+  rebuild-per-sweep fixed-point driven by **RECURSION** (`fixpoint(rows: Vec<i64>) ->
+  Vec<i64>` — take the rows array by value, `sweep` into a FRESH `Vec<i64>` pushed in
+  FnId order, element-wise `rows_eq` compare, converge or recurse) compiles + runs +
+  is **leak-free** (the `Vec<i64>` by-value-through-recursion auto-drops via RAII; no
+  index-assign, no loop-reassignment of a Move binding). The bit ops confirmed: union
+  `|`, discharge via `x & (mask ^ (0 - 1))` (bit-not as `^ -1` — avoids `~`, which the
+  1.0 surface lacks). The probe returned the expected `106` (a 3-fn graph: an annotated
+  callee's row propagating through the call graph to `main`, plus the discharge check).
+  ⚠ **`vec_to_array` is the `Vec<u8>`→`[u8]` bridge ONLY** — it type-errors on
+  `Vec<i64>`, which simply auto-drops (no explicit reclaim needed). **D3 (input
+  acquisition) stays lean-(a) self-contained** — to be confirmed at the Sentinel build
+  (the proven types pattern; lower risk).
+  - **The `snc effects` oracle landed** (`run_effects` + `effects_dump.rs`, `8b55a5f`):
+    parse → resolve → check → `effect_check`, dumping `effective_rows` one line per user
+    fn in FnId order (`(fn #<id> <name> <effect-name>…)`), exiting NONZERO on any error
+    (incl. effect errors) so the differential skips rejects. 4 goldens (`tests/effects.rs`).
+    **Corpus characterised: 122 clean-effect fixtures** (the (5b) phase-go target — types
+    ok + effects ok), 1 types-ok-but-effect-error (`c37_perform_outside_handle`, skipped),
+    18 type-rejected. Verified on c44 (`double Async` / `main` discharges via scope),
+    c35/c37 handlers, and call-graph inference (an unannotated caller picks up a callee's
+    row). **NEXT: the Sentinel `selfhost/effects.sentinel` (5a, second half)** — the
+    self-contained fn/effect tables + the annotation re-scan + the bitmask fixed-point +
+    the dump, on the simple call-graph + annotation cases.
+
 ## Decision
 
 ### D1. Goal.

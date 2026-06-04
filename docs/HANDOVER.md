@@ -1880,17 +1880,37 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 > test** (`05892f4` — kind 12 `Task<T>` + `scope`/`spawn`/`.await`; delegate fields
 > append after regular fields via `register_delegate_fields`).
 >
-> **(5/N) is a fresh stage — plan it like 0039/0040/0041 (its own kickoff ADR).** Per
-> ADR 0038 D5 the self-host sequence is lexer → parser → resolve → types → **HIR/MIR →
-> codegen**; the remaining analysis passes (borrow-check, effect-check) are separate
-> Rust crates (out of the types scope, never ported yet). The next stage needs: (1) a
-> design probe — what is the right `snc <stage>` ORACLE dump for HIR/MIR (or codegen),
-> and what Sentinel data model represents it (the interner/flat-pool idioms carry over);
-> (2) the sub-slice plan. ⚠ Decide WITH THE OWNER whether (5/N) is HIR/MIR, codegen, or
-> first the borrow-check/effect-check analysis passes — this is a genuine
-> sequencing/scoping choice, not a mechanical next-step. Until then there is **no
-> open in-flight slice** — the tree is a clean stage boundary. The `/tmp/tb`
-> build/run/leak workflow + the four norms are unchanged (below).
+> **(5/N) EFFECT-CHECK is now OPEN — ADR 0042 PROPOSED** (the owner picked it over
+> borrow-check/HIR-MIR/codegen: smallest-since-the-lexer at 758 lines, next in the ADR
+> 0031 D5 order, cleanest output to differential-dump). **The oracle + the central
+> probe have landed THIS session:**
+> - **`snc effects` oracle** (`8b55a5f` — `run_effects` + `effects_dump.rs`): dumps each
+>   user fn's effective effect row, one line `(fn #<id> <name> <effect-name>…)` in FnId
+>   order (effects by name in EffectId order; empty row → `(fn #N name)`; builtins
+>   omitted). Exits NONZERO on any error incl. effect errors → the differential skips
+>   rejects. 4 goldens (`tests/effects.rs`). **122 clean-effect corpus fixtures** = the
+>   (5b) phase-go target (1 effect-error fixture `c37_perform_outside_handle` skipped;
+>   18 type-rejected).
+> - **D4 probe SETTLED** (ADR 0042 A1, `/tmp/probe_ec`, leak-free): an effect row = an
+>   **i64 BITMASK** (union `|`, discharge `x & (mask ^ -1)` — bit-not via `^ -1`, no `~`);
+>   the fixed-point **REBUILDS the per-fn rows `Vec<i64>` each sweep via RECURSION**
+>   (`fixpoint(rows) -> rows` — Vec index-assign + loop-reassignment-of-a-Move-binding
+>   are both forbidden; recursion + a fresh pushed Vec sidesteps both; `Vec<i64>`
+>   auto-drops, and ⚠ `vec_to_array` is `Vec<u8>`-only so don't call it on `Vec<i64>`).
+>
+> **NEXT = the Sentinel `selfhost/effects.sentinel` (5a, second half), then (5b).** Per
+> ADR 0042: D3 lean-(a) **self-contained** (import only `parser.sentinel`; re-derive the
+> fn table + effect table [incl. the appended `Async`, id = user-effect count] + each
+> fn's annotation by RE-SCANNING the `! { … }` row the parser skips + walk each body for
+> the call graph), then the bitmask fixed-point (the probe shape) + the dump. The walk
+> (`collect_inferred`, the `dump_texpr` consuming-`match` shape but ACCUMULATING a mask):
+> Call→`| rows[callee]`, Perform→`| (1<<eid)`, Spawn/Await→`| (1<<async)`,
+> Scope→`walk(body) & ~async`, Handle→`(walk(body) & ~handled) | walk(arms…)`, else
+> structural. ⚠ resolve's Call-vs-ResumeKont split matters (a kont contributes no own
+> effect). Build/run/leak via `/tmp/tb` (stage `parser.sentinel` + `effects.sentinel`;
+> diff vs `snc effects`); add seeds; full-corpus phase-go
+> `sentinel_effect_checker_matches_oracle_on_corpus` (D8) closes the stage → ADR 0042
+> ACCEPTED. The four norms are unchanged (below).
 
 For pasting into a fresh chat to bootstrap context:
 
