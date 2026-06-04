@@ -34,6 +34,8 @@ use parser::Fields;
 use parser::Arms;
 use parser::Pattern;
 use parser::Binds;
+use parser::HArms;
+use parser::Ret;
 use parser::tokenize;
 use parser::parse_block;
 use parser::parse_type;
@@ -120,6 +122,15 @@ struct TyCtx {
     dgft: Vec<i64>,   // delegate field type handle
     dgts: Vec<i64>,   // delegate trait-name src start
     dgte: Vec<i64>,   // delegate trait-name src end
+    // --- (4g) effect table (names + op list keyed on SRC, as the perform/handle
+    //     emit the effect/op names from the AST). EffectId = index. ---
+    efs: Vec<i64>,    // effect name src start
+    efe: Vec<i64>,    // effect name src end
+    efoo: Vec<i64>,   // effect-op list: owner EffectId (one entry per op)
+    efos: Vec<i64>,   // op name src start
+    efoe: Vec<i64>,   // op name src end
+    efor: Vec<i64>,   // op return-type handle
+    voff: i64,        // effect-op-param count → the fn-region VarId base (ADR 0020)
 }
 
 fn tbase() -> i64 { 100 }
@@ -854,6 +865,89 @@ fn impl_for_class(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
     found
 }
 
+// Resolve an effect name (a query `[u8]`) to its EffectId, or -1. Keyed on SRC
+// (the perform/handle emit the effect name from the AST, not the interner).
+fn effect_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
+    let n: i64 = len((*c).efs);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if name_eq_src(src, (*c).efs[i], (*c).efe[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The op index (0-based, decl order) of op `q` in effect `eid`, or -1.
+fn op_index_lookup(c: &mut TyCtx, src: &[u8], eid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).efoo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).efoo[i] == eid {
+            if found == 0 - 1 {
+                if name_eq_src(src, (*c).efos[i], (*c).efoe[i], q) {
+                    found = idx;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The return-type handle of the `oidx`-th op of effect `eid`, or i64 default.
+fn op_ret(c: &mut TyCtx, eid: i64, oidx: i64) -> i64 {
+    let n: i64 = len((*c).efoo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0;
+    let mut hit: bool = false;
+    while i < n {
+        if (*c).efoo[i] == eid {
+            if hit {
+                0
+            } else {
+                if idx == oidx {
+                    found = (*c).efor[i];
+                    hit = true;
+                    0
+                } else {
+                    0
+                };
+                idx = idx + 1;
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
 // The field index (0-based, decl order) of field `q` in struct `sid`, or -1.
 fn field_index(c: &mut TyCtx, sid: i64, q: &[u8]) -> i64 {
     let n: i64 = len((*c).fldo);
@@ -1544,21 +1638,40 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             tt
         },
         Expr::Call(cn, ca) => {
-            let fid: i64 = fn_lookup(c, src, &cn);
-            sink_name(gb, cn);
-            append_str(out, "(call #");
-            append_int(out, fid);
-            // Generic builtins (e.g. `len: <T>([T]) -> i64`) emit `(targs T)`
-            // before the args; T is inferred from the first arg, so the args are
-            // dumped to a temp buffer first. The return type may depend on T.
-            let rt: i64 = if is_generic_builtin(fid) {
-                dump_gcall(out, fid, ca, src, c, gb)
+            // (4g) a callee resolving to an in-scope VAR is a continuation-resume
+            // `k(arg)` (vars shadow fns) → `(resume-kont #vid <args> :T)`, T = the
+            // resume value's type; else a free-fn call.
+            let kid: i64 = sc_lookup(c, &cn);
+            if kid >= 0 {
+                sink_name(gb, cn);
+                let kty: i64 = env_get(c, kid);
+                append_str(out, "(resume-kont #");
+                append_int(out, kid);
+                let rkt: i64 = dump_args_capture_first(out, ca, src, c, gb);
+                let krt: i64 = if rkt == 0 - 1 {
+                    kty
+                } else {
+                    rkt
+                };
+                close_ty(out, krt, c);
+                krt
             } else {
-                dump_targs(out, ca, src, c, gb);
-                fn_ret(c, fid)
-            };
-            close_ty(out, rt, c);
-            rt
+                let fid: i64 = fn_lookup(c, src, &cn);
+                sink_name(gb, cn);
+                append_str(out, "(call #");
+                append_int(out, fid);
+                // Generic builtins (e.g. `len: <T>([T]) -> i64`) emit `(targs T)`
+                // before the args; T is inferred from the first arg, so the args are
+                // dumped to a temp buffer first. The return type may depend on T.
+                let rt: i64 = if is_generic_builtin(fid) {
+                    dump_gcall(out, fid, ca, src, c, gb)
+                } else {
+                    dump_targs(out, ca, src, c, gb);
+                    fn_ret(c, fid)
+                };
+                close_ty(out, rt, c);
+                rt
+            }
         },
         Expr::SynthZero => {
             let w: bool = widen_pre(out, exp, 0, c);
@@ -1736,6 +1849,36 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 mret2
             }
         },
+        // (4g) `perform Eff.op(args)` → `(perform #eid op_idx Eff op <args> :ret)` —
+        // ret = the op's return type (the perform expression's value type).
+        Expr::Perform(pe, po, pa) => {
+            let peid: i64 = effect_lookup(c, src, &pe);
+            let poidx: i64 = op_index_lookup(c, src, peid, &po);
+            let pret: i64 = op_ret(c, peid, poidx);
+            append_str(out, "(perform #");
+            append_int(out, peid);
+            push(out, ' ');
+            append_int(out, poidx);
+            push(out, ' ');
+            append_str(out, pe);
+            push(out, ' ');
+            append_str(out, po);
+            dump_targs(out, pa, src, c, gb);
+            close_ty(out, pret, c);
+            pret
+        },
+        // (4g) `handle body with { Eff.op(ps) => arm, … return v => arm }` →
+        // `(handle <body :T> (arm #eid idx Eff op (#pvids) <arm-body>)… (return #vid
+        // <body>)? :T)` — the handle's type is the body's type. Handler-arm params +
+        // the return var bind VarIds in the enclosing fn region (scoped per-arm).
+        Expr::Handle(hb, ha, hr) => {
+            append_str(out, "(handle ");
+            let bty: i64 = dump_texpr(out, hb, 0 - 1, src, c, gb);
+            dump_tharms(out, ha, src, c, gb);
+            dump_tret(out, hr, bty, src, c, gb);
+            close_ty(out, bty, c);
+            bty
+        },
         // (4d) `declassify(e)` strips one secret layer: `secret T → T` (ADR 0019 D6).
         // The inner is synthesized with no expectation; the node's type is its stripped
         // type. `(declassify <inner :secret T> :T)`.
@@ -1831,6 +1974,80 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, src: &[u8], c: &mut TyCtx, g
             push(out, ')');
             dump_tarms(out, arest, exp, src, c, gb);
             bt
+        },
+    }
+}
+
+// (4g) A handler arm's params: each binds a fresh VarId (source order) → `#vid`. ⚠
+// bound with `i64` (every corpus op param is `i64`; the continuation `k` is only ever
+// used as a resume-kont callee, never a typed var). A non-`i64` op param would need
+// the op's param-type table (a follow-up).
+fn dump_thparams(out: &mut Vec<u8>, b: Binds, c: &mut TyCtx, first: bool) -> i64 {
+    match b {
+        Binds::BindEnd => 0,
+        Binds::BindCell(nm, rest) => {
+            if first {
+                0
+            } else {
+                push(out, ' ');
+                0
+            };
+            let pvid: i64 = (*c).nextvid;
+            (*c).nextvid = (*c).nextvid + 1;
+            bind_name(c, nm, pvid, 0);
+            push(out, '#');
+            append_int(out, pvid);
+            dump_thparams(out, rest, c, false)
+        },
+    }
+}
+
+// (4g) handler arms → `(arm #eid op_idx Eff op (#pvids) <body>)` — params bind VarIds
+// scoped to the arm (truncated after); the body is typed (sees the params + `k`).
+fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        HArms::HEnd => 0,
+        HArms::HCell(hef, hop, hparams, hbody, hrest) => {
+            let heid: i64 = effect_lookup(c, src, &hef);
+            let hoidx: i64 = op_index_lookup(c, src, heid, &hop);
+            append_str(out, " (arm #");
+            append_int(out, heid);
+            push(out, ' ');
+            append_int(out, hoidx);
+            push(out, ' ');
+            append_str(out, hef);
+            push(out, ' ');
+            append_str(out, hop);
+            append_str(out, " (");
+            let mark: i64 = len((*c).scs);
+            dump_thparams(out, hparams, c, true);
+            append_str(out, ") ");
+            dump_texpr(out, hbody, 0 - 1, src, c, gb);
+            truncate_scope(c, mark);
+            push(out, ')');
+            dump_tharms(out, hrest, src, c, gb)
+        },
+    }
+}
+
+// (4g) the optional `return v => body` arm → `(return #vid <body>)`: `v` binds a
+// VarId typed as the handle BODY's type `bty` (it names the body's value), scoped to
+// the arm.
+fn dump_tret(out: &mut Vec<u8>, r: Ret, bty: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match r {
+        Ret::NoRet => 0,
+        Ret::YesRet(rnm, rbody) => {
+            let mark: i64 = len((*c).scs);
+            let rvid: i64 = (*c).nextvid;
+            (*c).nextvid = (*c).nextvid + 1;
+            bind_name(c, rnm, rvid, bty);
+            append_str(out, " (return #");
+            append_int(out, rvid);
+            push(out, ' ');
+            dump_texpr(out, rbody, 0 - 1, src, c, gb);
+            truncate_scope(c, mark);
+            push(out, ')');
+            0
         },
     }
 }
@@ -3113,6 +3330,127 @@ fn synth_delegate_impl(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i6
     0
 }
 
+// --- (4g) effect decl scanning + emit --------------------------------------
+
+// PASS-1.5: scan an effect's op params (counting them into `voff` — they consume
+// global VarIds before any fn body, ADR 0020 — + disposing their types). Cursor at `(`.
+fn scan_op_params(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    *cur = *cur + 1;             // skip `(`
+    scan_opp_loop(k, s, e, src, cur, c, gb)
+}
+
+fn scan_opp_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        scan_opp_loop(k, s, e, src, cur, c, gb)
+    } else {
+        if (*k)[*cur] == 46 {
+            *cur = *cur + 1;
+            0
+        } else {
+            0
+        };
+        *cur = *cur + 1;         // skip name
+        *cur = *cur + 1;         // skip `:`
+        let pte: TypeE = parse_type(k, s, e, src, cur);
+        type_of_typeexpr(c, pte, gb);
+        (*c).voff = (*c).voff + 1;
+        scan_opp_loop(k, s, e, src, cur, c, gb)
+    }
+}
+
+// PASS-1.5 effect-op scan: record each op `(EffectId, name, return-type)` into the
+// op table + count its params into `voff`.
+fn scan_effect_ops(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, eid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut cur: i64 = p1 + 1;   // skip `effect`
+    cur = cur + 1;               // skip name
+    cur = cur + 1;               // skip `{`
+    scan_eop_loop(k, s, e, src, &mut cur, eid, c, gb)
+}
+
+fn scan_eop_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, eid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 44 {
+        *cur = *cur + 1;
+        scan_eop_loop(k, s, e, src, cur, eid, c, gb)
+    } else {
+        let on_s: i64 = (*s)[*cur];
+        let on_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;         // skip op name
+        scan_op_params(k, s, e, src, cur, c, gb);
+        let rth: i64 = if (*k)[*cur] == 8 {
+            *cur = *cur + 1;     // skip `->`
+            let rt: TypeE = parse_type(k, s, e, src, cur);
+            type_of_typeexpr(c, rt, gb)
+        } else {
+            0
+        };
+        push(&mut (*c).efoo, eid);
+        push(&mut (*c).efos, on_s);
+        push(&mut (*c).efoe, on_e);
+        push(&mut (*c).efor, rth);
+        scan_eop_loop(k, s, e, src, cur, eid, c, gb)
+    }
+}
+
+// (4g) effect op heads: ` (op name (params) ret)…` (op params reuse the no-VarId
+// trait-param emitter). Cursor at the first op (after the body `{`).
+fn teffect_ops(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 44 {
+        *cur = *cur + 1;
+        teffect_ops(out, k, s, e, src, cur, c, gb)
+    } else {
+        let on_s: i64 = (*s)[*cur];
+        let on_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;         // skip op name
+        *cur = *cur + 1;         // skip `(`
+        append_str(out, " (op ");
+        append_slice(out, src, on_s, on_e);
+        append_str(out, " (");
+        emit_trait_params(out, k, s, e, src, cur, c, gb, true);
+        append_str(out, ") ");
+        if (*k)[*cur] == 8 {
+            *cur = *cur + 1;     // skip `->`
+            let rt: TypeE = parse_type(k, s, e, src, cur);
+            let rth: i64 = type_of_typeexpr(c, rt, gb);
+            render_type(out, rth, c);
+            0
+        } else {
+            push(out, '_');
+            0
+        };
+        push(out, ')');
+        teffect_ops(out, k, s, e, src, cur, c, gb)
+    }
+}
+
+// (4g) emit an effect decl head `(effect #eid Name (op name (params) ret)…)`.
+fn type_effect(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, eid: i64) -> i64 {
+    *cur = *cur + 1;             // skip `effect`
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // skip name
+    *cur = *cur + 1;             // skip `{`
+    append_str(out, "(effect #");
+    append_int(out, eid);
+    push(out, ' ');
+    append_slice(out, src, nm_s, nm_e);
+    teffect_ops(out, k, s, e, src, cur, c, gb);
+    push(out, ')');
+    0
+}
+
 // Dispatch one top-level item on its kind (a SINGLE helper re-passing the `&mut`
 // PARAMS — main's local `&mut out`/`&mut ctx` would conflict across sibling-if
 // tails, ADR 0038 A2). `idx` = the fn index (FnId-14) or the StructId.
@@ -3133,6 +3471,9 @@ fn type_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
     } else if kind == 55 {
         let mut curi: i64 = pos;
         type_impl(out, k, s, e, src, &mut curi, c, gb, idx)
+    } else if kind == 57 {
+        let mut cure: i64 = pos;
+        type_effect(out, k, s, e, src, &mut cure, c, gb, idx)
     } else {
         0
     }
@@ -3205,6 +3546,13 @@ fn main() -> i64 {
         dgft: vec_new(),
         dgts: vec_new(),
         dgte: vec_new(),
+        efs: vec_new(),
+        efe: vec_new(),
+        efoo: vec_new(),
+        efos: vec_new(),
+        efoe: vec_new(),
+        efor: vec_new(),
+        voff: 0,
     };
     let mut garbage: Vec<u8> = vec_new();
     let mut out: Vec<u8> = vec_new();
@@ -3313,6 +3661,10 @@ fn main() -> i64 {
                 };
                 0
             } else if t1 == 57 {
+                push(&mut itempos, p1);
+                push(&mut itemkind, 57);
+                push(&mut ctx.efs, starts[p1 + 1]);
+                push(&mut ctx.efe, ends[p1 + 1]);
                 ecount = ecount + 1;
                 0
             } else {
@@ -3332,6 +3684,7 @@ fn main() -> i64 {
     let mut ec2: i64 = 0;
     let mut cl2: i64 = 0;
     let mut tr2: i64 = 0;
+    let mut ef2: i64 = 0;
     while q < ni {
         if itemkind[q] == 3 {
             let rh: i64 = scan_fn_ret(&kinds, &starts, &ends, &src, itempos[q], &mut ctx, &mut garbage);
@@ -3355,6 +3708,10 @@ fn main() -> i64 {
             0
         } else if itemkind[q] == 55 {
             scan_impl_header(&kinds, &starts, &ends, &src, itempos[q], &mut ctx);
+            0
+        } else if itemkind[q] == 57 {
+            scan_effect_ops(&kinds, &starts, &ends, &src, itempos[q], ef2, &mut ctx, &mut garbage);
+            ef2 = ef2 + 1;
             0
         } else {
             0
@@ -3384,9 +3741,20 @@ fn main() -> i64 {
     // VarIds, THEN class bodies', THEN impl bodies' — lib.rs:2559 — but the DUMP is
     // SOURCE order). Each item is typed into the shared `itembuf` in GROUP order,
     // tagged with its source index (`rsrc`) + blob slice (`rbs`/`rbe`); then emitted
-    // source-order. Group A = fns + structs + enums + traits (fns advance `nextvid`,
-    // the rest consume none); group B = classes; group C = impls. Each region's VarId
-    // base is the prior region's FINAL `nextvid` (no count precomputed).
+    // source-order. Group A = fns + structs + enums + traits + effects (fns advance
+    // `nextvid`, the rest consume none); group B = classes; group C = impls. ⚠ the fn
+    // region starts at `voff` (the Rust resolver assigns effect-op-param VarIds before
+    // any fn body — ADR 0020), so every fn's VarIds are offset by the op-param count.
+    // The env is VarId-indexed + append-only, so fill it with `voff` PHANTOM slots
+    // first (the op-param VarIds are never referenced, but `env[voff]` — the first real
+    // binding — must land at index voff).
+    let vbase: i64 = ctx.voff;
+    ctx.nextvid = vbase;
+    let mut vph: i64 = 0;
+    while vph < vbase {
+        push(&mut ctx.env, 0);
+        vph = vph + 1;
+    }
     let mut itembuf: Vec<u8> = vec_new();
     let mut rsrc: Vec<i64> = vec_new();
     let mut rbs: Vec<i64> = vec_new();
@@ -3398,6 +3766,7 @@ fn main() -> i64 {
     let mut sc3: i64 = 0;
     let mut ec3: i64 = 0;
     let mut tc3: i64 = 0;
+    let mut ef3: i64 = 0;
     while ia < ni {
         let kda: i64 = itemkind[ia];
         if kda == 3 {
@@ -3431,6 +3800,14 @@ fn main() -> i64 {
             push(&mut rbs, bst);
             push(&mut rbe, len(itembuf));
             tc3 = tc3 + 1;
+            0
+        } else if kda == 57 {
+            let bsf: i64 = len(itembuf);
+            type_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut ctx, &mut garbage, 57, itempos[ia], ef3);
+            push(&mut rsrc, ia);
+            push(&mut rbs, bsf);
+            push(&mut rbe, len(itembuf));
+            ef3 = ef3 + 1;
             0
         } else {
             0

@@ -12,10 +12,11 @@
 //! secret-preserving operators), (4e) enums + match (variant construction with
 //! `variant_index`, `match` with payload binding types + the wildcard), and (4f)
 //! classes/traits/impls (the receiver-typed method-dispatch split, class-init, `self`
-//! typing, named-impl qualified calls, `&`/`&mut`/`*` ref typing) — each expression
-//! node annotated with its inferred `Type` (a trailing ` :<type>`); the `let`'s
-//! inferred type replaces resolve's `_`. The full-corpus differential (4i) is the
-//! phase-go (D9); effects + generics land at 4g/4h.
+//! typing, named-impl qualified calls, `&`/`&mut`/`*` ref typing), and (4g)
+//! effects/handlers (`perform`, `handle` arms, resume-kont, the effect-op-param VarId
+//! offset) — each expression node annotated with its inferred `Type` (a trailing
+//! ` :<type>`); the `let`'s inferred type replaces resolve's `_`. The full-corpus
+//! differential (4i) is the phase-go (D9); generics land at 4h.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -131,6 +132,13 @@ const SEEDS: &[&str] = &[
     // C` whose method forwards to `self.f.m(args)` (a dispatch on the delegate field);
     // the synth impl's ImplId + VarIds continue after the user impls (group D).
     "trait W { fn w(self: &mut Self, n: i64) -> i64; }\nclass Inner { let v: i64; pub init() { self.v = 0; 0 } }\nimpl as W for Inner { fn w(self: &mut Self, n: i64) -> i64 { self.v = self.v + n; self.v } }\nclass Outer { delegate inner: Inner to W; pub init(i: Inner) { self.inner = i; 0 } }\nfn main() -> i64 { let x: Inner = Inner::init(); let mut o: Outer = Outer::init(x); o.w(42) }\n",
+    // (4g) effects/handlers: an effect decl, `perform Eff.op(args)` (typed by the op's
+    // return type), `handle … with { … }` (handler arms binding op params + the
+    // continuation, the resume-kont `k(v)`, the optional `return v => …` arm), and the
+    // effect-op-param VarId offset (every fn VarId shifts by the op-param count).
+    "effect Io { read() -> i64; }\nfn main() -> i64 { handle perform Io.read() with { Io.read(k) => k(42) } }\n",
+    "effect Io { write(msg: i64) -> i64; }\nfn w() -> i64 ! { Io } { perform Io.write(7) }\nfn main() -> i64 { handle w() with { Io.write(m, k) => k(m + 1) } }\n",
+    "effect Io { read() -> i64; }\nfn r() -> i64 ! { Io } { perform Io.read() }\nfn main() -> i64 { handle r() with { Io.read(k) => k(0), return v => v * 2 } }\n",
 ];
 
 #[test]
