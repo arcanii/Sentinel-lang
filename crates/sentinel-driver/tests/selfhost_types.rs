@@ -9,10 +9,11 @@
 //! index + the generic `len`), (4c-3) nullable (`?T` + `null` + the implicit
 //! `T → ?T` widening via expected-type threading through `dump_texpr`), and (4d)
 //! secret (`secret T` + `declassify` + the `T → secret T` widening + the
-//! secret-preserving operators) — each expression node annotated with its inferred
-//! `Type` (a trailing ` :<type>`); the `let`'s inferred type replaces resolve's `_`.
-//! The full-corpus differential (4i) is the phase-go (D9); enum / dispatch / generics
-//! land at 4e..4h.
+//! secret-preserving operators), and (4e) enums + match (variant construction with
+//! `variant_index`, `match` with payload binding types + the wildcard) — each
+//! expression node annotated with its inferred `Type` (a trailing ` :<type>`); the
+//! `let`'s inferred type replaces resolve's `_`. The full-corpus differential (4i) is
+//! the phase-go (D9); class/trait dispatch + effects + generics land at 4f..4h.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -106,6 +107,15 @@ const SEEDS: &[&str] = &[
     "fn eq(a: secret i64, b: secret i64) -> secret bool { a == b }\nfn main() -> i64 { let x: secret i64 = 5; if declassify(eq(x, x)) { 1 } else { 0 } }\n",
     "fn both(a: secret bool, b: secret bool) -> secret bool { a && b }\nfn main() -> i64 { 0 }\n",
     "fn main() -> i64 { let s: secret i64 = 7; let t: secret i64 = s ^ s; declassify(t) }\n",
+    // (4e) enums + match: enum decl heads, `Enum::Variant(args)` construction (with
+    // the computed `variant_index` + `:Enum` type), and `match` (the scrutinee's
+    // EnumId, each arm's `variant_index`, payload `(bind #vid name ty)` from the
+    // variant's declared payload types, the wildcard `_`, and the shared arm type).
+    "enum Color { Red, Green, Blue }\nfn f(c: Color) -> i64 { match c { Color::Red => 1, Color::Green => 2, Color::Blue => 3 } }\nfn main() -> i64 { f(Color::Green) }\n",
+    "enum Opt { None, Some(i64) }\nfn g(o: Opt) -> i64 { match o { Opt::None => 0, Opt::Some(x) => x } }\nfn main() -> i64 { g(Opt::Some(42)) }\n",
+    "enum E { A, B, C }\nfn h(e: E) -> i64 { match e { E::A => 1, _ => 0 } }\nfn main() -> i64 { h(E::A) }\n",
+    "enum Pair { P(i64, i64) }\nfn s(p: Pair) -> i64 { match p { Pair::P(a, b) => a + b } }\nfn main() -> i64 { s(Pair::P(3, 4)) }\n",
+    "enum Tag { On(bool), Off }\nfn t(x: Tag) -> i64 { match x { Tag::On(b) => if b { 1 } else { 0 }, Tag::Off => 9 } }\nfn main() -> i64 { t(Tag::Off) }\n",
 ];
 
 #[test]
