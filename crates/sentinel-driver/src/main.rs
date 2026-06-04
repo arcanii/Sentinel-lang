@@ -33,6 +33,7 @@
 //! accumulate on borrow_check_query.
 
 mod ast_dump;
+mod borrow_dump;
 mod effects_dump;
 mod resolve_dump;
 mod types_dump;
@@ -73,6 +74,7 @@ fn main() -> ExitCode {
         [_, cmd, path] if cmd == "resolve" => run_resolve(path),
         [_, cmd, path] if cmd == "types" => run_types(path),
         [_, cmd, path] if cmd == "effects" => run_effects(path),
+        [_, cmd, path] if cmd == "borrow" => run_borrow(path),
         [_, cmd, path] if cmd == "parse" => run_parse(path),
         [_, cmd, path] if cmd == "build" => run_build(path, None),
         [_, cmd, path, flag, output] if cmd == "build" && flag == "-o" => {
@@ -302,6 +304,52 @@ fn run_effects(path: &str) -> ExitCode {
         return ExitCode::from(1);
     }
     print!("{}", effects_dump::dump(&typed, &checked));
+    ExitCode::SUCCESS
+}
+
+/// Phase D self-host port (6/N) / ADR 0043 D2: `snc borrow <file>` — the
+/// borrow-check differential oracle. Runs parse → resolve → `check` →
+/// `borrow_check` and prints the canonical moved-sources dump
+/// (`borrow_dump::dump`) the Sentinel borrow-check stage reproduces. Exits
+/// nonzero on ANY error — parse/resolve/type (as `run_types`) OR a borrow error
+/// (use-after-move, borrow conflict, returns-local-ref, …) — so the corpus
+/// differential skips rejected fixtures (the happy-path discipline, ADR 0043 D5/D7).
+fn run_borrow(path: &str) -> ExitCode {
+    let src = match read_source(path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let db = SentinelDatabase::default();
+    let file = SourceFile::new(&db, path.to_string(), src.clone());
+    let program_opt = sentinel_syntax::parse_query(&db, file);
+    let diags = sentinel_syntax::parse_query::accumulated::<Diagnostic>(&db, file);
+    render_diagnostics(&diags, path, &src);
+    let program = match program_opt {
+        Some(p) => p,
+        None => return ExitCode::from(1),
+    };
+    let resolved = match sentinel_resolve::resolve(program) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let typed = match sentinel_types::check(&resolved) {
+        Ok(typed) => typed,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let (plan, errors) = sentinel_borrow_check::borrow_check(&typed);
+    if !errors.is_empty() {
+        for e in &errors {
+            eprintln!("snc: {e}");
+        }
+        return ExitCode::from(1);
+    }
+    print!("{}", borrow_dump::dump(&typed, &plan));
     ExitCode::SUCCESS
 }
 
