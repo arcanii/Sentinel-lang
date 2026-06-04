@@ -1861,35 +1861,49 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 
 ### 0.3 Quick-status block for session start
 
-> **NEXT SLICE = (4h) GENERICS** (the LAST types feature before the (4i) phase-go).
-> The Sentinel typer (`selfhost/types.sentinel`) matches `snc types` on **108
-> corpus fixtures** through (4g); only the **c17 generic fixtures** (`c17_id`,
-> `c17_box`, `c17_generic_array`, `c17_generic_nullable`, `c17_go_no_go`,
-> `c17_two_instantiations`) remain (plus `c44_go_no_go`, which also needs
-> concurrency). **(4h) is the HM-ish INFERENCE ENGINE — the single most intricate
-> slice — do it with fresh context.** Scouting (the oracle deltas, already
-> confirmed):
-> - **`TypeParam`** renders `<T#0>` — a new interner kind carrying the param index.
->   A generic fn `fn id<T>(x: T) -> T` binds `T` in a per-fn type-param scope; the
->   param / body / return all type as `<T#0>`. Oracle: `(fn #14 id ((param #0 x
->   <T#0>)) <T#0> (block (var #0 :<T#0>) :<T#0>))`.
-> - **`GenericInstance`** renders `Box<i64>` — a new interner kind = a (StructId,
->   arg-list) pair (the arg-list is a flat `(start,end)` slice into a side
->   `Vec<i64>`, the resolve op-list idiom; ⚠ A1's note: hash-cons on the arg-handle
->   CONTENT). `struct Box<T> { value: T }` → `(struct #0 Box (field value <T#0>))`;
->   `Box { value: 42 }` → `(struct-lit #0 Box (int 42 :i64) :Box<i64>)`.
-> - **`unify_one` bidirectional inference** at a generic-fn CALL: `id(42)` infers
->   `T=i64` from the arg, emits `(targs i64)` BEFORE the args, and the call's return
->   type is the SUBSTITUTED `T→i64` (`i64`). Oracle: `(call #14 (targs i64) (int 42
->   :i64) :i64)`. (`(targs …)` already works for the generic BUILTINS — `len`/
->   `unwrap_or` — via `dump_gcall`; user generic fns extend that to multi-param
->   unify + substitution of the return.)
-> - **Substitution on field access** of a `GenericInstance`: `b.value` where `b:
->   Box<i64>` → the declared field type `<T#0>` substituted to `i64` →
->   `(field (var #0 :Box<i64>) value 0 :i64)`.
-> Then **(4i)**: wire `sentinel_typer_matches_oracle_on_corpus` (the D9 phase-go,
-> mirroring `sentinel_resolver_matches_oracle_on_corpus`) over the clean-typing set,
-> and converge. The build/run/leak workflow + the four norms are unchanged (below).
+> **NEXT SLICE = (4i) THE FULL-CORPUS PHASE-GO** (the D9 close of the types stage).
+> **(4h) GENERICS LANDED (`a21cc94`, ADR 0041 A12) — the LAST types feature is now
+> ported.** The Sentinel typer (`selfhost/types.sentinel`) matches `snc types` on
+> **115 corpus fixtures** + 55 seeds, leak-free, 0 regressions. (4h) added: the
+> `TypeParam` (kind 9, `<T#idx>`) + `GenericInstance` (kind 10, `Decl<a, b>`,
+> hash-consed on StructId + arg CONTENT) interner kinds; a per-decl **type-param
+> scope** (`tp_setup`/`tp_lookup`/`tp_reset` over a `tpb` blob — reset per decl);
+> the fn-sig table (`scan_fn_sig` → `uftp`/`ufps`/`ufpe`/`ufret`); **`unify_one`
+> bidirectional inference** at a generic-fn call (`dump_generic_call` dumps args to a
+> temp capturing types, unifies declared-vs-arg structurally, emits `(targs …)`,
+> returns `subst_type` of the declared return); and generic struct-lit + field-access
+> substitution (the field type substituted by the instance's args — works even for the
+> abstract `Pair<A,B>` case, since a `TypeParam` handle is just an index). It fixed all
+> six c17 fixtures + a bonus `c25_generic_struct_array_drop`.
+>
+> **(4i) is now the only remaining types work.** Wire
+> `sentinel_typer_matches_oracle_on_corpus` (mirroring
+> `sentinel_resolver_matches_oracle_on_corpus` in `tests/selfhost_resolve.rs` — build
+> the typer, sweep `tests/pass` + `tests/ui`, skip where `snc types` exits nonzero,
+> assert byte-equality) and **converge**. ⚠ **8 clean-typing fixtures still diff** —
+> feature gaps, NOT regressions (out of every prior slice's scope). Categorized
+> (diffs inspected — these are NAMED slices, not mystery diffs):
+> - **Char / Str literals → `(UNHANDLED :i64)`** (`c5d2_strings`; also a sub-diff in
+>   `c5d3`/`c5d5`/`selfhost_ast_drop`): `dump_texpr` still has `Char`/`Str` in its
+>   `_ =>` catch-all. **SMALL — two arms:** `Char` → `u8` (`(char N :u8)`), `Str` →
+>   `[u8]` (`(str b… :[u8])`; ⚠ consume the `[u8]` by value, as the parser's
+>   `dump_str_body` did, or it leaks). Likely the cheapest (4i) win — do it first.
+> - **`Vec<T>` typing** (`c5d3_collections`, `c5d5_loops`, `selfhost_ast_drop`): the
+>   typer types `vec_new`/`push`/`pop`/index/`vec_to_array` + `Vec<T>`/`&mut Vec<T>`
+>   as `i64`. Needs `Vec<T>` as a first-class generic builtin type (a real slice —
+>   the D.3 surface: `vec_new()→Vec<T>` from its `(targs T)`/let-annotation, `push`/
+>   `pop`/`len`/index over `&mut Vec<T>`, `vec_to_array: Vec<T>→[T]`). The biggest of
+>   the three. (`selfhost_ast_drop` needs BOTH this + Char/Str.)
+> - **Concurrency** (`c44_go_no_go`): `scope`/`spawn`/`.await` → `(UNHANDLED)`; needs
+>   those `dump_texpr` arms + a `Task<T>` interner kind (`spawn e → Task<T>`,
+>   `e.await → T`, `scope { … } → tail type`). A real slice.
+> - **`c4_go_no_go`**: a class/impl-emit edge (the only NON-feature-gap of the 8 — it
+>   exercises already-shipped class/impl/delegate machinery, so it likely surfaces a
+>   real (4f) corner; INVESTIGATE the exact diff before deciding extend-vs-skip).
+> Decide per fixture: extend the typer (the Char/Str + Vec + concurrency slices above)
+> vs. an explicit skip-list in the corpus test (as the parser stage skipped its 2
+> error fixtures). Use the `/tmp/tb` build/run/leak workflow + the baseline-diff for
+> zero-regressions (below). The four norms are unchanged.
 
 For pasting into a fresh chat to bootstrap context:
 

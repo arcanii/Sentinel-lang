@@ -16,7 +16,7 @@ next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (4/N) TYPES is OPEN; ADR
 0041 → ACCEPTED-WITH-AMENDMENTS; (4a) oracle + probes + (4b) m-1 SCALAR + (4c-1/4c-2)
-STRUCTS + ARRAYS + (4c-3) NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g) EFFECTS/HANDLERS (A1–A11) LANDED.** Types is the **biggest/hardest
+STRUCTS + ARRAYS + (4c-3) NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g) EFFECTS/HANDLERS + (4h) GENERICS (A1–A12) LANDED — every types feature is now ported; only (4i) the full-corpus phase-go remains.** Types is the **biggest/hardest
 port stage** (the Rust `sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish
 inference, method/trait dispatch, secret-type propagation, match exhaustiveness;
 effect-check is a SEPARATE crate, out of scope). **`selfhost/types.sentinel`, the
@@ -71,9 +71,18 @@ EFFECTS/HANDLERS (A11)** — effect-decl emit + effect tables (op return types) 
 (→ op return type) + `handle` (body type; arms bind op-params+`k`; the `return v` arm) +
 resume-kont (a Call whose callee is an in-scope var) + ⚠ **the effect-op-param VarId
 offset** (the fn region starts at `voff`; the env gets `voff` phantom slots, else
-`env[voff]` is OOB). +23 → 108 fixtures. NEXT = **(4h) generics** (`unify_one`
-bidirectional inference, `GenericInstance` interning — the c17 fixtures), then (4i) the
-full-corpus phase-go.
+`env[voff]` is OOB). +23 → 108 fixtures. **(4h) GENERICS (A12)** — the LAST types
+feature (the HM-ish inference engine): two new interner kinds (**`TypeParam`** kind 9,
+rendered `<T#idx>` + **`GenericInstance`** kind 10, rendered `Decl<a, b>`, hash-consed
+on the StructId + arg CONTENT) + a per-decl **type-param scope** (`tp_setup`/`tp_lookup`/
+`tp_reset`, a `tpb` blob, reset per decl) + the fn-signature table (`scan_fn_sig` records
+`uftp`/`ufps`/`ufpe`/`ufret`) + **`unify_one` bidirectional inference** at a generic-fn
+call (`dump_generic_call` dumps args to a temp + captures types, unifies declared-vs-arg
+structurally, emits `(targs …)`, returns `subst_type` of the declared return) + generic
+struct-lit/field-access **substitution** (the field type substituted by the instance's
+type-args). +7 → **115 corpus fixtures** (the six c17 + a bonus `c25_generic_struct_array_drop`),
+leak-free, 0 regressions. **Every types feature is now ported.** NEXT = (4i) the
+full-corpus phase-go (D9 — wire `sentinel_typer_matches_oracle_on_corpus`, converge).
 **(4a) shipped the ORACLE + de-risked the Sentinel build:** `snc types <file>`
 (driver `run_types` + `types_dump.rs`, parse → resolve → `check` → dump) emits the
 `snc resolve` S-expr form **extended with each expression node's inferred `Type`** (a

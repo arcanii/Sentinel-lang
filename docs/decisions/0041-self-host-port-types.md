@@ -406,6 +406,70 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
   generics** (generic-fn calls via `unify_one` bidirectional inference, `GenericInstance`
   interning, `type_args` on calls — the c17 fixtures), then (4i) the full-corpus phase-go.
 
+- **A12 — (4h) generics LANDED; the LAST types feature (the HM-ish inference engine).**
+  **Matches `snc types` on 115 corpus fixtures** (+7 — all six `c17` generic fixtures:
+  `c17_id`/`c17_box`/`c17_generic_array`/`c17_generic_nullable`/`c17_two_instantiations`/
+  `c17_go_no_go`, **plus a bonus `c25_generic_struct_array_drop`** that the generics
+  support also fixes) **+ 55 seeds** (+7), **leak-free across all 115** (full `leaks
+  --atExit` sweep), **zero regressions** vs the (4g) 108-fixture baseline. The 8 still-
+  diffing fixtures are out-of-scope feature gaps (Vec/strings/loops/file-io/concurrency).
+  **Built in two internally-verified halves** (one commit): (4h-1) the type-param +
+  scalar/array/nullable inference core (the four non-struct-generic fixtures), then
+  (4h-2) `GenericInstance` (the two generic-struct fixtures).
+  - **Two new interner kinds (rendered structurally, no ID-order obligation — as A1
+    foresaw).** **kind 9 `TypeParam`** (`mk_tparam`): payload `a` = the param index;
+    renders `<T#idx>` (the name is ALWAYS `T` in the dump — only the index distinguishes,
+    matching the Rust `type_display`). **kind 10 `GenericInstance`** (`mk_generic`): `a` =
+    StructId, `b` = an arg-slice RECORD index into `girs`/`gire` over a flat `gia` pool;
+    renders `Decl<a0, a1>` (`, `-separated — the type render uses comma-space, while the
+    `(targs …)` list uses spaces, a deliberate distinction). **Hash-cons keys on the
+    StructId + the arg-list CONTENT** (the A1 note made concrete: a dedicated scan
+    comparing the `gia` slice, NOT `intern_type`'s `(kind,a,b)` — two `Pair<i64,i64>`
+    built at different sites share one handle).
+  - **Type-param scope** (`tpb` blob + `tpns`/`tpne`, **reset per decl** — type-params
+    don't nest in this language): `tp_setup` parses a `<…>` list (recording the first
+    ident after each `<`/`,` → bounds-tolerant) and advances past `>`; `tp_lookup`
+    resolves a name to its index; `tp_reset` clears (pops both vecs + the blob). Stored in
+    a DEDICATED blob (not `src`) because `type_of_typeexpr` has no `src` param (avoids a
+    ~15-call-site signature change). `type_of_typeexpr`'s `TIdent` arm checks the scope
+    **FIRST** (a type-param shadows scalar/struct/enum/class); its `TGeneric` arm builds a
+    `GenericInstance` for a user struct (`collect_tyargs` resolves each arg — which may
+    itself be a type-param), keeping the m-1 placeholder (dispose + `i64`) for a
+    non-struct generic (`Vec<T>`).
+  - **The fn-signature table** (`scan_fn_sig`, was `scan_fn_ret`): records each fn's full
+    signature UNDER its type-param scope → `uftp` (type-param count, 0 = non-generic — the
+    is-generic test), `ufps`/`ufpe` (a param-type slice into the flat `ufpp`), `ufret`. All
+    push once per fn in source order, staying index-aligned.
+  - **Inference (the headline).** At a call whose FnId ≥ 14 with `uftp > 0`,
+    `dump_generic_call` dumps the args to a TEMP buffer capturing each arg's type (the
+    `dump_gcall` temp-buffer idiom — the `(targs …)` precedes the args but is inferred
+    from them), runs `unify_one` (declared param type vs arg type, structural — binds a
+    bare type-param, else recurses through array/nullable/secret/ref shells + pairwise
+    through a same-decl `GenericInstance`), accumulating bindings into parallel
+    `(bi, bt)` lists (`subst_bind`/`subst_get` — FIRST binding wins; **append-only, since
+    `Vec` index-assign is unsupported**), emits `(targs t0 t1 …)` in type-param INDEX
+    order, splices the args, and returns `subst_type` of the declared return. `subst_type`
+    substitutes type-params through every compound shell, **incl. re-interning a nested
+    generic instance** (`make_pair`'s return `Pair<<T#0>, <T#1>>` → `Pair<i64, i64>` under
+    `[i64, i64]`).
+  - **Generic structs.** A generic struct-lit takes its type + type-args from the EXPECTED
+    type `exp` (a `GenericInstance` of this struct, threaded from a `let` annotation / fn
+    return); `dump_sfields` (extended with a `gen` flag + a once-built `gargs` arg vec —
+    **NOT a parallel `Fields`-consumer**, honoring the A6 finding) substitutes each field's
+    declared type before expecting the value. Field access on a generic instance
+    substitutes the declared field type with the instance's args (`b.value` where
+    `b: Box<i64>` → `i64`; `p.first` where `p: Pair<A,B>` → `<T#0>` — works for the
+    ABSTRACT case because the instance's args ARE the enclosing fn's type-params, and a
+    `TypeParam` handle is decl-agnostic, just an index). `type_fn` + `scan_struct_fields`
+    set up / tear down the scope around their bodies/fields.
+  - ⚠ **Idioms confirmed (no new gotchas).** `Vec<i64>` temps (`atys`/`bi`/`bt`/`subst`/
+    `gargs`/`fargs`/`gnewargs`) auto-drop via RAII (the full leak sweep is 0/115); MATCH
+    arms are independent name scopes (`sid`/`rt` recur across arms — only nested `if`
+    branches within ONE arm/fn need unique names, the A2 quirk); an unused `use` import is
+    tolerated by the compiler but was removed for hygiene. **Next: (4i)** the full-corpus
+    phase-go (D9) — wire `sentinel_typer_matches_oracle_on_corpus` over the clean-typing
+    set, mirroring the resolve corpus differential, and converge.
+
 ## Context
 
 The lexer (1/N), parser (2/N), and resolve (3/N) proved the **differential-oracle
