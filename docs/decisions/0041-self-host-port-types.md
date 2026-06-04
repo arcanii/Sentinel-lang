@@ -311,6 +311,56 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
     (`bind_name` consumes the AST `[u8]`, so it can't also be `append_str`'d).
     **Next: (4f) classes/traits/impls** — the method-dispatch split (`MethodCall` vs
     `ImplMethodCall`), `ClassInit`, `self` typing, the `QualifiedCall` check.
+- **A9 — (4f) classes + traits + impls LANDED (the CORE; delegate synthesis deferred).**
+  The largest single slice — the **receiver-typed method-dispatch split** + a
+  **group-order VarId restructure**. **Matches `snc types` byte-for-byte on 84 corpus
+  fixtures** (up from 67 — **+17**: `c41` ×2, `c42` ×2, `c4_named_impl`, and — as a
+  BONUS — the entire ref/borrow set `c20`–`c22` ×11 + `c25_go_no_go`, unlocked by the
+  ref-typing fix below) **+ 44 seeds** (+4 class/trait/impl/ref), **leak-free across all
+  84**, **zero regressions**.
+  - **The group-order restructure (the architectural change).** The Rust resolver
+    assigns ALL fn-body VarIds, THEN class-body, THEN impl-body (lib.rs:2559), but the
+    dump is source order. So pass-2 now types each item into a shared `itembuf` in
+    GROUP order — A (fns/structs/enums/traits) → B (classes) → C (impls) — tagged with
+    its source index (`rsrc`/`rbs`/`rbe`), then splices source-order. Each region's
+    VarId base is the prior region's final `nextvid` (the resolve idiom, no count
+    precomputed). **Behavior-preserving on the prior corpus** (groups B/C empty there →
+    the 67 stayed byte-identical, verified before adding any class code).
+  - **Classes.** The class + class-field + class-method tables (names in the shared
+    `snb`; **Class interner kind 8**, rendered like Struct/Enum). A bucketed decl
+    emitter (`type_class` → fields / init / methods buffers, mirroring resolve) with
+    **typed bodies** — `self` bound (synthetic for init, the receiver token for
+    methods) typed as the class; the method body's expectation is its return type.
+    `type_of_typeexpr` now resolves a `TIdent` through scalar→struct→enum→**class**.
+    `Name::init(args)` → `(class-init #cid Name <args> :Class)`. Class field access
+    extends the `Field` arm (`strip_ref` then struct-or-class).
+  - **Traits + impls.** The trait (+ trait-method-return-type) + impl (→ trait-id /
+    class-id, resolved via `src`-vs-`snb` slice lookups in pass-1.5) tables. `type_trait`
+    emits the sig heads (no VarIds — `emit_trait_params`); `type_impl` emits the impl
+    head + **typed method bodies** (reusing `tmethod`, `self` typed as the impl's class).
+  - **The dispatch split (the headline).** `target.m(args)` → the receiver's class (via
+    `class_of_handle(strip_ref(ty))`): its OWN method → `(method #cid <idx> <target> m
+    <args> :ret)`; else a default-impl method (`impl_for_class` finds the impl of that
+    class whose trait has `m`) → `(impl-method #iid <idx> <target> m <args> :ret)`. The
+    `#cid`/`#iid` precede the target, so the target builds in a temp first (the `Binary`
+    idiom). Named-impl qualified calls `Impl::m(args)` (the 4e `Qcall` placeholder's else
+    branch) → `(qcall-impl #iid <idx> Impl m <args> :ret)`.
+  - **Ref typing (the bonus).** `&`/`&mut`/`*` unary now build/strip ref types
+    (`mk_ref(0/1, inner)` / `strip_ref`) instead of passing the operand type through —
+    which is all the `c20`/`c21`/`c22` ref+borrow fixtures + `c25` needed to type-clean
+    (a +12 windfall beyond the class fixtures). `&mut c : &mut Counter` also makes the
+    qcall-impl arg type right.
+  - **⚠ Deferred: delegate-impl synthesis (`c43_go_no_go`).** A `class C { delegate f: T
+    to Tr; }` makes the compiler SYNTHESISE a forwarding `impl _ as Tr for C` whose every
+    method is `fn m(self, p…) { self.f.m(p…) }` (ADR 0040 A12). This needs: the delegate
+    field added to the class field table; a delegate record; a **group D** that
+    synthesises the forwarding impls AFTER user impls (continuing the impl VarId region,
+    recorded at the class's source index); and a **typed forwarding body** — a
+    method-dispatch on `self.f` (typed as the field type, itself splitting method vs
+    impl-method). It is ~150 lines of SYNTHESISED emission (no source to diff-guide), so
+    it is a self-contained **(4f-delegate)** follow-up. The current build SKIPS delegates
+    and degrades `c43` gracefully (a leak-free mismatch). **Next: (4f-delegate)** then
+    **(4g) effects/handlers**, (4h) generics, (4i) the full-corpus phase-go.
 
 ## Context
 

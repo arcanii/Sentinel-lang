@@ -16,7 +16,7 @@ next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (4/N) TYPES is OPEN; ADR
 0041 → ACCEPTED-WITH-AMENDMENTS; (4a) oracle + probes + (4b) m-1 SCALAR + (4c-1/4c-2)
-STRUCTS + ARRAYS + (4c-3) NULLABLE + (4d) SECRET + (4e) ENUM/MATCH (A1–A8) LANDED.** Types is the **biggest/hardest
+STRUCTS + ARRAYS + (4c-3) NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS (A1–A9) LANDED.** Types is the **biggest/hardest
 port stage** (the Rust `sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish
 inference, method/trait dispatch, secret-type propagation, match exhaustiveness;
 effect-check is a SEPARATE crate, out of scope). **`selfhost/types.sentinel`, the
@@ -28,8 +28,10 @@ generic-builtin `(targs T)` mechanism for `len`) + **nullable (4c-3)** (`?T` + `
 `declassify` + the `T → secret T` widening `widen-secret` + the secret-preserving
 operators — `secret == secret → secret bool`) + **enum/match (4e)** (enum decls + the
 `Enum::Variant` → `enum-construct` split with `variant_index` + `match` with payload
-`(bind #vid name ty)` binding + the wildcard) emitting the `snc types` dump
-byte-for-byte; **matches the oracle on 67 corpus fixtures + 40 seeds**
+`(bind #vid name ty)` binding + the wildcard) + **classes/traits/impls (4f core)** (the
+receiver-typed method-dispatch split `(method #cid …)`/`(impl-method #iid …)`, class-init,
+`self` typing, named-impl `qcall-impl`, `&`/`&mut`/`*` ref typing) emitting the `snc types`
+dump byte-for-byte; **matches the oracle on 84 corpus fixtures + 44 seeds**
 (`sentinel_typer_matches_oracle_on_seeds`), leak-free. ⚠ **D3 REFINED →
 self-contained** (NOT module-reuse of resolve): resolve's `RCtx` can't be extended
 with type fields across a module boundary, so `types.sentinel` is one clean `TyCtx`
@@ -54,9 +56,16 @@ added the enum + flat variant tables (names in `snb`, payload types in a `varpay
 slice; Enum interner kind 7), the `Qcall`→`enum-construct` split (`variant_index` +
 `:Enum`), and `match` (scrutinee `EnumId`, per-arm `variant_index` + payload-typed
 `(bind …)` scoped via `truncate_scope`, the wildcard, `exp` threaded to arm bodies).
-NEXT = **(4f) classes/traits/impls** (the method-dispatch split `MethodCall` vs
-`ImplMethodCall`, `ClassInit`, `self` typing, the `QualifiedCall` check), then (4g)
-effects, (4h) generics, (4i) the full-corpus phase-go.
+**(4f) CLASSES/TRAITS/IMPLS (A9)** — the largest slice — added a **group-order VarId
+restructure** (pass-2 types items into a shared `itembuf` in fns→classes→impls order,
+then splices source-order) + the class/trait/impl tables (Class interner kind 8) + the
+**method-dispatch split** (own method `(method #cid …)` vs default-impl `(impl-method
+#iid …)` vs named `(qcall-impl …)`) + `self`/class-field typing + `&`/`&mut`/`*` ref
+typing (a BONUS that unlocked the c20–c22 ref+borrow set + c25). ⚠ **delegate-impl
+synthesis (c43) is a documented (4f-delegate) follow-up** (a synthesised forwarding
+impl — ~150 lines of source-less emission; the current build degrades c43 to a
+leak-free mismatch). NEXT = **(4f-delegate)** then **(4g) effects**, (4h) generics,
+(4i) the full-corpus phase-go.
 **(4a) shipped the ORACLE + de-risked the Sentinel build:** `snc types <file>`
 (driver `run_types` + `types_dump.rs`, parse → resolve → `check` → dump) emits the
 `snc resolve` S-expr form **extended with each expression node's inferred `Type`** (a
