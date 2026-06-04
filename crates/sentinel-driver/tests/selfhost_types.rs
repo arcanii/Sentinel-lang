@@ -9,11 +9,13 @@
 //! index + the generic `len`), (4c-3) nullable (`?T` + `null` + the implicit
 //! `T → ?T` widening via expected-type threading through `dump_texpr`), and (4d)
 //! secret (`secret T` + `declassify` + the `T → secret T` widening + the
-//! secret-preserving operators), and (4e) enums + match (variant construction with
-//! `variant_index`, `match` with payload binding types + the wildcard) — each
-//! expression node annotated with its inferred `Type` (a trailing ` :<type>`); the
-//! `let`'s inferred type replaces resolve's `_`. The full-corpus differential (4i) is
-//! the phase-go (D9); class/trait dispatch + effects + generics land at 4f..4h.
+//! secret-preserving operators), (4e) enums + match (variant construction with
+//! `variant_index`, `match` with payload binding types + the wildcard), and (4f)
+//! classes/traits/impls (the receiver-typed method-dispatch split, class-init, `self`
+//! typing, named-impl qualified calls, `&`/`&mut`/`*` ref typing) — each expression
+//! node annotated with its inferred `Type` (a trailing ` :<type>`); the `let`'s
+//! inferred type replaces resolve's `_`. The full-corpus differential (4i) is the
+//! phase-go (D9); effects + generics land at 4g/4h.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -116,6 +118,15 @@ const SEEDS: &[&str] = &[
     "enum E { A, B, C }\nfn h(e: E) -> i64 { match e { E::A => 1, _ => 0 } }\nfn main() -> i64 { h(E::A) }\n",
     "enum Pair { P(i64, i64) }\nfn s(p: Pair) -> i64 { match p { Pair::P(a, b) => a + b } }\nfn main() -> i64 { s(Pair::P(3, 4)) }\n",
     "enum Tag { On(bool), Off }\nfn t(x: Tag) -> i64 { match x { Tag::On(b) => if b { 1 } else { 0 }, Tag::Off => 9 } }\nfn main() -> i64 { t(Tag::Off) }\n",
+    // (4f) classes / traits / impls: class decl + `Name::init` (class-init) + the
+    // receiver-typed method-dispatch split (a class's OWN method → `(method #cid …)`,
+    // a default-impl method → `(impl-method #iid …)`), `self` typing + class field
+    // access, named-impl qualified calls (`Impl::m(args)`), and `&`/`&mut`/`*` ref
+    // typing.
+    "class P { let x: i64; pub init(x: i64) { self.x = x; 0 } pub fn get(self: &Self) -> i64 { self.x } }\nfn main() -> i64 { let p: P = P::init(5); p.get() }\n",
+    "trait Sh { fn m(self: &Self) -> i64; }\nclass C { let v: i64; pub init() { self.v = 7; 0 } }\nimpl as Sh for C { fn m(self: &Self) -> i64 { self.v } }\nfn main() -> i64 { let c: C = C::init(); c.m() }\n",
+    "trait W { fn w(self: &mut Self, n: i64) -> i64; }\nclass B { let v: i64; pub init() { self.v = 0; 0 } }\nimpl Add as W for B { fn w(self: &mut Self, n: i64) -> i64 { self.v = self.v + n; self.v } }\nfn main() -> i64 { let mut b: B = B::init(); Add::w(&mut b, 9) }\n",
+    "fn main() -> i64 { let x: i64 = 5; let r: &i64 = &x; *r }\n",
 ];
 
 #[test]

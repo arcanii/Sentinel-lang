@@ -85,6 +85,32 @@ struct TyCtx {
     varps: Vec<i64>,  // payload-type slice start (into `varpay`)
     varpe: Vec<i64>,  // payload-type slice end
     varpay: Vec<i64>, // flat payload type handles
+    // --- (4f) class table: names in `snb`; ClassId = index ---
+    clns: Vec<i64>,   // class-name blob start (into `snb`)
+    clne: Vec<i64>,   // class-name blob end
+    // class fields (flat, one entry per field, owner ClassId)
+    clfo: Vec<i64>,   // owner ClassId
+    clfs: Vec<i64>,   // field-name blob start (into `snb`)
+    clfe: Vec<i64>,   // field-name blob end
+    clft: Vec<i64>,   // field type handle
+    // class methods (flat, one entry per method, owner ClassId) — for dispatch
+    clmo: Vec<i64>,   // owner ClassId
+    clms: Vec<i64>,   // method-name blob start (into `snb`)
+    clme: Vec<i64>,   // method-name blob end
+    clmr: Vec<i64>,   // method return-type handle
+    // --- (4f) trait table: names in `snb`; TraitId = index ---
+    trns: Vec<i64>,
+    trne: Vec<i64>,
+    // trait methods (flat, owner TraitId) — name + return type
+    trmo: Vec<i64>,
+    trms: Vec<i64>,
+    trme: Vec<i64>,
+    trmr: Vec<i64>,
+    // --- (4f) impl table: ImplId = index ---
+    imns: Vec<i64>,   // impl name start (0,0 slot for a default/unnamed impl)
+    imne: Vec<i64>,   // impl name end
+    imtid: Vec<i64>,  // the impl's TraitId
+    imcid: Vec<i64>,  // the impl's target ClassId
 }
 
 fn tbase() -> i64 { 100 }
@@ -314,6 +340,16 @@ fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
                 ei = ei + 1;
             }
             0
+        } else if k == 8 {
+            // Class: render its name from the class-name blob (a = ClassId).
+            let cs: i64 = (*c).clns[a];
+            let ce: i64 = (*c).clne[a];
+            let mut ci: i64 = cs;
+            while ci < ce {
+                push(out, (*c).snb[ci]);
+                ci = ci + 1;
+            }
+            0
         } else {
             append_str(out, "??")
         }
@@ -473,6 +509,342 @@ fn truncate_scope(c: &mut TyCtx, mark: i64) -> i64 {
     0
 }
 
+// --- (4f) class / method tables --------------------------------------------
+
+// The `Class` type handle for ClassId `cid` (interner kind 8; render → its name).
+fn mk_class(c: &mut TyCtx, cid: i64) -> i64 { intern_type(c, 8, cid, 0) }
+
+// Resolve a class name (a query `[u8]`) to its ClassId, or -1. Keyed on `snb`.
+fn class_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clns);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if snb_eq(c, (*c).clns[i], (*c).clne[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The ClassId underlying a type handle (a class type, kind 8), or -1.
+fn class_of_handle(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0 - 1
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 8 {
+            (*c).ta[idx]
+        } else {
+            0 - 1
+        }
+    }
+}
+
+// Strip one reference layer: `&T` / `&mut T` (kind 2, inner in `tb`) → `T`; else
+// unchanged. A method receiver `c.m()` carries the class value, but a `&Class` /
+// `&mut Class` (e.g. a `self` re-borrow) strips to the class.
+fn strip_ref(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        h
+    } else if (*c).tk[h - tbase()] == 2 {
+        (*c).tb[h - tbase()]
+    } else {
+        h
+    }
+}
+
+// The field index (0-based, decl order) of class field `q` in class `cid`, or -1.
+fn class_field_index(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clfo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).clfo[i] == cid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).clfs[i], (*c).clfe[i], q) {
+                    found = idx;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The type handle of class field `q` in class `cid`, or -1.
+fn class_field_type(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clfo);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).clfo[i] == cid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).clfs[i], (*c).clfe[i], q) {
+                    found = (*c).clft[i];
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// True iff class `cid` declares its OWN method `q` (vs. a default-impl method).
+fn class_has_method(c: &mut TyCtx, cid: i64, q: &[u8]) -> bool {
+    let n: i64 = len((*c).clmo);
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < n {
+        if (*c).clmo[i] == cid {
+            if snb_eq(c, (*c).clms[i], (*c).clme[i], q) {
+                found = true;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The method index (0-based, decl order) of class method `q` in class `cid`, or -1.
+fn class_method_index(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clmo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).clmo[i] == cid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).clms[i], (*c).clme[i], q) {
+                    found = idx;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The return-type handle of class method `q` in class `cid`, or i64 default.
+fn class_method_ret(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clmo);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0;
+    let mut hit: bool = false;
+    while i < n {
+        if (*c).clmo[i] == cid {
+            if hit {
+                0
+            } else {
+                if snb_eq(c, (*c).clms[i], (*c).clme[i], q) {
+                    found = (*c).clmr[i];
+                    hit = true;
+                    0
+                } else {
+                    0
+                };
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Resolve a trait name to its TraitId, or -1. Keyed on `snb`.
+fn trait_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).trns);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if snb_eq(c, (*c).trns[i], (*c).trne[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The method index (0-based, decl order) of method `q` in trait `tid`, or -1.
+fn trait_method_index(c: &mut TyCtx, tid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).trmo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).trmo[i] == tid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).trms[i], (*c).trme[i], q) {
+                    found = idx;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The return-type handle of method `q` in trait `tid`, or i64 default.
+fn trait_method_ret(c: &mut TyCtx, tid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).trmo);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0;
+    let mut hit: bool = false;
+    while i < n {
+        if (*c).trmo[i] == tid {
+            if hit {
+                0
+            } else {
+                if snb_eq(c, (*c).trms[i], (*c).trme[i], q) {
+                    found = (*c).trmr[i];
+                    hit = true;
+                    0
+                } else {
+                    0
+                };
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Resolve an impl NAME to its ImplId, or -1 (skips the 0,0 default-impl slots).
+fn impl_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).imns);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if (*c).imne[i] > (*c).imns[i] {
+                if snb_eq(c, (*c).imns[i], (*c).imne[i], q) {
+                    found = i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The TraitId of impl `iid`.
+fn impl_trait_of(c: &mut TyCtx, iid: i64) -> i64 {
+    if iid < 0 {
+        0 - 1
+    } else {
+        (*c).imtid[iid]
+    }
+}
+
+// Find the (default) impl whose target class is `cid` AND whose trait declares the
+// method `q` — the receiver-typed impl-method dispatch (a class with no OWN `q`), or
+// -1.
+fn impl_for_class(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).imcid);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if (*c).imcid[i] == cid {
+                let tid: i64 = (*c).imtid[i];
+                if trait_method_index(c, tid, q) >= 0 {
+                    found = i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
 // The field index (0-based, decl order) of field `q` in struct `sid`, or -1.
 fn field_index(c: &mut TyCtx, sid: i64, q: &[u8]) -> i64 {
     let n: i64 = len((*c).fldo);
@@ -549,6 +921,15 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             } else {
                 enum_lookup(c, &nm)
             };
+            let cid: i64 = if sc >= 0 {
+                0 - 1
+            } else if sid >= 0 {
+                0 - 1
+            } else if eid >= 0 {
+                0 - 1
+            } else {
+                class_lookup(c, &nm)
+            };
             sink_name(gb, nm);
             if sc >= 0 {
                 sc
@@ -556,6 +937,8 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 mk_struct(c, sid)
             } else if eid >= 0 {
                 mk_enum(c, eid)
+            } else if cid >= 0 {
+                mk_class(c, cid)
             } else {
                 0
             }
@@ -1039,9 +1422,15 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(out, usym);
             push(out, ' ');
             let it: i64 = dump_texpr(out, inner, 0 - 1, src, c, gb);
-            // `!` -> bool; arithmetic/deref unary -> the operand type.
+            // `!` -> bool; `&`/`&mut` -> a ref type; `*` -> strip a ref; `-` -> operand.
             let rt: i64 = if uop == 2 {
                 2
+            } else if uop == 4 {
+                mk_ref(c, 0, it)
+            } else if uop == 5 {
+                mk_ref(c, 1, it)
+            } else if uop == 3 {
+                strip_ref(c, it)
             } else {
                 it
             };
@@ -1190,9 +1579,20 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(out, "(field ");
             let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
             push(out, ' ');
-            let sid: i64 = struct_of_handle(c, tty);
-            let fidx: i64 = field_index(c, sid, &fdn);
-            let fty: i64 = field_type(c, sid, &fdn);
+            // The target is a struct or a class (a `&self`-receiver strips its ref).
+            let bare: i64 = strip_ref(c, tty);
+            let sid: i64 = struct_of_handle(c, bare);
+            let ccid: i64 = class_of_handle(c, bare);
+            let fidx: i64 = if sid >= 0 {
+                field_index(c, sid, &fdn)
+            } else {
+                class_field_index(c, ccid, &fdn)
+            };
+            let fty: i64 = if sid >= 0 {
+                field_type(c, sid, &fdn)
+            } else {
+                class_field_type(c, ccid, &fdn)
+            };
             append_str(out, fdn);
             push(out, ' ');
             append_int(out, fidx);
@@ -1241,12 +1641,24 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 close_ty(out, ety, c);
                 ety
             } else {
-                sink_name(gb, qi);
-                sink_name(gb, qm);
-                append_str(out, "(qcall-impl");
+                // (4f) a named-impl qualified call `ImplName::method(args)` →
+                // `(qcall-impl #iid <method_index> ImplName method <args> :ret)` (the
+                // method index + return type come from the impl's trait).
+                let iid: i64 = impl_lookup(c, &qi);
+                let qtid: i64 = impl_trait_of(c, iid);
+                let qmidx: i64 = trait_method_index(c, qtid, &qm);
+                let qmret: i64 = trait_method_ret(c, qtid, &qm);
+                append_str(out, "(qcall-impl #");
+                append_int(out, iid);
+                push(out, ' ');
+                append_int(out, qmidx);
+                push(out, ' ');
+                append_str(out, qi);
+                push(out, ' ');
+                append_str(out, qm);
                 dump_targs(out, qa, src, c, gb);
-                close_ty(out, 0, c);
-                0
+                close_ty(out, qmret, c);
+                qmret
             }
         },
         // (4e) `match <scrut> { pat => body, … }` — the scrutinee's type gives the
@@ -1262,6 +1674,58 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let mty: i64 = dump_tarms(out, marms, exp, src, c, gb);
             close_ty(out, mty, c);
             mty
+        },
+        // (4f) `Name::init(args)` → `(class-init #cid Name <typed-args> :Class)`.
+        Expr::ClassInit(cn, ca) => {
+            let cid: i64 = class_lookup(c, &cn);
+            let cty: i64 = mk_class(c, cid);
+            append_str(out, "(class-init #");
+            append_int(out, cid);
+            push(out, ' ');
+            append_str(out, cn);
+            dump_targs(out, ca, src, c, gb);
+            close_ty(out, cty, c);
+            cty
+        },
+        // (4f) `target.method(args)` — the receiver's class (the type-resolved split):
+        // its OWN method → `(method #cid <idx> <target> name <args> :ret)`; else a
+        // default-impl method → `(impl-method #iid <idx> <target> name <args> :ret)`.
+        // The target is built in a temp first (the `#cid`/`#iid` precede it).
+        Expr::Method(mt, mn, ma) => {
+            let mut tbuf: Vec<u8> = vec_new();
+            let tty: i64 = dump_texpr(&mut tbuf, mt, 0 - 1, src, c, gb);
+            let rcid: i64 = class_of_handle(c, strip_ref(c, tty));
+            if class_has_method(c, rcid, &mn) {
+                let midx: i64 = class_method_index(c, rcid, &mn);
+                let mret: i64 = class_method_ret(c, rcid, &mn);
+                append_str(out, "(method #");
+                append_int(out, rcid);
+                push(out, ' ');
+                append_int(out, midx);
+                push(out, ' ');
+                append_str(out, vec_to_array(tbuf));
+                push(out, ' ');
+                append_str(out, mn);
+                dump_targs(out, ma, src, c, gb);
+                close_ty(out, mret, c);
+                mret
+            } else {
+                let idef: i64 = impl_for_class(c, rcid, &mn);
+                let mtid: i64 = impl_trait_of(c, idef);
+                let midx2: i64 = trait_method_index(c, mtid, &mn);
+                let mret2: i64 = trait_method_ret(c, mtid, &mn);
+                append_str(out, "(impl-method #");
+                append_int(out, idef);
+                push(out, ' ');
+                append_int(out, midx2);
+                push(out, ' ');
+                append_str(out, vec_to_array(tbuf));
+                push(out, ' ');
+                append_str(out, mn);
+                dump_targs(out, ma, src, c, gb);
+                close_ty(out, mret2, c);
+                mret2
+            }
         },
         // (4d) `declassify(e)` strips one secret layer: `secret T → T` (ADR 0019 D6).
         // The inner is synthesized with no expectation; the node's type is its stripped
@@ -1777,6 +2241,602 @@ fn scan_payloads(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut
     }
 }
 
+// --- (4f) class decl scanning + emit ---------------------------------------
+
+// `init` is lexed as a plain ident; detect it by its 4 bytes (mirror resolve).
+fn is_init_slice(src: &[u8], st: i64, en: i64) -> bool {
+    if en - st != 4 {
+        false
+    } else {
+        ((*src)[st] == 'i') && ((*src)[st + 1] == 'n') && ((*src)[st + 2] == 'i') && ((*src)[st + 3] == 't')
+    }
+}
+
+// Parse a `self: &Self` / `self: &mut Self` receiver from `(` (cursor at `self`);
+// return whether it is `&mut` (exclusive). Advances past `Self`.
+fn tparse_self_kind(k: &Vec<i64>, cur: &mut i64) -> bool {
+    *cur = *cur + 1;             // skip `self`
+    *cur = *cur + 1;             // skip `:`
+    *cur = *cur + 1;             // skip `&`
+    let excl: bool = (*k)[*cur] == 46;
+    if excl {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    *cur = *cur + 1;             // skip `Self`
+    excl
+}
+
+// Skip a `( … )` list (no nested parens in Sentinel param/type syntax). Cursor at `(`.
+fn skip_paren_list(k: &Vec<i64>, cur: &mut i64) -> i64 {
+    *cur = *cur + 1;             // skip `(`
+    while (*k)[*cur] != 5 {
+        *cur = *cur + 1;
+    }
+    *cur = *cur + 1;             // skip `)`
+    0
+}
+
+// Skip a `{ … }` brace-balanced block. Cursor at `{`.
+fn skip_brace_block(k: &Vec<i64>, cur: &mut i64) -> i64 {
+    *cur = *cur + 1;             // skip `{`
+    let mut depth: i64 = 1;
+    while depth > 0 {
+        let t: i64 = (*k)[*cur];
+        if t == 6 {
+            depth = depth + 1;
+            0
+        } else if t == 7 {
+            depth = depth - 1;
+            0
+        } else {
+            0
+        };
+        *cur = *cur + 1;
+    }
+    0
+}
+
+// Skip to past the next `;` (kind 44) — a delegate decl (synthesis is 4f-delegate).
+fn skip_to_semi(k: &Vec<i64>, cur: &mut i64) -> i64 {
+    while (*k)[*cur] != 44 {
+        *cur = *cur + 1;
+    }
+    *cur = *cur + 1;
+    0
+}
+
+// PASS-1.5 class-field scan: record `(ClassId, name, type)` into the class-field
+// table. Cursor at `let`.
+fn scan_cfield(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, cid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    *cur = *cur + 1;             // skip `let`
+    let fn_s: i64 = (*s)[*cur];
+    let fn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // skip name
+    *cur = *cur + 1;             // skip `:`
+    let fte: TypeE = parse_type(k, s, e, src, cur);
+    let fth: i64 = type_of_typeexpr(c, fte, gb);
+    *cur = *cur + 1;             // skip `;`
+    let bst: i64 = len((*c).snb);
+    let mut bi: i64 = fn_s;
+    while bi < fn_e {
+        push(&mut (*c).snb, (*src)[bi]);
+        bi = bi + 1;
+    }
+    push(&mut (*c).clfo, cid);
+    push(&mut (*c).clfs, bst);
+    push(&mut (*c).clfe, bst + (fn_e - fn_s));
+    push(&mut (*c).clft, fth);
+    0
+}
+
+// PASS-1.5 class-method scan: record `(ClassId, name, return-type)` + SKIP the body.
+// Cursor at `fn`.
+fn scan_cmethod(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, cid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    *cur = *cur + 1;             // skip `fn`
+    let mn_s: i64 = (*s)[*cur];
+    let mn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // skip name
+    skip_paren_list(k, cur);     // skip `( self… params )`
+    *cur = *cur + 1;             // skip `->`
+    let mret: TypeE = parse_type(k, s, e, src, cur);
+    let mrth: i64 = type_of_typeexpr(c, mret, gb);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    let bst: i64 = len((*c).snb);
+    let mut bi: i64 = mn_s;
+    while bi < mn_e {
+        push(&mut (*c).snb, (*src)[bi]);
+        bi = bi + 1;
+    }
+    push(&mut (*c).clmo, cid);
+    push(&mut (*c).clms, bst);
+    push(&mut (*c).clme, bst + (mn_e - mn_s));
+    push(&mut (*c).clmr, mrth);
+    skip_brace_block(k, cur);    // skip the method body
+    0
+}
+
+fn scan_class_members(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, cid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut cur: i64 = p1 + 1;   // skip `class`
+    cur = cur + 1;               // skip name
+    cur = cur + 1;               // skip `{`
+    scan_cmem_loop(k, s, e, src, &mut cur, cid, c, gb)
+}
+
+fn scan_cmem_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, cid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    if (*k)[*cur] == 59 {
+        *cur = *cur + 1;         // skip a per-item `pub`
+        0
+    } else {
+        0
+    };
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 45 {
+        scan_cfield(k, s, e, src, cur, cid, c, gb);
+        scan_cmem_loop(k, s, e, src, cur, cid, c, gb)
+    } else if t == 3 {
+        scan_cmethod(k, s, e, src, cur, cid, c, gb);
+        scan_cmem_loop(k, s, e, src, cur, cid, c, gb)
+    } else if is_init_slice(src, (*s)[*cur], (*e)[*cur]) {
+        *cur = *cur + 1;         // skip `init`
+        skip_paren_list(k, cur);
+        skip_brace_block(k, cur);
+        scan_cmem_loop(k, s, e, src, cur, cid, c, gb)
+    } else {
+        skip_to_semi(k, cur);    // a `delegate` (synthesis at 4f-delegate)
+        scan_cmem_loop(k, s, e, src, cur, cid, c, gb)
+    }
+}
+
+// (4f) emit a class field head: ` (field name <type>)`. Cursor at `let`.
+fn tclass_field(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    *cur = *cur + 1;             // skip `let`
+    let fn_s: i64 = (*s)[*cur];
+    let fn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // skip name
+    *cur = *cur + 1;             // skip `:`
+    let fte: TypeE = parse_type(k, s, e, src, cur);
+    let fth: i64 = type_of_typeexpr(c, fte, gb);
+    *cur = *cur + 1;             // skip `;`
+    append_str(buf, " (field ");
+    append_slice(buf, src, fn_s, fn_e);
+    push(buf, ' ');
+    render_type(buf, fth, c);
+    push(buf, ')');
+    0
+}
+
+// (4f) emit + type a class init: ` (init #selfvid (params) <typed-body>)`. The init's
+// `self` is SYNTHETIC (no receiver token) → bind the literal `self`, typed as the
+// class. Cursor at `init`.
+fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64) -> i64 {
+    (*c).base = len((*c).scs);
+    *cur = *cur + 1;             // skip `init`
+    *cur = *cur + 1;             // skip `(`
+    let selfvid: i64 = (*c).nextvid;
+    (*c).nextvid = (*c).nextvid + 1;
+    let clty: i64 = mk_class(c, cid);
+    bind_name(c, "self", selfvid, clty);
+    append_str(buf, " (init #");
+    append_int(buf, selfvid);
+    append_str(buf, " (");
+    emit_tparams(buf, k, s, e, src, cur, c, gb, true);
+    append_str(buf, ") ");
+    let ibody: Expr = parse_block(k, s, e, src, cur);
+    dump_texpr(buf, ibody, 0 - 1, src, c, gb);
+    push(buf, ')');
+    0
+}
+
+// (4f) emit + type a class/impl method: ` (method #selfvid name <kind> (params) ret
+// <typed-body>)`. `self` is the receiver token, typed as the owning class. Cursor at
+// `fn`. The body's expectation is the return type (so a `?T`/secret method widens).
+fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64) -> i64 {
+    (*c).base = len((*c).scs);
+    *cur = *cur + 1;             // skip `fn`
+    let mn_s: i64 = (*s)[*cur];
+    let mn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // skip name
+    *cur = *cur + 1;             // skip `(`
+    let self_s: i64 = (*s)[*cur];
+    let self_e: i64 = (*e)[*cur];
+    let excl: bool = tparse_self_kind(k, cur);
+    let selfvid: i64 = (*c).nextvid;
+    (*c).nextvid = (*c).nextvid + 1;
+    let clty: i64 = mk_class(c, cid);
+    bind_src(c, src, self_s, self_e, selfvid, clty);
+    let skw: [u8] = if excl {
+        "exclusive"
+    } else {
+        "shared"
+    };
+    append_str(buf, " (method #");
+    append_int(buf, selfvid);
+    push(buf, ' ');
+    append_slice(buf, src, mn_s, mn_e);
+    push(buf, ' ');
+    append_str(buf, skw);
+    append_str(buf, " (");
+    emit_tparams(buf, k, s, e, src, cur, c, gb, true);
+    append_str(buf, ") ");
+    *cur = *cur + 1;             // skip `->`
+    let mret: TypeE = parse_type(k, s, e, src, cur);
+    let mrth: i64 = type_of_typeexpr(c, mret, gb);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    let mbody: Expr = parse_block(k, s, e, src, cur);
+    render_type(buf, mrth, c);
+    push(buf, ' ');
+    dump_texpr(buf, mbody, mrth, src, c, gb);
+    push(buf, ')');
+    0
+}
+
+// (4f) walk a class body, BUCKETING items into fields / init / methods buffers
+// (mirror resolve / the parser — the dump emits fields, then init, then methods).
+fn tclass_items(fbuf: &mut Vec<u8>, ibuf: &mut Vec<u8>, mbuf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64) -> i64 {
+    if (*k)[*cur] == 59 {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 45 {
+        tclass_field(fbuf, k, s, e, src, cur, c, gb);
+        tclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb, cid)
+    } else if t == 3 {
+        tmethod(mbuf, k, s, e, src, cur, c, gb, cid);
+        tclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb, cid)
+    } else if is_init_slice(src, (*s)[*cur], (*e)[*cur]) {
+        tclass_init(ibuf, k, s, e, src, cur, c, gb, cid);
+        tclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb, cid)
+    } else {
+        skip_to_semi(k, cur);
+        tclass_items(fbuf, ibuf, mbuf, k, s, e, src, cur, c, gb, cid)
+    }
+}
+
+// (4f) emit a class decl head `(class #cid Name (field …) (init …)? (method …)…)`.
+fn type_class(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64) -> i64 {
+    *cur = *cur + 1;             // skip `class`
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // skip name
+    *cur = *cur + 1;             // skip `{`
+    let mut fbuf: Vec<u8> = vec_new();
+    let mut ibuf: Vec<u8> = vec_new();
+    let mut mbuf: Vec<u8> = vec_new();
+    tclass_items(&mut fbuf, &mut ibuf, &mut mbuf, k, s, e, src, cur, c, gb, cid);
+    append_str(out, "(class #");
+    append_int(out, cid);
+    push(out, ' ');
+    append_slice(out, src, nm_s, nm_e);
+    append_str(out, vec_to_array(fbuf));
+    append_str(out, vec_to_array(ibuf));
+    append_str(out, vec_to_array(mbuf));
+    push(out, ')');
+    0
+}
+
+// --- (4f) trait + impl decl scanning + emit --------------------------------
+
+// Compare a `src` slice [ss,se) to an `snb` slice [bs,be).
+fn src_eq_snb(c: &mut TyCtx, bs: i64, be: i64, src: &[u8], ss: i64, se: i64) -> bool {
+    if be - bs != se - ss {
+        false
+    } else {
+        let n: i64 = be - bs;
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < n {
+            if (*c).snb[bs + i] != (*src)[ss + i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Resolve a `src` slice to a TraitId / ClassId, or -1.
+fn trait_lookup_slice(c: &mut TyCtx, src: &[u8], ss: i64, se: i64) -> i64 {
+    let n: i64 = len((*c).trns);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if src_eq_snb(c, (*c).trns[i], (*c).trne[i], src, ss, se) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+fn class_lookup_slice(c: &mut TyCtx, src: &[u8], ss: i64, se: i64) -> i64 {
+    let n: i64 = len((*c).clns);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if src_eq_snb(c, (*c).clns[i], (*c).clne[i], src, ss, se) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// PASS-1.5 trait-method scan: record `(TraitId, name, return-type)` into the
+// trait-method table (sigs only — no bodies/VarIds).
+fn scan_trait_methods(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, tid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut cur: i64 = p1 + 1;   // skip `trait`
+    cur = cur + 1;               // skip name
+    cur = cur + 1;               // skip `{`
+    scan_trm_loop(k, s, e, src, &mut cur, tid, c, gb)
+}
+
+fn scan_trm_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, tid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else {
+        *cur = *cur + 1;         // skip `fn`
+        let mn_s: i64 = (*s)[*cur];
+        let mn_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;         // skip name
+        skip_paren_list(k, cur);
+        *cur = *cur + 1;         // skip `->`
+        let mret: TypeE = parse_type(k, s, e, src, cur);
+        let mrth: i64 = type_of_typeexpr(c, mret, gb);
+        if (*k)[*cur] == 24 {
+            skip_effect_row(k, cur)
+        } else {
+            0
+        };
+        *cur = *cur + 1;         // skip `;`
+        let bst: i64 = len((*c).snb);
+        let mut bi: i64 = mn_s;
+        while bi < mn_e {
+            push(&mut (*c).snb, (*src)[bi]);
+            bi = bi + 1;
+        }
+        push(&mut (*c).trmo, tid);
+        push(&mut (*c).trms, bst);
+        push(&mut (*c).trme, bst + (mn_e - mn_s));
+        push(&mut (*c).trmr, mrth);
+        scan_trm_loop(k, s, e, src, cur, tid, c, gb)
+    }
+}
+
+// PASS-1.5 impl-header scan: resolve the impl's trait + target class, push into the
+// impl table (aligned by ImplId with the pass-1 name registration). The header is
+// `impl [Name as]? Trait for Type {`.
+fn scan_impl_header(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, c: &mut TyCtx) -> i64 {
+    let mut cur: i64 = p1 + 1;   // skip `impl`
+    if (*k)[cur] != 60 {
+        cur = cur + 1;           // skip the impl name (present unless next is `as`)
+        0
+    } else {
+        0
+    };
+    cur = cur + 1;               // skip `as`
+    let tr_s: i64 = (*s)[cur];
+    let tr_e: i64 = (*e)[cur];
+    cur = cur + 1;               // trait name
+    cur = cur + 1;               // skip `for`
+    let ty_s: i64 = (*s)[cur];
+    let ty_e: i64 = (*e)[cur];
+    let tid: i64 = trait_lookup_slice(c, src, tr_s, tr_e);
+    let cid: i64 = class_lookup_slice(c, src, ty_s, ty_e);
+    push(&mut (*c).imtid, tid);
+    push(&mut (*c).imcid, cid);
+    0
+}
+
+// (4f) trait-method sig params: ` (param [mut] name <type>)…` — NO VarIds (sigs).
+fn emit_trait_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, first: bool) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        emit_trait_params(out, k, s, e, src, cur, c, gb, first)
+    } else {
+        if first {
+            0
+        } else {
+            push(out, ' ');
+            0
+        };
+        let pm: bool = (*k)[*cur] == 46;
+        if pm {
+            *cur = *cur + 1;
+            0
+        } else {
+            0
+        };
+        let ns: i64 = (*s)[*cur];
+        let ne: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;         // skip `:`
+        let pte: TypeE = parse_type(k, s, e, src, cur);
+        let pth: i64 = type_of_typeexpr(c, pte, gb);
+        append_str(out, "(param ");
+        if pm {
+            append_str(out, "mut ")
+        } else {
+            0
+        };
+        append_slice(out, src, ns, ne);
+        push(out, ' ');
+        render_type(out, pth, c);
+        push(out, ')');
+        emit_trait_params(out, k, s, e, src, cur, c, gb, false)
+    }
+}
+
+// (4f) one trait method sig head: ` (method name <kind> (params) ret`. Cursor at `fn`.
+fn ttrait_method_head(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    *cur = *cur + 1;             // skip `fn`
+    let mn_s: i64 = (*s)[*cur];
+    let mn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // skip name
+    *cur = *cur + 1;             // skip `(`
+    let excl: bool = tparse_self_kind(k, cur);
+    let skw: [u8] = if excl {
+        "exclusive"
+    } else {
+        "shared"
+    };
+    append_str(out, " (method ");
+    append_slice(out, src, mn_s, mn_e);
+    push(out, ' ');
+    append_str(out, skw);
+    append_str(out, " (");
+    emit_trait_params(out, k, s, e, src, cur, c, gb, true);
+    append_str(out, ") ");
+    *cur = *cur + 1;             // skip `->`
+    let mret: TypeE = parse_type(k, s, e, src, cur);
+    let mrth: i64 = type_of_typeexpr(c, mret, gb);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    render_type(out, mrth, c);
+    0
+}
+
+fn ttrait_methods(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else {
+        ttrait_method_head(out, k, s, e, src, cur, c, gb);
+        *cur = *cur + 1;         // skip `;`
+        push(out, ')');
+        ttrait_methods(out, k, s, e, src, cur, c, gb)
+    }
+}
+
+// (4f) emit a trait decl head `(trait #tid Name (method name kind (params) ret)…)`.
+fn type_trait(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, tid: i64) -> i64 {
+    *cur = *cur + 1;             // skip `trait`
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // skip name
+    *cur = *cur + 1;             // skip `{`
+    append_str(out, "(trait #");
+    append_int(out, tid);
+    push(out, ' ');
+    append_slice(out, src, nm_s, nm_e);
+    ttrait_methods(out, k, s, e, src, cur, c, gb);
+    push(out, ')');
+    0
+}
+
+// (4f) impl methods: each reuses `tmethod` (self typed as the impl's class). The
+// per-method `pub` is skipped.
+fn timpl_methods(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 59 {
+        *cur = *cur + 1;         // skip a per-method `pub`
+        timpl_methods(out, k, s, e, src, cur, c, gb, cid)
+    } else {
+        tmethod(out, k, s, e, src, cur, c, gb, cid);
+        timpl_methods(out, k, s, e, src, cur, c, gb, cid)
+    }
+}
+
+// (4f) emit an impl decl head `(impl #iid name #tid Trait class#cid Type (method …)…)`
+// with TYPED method bodies. The trait + class were resolved in pass-1.5 (`imtid`/
+// `imcid`). The header is `impl [Name as]? Trait for Type {`.
+fn type_impl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, iid: i64) -> i64 {
+    *cur = *cur + 1;             // skip `impl`
+    let has_name: bool = (*k)[*cur] != 60;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    if has_name {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    *cur = *cur + 1;             // skip `as`
+    let tr_s: i64 = (*s)[*cur];
+    let tr_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // trait name
+    *cur = *cur + 1;             // skip `for`
+    let ty_s: i64 = (*s)[*cur];
+    let ty_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;             // type name
+    *cur = *cur + 1;             // skip `{`
+    let tid: i64 = (*c).imtid[iid];
+    let cid: i64 = (*c).imcid[iid];
+    append_str(out, "(impl #");
+    append_int(out, iid);
+    push(out, ' ');
+    if has_name {
+        append_slice(out, src, nm_s, nm_e);
+        0
+    } else {
+        push(out, '_');
+        0
+    };
+    push(out, ' ');
+    push(out, '#');
+    append_int(out, tid);
+    push(out, ' ');
+    append_slice(out, src, tr_s, tr_e);
+    append_str(out, " class#");
+    append_int(out, cid);
+    push(out, ' ');
+    append_slice(out, src, ty_s, ty_e);
+    timpl_methods(out, k, s, e, src, cur, c, gb, cid);
+    push(out, ')');
+    0
+}
+
 // Dispatch one top-level item on its kind (a SINGLE helper re-passing the `&mut`
 // PARAMS — main's local `&mut out`/`&mut ctx` would conflict across sibling-if
 // tails, ADR 0038 A2). `idx` = the fn index (FnId-14) or the StructId.
@@ -1788,6 +2848,15 @@ fn type_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
         type_struct(out, c, idx)
     } else if kind == 53 {
         type_enum(out, c, idx)
+    } else if kind == 56 {
+        let mut curc: i64 = pos;
+        type_class(out, k, s, e, src, &mut curc, c, gb, idx)
+    } else if kind == 54 {
+        let mut curt: i64 = pos;
+        type_trait(out, k, s, e, src, &mut curt, c, gb, idx)
+    } else if kind == 55 {
+        let mut curi: i64 = pos;
+        type_impl(out, k, s, e, src, &mut curi, c, gb, idx)
     } else {
         0
     }
@@ -1832,6 +2901,26 @@ fn main() -> i64 {
         varps: vec_new(),
         varpe: vec_new(),
         varpay: vec_new(),
+        clns: vec_new(),
+        clne: vec_new(),
+        clfo: vec_new(),
+        clfs: vec_new(),
+        clfe: vec_new(),
+        clft: vec_new(),
+        clmo: vec_new(),
+        clms: vec_new(),
+        clme: vec_new(),
+        clmr: vec_new(),
+        trns: vec_new(),
+        trne: vec_new(),
+        trmo: vec_new(),
+        trms: vec_new(),
+        trme: vec_new(),
+        trmr: vec_new(),
+        imns: vec_new(),
+        imne: vec_new(),
+        imtid: vec_new(),
+        imcid: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();
     let mut out: Vec<u8> = vec_new();
@@ -1888,6 +2977,56 @@ fn main() -> i64 {
                 push(&mut ctx.ets, est);
                 push(&mut ctx.ete, est + (een - ess));
                 0
+            } else if t1 == 56 {
+                push(&mut itempos, p1);
+                push(&mut itemkind, 56);
+                let css: i64 = starts[p1 + 1];
+                let cen: i64 = ends[p1 + 1];
+                let cst: i64 = len(ctx.snb);
+                let mut cbi: i64 = css;
+                while cbi < cen {
+                    push(&mut ctx.snb, src[cbi]);
+                    cbi = cbi + 1;
+                }
+                push(&mut ctx.clns, cst);
+                push(&mut ctx.clne, cst + (cen - css));
+                0
+            } else if t1 == 54 {
+                push(&mut itempos, p1);
+                push(&mut itemkind, 54);
+                let tss: i64 = starts[p1 + 1];
+                let ten: i64 = ends[p1 + 1];
+                let tst: i64 = len(ctx.snb);
+                let mut tbi: i64 = tss;
+                while tbi < ten {
+                    push(&mut ctx.snb, src[tbi]);
+                    tbi = tbi + 1;
+                }
+                push(&mut ctx.trns, tst);
+                push(&mut ctx.trne, tst + (ten - tss));
+                0
+            } else if t1 == 55 {
+                push(&mut itempos, p1);
+                push(&mut itemkind, 55);
+                let hasn: bool = kinds[p1 + 1] != 60;
+                let ist: i64 = len(ctx.snb);
+                if hasn {
+                    let iss: i64 = starts[p1 + 1];
+                    let ien: i64 = ends[p1 + 1];
+                    let mut ibi: i64 = iss;
+                    while ibi < ien {
+                        push(&mut ctx.snb, src[ibi]);
+                        ibi = ibi + 1;
+                    }
+                    push(&mut ctx.imns, ist);
+                    push(&mut ctx.imne, ist + (ien - iss));
+                    0
+                } else {
+                    push(&mut ctx.imns, 0);
+                    push(&mut ctx.imne, 0);
+                    0
+                };
+                0
             } else if t1 == 57 {
                 ecount = ecount + 1;
                 0
@@ -1906,6 +3045,8 @@ fn main() -> i64 {
     let mut q: i64 = 0;
     let mut sc2: i64 = 0;
     let mut ec2: i64 = 0;
+    let mut cl2: i64 = 0;
+    let mut tr2: i64 = 0;
     while q < ni {
         if itemkind[q] == 3 {
             let rh: i64 = scan_fn_ret(&kinds, &starts, &ends, &src, itempos[q], &mut ctx, &mut garbage);
@@ -1919,47 +3060,145 @@ fn main() -> i64 {
             scan_enum_variants(&kinds, &starts, &ends, &src, itempos[q], ec2, &mut ctx, &mut garbage);
             ec2 = ec2 + 1;
             0
+        } else if itemkind[q] == 56 {
+            scan_class_members(&kinds, &starts, &ends, &src, itempos[q], cl2, &mut ctx, &mut garbage);
+            cl2 = cl2 + 1;
+            0
+        } else if itemkind[q] == 54 {
+            scan_trait_methods(&kinds, &starts, &ends, &src, itempos[q], tr2, &mut ctx, &mut garbage);
+            tr2 = tr2 + 1;
+            0
+        } else if itemkind[q] == 55 {
+            scan_impl_header(&kinds, &starts, &ends, &src, itempos[q], &mut ctx);
+            0
         } else {
             0
         };
         q = q + 1;
     }
 
-    // Pass 2: emit each top-level item in source order, dispatching on kind. Only
-    // fns bind VarIds (structs consume none), so VarIds flow in fn source order.
-    let mut fi: i64 = 0;
-    let mut first_item: bool = true;
+    // Pass 2 — GROUP-ORDER emit (mirrors resolve / the Rust resolver: ALL fn bodies'
+    // VarIds, THEN class bodies', THEN impl bodies' — lib.rs:2559 — but the DUMP is
+    // SOURCE order). Each item is typed into the shared `itembuf` in GROUP order,
+    // tagged with its source index (`rsrc`) + blob slice (`rbs`/`rbe`); then emitted
+    // source-order. Group A = fns + structs + enums + traits (fns advance `nextvid`,
+    // the rest consume none); group B = classes; group C = impls. Each region's VarId
+    // base is the prior region's FINAL `nextvid` (no count precomputed).
+    let mut itembuf: Vec<u8> = vec_new();
+    let mut rsrc: Vec<i64> = vec_new();
+    let mut rbs: Vec<i64> = vec_new();
+    let mut rbe: Vec<i64> = vec_new();
+
+    // Group A: fns + structs + enums + traits, in source order.
+    let mut ia: i64 = 0;
     let mut fnct: i64 = 0;
     let mut sc3: i64 = 0;
     let mut ec3: i64 = 0;
-    while fi < ni {
-        if first_item {
-            first_item = false;
-            0
-        } else {
-            push(&mut out, '\n');
-            0
-        };
-        let kd: i64 = itemkind[fi];
-        let idx: i64 = if kd == 3 {
-            fnct
-        } else if kd == 52 {
-            sc3
-        } else {
-            ec3
-        };
-        type_item(&mut out, &kinds, &starts, &ends, &src, &mut ctx, &mut garbage, kd, itempos[fi], idx);
-        if kd == 3 {
+    let mut tc3: i64 = 0;
+    while ia < ni {
+        let kda: i64 = itemkind[ia];
+        if kda == 3 {
+            let bsa: i64 = len(itembuf);
+            type_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut ctx, &mut garbage, 3, itempos[ia], fnct);
+            push(&mut rsrc, ia);
+            push(&mut rbs, bsa);
+            push(&mut rbe, len(itembuf));
             fnct = fnct + 1;
             0
-        } else if kd == 52 {
+        } else if kda == 52 {
+            let bss: i64 = len(itembuf);
+            type_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut ctx, &mut garbage, 52, itempos[ia], sc3);
+            push(&mut rsrc, ia);
+            push(&mut rbs, bss);
+            push(&mut rbe, len(itembuf));
             sc3 = sc3 + 1;
             0
-        } else {
+        } else if kda == 53 {
+            let bse: i64 = len(itembuf);
+            type_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut ctx, &mut garbage, 53, itempos[ia], ec3);
+            push(&mut rsrc, ia);
+            push(&mut rbs, bse);
+            push(&mut rbe, len(itembuf));
             ec3 = ec3 + 1;
             0
+        } else if kda == 54 {
+            let bst: i64 = len(itembuf);
+            type_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut ctx, &mut garbage, 54, itempos[ia], tc3);
+            push(&mut rsrc, ia);
+            push(&mut rbs, bst);
+            push(&mut rbe, len(itembuf));
+            tc3 = tc3 + 1;
+            0
+        } else {
+            0
         };
-        fi = fi + 1;
+        ia = ia + 1;
+    }
+
+    // Group B: classes (classvid = nextvid after fns).
+    let mut ib: i64 = 0;
+    let mut clct: i64 = 0;
+    while ib < ni {
+        if itemkind[ib] == 56 {
+            let bsb: i64 = len(itembuf);
+            type_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut ctx, &mut garbage, 56, itempos[ib], clct);
+            push(&mut rsrc, ib);
+            push(&mut rbs, bsb);
+            push(&mut rbe, len(itembuf));
+            clct = clct + 1;
+            0
+        } else {
+            0
+        };
+        ib = ib + 1;
+    }
+
+    // Group C: impls (implvid = nextvid after classes).
+    let mut ic: i64 = 0;
+    let mut imct: i64 = 0;
+    while ic < ni {
+        if itemkind[ic] == 55 {
+            let bsc: i64 = len(itembuf);
+            type_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut ctx, &mut garbage, 55, itempos[ic], imct);
+            push(&mut rsrc, ic);
+            push(&mut rbs, bsc);
+            push(&mut rbe, len(itembuf));
+            imct = imct + 1;
+            0
+        } else {
+            0
+        };
+        ic = ic + 1;
+    }
+
+    // EMIT in source order: splice each item's `itembuf` slice (newline-separated).
+    let nrec: i64 = len(rsrc);
+    let mut si: i64 = 0;
+    let mut first_item: bool = true;
+    while si < ni {
+        let mut j: i64 = 0;
+        while j < nrec {
+            if rsrc[j] == si {
+                if first_item {
+                    first_item = false;
+                    0
+                } else {
+                    push(&mut out, '\n');
+                    0
+                };
+                let mut bi: i64 = rbs[j];
+                let bend: i64 = rbe[j];
+                while bi < bend {
+                    push(&mut out, itembuf[bi]);
+                    bi = bi + 1;
+                }
+                0
+            } else {
+                0
+            };
+            j = j + 1;
+        }
+        si = si + 1;
     }
 
     // The built-in `Async` effect (id = user-effect count) dumps last.
@@ -1976,6 +3215,7 @@ fn main() -> i64 {
 
     let arr: [u8] = vec_to_array(out);
     print_bytes(arr);
+    let _it: [u8] = vec_to_array(itembuf);
     let _g: [u8] = vec_to_array(garbage);
     0
 }
