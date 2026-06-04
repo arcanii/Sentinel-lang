@@ -1865,11 +1865,12 @@ For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
     (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host TYPES (4d) secret
-    docs** commit (`docs(selfhost): ADR 0041 A7 — (4d) secret landed`), atop the
-    **(4d) secret feat** (`b7706b9`, `feat(selfhost): types.sentinel (4d) secret —
-    secret T + declassify + widening`), atop the (4c-3) nullable docs (`f409e2c`) +
-    feat (`3071038`), atop the (4c-1/4c-2) structs+arrays docs (`3bd271c`) + feat
+    Local HEAD: verify with `git log -1` — expect the **self-host TYPES (4e)
+    enum/match docs** commit (`docs(selfhost): ADR 0041 A8 — (4e) enums + match
+    landed`), atop the **(4e) enum/match feat** (`37887b9`, `feat(selfhost):
+    types.sentinel (4e) enums + match`), atop the (4d) secret docs (`386d0da`) + feat
+    (`b7706b9`), atop the (4c-3) nullable docs (`f409e2c`) + feat (`3071038`), atop
+    the (4c-1/4c-2) structs+arrays docs (`3bd271c`) + feat
     (`fa20025`), atop the (4b) m-1 docs (`cf04226`) + feat (`62d1a5f`), the (4a) oracle docs
     (`cf44020`) + feat (`c52aef9`), atop the
     RESOLVE-COMPLETE docs (`bbada41`) + delegate-synthesis feat (`9da6c12`), the (3e) docs
@@ -1895,9 +1896,9 @@ For pasting into a fresh chat to bootstrap context:
     CORPUS differential `sentinel_resolver_matches_oracle_on_corpus` (the D9
     phase-go: all 132 clean-resolving fixtures, incl. delegates)** + the **`snc
     types` oracle goldens (`tests/types.rs`, 5)** + the **types seed differential
-    (`tests/selfhost_types.rs`, 35 seeds — scalar + structs/arrays + (4c-3)
-    nullable + (4d) secret; the Sentinel typer matches `snc types` on 66 corpus
-    fixtures too)**;
+    (`tests/selfhost_types.rs`, 40 seeds — scalar + structs/arrays + (4c-3)
+    nullable + (4d) secret + (4e) enum/match; the Sentinel typer matches `snc types`
+    on 67 corpus fixtures too)**;
     four-check green via `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
     (+ `cargo build`).
@@ -1912,8 +1913,9 @@ For pasting into a fresh chat to bootstrap context:
     as a D.6 module** (verified) but **refined at the (4b) build to SELF-CONTAINED**
     (A3 — resolve's `RCtx` can't be extended with type fields across a module
     boundary); **(4b) m-1 SCALAR + (4c-1) STRUCTS + (4c-2) ARRAYS + (4c-3) NULLABLE +
-    (4d) SECRET LANDED (A3/A4/A6/A7)** (`selfhost/types.sentinel`, the 4th Sentinel
-    stage — matches the oracle on 66 corpus fixtures + 35 seeds, leak-free; a 3-pass
+    (4d) SECRET + (4e) ENUM/MATCH LANDED (A3/A4/A6/A7/A8)** (`selfhost/types.sentinel`,
+    the 4th Sentinel stage — matches the oracle on 67 corpus fixtures + 40 seeds,
+    leak-free; a 3-pass
     `main` names→sigs/fields→emit; the `Struct` interner kind via a struct-name blob
     `snb`; struct-lit + field-access `field_index`; arrays + the generic-builtin
     `(targs T)` for `len`; **(4c-3) `?T` + `null` + the `T → ?T` widening
@@ -1926,9 +1928,13 @@ For pasting into a fresh chat to bootstrap context:
     the secret-preserving operators — reused the 4c-3 machinery wholesale: one
     `widen_kind` over `?T`(k4)+`secret T`(k3), `declassify`/`strip_secret`, cmp/logic
     → `secret bool` on a secret operand, arithmetic propagates for free via `resty=lt`,
-    mixed public+secret is oracle-rejected]); NEXT = **(4e) enum/match**
-    (variant-construction typing + match-arm payload binding + `variant_index`), then
-    (4f) class/method-dispatch) + the
+    mixed public+secret is oracle-rejected]; **(4e) enum/match: the enum + flat variant
+    tables (names in `snb`, payload types in a `varpay` slice; Enum interner kind 7),
+    `Qcall`→`enum-construct` (`variant_index`+`:Enum`), `match` (scrutinee `EnumId`,
+    per-arm `variant_index` + payload-typed `(bind …)` scoped via `truncate_scope`,
+    wildcard, `exp` threaded to arm bodies)]); NEXT = **(4f) classes/traits/impls**
+    (method-dispatch split `MethodCall`/`ImplMethodCall`, `ClassInit`, `self` typing,
+    `QualifiedCall`)) + the
     just-COMPLETED **ADR 0040** (resolve, ACCEPTED) + **ADR 0039**
     (the (2/N) parser — **now ACCEPTED / COMPLETE**: (2a)+(2b) the full expression
     grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the

@@ -274,6 +274,43 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
     `SecretInRefDeref`, `SecretDivisor`) are type ERRORS → oracle-rejected → out of
     scope (D7), exactly as planned. **Next: (4e) enum/match** (variant-construction
     typing + match-arm payload binding + the `variant_index`).
+- **A8 — (4e) enums + match LANDED.** The first decl kind whose *bodies* bind VarIds
+  (match-arm payloads) and the first new interner kind since `Struct`. **Matches `snc
+  types` byte-for-byte on 67 corpus fixtures** (up from 66 — the +1 is `c5d1_enum`, the
+  D.1 phase-go: unit + tuple-payload variants, constructed + `match`ed) **+ 40 seeds**
+  (+5 enum/match incl. the wildcard `_` and a `bool`-payload variant), **leak-free
+  across all 67** (the `Match`/`Arms`/`Pattern`/`Binds` Move-enums all consumed
+  cleanly), **zero regressions** vs the 4d baseline.
+  - **The enum + variant tables** (extending the struct-table idiom). `ets`/`ete` hold
+    enum names in the shared decl-name blob `snb` (EnumId = index); a **flat variant
+    table** `varo` (owner EnumId) / `varns`/`varne` (variant name in `snb`) /
+    `varps`/`varpe` (a slice into `varpay`, a flat `Vec<i64>` of payload-type handles).
+    Built in the existing **pass-1** (enum NAMES, token kind 53 — alongside `fn`/`struct`)
+    + **pass-1.5** (`scan_enum_variants` → `scan_payloads`, interning payload types now
+    that all names are registered, so a recursive `?Enum` payload resolves). The **Enum
+    interner kind 7** renders its name from `snb` (no `src` threading, exactly like
+    `Struct` kind 6). `type_of_typeexpr` now resolves a non-scalar / non-struct `TIdent`
+    to `mk_enum` (scalar → struct → enum → `i64` default).
+  - **enum-construct** (the `Qcall` split, mirroring resolve). When the base name is an
+    enum: `(enum-construct #eid <variant_index> Enum Variant <typed-args> :Enum)` — the
+    `variant_index` (decl order) + the node's `:Enum` type are the type-stage additions;
+    args dump with no expectation (the corpus never widens a payload arg). A non-enum
+    `::` (a named-impl qcall, 4f) emits a **non-leaking placeholder** (`(qcall-impl …)`
+    with the args consumed via `dump_targs`) so the match stays exhaustive without
+    leaking the unhandled `Qcall`'s payloads — unreachable by the matching corpus.
+  - **match.** `(match <scrut :Enum> #eid (arm (pat <vidx> V (bind #vid name ty)…)
+    <body :T>)… :T)`: the scrutinee's type → its `EnumId` (`enum_of_handle`, emitted as
+    `#eid`); resolve's uniform `(pat Enum V #vid…)` becomes `(pat <variant_index> V
+    (bind #vid name <payload-type>)…)` — the enum name is dropped for the index, and
+    each payload binding now carries its **declared payload type** (from `varpay` via
+    `variant_flat`). Arm payloads are **scoped per-arm** (`truncate_scope` pops the name
+    blob back after each body; VarIds stay monotonic, the env append-only — the resolve
+    3c idiom). The match's expectation `exp` threads to each arm **body** (so a
+    `?T`/`secret` match widens at the bodies); the match's type is the shared arm-body
+    type. ⚠ The bind name is emitted from `nb` *after* `bind_name` copies it there
+    (`bind_name` consumes the AST `[u8]`, so it can't also be `append_str`'d).
+    **Next: (4f) classes/traits/impls** — the method-dispatch split (`MethodCall` vs
+    `ImplMethodCall`), `ClassInit`, `self` typing, the `QualifiedCall` check.
 
 ## Context
 

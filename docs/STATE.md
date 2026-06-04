@@ -16,7 +16,7 @@ next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (4/N) TYPES is OPEN; ADR
 0041 → ACCEPTED-WITH-AMENDMENTS; (4a) oracle + probes + (4b) m-1 SCALAR + (4c-1/4c-2)
-STRUCTS + ARRAYS + (4c-3) NULLABLE + (4d) SECRET (A1–A7) LANDED.** Types is the **biggest/hardest
+STRUCTS + ARRAYS + (4c-3) NULLABLE + (4d) SECRET + (4e) ENUM/MATCH (A1–A8) LANDED.** Types is the **biggest/hardest
 port stage** (the Rust `sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish
 inference, method/trait dispatch, secret-type propagation, match exhaustiveness;
 effect-check is a SEPARATE crate, out of scope). **`selfhost/types.sentinel`, the
@@ -26,8 +26,10 @@ rendered via a struct-name blob) + **arrays (4c-2)** (lit + index + the
 generic-builtin `(targs T)` mechanism for `len`) + **nullable (4c-3)** (`?T` + `null`
 + the implicit `T → ?T` widening, `widen-null`) + **secret (4d)** (`secret T` +
 `declassify` + the `T → secret T` widening `widen-secret` + the secret-preserving
-operators — `secret == secret → secret bool`) emitting the `snc types` dump
-byte-for-byte; **matches the oracle on 66 corpus fixtures + 35 seeds**
+operators — `secret == secret → secret bool`) + **enum/match (4e)** (enum decls + the
+`Enum::Variant` → `enum-construct` split with `variant_index` + `match` with payload
+`(bind #vid name ty)` binding + the wildcard) emitting the `snc types` dump
+byte-for-byte; **matches the oracle on 67 corpus fixtures + 40 seeds**
 (`sentinel_typer_matches_oracle_on_seeds`), leak-free. ⚠ **D3 REFINED →
 self-contained** (NOT module-reuse of resolve): resolve's `RCtx` can't be extended
 with type fields across a module boundary, so `types.sentinel` is one clean `TyCtx`
@@ -47,9 +49,14 @@ SECRET (A7) reused that machinery wholesale** — the widen generalised over `?T
 4) + `secret T` (kind 3) via one `widen_kind` (the ` :T` suffix needs no kind — it
 renders from `exp`); `declassify` strips a secret layer (`strip_secret`); cmp/logic
 yield `secret bool` on a secret operand (arithmetic propagates FOR FREE via `resty =
-lt`; mixed public+secret is a `Mismatch`, oracle-rejected). NEXT = **(4e) enum/match**
-(variant-construction typing + match-arm payload binding + `variant_index`), then (4f)
-class/method-dispatch, …
+lt`; mixed public+secret is a `Mismatch`, oracle-rejected). **(4e) ENUM/MATCH (A8)**
+added the enum + flat variant tables (names in `snb`, payload types in a `varpay`
+slice; Enum interner kind 7), the `Qcall`→`enum-construct` split (`variant_index` +
+`:Enum`), and `match` (scrutinee `EnumId`, per-arm `variant_index` + payload-typed
+`(bind …)` scoped via `truncate_scope`, the wildcard, `exp` threaded to arm bodies).
+NEXT = **(4f) classes/traits/impls** (the method-dispatch split `MethodCall` vs
+`ImplMethodCall`, `ClassInit`, `self` typing, the `QualifiedCall` check), then (4g)
+effects, (4h) generics, (4i) the full-corpus phase-go.
 **(4a) shipped the ORACLE + de-risked the Sentinel build:** `snc types <file>`
 (driver `run_types` + `types_dump.rs`, parse → resolve → `check` → dump) emits the
 `snc resolve` S-expr form **extended with each expression node's inferred `Type`** (a
