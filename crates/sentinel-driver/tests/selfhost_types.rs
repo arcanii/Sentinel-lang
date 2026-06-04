@@ -127,6 +127,10 @@ const SEEDS: &[&str] = &[
     "trait Sh { fn m(self: &Self) -> i64; }\nclass C { let v: i64; pub init() { self.v = 7; 0 } }\nimpl as Sh for C { fn m(self: &Self) -> i64 { self.v } }\nfn main() -> i64 { let c: C = C::init(); c.m() }\n",
     "trait W { fn w(self: &mut Self, n: i64) -> i64; }\nclass B { let v: i64; pub init() { self.v = 0; 0 } }\nimpl Add as W for B { fn w(self: &mut Self, n: i64) -> i64 { self.v = self.v + n; self.v } }\nfn main() -> i64 { let mut b: B = B::init(); Add::w(&mut b, 9) }\n",
     "fn main() -> i64 { let x: i64 = 5; let r: &i64 = &x; *r }\n",
+    // (4f-delegate) a `delegate f: T to Tr` synthesises a forwarding `impl _ as Tr for
+    // C` whose method forwards to `self.f.m(args)` (a dispatch on the delegate field);
+    // the synth impl's ImplId + VarIds continue after the user impls (group D).
+    "trait W { fn w(self: &mut Self, n: i64) -> i64; }\nclass Inner { let v: i64; pub init() { self.v = 0; 0 } }\nimpl as W for Inner { fn w(self: &mut Self, n: i64) -> i64 { self.v = self.v + n; self.v } }\nclass Outer { delegate inner: Inner to W; pub init(i: Inner) { self.inner = i; 0 } }\nfn main() -> i64 { let x: Inner = Inner::init(); let mut o: Outer = Outer::init(x); o.w(42) }\n",
 ];
 
 #[test]
