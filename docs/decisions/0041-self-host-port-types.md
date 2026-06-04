@@ -242,6 +242,38 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
     a fixture demands it. **Next: (4d) secret** (`WidenToSecret` + the secret-preserving
     operator rules + `declassify`) — reuses this exact widen-threading machinery for the
     `T → secret T` coercion.
+- **A7 — (4d) secret typing LANDED; the widen machinery generalised + the
+  secret-preserving operators + `declassify`.** **Matches `snc types` byte-for-byte on
+  66 corpus fixtures** (up from 61 — the +5 are every clean secret fixture:
+  `c31_secret_typing` / `c31_go_no_go` / `c52_secret_ct` / `c53_ct_eq` /
+  `c52_secret_leak` — the last exercising secret `&&`), **+ 35 seeds** (+5 secret),
+  **leak-free across all 66**, **zero regressions** vs the 4c-3 baseline. As foreseen,
+  it reused the 4c-3 expected-type-threading wholesale — the `secret T` annotation
+  already rendered (kind 3, like `?T` rendered pre-4c-3), and `WidenToSecret` is the
+  same coercion shape as `WidenToNullable`.
+  - **The widen generalised over BOTH coercions.** `want_widen`/`exp_nullable`
+    collapsed into one **`widen_kind(exp, nt) → 0|1|2`** (0 none / 1 `widen-null`,
+    `?T` kind 4 / 2 `widen-secret`, `secret T` kind 3 — both store the inner `T` in
+    payload A). `widen_pre` emits the matching prefix; **`widen_post`/`widen_splice`
+    were untouched** — `close_ty` renders the ` :?T` / ` :secret T` suffix from `exp`
+    itself, so the suffix needs no kind. So every threading point (`let` / field / fn
+    return / `if`-branch / cmp-operand) now does secret widening for free; in the
+    corpus secret only widens at `let` values (`let pw: secret i64 = 42`).
+  - **The secret-preserving operators (D5b).** A key simplification fell out of ADR
+    0019's rule that **mixed public+secret operands are a `Type::Mismatch`** (rejected
+    upstream → oracle-skipped): in a clean fixture both operands share secrecy, so
+    **arithmetic needs NO change** — `resty = lt` already carries the secret (`secret
+    i64 + secret i64` → `lt` = `secret i64`). Only **cmp/logic** changed: `secret
+    operand → secret bool` (`mk_secret(2)` when `is_secret(lt)`, else `bool`). So
+    `secret == secret : secret bool`, `secret && secret : secret bool`. New helpers
+    `is_secret` + `strip_secret`.
+  - **`declassify` (D6).** A new `Declassify` arm: `(declassify <inner :secret T> :T)`
+    — synthesize the inner with no expectation, the node's type = `strip_secret(inner)`.
+    In the corpus `declassify`'s result never lands in a widen position, so it is
+    direct-emit (no wrapper). **The C3.1b CT-rejections** (`SecretBranch`,
+    `SecretInRefDeref`, `SecretDivisor`) are type ERRORS → oracle-rejected → out of
+    scope (D7), exactly as planned. **Next: (4e) enum/match** (variant-construction
+    typing + match-arm payload binding + the `variant_index`).
 
 ## Context
 

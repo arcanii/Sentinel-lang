@@ -16,7 +16,7 @@ next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (4/N) TYPES is OPEN; ADR
 0041 → ACCEPTED-WITH-AMENDMENTS; (4a) oracle + probes + (4b) m-1 SCALAR + (4c-1/4c-2)
-STRUCTS + ARRAYS + (4c-3) NULLABLE (A1–A6) LANDED.** Types is the **biggest/hardest
+STRUCTS + ARRAYS + (4c-3) NULLABLE + (4d) SECRET (A1–A7) LANDED.** Types is the **biggest/hardest
 port stage** (the Rust `sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish
 inference, method/trait dispatch, secret-type propagation, match exhaustiveness;
 effect-check is a SEPARATE crate, out of scope). **`selfhost/types.sentinel`, the
@@ -24,8 +24,10 @@ FOURTH Sentinel stage**, type-checks the SCALAR grammar (m-1) + **structs (4c-1)
 (decl tables + struct-lit + field-access `field_index`, the `Struct` interner kind
 rendered via a struct-name blob) + **arrays (4c-2)** (lit + index + the
 generic-builtin `(targs T)` mechanism for `len`) + **nullable (4c-3)** (`?T` + `null`
-+ the implicit `T → ?T` widening, `widen-null`) emitting the `snc types` dump
-byte-for-byte; **matches the oracle on 61 corpus fixtures + 30 seeds**
++ the implicit `T → ?T` widening, `widen-null`) + **secret (4d)** (`secret T` +
+`declassify` + the `T → secret T` widening `widen-secret` + the secret-preserving
+operators — `secret == secret → secret bool`) emitting the `snc types` dump
+byte-for-byte; **matches the oracle on 66 corpus fixtures + 35 seeds**
 (`sentinel_typer_matches_oracle_on_seeds`), leak-free. ⚠ **D3 REFINED →
 self-contained** (NOT module-reuse of resolve): resolve's `RCtx` can't be extended
 with type fields across a module boundary, so `types.sentinel` is one clean `TyCtx`
@@ -40,10 +42,14 @@ param, `-1` = none — never a SEPARATE mutually-recursive consumer, which leake
 Move-enum it destructured; the reusable Sentinel finding in A6). Leaves widen inline
 (`widen_pre`/`widen_post`); `Binary` builds in a temp then `widen_splice`s the
 wrapper; `null` types from `exp`; `If`/`Block` thread `exp`; threading points = fn
-return / `let` annotation (`tyopt_exp`) / struct field / `==`/`!=` operand. NEXT =
-**(4d) secret** (`WidenToSecret` + the secret-preserving operator rules +
-`declassify` — reuses the 4c-3 widen-threading machinery for `T → secret T`), then
-(4e) enum/match, (4f) class/method-dispatch, …
+return / `let` annotation (`tyopt_exp`) / struct field / `==`/`!=` operand. **(4d)
+SECRET (A7) reused that machinery wholesale** — the widen generalised over `?T` (kind
+4) + `secret T` (kind 3) via one `widen_kind` (the ` :T` suffix needs no kind — it
+renders from `exp`); `declassify` strips a secret layer (`strip_secret`); cmp/logic
+yield `secret bool` on a secret operand (arithmetic propagates FOR FREE via `resty =
+lt`; mixed public+secret is a `Mismatch`, oracle-rejected). NEXT = **(4e) enum/match**
+(variant-construction typing + match-arm payload binding + `variant_index`), then (4f)
+class/method-dispatch, …
 **(4a) shipped the ORACLE + de-risked the Sentinel build:** `snc types <file>`
 (driver `run_types` + `types_dump.rs`, parse → resolve → `check` → dump) emits the
 `snc resolve` S-expr form **extended with each expression node's inferred `Type`** (a
