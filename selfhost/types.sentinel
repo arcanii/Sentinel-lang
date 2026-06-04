@@ -303,6 +303,9 @@ fn mk_tparam(c: &mut TyCtx, idx: i64) -> i64 { intern_type(c, 9, idx, 0) }
 // (4i) a growable `Vec<T>` handle (interner kind 11; a = element type handle);
 // renders `Vec<T>`. The D.3 collections type — distinct from `[T]` (kind 1).
 fn mk_vec(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 11, elem, 0) }
+// (4i) a `Task<T>` handle (interner kind 12; a = the spawned result type); renders
+// `Task<T>`. The C4.4 structured-concurrency type (`spawn e → Task<U>`).
+fn mk_task(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 12, elem, 0) }
 
 // --- (4h) type-param scope --------------------------------------------------
 
@@ -642,6 +645,11 @@ fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
         } else if k == 11 {
             // (4i) Vec<T>: `Vec<` + element + `>`.
             append_str(out, "Vec<");
+            render_type(out, a, c);
+            push(out, '>')
+        } else if k == 12 {
+            // (4i) Task<T>: `Task<` + result type + `>`.
+            append_str(out, "Task<");
             render_type(out, a, c);
             push(out, '>')
         } else {
@@ -1875,6 +1883,21 @@ fn vec_elem_of(c: &mut TyCtx, h: i64) -> i64 {
     }
 }
 
+// (4i) the result type of a `Task<T>` handle (kind 12), or i64 default — the type
+// `t.await` yields.
+fn task_elem_of(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 12 {
+            (*c).ta[idx]
+        } else {
+            0
+        }
+    }
+}
+
 // The inner type of a nullable handle (kind 4), or i64 default.
 fn nullable_inner_of(c: &mut TyCtx, h: i64) -> i64 {
     if h < tbase() {
@@ -2582,8 +2605,35 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             close_ty(out, saty, c);
             widen_post(out, w, exp, saty, c)
         },
-        // The remaining Expr variants (Scope/Spawn/Await) land with the (4i) concurrency
-        // slice. A defensive catch-all keeps the match exhaustive.
+        // (4i) `scope concurrent { block }` → `(scope <block :T> :T)`: the scope's value
+        // IS the block's tail, so thread the expectation `exp` through (a `?T`-typed
+        // scope widens its tail). Discharges the Async effect (effect-check is D1, out of
+        // scope), so the type is just the body type.
+        Expr::Scope(sbody) => {
+            append_str(out, "(scope ");
+            let sct: i64 = dump_texpr(out, sbody, exp, src, c, gb);
+            close_ty(out, sct, c);
+            sct
+        },
+        // (4i) `spawn <call>` → `(spawn <inner :U> :Task<U>)`: spawn wraps the spawned
+        // expression's type U in a `Task`.
+        Expr::Spawn(scall) => {
+            append_str(out, "(spawn ");
+            let spt: i64 = dump_texpr(out, scall, 0 - 1, src, c, gb);
+            let tkt: i64 = mk_task(c, spt);
+            close_ty(out, tkt, c);
+            tkt
+        },
+        // (4i) `<target>.await` → `(await <target :Task<U>> :U)`: await joins the task +
+        // yields its result type U (the Task's element).
+        Expr::Await(aw) => {
+            append_str(out, "(await ");
+            let awt: i64 = dump_texpr(out, aw, 0 - 1, src, c, gb);
+            let awr: i64 = task_elem_of(c, awt);
+            close_ty(out, awr, c);
+            awr
+        },
+        // A defensive catch-all keeps the match exhaustive (no Expr variants remain).
         _ => {
             append_str(out, "(UNHANDLED");
             close_ty(out, 0, c);
@@ -3292,9 +3342,13 @@ fn scan_cmethod(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut 
     0
 }
 
-// PASS-1.5 delegate scan: `delegate name : T to Trait ;` → (1) a class FIELD added to
-// the class-field table (so `self.name` resolves in init + the synth body) + (2) a
-// delegate record driving the synthesised forwarding impl (group D).
+// PASS-1.5 delegate scan: `delegate name : T to Trait ;` records a delegate record
+// driving the synthesised forwarding impl (group D). ⚠ (4i) the class FIELD + its
+// index (`dgfx`) are NOT registered here — they are APPENDED after `scan_cmem_loop`
+// (`register_delegate_fields`), so the delegate field comes AFTER all regular fields
+// regardless of source order (the oracle buckets regular fields first, delegates
+// last — c4_go_no_go declares `delegate` BEFORE a `let`). dgfx therefore lags dgcid
+// until that post-pass (nothing reads it until pass 2's synthesis).
 fn scan_cdelegate(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, cid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     *cur = *cur + 1;             // skip `delegate`
     let fn_s: i64 = (*s)[*cur];
@@ -3308,36 +3362,51 @@ fn scan_cdelegate(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mu
     let tr_e: i64 = (*e)[*cur];
     *cur = *cur + 1;             // skip trait name
     *cur = *cur + 1;             // skip `;`
-    // the delegate field's index = the current count of fields for this class.
-    let nf: i64 = len((*c).clfo);
-    let mut fi: i64 = 0;
-    let mut fcount: i64 = 0;
-    while fi < nf {
-        if (*c).clfo[fi] == cid {
-            fcount = fcount + 1;
-            0
-        } else {
-            0
-        };
-        fi = fi + 1;
-    }
-    let bst: i64 = len((*c).snb);
-    let mut bi: i64 = fn_s;
-    while bi < fn_e {
-        push(&mut (*c).snb, (*src)[bi]);
-        bi = bi + 1;
-    }
-    push(&mut (*c).clfo, cid);
-    push(&mut (*c).clfs, bst);
-    push(&mut (*c).clfe, bst + (fn_e - fn_s));
-    push(&mut (*c).clft, fth);
     push(&mut (*c).dgcid, cid);
     push(&mut (*c).dgfs, fn_s);
     push(&mut (*c).dgfe, fn_e);
-    push(&mut (*c).dgfx, fcount);
     push(&mut (*c).dgft, fth);
     push(&mut (*c).dgts, tr_s);
     push(&mut (*c).dgte, tr_e);
+    0
+}
+
+// (4i) Append the delegate fields for delegate records `[dg0, dg1)` (the ones added
+// by THIS class's `scan_cmem_loop`) to the class-field table — AFTER all its regular
+// `let` fields — and push each field's index into `dgfx` (which stayed aligned with
+// `dgcid` across classes, since each class appends its delegate fields contiguously).
+fn register_delegate_fields(c: &mut TyCtx, src: &[u8], cid: i64, dg0: i64, dg1: i64) -> i64 {
+    let mut di: i64 = dg0;
+    while di < dg1 {
+        let dfs: i64 = (*c).dgfs[di];
+        let dfe: i64 = (*c).dgfe[di];
+        let dft: i64 = (*c).dgft[di];
+        // the field index = the current count of fields already registered for `cid`.
+        let nf: i64 = len((*c).clfo);
+        let mut fi: i64 = 0;
+        let mut fcount: i64 = 0;
+        while fi < nf {
+            if (*c).clfo[fi] == cid {
+                fcount = fcount + 1;
+                0
+            } else {
+                0
+            };
+            fi = fi + 1;
+        }
+        let bst: i64 = len((*c).snb);
+        let mut bi: i64 = dfs;
+        while bi < dfe {
+            push(&mut (*c).snb, (*src)[bi]);
+            bi = bi + 1;
+        }
+        push(&mut (*c).clfo, cid);
+        push(&mut (*c).clfs, bst);
+        push(&mut (*c).clfe, bst + (dfe - dfs));
+        push(&mut (*c).clft, dft);
+        push(&mut (*c).dgfx, fcount);
+        di = di + 1;
+    }
     0
 }
 
@@ -3345,7 +3414,12 @@ fn scan_class_members(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: 
     let mut cur: i64 = p1 + 1;   // skip `class`
     cur = cur + 1;               // skip name
     cur = cur + 1;               // skip `{`
-    scan_cmem_loop(k, s, e, src, &mut cur, cid, c, gb)
+    // (4i) scan regular fields/methods/init + record delegate metadata, THEN append the
+    // delegate fields after all regular fields (the oracle's field order).
+    let dg0: i64 = len((*c).dgcid);
+    scan_cmem_loop(k, s, e, src, &mut cur, cid, c, gb);
+    let dg1: i64 = len((*c).dgcid);
+    register_delegate_fields(c, src, cid, dg0, dg1)
 }
 
 fn scan_cmem_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, cid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {

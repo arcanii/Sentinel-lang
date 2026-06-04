@@ -169,6 +169,12 @@ const SEEDS: &[&str] = &[
     "fn build() -> Vec<i64> { let mut v: Vec<i64> = vec_new(); push(&mut v, 1); v }\nfn main() -> i64 { let w: Vec<i64> = build(); len(w) }\n",
     "fn main() -> i64 { let mut s: String = vec_new(); push(&mut s, 'h'); let a: [u8] = vec_to_array(s); len(a) }\n",
     "fn main() -> i64 { let d: [u8] = read_file(\"x\"); len(d) }\n",
+    // (4i) concurrency (C4.4): `scope concurrent { … }` → the block's tail type,
+    // `spawn e` → `Task<U>` (interner kind 12), `t.await` → the Task's element U.
+    "fn dbl(x: i64) -> i64 ! { Async } { x * 2 }\nfn main() -> i64 { let r: i64 = scope concurrent { let t = spawn dbl(21); t.await }; r }\n",
+    // (4i) a `delegate` field declared BEFORE a regular `let` field: the oracle orders
+    // regular fields first (tag=0), delegate fields last (inner=1) regardless of source.
+    "trait W { fn w(self: &Self) -> i64; }\nclass Inner { let v: i64; pub init() { self.v = 0; 0 } }\nimpl as W for Inner { fn w(self: &Self) -> i64 { self.v } }\nclass Outer { delegate inner: Inner to W; let tag: i64; pub init(i: Inner) { self.inner = i; self.tag = 7; 0 } pub fn t(self: &Self) -> i64 { self.tag } }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]
@@ -210,6 +216,84 @@ fn sentinel_typer_matches_oracle_on_seeds() {
         "the Sentinel typer diverged from `snc types` on {}/{} seed(s):\n{}",
         mismatches.len(),
         SEEDS.len(),
+        mismatches.join("\n")
+    );
+}
+
+/// Every `.sentinel` fixture under tests/pass + tests/ui, sorted.
+fn collect_fixtures() -> Vec<PathBuf> {
+    let root = workspace_root();
+    let mut fixtures = Vec::new();
+    for sub in ["tests/pass", "tests/ui"] {
+        for entry in std::fs::read_dir(root.join(sub)).expect("read fixture dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) == Some("sentinel") {
+                fixtures.push(path);
+            }
+        }
+    }
+    fixtures.sort();
+    fixtures
+}
+
+/// (4i) the D9 PHASE-GO: the Sentinel typer matches `snc types` byte-for-byte over
+/// the ENTIRE clean-typing corpus (every tests/pass + tests/ui fixture the oracle
+/// accepts). Mirrors `sentinel_resolver_matches_oracle_on_corpus`. Fixtures the oracle
+/// rejects (parse-/resolve-/type-error fixtures) are skipped — type-error parity is
+/// out of scope (ADR 0041 D7), as with the parser/resolve corpus differentials.
+#[test]
+fn sentinel_typer_matches_oracle_on_corpus() {
+    let tmp =
+        std::env::temp_dir().join(format!("snc_selfhost_types_corpus_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let typer = build_sentinel_typer(&tmp);
+
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+
+    let fixtures = collect_fixtures();
+    assert!(fixtures.len() > 100, "expected a substantial corpus, got {}", fixtures.len());
+
+    let mut clean = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+    for fixture in &fixtures {
+        let bytes = std::fs::read(fixture).expect("read fixture");
+        std::fs::write(&input, &bytes).expect("stage input");
+
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("types")
+            .arg(&input)
+            .output()
+            .expect("run snc types");
+        // Skip fixtures the oracle rejects (parse-/resolve-/type-error fixtures).
+        if !oracle.status.success() {
+            continue;
+        }
+        clean += 1;
+
+        let sentinel = Command::new(&typer)
+            .current_dir(&work)
+            .output()
+            .expect("run the Sentinel typer");
+
+        if oracle.stdout != sentinel.stdout {
+            mismatches.push(format!(
+                "  {} (oracle {} bytes vs sentinel {} bytes)",
+                fixture.file_name().unwrap().to_string_lossy(),
+                oracle.stdout.len(),
+                sentinel.stdout.len()
+            ));
+        }
+    }
+
+    assert!(clean > 100, "expected >100 clean-typing fixtures, got {clean}");
+    assert!(
+        mismatches.is_empty(),
+        "the Sentinel typer diverged from `snc types` on {}/{} clean-typing fixture(s):\n{}",
+        mismatches.len(),
+        clean,
         mismatches.join("\n")
     );
 }
