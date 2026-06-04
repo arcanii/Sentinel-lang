@@ -155,6 +155,12 @@ const SEEDS: &[&str] = &[
     "fn count<T>(a: [T]) -> i64 { len(a) }\nfn main() -> i64 { count([1, 2, 3]) }\n",
     "fn first_or<T>(x: ?T, d: T) -> T { unwrap_or(x, d) }\nfn main() -> i64 { let a: ?i64 = 9; first_or(a, 0) }\n",
     "fn snd<A, B>(a: A, b: B) -> B { b }\nfn main() -> i64 { let r: bool = snd(1, true); if r { 1 } else { 0 } }\n",
+    // (4i) char + string literals: `'c'` → `(char N :u8)` (the decoded byte), `\"…\"` →
+    // `(str b0 b1 … :[u8])` (a string IS a `[u8]`), with char comparison, `len`, and
+    // a string index + char-eq.
+    "fn dig(c: u8) -> bool { c >= '0' }\nfn main() -> i64 { if dig('5') { 1 } else { 0 } }\n",
+    "fn main() -> i64 { let s: [u8] = \"hello\"; len(s) }\n",
+    "fn main() -> i64 { let s: [u8] = \"hi\"; if s[0] == 'h' { 1 } else { 0 } }\n",
 ];
 
 #[test]

@@ -2482,9 +2482,36 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             close_ty(out, rt, c);
             rt
         },
-        // The remaining Expr variants (Char/Str/Method/Qcall/ClassInit/Match/
-        // Perform/Scope/Spawn/Await/Handle) land at 4e..4g. A defensive catch-all
-        // keeps the match exhaustive.
+        // (4i) char literal `'c'` → `(char N :u8)` (the decoded byte value, ADR 0033 D2:
+        // `u8`). Widens like the other scalar leaves (a `secret u8` / `?u8` context).
+        Expr::Char(cv) => {
+            let w: bool = widen_pre(out, exp, 3, c);
+            append_str(out, "(char ");
+            append_int(out, cv);
+            close_ty(out, 3, c);
+            widen_post(out, w, exp, 3, c)
+        },
+        // (4i) string literal `"…"` → `(str b0 b1 … :[u8])` (the decoded bytes, ADR 0033
+        // D2: a string IS a `[u8]`). ⚠ `sb` is an owned `[u8]` only INDEXED in the byte
+        // loop → `sink_name` it (by value) after, else it leaks (the parser's
+        // `dump_str_body` lesson).
+        Expr::Str(sb) => {
+            let saty: i64 = mk_array(c, 3);
+            let w: bool = widen_pre(out, exp, saty, c);
+            append_str(out, "(str");
+            let slen: i64 = len(sb);
+            let mut sbi: i64 = 0;
+            while sbi < slen {
+                push(out, ' ');
+                append_int(out, u8_to_i64(sb[sbi]));
+                sbi = sbi + 1;
+            }
+            sink_name(gb, sb);
+            close_ty(out, saty, c);
+            widen_post(out, w, exp, saty, c)
+        },
+        // The remaining Expr variants (Scope/Spawn/Await) land with the (4i) concurrency
+        // slice. A defensive catch-all keeps the match exhaustive.
         _ => {
             append_str(out, "(UNHANDLED");
             close_ty(out, 0, c);
