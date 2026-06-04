@@ -1,9 +1,15 @@
 # ADR 0041: Phase D self-host port — (4/N) types-in-Sentinel
 
-Status: **ACCEPTED-WITH-AMENDMENTS** — the fourth sub-phase of the self-host port
+Status: **ACCEPTED** — the fourth sub-phase of the self-host port
 (ADR 0031 D5 / ADR 0038 D9), after the lexer (1/N), the parser (2/N, ADR 0039 →
-ACCEPTED), and resolve (3/N, ADR 0040 → ACCEPTED). **(4a) has landed: the `snc types`
-oracle + the two design probes (A1) are settled + empirically verified.** Ports the
+ACCEPTED), and resolve (3/N, ADR 0040 → ACCEPTED). **COMPLETE (A1–A13): every types
+feature is ported and the (4i) D9 phase-go is GREEN** — `selfhost/types.sentinel`
+matches `snc types` byte-for-byte over the ENTIRE clean-typing corpus (123/123
+fixtures, `sentinel_typer_matches_oracle_on_corpus`), leak-free, after (4a–4h)
+[scalar → structs/arrays → nullable → secret → enum/match → classes/traits/impls →
+effects/handlers → generics] and (4i) [char/string literals, `Vec<T>` typing, the
+`String` alias, concurrency `scope`/`spawn`/`.await`+`Task<T>`, a delegate-field-order
+fix, and the phase-go test]. Ports the
 **types** stage to Sentinel: the
 name-resolved program → a **type-checked program** (every expression node carrying
 its inferred `Type`, the parser/resolver's remaining syntactic ambiguity resolved
@@ -469,6 +475,48 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
     tolerated by the compiler but was removed for hygiene. **Next: (4i)** the full-corpus
     phase-go (D9) — wire `sentinel_typer_matches_oracle_on_corpus` over the clean-typing
     set, mirroring the resolve corpus differential, and converge.
+
+- **A13 — (4i) the full-corpus phase-go LANDED; ADR 0041 → ACCEPTED, the TYPES STAGE
+  is COMPLETE.** The Sentinel typer matches `snc types` BYTE-FOR-BYTE over the ENTIRE
+  clean-typing corpus — **123/123 fixtures** (`sentinel_typer_matches_oracle_on_corpus`,
+  the D9 phase-go), leak-free (full `leaks --atExit` sweep 123/123), 0 regressions. The
+  18 skipped fixtures are oracle-REJECTED (parse-/resolve-/type-error — type-error parity
+  is out of scope, D7, as with the parser/resolve corpus differentials). Built in three
+  feat increments closing the 8 fixtures that diffed through (4h):
+  - **(4i-1) char + string literals** (`26fb029`): the two missing leaf-literal arms in
+    `dump_texpr` (were in the `_ =>` catch-all → `(UNHANDLED :i64)`). `Char(cv)` →
+    `(char N :u8)` (the decoded byte); `Str(sb)` → `(str b… :[u8])` (a string IS a `[u8]`;
+    ⚠ `sink_name` the owned `[u8]` after the byte loop — the parser's `dump_str_body`
+    lesson). Fixed `c5d2_strings` + `c5d5_break_continue` (115 → 117).
+  - **(4i-2) `Vec<T>` typing** (`cf1d070`): the D.3 collection as a first-class generic
+    builtin. Interner **kind 11 `Vec`** (`mk_vec`) → `Vec<T>`; `array_elem_of` extended to
+    strip BOTH `[T]` (k1) and `Vec<T>` (k11) so `len`/`v[i]` work over both; `vec_elem_of`
+    for the Vec ops. `type_of_typeexpr`: `Vec<T>` → `mk_vec`, **`String` = the built-in
+    `Vec<u8>` alias** (ADR 0034 — the oracle desugars it, rendering `Vec<u8>`; a type-param
+    named `String` shadows it). The generic-builtin path extended with vec_new (#7, T from
+    the EXPECTED type — it has no args, so `dump_gcall` now threads `exp`), push (#8) + pop
+    (#9) (`&mut Vec<T>` → `strip_ref` then vec elem), vec_to_array (#10, `Vec<T> → [T]`);
+    `builtin_ret`: read_file (#11) → `[u8]`. Fixed `c5d3_collections`, `c5d5_loops`,
+    `c5d4_file_io`, `selfhost_ast_drop` (117 → 121).
+  - **(4i-3) concurrency + a delegate-field-order fix + the phase-go test** (`05892f4`):
+    (a) the **Scope/Spawn/Await** arms (were in the catch-all) + interner **kind 12 `Task`**
+    (`mk_task`) → `Task<T>`: `scope concurrent { … }` → the block's tail type (exp threaded
+    so a `?T`-typed scope widens its tail), `spawn e` → `Task<U>`, `t.await` →
+    `task_elem_of` (the Task's element) — fixes `c44_go_no_go`. (b) **delegate field
+    order**: the oracle buckets a class's regular fields FIRST, delegate fields LAST
+    (regardless of source order), but `scan_cdelegate` registered the field at its source
+    position → swapped indices when a `delegate` precedes a `let` (`c4_go_no_go`:
+    `delegate inner` before `let log_count` gave inner=0/log_count=1 vs the oracle's
+    log_count=0/inner=1). Fix: `scan_cdelegate` records only the delegate METADATA;
+    `register_delegate_fields` APPENDS the field (+ its `dgfx` index) after
+    `scan_cmem_loop` — so regular fields always precede delegate fields (`dgfx` lags
+    `dgcid` until that post-pass; nothing reads it until pass-2 synthesis). No change for
+    a delegate-after-fields class. (c) the phase-go test (mirrors
+    `sentinel_resolver_matches_oracle_on_corpus`).
+  - **Next: (5/N) — the next self-host stage** (ADR 0038 D5: lexer → parser → resolve →
+    types → HIR/MIR → codegen; the remaining analysis passes borrow-check / effect-check
+    are separate crates). The specific next stage warrants its own kickoff ADR (the
+    cadence of 0039/0040/0041).
 
 ## Context
 

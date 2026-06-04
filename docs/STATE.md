@@ -14,9 +14,14 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (4/N) TYPES is OPEN; ADR
-0041 → ACCEPTED-WITH-AMENDMENTS; (4a) oracle + probes + (4b) m-1 SCALAR + (4c-1/4c-2)
-STRUCTS + ARRAYS + (4c-3) NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g) EFFECTS/HANDLERS + (4h) GENERICS (A1–A12) LANDED — every types feature is now ported; only (4i) the full-corpus phase-go remains.** Types is the **biggest/hardest
+Last updated: **Phase D movement 2 — the SELF-HOST PORT — (4/N) TYPES is COMPLETE;
+ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
+NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g)
+EFFECTS/HANDLERS + (4h) GENERICS + (4i) CHAR/STRING + Vec<T> + CONCURRENCY + THE
+FULL-CORPUS PHASE-GO (A1–A13) ALL LANDED.** `selfhost/types.sentinel` matches `snc
+types` byte-for-byte over the ENTIRE clean-typing corpus (**123/123 fixtures**,
+`sentinel_typer_matches_oracle_on_corpus`), leak-free, 0 regressions — the 4th Sentinel
+stage is DONE; next is **(5/N)** the next self-host stage (ADR 0038 D5). Types is the **biggest/hardest
 port stage** (the Rust `sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish
 inference, method/trait dispatch, secret-type propagation, match exhaustiveness;
 effect-check is a SEPARATE crate, out of scope). **`selfhost/types.sentinel`, the
@@ -81,8 +86,18 @@ call (`dump_generic_call` dumps args to a temp + captures types, unifies declare
 structurally, emits `(targs …)`, returns `subst_type` of the declared return) + generic
 struct-lit/field-access **substitution** (the field type substituted by the instance's
 type-args). +7 → **115 corpus fixtures** (the six c17 + a bonus `c25_generic_struct_array_drop`),
-leak-free, 0 regressions. **Every types feature is now ported.** NEXT = (4i) the
-full-corpus phase-go (D9 — wire `sentinel_typer_matches_oracle_on_corpus`, converge).
+leak-free, 0 regressions. **(4i) THE FULL-CORPUS PHASE-GO (A13)** closed the stage —
+three feat increments fixing the last 8 diffs: **char/string literals** (the `Char`→`u8`
++ `Str`→`[u8]` `dump_texpr` arms; +c5d2/c5d5_break_continue → 117), **`Vec<T>` typing**
+(interner kind 11 + `vec_new`/`push`/`pop`/index/`len`/`vec_to_array` + the `String` =
+`Vec<u8>` alias + `read_file`→`[u8]`; +c5d3/c5d5_loops/c5d4/selfhost_ast_drop → 121),
+and **concurrency + a delegate-field-order fix** (kind 12 `Task<T>` + `scope`/`spawn`/
+`.await`; the oracle buckets regular fields before delegate fields → `register_delegate_fields`
+appends delegate fields after `scan_cmem_loop`; +c44/c4 → 123). Wired
+`sentinel_typer_matches_oracle_on_corpus` (the D9 phase-go) → **123/123 clean-typing
+fixtures match, leak-free. ADR 0041 → ACCEPTED; the TYPES stage is COMPLETE.** NEXT =
+**(5/N)** the next self-host stage (ADR 0038 D5: HIR/MIR → codegen; borrow-check /
+effect-check are separate crates — its own kickoff ADR, per the 0039/0040/0041 cadence).
 **(4a) shipped the ORACLE + de-risked the Sentinel build:** `snc types <file>`
 (driver `run_types` + `types_dump.rs`, parse → resolve → `check` → dump) emits the
 `snc resolve` S-expr form **extended with each expression node's inferred `Type`** (a
