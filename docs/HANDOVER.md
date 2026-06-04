@@ -1861,40 +1861,45 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 
 ### 0.3 Quick-status block for session start
 
-> **NEXT = (6/N) THE NEXT SELF-HOST STAGE.** **The EFFECT-CHECK stage (5/N, ADR 0042) is
-> COMPLETE — ADR 0042 → ACCEPTED.** `selfhost/effects.sentinel` matches `snc effects`
-> byte-for-byte over the ENTIRE clean-effect corpus — **122/122 fixtures**
-> (`sentinel_effect_checker_matches_oracle_on_corpus`, the D8 phase-go) + 5 seeds,
-> leak-free, 0 regressions. The port now has **lexer (1/N) + parser (2/N) + resolve
-> (3/N) + types (4/N) + effect-check (5/N)** all done — the entire front end + the two
-> analysis passes' first member, each differentially validated against the Rust `snc`.
+> **NEXT = (6/N) BORROW-CHECK — the `types.sentinel`→library refactor, then
+> `borrow.sentinel`.** **(6/N) is OPEN — ADR 0043 PROPOSED; the `snc borrow` oracle has
+> landed (`4ef657d`).** The port has **lexer + parser + resolve + types + effect-check**
+> all done + ACCEPTED (effect-check (5/N), ADR 0042, this session: `selfhost/effects.sentinel`
+> matches `snc effects` on 122/122 clean-effect fixtures — self-contained, i64-bitmask
+> effect rows, a precompute walk + the rebuild-per-sweep recursive fixed-point; the
+> Call-vs-kont split fell out of a fn-table miss, no scope needed).
 >
-> **(5/N) this session** (ADR 0042, owner-chosen over borrow-check/HIR-MIR/codegen — the
-> smallest stage since the lexer, 758 lines): the `snc effects` oracle (`8b55a5f`), the
-> D4 bitmask-fixed-point probe (A1), and `selfhost/effects.sentinel` (`fa1eeb6` — (5a)+(5b)
-> converged in one build). Each user fn's effective effect row = (its `! { … }`
-> annotation if non-empty) else the union of callees' rows + own perform/spawn/await,
-> minus handler/scope discharge → `(fn #<id> <name> <effect-name>…)`. **Self-contained**
-> (parser only); effect rows are **i64 bitmasks** (union `|`, discharge `& (mask ^ -1)`,
-> `bitof` for `2^eid` — no `~`/`<<`); a **precompute walk** records call-graph edges +
-> own-masks, the **rebuild-per-sweep fixed-point via recursion** is pure bit ops. ⚠ key
-> findings: **no scope machinery needed** (a `Call` whose callee misses the user-fn
-> table — a builtin or a kont `k` — yields no edge, the correct effect outcome, so the
-> resolve Call-vs-ResumeKont split falls out for free); `Handle` walks arms-first to get
-> the handled mask then the body with `disch|handled`; the `! { Async }` annotation
-> resolves to EffectId `len(efs)` (the built-in, not a user effect) via `src_eq_lit`.
+> **(6/N) borrow-check (owner-chosen over the transform half) is the BACK-HALF
+> INFLECTION:** unlike the self-contained front-end stages, it needs the **FULL typed
+> program** (its move analysis classifies every value Copy-vs-Move via the expr's type).
+> **The owner chose to REUSE `types.sentinel`** (refactor it to a reusable typed-program
+> library) over re-deriving inference. The output to port is the **`DropPlan.moved_sources`**
+> (per fn, the moved-from VarIds — codegen's drop-skip set); the `BorrowError`s are
+> rejections, OUT OF SCOPE (D5/D7, as always). The `snc borrow` oracle dumps
+> `(fn #<id> <name> #<vid>…)` per fn, exits nonzero on any error → skip rejects;
+> **123 clean-borrow fixtures** (= the full type-clean set; no borrow-error fixtures) are
+> the (6b) phase-go target. 4 goldens (`tests/borrow.rs`).
 >
-> **(6/N) is a fresh stage — its own kickoff ADR (the 0039/0040/0041/0042 cadence).** Per
-> ADR 0038 D5 the remaining stages are **borrow-check** (2227 lines — the other analysis
-> pass; produces the DropPlan/move analysis codegen consumes; a `snc borrow` dump of that
-> structure) and **HIR/MIR → codegen** (HIR thin at 101 lines, MIR 1134, codegen 8263 —
-> the transform toward the object + the bootstrap fixed-point). ⚠ The pick (borrow-check
-> next, continuing the analysis-pass order, vs jumping to the transform half) is a genuine
-> sequencing call — **decide with the owner**, as (5/N) was. The probe + data-model
-> approach carries over (flat pools / bitmasks / consuming-`match` walks; an analysis
-> pass dumps its computed structure + skips rejects, a transform dumps its lowered form).
-> No open in-flight slice — a clean stage boundary. The `/tmp/tb` build/run/leak workflow
-> + the four norms are unchanged (below).
+> **DO NEXT, in order (per ADR 0043 D3/D4/D6):**
+> 1. **(6a) the D3 probe + the `types.sentinel`→library refactor.** Refactor
+>    `types.sentinel` from a DUMPER into a reusable typed-program builder exposing its
+>    built `TyCtx` (env + interner) — ⚠ **behaviour-preserving**: re-run
+>    `sentinel_typer_matches_oracle_on_corpus` (123/123) + the leak sweep AFTER, BEFORE
+>    any borrow logic. Probe the reuse SHAPE: **lean (a)** FUSE the move-recording into
+>    types' existing pass-2 walk (it already threads the scope + VarId + env through every
+>    expr — recording a consuming Var use's VarId is a small side-output, exposed via a
+>    `pub` accessor; `borrow.sentinel` stays thin) vs **(b)** a separate re-walk over the
+>    exposed `TyCtx` (heavier — must replay the scope to map Var-uses→VarIds).
+> 2. **(6b) `selfhost/borrow.sentinel`** — the move-analysis UNION (a consuming Var use of
+>    a non-Copy binding → its VarId; field/index/`&`/`*` receivers are NON-consuming; the
+>    branch-merge is a plain UNION since moved-in-EITHER-branch ⇒ included, so NO per-path
+>    state — much simpler than the full borrow checker, the error state-machine is out of
+>    scope) + the dump; then the phase-go `sentinel_borrow_checker_matches_oracle_on_corpus`
+>    (D8) → ADR 0043 ACCEPTED. Copy/Move via the reused interner (scalars/refs/nullable-of-
+>    Copy = Copy; struct/array/Vec/enum/class/string/secret-of-compound = Move).
+>
+> Build/run/leak via `/tmp/tb` (stage `parser.sentinel` + `types.sentinel` +
+> `borrow.sentinel`; diff vs `snc borrow`). The four norms are unchanged (below).
 
 For pasting into a fresh chat to bootstrap context:
 

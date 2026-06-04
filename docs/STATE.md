@@ -29,8 +29,14 @@ recording call-graph edges + own-effect masks, the rebuild-per-sweep fixed-point
 recursion, handler/scope discharge) match `snc effects` byte-for-byte over the ENTIRE
 clean-effect corpus (**122/122 fixtures**, `sentinel_effect_checker_matches_oracle_on_corpus`),
 leak-free, 0 regressions; (5a)+(5b) converged in one build. The port now has **lexer +
-parser + resolve + types + effect-check** all done. NEXT = **(6/N)** the next self-host
-stage (ADR 0038 D5: borrow-check or HIR/MIR → codegen). Types is the **biggest/hardest
+parser + resolve + types + effect-check** all done. **(6/N) BORROW-CHECK is now OPEN —
+ADR 0043 PROPOSED** (owner-chosen over the transform half; ⚠ the BACK-HALF INFLECTION —
+borrow-check needs the FULL typed program for Copy/Move move-analysis, so the owner chose
+to REUSE `types.sentinel` [refactor it to a reusable typed-program library], not re-derive):
+the `snc borrow` oracle (`run_borrow` + `borrow_dump.rs`, dumping the `DropPlan.moved_sources`
+— the moved-from VarIds per fn) has landed; 123 clean-borrow fixtures are the (6b) phase-go
+target. NEXT = the `types.sentinel`→library refactor (D3 probe — behaviour-preserving on the
+123 types corpus) + `selfhost/borrow.sentinel`. Types is the **biggest/hardest
 port stage** (the Rust `sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish
 inference, method/trait dispatch, secret-type propagation, match exhaustiveness;
 effect-check is a SEPARATE crate, out of scope). **`selfhost/types.sentinel`, the
