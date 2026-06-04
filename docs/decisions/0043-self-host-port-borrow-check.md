@@ -18,6 +18,47 @@ to REUSE the typed program** (refactor `types.sentinel` to expose its computed o
 a reusable library) over re-deriving inference — setting the back-half's "share the typed
 program" foundation. **The REUSE MECHANICS are the central PROBE-GATED question (D3).**
 
+## Amendments
+
+- **A1 — (6a) D3 SCOUTED + SETTLED to FUSE (lean a); the precise build plan.** Studying
+  `sentinel-borrow-check` confirmed: `moved_sources` is recorded only at **`Var` nodes in
+  a CONSUMING position whose type is non-Copy** (`check_and_record_move(id, ty)`) — never
+  at temporaries (a `Call`/struct-lit result), and a field/index/method receiver + a
+  `&`/`&mut`/`*` operand are NON-consuming. The branch-merge is a plain **UNION** (moved in
+  either arm ⇒ included), so the moved-sources output needs **no per-path state** — far
+  simpler than the full borrow checker (the use-after-move state machine is out of scope,
+  D5). ⚠ **The move-recording MUST FUSE into types' `dump_texpr` walk** (lean a, not a
+  separate re-walk): a `Var`'s VarId is resolved by `sc_lookup` against the scope, and
+  match/handler-arm payload binds are assigned + truncated DURING that walk — a second walk
+  can't recover them (it'd re-assign different VarIds). So the move-recording rides the one
+  walk where scope + VarId + env are all live.
+  - **Mechanism (avoids threading a param through all 35 `dump_texpr` sites):** a TyCtx
+    field **`consuming: bool`** with SAVE/RESTORE at the ~12 positions that CHANGE it —
+    set FALSE around a Field/Index/Method receiver + a `&`/`&mut`/`*` operand + the
+    if/while condition; set TRUE around each call/struct-lit/array/enum-construct/perform
+    arg (the arg helpers `dump_targs`/`dump_sfields`/`dump_array_elems`/`dump_args_*`) +
+    a `let`/assign-RHS + the match scrutinee; INHERIT (leave) at if-branches, block tails,
+    match-arm bodies, scope/handle bodies. The `Var` arm: `if (*c).consuming { record_move(c,
+    vid) }`. **`dump_texpr` is otherwise UNTOUCHED → `snc types` stays byte-identical by
+    construction** (the recording is a pure side-effect; `consuming` never affects the dump).
+  - **`record_move(c, vid)`**: push `(curfn, vid)` into a side-table (`mvf`/`mvv`) iff
+    `curfn >= 0` (set only in `type_fn` — top-level fn bodies; methods aren't in
+    `program.fns`, so `curfn = -1` there → not recorded) AND **`is_move_type(env[vid])`**.
+    `is_move_type(h)`: scalars + Ref (kind 2) + Task (kind 12) = Copy; Secret (3) / Nullable
+    (4) follow their inner; Array/Struct/Enum/Class/TypeParam/Generic/Vec = Move. (No insert
+    dedup needed — the dump iterates VarIds ascending + tests membership, naturally deduped
+    + sorted to match the BTreeSet oracle.)
+  - **The reuse refactor:** `types.sentinel`'s `main` pipeline → a `pub fn build_program(…)
+    -> TyCtx` that runs passes 1/1.5/2 filling the ctx (incl. the type-dump buffer as a new
+    `out` FIELD + `mvf`/`mvv`); `main` = `let c = build_program(…); print(c.out)`.
+    `borrow.sentinel` (3-deep `use`: borrow→types→parser) = `let c = build_program(…);
+    print(dump_moves(c))` (`dump_moves` emits `(fn #<id> <name> #<vid>…)`). ⚠ verify a
+    by-value `TyCtx` return works (the ADR 0041 A1 D3 probe verified cross-module pub
+    struct/fn; returning a big struct is the new bit — probe if it balks).
+  - **⚠ DO IN ORDER:** (1) add the move computation to `types.sentinel` + verify `snc types`
+    123/123 byte-identical + leak-free (the side-effect is harmless); (2) the build_program
+    refactor (re-verify 123/123); (3) `borrow.sentinel` + `dump_moves` + the differential.
+
 ## Decision
 
 ### D1. Goal.

@@ -1881,22 +1881,28 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 > the (6b) phase-go target. 4 goldens (`tests/borrow.rs`).
 >
 > **DO NEXT, in order (per ADR 0043 D3/D4/D6):**
-> 1. **(6a) the D3 probe + the `types.sentinel`→library refactor.** Refactor
->    `types.sentinel` from a DUMPER into a reusable typed-program builder exposing its
->    built `TyCtx` (env + interner) — ⚠ **behaviour-preserving**: re-run
->    `sentinel_typer_matches_oracle_on_corpus` (123/123) + the leak sweep AFTER, BEFORE
->    any borrow logic. Probe the reuse SHAPE: **lean (a)** FUSE the move-recording into
->    types' existing pass-2 walk (it already threads the scope + VarId + env through every
->    expr — recording a consuming Var use's VarId is a small side-output, exposed via a
->    `pub` accessor; `borrow.sentinel` stays thin) vs **(b)** a separate re-walk over the
->    exposed `TyCtx` (heavier — must replay the scope to map Var-uses→VarIds).
-> 2. **(6b) `selfhost/borrow.sentinel`** — the move-analysis UNION (a consuming Var use of
->    a non-Copy binding → its VarId; field/index/`&`/`*` receivers are NON-consuming; the
->    branch-merge is a plain UNION since moved-in-EITHER-branch ⇒ included, so NO per-path
->    state — much simpler than the full borrow checker, the error state-machine is out of
->    scope) + the dump; then the phase-go `sentinel_borrow_checker_matches_oracle_on_corpus`
->    (D8) → ADR 0043 ACCEPTED. Copy/Move via the reused interner (scalars/refs/nullable-of-
->    Copy = Copy; struct/array/Vec/enum/class/string/secret-of-compound = Move).
+> **The D3 design is now SETTLED — ADR 0043 A1 (the precise build plan; FUSE, lean a).**
+> Read A1 before building. The move-recording FUSES into types' `dump_texpr` walk (a
+> `Var`'s VarId + match/handler-arm binds are only live during that walk) via a TyCtx
+> **`consuming: bool`** field with SAVE/RESTORE at the ~12 positions that change it (FALSE
+> at field/index/method receivers + `&`/`&mut`/`*` operands + conditions; TRUE at args /
+> let-RHS / match-scrutinee; INHERIT at branches/tails/bodies); the `Var` arm records the
+> move iff `consuming && is_move_type(env[vid])` (Move = array/struct/enum/class/tparam/
+> generic/Vec; Copy = scalars/ref/Task, secret/nullable follow their inner). **`dump_texpr`
+> is otherwise untouched → `snc types` stays byte-identical by construction** (the recording
+> is a pure side-effect). DO IN ORDER:
+> 1. **(6a-i)** add the move computation to `types.sentinel` (the `consuming` field +
+>    `curfn` [set in `type_fn` only — methods aren't in `program.fns`] + `is_move_type` +
+>    `record_move` into `mvf`/`mvv` + the save/restore sites) → verify
+>    `sentinel_typer_matches_oracle_on_corpus` **123/123 byte-identical** + leak-free.
+> 2. **(6a-ii)** refactor `types.sentinel`'s `main` → a `pub fn build_program(…) -> TyCtx`
+>    (running the pipeline, filling the ctx incl. the type-dump buffer as a new `out` field
+>    + `mvf`/`mvv`); `main` calls it + prints `c.out` (re-verify 123/123). ⚠ probe that a
+>    by-value `TyCtx` return works.
+> 3. **(6b) `selfhost/borrow.sentinel`** (3-deep `use`: borrow→types→parser) = thin:
+>    `let c = build_program(…); print(dump_moves(c))` → `(fn #<id> <name> #<vid>…)`; then
+>    the phase-go `sentinel_borrow_checker_matches_oracle_on_corpus` (D8, 123 fixtures) →
+>    ADR 0043 ACCEPTED.
 >
 > Build/run/leak via `/tmp/tb` (stage `parser.sentinel` + `types.sentinel` +
 > `borrow.sentinel`; diff vs `snc borrow`). The four norms are unchanged (below).
