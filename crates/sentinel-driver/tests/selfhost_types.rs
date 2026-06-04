@@ -161,6 +161,14 @@ const SEEDS: &[&str] = &[
     "fn dig(c: u8) -> bool { c >= '0' }\nfn main() -> i64 { if dig('5') { 1 } else { 0 } }\n",
     "fn main() -> i64 { let s: [u8] = \"hello\"; len(s) }\n",
     "fn main() -> i64 { let s: [u8] = \"hi\"; if s[0] == 'h' { 1 } else { 0 } }\n",
+    // (4i) Vec<T> (D.3 collections, interner kind 11 → `Vec<T>`): the generic builtins
+    // vec_new (T from the expected type), push/pop (`&mut Vec<T>`), index + `len` over a
+    // Vec, vec_to_array (`Vec<T> → [T]`), a Vec returned from a fn, the `String` =
+    // `Vec<u8>` alias, and `read_file → [u8]`.
+    "fn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 5); push(&mut v, 7); let a: i64 = v[0]; let p: i64 = pop(&mut v); let n: i64 = len(v); a + p + n }\n",
+    "fn build() -> Vec<i64> { let mut v: Vec<i64> = vec_new(); push(&mut v, 1); v }\nfn main() -> i64 { let w: Vec<i64> = build(); len(w) }\n",
+    "fn main() -> i64 { let mut s: String = vec_new(); push(&mut s, 'h'); let a: [u8] = vec_to_array(s); len(a) }\n",
+    "fn main() -> i64 { let d: [u8] = read_file(\"x\"); len(d) }\n",
 ];
 
 #[test]

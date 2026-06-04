@@ -300,6 +300,9 @@ fn mk_nullable(c: &mut TyCtx, inner: i64) -> i64 { intern_type(c, 4, inner, 0) }
 // (interner kind 9; renders `<T#idx>`). The name is always `T` in the dump (only
 // the index distinguishes them, matching the Rust `type_display`).
 fn mk_tparam(c: &mut TyCtx, idx: i64) -> i64 { intern_type(c, 9, idx, 0) }
+// (4i) a growable `Vec<T>` handle (interner kind 11; a = element type handle);
+// renders `Vec<T>`. The D.3 collections type — distinct from `[T]` (kind 1).
+fn mk_vec(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 11, elem, 0) }
 
 // --- (4h) type-param scope --------------------------------------------------
 
@@ -635,6 +638,11 @@ fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
                 render_type(out, ah, c);
                 ga = ga + 1;
             }
+            push(out, '>')
+        } else if k == 11 {
+            // (4i) Vec<T>: `Vec<` + element + `>`.
+            append_str(out, "Vec<");
+            render_type(out, a, c);
             push(out, '>')
         } else {
             append_str(out, "??")
@@ -1279,7 +1287,16 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
         TypeE::TIdent(nm) => {
             // (4h) an in-scope type-param shadows everything else → `<T#idx>`.
             let tpidx: i64 = tp_lookup(c, &nm);
+            // (4i) `String` is a built-in alias for `Vec<u8>` (ADR 0034 — the oracle
+            // desugars it, rendering `Vec<u8>`); a type-param named `String` shadows it.
+            let is_string: bool = if tpidx >= 0 {
+                false
+            } else {
+                name_eq_lit(&nm, "String")
+            };
             let sc: i64 = if tpidx >= 0 {
+                0 - 1
+            } else if is_string {
                 0 - 1
             } else {
                 scalar_code(&nm)
@@ -1314,6 +1331,8 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             sink_name(gb, nm);
             if tpidx >= 0 {
                 mk_tparam(c, tpidx)
+            } else if is_string {
+                mk_vec(c, 3)
             } else if sc >= 0 {
                 sc
             } else if sid >= 0 {
@@ -1347,12 +1366,27 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             mk_secret(c, ih)
         },
         TypeE::TGeneric(gn, ga) => {
-            // (4h) `Name<args>`: if `Name` is a user struct → a GenericInstance
-            // (resolving each arg, which may itself be a type-param). A non-struct
-            // generic (e.g. `Vec<T>`) keeps the m-1 placeholder (dispose + i64).
-            let gsid: i64 = struct_lookup(c, &gn);
+            // (4i) `Vec<T>` → the kind-11 Vec type (D.3 collections). (4h) else
+            // `Name<args>` for a user struct → a GenericInstance (resolving each arg,
+            // which may itself be a type-param). Any other generic (no such type)
+            // keeps the placeholder (dispose + i64) — it only occurs in rejected fixtures.
+            let is_vec: bool = name_eq_lit(&gn, "Vec");
+            let gsid: i64 = if is_vec {
+                0 - 1
+            } else {
+                struct_lookup(c, &gn)
+            };
             sink_name(gb, gn);
-            if gsid >= 0 {
+            if is_vec {
+                let mut vav: Vec<i64> = vec_new();
+                collect_tyargs(c, ga, gb, &mut vav);
+                let velem: i64 = if len(vav) > 0 {
+                    vav[0]
+                } else {
+                    0
+                };
+                mk_vec(c, velem)
+            } else if gsid >= 0 {
                 let mut gav: Vec<i64> = vec_new();
                 collect_tyargs(c, ga, gb, &mut gav);
                 mk_generic(c, gsid, &gav)
@@ -1439,6 +1473,8 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
         0
     } else if fid == 6 {
         3
+    } else if fid == 11 {
+        mk_array(c, 3)
     } else {
         0
     }
@@ -1813,7 +1849,25 @@ fn array_elem_of(c: &mut TyCtx, h: i64) -> i64 {
         0
     } else {
         let idx: i64 = h - tbase();
+        // (4i) the element of a `[T]` (kind 1) OR a `Vec<T>` (kind 11) — so `len`
+        // and `v[i]` index work uniformly over arrays and vecs.
         if (*c).tk[idx] == 1 {
+            (*c).ta[idx]
+        } else if (*c).tk[idx] == 11 {
+            (*c).ta[idx]
+        } else {
+            0
+        }
+    }
+}
+
+// (4i) the element type of a `Vec<T>` handle (kind 11), or i64 default.
+fn vec_elem_of(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 11 {
             (*c).ta[idx]
         } else {
             0
@@ -1835,41 +1889,59 @@ fn nullable_inner_of(c: &mut TyCtx, h: i64) -> i64 {
     }
 }
 
-// Generic builtins that emit `(targs T)`: unwrap_or (#1), is_some (#2), len (#3).
-// (vec_new/push/pop/vec_to_array land with Vec.)
+// Generic builtins that emit `(targs T)`: unwrap_or (#1), is_some (#2), len (#3),
+// (4i) the D.3 Vec ops vec_new (#7), push (#8), pop (#9), vec_to_array (#10).
 fn is_generic_builtin(fid: i64) -> bool {
-    fid == 1 || fid == 2 || fid == 3
+    fid == 1 || fid == 2 || fid == 3 || fid == 7 || fid == 8 || fid == 9 || fid == 10
 }
 
-// The inferred type-arg T for a generic builtin, from its first arg's type.
-fn targ_of_builtin(c: &mut TyCtx, fid: i64, firstty: i64) -> i64 {
+// The inferred type-arg T for a generic builtin. `firstty` = the first arg's type
+// (-1 if none); `exp` = the call's expected type (for vec_new, which has no args).
+fn targ_of_builtin(c: &mut TyCtx, fid: i64, firstty: i64, exp: i64) -> i64 {
     if fid == 3 {
-        array_elem_of(c, firstty)
+        array_elem_of(c, firstty)            // len: [T]/Vec<T> element
     } else if fid == 1 {
-        nullable_inner_of(c, firstty)
+        nullable_inner_of(c, firstty)        // unwrap_or: ?T inner
     } else if fid == 2 {
-        nullable_inner_of(c, firstty)
+        nullable_inner_of(c, firstty)        // is_some: ?T inner
+    } else if fid == 7 {
+        vec_elem_of(c, exp)                  // vec_new: T from the expected Vec<T>
+    } else if fid == 8 {
+        let sr8: i64 = strip_ref(c, firstty);   // push: &mut Vec<T> → T
+        vec_elem_of(c, sr8)
+    } else if fid == 9 {
+        let sr9: i64 = strip_ref(c, firstty);   // pop: &mut Vec<T> → T
+        vec_elem_of(c, sr9)
+    } else if fid == 10 {
+        vec_elem_of(c, firstty)              // vec_to_array: Vec<T> → T
     } else {
         0
     }
 }
 
 // Dump a generic-builtin call's `(targs T)` + args. Args go to a temp buffer
-// first (T is inferred from the first arg, but `(targs T)` precedes the args in
-// the output). Returns the call's result type.
-fn dump_gcall(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// first (T is inferred from the first arg — or from `exp` for vec_new — but
+// `(targs T)` precedes the args in the output). Returns the call's result type.
+fn dump_gcall(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut abuf: Vec<u8> = vec_new();
     let firstty: i64 = dump_args_capture_first(&mut abuf, ca, src, c, gb);
-    let targ: i64 = targ_of_builtin(c, fid, firstty);
+    let targ: i64 = targ_of_builtin(c, fid, firstty, exp);
     append_str(out, " (targs ");
     render_type(out, targ, c);
     push(out, ')');
     append_str(out, vec_to_array(abuf));
-    // result type: unwrap_or -> T; is_some -> bool; len -> i64.
+    // result type: unwrap_or → T; is_some → bool; vec_new → Vec<T>; pop → T;
+    // vec_to_array → [T]; len/push → i64 (the catch-all).
     if fid == 1 {
         targ
     } else if fid == 2 {
         2
+    } else if fid == 7 {
+        mk_vec(c, targ)
+    } else if fid == 9 {
+        targ
+    } else if fid == 10 {
+        mk_array(c, targ)
     } else {
         0
     }
@@ -2204,7 +2276,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                     false
                 };
                 let rt: i64 = if is_generic_builtin(fid) {
-                    dump_gcall(out, fid, ca, src, c, gb)
+                    dump_gcall(out, fid, ca, exp, src, c, gb)
                 } else if isgenfn {
                     dump_generic_call(out, fid, ca, src, c, gb)
                 } else {
