@@ -1861,6 +1861,36 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 
 ### 0.3 Quick-status block for session start
 
+> **NEXT SLICE = (4h) GENERICS** (the LAST types feature before the (4i) phase-go).
+> The Sentinel typer (`selfhost/types.sentinel`) matches `snc types` on **108
+> corpus fixtures** through (4g); only the **c17 generic fixtures** (`c17_id`,
+> `c17_box`, `c17_generic_array`, `c17_generic_nullable`, `c17_go_no_go`,
+> `c17_two_instantiations`) remain (plus `c44_go_no_go`, which also needs
+> concurrency). **(4h) is the HM-ish INFERENCE ENGINE — the single most intricate
+> slice — do it with fresh context.** Scouting (the oracle deltas, already
+> confirmed):
+> - **`TypeParam`** renders `<T#0>` — a new interner kind carrying the param index.
+>   A generic fn `fn id<T>(x: T) -> T` binds `T` in a per-fn type-param scope; the
+>   param / body / return all type as `<T#0>`. Oracle: `(fn #14 id ((param #0 x
+>   <T#0>)) <T#0> (block (var #0 :<T#0>) :<T#0>))`.
+> - **`GenericInstance`** renders `Box<i64>` — a new interner kind = a (StructId,
+>   arg-list) pair (the arg-list is a flat `(start,end)` slice into a side
+>   `Vec<i64>`, the resolve op-list idiom; ⚠ A1's note: hash-cons on the arg-handle
+>   CONTENT). `struct Box<T> { value: T }` → `(struct #0 Box (field value <T#0>))`;
+>   `Box { value: 42 }` → `(struct-lit #0 Box (int 42 :i64) :Box<i64>)`.
+> - **`unify_one` bidirectional inference** at a generic-fn CALL: `id(42)` infers
+>   `T=i64` from the arg, emits `(targs i64)` BEFORE the args, and the call's return
+>   type is the SUBSTITUTED `T→i64` (`i64`). Oracle: `(call #14 (targs i64) (int 42
+>   :i64) :i64)`. (`(targs …)` already works for the generic BUILTINS — `len`/
+>   `unwrap_or` — via `dump_gcall`; user generic fns extend that to multi-param
+>   unify + substitution of the return.)
+> - **Substitution on field access** of a `GenericInstance`: `b.value` where `b:
+>   Box<i64>` → the declared field type `<T#0>` substituted to `i64` →
+>   `(field (var #0 :Box<i64>) value 0 :i64)`.
+> Then **(4i)**: wire `sentinel_typer_matches_oracle_on_corpus` (the D9 phase-go,
+> mirroring `sentinel_resolver_matches_oracle_on_corpus`) over the clean-typing set,
+> and converge. The build/run/leak workflow + the four norms are unchanged (below).
+
 For pasting into a fresh chat to bootstrap context:
 
     Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
