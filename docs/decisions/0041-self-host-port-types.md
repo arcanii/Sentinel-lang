@@ -381,6 +381,30 @@ ADR-0040 A1 discipline — `docs/agent-protocol.md`). See ## Amendments A1.
   **(4f) classes/traits/impls — including delegation — is COMPLETE. Next: (4g)
   effects/handlers** (`Perform` op-return typing, `Handle` + `Kont` interning), (4h)
   generics, (4i) the full-corpus phase-go.
+- **A11 — (4g) effects/handlers LANDED.** Types the effect/handler runtime surface
+  (effect-CHECK stays out of scope, D1 — this types `Perform`/`Handle`/resume nodes).
+  **Matches `snc types` on 108 corpus fixtures** (+23 — the ENTIRE c35/c36/c37 handler
+  suite + c32/c33 effect-decl + `c5_go_no_go`) **+ 48 seeds** (+3), **leak-free across
+  all 108**, **zero regressions**. (1) effect tables (names + op list keyed on SRC + op
+  return types) + the decl emit `(effect #id Name (op name (params) ret)…)` (op params
+  reuse the no-VarId `emit_trait_params`); effects are group-A items now (emit in source
+  order, then `Async` last). (2) `perform Eff.op(args)` → `(perform #eid op_idx Eff op
+  <args> :ret)` (ret = the op's return type). (3) `handle body with {…}` → `(handle
+  <body :T> (arm #eid idx Eff op (#pvids) <body>)… (return #vid <body>)? :T)` — the
+  handle's type IS the body's; handler-arm params + the return var bind VarIds scoped
+  per-arm (the return var typed as the body). (4) resume-kont: a `Call` whose callee
+  resolves to an in-scope VAR → `(resume-kont #vid <args> :T)` (T = the resume value's
+  type) — checked before `fn_lookup` (vars shadow fns); harmless for non-effect fixtures
+  (a normal callee is never an in-scope var). **(5) ⚠ the effect-op-param VarId offset
+  (ADR 0020): the Rust resolver assigns op-param VarIds BEFORE any fn body, so the fn
+  region starts at `voff` (the op-param count). Implemented by `nextvid = voff` + filling
+  the env with `voff` PHANTOM slots** — the env is VarId-indexed + append-only, so the
+  first real binding must land at `env[voff]` (without the phantoms, `env[voff]` was an
+  out-of-bounds crash). ⚠ handler-arm op params bind as `i64` (every corpus op param is
+  `i64`; the continuation `k` is only ever a resume-kont callee, never a typed var) — a
+  non-`i64` op param would need the op-param-type table, a follow-up. **Next: (4h)
+  generics** (generic-fn calls via `unify_one` bidirectional inference, `GenericInstance`
+  interning, `type_args` on calls — the c17 fixtures), then (4i) the full-corpus phase-go.
 
 ## Context
 

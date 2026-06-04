@@ -16,7 +16,7 @@ next phase is **D (self-hosting)**.
 
 Last updated: **Phase D movement 2 — the SELF-HOST PORT — (4/N) TYPES is OPEN; ADR
 0041 → ACCEPTED-WITH-AMENDMENTS; (4a) oracle + probes + (4b) m-1 SCALAR + (4c-1/4c-2)
-STRUCTS + ARRAYS + (4c-3) NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES (A1–A10) LANDED.** Types is the **biggest/hardest
+STRUCTS + ARRAYS + (4c-3) NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g) EFFECTS/HANDLERS (A1–A11) LANDED.** Types is the **biggest/hardest
 port stage** (the Rust `sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish
 inference, method/trait dispatch, secret-type propagation, match exhaustiveness;
 effect-check is a SEPARATE crate, out of scope). **`selfhost/types.sentinel`, the
@@ -31,8 +31,10 @@ operators — `secret == secret → secret bool`) + **enum/match (4e)** (enum de
 `(bind #vid name ty)` binding + the wildcard) + **classes/traits/impls (4f core)** (the
 receiver-typed method-dispatch split `(method #cid …)`/`(impl-method #iid …)`, class-init,
 `self` typing, named-impl `qcall-impl`, `&`/`&mut`/`*` ref typing, **+ delegate-impl
-synthesis**) emitting the `snc types` dump byte-for-byte; **matches the oracle on 85
-corpus fixtures + 45 seeds** (`sentinel_typer_matches_oracle_on_seeds`), leak-free. ⚠ **D3 REFINED →
+synthesis**) + **effects/handlers (4g)** (effect decls, `perform`, `handle` arms +
+resume-kont, the effect-op-param VarId offset) emitting the `snc types` dump
+byte-for-byte; **matches the oracle on 108 corpus fixtures + 48 seeds**
+(`sentinel_typer_matches_oracle_on_seeds`), leak-free. ⚠ **D3 REFINED →
 self-contained** (NOT module-reuse of resolve): resolve's `RCtx` can't be extended
 with type fields across a module boundary, so `types.sentinel` is one clean `TyCtx`
 (resolve's name-blob scope + fn table + the verified D4 type interner + the
@@ -64,9 +66,14 @@ then splices source-order) + the class/trait/impl tables (Class interner kind 8)
 typing (a BONUS that unlocked the c20–c22 ref+borrow set + c25). **(4f-delegate, A10)**
 closed it — `delegate f: T to Tr` synthesises a forwarding `impl _ as Tr for C`
 (group D, after user impls; the field added to the class table; each method forwards
-to `self.f.m(args)` — a dispatch on the delegate field). **(4f) is COMPLETE.** NEXT =
-**(4g) effects/handlers** (`Perform` op-return typing, `Handle` + `Kont` interning),
-(4h) generics, (4i) the full-corpus phase-go.
+to `self.f.m(args)` — a dispatch on the delegate field). **(4f) is COMPLETE.** **(4g)
+EFFECTS/HANDLERS (A11)** — effect-decl emit + effect tables (op return types) + `perform`
+(→ op return type) + `handle` (body type; arms bind op-params+`k`; the `return v` arm) +
+resume-kont (a Call whose callee is an in-scope var) + ⚠ **the effect-op-param VarId
+offset** (the fn region starts at `voff`; the env gets `voff` phantom slots, else
+`env[voff]` is OOB). +23 → 108 fixtures. NEXT = **(4h) generics** (`unify_one`
+bidirectional inference, `GenericInstance` interning — the c17 fixtures), then (4i) the
+full-corpus phase-go.
 **(4a) shipped the ORACLE + de-risked the Sentinel build:** `snc types <file>`
 (driver `run_types` + `types_dump.rs`, parse → resolve → `check` → dump) emits the
 `snc resolve` S-expr form **extended with each expression node's inferred `Type`** (a
