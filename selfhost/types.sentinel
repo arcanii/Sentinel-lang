@@ -39,7 +39,6 @@ use parser::Ret;
 use parser::tokenize;
 use parser::parse_block;
 use parser::parse_type;
-use parser::skip_type_params;
 use parser::skip_effect_row;
 use parser::append_int;
 use parser::append_str;
@@ -131,6 +130,25 @@ struct TyCtx {
     efoe: Vec<i64>,   // op name src end
     efor: Vec<i64>,   // op return-type handle
     voff: i64,        // effect-op-param count → the fn-region VarId base (ADR 0020)
+    // --- (4h) generics ---------------------------------------------------------
+    // Type-param scope: active while a generic decl's signature/body is typed; the
+    // param INDEX is the position in this list. Names are copied into `tpb` (a
+    // dedicated blob — `type_of_typeexpr` has no `src`, so it compares against this
+    // blob). Reset to empty per decl (type-params don't nest in this language).
+    tpb: Vec<u8>,     // type-param name blob
+    tpns: Vec<i64>,   // type-param name start (into `tpb`)
+    tpne: Vec<i64>,   // type-param name end (into `tpb`)
+    // User-fn generic signature info (indexed by FnId-14, same order as `ufret`).
+    uftp: Vec<i64>,   // type-param count (0 = non-generic)
+    ufps: Vec<i64>,   // param-type slice start (into `ufpp`)
+    ufpe: Vec<i64>,   // param-type slice end
+    ufpp: Vec<i64>,   // flat param-type handles (declaration order)
+    // Generic-instance arg pool + per-instance arg-slice records. The
+    // GenericInstance interner kind (10) stores the record index in `tb`;
+    // hash-cons keys on the StructId (`ta`) + the arg CONTENT (ADR 0041 A1).
+    gia: Vec<i64>,    // flat pool of generic-instance arg handles
+    girs: Vec<i64>,   // per-record arg-slice start (into `gia`)
+    gire: Vec<i64>,   // per-record arg-slice end (into `gia`)
 }
 
 fn tbase() -> i64 { 100 }
@@ -278,6 +296,222 @@ fn mk_array(c: &mut TyCtx, inner: i64) -> i64 { intern_type(c, 1, inner, 0) }
 fn mk_ref(c: &mut TyCtx, m: i64, inner: i64) -> i64 { intern_type(c, 2, m, inner) }
 fn mk_secret(c: &mut TyCtx, inner: i64) -> i64 { intern_type(c, 3, inner, 0) }
 fn mk_nullable(c: &mut TyCtx, inner: i64) -> i64 { intern_type(c, 4, inner, 0) }
+// (4h) a type-parameter handle, indexed by its position in the decl's `<…>` list
+// (interner kind 9; renders `<T#idx>`). The name is always `T` in the dump (only
+// the index distinguishes them, matching the Rust `type_display`).
+fn mk_tparam(c: &mut TyCtx, idx: i64) -> i64 { intern_type(c, 9, idx, 0) }
+
+// --- (4h) type-param scope --------------------------------------------------
+
+// Resolve a type-name query `q` to its type-param INDEX (position in the active
+// `<…>` list), or -1 if `q` is not an in-scope type-param. Compares against `tpb`.
+fn tp_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let qn: i64 = len(*q);
+    let n: i64 = len((*c).tpns);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            let st: i64 = (*c).tpns[i];
+            let en: i64 = (*c).tpne[i];
+            if en - st == qn {
+                let mut j: i64 = 0;
+                let mut ok: bool = true;
+                while j < qn {
+                    if (*c).tpb[st + j] != (*q)[j] {
+                        ok = false;
+                        0
+                    } else {
+                        0
+                    };
+                    j = j + 1;
+                }
+                if ok {
+                    found = i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Clear the type-param scope (called at the start of each generic decl's typing —
+// type-params don't nest in this language, so a full reset is correct).
+fn tp_reset(c: &mut TyCtx) -> i64 {
+    let mut t: i64 = len((*c).tpns);
+    while t > 0 {
+        pop(&mut (*c).tpns);
+        pop(&mut (*c).tpne);
+        t = t - 1;
+    }
+    let mut b: i64 = len((*c).tpb);
+    while b > 0 {
+        pop(&mut (*c).tpb);
+        b = b - 1;
+    }
+    0
+}
+
+// If the cursor sits at a `<` (token 15), copy the type-param NAMES into the scope
+// (resetting it first) and advance the cursor past the closing `>` (17); else just
+// reset. Mirrors `skip_type_params`'s `<`/`>` depth walk, recording the first ident
+// after each `<`/`,` (so a hypothetical `<T: Bound>` records only `T`).
+fn tp_setup(c: &mut TyCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    tp_reset(c);
+    if (*k)[*cur] != 15 {
+        0
+    } else {
+        *cur = *cur + 1;            // skip `<`
+        let mut depth: i64 = 1;
+        let mut wantn: bool = true;
+        while depth > 0 {
+            let t: i64 = (*k)[*cur];
+            if t == 15 {
+                depth = depth + 1;
+                0
+            } else if t == 17 {
+                depth = depth - 1;
+                0
+            } else if depth == 1 {
+                if t == 29 {
+                    wantn = true;
+                    0
+                } else if wantn {
+                    let ns: i64 = (*s)[*cur];
+                    let ne: i64 = (*e)[*cur];
+                    let bst: i64 = len((*c).tpb);
+                    let mut bi: i64 = ns;
+                    while bi < ne {
+                        push(&mut (*c).tpb, (*src)[bi]);
+                        bi = bi + 1;
+                    }
+                    push(&mut (*c).tpns, bst);
+                    push(&mut (*c).tpne, bst + (ne - ns));
+                    wantn = false;
+                    0
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            *cur = *cur + 1;
+        }
+        0
+    }
+}
+
+// --- (4h) generic-instance interner -----------------------------------------
+
+// A generic-instance handle `Decl<args>` (interner kind 10): the StructId lives in
+// `ta`, an arg-slice RECORD index in `tb`. Hash-cons on the StructId + the arg-list
+// CONTENT (ADR 0041 A1), so two `Pair<i64,i64>`s share one handle. The arg list is
+// appended to the `gia` pool; `girs`/`gire` record its (start,end) slice.
+fn mk_generic(c: &mut TyCtx, declid: i64, args: &Vec<i64>) -> i64 {
+    let na: i64 = len(*args);
+    let n: i64 = len((*c).tk);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if (*c).tk[i] == 10 {
+                if (*c).ta[i] == declid {
+                    let rec: i64 = (*c).tb[i];
+                    let rs: i64 = (*c).girs[rec];
+                    let re: i64 = (*c).gire[rec];
+                    if re - rs == na {
+                        let mut j: i64 = 0;
+                        let mut ok: bool = true;
+                        while j < na {
+                            if (*c).gia[rs + j] != (*args)[j] {
+                                ok = false;
+                                0
+                            } else {
+                                0
+                            };
+                            j = j + 1;
+                        }
+                        if ok {
+                            found = tbase() + i;
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else {
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if found == 0 - 1 {
+        let rs2: i64 = len((*c).gia);
+        let mut j2: i64 = 0;
+        while j2 < na {
+            let av: i64 = (*args)[j2];
+            push(&mut (*c).gia, av);
+            j2 = j2 + 1;
+        }
+        let re2: i64 = len((*c).gia);
+        let rec2: i64 = len((*c).girs);
+        push(&mut (*c).girs, rs2);
+        push(&mut (*c).gire, re2);
+        let ni: i64 = len((*c).tk);
+        push(&mut (*c).tk, 10);
+        push(&mut (*c).ta, declid);
+        push(&mut (*c).tb, rec2);
+        tbase() + ni
+    } else {
+        found
+    }
+}
+
+// If `h` is a generic instance (kind 10), its decl StructId; else -1.
+fn gi_decl_of(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0 - 1
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 10 {
+            (*c).ta[idx]
+        } else {
+            0 - 1
+        }
+    }
+}
+
+// The arg-slice start of a generic instance (assumes `h` is kind 10).
+fn gi_argstart(c: &mut TyCtx, h: i64) -> i64 {
+    let rec: i64 = (*c).tb[h - tbase()];
+    (*c).girs[rec]
+}
+
+// The arg-slice end of a generic instance (assumes `h` is kind 10).
+fn gi_argend(c: &mut TyCtx, h: i64) -> i64 {
+    let rec: i64 = (*c).tb[h - tbase()];
+    (*c).gire[rec]
+}
 
 // Scalar codes: i64=0, i32=1, bool=2, u8=3. -1 if `q` is not a scalar name.
 fn scalar_code(q: &[u8]) -> i64 {
@@ -370,6 +604,38 @@ fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
                 ci = ci + 1;
             }
             0
+        } else if k == 9 {
+            // (4h) TypeParam: `<T#idx>` (a = param index).
+            append_str(out, "<T#");
+            append_int(out, a);
+            push(out, '>')
+        } else if k == 10 {
+            // (4h) GenericInstance: `Decl<arg0, arg1, …>` (a = StructId, b = the
+            // arg-slice record index). Args are comma-space separated (the type
+            // render uses `, `; the `(targs …)` list uses spaces — distinct).
+            let gs: i64 = (*c).sts[a];
+            let ge: i64 = (*c).ste[a];
+            let mut gi: i64 = gs;
+            while gi < ge {
+                push(out, (*c).snb[gi]);
+                gi = gi + 1;
+            }
+            push(out, '<');
+            let grec: i64 = b;
+            let grs: i64 = (*c).girs[grec];
+            let gre: i64 = (*c).gire[grec];
+            let mut ga: i64 = grs;
+            while ga < gre {
+                if ga > grs {
+                    append_str(out, ", ")
+                } else {
+                    0
+                };
+                let ah: i64 = (*c).gia[ga];
+                render_type(out, ah, c);
+                ga = ga + 1;
+            }
+            push(out, '>')
         } else {
             append_str(out, "??")
         }
@@ -1011,20 +1277,32 @@ fn field_type(c: &mut TyCtx, sid: i64, q: &[u8]) -> i64 {
 fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
     match t {
         TypeE::TIdent(nm) => {
-            let sc: i64 = scalar_code(&nm);
-            let sid: i64 = if sc >= 0 {
+            // (4h) an in-scope type-param shadows everything else → `<T#idx>`.
+            let tpidx: i64 = tp_lookup(c, &nm);
+            let sc: i64 = if tpidx >= 0 {
+                0 - 1
+            } else {
+                scalar_code(&nm)
+            };
+            let sid: i64 = if tpidx >= 0 {
+                0 - 1
+            } else if sc >= 0 {
                 0 - 1
             } else {
                 struct_lookup(c, &nm)
             };
-            let eid: i64 = if sc >= 0 {
+            let eid: i64 = if tpidx >= 0 {
+                0 - 1
+            } else if sc >= 0 {
                 0 - 1
             } else if sid >= 0 {
                 0 - 1
             } else {
                 enum_lookup(c, &nm)
             };
-            let cid: i64 = if sc >= 0 {
+            let cid: i64 = if tpidx >= 0 {
+                0 - 1
+            } else if sc >= 0 {
                 0 - 1
             } else if sid >= 0 {
                 0 - 1
@@ -1034,7 +1312,9 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
                 class_lookup(c, &nm)
             };
             sink_name(gb, nm);
-            if sc >= 0 {
+            if tpidx >= 0 {
+                mk_tparam(c, tpidx)
+            } else if sc >= 0 {
                 sc
             } else if sid >= 0 {
                 mk_struct(c, sid)
@@ -1067,16 +1347,38 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             mk_secret(c, ih)
         },
         TypeE::TGeneric(gn, ga) => {
-            // m-1: generic types (Vec<T>, Name<args>) land at 4c/4h. Dispose the
-            // name + the arg list; default to i64.
+            // (4h) `Name<args>`: if `Name` is a user struct → a GenericInstance
+            // (resolving each arg, which may itself be a type-param). A non-struct
+            // generic (e.g. `Vec<T>`) keeps the m-1 placeholder (dispose + i64).
+            let gsid: i64 = struct_lookup(c, &gn);
             sink_name(gb, gn);
-            dispose_tyargs(c, ga, gb);
-            0
+            if gsid >= 0 {
+                let mut gav: Vec<i64> = vec_new();
+                collect_tyargs(c, ga, gb, &mut gav);
+                mk_generic(c, gsid, &gav)
+            } else {
+                dispose_tyargs(c, ga, gb);
+                0
+            }
         },
     }
 }
 
-// Consume a `TyArgs` cons-list (disposing its `TypeE`s) — m-1 placeholder.
+// (4h) Resolve a `TyArgs` cons-list into a flat `Vec<i64>` of type handles (each arg
+// may be a type-param, scalar, struct, or nested generic).
+fn collect_tyargs(c: &mut TyCtx, a: TyArgs, gb: &mut Vec<u8>, av: &mut Vec<i64>) -> i64 {
+    match a {
+        TyArgs::TAEnd => 0,
+        TyArgs::TACell(t, rest) => {
+            let h: i64 = type_of_typeexpr(c, t, gb);
+            push(av, h);
+            collect_tyargs(c, rest, gb, av)
+        },
+    }
+}
+
+// Consume a `TyArgs` cons-list (disposing its `TypeE`s) — the non-struct-generic
+// placeholder (e.g. `Vec<T>` annotations, still typed as i64).
 fn dispose_tyargs(c: &mut TyCtx, a: TyArgs, gb: &mut Vec<u8>) -> i64 {
     match a {
         TyArgs::TAEnd => 0,
@@ -1284,6 +1586,227 @@ fn dump_array_elems(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &
     }
 }
 
+// --- (4h) generic-fn inference (unify_one + substitution) -------------------
+
+// Substitute the type-params in `h` using the resolved type-arg list `args`
+// (indexed by type-param index). Recurses through compound shells; leaves
+// concrete types (scalars, structs, enums, classes) unchanged. (Generic-instance
+// substitution — kind 10 — lands with (4h-2)'s `mk_generic`.)
+fn subst_type(c: &mut TyCtx, h: i64, args: &Vec<i64>) -> i64 {
+    if h < tbase() {
+        h
+    } else {
+        let idx: i64 = h - tbase();
+        let k: i64 = (*c).tk[idx];
+        if k == 9 {
+            let pi: i64 = (*c).ta[idx];
+            (*args)[pi]
+        } else if k == 1 {
+            let inn: i64 = (*c).ta[idx];
+            let si: i64 = subst_type(c, inn, args);
+            mk_array(c, si)
+        } else if k == 4 {
+            let inn4: i64 = (*c).ta[idx];
+            let s4: i64 = subst_type(c, inn4, args);
+            mk_nullable(c, s4)
+        } else if k == 3 {
+            let inn3: i64 = (*c).ta[idx];
+            let s3: i64 = subst_type(c, inn3, args);
+            mk_secret(c, s3)
+        } else if k == 2 {
+            let m2: i64 = (*c).ta[idx];
+            let inn2: i64 = (*c).tb[idx];
+            let s2: i64 = subst_type(c, inn2, args);
+            mk_ref(c, m2, s2)
+        } else if k == 10 {
+            // A generic instance whose own args may be type-params (e.g. make_pair's
+            // return `Pair<<T#0>, <T#1>>` substituted to `Pair<i64, i64>`): substitute
+            // each arg, then re-intern. The arg slice [grs..gre] is stable under the
+            // recursive `mk_generic` appends (gia is append-only).
+            let gdecl: i64 = (*c).ta[idx];
+            let grec: i64 = (*c).tb[idx];
+            let grs: i64 = (*c).girs[grec];
+            let gre: i64 = (*c).gire[grec];
+            let mut gnewargs: Vec<i64> = vec_new();
+            let mut ggi: i64 = grs;
+            while ggi < gre {
+                let goa: i64 = (*c).gia[ggi];
+                let gsa: i64 = subst_type(c, goa, args);
+                push(&mut gnewargs, gsa);
+                ggi = ggi + 1;
+            }
+            mk_generic(c, gdecl, &gnewargs)
+        } else {
+            h
+        }
+    }
+}
+
+// Record a type-param binding (param index `pidx` → arg type `at`) into the
+// parallel (`bi`, `bt`) accumulator lists; FIRST binding wins (clean fixtures are
+// consistent, so a re-encounter of the same param need not re-check).
+fn subst_bind(bi: &mut Vec<i64>, bt: &mut Vec<i64>, pidx: i64, at: i64) -> i64 {
+    let n: i64 = len(*bi);
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < n {
+        if (*bi)[i] == pidx {
+            found = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if found {
+        0
+    } else {
+        push(bi, pidx);
+        push(bt, at);
+        0
+    }
+}
+
+// The bound type for param index `pidx` (-1 if unbound — defensive).
+fn subst_get(bi: &mut Vec<i64>, bt: &mut Vec<i64>, pidx: i64) -> i64 {
+    let n: i64 = len(*bi);
+    let mut i: i64 = 0;
+    let mut r: i64 = 0 - 1;
+    while i < n {
+        if r == 0 - 1 {
+            if (*bi)[i] == pidx {
+                r = (*bt)[i];
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    r
+}
+
+// Unify a (possibly type-param-bearing) declared param type `pt` against a
+// concrete arg type `at`, recording type-param bindings. Structural: matches the
+// array/nullable/secret shells and recurses; a bare type-param binds. (Ref +
+// generic-instance unify land with (4h-2).)
+fn unify_one(c: &mut TyCtx, pt: i64, at: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
+    if pt < tbase() {
+        0
+    } else {
+        let idx: i64 = pt - tbase();
+        let k: i64 = (*c).tk[idx];
+        if k == 9 {
+            let pidx: i64 = (*c).ta[idx];
+            subst_bind(bi, bt, pidx, at)
+        } else if k == 1 {
+            let pin: i64 = (*c).ta[idx];
+            let ain: i64 = array_elem_of(c, at);
+            unify_one(c, pin, ain, bi, bt)
+        } else if k == 4 {
+            let pin4: i64 = (*c).ta[idx];
+            let ain4: i64 = nullable_inner_of(c, at);
+            unify_one(c, pin4, ain4, bi, bt)
+        } else if k == 3 {
+            let pin3: i64 = (*c).ta[idx];
+            let ain3: i64 = strip_secret(c, at);
+            unify_one(c, pin3, ain3, bi, bt)
+        } else if k == 10 {
+            // A generic-instance param (e.g. `p: Pair<A, B>`) unifies pairwise against
+            // a same-decl arg instance (`Pair<i64, i64>`), binding each type-param.
+            let ptd: i64 = (*c).ta[idx];
+            let atd: i64 = gi_decl_of(c, at);
+            if atd == ptd {
+                let prec: i64 = (*c).tb[idx];
+                let prs: i64 = (*c).girs[prec];
+                let pre: i64 = (*c).gire[prec];
+                let ats: i64 = gi_argstart(c, at);
+                let ucount: i64 = pre - prs;
+                let mut ugi: i64 = 0;
+                while ugi < ucount {
+                    let upa: i64 = (*c).gia[prs + ugi];
+                    let uaa: i64 = (*c).gia[ats + ugi];
+                    unify_one(c, upa, uaa, bi, bt);
+                    ugi = ugi + 1;
+                }
+                0
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    }
+}
+
+// Dump every call arg into `out`, pushing each arg's synthesized type onto `atys`
+// (so a generic call can unify the fn's params against them).
+fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>, atys: &mut Vec<i64>) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(x, rest) => {
+            push(out, ' ');
+            let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            push(atys, t0);
+            dump_args_capture_all(out, rest, src, c, gb, atys)
+        },
+    }
+}
+
+// (4h) a call to a generic USER fn: infer the type-args by unifying the fn's
+// declared param types against the args' synthesized types, emit `(targs t0 t1 …)`
+// (space-separated) BEFORE the args, and return the SUBSTITUTED declared return
+// type. Args are dumped to a temp buffer first — the targs precede them in the
+// output but are inferred from them.
+fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut abuf: Vec<u8> = vec_new();
+    let mut atys: Vec<i64> = vec_new();
+    dump_args_capture_all(&mut abuf, ca, src, c, gb, &mut atys);
+    let ntp: i64 = (*c).uftp[fid - 14];
+    let ps: i64 = (*c).ufps[fid - 14];
+    let pe: i64 = (*c).ufpe[fid - 14];
+    let np: i64 = pe - ps;
+    let na: i64 = len(atys);
+    let lim: i64 = if np < na {
+        np
+    } else {
+        na
+    };
+    let mut bi: Vec<i64> = vec_new();
+    let mut bt: Vec<i64> = vec_new();
+    let mut pi: i64 = 0;
+    while pi < lim {
+        let pty: i64 = (*c).ufpp[ps + pi];
+        let aty: i64 = atys[pi];
+        unify_one(c, pty, aty, &mut bi, &mut bt);
+        pi = pi + 1;
+    }
+    // Build the resolved subst list in type-param INDEX order (0..ntp).
+    let mut subst: Vec<i64> = vec_new();
+    let mut ti: i64 = 0;
+    while ti < ntp {
+        let bd: i64 = subst_get(&mut bi, &mut bt, ti);
+        push(&mut subst, bd);
+        ti = ti + 1;
+    }
+    append_str(out, " (targs");
+    let mut tj: i64 = 0;
+    while tj < ntp {
+        push(out, ' ');
+        let th: i64 = subst[tj];
+        render_type(out, th, c);
+        tj = tj + 1;
+    }
+    push(out, ')');
+    let argbytes: [u8] = vec_to_array(abuf);
+    append_str(out, argbytes);
+    let rh: i64 = (*c).ufret[fid - 14];
+    subst_type(c, rh, &subst)
+}
+
 // The element type of an array type handle (kind 1), or i64 default.
 fn array_elem_of(c: &mut TyCtx, h: i64) -> i64 {
     if h < tbase() {
@@ -1366,19 +1889,27 @@ fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx
 }
 
 // (4c-1) struct-literal fields: emit each field's VALUE positionally (the names
-// are dropped — the typed StructLit is nameless/positional). Source order.
-fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// are dropped — the typed StructLit is nameless/positional). Source order. (4h) for
+// a GENERIC struct-lit (`gen`), the field's declared type is SUBSTITUTED with the
+// instance's type-args `gargs` before it expects the value (so `Box { value: 42 }`
+// types `42` against `i64`, and `Pair { first: a }` against `<T#0>`).
+fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, gen: bool, gargs: &Vec<i64>, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match f {
         Fields::FieldEnd => 0,
         Fields::FieldCell(fnm, fval, rest) => {
             // Each field VALUE is coerced to the field's DECLARED type — a `?T` field
             // widens a `T` value / types a bare `null`. Look up the type by name
             // BEFORE `fnm` is sunk.
-            let ftype: i64 = field_type(c, sid, &fnm);
+            let ftype0: i64 = field_type(c, sid, &fnm);
+            let ftype: i64 = if gen {
+                subst_type(c, ftype0, gargs)
+            } else {
+                ftype0
+            };
             sink_name(gb, fnm);
             push(out, ' ');
             dump_texpr(out, fval, ftype, src, c, gb);
-            dump_sfields(out, rest, sid, src, c, gb)
+            dump_sfields(out, rest, sid, gen, gargs, src, c, gb)
         },
     }
 }
@@ -1663,8 +2194,19 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 // Generic builtins (e.g. `len: <T>([T]) -> i64`) emit `(targs T)`
                 // before the args; T is inferred from the first arg, so the args are
                 // dumped to a temp buffer first. The return type may depend on T.
+                // (4h) a generic USER fn (FnId 14+ with type-params) infers + emits
+                // `(targs …)` then substitutes its return type; a generic BUILTIN
+                // (len/unwrap_or/is_some) uses the existing first-arg `dump_gcall`;
+                // everything else dumps args straight with the declared return type.
+                let isgenfn: bool = if fid >= 14 {
+                    (*c).uftp[fid - 14] > 0
+                } else {
+                    false
+                };
                 let rt: i64 = if is_generic_builtin(fid) {
                     dump_gcall(out, fid, ca, src, c, gb)
+                } else if isgenfn {
+                    dump_generic_call(out, fid, ca, src, c, gb)
                 } else {
                     dump_targs(out, ca, src, c, gb);
                     fn_ret(c, fid)
@@ -1685,12 +2227,40 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // struct. `(struct-lit #sid Name <v0> <v1>… :Name)`.
         Expr::StructLit(snm, fields) => {
             let sid: i64 = struct_lookup(c, &snm);
-            let sty: i64 = mk_struct(c, sid);
+            // (4h) a GENERIC struct-lit takes its type (and its type-args) from the
+            // expected type `exp` (a GenericInstance of this struct — threaded from a
+            // `let` annotation / fn return). The arg Vec is built ONCE here, so
+            // `dump_sfields` stays a single Fields-consumer (no parallel-consumer leak).
+            let sl_gd: i64 = gi_decl_of(c, exp);
+            let sl_isg: bool = if sl_gd >= 0 {
+                sl_gd == sid
+            } else {
+                false
+            };
+            let sty: i64 = if sl_isg {
+                exp
+            } else {
+                mk_struct(c, sid)
+            };
+            let mut gargs: Vec<i64> = vec_new();
+            if sl_isg {
+                let sl_gas: i64 = gi_argstart(c, exp);
+                let sl_gae: i64 = gi_argend(c, exp);
+                let mut sl_j: i64 = sl_gas;
+                while sl_j < sl_gae {
+                    let sl_a: i64 = (*c).gia[sl_j];
+                    push(&mut gargs, sl_a);
+                    sl_j = sl_j + 1;
+                }
+                0
+            } else {
+                0
+            };
             append_str(out, "(struct-lit #");
             append_int(out, sid);
             push(out, ' ');
             append_str(out, snm);
-            dump_sfields(out, fields, sid, src, c, gb);
+            dump_sfields(out, fields, sid, sl_isg, &gargs, src, c, gb);
             close_ty(out, sty, c);
             sty
         },
@@ -1701,19 +2271,42 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(out, "(field ");
             let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
             push(out, ' ');
-            // The target is a struct or a class (a `&self`-receiver strips its ref).
+            // The target is a struct, a generic-instance struct, or a class (a
+            // `&self`-receiver strips its ref). (4h) for a generic instance the
+            // declared field type is SUBSTITUTED with the instance's type-args
+            // (`b.value` where `b: Box<i64>` → `i64`; `p.first` where `p: Pair<A,B>`
+            // → `<T#0>`).
             let bare: i64 = strip_ref(c, tty);
-            let sid: i64 = struct_of_handle(c, bare);
+            let fd_gd: i64 = gi_decl_of(c, bare);
+            let sid: i64 = if fd_gd >= 0 {
+                fd_gd
+            } else {
+                struct_of_handle(c, bare)
+            };
             let ccid: i64 = class_of_handle(c, bare);
             let fidx: i64 = if sid >= 0 {
                 field_index(c, sid, &fdn)
             } else {
                 class_field_index(c, ccid, &fdn)
             };
-            let fty: i64 = if sid >= 0 {
+            let fty0: i64 = if sid >= 0 {
                 field_type(c, sid, &fdn)
             } else {
                 class_field_type(c, ccid, &fdn)
+            };
+            let fty: i64 = if fd_gd >= 0 {
+                let mut fargs: Vec<i64> = vec_new();
+                let fd_gas: i64 = gi_argstart(c, bare);
+                let fd_gae: i64 = gi_argend(c, bare);
+                let mut fd_j: i64 = fd_gas;
+                while fd_j < fd_gae {
+                    let fd_a: i64 = (*c).gia[fd_j];
+                    push(&mut fargs, fd_a);
+                    fd_j = fd_j + 1;
+                }
+                subst_type(c, fty0, &fargs)
+            } else {
+                fty0
             };
             append_str(out, fdn);
             push(out, ' ');
@@ -2198,11 +2791,10 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     let name_s: i64 = (*s)[*cur];
     let name_e: i64 = (*e)[*cur];
     *cur = *cur + 1;
-    if (*k)[*cur] == 15 {
-        skip_type_params(k, cur)
-    } else {
-        0
-    };
+    // (4h) set up the type-param scope so the params/body/return type as `<T#i>`;
+    // `tp_setup` resets first (so a non-generic fn gets an empty scope) + advances
+    // past `>` (or no-ops, leaving the cursor at `(`).
+    tp_setup(c, k, s, e, src, cur);
     *cur = *cur + 1;           // skip `(`
     (*c).base = len((*c).scs);
     append_str(out, "(fn #");
@@ -2227,37 +2819,49 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     // tail (`dump_texpr` on the body `Block` threads `rty` to the tail).
     dump_texpr(out, body, rty, src, c, gb);
     push(out, ')');
+    // (4h) clear the type-param scope so a following NON-generic decl (whose pass-2
+    // typing doesn't call `tp_setup`) doesn't see this fn's type-params.
+    tp_reset(c);
     0
 }
 
-// PASS-1 signature scan: position a cursor at the `fn` token `p1` and parse just
-// its return-type handle (skip `fn` name [<...>] `(...)` `->`, parse_type). Used
-// to fill `ufret` so a call to a forward-declared fn types correctly.
-fn scan_fn_ret(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// PASS-1.5 signature scan (was `scan_fn_ret`): position a cursor at the `fn` token
+// `p1`, set up its type-param scope (`<…>`), and record its full SIGNATURE into the
+// fn tables — `ufret` (return handle), `uftp` (type-param count, 0 = non-generic),
+// and `ufps`/`ufpe` (the param-type slice into `ufpp`). All four push once per fn in
+// source order, so they stay index-aligned. The type-param scope is reset after.
+// Lets a forward-declared (and possibly generic) fn type + infer correctly at calls.
+fn scan_fn_sig(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut cur: i64 = p1 + 1;     // at name
     cur = cur + 1;                 // skip name
-    if (*k)[cur] == 15 {
-        skip_type_params(k, &mut cur)
-    } else {
-        0
-    };
+    tp_setup(c, k, s, e, src, &mut cur);   // parse `<…>` type-params (advances past `>`)
+    let ntp: i64 = len((*c).tpns);
     cur = cur + 1;                 // skip `(`
-    skip_tparams(k, s, e, src, &mut cur, c, gb);
+    let ps: i64 = len((*c).ufpp);
+    scan_paramtypes(k, s, e, src, &mut cur, c, gb);
+    let pe: i64 = len((*c).ufpp);
     cur = cur + 1;                 // skip `->`
     let rte: TypeE = parse_type(k, s, e, src, &mut cur);
-    type_of_typeexpr(c, rte, gb)
+    let rty: i64 = type_of_typeexpr(c, rte, gb);
+    push(&mut (*c).ufret, rty);
+    push(&mut (*c).uftp, ntp);
+    push(&mut (*c).ufps, ps);
+    push(&mut (*c).ufpe, pe);
+    tp_reset(c);
+    0
 }
 
-// Skip a param list (no emit, no bind) — mirrors `emit_tparams`'s token walk,
-// disposing each param type. Ends past `)`.
-fn skip_tparams(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// Walk a param list (no emit, no var-bind) recording each param's type handle into
+// `ufpp` (for generic-call unification) — mirrors `emit_tparams`'s token walk under
+// the active type-param scope. Ends past `)`.
+fn scan_paramtypes(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let t: i64 = (*k)[*cur];
     if t == 5 {
         *cur = *cur + 1;
         0
     } else if t == 29 {
         *cur = *cur + 1;
-        skip_tparams(k, s, e, src, cur, c, gb)
+        scan_paramtypes(k, s, e, src, cur, c, gb)
     } else {
         let pm: bool = (*k)[*cur] == 46;
         if pm {
@@ -2269,8 +2873,9 @@ fn skip_tparams(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut 
         *cur = *cur + 1;           // skip name
         *cur = *cur + 1;           // skip `:`
         let pte: TypeE = parse_type(k, s, e, src, cur);
-        type_of_typeexpr(c, pte, gb);
-        skip_tparams(k, s, e, src, cur, c, gb)
+        let pty: i64 = type_of_typeexpr(c, pte, gb);
+        push(&mut (*c).ufpp, pty);
+        scan_paramtypes(k, s, e, src, cur, c, gb)
     }
 }
 
@@ -2319,13 +2924,13 @@ fn type_struct(out: &mut Vec<u8>, c: &mut TyCtx, sid: i64) -> i64 {
 fn scan_struct_fields(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, sid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut cur: i64 = p1 + 1;     // at name
     cur = cur + 1;                 // skip name
-    if (*k)[cur] == 15 {
-        skip_type_params(k, &mut cur)
-    } else {
-        0
-    };
+    // (4h) set up the struct's type-param scope so field types reference `<T#i>`
+    // (`struct Box<T> { value: T }` → field `value: <T#0>`); `tp_setup` advances
+    // past `>` (or no-ops, leaving the cursor at `{`).
+    tp_setup(c, k, s, e, src, &mut cur);
     cur = cur + 1;                 // skip `{`
-    scan_fields_loop(k, s, e, src, &mut cur, sid, c, gb)
+    scan_fields_loop(k, s, e, src, &mut cur, sid, c, gb);
+    tp_reset(c)
 }
 
 fn scan_fields_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, sid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
@@ -3553,6 +4158,16 @@ fn main() -> i64 {
         efoe: vec_new(),
         efor: vec_new(),
         voff: 0,
+        tpb: vec_new(),
+        tpns: vec_new(),
+        tpne: vec_new(),
+        uftp: vec_new(),
+        ufps: vec_new(),
+        ufpe: vec_new(),
+        ufpp: vec_new(),
+        gia: vec_new(),
+        girs: vec_new(),
+        gire: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();
     let mut out: Vec<u8> = vec_new();
@@ -3687,8 +4302,7 @@ fn main() -> i64 {
     let mut ef2: i64 = 0;
     while q < ni {
         if itemkind[q] == 3 {
-            let rh: i64 = scan_fn_ret(&kinds, &starts, &ends, &src, itempos[q], &mut ctx, &mut garbage);
-            push(&mut ctx.ufret, rh);
+            scan_fn_sig(&kinds, &starts, &ends, &src, itempos[q], &mut ctx, &mut garbage);
             0
         } else if itemkind[q] == 52 {
             scan_struct_fields(&kinds, &starts, &ends, &src, itempos[q], sc2, &mut ctx, &mut garbage);

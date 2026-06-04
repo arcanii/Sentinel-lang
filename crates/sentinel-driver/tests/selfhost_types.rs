@@ -14,9 +14,12 @@
 //! classes/traits/impls (the receiver-typed method-dispatch split, class-init, `self`
 //! typing, named-impl qualified calls, `&`/`&mut`/`*` ref typing), and (4g)
 //! effects/handlers (`perform`, `handle` arms, resume-kont, the effect-op-param VarId
-//! offset) — each expression node annotated with its inferred `Type` (a trailing
-//! ` :<type>`); the `let`'s inferred type replaces resolve's `_`. The full-corpus
-//! differential (4i) is the phase-go (D9); generics land at 4h.
+//! offset), and (4h) generics (the `TypeParam` / `GenericInstance` interner kinds, a
+//! per-decl type-param scope rendering `<T#i>`, `unify_one` bidirectional inference at
+//! a generic-fn call emitting `(targs …)` + the substituted return type, and
+//! substitution on a generic-instance field access) — each expression node annotated
+//! with its inferred `Type` (a trailing ` :<type>`); the `let`'s inferred type replaces
+//! resolve's `_`. The full-corpus differential (4i) is the phase-go (D9).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -139,6 +142,19 @@ const SEEDS: &[&str] = &[
     "effect Io { read() -> i64; }\nfn main() -> i64 { handle perform Io.read() with { Io.read(k) => k(42) } }\n",
     "effect Io { write(msg: i64) -> i64; }\nfn w() -> i64 ! { Io } { perform Io.write(7) }\nfn main() -> i64 { handle w() with { Io.write(m, k) => k(m + 1) } }\n",
     "effect Io { read() -> i64; }\nfn r() -> i64 ! { Io } { perform Io.read() }\nfn main() -> i64 { handle r() with { Io.read(k) => k(0), return v => v * 2 } }\n",
+    // (4h) generics: a generic fn (`<T>`) typed as `<T#0>` in its params/body/return,
+    // type-arg inference at call sites (`(targs …)` + the substituted return), two
+    // distinct instantiations of one fn, generic structs (`Box<T>` / `Pair<A,B>` →
+    // a GenericInstance, with field-type substitution + struct-lit under bidirectional
+    // context), `[T]` / `?T` type-param params (the generic builtins' targ is `<T#0>`),
+    // and a second type-param whose substitution differs (`snd<A,B> -> B`).
+    "fn id<T>(x: T) -> T { x }\nfn main() -> i64 { id(42) }\n",
+    "fn pick<T>(c: bool, a: T, b: T) -> T { if c { a } else { b } }\nfn main() -> i64 { let n: i64 = pick(true, 1, 2); let bb: bool = pick(false, true, false); if bb { n } else { 0 } }\n",
+    "struct Box<T> { value: T }\nfn main() -> i64 { let b: Box<i64> = Box { value: 7 }; b.value }\n",
+    "struct Pair<A, B> { fst: A, snd: B }\nfn mk<A, B>(a: A, b: B) -> Pair<A, B> { Pair { fst: a, snd: b } }\nfn firstof(p: Pair<i64, i64>) -> i64 { p.fst }\nfn main() -> i64 { let p: Pair<i64, i64> = mk(3, 4); firstof(p) }\n",
+    "fn count<T>(a: [T]) -> i64 { len(a) }\nfn main() -> i64 { count([1, 2, 3]) }\n",
+    "fn first_or<T>(x: ?T, d: T) -> T { unwrap_or(x, d) }\nfn main() -> i64 { let a: ?i64 = 9; first_or(a, 0) }\n",
+    "fn snd<A, B>(a: A, b: B) -> B { b }\nfn main() -> i64 { let r: bool = snd(1, true); if r { 1 } else { 0 } }\n",
 ];
 
 #[test]
