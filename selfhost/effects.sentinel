@@ -1,0 +1,737 @@
+// selfhost/effects.sentinel — the FIFTH Sentinel compiler stage (ADR 0042).
+//
+// Effect-check: each user fn's EFFECTIVE EFFECT ROW = (its `! { … }` annotation, if
+// non-empty) else the inferred row = the union of its callees' rows + its own
+// `perform` / `spawn` / `.await` effects, MINUS the effects discharged by an
+// enclosing `handle` / `scope concurrent`. Dumped one line per fn in FnId order:
+// `(fn #<id> <name> <effect-name>…)` (effects by name in EffectId order; empty →
+// `(fn #N name)`), matching `snc effects` byte-for-byte.
+//
+// SELF-CONTAINED (ADR 0042 D3): imports only the parser; re-derives the fn + effect
+// tables, re-scans each fn's annotation row, and walks the call graph. Effect rows
+// are i64 BITMASKS (ADR 0042 D4): union `|`, discharge `row & (mask ^ (0-1))`
+// (bit-not via `^ -1` — 1.0 has no `~`/`<<`/`>>`); `bitof` builds `2^eid` by a
+// multiply loop. The fixed-point REBUILDS the per-fn rows `Vec<i64>` each sweep via
+// RECURSION (Vec index-assign + loop-reassign-of-a-Move-binding are both forbidden).
+//
+// A precompute pass walks each body ONCE, recording call-graph edges (caller, callee,
+// the site's enclosing-discharge mask) + the fn's own-effect mask; the fixed-point is
+// then pure bit ops over those flat lists.
+
+use parser::Expr;
+use parser::Stmts;
+use parser::Stmt;
+use parser::Args;
+use parser::Fields;
+use parser::Arms;
+use parser::Pattern;
+use parser::Binds;
+use parser::HArms;
+use parser::Ret;
+use parser::TypeE;
+use parser::TyArgs;
+use parser::TyOpt;
+use parser::tokenize;
+use parser::parse_block;
+use parser::parse_type;
+use parser::skip_type_params;
+use parser::append_int;
+use parser::append_str;
+use parser::append_slice;
+
+struct ECtx {
+    // user-fn table: name src slices (FnId = 14 + idx).
+    ufs: Vec<i64>,
+    ufe: Vec<i64>,
+    // user-effect table: name src slices (EffectId = idx); the built-in `Async` is
+    // EffectId = len(efs) (the user-effect count) — never stored, rendered specially.
+    efs: Vec<i64>,
+    efe: Vec<i64>,
+    // per-fn (idx) annotation mask — 0 = unannotated / empty `! { }` → inferred.
+    ann: Vec<i64>,
+    // per-fn (idx) own-effect mask (perform/spawn/await, post-discharge at each site).
+    own: Vec<i64>,
+    // precomputed call-graph edges: caller idx, callee idx, the call site's
+    // enclosing-discharge mask (handles/scopes the call sits inside).
+    ecaller: Vec<i64>,
+    ecallee: Vec<i64>,
+    edisch: Vec<i64>,
+}
+
+// --- bit helpers (no `<<`/`>>`/`~` in 1.0) ----------------------------------
+
+// `2^eid` via a multiply loop (effects are few; eid is small).
+fn bitof(eid: i64) -> i64 {
+    let mut b: i64 = 1;
+    let mut i: i64 = 0;
+    while i < eid {
+        b = b * 2;
+        i = i + 1;
+    }
+    b
+}
+
+// --- name comparison + disposal (resolve/types idioms) ----------------------
+
+fn name_eq_src(src: &[u8], st: i64, en: i64, q: &[u8]) -> bool {
+    let qn: i64 = len(*q);
+    if en - st != qn {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < qn {
+            if (*src)[st + i] != (*q)[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Compare a `src` slice against a string LITERAL (by value, like `name_eq_lit`).
+fn src_eq_lit(src: &[u8], st: i64, en: i64, lit: [u8]) -> bool {
+    let qn: i64 = len(lit);
+    if en - st != qn {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < qn {
+            if (*src)[st + i] != lit[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Compare two `src` slices (for the annotation re-scan, where the queried effect
+// name is itself a src slice).
+fn same_src(src: &[u8], s1: i64, e1: i64, s2: i64, e2: i64) -> bool {
+    if e1 - s1 != e2 - s2 {
+        false
+    } else {
+        let n: i64 = e1 - s1;
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < n {
+            if (*src)[s1 + i] != (*src)[s2 + i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Sink a discarded owned `[u8]` (a resolved-away name) into the garbage Vec — an
+// owned `[u8]` merely indexed/dropped LEAKS; pushing its bytes reclaims it.
+fn sink_name(gb: &mut Vec<u8>, name: [u8]) -> i64 {
+    let n: i64 = len(name);
+    let mut i: i64 = 0;
+    while i < n {
+        push(gb, name[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// --- table lookups ----------------------------------------------------------
+
+// A call name → its user-fn INDEX (FnId = 14 + idx), or -1 for a builtin / a
+// continuation / any non-user-fn (all effect-free → no edge).
+fn fn_lookup(c: &mut ECtx, src: &[u8], q: &[u8]) -> i64 {
+    let n: i64 = len((*c).ufs);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// An effect name (owned `[u8]`) → its EffectId, or -1.
+fn effect_lookup(c: &mut ECtx, src: &[u8], q: &[u8]) -> i64 {
+    let n: i64 = len((*c).efs);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if name_eq_src(src, (*c).efs[i], (*c).efe[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// An effect name given as a SRC slice → its EffectId, or -1 (the annotation scan).
+// The built-in `Async` (`! { Async }`) is not in `efs` — it is EffectId = len(efs).
+fn effect_lookup_slice(c: &mut ECtx, src: &[u8], st: i64, en: i64) -> i64 {
+    let n: i64 = len((*c).efs);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if same_src(src, st, en, (*c).efs[i], (*c).efe[i]) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if found == 0 - 1 {
+        if src_eq_lit(src, st, en, "Async") {
+            len((*c).efs)
+        } else {
+            0 - 1
+        }
+    } else {
+        found
+    }
+}
+
+// --- AST disposal (consume every owned `[u8]` in skipped sub-structures) -----
+
+fn sink_typee(t: TypeE, gb: &mut Vec<u8>) -> i64 {
+    match t {
+        TypeE::TIdent(nm) => sink_name(gb, nm),
+        TypeE::TNullable(i) => sink_typee(i, gb),
+        TypeE::TArray(i) => sink_typee(i, gb),
+        TypeE::TRef(i) => sink_typee(i, gb),
+        TypeE::TRefMut(i) => sink_typee(i, gb),
+        TypeE::TSecret(i) => sink_typee(i, gb),
+        TypeE::TGeneric(nm, ga) => {
+            sink_name(gb, nm);
+            sink_tyargs(ga, gb)
+        },
+    }
+}
+
+fn sink_tyargs(a: TyArgs, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        TyArgs::TAEnd => 0,
+        TyArgs::TACell(t, rest) => {
+            sink_typee(t, gb);
+            sink_tyargs(rest, gb)
+        },
+    }
+}
+
+fn sink_tyopt(t: TyOpt, gb: &mut Vec<u8>) -> i64 {
+    match t {
+        TyOpt::NoTy => 0,
+        TyOpt::SomeTy(te) => sink_typee(te, gb),
+    }
+}
+
+fn sink_binds(b: Binds, gb: &mut Vec<u8>) -> i64 {
+    match b {
+        Binds::BindEnd => 0,
+        Binds::BindCell(nm, rest) => {
+            sink_name(gb, nm);
+            sink_binds(rest, gb)
+        },
+    }
+}
+
+fn sink_pattern(p: Pattern, gb: &mut Vec<u8>) -> i64 {
+    match p {
+        Pattern::PatWild => 0,
+        Pattern::PatVariant(en, vn, binds) => {
+            sink_name(gb, en);
+            sink_name(gb, vn);
+            sink_binds(binds, gb)
+        },
+    }
+}
+
+// --- the precompute walk: collect call edges + the fn's own-effect mask ------
+
+// Walk an expression (consuming it), threading the enclosing-`disch`arge mask down;
+// record each fn-call as an edge (caller `fidx` → callee, with `disch`) and OR each
+// own perform/spawn/await effect (post-discharge) into `*own`. `aid` = the Async
+// EffectId (= user-effect count). All owned `[u8]` payloads are sunk.
+fn walk_eff(e: Expr, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, src: &[u8], fidx: i64, aid: i64) -> i64 {
+    match e {
+        Expr::Int(_) => 0,
+        Expr::Bool(_) => 0,
+        Expr::Null => 0,
+        Expr::Char(_) => 0,
+        Expr::Str(sb) => sink_name(gb, sb),
+        Expr::Var(nm) => sink_name(gb, nm),
+        Expr::Unary(_, inner) => walk_eff(inner, disch, own, c, gb, src, fidx, aid),
+        Expr::Binary(_, l, r) => {
+            walk_eff(l, disch, own, c, gb, src, fidx, aid);
+            walk_eff(r, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Call(nm, args) => {
+            let callee: i64 = fn_lookup(c, src, &nm);
+            sink_name(gb, nm);
+            if callee >= 0 {
+                push(&mut (*c).ecaller, fidx);
+                push(&mut (*c).ecallee, callee);
+                push(&mut (*c).edisch, disch);
+                0
+            } else {
+                0
+            };
+            walk_args(args, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Method(t, mn, args) => {
+            // The Rust pass walks receiver + args but does NOT union a method's own
+            // row (D7 follow-on) — so no edge.
+            sink_name(gb, mn);
+            walk_eff(t, disch, own, c, gb, src, fidx, aid);
+            walk_args(args, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Field(t, fnm) => {
+            sink_name(gb, fnm);
+            walk_eff(t, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Index(t, ix) => {
+            walk_eff(t, disch, own, c, gb, src, fidx, aid);
+            walk_eff(ix, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Qcall(qi, qm, args) => {
+            // enum-construct / qcall-impl — walk args only (no own effect).
+            sink_name(gb, qi);
+            sink_name(gb, qm);
+            walk_args(args, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::ClassInit(cn, args) => {
+            sink_name(gb, cn);
+            walk_args(args, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Array(args) => walk_args(args, disch, own, c, gb, src, fidx, aid),
+        Expr::If(cnd, thn, els) => {
+            walk_eff(cnd, disch, own, c, gb, src, fidx, aid);
+            walk_eff(thn, disch, own, c, gb, src, fidx, aid);
+            walk_eff(els, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Block(stmts, tail) => {
+            walk_stmts(stmts, disch, own, c, gb, src, fidx, aid);
+            walk_eff(tail, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Match(scr, arms) => {
+            walk_eff(scr, disch, own, c, gb, src, fidx, aid);
+            walk_arms(arms, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::StructLit(sn, fields) => {
+            sink_name(gb, sn);
+            walk_fields(fields, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Declassify(inner) => walk_eff(inner, disch, own, c, gb, src, fidx, aid),
+        Expr::Perform(eff, op, args) => {
+            let eid: i64 = effect_lookup(c, src, &eff);
+            sink_name(gb, eff);
+            sink_name(gb, op);
+            if eid >= 0 {
+                let nd: i64 = disch ^ (0 - 1);
+                *own = *own | (bitof(eid) & nd);
+                0
+            } else {
+                0
+            };
+            walk_args(args, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Scope(body) => {
+            // `scope concurrent { … }` discharges Async from its body.
+            let ab: i64 = bitof(aid);
+            walk_eff(body, disch | ab, own, c, gb, src, fidx, aid)
+        },
+        Expr::Spawn(inner) => {
+            let nds: i64 = disch ^ (0 - 1);
+            *own = *own | (bitof(aid) & nds);
+            walk_eff(inner, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Await(inner) => {
+            let nda: i64 = disch ^ (0 - 1);
+            *own = *own | (bitof(aid) & nda);
+            walk_eff(inner, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::Handle(body, arms, ret) => {
+            // `handle` discharges its arms' effects from the BODY (not the arms /
+            // return arm, which contribute normally). Walk the arms FIRST to collect
+            // the handled mask (consuming them), then the body with `disch | handled`.
+            let hmask: i64 = walk_harms(arms, disch, own, c, gb, src, fidx, aid);
+            walk_eff(body, disch | hmask, own, c, gb, src, fidx, aid);
+            walk_ret(ret, disch, own, c, gb, src, fidx, aid)
+        },
+        Expr::SynthZero => 0,
+    }
+}
+
+fn walk_args(a: Args, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, src: &[u8], fidx: i64, aid: i64) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(x, rest) => {
+            walk_eff(x, disch, own, c, gb, src, fidx, aid);
+            walk_args(rest, disch, own, c, gb, src, fidx, aid)
+        },
+    }
+}
+
+fn walk_stmts(st: Stmts, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, src: &[u8], fidx: i64, aid: i64) -> i64 {
+    match st {
+        Stmts::SEnd => 0,
+        Stmts::SCell(s, rest) => {
+            walk_stmt(s, disch, own, c, gb, src, fidx, aid);
+            walk_stmts(rest, disch, own, c, gb, src, fidx, aid)
+        },
+    }
+}
+
+fn walk_stmt(s: Stmt, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, src: &[u8], fidx: i64, aid: i64) -> i64 {
+    match s {
+        Stmt::SLet(_, nm, ty, val) => {
+            sink_name(gb, nm);
+            sink_tyopt(ty, gb);
+            walk_eff(val, disch, own, c, gb, src, fidx, aid)
+        },
+        Stmt::SAssign(tgt, val) => {
+            walk_eff(tgt, disch, own, c, gb, src, fidx, aid);
+            walk_eff(val, disch, own, c, gb, src, fidx, aid)
+        },
+        Stmt::SWhile(cnd, body) => {
+            walk_eff(cnd, disch, own, c, gb, src, fidx, aid);
+            walk_eff(body, disch, own, c, gb, src, fidx, aid)
+        },
+        Stmt::SBreak => 0,
+        Stmt::SContinue => 0,
+        Stmt::SExpr(ex) => walk_eff(ex, disch, own, c, gb, src, fidx, aid),
+    }
+}
+
+fn walk_arms(a: Arms, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, src: &[u8], fidx: i64, aid: i64) -> i64 {
+    match a {
+        Arms::ArmEnd => 0,
+        Arms::ArmCell(pat, body, rest) => {
+            sink_pattern(pat, gb);
+            walk_eff(body, disch, own, c, gb, src, fidx, aid);
+            walk_arms(rest, disch, own, c, gb, src, fidx, aid)
+        },
+    }
+}
+
+fn walk_fields(f: Fields, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, src: &[u8], fidx: i64, aid: i64) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fval, rest) => {
+            sink_name(gb, fnm);
+            walk_eff(fval, disch, own, c, gb, src, fidx, aid);
+            walk_fields(rest, disch, own, c, gb, src, fidx, aid)
+        },
+    }
+}
+
+// Walk the handler arms (consuming), collecting their bodies' effects (with the OUTER
+// `disch`) + RETURNING the union of the effects they HANDLE (each arm's effect bit) —
+// the mask the enclosing `handle` discharges from its body.
+fn walk_harms(a: HArms, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, src: &[u8], fidx: i64, aid: i64) -> i64 {
+    match a {
+        HArms::HEnd => 0,
+        HArms::HCell(eff, op, params, body, rest) => {
+            let eid: i64 = effect_lookup(c, src, &eff);
+            sink_name(gb, eff);
+            sink_name(gb, op);
+            sink_binds(params, gb);
+            walk_eff(body, disch, own, c, gb, src, fidx, aid);
+            let rest_mask: i64 = walk_harms(rest, disch, own, c, gb, src, fidx, aid);
+            let this_bit: i64 = if eid >= 0 {
+                bitof(eid)
+            } else {
+                0
+            };
+            this_bit | rest_mask
+        },
+    }
+}
+
+fn walk_ret(r: Ret, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, src: &[u8], fidx: i64, aid: i64) -> i64 {
+    match r {
+        Ret::NoRet => 0,
+        Ret::YesRet(nm, body) => {
+            sink_name(gb, nm);
+            walk_eff(body, disch, own, c, gb, src, fidx, aid)
+        },
+    }
+}
+
+// --- the fixed-point (the D4 probe shape) -----------------------------------
+
+// The inferred row for fn `fidx` = its own-effect mask | the OR over its call edges
+// of (callee's current row, with that edge's discharge cleared).
+fn infer_row(fidx: i64, rows: &Vec<i64>, c: &mut ECtx) -> i64 {
+    let mut acc: i64 = (*c).own[fidx];
+    let ne: i64 = len((*c).ecaller);
+    let mut i: i64 = 0;
+    while i < ne {
+        if (*c).ecaller[i] == fidx {
+            let callee: i64 = (*c).ecallee[i];
+            let nd: i64 = (*c).edisch[i] ^ (0 - 1);
+            acc = acc | ((*rows)[callee] & nd);
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    acc
+}
+
+// One sweep: rebuild a FRESH per-fn rows Vec in FnId order. An annotated fn (mask ≠ 0)
+// is frozen at its annotation; an unannotated/empty-annotated fn takes the inferred row.
+fn sweep(rows: &Vec<i64>, c: &mut ECtx) -> Vec<i64> {
+    let nf: i64 = len((*c).ufs);
+    let mut nr: Vec<i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < nf {
+        let a: i64 = (*c).ann[i];
+        let row: i64 = if a != 0 {
+            a
+        } else {
+            infer_row(i, rows, c)
+        };
+        push(&mut nr, row);
+        i = i + 1;
+    }
+    nr
+}
+
+fn rows_eq(a: &Vec<i64>, b: &Vec<i64>) -> bool {
+    let n: i64 = len(*a);
+    let mut i: i64 = 0;
+    let mut ok: bool = true;
+    while i < n {
+        if (*a)[i] != (*b)[i] {
+            ok = false;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    ok
+}
+
+// Iterate to a fixed point by RECURSION (take `rows` by value, sweep, converge or
+// recurse) — sidesteps both the `Vec` index-assign ban and the moved-in-loop trap.
+fn fixpoint(rows: Vec<i64>, c: &mut ECtx) -> Vec<i64> {
+    let nr: Vec<i64> = sweep(&rows, c);
+    if rows_eq(&rows, &nr) {
+        nr
+    } else {
+        fixpoint(nr, c)
+    }
+}
+
+// --- the annotation re-scan + the dump --------------------------------------
+
+// Scan a `! { Eff1, Eff2 }` effect row (cursor at `!` = token 24) into a bitmask of
+// EffectIds, advancing the cursor past the closing `}`.
+fn scan_effect_row(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut ECtx) -> i64 {
+    *cur = *cur + 1;             // skip `!`
+    *cur = *cur + 1;             // skip `{`
+    let mut mask: i64 = 0;
+    while (*k)[*cur] != 7 {
+        if (*k)[*cur] == 29 {
+            *cur = *cur + 1;     // skip `,`
+            0
+        } else {
+            let eid: i64 = effect_lookup_slice(c, src, (*s)[*cur], (*e)[*cur]);
+            if eid >= 0 {
+                mask = mask | bitof(eid);
+                0
+            } else {
+                0
+            };
+            *cur = *cur + 1;
+            0
+        };
+    }
+    *cur = *cur + 1;             // skip `}`
+    mask
+}
+
+// Skip a `( params )` list (cursor just past the opening `(`); param types contain no
+// nested `(`, so advancing to the first `)` (token 5) closes the list.
+fn skip_param_list(k: &Vec<i64>, cur: &mut i64) -> i64 {
+    while (*k)[*cur] != 5 {
+        *cur = *cur + 1;
+    }
+    *cur = *cur + 1;             // skip `)`
+    0
+}
+
+// Emit `(fn #<id> <name> <effect-name>…)` for each user fn in FnId order.
+fn dump_rows(out: &mut Vec<u8>, rows: &Vec<i64>, c: &mut ECtx, src: &[u8]) -> i64 {
+    let nf: i64 = len((*c).ufs);
+    let neff: i64 = len((*c).efs);
+    let mut i: i64 = 0;
+    while i < nf {
+        append_str(out, "(fn #");
+        append_int(out, 14 + i);
+        push(out, ' ');
+        append_slice(out, src, (*c).ufs[i], (*c).ufe[i]);
+        let row: i64 = (*rows)[i];
+        let mut eid: i64 = 0;
+        while eid <= neff {
+            if (row & bitof(eid)) != 0 {
+                push(out, ' ');
+                if eid < neff {
+                    append_slice(out, src, (*c).efs[eid], (*c).efe[eid])
+                } else {
+                    append_str(out, "Async")
+                };
+                0
+            } else {
+                0
+            };
+            eid = eid + 1;
+        }
+        push(out, ')');
+        push(out, '\n');
+        i = i + 1;
+    }
+    0
+}
+
+fn main() -> i64 {
+    let path: [u8] = "input.sentinel";
+    let src: [u8] = read_file(path);
+    let n: i64 = len(src);
+    let mut kinds: Vec<i64> = vec_new();
+    let mut starts: Vec<i64> = vec_new();
+    let mut ends: Vec<i64> = vec_new();
+    tokenize(&src, n, &mut kinds, &mut starts, &mut ends);
+    let ntok: i64 = len(kinds);
+
+    let mut ctx: ECtx = ECtx {
+        ufs: vec_new(),
+        ufe: vec_new(),
+        efs: vec_new(),
+        efe: vec_new(),
+        ann: vec_new(),
+        own: vec_new(),
+        ecaller: vec_new(),
+        ecallee: vec_new(),
+        edisch: vec_new(),
+    };
+    let mut gb: Vec<u8> = vec_new();
+    let mut out: Vec<u8> = vec_new();
+
+    // Pass 1: brace-depth scan for TOP-LEVEL `fn` names (FnId 14+) + `effect` names
+    // (EffectId 0+). A method `fn` inside a class/impl/trait body is at depth > 0.
+    let mut depth: i64 = 0;
+    let mut p1: i64 = 0;
+    let mut fnpos: Vec<i64> = vec_new();
+    while p1 < ntok {
+        let t1: i64 = kinds[p1];
+        if t1 == 6 {
+            depth = depth + 1;
+            0
+        } else if t1 == 7 {
+            depth = depth - 1;
+            0
+        } else if depth == 0 {
+            if t1 == 3 {
+                push(&mut ctx.ufs, starts[p1 + 1]);
+                push(&mut ctx.ufe, ends[p1 + 1]);
+                push(&mut fnpos, p1);
+                0
+            } else if t1 == 57 {
+                push(&mut ctx.efs, starts[p1 + 1]);
+                push(&mut ctx.efe, ends[p1 + 1]);
+                0
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        p1 = p1 + 1;
+    }
+
+    let aid: i64 = len(ctx.efs);   // the built-in Async EffectId = the user-effect count.
+
+    // Pass 2 (precompute): per fn, parse its header (capturing the annotation mask +
+    // positioning at the body), then walk the body collecting call edges + the own mask.
+    let nf: i64 = len(fnpos);
+    let mut q: i64 = 0;
+    while q < nf {
+        let mut cur: i64 = fnpos[q] + 1;   // at name
+        cur = cur + 1;                     // skip name
+        if kinds[cur] == 15 {
+            skip_type_params(&kinds, &mut cur)
+        } else {
+            0
+        };
+        cur = cur + 1;                     // skip `(`
+        skip_param_list(&kinds, &mut cur);
+        cur = cur + 1;                     // skip `->`
+        let rte: TypeE = parse_type(&kinds, &starts, &ends, &src, &mut cur);
+        sink_typee(rte, &mut gb);
+        let amask: i64 = if kinds[cur] == 24 {
+            scan_effect_row(&kinds, &starts, &ends, &src, &mut cur, &mut ctx)
+        } else {
+            0
+        };
+        push(&mut ctx.ann, amask);
+        let body: Expr = parse_block(&kinds, &starts, &ends, &src, &mut cur);
+        let mut ownacc: i64 = 0;
+        walk_eff(body, 0, &mut ownacc, &mut ctx, &mut gb, &src, q, aid);
+        push(&mut ctx.own, ownacc);
+        q = q + 1;
+    }
+
+    // The fixed-point + the dump.
+    let mut rows0: Vec<i64> = vec_new();
+    let mut z: i64 = 0;
+    while z < nf {
+        push(&mut rows0, 0);
+        z = z + 1;
+    }
+    let fin: Vec<i64> = fixpoint(rows0, &mut ctx);
+    dump_rows(&mut out, &fin, &mut ctx, &src);
+
+    let arr: [u8] = vec_to_array(out);
+    print_bytes(arr);
+    let _g: [u8] = vec_to_array(gb);
+    0
+}
