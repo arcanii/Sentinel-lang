@@ -79,7 +79,7 @@ ret_ty }`; `MirBlock { params: Vec<MirValue>, insts, term }`; `MirInst { dest, o
 {target, args}`, `Branch {cond, then/else_blk, then/else_args, span}`, `Return(value?)`,
 `Unreachable`). `SinkKind` = `Branch`/`MemoryIndex`/`MemoryAddress`/`Division`.
 
-### D2. The oracle — a canonical MIR dump (`snc mir <file>`). [the load-bearing differential]
+### D2. The oracle — a canonical MIR dump (`snc mir <file>`). [LANDED — the load-bearing differential]
 
 `run_mir` + a new `crates/sentinel-driver/src/mir_dump.rs` (mirroring `borrow_dump.rs` /
 `effects_dump.rs`): parse → resolve → check → **`lower_to_mir`** → pretty-print the
@@ -109,6 +109,21 @@ the phase-go set is the ~123 type-clean corpus (D9). The verifier is validated s
 is type-clean (in the 123) but MIR-verifier-rejected — its lowered dump shows a
 secret-conditional `Branch`, so the LOWERING differential covers it (123), while the
 VERIFIER differential (D6) is where it shows up as the one true positive.
+
+**[LANDED]** `run_mir` + `crates/sentinel-driver/src/mir_dump.rs` + 8 goldens (`tests/mir.rs`).
+**AS-BUILT grammar (supersedes the sketch above):** `(fn <name> <ret-ty> <block>…)`; each
+block `(block b<N> (params <def>…) <inst>… (term <t>))`; a value DEF (block param / inst
+dest) = `v<N>:<ty>` (type via `type_display`, inline colon — may contain spaces, e.g.
+`v0:secret bool`), a USE = the bare `v<N>`; inst = `(v<dest>:<ty> <opname> <operands>)` —
+`const_int <n>` / `const_bool <true|false>` / `unary <sym> v` / `binop <sym> v v` / `cmp
+<sym> v v` / `declassify v` / `load v[ v]` (base then optional index) / `call <callee> v…` /
+`opaque v…`; term = `(term return[ v])` / `(term jump b<t> v…)` / `(term branch <cond>
+(b<then> v…) (b<else> v…))` / `(term unreachable)`; operators via `.symbol()` (the `snc ast`
+form); **NO spans**. Fns in FnId order (= source order). **Robust: 0 panics over the corpus;
+accepts EXACTLY the 123 type-clean fixtures** (= the types/borrow phase-go set — lowering is
+TOTAL, so every type-clean fixture lowers), rejects the 18 type-rejected. The
+`c52_secret_leak` lowered dump shows the secret `Branch` (covered by the lowering
+differential). This grammar is now the byte-target the Sentinel `mir.sentinel` reproduces.
 
 ### D3. How the Sentinel stage obtains the typed program (the reuse — PROBE-GATED).
 
