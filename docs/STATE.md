@@ -50,8 +50,10 @@ leak-free). **(7a) straight-line INTEGRATION LANDED (A2, `dc20dd8`) — `selfhos
 (the 7th stage) via fused `mode 2`: 8 seeds match `snc mir`, modes 0/1 stay 123/123
 byte-identical, leak-free. (7a) COMPLETE.** ⚠ one Sentinel rule found: passing `&mut
 (*c).field` to a USER fn re-borrows `c` → render into a LOCAL buffer + `push`-fold into the
-ctx field. NEXT = (7b) control flow (if/`&&`/`||` → branch+merge, the probe-proven
-algorithm). The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
+ctx field. **(7b) CONTROL FLOW LANDED (A3, `c15ce6d`)** — the branch+merge in the If/Logic
+(`&&`/`||`) arms (VarId-sorted diverged-var merge params; an SAssign rebind via `mir_lastvid`);
++8 control-flow seeds match `snc mir`, modes 0/1 stay 123/123, leak-free. NEXT = (7c) the
+`Opaque` catch-all + `Load` + calls. The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
 codegen reads the `TypedProgram` directly via `hir.program()`), and **codegen is the real
 transform** (→ a separate **8/N**, where Sentinel's lack of LLVM FFI forces an

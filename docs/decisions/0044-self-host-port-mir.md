@@ -115,6 +115,29 @@ variant — **the constant-time verifier is IN scope** (not the "drop verifier" 
   the probe-proven algorithm) → **(7c)** the `Opaque` catch-all + `Load` + calls → **(7e)**
   the full-corpus phase-go.
 
+- **A3 — (7b) CONTROL FLOW LANDED** (`c15ce6d`): the branch-merge in the `If` and Logic
+  (`&&`/`||`) `dump_texpr` arms under mode 2 — the probe-proven algorithm, executed as
+  designed. **`If`:** branch on the cond into fresh then/else blocks (snapshot `var_defs`
+  depth), walk each arm, then a merge block whose first param is the if-result + one param
+  per variable that **diverged** across the arms (VarId-sorted — iterate `0..nextvid`, keep
+  those live at the branch), reconciled via the arms' jumps. The then-arm rebindings are
+  saved to a side `(var,val)` list, `var_defs` truncated to the branch depth, then the else
+  arm walks and each live var's then-value (side-list / branch snapshot) vs else-value
+  (`var_defs[snap..]` / snapshot) is compared. **`&&`/`||`:** a short-circuit branch (And:
+  true→rhs, false→short-false; Or: true→short-true, false→rhs) merging the rhs value with
+  the short constant. New helpers: `mir_term_branch`/`mir_term_jump` + `var_defs`
+  prefix/range lookups + truncate + a side-list lookup. ⚠ **ONE MISSING HOOK found by the
+  `g` merge seed:** the merge needs **assignments** (not just `let`s) to update `var_defs` —
+  7a only hooked `SLet`. Added an `SAssign` rebind: `mir_lastvid` (the VarId the most-recent
+  `Var` node resolved to, set in the Var arm) gives a plain-Var target's VarId → rebind
+  `var_defs` to the RHS's `lastval`. (A field/`*`-deref store also routes its receiver Var
+  through `mir_lastvid`, so the Var-only rebind is exercised by the corpus only once the
+  `Opaque` store lands — 7c.) Matches `snc mir` byte-for-byte on **+8 control-flow seeds**
+  (`if`, `&&`, `||`, `secret &&`, a 1-var + a 2-var merge, nested `if`s, a logic chain);
+  **modes 0/1 stay 123/123 byte-identical**; **leak-free**. **NEXT = (7c)** the `Opaque`
+  catch-all + `Load` (index/deref) + calls (with the `mir_args` stack) → **(7e)** the
+  full-corpus phase-go.
+
 ## Decision
 
 ### D1. Goal.

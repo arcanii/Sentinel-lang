@@ -1861,20 +1861,22 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 
 ### 0.3 Quick-status block for session start
 
-> **NEXT = (7b) — control flow: `if`/`&&`/`||` → branch + merge (the probe-proven
-> algorithm). (7a) is COMPLETE** (ADR 0044 A1+A2): the `snc mir` ORACLE (`ce29b1e`) + the
-> SSA data-model PROBE (D4 confirmed, the merge de-risked early) + the **straight-line
-> INTEGRATION** (`selfhost/mir.sentinel`, the 7th stage, `dc20dd8`) all landed. `mir.sentinel`
+> **NEXT = (7c) — the `Opaque` catch-all + `Load` (index/deref) + calls (the `mir_args`
+> stack). (7a)+(7b) are DONE** (ADR 0044 A1–A3): the `snc mir` ORACLE (`ce29b1e`) + the SSA
+> data-model PROBE + the **straight-line INTEGRATION** (`dc20dd8`) + **CONTROL FLOW**
+> (`c15ce6d` — `if`/`&&`/`||` → branch + VarId-sorted merge, an `SAssign` rebind via
+> `mir_lastvid`) all landed; `selfhost/mir.sentinel` is the 7th stage. `mir.sentinel`
 > reuses `types.sentinel` via a new **`mode 2`** (the 6/N `types::run` template, FUSED into
 > the pass-2 walk as a guarded `if (*c).mode == 2` side-build + a `lastval` ctx field):
 > straight-line (const/var/unary/binop/cmp/`let` → one block + Return) matches `snc mir`
 > byte-for-byte on 8 seeds, **modes 0/1 stay 123/123 byte-identical** (mode-2 emits are dead
 > there), **leak-free**. ⚠ Sentinel rule found: passing `&mut (*c).field` to a USER fn
-> re-borrows `c` → render into a LOCAL buffer + `push`-fold into the ctx field. **(7b)** adds
-> the branch-merge to the If/Logic `dump_texpr` arms (the probe's `var_defs`
-> snapshot/truncate + VarId-sorted merge params); then **(7c)** the `Opaque` catch-all +
-> `Load` + calls; then **(7e)** the full-corpus phase-go. **The BORROW-CHECK stage (6/N, ADR
-> 0043) is COMPLETE — ADR 0043 → ACCEPTED.**
+> re-borrows `c` → render into a LOCAL buffer + `push`-fold into the ctx field. **(7b) DONE**
+> (`c15ce6d`): the branch-merge in the If/Logic arms (the probe's `var_defs` snapshot/truncate
+> + VarId-sorted merge params; `&&`/`||` short-circuit; an `SAssign` rebind via `mir_lastvid`).
+> **NEXT (7c)** = the `Opaque` catch-all + `Load` (index/deref) + calls (a `mir_args` stack to
+> collect each call/aggregate's operand MirValues); then **(7e)** the full-corpus phase-go.
+> **The BORROW-CHECK stage (6/N, ADR 0043) is COMPLETE — ADR 0043 → ACCEPTED.**
 > `selfhost/borrow.sentinel` matches `snc borrow` byte-for-byte over the ENTIRE
 > clean-borrow corpus — **123/123 fixtures**
 > (`sentinel_borrow_checker_matches_oracle_on_corpus`, the D8 phase-go) + 5 seeds,
@@ -1922,14 +1924,14 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0044 A2** docs commit ((7a) complete),
-    atop the straight-line MIR feat (`dc20dd8`) + the `snc mir` oracle (`ce29b1e`) + the ADR
-    0044 PROPOSED kickoff + the (6/N) borrow stage (ADR 0043 ACCEPTED:
-    `a76b8b0`/`d21910d`/`4ef657d`). Clean tree; four-check green (cargo build + `cargo
-    nextest run --workspace` + `cargo test --doc --workspace` + `cargo clippy --workspace
-    --all-targets -- -D warnings`); **1444 tests** (+8 `snc mir` goldens + 1 `mir.sentinel`
-    seeds test). `selfhost/mir.sentinel` (the 7th stage) lowers straight-line; (7b) control
-    flow is next. macOS + LLVM 18.
+    Verify HEAD with `git log -1` — expect the **ADR 0044 A3** docs commit ((7b) control
+    flow), atop the (7b) feat (`c15ce6d`) + the straight-line MIR feat (`dc20dd8`) + the `snc
+    mir` oracle (`ce29b1e`) + the ADR 0044 PROPOSED kickoff + the (6/N) borrow stage (ADR 0043
+    ACCEPTED: `a76b8b0`/`d21910d`/`4ef657d`). Clean tree; four-check green (cargo build +
+    `cargo nextest run --workspace` + `cargo test --doc --workspace` + `cargo clippy
+    --workspace --all-targets -- -D warnings`); **1444 tests** (+8 `snc mir` goldens + 1
+    `mir.sentinel` seeds test, now 16 seeds). `selfhost/mir.sentinel` (the 7th stage) lowers
+    straight-line + control flow; (7c) Opaque/Load/calls is next. macOS + LLVM 18.
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
     + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR
@@ -1940,17 +1942,18 @@ For pasting into a fresh chat to bootstrap context:
     types.sentinel, effects.sentinel, borrow.sentinel. **▶ (7/N) MIR + the const-time
     verifier OPENED — ADR 0044 PROPOSED (owner-chosen over codegen-first); no code yet.**
 
-    NEXT = **(7b) control flow** — add the `if`/`&&`/`||` branch + merge to the If/Logic
-    `dump_texpr` arms (the probe-proven `var_defs` snapshot/truncate + VarId-sorted merge
-    params). **(7a) is COMPLETE** (ADR 0044 A1+A2): the `snc mir` ORACLE (`ce29b1e`, 8
-    goldens, accepts the 123 type-clean set, 0 panics) + the SSA data-model PROBE (D4
-    CONFIRMED — flat append-only `Vec` pools, NO index-assign — + the branch-merge de-risked
-    early) + the **straight-line INTEGRATION** (`selfhost/mir.sentinel`, the 7th stage,
-    `dc20dd8`, via fused `mode 2`: 8 seeds match `snc mir`, modes 0/1 stay 123/123, leak-free)
-    all landed. ⚠ Sentinel rule: passing `&mut (*c).field` to a USER fn re-borrows `c` →
-    render into a LOCAL buffer + `push`-fold into the ctx field. Then **(7c)** the `Opaque`
-    catch-all + `Load` + calls; then **(7e)** the full-corpus phase-go. The back-half scout
-    REFRAMED the handover's
+    NEXT = **(7c) the `Opaque` catch-all + `Load` + calls** — lower the remaining forms
+    (struct-lit / field / array / method / enum-construct / match / perform / handle / scope /
+    spawn / await → `Opaque` carrying operand MirValues; `Index`/`*`-deref → `Load`; a call's
+    args) via a `mir_args` stack (collect each node's operand MirValues, append-only with a
+    length-snapshot). **(7a)+(7b) DONE** (ADR 0044 A1–A3): the `snc mir` ORACLE (`ce29b1e`) +
+    the SSA data-model PROBE (D4 confirmed, flat append-only `Vec` pools, NO index-assign) +
+    the **straight-line INTEGRATION** (`dc20dd8`, fused `mode 2`) + **CONTROL FLOW** (`c15ce6d`
+    — `if`/`&&`/`||` → branch + VarId-sorted merge, an `SAssign` rebind via `mir_lastvid`);
+    16 seeds match `snc mir`, modes 0/1 stay 123/123, leak-free. ⚠ Sentinel rule: passing
+    `&mut (*c).field` to a USER fn re-borrows `c` → render into a LOCAL buffer + `push`-fold
+    into the ctx field. Then **(7e)** the full-corpus phase-go. The back-half scout REFRAMED
+    the handover's
     "HIR/MIR → codegen": **HIR is a no-op** (101-line identity bundle), **MIR is an
     analysis SIDE-BRANCH** (feeds ONLY `verify_constant_time`; `compile_to_object` reads
     the `TypedProgram` directly — codegen IGNORES MIR), **codegen is the real transform**
