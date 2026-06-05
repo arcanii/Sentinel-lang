@@ -90,9 +90,17 @@ pin the spec, a 0-panics sweep (16 emit / 125 Err over 141), and **16/16 behavio
 counter, `%argN` params), `main`→i32-trunc, FnId order. D4 reuse SETTLED = **fused `mode 4`**
 (mirrors the proven MIR `mode 2`: a `cgout` buffer + an operand-threading field like `lastval` +
 a VarId→slot append-only pool like `mvdv` + a value counter; `type_fn` emits the define
-header/footer). NEXT = **(8a-ii)** build `mode 4` straight-line in `types.sentinel` + a thin
-`selfhost/codegen.sentinel` + the differential (byte + behavioural + leak), re-verify modes 0–3
-byte-identical. The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
+header/footer). **✅ (8a-ii) `selfhost/codegen.sentinel` LANDED (`2ed426a`, ADR 0045 A2) —
+(8a) COMPLETE:** the 8th + final Sentinel stage emits `.ll` straight-line, matching `snc llvm`
+byte-for-byte (`sentinel_codegen_matches_oracle_on_corpus`, 16/16 emitted), leak-free, modes
+0–3 byte-identical. The fused `mode 4` mirrors MIR `mode 2` 1:1 (cgout buffer + cglk/cglv
+operand ≈ lastval + cgsv/cgsr slot pool ≈ var_defs + value counter; `mir_on`→2/3 only, `cg_on`
+=4). 🔑 KEY FINDING: the A2 "no `&mut (*c).field` to a user fn" rule is sidestepped by
+direct-to-`cgout` helpers using the BUILTIN `push` + consuming `[u8]` args by value (simpler
+than MIR's render-to-local-then-fold; NO phi — alloca/load/store). NEXT = **(8b) control flow**
+(if/while/break/continue + `&&`/`||` → br + memory-cell merge, NO phi; the real loop CFG +
+back-edge + the ADR 0036 alloca hoist). The kickoff ADR's own line below was the prior NEXT
+pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
 codegen reads the `TypedProgram` directly via `hir.program()`), and **codegen is the real

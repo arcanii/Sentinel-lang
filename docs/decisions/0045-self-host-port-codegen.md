@@ -146,6 +146,43 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     (`sentinel_codegen_matches_oracle_on_corpus`: byte-for-byte vs `snc llvm` over the
     straight-line subset + behavioural + leak-free), re-verifying modes 0–3 byte-identical.
 
+- **A2 — (8a-ii) `selfhost/codegen.sentinel` LANDED; (8a) is COMPLETE.** The EIGHTH and
+  final Sentinel stage (`2ed426a`) emits textual `.ll` for the straight-line subset,
+  matching `snc llvm` byte-for-byte over the corpus (`sentinel_codegen_matches_oracle_on_corpus`
+  + `_on_seeds`, **16/16 emitted**), **leak-free** (`leaks --atExit` 0/0 over the subset),
+  with modes 0–3 (`snc lex`/`parse`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`)
+  **byte-identical** (all 8 corpus differentials green). The D4 fused `mode 4` executed as
+  A1 designed — a 1:1 mirror of the MIR `mode 2`:
+  - **TyCtx gained ~13 cg fields** (reset per-fn in `cg_reset`; `cgout` accumulates all
+    fns): `cgnext` (value counter), `cglk`/`cglv` (the threaded operand — kind 0 register
+    `%vN` / 1 literal — the analog of `lastval`), `cgsv`/`cgsr` (the VarId→slot append-only
+    pool — the analog of `mvdv`/`mvdl`), `cgpty` (param types for the header), `cgmain`,
+    `cgak`/`cgav`/`cgat` (the call-arg stacks — the analog of `margs`), `cg_collecting`,
+    `cg_suppress` (assign-target place walk), `cg_lastvid`.
+  - **`mir_on` narrowed to `mode 2/3`** + a new **`cg_on` = `mode 4`**, so the two
+    side-builds never co-fire; every cg emit is `cg_on`-guarded → modes 0–3 dead-code by
+    construction (the re-verify gate confirmed it).
+  - ⚠⚠ **THE KEY SENTINEL FINDING (reusable):** the A2-rule "never pass `&mut (*c).field`
+    to a USER fn" is sidestepped by **direct-to-`cgout` helpers** (`cgo_str`/`cgo_int`/
+    `cgo_ty`/`cgo_operand`) that take `&mut TyCtx` and push onto `(*c).cgout` via the
+    **builtin `push`** (the one thing allowed to take `&mut (*c).field`), each **consuming
+    any `[u8]` arg by value** (so a string literal drops at the helper's exit). This is
+    simpler than the MIR teardown's render-to-local-buffer-then-push-fold — no local buffer
+    needed, the walk emits text in order. (MIR built pools + rendered at teardown because
+    its dump groups out-of-order blocks; straight-line `.ll` is one in-order block, so
+    direct emission is clean. 8b's branches may revisit this.)
+  - `type_fn` emits the `define` header + param allocas (`cg_emit_fn_header`) before the
+    body walk and the return + `}` (`cg_emit_fn_footer`; `main` → `trunc i64 … to i32` +
+    `ret i32`, detected by a byte-compare `cg_is_main`); `emit_tparams` reserves each
+    param's alloca slot + records its type; `dump_targs` collects each call arg's operand
+    (`cg_collect`, gated). **NO phi** — the (7/N) `var_defs`-snapshot/merge muscle is not
+    used; alloca/load/store carries everything.
+  - **The bind-inner-first rule bit once:** `cgo_ty(c, (*c).cgat[i])` re-borrows `c` while
+    indexing a field — bind the field reads to locals first (the 4a-probe gotcha).
+  - **NEXT = (8b) control flow** — `if`/`else` (br + a memory-cell merge, NO phi),
+    `while`/`break`/`continue` (the real loop CFG + back-edge + the ADR 0036 alloca hoist),
+    short-circuit `&&`/`||`. ⚠ The behavioural-test scaling note (A1) still stands.
+
 ## Decision
 
 ### D1. Goal.

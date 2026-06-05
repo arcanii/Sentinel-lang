@@ -1909,14 +1909,24 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 > (mirrors the proven MIR `mode 2`): a `cgout` buffer + an operand-threading field (like
 > `lastval`) + a VarId→slot append-only pool (like `mvdv`) + a value counter; `type_fn` emits the
 > `define` header/footer. The hybrid (emit-helpers in a separate module) is deferred — fuse first.
-> **NEXT = (8a-ii):** add `mode 4` straight-line to `types.sentinel` + a thin
-> `selfhost/codegen.sentinel` (`use types::run; run(inp, 4, …)`) + the differential
-> (`sentinel_codegen_matches_oracle_on_corpus`: byte-for-byte vs `snc llvm` over the straight-line
-> subset + behavioural + leak-free), **re-verifying modes 0–3 (`snc types`/`borrow`/`mir`/
-> `ctverify`) byte-identical** (the 0044 D3 gate, widened to four accepted stages). ⚠ The
-> behavioural test rebuilds each emitted fixture twice — sample/cache it as the subset grows
-> (~8d/8e). Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT; Bar B 8h–8l →
-> full corpus → ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak + the four norms unchanged (below).
+> **✅ (8a-ii) `selfhost/codegen.sentinel` LANDED (`2ed426a`, ADR 0045 A2) — (8a) COMPLETE:**
+> the 8th + final Sentinel stage emits `.ll` straight-line, matching `snc llvm` byte-for-byte
+> (`sentinel_codegen_matches_oracle_on_corpus` + `_on_seeds`, 16/16 emitted), leak-free, modes
+> 0–3 byte-identical (all 8 corpus differentials green). The fused **`mode 4`** mirrors MIR
+> `mode 2` 1:1: a `cgout` buffer + `cglk`/`cglv` operand (≈ `lastval`) + a `cgsv`/`cgsr` slot
+> pool (≈ `var_defs`) + a value counter; `mir_on`→2/3-only, `cg_on`=4 (every cg emit guarded →
+> modes 0–3 dead by construction). 🔑 **KEY FINDING:** the A2 "no `&mut (*c).field` to a USER
+> fn" rule is sidestepped by **direct-to-`cgout` helpers** using the BUILTIN `push` + consuming
+> any `[u8]` arg by value (simpler than MIR's render-to-local-then-fold). `type_fn` emits the
+> define header + param allocas + ret/`}` (main → i32-trunc via `cg_is_main`); `emit_tparams`
+> reserves param slots; `dump_targs` collects call args (`cg_collect`). **NO phi** — alloca/
+> load/store. ⚠ bind-inner-first bit once (`cgo_ty(c, (*c).cgat[i])` re-borrows c). **NEXT =
+> (8b) control flow** — `if`/`else` (br + a memory-cell merge, NO phi), `while`/`break`/
+> `continue` (the real loop CFG + back-edge + the ADR 0036 alloca hoist), short-circuit
+> `&&`/`||`. ⚠ The behavioural test rebuilds each emitted fixture twice — sample/cache as the
+> subset grows (~8d/8e). Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT;
+> Bar B 8h–8l → full corpus → ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak + the four norms
+> unchanged (below).
 >
 > **(7/N) recap** (ADR 0044, A1–A5) reused `types.sentinel` via `types::run`-with-`mode`:
 > `mode 2` builds + dumps the MIR (a FUSED `if mir_on(c)` side-build of the pass-2 walk +
@@ -2027,12 +2037,19 @@ For pasting into a fresh chat to bootstrap context:
     `%vN` counter, `%argN` params), `main`→i32-trunc, FnId order. **D4 reuse SETTLED = fused
     `mode 4`** (mirrors MIR `mode 2`: a `cgout` buffer + an operand-threading field like
     `lastval` + a VarId→slot append-only pool like `mvdv` + a value counter; `type_fn` emits the
-    define header/footer; hybrid-with-a-separate-module deferred). **NEXT = (8a-ii):** add `mode
-    4` straight-line to `types.sentinel` + a thin `selfhost/codegen.sentinel` + the differential
-    (`sentinel_codegen_matches_oracle_on_corpus`: byte vs `snc llvm` + behavioural + leak),
-    **re-verify modes 0–3 byte-identical** (the 0044 D3 gate, four stages). Sub-slices 8a–8l in
-    ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT (8g); Bar B 8h–8l → full corpus → ADR 0045
-    ACCEPTED). No in-flight slice (oracle committed; codegen.sentinel is the next build).
+    define header/footer; hybrid-with-a-separate-module deferred). **✅ (8a-ii)
+    `selfhost/codegen.sentinel` LANDED (`2ed426a`, ADR 0045 A2) — (8a) COMPLETE:** the 8th +
+    final Sentinel stage emits `.ll` straight-line, matching `snc llvm` byte-for-byte
+    (`sentinel_codegen_matches_oracle_on_corpus`, 16/16 emitted), leak-free, modes 0–3
+    byte-identical (all 8 corpus differentials green). The fused `mode 4` mirrors MIR `mode 2`
+    1:1 (cgout + cglk/cglv≈lastval + cgsv/cgsr slot-pool≈var_defs + value counter; `mir_on`→2/3,
+    `cg_on`=4). 🔑 KEY: the "no `&mut (*c).field` to a USER fn" rule is sidestepped by
+    direct-to-`cgout` helpers using the BUILTIN `push` + consuming `[u8]` args by value (simpler
+    than MIR's render-to-local-then-fold; NO phi — alloca/load/store). **NEXT = (8b) control
+    flow** — `if`/`else` (br + a memory-cell merge, NO phi), `while`/`break`/`continue` (the real
+    loop CFG + back-edge + the ADR 0036 alloca hoist), `&&`/`||`. Sub-slices 8a–8l in ADR 0045
+    D10 (Bar A 8a–8g → the FIXED-POINT (8g); Bar B 8h–8l → full corpus → ADR 0045 ACCEPTED).
+    No in-flight slice.
 
     KEY REUSABLE FINDINGS (carry forward):
     - The back-half stages REUSE the typed program (they can't cheaply re-derive it).
