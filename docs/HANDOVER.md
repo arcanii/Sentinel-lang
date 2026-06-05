@@ -1896,614 +1896,82 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 
 For pasting into a fresh chat to bootstrap context:
 
-    Continuing Sentinel-lang work. Repo: https://github.com/arcanii/Sentinel-lang
-    (Rust workspace under crates/, building the `snc` bootstrap compiler.)
-    Local HEAD: verify with `git log -1` — expect the **self-host TYPES (4g)
-    effects docs** commit (`docs(selfhost): ADR 0041 A11 — (4g) effects/handlers`),
-    atop the **(4g) effects feat** (`a1b5b64`, `feat(selfhost): types.sentinel (4g)
-    effects + handlers`), atop the (4f-delegate) docs (`4873d6c`) + feat (`5ba3948`),
-    the **(4f core) docs** (`b70aef9`) + **feat** (`58748e9`), atop the (4e) enum/match docs
-    (`ea4ed98`) + feat (`37887b9`), the (4d) secret docs (`386d0da`) + feat
-    (`b7706b9`), the (4c-3) nullable docs (`f409e2c`) + feat (`3071038`), atop
-    the (4c-1/4c-2) structs+arrays docs (`3bd271c`) + feat
-    (`fa20025`), atop the (4b) m-1 docs (`cf04226`) + feat (`62d1a5f`), the (4a) oracle docs
-    (`cf44020`) + feat (`c52aef9`), atop the
-    RESOLVE-COMPLETE docs (`bbada41`) + delegate-synthesis feat (`9da6c12`), the (3e) docs
-    (`496a0ca`) + feat (`1c8eb97`), the (3c) docs (`c1e3527`) + the (3e)-finding
-    docs (`f650fa5`), the (3c) handle feat (`c38960a`), the
-    (3c) match/while feat (`b6749e3`) + the (3c-a) blob-scope refactor (`072f841`),
-    the (3b-5) docs (`546b798`) + feat (`249a9e4`), the (3b-4) docs (`7bdcb6d`) +
-    feat (`8eba1a6`) + the (3b-4a) VarId-refactor (`ef237a1`), the (3b-3) docs
-    (`b50dd45`) + feat (`4f6305f`), the (3b-2) docs (`7b2e8c7`) + feat (`b80c84e`),
-    the (3b-1) docs (`9117d07`) + feat (`64b82b9`), the (3a) m-2 docs (`7daa66f`) +
-    feat (`80a201d`),
-    the (3a) m-1 docs (`352b1ce`) + feat (`06f9241`), the parser AST-exposure
-    refactor (`20046e9`), the agent-protocol + probe-correction docs (`8a35328`),
-    the `snc resolve` oracle docs (`227ad6d`) + feat (`eba2fb4`) + ADR 0040; atop
-    the COMPLETE parser stage — (2d-8) `d2da83c` … (2d-1)
-    `debaa24`, (2c) `b2a9c3b`…, (2b) `189990e`…`0e84f36`, (2a) `8d6aa6e` +
-    `snc ast` oracle `7f10740` + ADR 0039 — atop the lexer (1/N) + the D.6
-    cross-module work. (Run `git log --oneline -50` for the full chain.) Clean
-    tree; **1422 tests** — the `selfhost_parse` seeds (192) + the parser corpus
-    differential (the D8 phase-go: all 139 clean-parsing fixtures) + `tests/ast.rs`
-    goldens + the `snc resolve` oracle goldens (`tests/resolve.rs`) + the resolve
-    seed differential (`tests/selfhost_resolve.rs`, **61 seeds**) + the **resolve
-    CORPUS differential `sentinel_resolver_matches_oracle_on_corpus` (the D9
-    phase-go: all 132 clean-resolving fixtures, incl. delegates)** + the **`snc
-    types` oracle goldens (`tests/types.rs`, 5)** + the **types seed differential
-    (`tests/selfhost_types.rs`, 48 seeds — scalar + structs/arrays + (4c-3)
-    nullable + (4d) secret + (4e) enum/match + (4f) classes/traits/impls+delegates +
-    (4g) effects/handlers; the Sentinel typer matches `snc types` on 108 corpus
-    fixtures too)**;
-    four-check green via `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`
-    (+ `cargo build`).
-    macOS + LLVM 18.
-    READ: docs/STATE.md top banner + HANDOVER §0/§0.1/§0.3 + **ADR 0041**
-    (the ACTIVE port stage — **types (4/N)**, ACCEPTED-WITH-AMENDMENTS; (4a) the
-    `snc types` oracle + the **D3/D4 design probes (A1)** landed + empirically
-    verified leak-free: D4 a `Type` is an **integer type-handle into a flat
-    hash-consed interner** (parallel `Vec<i64>`; equality = `==`; recursive
-    render/subst; the VarId→type env is **append-only** — `env[vid]=h` is
-    `IndexAssignNotSupported`), D3 `types.sentinel` will **`use` `resolve.sentinel`
-    as a D.6 module** (verified) but **refined at the (4b) build to SELF-CONTAINED**
-    (A3 — resolve's `RCtx` can't be extended with type fields across a module
-    boundary); **(4b) m-1 SCALAR + (4c-1) STRUCTS + (4c-2) ARRAYS + (4c-3) NULLABLE +
-    (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g)
-    EFFECTS/HANDLERS LANDED (A3/A4/A6–A11)** (`selfhost/types.sentinel`, the 4th Sentinel
-    stage — matches the oracle on 108 corpus fixtures + 48 seeds, leak-free; a 3-pass
-    `main` names→sigs/fields→emit; the `Struct` interner kind via a struct-name blob
-    `snb`; struct-lit + field-access `field_index`; arrays + the generic-builtin
-    `(targs T)` for `len`; **(4c-3) `?T` + `null` + the `T → ?T` widening
-    (`widen-null`) via the expected type threaded through `dump_texpr` ITSELF — the
-    ADR 0041 A6 path-(a) fix that RESOLVED the A5 leak** [a SEPARATE recursive
-    Expr-consumer leaks the Move-enum where one self-recursive walker does not; the
-    reusable finding]; leaves widen inline, `Binary` via a temp + `widen_splice`,
-    threading points = fn return / `let` annotation / struct field / `==`-operand;
-    **(4d) `secret T` + `declassify` + the `T → secret T` widening (`widen-secret`) +
-    the secret-preserving operators — reused the 4c-3 machinery wholesale: one
-    `widen_kind` over `?T`(k4)+`secret T`(k3), `declassify`/`strip_secret`, cmp/logic
-    → `secret bool` on a secret operand, arithmetic propagates for free via `resty=lt`,
-    mixed public+secret is oracle-rejected]; **(4e) enum/match: the enum + flat variant
-    tables (names in `snb`, payload types in a `varpay` slice; Enum interner kind 7),
-    `Qcall`→`enum-construct` (`variant_index`+`:Enum`), `match` (scrutinee `EnumId`,
-    per-arm `variant_index` + payload-typed `(bind …)` scoped via `truncate_scope`,
-    wildcard, `exp` threaded to arm bodies); **(4f core) classes/traits/impls — a
-    GROUP-ORDER VarId restructure (pass-2 types items into a shared `itembuf` in
-    fns→classes→impls order, splices source-order) + the class/trait/impl tables (Class
-    interner kind 8) + the method-dispatch split (own `(method #cid …)` / default-impl
-    `(impl-method #iid …)` / named `(qcall-impl …)`) + `self`/class-field typing +
-    `&`/`&mut`/`*` ref typing (a BONUS that unlocked the c20–c22 ref+borrow set + c25);
-    + (4f-delegate, A10) delegate-impl synthesis (a `delegate f: T to Tr` synthesises a
-    forwarding `impl _ as Tr for C` in group D, after user impls; each method forwards to
-    `self.f.m(args)`); **(4f) COMPLETE; (4g) effects/handlers — effect-decl emit + effect
-    tables (op return types) + `perform` (→ op ret) + `handle` (body type; arms bind
-    op-params+`k`; `return v` arm) + resume-kont (Call callee = in-scope var) + ⚠ the
-    effect-op-param VarId offset (fn region starts at `voff`; env gets `voff` phantom
-    slots)]); NEXT = (4h) generics** (`unify_one` bidirectional inference,
-    `GenericInstance` interning — the c17 fixtures), then (4i) full-corpus phase-go) + the
-    just-COMPLETED **ADR 0040** (resolve, ACCEPTED) + **ADR 0039**
-    (the (2/N) parser — **now ACCEPTED / COMPLETE**: (2a)+(2b) the full expression
-    grammar, (2c) statements/types/fn-defs, (2d) the top-level decls + (2d-8) the
-    full-corpus close — `selfhost/parser.sentinel` matches `snc ast` over every
-    clean-parsing fixture, leak-free) + **ADR 0040** (the active port stage,
-    **resolve — ACCEPTED-WITH-AMENDMENTS; (3a) m-1 + m-2 LANDED**: name-resolution
-    to Sentinel via FLAT parallel-`Vec` symbol tables (A1 corrected the original
-    cons-list plan) + a `snc resolve` ID-bearing oracle, sub-sliced 3a–3e. **The
-    (3a) ORACLE landed** (`eba2fb4`):
-    `snc resolve` (`run_resolve` + `resolve_dump.rs`) = the `snc ast` form +
-    resolved IDs (`(var #N)`/`(call #14 …)`/`(struct-lit #N …)`/`(qcall-impl …)`;
-    builtins FnId 0–13, user fns #14+; built-in `Async` effect emits last),
-    0 panics/141, 4 goldens. **3 parallel AGENT PROBES then settled the design
-    (ADR 0040 A1; `docs/agent-protocol.md`):** D3 parse-sharing CONFIRMED
-    (resolve.sentinel can `use` the parser's AST via a D.6 module); **D4/D5
-    CORRECTED — cons-list tables/scopes are UNUSABLE** (can't `match` a `&enum`;
-    a `&`-ref enum `match` aliases the heap → double-free on reuse; partial
-    cons-cell `truncate` leaks) → use **flat parallel-`Vec` arrays + a packed-name
-    byte blob, integer-indexed, length-truncation restore** (the parser's
-    token-array idiom; prototyped leak-clean / 100-arm loop). **(3a) m-1 + m-2
-    LANDED** (`20046e9` parser-exposed, `06f9241` m-1, `80a201d` m-2 `let`): the
-    THIRD Sentinel stage `use`s the parser as a D.6 module + name-resolves the
-    fn-body grammar (paramful fns + every expr form + `let`) → matches `snc
-    resolve` (17 seeds, leak-free, compiled first try); m-2 `let` pre-scans the
-    body tokens for the binding set into the immutable scope. ⚠ varids are GLOBAL
-    (never reset). **(3b-1) LANDED** (`64b82b9`): the top-level decl walk (pass 1 a
-    BRACE-DEPTH scan — depth 0 = top level, so method `fn`s inside trait/impl/class
-    bodies are not counted as top-level fns; pass 2 a source-order dispatch
-    `resolve_item`) + the first decl kind end to end — `(struct #id Name
-    (field …))` heads (source order, interleaved with fns) + struct-lit `#id` (a
-    struct consumes no VarId). **The symbol tables are now bundled in an `&mut
-    RCtx` struct** (A4 probe: a Sentinel struct of `Vec` fields supports
-    `push`/`len`/index through the ref + cross-field read+write, leak-free — ALWAYS
-    `(*c).field`; NO `&mut`→`&` auto-reborrow [a read-only helper still takes `&mut
-    RCtx`]; NEVER move a `Vec` field out [SIGTRAP on the next struct drop], so the
-    name `garbage` sink stays a standalone `&mut Vec<u8>` param). **(3b-2) LANDED**
-    (enum): the enum table (`ens`/`ene`/`enumct` in `RCtx`) + `(enum #id Name
-    (variant V <payloads>…)…)` heads (EnumId is its OWN source-order namespace —
-    an `enum #0` coexists with a `struct #0`) + the `Enum::Variant` →
-    `(enum-construct #E Enum Variant args)` split (enum table checked FIRST in BOTH
-    the `Qcall` and `ClassInit` arms; mirror
-    `crates/sentinel-resolve/src/lib.rs:3763–3899`). 30 seeds (+7 enum), leak-free.
-    **(3b-3) LANDED** (effect): the effect table (`efs`/`efe`/`effct`) + a flat op
-    list (`efoo`/`efos`/`efoe`) in `RCtx` + `(effect #id Name (op name (params)
-    ret)…)` heads (user effects in source order, `Async` last) + `perform` →
-    `(perform #E op_index Eff op args)` (op_index = the op's position in the
-    effect's op list). ⚠ **effect op params consume GLOBAL VarIds** in the Rust
-    resolver (before any fn body, lib.rs:2000), so every fn's VarIds are OFFSET by
-    the total effect-op-param count — INDEPENDENT of source order — reproduced with
-    PHANTOM scope slots (`scan_ops_of` pushes one dummy entry per op param, below
-    every fn's `base`, never looked up). 39 seeds (+9 effect/perform), leak-free.
-    **(3b-4) LANDED** (trait+impl): `(trait #id …)` heads (sigs, no bodies, params
-    no vids) + `(impl #id name #trait_id Trait struct#tid Type (method #selfvid
-    …))` heads with method BODIES (synthetic `self` VarId bound first, then params,
-    then body lets) + the `Qcall` else-branch → `(qcall-impl #I method_index
-    ImplName method args)` (method_index = the method's position in the impl's
-    trait's methods). ⚠⚠ **THE BIG CORRECTION (3b-4a): method-body VarIds are
-    GROUP-ordered** — the Rust resolver resolves ALL fn bodies BEFORE ANY impl
-    method body (lib.rs:2559), so a fn AFTER an impl still gets LOWER VarIds, and
-    `varid ≠ scope-array index`. Rearchitected to **EXPLICIT stored varids**
-    (`scv`); `sc_lookup` returns `scv[i]`; `base` is now purely an array-index
-    floor; a `nextvid` counter is loaded per item from a per-group counter — fn
-    region from `voff`, impl region (`implvid`) from `voff + total-fn-bindings`
-    (counted in pass 1: a `:` at depth 0 = a fn param, a `let` at depth ≥1 under a
-    fn = a fn let, via a `citem` flag). This retired the (3b-3) phantom slots. 46
-    seeds (+7 trait/impl/qcall), leak-free. **(3b-5) LANDED — (3b) is COMPLETE**
-    (class + class-init + resume-kont): `(class #id Name (field …) (init #selfvid
-    (params) <block>)? (method #selfvid …)…)` heads — BUCKETED (fields, then init,
-    then methods; scan-once-into-per-kind-buffers, mirror the parser) with
-    init+method BODIES binding `self` (a method's reuses `rimpl_method`'s receiver
-    token; an INIT's `self` is SYNTHETIC → a `-1` sentinel scope slot matched by
-    the literal name `self`); **delegates are SKIPPED** (the resolve dump omits
-    them — a (3e) follow-up; 4 corpus fixtures) + `(class-init #C Name args)` (the
-    `ClassInit` else-branch, enum checked FIRST) + `resume-kont` (a `Call` whose
-    callee is an in-scope var → `(resume-kont #vid …)`, scope checked BEFORE the fn
-    table). The class group resolves BEFORE impls → `classvid` = `voff +
-    total-fn-bindings`, `implvid` = `+ total-class-bindings` (`scan_class_bindings`
-    counts the class init/method bindings in pass 1); within a class VarIds are
-    bucket-order (init-first; the corpus always writes init before methods). An
-    `impl … for <class>` dumps `class#cid` (class table checked FIRST). 52 seeds
-    (+6 class/class-init/resume-kont, incl. the full c41 `Point` class), leak-free.
-    **(3c) LANDED — the full grammar resolves.** The SCOPED bodies (`match` arm
-    payloads, `while`, `handle` handler-arm params + the return arm). TWO model
-    corrections (probe-confirmed): (1) bindings are **DURING-WALK** in source order
-    — a `let b = match e {E::A(x)=>x}` binds `x` (lower VarId) before `b`, so the
-    (3a) `let` pre-scan was replaced (the value resolves into a temp buffer, the
-    let's VarId is taken AFTER); (2) the scope is a **NAME BLOB** (`ctx.nb`) —
-    body bindings come from the AST as owned `[u8]`, not token src slices, so their
-    bytes are pushed into the blob (which also disposes them) + the scope stores
-    blob offsets. Arm scopes use **D5 length-truncation** (`truncate_scope` pops
-    scs/sce/scv to a pre-arm mark; VarIds stay globally sequential — a payload name
-    reused in two arms gets DISTINCT VarIds). `while` needs no truncation (flat
-    per-fn namespace → names unique). `handle` needed ONE cross-stage parser edit:
-    the parser's `HArms::HCell` now STORES the handler-arm params (a `Binds`, via
-    `parse_binds`); `dump_harms` still OMITS them (disposed into a throwaway) so
-    `snc ast` is byte-unchanged (parser corpus + seed tests stay green). 61 seeds
-    (+5 match/while +4 handle), leak-free. **(3e) LANDED — the corpus PHASE-GO is
-    GREEN.** GROUP-ORDER resolution + the full-corpus differential. The class/impl
-    VarId base WAS precomputed by TOKEN-COUNTING fn/class bindings, which MISSED the
-    3c forms (match payloads / handler params / `return` var) → a fn body with a
-    binding `match`/`handle` made the class base too LOW (c5_go_no_go: a `handle` in
-    a fn → off by 2). **FIXED by GROUP-ORDER RESOLUTION:** pass 1 only COLLECTS items
-    (token pos + kind; `fnparams`/`fnlets`/`scan_class_bindings`/`classtot` all
-    DELETED); pass 2 resolves three groups — all fns (advancing `fnvid`) → `classvid
-    = fnvid` → all classes → `implvid = classvid` → all impls — so each region's base
-    is the prior's FINAL counter (exact, includes the 3c bindings). Each item's dump
-    is BUFFERED into one `itembuf` tagged with its source index `(src_idx,start,end)`;
-    the emit walks source indices + splices the slices in order (no `Vec<Vec>`). New
-    test `sentinel_resolver_matches_oracle_on_corpus` (mirrors the parser's) matches
-    `snc resolve` over the clean-resolving corpus, leak-free. **DELEGATE-IMPL
-    SYNTHESIS THEN CLOSED (A12) — (3/N) RESOLVE is COMPLETE; ADR 0040 → ACCEPTED.** A
-    `class C { delegate f: T to Tr; }` → (1) a class FIELD `(field f T)` (a
-    delegate-field bucket AFTER the explicit fields) + (2) a SYNTHESISED forwarding
-    `(impl _ as Tr for C { fn m(self,…) { self.f.m(…) } })` per trait method
-    (re-walked from `trpos[trait_id]`; a "group D" after the user impls so the
-    ImplIds + VarIds CONTINUE the impl region; recorded at the class's source index
-    so the emit — now splicing ALL records per source index — places it right after
-    the class). **The corpus differential now covers the ENTIRE clean-resolving
-    corpus (132 fixtures), leak-free.** **RESUME AT = the TYPES stage** (the next
-    port stage; its own ADR — write PROPOSED first): port `crates/sentinel-types`
-    to Sentinel, add a `snc types` ID/Type-bearing oracle (the `snc resolve` form +
-    resolved types), differentially validate over the corpus. resolve.sentinel's
-    `RCtx` + group-order + name-blob + the parser-as-D.6-module pattern carry
-    forward. +
-    **ADR 0038** (the port's
-    (1/N) lexer — DONE — + the differential-oracle method the parser reuses) +
-    **ADR 0031** (the Phase D roadmap — movement 1 complete; D5 = the self-host
-    sequence) + auto-memory sentinel_selfhost_port (+ sentinel_d6_modules_surface
-    for the Path A merge).
+    Continue Sentinel-lang (self-hosting compiler port). Repo:
+    /Users/bryan/Desktop/github_repos/Sentinel-lang — a Rust workspace under crates/
+    building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
+    itself, each stage differentially validated against the Rust `snc` oracle).
 
-    PHASE D = self-hosting (post-1.0; ADR 0031). Opens with a
-    language/stdlib build-out, keeping the Rust `snc` as the differential
-    oracle, converging on a byte-identical bootstrap fixed-point. **1.0 is
-    DECLARED**; the headline 1.0 capability — constant-time `secret` — is
-    delivered + machine-verified.
+    Verify HEAD with `git log -1` — expect **a76b8b0** ("docs(selfhost): ADR 0043 A2 —
+    (6/N) borrow-check COMPLETE; ADR 0043 ACCEPTED"), atop the (6/N) borrow feat
+    (`d21910d`) + the `snc borrow` oracle (`4ef657d`) + ADR 0043 (`09dc4e2`/`7782061`).
+    Clean tree; four-check green (cargo build + `cargo nextest run --workspace` +
+    `cargo test --doc --workspace` + `cargo clippy --workspace --all-targets -- -D
+    warnings`); **1435 tests**. macOS + LLVM 18.
 
-    Recent sessions (all four-check green, feat+docs pairs):
-    - **D.1 — sum types (`enum`) + pattern matching (`match`)** MVP COMPLETE
-      (ADR 0032 → ACCEPTED-WITH-AMENDMENTS): (1/N) lexer (`87e955c`), (2/N)
-      AST + parser (`e368a72`), (3/N) the type layer — `Type::Enum(EnumId)` +
-      construction + `match` type-check + **exhaustiveness** (`6381b21`),
-      (4/N) codegen — `{i32 tag, ptr payload}` + an LLVM `switch` + box-free
-      drop + `c5d1_enum` exit 42 (`cf44e9b`). ⚠ DEBT (A1): recursive-enum
-      payload-field drop is box-free only — leak-free for the standard
-      recursive-consume walk (verified via `leaks`), leaks only on
-      bind-and-ignore / unmatched-drop; the real fix is the payload-ownership
-      model (NOT drop fns alone — those double-free), bundle w/ D.1b. See
-      [[sentinel_d1_enum_surface]].
-    - **D.2 — strings + a `u8` byte type** MVP COMPLETE (ADR 0033 →
-      ACCEPTED-WITH-AMENDMENTS): (1/N) lexer `StringLit`/`CharLit` (`21ff065`),
-      (2/N) AST + parser + the parse-time escape decoder (`f310f15`), (3/N) the
-      type layer — `Type::U8` + the cascade + `ArrayElem::U8`; char→`u8`,
-      string→`[u8]`; `str_eq`/conversion builtins typed; the op-generic
-      pipeline absorbs `u8` via one `is_int` change; codegen rejected the
-      literals until 4/N (`56f69f0`), (4/N) codegen + runtime — `i8` +
-      `udiv`/unsigned-compare; string heap-copy via byte-stores;
-      `sentinel_str_eq`; `zext`/`trunc` conversions; `abi-v1` `u8` entry;
-      `c5d2_strings` + `c5d2_u8_unsigned` phase-gos at exit 42, **0 leaks**
-      (`891ec98`). A string IS a `[u8]`; `u8` IS `i8`. ⚠ builtins are now
-      `FnId(0..=6)` → user fns start at 7; inline string-lit ARGS to borrowing
-      builtins leak (the pre-existing temp-drop gap — bind them). See
-      [[sentinel_d2_strings_surface]].
-    - **ADR 0034 PROPOSED** (`86b7f9c`): Phase D.3 kickoff — growable
-      collections. A `Vec<T>` is `[T]` + capacity + mutation
-      (`Type::Vec(VecElem)` mirrors `Type::Array(ArrayElem)`); `String` =
-      `Vec<u8>`; `push(&mut v, x)` is the first heap-mutation primitive; no
-      new generics / no lexer-parser change. 1311 tests.
-    - **D.3 (1/N) — growable `Vec<T>`** COMPLETE (`a64883c` feat; ADR 0034
-      stays PROPOSED, (1/N) Amendments recorded): `Type::Vec(VecElem)` + the
-      cascade; `vec_new<T>()->Vec<T>` / `push<T>(&mut Vec<T>,T)->i64` /
-      `len` (overloaded over `[T]`+`Vec<T>`), typed + codegen
-      (`{i64 len,i64 cap,ptr data}`, data is field 2) + the `sentinel_realloc`
-      growth runtime + `&mut Vec` mutable-borrow + primitive-element drop.
-      End to end: `c5d3_collections` exit 67, **0 leaks** (multi-growth +
-      a Vec moved out of a helper). vec_new/push flow the uniform
-      generic-call path (explicit `(Vec,Vec)` `unify_one` arm); builtins
-      shift the FnId base (main 7→9). Amendments A1–A5 (String→2/N,
-      return-type pushdown, len special-case, sentinel_realloc,
-      VecElementNotSupported). 1324 tests. See
-      [[sentinel_d3_collections_surface]].
+    STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
+    + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR
+    0043) — **ALL COMPLETE + ACCEPTED.** The whole FRONT END + both analysis passes are
+    ported, each matching its `snc <stage>` oracle byte-for-byte over the corpus,
+    leak-free: `snc lex`/`ast`/`resolve`/`types` (123/123) / `effects` (122/122) /
+    `borrow` (123/123). selfhost/ has lexer.sentinel, parser.sentinel, resolve.sentinel,
+    types.sentinel, effects.sentinel, borrow.sentinel.
 
-    HISTORICAL (movement-1 close — SUPERSEDED; the current resume point is at
-    the TOP of §0.3 above = the parser stage is COMPLETE, next is resolve):
-    **Phase D.6 (1/N) — modules / multi-file — per
-    ADR 0037.** Modules was the **last** ADR 0031 D4 language prerequisite
-    before the lexer→parser→… self-host port (D5). **Phase D.5 — loops — is
-    COMPLETE** (ADR 0036 → ACCEPTED-WITH-AMENDMENTS: (1/N) `while` + (2/N)
-    `break`/`continue`; exit 67 + 115, 0 leaks) — recap in
-    [[sentinel_d5_loops_surface]].
-    **D.6 (1/N) PROGRESS (2 increments committed this session):**
-    (i) **front-end** (`d02f4a3`) — reserved `use` lexer keyword + `UseDecl`
-    AST + `Program.uses` + parser (`use a::b::Item;`, ≥2 segments, `;`);
-    resolve gates a non-empty `uses` with `UseDeclNotYet` (backstop).
-    (ii) **module-graph discovery** (`e7db419`) — the DRIVER follows `use`
-    edges from the entry, mapping `use a::b::Item` → module `a::b` → file
-    `<root>/a/b.sentinel` (source root = entry's dir; last segment = item;
-    cycles fine); a missing `use`d file → ModuleNotFound; single-file
-    unaffected; a discovered multi-module graph is REPORTED + GATED at the
-    driver pending per-unit wiring. `discover_module_graph` in
-    sentinel-driver/main.rs; tests in `tests/modules.rs`.
-    (iii) **top-level `pub`** (`26dfb5a`) — `visibility: Visibility` on
-    FnDef/StructDecl/EnumDecl/TraitDecl/EffectDecl, parsed from a `pub`
-    before the item (`pub` on use/class/impl rejected); the C4.1 no-op
-    single-file.
-    (iv) **cross-module import resolution + visibility** (`fe9d110`) —
-    sentinel-resolve `ModuleUnit` + `resolve_imports`: each `use a::b::Item`
-    must name a graph module `a::b` declaring a `pub` `Item`, else
-    `ModuleNotFound`/`UnknownImport`/`PrivateItem`. `discover_module_graph`
-    now carries each module's `Program` (entry first); the driver validates
-    imports BEFORE the multi-module gate. 1376 tests, green.
-    **ARCHITECTURE DECISION (owner, this session): take the lower-risk
-    PATH A** — whole-graph front-end + per-unit codegen/link — and reach true
-    per-unit resolve EVENTUALLY (folded into the (3/N) caching sub-phase).
-    (v) **the merge — MULTI-FILE COMPILES + RUNS** (`db9b6e4`) —
-    `sentinel_resolve::merge_modules` merges the graph into ONE `Program`:
-    qualifies each module's fn names by module path (`util::add` → symbol
-    `util$add`; `$` is collision-free) + rewrites cross-module + own call
-    refs per module scope (an exhaustive, compiler-checked `rewrite_expr`
-    walk) + keeps the entry's `main`; the driver compiles the merged program
-    via direct pipeline calls (`run_build_merged`) → one object → link.
-    VERIFIED end-to-end: cross-module `pub fn` call (exit 5); same-named
-    private `helper`s in two modules coexist (exit 41, 0 leaks); private
-    import → PrivateItem. 1378 tests, green.
-    (vi) **cross-module TYPES** (`3571ec2`) — `merge_modules` now also
-    qualifies struct + enum names by module path (`geo::Point` → `geo$Point`)
-    + rewrites EVERY type reference per module scope: all signature TypeExprs
-    (params/returns/fields/variant payloads/trait+effect+class+impl sigs +
-    delegate types), `let` annotations, struct literals, enum construction
-    (`QualifiedCall`/`ClassInit` heads), and `match` variant patterns — via a
-    per-module `Renamer` (the name map + the in-scope type-param set, which is
-    NEVER qualified). Trait/effect/class NAMES stay unqualified (cross-module
-    trait/effect *use* is the next increment) but their bodies' refs to
-    qualified structs/enums ARE rewritten. VERIFIED end-to-end: a
-    cross-module `pub struct` (annotation/literal/arg, exit 42); a
-    cross-module `pub enum` + `match` (exit 52); same-named `struct Item`s
-    across modules coexist (exit 42); a cross-module struct as another
-    module's field type, 3 modules deep (exit 42). 1384 tests, green.
-    (vii) **cross-module TRAITS / EFFECTS / CLASSES** (`7fd7817`) — the same
-    `Renamer` now also qualifies trait + effect + class + named-impl names
-    (so EVERY top-level item kind is qualified; same-named ones coexist) +
-    rewrites their refs: `impl as Trait for Type` heads (both names),
-    `perform`/`handle` effect names, fn/method/trait/impl effect rows
-    (`! { Net, Io }`), delegate `to Trait` names, and named-impl
-    `QualifiedCall` heads. Op + method names stay unqualified (scoped within
-    their effect/trait). The import gate (`is_qualified_kind`) is dropped —
-    every validated `use` maps to its qualified symbol. VERIFIED end-to-end: a
-    cross-module `pub trait` impl'd + dispatched (exit 42); same-named
-    `class`es coexist (exit 42); a cross-module `pub effect` performed in one
-    module + handled in the entry through the handler runtime (exit 42). 1389
-    tests, green.
-    (viii) **cross-module GENERICS verified** (`53a9aba`, test-only) — under
-    Path A the merged graph is one Program, so `collect_mono_instantiations`
-    runs whole-program and a generic instantiated in a DIFFERENT module than
-    its definition is emitted like any single-file instance. Pinned by 3
-    fixtures: a `Box<i64>` struct, an `id<T>` fn, and `Pair`/`make_pair`/`fst`
-    over `Pair<i64, i64>` — all exit 42. (The true per-unit `linkonce_odr`
-    story is still ADR 0037 (2/N).) 1392 tests, green.
-    (ix) **effect-check parity** (`7af1dce`) — `run_build_merged` now calls the
-    pure `sentinel_effect_check::effect_check(&typed)` between type-check and
-    borrow-check (matching the salsa `borrow_check_query`→`effect_check_query`
-    chain the single-file path uses), rejecting on any `EffectError`. Added the
-    `sentinel-effect-check` dep to the driver. So a multi-file `main` with an
-    unhandled effect is rejected (new negative test), not miscompiled; the
-    well-formed handle-discharges-it program still runs. 1393 tests, green.
-    **D.6 IS DONE ENOUGH — movement 1's language gate is CLEARED.** The merged
-    path is complete + sound (multi-file + every cross-module item kind +
-    generics + effect-check). Its remaining follow-ups are now **independent
-    deferred tracks, NOT blockers**: (i) the per-unit separate-compilation back
-    end (per-unit `.o` + module-qualified length-prefixed `abi-v1` mangling +
-    multi-object link + per-unit `linkonce_odr` generics, ADR 0037 (2/N)); (ii)
-    span-accurate multi-source diagnostics. They can be done whenever; the
-    self-host port does not need them.
-    **SELF-HOST PORT (1/N) — LEXER — DONE.** Movement 2 of Phase D (ADR 0031 D5)
-    — port `snc` to Sentinel stage by stage, each **differentially validated
-    against the Rust `snc` oracle**. The lexer landed in three pieces:
-    `snc lex <file>` (the oracle: a canonical token dump, one line per token
-    `<KIND> <start> <end> [<lexeme>]`, variant *names*, `<lexeme>` only for
-    `Ident`/`IntLit`/`StringLit`/`CharLit`, trailing `EOF`; golden-tested in
-    `tests/lex.rs`); `selfhost/lexer.sentinel` (the first compiler stage in
-    Sentinel, all 69 `TokenKind`s, emitting the dump directly into a `Vec<u8>` —
-    no Token enum yet); and `tests/selfhost_lex.rs` (compiles the Sentinel lexer
-    + asserts its dump == `snc lex` for all 139 clean-lexing fixtures). Amend:
-    A1 direct emission (no Token enum); A2 two Sentinel quirks (flat per-fn var
-    namespace → unique branch locals; deep-if tail `&mut` borrow conflict →
-    compute-then-emit-once); A3 lex-error parity deferred (the one `@` fixture is
-    excluded); A4 reads a fixed `./input.sentinel` (no argv yet — the test sets
-    the cwd).
-    **SELF-HOST PORT (2/N): the PARSER — ADR 0039 ACCEPTED-WITH-AMENDMENTS; (2a)
-    + (2b) expressions + (2c) statements/types/fn-defs COMPLETE (the fn-level grammar).** ✅ `snc ast` oracle (`run_ast`+`ast_dump.rs`,
-    golden `tests/ast.rs`) → the regular S-expr target, e.g. `(fn main () i64
-    (block (binop + (int 1) (binop * (int 2) (int 3)))))`. ✅ recursive-AST drop
-    gate (`tests/pass/selfhost_ast_drop.sentinel`, 0 leaks → no D.1b needed). ✅
-    `selfhost/parser.sentinel` (the 2nd Sentinel stage). **(2a):** paramless
-    `fn`-bodied integer arithmetic (precedence/parens/left-assoc/multi-fn). **(2b)
-    increment-1 (A4):** the COMPLETE operator-precedence ladder mirroring the Rust
-    parser (`expr → or → and → cmp → bitor → bitxor → bitand → add → mul → unary →
-    atom`) — `|| &&`, the six non-assoc comparisons `== != < <= > >=`, bitwise
-    `| ^ &`, prefix unary `- !`, + the scalar atom leaves (int / `true` / `false` /
-    `null` lits + variable refs). `Expr` gained `Bool`/`Null`/`Var([u8])`/`Unary` +
-    a unified `Binary(op-code,…)` (the i64 op-code encodes dump category + symbol).
-    **(2b) increment-2 (A5):** function calls `f(args)` → `(call …)` (an ATOM case
-    — the callee is a name, not an expr; only postfix `.m(args)` calls a value) +
-    the POSTFIX chain (`parse_postfix` between `parse_unary` and `parse_atom`): field
-    `t.field`, index `t[i]`, method `t.m(args)`. Arg lists = a **second
-    mutually-recursive cons-list enum** `Args = End | Cell(Expr, Args)` (since
-    `Vec<non-primitive>` is unsupported — de-risked by a probe; `Expr` gained
-    `Call`/`Method`/`Field`/`Index`). **(2b) increment-3 (A6):** the `::` paths in
-    `parse_atom` after an ident — `A::b(args)` → `(qcall …)`, `Name::init(args)` →
-    `(class-init …)`, paren-less `Enum::Variant` → a qcall with empty args — plus
-    array literals `[e1, …]` → `(array …)` (atom-position `[`, vs the postfix index
-    `[`). `Expr` gained `Qcall`/`ClassInit`/`Array`; `parse_args` generalised with a
-    terminator-tag param; tokenizer gained `::` (30) + `:` (31). Matches `snc ast`
-    over **59 seeds** (now incl. `::` paths + arrays + nests `[A::b(), c.d][0].e`),
-    leak-free. **(2b) increment-4 (A7):** `if <cond> { <then> } else { <else> }` →
-    `(if cond (block then) (block else))` — dispatched at the TOP of `parse_expr`
-    (a full expression, never an operator operand), `else` mandatory, `else if`
-    chains — plus brace blocks `{ <expr> }` → `(block …)`. `Expr` gained `If` +
-    `BlockE` (a statement-FREE block = just its tail; statements at (2c)); `if` /
-    `else` tagged in the tokenizer (32 / 33). Matches `snc ast` over **68 seeds**
-    (now incl. `if`/`else if` chains, nested `if`, blocks), leak-free. **(2b)
-    increment-5 (A8):** `match <scrut> { pat => body, … }` → `(match scrut (arm pat
-    body)…)` — also dispatched at the top of `parse_expr` (a `match` keyword tag);
-    arm bodies are exprs; patterns are `_` → `(pat _)` or `Enum::Variant(b1, b2)` →
-    `(pat Enum Variant b1 b2)`. The deepest mutual recursion yet — four enums
-    (`Expr → Arms → {Pattern → Binds, Expr}`, de-risked by a probe); `Expr` gained
-    `Match` + the `Arms`/`Pattern`/`Binds` enums; tokenizer gained `match` (34) +
-    `=>` (35). Matches `snc ast` over **78 seeds** (now incl. `match`/patterns +
-    an AST-walker shape), leak-free. **(2b) increment-6 (A9):** struct literals
-    `Name { f: v, … }` → `(struct-lit Name (field f v)…)`, disambiguated from an
-    `if`/`match` head's block by a **context-free `{ Ident :` lookahead** (a block
-    never starts with a single-colon `Ident :`) — NO `allow_struct_lit` threading.
-    `Expr` gained `StructLit` + a `Fields` cons-list (empty `Name {}` deferred).
-    Matches `snc ast` over **88 seeds** (now incl. struct lits + head-disambiguation),
-    leak-free. **(2b) increment-7 (A10):** the effect / concurrency leaf forms —
-    `declassify(e)`, `perform Eff.op(args)` → `(perform Eff op args…)`,
-    `scope concurrent { block }` → `(scope (block …))`, `spawn <call>`, and the
-    `.await` POSTFIX → `(await target)`. `Expr` gained
-    `Declassify`/`Perform`/`Scope`/`Spawn`/`Await` + 5 keyword tags (scope/while
-    bodies stay statement-free until (2c)). Matches `snc ast` over **102 seeds**,
-    leak-free. **(2b) increment-8 (A11) — CLOSES the expression grammar:** `handle
-    <body> with { Eff.op(params) => arm, … return v => arm }` → `(handle body (arm
-    Eff op armbody)… (return v body))`. Handler-arm params parsed but NOT dumped;
-    the optional `return` arm kept SEPARATE (a `&mut Ret` out-param — `*ret =
-    Ret::YesRet(…)`, the first non-primitive `&mut` assignment, de-risked by a
-    probe) so it dumps LAST regardless of source order. `Expr` gained `Handle` +
-    `HArms`/`Ret`; tags `handle`(41)/`with`(42)/`return`(43). Matches `snc ast` over
-    **110 seeds** (incl. return-not-last); leak-free. **Every `ExprKind` now parses.**
-    **(2c-1) (A12):** a block is now `{ <stmt>* <tail> }` → `(block <stmt>… <tail>)`
-    — `let [mut] name = e` → `(let [mut] name _ e)`, `target = e` → `(assign …)`,
-    `while cond { body }` → `(while …)`, `break`/`continue`, expr-stmt → `(expr e)`;
-    the fn body is a real block. Block tail = a `&mut Expr` out-param defaulting to a
-    NULLARY `SynthZero` (dumps `(int 0)` — the synth tail for a stmt-only `while`
-    body; a boxed `Int(0)` default leaked since `*tail = e` doesn't free the old
-    enum). `Expr` gained `Block(Stmts, Expr)`/`SynthZero` + `Stmts`/`Stmt`; tokens
-    `;`(44) + let/mut/while/break/continue (45–49). **122 seeds**, leak-free.
-    **(2c-2) (A13):** the optional `let` `: type` annotation → `(let [mut] name
-    <type> e)` (vs `_`), via a `parse_type` mirroring the Rust one (`secret T` /
-    `&T`/`&mut T` / `?T` / `[T]` / `Ident` / `Ident<args>`); nested generics close
-    without a `>>` split (the tokenizer has no `>>`). New `TypeE`/`TyArgs`/`TyOpt`
-    enums; tokens `?`(50) + `secret`(51). **135 seeds**, leak-free.
-    **(2c-3) (A14) — CLOSES the fn-level grammar:** full `fn` defs — `fn name <T>?
-    ( [mut] p: T, … ) -> RET ! { eff }? { body }` → `(fn name ((param [mut] p
-    <type>) …) <ret> <block>)`; the return type routes through `parse_type` (so
-    `[u8]`/`?T`/`Vec<T>` returns dump right); generic type-params + the effect row
-    are parsed-and-SKIPPED (the dump emits neither). New `Params` enum. **148 seeds**,
-    leak-free. ⚠ Sentinel `if` is an EXPRESSION (every branch needs a tail + an
-    `else`) — `skip_type_params` is `depth = if … else if … else …` in a `while
-    depth > 0` loop.
-    🔑 **PROVEN STRUCTURE (reuse for (2d)):** recursive `Expr` enum
-    returned BY VALUE + CONSUMING recursive `match` dump (`Vec<non-primitive>` is
-    unsupported, so NO arena/value-stack); recursive-descent helpers share the
-    token arrays + `src` as `&Vec<i64>`/`&[u8]` indexed via **`(*r)[i]`** (auto
-    `r[i]` fails) with a **`&mut i64` cursor**; left-assoc folds via **recursion**
-    (`parse_X` + `parse_X_rest(acc)` — a loop accumulator trips moved-in-loop);
-    match arms comma-separated; flat per-fn unique locals; the dump computes
-    prefix+symbol as `[u8]` values FIRST then emits (sibling `&mut out` borrows in
-    `if` tails read as overlapping). parser.sentinel is self-contained (its own
-    minimal tokenizer); sharing the full lexer via a D.6 module is a follow-on.
-    **RESUME HERE → (2d) the TOP-LEVEL DECLS (the LAST parser slice).** (2b) + (2c)
-    are COMPLETE — every `Stmt`/`Expr`/`TypeExpr`/`Pattern` + the fn header now parse,
-    over **148 seeds**. (2d) adds the remaining top-level item kinds beyond `fn`:
-    **struct** (`struct Name { f: T, … }`), **enum** (`enum Name { V, V(T), … }`),
-    **trait** (`trait T { fn sig; … }`), **impl** (`impl T for Ty { … }` + named
-    impls), **class** (`class Name { fields; init; methods; delegate }`), **effect**
-    (`effect E { op(…) -> T; … }`), and **use** (`use a::b::Item;`). ⚠ This needs the
-    oracle side too: ADR 0039 D2/A1 — `snc ast`'s `dump`/`dump_program` currently
-    emits only the `fns` (the seed corpus is fn-only); **extend `ast_dump.rs` to dump
-    every decl kind in source order** (the (2d) part of D2), then mirror each in
-    `selfhost/parser.sentinel`. `main`'s top loop currently assumes every item is a
-    `fn` (it does `cur+1` to skip `fn`); generalise it to dispatch on the leading
-    token (`fn`/`struct`(7→tag?)/`enum`/`trait`/`impl`/`class`/`effect`/`use`/`pub`).
-    Note `pub` is contextual + `use`/`enum`/`match`/etc. are already lexer keywords;
-    several decl keywords (struct/trait/impl/class/effect/pub/use) need tokenizer
-    tags. Land it incrementally (one decl kind per increment, each oracle-validated),
-    closing toward the full `tests/pass` + `tests/ui` corpus (D8). Once (2d) matches
-    the corpus, the parser stage is DONE — next port stage = resolve (its own ADR).
-    The goal (D8): `selfhost/parser.sentinel` matches `snc ast` over the whole
-    `tests/pass` + `tests/ui` corpus, like the lexer does for `snc lex`.
-    Back-end-agnostic (Path A merge); Rust `snc` stays the oracle. **Before coding:
-    read ADR 0039 + its Amendments A1–A14.**
-    **ADR 0037 — settled decisions (with the language owner):** (a) **module
-    surface = file-as-module + `use`** — a file *is* a module, its path
-    relative to the source root (the entry file's dir) *is* its module path;
-    `use a::b::Item;` imports a `pub` item; `pub` (parsed since C4.1, a no-op)
-    becomes the visibility gate; NO `mod` blocks. (b) **compilation model =
-    TRUE separate compilation** (not whole-program merge) — each module → its
-    own `.o`, cross-module refs resolved at link via stable `abi-v1`-keyed
-    symbols. **Why it's the biggest D-change:** it breaks 3 whole-program
-    codegen assumptions — `collect_mono_instantiations` (whole-program mono
-    discovery), the single `fns: HashMap<FnId, FunctionValue>` map, and
-    `self.fns.get(&id)` call resolution (a cross-unit callee is unknown) — and
-    turns cross-unit symbols into ABI surface (the bare-source-name mangling is
-    single-file-only + not collision-free; D7 = a module-qualified,
-    length-prefixed `abi-v1` mangling amendment). **Sub-phase split (ADR 0037
-    D9):** **(1/N)** the surface (`use` token + parse + top-level `pub`) + the
-    resolve **module graph** (discover files by following `use`; per-unit ID
-    spaces + namespaces; visibility) + per-unit type-check against imported
-    **signatures** + **non-generic** separate compilation (per-unit `.o`,
-    module-qualified mangling, extern-symbol cross-module calls + types,
-    deterministic link); **(2/N)** **cross-module generics** (per-unit
-    instantiation + `linkonce_odr` dedup — the C++ template model; `pub`
-    generic bodies cross the boundary) + cross-module trait/impl methods;
-    **(3/N)** incremental caching (Salsa) + per-unit `.o` repro. Emit/link
-    today: parse→…→codegen to ONE LLVM module `"sentinel"` → ONE `.o` → `cc`
-    links it + `libsentinel_runtime.a` (`compile_to_object` in
-    sentinel-codegen; `link()` in sentinel-driver/main.rs). **Before coding:**
-    re-read **ADR 0037** (esp. D3 resolve graph, D5 codegen-per-unit, D6
-    cross-module generics → (2/N), D7 mangling) + the emit/link path above +
-    **ADR 0029** (the frozen `abi-v1` mangling/symbol tests the D7 amendment
-    must update in the same commit). See [[sentinel_d5_loops_surface]].
+    NEXT = **(7/N) the TRANSFORM HALF — HIR/MIR → codegen** (+ the bootstrap
+    fixed-point). This is a fresh stage with its own kickoff ADR (the 0039–0043
+    cadence), and a DIFFERENT shape than the analysis passes: it TRANSFORMS toward the
+    object rather than dumping a computed set. ⚠ The (7/N) kickoff is a genuine
+    sequencing/design call — **DECIDE WITH THE OWNER** (as 5/N/6/N were): (1) the right
+    `snc <stage>` ORACLE (a `snc mir` lowered-form dump vs driving toward `snc build`
+    object parity), (2) the Sentinel data model, (3) MIR-first vs straight at codegen
+    (HIR is thin = 101 lines / MIR 1134 / codegen 8263 in crates/). Do the scouting,
+    recommend, ASK, then write the kickoff ADR. Clean stage boundary; no in-flight slice.
 
-    CARRIED-FORWARD DEBT (not blocking D.3): **D.1 A1 — recursive-enum
-    payload drop is box-free only** (leak-free for the standard
-    recursive-consume walk; leaks only on bind-and-ignore / drop-unmatched;
-    NO UAF). The real fix is the payload-ownership model (match-consumes-
-    scrutinee + drop-plan-registered bindings, NOT drop fns alone — those
-    double-free), best bundled with **D.1b** (generic enums `Option`/`Result`
-    + the leak-completeness fix). See [[sentinel_d1_enum_surface]]. Also
-    **droppable-element `Vec` drop** (`Vec<Struct>` / `Vec<[u8]>` per-element
-    free — ADR 0034 D8; the enum-A1-shaped follow-on; primitive-element Vecs
-    are leak-free today).
-    ROADMAP (ADR 0031 D4): after D.3 — file I/O (stdlib) -> modules -> loops,
-    then the self-host port (lexer -> parser -> ... in Sentinel,
-    differentially validated against the Rust `snc` oracle).
+    KEY REUSABLE FINDINGS (carry forward):
+    - The back-half stages REUSE the typed program (they can't cheaply re-derive it).
+      The template (6/N): `types.sentinel` exposes **`pub fn run(src, mode, result)`**
+      (mode 0 = the `snc types` dump; mode 1 = `snc borrow` moved-sources); a new
+      reusing stage is THIN (`use types::run;` via a D.6 chain stage→types→parser, OR
+      add a new `mode`). HIR/MIR/codegen build on this.
+    - The differential-oracle method: each Rust stage gets a `snc <stage>` dump
+      subcommand; the Sentinel stage reproduces it byte-for-byte; a corpus differential
+      test asserts equality (skipping fixtures the oracle rejects — error/diagnostic
+      parity is OUT OF SCOPE every stage). Mirror `tests/selfhost_borrow.rs`.
+    - Sentinel-language idioms/quirks (bite every stage): recursive ASTs = enums
+      returned BY VALUE + consuming `match` (Vec<non-primitive> UNSUPPORTED → cons-list
+      enums); flat parallel-`Vec<i64>` tables + a name blob (integer-indexed); an owned
+      `[u8]` must be CONSUMED (sink it) or it leaks; refs index via `(*r)[i]`; FLAT
+      per-fn var namespace (but MATCH arms are independent scopes — names recur across
+      arms; only nested if-branches within one arm need unique names); `if` is an
+      EXPRESSION (tail + mandatory else); Vec index-assign + loop-reassign-of-a-Move-
+      binding are FORBIDDEN (use recursion / append-only / rebuild); NO `<<`/`>>`/`~`
+      (use a multiply loop for `2^n`, `^ (0-1)` for bit-not); `vec_to_array` is
+      Vec<u8>-only (Vec<i64> auto-drops via RAII).
 
-    DEFERRED (none blocking; recorded in ADRs): C5.2a/D4 constant-time
-    EMISSION (branch-free arithmetic/bitwise already passes D5 on existing
-    codegen → D4 likely scoped out of 1.0; ADR 0026 flips once settled);
-    bitwise SHIFTS `<< >> ~` (ADR 0027 A1; need the `>>`/nested-generic-close
-    split); `[secret T]` arrays (would activate the broker secret-memory
-    policy); full escape analysis; `scope budget(N)` surface; cross-process /
-    modules / actors — all post-1.0 per ADR 0025.
+    BUILD/RUN/LEAK: stage selfhost/*.sentinel for the target stage in /tmp/tb/ (the
+    entry + its `use` deps), `target/debug/snc build /tmp/tb/<stage>.sentinel -o
+    /tmp/tb/bin`, run reading ./input.sentinel (cp <fixture> /tmp/tb/input.sentinel; (cd
+    /tmp/tb && ./bin)), diff vs `target/debug/snc <stage> <fixture>`. Sweep tests/pass +
+    tests/ui, skip where the oracle exits nonzero. Leak-check (codesign trick for fresh
+    binaries): an entitlements plist with com.apple.security.get-task-allow=true,
+    `codesign -s - --entitlements ent.plist -f /tmp/tb/bin`, then `(cd /tmp/tb && leaks
+    --atExit -- ./bin)` — want 0 leaks. ALWAYS full-corpus-diff for zero-regressions +
+    full-leak-sweep every match.
 
-    ADR STATUS: 0025 **ACCEPTED-WITH-AMENDMENTS** (Phase C5 kickoff — closed
-    at Sentinel 1.0; C5 sub-phase roll-up). 0026 PROPOSED (C5.1/C5.2; flips
-    when the deferred D4 emission/HIR-MIR migration lands post-1.0). 0027
-    ACCEPTED-WITH-AMENDMENTS (bitwise; shifts deferred). 0028
-    ACCEPTED-WITH-AMENDMENTS (broker scope arenas; A2 corrects the "UAF
-    hole"). 0029 ACCEPTED-WITH-AMENDMENTS (stable abi-v1; frozen + tested).
-    0030 **ACCEPTED-WITH-AMENDMENTS** (the 1.0 go/no-go — runs + passes D5;
-    3/N declared 1.0). 0031 **PROPOSED** (Phase D kickoff — self-hosting;
-    honest readiness verdict + the language/stdlib prerequisite roadmap;
-    first sub-phase D.1 = sum types + `match`). 0032 **ACCEPTED-WITH-
-    AMENDMENTS** (D.1 sum types + pattern matching MVP — 1/N lexer + 2/N
-    AST+parser + 3/N type layer + 4/N codegen; `enum`/`match` compile + run
-    end to end. A1: recursive payload-field drop deferred — box-free drop
-    leaks recursive-enum nested boxes; needs synthesized per-enum drop fns.
-    A2: inline-small-enum opt deferred. A3: generic enums → D.1b). 0033
-    **ACCEPTED-WITH-AMENDMENTS** (D.2 strings + a `u8` byte type MVP — 1/N
-    lexer + 2/N AST+parser + 3/N type layer + 4/N codegen/runtime; a string IS
-    a `[u8]`, `u8` is an integer scalar; char/string literals + indexing +
-    `str_eq` + `u8`↔`i64` conversions compile + run end to end, leak-free. A1:
-    string heap copy via direct byte-stores not a global (`CodegenCtx` lacks
-    `&Module`). A2: inline string-literal args to borrowing builtins inherit
-    the pre-existing temporary-drop gap; bound vars are leak-free. A3: `str_eq`
-    args borrowed not consumed). 0034 **ACCEPTED-WITH-AMENDMENTS** (D.3
-    growable collections — the MVP is complete: `Vec<T>` is `[T]` + capacity
-    + mutation, `Type::Vec(VecElem)` mirrors `Type::Array(ArrayElem)`,
-    `String` = `Vec<u8>`; no new generics / no lexer-parser change.
-    **(1/N)** `Type::Vec` + cascade + `vec_new`/`push`/`len` +
-    `sentinel_realloc` growth + `&mut Vec` borrow + drop (`a64883c`);
-    **(2/N)** `v[i]` (reuses Index, field-2 data ptr) + `pop` +
-    `vec_to_array` (the `Vec<u8>`->`[u8]` bridge) + `String` + the
-    comprehensive `c5d3` phase-go (`8430b0a`, exit 55 / 0 leaks).
-    Amendments A1–A5 (1/N) + B1–B3 (2/N) in the ADR. Builtins FnId 0..=10.
-    DEFERRED (D8): `Map`, droppable-element `Vec` drop, generic-fn `Vec`,
-    `with_capacity`/`insert`/slicing/iterators, `secret Vec`, broker-backing).
-    0035 **ACCEPTED-WITH-AMENDMENTS** (D.4 file I/O — the MVP is complete:
-    `read_file`/`write_file`/`print_bytes` as runtime builtins like `print`,
-    NOT algebraic effects (D2 amends ADR 0031 D4's "effects + handlers");
-    panic-on-failure (D5); paths + content are `[u8]`; `std::fs`-backed
-    `sentinel_*` wrappers join abi-v1 (23 symbols). **(1/N)** `read_file` +
-    `write_file` (`2c530f6`); **(2/N)** `print_bytes` (`fb1b51b`); c5d4 exit
-    5 / stdout "hello" / 0 leaks. The 3 open design points resolved at the
-    proposed defaults; Amendments A1 (std::fs not raw libc) + A2 (out-param
-    read ABI) + B1 (print_bytes: exact bytes, no newline, flushed). Builtins
-    FnId 0..=13. DEFERRED (D8): recoverable errors / `Io` effect row /
-    streaming / `read_stdin` / directories).
-    0036 **ACCEPTED-WITH-AMENDMENTS** (D.5 loops — `while` + `break`/
-    `continue`. (D3) a loop is a STATEMENT (`StmtKind::While`/`Break`/
-    `Continue`), not an expression; (D4) the first backward CFG branch
-    (cond→body→cond); (D5) per-iteration body-scope drop; (D8) the loop-
-    carried move rule — reject moving an outer Move-typed binding inside a
-    `while` body (`MovedInLoopBody`). **(1/N)** shipped `while` end to end
-    (`adec9c3`, c5d5_loops exit 67); Amendments A1 (stmt-only body →
-    synthesised unit tail) + A2 (entry-block alloca hoist via `loop_depth`).
-    **(2/N)** shipped `break`/`continue` (this session) — payload-free
-    statements branching to the innermost loop's `loop_after`/`loop_cond` via
-    a loop-target stack; the load-bearing **drains-before-branch** (drop every
-    scope frame down to the loop body before branching — `emit_loop_exit_drops`
-    /`emit_frame_drops`; leak-free with a heap binding live at the branch);
-    first mid-block divergence parks on an `after_loopctl` dead block;
-    out-of-loop rejection (`LoopControlOutsideLoop`) via a `loop_depth` on the
-    type env. Amendments C1–C5 (C5 = the conditional-break tail-idiom
-    ergonomic note). c5d5_break_continue exit 115 / 0 leaks; 1361 tests. No new
-    `Type` / no FnId-shift; `break`/`continue` are new lexer tokens. DEFERRED
-    (D8): `for`/ranges/iterators, labeled break, `break`-with-value /
-    loop-as-expression, a termination check).
-    Optional C4 follow-ons (none blocking): work-stealing scheduler
-    (ADR 0024 A1), scope cancellation (A2), Task<T>/spawn-args beyond i64
-    (A3), Path-3 bounded-generic dispatch (ADR 0023 A1).
-    Branch state: verify with `git status` at session start.
+    READ FIRST: docs/STATE.md top banner + docs/HANDOVER.md §0.1 (working norms) + §0.3
+    (quick-status — the (7/N) NEXT block at the top) + docs/decisions/0043-self-host-
+    port-borrow-check.md (the just-closed stage; A1+A2 = the reuse template) +
+    docs/decisions/0038-self-host-port-lexer.md (the port's spine) + docs/agent-protocol.md
+    + auto-memory `sentinel_selfhost_port`.
+
+    NORMS (HARD): never git push (dev pushes via GitHub Desktop); four-check green gates
+    EVERY commit; feat+docs commit pairs per increment (docs = ADR amendment + STATE
+    banner + HANDOVER §0.3 + auto-memory); never commit leaking code; commit messages
+    backtick-free (zsh — `git commit -F /tmp/msg.txt`), end with the `Co-Authored-By:
+    Claude Opus 4.8 (1M context)` trailer; no nested heredocs. Work on main (don't
+    branch). Small reviewable patches; build between each. Add seeds to the stage's
+    differential test per slice. Agents help at the EDGES (de-risking probes, corpus
+    analysis, adversarial review) per docs/agent-protocol.md — NOT the sequential stage
+    build; the orchestrator re-runs probe snippets (agent sandboxes deny `snc` exec).
 
 ---
 
