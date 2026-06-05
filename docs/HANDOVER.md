@@ -1861,29 +1861,33 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 
 ### 0.3 Quick-status block for session start
 
-> **NEXT = (7d) — the CONST-TIME VERIFIER (`verify_constant_time`) + leaking seeds, the LAST
-> piece of (7/N). (7a)+(7b)+(7c) the LOWERING is COMPLETE + (7e) the full-corpus PHASE-GO is
-> GREEN** (ADR 0044 A1–A4): `selfhost/mir.sentinel` (the 7th stage) matches `snc mir`
-> byte-for-byte over the ENTIRE clean-lowering corpus — **123/123 fixtures**
-> (`sentinel_mir_matches_oracle_on_corpus`), modes 0/1 (`snc types`/`snc borrow`) stay
-> 123/123 byte-identical, leak-free. The mode-2 fuse covers EVERY form (straight-line →
-> control-flow branch/merge → the `Opaque` catch-all + `Load` + all calls + the effect/
-> class/enum forms). ⚠ (7d) the verifier's corpus differential is near-empty (only
-> `c52_secret_leak` is a true positive) → the leaking seeds are load-bearing. `mir.sentinel`
-> reuses `types.sentinel` via a new **`mode 2`** (the 6/N `types::run` template, FUSED into
-> the pass-2 walk as a guarded `if (*c).mode == 2` side-build + a `lastval` ctx field):
-> straight-line (const/var/unary/binop/cmp/`let` → one block + Return) matches `snc mir`
-> byte-for-byte on 8 seeds, **modes 0/1 stay 123/123 byte-identical** (mode-2 emits are dead
-> there), **leak-free**. ⚠ Sentinel rule found: passing `&mut (*c).field` to a USER fn
-> re-borrows `c` → render into a LOCAL buffer + `push`-fold into the ctx field. **(7c) DONE
-> (`bd4ca96`+`a0a5a3c`) + (7e) phase-go GREEN:** the `Opaque` catch-all (struct/array/field/
-> widen/char/string/null + enum-construct/match/method/class-init/perform/handle/spawn/await/
-> resume-kont), `Load` (index/`*`-deref), `declassify`, and ALL calls — via the `margs`
-> operand stack + `emit_va`; `mir_suppress` for place stores + handle arms; an unbound Var
-> (match payload) → a fresh Opaque. 123/123. **NEXT (7d)** = the const-time verifier
-> (`verify_constant_time` — 4 sink checks reading `is_secret` off each value's type) + a
-> `snc ctverify` oracle + leaking seeds (the differential is near-empty on the clean corpus
-> — only `c52_secret_leak` leaks — so the positive seeds matter). **The BORROW-CHECK stage
+> **NEXT = (8/N) CODEGEN — the bootstrap-critical transform + the fixed-point (its OWN
+> kickoff ADR, the 0039–0044 cadence). (7/N) the MIR + const-time stage is COMPLETE — ADR
+> 0044 → ACCEPTED.** `selfhost/mir.sentinel` matches `snc mir` byte-for-byte over the ENTIRE
+> clean-lowering corpus (**123/123**, `sentinel_mir_matches_oracle_on_corpus`) and
+> `selfhost/ctverify.sentinel` matches `snc ctverify` over the type-clean corpus (**123/123**,
+> `sentinel_ctverifier_matches_oracle_on_corpus`), leak-free; `snc types`/`snc borrow` stay
+> byte-identical. The port now has lexer + parser + resolve + types + effect-check +
+> borrow-check + **MIR-lowering + const-time** — the WHOLE pipeline through codegen's input.
+>
+> **(7/N) this session** (ADR 0044, A1–A5) reused `types.sentinel` via `types::run`-with-`mode`:
+> `mode 2` builds the MIR (a FUSED `if mir_on(c)` side-build of the pass-2 walk + a `lastval`
+> ctx field; the flat append-only SSA pools the probe proved; `if`/`&&`/`||` → branch + a
+> VarId-sorted merge; a `margs` operand stack for call/Opaque; `mir_suppress` for place stores
+> + handle arms) and dumps it; `mode 3` reuses that build then runs `verify_constant_time` (4
+> sink checks on `is_secret`). Reusable findings: (a) a ctx-field `&mut (*c).field` to a USER
+> fn re-borrows `c` (render to a local + `push`-fold); (b) the ONLY type-clean MIR leak is a
+> secret `&&`/`||` Branch (other sinks are source-level type rejections); (c) the verifier's
+> corpus differential is a no-false-positive sweep + the one `c52_secret_leak` positive.
+>
+> **(8/N) CODEGEN is the GRAND FINALE + the bootstrap fixed-point** — a fresh stage, its own
+> kickoff ADR. ⚠ The design call the scout flagged: Sentinel has NO LLVM/inkwell FFI (only
+> `read_file`/`write_file`/`print_bytes`), so a self-hosted codegen must emit a TEXTUAL form —
+> most plausibly LLVM `.ll` via `write_file` → external `llc`/`clang` link — and its oracle
+> likely shifts from byte-dump parity to BEHAVIOURAL run-parity + the fixed-point (does the
+> Sentinel-compiled compiler reproduce the object?). Decide WITH THE OWNER (as 5/N–7/N were):
+> the emission target + the oracle. REUSES the typed program + the just-built MIR machinery.
+> **The BORROW-CHECK stage
 > (6/N, ADR 0043) is COMPLETE — ADR 0043 → ACCEPTED.**
 > `selfhost/borrow.sentinel` matches `snc borrow` byte-for-byte over the ENTIRE
 > clean-borrow corpus — **123/123 fixtures**
@@ -1932,35 +1936,34 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0044 A4** docs commit ((7c)+(7e)),
-    atop the (7c-complete + phase-go) feat (`a0a5a3c`) + the (7c) common-forms feat
-    (`bd4ca96`) + the (7b)/(7a)/oracle commits + ADR 0044 PROPOSED + the (6/N) borrow stage
-    (ADR 0043 ACCEPTED). Clean tree; four-check green (cargo build + `cargo nextest run
-    --workspace` + `cargo test --doc --workspace` + `cargo clippy --workspace --all-targets
-    -- -D warnings`); **1445 tests** (+8 `snc mir` goldens + 2 `mir.sentinel` tests: seeds +
-    the **`sentinel_mir_matches_oracle_on_corpus`** phase-go). `selfhost/mir.sentinel` (the
-    7th stage) lowers the WHOLE corpus byte-for-byte (123/123); (7d) the const-time verifier
-    is the last piece. macOS + LLVM 18.
+    Verify HEAD with `git log -1` — expect the **ADR 0044 A5** docs commit ((7/N) COMPLETE,
+    ADR 0044 ACCEPTED), atop the (7d) verifier feat (`1868b38`) + the (7c)/(7b)/(7a)/oracle
+    commits + ADR 0044 PROPOSED + the (6/N) borrow stage (ADR 0043 ACCEPTED). Clean tree;
+    four-check green (cargo build + `cargo nextest run --workspace` + `cargo test --doc
+    --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1449 tests**
+    (+`snc mir` goldens + the `mir.sentinel`/`ctverify.sentinel` differential tests:
+    `sentinel_mir_matches_oracle_on_corpus` + `sentinel_ctverifier_matches_oracle_on_corpus`,
+    both 123/123). macOS + LLVM 18.
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
-    + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR
-    0043) — **ALL COMPLETE + ACCEPTED.** The whole FRONT END + both analysis passes are
-    ported, each matching its `snc <stage>` oracle byte-for-byte over the corpus,
-    leak-free: `snc lex`/`ast`/`resolve`/`types` (123/123) / `effects` (122/122) /
-    `borrow` (123/123). selfhost/ has lexer.sentinel, parser.sentinel, resolve.sentinel,
-    types.sentinel, effects.sentinel, borrow.sentinel. **▶ (7/N) MIR + the const-time
-    verifier OPENED — ADR 0044 PROPOSED (owner-chosen over codegen-first); no code yet.**
+    + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR 0043)
+    + **MIR-lowering + const-time (7/N, ADR 0044)** — **ALL COMPLETE + ACCEPTED.** The whole
+    front end + both analysis passes + the transform-half's MIR lowering + the const-time
+    verifier are ported, each matching its `snc <stage>` oracle byte-for-byte over the
+    corpus, leak-free: `snc lex`/`ast`/`resolve`/`types` (123/123) / `effects` (122/122) /
+    `borrow` (123/123) / `mir` (123/123) / `ctverify` (123/123). selfhost/ has lexer,
+    parser, resolve, types, effects, borrow, **mir, ctverify** .sentinel. The ONLY thing
+    left is **codegen** (the bootstrap-critical transform → the object/fixed-point).
 
-    NEXT = **(7d) the const-time VERIFIER** — port `verify_constant_time` (4 sink checks:
-    a Load index/base, a Binary(Div) divisor, a Branch cond that is `secret` — taint read
-    off each value's type via `is_secret`) + a `snc ctverify` oracle dumping the leak set +
-    leaking seeds (the corpus differential is near-empty — only `c52_secret_leak` leaks —
-    so the positive seeds are load-bearing). Likely a `mode 3` that builds the MIR (reuse
-    the mode-2 build) then verifies. **(7a)+(7b)+(7c) the LOWERING is DONE + (7e) phase-go
-    GREEN** (ADR 0044 A1–A4): `selfhost/mir.sentinel` matches `snc mir` byte-for-byte over
-    123/123 fixtures (`sentinel_mir_matches_oracle_on_corpus`), modes 0/1 stay 123/123,
-    leak-free. The mode-2 fuse covers every form (straight-line / control-flow / Opaque /
-    Load / calls / effects / classes / enums). The back-half scout REFRAMED the handover's
+    NEXT = **(8/N) CODEGEN — the GRAND FINALE + the bootstrap fixed-point** (its own kickoff
+    ADR, the 0039–0044 cadence). ⚠ A genuine design call to settle WITH THE OWNER (as 5/N–7/N
+    were): Sentinel has NO LLVM/inkwell FFI (only read_file/write_file/print_bytes), so a
+    self-hosted codegen must emit a TEXTUAL form — most plausibly LLVM `.ll` via write_file →
+    external `llc`/`clang` link — and the oracle likely shifts from byte-dump parity to
+    BEHAVIOURAL run-parity + the fixed-point (does the Sentinel-compiled compiler reproduce
+    the object?). Scout `crates/sentinel-codegen` (8263 lines), recommend, ASK, then write
+    the kickoff ADR. REUSES the typed program + the just-built MIR machinery (`types::run`
+    with-`mode`). The back-half scout REFRAMED the handover's
     "HIR/MIR → codegen": **HIR is a no-op** (101-line identity bundle), **MIR is an
     analysis SIDE-BRANCH** (feeds ONLY `verify_constant_time`; `compile_to_object` reads
     the `TypedProgram` directly — codegen IGNORES MIR), **codegen is the real transform**

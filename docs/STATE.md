@@ -57,9 +57,16 @@ catch-all + `Load` + calls LANDED + (7e) the full-corpus PHASE-GO is GREEN (A4, 
 — `selfhost/mir.sentinel` matches `snc mir` BYTE-FOR-BYTE over the ENTIRE clean-lowering corpus
 (123/123, `sentinel_mir_matches_oracle_on_corpus`), modes 0/1 stay 123/123, leak-free.** Mechanisms:
 a `margs` operand stack + `emit_va` (call/opaque), op 5 load / 8 declassify, the widen-Opaque,
-`mir_suppress` (place stores + handle arms), the unbound-Var (match-payload) Opaque. **NEXT = (7d)
-the CONST-TIME VERIFIER (`verify_constant_time`) + leaking seeds — the LAST piece of (7/N).** The
-back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
+`mir_suppress` (place stores + handle arms), the unbound-Var (match-payload) Opaque. **✅ (7d) the
+CONST-TIME VERIFIER LANDED (A5, `1868b38`) — (7/N) is COMPLETE; ADR 0044 → ACCEPTED.**
+`selfhost/ctverify.sentinel` (via `types::run` `mode 3`, reusing the mode-2 MIR build gated by
+`mir_on`=`mode>=2`) matches `snc ctverify` byte-for-byte over the type-clean corpus (123/123,
+`sentinel_ctverifier_matches_oracle_on_corpus`) — empty for every CT fixture (no false positives),
+`(leak Branch)` for `c52_secret_leak` (a secret `&&` — the ONLY type-clean MIR leak; index/divisor/
+pointer are source-level type rejections), leak-free, modes 0/1/2 byte-identical. **The whole
+pipeline lexer→…→borrow-check→MIR-lowering+const-time is ported. NEXT = (8/N) CODEGEN** (the
+bootstrap-critical transform; its own kickoff ADR — no LLVM FFI → emit `.ll`, behavioural oracle).
+The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
 codegen reads the `TypedProgram` directly via `hir.program()`), and **codegen is the real
 transform** (→ a separate **8/N**, where Sentinel's lack of LLVM FFI forces an

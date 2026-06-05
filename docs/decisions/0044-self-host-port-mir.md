@@ -1,13 +1,20 @@
 # ADR 0044: Phase D self-host port — (7/N) MIR + the constant-time verifier in Sentinel
 
-Status: **PROPOSED** — the seventh sub-phase of the self-host port (ADR 0031 D5 /
+Status: **ACCEPTED** — the seventh sub-phase of the self-host port (ADR 0031 D5 /
 ADR 0038 D9), after the lexer (1/N), parser (2/N, ADR 0039), resolve (3/N, ADR 0040),
 types (4/N, ADR 0041), effect-check (5/N, ADR 0042), and borrow-check (6/N, ADR 0043)
-— all ACCEPTED. Ports the **MIR lowering** (`lower_to_mir`: the type-checked program →
-a minimal SSA/CFG mid-level IR) **+ the constant-time verifier** (`verify_constant_time`:
-the secret-leak gate) to Sentinel, differentially validated against a Rust `snc mir`
-oracle over the `tests/pass` + `tests/ui` corpus. The SECOND stage to REUSE the typed
-program (building on 6/N's `types::run` foundation).
+— all ACCEPTED. **COMPLETE (A1–A5): `selfhost/mir.sentinel` matches `snc mir` byte-for-byte
+over the ENTIRE clean-lowering corpus (123/123, `sentinel_mir_matches_oracle_on_corpus`)
+and `selfhost/ctverify.sentinel` matches `snc ctverify` over the type-clean corpus
+(123/123, `sentinel_ctverifier_matches_oracle_on_corpus`), leak-free; `snc types`/`snc
+borrow` stay byte-identical.** Ports the **MIR lowering** (`lower_to_mir`: the type-checked
+program → a minimal SSA/CFG mid-level IR) **+ the constant-time verifier**
+(`verify_constant_time`: the secret-leak gate) to Sentinel, differentially validated
+against Rust `snc mir`/`snc ctverify` oracles. The SECOND stage to REUSE the typed program
+(via 6/N's `types::run`-with-`mode` foundation — `mode 2` builds + dumps the MIR, `mode 3`
+builds + verifies). With it, the WHOLE pipeline — lexer → parser → resolve → types →
+effect-check → borrow-check → MIR-lowering + const-time — is ported. **NEXT = (8/N)
+codegen** (the bootstrap-critical transform; its own kickoff ADR — see Context).
 
 ## The reframing — what the scout found (read this first)
 
@@ -144,6 +151,31 @@ variant — **the constant-time verifier is IN scope** (not the "drop verifier" 
     (7d)** the const-time verifier (`verify_constant_time`) + leaking seeds — the last piece
     (the owner's full-version pick); its corpus differential is near-empty (only
     `c52_secret_leak` is a true positive), so the leaking seeds are load-bearing.
+
+- **A5 — (7d) the CONST-TIME VERIFIER COMPLETE; ADR 0044 → ACCEPTED, the (7/N) STAGE is
+  DONE.** `selfhost/ctverify.sentinel` (the verifier half of the 7th stage, `1868b38`) matches
+  `snc ctverify` byte-for-byte over the ENTIRE type-clean corpus — **123/123**
+  (`sentinel_ctverifier_matches_oracle_on_corpus`) + 5 seeds + 2 goldens, **leak-free**;
+  modes 0/1/2 stay 123/123 byte-identical. **REUSE = `mode 3`** (the `types::run`-with-`mode`
+  template): the MIR build is now gated by **`mir_on(c)` = `(*c).mode >= 2`** (a `replace_all`
+  of the `mode == 2` build-guards — `mir_on`'s body is `>= 2` so it isn't self-rewritten),
+  so mode 3 builds the same per-fn MIR; `type_fn`'s teardown splits **mode 2 → dump** vs
+  **mode 3 → `mir_verify_fn`** (the verify accumulates `(leak <SinkKind>)` lines into
+  `mirout`, which `run` mode≥2 copies to `result`). **`verify_constant_time`** = 4 sink
+  checks per fn (block → inst → terminator order): a `Load` secret index → `MemoryIndex`,
+  secret base → `MemoryAddress`; a `Binary(Div)` (op 3, sym 4) secret divisor → `Division`;
+  a `Branch` secret cond → `Branch` — taint read straight off each value's type
+  (`mir_val_secret` = `is_secret(mvty[v])`; NO def-use propagation — the typer computed the
+  fixpoint). Oracle = `snc ctverify` (`run_ctverify`, dumps the leak set). ⚠ **As D6 foresaw,
+  the corpus differential is a NO-FALSE-POSITIVE sweep + ONE true positive:** every
+  constant-time fixture (incl. the secret-but-CT `c31`/`c52_secret_ct`/`c53`) → empty, and
+  only `c52_secret_leak` (a secret `&&`) → `(leak Branch)`. **The ONLY type-clean MIR leak is
+  a secret `&&`/`||` short-circuit** (`SecretBranch` only rejects `if`); a secret index /
+  divisor / pointer is a SOURCE-LEVEL type rejection (verified by probe), so the positive
+  seeds are necessarily limited to `Branch`. **With (7d) the (7/N) stage is COMPLETE: the
+  whole pipeline — lexer → … → borrow-check → MIR-lowering + const-time — is ported.
+  NEXT = (8/N) codegen** (its own kickoff ADR; the emission-target question — no LLVM FFI →
+  emit `.ll`, behavioural oracle — settled there).
 
 - **A3 — (7b) CONTROL FLOW LANDED** (`c15ce6d`): the branch-merge in the `If` and Logic
   (`&&`/`||`) `dump_texpr` arms under mode 2 — the probe-proven algorithm, executed as
