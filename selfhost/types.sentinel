@@ -213,6 +213,15 @@ struct TyCtx {
     cg_collecting: bool, // true while a call walks its args (gates cg_collect)
     cg_suppress: bool,   // true while walking an assign target (the Var arm records, no load)
     cg_lastvid: i64,  // the VarId the most-recent Var node resolved to (for assign)
+    // (8b) the body is buffered per-fn so ALLOCAS can be HOISTED to the entry block
+    // (the if-result type is known only mid-walk; loop-body allocas must not re-run per
+    // iteration, ADR 0036). `cg_to_body` routes `cg_putc`: true during the walk (→ cgbody),
+    // false at teardown (→ cgout, for the header/hoisted-allocas/ret).
+    cgbody: Vec<u8>,       // the per-fn body .ll (folded into cgout at teardown)
+    cgalloca_sl: Vec<i64>, // hoisted alloca slots (the %vN)
+    cgalloca_ty: Vec<i64>, // hoisted alloca types (paired with cgalloca_sl)
+    cg_to_body: bool,      // route cg_putc to cgbody (walk) vs cgout (teardown)
+    cgblk: i64,            // per-fn basic-block label counter (bbN; entry is implicit)
     cgout: Vec<u8>,   // accumulated .ll across all fns (the mode-4 result)
 }
 
@@ -2713,6 +2722,41 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             (*c).consuming = false;
             dump_texpr(out, cnd, 0 - 1, src, c, gb);
             (*c).consuming = svc;
+            // (8b) codegen: capture the cond operand, allocate the then/else/merge block
+            // labels (+ the if-result slot, filled after the then walk), then branch on the
+            // cond and open the then block. No phi — the arms store into the result slot.
+            let cgC_k: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cgC_v: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
+            let mut cg_then: i64 = 0 - 1;
+            let mut cg_else: i64 = 0 - 1;
+            let mut cg_merge: i64 = 0 - 1;
+            let mut cg_rslot: i64 = 0 - 1;
+            if cg_on(c) {
+                cg_then = cg_fresh_block(c);
+                cg_else = cg_fresh_block(c);
+                cg_merge = cg_fresh_block(c);
+                cgo_str(c, "  br i1 ");
+                cgo_operand(c, cgC_k, cgC_v);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, cg_then);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, cg_else);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, cg_then);
+                cgo_str(c, ":\n");
+                0
+            } else {
+                0
+            };
             // (7b) MIR: branch on the cond into fresh then/else blocks; snapshot var_defs.
             let cv: i64 = if mir_on(c) {
                 (*c).lastval
@@ -2737,6 +2781,37 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // Both branches inherit the `if`'s expectation, so a `?T`-returning `if`
             // widens each branch's tail (and the `if`'s type is that branch type).
             let tt: i64 = dump_texpr(out, thn, exp, src, c, gb);
+            // (8b) codegen: capture the then operand; reserve the if-result slot (its type
+            // `tt` is known only now); store the then value, branch to merge, open the else.
+            let cgT_k: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cgT_v: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
+            if cg_on(c) {
+                cg_rslot = cg_alloca(c, tt);
+                cgo_str(c, "  store ");
+                cgo_ty(c, tt);
+                cg_putc(c, ' ');
+                cgo_operand(c, cgT_k, cgT_v);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, cg_rslot);
+                cg_putc(c, '\n');
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, cg_merge);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, cg_else);
+                cgo_str(c, ":\n");
+                0
+            } else {
+                0
+            };
             // (7b) MIR: capture the then value/exit + the then-arm rebindings (saved to a
             // side list), then restore var_defs to the branch + switch to the else block.
             let then_val: i64 = if mir_on(c) {
@@ -2815,6 +2890,36 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 mir_term_jump(c, else_exit, merge, &else_args);
                 (*c).mir_cur = merge;
                 (*c).lastval = result;
+                0
+            } else {
+                0
+            };
+            // (8b) codegen: store the else value, branch to merge, open merge, load result.
+            if cg_on(c) {
+                let cgE_k: i64 = (*c).cglk;
+                let cgE_v: i64 = (*c).cglv;
+                cgo_str(c, "  store ");
+                cgo_ty(c, tt);
+                cg_putc(c, ' ');
+                cgo_operand(c, cgE_k, cgE_v);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, cg_rslot);
+                cg_putc(c, '\n');
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, cg_merge);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, cg_merge);
+                cgo_str(c, ":\n");
+                let cg_ld: i64 = cg_fresh(c);
+                cgo_str(c, "  %v");
+                cgo_int(c, cg_ld);
+                cgo_str(c, " = load ");
+                cgo_ty(c, tt);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, cg_rslot);
+                cg_putc(c, '\n');
+                cg_reg(c, cg_ld);
                 0
             } else {
                 0
@@ -4017,12 +4122,21 @@ fn emit_tparams(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
         } else {
             0
         };
-        // (8/N) codegen: reserve the param's alloca slot + record its type (the alloca/
-        // store text is emitted by cg_emit_fn_header once all params are known).
+        // (8/N) codegen: hoist the param's alloca (recorded) + emit its store to cgbody
+        // (the store is the first thing in the body; the alloca lands in the entry block).
+        // The param index = len(cgpty) before the push (params record in order).
         if cg_on(c) {
-            let cgslot: i64 = cg_fresh(c);
+            let cgpidx: i64 = len((*c).cgpty);
+            let cgslot: i64 = cg_alloca(c, pty);
             cg_slot_set(c, vid, cgslot);
             push(&mut (*c).cgpty, pty);
+            cgo_str(c, "  store ");
+            cgo_ty(c, pty);
+            cgo_str(c, " %arg");
+            cgo_int(c, cgpidx);
+            cgo_str(c, ", ptr %v");
+            cgo_int(c, cgslot);
+            cg_putc(c, '\n');
             0
         } else {
             0
@@ -4091,14 +4205,8 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     let body: Expr = parse_block(k, s, e, src, cur);
     render_type(out, rty, c);
     push(out, ' ');
-    // (8/N) codegen: emit the `define` header + param allocas before the body walk
-    // (params parsed → slots in `cgsr`/types in `cgpty`; body instructions append next).
-    if cg_on(c) {
-        cg_emit_fn_header(c, src, name_s, name_e, rty);
-        0
-    } else {
-        0
-    };
+    // (8/N) codegen: the body walk appends to cgbody (allocas recorded for hoisting); the
+    // `define` header + entry-block allocas + ret are assembled into cgout at teardown.
     // (6/N) record this fn's moves: `curfn` = its idx (only top-level fn bodies — methods
     // aren't in `program.fns`), and the body's tail is CONSUMING (the returned value).
     (*c).curfn = fnidx;
@@ -4136,9 +4244,9 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     } else {
         0
     };
-    // (8/N) codegen: the body's value (`cglast`) is the fn's return; emit ret + `}`.
+    // (8/N) codegen: assemble the fn into cgout — header + hoisted allocas + body + ret.
     if cg_on(c) {
-        cg_emit_fn_footer(c, rty);
+        cg_emit_fn(c, src, name_s, name_e, rty);
         0
     } else {
         0
@@ -5567,6 +5675,11 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_collecting: false,
         cg_suppress: false,
         cg_lastvid: 0 - 1,
+        cgbody: vec_new(),
+        cgalloca_sl: vec_new(),
+        cgalloca_ty: vec_new(),
+        cg_to_body: false,
+        cgblk: 0,
         cgout: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();
@@ -6048,6 +6161,14 @@ fn clear_i64(v: &mut Vec<i64>) -> i64 {
     0
 }
 
+fn clear_u8(v: &mut Vec<u8>) -> i64 {
+    while len(*v) > 0 {
+        let _x: u8 = pop(v);
+        0
+    }
+    0
+}
+
 // (7d) the MIR pools are built for mode 2 (dump the MIR) AND mode 3 (build, then run
 // the const-time verifier over it). The per-fn dump-vs-verify differs (in `type_fn`).
 fn mir_on(c: &mut TyCtx) -> bool {
@@ -6101,10 +6222,15 @@ fn cg_reset(c: &mut TyCtx) -> i64 {
     clear_i64(&mut (*c).cgak);
     clear_i64(&mut (*c).cgav);
     clear_i64(&mut (*c).cgat);
+    clear_u8(&mut (*c).cgbody);
+    clear_i64(&mut (*c).cgalloca_sl);
+    clear_i64(&mut (*c).cgalloca_ty);
     (*c).cgnext = 0;
     (*c).cglk = 0;
     (*c).cglv = 0;
     (*c).cg_lastvid = 0 - 1;
+    (*c).cgblk = 0;
+    (*c).cg_to_body = true;   // the body walk routes cg_putc → cgbody
     0
 }
 
@@ -6112,6 +6238,25 @@ fn cg_fresh(c: &mut TyCtx) -> i64 {
     let n: i64 = (*c).cgnext;
     (*c).cgnext = n + 1;
     n
+}
+
+// A fresh basic-block label number (`bbN`); `entry` is the implicit first block.
+fn cg_fresh_block(c: &mut TyCtx) -> i64 {
+    let b: i64 = (*c).cgblk;
+    (*c).cgblk = b + 1;
+    b
+}
+
+// Route one byte to cgbody (during the body walk) or cgout (at teardown — the
+// header, the hoisted allocas, the return).
+fn cg_putc(c: &mut TyCtx, b: u8) -> i64 {
+    if (*c).cg_to_body {
+        push(&mut (*c).cgbody, b);
+        0
+    } else {
+        push(&mut (*c).cgout, b);
+        0
+    }
 }
 
 fn cg_slot_set(c: &mut TyCtx, vid: i64, slot: i64) -> i64 {
@@ -6148,7 +6293,7 @@ fn cgo_str(c: &mut TyCtx, s: [u8]) -> i64 {
     let n: i64 = len(s);
     let mut i: i64 = 0;
     while i < n {
-        push(&mut (*c).cgout, s[i]);
+        cg_putc(c, s[i]);
         i = i + 1;
     }
     0
@@ -6158,7 +6303,7 @@ fn cgo_str(c: &mut TyCtx, s: [u8]) -> i64 {
 fn cgo_slice(c: &mut TyCtx, src: &[u8], st: i64, en: i64) -> i64 {
     let mut i: i64 = st;
     while i < en {
-        push(&mut (*c).cgout, (*src)[i]);
+        cg_putc(c, (*src)[i]);
         i = i + 1;
     }
     0
@@ -6167,7 +6312,7 @@ fn cgo_slice(c: &mut TyCtx, src: &[u8], st: i64, en: i64) -> i64 {
 // push `n` in decimal.
 fn cgo_int(c: &mut TyCtx, n: i64) -> i64 {
     if n < 0 {
-        push(&mut (*c).cgout, i64_to_u8(45));
+        cg_putc(c, i64_to_u8(45));
         cgo_int_pos(c, 0 - n)
     } else {
         cgo_int_pos(c, n)
@@ -6182,7 +6327,7 @@ fn cgo_int_pos(c: &mut TyCtx, n: i64) -> i64 {
         0
     };
     let d: i64 = n - (n / 10) * 10;
-    push(&mut (*c).cgout, i64_to_u8(48 + d));
+    cg_putc(c, i64_to_u8(48 + d));
     0
 }
 
@@ -6233,13 +6378,13 @@ fn cg_reg(c: &mut TyCtx, d: i64) -> i64 {
 fn cg_bin(c: &mut TyCtx, op: [u8], ty: i64, lk: i64, lv: i64, rk: i64, rv: i64) -> i64 {
     let d: i64 = cg_dst(c);
     cgo_str(c, op);
-    push(&mut (*c).cgout, ' ');
+    cg_putc(c, ' ');
     cgo_ty(c, ty);
-    push(&mut (*c).cgout, ' ');
+    cg_putc(c, ' ');
     cgo_operand(c, lk, lv);
     cgo_str(c, ", ");
     cgo_operand(c, rk, rv);
-    push(&mut (*c).cgout, '\n');
+    cg_putc(c, '\n');
     cg_reg(c, d);
     d
 }
@@ -6249,13 +6394,13 @@ fn cg_cmp(c: &mut TyCtx, pred: [u8], ty: i64, lk: i64, lv: i64, rk: i64, rv: i64
     let d: i64 = cg_dst(c);
     cgo_str(c, "icmp ");
     cgo_str(c, pred);
-    push(&mut (*c).cgout, ' ');
+    cg_putc(c, ' ');
     cgo_ty(c, ty);
-    push(&mut (*c).cgout, ' ');
+    cg_putc(c, ' ');
     cgo_operand(c, lk, lv);
     cgo_str(c, ", ");
     cgo_operand(c, rk, rv);
-    push(&mut (*c).cgout, '\n');
+    cg_putc(c, '\n');
     cg_reg(c, d);
     d
 }
@@ -6267,7 +6412,7 @@ fn cg_neg(c: &mut TyCtx, ty: i64, k: i64, v: i64) -> i64 {
     cgo_ty(c, ty);
     cgo_str(c, " 0, ");
     cgo_operand(c, k, v);
-    push(&mut (*c).cgout, '\n');
+    cg_putc(c, '\n');
     cg_reg(c, d);
     d
 }
@@ -6278,7 +6423,7 @@ fn cg_not(c: &mut TyCtx, k: i64, v: i64) -> i64 {
     cgo_str(c, "xor i1 ");
     cgo_operand(c, k, v);
     cgo_str(c, ", 1");
-    push(&mut (*c).cgout, '\n');
+    cg_putc(c, '\n');
     cg_reg(c, d);
     d
 }
@@ -6287,13 +6432,13 @@ fn cg_not(c: &mut TyCtx, k: i64, v: i64) -> i64 {
 fn cg_conv(c: &mut TyCtx, op: [u8], fromty: i64, k: i64, v: i64, toty: i64) -> i64 {
     let d: i64 = cg_dst(c);
     cgo_str(c, op);
-    push(&mut (*c).cgout, ' ');
+    cg_putc(c, ' ');
     cgo_ty(c, fromty);
-    push(&mut (*c).cgout, ' ');
+    cg_putc(c, ' ');
     cgo_operand(c, k, v);
     cgo_str(c, " to ");
     cgo_ty(c, toty);
-    push(&mut (*c).cgout, '\n');
+    cg_putc(c, '\n');
     cg_reg(c, d);
     d
 }
@@ -6305,7 +6450,7 @@ fn cg_load(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
     cgo_ty(c, ty);
     cgo_str(c, ", ptr %v");
     cgo_int(c, slot);
-    push(&mut (*c).cgout, '\n');
+    cg_putc(c, '\n');
     cg_reg(c, d);
     d
 }
@@ -6314,22 +6459,21 @@ fn cg_load(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
 fn cg_store(c: &mut TyCtx, ty: i64, k: i64, v: i64, slot: i64) -> i64 {
     cgo_str(c, "  store ");
     cgo_ty(c, ty);
-    push(&mut (*c).cgout, ' ');
+    cg_putc(c, ' ');
     cgo_operand(c, k, v);
     cgo_str(c, ", ptr %v");
     cgo_int(c, slot);
-    push(&mut (*c).cgout, '\n');
+    cg_putc(c, '\n');
     0
 }
 
 // `  %vS = alloca <ty>`; returns the slot S.
+// Reserve an alloca slot — RECORD (slot, type) for hoisting to the entry block at
+// teardown (no inline text); the slot `%vN` is referenced by stores/loads in cgbody.
 fn cg_alloca(c: &mut TyCtx, ty: i64) -> i64 {
     let slot: i64 = cg_fresh(c);
-    cgo_str(c, "  %v");
-    cgo_int(c, slot);
-    cgo_str(c, " = alloca ");
-    cgo_ty(c, ty);
-    push(&mut (*c).cgout, '\n');
+    push(&mut (*c).cgalloca_sl, slot);
+    push(&mut (*c).cgalloca_ty, ty);
     slot
 }
 
@@ -6372,7 +6516,7 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         let us: i64 = (*c).ufs[fid - 14];
         let ue: i64 = (*c).ufe[fid - 14];
         cgo_slice(c, src, us, ue);
-        push(&mut (*c).cgout, '(');
+        cg_putc(c, '(');
         let n: i64 = len((*c).cgak);
         let mut i: i64 = snap;
         let mut first: bool = true;
@@ -6388,12 +6532,12 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
             let aok: i64 = (*c).cgak[i];
             let aov: i64 = (*c).cgav[i];
             cgo_ty(c, aty);
-            push(&mut (*c).cgout, ' ');
+            cg_putc(c, ' ');
             cgo_operand(c, aok, aov);
             i = i + 1;
         }
-        push(&mut (*c).cgout, ')');
-        push(&mut (*c).cgout, '\n');
+        cg_putc(c, ')');
+        cg_putc(c, '\n');
         cg_reg(c, d);
         0
     } else {
@@ -6411,7 +6555,15 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
 // `define <ret> @<name>(<ptys> %argN) {\nentry:\n` + each param's alloca + store.
 // Called after the params are parsed (slots reserved + types in `cgpty` by the
 // emit_tparams hook) and `rty` known, before the body walk.
-fn cg_emit_fn_header(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> i64 {
+// Teardown: ASSEMBLE the fn into cgout — the `define` header, the entry block (the
+// HOISTED allocas first), the buffered body (cgbody), then the return + `}`. Called
+// after the body walk; flips cg_putc to target cgout. The body's value (`cglast`) is
+// the fn's return (captured first — the header/ret emission advances cgnext for main's
+// trunc temp, which must continue after the body's numbering).
+fn cg_emit_fn(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> i64 {
+    let bk: i64 = (*c).cglk;
+    let bv: i64 = (*c).cglv;
+    (*c).cg_to_body = false;
     cgo_str(c, "define ");
     if (*c).cgmain {
         cgo_str(c, "i32")
@@ -6420,7 +6572,7 @@ fn cg_emit_fn_header(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i
     };
     cgo_str(c, " @");
     cgo_slice(c, src, name_s, name_e);
-    push(&mut (*c).cgout, '(');
+    cg_putc(c, '(');
     let np: i64 = len((*c).cgpty);
     let mut i: i64 = 0;
     while i < np {
@@ -6436,31 +6588,28 @@ fn cg_emit_fn_header(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i
         i = i + 1;
     }
     cgo_str(c, ") {\nentry:\n");
-    let mut j: i64 = 0;
-    while j < np {
-        let ptj: i64 = (*c).cgpty[j];
-        let slot: i64 = (*c).cgsr[j];
+    // the HOISTED allocas (params + lets + if-results), in reservation order.
+    let na: i64 = len((*c).cgalloca_sl);
+    let mut ai: i64 = 0;
+    while ai < na {
+        let asl: i64 = (*c).cgalloca_sl[ai];
+        let aty: i64 = (*c).cgalloca_ty[ai];
         cgo_str(c, "  %v");
-        cgo_int(c, slot);
+        cgo_int(c, asl);
         cgo_str(c, " = alloca ");
-        cgo_ty(c, ptj);
-        push(&mut (*c).cgout, '\n');
-        cgo_str(c, "  store ");
-        cgo_ty(c, ptj);
-        cgo_str(c, " %arg");
-        cgo_int(c, j);
-        cgo_str(c, ", ptr %v");
-        cgo_int(c, slot);
-        push(&mut (*c).cgout, '\n');
-        j = j + 1;
+        cgo_ty(c, aty);
+        cg_putc(c, '\n');
+        ai = ai + 1;
     }
-    0
-}
-
-// the fn's return + closing brace. `main` truncates its i64 body to i32 (the C ABI).
-fn cg_emit_fn_footer(c: &mut TyCtx, rty: i64) -> i64 {
-    let bk: i64 = (*c).cglk;
-    let bv: i64 = (*c).cglv;
+    // the buffered body (cgbody) — folded into cgout via the builtin push.
+    let nb: i64 = len((*c).cgbody);
+    let mut bi: i64 = 0;
+    while bi < nb {
+        let byte: u8 = (*c).cgbody[bi];
+        push(&mut (*c).cgout, byte);
+        bi = bi + 1;
+    }
+    // the return (main truncates its i64 body to i32 — the C ABI).
     if (*c).cgmain {
         let d: i64 = cg_dst(c);
         cgo_str(c, "trunc i64 ");
@@ -6468,14 +6617,14 @@ fn cg_emit_fn_footer(c: &mut TyCtx, rty: i64) -> i64 {
         cgo_str(c, " to i32\n");
         cgo_str(c, "  ret i32 %v");
         cgo_int(c, d);
-        push(&mut (*c).cgout, '\n');
+        cg_putc(c, '\n');
         0
     } else {
         cgo_str(c, "  ret ");
         cgo_ty(c, rty);
-        push(&mut (*c).cgout, ' ');
+        cg_putc(c, ' ');
         cgo_operand(c, bk, bv);
-        push(&mut (*c).cgout, '\n');
+        cg_putc(c, '\n');
         0
     };
     cgo_str(c, "}\n\n");

@@ -74,8 +74,8 @@ fn llvm_params_arith_and_call() {
             "define i64 @add(i64 %arg0, i64 %arg1) {\n",
             "entry:\n",
             "  %v0 = alloca i64\n",
-            "  store i64 %arg0, ptr %v0\n",
             "  %v1 = alloca i64\n",
+            "  store i64 %arg0, ptr %v0\n",
             "  store i64 %arg1, ptr %v1\n",
             "  %v2 = load i64, ptr %v0\n",
             "  %v3 = load i64, ptr %v1\n",
@@ -109,13 +109,13 @@ fn llvm_cmp_unary_and_bool_let() {
             "define i1 @f(i64 %arg0, i64 %arg1) {\n",
             "entry:\n",
             "  %v0 = alloca i64\n",
-            "  store i64 %arg0, ptr %v0\n",
             "  %v1 = alloca i64\n",
+            "  %v5 = alloca i1\n",
+            "  store i64 %arg0, ptr %v0\n",
             "  store i64 %arg1, ptr %v1\n",
             "  %v2 = load i64, ptr %v0\n",
             "  %v3 = load i64, ptr %v1\n",
             "  %v4 = icmp slt i64 %v2, %v3\n",
-            "  %v5 = alloca i1\n",
             "  store i1 %v4, ptr %v5\n",
             "  %v6 = load i1, ptr %v5\n",
             "  %v7 = xor i1 %v6, 1\n",
@@ -126,6 +126,55 @@ fn llvm_cmp_unary_and_bool_let() {
             "entry:\n",
             "  %v0 = trunc i64 0 to i32\n",
             "  ret i32 %v0\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
+#[test]
+fn llvm_if_else_memory_cell_merge() {
+    // `if c { a } else { b }` — no phi: a hoisted result slot, a conditional
+    // branch, each arm stores into the slot, the merge loads it. Block labels
+    // `bbN`; the result alloca (`%v5`) is hoisted to entry though reserved
+    // mid-walk (after the then-branch, so its type is known).
+    assert_eq!(
+        llvm_dump(
+            "ifelse",
+            "fn pick(c: bool, a: i64, b: i64) -> i64 {\n    if c { a } else { b }\n}\nfn main() -> i64 {\n    pick(true, 7, 9)\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "define i64 @pick(i1 %arg0, i64 %arg1, i64 %arg2) {\n",
+            "entry:\n",
+            "  %v0 = alloca i1\n",
+            "  %v1 = alloca i64\n",
+            "  %v2 = alloca i64\n",
+            "  %v5 = alloca i64\n",
+            "  store i1 %arg0, ptr %v0\n",
+            "  store i64 %arg1, ptr %v1\n",
+            "  store i64 %arg2, ptr %v2\n",
+            "  %v3 = load i1, ptr %v0\n",
+            "  br i1 %v3, label %bb0, label %bb1\n",
+            "bb0:\n",
+            "  %v4 = load i64, ptr %v1\n",
+            "  store i64 %v4, ptr %v5\n",
+            "  br label %bb2\n",
+            "bb1:\n",
+            "  %v6 = load i64, ptr %v2\n",
+            "  store i64 %v6, ptr %v5\n",
+            "  br label %bb2\n",
+            "bb2:\n",
+            "  %v7 = load i64, ptr %v5\n",
+            "  ret i64 %v7\n",
+            "}\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v0 = call i64 @pick(i1 1, i64 7, i64 9)\n",
+            "  %v1 = trunc i64 %v0 to i32\n",
+            "  ret i32 %v1\n",
             "}\n",
             "\n",
         )

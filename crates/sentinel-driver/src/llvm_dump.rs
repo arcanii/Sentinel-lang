@@ -82,26 +82,23 @@ fn dump_fn(f: &TypedFnDef, program: &TypedProgram, out: &mut String) -> Result<(
         llvm_ty(f.return_type)?
     };
 
-    write!(out, "define {ret_ll} @{}(", f.name).unwrap();
-    for (i, p) in f.params.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        write!(out, "{} %arg{i}", llvm_ty(p.ty)?).unwrap();
-    }
-    out.push_str(") {\nentry:\n");
-
     let mut e = Emit {
         program,
         next: 0,
+        block: 0,
         slots: HashMap::new(),
+        allocas: String::new(),
         body: String::new(),
     };
-    // Param allocas (the no-phi model: every binding is a memory slot).
+    // Allocas are HOISTED to the entry block: param slots, `let` slots, and the
+    // if-result slot all land in `e.allocas` (emitted first), while stores/loads/
+    // ops go to `e.body`. This (a) lets the if-result alloca carry a type known
+    // only AFTER its then-branch is walked, and (b) keeps loop-body allocas out of
+    // the loop (no per-iteration stack growth — ADR 0036). The param STORE stays
+    // in the body.
     for (i, p) in f.params.iter().enumerate() {
         let ty = llvm_ty(p.ty)?;
-        let slot = e.fresh();
-        writeln!(e.body, "  %v{slot} = alloca {ty}").unwrap();
+        let slot = e.alloca(&ty);
         writeln!(e.body, "  store {ty} %arg{i}, ptr %v{slot}").unwrap();
         e.slots.insert(p.id, slot);
     }
@@ -117,17 +114,31 @@ fn dump_fn(f: &TypedFnDef, program: &TypedProgram, out: &mut String) -> Result<(
         writeln!(e.body, "  ret {ret_ll} {tail}").unwrap();
     }
 
+    // Assemble: the `define` header, then the entry block (hoisted allocas first),
+    // then the body.
+    write!(out, "define {ret_ll} @{}(", f.name).unwrap();
+    for (i, p) in f.params.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        write!(out, "{} %arg{i}", llvm_ty(p.ty)?).unwrap();
+    }
+    out.push_str(") {\nentry:\n");
+    out.push_str(&e.allocas);
     out.push_str(&e.body);
     out.push_str("}\n");
     Ok(())
 }
 
-/// Per-fn emission state: the SSA value counter, the `VarId → alloca-slot`
-/// map (the slot's `%vN` number), and the instruction buffer.
+/// Per-fn emission state: the SSA value counter, the block-label counter, the
+/// `VarId → alloca-slot` map (the slot's `%vN` number), the hoisted-alloca buffer,
+/// and the instruction buffer.
 struct Emit<'a> {
     program: &'a TypedProgram,
     next: u32,
+    block: u32,
     slots: HashMap<VarId, u32>,
+    allocas: String,
     body: String,
 }
 
@@ -139,13 +150,27 @@ impl Emit<'_> {
         n
     }
 
+    /// A fresh basic-block label number (`bbN`); `entry` is the implicit first.
+    fn fresh_block(&mut self) -> u32 {
+        let b = self.block;
+        self.block += 1;
+        b
+    }
+
+    /// Reserve an alloca slot, emitting its `alloca` line into the HOISTED entry
+    /// buffer; the slot `%vN` is referenced by stores/loads in the body.
+    fn alloca(&mut self, ty: &str) -> u32 {
+        let s = self.fresh();
+        writeln!(self.allocas, "  %v{s} = alloca {ty}").unwrap();
+        s
+    }
+
     fn lower_stmt(&mut self, stmt: &TypedStmt) -> Result<(), String> {
         match &stmt.kind {
             TypedStmtKind::Let { id, ty, value, .. } => {
                 let v = self.lower_expr(value)?;
                 let llty = llvm_ty(*ty)?;
-                let slot = self.fresh();
-                writeln!(self.body, "  %v{slot} = alloca {llty}").unwrap();
+                let slot = self.alloca(&llty);
                 writeln!(self.body, "  store {llty} {v}, ptr %v{slot}").unwrap();
                 self.slots.insert(*id, slot);
                 Ok(())
@@ -256,6 +281,32 @@ impl Emit<'_> {
             // A value-block `{ stmts; tail }` needs no new basic block (only
             // if/while do) — lower its stmts, return its tail operand.
             TypedExprKind::Block(b) => self.lower_block_expr(b),
+            // `if c { t } else { e }` — the no-phi memory-cell merge: a hoisted
+            // result slot, a conditional branch, each arm storing its value into
+            // the slot, and a load at the merge. The result type is the (precomputed)
+            // then-branch type; the slot is reserved AFTER the then walk so the
+            // Sentinel side (which learns the type only then) numbers it identically.
+            TypedExprKind::If { cond, then_branch, else_branch } => {
+                let c = self.lower_expr(cond)?;
+                let then_b = self.fresh_block();
+                let else_b = self.fresh_block();
+                let merge_b = self.fresh_block();
+                writeln!(self.body, "  br i1 {c}, label %bb{then_b}, label %bb{else_b}").unwrap();
+                writeln!(self.body, "bb{then_b}:").unwrap();
+                let tv = self.lower_block_expr(then_branch)?;
+                let rty = llvm_ty(then_branch.ty)?;
+                let slot = self.alloca(&rty);
+                writeln!(self.body, "  store {rty} {tv}, ptr %v{slot}").unwrap();
+                writeln!(self.body, "  br label %bb{merge_b}").unwrap();
+                writeln!(self.body, "bb{else_b}:").unwrap();
+                let ev = self.lower_block_expr(else_branch)?;
+                writeln!(self.body, "  store {rty} {ev}, ptr %v{slot}").unwrap();
+                writeln!(self.body, "  br label %bb{merge_b}").unwrap();
+                writeln!(self.body, "bb{merge_b}:").unwrap();
+                let d = self.fresh();
+                writeln!(self.body, "  %v{d} = load {rty}, ptr %v{slot}").unwrap();
+                Ok(format!("%v{d}"))
+            }
             TypedExprKind::Call { id, args, .. } => self.lower_call(*id, args, expr.ty),
             _ => Err("expression not yet ported (straight-line 8a only)".into()),
         }
