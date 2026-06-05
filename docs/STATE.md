@@ -83,8 +83,16 @@ fraction of the 8263 lines; the ~2300-line handler/concurrency machinery is Bar 
 the 6/N `types::run`-with-`mode` template, a new **`mode 4`** (8a probe: fused vs hybrid;
 re-verify modes 0–3 byte-identical). 3-pass structure (type-decls / fn+runtime-symbol-decls /
 body-emission) reproduced; `compile_to_object` reads TypedProgram + DropPlan (codegen
-lib.rs:168). NEXT = (8a) the `snc llvm` oracle + reuse probe + behavioural harness +
-straight-line. The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
+lib.rs:168). **✅ (8a-i) the `snc llvm` ORACLE LANDED (`1931496`, ADR 0045 A1):** `run_llvm` +
+`llvm_dump.rs` (canonical `.ll`, partial-by-Err); 3-layer validation in `tests/llvm.rs` — goldens
+pin the spec, a 0-panics sweep (16 emit / 125 Err over 141), and **16/16 behavioural parity**
+(emitted `.ll` via `cc` == inkwell `snc build`). AS-BUILT spec: NO phi (alloca/load-store, `%vN`
+counter, `%argN` params), `main`→i32-trunc, FnId order. D4 reuse SETTLED = **fused `mode 4`**
+(mirrors the proven MIR `mode 2`: a `cgout` buffer + an operand-threading field like `lastval` +
+a VarId→slot append-only pool like `mvdv` + a value counter; `type_fn` emits the define
+header/footer). NEXT = **(8a-ii)** build `mode 4` straight-line in `types.sentinel` + a thin
+`selfhost/codegen.sentinel` + the differential (byte + behavioural + leak), re-verify modes 0–3
+byte-identical. The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
 codegen reads the `TypedProgram` directly via `hir.program()`), and **codegen is the real

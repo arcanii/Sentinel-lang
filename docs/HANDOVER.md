@@ -1898,11 +1898,25 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 > reusing type/VarId/scope, the `.ll`-emit helpers in a `codegen.sentinel` module — keeps the
 > monolith bounded); **re-verify modes 0–3 (`snc types`/`borrow`/`mir`/`ctverify`)
 > byte-identical BEFORE bulk emission** (the 0044 D3 gate, widened to FOUR accepted stages).
-> **NEXT = (8a):** the `snc llvm` oracle (`run_llvm` + `llvm_dump.rs`) + the canonical `.ll`
-> spec (golden-pinned) + the reuse probe + the behavioural harness + straight-line (a fn →
-> a clang-valid, exit-correct `.ll`). Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the
-> FIXED-POINT; Bar B 8h–8l → full corpus → ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak +
-> the four norms unchanged (below).
+> **✅ (8a-i) the `snc llvm` ORACLE LANDED** (`1931496`, ADR 0045 A1): `run_llvm` +
+> `llvm_dump.rs` emit the canonical `.ll` (partial-by-Err — emits the supported subset, Errs +
+> exits nonzero on the rest so the differential skips it). 3-layer validation in `tests/llvm.rs`:
+> goldens pin the spec; a 0-panics corpus sweep (**16 emit / 125 Err** over 141, no crash); and
+> **16/16 behavioural parity** (each emitted `.ll` via `cc` behaves identically to inkwell `snc
+> build`). AS-BUILT spec: **NO phi** (alloca/load-store, a per-fn `%vN` counter, `%argN` params),
+> `main`→i32-trunc, FnId order; ops add/sub/mul/sdiv/udiv/and/or/xor, icmp (signed+unsigned),
+> sub-0-neg, xor-1-not, call, zext/trunc width builtins. **D4 reuse SETTLED = fused `mode 4`**
+> (mirrors the proven MIR `mode 2`): a `cgout` buffer + an operand-threading field (like
+> `lastval`) + a VarId→slot append-only pool (like `mvdv`) + a value counter; `type_fn` emits the
+> `define` header/footer. The hybrid (emit-helpers in a separate module) is deferred — fuse first.
+> **NEXT = (8a-ii):** add `mode 4` straight-line to `types.sentinel` + a thin
+> `selfhost/codegen.sentinel` (`use types::run; run(inp, 4, …)`) + the differential
+> (`sentinel_codegen_matches_oracle_on_corpus`: byte-for-byte vs `snc llvm` over the straight-line
+> subset + behavioural + leak-free), **re-verifying modes 0–3 (`snc types`/`borrow`/`mir`/
+> `ctverify`) byte-identical** (the 0044 D3 gate, widened to four accepted stages). ⚠ The
+> behavioural test rebuilds each emitted fixture twice — sample/cache it as the subset grows
+> (~8d/8e). Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT; Bar B 8h–8l →
+> full corpus → ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak + the four norms unchanged (below).
 >
 > **(7/N) recap** (ADR 0044, A1–A5) reused `types.sentinel` via `types::run`-with-`mode`:
 > `mode 2` builds + dumps the MIR (a FUSED `if mir_on(c)` side-build of the pass-2 walk +
@@ -2006,11 +2020,19 @@ For pasting into a fresh chat to bootstrap context:
     0–3 (`snc types`/`borrow`/`mir`/`ctverify`) **byte-identical BEFORE bulk emission** (the
     0044 D3 gate, widened to FOUR accepted stages). ⚠ Precision: temporary/block numbering +
     GEP indices + `abi-v1` mangled names must match the Rust `llvm_dump` exactly (byte-for-byte
-    at object scale). **NEXT = (8a):** the `snc llvm` oracle (`run_llvm` + `llvm_dump.rs`) + the
-    canonical `.ll` spec (golden-pinned) + the reuse probe + the behavioural harness (clang
-    compile+run+diff) + straight-line (a fn → a clang-valid, exit-correct `.ll`). Sub-slices
-    8a–8l in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT (8g); Bar B 8h–8l → full corpus →
-    ADR 0045 ACCEPTED). Clean stage boundary; no in-flight slice.
+    at object scale). **✅ (8a-i) the `snc llvm` ORACLE LANDED** (`1931496`, ADR 0045 A1):
+    `run_llvm` + `llvm_dump.rs` emit the canonical `.ll` (partial-by-Err); `tests/llvm.rs` =
+    goldens + a 0-panics sweep (16 emit / 125 Err over 141) + **16/16 behavioural parity** (each
+    emitted `.ll` via `cc` == inkwell `snc build`). AS-BUILT spec: NO phi (alloca/load-store,
+    `%vN` counter, `%argN` params), `main`→i32-trunc, FnId order. **D4 reuse SETTLED = fused
+    `mode 4`** (mirrors MIR `mode 2`: a `cgout` buffer + an operand-threading field like
+    `lastval` + a VarId→slot append-only pool like `mvdv` + a value counter; `type_fn` emits the
+    define header/footer; hybrid-with-a-separate-module deferred). **NEXT = (8a-ii):** add `mode
+    4` straight-line to `types.sentinel` + a thin `selfhost/codegen.sentinel` + the differential
+    (`sentinel_codegen_matches_oracle_on_corpus`: byte vs `snc llvm` + behavioural + leak),
+    **re-verify modes 0–3 byte-identical** (the 0044 D3 gate, four stages). Sub-slices 8a–8l in
+    ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT (8g); Bar B 8h–8l → full corpus → ADR 0045
+    ACCEPTED). No in-flight slice (oracle committed; codegen.sentinel is the next build).
 
     KEY REUSABLE FINDINGS (carry forward):
     - The back-half stages REUSE the typed program (they can't cheaply re-derive it).

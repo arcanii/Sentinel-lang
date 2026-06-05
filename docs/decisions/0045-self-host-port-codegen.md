@@ -97,8 +97,54 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
 
 ## Amendments
 
-*(none yet — PROPOSED. A1 will record the (8a) probe + oracle landing, per the 0041 A3 /
-0042 A1 / 0043 A1 / 0044 A1 pattern.)*
+- **A1 — (8a-i) the `snc llvm` ORACLE + the canonical `.ll` spec LANDED + behaviourally
+  validated; the D4 reuse settled (fused `mode 4`, grounded in the mode-2 precedent).**
+  - **(8a-i) the oracle** (`1931496`) — `run_llvm` + `crates/sentinel-driver/src/llvm_dump.rs`
+    (mirroring `mir_dump.rs`): parse → resolve → check → emit canonical `.ll`. Partial-by-Err
+    (a not-yet-ported construct → `Err` → `run_llvm` exits nonzero → the corpus differential
+    skips it, exactly as it skips upstream rejects; the subset grows per sub-slice). Validated
+    in `tests/llvm.rs` across **three layers (D3)**: (1) **goldens** pin the spec (const+trunc,
+    params+call, cmp+unary+bool); (2) a **0-panics corpus sweep** — `snc llvm` over all 141
+    fixtures never crashes (**16 emit, 125 cleanly Err**); (3) **behavioural parity** — every
+    emitted `.ll`, compiled by `cc` + run, behaves identically (exit + stdout) to `snc build`
+    (inkwell) — **16/16** over the straight-line subset (so the textual backend is *correct*,
+    not just matching). Probe-grounded: a hand-written `.ll` in this exact style compiles +
+    runs exit-correct at `-O0` via `cc`/`clang`/`llc`-18.
+  - **THE AS-BUILT canonical `.ll` spec (8a straight-line; supersedes the D2 sketch where they
+    differ):** module preamble `target triple = "arm64-apple-darwin"` (hardcoded byte-target).
+    One `define` per top-level user fn in **FnId order**; `main` → `i32` (the C-ABI entry, its
+    `i64` body `trunc`'d), others → their declared type. **No phi** (the scout finding): every
+    param + `let` is an `alloca` slot (`%vN`, a per-fn counter), reads `load`, writes `store`;
+    instruction temporaries share the `%vN` counter; params arrive as `%argN`. Ops:
+    `add`/`sub`/`mul`/`sdiv`/`udiv` (`u8`→unsigned, ADR 0033) / `and`/`or`/`xor`; `icmp
+    <pred>` (signed `slt..` / unsigned `ult..`, result `i1`); `sub <ty> 0, x` (neg); `xor i1
+    x, 1` (not); `call <ret> @<name>(<ty> <arg>, …)`; `zext i8..i64` / `trunc i64..i8` (the u8
+    width builtins). Operands are literals (`42`, `0`/`1`) or `%vN`. Every value is explicitly
+    named (params `%argN`, the rest `%vN`) so there is **no implicit LLVM numbering** to match
+    — the byte-determinism the differential needs.
+  - **D4 SETTLED → fused `mode 4`** (grounded by reading `types.sentinel`'s `mode 2`): codegen
+    emission rides the **6/N `types::run`-with-`mode` template** as a new **`mode 4`**, fused
+    into the pass-2 `dump_texpr` walk exactly as MIR `mode 2` is — guarded by a `cg_on(c)` (=
+    `mode == 4`) so modes 0–3 stay byte-identical *by construction* (the 0044 D3 discipline).
+    The 1:1 mapping from the proven mode-2 machinery: `lastval` → an **operand-threading field**
+    (`cglast`: a register number, plus an is-literal flag + literal value, since a `.ll` operand
+    is either `%vN` or an integer literal); `mvdv`/`mvdl` (var_defs) → a **VarId→slot
+    append-only pool** (the resolve scope idiom); a `mirout` buffer → a **`cgout` `Vec<u8>`**;
+    plus a per-fn **value counter**. `type_fn` emits the `define` header + entry + param allocas
+    (entry) and the return + `}` (teardown), as it opens/dumps the MIR fn under mode 2. The
+    **hybrid** (the `.ll`-emit helpers in a separate `codegen.sentinel` module) is **deferred**
+    — fuse first (consistent with mode 2/3; the monolith concern is a Bar-B-scale problem, not
+    an 8a one). **The probe is LOW-RISK:** mode 2/3 proved the fused-walk-reuse + flat-pool +
+    threaded-value pattern at full corpus scale (123/123); straight-line `.ll` is a *subset*
+    (no branch-forking — that's 8b). The re-verify-modes-0–3-byte-identical gate stands when
+    the mode-4 code lands.
+  - ⚠ **Behavioural-test scaling note:** layer-3 rebuilds every emitted fixture twice (inkwell
+    + textual) — fine at 16, but it will dominate the suite as the subset grows; **sample or
+    cache** it past a few dozen fixtures (revisit at ~8d/8e).
+  - **NEXT = (8a-ii):** add `mode 4` straight-line to `types.sentinel` + a thin
+    `selfhost/codegen.sentinel` (`use types::run; run(inp, 4, …)`) + the differential
+    (`sentinel_codegen_matches_oracle_on_corpus`: byte-for-byte vs `snc llvm` over the
+    straight-line subset + behavioural + leak-free), re-verifying modes 0–3 byte-identical.
 
 ## Decision
 
