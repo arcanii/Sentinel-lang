@@ -1,0 +1,30 @@
+// selfhost/codegen.sentinel — the EIGHTH (and final) Sentinel compiler stage (ADR 0045).
+//
+// Codegen lowers the typed program to textual LLVM IR (`.ll`) — Sentinel has no
+// LLVM/inkwell FFI, so it emits text that an external `clang`/`llc` turns into an
+// object. This stage REUSES `types.sentinel` (the back-half "share the typed
+// program" foundation): the emission is FUSED into the typer's pass-2 walk as a
+// guarded side-build (mode 4, mirroring the MIR mode 2), and
+// `types::run(src, 4, result)` writes the module preamble + one `define` per fn,
+// matching the `snc llvm` oracle byte-for-byte (and `cc`-compiling to a runnable
+// object whose behaviour matches `snc build`).
+//
+// (8a) covers the straight-line subset: const/var, unary neg+not, binary
+// (add/sub/mul/sdiv/udiv/and/or/xor) + cmp (signed+unsigned icmp), `let`,
+// assign-to-var, value-block, and user-fn calls (+ the u8<->i64 width builtins) —
+// alloca/load/store, NO phi. Control flow, aggregates, Vec/strings, drops, and the
+// exotic forms come in later slices (8b..8l).
+//
+// (Module chain: codegen → types → parser; the D.6 merge follows the `use` edges.)
+
+use types::run;
+
+fn main() -> i64 {
+    let inp_path: [u8] = "input.sentinel";
+    let inp: [u8] = read_file(inp_path);
+    let mut result: Vec<u8> = vec_new();
+    run(inp, 4, &mut result);
+    let arr: [u8] = vec_to_array(result);
+    print_bytes(arr);
+    0
+}
