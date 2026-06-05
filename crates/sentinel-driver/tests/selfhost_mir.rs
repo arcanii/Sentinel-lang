@@ -127,3 +127,75 @@ fn sentinel_mir_matches_oracle_on_seeds() {
         mismatches.join("\n")
     );
 }
+
+/// Every `.sentinel` fixture under tests/pass + tests/ui, sorted.
+fn collect_fixtures() -> Vec<PathBuf> {
+    let root = workspace_root();
+    let mut fixtures = Vec::new();
+    for sub in ["tests/pass", "tests/ui"] {
+        for entry in std::fs::read_dir(root.join(sub)).expect("read fixture dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) == Some("sentinel") {
+                fixtures.push(path);
+            }
+        }
+    }
+    fixtures.sort();
+    fixtures
+}
+
+/// (7e) the D8 PHASE-GO: the Sentinel MIR lowerer matches `snc mir` byte-for-byte
+/// over the ENTIRE clean-lowering corpus (= the type-clean set — lowering is total).
+/// Mirrors `sentinel_borrow_checker_matches_oracle_on_corpus`; fixtures the oracle
+/// rejects (parse/resolve/type errors) exit nonzero and are skipped.
+#[test]
+fn sentinel_mir_matches_oracle_on_corpus() {
+    let tmp = std::env::temp_dir().join(format!("snc_selfhost_mir_corpus_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let lowerer = build_sentinel_mir_lowerer(&tmp);
+
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+
+    let fixtures = collect_fixtures();
+    assert!(fixtures.len() > 100, "expected a substantial corpus, got {}", fixtures.len());
+
+    let mut clean = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+    for fixture in &fixtures {
+        let bytes = std::fs::read(fixture).expect("read fixture");
+        std::fs::write(&input, &bytes).expect("stage input");
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("mir")
+            .arg(&input)
+            .output()
+            .expect("run snc mir");
+        if !oracle.status.success() {
+            continue;
+        }
+        clean += 1;
+        let sentinel = Command::new(&lowerer)
+            .current_dir(&work)
+            .output()
+            .expect("run the Sentinel MIR lowerer");
+        if oracle.stdout != sentinel.stdout {
+            mismatches.push(format!(
+                "  {} (oracle {} bytes vs sentinel {} bytes)",
+                fixture.file_name().unwrap().to_string_lossy(),
+                oracle.stdout.len(),
+                sentinel.stdout.len()
+            ));
+        }
+    }
+
+    assert!(clean > 100, "expected >100 clean-lowering fixtures, got {clean}");
+    assert!(
+        mismatches.is_empty(),
+        "the Sentinel MIR lowerer diverged from `snc mir` on {}/{} clean-lowering fixture(s):\n{}",
+        mismatches.len(),
+        clean,
+        mismatches.join("\n")
+    );
+}
