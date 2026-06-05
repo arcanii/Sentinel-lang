@@ -35,6 +35,7 @@
 mod ast_dump;
 mod borrow_dump;
 mod effects_dump;
+mod llvm_dump;
 mod mir_dump;
 mod resolve_dump;
 mod types_dump;
@@ -78,6 +79,7 @@ fn main() -> ExitCode {
         [_, cmd, path] if cmd == "borrow" => run_borrow(path),
         [_, cmd, path] if cmd == "mir" => run_mir(path),
         [_, cmd, path] if cmd == "ctverify" => run_ctverify(path),
+        [_, cmd, path] if cmd == "llvm" => run_llvm(path),
         [_, cmd, path] if cmd == "parse" => run_parse(path),
         [_, cmd, path] if cmd == "build" => run_build(path, None),
         [_, cmd, path, flag, output] if cmd == "build" && flag == "-o" => {
@@ -447,6 +449,54 @@ fn run_ctverify(path: &str) -> ExitCode {
     }
     print!("{out}");
     ExitCode::SUCCESS
+}
+
+/// Phase D self-host port (8/N) / ADR 0045 D2+D3: `snc llvm <file>` — the
+/// codegen differential oracle. Runs parse → resolve → `check` and emits the
+/// canonical textual LLVM IR (`.ll`) that `selfhost/codegen.sentinel` will
+/// reproduce byte-for-byte (and that `clang`/`llc` lowers to a runnable
+/// object — the behavioural half). Exits nonzero on an upstream
+/// parse/resolve/type error OR on a construct not yet ported (the corpus
+/// differential skips those, as it skips upstream rejects — the happy-path
+/// discipline; the supported subset grows per sub-slice 8a..8l).
+fn run_llvm(path: &str) -> ExitCode {
+    let src = match read_source(path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let db = SentinelDatabase::default();
+    let file = SourceFile::new(&db, path.to_string(), src.clone());
+    let program_opt = sentinel_syntax::parse_query(&db, file);
+    let diags = sentinel_syntax::parse_query::accumulated::<Diagnostic>(&db, file);
+    render_diagnostics(&diags, path, &src);
+    let program = match program_opt {
+        Some(p) => p,
+        None => return ExitCode::from(1),
+    };
+    let resolved = match sentinel_resolve::resolve(program) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let typed = match sentinel_types::check(&resolved) {
+        Ok(typed) => typed,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match llvm_dump::dump(&typed) {
+        Ok(ll) => {
+            print!("{ll}");
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("snc: llvm: {why}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 fn run_parse(path: &str) -> ExitCode {
