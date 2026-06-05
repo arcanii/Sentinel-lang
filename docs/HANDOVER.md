@@ -1861,16 +1861,20 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 
 ### 0.3 Quick-status block for session start
 
-> **NEXT = (7a) straight-line INTEGRATION — the `snc mir` ORACLE (`ce29b1e`) + the SSA
-> data-model PROBE are DONE (ADR 0044 A1); resume by wiring `mode 2` into `types.sentinel`.**
-> The oracle accepts the 123 type-clean fixtures (0 panics); the standalone probe CONFIRMED
-> D4 (flat append-only `Vec` pools, NO index-assign) + de-risked the (7b) branch-merge early
-> (reproduces `snc mir`'s `dbl`+`g` byte-for-byte, leak-free). D3 reuse-shape = fused
-> `mode 2` (recommended). The remaining (7a) work: MIR pools in `TyCtx` + a `mode 2`
-> `lower_fn` + fused emits on the linear `dump_texpr` arms + `dump_mir` + a thin
-> `mir.sentinel` + a straight-line differential test (re-verify `snc types`/`snc borrow`
-> 123/123 byte-identical). **The BORROW-CHECK stage (6/N, ADR 0043) is COMPLETE — ADR 0043 →
-> ACCEPTED.**
+> **NEXT = (7b) — control flow: `if`/`&&`/`||` → branch + merge (the probe-proven
+> algorithm). (7a) is COMPLETE** (ADR 0044 A1+A2): the `snc mir` ORACLE (`ce29b1e`) + the
+> SSA data-model PROBE (D4 confirmed, the merge de-risked early) + the **straight-line
+> INTEGRATION** (`selfhost/mir.sentinel`, the 7th stage, `dc20dd8`) all landed. `mir.sentinel`
+> reuses `types.sentinel` via a new **`mode 2`** (the 6/N `types::run` template, FUSED into
+> the pass-2 walk as a guarded `if (*c).mode == 2` side-build + a `lastval` ctx field):
+> straight-line (const/var/unary/binop/cmp/`let` → one block + Return) matches `snc mir`
+> byte-for-byte on 8 seeds, **modes 0/1 stay 123/123 byte-identical** (mode-2 emits are dead
+> there), **leak-free**. ⚠ Sentinel rule found: passing `&mut (*c).field` to a USER fn
+> re-borrows `c` → render into a LOCAL buffer + `push`-fold into the ctx field. **(7b)** adds
+> the branch-merge to the If/Logic `dump_texpr` arms (the probe's `var_defs`
+> snapshot/truncate + VarId-sorted merge params); then **(7c)** the `Opaque` catch-all +
+> `Load` + calls; then **(7e)** the full-corpus phase-go. **The BORROW-CHECK stage (6/N, ADR
+> 0043) is COMPLETE — ADR 0043 → ACCEPTED.**
 > `selfhost/borrow.sentinel` matches `snc borrow` byte-for-byte over the ENTIRE
 > clean-borrow corpus — **123/123 fixtures**
 > (`sentinel_borrow_checker_matches_oracle_on_corpus`, the D8 phase-go) + 5 seeds,
@@ -1918,13 +1922,14 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0044 A1** docs commit (the (7a) probe
-    record), atop the `snc mir` oracle feat (`ce29b1e`) + the ADR 0044 PROPOSED kickoff +
-    the (6/N) borrow stage (ADR 0043 ACCEPTED: `a76b8b0`/`d21910d`/`4ef657d`). Clean tree;
-    four-check green (cargo build + `cargo nextest run --workspace` + `cargo test --doc
-    --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1443 tests**
-    (+8 `snc mir` goldens; the Sentinel `mir.sentinel` is not built yet — (7a) integration
-    is next). macOS + LLVM 18.
+    Verify HEAD with `git log -1` — expect the **ADR 0044 A2** docs commit ((7a) complete),
+    atop the straight-line MIR feat (`dc20dd8`) + the `snc mir` oracle (`ce29b1e`) + the ADR
+    0044 PROPOSED kickoff + the (6/N) borrow stage (ADR 0043 ACCEPTED:
+    `a76b8b0`/`d21910d`/`4ef657d`). Clean tree; four-check green (cargo build + `cargo
+    nextest run --workspace` + `cargo test --doc --workspace` + `cargo clippy --workspace
+    --all-targets -- -D warnings`); **1444 tests** (+8 `snc mir` goldens + 1 `mir.sentinel`
+    seeds test). `selfhost/mir.sentinel` (the 7th stage) lowers straight-line; (7b) control
+    flow is next. macOS + LLVM 18.
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
     + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR
@@ -1935,14 +1940,17 @@ For pasting into a fresh chat to bootstrap context:
     types.sentinel, effects.sentinel, borrow.sentinel. **▶ (7/N) MIR + the const-time
     verifier OPENED — ADR 0044 PROPOSED (owner-chosen over codegen-first); no code yet.**
 
-    NEXT = **(7a) the straight-line INTEGRATION** — the `snc mir` ORACLE (`ce29b1e`, 8
-    goldens, accepts the 123 type-clean set, 0 panics) + the SSA data-model PROBE (ADR 0044
-    A1: D4 CONFIRMED — flat append-only `Vec` pools, NO index-assign — + the (7b)
-    branch-merge de-risked early, `dbl`+`g` reproduced byte-for-byte leak-free) are DONE;
-    wire `mode 2` into `types.sentinel` (fused, the recommended D3 shape): MIR pools in
-    `TyCtx` + a `mode 2` `lower_fn` + fused emits on the linear `dump_texpr` arms +
-    `dump_mir` + a thin `mir.sentinel` + a straight-line differential (re-verify `snc
-    types`/`snc borrow` 123/123). The back-half scout REFRAMED the handover's
+    NEXT = **(7b) control flow** — add the `if`/`&&`/`||` branch + merge to the If/Logic
+    `dump_texpr` arms (the probe-proven `var_defs` snapshot/truncate + VarId-sorted merge
+    params). **(7a) is COMPLETE** (ADR 0044 A1+A2): the `snc mir` ORACLE (`ce29b1e`, 8
+    goldens, accepts the 123 type-clean set, 0 panics) + the SSA data-model PROBE (D4
+    CONFIRMED — flat append-only `Vec` pools, NO index-assign — + the branch-merge de-risked
+    early) + the **straight-line INTEGRATION** (`selfhost/mir.sentinel`, the 7th stage,
+    `dc20dd8`, via fused `mode 2`: 8 seeds match `snc mir`, modes 0/1 stay 123/123, leak-free)
+    all landed. ⚠ Sentinel rule: passing `&mut (*c).field` to a USER fn re-borrows `c` →
+    render into a LOCAL buffer + `push`-fold into the ctx field. Then **(7c)** the `Opaque`
+    catch-all + `Load` + calls; then **(7e)** the full-corpus phase-go. The back-half scout
+    REFRAMED the handover's
     "HIR/MIR → codegen": **HIR is a no-op** (101-line identity bundle), **MIR is an
     analysis SIDE-BRANCH** (feeds ONLY `verify_constant_time`; `compile_to_object` reads
     the `TypedProgram` directly — codegen IGNORES MIR), **codegen is the real transform**

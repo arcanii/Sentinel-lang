@@ -46,9 +46,12 @@ the `snc mir` ORACLE + the SSA data-model PROBE DONE (A1).** The oracle (`run_mi
 8 goldens, `ce29b1e`) accepts the 123 type-clean fixtures, 0 panics; the standalone probe
 CONFIRMED D4 (the data model — flat append-only parallel-`Vec` pools, NO Vec index-assign) +
 de-risked the (7b) if branch-merge EARLY (reproduces `snc mir`'s `dbl`+`g` byte-for-byte,
-leak-free); D3 reuse-shape recommendation = fused `mode 2` (the 6/N `types::run` template).
-NEXT = the straight-line INTEGRATION in `types.sentinel` mode 2. The
-back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
+leak-free). **(7a) straight-line INTEGRATION LANDED (A2, `dc20dd8`) — `selfhost/mir.sentinel`
+(the 7th stage) via fused `mode 2`: 8 seeds match `snc mir`, modes 0/1 stay 123/123
+byte-identical, leak-free. (7a) COMPLETE.** ⚠ one Sentinel rule found: passing `&mut
+(*c).field` to a USER fn re-borrows `c` → render into a LOCAL buffer + `push`-fold into the
+ctx field. NEXT = (7b) control flow (if/`&&`/`||` → branch+merge, the probe-proven
+algorithm). The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
 codegen reads the `TypedProgram` directly via `hir.program()`), and **codegen is the real
 transform** (→ a separate **8/N**, where Sentinel's lack of LLVM FFI forces an

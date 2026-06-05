@@ -94,6 +94,27 @@ variant — **the constant-time verifier is IN scope** (not the "drop verifier" 
     (Int/Bool/Var/Unary/Binary/Cmp/Call/Block/Let) + `dump_mir` + a thin `mir.sentinel`
     (`use types::run; run(inp, 2, …)`) + a straight-line differential test.
 
+- **A2 — (7a) the straight-line INTEGRATION LANDED; (7a) is COMPLETE.** `selfhost/mir.sentinel`
+  (the 7th Sentinel stage, `dc20dd8`) lowers the straight-line grammar (const_int /
+  const_bool / var / unary neg+not / binop / cmp / `let` → one block + Return) and matches
+  `snc mir` byte-for-byte on 8 seeds (`sentinel_mir_matches_oracle_on_seeds`); **modes 0/1
+  (`snc types` / `snc borrow`) stay 123/123 byte-identical** (the mode-2 emits are dead under
+  modes 0/1 — the fuse is byte-clean by construction); **leak-free** (`leaks --atExit` 0/0).
+  The fuse executed as designed: `TyCtx` gained the ~22 MIR pool fields; `run` sets
+  `(*c).mode`; `type_fn` (mode 2) resets the pools + opens an entry block + dumps the fn on
+  exit; `emit_tparams` adds each param as an entry SSA param + binds `var_defs`; the linear
+  `dump_texpr` arms emit a guarded `if (*c).mode == 2` inst and thread the MirValue via a
+  `lastval` ctx field (save-between-children for `Binary`); `SLet` binds `var_defs` to the
+  RHS's `lastval`. ⚠ **THE ONE SENTINEL SNAG (a reusable rule):** passing a ctx-field `&mut
+  (*c).mirout` to a USER fn (`append_str`/`append_int`) **re-borrows `c`** ("cannot take
+  `&mut c` while already borrowed mutably") — only BUILTINS (`push`/`pop`) may take `&mut
+  (*c).field`. So the `mir_dump_*` helpers take a **LOCAL `out: &mut Vec<u8>` buffer**
+  (distinct from `c`), and `type_fn` folds it into the `mirout` FIELD via a `push` loop.
+  **RULE: render into a local buffer + `push`-fold into a ctx Vec field; never pass `&mut
+  (*c).field` to a user fn.** **NEXT = (7b)** control flow (`if`/`&&`/`||` → branch + merge —
+  the probe-proven algorithm) → **(7c)** the `Opaque` catch-all + `Load` + calls → **(7e)**
+  the full-corpus phase-go.
+
 ## Decision
 
 ### D1. Goal.
