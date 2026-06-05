@@ -459,6 +459,23 @@ IEC 62304 certification. Verified compilation, deterministic
 semantics, no dynamic allocation in the certified subset, and
 traceability from requirements through code to tests.
 
+### 9.4 C Transpilation Backend (legacy / portability)
+
+An alternative codegen backend that emits portable **C** instead of
+LLVM IR, so Sentinel can target platforms the primary LLVM path does
+not serve — legacy systems, exotic or older architectures, and
+toolchains where only a C compiler is available (the "C as portable
+assembly" route taken by Nim, V, and mrustc). The self-host port's
+codegen (ADR 0045) emits textual LLVM `.ll`; a C backend would be a
+**parallel emission target reusing the same `TypedProgram + DropPlan`
+walk**, not a rewrite. **Research-gated — establish value/requirement
+before committing:** which concrete legacy targets actually demand it,
+and — the load-bearing risks — whether the `abi-v1` layout + calling
+convention (ADR 0029) and the constant-time `secret` guarantee (no
+compiler-introduced branches or timing variation) survive translation
+through C *and its optimizer*, which a C backend cannot pin the way the
+LLVM path does. Lower priority until a target need is identified.
+
 ---
 
 ## 10. AI and Numerical Computing

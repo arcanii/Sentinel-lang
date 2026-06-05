@@ -81,7 +81,8 @@ determinism rather than relying on host inference; D2.)
 Settled with the owner (as 5/N–7/N were), recommendations grounded in the scout + probe:
 
 1. **Emission target = textual LLVM IR (`.ll`)** — via `write_file` → external `clang`/`llc`
-   → object → link `libsentinel_runtime.a`. (Over emit-C / emit-asm — D2.)
+   → object → link `libsentinel_runtime.a`. (Over emit-C / emit-asm — D2; a C backend for
+   legacy-systems portability is BACKLOGGED + research-gated, BACKLOG.md §9.4, not rejected.)
 2. **Oracle = canonical `.ll` byte-parity + behavioural run-parity** — a NEW Rust `snc llvm`
    (`llvm_dump.rs`) emits a canonical `.ll` to a spec **we** define (syntax-directed over the
    TypedProgram + DropPlan, reusing the existing mangling/type-mapping — NOT inkwell's
@@ -122,10 +123,17 @@ tables) + `hir.drop_plan()` (DropPlan: scope-exit free sites + `moved_sources`).
 `selfhost/codegen.sentinel` builds the `.ll` text in a `Vec<u8>` and `write_file`s it; the
 driver-equivalent then runs `clang -O0 <file>.ll libsentinel_runtime.a -o <exe>` (or the
 `llc -filetype=obj` → `cc` two-step — both probe-validated). **Why `.ll`** (over the
-alternatives the owner declined):
-  - **emit-C** — simplest text, behaviourally testable, but abandons the LLVM-IR differential
-    path and the `abi-v1` byte-layout control (struct packing, the kont/Vec/array layouts the
-    runtime ABI freezes, ADR 0029 D4) that the reproducible-build fixed-point rests on.
+alternatives):
+  - **emit-C** — for the self-host port + the fixed-point, `.ll` wins: emit-C abandons the
+    LLVM-IR differential path and the `abi-v1` byte-layout control (struct packing, the
+    kont/Vec/array layouts the runtime ABI freezes, ADR 0029 D4) the reproducible-build
+    fixed-point rests on, and routing `secret` through C risks the C optimizer reintroducing
+    the timing variation the constant-time story forbids. **But a C backend is BACKLOGGED, not
+    rejected** (owner, this session) — as a *legacy-systems / portability* target (platforms
+    LLVM does not serve; the C-as-portable-assembly route taken by Nim/V/mrustc), a parallel
+    emission backend reusing this same TypedProgram + DropPlan walk. **Research-gated:** is it
+    valuable / required, which concrete legacy targets demand it, and does `abi-v1` +
+    constant-time `secret` survive translation through C + its optimizer? See BACKLOG.md §9.4.
   - **emit-asm** — needs instruction selection + register allocation ported into Sentinel
     (a second backend); unrealistic for this stage.
 
