@@ -1861,32 +1861,57 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 
 ### 0.3 Quick-status block for session start
 
-> **NEXT = (8/N) CODEGEN — the bootstrap-critical transform + the fixed-point (its OWN
-> kickoff ADR, the 0039–0044 cadence). (7/N) the MIR + const-time stage is COMPLETE — ADR
-> 0044 → ACCEPTED.** `selfhost/mir.sentinel` matches `snc mir` byte-for-byte over the ENTIRE
-> clean-lowering corpus (**123/123**, `sentinel_mir_matches_oracle_on_corpus`) and
-> `selfhost/ctverify.sentinel` matches `snc ctverify` over the type-clean corpus (**123/123**,
-> `sentinel_ctverifier_matches_oracle_on_corpus`), leak-free; `snc types`/`snc borrow` stay
-> byte-identical. The port now has lexer + parser + resolve + types + effect-check +
-> borrow-check + **MIR-lowering + const-time** — the WHOLE pipeline through codegen's input.
+> **▶ (8/N) CODEGEN — the GRAND FINALE + the bootstrap fixed-point — is OPENED; ADR 0045
+> PROPOSED (2026-06-05), the 3 design calls SETTLED WITH THE OWNER (as 5/N–7/N were). (7/N)
+> the MIR + const-time stage is COMPLETE — ADR 0044 → ACCEPTED.** The whole pipeline through
+> codegen's input is ported (lexer → … → borrow-check → MIR-lowering + const-time; `snc
+> lex`/`ast`/`resolve`/`types`/`borrow`/`mir`/`ctverify` all 123/123, `effects` 122/122,
+> leak-free). The ONLY thing left is codegen → the object → the fixed-point.
 >
-> **(7/N) this session** (ADR 0044, A1–A5) reused `types.sentinel` via `types::run`-with-`mode`:
-> `mode 2` builds the MIR (a FUSED `if mir_on(c)` side-build of the pass-2 walk + a `lastval`
-> ctx field; the flat append-only SSA pools the probe proved; `if`/`&&`/`||` → branch + a
-> VarId-sorted merge; a `margs` operand stack for call/Opaque; `mir_suppress` for place stores
-> + handle arms) and dumps it; `mode 3` reuses that build then runs `verify_constant_time` (4
-> sink checks on `is_secret`). Reusable findings: (a) a ctx-field `&mut (*c).field` to a USER
-> fn re-borrows `c` (render to a local + `push`-fold); (b) the ONLY type-clean MIR leak is a
-> secret `&&`/`||` Branch (other sinks are source-level type rejections); (c) the verifier's
-> corpus differential is a no-false-positive sweep + the one `c52_secret_leak` positive.
+> **The 3 owner-chosen (8/N) decisions (ADR 0045):** (1) **emission target = textual LLVM
+> `.ll`** (`write_file` → external `clang`/`llc` → object → link `libsentinel_runtime.a`) —
+> over emit-C / emit-asm; (2) **oracle = a NEW Rust `snc llvm` (`llvm_dump.rs`) canonical-`.ll`
+> byte-parity differential** (the port's signature method — a canonical spec WE define, NOT
+> inkwell `print_to_string`) **+ behavioural clang-run-parity** (each `.ll` → clang → run →
+> diff exit/stdout vs the fixture) **+ the bootstrap fixed-point capstone** — over
+> behavioural-only / inkwell-parity; (3) **scope = fixed-point-first** (Bar A = the non-exotic
+> core the selfhost sources use → reach the fixed-point; Bar B = effects/handlers/concurrency/
+> classes/generics/nullable for full-corpus parity, AFTER).
 >
-> **(8/N) CODEGEN is the GRAND FINALE + the bootstrap fixed-point** — a fresh stage, its own
-> kickoff ADR. ⚠ The design call the scout flagged: Sentinel has NO LLVM/inkwell FFI (only
-> `read_file`/`write_file`/`print_bytes`), so a self-hosted codegen must emit a TEXTUAL form —
-> most plausibly LLVM `.ll` via `write_file` → external `llc`/`clang` link — and its oracle
-> likely shifts from byte-dump parity to BEHAVIOURAL run-parity + the fixed-point (does the
-> Sentinel-compiled compiler reproduce the object?). Decide WITH THE OWNER (as 5/N–7/N were):
-> the emission target + the oracle. REUSES the typed program + the just-built MIR machinery.
+> **🔑 SCOUT + PROBE findings that shrink the 8263-line finale** (this session): (a) **NO
+> phi** — codegen is `alloca`+`load`/`store` at `-O0` (mem2reg off), merging branches through
+> memory cells, so the textual `.ll` needs value-numbering only for instruction temporaries,
+> NOT SSA merge points — *simpler* than 7/N's MIR (the `var_defs`-snapshot/VarId-sorted-merge
+> muscle is NOT needed); a hand-written `.ll` in this exact style **clang/llc-18 compiles +
+> runs exit-correct at `-O0`, linking a `sentinel_*` symbol** (probe-validated). (b) **Secret
+> codegen is a no-op** — `secret T` strips to `T` (codegen lib.rs:1594; CT-emission deferred
+> post-1.0 per ADR 0019 D12); the CT guarantee = the source rejections + the 7/N D5 verifier.
+> (c) **The bootstrap subset is small** — the selfhost sources declare **424 fns / 3 structs /
+> 14 enums + 0 traits/impls/classes/effects/generics**, and use no nullable/handle/perform/
+> spawn/scope/declassify/secret → Bar A is a fraction of 8263 lines; the ~1500-line handler/
+> kont + ~765-line shape-detection + concurrency/class machinery is Bar B. (d) 3-pass structure
+> (type-decls / fn+runtime-symbol-decls / body-emission); `compile_to_object` reads TypedProgram
+> + DropPlan (codegen lib.rs:168); link = `cc obj libsentinel_runtime.a -o exe`.
+>
+> **Reuse = the 6/N `types::run`-with-`mode` template, a new `mode 4`** (emit-`.ll`). ⚠ THE
+> (8a) PROBE: **fused `mode 4` vs a hybrid** (the driving walk a `mode 4` in `types.sentinel`
+> reusing type/VarId/scope, the `.ll`-emit helpers in a `codegen.sentinel` module — keeps the
+> monolith bounded); **re-verify modes 0–3 (`snc types`/`borrow`/`mir`/`ctverify`)
+> byte-identical BEFORE bulk emission** (the 0044 D3 gate, widened to FOUR accepted stages).
+> **NEXT = (8a):** the `snc llvm` oracle (`run_llvm` + `llvm_dump.rs`) + the canonical `.ll`
+> spec (golden-pinned) + the reuse probe + the behavioural harness + straight-line (a fn →
+> a clang-valid, exit-correct `.ll`). Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the
+> FIXED-POINT; Bar B 8h–8l → full corpus → ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak +
+> the four norms unchanged (below).
+>
+> **(7/N) recap** (ADR 0044, A1–A5) reused `types.sentinel` via `types::run`-with-`mode`:
+> `mode 2` builds + dumps the MIR (a FUSED `if mir_on(c)` side-build of the pass-2 walk +
+> a `lastval` ctx field; flat append-only SSA pools; `if`/`&&`/`||` → branch + a VarId-sorted
+> merge; a `margs` operand stack; `mir_suppress` for place stores + handle arms); `mode 3`
+> reuses that build then runs `verify_constant_time` (4 sink checks on `is_secret`). Reusable:
+> (a) a ctx-field `&mut (*c).field` to a USER fn re-borrows `c` (render to a local + `push`-fold);
+> (b) the ONLY type-clean MIR leak is a secret `&&`/`||` Branch; (c) the verifier's corpus
+> differential is a no-false-positive sweep + the one `c52_secret_leak` positive.
 > **The BORROW-CHECK stage
 > (6/N, ADR 0043) is COMPLETE — ADR 0043 → ACCEPTED.**
 > `selfhost/borrow.sentinel` matches `snc borrow` byte-for-byte over the ENTIRE
@@ -1936,14 +1961,15 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0044 A5** docs commit ((7/N) COMPLETE,
-    ADR 0044 ACCEPTED), atop the (7d) verifier feat (`1868b38`) + the (7c)/(7b)/(7a)/oracle
-    commits + ADR 0044 PROPOSED + the (6/N) borrow stage (ADR 0043 ACCEPTED). Clean tree;
-    four-check green (cargo build + `cargo nextest run --workspace` + `cargo test --doc
-    --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1449 tests**
-    (+`snc mir` goldens + the `mir.sentinel`/`ctverify.sentinel` differential tests:
-    `sentinel_mir_matches_oracle_on_corpus` + `sentinel_ctverifier_matches_oracle_on_corpus`,
-    both 123/123). macOS + LLVM 18.
+    Verify HEAD with `git log -1` — expect the **ADR 0045 PROPOSED** docs commit ((8/N)
+    codegen OPENED, the kickoff), atop the ADR 0044 A5 docs commit (`3b384bf`, (7/N) COMPLETE/
+    ADR 0044 ACCEPTED) + the (7d) verifier feat (`1868b38`) + the (7c)/(7b)/(7a)/oracle commits
+    + the (6/N) borrow stage (ADR 0043 ACCEPTED). Clean tree; four-check green (cargo build +
+    `cargo nextest run --workspace` + `cargo test --doc --workspace` + `cargo clippy
+    --workspace --all-targets -- -D warnings`); **1449 tests** (the `mir.sentinel`/
+    `ctverify.sentinel` differential tests `sentinel_mir_matches_oracle_on_corpus` +
+    `sentinel_ctverifier_matches_oracle_on_corpus`, both 123/123). macOS + LLVM 18 (clang/llc/
+    opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain, verified).
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
     + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR 0043)
@@ -1955,34 +1981,36 @@ For pasting into a fresh chat to bootstrap context:
     parser, resolve, types, effects, borrow, **mir, ctverify** .sentinel. The ONLY thing
     left is **codegen** (the bootstrap-critical transform → the object/fixed-point).
 
-    NEXT = **(8/N) CODEGEN — the GRAND FINALE + the bootstrap fixed-point** (its own kickoff
-    ADR, the 0039–0044 cadence). ⚠ A genuine design call to settle WITH THE OWNER (as 5/N–7/N
-    were): Sentinel has NO LLVM/inkwell FFI (only read_file/write_file/print_bytes), so a
-    self-hosted codegen must emit a TEXTUAL form — most plausibly LLVM `.ll` via write_file →
-    external `llc`/`clang` link — and the oracle likely shifts from byte-dump parity to
-    BEHAVIOURAL run-parity + the fixed-point (does the Sentinel-compiled compiler reproduce
-    the object?). Scout `crates/sentinel-codegen` (8263 lines), recommend, ASK, then write
-    the kickoff ADR. REUSES the typed program + the just-built MIR machinery (`types::run`
-    with-`mode`). The back-half scout REFRAMED the handover's
-    "HIR/MIR → codegen": **HIR is a no-op** (101-line identity bundle), **MIR is an
-    analysis SIDE-BRANCH** (feeds ONLY `verify_constant_time`; `compile_to_object` reads
-    the `TypedProgram` directly — codegen IGNORES MIR), **codegen is the real transform**
-    (→ a separate **8/N**). So **(7/N) = the LAST analysis pass**: port `lower_to_mir`
-    (→ a minimal SSA/CFG IR) + `verify_constant_time` (the secret-leak gate). ADR 0044
-    settles: oracle = a new **`snc mir` lowered-form dump** (`run_mir` + `mir_dump.rs`,
-    mirroring `borrow_dump.rs`; the LOAD-BEARING differential — the verifier is near-empty
-    on clean fixtures); reuse = the **6/N `types::run`-with-`mode` template** (a new `mode
-    2`; `mir.sentinel` thin via a D.6 chain mir→types→parser); data model = parallel-Vec
-    SSA — ⚠ `var_defs` (`VarId→MirValue`) is index-assigned in Rust → the resolve
-    append-only-scope idiom; the `if`/`&&`/`||` branch-merge (the `var_defs` snapshot +
-    VarId-sorted merge params) is the central new muscle + a ⅛-scale codegen rehearsal.
-    ⚠ **(7a) is PROBE-GATED:** settle twin-walk vs fused `mode 2` + the `var_defs` SSA
-    model in miniature, and re-verify `snc types`/`snc borrow` **123/123 byte-identical**,
-    BEFORE lowering logic (the 0043 A1 discipline). ⚠ MIR value/block numbering is a NEW
-    byte-for-byte ordering obligation (mirror the Rust `new_value`/`new_block` order).
-    Sub-slices 7a..7e in ADR 0044 D8. **8/N = codegen** + the bootstrap fixed-point (its
-    own ADR — no LLVM FFI → `.ll` via `write_file` + external link; behavioural oracle).
-    Clean stage boundary; no in-flight slice.
+    NEXT = **(8/N) CODEGEN — the GRAND FINALE + the bootstrap fixed-point — is OPENED; ADR
+    0045 PROPOSED** (its own kickoff, the 0039–0044 cadence), the 3 design calls SETTLED WITH
+    THE OWNER (as 5/N–7/N were): (1) emission target = **textual LLVM `.ll`** (write_file →
+    external `clang`/`llc` → object → link `libsentinel_runtime.a`) — probe-validated; (2)
+    oracle = a NEW Rust **`snc llvm` (`llvm_dump.rs`) canonical-`.ll` byte-parity differential**
+    (the port's method — a canonical spec WE define, NOT inkwell `print_to_string`) + behavioural
+    clang-run-parity + the fixed-point capstone; (3) scope = **fixed-point-first** (Bar A = the
+    non-exotic core the selfhost sources use → the fixed-point; Bar B = effects/handlers/
+    concurrency/classes/generics/nullable → full-corpus parity, after). 🔑 SCOUT+PROBE findings
+    that shrink the 8263-line finale: **NO phi** — codegen is alloca/load-store at `-O0`, merges
+    via memory cells, so the `.ll` needs no SSA merge (simpler than 7/N's MIR; a hand-written
+    `.ll` in this style clang/llc-18 compiles + runs exit-correct at `-O0`, probe-validated);
+    **secret codegen is a no-op** (strip-to-inner, codegen lib.rs:1594; the CT guarantee = the
+    source rejections + the 7/N D5 verifier); **the bootstrap subset is small** (the selfhost
+    sources declare 424 fns / 3 structs / 14 enums + 0 traits/impls/classes/effects/generics +
+    no nullable → Bar A ≪ 8263 lines; the ~1500-line handler/kont + ~765-line shape-detection +
+    concurrency/class machinery is Bar B). Reuse = the 6/N `types::run`-with-`mode` template, a
+    new **`mode 4`** (emit-`.ll`); the 3-pass structure (type-decls / fn+runtime-symbol-decls /
+    body-emission) reproduced; `compile_to_object` reads TypedProgram + DropPlan (codegen
+    lib.rs:168); link = `cc obj libsentinel_runtime.a -o exe`. ⚠ **(8a) is PROBE-GATED:** settle
+    fused `mode 4` vs a hybrid (the driving walk a `mode 4` in `types.sentinel`, the `.ll`-emit
+    helpers in a `codegen.sentinel` module — keeps the monolith bounded), and re-verify modes
+    0–3 (`snc types`/`borrow`/`mir`/`ctverify`) **byte-identical BEFORE bulk emission** (the
+    0044 D3 gate, widened to FOUR accepted stages). ⚠ Precision: temporary/block numbering +
+    GEP indices + `abi-v1` mangled names must match the Rust `llvm_dump` exactly (byte-for-byte
+    at object scale). **NEXT = (8a):** the `snc llvm` oracle (`run_llvm` + `llvm_dump.rs`) + the
+    canonical `.ll` spec (golden-pinned) + the reuse probe + the behavioural harness (clang
+    compile+run+diff) + straight-line (a fn → a clang-valid, exit-correct `.ll`). Sub-slices
+    8a–8l in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT (8g); Bar B 8h–8l → full corpus →
+    ADR 0045 ACCEPTED). Clean stage boundary; no in-flight slice.
 
     KEY REUSABLE FINDINGS (carry forward):
     - The back-half stages REUSE the typed program (they can't cheaply re-derive it).
@@ -2016,11 +2044,14 @@ For pasting into a fresh chat to bootstrap context:
     full-leak-sweep every match.
 
     READ FIRST: docs/STATE.md top banner + docs/HANDOVER.md §0.1 (working norms) + §0.3
-    (quick-status — the (7/N) NEXT block at the top) + **docs/decisions/0044-self-host-
-    port-mir.md (the (7/N) kickoff — the build plan: D2 oracle, D3 reuse-probe, D4 data
-    model, D8 sub-slices)** + docs/decisions/0043-self-host-port-borrow-check.md (the
-    reuse template A1+A2) + docs/decisions/0026-hir-mir-pipeline-and-constant-time-secret-
-    codegen.md (the MIR/const-time DESIGN being ported) + docs/decisions/0038-self-host-
+    (quick-status — the (8/N) NEXT block at the top) + **docs/decisions/0045-self-host-
+    port-codegen.md (the (8/N) kickoff — the build plan: D2 emission target, D3 oracle, D4
+    reuse-probe, D5 data model, D6 the 3 passes, D7 the two bars, D8 the fixed-point, D10
+    sub-slices)** + docs/decisions/0044-self-host-port-mir.md (the just-closed stage + the
+    reuse template) + docs/decisions/0026-hir-mir-pipeline-and-constant-time-secret-
+    codegen.md (the codegen + CT-secret-codegen DESIGN being ported — the D3/D4 escape hatch
+    = why secret codegen is a no-op) + docs/decisions/0029-stable-abi.md (abi-v1 +
+    reproducible builds = the fixed-point substrate) + docs/decisions/0038-self-host-
     port-lexer.md (the port's spine) + docs/agent-protocol.md + auto-memory
     `sentinel_selfhost_port`.
 

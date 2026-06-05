@@ -64,8 +64,27 @@ CONST-TIME VERIFIER LANDED (A5, `1868b38`) — (7/N) is COMPLETE; ADR 0044 → A
 `sentinel_ctverifier_matches_oracle_on_corpus`) — empty for every CT fixture (no false positives),
 `(leak Branch)` for `c52_secret_leak` (a secret `&&` — the ONLY type-clean MIR leak; index/divisor/
 pointer are source-level type rejections), leak-free, modes 0/1/2 byte-identical. **The whole
-pipeline lexer→…→borrow-check→MIR-lowering+const-time is ported. NEXT = (8/N) CODEGEN** (the
-bootstrap-critical transform; its own kickoff ADR — no LLVM FFI → emit `.ll`, behavioural oracle).
+pipeline lexer→…→borrow-check→MIR-lowering+const-time is ported. ▶ (8/N) CODEGEN — the GRAND
+FINALE + the bootstrap fixed-point — is OPENED; ADR 0045 PROPOSED (2026-06-05), 3 owner
+decisions settled:** (1) emission target = **textual LLVM `.ll`** (write_file → external
+`clang`/`llc` → object → link `libsentinel_runtime.a`; probe-validated — a hand-written `.ll`
+in the codegen style, alloca/load-store + memory-cell branch-merge **NO phi**, calling a
+`sentinel_*` symbol, clang/llc-18 compiles + runs exit-correct at `-O0`); (2) oracle = a NEW
+Rust **`snc llvm`** (`llvm_dump.rs`) canonical-`.ll` byte-parity differential (the port's
+method — NOT inkwell `print_to_string`) **+ behavioural clang-run-parity + the fixed-point
+capstone**; (3) scope = **fixed-point-first** (Bar A = the non-exotic core the selfhost sources
+use → reach the bootstrap fixed-point; Bar B = effects/handlers/concurrency/classes/generics/
+nullable for full-corpus parity, after). 🔑 SCOUT/PROBE findings that shrink the finale:
+**no phi** (codegen is alloca/load-store at `-O0`, so the `.ll` needs no SSA merge — simpler
+than 7/N's MIR), **secret codegen is a no-op** (strip-to-inner, codegen lib.rs:1594; the CT
+guarantee = source rejections + the 7/N D5 verifier), **the selfhost sources declare 424 fns/
+3 structs/14 enums + 0 traits/impls/classes/effects/generics + no nullable** (so Bar A is a
+fraction of the 8263 lines; the ~2300-line handler/concurrency machinery is Bar B). Reuse =
+the 6/N `types::run`-with-`mode` template, a new **`mode 4`** (8a probe: fused vs hybrid;
+re-verify modes 0–3 byte-identical). 3-pass structure (type-decls / fn+runtime-symbol-decls /
+body-emission) reproduced; `compile_to_object` reads TypedProgram + DropPlan (codegen
+lib.rs:168). NEXT = (8a) the `snc llvm` oracle + reuse probe + behavioural harness +
+straight-line. The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
 codegen reads the `TypedProgram` directly via `hir.program()`), and **codegen is the real
