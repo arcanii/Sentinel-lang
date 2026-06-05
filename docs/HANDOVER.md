@@ -1997,15 +1997,17 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0045 PROPOSED** docs commit ((8/N)
-    codegen OPENED, the kickoff), atop the ADR 0044 A5 docs commit (`3b384bf`, (7/N) COMPLETE/
-    ADR 0044 ACCEPTED) + the (7d) verifier feat (`1868b38`) + the (7c)/(7b)/(7a)/oracle commits
-    + the (6/N) borrow stage (ADR 0043 ACCEPTED). Clean tree; four-check green (cargo build +
-    `cargo nextest run --workspace` + `cargo test --doc --workspace` + `cargo clippy
-    --workspace --all-targets -- -D warnings`); **1449 tests** (the `mir.sentinel`/
-    `ctverify.sentinel` differential tests `sentinel_mir_matches_oracle_on_corpus` +
-    `sentinel_ctverifier_matches_oracle_on_corpus`, both 123/123). macOS + LLVM 18 (clang/llc/
-    opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain, verified).
+    Verify HEAD with `git log -1` — expect the **ADR 0045 A3** docs commit (`92040ec`, (8b)
+    control flow COMPLETE), atop the (8b) feats (`7b33d49` while/`&&`/`||` + `c76db27` alloca
+    hoist + if/else) + the (8a) commits (`2ed426a`+`1efeb53` codegen.sentinel, `1931496`+`2c3ab19`
+    the snc llvm oracle) + ADR 0045 PROPOSED (`3f13169`) + the C-backlog (`f743a55`), all atop
+    the (7/N) ADR 0044 A5 close (`3b384bf`). ⚠ The dev pushes via GitHub Desktop — `git status`
+    may show "ahead N" (uncommitted-to-origin local commits); that's expected, never push.
+    Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1458 tests**
+    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [26/26 emitted] + the
+    `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still 123/123). macOS + LLVM
+    18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
     + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR 0043)
