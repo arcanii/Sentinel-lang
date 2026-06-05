@@ -49,9 +49,50 @@ variant — **the constant-time verifier is IN scope** (not the "drop verifier" 
 
 ## Amendments
 
-*(none yet — A1 will record the (7a) probe outcome: the reuse shape (D3) + the `var_defs`
-data model (D4), settled before any lowering logic, the 0041 A1 / 0042 A1 / 0043 A1
-pattern.)*
+- **A1 — (7a) the `snc mir` ORACLE + the SSA data-model PROBE LANDED; D2 + D4 settled, the
+  (7b) branch-merge de-risked early.**
+  - **(7a-i) the oracle** (`ce29b1e`) — `run_mir` + `mir_dump.rs` + 8 goldens; the AS-BUILT
+    grammar is recorded in D2 [LANDED]. Robust: **0 panics over the corpus; accepts exactly
+    the 123 type-clean fixtures** (= the types/borrow phase-go set), rejects the 18
+    type-rejected. Lowering is total → `snc mir` does not gate on the verifier.
+  - **(7a-ii) the SSA data-model PROBE — D4 CONFIRMED + the (7b) merge de-risked.** A
+    standalone Sentinel program hand-lowers `dbl` (straight-line) + **`g`** (the
+    `let mut x = 1; if c { x = 2; 0 } else { 0 }; x` merge case) by directly driving the
+    construction primitives, and reproduces `snc mir`'s dump for BOTH **byte-for-byte,
+    leak-free** (`leaks --atExit`: 0 leaks). **The whole IR is flat append-only
+    parallel-`Vec<i64>` pools tagged by block** — values (`vty`), instructions
+    (`in_blk`/`in_dest`/`in_op`/…), block params (`bp_blk`/`bp_val`), terminators
+    (`tm_blk`/`tm_kind`/…), jump-args (`tjargs`) — with **NO `Vec` index-assign anywhere**
+    (terminators/insts created out of order still group per block in the dump via a
+    tagged-pool scan). `var_defs` = append-only `(var, val)` pairs (`vd_var`/`vd_val`) with
+    newest-first lookup + length-snapshot/`pop`-truncate (the resolve scope idiom). **The
+    branch-merge** (nominally 7b) is validated: snapshot the `var_defs` depth at the branch,
+    walk the then-arm, **SAVE its rebindings into a side `(var,val)` list**, truncate, walk
+    the else-arm, then **iterate the VarId range (naturally sorted)** comparing each live
+    var's then-value (side-list else snapshot) vs else-value (`vd[s..e]` else snapshot) →
+    add a merge param + jump args + rebind on divergence. `g` produces the exact 2-param
+    merge (`v5` result + `v6` diverged `x`) with the right jump args. So D4's "the
+    `var_defs` index-assign is the #1 risk" is **retired** — the resolve append-only idiom
+    carries it, and the hardest slice (7b) is proven ahead of schedule.
+  - **D3 (reuse shape) RECOMMENDATION → fused-mode-guarded** (confirming the D3 lean, now
+    grounded by reading `types.sentinel`'s `run`/`dump_texpr`): `run(src, mode, result)`
+    already builds the type dump in `out` AND the `mvf`/`mvv` move side-table during the
+    pass-2 `dump_texpr` walk (the 6/N borrow fuse); add a **`mode 2`** that builds the MIR
+    pools (new TyCtx fields) as a guarded side-effect of that SAME walk and dumps them via
+    `dump_mir` (mode 2 discards `out`, exactly as mode 1 does). The walk already computes
+    each node's TYPE + resolves each `Var`'s real VarId via `sc_lookup` — so `value_tys` and
+    the merge's VarId-sort match the oracle **for free, with no scope replay**. The MirValue
+    threads up via a `lastval` ctx field (set on each emit, read by parents with the
+    save-between-children pattern the type walk already uses); the If/`&&`/`||` arms
+    fork blocks under mode 2 (7b). The MIR side-build is strictly `if (*c).mode == 2`-guarded
+    and never touches the type-dump-writing, so **modes 0/1 stay byte-identical by
+    construction** — re-verify `snc types` + `snc borrow` 123/123 before+after the wiring
+    (the 0043 A1 discipline). The alternative (a separate twin walk) is safe-by-construction
+    but would duplicate type-derivation + scope/VarId management (heavier for the full
+    stage's Opaque/generic forms). **NEXT in (7a): the straight-line INTEGRATION** — MIR
+    pools in `TyCtx` + a `mode 2` `lower_fn` + the fused emits on the linear arms
+    (Int/Bool/Var/Unary/Binary/Cmp/Call/Block/Let) + `dump_mir` + a thin `mir.sentinel`
+    (`use types::run; run(inp, 2, …)`) + a straight-line differential test.
 
 ## Decision
 

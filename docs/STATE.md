@@ -41,7 +41,13 @@ in mode 1) match `snc borrow` byte-for-byte over the ENTIRE clean-borrow corpus
 `snc types` byte-identical. ⚠ builtin args are non-consuming + a match scrutinee is not a
 move (oracle-revealed). The port now has **lexer+parser+resolve+types+effect-check+
 borrow-check** all done — the whole FRONT END + both analysis passes. **▶ (7/N) MIR + the
-CONSTANT-TIME VERIFIER OPENED — ADR 0044 PROPOSED (owner-chosen over codegen-first).** The
+CONSTANT-TIME VERIFIER OPENED — ADR 0044 PROPOSED (owner-chosen over codegen-first); (7a)
+the `snc mir` ORACLE + the SSA data-model PROBE DONE (A1).** The oracle (`run_mir`+`mir_dump.rs`,
+8 goldens, `ce29b1e`) accepts the 123 type-clean fixtures, 0 panics; the standalone probe
+CONFIRMED D4 (the data model — flat append-only parallel-`Vec` pools, NO Vec index-assign) +
+de-risked the (7b) if branch-merge EARLY (reproduces `snc mir`'s `dbl`+`g` byte-for-byte,
+leak-free); D3 reuse-shape recommendation = fused `mode 2` (the 6/N `types::run` template).
+NEXT = the straight-line INTEGRATION in `types.sentinel` mode 2. The
 back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
 codegen reads the `TypedProgram` directly via `hir.program()`), and **codegen is the real
