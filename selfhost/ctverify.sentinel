@@ -1,0 +1,20 @@
+// selfhost/ctverify.sentinel — the const-time verifier (ADR 0044 D6), the back half
+// of the SEVENTH Sentinel stage. REUSES types.sentinel via `mode 3`: build the MIR
+// (the mode-2 fused lowering) then run `verify_constant_time` over it — a `secret`
+// value reaching a Branch cond / a Load index or base / a Binary(Div) divisor is a
+// leak (taint read off each value's type). Emits one `(leak <SinkKind>)` per line,
+// matching `snc ctverify` byte-for-byte.
+//
+// (Module chain: ctverify -> types -> parser.)
+
+use types::run;
+
+fn main() -> i64 {
+    let inp_path: [u8] = "input.sentinel";
+    let inp: [u8] = read_file(inp_path);
+    let mut result: Vec<u8> = vec_new();
+    run(inp, 3, &mut result);
+    let arr: [u8] = vec_to_array(result);
+    print_bytes(arr);
+    0
+}

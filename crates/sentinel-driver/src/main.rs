@@ -77,6 +77,7 @@ fn main() -> ExitCode {
         [_, cmd, path] if cmd == "effects" => run_effects(path),
         [_, cmd, path] if cmd == "borrow" => run_borrow(path),
         [_, cmd, path] if cmd == "mir" => run_mir(path),
+        [_, cmd, path] if cmd == "ctverify" => run_ctverify(path),
         [_, cmd, path] if cmd == "parse" => run_parse(path),
         [_, cmd, path] if cmd == "build" => run_build(path, None),
         [_, cmd, path, flag, output] if cmd == "build" && flag == "-o" => {
@@ -393,6 +394,58 @@ fn run_mir(path: &str) -> ExitCode {
     };
     let mir = sentinel_mir::lower_to_mir(&typed);
     print!("{}", mir_dump::dump(&mir, &typed));
+    ExitCode::SUCCESS
+}
+
+/// Phase D self-host port (7/N) / ADR 0044 D6: `snc ctverify <file>` — the
+/// constant-time verifier oracle. Runs parse → resolve → `check` → `lower_to_mir`
+/// → `verify_constant_time` and prints its leak set, one `(leak <SinkKind>)` per
+/// line in iteration order (fn → block → inst → terminator). An empty result means
+/// the program is constant-time at the MIR level. Exits nonzero only on an upstream
+/// parse/resolve/type error (as `run_mir`); the verifier itself never rejects here
+/// (it reports — the `snc build` gate is what rejects a leaking program).
+fn run_ctverify(path: &str) -> ExitCode {
+    let src = match read_source(path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let db = SentinelDatabase::default();
+    let file = SourceFile::new(&db, path.to_string(), src.clone());
+    let program_opt = sentinel_syntax::parse_query(&db, file);
+    let diags = sentinel_syntax::parse_query::accumulated::<Diagnostic>(&db, file);
+    render_diagnostics(&diags, path, &src);
+    let program = match program_opt {
+        Some(p) => p,
+        None => return ExitCode::from(1),
+    };
+    let resolved = match sentinel_resolve::resolve(program) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let typed = match sentinel_types::check(&resolved) {
+        Ok(typed) => typed,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mir = sentinel_mir::lower_to_mir(&typed);
+    let leaks = sentinel_mir::verify_constant_time(&mir);
+    let mut out = String::new();
+    for leak in &leaks {
+        out.push_str("(leak ");
+        out.push_str(match leak.sink {
+            sentinel_mir::SinkKind::Branch => "Branch",
+            sentinel_mir::SinkKind::MemoryIndex => "MemoryIndex",
+            sentinel_mir::SinkKind::MemoryAddress => "MemoryAddress",
+            sentinel_mir::SinkKind::Division => "Division",
+        });
+        out.push_str(")\n");
+    }
+    print!("{out}");
     ExitCode::SUCCESS
 }
 

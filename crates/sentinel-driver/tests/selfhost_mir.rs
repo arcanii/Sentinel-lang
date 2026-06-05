@@ -199,3 +199,141 @@ fn sentinel_mir_matches_oracle_on_corpus() {
         mismatches.join("\n")
     );
 }
+
+// ---- (7d) the const-time verifier (`ctverify.sentinel`, types::run mode 3) --------
+
+/// Stage parser + types + `ctverify.sentinel` and compile the entry (the verifier
+/// builds the MIR via the mode-2 fused lowering, then runs `verify_constant_time`).
+fn build_sentinel_ctverifier(tmp: &Path) -> PathBuf {
+    let root = workspace_root();
+    std::fs::copy(root.join("selfhost/parser.sentinel"), tmp.join("parser.sentinel"))
+        .expect("stage parser.sentinel");
+    std::fs::copy(root.join("selfhost/types.sentinel"), tmp.join("types.sentinel"))
+        .expect("stage types.sentinel");
+    let entry = tmp.join("ctverify.sentinel");
+    std::fs::copy(root.join("selfhost/ctverify.sentinel"), &entry).expect("stage ctverify.sentinel");
+    let bin = tmp.join("sctv");
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg(&entry)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .expect("run snc build");
+    assert!(
+        out.status.success(),
+        "compiling selfhost/ctverify.sentinel failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    bin
+}
+
+/// Verifier seeds: the only type-clean MIR leak is a secret `&&`/`||` short-circuit
+/// (a `Branch` on a secret cond) — every other sink (a secret index / divisor /
+/// pointer) is a source-level type rejection. Plus no-false-positive cases (a secret
+/// flowing through arithmetic / compare / declassify is constant-time).
+const CTVERIFY_SEEDS: &[&str] = &[
+    "fn f(s: secret bool, t: secret bool) -> secret bool { s && t }\nfn main() -> i64 { 0 }\n",
+    "fn f(s: secret bool, t: secret bool) -> secret bool { s || t }\nfn main() -> i64 { 0 }\n",
+    "fn f(a: secret i64, b: secret i64) -> i64 { declassify(a + b) }\nfn main() -> i64 { 0 }\n",
+    "fn f(a: secret i64, b: secret i64) -> secret bool { a == b }\nfn main() -> i64 { 0 }\n",
+    "fn f(a: secret i64) -> secret i64 { a * 2 }\nfn main() -> i64 { 0 }\n",
+];
+
+#[test]
+fn sentinel_ctverifier_matches_oracle_on_seeds() {
+    let tmp = std::env::temp_dir().join(format!("snc_selfhost_ctv_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let verifier = build_sentinel_ctverifier(&tmp);
+
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+
+    let mut mismatches: Vec<String> = Vec::new();
+    for seed in CTVERIFY_SEEDS {
+        std::fs::write(&input, seed).expect("stage seed");
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("ctverify")
+            .arg(&input)
+            .output()
+            .expect("run snc ctverify");
+        let sentinel = Command::new(&verifier)
+            .current_dir(&work)
+            .output()
+            .expect("run the Sentinel verifier");
+        if oracle.stdout != sentinel.stdout {
+            mismatches.push(format!(
+                "  seed {seed:?}\n    oracle:   {}\n    sentinel: {}",
+                String::from_utf8_lossy(&oracle.stdout).trim_end(),
+                String::from_utf8_lossy(&sentinel.stdout).trim_end()
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "the Sentinel verifier diverged from `snc ctverify` on {}/{} seed(s):\n{}",
+        mismatches.len(),
+        CTVERIFY_SEEDS.len(),
+        mismatches.join("\n")
+    );
+}
+
+/// (7d) the verifier phase-go: the Sentinel const-time verifier matches `snc ctverify`
+/// over the ENTIRE type-clean corpus (empty for all but `c52_secret_leak`, which leaks
+/// a `Branch`). A no-false-positive sweep + the one true positive.
+#[test]
+fn sentinel_ctverifier_matches_oracle_on_corpus() {
+    let tmp =
+        std::env::temp_dir().join(format!("snc_selfhost_ctv_corpus_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let verifier = build_sentinel_ctverifier(&tmp);
+
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+
+    let fixtures = collect_fixtures();
+    let mut clean = 0usize;
+    let mut leaking = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+    for fixture in &fixtures {
+        let bytes = std::fs::read(fixture).expect("read fixture");
+        std::fs::write(&input, &bytes).expect("stage input");
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("ctverify")
+            .arg(&input)
+            .output()
+            .expect("run snc ctverify");
+        if !oracle.status.success() {
+            continue;
+        }
+        clean += 1;
+        if !oracle.stdout.is_empty() {
+            leaking += 1;
+        }
+        let sentinel = Command::new(&verifier)
+            .current_dir(&work)
+            .output()
+            .expect("run the Sentinel verifier");
+        if oracle.stdout != sentinel.stdout {
+            mismatches.push(format!(
+                "  {} (oracle {:?} vs sentinel {:?})",
+                fixture.file_name().unwrap().to_string_lossy(),
+                String::from_utf8_lossy(&oracle.stdout),
+                String::from_utf8_lossy(&sentinel.stdout),
+            ));
+        }
+    }
+    assert!(clean > 100, "expected >100 clean fixtures, got {clean}");
+    assert!(leaking >= 1, "expected at least one leaking fixture (c52_secret_leak), got {leaking}");
+    assert!(
+        mismatches.is_empty(),
+        "the Sentinel verifier diverged from `snc ctverify` on {}/{} fixture(s):\n{}",
+        mismatches.len(),
+        clean,
+        mismatches.join("\n")
+    );
+}

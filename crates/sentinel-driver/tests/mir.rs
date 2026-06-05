@@ -149,6 +149,48 @@ fn mir_declassify_and_unary() {
     );
 }
 
+/// `snc ctverify <file>` — the const-time verifier's leak set (ADR 0044 D6).
+fn ctverify_dump(name: &str, contents: &str) -> String {
+    let path = temp_file(name, contents);
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("ctverify")
+        .arg(&path)
+        .output()
+        .expect("run snc ctverify");
+    assert!(
+        out.status.success(),
+        "snc ctverify failed; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).expect("utf-8 dump")
+}
+
+#[test]
+fn ctverify_secret_short_circuit_is_a_branch_leak() {
+    // `secret bool && secret bool` type-checks (SecretBranch only rejects `if`) but
+    // lowers to a branch on a secret cond — the one type-clean MIR leak.
+    assert_eq!(
+        ctverify_dump(
+            "leak",
+            "fn f(s: secret bool, t: secret bool) -> secret bool { s && t }\nfn main() -> i64 { 0 }\n"
+        ),
+        "(leak Branch)\n"
+    );
+}
+
+#[test]
+fn ctverify_constant_time_secret_has_no_leak() {
+    // A secret flowing through arithmetic / compare / declassify is constant-time —
+    // the verifier reports nothing (no false positive).
+    assert_eq!(
+        ctverify_dump(
+            "clean",
+            "fn f(a: secret i64, b: secret i64) -> i64 { declassify(a + b) }\nfn main() -> i64 { 0 }\n"
+        ),
+        ""
+    );
+}
+
 #[test]
 fn mir_struct_lit_and_field_are_opaque() {
     // Aggregates the minimal IR doesn't model precisely funnel through

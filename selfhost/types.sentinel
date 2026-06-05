@@ -2220,7 +2220,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(out, "(int ");
             append_int(out, nv);
             close_ty(out, 0, c);
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit(c, mc, 0, 0, nv, 0, 0);
                 (*c).lastval = d;
@@ -2239,7 +2239,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 append_str(out, "(bool false")
             };
             close_ty(out, 2, c);
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let bi: i64 = if bv {
                     1
@@ -2261,7 +2261,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(out, "(null");
             close_ty(out, exp, c);
             // (7c) MIR: `null` is a public constant -> Opaque (no operands), type `exp`.
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_opaque0(c, mc, exp);
                 (*c).lastval = d;
@@ -2290,7 +2290,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // an enclosing assign can rebind it (7b). An UNBOUND VarId is a match-arm /
             // handler-arm payload binding the IR doesn't model — the Rust `lookup_var`
             // emits a fresh Opaque there (7c).
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mv: i64 = mir_vd_get(c, vid);
                 let dv: i64 = if mv < 0 {
                     let mc: i64 = (*c).mir_cur;
@@ -2327,7 +2327,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
             let it: i64 = dump_texpr(out, inner, 0 - 1, src, c, gb);
-            let iv: i64 = if (*c).mode == 2 {
+            let iv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -2349,7 +2349,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // (7/N) MIR: `*p` (uop 3) -> a Load (op 5, no index; a secret pointer is the
             // D5 leak); every other unary (- ! & &mut) -> a unary inst (op 2). One emit
             // (a per-branch `let` would collide in the flat namespace).
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let uo: i64 = if uop == 3 {
                     5
@@ -2425,7 +2425,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(&mut tmp, bsym);
             push(&mut tmp, ' ');
             let lt: i64 = dump_texpr(&mut tmp, l, 0 - 1, src, c, gb);
-            let blv: i64 = if (*c).mode == 2 {
+            let blv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -2436,7 +2436,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // Or: true->short, false->rhs.
             let mut rhs_blk: i64 = 0 - 1;
             let mut short_blk: i64 = 0 - 1;
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 if bop >= 14 {
                     rhs_blk = mir_new_block(c);
                     short_blk = mir_new_block(c);
@@ -2468,7 +2468,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0 - 1
             };
             let rt: i64 = dump_texpr(&mut tmp, r, rexp, src, c, gb);
-            let brv: i64 = if (*c).mode == 2 {
+            let brv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -2488,7 +2488,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             close_ty(&mut tmp, resty, c);
             // (7/N) MIR: binop (bop<=7) / cmp (8..13) -> an inst; logic (&&/||) -> the
             // short-circuit merge (the (7b) fork above branched on the left).
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 if bop <= 13 {
                     let mc: i64 = (*c).mir_cur;
                     let mop: i64 = if bop <= 7 {
@@ -2526,7 +2526,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
-            let bw: bool = if (*c).mode == 2 {
+            let bw: bool = if mir_on(c) {
                 widen_kind(c, exp, resty) != 0
             } else {
                 false
@@ -2544,7 +2544,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             dump_texpr(out, cnd, 0 - 1, src, c, gb);
             (*c).consuming = svc;
             // (7b) MIR: branch on the cond into fresh then/else blocks; snapshot var_defs.
-            let cv: i64 = if (*c).mode == 2 {
+            let cv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -2552,7 +2552,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let mut tb: i64 = 0 - 1;
             let mut eb: i64 = 0 - 1;
             let mut snap: i64 = 0;
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 tb = mir_new_block(c);
                 eb = mir_new_block(c);
                 let pred: i64 = (*c).mir_cur;
@@ -2569,7 +2569,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let tt: i64 = dump_texpr(out, thn, exp, src, c, gb);
             // (7b) MIR: capture the then value/exit + the then-arm rebindings (saved to a
             // side list), then restore var_defs to the branch + switch to the else block.
-            let then_val: i64 = if (*c).mode == 2 {
+            let then_val: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -2577,7 +2577,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let mut then_exit: i64 = 0 - 1;
             let mut tsv: Vec<i64> = vec_new();
             let mut tsval: Vec<i64> = vec_new();
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 then_exit = (*c).mir_cur;
                 let tlen: i64 = mir_vd_len(c);
                 let mut ki: i64 = snap;
@@ -2598,7 +2598,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             dump_texpr(out, els, exp, src, c, gb);
             // (7b) MIR: build the merge — result param first, then one param per variable
             // that diverged across the arms (VarId-sorted), reconciled via the arms' jumps.
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let else_val: i64 = (*c).lastval;
                 let else_exit: i64 = (*c).mir_cur;
                 let elen: i64 = mir_vd_len(c);
@@ -2676,13 +2676,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 (*c).consuming = true;
                 // (7c) MIR: a resume-kont funnels its args through Opaque.
                 let rk_col: bool = (*c).mir_collecting;
-                if (*c).mode == 2 {
+                if mir_on(c) {
                     (*c).mir_collecting = true;
                     0
                 } else {
                     0
                 };
-                let rk_snap: i64 = if (*c).mode == 2 {
+                let rk_snap: i64 = if mir_on(c) {
                     mir_margs_len(c)
                 } else {
                     0
@@ -2695,7 +2695,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                     rkt
                 };
                 close_ty(out, krt, c);
-                if (*c).mode == 2 {
+                if mir_on(c) {
                     (*c).mir_collecting = rk_col;
                     let kmc: i64 = (*c).mir_cur;
                     let kd: i64 = mir_emit_va(c, kmc, 7, 0, rk_snap, krt);
@@ -2734,13 +2734,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 // operand values while `mir_collecting` is set; the targs/inference in
                 // the dump path is orthogonal.
                 let cl_col: bool = (*c).mir_collecting;
-                if (*c).mode == 2 {
+                if mir_on(c) {
                     (*c).mir_collecting = true;
                     0
                 } else {
                     0
                 };
-                let cl_snap: i64 = if (*c).mode == 2 {
+                let cl_snap: i64 = if mir_on(c) {
                     mir_margs_len(c)
                 } else {
                     0
@@ -2755,7 +2755,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 };
                 (*c).consuming = svf;
                 close_ty(out, rt, c);
-                if (*c).mode == 2 {
+                if mir_on(c) {
                     (*c).mir_collecting = cl_col;
                     let mc: i64 = (*c).mir_cur;
                     let d: i64 = mir_emit_va(c, mc, 6, fid, cl_snap, rt);
@@ -2771,7 +2771,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let w: bool = widen_pre(out, exp, 0, c);
             append_str(out, "(int 0");
             close_ty(out, 0, c);
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit(c, mc, 0, 0, 0, 0, 0);
                 (*c).lastval = d;
@@ -2826,13 +2826,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             (*c).consuming = true;
             // (7c) MIR: collect the field values, then Opaque over them.
             let sl_col: bool = (*c).mir_collecting;
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = true;
                 0
             } else {
                 0
             };
-            let sl_snap: i64 = if (*c).mode == 2 {
+            let sl_snap: i64 = if mir_on(c) {
                 mir_margs_len(c)
             } else {
                 0
@@ -2840,7 +2840,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             dump_sfields(out, fields, sid, sl_isg, &gargs, src, c, gb);
             (*c).consuming = sl_svc;
             close_ty(out, sty, c);
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = sl_col;
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_va(c, mc, 7, 0, sl_snap, sty);
@@ -2861,7 +2861,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
             let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
-            let frecv: i64 = if (*c).mode == 2 {
+            let frecv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -2910,7 +2910,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_int(out, fidx);
             close_ty(out, fty, c);
             // (7c) MIR: a field read funnels through Opaque (the receiver carried).
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let snap: i64 = mir_margs_len(c);
                 mir_margs_push(c, frecv);
@@ -2933,13 +2933,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             (*c).consuming = true;
             // (7c) MIR: collect the element values, then Opaque over them.
             let ar_col: bool = (*c).mir_collecting;
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = true;
                 0
             } else {
                 0
             };
-            let ar_snap: i64 = if (*c).mode == 2 {
+            let ar_snap: i64 = if mir_on(c) {
                 mir_margs_len(c)
             } else {
                 0
@@ -2948,7 +2948,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             (*c).consuming = ar_svc;
             let aty: i64 = mk_array(c, ety);
             close_ty(out, aty, c);
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = ar_col;
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_va(c, mc, 7, 0, ar_snap, aty);
@@ -2967,14 +2967,14 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
             let tty: i64 = dump_texpr(out, it, 0 - 1, src, c, gb);
-            let ibase: i64 = if (*c).mode == 2 {
+            let ibase: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
             };
             push(out, ' ');
             dump_texpr(out, ii, 0 - 1, src, c, gb);
-            let iidx: i64 = if (*c).mode == 2 {
+            let iidx: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -2983,7 +2983,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let ety: i64 = array_elem_of(c, tty);
             close_ty(out, ety, c);
             // (7c) MIR: `a[i]` is a Load (base + index — a secret index is the D5 leak).
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit(c, mc, 5, 0, ibase, iidx, ety);
                 (*c).lastval = d;
@@ -3001,13 +3001,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         Expr::Qcall(qi, qm, qa) => {
             // (7c) MIR: an enum-construct / qcall-impl funnels its args through Opaque.
             let q_col: bool = (*c).mir_collecting;
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = true;
                 0
             } else {
                 0
             };
-            let q_snap: i64 = if (*c).mode == 2 {
+            let q_snap: i64 = if mir_on(c) {
                 mir_margs_len(c)
             } else {
                 0
@@ -3047,7 +3047,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 close_ty(out, qmret, c);
                 qmret
             };
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = q_col;
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_va(c, mc, 7, 0, q_snap, qrt);
@@ -3070,7 +3070,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
             let scrty: i64 = dump_texpr(out, mscr, 0 - 1, src, c, gb);
-            let mscrv: i64 = if (*c).mode == 2 {
+            let mscrv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -3081,12 +3081,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_int(out, meid);
             // (7c) MIR: a match -> Opaque([scrutinee, ...arm_bodies]).
             let mt_col: bool = (*c).mir_collecting;
-            let mt_snap: i64 = if (*c).mode == 2 {
+            let mt_snap: i64 = if mir_on(c) {
                 mir_margs_len(c)
             } else {
                 0
             };
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 mir_margs_push(c, mscrv);
                 (*c).mir_collecting = true;
                 0
@@ -3095,7 +3095,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             let mty: i64 = dump_tarms(out, marms, exp, src, c, gb);
             close_ty(out, mty, c);
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = mt_col;
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_va(c, mc, 7, 0, mt_snap, mty);
@@ -3116,20 +3116,20 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(out, cn);
             // (7c) MIR: class-init funnels its args through Opaque.
             let ci_col: bool = (*c).mir_collecting;
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = true;
                 0
             } else {
                 0
             };
-            let ci_snap: i64 = if (*c).mode == 2 {
+            let ci_snap: i64 = if mir_on(c) {
                 mir_margs_len(c)
             } else {
                 0
             };
             dump_cargs(out, ca, src, c, gb);
             close_ty(out, cty, c);
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = ci_col;
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_va(c, mc, 7, 0, ci_snap, cty);
@@ -3151,7 +3151,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
             let tty: i64 = dump_texpr(&mut tbuf, mt, 0 - 1, src, c, gb);
-            let mrecv: i64 = if (*c).mode == 2 {
+            let mrecv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -3160,12 +3160,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let rcid: i64 = class_of_handle(c, strip_ref(c, tty));
             // (7c) MIR: a method call -> Opaque([receiver, ...args]).
             let m_col: bool = (*c).mir_collecting;
-            let m_snap: i64 = if (*c).mode == 2 {
+            let m_snap: i64 = if mir_on(c) {
                 mir_margs_len(c)
             } else {
                 0
             };
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 mir_margs_push(c, mrecv);
                 (*c).mir_collecting = true;
                 0
@@ -3203,7 +3203,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 close_ty(out, mret2, c);
                 mret2
             };
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = m_col;
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_va(c, mc, 7, 0, m_snap, mrt);
@@ -3230,20 +3230,20 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(out, po);
             // (7c) MIR: perform funnels its args through Opaque.
             let pf_col: bool = (*c).mir_collecting;
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = true;
                 0
             } else {
                 0
             };
-            let pf_snap: i64 = if (*c).mode == 2 {
+            let pf_snap: i64 = if mir_on(c) {
                 mir_margs_len(c)
             } else {
                 0
             };
             dump_cargs(out, pa, src, c, gb);
             close_ty(out, pret, c);
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_collecting = pf_col;
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_va(c, mc, 7, 0, pf_snap, pret);
@@ -3261,7 +3261,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         Expr::Handle(hb, ha, hr) => {
             append_str(out, "(handle ");
             let bty: i64 = dump_texpr(out, hb, 0 - 1, src, c, gb);
-            let hbv: i64 = if (*c).mode == 2 {
+            let hbv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -3269,7 +3269,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // (7c) MIR: a handle lowers ONLY its body -> Opaque([body]); the handler arms
             // + return arm are walked for the dump but NOT lowered (suppress their emits).
             let h_sup: bool = (*c).mir_suppress;
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_suppress = true;
                 0
             } else {
@@ -3277,14 +3277,14 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             dump_tharms(out, ha, src, c, gb);
             dump_tret(out, hr, bty, src, c, gb);
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_suppress = h_sup;
                 0
             } else {
                 0
             };
             close_ty(out, bty, c);
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_opaque1(c, mc, hbv, bty);
                 (*c).lastval = d;
@@ -3303,7 +3303,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let svc: bool = (*c).consuming;
             (*c).consuming = true;
             let it: i64 = dump_texpr(out, di, 0 - 1, src, c, gb);
-            let dinv: i64 = if (*c).mode == 2 {
+            let dinv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -3313,7 +3313,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             close_ty(out, rt, c);
             // (7c) MIR: `declassify` is the one taint sink (op 8) — result is the
             // non-secret view of the operand.
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit(c, mc, 8, 0, dinv, 0, rt);
                 (*c).lastval = d;
@@ -3331,7 +3331,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_int(out, cv);
             close_ty(out, 3, c);
             // (7c) MIR: a char literal is a public constant -> Opaque (no operands), u8.
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_opaque0(c, mc, 3);
                 (*c).lastval = d;
@@ -3360,7 +3360,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             sink_name(gb, sb);
             close_ty(out, saty, c);
             // (7c) MIR: a string literal is a public constant -> Opaque (no operands), [u8].
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_opaque0(c, mc, saty);
                 (*c).lastval = d;
@@ -3386,7 +3386,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         Expr::Spawn(scall) => {
             append_str(out, "(spawn ");
             let spt: i64 = dump_texpr(out, scall, 0 - 1, src, c, gb);
-            let spv: i64 = if (*c).mode == 2 {
+            let spv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -3394,7 +3394,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let tkt: i64 = mk_task(c, spt);
             close_ty(out, tkt, c);
             // (7c) MIR: `spawn e` -> Opaque([e]) typed Task<U>.
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_opaque1(c, mc, spv, tkt);
                 (*c).lastval = d;
@@ -3409,7 +3409,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         Expr::Await(aw) => {
             append_str(out, "(await ");
             let awt: i64 = dump_texpr(out, aw, 0 - 1, src, c, gb);
-            let awv: i64 = if (*c).mode == 2 {
+            let awv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -3417,7 +3417,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let awr: i64 = task_elem_of(c, awt);
             close_ty(out, awr, c);
             // (7c) MIR: `t.await` -> Opaque([t]) typed U (the task's element).
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_opaque1(c, mc, awv, awr);
                 (*c).lastval = d;
@@ -3624,7 +3624,7 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             };
             bind_name(c, lnm, lvid, letty);
             // (7/N) MIR: the let's value is its current SSA value (the RHS's `lastval`).
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let lv: i64 = (*c).lastval;
                 mir_vd_set(c, lvid, lv);
                 0
@@ -3654,14 +3654,14 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // the (dump-only) target walk. A plain-Var target sets `mir_lastvid`; a
             // field/`*`-deref/index place sets it -1 (the wrapper arms).
             let as_sup: bool = (*c).mir_suppress;
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 (*c).mir_suppress = true;
                 0
             } else {
                 0
             };
             let ttgt: i64 = dump_texpr(out, atgt, 0 - 1, src, c, gb);
-            let tvid: i64 = if (*c).mode == 2 {
+            let tvid: i64 = if mir_on(c) {
                 (*c).mir_suppress = as_sup;
                 (*c).mir_lastvid
             } else {
@@ -3673,7 +3673,7 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // (7c) MIR: a plain-Var target rebinds var_defs to the RHS; a field/`*`-deref
             // store (no precise IR) funnels the value through Opaque (a store sink, typed
             // as the target).
-            if (*c).mode == 2 {
+            if mir_on(c) {
                 let av: i64 = (*c).lastval;
                 if tvid >= 0 {
                     mir_vd_set(c, tvid, av);
@@ -3774,7 +3774,7 @@ fn emit_tparams(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
         (*c).nextvid = (*c).nextvid + 1;
         bind_src(c, src, ns, ne, vid, pty);
         // (7/N) MIR: the param is an SSA param of the entry block; bind var_defs.
-        if (*c).mode == 2 {
+        if mir_on(c) {
             let mc: i64 = (*c).mir_cur;
             let pv: i64 = mir_add_param(c, mc, pty);
             mir_vd_set(c, vid, pv);
@@ -3812,7 +3812,7 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     (*c).base = len((*c).scs);
     // (7/N) MIR: start this fn's lowering — fresh pools + an entry block (b0).
     // Params are added as the entry's SSA params by `emit_tparams` (mode 2).
-    if (*c).mode == 2 {
+    if mir_on(c) {
         mir_reset(c);
         let eb: i64 = mir_new_block(c);
         (*c).mir_cur = eb;
@@ -3848,21 +3848,29 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     (*c).curfn = 0 - 1;
     // (7/N) MIR: the body's value (`lastval`) is the fn's return; terminate the
     // current block + dump this fn's MIR into `mirout`.
-    if (*c).mode == 2 {
+    if mir_on(c) {
         let bv: i64 = (*c).lastval;
         let cb: i64 = (*c).mir_cur;
         mir_term_return(c, cb, bv);
-        // Dump into a LOCAL buffer (distinct from `c`), then fold into the `mirout`
-        // FIELD via a `push` loop (a builtin works on a Vec field of `*c`).
-        let mut mb: Vec<u8> = vec_new();
-        mir_dump_fn(&mut mb, c, src, name_s, name_e, rty);
-        let mbn: i64 = len(mb);
-        let mut mbi: i64 = 0;
-        while mbi < mbn {
-            push(&mut (*c).mirout, mb[mbi]);
-            mbi = mbi + 1;
-        }
-        let _mbx: [u8] = vec_to_array(mb);
+        if (*c).mode == 3 {
+            // (7d) mode 3: verify this fn's MIR (leaks accumulate in `mirout`).
+            mir_verify_fn(c);
+            0
+        } else {
+            // mode 2: dump this fn's MIR into a LOCAL buffer (distinct from `c`), then
+            // fold into the `mirout` FIELD via a `push` loop (a builtin works on a Vec
+            // field of `*c`).
+            let mut mb: Vec<u8> = vec_new();
+            mir_dump_fn(&mut mb, c, src, name_s, name_e, rty);
+            let mbn: i64 = len(mb);
+            let mut mbi: i64 = 0;
+            while mbi < mbn {
+                push(&mut (*c).mirout, mb[mbi]);
+                mbi = mbi + 1;
+            }
+            let _mbx: [u8] = vec_to_array(mb);
+            0
+        };
         0
     } else {
         0
@@ -5744,6 +5752,12 @@ fn clear_i64(v: &mut Vec<i64>) -> i64 {
     0
 }
 
+// (7d) the MIR pools are built for mode 2 (dump the MIR) AND mode 3 (build, then run
+// the const-time verifier over it). The per-fn dump-vs-verify differs (in `type_fn`).
+fn mir_on(c: &mut TyCtx) -> bool {
+    (*c).mode >= 2
+}
+
 // Reset the per-fn MIR pools (between fns; value/block ids are per-fn).
 fn mir_reset(c: &mut TyCtx) -> i64 {
     clear_i64(&mut (*c).mvty);
@@ -5881,7 +5895,7 @@ fn mir_margs_len(c: &mut TyCtx) -> i64 {
 // (7c) push the just-walked child's MirValue onto the operand stack IFF a variadic
 // arm is collecting (called by the shared arg-list walkers after each element).
 fn mir_collect(c: &mut TyCtx) -> i64 {
-    if (*c).mode == 2 {
+    if mir_on(c) {
         if (*c).mir_collecting {
             let v: i64 = (*c).lastval;
             push(&mut (*c).margs, v);
@@ -5901,7 +5915,7 @@ fn mir_collect(c: &mut TyCtx) -> i64 {
 // Rust's explicit `WidenToSecret`/`WidenToNullable` node (a dump-time wrapper here,
 // an IR node there, lowered to `Opaque([inner])`).
 fn mir_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
-    if (*c).mode == 2 {
+    if mir_on(c) {
         if w {
             let iv: i64 = (*c).lastval;
             let mc: i64 = (*c).mir_cur;
@@ -6388,6 +6402,136 @@ fn mir_dump_fn(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], name_s: i64, name_e
     }
     push(out, ')');
     push(out, '\n');
+    0
+}
+
+// =============================================================================
+// (7d) the const-time verifier (ADR 0044 D6) — `verify_constant_time` over the
+// per-fn MIR: a `secret` value reaching a Branch cond / a Load index or base / a
+// Binary(Div) divisor is a leak. Taint is read straight off each value's type
+// (`is_secret` — the typer already computed the fixpoint). Leaks append to `mirout`
+// in fn -> block -> inst -> terminator order (one `(leak <SinkKind>)` per line).
+// =============================================================================
+
+// A MirValue is tainted iff its type handle is `secret` (interner kind 3).
+fn mir_val_secret(c: &mut TyCtx, v: i64) -> bool {
+    if v < 0 {
+        false
+    } else {
+        let h: i64 = (*c).mvty[v];
+        is_secret(c, h)
+    }
+}
+
+// Append `(leak <SinkKind>)` to `mirout` (via a local buffer + push-fold — a
+// ctx-field `&mut` can't go to a user fn). kind 0 Branch / 1 MemoryIndex /
+// 2 MemoryAddress / 3 Division.
+fn mir_emit_leak(c: &mut TyCtx, kind: i64) -> i64 {
+    let mut lb: Vec<u8> = vec_new();
+    append_str(&mut lb, "(leak ");
+    let nm: [u8] = if kind == 0 {
+        "Branch"
+    } else if kind == 1 {
+        "MemoryIndex"
+    } else if kind == 2 {
+        "MemoryAddress"
+    } else {
+        "Division"
+    };
+    append_str(&mut lb, nm);
+    push(&mut lb, ')');
+    push(&mut lb, '\n');
+    let n: i64 = len(lb);
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut (*c).mirout, lb[i]);
+        i = i + 1;
+    }
+    let _x: [u8] = vec_to_array(lb);
+    0
+}
+
+// Verify the current fn's MIR (block order; insts then the terminator per block).
+fn mir_verify_fn(c: &mut TyCtx) -> i64 {
+    let nb: i64 = (*c).mir_nblk;
+    let mut b: i64 = 0;
+    while b < nb {
+        let ni: i64 = len((*c).miblk);
+        let mut i: i64 = 0;
+        while i < ni {
+            if (*c).miblk[i] == b {
+                let op: i64 = (*c).miop[i];
+                if op == 5 {
+                    // load: a secret index (memory index) then a secret base (address).
+                    let idx: i64 = (*c).mib[i];
+                    if idx >= 0 {
+                        if mir_val_secret(c, idx) {
+                            mir_emit_leak(c, 1);
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else {
+                        0
+                    };
+                    let base: i64 = (*c).mia[i];
+                    if mir_val_secret(c, base) {
+                        mir_emit_leak(c, 2);
+                        0
+                    } else {
+                        0
+                    };
+                    0
+                } else if op == 3 {
+                    // binop: a secret divisor of an integer division (bop 4 = `/`).
+                    if (*c).misym[i] == 4 {
+                        let dv: i64 = (*c).mib[i];
+                        if mir_val_secret(c, dv) {
+                            mir_emit_leak(c, 3);
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else {
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        // terminator: a secret branch condition.
+        let nt: i64 = len((*c).mtb);
+        let mut t: i64 = 0;
+        while t < nt {
+            if (*c).mtb[t] == b {
+                if (*c).mtk[t] == 1 {
+                    let cond: i64 = (*c).mta[t];
+                    if mir_val_secret(c, cond) {
+                        mir_emit_leak(c, 0);
+                        0
+                    } else {
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            t = t + 1;
+        }
+        b = b + 1;
+    }
     0
 }
 
