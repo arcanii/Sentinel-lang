@@ -182,6 +182,7 @@ struct TyCtx {
     mtj: Vec<i64>,    // flat jump-args pool
     mvdv: Vec<i64>,   // var_defs (append-only): VarId
     mvdl: Vec<i64>,   // var_defs (append-only): current MirValue (paired with mvdv)
+    mir_lastvid: i64, // the VarId the most-recent `Var` node resolved to (for assign)
     mirout: Vec<u8>,  // accumulated per-fn MIR dump (the mode-2 result)
 }
 
@@ -2258,10 +2259,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(out, "(var #");
             append_int(out, vid);
             close_ty(out, ty, c);
-            // (7/N) MIR: a Var USE resolves to its current SSA value (no new inst).
+            // (7/N) MIR: a Var USE resolves to its current SSA value (no new inst);
+            // record its VarId so an enclosing assign can rebind it (7b).
             if (*c).mode == 2 {
                 let d: i64 = mir_vd_get(c, vid);
                 (*c).lastval = d;
+                (*c).mir_lastvid = vid;
                 0
             } else {
                 0
@@ -2379,6 +2382,33 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0 - 1
             };
+            // (7b) MIR: `&&`/`||` (bop 14/15) is a short-circuit BRANCH on the left — the
+            // right operand evaluates only on the non-short edge. Fork now (before the
+            // right walk, which then emits into `rhs_blk`). And: true->rhs, false->short;
+            // Or: true->short, false->rhs.
+            let mut rhs_blk: i64 = 0 - 1;
+            let mut short_blk: i64 = 0 - 1;
+            if (*c).mode == 2 {
+                if bop >= 14 {
+                    rhs_blk = mir_new_block(c);
+                    short_blk = mir_new_block(c);
+                    let pred: i64 = (*c).mir_cur;
+                    if bop == 14 {
+                        mir_term_branch(c, pred, blv, rhs_blk, short_blk);
+                        0
+                    } else {
+                        mir_term_branch(c, pred, blv, short_blk, rhs_blk);
+                        0
+                    };
+                    (*c).mir_cur = rhs_blk;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
             push(&mut tmp, ' ');
             // `==`/`!=` (bop 8/9): the right operand inherits the left's type, so
             // `x == null` types the `null` as `x`'s `?T` (ADR 0014 D7).
@@ -2408,8 +2438,8 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 2
             };
             close_ty(&mut tmp, resty, c);
-            // (7/N) MIR: binop (bop<=7) / cmp (8..13) -> an inst; logic (&&/||) is
-            // control flow (7b) — not emitted here.
+            // (7/N) MIR: binop (bop<=7) / cmp (8..13) -> an inst; logic (&&/||) -> the
+            // short-circuit merge (the (7b) fork above branched on the left).
             if (*c).mode == 2 {
                 if bop <= 13 {
                     let mc: i64 = (*c).mir_cur;
@@ -2422,6 +2452,26 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                     (*c).lastval = d;
                     0
                 } else {
+                    // logic short-circuit merge: the rhs value (brv) flows from the rhs
+                    // exit; the short block yields a constant (false for &&, true for ||);
+                    // both jump to a merge whose single param is the result.
+                    let rhs_exit: i64 = (*c).mir_cur;
+                    let sb: i64 = if bop == 15 {
+                        1
+                    } else {
+                        0
+                    };
+                    let sval: i64 = mir_emit(c, short_blk, 1, 0, sb, 0, resty);
+                    let merge: i64 = mir_new_block(c);
+                    let result: i64 = mir_add_param(c, merge, resty);
+                    let mut ra: Vec<i64> = vec_new();
+                    let mut sa: Vec<i64> = vec_new();
+                    push(&mut ra, brv);
+                    push(&mut sa, sval);
+                    mir_term_jump(c, rhs_exit, merge, &ra);
+                    mir_term_jump(c, short_blk, merge, &sa);
+                    (*c).mir_cur = merge;
+                    (*c).lastval = result;
                     0
                 };
                 0
@@ -2439,12 +2489,112 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             (*c).consuming = false;
             dump_texpr(out, cnd, 0 - 1, src, c, gb);
             (*c).consuming = svc;
+            // (7b) MIR: branch on the cond into fresh then/else blocks; snapshot var_defs.
+            let cv: i64 = if (*c).mode == 2 {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
+            let mut tb: i64 = 0 - 1;
+            let mut eb: i64 = 0 - 1;
+            let mut snap: i64 = 0;
+            if (*c).mode == 2 {
+                tb = mir_new_block(c);
+                eb = mir_new_block(c);
+                let pred: i64 = (*c).mir_cur;
+                snap = mir_vd_len(c);
+                mir_term_branch(c, pred, cv, tb, eb);
+                (*c).mir_cur = tb;
+                0
+            } else {
+                0
+            };
             push(out, ' ');
             // Both branches inherit the `if`'s expectation, so a `?T`-returning `if`
             // widens each branch's tail (and the `if`'s type is that branch type).
             let tt: i64 = dump_texpr(out, thn, exp, src, c, gb);
+            // (7b) MIR: capture the then value/exit + the then-arm rebindings (saved to a
+            // side list), then restore var_defs to the branch + switch to the else block.
+            let then_val: i64 = if (*c).mode == 2 {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
+            let mut then_exit: i64 = 0 - 1;
+            let mut tsv: Vec<i64> = vec_new();
+            let mut tsval: Vec<i64> = vec_new();
+            if (*c).mode == 2 {
+                then_exit = (*c).mir_cur;
+                let tlen: i64 = mir_vd_len(c);
+                let mut ki: i64 = snap;
+                while ki < tlen {
+                    let kv: i64 = (*c).mvdv[ki];
+                    let kl: i64 = (*c).mvdl[ki];
+                    push(&mut tsv, kv);
+                    push(&mut tsval, kl);
+                    ki = ki + 1;
+                }
+                mir_vd_trunc(c, snap);
+                (*c).mir_cur = eb;
+                0
+            } else {
+                0
+            };
             push(out, ' ');
             dump_texpr(out, els, exp, src, c, gb);
+            // (7b) MIR: build the merge — result param first, then one param per variable
+            // that diverged across the arms (VarId-sorted), reconciled via the arms' jumps.
+            if (*c).mode == 2 {
+                let else_val: i64 = (*c).lastval;
+                let else_exit: i64 = (*c).mir_cur;
+                let elen: i64 = mir_vd_len(c);
+                let merge: i64 = mir_new_block(c);
+                let result: i64 = mir_add_param(c, merge, tt);
+                let mut then_args: Vec<i64> = vec_new();
+                let mut else_args: Vec<i64> = vec_new();
+                push(&mut then_args, then_val);
+                push(&mut else_args, else_val);
+                let nv: i64 = (*c).nextvid;
+                let mut vid: i64 = 0;
+                while vid < nv {
+                    let bv: i64 = mir_vd_lp(c, snap, vid);
+                    if bv >= 0 {
+                        let ts: i64 = mir_side_lookup(&tsv, &tsval, vid);
+                        let tvv: i64 = if ts < 0 {
+                            bv
+                        } else {
+                            ts
+                        };
+                        let es: i64 = mir_vd_lr(c, snap, elen, vid);
+                        let evv: i64 = if es < 0 {
+                            bv
+                        } else {
+                            es
+                        };
+                        if tvv != evv {
+                            let pty: i64 = (*c).mvty[tvv];
+                            let p: i64 = mir_add_param(c, merge, pty);
+                            push(&mut then_args, tvv);
+                            push(&mut else_args, evv);
+                            mir_vd_set(c, vid, p);
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else {
+                        0
+                    };
+                    vid = vid + 1;
+                }
+                mir_term_jump(c, then_exit, merge, &then_args);
+                mir_term_jump(c, else_exit, merge, &else_args);
+                (*c).mir_cur = merge;
+                (*c).lastval = result;
+                0
+            } else {
+                0
+            };
             close_ty(out, tt, c);
             tt
         },
@@ -3101,9 +3251,30 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             let asvc: bool = (*c).consuming;
             (*c).consuming = false;
             dump_texpr(out, atgt, 0 - 1, src, c, gb);
+            // (7b) MIR: for a plain-Var target (`mir_lastvid` set by the Var arm), the
+            // assign rebinds its current SSA value to the RHS. (A field/`*`-deref store
+            // is 7c — its receiver Var also sets `mir_lastvid`, so the Var-only rebind
+            // is exercised by the control-flow corpus only at 7c+.)
+            let tvid: i64 = if (*c).mode == 2 {
+                (*c).mir_lastvid
+            } else {
+                0 - 1
+            };
             (*c).consuming = true;
             push(out, ' ');
             dump_texpr(out, aval, 0 - 1, src, c, gb);
+            if (*c).mode == 2 {
+                if tvid >= 0 {
+                    let av: i64 = (*c).lastval;
+                    mir_vd_set(c, tvid, av);
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
             (*c).consuming = asvc;
             push(out, ')');
             0
@@ -4687,6 +4858,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         mtj: vec_new(),
         mvdv: vec_new(),
         mvdl: vec_new(),
+        mir_lastvid: 0 - 1,
         mirout: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();
@@ -5223,6 +5395,40 @@ fn mir_term_return(c: &mut TyCtx, blk: i64, v: i64) -> i64 {
     0
 }
 
+// (7b) a conditional branch (branch args are always empty — the Rust lowering
+// passes values via the JUMPs to the merge, not the branch).
+fn mir_term_branch(c: &mut TyCtx, blk: i64, cond: i64, tb: i64, eb: i64) -> i64 {
+    push(&mut (*c).mtb, blk);
+    push(&mut (*c).mtk, 1);
+    push(&mut (*c).mta, cond);
+    push(&mut (*c).mtt, tb);
+    push(&mut (*c).mte, eb);
+    push(&mut (*c).mtjs, 0);
+    push(&mut (*c).mtje, 0);
+    0
+}
+
+// (7b) an unconditional jump to `target`, passing `args` to its block params.
+fn mir_term_jump(c: &mut TyCtx, blk: i64, target: i64, args: &Vec<i64>) -> i64 {
+    let st: i64 = len((*c).mtj);
+    let na: i64 = len(*args);
+    let mut i: i64 = 0;
+    while i < na {
+        let a: i64 = (*args)[i];
+        push(&mut (*c).mtj, a);
+        i = i + 1;
+    }
+    let en: i64 = len((*c).mtj);
+    push(&mut (*c).mtb, blk);
+    push(&mut (*c).mtk, 0);
+    push(&mut (*c).mta, target);
+    push(&mut (*c).mtt, 0 - 1);
+    push(&mut (*c).mte, 0 - 1);
+    push(&mut (*c).mtjs, st);
+    push(&mut (*c).mtje, en);
+    0
+}
+
 // var_defs: append-only (var,val) pairs; newest-first lookup.
 fn mir_vd_set(c: &mut TyCtx, var: i64, val: i64) -> i64 {
     push(&mut (*c).mvdv, var);
@@ -5251,6 +5457,84 @@ fn mir_vd_get(c: &mut TyCtx, var: i64) -> i64 {
 }
 
 // ---- the per-fn MIR dump (the oracle format; appended to `mirout`) ----------
+
+// (7b) var_defs depth (the snapshot mark at a branch).
+fn mir_vd_len(c: &mut TyCtx) -> i64 {
+    len((*c).mvdv)
+}
+
+// (7b) newest-first lookup of `var` in var_defs[0..hi); -1 if absent.
+fn mir_vd_lp(c: &mut TyCtx, hi: i64, var: i64) -> i64 {
+    let mut i: i64 = hi - 1;
+    let mut found: i64 = 0 - 1;
+    while i >= 0 {
+        if found < 0 {
+            if (*c).mvdv[i] == var {
+                found = (*c).mvdl[i];
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i - 1;
+    }
+    found
+}
+
+// (7b) newest-first lookup of `var` in var_defs[lo..hi); -1 if absent.
+fn mir_vd_lr(c: &mut TyCtx, lo: i64, hi: i64, var: i64) -> i64 {
+    let mut i: i64 = hi - 1;
+    let mut found: i64 = 0 - 1;
+    while i >= lo {
+        if found < 0 {
+            if (*c).mvdv[i] == var {
+                found = (*c).mvdl[i];
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i - 1;
+    }
+    found
+}
+
+// (7b) pop var_defs back to depth `s` (restore an arm's bindings off the stack).
+fn mir_vd_trunc(c: &mut TyCtx, s: i64) -> i64 {
+    while len((*c).mvdv) > s {
+        let _a: i64 = pop(&mut (*c).mvdv);
+        let _b: i64 = pop(&mut (*c).mvdl);
+        0
+    }
+    0
+}
+
+// (7b) newest-first lookup of `var` in a side (var,val) list; -1 if absent.
+fn mir_side_lookup(sv: &Vec<i64>, sval: &Vec<i64>, var: i64) -> i64 {
+    let mut i: i64 = len(*sv) - 1;
+    let mut found: i64 = 0 - 1;
+    while i >= 0 {
+        if found < 0 {
+            if (*sv)[i] == var {
+                found = (*sval)[i];
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i - 1;
+    }
+    found
+}
 
 // The dump writes to a buffer `out` (a LOCAL in the caller — NOT a `(*c).field`,
 // since passing a ctx-field `&mut` to a user fn re-borrows `c`). `out` and `c` are

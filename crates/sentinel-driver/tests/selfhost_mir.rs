@@ -4,8 +4,9 @@
 //! Rust `snc`, then assert its lowered-form dump is byte-identical to `snc mir`.
 //!
 //! (7a) covers the STRAIGHT-LINE grammar (const / var / unary / binop / cmp / `let`
-//! → one block + Return); control flow (if / `&&` / `||` → branch + merge) is (7b),
-//! the `Opaque` catch-all + `Load` + calls are (7c), and the full-corpus phase-go
+//! → one block + Return); (7b) adds CONTROL FLOW (`if` / `&&` / `||` → branch + a
+//! merge block whose params reconcile diverged vars, VarId-sorted); the `Opaque`
+//! catch-all + `Load` + calls are (7c), and the full-corpus phase-go
 //! (`sentinel_mir_matches_oracle_on_corpus`) is (7e). Fixtures the oracle rejects
 //! (parse/resolve/type errors) exit nonzero and are skipped — error parity is out of
 //! scope (ADR 0044 D7), as in every prior stage.
@@ -59,6 +60,17 @@ const SEEDS: &[&str] = &[
     "fn lets(x: i64) -> i64 { let y = x + 1; y * 2 }\nfn main() -> i64 { 0 }\n",
     "fn neg(x: i64) -> i64 { let n = -x; n }\nfn main() -> i64 { 0 }\n",
     "fn cmp_let(a: i64, b: i64) -> bool { let d = a - b; d < 0 }\nfn main() -> i64 { 0 }\n",
+    // (7b) control flow: if/branch + merge param, && / || short-circuit (incl. secret
+    // — a secret-dependent branch), a var diverged across arms (1 and 2 vars), nested
+    // ifs, and a logic chain.
+    "fn pick(c: bool) -> i64 { if c { 1 } else { 2 } }\nfn main() -> i64 { 0 }\n",
+    "fn both(a: bool, b: bool) -> bool { a && b }\nfn main() -> i64 { 0 }\n",
+    "fn either(a: bool, b: bool) -> bool { a || b }\nfn main() -> i64 { 0 }\n",
+    "fn sec(s: secret bool, t: secret bool) -> secret bool { s && t }\nfn main() -> i64 { 0 }\n",
+    "fn g(c: bool) -> i64 { let mut x = 1; if c { x = 2; 0 } else { 0 }; x }\nfn main() -> i64 { 0 }\n",
+    "fn nested(a: bool, b: bool) -> i64 { if a { if b { 1 } else { 2 } } else { 3 } }\nfn main() -> i64 { 0 }\n",
+    "fn chain(a: bool, b: bool, cc: bool) -> bool { a && b || cc }\nfn main() -> i64 { 0 }\n",
+    "fn two(c: bool, d: bool) -> i64 { let mut x = 0; let mut y = 10; if c { x = 1; 0 } else { y = 20; 0 }; x + y }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]
