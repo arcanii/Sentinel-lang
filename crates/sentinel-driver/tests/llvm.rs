@@ -181,6 +181,52 @@ fn llvm_if_else_memory_cell_merge() {
     );
 }
 
+#[test]
+fn llvm_while_loop_cfg() {
+    // `while c { … }` — the loop CFG: enter the cond block (`bb0`), which branches to
+    // the body (`bb1`) or after (`bb2`); the body branches back to the cond (the
+    // back-edge). Body allocas are hoisted to entry (no per-iteration growth).
+    assert_eq!(
+        llvm_dump(
+            "while",
+            "fn count(n: i64) -> i64 {\n    let mut i: i64 = 0;\n    while i < n {\n        i = i + 1;\n    }\n    i\n}\nfn main() -> i64 {\n    count(3)\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "define i64 @count(i64 %arg0) {\n",
+            "entry:\n",
+            "  %v0 = alloca i64\n",
+            "  %v1 = alloca i64\n",
+            "  store i64 %arg0, ptr %v0\n",
+            "  store i64 0, ptr %v1\n",
+            "  br label %bb0\n",
+            "bb0:\n",
+            "  %v2 = load i64, ptr %v1\n",
+            "  %v3 = load i64, ptr %v0\n",
+            "  %v4 = icmp slt i64 %v2, %v3\n",
+            "  br i1 %v4, label %bb1, label %bb2\n",
+            "bb1:\n",
+            "  %v5 = load i64, ptr %v1\n",
+            "  %v6 = add i64 %v5, 1\n",
+            "  store i64 %v6, ptr %v1\n",
+            "  br label %bb0\n",
+            "bb2:\n",
+            "  %v7 = load i64, ptr %v1\n",
+            "  ret i64 %v7\n",
+            "}\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v0 = call i64 @count(i64 3)\n",
+            "  %v1 = trunc i64 %v0 to i32\n",
+            "  ret i32 %v1\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {

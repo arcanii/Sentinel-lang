@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use sentinel_ast::{BinOp, CmpOp, UnaryOp};
+use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_resolve::{FnId, VarId, I64_TO_U8_FN_ID, U8_TO_I64_FN_ID};
 use sentinel_types::{
     Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
@@ -89,6 +89,7 @@ fn dump_fn(f: &TypedFnDef, program: &TypedProgram, out: &mut String) -> Result<(
         slots: HashMap::new(),
         allocas: String::new(),
         body: String::new(),
+        loops: Vec::new(),
     };
     // Allocas are HOISTED to the entry block: param slots, `let` slots, and the
     // if-result slot all land in `e.allocas` (emitted first), while stores/loads/
@@ -140,6 +141,9 @@ struct Emit<'a> {
     slots: HashMap<VarId, u32>,
     allocas: String,
     body: String,
+    /// The enclosing loops' (cond-block, after-block) labels — `break` branches
+    /// to the innermost after-block, `continue` to its cond-block.
+    loops: Vec<(u32, u32)>,
 }
 
 impl Emit<'_> {
@@ -195,9 +199,39 @@ impl Emit<'_> {
                 self.lower_expr(e)?;
                 Ok(())
             }
-            TypedStmtKind::While { .. } => Err("while loop (deferred to 8b)".into()),
+            TypedStmtKind::While { cond, body } => {
+                // The loop CFG: enter the cond; cond branches to body or after; the
+                // body (per-iteration) branches back to cond (the back-edge). Body
+                // allocas are hoisted to entry (no per-iteration stack growth).
+                let cond_b = self.fresh_block();
+                let body_b = self.fresh_block();
+                let after_b = self.fresh_block();
+                writeln!(self.body, "  br label %bb{cond_b}").unwrap();
+                writeln!(self.body, "bb{cond_b}:").unwrap();
+                let c = self.lower_expr(cond)?;
+                writeln!(self.body, "  br i1 {c}, label %bb{body_b}, label %bb{after_b}").unwrap();
+                writeln!(self.body, "bb{body_b}:").unwrap();
+                self.loops.push((cond_b, after_b));
+                let _ = self.lower_block_expr(body)?; // a while body's value is discarded
+                self.loops.pop();
+                writeln!(self.body, "  br label %bb{cond_b}").unwrap();
+                writeln!(self.body, "bb{after_b}:").unwrap();
+                Ok(())
+            }
             TypedStmtKind::Break | TypedStmtKind::Continue => {
-                Err("break/continue (deferred to 8b)".into())
+                let (cond_b, after_b) =
+                    *self.loops.last().ok_or("break/continue outside a loop")?;
+                let dest = if matches!(stmt.kind, TypedStmtKind::Break) {
+                    after_b
+                } else {
+                    cond_b
+                };
+                writeln!(self.body, "  br label %bb{dest}").unwrap();
+                // The branch terminates this block; park on a fresh (unreachable) block
+                // so any trailing code in this source block has somewhere to go.
+                let dead = self.fresh_block();
+                writeln!(self.body, "bb{dead}:").unwrap();
+                Ok(())
             }
         }
     }
@@ -305,6 +339,34 @@ impl Emit<'_> {
                 writeln!(self.body, "bb{merge_b}:").unwrap();
                 let d = self.fresh();
                 writeln!(self.body, "  %v{d} = load {rty}, ptr %v{slot}").unwrap();
+                Ok(format!("%v{d}"))
+            }
+            // `a && b` / `a || b` — short-circuit, no phi: branch on `a`; the rhs block
+            // evaluates `b` and stores it, the short block stores the constant (false for
+            // `&&`, true for `||`); the merge loads the i1 result.
+            TypedExprKind::Logic(op, lhs, rhs) => {
+                let l = self.lower_expr(lhs)?;
+                let rhs_b = self.fresh_block();
+                let short_b = self.fresh_block();
+                let merge_b = self.fresh_block();
+                let is_and = matches!(op, LogicOp::And);
+                if is_and {
+                    writeln!(self.body, "  br i1 {l}, label %bb{rhs_b}, label %bb{short_b}").unwrap();
+                } else {
+                    writeln!(self.body, "  br i1 {l}, label %bb{short_b}, label %bb{rhs_b}").unwrap();
+                }
+                writeln!(self.body, "bb{rhs_b}:").unwrap();
+                let r = self.lower_expr(rhs)?;
+                let slot = self.alloca("i1");
+                writeln!(self.body, "  store i1 {r}, ptr %v{slot}").unwrap();
+                writeln!(self.body, "  br label %bb{merge_b}").unwrap();
+                writeln!(self.body, "bb{short_b}:").unwrap();
+                let sc = if is_and { 0 } else { 1 };
+                writeln!(self.body, "  store i1 {sc}, ptr %v{slot}").unwrap();
+                writeln!(self.body, "  br label %bb{merge_b}").unwrap();
+                writeln!(self.body, "bb{merge_b}:").unwrap();
+                let d = self.fresh();
+                writeln!(self.body, "  %v{d} = load i1, ptr %v{slot}").unwrap();
                 Ok(format!("%v{d}"))
             }
             TypedExprKind::Call { id, args, .. } => self.lower_call(*id, args, expr.ty),

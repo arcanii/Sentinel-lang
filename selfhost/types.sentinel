@@ -222,6 +222,8 @@ struct TyCtx {
     cgalloca_ty: Vec<i64>, // hoisted alloca types (paired with cgalloca_sl)
     cg_to_body: bool,      // route cg_putc to cgbody (walk) vs cgout (teardown)
     cgblk: i64,            // per-fn basic-block label counter (bbN; entry is implicit)
+    cg_loop_cond: Vec<i64>, // enclosing loops' cond-block labels (continue target)
+    cg_loop_after: Vec<i64>,// enclosing loops' after-block labels (break target)
     cgout: Vec<u8>,   // accumulated .ll across all fns (the mode-4 result)
 }
 
@@ -2560,6 +2562,44 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            // (8b) cg: && / || short-circuit — branch on the left BEFORE the right walk
+            // so the right operand emits into the rhs block. Allocate rhs/short/merge.
+            let mut cg_lrhs: i64 = 0 - 1;
+            let mut cg_lshort: i64 = 0 - 1;
+            let mut cg_lmerge: i64 = 0 - 1;
+            let mut cg_lslot: i64 = 0 - 1;
+            if cg_on(c) {
+                if bop >= 14 {
+                    cg_lrhs = cg_fresh_block(c);
+                    cg_lshort = cg_fresh_block(c);
+                    cg_lmerge = cg_fresh_block(c);
+                    cgo_str(c, "  br i1 ");
+                    cgo_operand(c, cglk0, cglv0);
+                    if bop == 14 {
+                        cgo_str(c, ", label %bb");
+                        cgo_int(c, cg_lrhs);
+                        cgo_str(c, ", label %bb");
+                        cgo_int(c, cg_lshort);
+                        0
+                    } else {
+                        cgo_str(c, ", label %bb");
+                        cgo_int(c, cg_lshort);
+                        cgo_str(c, ", label %bb");
+                        cgo_int(c, cg_lrhs);
+                        0
+                    };
+                    cg_putc(c, '\n');
+                    cgo_str(c, "bb");
+                    cgo_int(c, cg_lrhs);
+                    cgo_str(c, ":\n");
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
             push(&mut tmp, ' ');
             // `==`/`!=` (bop 8/9): the right operand inherits the left's type, so
             // `x == null` types the `null` as `x`'s `?T` (ADR 0014 D7).
@@ -2699,6 +2739,44 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                     cg_cmp(c, prd, lt, cglk0, cglv0, cgrk, cgrv);
                     0
                 } else {
+                    // bop 14/15: && / || — the rhs walked into the rhs block (forked
+                    // above). Store the rhs value + the short constant (0 for &&, 1 for
+                    // ||); the merge loads the i1 result. No phi.
+                    cg_lslot = cg_alloca(c, 2);
+                    cgo_str(c, "  store i1 ");
+                    cgo_operand(c, cgrk, cgrv);
+                    cgo_str(c, ", ptr %v");
+                    cgo_int(c, cg_lslot);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "  br label %bb");
+                    cgo_int(c, cg_lmerge);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "bb");
+                    cgo_int(c, cg_lshort);
+                    cgo_str(c, ":\n");
+                    let cg_sc: i64 = if bop == 15 {
+                        1
+                    } else {
+                        0
+                    };
+                    cgo_str(c, "  store i1 ");
+                    cgo_int(c, cg_sc);
+                    cgo_str(c, ", ptr %v");
+                    cgo_int(c, cg_lslot);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "  br label %bb");
+                    cgo_int(c, cg_lmerge);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "bb");
+                    cgo_int(c, cg_lmerge);
+                    cgo_str(c, ":\n");
+                    let cg_lld: i64 = cg_fresh(c);
+                    cgo_str(c, "  %v");
+                    cgo_int(c, cg_lld);
+                    cgo_str(c, " = load i1, ptr %v");
+                    cgo_int(c, cg_lslot);
+                    cg_putc(c, '\n');
+                    cg_reg(c, cg_lld);
                     0
                 };
                 0
@@ -4037,19 +4115,101 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // non-consuming (call args inside still set their own consuming).
             let wsvc: bool = (*c).consuming;
             (*c).consuming = false;
+            // (8b) cg: the loop CFG. Enter the cond block (the back-edge target).
+            let mut cg_wc: i64 = 0 - 1;
+            let mut cg_wb: i64 = 0 - 1;
+            let mut cg_wa: i64 = 0 - 1;
+            if cg_on(c) {
+                cg_wc = cg_fresh_block(c);
+                cg_wb = cg_fresh_block(c);
+                cg_wa = cg_fresh_block(c);
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, cg_wc);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, cg_wc);
+                cgo_str(c, ":\n");
+                0
+            } else {
+                0
+            };
             dump_texpr(out, wcond, 0 - 1, src, c, gb);
+            // (8b) cg: branch cond → body/after, open the body, register loop targets.
+            if cg_on(c) {
+                let cwk: i64 = (*c).cglk;
+                let cwv: i64 = (*c).cglv;
+                cgo_str(c, "  br i1 ");
+                cgo_operand(c, cwk, cwv);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, cg_wb);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, cg_wa);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, cg_wb);
+                cgo_str(c, ":\n");
+                push(&mut (*c).cg_loop_cond, cg_wc);
+                push(&mut (*c).cg_loop_after, cg_wa);
+                0
+            } else {
+                0
+            };
             push(out, ' ');
             dump_texpr(out, wbody, 0 - 1, src, c, gb);
+            // (8b) cg: pop loop targets, back-edge to cond, open the after block.
+            if cg_on(c) {
+                let _pc: i64 = pop(&mut (*c).cg_loop_cond);
+                let _pa: i64 = pop(&mut (*c).cg_loop_after);
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, cg_wc);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, cg_wa);
+                cgo_str(c, ":\n");
+                0
+            } else {
+                0
+            };
             (*c).consuming = wsvc;
             push(out, ')');
             0
         },
         Stmt::SBreak => {
             append_str(out, "(break)");
+            // (8b) cg: branch to the innermost loop's after block; park on a dead block.
+            if cg_on(c) {
+                let bn: i64 = len((*c).cg_loop_after);
+                let bafter: i64 = (*c).cg_loop_after[bn - 1];
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, bafter);
+                cg_putc(c, '\n');
+                let bdead: i64 = cg_fresh_block(c);
+                cgo_str(c, "bb");
+                cgo_int(c, bdead);
+                cgo_str(c, ":\n");
+                0
+            } else {
+                0
+            };
             0
         },
         Stmt::SContinue => {
             append_str(out, "(continue)");
+            // (8b) cg: branch to the innermost loop's cond block; park on a dead block.
+            if cg_on(c) {
+                let kn: i64 = len((*c).cg_loop_cond);
+                let kcond: i64 = (*c).cg_loop_cond[kn - 1];
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, kcond);
+                cg_putc(c, '\n');
+                let kdead: i64 = cg_fresh_block(c);
+                cgo_str(c, "bb");
+                cgo_int(c, kdead);
+                cgo_str(c, ":\n");
+                0
+            } else {
+                0
+            };
             0
         },
         Stmt::SExpr(sx) => {
@@ -5680,6 +5840,8 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cgalloca_ty: vec_new(),
         cg_to_body: false,
         cgblk: 0,
+        cg_loop_cond: vec_new(),
+        cg_loop_after: vec_new(),
         cgout: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();
@@ -6225,6 +6387,8 @@ fn cg_reset(c: &mut TyCtx) -> i64 {
     clear_u8(&mut (*c).cgbody);
     clear_i64(&mut (*c).cgalloca_sl);
     clear_i64(&mut (*c).cgalloca_ty);
+    clear_i64(&mut (*c).cg_loop_cond);
+    clear_i64(&mut (*c).cg_loop_after);
     (*c).cgnext = 0;
     (*c).cglk = 0;
     (*c).cglv = 0;
