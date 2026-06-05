@@ -1,0 +1,23 @@
+// selfhost/mir.sentinel — the SEVENTH Sentinel compiler stage (ADR 0044).
+//
+// MIR lowering turns each top-level fn's typed body into a minimal SSA/CFG IR
+// (the substrate the constant-time verifier reads). This stage REUSES
+// `types.sentinel` (the back-half "share the typed program" foundation): the
+// lowering is FUSED into the typer's pass-2 walk as a guarded side-build (it
+// needs every node's type + the real VarIds), and `types::run(src, 2, result)`
+// emits the lowered-form dump — `(fn <name> <ret-ty> (block b<N> …)…)` — matching
+// `snc mir` byte-for-byte.
+//
+// (Module chain: mir → types → parser; the D.6 merge follows the `use` edges.)
+
+use types::run;
+
+fn main() -> i64 {
+    let inp_path: [u8] = "input.sentinel";
+    let inp: [u8] = read_file(inp_path);
+    let mut result: Vec<u8> = vec_new();
+    run(inp, 2, &mut result);
+    let arr: [u8] = vec_to_array(result);
+    print_bytes(arr);
+    0
+}
