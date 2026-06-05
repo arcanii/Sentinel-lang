@@ -115,6 +115,36 @@ variant — **the constant-time verifier is IN scope** (not the "drop verifier" 
   the probe-proven algorithm) → **(7c)** the `Opaque` catch-all + `Load` + calls → **(7e)**
   the full-corpus phase-go.
 
+- **A4 — (7c) the LOWERING is COMPLETE + (7e) the full-corpus PHASE-GO is GREEN.**
+  `selfhost/mir.sentinel` matches `snc mir` **byte-for-byte over the ENTIRE clean-lowering
+  corpus — 123/123 fixtures** (`sentinel_mir_matches_oracle_on_corpus`, the 7e phase-go),
+  modes 0/1 (`snc types`/`snc borrow`) stay 123/123 byte-identical, leak-free (full sweep
+  over deref/class/enum/effect/handle/generic/trait/named-impl). Two feat commits closed
+  (7c): **`bd4ca96`** (the common forms → 87/123) + **`a0a5a3c`** (the effect/class/enum
+  forms → 123/123). The mechanisms (all fused, mode-2-guarded):
+  - **A `margs` operand STACK** + `mir_emit_va` (op 6 `call` / op 7 `opaque`): the arg-list
+    walkers (`dump_targs`/`dump_sfields`/`dump_array_elems`/`dump_args_capture_*`/`dump_cargs`
+    →`dump_targs`/`dump_tarms`) push each child's MirValue while a `mir_collecting` flag is
+    set (so a shared walker in a non-collecting context can't pollute the stack); a variadic
+    arm snapshots `len(margs)`, walks, then `emit_va` copies `margs[snap..]` into the flat
+    `miargs` pool and truncates. Receivers/scrutinees are pushed manually (first), then the
+    args collect. Nesting works (each `emit_va` truncates its own args).
+  - **Op 5 `load`** (Index + `*`-deref, base + optional index), **op 8 `declassify`**,
+    and **the widen-Opaque** (`mir_widen`: `WidenToSecret`/`WidenToNullable` are dump-time
+    wrappers here but `Opaque([inner])` VALUES in the Rust MIR — emit one at each widen site).
+  - **`mir_suppress`** — a place the IR doesn't lower as a value (an assign target, a
+    `handle`'s arms/return) walks for the dump but emits NOTHING (the emit helpers early-out).
+    A field/`*`-deref/index **store** → `Opaque([value])` (the target suppressed); a plain-Var
+    target still rebinds `var_defs` (detected via `mir_lastvid`, which the place-wrapper arms
+    reset to −1). A `handle` lowers ONLY its body → `Opaque([body])`.
+  - **An UNBOUND Var** (a match/handler payload binding the IR doesn't model) → a fresh
+    `Opaque([])`, matching the Rust `lookup_var`. ⚠ Flat-namespace catch: the `Expr::Call`
+    arm's two branches (kont vs fn-call) needed distinct `let` names (`kmc`/`kd`) for their
+    emit blocks (a per-arm flat namespace; only match ARMS are independent scopes). **NEXT =
+    (7d)** the const-time verifier (`verify_constant_time`) + leaking seeds — the last piece
+    (the owner's full-version pick); its corpus differential is near-empty (only
+    `c52_secret_leak` is a true positive), so the leaking seeds are load-bearing.
+
 - **A3 — (7b) CONTROL FLOW LANDED** (`c15ce6d`): the branch-merge in the `If` and Logic
   (`&&`/`||`) `dump_texpr` arms under mode 2 — the probe-proven algorithm, executed as
   designed. **`If`:** branch on the cond into fresh then/else blocks (snapshot `var_defs`
