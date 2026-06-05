@@ -1,8 +1,13 @@
 # ADR 0043: Phase D self-host port — (6/N) borrow-check-in-Sentinel
 
-Status: **PROPOSED** — the sixth sub-phase of the self-host port (ADR 0031 D5 /
+Status: **ACCEPTED** — the sixth sub-phase of the self-host port (ADR 0031 D5 /
 ADR 0038 D9), after the lexer (1/N), parser (2/N, ADR 0039), resolve (3/N, ADR 0040),
-types (4/N, ADR 0041), and effect-check (5/N, ADR 0042) — all ACCEPTED. Ports the
+types (4/N, ADR 0041), and effect-check (5/N, ADR 0042) — all ACCEPTED. **COMPLETE
+(A1+A2): `selfhost/borrow.sentinel` matches `snc borrow` byte-for-byte over the ENTIRE
+clean-borrow corpus (123/123 fixtures, `sentinel_borrow_checker_matches_oracle_on_corpus`
+— the D8 phase-go), leak-free; `snc types` stays byte-identical (the move analysis is a
+pure side-pass).** The FIRST stage to REUSE a prior one (the back-half "share the typed
+program" foundation). Ports the
 **borrow-check** analysis pass to Sentinel: the type-checked program → the **`DropPlan`**
 (per fn, the set of **moved-source VarIds** — bindings used in a consuming/move position,
 which codegen must NOT drop), differentially validated against a Rust `snc borrow` oracle
@@ -58,6 +63,36 @@ program" foundation. **The REUSE MECHANICS are the central PROBE-GATED question 
   - **⚠ DO IN ORDER:** (1) add the move computation to `types.sentinel` + verify `snc types`
     123/123 byte-identical + leak-free (the side-effect is harmless); (2) the build_program
     refactor (re-verify 123/123); (3) `borrow.sentinel` + `dump_moves` + the differential.
+
+- **A2 — `selfhost/borrow.sentinel` LANDED; ADR 0043 → ACCEPTED, the BORROW-CHECK STAGE
+  (6/N) is COMPLETE.** Matches `snc borrow` BYTE-FOR-BYTE over the ENTIRE clean-borrow
+  corpus — **123/123 fixtures** (`sentinel_borrow_checker_matches_oracle_on_corpus`, the
+  D8 phase-go) + 5 seeds, leak-free (both `types.sentinel` + `borrow.sentinel` 123/123),
+  and **`snc types` stays byte-identical** (the move analysis is a pure side-pass)
+  (`d21910d`). The A1 fuse plan executed essentially as written — **(6a-i)** the move
+  computation, **(6a-ii)** the `run()` refactor, **(6b)** the thin `borrow.sentinel` —
+  with two oracle-revealed corrections:
+  - **The reuse mechanism is `run(src, mode, result)`** (NOT a by-value `TyCtx` return):
+    `types.sentinel`'s `main` pipeline → `pub fn run` that builds the type dump into a
+    local + (mode 0) writes it to `result` else (mode 1) writes `dump_moves(ctx)`.
+    `main` calls `run(0)`; `borrow.sentinel` is ~10 lines (`use types::run; run(inp, 1,
+    &mut result)`). The D.6 chain borrow→types→parser compiles + runs leak-free — sidesteps
+    the by-value-struct-return question entirely.
+  - **⚠ TWO move-classification corrections from the oracle** (the rest of A1 held): (i)
+    **BUILTIN call args are NON-consuming** (`len`/`push`/`vec_to_array`/`print` borrow or
+    don't move their args) — only USER-fn args consume, gated by `argcons = fid >= 14` in
+    the Call arm; (ii) a **`match` SCRUTINEE is NOT a move** (it's read/inspected — the
+    oracle never records it), so the scrutinee walks with `consuming = false` (the arms
+    still inherit the match's own consuming context, so a returned arm-payload still
+    moves). The `consuming` save/restore lives at ~14 sites; the Var arm records iff
+    `consuming && is_move_type(env[vid])`; `curfn` (set in `type_fn` only) keeps method
+    bodies out of the dump (methods aren't in `program.fns`).
+  - ⚠ idioms confirmed: the move-recording fused cleanly into the typer's walk with ZERO
+    change to the type dump (a `bool` field + a side-table); the conservative branch-merge
+    needs no per-path state (a plain union); the 3-deep D.6 reuse + `run`-with-`mode` is
+    the template for the next back-half stages. **NEXT: (7/N) — HIR/MIR → codegen** (the
+    transform half + the bootstrap fixed-point; its own kickoff ADR, reusing `types::run`'s
+    typed-program foundation).
 
 ## Decision
 

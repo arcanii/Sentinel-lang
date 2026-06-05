@@ -1861,51 +1861,38 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 
 ### 0.3 Quick-status block for session start
 
-> **NEXT = (6/N) BORROW-CHECK — the `types.sentinel`→library refactor, then
-> `borrow.sentinel`.** **(6/N) is OPEN — ADR 0043 PROPOSED; the `snc borrow` oracle has
-> landed (`4ef657d`).** The port has **lexer + parser + resolve + types + effect-check**
-> all done + ACCEPTED (effect-check (5/N), ADR 0042, this session: `selfhost/effects.sentinel`
-> matches `snc effects` on 122/122 clean-effect fixtures — self-contained, i64-bitmask
-> effect rows, a precompute walk + the rebuild-per-sweep recursive fixed-point; the
-> Call-vs-kont split fell out of a fn-table miss, no scope needed).
+> **NEXT = (7/N) HIR/MIR → codegen — the TRANSFORM HALF (its own kickoff ADR).** **The
+> BORROW-CHECK stage (6/N, ADR 0043) is COMPLETE — ADR 0043 → ACCEPTED.**
+> `selfhost/borrow.sentinel` matches `snc borrow` byte-for-byte over the ENTIRE
+> clean-borrow corpus — **123/123 fixtures**
+> (`sentinel_borrow_checker_matches_oracle_on_corpus`, the D8 phase-go) + 5 seeds,
+> leak-free; `snc types` stays byte-identical. **The port now has lexer + parser +
+> resolve + types + effect-check + borrow-check — the WHOLE FRONT END + both analysis
+> passes**, each differentially validated against the Rust `snc`.
 >
-> **(6/N) borrow-check (owner-chosen over the transform half) is the BACK-HALF
-> INFLECTION:** unlike the self-contained front-end stages, it needs the **FULL typed
-> program** (its move analysis classifies every value Copy-vs-Move via the expr's type).
-> **The owner chose to REUSE `types.sentinel`** (refactor it to a reusable typed-program
-> library) over re-deriving inference. The output to port is the **`DropPlan.moved_sources`**
-> (per fn, the moved-from VarIds — codegen's drop-skip set); the `BorrowError`s are
-> rejections, OUT OF SCOPE (D5/D7, as always). The `snc borrow` oracle dumps
-> `(fn #<id> <name> #<vid>…)` per fn, exits nonzero on any error → skip rejects;
-> **123 clean-borrow fixtures** (= the full type-clean set; no borrow-error fixtures) are
-> the (6b) phase-go target. 4 goldens (`tests/borrow.rs`).
+> **(6/N) this session** (ADR 0043) was the **back-half inflection** + the FIRST stage to
+> REUSE a prior one. borrow-check needs the full typed program (Copy/Move per binding), so
+> the move analysis is **fused into the typer's pass-2 walk** (a TyCtx `consuming: bool`
+> save/restore flag — false at receivers/borrows/conditions/match-scrutinee, true at
+> user-fn/construct/method args + let-RHS; the `Var` arm records iff `consuming &&
+> is_move_type(env[vid])`); `snc types` stays byte-identical (the recording is a pure
+> side-effect). `types.sentinel`'s `main` → **`pub fn run(src, mode, result)`** (mode 0 =
+> the type dump, mode 1 = `dump_moves`); `borrow.sentinel` is ~10 lines reusing
+> `types::run` via a D.6 chain (borrow→types→parser). ⚠ oracle-revealed: **builtin args
+> are non-consuming** (only user-fn args move, `argcons = fid>=14`); **a match scrutinee
+> is not a move**; the branch-merge is a plain UNION (no per-path state).
 >
-> **DO NEXT, in order (per ADR 0043 D3/D4/D6):**
-> **The D3 design is now SETTLED — ADR 0043 A1 (the precise build plan; FUSE, lean a).**
-> Read A1 before building. The move-recording FUSES into types' `dump_texpr` walk (a
-> `Var`'s VarId + match/handler-arm binds are only live during that walk) via a TyCtx
-> **`consuming: bool`** field with SAVE/RESTORE at the ~12 positions that change it (FALSE
-> at field/index/method receivers + `&`/`&mut`/`*` operands + conditions; TRUE at args /
-> let-RHS / match-scrutinee; INHERIT at branches/tails/bodies); the `Var` arm records the
-> move iff `consuming && is_move_type(env[vid])` (Move = array/struct/enum/class/tparam/
-> generic/Vec; Copy = scalars/ref/Task, secret/nullable follow their inner). **`dump_texpr`
-> is otherwise untouched → `snc types` stays byte-identical by construction** (the recording
-> is a pure side-effect). DO IN ORDER:
-> 1. **(6a-i)** add the move computation to `types.sentinel` (the `consuming` field +
->    `curfn` [set in `type_fn` only — methods aren't in `program.fns`] + `is_move_type` +
->    `record_move` into `mvf`/`mvv` + the save/restore sites) → verify
->    `sentinel_typer_matches_oracle_on_corpus` **123/123 byte-identical** + leak-free.
-> 2. **(6a-ii)** refactor `types.sentinel`'s `main` → a `pub fn build_program(…) -> TyCtx`
->    (running the pipeline, filling the ctx incl. the type-dump buffer as a new `out` field
->    + `mvf`/`mvv`); `main` calls it + prints `c.out` (re-verify 123/123). ⚠ probe that a
->    by-value `TyCtx` return works.
-> 3. **(6b) `selfhost/borrow.sentinel`** (3-deep `use`: borrow→types→parser) = thin:
->    `let c = build_program(…); print(dump_moves(c))` → `(fn #<id> <name> #<vid>…)`; then
->    the phase-go `sentinel_borrow_checker_matches_oracle_on_corpus` (D8, 123 fixtures) →
->    ADR 0043 ACCEPTED.
->
-> Build/run/leak via `/tmp/tb` (stage `parser.sentinel` + `types.sentinel` +
-> `borrow.sentinel`; diff vs `snc borrow`). The four norms are unchanged (below).
+> **(7/N) is the TRANSFORM HALF — a fresh stage, its own kickoff ADR (the cadence).** Per
+> ADR 0038 D5 what remains is **HIR/MIR → codegen** (HIR thin at 101 lines, MIR 1134,
+> codegen 8263 — the lowering toward the object + the **bootstrap fixed-point**). It's a
+> different SHAPE than the analysis passes (it TRANSFORMS, not just dumps a computed set),
+> so the (7/N) kickoff needs: (1) the right `snc <stage>` ORACLE (a `snc mir` lowered-form
+> dump? or drive toward `snc build` object parity?), (2) the data model, (3) whether to go
+> MIR-first or straight at codegen. ⚠ It REUSES the typed program — the **`types::run`
+> with-`mode` template** (6/N) is the foundation (add a mode / a new reusing stage). The
+> pick (MIR vs codegen, oracle shape) is a genuine call — **decide with the owner**, as
+> (5/N)/(6/N) were. Clean stage boundary, no in-flight slice. `/tmp/tb` build/run/leak +
+> the four norms unchanged (below).
 
 For pasting into a fresh chat to bootstrap context:
 
