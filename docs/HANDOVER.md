@@ -1920,13 +1920,25 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 > any `[u8]` arg by value (simpler than MIR's render-to-local-then-fold). `type_fn` emits the
 > define header + param allocas + ret/`}` (main → i32-trunc via `cg_is_main`); `emit_tparams`
 > reserves param slots; `dump_targs` collects call args (`cg_collect`). **NO phi** — alloca/
-> load/store. ⚠ bind-inner-first bit once (`cgo_ty(c, (*c).cgat[i])` re-borrows c). **NEXT =
-> (8b) control flow** — `if`/`else` (br + a memory-cell merge, NO phi), `while`/`break`/
-> `continue` (the real loop CFG + back-edge + the ADR 0036 alloca hoist), short-circuit
-> `&&`/`||`. ⚠ The behavioural test rebuilds each emitted fixture twice — sample/cache as the
-> subset grows (~8d/8e). Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT;
-> Bar B 8h–8l → full corpus → ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak + the four norms
-> unchanged (below).
+> load/store. ⚠ bind-inner-first bit once (`cgo_ty(c, (*c).cgat[i])` re-borrows c).
+>
+> **✅ (8b) CONTROL FLOW COMPLETE (ADR 0045 A3; `c76db27` 8b-1 + `7b33d49` 8b-2):** if/else +
+> while/break/continue + short-circuit `&&`/`||`, byte-identical to `snc llvm` (26/26 emitted)
+> + behavioural (cc==inkwell) + leak-free; modes 0–3 byte-identical. 🔑 THE ALLOCA HOIST (8b-1)
+> is the foundational refactor — every alloca (params/lets/if-results) is hoisted to the entry
+> block, solving BOTH the if-result's late-known type (the parser AST has no precomputed types,
+> so the slot is reserved after the then walk) AND ADR 0036 per-iteration loop-stack growth.
+> codegen.sentinel buffers the body in `cgbody` + records allocas as (slot,type) pairs + a
+> `cg_putc` router (`cg_to_body`) sends emission to cgbody (walk) vs cgout (teardown assembly:
+> header + hoisted allocas + folded body + ret); the (8a) helpers' 29 cgout pushes were routed
+> through `cg_putc`. if/else + `&&`/`||` are no-phi memory-cell merges; while is the real loop
+> CFG (back-edge + a loop-target stack `cg_loop_cond`/`cg_loop_after` + a dead-block after
+> break/continue). **NEXT = (8c) aggregates** — structs (lit + field GEP), arrays (lit + index
+> + bounds-check), `[u8]`/string literals. Then (8d) Vec + builtins + drops → (8e) enums/match
+> → (8f) calls/recursion/multi-module → **(8g) the bootstrap fixed-point**. ⚠ The behavioural
+> test rebuilds each emitted fixture twice (~25s at 26) — sample/cache as the subset grows
+> (~8d/8e). Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT; Bar B 8h–8l →
+> full corpus → ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak + the four norms unchanged (below).
 >
 > **(7/N) recap** (ADR 0044, A1–A5) reused `types.sentinel` via `types::run`-with-`mode`:
 > `mode 2` builds + dumps the MIR (a FUSED `if mir_on(c)` side-build of the pass-2 walk +
@@ -2045,11 +2057,19 @@ For pasting into a fresh chat to bootstrap context:
     1:1 (cgout + cglk/cglv≈lastval + cgsv/cgsr slot-pool≈var_defs + value counter; `mir_on`→2/3,
     `cg_on`=4). 🔑 KEY: the "no `&mut (*c).field` to a USER fn" rule is sidestepped by
     direct-to-`cgout` helpers using the BUILTIN `push` + consuming `[u8]` args by value (simpler
-    than MIR's render-to-local-then-fold; NO phi — alloca/load/store). **NEXT = (8b) control
-    flow** — `if`/`else` (br + a memory-cell merge, NO phi), `while`/`break`/`continue` (the real
-    loop CFG + back-edge + the ADR 0036 alloca hoist), `&&`/`||`. Sub-slices 8a–8l in ADR 0045
-    D10 (Bar A 8a–8g → the FIXED-POINT (8g); Bar B 8h–8l → full corpus → ADR 0045 ACCEPTED).
-    No in-flight slice.
+    than MIR's render-to-local-then-fold; NO phi — alloca/load/store). **✅ (8b) CONTROL FLOW
+    COMPLETE (ADR 0045 A3; `c76db27` 8b-1 + `7b33d49` 8b-2):** if/else + while/break/continue +
+    `&&`/`||`, byte-identical to `snc llvm` (26/26 emitted) + behavioural (cc==inkwell) +
+    leak-free; modes 0–3 byte-identical. 🔑 THE ALLOCA HOIST (8b-1): every alloca is hoisted to
+    the entry block (solves the if-result's late-known type — the parser AST has no precomputed
+    types — AND ADR 0036 loop-stack growth); codegen.sentinel buffers the body in `cgbody`,
+    records allocas as (slot,type) pairs, + a `cg_putc` router (cg_to_body → cgbody walk / cgout
+    teardown). if/else + `&&`/`||` = no-phi memory-cell merges; while = the real loop CFG (a
+    loop-target stack + a dead block after break/continue). **NEXT = (8c) aggregates** (structs +
+    field GEP, arrays + index + bounds-check, `[u8]`/strings) → (8d) Vec+builtins+drops → (8e)
+    enums/match → (8f) calls/multi-module → **(8g) the bootstrap fixed-point**. Sub-slices 8a–8l
+    in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT (8g); Bar B 8h–8l → full corpus → ADR 0045
+    ACCEPTED). No in-flight slice.
 
     KEY REUSABLE FINDINGS (carry forward):
     - The back-half stages REUSE the typed program (they can't cheaply re-derive it).

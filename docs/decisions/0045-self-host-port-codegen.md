@@ -183,6 +183,51 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     `while`/`break`/`continue` (the real loop CFG + back-edge + the ADR 0036 alloca hoist),
     short-circuit `&&`/`||`. ⚠ The behavioural-test scaling note (A1) still stands.
 
+- **A3 — (8b) CONTROL FLOW COMPLETE** (`c76db27` 8b-1 hoist + if/else; `7b33d49` 8b-2
+  while + `&&`/`||`). Codegen now lowers the full non-aggregate control-flow grammar,
+  byte-identical to `snc llvm` over the corpus (`sentinel_codegen_matches_oracle_on_corpus`,
+  **26/26 emitted**) + 6 control-flow seeds + 2 new goldens (if/else, while-CFG),
+  behaviourally correct (`cc`-run == inkwell) and leak-free; modes 0–3 byte-identical.
+  - **THE ALLOCA HOIST (8b-1) — the foundational refactor.** Every alloca (params,
+    `let`s, if-results) is HOISTED to the entry block. This solves two problems at once:
+    (a) the if-result slot's type is known only AFTER its then-branch is walked (the parser
+    AST has no precomputed types, unlike the Rust `then_branch.ty`), yet the slot must
+    dominate both arm stores + the merge load — so it can't be emitted inline; (b) a
+    loop-body `let`'s alloca must not re-run per iteration (ADR 0036). **Oracle:** `Emit`
+    gained an `allocas` buffer + a `block` counter; `alloca()` emits there; `dump_fn`
+    assembles header + entry + allocas + body. **codegen.sentinel:** the body is buffered
+    in a new `cgbody` field; allocas are recorded as `(slot,type)` pairs
+    (`cgalloca_sl`/`cgalloca_ty`); a **`cg_putc` router** (`cg_to_body`) sends emission to
+    cgbody during the walk and to cgout at teardown; `cg_emit_fn` assembles header + hoisted
+    allocas + folded body + ret. The (8a) helpers' 29 cgout pushes were routed through
+    `cg_putc` (a `perl` replace_all + the new router). ⚠ Named values (`%vN`) may be defined
+    out of numeric order across blocks (a hoisted `%v5` alloca in `entry` while `%v3`/`%v4`
+    are in a later block) — valid LLVM (names, not implicit numbering); `cc` accepts it.
+  - **if/else (8b-1):** a conditional `br` into then/else blocks (labels `bbN` via the
+    block counter), each storing its value into the hoisted result slot, then a merge block
+    that loads it. The result slot is reserved AFTER the then walk (type `tt` known), so
+    both sides number it identically. **NO phi** — the 7/N MIR `var_defs`-merge muscle is
+    not used; memory cells carry the merge.
+  - **while/break/continue (8b-2):** the loop CFG — `br` to the cond block (the back-edge
+    target), cond branches to body/after, the body branches back. `break`→the innermost
+    loop's after block, `continue`→its cond block, via a loop-target stack
+    (`cg_loop_cond`/`cg_loop_after`, pushed around the body walk). After a break/continue
+    `br`, a fresh **dead block** is opened so trailing source-block code has a home (LLVM
+    discards it — no live preds). Loop-body allocas are hoisted by the 8b-1 mechanism (no
+    per-iteration growth).
+  - **`&&`/`||` (8b-2):** short-circuit, no phi — branch on the left BEFORE the right walk
+    so the right operand emits INTO the rhs block (the MIR mode-2 fork structure); the rhs
+    block stores the right value, the short block stores the constant (false `&&` / true
+    `||`), the merge loads the i1. Lives in the Binary arm (bop 14/15), split across a
+    pre-rhs fork hook + a post-rhs merge hook (the cg block locals span both). The Rust
+    inkwell `lower_logic_and/or` use `phi`; the canonical spec uses the memory-cell form
+    (consistent with if; behaviourally identical).
+  - **NEXT = (8c) aggregates** — structs (lit + field GEP), arrays (lit + index + bounds
+    check), `[u8]`/string literals. Then (8d) Vec + builtins + drops, (8e) enums/match,
+    (8f) calls/recursion/multi-module, **(8g) the bootstrap fixed-point**. ⚠ The
+    behavioural test rebuilds each emitted fixture twice (~25s at 26) — sample/cache it
+    around (8d)/(8e) as the subset grows.
+
 ## Decision
 
 ### D1. Goal.

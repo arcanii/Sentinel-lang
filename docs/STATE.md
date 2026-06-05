@@ -97,10 +97,18 @@ byte-for-byte (`sentinel_codegen_matches_oracle_on_corpus`, 16/16 emitted), leak
 operand ≈ lastval + cgsv/cgsr slot pool ≈ var_defs + value counter; `mir_on`→2/3 only, `cg_on`
 =4). 🔑 KEY FINDING: the A2 "no `&mut (*c).field` to a user fn" rule is sidestepped by
 direct-to-`cgout` helpers using the BUILTIN `push` + consuming `[u8]` args by value (simpler
-than MIR's render-to-local-then-fold; NO phi — alloca/load/store). NEXT = **(8b) control flow**
-(if/while/break/continue + `&&`/`||` → br + memory-cell merge, NO phi; the real loop CFG +
-back-edge + the ADR 0036 alloca hoist). The kickoff ADR's own line below was the prior NEXT
-pointer (now superseded).
+than MIR's render-to-local-then-fold; NO phi — alloca/load/store). **✅ (8b) CONTROL FLOW
+COMPLETE (ADR 0045 A3; `c76db27` 8b-1 + `7b33d49` 8b-2):** if/else (br + a memory-cell merge,
+NO phi) + while/break/continue (the real loop CFG + back-edge + a loop-target stack + a
+dead-block-after-divergence) + short-circuit `&&`/`||` — byte-identical to `snc llvm` (26/26
+emitted) + behavioural (cc==inkwell) + leak-free; modes 0–3 byte-identical. 🔑 THE ALLOCA HOIST
+(8b-1) is the foundational refactor: every alloca (params/lets/if-results) is hoisted to the
+entry block — solving both the if-result's late-known type (the parser AST has no precomputed
+types) AND ADR 0036 per-iteration loop-stack growth; codegen.sentinel buffers the body in
+`cgbody` + records allocas as (slot,type) pairs + a `cg_putc` router (cg_to_body) sends emission
+to cgbody (walk) vs cgout (teardown assembly: header + hoisted allocas + folded body + ret).
+NEXT = **(8c) aggregates** (structs + field GEP, arrays + index + bounds-check, `[u8]`/strings).
+The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
 codegen reads the `TypedProgram` directly via `hir.program()`), and **codegen is the real
