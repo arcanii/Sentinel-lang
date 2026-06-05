@@ -40,9 +40,20 @@ in mode 1) match `snc borrow` byte-for-byte over the ENTIRE clean-borrow corpus
 (**123/123 fixtures**, `sentinel_borrow_checker_matches_oracle_on_corpus`), leak-free,
 `snc types` byte-identical. ⚠ builtin args are non-consuming + a match scrutinee is not a
 move (oracle-revealed). The port now has **lexer+parser+resolve+types+effect-check+
-borrow-check** all done — the whole FRONT END + both analysis passes. NEXT = **(7/N)
-HIR/MIR → codegen** (the transform half + the bootstrap fixed-point). Types is the
-**biggest/hardest
+borrow-check** all done — the whole FRONT END + both analysis passes. **▶ (7/N) MIR + the
+CONSTANT-TIME VERIFIER OPENED — ADR 0044 PROPOSED (owner-chosen over codegen-first).** The
+back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
+identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
+codegen reads the `TypedProgram` directly via `hir.program()`), and **codegen is the real
+transform** (→ a separate **8/N**, where Sentinel's lack of LLVM FFI forces an
+emission-target call). So **(7/N) = the LAST analysis pass** (the 4th typed-program gate:
+types→effect→borrow→**const-time**): port `lower_to_mir` (→ a minimal SSA/CFG IR) +
+`verify_constant_time` (the secret-leak gate); oracle = a new `snc mir` lowered-form dump
+(the load-bearing differential — the verifier is near-empty on clean fixtures); reuses the
+6/N `types::run`-with-`mode` template (a new `mode 2`); a ⅛-scale rehearsal of codegen's
+SSA/branch-merge transform. ⚠ the data-model risk = `var_defs` (`VarId→MirValue`) is
+index-assigned in Rust → use the resolve append-only-scope idiom (D4). NEXT-after = **(8/N)
+codegen + the bootstrap fixed-point.** Types is the **biggest/hardest
 port stage** (the Rust `sentinel-types` is **10,891 lines, ~1.8× resolve**: HM-ish
 inference, method/trait dispatch, secret-type propagation, match exhaustiveness;
 effect-check is a SEPARATE crate, out of scope). **`selfhost/types.sentinel`, the

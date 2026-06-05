@@ -1861,8 +1861,10 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 
 ### 0.3 Quick-status block for session start
 
-> **NEXT = (7/N) HIR/MIR → codegen — the TRANSFORM HALF (its own kickoff ADR).** **The
-> BORROW-CHECK stage (6/N, ADR 0043) is COMPLETE — ADR 0043 → ACCEPTED.**
+> **NEXT = (7a) — MIR + the const-time verifier; ADR 0044 PROPOSED (kickoff WRITTEN,
+> owner-chosen this session over codegen-first). Resume at (7a): the `snc mir` oracle + the
+> SSA data-model PROBE + straight-line lowering (ADR 0044 D8).** **The BORROW-CHECK stage
+> (6/N, ADR 0043) is COMPLETE — ADR 0043 → ACCEPTED.**
 > `selfhost/borrow.sentinel` matches `snc borrow` byte-for-byte over the ENTIRE
 > clean-borrow corpus — **123/123 fixtures**
 > (`sentinel_borrow_checker_matches_oracle_on_corpus`, the D8 phase-go) + 5 seeds,
@@ -1882,17 +1884,26 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 > are non-consuming** (only user-fn args move, `argcons = fid>=14`); **a match scrutinee
 > is not a move**; the branch-merge is a plain UNION (no per-path state).
 >
-> **(7/N) is the TRANSFORM HALF — a fresh stage, its own kickoff ADR (the cadence).** Per
-> ADR 0038 D5 what remains is **HIR/MIR → codegen** (HIR thin at 101 lines, MIR 1134,
-> codegen 8263 — the lowering toward the object + the **bootstrap fixed-point**). It's a
-> different SHAPE than the analysis passes (it TRANSFORMS, not just dumps a computed set),
-> so the (7/N) kickoff needs: (1) the right `snc <stage>` ORACLE (a `snc mir` lowered-form
-> dump? or drive toward `snc build` object parity?), (2) the data model, (3) whether to go
-> MIR-first or straight at codegen. ⚠ It REUSES the typed program — the **`types::run`
-> with-`mode` template** (6/N) is the foundation (add a mode / a new reusing stage). The
-> pick (MIR vs codegen, oracle shape) is a genuine call — **decide with the owner**, as
-> (5/N)/(6/N) were. Clean stage boundary, no in-flight slice. `/tmp/tb` build/run/leak +
-> the four norms unchanged (below).
+> **(7/N) = the LAST ANALYSIS PASS — NOT the transform half (the scout REFRAMED it).** The
+> back-half scout found the handover's "HIR/MIR → codegen" is three different things: **HIR
+> is a no-op** (a 101-line identity bundle), **MIR is an analysis SIDE-BRANCH** (it feeds
+> ONLY `verify_constant_time`; `compile_to_object(hir)` reads the `TypedProgram` directly
+> via `hir.program()` — codegen IGNORES MIR, confirmed), and **codegen is the real
+> transform** (→ a separate **8/N**). So (7/N) ports `lower_to_mir` (TypedProgram → a
+> minimal SSA/CFG IR) + `verify_constant_time` (the secret-leak gate) — the 4th + final
+> typed-program gate (types→effect→borrow→**const-time**). **ADR 0044 (PROPOSED) settles
+> the plan:** oracle = a new **`snc mir` lowered-form dump** (the LOAD-BEARING differential
+> — the verifier is near-empty on clean fixtures, so the IR dump carries it); reuse = the
+> **6/N `types::run`-with-`mode` template** (a new `mode 2`; `mir.sentinel` is thin); data
+> model = parallel-Vec SSA (⚠ `var_defs` `VarId→MirValue` is index-assigned in Rust → use
+> the resolve append-only-scope idiom; the `if`/`&&`/`||` branch-merge is the central new
+> muscle + a ⅛-scale codegen rehearsal). **The (7a) PROBE — twin-walk vs fused `mode 2` +
+> the `var_defs` SSA model — is the de-risk gate; settle it + re-verify `snc types`/`snc
+> borrow` 123/123 byte-identical BEFORE lowering logic** (the 0043 A1 discipline).
+> Sub-slices (7a..7e) in ADR 0044 D8. Clean stage boundary, no in-flight slice. **8/N =
+> codegen + the bootstrap fixed-point** (its own ADR — Sentinel has no LLVM FFI, so emit
+> `.ll` via `write_file` + external `llc`/`clang`; the oracle likely shifts to behavioural
+> run-parity). `/tmp/tb` build/run/leak + the four norms unchanged (below).
 
 For pasting into a fresh chat to bootstrap context:
 
@@ -1901,12 +1912,13 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect **a76b8b0** ("docs(selfhost): ADR 0043 A2 —
-    (6/N) borrow-check COMPLETE; ADR 0043 ACCEPTED"), atop the (6/N) borrow feat
-    (`d21910d`) + the `snc borrow` oracle (`4ef657d`) + ADR 0043 (`09dc4e2`/`7782061`).
-    Clean tree; four-check green (cargo build + `cargo nextest run --workspace` +
-    `cargo test --doc --workspace` + `cargo clippy --workspace --all-targets -- -D
-    warnings`); **1435 tests**. macOS + LLVM 18.
+    Verify HEAD with `git log -1` — expect the **ADR 0044 PROPOSED** docs commit
+    ("docs(selfhost): ADR 0044 PROPOSED — (7/N) MIR + const-time verifier kickoff"), atop
+    the (7/N) handover refresh (`8d6a548`) + the (6/N) borrow stage (ADR 0043 ACCEPTED:
+    `a76b8b0`/`d21910d`/`4ef657d`). Clean tree; four-check green (cargo build + `cargo
+    nextest run --workspace` + `cargo test --doc --workspace` + `cargo clippy --workspace
+    --all-targets -- -D warnings`); **1435 tests** (no code yet — (7/N) is docs-only so
+    far: the kickoff ADR). macOS + LLVM 18.
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
     + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR
@@ -1914,17 +1926,30 @@ For pasting into a fresh chat to bootstrap context:
     ported, each matching its `snc <stage>` oracle byte-for-byte over the corpus,
     leak-free: `snc lex`/`ast`/`resolve`/`types` (123/123) / `effects` (122/122) /
     `borrow` (123/123). selfhost/ has lexer.sentinel, parser.sentinel, resolve.sentinel,
-    types.sentinel, effects.sentinel, borrow.sentinel.
+    types.sentinel, effects.sentinel, borrow.sentinel. **▶ (7/N) MIR + the const-time
+    verifier OPENED — ADR 0044 PROPOSED (owner-chosen over codegen-first); no code yet.**
 
-    NEXT = **(7/N) the TRANSFORM HALF — HIR/MIR → codegen** (+ the bootstrap
-    fixed-point). This is a fresh stage with its own kickoff ADR (the 0039–0043
-    cadence), and a DIFFERENT shape than the analysis passes: it TRANSFORMS toward the
-    object rather than dumping a computed set. ⚠ The (7/N) kickoff is a genuine
-    sequencing/design call — **DECIDE WITH THE OWNER** (as 5/N/6/N were): (1) the right
-    `snc <stage>` ORACLE (a `snc mir` lowered-form dump vs driving toward `snc build`
-    object parity), (2) the Sentinel data model, (3) MIR-first vs straight at codegen
-    (HIR is thin = 101 lines / MIR 1134 / codegen 8263 in crates/). Do the scouting,
-    recommend, ASK, then write the kickoff ADR. Clean stage boundary; no in-flight slice.
+    NEXT = **(7a) — build the `snc mir` oracle + run the SSA data-model PROBE + land
+    straight-line lowering** (ADR 0044 D8). The back-half scout REFRAMED the handover's
+    "HIR/MIR → codegen": **HIR is a no-op** (101-line identity bundle), **MIR is an
+    analysis SIDE-BRANCH** (feeds ONLY `verify_constant_time`; `compile_to_object` reads
+    the `TypedProgram` directly — codegen IGNORES MIR), **codegen is the real transform**
+    (→ a separate **8/N**). So **(7/N) = the LAST analysis pass**: port `lower_to_mir`
+    (→ a minimal SSA/CFG IR) + `verify_constant_time` (the secret-leak gate). ADR 0044
+    settles: oracle = a new **`snc mir` lowered-form dump** (`run_mir` + `mir_dump.rs`,
+    mirroring `borrow_dump.rs`; the LOAD-BEARING differential — the verifier is near-empty
+    on clean fixtures); reuse = the **6/N `types::run`-with-`mode` template** (a new `mode
+    2`; `mir.sentinel` thin via a D.6 chain mir→types→parser); data model = parallel-Vec
+    SSA — ⚠ `var_defs` (`VarId→MirValue`) is index-assigned in Rust → the resolve
+    append-only-scope idiom; the `if`/`&&`/`||` branch-merge (the `var_defs` snapshot +
+    VarId-sorted merge params) is the central new muscle + a ⅛-scale codegen rehearsal.
+    ⚠ **(7a) is PROBE-GATED:** settle twin-walk vs fused `mode 2` + the `var_defs` SSA
+    model in miniature, and re-verify `snc types`/`snc borrow` **123/123 byte-identical**,
+    BEFORE lowering logic (the 0043 A1 discipline). ⚠ MIR value/block numbering is a NEW
+    byte-for-byte ordering obligation (mirror the Rust `new_value`/`new_block` order).
+    Sub-slices 7a..7e in ADR 0044 D8. **8/N = codegen** + the bootstrap fixed-point (its
+    own ADR — no LLVM FFI → `.ll` via `write_file` + external link; behavioural oracle).
+    Clean stage boundary; no in-flight slice.
 
     KEY REUSABLE FINDINGS (carry forward):
     - The back-half stages REUSE the typed program (they can't cheaply re-derive it).
@@ -1958,10 +1983,13 @@ For pasting into a fresh chat to bootstrap context:
     full-leak-sweep every match.
 
     READ FIRST: docs/STATE.md top banner + docs/HANDOVER.md §0.1 (working norms) + §0.3
-    (quick-status — the (7/N) NEXT block at the top) + docs/decisions/0043-self-host-
-    port-borrow-check.md (the just-closed stage; A1+A2 = the reuse template) +
-    docs/decisions/0038-self-host-port-lexer.md (the port's spine) + docs/agent-protocol.md
-    + auto-memory `sentinel_selfhost_port`.
+    (quick-status — the (7/N) NEXT block at the top) + **docs/decisions/0044-self-host-
+    port-mir.md (the (7/N) kickoff — the build plan: D2 oracle, D3 reuse-probe, D4 data
+    model, D8 sub-slices)** + docs/decisions/0043-self-host-port-borrow-check.md (the
+    reuse template A1+A2) + docs/decisions/0026-hir-mir-pipeline-and-constant-time-secret-
+    codegen.md (the MIR/const-time DESIGN being ported) + docs/decisions/0038-self-host-
+    port-lexer.md (the port's spine) + docs/agent-protocol.md + auto-memory
+    `sentinel_selfhost_port`.
 
     NORMS (HARD): never git push (dev pushes via GitHub Desktop); four-check green gates
     EVERY commit; feat+docs commit pairs per increment (docs = ADR amendment + STATE
