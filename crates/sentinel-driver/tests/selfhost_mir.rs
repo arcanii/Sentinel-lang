@@ -5,11 +5,13 @@
 //!
 //! (7a) covers the STRAIGHT-LINE grammar (const / var / unary / binop / cmp / `let`
 //! → one block + Return); (7b) adds CONTROL FLOW (`if` / `&&` / `||` → branch + a
-//! merge block whose params reconcile diverged vars, VarId-sorted); the `Opaque`
-//! catch-all + `Load` + calls are (7c), and the full-corpus phase-go
-//! (`sentinel_mir_matches_oracle_on_corpus`) is (7e). Fixtures the oracle rejects
-//! (parse/resolve/type errors) exit nonzero and are skipped — error parity is out of
-//! scope (ADR 0044 D7), as in every prior stage.
+//! merge block whose params reconcile diverged vars, VarId-sorted); (7c) adds the
+//! `Opaque` catch-all (struct/array/field/widen/char/string/null), `Load`
+//! (index/`*`-deref), `declassify`, and calls (plain + builtin/generic via the
+//! `mir_args` operand stack). The effect/class/enum forms + the full-corpus phase-go
+//! (`sentinel_mir_matches_oracle_on_corpus`) close (7c)/(7e). Fixtures the oracle
+//! rejects (parse/resolve/type errors) exit nonzero and are skipped — error parity is
+//! out of scope (ADR 0044 D7), as in every prior stage.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -71,6 +73,19 @@ const SEEDS: &[&str] = &[
     "fn nested(a: bool, b: bool) -> i64 { if a { if b { 1 } else { 2 } } else { 3 } }\nfn main() -> i64 { 0 }\n",
     "fn chain(a: bool, b: bool, cc: bool) -> bool { a && b || cc }\nfn main() -> i64 { 0 }\n",
     "fn two(c: bool, d: bool) -> i64 { let mut x = 0; let mut y = 10; if c { x = 1; 0 } else { y = 20; 0 }; x + y }\nfn main() -> i64 { 0 }\n",
+    // (7c) the Opaque catch-all + Load + calls: a plain call with args, a nested call, a
+    // struct-lit + field read, an array-lit + index, a `*`-deref load, a widen-to-nullable
+    // Opaque, declassify, a char/string Opaque, and generic/builtin calls (vec_new/push).
+    "fn id(x: i64) -> i64 { x }\nfn use_it(a: i64, b: i64) -> i64 { id(a) + id(b) }\nfn main() -> i64 { 0 }\n",
+    "fn add3(a: i64, b: i64, cc: i64) -> i64 { a + b + cc }\nfn nest(x: i64) -> i64 { add3(x, add3(x, x, x), x) }\nfn main() -> i64 { 0 }\n",
+    "struct P { x: i64, y: i64 }\nfn mk(a: i64, b: i64) -> P { P { x: a, y: b } }\nfn getx(p: P) -> i64 { p.x }\nfn main() -> i64 { 0 }\n",
+    "fn arr() -> [i64] { [1, 2, 3] }\nfn at(a: [i64], i: i64) -> i64 { a[i] / 2 }\nfn main() -> i64 { 0 }\n",
+    "fn deref(r: &i64) -> i64 { *r }\nfn main() -> i64 { 0 }\n",
+    "fn widen(x: i64) -> ?i64 { x }\nfn wb(b: i64) -> ?i64 { let y: ?i64 = b + 1; y }\nfn main() -> i64 { 0 }\n",
+    "fn unwrap(s: secret i64) -> i64 { declassify(s) }\nfn main() -> i64 { 0 }\n",
+    "fn ch() -> u8 { 'a' }\nfn st() -> [u8] { \"hi\" }\nfn main() -> i64 { 0 }\n",
+    "fn pushy(n: i64) -> [i64] { let mut v: Vec<i64> = vec_new(); push(&mut v, n); vec_to_array(v) }\nfn ln(a: [i64]) -> i64 { len(a) }\nfn main() -> i64 { 0 }\n",
+    "fn id<T>(x: T) -> T { x }\nfn use_g() -> i64 { id(5) }\nfn main() -> i64 { 0 }\n",
 ];
 
 #[test]

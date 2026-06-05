@@ -183,6 +183,15 @@ struct TyCtx {
     mvdv: Vec<i64>,   // var_defs (append-only): VarId
     mvdl: Vec<i64>,   // var_defs (append-only): current MirValue (paired with mvdv)
     mir_lastvid: i64, // the VarId the most-recent `Var` node resolved to (for assign)
+    // (7c) variadic-op operands (call / opaque). `margs` is a STACK the arg-list
+    // walkers push each child's MirValue onto; an emit copies margs[snap..] into the
+    // flat `miargs` pool (recording the per-inst slice mias/miae) + truncates margs.
+    margs: Vec<i64>,  // the operand-collection stack
+    mias: Vec<i64>,   // per-inst args slice start (into miargs); 0 for fixed-arity ops
+    miae: Vec<i64>,   // per-inst args slice end
+    miargs: Vec<i64>, // flat inst-args pool
+    mir_collecting: bool, // true while a variadic arm walks its args (gates the margs push,
+                          // so a shared arg-walker in a non-collecting context can't pollute)
     mirout: Vec<u8>,  // accumulated per-fn MIR dump (the mode-2 result)
 }
 
@@ -1657,6 +1666,7 @@ fn dump_targs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // (6/N) args INHERIT the caller's consuming context (the call arm sets it —
             // user-fn/construct args consume, builtin args do not).
             dump_texpr(out, x, 0 - 1, src, c, gb);
+            mir_collect(c);
             dump_targs(out, rest, src, c, gb)
         },
     }
@@ -1672,6 +1682,7 @@ fn dump_array_elems(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &
             push(out, ' ');
             // (6/N) the array arm sets consuming=true before this; elements inherit it.
             let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            mir_collect(c);
             dump_targs(out, rest, src, c, gb);
             t0
         },
@@ -1844,6 +1855,7 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, 
             // (6/N) generic-call args inherit the caller's consuming context (set true
             // by the user-fn call arm).
             let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            mir_collect(c);
             push(atys, t0);
             dump_args_capture_all(out, rest, src, c, gb, atys)
         },
@@ -2027,6 +2039,7 @@ fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx
         Args::Cell(x, rest) => {
             push(out, ' ');
             let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            mir_collect(c);
             dump_targs(out, rest, src, c, gb);
             t0
         },
@@ -2054,6 +2067,7 @@ fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, gen: bool, gargs: &Vec<i
             sink_name(gb, fnm);
             push(out, ' ');
             dump_texpr(out, fval, ftype, src, c, gb);
+            mir_collect(c);
             dump_sfields(out, rest, sid, gen, gargs, src, c, gb)
         },
     }
@@ -2212,6 +2226,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            mir_widen(c, w, exp);
             widen_post(out, w, exp, 0, c)
         },
         Expr::Bool(bv) => {
@@ -2235,6 +2250,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            mir_widen(c, w, exp);
             widen_post(out, w, exp, 2, c)
         },
         // (4c-3) `null` carries no syntactic type; its type IS the expectation `exp`
@@ -2242,6 +2258,15 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         Expr::Null => {
             append_str(out, "(null");
             close_ty(out, exp, c);
+            // (7c) MIR: `null` is a public constant -> Opaque (no operands), type `exp`.
+            if (*c).mode == 2 {
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit_opaque0(c, mc, exp);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
             exp
         },
         Expr::Var(nm) => {
@@ -2269,6 +2294,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            mir_widen(c, w, exp);
             widen_post(out, w, exp, ty, c)
         },
         Expr::Unary(uop, inner) => {
@@ -2310,17 +2336,28 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 it
             };
             close_ty(out, rt, c);
-            // (7/N) MIR: neg/not -> a unary inst (deref/ref are 7c — pass through).
+            // (7/N) MIR: `*p` (uop 3) -> a Load (op 5, no index; a secret pointer is the
+            // D5 leak); every other unary (- ! & &mut) -> a unary inst (op 2). One emit
+            // (a per-branch `let` would collide in the flat namespace).
             if (*c).mode == 2 {
-                if uop <= 2 {
-                    let mc: i64 = (*c).mir_cur;
-                    let d: i64 = mir_emit(c, mc, 2, uop, iv, 0, rt);
-                    (*c).lastval = d;
+                let mc: i64 = (*c).mir_cur;
+                let uo: i64 = if uop == 3 {
+                    5
+                } else {
+                    2
+                };
+                let us: i64 = if uop == 3 {
                     0
                 } else {
-                    (*c).lastval = iv;
+                    uop
+                };
+                let ub: i64 = if uop == 3 {
+                    0 - 1
+                } else {
                     0
                 };
+                let d: i64 = mir_emit(c, mc, uo, us, iv, ub, rt);
+                (*c).lastval = d;
                 0
             } else {
                 0
@@ -2478,6 +2515,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            let bw: bool = if (*c).mode == 2 {
+                widen_kind(c, exp, resty) != 0
+            } else {
+                false
+            };
+            mir_widen(c, bw, exp);
             widen_splice(out, tmp, exp, resty, c)
         },
         Expr::If(cnd, thn, els) => {
@@ -2652,6 +2695,23 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 let argcons: bool = fid >= 14;
                 let svf: bool = (*c).consuming;
                 (*c).consuming = argcons;
+                // (7c) MIR: ALL calls — plain, generic-builtin (len/push/vec_new/…), and
+                // generic-user — lower to a `call <name> <args>` (the Rust uses the
+                // signature name for every callee). The arg-list walkers collect the
+                // operand values while `mir_collecting` is set; the targs/inference in
+                // the dump path is orthogonal.
+                let cl_col: bool = (*c).mir_collecting;
+                if (*c).mode == 2 {
+                    (*c).mir_collecting = true;
+                    0
+                } else {
+                    0
+                };
+                let cl_snap: i64 = if (*c).mode == 2 {
+                    mir_margs_len(c)
+                } else {
+                    0
+                };
                 let rt: i64 = if is_generic_builtin(fid) {
                     dump_gcall(out, fid, ca, exp, src, c, gb)
                 } else if isgenfn {
@@ -2662,6 +2722,15 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 };
                 (*c).consuming = svf;
                 close_ty(out, rt, c);
+                if (*c).mode == 2 {
+                    (*c).mir_collecting = cl_col;
+                    let mc: i64 = (*c).mir_cur;
+                    let d: i64 = mir_emit_va(c, mc, 6, fid, cl_snap, rt);
+                    (*c).lastval = d;
+                    0
+                } else {
+                    0
+                };
                 rt
             }
         },
@@ -2677,6 +2746,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            mir_widen(c, w, exp);
             widen_post(out, w, exp, 0, c)
         },
         // (4c-1) struct literal — positional field VALUES in declaration order
@@ -2721,9 +2791,31 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // (6/N) struct-lit field values are CONSUMING (moved into the struct).
             let sl_svc: bool = (*c).consuming;
             (*c).consuming = true;
+            // (7c) MIR: collect the field values, then Opaque over them.
+            let sl_col: bool = (*c).mir_collecting;
+            if (*c).mode == 2 {
+                (*c).mir_collecting = true;
+                0
+            } else {
+                0
+            };
+            let sl_snap: i64 = if (*c).mode == 2 {
+                mir_margs_len(c)
+            } else {
+                0
+            };
             dump_sfields(out, fields, sid, sl_isg, &gargs, src, c, gb);
             (*c).consuming = sl_svc;
             close_ty(out, sty, c);
+            if (*c).mode == 2 {
+                (*c).mir_collecting = sl_col;
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit_va(c, mc, 7, 0, sl_snap, sty);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
             sty
         },
         // (4c-1) field access — `(field <target :Struct> name <field_index> :fty)`.
@@ -2736,6 +2828,11 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
             let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
+            let frecv: i64 = if (*c).mode == 2 {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
             (*c).consuming = svc;
             push(out, ' ');
             // The target is a struct, a generic-instance struct, or a class (a
@@ -2779,6 +2876,17 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             push(out, ' ');
             append_int(out, fidx);
             close_ty(out, fty, c);
+            // (7c) MIR: a field read funnels through Opaque (the receiver carried).
+            if (*c).mode == 2 {
+                let mc: i64 = (*c).mir_cur;
+                let snap: i64 = mir_margs_len(c);
+                mir_margs_push(c, frecv);
+                let d: i64 = mir_emit_va(c, mc, 7, 0, snap, fty);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
             fty
         },
         // (4c-2) array literal — `(array <e0> <e1>… :[T])`. The element type is
@@ -2789,10 +2897,32 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // (6/N) array elements are CONSUMING (moved into the array).
             let ar_svc: bool = (*c).consuming;
             (*c).consuming = true;
+            // (7c) MIR: collect the element values, then Opaque over them.
+            let ar_col: bool = (*c).mir_collecting;
+            if (*c).mode == 2 {
+                (*c).mir_collecting = true;
+                0
+            } else {
+                0
+            };
+            let ar_snap: i64 = if (*c).mode == 2 {
+                mir_margs_len(c)
+            } else {
+                0
+            };
             let ety: i64 = dump_array_elems(out, elems, src, c, gb);
             (*c).consuming = ar_svc;
             let aty: i64 = mk_array(c, ety);
             close_ty(out, aty, c);
+            if (*c).mode == 2 {
+                (*c).mir_collecting = ar_col;
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit_va(c, mc, 7, 0, ar_snap, aty);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
             aty
         },
         // (4c-2) postfix index — `(index <target :[T]> <index :i64> :T)`. The
@@ -2803,11 +2933,30 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
             let tty: i64 = dump_texpr(out, it, 0 - 1, src, c, gb);
+            let ibase: i64 = if (*c).mode == 2 {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
             push(out, ' ');
             dump_texpr(out, ii, 0 - 1, src, c, gb);
+            let iidx: i64 = if (*c).mode == 2 {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
             (*c).consuming = svc;
             let ety: i64 = array_elem_of(c, tty);
             close_ty(out, ety, c);
+            // (7c) MIR: `a[i]` is a Load (base + index — a secret index is the D5 leak).
+            if (*c).mode == 2 {
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit(c, mc, 5, 0, ibase, iidx, ety);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
             ety
         },
         // (4e) `Name::Variant(args)` / paren-less `Name::Variant`. If `Name` is an
@@ -2967,9 +3116,24 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let svc: bool = (*c).consuming;
             (*c).consuming = true;
             let it: i64 = dump_texpr(out, di, 0 - 1, src, c, gb);
+            let dinv: i64 = if (*c).mode == 2 {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
             (*c).consuming = svc;
             let rt: i64 = strip_secret(c, it);
             close_ty(out, rt, c);
+            // (7c) MIR: `declassify` is the one taint sink (op 8) — result is the
+            // non-secret view of the operand.
+            if (*c).mode == 2 {
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit(c, mc, 8, 0, dinv, 0, rt);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
             rt
         },
         // (4i) char literal `'c'` → `(char N :u8)` (the decoded byte value, ADR 0033 D2:
@@ -2979,6 +3143,16 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(out, "(char ");
             append_int(out, cv);
             close_ty(out, 3, c);
+            // (7c) MIR: a char literal is a public constant -> Opaque (no operands), u8.
+            if (*c).mode == 2 {
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit_opaque0(c, mc, 3);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
+            mir_widen(c, w, exp);
             widen_post(out, w, exp, 3, c)
         },
         // (4i) string literal `"…"` → `(str b0 b1 … :[u8])` (the decoded bytes, ADR 0033
@@ -2998,6 +3172,16 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             }
             sink_name(gb, sb);
             close_ty(out, saty, c);
+            // (7c) MIR: a string literal is a public constant -> Opaque (no operands), [u8].
+            if (*c).mode == 2 {
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit_opaque0(c, mc, saty);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
+            mir_widen(c, w, exp);
             widen_post(out, w, exp, saty, c)
         },
         // (4i) `scope concurrent { block }` → `(scope <block :T> :T)`: the scope's value
@@ -3015,8 +3199,22 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         Expr::Spawn(scall) => {
             append_str(out, "(spawn ");
             let spt: i64 = dump_texpr(out, scall, 0 - 1, src, c, gb);
+            let spv: i64 = if (*c).mode == 2 {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
             let tkt: i64 = mk_task(c, spt);
             close_ty(out, tkt, c);
+            // (7c) MIR: `spawn e` -> Opaque([e]) typed Task<U>.
+            if (*c).mode == 2 {
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit_opaque1(c, mc, spv, tkt);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
             tkt
         },
         // (4i) `<target>.await` → `(await <target :Task<U>> :U)`: await joins the task +
@@ -3024,8 +3222,22 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         Expr::Await(aw) => {
             append_str(out, "(await ");
             let awt: i64 = dump_texpr(out, aw, 0 - 1, src, c, gb);
+            let awv: i64 = if (*c).mode == 2 {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
             let awr: i64 = task_elem_of(c, awt);
             close_ty(out, awr, c);
+            // (7c) MIR: `t.await` -> Opaque([t]) typed U (the task's element).
+            if (*c).mode == 2 {
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit_opaque1(c, mc, awv, awr);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
             awr
         },
         // A defensive catch-all keeps the match exhaustive (no Expr variants remain).
@@ -4859,6 +5071,11 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         mvdv: vec_new(),
         mvdl: vec_new(),
         mir_lastvid: 0 - 1,
+        margs: vec_new(),
+        mias: vec_new(),
+        miae: vec_new(),
+        miargs: vec_new(),
+        mir_collecting: false,
         mirout: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();
@@ -5347,6 +5564,10 @@ fn mir_reset(c: &mut TyCtx) -> i64 {
     clear_i64(&mut (*c).mtj);
     clear_i64(&mut (*c).mvdv);
     clear_i64(&mut (*c).mvdl);
+    clear_i64(&mut (*c).margs);
+    clear_i64(&mut (*c).mias);
+    clear_i64(&mut (*c).miae);
+    clear_i64(&mut (*c).miargs);
     (*c).mir_nblk = 0;
     (*c).mir_cur = 0;
     (*c).lastval = 0 - 1;
@@ -5381,7 +5602,105 @@ fn mir_emit(c: &mut TyCtx, blk: i64, op: i64, sym: i64, a: i64, b: i64, ty: i64)
     push(&mut (*c).misym, sym);
     push(&mut (*c).mia, a);
     push(&mut (*c).mib, b);
+    push(&mut (*c).mias, 0);
+    push(&mut (*c).miae, 0);
     d
+}
+
+// (7c) a variadic inst (op 6 call / op 7 opaque): the operands are margs[snap..] —
+// copied into the flat `miargs` pool (recording the per-inst slice), then margs is
+// truncated back to `snap`. `fidsym` holds the callee FnId for a call (else 0).
+fn mir_emit_va(c: &mut TyCtx, blk: i64, op: i64, fidsym: i64, snap: i64, ty: i64) -> i64 {
+    let d: i64 = mir_new_value(c, ty);
+    let mas: i64 = len((*c).miargs);
+    let mn: i64 = len((*c).margs);
+    let mut i: i64 = snap;
+    while i < mn {
+        let av: i64 = (*c).margs[i];
+        push(&mut (*c).miargs, av);
+        i = i + 1;
+    }
+    let mae: i64 = len((*c).miargs);
+    while len((*c).margs) > snap {
+        let _x: i64 = pop(&mut (*c).margs);
+        0
+    }
+    push(&mut (*c).miblk, blk);
+    push(&mut (*c).midst, d);
+    push(&mut (*c).miop, op);
+    push(&mut (*c).misym, fidsym);
+    push(&mut (*c).mia, 0);
+    push(&mut (*c).mib, 0);
+    push(&mut (*c).mias, mas);
+    push(&mut (*c).miae, mae);
+    d
+}
+
+// (7c) push a child's MirValue onto the operand stack (called by the arg-list
+// walkers under mode 2); returns the stack depth BEFORE the push is irrelevant —
+// callers snapshot `len(margs)` themselves.
+fn mir_margs_push(c: &mut TyCtx, v: i64) -> i64 {
+    push(&mut (*c).margs, v);
+    0
+}
+
+// (7c) an Opaque with NO operands (a public constant: null / char / string lit).
+fn mir_emit_opaque0(c: &mut TyCtx, blk: i64, ty: i64) -> i64 {
+    let snap: i64 = len((*c).margs);
+    mir_emit_va(c, blk, 7, 0, snap, ty)
+}
+
+// (7c) an Opaque with ONE operand (a field read, a widen, spawn/await, …).
+fn mir_emit_opaque1(c: &mut TyCtx, blk: i64, a: i64, ty: i64) -> i64 {
+    let snap: i64 = len((*c).margs);
+    push(&mut (*c).margs, a);
+    mir_emit_va(c, blk, 7, 0, snap, ty)
+}
+
+fn mir_margs_len(c: &mut TyCtx) -> i64 {
+    len((*c).margs)
+}
+
+// (7c) push the just-walked child's MirValue onto the operand stack IFF a variadic
+// arm is collecting (called by the shared arg-list walkers after each element).
+fn mir_collect(c: &mut TyCtx) -> i64 {
+    if (*c).mode == 2 {
+        if (*c).mir_collecting {
+            let v: i64 = (*c).lastval;
+            push(&mut (*c).margs, v);
+            0
+        } else {
+            0
+        };
+        0
+    } else {
+        0
+    };
+    0
+}
+
+// (7c) at a widen site (`w` = the dump emitted a `(widen-* …)` wrapper), the MIR
+// adds an Opaque value wrapping the node's value, typed as `exp` — matching the
+// Rust's explicit `WidenToSecret`/`WidenToNullable` node (a dump-time wrapper here,
+// an IR node there, lowered to `Opaque([inner])`).
+fn mir_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
+    if (*c).mode == 2 {
+        if w {
+            let iv: i64 = (*c).lastval;
+            let mc: i64 = (*c).mir_cur;
+            let snap: i64 = mir_margs_len(c);
+            mir_margs_push(c, iv);
+            let d: i64 = mir_emit_va(c, mc, 7, 0, snap, exp);
+            (*c).lastval = d;
+            0
+        } else {
+            0
+        };
+        0
+    } else {
+        0
+    };
+    0
 }
 
 fn mir_term_return(c: &mut TyCtx, blk: i64, v: i64) -> i64 {
@@ -5613,7 +5932,21 @@ fn mir_put_bop(out: &mut Vec<u8>, bop: i64) -> i64 {
     0
 }
 
-fn mir_dump_inst(out: &mut Vec<u8>, c: &mut TyCtx, i: i64) -> i64 {
+// (7c) render a variadic inst's args slice (` v<arg>` each) from miargs[mias..miae].
+fn mir_dump_args(out: &mut Vec<u8>, c: &mut TyCtx, i: i64) -> i64 {
+    let s: i64 = (*c).mias[i];
+    let e: i64 = (*c).miae[i];
+    let mut j: i64 = s;
+    while j < e {
+        push(out, ' ');
+        let av: i64 = (*c).miargs[j];
+        mir_put_use(out, av);
+        j = j + 1;
+    }
+    0
+}
+
+fn mir_dump_inst(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], i: i64) -> i64 {
     push(out, '(');
     let d: i64 = (*c).midst[i];
     mir_put_def(out, c, d);
@@ -5648,13 +5981,41 @@ fn mir_dump_inst(out: &mut Vec<u8>, c: &mut TyCtx, i: i64) -> i64 {
         push(out, ' ');
         mir_put_use(out, b);
         0
-    } else {
+    } else if op == 4 {
         append_str(out, "cmp ");
         mir_put_bop(out, sym);
         push(out, ' ');
         mir_put_use(out, a);
         push(out, ' ');
         mir_put_use(out, b);
+        0
+    } else if op == 5 {
+        // load: base (a) + optional index (b, -1 = a `*p` deref).
+        append_str(out, "load ");
+        mir_put_use(out, a);
+        if b >= 0 {
+            push(out, ' ');
+            mir_put_use(out, b);
+            0
+        } else {
+            0
+        };
+        0
+    } else if op == 6 {
+        // call: callee name (the FnId is in `sym`) + the args slice.
+        append_str(out, "call ");
+        mir_put_callee(out, c, src, sym);
+        mir_dump_args(out, c, i);
+        0
+    } else if op == 8 {
+        // declassify: the one taint sink (operand in `a`).
+        append_str(out, "declassify ");
+        mir_put_use(out, a);
+        0
+    } else {
+        // opaque (op 7): just the operand args slice.
+        append_str(out, "opaque");
+        mir_dump_args(out, c, i);
         0
     };
     push(out, ')');
@@ -5716,7 +6077,7 @@ fn mir_dump_term(out: &mut Vec<u8>, c: &mut TyCtx, blk: i64) -> i64 {
     0
 }
 
-fn mir_dump_block(out: &mut Vec<u8>, c: &mut TyCtx, blk: i64) -> i64 {
+fn mir_dump_block(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], blk: i64) -> i64 {
     append_str(out, "(block b");
     append_int(out, blk);
     append_str(out, " (params");
@@ -5739,7 +6100,7 @@ fn mir_dump_block(out: &mut Vec<u8>, c: &mut TyCtx, blk: i64) -> i64 {
     while i < ni {
         if (*c).miblk[i] == blk {
             push(out, ' ');
-            mir_dump_inst(out, c, i);
+            mir_dump_inst(out, c, src, i);
             0
         } else {
             0
@@ -5752,6 +6113,49 @@ fn mir_dump_block(out: &mut Vec<u8>, c: &mut TyCtx, blk: i64) -> i64 {
     0
 }
 
+// (7c) render a call's callee name: a USER fn (FnId >= 14) from `ufs`/`ufe` via
+// `src`; else a builtin's fixed name (FnId 0..=13 — the resolve/runtime map).
+fn mir_put_callee(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], fid: i64) -> i64 {
+    if fid >= 14 {
+        let s: i64 = (*c).ufs[fid - 14];
+        let e: i64 = (*c).ufe[fid - 14];
+        append_slice(out, src, s, e);
+        0
+    } else {
+        let nm: [u8] = if fid == 0 {
+            "print"
+        } else if fid == 1 {
+            "unwrap_or"
+        } else if fid == 2 {
+            "is_some"
+        } else if fid == 3 {
+            "len"
+        } else if fid == 4 {
+            "str_eq"
+        } else if fid == 5 {
+            "u8_to_i64"
+        } else if fid == 6 {
+            "i64_to_u8"
+        } else if fid == 7 {
+            "vec_new"
+        } else if fid == 8 {
+            "push"
+        } else if fid == 9 {
+            "pop"
+        } else if fid == 10 {
+            "vec_to_array"
+        } else if fid == 11 {
+            "read_file"
+        } else if fid == 12 {
+            "write_file"
+        } else {
+            "print_bytes"
+        };
+        append_str(out, nm);
+        0
+    }
+}
+
 // Write one fn's MIR (`(fn <name> <ret-ty> <block>…)`) into `out`.
 fn mir_dump_fn(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> i64 {
     append_str(out, "(fn ");
@@ -5762,7 +6166,7 @@ fn mir_dump_fn(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], name_s: i64, name_e
     let mut b: i64 = 0;
     while b < nb {
         push(out, ' ');
-        mir_dump_block(out, c, b);
+        mir_dump_block(out, c, src, b);
         b = b + 1;
     }
     push(out, ')');
