@@ -1,0 +1,23 @@
+// selfhost/borrow.sentinel — the SIXTH Sentinel compiler stage (ADR 0043).
+//
+// Borrow-check's persistent output = the `DropPlan` = each fn's MOVED-SOURCE set (the
+// VarIds used in a consuming/move position whose type is non-Copy — codegen's
+// drop-skip set). This stage REUSES `types.sentinel` (the back-half "share the typed
+// program" foundation, ADR 0043 D3): the move analysis is computed as a side-pass
+// fused into the typer's pass-2 walk (it needs every binding's type for Copy/Move
+// classification), and `types::run(src, 1, result)` emits the moved-sources dump —
+// `(fn #<id> <name> #<vid>…)` — matching `snc borrow` byte-for-byte.
+//
+// (Module chain: borrow → types → parser; the D.6 merge follows the `use` edges.)
+
+use types::run;
+
+fn main() -> i64 {
+    let inp_path: [u8] = "input.sentinel";
+    let inp: [u8] = read_file(inp_path);
+    let mut result: Vec<u8> = vec_new();
+    run(inp, 1, &mut result);
+    let arr: [u8] = vec_to_array(result);
+    print_bytes(arr);
+    0
+}

@@ -149,6 +149,12 @@ struct TyCtx {
     gia: Vec<i64>,    // flat pool of generic-instance arg handles
     girs: Vec<i64>,   // per-record arg-slice start (into `gia`)
     gire: Vec<i64>,   // per-record arg-slice end (into `gia`)
+    // --- (6/N) borrow-check move analysis (ADR 0043 A1) — a side-pass fused into the
+    //     pass-2 walk: record each non-Copy `Var` used in a CONSUMING position. ---
+    consuming: bool,  // is the current walk position consuming (a move) vs a borrow/read?
+    curfn: i64,       // the top-level fn idx being typed (-1 outside a fn body → no record)
+    mvf: Vec<i64>,    // moved-source records: owner fn idx
+    mvv: Vec<i64>,    // moved-source records: the moved VarId (paired with `mvf`)
 }
 
 fn tbase() -> i64 { 100 }
@@ -1604,11 +1610,23 @@ fn close_ty(out: &mut Vec<u8>, ty: i64, c: &mut TyCtx) -> i64 {
     0
 }
 
+// (6/N) dump an arg list in a CONSUMING context (constructor / method / perform /
+// enum-construct args — moved into the callee). Sets `consuming` true around the args.
+fn dump_cargs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let svc: bool = (*c).consuming;
+    (*c).consuming = true;
+    dump_targs(out, a, src, c, gb);
+    (*c).consuming = svc;
+    0
+}
+
 fn dump_targs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match a {
         Args::End => 0,
         Args::Cell(x, rest) => {
             push(out, ' ');
+            // (6/N) args INHERIT the caller's consuming context (the call arm sets it —
+            // user-fn/construct args consume, builtin args do not).
             dump_texpr(out, x, 0 - 1, src, c, gb);
             dump_targs(out, rest, src, c, gb)
         },
@@ -1623,6 +1641,7 @@ fn dump_array_elems(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &
         Args::End => 0,
         Args::Cell(x, rest) => {
             push(out, ' ');
+            // (6/N) the array arm sets consuming=true before this; elements inherit it.
             let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
             dump_targs(out, rest, src, c, gb);
             t0
@@ -1793,6 +1812,8 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, 
         Args::End => 0,
         Args::Cell(x, rest) => {
             push(out, ' ');
+            // (6/N) generic-call args inherit the caller's consuming context (set true
+            // by the user-fn call arm).
             let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
             push(atys, t0);
             dump_args_capture_all(out, rest, src, c, gb, atys)
@@ -2099,6 +2120,54 @@ fn widen_splice(out: &mut Vec<u8>, tmp: Vec<u8>, exp: i64, nt: i64, c: &mut TyCt
     widen_post(out, w, exp, nt, c)
 }
 
+// --- (6/N) borrow-check move analysis (ADR 0043 A1) -------------------------
+
+// True iff a value of type `h` is MOVED on a consuming use (non-Copy). Copy =
+// scalars + Ref (kind 2) + Task (kind 12); Secret (3) / Nullable (4) follow their
+// inner; Array (1) / Struct (6) / Enum (7) / Class (8) / TypeParam (9) /
+// GenericInstance (10) / Vec (11) = Move.
+fn is_move_type(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        let idx: i64 = h - tbase();
+        let k: i64 = (*c).tk[idx];
+        if k == 2 {
+            false
+        } else if k == 12 {
+            false
+        } else if k == 3 {
+            is_move_type(c, (*c).ta[idx])
+        } else if k == 4 {
+            is_move_type(c, (*c).ta[idx])
+        } else {
+            true
+        }
+    }
+}
+
+// Record a moved source: a `Var #vid` used in a CONSUMING position (`c.consuming`)
+// whose type is non-Copy, inside a top-level fn body (`curfn >= 0`; methods aren't
+// in `program.fns`, so their moves aren't dumped). Pushes `(curfn, vid)` into the
+// `mvf`/`mvv` side-table (dedup happens at dump time via ascending-VarId membership).
+fn record_move(c: &mut TyCtx, vid: i64) -> i64 {
+    if (*c).curfn < 0 {
+        0
+    } else if vid < 0 {
+        0
+    } else {
+        let vty: i64 = (*c).env[vid];
+        if is_move_type(c, vty) {
+            let cf: i64 = (*c).curfn;
+            push(&mut (*c).mvf, cf);
+            push(&mut (*c).mvv, vid);
+            0
+        } else {
+            0
+        }
+    }
+}
+
 fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match ex {
         Expr::Int(nv) => {
@@ -2128,6 +2197,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         Expr::Var(nm) => {
             let vid: i64 = sc_lookup(c, &nm);
             sink_name(gb, nm);
+            // (6/N) a Var in a consuming position moves it (if non-Copy).
+            if (*c).consuming {
+                record_move(c, vid);
+                0
+            } else {
+                0
+            };
             let ty: i64 = env_get(c, vid);
             let w: bool = widen_pre(out, exp, ty, c);
             append_str(out, "(var #");
@@ -2150,7 +2226,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             append_str(out, usym);
             push(out, ' ');
+            // (6/N) a `&`/`&mut` borrow + `*` deref operand is NON-consuming (and `-`/`!`
+            // operands are Copy scalars → moot); never a move.
+            let svc: bool = (*c).consuming;
+            (*c).consuming = false;
             let it: i64 = dump_texpr(out, inner, 0 - 1, src, c, gb);
+            (*c).consuming = svc;
             // `!` -> bool; `&`/`&mut` -> a ref type; `*` -> strip a ref; `-` -> operand.
             let rt: i64 = if uop == 2 {
                 2
@@ -2244,7 +2325,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         },
         Expr::If(cnd, thn, els) => {
             append_str(out, "(if ");
+            // (6/N) the condition is a read (non-consuming); the branches INHERIT the
+            // if's consuming context (a returned/moved if moves its branch-tail Vars —
+            // the conservative union: a Var moved in EITHER branch is recorded).
+            let svc: bool = (*c).consuming;
+            (*c).consuming = false;
             dump_texpr(out, cnd, 0 - 1, src, c, gb);
+            (*c).consuming = svc;
             push(out, ' ');
             // Both branches inherit the `if`'s expectation, so a `?T`-returning `if`
             // widens each branch's tail (and the `if`'s type is that branch type).
@@ -2273,7 +2360,11 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 let kty: i64 = env_get(c, kid);
                 append_str(out, "(resume-kont #");
                 append_int(out, kid);
+                // (6/N) resume-kont args are consuming (passed by value to the cont).
+                let svk: bool = (*c).consuming;
+                (*c).consuming = true;
                 let rkt: i64 = dump_args_capture_first(out, ca, src, c, gb);
+                (*c).consuming = svk;
                 let krt: i64 = if rkt == 0 - 1 {
                     kty
                 } else {
@@ -2298,6 +2389,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 } else {
                     false
                 };
+                // (6/N) USER-fn (FnId >= 14) args are CONSUMING (moved into the callee);
+                // BUILTIN args (len/push/vec_to_array/print/…) are NON-consuming (the
+                // builtins borrow / don't move). `argcons` gates the args' move-recording.
+                let argcons: bool = fid >= 14;
+                let svf: bool = (*c).consuming;
+                (*c).consuming = argcons;
                 let rt: i64 = if is_generic_builtin(fid) {
                     dump_gcall(out, fid, ca, exp, src, c, gb)
                 } else if isgenfn {
@@ -2306,6 +2403,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                     dump_targs(out, ca, src, c, gb);
                     fn_ret(c, fid)
                 };
+                (*c).consuming = svf;
                 close_ty(out, rt, c);
                 rt
             }
@@ -2355,7 +2453,11 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_int(out, sid);
             push(out, ' ');
             append_str(out, snm);
+            // (6/N) struct-lit field values are CONSUMING (moved into the struct).
+            let sl_svc: bool = (*c).consuming;
+            (*c).consuming = true;
             dump_sfields(out, fields, sid, sl_isg, &gargs, src, c, gb);
+            (*c).consuming = sl_svc;
             close_ty(out, sty, c);
             sty
         },
@@ -2364,7 +2466,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // index (for codegen's GEP) + the field type.
         Expr::Field(ft, fdn) => {
             append_str(out, "(field ");
+            // (6/N) a field-access receiver is a READ (non-consuming) — `p.x` does not
+            // move `p`.
+            let svc: bool = (*c).consuming;
+            (*c).consuming = false;
             let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
+            (*c).consuming = svc;
             push(out, ' ');
             // The target is a struct, a generic-instance struct, or a class (a
             // `&self`-receiver strips its ref). (4h) for a generic instance the
@@ -2414,7 +2521,11 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // follow-up); the node's type is `[T]`.
         Expr::Array(elems) => {
             append_str(out, "(array");
+            // (6/N) array elements are CONSUMING (moved into the array).
+            let ar_svc: bool = (*c).consuming;
+            (*c).consuming = true;
             let ety: i64 = dump_array_elems(out, elems, src, c, gb);
+            (*c).consuming = ar_svc;
             let aty: i64 = mk_array(c, ety);
             close_ty(out, aty, c);
             aty
@@ -2423,9 +2534,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // element type is the array's inner.
         Expr::Index(it, ii) => {
             append_str(out, "(index ");
+            // (6/N) `a[i]` reads `a` + `i` (both non-consuming) — neither is moved.
+            let svc: bool = (*c).consuming;
+            (*c).consuming = false;
             let tty: i64 = dump_texpr(out, it, 0 - 1, src, c, gb);
             push(out, ' ');
             dump_texpr(out, ii, 0 - 1, src, c, gb);
+            (*c).consuming = svc;
             let ety: i64 = array_elem_of(c, tty);
             close_ty(out, ety, c);
             ety
@@ -2447,7 +2562,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 append_str(out, qi);
                 push(out, ' ');
                 append_str(out, qm);
-                dump_targs(out, qa, src, c, gb);
+                dump_cargs(out, qa, src, c, gb);
                 close_ty(out, ety, c);
                 ety
             } else {
@@ -2466,7 +2581,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 append_str(out, qi);
                 push(out, ' ');
                 append_str(out, qm);
-                dump_targs(out, qa, src, c, gb);
+                dump_cargs(out, qa, src, c, gb);
                 close_ty(out, qmret, c);
                 qmret
             }
@@ -2477,7 +2592,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // `(match <scrut :Enum> #eid (arm (pat vidx V (bind #vid n ty)…) <body :T>)… :T)`.
         Expr::Match(mscr, marms) => {
             append_str(out, "(match ");
+            // (6/N) a `match` scrutinee is NOT a move (the oracle does not record it —
+            // it's read/inspected); the arms inherit the match's own consuming context
+            // (restored `svc`), so an arm body's returned-tail Vars still move.
+            let svc: bool = (*c).consuming;
+            (*c).consuming = false;
             let scrty: i64 = dump_texpr(out, mscr, 0 - 1, src, c, gb);
+            (*c).consuming = svc;
             let meid: i64 = enum_of_handle(c, scrty);
             append_str(out, " #");
             append_int(out, meid);
@@ -2493,7 +2614,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_int(out, cid);
             push(out, ' ');
             append_str(out, cn);
-            dump_targs(out, ca, src, c, gb);
+            dump_cargs(out, ca, src, c, gb);
             close_ty(out, cty, c);
             cty
         },
@@ -2503,7 +2624,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // The target is built in a temp first (the `#cid`/`#iid` precede it).
         Expr::Method(mt, mn, ma) => {
             let mut tbuf: Vec<u8> = vec_new();
+            // (6/N) a method receiver is borrowed (`self: &Self`/`&mut Self`) →
+            // non-consuming; the args are consuming (forced by `dump_targs`).
+            let svc: bool = (*c).consuming;
+            (*c).consuming = false;
             let tty: i64 = dump_texpr(&mut tbuf, mt, 0 - 1, src, c, gb);
+            (*c).consuming = svc;
             let rcid: i64 = class_of_handle(c, strip_ref(c, tty));
             if class_has_method(c, rcid, &mn) {
                 let midx: i64 = class_method_index(c, rcid, &mn);
@@ -2516,7 +2642,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 append_str(out, vec_to_array(tbuf));
                 push(out, ' ');
                 append_str(out, mn);
-                dump_targs(out, ma, src, c, gb);
+                dump_cargs(out, ma, src, c, gb);
                 close_ty(out, mret, c);
                 mret
             } else {
@@ -2532,7 +2658,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 append_str(out, vec_to_array(tbuf));
                 push(out, ' ');
                 append_str(out, mn);
-                dump_targs(out, ma, src, c, gb);
+                dump_cargs(out, ma, src, c, gb);
                 close_ty(out, mret2, c);
                 mret2
             }
@@ -2551,7 +2677,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             append_str(out, pe);
             push(out, ' ');
             append_str(out, po);
-            dump_targs(out, pa, src, c, gb);
+            dump_cargs(out, pa, src, c, gb);
             close_ty(out, pret, c);
             pret
         },
@@ -2572,7 +2698,11 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // type. `(declassify <inner :secret T> :T)`.
         Expr::Declassify(di) => {
             append_str(out, "(declassify ");
+            // (6/N) `declassify` consumes its (secret) operand.
+            let svc: bool = (*c).consuming;
+            (*c).consuming = true;
             let it: i64 = dump_texpr(out, di, 0 - 1, src, c, gb);
+            (*c).consuming = svc;
             let rt: i64 = strip_secret(c, it);
             close_ty(out, rt, c);
             rt
@@ -2815,7 +2945,11 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             // value's inferred type. Format: `(let #vid [mut] <type> <value>)`.
             let mut vbuf: Vec<u8> = vec_new();
             let letexp: i64 = tyopt_exp(c, lty, gb);
+            // (6/N) a `let`'s RHS is CONSUMING (a bare-Var RHS moves the binding).
+            let lsvc: bool = (*c).consuming;
+            (*c).consuming = true;
             let valty: i64 = dump_texpr(&mut vbuf, lval, letexp, src, c, gb);
+            (*c).consuming = lsvc;
             let lvid: i64 = (*c).nextvid;
             (*c).nextvid = (*c).nextvid + 1;
             let letty: i64 = if letexp == 0 - 1 {
@@ -2840,17 +2974,27 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
         },
         Stmt::SAssign(atgt, aval) => {
             append_str(out, "(assign ");
+            // (6/N) the assign TARGET is a place (non-consuming); the VALUE is consuming.
+            let asvc: bool = (*c).consuming;
+            (*c).consuming = false;
             dump_texpr(out, atgt, 0 - 1, src, c, gb);
+            (*c).consuming = true;
             push(out, ' ');
             dump_texpr(out, aval, 0 - 1, src, c, gb);
+            (*c).consuming = asvc;
             push(out, ')');
             0
         },
         Stmt::SWhile(wcond, wbody) => {
             append_str(out, "(while ");
+            // (6/N) the cond is a read + the while body's value is discarded — both
+            // non-consuming (call args inside still set their own consuming).
+            let wsvc: bool = (*c).consuming;
+            (*c).consuming = false;
             dump_texpr(out, wcond, 0 - 1, src, c, gb);
             push(out, ' ');
             dump_texpr(out, wbody, 0 - 1, src, c, gb);
+            (*c).consuming = wsvc;
             push(out, ')');
             0
         },
@@ -2864,7 +3008,12 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
         },
         Stmt::SExpr(sx) => {
             append_str(out, "(expr ");
+            // (6/N) an expr-statement's value is discarded → non-consuming (inner call
+            // args still set their own consuming).
+            let esvc: bool = (*c).consuming;
+            (*c).consuming = false;
             dump_texpr(out, sx, 0 - 1, src, c, gb);
+            (*c).consuming = esvc;
             push(out, ')');
             0
         },
@@ -2964,9 +3113,14 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     let body: Expr = parse_block(k, s, e, src, cur);
     render_type(out, rty, c);
     push(out, ' ');
+    // (6/N) record this fn's moves: `curfn` = its idx (only top-level fn bodies — methods
+    // aren't in `program.fns`), and the body's tail is CONSUMING (the returned value).
+    (*c).curfn = fnidx;
+    (*c).consuming = true;
     // The fn return type is the body's expectation — a `?T`-returning fn widens its
     // tail (`dump_texpr` on the body `Block` threads `rty` to the tail).
     dump_texpr(out, body, rty, src, c, gb);
+    (*c).curfn = 0 - 1;
     push(out, ')');
     // (4h) clear the type-param scope so a following NON-generic decl (whose pass-2
     // typing doesn't call `tp_setup`) doesn't see this fn's type-params.
@@ -4257,9 +4411,11 @@ fn type_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
     }
 }
 
-fn main() -> i64 {
-    let path: [u8] = "input.sentinel";
-    let src: [u8] = read_file(path);
+// (6/N) the shared build pipeline (ADR 0043 D3 reuse): parse → resolve → type-check
+// the whole program, computing the typed dump + the moved-sources side-table. `mode`
+// 0 → write the `snc types` dump to `result`; mode 1 → write the `snc borrow`
+// moved-sources dump (reused by `selfhost/borrow.sentinel`). `src` is consumed.
+pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
     let n: i64 = len(src);
     let mut kinds: Vec<i64> = vec_new();
     let mut starts: Vec<i64> = vec_new();
@@ -4341,6 +4497,10 @@ fn main() -> i64 {
         gia: vec_new(),
         girs: vec_new(),
         gire: vec_new(),
+        consuming: false,
+        curfn: 0 - 1,
+        mvf: vec_new(),
+        mvv: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();
     let mut out: Vec<u8> = vec_new();
@@ -4718,9 +4878,75 @@ fn main() -> i64 {
     append_str(&mut out, " Async)");
     push(&mut out, '\n');
 
-    let arr: [u8] = vec_to_array(out);
-    print_bytes(arr);
+    // (6/N) mode 0 = the type dump (`snc types`); mode 1 = the moved-sources dump
+    // (`snc borrow`, reusing this same build — ADR 0043).
+    if mode == 0 {
+        append_str(result, vec_to_array(out));
+        0
+    } else {
+        let _o: [u8] = vec_to_array(out);
+        dump_moves(&mut ctx, &src, result);
+        0
+    };
     let _it: [u8] = vec_to_array(itembuf);
     let _g: [u8] = vec_to_array(garbage);
+    0
+}
+
+// (6/N) dump each user fn's moved-source set (ADR 0043 D2): `(fn #<id> <name> #<vid>…)`,
+// the moved-from VarIds in ascending order (membership over the `mvf`/`mvv` side-table),
+// one line per fn. (The `snc borrow` oracle's format.)
+pub fn dump_moves(c: &mut TyCtx, src: &[u8], out: &mut Vec<u8>) -> i64 {
+    let nf: i64 = len((*c).ufs);
+    let nv: i64 = (*c).nextvid;
+    let mut i: i64 = 0;
+    while i < nf {
+        append_str(out, "(fn #");
+        append_int(out, 14 + i);
+        push(out, ' ');
+        append_slice(out, src, (*c).ufs[i], (*c).ufe[i]);
+        let mut vid: i64 = 0;
+        while vid < nv {
+            let nm: i64 = len((*c).mvf);
+            let mut j: i64 = 0;
+            let mut found: bool = false;
+            while j < nm {
+                if (*c).mvf[j] == i {
+                    if (*c).mvv[j] == vid {
+                        found = true;
+                        0
+                    } else {
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                j = j + 1;
+            }
+            if found {
+                append_str(out, " #");
+                append_int(out, vid);
+                0
+            } else {
+                0
+            };
+            vid = vid + 1;
+        }
+        push(out, ')');
+        push(out, '\n');
+        i = i + 1;
+    }
+    0
+}
+
+// (6/N) `snc types` entry: build (mode 0) + print the type dump.
+fn main() -> i64 {
+    let inp_path: [u8] = "input.sentinel";
+    let inp: [u8] = read_file(inp_path);
+    let mut result: Vec<u8> = vec_new();
+    run(inp, 0, &mut result);
+    let arr: [u8] = vec_to_array(result);
+    print_bytes(arr);
     0
 }
