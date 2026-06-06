@@ -354,10 +354,10 @@ impl Emit<'_> {
                     writeln!(self.body, "  store {llty} {v}, ptr %v{slot}").unwrap();
                     Ok(())
                 }
-                // `*r = x` — the target pointer (r's value) is emitted FIRST, then the
-                // value, then the store (the Sentinel walks target-then-value, and the
-                // deref target DOES emit a load of r).
-                TypedExprKind::Unary(UnaryOp::Deref, _) => {
+                // `*r = x` / `(*c).f = x` — the target pointer (r's value, or the field
+                // GEP) is emitted FIRST, then the value, then the store (the Sentinel
+                // walks target-then-value, and the deref/field target DOES emit).
+                TypedExprKind::Unary(UnaryOp::Deref, _) | TypedExprKind::FieldAccess { .. } => {
                     let ptr = self.lower_lvalue_ptr(target)?;
                     let v = self.lower_expr(value)?;
                     let llty = llvm_ty(target.ty)?;
@@ -828,9 +828,10 @@ impl Emit<'_> {
         Ok(format!("%v{e1}"))
     }
 
-    /// The pointer operand for an lvalue (a place): a `Var`'s alloca slot, or the
-    /// value of a deref's inner ref (`&*r` / the `*r = …` target). FieldAccess/Index
-    /// lvalues (struct-field / element refs) are a later slice.
+    /// The pointer operand for an lvalue (a place): a `Var`'s alloca slot, the value of
+    /// a deref's inner ref (`&*r` / the `*r = …` target), or a struct field's address
+    /// (`&mut (*c).f` — the selfhost sources' pervasive `&mut`-into-a-`ctx`-field form).
+    /// Element-ref lvalues (`&a[i]`) are a later slice (the selfhost sources don't use them).
     fn lower_lvalue_ptr(&mut self, expr: &TypedExpr) -> Result<String, String> {
         match &expr.kind {
             TypedExprKind::Var(id) => {
@@ -838,6 +839,20 @@ impl Emit<'_> {
                 Ok(format!("%v{slot}"))
             }
             TypedExprKind::Unary(UnaryOp::Deref, inner) => self.lower_expr(inner),
+            // 8f-3: `&(target).f` — GEP into the target's lvalue pointer. For `&mut
+            // (*c).f` the target is `*c` (a Deref → c's value, a struct pointer). The
+            // GEP type is the target struct (`%Struct.N`), field `field_index`.
+            TypedExprKind::FieldAccess { target, field_index, .. } => {
+                let target_ptr = self.lower_lvalue_ptr(target)?;
+                let struct_ll = llvm_ty(target.ty)?;
+                let fp = self.fresh();
+                writeln!(
+                    self.body,
+                    "  %v{fp} = getelementptr {struct_ll}, ptr {target_ptr}, i32 0, i32 {field_index}"
+                )
+                .unwrap();
+                Ok(format!("%v{fp}"))
+            }
             _ => Err("address-of a non-place (deferred to a later slice)".into()),
         }
     }

@@ -3449,7 +3449,26 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             if cg_on(c) {
                 let cg_fsid: i64 = struct_of_handle(c, bare);
                 if cg_fsid >= 0 {
-                    cg_extract(c, bare, cg_ftk, cg_ftv, fidx);
+                    if (*c).cg_suppress {
+                        // (8f-3) lvalue field — `&mut (*c).f` / `(*c).f = x`. The field's
+                        // ADDRESS: GEP into the target's pointer (the target `*c` left c's
+                        // pointer in the operand). cg_lastvid=-1 signals a place, so the
+                        // enclosing `&mut`/assign uses the operand as the address.
+                        let cg_fgp: i64 = cg_dst(c);
+                        cgo_str(c, "getelementptr %Struct.");
+                        cgo_int(c, cg_fsid);
+                        cgo_str(c, ", ptr ");
+                        cgo_operand(c, cg_ftk, cg_ftv);
+                        cgo_str(c, ", i32 0, i32 ");
+                        cgo_int(c, fidx);
+                        cg_putc(c, '\n');
+                        cg_reg(c, cg_fgp);
+                        (*c).cg_lastvid = 0 - 1;
+                        0
+                    } else {
+                        cg_extract(c, bare, cg_ftk, cg_ftv, fidx);
+                        0
+                    };
                     0
                 } else {
                     0

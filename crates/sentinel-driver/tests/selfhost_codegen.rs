@@ -130,6 +130,10 @@ const SEEDS: &[&str] = &[
     // enum is dropped at the callee's exit; a 2-payload variant binds two fields.
     "enum E { A, B(i64) }\nfn f(e: E) -> i64 { match e { E::A => 0, E::B(x) => x } }\nfn main() -> i64 { f(E::B(7)) }\n",
     "enum Shape { Unit, Circle(i64), Rect(i64, i64) }\nfn area(s: Shape) -> i64 { match s { Shape::Unit => 0, Shape::Circle(r) => r * r, Shape::Rect(w, h) => w * h } }\nfn main() -> i64 { area(Shape::Rect(5, 6)) }\n",
+    // (8f-3) lvalue field places — `&mut (*c).f` (the selfhost ctx-field idiom, 236x) +
+    // `(*c).f = x`: address-of / assign-to a struct field through a &mut pointer. GEP
+    // into the target's pointer; the enclosing &mut/assign uses the field address.
+    "struct Box { items: Vec<i64>, n: i64 }\nfn add(b: &mut Box, x: i64) -> i64 { push(&mut (*b).items, x); (*b).n = (*b).n + 1; 0 }\nfn main() -> i64 { let mut bx: Box = Box { items: vec_new(), n: 0 }; add(&mut bx, 10); add(&mut bx, 20); bx.n + len(bx.items) }\n",
 ];
 
 #[test]
@@ -299,6 +303,37 @@ fn sentinel_codegen_matches_oracle_on_selfhost_stages() {
              (oracle {} bytes vs sentinel {} bytes)",
             oracle.stdout.len(),
             sentinel.stdout.len()
+        );
+    }
+}
+
+/// (8f-2/8f-3) `snc llvm` lowers the FULL multi-module self-hosting compiler via the
+/// merged path (`run_llvm_merged` mirrors `run_build`'s D.6 discovery + `merge_modules`).
+/// Each stage that `use`s others (`types` uses parser; `codegen` uses the 3-deep chain)
+/// emits its `.ll` without Err — guarding the multi-module dispatch AND the complete
+/// Bar-A construct coverage on the real compiler (the merged `codegen` is ~83k `.ll`
+/// lines). Oracle-only: the Sentinel `scg` is single-file, so self-compiling the
+/// multi-module compiler (it merging too) is the (8g) fixed-point. (The emitted `.ll` is
+/// behaviourally validated cc==inkwell out of band.)
+#[test]
+fn snc_llvm_lowers_the_merged_compiler() {
+    let root = workspace_root();
+    for stage in ["types", "codegen"] {
+        let src = root.join("selfhost").join(format!("{stage}.sentinel"));
+        let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(&src)
+            .output()
+            .expect("run snc llvm");
+        assert!(
+            out.status.success(),
+            "snc llvm failed on the merged selfhost/{stage}.sentinel:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.stdout.len() > 100_000,
+            "expected a large `.ll` for the merged {stage} compiler, got {} bytes",
+            out.stdout.len()
         );
     }
 }

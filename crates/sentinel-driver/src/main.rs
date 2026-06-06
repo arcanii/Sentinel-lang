@@ -464,6 +464,30 @@ fn run_llvm(path: &str) -> ExitCode {
         Ok(s) => s,
         Err(code) => return code,
     };
+    // 8f-2: a multi-module entry (one that `use`s other files) lowers via the MERGED
+    // program, mirroring `run_build`'s D.6 discovery + `merge_modules`. The single-file
+    // `snc llvm` (below) is unchanged; this is what lets the oracle emit the full
+    // self-hosting compiler's `.ll` (the multi-module stages: types/codegen/…).
+    match discover_module_graph(Path::new(path)) {
+        Ok(modules) if !modules.is_empty() => {
+            let units: Vec<sentinel_resolve::ModuleUnit> = modules
+                .iter()
+                .map(|m| sentinel_resolve::ModuleUnit { path: m.path.clone(), program: &m.program })
+                .collect();
+            return match sentinel_resolve::merge_modules(&units) {
+                Ok(merged) => run_llvm_merged(merged),
+                Err(e) => {
+                    eprintln!("snc: {e}");
+                    ExitCode::from(1)
+                }
+            };
+        }
+        Ok(_) => {} // single-file: fall through to the existing pipeline.
+        Err(msg) => {
+            eprintln!("snc: {msg}");
+            return ExitCode::from(1);
+        }
+    }
     let db = SentinelDatabase::default();
     let file = SourceFile::new(&db, path.to_string(), src.clone());
     let program_opt = sentinel_syntax::parse_query(&db, file);
@@ -491,6 +515,39 @@ fn run_llvm(path: &str) -> ExitCode {
     // freeing bindings whose ownership was moved out. The emitting subset is
     // borrow-clean (all "pass" fixtures), so any borrow errors are ignored here —
     // a real reject would have failed the full pipeline upstream.
+    let (drop_plan, _borrow_errors) = sentinel_borrow_check::borrow_check(&typed);
+    match llvm_dump::dump(&typed, &drop_plan) {
+        Ok(ll) => {
+            print!("{ll}");
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("snc: llvm: {why}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// 8f-2: emit the canonical `.ll` for a MERGED multi-module program (one `Program` from
+/// `merge_modules`), mirroring `run_build_merged` but with `llvm_dump::dump` in place of
+/// `compile_to_object` + link. Runs the same passes the single-file `run_llvm` does —
+/// resolve → check → borrow-check → dump — over the merged program (it bypasses the
+/// Salsa query layer, like `run_build_merged`, since the merged program is synthesized).
+fn run_llvm_merged(merged: Program) -> ExitCode {
+    let resolved = match sentinel_resolve::resolve(&merged) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let typed = match sentinel_types::check(&resolved) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
     let (drop_plan, _borrow_errors) = sentinel_borrow_check::borrow_check(&typed);
     match llvm_dump::dump(&typed, &drop_plan) {
         Ok(ll) => {
