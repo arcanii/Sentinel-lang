@@ -163,6 +163,18 @@ Sentinel side mirrors via `cg_used_*` flags + a `cg_lenptr` helper (extractvalue
 ptr=len+1). NEXT = **(8d rest) Vec** (`{len,cap,ptr}` + `sentinel_realloc`; `push`/`pop` take
 `&mut Vec` → needs Bar-A **refs** `&`/`&mut`/`*`/`*p=x` first) + **heap drops** (DropPlan
 `sentinel_free` — byte-parity-neutral for behaviour but needed for a clean fixed-point).
+**✅ (8d-refs) REFERENCES LANDED (ADR 0045 A8) — the Vec prerequisite:** `&`/`&mut`/`*`/`*p=x`,
+byte-identical to `snc llvm` (**53/53 emitted** — the 8 C2 ref fixtures light up) + 2 seeds + 1
+golden, behavioural (cc==inkwell) + leak-free; modes 0–3 + effects byte-identical. A ref `&T`/`&mut
+T` is an opaque `ptr` (mutability ignored; pointee from `program.refs` at the deref); a ref param is
+a `ptr` slot. `&v`/`&mut v` = v's alloca slot (the slot IS the pointer, NO instruction); `*r` =
+`load <pointee>, ptr <r-val>`; `*r = x` = `store <pointee> x, ptr <r-val>` (target ptr emitted FIRST
+— the Sentinel walks an assign target-then-value). Sentinel REUSES the existing `cg_suppress`: `&`/
+`&mut` suppress the inner Var's load + read its slot (`cg_slot_get`); `*` loads through r, or (assign
+place) leaves r's pointer + `cg_lastvid=-1`; `&*r` keeps the deref-place's pointer. ⚠ `&*r` was a
+1-byte miss first (`cg_slot_get(-1)`→`%v-1`) — fixed by an `un_vid>=0` guard. NEXT = **(8d-Vec)**
+(`vec_new` constant + `push` realloc-grow CFG via `&mut Vec` + pop/len/vec_to_array, `{len,cap,ptr}`
+data=field 2) → **heap drops** (DropPlan).
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;

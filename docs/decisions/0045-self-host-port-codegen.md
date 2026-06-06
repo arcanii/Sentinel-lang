@@ -369,6 +369,32 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     for behaviour (exit/stdout unaffected by leaks) but needed for a clean fixed-point. ⚠⚠ The
     behavioural test (~57s at 45) should be **sampled/cached** here.
 
+- **A8 — (8d-refs) REFERENCES LANDED** — `&`/`&mut`/`*`/`*p = x`, the prerequisite for Vec
+  (`push`/`pop` take `&mut Vec`). Byte-identical to `snc llvm` over the corpus
+  (`sentinel_codegen_matches_oracle_on_corpus`, **53/53 emitted** — the 8 C2 ref fixtures light
+  up) + 2 seeds + 1 new golden (`llvm_refs_address_of_and_deref`), behavioural (`cc`-run ==
+  inkwell) and leak-free; modes 0–3 + effects byte-identical.
+  - **A reference `&T`/`&mut T` is an opaque `ptr`** (LLVM ignores mutability; the pointee type is
+    recovered from `program.refs` at the deref). A ref param/let is a `ptr` slot.
+  - **The lvalue/rvalue model.** `&v`/`&mut v` → the lvalue pointer: a `Var`'s alloca slot (the
+    slot IS the pointer — NO instruction); `&*r` (reborrow) → r's value. `*r` (rvalue) → `load
+    <pointee>, ptr <r-value>`. `*r = x` → `store <pointee> x, ptr <r-value>`. ⚠ **Order:** the
+    Sentinel `SAssign` walks **target-then-value**, and a deref target DOES emit (load r) — so the
+    oracle's `Assign` was restructured to lower the deref-target pointer BEFORE the value (for a
+    `Var` target, which emits nothing, value-then-store still matches).
+  - **Oracle** (`llvm_dump.rs`): a `lower_lvalue_ptr` helper (`Var`→slot, `Deref`→`lower_expr`
+    inner); the `Unary(Ref/RefMut)`→lvalue-ptr / `Unary(Deref)`→load arms.
+  - **Sentinel** (mode 4): **reuses the existing `cg_suppress`** (the assign-target machinery) — for
+    `&`/`&mut` it suppresses the inner Var's load and reads its slot (`cg_slot_get`); for `*` it
+    loads through r, or (as an assign place) leaves r's pointer + signals `cg_lastvid = -1`; `&*r`
+    keeps the inner deref-place's pointer (`un_vid = -1` → don't re-slot). `SAssign` stores through
+    that pointer (`cg_store` renders the pointer reg as `ptr %v<n>`). No new ctx fields. ⚠ The `&*r`
+    reborrow was a 1-byte miss first (`cg_slot_get(-1)` → `%v-1`) — fixed by the `un_vid >= 0` guard.
+  - **NEXT = (8d-Vec)** — `vec_new` (a constant `{ i64 0, i64 0, ptr null }`), `push(&mut v, x)`
+    (the `len==cap` `sentinel_realloc` GROW CFG, in-place field GEP/store through the `&mut Vec`),
+    `pop`/`len`/`vec_to_array`, the `{ i64 len, i64 cap, ptr data }` layout (data = FIELD 2). Then
+    **heap drops** (DropPlan). ⚠⚠ behavioural test ~80s at 53 — **sample/cache it now**.
+
 ## Decision
 
 ### D1. Goal.
