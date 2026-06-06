@@ -311,6 +311,33 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     path: an `i8` array of constant byte stores) → closes (8c) → (8d) Vec + builtins + drops.
     ⚠ The behavioural test is now ~71s (42 fixtures rebuilt twice) — sample/cache at (8d).
 
+- **A6 — (8c-3) `[u8]`/STRING LITERALS LANDED — slice (8c) aggregates is COMPLETE.** Codegen
+  lowers string literals (and the char-literal cg operand), byte-identical to `snc llvm` over the
+  corpus (`sentinel_codegen_matches_oracle_on_corpus`, **43/43 emitted** — `c5d5_break_continue`
+  joins, its `len("tok")=3` / `len("word")=4` driving the exit) + 2 seeds + 1 new golden
+  (`llvm_string_literal_is_a_u8_array`), behavioural (`cc`-run == inkwell) and leak-free; modes
+  0–3 + effects byte-identical.
+  - **A string literal IS a `[u8]`** (ADR 0033 D2/D3) — the decoded bytes heap-copied
+    (`sentinel_alloc` + N constant `i8` stores) into a fresh `{ i64, ptr }`, EXACTLY a u8 array
+    literal of byte constants. So it reuses the array machinery wholesale: the oracle factored the
+    array-buffer scaffold (GEP-sizeof + alloc + GEP-stores + `insertvalue {len,ptr}`) into
+    `emit_array_buffer`, shared by the ArrayLit arm (lowered element operands) and the StringLit
+    arm (constant `i8` byte operands) so the two cannot drift; the Sentinel `Str` arm pushes each
+    decoded byte as an `i8` literal operand then calls the existing `cg_emit_arraylit` (reading
+    `sb` BEFORE `sink_name` consumes it). `sizeof(u8) = 1` so the GEP-sizeof buffer is exactly N
+    bytes — the same idiom, no special case.
+  - **Char-literal cg operand (a closed latent gap).** The Sentinel `Char` arm did not set the cg
+    operand (no emitting fixture exercised a char before); it now sets `cglk=1`/`cglv=cv` like the
+    `Int` arm — a `u8` constant, the same family as a string byte, needed by the string phase-go
+    (`c5d2_strings`, which still Errs on `str_eq`/`print_bytes` → 8d). The oracle already handled
+    `CharLit` since 8a.
+  - **NEXT = (8d) `Vec<i64>`/`Vec<u8>`** (`vec_new`/`push`/`pop`/`len`/`vec_to_array` + the
+    `{len,cap,ptr}` layout + `sentinel_realloc`) + the runtime builtins (`str_eq`, `read_file`/
+    `write_file`/`print_bytes`) + **heap drops** (the DropPlan — `sentinel_free` at scope exit; the
+    first slice where the emitted program's *runtime* leaks matter, vs the compiler's). ⚠⚠ The
+    behavioural test is now ~55–71s (43 fixtures rebuilt twice) — **sample/cache it at (8d)** (the
+    `snc build` ground-truth + the `cc` compile per fixture is the cost).
+
 ## Decision
 
 ### D1. Goal.

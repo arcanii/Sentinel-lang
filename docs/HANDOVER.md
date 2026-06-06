@@ -1967,10 +1967,23 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 > (`c16_empty_array` → only `sentinel_alloc`). ⚠ Debug find: `len` (FnId 3, a generic builtin)
 > routes through `dump_gcall`/`dump_args_capture_first`, which walked the first arg WITHOUT
 > `cg_collect`ing it (same gap as `dump_array_elems`) → empty `cgak` → SIGABRT; fixed by collecting
-> the first arg in both. **NEXT = (8c-3) `[u8]`/string literals** (heap-copied byte arrays, the
-> `lower_string_lit` path — closing 8c) → (8d) Vec + builtins + drops → (8e) enums/match → (8f)
-> calls/recursion/multi-module → **(8g) the bootstrap fixed-point**. ⚠ The behavioural test
-> rebuilds each emitted fixture twice (~71s at 42) — sample/cache as the subset grows (~8d).
+> the first arg in both.
+>
+> **✅ (8c-3) `[u8]`/STRING LITERALS COMPLETE (ADR 0045 A6) — slice (8c) aggregates DONE:** string
+> literals + the char-literal cg operand, byte-identical to `snc llvm` (**43/43 emitted** —
+> `c5d5_break_continue` joins, its `len("tok")=3` driving the exit) + 2 seeds + 1 golden, behavioural
+> (cc==inkwell) + leak-free; modes 0–3 + effects byte-identical. 🔑 A string literal **IS a `[u8]`**
+> (ADR 0033) — decoded bytes heap-copied (`sentinel_alloc` + N constant `i8` stores) into `{ i64,
+> ptr }`, EXACTLY a u8 array literal of byte constants → reuses the array machinery: the oracle
+> factored the array-buffer scaffold into `emit_array_buffer` (shared by ArrayLit + StringLit, can't
+> drift); the Sentinel `Str` arm pushes each byte as an `i8` literal operand then reuses
+> `cg_emit_arraylit` (read BEFORE `sink_name` consumes `sb`). Closed a latent gap: the `Char` arm now
+> sets the cg operand (`cglk=1`/`cglv=cv`, a u8 constant like `Int`) — needed by `c5d2_strings` (8d).
+> **NEXT = (8d) `Vec<i64>`/`Vec<u8>`** (`{len,cap,ptr}` + `sentinel_realloc`) + the runtime builtins
+> (`str_eq`/`read_file`/`write_file`/`print_bytes`) + **heap drops** (the DropPlan — `sentinel_free`
+> at scope exit; FIRST slice where the emitted program's *runtime* leaks matter) → (8e) enums/match
+> → (8f) calls/recursion/multi-module → **(8g) the bootstrap fixed-point**. ⚠⚠ The behavioural test
+> rebuilds each emitted fixture twice (~55–71s at 43) — **sample/cache at (8d)**.
 > Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT; Bar B 8h–8l → full corpus →
 > ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak + the four norms unchanged (below).
 >
@@ -2031,16 +2044,17 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0045 A5** docs commit (HEAD — this commit,
-    (8c-2) arrays COMPLETE) atop the (8c-2) feat (`a6cc205` arrays: lit + index + bounds-check),
-    atop the (8c-1) close (`3ac88cd` A4 docs + `f62466b` structs feat) + the (8b) close
-    (`92040ec` A3 docs + `7b33d49`/`c76db27` feats) + the (8a) commits (`2ed426a`
-    codegen.sentinel + `1931496` the snc llvm oracle) + ADR 0045 PROPOSED (`3f13169`), all atop
-    the (7/N) ADR 0044 A5 close (`3b384bf`). ⚠ The dev pushes via GitHub Desktop — `git status`
-    may show "ahead N" (uncommitted-to-origin local commits); that's expected, never push.
+    Verify HEAD with `git log -1` — expect the **ADR 0045 A6** docs commit (HEAD — this commit,
+    (8c-3) strings COMPLETE / slice 8c DONE) atop the (8c-3) feat (`fa8d033` [u8]/string literals +
+    char cg operand), atop the (8c-2) close (`8298460` A5 docs + `a6cc205` arrays feat) + the
+    (8c-1) close (`3ac88cd` A4 docs + `f62466b` structs feat) + the (8b) close (`92040ec` A3 docs +
+    `7b33d49`/`c76db27` feats) + the (8a) commits (`2ed426a` codegen.sentinel + `1931496` the snc
+    llvm oracle) + ADR 0045 PROPOSED (`3f13169`), all atop the (7/N) ADR 0044 A5 close (`3b384bf`).
+    ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin
+    local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1460 tests**
-    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [42/42 emitted] + the
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1461 tests**
+    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [43/43 emitted] + the
     `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still 123/123). macOS + LLVM
     18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
 
@@ -2122,10 +2136,20 @@ For pasting into a fresh chat to bootstrap context:
     symbols used (per-symbol `used_alloc`/`used_panic` → 8a–8c-1 byte-identical). ⚠ `len` (FnId 3,
     generic builtin) goes via `dump_gcall`/`dump_args_capture_first`, which DIDN'T `cg_collect` the
     first arg → SIGABRT; fixed (collect first arg in `dump_args_capture_first` + `dump_array_elems`).
-    **NEXT = (8c-3) `[u8]`/string literals** (heap-copied byte arrays, the `lower_string_lit` path
-    — closing 8c) → (8d) Vec+builtins+drops → (8e) enums/match → (8f) calls/multi-module → **(8g)
-    the bootstrap fixed-point**. Sub-slices 8a–8l in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT
-    (8g); Bar B 8h–8l → full corpus → ADR 0045 ACCEPTED). No in-flight slice.
+    **✅ (8c-3) `[u8]`/STRING LITERALS COMPLETE (ADR 0045 A6) — slice (8c) aggregates DONE:** string
+    literals + the char-literal cg operand, byte-identical to `snc llvm` (43/43 emitted —
+    `c5d5_break_continue` joins, `len("tok")=3` drives the exit) + 2 seeds + 1 golden, behavioural +
+    leak-free; modes 0–3 + effects byte-identical. A string IS a `[u8]` (ADR 0033) — decoded bytes
+    heap-copied (`sentinel_alloc` + N `i8` stores) into `{ i64, ptr }`, EXACTLY a u8 array literal of
+    byte constants → reuses the array machinery (oracle factored `emit_array_buffer` shared by
+    ArrayLit+StringLit; Sentinel `Str` arm pushes bytes as `i8` operands + reuses `cg_emit_arraylit`,
+    read before `sink_name`). Closed a latent gap: `Char` arm now sets the cg operand (u8 constant
+    like `Int`). **NEXT = (8d) `Vec<i64>`/`Vec<u8>`** (`{len,cap,ptr}` + `sentinel_realloc`) + runtime
+    builtins (`str_eq`/`read_file`/`write_file`/`print_bytes`) + **heap drops** (DropPlan
+    `sentinel_free` — first slice where the emitted program's runtime leaks matter) → (8e)
+    enums/match → (8f) calls/multi-module → **(8g) the bootstrap fixed-point**. ⚠⚠ behavioural test
+    ~55–71s at 43 — sample/cache at (8d). Sub-slices 8a–8l in ADR 0045 D10 (Bar A 8a–8g → the
+    FIXED-POINT (8g); Bar B 8h–8l → full corpus → ADR 0045 ACCEPTED). No in-flight slice.
 
     KEY REUSABLE FINDINGS (carry forward):
     - The back-half stages REUSE the typed program (they can't cheaply re-derive it).

@@ -139,6 +139,18 @@ declares** — emitted ONLY for symbols a program uses (per-symbol `used_alloc`/
 first arg WITHOUT `cg_collect`ing it (same gap as `dump_array_elems`) → empty `cgak` → SIGABRT;
 fixed by collecting the first arg in both. NEXT = **(8c-3) `[u8]`/string literals** (closing 8c) →
 (8d) Vec + builtins + drops.
+**✅ (8c-3) `[u8]`/STRING LITERALS LANDED (ADR 0045 A6) — slice (8c) aggregates COMPLETE:** string
+literals (+ the char-literal cg operand), byte-identical to `snc llvm` (**43/43 emitted** —
+`c5d5_break_continue` joins, its `len("tok")=3` driving the exit) + 2 seeds + 1 golden, behavioural
+(cc==inkwell) + leak-free; modes 0–3 + effects byte-identical. A string literal IS a `[u8]` (ADR
+0033) — the decoded bytes heap-copied (`sentinel_alloc` + N constant `i8` stores) into `{ i64, ptr
+}`, EXACTLY a u8 array literal of byte constants → reuses the array machinery: the oracle factored
+the array-buffer scaffold into `emit_array_buffer` (shared by ArrayLit + StringLit so they can't
+drift); the Sentinel `Str` arm pushes each byte as an `i8` literal operand then reuses
+`cg_emit_arraylit` (read before `sink_name` consumes `sb`). Closed a latent gap: the `Char` arm now
+sets the cg operand (`cglk=1`/`cglv=cv`, a u8 constant like `Int`) — needed by `c5d2_strings` (8d).
+NEXT = **(8d) `Vec<i64>`/`Vec<u8>`** (`{len,cap,ptr}` + `sentinel_realloc`) + runtime builtins
+(`str_eq`/`read_file`/`write_file`/`print_bytes`) + **heap drops** (DropPlan `sentinel_free`).
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
