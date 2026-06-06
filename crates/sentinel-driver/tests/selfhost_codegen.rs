@@ -84,6 +84,10 @@ const SEEDS: &[&str] = &[
     "fn main() -> i64 { let xs = [10, 20, 30]; xs[1] + len(xs) }\n",
     "fn first(xs: [i64]) -> i64 { xs[0] }\nfn main() -> i64 { first([7, 8, 9]) }\n",
     "fn main() -> i64 { let xs: [i64] = []; len(xs) }\n",
+    // (8c-3) [u8]/string literals (heap-copied byte arrays — a u8 array literal of
+    // constant bytes) + char literals (u8 constants).
+    "fn main() -> i64 { let s: [u8] = \"hi\"; len(s) }\n",
+    "fn main() -> i64 { let c: u8 = 'Z'; u8_to_i64(c) }\n",
 ];
 
 #[test]

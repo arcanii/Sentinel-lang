@@ -3829,6 +3829,14 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            // (8c-3) codegen: a char literal is a u8 operand (no instruction).
+            if cg_on(c) {
+                (*c).cglk = 1;
+                (*c).cglv = cv;
+                0
+            } else {
+                0
+            };
             mir_widen(c, w, exp);
             widen_post(out, w, exp, 3, c)
         },
@@ -3847,6 +3855,24 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 append_int(out, u8_to_i64(sb[sbi]));
                 sbi = sbi + 1;
             }
+            // (8c-3) codegen: a string literal IS a u8 array literal of constant bytes
+            // — push each byte as a literal operand (i8), then reuse cg_emit_arraylit.
+            // Must read `sb` BEFORE `sink_name` consumes it.
+            if cg_on(c) {
+                let s_snap: i64 = len((*c).cgak);
+                let mut sci: i64 = 0;
+                while sci < slen {
+                    let sbv: i64 = u8_to_i64(sb[sci]);
+                    push(&mut (*c).cgak, 1);
+                    push(&mut (*c).cgav, sbv);
+                    push(&mut (*c).cgat, 3);
+                    sci = sci + 1;
+                }
+                cg_emit_arraylit(c, 3, s_snap);
+                0
+            } else {
+                0
+            };
             sink_name(gb, sb);
             close_ty(out, saty, c);
             // (7c) MIR: a string literal is a public constant -> Opaque (no operands), [u8].

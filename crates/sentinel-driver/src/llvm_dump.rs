@@ -472,28 +472,19 @@ impl Emit<'_> {
             // type incl. structs, without replicating layout/padding.
             TypedExprKind::ArrayLit { elem_ty, elements } => {
                 let ety = llvm_ty(elem_ty.to_type())?;
-                let mut elem_ops = Vec::with_capacity(elements.len());
+                let mut ops = Vec::with_capacity(elements.len());
                 for el in elements {
-                    elem_ops.push(self.lower_expr(el)?);
+                    ops.push(self.lower_expr(el)?);
                 }
-                let n = elements.len();
-                let sz = self.fresh();
-                writeln!(self.body, "  %v{sz} = getelementptr {ety}, ptr null, i64 {n}").unwrap();
-                let szi = self.fresh();
-                writeln!(self.body, "  %v{szi} = ptrtoint ptr %v{sz} to i64").unwrap();
-                let data = self.fresh();
-                writeln!(self.body, "  %v{data} = call ptr @sentinel_alloc(i64 %v{szi})").unwrap();
-                self.used_alloc = true;
-                for (i, op) in elem_ops.iter().enumerate() {
-                    let ep = self.fresh();
-                    writeln!(self.body, "  %v{ep} = getelementptr {ety}, ptr %v{data}, i64 {i}").unwrap();
-                    writeln!(self.body, "  store {ety} {op}, ptr %v{ep}").unwrap();
-                }
-                let a0 = self.fresh();
-                writeln!(self.body, "  %v{a0} = insertvalue {{ i64, ptr }} undef, i64 {n}, 0").unwrap();
-                let a1 = self.fresh();
-                writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
-                Ok(format!("%v{a1}"))
+                Ok(self.emit_array_buffer(&ety, &ops))
+            }
+            // A string literal is a `[u8]` (ADR 0033): the decoded bytes heap-copied
+            // into a fresh `{ i64, ptr }` — an array literal whose elements are byte
+            // constants (the `lower_string_lit` shape; sizeof(u8) = 1 so the buffer is
+            // exactly N bytes, but the GEP-sizeof idiom reuses `emit_array_buffer`).
+            TypedExprKind::StringLit(bytes) => {
+                let ops: Vec<String> = bytes.iter().map(|b| b.to_string()).collect();
+                Ok(self.emit_array_buffer("i8", &ops))
             }
             // `a[i]` — extract len(0)/data(1), bounds-check (0 <= i < len), then
             // GEP+load. OOB → `sentinel_panic_oob` + `unreachable`; the OK block
@@ -535,6 +526,32 @@ impl Emit<'_> {
             self.lower_stmt(stmt)?;
         }
         self.lower_expr(&b.tail)
+    }
+
+    /// Emit a heap `[T]` buffer from already-rendered element operands: the
+    /// GEP-sizeof size, `sentinel_alloc`, a per-element GEP-store, and the
+    /// `{ i64 len, ptr data }` `insertvalue`. Shared by array literals (lowered
+    /// element operands) and string literals (constant `i8` byte operands) so the
+    /// two cannot drift.
+    fn emit_array_buffer(&mut self, ety: &str, ops: &[String]) -> String {
+        let n = ops.len();
+        let sz = self.fresh();
+        writeln!(self.body, "  %v{sz} = getelementptr {ety}, ptr null, i64 {n}").unwrap();
+        let szi = self.fresh();
+        writeln!(self.body, "  %v{szi} = ptrtoint ptr %v{sz} to i64").unwrap();
+        let data = self.fresh();
+        writeln!(self.body, "  %v{data} = call ptr @sentinel_alloc(i64 %v{szi})").unwrap();
+        self.used_alloc = true;
+        for (i, op) in ops.iter().enumerate() {
+            let ep = self.fresh();
+            writeln!(self.body, "  %v{ep} = getelementptr {ety}, ptr %v{data}, i64 {i}").unwrap();
+            writeln!(self.body, "  store {ety} {op}, ptr %v{ep}").unwrap();
+        }
+        let a0 = self.fresh();
+        writeln!(self.body, "  %v{a0} = insertvalue {{ i64, ptr }} undef, i64 {n}, 0").unwrap();
+        let a1 = self.fresh();
+        writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
+        format!("%v{a1}")
     }
 
     fn lower_call(&mut self, id: FnId, args: &[TypedExpr], ret_ty: Type) -> Result<String, String> {

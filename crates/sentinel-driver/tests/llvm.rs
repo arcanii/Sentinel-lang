@@ -329,6 +329,44 @@ fn llvm_array_lit_index_and_len() {
     );
 }
 
+#[test]
+fn llvm_string_literal_is_a_u8_array() {
+    // 8c-3: a string literal is a `[u8]` (ADR 0033) — the decoded bytes heap-copied
+    // (`sentinel_alloc` + N constant `i8` stores) into a `{ i64, ptr }`, exactly an
+    // array literal of byte constants. "hi" = [104, 105]; len = 2.
+    assert_eq!(
+        llvm_dump(
+            "string",
+            "fn main() -> i64 {\n    let s: [u8] = \"hi\";\n    len(s)\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "declare ptr @sentinel_alloc(i64)\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v7 = alloca { i64, ptr }\n",
+            "  %v0 = getelementptr i8, ptr null, i64 2\n",
+            "  %v1 = ptrtoint ptr %v0 to i64\n",
+            "  %v2 = call ptr @sentinel_alloc(i64 %v1)\n",
+            "  %v3 = getelementptr i8, ptr %v2, i64 0\n",
+            "  store i8 104, ptr %v3\n",
+            "  %v4 = getelementptr i8, ptr %v2, i64 1\n",
+            "  store i8 105, ptr %v4\n",
+            "  %v5 = insertvalue { i64, ptr } undef, i64 2, 0\n",
+            "  %v6 = insertvalue { i64, ptr } %v5, ptr %v2, 1\n",
+            "  store { i64, ptr } %v6, ptr %v7\n",
+            "  %v8 = load { i64, ptr }, ptr %v7\n",
+            "  %v9 = extractvalue { i64, ptr } %v8, 0\n",
+            "  %v10 = trunc i64 %v9 to i32\n",
+            "  ret i32 %v10\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {
