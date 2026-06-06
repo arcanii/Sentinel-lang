@@ -2092,10 +2092,11 @@ For pasting into a fresh chat to bootstrap context:
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin
     local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1466 tests**
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1467 tests**
     (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [55/55 emitted, now WITH
-    scope-exit heap drops] + the `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still
-    123/123). macOS + LLVM 18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
+    scope-exit heap drops incl. recursive struct fields] + the `snc llvm` oracle tests
+    `tests/llvm.rs`; `mir`/`ctverify`/etc. still 123/123). macOS + LLVM 18 (clang/llc/opt 18.1.8,
+    arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
     + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR 0043)
@@ -2107,25 +2108,27 @@ For pasting into a fresh chat to bootstrap context:
     parser, resolve, types, effects, borrow, **mir, ctverify** .sentinel. The ONLY thing
     left is **codegen** (the bootstrap-critical transform → the object/fixed-point).
 
-    ▶ **RESUME AT: (8d-drops-2) — recursive struct-field drop.** Codegen (8/N) is WELL UNDERWAY
-    (ADR 0045, amendments A1–A11): 8a scalars/calls, 8b control flow, 8c-1/2/3 structs/arrays/strings,
+    ▶ **RESUME AT: (8d-drops-3) — loop-exit drops (break/continue).** Codegen (8/N) is WELL UNDERWAY
+    (ADR 0045, amendments A1–A12): 8a scalars/calls, 8b control flow, 8c-1/2/3 structs/arrays/strings,
     8d builtins (str_eq/file-IO) + refs (`&`/`&mut`/`*`/`*p=x`) + Vec (vec_new/push/pop/len/`v[i]` +
-    `vec_to_array`) + **(8d-drops-1) SCOPE-EXIT HEAP DROPS** (array/`Vec`/`[u8]` `sentinel_free` at block
-    exit, reverse decl order, skipping `moved_sources`; A11) — ALL byte-identical to `snc llvm` +
-    behavioural (cc==inkwell) + **leak-free** (13/15 heap fixtures) + modes 0–3 byte-identical (**55/55
-    emitting fixtures**). 🔑 drops-1 design: **per-binding `sentinel_free`, NO arena** (the arena's a
-    perf opt; per-binding is leak-free + the canonical spec); **skip `moved_sources` ALONE** (no
-    tail-returned guard — body tail is consuming so `{tail}⊆{moved}`; `cg_is_moved` scans `mvf`/`mvv`,
-    proven == oracle `DropPlan` in 6/N); **two-frame fn** (params + body block). **NEXT = (8d-drops-2):**
-    `c16_array_in_struct` (`Bag { items: [i64], owner_id }`) — a struct binding's drop must RECURSE into
-    its heap-backed fields (GEP each field + dispatch); mirror production `emit_drop_struct_fields`
-    (codegen lib.rs:3934). ⚠ its `.ll` emits no free yet (the `leaks` 0 is a conservative FALSE
-    NEGATIVE — the buffer ptr lingers on the stack; inkwell genuinely frees it). THEN **(8d-drops-3):**
-    `c5d5_break_continue` — loop-exit drops (the per-iteration `[u8]` on the `break`/`continue` paths;
-    5 leaks today) via draining the loop-body frame before the branch (production `emit_loop_exit_drops`,
-    lib.rs:3723). Then → **(8e) enums/match** → **(8f) calls/recursion/multi-module** → **(8g) THE
-    BOOTSTRAP FIXED-POINT**. ⚠ The leak GATE is the **`leaks --atExit` sweep** (codesign trick), NOT the
-    differential/behavioural (a missing free is byte-parity-NEUTRAL — same exit/stdout). ⚠⚠ **The
+    `vec_to_array`) + **HEAP DROPS** ((8d-drops-1) scope-exit array/`Vec`/`[u8]` `sentinel_free`, A11;
+    (8d-drops-2) recursive struct-field drop, A12) — ALL byte-identical to `snc llvm` + behavioural
+    (cc==inkwell) + **leak-free** (14/15 heap fixtures) + modes 0–3 byte-identical (**55/55 emitting
+    fixtures**). 🔑 drops design: **per-binding `sentinel_free`, NO arena** (a perf opt; per-binding is
+    leak-free + the canonical spec); **skip `moved_sources` ALONE** (no tail-returned guard — body tail
+    is consuming so `{tail}⊆{moved}`; `cg_is_moved` scans `mvf`/`mvv`, proven == oracle `DropPlan` in
+    6/N); **two-frame fn** (params + body); struct drop GEPs each `needs_drop` field + recurses (the
+    `ptr_reg` is uniformly an alloca slot OR a field-GEP `%vN`). **NEXT = (8d-drops-3):** the ONE
+    remaining leak — `c5d5_break_continue`'s per-iteration `[u8]` (`let s = "tok"` / `let w = "word"`)
+    leaks on the `break`/`continue` paths (5 leaks) because branching to `loop_after`/`loop_cond` skips
+    the body block's end-of-iteration drop. DRAIN the loop-body scope frame(s) before the branch —
+    mirror production `emit_loop_exit_drops` (codegen lib.rs:3723): on break/continue, walk the open
+    frames from the top down to the loop-body frame, freeing each (the per-iteration drop still runs on
+    the fall-through path via the Block arm, so each runtime path frees once — mutually-exclusive
+    blocks). Need a per-loop `scope_floor` (the cgdv length / oracle scope depth at loop-body entry) on
+    the loop-target stack. Then → **(8e) enums/match** → **(8f) calls/recursion/multi-module** → **(8g)
+    THE BOOTSTRAP FIXED-POINT**. ⚠ The leak GATE is the **`leaks --atExit` sweep** (codesign trick), NOT
+    the differential/behavioural (a missing free is byte-parity-NEUTRAL — same exit/stdout). ⚠⚠ **The
     behavioural test is ~83s at 55 fixtures** — **SAMPLE it** (targeted inkwell-vs-cc on the changed
     fixture(s) + new seeds; the unchanged fixtures are provably byte-identical via the corpus
     differential), run the full suite ONCE as the final gate. The PER-SLICE METHOD: extend

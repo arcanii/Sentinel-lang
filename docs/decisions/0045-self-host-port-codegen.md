@@ -499,6 +499,32 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     inkwell genuinely frees it). `c5d5_break_continue` needs **(8d-drops-3)** loop-exit drops (the
     per-iteration `[u8]` on the `break`/`continue` paths — 5 leaks today). Then → **(8e) enums/match**.
 
+- **A12 — (8d-drops-2) RECURSIVE STRUCT-FIELD DROP LANDED:** dropping a struct binding now GEPs
+  into each heap-backed field (declaration order) and frees it recursively, so a struct with an
+  array/`Vec`/struct field no longer leaks. Byte-identical to `snc llvm`
+  (`sentinel_codegen_matches_oracle_on_corpus`, **55/55** — `c16_array_in_struct` now emits its
+  field free) + 1 new seed + 1 new golden (`llvm_struct_field_recursive_drop`), behavioural
+  (`cc`-run == inkwell, exit 12) and **leak-free** (`c16_array_in_struct` 0 leaks — genuinely now, a
+  real `sentinel_free`); modes 0–3 + effects byte-identical; 1467 tests, four-check green; scg
+  compiler leak-free. Mirrors the production `emit_drop_struct_fields` (codegen lib.rs:3934).
+  - **The shape.** `emit_drop_for_binding`'s `ptr_reg` arg is uniformly a `%vN` — an alloca slot for
+    a top-level binding, OR a `getelementptr %Struct.K, ptr <ptr_reg>, i32 0, i32 <idx>` field
+    register when recursing. A struct arm GEPs each field whose type `needs_drop` and recurses; the
+    GEP `idx` is the field's DECLARATION position (a counter over ALL fields), not the count of
+    drop-needing fields. `needs_drop`: array / `Vec` → true; struct → true iff some field does
+    (recursive, so a struct of only scalars GEPs nothing); the Bar-B shapes → false (don't emit).
+  - **Sentinel.** A `cg_needs_drop` predicate (mirrors `needs_drop`) + a struct branch in
+    `cg_emit_drop` that scans the flat `fldo`/`fldty` field table for `owner == sid` (declaration
+    order, like `cg_pass0`), tracking `fidx` to emit the GEP index. `struct_of_handle` recovers the
+    StructId; recursion reuses `cg_emit_drop`. Only `c16_array_in_struct` changed (the only emitting
+    fixture with a heap-backed struct field; a struct of scalars like `Point` GEPs nothing). Array
+    of struct (`c16_array_of_struct`) stays a plain array drop — per-element recursion is deferred,
+    but its `Point` elements own no heap so it's already leak-free.
+  - **NEXT = (8d-drops-3)** — loop-exit drops: `c5d5_break_continue`'s per-iteration `[u8]` leaks on
+    the `break`/`continue` paths (5 leaks) because branching to `loop_after`/`loop_cond` skips the
+    body block's end-of-iteration drop. Drain the loop-body frame(s) before the branch (production
+    `emit_loop_exit_drops`, lib.rs:3723). Then → **(8e) enums/match**.
+
 ## Decision
 
 ### D1. Goal.

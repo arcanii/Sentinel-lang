@@ -216,6 +216,16 @@ into `dump`. Sentinel: `cgdv`/`cgdt`/`cgds` pool + `cg_drop_record`/`cg_drop_fra
 `cg_is_moved`; `sentinel_free` declare after realloc. ⚠ REMAINING: `c16_array_in_struct` → **(8d-drops-2)**
 struct recursive field drop; `c5d5_break_continue` → **(8d-drops-3)** loop-exit drops. Then → **(8e)
 enums/match**.
+**✅ (8d-drops-2) RECURSIVE STRUCT-FIELD DROP LANDED (ADR 0045 A12):** dropping a struct GEPs into each
+heap-backed field (decl order) + frees it recursively; byte-identical to `snc llvm` (**55/55** —
+`c16_array_in_struct` now frees its `[i64]` field) + 1 seed + 1 golden (`llvm_struct_field_recursive_drop`),
+behavioural (cc==inkwell exit 12) + **leak-free** (c16_array_in_struct 0 leaks, a real free now); modes
+0–3+effects byte-identical; 1467 tests; scg leak-free. `emit_drop_for_binding`'s `ptr_reg` is uniformly a
+`%vN` (alloca slot OR a `getelementptr %Struct.K, …, i32 0, i32 idx` field reg); a `needs_drop`/
+`cg_needs_drop` predicate (array/Vec true; struct→any field) gates which fields GEP (the GEP idx = the
+field's DECL position). Sentinel scans the flat `fldo`/`fldty` table (like `cg_pass0`). Only
+`c16_array_in_struct` changed. NEXT = **(8d-drops-3)** loop-exit drops (`c5d5_break_continue` — per-iter
+`[u8]` leaks on break/continue paths). Then → **(8e) enums/match**.
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
