@@ -263,6 +263,17 @@ TRY.** Per arm: `icmp eq tag,vidx`+`br arm/next`; arm: bind payloads (`getelemen
 captured into a dump_tarms local; pj for the pstruct); prologue+bind in `dump_tpat`/`dump_tbinds`,
 epilogue in `dump_tarms`. NEXT = **(8f) calls/recursion/multi-module** → **(8g) THE BOOTSTRAP
 FIXED-POINT** (the Bar-A construct set is now complete — only whole-program plumbing remains).
+**✅ (8f-1) THE SELFHOST FRONT-END STAGES SELF-HOST (ADR 0045 A16):** the Sentinel codegen (`scg`) emits
+its OWN `selfhost/lexer.sentinel` (390 lines → 4378 `.ll` lines) + `selfhost/parser.sentinel` (2590 →
+21606) **byte-identically to `snc llvm`**, AND the `cc`-compiled `.ll` runs == inkwell — the compiler
+compiling its own source. **NO codegen change** — the Bar-A set (closed at 8e) already suffices; these
+stages exercise it at 20×–500× the largest corpus fixture. Locked in by
+`sentinel_codegen_matches_oracle_on_selfhost_stages`; 1471 tests. The self-contained stages (no `use`)
+lower via the single-file pipeline; the multi-module stages (`types`/`codegen`/…) need the merged path
+(`snc llvm` rejects `use` today; `snc build` already merges via `run_build_merged`). NEXT = **(8f-2)** wire
+`snc llvm` to the merged multi-module path (mirror `run_build`+`merge_modules`, emit `.ll`) → **(8g) THE
+FIXED-POINT** (the harder half: `scg` is single-file, so self-compiling the multi-module compiler needs
+`scg` to merge too — port discovery+`merge_modules`+`Renamer` to Sentinel, or a pre-merged source).
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;

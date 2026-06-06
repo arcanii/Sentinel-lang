@@ -616,6 +616,25 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     Vec, builtins, heap drops, enums+match) — what remains is the whole-program plumbing for the
     fixed-point.
 
+- **A16 — (8f-1) THE SELFHOST FRONT-END STAGES SELF-HOST:** the Sentinel codegen (`scg`) emits its OWN
+  `selfhost/lexer.sentinel` (390 lines → 4378 `.ll` lines) and `selfhost/parser.sentinel` (2590 lines →
+  21606 `.ll` lines) **byte-identically to `snc llvm`**, AND the `cc`-compiled `.ll` runs identically to
+  inkwell (`snc build`) — a step toward the bootstrap fixed-point: the compiler compiling its own source.
+  This was achieved with **NO codegen change** — the Bar-A construct set (closed at 8e) already suffices;
+  the lexer + parser exercise it at real scale (20×–500× the largest corpus fixture). Locked in by a new
+  differential test (`sentinel_codegen_matches_oracle_on_selfhost_stages`). 1471 tests, four-check green.
+  - **The self-contained stages** (`lexer`/`parser`, no `use`) lower through the existing single-file
+    pipeline; the **multi-module** stages (`types`/`resolve`/`effects`/`codegen`, which `use` each other)
+    need the merged path — `snc llvm` currently rejects `use` ("not yet wired"), while `snc build` already
+    discovers the module graph + `merge_modules` → `run_build_merged`.
+  - **NEXT = (8f-2)** — wire `snc llvm` to the merged multi-module path (mirror `run_build`'s discovery +
+    `merge_modules`, emit `.ll` instead of an object) so the oracle can lower the FULL merged compiler
+    (`types`/`codegen`). Then **(8g) the fixed-point** — the harder half: `scg` is single-file (reads one
+    `input.sentinel`), so self-compiling the multi-module compiler needs `scg` to merge too (port the
+    driver's discovery + `merge_modules` + `Renamer` to Sentinel) OR a pre-merged single source. The
+    capstone: `scg` emits the compiler's `.ll`; `cc` → `scg'`; assert `scg'` emits == `scg` (byte-for-byte
+    self-compilation — why C5 shipped `abi-v1` + reproducible builds).
+
 ## Decision
 
 ### D1. Goal.
