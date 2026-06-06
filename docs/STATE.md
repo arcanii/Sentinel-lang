@@ -226,6 +226,18 @@ behavioural (cc==inkwell exit 12) + **leak-free** (c16_array_in_struct 0 leaks, 
 field's DECL position). Sentinel scans the flat `fldo`/`fldty` table (like `cg_pass0`). Only
 `c16_array_in_struct` changed. NEXT = **(8d-drops-3)** loop-exit drops (`c5d5_break_continue` — per-iter
 `[u8]` leaks on break/continue paths). Then → **(8e) enums/match**.
+**✅ (8d-drops-3) LOOP-EXIT DROPS LANDED (ADR 0045 A13) — HEAP DROPS COMPLETE:** a `break`/`continue`
+drains the open frame(s) down to the loop-body frame BEFORE branching, so a per-iteration heap binding is
+freed on the early-exit path too. Byte-identical to `snc llvm` (**55/55**) + 2 seeds (break+continue) + 1
+golden (`llvm_loop_exit_drops_on_break`), behavioural (cc==inkwell) + **leak-free**; modes 0–3+effects
+byte-identical; 1468 tests; scg leak-free. **🎯 ALL 15 heap fixtures leak-free under `leaks --atExit`** —
+generated programs match inkwell; heap drops (drops-1/2/3) DONE. Each loop records a `scope_floor` (scope
+depth at body entry); break/continue drain every frame `>= floor` (innermost first) WITHOUT popping (dead
+remainder re-drops into an unreachable block → each path frees once). Oracle: `loops` gains `scope_floor`;
+`emit_scope_drops`→`emit_frame_drops(idx)`+`emit_loop_exit_drops(floor)`. Sentinel: a `cg_loop_floor`
+stack + `cg_drop_range(floor)` (drop-only, no truncate); 🔑 reversing the flat `cgdv[floor..]` == the
+oracle's top-down per-frame reverse. NEXT = **(8e) enums/match** → **(8f) calls/recursion/multi-module** →
+**(8g) THE BOOTSTRAP FIXED-POINT.**
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;

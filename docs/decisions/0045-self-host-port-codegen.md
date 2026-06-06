@@ -525,6 +525,35 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     body block's end-of-iteration drop. Drain the loop-body frame(s) before the branch (production
     `emit_loop_exit_drops`, lib.rs:3723). Then → **(8e) enums/match**.
 
+- **A13 — (8d-drops-3) LOOP-EXIT DROPS LANDED — heap drops COMPLETE:** a `break`/`continue` now
+  drains the open scope frame(s) from the top down to the loop-body frame BEFORE branching, so a
+  per-iteration heap binding is freed on the early-exit path (not just the fall-through). Byte-identical
+  to `snc llvm` (`sentinel_codegen_matches_oracle_on_corpus`, **55/55**) + 2 new seeds (break +
+  continue) + 1 new golden (`llvm_loop_exit_drops_on_break`), behavioural (`cc`-run == inkwell, exit
+  unchanged) and **leak-free**; modes 0–3 + effects byte-identical; 1468 tests, four-check green; scg
+  compiler leak-free. **🎯 ALL 15 heap fixtures are now leak-free under `leaks --atExit`** — the
+  generated programs match inkwell's leak-freedom; heap drops (drops-1/2/3) are DONE. Mirrors the
+  production `emit_loop_exit_drops` (codegen lib.rs:3723).
+  - **The mechanism.** Each loop records a `scope_floor` = the scope depth at loop-body entry
+    (captured BEFORE the body block pushes its frame). On `break`/`continue`, drain every frame
+    `>= scope_floor` (the body + any nested `if`/block frames open at the branch), innermost first,
+    WITHOUT popping — the now-dead remainder of each block still pops + re-drops via its own block
+    exit (into an unreachable block), so each runtime path frees a given binding exactly once
+    (early-exit drain XOR fall-through body-end drop — mutually exclusive blocks). The fn-return
+    early-exit shape (ADR 0017), reused for loops.
+  - **Oracle.** `loops: Vec<(u32, u32)>` → `Vec<(u32, u32, usize)>` (+ `scope_floor`); the while arm
+    captures `self.scopes.len()` at the `loops.push`; `emit_scope_drops` factored into
+    `emit_frame_drops(idx)` + `emit_loop_exit_drops(floor)` (drain `[floor..len)` reverse); the
+    break/continue arm drains before the branch.
+  - **Sentinel.** A `cg_loop_floor` stack (parallel to `cg_loop_cond`/`cg_loop_after`) records
+    `len(cgdv)` at loop-body entry; a `cg_drop_range(floor)` (drop-only, NO truncate — `cg_drop_frame`
+    minus the pop loop) drains `cgdv[floor..]` reverse; SBreak/SContinue call it before the branch.
+    🔑 **Reversing the flat `cgdv[floor..]` == the oracle's top-down per-frame reverse** — the flat
+    pool concatenates frames in push order, so reversing the whole range reverses both the frame order
+    AND each frame's bindings, exactly matching `for i in (floor..len).rev() { frame[i].rev() }`.
+  - **NEXT = (8e) enums/match** → **(8f) calls/recursion/multi-module** → **(8g) THE BOOTSTRAP
+    FIXED-POINT.**
+
 ## Decision
 
 ### D1. Goal.

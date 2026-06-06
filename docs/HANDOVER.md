@@ -2092,11 +2092,11 @@ For pasting into a fresh chat to bootstrap context:
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin
     local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1467 tests**
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1468 tests**
     (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [55/55 emitted, now WITH
-    scope-exit heap drops incl. recursive struct fields] + the `snc llvm` oracle tests
-    `tests/llvm.rs`; `mir`/`ctverify`/etc. still 123/123). macOS + LLVM 18 (clang/llc/opt 18.1.8,
-    arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
+    scope-exit heap drops — array/Vec/[u8] + recursive struct fields + loop-exit; ALL 15 heap
+    fixtures leak-free] + the `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still
+    123/123). macOS + LLVM 18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
     + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR 0043)
@@ -2108,26 +2108,29 @@ For pasting into a fresh chat to bootstrap context:
     parser, resolve, types, effects, borrow, **mir, ctverify** .sentinel. The ONLY thing
     left is **codegen** (the bootstrap-critical transform → the object/fixed-point).
 
-    ▶ **RESUME AT: (8d-drops-3) — loop-exit drops (break/continue).** Codegen (8/N) is WELL UNDERWAY
-    (ADR 0045, amendments A1–A12): 8a scalars/calls, 8b control flow, 8c-1/2/3 structs/arrays/strings,
-    8d builtins (str_eq/file-IO) + refs (`&`/`&mut`/`*`/`*p=x`) + Vec (vec_new/push/pop/len/`v[i]` +
-    `vec_to_array`) + **HEAP DROPS** ((8d-drops-1) scope-exit array/`Vec`/`[u8]` `sentinel_free`, A11;
-    (8d-drops-2) recursive struct-field drop, A12) — ALL byte-identical to `snc llvm` + behavioural
-    (cc==inkwell) + **leak-free** (14/15 heap fixtures) + modes 0–3 byte-identical (**55/55 emitting
-    fixtures**). 🔑 drops design: **per-binding `sentinel_free`, NO arena** (a perf opt; per-binding is
-    leak-free + the canonical spec); **skip `moved_sources` ALONE** (no tail-returned guard — body tail
-    is consuming so `{tail}⊆{moved}`; `cg_is_moved` scans `mvf`/`mvv`, proven == oracle `DropPlan` in
-    6/N); **two-frame fn** (params + body); struct drop GEPs each `needs_drop` field + recurses (the
-    `ptr_reg` is uniformly an alloca slot OR a field-GEP `%vN`). **NEXT = (8d-drops-3):** the ONE
-    remaining leak — `c5d5_break_continue`'s per-iteration `[u8]` (`let s = "tok"` / `let w = "word"`)
-    leaks on the `break`/`continue` paths (5 leaks) because branching to `loop_after`/`loop_cond` skips
-    the body block's end-of-iteration drop. DRAIN the loop-body scope frame(s) before the branch —
-    mirror production `emit_loop_exit_drops` (codegen lib.rs:3723): on break/continue, walk the open
-    frames from the top down to the loop-body frame, freeing each (the per-iteration drop still runs on
-    the fall-through path via the Block arm, so each runtime path frees once — mutually-exclusive
-    blocks). Need a per-loop `scope_floor` (the cgdv length / oracle scope depth at loop-body entry) on
-    the loop-target stack. Then → **(8e) enums/match** → **(8f) calls/recursion/multi-module** → **(8g)
-    THE BOOTSTRAP FIXED-POINT**. ⚠ The leak GATE is the **`leaks --atExit` sweep** (codesign trick), NOT
+    ▶ **RESUME AT: (8e) — enums + match.** Codegen (8/N) is WELL UNDERWAY (ADR 0045, amendments
+    A1–A13): 8a scalars/calls, 8b control flow, 8c-1/2/3 structs/arrays/strings, 8d builtins
+    (str_eq/file-IO) + refs (`&`/`&mut`/`*`/`*p=x`) + Vec (vec_new/push/pop/len/`v[i]`/`vec_to_array`)
+    + **HEAP DROPS — COMPLETE** ((8d-drops-1) scope-exit array/`Vec`/`[u8]` `sentinel_free`, A11;
+    (8d-drops-2) recursive struct-field drop, A12; (8d-drops-3) loop-exit drops, A13) — ALL
+    byte-identical to `snc llvm` + behavioural (cc==inkwell) + **leak-free (ALL 15 heap fixtures —
+    generated programs match inkwell)** + modes 0–3 byte-identical (**55/55 emitting fixtures**). 🔑
+    drops design (REUSE for enum drops in 8e): **per-binding `sentinel_free`, NO arena**; **skip
+    `moved_sources` ALONE** (`{tail}⊆{moved}`; `cg_is_moved` scans `mvf`/`mvv`, == oracle `DropPlan`);
+    **two-frame fn** (params + body); a `cgdv`/`cgdt`/`cgds` scope pool + `cg_drop_frame` (block exit,
+    drops+truncates) / `cg_drop_range` (break/continue, drops only); struct drop GEPs each `needs_drop`
+    field + recurses; loop-exit drains `cgdv[floor..]` (the flat-reverse == per-frame-reverse identity).
+    **NEXT = (8e) enums/match** — the LAST big Bar-A construct (the selfhost sources declare **14
+    enums**; the AST `Expr`/`Args`/etc. ARE enums, so this unblocks the bootstrap). The oracle currently
+    Errs on `Type::Enum`. An enum is `{ i32 tag, ptr payload }` (ADR 0032): **enum-construct** = set the
+    tag + heap-box the payload (or null for a unit variant); **match** = `switch` on the tag to
+    per-variant blocks, each `extractvalue`/load-payload binding the arm's vars + a memory-cell result
+    merge (NO phi, like `if`); **enum DROP** = null-check the payload + `sentinel_free` (the drop arm
+    already sketched at production lib.rs:3876 — wire it into `emit_drop_for_binding`/`cg_emit_drop` +
+    `needs_drop`). Mirror production `lower_match` / `EnumConstruct` lowering + the `{tag,ptr}` layout.
+    ⚠ recursive-enum payload drop is box-free-only in the language today (a known D.1b limit) — match
+    the production (don't over-engineer). Then → **(8f) calls/recursion/multi-module** → **(8g) THE
+    BOOTSTRAP FIXED-POINT**. ⚠ The leak GATE is the **`leaks --atExit` sweep** (codesign trick), NOT
     the differential/behavioural (a missing free is byte-parity-NEUTRAL — same exit/stdout). ⚠⚠ **The
     behavioural test is ~83s at 55 fixtures** — **SAMPLE it** (targeted inkwell-vs-cc on the changed
     fixture(s) + new seeds; the unchanged fixtures are provably byte-identical via the corpus
