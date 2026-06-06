@@ -338,6 +338,37 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     behavioural test is now ~55–71s (43 fixtures rebuilt twice) — **sample/cache it at (8d)** (the
     `snc build` ground-truth + the `cc` compile per fixture is the cost).
 
+- **A7 — (8d, runtime builtins) LANDED** — the byte-array runtime builtins, done FIRST within (8d)
+  (ahead of Vec/refs/drops) because they're the simplest + most impactful. Codegen lowers `str_eq`,
+  `print_bytes`, `read_file`, `write_file`, byte-identical to `snc llvm` over the corpus
+  (`sentinel_codegen_matches_oracle_on_corpus`, **45/45 emitted** — **`c5d2_strings`** (the D.2
+  strings phase-go, via `str_eq`) AND **`c5d4_file_io`** (the D.4 file-IO phase-go, via
+  `read_file`/`write_file`/`print_bytes` — REAL file I/O) join) + 2 seeds + 1 new golden
+  (`llvm_str_eq_runtime_builtin`), behavioural (`cc`-run == inkwell) and leak-free; modes 0–3 +
+  effects byte-identical.
+  - **Each builtin decomposes its `[u8]` into (ptr, len)** and calls the `sentinel_*` symbol: the
+    `{ i64 len, ptr data }` is `extractvalue`'d into `len`(0) + `ptr`(1), passed as the C ABI's
+    `(ptr, i64, …)`. `str_eq(a,b)` → `i1`; `print_bytes`/`write_file` → `i64`; `read_file(path)`
+    calls with a HOISTED `i64` out-len slot then reassembles the owned `[u8]` `{ out_len, data }`.
+    All are non-generic builtins, so they already route through `dump_targs` (args collected) on the
+    Sentinel side; the oracle handles them in `lower_call` like `len`/`zext`/`trunc`.
+  - **Refactor — `RuntimeSyms`.** The per-symbol declare bools (`used_alloc`/`used_panic`, 8c-2)
+    became a `RuntimeSyms` struct (`alloc`/`panic_oob`/`str_eq`/`read_file`/`write_file`/
+    `print_bytes`) with `merge` + `emit_declares`, so the fixed-order declare block scales as
+    symbols are added (`realloc` joins at the Vec slice). The Sentinel side mirrors it with
+    `cg_used_*` ctx flags + the preamble emitting the SAME fixed order — `c5d2_strings` declares
+    `alloc`+`panic_oob`+`str_eq`; `c5d4_file_io` declares the file symbols. The order is canonical:
+    alloc, panic_oob, str_eq, read_file, write_file, print_bytes.
+  - **`cg_lenptr` (Sentinel)** — a helper emitting the two `extractvalue`s for one `[u8]` operand,
+    returning the len reg (ptr reg = len+1, the next number). Keeps the 4 builtin arms compact.
+  - **NEXT = (8d rest) Vec + heap drops.** Vec (`vec_new`/`push`/`pop`/`len`/`vec_to_array` +
+    `{len,cap,ptr}` + `sentinel_realloc`) needs **ref support** first — `push`/`pop` take `&mut Vec`
+    (in-place field GEP + a realloc grow CFG), so `&v`/`&mut v`/`*p`/`*p = x` (ADR D7 Bar-A refs)
+    come with it. Then **heap drops** (the DropPlan — `sentinel_free` for un-moved heap bindings at
+    scope exit; the box-free recursive-enum drop; Vec/`[u8]` drop) — drops are byte-parity-neutral
+    for behaviour (exit/stdout unaffected by leaks) but needed for a clean fixed-point. ⚠⚠ The
+    behavioural test (~57s at 45) should be **sampled/cached** here.
+
 ## Decision
 
 ### D1. Goal.

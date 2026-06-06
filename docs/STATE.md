@@ -151,6 +151,18 @@ drift); the Sentinel `Str` arm pushes each byte as an `i8` literal operand then 
 sets the cg operand (`cglk=1`/`cglv=cv`, a u8 constant like `Int`) — needed by `c5d2_strings` (8d).
 NEXT = **(8d) `Vec<i64>`/`Vec<u8>`** (`{len,cap,ptr}` + `sentinel_realloc`) + runtime builtins
 (`str_eq`/`read_file`/`write_file`/`print_bytes`) + **heap drops** (DropPlan `sentinel_free`).
+**✅ (8d, runtime builtins) LANDED (ADR 0045 A7) — the byte-array builtins, done FIRST within (8d):**
+`str_eq`/`print_bytes`/`read_file`/`write_file`, byte-identical to `snc llvm` (**45/45 emitted** —
+**`c5d2_strings`** (D.2 strings phase-go, str_eq) AND **`c5d4_file_io`** (D.4 file-IO phase-go,
+read/write/print — REAL file I/O) join) + 2 seeds + 1 golden, behavioural (cc==inkwell) + leak-free;
+modes 0–3 + effects byte-identical. Each builtin `extractvalue`s its `[u8]` into len(0)+ptr(1) and
+calls the `sentinel_*` symbol as `(ptr, i64, …)`; `read_file` uses a hoisted out-len slot then
+reassembles the `[u8]`. Refactor: the per-symbol declare bools became a **`RuntimeSyms`** struct
+(merge + emit_declares, fixed order alloc/panic_oob/str_eq/read_file/write_file/print_bytes); the
+Sentinel side mirrors via `cg_used_*` flags + a `cg_lenptr` helper (extractvalue len/ptr → len reg,
+ptr=len+1). NEXT = **(8d rest) Vec** (`{len,cap,ptr}` + `sentinel_realloc`; `push`/`pop` take
+`&mut Vec` → needs Bar-A **refs** `&`/`&mut`/`*`/`*p=x` first) + **heap drops** (DropPlan
+`sentinel_free` — byte-parity-neutral for behaviour but needed for a clean fixed-point).
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;

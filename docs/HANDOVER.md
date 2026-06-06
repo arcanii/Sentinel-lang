@@ -1979,11 +1979,23 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 > drift); the Sentinel `Str` arm pushes each byte as an `i8` literal operand then reuses
 > `cg_emit_arraylit` (read BEFORE `sink_name` consumes `sb`). Closed a latent gap: the `Char` arm now
 > sets the cg operand (`cglk=1`/`cglv=cv`, a u8 constant like `Int`) — needed by `c5d2_strings` (8d).
-> **NEXT = (8d) `Vec<i64>`/`Vec<u8>`** (`{len,cap,ptr}` + `sentinel_realloc`) + the runtime builtins
-> (`str_eq`/`read_file`/`write_file`/`print_bytes`) + **heap drops** (the DropPlan — `sentinel_free`
-> at scope exit; FIRST slice where the emitted program's *runtime* leaks matter) → (8e) enums/match
-> → (8f) calls/recursion/multi-module → **(8g) the bootstrap fixed-point**. ⚠⚠ The behavioural test
-> rebuilds each emitted fixture twice (~55–71s at 43) — **sample/cache at (8d)**.
+> **✅ (8d, runtime builtins) COMPLETE (ADR 0045 A7) — the byte-array builtins, done FIRST within
+> (8d):** `str_eq`/`print_bytes`/`read_file`/`write_file`, byte-identical to `snc llvm` (**45/45
+> emitted** — **`c5d2_strings`** (D.2 strings phase-go, str_eq) AND **`c5d4_file_io`** (D.4 file-IO
+> phase-go, read/write/print — REAL file I/O) join) + 2 seeds + 1 golden, behavioural (cc==inkwell)
+> + leak-free; modes 0–3 + effects byte-identical. 🔑 Each builtin `extractvalue`s its `[u8]` into
+> len(0)+ptr(1) and calls the `sentinel_*` symbol as `(ptr, i64, …)`; `read_file` uses a HOISTED
+> out-len slot then reassembles the `[u8]`. Refactor: the per-symbol declare bools became a
+> **`RuntimeSyms`** struct (merge + emit_declares; fixed order
+> alloc/panic_oob/str_eq/read_file/write_file/print_bytes); the Sentinel side mirrors via `cg_used_*`
+> flags + a **`cg_lenptr`** helper (extractvalue len/ptr → len reg, ptr=len+1). Non-generic builtins
+> route through `dump_targs` (args collected) already. **NEXT = (8d rest) Vec** (`vec_new`/`push`/
+> `pop`/`len`/`vec_to_array` + `{len,cap,ptr}` + `sentinel_realloc`) — needs Bar-A **refs** first
+> (`&`/`&mut`/`*`/`*p=x`; `push`/`pop` take `&mut Vec` → in-place field GEP + a realloc grow CFG) —
+> then **heap drops** (DropPlan `sentinel_free`; byte-parity-NEUTRAL for behaviour — leaks don't
+> change exit/stdout — but needed for a clean fixed-point) → (8e) enums/match → (8f)
+> calls/recursion/multi-module → **(8g) the bootstrap fixed-point**. ⚠⚠ The behavioural test
+> rebuilds each emitted fixture twice (~57s at 45) — **sample/cache at (8d-Vec)**.
 > Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT; Bar B 8h–8l → full corpus →
 > ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak + the four norms unchanged (below).
 >
@@ -2044,17 +2056,17 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0045 A6** docs commit (HEAD — this commit,
-    (8c-3) strings COMPLETE / slice 8c DONE) atop the (8c-3) feat (`fa8d033` [u8]/string literals +
-    char cg operand), atop the (8c-2) close (`8298460` A5 docs + `a6cc205` arrays feat) + the
-    (8c-1) close (`3ac88cd` A4 docs + `f62466b` structs feat) + the (8b) close (`92040ec` A3 docs +
-    `7b33d49`/`c76db27` feats) + the (8a) commits (`2ed426a` codegen.sentinel + `1931496` the snc
-    llvm oracle) + ADR 0045 PROPOSED (`3f13169`), all atop the (7/N) ADR 0044 A5 close (`3b384bf`).
-    ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin
-    local commits); that's expected, never push.
+    Verify HEAD with `git log -1` — expect the **ADR 0045 A7** docs commit (HEAD — this commit,
+    (8d, runtime builtins) COMPLETE) atop the (8d-builtins) feat (`bd6ee21` str_eq/print_bytes/
+    read_file/write_file), atop the (8c-3) close (`ccadb53` A6 docs + `fa8d033` strings feat — slice
+    8c DONE) + the (8c) feats (`a6cc205` arrays + `f62466b` structs) + the (8b) close (`92040ec` A3
+    docs + `7b33d49`/`c76db27` feats) + the (8a) commits (`2ed426a` codegen.sentinel + `1931496` the
+    snc llvm oracle) + ADR 0045 PROPOSED (`3f13169`), all atop the (7/N) ADR 0044 A5 close
+    (`3b384bf`). ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N"
+    (uncommitted-to-origin local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1461 tests**
-    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [43/43 emitted] + the
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1462 tests**
+    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [45/45 emitted] + the
     `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still 123/123). macOS + LLVM
     18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
 
@@ -2144,12 +2156,19 @@ For pasting into a fresh chat to bootstrap context:
     byte constants → reuses the array machinery (oracle factored `emit_array_buffer` shared by
     ArrayLit+StringLit; Sentinel `Str` arm pushes bytes as `i8` operands + reuses `cg_emit_arraylit`,
     read before `sink_name`). Closed a latent gap: `Char` arm now sets the cg operand (u8 constant
-    like `Int`). **NEXT = (8d) `Vec<i64>`/`Vec<u8>`** (`{len,cap,ptr}` + `sentinel_realloc`) + runtime
-    builtins (`str_eq`/`read_file`/`write_file`/`print_bytes`) + **heap drops** (DropPlan
-    `sentinel_free` — first slice where the emitted program's runtime leaks matter) → (8e)
-    enums/match → (8f) calls/multi-module → **(8g) the bootstrap fixed-point**. ⚠⚠ behavioural test
-    ~55–71s at 43 — sample/cache at (8d). Sub-slices 8a–8l in ADR 0045 D10 (Bar A 8a–8g → the
-    FIXED-POINT (8g); Bar B 8h–8l → full corpus → ADR 0045 ACCEPTED). No in-flight slice.
+    like `Int`). **✅ (8d, runtime builtins) COMPLETE (ADR 0045 A7) — byte-array builtins, FIRST
+    within (8d):** `str_eq`/`print_bytes`/`read_file`/`write_file`, byte-identical to `snc llvm`
+    (45/45 emitted — `c5d2_strings` (str_eq) + `c5d4_file_io` (read/write/print — REAL file I/O) join)
+    + 2 seeds + 1 golden, behavioural + leak-free; modes 0–3 + effects byte-identical. Each
+    `extractvalue`s its `[u8]` into len(0)+ptr(1) and calls `sentinel_*` as `(ptr, i64, …)`;
+    `read_file` uses a hoisted out-len slot. Refactor: per-symbol declare bools → a **`RuntimeSyms`**
+    struct (merge + emit_declares, fixed order); Sentinel `cg_used_*` + a `cg_lenptr` helper.
+    **NEXT = (8d rest) Vec** (`{len,cap,ptr}` + `sentinel_realloc`; `push`/`pop` take `&mut Vec` →
+    needs Bar-A **refs** `&`/`&mut`/`*`/`*p=x` first) + **heap drops** (DropPlan `sentinel_free` —
+    byte-parity-NEUTRAL for behaviour, needed for a clean fixed-point) → (8e) enums/match → (8f)
+    calls/multi-module → **(8g) the bootstrap fixed-point**. ⚠⚠ behavioural test ~57s at 45 —
+    sample/cache at (8d-Vec). Sub-slices 8a–8l in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT (8g);
+    Bar B 8h–8l → full corpus → ADR 0045 ACCEPTED). No in-flight slice.
 
     KEY REUSABLE FINDINGS (carry forward):
     - The back-half stages REUSE the typed program (they can't cheaply re-derive it).
