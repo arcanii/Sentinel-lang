@@ -97,6 +97,9 @@ const SEEDS: &[&str] = &[
     // instruction), `*r` loads through it, `*x = v` stores through it.
     "fn add(a: &i64, b: &i64) -> i64 { *a + *b }\nfn main() -> i64 { let a: i64 = 10; let b: i64 = 32; add(&a, &b) }\n",
     "fn inc(x: &mut i64) -> i64 { let n: i64 = *x + 1; *x = n; *x }\nfn main() -> i64 { let mut a: i64 = 10; let r: i64 = inc(&mut a); a + r }\n",
+    // (8d-Vec) Vec<T> = {len,cap,ptr}: vec_new (constant), push (the len==cap
+    // realloc grow CFG via &mut Vec), v[i] (index, data = field 2), len, pop.
+    "fn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 10); push(&mut v, 20); let a: i64 = v[1]; let l: i64 = len(v); let p: i64 = pop(&mut v); a + l + p }\n",
 ];
 
 #[test]

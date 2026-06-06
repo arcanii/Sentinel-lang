@@ -212,6 +212,7 @@ struct TyCtx {
     cgat: Vec<i64>,   // call-arg stack: operand type handle
     cg_collecting: bool, // true while a call walks its args (gates cg_collect)
     cg_used_alloc: bool, // (8c-2) module emits `declare sentinel_alloc` iff set
+    cg_used_realloc: bool, // (8d-Vec) `declare sentinel_realloc`
     cg_used_panic: bool, // (8c-2) module emits `declare sentinel_panic_oob` iff set
     cg_used_streq: bool, // (8d) `declare sentinel_str_eq`
     cg_used_rdfile: bool, // (8d) `declare sentinel_read_file`
@@ -3538,7 +3539,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0
             };
             if cg_on(c) {
-                cg_emit_index(c, ety, cg_itk, cg_itv, cg_iik, cg_iiv);
+                cg_emit_index(c, ety, tty, cg_itk, cg_itv, cg_iik, cg_iiv);
                 0
             } else {
                 0
@@ -6045,6 +6046,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cgat: vec_new(),
         cg_collecting: false,
         cg_used_alloc: false,
+        cg_used_realloc: false,
         cg_used_panic: false,
         cg_used_streq: false,
         cg_used_rdfile: false,
@@ -6463,6 +6465,12 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        if ctx.cg_used_realloc {
+            append_str(result, "declare ptr @sentinel_realloc(ptr, i64)\n");
+            0
+        } else {
+            0
+        };
         if ctx.cg_used_panic {
             append_str(result, "declare void @sentinel_panic_oob(i64, i64)\n");
             0
@@ -6493,7 +6501,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_prbytes;
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_prbytes;
         if cg_anydecl {
             push(result, '\n');
             0
@@ -6778,6 +6786,15 @@ fn cg_is_ref(c: &mut TyCtx, h: i64) -> bool {
     }
 }
 
+// True iff `h` is a `Vec<T>` (interner kind 11).
+fn cg_is_vec(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        (*c).tk[h - tbase()] == 11
+    }
+}
+
 fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
     if h == 0 {
         cgo_str(c, "i64")
@@ -6801,6 +6818,8 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
             cgo_str(c, "{ i64, ptr }")
         } else if cg_is_ref(c, h) {
             cgo_str(c, "ptr")
+        } else if cg_is_vec(c, h) {
+            cgo_str(c, "{ i64, i64, ptr }")
         } else {
             cgo_str(c, "i64")
         }
@@ -6828,6 +6847,8 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
             append_str(out, "{ i64, ptr }")
         } else if cg_is_ref(c, h) {
             append_str(out, "ptr")
+        } else if cg_is_vec(c, h) {
+            append_str(out, "{ i64, i64, ptr }")
         } else {
             append_str(out, "i64")
         }
@@ -6885,13 +6906,16 @@ fn cg_pass0(out: &mut Vec<u8>, c: &mut TyCtx) -> i64 {
     0
 }
 
-// an operand: a register `%vN` (kind 0) or an integer literal (kind 1).
+// an operand: a register `%vN` (kind 0), an integer literal (kind 1), or (8d-Vec)
+// the empty-`Vec` constant (kind 2 — `vec_new()`'s value, the same for every elem).
 fn cgo_operand(c: &mut TyCtx, kind: i64, val: i64) -> i64 {
     if kind == 0 {
         cgo_str(c, "%v");
         cgo_int(c, val)
-    } else {
+    } else if kind == 1 {
         cgo_int(c, val)
+    } else {
+        cgo_str(c, "{ i64 0, i64 0, ptr null }")
     }
 }
 
@@ -7048,11 +7072,15 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cg_conv(c, "trunc", 0, bk, bv, 3);
         0
     } else if fid == 3 {
-        // (8c-2) len(arr) = extractvalue { i64, ptr } <arr>, 0 (the arg is at snap).
+        // (8c-2/8d) len = extractvalue <agg> <coll>, 0 — `<agg>` is the arg's actual
+        // type (`{i64,ptr}` for `[T]`, `{i64,i64,ptr}` for `Vec<T>`; len is field 0).
         let lk: i64 = (*c).cgak[snap];
         let lv: i64 = (*c).cgav[snap];
+        let lt: i64 = (*c).cgat[snap];
         let ld: i64 = cg_dst(c);
-        cgo_str(c, "extractvalue { i64, ptr } ");
+        cgo_str(c, "extractvalue ");
+        cgo_ty(c, lt);
+        cg_putc(c, ' ');
         cgo_operand(c, lk, lv);
         cgo_str(c, ", 0\n");
         cg_reg(c, ld);
@@ -7143,6 +7171,220 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_int(c, rdata);
         cgo_str(c, ", 1\n");
         cg_reg(c, ra1);
+        0
+    } else if fid == 7 {
+        // (8d-Vec) vec_new() = the empty-Vec constant operand (kind 2).
+        (*c).cglk = 2;
+        (*c).cglv = 0;
+        0
+    } else if fid == 8 {
+        // (8d-Vec) push(&mut v, x): grow if len==cap (realloc), store x, bump len.
+        // Returns i64 0. Field GEPs through the &mut Vec pointer (cgak[snap]).
+        let pu_pk: i64 = (*c).cgak[snap];
+        let pu_pv: i64 = (*c).cgav[snap];
+        let pu_rt: i64 = (*c).cgat[snap];
+        let pu_xk: i64 = (*c).cgak[snap + 1];
+        let pu_xv: i64 = (*c).cgav[snap + 1];
+        let pu_sr: i64 = strip_ref(c, pu_rt);
+        let pu_e: i64 = vec_elem_of(c, pu_sr);
+        let pu_lp: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr { i64, i64, ptr }, ptr ");
+        cgo_operand(c, pu_pk, pu_pv);
+        cgo_str(c, ", i32 0, i32 0\n");
+        let pu_dp: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr { i64, i64, ptr }, ptr ");
+        cgo_operand(c, pu_pk, pu_pv);
+        cgo_str(c, ", i32 0, i32 2\n");
+        let pu_cp: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr { i64, i64, ptr }, ptr ");
+        cgo_operand(c, pu_pk, pu_pv);
+        cgo_str(c, ", i32 0, i32 1\n");
+        let pu_lv: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, pu_lp);
+        cg_putc(c, '\n');
+        let pu_cv: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, pu_cp);
+        cg_putc(c, '\n');
+        let pu_ng: i64 = cg_dst(c);
+        cgo_str(c, "icmp eq i64 %v");
+        cgo_int(c, pu_lv);
+        cgo_str(c, ", %v");
+        cgo_int(c, pu_cv);
+        cg_putc(c, '\n');
+        let pu_gb: i64 = cg_fresh_block(c);
+        let pu_cb: i64 = cg_fresh_block(c);
+        cgo_str(c, "  br i1 %v");
+        cgo_int(c, pu_ng);
+        cgo_str(c, ", label %bb");
+        cgo_int(c, pu_gb);
+        cgo_str(c, ", label %bb");
+        cgo_int(c, pu_cb);
+        cg_putc(c, '\n');
+        cgo_str(c, "bb");
+        cgo_int(c, pu_gb);
+        cgo_str(c, ":\n");
+        let pu_od: i64 = cg_dst(c);
+        cgo_str(c, "load ptr, ptr %v");
+        cgo_int(c, pu_dp);
+        cg_putc(c, '\n');
+        let pu_cx: i64 = cg_dst(c);
+        cgo_str(c, "mul i64 %v");
+        cgo_int(c, pu_cv);
+        cgo_str(c, ", 2\n");
+        let pu_cz: i64 = cg_dst(c);
+        cgo_str(c, "icmp eq i64 %v");
+        cgo_int(c, pu_cv);
+        cgo_str(c, ", 0\n");
+        let pu_nc: i64 = cg_dst(c);
+        cgo_str(c, "select i1 %v");
+        cgo_int(c, pu_cz);
+        cgo_str(c, ", i64 1, i64 %v");
+        cgo_int(c, pu_cx);
+        cg_putc(c, '\n');
+        let pu_sz: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr ");
+        cgo_ty(c, pu_e);
+        cgo_str(c, ", ptr null, i64 1\n");
+        let pu_szi: i64 = cg_dst(c);
+        cgo_str(c, "ptrtoint ptr %v");
+        cgo_int(c, pu_sz);
+        cgo_str(c, " to i64\n");
+        let pu_ns: i64 = cg_dst(c);
+        cgo_str(c, "mul i64 %v");
+        cgo_int(c, pu_nc);
+        cgo_str(c, ", %v");
+        cgo_int(c, pu_szi);
+        cg_putc(c, '\n');
+        let pu_nd: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_realloc(ptr %v");
+        cgo_int(c, pu_od);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, pu_ns);
+        cgo_str(c, ")\n");
+        (*c).cg_used_realloc = true;
+        cgo_str(c, "  store i64 %v");
+        cgo_int(c, pu_nc);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, pu_cp);
+        cg_putc(c, '\n');
+        cgo_str(c, "  store ptr %v");
+        cgo_int(c, pu_nd);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, pu_dp);
+        cg_putc(c, '\n');
+        cgo_str(c, "  br label %bb");
+        cgo_int(c, pu_cb);
+        cg_putc(c, '\n');
+        cgo_str(c, "bb");
+        cgo_int(c, pu_cb);
+        cgo_str(c, ":\n");
+        let pu_dd: i64 = cg_dst(c);
+        cgo_str(c, "load ptr, ptr %v");
+        cgo_int(c, pu_dp);
+        cg_putc(c, '\n');
+        let pu_sl: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr ");
+        cgo_ty(c, pu_e);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, pu_dd);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, pu_lv);
+        cg_putc(c, '\n');
+        cgo_str(c, "  store ");
+        cgo_ty(c, pu_e);
+        cg_putc(c, ' ');
+        cgo_operand(c, pu_xk, pu_xv);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, pu_sl);
+        cg_putc(c, '\n');
+        let pu_nl: i64 = cg_dst(c);
+        cgo_str(c, "add i64 %v");
+        cgo_int(c, pu_lv);
+        cgo_str(c, ", 1\n");
+        cgo_str(c, "  store i64 %v");
+        cgo_int(c, pu_nl);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, pu_lp);
+        cg_putc(c, '\n');
+        (*c).cglk = 1;
+        (*c).cglv = 0;
+        0
+    } else if fid == 9 {
+        // (8d-Vec) pop(&mut v) -> T: empty-check (OOB trap), decrement len, return
+        // data[len-1].
+        let po_pk: i64 = (*c).cgak[snap];
+        let po_pv: i64 = (*c).cgav[snap];
+        let po_rt: i64 = (*c).cgat[snap];
+        let po_sr: i64 = strip_ref(c, po_rt);
+        let po_e: i64 = vec_elem_of(c, po_sr);
+        let po_lp: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr { i64, i64, ptr }, ptr ");
+        cgo_operand(c, po_pk, po_pv);
+        cgo_str(c, ", i32 0, i32 0\n");
+        let po_dp: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr { i64, i64, ptr }, ptr ");
+        cgo_operand(c, po_pk, po_pv);
+        cgo_str(c, ", i32 0, i32 2\n");
+        let po_lv: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, po_lp);
+        cg_putc(c, '\n');
+        let po_nl: i64 = cg_dst(c);
+        cgo_str(c, "sub i64 %v");
+        cgo_int(c, po_lv);
+        cgo_str(c, ", 1\n");
+        let po_ne: i64 = cg_dst(c);
+        cgo_str(c, "icmp sge i64 %v");
+        cgo_int(c, po_nl);
+        cgo_str(c, ", 0\n");
+        let po_ok: i64 = cg_fresh_block(c);
+        let po_em: i64 = cg_fresh_block(c);
+        cgo_str(c, "  br i1 %v");
+        cgo_int(c, po_ne);
+        cgo_str(c, ", label %bb");
+        cgo_int(c, po_ok);
+        cgo_str(c, ", label %bb");
+        cgo_int(c, po_em);
+        cg_putc(c, '\n');
+        cgo_str(c, "bb");
+        cgo_int(c, po_em);
+        cgo_str(c, ":\n");
+        cgo_str(c, "  call void @sentinel_panic_oob(i64 %v");
+        cgo_int(c, po_nl);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, po_lv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_panic = true;
+        cgo_str(c, "  unreachable\n");
+        cgo_str(c, "bb");
+        cgo_int(c, po_ok);
+        cgo_str(c, ":\n");
+        let po_dd: i64 = cg_dst(c);
+        cgo_str(c, "load ptr, ptr %v");
+        cgo_int(c, po_dp);
+        cg_putc(c, '\n');
+        let po_ep: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr ");
+        cgo_ty(c, po_e);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, po_dd);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, po_nl);
+        cg_putc(c, '\n');
+        let po_ev: i64 = cg_dst(c);
+        cgo_str(c, "load ");
+        cgo_ty(c, po_e);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, po_ep);
+        cg_putc(c, '\n');
+        cgo_str(c, "  store i64 %v");
+        cgo_int(c, po_nl);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, po_lp);
+        cg_putc(c, '\n');
+        cg_reg(c, po_ev);
         0
     } else if fid >= 14 {
         let d: i64 = cg_dst(c);
@@ -7337,15 +7579,27 @@ fn cg_emit_arraylit(c: &mut TyCtx, ety: i64, snap: i64) -> i64 {
 // (8c-2) emit `a[i]`: extract len(0)/data(1), bounds-check (0 <= i < len, else
 // `sentinel_panic_oob` + `unreachable`), then GEP+load. Sets the operand to the
 // loaded value. Blocks: oob first (dead-ends), ok second (continues).
-fn cg_emit_index(c: &mut TyCtx, ety: i64, tk: i64, tv: i64, ik: i64, iv: i64) -> i64 {
+fn cg_emit_index(c: &mut TyCtx, ety: i64, tty: i64, tk: i64, tv: i64, ik: i64, iv: i64) -> i64 {
+    // `<agg>` is the target's actual type (`{i64,ptr}` for `[T]` with data at field 1,
+    // `{i64,i64,ptr}` for `Vec<T>` with data at field 2; len is field 0 for both).
     let ln: i64 = cg_dst(c);
-    cgo_str(c, "extractvalue { i64, ptr } ");
+    cgo_str(c, "extractvalue ");
+    cgo_ty(c, tty);
+    cg_putc(c, ' ');
     cgo_operand(c, tk, tv);
     cgo_str(c, ", 0\n");
     let dat: i64 = cg_dst(c);
-    cgo_str(c, "extractvalue { i64, ptr } ");
+    cgo_str(c, "extractvalue ");
+    cgo_ty(c, tty);
+    cg_putc(c, ' ');
     cgo_operand(c, tk, tv);
-    cgo_str(c, ", 1\n");
+    cgo_str(c, ", ");
+    if cg_is_vec(c, tty) {
+        cgo_int(c, 2)
+    } else {
+        cgo_int(c, 1)
+    };
+    cg_putc(c, '\n');
     let ge: i64 = cg_dst(c);
     cgo_str(c, "icmp sge i64 ");
     cgo_operand(c, ik, iv);

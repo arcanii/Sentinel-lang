@@ -451,6 +451,61 @@ fn llvm_refs_address_of_and_deref() {
     );
 }
 
+#[test]
+fn llvm_vec_new_push_and_len() {
+    // 8d-Vec: `Vec<T>` = `{ i64 len, i64 cap, ptr data }` (ADR 0034). vec_new is the
+    // constant `{0,0,null}`; push grows the buffer (len==cap → `sentinel_realloc` to
+    // `max(1,cap*2)*sizeof`) through the `&mut Vec`'s field GEPs, then stores + bumps
+    // len (a grow/cont CFG, no phi); len reads field 0 of `{i64,i64,ptr}`.
+    assert_eq!(
+        llvm_dump(
+            "vec",
+            "fn main() -> i64 {\n    let mut v: Vec<i64> = vec_new();\n    push(&mut v, 7);\n    len(v)\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "declare ptr @sentinel_realloc(ptr, i64)\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v0 = alloca { i64, i64, ptr }\n",
+            "  store { i64, i64, ptr } { i64 0, i64 0, ptr null }, ptr %v0\n",
+            "  %v1 = getelementptr { i64, i64, ptr }, ptr %v0, i32 0, i32 0\n",
+            "  %v2 = getelementptr { i64, i64, ptr }, ptr %v0, i32 0, i32 2\n",
+            "  %v3 = getelementptr { i64, i64, ptr }, ptr %v0, i32 0, i32 1\n",
+            "  %v4 = load i64, ptr %v1\n",
+            "  %v5 = load i64, ptr %v3\n",
+            "  %v6 = icmp eq i64 %v4, %v5\n",
+            "  br i1 %v6, label %bb0, label %bb1\n",
+            "bb0:\n",
+            "  %v7 = load ptr, ptr %v2\n",
+            "  %v8 = mul i64 %v5, 2\n",
+            "  %v9 = icmp eq i64 %v5, 0\n",
+            "  %v10 = select i1 %v9, i64 1, i64 %v8\n",
+            "  %v11 = getelementptr i64, ptr null, i64 1\n",
+            "  %v12 = ptrtoint ptr %v11 to i64\n",
+            "  %v13 = mul i64 %v10, %v12\n",
+            "  %v14 = call ptr @sentinel_realloc(ptr %v7, i64 %v13)\n",
+            "  store i64 %v10, ptr %v3\n",
+            "  store ptr %v14, ptr %v2\n",
+            "  br label %bb1\n",
+            "bb1:\n",
+            "  %v15 = load ptr, ptr %v2\n",
+            "  %v16 = getelementptr i64, ptr %v15, i64 %v4\n",
+            "  store i64 7, ptr %v16\n",
+            "  %v17 = add i64 %v4, 1\n",
+            "  store i64 %v17, ptr %v1\n",
+            "  %v18 = load { i64, i64, ptr }, ptr %v0\n",
+            "  %v19 = extractvalue { i64, i64, ptr } %v18, 0\n",
+            "  %v20 = trunc i64 %v19 to i32\n",
+            "  ret i32 %v20\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {

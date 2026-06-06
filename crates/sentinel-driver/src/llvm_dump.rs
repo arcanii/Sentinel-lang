@@ -38,8 +38,8 @@ use std::fmt::Write;
 
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_resolve::{
-    FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, PRINT_BYTES_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID,
-    U8_TO_I64_FN_ID, WRITE_FILE_FN_ID,
+    FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PUSH_FN_ID,
+    READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, VEC_NEW_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
     Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
@@ -60,6 +60,7 @@ const FIRST_USER_FN: u32 = 14;
 #[derive(Default, Clone, Copy)]
 struct RuntimeSyms {
     alloc: bool,
+    realloc: bool,
     panic_oob: bool,
     str_eq: bool,
     read_file: bool,
@@ -70,6 +71,7 @@ struct RuntimeSyms {
 impl RuntimeSyms {
     fn merge(&mut self, other: RuntimeSyms) {
         self.alloc |= other.alloc;
+        self.realloc |= other.realloc;
         self.panic_oob |= other.panic_oob;
         self.str_eq |= other.str_eq;
         self.read_file |= other.read_file;
@@ -82,6 +84,9 @@ impl RuntimeSyms {
     fn emit_declares(self, out: &mut String) -> bool {
         if self.alloc {
             writeln!(out, "declare ptr @sentinel_alloc(i64)").unwrap();
+        }
+        if self.realloc {
+            writeln!(out, "declare ptr @sentinel_realloc(ptr, i64)").unwrap();
         }
         if self.panic_oob {
             writeln!(out, "declare void @sentinel_panic_oob(i64, i64)").unwrap();
@@ -98,7 +103,13 @@ impl RuntimeSyms {
         if self.print_bytes {
             writeln!(out, "declare i64 @sentinel_print_bytes(ptr, i64)").unwrap();
         }
-        self.alloc || self.panic_oob || self.str_eq || self.read_file || self.write_file || self.print_bytes
+        self.alloc
+            || self.realloc
+            || self.panic_oob
+            || self.str_eq
+            || self.read_file
+            || self.write_file
+            || self.print_bytes
     }
 }
 
@@ -558,10 +569,14 @@ impl Emit<'_> {
                 let arr = self.lower_expr(target)?;
                 let idx = self.lower_expr(index)?;
                 let ety = llvm_ty(elem_ty.to_type())?;
+                // `[T]` is `{i64,ptr}` (data field 1); `Vec<T>` is `{i64,i64,ptr}`
+                // (data field 2 — capacity sits between). `len` is field 0 for both.
+                let aggty = llvm_ty(target.ty)?;
+                let data_field = if matches!(target.ty, Type::Vec(_)) { 2 } else { 1 };
                 let len = self.fresh();
-                writeln!(self.body, "  %v{len} = extractvalue {{ i64, ptr }} {arr}, 0").unwrap();
+                writeln!(self.body, "  %v{len} = extractvalue {aggty} {arr}, 0").unwrap();
                 let dat = self.fresh();
-                writeln!(self.body, "  %v{dat} = extractvalue {{ i64, ptr }} {arr}, 1").unwrap();
+                writeln!(self.body, "  %v{dat} = extractvalue {aggty} {arr}, {data_field}").unwrap();
                 let ge = self.fresh();
                 writeln!(self.body, "  %v{ge} = icmp sge i64 {idx}, 0").unwrap();
                 let lt = self.fresh();
@@ -649,11 +664,12 @@ impl Emit<'_> {
             return Ok(format!("%v{v}"));
         }
         if id == LEN_FN_ID {
-            // `len(arr)` = the collection's length field (`extractvalue 0`); the
-            // `{ i64 len, ptr data }` layout puts `len` first for `[T]`.
+            // `len` works on `[T]` (`{i64,ptr}`) and `Vec<T>` (`{i64,i64,ptr}`) — both
+            // put `len` at field 0; use the arg's actual aggregate type.
             let arr = self.lower_expr(&args[0])?;
+            let aggty = llvm_ty(args[0].ty)?;
             let v = self.fresh();
-            writeln!(self.body, "  %v{v} = extractvalue {{ i64, ptr }} {arr}, 0").unwrap();
+            writeln!(self.body, "  %v{v} = extractvalue {aggty} {arr}, 0").unwrap();
             return Ok(format!("%v{v}"));
         }
         // The byte-array runtime builtins (ADR 0033/0035): each decomposes its
@@ -739,6 +755,105 @@ impl Emit<'_> {
             writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
             return Ok(format!("%v{a1}"));
         }
+        // The growable-collection builtins (ADR 0034). A `Vec<T>` is
+        // `{ i64 len, i64 cap, ptr data }`; push/pop mutate it in place through the
+        // `&mut Vec` pointer (its first arg).
+        if id == VEC_NEW_FN_ID {
+            // An empty vector value — the same constant for every element type.
+            return Ok("{ i64 0, i64 0, ptr null }".to_string());
+        }
+        if id == PUSH_FN_ID || id == POP_FN_ID {
+            // The element type, recovered from the `&mut Vec<T>` first arg.
+            let vec_ty = match args[0].ty {
+                Type::Ref(rid) => self.program.refs[rid.0 as usize].inner,
+                _ => return Err("push/pop arg is not a &mut Vec".into()),
+            };
+            let elem = match vec_ty {
+                Type::Vec(ve) => ve.to_type(),
+                _ => return Err("push/pop is not on a Vec".into()),
+            };
+            let ety = llvm_ty(elem)?;
+            // Lower the args FIRST (push's element next), matching the Sentinel — which
+            // collects both call args before emitting — so a side-effecting arg's
+            // instructions land before the field GEPs on both backends.
+            let vec_ptr = self.lower_expr(&args[0])?;
+            let elem_val = if id == PUSH_FN_ID {
+                self.lower_expr(&args[1])?
+            } else {
+                String::new()
+            };
+            let lenp = self.fresh();
+            writeln!(self.body, "  %v{lenp} = getelementptr {{ i64, i64, ptr }}, ptr {vec_ptr}, i32 0, i32 0").unwrap();
+            let datp = self.fresh();
+            writeln!(self.body, "  %v{datp} = getelementptr {{ i64, i64, ptr }}, ptr {vec_ptr}, i32 0, i32 2").unwrap();
+            if id == PUSH_FN_ID {
+                let capp = self.fresh();
+                writeln!(self.body, "  %v{capp} = getelementptr {{ i64, i64, ptr }}, ptr {vec_ptr}, i32 0, i32 1").unwrap();
+                let lenv = self.fresh();
+                writeln!(self.body, "  %v{lenv} = load i64, ptr %v{lenp}").unwrap();
+                let capv = self.fresh();
+                writeln!(self.body, "  %v{capv} = load i64, ptr %v{capp}").unwrap();
+                let ng = self.fresh();
+                writeln!(self.body, "  %v{ng} = icmp eq i64 %v{lenv}, %v{capv}").unwrap();
+                let gb = self.fresh_block();
+                let cb = self.fresh_block();
+                writeln!(self.body, "  br i1 %v{ng}, label %bb{gb}, label %bb{cb}").unwrap();
+                writeln!(self.body, "bb{gb}:").unwrap();
+                let od = self.fresh();
+                writeln!(self.body, "  %v{od} = load ptr, ptr %v{datp}").unwrap();
+                let cx = self.fresh();
+                writeln!(self.body, "  %v{cx} = mul i64 %v{capv}, 2").unwrap();
+                let cz = self.fresh();
+                writeln!(self.body, "  %v{cz} = icmp eq i64 %v{capv}, 0").unwrap();
+                let nc = self.fresh();
+                writeln!(self.body, "  %v{nc} = select i1 %v{cz}, i64 1, i64 %v{cx}").unwrap();
+                let sz = self.fresh();
+                writeln!(self.body, "  %v{sz} = getelementptr {ety}, ptr null, i64 1").unwrap();
+                let szi = self.fresh();
+                writeln!(self.body, "  %v{szi} = ptrtoint ptr %v{sz} to i64").unwrap();
+                let ns = self.fresh();
+                writeln!(self.body, "  %v{ns} = mul i64 %v{nc}, %v{szi}").unwrap();
+                let nd = self.fresh();
+                writeln!(self.body, "  %v{nd} = call ptr @sentinel_realloc(ptr %v{od}, i64 %v{ns})").unwrap();
+                self.used.realloc = true;
+                writeln!(self.body, "  store i64 %v{nc}, ptr %v{capp}").unwrap();
+                writeln!(self.body, "  store ptr %v{nd}, ptr %v{datp}").unwrap();
+                writeln!(self.body, "  br label %bb{cb}").unwrap();
+                writeln!(self.body, "bb{cb}:").unwrap();
+                let dd = self.fresh();
+                writeln!(self.body, "  %v{dd} = load ptr, ptr %v{datp}").unwrap();
+                let sl = self.fresh();
+                writeln!(self.body, "  %v{sl} = getelementptr {ety}, ptr %v{dd}, i64 %v{lenv}").unwrap();
+                writeln!(self.body, "  store {ety} {elem_val}, ptr %v{sl}").unwrap();
+                let nl = self.fresh();
+                writeln!(self.body, "  %v{nl} = add i64 %v{lenv}, 1").unwrap();
+                writeln!(self.body, "  store i64 %v{nl}, ptr %v{lenp}").unwrap();
+                return Ok("0".into());
+            }
+            // pop: empty-check (reuse the OOB trap), decrement len, return data[len-1].
+            let lenv = self.fresh();
+            writeln!(self.body, "  %v{lenv} = load i64, ptr %v{lenp}").unwrap();
+            let nl = self.fresh();
+            writeln!(self.body, "  %v{nl} = sub i64 %v{lenv}, 1").unwrap();
+            let ne = self.fresh();
+            writeln!(self.body, "  %v{ne} = icmp sge i64 %v{nl}, 0").unwrap();
+            let ok = self.fresh_block();
+            let empty = self.fresh_block();
+            writeln!(self.body, "  br i1 %v{ne}, label %bb{ok}, label %bb{empty}").unwrap();
+            writeln!(self.body, "bb{empty}:").unwrap();
+            writeln!(self.body, "  call void @sentinel_panic_oob(i64 %v{nl}, i64 %v{lenv})").unwrap();
+            self.used.panic_oob = true;
+            writeln!(self.body, "  unreachable").unwrap();
+            writeln!(self.body, "bb{ok}:").unwrap();
+            let dd = self.fresh();
+            writeln!(self.body, "  %v{dd} = load ptr, ptr %v{datp}").unwrap();
+            let ep = self.fresh();
+            writeln!(self.body, "  %v{ep} = getelementptr {ety}, ptr %v{dd}, i64 %v{nl}").unwrap();
+            let ev = self.fresh();
+            writeln!(self.body, "  %v{ev} = load {ety}, ptr %v{ep}").unwrap();
+            writeln!(self.body, "  store i64 %v{nl}, ptr %v{lenp}").unwrap();
+            return Ok(format!("%v{ev}"));
+        }
         if id.0 < FIRST_USER_FN {
             return Err(format!("builtin call #{} (deferred to a later slice)", id.0));
         }
@@ -785,6 +900,9 @@ fn llvm_ty(ty: Type) -> Result<String, String> {
         // A reference `&T`/`&mut T` is an opaque pointer (LLVM doesn't distinguish
         // mutability; the pointee type is recovered from `program.refs` at the deref).
         Type::Ref(_) => Ok("ptr".into()),
+        // A `Vec<T>` is `{ i64 len, i64 cap, ptr data }` (ADR 0034) — data is FIELD 2
+        // (the capacity sits between len and data, vs `[T]`'s field 1).
+        Type::Vec(_) => Ok("{ i64, i64, ptr }".into()),
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
     }
 }
