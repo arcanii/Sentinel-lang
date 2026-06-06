@@ -7,9 +7,11 @@
 //! (8a) covers the STRAIGHT-LINE subset (const, var, unary neg/not, binary and cmp,
 //! `let`, assign-to-var, value-block, user-fn calls, the u8<->i64 width builtins);
 //! (8b) adds control flow (if/else, while/break/continue, &&/||); (8c-1) adds
-//! aggregates — STRUCTS (Pass-0 `%Struct.N` type decls, `insertvalue` literals,
-//! `extractvalue` field reads, pass-by-value params/returns) — all alloca/load/store,
-//! NO phi. The oracle is PARTIAL-by-Err (it Errs + exits nonzero on
+//! STRUCTS (Pass-0 `%Struct.N` type decls, `insertvalue` literals, `extractvalue`
+//! field reads, pass-by-value params/returns); (8c-2) adds ARRAYS (`[T]` =
+//! `{ i64, ptr }`, heap-alloc literals via `sentinel_alloc`, `a[i]` with a
+//! `sentinel_panic_oob` bounds-check, `len`) — all alloca/load/store, NO phi. The
+//! oracle is PARTIAL-by-Err (it Errs + exits nonzero on
 //! a not-yet-ported construct), so the differential skips those fixtures, exactly as it
 //! skips upstream parse/resolve/type rejects; the supported subset grows per sub-slice
 //! (8b..8l). Behavioural correctness of the `.ll` is covered by `tests/llvm.rs` (the
@@ -76,6 +78,12 @@ const SEEDS: &[&str] = &[
     "struct Inner { x: i64 }\nstruct Outer { inner: Inner, y: i64 }\nfn main() -> i64 { let o = Outer { inner: Inner { x: 7 }, y: 3 }; o.inner.x + o.y }\n",
     "struct Tagged { value: i64, valid: bool, count: i64 }\nfn main() -> i64 { let t = Tagged { value: 5, valid: true, count: 9 }; if t.valid { t.value + t.count } else { 0 } }\n",
     "struct Pair { a: i64, b: i64 }\nfn pick(c: bool) -> Pair { if c { Pair { a: 1, b: 2 } } else { Pair { a: 10, b: 20 } } }\nfn main() -> i64 { let p = pick(true); p.a + p.b }\n",
+    // (8c-2) aggregates — arrays: `{ i64, ptr }`, heap alloc + GEP-stores +
+    // insertvalue; `a[i]` bounds-check + GEP+load; `len` = extractvalue 0; the
+    // module declares only the runtime symbols actually used.
+    "fn main() -> i64 { let xs = [10, 20, 30]; xs[1] + len(xs) }\n",
+    "fn first(xs: [i64]) -> i64 { xs[0] }\nfn main() -> i64 { first([7, 8, 9]) }\n",
+    "fn main() -> i64 { let xs: [i64] = []; len(xs) }\n",
 ];
 
 #[test]

@@ -272,6 +272,63 @@ fn llvm_struct_decl_lit_and_field() {
     );
 }
 
+#[test]
+fn llvm_array_lit_index_and_len() {
+    // 8c-2 arrays: `[T]` is the abi-v1 `{ i64, ptr }`. A literal heap-allocates
+    // (GEP-sizeof + `sentinel_alloc`), GEP-stores each element, builds `{len,ptr}`;
+    // `a[i]` bounds-checks (0 <= i < len, else `sentinel_panic_oob` + unreachable)
+    // then GEPs+loads; `len` is `extractvalue 0`. The module declares only the
+    // runtime symbols actually used (both here). xs[1] + len = 20 + 3 = 23.
+    assert_eq!(
+        llvm_dump(
+            "array",
+            "fn main() -> i64 {\n    let xs = [10, 20, 30];\n    xs[1] + len(xs)\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "declare ptr @sentinel_alloc(i64)\n",
+            "declare void @sentinel_panic_oob(i64, i64)\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v8 = alloca { i64, ptr }\n",
+            "  %v0 = getelementptr i64, ptr null, i64 3\n",
+            "  %v1 = ptrtoint ptr %v0 to i64\n",
+            "  %v2 = call ptr @sentinel_alloc(i64 %v1)\n",
+            "  %v3 = getelementptr i64, ptr %v2, i64 0\n",
+            "  store i64 10, ptr %v3\n",
+            "  %v4 = getelementptr i64, ptr %v2, i64 1\n",
+            "  store i64 20, ptr %v4\n",
+            "  %v5 = getelementptr i64, ptr %v2, i64 2\n",
+            "  store i64 30, ptr %v5\n",
+            "  %v6 = insertvalue { i64, ptr } undef, i64 3, 0\n",
+            "  %v7 = insertvalue { i64, ptr } %v6, ptr %v2, 1\n",
+            "  store { i64, ptr } %v7, ptr %v8\n",
+            "  %v9 = load { i64, ptr }, ptr %v8\n",
+            "  %v10 = extractvalue { i64, ptr } %v9, 0\n",
+            "  %v11 = extractvalue { i64, ptr } %v9, 1\n",
+            "  %v12 = icmp sge i64 1, 0\n",
+            "  %v13 = icmp slt i64 1, %v10\n",
+            "  %v14 = and i1 %v12, %v13\n",
+            "  br i1 %v14, label %bb1, label %bb0\n",
+            "bb0:\n",
+            "  call void @sentinel_panic_oob(i64 1, i64 %v10)\n",
+            "  unreachable\n",
+            "bb1:\n",
+            "  %v15 = getelementptr i64, ptr %v11, i64 1\n",
+            "  %v16 = load i64, ptr %v15\n",
+            "  %v17 = load { i64, ptr }, ptr %v8\n",
+            "  %v18 = extractvalue { i64, ptr } %v17, 0\n",
+            "  %v19 = add i64 %v16, %v18\n",
+            "  %v20 = trunc i64 %v19 to i32\n",
+            "  ret i32 %v20\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {

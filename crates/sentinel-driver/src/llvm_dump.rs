@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
-use sentinel_resolve::{FnId, VarId, I64_TO_U8_FN_ID, U8_TO_I64_FN_ID};
+use sentinel_resolve::{FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, U8_TO_I64_FN_ID};
 use sentinel_types::{
     Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
 };
@@ -83,17 +83,40 @@ pub fn dump(program: &TypedProgram) -> Result<String, String> {
     if emitted_struct {
         out.push('\n');
     }
-    // FnId order = source order; deterministic + matches the Sentinel side.
+    // FnId order = source order; deterministic + matches the Sentinel side. Build
+    // the fns into a buffer so the runtime-symbol `declare`s — emitted only for the
+    // symbols the bodies actually use — can be placed BEFORE them in the module.
+    let mut fns_buf = String::new();
+    let mut used_alloc = false;
+    let mut used_panic = false;
     let mut fns: Vec<&TypedFnDef> = program.fns.iter().collect();
     fns.sort_by_key(|f| f.id.0);
     for f in fns {
-        dump_fn(f, program, &mut out)?;
+        dump_fn(f, program, &mut fns_buf, &mut used_alloc, &mut used_panic)?;
+        fns_buf.push('\n');
+    }
+    // Runtime-symbol declarations (8c-2+): only the symbols actually used, in a
+    // fixed order, so a program using no heap/bounds stays byte-identical to 8c-1.
+    if used_alloc {
+        writeln!(out, "declare ptr @sentinel_alloc(i64)").unwrap();
+    }
+    if used_panic {
+        writeln!(out, "declare void @sentinel_panic_oob(i64, i64)").unwrap();
+    }
+    if used_alloc || used_panic {
         out.push('\n');
     }
+    out.push_str(&fns_buf);
     Ok(out)
 }
 
-fn dump_fn(f: &TypedFnDef, program: &TypedProgram, out: &mut String) -> Result<(), String> {
+fn dump_fn(
+    f: &TypedFnDef,
+    program: &TypedProgram,
+    out: &mut String,
+    used_alloc: &mut bool,
+    used_panic: &mut bool,
+) -> Result<(), String> {
     let sig = program.signature(f.id);
     if !sig.type_params.is_empty() {
         return Err(format!("generic fn `{}` (deferred to Bar B)", f.name));
@@ -116,6 +139,8 @@ fn dump_fn(f: &TypedFnDef, program: &TypedProgram, out: &mut String) -> Result<(
         allocas: String::new(),
         body: String::new(),
         loops: Vec::new(),
+        used_alloc: false,
+        used_panic: false,
     };
     // Allocas are HOISTED to the entry block: param slots, `let` slots, and the
     // if-result slot all land in `e.allocas` (emitted first), while stores/loads/
@@ -154,6 +179,8 @@ fn dump_fn(f: &TypedFnDef, program: &TypedProgram, out: &mut String) -> Result<(
     out.push_str(&e.allocas);
     out.push_str(&e.body);
     out.push_str("}\n");
+    *used_alloc |= e.used_alloc;
+    *used_panic |= e.used_panic;
     Ok(())
 }
 
@@ -170,6 +197,10 @@ struct Emit<'a> {
     /// The enclosing loops' (cond-block, after-block) labels — `break` branches
     /// to the innermost after-block, `continue` to its cond-block.
     loops: Vec<(u32, u32)>,
+    /// Set when this fn emits a `sentinel_alloc` / `sentinel_panic_oob` call —
+    /// the module emits a `declare` for each symbol it actually uses (8c-2+).
+    used_alloc: bool,
+    used_panic: bool,
 }
 
 impl Emit<'_> {
@@ -433,6 +464,68 @@ impl Emit<'_> {
                 writeln!(self.body, "  %v{v} = extractvalue {sty} {agg}, {field_index}").unwrap();
                 Ok(format!("%v{v}"))
             }
+            // An array literal `[e1, …]` heap-allocates `n * sizeof(elem)` bytes
+            // (`sentinel_alloc`), GEP-stores each element, and builds the abi-v1
+            // `{ i64 len, ptr data }`. Element operands are lowered FIRST (collect-
+            // then-emit, like a struct lit). Size = the GEP-sizeof constant idiom
+            // (`getelementptr T, null, n` then `ptrtoint`), correct for any element
+            // type incl. structs, without replicating layout/padding.
+            TypedExprKind::ArrayLit { elem_ty, elements } => {
+                let ety = llvm_ty(elem_ty.to_type())?;
+                let mut elem_ops = Vec::with_capacity(elements.len());
+                for el in elements {
+                    elem_ops.push(self.lower_expr(el)?);
+                }
+                let n = elements.len();
+                let sz = self.fresh();
+                writeln!(self.body, "  %v{sz} = getelementptr {ety}, ptr null, i64 {n}").unwrap();
+                let szi = self.fresh();
+                writeln!(self.body, "  %v{szi} = ptrtoint ptr %v{sz} to i64").unwrap();
+                let data = self.fresh();
+                writeln!(self.body, "  %v{data} = call ptr @sentinel_alloc(i64 %v{szi})").unwrap();
+                self.used_alloc = true;
+                for (i, op) in elem_ops.iter().enumerate() {
+                    let ep = self.fresh();
+                    writeln!(self.body, "  %v{ep} = getelementptr {ety}, ptr %v{data}, i64 {i}").unwrap();
+                    writeln!(self.body, "  store {ety} {op}, ptr %v{ep}").unwrap();
+                }
+                let a0 = self.fresh();
+                writeln!(self.body, "  %v{a0} = insertvalue {{ i64, ptr }} undef, i64 {n}, 0").unwrap();
+                let a1 = self.fresh();
+                writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
+                Ok(format!("%v{a1}"))
+            }
+            // `a[i]` — extract len(0)/data(1), bounds-check (0 <= i < len), then
+            // GEP+load. OOB → `sentinel_panic_oob` + `unreachable`; the OK block
+            // continues (subsequent code emits into it).
+            TypedExprKind::Index { target, index, elem_ty } => {
+                let arr = self.lower_expr(target)?;
+                let idx = self.lower_expr(index)?;
+                let ety = llvm_ty(elem_ty.to_type())?;
+                let len = self.fresh();
+                writeln!(self.body, "  %v{len} = extractvalue {{ i64, ptr }} {arr}, 0").unwrap();
+                let dat = self.fresh();
+                writeln!(self.body, "  %v{dat} = extractvalue {{ i64, ptr }} {arr}, 1").unwrap();
+                let ge = self.fresh();
+                writeln!(self.body, "  %v{ge} = icmp sge i64 {idx}, 0").unwrap();
+                let lt = self.fresh();
+                writeln!(self.body, "  %v{lt} = icmp slt i64 {idx}, %v{len}").unwrap();
+                let inb = self.fresh();
+                writeln!(self.body, "  %v{inb} = and i1 %v{ge}, %v{lt}").unwrap();
+                let oob_b = self.fresh_block();
+                let ok_b = self.fresh_block();
+                writeln!(self.body, "  br i1 %v{inb}, label %bb{ok_b}, label %bb{oob_b}").unwrap();
+                writeln!(self.body, "bb{oob_b}:").unwrap();
+                writeln!(self.body, "  call void @sentinel_panic_oob(i64 {idx}, i64 %v{len})").unwrap();
+                self.used_panic = true;
+                writeln!(self.body, "  unreachable").unwrap();
+                writeln!(self.body, "bb{ok_b}:").unwrap();
+                let ep = self.fresh();
+                writeln!(self.body, "  %v{ep} = getelementptr {ety}, ptr %v{dat}, i64 {idx}").unwrap();
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = load {ety}, ptr %v{ep}").unwrap();
+                Ok(format!("%v{v}"))
+            }
             _ => Err("expression not yet ported (straight-line 8a only)".into()),
         }
     }
@@ -457,6 +550,14 @@ impl Emit<'_> {
             let x = self.lower_expr(&args[0])?;
             let v = self.fresh();
             writeln!(self.body, "  %v{v} = trunc i64 {x} to i8").unwrap();
+            return Ok(format!("%v{v}"));
+        }
+        if id == LEN_FN_ID {
+            // `len(arr)` = the collection's length field (`extractvalue 0`); the
+            // `{ i64 len, ptr data }` layout puts `len` first for `[T]`.
+            let arr = self.lower_expr(&args[0])?;
+            let v = self.fresh();
+            writeln!(self.body, "  %v{v} = extractvalue {{ i64, ptr }} {arr}, 0").unwrap();
             return Ok(format!("%v{v}"));
         }
         if id.0 < FIRST_USER_FN {
@@ -497,6 +598,11 @@ fn llvm_ty(ty: Type) -> Result<String, String> {
         // A user struct is the named aggregate declared in Pass 0. (Generic
         // instances — `Type::GenericInstance` — are Bar B → still Err below.)
         Type::Struct(id) => Ok(format!("%Struct.{}", id.0)),
+        // `[T]` is the abi-v1 `{ i64 len, ptr data }` (ADR 0029 §2) — an inline
+        // literal struct type, the same for every element type (the data is an
+        // opaque heap pointer), so it needs no Pass-0 name. The element type only
+        // matters for the GEP stride in ArrayLit/Index (carried by those nodes).
+        Type::Array(_) => Ok("{ i64, ptr }".into()),
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
     }
 }
