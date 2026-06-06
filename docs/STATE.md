@@ -250,6 +250,19 @@ variant (`varpay[varps[j]..]` via `variant_flat`). Sentinel: `cgo_ty`/`ll_type_t
 `cg_emit_drop`/`cg_needs_drop` enum arms. NEXT = **(8e-2) match** (switch on tag → per-variant payload
 bind + memory-cell merge; lights up `c5d1_enum`) → **(8f) calls/recursion/multi-module** → **(8g) THE
 BOOTSTRAP FIXED-POINT.**
+**✅ (8e-2) MATCH LANDED (ADR 0045 A15) — (8e) ENUMS COMPLETE:** `match` = an IF-ELSE CHAIN over the
+variant arms (NOT a switch — single-pass, since the Sentinel walks the arm cons-list consuming; a switch
+would need a temp buffer) + per-arm payload bind + memory-cell merge. Byte-identical to `snc llvm`
+(**57/57** — `c5d1_enum` + recursive-enum `selfhost_ast_drop` join) + 2 seeds + 1 golden
+(`llvm_match_if_else_chain`), behavioural (cc==inkwell: c5d1→42, ast_drop→11) + leak-free; modes
+0–3+effects byte-identical; 1470 tests; scg leak-free. **THE MOST COMPLEX EMISSION — byte-identical FIRST
+TRY.** Per arm: `icmp eq tag,vidx`+`br arm/next`; arm: bind payloads (`getelementptr <pstruct>, payload,
+0, i` + load → hoisted slot, keyed by VarId, NOT drop-recorded — aliases the box) + body + `store result`
++ `br merge`; `unreachable` default; merge `load`. Result slot type = `expr.ty` (oracle) / `exp`
+(Sentinel). Sentinel: 6 `cg_m_*` fields (tag/payload/result/merge SAVE+RESTORE for nesting; armnext
+captured into a dump_tarms local; pj for the pstruct); prologue+bind in `dump_tpat`/`dump_tbinds`,
+epilogue in `dump_tarms`. NEXT = **(8f) calls/recursion/multi-module** → **(8g) THE BOOTSTRAP
+FIXED-POINT** (the Bar-A construct set is now complete — only whole-program plumbing remains).
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;

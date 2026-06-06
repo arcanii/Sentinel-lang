@@ -2092,10 +2092,10 @@ For pasting into a fresh chat to bootstrap context:
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin
     local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1469 tests**
-    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [55/55 emitted, WITH heap
-    drops + enum construct/drop] + the `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc.
-    still 123/123). macOS + LLVM 18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1470 tests**
+    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [57/57 emitted, WITH heap
+    drops + enums (construct/drop/match)] + the `snc llvm` oracle tests `tests/llvm.rs`;
+    `mir`/`ctverify`/etc. still 123/123). macOS + LLVM 18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
     + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR 0043)
@@ -2107,48 +2107,33 @@ For pasting into a fresh chat to bootstrap context:
     parser, resolve, types, effects, borrow, **mir, ctverify** .sentinel. The ONLY thing
     left is **codegen** (the bootstrap-critical transform → the object/fixed-point).
 
-    ▶ **RESUME AT: (8e-2) — match (switch + payload bind + merge).** Codegen (8/N) is WELL UNDERWAY
-    (ADR 0045, amendments A1–A14): 8a scalars/calls, 8b control flow, 8c-1/2/3 structs/arrays/strings,
-    8d builtins (str_eq/file-IO) + refs + Vec (…/`vec_to_array`) + **HEAP DROPS COMPLETE** (drops-1/2/3,
-    A11–A13; ALL 15 heap fixtures leak-free) + **(8e-1) ENUMS** (type `{ i32 tag, ptr payload }` +
-    enum-construct `{tag, heap-boxed-payload-or-null}` + enum drop null-check+free, A14) — ALL
-    byte-identical to `snc llvm` + behavioural (cc==inkwell) + leak-free + modes 0–3 byte-identical
-    (**55/55 emitting fixtures**; `c5d1_enum` needs match → still Err). 🔑 enum (8e-1): `{i32,ptr}` is
-    INLINE (no Pass-0 name); construct lowers args FIRST (collect via `dump_cargs` under `cg_collecting`)
-    then `cg_emit_enum_construct`; payload struct `{…}` from `varpay[varps[j]..]` (`variant_flat`);
-    drop is BOX-FREE-ONLY (`needs_drop(Enum)`=any variant has payload). **NEXT = (8e-2) match** — the
-    real complexity + the slice that LIGHTS UP `c5d1_enum` AND `selfhost_ast_drop` (→ 57/57). 🔑🔑 **THE
-    ORACLE DESIGN IS ALREADY PROVEN** (built + validated this session, then reverted to keep the tree
-    green pending the Sentinel mirror): use an **IF-ELSE CHAIN, NOT a `switch`** — behaviourally identical
-    for disjoint variants (cc==inkwell), but it lowers in a SINGLE PASS (the Sentinel walks the arm
-    cons-list CONSUMING, with no slice to pre-scan for the switch's up-front case-block table — a switch
-    would force a temp-buffer). Validated end-to-end: `c5d1_enum`→42, `selfhost_ast_drop`→11, both
-    ==inkwell, leak-clean (the recursive-enum nested-box leak is box-free-only on BOTH backends — a
-    consistent D.1b limit, and `leaks` false-negatives it anyway). The proven oracle `lower_match`
-    (in `llvm_dump.rs`, mirror it): lower scrutinee → `tag = extractvalue {i32,ptr} _, 0`,
-    `payload = extractvalue _, 1`; **`result = alloca <ty>` BEFORE the arms — use `expr.ty` in the oracle;
-    in the Sentinel use `exp`** (the match's expectation == its type for BOTH emitting fixtures, which are
-    fn-body tails — verified); `merge_b = fresh_block`. Then per VARIANT arm (source order): `cmp = icmp
-    eq i32 %tag, <vidx>`; `arm_b/next_b = fresh_block`; `br i1 %cmp, arm_b, next_b`; `arm_b:` bind
-    payloads + lower body + `store <ty> <v>, result` + `br merge`; `next_b:` (becomes the current block
-    for the next arm). After the arms: `unreachable` (no wildcard in the emitting set; a `_` wildcard
-    would be the final-else body — defer, none emit). `merge_b:` `load <ty>, result`. **Payload bind**
-    (mirror `bind_pattern_payloads`, lib.rs:4238): per binding i, `getelementptr <pstruct>, ptr
-    %payload, i32 0, i32 i` (pstruct = `cg_emit_pstruct(j)`) + `load <fty>` + a HOISTED `cg_alloca` slot +
-    `store` + `cg_slot_set(var_id, slot)`; do NOT cg_drop_record (a heap binding aliases the box, freed by
-    the scrutinee's enum drop — would double-free). **Sentinel threading plan:** ~6 TyCtx fields
-    (`cg_m_tag`/`cg_m_payload`/`cg_m_result`/`cg_m_rty`/`cg_m_merge`/`cg_m_armnext` + `cg_m_pj` for the
-    pstruct) SET in the `Expr::Match` arm (SAVE/RESTORE around `dump_tarms` for NESTED matches in arm
-    bodies); the prologue (icmp/br/arm_b label) + payload bind emit in `dump_tpat`/`dump_tbinds` (which
-    already compute vidx/`j`/pbase + bind via `varpay[pbase+k]`); the epilogue (store/br merge/next_b
-    label) in `dump_tarms` — CAPTURE `cg_m_armnext` into a LOCAL right after `dump_tpat` (before the body
-    walk) so a nested match doesn't clobber it. Then → **(8f)
-    calls/recursion/multi-module** → **(8g) THE BOOTSTRAP FIXED-POINT**. ⚠ The leak GATE is the **`leaks
-    --atExit` sweep** (codesign trick), NOT the differential/behavioural (a missing free is
-    byte-parity-NEUTRAL — same exit/stdout). ⚠⚠ **The behavioural test is ~83s at 55 fixtures** —
-    **SAMPLE it** (targeted inkwell-vs-cc on the changed fixture(s) + new seeds; the unchanged fixtures
-    are provably byte-identical via the corpus differential), run the full suite ONCE as the final gate.
-    The PER-SLICE METHOD: extend
+    ▶ **RESUME AT: (8f) — the path to the bootstrap fixed-point.** Codegen (8/N) is WELL ALONG (ADR
+    0045, amendments A1–A15): 8a scalars/calls, 8b control flow, 8c structs/arrays/strings, 8d builtins
+    (str_eq/file-IO) + refs + Vec (…/`vec_to_array`) + **HEAP DROPS COMPLETE** (drops-1/2/3, A11–A13; all
+    15 heap fixtures leak-free) + **ENUMS COMPLETE** ((8e-1) type/construct/drop A14; (8e-2) **match** —
+    an if-else chain, A15) — ALL byte-identical to `snc llvm` + behavioural (cc==inkwell) + leak-free +
+    modes 0–3 byte-identical (**57/57 emitting fixtures**). 🔑 match (8e-2): IF-ELSE CHAIN not switch
+    (single-pass — the Sentinel walks the arm cons-list consuming); per arm `icmp eq tag,vidx`+br, bind
+    payloads (GEP+load→hoisted slot, NOT drop-recorded — aliases the box), body, store result, br merge;
+    `unreachable` default; merge load. 6 `cg_m_*` fields (save/restore for nesting). **The Bar-A construct
+    set is now COMPLETE** (scalars/control-flow/structs/arrays/strings/refs/Vec/builtins/heap-drops/
+    enums+match — the whole non-exotic core the selfhost sources use). **NEXT = (8f): the path to the
+    fixed-point.** FIRST SCOUT — compile each `selfhost/*.sentinel` stage through `snc llvm` (or the
+    merged path) and see what Errs: the per-construct work is done for the CORPUS, but the selfhost
+    sources THEMSELVES must compile via codegen, and they're **multi-module** (`use a::b::Item;`, the D.6
+    merge). The oracle `run_llvm` uses the SINGLE-FILE pipeline (parse→resolve→check→borrow→dump); the
+    fixed-point needs the **merged multi-module** program lowered (cf. `run_build_merged`, the D.6 path in
+    the driver — `merge_modules` qualifies names + a `Renamer`; see [[sentinel_d6_modules_surface]]).
+    So (8f) ≈ wire codegen into the merged-program path (a `snc llvm` over the module graph) + close any
+    straggler constructs the selfhost sources hit that the 57-fixture corpus didn't exercise. THEN **(8g)
+    THE BOOTSTRAP FIXED-POINT:** `snc build` (inkwell) compiles `selfhost/codegen.sentinel` → `scg`; `scg`
+    emits `.ll` for the selfhost sources; `cc` → `scg'`; assert `scg'`'s emitted `.ll` == `scg`'s
+    (byte-for-byte self-compilation — the capstone; this is *why* C5 shipped `abi-v1` + reproducible
+    builds). ⚠ The leak GATE is the **`leaks --atExit` sweep** (codesign trick), NOT the
+    differential/behavioural (a missing free is byte-parity-NEUTRAL — same exit/stdout). ⚠⚠ **The
+    behavioural test is ~84s at 57 fixtures** — **SAMPLE it** (targeted inkwell-vs-cc on the changed
+    fixture(s) + new seeds; the unchanged fixtures are provably byte-identical via the corpus
+    differential), run the full suite ONCE as the final gate. The PER-SLICE METHOD: extend
     `crates/sentinel-driver/src/llvm_dump.rs` (the oracle — a canonical `.ll` spec we define) +
     `selfhost/types.sentinel` (the mode-4 FUSED codegen — the `cg_*` machinery:
     `cgo_ty`/`cg_emit_*`/`cg_dst`/`cgo_operand`/`cg_fresh_block`/the `cgak`/`cgav`/`cgat` collect

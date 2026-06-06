@@ -581,6 +581,41 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     into slots), a memory-cell result merge (no phi, like `if`), wildcard/`unreachable` default. Lights
     up `c5d1_enum` (and the recursive-enum `selfhost_ast_drop`). Mirror `lower_match` (lib.rs:4144).
 
+- **A15 — (8e-2) MATCH LANDED — (8e) ENUMS COMPLETE:** `match` lowers to an IF-ELSE CHAIN over the
+  variant arms (NOT a `switch`), the memory-cell merge, and per-arm payload binding. Byte-identical to
+  `snc llvm` (`sentinel_codegen_matches_oracle_on_corpus`, **57/57 emitted** — `c5d1_enum` AND the
+  recursive-enum `selfhost_ast_drop` join) + 2 new seeds + 1 new golden (`llvm_match_if_else_chain`),
+  behavioural (`cc`-run == inkwell: c5d1→42, selfhost_ast_drop→11) and leak-free; modes 0–3 + effects
+  byte-identical; 1470 tests, four-check green; scg compiler leak-free. **The most complex emission in
+  the port — byte-identical on the FIRST try** (the value/block-numbering discipline holds at switch
+  scale). Behaviourally mirrors the production `lower_match` (codegen lib.rs:4144) + `bind_pattern_payloads`
+  (lib.rs:4238).
+  - **🔑 IF-ELSE CHAIN, NOT `switch`.** Behaviourally identical for disjoint variants (the variants are
+    a partition; the wildcard is the catch-all), but it lowers in a SINGLE PASS — the Sentinel walks the
+    arm cons-list CONSUMING, with no slice to pre-scan for a switch's up-front case→block table (a switch
+    would force a temp buffer for the arm bodies). The oracle (a slice) matches the same shape. Per arm:
+    `icmp eq i32 %tag, <vidx>` → `br` to the arm block (bind + body + `store` result + `br merge`) or the
+    next-check block; after the arms `unreachable` (exhaustive — no wildcard in the emitting set; a `_`
+    body would be the final else, deferred); the merge `load`s the result (the if-merge memory cell).
+  - **Result slot type.** The oracle alloca's `result` BEFORE the arms with `expr.ty`; the Sentinel uses
+    `exp` (the match's expectation == its type for a USED match — both emitting fixtures are fn-body
+    tails). Tag/payload are `extractvalue 0`/`1` of the scrutinee `{i32,ptr}`.
+  - **Payload bind** (`bind_pattern_payloads`): per binding, `getelementptr <pstruct>, ptr %payload, i32
+    0, i32 i` + `load` into a fresh HOISTED slot keyed by the binding's VarId (so the arm body's `Var`
+    reads it); a `_` binding still gets a slot. NOT drop-recorded — a heap binding aliases the box's
+    buffer (owned + freed by the scrutinee's enum drop), so dropping it would double-free.
+  - **Sentinel threading.** 6 `cg_m_*` fields: `cg_m_tag`/`cg_m_payload`/`cg_m_result`/`cg_m_merge` SET
+    in the `Expr::Match` arm and SAVED+RESTORED around `dump_tarms` (nested matches); `cg_m_armnext`
+    (the arm's next-check block, set in `dump_tpat`, CAPTURED into a `dump_tarms` local before the body
+    so a nested match can't clobber it) and `cg_m_pj` (the variant flat index, for `cg_emit_pstruct` in
+    the bind). The prologue (icmp/br/arm-label) + bind emit in `dump_tpat`/`dump_tbinds`; the epilogue
+    (store/br merge/next-label) in `dump_tarms`. ⚠ `selfhost_ast_drop` is a recursive enum — its
+    nested-box leak is box-free-only on BOTH backends (the D.1b limit), consistent + `leaks`-clean.
+  - **NEXT = (8f) calls/recursion/multi-module** → **(8g) THE BOOTSTRAP FIXED-POINT.** The Bar-A
+    construct set is now essentially complete (scalars, control flow, structs, arrays/strings, refs,
+    Vec, builtins, heap drops, enums+match) — what remains is the whole-program plumbing for the
+    fixed-point.
+
 ## Decision
 
 ### D1. Goal.
