@@ -2117,17 +2117,32 @@ For pasting into a fresh chat to bootstrap context:
     INLINE (no Pass-0 name); construct lowers args FIRST (collect via `dump_cargs` under `cg_collecting`)
     then `cg_emit_enum_construct`; payload struct `{…}` from `varpay[varps[j]..]` (`variant_flat`);
     drop is BOX-FREE-ONLY (`needs_drop(Enum)`=any variant has payload). **NEXT = (8e-2) match** — the
-    real complexity + the slice that LIGHTS UP `c5d1_enum` (→ 56/56). Mirror production `lower_match`
-    (codegen lib.rs:4144): extract tag (field 0) + payload ptr (field 1) from the scrutinee; a hoisted
-    result alloca; an LLVM `switch` on the tag → one block per VARIANT arm + a default block (the `_`
-    wildcard body, or `unreachable` — exhaustiveness is a type-check guarantee); each variant arm BINDS
-    its payloads (`bind_pattern_payloads`, lib.rs:4238: GEP each field of the boxed payload struct +
-    load into a fresh alloca slot keyed by the binding's VarId, so the arm body's `Var(bind)` reads it),
-    lowers the body, stores to the result alloca, branches to the merge; merge loads the result (the
-    no-phi memory-cell merge, like `if`). The Sentinel walks `Expr::Match(mscr,marms)` /
-    `dump_tarms`/`dump_tpat`/`dump_tbinds` (the typer already binds payloads via `varpay[pbase+k]`) —
-    add the cg emission alongside. ⚠ ALSO lights up the recursive-enum `selfhost_ast_drop` (box-free
-    drop already handled — match the production's leak on nested boxes). Then → **(8f)
+    real complexity + the slice that LIGHTS UP `c5d1_enum` AND `selfhost_ast_drop` (→ 57/57). 🔑🔑 **THE
+    ORACLE DESIGN IS ALREADY PROVEN** (built + validated this session, then reverted to keep the tree
+    green pending the Sentinel mirror): use an **IF-ELSE CHAIN, NOT a `switch`** — behaviourally identical
+    for disjoint variants (cc==inkwell), but it lowers in a SINGLE PASS (the Sentinel walks the arm
+    cons-list CONSUMING, with no slice to pre-scan for the switch's up-front case-block table — a switch
+    would force a temp-buffer). Validated end-to-end: `c5d1_enum`→42, `selfhost_ast_drop`→11, both
+    ==inkwell, leak-clean (the recursive-enum nested-box leak is box-free-only on BOTH backends — a
+    consistent D.1b limit, and `leaks` false-negatives it anyway). The proven oracle `lower_match`
+    (in `llvm_dump.rs`, mirror it): lower scrutinee → `tag = extractvalue {i32,ptr} _, 0`,
+    `payload = extractvalue _, 1`; **`result = alloca <ty>` BEFORE the arms — use `expr.ty` in the oracle;
+    in the Sentinel use `exp`** (the match's expectation == its type for BOTH emitting fixtures, which are
+    fn-body tails — verified); `merge_b = fresh_block`. Then per VARIANT arm (source order): `cmp = icmp
+    eq i32 %tag, <vidx>`; `arm_b/next_b = fresh_block`; `br i1 %cmp, arm_b, next_b`; `arm_b:` bind
+    payloads + lower body + `store <ty> <v>, result` + `br merge`; `next_b:` (becomes the current block
+    for the next arm). After the arms: `unreachable` (no wildcard in the emitting set; a `_` wildcard
+    would be the final-else body — defer, none emit). `merge_b:` `load <ty>, result`. **Payload bind**
+    (mirror `bind_pattern_payloads`, lib.rs:4238): per binding i, `getelementptr <pstruct>, ptr
+    %payload, i32 0, i32 i` (pstruct = `cg_emit_pstruct(j)`) + `load <fty>` + a HOISTED `cg_alloca` slot +
+    `store` + `cg_slot_set(var_id, slot)`; do NOT cg_drop_record (a heap binding aliases the box, freed by
+    the scrutinee's enum drop — would double-free). **Sentinel threading plan:** ~6 TyCtx fields
+    (`cg_m_tag`/`cg_m_payload`/`cg_m_result`/`cg_m_rty`/`cg_m_merge`/`cg_m_armnext` + `cg_m_pj` for the
+    pstruct) SET in the `Expr::Match` arm (SAVE/RESTORE around `dump_tarms` for NESTED matches in arm
+    bodies); the prologue (icmp/br/arm_b label) + payload bind emit in `dump_tpat`/`dump_tbinds` (which
+    already compute vidx/`j`/pbase + bind via `varpay[pbase+k]`); the epilogue (store/br merge/next_b
+    label) in `dump_tarms` — CAPTURE `cg_m_armnext` into a LOCAL right after `dump_tpat` (before the body
+    walk) so a nested match doesn't clobber it. Then → **(8f)
     calls/recursion/multi-module** → **(8g) THE BOOTSTRAP FIXED-POINT**. ⚠ The leak GATE is the **`leaks
     --atExit` sweep** (codesign trick), NOT the differential/behavioural (a missing free is
     byte-parity-NEUTRAL — same exit/stdout). ⚠⚠ **The behavioural test is ~83s at 55 fixtures** —
