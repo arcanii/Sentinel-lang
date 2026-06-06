@@ -202,6 +202,20 @@ fixture + 2 seeds), then run once as the final gate. NEXT = **heap drops** (Drop
 scope exit — the textual `.ll` now allocs `Vec`/array buffers it never frees; byte-parity-NEUTRAL for
 behaviour, needed for a clean fixed-point) → **(8e) enums/match** → **(8f) calls/recursion/multi-module**
 → **(8g) THE BOOTSTRAP FIXED-POINT.**
+**✅ (8d-drops-1) SCOPE-EXIT HEAP DROPS LANDED (ADR 0045 A11) — array/`Vec`/`[u8]` `sentinel_free`:**
+at each block exit the un-moved heap bindings are freed in reverse decl order; byte-identical to `snc
+llvm` (**55/55**, now WITH drops) + 2 seeds + 5 updated + 1 new golden, behavioural (cc==inkwell — drops
+don't change exit/stdout) + **leak-free** (13/15 heap fixtures; 1466 tests, four-check green); modes
+0–3+effects byte-identical; scg compiler leak-free. 🔑 TWO simplifying calls (leaks-validated): (1)
+**per-binding `sentinel_free`, NO arena** (the arena is a perf opt; per-binding is equally leak-free +
+our canonical spec — `c54_scope_arena` clean); (2) **skip `moved_sources` ALONE, no tail-returned guard**
+(the body tail is walked consuming → `{tail}⊆{moved}`; `cg_is_moved` ⟺ oracle `DropPlan`, proven == in
+6/N — `c24_moved`/`c23_array_move` no double-free). **Two-frame fn** (scope-0 params + scope-1 body;
+body drops then param drops before `ret`). Oracle: `run_llvm` runs `borrow_check`, threads `DropPlan`
+into `dump`. Sentinel: `cgdv`/`cgdt`/`cgds` pool + `cg_drop_record`/`cg_drop_frame`/`cg_emit_drop`/
+`cg_is_moved`; `sentinel_free` declare after realloc. ⚠ REMAINING: `c16_array_in_struct` → **(8d-drops-2)**
+struct recursive field drop; `c5d5_break_continue` → **(8d-drops-3)** loop-exit drops. Then → **(8e)
+enums/match**.
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;

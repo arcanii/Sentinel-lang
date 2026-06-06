@@ -458,6 +458,47 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     buffers it never frees) → **(8e) enums/match** → **(8f) calls/recursion/multi-module** → **(8g)
     THE BOOTSTRAP FIXED-POINT.**
 
+- **A11 — (8d-drops-1) SCOPE-EXIT HEAP DROPS LANDED — array / `Vec` / `[u8]` `sentinel_free`:** at
+  each block's exit the un-moved heap-backed bindings are freed in reverse declaration order, so
+  the generated programs stop leaking. Byte-identical to `snc llvm` over the corpus
+  (`sentinel_codegen_matches_oracle_on_corpus`, still **55/55 emitted**, now WITH drops) + 2 new
+  seeds + 5 updated goldens + 1 new golden (`llvm_scope_drops_moved_and_nested`), behavioural
+  (`cc`-run == inkwell — drops don't change exit/stdout) and **leak-free under `leaks --atExit`**
+  (13 of the 15 heap fixtures; the other two are the next two slices). Modes 0–3 + effects
+  byte-identical; 1466 tests, four-check green. Mirrors the production `emit_frame_drops` /
+  `emit_drop_for_binding` (codegen lib.rs:3666/3742).
+  - **Two key design calls that SIMPLIFY the port** (both validated by the leaks sweep):
+    - **Per-binding `sentinel_free`, NO arena routing.** Production routes primitive array literals
+      (`[i64]`/`[i32]`/`[bool]`) into a per-scope arena bulk-freed by `sentinel_arena_exit`
+      (`compute_arena_routed`, lib.rs:7574) — a perf optimization, NOT a correctness requirement. The
+      oracle is OUR canonical spec, and the behavioural test compares *behaviour* not `.ll` text, so a
+      plain per-binding free is equally leak-free, far simpler, and byte-parity-clean. Arenas →
+      deferred (Bar B). `c54_scope_arena` (nested-block arrays) is leak-free via per-binding frees.
+    - **Skip `moved_sources` ALONE — no separate tail-returned guard.** Production skips
+      `moved ∪ {tail-returned}`; but the body tail is walked in a CONSUMING context, so a returned
+      `Var` is already recorded as a move → `{tail-returned} ⊆ {moved}`. Skipping `moved` alone gives
+      the identical drop set with no `&enum`-peek (which Sentinel can't do). The Sentinel's move set
+      (`mvf`/`mvv`) was already proven == the oracle's `DropPlan` in the (6/N) borrow slice, so
+      `cg_is_moved` ⟺ `moved_sources_for`. Validated: `c24_moved_array_no_double_free` /
+      `c23_array_move` (recursive move) → exit-correct, 0 leaks, no double-free.
+  - **Two-frame fn structure.** A fn has scope-0 (params) + scope-1 (the body block); body-frame
+    drops fire first, then param-frame drops, before `ret` — so a `[u8]` param of a non-consuming
+    callee (e.g. `show(b: [u8])`) is freed by the callee, and `reverse(all) = reverse(body) ++
+    reverse(params)`. The oracle's `dump_fn` opens both frames explicitly; the Sentinel's
+    `type_fn` opens the param frame (mark before `emit_tparams`) and the Block arm opens the body
+    frame — frames nest LIFO via the recursive Block walk, so the mark is a local (no stack). ⚠ The
+    param-frame drop must fire BEFORE `curfn` is cleared (`cg_is_moved` keys on it).
+  - **Plumbing.** Oracle: `run_llvm` runs `sentinel_borrow_check::borrow_check(&typed)` and threads
+    the `DropPlan` into `dump`; `Emit` gained `drop_plan` / `current_fn` / `var_ty` / `scopes`.
+    Sentinel: a `cgdv`/`cgdt`/`cgds` scope-drop pool (VarId/type/slot) + `cg_drop_record` (at each
+    param + `let`), `cg_drop_frame` (reverse-free [mark..] + truncate), `cg_emit_drop` (Array→free
+    field 1, Vec→free field 2), `cg_is_moved`. `sentinel_free` is a new declare on both sides
+    (`RuntimeSyms.free` / `cg_used_free`; declares right after `realloc`).
+  - **REMAINING (the next two slices):** `c16_array_in_struct` needs **(8d-drops-2)** recursive
+    struct-field drop (its `.ll` emits no free yet — the `leaks` 0 is a conservative false negative;
+    inkwell genuinely frees it). `c5d5_break_continue` needs **(8d-drops-3)** loop-exit drops (the
+    per-iteration `[u8]` on the `break`/`continue` paths — 5 leaks today). Then → **(8e) enums/match**.
+
 ## Decision
 
 ### D1. Goal.
