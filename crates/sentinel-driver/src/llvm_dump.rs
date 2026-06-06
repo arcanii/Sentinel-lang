@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
+use sentinel_borrow_check::DropPlan;
 use sentinel_resolve::{
     FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PUSH_FN_ID,
     READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
@@ -62,6 +63,9 @@ const FIRST_USER_FN: u32 = 14;
 struct RuntimeSyms {
     alloc: bool,
     realloc: bool,
+    /// `sentinel_free(ptr) -> void` (C2.4) — scope-exit heap drops (8d-drops).
+    /// Pairs with alloc/realloc, so declares right after them.
+    free: bool,
     panic_oob: bool,
     str_eq: bool,
     read_file: bool,
@@ -77,6 +81,7 @@ impl RuntimeSyms {
     fn merge(&mut self, other: RuntimeSyms) {
         self.alloc |= other.alloc;
         self.realloc |= other.realloc;
+        self.free |= other.free;
         self.panic_oob |= other.panic_oob;
         self.str_eq |= other.str_eq;
         self.read_file |= other.read_file;
@@ -93,6 +98,9 @@ impl RuntimeSyms {
         }
         if self.realloc {
             writeln!(out, "declare ptr @sentinel_realloc(ptr, i64)").unwrap();
+        }
+        if self.free {
+            writeln!(out, "declare void @sentinel_free(ptr)").unwrap();
         }
         if self.panic_oob {
             writeln!(out, "declare void @sentinel_panic_oob(i64, i64)").unwrap();
@@ -114,6 +122,7 @@ impl RuntimeSyms {
         }
         self.alloc
             || self.realloc
+            || self.free
             || self.panic_oob
             || self.str_eq
             || self.read_file
@@ -126,7 +135,7 @@ impl RuntimeSyms {
 /// Emit the canonical `.ll` for `program`, or `Err(why)` if it uses a
 /// construct not yet ported (the caller exits nonzero so the differential
 /// skips the fixture).
-pub fn dump(program: &TypedProgram) -> Result<String, String> {
+pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, String> {
     let mut out = String::new();
     writeln!(out, "target triple = \"{TARGET_TRIPLE}\"").unwrap();
     out.push('\n');
@@ -164,7 +173,7 @@ pub fn dump(program: &TypedProgram) -> Result<String, String> {
     let mut fns: Vec<&TypedFnDef> = program.fns.iter().collect();
     fns.sort_by_key(|f| f.id.0);
     for f in fns {
-        dump_fn(f, program, &mut fns_buf, &mut used)?;
+        dump_fn(f, program, drop_plan, &mut fns_buf, &mut used)?;
         fns_buf.push('\n');
     }
     // Runtime-symbol declarations (8c-2+): only the symbols actually used, in a
@@ -179,6 +188,7 @@ pub fn dump(program: &TypedProgram) -> Result<String, String> {
 fn dump_fn(
     f: &TypedFnDef,
     program: &TypedProgram,
+    drop_plan: &DropPlan,
     out: &mut String,
     used: &mut RuntimeSyms,
 ) -> Result<(), String> {
@@ -201,6 +211,10 @@ fn dump_fn(
         next: 0,
         block: 0,
         slots: HashMap::new(),
+        var_ty: HashMap::new(),
+        scopes: Vec::new(),
+        drop_plan,
+        current_fn: f.id,
         allocas: String::new(),
         body: String::new(),
         loops: Vec::new(),
@@ -212,16 +226,29 @@ fn dump_fn(
     // only AFTER its then-branch is walked, and (b) keeps loop-body allocas out of
     // the loop (no per-iteration stack growth — ADR 0036). The param STORE stays
     // in the body.
+    // 8d-drops: params live in the outermost scope frame (frame 0); the fn body is
+    // a block that pushes frame 1. At fn exit the body-frame drops fire first, then
+    // the param-frame drops (reverse declaration order overall) — matching the
+    // production codegen's scope-0 (params) + scope-1 (body) structure.
+    e.scopes.push(Vec::new());
     for (i, p) in f.params.iter().enumerate() {
         let ty = llvm_ty(p.ty)?;
         let slot = e.alloca(&ty);
         writeln!(e.body, "  store {ty} %arg{i}, ptr %v{slot}").unwrap();
         e.slots.insert(p.id, slot);
+        e.var_ty.insert(p.id, p.ty);
+        e.scopes.last_mut().unwrap().push(p.id);
     }
+    // The body block (frame 1): its locals drop at the body's end, before the params.
+    e.scopes.push(Vec::new());
     for stmt in &f.body.stmts {
         e.lower_stmt(stmt)?;
     }
     let tail = e.lower_expr(&f.body.tail)?;
+    e.emit_scope_drops()?; // body-frame drops
+    e.scopes.pop();
+    e.emit_scope_drops()?; // param-frame drops
+    e.scopes.pop();
     if sig.is_main {
         let t = e.fresh();
         writeln!(e.body, "  %v{t} = trunc i64 {tail} to i32").unwrap();
@@ -255,6 +282,17 @@ struct Emit<'a> {
     next: u32,
     block: u32,
     slots: HashMap<VarId, u32>,
+    /// 8d-drops: the type of each bound var, for the scope-exit drop dispatch.
+    var_ty: HashMap<VarId, Type>,
+    /// 8d-drops: the per-scope declared VarIds (one inner `Vec` per lexical block,
+    /// outermost = the fn's param frame). Drops fire in reverse declaration order at
+    /// each block's exit. See [`Self::emit_scope_drops`].
+    scopes: Vec<Vec<VarId>>,
+    /// 8d-drops: the borrow-check move plan — a binding in `moved_sources_for` is
+    /// owned + dropped by its consumer, so the current fn skips its scope-exit free.
+    drop_plan: &'a DropPlan,
+    /// 8d-drops: the fn being emitted (to key `moved_sources_for`).
+    current_fn: FnId,
     allocas: String,
     body: String,
     /// The enclosing loops' (cond-block, after-block) labels — `break` branches
@@ -296,6 +334,10 @@ impl Emit<'_> {
                 let slot = self.alloca(&llty);
                 writeln!(self.body, "  store {llty} {v}, ptr %v{slot}").unwrap();
                 self.slots.insert(*id, slot);
+                // 8d-drops: record the binding in the current scope frame so it is
+                // freed at the block's exit (unless moved out — see emit_scope_drops).
+                self.var_ty.insert(*id, *ty);
+                self.scopes.last_mut().expect("a scope frame is open").push(*id);
                 Ok(())
             }
             TypedStmtKind::Assign { target, value } => match &target.kind {
@@ -626,10 +668,74 @@ impl Emit<'_> {
     }
 
     fn lower_block_expr(&mut self, b: &TypedBlock) -> Result<String, String> {
+        // 8d-drops: a nested `{ … }` block opens a scope frame whose locals are freed
+        // at its exit (after the tail value is computed, before the block's value is
+        // used by the parent). Moved-out / tail-returned bindings are in
+        // `moved_sources` and skipped (the body tail is walked consuming).
+        self.scopes.push(Vec::new());
         for stmt in &b.stmts {
             self.lower_stmt(stmt)?;
         }
-        self.lower_expr(&b.tail)
+        let val = self.lower_expr(&b.tail)?;
+        self.emit_scope_drops()?;
+        self.scopes.pop();
+        Ok(val)
+    }
+
+    /// 8d-drops: free the un-moved heap-backed bindings of the top scope frame, in
+    /// reverse declaration order. A binding in the fn's `moved_sources` is owned +
+    /// dropped by its consumer — and that set already contains tail-returned
+    /// bindings (the body tail is walked consuming, so returning a `Var` records it
+    /// as a move), so skipping `moved` alone avoids every double-free without a
+    /// separate tail-returned guard.
+    fn emit_scope_drops(&mut self) -> Result<(), String> {
+        let dp = self.drop_plan;
+        let moved = dp.moved_sources_for(self.current_fn);
+        let scope = self.scopes.last().cloned().unwrap_or_default();
+        for &id in scope.iter().rev() {
+            if moved.contains(&id) {
+                continue;
+            }
+            let ty = match self.var_ty.get(&id) {
+                Some(&t) => t,
+                None => continue,
+            };
+            let slot = match self.slots.get(&id) {
+                Some(&s) => s,
+                None => continue,
+            };
+            self.emit_drop_for_binding(slot, ty)?;
+        }
+        Ok(())
+    }
+
+    /// 8d-drops: emit a `sentinel_free` for a binding at alloca `slot` of type `ty`.
+    /// An array `[T]` (`{ i64, ptr }`) frees its data pointer (field 1); a `Vec<T>`
+    /// (`{ i64, i64, ptr }`) frees field 2 (`sentinel_free(null)` is a safe no-op, so
+    /// an empty `vec_new()` drops cleanly with no guard). Primitives / refs have no
+    /// heap → nothing. Struct recursive field drop + the Bar-B shapes
+    /// (nullable/enum/class) are later slices; their fixtures don't emit yet.
+    fn emit_drop_for_binding(&mut self, slot: u32, ty: Type) -> Result<(), String> {
+        match ty {
+            Type::Array(_) => {
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = load {{ i64, ptr }}, ptr %v{slot}").unwrap();
+                let d = self.fresh();
+                writeln!(self.body, "  %v{d} = extractvalue {{ i64, ptr }} %v{v}, 1").unwrap();
+                writeln!(self.body, "  call void @sentinel_free(ptr %v{d})").unwrap();
+                self.used.free = true;
+            }
+            Type::Vec(_) => {
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = load {{ i64, i64, ptr }}, ptr %v{slot}").unwrap();
+                let d = self.fresh();
+                writeln!(self.body, "  %v{d} = extractvalue {{ i64, i64, ptr }} %v{v}, 2").unwrap();
+                writeln!(self.body, "  call void @sentinel_free(ptr %v{d})").unwrap();
+                self.used.free = true;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Emit a heap `[T]` buffer from already-rendered element operands: the

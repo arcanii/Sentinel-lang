@@ -219,6 +219,14 @@ struct TyCtx {
     cg_used_wrfile: bool, // (8d) `declare sentinel_write_file`
     cg_used_prbytes: bool, // (8d) `declare sentinel_print_bytes`
     cg_used_memcpy: bool, // (8d-Vec-2) `declare void @llvm.memcpy.p0.p0.i64` (vec_to_array)
+    cg_used_free: bool, // (8d-drops) `declare void @sentinel_free` (scope-exit heap drops)
+    // (8d-drops) per-block scope frames for drop emission: each bound var (param /
+    // `let`) records (VarId, type, slot); a block's exit frees the un-moved
+    // heap-backed ones in reverse order. Frames nest via the recursive Block walk —
+    // each block remembers its entry length (a mark) and truncates back to it.
+    cgdv: Vec<i64>,   // scope-drop pool (append-only): VarId
+    cgdt: Vec<i64>,   // scope-drop pool: the binding's type handle
+    cgds: Vec<i64>,   // scope-drop pool: the binding's alloca `%vN` (paired with cgdv)
     cg_suppress: bool,   // true while walking an assign target (the Var arm records, no load)
     cg_lastvid: i64,  // the VarId the most-recent Var node resolved to (for assign)
     // (8b) the body is buffered per-fn so ALLOCAS can be HOISTED to the entry block
@@ -3082,11 +3090,24 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         },
         Expr::Block(stmts, tail) => {
             append_str(out, "(block");
+            // (8d-drops) a block opens a scope frame; its un-moved heap locals are
+            // freed at its exit (after the tail value, before it's used by the parent).
+            let cgmark: i64 = if cg_on(c) {
+                len((*c).cgdv)
+            } else {
+                0
+            };
             dump_tstmts(out, stmts, src, c, gb);
             push(out, ' ');
             // The block's value is its tail — thread the expectation through to it.
             let tt: i64 = dump_texpr(out, tail, exp, src, c, gb);
             close_ty(out, tt, c);
+            if cg_on(c) {
+                cg_drop_frame(c, cgmark);
+                0
+            } else {
+                0
+            };
             tt
         },
         Expr::Call(cn, ca) => {
@@ -4218,6 +4239,7 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
                 let cgslot: i64 = cg_alloca(c, letty);
                 cg_store(c, letty, rk, rv, cgslot);
                 cg_slot_set(c, lvid, cgslot);
+                cg_drop_record(c, lvid, letty, cgslot);
                 0
             } else {
                 0
@@ -4502,6 +4524,7 @@ fn emit_tparams(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
             let cgpidx: i64 = len((*c).cgpty);
             let cgslot: i64 = cg_alloca(c, pty);
             cg_slot_set(c, vid, cgslot);
+            cg_drop_record(c, vid, pty, cgslot);
             push(&mut (*c).cgpty, pty);
             cgo_str(c, "  store ");
             cgo_ty(c, pty);
@@ -4560,6 +4583,14 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     } else {
         0
     };
+    // (8d-drops) the param frame's mark (0 after cg_reset). `emit_tparams` records the
+    // params into the drop pools; the body block (frame 1) drops its own locals; then
+    // the param frame (frame 0) is freed below — matching the production scope-0/1 order.
+    let cgpmark: i64 = if cg_on(c) {
+        len((*c).cgdv)
+    } else {
+        0
+    };
     append_str(out, "(fn #");
     append_int(out, 14 + fnidx);
     push(out, ' ');
@@ -4587,6 +4618,14 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     // The fn return type is the body's expectation — a `?T`-returning fn widens its
     // tail (`dump_texpr` on the body `Block` threads `rty` to the tail).
     dump_texpr(out, body, rty, src, c, gb);
+    // (8d-drops) free the param frame (frame 0) — AFTER the body-block drops (emitted
+    // inside the Block arm), BEFORE `curfn` is cleared (cg_is_moved keys on it).
+    if cg_on(c) {
+        cg_drop_frame(c, cgpmark);
+        0
+    } else {
+        0
+    };
     (*c).curfn = 0 - 1;
     // (7/N) MIR: the body's value (`lastval`) is the fn's return; terminate the
     // current block + dump this fn's MIR into `mirout`.
@@ -6054,6 +6093,10 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_used_wrfile: false,
         cg_used_prbytes: false,
         cg_used_memcpy: false,
+        cg_used_free: false,
+        cgdv: vec_new(),
+        cgdt: vec_new(),
+        cgds: vec_new(),
         cg_suppress: false,
         cg_lastvid: 0 - 1,
         cgbody: vec_new(),
@@ -6473,6 +6516,12 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        if ctx.cg_used_free {
+            append_str(result, "declare void @sentinel_free(ptr)\n");
+            0
+        } else {
+            0
+        };
         if ctx.cg_used_panic {
             append_str(result, "declare void @sentinel_panic_oob(i64, i64)\n");
             0
@@ -6512,7 +6561,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_prbytes || ctx.cg_used_memcpy;
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_prbytes || ctx.cg_used_memcpy;
         if cg_anydecl {
             push(result, '\n');
             0
@@ -6672,6 +6721,9 @@ fn cg_reset(c: &mut TyCtx) -> i64 {
     clear_i64(&mut (*c).cgalloca_ty);
     clear_i64(&mut (*c).cg_loop_cond);
     clear_i64(&mut (*c).cg_loop_after);
+    clear_i64(&mut (*c).cgdv);
+    clear_i64(&mut (*c).cgdt);
+    clear_i64(&mut (*c).cgds);
     (*c).cgnext = 0;
     (*c).cglk = 0;
     (*c).cglv = 0;
@@ -7049,6 +7101,104 @@ fn cg_alloca(c: &mut TyCtx, ty: i64) -> i64 {
     push(&mut (*c).cgalloca_sl, slot);
     push(&mut (*c).cgalloca_ty, ty);
     slot
+}
+
+// (8d-drops) record a scope-drop entry: (VarId, type, alloca slot). Called for each
+// param + `let` so the owning block frees it (if un-moved) at exit.
+fn cg_drop_record(c: &mut TyCtx, vid: i64, ty: i64, slot: i64) -> i64 {
+    push(&mut (*c).cgdv, vid);
+    push(&mut (*c).cgdt, ty);
+    push(&mut (*c).cgds, slot);
+    0
+}
+
+// (8d-drops) is `vid` a moved source of fn `fnidx`? Scans the borrow analysis's
+// `mvf`/`mvv` side-table (the same set `snc borrow` dumps) — a moved binding is owned
+// + dropped by its consumer (incl. a tail-returned value, recorded as a consuming
+// move), so it is skipped at scope exit. Mirrors `DropPlan::moved_sources_for`.
+fn cg_is_moved(c: &mut TyCtx, fnidx: i64, vid: i64) -> bool {
+    let n: i64 = len((*c).mvf);
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < n {
+        if (*c).mvf[i] == fnidx {
+            if (*c).mvv[i] == vid {
+                found = true;
+                0
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// (8d-drops) `sentinel_free` a binding of type `ty` at alloca `slot`: an array `[T]`
+// (`{ i64, ptr }`) frees its data pointer (field 1); a `Vec<T>` (`{ i64, i64, ptr }`)
+// frees field 2 (`sentinel_free(null)` is a safe no-op, so an empty `vec_new()` drops
+// cleanly). Primitives / refs have no heap → nothing. Struct recursive field drop +
+// the Bar-B shapes are later slices. Mirrors the oracle's `emit_drop_for_binding`.
+fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
+    if cg_is_array(c, ty) {
+        let adv: i64 = cg_dst(c);
+        cgo_str(c, "load { i64, ptr }, ptr %v");
+        cgo_int(c, slot);
+        cg_putc(c, '\n');
+        let add: i64 = cg_dst(c);
+        cgo_str(c, "extractvalue { i64, ptr } %v");
+        cgo_int(c, adv);
+        cgo_str(c, ", 1\n");
+        cgo_str(c, "  call void @sentinel_free(ptr %v");
+        cgo_int(c, add);
+        cgo_str(c, ")\n");
+        (*c).cg_used_free = true;
+        0
+    } else if cg_is_vec(c, ty) {
+        let vdv: i64 = cg_dst(c);
+        cgo_str(c, "load { i64, i64, ptr }, ptr %v");
+        cgo_int(c, slot);
+        cg_putc(c, '\n');
+        let vdd: i64 = cg_dst(c);
+        cgo_str(c, "extractvalue { i64, i64, ptr } %v");
+        cgo_int(c, vdv);
+        cgo_str(c, ", 2\n");
+        cgo_str(c, "  call void @sentinel_free(ptr %v");
+        cgo_int(c, vdd);
+        cgo_str(c, ")\n");
+        (*c).cg_used_free = true;
+        0
+    } else {
+        0
+    }
+}
+
+// (8d-drops) free the top scope frame [mark..]: the un-moved heap-backed bindings in
+// REVERSE declaration order, then truncate the pools back to `mark`. Called at each
+// block's exit (body-block + nested blocks via the Block arm; the param frame in
+// `type_fn`). Frames nest LIFO via the recursive walk, so `mark` is a local — no stack.
+fn cg_drop_frame(c: &mut TyCtx, mark: i64) -> i64 {
+    let mut i: i64 = len((*c).cgdv) - 1;
+    while i >= mark {
+        let vid: i64 = (*c).cgdv[i];
+        let ty: i64 = (*c).cgdt[i];
+        let slot: i64 = (*c).cgds[i];
+        if cg_is_moved(c, (*c).curfn, vid) {
+            0
+        } else {
+            cg_emit_drop(c, ty, slot)
+        };
+        i = i - 1;
+    }
+    while len((*c).cgdv) > mark {
+        let _a: i64 = pop(&mut (*c).cgdv);
+        let _b: i64 = pop(&mut (*c).cgdt);
+        let _s: i64 = pop(&mut (*c).cgds);
+        0
+    }
+    0
 }
 
 // collect one call arg (its operand + type) onto the arg stacks (gated).

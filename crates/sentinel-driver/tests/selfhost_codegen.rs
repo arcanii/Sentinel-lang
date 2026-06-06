@@ -106,6 +106,12 @@ const SEEDS: &[&str] = &[
     // (elem = i64, a wider GEP-sizeof stride).
     "fn main() -> i64 { let mut v: Vec<u8> = vec_new(); push(&mut v, 'h'); push(&mut v, 'i'); let a: [u8] = vec_to_array(v); len(a) }\n",
     "fn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 10); push(&mut v, 20); push(&mut v, 30); let a: [i64] = vec_to_array(v); a[0] + a[2] }\n",
+    // (8d-drops) scope-exit `sentinel_free`: a heap binding is freed in reverse decl
+    // order at its block's exit, EXCEPT a moved-out one (consuming call) — the callee
+    // frees its param. arr is moved into consume (no double-free); tmp drops at the
+    // nested block; the [u8] param of show drops at show's exit.
+    "fn consume(xs: [i64]) -> i64 { xs[0] }\nfn main() -> i64 { let arr: [i64] = [1, 2, 3]; let inner: i64 = { let tmp: [i64] = [4, 5]; tmp[0] }; consume(arr) + inner }\n",
+    "fn show(b: [u8]) -> i64 { len(b) }\nfn main() -> i64 { let s: [u8] = \"hi\"; let v: Vec<i64> = vec_new(); show(s) + len(v) }\n",
 ];
 
 #[test]
