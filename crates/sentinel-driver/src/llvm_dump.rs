@@ -39,7 +39,8 @@ use std::fmt::Write;
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_resolve::{
     FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PUSH_FN_ID,
-    READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, VEC_NEW_FN_ID, WRITE_FILE_FN_ID,
+    READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
+    WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
     Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
@@ -66,6 +67,10 @@ struct RuntimeSyms {
     read_file: bool,
     write_file: bool,
     print_bytes: bool,
+    /// The `llvm.memcpy` intrinsic (8d-Vec-2: `vec_to_array` copies the live
+    /// prefix). An `@llvm.*` intrinsic, not a `sentinel_*` symbol, so it
+    /// declares LAST — after the runtime-symbol group.
+    memcpy: bool,
 }
 
 impl RuntimeSyms {
@@ -77,6 +82,7 @@ impl RuntimeSyms {
         self.read_file |= other.read_file;
         self.write_file |= other.write_file;
         self.print_bytes |= other.print_bytes;
+        self.memcpy |= other.memcpy;
     }
 
     /// Emit the `declare`s for the used symbols, in the fixed canonical order,
@@ -103,6 +109,9 @@ impl RuntimeSyms {
         if self.print_bytes {
             writeln!(out, "declare i64 @sentinel_print_bytes(ptr, i64)").unwrap();
         }
+        if self.memcpy {
+            writeln!(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)").unwrap();
+        }
         self.alloc
             || self.realloc
             || self.panic_oob
@@ -110,6 +119,7 @@ impl RuntimeSyms {
             || self.read_file
             || self.write_file
             || self.print_bytes
+            || self.memcpy
     }
 }
 
@@ -853,6 +863,40 @@ impl Emit<'_> {
             writeln!(self.body, "  %v{ev} = load {ety}, ptr %v{ep}").unwrap();
             writeln!(self.body, "  store i64 %v{nl}, ptr %v{lenp}").unwrap();
             return Ok(format!("%v{ev}"));
+        }
+        if id == VEC_TO_ARRAY_FN_ID {
+            // vec_to_array(v: Vec<T>) -> [T]: copy the live `len` elements into a
+            // fresh heap buffer and build an owned `[T]` `{ i64 len, ptr data }`.
+            // Non-consuming — the array is an independent copy (`v` keeps its own
+            // buffer), so both drop their buffers at scope exit (leak-free). The Vec
+            // is passed by VALUE (its aggregate `{i64,i64,ptr}`), so `data` is field 2.
+            let elem = match args[0].ty {
+                Type::Vec(ve) => ve.to_type(),
+                _ => return Err("vec_to_array arg is not a Vec".into()),
+            };
+            let ety = llvm_ty(elem)?;
+            let vec_val = self.lower_expr(&args[0])?;
+            let len = self.fresh();
+            writeln!(self.body, "  %v{len} = extractvalue {{ i64, i64, ptr }} {vec_val}, 0").unwrap();
+            let src = self.fresh();
+            writeln!(self.body, "  %v{src} = extractvalue {{ i64, i64, ptr }} {vec_val}, 2").unwrap();
+            // Size = len * sizeof(T) via the GEP-sizeof idiom (correct for any element
+            // type, incl. padded structs); `sentinel_alloc` the dest; `llvm.memcpy`
+            // the live prefix (align 1 implicit; a 0-length copy is a no-op).
+            let sz = self.fresh();
+            writeln!(self.body, "  %v{sz} = getelementptr {ety}, ptr null, i64 %v{len}").unwrap();
+            let szi = self.fresh();
+            writeln!(self.body, "  %v{szi} = ptrtoint ptr %v{sz} to i64").unwrap();
+            let dest = self.fresh();
+            writeln!(self.body, "  %v{dest} = call ptr @sentinel_alloc(i64 %v{szi})").unwrap();
+            self.used.alloc = true;
+            writeln!(self.body, "  call void @llvm.memcpy.p0.p0.i64(ptr %v{dest}, ptr %v{src}, i64 %v{szi}, i1 false)").unwrap();
+            self.used.memcpy = true;
+            let a0 = self.fresh();
+            writeln!(self.body, "  %v{a0} = insertvalue {{ i64, ptr }} undef, i64 %v{len}, 0").unwrap();
+            let a1 = self.fresh();
+            writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{dest}, 1").unwrap();
+            return Ok(format!("%v{a1}"));
         }
         if id.0 < FIRST_USER_FN {
             return Err(format!("builtin call #{} (deferred to a later slice)", id.0));

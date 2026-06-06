@@ -218,6 +218,7 @@ struct TyCtx {
     cg_used_rdfile: bool, // (8d) `declare sentinel_read_file`
     cg_used_wrfile: bool, // (8d) `declare sentinel_write_file`
     cg_used_prbytes: bool, // (8d) `declare sentinel_print_bytes`
+    cg_used_memcpy: bool, // (8d-Vec-2) `declare void @llvm.memcpy.p0.p0.i64` (vec_to_array)
     cg_suppress: bool,   // true while walking an assign target (the Var arm records, no load)
     cg_lastvid: i64,  // the VarId the most-recent Var node resolved to (for assign)
     // (8b) the body is buffered per-fn so ALLOCAS can be HOISTED to the entry block
@@ -6052,6 +6053,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_used_rdfile: false,
         cg_used_wrfile: false,
         cg_used_prbytes: false,
+        cg_used_memcpy: false,
         cg_suppress: false,
         cg_lastvid: 0 - 1,
         cgbody: vec_new(),
@@ -6501,7 +6503,16 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_prbytes;
+        // (8d-Vec-2) the `llvm.memcpy` intrinsic declares LAST — after the
+        // `sentinel_*` runtime-symbol group (it is an `@llvm.*` intrinsic, not a
+        // runtime symbol), matching the oracle's `RuntimeSyms::emit_declares`.
+        if ctx.cg_used_memcpy {
+            append_str(result, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n");
+            0
+        } else {
+            0
+        };
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_prbytes || ctx.cg_used_memcpy;
         if cg_anydecl {
             push(result, '\n');
             0
@@ -7385,6 +7396,58 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_int(c, po_lp);
         cg_putc(c, '\n');
         cg_reg(c, po_ev);
+        0
+    } else if fid == 10 {
+        // (8d-Vec-2) vec_to_array(v: Vec<T>) -> [T]: copy the live `len` elements
+        // into a fresh heap buffer, build an owned [T] { i64 len, ptr data }. The
+        // Vec is passed by VALUE ({i64,i64,ptr}), so `data` is field 2. Non-consuming
+        // — the array is an independent copy, so both drop their buffers at scope exit.
+        let vt_vk: i64 = (*c).cgak[snap];
+        let vt_vv: i64 = (*c).cgav[snap];
+        let vt_rt: i64 = (*c).cgat[snap];
+        let vt_e: i64 = vec_elem_of(c, vt_rt);
+        let vt_len: i64 = cg_dst(c);
+        cgo_str(c, "extractvalue { i64, i64, ptr } ");
+        cgo_operand(c, vt_vk, vt_vv);
+        cgo_str(c, ", 0\n");
+        let vt_src: i64 = cg_dst(c);
+        cgo_str(c, "extractvalue { i64, i64, ptr } ");
+        cgo_operand(c, vt_vk, vt_vv);
+        cgo_str(c, ", 2\n");
+        let vt_sz: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr ");
+        cgo_ty(c, vt_e);
+        cgo_str(c, ", ptr null, i64 %v");
+        cgo_int(c, vt_len);
+        cg_putc(c, '\n');
+        let vt_szi: i64 = cg_dst(c);
+        cgo_str(c, "ptrtoint ptr %v");
+        cgo_int(c, vt_sz);
+        cgo_str(c, " to i64\n");
+        let vt_dest: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_alloc(i64 %v");
+        cgo_int(c, vt_szi);
+        cgo_str(c, ")\n");
+        (*c).cg_used_alloc = true;
+        cgo_str(c, "  call void @llvm.memcpy.p0.p0.i64(ptr %v");
+        cgo_int(c, vt_dest);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, vt_src);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, vt_szi);
+        cgo_str(c, ", i1 false)\n");
+        (*c).cg_used_memcpy = true;
+        let vt_a0: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i64, ptr } undef, i64 %v");
+        cgo_int(c, vt_len);
+        cgo_str(c, ", 0\n");
+        let vt_a1: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i64, ptr } %v");
+        cgo_int(c, vt_a0);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, vt_dest);
+        cgo_str(c, ", 1\n");
+        cg_reg(c, vt_a1);
         0
     } else if fid >= 14 {
         let d: i64 = cg_dst(c);

@@ -100,6 +100,12 @@ const SEEDS: &[&str] = &[
     // (8d-Vec) Vec<T> = {len,cap,ptr}: vec_new (constant), push (the len==cap
     // realloc grow CFG via &mut Vec), v[i] (index, data = field 2), len, pop.
     "fn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 10); push(&mut v, 20); let a: i64 = v[1]; let l: i64 = len(v); let p: i64 = pop(&mut v); a + l + p }\n",
+    // (8d-Vec-2) vec_to_array(v): the Vec -> [T] bridge — extract len(0)/data(2),
+    // sentinel_alloc(len*sizeof), llvm.memcpy the live prefix, build [T] {len,dest}.
+    // A Vec<u8> bridge (elem = i8, the lexer/String use case) and a Vec<i64> bridge
+    // (elem = i64, a wider GEP-sizeof stride).
+    "fn main() -> i64 { let mut v: Vec<u8> = vec_new(); push(&mut v, 'h'); push(&mut v, 'i'); let a: [u8] = vec_to_array(v); len(a) }\n",
+    "fn main() -> i64 { let mut v: Vec<i64> = vec_new(); push(&mut v, 10); push(&mut v, 20); push(&mut v, 30); let a: [i64] = vec_to_array(v); a[0] + a[2] }\n",
 ];
 
 #[test]
