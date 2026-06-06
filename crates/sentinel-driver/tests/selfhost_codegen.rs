@@ -125,6 +125,11 @@ const SEEDS: &[&str] = &[
     // (match — reading the value back — is 8e-2.)
     "enum E { A, B(i64) }\nfn main() -> i64 { let x = E::B(7); let y = E::A; 0 }\n",
     "enum P { Z, Two(i64, i64) }\nfn main() -> i64 { let p = P::Two(3, 4); let z = P::Z; 0 }\n",
+    // (8e-2) match: an if-else chain over the variant arms (tag check + payload bind +
+    // body + store-to-result + br merge), `unreachable` default, merge load. The param
+    // enum is dropped at the callee's exit; a 2-payload variant binds two fields.
+    "enum E { A, B(i64) }\nfn f(e: E) -> i64 { match e { E::A => 0, E::B(x) => x } }\nfn main() -> i64 { f(E::B(7)) }\n",
+    "enum Shape { Unit, Circle(i64), Rect(i64, i64) }\nfn area(s: Shape) -> i64 { match s { Shape::Unit => 0, Shape::Circle(r) => r * r, Shape::Rect(w, h) => w * h } }\nfn main() -> i64 { area(Shape::Rect(5, 6)) }\n",
 ];
 
 #[test]

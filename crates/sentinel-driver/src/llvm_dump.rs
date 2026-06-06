@@ -44,7 +44,8 @@ use sentinel_resolve::{
     WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
-    Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
+    Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedMatchArm, TypedPattern,
+    TypedPatternBinding, TypedProgram, TypedStmt, TypedStmtKind,
 };
 
 /// Hardcoded for a reproducible byte-target (not host inference). `clang`
@@ -665,8 +666,114 @@ impl Emit<'_> {
             TypedExprKind::EnumConstruct { enum_id, variant_index, args, .. } => {
                 self.lower_enum_construct(*enum_id, *variant_index, args)
             }
+            // 8e-2: `match` lowers to an if-else chain over the variant arms (binding
+            // each arm's payload fields), a memory-cell result merge (no phi), and the
+            // `_` wildcard (or `unreachable`) as the final else.
+            TypedExprKind::Match { scrutinee, enum_id, arms } => {
+                self.lower_match(scrutinee, *enum_id, arms, expr.ty)
+            }
             _ => Err("expression not yet ported (straight-line 8a only)".into()),
         }
+    }
+
+    /// 8e-2: lower `match scrutinee { arms }` (ADR 0032 D5). Extract the scrutinee's
+    /// tag + payload ptr, then an IF-ELSE CHAIN over the variant arms: per arm, `icmp
+    /// eq tag, vidx` → branch to the arm block (bind the payload fields, lower the body,
+    /// store the result, branch to merge) or the next check. The final else is the `_`
+    /// wildcard body, or `unreachable` (exhaustiveness is a type-check guarantee). The
+    /// merge loads the result (the if-merge memory cell, no phi).
+    ///
+    /// An if-else chain rather than the production's `switch` (behaviourally identical
+    /// for disjoint variants — `cc`-run == inkwell) because it lowers in a SINGLE pass:
+    /// the Sentinel walks the arm cons-list consuming, with no slice to pre-scan for the
+    /// switch's up-front case-block table. The two stay byte-identical.
+    fn lower_match(
+        &mut self,
+        scrutinee: &TypedExpr,
+        enum_id: EnumId,
+        arms: &[TypedMatchArm],
+        result_ty: Type,
+    ) -> Result<String, String> {
+        let scrut = self.lower_expr(scrutinee)?;
+        let tag = self.fresh();
+        writeln!(self.body, "  %v{tag} = extractvalue {{ i32, ptr }} {scrut}, 0").unwrap();
+        let payload = self.fresh();
+        writeln!(self.body, "  %v{payload} = extractvalue {{ i32, ptr }} {scrut}, 1").unwrap();
+        let rty = llvm_ty(result_ty)?;
+        let result = self.alloca(&rty); // hoisted result slot (the if-merge memory cell)
+        let merge_b = self.fresh_block();
+
+        // The variant arms become the chain; a `_` wildcard (if any) is the final else.
+        let mut wildcard: Option<&TypedMatchArm> = None;
+        for arm in arms {
+            match &arm.pattern {
+                TypedPattern::Variant { variant_index, bindings, .. } => {
+                    let cmp = self.fresh();
+                    writeln!(self.body, "  %v{cmp} = icmp eq i32 %v{tag}, {variant_index}").unwrap();
+                    let arm_b = self.fresh_block();
+                    let next_b = self.fresh_block();
+                    writeln!(self.body, "  br i1 %v{cmp}, label %bb{arm_b}, label %bb{next_b}").unwrap();
+                    writeln!(self.body, "bb{arm_b}:").unwrap();
+                    self.bind_pattern_payloads(payload, enum_id, *variant_index, bindings)?;
+                    let v = self.lower_expr(&arm.body)?;
+                    writeln!(self.body, "  store {rty} {v}, ptr %v{result}").unwrap();
+                    writeln!(self.body, "  br label %bb{merge_b}").unwrap();
+                    writeln!(self.body, "bb{next_b}:").unwrap();
+                }
+                TypedPattern::Wildcard(_) => wildcard = Some(arm),
+            }
+        }
+        // The final else (the last `next_b` block): the wildcard body, or `unreachable`.
+        if let Some(arm) = wildcard {
+            let v = self.lower_expr(&arm.body)?;
+            writeln!(self.body, "  store {rty} {v}, ptr %v{result}").unwrap();
+            writeln!(self.body, "  br label %bb{merge_b}").unwrap();
+        } else {
+            writeln!(self.body, "  unreachable").unwrap();
+        }
+
+        writeln!(self.body, "bb{merge_b}:").unwrap();
+        let loaded = self.fresh();
+        writeln!(self.body, "  %v{loaded} = load {rty}, ptr %v{result}").unwrap();
+        Ok(format!("%v{loaded}"))
+    }
+
+    /// 8e-2: bind a variant pattern's payload fields into the arm's locals — GEP each
+    /// field of the heap-boxed payload struct, load it into a fresh (hoisted) alloca
+    /// slot keyed by the binding's VarId, so the arm body's `Var(binding)` reads it. A
+    /// `_` binding still gets a slot (positional; never read). NOT added to a scope
+    /// drop frame: a heap-typed binding aliases the box's buffer (owned + freed by the
+    /// scrutinee's enum drop), so dropping it would double-free (matches production).
+    fn bind_pattern_payloads(
+        &mut self,
+        payload: u32,
+        enum_id: EnumId,
+        variant_index: usize,
+        bindings: &[TypedPatternBinding],
+    ) -> Result<(), String> {
+        if bindings.is_empty() {
+            return Ok(());
+        }
+        let prog = self.program;
+        let payload_tys: Vec<Type> =
+            prog.enum_data(enum_id).variants[variant_index].payloads.clone();
+        let mut field_lls = Vec::with_capacity(payload_tys.len());
+        for t in &payload_tys {
+            field_lls.push(llvm_ty(*t)?);
+        }
+        let pstruct = format!("{{ {} }}", field_lls.join(", "));
+        for (i, b) in bindings.iter().enumerate() {
+            let fty = llvm_ty(b.ty)?;
+            let fp = self.fresh();
+            writeln!(self.body, "  %v{fp} = getelementptr {pstruct}, ptr %v{payload}, i32 0, i32 {i}").unwrap();
+            let ld = self.fresh();
+            writeln!(self.body, "  %v{ld} = load {fty}, ptr %v{fp}").unwrap();
+            let slot = self.alloca(&fty);
+            writeln!(self.body, "  store {fty} %v{ld}, ptr %v{slot}").unwrap();
+            self.slots.insert(b.var_id, slot);
+            self.var_ty.insert(b.var_id, b.ty);
+        }
+        Ok(())
     }
 
     /// 8e-1: lower an enum construction to `{ i32 tag, ptr payload }` (ADR 0032 D4). A

@@ -242,6 +242,16 @@ struct TyCtx {
     cg_loop_after: Vec<i64>,// enclosing loops' after-block labels (break target)
     cg_loop_floor: Vec<i64>,// (8d-drops-3) enclosing loops' scope-drop floor (the cgdv
                             // length at loop-body entry; break/continue drain cgdv[floor..])
+    // (8e-2) match state: SET in the `Expr::Match` arm (the per-match cg_m_tag/payload/
+    // result/merge are SAVED+RESTORED around `dump_tarms` for nested matches); cg_m_pj /
+    // cg_m_armnext are transient (set in `dump_tpat`, used immediately / captured into a
+    // local in `dump_tarms` before the body). The if-else-chain over the variant arms.
+    cg_m_tag: i64,    // the scrutinee's tag register (icmp eq i32 tag, vidx per arm)
+    cg_m_payload: i64,// the scrutinee's payload-ptr register (GEP the bound fields)
+    cg_m_result: i64, // the result alloca slot (each arm stores its body value here)
+    cg_m_merge: i64,  // the merge block (each arm branches here; the load follows)
+    cg_m_armnext: i64,// the current arm's next-check block (set in dump_tpat; -1 = wildcard)
+    cg_m_pj: i64,     // the current variant's flat index (for cg_emit_pstruct in the bind)
     cgout: Vec<u8>,   // accumulated .ll across all fns (the mode-4 result)
 }
 
@@ -3666,6 +3676,17 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
             let scrty: i64 = dump_texpr(out, mscr, 0 - 1, src, c, gb);
+            // (8e-2) cg: capture the scrutinee's `{i32,ptr}` operand before anything else.
+            let cgm_sk: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cgm_sv: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
             let mscrv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -3675,6 +3696,32 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let meid: i64 = enum_of_handle(c, scrty);
             append_str(out, " #");
             append_int(out, meid);
+            // (8e-2) cg: SAVE the enclosing match state (nesting); extract the tag (field
+            // 0) + payload ptr (field 1); reserve the hoisted result slot (type = `exp`,
+            // the match's expectation == its type for a used match); open the merge block.
+            let cgm_save_tag: i64 = (*c).cg_m_tag;
+            let cgm_save_pl: i64 = (*c).cg_m_payload;
+            let cgm_save_res: i64 = (*c).cg_m_result;
+            let cgm_save_mrg: i64 = (*c).cg_m_merge;
+            if cg_on(c) {
+                let cgm_tg: i64 = cg_dst(c);
+                cgo_str(c, "extractvalue { i32, ptr } ");
+                cgo_operand(c, cgm_sk, cgm_sv);
+                cgo_str(c, ", 0\n");
+                let cgm_pl: i64 = cg_dst(c);
+                cgo_str(c, "extractvalue { i32, ptr } ");
+                cgo_operand(c, cgm_sk, cgm_sv);
+                cgo_str(c, ", 1\n");
+                let cgm_rs: i64 = cg_alloca(c, exp);
+                let cgm_mg: i64 = cg_fresh_block(c);
+                (*c).cg_m_tag = cgm_tg;
+                (*c).cg_m_payload = cgm_pl;
+                (*c).cg_m_result = cgm_rs;
+                (*c).cg_m_merge = cgm_mg;
+                0
+            } else {
+                0
+            };
             // (7c) MIR: a match -> Opaque([scrutinee, ...arm_bodies]).
             let mt_col: bool = (*c).mir_collecting;
             let mt_snap: i64 = if mir_on(c) {
@@ -3691,6 +3738,29 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             let mty: i64 = dump_tarms(out, marms, exp, src, c, gb);
             close_ty(out, mty, c);
+            // (8e-2) cg: the final else (unreachable — exhaustive, no wildcard in the
+            // emitting set), then the merge block + the result load; RESTORE the
+            // enclosing match state.
+            if cg_on(c) {
+                cgo_str(c, "  unreachable\n");
+                cgo_str(c, "bb");
+                cgo_int(c, (*c).cg_m_merge);
+                cgo_str(c, ":\n");
+                let cgm_ld: i64 = cg_dst(c);
+                cgo_str(c, "load ");
+                cgo_ty(c, exp);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, (*c).cg_m_result);
+                cg_putc(c, '\n');
+                cg_reg(c, cgm_ld);
+                (*c).cg_m_tag = cgm_save_tag;
+                (*c).cg_m_payload = cgm_save_pl;
+                (*c).cg_m_result = cgm_save_res;
+                (*c).cg_m_merge = cgm_save_mrg;
+                0
+            } else {
+                0
+            };
             if mir_on(c) {
                 (*c).mir_collecting = mt_col;
                 let mc: i64 = (*c).mir_cur;
@@ -4072,6 +4142,38 @@ fn dump_tbinds(out: &mut Vec<u8>, b: Binds, pbase: i64, payidx: i64, c: &mut TyC
             let pty: i64 = (*c).varpay[pbase + payidx];
             let nst: i64 = len((*c).nb);
             bind_name(c, nm, bvid, pty);
+            // (8e-2) cg: bind the payload field — GEP the boxed payload struct's field
+            // `payidx`, load it into a fresh hoisted slot, store, key the slot by VarId
+            // (so the arm body's Var reads it). A `_` binding still gets a slot. NOT
+            // drop-recorded (it aliases the box, freed by the scrutinee's enum drop).
+            if cg_on(c) {
+                let bfp: i64 = cg_dst(c);
+                cgo_str(c, "getelementptr ");
+                cg_emit_pstruct(c, (*c).cg_m_pj);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, (*c).cg_m_payload);
+                cgo_str(c, ", i32 0, i32 ");
+                cgo_int(c, payidx);
+                cg_putc(c, '\n');
+                let bld: i64 = cg_dst(c);
+                cgo_str(c, "load ");
+                cgo_ty(c, pty);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, bfp);
+                cg_putc(c, '\n');
+                let bsl: i64 = cg_alloca(c, pty);
+                cgo_str(c, "  store ");
+                cgo_ty(c, pty);
+                cgo_str(c, " %v");
+                cgo_int(c, bld);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, bsl);
+                cg_putc(c, '\n');
+                cg_slot_set(c, bvid, bsl);
+                0
+            } else {
+                0
+            };
             let nen: i64 = len((*c).nb);
             append_str(out, " (bind #");
             append_int(out, bvid);
@@ -4096,6 +4198,14 @@ fn dump_tpat(out: &mut Vec<u8>, p: Pattern, c: &mut TyCtx, gb: &mut Vec<u8>) -> 
     match p {
         Pattern::PatWild => {
             append_str(out, "(pat _)");
+            // (8e-2) cg: a wildcard arm has no tag check — signal the epilogue (-1).
+            // (No emitting fixture uses one; the final-else body is a deferred case.)
+            if cg_on(c) {
+                (*c).cg_m_armnext = 0 - 1;
+                0
+            } else {
+                0
+            };
             0
         },
         Pattern::PatVariant(en, vn, bs) => {
@@ -4104,6 +4214,33 @@ fn dump_tpat(out: &mut Vec<u8>, p: Pattern, c: &mut TyCtx, gb: &mut Vec<u8>) -> 
             let vidx: i64 = variant_index(c, eid, &vn);
             let j: i64 = variant_flat(c, eid, vidx);
             let pbase: i64 = (*c).varps[j];
+            // (8e-2) cg: the arm's tag check — `icmp eq tag, vidx`; branch to the arm
+            // block (open it) or the next check. `cg_m_pj` carries `j` to the bind.
+            if cg_on(c) {
+                (*c).cg_m_pj = j;
+                let pcmp: i64 = cg_dst(c);
+                cgo_str(c, "icmp eq i32 %v");
+                cgo_int(c, (*c).cg_m_tag);
+                cgo_str(c, ", ");
+                cgo_int(c, vidx);
+                cg_putc(c, '\n');
+                let parm: i64 = cg_fresh_block(c);
+                let pnext: i64 = cg_fresh_block(c);
+                cgo_str(c, "  br i1 %v");
+                cgo_int(c, pcmp);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, parm);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, pnext);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, parm);
+                cgo_str(c, ":\n");
+                (*c).cg_m_armnext = pnext;
+                0
+            } else {
+                0
+            };
             append_str(out, "(pat ");
             append_int(out, vidx);
             push(out, ' ');
@@ -4125,11 +4262,59 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, src: &[u8], c: &mut TyCtx, g
         Arms::ArmCell(ap, abody, arest) => {
             append_str(out, " (arm ");
             let mark: i64 = len((*c).scs);
+            // (8e-2) cg: reset the arm's next-block before the pattern sets it; capture it
+            // into a LOCAL after, so a nested match in the body can't clobber it.
+            if cg_on(c) {
+                (*c).cg_m_armnext = 0 - 1;
+                0
+            } else {
+                0
+            };
             dump_tpat(out, ap, c, gb);
+            let cg_arm_next: i64 = if cg_on(c) {
+                (*c).cg_m_armnext
+            } else {
+                0 - 1
+            };
             push(out, ' ');
             let bt: i64 = dump_texpr(out, abody, exp, src, c, gb);
+            // (8e-2) cg: store the arm body's value to the result slot, branch to merge,
+            // open the next-check block (a variant arm only — `cg_arm_next >= 0`).
+            let cg_bk: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cg_bv: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
             mir_collect(c);
             truncate_scope(c, mark);
+            if cg_on(c) {
+                if cg_arm_next >= 0 {
+                    cgo_str(c, "  store ");
+                    cgo_ty(c, exp);
+                    cg_putc(c, ' ');
+                    cgo_operand(c, cg_bk, cg_bv);
+                    cgo_str(c, ", ptr %v");
+                    cgo_int(c, (*c).cg_m_result);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "  br label %bb");
+                    cgo_int(c, (*c).cg_m_merge);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "bb");
+                    cgo_int(c, cg_arm_next);
+                    cgo_str(c, ":\n");
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
             push(out, ')');
             dump_tarms(out, arest, exp, src, c, gb);
             bt
@@ -6139,6 +6324,12 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_loop_cond: vec_new(),
         cg_loop_after: vec_new(),
         cg_loop_floor: vec_new(),
+        cg_m_tag: 0 - 1,
+        cg_m_payload: 0 - 1,
+        cg_m_result: 0 - 1,
+        cg_m_merge: 0 - 1,
+        cg_m_armnext: 0 - 1,
+        cg_m_pj: 0 - 1,
         cgout: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();

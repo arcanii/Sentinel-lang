@@ -904,6 +904,82 @@ fn llvm_enum_construct_and_drop() {
     );
 }
 
+#[test]
+fn llvm_match_if_else_chain() {
+    // 8e-2: `match` lowers to an if-else chain over the variant arms — per arm `icmp eq
+    // tag, vidx` → branch to the arm block (bind payloads, lower body, store to the
+    // result slot, branch to merge) or the next check; `unreachable` is the exhaustive
+    // default; the merge loads the result (no phi). `f`'s param enum `e` is dropped at
+    // exit (box freed). main moves `E::B(7)` into `f` (consuming), so only `f` frees it.
+    // f(B(7)) = 7.
+    assert_eq!(
+        llvm_dump(
+            "match",
+            "enum E { A, B(i64) }\nfn f(e: E) -> i64 {\n    match e {\n        E::A => 0,\n        E::B(x) => x,\n    }\n}\nfn main() -> i64 {\n    f(E::B(7))\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "declare ptr @sentinel_alloc(i64)\n",
+            "declare void @sentinel_free(ptr)\n",
+            "\n",
+            "define i64 @f({ i32, ptr } %arg0) {\n",
+            "entry:\n",
+            "  %v0 = alloca { i32, ptr }\n",
+            "  %v4 = alloca i64\n",
+            "  %v9 = alloca i64\n",
+            "  store { i32, ptr } %arg0, ptr %v0\n",
+            "  %v1 = load { i32, ptr }, ptr %v0\n",
+            "  %v2 = extractvalue { i32, ptr } %v1, 0\n",
+            "  %v3 = extractvalue { i32, ptr } %v1, 1\n",
+            "  %v5 = icmp eq i32 %v2, 0\n",
+            "  br i1 %v5, label %bb1, label %bb2\n",
+            "bb1:\n",
+            "  store i64 0, ptr %v4\n",
+            "  br label %bb0\n",
+            "bb2:\n",
+            "  %v6 = icmp eq i32 %v2, 1\n",
+            "  br i1 %v6, label %bb3, label %bb4\n",
+            "bb3:\n",
+            "  %v7 = getelementptr { i64 }, ptr %v3, i32 0, i32 0\n",
+            "  %v8 = load i64, ptr %v7\n",
+            "  store i64 %v8, ptr %v9\n",
+            "  %v10 = load i64, ptr %v9\n",
+            "  store i64 %v10, ptr %v4\n",
+            "  br label %bb0\n",
+            "bb4:\n",
+            "  unreachable\n",
+            "bb0:\n",
+            "  %v11 = load i64, ptr %v4\n",
+            "  %v12 = load { i32, ptr }, ptr %v0\n",
+            "  %v13 = extractvalue { i32, ptr } %v12, 1\n",
+            "  %v14 = icmp eq ptr %v13, null\n",
+            "  br i1 %v14, label %bb6, label %bb5\n",
+            "bb5:\n",
+            "  call void @sentinel_free(ptr %v13)\n",
+            "  br label %bb6\n",
+            "bb6:\n",
+            "  ret i64 %v11\n",
+            "}\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v0 = insertvalue { i64 } undef, i64 7, 0\n",
+            "  %v1 = getelementptr { i64 }, ptr null, i64 1\n",
+            "  %v2 = ptrtoint ptr %v1 to i64\n",
+            "  %v3 = call ptr @sentinel_alloc(i64 %v2)\n",
+            "  store { i64 } %v0, ptr %v3\n",
+            "  %v4 = insertvalue { i32, ptr } undef, i32 1, 0\n",
+            "  %v5 = insertvalue { i32, ptr } %v4, ptr %v3, 1\n",
+            "  %v6 = call i64 @f({ i32, ptr } %v5)\n",
+            "  %v7 = trunc i64 %v6 to i32\n",
+            "  ret i32 %v7\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {
