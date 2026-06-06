@@ -277,21 +277,29 @@ impl Emit<'_> {
                 self.slots.insert(*id, slot);
                 Ok(())
             }
-            TypedStmtKind::Assign { target, value } => {
-                let v = self.lower_expr(value)?;
-                match &target.kind {
-                    TypedExprKind::Var(id) => {
-                        let slot = *self
-                            .slots
-                            .get(id)
-                            .ok_or("assign to an unbound var")?;
-                        let llty = llvm_ty(target.ty)?;
-                        writeln!(self.body, "  store {llty} {v}, ptr %v{slot}").unwrap();
-                        Ok(())
-                    }
-                    _ => Err("assign to a non-Var lvalue (deferred to a later slice)".into()),
+            TypedStmtKind::Assign { target, value } => match &target.kind {
+                TypedExprKind::Var(id) => {
+                    // The Var target is just a slot (no emission), so lowering the
+                    // value then storing matches the Sentinel's target-then-value
+                    // order (its suppressed target walk emits nothing).
+                    let slot = *self.slots.get(id).ok_or("assign to an unbound var")?;
+                    let v = self.lower_expr(value)?;
+                    let llty = llvm_ty(target.ty)?;
+                    writeln!(self.body, "  store {llty} {v}, ptr %v{slot}").unwrap();
+                    Ok(())
                 }
-            }
+                // `*r = x` — the target pointer (r's value) is emitted FIRST, then the
+                // value, then the store (the Sentinel walks target-then-value, and the
+                // deref target DOES emit a load of r).
+                TypedExprKind::Unary(UnaryOp::Deref, _) => {
+                    let ptr = self.lower_lvalue_ptr(target)?;
+                    let v = self.lower_expr(value)?;
+                    let llty = llvm_ty(target.ty)?;
+                    writeln!(self.body, "  store {llty} {v}, ptr {ptr}").unwrap();
+                    Ok(())
+                }
+                _ => Err("assign to a non-Var/deref lvalue (deferred to a later slice)".into()),
+            },
             TypedStmtKind::Expr(e) => {
                 // Statement-position expr: lower for effect, discard the value.
                 self.lower_expr(e)?;
@@ -367,6 +375,22 @@ impl Emit<'_> {
                 let x = self.lower_expr(inner)?;
                 let v = self.fresh();
                 writeln!(self.body, "  %v{v} = xor i1 {x}, 1").unwrap();
+                Ok(format!("%v{v}"))
+            }
+            // `&x` / `&mut x` → a pointer to x's storage (its lvalue): for a `Var`,
+            // its alloca slot — no instruction. LLVM ignores mutability.
+            TypedExprKind::Unary(UnaryOp::Ref, inner)
+            | TypedExprKind::Unary(UnaryOp::RefMut, inner) => self.lower_lvalue_ptr(inner),
+            // `*r` (rvalue) → load the pointee through r's pointer value.
+            TypedExprKind::Unary(UnaryOp::Deref, inner) => {
+                let ptr = self.lower_expr(inner)?;
+                let pointee = match inner.ty {
+                    Type::Ref(id) => self.program.refs[id.0 as usize].inner,
+                    _ => return Err("deref of a non-ref (deferred)".into()),
+                };
+                let llty = llvm_ty(pointee)?;
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = load {llty}, ptr {ptr}").unwrap();
                 Ok(format!("%v{v}"))
             }
             TypedExprKind::Binary(op, lhs, rhs) => {
@@ -562,6 +586,20 @@ impl Emit<'_> {
         }
     }
 
+    /// The pointer operand for an lvalue (a place): a `Var`'s alloca slot, or the
+    /// value of a deref's inner ref (`&*r` / the `*r = …` target). FieldAccess/Index
+    /// lvalues (struct-field / element refs) are a later slice.
+    fn lower_lvalue_ptr(&mut self, expr: &TypedExpr) -> Result<String, String> {
+        match &expr.kind {
+            TypedExprKind::Var(id) => {
+                let slot = *self.slots.get(id).ok_or("address-of an unbound var")?;
+                Ok(format!("%v{slot}"))
+            }
+            TypedExprKind::Unary(UnaryOp::Deref, inner) => self.lower_expr(inner),
+            _ => Err("address-of a non-place (deferred to a later slice)".into()),
+        }
+    }
+
     fn lower_block_expr(&mut self, b: &TypedBlock) -> Result<String, String> {
         for stmt in &b.stmts {
             self.lower_stmt(stmt)?;
@@ -744,6 +782,9 @@ fn llvm_ty(ty: Type) -> Result<String, String> {
         // opaque heap pointer), so it needs no Pass-0 name. The element type only
         // matters for the GEP stride in ArrayLit/Index (carried by those nodes).
         Type::Array(_) => Ok("{ i64, ptr }".into()),
+        // A reference `&T`/`&mut T` is an opaque pointer (LLVM doesn't distinguish
+        // mutability; the pointee type is recovered from `program.refs` at the deref).
+        Type::Ref(_) => Ok("ptr".into()),
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
     }
 }

@@ -409,6 +409,48 @@ fn llvm_str_eq_runtime_builtin() {
     );
 }
 
+#[test]
+fn llvm_refs_address_of_and_deref() {
+    // 8d refs: a reference is an opaque `ptr`. `&x`/`&mut x` is x's alloca slot (no
+    // instruction); `*r` loads the pointee through r's pointer value; a ref param
+    // arrives as `ptr`. add(&10, &32) = *a + *b = 42.
+    assert_eq!(
+        llvm_dump(
+            "refs",
+            "fn add(a: &i64, b: &i64) -> i64 {\n    *a + *b\n}\nfn main() -> i64 {\n    let a: i64 = 10;\n    let b: i64 = 32;\n    add(&a, &b)\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "define i64 @add(ptr %arg0, ptr %arg1) {\n",
+            "entry:\n",
+            "  %v0 = alloca ptr\n",
+            "  %v1 = alloca ptr\n",
+            "  store ptr %arg0, ptr %v0\n",
+            "  store ptr %arg1, ptr %v1\n",
+            "  %v2 = load ptr, ptr %v0\n",
+            "  %v3 = load i64, ptr %v2\n",
+            "  %v4 = load ptr, ptr %v1\n",
+            "  %v5 = load i64, ptr %v4\n",
+            "  %v6 = add i64 %v3, %v5\n",
+            "  ret i64 %v6\n",
+            "}\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v0 = alloca i64\n",
+            "  %v1 = alloca i64\n",
+            "  store i64 10, ptr %v0\n",
+            "  store i64 32, ptr %v1\n",
+            "  %v2 = call i64 @add(ptr %v0, ptr %v1)\n",
+            "  %v3 = trunc i64 %v2 to i32\n",
+            "  ret i32 %v3\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {

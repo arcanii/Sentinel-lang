@@ -2409,6 +2409,26 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // operands are Copy scalars → moot); never a move.
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
+            // (8d) codegen lvalue handling: `&`/`&mut` want the inner's ADDRESS — suppress
+            // its Var load (the slot IS the pointer); `*` wants the inner's VALUE (the
+            // pointer, loaded). `un_place` = whether THIS unary is itself an assign-target
+            // place (an `*r = …` set cg_suppress before walking us).
+            let un_place: bool = (*c).cg_suppress;
+            if cg_on(c) {
+                if uop == 4 {
+                    (*c).cg_suppress = true;
+                    0
+                } else if uop == 5 {
+                    (*c).cg_suppress = true;
+                    0
+                } else {
+                    (*c).cg_suppress = false;
+                    0
+                };
+                0
+            } else {
+                0
+            };
             let it: i64 = dump_texpr(out, inner, 0 - 1, src, c, gb);
             let iv: i64 = if mir_on(c) {
                 (*c).lastval
@@ -2423,6 +2443,18 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             let cguv: i64 = if cg_on(c) {
                 (*c).cglv
+            } else {
+                0
+            };
+            // (8d) the inner Var's id (recorded under suppress) — for `&v`'s slot.
+            let un_vid: i64 = if cg_on(c) {
+                (*c).cg_lastvid
+            } else {
+                0 - 1
+            };
+            if cg_on(c) {
+                (*c).cg_suppress = un_place;
+                0
             } else {
                 0
             };
@@ -2467,8 +2499,9 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
-            // (8/N) codegen: `-x` -> `sub <ty> 0, x`; `!b` -> `xor i1 b, 1`. (& / &mut / *
-            // are not in the straight-line subset.)
+            // (8/N) codegen: `-x`→`sub <ty> 0, x`; `!b`→`xor i1 b, 1`; (8d) `*r`→`load <rt>,
+            // ptr <r-val>` (or, as an assign-target place, leave r's pointer + signal -1);
+            // `&v`/`&mut v`→v's alloca slot (the pointer; no instruction).
             if cg_on(c) {
                 if uop == 1 {
                     cg_neg(c, rt, cguk, cguv);
@@ -2476,7 +2509,31 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 } else if uop == 2 {
                     cg_not(c, cguk, cguv);
                     0
+                } else if uop == 3 {
+                    if un_place {
+                        (*c).cg_lastvid = 0 - 1;
+                        0
+                    } else {
+                        let und: i64 = cg_dst(c);
+                        cgo_str(c, "load ");
+                        cgo_ty(c, rt);
+                        cgo_str(c, ", ptr ");
+                        cgo_operand(c, cguk, cguv);
+                        cg_putc(c, '\n');
+                        cg_reg(c, und);
+                        0
+                    };
+                    0
                 } else {
+                    if un_vid >= 0 {
+                        let uncgsl: i64 = cg_slot_get(c, un_vid);
+                        cg_reg(c, uncgsl);
+                        0
+                    } else {
+                        // `&*r` reborrow: the inner deref-place already left r's pointer
+                        // in the operand (un_vid = -1) — that IS the address; keep it.
+                        0
+                    };
                     0
                 };
                 0
@@ -4214,6 +4271,13 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             } else {
                 0 - 1
             };
+            // (8d) for a `*r =` deref target the place is r's pointer (left in the operand
+            // by the Unary arm, cg_lastvid = -1); capture it BEFORE the value walk clobbers.
+            let cgtpv: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
             (*c).consuming = true;
             push(out, ' ');
             dump_texpr(out, aval, 0 - 1, src, c, gb);
@@ -4234,12 +4298,20 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             } else {
                 0
             };
-            // (8/N) codegen: store the RHS operand into the target var's alloca slot.
+            // (8/N) codegen: store the RHS operand into the target's place — a Var's alloca
+            // slot (cgtvid >= 0), or (8d) THROUGH a `*r` deref pointer (cgtvid = -1, the
+            // pointer reg in cgtpv; cg_store renders it as `ptr %v<cgtpv>`).
             if cg_on(c) {
                 let asak: i64 = (*c).cglk;
                 let asav: i64 = (*c).cglv;
-                let asslot: i64 = cg_slot_get(c, cgtvid);
-                cg_store(c, ttgt, asak, asav, asslot);
+                if cgtvid >= 0 {
+                    let asslot: i64 = cg_slot_get(c, cgtvid);
+                    cg_store(c, ttgt, asak, asav, asslot);
+                    0
+                } else {
+                    cg_store(c, ttgt, asak, asav, cgtpv);
+                    0
+                };
                 0
             } else {
                 0
@@ -6697,6 +6769,15 @@ fn cg_is_array(c: &mut TyCtx, h: i64) -> bool {
     }
 }
 
+// True iff `h` is a reference type `&T`/`&mut T` (interner kind 2).
+fn cg_is_ref(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        (*c).tk[h - tbase()] == 2
+    }
+}
+
 fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
     if h == 0 {
         cgo_str(c, "i64")
@@ -6718,6 +6799,8 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
             cgo_int(c, sid)
         } else if cg_is_array(c, h) {
             cgo_str(c, "{ i64, ptr }")
+        } else if cg_is_ref(c, h) {
+            cgo_str(c, "ptr")
         } else {
             cgo_str(c, "i64")
         }
@@ -6743,6 +6826,8 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
             append_int(out, sid)
         } else if cg_is_array(c, h) {
             append_str(out, "{ i64, ptr }")
+        } else if cg_is_ref(c, h) {
+            append_str(out, "ptr")
         } else {
             append_str(out, "i64")
         }
