@@ -422,6 +422,42 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     `llvm.memcpy` the live prefix, build the `[T]`) → `c5d3_collections` (the D.3 phase-go) emits.
     Then **heap drops** (DropPlan). ⚠⚠ behavioural test ~83s at 54 — sample/cache imminent.
 
+- **A10 — (8d-Vec-2) `vec_to_array` LANDED — the `Vec` → `[T]` memcpy bridge:** `vec_to_array(v:
+  Vec<T>) -> [T]` copies the live `len` elements of `v` into a fresh heap buffer and builds an
+  owned `[T]` `{ i64 len, ptr data }`. Byte-identical to `snc llvm` over the corpus
+  (`sentinel_codegen_matches_oracle_on_corpus`, **55/55 emitted** — `c5d3_collections`, the D.3
+  Vec phase-go, joins) + 2 seeds + 1 new golden (`llvm_vec_to_array_bridge`), behavioural (`cc`-run
+  == inkwell) and leak-free; modes 0–3 + effects byte-identical. Mirrors the production
+  `lower_vec_to_array` (codegen lib.rs:5043).
+  - **The bridge.** The Vec is passed by VALUE (its aggregate `{ i64, i64, ptr }`), so `extractvalue
+    0` = `len`, `extractvalue 2` = the source `data` pointer (field 2, vs `[T]`'s field 1). Size =
+    `len * sizeof(T)` via the GEP-sizeof idiom (`getelementptr T, ptr null, i64 %len` + `ptrtoint`
+    — correct for any element type, the same idiom `emit_array_buffer` uses); `sentinel_alloc` the
+    dest; `call void @llvm.memcpy.p0.p0.i64(ptr %dest, ptr %src, i64 %size, i1 false)` the live
+    prefix (align 1 implicit; a 0-length copy on an empty `Vec` is a no-op); then `insertvalue` the
+    `[T]` `{ len, dest }`. **NON-consuming** — the array is an independent copy, so `v` keeps its own
+    buffer and both drop at scope exit (leak-free once heap drops land).
+  - **The intrinsic.** `llvm.memcpy` is a NEW declare — `declare void @llvm.memcpy.p0.p0.i64(ptr,
+    ptr, i64, i1)`. As an `@llvm.*` intrinsic (not a `sentinel_*` runtime symbol) it declares LAST,
+    after the runtime-symbol group: `RuntimeSyms` (oracle) / the `cg_used_*` chain (Sentinel) both
+    gained a `memcpy` flag, set as the call is emitted, so a program not using `vec_to_array` stays
+    byte-identical to A9. (Probe-validated first: a hand-written `.ll` in this exact shape compiles +
+    runs correct under clang-18.)
+  - **Mechanics.** `vec_to_array` is a GENERIC builtin (FnId 10) routing through `dump_gcall` (the
+    arg is collected, as `len`/`push` already needed; the typer returns `mk_array(targ)` = `[T]`), so
+    `cg_emit_call`'s new `fid == 10` arm reads the collected Vec operand (`cgak/cgav/cgat[snap]`) and
+    recovers the element type via `vec_elem_of` (no `strip_ref` — the arg is a bare `Vec`, not `&mut
+    Vec`). **The bridge matched the differential on the FIRST try** + leak-free (the arm allocates
+    nothing — reads the collect-stacks, emits to `cgout`).
+  - **DO-FIRST honoured:** the behavioural test (~83s at 55) was SAMPLED — the targeted inkwell-vs-cc
+    check ran on the one fixture whose `.ll` changed (`c5d3` Err→emit, exit 55 both backends) + the 2
+    new seeds (Vec<u8>→2, Vec<i64>→40); the other 54 are provably unchanged (the corpus differential
+    confirms byte-identical `.ll`). The full behavioural suite was then run ONCE as the final gate.
+  - **NEXT = heap drops** (the DropPlan — `sentinel_free` at scope exit; byte-parity-NEUTRAL for
+    behaviour, but needed for a clean fixed-point: the textual `.ll` path now allocs `Vec`/array
+    buffers it never frees) → **(8e) enums/match** → **(8f) calls/recursion/multi-module** → **(8g)
+    THE BOOTSTRAP FIXED-POINT.**
+
 ## Decision
 
 ### D1. Goal.

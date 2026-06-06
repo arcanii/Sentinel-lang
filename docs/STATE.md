@@ -187,6 +187,21 @@ target type, data field keyed on `cg_is_vec`). New `sentinel_realloc` declare (`
 gained realloc). ⚠ the oracle lowers both push args before the GEPs (matching the Sentinel
 collect-both-first). **The grow-CFG matched the differential first try.** NEXT = **(8d-Vec-2)**
 `vec_to_array` (the `Vec`→`[T]` memcpy bridge → `c5d3_collections` emits) → **heap drops** (DropPlan).
+**✅ (8d-Vec-2) `vec_to_array` LANDED (ADR 0045 A10) — the `Vec`→`[T]` memcpy bridge:**
+`vec_to_array(v: Vec<T>) -> [T]`, byte-identical to `snc llvm` (**55/55 emitted** —
+`c5d3_collections`, the D.3 Vec phase-go, joins) + 2 seeds + 1 golden (`llvm_vec_to_array_bridge`),
+behavioural (cc==inkwell) + leak-free; modes 0–3 + effects byte-identical. The Vec is passed BY VALUE
+(`{i64,i64,ptr}`): `extractvalue 0`=len, `extractvalue 2`=src data; size=`len*sizeof(T)` (GEP-sizeof
+idiom); `sentinel_alloc` dest; `call void @llvm.memcpy.p0.p0.i64(... i1 false)` the live prefix;
+`insertvalue` the `[T]` `{len,dest}`. NON-consuming (an independent copy). `llvm.memcpy` is a NEW
+intrinsic declare (`RuntimeSyms`/`cg_used_*` gained `memcpy`; declares LAST — it's `@llvm.*`, not
+`sentinel_*`). FnId 10 routes via `dump_gcall` → `cg_emit_call`'s `fid==10` arm; elem via
+`vec_elem_of` (no `strip_ref` — a bare `Vec`, not `&mut Vec`). **Matched the differential first try.**
+⚠ DO-FIRST honoured: the ~83s behavioural test was SAMPLED (targeted inkwell-vs-cc on the one changed
+fixture + 2 seeds), then run once as the final gate. NEXT = **heap drops** (DropPlan `sentinel_free` at
+scope exit — the textual `.ll` now allocs `Vec`/array buffers it never frees; byte-parity-NEUTRAL for
+behaviour, needed for a clean fixed-point) → **(8e) enums/match** → **(8f) calls/recursion/multi-module**
+→ **(8g) THE BOOTSTRAP FIXED-POINT.**
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;

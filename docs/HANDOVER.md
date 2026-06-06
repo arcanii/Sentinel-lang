@@ -2092,8 +2092,8 @@ For pasting into a fresh chat to bootstrap context:
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin
     local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1464 tests**
-    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [54/54 emitted] + the
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1465 tests**
+    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [55/55 emitted] + the
     `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still 123/123). macOS + LLVM
     18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
 
@@ -2107,28 +2107,32 @@ For pasting into a fresh chat to bootstrap context:
     parser, resolve, types, effects, borrow, **mir, ctverify** .sentinel. The ONLY thing
     left is **codegen** (the bootstrap-critical transform → the object/fixed-point).
 
-    ▶ **RESUME AT: (8d-Vec-2) — `vec_to_array` (the `Vec`→`[T]` memcpy bridge).** Codegen (8/N) is
-    WELL UNDERWAY (ADR 0045, amendments A1–A9): 8a scalars/calls, 8b control flow, 8c-1/2/3
-    structs/arrays/strings, 8d builtins (str_eq/file-IO) + refs (`&`/`&mut`/`*`/`*p=x`) + Vec-1
-    (vec_new/push/pop/len/`v[i]`) — ALL byte-identical to `snc llvm` + behavioural (cc==inkwell) +
-    leak-free + modes 0–3 byte-identical (**54/54 emitting fixtures**). **8d-Vec-2 = `vec_to_array(v)`:**
-    extractvalue len(0)/data(field 2), `sentinel_alloc(len*sizeof)`, **`llvm.memcpy`** the live prefix
-    (a NEW intrinsic + its declare), build the `[T]` `{len,dest}` (NON-consuming — an independent
-    copy). Mirror the production `lower_vec_to_array` (codegen lib.rs:5043). It makes
-    `c5d3_collections` (the D.3 Vec phase-go) emit. Then: **heap drops** (the DropPlan —
-    `sentinel_free` at scope exit; byte-parity-NEUTRAL for behaviour, but needed for a clean
-    fixed-point) → **(8e) enums/match** → **(8f) calls/recursion/multi-module** → **(8g) THE BOOTSTRAP
-    FIXED-POINT**. ⚠⚠ **DO FIRST in Vec-2:** the behavioural test is ~83s at 54 fixtures (rebuilds each
-    twice — `snc build` for the inkwell ground-truth + `cc` for the textual path) — **SAMPLE or CACHE
-    it** (it balloons each slice). The PER-SLICE METHOD: extend `crates/sentinel-driver/src/llvm_dump.rs`
-    (the oracle — a canonical `.ll` spec we define) + `selfhost/types.sentinel` (the mode-4 FUSED
-    codegen — the `cg_*` machinery: `cgo_ty`/`cg_emit_*`/`cg_dst`/`cgo_operand`/`cg_fresh_block`/the
-    `cgak`/`cgav`/`cgat` collect stacks) in LOCK-STEP, byte-for-byte; PROBE the `.ll` shape with `cc`
-    first; add a golden (`tests/llvm.rs`) + a seed (`tests/selfhost_codegen.rs`); validate = the codegen
-    differential (`sentinel_codegen_matches_oracle_on_corpus`) + modes 0–3 (`selfhost_types`/`borrow`/
-    `mir`) byte-identical + the `leaks` sweep + the four-check; feat+docs commit pair (ADR 0045
-    amendment). ⚠ Bar A only (no generics/classes/effects/nullable — the oracle Errs on them → the
-    differential skips, partial-by-Err). The codegen history that built this is below.
+    ▶ **RESUME AT: (8d heap drops) — the DropPlan `sentinel_free` at scope exit.** Codegen (8/N) is
+    WELL UNDERWAY (ADR 0045, amendments A1–A10): 8a scalars/calls, 8b control flow, 8c-1/2/3
+    structs/arrays/strings, 8d builtins (str_eq/file-IO) + refs (`&`/`&mut`/`*`/`*p=x`) + Vec
+    (vec_new/push/pop/len/`v[i]` + **`vec_to_array`** — the `Vec`→`[T]` `llvm.memcpy` bridge, A10) —
+    ALL byte-identical to `snc llvm` + behavioural (cc==inkwell) + leak-free + modes 0–3
+    byte-identical (**55/55 emitting fixtures** — `c5d3_collections` joined). **NEXT = heap drops:**
+    the textual `.ll` path now allocs `Vec`/array buffers (`sentinel_alloc`/`sentinel_realloc`) but
+    NEVER frees them — port the DropPlan's `sentinel_free` at scope exit (`compile_to_object` reads
+    TypedProgram + DropPlan, codegen lib.rs:168; the drop emission is the `emit_*_drops` family).
+    ⚠ It is **byte-parity-NEUTRAL for behaviour** (a leak vs no-leak doesn't change exit codes /
+    stdout, so the behavioural test won't catch a missing free) — the GATE is the **`leaks` sweep**
+    (codesign + `leaks --atExit`) on the cc-compiled fixtures, NOT just the differential. Needed for
+    a clean fixed-point. Then → **(8e) enums/match** → **(8f) calls/recursion/multi-module** → **(8g)
+    THE BOOTSTRAP FIXED-POINT**. ⚠⚠ **The behavioural test is ~83s at 55 fixtures** (rebuilds each
+    twice — `snc build` for inkwell + `cc` for the textual path) — **SAMPLE it** (targeted inkwell-vs-cc
+    on the changed fixture(s) + new seeds; the unchanged fixtures are provably byte-identical via the
+    corpus differential), run the full suite ONCE as the final gate. The PER-SLICE METHOD: extend
+    `crates/sentinel-driver/src/llvm_dump.rs` (the oracle — a canonical `.ll` spec we define) +
+    `selfhost/types.sentinel` (the mode-4 FUSED codegen — the `cg_*` machinery:
+    `cgo_ty`/`cg_emit_*`/`cg_dst`/`cgo_operand`/`cg_fresh_block`/the `cgak`/`cgav`/`cgat` collect
+    stacks) in LOCK-STEP, byte-for-byte; PROBE the `.ll` shape with `cc` first; add a golden
+    (`tests/llvm.rs`) + a seed (`tests/selfhost_codegen.rs`); validate = the codegen differential
+    (`sentinel_codegen_matches_oracle_on_corpus`) + modes 0–3 (`selfhost_types`/`borrow`/`mir`)
+    byte-identical + the `leaks` sweep + the four-check; feat+docs commit pair (ADR 0045 amendment).
+    ⚠ Bar A only (no generics/classes/effects/nullable — the oracle Errs on them → the differential
+    skips, partial-by-Err). The codegen history that built this is below.
 
     NEXT = **(8/N) CODEGEN — the GRAND FINALE + the bootstrap fixed-point — is OPENED; ADR
     0045 PROPOSED** (its own kickoff, the 0039–0044 cadence), the 3 design calls SETTLED WITH
