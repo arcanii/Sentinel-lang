@@ -272,6 +272,45 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     test is now ~66s (rebuilds each emitted fixture twice; 32 fixtures) — sample/cache at
     (8d)/(8e).
 
+- **A5 — (8c-2) ARRAYS LANDED** (the second aggregate). Codegen lowers array literals,
+  indexing, and `len`, byte-identical to `snc llvm` over the corpus
+  (`sentinel_codegen_matches_oracle_on_corpus`, **42/42 emitted** — the 10 C1.6/C2.3 array
+  fixtures light up) + 3 array seeds + 1 new golden (`llvm_array_lit_index_and_len`),
+  behavioural (`cc`-run == inkwell) and leak-free; modes 0–3 + effects byte-identical.
+  - **`[T]` is the abi-v1 `{ i64 len, ptr data }`** (ADR 0029 §2) — ONE inline literal struct
+    type for every element type (the data is an opaque heap pointer), so it needs NO Pass-0
+    name (unlike a struct's `%Struct.N`); `let`/`Var`/param/return/call carry it through the
+    EXISTING alloca/store/load the moment the type renderer learns `Type::Array` → `{ i64,
+    ptr }`. The element type matters only for the GEP stride (carried by the ArrayLit/Index
+    nodes).
+  - **array literal = heap alloc + GEP-stores + insertvalue.** `n * sizeof(elem)` via the
+    **GEP-sizeof constant idiom** (`getelementptr T, ptr null, i64 n` then `ptrtoint`) —
+    correct for ANY element type incl. structs (with padding), without replicating layout
+    sizing — then `sentinel_alloc`, a per-element `getelementptr`+`store`, and the `{len,ptr}`
+    `insertvalue`. Element operands are COLLECTED first (reusing the call-arg stacks +
+    `cg_emit_arraylit`).
+  - **`a[i]` = bounds-check + GEP + load.** Extract `len`(0)/`data`(1); `icmp sge i, 0` + `icmp
+    slt i, len` + `and`; `br` to ok/oob; OOB = `call void @sentinel_panic_oob(i, len)` +
+    `unreachable`; OK = `getelementptr elem, data, i` + `load` (the OK block continues; the
+    Index arm captures both operands then `cg_emit_index`, reusing `cg_fresh_block` — blocks
+    oob-first/ok-second). `len(arr)` = `extractvalue 0`.
+  - **The first runtime-symbol declares.** A program emits `declare ptr @sentinel_alloc(i64)` /
+    `declare void @sentinel_panic_oob(i64, i64)` ONLY for the symbols it actually uses (per-
+    symbol `used_alloc`/`used_panic` flags set during emission; the oracle buffers the fns so
+    the declares precede them, the Sentinel side reads the flags in the mode-4 preamble) — so a
+    heap/bounds-free program (all of 8a–8c-1) stays byte-identical. `c16_empty_array` declares
+    only `sentinel_alloc` (a `let xs = []` + `len`, no index) — proving the per-symbol split.
+  - ⚠ **The `len`-arg collect gap (a debugging find).** `len` (FnId 3) is a GENERIC builtin →
+    routes through `dump_gcall`/`dump_args_capture_first`, NOT `dump_targs`, and that path walked
+    the first arg WITHOUT `cg_collect`ing it (the same gap `dump_array_elems` had) → an empty
+    `cgak` → `cg_emit_call` indexed out of bounds (the compiler SIGABRT'd on the 3 `len`
+    fixtures). Fixed by collecting the first arg in both `dump_args_capture_first` and
+    `dump_array_elems`. (Also: the flat per-fn namespace bit once — `let d` in the new `len`
+    branch clashed with `cg_emit_call`'s existing `d`; renamed.)
+  - **NEXT = (8c-3) `[u8]`/string literals** (heap-copied byte arrays — the `lower_string_lit`
+    path: an `i8` array of constant byte stores) → closes (8c) → (8d) Vec + builtins + drops.
+    ⚠ The behavioural test is now ~71s (42 fixtures rebuilt twice) — sample/cache at (8d).
+
 ## Decision
 
 ### D1. Goal.

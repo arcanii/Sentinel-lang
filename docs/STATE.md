@@ -122,6 +122,23 @@ interleave→collect so both agree on side-effecting field values) reusing the c
 ASSIGNMENT (`p.x = …`, the oracle's non-Var-lvalue limit) stay deferred — no emitting fixture
 needs them. NEXT = **(8c-2) arrays** (lit + index + `sentinel_panic_oob` bounds-check) →
 `[u8]`/strings (closing 8c) → (8d) Vec + builtins + drops.
+**✅ (8c-2) ARRAYS LANDED (ADR 0045 A5):** array literals + indexing + `len`, byte-identical to
+`snc llvm` (**42/42 emitted** — the 10 C1.6/C2.3 array fixtures light up) + 3 seeds + 1 golden,
+behavioural (cc==inkwell) + leak-free; modes 0–3 + effects byte-identical. `[T]` is the abi-v1
+`{ i64 len, ptr data }` — ONE inline literal type for every element type (data = opaque heap ptr),
+so NO Pass-0 name; `let`/`Var`/param/return/call carry it via the EXISTING alloca/store/load once
+`cgo_ty` learns `Type::Array` → `{ i64, ptr }`. A literal heap-allocs `n * sizeof(elem)` (the
+GEP-sizeof idiom `getelementptr T, null, n` + `ptrtoint` — correct for any element incl. padded
+structs) via `sentinel_alloc`, GEP-stores each element, builds `insertvalue {len,ptr}` (reusing
+the call-arg collect stacks + `cg_emit_arraylit`). `a[i]` extracts len(0)/data(1), bounds-checks
+(`sge 0` + `slt len` + `and`, br to ok/oob, OOB = `sentinel_panic_oob` + `unreachable`), GEP+loads
+(`cg_emit_index`, reusing `cg_fresh_block`); `len` = `extractvalue 0`. **First runtime-symbol
+declares** — emitted ONLY for symbols a program uses (per-symbol `used_alloc`/`used_panic`), so
+8a–8c-1 stay byte-identical (`c16_empty_array` declares only `sentinel_alloc`). ⚠ Debug find: `len`
+(FnId 3, a generic builtin) routes through `dump_gcall`/`dump_args_capture_first` which walked the
+first arg WITHOUT `cg_collect`ing it (same gap as `dump_array_elems`) → empty `cgak` → SIGABRT;
+fixed by collecting the first arg in both. NEXT = **(8c-3) `[u8]`/string literals** (closing 8c) →
+(8d) Vec + builtins + drops.
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;

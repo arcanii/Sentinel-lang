@@ -1949,10 +1949,28 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 > (`cg_collecting`/`cgak`/`cgav`/`cgat` + a new `cg_emit_structlit`); **field read** = a new
 > `cg_extract` (`extractvalue`; chained `o.inner.x` nests). ⚠ Generic structs (8h/Bar B) + field
 > ASSIGNMENT (`p.x = …`, the oracle's non-Var-lvalue limit) are deferred — no emitting fixture
-> needs them. **NEXT = (8c-2) arrays** (lit + index + `sentinel_panic_oob` bounds-check) →
-> `[u8]`/string literals (closing 8c) → (8d) Vec + builtins + drops → (8e) enums/match → (8f)
+> needs them.
+>
+> **✅ (8c-2) ARRAYS COMPLETE (ADR 0045 A5):** array literals + indexing + `len`, byte-identical
+> to `snc llvm` (**42/42 emitted** — the 10 C1.6/C2.3 array fixtures light up) + 3 seeds + 1 golden
+> (`llvm_array_lit_index_and_len`), behavioural (cc==inkwell) + leak-free; modes 0–3 + effects
+> byte-identical. 🔑 `[T]` is the abi-v1 `{ i64 len, ptr data }` — ONE inline literal type for every
+> element type (data = opaque heap ptr), so NO Pass-0 name; `let`/`Var`/param/return/call carry it
+> via the EXISTING alloca/store/load once `cgo_ty` learns `Type::Array` → `{ i64, ptr }`. A literal
+> heap-allocs `n * sizeof(elem)` (the **GEP-sizeof idiom** `getelementptr T, null, n` + `ptrtoint`
+> — correct for any element incl. padded structs) via `sentinel_alloc`, GEP-stores each element,
+> builds `insertvalue {len,ptr}` (reusing the call-arg collect stacks + `cg_emit_arraylit`). `a[i]`
+> extracts len(0)/data(1), bounds-checks (`sge 0` + `slt len` + `and`; br to ok/oob; OOB =
+> `sentinel_panic_oob` + `unreachable`), GEP+loads (`cg_emit_index`, reusing `cg_fresh_block`);
+> `len` = `extractvalue 0`. **First runtime-symbol declares** — emitted ONLY for the symbols a
+> program uses (per-symbol `used_alloc`/`used_panic`), so 8a–8c-1 stay byte-identical
+> (`c16_empty_array` → only `sentinel_alloc`). ⚠ Debug find: `len` (FnId 3, a generic builtin)
+> routes through `dump_gcall`/`dump_args_capture_first`, which walked the first arg WITHOUT
+> `cg_collect`ing it (same gap as `dump_array_elems`) → empty `cgak` → SIGABRT; fixed by collecting
+> the first arg in both. **NEXT = (8c-3) `[u8]`/string literals** (heap-copied byte arrays, the
+> `lower_string_lit` path — closing 8c) → (8d) Vec + builtins + drops → (8e) enums/match → (8f)
 > calls/recursion/multi-module → **(8g) the bootstrap fixed-point**. ⚠ The behavioural test
-> rebuilds each emitted fixture twice (~66s at 32) — sample/cache as the subset grows (~8d/8e).
+> rebuilds each emitted fixture twice (~71s at 42) — sample/cache as the subset grows (~8d).
 > Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT; Bar B 8h–8l → full corpus →
 > ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak + the four norms unchanged (below).
 >
@@ -2013,16 +2031,16 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0045 A4** docs commit (HEAD — this commit,
-    (8c-1) structs COMPLETE) atop the (8c-1) feat (`f62466b` structs: Pass-0 + insertvalue/
-    extractvalue), atop the (8b) close (`4c6d5c4` paste-refresh + `92040ec` A3 docs +
-    `7b33d49`/`c76db27` feats) + the (8a) commits (`2ed426a` codegen.sentinel + `1931496` the
-    snc llvm oracle) + ADR 0045 PROPOSED (`3f13169`), all atop the (7/N) ADR 0044 A5 close
-    (`3b384bf`). ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N"
-    (uncommitted-to-origin local commits); that's expected, never push.
+    Verify HEAD with `git log -1` — expect the **ADR 0045 A5** docs commit (HEAD — this commit,
+    (8c-2) arrays COMPLETE) atop the (8c-2) feat (`a6cc205` arrays: lit + index + bounds-check),
+    atop the (8c-1) close (`3ac88cd` A4 docs + `f62466b` structs feat) + the (8b) close
+    (`92040ec` A3 docs + `7b33d49`/`c76db27` feats) + the (8a) commits (`2ed426a`
+    codegen.sentinel + `1931496` the snc llvm oracle) + ADR 0045 PROPOSED (`3f13169`), all atop
+    the (7/N) ADR 0044 A5 close (`3b384bf`). ⚠ The dev pushes via GitHub Desktop — `git status`
+    may show "ahead N" (uncommitted-to-origin local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1459 tests**
-    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [32/32 emitted] + the
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1460 tests**
+    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [42/42 emitted] + the
     `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still 123/123). macOS + LLVM
     18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
 
@@ -2093,11 +2111,21 @@ For pasting into a fresh chat to bootstrap context:
     in the mode-4 preamble + `ll_type_to`) emits the `%Struct.N = type {…}` decls; struct-lit
     reuses the call-arg collect stacks (`cg_collecting`/`cgak`/`cgav`/`cgat` + `cg_emit_structlit`,
     the oracle switched interleave→collect to match); field read = `cg_extract` (`extractvalue`).
-    Generic structs (8h/Bar B) + field-assign (`p.x=…`, non-Var-lvalue) deferred. **NEXT = (8c-2)
-    arrays** (lit + index + `sentinel_panic_oob` bounds-check) → `[u8]`/strings (closing 8c) →
-    (8d) Vec+builtins+drops → (8e) enums/match → (8f) calls/multi-module → **(8g) the bootstrap
-    fixed-point**. Sub-slices 8a–8l in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT (8g); Bar B
-    8h–8l → full corpus → ADR 0045 ACCEPTED). No in-flight slice.
+    Generic structs (8h/Bar B) + field-assign (`p.x=…`, non-Var-lvalue) deferred. **✅ (8c-2)
+    ARRAYS COMPLETE (ADR 0045 A5):** array literals + indexing + `len`, byte-identical to `snc
+    llvm` (42/42 emitted) + behavioural + leak-free; modes 0–3 + effects byte-identical. `[T]` =
+    the abi-v1 `{ i64, ptr }` (ONE inline literal for every element type → NO Pass-0 name); a
+    literal heap-allocs `n*sizeof(elem)` (GEP-sizeof idiom + `sentinel_alloc`) + GEP-stores +
+    `insertvalue {len,ptr}` (`cg_emit_arraylit`); `a[i]` = extract len(0)/data(1) + bounds-check
+    (`sge`/`slt`/`and`, br ok/oob, OOB=`sentinel_panic_oob`+`unreachable`) + GEP+load
+    (`cg_emit_index`); `len`=`extractvalue 0`. First **runtime-symbol declares**, emitted only for
+    symbols used (per-symbol `used_alloc`/`used_panic` → 8a–8c-1 byte-identical). ⚠ `len` (FnId 3,
+    generic builtin) goes via `dump_gcall`/`dump_args_capture_first`, which DIDN'T `cg_collect` the
+    first arg → SIGABRT; fixed (collect first arg in `dump_args_capture_first` + `dump_array_elems`).
+    **NEXT = (8c-3) `[u8]`/string literals** (heap-copied byte arrays, the `lower_string_lit` path
+    — closing 8c) → (8d) Vec+builtins+drops → (8e) enums/match → (8f) calls/multi-module → **(8g)
+    the bootstrap fixed-point**. Sub-slices 8a–8l in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT
+    (8g); Bar B 8h–8l → full corpus → ADR 0045 ACCEPTED). No in-flight slice.
 
     KEY REUSABLE FINDINGS (carry forward):
     - The back-half stages REUSE the typed program (they can't cheaply re-derive it).
