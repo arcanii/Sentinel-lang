@@ -7136,11 +7136,47 @@ fn cg_is_moved(c: &mut TyCtx, fnidx: i64, vid: i64) -> bool {
     found
 }
 
-// (8d-drops) `sentinel_free` a binding of type `ty` at alloca `slot`: an array `[T]`
-// (`{ i64, ptr }`) frees its data pointer (field 1); a `Vec<T>` (`{ i64, i64, ptr }`)
-// frees field 2 (`sentinel_free(null)` is a safe no-op, so an empty `vec_new()` drops
-// cleanly). Primitives / refs have no heap → nothing. Struct recursive field drop +
-// the Bar-B shapes are later slices. Mirrors the oracle's `emit_drop_for_binding`.
+// (8d-drops-2) does a value of type `ty` own heap that scope-exit must `sentinel_free`?
+// An array / `Vec` always does; a struct does iff some field does (recursive — a struct
+// of only scalars drops nothing). Bar-B shapes don't emit → false. Mirrors `needs_drop`.
+fn cg_needs_drop(c: &mut TyCtx, ty: i64) -> bool {
+    if cg_is_array(c, ty) {
+        true
+    } else if cg_is_vec(c, ty) {
+        true
+    } else {
+        let nsid: i64 = struct_of_handle(c, ty);
+        if nsid >= 0 {
+            let nf: i64 = len((*c).fldo);
+            let mut i: i64 = 0;
+            let mut any: bool = false;
+            while i < nf {
+                if (*c).fldo[i] == nsid {
+                    let ft: i64 = (*c).fldty[i];
+                    if cg_needs_drop(c, ft) {
+                        any = true;
+                        0
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                i = i + 1;
+            }
+            any
+        } else {
+            false
+        }
+    }
+}
+
+// (8d-drops) `sentinel_free` a value of type `ty` living AT `slot` (a `%vN` — an alloca
+// slot, or a struct-field GEP register when recursing): an array `[T]` (`{ i64, ptr }`)
+// frees its data pointer (field 1); a `Vec<T>` (`{ i64, i64, ptr }`) frees field 2
+// (`sentinel_free(null)` is a safe no-op); a struct (8d-drops-2) GEPs into each
+// drop-needing field (declaration order) and recurses. Primitives / refs → nothing.
+// Mirrors the oracle's `emit_drop_for_binding` / `emit_drop_struct_fields`.
 fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
     if cg_is_array(c, ty) {
         let adv: i64 = cg_dst(c);
@@ -7171,7 +7207,42 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
         (*c).cg_used_free = true;
         0
     } else {
-        0
+        // (8d-drops-2) a struct: GEP each drop-needing field (declaration order) and
+        // recurse. `fidx` counts EVERY field (the GEP index is the field's position),
+        // emitting only for the heap-backed ones.
+        let ssid: i64 = struct_of_handle(c, ty);
+        if ssid >= 0 {
+            let snf: i64 = len((*c).fldo);
+            let mut si: i64 = 0;
+            let mut fidx: i64 = 0;
+            while si < snf {
+                if (*c).fldo[si] == ssid {
+                    let sft: i64 = (*c).fldty[si];
+                    if cg_needs_drop(c, sft) {
+                        let sfp: i64 = cg_dst(c);
+                        cgo_str(c, "getelementptr %Struct.");
+                        cgo_int(c, ssid);
+                        cgo_str(c, ", ptr %v");
+                        cgo_int(c, slot);
+                        cgo_str(c, ", i32 0, i32 ");
+                        cgo_int(c, fidx);
+                        cg_putc(c, '\n');
+                        cg_emit_drop(c, sft, sfp);
+                        0
+                    } else {
+                        0
+                    };
+                    fidx = fidx + 1;
+                    0
+                } else {
+                    0
+                };
+                si = si + 1;
+            }
+            0
+        } else {
+            0
+        }
     }
 }
 

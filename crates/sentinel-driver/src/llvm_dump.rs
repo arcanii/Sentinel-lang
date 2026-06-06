@@ -709,17 +709,18 @@ impl Emit<'_> {
         Ok(())
     }
 
-    /// 8d-drops: emit a `sentinel_free` for a binding at alloca `slot` of type `ty`.
-    /// An array `[T]` (`{ i64, ptr }`) frees its data pointer (field 1); a `Vec<T>`
+    /// 8d-drops: emit a `sentinel_free` for a value of type `ty` living AT `ptr_reg`
+    /// (a `%vN` — an alloca slot, or a struct-field GEP register when recursing). An
+    /// array `[T]` (`{ i64, ptr }`) frees its data pointer (field 1); a `Vec<T>`
     /// (`{ i64, i64, ptr }`) frees field 2 (`sentinel_free(null)` is a safe no-op, so
-    /// an empty `vec_new()` drops cleanly with no guard). Primitives / refs have no
-    /// heap → nothing. Struct recursive field drop + the Bar-B shapes
-    /// (nullable/enum/class) are later slices; their fixtures don't emit yet.
-    fn emit_drop_for_binding(&mut self, slot: u32, ty: Type) -> Result<(), String> {
+    /// an empty `vec_new()` drops cleanly with no guard); a struct recurses into its
+    /// heap-backed fields (8d-drops-2). Primitives / refs have no heap → nothing. The
+    /// Bar-B shapes (nullable/enum/class) are later slices; their fixtures don't emit.
+    fn emit_drop_for_binding(&mut self, ptr_reg: u32, ty: Type) -> Result<(), String> {
         match ty {
             Type::Array(_) => {
                 let v = self.fresh();
-                writeln!(self.body, "  %v{v} = load {{ i64, ptr }}, ptr %v{slot}").unwrap();
+                writeln!(self.body, "  %v{v} = load {{ i64, ptr }}, ptr %v{ptr_reg}").unwrap();
                 let d = self.fresh();
                 writeln!(self.body, "  %v{d} = extractvalue {{ i64, ptr }} %v{v}, 1").unwrap();
                 writeln!(self.body, "  call void @sentinel_free(ptr %v{d})").unwrap();
@@ -727,11 +728,31 @@ impl Emit<'_> {
             }
             Type::Vec(_) => {
                 let v = self.fresh();
-                writeln!(self.body, "  %v{v} = load {{ i64, i64, ptr }}, ptr %v{slot}").unwrap();
+                writeln!(self.body, "  %v{v} = load {{ i64, i64, ptr }}, ptr %v{ptr_reg}").unwrap();
                 let d = self.fresh();
                 writeln!(self.body, "  %v{d} = extractvalue {{ i64, i64, ptr }} %v{v}, 2").unwrap();
                 writeln!(self.body, "  call void @sentinel_free(ptr %v{d})").unwrap();
                 self.used.free = true;
+            }
+            // 8d-drops-2: a struct owns its heap-backed fields — GEP into each
+            // drop-needing field (in declaration order) and recurse. The `ptr_reg`
+            // is where the struct lives; field N lives at `gep %Struct.K, ptr, 0, N`.
+            Type::Struct(id) => {
+                let prog = self.program;
+                let field_tys: Vec<Type> = prog.struct_decl(id).fields.iter().map(|f| f.ty).collect();
+                for (idx, &fty) in field_tys.iter().enumerate() {
+                    if !needs_drop(fty, prog) {
+                        continue;
+                    }
+                    let fp = self.fresh();
+                    writeln!(
+                        self.body,
+                        "  %v{fp} = getelementptr %Struct.{}, ptr %v{ptr_reg}, i32 0, i32 {idx}",
+                        id.0
+                    )
+                    .unwrap();
+                    self.emit_drop_for_binding(fp, fty)?;
+                }
             }
             _ => {}
         }
@@ -1054,5 +1075,21 @@ fn llvm_ty(ty: Type) -> Result<String, String> {
         // (the capacity sits between len and data, vs `[T]`'s field 1).
         Type::Vec(_) => Ok("{ i64, i64, ptr }".into()),
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
+    }
+}
+
+/// 8d-drops-2: does a value of type `ty` own heap that scope-exit must `sentinel_free`?
+/// An array / `Vec` always does; a struct does iff some field does (recursive — so a
+/// struct of only scalars drops nothing). The Bar-B shapes (nullable / enum / generic /
+/// secret) don't appear in the emitting subset, so a plain `false` suffices.
+fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
+    match ty {
+        Type::Array(_) | Type::Vec(_) => true,
+        Type::Struct(id) => program
+            .struct_decl(id)
+            .fields
+            .iter()
+            .any(|f| needs_drop(f.ty, program)),
+        _ => false,
     }
 }

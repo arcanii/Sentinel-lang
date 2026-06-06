@@ -702,6 +702,71 @@ fn llvm_scope_drops_moved_and_nested() {
     );
 }
 
+#[test]
+fn llvm_struct_field_recursive_drop() {
+    // 8d-drops-2: a struct owns its heap-backed fields. Dropping `b` GEPs into each
+    // drop-needing field (declaration order) and frees it — here field 0 (`data:
+    // [i64]`) frees its buffer; field 1 (`tag: i64`) is a scalar and is skipped (no
+    // GEP). The GEP index is the field's position, not the drop-needing count.
+    // b.data[0]=9 + b.tag=5 = 14.
+    assert_eq!(
+        llvm_dump(
+            "sdrop",
+            "struct Box { data: [i64], tag: i64 }\nfn main() -> i64 {\n    let b = Box { data: [9, 8], tag: 5 };\n    b.data[0] + b.tag\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "%Struct.0 = type { { i64, ptr }, i64 }\n",
+            "\n",
+            "declare ptr @sentinel_alloc(i64)\n",
+            "declare void @sentinel_free(ptr)\n",
+            "declare void @sentinel_panic_oob(i64, i64)\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v9 = alloca %Struct.0\n",
+            "  %v0 = getelementptr i64, ptr null, i64 2\n",
+            "  %v1 = ptrtoint ptr %v0 to i64\n",
+            "  %v2 = call ptr @sentinel_alloc(i64 %v1)\n",
+            "  %v3 = getelementptr i64, ptr %v2, i64 0\n",
+            "  store i64 9, ptr %v3\n",
+            "  %v4 = getelementptr i64, ptr %v2, i64 1\n",
+            "  store i64 8, ptr %v4\n",
+            "  %v5 = insertvalue { i64, ptr } undef, i64 2, 0\n",
+            "  %v6 = insertvalue { i64, ptr } %v5, ptr %v2, 1\n",
+            "  %v7 = insertvalue %Struct.0 undef, { i64, ptr } %v6, 0\n",
+            "  %v8 = insertvalue %Struct.0 %v7, i64 5, 1\n",
+            "  store %Struct.0 %v8, ptr %v9\n",
+            "  %v10 = load %Struct.0, ptr %v9\n",
+            "  %v11 = extractvalue %Struct.0 %v10, 0\n",
+            "  %v12 = extractvalue { i64, ptr } %v11, 0\n",
+            "  %v13 = extractvalue { i64, ptr } %v11, 1\n",
+            "  %v14 = icmp sge i64 0, 0\n",
+            "  %v15 = icmp slt i64 0, %v12\n",
+            "  %v16 = and i1 %v14, %v15\n",
+            "  br i1 %v16, label %bb1, label %bb0\n",
+            "bb0:\n",
+            "  call void @sentinel_panic_oob(i64 0, i64 %v12)\n",
+            "  unreachable\n",
+            "bb1:\n",
+            "  %v17 = getelementptr i64, ptr %v13, i64 0\n",
+            "  %v18 = load i64, ptr %v17\n",
+            "  %v19 = load %Struct.0, ptr %v9\n",
+            "  %v20 = extractvalue %Struct.0 %v19, 1\n",
+            "  %v21 = add i64 %v18, %v20\n",
+            "  %v22 = getelementptr %Struct.0, ptr %v9, i32 0, i32 0\n",
+            "  %v23 = load { i64, ptr }, ptr %v22\n",
+            "  %v24 = extractvalue { i64, ptr } %v23, 1\n",
+            "  call void @sentinel_free(ptr %v24)\n",
+            "  %v25 = trunc i64 %v21 to i32\n",
+            "  ret i32 %v25\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {

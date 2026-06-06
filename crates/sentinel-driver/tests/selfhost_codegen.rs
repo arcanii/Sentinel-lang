@@ -112,6 +112,9 @@ const SEEDS: &[&str] = &[
     // nested block; the [u8] param of show drops at show's exit.
     "fn consume(xs: [i64]) -> i64 { xs[0] }\nfn main() -> i64 { let arr: [i64] = [1, 2, 3]; let inner: i64 = { let tmp: [i64] = [4, 5]; tmp[0] }; consume(arr) + inner }\n",
     "fn show(b: [u8]) -> i64 { len(b) }\nfn main() -> i64 { let s: [u8] = \"hi\"; let v: Vec<i64> = vec_new(); show(s) + len(v) }\n",
+    // (8d-drops-2) recursive struct-field drop: dropping the struct GEPs into each
+    // heap-backed field and frees it (the [i64] field); scalar fields are skipped.
+    "struct Box { data: [i64], tag: i64 }\nfn main() -> i64 { let b = Box { data: [9, 8], tag: 5 }; b.data[0] + b.tag }\n",
 ];
 
 #[test]
