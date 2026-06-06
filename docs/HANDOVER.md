@@ -1933,12 +1933,28 @@ C1.3 retrospective (kept for reference): "2 weeks" estimated;
 > header + hoisted allocas + folded body + ret); the (8a) helpers' 29 cgout pushes were routed
 > through `cg_putc`. if/else + `&&`/`||` are no-phi memory-cell merges; while is the real loop
 > CFG (back-edge + a loop-target stack `cg_loop_cond`/`cg_loop_after` + a dead-block after
-> break/continue). **NEXT = (8c) aggregates** — structs (lit + field GEP), arrays (lit + index
-> + bounds-check), `[u8]`/string literals. Then (8d) Vec + builtins + drops → (8e) enums/match
-> → (8f) calls/recursion/multi-module → **(8g) the bootstrap fixed-point**. ⚠ The behavioural
-> test rebuilds each emitted fixture twice (~25s at 26) — sample/cache as the subset grows
-> (~8d/8e). Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT; Bar B 8h–8l →
-> full corpus → ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak + the four norms unchanged (below).
+> break/continue).
+>
+> **✅ (8c-1) STRUCTS COMPLETE (ADR 0045 A4) — opens slice (8c):** struct type decls + literals
+> + field reads, byte-identical to `snc llvm` (**32/32 emitted** — the 5 C1.4 pure-struct
+> fixtures light up) + 4 seeds + 1 golden (`llvm_struct_decl_lit_and_field`), behavioural
+> (cc==inkwell) + leak-free; modes 0–3 (types/borrow/mir/ctverify) + effects byte-identical. 🔑
+> A struct is a first-class SSA VALUE — `insertvalue`/`extractvalue` over an aggregate `%vN`
+> (the inkwell rvalue path), NOT alloca/GEP — so `let`/`Var`/param/return/call carry it through
+> the EXISTING alloca/store/load once `cgo_ty` learns structs (kind-6 → `%Struct.N` via
+> `struct_of_handle`); the slice is small. **Pass 0** (`cg_pass0` in the mode-4 preamble + a
+> buffer-targeted `ll_type_to`) emits `%Struct.N = type { … }` per struct in StructId order.
+> **struct-lit** = COLLECT-then-emit (the oracle switched interleave→collect so both backends
+> agree on side-effecting field values) reusing the call-arg stacks
+> (`cg_collecting`/`cgak`/`cgav`/`cgat` + a new `cg_emit_structlit`); **field read** = a new
+> `cg_extract` (`extractvalue`; chained `o.inner.x` nests). ⚠ Generic structs (8h/Bar B) + field
+> ASSIGNMENT (`p.x = …`, the oracle's non-Var-lvalue limit) are deferred — no emitting fixture
+> needs them. **NEXT = (8c-2) arrays** (lit + index + `sentinel_panic_oob` bounds-check) →
+> `[u8]`/string literals (closing 8c) → (8d) Vec + builtins + drops → (8e) enums/match → (8f)
+> calls/recursion/multi-module → **(8g) the bootstrap fixed-point**. ⚠ The behavioural test
+> rebuilds each emitted fixture twice (~66s at 32) — sample/cache as the subset grows (~8d/8e).
+> Sub-slices (8a–8l) in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT; Bar B 8h–8l → full corpus →
+> ADR 0045 ACCEPTED). `/tmp/tb` build/run/leak + the four norms unchanged (below).
 >
 > **(7/N) recap** (ADR 0044, A1–A5) reused `types.sentinel` via `types::run`-with-`mode`:
 > `mode 2` builds + dumps the MIR (a FUSED `if mir_on(c)` side-build of the pass-2 walk +
@@ -1997,15 +2013,16 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0045 A3** docs commit (`92040ec`, (8b)
-    control flow COMPLETE), atop the (8b) feats (`7b33d49` while/`&&`/`||` + `c76db27` alloca
-    hoist + if/else) + the (8a) commits (`2ed426a`+`1efeb53` codegen.sentinel, `1931496`+`2c3ab19`
-    the snc llvm oracle) + ADR 0045 PROPOSED (`3f13169`) + the C-backlog (`f743a55`), all atop
-    the (7/N) ADR 0044 A5 close (`3b384bf`). ⚠ The dev pushes via GitHub Desktop — `git status`
-    may show "ahead N" (uncommitted-to-origin local commits); that's expected, never push.
+    Verify HEAD with `git log -1` — expect the **ADR 0045 A4** docs commit (HEAD — this commit,
+    (8c-1) structs COMPLETE) atop the (8c-1) feat (`f62466b` structs: Pass-0 + insertvalue/
+    extractvalue), atop the (8b) close (`4c6d5c4` paste-refresh + `92040ec` A3 docs +
+    `7b33d49`/`c76db27` feats) + the (8a) commits (`2ed426a` codegen.sentinel + `1931496` the
+    snc llvm oracle) + ADR 0045 PROPOSED (`3f13169`), all atop the (7/N) ADR 0044 A5 close
+    (`3b384bf`). ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N"
+    (uncommitted-to-origin local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1458 tests**
-    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [26/26 emitted] + the
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1459 tests**
+    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [32/32 emitted] + the
     `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still 123/123). macOS + LLVM
     18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
 
@@ -2067,11 +2084,20 @@ For pasting into a fresh chat to bootstrap context:
     types — AND ADR 0036 loop-stack growth); codegen.sentinel buffers the body in `cgbody`,
     records allocas as (slot,type) pairs, + a `cg_putc` router (cg_to_body → cgbody walk / cgout
     teardown). if/else + `&&`/`||` = no-phi memory-cell merges; while = the real loop CFG (a
-    loop-target stack + a dead block after break/continue). **NEXT = (8c) aggregates** (structs +
-    field GEP, arrays + index + bounds-check, `[u8]`/strings) → (8d) Vec+builtins+drops → (8e)
-    enums/match → (8f) calls/multi-module → **(8g) the bootstrap fixed-point**. Sub-slices 8a–8l
-    in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT (8g); Bar B 8h–8l → full corpus → ADR 0045
-    ACCEPTED). No in-flight slice.
+    loop-target stack + a dead block after break/continue). **✅ (8c-1) STRUCTS COMPLETE (ADR
+    0045 A4):** struct type decls + literals + field reads, byte-identical to `snc llvm` (32/32
+    emitted) + behavioural (cc==inkwell) + leak-free; modes 0–3 + effects byte-identical. A struct
+    is a first-class SSA VALUE — `insertvalue`/`extractvalue` over an aggregate `%vN` (NOT
+    alloca/GEP), so let/var/param/return/call carry it via the EXISTING alloca/store/load once
+    `cgo_ty` learns structs (kind-6 → `%Struct.N` via `struct_of_handle`); **Pass 0** (`cg_pass0`
+    in the mode-4 preamble + `ll_type_to`) emits the `%Struct.N = type {…}` decls; struct-lit
+    reuses the call-arg collect stacks (`cg_collecting`/`cgak`/`cgav`/`cgat` + `cg_emit_structlit`,
+    the oracle switched interleave→collect to match); field read = `cg_extract` (`extractvalue`).
+    Generic structs (8h/Bar B) + field-assign (`p.x=…`, non-Var-lvalue) deferred. **NEXT = (8c-2)
+    arrays** (lit + index + `sentinel_panic_oob` bounds-check) → `[u8]`/strings (closing 8c) →
+    (8d) Vec+builtins+drops → (8e) enums/match → (8f) calls/multi-module → **(8g) the bootstrap
+    fixed-point**. Sub-slices 8a–8l in ADR 0045 D10 (Bar A 8a–8g → the FIXED-POINT (8g); Bar B
+    8h–8l → full corpus → ADR 0045 ACCEPTED). No in-flight slice.
 
     KEY REUSABLE FINDINGS (carry forward):
     - The back-half stages REUSE the typed program (they can't cheaply re-derive it).

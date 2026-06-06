@@ -228,6 +228,50 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     behavioural test rebuilds each emitted fixture twice (~25s at 26) — sample/cache it
     around (8d)/(8e) as the subset grows.
 
+- **A4 — (8c-1) STRUCTS LANDED** (the first aggregate; opens slice (8c)). Codegen lowers
+  struct **type declarations**, **literals**, and **field reads**, byte-identical to `snc
+  llvm` over the corpus (`sentinel_codegen_matches_oracle_on_corpus`, **32/32 emitted** —
+  the five C1.4-shaped pure-struct fixtures now light up) + 4 struct seeds + 1 new golden
+  (`llvm_struct_decl_lit_and_field`), behaviourally correct (`cc`-run == inkwell) and
+  leak-free; modes 0–3 (types/borrow/mir/ctverify) + effects byte-identical (the 0044 D3
+  gate, four stages).
+  - **A struct is a first-class SSA VALUE, not memory.** The canonical choice (matching the
+    inkwell rvalue path, D6) is **`insertvalue`/`extractvalue`** over an aggregate `%vN`,
+    NOT alloca/GEP for the struct itself — so a struct flows as ONE operand and
+    `let`/`Var`/param/return/call already carry it through the EXISTING alloca/store/load the
+    moment the type renderer learns structs. No GEP, no new memory model; the slice is
+    small.
+  - **Pass 0 — named type decls.** A new pre-fns pass emits `%Struct.N = type { <field-ll-
+    types> }` per struct in StructId order (empty → `type {}`). **Oracle** (`dump`): a loop
+    over `program.structs`; `llvm_ty` extended `Type::Struct(id)` → `%Struct.{id}`.
+    **codegen.sentinel** (`cg_pass0`, wired into the mode-4 preamble right after the target
+    triple): iterates the flat struct/field tables (`sts`/`fldo`/`fldty`) via a
+    buffer-targeted `ll_type_to` (the `cgo_ty` mapping written to `result` — Pass 0 writes
+    the module preamble, not the cg body buffer); `cgo_ty` gained the struct case through the
+    existing `struct_of_handle` (kind-6 handle → StructId).
+  - **struct-lit = `insertvalue` chain from `undef`, COLLECT-then-emit.** The oracle was
+    switched interleave→**collect** (lower ALL field operands first, then emit the chain) so
+    both backends agree even when a field VALUE emits instructions — which lets
+    codegen.sentinel **reuse the call-arg machinery verbatim** (`cg_collecting` + a `snap` of
+    the shared `cgak`/`cgav`/`cgat` stacks; `dump_sfields` `cg_collect`s each field; a new
+    `cg_emit_structlit` folds `[snap..]` into the chain, then pops back). Nested struct lits
+    fall out (each gets its own snap). For literal/nested-lit fields (the whole corpus)
+    collect and interleave are byte-identical, so the golden is unchanged.
+  - **field read = `extractvalue`.** The Field arm captures the target aggregate operand
+    after the receiver walk and emits `extractvalue %Struct.N <agg>, <fidx>` (a new
+    `cg_extract`); a chained `o.inner.x` nests as the inner result feeds the outer. Guarded
+    to plain structs (kind 6) — a class/generic-instance target makes the oracle Err (the
+    fixture is skipped, so its bytes are never compared).
+  - **GENERIC structs are 8h/Bar B.** The oracle skips them in Pass 0 (`type_params`
+    non-empty); no oracle-emitting fixture declares one, so the Sentinel side iterating ALL
+    structs matches byte-for-byte on the Bar-A subset (the skip + a `Type::GenericInstance`
+    renderer land together at 8h). Field ASSIGNMENT (`p.x = …`) stays deferred (the oracle's
+    non-Var-lvalue limit) — the struct fixtures construct + read only.
+  - **NEXT = (8c-2) arrays** (lit + index + the `sentinel_panic_oob` bounds check) →
+    `[u8]`/string literals (closing 8c) → (8d) Vec + builtins + drops. ⚠ The behavioural
+    test is now ~66s (rebuilds each emitted fixture twice; 32 fixtures) — sample/cache at
+    (8d)/(8e).
+
 ## Decision
 
 ### D1. Goal.

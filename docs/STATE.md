@@ -107,7 +107,21 @@ entry block — solving both the if-result's late-known type (the parser AST has
 types) AND ADR 0036 per-iteration loop-stack growth; codegen.sentinel buffers the body in
 `cgbody` + records allocas as (slot,type) pairs + a `cg_putc` router (cg_to_body) sends emission
 to cgbody (walk) vs cgout (teardown assembly: header + hoisted allocas + folded body + ret).
-NEXT = **(8c) aggregates** (structs + field GEP, arrays + index + bounds-check, `[u8]`/strings).
+**✅ (8c-1) STRUCTS LANDED (ADR 0045 A4) — opens slice (8c):** struct type decls + literals +
+field reads, byte-identical to `snc llvm` (`sentinel_codegen_matches_oracle_on_corpus`, **32/32
+emitted** — the 5 C1.4 pure-struct fixtures light up) + 4 seeds + 1 golden, behavioural
+(cc==inkwell) + leak-free; modes 0–3 + effects byte-identical. A struct is a first-class SSA
+VALUE — `insertvalue`/`extractvalue` over an aggregate `%vN` (the inkwell rvalue path), NOT
+alloca/GEP — so `let`/`Var`/param/return/call carry it through the EXISTING alloca/store/load the
+moment `cgo_ty` learns structs (kind-6 handle → `%Struct.N` via `struct_of_handle`). **Pass 0**
+(`cg_pass0` in the mode-4 preamble + a buffer-targeted `ll_type_to`) emits `%Struct.N = type {
+… }` per struct in StructId order. **struct-lit** = COLLECT-then-emit (the oracle switched
+interleave→collect so both agree on side-effecting field values) reusing the call-arg stacks
+(`cg_collecting`/`cgak`/`cgav`/`cgat` + a new `cg_emit_structlit`); **field read** = a new
+`cg_extract` (`extractvalue`; chained `o.inner.x` nests). Generic structs (8h/Bar B) + field
+ASSIGNMENT (`p.x = …`, the oracle's non-Var-lvalue limit) stay deferred — no emitting fixture
+needs them. NEXT = **(8c-2) arrays** (lit + index + `sentinel_panic_oob` bounds-check) →
+`[u8]`/strings (closing 8c) → (8d) Vec + builtins + drops.
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
