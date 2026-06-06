@@ -39,7 +39,7 @@ use std::fmt::Write;
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_resolve::{
-    FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PUSH_FN_ID,
+    EnumId, FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PUSH_FN_ID,
     READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
     WRITE_FILE_FN_ID,
 };
@@ -659,8 +659,66 @@ impl Emit<'_> {
                 writeln!(self.body, "  %v{v} = load {ety}, ptr %v{ep}").unwrap();
                 Ok(format!("%v{v}"))
             }
+            // 8e-1: enum construction — `{ i32 tag, ptr payload }`. The payload is null
+            // for a unit variant, else a heap-boxed struct of the variant's payload
+            // fields (built from the lowered args).
+            TypedExprKind::EnumConstruct { enum_id, variant_index, args, .. } => {
+                self.lower_enum_construct(*enum_id, *variant_index, args)
+            }
             _ => Err("expression not yet ported (straight-line 8a only)".into()),
         }
+    }
+
+    /// 8e-1: lower an enum construction to `{ i32 tag, ptr payload }` (ADR 0032 D4). A
+    /// unit variant gets a null payload; a payload variant builds the payload struct
+    /// `{ <field tys> }` from the args (`insertvalue` chain), heap-boxes it
+    /// (GEP-sizeof + `sentinel_alloc` + store), and points the enum at it. The args are
+    /// lowered FIRST (matching the Sentinel's collect-then-emit), so a side-effecting
+    /// arg's instructions land before the payload chain on both backends.
+    fn lower_enum_construct(
+        &mut self,
+        enum_id: EnumId,
+        variant_index: usize,
+        args: &[TypedExpr],
+    ) -> Result<String, String> {
+        let payload: String = if args.is_empty() {
+            "null".to_string()
+        } else {
+            let prog = self.program;
+            let payload_tys: Vec<Type> =
+                prog.enum_data(enum_id).variants[variant_index].payloads.clone();
+            let mut field_lls = Vec::with_capacity(payload_tys.len());
+            for t in &payload_tys {
+                field_lls.push(llvm_ty(*t)?);
+            }
+            let pstruct = format!("{{ {} }}", field_lls.join(", "));
+            // Lower the args, then build the payload aggregate (declaration order).
+            let mut ops = Vec::with_capacity(args.len());
+            for a in args {
+                ops.push((llvm_ty(a.ty)?, self.lower_expr(a)?));
+            }
+            let mut agg = "undef".to_string();
+            for (i, (fty, op)) in ops.iter().enumerate() {
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = insertvalue {pstruct} {agg}, {fty} {op}, {i}").unwrap();
+                agg = format!("%v{v}");
+            }
+            // Heap-box the payload struct (sizeof via the GEP-sizeof idiom).
+            let sz = self.fresh();
+            writeln!(self.body, "  %v{sz} = getelementptr {pstruct}, ptr null, i64 1").unwrap();
+            let szi = self.fresh();
+            writeln!(self.body, "  %v{szi} = ptrtoint ptr %v{sz} to i64").unwrap();
+            let boxp = self.fresh();
+            writeln!(self.body, "  %v{boxp} = call ptr @sentinel_alloc(i64 %v{szi})").unwrap();
+            self.used.alloc = true;
+            writeln!(self.body, "  store {pstruct} {agg}, ptr %v{boxp}").unwrap();
+            format!("%v{boxp}")
+        };
+        let e0 = self.fresh();
+        writeln!(self.body, "  %v{e0} = insertvalue {{ i32, ptr }} undef, i32 {variant_index}, 0").unwrap();
+        let e1 = self.fresh();
+        writeln!(self.body, "  %v{e1} = insertvalue {{ i32, ptr }} %v{e0}, ptr {payload}, 1").unwrap();
+        Ok(format!("%v{e1}"))
     }
 
     /// The pointer operand for an lvalue (a place): a `Var`'s alloca slot, or the
@@ -787,6 +845,25 @@ impl Emit<'_> {
                     .unwrap();
                     self.emit_drop_for_binding(fp, fty)?;
                 }
+            }
+            // 8e-1: an enum owns its heap-boxed payload — load `{ i32, ptr }`, and if
+            // the payload is non-null, free it. (Box-free-only: a recursive enum's
+            // nested boxes are NOT walked — the production's measured D.1b limit.)
+            Type::Enum(_) => {
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = load {{ i32, ptr }}, ptr %v{ptr_reg}").unwrap();
+                let pl = self.fresh();
+                writeln!(self.body, "  %v{pl} = extractvalue {{ i32, ptr }} %v{v}, 1").unwrap();
+                let isnull = self.fresh();
+                writeln!(self.body, "  %v{isnull} = icmp eq ptr %v{pl}, null").unwrap();
+                let free_b = self.fresh_block();
+                let after_b = self.fresh_block();
+                writeln!(self.body, "  br i1 %v{isnull}, label %bb{after_b}, label %bb{free_b}").unwrap();
+                writeln!(self.body, "bb{free_b}:").unwrap();
+                writeln!(self.body, "  call void @sentinel_free(ptr %v{pl})").unwrap();
+                self.used.free = true;
+                writeln!(self.body, "  br label %bb{after_b}").unwrap();
+                writeln!(self.body, "bb{after_b}:").unwrap();
             }
             _ => {}
         }
@@ -1108,6 +1185,11 @@ fn llvm_ty(ty: Type) -> Result<String, String> {
         // A `Vec<T>` is `{ i64 len, i64 cap, ptr data }` (ADR 0034) — data is FIELD 2
         // (the capacity sits between len and data, vs `[T]`'s field 1).
         Type::Vec(_) => Ok("{ i64, i64, ptr }".into()),
+        // An enum is the abi-v1 `{ i32 tag, ptr payload }` (ADR 0032 D4) — a 4-byte
+        // discriminant (variant index, source order) + an opaque pointer to a
+        // heap-boxed payload struct (`null` for a unit variant). One inline literal
+        // for every enum, like `[T]`/`Vec` (the payload type is recovered per variant).
+        Type::Enum(_) => Ok("{ i32, ptr }".into()),
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
     }
 }
@@ -1124,6 +1206,14 @@ fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
             .fields
             .iter()
             .any(|f| needs_drop(f.ty, program)),
+        // 8e-1: an enum needs a drop iff some variant carries a payload (a pure-unit
+        // C-style enum boxes nothing). No recursion — the box-free-only drop matches
+        // the production (recursive payload-field drop needs synthesized per-enum fns).
+        Type::Enum(id) => program
+            .enum_data(id)
+            .variants
+            .iter()
+            .any(|v| !v.payloads.is_empty()),
         _ => false,
     }
 }

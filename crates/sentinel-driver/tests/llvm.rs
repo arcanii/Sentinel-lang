@@ -847,6 +847,63 @@ fn llvm_loop_exit_drops_on_break() {
     );
 }
 
+#[test]
+fn llvm_enum_construct_and_drop() {
+    // 8e-1: an enum is `{ i32 tag, ptr payload }` (ADR 0032). A payload variant
+    // (`B(7)`) builds a payload struct `{ i64 }` and heap-boxes it; a unit variant
+    // (`A`) gets a null payload. At scope exit each enum is dropped: load `{i32,ptr}`,
+    // null-check the payload, `sentinel_free` it (box-free-only). `match` (reading the
+    // value back) is 8e-2 — here the program just constructs + drops, returning 0.
+    assert_eq!(
+        llvm_dump(
+            "enumc",
+            "enum E { A, B(i64) }\nfn main() -> i64 {\n    let x = E::B(7);\n    let y = E::A;\n    0\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "declare ptr @sentinel_alloc(i64)\n",
+            "declare void @sentinel_free(ptr)\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v6 = alloca { i32, ptr }\n",
+            "  %v9 = alloca { i32, ptr }\n",
+            "  %v0 = insertvalue { i64 } undef, i64 7, 0\n",
+            "  %v1 = getelementptr { i64 }, ptr null, i64 1\n",
+            "  %v2 = ptrtoint ptr %v1 to i64\n",
+            "  %v3 = call ptr @sentinel_alloc(i64 %v2)\n",
+            "  store { i64 } %v0, ptr %v3\n",
+            "  %v4 = insertvalue { i32, ptr } undef, i32 1, 0\n",
+            "  %v5 = insertvalue { i32, ptr } %v4, ptr %v3, 1\n",
+            "  store { i32, ptr } %v5, ptr %v6\n",
+            "  %v7 = insertvalue { i32, ptr } undef, i32 0, 0\n",
+            "  %v8 = insertvalue { i32, ptr } %v7, ptr null, 1\n",
+            "  store { i32, ptr } %v8, ptr %v9\n",
+            "  %v10 = load { i32, ptr }, ptr %v9\n",
+            "  %v11 = extractvalue { i32, ptr } %v10, 1\n",
+            "  %v12 = icmp eq ptr %v11, null\n",
+            "  br i1 %v12, label %bb1, label %bb0\n",
+            "bb0:\n",
+            "  call void @sentinel_free(ptr %v11)\n",
+            "  br label %bb1\n",
+            "bb1:\n",
+            "  %v13 = load { i32, ptr }, ptr %v6\n",
+            "  %v14 = extractvalue { i32, ptr } %v13, 1\n",
+            "  %v15 = icmp eq ptr %v14, null\n",
+            "  br i1 %v15, label %bb3, label %bb2\n",
+            "bb2:\n",
+            "  call void @sentinel_free(ptr %v14)\n",
+            "  br label %bb3\n",
+            "bb3:\n",
+            "  %v16 = trunc i64 0 to i32\n",
+            "  ret i32 %v16\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {

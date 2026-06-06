@@ -3600,7 +3600,27 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 append_str(out, qi);
                 push(out, ' ');
                 append_str(out, qm);
+                // (8e-1) cg: collect the construct args, then emit { i32 tag, ptr payload }.
+                let cg_ec_col: bool = (*c).cg_collecting;
+                let cg_ec_snap: i64 = if cg_on(c) {
+                    len((*c).cgak)
+                } else {
+                    0
+                };
+                if cg_on(c) {
+                    (*c).cg_collecting = true;
+                    0
+                } else {
+                    0
+                };
                 dump_cargs(out, qa, src, c, gb);
+                if cg_on(c) {
+                    (*c).cg_collecting = cg_ec_col;
+                    cg_emit_enum_construct(c, qeid, vidx, cg_ec_snap);
+                    0
+                } else {
+                    0
+                };
                 close_ty(out, ety, c);
                 ety
             } else {
@@ -6897,6 +6917,8 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
             cgo_str(c, "ptr")
         } else if cg_is_vec(c, h) {
             cgo_str(c, "{ i64, i64, ptr }")
+        } else if enum_of_handle(c, h) >= 0 {
+            cgo_str(c, "{ i32, ptr }")
         } else {
             cgo_str(c, "i64")
         }
@@ -6926,6 +6948,8 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
             append_str(out, "ptr")
         } else if cg_is_vec(c, h) {
             append_str(out, "{ i64, i64, ptr }")
+        } else if enum_of_handle(c, h) >= 0 {
+            append_str(out, "{ i32, ptr }")
         } else {
             append_str(out, "i64")
         }
@@ -7180,7 +7204,30 @@ fn cg_needs_drop(c: &mut TyCtx, ty: i64) -> bool {
             }
             any
         } else {
-            false
+            // (8e-1) an enum needs a drop iff some variant carries a payload (a
+            // pure-unit enum boxes nothing). No recursion (box-free-only).
+            let neid: i64 = enum_of_handle(c, ty);
+            if neid >= 0 {
+                let nv: i64 = len((*c).varo);
+                let mut vi: i64 = 0;
+                let mut vany: bool = false;
+                while vi < nv {
+                    if (*c).varo[vi] == neid {
+                        if (*c).varpe[vi] > (*c).varps[vi] {
+                            vany = true;
+                            0
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
+                    vi = vi + 1;
+                }
+                vany
+            } else {
+                false
+            }
         }
     }
 }
@@ -7255,7 +7302,49 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
             }
             0
         } else {
-            0
+            // (8e-1) an enum: load `{ i32, ptr }`, null-check the payload, free it (the
+            // box). Box-free-only — recursive payload-field drop is deferred (the D.1b
+            // limit, matching production).
+            let edid: i64 = enum_of_handle(c, ty);
+            if edid >= 0 {
+                let edv: i64 = cg_dst(c);
+                cgo_str(c, "load { i32, ptr }, ptr %v");
+                cgo_int(c, slot);
+                cg_putc(c, '\n');
+                let edpl: i64 = cg_dst(c);
+                cgo_str(c, "extractvalue { i32, ptr } %v");
+                cgo_int(c, edv);
+                cgo_str(c, ", 1\n");
+                let ednn: i64 = cg_dst(c);
+                cgo_str(c, "icmp eq ptr %v");
+                cgo_int(c, edpl);
+                cgo_str(c, ", null\n");
+                let edfb: i64 = cg_fresh_block(c);
+                let edab: i64 = cg_fresh_block(c);
+                cgo_str(c, "  br i1 %v");
+                cgo_int(c, ednn);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, edab);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, edfb);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, edfb);
+                cgo_str(c, ":\n");
+                cgo_str(c, "  call void @sentinel_free(ptr %v");
+                cgo_int(c, edpl);
+                cgo_str(c, ")\n");
+                (*c).cg_used_free = true;
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, edab);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, edab);
+                cgo_str(c, ":\n");
+                0
+            } else {
+                0
+            }
         }
     }
 }
@@ -7322,6 +7411,115 @@ fn cg_collect(c: &mut TyCtx, at: i64) -> i64 {
     } else {
         0
     }
+}
+
+// (8e-1) emit a variant's payload struct type literal `{ t0, t1, … }` (the flat
+// variant index `j` = `variant_flat(eid, vidx)`; payloads are `varpay[varps[j]..]`).
+// Only called for a non-empty payload (a unit variant uses a null payload, no struct).
+fn cg_emit_pstruct(c: &mut TyCtx, j: i64) -> i64 {
+    let ps: i64 = (*c).varps[j];
+    let pe: i64 = (*c).varpe[j];
+    cgo_str(c, "{ ");
+    let mut k: i64 = ps;
+    let mut first: bool = true;
+    while k < pe {
+        if first {
+            first = false;
+            0
+        } else {
+            cgo_str(c, ", ");
+            0
+        };
+        cgo_ty(c, (*c).varpay[k]);
+        k = k + 1;
+    }
+    cgo_str(c, " }")
+}
+
+// (8e-1) emit an enum construction `{ i32 tag, ptr payload }` from the args collected
+// at `cgak[snap..]`. A unit variant (no args) gets a null payload; else build the
+// payload struct (insertvalue chain), heap-box it (GEP-sizeof + alloc + store), and
+// point the enum at it. Sets the result operand; pops the consumed args. Mirrors the
+// oracle's `lower_enum_construct`.
+fn cg_emit_enum_construct(c: &mut TyCtx, eid: i64, vidx: i64, snap: i64) -> i64 {
+    let nargs: i64 = len((*c).cgak) - snap;
+    let mut boxreg: i64 = 0 - 1;
+    if nargs > 0 {
+        let j: i64 = variant_flat(c, eid, vidx);
+        let mut aggreg: i64 = 0 - 1;
+        let mut i: i64 = 0;
+        while i < nargs {
+            let fk: i64 = (*c).cgak[snap + i];
+            let fv: i64 = (*c).cgav[snap + i];
+            let ft: i64 = (*c).cgat[snap + i];
+            let d: i64 = cg_dst(c);
+            cgo_str(c, "insertvalue ");
+            cg_emit_pstruct(c, j);
+            cg_putc(c, ' ');
+            if aggreg < 0 {
+                cgo_str(c, "undef")
+            } else {
+                cgo_str(c, "%v");
+                cgo_int(c, aggreg)
+            };
+            cgo_str(c, ", ");
+            cgo_ty(c, ft);
+            cg_putc(c, ' ');
+            cgo_operand(c, fk, fv);
+            cgo_str(c, ", ");
+            cgo_int(c, i);
+            cg_putc(c, '\n');
+            aggreg = d;
+            i = i + 1;
+        }
+        let szr: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr ");
+        cg_emit_pstruct(c, j);
+        cgo_str(c, ", ptr null, i64 1\n");
+        let szir: i64 = cg_dst(c);
+        cgo_str(c, "ptrtoint ptr %v");
+        cgo_int(c, szr);
+        cgo_str(c, " to i64\n");
+        let br: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_alloc(i64 %v");
+        cgo_int(c, szir);
+        cgo_str(c, ")\n");
+        (*c).cg_used_alloc = true;
+        cgo_str(c, "  store ");
+        cg_emit_pstruct(c, j);
+        cgo_str(c, " %v");
+        cgo_int(c, aggreg);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, br);
+        cg_putc(c, '\n');
+        boxreg = br;
+        0
+    } else {
+        0
+    };
+    let e0: i64 = cg_dst(c);
+    cgo_str(c, "insertvalue { i32, ptr } undef, i32 ");
+    cgo_int(c, vidx);
+    cgo_str(c, ", 0\n");
+    let e1: i64 = cg_dst(c);
+    cgo_str(c, "insertvalue { i32, ptr } %v");
+    cgo_int(c, e0);
+    cgo_str(c, ", ptr ");
+    if boxreg < 0 {
+        cgo_str(c, "null")
+    } else {
+        cgo_str(c, "%v");
+        cgo_int(c, boxreg)
+    };
+    cgo_str(c, ", 1\n");
+    cg_reg(c, e1);
+    while len((*c).cgak) > snap {
+        let _a: i64 = pop(&mut (*c).cgak);
+        let _b: i64 = pop(&mut (*c).cgav);
+        let _t: i64 = pop(&mut (*c).cgat);
+        0
+    }
+    0
 }
 
 // emit a call (or the u8<->i64 width builtins): consume the arg slice [snap..],
