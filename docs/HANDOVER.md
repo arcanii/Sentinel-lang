@@ -2082,15 +2082,15 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0045 A9** docs commit (HEAD — this commit,
-    (8d-Vec-1) Vec in-place ops COMPLETE) atop the (8d-Vec-1) feat (`7023e42` vec_new/push/pop/len/
-    index), atop the (8d-refs) close (`191bf58` A8 docs + `d579e76` refs feat) + the (8d-builtins)
-    close (`c396f74` A7 docs + `bd6ee21` str_eq/file-IO) + the (8c) closes (strings `fa8d033` —
-    slice 8c DONE + arrays `a6cc205` + structs `f62466b`) + the (8b) close (`92040ec` A3 docs +
-    `7b33d49`/`c76db27` feats) + the (8a) commits (`2ed426a` codegen.sentinel + `1931496` the snc
-    llvm oracle) + ADR 0045 PROPOSED (`3f13169`), all atop the (7/N) ADR 0044 A5 close (`3b384bf`).
-    ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin
-    local commits); that's expected, never push.
+    Verify HEAD with `git log -1` — expect the **ADR 0045 A17** docs commit (`59c30a7` —
+    (8f-2/8f-3) snc llvm lowers the full self-hosting compiler) atop its feat (`67fa808`
+    multi-module `snc llvm` + the `&mut (*c).f` / `(*c).f = x` lvalue stragglers). The 8/N codegen
+    chain below it: (8f-1) selfhost stages self-host (`8b89726` A16 docs + `3c389cd` feat) ·
+    (8e-2) match (`3b95b52` A15 + `b06ddbb`) · (8e-1) enums (`4ce165f` A14 + `e9d0a7a`) · heap drops
+    (8d-drops-1/2/3, A11–A13) · (8d-Vec-2) vec_to_array (A10) · (8d-Vec-1) Vec ops (A9) · 8d
+    refs/builtins · 8c structs/arrays/strings · 8b control flow · 8a scalars+oracle. ADR 0045 is
+    ACCEPTED-shape (amendments A1–A17). ⚠ The dev pushes via GitHub Desktop — `git status` may show
+    "ahead N" (uncommitted-to-origin local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
     --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1472 tests**
     (the codegen differential [57/57] + `sentinel_codegen_matches_oracle_on_selfhost_stages` [lexer+parser
@@ -2105,8 +2105,12 @@ For pasting into a fresh chat to bootstrap context:
     verifier are ported, each matching its `snc <stage>` oracle byte-for-byte over the
     corpus, leak-free: `snc lex`/`ast`/`resolve`/`types` (123/123) / `effects` (122/122) /
     `borrow` (123/123) / `mir` (123/123) / `ctverify` (123/123). selfhost/ has lexer,
-    parser, resolve, types, effects, borrow, **mir, ctverify** .sentinel. The ONLY thing
-    left is **codegen** (the bootstrap-critical transform → the object/fixed-point).
+    parser, resolve, types, effects, borrow, mir, ctverify, **codegen** .sentinel. **(8/N)
+    CODEGEN is essentially DONE** (ADR 0045 A1–A17): `snc llvm` (the canonical-`.ll` oracle) +
+    `selfhost/types.sentinel` mode-4 emit byte-identical `.ll` over the whole corpus AND the
+    self-contained selfhost stages (lexer/parser self-host); the oracle lowers the FULL merged
+    compiler (~83k `.ll` lines), cc-run == inkwell, leak-free. The ONLY thing left is **(8g) the
+    bootstrap FIXED-POINT** (the Sentinel side of multi-module — see RESUME AT).
 
     ▶ **RESUME AT: (8g) — THE BOOTSTRAP FIXED-POINT.** Codegen (8/N) is essentially DONE (ADR 0045,
     amendments A1–A17): 8a scalars/calls, 8b control flow, 8c structs/arrays/strings, 8d builtins + refs +
