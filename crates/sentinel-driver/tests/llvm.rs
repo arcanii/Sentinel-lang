@@ -227,6 +227,51 @@ fn llvm_while_loop_cfg() {
     );
 }
 
+#[test]
+fn llvm_struct_decl_lit_and_field() {
+    // 8c-1 aggregates: a user struct is a Pass-0 named type
+    // (`%Struct.N = type { … }`) and a first-class SSA value — the literal
+    // builds it via an `insertvalue` chain from `undef`, a field reads via
+    // `extractvalue`, and `let`/param/return/call carry it by value
+    // (alloca/store/load of `%Struct.0`), no GEP. dist({30,12}) = 42.
+    assert_eq!(
+        llvm_dump(
+            "struct",
+            "struct Point { x: i64, y: i64 }\nfn dist(p: Point) -> i64 {\n    p.x + p.y\n}\nfn main() -> i64 {\n    let p = Point { x: 30, y: 12 };\n    dist(p)\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "%Struct.0 = type { i64, i64 }\n",
+            "\n",
+            "define i64 @dist(%Struct.0 %arg0) {\n",
+            "entry:\n",
+            "  %v0 = alloca %Struct.0\n",
+            "  store %Struct.0 %arg0, ptr %v0\n",
+            "  %v1 = load %Struct.0, ptr %v0\n",
+            "  %v2 = extractvalue %Struct.0 %v1, 0\n",
+            "  %v3 = load %Struct.0, ptr %v0\n",
+            "  %v4 = extractvalue %Struct.0 %v3, 1\n",
+            "  %v5 = add i64 %v2, %v4\n",
+            "  ret i64 %v5\n",
+            "}\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v2 = alloca %Struct.0\n",
+            "  %v0 = insertvalue %Struct.0 undef, i64 30, 0\n",
+            "  %v1 = insertvalue %Struct.0 %v0, i64 12, 1\n",
+            "  store %Struct.0 %v1, ptr %v2\n",
+            "  %v3 = load %Struct.0, ptr %v2\n",
+            "  %v4 = call i64 @dist(%Struct.0 %v3)\n",
+            "  %v5 = trunc i64 %v4 to i32\n",
+            "  ret i32 %v5\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {

@@ -57,6 +57,32 @@ pub fn dump(program: &TypedProgram) -> Result<String, String> {
     let mut out = String::new();
     writeln!(out, "target triple = \"{TARGET_TRIPLE}\"").unwrap();
     out.push('\n');
+    // Pass 0: user struct type decls, in StructId order (= program.structs order),
+    // as `%Struct.N = type { <field-ll-types> }`. The aggregate is a first-class
+    // SSA value (struct-lit → insertvalue, field → extractvalue; no GEP/memory for
+    // the struct itself). Generic struct *decls* (8h/Bar B) have no runtime layout
+    // → skipped. A field of an as-yet-unported type makes `llvm_ty` Err → the whole
+    // dump Errs → the fixture is skipped (partial-by-Err), lighting up once that
+    // field type is ported (`[u8]`/strings 8c-rest, Vec 8d, enums 8e).
+    let mut emitted_struct = false;
+    for sd in &program.structs {
+        if !sd.type_params.is_empty() {
+            continue;
+        }
+        if sd.fields.is_empty() {
+            writeln!(out, "%Struct.{} = type {{}}", sd.id.0).unwrap();
+        } else {
+            let mut field_lls = Vec::with_capacity(sd.fields.len());
+            for f in &sd.fields {
+                field_lls.push(llvm_ty(f.ty)?);
+            }
+            writeln!(out, "%Struct.{} = type {{ {} }}", sd.id.0, field_lls.join(", ")).unwrap();
+        }
+        emitted_struct = true;
+    }
+    if emitted_struct {
+        out.push('\n');
+    }
     // FnId order = source order; deterministic + matches the Sentinel side.
     let mut fns: Vec<&TypedFnDef> = program.fns.iter().collect();
     fns.sort_by_key(|f| f.id.0);
@@ -370,6 +396,43 @@ impl Emit<'_> {
                 Ok(format!("%v{d}"))
             }
             TypedExprKind::Call { id, args, .. } => self.lower_call(*id, args, expr.ty),
+            // A struct literal builds its aggregate value by an `insertvalue` chain
+            // from `undef` (declaration field order; the typed `fields` are already
+            // reordered to it). All field operands are lowered FIRST, then the chain
+            // is emitted — a collect-then-emit shape (like a call's args) so a
+            // side-effecting field value emits before the chain on BOTH backends (the
+            // Sentinel side reuses its cg-collect arg stacks). The result is a single
+            // SSA aggregate operand, so `let`/`Var`/param/return handle a struct
+            // generically (alloca/store/load of `%Struct.N`) — no GEP needed.
+            TypedExprKind::StructLit { fields, .. } => {
+                let sty = llvm_ty(expr.ty)?;
+                let mut field_ops = Vec::with_capacity(fields.len());
+                for fv in fields {
+                    let fty = llvm_ty(fv.ty)?;
+                    let op = self.lower_expr(fv)?;
+                    field_ops.push((fty, op));
+                }
+                let mut agg = "undef".to_string();
+                for (i, (fty, op)) in field_ops.iter().enumerate() {
+                    let v = self.fresh();
+                    writeln!(
+                        self.body,
+                        "  %v{v} = insertvalue {sty} {agg}, {fty} {op}, {i}"
+                    )
+                    .unwrap();
+                    agg = format!("%v{v}");
+                }
+                Ok(agg)
+            }
+            // Field read = `extractvalue` on the target aggregate (chained accesses
+            // nest naturally — the inner access's result is the outer's operand).
+            TypedExprKind::FieldAccess { target, field_index, .. } => {
+                let agg = self.lower_expr(target)?;
+                let sty = llvm_ty(target.ty)?;
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = extractvalue {sty} {agg}, {field_index}").unwrap();
+                Ok(format!("%v{v}"))
+            }
             _ => Err("expression not yet ported (straight-line 8a only)".into()),
         }
     }
@@ -431,6 +494,9 @@ fn llvm_ty(ty: Type) -> Result<String, String> {
         Type::I32 => Ok("i32".into()),
         Type::U8 => Ok("i8".into()),
         Type::Bool => Ok("i1".into()),
+        // A user struct is the named aggregate declared in Pass 0. (Generic
+        // instances — `Type::GenericInstance` — are Bar B → still Err below.)
+        Type::Struct(id) => Ok(format!("%Struct.{}", id.0)),
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
     }
 }

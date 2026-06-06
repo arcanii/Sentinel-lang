@@ -4,10 +4,12 @@
 //! the Rust `snc`, then assert its emitted textual LLVM IR (`.ll`) is byte-identical
 //! to the `snc llvm` oracle.
 //!
-//! (8a) covers the STRAIGHT-LINE subset: const / var / unary neg+not / binary
-//! (add/sub/mul/sdiv/udiv/and/or/xor) + cmp (signed+unsigned icmp) / `let` /
-//! assign-to-var / value-block / user-fn calls (+ the u8<->i64 width builtins) —
-//! alloca/load/store, NO phi. The oracle is PARTIAL-by-Err (it Errs + exits nonzero on
+//! (8a) covers the STRAIGHT-LINE subset (const, var, unary neg/not, binary and cmp,
+//! `let`, assign-to-var, value-block, user-fn calls, the u8<->i64 width builtins);
+//! (8b) adds control flow (if/else, while/break/continue, &&/||); (8c-1) adds
+//! aggregates — STRUCTS (Pass-0 `%Struct.N` type decls, `insertvalue` literals,
+//! `extractvalue` field reads, pass-by-value params/returns) — all alloca/load/store,
+//! NO phi. The oracle is PARTIAL-by-Err (it Errs + exits nonzero on
 //! a not-yet-ported construct), so the differential skips those fixtures, exactly as it
 //! skips upstream parse/resolve/type rejects; the supported subset grows per sub-slice
 //! (8b..8l). Behavioural correctness of the `.ll` is covered by `tests/llvm.rs` (the
@@ -68,6 +70,12 @@ const SEEDS: &[&str] = &[
     "fn t(a: bool, b: bool) -> bool { a && b || a }\nfn main() -> i64 { 0 }\n",
     "fn brk(n: i64) -> i64 { let mut i: i64 = 0; while i < 100 { i = i + 1; if i == n { break; 0 } else { 0 }; } i }\nfn main() -> i64 { brk(7) }\n",
     "fn cont(n: i64) -> i64 { let mut i: i64 = 0; let mut s: i64 = 0; while i < n { i = i + 1; if i == 2 { continue; 0 } else { 0 }; s = s + i; } s }\nfn main() -> i64 { cont(4) }\n",
+    // (8c-1) aggregates — structs: Pass-0 `%Struct.N` decls, `insertvalue` literals,
+    // `extractvalue` field reads, pass-by-value params/returns (alloca/store/load).
+    "struct Point { x: i64, y: i64 }\nfn dist(p: Point) -> i64 { p.x + p.y }\nfn main() -> i64 { let p = Point { x: 30, y: 12 }; dist(p) }\n",
+    "struct Inner { x: i64 }\nstruct Outer { inner: Inner, y: i64 }\nfn main() -> i64 { let o = Outer { inner: Inner { x: 7 }, y: 3 }; o.inner.x + o.y }\n",
+    "struct Tagged { value: i64, valid: bool, count: i64 }\nfn main() -> i64 { let t = Tagged { value: 5, valid: true, count: 9 }; if t.valid { t.value + t.count } else { 0 } }\n",
+    "struct Pair { a: i64, b: i64 }\nfn pick(c: bool) -> Pair { if c { Pair { a: 1, b: 2 } } else { Pair { a: 10, b: 20 } } }\nfn main() -> i64 { let p = pick(true); p.a + p.b }\n",
 ];
 
 #[test]

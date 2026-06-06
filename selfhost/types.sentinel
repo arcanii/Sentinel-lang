@@ -2099,8 +2099,12 @@ fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, gen: bool, gargs: &Vec<i
             };
             sink_name(gb, fnm);
             push(out, ' ');
-            dump_texpr(out, fval, ftype, src, c, gb);
+            let sf_vty: i64 = dump_texpr(out, fval, ftype, src, c, gb);
             mir_collect(c);
+            // (8c-1) codegen: collect this field's operand + type onto the shared
+            // arg stacks (gated by `cg_collecting`); the struct-lit arm emits the
+            // `insertvalue` chain over them after the walk (the call-arg pattern).
+            cg_collect(c, sf_vty);
             dump_sfields(out, rest, sid, gen, gargs, src, c, gb)
         },
     }
@@ -3218,6 +3222,20 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            // (8c-1) codegen: collect field operands during the walk, then emit the
+            // `insertvalue` chain (mirrors the call arm; snapshot the arg-stack top).
+            let sl_cgcol: bool = (*c).cg_collecting;
+            if cg_on(c) {
+                (*c).cg_collecting = true;
+                0
+            } else {
+                0
+            };
+            let sl_cgsnap: i64 = if cg_on(c) {
+                len((*c).cgak)
+            } else {
+                0
+            };
             dump_sfields(out, fields, sid, sl_isg, &gargs, src, c, gb);
             (*c).consuming = sl_svc;
             close_ty(out, sty, c);
@@ -3226,6 +3244,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_va(c, mc, 7, 0, sl_snap, sty);
                 (*c).lastval = d;
+                0
+            } else {
+                0
+            };
+            if cg_on(c) {
+                (*c).cg_collecting = sl_cgcol;
+                cg_emit_structlit(c, sty, sl_cgsnap);
                 0
             } else {
                 0
@@ -3246,6 +3271,18 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 (*c).lastval
             } else {
                 0 - 1
+            };
+            // (8c-1) codegen: capture the target aggregate operand (the field read is
+            // an `extractvalue` on it, emitted after the field index is known below).
+            let cg_ftk: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cg_ftv: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
             };
             (*c).consuming = svc;
             push(out, ' ');
@@ -3298,6 +3335,21 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 let d: i64 = mir_emit_va(c, mc, 7, 0, snap, fty);
                 (*c).lastval = d;
                 (*c).mir_lastvid = 0 - 1;
+                0
+            } else {
+                0
+            };
+            // (8c-1) codegen: `%vD = extractvalue %Struct.N <target>, <fidx>`. Only a
+            // plain struct target (kind 6) — a class/generic-instance target makes the
+            // oracle Err (that fixture is skipped), so its bytes are never compared.
+            if cg_on(c) {
+                let cg_fsid: i64 = struct_of_handle(c, bare);
+                if cg_fsid >= 0 {
+                    cg_extract(c, bare, cg_ftk, cg_ftv, fidx);
+                    0
+                } else {
+                    0
+                };
                 0
             } else {
                 0
@@ -6236,6 +6288,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         // dropping the struct double-frees, as for mirout).
         let _o4: [u8] = vec_to_array(out);
         append_str(result, "target triple = \"arm64-apple-darwin\"\n\n");
+        cg_pass0(result, &mut ctx);
         let cn: i64 = len(ctx.cgout);
         let mut ci: i64 = 0;
         while ci < cn {
@@ -6506,8 +6559,92 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
     } else if h == 3 {
         cgo_str(c, "i8")
     } else {
-        cgo_str(c, "i64")
+        // (8c-1) a user struct is the Pass-0 named aggregate `%Struct.N` (N =
+        // StructId). Non-struct compounds (refs/Vec/enum/generic-instance) are
+        // later slices → the i64 fallback (their fixtures Err in the oracle and
+        // are skipped, so the fallback bytes are never compared).
+        let sid: i64 = struct_of_handle(c, h);
+        if sid >= 0 {
+            cgo_str(c, "%Struct.");
+            cgo_int(c, sid)
+        } else {
+            cgo_str(c, "i64")
+        }
     }
+}
+
+// (8c-1) the LLVM type for handle `h`, written to an ARBITRARY buffer `out` (Pass 0
+// writes struct decls into `result`, not the cg buffer, so it can't route through
+// `cgo_ty`/`cg_putc`). Mirrors `cgo_ty`'s mapping exactly.
+fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
+    if h == 0 {
+        append_str(out, "i64")
+    } else if h == 1 {
+        append_str(out, "i32")
+    } else if h == 2 {
+        append_str(out, "i1")
+    } else if h == 3 {
+        append_str(out, "i8")
+    } else {
+        let sid: i64 = struct_of_handle(c, h);
+        if sid >= 0 {
+            append_str(out, "%Struct.");
+            append_int(out, sid)
+        } else {
+            append_str(out, "i64")
+        }
+    }
+}
+
+// (8c-1) Pass 0: emit `%Struct.N = type { <field-ll-types> }` for every struct in
+// StructId order (= the oracle's `program.structs` order); an empty struct → `type
+// {}`. Field types come from the flat field table (`fldo`/`fldty`), filtered by
+// owner StructId, in declaration order. Generic structs are Bar B (8h) — no
+// oracle-emitting fixture declares one, so iterating all structs matches the
+// oracle's `type_params.is_empty()` skip for the Bar-A subset (ADR 0045 A4).
+fn cg_pass0(out: &mut Vec<u8>, c: &mut TyCtx) -> i64 {
+    let ns: i64 = len((*c).sts);
+    let mut sid: i64 = 0;
+    let mut any: bool = false;
+    while sid < ns {
+        append_str(out, "%Struct.");
+        append_int(out, sid);
+        append_str(out, " = type {");
+        let nf: i64 = len((*c).fldo);
+        let mut i: i64 = 0;
+        let mut first: bool = true;
+        while i < nf {
+            if (*c).fldo[i] == sid {
+                if first {
+                    push(out, ' ');
+                    first = false;
+                    0
+                } else {
+                    append_str(out, ", ")
+                };
+                let fh: i64 = (*c).fldty[i];
+                ll_type_to(out, c, fh);
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        if first {
+            0
+        } else {
+            push(out, ' ')
+        };
+        append_str(out, "}\n");
+        any = true;
+        sid = sid + 1;
+    }
+    if any {
+        push(out, '\n')
+    } else {
+        0
+    };
+    0
 }
 
 // an operand: a register `%vN` (kind 0) or an integer literal (kind 1).
@@ -6724,6 +6861,65 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
 // after the body walk; flips cg_putc to target cgout. The body's value (`cglast`) is
 // the fn's return (captured first — the header/ret emission advances cgnext for main's
 // trunc temp, which must continue after the body's numbering).
+
+// (8c-1) `  %vD = extractvalue <ty> <op>, <idx>` (a struct field read); sets the
+// threaded operand to the dest register.
+fn cg_extract(c: &mut TyCtx, tyh: i64, opk: i64, opv: i64, idx: i64) -> i64 {
+    let d: i64 = cg_dst(c);
+    cgo_str(c, "extractvalue ");
+    cgo_ty(c, tyh);
+    cg_putc(c, ' ');
+    cgo_operand(c, opk, opv);
+    cgo_str(c, ", ");
+    cgo_int(c, idx);
+    cg_putc(c, '\n');
+    cg_reg(c, d)
+}
+
+// (8c-1) emit a struct literal's `insertvalue` chain over the field operands
+// collected on the arg stacks since `snap` (building from `undef`); sets the
+// threaded operand to the final aggregate register; pops the stacks back to `snap`.
+// (`(*c).cgat[i]` is bound to a local before `cgo_ty` — passing it inline while `c`
+// is `&mut` re-borrows `c`, the A2 quirk.)
+fn cg_emit_structlit(c: &mut TyCtx, styh: i64, snap: i64) -> i64 {
+    let n: i64 = len((*c).cgak);
+    let mut prev: i64 = 0 - 1;
+    let mut idx: i64 = 0;
+    let mut i: i64 = snap;
+    while i < n {
+        let d: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue ");
+        cgo_ty(c, styh);
+        cg_putc(c, ' ');
+        if prev < 0 {
+            cgo_str(c, "undef")
+        } else {
+            cgo_str(c, "%v");
+            cgo_int(c, prev)
+        };
+        cgo_str(c, ", ");
+        let aty: i64 = (*c).cgat[i];
+        cgo_ty(c, aty);
+        cg_putc(c, ' ');
+        let aok: i64 = (*c).cgak[i];
+        let aov: i64 = (*c).cgav[i];
+        cgo_operand(c, aok, aov);
+        cgo_str(c, ", ");
+        cgo_int(c, idx);
+        cg_putc(c, '\n');
+        prev = d;
+        idx = idx + 1;
+        i = i + 1;
+    }
+    while len((*c).cgak) > snap {
+        let _a: i64 = pop(&mut (*c).cgak);
+        let _b: i64 = pop(&mut (*c).cgav);
+        let _t: i64 = pop(&mut (*c).cgat);
+        0
+    }
+    cg_reg(c, prev)
+}
+
 fn cg_emit_fn(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> i64 {
     let bk: i64 = (*c).cglk;
     let bv: i64 = (*c).cglv;
