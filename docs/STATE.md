@@ -238,6 +238,18 @@ remainder re-drops into an unreachable block → each path frees once). Oracle: 
 stack + `cg_drop_range(floor)` (drop-only, no truncate); 🔑 reversing the flat `cgdv[floor..]` == the
 oracle's top-down per-frame reverse. NEXT = **(8e) enums/match** → **(8f) calls/recursion/multi-module** →
 **(8g) THE BOOTSTRAP FIXED-POINT.**
+**✅ (8e-1) ENUM TYPE + ENUM-CONSTRUCT + ENUM DROP LANDED (ADR 0045 A14):** an enum is the abi-v1
+`{ i32 tag, ptr payload }` (ADR 0032); construct = `{tag, heap-boxed-payload-or-null}` (unit→null;
+payload→`insertvalue` struct + GEP-sizeof box + store); drop = null-check payload + `sentinel_free` (BOX-
+FREE-ONLY, matches prod D.1b limit; `needs_drop(Enum)`=any variant has payload). Byte-identical to `snc
+llvm` (**55/55** — `c5d1_enum` needs match (8e-2), corpus unchanged) + 2 seeds + 1 golden
+(`llvm_enum_construct_and_drop`), behavioural (cc==inkwell) + leak-free; modes 0–3+effects byte-identical;
+1469 tests; scg leak-free. `{i32,ptr}` is INLINE (no Pass-0 name); payload struct `{…}` recovered per
+variant (`varpay[varps[j]..]` via `variant_flat`). Sentinel: `cgo_ty`/`ll_type_to` learn `enum_of_handle`;
+`cg_emit_pstruct` + `cg_emit_enum_construct` (Qcall enum arm wraps `dump_cargs` in `cg_collecting`);
+`cg_emit_drop`/`cg_needs_drop` enum arms. NEXT = **(8e-2) match** (switch on tag → per-variant payload
+bind + memory-cell merge; lights up `c5d1_enum`) → **(8f) calls/recursion/multi-module** → **(8g) THE
+BOOTSTRAP FIXED-POINT.**
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;

@@ -2092,11 +2092,10 @@ For pasting into a fresh chat to bootstrap context:
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin
     local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1468 tests**
-    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [55/55 emitted, now WITH
-    scope-exit heap drops — array/Vec/[u8] + recursive struct fields + loop-exit; ALL 15 heap
-    fixtures leak-free] + the `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still
-    123/123). macOS + LLVM 18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1469 tests**
+    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [55/55 emitted, WITH heap
+    drops + enum construct/drop] + the `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc.
+    still 123/123). macOS + LLVM 18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
     + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR 0043)
@@ -2108,33 +2107,33 @@ For pasting into a fresh chat to bootstrap context:
     parser, resolve, types, effects, borrow, **mir, ctverify** .sentinel. The ONLY thing
     left is **codegen** (the bootstrap-critical transform → the object/fixed-point).
 
-    ▶ **RESUME AT: (8e) — enums + match.** Codegen (8/N) is WELL UNDERWAY (ADR 0045, amendments
-    A1–A13): 8a scalars/calls, 8b control flow, 8c-1/2/3 structs/arrays/strings, 8d builtins
-    (str_eq/file-IO) + refs (`&`/`&mut`/`*`/`*p=x`) + Vec (vec_new/push/pop/len/`v[i]`/`vec_to_array`)
-    + **HEAP DROPS — COMPLETE** ((8d-drops-1) scope-exit array/`Vec`/`[u8]` `sentinel_free`, A11;
-    (8d-drops-2) recursive struct-field drop, A12; (8d-drops-3) loop-exit drops, A13) — ALL
-    byte-identical to `snc llvm` + behavioural (cc==inkwell) + **leak-free (ALL 15 heap fixtures —
-    generated programs match inkwell)** + modes 0–3 byte-identical (**55/55 emitting fixtures**). 🔑
-    drops design (REUSE for enum drops in 8e): **per-binding `sentinel_free`, NO arena**; **skip
-    `moved_sources` ALONE** (`{tail}⊆{moved}`; `cg_is_moved` scans `mvf`/`mvv`, == oracle `DropPlan`);
-    **two-frame fn** (params + body); a `cgdv`/`cgdt`/`cgds` scope pool + `cg_drop_frame` (block exit,
-    drops+truncates) / `cg_drop_range` (break/continue, drops only); struct drop GEPs each `needs_drop`
-    field + recurses; loop-exit drains `cgdv[floor..]` (the flat-reverse == per-frame-reverse identity).
-    **NEXT = (8e) enums/match** — the LAST big Bar-A construct (the selfhost sources declare **14
-    enums**; the AST `Expr`/`Args`/etc. ARE enums, so this unblocks the bootstrap). The oracle currently
-    Errs on `Type::Enum`. An enum is `{ i32 tag, ptr payload }` (ADR 0032): **enum-construct** = set the
-    tag + heap-box the payload (or null for a unit variant); **match** = `switch` on the tag to
-    per-variant blocks, each `extractvalue`/load-payload binding the arm's vars + a memory-cell result
-    merge (NO phi, like `if`); **enum DROP** = null-check the payload + `sentinel_free` (the drop arm
-    already sketched at production lib.rs:3876 — wire it into `emit_drop_for_binding`/`cg_emit_drop` +
-    `needs_drop`). Mirror production `lower_match` / `EnumConstruct` lowering + the `{tag,ptr}` layout.
-    ⚠ recursive-enum payload drop is box-free-only in the language today (a known D.1b limit) — match
-    the production (don't over-engineer). Then → **(8f) calls/recursion/multi-module** → **(8g) THE
-    BOOTSTRAP FIXED-POINT**. ⚠ The leak GATE is the **`leaks --atExit` sweep** (codesign trick), NOT
-    the differential/behavioural (a missing free is byte-parity-NEUTRAL — same exit/stdout). ⚠⚠ **The
-    behavioural test is ~83s at 55 fixtures** — **SAMPLE it** (targeted inkwell-vs-cc on the changed
-    fixture(s) + new seeds; the unchanged fixtures are provably byte-identical via the corpus
-    differential), run the full suite ONCE as the final gate. The PER-SLICE METHOD: extend
+    ▶ **RESUME AT: (8e-2) — match (switch + payload bind + merge).** Codegen (8/N) is WELL UNDERWAY
+    (ADR 0045, amendments A1–A14): 8a scalars/calls, 8b control flow, 8c-1/2/3 structs/arrays/strings,
+    8d builtins (str_eq/file-IO) + refs + Vec (…/`vec_to_array`) + **HEAP DROPS COMPLETE** (drops-1/2/3,
+    A11–A13; ALL 15 heap fixtures leak-free) + **(8e-1) ENUMS** (type `{ i32 tag, ptr payload }` +
+    enum-construct `{tag, heap-boxed-payload-or-null}` + enum drop null-check+free, A14) — ALL
+    byte-identical to `snc llvm` + behavioural (cc==inkwell) + leak-free + modes 0–3 byte-identical
+    (**55/55 emitting fixtures**; `c5d1_enum` needs match → still Err). 🔑 enum (8e-1): `{i32,ptr}` is
+    INLINE (no Pass-0 name); construct lowers args FIRST (collect via `dump_cargs` under `cg_collecting`)
+    then `cg_emit_enum_construct`; payload struct `{…}` from `varpay[varps[j]..]` (`variant_flat`);
+    drop is BOX-FREE-ONLY (`needs_drop(Enum)`=any variant has payload). **NEXT = (8e-2) match** — the
+    real complexity + the slice that LIGHTS UP `c5d1_enum` (→ 56/56). Mirror production `lower_match`
+    (codegen lib.rs:4144): extract tag (field 0) + payload ptr (field 1) from the scrutinee; a hoisted
+    result alloca; an LLVM `switch` on the tag → one block per VARIANT arm + a default block (the `_`
+    wildcard body, or `unreachable` — exhaustiveness is a type-check guarantee); each variant arm BINDS
+    its payloads (`bind_pattern_payloads`, lib.rs:4238: GEP each field of the boxed payload struct +
+    load into a fresh alloca slot keyed by the binding's VarId, so the arm body's `Var(bind)` reads it),
+    lowers the body, stores to the result alloca, branches to the merge; merge loads the result (the
+    no-phi memory-cell merge, like `if`). The Sentinel walks `Expr::Match(mscr,marms)` /
+    `dump_tarms`/`dump_tpat`/`dump_tbinds` (the typer already binds payloads via `varpay[pbase+k]`) —
+    add the cg emission alongside. ⚠ ALSO lights up the recursive-enum `selfhost_ast_drop` (box-free
+    drop already handled — match the production's leak on nested boxes). Then → **(8f)
+    calls/recursion/multi-module** → **(8g) THE BOOTSTRAP FIXED-POINT**. ⚠ The leak GATE is the **`leaks
+    --atExit` sweep** (codesign trick), NOT the differential/behavioural (a missing free is
+    byte-parity-NEUTRAL — same exit/stdout). ⚠⚠ **The behavioural test is ~83s at 55 fixtures** —
+    **SAMPLE it** (targeted inkwell-vs-cc on the changed fixture(s) + new seeds; the unchanged fixtures
+    are provably byte-identical via the corpus differential), run the full suite ONCE as the final gate.
+    The PER-SLICE METHOD: extend
     `crates/sentinel-driver/src/llvm_dump.rs` (the oracle — a canonical `.ll` spec we define) +
     `selfhost/types.sentinel` (the mode-4 FUSED codegen — the `cg_*` machinery:
     `cgo_ty`/`cg_emit_*`/`cg_dst`/`cgo_operand`/`cg_fresh_block`/the `cgak`/`cgav`/`cgat` collect

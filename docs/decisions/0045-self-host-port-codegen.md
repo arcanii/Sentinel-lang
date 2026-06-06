@@ -554,6 +554,33 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
   - **NEXT = (8e) enums/match** → **(8f) calls/recursion/multi-module** → **(8g) THE BOOTSTRAP
     FIXED-POINT.**
 
+- **A14 — (8e-1) ENUM TYPE + ENUM-CONSTRUCT + ENUM DROP LANDED:** an enum lowers to the abi-v1
+  `{ i32 tag, ptr payload }` (ADR 0032 D4); construction builds `{ tag, heap-boxed-payload-or-null }`;
+  the scope-exit drop null-checks + frees the payload box. Byte-identical to `snc llvm`
+  (`sentinel_codegen_matches_oracle_on_corpus`, still **55/55** — `c5d1_enum` needs `match`, the 8e-2
+  slice, so the corpus is unchanged) + 2 new seeds + 1 new golden (`llvm_enum_construct_and_drop`),
+  behavioural (`cc`-run == inkwell) and leak-free (the enum seed + scg compiler); modes 0–3 + effects
+  byte-identical; 1469 tests, four-check green. Mirrors the production `lower_enum_construct` (codegen
+  lib.rs:4085) + the enum drop arm (lib.rs:3876) + the `{i32,ptr}` layout (lib.rs:1708).
+  - **enum-construct.** A unit variant → a null payload. A payload variant → build the payload struct
+    `{ <field tys> }` from the args (`insertvalue` chain from `undef`), heap-box it (GEP-sizeof +
+    `sentinel_alloc` + `store`), and point the enum at the box; then `{ i32 tag, ptr payload }` (tag =
+    variant index, source order). Args are lowered FIRST (the Sentinel collects them via `dump_cargs`
+    before `cg_emit_enum_construct`), so a side-effecting arg lands before the payload chain on both.
+  - **enum drop.** `load { i32, ptr }`, `extractvalue 1` (the payload), `icmp eq ptr …, null`, branch
+    to a free block (`sentinel_free`) or the after block. **Box-free-only** — a recursive enum's
+    nested boxes are NOT walked (the production's measured D.1b limit); `needs_drop(Enum)` is true iff
+    some variant carries a payload (a pure-unit enum boxes nothing).
+  - **`{ i32, ptr }` is inline** (like `[T]`/`Vec`) — no Pass-0 name; the payload struct type
+    `{ … }` is recovered per variant from `enum_data().variants[v].payloads` (oracle) /
+    `varpay[varps[j]..]` (Sentinel, via `variant_flat`). The Sentinel: `cgo_ty`/`ll_type_to` learn
+    `enum_of_handle ≥ 0 → { i32, ptr }`; a `cg_emit_pstruct` helper emits the payload struct literal;
+    `cg_emit_enum_construct` mirrors the oracle; the Qcall enum arm wraps `dump_cargs` in
+    `cg_collecting` then emits; `cg_emit_drop`/`cg_needs_drop` gain the enum arm.
+  - **NEXT = (8e-2) match** — `switch` on the tag to per-variant blocks (bind payloads via GEP+load
+    into slots), a memory-cell result merge (no phi, like `if`), wildcard/`unreachable` default. Lights
+    up `c5d1_enum` (and the recursive-enum `selfhost_ast_drop`). Mirror `lower_match` (lib.rs:4144).
+
 ## Decision
 
 ### D1. Goal.
