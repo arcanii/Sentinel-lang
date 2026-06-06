@@ -240,6 +240,8 @@ struct TyCtx {
     cgblk: i64,            // per-fn basic-block label counter (bbN; entry is implicit)
     cg_loop_cond: Vec<i64>, // enclosing loops' cond-block labels (continue target)
     cg_loop_after: Vec<i64>,// enclosing loops' after-block labels (break target)
+    cg_loop_floor: Vec<i64>,// (8d-drops-3) enclosing loops' scope-drop floor (the cgdv
+                            // length at loop-body entry; break/continue drain cgdv[floor..])
     cgout: Vec<u8>,   // accumulated .ll across all fns (the mode-4 result)
 }
 
@@ -4385,6 +4387,9 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
                 cgo_str(c, ":\n");
                 push(&mut (*c).cg_loop_cond, cg_wc);
                 push(&mut (*c).cg_loop_after, cg_wa);
+                // (8d-drops-3) the body frame's drop floor = cgdv length NOW, before the
+                // body Block arm pushes its frame; break/continue drain cgdv[floor..].
+                push(&mut (*c).cg_loop_floor, len((*c).cgdv));
                 0
             } else {
                 0
@@ -4395,6 +4400,7 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             if cg_on(c) {
                 let _pc: i64 = pop(&mut (*c).cg_loop_cond);
                 let _pa: i64 = pop(&mut (*c).cg_loop_after);
+                let _pf: i64 = pop(&mut (*c).cg_loop_floor);
                 cgo_str(c, "  br label %bb");
                 cgo_int(c, cg_wc);
                 cg_putc(c, '\n');
@@ -4415,6 +4421,9 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             if cg_on(c) {
                 let bn: i64 = len((*c).cg_loop_after);
                 let bafter: i64 = (*c).cg_loop_after[bn - 1];
+                // (8d-drops-3) drain the body frame(s) before branching out of the loop.
+                let bfloor: i64 = (*c).cg_loop_floor[bn - 1];
+                cg_drop_range(c, bfloor);
                 cgo_str(c, "  br label %bb");
                 cgo_int(c, bafter);
                 cg_putc(c, '\n');
@@ -4434,6 +4443,9 @@ fn dump_tstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut TyCtx, gb: &mut Ve
             if cg_on(c) {
                 let kn: i64 = len((*c).cg_loop_cond);
                 let kcond: i64 = (*c).cg_loop_cond[kn - 1];
+                // (8d-drops-3) drain the body frame(s) before branching to the cond.
+                let kfloor: i64 = (*c).cg_loop_floor[kn - 1];
+                cg_drop_range(c, kfloor);
                 cgo_str(c, "  br label %bb");
                 cgo_int(c, kcond);
                 cg_putc(c, '\n');
@@ -6106,6 +6118,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cgblk: 0,
         cg_loop_cond: vec_new(),
         cg_loop_after: vec_new(),
+        cg_loop_floor: vec_new(),
         cgout: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();
@@ -6721,6 +6734,7 @@ fn cg_reset(c: &mut TyCtx) -> i64 {
     clear_i64(&mut (*c).cgalloca_ty);
     clear_i64(&mut (*c).cg_loop_cond);
     clear_i64(&mut (*c).cg_loop_after);
+    clear_i64(&mut (*c).cg_loop_floor);
     clear_i64(&mut (*c).cgdv);
     clear_i64(&mut (*c).cgdt);
     clear_i64(&mut (*c).cgds);
@@ -7268,6 +7282,27 @@ fn cg_drop_frame(c: &mut TyCtx, mark: i64) -> i64 {
         let _b: i64 = pop(&mut (*c).cgdt);
         let _s: i64 = pop(&mut (*c).cgds);
         0
+    }
+    0
+}
+
+// (8d-drops-3) drain (free) the un-moved heap-backed bindings of cgdv[floor..] in
+// REVERSE order — the per-iteration drops on a `break`/`continue` early-exit path. Does
+// NOT truncate: the (now-dead) remainder of each block still truncates via its Block-arm
+// `cg_drop_frame`, so each runtime path frees once. Reversing the flat cgdv[floor..]
+// == the oracle's top-down per-frame reverse (concatenated frames reverse identically).
+fn cg_drop_range(c: &mut TyCtx, floor: i64) -> i64 {
+    let mut i: i64 = len((*c).cgdv) - 1;
+    while i >= floor {
+        let vid: i64 = (*c).cgdv[i];
+        let ty: i64 = (*c).cgdt[i];
+        let slot: i64 = (*c).cgds[i];
+        if cg_is_moved(c, (*c).curfn, vid) {
+            0
+        } else {
+            cg_emit_drop(c, ty, slot)
+        };
+        i = i - 1;
     }
     0
 }

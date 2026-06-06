@@ -115,6 +115,11 @@ const SEEDS: &[&str] = &[
     // (8d-drops-2) recursive struct-field drop: dropping the struct GEPs into each
     // heap-backed field and frees it (the [i64] field); scalar fields are skipped.
     "struct Box { data: [i64], tag: i64 }\nfn main() -> i64 { let b = Box { data: [9, 8], tag: 5 }; b.data[0] + b.tag }\n",
+    // (8d-drops-3) loop-exit drops: a per-iteration heap binding is drained on the
+    // break path (before branching to loop_after) AND on the fall-through (body end);
+    // mutually exclusive blocks → freed once per runtime path.
+    "fn main() -> i64 { let mut i: i64 = 0; let mut n: i64 = 0; while i < 3 { let s: [u8] = \"ab\"; n = n + len(s); if i == 1 { break; 0 } else { 0 }; i = i + 1; } n }\n",
+    "fn main() -> i64 { let mut i: i64 = 0; let mut n: i64 = 0; while i < 4 { i = i + 1; let w: [u8] = \"xy\"; n = n + len(w); if (i / 2) * 2 != i { continue; 0 } else { 0 }; n = n + 1; } n }\n",
 ];
 
 #[test]

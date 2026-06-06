@@ -767,6 +767,86 @@ fn llvm_struct_field_recursive_drop() {
     );
 }
 
+#[test]
+fn llvm_loop_exit_drops_on_break() {
+    // 8d-drops-3: a heap binding allocated in a loop body is freed PER ITERATION. On a
+    // `break` (bb3) the body frame is drained before branching to loop_after (bb2); on
+    // the fall-through (bb5) the same `s` is freed before the back-edge to loop_cond
+    // (bb0). Mutually exclusive blocks → each runtime path frees once. n = len("ab")=2
+    // at i=0, +2 at i=1 then break = 4.
+    assert_eq!(
+        llvm_dump(
+            "loopdrop",
+            "fn main() -> i64 {\n    let mut i: i64 = 0;\n    let mut n: i64 = 0;\n    while i < 3 {\n        let s: [u8] = \"ab\";\n        n = n + len(s);\n        if i == 1 { break; 0 } else { 0 };\n        i = i + 1;\n    }\n    n\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "declare ptr @sentinel_alloc(i64)\n",
+            "declare void @sentinel_free(ptr)\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v0 = alloca i64\n",
+            "  %v1 = alloca i64\n",
+            "  %v11 = alloca { i64, ptr }\n",
+            "  %v20 = alloca i64\n",
+            "  store i64 0, ptr %v0\n",
+            "  store i64 0, ptr %v1\n",
+            "  br label %bb0\n",
+            "bb0:\n",
+            "  %v2 = load i64, ptr %v0\n",
+            "  %v3 = icmp slt i64 %v2, 3\n",
+            "  br i1 %v3, label %bb1, label %bb2\n",
+            "bb1:\n",
+            "  %v4 = getelementptr i8, ptr null, i64 2\n",
+            "  %v5 = ptrtoint ptr %v4 to i64\n",
+            "  %v6 = call ptr @sentinel_alloc(i64 %v5)\n",
+            "  %v7 = getelementptr i8, ptr %v6, i64 0\n",
+            "  store i8 97, ptr %v7\n",
+            "  %v8 = getelementptr i8, ptr %v6, i64 1\n",
+            "  store i8 98, ptr %v8\n",
+            "  %v9 = insertvalue { i64, ptr } undef, i64 2, 0\n",
+            "  %v10 = insertvalue { i64, ptr } %v9, ptr %v6, 1\n",
+            "  store { i64, ptr } %v10, ptr %v11\n",
+            "  %v12 = load i64, ptr %v1\n",
+            "  %v13 = load { i64, ptr }, ptr %v11\n",
+            "  %v14 = extractvalue { i64, ptr } %v13, 0\n",
+            "  %v15 = add i64 %v12, %v14\n",
+            "  store i64 %v15, ptr %v1\n",
+            "  %v16 = load i64, ptr %v0\n",
+            "  %v17 = icmp eq i64 %v16, 1\n",
+            "  br i1 %v17, label %bb3, label %bb4\n",
+            "bb3:\n",
+            "  %v18 = load { i64, ptr }, ptr %v11\n",
+            "  %v19 = extractvalue { i64, ptr } %v18, 1\n",
+            "  call void @sentinel_free(ptr %v19)\n",
+            "  br label %bb2\n",
+            "bb6:\n",
+            "  store i64 0, ptr %v20\n",
+            "  br label %bb5\n",
+            "bb4:\n",
+            "  store i64 0, ptr %v20\n",
+            "  br label %bb5\n",
+            "bb5:\n",
+            "  %v21 = load i64, ptr %v20\n",
+            "  %v22 = load i64, ptr %v0\n",
+            "  %v23 = add i64 %v22, 1\n",
+            "  store i64 %v23, ptr %v0\n",
+            "  %v24 = load { i64, ptr }, ptr %v11\n",
+            "  %v25 = extractvalue { i64, ptr } %v24, 1\n",
+            "  call void @sentinel_free(ptr %v25)\n",
+            "  br label %bb0\n",
+            "bb2:\n",
+            "  %v26 = load i64, ptr %v1\n",
+            "  %v27 = trunc i64 %v26 to i32\n",
+            "  ret i32 %v27\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {

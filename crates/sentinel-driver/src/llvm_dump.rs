@@ -295,9 +295,11 @@ struct Emit<'a> {
     current_fn: FnId,
     allocas: String,
     body: String,
-    /// The enclosing loops' (cond-block, after-block) labels — `break` branches
-    /// to the innermost after-block, `continue` to its cond-block.
-    loops: Vec<(u32, u32)>,
+    /// The enclosing loops' (cond-block, after-block, scope_floor) — `break` branches
+    /// to the innermost after-block, `continue` to its cond-block, and both drain the
+    /// open scope frames down to `scope_floor` (the loop-body frame index) first, so
+    /// per-iteration heap bindings are freed on the early-exit path (8d-drops-3).
+    loops: Vec<(u32, u32, usize)>,
     /// The `sentinel_*` runtime symbols this fn's body uses (merged module-wide
     /// into the `declare`s — 8c-2+).
     used: RuntimeSyms,
@@ -380,7 +382,9 @@ impl Emit<'_> {
                 let c = self.lower_expr(cond)?;
                 writeln!(self.body, "  br i1 {c}, label %bb{body_b}, label %bb{after_b}").unwrap();
                 writeln!(self.body, "bb{body_b}:").unwrap();
-                self.loops.push((cond_b, after_b));
+                // 8d-drops-3: scope_floor = the body frame's index, captured NOW (before
+                // lower_block_expr pushes it) so break/continue drain frames >= it.
+                self.loops.push((cond_b, after_b, self.scopes.len()));
                 let _ = self.lower_block_expr(body)?; // a while body's value is discarded
                 self.loops.pop();
                 writeln!(self.body, "  br label %bb{cond_b}").unwrap();
@@ -388,8 +392,14 @@ impl Emit<'_> {
                 Ok(())
             }
             TypedStmtKind::Break | TypedStmtKind::Continue => {
-                let (cond_b, after_b) =
+                let (cond_b, after_b, scope_floor) =
                     *self.loops.last().ok_or("break/continue outside a loop")?;
+                // 8d-drops-3: the per-iteration drops for every open frame from the top
+                // down to the loop body — branching to loop_after/loop_cond skips
+                // lower_block_expr's end-of-iteration drops, so a body-scope heap binding
+                // live here would leak. (Each runtime path frees once: this early-exit
+                // drop, or the fall-through body-end drop — mutually exclusive blocks.)
+                self.emit_loop_exit_drops(scope_floor)?;
                 let dest = if matches!(stmt.kind, TypedStmtKind::Break) {
                     after_b
                 } else {
@@ -689,9 +699,20 @@ impl Emit<'_> {
     /// as a move), so skipping `moved` alone avoids every double-free without a
     /// separate tail-returned guard.
     fn emit_scope_drops(&mut self) -> Result<(), String> {
+        if self.scopes.is_empty() {
+            return Ok(());
+        }
+        let top = self.scopes.len() - 1;
+        self.emit_frame_drops(top)
+    }
+
+    /// 8d-drops: free the un-moved heap-backed bindings of scope frame `idx` in reverse
+    /// declaration order. Factored out of `emit_scope_drops` (8d-drops-3) so
+    /// `emit_loop_exit_drops` can drain several frames at once.
+    fn emit_frame_drops(&mut self, idx: usize) -> Result<(), String> {
         let dp = self.drop_plan;
         let moved = dp.moved_sources_for(self.current_fn);
-        let scope = self.scopes.last().cloned().unwrap_or_default();
+        let scope = self.scopes[idx].clone();
         for &id in scope.iter().rev() {
             if moved.contains(&id) {
                 continue;
@@ -705,6 +726,19 @@ impl Emit<'_> {
                 None => continue,
             };
             self.emit_drop_for_binding(slot, ty)?;
+        }
+        Ok(())
+    }
+
+    /// 8d-drops-3: drain every open scope frame from the current top down to (and
+    /// including) the loop-body frame at `scope_floor`, innermost first — the
+    /// per-iteration drops on a `break`/`continue` early-exit path. The frames are NOT
+    /// popped (the now-dead remainder of each block still pops them via its own
+    /// `lower_block_expr`, emitting a second, unreachable drop set), so each runtime
+    /// path frees a given binding exactly once.
+    fn emit_loop_exit_drops(&mut self, scope_floor: usize) -> Result<(), String> {
+        for i in (scope_floor..self.scopes.len()).rev() {
+            self.emit_frame_drops(i)?;
         }
         Ok(())
     }
