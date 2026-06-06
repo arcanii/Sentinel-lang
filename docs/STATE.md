@@ -175,6 +175,18 @@ place) leaves r's pointer + `cg_lastvid=-1`; `&*r` keeps the deref-place's point
 1-byte miss first (`cg_slot_get(-1)`→`%v-1`) — fixed by an `un_vid>=0` guard. NEXT = **(8d-Vec)**
 (`vec_new` constant + `push` realloc-grow CFG via `&mut Vec` + pop/len/vec_to_array, `{len,cap,ptr}`
 data=field 2) → **heap drops** (DropPlan).
+**✅ (8d-Vec-1) Vec IN-PLACE OPS LANDED (ADR 0045 A9):** `vec_new`/`push`/`pop`/`len`/`v[i]`,
+byte-identical to `snc llvm` (**54/54 emitted** — `c5d5_loops` joins) + 1 seed + 1 golden, behavioural
+(cc==inkwell) + leak-free; modes 0–3 + effects byte-identical. A `Vec<T>` is `{ i64 len, i64 cap, ptr
+data }` (data = FIELD 2, vs `[T]`'s field 1). `vec_new` = the constant `{0,0,null}` (a new
+`cgo_operand` kind 2); `push(&mut v,x)` = load len/cap through the `&mut Vec` field GEPs, grow if
+`len==cap` (`sentinel_realloc` to `max(1,cap*2)*sizeof` via `select`+GEP-sizeof) + store cap/data,
+then `data[len]=x`/`len++` (a grow/cont CFG, no phi, returns i64 0); `pop` = empty-check + decrement +
+return `data[len-1]`; `len`/`v[i]` use the arg's ACTUAL aggregate type (`cg_emit_index` gained the
+target type, data field keyed on `cg_is_vec`). New `sentinel_realloc` declare (`RuntimeSyms`/`cg_used_*`
+gained realloc). ⚠ the oracle lowers both push args before the GEPs (matching the Sentinel
+collect-both-first). **The grow-CFG matched the differential first try.** NEXT = **(8d-Vec-2)**
+`vec_to_array` (the `Vec`→`[T]` memcpy bridge → `c5d3_collections` emits) → **heap drops** (DropPlan).
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;

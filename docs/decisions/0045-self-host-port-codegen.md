@@ -395,6 +395,33 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     `pop`/`len`/`vec_to_array`, the `{ i64 len, i64 cap, ptr data }` layout (data = FIELD 2). Then
     **heap drops** (DropPlan). ⚠⚠ behavioural test ~80s at 53 — **sample/cache it now**.
 
+- **A9 — (8d-Vec-1) Vec IN-PLACE OPS LANDED** — `vec_new`/`push`/`pop`/`len`/`v[i]`, the
+  growable-collection MVP minus the bridge. A `Vec<T>` is `{ i64 len, i64 cap, ptr data }`
+  (ADR 0034; data = FIELD 2, vs `[T]`'s field 1). Byte-identical to `snc llvm` over the corpus
+  (`sentinel_codegen_matches_oracle_on_corpus`, **54/54 emitted** — `c5d5_loops` joins) + 1 seed +
+  1 new golden (`llvm_vec_new_push_and_len`), behavioural (`cc`-run == inkwell) and leak-free;
+  modes 0–3 + effects byte-identical. (`vec_to_array` — the `Vec`→`[T]` memcpy bridge — is 8d-Vec-2;
+  `c5d3_collections` needs it.)
+  - **vec_new** → the constant `{ i64 0, i64 0, ptr null }` — a NEW operand kind (the Sentinel
+    `cgo_operand` gained kind 2); the same value for every element type.
+  - **push(&mut v, x)** → load len/cap through the `&mut Vec`'s field GEPs; if `len == cap` grow
+    (`sentinel_realloc` to `max(1, cap*2) * sizeof`, via `select` + the GEP-sizeof idiom) and store
+    cap/data back; then `data[len] = x`, `len++`. A grow/cont CFG, **no phi**. Returns i64 0. ⚠ The
+    oracle lowers BOTH push args before the field GEPs (matching the Sentinel's collect-both-first),
+    so a side-effecting push element matches on both backends (the lexer pushes computed bytes).
+  - **pop(&mut v)** → empty-check (reuse the OOB trap), decrement len, return `data[len-1]`.
+  - **len / `v[i]`** → use the arg's ACTUAL aggregate type: `{i64,ptr}` (array) vs `{i64,i64,ptr}`
+    (Vec); `cg_emit_index` gained the target type + keys the data field on `cg_is_vec` (2 vs 1).
+  - **Mechanics.** The Vec builtins are GENERIC (route through `dump_gcall` → the first arg is
+    collected, as `len` already needed), so `cg_emit_call` reads the collected `&mut`-Vec pointer +
+    element operands; the element type is recovered from the `&mut Vec<T>` arg (`strip_ref` +
+    `vec_elem_of`). New `sentinel_realloc` declare (`RuntimeSyms` gained `realloc`; canonical order
+    alloc/realloc/panic_oob/str_eq/read_file/write_file/print_bytes). **The grow-CFG matched the
+    differential on the FIRST try** — the value-numbering discipline holds at this complexity.
+  - **NEXT = (8d-Vec-2)** — `vec_to_array(v)` (extract len/data, `sentinel_alloc(len*sizeof)`,
+    `llvm.memcpy` the live prefix, build the `[T]`) → `c5d3_collections` (the D.3 phase-go) emits.
+    Then **heap drops** (DropPlan). ⚠⚠ behavioural test ~83s at 54 — sample/cache imminent.
+
 ## Decision
 
 ### D1. Goal.
