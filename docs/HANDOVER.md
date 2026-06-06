@@ -2092,11 +2092,11 @@ For pasting into a fresh chat to bootstrap context:
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin
     local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1471 tests**
-    (the codegen differential `sentinel_codegen_matches_oracle_on_corpus` [57/57] + the selfhost-stages
-    differential `sentinel_codegen_matches_oracle_on_selfhost_stages` [lexer+parser self-host
-    byte-identically] + the `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still 123/123).
-    macOS + LLVM 18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1472 tests**
+    (the codegen differential [57/57] + `sentinel_codegen_matches_oracle_on_selfhost_stages` [lexer+parser
+    self-host byte-identically] + `snc_llvm_lowers_the_merged_compiler` [the FULL merged compiler emits] +
+    the `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still 123/123). macOS + LLVM 18
+    (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
     + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR 0043)
@@ -2108,29 +2108,28 @@ For pasting into a fresh chat to bootstrap context:
     parser, resolve, types, effects, borrow, **mir, ctverify** .sentinel. The ONLY thing
     left is **codegen** (the bootstrap-critical transform → the object/fixed-point).
 
-    ▶ **RESUME AT: (8f-2) — multi-module `snc llvm` (toward the fixed-point).** Codegen (8/N) is WELL
-    ALONG (ADR 0045, amendments A1–A16): 8a scalars/calls, 8b control flow, 8c structs/arrays/strings, 8d
-    builtins + refs + Vec (…/`vec_to_array`) + **HEAP DROPS COMPLETE** (drops-1/2/3) + **ENUMS COMPLETE**
-    ((8e-1) type/construct/drop; (8e-2) **match** — an if-else chain) — ALL byte-identical to `snc llvm` +
-    behavioural (cc==inkwell) + leak-free + modes 0–3 byte-identical (**57/57 emitting fixtures**).
-    🎯 **(8f-1) DONE (A16): the Sentinel codegen `scg` SELF-HOSTS its own `lexer.sentinel` (390→4378 `.ll`
-    lines) + `parser.sentinel` (2590→21606) BYTE-IDENTICALLY to `snc llvm`, cc-run == inkwell** — the
-    compiler compiling its own source, with NO codegen change (the Bar-A set, closed at 8e, already
-    suffices at 20×–500× corpus scale). Guarded by `sentinel_codegen_matches_oracle_on_selfhost_stages`.
-    **The Bar-A construct set is COMPLETE.** **NEXT = (8f-2): wire `snc llvm` to the MERGED multi-module
-    path.** Today `snc llvm` (`run_llvm`, main.rs:462) is SINGLE-FILE and rejects `use` ("not yet wired");
-    the self-contained stages (lexer/parser, no `use`) work, but the rest (`types`/`resolve`/`effects`/
-    `codegen`) `use` each other. `snc build` ALREADY handles this: `run_build` (main.rs:611) discovers the
-    module graph + `sentinel_resolve::merge_modules(&units)` → `run_build_merged` (main.rs:724). MIRROR
-    that for llvm: a `run_llvm` that, on a multi-module entry, discovers + merges, then `llvm_dump::dump`s
-    the merged `Program` (+ its `borrow_check` DropPlan). Then `snc llvm codegen.sentinel` emits the FULL
-    merged compiler's `.ll` (reveals any straggler construct the 57 fixtures + lexer/parser didn't hit).
-    THEN **(8g) THE FIXED-POINT** — the harder half: `scg` is SINGLE-FILE (reads one `input.sentinel`), so
-    self-compiling the MULTI-MODULE compiler needs `scg` to merge too (port the driver's discovery +
-    `merge_modules` + `Renamer` to Sentinel — a big feature; see [[sentinel_d6_modules_surface]]) OR feed
-    `scg` a pre-merged single source. The capstone: `scg` emits the compiler's `.ll`; `cc` → `scg'`;
-    assert `scg'` emits == `scg` (byte-for-byte self-compilation — why C5 shipped `abi-v1` + reproducible
-    builds). ⚠ The leak GATE is the **`leaks --atExit` sweep** (codesign trick), NOT the
+    ▶ **RESUME AT: (8g) — THE BOOTSTRAP FIXED-POINT.** Codegen (8/N) is essentially DONE (ADR 0045,
+    amendments A1–A17): 8a scalars/calls, 8b control flow, 8c structs/arrays/strings, 8d builtins + refs +
+    Vec (…/`vec_to_array`) + **HEAP DROPS** (drops-1/2/3) + **ENUMS** ((8e-1) type/construct/drop; (8e-2)
+    match) + **SELF-HOST + MULTI-MODULE** (8f) — ALL byte-identical to `snc llvm` + behavioural
+    (cc==inkwell) + leak-free + modes 0–3 byte-identical (**57/57 fixtures**). 🎯🎯 **THE ORACLE NOW LOWERS
+    THE ENTIRE SELF-HOSTING COMPILER:** `snc llvm` emits every stage incl. the merged `codegen.sentinel`
+    (parser→types→codegen, **~83k `.ll` lines**), cc-run == inkwell (A17); the Sentinel `scg` self-hosts
+    its own `lexer`+`parser` byte-identically (A16) + handles every construct + lvalue form
+    (`&mut (*c).f` / `(*c).f = x`, A17). **The Bar-A construct set is PROVEN COMPLETE on the real
+    compiler.** **NEXT = (8g) the capstone — the remaining half is the SENTINEL side of multi-module.**
+    `scg` is SINGLE-FILE (reads one `input.sentinel`); the full compiler is multi-module. TWO paths to the
+    fixed-point: **(a)** port the module merge to Sentinel — `discover_module_graph` + `merge_modules` +
+    the `Renamer` (the D.6 driver machinery; qualifies every top-level name by module path + rewrites all
+    refs; ~hundreds of Rust lines — the big lift; see [[sentinel_d6_modules_surface]]) so `scg` itself
+    discovers+merges+emits; **OR (b)** a "merge-to-source" mode in the Rust `snc` (emit the merged
+    `Program` back to one `.sentinel` text) that `scg` reads as a single file — lighter, but needs the
+    merged AST (with `$`-qualified names) to round-trip to valid source. Then the **capstone assertion:**
+    `snc build` (inkwell) → `scg`; `scg` emits the (merged) compiler's `.ll` == the `snc llvm` oracle's;
+    `cc` the `.ll` → `scg'`; `scg'` emits the same `.ll` (a true fixed point — the compiler reproduces
+    itself byte-for-byte; this is *why* C5 shipped `abi-v1` + reproducible builds). A meaningful PARTIAL
+    fixed-point already holds: `scg` reproduces its own `lexer`+`parser` stages byte-identically. ⚠ The
+    leak GATE is the **`leaks --atExit` sweep** (codesign trick), NOT the
     differential/behavioural (a missing free is byte-parity-NEUTRAL — same exit/stdout). ⚠⚠ **The
     behavioural test is ~84s at 57 fixtures** — **SAMPLE it** (targeted inkwell-vs-cc on the changed
     fixture(s) + new seeds; the unchanged fixtures are provably byte-identical via the corpus

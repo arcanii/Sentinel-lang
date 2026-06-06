@@ -635,6 +635,32 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     capstone: `scg` emits the compiler's `.ll`; `cc` → `scg'`; assert `scg'` emits == `scg` (byte-for-byte
     self-compilation — why C5 shipped `abi-v1` + reproducible builds).
 
+- **A17 — (8f-2/8f-3) `snc llvm` LOWERS THE FULL SELF-HOSTING COMPILER:** with the multi-module path
+  wired + the last two lvalue stragglers ported, **`snc llvm` emits every selfhost stage**, including
+  the merged `codegen.sentinel` (the 3-deep parser→types→codegen chain, **~83k `.ll` lines**), and the
+  `cc`-compiled `.ll` runs identically to inkwell. The Sentinel side handles the same lvalue forms
+  (seed-validated). 1472 tests (a field-place seed + a merged-compiler emission guard), four-check green.
+  - **(8f-2) multi-module `snc llvm`.** `run_llvm` gained the D.6 dispatch (mirroring `run_build`):
+    `discover_module_graph` → `merge_modules` → a new `run_llvm_merged` that runs resolve → check →
+    borrow-check → `llvm_dump::dump` over the merged `Program` (bypassing Salsa, like `run_build_merged`).
+    The single-file path is unchanged. This is what lets the oracle lower the multi-module stages.
+  - **(8f-3) lvalue field places.** The selfhost sources use exactly two address-of forms — `&mut V`
+    (already handled) and **`&mut (*c).f`** (236×) — plus the symmetric `(*c).f = x`. Added the
+    `FieldAccess` arm to the oracle's `lower_lvalue_ptr` (GEP into the target's lvalue pointer:
+    `getelementptr %Struct.N, ptr <target>, i32 0, i32 field_index`) + the `FieldAccess` assign target.
+    🔑 **The Sentinel needed only ONE change** — a `FieldAccess`-under-`cg_suppress` branch emitting the
+    GEP + signalling `cg_lastvid = -1`; the existing `&mut`/`SAssign` machinery already treats
+    `cg_lastvid = -1` as "the operand IS the place address", so address-of-field and assign-to-field both
+    fell out. Validated by a single-file seed (`&mut (*b).items` + `(*b).n = …`): scg == oracle, cc ==
+    inkwell, leak-free. (Element-ref `&a[i]` is unported — the selfhost sources don't use it.)
+  - **The Bar-A construct coverage is PROVEN COMPLETE on the real compiler** — the merged `codegen`
+    (the whole front end + analysis + the codegen itself) lowers with zero stragglers.
+  - **NEXT = (8g) THE FIXED-POINT.** The oracle now lowers the full compiler; the remaining half is the
+    Sentinel side: `scg` is single-file, so self-compiling the multi-module compiler needs `scg` to MERGE
+    (port `discover_module_graph` + `merge_modules` + `Renamer` to Sentinel — a sizable feature) OR a
+    pre-merged single source fed to `scg`. Then: `scg` emits the compiler's `.ll`; `cc` → `scg'`; assert
+    `scg'` emits == `scg` — byte-for-byte self-compilation.
+
 ## Decision
 
 ### D1. Goal.

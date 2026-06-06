@@ -274,6 +274,19 @@ lower via the single-file pipeline; the multi-module stages (`types`/`codegen`/�
 `snc llvm` to the merged multi-module path (mirror `run_build`+`merge_modules`, emit `.ll`) → **(8g) THE
 FIXED-POINT** (the harder half: `scg` is single-file, so self-compiling the multi-module compiler needs
 `scg` to merge too — port discovery+`merge_modules`+`Renamer` to Sentinel, or a pre-merged source).
+**✅ (8f-2/8f-3) `snc llvm` LOWERS THE FULL SELF-HOSTING COMPILER (ADR 0045 A17):** the multi-module path
+is wired (`run_llvm` → `discover_module_graph` → `merge_modules` → new `run_llvm_merged`, mirroring
+`run_build`) + the last two lvalue stragglers ported (`&mut (*c).f` + `(*c).f = x` — address-of/assign-to
+a field through a `&mut` ptr). So **`snc llvm` emits EVERY selfhost stage**, incl. the merged
+`codegen.sentinel` (parser→types→codegen, ~83k `.ll` lines); `cc`-run == inkwell. The Bar-A construct
+coverage is PROVEN COMPLETE on the real compiler. Oracle: `lower_lvalue_ptr` gained `FieldAccess` (GEP
+into the target's pointer) + the `FieldAccess` assign target. 🔑 Sentinel needed ONE change — a
+`FieldAccess`-under-`cg_suppress` GEP branch signalling `cg_lastvid=-1`; the existing `&mut`/`SAssign`
+machinery already treats `-1` as "the operand IS the place address", so both forms fell out.
+Seed-validated (scg==oracle, cc==inkwell, leak-free); 1472 tests, four-check green. NEXT = **(8g) THE
+FIXED-POINT** — `scg` is single-file, so self-compiling the multi-module compiler needs `scg` to merge too
+(port discovery+`merge_modules`+`Renamer` to Sentinel) OR a pre-merged source; then `scg`→`.ll`→`cc`→`scg'`,
+assert `scg'` emits == `scg`.
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;
