@@ -367,6 +367,48 @@ fn llvm_string_literal_is_a_u8_array() {
     );
 }
 
+#[test]
+fn llvm_str_eq_runtime_builtin() {
+    // 8d runtime builtins: a byte-array builtin decomposes its `[u8]` arg(s) into
+    // the (ptr, len) the C symbol wants, then calls it. `str_eq` extracts len(0)/
+    // ptr(1) from each `{ i64, ptr }` and calls `sentinel_str_eq(ptr,i64,ptr,i64)`
+    // → i1. The module declares only the symbols it uses.
+    assert_eq!(
+        llvm_dump(
+            "streq",
+            "fn eq(a: [u8], b: [u8]) -> bool {\n    str_eq(a, b)\n}\nfn main() -> i64 {\n    0\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "declare i1 @sentinel_str_eq(ptr, i64, ptr, i64)\n",
+            "\n",
+            "define i1 @eq({ i64, ptr } %arg0, { i64, ptr } %arg1) {\n",
+            "entry:\n",
+            "  %v0 = alloca { i64, ptr }\n",
+            "  %v1 = alloca { i64, ptr }\n",
+            "  store { i64, ptr } %arg0, ptr %v0\n",
+            "  store { i64, ptr } %arg1, ptr %v1\n",
+            "  %v2 = load { i64, ptr }, ptr %v0\n",
+            "  %v3 = load { i64, ptr }, ptr %v1\n",
+            "  %v4 = extractvalue { i64, ptr } %v2, 0\n",
+            "  %v5 = extractvalue { i64, ptr } %v2, 1\n",
+            "  %v6 = extractvalue { i64, ptr } %v3, 0\n",
+            "  %v7 = extractvalue { i64, ptr } %v3, 1\n",
+            "  %v8 = call i1 @sentinel_str_eq(ptr %v5, i64 %v4, ptr %v7, i64 %v6)\n",
+            "  ret i1 %v8\n",
+            "}\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v0 = trunc i64 0 to i32\n",
+            "  ret i32 %v0\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
 // ---- Layer 2: the 0-panics corpus sweep ---------------------------------
 
 fn corpus_fixtures() -> Vec<PathBuf> {

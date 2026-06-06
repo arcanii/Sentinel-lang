@@ -37,7 +37,10 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
-use sentinel_resolve::{FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, U8_TO_I64_FN_ID};
+use sentinel_resolve::{
+    FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, PRINT_BYTES_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID,
+    U8_TO_I64_FN_ID, WRITE_FILE_FN_ID,
+};
 use sentinel_types::{
     Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
 };
@@ -49,6 +52,55 @@ const TARGET_TRIPLE: &str = "arm64-apple-darwin";
 
 /// The lowest user FnId — ids 0..=13 are runtime/builtins (ADR 0044 FnId map).
 const FIRST_USER_FN: u32 = 14;
+
+/// Which `sentinel_*` runtime symbols a module's bodies actually use. The module
+/// emits a `declare` for each used symbol — in a FIXED order, before the fns — so a
+/// program using none stays byte-identical to the slice that added the first
+/// (8c-1). Each flag is set as the corresponding call is emitted.
+#[derive(Default, Clone, Copy)]
+struct RuntimeSyms {
+    alloc: bool,
+    panic_oob: bool,
+    str_eq: bool,
+    read_file: bool,
+    write_file: bool,
+    print_bytes: bool,
+}
+
+impl RuntimeSyms {
+    fn merge(&mut self, other: RuntimeSyms) {
+        self.alloc |= other.alloc;
+        self.panic_oob |= other.panic_oob;
+        self.str_eq |= other.str_eq;
+        self.read_file |= other.read_file;
+        self.write_file |= other.write_file;
+        self.print_bytes |= other.print_bytes;
+    }
+
+    /// Emit the `declare`s for the used symbols, in the fixed canonical order,
+    /// returning whether any were emitted (the caller adds a trailing blank line).
+    fn emit_declares(self, out: &mut String) -> bool {
+        if self.alloc {
+            writeln!(out, "declare ptr @sentinel_alloc(i64)").unwrap();
+        }
+        if self.panic_oob {
+            writeln!(out, "declare void @sentinel_panic_oob(i64, i64)").unwrap();
+        }
+        if self.str_eq {
+            writeln!(out, "declare i1 @sentinel_str_eq(ptr, i64, ptr, i64)").unwrap();
+        }
+        if self.read_file {
+            writeln!(out, "declare ptr @sentinel_read_file(ptr, i64, ptr)").unwrap();
+        }
+        if self.write_file {
+            writeln!(out, "declare i64 @sentinel_write_file(ptr, i64, ptr, i64)").unwrap();
+        }
+        if self.print_bytes {
+            writeln!(out, "declare i64 @sentinel_print_bytes(ptr, i64)").unwrap();
+        }
+        self.alloc || self.panic_oob || self.str_eq || self.read_file || self.write_file || self.print_bytes
+    }
+}
 
 /// Emit the canonical `.ll` for `program`, or `Err(why)` if it uses a
 /// construct not yet ported (the caller exits nonzero so the differential
@@ -87,23 +139,16 @@ pub fn dump(program: &TypedProgram) -> Result<String, String> {
     // the fns into a buffer so the runtime-symbol `declare`s — emitted only for the
     // symbols the bodies actually use — can be placed BEFORE them in the module.
     let mut fns_buf = String::new();
-    let mut used_alloc = false;
-    let mut used_panic = false;
+    let mut used = RuntimeSyms::default();
     let mut fns: Vec<&TypedFnDef> = program.fns.iter().collect();
     fns.sort_by_key(|f| f.id.0);
     for f in fns {
-        dump_fn(f, program, &mut fns_buf, &mut used_alloc, &mut used_panic)?;
+        dump_fn(f, program, &mut fns_buf, &mut used)?;
         fns_buf.push('\n');
     }
     // Runtime-symbol declarations (8c-2+): only the symbols actually used, in a
-    // fixed order, so a program using no heap/bounds stays byte-identical to 8c-1.
-    if used_alloc {
-        writeln!(out, "declare ptr @sentinel_alloc(i64)").unwrap();
-    }
-    if used_panic {
-        writeln!(out, "declare void @sentinel_panic_oob(i64, i64)").unwrap();
-    }
-    if used_alloc || used_panic {
+    // fixed order, so a program using none stays byte-identical to 8c-1.
+    if used.emit_declares(&mut out) {
         out.push('\n');
     }
     out.push_str(&fns_buf);
@@ -114,8 +159,7 @@ fn dump_fn(
     f: &TypedFnDef,
     program: &TypedProgram,
     out: &mut String,
-    used_alloc: &mut bool,
-    used_panic: &mut bool,
+    used: &mut RuntimeSyms,
 ) -> Result<(), String> {
     let sig = program.signature(f.id);
     if !sig.type_params.is_empty() {
@@ -139,8 +183,7 @@ fn dump_fn(
         allocas: String::new(),
         body: String::new(),
         loops: Vec::new(),
-        used_alloc: false,
-        used_panic: false,
+        used: RuntimeSyms::default(),
     };
     // Allocas are HOISTED to the entry block: param slots, `let` slots, and the
     // if-result slot all land in `e.allocas` (emitted first), while stores/loads/
@@ -179,8 +222,7 @@ fn dump_fn(
     out.push_str(&e.allocas);
     out.push_str(&e.body);
     out.push_str("}\n");
-    *used_alloc |= e.used_alloc;
-    *used_panic |= e.used_panic;
+    used.merge(e.used);
     Ok(())
 }
 
@@ -197,10 +239,9 @@ struct Emit<'a> {
     /// The enclosing loops' (cond-block, after-block) labels — `break` branches
     /// to the innermost after-block, `continue` to its cond-block.
     loops: Vec<(u32, u32)>,
-    /// Set when this fn emits a `sentinel_alloc` / `sentinel_panic_oob` call —
-    /// the module emits a `declare` for each symbol it actually uses (8c-2+).
-    used_alloc: bool,
-    used_panic: bool,
+    /// The `sentinel_*` runtime symbols this fn's body uses (merged module-wide
+    /// into the `declare`s — 8c-2+).
+    used: RuntimeSyms,
 }
 
 impl Emit<'_> {
@@ -508,7 +549,7 @@ impl Emit<'_> {
                 writeln!(self.body, "  br i1 %v{inb}, label %bb{ok_b}, label %bb{oob_b}").unwrap();
                 writeln!(self.body, "bb{oob_b}:").unwrap();
                 writeln!(self.body, "  call void @sentinel_panic_oob(i64 {idx}, i64 %v{len})").unwrap();
-                self.used_panic = true;
+                self.used.panic_oob = true;
                 writeln!(self.body, "  unreachable").unwrap();
                 writeln!(self.body, "bb{ok_b}:").unwrap();
                 let ep = self.fresh();
@@ -541,7 +582,7 @@ impl Emit<'_> {
         writeln!(self.body, "  %v{szi} = ptrtoint ptr %v{sz} to i64").unwrap();
         let data = self.fresh();
         writeln!(self.body, "  %v{data} = call ptr @sentinel_alloc(i64 %v{szi})").unwrap();
-        self.used_alloc = true;
+        self.used.alloc = true;
         for (i, op) in ops.iter().enumerate() {
             let ep = self.fresh();
             writeln!(self.body, "  %v{ep} = getelementptr {ety}, ptr %v{data}, i64 {i}").unwrap();
@@ -576,6 +617,89 @@ impl Emit<'_> {
             let v = self.fresh();
             writeln!(self.body, "  %v{v} = extractvalue {{ i64, ptr }} {arr}, 0").unwrap();
             return Ok(format!("%v{v}"));
+        }
+        // The byte-array runtime builtins (ADR 0033/0035): each decomposes its
+        // `[u8]` (`{ i64 len, ptr data }`) arg(s) into the (ptr, len) the C symbol
+        // wants and calls it. str_eq → i1; print_bytes/write_file → i64; read_file
+        // reassembles an owned `[u8]` from the returned data ptr + the out-len slot.
+        if id == STR_EQ_FN_ID {
+            let a = self.lower_expr(&args[0])?;
+            let b = self.lower_expr(&args[1])?;
+            let al = self.fresh();
+            writeln!(self.body, "  %v{al} = extractvalue {{ i64, ptr }} {a}, 0").unwrap();
+            let ap = self.fresh();
+            writeln!(self.body, "  %v{ap} = extractvalue {{ i64, ptr }} {a}, 1").unwrap();
+            let bl = self.fresh();
+            writeln!(self.body, "  %v{bl} = extractvalue {{ i64, ptr }} {b}, 0").unwrap();
+            let bp = self.fresh();
+            writeln!(self.body, "  %v{bp} = extractvalue {{ i64, ptr }} {b}, 1").unwrap();
+            let v = self.fresh();
+            writeln!(
+                self.body,
+                "  %v{v} = call i1 @sentinel_str_eq(ptr %v{ap}, i64 %v{al}, ptr %v{bp}, i64 %v{bl})"
+            )
+            .unwrap();
+            self.used.str_eq = true;
+            return Ok(format!("%v{v}"));
+        }
+        if id == PRINT_BYTES_FN_ID {
+            let d = self.lower_expr(&args[0])?;
+            let dl = self.fresh();
+            writeln!(self.body, "  %v{dl} = extractvalue {{ i64, ptr }} {d}, 0").unwrap();
+            let dp = self.fresh();
+            writeln!(self.body, "  %v{dp} = extractvalue {{ i64, ptr }} {d}, 1").unwrap();
+            let v = self.fresh();
+            writeln!(
+                self.body,
+                "  %v{v} = call i64 @sentinel_print_bytes(ptr %v{dp}, i64 %v{dl})"
+            )
+            .unwrap();
+            self.used.print_bytes = true;
+            return Ok(format!("%v{v}"));
+        }
+        if id == WRITE_FILE_FN_ID {
+            let p = self.lower_expr(&args[0])?;
+            let d = self.lower_expr(&args[1])?;
+            let pl = self.fresh();
+            writeln!(self.body, "  %v{pl} = extractvalue {{ i64, ptr }} {p}, 0").unwrap();
+            let pp = self.fresh();
+            writeln!(self.body, "  %v{pp} = extractvalue {{ i64, ptr }} {p}, 1").unwrap();
+            let dl = self.fresh();
+            writeln!(self.body, "  %v{dl} = extractvalue {{ i64, ptr }} {d}, 0").unwrap();
+            let dp = self.fresh();
+            writeln!(self.body, "  %v{dp} = extractvalue {{ i64, ptr }} {d}, 1").unwrap();
+            let v = self.fresh();
+            writeln!(
+                self.body,
+                "  %v{v} = call i64 @sentinel_write_file(ptr %v{pp}, i64 %v{pl}, ptr %v{dp}, i64 %v{dl})"
+            )
+            .unwrap();
+            self.used.write_file = true;
+            return Ok(format!("%v{v}"));
+        }
+        if id == READ_FILE_FN_ID {
+            let p = self.lower_expr(&args[0])?;
+            let pl = self.fresh();
+            writeln!(self.body, "  %v{pl} = extractvalue {{ i64, ptr }} {p}, 0").unwrap();
+            let pp = self.fresh();
+            writeln!(self.body, "  %v{pp} = extractvalue {{ i64, ptr }} {p}, 1").unwrap();
+            // The out-len slot is a hoisted i64 alloca; the call writes the byte
+            // count there and returns the data ptr → reassemble the owned `[u8]`.
+            let slot = self.alloca("i64");
+            let data = self.fresh();
+            writeln!(
+                self.body,
+                "  %v{data} = call ptr @sentinel_read_file(ptr %v{pp}, i64 %v{pl}, ptr %v{slot})"
+            )
+            .unwrap();
+            self.used.read_file = true;
+            let rlen = self.fresh();
+            writeln!(self.body, "  %v{rlen} = load i64, ptr %v{slot}").unwrap();
+            let a0 = self.fresh();
+            writeln!(self.body, "  %v{a0} = insertvalue {{ i64, ptr }} undef, i64 %v{rlen}, 0").unwrap();
+            let a1 = self.fresh();
+            writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
+            return Ok(format!("%v{a1}"));
         }
         if id.0 < FIRST_USER_FN {
             return Err(format!("builtin call #{} (deferred to a later slice)", id.0));

@@ -213,6 +213,10 @@ struct TyCtx {
     cg_collecting: bool, // true while a call walks its args (gates cg_collect)
     cg_used_alloc: bool, // (8c-2) module emits `declare sentinel_alloc` iff set
     cg_used_panic: bool, // (8c-2) module emits `declare sentinel_panic_oob` iff set
+    cg_used_streq: bool, // (8d) `declare sentinel_str_eq`
+    cg_used_rdfile: bool, // (8d) `declare sentinel_read_file`
+    cg_used_wrfile: bool, // (8d) `declare sentinel_write_file`
+    cg_used_prbytes: bool, // (8d) `declare sentinel_print_bytes`
     cg_suppress: bool,   // true while walking an assign target (the Var arm records, no load)
     cg_lastvid: i64,  // the VarId the most-recent Var node resolved to (for assign)
     // (8b) the body is buffered per-fn so ALLOCAS can be HOISTED to the entry block
@@ -5970,6 +5974,10 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_collecting: false,
         cg_used_alloc: false,
         cg_used_panic: false,
+        cg_used_streq: false,
+        cg_used_rdfile: false,
+        cg_used_wrfile: false,
+        cg_used_prbytes: false,
         cg_suppress: false,
         cg_lastvid: 0 - 1,
         cgbody: vec_new(),
@@ -6374,8 +6382,9 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         let _o4: [u8] = vec_to_array(out);
         append_str(result, "target triple = \"arm64-apple-darwin\"\n\n");
         cg_pass0(result, &mut ctx);
-        // (8c-2) runtime-symbol declarations — only the symbols the bodies used, in
-        // a fixed order (so a heap/bounds-free program stays byte-identical to 8c-1).
+        // (8c-2/8d) runtime-symbol declarations — only the symbols the bodies used,
+        // in a FIXED order (matching the oracle), so a program using none stays
+        // byte-identical to 8c-1.
         if ctx.cg_used_alloc {
             append_str(result, "declare ptr @sentinel_alloc(i64)\n");
             0
@@ -6388,7 +6397,32 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
-        if ctx.cg_used_alloc || ctx.cg_used_panic {
+        if ctx.cg_used_streq {
+            append_str(result, "declare i1 @sentinel_str_eq(ptr, i64, ptr, i64)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_rdfile {
+            append_str(result, "declare ptr @sentinel_read_file(ptr, i64, ptr)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_wrfile {
+            append_str(result, "declare i64 @sentinel_write_file(ptr, i64, ptr, i64)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_prbytes {
+            append_str(result, "declare i64 @sentinel_print_bytes(ptr, i64)\n");
+            0
+        } else {
+            0
+        };
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_prbytes;
+        if cg_anydecl {
             push(result, '\n');
             0
         } else {
@@ -6938,6 +6972,93 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_str(c, ", 0\n");
         cg_reg(c, ld);
         0
+    } else if fid == 4 {
+        // (8d) str_eq(a, b): decompose each [u8], call sentinel_str_eq -> i1.
+        let s_ak: i64 = (*c).cgak[snap];
+        let s_av: i64 = (*c).cgav[snap];
+        let s_bk: i64 = (*c).cgak[snap + 1];
+        let s_bv: i64 = (*c).cgav[snap + 1];
+        let al: i64 = cg_lenptr(c, s_ak, s_av);
+        let bl: i64 = cg_lenptr(c, s_bk, s_bv);
+        let d2: i64 = cg_dst(c);
+        cgo_str(c, "call i1 @sentinel_str_eq(ptr %v");
+        cgo_int(c, al + 1);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, al);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, bl + 1);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, bl);
+        cgo_str(c, ")\n");
+        (*c).cg_used_streq = true;
+        cg_reg(c, d2);
+        0
+    } else if fid == 13 {
+        // (8d) print_bytes(d): decompose [u8], call sentinel_print_bytes -> i64.
+        let p_dk: i64 = (*c).cgak[snap];
+        let p_dv: i64 = (*c).cgav[snap];
+        let pdl: i64 = cg_lenptr(c, p_dk, p_dv);
+        let d3: i64 = cg_dst(c);
+        cgo_str(c, "call i64 @sentinel_print_bytes(ptr %v");
+        cgo_int(c, pdl + 1);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, pdl);
+        cgo_str(c, ")\n");
+        (*c).cg_used_prbytes = true;
+        cg_reg(c, d3);
+        0
+    } else if fid == 12 {
+        // (8d) write_file(path, data) -> i64.
+        let w_pk: i64 = (*c).cgak[snap];
+        let w_pv: i64 = (*c).cgav[snap];
+        let w_dk: i64 = (*c).cgak[snap + 1];
+        let w_dv: i64 = (*c).cgav[snap + 1];
+        let wpl: i64 = cg_lenptr(c, w_pk, w_pv);
+        let wdl: i64 = cg_lenptr(c, w_dk, w_dv);
+        let d4: i64 = cg_dst(c);
+        cgo_str(c, "call i64 @sentinel_write_file(ptr %v");
+        cgo_int(c, wpl + 1);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, wpl);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, wdl + 1);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, wdl);
+        cgo_str(c, ")\n");
+        (*c).cg_used_wrfile = true;
+        cg_reg(c, d4);
+        0
+    } else if fid == 11 {
+        // (8d) read_file(path) -> [u8]: call, then reassemble {len, data}.
+        let r_pk: i64 = (*c).cgak[snap];
+        let r_pv: i64 = (*c).cgav[snap];
+        let rpl: i64 = cg_lenptr(c, r_pk, r_pv);
+        let rslot: i64 = cg_alloca(c, 0);
+        let rdata: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_read_file(ptr %v");
+        cgo_int(c, rpl + 1);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, rpl);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, rslot);
+        cgo_str(c, ")\n");
+        (*c).cg_used_rdfile = true;
+        let rrlen: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, rslot);
+        cg_putc(c, '\n');
+        let ra0: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i64, ptr } undef, i64 %v");
+        cgo_int(c, rrlen);
+        cgo_str(c, ", 0\n");
+        let ra1: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i64, ptr } %v");
+        cgo_int(c, ra0);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, rdata);
+        cgo_str(c, ", 1\n");
+        cg_reg(c, ra1);
+        0
     } else if fid >= 14 {
         let d: i64 = cg_dst(c);
         cgo_str(c, "call ");
@@ -7047,6 +7168,21 @@ fn cg_emit_structlit(c: &mut TyCtx, styh: i64, snap: i64) -> i64 {
         0
     }
     cg_reg(c, prev)
+}
+
+// (8d) decompose a `[u8]`/`{ i64, ptr }` operand into its (len, ptr) for a runtime
+// builtin: emit `%vL = extractvalue { i64, ptr } <op>, 0` then `%v(L+1) =
+// extractvalue …, 1`; return L (the len reg; the ptr reg is L+1, the very next).
+fn cg_lenptr(c: &mut TyCtx, opk: i64, opv: i64) -> i64 {
+    let l: i64 = cg_dst(c);
+    cgo_str(c, "extractvalue { i64, ptr } ");
+    cgo_operand(c, opk, opv);
+    cgo_str(c, ", 0\n");
+    let _p: i64 = cg_dst(c);
+    cgo_str(c, "extractvalue { i64, ptr } ");
+    cgo_operand(c, opk, opv);
+    cgo_str(c, ", 1\n");
+    l
 }
 
 // (8c-2) emit an array literal: heap alloc (`n * sizeof(elem)` via the GEP-sizeof

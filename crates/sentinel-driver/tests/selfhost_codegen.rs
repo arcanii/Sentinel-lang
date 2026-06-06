@@ -88,6 +88,11 @@ const SEEDS: &[&str] = &[
     // constant bytes) + char literals (u8 constants).
     "fn main() -> i64 { let s: [u8] = \"hi\"; len(s) }\n",
     "fn main() -> i64 { let c: u8 = 'Z'; u8_to_i64(c) }\n",
+    // (8d) runtime builtins: str_eq + print_bytes decompose a [u8] into (ptr, len)
+    // and call the sentinel_* symbol. (read_file/write_file need a real file at
+    // runtime → behaviourally covered by the c5d4_file_io corpus fixture, not a seed.)
+    "fn eq(a: [u8], b: [u8]) -> bool { str_eq(a, b) }\nfn main() -> i64 { let x: [u8] = \"hi\"; let y: [u8] = \"hi\"; if eq(x, y) { 1 } else { 0 } }\n",
+    "fn show(b: [u8]) -> i64 { print_bytes(b) }\nfn main() -> i64 { let s: [u8] = \"hi\"; show(s) }\n",
 ];
 
 #[test]
