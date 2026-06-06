@@ -253,3 +253,52 @@ fn sentinel_codegen_matches_oracle_on_corpus() {
         mismatches.join("\n")
     );
 }
+
+/// (8f) The Sentinel codegen emits its OWN front-end stages byte-identically to `snc
+/// llvm` — a step toward the bootstrap fixed-point: the compiler compiling its own
+/// source. `lexer.sentinel` (390 lines) and `parser.sentinel` (2590 lines) are the
+/// self-contained stages (no `use`), so they lower through the single-file pipeline;
+/// they exercise the WHOLE Bar-A construct set at real scale (4.4k + 21.6k `.ll` lines)
+/// far beyond the small corpus fixtures. The multi-module stages (types/codegen/…) need
+/// the merged path (a later slice). This is the headline (8f) regression guard.
+#[test]
+fn sentinel_codegen_matches_oracle_on_selfhost_stages() {
+    let tmp =
+        std::env::temp_dir().join(format!("snc_selfhost_cg_stages_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let cg = build_sentinel_codegen(&tmp);
+
+    let work = tmp.join("work");
+    std::fs::create_dir_all(&work).expect("create work dir");
+    let input = work.join("input.sentinel");
+    let root = workspace_root();
+
+    for stage in ["lexer", "parser"] {
+        let src = root.join("selfhost").join(format!("{stage}.sentinel"));
+        let bytes = std::fs::read(&src).expect("read selfhost stage");
+        std::fs::write(&input, &bytes).expect("stage input");
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(&input)
+            .output()
+            .expect("run snc llvm");
+        assert!(
+            oracle.status.success(),
+            "snc llvm rejected selfhost/{stage}.sentinel:\n{}",
+            String::from_utf8_lossy(&oracle.stderr)
+        );
+        let sentinel = Command::new(&cg)
+            .current_dir(&work)
+            .output()
+            .expect("run the Sentinel codegen");
+        assert_eq!(
+            oracle.stdout,
+            sentinel.stdout,
+            "selfhost/{stage}.sentinel: the Sentinel codegen diverged from `snc llvm` \
+             (oracle {} bytes vs sentinel {} bytes)",
+            oracle.stdout.len(),
+            sentinel.stdout.len()
+        );
+    }
+}
