@@ -2082,12 +2082,12 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0045 A21** docs commit (`749d32a` — Bar B opened +
-    `print`) atop the `print` feat (`391ae58`) atop the **A20** path-(a) commit (`6355c23` — PATH (a)
-    COMPLETE, the self-hosted merge) atop the path-(a) feats: (a-4) scg self-merges (`d33397c`),
-    (a-2)+(a-3) the self-hosted merge (`ef56104`), (a-1) the un-parser (`71efa09`; A19 docs `d13d17e`),
-    atop the 8g fixed-point (A18 docs `7054145` + feat `41f00fa`; refresh `8811b33`). The 8/N codegen
-    chain below: (8f-2/8f-3) snc llvm lowers the full compiler (`59c30a7` A17 + `67fa808`) · (8f-1)
+    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): refresh ... 0.3 paste-block` commit, atop
+    the **ADR 0045 A21** docs (`749d32a` — Bar B opened + `print`) + the `print` feat (`391ae58`). Below:
+    the **A20** path-(a) commit (`6355c23` — PATH (a) COMPLETE, the self-hosted merge) + the path-(a)
+    feats (a-4 scg self-merges `d33397c`, a-2/a-3 the self-hosted merge `ef56104`, a-1 the un-parser
+    `71efa09` / A19 docs `d13d17e`), atop the 8g fixed-point (A18 docs `7054145` + feat `41f00fa`). The
+    8/N codegen chain below: (8f-2/8f-3) snc llvm lowers the full compiler (`59c30a7` A17 + `67fa808`) · (8f-1)
     selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e) enums+match (A14/A15) · heap drops
     (A11–A13) · Vec (A9/A10) · 8d refs/builtins · 8c aggregates · 8b control flow · 8a scalars+oracle.
     ADR 0045 is ACCEPTED-shape (amendments A1–A21; Bar B in progress — `print` done, 73/123 emitting); the **bootstrap fixed point is reached via BOTH
