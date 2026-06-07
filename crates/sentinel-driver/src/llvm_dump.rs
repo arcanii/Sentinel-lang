@@ -39,13 +39,13 @@ use std::fmt::Write;
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_resolve::{
-    EnumId, FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
-    PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
-    WRITE_FILE_FN_ID,
+    EnumId, FnId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID,
+    PRINT_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
+    VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
-    Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedMatchArm, TypedPattern,
-    TypedPatternBinding, TypedProgram, TypedStmt, TypedStmtKind,
+    NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedMatchArm,
+    TypedPattern, TypedPatternBinding, TypedProgram, TypedStmt, TypedStmtKind,
 };
 
 /// Hardcoded for a reproducible byte-target (not host inference). `clang`
@@ -496,12 +496,8 @@ impl Emit<'_> {
                 Ok(format!("%v{v}"))
             }
             TypedExprKind::Cmp(op, lhs, rhs) => {
-                if lhs.ty.is_nullable() || rhs.ty.is_nullable() {
-                    return Err("nullable comparison (deferred)".into());
-                }
                 let l = self.lower_expr(lhs)?;
                 let r = self.lower_expr(rhs)?;
-                let llty = llvm_ty(lhs.ty)?;
                 let is_unsigned = matches!(lhs.ty, Type::U8);
                 let pred = match op {
                     CmpOp::Eq => "eq",
@@ -511,6 +507,21 @@ impl Emit<'_> {
                     CmpOp::Gt => if is_unsigned { "ugt" } else { "sgt" },
                     CmpOp::Ge => if is_unsigned { "uge" } else { "sge" },
                 };
+                // ADR 0014 D7: `x == null` / `x != null` (the only type-legal nullable
+                // comparisons) compare the i1 discriminators, not the payloads. Extract
+                // the valid bit (field 0) from each side and `icmp` those.
+                if lhs.ty.is_nullable() || rhs.ty.is_nullable() {
+                    let lty = llvm_ty(lhs.ty)?;
+                    let rty = llvm_ty(rhs.ty)?;
+                    let lv = self.fresh();
+                    writeln!(self.body, "  %v{lv} = extractvalue {lty} {l}, 0").unwrap();
+                    let rv = self.fresh();
+                    writeln!(self.body, "  %v{rv} = extractvalue {rty} {r}, 0").unwrap();
+                    let v = self.fresh();
+                    writeln!(self.body, "  %v{v} = icmp {pred} i1 %v{lv}, %v{rv}").unwrap();
+                    return Ok(format!("%v{v}"));
+                }
+                let llty = llvm_ty(lhs.ty)?;
                 let v = self.fresh();
                 writeln!(self.body, "  %v{v} = icmp {pred} {llty} {l}, {r}").unwrap();
                 Ok(format!("%v{v}"))
@@ -678,6 +689,44 @@ impl Emit<'_> {
             // `_` wildcard (or `unreachable`) as the final else.
             TypedExprKind::Match { scrutinee, enum_id, arms } => {
                 self.lower_match(scrutinee, *enum_id, arms, expr.ty)
+            }
+            // `null` (ADR 0014 D2) is the constant `{ i1 0, <zero payload> }` — a
+            // constant aggregate operand (no instruction), mirroring inkwell's
+            // `const_named_struct`. `?primitive` zeroes its payload (`iN 0`);
+            // `?Struct`/`?GI` (heap-indirected) use a null pointer.
+            TypedExprKind::NullLit => {
+                let inner = match expr.ty {
+                    Type::Nullable(ni) => ni,
+                    _ => return Err("NullLit type is not nullable".into()),
+                };
+                let payload = match inner {
+                    NullableInner::Struct(_) | NullableInner::GenericInstance(_) => {
+                        "ptr null".to_string()
+                    }
+                    _ => format!("{} 0", llvm_ty(inner.to_type())?),
+                };
+                Ok(format!("{{ i1 0, {payload} }}"))
+            }
+            // `T → ?T` widening (ADR 0014 D3): wrap the inner value as `{ i1 1, T }`
+            // via an `insertvalue` chain from `undef` (mirroring inkwell
+            // `build_insert_value`). The `?Struct`/`?GI` heap-box path (alloc + store +
+            // pointer payload) is unexercised by the corpus → deferred with an Err.
+            TypedExprKind::WidenToNullable(inner) => {
+                let ni = match expr.ty {
+                    Type::Nullable(ni) => ni,
+                    _ => return Err("WidenToNullable type is not nullable".into()),
+                };
+                if matches!(ni, NullableInner::Struct(_) | NullableInner::GenericInstance(_)) {
+                    return Err("widen-to-nullable of a struct/generic payload (heap-box) deferred".into());
+                }
+                let sty = llvm_ty(expr.ty)?;
+                let pty = llvm_ty(inner.ty)?;
+                let payload = self.lower_expr(inner)?;
+                let a0 = self.fresh();
+                writeln!(self.body, "  %v{a0} = insertvalue {sty} undef, i1 1, 0").unwrap();
+                let a1 = self.fresh();
+                writeln!(self.body, "  %v{a1} = insertvalue {sty} %v{a0}, {pty} {payload}, 1").unwrap();
+                Ok(format!("%v{a1}"))
             }
             _ => Err("expression not yet ported (straight-line 8a only)".into()),
         }
@@ -1057,6 +1106,31 @@ impl Emit<'_> {
             writeln!(self.body, "  %v{v} = extractvalue {aggty} {arr}, 0").unwrap();
             return Ok(format!("%v{v}"));
         }
+        // is_some(x: ?T) -> bool (Bar B / ADR 0014 D9): extract the i1 valid bit
+        // (field 0) of the `{ i1, T }` nullable struct. Inline, no runtime symbol.
+        if id == IS_SOME_FN_ID {
+            let x = self.lower_expr(&args[0])?;
+            let nty = llvm_ty(args[0].ty)?;
+            let v = self.fresh();
+            writeln!(self.body, "  %v{v} = extractvalue {nty} {x}, 0").unwrap();
+            return Ok(format!("%v{v}"));
+        }
+        // unwrap_or(x: ?T, default: T) -> T (Bar B / ADR 0014 D9): extract the valid
+        // bit + payload, then `select` between the payload (valid) and the default
+        // (null). `select` (not control flow) since both operands are already eval'd.
+        if id == UNWRAP_OR_FN_ID {
+            let x = self.lower_expr(&args[0])?;
+            let d = self.lower_expr(&args[1])?;
+            let nty = llvm_ty(args[0].ty)?;
+            let pty = llvm_ty(ret_ty)?;
+            let valid = self.fresh();
+            writeln!(self.body, "  %v{valid} = extractvalue {nty} {x}, 0").unwrap();
+            let payload = self.fresh();
+            writeln!(self.body, "  %v{payload} = extractvalue {nty} {x}, 1").unwrap();
+            let v = self.fresh();
+            writeln!(self.body, "  %v{v} = select i1 %v{valid}, {pty} %v{payload}, {pty} {d}").unwrap();
+            return Ok(format!("%v{v}"));
+        }
         // The byte-array runtime builtins (ADR 0033/0035): each decomposes its
         // `[u8]` (`{ i64 len, ptr data }`) arg(s) into the (ptr, len) the C symbol
         // wants and calls it. str_eq → i1; print_bytes/write_file → i64; read_file
@@ -1327,6 +1401,19 @@ fn llvm_ty(ty: Type) -> Result<String, String> {
         // heap-boxed payload struct (`null` for a unit variant). One inline literal
         // for every enum, like `[T]`/`Vec` (the payload type is recovered per variant).
         Type::Enum(_) => Ok("{ i32, ptr }".into()),
+        // A nullable `?T` (ADR 0014 D2 / ADR 0015 D11) is `{ i1 valid, <payload> }`.
+        // The layout is inner-dependent (mirroring inkwell `llvm_basic_type`,
+        // lib.rs:1623): `?primitive` stays inline (`{ i1, T }`), while `?Struct` /
+        // `?GenericInstance` heap-indirect (`{ i1, ptr }`) — which is what breaks a
+        // recursive `struct Node { next: ?Node }` cycle (the cycle goes through a
+        // pointer-sized field). `?Ref` recurses to `ptr` too (a ref IS a pointer).
+        Type::Nullable(inner) => {
+            let payload = match inner {
+                NullableInner::Struct(_) | NullableInner::GenericInstance(_) => "ptr".to_string(),
+                _ => llvm_ty(inner.to_type())?,
+            };
+            Ok(format!("{{ i1, {payload} }}"))
+        }
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
     }
 }

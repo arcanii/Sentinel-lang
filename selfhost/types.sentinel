@@ -2308,6 +2308,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0
             };
             mir_widen(c, w, exp);
+            cg_widen(c, w, exp);
             widen_post(out, w, exp, 0, c)
         },
         Expr::Bool(bv) => {
@@ -2344,6 +2345,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0
             };
             mir_widen(c, w, exp);
+            cg_widen(c, w, exp);
             widen_post(out, w, exp, 2, c)
         },
         // (4c-3) `null` carries no syntactic type; its type IS the expectation `exp`
@@ -2356,6 +2358,15 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_opaque0(c, mc, exp);
                 (*c).lastval = d;
+                0
+            } else {
+                0
+            };
+            // (Bar B) codegen: `null` is a `{ i1 0, <zero> }` constant operand (kind 3),
+            // keyed by `exp`'s inner type (a `?T` from the let/field/cmp/branch context).
+            if cg_on(c) {
+                (*c).cglk = 3;
+                (*c).cglv = nullable_inner_of(c, exp);
                 0
             } else {
                 0
@@ -2412,6 +2423,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0
             };
             mir_widen(c, w, exp);
+            cg_widen(c, w, exp);
             widen_post(out, w, exp, ty, c)
         },
         Expr::Unary(uop, inner) => {
@@ -2833,7 +2845,18 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                             "sge"
                         }
                     };
-                    cg_cmp(c, prd, lt, cglk0, cglv0, cgrk, cgrv);
+                    // (Bar B) a nullable operand (`x == null`) compares the i1 valid
+                    // bits, not the payloads (only eq/ne are type-legal → `prd` fits).
+                    let cmp_ln: bool = cg_is_nullable(c, lt);
+                    let cmp_rn: bool = cg_is_nullable(c, rt);
+                    let cmp_null: bool = cmp_ln || cmp_rn;
+                    if cmp_null {
+                        cg_cmp_null(c, prd, lt, rt, cglk0, cglv0, cgrk, cgrv);
+                        0
+                    } else {
+                        cg_cmp(c, prd, lt, cglk0, cglv0, cgrk, cgrv);
+                        0
+                    };
                     0
                 } else {
                     // bop 14/15: && / || — the rhs walked into the rhs block (forked
@@ -2882,10 +2905,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             let bw: bool = if mir_on(c) {
                 widen_kind(c, exp, resty) != 0
+            } else if cg_on(c) {
+                widen_kind(c, exp, resty) != 0
             } else {
                 false
             };
             mir_widen(c, bw, exp);
+            cg_widen(c, bw, exp);
             widen_splice(out, tmp, exp, resty, c)
         },
         Expr::If(cnd, thn, els) => {
@@ -3271,6 +3297,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0
             };
             mir_widen(c, w, exp);
+            cg_widen(c, w, exp);
             widen_post(out, w, exp, 0, c)
         },
         // (4c-1) struct literal — positional field VALUES in declaration order
@@ -4069,6 +4096,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0
             };
             mir_widen(c, w, exp);
+            cg_widen(c, w, exp);
             widen_post(out, w, exp, 3, c)
         },
         // (4i) string literal `"…"` → `(str b0 b1 … :[u8])` (the decoded bytes, ADR 0033
@@ -4116,6 +4144,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0
             };
             mir_widen(c, w, exp);
+            cg_widen(c, w, exp);
             widen_post(out, w, exp, saty, c)
         },
         // (4i) `scope concurrent { block }` → `(scope <block :T> :T)`: the scope's value
@@ -7161,6 +7190,15 @@ fn cg_is_vec(c: &mut TyCtx, h: i64) -> bool {
     }
 }
 
+// (Bar B) true iff `h` is a nullable `?T` (interner kind 4).
+fn cg_is_nullable(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        (*c).tk[h - tbase()] == 4
+    }
+}
+
 fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
     if h == 0 {
         cgo_str(c, "i64")
@@ -7188,6 +7226,17 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
             cgo_str(c, "{ i64, i64, ptr }")
         } else if enum_of_handle(c, h) >= 0 {
             cgo_str(c, "{ i32, ptr }")
+        } else if cg_is_nullable(c, h) {
+            // (Bar B) `?T` = `{ i1 valid, <payload> }` — inner-dependent: `?Struct`
+            // heap-indirects (`{ i1, ptr }`), `?primitive` stays inline (`{ i1, T }`).
+            cgo_str(c, "{ i1, ");
+            let nin: i64 = nullable_inner_of(c, h);
+            if struct_of_handle(c, nin) >= 0 {
+                cgo_str(c, "ptr")
+            } else {
+                cgo_ty(c, nin)
+            };
+            cgo_str(c, " }")
         } else {
             cgo_str(c, "i64")
         }
@@ -7219,6 +7268,17 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
             append_str(out, "{ i64, i64, ptr }")
         } else if enum_of_handle(c, h) >= 0 {
             append_str(out, "{ i32, ptr }")
+        } else if cg_is_nullable(c, h) {
+            // (Bar B) `?T` = `{ i1, <payload> }` (mirrors `cgo_ty`); a Pass-0 struct
+            // field of nullable type lands here (`struct Node { next: ?Node }`).
+            append_str(out, "{ i1, ");
+            let nin: i64 = nullable_inner_of(c, h);
+            if struct_of_handle(c, nin) >= 0 {
+                append_str(out, "ptr")
+            } else {
+                ll_type_to(out, c, nin)
+            };
+            append_str(out, " }")
         } else {
             append_str(out, "i64")
         }
@@ -7276,16 +7336,28 @@ fn cg_pass0(out: &mut Vec<u8>, c: &mut TyCtx) -> i64 {
     0
 }
 
-// an operand: a register `%vN` (kind 0), an integer literal (kind 1), or (8d-Vec)
-// the empty-`Vec` constant (kind 2 — `vec_new()`'s value, the same for every elem).
+// an operand: a register `%vN` (kind 0), an integer literal (kind 1), (8d-Vec) the
+// empty-`Vec` constant (kind 2 — `vec_new()`'s value, the same for every elem), or
+// (Bar B) a `null` constant (kind 3 — `{ i1 0, <zero> }`, `val` = the inner type).
 fn cgo_operand(c: &mut TyCtx, kind: i64, val: i64) -> i64 {
     if kind == 0 {
         cgo_str(c, "%v");
         cgo_int(c, val)
     } else if kind == 1 {
         cgo_int(c, val)
-    } else {
+    } else if kind == 2 {
         cgo_str(c, "{ i64 0, i64 0, ptr null }")
+    } else {
+        // kind 3: `null` = `{ i1 0, <zero payload> }`. `?Struct` zeroes a pointer;
+        // `?primitive` zeroes its inline scalar.
+        cgo_str(c, "{ i1 0, ");
+        if struct_of_handle(c, val) >= 0 {
+            cgo_str(c, "ptr null")
+        } else {
+            cgo_ty(c, val);
+            cgo_str(c, " 0")
+        };
+        cgo_str(c, " }")
     }
 }
 
@@ -7333,6 +7405,24 @@ fn cg_cmp(c: &mut TyCtx, pred: [u8], ty: i64, lk: i64, lv: i64, rk: i64, rv: i64
     cgo_operand(c, lk, lv);
     cgo_str(c, ", ");
     cgo_operand(c, rk, rv);
+    cg_putc(c, '\n');
+    cg_reg(c, d);
+    d
+}
+
+// (Bar B) `x == null` / `x != null` (ADR 0014 D7): extract the i1 valid bit (field 0)
+// of each `?T` operand, then `icmp <pred> i1` those — the discriminators, not the
+// payloads. `lty`/`rty` are the operands' nullable types (`{ i1, T }`).
+fn cg_cmp_null(c: &mut TyCtx, pred: [u8], lty: i64, rty: i64, lk: i64, lv: i64, rk: i64, rv: i64) -> i64 {
+    let a: i64 = cg_extract(c, lty, lk, lv, 0);
+    let b: i64 = cg_extract(c, rty, rk, rv, 0);
+    let d: i64 = cg_dst(c);
+    cgo_str(c, "icmp ");
+    cgo_str(c, pred);
+    cgo_str(c, " i1 %v");
+    cgo_int(c, a);
+    cgo_str(c, ", %v");
+    cgo_int(c, b);
     cg_putc(c, '\n');
     cg_reg(c, d);
     d
@@ -7819,6 +7909,37 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_str(c, ", 0\n");
         cg_reg(c, ld);
         0
+    } else if fid == 2 {
+        // (Bar B) is_some(x: ?T) -> bool = extractvalue { i1, T } <x>, 0 (the valid bit).
+        let nul_xk: i64 = (*c).cgak[snap];
+        let nul_xv: i64 = (*c).cgav[snap];
+        let nul_xt: i64 = (*c).cgat[snap];
+        cg_extract(c, nul_xt, nul_xk, nul_xv, 0);
+        0
+    } else if fid == 1 {
+        // (Bar B) unwrap_or(x: ?T, default: T) -> T: extract the valid bit + payload,
+        // then `select` between the payload (valid) and the default (null). `rty` = T.
+        let uor_xk: i64 = (*c).cgak[snap];
+        let uor_xv: i64 = (*c).cgav[snap];
+        let uor_xt: i64 = (*c).cgat[snap];
+        let uor_dk: i64 = (*c).cgak[snap + 1];
+        let uor_dv: i64 = (*c).cgav[snap + 1];
+        let uor_vld: i64 = cg_extract(c, uor_xt, uor_xk, uor_xv, 0);
+        let uor_pay: i64 = cg_extract(c, uor_xt, uor_xk, uor_xv, 1);
+        let uor_sel: i64 = cg_dst(c);
+        cgo_str(c, "select i1 %v");
+        cgo_int(c, uor_vld);
+        cgo_str(c, ", ");
+        cgo_ty(c, rty);
+        cgo_str(c, " %v");
+        cgo_int(c, uor_pay);
+        cgo_str(c, ", ");
+        cgo_ty(c, rty);
+        cg_putc(c, ' ');
+        cgo_operand(c, uor_dk, uor_dv);
+        cg_putc(c, '\n');
+        cg_reg(c, uor_sel);
+        0
     } else if fid == 4 {
         // (8d) str_eq(a, b): decompose each [u8], call sentinel_str_eq -> i1.
         let s_ak: i64 = (*c).cgak[snap];
@@ -8247,7 +8368,8 @@ fn cg_extract(c: &mut TyCtx, tyh: i64, opk: i64, opv: i64, idx: i64) -> i64 {
     cgo_str(c, ", ");
     cgo_int(c, idx);
     cg_putc(c, '\n');
-    cg_reg(c, d)
+    cg_reg(c, d);
+    d
 }
 
 // (8c-1) emit a struct literal's `insertvalue` chain over the field operands
@@ -8689,6 +8811,48 @@ fn mir_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
             let d: i64 = mir_emit_va(c, mc, 7, 0, snap, exp);
             (*c).lastval = d;
             0
+        } else {
+            0
+        };
+        0
+    } else {
+        0
+    };
+    0
+}
+
+// (Bar B) codegen counterpart to `mir_widen`: when a node widened to `exp` and `exp`
+// is a nullable `?T` (kind 4), wrap the threaded operand into `{ i1 1, <op> }` via an
+// `insertvalue` chain (mirrors the oracle's WidenToNullable). A `secret` widen (`w`
+// true, but `exp` is kind 3) is value-level identity → no-op. The `?Struct`/`?GI`
+// heap-box widen is unexercised (the corpus only widens primitives, and reaches
+// `?Struct` via `null`), so the inline-payload chain suffices.
+fn cg_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
+    if cg_on(c) {
+        if w {
+            if cg_is_nullable(c, exp) {
+                let ik: i64 = (*c).cglk;
+                let iv: i64 = (*c).cglv;
+                let nin: i64 = nullable_inner_of(c, exp);
+                let a0: i64 = cg_dst(c);
+                cgo_str(c, "insertvalue ");
+                cgo_ty(c, exp);
+                cgo_str(c, " undef, i1 1, 0\n");
+                let a1: i64 = cg_dst(c);
+                cgo_str(c, "insertvalue ");
+                cgo_ty(c, exp);
+                cgo_str(c, " %v");
+                cgo_int(c, a0);
+                cgo_str(c, ", ");
+                cgo_ty(c, nin);
+                cg_putc(c, ' ');
+                cgo_operand(c, ik, iv);
+                cgo_str(c, ", 1\n");
+                cg_reg(c, a1);
+                0
+            } else {
+                0
+            }
         } else {
             0
         };
