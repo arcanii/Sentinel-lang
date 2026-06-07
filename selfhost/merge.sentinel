@@ -1,0 +1,931 @@
+// selfhost/merge.sentinel — path (a), the Sentinel un-parser (ADR 0045 (8g)).
+//
+// To self-host the D.6 module merge, `scg` must turn a parsed program back into
+// re-parseable source (the merge then qualifies names + concatenates modules).
+// This is the Sentinel port of the Rust `crates/sentinel-driver/src/source_dump.rs`,
+// reusing the parser's AST enums + parse fns + the consuming-walk structure of the
+// parser's own `dump_*` (which already emit a (different) text from the AST).
+//
+// (a-1): the un-parser core — `fn` decls + the full expr/stmt/type grammar — emitting
+// SOURCE (not the `snc ast` S-expr). Validated by round-trip: `snc llvm` on the
+// un-parsed source == `snc llvm` on the original. Parens are AST-transparent, so every
+// compound expression is wrapped — preserving precedence + sidestepping positional
+// ambiguity — EXCEPT `if`/`while`/fn-body blocks, which must stay literal `{ … }`
+// (emitted raw via `emit_block_raw`). Decls (structs/enums) + the per-module rename +
+// BFS discovery land in (a-1b)…(a-4).
+
+use parser::Expr;
+use parser::Stmt;
+use parser::Stmts;
+use parser::TypeE;
+use parser::TyArgs;
+use parser::TyOpt;
+use parser::Args;
+use parser::Fields;
+use parser::Arms;
+use parser::Pattern;
+use parser::Binds;
+use parser::HArms;
+use parser::Ret;
+use parser::Params;
+use parser::tokenize;
+use parser::parse_block;
+use parser::parse_type;
+use parser::parse_params;
+use parser::skip_type_params;
+use parser::skip_effect_row;
+use parser::append_int;
+use parser::append_str;
+use parser::append_slice;
+
+// --- byte/literal encoding ---------------------------------------------------
+
+fn hexdigit(d: i64) -> u8 {
+    if d < 10 {
+        i64_to_u8(48 + d)
+    } else {
+        i64_to_u8(65 + d - 10)
+    }
+}
+
+// Emit one decoded byte into a string/char literal body so the parser decodes it
+// back to the same byte (ADR 0033 D2): `\\` / the delimiter escaped, a bare
+// printable ASCII byte verbatim, else `\xHH`.
+fn emit_byte_esc(out: &mut Vec<u8>, b: i64, delim: i64) -> i64 {
+    if b == 92 {
+        push(out, '\\');
+        push(out, '\\');
+        0
+    } else if b == delim {
+        push(out, '\\');
+        push(out, i64_to_u8(delim));
+        0
+    } else if b >= 32 && b <= 126 {
+        push(out, i64_to_u8(b));
+        0
+    } else {
+        push(out, '\\');
+        push(out, 'x');
+        push(out, hexdigit(b / 16));
+        push(out, hexdigit(b - (b / 16) * 16));
+        0
+    }
+}
+
+// Consume a string literal's bytes, emitting the `"…"` body (escaped).
+fn emit_str_body(out: &mut Vec<u8>, sb: [u8]) -> i64 {
+    let n: i64 = len(sb);
+    let mut i: i64 = 0;
+    while i < n {
+        emit_byte_esc(out, u8_to_i64(sb[i]), 34);
+        i = i + 1;
+    }
+    0
+}
+
+// --- types -------------------------------------------------------------------
+
+fn emit_type(out: &mut Vec<u8>, ty: TypeE) -> i64 {
+    match ty {
+        TypeE::TIdent(nm) => {
+            append_str(out, nm);
+            0
+        },
+        TypeE::TNullable(inner) => {
+            push(out, '?');
+            emit_type(out, inner);
+            0
+        },
+        TypeE::TArray(inner) => {
+            push(out, '[');
+            emit_type(out, inner);
+            push(out, ']');
+            0
+        },
+        TypeE::TRef(inner) => {
+            push(out, '&');
+            emit_type(out, inner);
+            0
+        },
+        TypeE::TRefMut(inner) => {
+            append_str(out, "&mut ");
+            emit_type(out, inner);
+            0
+        },
+        TypeE::TSecret(inner) => {
+            append_str(out, "secret ");
+            emit_type(out, inner);
+            0
+        },
+        TypeE::TGeneric(gn, ga) => {
+            append_str(out, gn);
+            push(out, '<');
+            emit_targs(out, ga);
+            push(out, '>');
+            0
+        },
+    }
+}
+
+fn emit_targs(out: &mut Vec<u8>, a: TyArgs) -> i64 {
+    match a {
+        TyArgs::TAEnd => 0,
+        TyArgs::TACell(h, t) => {
+            emit_type(out, h);
+            emit_targs_rest(out, t);
+            0
+        },
+    }
+}
+
+fn emit_targs_rest(out: &mut Vec<u8>, a: TyArgs) -> i64 {
+    match a {
+        TyArgs::TAEnd => 0,
+        TyArgs::TACell(h, t) => {
+            append_str(out, ", ");
+            emit_type(out, h);
+            emit_targs_rest(out, t);
+            0
+        },
+    }
+}
+
+fn emit_tyopt(out: &mut Vec<u8>, ty: TyOpt) -> i64 {
+    match ty {
+        TyOpt::NoTy => 0,
+        TyOpt::SomeTy(t) => {
+            append_str(out, ": ");
+            emit_type(out, t);
+            0
+        },
+    }
+}
+
+// --- operator symbols --------------------------------------------------------
+
+fn unary_sym(uop: i64) -> [u8] {
+    if uop == 1 {
+        "-"
+    } else if uop == 2 {
+        "!"
+    } else if uop == 3 {
+        "*"
+    } else if uop == 4 {
+        "&"
+    } else {
+        "&mut"
+    }
+}
+
+fn binary_sym(bop: i64) -> [u8] {
+    if bop == 1 {
+        "+"
+    } else if bop == 2 {
+        "-"
+    } else if bop == 3 {
+        "*"
+    } else if bop == 4 {
+        "/"
+    } else if bop == 5 {
+        "&"
+    } else if bop == 6 {
+        "|"
+    } else if bop == 7 {
+        "^"
+    } else if bop == 8 {
+        "=="
+    } else if bop == 9 {
+        "!="
+    } else if bop == 10 {
+        "<"
+    } else if bop == 11 {
+        "<="
+    } else if bop == 12 {
+        ">"
+    } else if bop == 13 {
+        ">="
+    } else if bop == 14 {
+        "&&"
+    } else {
+        "||"
+    }
+}
+
+// --- expressions -------------------------------------------------------------
+
+// Emit a block expression as a literal `{ <stmts> <tail> }` (NO surrounding
+// parens) — for `if`/`while`/fn bodies, where the parser requires a brace block.
+fn emit_block_raw(out: &mut Vec<u8>, ex: Expr) -> i64 {
+    match ex {
+        Expr::Block(bs, bt) => {
+            push(out, '{');
+            emit_stmts(out, bs);
+            push(out, ' ');
+            emit_expr(out, bt);
+            append_str(out, " }");
+            0
+        },
+        _ => {
+            append_str(out, "{ 0 }");
+            0
+        },
+    }
+}
+
+// Emit `ex`, wrapping every COMPOUND node in `( … )` so the surface form round-trips
+// to the identical AST regardless of precedence/position (parens leave no AST trace).
+// Atoms emit bare.
+fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
+    match ex {
+        Expr::Int(nv) => {
+            append_int(out, nv);
+            0
+        },
+        Expr::Bool(bv) => {
+            let blit: [u8] = if bv {
+                "true"
+            } else {
+                "false"
+            };
+            append_str(out, blit);
+            0
+        },
+        Expr::Null => {
+            append_str(out, "null");
+            0
+        },
+        Expr::Char(cv) => {
+            push(out, '\'');
+            emit_byte_esc(out, cv, 39);
+            push(out, '\'');
+            0
+        },
+        Expr::Str(sb) => {
+            push(out, '"');
+            emit_str_body(out, sb);
+            push(out, '"');
+            0
+        },
+        Expr::Var(nm) => {
+            append_str(out, nm);
+            0
+        },
+        Expr::Unary(uop, inner) => {
+            push(out, '(');
+            append_str(out, unary_sym(uop));
+            push(out, ' ');
+            emit_expr(out, inner);
+            push(out, ')');
+            0
+        },
+        Expr::Binary(bop, l, r) => {
+            push(out, '(');
+            emit_expr(out, l);
+            push(out, ' ');
+            append_str(out, binary_sym(bop));
+            push(out, ' ');
+            emit_expr(out, r);
+            push(out, ')');
+            0
+        },
+        Expr::Call(cn, ca) => {
+            push(out, '(');
+            append_str(out, cn);
+            push(out, '(');
+            emit_args(out, ca);
+            push(out, ')');
+            push(out, ')');
+            0
+        },
+        Expr::Method(mt, mn, ma) => {
+            push(out, '(');
+            emit_expr(out, mt);
+            push(out, '.');
+            append_str(out, mn);
+            push(out, '(');
+            emit_args(out, ma);
+            push(out, ')');
+            push(out, ')');
+            0
+        },
+        Expr::Field(ft, fdn) => {
+            push(out, '(');
+            emit_expr(out, ft);
+            push(out, '.');
+            append_str(out, fdn);
+            push(out, ')');
+            0
+        },
+        Expr::Index(it, ii) => {
+            push(out, '(');
+            emit_expr(out, it);
+            push(out, '[');
+            emit_expr(out, ii);
+            push(out, ']');
+            push(out, ')');
+            0
+        },
+        Expr::Qcall(qi, qm, qa) => {
+            push(out, '(');
+            append_str(out, qi);
+            append_str(out, "::");
+            append_str(out, qm);
+            emit_qcall_args(out, qa);
+            push(out, ')');
+            0
+        },
+        Expr::ClassInit(ci, cia) => {
+            push(out, '(');
+            append_str(out, ci);
+            append_str(out, "::init(");
+            emit_args(out, cia);
+            push(out, ')');
+            push(out, ')');
+            0
+        },
+        Expr::Array(ae) => {
+            push(out, '(');
+            push(out, '[');
+            emit_args(out, ae);
+            push(out, ']');
+            push(out, ')');
+            0
+        },
+        Expr::If(ic, it2, ie2) => {
+            push(out, '(');
+            append_str(out, "if ");
+            emit_expr(out, ic);
+            push(out, ' ');
+            emit_block_raw(out, it2);
+            append_str(out, " else ");
+            emit_block_raw(out, ie2);
+            push(out, ')');
+            0
+        },
+        Expr::Block(bs, bt) => {
+            push(out, '(');
+            push(out, '{');
+            emit_stmts(out, bs);
+            push(out, ' ');
+            emit_expr(out, bt);
+            append_str(out, " }");
+            push(out, ')');
+            0
+        },
+        Expr::SynthZero => {
+            push(out, '0');
+            0
+        },
+        Expr::Match(mscr, marms) => {
+            push(out, '(');
+            append_str(out, "match ");
+            emit_expr(out, mscr);
+            append_str(out, " { ");
+            emit_arms(out, marms);
+            append_str(out, " }");
+            push(out, ')');
+            0
+        },
+        Expr::StructLit(sn, sf) => {
+            push(out, '(');
+            append_str(out, sn);
+            append_str(out, " { ");
+            emit_fields(out, sf);
+            append_str(out, " }");
+            push(out, ')');
+            0
+        },
+        Expr::Declassify(di) => {
+            push(out, '(');
+            append_str(out, "declassify(");
+            emit_expr(out, di);
+            push(out, ')');
+            push(out, ')');
+            0
+        },
+        Expr::Perform(pe, po, pa) => {
+            push(out, '(');
+            append_str(out, "perform ");
+            append_str(out, pe);
+            push(out, '.');
+            append_str(out, po);
+            push(out, '(');
+            emit_args(out, pa);
+            push(out, ')');
+            push(out, ')');
+            0
+        },
+        Expr::Scope(sb) => {
+            push(out, '(');
+            append_str(out, "scope concurrent ");
+            emit_block_raw(out, sb);
+            push(out, ')');
+            0
+        },
+        Expr::Spawn(sc) => {
+            push(out, '(');
+            append_str(out, "spawn ");
+            emit_expr(out, sc);
+            push(out, ')');
+            0
+        },
+        Expr::Await(aw) => {
+            push(out, '(');
+            emit_expr(out, aw);
+            append_str(out, ".await");
+            push(out, ')');
+            0
+        },
+        Expr::Handle(hb, ha, hr) => {
+            push(out, '(');
+            append_str(out, "handle ");
+            emit_expr(out, hb);
+            append_str(out, " with { ");
+            emit_harms(out, ha);
+            emit_ret(out, hr);
+            append_str(out, " }");
+            push(out, ')');
+            0
+        },
+    }
+}
+
+// Qcall args: a paren-less `Name::Variant` (empty args) stays paren-less (round-trips
+// to empty args); a non-empty list gets `( … )`.
+fn emit_qcall_args(out: &mut Vec<u8>, a: Args) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(h, t) => {
+            push(out, '(');
+            emit_expr(out, h);
+            emit_args_rest(out, t);
+            push(out, ')');
+            0
+        },
+    }
+}
+
+// Comma-separated argument elements (NO surrounding brackets — the caller adds them).
+fn emit_args(out: &mut Vec<u8>, a: Args) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(h, t) => {
+            emit_expr(out, h);
+            emit_args_rest(out, t);
+            0
+        },
+    }
+}
+
+fn emit_args_rest(out: &mut Vec<u8>, a: Args) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(h, t) => {
+            append_str(out, ", ");
+            emit_expr(out, h);
+            emit_args_rest(out, t);
+            0
+        },
+    }
+}
+
+fn emit_fields(out: &mut Vec<u8>, f: Fields) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fv, fr) => {
+            append_str(out, fnm);
+            append_str(out, ": ");
+            emit_expr(out, fv);
+            emit_fields_rest(out, fr);
+            0
+        },
+    }
+}
+
+fn emit_fields_rest(out: &mut Vec<u8>, f: Fields) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fv, fr) => {
+            append_str(out, ", ");
+            append_str(out, fnm);
+            append_str(out, ": ");
+            emit_expr(out, fv);
+            emit_fields_rest(out, fr);
+            0
+        },
+    }
+}
+
+fn emit_arms(out: &mut Vec<u8>, a: Arms) -> i64 {
+    match a {
+        Arms::ArmEnd => 0,
+        Arms::ArmCell(ap, abody, arest) => {
+            emit_pat(out, ap);
+            append_str(out, " => ");
+            emit_expr(out, abody);
+            emit_arms_rest(out, arest);
+            0
+        },
+    }
+}
+
+fn emit_arms_rest(out: &mut Vec<u8>, a: Arms) -> i64 {
+    match a {
+        Arms::ArmEnd => 0,
+        Arms::ArmCell(ap, abody, arest) => {
+            append_str(out, ", ");
+            emit_pat(out, ap);
+            append_str(out, " => ");
+            emit_expr(out, abody);
+            emit_arms_rest(out, arest);
+            0
+        },
+    }
+}
+
+fn emit_pat(out: &mut Vec<u8>, p: Pattern) -> i64 {
+    match p {
+        Pattern::PatWild => {
+            push(out, '_');
+            0
+        },
+        Pattern::PatVariant(pen, pvn, pbs) => {
+            append_str(out, pen);
+            append_str(out, "::");
+            append_str(out, pvn);
+            emit_binds(out, pbs);
+            0
+        },
+    }
+}
+
+// Pattern bindings: a non-empty list gets `( … )`; empty stays bare.
+fn emit_binds(out: &mut Vec<u8>, b: Binds) -> i64 {
+    match b {
+        Binds::BindEnd => 0,
+        Binds::BindCell(bh, bt) => {
+            push(out, '(');
+            append_str(out, bh);
+            emit_binds_rest(out, bt);
+            push(out, ')');
+            0
+        },
+    }
+}
+
+fn emit_binds_rest(out: &mut Vec<u8>, b: Binds) -> i64 {
+    match b {
+        Binds::BindEnd => 0,
+        Binds::BindCell(bh, bt) => {
+            append_str(out, ", ");
+            append_str(out, bh);
+            emit_binds_rest(out, bt);
+            0
+        },
+    }
+}
+
+fn emit_harms(out: &mut Vec<u8>, a: HArms) -> i64 {
+    match a {
+        HArms::HEnd => 0,
+        HArms::HCell(hef, hop, hparams, hbody, hrest) => {
+            append_str(out, hef);
+            push(out, '.');
+            append_str(out, hop);
+            push(out, '(');
+            emit_binds_open(out, hparams);
+            append_str(out, ") => ");
+            emit_expr(out, hbody);
+            append_str(out, ", ");
+            emit_harms(out, hrest);
+            0
+        },
+    }
+}
+
+// Handler-arm params as a bare comma-separated list (the caller adds the parens).
+fn emit_binds_open(out: &mut Vec<u8>, b: Binds) -> i64 {
+    match b {
+        Binds::BindEnd => 0,
+        Binds::BindCell(bh, bt) => {
+            append_str(out, bh);
+            emit_binds_rest(out, bt);
+            0
+        },
+    }
+}
+
+fn emit_ret(out: &mut Vec<u8>, r: Ret) -> i64 {
+    match r {
+        Ret::NoRet => 0,
+        Ret::YesRet(rnm, rbody) => {
+            append_str(out, "return ");
+            append_str(out, rnm);
+            append_str(out, " => ");
+            emit_expr(out, rbody);
+            0
+        },
+    }
+}
+
+// --- statements --------------------------------------------------------------
+
+fn emit_stmts(out: &mut Vec<u8>, st: Stmts) -> i64 {
+    match st {
+        Stmts::SEnd => 0,
+        Stmts::SCell(one, rest) => {
+            push(out, ' ');
+            emit_stmt(out, one);
+            emit_stmts(out, rest);
+            0
+        },
+    }
+}
+
+fn emit_stmt(out: &mut Vec<u8>, s: Stmt) -> i64 {
+    match s {
+        Stmt::SLet(lmf, lnm, lty, lval) => {
+            append_str(out, "let ");
+            if lmf {
+                append_str(out, "mut ");
+                0
+            } else {
+                0
+            };
+            append_str(out, lnm);
+            emit_tyopt(out, lty);
+            append_str(out, " = ");
+            emit_expr(out, lval);
+            push(out, ';');
+            0
+        },
+        Stmt::SAssign(atgt, aval) => {
+            emit_expr(out, atgt);
+            append_str(out, " = ");
+            emit_expr(out, aval);
+            push(out, ';');
+            0
+        },
+        Stmt::SWhile(wcond, wbody) => {
+            append_str(out, "while ");
+            emit_expr(out, wcond);
+            push(out, ' ');
+            emit_block_raw(out, wbody);
+            0
+        },
+        Stmt::SBreak => {
+            append_str(out, "break;");
+            0
+        },
+        Stmt::SContinue => {
+            append_str(out, "continue;");
+            0
+        },
+        Stmt::SExpr(sx) => {
+            emit_expr(out, sx);
+            push(out, ';');
+            0
+        },
+    }
+}
+
+// --- parameters --------------------------------------------------------------
+
+fn emit_param_one(out: &mut Vec<u8>, pm: bool, pn: [u8], pt: TypeE) -> i64 {
+    if pm {
+        append_str(out, "mut ");
+        0
+    } else {
+        0
+    };
+    append_str(out, pn);
+    append_str(out, ": ");
+    emit_type(out, pt);
+    0
+}
+
+fn emit_params(out: &mut Vec<u8>, ps: Params) -> i64 {
+    match ps {
+        Params::PEnd => 0,
+        Params::PCell(pm, pn, pt, rest) => {
+            emit_param_one(out, pm, pn, pt);
+            emit_params_rest(out, rest);
+            0
+        },
+    }
+}
+
+fn emit_params_rest(out: &mut Vec<u8>, ps: Params) -> i64 {
+    match ps {
+        Params::PEnd => 0,
+        Params::PCell(pm, pn, pt, rest) => {
+            append_str(out, ", ");
+            emit_param_one(out, pm, pn, pt);
+            emit_params_rest(out, rest);
+            0
+        },
+    }
+}
+
+// --- top-level fn decl -------------------------------------------------------
+
+// `fn` is at the cursor (any `pub` already consumed). Parses the header + body
+// (mirroring the parser's dump_fn_decl) and emits `fn name(params) -> ret { body }`.
+fn emit_fn_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let name_s: i64 = (*s)[*cur];
+    let name_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    if (*k)[*cur] == 15 {
+        skip_type_params(k, cur)
+    } else {
+        0
+    };
+    *cur = *cur + 1;
+    let params: Params = parse_params(k, s, e, src, cur);
+    *cur = *cur + 1;
+    let rty: TypeE = parse_type(k, s, e, src, cur);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    let body: Expr = parse_block(k, s, e, src, cur);
+    append_str(out, "fn ");
+    append_slice(out, src, name_s, name_e);
+    push(out, '(');
+    emit_params(out, params);
+    append_str(out, ") -> ");
+    emit_type(out, rty);
+    push(out, ' ');
+    emit_block_raw(out, body);
+    0
+}
+
+// --- top-level struct / enum / use decls (a-1b) ------------------------------
+
+// `struct` is at the cursor → `struct Name { f1: t1, f2: t2, }` (trailing comma
+// is accepted on re-parse; generics parsed-and-skipped, as the selfhost structs
+// are non-generic).
+fn emit_struct_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    if (*k)[*cur] == 15 {
+        skip_type_params(k, cur)
+    } else {
+        0
+    };
+    *cur = *cur + 1;
+    append_str(out, "struct ");
+    append_slice(out, src, nm_s, nm_e);
+    append_str(out, " {");
+    emit_struct_fields(out, k, s, e, src, cur);
+    0
+}
+
+fn emit_struct_fields(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        append_str(out, " }");
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        emit_struct_fields(out, k, s, e, src, cur)
+    } else {
+        let fnm_s: i64 = (*s)[*cur];
+        let fnm_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let fty: TypeE = parse_type(k, s, e, src, cur);
+        push(out, ' ');
+        append_slice(out, src, fnm_s, fnm_e);
+        append_str(out, ": ");
+        emit_type(out, fty);
+        push(out, ',');
+        emit_struct_fields(out, k, s, e, src, cur)
+    }
+}
+
+// `enum` is at the cursor → `enum Name { V1, V2(t1, t2), }` (non-generic).
+fn emit_enum_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    append_str(out, "enum ");
+    append_slice(out, src, nm_s, nm_e);
+    append_str(out, " {");
+    emit_variants(out, k, s, e, src, cur);
+    0
+}
+
+fn emit_variants(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        append_str(out, " }");
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        emit_variants(out, k, s, e, src, cur)
+    } else {
+        let vn_s: i64 = (*s)[*cur];
+        let vn_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        push(out, ' ');
+        append_slice(out, src, vn_s, vn_e);
+        if (*k)[*cur] == 4 {
+            *cur = *cur + 1;
+            push(out, '(');
+            emit_payloads(out, k, s, e, src, cur);
+            0
+        } else {
+            0
+        };
+        push(out, ',');
+        emit_variants(out, k, s, e, src, cur)
+    }
+}
+
+fn emit_payloads(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        push(out, ')');
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        emit_payloads(out, k, s, e, src, cur)
+    } else {
+        let pty: TypeE = parse_type(k, s, e, src, cur);
+        emit_type(out, pty);
+        push(out, ',');
+        emit_payloads(out, k, s, e, src, cur)
+    }
+}
+
+// `use` is at the cursor → `use a::b::Item;` (round-tripped verbatim; the merge
+// strips these once it qualifies cross-module names — a later slice).
+fn emit_use_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    append_str(out, "use ");
+    append_slice(out, src, (*s)[*cur], (*e)[*cur]);
+    *cur = *cur + 1;
+    while (*k)[*cur] == 30 {
+        *cur = *cur + 1;
+        append_str(out, "::");
+        append_slice(out, src, (*s)[*cur], (*e)[*cur]);
+        *cur = *cur + 1;
+    }
+    *cur = *cur + 1;
+    push(out, ';');
+    0
+}
+
+// Dispatch one top-level item on its leading token (after an optional `pub`), per
+// the parser's `dump_item` codes: 52 struct / 53 enum / 58 use / else fn. The
+// selfhost sources use no trait/impl/class/effect (54–57), so those are unported.
+fn emit_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    if (*k)[*cur] == 59 {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    let lead: i64 = (*k)[*cur];
+    if lead == 52 {
+        emit_struct_decl(out, k, s, e, src, cur)
+    } else if lead == 53 {
+        emit_enum_decl(out, k, s, e, src, cur)
+    } else if lead == 58 {
+        emit_use_decl(out, k, s, e, src, cur)
+    } else {
+        emit_fn_decl(out, k, s, e, src, cur)
+    }
+}
+
+// --- driver ------------------------------------------------------------------
+
+fn main() -> i64 {
+    let path: [u8] = "input.sentinel";
+    let src: [u8] = read_file(path);
+    let n: i64 = len(src);
+    let mut kinds: Vec<i64> = vec_new();
+    let mut starts: Vec<i64> = vec_new();
+    let mut ends: Vec<i64> = vec_new();
+    tokenize(&src, n, &mut kinds, &mut starts, &mut ends);
+    let ntok: i64 = len(kinds);
+    let mut out: Vec<u8> = vec_new();
+    let mut cur: i64 = 0;
+    while cur < ntok {
+        emit_item(&mut out, &kinds, &starts, &ends, &src, &mut cur);
+        push(&mut out, '\n');
+    }
+    let arr: [u8] = vec_to_array(out);
+    print_bytes(arr);
+    0
+}
