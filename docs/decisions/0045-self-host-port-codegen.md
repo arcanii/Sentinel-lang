@@ -781,6 +781,43 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     impls + effects/handlers + concurrency) for full ~123-corpus parity — or re-scope it deferred and
     declare the port closed (Revisit D7/D10).
 
+- **A21 — BAR B OPENED (full-corpus parity → ADR 0045 ACCEPTED); the `print` builtin landed.** Owner
+  chose to pursue Bar B. The method is the established per-slice lock-step: extend the oracle
+  (`llvm_dump.rs`) + the Sentinel mode-4 cg (`types.sentinel`) for each construct the corpus uses but the
+  selfhost compiler doesn't, **mirroring the inkwell backend** (`crates/sentinel-codegen/src/lib.rs`) for
+  the layout/lowering; validate = the codegen differential (`sentinel_codegen_matches_oracle_on_corpus`,
+  byte + behavioural) + modes 0–3 byte-identical + leaks + four-check; one feat per construct, docs batched.
+  - **✅ `print` (FnId 0)** — `print(i64) -> i64` → `call i64 @sentinel_print(i64 x)` (oracle: a
+    `RuntimeSyms.print` flag + the FnId-0 case in `lower_call` + the declare before print_bytes; Sentinel:
+    `cg_used_print` + the `fid==0` arm in `cg_emit_call`). The emitting set grew **57 → 73** (the 16 print
+    fixtures). Feat `391ae58`.
+  - **🔑 THE REMAINING BAR-B BREAKDOWN** (from `snc llvm` over the corpus — the count is fixtures whose
+    FIRST un-portable construct is this; some overlap):
+    - **effects/handlers — 18 effecting fns + perform/handle/return-arm exprs** (c35/c36/c37). The gate is
+      `dump_fn`'s `if !sig.effect_row.is_empty()` Err (llvm_dump.rs:200) + `lower_expr`'s Perform/Handle.
+      THE HAIRIEST (~2300 lines — kont ABI + the ~765-line shape-detection + the handler machinery).
+      Mirror inkwell's Handle/Perform/ResumeKont lowering. Likely the last + biggest slice.
+    - **nullable `?T` — 4 type + 3 expr** (c14/c15: null lit, widen-to-nullable, `unwrap_or`/`is_some`
+      FnId 1/2). `llvm_ty` needs the `Nullable` layout (inner-dependent: scalar vs heap-payload struct —
+      see inkwell `llvm_basic_type` lib.rs:1623); the Sentinel interner already has nullable kind 4 +
+      `mk_nullable`/`nullable_inner_of`. No table-threading. A clean self-contained next slice.
+    - **secret `secret T` — 6 type + declassify** — STRIP-TO-INNER (a no-op; the value IS the inner). The
+      oracle's `llvm_ty` (a free fn, 31 call sites) needs the secrets table to strip `Type::Secret(id)` →
+      `secrets[id].inner` (`Type::strip_secret(&[SecretData])` exists, sentinel-types lib.rs:793; inkwell
+      strips at llvm_basic_type entry, lib.rs:1599). Cleanest: an `Emit::lty(&self, ty)` that strips via
+      `self.program.secrets` then calls `llvm_ty`, replacing the Emit-context `llvm_ty(` calls; strip
+      inline at the struct-decl loop + `dump_fn` ret. `declassify(e)` → lower `e` (no instruction). The
+      Sentinel `cgo_ty` strips kind-3 → inner similarly.
+    - **generics — 5 generic fns + 2 GenericInstance** (c16/c17) — monomorphization (mono instances +
+      `GenericInstance` struct layout + generic-struct mangling). Gate: `dump_fn`'s
+      `if !sig.type_params.is_empty()` Err (lib.rs:198) + `llvm_ty`'s GenericInstance + `lower_call`'s
+      "generic call" Err. Mirror inkwell's `generic_instances`/mono.
+    - **classes/traits/impls/delegates** (c41/c42/c43/c4_named_impl) — MethodCall + ClassInit +
+      QualifiedCall lowering (dispatch + witness/vtable + init). Mirror inkwell's class/impl codegen.
+    - **concurrency — spawn/scope/await** (c4_go_no_go) + arena routing — the task/scope runtime symbols.
+  - **NEXT (recommended order, easiest→hardest):** nullable → secret(+declassify) → generics → classes →
+    effects/handlers → concurrency → the full-corpus phase-go (8l) → ADR 0045 ACCEPTED.
+
 ## Decision
 
 ### D1. Goal.
