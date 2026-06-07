@@ -164,7 +164,7 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
         } else {
             let mut field_lls = Vec::with_capacity(sd.fields.len());
             for f in &sd.fields {
-                field_lls.push(llvm_ty(f.ty)?);
+                field_lls.push(llvm_ty(f.ty.strip_secret(&program.secrets).0)?);
             }
             writeln!(out, "%Struct.{} = type {{ {} }}", sd.id.0, field_lls.join(", ")).unwrap();
         }
@@ -211,7 +211,7 @@ fn dump_fn(
     let ret_ll = if sig.is_main {
         "i32".to_string()
     } else {
-        llvm_ty(f.return_type)?
+        llvm_ty(f.return_type.strip_secret(&program.secrets).0)?
     };
 
     let mut e = Emit {
@@ -240,7 +240,7 @@ fn dump_fn(
     // production codegen's scope-0 (params) + scope-1 (body) structure.
     e.scopes.push(Vec::new());
     for (i, p) in f.params.iter().enumerate() {
-        let ty = llvm_ty(p.ty)?;
+        let ty = llvm_ty(p.ty.strip_secret(&program.secrets).0)?;
         let slot = e.alloca(&ty);
         writeln!(e.body, "  store {ty} %arg{i}, ptr %v{slot}").unwrap();
         e.slots.insert(p.id, slot);
@@ -272,7 +272,7 @@ fn dump_fn(
         if i > 0 {
             out.push_str(", ");
         }
-        write!(out, "{} %arg{i}", llvm_ty(p.ty)?).unwrap();
+        write!(out, "{} %arg{i}", llvm_ty(p.ty.strip_secret(&program.secrets).0)?).unwrap();
     }
     out.push_str(") {\nentry:\n");
     out.push_str(&e.allocas);
@@ -336,11 +336,21 @@ impl Emit<'_> {
         s
     }
 
+    /// The LLVM type for `ty`, first stripping a top-level `secret T` to its
+    /// inner — `secret` lowers identically to its inner (ADR 0019 D5/D12; the
+    /// constant-time guarantee is the source rejections + the 7/N D5 verifier,
+    /// not a distinct runtime representation). Mirrors inkwell `llvm_basic_type`'s
+    /// entry strip (lib.rs:1598). Used for every type that could carry a `secret`
+    /// qualifier — i.e. all expression/binding/operand types in the body walk.
+    fn lty(&self, ty: Type) -> Result<String, String> {
+        llvm_ty(ty.strip_secret(&self.program.secrets).0)
+    }
+
     fn lower_stmt(&mut self, stmt: &TypedStmt) -> Result<(), String> {
         match &stmt.kind {
             TypedStmtKind::Let { id, ty, value, .. } => {
                 let v = self.lower_expr(value)?;
-                let llty = llvm_ty(*ty)?;
+                let llty = self.lty(*ty)?;
                 let slot = self.alloca(&llty);
                 writeln!(self.body, "  store {llty} {v}, ptr %v{slot}").unwrap();
                 self.slots.insert(*id, slot);
@@ -357,7 +367,7 @@ impl Emit<'_> {
                     // order (its suppressed target walk emits nothing).
                     let slot = *self.slots.get(id).ok_or("assign to an unbound var")?;
                     let v = self.lower_expr(value)?;
-                    let llty = llvm_ty(target.ty)?;
+                    let llty = self.lty(target.ty)?;
                     writeln!(self.body, "  store {llty} {v}, ptr %v{slot}").unwrap();
                     Ok(())
                 }
@@ -367,7 +377,7 @@ impl Emit<'_> {
                 TypedExprKind::Unary(UnaryOp::Deref, _) | TypedExprKind::FieldAccess { .. } => {
                     let ptr = self.lower_lvalue_ptr(target)?;
                     let v = self.lower_expr(value)?;
-                    let llty = llvm_ty(target.ty)?;
+                    let llty = self.lty(target.ty)?;
                     writeln!(self.body, "  store {llty} {v}, ptr {ptr}").unwrap();
                     Ok(())
                 }
@@ -438,14 +448,14 @@ impl Emit<'_> {
             }
             TypedExprKind::Var(id) => {
                 let slot = *self.slots.get(id).ok_or("read of an unbound var")?;
-                let llty = llvm_ty(expr.ty)?;
+                let llty = self.lty(expr.ty)?;
                 let v = self.fresh();
                 writeln!(self.body, "  %v{v} = load {llty}, ptr %v{slot}").unwrap();
                 Ok(format!("%v{v}"))
             }
             TypedExprKind::Unary(UnaryOp::Neg, inner) => {
                 let x = self.lower_expr(inner)?;
-                let llty = llvm_ty(expr.ty)?;
+                let llty = self.lty(expr.ty)?;
                 let v = self.fresh();
                 // LLVM has no int `neg`; inkwell's build_int_neg = `sub 0, x`.
                 writeln!(self.body, "  %v{v} = sub {llty} 0, {x}").unwrap();
@@ -469,7 +479,7 @@ impl Emit<'_> {
                     Type::Ref(id) => self.program.refs[id.0 as usize].inner,
                     _ => return Err("deref of a non-ref (deferred)".into()),
                 };
-                let llty = llvm_ty(pointee)?;
+                let llty = self.lty(pointee)?;
                 let v = self.fresh();
                 writeln!(self.body, "  %v{v} = load {llty}, ptr {ptr}").unwrap();
                 Ok(format!("%v{v}"))
@@ -477,7 +487,7 @@ impl Emit<'_> {
             TypedExprKind::Binary(op, lhs, rhs) => {
                 let l = self.lower_expr(lhs)?;
                 let r = self.lower_expr(rhs)?;
-                let llty = llvm_ty(expr.ty)?;
+                let llty = self.lty(expr.ty)?;
                 // `u8` is unsigned → `/` is `udiv` (ADR 0033 D6); the rest are
                 // sign-agnostic in two's complement.
                 let is_unsigned = matches!(lhs.ty, Type::U8);
@@ -511,8 +521,8 @@ impl Emit<'_> {
                 // comparisons) compare the i1 discriminators, not the payloads. Extract
                 // the valid bit (field 0) from each side and `icmp` those.
                 if lhs.ty.is_nullable() || rhs.ty.is_nullable() {
-                    let lty = llvm_ty(lhs.ty)?;
-                    let rty = llvm_ty(rhs.ty)?;
+                    let lty = self.lty(lhs.ty)?;
+                    let rty = self.lty(rhs.ty)?;
                     let lv = self.fresh();
                     writeln!(self.body, "  %v{lv} = extractvalue {lty} {l}, 0").unwrap();
                     let rv = self.fresh();
@@ -521,7 +531,7 @@ impl Emit<'_> {
                     writeln!(self.body, "  %v{v} = icmp {pred} i1 %v{lv}, %v{rv}").unwrap();
                     return Ok(format!("%v{v}"));
                 }
-                let llty = llvm_ty(lhs.ty)?;
+                let llty = self.lty(lhs.ty)?;
                 let v = self.fresh();
                 writeln!(self.body, "  %v{v} = icmp {pred} {llty} {l}, {r}").unwrap();
                 Ok(format!("%v{v}"))
@@ -542,7 +552,7 @@ impl Emit<'_> {
                 writeln!(self.body, "  br i1 {c}, label %bb{then_b}, label %bb{else_b}").unwrap();
                 writeln!(self.body, "bb{then_b}:").unwrap();
                 let tv = self.lower_block_expr(then_branch)?;
-                let rty = llvm_ty(then_branch.ty)?;
+                let rty = self.lty(then_branch.ty)?;
                 let slot = self.alloca(&rty);
                 writeln!(self.body, "  store {rty} {tv}, ptr %v{slot}").unwrap();
                 writeln!(self.body, "  br label %bb{merge_b}").unwrap();
@@ -593,10 +603,10 @@ impl Emit<'_> {
             // SSA aggregate operand, so `let`/`Var`/param/return handle a struct
             // generically (alloca/store/load of `%Struct.N`) — no GEP needed.
             TypedExprKind::StructLit { fields, .. } => {
-                let sty = llvm_ty(expr.ty)?;
+                let sty = self.lty(expr.ty)?;
                 let mut field_ops = Vec::with_capacity(fields.len());
                 for fv in fields {
-                    let fty = llvm_ty(fv.ty)?;
+                    let fty = self.lty(fv.ty)?;
                     let op = self.lower_expr(fv)?;
                     field_ops.push((fty, op));
                 }
@@ -616,7 +626,7 @@ impl Emit<'_> {
             // nest naturally — the inner access's result is the outer's operand).
             TypedExprKind::FieldAccess { target, field_index, .. } => {
                 let agg = self.lower_expr(target)?;
-                let sty = llvm_ty(target.ty)?;
+                let sty = self.lty(target.ty)?;
                 let v = self.fresh();
                 writeln!(self.body, "  %v{v} = extractvalue {sty} {agg}, {field_index}").unwrap();
                 Ok(format!("%v{v}"))
@@ -628,7 +638,7 @@ impl Emit<'_> {
             // (`getelementptr T, null, n` then `ptrtoint`), correct for any element
             // type incl. structs, without replicating layout/padding.
             TypedExprKind::ArrayLit { elem_ty, elements } => {
-                let ety = llvm_ty(elem_ty.to_type())?;
+                let ety = self.lty(elem_ty.to_type())?;
                 let mut ops = Vec::with_capacity(elements.len());
                 for el in elements {
                     ops.push(self.lower_expr(el)?);
@@ -649,10 +659,10 @@ impl Emit<'_> {
             TypedExprKind::Index { target, index, elem_ty } => {
                 let arr = self.lower_expr(target)?;
                 let idx = self.lower_expr(index)?;
-                let ety = llvm_ty(elem_ty.to_type())?;
+                let ety = self.lty(elem_ty.to_type())?;
                 // `[T]` is `{i64,ptr}` (data field 1); `Vec<T>` is `{i64,i64,ptr}`
                 // (data field 2 — capacity sits between). `len` is field 0 for both.
-                let aggty = llvm_ty(target.ty)?;
+                let aggty = self.lty(target.ty)?;
                 let data_field = if matches!(target.ty, Type::Vec(_)) { 2 } else { 1 };
                 let len = self.fresh();
                 writeln!(self.body, "  %v{len} = extractvalue {aggty} {arr}, 0").unwrap();
@@ -703,7 +713,7 @@ impl Emit<'_> {
                     NullableInner::Struct(_) | NullableInner::GenericInstance(_) => {
                         "ptr null".to_string()
                     }
-                    _ => format!("{} 0", llvm_ty(inner.to_type())?),
+                    _ => format!("{} 0", self.lty(inner.to_type())?),
                 };
                 Ok(format!("{{ i1 0, {payload} }}"))
             }
@@ -719,8 +729,8 @@ impl Emit<'_> {
                 if matches!(ni, NullableInner::Struct(_) | NullableInner::GenericInstance(_)) {
                     return Err("widen-to-nullable of a struct/generic payload (heap-box) deferred".into());
                 }
-                let sty = llvm_ty(expr.ty)?;
-                let pty = llvm_ty(inner.ty)?;
+                let sty = self.lty(expr.ty)?;
+                let pty = self.lty(inner.ty)?;
                 let payload = self.lower_expr(inner)?;
                 let a0 = self.fresh();
                 writeln!(self.body, "  %v{a0} = insertvalue {sty} undef, i1 1, 0").unwrap();
@@ -755,7 +765,7 @@ impl Emit<'_> {
         writeln!(self.body, "  %v{tag} = extractvalue {{ i32, ptr }} {scrut}, 0").unwrap();
         let payload = self.fresh();
         writeln!(self.body, "  %v{payload} = extractvalue {{ i32, ptr }} {scrut}, 1").unwrap();
-        let rty = llvm_ty(result_ty)?;
+        let rty = self.lty(result_ty)?;
         let result = self.alloca(&rty); // hoisted result slot (the if-merge memory cell)
         let merge_b = self.fresh_block();
 
@@ -815,11 +825,11 @@ impl Emit<'_> {
             prog.enum_data(enum_id).variants[variant_index].payloads.clone();
         let mut field_lls = Vec::with_capacity(payload_tys.len());
         for t in &payload_tys {
-            field_lls.push(llvm_ty(*t)?);
+            field_lls.push(self.lty(*t)?);
         }
         let pstruct = format!("{{ {} }}", field_lls.join(", "));
         for (i, b) in bindings.iter().enumerate() {
-            let fty = llvm_ty(b.ty)?;
+            let fty = self.lty(b.ty)?;
             let fp = self.fresh();
             writeln!(self.body, "  %v{fp} = getelementptr {pstruct}, ptr %v{payload}, i32 0, i32 {i}").unwrap();
             let ld = self.fresh();
@@ -852,13 +862,13 @@ impl Emit<'_> {
                 prog.enum_data(enum_id).variants[variant_index].payloads.clone();
             let mut field_lls = Vec::with_capacity(payload_tys.len());
             for t in &payload_tys {
-                field_lls.push(llvm_ty(*t)?);
+                field_lls.push(self.lty(*t)?);
             }
             let pstruct = format!("{{ {} }}", field_lls.join(", "));
             // Lower the args, then build the payload aggregate (declaration order).
             let mut ops = Vec::with_capacity(args.len());
             for a in args {
-                ops.push((llvm_ty(a.ty)?, self.lower_expr(a)?));
+                ops.push((self.lty(a.ty)?, self.lower_expr(a)?));
             }
             let mut agg = "undef".to_string();
             for (i, (fty, op)) in ops.iter().enumerate() {
@@ -900,7 +910,7 @@ impl Emit<'_> {
             // GEP type is the target struct (`%Struct.N`), field `field_index`.
             TypedExprKind::FieldAccess { target, field_index, .. } => {
                 let target_ptr = self.lower_lvalue_ptr(target)?;
-                let struct_ll = llvm_ty(target.ty)?;
+                let struct_ll = self.lty(target.ty)?;
                 let fp = self.fresh();
                 writeln!(
                     self.body,
@@ -1101,7 +1111,7 @@ impl Emit<'_> {
             // `len` works on `[T]` (`{i64,ptr}`) and `Vec<T>` (`{i64,i64,ptr}`) — both
             // put `len` at field 0; use the arg's actual aggregate type.
             let arr = self.lower_expr(&args[0])?;
-            let aggty = llvm_ty(args[0].ty)?;
+            let aggty = self.lty(args[0].ty)?;
             let v = self.fresh();
             writeln!(self.body, "  %v{v} = extractvalue {aggty} {arr}, 0").unwrap();
             return Ok(format!("%v{v}"));
@@ -1110,7 +1120,7 @@ impl Emit<'_> {
         // (field 0) of the `{ i1, T }` nullable struct. Inline, no runtime symbol.
         if id == IS_SOME_FN_ID {
             let x = self.lower_expr(&args[0])?;
-            let nty = llvm_ty(args[0].ty)?;
+            let nty = self.lty(args[0].ty)?;
             let v = self.fresh();
             writeln!(self.body, "  %v{v} = extractvalue {nty} {x}, 0").unwrap();
             return Ok(format!("%v{v}"));
@@ -1121,8 +1131,8 @@ impl Emit<'_> {
         if id == UNWRAP_OR_FN_ID {
             let x = self.lower_expr(&args[0])?;
             let d = self.lower_expr(&args[1])?;
-            let nty = llvm_ty(args[0].ty)?;
-            let pty = llvm_ty(ret_ty)?;
+            let nty = self.lty(args[0].ty)?;
+            let pty = self.lty(ret_ty)?;
             let valid = self.fresh();
             writeln!(self.body, "  %v{valid} = extractvalue {nty} {x}, 0").unwrap();
             let payload = self.fresh();
@@ -1231,7 +1241,7 @@ impl Emit<'_> {
                 Type::Vec(ve) => ve.to_type(),
                 _ => return Err("push/pop is not on a Vec".into()),
             };
-            let ety = llvm_ty(elem)?;
+            let ety = self.lty(elem)?;
             // Lower the args FIRST (push's element next), matching the Sentinel — which
             // collects both call args before emitting — so a side-effecting arg's
             // instructions land before the field GEPs on both backends.
@@ -1323,7 +1333,7 @@ impl Emit<'_> {
                 Type::Vec(ve) => ve.to_type(),
                 _ => return Err("vec_to_array arg is not a Vec".into()),
             };
-            let ety = llvm_ty(elem)?;
+            let ety = self.lty(elem)?;
             let vec_val = self.lower_expr(&args[0])?;
             let len = self.fresh();
             writeln!(self.body, "  %v{len} = extractvalue {{ i64, i64, ptr }} {vec_val}, 0").unwrap();
@@ -1354,12 +1364,12 @@ impl Emit<'_> {
         if !sig.type_params.is_empty() {
             return Err("generic call (deferred to Bar B)".into());
         }
-        let ret = llvm_ty(ret_ty)?;
+        let ret = self.lty(ret_ty)?;
         // Lower args to operands first, then emit the call.
         let mut arg_ops: Vec<(String, String)> = Vec::with_capacity(args.len());
         for a in args {
             let op = self.lower_expr(a)?;
-            arg_ops.push((llvm_ty(a.ty)?, op));
+            arg_ops.push((self.lty(a.ty)?, op));
         }
         let v = self.fresh();
         write!(self.body, "  %v{v} = call {ret} @{}(", sig.name).unwrap();

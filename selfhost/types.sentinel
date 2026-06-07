@@ -7200,13 +7200,18 @@ fn cg_is_nullable(c: &mut TyCtx, h: i64) -> bool {
 }
 
 fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
-    if h == 0 {
+    // (Bar B) strip a top-level `secret T` to its inner FIRST — secret lowers
+    // identically to its inner (ADR 0019 D5/D12); mirrors the oracle's `Emit::lty` /
+    // inkwell's llvm_basic_type entry strip. A stripped primitive (`secret bool` →
+    // `i1`) must route to the scalar arms, so strip BEFORE the dispatch.
+    let hs: i64 = strip_secret(c, h);
+    if hs == 0 {
         cgo_str(c, "i64")
-    } else if h == 1 {
+    } else if hs == 1 {
         cgo_str(c, "i32")
-    } else if h == 2 {
+    } else if hs == 2 {
         cgo_str(c, "i1")
-    } else if h == 3 {
+    } else if hs == 3 {
         cgo_str(c, "i8")
     } else {
         // (8c-1) a user struct is the Pass-0 named aggregate `%Struct.N` (N =
@@ -7214,23 +7219,23 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
         // for every element type). Other compounds (refs/Vec/enum/generic) are
         // later slices → the i64 fallback (their fixtures Err in the oracle and
         // are skipped, so the fallback bytes are never compared).
-        let sid: i64 = struct_of_handle(c, h);
+        let sid: i64 = struct_of_handle(c, hs);
         if sid >= 0 {
             cgo_str(c, "%Struct.");
             cgo_int(c, sid)
-        } else if cg_is_array(c, h) {
+        } else if cg_is_array(c, hs) {
             cgo_str(c, "{ i64, ptr }")
-        } else if cg_is_ref(c, h) {
+        } else if cg_is_ref(c, hs) {
             cgo_str(c, "ptr")
-        } else if cg_is_vec(c, h) {
+        } else if cg_is_vec(c, hs) {
             cgo_str(c, "{ i64, i64, ptr }")
-        } else if enum_of_handle(c, h) >= 0 {
+        } else if enum_of_handle(c, hs) >= 0 {
             cgo_str(c, "{ i32, ptr }")
-        } else if cg_is_nullable(c, h) {
+        } else if cg_is_nullable(c, hs) {
             // (Bar B) `?T` = `{ i1 valid, <payload> }` — inner-dependent: `?Struct`
             // heap-indirects (`{ i1, ptr }`), `?primitive` stays inline (`{ i1, T }`).
             cgo_str(c, "{ i1, ");
-            let nin: i64 = nullable_inner_of(c, h);
+            let nin: i64 = nullable_inner_of(c, hs);
             if struct_of_handle(c, nin) >= 0 {
                 cgo_str(c, "ptr")
             } else {
@@ -7247,32 +7252,35 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
 // writes struct decls into `result`, not the cg buffer, so it can't route through
 // `cgo_ty`/`cg_putc`). Mirrors `cgo_ty`'s mapping exactly.
 fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
-    if h == 0 {
+    // (Bar B) strip a top-level `secret T` first (mirrors `cgo_ty`); a Pass-0 struct
+    // field of `secret` type lands here.
+    let hs: i64 = strip_secret(c, h);
+    if hs == 0 {
         append_str(out, "i64")
-    } else if h == 1 {
+    } else if hs == 1 {
         append_str(out, "i32")
-    } else if h == 2 {
+    } else if hs == 2 {
         append_str(out, "i1")
-    } else if h == 3 {
+    } else if hs == 3 {
         append_str(out, "i8")
     } else {
-        let sid: i64 = struct_of_handle(c, h);
+        let sid: i64 = struct_of_handle(c, hs);
         if sid >= 0 {
             append_str(out, "%Struct.");
             append_int(out, sid)
-        } else if cg_is_array(c, h) {
+        } else if cg_is_array(c, hs) {
             append_str(out, "{ i64, ptr }")
-        } else if cg_is_ref(c, h) {
+        } else if cg_is_ref(c, hs) {
             append_str(out, "ptr")
-        } else if cg_is_vec(c, h) {
+        } else if cg_is_vec(c, hs) {
             append_str(out, "{ i64, i64, ptr }")
-        } else if enum_of_handle(c, h) >= 0 {
+        } else if enum_of_handle(c, hs) >= 0 {
             append_str(out, "{ i32, ptr }")
-        } else if cg_is_nullable(c, h) {
+        } else if cg_is_nullable(c, hs) {
             // (Bar B) `?T` = `{ i1, <payload> }` (mirrors `cgo_ty`); a Pass-0 struct
             // field of nullable type lands here (`struct Node { next: ?Node }`).
             append_str(out, "{ i1, ");
-            let nin: i64 = nullable_inner_of(c, h);
+            let nin: i64 = nullable_inner_of(c, hs);
             if struct_of_handle(c, nin) >= 0 {
                 append_str(out, "ptr")
             } else {
