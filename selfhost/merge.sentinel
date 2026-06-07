@@ -855,19 +855,62 @@ fn emit_fn_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: 
     0
 }
 
+// (Bar B) emit a generic decl's `<T0, T1, ...>` type-params VERBATIM (the names are
+// local — never module-renamed; the Renamer skips in-scope type params). `cur` at `<`
+// (15); ends past the matching `>` (17). The un-parser was generics-unaware (the
+// selfhost sources use none), but a re-emitted generic decl must keep `<T>` so the
+// re-parse infers TypeParam fields/params (else `struct Box<T>` → `struct Box`, and
+// the field `value: T` scans as an unbound `T` → i64).
+fn emit_type_params(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    push(out, '<');
+    *cur = *cur + 1;
+    let mut depth: i64 = 1;
+    while depth > 0 {
+        let t: i64 = (*k)[*cur];
+        if t == 15 {
+            depth = depth + 1;
+            push(out, '<');
+            *cur = *cur + 1;
+            0
+        } else if t == 17 {
+            depth = depth - 1;
+            if depth > 0 {
+                push(out, '>');
+                0
+            } else {
+                0
+            };
+            *cur = *cur + 1;
+            0
+        } else if t == 29 {
+            append_str(out, ", ");
+            *cur = *cur + 1;
+            0
+        } else {
+            let ps: i64 = (*s)[*cur];
+            let pe: i64 = (*e)[*cur];
+            append_slice(out, src, ps, pe);
+            *cur = *cur + 1;
+            0
+        };
+    }
+    push(out, '>');
+    0
+}
+
 fn emit_struct_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     *cur = *cur + 1;
     let nm_s: i64 = (*s)[*cur];
     let nm_e: i64 = (*e)[*cur];
     *cur = *cur + 1;
+    append_str(out, "struct ");
+    emit_name_slice(out, c, src, nm_s, nm_e);
     if (*k)[*cur] == 15 {
-        skip_type_params(k, cur)
+        emit_type_params(out, k, s, e, src, cur)
     } else {
         0
     };
     *cur = *cur + 1;
-    append_str(out, "struct ");
-    emit_name_slice(out, c, src, nm_s, nm_e);
     append_str(out, " {");
     emit_struct_fields(out, c, k, s, e, src, cur);
     0

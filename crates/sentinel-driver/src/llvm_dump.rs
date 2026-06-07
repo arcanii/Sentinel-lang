@@ -39,9 +39,9 @@ use std::fmt::Write;
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_resolve::{
-    EnumId, FnId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID,
-    PRINT_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
-    VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
+    EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID,
+    PRINT_BYTES_FN_ID, PRINT_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID,
+    UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
     NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedMatchArm,
@@ -164,9 +164,37 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
         } else {
             let mut field_lls = Vec::with_capacity(sd.fields.len());
             for f in &sd.fields {
-                field_lls.push(llvm_ty(f.ty.strip_secret(&program.secrets).0)?);
+                field_lls.push(llvm_ty(f.ty, program)?);
             }
             writeln!(out, "%Struct.{} = type {{ {} }}", sd.id.0, field_lls.join(", ")).unwrap();
+        }
+        emitted_struct = true;
+    }
+    // Generic-struct instance decls (Bar B): each CONCRETE instance `Decl<args>` gets
+    // `%<mangled> = type { <substituted field types> }`. Abstract (TypeParam-bearing)
+    // instances — interned for generic-fn signatures like `fst<A,B>(p: Pair<A,B>)` —
+    // have no runtime layout, so they're skipped. The name is structural (order-
+    // independent); the emission order here must match the Sentinel side (both iterate
+    // the instance table; ≤1 concrete instance per corpus fixture today).
+    for inst in &program.generic_instances {
+        if !instance_is_concrete(&inst.args, program) {
+            continue;
+        }
+        let name = mangle_instance(program, inst.struct_id, &inst.args);
+        let decl = program.struct_decl(inst.struct_id);
+        if decl.fields.is_empty() {
+            writeln!(out, "%{name} = type {{}}").unwrap();
+        } else {
+            // Substitute each declared field type by the instance's type-args to get
+            // the concrete LLVM field layout (`Box<i64>`'s `value: T` → `i64`).
+            let mut field_lls = Vec::with_capacity(decl.fields.len());
+            for f in &decl.fields {
+                let mut insts = program.generic_instances.clone();
+                let mut refs = program.refs.clone();
+                let concrete = f.ty.substitute(&inst.args, &mut insts, &mut refs);
+                field_lls.push(llvm_ty(concrete, program)?);
+            }
+            writeln!(out, "%{name} = type {{ {} }}", field_lls.join(", ")).unwrap();
         }
         emitted_struct = true;
     }
@@ -211,7 +239,7 @@ fn dump_fn(
     let ret_ll = if sig.is_main {
         "i32".to_string()
     } else {
-        llvm_ty(f.return_type.strip_secret(&program.secrets).0)?
+        llvm_ty(f.return_type, program)?
     };
 
     let mut e = Emit {
@@ -240,7 +268,7 @@ fn dump_fn(
     // production codegen's scope-0 (params) + scope-1 (body) structure.
     e.scopes.push(Vec::new());
     for (i, p) in f.params.iter().enumerate() {
-        let ty = llvm_ty(p.ty.strip_secret(&program.secrets).0)?;
+        let ty = llvm_ty(p.ty, program)?;
         let slot = e.alloca(&ty);
         writeln!(e.body, "  store {ty} %arg{i}, ptr %v{slot}").unwrap();
         e.slots.insert(p.id, slot);
@@ -272,7 +300,7 @@ fn dump_fn(
         if i > 0 {
             out.push_str(", ");
         }
-        write!(out, "{} %arg{i}", llvm_ty(p.ty.strip_secret(&program.secrets).0)?).unwrap();
+        write!(out, "{} %arg{i}", llvm_ty(p.ty, program)?).unwrap();
     }
     out.push_str(") {\nentry:\n");
     out.push_str(&e.allocas);
@@ -336,14 +364,12 @@ impl Emit<'_> {
         s
     }
 
-    /// The LLVM type for `ty`, first stripping a top-level `secret T` to its
-    /// inner — `secret` lowers identically to its inner (ADR 0019 D5/D12; the
-    /// constant-time guarantee is the source rejections + the 7/N D5 verifier,
-    /// not a distinct runtime representation). Mirrors inkwell `llvm_basic_type`'s
-    /// entry strip (lib.rs:1598). Used for every type that could carry a `secret`
-    /// qualifier — i.e. all expression/binding/operand types in the body walk.
+    /// The LLVM type for `ty` in the body walk — forwards to the program-aware
+    /// `llvm_ty` (which strips a top-level `secret T` and renders `GenericInstance`
+    /// structurally). Used for every expression/binding/operand type, any of which
+    /// may carry a `secret` qualifier or be a generic instance.
     fn lty(&self, ty: Type) -> Result<String, String> {
-        llvm_ty(ty.strip_secret(&self.program.secrets).0)
+        llvm_ty(ty, self.program)
     }
 
     fn lower_stmt(&mut self, stmt: &TypedStmt) -> Result<(), String> {
@@ -1034,6 +1060,38 @@ impl Emit<'_> {
                     self.emit_drop_for_binding(fp, fty)?;
                 }
             }
+            // A generic-struct instance drops like a struct, but its LLVM type is the
+            // structural `%<mangled>` name and its field types are the declared fields
+            // SUBSTITUTED by the instance args (`Holder<[i64]>` → field 0 is `[i64]`).
+            Type::GenericInstance(id) => {
+                let prog = self.program;
+                let inst = prog.generic_instance(id);
+                let struct_id = inst.struct_id;
+                let inst_args = inst.args.clone();
+                let name = mangle_instance(prog, struct_id, &inst_args);
+                let field_tys: Vec<Type> = prog
+                    .struct_decl(struct_id)
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let mut insts = prog.generic_instances.clone();
+                        let mut refs = prog.refs.clone();
+                        f.ty.substitute(&inst_args, &mut insts, &mut refs)
+                    })
+                    .collect();
+                for (idx, &fty) in field_tys.iter().enumerate() {
+                    if !needs_drop(fty, prog) {
+                        continue;
+                    }
+                    let fp = self.fresh();
+                    writeln!(
+                        self.body,
+                        "  %v{fp} = getelementptr %{name}, ptr %v{ptr_reg}, i32 0, i32 {idx}"
+                    )
+                    .unwrap();
+                    self.emit_drop_for_binding(fp, fty)?;
+                }
+            }
             // 8e-1: an enum owns its heap-boxed payload — load `{ i32, ptr }`, and if
             // the payload is non-null, free it. (Box-free-only: a recursive enum's
             // nested boxes are NOT walked — the production's measured D.1b limit.)
@@ -1384,16 +1442,19 @@ impl Emit<'_> {
     }
 }
 
-/// The LLVM type for a Sentinel scalar `Type` (8a subset). Anything else
-/// (structs, arrays, Vec, refs, nullable, secret, …) → `Err`.
-fn llvm_ty(ty: Type) -> Result<String, String> {
+/// The LLVM type for a Sentinel `Type`. Takes `program` for the two type-table-
+/// dependent cases: a top-level `secret T` strips to its inner (ADR 0019 D5/D12),
+/// and a `GenericInstance` renders its structural mangled name (mirroring inkwell's
+/// `llvm_basic_type`, which receives all interner tables). Un-ported types → `Err`.
+fn llvm_ty(ty: Type, program: &TypedProgram) -> Result<String, String> {
+    // `secret T` lowers identically to its inner — strip at entry (ADR 0019 D5/D12).
+    let ty = ty.strip_secret(&program.secrets).0;
     match ty {
         Type::I64 => Ok("i64".into()),
         Type::I32 => Ok("i32".into()),
         Type::U8 => Ok("i8".into()),
         Type::Bool => Ok("i1".into()),
-        // A user struct is the named aggregate declared in Pass 0. (Generic
-        // instances — `Type::GenericInstance` — are Bar B → still Err below.)
+        // A user struct is the named aggregate declared in Pass 0.
         Type::Struct(id) => Ok(format!("%Struct.{}", id.0)),
         // `[T]` is the abi-v1 `{ i64 len, ptr data }` (ADR 0029 §2) — an inline
         // literal struct type, the same for every element type (the data is an
@@ -1420,11 +1481,92 @@ fn llvm_ty(ty: Type) -> Result<String, String> {
         Type::Nullable(inner) => {
             let payload = match inner {
                 NullableInner::Struct(_) | NullableInner::GenericInstance(_) => "ptr".to_string(),
-                _ => llvm_ty(inner.to_type())?,
+                _ => llvm_ty(inner.to_type(), program)?,
             };
             Ok(format!("{{ i1, {payload} }}"))
         }
+        // A generic-struct instance `Decl<args>` lowers like a plain struct, but its
+        // LLVM type is named STRUCTURALLY (`%Decl_arg1_arg2`) not by interner id — the
+        // two type-checkers may intern instances in different orders, so a structural
+        // name is order-independent (mirrors inkwell `mangle_generic_struct_name`).
+        // Declared in Pass 0 with its substituted field layout.
+        Type::GenericInstance(id) => {
+            let inst = &program.generic_instances[id.0 as usize];
+            Ok(format!("%{}", mangle_instance(program, inst.struct_id, &inst.args)))
+        }
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
+    }
+}
+
+/// A structural mangling tag for `ty` (`i64` → `"i64"`, `[i64]` → `"arr_i64"`,
+/// `Pair<i64, bool>` → `"Pair_i64_bool"`). Order-independent (no interner ids), so
+/// both the oracle and the Sentinel side derive the same generic-instance type names
+/// and monomorphic fn symbols. Mirrors inkwell `mangle_type` (lib.rs:2063).
+fn mangle_type(ty: Type, program: &TypedProgram) -> String {
+    match ty {
+        Type::I64 => "i64".into(),
+        Type::I32 => "i32".into(),
+        Type::Bool => "bool".into(),
+        Type::U8 => "u8".into(),
+        Type::Struct(id) => mangle_struct_name(program, id),
+        Type::Nullable(inner) => format!("opt_{}", mangle_type(inner.to_type(), program)),
+        Type::Array(elem) => format!("arr_{}", mangle_type(elem.to_type(), program)),
+        Type::Vec(elem) => format!("vec_{}", mangle_type(elem.to_type(), program)),
+        Type::Ref(id) => {
+            let d = &program.refs[id.0 as usize];
+            let prefix = if d.mutable { "refmut" } else { "ref" };
+            format!("{prefix}_{}", mangle_type(d.inner, program))
+        }
+        Type::Secret(id) => format!("sec_{}", mangle_type(program.secrets[id.0 as usize].inner, program)),
+        Type::GenericInstance(id) => {
+            let inst = &program.generic_instances[id.0 as usize];
+            mangle_instance(program, inst.struct_id, &inst.args)
+        }
+        Type::TypeParam(id) => format!("T{}", id.0),
+        // Enum/Class/Kont/Task/TraitSelf never appear in a corpus mono key or instance
+        // arg — a defensive label only (keeps the oracle self-contained).
+        other => format!("ty_{other:?}"),
+    }
+}
+
+fn mangle_struct_name(program: &TypedProgram, id: StructId) -> String {
+    program
+        .structs
+        .get(id.0 as usize)
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| format!("struct{}", id.0))
+}
+
+/// The mangled name for a generic-struct instance: `{StructName}_{arg1}_{arg2}…`
+/// (mirrors inkwell `mangle_generic_struct_name`, lib.rs:2198).
+fn mangle_instance(program: &TypedProgram, struct_id: StructId, args: &[Type]) -> String {
+    let mut s = mangle_struct_name(program, struct_id);
+    for a in args {
+        s.push('_');
+        s.push_str(&mangle_type(*a, program));
+    }
+    s
+}
+
+/// `true` iff none of `args` mentions a `Type::TypeParam` (transitively). Abstract
+/// instances (TypeParam-bearing — interned for generic-fn signatures like
+/// `fst<A,B>(p: Pair<A,B>)`) have no runtime layout and are skipped in Pass 0.
+fn instance_is_concrete(args: &[Type], program: &TypedProgram) -> bool {
+    args.iter().all(|a| !type_has_typeparam(*a, program))
+}
+
+fn type_has_typeparam(ty: Type, program: &TypedProgram) -> bool {
+    match ty {
+        Type::TypeParam(_) => true,
+        Type::Nullable(ni) => type_has_typeparam(ni.to_type(), program),
+        Type::Array(ae) => type_has_typeparam(ae.to_type(), program),
+        Type::Vec(ve) => type_has_typeparam(ve.to_type(), program),
+        Type::Ref(id) => type_has_typeparam(program.refs[id.0 as usize].inner, program),
+        Type::GenericInstance(id) => program.generic_instances[id.0 as usize]
+            .args
+            .iter()
+            .any(|a| type_has_typeparam(*a, program)),
+        _ => false,
     }
 }
 
@@ -1448,6 +1590,19 @@ fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
             .variants
             .iter()
             .any(|v| !v.payloads.is_empty()),
+        // A generic-struct instance owns drop iff some SUBSTITUTED field does
+        // (`Holder<[i64]>`'s `value: T` → `[i64]` → needs drop). Mirrors the Struct
+        // arm with the instance type-args applied to each declared field type.
+        Type::GenericInstance(id) => {
+            let inst = program.generic_instance(id);
+            let struct_id = inst.struct_id;
+            let inst_args = inst.args.clone();
+            program.struct_decl(struct_id).fields.iter().any(|f| {
+                let mut insts = program.generic_instances.clone();
+                let mut refs = program.refs.clone();
+                needs_drop(f.ty.substitute(&inst_args, &mut insts, &mut refs), program)
+            })
+        }
         _ => false,
     }
 }

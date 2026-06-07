@@ -3522,6 +3522,34 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                         0
                     };
                     0
+                } else if gi_decl_of(c, bare) >= 0 {
+                    // (Bar B) generic-instance field access. RVALUE = extractvalue from
+                    // the `%<mangled>` aggregate (cgo_ty(bare) renders it). The lvalue
+                    // field-place mirrors the struct case with the `%<mangled>` base.
+                    if (*c).cg_suppress {
+                        let cg_ggp: i64 = cg_dst(c);
+                        cgo_str(c, "getelementptr ");
+                        cgo_ty(c, bare);
+                        cgo_str(c, ", ptr ");
+                        if cg_ftvid >= 0 {
+                            let cg_gbase: i64 = cg_slot_get(c, cg_ftvid);
+                            cgo_operand(c, 0, cg_gbase);
+                            0
+                        } else {
+                            cgo_operand(c, cg_ftk, cg_ftv);
+                            0
+                        };
+                        cgo_str(c, ", i32 0, i32 ");
+                        cgo_int(c, fidx);
+                        cg_putc(c, '\n');
+                        cg_reg(c, cg_ggp);
+                        (*c).cg_lastvid = 0 - 1;
+                        0
+                    } else {
+                        cg_extract(c, bare, cg_ftk, cg_ftv, fidx);
+                        0
+                    };
+                    0
                 } else {
                     0
                 };
@@ -7199,6 +7227,127 @@ fn cg_is_nullable(c: &mut TyCtx, h: i64) -> bool {
     }
 }
 
+// (Bar B) append a struct's name (from the struct-name blob `snb`) to `out`.
+fn cg_struct_name_to(out: &mut Vec<u8>, c: &mut TyCtx, sid: i64) -> i64 {
+    let bs: i64 = (*c).sts[sid];
+    let be: i64 = (*c).ste[sid];
+    let mut bi: i64 = bs;
+    while bi < be {
+        push(out, (*c).snb[bi]);
+        bi = bi + 1;
+    }
+    0
+}
+
+// (Bar B) the STRUCTURAL mangle tag for handle `h`, to an arbitrary buffer — `i64`,
+// `arr_<elem>`, `Box_i64`, `Pair_i64_i64`, etc. Order-independent (no interner ids),
+// mirroring the oracle's `mangle_type`/`mangle_instance`. Used for generic-instance
+// LLVM type names (`%<mangled>`) + (Bar B mono) monomorphic fn symbols.
+fn cg_mangle_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
+    if h == 0 {
+        append_str(out, "i64")
+    } else if h == 1 {
+        append_str(out, "i32")
+    } else if h == 2 {
+        append_str(out, "bool")
+    } else if h == 3 {
+        append_str(out, "u8")
+    } else {
+        let idx: i64 = h - tbase();
+        let k: i64 = (*c).tk[idx];
+        // Bind payloads first (the nested-`&mut`-ctx quirk — see `cg_has_typeparam`).
+        let ta_v: i64 = (*c).ta[idx];
+        let tb_v: i64 = (*c).tb[idx];
+        if k == 1 {
+            append_str(out, "arr_");
+            cg_mangle_to(out, c, ta_v)
+        } else if k == 2 {
+            if ta_v == 1 {
+                append_str(out, "refmut_")
+            } else {
+                append_str(out, "ref_")
+            };
+            cg_mangle_to(out, c, tb_v)
+        } else if k == 3 {
+            append_str(out, "sec_");
+            cg_mangle_to(out, c, ta_v)
+        } else if k == 4 {
+            append_str(out, "opt_");
+            cg_mangle_to(out, c, ta_v)
+        } else if k == 11 {
+            append_str(out, "vec_");
+            cg_mangle_to(out, c, ta_v)
+        } else if k == 6 {
+            cg_struct_name_to(out, c, ta_v)
+        } else if k == 9 {
+            append_str(out, "T");
+            append_int(out, ta_v)
+        } else if k == 10 {
+            cg_struct_name_to(out, c, ta_v);
+            let gas: i64 = gi_argstart(c, h);
+            let gae: i64 = gi_argend(c, h);
+            let mut gj: i64 = gas;
+            while gj < gae {
+                push(out, '_');
+                let ga: i64 = (*c).gia[gj];
+                cg_mangle_to(out, c, ga);
+                gj = gj + 1;
+            }
+            0
+        } else {
+            append_str(out, "ty")
+        }
+    }
+}
+
+// (Bar B) true iff handle `h` mentions a TypeParam (kind 9) transitively. Abstract
+// generic instances (TypeParam-bearing — interned for generic-fn sigs) are skipped in
+// Pass 0 (no runtime layout). Mirrors the oracle's `type_has_typeparam`.
+fn cg_has_typeparam(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        let idx: i64 = h - tbase();
+        let k: i64 = (*c).tk[idx];
+        // Bind the payloads to locals FIRST (a recursive `cg_has_typeparam(c,
+        // (*c).ta[idx])` re-reads `c` while passing it `&mut` — the nested-`&mut`-ctx
+        // quirk yields a wrong value; the established idiom binds, like `render_type`).
+        let ta_v: i64 = (*c).ta[idx];
+        let tb_v: i64 = (*c).tb[idx];
+        if k == 9 {
+            true
+        } else if k == 1 {
+            cg_has_typeparam(c, ta_v)
+        } else if k == 3 {
+            cg_has_typeparam(c, ta_v)
+        } else if k == 4 {
+            cg_has_typeparam(c, ta_v)
+        } else if k == 11 {
+            cg_has_typeparam(c, ta_v)
+        } else if k == 2 {
+            cg_has_typeparam(c, tb_v)
+        } else if k == 10 {
+            let gas: i64 = gi_argstart(c, h);
+            let gae: i64 = gi_argend(c, h);
+            let mut gj: i64 = gas;
+            let mut any: bool = false;
+            while gj < gae {
+                let ga: i64 = (*c).gia[gj];
+                if cg_has_typeparam(c, ga) {
+                    any = true;
+                    0
+                } else {
+                    0
+                };
+                gj = gj + 1;
+            }
+            any
+        } else {
+            false
+        }
+    }
+}
+
 fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
     // (Bar B) strip a top-level `secret T` to its inner FIRST — secret lowers
     // identically to its inner (ADR 0019 D5/D12); mirrors the oracle's `Emit::lty` /
@@ -7242,6 +7391,13 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
                 cgo_ty(c, nin)
             };
             cgo_str(c, " }")
+        } else if gi_decl_of(c, hs) >= 0 {
+            // (Bar B) a generic-struct instance `%<mangled>` (structural name, declared
+            // in Pass 0). Render to a temp then emit (cgo_str routes to the cg buffer).
+            cgo_str(c, "%");
+            let mut gmb: Vec<u8> = vec_new();
+            cg_mangle_to(&mut gmb, c, hs);
+            cgo_str(c, vec_to_array(gmb))
         } else {
             cgo_str(c, "i64")
         }
@@ -7287,6 +7443,10 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
                 ll_type_to(out, c, nin)
             };
             append_str(out, " }")
+        } else if gi_decl_of(c, hs) >= 0 {
+            // (Bar B) a generic-struct instance `%<mangled>` (mirrors `cgo_ty`).
+            push(out, '%');
+            cg_mangle_to(out, c, hs)
         } else {
             append_str(out, "i64")
         }
@@ -7299,42 +7459,134 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
 // owner StructId, in declaration order. Generic structs are Bar B (8h) — no
 // oracle-emitting fixture declares one, so iterating all structs matches the
 // oracle's `type_params.is_empty()` skip for the Bar-A subset (ADR 0045 A4).
+// (Bar B) true iff struct `sid` is a GENERIC decl — detected by a TypeParam-bearing
+// field (`Box<T> { value: T }`). Generic decls have no runtime layout (only their
+// concrete instances do), so Pass 0 skips them — mirroring the oracle's
+// `type_params.is_empty()` skip. (A generic struct with no TypeParam field — e.g. a
+// phantom `<T>` — isn't in the corpus; it would need a real type-param count.)
+fn cg_struct_is_generic(c: &mut TyCtx, sid: i64) -> bool {
+    let nf: i64 = len((*c).fldo);
+    let mut i: i64 = 0;
+    let mut g: bool = false;
+    while i < nf {
+        if (*c).fldo[i] == sid {
+            let fh: i64 = (*c).fldty[i];
+            if cg_has_typeparam(c, fh) {
+                g = true;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    g
+}
+
 fn cg_pass0(out: &mut Vec<u8>, c: &mut TyCtx) -> i64 {
     let ns: i64 = len((*c).sts);
     let mut sid: i64 = 0;
     let mut any: bool = false;
     while sid < ns {
-        append_str(out, "%Struct.");
-        append_int(out, sid);
-        append_str(out, " = type {");
-        let nf: i64 = len((*c).fldo);
-        let mut i: i64 = 0;
-        let mut first: bool = true;
-        while i < nf {
-            if (*c).fldo[i] == sid {
-                if first {
-                    push(out, ' ');
-                    first = false;
-                    0
-                } else {
-                    append_str(out, ", ")
-                };
-                let fh: i64 = (*c).fldty[i];
-                ll_type_to(out, c, fh);
-                0
-            } else {
-                0
-            };
-            i = i + 1;
-        }
-        if first {
+        if cg_struct_is_generic(c, sid) {
             0
         } else {
-            push(out, ' ')
+            append_str(out, "%Struct.");
+            append_int(out, sid);
+            append_str(out, " = type {");
+            let nf: i64 = len((*c).fldo);
+            let mut i: i64 = 0;
+            let mut first: bool = true;
+            while i < nf {
+                if (*c).fldo[i] == sid {
+                    if first {
+                        push(out, ' ');
+                        first = false;
+                        0
+                    } else {
+                        append_str(out, ", ")
+                    };
+                    let fh: i64 = (*c).fldty[i];
+                    ll_type_to(out, c, fh);
+                    0
+                } else {
+                    0
+                };
+                i = i + 1;
+            }
+            if first {
+                0
+            } else {
+                push(out, ' ')
+            };
+            append_str(out, "}\n");
+            any = true;
+            0
         };
-        append_str(out, "}\n");
-        any = true;
         sid = sid + 1;
+    }
+    // (Bar B) concrete generic-struct instance decls: `%<mangled> = type { <subst
+    // fields> }` for each kind-10 interner entry whose args have no TypeParam. The
+    // emission order (interner order) must match the oracle's `generic_instances`
+    // order; the corpus has ≤1 concrete instance per fixture, so order is moot today.
+    let nt: i64 = len((*c).tk);
+    let mut ti: i64 = 0;
+    while ti < nt {
+        if (*c).tk[ti] == 10 {
+            let gh: i64 = tbase() + ti;
+            if cg_has_typeparam(c, gh) {
+                0
+            } else {
+                push(out, '%');
+                cg_mangle_to(out, c, gh);
+                append_str(out, " = type {");
+                let gsid: i64 = gi_decl_of(c, gh);
+                let mut gargs: Vec<i64> = vec_new();
+                let gas: i64 = gi_argstart(c, gh);
+                let gae: i64 = gi_argend(c, gh);
+                let mut gj: i64 = gas;
+                while gj < gae {
+                    push(&mut gargs, (*c).gia[gj]);
+                    gj = gj + 1;
+                }
+                let gnf: i64 = len((*c).fldo);
+                let mut gfi: i64 = 0;
+                let mut gfirst: bool = true;
+                while gfi < gnf {
+                    if (*c).fldo[gfi] == gsid {
+                        if gfirst {
+                            push(out, ' ');
+                            gfirst = false;
+                            0
+                        } else {
+                            append_str(out, ", ")
+                        };
+                        let gfh: i64 = (*c).fldty[gfi];
+                        let gch: i64 = subst_type(c, gfh, &gargs);
+                        ll_type_to(out, c, gch);
+                        0
+                    } else {
+                        0
+                    };
+                    gfi = gfi + 1;
+                }
+                if gfirst {
+                    0
+                } else {
+                    push(out, ' ')
+                };
+                append_str(out, "}\n");
+                any = true;
+                0
+            };
+            0
+        } else {
+            0
+        };
+        ti = ti + 1;
     }
     if any {
         push(out, '\n')
@@ -7593,7 +7845,40 @@ fn cg_needs_drop(c: &mut TyCtx, ty: i64) -> bool {
                 }
                 vany
             } else {
-                false
+                // (Bar B) a generic-struct instance needs drop iff some SUBSTITUTED
+                // field does (`Holder<[i64]>`'s `value: T` → `[i64]`).
+                let ngd: i64 = gi_decl_of(c, ty);
+                if ngd >= 0 {
+                    let mut gargs: Vec<i64> = vec_new();
+                    let gas: i64 = gi_argstart(c, ty);
+                    let gae: i64 = gi_argend(c, ty);
+                    let mut gj: i64 = gas;
+                    while gj < gae {
+                        push(&mut gargs, (*c).gia[gj]);
+                        gj = gj + 1;
+                    }
+                    let gnf: i64 = len((*c).fldo);
+                    let mut gi2: i64 = 0;
+                    let mut gany: bool = false;
+                    while gi2 < gnf {
+                        if (*c).fldo[gi2] == ngd {
+                            let gfh2: i64 = (*c).fldty[gi2];
+                            let gch: i64 = subst_type(c, gfh2, &gargs);
+                            if cg_needs_drop(c, gch) {
+                                gany = true;
+                                0
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        };
+                        gi2 = gi2 + 1;
+                    }
+                    gany
+                } else {
+                    false
+                }
             }
         }
     }
@@ -7710,7 +7995,54 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
                 cgo_str(c, ":\n");
                 0
             } else {
-                0
+                // (Bar B) a generic-struct instance: GEP each drop-needing SUBSTITUTED
+                // field of the `%<mangled>` aggregate + recurse (`Holder<[i64]>` → free
+                // the `[i64]` field). Mirrors the plain-struct arm with the instance
+                // type-args applied + the structural `%<mangled>` GEP base.
+                let gdid: i64 = gi_decl_of(c, ty);
+                if gdid >= 0 {
+                    let mut dgargs: Vec<i64> = vec_new();
+                    let dgas: i64 = gi_argstart(c, ty);
+                    let dgae: i64 = gi_argend(c, ty);
+                    let mut dgj: i64 = dgas;
+                    while dgj < dgae {
+                        push(&mut dgargs, (*c).gia[dgj]);
+                        dgj = dgj + 1;
+                    }
+                    let dgnf: i64 = len((*c).fldo);
+                    let mut dgi: i64 = 0;
+                    let mut dgfidx: i64 = 0;
+                    while dgi < dgnf {
+                        if (*c).fldo[dgi] == gdid {
+                            let dgfh: i64 = (*c).fldty[dgi];
+                            let dgch: i64 = subst_type(c, dgfh, &dgargs);
+                            if cg_needs_drop(c, dgch) {
+                                let dgfp: i64 = cg_dst(c);
+                                cgo_str(c, "getelementptr %");
+                                let mut dgmb: Vec<u8> = vec_new();
+                                cg_mangle_to(&mut dgmb, c, ty);
+                                cgo_str(c, vec_to_array(dgmb));
+                                cgo_str(c, ", ptr %v");
+                                cgo_int(c, slot);
+                                cgo_str(c, ", i32 0, i32 ");
+                                cgo_int(c, dgfidx);
+                                cg_putc(c, '\n');
+                                cg_emit_drop(c, dgch, dgfp);
+                                0
+                            } else {
+                                0
+                            };
+                            dgfidx = dgfidx + 1;
+                            0
+                        } else {
+                            0
+                        };
+                        dgi = dgi + 1;
+                    }
+                    0
+                } else {
+                    0
+                }
             }
         }
     }
