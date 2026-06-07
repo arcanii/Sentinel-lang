@@ -38,6 +38,7 @@ mod effects_dump;
 mod llvm_dump;
 mod mir_dump;
 mod resolve_dump;
+mod source_dump;
 mod types_dump;
 
 use std::collections::BTreeSet;
@@ -80,6 +81,7 @@ fn main() -> ExitCode {
         [_, cmd, path] if cmd == "mir" => run_mir(path),
         [_, cmd, path] if cmd == "ctverify" => run_ctverify(path),
         [_, cmd, path] if cmd == "llvm" => run_llvm(path),
+        [_, cmd, path] if cmd == "merge" => run_merge(path),
         [_, cmd, path] if cmd == "parse" => run_parse(path),
         [_, cmd, path] if cmd == "build" => run_build(path, None),
         [_, cmd, path, flag, output] if cmd == "build" && flag == "-o" => {
@@ -556,6 +558,60 @@ fn run_llvm_merged(merged: Program) -> ExitCode {
         }
         Err(why) => {
             eprintln!("snc: llvm: {why}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Phase D self-host port (8g) / ADR 0045 D8(ii): **merge-to-source** — the
+/// lighter bootstrap-fixed-point path. Discover the module graph from
+/// `path`, `merge_modules` it into one `Program` (the existing D.6
+/// machinery), and print that merged program back as a single re-parseable
+/// `.sentinel` file (`source_dump`). The single-file Sentinel codegen
+/// (`scg`) then reads this one file — so `snc llvm` and `scg` lower the
+/// *same* merged source and must emit byte-identical `.ll`. A single-file
+/// program (no `use`) is parsed and re-printed directly (its own merge).
+fn run_merge(path: &str) -> ExitCode {
+    let merged: Program = match discover_module_graph(Path::new(path)) {
+        Ok(modules) if !modules.is_empty() => {
+            let units: Vec<sentinel_resolve::ModuleUnit> = modules
+                .iter()
+                .map(|m| sentinel_resolve::ModuleUnit { path: m.path.clone(), program: &m.program })
+                .collect();
+            match sentinel_resolve::merge_modules(&units) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("snc: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        Ok(_) => {
+            // Single-file: parse + re-print directly (no module graph).
+            let src = match read_source(path) {
+                Ok(s) => s,
+                Err(code) => return code,
+            };
+            match sentinel_syntax::parse(&src) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("snc: parse error: {e:?}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        Err(msg) => {
+            eprintln!("snc: {msg}");
+            return ExitCode::from(1);
+        }
+    };
+    match source_dump::dump(&merged) {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(why) => {
+            eprintln!("snc: merge: {why}");
             ExitCode::from(1)
         }
     }

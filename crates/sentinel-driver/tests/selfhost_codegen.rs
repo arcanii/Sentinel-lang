@@ -337,3 +337,105 @@ fn snc_llvm_lowers_the_merged_compiler() {
         );
     }
 }
+
+/// (8g) THE BOOTSTRAP FIXED POINT — the capstone of the self-host port (ADR 0045
+/// D8(ii)). The Sentinel codegen (`scg`, built by `snc build` via inkwell) lowers the
+/// WHOLE multi-module self-hosting compiler AND reproduces it. Two assertions:
+///   1. **Self-compilation** — `scg` reads the MERGED compiler source (`snc merge`: the
+///      D.6 module graph collapsed to one `$`-qualified `.sentinel`, the owner-chosen
+///      path (b)) and emits `.ll` BYTE-IDENTICAL to the Rust `snc llvm` oracle.
+///   2. **Fixed point** — `cc` that `.ll` into a fresh compiler `scg'`, which re-emits
+///      the SAME `.ll` byte-for-byte: the compiler reproduces its own output (why C5
+///      shipped `abi-v1` + reproducible builds, ADR 0029).
+///
+/// `scg` is single-file; the compiler is multi-module — so the merge runs in Rust
+/// (`merge_modules` + `source_dump`) and feeds `scg` one file. Every compiler STAGE
+/// (lex → resolve → types → effect → borrow → ctverify → codegen) runs inside `scg`.
+#[test]
+fn sentinel_codegen_reaches_the_bootstrap_fixed_point() {
+    let tmp =
+        std::env::temp_dir().join(format!("snc_fixedpoint_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    // Stage parser+types+codegen into `tmp` and build `scg` (inkwell). The entry the
+    // merge/oracle read is the SAME staged source `scg` was built from.
+    let scg = build_sentinel_codegen(&tmp);
+    let entry = tmp.join("codegen.sentinel");
+
+    // M = the merged single-file compiler source (Rust merge-to-source, ADR 0045 (8g)).
+    let merged = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("merge")
+        .arg(&entry)
+        .output()
+        .expect("run snc merge");
+    assert!(
+        merged.status.success(),
+        "snc merge failed:\n{}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+
+    // The Rust oracle's canonical `.ll` for the full compiler.
+    let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(&entry)
+        .output()
+        .expect("run snc llvm");
+    assert!(
+        oracle.status.success(),
+        "snc llvm failed:\n{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+
+    // L1 = scg(M). `scg` reads `./input.sentinel` from its cwd.
+    let r1 = tmp.join("r1");
+    std::fs::create_dir_all(&r1).expect("create r1");
+    std::fs::write(r1.join("input.sentinel"), &merged.stdout).expect("stage M for scg");
+    let l1 = Command::new(&scg).current_dir(&r1).output().expect("run scg");
+    assert!(l1.status.success(), "scg failed:\n{}", String::from_utf8_lossy(&l1.stderr));
+
+    // Capstone 1: scg == the Rust oracle, byte-for-byte, over the full merged compiler.
+    assert_eq!(
+        l1.stdout,
+        oracle.stdout,
+        "scg diverged from `snc llvm` on the merged compiler (scg {} vs oracle {} bytes)",
+        l1.stdout.len(),
+        oracle.stdout.len()
+    );
+
+    // scg' = cc(L1). The runtime archive sits beside the snc binary.
+    let runtime = Path::new(env!("CARGO_BIN_EXE_snc"))
+        .parent()
+        .expect("snc binary dir")
+        .join("libsentinel_runtime.a");
+    let l1_path = tmp.join("L1.ll");
+    std::fs::write(&l1_path, &l1.stdout).expect("write L1.ll");
+    let scg_prime = tmp.join("scg_prime");
+    let cc = Command::new("cc")
+        .arg(&l1_path)
+        .arg(&runtime)
+        .arg("-o")
+        .arg(&scg_prime)
+        .output()
+        .expect("run cc on the scg-emitted .ll");
+    assert!(
+        cc.status.success(),
+        "cc of the scg-emitted .ll failed:\n{}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+
+    // L2 = scg'(M). Capstone 2: L2 == L1 — the bootstrap fixed point.
+    let r2 = tmp.join("r2");
+    std::fs::create_dir_all(&r2).expect("create r2");
+    std::fs::write(r2.join("input.sentinel"), &merged.stdout).expect("stage M for scg'");
+    let l2 = Command::new(&scg_prime).current_dir(&r2).output().expect("run scg'");
+    assert!(l2.status.success(), "scg' failed:\n{}", String::from_utf8_lossy(&l2.stderr));
+    assert_eq!(
+        l2.stdout,
+        l1.stdout,
+        "the bootstrap fixed point does not hold: scg' re-emitted {} bytes vs scg's {}",
+        l2.stdout.len(),
+        l1.stdout.len()
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

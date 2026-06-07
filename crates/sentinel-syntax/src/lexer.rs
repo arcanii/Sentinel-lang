@@ -286,7 +286,16 @@ pub enum TokenKind {
     #[regex(r"'([^'\\\n]|\\.)*'")]
     CharLit,
 
-    #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
+    /// Phase D self-host port (8g) / ADR 0045: `$` is admitted as an
+    /// identifier *continuation* char (never a start) so the
+    /// module-merge's `$`-qualified symbols (`util$add`, `geo$Point` —
+    /// `merge_modules`, ADR 0037) round-trip through the
+    /// `snc merge` → source → re-parse path the bootstrap fixed-point
+    /// uses. `$` is otherwise unused in Sentinel syntax and absent from
+    /// every corpus fixture, so this is byte-neutral for all existing
+    /// source (only `$`-bearing merged source lexes differently — by
+    /// design).
+    #[regex(r"[A-Za-z_][A-Za-z0-9_$]*")]
     Ident,
 }
 

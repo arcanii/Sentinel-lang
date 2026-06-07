@@ -29,7 +29,7 @@ fn is_ident_start(c: u8) -> bool {
 }
 
 fn is_ident_cont(c: u8) -> bool {
-    is_ident_start(c) || is_digit(c)
+    is_ident_start(c) || is_digit(c) || c == '$'
 }
 
 // Append the decimal rendering of `x` (>= 0) to `out`.

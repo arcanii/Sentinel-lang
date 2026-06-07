@@ -252,6 +252,7 @@ struct TyCtx {
     cg_m_merge: i64,  // the merge block (each arm branches here; the load follows)
     cg_m_armnext: i64,// the current arm's next-check block (set in dump_tpat; -1 = wildcard)
     cg_m_pj: i64,     // the current variant's flat index (for cg_emit_pstruct in the bind)
+    cg_m_wild: bool,  // (8g) true once a `_` arm emitted the final-else body+br (the match epilogue then skips `unreachable`); save/restored around dump_tarms for nesting
     cgout: Vec<u8>,   // accumulated .ll across all fns (the mode-4 result)
 }
 
@@ -3388,6 +3389,17 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            // (8g) the target's resolved VarId: >=0 means the target is a plain
+            // `Var` (a local/param struct) whose ADDRESS is its alloca slot (a
+            // field-place `c.f = …` / `&mut c.f` GEPs into the slot); -1 means the
+            // target left its pointer in the operand (a `*c` deref or a nested
+            // field-place). Captured here, before the field-index work, mirroring
+            // the oracle's recursive `lower_lvalue_ptr`.
+            let cg_ftvid: i64 = if cg_on(c) {
+                (*c).cg_lastvid
+            } else {
+                0 - 1
+            };
             (*c).consuming = svc;
             push(out, ' ');
             // The target is a struct, a generic-instance struct, or a class (a
@@ -3458,7 +3470,19 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                         cgo_str(c, "getelementptr %Struct.");
                         cgo_int(c, cg_fsid);
                         cgo_str(c, ", ptr ");
-                        cgo_operand(c, cg_ftk, cg_ftv);
+                        // (8g) the base pointer: a plain-`Var` target (a local/param
+                        // struct, cg_ftvid>=0) GEPs into its alloca SLOT; otherwise the
+                        // target (a `*c` deref or nested field-place) already left its
+                        // pointer in the operand. Matches the oracle's `lower_lvalue_ptr`
+                        // (Var -> slot, Deref -> the value, FieldAccess -> the inner GEP).
+                        if cg_ftvid >= 0 {
+                            let cg_fbase: i64 = cg_slot_get(c, cg_ftvid);
+                            cgo_operand(c, 0, cg_fbase);
+                            0
+                        } else {
+                            cgo_operand(c, cg_ftk, cg_ftv);
+                            0
+                        };
                         cgo_str(c, ", i32 0, i32 ");
                         cgo_int(c, fidx);
                         cg_putc(c, '\n');
@@ -3722,6 +3746,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let cgm_save_pl: i64 = (*c).cg_m_payload;
             let cgm_save_res: i64 = (*c).cg_m_result;
             let cgm_save_mrg: i64 = (*c).cg_m_merge;
+            let cgm_save_wild: bool = (*c).cg_m_wild;
             if cg_on(c) {
                 let cgm_tg: i64 = cg_dst(c);
                 cgo_str(c, "extractvalue { i32, ptr } ");
@@ -3737,6 +3762,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 (*c).cg_m_payload = cgm_pl;
                 (*c).cg_m_result = cgm_rs;
                 (*c).cg_m_merge = cgm_mg;
+                (*c).cg_m_wild = false;
                 0
             } else {
                 0
@@ -3757,11 +3783,19 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             let mty: i64 = dump_tarms(out, marms, exp, src, c, gb);
             close_ty(out, mty, c);
-            // (8e-2) cg: the final else (unreachable — exhaustive, no wildcard in the
-            // emitting set), then the merge block + the result load; RESTORE the
-            // enclosing match state.
+            // (8e-2/8g) cg: the final else. A `_` wildcard arm (always last in the
+            // selfhost sources) already emitted its body + store + `br merge` as the
+            // final else (cg_m_wild set), so skip `unreachable`; otherwise the variant
+            // arms partition the enum exhaustively and the final next-block is `unreachable`
+            // (matches the oracle's `lower_match`). Then the merge block + result load;
+            // RESTORE the enclosing match state.
             if cg_on(c) {
-                cgo_str(c, "  unreachable\n");
+                if (*c).cg_m_wild {
+                    0
+                } else {
+                    cgo_str(c, "  unreachable\n");
+                    0
+                };
                 cgo_str(c, "bb");
                 cgo_int(c, (*c).cg_m_merge);
                 cgo_str(c, ":\n");
@@ -3776,6 +3810,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 (*c).cg_m_payload = cgm_save_pl;
                 (*c).cg_m_result = cgm_save_res;
                 (*c).cg_m_merge = cgm_save_mrg;
+                (*c).cg_m_wild = cgm_save_wild;
                 0
             } else {
                 0
@@ -4328,6 +4363,21 @@ fn dump_tarms(out: &mut Vec<u8>, a: Arms, exp: i64, src: &[u8], c: &mut TyCtx, g
                     cgo_str(c, ":\n");
                     0
                 } else {
+                    // (8g) the `_` wildcard arm (cg_arm_next < 0) IS the final else: store
+                    // the body + `br merge`, but open NO next-check block, and signal the
+                    // epilogue to skip `unreachable` (matches the oracle's `lower_match`,
+                    // which emits the wildcard body as the last block).
+                    cgo_str(c, "  store ");
+                    cgo_ty(c, exp);
+                    cg_putc(c, ' ');
+                    cgo_operand(c, cg_bk, cg_bv);
+                    cgo_str(c, ", ptr %v");
+                    cgo_int(c, (*c).cg_m_result);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "  br label %bb");
+                    cgo_int(c, (*c).cg_m_merge);
+                    cg_putc(c, '\n');
+                    (*c).cg_m_wild = true;
                     0
                 };
                 0
@@ -6349,6 +6399,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_m_merge: 0 - 1,
         cg_m_armnext: 0 - 1,
         cg_m_pj: 0 - 1,
+        cg_m_wild: false,
         cgout: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();
