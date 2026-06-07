@@ -33,13 +33,14 @@ rewrite — one module at a time, no `Vec<Program>`/HashMap) + (a-4) `scg` self-
 `types::run`). **1476 tests**, four-check green; guarded by
 `sentinel_codegen_self_merges_the_compiler_and_reaches_fixed_point` +
 `sentinel_merge_matches_oracle_on_multi_module_stages`. **BOTH fixed-point paths now reached — (b) 8g
-merge-to-source + (a) self-hosted merge.** **▶ NOW: BAR B (full-corpus parity → ADR 0045 ACCEPTED; A21).**
+merge-to-source + (a) self-hosted merge.** **▶ NOW: BAR B (full-corpus parity → ADR 0045 ACCEPTED; A21/A22).**
 Per-slice lock-step (oracle `llvm_dump.rs` + Sentinel mode-4, mirroring the inkwell backend) for each
-construct the corpus uses but the selfhost compiler doesn't. ✅ `print` (FnId 0) done — the codegen
-differential emitting set grew **57 → 73** (1476 tests). NEXT (easiest→hardest): nullable `?T` (4 type +
-3 expr) → secret+declassify (6, strip-to-inner) → generics (mono, 7) → classes/traits/impls → effects/
-handlers (18 — the hairiest ~2300 lines) → concurrency → the full-corpus phase-go → ACCEPTED. (Full
-Bar-B breakdown + per-construct plan in ADR 0045 A21.) The full slice log:
+construct the corpus uses but the selfhost compiler doesn't. ✅ `print` (FnId 0) → **57 → 73**; ✅ **nullable
+`?T`** (A22, feat `8150ccc`) → **73 → 80** (the 6 `c15_*` + `c16_linked_list_node`; `?T` layout `{ i1, T }` /
+`{ i1, ptr }` + null-lit/widen/`is_some`/`unwrap_or`/`x == null`; leak-free, both fixed-point paths preserved,
+1476 tests). NEXT (easiest→hardest): secret+declassify (6, strip-to-inner) → generics (mono, 7) →
+classes/traits/impls → effects/handlers (18 — the hairiest ~2300 lines) → concurrency → the full-corpus
+phase-go → ACCEPTED. (Full Bar-B breakdown + per-construct plan in ADR 0045 A21.) The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
 NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g)

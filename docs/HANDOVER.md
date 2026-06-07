@@ -2082,15 +2082,16 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): refresh ... 0.3 paste-block` commit, atop
-    the **ADR 0045 A21** docs (`749d32a` — Bar B opened + `print`) + the `print` feat (`391ae58`). Below:
-    the **A20** path-(a) commit (`6355c23` — PATH (a) COMPLETE, the self-hosted merge) + the path-(a)
-    feats (a-4 scg self-merges `d33397c`, a-2/a-3 the self-hosted merge `ef56104`, a-1 the un-parser
-    `71efa09` / A19 docs `d13d17e`), atop the 8g fixed-point (A18 docs `7054145` + feat `41f00fa`). The
-    8/N codegen chain below: (8f-2/8f-3) snc llvm lowers the full compiler (`59c30a7` A17 + `67fa808`) · (8f-1)
-    selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e) enums+match (A14/A15) · heap drops
-    (A11–A13) · Vec (A9/A10) · 8d refs/builtins · 8c aggregates · 8b control flow · 8a scalars+oracle.
-    ADR 0045 is ACCEPTED-shape (amendments A1–A21; Bar B in progress — `print` done, 73/123 emitting); the **bootstrap fixed point is reached via BOTH
+    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A22 — the nullable slice` commit,
+    atop the **nullable `?T` feat** (`8150ccc` — Bar B's 2nd construct) + the **A21**/print docs (`749d32a`)
+    + the `print` feat (`391ae58`). Below: the **A20** path-(a) commit (`6355c23` — PATH (a) COMPLETE, the
+    self-hosted merge) + the path-(a) feats (a-4 scg self-merges `d33397c`, a-2/a-3 the self-hosted merge
+    `ef56104`, a-1 the un-parser `71efa09` / A19 docs `d13d17e`), atop the 8g fixed-point (A18 docs
+    `7054145` + feat `41f00fa`). The 8/N codegen chain below: (8f-2/8f-3) snc llvm lowers the full compiler
+    (`59c30a7` A17 + `67fa808`) · (8f-1) selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e)
+    enums+match (A14/A15) · heap drops (A11–A13) · Vec (A9/A10) · 8d refs/builtins · 8c aggregates · 8b
+    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A22; Bar B in progress —
+    `print` + nullable done, **80/123 emitting**); the **bootstrap fixed point is reached via BOTH
     paths** — (b) 8g merge-to-source + (a) the self-hosted merge (`scg` discovers+merges+emits itself).
     Bar B is the remaining open scope for the full-corpus ACCEPTED flip — or an owner-deferred close.
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin local
@@ -2147,15 +2148,21 @@ For pasting into a fresh chat to bootstrap context:
     validate = the codegen differential (`sentinel_codegen_matches_oracle_on_corpus`, byte + behavioural) +
     modes 0–3 byte-identical + the `leaks` sweep + four-check; feat per construct, docs batched. To find the
     current emitting set + remaining blockers, run `snc llvm` over `tests/pass`+`tests/ui` and bucket the
-    Errs (the categorize loop is trivial). **✅ DONE: `print` (FnId 0)** — `call i64 @sentinel_print(i64 x)`
-    (oracle `RuntimeSyms.print` + `lower_call` FnId-0; Sentinel `cg_used_print` + `cg_emit_call` fid==0);
-    emitting set **57 → 73**, 1476 tests, four-check green (feat `391ae58`). **▶ NEXT (easiest→hardest, full
-    breakdown in ADR 0045 A21):** nullable `?T` (4 type + 3 expr — `llvm_ty` Nullable layout [inner-dependent,
-    inkwell lib.rs:1623] + null/widen/`unwrap_or`/`is_some`; Sentinel already has nullable kind 4) → secret
-    +declassify (6 — STRIP-TO-INNER, thread the secrets table into `llvm_ty`'s 31 sites via an `Emit::lty`
-    helper; `Type::strip_secret` exists, sentinel-types lib.rs:793) → generics (mono, 7) → classes/traits/
-    impls (MethodCall/ClassInit/QualifiedCall dispatch) → effects/handlers (18 — the hairiest ~2300 lines,
-    kont ABI) → concurrency (spawn/scope/await) → the full-corpus phase-go (8l) → **ADR 0045 ACCEPTED**.
+    Errs (the categorize loop is trivial). **✅ DONE: `print` (FnId 0)** — emitting set **57 → 73** (feat
+    `391ae58`). **✅ DONE: nullable `?T`** (A22, feat `8150ccc`) — emitting set **73 → 80** (the 6 `c15_*`
+    fixtures + `c16_linked_list_node`, which reaches `?Struct` via `null`; c17 stays Err'd — needs mono).
+    Layout `{ i1, T }` (`?primitive`) / `{ i1, ptr }` (`?Struct`, heap-indirect → recursive `struct Node {
+    next: ?Node }` works) in `cgo_ty`/`ll_type_to`; `null` = operand kind 3 (`{ i1 0, <zero> }`); widen =
+    `cg_widen` (mir_widen's cg twin, at every widen site) → `{ i1 1, T }` insertvalue; `x == null` =
+    `cg_cmp_null` (extract+icmp valid bits); `is_some`/`unwrap_or` in `cg_emit_call` (FnId 2/1). ⚠ `?Struct`
+    heap-box WidenToNullable + nullable drop DEFERRED (unexercised — corpus only widens primitives + `null`s
+    `?Struct`); `cg_extract` now returns its dest reg. Byte-identical + behavioural + leak-free, both
+    fixed-point paths preserved, 1476 tests, four-check green. **▶ NEXT (easiest→hardest, full breakdown in
+    ADR 0045 A21):** secret+declassify (6 — STRIP-TO-INNER, thread the secrets table into `llvm_ty`'s 31
+    sites via an `Emit::lty` helper; `Type::strip_secret` exists, sentinel-types lib.rs:793) → generics
+    (mono, 7) → classes/traits/impls (MethodCall/ClassInit/QualifiedCall dispatch) → effects/handlers (18 —
+    the hairiest ~2300 lines, kont ABI) → concurrency (spawn/scope/await) → the full-corpus phase-go (8l) →
+    **ADR 0045 ACCEPTED**.
     ⚠ A genuinely single-file entry must stay a PASSTHROUGH (the merge `has_use` gate). The path-(a) build
     record + design follows (COMPLETE):
     **✅ (a-1)+(a-1b) DONE (ADR 0045 A19):**

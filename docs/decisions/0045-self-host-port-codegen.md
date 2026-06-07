@@ -818,6 +818,34 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
   - **NEXT (recommended order, easiest→hardest):** nullable → secret(+declassify) → generics → classes →
     effects/handlers → concurrency → the full-corpus phase-go (8l) → ADR 0045 ACCEPTED.
 
+- **A22 — BAR B: the nullable `?T` slice LANDED (feat `8150ccc`).** Ported the nullable lowering to BOTH
+  backends in lock-step, mirroring inkwell (`lib.rs` `llvm_basic_type` :1623 / `lower_is_some` /
+  `lower_unwrap_or` / NullLit / WidenToNullable / the Cmp nullable arm). The codegen differential's
+  emitting set grew **73 → 80** — the 6 `c15_*` fixtures (`null_literal` / `widen` / `eq_null` /
+  `nullable_struct_field` / `maybe_compose` / `go_no_go`) **+ `c16_linked_list_node`** (which reaches
+  `?Struct` via `null`). (c17_generic_nullable stays Err'd — it needs mono, the generics slice.)
+  - **The layout** (oracle `llvm_ty` + Sentinel `cgo_ty`/`ll_type_to`): `?T` = `{ i1 valid, <payload> }`,
+    inner-dependent — `?primitive` inline (`{ i1, T }`), `?Struct`/`?GenericInstance` heap-indirect
+    (`{ i1, ptr }`, which is what makes `struct Node { next: ?Node }` representable — the cycle goes
+    through a pointer-sized field). `llvm_ty` is self-contained (no table-threading; the layout is fully
+    determined by `NullableInner`). Pass-0 struct decls + fn param/return types pick it up for free.
+  - **The exprs:** `null` → the `{ i1 0, <zero> }` **constant operand** (no instruction; `?Struct` →
+    `ptr null`) — Sentinel models it as a new operand **kind 3** (`cgo_operand`), keyed by the inner type
+    handle. `T → ?T` widening → the `{ i1 1, T }` **insertvalue** chain — Sentinel adds **`cg_widen`** (the
+    codegen counterpart to `mir_widen`), called at every widen site (Int/Bool/Var/binop/…); a `secret`
+    widen is a no-op (the value IS the inner). `x == null` (ADR 0014 D7) → extract each i1 valid bit
+    (field 0) + `icmp` those (`cg_cmp_null`). `is_some` (FnId 2) → `extractvalue 0`; `unwrap_or` (FnId 1)
+    → extract valid+payload + `select` (both operands pre-evaluated, so no control flow).
+  - **`?Struct` heap-box WidenToNullable is DEFERRED** (Err) — unexercised (the corpus only widens
+    primitives + reaches `?Struct` via `null`). Drop stays a no-op for nullable (`needs_drop`/`cg_needs_drop`
+    false) — correct for the corpus (no heap-boxed nullable is ever bound-then-dropped); pairs with the
+    deferred heap-box. ⚠ FIX in-flight: `cg_extract` returned `cg_reg`'s `0`, not its dest register — now
+    returns `d` (its natural API; pre-existing callers ignored the return).
+  - **Validation:** the 7 fixtures byte-identical (`scg` == `snc llvm`) + behaviourally equal to inkwell
+    (exit/stdout) + leak-free (`leaks --atExit`: 0 leaks — nullable is inline / a null pointer, no heap).
+    Modes 0–3 byte-identical; BOTH bootstrap fixed-point paths preserved (pure-additive — the selfhost
+    sources use no nullable). Four-check green (1476 tests). **NEXT: secret + declassify** (strip-to-inner).
+
 ## Decision
 
 ### D1. Goal.
