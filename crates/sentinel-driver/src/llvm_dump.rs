@@ -39,8 +39,8 @@ use std::fmt::Write;
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_resolve::{
-    EnumId, FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PUSH_FN_ID,
-    READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
+    EnumId, FnId, VarId, I64_TO_U8_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID,
+    PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
     WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
@@ -71,6 +71,8 @@ struct RuntimeSyms {
     str_eq: bool,
     read_file: bool,
     write_file: bool,
+    /// `sentinel_print(i64) -> i64` (Bar B): the `print` builtin (FnId 0).
+    print: bool,
     print_bytes: bool,
     /// The `llvm.memcpy` intrinsic (8d-Vec-2: `vec_to_array` copies the live
     /// prefix). An `@llvm.*` intrinsic, not a `sentinel_*` symbol, so it
@@ -87,6 +89,7 @@ impl RuntimeSyms {
         self.str_eq |= other.str_eq;
         self.read_file |= other.read_file;
         self.write_file |= other.write_file;
+        self.print |= other.print;
         self.print_bytes |= other.print_bytes;
         self.memcpy |= other.memcpy;
     }
@@ -115,6 +118,9 @@ impl RuntimeSyms {
         if self.write_file {
             writeln!(out, "declare i64 @sentinel_write_file(ptr, i64, ptr, i64)").unwrap();
         }
+        if self.print {
+            writeln!(out, "declare i64 @sentinel_print(i64)").unwrap();
+        }
         if self.print_bytes {
             writeln!(out, "declare i64 @sentinel_print_bytes(ptr, i64)").unwrap();
         }
@@ -128,6 +134,7 @@ impl RuntimeSyms {
             || self.str_eq
             || self.read_file
             || self.write_file
+            || self.print
             || self.print_bytes
             || self.memcpy
     }
@@ -1021,6 +1028,14 @@ impl Emit<'_> {
     fn lower_call(&mut self, id: FnId, args: &[TypedExpr], ret_ty: Type) -> Result<String, String> {
         // The two trivial width-conversion builtins (used by the selfhost
         // sources): zext (u8→i64) / trunc (i64→u8).
+        // print(x: i64) -> i64 (Bar B): the simplest runtime builtin — call the C symbol.
+        if id == PRINT_FN_ID {
+            let x = self.lower_expr(&args[0])?;
+            let v = self.fresh();
+            writeln!(self.body, "  %v{v} = call i64 @sentinel_print(i64 {x})").unwrap();
+            self.used.print = true;
+            return Ok(format!("%v{v}"));
+        }
         if id == U8_TO_I64_FN_ID {
             let x = self.lower_expr(&args[0])?;
             let v = self.fresh();
