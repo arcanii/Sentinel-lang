@@ -1,18 +1,20 @@
-// selfhost/merge.sentinel — path (a), the Sentinel un-parser (ADR 0045 (8g)).
+// selfhost/merge.sentinel — path (a): self-hosting the D.6 module merge (ADR 0045 (8g)).
 //
-// To self-host the D.6 module merge, `scg` must turn a parsed program back into
-// re-parseable source (the merge then qualifies names + concatenates modules).
-// This is the Sentinel port of the Rust `crates/sentinel-driver/src/source_dump.rs`,
-// reusing the parser's AST enums + parse fns + the consuming-walk structure of the
-// parser's own `dump_*` (which already emit a (different) text from the AST).
+// `scg` is single-file; the full compiler is multi-module (`use a::b::Item;`). Path (a)
+// ports the merge to Sentinel so `scg` discovers + merges + emits with NO Rust pre-pass.
+// This is the Sentinel port of the Rust driver: `discover_module_graph` + `merge_modules`
+// + the `Renamer` + `source_dump.rs`.
 //
-// (a-1): the un-parser core — `fn` decls + the full expr/stmt/type grammar — emitting
-// SOURCE (not the `snc ast` S-expr). Validated by round-trip: `snc llvm` on the
-// un-parsed source == `snc llvm` on the original. Parens are AST-transparent, so every
-// compound expression is wrapped — preserving precedence + sidestepping positional
-// ambiguity — EXCEPT `if`/`while`/fn-body blocks, which must stay literal `{ … }`
-// (emitted raw via `emit_block_raw`). Decls (structs/enums) + the per-module rename +
-// BFS discovery land in (a-1b)…(a-4).
+// (a-1)+(a-1b): the un-parser core (a parsed program → re-parseable source), reusing the
+// parser's AST enums + parse fns + the consuming-walk structure of the parser's own dump_*.
+// (a-2)+(a-3): the per-module rename map + BFS discovery. The KEY enabler: each module's
+// rename map is SELF-CONTAINED (its own top-level names qualified by its `$`-prefix + each
+// `use a::b::Item` → `a$b$Item`), so we process ONE MODULE AT A TIME (re-parse per module,
+// no `Vec<Program>` / no HashMap) and FUSE the rewrite into the un-parser (look up the
+// rename map at each name-emit site). Discovery + emit fuse: BFS order = merge order.
+//
+// To match the Rust driver, a genuinely single-file entry (no `use`) is a PASSTHROUGH (no
+// qualify — `run_merge` short-circuits it); only a multi-module entry qualifies.
 
 use parser::Expr;
 use parser::Stmt;
@@ -38,6 +40,23 @@ use parser::append_int;
 use parser::append_str;
 use parser::append_slice;
 
+// The merge context: the BFS discovery queue + the current module's rename map. All are
+// flat parallel pools (the resolve/types idiom; no `Vec<Program>` / no HashMap).
+struct MergeCtx {
+    qpath: Vec<u8>,   // packed module file-path bytes
+    qps: Vec<i64>,    // file-path start per module
+    qpe: Vec<i64>,    // file-path end per module
+    qpfx: Vec<u8>,    // packed module `$`-prefix bytes
+    qxs: Vec<i64>,    // prefix start per module
+    qxe: Vec<i64>,    // prefix end per module
+    rnsrc: Vec<u8>,   // packed rename SOURCE names (the bare name to match)
+    rss: Vec<i64>,    // source-name start per entry
+    rse: Vec<i64>,    // source-name end per entry
+    rnq: Vec<u8>,     // packed rename QUALIFIED names (what to emit)
+    rqs: Vec<i64>,    // qualified-name start per entry
+    rqe: Vec<i64>,    // qualified-name end per entry
+}
+
 // --- byte/literal encoding ---------------------------------------------------
 
 fn hexdigit(d: i64) -> u8 {
@@ -48,9 +67,6 @@ fn hexdigit(d: i64) -> u8 {
     }
 }
 
-// Emit one decoded byte into a string/char literal body so the parser decodes it
-// back to the same byte (ADR 0033 D2): `\\` / the delimiter escaped, a bare
-// printable ASCII byte verbatim, else `\xHH`.
 fn emit_byte_esc(out: &mut Vec<u8>, b: i64, delim: i64) -> i64 {
     if b == 92 {
         push(out, '\\');
@@ -72,7 +88,6 @@ fn emit_byte_esc(out: &mut Vec<u8>, b: i64, delim: i64) -> i64 {
     }
 }
 
-// Consume a string literal's bytes, emitting the `"…"` body (escaped).
 fn emit_str_body(out: &mut Vec<u8>, sb: [u8]) -> i64 {
     let n: i64 = len(sb);
     let mut i: i64 = 0;
@@ -83,79 +98,169 @@ fn emit_str_body(out: &mut Vec<u8>, sb: [u8]) -> i64 {
     0
 }
 
+// --- rename map lookup -------------------------------------------------------
+
+// Compare rename SOURCE entry `idx` to `b[bs..be]`.
+fn rn_eq(c: &MergeCtx, idx: i64, b: &[u8], bs: i64, be: i64) -> bool {
+    let a: i64 = (*c).rss[idx];
+    let z: i64 = (*c).rse[idx];
+    let la: i64 = z - a;
+    let lb: i64 = be - bs;
+    if la != lb {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < la {
+            if (*c).rnsrc[a + i] != (*b)[bs + i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// The rename entry whose source name == `b[bs..be]`, or -1.
+fn find_rename(c: &MergeCtx, b: &[u8], bs: i64, be: i64) -> i64 {
+    let nent: i64 = len((*c).rss);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < nent {
+        if found < 0 {
+            if rn_eq(c, i, b, bs, be) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Emit rename entry `idx`'s qualified name.
+fn emit_qualified(out: &mut Vec<u8>, c: &MergeCtx, idx: i64) -> i64 {
+    let a: i64 = (*c).rqs[idx];
+    let z: i64 = (*c).rqe[idx];
+    let mut i: i64 = a;
+    while i < z {
+        push(out, (*c).rnq[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// A name from a SRC slice (a decl name) — qualified if in the rename map, else verbatim.
+fn emit_name_slice(out: &mut Vec<u8>, c: &MergeCtx, src: &[u8], ns: i64, ne: i64) -> i64 {
+    let idx: i64 = find_rename(c, src, ns, ne);
+    if idx >= 0 {
+        emit_qualified(out, c, idx);
+        0
+    } else {
+        append_slice(out, src, ns, ne);
+        0
+    }
+}
+
+// A name from an owned `[u8]` AST payload (a Call callee, type ident, …) — qualified if in
+// the rename map, else verbatim. Consumes `nm` either way (disposed via a throwaway when
+// the qualified form replaces it).
+fn emit_name(out: &mut Vec<u8>, c: &MergeCtx, nm: [u8]) -> i64 {
+    let ln: i64 = len(nm);
+    let idx: i64 = find_rename(c, &nm, 0, ln);
+    if idx >= 0 {
+        emit_qualified(out, c, idx);
+        let mut tw: Vec<u8> = vec_new();
+        append_str(&mut tw, nm);
+        let _t: [u8] = vec_to_array(tw);
+        0
+    } else {
+        append_str(out, nm);
+        0
+    }
+}
+
 // --- types -------------------------------------------------------------------
 
-fn emit_type(out: &mut Vec<u8>, ty: TypeE) -> i64 {
+fn emit_type(out: &mut Vec<u8>, c: &MergeCtx, ty: TypeE) -> i64 {
     match ty {
         TypeE::TIdent(nm) => {
-            append_str(out, nm);
+            emit_name(out, c, nm);
             0
         },
         TypeE::TNullable(inner) => {
             push(out, '?');
-            emit_type(out, inner);
+            emit_type(out, c, inner);
             0
         },
         TypeE::TArray(inner) => {
             push(out, '[');
-            emit_type(out, inner);
+            emit_type(out, c, inner);
             push(out, ']');
             0
         },
         TypeE::TRef(inner) => {
             push(out, '&');
-            emit_type(out, inner);
+            emit_type(out, c, inner);
             0
         },
         TypeE::TRefMut(inner) => {
             append_str(out, "&mut ");
-            emit_type(out, inner);
+            emit_type(out, c, inner);
             0
         },
         TypeE::TSecret(inner) => {
             append_str(out, "secret ");
-            emit_type(out, inner);
+            emit_type(out, c, inner);
             0
         },
         TypeE::TGeneric(gn, ga) => {
-            append_str(out, gn);
+            emit_name(out, c, gn);
             push(out, '<');
-            emit_targs(out, ga);
+            emit_targs(out, c, ga);
             push(out, '>');
             0
         },
     }
 }
 
-fn emit_targs(out: &mut Vec<u8>, a: TyArgs) -> i64 {
+fn emit_targs(out: &mut Vec<u8>, c: &MergeCtx, a: TyArgs) -> i64 {
     match a {
         TyArgs::TAEnd => 0,
         TyArgs::TACell(h, t) => {
-            emit_type(out, h);
-            emit_targs_rest(out, t);
+            emit_type(out, c, h);
+            emit_targs_rest(out, c, t);
             0
         },
     }
 }
 
-fn emit_targs_rest(out: &mut Vec<u8>, a: TyArgs) -> i64 {
+fn emit_targs_rest(out: &mut Vec<u8>, c: &MergeCtx, a: TyArgs) -> i64 {
     match a {
         TyArgs::TAEnd => 0,
         TyArgs::TACell(h, t) => {
             append_str(out, ", ");
-            emit_type(out, h);
-            emit_targs_rest(out, t);
+            emit_type(out, c, h);
+            emit_targs_rest(out, c, t);
             0
         },
     }
 }
 
-fn emit_tyopt(out: &mut Vec<u8>, ty: TyOpt) -> i64 {
+fn emit_tyopt(out: &mut Vec<u8>, c: &MergeCtx, ty: TyOpt) -> i64 {
     match ty {
         TyOpt::NoTy => 0,
         TyOpt::SomeTy(t) => {
             append_str(out, ": ");
-            emit_type(out, t);
+            emit_type(out, c, t);
             0
         },
     }
@@ -213,15 +318,13 @@ fn binary_sym(bop: i64) -> [u8] {
 
 // --- expressions -------------------------------------------------------------
 
-// Emit a block expression as a literal `{ <stmts> <tail> }` (NO surrounding
-// parens) — for `if`/`while`/fn bodies, where the parser requires a brace block.
-fn emit_block_raw(out: &mut Vec<u8>, ex: Expr) -> i64 {
+fn emit_block_raw(out: &mut Vec<u8>, c: &MergeCtx, ex: Expr) -> i64 {
     match ex {
         Expr::Block(bs, bt) => {
             push(out, '{');
-            emit_stmts(out, bs);
+            emit_stmts(out, c, bs);
             push(out, ' ');
-            emit_expr(out, bt);
+            emit_expr(out, c, bt);
             append_str(out, " }");
             0
         },
@@ -232,10 +335,7 @@ fn emit_block_raw(out: &mut Vec<u8>, ex: Expr) -> i64 {
     }
 }
 
-// Emit `ex`, wrapping every COMPOUND node in `( … )` so the surface form round-trips
-// to the identical AST regardless of precedence/position (parens leave no AST trace).
-// Atoms emit bare.
-fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
+fn emit_expr(out: &mut Vec<u8>, c: &MergeCtx, ex: Expr) -> i64 {
     match ex {
         Expr::Int(nv) => {
             append_int(out, nv);
@@ -274,43 +374,43 @@ fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
             push(out, '(');
             append_str(out, unary_sym(uop));
             push(out, ' ');
-            emit_expr(out, inner);
+            emit_expr(out, c, inner);
             push(out, ')');
             0
         },
         Expr::Binary(bop, l, r) => {
             push(out, '(');
-            emit_expr(out, l);
+            emit_expr(out, c, l);
             push(out, ' ');
             append_str(out, binary_sym(bop));
             push(out, ' ');
-            emit_expr(out, r);
+            emit_expr(out, c, r);
             push(out, ')');
             0
         },
         Expr::Call(cn, ca) => {
             push(out, '(');
-            append_str(out, cn);
+            emit_name(out, c, cn);
             push(out, '(');
-            emit_args(out, ca);
+            emit_args(out, c, ca);
             push(out, ')');
             push(out, ')');
             0
         },
         Expr::Method(mt, mn, ma) => {
             push(out, '(');
-            emit_expr(out, mt);
+            emit_expr(out, c, mt);
             push(out, '.');
             append_str(out, mn);
             push(out, '(');
-            emit_args(out, ma);
+            emit_args(out, c, ma);
             push(out, ')');
             push(out, ')');
             0
         },
         Expr::Field(ft, fdn) => {
             push(out, '(');
-            emit_expr(out, ft);
+            emit_expr(out, c, ft);
             push(out, '.');
             append_str(out, fdn);
             push(out, ')');
@@ -318,27 +418,27 @@ fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         },
         Expr::Index(it, ii) => {
             push(out, '(');
-            emit_expr(out, it);
+            emit_expr(out, c, it);
             push(out, '[');
-            emit_expr(out, ii);
+            emit_expr(out, c, ii);
             push(out, ']');
             push(out, ')');
             0
         },
         Expr::Qcall(qi, qm, qa) => {
             push(out, '(');
-            append_str(out, qi);
+            emit_name(out, c, qi);
             append_str(out, "::");
             append_str(out, qm);
-            emit_qcall_args(out, qa);
+            emit_qcall_args(out, c, qa);
             push(out, ')');
             0
         },
         Expr::ClassInit(ci, cia) => {
             push(out, '(');
-            append_str(out, ci);
+            emit_name(out, c, ci);
             append_str(out, "::init(");
-            emit_args(out, cia);
+            emit_args(out, c, cia);
             push(out, ')');
             push(out, ')');
             0
@@ -346,7 +446,7 @@ fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         Expr::Array(ae) => {
             push(out, '(');
             push(out, '[');
-            emit_args(out, ae);
+            emit_args(out, c, ae);
             push(out, ']');
             push(out, ')');
             0
@@ -354,20 +454,20 @@ fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         Expr::If(ic, it2, ie2) => {
             push(out, '(');
             append_str(out, "if ");
-            emit_expr(out, ic);
+            emit_expr(out, c, ic);
             push(out, ' ');
-            emit_block_raw(out, it2);
+            emit_block_raw(out, c, it2);
             append_str(out, " else ");
-            emit_block_raw(out, ie2);
+            emit_block_raw(out, c, ie2);
             push(out, ')');
             0
         },
         Expr::Block(bs, bt) => {
             push(out, '(');
             push(out, '{');
-            emit_stmts(out, bs);
+            emit_stmts(out, c, bs);
             push(out, ' ');
-            emit_expr(out, bt);
+            emit_expr(out, c, bt);
             append_str(out, " }");
             push(out, ')');
             0
@@ -379,18 +479,18 @@ fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         Expr::Match(mscr, marms) => {
             push(out, '(');
             append_str(out, "match ");
-            emit_expr(out, mscr);
+            emit_expr(out, c, mscr);
             append_str(out, " { ");
-            emit_arms(out, marms);
+            emit_arms(out, c, marms);
             append_str(out, " }");
             push(out, ')');
             0
         },
         Expr::StructLit(sn, sf) => {
             push(out, '(');
-            append_str(out, sn);
+            emit_name(out, c, sn);
             append_str(out, " { ");
-            emit_fields(out, sf);
+            emit_fields(out, c, sf);
             append_str(out, " }");
             push(out, ')');
             0
@@ -398,7 +498,7 @@ fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         Expr::Declassify(di) => {
             push(out, '(');
             append_str(out, "declassify(");
-            emit_expr(out, di);
+            emit_expr(out, c, di);
             push(out, ')');
             push(out, ')');
             0
@@ -406,11 +506,11 @@ fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         Expr::Perform(pe, po, pa) => {
             push(out, '(');
             append_str(out, "perform ");
-            append_str(out, pe);
+            emit_name(out, c, pe);
             push(out, '.');
             append_str(out, po);
             push(out, '(');
-            emit_args(out, pa);
+            emit_args(out, c, pa);
             push(out, ')');
             push(out, ')');
             0
@@ -418,20 +518,20 @@ fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         Expr::Scope(sb) => {
             push(out, '(');
             append_str(out, "scope concurrent ");
-            emit_block_raw(out, sb);
+            emit_block_raw(out, c, sb);
             push(out, ')');
             0
         },
         Expr::Spawn(sc) => {
             push(out, '(');
             append_str(out, "spawn ");
-            emit_expr(out, sc);
+            emit_expr(out, c, sc);
             push(out, ')');
             0
         },
         Expr::Await(aw) => {
             push(out, '(');
-            emit_expr(out, aw);
+            emit_expr(out, c, aw);
             append_str(out, ".await");
             push(out, ')');
             0
@@ -439,10 +539,10 @@ fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         Expr::Handle(hb, ha, hr) => {
             push(out, '(');
             append_str(out, "handle ");
-            emit_expr(out, hb);
+            emit_expr(out, c, hb);
             append_str(out, " with { ");
-            emit_harms(out, ha);
-            emit_ret(out, hr);
+            emit_harms(out, c, ha);
+            emit_ret(out, c, hr);
             append_str(out, " }");
             push(out, ')');
             0
@@ -450,107 +550,104 @@ fn emit_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
     }
 }
 
-// Qcall args: a paren-less `Name::Variant` (empty args) stays paren-less (round-trips
-// to empty args); a non-empty list gets `( … )`.
-fn emit_qcall_args(out: &mut Vec<u8>, a: Args) -> i64 {
+fn emit_qcall_args(out: &mut Vec<u8>, c: &MergeCtx, a: Args) -> i64 {
     match a {
         Args::End => 0,
         Args::Cell(h, t) => {
             push(out, '(');
-            emit_expr(out, h);
-            emit_args_rest(out, t);
+            emit_expr(out, c, h);
+            emit_args_rest(out, c, t);
             push(out, ')');
             0
         },
     }
 }
 
-// Comma-separated argument elements (NO surrounding brackets — the caller adds them).
-fn emit_args(out: &mut Vec<u8>, a: Args) -> i64 {
+fn emit_args(out: &mut Vec<u8>, c: &MergeCtx, a: Args) -> i64 {
     match a {
         Args::End => 0,
         Args::Cell(h, t) => {
-            emit_expr(out, h);
-            emit_args_rest(out, t);
+            emit_expr(out, c, h);
+            emit_args_rest(out, c, t);
             0
         },
     }
 }
 
-fn emit_args_rest(out: &mut Vec<u8>, a: Args) -> i64 {
+fn emit_args_rest(out: &mut Vec<u8>, c: &MergeCtx, a: Args) -> i64 {
     match a {
         Args::End => 0,
         Args::Cell(h, t) => {
             append_str(out, ", ");
-            emit_expr(out, h);
-            emit_args_rest(out, t);
+            emit_expr(out, c, h);
+            emit_args_rest(out, c, t);
             0
         },
     }
 }
 
-fn emit_fields(out: &mut Vec<u8>, f: Fields) -> i64 {
+fn emit_fields(out: &mut Vec<u8>, c: &MergeCtx, f: Fields) -> i64 {
     match f {
         Fields::FieldEnd => 0,
         Fields::FieldCell(fnm, fv, fr) => {
             append_str(out, fnm);
             append_str(out, ": ");
-            emit_expr(out, fv);
-            emit_fields_rest(out, fr);
+            emit_expr(out, c, fv);
+            emit_fields_rest(out, c, fr);
             0
         },
     }
 }
 
-fn emit_fields_rest(out: &mut Vec<u8>, f: Fields) -> i64 {
+fn emit_fields_rest(out: &mut Vec<u8>, c: &MergeCtx, f: Fields) -> i64 {
     match f {
         Fields::FieldEnd => 0,
         Fields::FieldCell(fnm, fv, fr) => {
             append_str(out, ", ");
             append_str(out, fnm);
             append_str(out, ": ");
-            emit_expr(out, fv);
-            emit_fields_rest(out, fr);
+            emit_expr(out, c, fv);
+            emit_fields_rest(out, c, fr);
             0
         },
     }
 }
 
-fn emit_arms(out: &mut Vec<u8>, a: Arms) -> i64 {
+fn emit_arms(out: &mut Vec<u8>, c: &MergeCtx, a: Arms) -> i64 {
     match a {
         Arms::ArmEnd => 0,
         Arms::ArmCell(ap, abody, arest) => {
-            emit_pat(out, ap);
+            emit_pat(out, c, ap);
             append_str(out, " => ");
-            emit_expr(out, abody);
-            emit_arms_rest(out, arest);
+            emit_expr(out, c, abody);
+            emit_arms_rest(out, c, arest);
             0
         },
     }
 }
 
-fn emit_arms_rest(out: &mut Vec<u8>, a: Arms) -> i64 {
+fn emit_arms_rest(out: &mut Vec<u8>, c: &MergeCtx, a: Arms) -> i64 {
     match a {
         Arms::ArmEnd => 0,
         Arms::ArmCell(ap, abody, arest) => {
             append_str(out, ", ");
-            emit_pat(out, ap);
+            emit_pat(out, c, ap);
             append_str(out, " => ");
-            emit_expr(out, abody);
-            emit_arms_rest(out, arest);
+            emit_expr(out, c, abody);
+            emit_arms_rest(out, c, arest);
             0
         },
     }
 }
 
-fn emit_pat(out: &mut Vec<u8>, p: Pattern) -> i64 {
+fn emit_pat(out: &mut Vec<u8>, c: &MergeCtx, p: Pattern) -> i64 {
     match p {
         Pattern::PatWild => {
             push(out, '_');
             0
         },
         Pattern::PatVariant(pen, pvn, pbs) => {
-            append_str(out, pen);
+            emit_name(out, c, pen);
             append_str(out, "::");
             append_str(out, pvn);
             emit_binds(out, pbs);
@@ -559,7 +656,6 @@ fn emit_pat(out: &mut Vec<u8>, p: Pattern) -> i64 {
     }
 }
 
-// Pattern bindings: a non-empty list gets `( … )`; empty stays bare.
 fn emit_binds(out: &mut Vec<u8>, b: Binds) -> i64 {
     match b {
         Binds::BindEnd => 0,
@@ -585,25 +681,24 @@ fn emit_binds_rest(out: &mut Vec<u8>, b: Binds) -> i64 {
     }
 }
 
-fn emit_harms(out: &mut Vec<u8>, a: HArms) -> i64 {
+fn emit_harms(out: &mut Vec<u8>, c: &MergeCtx, a: HArms) -> i64 {
     match a {
         HArms::HEnd => 0,
         HArms::HCell(hef, hop, hparams, hbody, hrest) => {
-            append_str(out, hef);
+            emit_name(out, c, hef);
             push(out, '.');
             append_str(out, hop);
             push(out, '(');
             emit_binds_open(out, hparams);
             append_str(out, ") => ");
-            emit_expr(out, hbody);
+            emit_expr(out, c, hbody);
             append_str(out, ", ");
-            emit_harms(out, hrest);
+            emit_harms(out, c, hrest);
             0
         },
     }
 }
 
-// Handler-arm params as a bare comma-separated list (the caller adds the parens).
 fn emit_binds_open(out: &mut Vec<u8>, b: Binds) -> i64 {
     match b {
         Binds::BindEnd => 0,
@@ -615,14 +710,14 @@ fn emit_binds_open(out: &mut Vec<u8>, b: Binds) -> i64 {
     }
 }
 
-fn emit_ret(out: &mut Vec<u8>, r: Ret) -> i64 {
+fn emit_ret(out: &mut Vec<u8>, c: &MergeCtx, r: Ret) -> i64 {
     match r {
         Ret::NoRet => 0,
         Ret::YesRet(rnm, rbody) => {
             append_str(out, "return ");
             append_str(out, rnm);
             append_str(out, " => ");
-            emit_expr(out, rbody);
+            emit_expr(out, c, rbody);
             0
         },
     }
@@ -630,19 +725,19 @@ fn emit_ret(out: &mut Vec<u8>, r: Ret) -> i64 {
 
 // --- statements --------------------------------------------------------------
 
-fn emit_stmts(out: &mut Vec<u8>, st: Stmts) -> i64 {
+fn emit_stmts(out: &mut Vec<u8>, c: &MergeCtx, st: Stmts) -> i64 {
     match st {
         Stmts::SEnd => 0,
         Stmts::SCell(one, rest) => {
             push(out, ' ');
-            emit_stmt(out, one);
-            emit_stmts(out, rest);
+            emit_stmt(out, c, one);
+            emit_stmts(out, c, rest);
             0
         },
     }
 }
 
-fn emit_stmt(out: &mut Vec<u8>, s: Stmt) -> i64 {
+fn emit_stmt(out: &mut Vec<u8>, c: &MergeCtx, s: Stmt) -> i64 {
     match s {
         Stmt::SLet(lmf, lnm, lty, lval) => {
             append_str(out, "let ");
@@ -653,24 +748,24 @@ fn emit_stmt(out: &mut Vec<u8>, s: Stmt) -> i64 {
                 0
             };
             append_str(out, lnm);
-            emit_tyopt(out, lty);
+            emit_tyopt(out, c, lty);
             append_str(out, " = ");
-            emit_expr(out, lval);
+            emit_expr(out, c, lval);
             push(out, ';');
             0
         },
         Stmt::SAssign(atgt, aval) => {
-            emit_expr(out, atgt);
+            emit_expr(out, c, atgt);
             append_str(out, " = ");
-            emit_expr(out, aval);
+            emit_expr(out, c, aval);
             push(out, ';');
             0
         },
         Stmt::SWhile(wcond, wbody) => {
             append_str(out, "while ");
-            emit_expr(out, wcond);
+            emit_expr(out, c, wcond);
             push(out, ' ');
-            emit_block_raw(out, wbody);
+            emit_block_raw(out, c, wbody);
             0
         },
         Stmt::SBreak => {
@@ -682,7 +777,7 @@ fn emit_stmt(out: &mut Vec<u8>, s: Stmt) -> i64 {
             0
         },
         Stmt::SExpr(sx) => {
-            emit_expr(out, sx);
+            emit_expr(out, c, sx);
             push(out, ';');
             0
         },
@@ -691,7 +786,7 @@ fn emit_stmt(out: &mut Vec<u8>, s: Stmt) -> i64 {
 
 // --- parameters --------------------------------------------------------------
 
-fn emit_param_one(out: &mut Vec<u8>, pm: bool, pn: [u8], pt: TypeE) -> i64 {
+fn emit_param_one(out: &mut Vec<u8>, c: &MergeCtx, pm: bool, pn: [u8], pt: TypeE) -> i64 {
     if pm {
         append_str(out, "mut ");
         0
@@ -700,38 +795,36 @@ fn emit_param_one(out: &mut Vec<u8>, pm: bool, pn: [u8], pt: TypeE) -> i64 {
     };
     append_str(out, pn);
     append_str(out, ": ");
-    emit_type(out, pt);
+    emit_type(out, c, pt);
     0
 }
 
-fn emit_params(out: &mut Vec<u8>, ps: Params) -> i64 {
+fn emit_params(out: &mut Vec<u8>, c: &MergeCtx, ps: Params) -> i64 {
     match ps {
         Params::PEnd => 0,
         Params::PCell(pm, pn, pt, rest) => {
-            emit_param_one(out, pm, pn, pt);
-            emit_params_rest(out, rest);
+            emit_param_one(out, c, pm, pn, pt);
+            emit_params_rest(out, c, rest);
             0
         },
     }
 }
 
-fn emit_params_rest(out: &mut Vec<u8>, ps: Params) -> i64 {
+fn emit_params_rest(out: &mut Vec<u8>, c: &MergeCtx, ps: Params) -> i64 {
     match ps {
         Params::PEnd => 0,
         Params::PCell(pm, pn, pt, rest) => {
             append_str(out, ", ");
-            emit_param_one(out, pm, pn, pt);
-            emit_params_rest(out, rest);
+            emit_param_one(out, c, pm, pn, pt);
+            emit_params_rest(out, c, rest);
             0
         },
     }
 }
 
-// --- top-level fn decl -------------------------------------------------------
+// --- top-level decls (emit, with the decl name qualified + uses stripped) -----
 
-// `fn` is at the cursor (any `pub` already consumed). Parses the header + body
-// (mirroring the parser's dump_fn_decl) and emits `fn name(params) -> ret { body }`.
-fn emit_fn_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+fn emit_fn_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     *cur = *cur + 1;
     let name_s: i64 = (*s)[*cur];
     let name_e: i64 = (*e)[*cur];
@@ -752,22 +845,17 @@ fn emit_fn_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
     };
     let body: Expr = parse_block(k, s, e, src, cur);
     append_str(out, "fn ");
-    append_slice(out, src, name_s, name_e);
+    emit_name_slice(out, c, src, name_s, name_e);
     push(out, '(');
-    emit_params(out, params);
+    emit_params(out, c, params);
     append_str(out, ") -> ");
-    emit_type(out, rty);
+    emit_type(out, c, rty);
     push(out, ' ');
-    emit_block_raw(out, body);
+    emit_block_raw(out, c, body);
     0
 }
 
-// --- top-level struct / enum / use decls (a-1b) ------------------------------
-
-// `struct` is at the cursor → `struct Name { f1: t1, f2: t2, }` (trailing comma
-// is accepted on re-parse; generics parsed-and-skipped, as the selfhost structs
-// are non-generic).
-fn emit_struct_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+fn emit_struct_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     *cur = *cur + 1;
     let nm_s: i64 = (*s)[*cur];
     let nm_e: i64 = (*e)[*cur];
@@ -779,13 +867,13 @@ fn emit_struct_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>,
     };
     *cur = *cur + 1;
     append_str(out, "struct ");
-    append_slice(out, src, nm_s, nm_e);
+    emit_name_slice(out, c, src, nm_s, nm_e);
     append_str(out, " {");
-    emit_struct_fields(out, k, s, e, src, cur);
+    emit_struct_fields(out, c, k, s, e, src, cur);
     0
 }
 
-fn emit_struct_fields(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+fn emit_struct_fields(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     let t: i64 = (*k)[*cur];
     if t == 7 {
         *cur = *cur + 1;
@@ -793,7 +881,7 @@ fn emit_struct_fields(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64
         0
     } else if t == 29 {
         *cur = *cur + 1;
-        emit_struct_fields(out, k, s, e, src, cur)
+        emit_struct_fields(out, c, k, s, e, src, cur)
     } else {
         let fnm_s: i64 = (*s)[*cur];
         let fnm_e: i64 = (*e)[*cur];
@@ -803,27 +891,26 @@ fn emit_struct_fields(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64
         push(out, ' ');
         append_slice(out, src, fnm_s, fnm_e);
         append_str(out, ": ");
-        emit_type(out, fty);
+        emit_type(out, c, fty);
         push(out, ',');
-        emit_struct_fields(out, k, s, e, src, cur)
+        emit_struct_fields(out, c, k, s, e, src, cur)
     }
 }
 
-// `enum` is at the cursor → `enum Name { V1, V2(t1, t2), }` (non-generic).
-fn emit_enum_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+fn emit_enum_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     *cur = *cur + 1;
     let nm_s: i64 = (*s)[*cur];
     let nm_e: i64 = (*e)[*cur];
     *cur = *cur + 1;
     *cur = *cur + 1;
     append_str(out, "enum ");
-    append_slice(out, src, nm_s, nm_e);
+    emit_name_slice(out, c, src, nm_s, nm_e);
     append_str(out, " {");
-    emit_variants(out, k, s, e, src, cur);
+    emit_variants(out, c, k, s, e, src, cur);
     0
 }
 
-fn emit_variants(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+fn emit_variants(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     let t: i64 = (*k)[*cur];
     if t == 7 {
         *cur = *cur + 1;
@@ -831,7 +918,7 @@ fn emit_variants(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, sr
         0
     } else if t == 29 {
         *cur = *cur + 1;
-        emit_variants(out, k, s, e, src, cur)
+        emit_variants(out, c, k, s, e, src, cur)
     } else {
         let vn_s: i64 = (*s)[*cur];
         let vn_e: i64 = (*e)[*cur];
@@ -841,17 +928,17 @@ fn emit_variants(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, sr
         if (*k)[*cur] == 4 {
             *cur = *cur + 1;
             push(out, '(');
-            emit_payloads(out, k, s, e, src, cur);
+            emit_payloads(out, c, k, s, e, src, cur);
             0
         } else {
             0
         };
         push(out, ',');
-        emit_variants(out, k, s, e, src, cur)
+        emit_variants(out, c, k, s, e, src, cur)
     }
 }
 
-fn emit_payloads(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+fn emit_payloads(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     let t: i64 = (*k)[*cur];
     if t == 5 {
         *cur = *cur + 1;
@@ -859,37 +946,25 @@ fn emit_payloads(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, sr
         0
     } else if t == 29 {
         *cur = *cur + 1;
-        emit_payloads(out, k, s, e, src, cur)
+        emit_payloads(out, c, k, s, e, src, cur)
     } else {
         let pty: TypeE = parse_type(k, s, e, src, cur);
-        emit_type(out, pty);
+        emit_type(out, c, pty);
         push(out, ',');
-        emit_payloads(out, k, s, e, src, cur)
+        emit_payloads(out, c, k, s, e, src, cur)
     }
 }
 
-// `use` is at the cursor → `use a::b::Item;` (round-tripped verbatim; the merge
-// strips these once it qualifies cross-module names — a later slice).
-fn emit_use_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
-    *cur = *cur + 1;
-    append_str(out, "use ");
-    append_slice(out, src, (*s)[*cur], (*e)[*cur]);
-    *cur = *cur + 1;
-    while (*k)[*cur] == 30 {
-        *cur = *cur + 1;
-        append_str(out, "::");
-        append_slice(out, src, (*s)[*cur], (*e)[*cur]);
+// Strip a `use a::b::Item;` (the merge resolves cross-module refs by qualifying names).
+fn skip_use(k: &Vec<i64>, cur: &mut i64) -> i64 {
+    while (*k)[*cur] != 44 {
         *cur = *cur + 1;
     }
     *cur = *cur + 1;
-    push(out, ';');
     0
 }
 
-// Dispatch one top-level item on its leading token (after an optional `pub`), per
-// the parser's `dump_item` codes: 52 struct / 53 enum / 58 use / else fn. The
-// selfhost sources use no trait/impl/class/effect (54–57), so those are unported.
-fn emit_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+fn emit_item(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     if (*k)[*cur] == 59 {
         *cur = *cur + 1;
         0
@@ -897,35 +972,454 @@ fn emit_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
         0
     };
     let lead: i64 = (*k)[*cur];
-    if lead == 52 {
-        emit_struct_decl(out, k, s, e, src, cur)
+    if lead == 58 {
+        skip_use(k, cur)
+    } else if lead == 52 {
+        emit_struct_decl(out, c, k, s, e, src, cur)
     } else if lead == 53 {
-        emit_enum_decl(out, k, s, e, src, cur)
-    } else if lead == 58 {
-        emit_use_decl(out, k, s, e, src, cur)
+        emit_enum_decl(out, c, k, s, e, src, cur)
+    } else if lead == 3 {
+        emit_fn_decl(out, c, k, s, e, src, cur)
     } else {
-        emit_fn_decl(out, k, s, e, src, cur)
+        *cur = *cur + 1;
+        0
     }
 }
 
-// --- driver ------------------------------------------------------------------
-
-fn main() -> i64 {
-    let path: [u8] = "input.sentinel";
-    let src: [u8] = read_file(path);
-    let n: i64 = len(src);
-    let mut kinds: Vec<i64> = vec_new();
-    let mut starts: Vec<i64> = vec_new();
-    let mut ends: Vec<i64> = vec_new();
-    tokenize(&src, n, &mut kinds, &mut starts, &mut ends);
-    let ntok: i64 = len(kinds);
-    let mut out: Vec<u8> = vec_new();
+fn emit_module(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8]) -> i64 {
+    let ntok: i64 = len((*k));
     let mut cur: i64 = 0;
     while cur < ntok {
-        emit_item(&mut out, &kinds, &starts, &ends, &src, &mut cur);
-        push(&mut out, '\n');
+        emit_item(out, c, k, s, e, src, &mut cur);
+        push(out, '\n');
     }
-    let arr: [u8] = vec_to_array(out);
+    0
+}
+
+// --- the rename map: record this module's top-level names + use imports -------
+
+fn is_main(src: &[u8], ns: i64, ne: i64) -> bool {
+    ne - ns == 4
+        && (*src)[ns] == 'm'
+        && (*src)[ns + 1] == 'a'
+        && (*src)[ns + 2] == 'i'
+        && (*src)[ns + 3] == 'n'
+}
+
+// Record `name` (src[ns..ne]) → `<module-prefix>$name` (the prefix is queue entry `scan`).
+fn record_own(c: &mut MergeCtx, scan: i64, src: &[u8], ns: i64, ne: i64) -> i64 {
+    let ss: i64 = len((*c).rnsrc);
+    let mut i: i64 = ns;
+    while i < ne {
+        push(&mut (*c).rnsrc, (*src)[i]);
+        i = i + 1;
+    }
+    let se: i64 = len((*c).rnsrc);
+    push(&mut (*c).rss, ss);
+    push(&mut (*c).rse, se);
+    let qs: i64 = len((*c).rnq);
+    let pa: i64 = (*c).qxs[scan];
+    let pz: i64 = (*c).qxe[scan];
+    let mut j: i64 = pa;
+    while j < pz {
+        push(&mut (*c).rnq, (*c).qpfx[j]);
+        j = j + 1;
+    }
+    push(&mut (*c).rnq, '$');
+    let mut m: i64 = ns;
+    while m < ne {
+        push(&mut (*c).rnq, (*src)[m]);
+        m = m + 1;
+    }
+    let qe: i64 = len((*c).rnq);
+    push(&mut (*c).rqs, qs);
+    push(&mut (*c).rqe, qe);
+    0
+}
+
+// `use a::b::Item;` at `i` (tag 58) → record `Item` → `a$b$Item`. Returns the index after
+// the `;`. The source name is the LAST segment; the qualified name is ALL segments joined
+// by `$`.
+fn record_use(c: &mut MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], i: i64) -> i64 {
+    let mut ss: Vec<i64> = vec_new();
+    let mut se: Vec<i64> = vec_new();
+    let mut p: i64 = i + 1;
+    push(&mut ss, (*s)[p]);
+    push(&mut se, (*e)[p]);
+    p = p + 1;
+    while (*k)[p] == 30 {
+        p = p + 1;
+        push(&mut ss, (*s)[p]);
+        push(&mut se, (*e)[p]);
+        p = p + 1;
+    }
+    let after: i64 = p + 1;
+    let nseg: i64 = len(ss);
+    // source name = the item (last segment)
+    let isrc: i64 = ss[nseg - 1];
+    let iend: i64 = se[nseg - 1];
+    let rs: i64 = len((*c).rnsrc);
+    let mut a: i64 = isrc;
+    while a < iend {
+        push(&mut (*c).rnsrc, (*src)[a]);
+        a = a + 1;
+    }
+    let re: i64 = len((*c).rnsrc);
+    push(&mut (*c).rss, rs);
+    push(&mut (*c).rse, re);
+    // qualified = all segments joined by `$`
+    let qs: i64 = len((*c).rnq);
+    let mut g: i64 = 0;
+    while g < nseg {
+        if g > 0 {
+            push(&mut (*c).rnq, '$');
+            0
+        } else {
+            0
+        };
+        let a2: i64 = ss[g];
+        let z2: i64 = se[g];
+        let mut b2: i64 = a2;
+        while b2 < z2 {
+            push(&mut (*c).rnq, (*src)[b2]);
+            b2 = b2 + 1;
+        }
+        g = g + 1;
+    }
+    let qe: i64 = len((*c).rnq);
+    push(&mut (*c).rqs, qs);
+    push(&mut (*c).rqe, qe);
+    after
+}
+
+fn skip_to_item_end(k: &Vec<i64>, start: i64) -> i64 {
+    let n: i64 = len((*k));
+    let mut i: i64 = start;
+    while i < n && (*k)[i] != 6 {
+        i = i + 1;
+    }
+    let mut depth: i64 = 0;
+    let mut done: bool = false;
+    while i < n && !done {
+        let t: i64 = (*k)[i];
+        if t == 6 {
+            depth = depth + 1;
+            0
+        } else if t == 7 {
+            depth = depth - 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+        if depth == 0 {
+            done = true;
+            0
+        } else {
+            0
+        };
+    }
+    i
+}
+
+// Scan this module's top-level decls, recording each name in the rename map. The entry's
+// (scan == 0) `main` keeps its symbol (not recorded → emitted verbatim).
+fn build_rename(c: &mut MergeCtx, scan: i64, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8]) -> i64 {
+    let ntok: i64 = len((*k));
+    let mut i: i64 = 0;
+    while i < ntok {
+        let mut j: i64 = i;
+        if (*k)[j] == 59 {
+            j = j + 1;
+            0
+        } else {
+            0
+        };
+        let lead: i64 = (*k)[j];
+        if lead == 58 {
+            i = record_use(c, k, s, e, src, j);
+            0
+        } else if lead == 3 {
+            let ns: i64 = (*s)[j + 1];
+            let ne: i64 = (*e)[j + 1];
+            if scan == 0 && is_main(src, ns, ne) {
+                0
+            } else {
+                record_own(c, scan, src, ns, ne);
+                0
+            };
+            i = skip_to_item_end(k, j);
+            0
+        } else if lead == 52 || lead == 53 {
+            record_own(c, scan, src, (*s)[j + 1], (*e)[j + 1]);
+            i = skip_to_item_end(k, j);
+            0
+        } else {
+            i = i + 1;
+            0
+        };
+    }
+    0
+}
+
+// --- discovery: enqueue this module's use-targets (BFS) -----------------------
+
+fn qpfx_eq(c: &mut MergeCtx, m: i64, px: &Vec<u8>) -> bool {
+    let a: i64 = (*c).qxs[m];
+    let z: i64 = (*c).qxe[m];
+    let la: i64 = z - a;
+    let lb: i64 = len((*px));
+    if la != lb {
+        false
+    } else {
+        let mut i: i64 = 0;
+        let mut ok: bool = true;
+        while i < la {
+            if (*c).qpfx[a + i] != (*px)[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// Enqueue module (file path `fp`, prefix `px`) if its prefix is not already queued.
+fn enqueue_if_new(c: &mut MergeCtx, fp: &Vec<u8>, px: &Vec<u8>) -> i64 {
+    let nmod: i64 = len((*c).qps);
+    let mut m: i64 = 0;
+    let mut seen: bool = false;
+    while m < nmod {
+        if !seen {
+            if qpfx_eq(c, m, px) {
+                seen = true;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        m = m + 1;
+    }
+    if seen {
+        0
+    } else {
+        let ps: i64 = len((*c).qpath);
+        let lf: i64 = len((*fp));
+        let mut a: i64 = 0;
+        while a < lf {
+            push(&mut (*c).qpath, (*fp)[a]);
+            a = a + 1;
+        }
+        let pe: i64 = len((*c).qpath);
+        push(&mut (*c).qps, ps);
+        push(&mut (*c).qpe, pe);
+        let xs: i64 = len((*c).qpfx);
+        let lx: i64 = len((*px));
+        let mut b: i64 = 0;
+        while b < lx {
+            push(&mut (*c).qpfx, (*px)[b]);
+            b = b + 1;
+        }
+        let xe: i64 = len((*c).qpfx);
+        push(&mut (*c).qxs, xs);
+        push(&mut (*c).qxe, xe);
+        0
+    }
+}
+
+// `use a::b::Item;` at `i` → discover module `a::b` (file `a/b.sentinel`, prefix `a$b`).
+// Returns the index after the `;`.
+fn enqueue_one_use(c: &mut MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], i: i64) -> i64 {
+    let mut ss: Vec<i64> = vec_new();
+    let mut se: Vec<i64> = vec_new();
+    let mut p: i64 = i + 1;
+    push(&mut ss, (*s)[p]);
+    push(&mut se, (*e)[p]);
+    p = p + 1;
+    while (*k)[p] == 30 {
+        p = p + 1;
+        push(&mut ss, (*s)[p]);
+        push(&mut se, (*e)[p]);
+        p = p + 1;
+    }
+    let after: i64 = p + 1;
+    let nseg: i64 = len(ss);
+    let mods: i64 = nseg - 1;
+    let mut fp: Vec<u8> = vec_new();
+    let mut px: Vec<u8> = vec_new();
+    let mut g: i64 = 0;
+    while g < mods {
+        if g > 0 {
+            push(&mut fp, '/');
+            push(&mut px, '$');
+            0
+        } else {
+            0
+        };
+        let a: i64 = ss[g];
+        let z: i64 = se[g];
+        let mut b: i64 = a;
+        while b < z {
+            push(&mut fp, (*src)[b]);
+            push(&mut px, (*src)[b]);
+            b = b + 1;
+        }
+        g = g + 1;
+    }
+    append_str(&mut fp, ".sentinel");
+    enqueue_if_new(c, &fp, &px);
+    after
+}
+
+fn enqueue_uses(c: &mut MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8]) -> i64 {
+    let ntok: i64 = len((*k));
+    let mut i: i64 = 0;
+    while i < ntok {
+        if (*k)[i] == 58 {
+            i = enqueue_one_use(c, k, s, e, src, i);
+            0
+        } else {
+            i = i + 1;
+            0
+        };
+    }
+    0
+}
+
+// --- queue helpers -----------------------------------------------------------
+
+fn mc_count(c: &MergeCtx) -> i64 {
+    len((*c).qps)
+}
+
+fn mc_module_path(c: &MergeCtx, scan: i64) -> [u8] {
+    let a: i64 = (*c).qps[scan];
+    let z: i64 = (*c).qpe[scan];
+    let mut t: Vec<u8> = vec_new();
+    let mut i: i64 = a;
+    while i < z {
+        push(&mut t, (*c).qpath[i]);
+        i = i + 1;
+    }
+    vec_to_array(t)
+}
+
+fn mc_reset_rename(c: &mut MergeCtx) -> i64 {
+    while len((*c).rnsrc) > 0 {
+        pop(&mut (*c).rnsrc);
+    }
+    while len((*c).rss) > 0 {
+        pop(&mut (*c).rss);
+    }
+    while len((*c).rse) > 0 {
+        pop(&mut (*c).rse);
+    }
+    while len((*c).rnq) > 0 {
+        pop(&mut (*c).rnq);
+    }
+    while len((*c).rqs) > 0 {
+        pop(&mut (*c).rqs);
+    }
+    while len((*c).rqe) > 0 {
+        pop(&mut (*c).rqe);
+    }
+    0
+}
+
+// Enqueue the entry module: path `p`, prefix `x` (the entry stem).
+fn enqueue_entry(c: &mut MergeCtx, p: [u8], x: [u8]) -> i64 {
+    let ps: i64 = len((*c).qpath);
+    let lp: i64 = len(p);
+    let mut i: i64 = 0;
+    while i < lp {
+        push(&mut (*c).qpath, p[i]);
+        i = i + 1;
+    }
+    let pe: i64 = len((*c).qpath);
+    push(&mut (*c).qps, ps);
+    push(&mut (*c).qpe, pe);
+    let xs: i64 = len((*c).qpfx);
+    let lx: i64 = len(x);
+    let mut j: i64 = 0;
+    while j < lx {
+        push(&mut (*c).qpfx, x[j]);
+        j = j + 1;
+    }
+    let xe: i64 = len((*c).qpfx);
+    push(&mut (*c).qxs, xs);
+    push(&mut (*c).qxe, xe);
+    0
+}
+
+fn has_use(k: &Vec<i64>) -> bool {
+    let ntok: i64 = len((*k));
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < ntok {
+        if (*k)[i] == 58 {
+            found = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// --- driver: BFS discover + per-module rename + emit --------------------------
+
+fn main() -> i64 {
+    let mut c: MergeCtx = MergeCtx {
+        qpath: vec_new(),
+        qps: vec_new(),
+        qpe: vec_new(),
+        qpfx: vec_new(),
+        qxs: vec_new(),
+        qxe: vec_new(),
+        rnsrc: vec_new(),
+        rss: vec_new(),
+        rse: vec_new(),
+        rnq: vec_new(),
+        rqs: vec_new(),
+        rqe: vec_new(),
+    };
+    enqueue_entry(&mut c, "input.sentinel", "input");
+    let mut merged: Vec<u8> = vec_new();
+    let mut merge_mode: bool = false;
+    let mut scan: i64 = 0;
+    while scan < mc_count(&c) {
+        let mpath: [u8] = mc_module_path(&c, scan);
+        let msrc: [u8] = read_file(mpath);
+        let mn: i64 = len(msrc);
+        let mut k: Vec<i64> = vec_new();
+        let mut s: Vec<i64> = vec_new();
+        let mut e: Vec<i64> = vec_new();
+        tokenize(&msrc, mn, &mut k, &mut s, &mut e);
+        if scan == 0 {
+            merge_mode = has_use(&k);
+            0
+        } else {
+            0
+        };
+        mc_reset_rename(&mut c);
+        if merge_mode {
+            build_rename(&mut c, scan, &k, &s, &e, &msrc);
+            enqueue_uses(&mut c, &k, &s, &e, &msrc);
+            0
+        } else {
+            0
+        };
+        emit_module(&mut merged, &c, &k, &s, &e, &msrc);
+        scan = scan + 1;
+    }
+    let arr: [u8] = vec_to_array(merged);
     print_bytes(arr);
     0
 }

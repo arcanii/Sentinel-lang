@@ -112,3 +112,89 @@ fn sentinel_merge_unparser_round_trips_single_module_stages() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// (a-2)+(a-3) The Sentinel merge — discovery (BFS over `use` edges) + the per-module
+/// rename map (own names qualified by the module's `$`-prefix; `use a::b::Item` →
+/// `a$b$Item`) + the fused rewrite — collapses the real multi-module compiler to one
+/// `$`-qualified source. Validate: `snc llvm` on the Sentinel-merged source is
+/// BYTE-IDENTICAL to `snc llvm` on the entry (which goes through the Rust `merge_modules`)
+/// — i.e. the Sentinel merge == the Rust merge, semantically. The entry is staged as
+/// `input.sentinel` so its stem ("input") is the same for both sides.
+#[test]
+fn sentinel_merge_matches_oracle_on_multi_module_stages() {
+    let tmp = std::env::temp_dir().join(format!("snc_merge_multi_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let merge = build_sentinel_merge(&tmp);
+    let root = workspace_root();
+
+    // (entry stage, dependency stages reachable via `use`). `types` uses `parser`;
+    // `codegen` uses `types` (which uses `parser`).
+    let cases: &[(&str, &[&str])] = &[("types", &["parser"]), ("codegen", &["types", "parser"])];
+
+    for (entry, deps) in cases {
+        let work = tmp.join(entry);
+        std::fs::create_dir_all(&work).expect("create work dir");
+        // The entry is staged as `input.sentinel` (the name `merge` reads); deps keep
+        // their own names so the `use` edges resolve.
+        std::fs::copy(
+            root.join("selfhost").join(format!("{entry}.sentinel")),
+            work.join("input.sentinel"),
+        )
+        .expect("stage entry as input.sentinel");
+        for dep in *deps {
+            std::fs::copy(
+                root.join("selfhost").join(format!("{dep}.sentinel")),
+                work.join(format!("{dep}.sentinel")),
+            )
+            .expect("stage dependency");
+        }
+
+        // The Rust oracle: `snc llvm` on the entry (discovers + `merge_modules` + dumps).
+        let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(work.join("input.sentinel"))
+            .output()
+            .expect("run snc llvm (oracle)");
+        assert!(
+            oracle.status.success(),
+            "snc llvm rejected the {entry} entry:\n{}",
+            String::from_utf8_lossy(&oracle.stderr)
+        );
+
+        // The Sentinel merge: reads `./input.sentinel`, discovers + merges, prints source.
+        let merged = Command::new(&merge)
+            .current_dir(&work)
+            .output()
+            .expect("run the Sentinel merge");
+        assert!(
+            merged.status.success(),
+            "the Sentinel merge failed on {entry}:\n{}",
+            String::from_utf8_lossy(&merged.stderr)
+        );
+        let merged_path = work.join("merged.sentinel");
+        std::fs::write(&merged_path, &merged.stdout).expect("write merged source");
+
+        // `snc llvm` on the Sentinel-merged single source.
+        let sg = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .arg("llvm")
+            .arg(&merged_path)
+            .output()
+            .expect("run snc llvm (sentinel-merged)");
+        assert!(
+            sg.status.success(),
+            "snc llvm rejected the Sentinel-merged {entry}:\n{}",
+            String::from_utf8_lossy(&sg.stderr)
+        );
+
+        assert_eq!(
+            oracle.stdout,
+            sg.stdout,
+            "{entry}: the Sentinel merge diverged from the Rust merge (oracle {} vs sentinel {} bytes)",
+            oracle.stdout.len(),
+            sg.stdout.len()
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
