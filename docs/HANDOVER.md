@@ -2082,7 +2082,7 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0045 A18** docs commit (`<DOCS>` —
+    Verify HEAD with `git log -1` — expect the **ADR 0045 A18** docs commit (`7054145` —
     (8g) the bootstrap fixed point) atop its feat (`41f00fa` — merge-to-source `snc merge` +
     `source_dump.rs` + the `$`-ident lexer + the two (8g) `types.sentinel` cg fixes + the capstone test).
     The 8/N codegen chain below it: (8f-2/8f-3) snc llvm lowers the full compiler (`59c30a7` A17 +
