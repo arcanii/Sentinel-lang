@@ -846,6 +846,30 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     Modes 0–3 byte-identical; BOTH bootstrap fixed-point paths preserved (pure-additive — the selfhost
     sources use no nullable). Four-check green (1476 tests). **NEXT: secret + declassify** (strip-to-inner).
 
+- **A23 — BAR B: the secret + declassify slice LANDED (feat `7b471a9`).** `secret T` lowers IDENTICALLY to
+  its inner T — strip-to-inner, a no-op at the value level (ADR 0019 D5/D12; the constant-time guarantee is
+  the source-level rejections + the 7/N D5 verifier, NOT a distinct runtime representation). The emitting
+  set grew **80 → 85** — `c31_secret_typing`, `c31_go_no_go` (`secret i64` + `secret bool` +
+  `secret==secret→secret bool`), `c52_secret_ct`, `c53_ct_eq`, + the `c52_secret_leak` ui fixture.
+  (`c5_go_no_go`/`c33_go_no_go` stay Err'd — they need effects/handlers + classes, not secret.)
+  - **The strip** mirrors inkwell's `llvm_basic_type` ENTRY strip (lib.rs:1598). Oracle: the free `llvm_ty`
+    has no secrets table, so a new **`Emit::lty(&self, ty)`** strips a top-level `Type::Secret(id)` via
+    `ty.strip_secret(&self.program.secrets)` (sentinel-types lib.rs:793) then calls `llvm_ty`; every
+    Emit-context `llvm_ty(` call became `self.lty(` (scoped prefix-replace, ~34 sites), and the 4 non-Emit
+    sites (Pass-0 struct field + `dump_fn` ret/params) strip inline via `program.secrets`. Sentinel:
+    `cgo_ty`/`ll_type_to` strip secret (interner **kind 3**) at their ENTRY — a stripped primitive
+    (`secret bool` → `i1`) must route to the scalar arms, so strip BEFORE the dispatch (the prior `i64`
+    fallback was wrong for `secret bool`/`secret i32`).
+  - **The exprs are already identity:** `declassify(e)` lowers `e` (oracle `WidenToSecret|Declassify =>
+    lower(inner)`; Sentinel's Declassify arm flows the inner operand untouched); the `T → secret T` widen is
+    a no-op (`cg_widen` only wraps nullable, kind 4). Drop stays no-op for secret scalars (`needs_drop`/
+    `cg_needs_drop` false — secret scalars own no heap; a hypothetical `secret Struct` drop is deferred,
+    unexercised).
+  - **Validation:** the 5 fixtures byte-identical (`scg` == `snc llvm`) + behaviourally equal to inkwell +
+    leak-free (no heap). Modes 0–3 byte-identical; BOTH fixed-point paths preserved. Four-check green (1476
+    tests). **NEXT: generics (mono)** — `dump_fn` type_params Err (lib.rs:198), `llvm_ty` GenericInstance,
+    `lower_call` generic Err; mirror inkwell's `generic_instances`/mono.
+
 ## Decision
 
 ### D1. Goal.

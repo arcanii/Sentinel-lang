@@ -2082,16 +2082,17 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A22 — the nullable slice` commit,
-    atop the **nullable `?T` feat** (`8150ccc` — Bar B's 2nd construct) + the **A21**/print docs (`749d32a`)
-    + the `print` feat (`391ae58`). Below: the **A20** path-(a) commit (`6355c23` — PATH (a) COMPLETE, the
+    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A23 — the secret slice` commit,
+    atop the **secret+declassify feat** (`7b471a9` — Bar B's 3rd construct) + the A22/nullable feat
+    (`8150ccc`) + the **A21**/print docs (`749d32a`) + the `print` feat (`391ae58`). Below: the **A20**
+    path-(a) commit (`6355c23` — PATH (a) COMPLETE, the
     self-hosted merge) + the path-(a) feats (a-4 scg self-merges `d33397c`, a-2/a-3 the self-hosted merge
     `ef56104`, a-1 the un-parser `71efa09` / A19 docs `d13d17e`), atop the 8g fixed-point (A18 docs
     `7054145` + feat `41f00fa`). The 8/N codegen chain below: (8f-2/8f-3) snc llvm lowers the full compiler
     (`59c30a7` A17 + `67fa808`) · (8f-1) selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e)
     enums+match (A14/A15) · heap drops (A11–A13) · Vec (A9/A10) · 8d refs/builtins · 8c aggregates · 8b
-    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A22; Bar B in progress —
-    `print` + nullable done, **80/123 emitting**); the **bootstrap fixed point is reached via BOTH
+    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A23; Bar B in progress —
+    `print` + nullable + secret done, **85/123 emitting**); the **bootstrap fixed point is reached via BOTH
     paths** — (b) 8g merge-to-source + (a) the self-hosted merge (`scg` discovers+merges+emits itself).
     Bar B is the remaining open scope for the full-corpus ACCEPTED flip — or an owner-deferred close.
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin local
@@ -2157,12 +2158,17 @@ For pasting into a fresh chat to bootstrap context:
     `cg_cmp_null` (extract+icmp valid bits); `is_some`/`unwrap_or` in `cg_emit_call` (FnId 2/1). ⚠ `?Struct`
     heap-box WidenToNullable + nullable drop DEFERRED (unexercised — corpus only widens primitives + `null`s
     `?Struct`); `cg_extract` now returns its dest reg. Byte-identical + behavioural + leak-free, both
-    fixed-point paths preserved, 1476 tests, four-check green. **▶ NEXT (easiest→hardest, full breakdown in
-    ADR 0045 A21):** secret+declassify (6 — STRIP-TO-INNER, thread the secrets table into `llvm_ty`'s 31
-    sites via an `Emit::lty` helper; `Type::strip_secret` exists, sentinel-types lib.rs:793) → generics
-    (mono, 7) → classes/traits/impls (MethodCall/ClassInit/QualifiedCall dispatch) → effects/handlers (18 —
-    the hairiest ~2300 lines, kont ABI) → concurrency (spawn/scope/await) → the full-corpus phase-go (8l) →
-    **ADR 0045 ACCEPTED**.
+    fixed-point paths preserved, 1476 tests, four-check green. **✅ DONE: secret + declassify** (A23, feat
+    `7b471a9`) — emitting set **80 → 85** (`c31_secret_typing`, `c31_go_no_go`, `c52_secret_ct`, `c53_ct_eq`
+    + the `c52_secret_leak` ui). STRIP-TO-INNER: `secret T` lowers identically to its inner. Oracle = a new
+    `Emit::lty(&self, ty)` strips a top-level `Type::Secret` via `program.secrets` then calls `llvm_ty`
+    (every Emit `llvm_ty(` → `self.lty(`; 4 non-Emit sites strip inline); Sentinel = `cgo_ty`/`ll_type_to`
+    strip kind-3 at their ENTRY (a stripped `secret bool` → `i1` must route to the scalar arm). declassify /
+    widen-secret are identity. **▶ NEXT (easiest→hardest, full breakdown in ADR 0045 A21):** generics (mono,
+    7 — `dump_fn` type_params Err lib.rs:198 + `llvm_ty` GenericInstance + `lower_call` generic Err; mirror
+    inkwell `generic_instances`/mono) → classes/traits/impls (MethodCall/ClassInit/QualifiedCall dispatch) →
+    effects/handlers (18 — the hairiest ~2300 lines, kont ABI) → concurrency (spawn/scope/await) → the
+    full-corpus phase-go (8l) → **ADR 0045 ACCEPTED**.
     ⚠ A genuinely single-file entry must stay a PASSTHROUGH (the merge `has_use` gate). The path-(a) build
     record + design follows (COMPLETE):
     **✅ (a-1)+(a-1b) DONE (ADR 0045 A19):**

@@ -36,11 +36,13 @@ rewrite — one module at a time, no `Vec<Program>`/HashMap) + (a-4) `scg` self-
 merge-to-source + (a) self-hosted merge.** **▶ NOW: BAR B (full-corpus parity → ADR 0045 ACCEPTED; A21/A22).**
 Per-slice lock-step (oracle `llvm_dump.rs` + Sentinel mode-4, mirroring the inkwell backend) for each
 construct the corpus uses but the selfhost compiler doesn't. ✅ `print` (FnId 0) → **57 → 73**; ✅ **nullable
-`?T`** (A22, feat `8150ccc`) → **73 → 80** (the 6 `c15_*` + `c16_linked_list_node`; `?T` layout `{ i1, T }` /
-`{ i1, ptr }` + null-lit/widen/`is_some`/`unwrap_or`/`x == null`; leak-free, both fixed-point paths preserved,
-1476 tests). NEXT (easiest→hardest): secret+declassify (6, strip-to-inner) → generics (mono, 7) →
-classes/traits/impls → effects/handlers (18 — the hairiest ~2300 lines) → concurrency → the full-corpus
-phase-go → ACCEPTED. (Full Bar-B breakdown + per-construct plan in ADR 0045 A21.) The full slice log:
+`?T`** (A22, `8150ccc`) → **73 → 80** (`?T` layout + null-lit/widen/`is_some`/`unwrap_or`/`x == null`); ✅
+**secret + declassify** (A23, feat `7b471a9`) → **80 → 85** (strip-to-inner — `secret T` lowers identically
+to its inner; `cgo_ty`/`Emit::lty` strip kind-3, declassify/widen-secret are identity; the 4 c5x/c31 secret
+fixtures + the `c52_secret_leak` ui; leak-free, both fixed-point paths preserved, 1476 tests). NEXT
+(easiest→hardest): generics (mono, 7) → classes/traits/impls → effects/handlers (18 — the hairiest ~2300
+lines) → concurrency → the full-corpus phase-go → ACCEPTED. (Full Bar-B breakdown + per-construct plan in
+ADR 0045 A21.) The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
 NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g)
