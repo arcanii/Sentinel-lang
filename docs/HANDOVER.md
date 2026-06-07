@@ -2082,19 +2082,20 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0045 A18** docs commit (`7054145` —
-    (8g) the bootstrap fixed point) atop its feat (`41f00fa` — merge-to-source `snc merge` +
-    `source_dump.rs` + the `$`-ident lexer + the two (8g) `types.sentinel` cg fixes + the capstone test).
-    The 8/N codegen chain below it: (8f-2/8f-3) snc llvm lowers the full compiler (`59c30a7` A17 +
-    `67fa808`) · (8f-1) selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e-2) match (`3b95b52`
-    A15 + `b06ddbb`) · (8e-1) enums (`4ce165f` A14 + `e9d0a7a`) · heap drops (8d-drops-1/2/3, A11–A13) ·
-    (8d-Vec-2) vec_to_array (A10) · (8d-Vec-1) Vec ops (A9) · 8d refs/builtins · 8c structs/arrays/strings
-    · 8b control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A18); the
-    **bootstrap fixed point is reached** (Bar B is the remaining open scope for the full-corpus ACCEPTED
-    flip — or an owner-deferred follow-on). ⚠ The dev pushes via GitHub Desktop — `git status` may show
-    "ahead N" (uncommitted-to-origin local commits); that's expected, never push.
+    Verify HEAD with `git log -1` — expect the **ADR 0045 A20** docs commit (`<DOCS>` — PATH (a)
+    COMPLETE, the self-hosted merge) atop the path-(a) feats: (a-4) scg self-merges (`d33397c`),
+    (a-2)+(a-3) the self-hosted merge (`ef56104`), (a-1) the un-parser (`71efa09`; A19 docs `d13d17e`),
+    atop the 8g fixed-point (A18 docs `7054145` + feat `41f00fa`; refresh `8811b33`). The 8/N codegen
+    chain below: (8f-2/8f-3) snc llvm lowers the full compiler (`59c30a7` A17 + `67fa808`) · (8f-1)
+    selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e) enums+match (A14/A15) · heap drops
+    (A11–A13) · Vec (A9/A10) · 8d refs/builtins · 8c aggregates · 8b control flow · 8a scalars+oracle.
+    ADR 0045 is ACCEPTED-shape (amendments A1–A20); the **bootstrap fixed point is reached via BOTH
+    paths** — (b) 8g merge-to-source + (a) the self-hosted merge (`scg` discovers+merges+emits itself).
+    Bar B is the remaining open scope for the full-corpus ACCEPTED flip — or an owner-deferred close.
+    ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin local
+    commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1473 tests**
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1476 tests**
     (the codegen differential [57/57] + `sentinel_codegen_matches_oracle_on_selfhost_stages` [lexer+parser
     self-host byte-identically] + `snc_llvm_lowers_the_merged_compiler` + **`sentinel_codegen_reaches_the_
     bootstrap_fixed_point`** [the (8g) capstone] + the `snc llvm` oracle tests `tests/llvm.rs`;
@@ -2135,10 +2136,19 @@ For pasting into a fresh chat to bootstrap context:
     `sentinel_codegen_reaches_the_bootstrap_fixed_point`; **1473 tests**, modes 0–4 byte-identical, `scg`
     leak-free (`leaks --atExit`: 0 leaks lowering the merged compiler), four-check green.
 
-    ▶ **RESUME AT: PATH (a) — self-host the module merge — (a-2) the rename map.** The headline (the
-    compiler compiles itself) is DONE (8g, fixed point). **The owner chose path (a)** (over Bar B / closing
-    the port): port the D.6 driver merge to Sentinel so `scg` itself discovers + merges + emits, with NO
-    Rust pre-pass — the "true full self-host". **✅ (a-1)+(a-1b) DONE (ADR 0045 A19):**
+    ▶ **RESUME AT: the OWNER CALL — Bar B, or close the port.** ✅✅ **BOTH FIXED-POINT PATHS ARE DONE:**
+    (b) 8g merge-to-source (A18) AND (a) the SELF-HOSTED MERGE (A19–A20) — `scg` (`codegen.sentinel`, which
+    now `use`s `selfhost/merge.sentinel`) DISCOVERS + MERGES + EMITS the whole multi-module compiler ITSELF,
+    with NO Rust pre-pass, `.ll`-identical to the `snc llvm` oracle (94,390 `.ll` lines for
+    `codegen`+`merge`+`types`+`parser`); `cc`→`scg'` self-reproduces; leak-free; 1476 tests, four-check
+    green (guards: `sentinel_codegen_self_merges_the_compiler_and_reaches_fixed_point` +
+    `sentinel_merge_matches_oracle_on_multi_module_stages`). **THE SENTINEL COMPILER FULLY COMPILES
+    ITSELF.** **▶ NEXT = OWNER CALL:** (1) **Bar B** (generics + nullable + classes/traits/impls +
+    effects/handlers + concurrency) → flip **ADR 0045 → ACCEPTED** over the full ~123-corpus, each its own
+    slice via the per-slice method (oracle + Sentinel mode-4 in lock-step, golden + seed, leaks + four-check);
+    OR (2) **declare the self-host port CLOSED at the fixed-point** (Revisit D7/D10 — the compiler fully
+    self-hosts without Bar B). The path-(a) build record + design follows (now COMPLETE):
+    **✅ (a-1)+(a-1b) DONE (ADR 0045 A19):**
     `selfhost/merge.sentinel` — a Sentinel un-parser (port of `source_dump.rs`) re-emitting a parsed
     program as re-parseable source (fns + structs + enums + the full expr/stmt/type grammar);
     round-trips the real single-module stages BYTE-IDENTICAL (`snc llvm` unparsed == orig: `lexer`
@@ -2164,17 +2174,13 @@ For pasting into a fresh chat to bootstrap context:
     variant/op names — mirror the Rust `rewrite_expr`); (a-3) BFS discovery (read entry, follow `use` edges,
     build `<root>/a/b.sentinel` paths, read each); (a-4) wire `discover_and_merge` into `codegen.sentinel`'s
     `main` (then `types::run(merged, 4, …)`) + the capstone: `scg` discovers+merges+emits == the `snc llvm`
-    oracle, `cc`→`scg'` self-reproduces. Consider a `snc merge`-AST differential oracle (the Rust
-    `merge_modules` AST vs the Sentinel merge) to validate per-slice. Consider a `snc merge`-AST differential oracle
-    (the Rust `merge_modules` AST vs the Sentinel merge) to validate per-slice. ⚠ The leak GATE is the
-    **`leaks --atExit` sweep** (codesign: entitlements plist w/ get-task-allow → `codesign -s - -f
-    --entitlements ent.plist ./bin` → `leaks --atExit -- ./bin`), NOT the differential. ⚠⚠ **The
-    behavioural test is ~87s** — SAMPLE on changed fixtures, full suite ONCE as the final gate. The Rust
-    `snc merge` + `source_dump.rs` (the proven reference) + `merge_modules`/`Renamer`/`rewrite_*`
-    (sentinel-resolve/src/lib.rs:1416-1949) + `discover_module_graph` (main.rs:607) are the spec to port.
-    **DEFERRED alternative (if path (a) stalls):** Bar B (generics/nullable/classes/effects/concurrency)
-    flips ADR 0045 → ACCEPTED over the full ~123-corpus; or declare the port closed at the fixed-point
-    (Revisit D7/D10). The codegen history that built the fixed point is below.
+    oracle, `cc`→`scg'` self-reproduces. ⚠ The leak GATE is the **`leaks --atExit` sweep** (codesign:
+    entitlements plist w/ get-task-allow → `codesign -s - -f --entitlements ent.plist ./bin` →
+    `leaks --atExit -- ./bin`), NOT the differential. ⚠⚠ **The behavioural test is ~84s** — SAMPLE on
+    changed fixtures, full suite ONCE as the final gate. (Path (a)'s spec was the Rust `snc merge` +
+    `source_dump.rs` + `merge_modules`/`Renamer`/`rewrite_*` (sentinel-resolve/src/lib.rs:1416-1949) +
+    `discover_module_graph` (main.rs:607) — all now ported to `selfhost/merge.sentinel`.) The codegen +
+    self-host history that built this is below.
 
     NEXT = **(8/N) CODEGEN — the GRAND FINALE + the bootstrap fixed-point — is OPENED; ADR
     0045 PROPOSED** (its own kickoff, the 0039–0044 cadence), the 3 design calls SETTLED WITH

@@ -747,6 +747,40 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     (a-4) wire `discover_and_merge` into `codegen.sentinel`'s `main` (then `types::run(merged, 4, …)`) +
     the capstone (`scg` discovers+merges+emits == the `snc llvm` oracle, `cc`→`scg'` self-reproduces).
 
+- **A20 — PATH (a) COMPLETE: THE SELF-HOSTED MERGE — THE TRUE FULL SELF-HOST.** `scg`
+  (`codegen.sentinel`, which now `use`s `merge.sentinel`) **DISCOVERS + MERGES + EMITS the whole
+  multi-module compiler ITSELF — with NO Rust merge pre-pass.** It reads the multi-module entry, follows
+  the `use` edges, merges in Sentinel, and lowers the merged program to `.ll` **byte-identical to the `snc
+  llvm` oracle** (94,390 `.ll` lines for the full `codegen`+`merge`+`types`+`parser` graph); `cc` that
+  `.ll` → `scg'`, which re-emits the same `.ll` byte-for-byte (the fixed point). Leak-free; 1476 tests,
+  four-check green. (a-2)+(a-3) feat `ef56104`, (a-4) feat `d33397c`.
+  - **(a-2)+(a-3) THE SELF-HOSTED MERGE.** BFS discovery over `use` edges + a per-module rename map + the
+    rewrite fused into the un-parser. **🔑 The enabler: each module's rename map is SELF-CONTAINED** (its
+    own top-level names qualified by its `$`-prefix + each `use a::b::Item` → `a$b$Item`, computed from the
+    use path alone — `merge_modules` never cross-references other modules to build a map), so modules
+    process ONE AT A TIME (re-parse per module — NO `Vec<Program>`, NO HashMap; flat parallel pools, the
+    resolve/types idiom). The rewrite fuses into `emit_expr` via `emit_name` at the qualify sites (Call
+    callee / StructLit-ClassInit-Qcall names / type Idents / Pattern enum / Handle-Perform effects; never
+    `Var`/locals/field/method/variant/op — mirroring the Rust `rewrite_expr`); `use`s are stripped; the
+    entry's `main` keeps its symbol. **Matches the Rust short-circuit:** a genuinely single-file entry (no
+    `use`) is a PASSTHROUGH (no qualify), gated on `has_use` of the entry — so the existing single-file
+    `scg` tests (corpus/seeds/selfhost-stages/fixed-point) hold unchanged. Proven: the merged `types`
+    (83,458 `.ll`) and `codegen` (83,536) match the oracle byte-for-byte.
+  - **(a-4) `scg` SELF-MERGES.** `merge.sentinel`'s body is a `pub fn merge_source() -> [u8]`;
+    `codegen.sentinel`'s `main` is `merge_source()` → `types::run(merged, 4, …)` — so ONE binary does the
+    whole pipeline (discover → merge → lex → … → codegen). Tests:
+    `sentinel_merge_matches_oracle_on_multi_module_stages` + `sentinel_merge_unparser_round_trips_single_
+    module_stages` (path-(a) un-parser/merge) and `sentinel_codegen_self_merges_the_compiler_and_reaches_
+    fixed_point` (the capstone).
+  - **⚠ FALSE-ALARM, recorded:** the data-model probe's "heap crash" was a misread — a probe's exit 139
+    was its correct return value (`53+48+19+19`), not SIGSEGV (`128+11`); `lldb` showed a clean exit. No
+    bug; the spine was sound all along.
+  - **BOTH fixed-point paths are now reached:** path (b) (8g, A18 — Rust merge-to-source feeding
+    single-file `scg`) AND path (a) (A20 — `scg` self-merges). The headline self-host milestone is
+    doubly-secured. **REMAINING for ADR 0045 → ACCEPTED:** Bar B (generics + nullable + classes/traits/
+    impls + effects/handlers + concurrency) for full ~123-corpus parity — or re-scope it deferred and
+    declare the port closed (Revisit D7/D10).
+
 ## Decision
 
 ### D1. Goal.

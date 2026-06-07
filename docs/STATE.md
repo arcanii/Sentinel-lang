@@ -22,13 +22,18 @@ point). Owner-chosen path (b) merge-to-source (`snc merge` = `merge_modules` + a
 `source_dump.rs` un-parser, fed to the single-file `scg`; `$`-in-identifier lexer extension);
 two (8g)-revealed `types.sentinel` cg gaps fixed to match the oracle (field-place GEP base →
 the var's alloca slot; `match` `_` wildcard → final-else body+br, not `unreachable`). 1473
-tests, modes 0–4 byte-identical, `scg` leak-free, four-check green. **▶ NOW BUILDING PATH (a)**
-(owner-chosen — self-host the module merge so `scg` discovers+merges+emits with no Rust pre-pass;
-ADR 0045 A19): (a-1)+(a-1b) DONE — `selfhost/merge.sentinel`, a Sentinel un-parser (port of
-`source_dump.rs`) re-emitting a parsed program as re-parseable source, round-trips the real
-single-module stages byte-identical (`lexer`/`parser`: `snc llvm` unparsed == orig), leak-free,
-1474 tests. NEXT = (a-2) per-module rename map + fused rewrite; (a-3) BFS discovery; (a-4) wire
-into `codegen.sentinel` + the capstone. (Bar B — generics/nullable/classes/effects/concurrency —
+tests, modes 0–4 byte-identical, `scg` leak-free, four-check green. **✅ PATH (a) COMPLETE — THE TRUE
+FULL SELF-HOST (owner-chosen; ADR 0045 A19–A20):** `selfhost/merge.sentinel` ports the D.6 module
+merge to Sentinel, and `codegen.sentinel` now `use`s it — so **`scg` DISCOVERS + MERGES + EMITS the
+whole multi-module compiler ITSELF, with NO Rust pre-pass**, lowering it to `.ll` byte-identical to
+the `snc llvm` oracle (94,390 `.ll` lines for the full `codegen`+`merge`+`types`+`parser` graph);
+`cc`→`scg'` self-reproduces; leak-free. (a-1)+(a-1b) the Sentinel un-parser (port of `source_dump.rs`)
++ (a-2)+(a-3) the self-hosted merge (BFS discovery + per-module SELF-CONTAINED rename map + fused
+rewrite — one module at a time, no `Vec<Program>`/HashMap) + (a-4) `scg` self-merges (`merge_source` →
+`types::run`). **1476 tests**, four-check green; guarded by
+`sentinel_codegen_self_merges_the_compiler_and_reaches_fixed_point` +
+`sentinel_merge_matches_oracle_on_multi_module_stages`. **BOTH fixed-point paths now reached — (b) 8g
+merge-to-source + (a) self-hosted merge.** (Bar B — generics/nullable/classes/effects/concurrency —
 remains for ADR 0045 → ACCEPTED over the full ~123 corpus, or a deferred close.) The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
