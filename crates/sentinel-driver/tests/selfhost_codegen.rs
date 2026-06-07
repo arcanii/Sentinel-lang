@@ -37,6 +37,9 @@ fn build_sentinel_codegen(tmp: &Path) -> PathBuf {
         .expect("stage parser.sentinel");
     std::fs::copy(root.join("selfhost/types.sentinel"), tmp.join("types.sentinel"))
         .expect("stage types.sentinel");
+    // (8g) path (a): codegen.sentinel now `use`s merge.sentinel (self-hosted discover+merge).
+    std::fs::copy(root.join("selfhost/merge.sentinel"), tmp.join("merge.sentinel"))
+        .expect("stage merge.sentinel");
     let entry = tmp.join("codegen.sentinel");
     std::fs::copy(root.join("selfhost/codegen.sentinel"), &entry).expect("stage codegen.sentinel");
     let bin = tmp.join("scg");
@@ -433,6 +436,93 @@ fn sentinel_codegen_reaches_the_bootstrap_fixed_point() {
         l2.stdout,
         l1.stdout,
         "the bootstrap fixed point does not hold: scg' re-emitted {} bytes vs scg's {}",
+        l2.stdout.len(),
+        l1.stdout.len()
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// (8g) PATH (a) — THE TRUE FULL SELF-HOST. `scg` (`codegen.sentinel`, which now `use`s
+/// the self-hosted `merge.sentinel`) DISCOVERS + MERGES + EMITS the whole multi-module
+/// compiler ITSELF — no Rust merge pre-pass. It reads the multi-module entry directly,
+/// follows the `use` edges, merges in Sentinel, and lowers the merged program to `.ll`
+/// BYTE-IDENTICAL to the `snc llvm` oracle; `cc` that `.ll` → `scg'`, which re-emits the
+/// same `.ll` byte-for-byte (the fixed point). The entry is staged as `input.sentinel`
+/// (the name `merge_source` reads) so its stem matches the oracle's.
+#[test]
+fn sentinel_codegen_self_merges_the_compiler_and_reaches_fixed_point() {
+    let tmp =
+        std::env::temp_dir().join(format!("snc_patha_capstone_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    // Builds scg from codegen.sentinel + merge + types + parser (the self-merging compiler).
+    let scg = build_sentinel_codegen(&tmp);
+
+    // The run dir: the multi-module compiler, with `codegen.sentinel` as the entry
+    // (`input.sentinel`) and its `use`-reachable deps alongside.
+    let run = tmp.join("run");
+    std::fs::create_dir_all(&run).expect("create run dir");
+    let root = workspace_root();
+    std::fs::copy(root.join("selfhost/codegen.sentinel"), run.join("input.sentinel"))
+        .expect("stage codegen as input.sentinel");
+    for dep in ["merge", "types", "parser"] {
+        std::fs::copy(
+            root.join("selfhost").join(format!("{dep}.sentinel")),
+            run.join(format!("{dep}.sentinel")),
+        )
+        .expect("stage dependency");
+    }
+
+    // The Rust oracle: `snc llvm` on the entry (discovers + merge_modules + dumps).
+    let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(run.join("input.sentinel"))
+        .output()
+        .expect("run snc llvm (oracle)");
+    assert!(
+        oracle.status.success(),
+        "snc llvm failed on the multi-module compiler entry:\n{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+
+    // scg discovers + merges + emits ITSELF (reads ./input.sentinel, follows `use` edges).
+    let l1 = Command::new(&scg).current_dir(&run).output().expect("run scg (self-merge)");
+    assert!(l1.status.success(), "scg failed:\n{}", String::from_utf8_lossy(&l1.stderr));
+    assert_eq!(
+        l1.stdout,
+        oracle.stdout,
+        "scg's self-merge+emit diverged from the oracle (scg {} vs oracle {} bytes)",
+        l1.stdout.len(),
+        oracle.stdout.len()
+    );
+
+    // scg' = cc(L1); L2 = scg'(compiler); assert L2 == L1 (the fixed point).
+    let runtime = Path::new(env!("CARGO_BIN_EXE_snc"))
+        .parent()
+        .expect("snc binary dir")
+        .join("libsentinel_runtime.a");
+    let l1_path = tmp.join("L1.ll");
+    std::fs::write(&l1_path, &l1.stdout).expect("write L1.ll");
+    let scg_prime = tmp.join("scg_prime");
+    let cc = Command::new("cc")
+        .arg(&l1_path)
+        .arg(&runtime)
+        .arg("-o")
+        .arg(&scg_prime)
+        .output()
+        .expect("run cc on the scg-emitted .ll");
+    assert!(
+        cc.status.success(),
+        "cc of the scg-emitted .ll failed:\n{}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+    let l2 = Command::new(&scg_prime).current_dir(&run).output().expect("run scg'");
+    assert!(l2.status.success(), "scg' failed:\n{}", String::from_utf8_lossy(&l2.stderr));
+    assert_eq!(
+        l2.stdout,
+        l1.stdout,
+        "path (a) fixed point does not hold: scg' re-emitted {} bytes vs scg's {}",
         l2.stdout.len(),
         l1.stdout.len()
     );

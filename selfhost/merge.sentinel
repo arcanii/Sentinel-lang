@@ -1375,7 +1375,11 @@ fn has_use(k: &Vec<i64>) -> bool {
 
 // --- driver: BFS discover + per-module rename + emit --------------------------
 
-fn main() -> i64 {
+// Discover (BFS over `use` edges) + merge the multi-module program rooted at
+// `./input.sentinel` into one `$`-qualified source, returned as `[u8]`. Reusable by
+// `codegen.sentinel` (so `scg` discovers + merges + emits in ONE binary) and by the
+// standalone `main` below.
+pub fn merge_source() -> [u8] {
     let mut c: MergeCtx = MergeCtx {
         qpath: vec_new(),
         qps: vec_new(),
@@ -1419,7 +1423,11 @@ fn main() -> i64 {
         emit_module(&mut merged, &c, &k, &s, &e, &msrc);
         scan = scan + 1;
     }
-    let arr: [u8] = vec_to_array(merged);
+    vec_to_array(merged)
+}
+
+fn main() -> i64 {
+    let arr: [u8] = merge_source();
     print_bytes(arr);
     0
 }

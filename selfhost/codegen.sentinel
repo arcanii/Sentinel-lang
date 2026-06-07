@@ -17,11 +17,13 @@
 //
 // (Module chain: codegen → types → parser; the D.6 merge follows the `use` edges.)
 
+// (8g) path (a): `scg` discovers + merges the multi-module program ITSELF (via the
+// self-hosted `merge_source`, no Rust pre-pass), then lowers the merged source.
 use types::run;
+use merge::merge_source;
 
 fn main() -> i64 {
-    let inp_path: [u8] = "input.sentinel";
-    let inp: [u8] = read_file(inp_path);
+    let inp: [u8] = merge_source();
     let mut result: Vec<u8> = vec_new();
     run(inp, 4, &mut result);
     let arr: [u8] = vec_to_array(result);

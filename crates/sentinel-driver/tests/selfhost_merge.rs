@@ -129,8 +129,9 @@ fn sentinel_merge_matches_oracle_on_multi_module_stages() {
     let root = workspace_root();
 
     // (entry stage, dependency stages reachable via `use`). `types` uses `parser`;
-    // `codegen` uses `types` (which uses `parser`).
-    let cases: &[(&str, &[&str])] = &[("types", &["parser"]), ("codegen", &["types", "parser"])];
+    // `codegen` uses `merge` + `types` (which both use `parser`).
+    let cases: &[(&str, &[&str])] =
+        &[("types", &["parser"]), ("codegen", &["merge", "types", "parser"])];
 
     for (entry, deps) in cases {
         let work = tmp.join(entry);
