@@ -2082,7 +2082,7 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0045 A21** docs commit (`<DOCS>` — Bar B opened +
+    Verify HEAD with `git log -1` — expect the **ADR 0045 A21** docs commit (`749d32a` — Bar B opened +
     `print`) atop the `print` feat (`391ae58`) atop the **A20** path-(a) commit (`6355c23` — PATH (a)
     COMPLETE, the self-hosted merge) atop the path-(a) feats: (a-4) scg self-merges (`d33397c`),
     (a-2)+(a-3) the self-hosted merge (`ef56104`), (a-1) the un-parser (`71efa09`; A19 docs `d13d17e`),
