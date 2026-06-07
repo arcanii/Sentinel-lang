@@ -870,6 +870,43 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     tests). **NEXT: generics (mono)** — `dump_fn` type_params Err (lib.rs:198), `llvm_ty` GenericInstance,
     `lower_call` generic Err; mirror inkwell's `generic_instances`/mono.
 
+- **A24 — BAR B: generics, sub-slice (a) — generic STRUCT instances LANDED (feat `d3be39b`).** The generics
+  slice splits into **(a) generic struct instances** (this) + **(b) generic fns / monomorphization** (next).
+  A concrete `Decl<args>` (`Box<i64>`, `Pair<i64,i64>`, `Holder<[i64]>`) lowers like a plain struct, but
+  its LLVM type is named **STRUCTURALLY** (`%Box_i64`, `%Holder_arr_i64`) — NOT by interner id, because the
+  Rust and Sentinel type-checkers may intern instances in different orders, so a structural name (mirroring
+  inkwell `mangle_generic_struct_name`, lib.rs:2198) is order-independent. The emitting set grew **85 → 87**
+  (`c17_box`, `c25_generic_struct_array_drop`). (The other c17 fixtures need generic FNS / mono → (b).)
+  - **Oracle:** `llvm_ty` now takes `&TypedProgram` (threaded — this UNIFIED the A23 secret strip with the
+    new `GenericInstance` arm; `Emit::lty` forwards, the 4 dump/dump_fn sites pass `program`). `mangle_type`
+    / `mangle_instance` (local ports). Pass 0 emits `%<mangled> = type { <substituted field types> }` for
+    each concrete instance (`Type::substitute` on the decl fields by the instance args; abstract
+    TypeParam-bearing instances skipped via `type_has_typeparam`). `needs_drop` /
+    `emit_drop_for_binding` gain GenericInstance arms (substitute fields, recurse) → `Holder<[i64]>` frees
+    its `[i64]` field.
+  - **Sentinel mode-4:** `cgo_ty`/`ll_type_to` render kind-10 via `cg_mangle_to` (a structural mangle to a
+    buffer); `cg_has_typeparam` / `cg_struct_is_generic` (a generic decl = a TypeParam-bearing field — the
+    Sentinel doesn't track a struct type-param count) skip generic decls + abstract instances; `cg_pass0`
+    iterates the type interner (kind 10) for concrete instances; `cg_needs_drop`/`cg_emit_drop` + the
+    field-access arm handle generic-instance targets. ⚠⚠ **All new helpers BIND `(*c).ta[idx]` etc. to a
+    local before a recursive `&mut c` call** — the nested-`&mut`-ctx quirk yields a WRONG value otherwise
+    (this cost a debug cycle: `cg_has_typeparam(c, (*c).fldty[i])` silently read garbage → generic decls
+    weren't skipped + field subst gave `i64`).
+  - **⚠ THE UN-PARSER (`merge.sentinel`) had to become generics-aware.** `scg` = `merge_source` (un-parse)
+    + `types::run(4)`; `merge_source` ALWAYS re-emits via `emit_module` (no raw passthrough even for a
+    single-file no-`use` entry). `emit_struct_decl` did `skip_type_params` — DROPPING `<T>` — so a re-emitted
+    `struct Box<T>` became `struct Box`, and the re-parse scanned `value: T` as an unbound `i64` (the merge
+    was built generics-unaware — the selfhost sources use none). Fixed: a new **`emit_type_params`** emits
+    `<T0, T1, …>` verbatim (type-param names are local, never module-renamed). `emit_type` already preserved
+    generic ANNOTATIONS (`Box<i64>`). Non-generic decls are byte-unchanged → the fixed point holds. (The fn
+    `emit_fn_decl` `<T>` fix is bundled with (b), where generic fns are exercised.)
+  - **Validation:** c17_box + c25 byte-identical (`scg` == `snc llvm`) + behaviourally equal to inkwell
+    (42 / 66); `scg` leak-free on c25 (the `Holder<[i64]>` drop). Modes 0–3 byte-identical; BOTH fixed-point
+    paths preserved (the un-parser change is generic-only). **NEXT: (b) generic fns / mono** — the
+    discovery worklist (`collect_mono_instantiations`) + substituted mono defines (`TypedFnDef::substitute`)
+    + `mangle_mono_name` (`id__i64`) + `lower_call` mono dispatch (oracle); a Sentinel mono pass that
+    re-walks each generic fn body with the type-param scope bound to concrete args; + `emit_fn_decl`'s `<T>`.
+
 ## Decision
 
 ### D1. Goal.
