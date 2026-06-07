@@ -2135,12 +2135,18 @@ For pasting into a fresh chat to bootstrap context:
     `sentinel_codegen_reaches_the_bootstrap_fixed_point`; **1473 tests**, modes 0–4 byte-identical, `scg`
     leak-free (`leaks --atExit`: 0 leaks lowering the merged compiler), four-check green.
 
-    ▶ **RESUME AT: BUILD PATH (a) — self-host the module merge.** The headline (the compiler compiles
-    itself) is DONE (8g, fixed point). **The owner chose path (a)** (over Bar B / closing the port): port
-    the D.6 driver merge to Sentinel so `scg` itself discovers + merges + emits, with NO Rust pre-pass —
-    the "true full self-host". **Spine PROVEN, NO blocker** (probe /tmp/sg/pa; an earlier "heap crash" was
-    a FALSE ALARM — exit 139 was a probe's correct return value 53+48+19+19, misread as SIGSEGV; lldb
-    confirmed a clean exit). **DESIGN (settled):** each module's rename map is SELF-CONTAINED
+    ▶ **RESUME AT: PATH (a) — self-host the module merge — (a-2) the rename map.** The headline (the
+    compiler compiles itself) is DONE (8g, fixed point). **The owner chose path (a)** (over Bar B / closing
+    the port): port the D.6 driver merge to Sentinel so `scg` itself discovers + merges + emits, with NO
+    Rust pre-pass — the "true full self-host". **✅ (a-1)+(a-1b) DONE (ADR 0045 A19):**
+    `selfhost/merge.sentinel` — a Sentinel un-parser (port of `source_dump.rs`) re-emitting a parsed
+    program as re-parseable source (fns + structs + enums + the full expr/stmt/type grammar);
+    round-trips the real single-module stages BYTE-IDENTICAL (`snc llvm` unparsed == orig: `lexer`
+    4,390 / `parser` 21,618 `.ll` lines), leak-free, guarded by
+    `sentinel_merge_unparser_round_trips_single_module_stages`; 1474 tests, four-check green. **Spine
+    PROVEN, NO blocker** (an earlier "heap crash" was a FALSE ALARM — exit 139 was a probe's correct return
+    value 53+48+19+19, misread as SIGSEGV; lldb confirmed a clean exit). **DESIGN (settled):** each
+    module's rename map is SELF-CONTAINED
     (`merge_modules` builds it from that module's own top-level names [qualified by its `$`-prefix] + its
     `use a::b::Item` → `a$b$Item`, never cross-referencing other modules) → `scg` processes ONE MODULE AT A
     TIME (re-parse per module; NO `Vec<Program>`/HashMap needed) and the rewrite FUSES into a Sentinel
@@ -2150,12 +2156,16 @@ For pasting into a fresh chat to bootstrap context:
     mirror the Rust `rewrite_expr`/`rewrite_type_expr`). BFS discover+emit can fuse (one parse/module, BFS
     order = merge order). **INTEGRATION:** `codegen.sentinel main` does `merged = discover_and_merge(entry)`
     then `types::run(merged, 4, result)` (the existing pipeline, unchanged); `types::run` is TOKEN-DRIVEN
-    (tokenize → walk), so the un-parser mirrors that. **SLICES:** (a-1) single-module passthrough un-parser
-    (un-parse one file, no rename/discovery → `scg`'s `.ll` == oracle; builds the un-parser bulk on the
-    simplest case); (a-2) per-module rename map (flat parallel pools, the resolve/types idiom) + fused
-    rewrite at name sites; (a-3) BFS discovery (read entry, follow `use` edges, build `<root>/a/b.sentinel`
-    paths, read each); (a-4) wire it into `codegen.sentinel` + the capstone: `scg` discovers+merges+emits
-    == the `snc llvm` oracle, `cc`→`scg'` self-reproduces. Consider a `snc merge`-AST differential oracle
+    (tokenize → walk), so the un-parser mirrors that. **SLICES:** ✅ (a-1)+(a-1b) DONE — the single-module
+    un-parser (`selfhost/merge.sentinel`; round-trips `lexer`/`parser` byte-identical, leak-free);
+    **▶ (a-2) NEXT** — per-module rename map (flat parallel pools, the resolve/types idiom) + the rewrite
+    FUSED into `emit_expr` (look up the rename map at name-emit sites — Call callee / StructLit-ClassInit-
+    Qcall names / type Idents / Pattern enum / Handle-Perform effects; NEVER `Var`/locals/field/method/
+    variant/op names — mirror the Rust `rewrite_expr`); (a-3) BFS discovery (read entry, follow `use` edges,
+    build `<root>/a/b.sentinel` paths, read each); (a-4) wire `discover_and_merge` into `codegen.sentinel`'s
+    `main` (then `types::run(merged, 4, …)`) + the capstone: `scg` discovers+merges+emits == the `snc llvm`
+    oracle, `cc`→`scg'` self-reproduces. Consider a `snc merge`-AST differential oracle (the Rust
+    `merge_modules` AST vs the Sentinel merge) to validate per-slice. Consider a `snc merge`-AST differential oracle
     (the Rust `merge_modules` AST vs the Sentinel merge) to validate per-slice. ⚠ The leak GATE is the
     **`leaks --atExit` sweep** (codesign: entitlements plist w/ get-task-allow → `codesign -s - -f
     --entitlements ent.plist ./bin` → `leaks --atExit -- ./bin`), NOT the differential. ⚠⚠ **The

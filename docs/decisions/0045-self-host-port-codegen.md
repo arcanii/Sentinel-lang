@@ -717,6 +717,36 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     Bar B as a deferred follow-on and declare the port closed at the fixed-point (Revisit, below) — the
     headline (compiler compiles itself) is reached.
 
+- **A19 — PATH (a), (a-1)+(a-1b): THE SINGLE-MODULE SENTINEL UN-PARSER.** The owner chose **path (a)**
+  (self-host the D.6 module merge so `scg` discovers + merges + emits with NO Rust pre-pass — the "true
+  full self-host") over Bar B / closing the port. Its foundation is a Sentinel un-parser:
+  **`selfhost/merge.sentinel`**, a parsed program re-emitted as re-parseable source (the Sentinel port of
+  the Rust `source_dump.rs`), reusing the parser's AST enums + `tokenize`/`parse_block`/`parse_type`/
+  `parse_params` + the **consuming-walk structure of the parser's own `dump_*`** (which already walk + emit
+  a [different] text from the AST). It handles the **full selfhost subset** — fns + structs + enums + every
+  expr/stmt/type/pattern. **Round-trip PROVEN byte-identical** on the real single-module stages: `snc llvm`
+  on the un-parsed source == `snc llvm` on the original — `lexer.sentinel` (4,390 `.ll` lines) +
+  `parser.sentinel` (21,618 `.ll` lines); leak-free (`leaks --atExit` 0 un-parsing `parser.sentinel`);
+  guarded by `sentinel_merge_unparser_round_trips_single_module_stages`; 1474 tests, four-check green.
+  - **🔑 EMISSION RULES (from `source_dump.rs`).** Parens are AST-transparent (no `Paren` node) → wrap
+    EVERY compound expr in `( … )` (preserves precedence + sidesteps positional ambiguity, no
+    `allow_struct_lit` re-derivation), **EXCEPT `if`/`while`/fn-body blocks** which must stay literal
+    `{ … }` (emitted raw via `emit_block_raw` — the parser requires a brace block there, not `(`).
+    Op-codes → symbols (mirroring the parser's `bsym`/`usym`: Binary 1-15, Unary 1-5); string/char bytes
+    re-encode via `\xHH` (or a bare printable byte); decls + struct fields / enum variants emit with a
+    trailing comma (re-parse accepts it).
+  - **DATA-MODEL spine proven** (probe): `scg` can read multiple files, build paths at runtime, tokenize
+    each sequentially, and accumulate into one `Vec<u8>` — with NO `Vec<Program>` held (each module is
+    parsed, used, dropped before the next), because each module's rename map is self-contained. ⚠ An
+    earlier "heap crash" blocker was a FALSE ALARM — a probe's exit 139 was its correct return value
+    (`53+48+19+19`), misread as SIGSEGV (`128+11`); `lldb` confirmed a clean exit. No bug.
+  - **NEXT:** (a-2) the per-module rename map (flat parallel pools, the resolve/types idiom) + the rewrite
+    FUSED into the un-parser (look up each name-emit site: Call callee / StructLit-ClassInit-Qcall names /
+    type Idents / Pattern enum / Handle-Perform effects; never `Var`/locals/field/method/variant/op names);
+    (a-3) BFS discovery (read entry, follow `use` edges, build `<root>/a/b.sentinel` paths, read each);
+    (a-4) wire `discover_and_merge` into `codegen.sentinel`'s `main` (then `types::run(merged, 4, …)`) +
+    the capstone (`scg` discovers+merges+emits == the `snc llvm` oracle, `cc`→`scg'` self-reproduces).
+
 ## Decision
 
 ### D1. Goal.

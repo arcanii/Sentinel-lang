@@ -22,9 +22,14 @@ point). Owner-chosen path (b) merge-to-source (`snc merge` = `merge_modules` + a
 `source_dump.rs` un-parser, fed to the single-file `scg`; `$`-in-identifier lexer extension);
 two (8g)-revealed `types.sentinel` cg gaps fixed to match the oracle (field-place GEP base →
 the var's alloca slot; `match` `_` wildcard → final-else body+br, not `unreachable`). 1473
-tests, modes 0–4 byte-identical, `scg` leak-free, four-check green. Remaining for ADR 0045 →
-ACCEPTED (full ~123 corpus): Bar B (generics/nullable/classes/effects/concurrency) — or
-re-scope it deferred and close at the fixed-point (owner call). The full slice log:
+tests, modes 0–4 byte-identical, `scg` leak-free, four-check green. **▶ NOW BUILDING PATH (a)**
+(owner-chosen — self-host the module merge so `scg` discovers+merges+emits with no Rust pre-pass;
+ADR 0045 A19): (a-1)+(a-1b) DONE — `selfhost/merge.sentinel`, a Sentinel un-parser (port of
+`source_dump.rs`) re-emitting a parsed program as re-parseable source, round-trips the real
+single-module stages byte-identical (`lexer`/`parser`: `snc llvm` unparsed == orig), leak-free,
+1474 tests. NEXT = (a-2) per-module rename map + fused rewrite; (a-3) BFS discovery; (a-4) wire
+into `codegen.sentinel` + the capstone. (Bar B — generics/nullable/classes/effects/concurrency —
+remains for ADR 0045 → ACCEPTED over the full ~123 corpus, or a deferred close.) The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
 NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g)
