@@ -2082,21 +2082,24 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — expect the **ADR 0045 A17** docs commit (`59c30a7` —
-    (8f-2/8f-3) snc llvm lowers the full self-hosting compiler) atop its feat (`67fa808`
-    multi-module `snc llvm` + the `&mut (*c).f` / `(*c).f = x` lvalue stragglers). The 8/N codegen
-    chain below it: (8f-1) selfhost stages self-host (`8b89726` A16 docs + `3c389cd` feat) ·
-    (8e-2) match (`3b95b52` A15 + `b06ddbb`) · (8e-1) enums (`4ce165f` A14 + `e9d0a7a`) · heap drops
-    (8d-drops-1/2/3, A11–A13) · (8d-Vec-2) vec_to_array (A10) · (8d-Vec-1) Vec ops (A9) · 8d
-    refs/builtins · 8c structs/arrays/strings · 8b control flow · 8a scalars+oracle. ADR 0045 is
-    ACCEPTED-shape (amendments A1–A17). ⚠ The dev pushes via GitHub Desktop — `git status` may show
+    Verify HEAD with `git log -1` — expect the **ADR 0045 A18** docs commit (`<DOCS>` —
+    (8g) the bootstrap fixed point) atop its feat (`41f00fa` — merge-to-source `snc merge` +
+    `source_dump.rs` + the `$`-ident lexer + the two (8g) `types.sentinel` cg fixes + the capstone test).
+    The 8/N codegen chain below it: (8f-2/8f-3) snc llvm lowers the full compiler (`59c30a7` A17 +
+    `67fa808`) · (8f-1) selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e-2) match (`3b95b52`
+    A15 + `b06ddbb`) · (8e-1) enums (`4ce165f` A14 + `e9d0a7a`) · heap drops (8d-drops-1/2/3, A11–A13) ·
+    (8d-Vec-2) vec_to_array (A10) · (8d-Vec-1) Vec ops (A9) · 8d refs/builtins · 8c structs/arrays/strings
+    · 8b control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A18); the
+    **bootstrap fixed point is reached** (Bar B is the remaining open scope for the full-corpus ACCEPTED
+    flip — or an owner-deferred follow-on). ⚠ The dev pushes via GitHub Desktop — `git status` may show
     "ahead N" (uncommitted-to-origin local commits); that's expected, never push.
     Clean tree; four-check green (cargo build + `cargo nextest run --workspace` + `cargo test
-    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1472 tests**
+    --doc --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`); **1473 tests**
     (the codegen differential [57/57] + `sentinel_codegen_matches_oracle_on_selfhost_stages` [lexer+parser
-    self-host byte-identically] + `snc_llvm_lowers_the_merged_compiler` [the FULL merged compiler emits] +
-    the `snc llvm` oracle tests `tests/llvm.rs`; `mir`/`ctverify`/etc. still 123/123). macOS + LLVM 18
-    (clang/llc/opt 18.1.8, arm64-apple-darwin — the (8/N) `.ll` → object → link toolchain).
+    self-host byte-identically] + `snc_llvm_lowers_the_merged_compiler` + **`sentinel_codegen_reaches_the_
+    bootstrap_fixed_point`** [the (8g) capstone] + the `snc llvm` oracle tests `tests/llvm.rs`;
+    `mir`/`ctverify`/etc. still 123/123). macOS + LLVM 18 (clang/llc/opt 18.1.8, arm64-apple-darwin — the
+    (8/N) `.ll` → object → link toolchain).
 
     STATE OF THE PORT: lexer (1/N) + parser (2/N, ADR 0039) + resolve (3/N, ADR 0040)
     + types (4/N, ADR 0041) + effect-check (5/N, ADR 0042) + borrow-check (6/N, ADR 0043)
@@ -2106,47 +2109,52 @@ For pasting into a fresh chat to bootstrap context:
     corpus, leak-free: `snc lex`/`ast`/`resolve`/`types` (123/123) / `effects` (122/122) /
     `borrow` (123/123) / `mir` (123/123) / `ctverify` (123/123). selfhost/ has lexer,
     parser, resolve, types, effects, borrow, mir, ctverify, **codegen** .sentinel. **(8/N)
-    CODEGEN is essentially DONE** (ADR 0045 A1–A17): `snc llvm` (the canonical-`.ll` oracle) +
-    `selfhost/types.sentinel` mode-4 emit byte-identical `.ll` over the whole corpus AND the
-    self-contained selfhost stages (lexer/parser self-host); the oracle lowers the FULL merged
-    compiler (~83k `.ll` lines), cc-run == inkwell, leak-free. The ONLY thing left is **(8g) the
-    bootstrap FIXED-POINT** (the Sentinel side of multi-module — see RESUME AT).
+    CODEGEN + THE BOOTSTRAP FIXED POINT — DONE** (ADR 0045 A1–A18): `snc llvm` (the canonical-`.ll`
+    oracle) + `selfhost/types.sentinel` mode-4 emit byte-identical `.ll` over the whole corpus, and
+    **`scg` (the Sentinel-built compiler) lowers the FULL merged compiler `.ll`-identical to the oracle
+    (83,536 lines) AND `cc`-ing that `.ll` yields `scg'` which re-emits the same `.ll` byte-for-byte —
+    THE SENTINEL COMPILER COMPILES ITSELF** (8g, path (b) merge-to-source). Remaining for ADR 0045 →
+    ACCEPTED over the full corpus: **Bar B** (generics/nullable/classes/effects/concurrency), or an
+    owner-deferred close at the fixed-point — see RESUME AT.
 
-    ▶ **RESUME AT: (8g) — THE BOOTSTRAP FIXED-POINT.** Codegen (8/N) is essentially DONE (ADR 0045,
-    amendments A1–A17): 8a scalars/calls, 8b control flow, 8c structs/arrays/strings, 8d builtins + refs +
-    Vec (…/`vec_to_array`) + **HEAP DROPS** (drops-1/2/3) + **ENUMS** ((8e-1) type/construct/drop; (8e-2)
-    match) + **SELF-HOST + MULTI-MODULE** (8f) — ALL byte-identical to `snc llvm` + behavioural
-    (cc==inkwell) + leak-free + modes 0–3 byte-identical (**57/57 fixtures**). 🎯🎯 **THE ORACLE NOW LOWERS
-    THE ENTIRE SELF-HOSTING COMPILER:** `snc llvm` emits every stage incl. the merged `codegen.sentinel`
-    (parser→types→codegen, **~83k `.ll` lines**), cc-run == inkwell (A17); the Sentinel `scg` self-hosts
-    its own `lexer`+`parser` byte-identically (A16) + handles every construct + lvalue form
-    (`&mut (*c).f` / `(*c).f = x`, A17). **The Bar-A construct set is PROVEN COMPLETE on the real
-    compiler.** **NEXT = (8g) the capstone — the remaining half is the SENTINEL side of multi-module.**
-    `scg` is SINGLE-FILE (reads one `input.sentinel`); the full compiler is multi-module. TWO paths to the
-    fixed-point: **(a)** port the module merge to Sentinel — `discover_module_graph` + `merge_modules` +
-    the `Renamer` (the D.6 driver machinery; qualifies every top-level name by module path + rewrites all
-    refs; ~hundreds of Rust lines — the big lift; see [[sentinel_d6_modules_surface]]) so `scg` itself
-    discovers+merges+emits; **OR (b)** a "merge-to-source" mode in the Rust `snc` (emit the merged
-    `Program` back to one `.sentinel` text) that `scg` reads as a single file — lighter, but needs the
-    merged AST (with `$`-qualified names) to round-trip to valid source. Then the **capstone assertion:**
-    `snc build` (inkwell) → `scg`; `scg` emits the (merged) compiler's `.ll` == the `snc llvm` oracle's;
-    `cc` the `.ll` → `scg'`; `scg'` emits the same `.ll` (a true fixed point — the compiler reproduces
-    itself byte-for-byte; this is *why* C5 shipped `abi-v1` + reproducible builds). A meaningful PARTIAL
-    fixed-point already holds: `scg` reproduces its own `lexer`+`parser` stages byte-identically. ⚠ The
-    leak GATE is the **`leaks --atExit` sweep** (codesign trick), NOT the
-    differential/behavioural (a missing free is byte-parity-NEUTRAL — same exit/stdout). ⚠⚠ **The
-    behavioural test is ~84s at 57 fixtures** — **SAMPLE it** (targeted inkwell-vs-cc on the changed
-    fixture(s) + new seeds; the unchanged fixtures are provably byte-identical via the corpus
-    differential), run the full suite ONCE as the final gate. The PER-SLICE METHOD: extend
-    `crates/sentinel-driver/src/llvm_dump.rs` (the oracle — a canonical `.ll` spec we define) +
-    `selfhost/types.sentinel` (the mode-4 FUSED codegen — the `cg_*` machinery:
-    `cgo_ty`/`cg_emit_*`/`cg_dst`/`cgo_operand`/`cg_fresh_block`/the `cgak`/`cgav`/`cgat` collect
-    stacks) in LOCK-STEP, byte-for-byte; PROBE the `.ll` shape with `cc` first; add a golden
-    (`tests/llvm.rs`) + a seed (`tests/selfhost_codegen.rs`); validate = the codegen differential
-    (`sentinel_codegen_matches_oracle_on_corpus`) + modes 0–3 (`selfhost_types`/`borrow`/`mir`)
-    byte-identical + the `leaks` sweep + the four-check; feat+docs commit pair (ADR 0045 amendment).
-    ⚠ Bar A only (no generics/classes/effects/nullable — the oracle Errs on them → the differential
-    skips, partial-by-Err). The codegen history that built this is below.
+    🎯🎯🎯 **(8g) THE BOOTSTRAP FIXED POINT IS REACHED (ADR 0045 A18) — THE SELF-HOST CAPSTONE. THE
+    SENTINEL COMPILER COMPILES ITSELF.** `scg` (`snc build`, inkwell) lowers the WHOLE merged compiler to
+    `.ll` **byte-identical to the `snc llvm` oracle** (83,536 lines); `cc` that `.ll` → `scg'`, which
+    re-emits the **same** `.ll` byte-for-byte (a true fixed point). Owner-chosen **path (b),
+    merge-to-source**: the Rust driver `merge_modules` + a new `crates/sentinel-driver/src/source_dump.rs`
+    un-parser print the multi-file compiler to ONE `$`-qualified `.sentinel` (`snc merge <entry>`), fed to
+    the unchanged single-file `scg` — every STAGE (lex→…→codegen) runs in `scg`; only the module-merge
+    pre-pass stays in Rust. Enablers: a `$`-in-identifier lexer extension (Rust regex +
+    `parser.sentinel`/`lexer.sentinel`, corpus-neutral); the Rust-only round-trip gate
+    (`snc llvm <merged-source>` == `snc llvm <entry>`). TWO (8g)-revealed `types.sentinel` cg gaps (only
+    in the merged `types`/`codegen`, not the corpus/lexer/parser) fixed to match the oracle: **(i)**
+    field-place GEP base — `&mut c.f`/`c.f = x` on a LOCAL struct → GEP the var's alloca SLOT
+    (`cg_slot_get`, `cg_lastvid>=0`→slot else operand), not the stale operand the A17 `cg_suppress` left
+    (which was right only for a `*c` Deref target); **(ii)** `match` `_` wildcard → body+`store`+`br merge`
+    as the final else (a save/restored `cg_m_wild` flag), not `unreachable`. Capstone test
+    `sentinel_codegen_reaches_the_bootstrap_fixed_point`; **1473 tests**, modes 0–4 byte-identical, `scg`
+    leak-free (`leaks --atExit`: 0 leaks lowering the merged compiler), four-check green.
+
+    ▶ **RESUME AT: the OWNER CALL on closing the port.** The headline (the compiler compiles itself) is
+    DONE. To flip **ADR 0045 → ACCEPTED over the full ~123-corpus**, the remaining scope is **Bar B**:
+    generics (mono + generic-struct mangling) + nullable (`?T`) + classes/traits/impls/delegates +
+    effects/handlers (perform/handle/resume-kont) + structured concurrency (spawn/scope/await) — the
+    exotic lowering the corpus exercises but the selfhost compiler does NOT use (D7/D10). Each is its own
+    slice via the SAME per-slice method (oracle + Sentinel mode-4 in lock-step, golden + seed, leaks +
+    four-check). **OR** the owner may **re-scope Bar B as a deferred post-1.0 follow-on and declare the
+    self-host port CLOSED at the fixed-point** (ADR 0045 Revisit D7/D10 explicitly allows this — the
+    selfhost compiler is fully self-hosting without Bar B). A separate strictly-stronger track: **path
+    (a)** — self-host the module merge itself (port `discover_module_graph` + `merge_modules` + the
+    `Renamer` to Sentinel, ideally with a new `snc merge`-AST differential oracle) so `scg` discovers +
+    merges with NO Rust pre-pass. **Recommend asking the owner** which of {Bar B, close-the-port, path
+    (a)} to pursue. ⚠ The leak GATE is the **`leaks --atExit` sweep** (codesign trick: entitlements plist
+    w/ get-task-allow → `codesign -s - -f --entitlements ent.plist ./bin` → `leaks --atExit -- ./bin`),
+    NOT the differential (a missing free is byte-parity-NEUTRAL). ⚠⚠ **The behavioural test is ~87s** —
+    SAMPLE it on changed fixtures, run the full suite ONCE as the final gate. PER-SLICE METHOD (Bar B):
+    extend `crates/sentinel-driver/src/llvm_dump.rs` (oracle) + `selfhost/types.sentinel` (mode-4 `cg_*`)
+    in LOCK-STEP, byte-for-byte; golden (`tests/llvm.rs`) + seed (`tests/selfhost_codegen.rs`); validate =
+    the codegen differential + modes 0–3 byte-identical + the `leaks` sweep + the four-check; feat+docs
+    commit pair (ADR 0045 amendment). The codegen history that built this is below.
 
     NEXT = **(8/N) CODEGEN — the GRAND FINALE + the bootstrap fixed-point — is OPENED; ADR
     0045 PROPOSED** (its own kickoff, the 0039–0044 cadence), the 3 design calls SETTLED WITH

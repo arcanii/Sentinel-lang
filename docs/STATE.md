@@ -14,7 +14,18 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **Phase D movement 2 — the SELF-HOST PORT — (4/N) TYPES is COMPLETE;
+Last updated: **🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
+POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
+whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and
+`cc`-ing that `.ll` yields `scg'` which re-emits the same `.ll` byte-for-byte (a true fixed
+point). Owner-chosen path (b) merge-to-source (`snc merge` = `merge_modules` + a new
+`source_dump.rs` un-parser, fed to the single-file `scg`; `$`-in-identifier lexer extension);
+two (8g)-revealed `types.sentinel` cg gaps fixed to match the oracle (field-place GEP base →
+the var's alloca slot; `match` `_` wildcard → final-else body+br, not `unreachable`). 1473
+tests, modes 0–4 byte-identical, `scg` leak-free, four-check green. Remaining for ADR 0045 →
+ACCEPTED (full ~123 corpus): Bar B (generics/nullable/classes/effects/concurrency) — or
+re-scope it deferred and close at the fixed-point (owner call). The full slice log:
+(4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
 NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g)
 EFFECTS/HANDLERS + (4h) GENERICS + (4i) CHAR/STRING + Vec<T> + CONCURRENCY + THE
@@ -283,10 +294,30 @@ coverage is PROVEN COMPLETE on the real compiler. Oracle: `lower_lvalue_ptr` gai
 into the target's pointer) + the `FieldAccess` assign target. 🔑 Sentinel needed ONE change — a
 `FieldAccess`-under-`cg_suppress` GEP branch signalling `cg_lastvid=-1`; the existing `&mut`/`SAssign`
 machinery already treats `-1` as "the operand IS the place address", so both forms fell out.
-Seed-validated (scg==oracle, cc==inkwell, leak-free); 1472 tests, four-check green. NEXT = **(8g) THE
-FIXED-POINT** — `scg` is single-file, so self-compiling the multi-module compiler needs `scg` to merge too
-(port discovery+`merge_modules`+`Renamer` to Sentinel) OR a pre-merged source; then `scg`→`.ll`→`cc`→`scg'`,
-assert `scg'` emits == `scg`.
+Seed-validated (scg==oracle, cc==inkwell, leak-free); 1472 tests, four-check green.
+**🎯🎯🎯 ✅ (8g) THE BOOTSTRAP FIXED POINT — REACHED (ADR 0045 A18) — THE SELF-HOST CAPSTONE:** the
+Sentinel codegen `scg` (`snc build`, inkwell) lowers the WHOLE multi-module self-hosting compiler AND
+reproduces it. **(1) Self-compilation:** `scg` reads the MERGED compiler source (`snc merge`) and emits
+`.ll` BYTE-IDENTICAL to the `snc llvm` oracle (83,536 `.ll` lines). **(2) Fixed point:** `cc` that `.ll`
+→ a fresh compiler `scg'`, which re-emits the SAME `.ll` byte-for-byte — the compiler reproduces its own
+output. **THE SENTINEL COMPILER COMPILES ITSELF.** Owner-chosen **path (b), merge-to-source** (ADR
+0045 D8(ii)): the Rust driver `merge_modules` + a new `source_dump.rs` un-parser print the multi-file
+compiler to ONE `$`-qualified `.sentinel` fed to the unchanged single-file `scg` (every STAGE
+lex→…→codegen runs in `scg`; only the module-merge pre-pass stays in Rust). Enablers: a `$`-in-identifier
+lexer extension (Rust regex + `parser.sentinel`/`lexer.sentinel`, corpus-neutral — `$` unused) so merged
+names round-trip; the Rust-only round-trip gate (`snc llvm <merged-source>` == `snc llvm <entry>`). TWO
+(8g)-revealed `types.sentinel` cg gaps — surfacing only in the merged `types`/`codegen` (not the
+corpus/lexer/parser) — fixed to match the oracle: **(i) field-place GEP base** (`&mut c.f`/`c.f = x` on a
+LOCAL struct → GEP the var's alloca SLOT via `cg_slot_get`, not the stale operand the A17 `cg_suppress`
+left; `cg_lastvid>=0`→slot else operand, mirroring the oracle's `lower_lvalue_ptr`); **(ii) `match`
+wildcard** (a `_` arm emits body+`store`+`br merge` as the final else via a save/restored `cg_m_wild`
+flag, not `unreachable`). Capstone test `sentinel_codegen_reaches_the_bootstrap_fixed_point`; **1473
+tests**, modes 0–4 byte-identical (8 stage differentials green), `scg` leak-free (`leaks --atExit`: 0
+leaks lowering the merged compiler), four-check green. **The headline self-host milestone is reached.**
+NEXT (optional, for ADR 0045 → ACCEPTED over the full ~123 corpus): **Bar B** — generics + nullable +
+classes/traits/impls + effects/handlers + concurrency (D7/D10); OR re-scope Bar B as a deferred
+follow-on and close the port at the fixed-point (owner call). Path (a) — self-hosting the module merge
+itself — is a separable strictly-stronger follow-on.
 The kickoff ADR's own line below was the prior NEXT pointer (now superseded).
 The back-half scout REFRAMED the handover's "HIR/MIR → codegen": **HIR is a no-op** (a 101-line
 identity bundle), **MIR is an analysis SIDE-BRANCH** (feeds only `verify_constant_time`;

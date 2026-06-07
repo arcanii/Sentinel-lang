@@ -661,6 +661,62 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     pre-merged single source fed to `scg`. Then: `scg` emits the compiler's `.ll`; `cc` → `scg'`; assert
     `scg'` emits == `scg` — byte-for-byte self-compilation.
 
+- **A18 — (8g) THE BOOTSTRAP FIXED POINT — the self-host capstone (path b, merge-to-source):** the
+  Sentinel codegen `scg` (`snc build` via inkwell) lowers the WHOLE multi-module self-hosting compiler
+  and REPRODUCES it. **(1) Self-compilation:** `scg` reads the MERGED compiler source (`snc merge`) and
+  emits `.ll` **byte-identical to the `snc llvm` oracle** (83,536 `.ll` lines). **(2) Fixed point:** `cc`
+  that `.ll` → a fresh compiler `scg'`, which re-emits the **same** `.ll` byte-for-byte — the compiler
+  reproduces its own output (why C5 shipped `abi-v1` + reproducible builds, ADR 0029). Validated by
+  `sentinel_codegen_reaches_the_bootstrap_fixed_point` (the (8g) capstone test); 1473 tests, modes 0–4
+  byte-identical, `scg` leak-free (`leaks --atExit`: 0 leaks lowering the merged compiler), four-check
+  green. **The headline self-host milestone: the Sentinel compiler compiles itself.**
+  - **🔑 PATH (b), MERGE-TO-SOURCE [owner-chosen, D8(ii)].** Rather than port the D.6 driver merge to
+    Sentinel (path a — `discover_module_graph` + `merge_modules` + the `Renamer`, ~550 intricate lines),
+    the Rust driver merges the multi-file compiler into one `Program` (the existing `merge_modules`) and
+    prints it back to a single `.sentinel` file fed to the unchanged single-file `scg`. Every compiler
+    STAGE (lex → resolve → types → effect → borrow → ctverify → codegen) runs inside `scg`; only the
+    module-merge PRE-PASS stays in Rust (driver plumbing, ADR-sanctioned). Path (a) — self-hosting the
+    merge itself — is a strictly-stronger, separable follow-on (ideally with its own `snc merge`-AST
+    oracle).
+  - **`$`-in-identifier lexer extension.** `merge_modules` qualifies every top-level name by module path
+    (`util$add`, `parser$Expr`). `$` was unused in Sentinel syntax and absent from every corpus fixture,
+    so admitting it as an identifier-CONTINUATION char (Rust lexer regex `[A-Za-z_][A-Za-z0-9_$]*` +
+    `selfhost/parser.sentinel`'s `is_ident_cont` + `lexer.sentinel` for port faithfulness) is
+    byte-neutral for all existing source and lets the `$`-qualified merged names round-trip through
+    re-parse.
+  - **`source_dump.rs` + `snc merge`.** A faithful `Program → .sentinel` un-parser over the Bar-A subset
+    (fns/structs/enums + every stmt/expr/type/pattern/`match`), Err-loud on exotic kinds. **Fidelity by
+    construction:** parens are AST-transparent (no `Paren` node, ast/lib.rs:147) → every compound expr is
+    wrapped `( … )`, preserving precedence AND sidestepping positional ambiguity (struct-lit-in-head etc.)
+    with no `allow_struct_lit` re-derivation; decls emit per kind in vector order (the parser buckets by
+    kind → intra-kind order fixes the IDs); string/char bytes re-encode via `\xHH`. `snc merge` =
+    `discover_module_graph` → `merge_modules` → `source_dump`. **Round-trip proven** before the capstone:
+    `snc llvm <merged-source>` == `snc llvm <multi-module-entry>` byte-for-byte over the selfhost `types`
+    and `codegen` (the Rust-only fidelity gate).
+  - **TWO (8g)-revealed cg gaps in `types.sentinel` mode-4, fixed to match the oracle.** Both involve
+    constructs that appear ONLY in the merged `types`/`codegen` (never in the corpus or the self-contained
+    lexer/parser) — which is exactly why (8g), the first time `scg` lowers the full compiler, surfaced
+    them. The Rust oracle (`llvm_dump.rs`) already handled both (it had to, to lower the full compiler at
+    A17); these are the Sentinel port catching up — no oracle change.
+    - **Field-place GEP base (28×).** `&mut c.f` / `c.f = x` on a LOCAL struct (`c` a `Var`, the cg's
+      pervasive ctx pools) must GEP into the var's **alloca slot** (`cg_slot_get`); the A17 `cg_suppress`
+      mechanism used the stale threaded operand (correct only for a `*c` Deref target, where it holds the
+      loaded pointer), so a field-place after a store/branch rendered `ptr 0` or a wrong register. Now:
+      capture the target's `cg_lastvid`; `>=0` (a `Var` target) → slot, else (Deref/nested) → operand —
+      mirroring the oracle's recursive `lower_lvalue_ptr` (Var→slot, Deref→value, FieldAccess→inner GEP).
+    - **`match` wildcard (1×).** A `_` arm (always last in the selfhost sources) emits its body + `store`
+      result + `br merge` as the FINAL ELSE — not the A15-deferred `unreachable`. A new save/restored
+      `cg_m_wild` flag (nesting-safe like the other `cg_m_*` fields) tells the match epilogue to skip
+      `unreachable`. Matches the oracle's `lower_match` wildcard branch.
+  - **The fixed-point consistency subtlety** (a good illustration): the merged source IS the compiler's
+    source, so the capstone must merge the CURRENT `types.sentinel` — a STALE merge made `scg` (fixed
+    logic) and `scg'` (cc'd from `scg`'s output, which EXECUTES the merged source's logic) disagree by
+    exactly the two fixed bugs. Fresh merge → convergence.
+  - **REMAINING for ADR 0045 → ACCEPTED:** Bar B (generics + nullable + classes/traits/impls +
+    effects/handlers + concurrency) for full ~123-corpus parity (D7/D10). The owner may instead re-scope
+    Bar B as a deferred follow-on and declare the port closed at the fixed-point (Revisit, below) — the
+    headline (compiler compiles itself) is reached.
+
 ## Decision
 
 ### D1. Goal.
