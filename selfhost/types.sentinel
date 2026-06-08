@@ -140,6 +140,8 @@ struct TyCtx {
     tpne: Vec<i64>,   // type-param name end (into `tpb`)
     // User-fn generic signature info (indexed by FnId-14, same order as `ufret`).
     uftp: Vec<i64>,   // type-param count (0 = non-generic)
+    ufeff: Vec<i64>,  // (Bar B / effects c35b) 1 = effecting fn (non-Async effect row;
+                      //   Kont* ABI — returns ptr, a call to it yields ptr), else 0
     ufps: Vec<i64>,   // param-type slice start (into `ufpp`)
     ufpe: Vec<i64>,   // param-type slice end
     ufpp: Vec<i64>,   // flat param-type handles (declaration order)
@@ -296,6 +298,10 @@ struct TyCtx {
     cg_used_perform: bool,   // declare sentinel_perform_op
     cg_used_resume: bool,    // declare sentinel_kont_resume
     cg_used_consume: bool,   // declare sentinel_kont_consume_pure
+    cg_used_kontpure: bool,  // (c35b) declare sentinel_kont_pure (wrap a pure value)
+    cg_eff: bool,     // (c35b) is the fn being emitted effecting (Kont* ABI: ret ptr)?
+    cg_tailk: bool,   // (c35b) did the just-lowered body tail produce a kont (a direct
+                      //   perform / call-to-effecting)? else a pure tail → kont_pure-wrap
     cg_h_opid: i64,   // the current handle's loaded op_id register (for the arm icmps)
     cg_h_ck: i64,     // the current handle's loaded kont register (arm-param GEP + kont slot)
     cg_h_loop: i64,   // the dispatch loop block (a `k(v)` bubble re-enters it)
@@ -5388,6 +5394,9 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     if cg_on(c) {
         cg_reset(c);
         (*c).cgmain = cg_is_main(src, name_s, name_e);
+        // (Bar B / effects c35b) an effecting fn (non-Async row, recorded in pass-1)
+        // uses the Kont* ABI — `cg_emit_fn` returns `ptr` (wrapping a pure tail).
+        (*c).cg_eff = (*c).ufeff[fnidx] != 0;
         0
     } else {
         0
@@ -5481,10 +5490,59 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
 
 // PASS-1.5 signature scan (was `scan_fn_ret`): position a cursor at the `fn` token
 // `p1`, set up its type-param scope (`<…>`), and record its full SIGNATURE into the
+// (Bar B / effects c35b) is the src slice [st..en] the built-in effect name `Async`?
+// (mirror of `cg_is_main`'s in-place literal compare.)
+fn cg_is_async(src: &[u8], st: i64, en: i64) -> bool {
+    if en - st != 5 {
+        false
+    } else if (*src)[st] == 'A' {
+        if (*src)[st + 1] == 's' {
+            if (*src)[st + 2] == 'y' {
+                if (*src)[st + 3] == 'n' {
+                    (*src)[st + 4] == 'c'
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+// (Bar B / effects c35b) does the effect row whose `!` is at token `at` contain any
+// effect OTHER than the built-in `Async`? Such a row gives the fn the Kont* ABI (it
+// returns `ptr`). `! { Async }` alone stays a plain value-returning fn (Async is a
+// direct-runtime marker — spawn/await, never `handle`). Peeks; does not advance.
+// Mirrors the oracle / inkwell `uses_kont_abi`.
+fn eff_row_is_kont(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], at: i64) -> bool {
+    let mut i: i64 = at + 2;   // skip `!` then `{`
+    let mut kont: bool = false;
+    while (*k)[i] != 7 {       // up to `}`
+        if (*k)[i] != 29 {     // an effect-name ident (not a `,` separator)
+            if cg_is_async(src, (*s)[i], (*e)[i]) {
+                0
+            } else {
+                kont = true;
+                0
+            }
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    kont
+}
+
 // fn tables — `ufret` (return handle), `uftp` (type-param count, 0 = non-generic),
-// and `ufps`/`ufpe` (the param-type slice into `ufpp`). All four push once per fn in
-// source order, so they stay index-aligned. The type-param scope is reset after.
-// Lets a forward-declared (and possibly generic) fn type + infer correctly at calls.
+// `ufeff` (1 = effecting / Kont* ABI), and `ufps`/`ufpe` (the param-type slice into
+// `ufpp`). All push once per fn in source order, so they stay index-aligned. The
+// type-param scope is reset after. Lets a forward-declared (and possibly generic) fn
+// type + infer correctly at calls.
 fn scan_fn_sig(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut cur: i64 = p1 + 1;     // at name
     cur = cur + 1;                 // skip name
@@ -5499,6 +5557,14 @@ fn scan_fn_sig(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, c:
     let rty: i64 = type_of_typeexpr(c, rte, gb);
     push(&mut (*c).ufret, rty);
     push(&mut (*c).uftp, ntp);
+    // (Bar B / effects c35b) record whether this fn is effecting (a non-Async effect
+    // row at `cur` — token 24 = `!`). `cur` sits past the return type here.
+    let eff: bool = if (*k)[cur] == 24 {
+        eff_row_is_kont(k, s, e, src, cur)
+    } else {
+        false
+    };
+    push(&mut (*c).ufeff, if eff { 1 } else { 0 });
     push(&mut (*c).ufps, ps);
     push(&mut (*c).ufpe, pe);
     tp_reset(c);
@@ -6979,6 +7045,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         tpns: vec_new(),
         tpne: vec_new(),
         uftp: vec_new(),
+        ufeff: vec_new(),
         ufps: vec_new(),
         ufpe: vec_new(),
         ufpp: vec_new(),
@@ -7084,6 +7151,9 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_used_perform: false,
         cg_used_resume: false,
         cg_used_consume: false,
+        cg_used_kontpure: false,
+        cg_eff: false,
+        cg_tailk: false,
         cg_h_opid: 0,
         cg_h_ck: 0,
         cg_h_loop: 0,
@@ -7610,6 +7680,12 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        if ctx.cg_used_kontpure {
+            append_str(result, "declare ptr @sentinel_kont_pure(i64)\n");
+            0
+        } else {
+            0
+        };
         // (8d-Vec-2) the `llvm.memcpy` intrinsic declares LAST — after the
         // `sentinel_*` runtime-symbol group (it is an `@llvm.*` intrinsic, not a
         // runtime symbol), matching the oracle's `RuntimeSyms::emit_declares`.
@@ -7619,7 +7695,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_memcpy;
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_memcpy;
         if cg_anydecl {
             push(result, '\n');
             0
@@ -7804,6 +7880,9 @@ fn cg_reset(c: &mut TyCtx) -> i64 {
     (*c).cg_self_var = 0 - 1;
     (*c).cg_arg_base = 0;
     (*c).cg_to_cls = false;
+    // (Bar B / effects c35b) the body tail hasn't been lowered yet → not a kont; a
+    // perform / call-to-effecting in the tail sets it (→ the fn returns ptr directly).
+    (*c).cg_tailk = false;
     0
 }
 
@@ -9477,6 +9556,9 @@ fn cg_emit_perform(c: &mut TyCtx, eid: i64, opidx: i64, snap: i64) -> i64 {
     }
     (*c).cg_used_perform = true;
     cg_reg(c, d);
+    // (c35b) a `perform` produces a kont — if it is the fn-body tail, the effecting fn
+    // returns it directly (no `kont_pure` wrap).
+    (*c).cg_tailk = true;
     0
 }
 
@@ -10016,9 +10098,17 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cg_reg(c, vt_a1);
         0
     } else if fid >= 14 {
+        // (Bar B / effects c35b) a call to an effecting fn yields a Kont* (`ptr`), not
+        // its declared return type — and a tail effecting-call makes the caller's tail
+        // kont-producing (so an enclosing effecting fn returns it as-is).
+        let efc: bool = (*c).ufeff[fid - 14] != 0;
         let d: i64 = cg_dst(c);
         cgo_str(c, "call ");
-        cgo_ty(c, rty);
+        if efc {
+            cgo_str(c, "ptr")
+        } else {
+            cgo_ty(c, rty)
+        };
         cgo_str(c, " @");
         let us: i64 = (*c).ufs[fid - 14];
         let ue: i64 = (*c).ufe[fid - 14];
@@ -10055,6 +10145,7 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cg_putc(c, ')');
         cg_putc(c, '\n');
         cg_reg(c, d);
+        (*c).cg_tailk = efc;
         0
     } else {
         0
@@ -10301,6 +10392,9 @@ fn cg_emit_fn(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> 
     cgo_str(c, "define ");
     if (*c).cgmain {
         cgo_str(c, "i32")
+    } else if (*c).cg_eff {
+        // (Bar B / effects c35b) effecting fn — the Kont* ABI returns `ptr`.
+        cgo_str(c, "ptr")
     } else {
         cgo_ty(c, rty)
     };
@@ -10365,6 +10459,26 @@ fn cg_emit_fn(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> 
         cgo_int(c, d);
         cg_putc(c, '\n');
         0
+    } else if (*c).cg_eff {
+        // (Bar B / effects c35b) the Kont* ABI: a kont-producing tail (direct perform /
+        // call-to-effecting) returns as-is; a pure tail is wrapped as a PURE_RETURN kont
+        // (`sentinel_kont_pure`) so the caller's `handle` sees a uniform Kont*.
+        if (*c).cg_tailk {
+            cgo_str(c, "  ret ptr ");
+            cgo_operand(c, bk, bv);
+            cg_putc(c, '\n');
+            0
+        } else {
+            let kp: i64 = cg_dst(c);
+            cgo_str(c, "call ptr @sentinel_kont_pure(i64 ");
+            cgo_operand(c, bk, bv);
+            cgo_str(c, ")\n");
+            (*c).cg_used_kontpure = true;
+            cgo_str(c, "  ret ptr %v");
+            cgo_int(c, kp);
+            cg_putc(c, '\n');
+            0
+        }
     } else {
         cgo_str(c, "  ret ");
         cgo_ty(c, rty);

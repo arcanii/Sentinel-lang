@@ -844,8 +844,13 @@ fn emit_fn_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: 
     let params: Params = parse_params(k, s, e, src, cur);
     *cur = *cur + 1;
     let rty: TypeE = parse_type(k, s, e, src, cur);
+    // (Bar B / effects c35b) capture the `! { E }` effect row to a temp + RE-EMIT it
+    // (after the return type) — else `fn f() -> i64 ! { Io }` → `fn f() -> i64`, the
+    // re-parse loses the effect row, and the effecting-fn Kont* ABI never triggers
+    // (`ufeff` stays 0 → it lowers as a plain i64-returning fn). The A24 `<T>` analog.
+    let mut effbuf: Vec<u8> = vec_new();
     if (*k)[*cur] == 24 {
-        skip_effect_row(k, cur)
+        emit_effect_row(&mut effbuf, c, k, s, e, src, cur)
     } else {
         0
     };
@@ -857,8 +862,43 @@ fn emit_fn_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: 
     emit_params(out, c, params);
     append_str(out, ") -> ");
     emit_type(out, c, rty);
+    append_str(out, vec_to_array(effbuf));
     push(out, ' ');
     emit_block_raw(out, c, body);
+    0
+}
+
+// (Bar B / effects c35b) emit a fn's `! { E0, E1, … }` effect row VERBATIM (a leading
+// space + the brace-delimited effect-name list), so a re-parse re-detects the effecting
+// fn. `cur` at `!` (24); ends past the closing `}` (7). Effect names route through
+// `emit_name_slice` (module-renamed in a multi-module merge, like `perform`/`handle`'s
+// — a no-op single-module). Mirrors `skip_effect_row`'s token walk.
+fn emit_effect_row(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    append_str(out, " ! { ");
+    *cur = *cur + 1;   // skip `!`
+    *cur = *cur + 1;   // skip `{`
+    let mut first: bool = true;
+    while (*k)[*cur] != 7 {
+        if (*k)[*cur] == 29 {
+            append_str(out, ", ");
+            *cur = *cur + 1;
+            0
+        } else {
+            if first {
+                first = false;
+                0
+            } else {
+                0
+            };
+            let ns: i64 = (*s)[*cur];
+            let ne: i64 = (*e)[*cur];
+            emit_name_slice(out, c, src, ns, ne);
+            *cur = *cur + 1;
+            0
+        }
+    }
+    *cur = *cur + 1;   // skip `}`
+    append_str(out, " }");
     0
 }
 

@@ -47,9 +47,9 @@ use sentinel_resolve::{
     U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
-    NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedHandlerArm,
-    TypedMatchArm, TypedParam, TypedPattern, TypedPatternBinding, TypedProgram, TypedReturnArm,
-    TypedStmt, TypedStmtKind,
+    NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedFnSignature,
+    TypedHandlerArm, TypedMatchArm, TypedParam, TypedPattern, TypedPatternBinding, TypedProgram,
+    TypedReturnArm, TypedStmt, TypedStmtKind,
 };
 
 /// Hardcoded for a reproducible byte-target (not host inference). `clang`
@@ -99,6 +99,10 @@ struct RuntimeSyms {
     kont_resume: bool,
     /// `sentinel_kont_consume_pure(ptr kont) -> i64` (unwrap a PURE_RETURN kont).
     kont_consume_pure: bool,
+    /// Bar B / effects (c35b): `sentinel_kont_pure(i64 value) -> ptr` — wrap a pure
+    /// i64 as a PURE_RETURN-tagged kont (an effecting fn / handle body whose value
+    /// never performed; the caller's dispatch then matches the PURE_RETURN case).
+    kont_pure: bool,
 }
 
 impl RuntimeSyms {
@@ -116,6 +120,7 @@ impl RuntimeSyms {
         self.perform_op |= other.perform_op;
         self.kont_resume |= other.kont_resume;
         self.kont_consume_pure |= other.kont_consume_pure;
+        self.kont_pure |= other.kont_pure;
     }
 
     /// Emit the `declare`s for the used symbols, in the fixed canonical order,
@@ -158,6 +163,9 @@ impl RuntimeSyms {
         if self.kont_consume_pure {
             writeln!(out, "declare i64 @sentinel_kont_consume_pure(ptr)").unwrap();
         }
+        if self.kont_pure {
+            writeln!(out, "declare ptr @sentinel_kont_pure(i64)").unwrap();
+        }
         if self.memcpy {
             writeln!(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)").unwrap();
         }
@@ -173,6 +181,7 @@ impl RuntimeSyms {
             || self.perform_op
             || self.kont_resume
             || self.kont_consume_pure
+            || self.kont_pure
             || self.memcpy
     }
 }
@@ -362,12 +371,21 @@ fn dump_fn_named(
     sym: &str,
 ) -> Result<(), String> {
     let sig = program.signature(f.id);
-    if !sig.effect_row.is_empty() {
-        return Err(format!("effecting fn `{}` (deferred to Bar B)", f.name));
+    // Bar B / effects (c35b): an effecting fn (non-empty, non-`Async` effect row) uses
+    // the Kont* ABI — it returns `ptr` (a continuation), not its declared type. Only
+    // the c35b body shapes lower yet (a direct `perform`, a call to another effecting
+    // fn, or a fully pure tail wrapped via `sentinel_kont_pure`); let-bound / embedded
+    // / chained `perform` need per-eval-site frame reification (c35c+) and Err here.
+    let is_effecting = uses_kont_abi(sig, program);
+    if is_effecting {
+        validate_effecting_fn_body(f, program)?;
     }
-    // main is the C-ABI entry: i32 return (its i64 body is truncated).
+    // main is the C-ABI entry: i32 return (its i64 body is truncated). An effecting fn
+    // returns `ptr`; an ordinary fn its declared type.
     let ret_ll = if sig.is_main {
         "i32".to_string()
+    } else if is_effecting {
+        "ptr".to_string()
     } else {
         llvm_ty(f.return_type, program)?
     };
@@ -421,7 +439,15 @@ fn dump_fn_named(
         let t = e.fresh();
         writeln!(e.body, "  %v{t} = trunc i64 {tail} to i32").unwrap();
         writeln!(e.body, "  ret i32 %v{t}").unwrap();
+    } else if is_effecting && !produces_kont(&f.body.tail, program) {
+        // Effecting fn with a pure tail: wrap the i64 value as a PURE_RETURN kont so
+        // the caller's `handle` sees a uniform Kont* (and dispatches PURE_RETURN).
+        let kp = e.fresh();
+        writeln!(e.body, "  %v{kp} = call ptr @sentinel_kont_pure(i64 {tail})").unwrap();
+        e.used.kont_pure = true;
+        writeln!(e.body, "  ret ptr %v{kp}").unwrap();
     } else {
+        // Ordinary fn, or an effecting fn whose tail already produced a Kont*.
         writeln!(e.body, "  ret {ret_ll} {tail}").unwrap();
     }
 
@@ -1507,8 +1533,8 @@ impl Emit<'_> {
         if return_arm.is_some() {
             return Err("handle return arm (deferred to c36a)".into());
         }
-        if !produces_kont(body) {
-            return Err("handle body shape (deferred to c35b: effecting-call / pure body)".into());
+        if !produces_kont(body, self.program) {
+            return Err("handle body shape (deferred: pure body / nested handle)".into());
         }
         let kptr = self.lower_expr(body)?;
         let cks = self.alloca("ptr");
@@ -1915,7 +1941,13 @@ impl Emit<'_> {
             return Err(format!("builtin call #{} (deferred to a later slice)", id.0));
         }
         let sig = self.program.signature(id);
-        let ret = self.lty(ret_ty)?;
+        // Bar B / effects (c35b): a call to an effecting fn yields a Kont* (`ptr`), not
+        // its declared return type — the enclosing `handle` dispatches on the kont.
+        let ret = if uses_kont_abi(sig, self.program) {
+            "ptr".to_string()
+        } else {
+            self.lty(ret_ty)?
+        };
         // A generic callee resolves to its monomorphic instance's mangled symbol
         // (`id__i64`); `type_args` are concrete here (inferred at a non-generic call
         // site, or substituted in a mono body). A normal fn uses its plain name.
@@ -2094,11 +2126,134 @@ fn type_has_typeparam(ty: Type, program: &TypedProgram) -> bool {
 /// struct of only scalars drops nothing). The Bar-B shapes (nullable / enum / generic /
 /// secret) don't appear in the emitting subset, so a plain `false` suffices.
 /// Bar B / effects — `true` iff `expr` lowers to a kont* (so a `handle` body uses it
-/// directly as the initial kont). At c35a only a direct `perform`; c35b adds a call to
-/// an effecting fn, c36b a nested `handle`. A pure body (i64) is wrapped via
-/// `sentinel_kont_pure` (c35b) — until then, `lower_handle` Errs on it.
-fn produces_kont(expr: &TypedExpr) -> bool {
-    matches!(expr.kind, TypedExprKind::Perform { .. })
+/// directly as the initial kont, and an effecting-fn tail returns it as-is). c35a: a
+/// direct `perform`. c35b: also a call to an effecting fn, or a block whose tail does
+/// (with no performing statement). c36b would add a nested `handle`. A pure body (i64)
+/// is wrapped via `sentinel_kont_pure` by the caller (the fn-ABI / handle-body paths).
+fn produces_kont(expr: &TypedExpr, program: &TypedProgram) -> bool {
+    match &expr.kind {
+        TypedExprKind::Perform { .. } => true,
+        TypedExprKind::Call { id, .. } => uses_kont_abi(program.signature(*id), program),
+        TypedExprKind::Block(b) => {
+            !b.stmts.iter().any(|s| stmt_performs(&s.kind)) && produces_kont(&b.tail, program)
+        }
+        _ => false,
+    }
+}
+
+/// Bar B / effects (c35b) — does this fn use the effecting-fn `Kont*` ABI? Any fn with
+/// a non-empty effect row EXCEPT one whose only effect is the built-in `Async` (a
+/// direct-runtime marker — spawn/await lower to runtime calls, never `handle`, so an
+/// Async-only fn keeps the plain value-returning ABI). Mirrors inkwell `uses_kont_abi`.
+fn uses_kont_abi(sig: &TypedFnSignature, program: &TypedProgram) -> bool {
+    sig.effect_row.iter().any(|eid| {
+        program
+            .effect_decls
+            .get(eid.0 as usize)
+            .map(|d| d.name != "Async")
+            .unwrap_or(true)
+    })
+}
+
+/// Bar B / effects (c35b) — validate that an effecting fn's body is a shape codegen can
+/// lower at this sub-phase: no top-level (or nested-block) statement may itself
+/// `perform`, and the tail must either produce a kont (direct `perform` / call-to-
+/// effecting) or be fully pure (no `perform` anywhere — wrapped via `sentinel_kont_pure`
+/// by the fn-ABI return path). A tail that mixes a `perform` into surrounding pure
+/// context (`perform Op(..) + 1`, `f(perform Op(..))`) or a let-bound / chained perform
+/// needs per-eval-site frame reification (c35c+) and Errs here so the fixture defers.
+/// Mirrors inkwell `validate_effecting_fn_body`.
+fn validate_effecting_fn_body(f: &TypedFnDef, program: &TypedProgram) -> Result<(), String> {
+    for stmt in &f.body.stmts {
+        if stmt_performs(&stmt.kind) {
+            return Err(format!(
+                "effecting fn `{}` body has a performing statement (deferred to c35c+)",
+                f.name
+            ));
+        }
+    }
+    let tail = &f.body.tail;
+    if produces_kont(tail, program) || !expr_performs(tail) {
+        Ok(())
+    } else {
+        Err(format!(
+            "effecting fn `{}` tail mixes perform with pure context (deferred to c35c+)",
+            f.name
+        ))
+    }
+}
+
+/// Does this statement contain a `perform` (transitively)? (c35b validation helper.)
+fn stmt_performs(kind: &TypedStmtKind) -> bool {
+    match kind {
+        TypedStmtKind::Let { value, .. } => expr_performs(value),
+        TypedStmtKind::Assign { target, value } => expr_performs(target) || expr_performs(value),
+        TypedStmtKind::While { cond, body } => {
+            expr_performs(cond)
+                || body.stmts.iter().any(|s| stmt_performs(&s.kind))
+                || expr_performs(&body.tail)
+        }
+        TypedStmtKind::Break | TypedStmtKind::Continue => false,
+        TypedStmtKind::Expr(e) => expr_performs(e),
+    }
+}
+
+/// Does this expression contain a `perform` / `k(v)` (transitively)? (c35b validation
+/// helper — mirrors inkwell `expr_performs`; total over every `TypedExprKind`.)
+fn expr_performs(expr: &TypedExpr) -> bool {
+    match &expr.kind {
+        TypedExprKind::Perform { .. } | TypedExprKind::ResumeKont { .. } => true,
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            expr_performs(body)
+                || arms.iter().any(|a| expr_performs(&a.body))
+                || return_arm.as_deref().is_some_and(|ra| expr_performs(&ra.body))
+        }
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
+        | TypedExprKind::Var(_) => false,
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner) => expr_performs(inner),
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => expr_performs(l) || expr_performs(r),
+        TypedExprKind::Block(b) => {
+            b.stmts.iter().any(|s| stmt_performs(&s.kind)) || expr_performs(&b.tail)
+        }
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            expr_performs(cond)
+                || then_branch.stmts.iter().any(|s| stmt_performs(&s.kind))
+                || expr_performs(&then_branch.tail)
+                || else_branch.stmts.iter().any(|s| stmt_performs(&s.kind))
+                || expr_performs(&else_branch.tail)
+        }
+        TypedExprKind::Call { args, .. } => args.iter().any(expr_performs),
+        TypedExprKind::StructLit { fields, .. } => fields.iter().any(expr_performs),
+        TypedExprKind::FieldAccess { target, .. } => expr_performs(target),
+        TypedExprKind::ArrayLit { elements, .. } => elements.iter().any(expr_performs),
+        TypedExprKind::Index { target, index, .. } => expr_performs(target) || expr_performs(index),
+        TypedExprKind::MethodCall { target, args, .. } => {
+            expr_performs(target) || args.iter().any(expr_performs)
+        }
+        TypedExprKind::ClassInit { args, .. } => args.iter().any(expr_performs),
+        TypedExprKind::ImplMethodCall { target, args, .. } => {
+            expr_performs(target) || args.iter().any(expr_performs)
+        }
+        TypedExprKind::QualifiedCall { args, .. } => args.iter().any(expr_performs),
+        TypedExprKind::Scope { body, .. } => {
+            body.stmts.iter().any(|s| stmt_performs(&s.kind)) || expr_performs(&body.tail)
+        }
+        TypedExprKind::Spawn { call, .. } => expr_performs(call),
+        TypedExprKind::Await { task_expr, .. } => expr_performs(task_expr),
+        TypedExprKind::EnumConstruct { args, .. } => args.iter().any(expr_performs),
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            expr_performs(scrutinee) || arms.iter().any(|a| expr_performs(&a.body))
+        }
+    }
 }
 
 fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
