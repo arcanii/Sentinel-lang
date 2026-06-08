@@ -299,6 +299,7 @@ struct TyCtx {
     cg_used_resume: bool,    // declare sentinel_kont_resume
     cg_used_consume: bool,   // declare sentinel_kont_consume_pure
     cg_used_kontpure: bool,  // (c35b) declare sentinel_kont_pure (wrap a pure value)
+    cg_used_kontpush: bool,  // (c35c) declare sentinel_kont_push (push a captured frame)
     cg_eff: bool,     // (c35b) is the fn being emitted effecting (Kont* ABI: ret ptr)?
     cg_tailk: bool,   // (c35b) did the just-lowered body tail produce a kont (a direct
                       //   perform / call-to-effecting)? else a pure tail → kont_pure-wrap
@@ -5414,7 +5415,12 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     push(out, ' ');
     append_slice(out, src, name_s, name_e);
     append_str(out, " (");
+    // (Bar B / effects c35c) the param VarId range [cg_pv0, cg_pvn) — the let-shape
+    // capture set (the effecting fn's params, the only in-scope vars its pure tail can
+    // reference besides the let-bound var).
+    let cg_pv0: i64 = (*c).nextvid;
     emit_tparams(out, k, s, e, src, cur, c, gb, true);
+    let cg_pvn: i64 = (*c).nextvid;
     append_str(out, ") ");
     *cur = *cur + 1;           // skip `->`
     let rte: TypeE = parse_type(k, s, e, src, cur);
@@ -5433,15 +5439,27 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     // aren't in `program.fns`), and the body's tail is CONSUMING (the returned value).
     (*c).curfn = fnidx;
     (*c).consuming = true;
+    // (Bar B / effects c35c) an EFFECTING fn (Kont* ABI) routes through `cg_emit_fn_eff`,
+    // which consumes `body` + assembles the define(s): a let-bound-perform body becomes a
+    // RESUMER fn + a parent that pushes a captured frame (two defines); any other
+    // effecting body (c32/c33/c35b) walks + assembles straight-line. A NON-effecting fn
+    // (or modes 0-3) walks here; `cg_emit_fn` below assembles its single define.
     // The fn return type is the body's expectation — a `?T`-returning fn widens its
     // tail (`dump_texpr` on the body `Block` threads `rty` to the tail).
-    dump_texpr(out, body, rty, src, c, gb);
-    // (8d-drops) free the param frame (frame 0) — AFTER the body-block drops (emitted
-    // inside the Block arm), BEFORE `curfn` is cleared (cg_is_moved keys on it).
-    if cg_on(c) {
-        cg_drop_frame(c, cgpmark);
+    let cg_eff_fn: bool = cg_on(c) && (*c).cg_eff;
+    if cg_eff_fn {
+        cg_emit_fn_eff(out, c, body, rty, src, name_s, name_e, cgpmark, cg_pv0, cg_pvn, gb);
         0
     } else {
+        dump_texpr(out, body, rty, src, c, gb);
+        // (8d-drops) free the param frame (frame 0) — AFTER the body-block drops (emitted
+        // inside the Block arm), BEFORE `curfn` is cleared (cg_is_moved keys on it).
+        if cg_on(c) {
+            cg_drop_frame(c, cgpmark);
+            0
+        } else {
+            0
+        };
         0
     };
     (*c).curfn = 0 - 1;
@@ -5475,9 +5493,14 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
         0
     };
     // (8/N) codegen: assemble the fn into cgout — header + hoisted allocas + body + ret.
+    // (c35c) an EFFECTING fn already assembled its define(s) inside `cg_emit_fn_eff`.
     if cg_on(c) {
-        cg_emit_fn(c, src, name_s, name_e, rty);
-        0
+        if (*c).cg_eff {
+            0
+        } else {
+            cg_emit_fn(c, src, name_s, name_e, rty);
+            0
+        }
     } else {
         0
     };
@@ -7152,6 +7175,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_used_resume: false,
         cg_used_consume: false,
         cg_used_kontpure: false,
+        cg_used_kontpush: false,
         cg_eff: false,
         cg_tailk: false,
         cg_h_opid: 0,
@@ -7686,6 +7710,13 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        // (c35c) sentinel_kont_push — the captured-frame push, in the kont group.
+        if ctx.cg_used_kontpush {
+            append_str(result, "declare void @sentinel_kont_push(ptr, ptr, ptr)\n");
+            0
+        } else {
+            0
+        };
         // (8d-Vec-2) the `llvm.memcpy` intrinsic declares LAST — after the
         // `sentinel_*` runtime-symbol group (it is an `@llvm.*` intrinsic, not a
         // runtime symbol), matching the oracle's `RuntimeSyms::emit_declares`.
@@ -7695,7 +7726,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_memcpy;
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_memcpy;
         if cg_anydecl {
             push(result, '\n');
             0
@@ -10488,6 +10519,269 @@ fn cg_emit_fn(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> 
         0
     };
     cgo_str(c, "}\n\n");
+    0
+}
+
+// (Bar B / effects c35c) emit the hoisted entry-block allocas (cgalloca_sl/_ty, in
+// reservation order) then fold the buffered body (cgbody) — the shared tail of a
+// `define` assembly. Assumes `cg_to_body` is already false (output routes to cgout).
+fn cg_flush_allocas_body(c: &mut TyCtx) -> i64 {
+    let na: i64 = len((*c).cgalloca_sl);
+    let mut ai: i64 = 0;
+    while ai < na {
+        let asl: i64 = (*c).cgalloca_sl[ai];
+        let aty: i64 = (*c).cgalloca_ty[ai];
+        cgo_str(c, "  %v");
+        cgo_int(c, asl);
+        cgo_str(c, " = alloca ");
+        if aty < 0 {
+            cgo_str(c, "ptr")
+        } else {
+            cgo_ty(c, aty)
+        };
+        cg_putc(c, '\n');
+        ai = ai + 1;
+    }
+    let nb: i64 = len((*c).cgbody);
+    let mut bi: i64 = 0;
+    while bi < nb {
+        let byte: u8 = (*c).cgbody[bi];
+        push(&mut (*c).cgout, byte);
+        bi = bi + 1;
+    }
+    0
+}
+
+// (Bar B / effects c35c) emit an EFFECTING fn (Kont* ABI). A let-bound-perform body
+// (`{ let v: i64 = perform …; <pure tail> }`) reifies a captured frame → a RESUMER fn +
+// a parent (`cg_letshape_emit`, two defines); any OTHER effecting body (a pure / direct-
+// perform / call-to-effecting tail, no statements — c32/c33/c35b) walks + assembles
+// straight-line (`cg_eff_normal`). Mirrors the oracle's `dump_fn_named` routing through
+// `detect_let_shape`. Consumes `body`. `[pv0,pvn)` = the fn's param VarId range (the
+// let-shape capture set). The let-shape is matched structurally (single `let` with a
+// `perform` RHS) — every effecting fn the oracle EMITS with a performing statement is a
+// let-shape (its `validate_effecting_fn_body` defers the rest), so scg need not re-check
+// the i64 / pure-tail conditions (the differential only runs scg when the oracle emits).
+fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>) -> i64 {
+    // (The Sentinel match grammar has no bind-the-whole-value pattern — only
+    // `Enum::Variant(..)` + `_`. So the non-let-shape branches re-wrap the moved-out
+    // parts and fall through to `cg_eff_normal`; `Stmts`/`Stmt` are fully enumerated.)
+    match body {
+        Expr::Block(stmts, tail) => {
+            match stmts {
+                Stmts::SEnd => {
+                    // No statements — the c35b shape (pure / perform / call-to-effecting tail).
+                    let b0: Expr = Expr::Block(Stmts::SEnd, tail);
+                    cg_eff_normal(out, c, b0, rty, src, name_s, name_e, cgpmark, gb)
+                },
+                Stmts::SCell(st, rest) => {
+                    match rest {
+                        Stmts::SEnd => {
+                            // Exactly one statement. A single `let` in an EMITTED effecting fn
+                            // is the c35c let-bound-perform shape (the oracle's
+                            // `validate_effecting_fn_body` defers every other performing-let
+                            // body, so it never reaches scg) → walk its RHS as the perform.
+                            match st {
+                                Stmt::SLet(lmf, lnm, lty, lval) => {
+                                    cg_letshape_emit(out, c, lnm, lty, lval, tail, rty, src, name_s, name_e, pv0, pvn, gb)
+                                },
+                                Stmt::SAssign(at, av) => {
+                                    let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SAssign(at, av), Stmts::SEnd), tail);
+                                    cg_eff_normal(out, c, b1, rty, src, name_s, name_e, cgpmark, gb)
+                                },
+                                Stmt::SWhile(wc, wb) => {
+                                    let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SWhile(wc, wb), Stmts::SEnd), tail);
+                                    cg_eff_normal(out, c, b1, rty, src, name_s, name_e, cgpmark, gb)
+                                },
+                                Stmt::SBreak => {
+                                    let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SBreak, Stmts::SEnd), tail);
+                                    cg_eff_normal(out, c, b1, rty, src, name_s, name_e, cgpmark, gb)
+                                },
+                                Stmt::SContinue => {
+                                    let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SContinue, Stmts::SEnd), tail);
+                                    cg_eff_normal(out, c, b1, rty, src, name_s, name_e, cgpmark, gb)
+                                },
+                                Stmt::SExpr(ex) => {
+                                    let b1: Expr = Expr::Block(Stmts::SCell(Stmt::SExpr(ex), Stmts::SEnd), tail);
+                                    cg_eff_normal(out, c, b1, rty, src, name_s, name_e, cgpmark, gb)
+                                },
+                            }
+                        },
+                        Stmts::SCell(s2, r2) => {
+                            // 2+ statements — not a c35c shape; straight-line.
+                            let b2: Expr = Expr::Block(Stmts::SCell(st, Stmts::SCell(s2, r2)), tail);
+                            cg_eff_normal(out, c, b2, rty, src, name_s, name_e, cgpmark, gb)
+                        },
+                    }
+                },
+            }
+        },
+        _ => {
+            // A fn body is always a `Block` (parse_block); this arm is unreachable.
+            0
+        },
+    }
+}
+
+// (Bar B / effects c35c) a non-let-shape effecting body (c32/c33/c35b): the straight-line
+// walk + the standard single-define assembly (the c35b path — `cg_emit_fn` wraps a pure
+// tail via `kont_pure`, or returns the kont tail directly).
+fn cg_eff_normal(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, gb: &mut Vec<u8>) -> i64 {
+    dump_texpr(out, body, rty, src, c, gb);
+    cg_drop_frame(c, cgpmark);
+    cg_emit_fn(c, src, name_s, name_e, rty);
+    0
+}
+
+// (Bar B / effects c35c / ADR 0020 D7) emit a let-bound-perform effecting fn as TWO
+// defines (mirror the oracle's `dump_let_shape_fn` / inkwell `compile_effecting_fn_with_
+// let`). The PARENT's params are ALREADY set up (emit_tparams ran — cgbody has the param
+// stores, cg slots set, the register counter at #params); here it fills the captured-
+// state struct (i64[N], one field per param — the capture set; `null` if none), lowers
+// the RHS perform to a Kont*, `sentinel_kont_push`es a frame (the resumer + captured
+// ptr), returns the Kont*. The RESUMER (`@__resume_<name>(i64 %arg0, ptr %arg1)`) binds
+// the let var to the resumed value `%arg0` + each captured param to its struct field
+// (loaded from `%arg1`), lowers the pure tail, wraps it via `sentinel_kont_pure`. Both
+// loads/stores/GEPs are i64 (the SentinelKont `arg` slot). The capture set is the param
+// list in declaration order = the oracle's first-reference order for the c35c corpus
+// (≤1 param per let-shape fn, always used in the tail); multi-param first-ref ordering
+// is a c35d+ refinement.
+fn cg_letshape_emit(out: &mut Vec<u8>, c: &mut TyCtx, lnm: [u8], lty: TyOpt, lval: Expr, tail: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>) -> i64 {
+    let nparams: i64 = pvn - pv0;
+    let cap_null: bool = nparams == 0;
+    // ===== PARENT define: captured struct, RHS → kont, push, ret ptr =====
+    let mut alloc_reg: i64 = 0 - 1;
+    if nparams > 0 {
+        alloc_reg = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_alloc(i64 ");
+        cgo_int(c, nparams * 8);
+        cgo_str(c, ")\n");
+        (*c).cg_used_alloc = true;
+        let mut pi: i64 = pv0;
+        while pi < pvn {
+            let off: i64 = (pi - pv0) * 8;
+            let gp: i64 = cg_dst(c);
+            cgo_str(c, "getelementptr i8, ptr %v");
+            cgo_int(c, alloc_reg);
+            cgo_str(c, ", i64 ");
+            cgo_int(c, off);
+            cg_putc(c, '\n');
+            let pslot: i64 = cg_slot_get(c, pi);
+            let ld: i64 = cg_dst(c);
+            cgo_str(c, "load i64, ptr %v");
+            cgo_int(c, pslot);
+            cg_putc(c, '\n');
+            cgo_str(c, "  store i64 %v");
+            cgo_int(c, ld);
+            cgo_str(c, ", ptr %v");
+            cgo_int(c, gp);
+            cg_putc(c, '\n');
+            pi = pi + 1;
+        }
+        0
+    } else {
+        0
+    };
+    // Lower the RHS (a `perform`) → a Kont* (operand in cglk/cglv, cg_tailk set); walk it
+    // (the type-dump goes to a throwaway buffer; the cg lands in cgbody).
+    let mut pbuf: Vec<u8> = vec_new();
+    let _prt: i64 = dump_texpr(&mut pbuf, lval, 0 - 1, src, c, gb);
+    let _pbx: [u8] = vec_to_array(pbuf);
+    let kk: i64 = (*c).cglk;
+    let kv: i64 = (*c).cglv;
+    // Push the captured frame referencing the resumer + the captured ptr.
+    cgo_str(c, "  call void @sentinel_kont_push(ptr ");
+    cgo_operand(c, kk, kv);
+    cgo_str(c, ", ptr @__resume_");
+    cgo_slice(c, src, name_s, name_e);
+    cgo_str(c, ", ptr ");
+    if cap_null {
+        cgo_str(c, "null")
+    } else {
+        cgo_str(c, "%v");
+        cgo_int(c, alloc_reg)
+    };
+    cgo_str(c, ")\n");
+    (*c).cg_used_kontpush = true;
+    // Assemble the PARENT: `define ptr @<name>(<params>) { entry: <allocas> <body> ret ptr <kont> }`.
+    (*c).cg_to_body = false;
+    cgo_str(c, "define ptr @");
+    cgo_slice(c, src, name_s, name_e);
+    cg_putc(c, '(');
+    let np: i64 = len((*c).cgpty);
+    let mut hi: i64 = 0;
+    while hi < np {
+        if hi > 0 {
+            cgo_str(c, ", ")
+        } else {
+            0
+        };
+        let pty: i64 = (*c).cgpty[hi];
+        cgo_ty(c, pty);
+        cgo_str(c, " %arg");
+        cgo_int(c, hi);
+        hi = hi + 1;
+    }
+    cgo_str(c, ") {\nentry:\n");
+    cg_flush_allocas_body(c);
+    cgo_str(c, "  ret ptr ");
+    cgo_operand(c, kk, kv);
+    cgo_str(c, "\n}\n\n");
+    // ===== RESUMER define: bind v + captures, lower tail, kont_pure wrap, ret ptr =====
+    cg_reset(c);
+    // Bind the let var to the resumed value (`%arg0`); `letty` = i64 (the corpus).
+    let letty: i64 = tyopt_exp(c, lty, gb);
+    let v_vid: i64 = (*c).nextvid;
+    (*c).nextvid = (*c).nextvid + 1;
+    bind_name(c, lnm, v_vid, letty);
+    let v_slot: i64 = cg_alloca(c, letty);
+    cg_slot_set(c, v_vid, v_slot);
+    cgo_str(c, "  store i64 %arg0, ptr %v");
+    cgo_int(c, v_slot);
+    cg_putc(c, '\n');
+    // Bind each captured param to a fresh slot, loaded from the captured ptr (`%arg1`).
+    // Its TYPE binding persists in the env from emit_tparams (cg_reset clears only the cg
+    // slots), so the tail's `Var` resolves + loads as i64.
+    let mut pj: i64 = pv0;
+    while pj < pvn {
+        let off2: i64 = (pj - pv0) * 8;
+        let gp2: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr i8, ptr %arg1, i64 ");
+        cgo_int(c, off2);
+        cg_putc(c, '\n');
+        let ld2: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, gp2);
+        cg_putc(c, '\n');
+        let cs: i64 = cg_alloca(c, 0);
+        cgo_str(c, "  store i64 %v");
+        cgo_int(c, ld2);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, cs);
+        cg_putc(c, '\n');
+        cg_slot_set(c, pj, cs);
+        pj = pj + 1;
+    }
+    // Lower the pure tail → operand; wrap it as a PURE_RETURN kont.
+    let mut tbuf: Vec<u8> = vec_new();
+    let _trt: i64 = dump_texpr(&mut tbuf, tail, 0 - 1, src, c, gb);
+    let _tbx: [u8] = vec_to_array(tbuf);
+    let tk: i64 = (*c).cglk;
+    let tv: i64 = (*c).cglv;
+    let kp: i64 = cg_dst(c);
+    cgo_str(c, "call ptr @sentinel_kont_pure(i64 ");
+    cgo_operand(c, tk, tv);
+    cgo_str(c, ")\n");
+    (*c).cg_used_kontpure = true;
+    // Assemble the RESUMER.
+    (*c).cg_to_body = false;
+    cgo_str(c, "define ptr @__resume_");
+    cgo_slice(c, src, name_s, name_e);
+    cgo_str(c, "(i64 %arg0, ptr %arg1) {\nentry:\n");
+    cg_flush_allocas_body(c);
+    cgo_str(c, "  ret ptr %v");
+    cgo_int(c, kp);
+    cgo_str(c, "\n}\n\n");
     0
 }
 
