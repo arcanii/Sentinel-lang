@@ -2082,9 +2082,10 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A25 — generics (b) mono` commit, atop
-    the **generic-fns/mono feat** (`170a13a` — Bar B's 5th construct; GENERICS COMPLETE) + the A24/generic-
-    structs feat (`d3be39b`) + the A23/secret feat (`7b471a9`) + the A22/nullable feat (`8150ccc`) + the
+    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A26 — classes/traits/impls` commit,
+    atop the **classes/traits/impls/delegates feat** (`a1a3341` — Bar B's 6th construct; emitting set 92 → 98)
+    + the A25/generic-fns-mono feat (`170a13a` — GENERICS COMPLETE) + the A24/generic-structs feat
+    (`d3be39b`) + the A23/secret feat (`7b471a9`) + the A22/nullable feat (`8150ccc`) + the
     **A21**/print docs (`749d32a`) + the `print` feat (`391ae58`). Below: the **A20** path-(a) commit
     (`6355c23` — PATH (a) COMPLETE, the
     self-hosted merge) + the path-(a) feats (a-4 scg self-merges `d33397c`, a-2/a-3 the self-hosted merge
@@ -2184,9 +2185,25 @@ For pasting into a fresh chat to bootstrap context:
     `type_fn` with `cg_mono_on`+`cg_mono_args` (so `type_of_typeexpr` resolves `T`→concrete + `cg_emit_fn`
     mangles); `cg_emit_call` mangles a generic callee. ⚠ `dump_args_capture_all` had to `cg_collect` (was
     mir-only). Un-parser `emit_fn_decl` preserves fn `<T>`. Both fixed-point paths preserved (the mono
-    machinery is inert for the generics-free selfhost — `nmono`=0). **▶ NEXT: classes/traits/impls**
-    (MethodCall/ClassInit/QualifiedCall dispatch + witness/init) → effects/handlers (18 — the hairiest ~2300
-    lines, kont ABI) → concurrency (spawn/scope/await) → the full-corpus phase-go (8l) → **ADR 0045 ACCEPTED**.
+    machinery is inert for the generics-free selfhost — `nmono`=0). **✅ DONE: classes / traits / impls /
+    delegates** (A26, feat `a1a3341`) — emitting set **92 → 98** (c41/c42/c43/c4_named_impl). Pointer ABI
+    (mirror inkwell): a class is `%Class.N` held by value; `init` = `void @Class__init(ptr out,…)`, a method
+    `@Class__m(ptr self,…)`, an impl method `<prefix>__<Type>__<Trait>__<m>` (`default` or the impl name).
+    `self` binds to `%arg0` (no alloca — `Var(self)` loads `%Class.N`, `self.f` GEPs `%arg0`); the 4 forms
+    (ClassInit alloca-call-load / MethodCall + ImplMethodCall self-ptr / QualifiedCall args[0]=recv) compose
+    through the existing FieldAccess + call paths. **Delegates need NO special cg** — the type layer already
+    synthesised them into ordinary `impl as Tr for C { fn m … { self.f.m(args) } }` (GEP the inline field →
+    the field type's `default` impl). ⚠⚠ BOTH un-parsers (`source_dump.rs` AST-driven + `merge.sentinel`
+    token-driven) REJECTED class/trait/impl DECLs — both now emit them so a re-parse is structurally identical
+    (same ClassId / field+method indices / delegate ImplIds, all fixed by intra-kind source order). Sentinel
+    side: a **`cgcls`** buffer for class/impl defines appended AFTER the fns (the group-ordered walk lands them
+    in the oracle's order); operand **kind 4** = `%arg0`; `cg_self_var`/`cg_arg_base`; `cg_emit_method` + the
+    call/symbol helpers; `synth_forward` emits the delegate forwarding. The 6 fixtures `scg` == `snc llvm`
+    byte-identical + behaviourally == inkwell (7/42/42/42/42/42) + leak-free; modes 0–3 byte-identical; both
+    fixed-point paths preserved (selfhost declares no classes → `cgcls` empty). **▶ NEXT: effects/handlers**
+    (18 effecting fns + perform/handle/return-arm — THE HAIREST ~2300 lines: the kont ABI + the ~765-line
+    shape-detection + the handler machinery; mirror inkwell's Handle/Perform/ResumeKont) → concurrency
+    (spawn/scope/await + arena routing) → the full-corpus phase-go (8l) → **ADR 0045 ACCEPTED**.
     ⚠ A genuinely single-file entry must stay a PASSTHROUGH (the merge `has_use` gate). The path-(a) build
     record + design follows (COMPLETE):
     **✅ (a-1)+(a-1b) DONE (ADR 0045 A19):**

@@ -932,6 +932,60 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     machinery is inert for the generics-free selfhost sources — `nmono`=0, no fns skipped). **NEXT: classes/
     traits/impls** (MethodCall / ClassInit / QualifiedCall dispatch + witness/init).
 
+- **A26 — BAR B: classes / traits / impls / delegates LANDED (feat `a1a3341`).** A class is a Pass-0 named
+  aggregate `%Class.N` (N = ClassId, like `%Struct.N`) held BY VALUE; on top of it a **pointer ABI** (ADR
+  0022 D9, mirroring the inkwell backend lib.rs:643–740 + 2362–2520 + 5671–5771): `init` = `void
+  @Class__init(ptr out, params)` (writes through the out-ptr); a method = `<ret> @Class__method(ptr self,
+  params)`; an impl method = `<prefix>__<Type>__<Trait>__<method>` (`prefix` = the impl name, or `default`).
+  The emitting set grew **92 → 98** (c41_class_basic, c41_go_no_go, c42_trait_basic, c42_go_no_go,
+  c43_go_no_go, c4_named_impl). 🔑 `self` binds DIRECTLY to the first param `%arg0` (NO alloca, so writes
+  persist to the caller): `Var(self)` LOADS the whole `%Class.N`, `self.f`'s lvalue GEPs `%arg0`, a method
+  receiver passes `%arg0`/the field GEP. Everything else composes through the existing FieldAccess (an
+  aggregate `extractvalue` read / a GEP-into-pointer write — generalised from struct to class) + call paths.
+  - **The 4 lowering forms.** `ClassInit{id,args}` → alloca `%Class.N`, `call void @Name__init(ptr <slot>,
+    args)`, then `load` (the alloca is reserved BEFORE the args, matching inkwell's order). `MethodCall` →
+    `lower_lvalue_ptr(target)` for `self`, then `call @Class__method(ptr self, args)`. `ImplMethodCall`
+    (receiver-typed dispatch, Path 1) → same self-ptr ABI but the impl-method mangle, always the `default`
+    impl. `QualifiedCall` (Path 2) → `args[0]` IS the receiver (a ref lowered to a `ptr`), passed as `self`;
+    `args[1..]` are the declared params. **Delegates need NO special codegen** — the type layer (4f-delegate,
+    resolve Pass 4.5) already synthesised each `delegate f: T to Tr;` into an ORDINARY `impl as Tr for C`
+    whose body is `self.f.m(args)`; codegen emits it like any impl (GEP the inline field → a `ptr` to it →
+    dispatch to the field type's default impl, e.g. `default__Logger__Writer__write` GEPs `self.writer` and
+    calls `default__FileSink__Writer__write`).
+  - **Oracle (`crates/sentinel-driver/src/llvm_dump.rs`):** `Type::Class` → `%Class.N` in `llvm_ty`; a
+    Pass-0 class-type loop; a `dump_method` (the self-ptr ABI — `self` = `ptr %arg0`, declared params
+    `%arg1..`, `ret void` + tail-ignored for init) over `program.class_decls` (init then methods) then
+    `program.impl_decls` (incl. the delegate-synth impls, ImplId order — so the order is all fns, then all
+    class methods, then all impl methods); `mangle_impl_method`; an `Emit::self_var` + the `self` special-case
+    in the `Var` rvalue (`load … %arg0`) + `lower_lvalue_ptr` (`%arg0`). Placeholder `current_fn = FnId(MAX)`
+    (no DropPlan entry → empty moved-set; corpus methods own no heap anyway).
+  - **Un-parser (`source_dump.rs` + `selfhost/merge.sentinel`) — the gotcha-flagged half.** Both REJECTED
+    class/trait/impl DECLARATIONS (out-of-Bar-A); now both emit them so a re-parse yields the
+    STRUCTURALLY-IDENTICAL program (same ClassId / field+method indices / delegate ImplIds — all fixed by
+    intra-kind source order, preserved). `source_dump.rs` is AST-driven; `merge.sentinel` is TOKEN-driven
+    (re-walks the parser's token stream — mirrors `parser.sentinel`'s class/trait/impl walk; `parse_self_kind`
+    + `is_kw_init` exposed `pub`). The corpus differential routes through `scg` (= merge + types mode-4), so
+    BOTH the un-parse AND the cg must be right; validated by `snc llvm <orig>` == `snc llvm <(snc merge orig)>`
+    (Rust) + `scg` == `snc llvm` (Sentinel).
+  - **Sentinel mode-4 (`selfhost/types.sentinel`):** `%Class.N` in `cgo_ty`/`ll_type_to`/`cg_pass0`; operand
+    **kind 4** = `%arg0`; a **`cgcls` buffer** for class/impl/delegate DEFINEs, appended after `cgout` (the
+    fns + mono) — the group-ordered pass-2 walk (classes → impls → delegate-synth) already lands them in the
+    oracle's order, so ONE buffer suffices; `cg_self_var` + `cg_arg_base` (=1 for methods, so `emit_tparams`
+    stores `%arg{i+1}`); the `Var`/`Field` `self`+class arms; ClassInit/Method/Qcall cg; `cg_emit_method`
+    (the define assembler, into cgcls) + `cg_emit_method_sym` (built from `cgm_*` context fields set by
+    type_class/type_impl/synth_delegate_impl) + the call emitters (`cg_emit_class_mcall`/`cg_emit_impl_mcall`/
+    `cg_emit_qcall`, names from the flat class/trait method tables in `snb`); `synth_forward` emits the
+    delegate forwarding dispatch. ⚠ Bound `(*c).field[i]` to a local before any `&mut c` helper call (the
+    nested-`&mut`-ctx quirk).
+  - **Validation:** the 6 fixtures byte-identical (`scg` == `snc llvm`) + behaviourally equal to inkwell
+    (exit 7/42/42/42/42/42) + leak-free (`leaks --atExit`: 0 leaks — corpus classes are stack-only, no heap
+    fields). Modes 0–3 byte-identical (no regression — the cg is `cg_on`-gated); BOTH bootstrap fixed-point
+    paths preserved (the selfhost sources declare no classes → `cgcls` stays empty, the un-parser's
+    class/trait/impl emitters are never reached). 1476 tests, four-check green. **NEXT: effects/handlers**
+    (18 effecting fns + perform/handle/return-arm — the hairiest ~2300 lines: the kont ABI + the ~765-line
+    shape-detection + the handler machinery) → concurrency (spawn/scope/await) → the full-corpus phase-go →
+    **ADR 0045 ACCEPTED**.
+
 ## Decision
 
 ### D1. Goal.

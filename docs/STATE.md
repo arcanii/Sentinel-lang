@@ -44,8 +44,16 @@ declassify/widen-secret identity); ✅ **generics (a) — generic STRUCT instanc
 COMPLETE (a generic fn emits once per instance under `id__i64`; oracle reuses inkwell's
 `collect_mono_instantiations`; Sentinel re-walks each instance with the type-param scope bound to concrete
 args; un-parser preserves fn `<T>`; the 5 c17 fixtures incl. `pick__i64`+`pick__bool`, leak-free, both
-fixed-point paths preserved). NEXT: **classes/traits/impls** → effects/handlers (18 — the hairiest ~2300
-lines) → concurrency → the full-corpus phase-go → ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21.) The full
+fixed-point paths preserved); ✅ **classes / traits / impls / delegates** (A26, feat `a1a3341`) → **92 → 98**
+(c41/c42/c43/c4_named_impl). Pointer ABI mirroring inkwell: a class is `%Class.N` held by value; `init` =
+`void @Class__init(ptr out,…)`, methods `@Class__m(ptr self,…)`, impl methods
+`<prefix>__<Type>__<Trait>__<m>` (`default` or the impl name); `self` binds to `%arg0` (no alloca);
+delegates need NO special cg (the type layer synthesised them into ordinary `self.field.m(args)` impls).
+⚠ Both un-parsers (`source_dump.rs` + `merge.sentinel`) had to learn class/trait/impl/delegate DECLs (were
+rejected/dropped). Sentinel side: a `cgcls` buffer (class/impl defines after the fns — the oracle's order),
+operand kind 4 = `%arg0`, `cg_self_var`/`cg_arg_base`. NEXT: **effects/handlers** (18 — the hairiest ~2300
+lines: kont ABI + ~765-line shape-detection) → concurrency → the full-corpus phase-go → ACCEPTED. (Full
+Bar-B breakdown in ADR 0045 A21; the classes slice in A26.) The full
 slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
