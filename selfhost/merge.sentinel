@@ -1254,6 +1254,58 @@ fn emit_class_delegate_src(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Ve
     0
 }
 
+// (Bar B / effects) `effect Name { op(params) -> ret; … }` (cur at `effect`). Mirrors
+// the parser's dump_effect_decl/dump_ops token-walk, re-emitting source. (emit_expr
+// already handles the `perform`/`handle` forms.)
+fn emit_effect_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    append_str(out, "effect ");
+    emit_name_slice(out, c, src, nm_s, nm_e);
+    append_str(out, " { ");
+    emit_ops(out, c, k, s, e, src, cur);
+    0
+}
+
+// Effect ops up to + consuming the closing `}` (7); each `op(params) [-> ret];`. The op
+// branch emits the trailing `;`; a stray `;` token (44) is skipped (the parser leaves the
+// `;` for the next iteration).
+fn emit_ops(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        push(out, '}');
+        0
+    } else if t == 44 {
+        *cur = *cur + 1;
+        emit_ops(out, c, k, s, e, src, cur)
+    } else {
+        let on_s: i64 = (*s)[*cur];
+        let on_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let oparams: Params = parse_params(k, s, e, src, cur);
+        append_slice(out, src, on_s, on_e);
+        push(out, '(');
+        emit_params(out, c, oparams);
+        push(out, ')');
+        if (*k)[*cur] == 8 {
+            *cur = *cur + 1;
+            let oret: TypeE = parse_type(k, s, e, src, cur);
+            append_str(out, " -> ");
+            emit_type(out, c, oret);
+            0
+        } else {
+            0
+        };
+        append_str(out, "; ");
+        emit_ops(out, c, k, s, e, src, cur)
+    }
+}
+
 fn emit_item(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     if (*k)[*cur] == 59 {
         *cur = *cur + 1;
@@ -1276,6 +1328,8 @@ fn emit_item(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Ve
         emit_impl_decl(out, c, k, s, e, src, cur)
     } else if lead == 56 {
         emit_class_decl(out, c, k, s, e, src, cur)
+    } else if lead == 57 {
+        emit_effect_decl(out, c, k, s, e, src, cur)
     } else {
         *cur = *cur + 1;
         0

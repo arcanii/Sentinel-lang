@@ -36,20 +36,15 @@
 //! correct-or-loud over the bootstrap subset, never silently wrong.
 
 use sentinel_ast::{
-    BinOp, Block, ClassDecl, CmpOp, DelegateDecl, EnumDecl, Expr, ExprKind, FnDef, ImplDecl,
-    InitDef, LogicOp, Param, Pattern, Program, SelfKind, Stmt, StmtKind, StructDecl,
-    TraitDecl, TraitMethodSig, TypeExpr, TypeExprKind, UnaryOp, Visibility,
+    BinOp, Block, ClassDecl, CmpOp, DelegateDecl, EffectDecl, EnumDecl, Expr, ExprKind, FnDef,
+    HandlerArm, ImplDecl, InitDef, LogicOp, OpDecl, Param, Pattern, Program, SelfKind,
+    Stmt, StmtKind, StructDecl, TraitDecl, TraitMethodSig, TypeExpr, TypeExprKind, UnaryOp,
+    Visibility,
 };
 
 /// Emit `program` as re-parseable Sentinel source, or an error naming the
 /// first construct outside the Bar-A subset this printer supports.
 pub fn dump(program: &Program) -> Result<String, String> {
-    // Effects/handlers/concurrency remain a later Bar-B slice (the expr forms below
-    // still Err). Classes/traits/impls/delegates ARE emitted (Bar B / classes slice).
-    if !program.effects.is_empty() {
-        return Err("merge-to-source: effect declarations are out of Bar-A scope".into());
-    }
-
     let mut out = String::new();
     // Per-kind, in vector order (intra-kind order fixes the IDs; inter-kind
     // order is free — resolve builds all tables before any body). Traits/impls/
@@ -74,7 +69,46 @@ pub fn dump(program: &Program) -> Result<String, String> {
     for c in &program.classes {
         emit_class(&mut out, c)?;
     }
+    for ef in &program.effects {
+        emit_effect(&mut out, ef)?;
+    }
     Ok(out)
+}
+
+// --- effects (Bar B / effects) -----------------------------------------------
+
+fn emit_effect(out: &mut String, ef: &EffectDecl) -> Result<(), String> {
+    if ef.visibility == Visibility::Public {
+        out.push_str("pub ");
+    }
+    out.push_str("effect ");
+    out.push_str(&ef.name);
+    out.push_str(" { ");
+    for op in &ef.ops {
+        emit_op_decl(out, op);
+        out.push(' ');
+    }
+    out.push_str("}\n");
+    Ok(())
+}
+
+/// `op(params) -> ret;` — the return type is omitted when `None` (the parser accepts
+/// a bodyless `op(params);`, ADR 0020).
+fn emit_op_decl(out: &mut String, op: &OpDecl) {
+    out.push_str(&op.name);
+    out.push('(');
+    for (i, p) in op.params.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        emit_param(out, p);
+    }
+    out.push(')');
+    if let Some(rt) = &op.return_type {
+        out.push_str(" -> ");
+        emit_type(out, rt);
+    }
+    out.push(';');
 }
 
 // --- declarations -----------------------------------------------------------
@@ -557,9 +591,38 @@ fn emit_node(out: &mut String, e: &Expr) -> Result<(), String> {
             }
             out.push_str(" }");
         }
+        // Bar B / effects (ADR 0020): `perform Eff.op(args)` + `handle body with { … }`.
+        ExprKind::Perform { effect, op, args } => {
+            out.push_str("perform ");
+            out.push_str(&effect.kind);
+            out.push('.');
+            out.push_str(&op.kind);
+            emit_args(out, args)?;
+        }
+        ExprKind::Handle { body, arms, return_arm } => {
+            out.push_str("handle ");
+            emit_expr(out, body)?;
+            out.push_str(" with { ");
+            let mut first = true;
+            for arm in arms {
+                if !first {
+                    out.push_str(", ");
+                }
+                first = false;
+                emit_handler_arm(out, arm)?;
+            }
+            if let Some(ra) = return_arm {
+                if !first {
+                    out.push_str(", ");
+                }
+                out.push_str("return ");
+                out.push_str(&ra.value_name.kind);
+                out.push_str(" => ");
+                emit_expr(out, &ra.body)?;
+            }
+            out.push_str(" }");
+        }
         ExprKind::Declassify(_)
-        | ExprKind::Perform { .. }
-        | ExprKind::Handle { .. }
         | ExprKind::Scope { .. }
         | ExprKind::Spawn { .. }
         | ExprKind::Await { .. } => {
@@ -570,6 +633,24 @@ fn emit_node(out: &mut String, e: &Expr) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `Eff.op(p1, p2, …) => body` — the params are the op-params followed by the
+/// continuation binding (all plain idents; the typing layer splits them).
+fn emit_handler_arm(out: &mut String, arm: &HandlerArm) -> Result<(), String> {
+    out.push_str(&arm.effect.kind);
+    out.push('.');
+    out.push_str(&arm.op.kind);
+    out.push('(');
+    for (i, p) in arm.param_names.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&p.kind);
+    }
+    out.push(')');
+    out.push_str(" => ");
+    emit_expr(out, &arm.body)
 }
 
 fn emit_binary(out: &mut String, sym: &str, l: &Expr, r: &Expr) -> Result<(), String> {

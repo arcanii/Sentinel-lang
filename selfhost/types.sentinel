@@ -291,6 +291,17 @@ struct TyCtx {
     cgm_nm_e: i64,       // impl-name `src` slice end
     cgm_type_cid: i64,   // the owning/target class (→ `%Class`/className via `snb`)
     cgm_trait_tid: i64,  // (impl method) the trait (→ traitName via `snb`)
+    // (Bar B / effects, ADR 0020) the kont runtime symbols used (→ declares) + the
+    // enclosing `handle`'s dispatch state (the if-else-chain mirror of the oracle).
+    cg_used_perform: bool,   // declare sentinel_perform_op
+    cg_used_resume: bool,    // declare sentinel_kont_resume
+    cg_used_consume: bool,   // declare sentinel_kont_consume_pure
+    cg_h_opid: i64,   // the current handle's loaded op_id register (for the arm icmps)
+    cg_h_ck: i64,     // the current handle's loaded kont register (arm-param GEP + kont slot)
+    cg_h_loop: i64,   // the dispatch loop block (a `k(v)` bubble re-enters it)
+    cg_h_cks: i64,    // the current_kont_slot (a bubble stores the new kont here)
+    cg_h_rslot: i64,  // the result memory cell (each arm / the pure case stores here)
+    cg_h_merge: i64,  // the merge block (each arm / pure branches here; the load follows)
 }
 
 fn tbase() -> i64 { 100 }
@@ -3246,6 +3257,25 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             if kid >= 0 {
                 sink_name(gb, cn);
                 let kty: i64 = env_get(c, kid);
+                // (Bar B / effects) cg: load the kont FIRST (the oracle's order), then
+                // collect the resume arg, then emit kont_resume + the pure/bubble split.
+                let cg_kreg: i64 = if cg_on(c) {
+                    cg_emit_resume_load(c, kid)
+                } else {
+                    0 - 1
+                };
+                let cg_rk_col: bool = (*c).cg_collecting;
+                let cg_rk_csnap: i64 = if cg_on(c) {
+                    len((*c).cgak)
+                } else {
+                    0
+                };
+                if cg_on(c) {
+                    (*c).cg_collecting = true;
+                    0
+                } else {
+                    0
+                };
                 append_str(out, "(resume-kont #");
                 append_int(out, kid);
                 // (6/N) resume-kont args are consuming (passed by value to the cont).
@@ -3277,6 +3307,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                     let kmc: i64 = (*c).mir_cur;
                     let kd: i64 = mir_emit_va(c, kmc, 7, 0, rk_snap, krt);
                     (*c).lastval = kd;
+                    0
+                } else {
+                    0
+                };
+                if cg_on(c) {
+                    (*c).cg_collecting = cg_rk_col;
+                    cg_emit_resume_tail(c, cg_kreg, cg_rk_csnap);
                     0
                 } else {
                     0
@@ -4238,6 +4275,20 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let peid: i64 = effect_lookup(c, src, &pe);
             let poidx: i64 = op_index_lookup(c, src, peid, &po);
             let pret: i64 = op_ret(c, peid, poidx);
+            // (Bar B / effects) cg: collect the (single, C3.5(a)) op arg, then emit
+            // `call ptr @sentinel_perform_op(i32 op_id, i64 arg|0)`.
+            let cg_pf_col: bool = (*c).cg_collecting;
+            let cg_pf_csnap: i64 = if cg_on(c) {
+                len((*c).cgak)
+            } else {
+                0
+            };
+            if cg_on(c) {
+                (*c).cg_collecting = true;
+                0
+            } else {
+                0
+            };
             append_str(out, "(perform #");
             append_int(out, peid);
             push(out, ' ');
@@ -4270,6 +4321,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            if cg_on(c) {
+                (*c).cg_collecting = cg_pf_col;
+                cg_emit_perform(c, peid, poidx, cg_pf_csnap);
+                0
+            } else {
+                0
+            };
             pret
         },
         // (4g) `handle body with { Eff.op(ps) => arm, … return v => arm }` →
@@ -4283,6 +4341,52 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 (*c).lastval
             } else {
                 0 - 1
+            };
+            // (Bar B / effects) cg: the dispatch loop. Capture the body's kont operand,
+            // SAVE the enclosing handle state (nesting), then store the kont + open the
+            // loop (load the kont + its op_id). `dump_tharms` emits the per-arm if-else
+            // chain; the pure-check tail + merge follow.
+            let cg_bk: i64 = (*c).cglk;
+            let cg_bv: i64 = (*c).cglv;
+            let sv_opid: i64 = (*c).cg_h_opid;
+            let sv_ck: i64 = (*c).cg_h_ck;
+            let sv_loop: i64 = (*c).cg_h_loop;
+            let sv_cks: i64 = (*c).cg_h_cks;
+            let sv_rslot: i64 = (*c).cg_h_rslot;
+            let sv_merge: i64 = (*c).cg_h_merge;
+            if cg_on(c) {
+                let cks: i64 = cg_alloca_ptr(c);
+                cgo_str(c, "  store ptr ");
+                cgo_operand(c, cg_bk, cg_bv);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, cks);
+                cg_putc(c, '\n');
+                let rslot: i64 = cg_alloca(c, 0);
+                let loop_b: i64 = cg_fresh_block(c);
+                let merge_b: i64 = cg_fresh_block(c);
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, loop_b);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, loop_b);
+                cgo_str(c, ":\n");
+                let ck: i64 = cg_dst(c);
+                cgo_str(c, "load ptr, ptr %v");
+                cgo_int(c, cks);
+                cg_putc(c, '\n');
+                let opid: i64 = cg_dst(c);
+                cgo_str(c, "load i32, ptr %v");
+                cgo_int(c, ck);
+                cg_putc(c, '\n');
+                (*c).cg_h_opid = opid;
+                (*c).cg_h_ck = ck;
+                (*c).cg_h_loop = loop_b;
+                (*c).cg_h_cks = cks;
+                (*c).cg_h_rslot = rslot;
+                (*c).cg_h_merge = merge_b;
+                0
+            } else {
+                0
             };
             // (7c) MIR: a handle lowers ONLY its body -> Opaque([body]); the handler arms
             // + return arm are walked for the dump but NOT lowered (suppress their emits).
@@ -4302,6 +4406,63 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0
             };
             close_ty(out, bty, c);
+            // (cg) the PURE_RETURN check (the chain's tail) + the merge; restore state.
+            if cg_on(c) {
+                let hopid: i64 = (*c).cg_h_opid;
+                let hck: i64 = (*c).cg_h_ck;
+                let hrslot: i64 = (*c).cg_h_rslot;
+                let hmerge: i64 = (*c).cg_h_merge;
+                let cmpp: i64 = cg_dst(c);
+                cgo_str(c, "icmp eq i32 %v");
+                cgo_int(c, hopid);
+                cgo_str(c, ", 4294967295\n");
+                let pure_b: i64 = cg_fresh_block(c);
+                let default_b: i64 = cg_fresh_block(c);
+                cgo_str(c, "  br i1 %v");
+                cgo_int(c, cmpp);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, pure_b);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, default_b);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, pure_b);
+                cgo_str(c, ":\n");
+                let pv: i64 = cg_dst(c);
+                cgo_str(c, "call i64 @sentinel_kont_consume_pure(ptr %v");
+                cgo_int(c, hck);
+                cgo_str(c, ")\n");
+                (*c).cg_used_consume = true;
+                cgo_str(c, "  store i64 %v");
+                cgo_int(c, pv);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, hrslot);
+                cg_putc(c, '\n');
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, hmerge);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, default_b);
+                cgo_str(c, ":\n");
+                cgo_str(c, "  unreachable\n");
+                cgo_str(c, "bb");
+                cgo_int(c, hmerge);
+                cgo_str(c, ":\n");
+                let rv: i64 = cg_dst(c);
+                cgo_str(c, "load i64, ptr %v");
+                cgo_int(c, hrslot);
+                cg_putc(c, '\n');
+                cg_reg(c, rv);
+                (*c).cg_h_opid = sv_opid;
+                (*c).cg_h_ck = sv_ck;
+                (*c).cg_h_loop = sv_loop;
+                (*c).cg_h_cks = sv_cks;
+                (*c).cg_h_rslot = sv_rslot;
+                (*c).cg_h_merge = sv_merge;
+                0
+            } else {
+                0
+            };
             if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit_opaque1(c, mc, hbv, bty);
@@ -4723,6 +4884,34 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
         HArms::HCell(hef, hop, hparams, hbody, hrest) => {
             let heid: i64 = effect_lookup(c, src, &hef);
             let hoidx: i64 = op_index_lookup(c, src, heid, &hop);
+            // (Bar B / effects) cg: this arm's op_id check (the if-else chain) — branch to
+            // the arm block or the next check. `cg_next_b` is the block the next arm's
+            // check (or the pure-check tail) continues in.
+            let cg_next_b: i64 = if cg_on(c) {
+                let oid: i64 = cg_encode_op_id(heid, hoidx);
+                let hopid: i64 = (*c).cg_h_opid;
+                let cmp: i64 = cg_dst(c);
+                cgo_str(c, "icmp eq i32 %v");
+                cgo_int(c, hopid);
+                cgo_str(c, ", ");
+                cgo_int(c, oid);
+                cg_putc(c, '\n');
+                let ab: i64 = cg_fresh_block(c);
+                let nb: i64 = cg_fresh_block(c);
+                cgo_str(c, "  br i1 %v");
+                cgo_int(c, cmp);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, ab);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, nb);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, ab);
+                cgo_str(c, ":\n");
+                nb
+            } else {
+                0
+            };
             append_str(out, " (arm #");
             append_int(out, heid);
             push(out, ' ');
@@ -4733,11 +4922,43 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
             append_str(out, hop);
             append_str(out, " (");
             let mark: i64 = len((*c).scs);
+            let cg_pv0: i64 = (*c).nextvid;
             dump_thparams(out, hparams, c, true);
+            let cg_pvn: i64 = (*c).nextvid;
             append_str(out, ") ");
+            // (cg) bind the arm's op-param (kont.arg @8) + continuation (a slot holding ck).
+            if cg_on(c) {
+                let ck: i64 = (*c).cg_h_ck;
+                cg_bind_harm_params(c, cg_pv0, cg_pvn, ck);
+                0
+            } else {
+                0
+            };
             dump_texpr(out, hbody, 0 - 1, src, c, gb);
             truncate_scope(c, mark);
             push(out, ')');
+            // (cg) store the arm value to the result cell + branch to merge; open the next
+            // check block (the next arm / the pure-check tail continues there).
+            if cg_on(c) {
+                let bk: i64 = (*c).cglk;
+                let bv: i64 = (*c).cglv;
+                let rslot: i64 = (*c).cg_h_rslot;
+                let merge_b: i64 = (*c).cg_h_merge;
+                cgo_str(c, "  store i64 ");
+                cgo_operand(c, bk, bv);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, rslot);
+                cg_putc(c, '\n');
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, merge_b);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, cg_next_b);
+                cgo_str(c, ":\n");
+                0
+            } else {
+                0
+            };
             dump_tharms(out, hrest, src, c, gb)
         },
     }
@@ -6860,6 +7081,15 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cgm_nm_e: 0,
         cgm_type_cid: 0,
         cgm_trait_tid: 0,
+        cg_used_perform: false,
+        cg_used_resume: false,
+        cg_used_consume: false,
+        cg_h_opid: 0,
+        cg_h_ck: 0,
+        cg_h_loop: 0,
+        cg_h_cks: 0,
+        cg_h_rslot: 0,
+        cg_h_merge: 0,
     };
     let mut garbage: Vec<u8> = vec_new();
     let mut out: Vec<u8> = vec_new();
@@ -7361,6 +7591,25 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        // (Bar B / effects) the kont runtime symbols, in the `sentinel_*` group.
+        if ctx.cg_used_perform {
+            append_str(result, "declare ptr @sentinel_perform_op(i32, i64)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_resume {
+            append_str(result, "declare ptr @sentinel_kont_resume(ptr, i64)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_consume {
+            append_str(result, "declare i64 @sentinel_kont_consume_pure(ptr)\n");
+            0
+        } else {
+            0
+        };
         // (8d-Vec-2) the `llvm.memcpy` intrinsic declares LAST — after the
         // `sentinel_*` runtime-symbol group (it is an `@llvm.*` intrinsic, not a
         // runtime symbol), matching the oracle's `RuntimeSyms::emit_declares`.
@@ -7370,7 +7619,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_memcpy;
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_memcpy;
         if cg_anydecl {
             push(result, '\n');
             0
@@ -8388,6 +8637,15 @@ fn cg_alloca(c: &mut TyCtx, ty: i64) -> i64 {
     slot
 }
 
+// (Bar B / effects) hoist an `alloca ptr` (a kont slot) — `-1` marks a raw pointer in
+// the alloca-type pool (the hoist loop renders it as `ptr`, not via `cgo_ty`).
+fn cg_alloca_ptr(c: &mut TyCtx) -> i64 {
+    let slot: i64 = cg_fresh(c);
+    push(&mut (*c).cgalloca_sl, slot);
+    push(&mut (*c).cgalloca_ty, 0 - 1);
+    slot
+}
+
 // (8d-drops) record a scope-drop entry: (VarId, type, alloca slot). Called for each
 // param + `let` so the owning block frees it (if un-moved) at exit.
 fn cg_drop_record(c: &mut TyCtx, vid: i64, ty: i64, slot: i64) -> i64 {
@@ -8993,7 +9251,11 @@ fn cg_emit_method(c: &mut TyCtx, src: &[u8], rty: i64, is_void: bool, is_init: b
         cgo_str(c, "  %v");
         cgo_int(c, asl);
         cgo_str(c, " = alloca ");
-        cgo_ty(c, aty);
+        if aty < 0 {
+            cgo_str(c, "ptr")
+        } else {
+            cgo_ty(c, aty)
+        };
         cg_putc(c, '\n');
         ai = ai + 1;
     }
@@ -9177,6 +9439,156 @@ fn cg_emit_qcall(c: &mut TyCtx, rty: i64, snap: i64, iid: i64, qtid: i64, midx: 
     let _a: i64 = pop(&mut (*c).cgak);
     let _b: i64 = pop(&mut (*c).cgav);
     let _t: i64 = pop(&mut (*c).cgat);
+    0
+}
+
+// --- (Bar B / effects) handler-runtime codegen helpers ----------------------
+
+// A unique op id per `(EffectId, op_index)` — `(eid<<16)|(op&0xFFFF)`, which for an
+// op_index < 65536 (always) is `eid*65536 + op` (no `<<`/`|` needed; same decimal value).
+fn cg_encode_op_id(eid: i64, opidx: i64) -> i64 {
+    eid * 65536 + opidx
+}
+
+// `%vD = call ptr @sentinel_perform_op(i32 op_id, i64 arg|0)` (the collected single arg
+// at `snap`, or `0`); pops the collected args. Sets the result operand to the kont ptr.
+fn cg_emit_perform(c: &mut TyCtx, eid: i64, opidx: i64, snap: i64) -> i64 {
+    let opid: i64 = cg_encode_op_id(eid, opidx);
+    let d: i64 = cg_dst(c);
+    cgo_str(c, "call ptr @sentinel_perform_op(i32 ");
+    cgo_int(c, opid);
+    cgo_str(c, ", i64 ");
+    let n: i64 = len((*c).cgak);
+    if n > snap {
+        let ak: i64 = (*c).cgak[snap];
+        let av: i64 = (*c).cgav[snap];
+        cgo_operand(c, ak, av);
+        0
+    } else {
+        cg_putc(c, '0');
+        0
+    };
+    cgo_str(c, ")\n");
+    while len((*c).cgak) > snap {
+        let _a: i64 = pop(&mut (*c).cgak);
+        let _b: i64 = pop(&mut (*c).cgav);
+        let _t: i64 = pop(&mut (*c).cgat);
+        0
+    }
+    (*c).cg_used_perform = true;
+    cg_reg(c, d);
+    0
+}
+
+// (Bar B / effects) bind a handler arm's params from the VarId range `[pv0, pvn)` (in
+// the SAME order the oracle's `bind_handler_arm_params` allocates): the op-param (when
+// there are >=2 params — `kont.arg` via i8-GEP @8 into an i64 slot), then the
+// continuation (the last, a slot holding the kont ptr `ck`). C3.5(a): one op-param max.
+fn cg_bind_harm_params(c: &mut TyCtx, pv0: i64, pvn: i64, ck: i64) -> i64 {
+    let n: i64 = pvn - pv0;
+    if n >= 2 {
+        let ap: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr i8, ptr %v");
+        cgo_int(c, ck);
+        cgo_str(c, ", i64 8\n");
+        let av: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, ap);
+        cg_putc(c, '\n');
+        let oslot: i64 = cg_alloca(c, 0);
+        cgo_str(c, "  store i64 %v");
+        cgo_int(c, av);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, oslot);
+        cg_putc(c, '\n');
+        cg_slot_set(c, pv0, oslot);
+        0
+    } else {
+        0
+    };
+    let kslot: i64 = cg_alloca_ptr(c);
+    cgo_str(c, "  store ptr %v");
+    cgo_int(c, ck);
+    cgo_str(c, ", ptr %v");
+    cgo_int(c, kslot);
+    cg_putc(c, '\n');
+    cg_slot_set(c, pvn - 1, kslot);
+    0
+}
+
+// (Bar B / effects) `k(arg)` part 1: load the kont pointer from `kid`'s slot — emitted
+// BEFORE the arg is lowered (the oracle's `lower_resume_kont` loads the kont first, then
+// the arg). Returns the loaded-kont register.
+fn cg_emit_resume_load(c: &mut TyCtx, kid: i64) -> i64 {
+    let kslot: i64 = cg_slot_get(c, kid);
+    let kreg: i64 = cg_dst(c);
+    cgo_str(c, "load ptr, ptr %v");
+    cgo_int(c, kslot);
+    cg_putc(c, '\n');
+    kreg
+}
+
+// (Bar B / effects) `k(arg)` part 2 (after the arg is collected at `snap`): `kont_resume`
+// then branch on the result's op_id: a PURE_RETURN drains via `consume_pure` (the value);
+// else a resumer bubbled → store the new kont to the enclosing handle's slot + re-enter
+// its loop. The builder ends on the pure block; the result operand is the unwrapped i64.
+fn cg_emit_resume_tail(c: &mut TyCtx, kreg: i64, snap: i64) -> i64 {
+    let argk: i64 = (*c).cgak[snap];
+    let argv: i64 = (*c).cgav[snap];
+    let kr: i64 = cg_dst(c);
+    cgo_str(c, "call ptr @sentinel_kont_resume(ptr %v");
+    cgo_int(c, kreg);
+    cgo_str(c, ", i64 ");
+    cgo_operand(c, argk, argv);
+    cgo_str(c, ")\n");
+    while len((*c).cgak) > snap {
+        let _a: i64 = pop(&mut (*c).cgak);
+        let _b: i64 = pop(&mut (*c).cgav);
+        let _t: i64 = pop(&mut (*c).cgat);
+        0
+    }
+    let kropid: i64 = cg_dst(c);
+    cgo_str(c, "load i32, ptr %v");
+    cgo_int(c, kr);
+    cg_putc(c, '\n');
+    let isp: i64 = cg_dst(c);
+    cgo_str(c, "icmp eq i32 %v");
+    cgo_int(c, kropid);
+    cgo_str(c, ", 4294967295\n");
+    let pure_b: i64 = cg_fresh_block(c);
+    let bubble_b: i64 = cg_fresh_block(c);
+    cgo_str(c, "  br i1 %v");
+    cgo_int(c, isp);
+    cgo_str(c, ", label %bb");
+    cgo_int(c, pure_b);
+    cgo_str(c, ", label %bb");
+    cgo_int(c, bubble_b);
+    cg_putc(c, '\n');
+    // Bubble: hand the new kont to the enclosing handle's loop.
+    let hcks: i64 = (*c).cg_h_cks;
+    let hloop: i64 = (*c).cg_h_loop;
+    cgo_str(c, "bb");
+    cgo_int(c, bubble_b);
+    cgo_str(c, ":\n");
+    cgo_str(c, "  store ptr %v");
+    cgo_int(c, kr);
+    cgo_str(c, ", ptr %v");
+    cgo_int(c, hcks);
+    cg_putc(c, '\n');
+    cgo_str(c, "  br label %bb");
+    cgo_int(c, hloop);
+    cg_putc(c, '\n');
+    // Pure: unwrap to the resumed i64.
+    cgo_str(c, "bb");
+    cgo_int(c, pure_b);
+    cgo_str(c, ":\n");
+    let pv: i64 = cg_dst(c);
+    cgo_str(c, "call i64 @sentinel_kont_consume_pure(ptr %v");
+    cgo_int(c, kr);
+    cgo_str(c, ")\n");
+    (*c).cg_used_resume = true;
+    (*c).cg_used_consume = true;
+    cg_reg(c, pv);
     0
 }
 
@@ -9927,7 +10339,11 @@ fn cg_emit_fn(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> 
         cgo_str(c, "  %v");
         cgo_int(c, asl);
         cgo_str(c, " = alloca ");
-        cgo_ty(c, aty);
+        if aty < 0 {
+            cgo_str(c, "ptr")
+        } else {
+            cgo_ty(c, aty)
+        };
         cg_putc(c, '\n');
         ai = ai + 1;
     }

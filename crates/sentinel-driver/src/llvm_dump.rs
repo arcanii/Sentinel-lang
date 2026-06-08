@@ -42,13 +42,14 @@ use sentinel_borrow_check::DropPlan;
 // oracle monomorphizes the same set, in the same order, as the production codegen.
 use sentinel_codegen::collect_mono_instantiations;
 use sentinel_resolve::{
-    ClassId, EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID,
+    ClassId, EffectId, EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID,
     POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID,
     U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
-    NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedMatchArm,
-    TypedParam, TypedPattern, TypedPatternBinding, TypedProgram, TypedStmt, TypedStmtKind,
+    NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedHandlerArm,
+    TypedMatchArm, TypedParam, TypedPattern, TypedPatternBinding, TypedProgram, TypedReturnArm,
+    TypedStmt, TypedStmtKind,
 };
 
 /// Hardcoded for a reproducible byte-target (not host inference). `clang`
@@ -58,6 +59,16 @@ const TARGET_TRIPLE: &str = "arm64-apple-darwin";
 
 /// The lowest user FnId — ids 0..=13 are runtime/builtins (ADR 0044 FnId map).
 const FIRST_USER_FN: u32 = 14;
+
+/// Bar B / effects (ADR 0020): the reserved kont op_id for a PURE_RETURN wrap
+/// (`u32::MAX`) — the handle dispatch + `k(v)` pure-check compare against it.
+const PURE_RETURN_OP_ID: u32 = u32::MAX;
+
+/// Bar B / effects: a unique 32-bit op id per `(EffectId, op_index)`, mirroring the
+/// runtime/inkwell `encode_op_id` (`(eid << 16) | (op & 0xFFFF)`).
+fn encode_op_id(effect_id: EffectId, op_index: usize) -> u32 {
+    (effect_id.0 << 16) | ((op_index as u32) & 0xFFFF)
+}
 
 /// Which `sentinel_*` runtime symbols a module's bodies actually use. The module
 /// emits a `declare` for each used symbol — in a FIXED order, before the fns — so a
@@ -81,6 +92,13 @@ struct RuntimeSyms {
     /// prefix). An `@llvm.*` intrinsic, not a `sentinel_*` symbol, so it
     /// declares LAST — after the runtime-symbol group.
     memcpy: bool,
+    /// Bar B / effects (ADR 0020): the handler-runtime kont symbols.
+    /// `sentinel_perform_op(i32 op_id, i64 arg) -> ptr` (a fresh kont).
+    perform_op: bool,
+    /// `sentinel_kont_resume(ptr kont, i64 value) -> ptr` (a result kont).
+    kont_resume: bool,
+    /// `sentinel_kont_consume_pure(ptr kont) -> i64` (unwrap a PURE_RETURN kont).
+    kont_consume_pure: bool,
 }
 
 impl RuntimeSyms {
@@ -95,6 +113,9 @@ impl RuntimeSyms {
         self.print |= other.print;
         self.print_bytes |= other.print_bytes;
         self.memcpy |= other.memcpy;
+        self.perform_op |= other.perform_op;
+        self.kont_resume |= other.kont_resume;
+        self.kont_consume_pure |= other.kont_consume_pure;
     }
 
     /// Emit the `declare`s for the used symbols, in the fixed canonical order,
@@ -127,6 +148,16 @@ impl RuntimeSyms {
         if self.print_bytes {
             writeln!(out, "declare i64 @sentinel_print_bytes(ptr, i64)").unwrap();
         }
+        // Bar B / effects: the kont runtime symbols, in the `sentinel_*` group.
+        if self.perform_op {
+            writeln!(out, "declare ptr @sentinel_perform_op(i32, i64)").unwrap();
+        }
+        if self.kont_resume {
+            writeln!(out, "declare ptr @sentinel_kont_resume(ptr, i64)").unwrap();
+        }
+        if self.kont_consume_pure {
+            writeln!(out, "declare i64 @sentinel_kont_consume_pure(ptr)").unwrap();
+        }
         if self.memcpy {
             writeln!(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)").unwrap();
         }
@@ -139,6 +170,9 @@ impl RuntimeSyms {
             || self.write_file
             || self.print
             || self.print_bytes
+            || self.perform_op
+            || self.kont_resume
+            || self.kont_consume_pure
             || self.memcpy
     }
 }
@@ -352,6 +386,7 @@ fn dump_fn_named(
         loops: Vec::new(),
         used: RuntimeSyms::default(),
         self_var: None,
+        handle_stack: Vec::new(),
     };
     // Allocas are HOISTED to the entry block: param slots, `let` slots, and the
     // if-result slot all land in `e.allocas` (emitted first), while stores/loads/
@@ -456,6 +491,7 @@ fn dump_method(
         loops: Vec::new(),
         used: RuntimeSyms::default(),
         self_var: Some(self_var_id),
+        handle_stack: Vec::new(),
     };
     // `self` is `%arg0` — bound by `self_var`, with its body type recorded as the class
     // (so `Var(self)` loads `%Class.N` and `self.f` GEPs the class). It is BORROWED, not
@@ -542,6 +578,11 @@ struct Emit<'a> {
     /// caller. `Var(self)` LOADS the whole `%Class.N` from it; `&self`/the lvalue of
     /// `self.f` GEPs from it. `None` for a free fn.
     self_var: Option<VarId>,
+    /// Bar B / effects (ADR 0020): the enclosing `handle`s' dispatch context —
+    /// `(loop_block, current_kont_slot)`. A `k(v)` (`ResumeKont`) inside an arm whose
+    /// resume BUBBLES (a resumer performed) stores the bubble kont into the innermost
+    /// handle's `current_kont_slot` and branches to its `loop_block` to re-dispatch.
+    handle_stack: Vec<(u32, u32)>,
 }
 
 impl Emit<'_> {
@@ -1042,6 +1083,29 @@ impl Emit<'_> {
                 self.body.push_str(")\n");
                 Ok(format!("%v{v}"))
             }
+            // Bar B / effects (ADR 0020) — `perform Eff.op(args)` raises a continuation:
+            // `call ptr @sentinel_perform_op(i32 <op_id>, i64 <arg|0>)`. The result is a
+            // kont* that flows up to the enclosing `handle`'s dispatch. (C3.5(a) single-arg.)
+            TypedExprKind::Perform { effect_id, op_index, args, .. } => {
+                let op_id = encode_op_id(*effect_id, *op_index);
+                let arg = if args.is_empty() {
+                    "0".to_string()
+                } else {
+                    self.lower_expr(&args[0])?
+                };
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = call ptr @sentinel_perform_op(i32 {op_id}, i64 {arg})").unwrap();
+                self.used.perform_op = true;
+                Ok(format!("%v{v}"))
+            }
+            // Bar B / effects — `handle <body> with { arms }`: the dispatch loop.
+            TypedExprKind::Handle { body, arms, return_arm, .. } => {
+                self.lower_handle(body, arms, return_arm.as_deref())
+            }
+            // Bar B / effects — `k(v)` resumes a continuation (inside a handler arm).
+            TypedExprKind::ResumeKont { kont, args, .. } => {
+                self.lower_resume_kont(*kont, args)
+            }
             _ => Err("expression not yet ported (straight-line 8a only)".into()),
         }
     }
@@ -1424,6 +1488,142 @@ impl Emit<'_> {
         let a1 = self.fresh();
         writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
         format!("%v{a1}")
+    }
+
+    /// Bar B / effects (ADR 0020) — `handle <body> with { arms }` as a dispatch loop.
+    /// The body produces a kont* (a direct `perform` at c35a); the loop reads the kont's
+    /// `op_id` (offset 0) + branches via an **if-else chain** (NOT a `switch` — the
+    /// Sentinel side's arm cons-list is single-consumption, so both backends chain for
+    /// byte-parity): an arm whose `(EffectId, op_index)` matches binds its op-param
+    /// (kont.arg @8) + the continuation + runs its body; a final PURE_RETURN check unwraps
+    /// the value. A `k(v)` bubble re-enters the loop. The merge is via a result memory
+    /// cell (NO phi). Top-level + no return arm at c35a (nesting / return arm later).
+    fn lower_handle(
+        &mut self,
+        body: &TypedExpr,
+        arms: &[TypedHandlerArm],
+        return_arm: Option<&TypedReturnArm>,
+    ) -> Result<String, String> {
+        if return_arm.is_some() {
+            return Err("handle return arm (deferred to c36a)".into());
+        }
+        if !produces_kont(body) {
+            return Err("handle body shape (deferred to c35b: effecting-call / pure body)".into());
+        }
+        let kptr = self.lower_expr(body)?;
+        let cks = self.alloca("ptr");
+        writeln!(self.body, "  store ptr {kptr}, ptr %v{cks}").unwrap();
+        let rslot = self.alloca("i64");
+        let loop_b = self.fresh_block();
+        let merge_b = self.fresh_block();
+        writeln!(self.body, "  br label %bb{loop_b}").unwrap();
+        // Loop: re-load the current kont, read its op_id.
+        writeln!(self.body, "bb{loop_b}:").unwrap();
+        let ck = self.fresh();
+        writeln!(self.body, "  %v{ck} = load ptr, ptr %v{cks}").unwrap();
+        let opid = self.fresh();
+        writeln!(self.body, "  %v{opid} = load i32, ptr %v{ck}").unwrap();
+        // If-else chain over the arms: each compares op_id, branches to the arm or the
+        // next check. The current check block starts as the loop block; each arm opens a
+        // fresh next-check block to continue in.
+        for arm in arms {
+            let oid = encode_op_id(arm.effect_id, arm.op_index);
+            let cmp = self.fresh();
+            writeln!(self.body, "  %v{cmp} = icmp eq i32 %v{opid}, {oid}").unwrap();
+            let arm_b = self.fresh_block();
+            let next_b = self.fresh_block();
+            writeln!(self.body, "  br i1 %v{cmp}, label %bb{arm_b}, label %bb{next_b}").unwrap();
+            writeln!(self.body, "bb{arm_b}:").unwrap();
+            self.bind_handler_arm_params(arm, ck)?;
+            self.handle_stack.push((loop_b, cks));
+            let av = self.lower_expr(&arm.body)?;
+            self.handle_stack.pop();
+            writeln!(self.body, "  store i64 {av}, ptr %v{rslot}").unwrap();
+            writeln!(self.body, "  br label %bb{merge_b}").unwrap();
+            writeln!(self.body, "bb{next_b}:").unwrap();
+        }
+        // The final check: PURE_RETURN → unwrap; else `unreachable` (full op coverage).
+        let cmpp = self.fresh();
+        writeln!(self.body, "  %v{cmpp} = icmp eq i32 %v{opid}, {PURE_RETURN_OP_ID}").unwrap();
+        let pure_b = self.fresh_block();
+        let default_b = self.fresh_block();
+        writeln!(self.body, "  br i1 %v{cmpp}, label %bb{pure_b}, label %bb{default_b}").unwrap();
+        writeln!(self.body, "bb{pure_b}:").unwrap();
+        let pv = self.fresh();
+        writeln!(self.body, "  %v{pv} = call i64 @sentinel_kont_consume_pure(ptr %v{ck})").unwrap();
+        self.used.kont_consume_pure = true;
+        writeln!(self.body, "  store i64 %v{pv}, ptr %v{rslot}").unwrap();
+        writeln!(self.body, "  br label %bb{merge_b}").unwrap();
+        writeln!(self.body, "bb{default_b}:").unwrap();
+        writeln!(self.body, "  unreachable").unwrap();
+        writeln!(self.body, "bb{merge_b}:").unwrap();
+        let rv = self.fresh();
+        writeln!(self.body, "  %v{rv} = load i64, ptr %v{rslot}").unwrap();
+        Ok(format!("%v{rv}"))
+    }
+
+    /// Bar B / effects — bind a handler arm's op-param(s) + the continuation. The single
+    /// op-param (C3.5(a)) reads `kont.arg` (i8-GEP offset 8) into an alloca slot; the
+    /// continuation (the last `param_var_id`) gets a slot holding the kont pointer
+    /// (`ResumeKont` loads `ptr` from it). `kont_reg` is the loaded current-kont `%vN`.
+    fn bind_handler_arm_params(
+        &mut self,
+        arm: &TypedHandlerArm,
+        kont_reg: u32,
+    ) -> Result<(), String> {
+        let n = arm.param_var_ids.len();
+        let n_op = n - 1; // the last param is the continuation
+        if n_op >= 1 {
+            let ap = self.fresh();
+            writeln!(self.body, "  %v{ap} = getelementptr i8, ptr %v{kont_reg}, i64 8").unwrap();
+            let av = self.fresh();
+            writeln!(self.body, "  %v{av} = load i64, ptr %v{ap}").unwrap();
+            let slot = self.alloca("i64");
+            writeln!(self.body, "  store i64 %v{av}, ptr %v{slot}").unwrap();
+            self.slots.insert(arm.param_var_ids[0], slot);
+            self.var_ty.insert(arm.param_var_ids[0], Type::I64);
+        }
+        let kont_vid = arm.param_var_ids[n - 1];
+        let kslot = self.alloca("ptr");
+        writeln!(self.body, "  store ptr %v{kont_reg}, ptr %v{kslot}").unwrap();
+        self.slots.insert(kont_vid, kslot);
+        Ok(())
+    }
+
+    /// Bar B / effects — `k(v)` resumes the continuation `kont` with `v`:
+    /// `call ptr @sentinel_kont_resume(kont, v)` → a result kont; if its `op_id` is
+    /// PURE_RETURN the chain drained → `consume_pure` to the i64 value; otherwise a
+    /// resumer bubbled → store it to the enclosing handle's slot + re-enter its loop.
+    /// Returns the i64 value (the builder ends on the pure path).
+    fn lower_resume_kont(&mut self, kont: VarId, args: &[TypedExpr]) -> Result<String, String> {
+        let kslot = *self.slots.get(&kont).ok_or("resume of an unbound kont")?;
+        let kreg = self.fresh();
+        writeln!(self.body, "  %v{kreg} = load ptr, ptr %v{kslot}").unwrap();
+        let arg = self.lower_expr(&args[0])?;
+        let kr = self.fresh();
+        writeln!(self.body, "  %v{kr} = call ptr @sentinel_kont_resume(ptr %v{kreg}, i64 {arg})").unwrap();
+        self.used.kont_resume = true;
+        let kropid = self.fresh();
+        writeln!(self.body, "  %v{kropid} = load i32, ptr %v{kr}").unwrap();
+        let isp = self.fresh();
+        writeln!(self.body, "  %v{isp} = icmp eq i32 %v{kropid}, {PURE_RETURN_OP_ID}").unwrap();
+        let pure_b = self.fresh_block();
+        let bubble_b = self.fresh_block();
+        writeln!(self.body, "  br i1 %v{isp}, label %bb{pure_b}, label %bb{bubble_b}").unwrap();
+        // Bubble: hand the new kont to the enclosing handle's dispatch loop.
+        let (loop_b, cks) = *self
+            .handle_stack
+            .last()
+            .ok_or("ResumeKont must be lowered inside a handle arm")?;
+        writeln!(self.body, "bb{bubble_b}:").unwrap();
+        writeln!(self.body, "  store ptr %v{kr}, ptr %v{cks}").unwrap();
+        writeln!(self.body, "  br label %bb{loop_b}").unwrap();
+        // Pure: unwrap. (A non-identity return arm is applied here at c36a.)
+        writeln!(self.body, "bb{pure_b}:").unwrap();
+        let pv = self.fresh();
+        writeln!(self.body, "  %v{pv} = call i64 @sentinel_kont_consume_pure(ptr %v{kr})").unwrap();
+        self.used.kont_consume_pure = true;
+        Ok(format!("%v{pv}"))
     }
 
     /// Lower a slice of argument expressions to `(ll-type, operand)` pairs, in order —
@@ -1893,6 +2093,14 @@ fn type_has_typeparam(ty: Type, program: &TypedProgram) -> bool {
 /// An array / `Vec` always does; a struct does iff some field does (recursive — so a
 /// struct of only scalars drops nothing). The Bar-B shapes (nullable / enum / generic /
 /// secret) don't appear in the emitting subset, so a plain `false` suffices.
+/// Bar B / effects — `true` iff `expr` lowers to a kont* (so a `handle` body uses it
+/// directly as the initial kont). At c35a only a direct `perform`; c35b adds a call to
+/// an effecting fn, c36b a nested `handle`. A pure body (i64) is wrapped via
+/// `sentinel_kont_pure` (c35b) — until then, `lower_handle` Errs on it.
+fn produces_kont(expr: &TypedExpr) -> bool {
+    matches!(expr.kind, TypedExprKind::Perform { .. })
+}
+
 fn needs_drop(ty: Type, program: &TypedProgram) -> bool {
     match ty {
         Type::Array(_) | Type::Vec(_) => true,
