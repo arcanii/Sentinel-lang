@@ -907,6 +907,31 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     + `mangle_mono_name` (`id__i64`) + `lower_call` mono dispatch (oracle); a Sentinel mono pass that
     re-walks each generic fn body with the type-param scope bound to concrete args; + `emit_fn_decl`'s `<T>`.
 
+- **A25 — BAR B: generics, sub-slice (b) — generic FNS / MONOMORPHIZATION LANDED (feat `170a13a`); the
+  GENERICS slice is COMPLETE.** A generic fn is emitted ONCE PER concrete instantiation under a mangled
+  symbol (`id__i64`, `__`-separated — vs the single-`_` generic-struct mangle); each call resolves to its
+  instance's symbol. The emitting set grew **87 → 92** (c17_id, c17_two_instantiations [`pick__i64` +
+  `pick__bool` — two monomorphizations of one fn], c17_generic_nullable, c17_generic_array, c17_go_no_go).
+  - **Oracle:** REUSES the inkwell backend's `collect_mono_instantiations` (made `pub` — pure logic, so the
+    oracle discovers the same set in the same worklist order). The main fn loop FILTERS generic defs; a mono
+    loop substitutes each generic def → a concrete `TypedFnDef` (`TypedFnDef::substitute`) and emits it via a
+    new `dump_fn_named` under `mangle_mono_name`. `lower_call` threads `type_args` → a generic callee uses
+    the mangled symbol. (Insertion order; the corpus has no transitive generic-from-generic calls.)
+  - **Sentinel mode-4 (the hard half — a 2nd pass over the mode-4 flow):** the pass-2 dispatch SKIPS generic
+    fns in mode 4 (recording each `fn`-token position, `cggfn_id`/`pos`); `dump_generic_call` records the
+    instance (`cg_mono_record`, dedup) + stashes the inferred type-args (`cg_targs`). A **MONO PASS** (after
+    the main walk, before the declares) RE-WALKS each instance's body via `type_fn` with `cg_mono_on` +
+    `cg_mono_args`, so `type_of_typeexpr` resolves `T` → the concrete arg and `cg_emit_fn` mangles the
+    symbol. `cg_emit_call` mangles a generic callee from `cg_targs`. ⚠ `dump_args_capture_all` had to
+    `cg_collect` the generic-call args (was mir-only — else the mangled call had no args).
+  - **Un-parser:** `emit_fn_decl` now PRESERVES the generic `<T>` (capture to a temp, emit after the name) —
+    else the re-parsed fn lost its type-params and mono never triggered (`uftp` stayed 0). Non-generic fns
+    byte-unchanged → the fixed point holds.
+  - **Validation:** the 5 fixtures byte-identical (`scg` == `snc llvm`) + behaviourally equal to inkwell;
+    `scg` leak-free on c17_go_no_go. Modes 0–3 byte-identical; BOTH fixed-point paths preserved (the generic
+    machinery is inert for the generics-free selfhost sources — `nmono`=0, no fns skipped). **NEXT: classes/
+    traits/impls** (MethodCall / ClassInit / QualifiedCall dispatch + witness/init).
+
 ## Decision
 
 ### D1. Goal.

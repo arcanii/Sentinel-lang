@@ -38,13 +38,15 @@ Per-slice lock-step (oracle `llvm_dump.rs` + Sentinel mode-4, mirroring the inkw
 construct the corpus uses but the selfhost compiler doesn't. ✅ `print` (FnId 0) → **57 → 73**; ✅ **nullable
 `?T`** (A22, `8150ccc`) → **73 → 80** (`?T` layout + null-lit/widen/`is_some`/`unwrap_or`/`x == null`); ✅
 **secret + declassify** (A23, `7b471a9`) → **80 → 85** (strip-to-inner; `cgo_ty`/`Emit::lty` strip kind-3,
-declassify/widen-secret identity); ✅ **generics (a) — generic STRUCT instances** (A24, feat `d3be39b`) →
-**85 → 87** (`Decl<args>` → a structurally-named `%Box_i64`/`%Holder_arr_i64` aggregate + substituted-field
-layout/drop; the un-parser `emit_struct_decl` now preserves `<T>`; c17_box + c25, leak-free, both
-fixed-point paths preserved). NEXT: **generics (b) — generic fns / monomorphization** (the discovery
-worklist + substituted mono defines + `id__i64` mangling + a Sentinel mono pass) → classes/traits/impls →
-effects/handlers (18 — the hairiest ~2300 lines) → concurrency → the full-corpus phase-go → ACCEPTED. (Full
-Bar-B breakdown in ADR 0045 A21.) The full slice log:
+declassify/widen-secret identity); ✅ **generics (a) — generic STRUCT instances** (A24, `d3be39b`) →
+**85 → 87** (`Decl<args>` → a structurally-named `%Box_i64` aggregate + subst-field layout/drop); ✅
+**generics (b) — generic fns / MONOMORPHIZATION** (A25, feat `170a13a`) → **87 → 92** — the GENERICS slice is
+COMPLETE (a generic fn emits once per instance under `id__i64`; oracle reuses inkwell's
+`collect_mono_instantiations`; Sentinel re-walks each instance with the type-param scope bound to concrete
+args; un-parser preserves fn `<T>`; the 5 c17 fixtures incl. `pick__i64`+`pick__bool`, leak-free, both
+fixed-point paths preserved). NEXT: **classes/traits/impls** → effects/handlers (18 — the hairiest ~2300
+lines) → concurrency → the full-corpus phase-go → ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21.) The full
+slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
 NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g)

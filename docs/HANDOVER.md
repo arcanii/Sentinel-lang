@@ -2082,17 +2082,18 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A24 — generics (a) generic structs`
-    commit, atop the **generic-struct-instances feat** (`d3be39b` — Bar B's 4th construct) + the A23/secret
-    feat (`7b471a9`) + the A22/nullable feat (`8150ccc`) + the **A21**/print docs (`749d32a`) + the `print`
-    feat (`391ae58`). Below: the **A20** path-(a) commit (`6355c23` — PATH (a) COMPLETE, the
+    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A25 — generics (b) mono` commit, atop
+    the **generic-fns/mono feat** (`170a13a` — Bar B's 5th construct; GENERICS COMPLETE) + the A24/generic-
+    structs feat (`d3be39b`) + the A23/secret feat (`7b471a9`) + the A22/nullable feat (`8150ccc`) + the
+    **A21**/print docs (`749d32a`) + the `print` feat (`391ae58`). Below: the **A20** path-(a) commit
+    (`6355c23` — PATH (a) COMPLETE, the
     self-hosted merge) + the path-(a) feats (a-4 scg self-merges `d33397c`, a-2/a-3 the self-hosted merge
     `ef56104`, a-1 the un-parser `71efa09` / A19 docs `d13d17e`), atop the 8g fixed-point (A18 docs
     `7054145` + feat `41f00fa`). The 8/N codegen chain below: (8f-2/8f-3) snc llvm lowers the full compiler
     (`59c30a7` A17 + `67fa808`) · (8f-1) selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e)
     enums+match (A14/A15) · heap drops (A11–A13) · Vec (A9/A10) · 8d refs/builtins · 8c aggregates · 8b
-    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A24; Bar B in progress —
-    `print` + nullable + secret + generic-structs done, **87/123 emitting**); the **bootstrap fixed point is
+    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A25; Bar B in progress —
+    `print` + nullable + secret + generics done, **92/123 emitting**); the **bootstrap fixed point is
     reached via BOTH paths** — (b) 8g merge-to-source + (a) the self-hosted merge (`scg` discovers+merges+emits itself).
     Bar B is the remaining open scope for the full-corpus ACCEPTED flip — or an owner-deferred close.
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin local
@@ -2173,13 +2174,19 @@ For pasting into a fresh chat to bootstrap context:
     (⚠ BIND `(*c).ta[idx]` to a local before a recursive `&mut c` call — the nested-`&mut`-ctx quirk). ⚠⚠ THE
     UN-PARSER (`merge.sentinel`) had to preserve generic `<T>`: `merge_source` ALWAYS re-emits (no raw
     passthrough), and `emit_struct_decl` did `skip_type_params` (dropping `<T>`) → fixed with a new
-    `emit_type_params` (non-generic decls byte-unchanged → fixed point holds). **▶ NEXT: generics (b) —
-    generic fns / mono** (the discovery worklist `collect_mono_instantiations` + substituted mono defines
-    `TypedFnDef::substitute` + `mangle_mono_name` `id__i64` + `lower_call` mono dispatch [oracle]; a Sentinel
-    mono pass re-walking each generic fn body with the type-param scope bound to concrete args; +
-    `emit_fn_decl`'s `<T>`) → classes/traits/impls (MethodCall/ClassInit/QualifiedCall dispatch) →
-    effects/handlers (18 — the hairiest ~2300 lines, kont ABI) → concurrency (spawn/scope/await) → the
-    full-corpus phase-go (8l) → **ADR 0045 ACCEPTED**.
+    `emit_type_params` (non-generic decls byte-unchanged → fixed point holds). **✅ DONE: generics (b) —
+    generic fns / MONO** (A25, feat `170a13a`) — emitting set **87 → 92** (the 5 c17 generic-fn fixtures incl.
+    `pick__i64`+`pick__bool`); GENERICS COMPLETE. A generic fn emits ONCE PER instance under `id__i64`. Oracle:
+    reuses inkwell's `collect_mono_instantiations` (now `pub`) + substitutes each def (`TypedFnDef::substitute`)
+    → `dump_fn_named` under `mangle_mono_name`; `lower_call` threads `type_args` → mangled callee. Sentinel
+    (the hard half): pass-2 SKIPS generic fns in mode 4 (records `fn`-token positions); `dump_generic_call`
+    records the instance (`cg_mono_record`) + stashes `cg_targs`; a MONO PASS re-walks each instance's body via
+    `type_fn` with `cg_mono_on`+`cg_mono_args` (so `type_of_typeexpr` resolves `T`→concrete + `cg_emit_fn`
+    mangles); `cg_emit_call` mangles a generic callee. ⚠ `dump_args_capture_all` had to `cg_collect` (was
+    mir-only). Un-parser `emit_fn_decl` preserves fn `<T>`. Both fixed-point paths preserved (the mono
+    machinery is inert for the generics-free selfhost — `nmono`=0). **▶ NEXT: classes/traits/impls**
+    (MethodCall/ClassInit/QualifiedCall dispatch + witness/init) → effects/handlers (18 — the hairiest ~2300
+    lines, kont ABI) → concurrency (spawn/scope/await) → the full-corpus phase-go (8l) → **ADR 0045 ACCEPTED**.
     ⚠ A genuinely single-file entry must stay a PASSTHROUGH (the merge `has_use` gate). The path-(a) build
     record + design follows (COMPLETE):
     **✅ (a-1)+(a-1b) DONE (ADR 0045 A19):**
