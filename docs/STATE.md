@@ -51,9 +51,15 @@ fixed-point paths preserved); ✅ **classes / traits / impls / delegates** (A26,
 delegates need NO special cg (the type layer synthesised them into ordinary `self.field.m(args)` impls).
 ⚠ Both un-parsers (`source_dump.rs` + `merge.sentinel`) had to learn class/trait/impl/delegate DECLs (were
 rejected/dropped). Sentinel side: a `cgcls` buffer (class/impl defines after the fns — the oracle's order),
-operand kind 4 = `%arg0`, `cg_self_var`/`cg_arg_base`. NEXT: **effects/handlers** (18 — the hairiest ~2300
-lines: kont ABI + ~765-line shape-detection) → concurrency → the full-corpus phase-go → ACCEPTED. (Full
-Bar-B breakdown in ADR 0045 A21; the classes slice in A26.) The full
+operand kind 4 = `%arg0`, `cg_self_var`/`cg_arg_base`; ✅ **effects/handlers c35a — inline perform/handle/
+resume** (A27, feat `29e3027`) → **98 → 101** (c35_handle_inline_perform, c35_handle_log_returns_msg, + the
+type-clean negative c37_perform_outside_handle). The restricted handler case (a `handle` body that IS a
+direct `perform`): `perform`→`sentinel_perform_op`; `handle`→a dispatch LOOP (load op_id @0, an IF-ELSE
+CHAIN per arm — NOT a `switch`, since `HArms` is single-consumption — + a PURE_RETURN/`consume_pure` tail,
+result memory cell, NO phi); `k(v)`→`kont_resume` + a pure-vs-bubble split. Kont ABI: op_id `(eid<<16)|op`,
+PURE = `u32::MAX`, runtime owns kont memory (leak-free, no cg drops). NEXT: **c35b** (effecting-fn ABI returns
+`Kont*` + pure-return + multi-arm) → c35c (let-bound resumers + `kont_push`) → c35d/c35e/c36a/c36b → the
+full-corpus phase-go → ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27.) The full
 slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/

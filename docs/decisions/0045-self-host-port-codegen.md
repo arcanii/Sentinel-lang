@@ -986,6 +986,55 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     shape-detection + the handler machinery) → concurrency (spawn/scope/await) → the full-corpus phase-go →
     **ADR 0045 ACCEPTED**.
 
+- **A27 — BAR B: effects/handlers, sub-slice c35a — inline perform/handle/resume LANDED (feat `29e3027`).**
+  The first + simplest of the production's C3.5(a)–(e)+C3.6 handler sub-phases: the RESTRICTED case where a
+  `handle` body is a DIRECT `perform` (no effecting fn, no captured frames). `handle perform Eff.op(a) with {
+  Eff.op([msg,] k) => k(…) }`, lowered in lock-step (oracle + both un-parsers + the Sentinel mode-4 cg). The
+  emitting set grew **98 → 101**: `c35_handle_inline_perform`, `c35_handle_log_returns_msg`, + the type-clean
+  NEGATIVE `c37_perform_outside_handle` (the codegen oracle emits it — it doesn't run effect-check, which is
+  what rejects `unhandled effect Io in main`; analogous to `c52_secret_leak` being a type-clean CT-negative in
+  the emitting set; a tests/ui fixture, behaviourally skipped). (The other c35/c36/c37 fixtures stay Err'd —
+  they need the effecting-fn ABI / resumers / return-arm / nesting of the later sub-slices.)
+  - **The kont ABI** (ADR 0020, `sentinel-runtime`, mirrored): `SentinelKont { i32 op_id@0, i32 _pad, i64
+    arg@8, i8 consumed@16, [7 x i8], ptr frames_head@24 }`; `encode_op_id = (eid<<16)|(op&0xFFFF)` (=
+    `eid*65536+op` in the Sentinel, no `<<`/`|`); `PURE_RETURN_OP_ID = u32::MAX` (emits `i32 4294967295`,
+    `cc`-accepted). Symbols: `perform_op(i32,i64)->ptr`, `kont_resume(ptr,i64)->ptr` (a pure-or-bubble result
+    kont), `kont_consume_pure(ptr)->i64`. The runtime owns the kont memory (perform allocs; resume +
+    consume_pure free) → leak-free with NO codegen-side drops.
+  - **The lowering.** `perform Eff.op(a)` → `call ptr @sentinel_perform_op(i32 op_id, i64 a|0)` (the kont*).
+    `handle` → a dispatch LOOP over a `current_kont_slot`: load the kont, read its `op_id` (offset 0), then an
+    **if-else CHAIN** — one `icmp op_id, <encode(eid,op)>` + branch per arm, then a final `icmp op_id, PURE`
+    → `consume_pure` (the body-was-pure path), `default` `unreachable` — merged through a **result memory
+    cell (NO phi)**. A handler arm binds its op-param (`kont.arg` via i8-GEP @8 into an i64 slot) + the
+    continuation (a slot holding the kont ptr). `k(v)` (a `ResumeKont` — in the Sentinel, a `Call` whose
+    callee resolves to an in-scope var) → `kont_resume(kont, v)` then `icmp result.op_id, PURE` → pure
+    (`consume_pure` = the resumed value) vs bubble (store the new kont to the slot + branch back to the loop).
+  - **⚠⚠ THE IF-ELSE CHAIN, NOT A `switch` — in BOTH backends.** The Sentinel's `HArms` is a single-
+    consumption cons-list (you can't iterate the arms twice — once for a `switch`'s case list, once for the
+    bodies — and `match &enum` / `Vec<Expr>` are both unsupported), so the dispatch MUST chain (mirroring the
+    match cg). The oracle was first prototyped with a `switch`, found unmirror­able, and rewritten to the
+    chain so the two are byte-identical. (This was the scout's key finding, ADR-recorded in HANDOVER, now
+    realized.) ⚠ The kont load in `k(v)` is emitted BEFORE the resume arg is lowered (the oracle's order) —
+    the Sentinel splits its resume helper (`cg_emit_resume_load` before the arg walk, `cg_emit_resume_tail`
+    after) so the register numbering matches.
+  - **Oracle (`llvm_dump.rs`):** the `Perform`/`Handle`/`ResumeKont` `lower_expr` arms + `lower_handle` (the
+    chain + result cell) + `lower_resume_kont` + `bind_handler_arm_params` + `encode_op_id` + a `handle_stack`
+    on `Emit` + the 3 kont `RuntimeSyms` declares.
+  - **Un-parsers (`source_dump.rs` + `merge.sentinel`):** emit effect DECLs (`effect Name { op(p:T) -> R; }`)
+    — both REJECTED them before; `merge.sentinel`'s `emit_expr` already had `perform`/`handle`. The corpus
+    differential routes through `scg` (merge + types mode-4), so both must round-trip.
+  - **Sentinel mode-4 (`types.sentinel`):** the `Perform`/`Handle`/`resume-kont`(Call) cg woven through the
+    shared 5-mode `dump_tharms` (the if-else chain) + the `dump_thparams` VarId-range param binding; a
+    `cg_alloca_ptr` (raw `alloca ptr` via a `-1` type sentinel in the hoist pool); the handle dispatch state
+    (`cg_h_opid`/`ck`/`loop`/`cks`/`rslot`/`merge`, save/restored for nesting) + 3 `cg_used_*` flags on
+    `TyCtx`; the kont declares in `run` mode 4.
+  - **Validation:** both c35a fixtures `scg` == `snc llvm` byte-for-byte + behaviourally == inkwell (exit 42)
+    + leak-free (`leaks --atExit`). Modes 0–3 byte-identical (no regression — the cg is `cg_on`-gated); BOTH
+    bootstrap fixed-point paths preserved (selfhost uses no effects). 1476 tests, four-check green. **NEXT:
+    c35b** (the effecting-fn ABI — a `!{E}` fn returns `Kont*` — + pure-return wrap [`kont_pure`] + handle-of-
+    fn-call body + multi-arm) → c35c (let-bound perform + per-let resumer fns + `kont_push`) → c35d/c35e/c36a/
+    c36b → the full-corpus phase-go → ADR 0045 ACCEPTED.
+
 ## Decision
 
 ### D1. Goal.
