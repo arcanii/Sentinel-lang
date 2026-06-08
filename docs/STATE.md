@@ -57,10 +57,17 @@ type-clean negative c37_perform_outside_handle). The restricted handler case (a 
 direct `perform`): `perform`→`sentinel_perform_op`; `handle`→a dispatch LOOP (load op_id @0, an IF-ELSE
 CHAIN per arm — NOT a `switch`, since `HArms` is single-consumption — + a PURE_RETURN/`consume_pure` tail,
 result memory cell, NO phi); `k(v)`→`kont_resume` + a pure-vs-bubble split. Kont ABI: op_id `(eid<<16)|op`,
-PURE = `u32::MAX`, runtime owns kont memory (leak-free, no cg drops). NEXT: **c35b** (effecting-fn ABI returns
-`Kont*` + pure-return + multi-arm) → c35c (let-bound resumers + `kont_push`) → c35d/c35e/c36a/c36b → the
-full-corpus phase-go → ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27.) The full
-slice log:
+PURE = `u32::MAX`, runtime owns kont memory (leak-free, no cg drops). ✅ **effects/handlers c35b — the
+effecting-fn `Kont*` ABI + pure-return** (A28, feat `02891fd`) → **101 → 107** (c35b_handle_fn_call_body /
+_multi_arm / _pure_return + c32_go_no_go + c33_go_no_go + the C5 phase-go **c5_go_no_go**). A fn with a
+non-`Async` effect row returns `ptr` (a continuation), so a `handle` body that is a CALL to an effecting fn
+dispatches on the returned kont; a pure tail wraps via `sentinel_kont_pure`. Oracle: lift the `dump_fn`
+gate + `uses_kont_abi`/`validate_effecting_fn_body` (defer let-bound/embedded/chained perform) + `lower_call`
+returns ptr. Un-parser (`merge.sentinel`): `emit_fn_decl` re-emits the `! { E }` row (the A24 `<T>` analog —
+else the merged source loses it). Sentinel: a per-FnId `ufeff` table + `cg_eff`/`cg_tailk`. Modes 0–3
+byte-identical; both fixed-point paths preserved (selfhost uses no effects). NEXT: **c35c** (let-bound perform
++ per-let resumers + `kont_push`) → c35d/c35e/c36a/c36b → the full-corpus phase-go → ACCEPTED. (Full Bar-B
+breakdown in ADR 0045 A21; classes in A26; c35a in A27; c35b in A28.) The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
 NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g)

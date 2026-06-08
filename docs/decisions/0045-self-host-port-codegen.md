@@ -1035,6 +1035,57 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     fn-call body + multi-arm) → c35c (let-bound perform + per-let resumer fns + `kont_push`) → c35d/c35e/c36a/
     c36b → the full-corpus phase-go → ADR 0045 ACCEPTED.
 
+- **A28 — BAR B: effects/handlers, sub-slice c35b — the effecting-fn Kont\* ABI + pure-return LANDED (feat
+  `02891fd`).** The second handler sub-phase: a fn with a non-`Async` effect row returns a continuation
+  pointer (`Kont*`) instead of its declared type, so a `handle` whose body is a **CALL to an effecting fn**
+  (not only an inline `perform`) dispatches on the kont that call returns. The emitting set grew **101 → 107**
+  — SIX fixtures flip `Err → Ok` (byte-identical `scg` == `snc llvm` + behaviourally == inkwell + leak-free):
+  `c35b_handle_fn_call_body` / `c35b_handle_multi_arm` / `c35b_handle_pure_return` (the targets), plus
+  `c32_go_no_go` + `c33_go_no_go` (effecting fns with pure / call-to-effecting bodies, **no `handle`** — a
+  natural consequence of the ABI: `check_inner() !{Io} { 0 }`, `maybe_log() !{Io} { x+1 }`, `check_outer()
+  !{Io} { check_inner() }`), plus **`c5_go_no_go`** (the C5 phase-go — its simple `handle recv_client_share()
+  with { Net.recv(req,k) => k(5) }` + classes + secret all now lower). The remaining c35c/d/e/c36/c37
+  fixtures stay `Err`'d (let-bound / embedded / chained perform, return arm, nested handle).
+  - **The ABI** (mirror inkwell `uses_kont_abi` / the C3.5(b) shape): an **effecting fn** = a non-empty
+    effect row that contains some effect OTHER than the built-in `Async` (a direct-runtime marker —
+    spawn/await, never `handle` — so an `Async`-only fn keeps the plain value ABI). Such a fn returns `ptr`.
+    Its tail is either **kont-producing** (`produces_kont` — a direct `perform`, a call to another effecting
+    fn, or a block whose tail is, with no performing statement) → return the `ptr` as-is; or **pure** (no
+    `perform` anywhere) → wrap the i64 via `sentinel_kont_pure(i64) -> ptr` (a PURE_RETURN-tagged kont) so the
+    caller's `handle` sees a uniform `Kont*` and matches the PURE_RETURN case.
+  - **Oracle (`llvm_dump.rs`):** lift the `dump_fn` effect-row Err gate; gate emission with the new
+    `uses_kont_abi` + `validate_effecting_fn_body` (`stmt_performs` / `expr_performs` — defer a body with a
+    performing statement, or a tail that mixes a `perform` into pure context like `perform Op()+1` /
+    `f(perform Op())`, to c35c+). `ret_ll = "ptr"` for an effecting fn; the return wraps a pure tail via the
+    new `kont_pure` `RuntimeSym`. `lower_call` returns `ptr` for an effecting callee; `lower_handle`'s body
+    gate is the extended `produces_kont(body, program)` (multi-arm was already the if-else chain). The c35a
+    dispatch loop (if-else chain + result memory cell, NO phi) is unchanged.
+  - **Un-parser (`merge.sentinel`):** `emit_fn_decl` now **re-emits** the `! { E }` effect row (new
+    `emit_effect_row`, effect names via `emit_name_slice` so they rename in a multi-module merge) instead of
+    `skip_effect_row` dropping it — else the merged source loses the row, the re-parse never sees the
+    effecting fn, and it lowers as a plain `i64`-returning fn (`ufeff` stays 0). **This is the A24 generic-
+    `<T>` preservation analog** — `merge_source` always re-emits (no raw passthrough; `merge_mode` only gates
+    the rename map), so a dropped row is silently lost. (`source_dump.rs` already round-trips the row; it is
+    deliberately Bar-A-scoped and rejects `c33`/`c5` `declassify`, which is harmless — no corpus-wide
+    `source_dump` round-trip test exists; the corpus differential routes through `scg` = `merge.sentinel` +
+    `types.sentinel`.)
+  - **Sentinel mode-4 (`types.sentinel`):** a per-FnId effecting table **`ufeff`** recorded in `scan_fn_sig`
+    (pass-1, peeking the row via `eff_row_is_kont` / `cg_is_async` for any non-`Async` name); `cg_emit_fn`
+    returns `ptr` + wraps a pure tail via `sentinel_kont_pure` (gated on the per-fn `cg_eff` = `ufeff[fnidx]`
+    + `cg_tailk`); `cg_emit_call` returns `ptr` for an effecting callee + sets `cg_tailk`; `cg_emit_perform`
+    sets `cg_tailk`; the `cg_used_kontpure` declare in `run` mode 4. ⚠ `cg_tailk` is a dynamic flag (reset in
+    `cg_reset`, set by the last `perform` / effecting-call) — correct for the emitted set (no emitted
+    effecting fn has a let-bound effecting call + pure tail, the one staleness case validate would otherwise
+    let through). The **handle body lowering needed NO change** (it already stores the body operand as the
+    initial kont `ptr`, whatever produced it — c35a's direct-perform or c35b's effecting-call).
+  - **Validation:** 107/107 emitted fixtures `scg` == `snc llvm` byte-for-byte (`sentinel_codegen_matches_
+    oracle_on_corpus`); the 6 behaviourally == inkwell (`llvm_behaviour_matches_inkwell_over_emitted_subset`,
+    exit 42/0) + leak-free (`leaks --atExit`). Modes 0–3 stay byte-identical (the cg is `cg_on`-gated; `ufeff`
+    is an inert pass-1 table); BOTH bootstrap fixed-point paths preserved (the selfhost compiler declares no
+    effects → `ufeff` all 0, `cg_eff` never set). 1476 tests, four-check green. **NEXT: c35c** (let-bound
+    perform — per-let resumer fns + `sentinel_kont_push`, the captured-frame chain) → c35d/c35e/c36a/c36b →
+    the full-corpus phase-go → ADR 0045 ACCEPTED.
+
 ## Decision
 
 ### D1. Goal.

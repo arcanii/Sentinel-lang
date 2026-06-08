@@ -2082,9 +2082,11 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A27 — effects c35a` commit, atop the
-    **effects/handlers c35a feat** (`29e3027` — inline perform/handle/resume; emitting set 98 → 101) + the
-    A26-scout docs (`43863f6` — NOW SUPERSEDED: c35a is LANDED, not reverted) + the **classes/traits/impls/
+    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A28 — effects c35b` commit, atop the
+    **effects/handlers c35b feat** (`02891fd` — the effecting-fn `Kont*` ABI + pure-return; emitting set
+    101 → 107: c35b_handle_{fn_call_body,multi_arm,pure_return} + c32/c33_go_no_go + the C5 phase-go
+    c5_go_no_go) + the A27/c35a docs + the **effects/handlers c35a feat** (`29e3027` — inline perform/handle/
+    resume; emitting set 98 → 101) + the A26-scout docs (`43863f6` — SUPERSEDED) + the **classes/traits/impls/
     delegates feat** (`a1a3341` — Bar B's 6th construct; emitting set 92 → 98) + the A26 docs (`90b5586`)
     + the A25/generic-fns-mono feat (`170a13a` — GENERICS COMPLETE) + the A24/generic-structs feat
     (`d3be39b`) + the A23/secret feat (`7b471a9`) + the A22/nullable feat (`8150ccc`) + the
@@ -2095,9 +2097,9 @@ For pasting into a fresh chat to bootstrap context:
     `7054145` + feat `41f00fa`). The 8/N codegen chain below: (8f-2/8f-3) snc llvm lowers the full compiler
     (`59c30a7` A17 + `67fa808`) · (8f-1) selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e)
     enums+match (A14/A15) · heap drops (A11–A13) · Vec (A9/A10) · 8d refs/builtins · 8c aggregates · 8b
-    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A25; Bar B in progress —
-    `print` + nullable + secret + generics done, **92/123 emitting**); the **bootstrap fixed point is
-    reached via BOTH paths** — (b) 8g merge-to-source + (a) the self-hosted merge (`scg` discovers+merges+emits itself).
+    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A28; Bar B in progress —
+    `print` + nullable + secret + generics + classes + effects c35a/c35b done, **107/123+ emitting**); the
+    **bootstrap fixed point is reached via BOTH paths** — (b) 8g merge-to-source + (a) the self-hosted merge (`scg` discovers+merges+emits itself).
     Bar B is the remaining open scope for the full-corpus ACCEPTED flip — or an owner-deferred close.
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin local
     commits); that's expected, never push.
@@ -2204,20 +2206,33 @@ For pasting into a fresh chat to bootstrap context:
     byte-identical + behaviourally == inkwell (7/42/42/42/42/42) + leak-free; modes 0–3 byte-identical; both
     fixed-point paths preserved (selfhost declares no classes → `cgcls` empty). **✅ EFFECTS c35a LANDED**
     (A27, feat `29e3027`, emitting set 98 → 101) — the restricted handler case (a `handle` body that IS a
-    direct `perform`). The kont ABI + the c35a `.ll`/cg are now IN the code (`llvm_dump.rs` lower_handle/
+    direct `perform`). The kont ABI + the c35a `.ll`/cg are IN the code (`llvm_dump.rs` lower_handle/
     lower_resume_kont/Perform + `types.sentinel` dump_tharms/Handle/Perform/resume-kont + the un-parser effect
-    decls) — read those as the reference for the next sub-slices. The if-else-chain finding is REALIZED (both
-    backends chain, not `switch`; the Sentinel `HArms` is single-consumption). **▶ NEXT: the effects tail**
-    (mirror inkwell's Handle/Perform/ResumeKont + the shape-detectors; the hairiest remaining work). Sub-phase
-    like the production C3.5(a)–(e)+C3.6 — done: **c35a** inline perform/handle/resume. Remaining: **c35b**
-    effecting-fn ABI (a `!{E}` fn returns `Kont*` — gate `dump_fn`'s effect-row Err; the oracle emits an
-    effecting fn returning ptr) + pure-return (`kont_pure`/wrap a pure handle body) + handle-of-fn-call body +
-    multi-arm → **c35c** let-bound perform (per-let resumer fns + `sentinel_kont_push`) → **c35d** embedded
-    perform → **c35e** chained → **c36a** return arm (the `dump_tret`/pure-path apply) → **c36b** nested
-    handle (the `cg_h_*` save/restore is already in place) → the full-corpus phase-go (8l) → **ADR 0045
-    ACCEPTED**. Remaining runtime symbols for those: `kont_push(ptr,ptr,ptr)`, `kont_pure(i64)->ptr`.
-    ⚠ A genuinely single-file entry must stay a PASSTHROUGH (the merge `has_use` gate). The path-(a) build
-    record + design follows (COMPLETE):
+    decls) — the reference for the next sub-slices. The if-else-chain finding is REALIZED (both backends
+    chain, not `switch`; the Sentinel `HArms` is single-consumption). **✅ EFFECTS c35b LANDED** (A28, feat
+    `02891fd`, emitting set **101 → 107**) — the **effecting-fn `Kont*` ABI + pure-return**: a fn with a
+    non-`Async` effect row returns `ptr`, so a `handle` body that is a CALL to an effecting fn dispatches on
+    the returned kont; a pure tail wraps via `sentinel_kont_pure`. SIX fixtures flip: c35b_handle_{fn_call_
+    body,multi_arm,pure_return} + c32/c33_go_no_go (effecting fns, no handle) + **c5_go_no_go** (the C5
+    phase-go). Oracle: lift `dump_fn`'s gate + `uses_kont_abi`/`validate_effecting_fn_body`/`produces_kont`
+    (defer let-bound/embedded/chained perform) + `lower_call`→ptr. Un-parser (`merge.sentinel`):
+    `emit_fn_decl` re-emits the `! { E }` row (new `emit_effect_row` — the A24 `<T>` analog). Sentinel: a
+    per-FnId `ufeff` table (pass-1 `eff_row_is_kont`/`cg_is_async`) + `cg_eff`/`cg_tailk` driving `cg_emit_fn`
+    (ptr ABI + kont_pure wrap) / `cg_emit_call` (ptr) / `cg_emit_perform`. ⚠ **CORRECTION:** `merge_source`
+    ALWAYS re-emits (no raw passthrough — `merge_mode`=`has_use` only gates the rename map), so the
+    `emit_fn_decl` effect-row re-emit was REQUIRED (dropping it silently lost the row → plain i64 ABI).
+    ⚠ scg is run ONLY when the oracle SUCCEEDS (the differential `continue`s first), so a deferred fixture's
+    scg output is never compared → the Sentinel side needs NO `validate_effecting_fn_body`. **▶ NEXT: c35c**
+    (mirror inkwell's `compile_effecting_fn_with_let` + the shape-detectors; the hairiest remaining work).
+    Sub-phase like the production C3.5(a)–(e)+C3.6 — done: **c35a** inline + **c35b** effecting-fn ABI.
+    Remaining: **c35c** let-bound perform (per-let resumer fns + `sentinel_kont_push` — the captured-frame
+    chain; `detect_let_shape`/`compile_effecting_fn_with_let`) → **c35d** embedded perform
+    (`detect_embedded_perform_shape`) → **c35e** chained (`detect_chained_effecting_lets_shape`) → **c36a**
+    return arm (the `dump_tret`/pure-path apply; `lower_handle` Errs on `return_arm` today) → **c36b** nested
+    handle (the `cg_h_*` save/restore is already in place; `produces_kont` would accept a nested `Handle`) →
+    the full-corpus phase-go (8l) → **ADR 0045 ACCEPTED**. Remaining runtime symbol for those:
+    `sentinel_kont_push(ptr,ptr,ptr)` (`kont_pure` is now USED). The path-(a) build record + design follows
+    (COMPLETE):
     **✅ (a-1)+(a-1b) DONE (ADR 0045 A19):**
     `selfhost/merge.sentinel` — a Sentinel un-parser (port of `source_dump.rs`) re-emitting a parsed
     program as re-parseable source (fns + structs + enums + the full expr/stmt/type grammar);
