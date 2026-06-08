@@ -254,6 +254,23 @@ struct TyCtx {
     cg_m_armnext: i64,// the current arm's next-check block (set in dump_tpat; -1 = wildcard)
     cg_m_pj: i64,     // the current variant's flat index (for cg_emit_pstruct in the bind)
     cg_m_wild: bool,  // (8g) true once a `_` arm emitted the final-else body+br (the match epilogue then skips `unreachable`); save/restored around dump_tarms for nesting
+    // (Bar B / generics-b) MONOMORPHIZATION. Generic fns are SKIPPED in the mode-4 main
+    // walk + RE-WALKED once per instance. Recorded instances: `cgmono_fid[i]` = the
+    // generic fn id, `cgmono_as[i]`/`cgmono_ae[i]` = its concrete-arg slice into the flat
+    // `cgmono_pool`. `cggfn_id`/`cggfn_pos` = each generic fn's id → `fn`-token position
+    // (for the re-walk). During a re-walk `cg_mono_on` is set + `cg_mono_args` holds the
+    // instance's concrete args (so `type_of_typeexpr` resolves `T` → concrete and
+    // `cg_emit_fn` mangles the symbol). `cg_targs` = the just-inferred type-args of a
+    // generic CALL (set by `dump_generic_call`, read by `cg_emit_call` for the callee).
+    cgmono_fid: Vec<i64>,
+    cgmono_as: Vec<i64>,
+    cgmono_ae: Vec<i64>,
+    cgmono_pool: Vec<i64>,
+    cggfn_id: Vec<i64>,
+    cggfn_pos: Vec<i64>,
+    cg_mono_on: bool,
+    cg_mono_args: Vec<i64>,
+    cg_targs: Vec<i64>,
     cgout: Vec<u8>,   // accumulated .ll across all fns (the mode-4 result)
 }
 
@@ -1444,7 +1461,14 @@ fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
             };
             sink_name(gb, nm);
             if tpidx >= 0 {
-                mk_tparam(c, tpidx)
+                // (Bar B / generics-b) during a mono re-walk, a type-param resolves to
+                // the instance's CONCRETE arg (`T` → `i64`) so the body lowers concretely;
+                // otherwise it's the abstract `<T#idx>` (the type dump + the seed walk).
+                if (*c).cg_mono_on {
+                    (*c).cg_mono_args[tpidx]
+                } else {
+                    mk_tparam(c, tpidx)
+                }
             } else if is_string {
                 mk_vec(c, 3)
             } else if sc >= 0 {
@@ -1922,6 +1946,9 @@ fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, 
             // by the user-fn call arm).
             let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
             mir_collect(c);
+            // (Bar B / generics-b) codegen: collect the arg operand so cg_emit_call can
+            // pass it to the monomorphic callee (mirrors dump_targs / dump_args_capture_first).
+            cg_collect(c, t0);
             push(atys, t0);
             dump_args_capture_all(out, rest, src, c, gb, atys)
         },
@@ -1964,6 +1991,29 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut 
         push(&mut subst, bd);
         ti = ti + 1;
     }
+    // (Bar B / generics-b) codegen: record this monomorphic instance (for later mono
+    // emission) + stash the inferred type-args so the following `cg_emit_call` mangles
+    // the callee (`id__i64`). Recording is skipped during a mono re-walk (`cg_mono_on`)
+    // — its nested generic calls are concrete but the corpus has none (no transitive).
+    if cg_on(c) {
+        if (*c).cg_mono_on {
+            0
+        } else {
+            cg_mono_record(c, fid, &subst);
+            0
+        };
+        clear_i64(&mut (*c).cg_targs);
+        let mut csi: i64 = 0;
+        let csn: i64 = len(subst);
+        while csi < csn {
+            let cst: i64 = subst[csi];
+            push(&mut (*c).cg_targs, cst);
+            csi = csi + 1;
+        }
+        0
+    } else {
+        0
+    };
     append_str(out, " (targs");
     let mut tj: i64 = 0;
     while tj < ntp {
@@ -6459,6 +6509,15 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_m_armnext: 0 - 1,
         cg_m_pj: 0 - 1,
         cg_m_wild: false,
+        cgmono_fid: vec_new(),
+        cgmono_as: vec_new(),
+        cgmono_ae: vec_new(),
+        cgmono_pool: vec_new(),
+        cggfn_id: vec_new(),
+        cggfn_pos: vec_new(),
+        cg_mono_on: false,
+        cg_mono_args: vec_new(),
+        cg_targs: vec_new(),
         cgout: vec_new(),
     };
     let mut garbage: Vec<u8> = vec_new();
@@ -6676,11 +6735,22 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
     while ia < ni {
         let kda: i64 = itemkind[ia];
         if kda == 3 {
-            let bsa: i64 = len(itembuf);
-            type_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut ctx, &mut garbage, 3, itempos[ia], fnct);
-            push(&mut rsrc, ia);
-            push(&mut rbs, bsa);
-            push(&mut rbe, len(itembuf));
+            // (Bar B / generics-b) in mode 4 a GENERIC fn is not emitted raw — record its
+            // `fn`-token position for the per-instance mono re-walk (after this loop). In
+            // modes 0–3 it's dumped normally.
+            let cg_skip_gen: bool = ctx.mode == 4 && ctx.uftp[fnct] > 0;
+            if cg_skip_gen {
+                push(&mut ctx.cggfn_id, 14 + fnct);
+                push(&mut ctx.cggfn_pos, itempos[ia]);
+                0
+            } else {
+                let bsa: i64 = len(itembuf);
+                type_item(&mut itembuf, &kinds, &starts, &ends, &src, &mut ctx, &mut garbage, 3, itempos[ia], fnct);
+                push(&mut rsrc, ia);
+                push(&mut rbs, bsa);
+                push(&mut rbe, len(itembuf));
+                0
+            };
             fnct = fnct + 1;
             0
         } else if kda == 52 {
@@ -6852,6 +6922,45 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         // copy cgout's BYTES into `result` (NOT vec_to_array — moving a Vec field out then
         // dropping the struct double-frees, as for mirout).
         let _o4: [u8] = vec_to_array(out);
+        // (Bar B / generics-b) emit one monomorphic define per recorded instance —
+        // re-walk the generic fn body with `cg_mono_on` + the instance's concrete args
+        // (so `type_of_typeexpr` resolves `T` → concrete + `cg_emit_fn` mangles the
+        // symbol). APPENDS to cgout (after the non-generic fns) + sets cg_used_*, so it
+        // MUST run before the declares below. Insertion order = the recorded order
+        // (matches the oracle's worklist seed; the corpus has no transitive generics).
+        let nmono: i64 = len(ctx.cgmono_fid);
+        let mut mqi: i64 = 0;
+        while mqi < nmono {
+            let mfid: i64 = ctx.cgmono_fid[mqi];
+            clear_i64(&mut ctx.cg_mono_args);
+            let mas: i64 = ctx.cgmono_as[mqi];
+            let mae: i64 = ctx.cgmono_ae[mqi];
+            let mut mai: i64 = mas;
+            while mai < mae {
+                let marg: i64 = ctx.cgmono_pool[mai];
+                push(&mut ctx.cg_mono_args, marg);
+                mai = mai + 1;
+            }
+            let ng: i64 = len(ctx.cggfn_id);
+            let mut gqi: i64 = 0;
+            let mut mpos: i64 = 0 - 1;
+            while gqi < ng {
+                if ctx.cggfn_id[gqi] == mfid {
+                    mpos = ctx.cggfn_pos[gqi];
+                    0
+                } else {
+                    0
+                };
+                gqi = gqi + 1;
+            }
+            ctx.cg_mono_on = true;
+            let mut mcur: i64 = mpos;
+            let mut mbuf: Vec<u8> = vec_new();
+            type_fn(&mut mbuf, &kinds, &starts, &ends, &src, &mut mcur, &mut ctx, &mut garbage, mfid - 14);
+            let _mbx: [u8] = vec_to_array(mbuf);
+            ctx.cg_mono_on = false;
+            mqi = mqi + 1;
+        }
         append_str(result, "target triple = \"arm64-apple-darwin\"\n\n");
         cg_pass0(result, &mut ctx);
         // (8c-2/8d) runtime-symbol declarations — only the symbols the bodies used,
@@ -7484,6 +7593,102 @@ fn cg_struct_is_generic(c: &mut TyCtx, sid: i64) -> bool {
         i = i + 1;
     }
     g
+}
+
+// (Bar B / generics-b) record a monomorphic fn instance `(fid, concrete args)` unless
+// already recorded (dedup on fid + arg content). First-encounter order matches the
+// oracle's worklist seed (the corpus has no transitive generic-from-generic calls).
+fn cg_mono_record(c: &mut TyCtx, fid: i64, subst: &Vec<i64>) -> i64 {
+    let na: i64 = len(*subst);
+    let ni: i64 = len((*c).cgmono_fid);
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < ni {
+        if (*c).cgmono_fid[i] == fid {
+            let as0: i64 = (*c).cgmono_as[i];
+            let ae0: i64 = (*c).cgmono_ae[i];
+            if ae0 - as0 == na {
+                let mut j: i64 = 0;
+                let mut same: bool = true;
+                while j < na {
+                    if (*c).cgmono_pool[as0 + j] != (*subst)[j] {
+                        same = false;
+                        0
+                    } else {
+                        0
+                    };
+                    j = j + 1;
+                }
+                if same {
+                    found = true;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if found {
+        0
+    } else {
+        let ps: i64 = len((*c).cgmono_pool);
+        let mut kk: i64 = 0;
+        while kk < na {
+            push(&mut (*c).cgmono_pool, (*subst)[kk]);
+            kk = kk + 1;
+        }
+        let pe: i64 = len((*c).cgmono_pool);
+        push(&mut (*c).cgmono_fid, fid);
+        push(&mut (*c).cgmono_as, ps);
+        push(&mut (*c).cgmono_ae, pe);
+        0
+    };
+    0
+}
+
+// (Bar B) emit the monomorphic-symbol suffix `__<mangle(arg0)>__<mangle(arg1)>…`.
+// `args` must be a LOCAL copy (not `&(*c).cg_*`) — it aliases nothing while `c` is `&mut`.
+fn cg_emit_mono_suffix(c: &mut TyCtx, args: &Vec<i64>) -> i64 {
+    let n: i64 = len(*args);
+    let mut i: i64 = 0;
+    while i < n {
+        cgo_str(c, "__");
+        let a: i64 = (*args)[i];
+        let mut mb: Vec<u8> = vec_new();
+        cg_mangle_to(&mut mb, c, a);
+        cgo_str(c, vec_to_array(mb));
+        i = i + 1;
+    }
+    0
+}
+
+// (Bar B) copy `(*c).cg_mono_args` / `(*c).cg_targs` into a fresh local Vec (so it can
+// be passed to a `&mut c` helper without aliasing). `which` 0 = cg_mono_args, 1 = cg_targs.
+fn cg_copy_targs(c: &mut TyCtx, which: i64) -> Vec<i64> {
+    let mut v: Vec<i64> = vec_new();
+    let n: i64 = if which == 0 {
+        len((*c).cg_mono_args)
+    } else {
+        len((*c).cg_targs)
+    };
+    let mut i: i64 = 0;
+    while i < n {
+        let a: i64 = if which == 0 {
+            (*c).cg_mono_args[i]
+        } else {
+            (*c).cg_targs[i]
+        };
+        push(&mut v, a);
+        i = i + 1;
+    }
+    v
 }
 
 fn cg_pass0(out: &mut Vec<u8>, c: &mut TyCtx) -> i64 {
@@ -8652,6 +8857,15 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         let us: i64 = (*c).ufs[fid - 14];
         let ue: i64 = (*c).ufe[fid - 14];
         cgo_slice(c, src, us, ue);
+        // (Bar B / generics-b) a generic callee resolves to its monomorphic symbol
+        // `name__<arg0>__…`; `cg_targs` was set by the preceding `dump_generic_call`.
+        if (*c).uftp[fid - 14] > 0 {
+            let ctargs: Vec<i64> = cg_copy_targs(c, 1);
+            cg_emit_mono_suffix(c, &ctargs);
+            0
+        } else {
+            0
+        };
         cg_putc(c, '(');
         let n: i64 = len((*c).cgak);
         let mut i: i64 = snap;
@@ -8926,6 +9140,14 @@ fn cg_emit_fn(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> 
     };
     cgo_str(c, " @");
     cgo_slice(c, src, name_s, name_e);
+    // (Bar B / generics-b) a monomorphic instance's symbol is `name__<arg0>__…`.
+    if (*c).cg_mono_on {
+        let margs: Vec<i64> = cg_copy_targs(c, 0);
+        cg_emit_mono_suffix(c, &margs);
+        0
+    } else {
+        0
+    };
     cg_putc(c, '(');
     let np: i64 = len((*c).cgpty);
     let mut i: i64 = 0;

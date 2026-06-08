@@ -1731,7 +1731,11 @@ fn llvm_basic_type<'ctx>(
 /// processing newly-discovered instances with their type-arg
 /// substitution applied. Returns instances in a deterministic
 /// (insertion) order for stable LLVM output.
-fn collect_mono_instantiations(
+// Reused by the `snc llvm` oracle (`sentinel-driver/src/llvm_dump.rs`) so its
+// monomorphic-instance discovery is byte-faithful to the inkwell backend's — pure
+// logic over the TypedProgram (no inkwell types), so the textual oracle and the
+// production codegen monomorphize the same set in the same order.
+pub fn collect_mono_instantiations(
     program: &TypedProgram,
     instances: &mut Vec<GenericInstanceData>,
     refs: &mut Vec<RefData>,

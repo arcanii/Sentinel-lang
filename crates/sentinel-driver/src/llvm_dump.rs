@@ -38,6 +38,9 @@ use std::fmt::Write;
 
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
+// Bar B / generics: reuse the inkwell backend's monomorphic-instance discovery so the
+// oracle monomorphizes the same set, in the same order, as the production codegen.
+use sentinel_codegen::collect_mono_instantiations;
 use sentinel_resolve::{
     EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID,
     PRINT_BYTES_FN_ID, PRINT_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID,
@@ -201,15 +204,40 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
     if emitted_struct {
         out.push('\n');
     }
+    // Bar B / generics: discover every monomorphic fn instance `(FnId, type_args)`
+    // reachable from non-generic bodies (reusing the inkwell backend's worklist, so
+    // the set + order match). May extend `instances`/`refs` with nested generic
+    // instances surfaced during substitution.
+    let mut instances = program.generic_instances.clone();
+    let mut refs = program.refs.clone();
+    let mono_insts = collect_mono_instantiations(program, &mut instances, &mut refs);
+
     // FnId order = source order; deterministic + matches the Sentinel side. Build
     // the fns into a buffer so the runtime-symbol `declare`s — emitted only for the
     // symbols the bodies actually use — can be placed BEFORE them in the module.
     let mut fns_buf = String::new();
     let mut used = RuntimeSyms::default();
-    let mut fns: Vec<&TypedFnDef> = program.fns.iter().collect();
+    // Non-generic fns first; generic fn DEFS are monomorphized below (not dumped raw).
+    let mut fns: Vec<&TypedFnDef> =
+        program.fns.iter().filter(|f| f.type_params.is_empty()).collect();
     fns.sort_by_key(|f| f.id.0);
     for f in fns {
         dump_fn(f, program, drop_plan, &mut fns_buf, &mut used)?;
+        fns_buf.push('\n');
+    }
+    // Then one monomorphic `define` per instance — substitute the generic def to a
+    // concrete `TypedFnDef`, emit under its mangled symbol (`id__i64`). Insertion
+    // order from the worklist (mirrors inkwell; the Sentinel records the same order
+    // during its walk).
+    for (fn_id, args) in &mono_insts {
+        let gdef = program
+            .fns
+            .iter()
+            .find(|f| f.id == *fn_id)
+            .ok_or("mono instance references an unknown fn")?;
+        let mono_def = gdef.substitute(args, &mut instances, &mut refs);
+        let sym = mangle_mono_name(&gdef.name, args, program);
+        dump_fn_named(&mono_def, program, drop_plan, &mut fns_buf, &mut used, &sym)?;
         fns_buf.push('\n');
     }
     // Runtime-symbol declarations (8c-2+): only the symbols actually used, in a
@@ -228,10 +256,22 @@ fn dump_fn(
     out: &mut String,
     used: &mut RuntimeSyms,
 ) -> Result<(), String> {
+    dump_fn_named(f, program, drop_plan, out, used, &f.name)
+}
+
+/// Emit a fn `define` under symbol `sym` — `f.name` for a normal fn, or the mangled
+/// `id__i64` for a monomorphic instance (whose `f` is a SUBSTITUTED, concrete
+/// `TypedFnDef`, so no `TypeParam` reaches `llvm_ty`). Generic fn DEFS are never passed
+/// here — the caller monomorphizes + filters them; only concrete defs reach this.
+fn dump_fn_named(
+    f: &TypedFnDef,
+    program: &TypedProgram,
+    drop_plan: &DropPlan,
+    out: &mut String,
+    used: &mut RuntimeSyms,
+    sym: &str,
+) -> Result<(), String> {
     let sig = program.signature(f.id);
-    if !sig.type_params.is_empty() {
-        return Err(format!("generic fn `{}` (deferred to Bar B)", f.name));
-    }
     if !sig.effect_row.is_empty() {
         return Err(format!("effecting fn `{}` (deferred to Bar B)", f.name));
     }
@@ -295,7 +335,7 @@ fn dump_fn(
 
     // Assemble: the `define` header, then the entry block (hoisted allocas first),
     // then the body.
-    write!(out, "define {ret_ll} @{}(", f.name).unwrap();
+    write!(out, "define {ret_ll} @{sym}(").unwrap();
     for (i, p) in f.params.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
@@ -619,7 +659,9 @@ impl Emit<'_> {
                 writeln!(self.body, "  %v{d} = load i1, ptr %v{slot}").unwrap();
                 Ok(format!("%v{d}"))
             }
-            TypedExprKind::Call { id, args, .. } => self.lower_call(*id, args, expr.ty),
+            TypedExprKind::Call { id, args, type_args, .. } => {
+                self.lower_call(*id, args, type_args, expr.ty)
+            }
             // A struct literal builds its aggregate value by an `insertvalue` chain
             // from `undef` (declaration field order; the typed `fields` are already
             // reordered to it). All field operands are lowered FIRST, then the chain
@@ -1142,7 +1184,7 @@ impl Emit<'_> {
         format!("%v{a1}")
     }
 
-    fn lower_call(&mut self, id: FnId, args: &[TypedExpr], ret_ty: Type) -> Result<String, String> {
+    fn lower_call(&mut self, id: FnId, args: &[TypedExpr], type_args: &[Type], ret_ty: Type) -> Result<String, String> {
         // The two trivial width-conversion builtins (used by the selfhost
         // sources): zext (u8→i64) / trunc (i64→u8).
         // print(x: i64) -> i64 (Bar B): the simplest runtime builtin — call the C symbol.
@@ -1419,10 +1461,15 @@ impl Emit<'_> {
             return Err(format!("builtin call #{} (deferred to a later slice)", id.0));
         }
         let sig = self.program.signature(id);
-        if !sig.type_params.is_empty() {
-            return Err("generic call (deferred to Bar B)".into());
-        }
         let ret = self.lty(ret_ty)?;
+        // A generic callee resolves to its monomorphic instance's mangled symbol
+        // (`id__i64`); `type_args` are concrete here (inferred at a non-generic call
+        // site, or substituted in a mono body). A normal fn uses its plain name.
+        let sym = if sig.type_params.is_empty() {
+            sig.name.clone()
+        } else {
+            mangle_mono_name(&sig.name, type_args, self.program)
+        };
         // Lower args to operands first, then emit the call.
         let mut arg_ops: Vec<(String, String)> = Vec::with_capacity(args.len());
         for a in args {
@@ -1430,7 +1477,7 @@ impl Emit<'_> {
             arg_ops.push((self.lty(a.ty)?, op));
         }
         let v = self.fresh();
-        write!(self.body, "  %v{v} = call {ret} @{}(", sig.name).unwrap();
+        write!(self.body, "  %v{v} = call {ret} @{sym}(").unwrap();
         for (i, (t, op)) in arg_ops.iter().enumerate() {
             if i > 0 {
                 self.body.push_str(", ");
@@ -1544,6 +1591,18 @@ fn mangle_instance(program: &TypedProgram, struct_id: StructId, args: &[Type]) -
     for a in args {
         s.push('_');
         s.push_str(&mangle_type(*a, program));
+    }
+    s
+}
+
+/// The mangled symbol for a monomorphic fn instance: `{name}__{arg1}__{arg2}…`
+/// (mirrors inkwell `mangle_mono_name`, lib.rs:2045 — note the DOUBLE underscore,
+/// vs the single-underscore generic-struct mangle). `id<i64>` → `id__i64`.
+fn mangle_mono_name(base: &str, type_args: &[Type], program: &TypedProgram) -> String {
+    let mut s = base.to_string();
+    for t in type_args {
+        s.push_str("__");
+        s.push_str(&mangle_type(*t, program));
     }
     s
 }

@@ -829,8 +829,12 @@ fn emit_fn_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: 
     let name_s: i64 = (*s)[*cur];
     let name_e: i64 = (*e)[*cur];
     *cur = *cur + 1;
+    // (Bar B / generics-b) capture the generic `<T>` params to a temp (they come before
+    // `(` in the token stream but must be EMITTED after the name) so the re-parse infers
+    // a generic fn — else `fn id<T>` → `fn id`, mono never triggers (uftp stays 0).
+    let mut tpbuf: Vec<u8> = vec_new();
     if (*k)[*cur] == 15 {
-        skip_type_params(k, cur)
+        emit_type_params(&mut tpbuf, k, s, e, src, cur)
     } else {
         0
     };
@@ -846,6 +850,7 @@ fn emit_fn_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: 
     let body: Expr = parse_block(k, s, e, src, cur);
     append_str(out, "fn ");
     emit_name_slice(out, c, src, name_s, name_e);
+    append_str(out, vec_to_array(tpbuf));
     push(out, '(');
     emit_params(out, c, params);
     append_str(out, ") -> ");
