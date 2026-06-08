@@ -34,6 +34,8 @@ use parser::tokenize;
 use parser::parse_block;
 use parser::parse_type;
 use parser::parse_params;
+use parser::parse_self_kind;
+use parser::is_kw_init;
 use parser::skip_type_params;
 use parser::skip_effect_row;
 use parser::append_int;
@@ -1012,6 +1014,246 @@ fn skip_use(k: &Vec<i64>, cur: &mut i64) -> i64 {
     0
 }
 
+// --- traits / impls / classes (Bar B / classes) ------------------------------
+// The un-parser is TOKEN-driven for top-level decls (it re-walks the parser's token
+// stream + re-emits re-parseable source), so these mirror the parser's class/trait/
+// impl token-walking (parser.sentinel dump_trait_decl / dump_impl_decl / dump_class_decl)
+// but emit SOURCE rather than the S-expr. Each class/trait/impl/delegate is re-emitted
+// so a re-parse yields the structurally-identical decl (same ClassId / field+method
+// indices / delegate-synthesized ImplIds — all fixed by intra-kind order, preserved
+// here as we scan source order). Type/trait/class refs route through emit_name_slice /
+// emit_type (module-qualified if renamed; verbatim single-file); field/method/delegate-
+// field names + `self` are local → verbatim.
+
+// The shared `fn name(self: &[mut] Self, params) -> ret` head (cur at `fn`). Consumes
+// through the return type (+ skips an effect row, mirroring emit_fn_decl). Reused by
+// trait sigs, impl methods, class methods. The receiver is implicit in the token stream
+// (`self : & [mut] Self`) — re-synthesized; the declared params follow with a leading
+// `, ` each (emit_params_rest), since `self` is already emitted.
+fn emit_method_head_src(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let mn_s: i64 = (*s)[*cur];
+    let mn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let excl: bool = parse_self_kind(k, cur);
+    let mparams: Params = parse_params(k, s, e, src, cur);
+    *cur = *cur + 1;
+    let mret: TypeE = parse_type(k, s, e, src, cur);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    let skw: [u8] = if excl {
+        "&mut Self"
+    } else {
+        "&Self"
+    };
+    append_str(out, "fn ");
+    append_slice(out, src, mn_s, mn_e);
+    append_str(out, "(self: ");
+    append_str(out, skw);
+    emit_params_rest(out, c, mparams);
+    append_str(out, ") -> ");
+    emit_type(out, c, mret);
+    0
+}
+
+// `trait Name { fn m(self: &Self, …) -> R; … }` (cur at `trait`).
+fn emit_trait_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    append_str(out, "trait ");
+    emit_name_slice(out, c, src, nm_s, nm_e);
+    append_str(out, " { ");
+    emit_trait_methods(out, c, k, s, e, src, cur);
+    0
+}
+
+// Trait method sigs up to + consuming the closing `}` (7). Each `fn … ;` (no body).
+fn emit_trait_methods(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        push(out, '}');
+        0
+    } else {
+        emit_method_head_src(out, c, k, s, e, src, cur);
+        *cur = *cur + 1;
+        append_str(out, "; ");
+        emit_trait_methods(out, c, k, s, e, src, cur)
+    }
+}
+
+// `impl Name? as Trait for Type { fn m(self: …) -> R { … } … }` (cur at `impl`). The
+// optional impl name is present iff the token after `impl` is NOT `as` (60).
+fn emit_impl_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let has_name: bool = (*k)[*cur] != 60;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    if has_name {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    *cur = *cur + 1;
+    let tr_s: i64 = (*s)[*cur];
+    let tr_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let ty_s: i64 = (*s)[*cur];
+    let ty_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    append_str(out, "impl ");
+    if has_name {
+        append_slice(out, src, nm_s, nm_e);
+        push(out, ' ');
+        0
+    } else {
+        0
+    };
+    append_str(out, "as ");
+    emit_name_slice(out, c, src, tr_s, tr_e);
+    append_str(out, " for ");
+    emit_name_slice(out, c, src, ty_s, ty_e);
+    append_str(out, " { ");
+    emit_impl_methods(out, c, k, s, e, src, cur);
+    0
+}
+
+// Impl methods up to + consuming the closing `}` (7); each `[pub] fn … { body }`. The
+// per-method `pub` (59) is skipped (a visibility no-op single-file).
+fn emit_impl_methods(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        push(out, '}');
+        0
+    } else if t == 59 {
+        *cur = *cur + 1;
+        emit_impl_methods(out, c, k, s, e, src, cur)
+    } else {
+        emit_method_head_src(out, c, k, s, e, src, cur);
+        let mbody: Expr = parse_block(k, s, e, src, cur);
+        push(out, ' ');
+        emit_block_raw(out, c, mbody);
+        push(out, ' ');
+        emit_impl_methods(out, c, k, s, e, src, cur)
+    }
+}
+
+// `class Name { let f: T; init(p){…} fn m(self…){…} delegate g: T to Tr; }` (cur at
+// `class`). We re-emit each item in SOURCE order (the parser re-buckets by kind, so
+// intra-kind order — all that fixes field/method indices + the delegate ImplIds —
+// round-trips).
+fn emit_class_decl(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let nm_s: i64 = (*s)[*cur];
+    let nm_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    append_str(out, "class ");
+    emit_name_slice(out, c, src, nm_s, nm_e);
+    append_str(out, " { ");
+    emit_class_items(out, c, k, s, e, src, cur);
+    0
+}
+
+// Class items up to + consuming the closing `}` (7): `let`→field, `fn`→method,
+// `init`/`delegate`→those (both lex as plain idents — `init` slice-compared, delegate
+// is the fall-through). A per-item `pub` (59) is skipped.
+fn emit_class_items(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    if (*k)[*cur] == 59 {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        push(out, '}');
+        0
+    } else if t == 45 {
+        emit_class_field_src(out, c, k, s, e, src, cur);
+        emit_class_items(out, c, k, s, e, src, cur)
+    } else if t == 3 {
+        emit_method_head_src(out, c, k, s, e, src, cur);
+        let cmbody: Expr = parse_block(k, s, e, src, cur);
+        push(out, ' ');
+        emit_block_raw(out, c, cmbody);
+        push(out, ' ');
+        emit_class_items(out, c, k, s, e, src, cur)
+    } else if is_kw_init(src, (*s)[*cur], (*e)[*cur]) {
+        emit_class_init_src(out, c, k, s, e, src, cur);
+        emit_class_items(out, c, k, s, e, src, cur)
+    } else {
+        emit_class_delegate_src(out, c, k, s, e, src, cur);
+        emit_class_items(out, c, k, s, e, src, cur)
+    }
+}
+
+// `let name: type;` (cur at `let`).
+fn emit_class_field_src(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let fn_s: i64 = (*s)[*cur];
+    let fn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let fty: TypeE = parse_type(k, s, e, src, cur);
+    *cur = *cur + 1;
+    append_str(out, "let ");
+    append_slice(out, src, fn_s, fn_e);
+    append_str(out, ": ");
+    emit_type(out, c, fty);
+    append_str(out, "; ");
+    0
+}
+
+// `init(params) { body }` (cur at `init`) — no self, no return type.
+fn emit_class_init_src(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let iparams: Params = parse_params(k, s, e, src, cur);
+    let ibody: Expr = parse_block(k, s, e, src, cur);
+    append_str(out, "init(");
+    emit_params(out, c, iparams);
+    append_str(out, ") ");
+    emit_block_raw(out, c, ibody);
+    push(out, ' ');
+    0
+}
+
+// `delegate field: type to Trait;` (cur at `delegate`; `to` is a positional ident).
+fn emit_class_delegate_src(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let fn_s: i64 = (*s)[*cur];
+    let fn_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let dty: TypeE = parse_type(k, s, e, src, cur);
+    *cur = *cur + 1;
+    let tr_s: i64 = (*s)[*cur];
+    let tr_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    append_str(out, "delegate ");
+    append_slice(out, src, fn_s, fn_e);
+    append_str(out, ": ");
+    emit_type(out, c, dty);
+    append_str(out, " to ");
+    emit_name_slice(out, c, src, tr_s, tr_e);
+    append_str(out, "; ");
+    0
+}
+
 fn emit_item(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
     if (*k)[*cur] == 59 {
         *cur = *cur + 1;
@@ -1028,6 +1270,12 @@ fn emit_item(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Ve
         emit_enum_decl(out, c, k, s, e, src, cur)
     } else if lead == 3 {
         emit_fn_decl(out, c, k, s, e, src, cur)
+    } else if lead == 54 {
+        emit_trait_decl(out, c, k, s, e, src, cur)
+    } else if lead == 55 {
+        emit_impl_decl(out, c, k, s, e, src, cur)
+    } else if lead == 56 {
+        emit_class_decl(out, c, k, s, e, src, cur)
     } else {
         *cur = *cur + 1;
         0

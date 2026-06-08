@@ -36,29 +36,26 @@
 //! correct-or-loud over the bootstrap subset, never silently wrong.
 
 use sentinel_ast::{
-    BinOp, Block, CmpOp, EnumDecl, Expr, ExprKind, FnDef, LogicOp, Param, Pattern, Program,
-    Stmt, StmtKind, StructDecl, TypeExpr, TypeExprKind, UnaryOp, Visibility,
+    BinOp, Block, ClassDecl, CmpOp, DelegateDecl, EnumDecl, Expr, ExprKind, FnDef, ImplDecl,
+    InitDef, LogicOp, Param, Pattern, Program, SelfKind, Stmt, StmtKind, StructDecl,
+    TraitDecl, TraitMethodSig, TypeExpr, TypeExprKind, UnaryOp, Visibility,
 };
 
 /// Emit `program` as re-parseable Sentinel source, or an error naming the
 /// first construct outside the Bar-A subset this printer supports.
 pub fn dump(program: &Program) -> Result<String, String> {
-    if !program.traits.is_empty() {
-        return Err("merge-to-source: trait declarations are out of Bar-A scope".into());
-    }
-    if !program.impls.is_empty() {
-        return Err("merge-to-source: impl declarations are out of Bar-A scope".into());
-    }
-    if !program.classes.is_empty() {
-        return Err("merge-to-source: class declarations are out of Bar-A scope".into());
-    }
+    // Effects/handlers/concurrency remain a later Bar-B slice (the expr forms below
+    // still Err). Classes/traits/impls/delegates ARE emitted (Bar B / classes slice).
     if !program.effects.is_empty() {
         return Err("merge-to-source: effect declarations are out of Bar-A scope".into());
     }
 
     let mut out = String::new();
     // Per-kind, in vector order (intra-kind order fixes the IDs; inter-kind
-    // order is free — resolve builds all tables before any body).
+    // order is free — resolve builds all tables before any body). Traits/impls/
+    // classes follow the fns: a delegate inside a class re-synthesizes its impl at
+    // resolve time, so its ImplId lands right after the user impls — preserved by
+    // emitting each kind's vector in order.
     for s in &program.structs {
         emit_struct(&mut out, s)?;
     }
@@ -67,6 +64,15 @@ pub fn dump(program: &Program) -> Result<String, String> {
     }
     for f in &program.fns {
         emit_fn(&mut out, f)?;
+    }
+    for t in &program.traits {
+        emit_trait(&mut out, t)?;
+    }
+    for i in &program.impls {
+        emit_impl(&mut out, i)?;
+    }
+    for c in &program.classes {
+        emit_class(&mut out, c)?;
     }
     Ok(out)
 }
@@ -159,6 +165,161 @@ fn emit_param(out: &mut String, p: &Param) {
     out.push_str(&p.name);
     out.push_str(": ");
     emit_type(out, &p.ty);
+}
+
+// --- traits / impls / classes (Bar B / classes) -----------------------------
+
+fn emit_trait(out: &mut String, t: &TraitDecl) -> Result<(), String> {
+    if t.visibility == Visibility::Public {
+        out.push_str("pub ");
+    }
+    out.push_str("trait ");
+    out.push_str(&t.name);
+    out.push_str(" { ");
+    for m in &t.methods {
+        emit_trait_method_sig(out, m);
+        out.push(' ');
+    }
+    out.push_str("}\n");
+    Ok(())
+}
+
+/// A trait method signature: `fn name(self: &Self, …) -> R;` — head only, `;`
+/// terminated (no body). Effect rows pass through like a free fn's.
+fn emit_trait_method_sig(out: &mut String, m: &TraitMethodSig) {
+    emit_method_head(out, &m.name, m.self_kind, &m.params, &m.return_type, &m.effect_row);
+    out.push(';');
+}
+
+fn emit_impl(out: &mut String, i: &ImplDecl) -> Result<(), String> {
+    out.push_str("impl ");
+    if let Some(name) = &i.name {
+        out.push_str(name);
+        out.push(' ');
+    }
+    out.push_str("as ");
+    out.push_str(&i.trait_name);
+    out.push_str(" for ");
+    out.push_str(&i.type_name);
+    out.push_str(" { ");
+    for m in &i.methods {
+        emit_method_head(out, &m.name, m.self_kind, &m.params, &m.return_type, &m.effect_row);
+        out.push(' ');
+        emit_block(out, &m.body)?;
+        out.push(' ');
+    }
+    out.push_str("}\n");
+    Ok(())
+}
+
+fn emit_class(out: &mut String, c: &ClassDecl) -> Result<(), String> {
+    out.push_str("class ");
+    out.push_str(&c.name);
+    out.push_str(" { ");
+    // Fields, then delegates, then init, then methods. The parser buckets a class
+    // body by item kind (not source order), so each KIND's intra-vector order is all
+    // that fixes field indices / method indices / the delegate-synthesized ImplIds —
+    // and that order round-trips here.
+    for f in &c.fields {
+        if f.visibility == Visibility::Public {
+            out.push_str("pub ");
+        }
+        out.push_str("let ");
+        out.push_str(&f.name);
+        out.push_str(": ");
+        emit_type(out, &f.ty);
+        out.push_str("; ");
+    }
+    for d in &c.delegates {
+        emit_delegate(out, d);
+        out.push(' ');
+    }
+    if let Some(init) = &c.init {
+        emit_init(out, init)?;
+        out.push(' ');
+    }
+    for m in &c.methods {
+        if m.visibility == Visibility::Public {
+            out.push_str("pub ");
+        }
+        emit_method_head(out, &m.name, m.self_kind, &m.params, &m.return_type, &m.effect_row);
+        out.push(' ');
+        emit_block(out, &m.body)?;
+        out.push(' ');
+    }
+    out.push_str("}\n");
+    Ok(())
+}
+
+/// `('pub')? 'init' '(' params ')' '{' body '}'` — no return type (init implicitly
+/// returns the constructed instance, ADR 0022 D4). The body's `0` placeholder tail
+/// re-emits verbatim (round-trip exact).
+fn emit_init(out: &mut String, init: &InitDef) -> Result<(), String> {
+    if init.visibility == Visibility::Public {
+        out.push_str("pub ");
+    }
+    out.push_str("init(");
+    for (i, p) in init.params.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        emit_param(out, p);
+    }
+    out.push_str(") ");
+    emit_block(out, &init.body)
+}
+
+fn emit_delegate(out: &mut String, d: &DelegateDecl) {
+    if d.visibility == Visibility::Public {
+        out.push_str("pub ");
+    }
+    out.push_str("delegate ");
+    out.push_str(&d.field_name);
+    out.push_str(": ");
+    emit_type(out, &d.ty);
+    out.push_str(" to ");
+    out.push_str(&d.trait_name);
+    out.push(';');
+}
+
+/// The shared `fn name(self: &[mut] Self, params) -> R [! { effects }]` head used by
+/// trait sigs, impl methods, and class methods. The receiver `self` is implicit in
+/// the AST (`self_kind`) + excluded from `params`, so we re-synthesize it first.
+fn emit_method_head(
+    out: &mut String,
+    name: &str,
+    self_kind: SelfKind,
+    params: &[Param],
+    return_type: &TypeExpr,
+    effect_row: &[sentinel_ast::Spanned<String>],
+) {
+    out.push_str("fn ");
+    out.push_str(name);
+    out.push_str("(self: ");
+    out.push_str(self_kind_str(self_kind));
+    for p in params {
+        out.push_str(", ");
+        emit_param(out, p);
+    }
+    out.push_str(") -> ");
+    emit_type(out, return_type);
+    if !effect_row.is_empty() {
+        out.push_str(" ! { ");
+        for (i, eff) in effect_row.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&eff.kind);
+        }
+        out.push_str(" }");
+    }
+}
+
+fn self_kind_str(k: SelfKind) -> &'static str {
+    match k {
+        SelfKind::Shared => "&Self",
+        SelfKind::Exclusive => "&mut Self",
+    }
 }
 
 fn emit_type_params(out: &mut String, params: &[sentinel_ast::TypeParam]) {

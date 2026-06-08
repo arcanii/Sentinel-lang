@@ -272,6 +272,25 @@ struct TyCtx {
     cg_mono_args: Vec<i64>,
     cg_targs: Vec<i64>,
     cgout: Vec<u8>,   // accumulated .ll across all fns (the mode-4 result)
+    // (Bar B / classes) class init / method / impl-method DEFINEs. The pass-2 walk is
+    // GROUPED (fns, then classes, then impls, then delegate-synth), so accumulating
+    // every class/impl method here + appending it AFTER `cgout` (the fns + mono) yields
+    // the oracle's order (all fns, then all class methods, then all impl methods). A
+    // method has the pointer ABI: `self` is the FIRST param `ptr %arg0` (the live class
+    // storage), declared params follow as `%arg1..`. `cg_to_cls` routes the header/
+    // allocas/ret here (the body walk still targets cgbody, copied in at assembly).
+    cgcls: Vec<u8>,
+    cg_to_cls: bool,     // route cg_putc → cgcls (during a method DEFINE assembly)
+    cg_self_var: i64,    // the synthetic `self` VarId inside a method (-1 outside) — its
+                         // pointer IS `%arg0` (no alloca), so a `Var(self)` load / lvalue
+                         // GEP / method-receiver uses `%arg0` (operand kind 4).
+    cg_arg_base: i64,    // param `%arg` offset (0 = a free fn; 1 = a method — self is %arg0)
+    cgm_pfx_kind: i64,   // current method-owner kind: 0 = class method, 1 = impl method
+    cgm_named: bool,     // (impl method) the impl is NAMED (a `Plus`/`Doubling` prefix) vs default
+    cgm_nm_s: i64,       // (impl method) impl-name `src` slice start (when cgm_named)
+    cgm_nm_e: i64,       // impl-name `src` slice end
+    cgm_type_cid: i64,   // the owning/target class (→ `%Class`/className via `snb`)
+    cgm_trait_tid: i64,  // (impl method) the trait (→ traitName via `snb`)
 }
 
 fn tbase() -> i64 { 100 }
@@ -2460,12 +2479,31 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // loads from the var's alloca slot. An assign TARGET walk (cg_suppress) skips
             // the load — the assign emits the store itself.
             if cg_on(c) {
-                (*c).cg_lastvid = vid;
-                if (*c).cg_suppress {
+                // (Bar B / classes) `self` IS the `%arg0` pointer (no alloca). As a PLACE
+                // (suppressed — an `&self` / `self.f` lvalue / method receiver) it yields
+                // the `%arg0` operand (kind 4) + cg_lastvid=-1 (address-in-operand); as a
+                // VALUE it loads the whole `%Class.N` aggregate from `%arg0`. A normal var
+                // records its vid + (unless suppressed) loads from its alloca slot.
+                if (*c).cg_self_var == vid {
+                    if (*c).cg_suppress {
+                        (*c).cglk = 4;
+                        (*c).cglv = 0;
+                        0
+                    } else {
+                        cg_load_self(c, ty);
+                        0
+                    };
+                    (*c).cg_lastvid = 0 - 1;
                     0
                 } else {
-                    let cgslot: i64 = cg_slot_get(c, vid);
-                    cg_load(c, ty, cgslot);
+                    (*c).cg_lastvid = vid;
+                    if (*c).cg_suppress {
+                        0
+                    } else {
+                        let cgslot: i64 = cg_slot_get(c, vid);
+                        cg_load(c, ty, cgslot);
+                        0
+                    };
                     0
                 };
                 0
@@ -3600,6 +3638,37 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                         0
                     };
                     0
+                } else if class_of_handle(c, bare) >= 0 {
+                    // (Bar B / classes) class field access — the SAME shape as a generic
+                    // instance, with `%Class.N` (cgo_ty(bare)). LVALUE (`self.f = x` /
+                    // `&self.f` / a method receiver `self.f.m()`): GEP into the target's
+                    // pointer (a plain-Var target GEPs its slot; `self`/a nested place left
+                    // its pointer in the operand — `self`'s is `%arg0`). RVALUE: extractvalue
+                    // from the loaded `%Class.N` aggregate.
+                    if (*c).cg_suppress {
+                        let cg_cgp: i64 = cg_dst(c);
+                        cgo_str(c, "getelementptr ");
+                        cgo_ty(c, bare);
+                        cgo_str(c, ", ptr ");
+                        if cg_ftvid >= 0 {
+                            let cg_cbase: i64 = cg_slot_get(c, cg_ftvid);
+                            cgo_operand(c, 0, cg_cbase);
+                            0
+                        } else {
+                            cgo_operand(c, cg_ftk, cg_ftv);
+                            0
+                        };
+                        cgo_str(c, ", i32 0, i32 ");
+                        cgo_int(c, fidx);
+                        cg_putc(c, '\n');
+                        cg_reg(c, cg_cgp);
+                        (*c).cg_lastvid = 0 - 1;
+                        0
+                    } else {
+                        cg_extract(c, bare, cg_ftk, cg_ftv, fidx);
+                        0
+                    };
+                    0
                 } else {
                     0
                 };
@@ -3748,7 +3817,20 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0
             };
             let qeid: i64 = enum_lookup(c, &qi);
+            // (Bar B / classes) cg: a named-impl qualified call needs the impl name `qi`
+            // for its symbol, but the S-expr dump consumes it — copy it now (only the
+            // impl-qcall case uses it; the enum-construct case frees the empty copy).
+            let cg_qi: Vec<u8> = if cg_on(c) {
+                if qeid < 0 {
+                    cg_copy_name(&qi)
+                } else {
+                    vec_new()
+                }
+            } else {
+                vec_new()
+            };
             let qrt: i64 = if qeid >= 0 {
+                let _qix: [u8] = vec_to_array(cg_qi);
                 let vidx: i64 = variant_index(c, qeid, &qm);
                 let ety: i64 = mk_enum(c, qeid);
                 append_str(out, "(enum-construct #");
@@ -3798,8 +3880,31 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 append_str(out, qi);
                 push(out, ' ');
                 append_str(out, qm);
+                // (Bar B / classes) cg: collect ALL args (args[0] = the receiver ref,
+                // lowered to a ptr), then `cg_emit_qcall` emits `@<Impl>__Type__Trait__m
+                // (ptr <recv>, args[1..])`.
+                let cg_q_col: bool = (*c).cg_collecting;
+                let cg_q_snap: i64 = if cg_on(c) {
+                    len((*c).cgak)
+                } else {
+                    0
+                };
+                if cg_on(c) {
+                    (*c).cg_collecting = true;
+                    0
+                } else {
+                    0
+                };
                 dump_cargs(out, qa, src, c, gb);
                 close_ty(out, qmret, c);
+                if cg_on(c) {
+                    (*c).cg_collecting = cg_q_col;
+                    cg_emit_qcall(c, qmret, cg_q_snap, iid, qtid, qmidx, cg_qi);
+                    0
+                } else {
+                    let _qix2: [u8] = vec_to_array(cg_qi);
+                    0
+                };
                 qmret
             };
             if mir_on(c) {
@@ -3936,6 +4041,26 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         Expr::ClassInit(cn, ca) => {
             let cid: i64 = class_lookup(c, &cn);
             let cty: i64 = mk_class(c, cid);
+            // (Bar B / classes) cg: reserve the init-temp alloca BEFORE the args (the
+            // oracle allocas the class storage first, then lowers each arg), then collect
+            // the args; `cg_emit_class_init` emits the `@Name__init` call + the load.
+            let cg_ci_slot: i64 = if cg_on(c) {
+                cg_alloca(c, cty)
+            } else {
+                0
+            };
+            let cg_ci_col: bool = (*c).cg_collecting;
+            let cg_ci_snap: i64 = if cg_on(c) {
+                len((*c).cgak)
+            } else {
+                0
+            };
+            if cg_on(c) {
+                (*c).cg_collecting = true;
+                0
+            } else {
+                0
+            };
             append_str(out, "(class-init #");
             append_int(out, cid);
             push(out, ' ');
@@ -3964,6 +4089,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            if cg_on(c) {
+                (*c).cg_collecting = cg_ci_col;
+                cg_emit_class_init(c, cid, cty, cg_ci_slot, cg_ci_snap);
+                0
+            } else {
+                0
+            };
             cty
         },
         // (4f) `target.method(args)` — the receiver's class (the type-resolved split):
@@ -3976,7 +4108,53 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // non-consuming; the args are consuming (forced by `dump_targs`).
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
+            // (Bar B / classes) cg: the receiver supplies the `self` POINTER — walk it as
+            // a PLACE (suppress, like the oracle's `lower_lvalue_ptr`): a plain `Var`
+            // leaves its VarId (the alloca slot IS the address; `self` → `%arg0`), a
+            // `self.field` deref/place leaves the GEP pointer in the operand.
+            let cg_m_sup: bool = (*c).cg_suppress;
+            if cg_on(c) {
+                (*c).cg_suppress = true;
+                0
+            } else {
+                0
+            };
             let tty: i64 = dump_texpr(&mut tbuf, mt, 0 - 1, src, c, gb);
+            // capture the self-ptr operand (resolve the suppressed-place result), BEFORE
+            // the args walk clobbers cglk/cglv/cg_lastvid.
+            let cg_m_lvid: i64 = if cg_on(c) {
+                (*c).cg_lastvid
+            } else {
+                0 - 1
+            };
+            let cg_m_selfk: i64 = if cg_m_lvid >= 0 {
+                0
+            } else {
+                (*c).cglk
+            };
+            let cg_m_selfv: i64 = if cg_m_lvid >= 0 {
+                cg_slot_get(c, cg_m_lvid)
+            } else {
+                (*c).cglv
+            };
+            if cg_on(c) {
+                (*c).cg_suppress = cg_m_sup;
+                0
+            } else {
+                0
+            };
+            let cg_m_col: bool = (*c).cg_collecting;
+            let cg_m_snap: i64 = if cg_on(c) {
+                len((*c).cgak)
+            } else {
+                0
+            };
+            if cg_on(c) {
+                (*c).cg_collecting = true;
+                0
+            } else {
+                0
+            };
             let mrecv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -4011,6 +4189,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 append_str(out, mn);
                 dump_cargs(out, ma, src, c, gb);
                 close_ty(out, mret, c);
+                if cg_on(c) {
+                    (*c).cg_collecting = cg_m_col;
+                    cg_emit_class_mcall(c, mret, cg_m_selfk, cg_m_selfv, cg_m_snap, rcid, midx);
+                    0
+                } else {
+                    0
+                };
                 mret
             } else {
                 let idef: i64 = impl_for_class(c, rcid, &mn);
@@ -4027,6 +4212,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 append_str(out, mn);
                 dump_cargs(out, ma, src, c, gb);
                 close_ty(out, mret2, c);
+                if cg_on(c) {
+                    (*c).cg_collecting = cg_m_col;
+                    cg_emit_impl_mcall(c, mret2, cg_m_selfk, cg_m_selfv, cg_m_snap, idef, mtid, midx2);
+                    0
+                } else {
+                    0
+                };
                 mret2
             };
             if mir_on(c) {
@@ -4923,7 +5115,9 @@ fn emit_tparams(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src
             cgo_str(c, "  store ");
             cgo_ty(c, pty);
             cgo_str(c, " %arg");
-            cgo_int(c, cgpidx);
+            // (Bar B / classes) a method's declared params are `%arg1..` (self is %arg0);
+            // `cg_arg_base` is 1 for a method, 0 for a free fn.
+            cgo_int(c, cgpidx + (*c).cg_arg_base);
             cgo_str(c, ", ptr %v");
             cgo_int(c, cgslot);
             cg_putc(c, '\n');
@@ -5569,6 +5763,22 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     (*c).nextvid = (*c).nextvid + 1;
     let clty: i64 = mk_class(c, cid);
     bind_name(c, "self", selfvid, clty);
+    // (Bar B / classes) cg: a fresh per-init cg state with `self` = `%arg0` (the out-ptr,
+    // cg_arg_base=1 so params are %arg1..). type_class set cgm_pfx_kind/cgm_type_cid.
+    if cg_on(c) {
+        cg_reset(c);
+        (*c).cgmain = false;
+        (*c).cg_self_var = selfvid;
+        (*c).cg_arg_base = 1;
+        0
+    } else {
+        0
+    };
+    let cg_i_pmark: i64 = if cg_on(c) {
+        len((*c).cgdv)
+    } else {
+        0
+    };
     append_str(buf, " (init #");
     append_int(buf, selfvid);
     append_str(buf, " (");
@@ -5577,6 +5787,15 @@ fn tclass_init(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src:
     let ibody: Expr = parse_block(k, s, e, src, cur);
     dump_texpr(buf, ibody, 0 - 1, src, c, gb);
     push(buf, ')');
+    // (Bar B / classes) cg: the init DEFINE (`void @Class__init(ptr out, params)`; the
+    // `0`-placeholder tail is NOT lowered). Appended to cgcls (after the fns).
+    if cg_on(c) {
+        cg_drop_frame(c, cg_i_pmark);
+        cg_emit_method(c, src, 0 - 1, true, true, 0, 0);
+        0
+    } else {
+        0
+    };
     0
 }
 
@@ -5597,6 +5816,22 @@ fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     (*c).nextvid = (*c).nextvid + 1;
     let clty: i64 = mk_class(c, cid);
     bind_src(c, src, self_s, self_e, selfvid, clty);
+    // (Bar B / classes) cg: a fresh per-method cg state with `self` = `%arg0` (cg_arg_base
+    // =1). The caller (type_class / type_impl) set cgm_pfx_kind + the symbol components.
+    if cg_on(c) {
+        cg_reset(c);
+        (*c).cgmain = false;
+        (*c).cg_self_var = selfvid;
+        (*c).cg_arg_base = 1;
+        0
+    } else {
+        0
+    };
+    let cg_m_pmark: i64 = if cg_on(c) {
+        len((*c).cgdv)
+    } else {
+        0
+    };
     let skw: [u8] = if excl {
         "exclusive"
     } else {
@@ -5624,6 +5859,14 @@ fn tmethod(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     push(buf, ' ');
     dump_texpr(buf, mbody, mrth, src, c, gb);
     push(buf, ')');
+    // (Bar B / classes) cg: the method DEFINE (`<ret> @<sym>(ptr self, params)`) → cgcls.
+    if cg_on(c) {
+        cg_drop_frame(c, cg_m_pmark);
+        cg_emit_method(c, src, mrth, false, false, mn_s, mn_e);
+        0
+    } else {
+        0
+    };
     0
 }
 
@@ -5688,6 +5931,14 @@ fn type_class(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: 
     let mut dfbuf: Vec<u8> = vec_new();
     let mut ibuf: Vec<u8> = vec_new();
     let mut mbuf: Vec<u8> = vec_new();
+    // (Bar B / classes) cg: this class's methods + init mangle as `Class__<m>` / `Class__init`.
+    if cg_on(c) {
+        (*c).cgm_pfx_kind = 0;
+        (*c).cgm_type_cid = cid;
+        0
+    } else {
+        0
+    };
     tclass_items(&mut fbuf, &mut dfbuf, &mut ibuf, &mut mbuf, k, s, e, src, cur, c, gb, cid);
     append_str(out, "(class #");
     append_int(out, cid);
@@ -5999,6 +6250,18 @@ fn type_impl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
     append_int(out, cid);
     push(out, ' ');
     append_slice(out, src, ty_s, ty_e);
+    // (Bar B / classes) cg: this impl's methods mangle as `<name|default>__Type__Trait__<m>`.
+    if cg_on(c) {
+        (*c).cgm_pfx_kind = 1;
+        (*c).cgm_named = has_name;
+        (*c).cgm_nm_s = nm_s;
+        (*c).cgm_nm_e = nm_e;
+        (*c).cgm_type_cid = cid;
+        (*c).cgm_trait_tid = tid;
+        0
+    } else {
+        0
+    };
     timpl_methods(out, k, s, e, src, cur, c, gb, cid);
     push(out, ')');
     0
@@ -6071,6 +6334,39 @@ fn synth_forward(buf: &mut Vec<u8>, c: &mut TyCtx, gb: &mut Vec<u8>, cid: i64, s
     };
     sink_name(gb, mn_arr);
     let clty: i64 = mk_class(c, cid);
+    // (Bar B / classes) cg: the synthesized forwarding body `self.field.m(params)` —
+    // GEP the delegate field (self is `%arg0`), load + collect each param, then dispatch
+    // to the field-type's class method (own) or default impl. Emitted into cgbody.
+    if cg_on(c) {
+        let cg_fwd_snap: i64 = len((*c).cgak);
+        let cg_fwd_gp: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr %Class.");
+        cgo_int(c, cid);
+        cgo_str(c, ", ptr %arg0, i32 0, i32 ");
+        cgo_int(c, fidx);
+        cg_putc(c, '\n');
+        let cg_fwd_col: bool = (*c).cg_collecting;
+        (*c).cg_collecting = true;
+        let mut cg_pv: i64 = pv0;
+        while cg_pv < pvn {
+            let cg_pty: i64 = env_get(c, cg_pv);
+            let cg_ps: i64 = cg_slot_get(c, cg_pv);
+            cg_load(c, cg_pty, cg_ps);
+            cg_collect(c, cg_pty);
+            cg_pv = cg_pv + 1;
+        }
+        (*c).cg_collecting = cg_fwd_col;
+        if own {
+            cg_emit_class_mcall(c, mrth, 0, cg_fwd_gp, cg_fwd_snap, rcid, oidx);
+            0
+        } else {
+            cg_emit_impl_mcall(c, mrth, 0, cg_fwd_gp, cg_fwd_snap, iid, itid, iidx);
+            0
+        };
+        0
+    } else {
+        0
+    };
     if own {
         append_str(buf, "(method #");
         append_int(buf, rcid);
@@ -6117,6 +6413,22 @@ fn synth_one_method(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>,
     (*c).nextvid = (*c).nextvid + 1;
     let clty: i64 = mk_class(c, cid);
     bind_name(c, "self", selfvid, clty);
+    // (Bar B / classes) cg: a fresh per-method cg state (self = %arg0). synth_delegate_impl
+    // set cgm_* (an unnamed `default` impl of the delegated trait for the owning class).
+    if cg_on(c) {
+        cg_reset(c);
+        (*c).cgmain = false;
+        (*c).cg_self_var = selfvid;
+        (*c).cg_arg_base = 1;
+        0
+    } else {
+        0
+    };
+    let cg_sm_pmark: i64 = if cg_on(c) {
+        len((*c).cgdv)
+    } else {
+        0
+    };
     let skw: [u8] = if excl {
         "exclusive"
     } else {
@@ -6148,6 +6460,14 @@ fn synth_one_method(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>,
     render_type(buf, mrth, c);
     push(buf, ')');             // close block
     push(buf, ')');             // close method
+    // (Bar B / classes) cg: the synthesized impl-method DEFINE → cgcls.
+    if cg_on(c) {
+        cg_drop_frame(c, cg_sm_pmark);
+        cg_emit_method(c, src, mrth, false, false, mn_s, mn_e);
+        0
+    } else {
+        0
+    };
     0
 }
 
@@ -6189,6 +6509,17 @@ fn synth_delegate_impl(buf: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i6
         push(buf, (*c).snb[ci]);
         ci = ci + 1;
     }
+    // (Bar B / classes) cg: the synthesized impl is an UNNAMED (`default`) impl of the
+    // delegated trait for the owning class — its methods mangle `default__Class__Trait__m`.
+    if cg_on(c) {
+        (*c).cgm_pfx_kind = 1;
+        (*c).cgm_named = false;
+        (*c).cgm_type_cid = cid;
+        (*c).cgm_trait_tid = tid;
+        0
+    } else {
+        0
+    };
     let tpos: i64 = (*c).trpos[tid];
     let mut tcur: i64 = tpos + 1;   // skip `trait`
     tcur = tcur + 1;                // skip name
@@ -6519,6 +6850,16 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_mono_args: vec_new(),
         cg_targs: vec_new(),
         cgout: vec_new(),
+        cgcls: vec_new(),
+        cg_to_cls: false,
+        cg_self_var: 0 - 1,
+        cg_arg_base: 0,
+        cgm_pfx_kind: 0,
+        cgm_named: false,
+        cgm_nm_s: 0,
+        cgm_nm_e: 0,
+        cgm_type_cid: 0,
+        cgm_trait_tid: 0,
     };
     let mut garbage: Vec<u8> = vec_new();
     let mut out: Vec<u8> = vec_new();
@@ -7042,6 +7383,16 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
             push(result, ctx.cgout[ci]);
             ci = ci + 1;
         }
+        // (Bar B / classes) the class/impl/delegate method DEFINEs (cgcls), AFTER all fns
+        // + mono (cgout) — the oracle's order (every fn, then class methods, then impl
+        // methods). The group-ordered pass-2 walk (classes before impls before delegate)
+        // already accumulated them in that order.
+        let ccn: i64 = len(ctx.cgcls);
+        let mut cci: i64 = 0;
+        while cci < ccn {
+            push(result, ctx.cgcls[cci]);
+            cci = cci + 1;
+        }
         0
     } else {
         // (7/N) mode 2 = the MIR dump, accumulated per-fn in `ctx.mirout` during the
@@ -7199,6 +7550,11 @@ fn cg_reset(c: &mut TyCtx) -> i64 {
     (*c).cg_lastvid = 0 - 1;
     (*c).cgblk = 0;
     (*c).cg_to_body = true;   // the body walk routes cg_putc → cgbody
+    // (Bar B / classes) per-fn defaults: a free fn has no `self` + params at %arg0. A
+    // method overrides these (cg_self_var = its self VarId, cg_arg_base = 1) AFTER reset.
+    (*c).cg_self_var = 0 - 1;
+    (*c).cg_arg_base = 0;
+    (*c).cg_to_cls = false;
     0
 }
 
@@ -7220,6 +7576,9 @@ fn cg_fresh_block(c: &mut TyCtx) -> i64 {
 fn cg_putc(c: &mut TyCtx, b: u8) -> i64 {
     if (*c).cg_to_body {
         push(&mut (*c).cgbody, b);
+        0
+    } else if (*c).cg_to_cls {
+        push(&mut (*c).cgcls, b);
         0
     } else {
         push(&mut (*c).cgout, b);
@@ -7507,6 +7866,12 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
             let mut gmb: Vec<u8> = vec_new();
             cg_mangle_to(&mut gmb, c, hs);
             cgo_str(c, vec_to_array(gmb))
+        } else if class_of_handle(c, hs) >= 0 {
+            // (Bar B / classes) a class is the Pass-0 named aggregate `%Class.N` — held
+            // by VALUE as this aggregate (an init param / `let` / `Var(self)` load).
+            let cgcid: i64 = class_of_handle(c, hs);
+            cgo_str(c, "%Class.");
+            cgo_int(c, cgcid)
         } else {
             cgo_str(c, "i64")
         }
@@ -7556,6 +7921,11 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
             // (Bar B) a generic-struct instance `%<mangled>` (mirrors `cgo_ty`).
             push(out, '%');
             cg_mangle_to(out, c, hs)
+        } else if class_of_handle(c, hs) >= 0 {
+            // (Bar B / classes) a class is the Pass-0 named aggregate `%Class.N`.
+            let llcid: i64 = class_of_handle(c, hs);
+            append_str(out, "%Class.");
+            append_int(out, llcid)
         } else {
             append_str(out, "i64")
         }
@@ -7793,6 +8163,45 @@ fn cg_pass0(out: &mut Vec<u8>, c: &mut TyCtx) -> i64 {
         };
         ti = ti + 1;
     }
+    // (Bar B / classes) class type decls `%Class.N = type { <field types> }` (N =
+    // ClassId, source order), mirroring `%Struct.N`. Fields from the class-field table
+    // (`clfo`/`clft`), filtered by owner ClassId, in declaration order (explicit fields
+    // then delegate fields — the field-index order resolve assigns).
+    let ncl: i64 = len((*c).clns);
+    let mut clid: i64 = 0;
+    while clid < ncl {
+        append_str(out, "%Class.");
+        append_int(out, clid);
+        append_str(out, " = type {");
+        let ncf: i64 = len((*c).clfo);
+        let mut cfi: i64 = 0;
+        let mut cffirst: bool = true;
+        while cfi < ncf {
+            if (*c).clfo[cfi] == clid {
+                if cffirst {
+                    push(out, ' ');
+                    cffirst = false;
+                    0
+                } else {
+                    append_str(out, ", ")
+                };
+                let cfh: i64 = (*c).clft[cfi];
+                ll_type_to(out, c, cfh);
+                0
+            } else {
+                0
+            };
+            cfi = cfi + 1;
+        }
+        if cffirst {
+            0
+        } else {
+            push(out, ' ')
+        };
+        append_str(out, "}\n");
+        any = true;
+        clid = clid + 1;
+    }
     if any {
         push(out, '\n')
     } else {
@@ -7808,6 +8217,9 @@ fn cgo_operand(c: &mut TyCtx, kind: i64, val: i64) -> i64 {
     if kind == 0 {
         cgo_str(c, "%v");
         cgo_int(c, val)
+    } else if kind == 4 {
+        // (Bar B / classes) the `self` pointer — the first param of a method (`%arg0`).
+        cgo_str(c, "%arg0")
     } else if kind == 1 {
         cgo_int(c, val)
     } else if kind == 2 {
@@ -7939,6 +8351,17 @@ fn cg_load(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
     cgo_str(c, ", ptr %v");
     cgo_int(c, slot);
     cg_putc(c, '\n');
+    cg_reg(c, d);
+    d
+}
+
+// (Bar B / classes) `Var(self)` as a VALUE — load the whole `%Class.N` aggregate from
+// the self pointer `%arg0` (which a class MethodCall later GEPs into via the lvalue).
+fn cg_load_self(c: &mut TyCtx, ty: i64) -> i64 {
+    let d: i64 = cg_dst(c);
+    cgo_str(c, "load ");
+    cgo_ty(c, ty);
+    cgo_str(c, ", ptr %arg0\n");
     cg_reg(c, d);
     d
 }
@@ -8423,6 +8846,337 @@ fn cg_emit_enum_construct(c: &mut TyCtx, eid: i64, vidx: i64, snap: i64) -> i64 
         let _t: i64 = pop(&mut (*c).cgat);
         0
     }
+    0
+}
+
+// --- (Bar B / classes) class/method codegen helpers --------------------------
+
+// Emit a class name (`snb[clns[cid]..clne[cid]]`) into the current cg buffer.
+fn cg_emit_snb_clsname(c: &mut TyCtx, cid: i64) -> i64 {
+    let ns: i64 = (*c).clns[cid];
+    let ne: i64 = (*c).clne[cid];
+    let mut i: i64 = ns;
+    while i < ne {
+        let b: u8 = (*c).snb[i];
+        cg_putc(c, b);
+        i = i + 1;
+    }
+    0
+}
+
+// Emit a trait name (`snb[trns[tid]..trne[tid]]`) into the current cg buffer.
+fn cg_emit_snb_trname(c: &mut TyCtx, tid: i64) -> i64 {
+    let ns: i64 = (*c).trns[tid];
+    let ne: i64 = (*c).trne[tid];
+    let mut i: i64 = ns;
+    while i < ne {
+        let b: u8 = (*c).snb[i];
+        cg_putc(c, b);
+        i = i + 1;
+    }
+    0
+}
+
+// Emit the trailing collected args of a class call — `, <ty> <op>` per arg in [snap..]
+// — then pop them off the cgak/cgav/cgat stacks. The leading `(self...` is the caller's.
+fn cg_emit_call_args(c: &mut TyCtx, snap: i64) -> i64 {
+    let n: i64 = len((*c).cgak);
+    let mut i: i64 = snap;
+    while i < n {
+        cgo_str(c, ", ");
+        let aty: i64 = (*c).cgat[i];
+        cgo_ty(c, aty);
+        cg_putc(c, ' ');
+        let aok: i64 = (*c).cgak[i];
+        let aov: i64 = (*c).cgav[i];
+        cgo_operand(c, aok, aov);
+        i = i + 1;
+    }
+    while len((*c).cgak) > snap {
+        let _a: i64 = pop(&mut (*c).cgak);
+        let _b: i64 = pop(&mut (*c).cgav);
+        let _t: i64 = pop(&mut (*c).cgat);
+        0
+    }
+    0
+}
+
+// (Bar B / classes) `Name::init(args)` cg: call the void `@Name__init(ptr <slot>, args)`
+// (it writes through the out-ptr), then LOAD the constructed `%Class.N` value (the slot
+// was pre-reserved before the args, matching the oracle's alloca-then-args order).
+fn cg_emit_class_init(c: &mut TyCtx, cid: i64, cty: i64, slot: i64, snap: i64) -> i64 {
+    cgo_str(c, "  call void @");
+    cg_emit_snb_clsname(c, cid);
+    cgo_str(c, "__init(ptr %v");
+    cgo_int(c, slot);
+    cg_emit_call_args(c, snap);
+    cgo_str(c, ")\n");
+    let d: i64 = cg_dst(c);
+    cgo_str(c, "load ");
+    cgo_ty(c, cty);
+    cgo_str(c, ", ptr %v");
+    cgo_int(c, slot);
+    cg_putc(c, '\n');
+    cg_reg(c, d);
+    0
+}
+
+// (Bar B / classes) the method symbol after `@` (NO surrounding text): a class method
+// `Class__method`, an init `Class__init`, or an impl method `<prefix>__<Type>__<Trait>__
+// <method>` (prefix = the impl name, or `default`). Built from the `cgm_*` fields the
+// caller set per-class/impl. `mn_s`/`mn_e` = the method-name `src` slice (unused for init).
+fn cg_emit_method_sym(c: &mut TyCtx, src: &[u8], is_init: bool, mn_s: i64, mn_e: i64) -> i64 {
+    let tcid: i64 = (*c).cgm_type_cid;
+    if is_init {
+        cg_emit_snb_clsname(c, tcid);
+        cgo_str(c, "__init");
+        0
+    } else if (*c).cgm_pfx_kind == 0 {
+        cg_emit_snb_clsname(c, tcid);
+        cgo_str(c, "__");
+        cgo_slice(c, src, mn_s, mn_e);
+        0
+    } else {
+        if (*c).cgm_named {
+            let nms: i64 = (*c).cgm_nm_s;
+            let nme: i64 = (*c).cgm_nm_e;
+            cgo_slice(c, src, nms, nme);
+            0
+        } else {
+            cgo_str(c, "default");
+            0
+        };
+        cgo_str(c, "__");
+        cg_emit_snb_clsname(c, tcid);
+        cgo_str(c, "__");
+        let ttid: i64 = (*c).cgm_trait_tid;
+        cg_emit_snb_trname(c, ttid);
+        cgo_str(c, "__");
+        cgo_slice(c, src, mn_s, mn_e);
+        0
+    }
+}
+
+// (Bar B / classes) assemble a class init / method / impl-method DEFINE into `cgcls`:
+// the pointer-ABI header (`self` = `ptr %arg0`, declared params `%arg1..`), the hoisted
+// entry-block allocas, the buffered body (cgbody), and the return (`void` for an init —
+// its `0`-placeholder tail is NOT lowered). Mirrors `cg_emit_fn`; targets cgcls so it
+// lands after all fns (the oracle's order). Call AFTER the body walk.
+fn cg_emit_method(c: &mut TyCtx, src: &[u8], rty: i64, is_void: bool, is_init: bool, mn_s: i64, mn_e: i64) -> i64 {
+    (*c).cg_to_body = false;
+    (*c).cg_to_cls = true;
+    cgo_str(c, "define ");
+    if is_void {
+        cgo_str(c, "void")
+    } else {
+        cgo_ty(c, rty)
+    };
+    cgo_str(c, " @");
+    cg_emit_method_sym(c, src, is_init, mn_s, mn_e);
+    cgo_str(c, "(ptr %arg0");
+    let np: i64 = len((*c).cgpty);
+    let mut i: i64 = 0;
+    while i < np {
+        cgo_str(c, ", ");
+        let pty: i64 = (*c).cgpty[i];
+        cgo_ty(c, pty);
+        cgo_str(c, " %arg");
+        cgo_int(c, i + 1);
+        i = i + 1;
+    }
+    cgo_str(c, ") {\nentry:\n");
+    let na: i64 = len((*c).cgalloca_sl);
+    let mut ai: i64 = 0;
+    while ai < na {
+        let asl: i64 = (*c).cgalloca_sl[ai];
+        let aty: i64 = (*c).cgalloca_ty[ai];
+        cgo_str(c, "  %v");
+        cgo_int(c, asl);
+        cgo_str(c, " = alloca ");
+        cgo_ty(c, aty);
+        cg_putc(c, '\n');
+        ai = ai + 1;
+    }
+    let nb: i64 = len((*c).cgbody);
+    let mut bi: i64 = 0;
+    while bi < nb {
+        let byte: u8 = (*c).cgbody[bi];
+        push(&mut (*c).cgcls, byte);
+        bi = bi + 1;
+    }
+    if is_void {
+        cgo_str(c, "  ret void\n");
+        0
+    } else {
+        cgo_str(c, "  ret ");
+        cgo_ty(c, rty);
+        cg_putc(c, ' ');
+        let bk: i64 = (*c).cglk;
+        let bv: i64 = (*c).cglv;
+        cgo_operand(c, bk, bv);
+        cg_putc(c, '\n');
+        0
+    };
+    cgo_str(c, "}\n\n");
+    (*c).cg_to_cls = false;
+    0
+}
+
+// Emit the `midx`-th class-method name of class `rcid` (from the flat class-method
+// table — the names live in `snb`) — the method symbol's tail for a class MethodCall.
+fn cg_emit_class_mname(c: &mut TyCtx, rcid: i64, midx: i64) -> i64 {
+    let n: i64 = len((*c).clmo);
+    let mut i: i64 = 0;
+    let mut seen: i64 = 0;
+    let mut done: bool = false;
+    while i < n {
+        if done {
+            0
+        } else if (*c).clmo[i] == rcid {
+            if seen == midx {
+                let ns: i64 = (*c).clms[i];
+                let ne: i64 = (*c).clme[i];
+                let mut j: i64 = ns;
+                while j < ne {
+                    let b: u8 = (*c).snb[j];
+                    cg_putc(c, b);
+                    j = j + 1;
+                }
+                done = true;
+                0
+            } else {
+                0
+            };
+            seen = seen + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
+// Emit the `midx`-th trait-method name of trait `tid` (from the flat trait-method
+// table in `snb`) — the method symbol's tail for an impl-method dispatch.
+fn cg_emit_trait_mname(c: &mut TyCtx, tid: i64, midx: i64) -> i64 {
+    let n: i64 = len((*c).trmo);
+    let mut i: i64 = 0;
+    let mut seen: i64 = 0;
+    let mut done: bool = false;
+    while i < n {
+        if done {
+            0
+        } else if (*c).trmo[i] == tid {
+            if seen == midx {
+                let ns: i64 = (*c).trms[i];
+                let ne: i64 = (*c).trme[i];
+                let mut j: i64 = ns;
+                while j < ne {
+                    let b: u8 = (*c).snb[j];
+                    cg_putc(c, b);
+                    j = j + 1;
+                }
+                done = true;
+                0
+            } else {
+                0
+            };
+            seen = seen + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
+// Copy a borrowed name `v` into a fresh owned `Vec<u8>` (index-loop, NON-consuming) so
+// it survives a later consuming use of the original (e.g. a qcall's impl name `qi`,
+// which the S-expr dump moves, is needed again for the cg symbol).
+fn cg_copy_name(v: &[u8]) -> Vec<u8> {
+    let n: i64 = len(*v);
+    let mut r: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        let b: u8 = (*v)[i];
+        push(&mut r, b);
+        i = i + 1;
+    }
+    r
+}
+
+// Emit `%vD = call <ret> @` (the call-instruction head); returns D.
+fn cg_call_head(c: &mut TyCtx, rty: i64) -> i64 {
+    let d: i64 = cg_dst(c);
+    cgo_str(c, "call ");
+    cgo_ty(c, rty);
+    cgo_str(c, " @");
+    d
+}
+
+// Emit `(ptr <self>, <args>)` + newline + set the result operand to register `d`. The
+// `self` pointer is the leading arg of every class/impl method (the pointer ABI).
+fn cg_call_tail(c: &mut TyCtx, selfk: i64, selfv: i64, snap: i64, d: i64) -> i64 {
+    cgo_str(c, "(ptr ");
+    cgo_operand(c, selfk, selfv);
+    cg_emit_call_args(c, snap);
+    cgo_str(c, ")\n");
+    cg_reg(c, d);
+    0
+}
+
+// (Bar B / classes) a class MethodCall `recv.m(args)` → `call @Class__method(ptr self, args)`.
+fn cg_emit_class_mcall(c: &mut TyCtx, rty: i64, selfk: i64, selfv: i64, snap: i64, rcid: i64, midx: i64) -> i64 {
+    let d: i64 = cg_call_head(c, rty);
+    cg_emit_snb_clsname(c, rcid);
+    cgo_str(c, "__");
+    cg_emit_class_mname(c, rcid, midx);
+    cg_call_tail(c, selfk, selfv, snap, d)
+}
+
+// (Bar B / classes) a receiver-typed impl-method dispatch → `call @default__Type__Trait__
+// method(ptr self, args)` (Path 1 always routes through the DEFAULT impl, prefix `default`).
+fn cg_emit_impl_mcall(c: &mut TyCtx, rty: i64, selfk: i64, selfv: i64, snap: i64, iid: i64, mtid: i64, midx: i64) -> i64 {
+    let d: i64 = cg_call_head(c, rty);
+    cgo_str(c, "default__");
+    let tcid: i64 = (*c).imcid[iid];
+    cg_emit_snb_clsname(c, tcid);
+    cgo_str(c, "__");
+    cg_emit_snb_trname(c, mtid);
+    cgo_str(c, "__");
+    cg_emit_trait_mname(c, mtid, midx);
+    cg_call_tail(c, selfk, selfv, snap, d)
+}
+
+// (Bar B / classes) a qualified-named impl call `Impl::m(&recv, args)` → `call
+// @<Impl>__Type__Trait__method(ptr self, args)`. Here `args[0]` IS the receiver (a ref
+// lowered to a ptr — the FIRST collected operand at `snap`); the declared params are
+// `[snap+1..]`. `qi_vec` = the impl-name bytes (copied before the S-expr consumed them);
+// CONSUMED here.
+fn cg_emit_qcall(c: &mut TyCtx, rty: i64, snap: i64, iid: i64, qtid: i64, midx: i64, qi_vec: Vec<u8>) -> i64 {
+    let selfk: i64 = (*c).cgak[snap];
+    let selfv: i64 = (*c).cgav[snap];
+    let d: i64 = cg_call_head(c, rty);
+    let qia: [u8] = vec_to_array(qi_vec);
+    cgo_str(c, qia);
+    cgo_str(c, "__");
+    let tcid: i64 = (*c).imcid[iid];
+    cg_emit_snb_clsname(c, tcid);
+    cgo_str(c, "__");
+    cg_emit_snb_trname(c, qtid);
+    cgo_str(c, "__");
+    cg_emit_trait_mname(c, qtid, midx);
+    cgo_str(c, "(ptr ");
+    cgo_operand(c, selfk, selfv);
+    cg_emit_call_args(c, snap + 1);
+    cgo_str(c, ")\n");
+    cg_reg(c, d);
+    // pop the receiver operand (the args [snap+1..] were popped by cg_emit_call_args).
+    let _a: i64 = pop(&mut (*c).cgak);
+    let _b: i64 = pop(&mut (*c).cgav);
+    let _t: i64 = pop(&mut (*c).cgat);
     0
 }
 

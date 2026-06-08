@@ -42,13 +42,13 @@ use sentinel_borrow_check::DropPlan;
 // oracle monomorphizes the same set, in the same order, as the production codegen.
 use sentinel_codegen::collect_mono_instantiations;
 use sentinel_resolve::{
-    EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID,
-    PRINT_BYTES_FN_ID, PRINT_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID,
-    UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
+    ClassId, EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID,
+    POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID,
+    U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
     NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedMatchArm,
-    TypedPattern, TypedPatternBinding, TypedProgram, TypedStmt, TypedStmtKind,
+    TypedParam, TypedPattern, TypedPatternBinding, TypedProgram, TypedStmt, TypedStmtKind,
 };
 
 /// Hardcoded for a reproducible byte-target (not host inference). `clang`
@@ -201,6 +201,23 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
         }
         emitted_struct = true;
     }
+    // Class decls (Bar B / classes): each `class Name { let f: T; … }` gets a named
+    // aggregate `%Class.N = type { <field types> }` (N = ClassId, source order), exactly
+    // like `%Struct.N`. A class instance is held + passed BY VALUE as this aggregate; the
+    // pointer/GEP machinery (init out_ptr, method self_ptr, `self.field`) layers on top of
+    // it. Empty loop for class-free fixtures → byte-unchanged.
+    for cd in &program.class_decls {
+        if cd.fields.is_empty() {
+            writeln!(out, "%Class.{} = type {{}}", cd.id.0).unwrap();
+        } else {
+            let mut field_lls = Vec::with_capacity(cd.fields.len());
+            for f in &cd.fields {
+                field_lls.push(llvm_ty(f.ty, program)?);
+            }
+            writeln!(out, "%Class.{} = type {{ {} }}", cd.id.0, field_lls.join(", ")).unwrap();
+        }
+        emitted_struct = true;
+    }
     if emitted_struct {
         out.push('\n');
     }
@@ -239,6 +256,45 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
         let sym = mangle_mono_name(&gdef.name, args, program);
         dump_fn_named(&mono_def, program, drop_plan, &mut fns_buf, &mut used, &sym)?;
         fns_buf.push('\n');
+    }
+    // Class init + method bodies, then impl method bodies (Bar B / classes). Each is a
+    // pointer-ABI function — `self`/`out_ptr` as the first `ptr` param, declared params
+    // following — emitted after the free fns (no FnId; they're not in `program.fns`).
+    // ClassId / ImplId order = source order, matching the Sentinel side. Empty for
+    // class-free fixtures → byte-unchanged.
+    for cd in &program.class_decls {
+        if let Some(init) = &cd.init {
+            let sym = format!("{}__init", cd.name);
+            dump_method(
+                program, drop_plan, &mut fns_buf, &mut used, &sym, init.self_var_id, cd.id,
+                &init.params, None, &init.body,
+            )?;
+            fns_buf.push('\n');
+        }
+        for m in &cd.methods {
+            let sym = format!("{}__{}", cd.name, m.name);
+            dump_method(
+                program, drop_plan, &mut fns_buf, &mut used, &sym, m.self_var_id, cd.id,
+                &m.params, Some(m.return_type), &m.body,
+            )?;
+            fns_buf.push('\n');
+        }
+    }
+    for imp in &program.impl_decls {
+        for m in &imp.methods {
+            let sym = mangle_impl_method(imp, &m.name);
+            // The impl method's `self` is a `ptr` to the implementing type's storage; we
+            // bind it as `Type::Class(self_class)` — every corpus impl targets a class.
+            let self_class = match imp.target {
+                sentinel_resolve::ImplTarget::Class(cid) => cid,
+                ref other => return Err(format!("impl on a non-class target: {other:?}")),
+            };
+            dump_method(
+                program, drop_plan, &mut fns_buf, &mut used, &sym, m.self_var_id, self_class,
+                &m.params, Some(m.return_type), &m.body,
+            )?;
+            fns_buf.push('\n');
+        }
     }
     // Runtime-symbol declarations (8c-2+): only the symbols actually used, in a
     // fixed order, so a program using none stays byte-identical to 8c-1.
@@ -295,6 +351,7 @@ fn dump_fn_named(
         body: String::new(),
         loops: Vec::new(),
         used: RuntimeSyms::default(),
+        self_var: None,
     };
     // Allocas are HOISTED to the entry block: param slots, `let` slots, and the
     // if-result slot all land in `e.allocas` (emitted first), while stores/loads/
@@ -350,6 +407,106 @@ fn dump_fn_named(
     Ok(())
 }
 
+/// The mangled symbol for an impl method (Bar B / classes), mirroring the inkwell
+/// backend (lib.rs:732): `<prefix>__<Type>__<Trait>__<method>`, where `prefix` is the
+/// impl's name (a named impl like `Doubling`) or `default` (an unnamed `impl as Trait
+/// for Type`). The delegate-synthesized impls reach here as ordinary default impls.
+fn mangle_impl_method(imp: &sentinel_types::ImplData, method: &str) -> String {
+    let prefix = imp.name.as_deref().unwrap_or("default");
+    format!("{prefix}__{}__{}__{}", imp.type_name, imp.trait_name, method)
+}
+
+/// Emit a class init / method / impl-method body under `sym` (Bar B / classes). The
+/// pointer ABI (ADR 0022 D9): `self` is the FIRST param, a `ptr` (`%arg0`) into the
+/// live class storage — bound via `Emit::self_var` (NOT an alloca, so writes persist
+/// to the caller) — and the declared params follow as `%arg1..` (alloca/store like a
+/// free fn's). `ret_ty = None` is an `init` (returns `void`; its body tail is the
+/// `0` placeholder per ADR 0022's init shape, NOT lowered); `Some(t)` returns `t`.
+#[allow(clippy::too_many_arguments)]
+fn dump_method(
+    program: &TypedProgram,
+    drop_plan: &DropPlan,
+    out: &mut String,
+    used: &mut RuntimeSyms,
+    sym: &str,
+    self_var_id: VarId,
+    self_class: ClassId,
+    params: &[TypedParam],
+    ret_ty: Option<Type>,
+    body: &TypedBlock,
+) -> Result<(), String> {
+    let ret_ll = match ret_ty {
+        Some(t) => llvm_ty(t, program)?,
+        None => "void".to_string(),
+    };
+    let mut e = Emit {
+        program,
+        next: 0,
+        block: 0,
+        slots: HashMap::new(),
+        var_ty: HashMap::new(),
+        scopes: Vec::new(),
+        drop_plan,
+        // No FnId — method bodies aren't in `program.fns`; a placeholder keys an empty
+        // moved-set (`moved_sources_for` returns EMPTY for an unknown fn), so scope-exit
+        // drops fire normally (and the corpus methods have no heap locals anyway).
+        current_fn: FnId(u32::MAX),
+        allocas: String::new(),
+        body: String::new(),
+        loops: Vec::new(),
+        used: RuntimeSyms::default(),
+        self_var: Some(self_var_id),
+    };
+    // `self` is `%arg0` — bound by `self_var`, with its body type recorded as the class
+    // (so `Var(self)` loads `%Class.N` and `self.f` GEPs the class). It is BORROWED, not
+    // owned, so it is NOT pushed onto a scope frame (never dropped here).
+    e.var_ty.insert(self_var_id, Type::Class(self_class));
+    // Param frame (frame 0): declared params are `%arg1..` (self shifts them by one).
+    e.scopes.push(Vec::new());
+    for (i, p) in params.iter().enumerate() {
+        let ty = llvm_ty(p.ty, program)?;
+        let slot = e.alloca(&ty);
+        writeln!(e.body, "  store {ty} %arg{}, ptr %v{slot}", i + 1).unwrap();
+        e.slots.insert(p.id, slot);
+        e.var_ty.insert(p.id, p.ty);
+        e.scopes.last_mut().unwrap().push(p.id);
+    }
+    // Body frame (frame 1): its locals drop at the body's end, before the params.
+    e.scopes.push(Vec::new());
+    for stmt in &body.stmts {
+        e.lower_stmt(stmt)?;
+    }
+    match ret_ty {
+        Some(_) => {
+            let tail = e.lower_expr(&body.tail)?;
+            e.emit_scope_drops()?;
+            e.scopes.pop();
+            e.emit_scope_drops()?;
+            e.scopes.pop();
+            writeln!(e.body, "  ret {ret_ll} {tail}").unwrap();
+        }
+        None => {
+            // init: lower stmts only (the `0` tail is a placeholder, ADR 0022) → ret void.
+            e.emit_scope_drops()?;
+            e.scopes.pop();
+            e.emit_scope_drops()?;
+            e.scopes.pop();
+            e.body.push_str("  ret void\n");
+        }
+    }
+    // Assemble: `self` (`ptr %arg0`) then the declared params (`%arg1..`).
+    write!(out, "define {ret_ll} @{sym}(ptr %arg0").unwrap();
+    for (i, p) in params.iter().enumerate() {
+        write!(out, ", {} %arg{}", llvm_ty(p.ty, program)?, i + 1).unwrap();
+    }
+    out.push_str(") {\nentry:\n");
+    out.push_str(&e.allocas);
+    out.push_str(&e.body);
+    out.push_str("}\n");
+    used.merge(e.used);
+    Ok(())
+}
+
 /// Per-fn emission state: the SSA value counter, the block-label counter, the
 /// `VarId → alloca-slot` map (the slot's `%vN` number), the hoisted-alloca buffer,
 /// and the instruction buffer.
@@ -379,6 +536,12 @@ struct Emit<'a> {
     /// The `sentinel_*` runtime symbols this fn's body uses (merged module-wide
     /// into the `declare`s — 8c-2+).
     used: RuntimeSyms,
+    /// Bar B / classes: inside a class init / method / impl method, the synthetic
+    /// `self` binding. `self` is NOT an alloca slot — it IS the first `ptr` param
+    /// (`%arg0`), pointing at the live class storage so field writes persist to the
+    /// caller. `Var(self)` LOADS the whole `%Class.N` from it; `&self`/the lvalue of
+    /// `self.f` GEPs from it. `None` for a free fn.
+    self_var: Option<VarId>,
 }
 
 impl Emit<'_> {
@@ -513,10 +676,16 @@ impl Emit<'_> {
                 self.lower_expr(inner)
             }
             TypedExprKind::Var(id) => {
-                let slot = *self.slots.get(id).ok_or("read of an unbound var")?;
                 let llty = self.lty(expr.ty)?;
                 let v = self.fresh();
-                writeln!(self.body, "  %v{v} = load {llty}, ptr %v{slot}").unwrap();
+                // Bar B / classes: `Var(self)` loads the whole `%Class.N` aggregate from
+                // the self pointer (`%arg0`); a normal var loads from its alloca slot.
+                if self.self_var == Some(*id) {
+                    writeln!(self.body, "  %v{v} = load {llty}, ptr %arg0").unwrap();
+                } else {
+                    let slot = *self.slots.get(id).ok_or("read of an unbound var")?;
+                    writeln!(self.body, "  %v{v} = load {llty}, ptr %v{slot}").unwrap();
+                }
                 Ok(format!("%v{v}"))
             }
             TypedExprKind::Unary(UnaryOp::Neg, inner) => {
@@ -806,6 +975,73 @@ impl Emit<'_> {
                 writeln!(self.body, "  %v{a1} = insertvalue {sty} %v{a0}, {pty} {payload}, 1").unwrap();
                 Ok(format!("%v{a1}"))
             }
+            // Bar B / classes — `Name::init(args)` (ADR 0022 D5). Alloca the class
+            // storage, call `Name__init(out_ptr, args)` (it writes through `out_ptr`),
+            // then LOAD the constructed value (so a `let`/param/return handles a class
+            // generically as the `%Class.N` aggregate). Args lowered after the alloca,
+            // before the call (matching the inkwell order).
+            TypedExprKind::ClassInit { id, name, args, .. } => {
+                let cty = self.lty(expr.ty)?;
+                let slot = self.alloca(&cty);
+                let arg_ops = self.lower_args(args)?;
+                write!(self.body, "  call void @{name}__init(ptr %v{slot}").unwrap();
+                for (t, op) in &arg_ops {
+                    write!(self.body, ", {t} {op}").unwrap();
+                }
+                self.body.push_str(")\n");
+                let _ = id;
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = load {cty}, ptr %v{slot}").unwrap();
+                Ok(format!("%v{v}"))
+            }
+            // Bar B / classes — postfix method call `recv.m(args)` (ADR 0022 D7). The
+            // receiver is an lvalue; pass its pointer as `self`, then the args. Symbol
+            // `Class__method` (class NAME, like the inkwell backend).
+            TypedExprKind::MethodCall { target, class_id, method, args, .. } => {
+                let self_ptr = self.lower_lvalue_ptr(target)?;
+                let arg_ops = self.lower_args(args)?;
+                let ret = self.lty(expr.ty)?;
+                let cls = self.program.class_decl(*class_id).name.clone();
+                let v = self.fresh();
+                write!(self.body, "  %v{v} = call {ret} @{cls}__{method}(ptr {self_ptr}").unwrap();
+                for (t, op) in &arg_ops {
+                    write!(self.body, ", {t} {op}").unwrap();
+                }
+                self.body.push_str(")\n");
+                Ok(format!("%v{v}"))
+            }
+            // Bar B / classes — receiver-typed dispatch to an impl method (ADR 0023 D5
+            // Path 1). Same self-ptr ABI as a class MethodCall, but the symbol is the
+            // impl-method mangle. Also the shape the delegate-synthesized impl bodies use.
+            TypedExprKind::ImplMethodCall { target, impl_id, method, args, .. } => {
+                let self_ptr = self.lower_lvalue_ptr(target)?;
+                let arg_ops = self.lower_args(args)?;
+                let ret = self.lty(expr.ty)?;
+                let sym = mangle_impl_method(self.program.impl_decl(*impl_id), method);
+                let v = self.fresh();
+                write!(self.body, "  %v{v} = call {ret} @{sym}(ptr {self_ptr}").unwrap();
+                for (t, op) in &arg_ops {
+                    write!(self.body, ", {t} {op}").unwrap();
+                }
+                self.body.push_str(")\n");
+                Ok(format!("%v{v}"))
+            }
+            // Bar B / classes — qualified-named dispatch `Impl::m(&mut recv, args)` (ADR
+            // 0023 D5 Path 2). `args[0]` IS the receiver as a ref-typed expr (lowered to a
+            // `ptr` value), passed as `self`; `args[1..]` are the declared params.
+            TypedExprKind::QualifiedCall { impl_id, method, args, .. } => {
+                let self_val = self.lower_expr(&args[0])?;
+                let arg_ops = self.lower_args(&args[1..])?;
+                let ret = self.lty(expr.ty)?;
+                let sym = mangle_impl_method(self.program.impl_decl(*impl_id), method);
+                let v = self.fresh();
+                write!(self.body, "  %v{v} = call {ret} @{sym}(ptr {self_val}").unwrap();
+                for (t, op) in &arg_ops {
+                    write!(self.body, ", {t} {op}").unwrap();
+                }
+                self.body.push_str(")\n");
+                Ok(format!("%v{v}"))
+            }
             _ => Err("expression not yet ported (straight-line 8a only)".into()),
         }
     }
@@ -969,6 +1205,12 @@ impl Emit<'_> {
     fn lower_lvalue_ptr(&mut self, expr: &TypedExpr) -> Result<String, String> {
         match &expr.kind {
             TypedExprKind::Var(id) => {
+                // Bar B / classes: the lvalue of `self` IS the self pointer (`%arg0`) —
+                // no alloca. So `self.f = x` GEPs from `%arg0` and a method call on
+                // `self` (`self.manhattan()`) passes `%arg0` straight through.
+                if self.self_var == Some(*id) {
+                    return Ok("%arg0".to_string());
+                }
                 let slot = *self.slots.get(id).ok_or("address-of an unbound var")?;
                 Ok(format!("%v{slot}"))
             }
@@ -1182,6 +1424,18 @@ impl Emit<'_> {
         let a1 = self.fresh();
         writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{data}, 1").unwrap();
         format!("%v{a1}")
+    }
+
+    /// Lower a slice of argument expressions to `(ll-type, operand)` pairs, in order —
+    /// the collect-then-emit shape shared by every call form (Bar B / classes reuses it
+    /// for the class-call args after the leading `self`/`out_ptr`).
+    fn lower_args(&mut self, args: &[TypedExpr]) -> Result<Vec<(String, String)>, String> {
+        let mut ops = Vec::with_capacity(args.len());
+        for a in args {
+            let op = self.lower_expr(a)?;
+            ops.push((self.lty(a.ty)?, op));
+        }
+        Ok(ops)
     }
 
     fn lower_call(&mut self, id: FnId, args: &[TypedExpr], type_args: &[Type], ret_ty: Type) -> Result<String, String> {
@@ -1503,6 +1757,12 @@ fn llvm_ty(ty: Type, program: &TypedProgram) -> Result<String, String> {
         Type::Bool => Ok("i1".into()),
         // A user struct is the named aggregate declared in Pass 0.
         Type::Struct(id) => Ok(format!("%Struct.{}", id.0)),
+        // A class is the named aggregate declared in Pass 0 (Bar B / classes). Unlike a
+        // struct (an SSA aggregate value), a class instance lives in memory: `init` writes
+        // through an `out_ptr`, methods receive `self` as a `ptr`, and `self.field` GEPs.
+        // But as a VALUE type (an init param like `Logger.init(w: FileSink)`, a `let`
+        // binding, a `Var(self)` load) it's still the named aggregate `%Class.N`.
+        Type::Class(id) => Ok(format!("%Class.{}", id.0)),
         // `[T]` is the abi-v1 `{ i64 len, ptr data }` (ADR 0029 §2) — an inline
         // literal struct type, the same for every element type (the data is an
         // opaque heap pointer), so it needs no Pass-0 name. The element type only

@@ -257,7 +257,7 @@ fn is_kw_null(src: &[u8], start: i64, end: i64) -> bool {
 // After `::`, the name `init` (with parens) is class instantiation; any other
 // name (or bare `init`) is a qualified call. The lexer has no `init` keyword in
 // this self-contained tokenizer, so compare the slice in place.
-fn is_kw_init(src: &[u8], start: i64, end: i64) -> bool {
+pub fn is_kw_init(src: &[u8], start: i64, end: i64) -> bool {
     end - start == 4 && (*src)[start] == 'i' && (*src)[start + 1] == 'n'
         && (*src)[start + 2] == 'i' && (*src)[start + 3] == 't'
 }
@@ -1490,7 +1490,7 @@ pub fn skip_effect_row(k: &Vec<i64>, cur: &mut i64) -> i64 {
 // at `self`) and return whether it is exclusive (`&mut Self`). `self` / `Self`
 // lex as plain idents here, so consume positionally: ident `:`(31) `&`(23)
 // `[mut(46)]` ident. Used by trait / impl / class method headers.
-fn parse_self_kind(k: &Vec<i64>, cur: &mut i64) -> bool {
+pub fn parse_self_kind(k: &Vec<i64>, cur: &mut i64) -> bool {
     *cur = *cur + 1;
     *cur = *cur + 1;
     *cur = *cur + 1;
