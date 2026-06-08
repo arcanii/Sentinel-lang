@@ -2204,6 +2204,32 @@ For pasting into a fresh chat to bootstrap context:
     (18 effecting fns + perform/handle/return-arm — THE HAIREST ~2300 lines: the kont ABI + the ~765-line
     shape-detection + the handler machinery; mirror inkwell's Handle/Perform/ResumeKont) → concurrency
     (spawn/scope/await + arena routing) → the full-corpus phase-go (8l) → **ADR 0045 ACCEPTED**.
+    **⚙ EFFECTS DESIGN SCOUTED (next session — the oracle + un-parser were prototyped + VALIDATED, then
+    REVERTED to keep the tree green pending the Sentinel cg; rebuild from this).** Sub-phase the fixtures
+    like the production C3.5(a)–(e)+C3.6: **c35a** inline `handle perform Eff.op() with {…}` (main not
+    effecting — hits the `lower_expr Perform/Handle` gate, not the `dump_fn` effect-row gate) → **c35b**
+    effecting-fn ABI (a `!{E}` fn returns `Kont*`) + pure-return + multi-arm → **c35c** let-bound perform
+    (per-let resumer fns + `kont_push`) → **c35d** embedded perform → **c35e** chained → **c36a** return
+    arm → **c36b** nested handle. **Runtime ABI (`sentinel-runtime`):** `SentinelKont { i32 op_id@0, i32
+    pad, i64 arg@8, i8 consumed@16, [7 x i8], ptr frames_head@24 }`; `encode_op_id = (eid<<16)|(op&0xFFFF)`;
+    `PURE_RETURN_OP_ID = u32::MAX` (emits as `i32 4294967295`, `cc`-accepted); symbols `perform_op(i32,i64)
+    ->ptr`, `kont_push(ptr,ptr,ptr)`, `kont_resume(ptr,i64)->ptr` (returns a pure-or-bubble kont),
+    `kont_pure(i64)->ptr`, `kont_consume_pure(ptr)->i64`. **c35a `.ll` (validated cc-vs-inkwell = 42):**
+    `perform` → `call ptr @sentinel_perform_op(op_id, arg|0)`; `handle` → a dispatch *loop* over a
+    `current_kont_slot` (op_id @0, branch per arm, a PURE case → `consume_pure`, default `unreachable`) with
+    a **result memory cell** (NO phi); `k(v)` → `kont_resume` then `icmp op_id, PURE` → pure (`consume_pure`,
+    the value) vs bubble (store the new kont to the slot + `br` back to the loop). The handler arm binds its
+    op-param via an i8-GEP `kont.arg@8` + the continuation to a slot holding the kont ptr. **⚠⚠ THE KEY
+    FINDING:** the Sentinel CANNOT use a `switch` for the dispatch — `HArms` is a single-consumption cons-list
+    (can't iterate arms twice for the switch cases + the bodies, and `match &enum` / `Vec<Expr>` are both
+    unsupported), so the dispatch MUST be an **if-else chain** (mirroring the existing match-cg idiom) — and
+    the **oracle must use the if-else chain too** (not a `switch`) for byte-parity. **Un-parser:** both
+    `source_dump.rs` (AST-driven) + `merge.sentinel` (token-driven) round-trip effect decls + `perform`/
+    `handle` (merge.sentinel's `emit_expr` ALREADY has Perform/Handle/Scope/Spawn/Await/Declassify arms — only
+    the effect-DECL dispatch `lead==57` + `emit_effect_decl`/`emit_ops` are missing; the handler-arm trailing
+    `, ` re-parses fine). The Sentinel cg (the unwritten half) weaves the if-else-chain dispatch through the
+    shared 5-mode `dump_tharms` + `dump_thparams` (bind cg slots alongside the typing `bind_name`) + the
+    `Call`-resume-kont sub-case + a `handle_stack` (loop-block + slot) on `TyCtx` + 3 new `cg_used_*` flags.
     ⚠ A genuinely single-file entry must stay a PASSTHROUGH (the merge `has_use` gate). The path-(a) build
     record + design follows (COMPLETE):
     **✅ (a-1)+(a-1b) DONE (ADR 0045 A19):**
