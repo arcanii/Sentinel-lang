@@ -1086,6 +1086,72 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     perform — per-let resumer fns + `sentinel_kont_push`, the captured-frame chain) → c35d/c35e/c36a/c36b →
     the full-corpus phase-go → ADR 0045 ACCEPTED.
 
+- **A29 — BAR B: effects/handlers, sub-slice c35c — let-bound perform + the captured frame LANDED (feat
+  `96c54b9`).** The third handler sub-phase (the production's C3.5(c)): an effecting fn whose body is a
+  **let-bound perform in non-tail position** — `fn f(..) !{E} { let v: i64 = perform Op(..); <pure tail> }` —
+  where the perform is reified into a runtime **captured evaluation frame** so the kont's resume replays the
+  let's tail. The **first sub-slice that emits TWO `define`s per source fn** + the first use of
+  `sentinel_kont_push`. The emitting set grew **107 → 110** — THREE fixtures flip `Err → Ok` (byte-identical
+  `scg` == `snc llvm` + behaviourally == inkwell + leak-free): `c35c_let_bound_perform` (no capture —
+  `do_work() { let v = perform Io.read(); v + 1 }`), `c35c_let_bound_perform_with_capture` (captures the param
+  `offset`; `v + offset`), and **`c35c_go_no_go`'s analog `c37_go_no_go`** (the C3.7 phase-go — a
+  perform-WITH-arg `perform Io.log(x)`, captured `x`, tail `x + logged`, + `print(result)` → stdout `85`,
+  exit `0`; a natural consequence of the shape). The other c35d/c35e/c36/c37-negative fixtures stay `Err`'d
+  (embedded / chained perform, return arm, nested handle).
+  - **The two-`define` lowering** (mirror inkwell `compile_effecting_fn_with_let`):
+    1. the **PARENT** `@<name>` (the c35b Kont\* ABI, returns `ptr`): bind params, allocate + fill the
+       **captured-state struct** (`i64[N]` via `sentinel_alloc`, one field per captured var at byte offsets
+       `0,8,…`, i8-GEP-stored; a **null ptr** when nothing is captured), lower the let's effecting RHS to a
+       Kont\*, **`sentinel_kont_push(kont, @__resume_<name>, captured)`** a frame, `ret ptr` the kont.
+    2. the **RESUMER** `@__resume_<name>(i64 %arg0, ptr %arg1)`: bind the let var to the resumed value
+       `%arg0` (a `resumed_value` alloca) + each captured var to its struct field (i8-GEP-loaded from
+       `%arg1` into a fresh alloca), lower the **pure tail**, wrap it via `sentinel_kont_pure`, `ret ptr`.
+    The two defines share **NO register counter** (each starts `%v0` fresh — LLVM `%vN` are NAMED locals, so
+    non-contiguous numbering across the pair is legal). The runtime owns the kont / frame / captured memory
+    (`sentinel_kont_resume` frees them as it drains the chain) → **leak-free with NO codegen-side drops**.
+  - **The resumer ABI** (`sentinel-runtime` `SentinelFrame`): `resumer(value: i64, captured: *mut u8) -> *mut
+    SentinelKont`. At c35c the resumer is **non-performing** (it wraps its result via `sentinel_kont_pure`);
+    the runtime's `sentinel_kont_resume` already bubbles on a non-pure-return resumer result (the c35e
+    chained-let groundwork). The captured struct is the tail's free vars (minus the let var) at i64 offsets.
+  - **Oracle (`llvm_dump.rs`):** `detect_let_shape` (an effecting non-main fn, body = a single i64 `let`
+    whose RHS `produces_kont` + a pure tail) routes `dump_fn_named` to the new **`dump_let_shape_fn`** BEFORE
+    `validate_effecting_fn_body` (which still defers embedded / chained / mixed-tail performs to c35d+);
+    `collect_captured_vars` + `walk_collect_var_refs` walk the tail for free VarIds (first-reference order =
+    the struct field layout) minus the let var; a new **`kont_push` `RuntimeSym`** (`declare void
+    @sentinel_kont_push(ptr, ptr, ptr)`, in the kont group after `kont_pure`).
+  - **Un-parsers: NO change.** `source_dump.rs` round-trips the let-bound-perform body + the `!{E}` effect
+    row byte-identically (verified: `snc llvm <merged>` == `snc llvm <orig>` for all three); `merge.sentinel`
+    already emits `let` / `perform` / `handle` / the effect row (c35a/c35b). c35c introduces NO new syntax —
+    just a new combination of already-supported constructs.
+  - **Sentinel mode-4 (`types.sentinel`):** an effecting fn (`cg_eff`, mode-4 only) routes through the new
+    **`cg_emit_fn_eff`**, which detects the let-shape **structurally** — a single `SLet` statement (every
+    EMITTED effecting fn with a performing statement IS a let-shape, since the oracle's
+    `validate_effecting_fn_body` defers all other performing bodies → they never reach `scg`; so the Sentinel
+    needs no i64 / pure-tail re-check) — and emits the parent + resumer via **`cg_letshape_emit`**, else falls
+    through to **`cg_eff_normal`** (the c35b straight-line path: `dump_texpr` + `cg_drop_frame` + `cg_emit_fn`).
+    The PARENT reuses the already-set-up param state (`emit_tparams` ran — cg slots + the register counter at
+    `#params`); the RESUMER `cg_reset`s to a fresh counter, manually binds the let var (`nextvid++` +
+    `bind_name` + a slot) + rebinds each captured param's slot (loaded from `%arg1`; its TYPE binding persists
+    in the env, so the tail's `Var` resolves), walks the tail, wraps via `sentinel_kont_pure`. Both defines
+    hand-assemble their header + the shared `cg_flush_allocas_body` (hoisted allocas + cgbody fold) + a
+    custom `ret ptr`. The **capture set is the param VarId range `[cg_pv0, cg_pvn)`** (captured in `type_fn`
+    around `emit_tparams`) = the oracle's first-reference order for the c35c corpus (**≤1 param per let-shape
+    fn, always used in the tail**); multi-param first-reference ordering is a c35d+ refinement. ⚠ The Sentinel
+    match grammar has NO bind-the-whole-value pattern (only `Enum::Variant(..)` + `_`), so the non-let-shape
+    branches re-wrap the moved-out `Stmts`/`Stmt` parts (both fully enumerated) and fall through; the body's
+    `_` arm is the unreachable non-`Block` case (a fn body is always a `Block`). New: `cg_used_kontpush` (+ its
+    mode-4 declare).
+  - **Validation:** 110/110 emitted fixtures `scg` == `snc llvm` byte-for-byte (`sentinel_codegen_matches_
+    oracle_on_corpus`); the 3 behaviourally == inkwell (`llvm_behaviour_matches_inkwell_over_emitted_subset`,
+    exit 42 / stdout 85) + leak-free (`leaks --atExit`: 0 leaks — the runtime frees kont/frame/captured).
+    Modes 0–3 stay byte-identical (the let-shape routing is `cg_on`+`cg_eff`-gated, mode-4 only); BOTH
+    bootstrap fixed-point paths preserved (the selfhost compiler declares no effects → `cg_eff` never set →
+    `cg_emit_fn_eff` never reached). 1476 tests, four-check green. **NEXT: c35d** (embedded perform — a tail
+    that mixes a perform into pure context, `perform Op()+1` / `f(perform Op())`; inkwell
+    `detect_embedded_perform_shape` + the placeholder-substituted resumer) → c35e (chained effecting lets —
+    `detect_chained_effecting_lets_shape` + N resumers, the resumer-can-perform bubble) → c36a (return arm) →
+    c36b (nested handle) → the full-corpus phase-go → ADR 0045 ACCEPTED.
+
 ## Decision
 
 ### D1. Goal.

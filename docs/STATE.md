@@ -65,9 +65,21 @@ dispatches on the returned kont; a pure tail wraps via `sentinel_kont_pure`. Ora
 gate + `uses_kont_abi`/`validate_effecting_fn_body` (defer let-bound/embedded/chained perform) + `lower_call`
 returns ptr. Un-parser (`merge.sentinel`): `emit_fn_decl` re-emits the `! { E }` row (the A24 `<T>` analog —
 else the merged source loses it). Sentinel: a per-FnId `ufeff` table + `cg_eff`/`cg_tailk`. Modes 0–3
-byte-identical; both fixed-point paths preserved (selfhost uses no effects). NEXT: **c35c** (let-bound perform
-+ per-let resumers + `kont_push`) → c35d/c35e/c36a/c36b → the full-corpus phase-go → ACCEPTED. (Full Bar-B
-breakdown in ADR 0045 A21; classes in A26; c35a in A27; c35b in A28.) The full slice log:
+byte-identical; both fixed-point paths preserved (selfhost uses no effects). ✅ **effects/handlers c35c —
+let-bound perform + the captured frame** (A29, feat `96c54b9`) → **107 → 110** (c35c_let_bound_perform /
+_with_capture + the C3.7 phase-go **c37_go_no_go**: perform-with-arg + captured var + `print` → stdout 85).
+A let-bound perform in non-tail position (`let v: i64 = perform Op(); <pure tail>`) reifies a CAPTURED FRAME:
+the FIRST sub-slice emitting **TWO defines per source fn** + using `sentinel_kont_push`. PARENT (Kont* ABI):
+alloc the captured struct (`i64[N]`, or null), lower the RHS perform → kont, `kont_push(kont, @__resume_<name>,
+captured)`, ret. RESUMER `@__resume_<name>(i64 %arg0, ptr %arg1)`: bind the let var to %arg0 + captures from
+%arg1, lower the pure tail, `kont_pure`-wrap, ret. Runtime owns kont/frame/captured (leak-free, no cg drops).
+Oracle: `detect_let_shape` + `dump_let_shape_fn` + `collect_captured_vars` + a `kont_push` RuntimeSym. Sentinel
+(`cg_emit_fn_eff` → `cg_letshape_emit`/`cg_eff_normal`): a single-SLet effecting fn IS a let-shape (the oracle
+defers all other performing bodies); the capture set = the param list (c35c corpus: ≤1 param). Un-parsers
+unchanged (no new syntax). Modes 0–3 byte-identical; both fixed-point paths preserved. NEXT: **c35d** (embedded
+perform — `perform Op()+1` / `f(perform Op())`) → c35e (chained lets) → c36a/c36b → the full-corpus phase-go →
+ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27; c35b in A28; c35c in A29.)
+The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
 NULLABLE + (4d) SECRET + (4e) ENUM/MATCH + (4f) CLASSES/TRAITS/IMPLS+DELEGATES + (4g)
