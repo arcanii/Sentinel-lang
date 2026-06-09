@@ -2082,7 +2082,10 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A29 — effects c35c` commit, atop the
+    Verify HEAD with `git log -1` — HEAD is a `docs: session handoff` commit (this verify-HEAD refresh), atop
+    `docs: update README for Phase D self-hosting` (`d70de5c` — refreshes the stale README to reflect that the
+    compiler now self-hosts; no code change), atop the `docs(selfhost): ADR 0045 A29 — effects c35c` commit
+    (`f76ca76`), atop the
     **effects/handlers c35c feat** (`96c54b9` — let-bound perform + the captured frame; emitting set
     107 → 110: c35c_let_bound_perform + _with_capture + the C3.7 phase-go c37_go_no_go [perform-with-arg +
     captured var + print → stdout 85]; the FIRST sub-slice emitting TWO defines per fn + using
