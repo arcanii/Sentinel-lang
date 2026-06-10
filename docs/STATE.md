@@ -76,9 +76,22 @@ captured)`, ret. RESUMER `@__resume_<name>(i64 %arg0, ptr %arg1)`: bind the let 
 Oracle: `detect_let_shape` + `dump_let_shape_fn` + `collect_captured_vars` + a `kont_push` RuntimeSym. Sentinel
 (`cg_emit_fn_eff` → `cg_letshape_emit`/`cg_eff_normal`): a single-SLet effecting fn IS a let-shape (the oracle
 defers all other performing bodies); the capture set = the param list (c35c corpus: ≤1 param). Un-parsers
-unchanged (no new syntax). Modes 0–3 byte-identical; both fixed-point paths preserved. NEXT: **c35d** (embedded
-perform — `perform Op()+1` / `f(perform Op())`) → c35e (chained lets) → c36a/c36b → the full-corpus phase-go →
-ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27; c35b in A28; c35c in A29.)
+unchanged (no new syntax). Modes 0–3 byte-identical; both fixed-point paths preserved. ✅ **effects/handlers
+c35d — embedded perform via placeholder substitution** (A30, feat `ecd150c`) → **110 → 113**
+(c35d_binop_with_perform / _perform_in_call_arg / _perform_with_capture_and_binop, all exit 42). A statement-
+free tail mixing exactly ONE perform into pure context (`perform Op()+1`, `f(perform Op())`) reuses the c35c
+two-define frame: the PARENT lowers JUST the perform + `kont_push`es; the RESUMER re-evaluates the FULL tail
+with the perform substituted by the resumed value. Oracle: `detect_embedded_shape` (a `collect_performs`
+walker; before `validate_effecting_fn_body`) + `dump_embedded_shape_fn` + an `Emit::embed_ph` placeholder slot
+(the Perform arm emits a `load` from it, not a perform call); the captured walk skips the Perform subtree
+(= inkwell's substituted-tail walk). Sentinel: move semantics bar inspect-then-reuse, so `type_fn` re-parses a
+disposable CLASSIFICATION COPY from the same tokens (mode-4 effecting fns only) → `eff_classify` extracts the
+perform as a 1-element `Args` list → `cg_embed_emit` (the letshape mirror, ANONYMOUS `cg_ph` slot instead of a
+let binding; `cg_emit_phload` in the Perform arm). Un-parsers unchanged. Modes 0–3 byte-identical; both
+fixed-point paths preserved. NEXT: **c35e** (chained effecting lets — N resumers + the resumer-can-perform
+bubble) → c36a (return arm) → c36b (nested handle) → the full-corpus phase-go →
+ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27; c35b in A28; c35c in A29; c35d
+in A30.)
 The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/

@@ -2082,7 +2082,13 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs: session handoff` commit (this verify-HEAD refresh), atop
+    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A30 — effects c35d` commit (this
+    verify-HEAD refresh), atop the
+    **effects/handlers c35d feat** (`ecd150c` — embedded perform via placeholder substitution; emitting set
+    110 → 113: c35d_binop_with_perform + _perform_in_call_arg + _perform_with_capture_and_binop [exit 42
+    each]; oracle `detect_embedded_shape`/`dump_embedded_shape_fn` + `Emit::embed_ph` [the Perform arm
+    emits a load, no substituted tree]; Sentinel re-parsed CLASSIFICATION COPY → `eff_classify` →
+    `cg_embed_emit` + `TyCtx.cg_ph`/`cg_emit_phload`), atop the prior session handoff (`5b1152e`), atop
     `docs: update README for Phase D self-hosting` (`d70de5c` — refreshes the stale README to reflect that the
     compiler now self-hosts; no code change), atop the `docs(selfhost): ADR 0045 A29 — effects c35c` commit
     (`f76ca76`), atop the
@@ -2104,8 +2110,8 @@ For pasting into a fresh chat to bootstrap context:
     `7054145` + feat `41f00fa`). The 8/N codegen chain below: (8f-2/8f-3) snc llvm lowers the full compiler
     (`59c30a7` A17 + `67fa808`) · (8f-1) selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e)
     enums+match (A14/A15) · heap drops (A11–A13) · Vec (A9/A10) · 8d refs/builtins · 8c aggregates · 8b
-    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A29; Bar B in progress —
-    `print` + nullable + secret + generics + classes + effects c35a/c35b/c35c done, **110/123+ emitting**); the
+    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A30; Bar B in progress —
+    `print` + nullable + secret + generics + classes + effects c35a/c35b/c35c/c35d done, **113/123+ emitting**); the
     **bootstrap fixed point is reached via BOTH paths** — (b) 8g merge-to-source + (a) the self-hosted merge (`scg` discovers+merges+emits itself).
     Bar B is the remaining open scope for the full-corpus ACCEPTED flip — or an owner-deferred close.
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin local
@@ -2248,11 +2254,26 @@ For pasting into a fresh chat to bootstrap context:
     `cg_eff_normal` (the c35b straight-line path). Capture set = the param range `[cg_pv0,cg_pvn)` (= the
     oracle's first-ref order for the ≤1-param c35c corpus; multi-param first-ref is c35d+). ⚠ The Sentinel
     match grammar has NO bind-the-whole-value pattern (only `Enum::Variant`/`_`), so non-let-shape branches
-    re-wrap the moved-out `Stmts`/`Stmt` parts (fully enumerated). New: `cg_used_kontpush`. **▶ NEXT: c35d**
-    (embedded perform — a tail mixing a perform into pure context, `perform Op()+1` / `f(perform Op())`; mirror
-    inkwell's `detect_embedded_perform_shape` + the placeholder-substituted resumer). Sub-phase like the
-    production C3.5(a)–(e)+C3.6 — done: **c35a** inline + **c35b** effecting-fn ABI + **c35c** let-bound perform.
-    Remaining: **c35d** embedded perform (`detect_embedded_perform_shape`) → **c35e** chained
+    re-wrap the moved-out `Stmts`/`Stmt` parts (fully enumerated). New: `cg_used_kontpush`. **✅ EFFECTS c35d
+    LANDED** (A30, feat `ecd150c`, emitting set **110 → 113**) — **embedded perform via placeholder
+    substitution**: a statement-free tail mixing exactly ONE perform into pure context (`perform Op()+1`,
+    `f(perform Op())`) reuses the c35c two-define frame — the PARENT lowers JUST the perform + `kont_push`es;
+    the RESUMER re-evaluates the FULL tail with the perform substituted by the resumed value. THREE fixtures
+    flip: c35d_binop_with_perform / _perform_in_call_arg / _perform_with_capture_and_binop (exit 42 each).
+    Oracle: `detect_embedded_shape` (`collect_performs` walker, exactly-one + i64, before
+    `validate_effecting_fn_body`) → `dump_embedded_shape_fn`; NO substituted tree — a new `Emit::embed_ph`
+    slot makes the Perform arm emit a `load` (byte-equal to the substituted `Var`); the captured walk skips
+    the Perform subtree (= inkwell's substituted-tail walk). Un-parsers: NO change. Sentinel: move semantics
+    bar inspect-then-reuse, so `type_fn` re-parses a disposable CLASSIFICATION COPY from the same tokens
+    (mode-4 effecting fns only) → `eff_classify`/`efp_*` extract the perform as a 1-element `Args` list →
+    `cg_embed_emit` (the letshape mirror; ANONYMOUS `TyCtx.cg_ph` slot, no `bind_name`) + `cg_emit_phload`
+    in the Perform arm. The param-range capture heuristic stays exact (≤1 captured var). **▶ NEXT: c35e**
+    (chained effecting lets — mirror inkwell's `detect_chained_effecting_lets_shape` +
+    `compile_effecting_fn_with_chained_lets`: N resumers, each resumer-i emits let-(i+1)'s perform + pushes
+    resumer-(i+1), the last wraps the pure tail; the runtime's resumer-can-perform bubble is already in
+    place). Sub-phase like the production C3.5(a)–(e)+C3.6 — done: **c35a** inline + **c35b** effecting-fn
+    ABI + **c35c** let-bound perform + **c35d** embedded perform.
+    Remaining: **c35e** chained
     (`detect_chained_effecting_lets_shape` + N resumers, the resumer-can-perform bubble) → **c36a**
     return arm (the `dump_tret`/pure-path apply; `lower_handle` Errs on `return_arm` today) → **c36b** nested
     handle (the `cg_h_*` save/restore is already in place; `produces_kont` would accept a nested `Handle`) →

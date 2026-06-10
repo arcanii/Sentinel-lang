@@ -1152,6 +1152,60 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     `detect_chained_effecting_lets_shape` + N resumers, the resumer-can-perform bubble) → c36a (return arm) →
     c36b (nested handle) → the full-corpus phase-go → ADR 0045 ACCEPTED.
 
+- **A30 — BAR B: effects/handlers, sub-slice c35d — embedded perform via placeholder substitution LANDED
+  (feat `ecd150c`).** The fourth handler sub-phase (the production's C3.5(d)): an effecting fn whose
+  STATEMENT-FREE tail mixes exactly ONE `perform` into pure surrounding context — `perform Io.read() + 1`,
+  `double(perform Io.read())`, nested binops — reusing the c35c captured-frame machinery with the perform's
+  surrounding context as the resumer body. The emitting set grew **110 → 113** — the THREE c35d fixtures flip
+  `Err → Ok` (byte-identical `scg` == `snc llvm` + behaviourally == inkwell, exit 42 each + leak-free):
+  `c35d_binop_with_perform` (perform at the binop's left), `c35d_perform_in_call_arg` (perform as a pure fn's
+  arg), `c35d_perform_with_capture_and_binop` (nested binop + a captured param). The flip set was verified
+  exact — no other fixture's Err reason touches this gate (c35e/c36 reasons unchanged).
+  - **The lowering** (mirror inkwell `compile_effecting_fn_with_embedded_perform`): the same two-`define`
+    shape as c35c, except there is no `let` — the PARENT lowers **just the unique perform** (its args
+    reference the parent-bound params) → Kont\*, fills the captured struct, `sentinel_kont_push`es
+    (resumer + captured), returns the kont; the RESUMER binds an **anonymous placeholder slot** to the
+    resumed value `%arg0` + the captures from `%arg1`, then re-evaluates the **full tail** with the perform
+    substituted by a load from the placeholder slot, `kont_pure`-wraps, returns.
+  - **Oracle (`llvm_dump.rs`):** `detect_embedded_shape` (effecting non-main, `stmts` empty, tail NOT a
+    direct perform / call-to-effecting [the c35a/c35b straight-line shapes], exactly ONE perform via the new
+    total `collect_performs` walker [pre-order, recursing into perform args], i64-valued) routes
+    `dump_fn_named` to the new `dump_embedded_shape_fn` BEFORE `validate_effecting_fn_body` (which now defers
+    only chained/multi/non-i64 performs to c35e+). Rather than building a substituted tree (inkwell's
+    `substitute_perform_with_var`), the oracle arms a new **`Emit::embed_ph: Option<u32>`** field — the
+    `Perform` arm of `lower_expr` emits `load i64, ptr %v<slot>` and returns (byte-identical to lowering the
+    substituted `Var`, with no tree clone). The captured set walks the ORIGINAL tail —
+    `walk_collect_var_refs` skips `Perform` (its `_` arm), which EQUALS inkwell's walk over the
+    placeholder-substituted tail (the perform subtree is the parent's; its arg vars are not captured).
+  - **Un-parsers: NO change** (no new syntax — same as c35c). Verified: `snc merge` → `snc llvm` round-trips
+    all three byte-identically.
+  - **Sentinel mode-4 (`types.sentinel`):** the HARD PART — the perform→placeholder substitution under move
+    semantics + the no-bind-pattern grammar. Solved with NO Expr→Expr rewrite: since `type_fn` parses the
+    body from tokens (`parse_block`), it re-parses a **disposable CLASSIFICATION COPY** from the same token
+    position (gated `cg_on && cg_eff` — mode-4 effecting fns only; modes 0–3 and pure fns never re-parse) and
+    the consuming walkers `eff_classify`/`efp_top`/`efp_expr`/`efp_args` extract the unique perform as a
+    1-element `Args` list (`Args::End` = not embedded), threaded into `cg_emit_fn_eff` as a new param. The
+    SEnd branch matches it: `Args::Cell(pf, _)` → the new **`cg_embed_emit`** (the `cg_letshape_emit` mirror:
+    parent = captured struct + `dump_texpr(pf)` + push; resumer = `cg_reset` + an ANONYMOUS placeholder slot
+    in the new **`TyCtx.cg_ph`** field [no `bind_name` — there is no source binding] + capture rebinds + the
+    FULL-tail walk); the Perform arm routes to the new **`cg_emit_phload`** (load from `cg_ph`, pops
+    collected args, does NOT set `cg_tailk`) when `cg_ph >= 0`. `efp_top` excludes a direct-perform tail
+    (c35a); a call tail searches only its args (no `ufeff` callee check needed — an effecting callee's args
+    never perform in the emitted corpus). The c35c **param-range capture heuristic** (`[pv0,pvn)` declaration
+    order) stays exact for this corpus (≤1 captured var, always a tail-referenced param).
+  - **Scope notes:** zero-arg embedded performs over this corpus (an arg'd embedded perform would lower
+    parent-side for free oracle-side, but the Sentinel resumer's arg-suppression is untested — the
+    differential would catch any divergence loudly). The classification copy's partially-consumed drops ride
+    the D.1 box-free enum-drop debt (scg-side only, ungated, leak-not-UAF). Multi-param first-reference
+    capture ordering remains a c35e+ refinement if a fixture demands it.
+  - **Validation:** 113/113 emitted fixtures `scg` == `snc llvm` byte-for-byte
+    (`sentinel_codegen_matches_oracle_on_corpus`); the 3 behaviourally == inkwell (oracle-`cc` exit 42 each +
+    the full `llvm_behaviour_matches_inkwell_over_emitted_subset`) + leak-free (`leaks --atExit`: 0 leaks).
+    Modes 0–3 byte-identical; BOTH bootstrap fixed-point paths preserved (the selfhost compiler declares no
+    effects — the classification re-parse never runs there). 1476 tests, four-check green. **NEXT: c35e**
+    (chained effecting lets — `detect_chained_effecting_lets_shape` + N resumers, the resumer-can-perform
+    bubble) → c36a (return arm) → c36b (nested handle) → the full-corpus phase-go → ADR 0045 ACCEPTED.
+
 ## Decision
 
 ### D1. Goal.
