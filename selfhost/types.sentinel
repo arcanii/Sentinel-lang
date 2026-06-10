@@ -231,6 +231,9 @@ struct TyCtx {
     cgdt: Vec<i64>,   // scope-drop pool: the binding's type handle
     cgds: Vec<i64>,   // scope-drop pool: the binding's alloca `%vN` (paired with cgdv)
     cg_suppress: bool,   // true while walking an assign target (the Var arm records, no load)
+    cg_ph: i64,       // (c35d) inside an embedded-perform RESUMER: the placeholder slot
+                      //   holding the resumed value (the Perform arm emits a load from it,
+                      //   not a perform call); -1 everywhere else
     cg_lastvid: i64,  // the VarId the most-recent Var node resolved to (for assign)
     // (8b) the body is buffered per-fn so ALLOCAS can be HOISTED to the entry block
     // (the if-result type is known only mid-walk; loop-body allocas must not re-run per
@@ -4330,7 +4333,16 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             if cg_on(c) {
                 (*c).cg_collecting = cg_pf_col;
-                cg_emit_perform(c, peid, poidx, cg_pf_csnap);
+                // (c35d) inside an embedded-shape RESUMER (`cg_ph` armed) the unique
+                // perform was reified by the parent — emit a load from the placeholder
+                // slot instead of a perform call.
+                if (*c).cg_ph >= 0 {
+                    cg_emit_phload(c, cg_pf_csnap);
+                    0
+                } else {
+                    cg_emit_perform(c, peid, poidx, cg_pf_csnap);
+                    0
+                };
                 0
             } else {
                 0
@@ -5430,6 +5442,7 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     } else {
         0
     };
+    let body_tok0: i64 = *cur;
     let body: Expr = parse_block(k, s, e, src, cur);
     render_type(out, rty, c);
     push(out, ' ');
@@ -5448,7 +5461,14 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
     // tail (`dump_texpr` on the body `Block` threads `rty` to the tail).
     let cg_eff_fn: bool = cg_on(c) && (*c).cg_eff;
     if cg_eff_fn {
-        cg_emit_fn_eff(out, c, body, rty, src, name_s, name_e, cgpmark, cg_pv0, cg_pvn, gb);
+        // (c35d) classify the tail from a re-parsed CLASSIFICATION COPY of the same
+        // tokens (mode-4 effecting fns only — modes 0-3 and pure fns never re-parse):
+        // move semantics bar inspect-then-reuse of `body`, so a disposable second
+        // parse carries the embedded-perform detection + extraction.
+        let mut cur2: i64 = body_tok0;
+        let body2: Expr = parse_block(k, s, e, src, &mut cur2);
+        let embed: Args = eff_classify(body2);
+        cg_emit_fn_eff(out, c, body, rty, src, name_s, name_e, cgpmark, cg_pv0, cg_pvn, gb, embed);
         0
     } else {
         dump_texpr(out, body, rty, src, c, gb);
@@ -7135,6 +7155,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cgdt: vec_new(),
         cgds: vec_new(),
         cg_suppress: false,
+        cg_ph: 0 - 1,
         cg_lastvid: 0 - 1,
         cgbody: vec_new(),
         cgalloca_sl: vec_new(),
@@ -9593,6 +9614,26 @@ fn cg_emit_perform(c: &mut TyCtx, eid: i64, opidx: i64, snap: i64) -> i64 {
     0
 }
 
+// (Bar B / effects c35d) `%vD = load i64, ptr %v<cg_ph>` — inside an embedded-shape
+// RESUMER the unique `perform` was reified by the parent; its result arrives as the
+// resumed value at the placeholder slot. Pops any collected args like
+// `cg_emit_perform` (the args were the PARENT's to lower — zero-arg over the c35d
+// corpus). Does NOT set `cg_tailk` (the load is a plain i64 inside the pure context).
+fn cg_emit_phload(c: &mut TyCtx, snap: i64) -> i64 {
+    let d: i64 = cg_dst(c);
+    cgo_str(c, "load i64, ptr %v");
+    cgo_int(c, (*c).cg_ph);
+    cg_putc(c, '\n');
+    while len((*c).cgak) > snap {
+        let _a: i64 = pop(&mut (*c).cgak);
+        let _b: i64 = pop(&mut (*c).cgav);
+        let _t: i64 = pop(&mut (*c).cgat);
+        0
+    }
+    cg_reg(c, d);
+    0
+}
+
 // (Bar B / effects) bind a handler arm's params from the VarId range `[pv0, pvn)` (in
 // the SAME order the oracle's `bind_handler_arm_params` allocates): the op-param (when
 // there are >=2 params — `kont.arg` via i8-GEP @8 into an i64 slot), then the
@@ -10562,7 +10603,7 @@ fn cg_flush_allocas_body(c: &mut TyCtx) -> i64 {
 // `perform` RHS) — every effecting fn the oracle EMITS with a performing statement is a
 // let-shape (its `validate_effecting_fn_body` defers the rest), so scg need not re-check
 // the i64 / pure-tail conditions (the differential only runs scg when the oracle emits).
-fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>) -> i64 {
+fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>, embed: Args) -> i64 {
     // (The Sentinel match grammar has no bind-the-whole-value pattern — only
     // `Enum::Variant(..)` + `_`. So the non-let-shape branches re-wrap the moved-out
     // parts and fall through to `cg_eff_normal`; `Stmts`/`Stmt` are fully enumerated.)
@@ -10570,9 +10611,19 @@ fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &
         Expr::Block(stmts, tail) => {
             match stmts {
                 Stmts::SEnd => {
-                    // No statements — the c35b shape (pure / perform / call-to-effecting tail).
-                    let b0: Expr = Expr::Block(Stmts::SEnd, tail);
-                    cg_eff_normal(out, c, b0, rty, src, name_s, name_e, cgpmark, gb)
+                    // No statements — the c35b shape (pure / perform / call-to-effecting
+                    // tail), or the c35d EMBEDDED-perform shape (`embed` carries the
+                    // unique perform, extracted from the classification copy).
+                    match embed {
+                        Args::Cell(pf, erest) => {
+                            let _er: Args = erest;
+                            cg_embed_emit(out, c, pf, tail, rty, src, name_s, name_e, pv0, pvn, gb)
+                        },
+                        Args::End => {
+                            let b0: Expr = Expr::Block(Stmts::SEnd, tail);
+                            cg_eff_normal(out, c, b0, rty, src, name_s, name_e, cgpmark, gb)
+                        },
+                    }
                 },
                 Stmts::SCell(st, rest) => {
                     match rest {
@@ -10766,6 +10817,263 @@ fn cg_letshape_emit(out: &mut Vec<u8>, c: &mut TyCtx, lnm: [u8], lty: TyOpt, lva
     let mut tbuf: Vec<u8> = vec_new();
     let _trt: i64 = dump_texpr(&mut tbuf, tail, 0 - 1, src, c, gb);
     let _tbx: [u8] = vec_to_array(tbuf);
+    let tk: i64 = (*c).cglk;
+    let tv: i64 = (*c).cglv;
+    let kp: i64 = cg_dst(c);
+    cgo_str(c, "call ptr @sentinel_kont_pure(i64 ");
+    cgo_operand(c, tk, tv);
+    cgo_str(c, ")\n");
+    (*c).cg_used_kontpure = true;
+    // Assemble the RESUMER.
+    (*c).cg_to_body = false;
+    cgo_str(c, "define ptr @__resume_");
+    cgo_slice(c, src, name_s, name_e);
+    cgo_str(c, "(i64 %arg0, ptr %arg1) {\nentry:\n");
+    cg_flush_allocas_body(c);
+    cgo_str(c, "  ret ptr %v");
+    cgo_int(c, kp);
+    cgo_str(c, "\n}\n\n");
+    0
+}
+
+// (Bar B / effects c35d) classify a statement-free effecting body's tail for the
+// EMBEDDED-perform shape, consuming a CLASSIFICATION COPY of the body (a re-parse of
+// the same tokens — the emission copy is untouched; move semantics bar a borrow-free
+// inspect-then-reuse, so the copy is disposable by design). Returns the unique embedded
+// `perform` as a 1-element `Args` list (`Args::End` = not embedded: a direct-perform
+// tail [c35a], a call tail [c35b — an effecting callee's args never perform in the
+// emitted corpus, so no ufeff check is needed], a fully pure tail [c35b], or any body
+// with statements [the c35c let-shape, routed structurally in `cg_emit_fn_eff`]).
+// Mirrors the oracle's `detect_embedded_shape` over the emitted-corpus shapes.
+fn eff_classify(body2: Expr) -> Args {
+    match body2 {
+        Expr::Block(st2, tail2) => {
+            match st2 {
+                Stmts::SEnd => efp_top(tail2),
+                Stmts::SCell(s1, srest) => {
+                    let _s1: Stmt = s1;
+                    let _sr: Stmts = srest;
+                    Args::End
+                },
+            }
+        },
+        _ => {
+            // A fn body is always a `Block` (parse_block); unreachable.
+            Args::End
+        },
+    }
+}
+
+// (c35d) the tail's TOP node: a direct `perform` is the c35a shape (NOT embedded —
+// it produces a Kont* without reification); everything else searches its subtree.
+fn efp_top(tail2: Expr) -> Args {
+    match tail2 {
+        Expr::Perform(qe, qo, qa) => {
+            let _qe: [u8] = qe;
+            let _qo: [u8] = qo;
+            let _qa: Args = qa;
+            Args::End
+        },
+        Expr::Binary(bop, bl, br) => {
+            let lf: Args = efp_expr(bl);
+            match lf {
+                Args::Cell(p, prest) => {
+                    let _pr: Args = prest;
+                    Args::Cell(p, Args::End)
+                },
+                Args::End => efp_expr(br),
+            }
+        },
+        Expr::Call(cnm, cargs) => {
+            let _cn: [u8] = cnm;
+            efp_args(cargs)
+        },
+        _ => Args::End,
+    }
+}
+
+// (c35d) find the unique embedded `perform` in a classification-copy subtree —
+// pre-order, consuming; returns it as a 1-element list (`Args::End` = none). Only the
+// pure-context shapes the emitted corpus exercises recurse (unary / binop / call
+// args); the `_` arm covers constructs that never appear in an EMITTED statement-free
+// effecting tail (the oracle's gate keeps them out of scg).
+fn efp_expr(ex: Expr) -> Args {
+    match ex {
+        Expr::Perform(pe, po, pa) => Args::Cell(Expr::Perform(pe, po, pa), Args::End),
+        Expr::Unary(uop, uin) => {
+            let _uo: i64 = uop;
+            efp_expr(uin)
+        },
+        Expr::Binary(bop, bl, br) => {
+            let _bo: i64 = bop;
+            let lf: Args = efp_expr(bl);
+            match lf {
+                Args::Cell(p, prest) => {
+                    let _pr: Args = prest;
+                    Args::Cell(p, Args::End)
+                },
+                Args::End => efp_expr(br),
+            }
+        },
+        Expr::Call(cnm, cargs) => {
+            let _cn: [u8] = cnm;
+            efp_args(cargs)
+        },
+        _ => Args::End,
+    }
+}
+
+fn efp_args(aa: Args) -> Args {
+    match aa {
+        Args::End => Args::End,
+        Args::Cell(hd, tl) => {
+            let hf: Args = efp_expr(hd);
+            match hf {
+                Args::Cell(p, prest) => {
+                    let _pr: Args = prest;
+                    let _tl: Args = tl;
+                    Args::Cell(p, Args::End)
+                },
+                Args::End => efp_args(tl),
+            }
+        },
+    }
+}
+
+// (Bar B / effects c35d / ADR 0020 D7) emit an embedded-perform effecting fn as TWO
+// defines (mirror the oracle's `dump_embedded_shape_fn` / inkwell
+// `compile_effecting_fn_with_embedded_perform`). The body is a statement-free tail
+// mixing exactly ONE `perform` into pure context (`perform Op() + 1`,
+// `f(perform Op())`); the perform — extracted from the classification copy by
+// `eff_classify` — is reified into a captured frame. The PARENT (params already set up
+// by emit_tparams) fills the captured-state struct (one i64 field per param — the c35c
+// capture-set heuristic, exact for this corpus), lowers JUST the perform to a Kont*
+// (its args reference the parent-bound params), `sentinel_kont_push`es a frame
+// (resumer + captured ptr), returns the Kont*. The RESUMER binds the ANONYMOUS
+// placeholder slot (`cg_ph`) to the resumed value `%arg0` + each captured param from
+// `%arg1`, then walks the FULL tail with `cg_ph` armed — the Perform arm emits a load
+// from the slot instead of a perform call (`cg_emit_phload`, the substituted-Var
+// equivalent) — and wraps the i64 result via `sentinel_kont_pure`.
+fn cg_embed_emit(out: &mut Vec<u8>, c: &mut TyCtx, pf: Expr, tail: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>) -> i64 {
+    let nparams: i64 = pvn - pv0;
+    let cap_null: bool = nparams == 0;
+    // ===== PARENT define: captured struct, the perform → kont, push, ret ptr =====
+    let mut alloc_reg: i64 = 0 - 1;
+    if nparams > 0 {
+        alloc_reg = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_alloc(i64 ");
+        cgo_int(c, nparams * 8);
+        cgo_str(c, ")\n");
+        (*c).cg_used_alloc = true;
+        let mut pi: i64 = pv0;
+        while pi < pvn {
+            let off: i64 = (pi - pv0) * 8;
+            let gp: i64 = cg_dst(c);
+            cgo_str(c, "getelementptr i8, ptr %v");
+            cgo_int(c, alloc_reg);
+            cgo_str(c, ", i64 ");
+            cgo_int(c, off);
+            cg_putc(c, '\n');
+            let pslot: i64 = cg_slot_get(c, pi);
+            let ld: i64 = cg_dst(c);
+            cgo_str(c, "load i64, ptr %v");
+            cgo_int(c, pslot);
+            cg_putc(c, '\n');
+            cgo_str(c, "  store i64 %v");
+            cgo_int(c, ld);
+            cgo_str(c, ", ptr %v");
+            cgo_int(c, gp);
+            cg_putc(c, '\n');
+            pi = pi + 1;
+        }
+        0
+    } else {
+        0
+    };
+    // Lower JUST the unique perform → a Kont* (operand in cglk/cglv; the type-dump
+    // goes to a throwaway buffer, the cg lands in cgbody). The pure context around
+    // it is the RESUMER's to re-evaluate.
+    let mut pbuf: Vec<u8> = vec_new();
+    let _prt: i64 = dump_texpr(&mut pbuf, pf, 0 - 1, src, c, gb);
+    let _pbx: [u8] = vec_to_array(pbuf);
+    let kk: i64 = (*c).cglk;
+    let kv: i64 = (*c).cglv;
+    // Push the captured frame referencing the resumer + the captured ptr.
+    cgo_str(c, "  call void @sentinel_kont_push(ptr ");
+    cgo_operand(c, kk, kv);
+    cgo_str(c, ", ptr @__resume_");
+    cgo_slice(c, src, name_s, name_e);
+    cgo_str(c, ", ptr ");
+    if cap_null {
+        cgo_str(c, "null")
+    } else {
+        cgo_str(c, "%v");
+        cgo_int(c, alloc_reg)
+    };
+    cgo_str(c, ")\n");
+    (*c).cg_used_kontpush = true;
+    // Assemble the PARENT: `define ptr @<name>(<params>) { entry: <allocas> <body> ret ptr <kont> }`.
+    (*c).cg_to_body = false;
+    cgo_str(c, "define ptr @");
+    cgo_slice(c, src, name_s, name_e);
+    cg_putc(c, '(');
+    let np: i64 = len((*c).cgpty);
+    let mut hi: i64 = 0;
+    while hi < np {
+        if hi > 0 {
+            cgo_str(c, ", ")
+        } else {
+            0
+        };
+        let pty: i64 = (*c).cgpty[hi];
+        cgo_ty(c, pty);
+        cgo_str(c, " %arg");
+        cgo_int(c, hi);
+        hi = hi + 1;
+    }
+    cgo_str(c, ") {\nentry:\n");
+    cg_flush_allocas_body(c);
+    cgo_str(c, "  ret ptr ");
+    cgo_operand(c, kk, kv);
+    cgo_str(c, "\n}\n\n");
+    // ===== RESUMER define: bind ph + captures, walk tail, kont_pure wrap, ret ptr =====
+    cg_reset(c);
+    // Bind the ANONYMOUS placeholder slot to the resumed value (`%arg0`) — unlike the
+    // c35c let-shape there is no source-level binding; the Perform arm reads `cg_ph`.
+    let ph_slot: i64 = cg_alloca(c, 0);
+    cgo_str(c, "  store i64 %arg0, ptr %v");
+    cgo_int(c, ph_slot);
+    cg_putc(c, '\n');
+    // Bind each captured param to a fresh slot, loaded from the captured ptr (`%arg1`).
+    // Its TYPE binding persists in the env from emit_tparams (cg_reset clears only the
+    // cg slots), so the tail's `Var` resolves + loads as i64.
+    let mut pj: i64 = pv0;
+    while pj < pvn {
+        let off2: i64 = (pj - pv0) * 8;
+        let gp2: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr i8, ptr %arg1, i64 ");
+        cgo_int(c, off2);
+        cg_putc(c, '\n');
+        let ld2: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, gp2);
+        cg_putc(c, '\n');
+        let cs: i64 = cg_alloca(c, 0);
+        cgo_str(c, "  store i64 %v");
+        cgo_int(c, ld2);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, cs);
+        cg_putc(c, '\n');
+        cg_slot_set(c, pj, cs);
+        pj = pj + 1;
+    }
+    // Lower the FULL tail with the placeholder armed (the unique Perform lowers as a
+    // load from `cg_ph`) → operand; wrap it as a PURE_RETURN kont.
+    (*c).cg_ph = ph_slot;
+    let mut tbuf: Vec<u8> = vec_new();
+    let _trt: i64 = dump_texpr(&mut tbuf, tail, 0 - 1, src, c, gb);
+    let _tbx: [u8] = vec_to_array(tbuf);
+    (*c).cg_ph = 0 - 1;
     let tk: i64 = (*c).cglk;
     let tv: i64 = (*c).cglv;
     let kp: i64 = cg_dst(c);

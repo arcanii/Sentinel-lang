@@ -394,6 +394,13 @@ fn dump_fn_named(
         if let Some(info) = detect_let_shape(f, program) {
             return dump_let_shape_fn(f, &info, program, drop_plan, out, used, sym);
         }
+        // c35d: an embedded-perform body (a statement-free tail mixing exactly ONE
+        // `perform` into pure context — `perform Op() + 1`, `f(perform Op())`) also
+        // reifies a captured frame: the parent lowers JUST the perform; the resumer
+        // lowers the tail with the perform substituted by the resumed value.
+        if let Some(perform) = detect_embedded_shape(f, program) {
+            return dump_embedded_shape_fn(f, perform, program, drop_plan, out, used, sym);
+        }
         validate_effecting_fn_body(f, program)?;
     }
     // main is the C-ABI entry: i32 return (its i64 body is truncated). An effecting fn
@@ -421,6 +428,7 @@ fn dump_fn_named(
         used: RuntimeSyms::default(),
         self_var: None,
         handle_stack: Vec::new(),
+        embed_ph: None,
     };
     // Allocas are HOISTED to the entry block: param slots, `let` slots, and the
     // if-result slot all land in `e.allocas` (emitted first), while stores/loads/
@@ -533,6 +541,7 @@ fn dump_let_shape_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            embed_ph: None,
         };
         e.scopes.push(Vec::new());
         for (i, p) in f.params.iter().enumerate() {
@@ -607,6 +616,7 @@ fn dump_let_shape_fn(
             used: RuntimeSyms::default(),
             self_var: None,
             handle_stack: Vec::new(),
+            embed_ph: None,
         };
         e.scopes.push(Vec::new());
         // Bind the let var to the resumed value (`%arg0`).
@@ -628,6 +638,169 @@ fn dump_let_shape_fn(
         }
         // Lower the pure tail, wrap its i64 as a PURE_RETURN kont.
         let tail = e.lower_expr(info.tail)?;
+        let kp = e.fresh();
+        writeln!(e.body, "  %v{kp} = call ptr @sentinel_kont_pure(i64 {tail})").unwrap();
+        e.used.kont_pure = true;
+        writeln!(e.body, "  ret ptr %v{kp}").unwrap();
+        write!(out, "define ptr @{resumer_sym}(i64 %arg0, ptr %arg1) {{\nentry:\n").unwrap();
+        out.push_str(&e.allocas);
+        out.push_str(&e.body);
+        out.push_str("}\n");
+        used.merge(e.used);
+    }
+    Ok(())
+}
+
+/// Bar B / effects (c35d / ADR 0020 D7) — emit an embedded-perform effecting fn as TWO
+/// `define`s (mirroring inkwell `compile_effecting_fn_with_embedded_perform`). The body
+/// is a statement-free tail mixing exactly ONE `perform` into pure context
+/// (`perform Op() + 1`, `f(perform Op())` — `detect_embedded_shape`); the perform is
+/// reified into a runtime frame whose resume re-evaluates the surrounding context:
+///   1. the PARENT `@<sym>` (Kont* ABI, returns `ptr`): bind params, allocate + fill the
+///      captured-state struct (i64[N], one field per tail-captured var at byte offsets
+///      0,8,…; `null` when empty), lower JUST the unique `perform` (its args reference
+///      the parent-bound params) to a Kont*, `sentinel_kont_push` a frame (the resumer
+///      + captured ptr), return the Kont*.
+///   2. the RESUMER `@__resume_<sym>(i64 %arg0, ptr %arg1)`: bind the placeholder slot
+///      to the resumed value `%arg0` + each captured var to its struct field (loaded
+///      from `%arg1`), lower the FULL tail with `Emit::embed_ph` set — the unique
+///      `Perform` lowers as a load from the placeholder slot (the substituted-Var
+///      equivalent) — wrap the i64 result via `sentinel_kont_pure`, return that Kont*.
+///
+/// The captured set is the tail's free vars EXCLUDING the perform subtree
+/// (`walk_collect_var_refs` skips `Perform`, matching inkwell's walk over the
+/// placeholder-substituted tail). The two defines share NO register counter (each its
+/// own `Emit`, `next: 0`), matching the Sentinel side's `cg_reset`.
+fn dump_embedded_shape_fn(
+    f: &TypedFnDef,
+    perform: &TypedExpr,
+    program: &TypedProgram,
+    drop_plan: &DropPlan,
+    out: &mut String,
+    used: &mut RuntimeSyms,
+    sym: &str,
+) -> Result<(), String> {
+    // The captured set: the tail's free vars minus the perform subtree (whose args the
+    // PARENT lowers), in first-reference order — the struct field layout.
+    let mut captured: Vec<VarId> = Vec::new();
+    walk_collect_var_refs(&f.body.tail, &mut captured);
+    let resumer_sym = format!("__resume_{sym}");
+
+    // --- the PARENT define: params, captured struct, perform → kont, push, ret ptr ---
+    {
+        let mut e = Emit {
+            program,
+            next: 0,
+            block: 0,
+            slots: HashMap::new(),
+            var_ty: HashMap::new(),
+            scopes: Vec::new(),
+            drop_plan,
+            current_fn: f.id,
+            allocas: String::new(),
+            body: String::new(),
+            loops: Vec::new(),
+            used: RuntimeSyms::default(),
+            self_var: None,
+            handle_stack: Vec::new(),
+            embed_ph: None,
+        };
+        e.scopes.push(Vec::new());
+        for (i, p) in f.params.iter().enumerate() {
+            let ty = llvm_ty(p.ty, program)?;
+            let slot = e.alloca(&ty);
+            writeln!(e.body, "  store {ty} %arg{i}, ptr %v{slot}").unwrap();
+            e.slots.insert(p.id, slot);
+            e.var_ty.insert(p.id, p.ty);
+            e.scopes.last_mut().unwrap().push(p.id);
+        }
+        // The captured-state struct: i64[N] via `sentinel_alloc`, or a null ptr when the
+        // tail captures nothing (the resumer ignores its `%arg1`).
+        let captured_op = if captured.is_empty() {
+            "null".to_string()
+        } else {
+            let size = captured.len() * 8;
+            let a = e.fresh();
+            writeln!(e.body, "  %v{a} = call ptr @sentinel_alloc(i64 {size})").unwrap();
+            e.used.alloc = true;
+            for (i, cap_id) in captured.iter().enumerate() {
+                let off = i * 8;
+                let gp = e.fresh();
+                writeln!(e.body, "  %v{gp} = getelementptr i8, ptr %v{a}, i64 {off}").unwrap();
+                let slot = *e
+                    .slots
+                    .get(cap_id)
+                    .ok_or("c35d: captured var is not a bound fn param")?;
+                let ld = e.fresh();
+                writeln!(e.body, "  %v{ld} = load i64, ptr %v{slot}").unwrap();
+                writeln!(e.body, "  store i64 %v{ld}, ptr %v{gp}").unwrap();
+            }
+            format!("%v{a}")
+        };
+        // Lower JUST the unique perform → a Kont* (the pure context around it is the
+        // resumer's to re-evaluate).
+        let kont = e.lower_expr(perform)?;
+        writeln!(
+            e.body,
+            "  call void @sentinel_kont_push(ptr {kont}, ptr @{resumer_sym}, ptr {captured_op})"
+        )
+        .unwrap();
+        e.used.kont_push = true;
+        writeln!(e.body, "  ret ptr {kont}").unwrap();
+        write!(out, "define ptr @{sym}(").unwrap();
+        for (i, p) in f.params.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            write!(out, "{} %arg{i}", llvm_ty(p.ty, program)?).unwrap();
+        }
+        out.push_str(") {\nentry:\n");
+        out.push_str(&e.allocas);
+        out.push_str(&e.body);
+        out.push_str("}\n");
+        used.merge(e.used);
+    }
+    out.push('\n');
+
+    // --- the RESUMER define: bind ph + captures, lower tail, kont_pure wrap, ret ptr ---
+    {
+        let mut e = Emit {
+            program,
+            next: 0,
+            block: 0,
+            slots: HashMap::new(),
+            var_ty: HashMap::new(),
+            scopes: Vec::new(),
+            drop_plan,
+            current_fn: f.id,
+            allocas: String::new(),
+            body: String::new(),
+            loops: Vec::new(),
+            used: RuntimeSyms::default(),
+            self_var: None,
+            handle_stack: Vec::new(),
+            embed_ph: None,
+        };
+        e.scopes.push(Vec::new());
+        // Bind the placeholder slot to the resumed value (`%arg0`).
+        let ph_slot = e.alloca("i64");
+        writeln!(e.body, "  store i64 %arg0, ptr %v{ph_slot}").unwrap();
+        // Bind each captured var to its struct field, loaded from the captured ptr (`%arg1`).
+        for (i, cap_id) in captured.iter().enumerate() {
+            let off = i * 8;
+            let gp = e.fresh();
+            writeln!(e.body, "  %v{gp} = getelementptr i8, ptr %arg1, i64 {off}").unwrap();
+            let ld = e.fresh();
+            writeln!(e.body, "  %v{ld} = load i64, ptr %v{gp}").unwrap();
+            let slot = e.alloca("i64");
+            writeln!(e.body, "  store i64 %v{ld}, ptr %v{slot}").unwrap();
+            e.slots.insert(*cap_id, slot);
+            e.var_ty.insert(*cap_id, Type::I64);
+        }
+        // Lower the FULL tail with the placeholder hook armed — the unique Perform
+        // lowers as a load from `ph_slot`; wrap the i64 result as a PURE_RETURN kont.
+        e.embed_ph = Some(ph_slot);
+        let tail = e.lower_expr(&f.body.tail)?;
         let kp = e.fresh();
         writeln!(e.body, "  %v{kp} = call ptr @sentinel_kont_pure(i64 {tail})").unwrap();
         e.used.kont_pure = true;
@@ -691,6 +864,7 @@ fn dump_method(
         used: RuntimeSyms::default(),
         self_var: Some(self_var_id),
         handle_stack: Vec::new(),
+        embed_ph: None,
     };
     // `self` is `%arg0` — bound by `self_var`, with its body type recorded as the class
     // (so `Var(self)` loads `%Class.N` and `self.f` GEPs the class). It is BORROWED, not
@@ -782,6 +956,11 @@ struct Emit<'a> {
     /// resume BUBBLES (a resumer performed) stores the bubble kont into the innermost
     /// handle's `current_kont_slot` and branches to its `loop_block` to re-dispatch.
     handle_stack: Vec<(u32, u32)>,
+    /// Bar B / effects (c35d): inside an embedded-perform RESUMER, the placeholder
+    /// slot holding the resumed value. When set, the unique `Perform` in the tail
+    /// lowers as a `load` from this slot (the parent already lowered the real
+    /// perform + its args); `None` everywhere else.
+    embed_ph: Option<u32>,
 }
 
 impl Emit<'_> {
@@ -1286,6 +1465,15 @@ impl Emit<'_> {
             // `call ptr @sentinel_perform_op(i32 <op_id>, i64 <arg|0>)`. The result is a
             // kont* that flows up to the enclosing `handle`'s dispatch. (C3.5(a) single-arg.)
             TypedExprKind::Perform { effect_id, op_index, args, .. } => {
+                // Bar B / effects (c35d): inside an embedded-shape RESUMER the unique
+                // perform was reified by the parent — its result arrives as the resumed
+                // value at the placeholder slot. Emit a load (the substituted-placeholder
+                // equivalent), NOT a perform call; the args were the PARENT's to lower.
+                if let Some(slot) = self.embed_ph {
+                    let v = self.fresh();
+                    writeln!(self.body, "  %v{v} = load i64, ptr %v{slot}").unwrap();
+                    return Ok(format!("%v{v}"));
+                }
                 let op_id = encode_op_id(*effect_id, *op_index);
                 let arg = if args.is_empty() {
                     "0".to_string()
@@ -2467,6 +2655,170 @@ fn detect_let_shape<'a>(f: &'a TypedFnDef, program: &TypedProgram) -> Option<Let
     Some(LetShapeInfo { let_id, let_ty: ty, rhs: value, tail: &f.body.tail })
 }
 
+/// Bar B / effects (c35d) — the embedded-perform shape: an effecting (non-main) fn whose
+/// body is a STATEMENT-FREE tail mixing exactly ONE `perform` into pure surrounding
+/// context (`perform Op() + 1`, `f(perform Op())`, nested binops, …). The perform is
+/// reified into a captured frame (`dump_embedded_shape_fn`); the resumer re-evaluates
+/// the surrounding context with the resumed value in the perform's place. Excludes the
+/// shapes already lowered straight-line at c35a/c35b (a tail that IS a direct `perform`
+/// or a direct call to an effecting fn — both produce a Kont* without reification).
+/// MVP-restricted to an i64-valued perform (the SentinelKont `arg` slot + placeholder
+/// are i64). Returns the unique `Perform` node. Mirrors inkwell
+/// `detect_embedded_perform_shape`.
+fn detect_embedded_shape<'a>(
+    f: &'a TypedFnDef,
+    program: &TypedProgram,
+) -> Option<&'a TypedExpr> {
+    let sig = program.signature(f.id);
+    if !uses_kont_abi(sig, program) || sig.is_main {
+        return None;
+    }
+    if !f.body.stmts.is_empty() {
+        return None;
+    }
+    let tail = &f.body.tail;
+    if matches!(tail.kind, TypedExprKind::Perform { .. }) {
+        return None;
+    }
+    if let TypedExprKind::Call { id, .. } = &tail.kind {
+        if uses_kont_abi(program.signature(*id), program) {
+            return None;
+        }
+    }
+    let mut performs: Vec<&TypedExpr> = Vec::new();
+    collect_performs(tail, &mut performs);
+    if performs.len() != 1 {
+        return None;
+    }
+    let perform = performs[0];
+    if perform.ty != Type::I64 {
+        return None;
+    }
+    Some(perform)
+}
+
+/// Bar B / effects (c35d) — collect every `Perform` node in pre-order, recursing into
+/// perform args so nested performs are all seen (the embedded shape requires EXACTLY
+/// one). Mirrors inkwell `count_performs` + `find_unique_perform` in a single walk.
+fn collect_performs<'a>(expr: &'a TypedExpr, acc: &mut Vec<&'a TypedExpr>) {
+    if let TypedExprKind::Perform { args, .. } = &expr.kind {
+        acc.push(expr);
+        for a in args {
+            collect_performs(a, acc);
+        }
+        return;
+    }
+    match &expr.kind {
+        TypedExprKind::Perform { .. } => unreachable!("handled above"),
+        TypedExprKind::IntLit(_)
+        | TypedExprKind::BoolLit(_)
+        | TypedExprKind::NullLit
+        | TypedExprKind::CharLit(_)
+        | TypedExprKind::StringLit(_)
+        | TypedExprKind::Var(_) => {}
+        TypedExprKind::Unary(_, inner)
+        | TypedExprKind::WidenToNullable(inner)
+        | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Declassify(inner) => collect_performs(inner, acc),
+        TypedExprKind::Binary(_, l, r)
+        | TypedExprKind::Cmp(_, l, r)
+        | TypedExprKind::Logic(_, l, r) => {
+            collect_performs(l, acc);
+            collect_performs(r, acc);
+        }
+        TypedExprKind::Block(b) => {
+            for s in &b.stmts {
+                collect_performs_stmt(&s.kind, acc);
+            }
+            collect_performs(&b.tail, acc);
+        }
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            collect_performs(cond, acc);
+            for s in &then_branch.stmts {
+                collect_performs_stmt(&s.kind, acc);
+            }
+            collect_performs(&then_branch.tail, acc);
+            for s in &else_branch.stmts {
+                collect_performs_stmt(&s.kind, acc);
+            }
+            collect_performs(&else_branch.tail, acc);
+        }
+        TypedExprKind::Call { args, .. }
+        | TypedExprKind::EnumConstruct { args, .. }
+        | TypedExprKind::ClassInit { args, .. }
+        | TypedExprKind::QualifiedCall { args, .. }
+        | TypedExprKind::ResumeKont { args, .. } => {
+            for a in args {
+                collect_performs(a, acc);
+            }
+        }
+        TypedExprKind::MethodCall { target, args, .. }
+        | TypedExprKind::ImplMethodCall { target, args, .. } => {
+            collect_performs(target, acc);
+            for a in args {
+                collect_performs(a, acc);
+            }
+        }
+        TypedExprKind::StructLit { fields, .. } => {
+            for f in fields {
+                collect_performs(f, acc);
+            }
+        }
+        TypedExprKind::ArrayLit { elements, .. } => {
+            for el in elements {
+                collect_performs(el, acc);
+            }
+        }
+        TypedExprKind::FieldAccess { target, .. } => collect_performs(target, acc),
+        TypedExprKind::Index { target, index, .. } => {
+            collect_performs(target, acc);
+            collect_performs(index, acc);
+        }
+        TypedExprKind::Handle { body, arms, return_arm, .. } => {
+            collect_performs(body, acc);
+            for a in arms {
+                collect_performs(&a.body, acc);
+            }
+            if let Some(ra) = return_arm.as_deref() {
+                collect_performs(&ra.body, acc);
+            }
+        }
+        TypedExprKind::Scope { body, .. } => {
+            for s in &body.stmts {
+                collect_performs_stmt(&s.kind, acc);
+            }
+            collect_performs(&body.tail, acc);
+        }
+        TypedExprKind::Spawn { call, .. } => collect_performs(call, acc),
+        TypedExprKind::Await { task_expr, .. } => collect_performs(task_expr, acc),
+        TypedExprKind::Match { scrutinee, arms, .. } => {
+            collect_performs(scrutinee, acc);
+            for a in arms {
+                collect_performs(&a.body, acc);
+            }
+        }
+    }
+}
+
+fn collect_performs_stmt<'a>(kind: &'a TypedStmtKind, acc: &mut Vec<&'a TypedExpr>) {
+    match kind {
+        TypedStmtKind::Let { value, .. } => collect_performs(value, acc),
+        TypedStmtKind::Assign { target, value } => {
+            collect_performs(target, acc);
+            collect_performs(value, acc);
+        }
+        TypedStmtKind::While { cond, body } => {
+            collect_performs(cond, acc);
+            for s in &body.stmts {
+                collect_performs_stmt(&s.kind, acc);
+            }
+            collect_performs(&body.tail, acc);
+        }
+        TypedStmtKind::Break | TypedStmtKind::Continue => {}
+        TypedStmtKind::Expr(e) => collect_performs(e, acc),
+    }
+}
+
 /// Bar B / effects (c35c) — the captured set for a let-shape resumer: the tail's free
 /// VarIds (first-reference order = the captured-struct field layout) minus the let-bound
 /// var (re-bound from the resumed value). Mirrors inkwell `collect_captured_vars`.
@@ -2536,8 +2888,11 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
             walk_collect_var_refs(target, acc);
             walk_collect_var_refs(index, acc);
         }
-        // Literals reference no vars; effects/spawn/await/handle/match can't appear in a
-        // c35c pure tail (`expr_performs` would have rejected them in `detect_let_shape`).
+        // Literals reference no vars; spawn/await/handle/match can't appear in a c35c
+        // pure tail (`expr_performs` would have rejected them in `detect_let_shape`).
+        // A `Perform` (the c35d embedded tail) is INTENTIONALLY skipped — its subtree
+        // is the parent's to lower, so its arg vars are not part of the captured set
+        // (matching inkwell's walk over the placeholder-SUBSTITUTED tail).
         _ => {}
     }
 }
