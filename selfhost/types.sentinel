@@ -324,6 +324,8 @@ struct TyCtx {
     cg_h_cks: i64,    // the current_kont_slot (a bubble stores the new kont here)
     cg_h_rslot: i64,  // the result memory cell (each arm / the pure case stores here)
     cg_h_merge: i64,  // the merge block (each arm / pure branches here; the load follows)
+    cg_h_depth: i64,  // (c36b) dynamic handle nesting depth; `> 1` ⇒ this handle is nested
+                      //   (its result is a Kont* the enclosing handle dispatches on)
 }
 
 fn tbase() -> i64 { 100 }
@@ -4367,15 +4369,18 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // the return var bind VarIds in the enclosing fn region (scoped per-arm).
         Expr::Handle(hb, ha, hr) => {
             append_str(out, "(handle ");
+            // (c36b) track dynamic nesting depth: this handle is NESTED (its result is a
+            // Kont* the enclosing handle dispatches on) iff depth > 1 after entry. The
+            // counter persists across the body walk (an inner handle inc/decs it).
+            (*c).cg_h_depth = (*c).cg_h_depth + 1;
+            let is_nested: bool = (*c).cg_h_depth > 1;
             // (c36a) reset cg_tailk so the body walk's result tells us whether the body
-            // produced a kont (a `perform` / effecting-call sets it) or is PURE (an i64
-            // needing a kont_pure wrap — `handle 42`); restore after (the handle's own
-            // result is a plain i64, never a kont).
-            let sv_tailk: bool = (*c).cg_tailk;
+            // produced a kont (a `perform` / effecting-call / a nested handle sets it) or
+            // is PURE (an i64 needing a kont_pure wrap — `handle 42`). At the END this
+            // handle sets cg_tailk = is_nested (its own result's kont-ness).
             (*c).cg_tailk = false;
             let bty: i64 = dump_texpr(out, hb, 0 - 1, src, c, gb);
             let body_is_kont: bool = (*c).cg_tailk;
-            (*c).cg_tailk = sv_tailk;
             let hbv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -4416,7 +4421,12 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 cgo_str(c, ", ptr %v");
                 cgo_int(c, cks);
                 cg_putc(c, '\n');
-                let rslot: i64 = cg_alloca(c, 0);
+                // (c36b) nested ⇒ the result cell is a Kont* (ptr); top-level ⇒ i64.
+                let rslot: i64 = if is_nested {
+                    cg_alloca_ptr(c)
+                } else {
+                    cg_alloca(c, 0)
+                };
                 let loop_b: i64 = cg_fresh_block(c);
                 let merge_b: i64 = cg_fresh_block(c);
                 cgo_str(c, "  br label %bb");
@@ -4471,7 +4481,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
-            dump_tharms(out, ha, src, c, gb);
+            dump_tharms(out, ha, src, c, gb, is_nested);
             dump_tret(out, hr2, bty, src, c, gb);
             if mir_on(c) {
                 (*c).mir_suppress = h_sup;
@@ -4502,33 +4512,65 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 cgo_str(c, "bb");
                 cgo_int(c, pure_b);
                 cgo_str(c, ":\n");
-                let pv: i64 = cg_dst(c);
-                cgo_str(c, "call i64 @sentinel_kont_consume_pure(ptr %v");
-                cgo_int(c, hck);
-                cgo_str(c, ")\n");
-                (*c).cg_used_consume = true;
-                // (c36a) the body's pure return runs through the `return` arm (identity if
-                // none) — sets cglk/cglv to the result, stored to the handle's result slot.
-                cg_apply_return_arm(c, 0, pv, src, gb);
-                let rrk: i64 = (*c).cglk;
-                let rrv: i64 = (*c).cglv;
-                cgo_str(c, "  store i64 ");
-                cgo_operand(c, rrk, rrv);
-                cgo_str(c, ", ptr %v");
-                cgo_int(c, hrslot);
-                cg_putc(c, '\n');
+                // (c36b) the pure block: a NESTED handle with NO return arm passes the
+                // PURE_RETURN kont THROUGH (the enclosing handle consumes it — no consume
+                // here); else consume + apply the return arm (identity if none) + (nested:
+                // re-wrap the i64 result as a kont so the outer dispatches it).
+                let pass_through: bool = if is_nested {
+                    !(*c).cg_ret_on
+                } else {
+                    false
+                };
+                if pass_through {
+                    cgo_str(c, "  store ptr %v");
+                    cgo_int(c, hck);
+                    cgo_str(c, ", ptr %v");
+                    cgo_int(c, hrslot);
+                    cg_putc(c, '\n');
+                    0
+                } else {
+                    let pv: i64 = cg_dst(c);
+                    cgo_str(c, "call i64 @sentinel_kont_consume_pure(ptr %v");
+                    cgo_int(c, hck);
+                    cgo_str(c, ")\n");
+                    (*c).cg_used_consume = true;
+                    cg_apply_return_arm(c, 0, pv, src, gb);
+                    let rrk: i64 = (*c).cglk;
+                    let rrv: i64 = (*c).cglv;
+                    cg_store_hresult(c, is_nested, rrk, rrv, hrslot);
+                    0
+                };
                 cgo_str(c, "  br label %bb");
                 cgo_int(c, hmerge);
                 cg_putc(c, '\n');
                 cgo_str(c, "bb");
                 cgo_int(c, default_b);
                 cgo_str(c, ":\n");
-                cgo_str(c, "  unreachable\n");
+                // (c36b) nested default = PROPAGATE the un-caught kont to the merge (it's an
+                // effect for an enclosing handle); top-level = unreachable (full coverage).
+                if is_nested {
+                    cgo_str(c, "  store ptr %v");
+                    cgo_int(c, hck);
+                    cgo_str(c, ", ptr %v");
+                    cgo_int(c, hrslot);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "  br label %bb");
+                    cgo_int(c, hmerge);
+                    cg_putc(c, '\n');
+                    0
+                } else {
+                    cgo_str(c, "  unreachable\n");
+                    0
+                };
                 cgo_str(c, "bb");
                 cgo_int(c, hmerge);
                 cgo_str(c, ":\n");
                 let rv: i64 = cg_dst(c);
-                cgo_str(c, "load i64, ptr %v");
+                if is_nested {
+                    cgo_str(c, "load ptr, ptr %v")
+                } else {
+                    cgo_str(c, "load i64, ptr %v")
+                };
                 cgo_int(c, hrslot);
                 cg_putc(c, '\n');
                 cg_reg(c, rv);
@@ -4553,6 +4595,10 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            // (c36b) this handle's RESULT is a Kont* iff nested → the enclosing context's
+            // body-kont detection (cg_tailk) sees it; pop the nesting depth.
+            (*c).cg_tailk = is_nested;
+            (*c).cg_h_depth = (*c).cg_h_depth - 1;
             bty
         },
         // (4d) `declassify(e)` strips one secret layer: `secret T → T` (ADR 0019 D6).
@@ -4960,7 +5006,34 @@ fn dump_thparams(out: &mut Vec<u8>, b: Binds, c: &mut TyCtx, first: bool) -> i64
 
 // (4g) handler arms → `(arm #eid op_idx Eff op (#pvids) <body>)` — params bind VarIds
 // scoped to the arm (truncated after); the body is typed (sees the params + `k`).
-fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// (Bar B / effects c36b) store a handler-arm / pure-return value operand into the
+// handle's result cell. Top-level: a plain `store i64`. Nested: the cell is Kont*, so
+// wrap the i64 via `sentinel_kont_pure` first (the merged result is the kont the
+// enclosing handle dispatches on). Mirrors the oracle's `store_handle_result`.
+fn cg_store_hresult(c: &mut TyCtx, is_nested: bool, vk: i64, vv: i64, rslot: i64) -> i64 {
+    if is_nested {
+        let w: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_kont_pure(i64 ");
+        cgo_operand(c, vk, vv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_kontpure = true;
+        cgo_str(c, "  store ptr %v");
+        cgo_int(c, w);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, rslot);
+        cg_putc(c, '\n');
+        0
+    } else {
+        cgo_str(c, "  store i64 ");
+        cgo_operand(c, vk, vv);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, rslot);
+        cg_putc(c, '\n');
+        0
+    }
+}
+
+fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>, is_nested: bool) -> i64 {
     match a {
         HArms::HEnd => 0,
         HArms::HCell(hef, hop, hparams, hbody, hrest) => {
@@ -5026,11 +5099,8 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
                 let bv: i64 = (*c).cglv;
                 let rslot: i64 = (*c).cg_h_rslot;
                 let merge_b: i64 = (*c).cg_h_merge;
-                cgo_str(c, "  store i64 ");
-                cgo_operand(c, bk, bv);
-                cgo_str(c, ", ptr %v");
-                cgo_int(c, rslot);
-                cg_putc(c, '\n');
+                // (c36b) nested: wrap the arm's i64 → kont_pure → ptr (the merge is Kont*).
+                cg_store_hresult(c, is_nested, bk, bv, rslot);
                 cgo_str(c, "  br label %bb");
                 cgo_int(c, merge_b);
                 cg_putc(c, '\n');
@@ -5041,7 +5111,7 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
             } else {
                 0
             };
-            dump_tharms(out, hrest, src, c, gb)
+            dump_tharms(out, hrest, src, c, gb, is_nested)
         },
     }
 }
@@ -7289,6 +7359,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_h_cks: 0,
         cg_h_rslot: 0,
         cg_h_merge: 0,
+        cg_h_depth: 0,
     };
     let mut garbage: Vec<u8> = vec_new();
     let mut out: Vec<u8> = vec_new();

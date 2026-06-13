@@ -436,6 +436,7 @@ fn dump_fn_named(
         self_var: None,
         handle_stack: Vec::new(),
         embed_ph: None,
+        handle_depth: 0,
     };
     // Allocas are HOISTED to the entry block: param slots, `let` slots, and the
     // if-result slot all land in `e.allocas` (emitted first), while stores/loads/
@@ -549,6 +550,7 @@ fn dump_let_shape_fn(
             self_var: None,
             handle_stack: Vec::new(),
             embed_ph: None,
+        handle_depth: 0,
         };
         e.scopes.push(Vec::new());
         for (i, p) in f.params.iter().enumerate() {
@@ -624,6 +626,7 @@ fn dump_let_shape_fn(
             self_var: None,
             handle_stack: Vec::new(),
             embed_ph: None,
+        handle_depth: 0,
         };
         e.scopes.push(Vec::new());
         // Bind the let var to the resumed value (`%arg0`).
@@ -711,6 +714,7 @@ fn dump_embedded_shape_fn(
             self_var: None,
             handle_stack: Vec::new(),
             embed_ph: None,
+        handle_depth: 0,
         };
         e.scopes.push(Vec::new());
         for (i, p) in f.params.iter().enumerate() {
@@ -787,6 +791,7 @@ fn dump_embedded_shape_fn(
             self_var: None,
             handle_stack: Vec::new(),
             embed_ph: None,
+        handle_depth: 0,
         };
         e.scopes.push(Vec::new());
         // Bind the placeholder slot to the resumed value (`%arg0`).
@@ -895,6 +900,7 @@ fn dump_chained_lets_fn(
             self_var: None,
             handle_stack: Vec::new(),
             embed_ph: None,
+        handle_depth: 0,
         };
         e.scopes.push(Vec::new());
         for (i, p) in f.params.iter().enumerate() {
@@ -947,6 +953,7 @@ fn dump_chained_lets_fn(
             self_var: None,
             handle_stack: Vec::new(),
             embed_ph: None,
+        handle_depth: 0,
         };
         e.scopes.push(Vec::new());
         // Bind let-`level` to the resumed value (`%arg0`).
@@ -1050,6 +1057,7 @@ fn dump_method(
         self_var: Some(self_var_id),
         handle_stack: Vec::new(),
         embed_ph: None,
+        handle_depth: 0,
     };
     // `self` is `%arg0` — bound by `self_var`, with its body type recorded as the class
     // (so `Var(self)` loads `%Class.N` and `self.f` GEPs the class). It is BORROWED, not
@@ -1148,6 +1156,12 @@ struct Emit<'a> {
     /// lowers as a `load` from this slot (the parent already lowered the real
     /// perform + its args); `None` everywhere else.
     embed_ph: Option<u32>,
+    /// Bar B / effects (c36b): the dynamic `handle` nesting depth. Incremented on entry
+    /// to `lower_handle`, decremented on exit; `> 1` means this handle is nested (its
+    /// body is reached from an enclosing handle), so it lowers to a Kont*-typed result
+    /// (arms wrap their i64 via `kont_pure`, the switch default PROPAGATES the un-caught
+    /// kont to the merge) instead of an i64.
+    handle_depth: u32,
 }
 
 impl Emit<'_> {
@@ -2078,17 +2092,30 @@ impl Emit<'_> {
         arms: &[TypedHandlerArm],
         return_arm: Option<&TypedReturnArm>,
     ) -> Result<String, String> {
-        // c36b deferred: a nested `handle` body needs the propagate / Kont*-merge
-        // machinery (the inkwell `is_nested` path). At c36a the body is a `perform`, a
-        // call-to-effecting, or a PURE expression.
-        if matches!(body.kind, TypedExprKind::Handle { .. }) {
-            return Err("handle nested-handle body (deferred to c36b)".into());
-        }
+        // c36b: track dynamic nesting depth so a handle whose body is reached from an
+        // enclosing handle (`depth > 1`) lowers to a Kont*-typed result. Decrement on
+        // every exit (incl. the `?` error paths) via the inner-fn wrapper.
+        self.handle_depth += 1;
+        let is_nested = self.handle_depth > 1;
+        let result = self.lower_handle_inner(body, arms, return_arm, is_nested);
+        self.handle_depth -= 1;
+        result
+    }
+
+    fn lower_handle_inner(
+        &mut self,
+        body: &TypedExpr,
+        arms: &[TypedHandlerArm],
+        return_arm: Option<&TypedReturnArm>,
+        is_nested: bool,
+    ) -> Result<String, String> {
         // Lower the body to an initial kont: a kont-producing body (perform / call-to-
-        // effecting) yields a Kont* directly; a PURE body (c36a/c37 — `handle 42`,
-        // `handle do_pure()`) is wrapped via `sentinel_kont_pure` so the dispatch loop
-        // sees a uniform Kont* (PURE_RETURN-tagged → the pure block fires).
-        let kptr = if produces_kont(body, self.program) {
+        // effecting / a NESTED `handle` — which itself yields a Kont*) is used directly;
+        // a PURE body (`handle 42`) is wrapped via `sentinel_kont_pure` so the dispatch
+        // loop sees a uniform Kont* (PURE_RETURN-tagged → the pure block fires).
+        let body_is_kont = produces_kont(body, self.program)
+            || matches!(body.kind, TypedExprKind::Handle { .. });
+        let kptr = if body_is_kont {
             self.lower_expr(body)?
         } else {
             let bv = self.lower_expr(body)?;
@@ -2099,7 +2126,10 @@ impl Emit<'_> {
         };
         let cks = self.alloca("ptr");
         writeln!(self.body, "  store ptr {kptr}, ptr %v{cks}").unwrap();
-        let rslot = self.alloca("i64");
+        // When nested, the handle's RESULT is a Kont* (the un-caught/wrapped continuation
+        // the enclosing handle dispatches on); top-level it's the i64 value.
+        let rty = if is_nested { "ptr" } else { "i64" };
+        let rslot = self.alloca(rty);
         let loop_b = self.fresh_block();
         let merge_b = self.fresh_block();
         writeln!(self.body, "  br label %bb{loop_b}").unwrap();
@@ -2124,31 +2154,61 @@ impl Emit<'_> {
             self.handle_stack.push((loop_b, cks, return_arm.cloned()));
             let av = self.lower_expr(&arm.body)?;
             self.handle_stack.pop();
-            writeln!(self.body, "  store i64 {av}, ptr %v{rslot}").unwrap();
+            // Nested: the merge type is Kont*, so wrap the arm's i64 via `kont_pure`.
+            self.store_handle_result(is_nested, &av, rslot);
             writeln!(self.body, "  br label %bb{merge_b}").unwrap();
             writeln!(self.body, "bb{next_b}:").unwrap();
         }
-        // The final check: PURE_RETURN → unwrap; else `unreachable` (full op coverage).
+        // The PURE_RETURN check (the chain's tail): the body / a `k(v)` drained pure.
         let cmpp = self.fresh();
         writeln!(self.body, "  %v{cmpp} = icmp eq i32 %v{opid}, {PURE_RETURN_OP_ID}").unwrap();
         let pure_b = self.fresh_block();
         let default_b = self.fresh_block();
         writeln!(self.body, "  br i1 %v{cmpp}, label %bb{pure_b}, label %bb{default_b}").unwrap();
         writeln!(self.body, "bb{pure_b}:").unwrap();
-        let pv = self.fresh();
-        writeln!(self.body, "  %v{pv} = call i64 @sentinel_kont_consume_pure(ptr %v{ck})").unwrap();
-        self.used.kont_consume_pure = true;
-        // c36a: a non-identity `return v => body` arm transforms the body's pure value
-        // (bind `v` to the consumed i64, lower the arm body). Identity (no arm) stores pv.
-        let pure_result = self.apply_return_arm(return_arm, &format!("%v{pv}"))?;
-        writeln!(self.body, "  store i64 {pure_result}, ptr %v{rslot}").unwrap();
+        if is_nested && return_arm.is_none() {
+            // Nested + no return arm: pass the PURE_RETURN kont THROUGH unchanged (the
+            // enclosing handle's pure path consumes it). No `consume_pure` here.
+            writeln!(self.body, "  store ptr %v{ck}, ptr %v{rslot}").unwrap();
+        } else {
+            let pv = self.fresh();
+            writeln!(self.body, "  %v{pv} = call i64 @sentinel_kont_consume_pure(ptr %v{ck})").unwrap();
+            self.used.kont_consume_pure = true;
+            // c36a: a non-identity `return v => body` arm transforms the pure value.
+            let pure_result = self.apply_return_arm(return_arm, &format!("%v{pv}"))?;
+            // Nested: re-wrap the (transformed) i64 in a PURE_RETURN kont for the outer.
+            self.store_handle_result(is_nested, &pure_result, rslot);
+        }
         writeln!(self.body, "  br label %bb{merge_b}").unwrap();
         writeln!(self.body, "bb{default_b}:").unwrap();
-        writeln!(self.body, "  unreachable").unwrap();
+        if is_nested {
+            // Nested default = PROPAGATE: the op_id matched no arm + isn't PURE_RETURN, so
+            // it's an effect for an ENCLOSING handle — contribute the kont to the merge.
+            writeln!(self.body, "  store ptr %v{ck}, ptr %v{rslot}").unwrap();
+            writeln!(self.body, "  br label %bb{merge_b}").unwrap();
+        } else {
+            // Top-level: type-check guarantees full op coverage.
+            writeln!(self.body, "  unreachable").unwrap();
+        }
         writeln!(self.body, "bb{merge_b}:").unwrap();
         let rv = self.fresh();
-        writeln!(self.body, "  %v{rv} = load i64, ptr %v{rslot}").unwrap();
+        writeln!(self.body, "  %v{rv} = load {rty}, ptr %v{rslot}").unwrap();
         Ok(format!("%v{rv}"))
+    }
+
+    /// Bar B / effects (c36b) — store a handler-arm / pure-return i64 `val` into the
+    /// handle's result slot. Top-level: a plain `store i64`. Nested: the slot is Kont*,
+    /// so wrap `val` via `sentinel_kont_pure` first (the merged result is the kont the
+    /// enclosing handle dispatches on).
+    fn store_handle_result(&mut self, is_nested: bool, val: &str, rslot: u32) {
+        if is_nested {
+            let w = self.fresh();
+            writeln!(self.body, "  %v{w} = call ptr @sentinel_kont_pure(i64 {val})").unwrap();
+            self.used.kont_pure = true;
+            writeln!(self.body, "  store ptr %v{w}, ptr %v{rslot}").unwrap();
+        } else {
+            writeln!(self.body, "  store i64 {val}, ptr %v{rslot}").unwrap();
+        }
     }
 
     /// Bar B / effects (c36a / ADR 0020 D4) — apply an optional non-identity `return v =>
