@@ -2082,8 +2082,16 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs: ADR 0046 ACCEPTED — scg mirror` commit (this
-    verify-HEAD refresh — ADR flip + STATE banner + borrow-check-limitations + HANDOVER), atop the
+    Verify HEAD with `git log -1` — HEAD is a `docs: session handoff` commit (this verify-HEAD +
+    RESUME-AT refresh), atop the **P0 claim-calibration batch** (`0810491` — docs: P0 claim
+    calibration and posture, review-plan P0.1–P0.6, docs/config only: the README constant-time claim
+    reworded from "proves it" to the precise property + its two boundaries [type system as taint oracle;
+    pre-LLVM, no forced emission — copied from the sentinel-mir doc comments]; the borrow checker's
+    posture stated honestly [the under-rejection is CLOSED; remaining limits are over-rejections];
+    `CONTRIBUTING.md` created; `SECRETS_LIFECYCLE.md` got a VISION/not-on-roadmap banner; `ci.yml` +
+    `just check-all` gained the missing `cargo test --doc` step; rode-along Status staleness fixes
+    [1476→1484 tests, Bar B done not "Remaining"]), atop the **ADR 0046 ACCEPTED docs** (`cfc055d` — ADR
+    flip + STATE banner + borrow-check-limitations + HANDOVER), atop the
     **scg-mirror feat** (`714ce3f` — feat(selfhost): mirror the partial-move-through-field skip into scg,
     ADR 0046 D6: the self-hosted `scg` no longer double-frees a Move-typed field consumed by value. The
     `snc borrow` dump [`borrow_dump.rs`] gains the `#<vid>.<field>` partial-move suffix; the `snc llvm`
@@ -2213,14 +2221,25 @@ For pasting into a fresh chat to bootstrap context:
     codegen differentials are byte-identical over the whole corpus (incl. `c17_go_no_go`, which RETURNS a
     generic field by value — A3) and both fixed points hold; +3 corpus fixtures (reproducer exit 37 / a
     non-consuming-read regression exit 4 / a use-after-partial-move reject), 0 leaks, 1484 tests. The borrow
-    checker's remaining limitations are all OVER-rejections (ergonomics, ADR 0018) — sound. **▶ OPEN TRACKS
-    (owner's call):** (1) the per-unit separate-compilation back end (ADR 0037 (a) — per-unit `.o` +
-    module-qualified `abi-v1` mangling + multi-object link + `linkonce_odr` cross-module generics →
-    incremental builds; the headline deferred track, independent of the port); (2) review-plan P0.1 —
-    calibrate the README "constant-time, machine-verified" claim to what the MIR pass actually guarantees
-    (the reviewers' top credibility concern; docs-only); (3) P2.4 — a Linux CI target; (4) P3.1 — rewrite
-    the stale PROGRAMMING_GUIDE (still describes pre-C1 "i64 only"). Detail: `docs/REVIEW_ACTION_PLAN.md`
-    (the owner's untracked plan) + [[sentinel_partial_move_fix]] + `docs/decisions/0046`.
+    checker's remaining limitations are all OVER-rejections (ergonomics, ADR 0018) — sound. **The
+    review-plan P0 band is ALSO DONE** (`0810491`, docs/config only): P0.1 the README constant-time claim
+    calibrated ("proves it" → the precise property + its two boundaries, copied from the `sentinel-mir`
+    doc comments: the type system is the taint oracle, and the check runs pre-LLVM so it constrains the
+    program, not the optimized machine code / forced emission); P0.2 the borrow checker's posture stated
+    honestly; P0.3 `CONTRIBUTING.md`; P0.4 the `SECRETS_LIFECYCLE.md` vision banner; P0.5 the stale ADR
+    0019 pointer (already gone); P0.6 the CI/justfile `cargo test --doc` step. So **P1.1 + P1.2 + the
+    whole P0 band are complete.** **▶ OPEN TRACKS (owner's call — see [[sentinel_review_action_plan]] +
+    `docs/REVIEW_ACTION_PLAN.md`, the owner's UNTRACKED plan):** (1) **P2 — verification hardening**:
+    P2.1 a `docs/ct-model.md` (per-construct CT modeling status: precise vs `Opaque`-conservative vs
+    not-on-1.0-path), P2.2 a secret-flow conformance suite (route a secret through EACH Opaque-funneled
+    construct → each sink, assert still rejected — the test-backed answer to "soundness rests on the type
+    checker being right everywhere"; pairs with P0.1), P2.3 a loud `lookup_var` fallback (`debug_assert!`
+    at `crates/sentinel-mir/src/lib.rs:318` — the one small CODE change), P2.4 a Linux `ubuntu-24.04` CI
+    job (observe-only; glibc surfaces heap bugs macOS masks; before abi-v1 ossifies), P2.5 cargo-fuzz
+    seeds; (2) **P3 — docs/DX**: P3.1 rewrite the stale `PROGRAMMING_GUIDE.md` (pre-C1 "i64 only"; pull
+    examples from `tests/pass/`), P3.2 split STATE.md, P3.5 a minimal LSP; (3) the per-unit
+    separate-compilation back end (ADR 0037 (a) — incremental builds, independent of the port). Detail:
+    [[sentinel_review_action_plan]] + [[sentinel_partial_move_fix]] + `docs/decisions/0046`.
 
     --- BELOW: the Bar B historical record (the completed full-corpus codegen-parity work) ---
     **Bar B headline** (DONE): the Sentinel compiler fully compiles itself, via BOTH fixed-point paths —
