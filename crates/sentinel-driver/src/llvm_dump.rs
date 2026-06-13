@@ -401,6 +401,13 @@ fn dump_fn_named(
         if let Some(perform) = detect_embedded_shape(f, program) {
             return dump_embedded_shape_fn(f, perform, program, drop_plan, out, used, sym);
         }
+        // c35e: chained effecting lets (2+ `let v: i64 = <produces-kont>` + a pure
+        // tail) — N+1 defines: the parent pushes resumer-0 onto let-0's kont; each
+        // resumer-i binds let-i + its captures, then performs let-(i+1) and pushes
+        // resumer-(i+1) (the runtime bubbles the fresh kont); the last wraps the tail.
+        if let Some(info) = detect_chained_lets_shape(f, program) {
+            return dump_chained_lets_fn(f, &info, program, drop_plan, out, used, sym);
+        }
         validate_effecting_fn_body(f, program)?;
     }
     // main is the C-ABI entry: i32 return (its i64 body is truncated). An effecting fn
@@ -806,6 +813,184 @@ fn dump_embedded_shape_fn(
         e.used.kont_pure = true;
         writeln!(e.body, "  ret ptr %v{kp}").unwrap();
         write!(out, "define ptr @{resumer_sym}(i64 %arg0, ptr %arg1) {{\nentry:\n").unwrap();
+        out.push_str(&e.allocas);
+        out.push_str(&e.body);
+        out.push_str("}\n");
+        used.merge(e.used);
+    }
+    Ok(())
+}
+
+/// Bar B / effects (c35e) — emit a captured-state struct build: `i64[N]` via
+/// `sentinel_alloc`, one field per captured var at byte offsets 0,8,… filled from the
+/// var's CURRENT slot; returns the struct operand (`%vA`), or the literal `null` when
+/// nothing is captured (the receiving resumer ignores its `%arg1`).
+fn emit_chained_captures_build(e: &mut Emit<'_>, caps: &[VarId]) -> Result<String, String> {
+    if caps.is_empty() {
+        return Ok("null".to_string());
+    }
+    let size = caps.len() * 8;
+    let a = e.fresh();
+    writeln!(e.body, "  %v{a} = call ptr @sentinel_alloc(i64 {size})").unwrap();
+    e.used.alloc = true;
+    for (i, cap_id) in caps.iter().enumerate() {
+        let off = i * 8;
+        let gp = e.fresh();
+        writeln!(e.body, "  %v{gp} = getelementptr i8, ptr %v{a}, i64 {off}").unwrap();
+        let slot = *e
+            .slots
+            .get(cap_id)
+            .ok_or("c35e: captured var has no bound slot in the emitting define")?;
+        let ld = e.fresh();
+        writeln!(e.body, "  %v{ld} = load i64, ptr %v{slot}").unwrap();
+        writeln!(e.body, "  store i64 %v{ld}, ptr %v{gp}").unwrap();
+    }
+    Ok(format!("%v{a}"))
+}
+
+/// Bar B / effects (c35e / ADR 0020 D7) — emit a chained-effecting-lets fn as N+1
+/// `define`s (mirroring inkwell `compile_effecting_fn_with_chained_lets`; the oracle
+/// emits parent-first, the established c35c/c35d layout):
+///   1. the PARENT `@<sym>` (Kont* ABI): bind params, build the captured struct for
+///      resumer-0 (`compute_chained_captures(0)`), lower lets[0]'s RHS to a Kont*,
+///      `sentinel_kont_push(kont, @__resume_<sym>_0, captured)`, return the Kont*.
+///   2. resumer-`i` `@__resume_<sym>_<i>(i64 %arg0, ptr %arg1)` for i in 0..N-1: bind
+///      let-i to the resumed value + each captures[i] var from `%arg1`, build the
+///      struct for resumer-(i+1) from its OWN slots, lower lets[i+1]'s RHS (the
+///      perform's args resolve against this resumer's bindings) to a Kont*, push
+///      (resumer-(i+1), captured), return the Kont* — the runtime BUBBLES it.
+///   3. the LAST resumer `@__resume_<sym>_<N-1>`: bind let-(N-1) + captures[N-1],
+///      lower the pure tail, wrap via `sentinel_kont_pure`, return.
+///
+/// Each define is its own `Emit` (`next: 0` — no shared register counter).
+#[allow(clippy::too_many_arguments)]
+fn dump_chained_lets_fn(
+    f: &TypedFnDef,
+    info: &ChainedLetsInfo<'_>,
+    program: &TypedProgram,
+    drop_plan: &DropPlan,
+    out: &mut String,
+    used: &mut RuntimeSyms,
+    sym: &str,
+) -> Result<(), String> {
+    let n = info.lets.len();
+    let captures_per: Vec<Vec<VarId>> =
+        (0..n).map(|i| compute_chained_captures(info, i)).collect();
+
+    // --- the PARENT define: params, captures-0 struct, lets[0] RHS → kont, push ---
+    {
+        let mut e = Emit {
+            program,
+            next: 0,
+            block: 0,
+            slots: HashMap::new(),
+            var_ty: HashMap::new(),
+            scopes: Vec::new(),
+            drop_plan,
+            current_fn: f.id,
+            allocas: String::new(),
+            body: String::new(),
+            loops: Vec::new(),
+            used: RuntimeSyms::default(),
+            self_var: None,
+            handle_stack: Vec::new(),
+            embed_ph: None,
+        };
+        e.scopes.push(Vec::new());
+        for (i, p) in f.params.iter().enumerate() {
+            let ty = llvm_ty(p.ty, program)?;
+            let slot = e.alloca(&ty);
+            writeln!(e.body, "  store {ty} %arg{i}, ptr %v{slot}").unwrap();
+            e.slots.insert(p.id, slot);
+            e.var_ty.insert(p.id, p.ty);
+            e.scopes.last_mut().unwrap().push(p.id);
+        }
+        let captured_op = emit_chained_captures_build(&mut e, &captures_per[0])?;
+        let kont = e.lower_expr(info.lets[0].2)?;
+        writeln!(
+            e.body,
+            "  call void @sentinel_kont_push(ptr {kont}, ptr @__resume_{sym}_0, ptr {captured_op})"
+        )
+        .unwrap();
+        e.used.kont_push = true;
+        writeln!(e.body, "  ret ptr {kont}").unwrap();
+        write!(out, "define ptr @{sym}(").unwrap();
+        for (i, p) in f.params.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            write!(out, "{} %arg{i}", llvm_ty(p.ty, program)?).unwrap();
+        }
+        out.push_str(") {\nentry:\n");
+        out.push_str(&e.allocas);
+        out.push_str(&e.body);
+        out.push_str("}\n");
+        used.merge(e.used);
+    }
+
+    // --- the N resumer defines ---
+    for level in 0..n {
+        out.push('\n');
+        let mut e = Emit {
+            program,
+            next: 0,
+            block: 0,
+            slots: HashMap::new(),
+            var_ty: HashMap::new(),
+            scopes: Vec::new(),
+            drop_plan,
+            current_fn: f.id,
+            allocas: String::new(),
+            body: String::new(),
+            loops: Vec::new(),
+            used: RuntimeSyms::default(),
+            self_var: None,
+            handle_stack: Vec::new(),
+            embed_ph: None,
+        };
+        e.scopes.push(Vec::new());
+        // Bind let-`level` to the resumed value (`%arg0`).
+        let (let_id, let_ty, _rhs) = info.lets[level];
+        let v_slot = e.alloca("i64");
+        writeln!(e.body, "  store i64 %arg0, ptr %v{v_slot}").unwrap();
+        e.slots.insert(let_id, v_slot);
+        e.var_ty.insert(let_id, let_ty);
+        // Bind each captures[level] var to its struct field, loaded from `%arg1`.
+        for (i, cap_id) in captures_per[level].iter().enumerate() {
+            let off = i * 8;
+            let gp = e.fresh();
+            writeln!(e.body, "  %v{gp} = getelementptr i8, ptr %arg1, i64 {off}").unwrap();
+            let ld = e.fresh();
+            writeln!(e.body, "  %v{ld} = load i64, ptr %v{gp}").unwrap();
+            let slot = e.alloca("i64");
+            writeln!(e.body, "  store i64 %v{ld}, ptr %v{slot}").unwrap();
+            e.slots.insert(*cap_id, slot);
+            e.var_ty.insert(*cap_id, Type::I64);
+        }
+        if level + 1 == n {
+            // The LAST resumer: lower the pure tail, wrap as a PURE_RETURN kont.
+            let tail = e.lower_expr(info.tail)?;
+            let kp = e.fresh();
+            writeln!(e.body, "  %v{kp} = call ptr @sentinel_kont_pure(i64 {tail})").unwrap();
+            e.used.kont_pure = true;
+            writeln!(e.body, "  ret ptr %v{kp}").unwrap();
+        } else {
+            // A chaining resumer: build the next struct from THIS resumer's slots,
+            // lower lets[level+1]'s RHS → kont, push resumer-(level+1), return it.
+            let captured_op =
+                emit_chained_captures_build(&mut e, &captures_per[level + 1])?;
+            let kont = e.lower_expr(info.lets[level + 1].2)?;
+            let next = level + 1;
+            writeln!(
+                e.body,
+                "  call void @sentinel_kont_push(ptr {kont}, ptr @__resume_{sym}_{next}, ptr {captured_op})"
+            )
+            .unwrap();
+            e.used.kont_push = true;
+            writeln!(e.body, "  ret ptr {kont}").unwrap();
+        }
+        write!(out, "define ptr @__resume_{sym}_{level}(i64 %arg0, ptr %arg1) {{\nentry:\n")
+            .unwrap();
         out.push_str(&e.allocas);
         out.push_str(&e.body);
         out.push_str("}\n");
@@ -2817,6 +3002,89 @@ fn collect_performs_stmt<'a>(kind: &'a TypedStmtKind, acc: &mut Vec<&'a TypedExp
         TypedStmtKind::Break | TypedStmtKind::Continue => {}
         TypedStmtKind::Expr(e) => collect_performs(e, acc),
     }
+}
+
+/// Bar B / effects (c35e) — the chained-effecting-lets shape: an effecting (non-main)
+/// fn whose body is 2+ `let v: i64 = <produces-kont>` statements followed by a pure
+/// tail. Each let's perform is reified into its own frame; resumer-i itself performs
+/// (lowering let-(i+1)'s RHS) and pushes resumer-(i+1) — the runtime's
+/// `sentinel_kont_resume` BUBBLES the fresh kont so the handle's dispatch loop
+/// re-dispatches it (ADR 0020 D3 deep-handler semantics). Mirrors inkwell
+/// `detect_chained_effecting_lets_shape`. (A single let is the c35c shape.)
+struct ChainedLetsInfo<'a> {
+    lets: Vec<(VarId, Type, &'a TypedExpr)>,
+    tail: &'a TypedExpr,
+}
+
+fn detect_chained_lets_shape<'a>(
+    f: &'a TypedFnDef,
+    program: &TypedProgram,
+) -> Option<ChainedLetsInfo<'a>> {
+    let sig = program.signature(f.id);
+    if !uses_kont_abi(sig, program) || sig.is_main {
+        return None;
+    }
+    if f.body.stmts.len() < 2 {
+        return None;
+    }
+    let mut lets = Vec::with_capacity(f.body.stmts.len());
+    for stmt in &f.body.stmts {
+        let (id, value, ty) = match &stmt.kind {
+            TypedStmtKind::Let { id, value, ty, .. } => (*id, value, *ty),
+            _ => return None,
+        };
+        // Each RHS must produce a Kont (direct `perform` / call-to-effecting) so the
+        // next resumer can be pushed onto it; MVP-restricted to i64 lets (the kont's
+        // single `arg` slot carries the resumed value) — same as c35c/c35d.
+        if !produces_kont(value, program) {
+            return None;
+        }
+        if ty != Type::I64 {
+            return None;
+        }
+        lets.push((id, ty, value));
+    }
+    if expr_performs(&f.body.tail) {
+        return None;
+    }
+    Some(ChainedLetsInfo { lets, tail: &f.body.tail })
+}
+
+/// Bar B / effects (c35e) — the captured set for chained-lets resumer-`level`: the
+/// vars referenced anywhere in the body resumer-`level` runs (the suffix RHSes
+/// `lets[level+1..]` + the tail), in first-reference order, minus the resumed-value
+/// let (its `value` param) and the deeper lets (bound in deeper resumers, not
+/// captured). Mirrors inkwell `compute_chained_lets_captures`. The math closes:
+/// everything captures[level+1] needs is either resumer-`level`'s value param or in
+/// captures[level], so each resumer can build the next struct from its own slots.
+fn compute_chained_captures(info: &ChainedLetsInfo<'_>, level: usize) -> Vec<VarId> {
+    let mut refs: Vec<VarId> = Vec::new();
+    for j in (level + 1)..info.lets.len() {
+        walk_collect_rhs_var_refs(info.lets[j].2, &mut refs);
+    }
+    walk_collect_var_refs(info.tail, &mut refs);
+    let mut excluded: Vec<VarId> =
+        info.lets.iter().skip(level + 1).map(|l| l.0).collect();
+    excluded.push(info.lets[level].0);
+    refs.into_iter().filter(|id| !excluded.contains(id)).collect()
+}
+
+/// Bar B / effects (c35e) — collect var refs from a chained let's RHS. Unlike the
+/// c35d captured walk (where the perform subtree is the PARENT's to lower, so
+/// `walk_collect_var_refs` skips it), a chained RHS's perform is lowered by the
+/// EMITTING resumer — its ARG vars must be captured, so descend into a top-level
+/// `Perform`'s args (inkwell's walker descends into performs everywhere; for the
+/// shapes `detect_chained_lets_shape` admits, this wrapper is equivalent — a
+/// block-wrapped kont RHS with an arg'd nested perform would diverge, but no such
+/// corpus shape exists and the differential would catch it loudly).
+fn walk_collect_rhs_var_refs(rhs: &TypedExpr, acc: &mut Vec<VarId>) {
+    if let TypedExprKind::Perform { args, .. } = &rhs.kind {
+        for a in args {
+            walk_collect_var_refs(a, acc);
+        }
+        return;
+    }
+    walk_collect_var_refs(rhs, acc);
 }
 
 /// Bar B / effects (c35c) — the captured set for a let-shape resumer: the tail's free

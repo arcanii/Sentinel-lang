@@ -5468,7 +5468,7 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
         let mut cur2: i64 = body_tok0;
         let body2: Expr = parse_block(k, s, e, src, &mut cur2);
         let embed: Args = eff_classify(body2);
-        cg_emit_fn_eff(out, c, body, rty, src, name_s, name_e, cgpmark, cg_pv0, cg_pvn, gb, embed);
+        cg_emit_fn_eff(out, c, body, rty, src, name_s, name_e, cgpmark, cg_pv0, cg_pvn, gb, embed, k, s, e, body_tok0);
         0
     } else {
         dump_texpr(out, body, rty, src, c, gb);
@@ -10603,7 +10603,7 @@ fn cg_flush_allocas_body(c: &mut TyCtx) -> i64 {
 // `perform` RHS) — every effecting fn the oracle EMITS with a performing statement is a
 // let-shape (its `validate_effecting_fn_body` defers the rest), so scg need not re-check
 // the i64 / pure-tail conditions (the differential only runs scg when the oracle emits).
-fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>, embed: Args) -> i64 {
+fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, cgpmark: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>, embed: Args, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
     // (The Sentinel match grammar has no bind-the-whole-value pattern — only
     // `Enum::Variant(..)` + `_`. So the non-let-shape branches re-wrap the moved-out
     // parts and fall through to `cg_eff_normal`; `Stmts`/`Stmt` are fully enumerated.)
@@ -10659,9 +10659,15 @@ fn cg_emit_fn_eff(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &
                             }
                         },
                         Stmts::SCell(s2, r2) => {
-                            // 2+ statements — not a c35c shape; straight-line.
+                            // 2+ statements — the c35e CHAINED-effecting-lets shape (every
+                            // EMITTED 2+-stmt effecting fn is chained lets: the oracle's
+                            // `validate_effecting_fn_body` defers all other 2+-stmt
+                            // performing bodies, and no 2+-pure-stmt effecting fn is in the
+                            // emitted corpus). Re-wrap the moved-out chain + thread it to
+                            // `cg_chained_emit`, which lowers each let's RHS into its own
+                            // resumer (N+1 defines) + re-parses copies for the capture sets.
                             let b2: Expr = Expr::Block(Stmts::SCell(st, Stmts::SCell(s2, r2)), tail);
-                            cg_eff_normal(out, c, b2, rty, src, name_s, name_e, cgpmark, gb)
+                            cg_chained_emit(out, c, b2, rty, src, name_s, name_e, pv0, pvn, gb, k, s, e, body_tok0)
                         },
                     }
                 },
@@ -11090,6 +11096,526 @@ fn cg_embed_emit(out: &mut Vec<u8>, c: &mut TyCtx, pf: Expr, tail: Expr, rty: i6
     cgo_str(c, "  ret ptr %v");
     cgo_int(c, kp);
     cgo_str(c, "\n}\n\n");
+    0
+}
+
+// (Bar B / effects c35e / ADR 0020 D7) emit a CHAINED-effecting-lets fn as N+1 defines
+// (mirror the oracle's `dump_chained_lets_fn` / inkwell `compile_effecting_fn_with_
+// chained_lets`). The body is 2+ `let v: i64 = <perform/call-to-effecting>` statements +
+// a pure tail; each let's perform is reified into its own frame, and resumer-i itself
+// performs (lowering let-(i+1)'s RHS) + pushes resumer-(i+1) — the runtime BUBBLES the
+// fresh kont so the handle re-dispatches.
+//   - PARENT @<name>: bind params, build captures[0], lower lets[0].RHS → kont, push
+//     resumer-0, ret ptr.
+//   - resumer-i (i<N-1): bind let-i + captures[i] from %arg1, build captures[i+1], lower
+//     lets[i+1].RHS → kont, push resumer-(i+1), ret ptr.
+//   - resumer-(N-1): bind let-(N-1) + captures[N-1], lower the pure tail, kont_pure-wrap.
+// The ORIGINAL `body` is consumed for the LOWERING (each RHS/tail walked once by
+// `dump_texpr`); the capture sets are computed from disposable RE-PARSED copies (move
+// semantics bar inspect-then-reuse — the c35d classification-copy idiom). All lets are
+// i64 (the shape requires it). `[pv0,pvn)` = the param VarId range (params are bound by
+// emit_tparams; captures[0] is the subset of params + nothing the suffix/tail uses).
+fn cg_chained_emit(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, rty: i64, src: &[u8], name_s: i64, name_e: i64, pv0: i64, pvn: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
+    let _rt: i64 = rty;
+    let _p0: i64 = pv0;
+    let _pn: i64 = pvn;
+    // Phase 1: re-parse a copy, bind each let var (vid + name + i64 type), count N.
+    let mut cur1: i64 = body_tok0;
+    let body1: Expr = parse_block(k, s, e, src, &mut cur1);
+    let mut letvids: Vec<i64> = vec_new();
+    let mut letty: i64 = 0;
+    let nlets: i64 = cg_chained_phase1(c, body1, &mut letvids, &mut letty, gb);
+    // Phase 3: consume the ORIGINAL body chain, emitting parent + N resumers (captures
+    // computed on-demand per define from fresh re-parses).
+    cg_chained_walk(out, c, body, nlets, &letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0);
+    0
+}
+
+// (c35e) bind each chained let's var (vid via nextvid++, name + i64 type via bind_name),
+// pushing vids into `letvids` in source order; returns the count. Consumes `body`
+// (disposing each RHS + the tail). Sets `*letty` to the i64 handle (all lets are i64).
+fn cg_chained_phase1(c: &mut TyCtx, body: Expr, letvids: &mut Vec<i64>, letty: &mut i64, gb: &mut Vec<u8>) -> i64 {
+    match body {
+        Expr::Block(stmts, tail) => {
+            let mut scratch: Vec<i64> = vec_new();
+            let n: i64 = cg_chained_bind(c, stmts, letvids, letty, &mut scratch, gb);
+            cg_walk_ex(c, tail, false, &mut scratch, gb);
+            n
+        },
+        _ => 0,
+    }
+}
+
+// (c35e) walk the stmt chain binding each SLet (consuming, disposing RHSes).
+fn cg_chained_bind(c: &mut TyCtx, stmts: Stmts, letvids: &mut Vec<i64>, letty: &mut i64, scratch: &mut Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+    match stmts {
+        Stmts::SEnd => 0,
+        Stmts::SCell(st, rest) => {
+            match st {
+                Stmt::SLet(lmf, lnm, lty, lval) => {
+                    let _lmf: bool = lmf;
+                    let ty: i64 = tyopt_exp(c, lty, gb);
+                    *letty = ty;
+                    let vid: i64 = (*c).nextvid;
+                    (*c).nextvid = (*c).nextvid + 1;
+                    bind_name(c, lnm, vid, ty);
+                    push(letvids, vid);
+                    cg_walk_ex(c, lval, false, scratch, gb);
+                    let r: i64 = cg_chained_bind(c, rest, letvids, letty, scratch, gb);
+                    r + 1
+                },
+                Stmt::SExpr(ex) => {
+                    cg_walk_ex(c, ex, false, scratch, gb);
+                    cg_chained_bind(c, rest, letvids, letty, scratch, gb)
+                },
+                Stmt::SAssign(at, av) => {
+                    cg_walk_ex(c, at, false, scratch, gb);
+                    cg_walk_ex(c, av, false, scratch, gb);
+                    cg_chained_bind(c, rest, letvids, letty, scratch, gb)
+                },
+                Stmt::SWhile(wc, wb) => {
+                    cg_walk_ex(c, wc, false, scratch, gb);
+                    cg_walk_ex(c, wb, false, scratch, gb);
+                    cg_chained_bind(c, rest, letvids, letty, scratch, gb)
+                },
+                Stmt::SBreak => cg_chained_bind(c, rest, letvids, letty, scratch, gb),
+                Stmt::SContinue => cg_chained_bind(c, rest, letvids, letty, scratch, gb),
+            }
+        },
+    }
+}
+
+// (c35e) consuming walk of an Expr: sinks all owned `[u8]` payloads (disposal) and, when
+// `collect`, pushes each referenced var's VarId into `out` (deduped, first-reference
+// pre-order — mirrors the oracle's `walk_collect_var_refs`). Used for the capture-set
+// computation + disposal of re-parsed copies. Covers the forms a chained-lets RHS (a
+// `perform` / effecting call) + pure tail use; the `_` arm drops exotic forms
+// (handle/match/scope/struct-lit/…) — they never appear in an EMITTED chained body (the
+// oracle's gate keeps them out of scg), so they never reach here.
+fn cg_walk_ex(c: &mut TyCtx, ex: Expr, collect: bool, out: &mut Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+    match ex {
+        Expr::Int(n) => { let _n: i64 = n; 0 },
+        Expr::Bool(b) => { let _b: bool = b; 0 },
+        Expr::Null => 0,
+        Expr::Char(ch) => { let _ch: i64 = ch; 0 },
+        Expr::Str(by) => { sink_name(gb, by); 0 },
+        Expr::Var(nm) => {
+            if collect {
+                let vid: i64 = sc_lookup(c, &nm);
+                cg_push_unique(out, vid);
+                0
+            } else {
+                0
+            };
+            sink_name(gb, nm);
+            0
+        },
+        Expr::Unary(uop, inner) => {
+            let _u: i64 = uop;
+            cg_walk_ex(c, inner, collect, out, gb)
+        },
+        Expr::Binary(bop, l, r) => {
+            let _b: i64 = bop;
+            cg_walk_ex(c, l, collect, out, gb);
+            cg_walk_ex(c, r, collect, out, gb);
+            0
+        },
+        Expr::Call(nm, args) => {
+            sink_name(gb, nm);
+            cg_walk_args(c, args, collect, out, gb)
+        },
+        Expr::Method(t, nm, args) => {
+            cg_walk_ex(c, t, collect, out, gb);
+            sink_name(gb, nm);
+            cg_walk_args(c, args, collect, out, gb)
+        },
+        Expr::Field(t, nm) => {
+            sink_name(gb, nm);
+            cg_walk_ex(c, t, collect, out, gb)
+        },
+        Expr::Index(t, ix) => {
+            cg_walk_ex(c, t, collect, out, gb);
+            cg_walk_ex(c, ix, collect, out, gb);
+            0
+        },
+        Expr::Declassify(inner) => cg_walk_ex(c, inner, collect, out, gb),
+        Expr::Perform(pe, po, pa) => {
+            sink_name(gb, pe);
+            sink_name(gb, po);
+            cg_walk_args(c, pa, collect, out, gb)
+        },
+        _ => {
+            // handle/match/scope/spawn/await/struct-lit/qcall/class-init/array/if/block —
+            // never in an EMITTED chained RHS or pure tail; the `_` drops `ex`.
+            0
+        },
+    }
+}
+
+// (c35e) walk an Args cons-list (consuming).
+fn cg_walk_args(c: &mut TyCtx, aa: Args, collect: bool, out: &mut Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+    match aa {
+        Args::End => 0,
+        Args::Cell(hd, tl) => {
+            cg_walk_ex(c, hd, collect, out, gb);
+            cg_walk_args(c, tl, collect, out, gb)
+        },
+    }
+}
+
+// (c35e) push `vid` to `out` if not already present (first-reference dedup).
+fn cg_push_unique(out: &mut Vec<i64>, vid: i64) -> i64 {
+    let n: i64 = len(*out);
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < n {
+        if (*out)[i] == vid {
+            found = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if found {
+        0
+    } else {
+        push(out, vid);
+        0
+    };
+    0
+}
+
+// (c35e) compute captures[level] into `out` (caller-cleared): the var refs in
+// (lets[level+1..].RHS + the tail), first-reference order, minus lets[level..N-1] (the
+// resumed value + deeper lets, bound in this/deeper resumers). Re-parses a disposable
+// copy; mirrors the oracle's `compute_chained_captures`.
+fn cg_chained_caps(c: &mut TyCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], body_tok0: i64, level: i64, letvids: &Vec<i64>, nlets: i64, out: &mut Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+    let mut raw: Vec<i64> = vec_new();
+    let mut cur: i64 = body_tok0;
+    let copy: Expr = parse_block(k, s, e, src, &mut cur);
+    // The navigate-and-collect is a HELPER (not an inline discarded `match`): scg defaults
+    // an unexpected-typed `match` result to `ptr` (vs the oracle's `i64`), which would
+    // diverge the self-compiled alloca; in tail position the fn's i64 return directs it.
+    cg_caps_collect(c, copy, level, &mut raw, gb);
+    // Filter out lets[level..nlets] (the current + deeper lets).
+    let n: i64 = len(raw);
+    let mut r: i64 = 0;
+    while r < n {
+        let vid: i64 = raw[r];
+        let mut excluded: bool = false;
+        let mut j: i64 = level;
+        while j < nlets {
+            if (*letvids)[j] == vid {
+                excluded = true;
+                0
+            } else {
+                0
+            };
+            j = j + 1;
+        }
+        if excluded {
+            0
+        } else {
+            push(out, vid);
+            0
+        };
+        r = r + 1;
+    }
+    0
+}
+
+// (c35e) navigate a re-parsed body copy for capture collection: collect the suffix lets'
+// RHS var refs (skipping the first `level+1`) + the tail's. The `match` lives here (tail
+// position, i64 return) so scg types its result `i64` like the oracle — an inline
+// discarded `match` would diverge the self-compiled alloca (`ptr` vs `i64`).
+fn cg_caps_collect(c: &mut TyCtx, copy: Expr, level: i64, out: &mut Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+    match copy {
+        Expr::Block(stmts, tail) => {
+            cg_caps_stmts(c, stmts, level + 1, 0, out, gb);
+            cg_walk_ex(c, tail, true, out, gb);
+            0
+        },
+        _ => 0,
+    }
+}
+
+// (c35e) walk a stmt chain for capture collection: dispose the first `skip` lets' RHSes,
+// then COLLECT var refs from the remaining lets' RHSes (descending perform args).
+fn cg_caps_stmts(c: &mut TyCtx, stmts: Stmts, skip: i64, idx: i64, out: &mut Vec<i64>, gb: &mut Vec<u8>) -> i64 {
+    match stmts {
+        Stmts::SEnd => 0,
+        Stmts::SCell(st, rest) => {
+            match st {
+                Stmt::SLet(lmf, lnm, lty, lval) => {
+                    let _lmf: bool = lmf;
+                    sink_name(gb, lnm);
+                    let _t: i64 = tyopt_exp(c, lty, gb);
+                    let coll: bool = idx >= skip;
+                    cg_walk_ex(c, lval, coll, out, gb);
+                    cg_caps_stmts(c, rest, skip, idx + 1, out, gb)
+                },
+                Stmt::SExpr(ex) => {
+                    cg_walk_ex(c, ex, false, out, gb);
+                    cg_caps_stmts(c, rest, skip, idx, out, gb)
+                },
+                Stmt::SAssign(at, av) => {
+                    cg_walk_ex(c, at, false, out, gb);
+                    cg_walk_ex(c, av, false, out, gb);
+                    cg_caps_stmts(c, rest, skip, idx, out, gb)
+                },
+                Stmt::SWhile(wc, wb) => {
+                    cg_walk_ex(c, wc, false, out, gb);
+                    cg_walk_ex(c, wb, false, out, gb);
+                    cg_caps_stmts(c, rest, skip, idx, out, gb)
+                },
+                Stmt::SBreak => cg_caps_stmts(c, rest, skip, idx, out, gb),
+                Stmt::SContinue => cg_caps_stmts(c, rest, skip, idx, out, gb),
+            }
+        },
+    }
+}
+
+// (c35e) emit the captures struct (`i64[N]` via sentinel_alloc, one field per captured
+// var at byte offsets 0,8,… loaded from its CURRENT slot), returning the alloc register
+// (or -1 when empty → the caller emits `null`). Mirrors the oracle's
+// `emit_chained_captures_build` + the c35c parent loop.
+fn cg_build_caps_struct(c: &mut TyCtx, caps: &Vec<i64>) -> i64 {
+    let ncaps: i64 = len(*caps);
+    if ncaps == 0 {
+        0 - 1
+    } else {
+        let alloc_reg: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_alloc(i64 ");
+        cgo_int(c, ncaps * 8);
+        cgo_str(c, ")\n");
+        (*c).cg_used_alloc = true;
+        let mut i: i64 = 0;
+        while i < ncaps {
+            let off: i64 = i * 8;
+            let gp: i64 = cg_dst(c);
+            cgo_str(c, "getelementptr i8, ptr %v");
+            cgo_int(c, alloc_reg);
+            cgo_str(c, ", i64 ");
+            cgo_int(c, off);
+            cg_putc(c, '\n');
+            let vid: i64 = (*caps)[i];
+            let slot: i64 = cg_slot_get(c, vid);
+            let ld: i64 = cg_dst(c);
+            cgo_str(c, "load i64, ptr %v");
+            cgo_int(c, slot);
+            cg_putc(c, '\n');
+            cgo_str(c, "  store i64 %v");
+            cgo_int(c, ld);
+            cgo_str(c, ", ptr %v");
+            cgo_int(c, gp);
+            cg_putc(c, '\n');
+            i = i + 1;
+        }
+        alloc_reg
+    }
+}
+
+// (c35e) emit the captured-state pointer operand for a kont_push: `%vN` or `null`.
+fn cg_caps_op(c: &mut TyCtx, alloc_reg: i64, ncaps: i64) -> i64 {
+    if ncaps == 0 {
+        cgo_str(c, "null");
+        0
+    } else {
+        cgo_str(c, "%v");
+        cgo_int(c, alloc_reg);
+        0
+    }
+}
+
+// (c35e) walk the original body chain, emitting parent (chain index 0) + chaining
+// resumers (index 1..N-1), then the LAST resumer (lowering the tail) at chain end.
+fn cg_chained_walk(out: &mut Vec<u8>, c: &mut TyCtx, body: Expr, nlets: i64, letvids: &Vec<i64>, letty: i64, src: &[u8], name_s: i64, name_e: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
+    match body {
+        Expr::Block(stmts, tail) => {
+            cg_chained_chain(out, c, stmts, tail, 0, nlets, letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0)
+        },
+        _ => 0,
+    }
+}
+
+// (c35e) the chain emitter: chain element `kidx`'s RHS is lowered by the PARENT (kidx=0)
+// or resumer-(kidx-1) (kidx>=1, a chaining resumer); at SEnd, resumer-(N-1) lowers the
+// pure tail. Consumes the original body's stmt chain + tail.
+fn cg_chained_chain(out: &mut Vec<u8>, c: &mut TyCtx, stmts: Stmts, tail: Expr, kidx: i64, nlets: i64, letvids: &Vec<i64>, letty: i64, src: &[u8], name_s: i64, name_e: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64) -> i64 {
+    match stmts {
+        Stmts::SCell(st, rest) => {
+            match st {
+                Stmt::SLet(lmf, lnm, lty, lval) => {
+                    let _lmf: bool = lmf;
+                    sink_name(gb, lnm);
+                    let _t: i64 = tyopt_exp(c, lty, gb);
+                    if kidx == 0 {
+                        cg_chained_parent(out, c, lval, src, name_s, name_e, gb, k, s, e, body_tok0, nlets, letvids);
+                        0
+                    } else {
+                        cg_chained_resumer(out, c, lval, kidx - 1, false, letty, src, name_s, name_e, gb, k, s, e, body_tok0, nlets, letvids);
+                        0
+                    };
+                    cg_chained_chain(out, c, rest, tail, kidx + 1, nlets, letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0)
+                },
+                _ => {
+                    // non-let — never in an emitted chained body; drop `st`, recurse.
+                    cg_chained_chain(out, c, rest, tail, kidx, nlets, letvids, letty, src, name_s, name_e, gb, k, s, e, body_tok0)
+                },
+            }
+        },
+        Stmts::SEnd => {
+            // All RHSes consumed; the LAST resumer (nlets-1) lowers the pure tail.
+            cg_chained_resumer(out, c, tail, nlets - 1, true, letty, src, name_s, name_e, gb, k, s, e, body_tok0, nlets, letvids)
+        },
+    }
+}
+
+// (c35e) emit the PARENT define (reuses emit_tparams's param setup — cgnext at #params,
+// param slots set, param stores in cgbody): build captures[0], lower lets[0].RHS → kont,
+// push resumer-0, ret ptr.
+fn cg_chained_parent(out: &mut Vec<u8>, c: &mut TyCtx, rhs0: Expr, src: &[u8], name_s: i64, name_e: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64, nlets: i64, letvids: &Vec<i64>) -> i64 {
+    let mut caps0: Vec<i64> = vec_new();
+    cg_chained_caps(c, k, s, e, src, body_tok0, 0, letvids, nlets, &mut caps0, gb);
+    let alloc_reg: i64 = cg_build_caps_struct(c, &caps0);
+    let ncaps: i64 = len(caps0);
+    let mut pbuf: Vec<u8> = vec_new();
+    let _prt: i64 = dump_texpr(&mut pbuf, rhs0, 0 - 1, src, c, gb);
+    let _pbx: [u8] = vec_to_array(pbuf);
+    let kk: i64 = (*c).cglk;
+    let kv: i64 = (*c).cglv;
+    cgo_str(c, "  call void @sentinel_kont_push(ptr ");
+    cgo_operand(c, kk, kv);
+    cgo_str(c, ", ptr @__resume_");
+    cgo_slice(c, src, name_s, name_e);
+    cgo_str(c, "_0, ptr ");
+    cg_caps_op(c, alloc_reg, ncaps);
+    cgo_str(c, ")\n");
+    (*c).cg_used_kontpush = true;
+    // Assemble: `define ptr @<name>(<params>) { entry: <allocas> <body> ret ptr <kont> }`.
+    (*c).cg_to_body = false;
+    cgo_str(c, "define ptr @");
+    cgo_slice(c, src, name_s, name_e);
+    cg_putc(c, '(');
+    let np: i64 = len((*c).cgpty);
+    let mut hi: i64 = 0;
+    while hi < np {
+        if hi > 0 {
+            cgo_str(c, ", ")
+        } else {
+            0
+        };
+        let pty: i64 = (*c).cgpty[hi];
+        cgo_ty(c, pty);
+        cgo_str(c, " %arg");
+        cgo_int(c, hi);
+        hi = hi + 1;
+    }
+    cgo_str(c, ") {\nentry:\n");
+    cg_flush_allocas_body(c);
+    cgo_str(c, "  ret ptr ");
+    cgo_operand(c, kk, kv);
+    cgo_str(c, "\n}\n\n");
+    0
+}
+
+// (c35e) emit a resumer define (`@__resume_<name>_<level>(i64 %arg0, ptr %arg1)`): bind
+// let-`level` to the resumed value `%arg0` + each captures[level] var from `%arg1`; then
+// either (last) lower the pure `payload` tail + kont_pure-wrap, or (chaining) build
+// captures[level+1] + lower `payload` (= lets[level+1].RHS) → kont + push resumer-
+// (level+1). Each resumer is its own register space (`cg_reset`).
+fn cg_chained_resumer(out: &mut Vec<u8>, c: &mut TyCtx, payload: Expr, level: i64, is_last: bool, letty: i64, src: &[u8], name_s: i64, name_e: i64, gb: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, body_tok0: i64, nlets: i64, letvids: &Vec<i64>) -> i64 {
+    cg_reset(c);
+    // Bind let-level to the resumed value (%arg0).
+    let lvid: i64 = (*letvids)[level];
+    let v_slot: i64 = cg_alloca(c, letty);
+    cg_slot_set(c, lvid, v_slot);
+    cgo_str(c, "  store i64 %arg0, ptr %v");
+    cgo_int(c, v_slot);
+    cg_putc(c, '\n');
+    // Bind captures[level] from %arg1 (each loaded into a fresh i64 slot).
+    let mut capin: Vec<i64> = vec_new();
+    cg_chained_caps(c, k, s, e, src, body_tok0, level, letvids, nlets, &mut capin, gb);
+    let nin: i64 = len(capin);
+    let mut i: i64 = 0;
+    while i < nin {
+        let off: i64 = i * 8;
+        let gp: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr i8, ptr %arg1, i64 ");
+        cgo_int(c, off);
+        cg_putc(c, '\n');
+        let ld: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, gp);
+        cg_putc(c, '\n');
+        let cs: i64 = cg_alloca(c, 0);
+        cgo_str(c, "  store i64 %v");
+        cgo_int(c, ld);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, cs);
+        cg_putc(c, '\n');
+        cg_slot_set(c, capin[i], cs);
+        i = i + 1;
+    }
+    if is_last {
+        // Lower the pure tail → operand; wrap as a PURE_RETURN kont.
+        let mut tbuf: Vec<u8> = vec_new();
+        let _trt: i64 = dump_texpr(&mut tbuf, payload, 0 - 1, src, c, gb);
+        let _tbx: [u8] = vec_to_array(tbuf);
+        let tk: i64 = (*c).cglk;
+        let tv: i64 = (*c).cglv;
+        let kp: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_kont_pure(i64 ");
+        cgo_operand(c, tk, tv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_kontpure = true;
+        cg_chained_resumer_header(c, src, name_s, name_e, level);
+        cg_flush_allocas_body(c);
+        cgo_str(c, "  ret ptr %v");
+        cgo_int(c, kp);
+        cgo_str(c, "\n}\n\n");
+        0
+    } else {
+        // Chaining resumer: build captures[level+1], lower lets[level+1].RHS → kont,
+        // push resumer-(level+1), ret ptr.
+        let mut capout: Vec<i64> = vec_new();
+        cg_chained_caps(c, k, s, e, src, body_tok0, level + 1, letvids, nlets, &mut capout, gb);
+        let alloc_reg: i64 = cg_build_caps_struct(c, &capout);
+        let nout: i64 = len(capout);
+        let mut pbuf: Vec<u8> = vec_new();
+        let _prt: i64 = dump_texpr(&mut pbuf, payload, 0 - 1, src, c, gb);
+        let _pbx: [u8] = vec_to_array(pbuf);
+        let kk: i64 = (*c).cglk;
+        let kv: i64 = (*c).cglv;
+        let next: i64 = level + 1;
+        cgo_str(c, "  call void @sentinel_kont_push(ptr ");
+        cgo_operand(c, kk, kv);
+        cgo_str(c, ", ptr @__resume_");
+        cgo_slice(c, src, name_s, name_e);
+        cg_putc(c, '_');
+        cgo_int(c, next);
+        cgo_str(c, ", ptr ");
+        cg_caps_op(c, alloc_reg, nout);
+        cgo_str(c, ")\n");
+        (*c).cg_used_kontpush = true;
+        cg_chained_resumer_header(c, src, name_s, name_e, level);
+        cg_flush_allocas_body(c);
+        cgo_str(c, "  ret ptr ");
+        cgo_operand(c, kk, kv);
+        cgo_str(c, "\n}\n\n");
+        0
+    }
+}
+
+// (c35e) emit a resumer's `define` header + entry label (shared by both resumer arms).
+fn cg_chained_resumer_header(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, level: i64) -> i64 {
+    (*c).cg_to_body = false;
+    cgo_str(c, "define ptr @__resume_");
+    cgo_slice(c, src, name_s, name_e);
+    cg_putc(c, '_');
+    cgo_int(c, level);
+    cgo_str(c, "(i64 %arg0, ptr %arg1) {\nentry:\n");
     0
 }
 
