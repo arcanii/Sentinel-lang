@@ -2083,7 +2083,13 @@ For pasting into a fresh chat to bootstrap context:
     itself, each stage differentially validated against the Rust `snc` oracle).
 
     Verify HEAD with `git log -1` — HEAD is a `docs: session handoff` commit (this verify-HEAD +
-    RESUME-AT refresh), atop the **scg parser-hardening mirror** (`99d5ee1` — feat(selfhost): mirror
+    RESUME-AT refresh), atop the **ADR 0037 per-unit-back-end flip** (`7696f5d` — docs(adr 0037): flip
+    toward the per-unit separate-compilation back end; PINS D7 module-qualified mangling [`_S` +
+    length-prefixed module segments + a length-prefixed item; empty module path → the bare item, so
+    single-file ABI is byte-unchanged → an AMENDMENT not abi-v2] + the per-unit ID model [D5.1
+    extern-fn-in-FnId-space] + the codegen-per-unit boundary [D5.2, the 3 whole-program assumptions];
+    docs-only, the ADR-first gate before any code), atop the prior **session handoff** (`4825529`),
+    atop the **scg parser-hardening mirror** (`99d5ee1` — feat(selfhost): mirror
     the P2.5 parser deep-nesting hardening into scg. The self-hosted parser had the same DoS (SIGSEGV at
     ~6000 nested brackets). A faithful depth limit would thread `&mut i64` through ~30 recursive parser
     fns (high churn / differential risk) and the Sentinel parser has no error channel (ADR 0043 D5/D7),
@@ -2247,8 +2253,10 @@ For pasting into a fresh chat to bootstrap context:
     `sentinel_codegen_reaches_the_bootstrap_fixed_point`; **1473 tests**, modes 0–4 byte-identical, `scg`
     leak-free (`leaks --atExit`: 0 leaks lowering the merged compiler), four-check green.
 
-    ▶ **RESUME AT: owner's call among the open tracks — the self-host port AND the ADR 0046 partial-move
-    soundness fix are both COMPLETE.** **The self-host port: Bar B closed, ADR 0045 ACCEPTED-WITH-AMENDMENTS
+    ▶ **RESUME AT: the per-unit separate-compilation back end is UNDERWAY — ADR 0037 FLIPPED (step 1,
+    ADR-first, `7696f5d`); NEXT = code D.6 (1/N), the non-generic vertical slice (see the ▶ NOW ON block
+    below). The self-host port AND the ADR 0046 partial-move soundness fix are both COMPLETE.** **The
+    self-host port: Bar B closed, ADR 0045 ACCEPTED-WITH-AMENDMENTS
     (A1–A34): all 123 pass fixtures emit byte-identically `scg` == `snc llvm`, and the bootstrap fixed point
     holds via BOTH paths.** **ADR 0046 (the partial-move-through-field double-free, review-plan P1.2):
     CLOSED in `snc` AND `scg` → ACCEPTED-WITH-AMENDMENTS A1–A3** (feat `a16881b` snc + `714ce3f` the scg
@@ -2268,12 +2276,36 @@ For pasting into a fresh chat to bootstrap context:
     whole P0 band are complete — AND review-plan P3.1 (the PROGRAMMING_GUIDE rewrite, `2aac7cd`) AND P2
     (P2.3 `11c4c78` + P2.1/P2.2 `ec81d77` + P2.5 `ce2ad2e` + the scg parser-hardening mirror `99d5ee1`)
     are done — only P2.4 remains in P2.**
-    **▶ THE OWNER IS HEADING TO THE PER-UNIT SEPARATE-COMPILATION BACK END (ADR 0037 (a)) — the big
-    deferred architectural track (per-unit `.o` + module-qualified `abi-v1` mangling + multi-object link +
-    `linkonce_odr` cross-module generics → incremental builds; independent of the port). A standalone
-    bootstrap prompt for it was provided to the owner this session. It is ADR-FIRST: settle the D7/D9
-    decisions (mangling amendment, the 3 broken whole-program assumptions: `collect_mono_instantiations`,
-    the single `fns: HashMap<FnId, FunctionValue>`, `self.fns.get(&id)` call resolution) before code.**
+    **▶ NOW ON: THE PER-UNIT SEPARATE-COMPILATION BACK END (ADR 0037 (a)) — the big deferred architectural
+    track (per-unit `.o` + module-qualified `abi-v1` mangling + multi-object link + `linkonce_odr`
+    cross-module generics → incremental builds; independent of the port). ✅ STEP 1 DONE (ADR-FIRST): ADR
+    0037 is FLIPPED toward the per-unit (1/N) (`7696f5d`, docs-only) — the frozen-ABI decisions are PINNED
+    before code: (D7 mangling) `_S` + length-prefixed module segments + a length-prefixed item; **empty
+    module path → the bare item**, so single-file ABI is byte-unchanged → an AMENDMENT not abi-v2;
+    `main`/`sentinel_*` exempt; `_S` reserved; item = the existing intra-module abi-v1 §4 symbol wrapped as
+    ONE length-prefixed blob. (D5.1 per-unit ID model) the extern-fn-in-FnId-space model — an imported fn is
+    an extern `FnSignature` + a module-qualified `link_symbol`, no body, NO new expr variant; imported types
+    are layout-only (no symbol); `resolve_module(program, imports)` generalizes `resolve()` (`imports==[]` =
+    today's single-file path, byte-unchanged). (D5.2 codegen boundary) the 3 whole-program assumptions:
+    whole-program `collect_mono_instantiations`→per-unit+`linkonce_odr` (2/N); the single
+    `fns: HashMap<FnId, FunctionValue>`→per-unit, externs DECLARED; `self.fns.get(&id)`→mechanically
+    unchanged (returns a declaration for externs, the linker binds it). Built ADDITIVELY (opt-in `--separate`
+    until (2/N) parity, then default; the Path A merge + `snc merge` + BOTH bootstrap fixed points stay
+    green). ▶ **NEXT (D.6 1/N): CODE the non-generic vertical slice** — `resolve_module` (per-unit
+    FnId/StructId spaces + imported externs) → per-unit codegen (thread the module path into
+    `compile_to_object`; mangle local defs, declare imported externs) → the driver drives N modules → N `.o`
+    → path-sorted `cc` link → the **D10 two-module phase-go** (`main.sentinel` `use`s a `pub` fn + type from
+    `util/math.sentinel` → TWO `.o` linked → a computed exit code) + ui fixtures for
+    `ModuleNotFound`/`PrivateItem`. ⚠ THE FIRST CODE CHUNK THAT TOUCHES THE MANGLING must land the golden
+    test + the `docs/abi-v1.md` §4/§8 amendment IN THE SAME COMMIT (the C5 D7 discipline) + run the FULL
+    four-check incl. the selfhost differentials + both fixed points (byte-identity confirms the
+    empty-module-path path is unchanged). Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
+    D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
+    `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;
+    `collect_mono_instantiations` `:1738`; `mangle_mono_name`/`mangle_type` `:2049`/`:2067`; golden test
+    `abi_v1_mangling_is_stable` `:7736`; driver `discover_module_graph`/`run_build`/`run_build_merged` =
+    `crates/sentinel-driver/src/main.rs:663`/`:724`/`:837`; `merge_modules`/`resolve_imports` =
+    `crates/sentinel-resolve/src/lib.rs:1499`/`:1416`; the FnId builtins `:56–135`.**
     **▶ OTHER OPEN TRACKS (owner's call — see [[sentinel_review_action_plan]] +
     `docs/REVIEW_ACTION_PLAN.md`, the owner's UNTRACKED plan):** (1) **P2.4** — a Linux `ubuntu-24.04` CI
     job (observe-only / continue-on-error; glibc surfaces heap bugs macOS masks; before abi-v1 ossifies;
