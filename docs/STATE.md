@@ -102,9 +102,21 @@ consumes the ORIGINAL body for the N+1 lowerings, the capture sets are computed 
 alloca surfaced a scg quirk — an inline discarded `match` defaults its result to `ptr` (vs the oracle's `i64`),
 so the navigate-collect lives in a helper (`cg_caps_collect`, tail position → i64-directed). Un-parsers
 unchanged. Modes 0–3 byte-identical; both fixed-point paths preserved (the fixed point now also covers the new
-c35e SOURCE self-compiling identically). NEXT: **c36a** (return arm) → c36b (nested handle) → the full-corpus
-phase-go → ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27; c35b in A28; c35c in
-A29; c35d in A30; c35e in A31.)
+c35e SOURCE self-compiling identically). ✅ **effects/handlers c36a — handle `return` arm + pure-body wrap**
+(A32, feat `caf4175`) → **116 → 119** (c36a_return_arm_transform / _return_arm_after_resume / c37_handle_return,
+exit 42/42/84). A non-identity `return v => body` arm transforms the pure value at each pure-drain site (the
+dispatch pure block AND each k(v) pure path — Phase B's deep-handler re-wrap); a PURE body (`handle 42`) wraps
+via `kont_pure`. Oracle: `lower_handle` drops the return-arm Err gate + defers a nested-Handle body (c36b) +
+wraps pure bodies; `apply_return_arm` inlines the arm body at each site (the arm is carried in `handle_stack`).
+Sentinel (the hard half — the body lowers at MULTIPLE sites but move semantics bar reusing the Expr): RE-PARSE.
+`Ret::YesRet` gains the var + body token indices (parser); the tokens are copied into `TyCtx` (cgtk/cgts/cgte)
+ONLY when mode 4 + a `return` token is present (the selfhost compiler has none → the fixed point pays nothing);
+`cg_apply_return_arm` re-parses the body via `parse_expr` at each site. The `Ret::YesRet` AST change rippled
+mechanically to 4 stages (parser/resolve/effects/merge — all dumps byte-unchanged). Pure-body detection via
+`cg_tailk`. Modes 0–3 byte-identical; both fixed-point paths preserved (the new YesRet shape + types.sentinel
+code self-compile identically). NEXT: **c36b** (nested handle) → the full-corpus phase-go → ACCEPTED. (Full
+Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27; c35b in A28; c35c in A29; c35d in A30; c35e in
+A31; c36a in A32.)
 The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/

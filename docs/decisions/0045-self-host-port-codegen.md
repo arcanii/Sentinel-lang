@@ -1266,6 +1266,55 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     `lower_handle` Errs on `return_arm` today; the `dump_tret` / pure-path apply) → c36b (nested handle) →
     the full-corpus phase-go → ADR 0045 ACCEPTED.
 
+- **A32 — BAR B: effects/handlers, sub-slice c36a — handle `return` arm + pure-body wrap LANDED (feat
+  `caf4175`).** The sixth handler sub-phase (the production's C3.6(a)): a non-identity `return v => body` arm
+  on a `handle`, transforming the pure value at each pure-drain site per Phase B's deep-handler re-wrap
+  (`k := \v. handle (resume v) with H` — so `k(v)`'s pure result IS the return arm applied to the resumed
+  value, exactly as the body's direct pure return is). Also lands PURE handle bodies (`handle 42`) via a
+  `sentinel_kont_pure` wrap. The emitting set grew **116 → 119** — THREE fixtures flip `Err → Ok`
+  (byte-identical `scg` == `snc llvm` + behaviourally == inkwell, leak-free): `c36a_return_arm_transform`
+  (`do_pure()` returns pure → the dispatch pure block transforms 21→42), `c36a_return_arm_after_resume` (the
+  body performs; the Io.read arm's `k(21)` pure path transforms 21→42 — the REQUIRED k(v)-path case, since the
+  dispatch block is dead here), and `c37_handle_return` (pure body `42` → 84, no handler arms). The flip set
+  was verified exact; c36b (nested handle) stays deferred.
+  - **The return arm is INLINED at each pure-drain site** (matching inkwell — correct for embedded `k(v)`, not
+    just `k(v)` as the whole arm body). Two sites: the dispatch loop's PURE_RETURN block (the body's direct
+    pure return) and `lower_resume_kont`'s pure path (each `k(v)`). So the body's cg appears once per site
+    (verified: `v*2` emits twice in `c36a_return_arm_transform`, the dead k(0) path + the live dispatch block).
+  - **Oracle (`llvm_dump.rs`):** `lower_handle` drops the `return_arm.is_some()` Err gate, adds a
+    nested-`Handle`-body Err (c36b deferral), and wraps a pure body (`!produces_kont`) via `kont_pure`. The new
+    `apply_return_arm` binds `v` to a fresh i64 slot + lowers the arm body; it is called at the dispatch pure
+    block AND in `lower_resume_kont`'s pure path. The `handle_stack` entry grows to `(loop_b, cks,
+    Option<TypedReturnArm>)` — the arm is carried as an OWNED clone so the k(v) path applies it without
+    re-borrowing the stack across its `lower_expr`.
+  - **Sentinel mode-4 (`types.sentinel`) — THE HARD HALF:** the return body must lower at MULTIPLE pure-drain
+    sites, but Sentinel has no `clone` (move semantics bar inspect-then-reuse of the parsed `Expr`). Solved by
+    **RE-PARSE**: `Ret::YesRet` gains the var's token index + the body's start-token index (parser captures
+    them); the program tokens are COPIED into `TyCtx` (`cgtk`/`cgts`/`cgte`) ONLY when mode 4 + a `return`
+    token (43) is present in the source (the selfhost compiler has no handlers → no `return` token → the copy
+    is skipped → **the fixed point pays nothing**). The new **`cg_apply_return_arm`** re-parses the body via
+    `parse_expr` from the stored token range at each site (the Handle arm's dispatch pure block +
+    `cg_emit_resume_tail`'s k(v) path), binding `v` to a fresh i64 slot re-sliced from its token. The borrow
+    `parse_expr(&(*c).cgtk, …)` (a `TyCtx` field as a `&Vec<i64>` arg) was de-risked in isolation first.
+  - **The Handle arm reconstructs `hr`** after peeking its token info (a `match` that moves the parts back into
+    a `Ret::YesRet`), so the `cg_ret_*` state is set BEFORE `dump_tharms` (the k(v) sites read it) yet `hr2`
+    still reaches `dump_tret`. `dump_tret` is now mode-aware: mode 4 DISPOSES the body (the cg is at the sites;
+    the `out` type-dump is throwaway in cg) — modes 0-3 emit the `(return #vid <body>)` S-expr from the Expr.
+    A PURE body is detected via **`cg_tailk`** (reset before the body walk; a `perform`/effecting-call sets it)
+    and wrapped. `cg_ret_on`/`ntok`/`tok0` save/restore mirrors the `cg_h_*` nesting discipline.
+  - **The AST change** (`Ret::YesRet` gains 2 i64 fields) rippled MECHANICALLY to the 4 other stages — parser
+    `dump_ret`, resolve `dump_rret`, effects `walk_ret`, merge `emit_ret` — each binds + ignores the new
+    fields, so every stage's dump stays byte-unchanged (the parser/resolve/effects/merge differentials all
+    pass). `parse_expr` + `slice_of` were made `pub`.
+  - **Validation:** 119/119 emitted fixtures `scg` == `snc llvm` byte-for-byte; ALL stage differentials
+    (lex/parse/resolve/effects/types/borrow/mir/ctverify/codegen) byte-identical; the 3 behaviourally ==
+    inkwell (42/42/84) + leak-free (`leaks --atExit`: 0). Modes 0-3 byte-identical; BOTH bootstrap fixed-point
+    capstones pass — the new `YesRet` shape + the new types.sentinel code self-compile identically (the AST
+    change flows through the merged compiler, exercised by the fixed-point as in c35e). 1476 tests, four-check
+    green. **NEXT: c36b** (nested handle — the inkwell `is_nested` / Kont*-merge / propagate-block path; the
+    oracle Errs on a nested-Handle body today, the `cg_h_*` save/restore is already in place) → the full-corpus
+    phase-go → ADR 0045 ACCEPTED.
+
 ## Decision
 
 ### D1. Goal.

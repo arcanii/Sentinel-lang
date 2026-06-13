@@ -2082,9 +2082,15 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A31 — effects c35e` commit (this
+    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A32 — effects c36a` commit (this
     verify-HEAD refresh), atop the
-    **effects/handlers c35e feat** (`6bdd23b` — chained effecting lets; emitting set
+    **effects/handlers c36a feat** (`caf4175` — handle `return` arm + pure-body wrap; emitting set
+    116 → 119: c36a_return_arm_transform + _return_arm_after_resume + c37_handle_return [exit 42/42/84]; oracle
+    `lower_handle` drops the return-arm gate + wraps pure bodies + `apply_return_arm` inlines at the dispatch
+    pure block AND `lower_resume_kont`'s k(v) path; Sentinel RE-PARSES the body [`Ret::YesRet` gains 2 token
+    indices, tokens copied to `TyCtx` only when mode 4 + a `return` token; `cg_apply_return_arm` via
+    `parse_expr`]; the `YesRet` AST change rippled to 4 stages [bind+ignore]; pure-body via `cg_tailk`), atop
+    the **effects/handlers c35e feat** (`6bdd23b` — chained effecting lets; emitting set
     113 → 116: c35e_chained_perform + _chained_dependent_perform + _chained_perform_with_capture [exit 42
     each]; oracle `detect_chained_lets_shape`/`dump_chained_lets_fn` + `compute_chained_captures`; Sentinel
     `cg_chained_emit` [3-phase: re-parse-bind / consume-original-for-lowering / on-demand capture re-parses]
@@ -2118,8 +2124,8 @@ For pasting into a fresh chat to bootstrap context:
     `7054145` + feat `41f00fa`). The 8/N codegen chain below: (8f-2/8f-3) snc llvm lowers the full compiler
     (`59c30a7` A17 + `67fa808`) · (8f-1) selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e)
     enums+match (A14/A15) · heap drops (A11–A13) · Vec (A9/A10) · 8d refs/builtins · 8c aggregates · 8b
-    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A31; Bar B in progress —
-    `print` + nullable + secret + generics + classes + effects c35a/c35b/c35c/c35d/c35e done, **116/123+ emitting**); the
+    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A32; Bar B in progress —
+    `print` + nullable + secret + generics + classes + effects c35a/b/c/d/e + c36a done, **119/123+ emitting**); the
     **bootstrap fixed point is reached via BOTH paths** — (b) 8g merge-to-source + (a) the self-hosted merge (`scg` discovers+merges+emits itself).
     Bar B is the remaining open scope for the full-corpus ACCEPTED flip — or an owner-deferred close.
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin local
@@ -2296,10 +2302,27 @@ For pasting into a fresh chat to bootstrap context:
     (infers from the then-branch). **REUSABLE RULE: a discarded `match` statement needs an i64-directing
     context (tail position / annotated binding) or scg allocas its result slot as `ptr`.** First Bar-B slice
     where the new SENTINEL SOURCE (not just its emitted output) had to self-compile identically.
+    where the new SENTINEL SOURCE (not just its emitted output) had to self-compile identically. **✅ EFFECTS
+    c36a LANDED** (A32, feat `caf4175`, emitting set **116 → 119**) — **handle `return` arm + pure-body wrap**:
+    a non-identity `return v => body` transforms the pure value at each pure-drain site (the dispatch pure
+    block AND each k(v) pure path — Phase B's re-wrap); a PURE body (`handle 42`) wraps via `kont_pure`. THREE
+    fixtures flip: c36a_return_arm_transform / _return_arm_after_resume (the k(v)-path case — REQUIRED) /
+    c37_handle_return (42→84). Oracle: `lower_handle` drops the return-arm Err + defers nested-Handle bodies +
+    wraps pure; `apply_return_arm` inlines at both sites (arm carried in `handle_stack`). Sentinel (THE HARD
+    HALF — multi-site lowering vs no-clone): **RE-PARSE** — `Ret::YesRet` gains the var+body token indices, the
+    tokens are copied to `TyCtx` ONLY when mode 4 + a `return` token (so the fixed point pays nothing),
+    `cg_apply_return_arm` re-parses via `parse_expr` at each site (the borrow `parse_expr(&(*c).cgtk, …)`
+    de-risked in isolation first). The Handle arm reconstructs `hr` to set `cg_ret_*` before `dump_tharms`;
+    `dump_tret` disposes the body in mode 4 / type-dumps in 0-3; pure-body via `cg_tailk`. ⚠ The `YesRet` AST
+    change rippled to 4 stages (parser/resolve/effects/merge — bind+ignore, dumps byte-unchanged); `parse_expr`
+    + `slice_of` made `pub`. Both fixed-point capstones pass (the AST change + new code self-compile). **▶ NEXT:
+    c36b** (nested handle — the inkwell `is_nested` path: a nested-`Handle` body lowers to Kont*-typed merge
+    values [arms wrap their i64 via `kont_pure`, the pure-return case passes/rewraps], the switch default is a
+    propagate block contributing the un-caught kont to the merge so the OUTER handle dispatches it; the oracle
+    Errs on a nested-Handle body today [the c36a guard], the `cg_h_*` save/restore is already in place).
     Sub-phase like the production C3.5(a)–(e)+C3.6 — done: **c35a** inline + **c35b** effecting-fn ABI +
-    **c35c** let-bound perform + **c35d** embedded perform + **c35e** chained lets.
-    Remaining: **c36a**
-    return arm (the `dump_tret`/pure-path apply; `lower_handle` Errs on `return_arm` today) → **c36b** nested
+    **c35c** let-bound perform + **c35d** embedded perform + **c35e** chained lets + **c36a** return arm.
+    Remaining: **c36b** nested
     handle (the `cg_h_*` save/restore is already in place; `produces_kont` would accept a nested `Handle`) →
     the full-corpus phase-go (8l) → **ADR 0045 ACCEPTED**. Runtime symbols for those: all the kont symbols
     (`perform_op`/`kont_resume`/`kont_consume_pure`/`kont_pure`/`kont_push`) are now USED. The path-(a) build
