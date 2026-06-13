@@ -2083,7 +2083,15 @@ For pasting into a fresh chat to bootstrap context:
     itself, each stage differentially validated against the Rust `snc` oracle).
 
     Verify HEAD with `git log -1` — HEAD is a `docs: session handoff` commit (this verify-HEAD +
-    RESUME-AT refresh), atop the **CT-model doc + secret-flow conformance suite** (`ec81d77` —
+    RESUME-AT refresh), atop the **front-end panic-freedom fuzzer + 2 bug fixes** (`ce2ad2e` —
+    review-plan P2.5 / F11: a dependency-free, deterministic, CI-integrated fuzzer
+    [`crates/sentinel-syntax/tests/fuzz_panic_freedom.rs` — random bytes + token soup + corpus
+    mutations; `SENTINEL_FUZZ_ITERS` override, 2M-iter campaign clean] that FOUND + FIXED two real
+    parser bugs: a DoS stack overflow on ~256 nested `(` → a `MAX_EXPR_DEPTH=128` guard +
+    `ParseError::RecursionLimit`, and a panic on `"pub"` alone [trailing `pub` hit an `unreachable!()`]
+    → a clean `unexpected_eof`. Both error-path-only → differentials + both fixed points unaffected;
+    the selfhost parser.sentinel mirror is a follow-on), atop the
+    **CT-model doc + secret-flow conformance suite** (`ec81d77` —
     review-plan P2.1 + P2.2 / F3: `docs/ct-model.md` catalogs every construct's CT modeling [4 sinks;
     PRECISE vs `Opaque`/`Call`-conservative vs off-the-1.0-CT-path; handler arm bodies are unchecked]
     + 7 ui rejects + 1 pass [`c52_secret_*`] proving taint SURVIVES the Call/field/match `Opaque`
@@ -2245,18 +2253,20 @@ For pasting into a fresh chat to bootstrap context:
     program, not the optimized machine code / forced emission); P0.2 the borrow checker's posture stated
     honestly; P0.3 `CONTRIBUTING.md`; P0.4 the `SECRETS_LIFECYCLE.md` vision banner; P0.5 the stale ADR
     0019 pointer (already gone); P0.6 the CI/justfile `cargo test --doc` step. So **P1.1 + P1.2 + the
-    whole P0 band are complete — AND review-plan P3.1 (the PROGRAMMING_GUIDE rewrite, `2aac7cd`) AND the
-    P2 verification-hardening CORE (P2.3 `11c4c78` + P2.1/P2.2 `ec81d77`) are done.**
+    whole P0 band are complete — AND review-plan P3.1 (the PROGRAMMING_GUIDE rewrite, `2aac7cd`) AND P2
+    (P2.3 `11c4c78` + P2.1/P2.2 `ec81d77` + P2.5 `ce2ad2e`) are done — only P2.4 remains in P2.**
     **▶ OPEN TRACKS (owner's call — see [[sentinel_review_action_plan]] +
-    `docs/REVIEW_ACTION_PLAN.md`, the owner's UNTRACKED plan):** (1) **finish P2 — 2nd platform / fuzzing**:
-    P2.4 a Linux `ubuntu-24.04` CI job (observe-only; glibc surfaces heap bugs macOS masks; before abi-v1
-    ossifies), P2.5 cargo-fuzz seeds (lexer/parser, then differential fuzzing — the per-stage dump oracles
-    make it cheap); (2) **rest of P3 — docs/DX**: P3.2 split STATE.md (banner + capabilities vs an
-    append-only journal), P3.3 DESIGN vs DESIGN2 disposition, P3.4 a stale-reference sweep, P3.5 a minimal
-    LSP (wire the salsa pipeline → publishDiagnostics), P3.6 a diagnostics-quality pass; (3) the per-unit
-    separate-compilation back end (ADR 0037 (a) — incremental builds, independent of the port); (4) P4
-    (external CT review of the now-calibrated claim + ct-model doc + conformance suite; perf profile;
-    deferred Polonius ergonomics). Detail: [[sentinel_review_action_plan]] (the full P0–P4 status) +
+    `docs/REVIEW_ACTION_PLAN.md`, the owner's UNTRACKED plan):** (1) **P2.4** — a Linux `ubuntu-24.04` CI
+    job (observe-only / continue-on-error; glibc surfaces heap bugs macOS masks; before abi-v1 ossifies;
+    NOTE: configurable but only verifiable on GitHub, no Linux locally); (2) **rest of P3 — docs/DX**:
+    P3.2 split STATE.md (banner + capabilities vs an append-only journal), P3.3 DESIGN vs DESIGN2
+    disposition, P3.4 a stale-reference sweep, P3.5 a minimal LSP (wire the salsa pipeline →
+    publishDiagnostics — error-as-you-type, 3 reviewers flagged the stub), P3.6 a diagnostics-quality
+    pass; (3) the per-unit separate-compilation back end (ADR 0037 (a) — incremental builds, independent
+    of the port); (4) **P4** (external CT review of the now-calibrated claim + `docs/ct-model.md` +
+    conformance suite — the artifacts were built to feed it; perf profile; deferred Polonius ergonomics);
+    (5) a follow-on: mirror the P2.5 parser hardening (depth limit + `pub`-EOF) into `selfhost/parser.sentinel`
+    so `scg` is equally robust. Detail: [[sentinel_review_action_plan]] (the full P0–P4 status) +
     [[sentinel_partial_move_fix]] + `docs/ct-model.md`.
 
     --- BELOW: the Bar B historical record (the completed full-corpus codegen-parity work) ---
