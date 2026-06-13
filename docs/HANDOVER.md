@@ -2083,7 +2083,17 @@ For pasting into a fresh chat to bootstrap context:
     itself, each stage differentially validated against the Rust `snc` oracle).
 
     Verify HEAD with `git log -1` — HEAD is a `docs: session handoff` commit (this verify-HEAD +
-    RESUME-AT refresh), atop the **PROGRAMMING_GUIDE rewrite** (`2aac7cd` — review-plan P3.1 / F6:
+    RESUME-AT refresh), atop the **CT-model doc + secret-flow conformance suite** (`ec81d77` —
+    review-plan P2.1 + P2.2 / F3: `docs/ct-model.md` catalogs every construct's CT modeling [4 sinks;
+    PRECISE vs `Opaque`/`Call`-conservative vs off-the-1.0-CT-path; handler arm bodies are unchecked]
+    + 7 ui rejects + 1 pass [`c52_secret_*`] proving taint SURVIVES the Call/field/match `Opaque`
+    funnels → `mir::secret_leak`, the direct sinks caught at the type level, the no-sink accept side at
+    exit 80; probing found NO gap; +8 tests, 1493 total), atop the **lookup_var loud-fallback guard**
+    (`11c4c78` — review-plan P2.3 / F4: a `debug_assert!` makes an unbound-VarId resolver bug LOUD in
+    debug/test builds [release keeps the total fallback], distinguishing the benign `match`-arm-binding
+    case via a new `expected_unbound` set; output-neutral, so differentials + selfhost + fixed points
+    are unaffected — the full corpus passes with the assert ACTIVE), atop the
+    **PROGRAMMING_GUIDE rewrite** (`2aac7cd` — review-plan P3.1 / F6:
     the guide was pre-C1 "i64 only" + untyped `fn f(x)` [now a parse error]; rewritten as a tour of
     CURRENT Sentinel covering every feature [types/let, operators, fns, if/while, structs, enums+match,
     refs/moves/borrow, strings/[u8]/Vec, file I/O, generics, ?T, secret+CT, effects, classes/traits/
@@ -2235,20 +2245,19 @@ For pasting into a fresh chat to bootstrap context:
     program, not the optimized machine code / forced emission); P0.2 the borrow checker's posture stated
     honestly; P0.3 `CONTRIBUTING.md`; P0.4 the `SECRETS_LIFECYCLE.md` vision banner; P0.5 the stale ADR
     0019 pointer (already gone); P0.6 the CI/justfile `cargo test --doc` step. So **P1.1 + P1.2 + the
-    whole P0 band are complete — AND review-plan P3.1 (the PROGRAMMING_GUIDE rewrite) is done (`2aac7cd`).**
+    whole P0 band are complete — AND review-plan P3.1 (the PROGRAMMING_GUIDE rewrite, `2aac7cd`) AND the
+    P2 verification-hardening CORE (P2.3 `11c4c78` + P2.1/P2.2 `ec81d77`) are done.**
     **▶ OPEN TRACKS (owner's call — see [[sentinel_review_action_plan]] +
-    `docs/REVIEW_ACTION_PLAN.md`, the owner's UNTRACKED plan):** (1) **P2 — verification hardening**:
-    P2.1 a `docs/ct-model.md` (per-construct CT modeling status: precise vs `Opaque`-conservative vs
-    not-on-1.0-path), P2.2 a secret-flow conformance suite (route a secret through EACH Opaque-funneled
-    construct → each sink, assert still rejected — the test-backed answer to "soundness rests on the type
-    checker being right everywhere"; pairs with P0.1), P2.3 a loud `lookup_var` fallback (`debug_assert!`
-    at `crates/sentinel-mir/src/lib.rs:318` — the one small CODE change), P2.4 a Linux `ubuntu-24.04` CI
-    job (observe-only; glibc surfaces heap bugs macOS masks; before abi-v1 ossifies), P2.5 cargo-fuzz
-    seeds; (2) **rest of P3 — docs/DX**: P3.2 split STATE.md (banner + capabilities vs an append-only
-    journal), P3.4 a stale-reference sweep, P3.5 a minimal LSP (wire the salsa pipeline →
-    publishDiagnostics), P3.6 a diagnostics-quality pass; (3) the per-unit separate-compilation back end
-    (ADR 0037 (a) — incremental builds, independent of the port). Detail:
-    [[sentinel_review_action_plan]] + [[sentinel_partial_move_fix]] + `docs/decisions/0046`.
+    `docs/REVIEW_ACTION_PLAN.md`, the owner's UNTRACKED plan):** (1) **finish P2 — 2nd platform / fuzzing**:
+    P2.4 a Linux `ubuntu-24.04` CI job (observe-only; glibc surfaces heap bugs macOS masks; before abi-v1
+    ossifies), P2.5 cargo-fuzz seeds (lexer/parser, then differential fuzzing — the per-stage dump oracles
+    make it cheap); (2) **rest of P3 — docs/DX**: P3.2 split STATE.md (banner + capabilities vs an
+    append-only journal), P3.3 DESIGN vs DESIGN2 disposition, P3.4 a stale-reference sweep, P3.5 a minimal
+    LSP (wire the salsa pipeline → publishDiagnostics), P3.6 a diagnostics-quality pass; (3) the per-unit
+    separate-compilation back end (ADR 0037 (a) — incremental builds, independent of the port); (4) P4
+    (external CT review of the now-calibrated claim + ct-model doc + conformance suite; perf profile;
+    deferred Polonius ergonomics). Detail: [[sentinel_review_action_plan]] (the full P0–P4 status) +
+    [[sentinel_partial_move_fix]] + `docs/ct-model.md`.
 
     --- BELOW: the Bar B historical record (the completed full-corpus codegen-parity work) ---
     **Bar B headline** (DONE): the Sentinel compiler fully compiles itself, via BOTH fixed-point paths —
