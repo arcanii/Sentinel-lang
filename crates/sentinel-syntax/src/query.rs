@@ -171,6 +171,13 @@ fn parse_error_to_diagnostic(err: &ParseError) -> Diagnostic {
             message: format!("invalid escape sequence in literal `{text}`"),
             span: span.offset()..(span.offset() + span.len()),
         },
+        ParseError::RecursionLimit { span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::recursion_limit",
+            message: "expression nested too deeply".to_string(),
+            span: span.offset()..(span.offset() + span.len()),
+        },
     }
 }
 

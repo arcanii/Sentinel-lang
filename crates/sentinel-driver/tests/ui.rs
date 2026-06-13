@@ -131,3 +131,7 @@ ui_snapshot!(c52_secret_or_leak, "c52_secret_or_leak.sentinel");
 ui_snapshot!(c52_secret_in_if, "c52_secret_in_if.sentinel");
 ui_snapshot!(c52_secret_array_index, "c52_secret_array_index.sentinel");
 ui_snapshot!(c52_secret_divisor, "c52_secret_divisor.sentinel");
+
+// ---- Fuzzer-found parse robustness (review F11 / P2.5): a trailing `pub`
+// with no item used to panic (`unreachable!`); now a clean unexpected_eof. ----
+ui_snapshot!(parse_trailing_pub, "parse_trailing_pub.sentinel");

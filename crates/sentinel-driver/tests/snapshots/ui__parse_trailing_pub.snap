@@ -1,0 +1,11 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"parse_trailing_pub.sentinel\")"
+---
+sentinel::parse::unexpected_eof
+
+  × unexpected end of input, expected an item (`fn`, `struct`, `effect`,
+  │ `trait`, or `enum`) after `pub`
+   ╭─[tests/ui/parse_trailing_pub.sentinel:6:1]
+ 5 │ pub
+   ╰────

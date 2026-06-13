@@ -1,0 +1,5 @@
+// Review F11 / P2.5 (fuzzer find): a trailing `pub` with no item following
+// must be a CLEAN parse error, not a panic. `parse_optional_visibility`
+// consumes the `pub`, leaving EOF where an item was expected — which used to
+// hit an `unreachable!()`. Now it is `sentinel::parse::unexpected_eof`.
+pub

@@ -209,7 +209,31 @@ pub enum ParseError {
         #[label("invalid escape here")]
         span: miette::SourceSpan,
     },
+
+    /// Review F11 / P2.5: the expression nesting exceeded
+    /// [`MAX_EXPR_DEPTH`]. The recursive-descent parser would otherwise
+    /// stack-overflow (a denial-of-service on adversarial input — e.g. a
+    /// few hundred nested `(`); this turns the crash into a clean rejection.
+    /// No legitimate program nests expressions remotely this deep (binary
+    /// chains are iterative, not recursive — only true nesting counts).
+    #[error("expression nested too deeply (limit {MAX_EXPR_DEPTH})")]
+    #[diagnostic(
+        code(sentinel::parse::recursion_limit),
+        help("the expression is nested past the parser's depth limit; flatten it")
+    )]
+    RecursionLimit {
+        #[label("nesting exceeds the depth limit here")]
+        span: miette::SourceSpan,
+    },
 }
+
+/// Review F11 / P2.5: the maximum expression-nesting depth the recursive-
+/// descent parser will recurse to before returning [`ParseError::RecursionLimit`]
+/// instead of risking a stack overflow. Generous for any real program (genuine
+/// nesting — parens, nested calls, nested `if`/`match` — is rarely past ~20;
+/// binary/postfix chains are iterative), and well under the overflow threshold
+/// even on a small (2 MiB) thread stack.
+const MAX_EXPR_DEPTH: usize = 128;
 
 /// Parse a Sentinel source string into a [`Program`] — zero or
 /// more statements followed by a trailing expression. This is the
@@ -290,11 +314,15 @@ pub struct Parser<'a> {
     /// struct literal. Set to false while parsing an `if` condition;
     /// parens / let-RHS / fn-call args / etc. restore it to true.
     allow_struct_lit: bool,
+    /// Review F11 / P2.5: current expression-nesting depth, bounded by
+    /// [`MAX_EXPR_DEPTH`] in [`Parser::parse_expr`] so adversarial deep
+    /// nesting is rejected, not a stack overflow.
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(src: &'a str, tokens: &'a [Spanned<TokenKind>]) -> Self {
-        Self { src, tokens, pos: 0, allow_struct_lit: true }
+        Self { src, tokens, pos: 0, allow_struct_lit: true, depth: 0 }
     }
 
     pub fn parse_top(&mut self) -> Result<Expr, ParseError> {
@@ -354,7 +382,15 @@ impl<'a> Parser<'a> {
                         span: to_source_span(&t.span),
                     });
                 }
-                None => unreachable!(),
+                // Review F11 / P2.5: NOT unreachable — `parse_optional_visibility`
+                // consumes a `pub`, so a trailing `pub` with no item following hits
+                // EOF here (the fuzzer found `"pub"` alone panicked). Reject cleanly.
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "an item (`fn`, `struct`, `effect`, `trait`, or `enum`) after `pub`",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
             }
         }
         if fns.is_empty()
@@ -3007,15 +3043,29 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        if self.peek_kind() == Some(TokenKind::If) {
-            return self.parse_if();
-        }
-        // Phase D.1 / ADR 0032: `match` is a control-flow expression,
-        // dispatched here alongside `if`.
-        if self.peek_kind() == Some(TokenKind::Match) {
-            return self.parse_match_expr();
-        }
-        self.parse_or()
+        // Review F11 / P2.5: `parse_expr` is the recursion cycle's entry — every
+        // nested expression (parens, call args, nested `if`/`match`, block tails)
+        // funnels back through here. Bound the depth so adversarial deep nesting
+        // is a clean `RecursionLimit` rejection, not a stack overflow. Always
+        // decrement so a recovered parse keeps an accurate count.
+        self.depth += 1;
+        let result = if self.depth > MAX_EXPR_DEPTH {
+            let span = self
+                .peek()
+                .map(|t| t.span.clone())
+                .unwrap_or_else(|| self.eof_span());
+            Err(ParseError::RecursionLimit { span: to_source_span(&span) })
+        } else if self.peek_kind() == Some(TokenKind::If) {
+            self.parse_if()
+        } else if self.peek_kind() == Some(TokenKind::Match) {
+            // Phase D.1 / ADR 0032: `match` is a control-flow expression,
+            // dispatched here alongside `if`.
+            self.parse_match_expr()
+        } else {
+            self.parse_or()
+        };
+        self.depth -= 1;
+        result
     }
 
     /// `or_expr = and_expr ('||' and_expr)*` — left-associative,
