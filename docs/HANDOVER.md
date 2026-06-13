@@ -2083,7 +2083,14 @@ For pasting into a fresh chat to bootstrap context:
     itself, each stage differentially validated against the Rust `snc` oracle).
 
     Verify HEAD with `git log -1` — HEAD is a `docs: session handoff` commit (this verify-HEAD +
-    RESUME-AT refresh), atop the **P0 claim-calibration batch** (`0810491` — docs: P0 claim
+    RESUME-AT refresh), atop the **PROGRAMMING_GUIDE rewrite** (`2aac7cd` — review-plan P3.1 / F6:
+    the guide was pre-C1 "i64 only" + untyped `fn f(x)` [now a parse error]; rewritten as a tour of
+    CURRENT Sentinel covering every feature [types/let, operators, fns, if/while, structs, enums+match,
+    refs/moves/borrow, strings/[u8]/Vec, file I/O, generics, ?T, secret+CT, effects, classes/traits/
+    delegation, concurrency, modules], EVERY example real current syntax drawn from / verified against
+    the CI-tested `tests/pass/` fixtures [each adapted snippet compiled + run to its claimed exit code,
+    incl. a multi-file module build], C0 demoted to a historical appendix; docs-only), atop the
+    **P0 claim-calibration batch** (`0810491` — docs: P0 claim
     calibration and posture, review-plan P0.1–P0.6, docs/config only: the README constant-time claim
     reworded from "proves it" to the precise property + its two boundaries [type system as taint oracle;
     pre-LLVM, no forced emission — copied from the sentinel-mir doc comments]; the borrow checker's
@@ -2228,7 +2235,8 @@ For pasting into a fresh chat to bootstrap context:
     program, not the optimized machine code / forced emission); P0.2 the borrow checker's posture stated
     honestly; P0.3 `CONTRIBUTING.md`; P0.4 the `SECRETS_LIFECYCLE.md` vision banner; P0.5 the stale ADR
     0019 pointer (already gone); P0.6 the CI/justfile `cargo test --doc` step. So **P1.1 + P1.2 + the
-    whole P0 band are complete.** **▶ OPEN TRACKS (owner's call — see [[sentinel_review_action_plan]] +
+    whole P0 band are complete — AND review-plan P3.1 (the PROGRAMMING_GUIDE rewrite) is done (`2aac7cd`).**
+    **▶ OPEN TRACKS (owner's call — see [[sentinel_review_action_plan]] +
     `docs/REVIEW_ACTION_PLAN.md`, the owner's UNTRACKED plan):** (1) **P2 — verification hardening**:
     P2.1 a `docs/ct-model.md` (per-construct CT modeling status: precise vs `Opaque`-conservative vs
     not-on-1.0-path), P2.2 a secret-flow conformance suite (route a secret through EACH Opaque-funneled
@@ -2236,9 +2244,10 @@ For pasting into a fresh chat to bootstrap context:
     checker being right everywhere"; pairs with P0.1), P2.3 a loud `lookup_var` fallback (`debug_assert!`
     at `crates/sentinel-mir/src/lib.rs:318` — the one small CODE change), P2.4 a Linux `ubuntu-24.04` CI
     job (observe-only; glibc surfaces heap bugs macOS masks; before abi-v1 ossifies), P2.5 cargo-fuzz
-    seeds; (2) **P3 — docs/DX**: P3.1 rewrite the stale `PROGRAMMING_GUIDE.md` (pre-C1 "i64 only"; pull
-    examples from `tests/pass/`), P3.2 split STATE.md, P3.5 a minimal LSP; (3) the per-unit
-    separate-compilation back end (ADR 0037 (a) — incremental builds, independent of the port). Detail:
+    seeds; (2) **rest of P3 — docs/DX**: P3.2 split STATE.md (banner + capabilities vs an append-only
+    journal), P3.4 a stale-reference sweep, P3.5 a minimal LSP (wire the salsa pipeline →
+    publishDiagnostics), P3.6 a diagnostics-quality pass; (3) the per-unit separate-compilation back end
+    (ADR 0037 (a) — incremental builds, independent of the port). Detail:
     [[sentinel_review_action_plan]] + [[sentinel_partial_move_fix]] + `docs/decisions/0046`.
 
     --- BELOW: the Bar B historical record (the completed full-corpus codegen-parity work) ---
