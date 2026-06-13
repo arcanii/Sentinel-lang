@@ -315,6 +315,14 @@ struct TyCtx {
     cg_used_consume: bool,   // declare sentinel_kont_consume_pure
     cg_used_kontpure: bool,  // (c35b) declare sentinel_kont_pure (wrap a pure value)
     cg_used_kontpush: bool,  // (c35c) declare sentinel_kont_push (push a captured frame)
+    // (concurrency / ADR 0024) the structured-concurrency runtime declares + state.
+    cg_used_taskspawn: bool,
+    cg_used_taskawait: bool,
+    cg_used_scopeenter: bool,
+    cg_used_scoperegister: bool,
+    cg_used_scopeexit: bool,
+    cg_scope: i64,         // the enclosing `scope`'s *ScopeCtx register (-1 = no scope)
+    cg_spawn_t: Vec<i64>,  // spawn-target FnIds (sorted+deduped) → one wrapper each at end
     cg_eff: bool,     // (c35b) is the fn being emitted effecting (Kont* ABI: ret ptr)?
     cg_tailk: bool,   // (c35b) did the just-lowered body tail produce a kont (a direct
                       //   perform / call-to-effecting)? else a pure tail → kont_pure-wrap
@@ -4712,7 +4720,30 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // scope), so the type is just the body type.
         Expr::Scope(sbody) => {
             append_str(out, "(scope ");
+            // (concurrency) cg: enter a scope ctx (so `spawn`s inside register with it),
+            // lower the body, exit the scope (joins/awaits unawaited tasks). The body's
+            // value (operand in cglk/cglv) is the scope's value.
+            let sv_scope: i64 = (*c).cg_scope;
+            let cg_sc: i64 = if cg_on(c) {
+                let sc: i64 = cg_dst(c);
+                cgo_str(c, "call ptr @sentinel_scope_enter()\n");
+                (*c).cg_used_scopeenter = true;
+                (*c).cg_scope = sc;
+                sc
+            } else {
+                0 - 1
+            };
             let sct: i64 = dump_texpr(out, sbody, exp, src, c, gb);
+            if cg_on(c) {
+                (*c).cg_scope = sv_scope;
+                cgo_str(c, "  call void @sentinel_scope_exit(ptr %v");
+                cgo_int(c, cg_sc);
+                cgo_str(c, ")\n");
+                (*c).cg_used_scopeexit = true;
+                0
+            } else {
+                0
+            };
             close_ty(out, sct, c);
             sct
         },
@@ -4720,24 +4751,53 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // expression's type U in a `Task`.
         Expr::Spawn(scall) => {
             append_str(out, "(spawn ");
-            let spt: i64 = dump_texpr(out, scall, 0 - 1, src, c, gb);
-            let spv: i64 = if mir_on(c) {
-                (*c).lastval
+            if cg_on(c) {
+                // (concurrency) mode 4: the spawn cg (the `out` type dump is throwaway).
+                // The spawn target is a direct fn Call — collect its args (cg operands)
+                // then pack + `task_spawn`. NOT a normal call (we don't invoke it here).
+                match scall {
+                    Expr::Call(scn, sca) => {
+                        let sfid: i64 = fn_lookup(c, src, &scn);
+                        sink_name(gb, scn);
+                        let sret: i64 = fn_ret(c, sfid);
+                        let cg_col: bool = (*c).cg_collecting;
+                        let snap: i64 = len((*c).cgak);
+                        (*c).cg_collecting = true;
+                        let svc: bool = (*c).consuming;
+                        (*c).consuming = true;
+                        dump_targs(out, sca, src, c, gb);
+                        (*c).consuming = svc;
+                        (*c).cg_collecting = cg_col;
+                        cg_emit_spawn(c, sfid, snap, src);
+                        mk_task(c, sret)
+                    },
+                    _ => {
+                        // unreachable (type-check restricts spawn to a Call); dispose.
+                        let mut scratch: Vec<i64> = vec_new();
+                        cg_walk_ex(c, scall, false, &mut scratch, gb);
+                        mk_task(c, 0)
+                    },
+                }
             } else {
-                0 - 1
-            };
-            let tkt: i64 = mk_task(c, spt);
-            close_ty(out, tkt, c);
-            // (7c) MIR: `spawn e` -> Opaque([e]) typed Task<U>.
-            if mir_on(c) {
-                let mc: i64 = (*c).mir_cur;
-                let d: i64 = mir_emit_opaque1(c, mc, spv, tkt);
-                (*c).lastval = d;
-                0
-            } else {
-                0
-            };
-            tkt
+                // modes 0-3: the type dump + MIR (`spawn e` → Opaque([e]) typed Task<U>).
+                let spt: i64 = dump_texpr(out, scall, 0 - 1, src, c, gb);
+                let spv: i64 = if mir_on(c) {
+                    (*c).lastval
+                } else {
+                    0 - 1
+                };
+                let tkt: i64 = mk_task(c, spt);
+                close_ty(out, tkt, c);
+                if mir_on(c) {
+                    let mc: i64 = (*c).mir_cur;
+                    let d: i64 = mir_emit_opaque1(c, mc, spv, tkt);
+                    (*c).lastval = d;
+                    0
+                } else {
+                    0
+                };
+                tkt
+            }
         },
         // (4i) `<target>.await` → `(await <target :Task<U>> :U)`: await joins the task +
         // yields its result type U (the Task's element).
@@ -4751,6 +4811,20 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             let awr: i64 = task_elem_of(c, awt);
             close_ty(out, awr, c);
+            // (concurrency) cg: join the task + read its i64 result.
+            if cg_on(c) {
+                let tk: i64 = (*c).cglk;
+                let tv: i64 = (*c).cglv;
+                let r: i64 = cg_dst(c);
+                cgo_str(c, "call i64 @sentinel_task_await(ptr ");
+                cgo_operand(c, tk, tv);
+                cgo_str(c, ")\n");
+                (*c).cg_used_taskawait = true;
+                cg_reg(c, r);
+                0
+            } else {
+                0
+            };
             // (7c) MIR: `t.await` -> Opaque([t]) typed U (the task's element).
             if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
@@ -7351,6 +7425,13 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_used_consume: false,
         cg_used_kontpure: false,
         cg_used_kontpush: false,
+        cg_used_taskspawn: false,
+        cg_used_taskawait: false,
+        cg_used_scopeenter: false,
+        cg_used_scoperegister: false,
+        cg_used_scopeexit: false,
+        cg_scope: 0 - 1,
+        cg_spawn_t: vec_new(),
         cg_eff: false,
         cg_tailk: false,
         cg_h_opid: 0,
@@ -7835,6 +7916,37 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
             ctx.cg_mono_on = false;
             mqi = mqi + 1;
         }
+        // (concurrency / ADR 0024 D8) one `__spawn_wrapper_<id>` per recorded spawn
+        // target, in ascending FnId order (a min-scan, matching the oracle's sort+dedup).
+        // Appends to cgout (after all fns). Empty for concurrency-free fixtures.
+        let nt: i64 = len(ctx.cg_spawn_t);
+        let mut last_w: i64 = 0 - 1;
+        let mut emitted_w: i64 = 0;
+        while emitted_w < nt {
+            let mut best: i64 = 0 - 1;
+            let mut wk: i64 = 0;
+            while wk < nt {
+                let wf: i64 = ctx.cg_spawn_t[wk];
+                if wf > last_w {
+                    if best < 0 {
+                        best = wf;
+                        0
+                    } else if wf < best {
+                        best = wf;
+                        0
+                    } else {
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                wk = wk + 1;
+            }
+            cg_emit_spawn_wrapper(&mut ctx, best, &src);
+            last_w = best;
+            emitted_w = emitted_w + 1;
+        }
         append_str(result, "target triple = \"arm64-apple-darwin\"\n\n");
         cg_pass0(result, &mut ctx);
         // (8c-2/8d) runtime-symbol declarations — only the symbols the bodies used,
@@ -7926,6 +8038,37 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        // (concurrency) the structured-concurrency runtime group (after the kont group).
+        if ctx.cg_used_taskspawn {
+            append_str(result, "declare ptr @sentinel_task_spawn(ptr, ptr, i64)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_taskawait {
+            append_str(result, "declare i64 @sentinel_task_await(ptr)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_scopeenter {
+            append_str(result, "declare ptr @sentinel_scope_enter()\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_scoperegister {
+            append_str(result, "declare void @sentinel_scope_register(ptr, ptr)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_scopeexit {
+            append_str(result, "declare void @sentinel_scope_exit(ptr)\n");
+            0
+        } else {
+            0
+        };
         // (8d-Vec-2) the `llvm.memcpy` intrinsic declares LAST — after the
         // `sentinel_*` runtime-symbol group (it is an `@llvm.*` intrinsic, not a
         // runtime symbol), matching the oracle's `RuntimeSyms::emit_declares`.
@@ -7935,7 +8078,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_memcpy;
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_taskspawn || ctx.cg_used_taskawait || ctx.cg_used_scopeenter || ctx.cg_used_scoperegister || ctx.cg_used_scopeexit || ctx.cg_used_memcpy;
         if cg_anydecl {
             push(result, '\n');
             0
@@ -8254,6 +8397,15 @@ fn cg_is_vec(c: &mut TyCtx, h: i64) -> bool {
     }
 }
 
+// (concurrency) a `Task<T>` (interner kind 12) — codegen holds it as an opaque `*Task`.
+fn cg_is_task(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        (*c).tk[h - tbase()] == 12
+    }
+}
+
 // (Bar B) true iff `h` is a nullable `?T` (interner kind 4).
 fn cg_is_nullable(c: &mut TyCtx, h: i64) -> bool {
     if h < tbase() {
@@ -8440,6 +8592,9 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
             let cgcid: i64 = class_of_handle(c, hs);
             cgo_str(c, "%Class.");
             cgo_int(c, cgcid)
+        } else if cg_is_task(c, hs) {
+            // (concurrency) a `Task<T>` is an opaque `*Task` pointer.
+            cgo_str(c, "ptr")
         } else {
             cgo_str(c, "i64")
         }
@@ -8494,6 +8649,9 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
             let llcid: i64 = class_of_handle(c, hs);
             append_str(out, "%Class.");
             append_int(out, llcid)
+        } else if cg_is_task(c, hs) {
+            // (concurrency) a `Task<T>` is an opaque `*Task` pointer.
+            append_str(out, "ptr")
         } else {
             append_str(out, "i64")
         }
@@ -9907,6 +10065,159 @@ fn cg_apply_return_arm(c: &mut TyCtx, vk: i64, vv: i64, src: &[u8], gb: &mut Vec
         (*c).cglv = vv;
         0
     }
+}
+
+// (Bar B / concurrency / ADR 0024) record a spawn-target FnId (deduped). One
+// `__spawn_wrapper_<id>` is synthesized per unique target at codegen end; the emission
+// loop scans for FnId order (matching the oracle's `sort_by_key` + `dedup`).
+fn cg_record_spawn(c: &mut TyCtx, fid: i64) -> i64 {
+    let n: i64 = len((*c).cg_spawn_t);
+    let mut i: i64 = 0;
+    let mut dup: bool = false;
+    while i < n {
+        if (*c).cg_spawn_t[i] == fid {
+            dup = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if dup {
+        0
+    } else {
+        push(&mut (*c).cg_spawn_t, fid);
+        0
+    }
+}
+
+// (Bar B / concurrency) emit a `spawn fn(args)`'s cg: pack the collected args (operands
+// in cgak/cgav from `snap`) into a heap buffer (one i64 slot each, ≥8 bytes), call
+// `sentinel_task_spawn(@__spawn_wrapper_<fid>, args, size)`, and (inside a scope)
+// register the Task with `cg_scope`. Result operand = the Task ptr. Records `fid` for
+// wrapper synthesis. Mirrors the oracle's Spawn lowering (args are immediates in the
+// corpus, so collect-then-store is byte-identical to the oracle's inline lower-then-store).
+fn cg_emit_spawn(c: &mut TyCtx, fid: i64, snap: i64, src: &[u8]) -> i64 {
+    let _s: &[u8] = src;
+    let n: i64 = len((*c).cgak) - snap;
+    let size: i64 = if n > 0 {
+        n * 8
+    } else {
+        8
+    };
+    let st: i64 = cg_dst(c);
+    cgo_str(c, "call ptr @sentinel_alloc(i64 ");
+    cgo_int(c, size);
+    cgo_str(c, ")\n");
+    (*c).cg_used_alloc = true;
+    let mut i: i64 = 0;
+    while i < n {
+        let ak: i64 = (*c).cgak[snap + i];
+        let av: i64 = (*c).cgav[snap + i];
+        let off: i64 = i * 8;
+        let gp: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr i8, ptr %v");
+        cgo_int(c, st);
+        cgo_str(c, ", i64 ");
+        cgo_int(c, off);
+        cg_putc(c, '\n');
+        cgo_str(c, "  store i64 ");
+        cgo_operand(c, ak, av);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, gp);
+        cg_putc(c, '\n');
+        i = i + 1;
+    }
+    while len((*c).cgak) > snap {
+        let _a: i64 = pop(&mut (*c).cgak);
+        let _b: i64 = pop(&mut (*c).cgav);
+        let _t: i64 = pop(&mut (*c).cgat);
+        0
+    }
+    let task: i64 = cg_dst(c);
+    cgo_str(c, "call ptr @sentinel_task_spawn(ptr @__spawn_wrapper_");
+    cgo_int(c, fid);
+    cgo_str(c, ", ptr %v");
+    cgo_int(c, st);
+    cgo_str(c, ", i64 ");
+    cgo_int(c, size);
+    cgo_str(c, ")\n");
+    (*c).cg_used_taskspawn = true;
+    if (*c).cg_scope >= 0 {
+        cgo_str(c, "  call void @sentinel_scope_register(ptr %v");
+        cgo_int(c, (*c).cg_scope);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, task);
+        cgo_str(c, ")\n");
+        (*c).cg_used_scoperegister = true;
+        0
+    } else {
+        0
+    };
+    cg_record_spawn(c, fid);
+    cg_reg(c, task);
+    0
+}
+
+// (Bar B / concurrency) emit `void @__spawn_wrapper_<fid>(ptr %arg0, ptr %arg1)` (%arg0 =
+// the Task, %arg1 = the packed args): unpack `np` i64 args (8-byte slots), call the
+// target, store the result into task@0, set task->done (i32 @ 8), ret void. Emits DIRECTLY
+// to cgout (a standalone define, no alloca hoisting). Mirrors the oracle's
+// `dump_spawn_wrapper`.
+fn cg_emit_spawn_wrapper(c: &mut TyCtx, fid: i64, src: &[u8]) -> i64 {
+    cg_reset(c);
+    // Route to cgcls (the class/impl-method buffer, folded into `result` AFTER cgout) so
+    // the wrappers land LAST — after the fns + class/impl methods (the oracle's order).
+    (*c).cg_to_body = false;
+    (*c).cg_to_cls = true;
+    let ns: i64 = (*c).ufs[fid - 14];
+    let ne: i64 = (*c).ufe[fid - 14];
+    let np: i64 = (*c).ufpe[fid - 14] - (*c).ufps[fid - 14];
+    cgo_str(c, "define void @__spawn_wrapper_");
+    cgo_int(c, fid);
+    cgo_str(c, "(ptr %arg0, ptr %arg1) {\nentry:\n");
+    let mut loads: Vec<i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < np {
+        let off: i64 = i * 8;
+        let gp: i64 = cg_dst(c);
+        cgo_str(c, "getelementptr i8, ptr %arg1, i64 ");
+        cgo_int(c, off);
+        cg_putc(c, '\n');
+        let ld: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, gp);
+        cg_putc(c, '\n');
+        push(&mut loads, ld);
+        i = i + 1;
+    }
+    let cr: i64 = cg_dst(c);
+    cgo_str(c, "call i64 @");
+    cgo_slice(c, src, ns, ne);
+    cg_putc(c, '(');
+    let mut j: i64 = 0;
+    while j < np {
+        if j > 0 {
+            cgo_str(c, ", ")
+        } else {
+            0
+        };
+        cgo_str(c, "i64 %v");
+        cgo_int(c, loads[j]);
+        j = j + 1;
+    }
+    cgo_str(c, ")\n");
+    cgo_str(c, "  store i64 %v");
+    cgo_int(c, cr);
+    cgo_str(c, ", ptr %arg0\n");
+    let dg: i64 = cg_dst(c);
+    cgo_str(c, "getelementptr i8, ptr %arg0, i64 8\n");
+    cgo_str(c, "  store i32 1, ptr %v");
+    cgo_int(c, dg);
+    cg_putc(c, '\n');
+    cgo_str(c, "  ret void\n}\n\n");
+    let _lx: i64 = len(loads);
+    0
 }
 
 // (Bar B / effects) `k(arg)` part 2 (after the arg is collected at `snap`): `kont_resume`

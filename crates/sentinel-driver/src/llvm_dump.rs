@@ -107,6 +107,17 @@ struct RuntimeSyms {
     /// -> void` — push a captured evaluation frame (a let-body resumer + its captured
     /// state) onto a kont's chain, so `sentinel_kont_resume` replays the let's tail.
     kont_push: bool,
+    /// Bar B / concurrency (ADR 0024): the structured-concurrency runtime.
+    /// `sentinel_task_spawn(wrapper, args, args_size) -> *Task`.
+    task_spawn: bool,
+    /// `sentinel_task_await(task) -> i64`.
+    task_await: bool,
+    /// `sentinel_scope_enter() -> *ScopeCtx`.
+    scope_enter: bool,
+    /// `sentinel_scope_register(scope, task) -> void`.
+    scope_register: bool,
+    /// `sentinel_scope_exit(scope) -> void`.
+    scope_exit: bool,
 }
 
 impl RuntimeSyms {
@@ -126,6 +137,11 @@ impl RuntimeSyms {
         self.kont_consume_pure |= other.kont_consume_pure;
         self.kont_pure |= other.kont_pure;
         self.kont_push |= other.kont_push;
+        self.task_spawn |= other.task_spawn;
+        self.task_await |= other.task_await;
+        self.scope_enter |= other.scope_enter;
+        self.scope_register |= other.scope_register;
+        self.scope_exit |= other.scope_exit;
     }
 
     /// Emit the `declare`s for the used symbols, in the fixed canonical order,
@@ -174,6 +190,22 @@ impl RuntimeSyms {
         if self.kont_push {
             writeln!(out, "declare void @sentinel_kont_push(ptr, ptr, ptr)").unwrap();
         }
+        // Bar B / concurrency: the structured-concurrency runtime group.
+        if self.task_spawn {
+            writeln!(out, "declare ptr @sentinel_task_spawn(ptr, ptr, i64)").unwrap();
+        }
+        if self.task_await {
+            writeln!(out, "declare i64 @sentinel_task_await(ptr)").unwrap();
+        }
+        if self.scope_enter {
+            writeln!(out, "declare ptr @sentinel_scope_enter()").unwrap();
+        }
+        if self.scope_register {
+            writeln!(out, "declare void @sentinel_scope_register(ptr, ptr)").unwrap();
+        }
+        if self.scope_exit {
+            writeln!(out, "declare void @sentinel_scope_exit(ptr)").unwrap();
+        }
         if self.memcpy {
             writeln!(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)").unwrap();
         }
@@ -191,8 +223,104 @@ impl RuntimeSyms {
             || self.kont_consume_pure
             || self.kont_pure
             || self.kont_push
+            || self.task_spawn
+            || self.task_await
+            || self.scope_enter
+            || self.scope_register
+            || self.scope_exit
             || self.memcpy
     }
+}
+
+/// Bar B / concurrency (ADR 0024) — collect every `spawn`-target FnId reachable from a
+/// fn body (deduped + FnId-sorted by the caller). Each unique target gets one
+/// `__spawn_wrapper_<id>` synthesized. Mirrors inkwell `collect_spawn_targets_*`.
+fn collect_spawn_targets_block(block: &TypedBlock, acc: &mut Vec<FnId>) {
+    for s in &block.stmts {
+        collect_spawn_targets_stmt(&s.kind, acc);
+    }
+    collect_spawn_targets_expr(&block.tail, acc);
+}
+
+fn collect_spawn_targets_stmt(kind: &TypedStmtKind, acc: &mut Vec<FnId>) {
+    match kind {
+        TypedStmtKind::Let { value, .. } => collect_spawn_targets_expr(value, acc),
+        TypedStmtKind::Assign { target, value } => {
+            collect_spawn_targets_expr(target, acc);
+            collect_spawn_targets_expr(value, acc);
+        }
+        TypedStmtKind::While { cond, body } => {
+            collect_spawn_targets_expr(cond, acc);
+            collect_spawn_targets_block(body, acc);
+        }
+        TypedStmtKind::Break | TypedStmtKind::Continue => {}
+        TypedStmtKind::Expr(e) => collect_spawn_targets_expr(e, acc),
+    }
+}
+
+fn collect_spawn_targets_expr(expr: &TypedExpr, acc: &mut Vec<FnId>) {
+    match &expr.kind {
+        TypedExprKind::Spawn { call, .. } => {
+            if let TypedExprKind::Call { id, args, .. } = &call.kind {
+                acc.push(*id);
+                for a in args {
+                    collect_spawn_targets_expr(a, acc);
+                }
+            }
+        }
+        TypedExprKind::Scope { body, .. } => collect_spawn_targets_block(body, acc),
+        TypedExprKind::Await { task_expr, .. } => collect_spawn_targets_expr(task_expr, acc),
+        TypedExprKind::Block(b) => collect_spawn_targets_block(b, acc),
+        TypedExprKind::If { cond, then_branch, else_branch } => {
+            collect_spawn_targets_expr(cond, acc);
+            collect_spawn_targets_block(then_branch, acc);
+            collect_spawn_targets_block(else_branch, acc);
+        }
+        TypedExprKind::Call { args, .. } => {
+            for a in args {
+                collect_spawn_targets_expr(a, acc);
+            }
+        }
+        // Other forms carry no `spawn` in the emitted corpus (spawn only appears in
+        // let-value / tail position inside a `scope`); a missed nesting would surface
+        // loudly as a reference to an undefined wrapper.
+        _ => {}
+    }
+}
+
+/// Bar B / concurrency — synthesize `void @__spawn_wrapper_<id>(ptr %arg0, ptr %arg1)`
+/// (`%arg0` = the Task, `%arg1` = the packed args): unpack `n` i64 args (8-byte slots),
+/// call the target, store the result into `task` (offset 0), set `task->done` (i32 @ 8),
+/// return void. Mirrors inkwell's pre-walk wrapper synthesis. Args are i64 at the C4.4
+/// minimum (the `Task<i64>` result restriction).
+fn dump_spawn_wrapper(program: &TypedProgram, fn_id: FnId, out: &mut String) {
+    let target = program.fns.iter().find(|f| f.id == fn_id);
+    let (name, n) = match target {
+        Some(f) => (f.name.clone(), f.params.len()),
+        None => return,
+    };
+    writeln!(out, "define void @__spawn_wrapper_{}(ptr %arg0, ptr %arg1) {{", fn_id.0).unwrap();
+    out.push_str("entry:\n");
+    let mut next: u32 = 0;
+    let mut call_args: Vec<String> = Vec::with_capacity(n);
+    for i in 0..n {
+        let off = i * 8;
+        let gp = next;
+        next += 1;
+        writeln!(out, "  %v{gp} = getelementptr i8, ptr %arg1, i64 {off}").unwrap();
+        let ld = next;
+        next += 1;
+        writeln!(out, "  %v{ld} = load i64, ptr %v{gp}").unwrap();
+        call_args.push(format!("i64 %v{ld}"));
+    }
+    let call_reg = next;
+    next += 1;
+    writeln!(out, "  %v{call_reg} = call i64 @{name}({})", call_args.join(", ")).unwrap();
+    writeln!(out, "  store i64 %v{call_reg}, ptr %arg0").unwrap();
+    let done_gp = next;
+    writeln!(out, "  %v{done_gp} = getelementptr i8, ptr %arg0, i64 8").unwrap();
+    writeln!(out, "  store i32 1, ptr %v{done_gp}").unwrap();
+    out.push_str("  ret void\n}\n");
 }
 
 /// Emit the canonical `.ll` for `program`, or `Err(why)` if it uses a
@@ -348,6 +476,19 @@ pub fn dump(program: &TypedProgram, drop_plan: &DropPlan) -> Result<String, Stri
             fns_buf.push('\n');
         }
     }
+    // Bar B / concurrency (ADR 0024 D8): one `__spawn_wrapper_<id>` per unique spawn
+    // target, in FnId order (deduped) — emitted after all fn bodies. Empty for
+    // concurrency-free fixtures → byte-unchanged.
+    let mut spawn_targets: Vec<FnId> = Vec::new();
+    for f in program.fns.iter().filter(|f| f.type_params.is_empty()) {
+        collect_spawn_targets_block(&f.body, &mut spawn_targets);
+    }
+    spawn_targets.sort_by_key(|f| f.0);
+    spawn_targets.dedup();
+    for fn_id in spawn_targets {
+        dump_spawn_wrapper(program, fn_id, &mut fns_buf);
+        fns_buf.push('\n');
+    }
     // Runtime-symbol declarations (8c-2+): only the symbols actually used, in a
     // fixed order, so a program using none stays byte-identical to 8c-1.
     if used.emit_declares(&mut out) {
@@ -437,6 +578,7 @@ fn dump_fn_named(
         handle_stack: Vec::new(),
         embed_ph: None,
         handle_depth: 0,
+        current_scope: None,
     };
     // Allocas are HOISTED to the entry block: param slots, `let` slots, and the
     // if-result slot all land in `e.allocas` (emitted first), while stores/loads/
@@ -551,6 +693,7 @@ fn dump_let_shape_fn(
             handle_stack: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
+        current_scope: None,
         };
         e.scopes.push(Vec::new());
         for (i, p) in f.params.iter().enumerate() {
@@ -627,6 +770,7 @@ fn dump_let_shape_fn(
             handle_stack: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
+        current_scope: None,
         };
         e.scopes.push(Vec::new());
         // Bind the let var to the resumed value (`%arg0`).
@@ -715,6 +859,7 @@ fn dump_embedded_shape_fn(
             handle_stack: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
+        current_scope: None,
         };
         e.scopes.push(Vec::new());
         for (i, p) in f.params.iter().enumerate() {
@@ -792,6 +937,7 @@ fn dump_embedded_shape_fn(
             handle_stack: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
+        current_scope: None,
         };
         e.scopes.push(Vec::new());
         // Bind the placeholder slot to the resumed value (`%arg0`).
@@ -901,6 +1047,7 @@ fn dump_chained_lets_fn(
             handle_stack: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
+        current_scope: None,
         };
         e.scopes.push(Vec::new());
         for (i, p) in f.params.iter().enumerate() {
@@ -954,6 +1101,7 @@ fn dump_chained_lets_fn(
             handle_stack: Vec::new(),
             embed_ph: None,
         handle_depth: 0,
+        current_scope: None,
         };
         e.scopes.push(Vec::new());
         // Bind let-`level` to the resumed value (`%arg0`).
@@ -1058,6 +1206,7 @@ fn dump_method(
         handle_stack: Vec::new(),
         embed_ph: None,
         handle_depth: 0,
+        current_scope: None,
     };
     // `self` is `%arg0` — bound by `self_var`, with its body type recorded as the class
     // (so `Var(self)` loads `%Class.N` and `self.f` GEPs the class). It is BORROWED, not
@@ -1162,6 +1311,10 @@ struct Emit<'a> {
     /// (arms wrap their i64 via `kont_pure`, the switch default PROPAGATES the un-caught
     /// kont to the merge) instead of an i64.
     handle_depth: u32,
+    /// Bar B / concurrency (ADR 0024): the enclosing `scope concurrent`'s `*ScopeCtx`
+    /// register, so a `spawn` inside the scope registers its Task with it (the scope
+    /// owns + auto-awaits unawaited tasks at exit). `None` outside a scope.
+    current_scope: Option<u32>,
 }
 
 impl Emit<'_> {
@@ -1694,7 +1847,63 @@ impl Emit<'_> {
             TypedExprKind::ResumeKont { kont, args, .. } => {
                 self.lower_resume_kont(*kont, args)
             }
-            _ => Err("expression not yet ported (straight-line 8a only)".into()),
+            // Bar B / concurrency (ADR 0024) — `scope concurrent { body }`: enter a scope
+            // ctx (so `spawn`s inside register with it), lower the body, exit the scope
+            // (which joins/awaits any unawaited tasks). The block's value is the result.
+            TypedExprKind::Scope { body, .. } => {
+                let sc = self.fresh();
+                writeln!(self.body, "  %v{sc} = call ptr @sentinel_scope_enter()").unwrap();
+                self.used.scope_enter = true;
+                let prev = self.current_scope;
+                self.current_scope = Some(sc);
+                let bv = self.lower_block_expr(body)?;
+                self.current_scope = prev;
+                writeln!(self.body, "  call void @sentinel_scope_exit(ptr %v{sc})").unwrap();
+                self.used.scope_exit = true;
+                Ok(bv)
+            }
+            // Bar B / concurrency — `spawn fn(args)`: pack the args into a heap buffer
+            // (one i64 slot each), spawn a Task via the per-target `__spawn_wrapper_<id>`,
+            // and (inside a scope) register the Task so the scope owns it.
+            TypedExprKind::Spawn { call, .. } => {
+                let (callee_id, args) = match &call.kind {
+                    TypedExprKind::Call { id, args, .. } => (*id, args),
+                    _ => return Err("spawn target must be a direct fn call".into()),
+                };
+                let n = args.len();
+                let size = n.max(1) * 8;
+                let st = self.fresh();
+                writeln!(self.body, "  %v{st} = call ptr @sentinel_alloc(i64 {size})").unwrap();
+                self.used.alloc = true;
+                for (i, arg) in args.iter().enumerate() {
+                    let v = self.lower_expr(arg)?;
+                    let off = i * 8;
+                    let gp = self.fresh();
+                    writeln!(self.body, "  %v{gp} = getelementptr i8, ptr %v{st}, i64 {off}").unwrap();
+                    writeln!(self.body, "  store i64 {v}, ptr %v{gp}").unwrap();
+                }
+                let task = self.fresh();
+                writeln!(
+                    self.body,
+                    "  %v{task} = call ptr @sentinel_task_spawn(ptr @__spawn_wrapper_{}, ptr %v{st}, i64 {size})",
+                    callee_id.0
+                )
+                .unwrap();
+                self.used.task_spawn = true;
+                if let Some(sc) = self.current_scope {
+                    writeln!(self.body, "  call void @sentinel_scope_register(ptr %v{sc}, ptr %v{task})").unwrap();
+                    self.used.scope_register = true;
+                }
+                Ok(format!("%v{task}"))
+            }
+            // Bar B / concurrency — `task.await`: join the task + read its i64 result.
+            TypedExprKind::Await { task_expr, .. } => {
+                let t = self.lower_expr(task_expr)?;
+                let r = self.fresh();
+                writeln!(self.body, "  %v{r} = call i64 @sentinel_task_await(ptr {t})").unwrap();
+                self.used.task_await = true;
+                Ok(format!("%v{r}"))
+            }
         }
     }
 
@@ -2684,6 +2893,9 @@ fn llvm_ty(ty: Type, program: &TypedProgram) -> Result<String, String> {
             let inst = &program.generic_instances[id.0 as usize];
             Ok(format!("%{}", mangle_instance(program, inst.struct_id, &inst.args)))
         }
+        // Bar B / concurrency (ADR 0024): a `Task<i64>` is an opaque `*Task` (the runtime
+        // SentinelTask struct) — codegen only ever holds/passes the pointer.
+        Type::Task(_) => Ok("ptr".to_string()),
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
     }
 }
