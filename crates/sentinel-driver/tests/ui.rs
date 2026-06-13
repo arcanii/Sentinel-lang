@@ -118,3 +118,16 @@ ui_snapshot!(c5d2_mixed_width, "c5d2_mixed_width.sentinel");
 
 // ---- ADR 0046 partial-move-through-field: use-after-partial-move (borrow) ----
 ui_snapshot!(c25_use_after_partial_move, "c25_use_after_partial_move.sentinel");
+
+// ---- Secret-flow conformance suite (review F3 / P2.2): a secret routed
+// through each construct into each sink must still be rejected. The first four
+// prove taint SURVIVES the conservative `Opaque`/`Call` funnels (caught by the
+// MIR D5 pass); the last three are the type checker's source-level rejections
+// of the direct sinks. The accept side is tests/pass/c52_secret_through_constructs_ok.
+ui_snapshot!(c52_secret_via_call, "c52_secret_via_call.sentinel");
+ui_snapshot!(c52_secret_via_field, "c52_secret_via_field.sentinel");
+ui_snapshot!(c52_secret_via_match, "c52_secret_via_match.sentinel");
+ui_snapshot!(c52_secret_or_leak, "c52_secret_or_leak.sentinel");
+ui_snapshot!(c52_secret_in_if, "c52_secret_in_if.sentinel");
+ui_snapshot!(c52_secret_array_index, "c52_secret_array_index.sentinel");
+ui_snapshot!(c52_secret_divisor, "c52_secret_divisor.sentinel");

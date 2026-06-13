@@ -1131,6 +1131,16 @@ fn pass_c52_secret_ct() {
 }
 
 #[test]
+fn pass_c52_secret_through_constructs_ok() {
+    // Secret-flow conformance (review F3 / P2.2), accept side: a secret flows
+    // through a field, a call, and a `match`, combined with arithmetic only
+    // (no branch / index / divisor), then declassified. The conservative
+    // funnels preserve taint (so the c52_secret_via_* leaks are caught) yet a
+    // genuinely constant-time use still compiles. 40 + 40 = 80.
+    assert_eq!(run_exit("c52_secret_through_constructs_ok.sentinel"), 80);
+}
+
+#[test]
 fn pass_c53_bitwise() {
     // ADR 0027 D10 c53_bitwise: `5 & 6 ^ 3 | 8` == 15, pinning the
     // `&` > `^` > `|` precedence (a misparse would give 5).
