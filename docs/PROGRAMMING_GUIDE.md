@@ -1,68 +1,51 @@
-# Introduction to Sentinel programming
+# Programming in Sentinel
 
-This guide teaches the basics of writing and running Sentinel programs
-using the current bootstrap compiler (`snc`). It covers everything in
-the language as of **Phase C0**: function definitions, `let`-bindings,
-arithmetic, `if`/`else`, blocks, and `print`. That's enough to write
-small numerical programs that compile to native binaries via LLVM.
+This guide is a tour of the Sentinel language **as it exists today**, written
+for someone who wants to read and write Sentinel programs with the bootstrap
+compiler (`snc`). Every code block below is real, current syntax — the
+examples are drawn from (or verified against) the `tests/pass/` fixtures that
+CI compiles and runs on every change.
 
-It is **not** a tour of the eventual Sentinel language. The type
-system, `secret` qualifier, effects, regions, and the broker
-integration are all under construction — see
-[`SENTINEL_DESIGN.md`](SENTINEL_DESIGN.md) and
-[`STATE.md`](STATE.md) for the full picture. This guide stays close
-to what you can compile and run today.
+Sentinel is a memory-safe, capability-bounded systems language. Its
+distinctive features — move-checked references with RAII, a `secret` qualifier
+with a constant-time check, algebraic effects, classes/traits/delegation, and
+structured concurrency — are all covered here. What it is *not* yet (a
+production toolchain, a standard library, multi-process) is covered at the end.
 
-If anything in this guide disagrees with the actual compiler,
-the compiler wins. File the discrepancy as a docs bug.
+> **If this guide disagrees with the compiler, the compiler wins** — and if it
+> disagrees with [`STATE.md`](STATE.md), STATE.md wins. Report any discrepancy
+> as a docs bug (see [`CONTRIBUTING.md`](../CONTRIBUTING.md)). The language is
+> still evolving; treat this as a snapshot, not a spec.
 
 ## Contents
 
-- [What you can do today](#what-you-can-do-today)
 - [Setup](#setup)
 - [Your first program](#your-first-program)
-- [Variables and `let`](#variables-and-let)
-- [Arithmetic](#arithmetic)
+- [Values, types, and `let`](#values-types-and-let)
+- [Operators](#operators)
 - [Functions](#functions)
-- [Blocks are expressions](#blocks-are-expressions)
-- [`if`/`else`](#ifelse)
-- [Comments](#comments)
+- [Control flow: `if` and `while`](#control-flow-if-and-while)
+- [Structs](#structs)
+- [Enums and `match`](#enums-and-match)
+- [References, moves, and the borrow checker](#references-moves-and-the-borrow-checker)
+- [Strings, bytes, and `Vec`](#strings-bytes-and-vec)
+- [File I/O](#file-io)
+- [Generics](#generics)
+- [Nullable `?T`](#nullable-t)
+- [`secret` and constant-time](#secret-and-constant-time)
+- [Effects and handlers](#effects-and-handlers)
+- [Classes, traits, and delegation](#classes-traits-and-delegation)
+- [Structured concurrency](#structured-concurrency)
+- [Modules and multiple files](#modules-and-multiple-files)
 - [A worked example](#a-worked-example)
-- [What doesn't work yet](#what-doesnt-work-yet)
-- [Where Sentinel is headed](#where-sentinel-is-headed)
-
-## What you can do today
-
-The C0 language has exactly one type: 64-bit signed integer (`i64`).
-Every value, parameter, return type, and `let`-binding is `i64`.
-There is no `bool`, no string, no float, no struct, no array. The
-type system arrives at **Phase C1.3** (per
-[ADR 0011](decisions/0011-phase-c1-kickoff-and-type-system-plan.md)).
-
-What you get today is enough to write programs like:
-
-```sentinel
-fn double(x) { x * 2 }
-
-fn pick(cond, a, b) {
-    if cond { a } else { b }
-}
-
-fn main() {
-    let x = 5;
-    let y = pick(x, double(x), 0);
-    print(y)
-}
-```
-
-That's the `c05_go_no_go` acceptance program. It prints `10` and
-exits with code 0.
+- [What isn't here yet](#what-isnt-here-yet)
+- [Appendix: the C0 language (historical)](#appendix-the-c0-language-historical)
 
 ## Setup
 
-You need Rust stable (1.80+) and LLVM 18. The compiler is currently
-macOS-only because `.cargo/config.toml` hard-codes Homebrew paths;
-cross-platform support is a future concern.
+You need Rust (stable) and **LLVM 18**. The primary, CI-tested platform is
+macOS on Apple Silicon; Linux is possible with `llvm-18` installed and
+`LLVM_SYS_180_PREFIX` exported, but is not yet CI-verified.
 
 ```bash
 brew install llvm@18
@@ -72,367 +55,599 @@ cd Sentinel-lang
 cargo build --workspace
 ```
 
-After the workspace builds, the compiler driver is at
-`target/debug/snc`. You can run it directly or via cargo:
+The compiler driver lands at `target/debug/snc`. Its main subcommands:
 
-```bash
-cargo run --bin snc -- help
-```
+| Command                            | What it does                                              |
+| ---------------------------------- | --------------------------------------------------------- |
+| `snc build <file> [-o <output>]`   | Compile + link to a native executable (default name = the file stem). |
+| `snc parse <file>`                 | Lex, parse, and pretty-print the program.                 |
+| `snc ast <file>` / `snc lex <file>`| Dump the canonical AST / token stream (used as self-host oracles). |
 
-`snc` has two subcommands:
-
-| Command                          | What it does                                                         |
-| -------------------------------- | -------------------------------------------------------------------- |
-| `snc parse <file>`               | Lex and parse `<file>`; pretty-print the AST as an s-expression.      |
-| `snc build <file> [-o <output>]` | Compile `<file>` to a native executable. Output defaults to `<stem>`. |
+A Sentinel source file uses the `.sentinel` extension. Run `snc help` for the
+full list.
 
 ## Your first program
 
-Sentinel source files use the `.sentinel` extension. The smallest
-valid program is a `main` function with a tail expression:
+The smallest valid program is a `main` function returning `i64`:
 
 ```sentinel
 // hello.sentinel
-fn main() {
+fn main() -> i64 {
     0
 }
 ```
 
-Compile and run it:
-
 ```bash
-cargo run --bin snc -- build hello.sentinel -o hello
-./hello
-echo "exit=$?"     # exit=0
+snc build hello.sentinel -o hello
+./hello; echo "exit=$?"     # exit=0
 ```
 
-A program's exit code is the value of `main`'s tail expression
-(truncated from `i64` to the C ABI's 32-bit `int`). So
-`fn main() { 42 }` exits with code 42. This is a temporary
-convention — once Sentinel grows a real return-channel story
-(strings, structured output), exit codes will go back to meaning
-"success or failure."
+**Exit codes are the answer.** A program's exit code is the value of `main`'s
+tail expression, truncated to the C ABI's 32-bit `int`. So `fn main() -> i64 {
+42 }` exits with code 42. This "the exit code is the result" convention is what
+the test corpus asserts on, and it's the easiest way to see a program's value
+without a print.
 
-To print numbers to stdout, use the built-in `print`:
+To write to stdout, use the built-in `print`, which takes an `i64` and writes
+it as decimal followed by a newline (and returns 0):
 
 ```sentinel
-fn main() {
-    print(42)
+fn main() -> i64 {
+    print(42)               // writes "42\n"; print returns 0, so main exits 0
 }
 ```
 
-Compile, run, observe:
+## Values, types, and `let`
 
-```bash
-cargo run --bin snc -- build hello.sentinel -o hello
-./hello              # writes "42\n" to stdout
-echo "exit=$?"       # exit=0
-```
+Sentinel is statically typed, and **type annotations are required where a type
+can't be inferred** — function parameters and return types always carry them.
+The scalar types are:
 
-`print(x)` writes `x` to stdout as ASCII decimal followed by a
-newline, and returns 0. So the program above prints `42` and
-then exits with code 0 (because `print`'s return value of 0 is
-`main`'s tail expression).
+| Type   | Meaning                                  |
+| ------ | ---------------------------------------- |
+| `i64`  | 64-bit signed integer (the default int). |
+| `i32`  | 32-bit signed integer.                   |
+| `u8`   | unsigned byte (also the element of strings — see below). |
+| `bool` | `true` / `false`.                        |
 
-## Variables and `let`
-
-`let` introduces an immutable binding inside a function or block:
+`let` introduces a binding. Add `mut` to make it reassignable; an annotation is
+optional when the initializer's type is obvious, and required otherwise (e.g.
+`vec_new()`, `null`, a `secret`/nullable widen):
 
 ```sentinel
-fn main() {
-    let x = 5;
-    let y = x + 3;
-    print(y)              // 8
+fn main() -> i64 {
+    let x: i64 = 5;         // annotated
+    let y = x + 3;          // inferred as i64
+    let mut acc: i64 = 0;   // mutable
+    acc = acc + y;          // assignment (no `let`)
+    acc = acc + 1;
+    acc                     // 9
 }
 ```
 
-Each `let` is a statement and must end with a semicolon. The
-binding is in scope for the rest of the enclosing block. There
-is no shadowing — declaring `let x = 1; let x = 2;` in the same
-block is a compile error (`RedeclaredVariable`). Block-scoped
-shadowing arrives with the type system later.
+Bindings are block-scoped and live until the end of the enclosing block.
 
-Bindings are not yet mutable. There is no `let mut` or
-assignment statement; once you `let x = ...`, `x` keeps that
-value for its scope. Mutability is a deliberate omission until
-the type system can reason about it correctly.
+## Operators
 
-## Arithmetic
+Arithmetic, comparison, logical, and bitwise operators are all present:
 
-The four arithmetic operators work as you'd expect:
+| Group       | Operators                          | Result    |
+| ----------- | ---------------------------------- | --------- |
+| arithmetic  | `+` `-` `*` `/` and unary `-`      | numeric   |
+| comparison  | `==` `!=` `<` `<=` `>` `>=`        | `bool`    |
+| logical     | `&&` `\|\|` `!`                    | `bool`    |
+| bitwise     | `&` `\|` `^`                       | integer   |
 
-| Operator | Meaning           | Example   |
-| -------- | ----------------- | --------- |
-| `+`      | addition          | `1 + 2`   |
-| `-`      | subtraction       | `5 - 3`   |
-| `*`      | multiplication    | `4 * 7`   |
-| `/`      | integer division  | `9 / 4`   |
-| `-` (unary) | negation       | `-5`      |
-
-Precedence is the conventional one: unary `-` binds tightest,
-then `* /`, then `+ -`. All binary operators are left-associative.
-Parentheses override precedence:
+`/` is integer division. `&&` and `||` short-circuit — the right operand is not
+evaluated if the left already decides the result:
 
 ```sentinel
-fn main() {
-    print(1 + 2 * 3)        // 7  — multiplication first
-    print((1 + 2) * 3)      // 9
-    print(-2 * 3)           // -6 — unary minus binds tighter than *
-    print(1 - -2)           // 3  — second `-` is unary
+// `print(99)` never runs: `false &&` short-circuits. stdout stays empty.
+fn main() -> i64 {
+    if false && print(99) > 0 { 1 } else { 7 }   // exit 7
 }
 ```
 
-Division is integer division (`9 / 4 == 2`), and dividing by zero
-is undefined at runtime — the compiler does not yet insert a
-check. Don't divide by zero.
+Precedence is conventional (unary tightest, then `* /`, then `+ -`, then
+comparisons, then `&& ||`); parentheses override it.
 
 ## Functions
 
-A function definition is `fn name(params) { body }`. The body
-is a block; its tail expression is the return value. Every
-function must have a body — there are no forward declarations
-separate from definitions.
+A function is `fn name(params) -> ReturnType { body }`. The body is a block, and
+its tail expression is the return value. Parameter and return types are
+mandatory:
 
 ```sentinel
-fn double(x) {
+fn double(x: i64) -> i64 {
     x * 2
 }
 
-fn add(a, b) {
+fn add(a: i64, b: i64) -> i64 {
     a + b
 }
 
-fn main() {
-    print(double(7))         // 14
-    print(add(3, 4))         // 7
+fn main() -> i64 {
+    print(double(7));       // 14
+    add(3, 4)               // exit 7
 }
 ```
 
-A program is one or more `fn` definitions at the top level, and
-exactly one of them must be named `main`. `main` takes no
-parameters and is the entry point.
+A program is one or more top-level `fn` definitions; exactly one must be named
+`main`. Functions may call each other in either direction — the compiler
+resolves signatures before bodies, so forward references are fine. `print` is a
+reserved built-in; you can't redefine it.
 
-Functions can refer to each other in either direction — forward
-references are fine because the compiler does a two-pass lower
-(signatures first, then bodies):
+## Control flow: `if` and `while`
 
-```sentinel
-fn main() {
-    print(triple(4))         // 12
-}
-
-fn triple(x) {
-    x * 3
-}
-```
-
-`print` is a reserved function name and is provided by the
-runtime. You can't define your own `fn print(x) { ... }`; trying
-to is a compile error.
-
-## Blocks are expressions
-
-A `{ ... }` block can appear anywhere an expression can. Its
-value is its tail expression:
+`if` is an **expression**: the chosen branch's tail is the value of the whole
+`if`. The condition must be a `bool`, and **`else` is mandatory** (both branches
+must produce a value):
 
 ```sentinel
-fn main() {
-    let r = { let y = 4; y + 1 };
-    print(r * 2)             // 10
+fn main() -> i64 {
+    if 5 > 3 { 12 } else { 0 }    // exit 12
 }
 ```
 
-Blocks contain zero or more `;`-terminated statements followed
-by exactly one tail expression (no `;` at the end). Empty blocks
-are not allowed; `{ }` is a parse error. The trailing-expression
-requirement is a deliberate choice — it forces every block to
-have a value, which keeps the C1 type system honest.
-
-You can mix expression-statements and `let`s freely:
+`while` is a **statement** (a loop has no value). `break` and `continue` work
+inside it. Loop-carried state is a `let mut` declared outside the loop:
 
 ```sentinel
-fn main() {
-    let x = 5;
-    print(x);                 // expression-statement: evaluate, discard
-    print(x * 2);             //   "
-    x + 1                     // tail: this is main's return value
+fn main() -> i64 {
+    let mut total: i64 = 0;
+    let mut i: i64 = 1;
+    while i <= 10 {
+        total = total + i;
+        i = i + 1;
+    }
+    total                          // 1+2+...+10 = 55
 }
 ```
 
-The program above prints `5` and `10`, then exits with code 6.
+A binding declared *inside* the loop body is fresh each iteration (and its heap,
+if any, is freed each iteration — see RAII below).
 
-## `if`/`else`
+## Structs
 
-`if` is an expression. The condition is evaluated, the
-corresponding branch's block runs, and the block's tail
-expression is the value of the whole `if`:
+A `struct` groups named fields. Construct one with `Name { field: value }` and
+read a field with `value.field`:
 
 ```sentinel
-fn main() {
-    let x = 5;
-    let y = if x { x * 2 } else { 0 };
-    print(y)                  // 10
+struct Point { x: i64, y: i64 }
+
+fn manhattan(p: Point) -> i64 {
+    p.x + p.y
+}
+
+fn main() -> i64 {
+    let p: Point = Point { x: 3, y: 4 };
+    manhattan(p)                   // exit 7
 }
 ```
 
-Two important constraints for C0:
+Fields can be any type, including other structs and the nullable/collection
+types below.
 
-1. **`else` is mandatory.** Every `if` needs an `else` branch.
-   This will relax once the type system arrives and can prove
-   that a missing `else` is OK (e.g., when both branches type
-   to a `?T` and `None` is the implicit fallthrough).
+## Enums and `match`
 
-2. **The condition uses C-style truthy.** Since there is no
-   `bool` yet, the condition is an `i64` and `0` is false; any
-   other value is true. So `if x { ... }` reads as "if x is
-   nonzero." This will change at C1.3 when `bool` lands and
-   conditions become strictly `bool`-typed.
-
-`else if` chains work the obvious way and parse as nested
-`if`/`else`:
+An `enum` is a sum type: a value is exactly one of its variants, and a variant
+may carry a positional payload. Construct with `Enum::Variant(...)` and inspect
+with `match`, which **must be exhaustive**:
 
 ```sentinel
-fn classify(x) {
-    if x {
-        if x - 100 { 1 } else { 2 }
-    } else {
-        3
+enum Shape {
+    Unit,
+    Circle(i64),
+    Rect(i64, i64),
+}
+
+fn area(s: Shape) -> i64 {
+    match s {
+        Shape::Unit => 0,
+        Shape::Circle(r) => r * r * 3,
+        Shape::Rect(w, h) => w * h,
     }
 }
-```
 
-Because `if` is an expression at the top of the expression grammar,
-it can't sit bare inside arithmetic. Wrap it in parens if you
-need to:
-
-```sentinel
-fn main() {
-    let r = (if 1 { 2 } else { 3 }) + 4;
-    print(r)                  // 6
+fn main() -> i64 {
+    let c = Shape::Circle(2);      // area 12
+    let r = Shape::Rect(5, 6);     // area 30
+    area(Shape::Unit) + area(c) + area(r)   // 0 + 12 + 30 = 42
 }
 ```
 
-## Comments
+A `match` arm binds the variant's payload (`r`, `w`, `h` above). The scrutinee
+is consumed by the match (it's moved in).
 
-Line comments start with `//` and run to end-of-line. There are
-no block comments yet.
+## References, moves, and the borrow checker
+
+Sentinel has ownership, move semantics, references, and RAII drop — the C2
+surface.
+
+**References.** `&x` is a shared (read-only) borrow; `&mut x` is a mutable
+borrow; `*r` dereferences. A function takes them as `&T` / `&mut T`:
 
 ```sentinel
-// This is a comment.
-fn main() {
-    let x = 5;        // and so is this
-    print(x)
+fn add(a: &i64, b: &i64) -> i64 {
+    *a + *b
+}
+
+fn main() -> i64 {
+    let a: i64 = 10;
+    let b: i64 = 32;
+    add(&a, &b)                    // exit 42
 }
 ```
+
+The borrow checker enforces **shared-XOR-mutable**: at any time a value has
+either any number of `&` borrows or exactly one `&mut`, never both.
+
+**Moves.** Non-`Copy` values (structs, arrays, `Vec`, `String`, enums) are
+*moved* when passed by value or returned. After a move the original binding is
+no longer usable — using it is a compile error. Scalars (`i64`, `bool`, …) and
+references are `Copy` (they're duplicated, not moved):
+
+```sentinel
+struct Point { x: i64, y: i64 }
+fn consume(p: Point) -> i64 { p.x + p.y }
+
+fn main() -> i64 {
+    let p: Point = Point { x: 3, y: 4 };
+    consume(p)                     // `p` is moved here; it can't be used again
+}
+```
+
+**RAII drop.** A value that owns heap memory (an array, a `Vec`, a heap-boxed
+enum payload, a struct/class containing one) is freed automatically at the end
+of its scope — no manual `free`. A value that was moved out is *not* dropped by
+the original scope (the new owner drops it), so there's no double-free.
+
+**Known limitations.** The borrow checker is lexical (pre-Polonius), so it is
+*conservative*: it sometimes rejects a program that is actually safe — for
+example, a borrow whose last use was on the previous line, or a borrow of one
+struct field that blocks a write to a different field. Each such case has a
+documented workaround in
+[`borrow-check-limitations.md`](borrow-check-limitations.md). These are
+over-rejections (it errs on the side of safety); the one historical
+*under*-rejection (a moved struct field could double-free) is closed.
+
+## Strings, bytes, and `Vec`
+
+**A string is its bytes.** A string literal `"hi"` has type `[u8]` — an array
+of unsigned bytes. A character literal `'h'` is a `u8`. `u8` arithmetic is
+*unsigned* (a byte ≥ `0x80` is large, not negative). Convert with
+`i64_to_u8` / `u8_to_i64`, compare two `[u8]` with `str_eq`, take a length with
+`len`, and index with `s[i]` (yielding a `u8`):
+
+```sentinel
+fn main() -> i64 {
+    let big: u8 = i64_to_u8(200);
+    let small: u8 = i64_to_u8(100);
+    let q: u8 = big / small;       // unsigned division -> 2
+    if big > small && u8_to_i64(q) == 2 { 42 } else { 0 }
+}
+```
+
+**`Vec<T>` is a growable array.** Create one with `vec_new()` (the element type
+comes from the annotation), append with `push(&mut v, x)`, read with `v[i]`,
+remove the last with `pop(&mut v)`, measure with `len(v)`, and bridge a
+`Vec<T>` to a `[T]` with `vec_to_array(v)`. **`String` is an alias for
+`Vec<u8>`** — a growable byte buffer:
+
+```sentinel
+fn main() -> i64 {
+    let mut nums: Vec<i64> = vec_new();
+    push(&mut nums, 10);
+    push(&mut nums, 20);
+    push(&mut nums, 30);
+    let first: i64 = nums[0];        // 10
+    let last: i64 = pop(&mut nums);  // 30 (len now 2)
+
+    let mut word: String = vec_new();
+    push(&mut word, 'l');
+    push(&mut word, 'e');
+    push(&mut word, 't');
+    let arr: [u8] = vec_to_array(word);   // bridge Vec<u8> -> [u8]
+    let kw: [u8] = "let";
+    let matched: i64 = if str_eq(arr, kw) { 1 } else { 0 };
+
+    first + last + len(nums) + matched   // 10 + 30 + 2 + 1 = 43
+}
+```
+
+Every `Vec` / array / string is freed at its owning scope's exit (RAII), so
+these programs are leak-free.
+
+## File I/O
+
+File I/O is a set of runtime built-ins (not effects). `write_file(path, bytes)`
+writes, `read_file(path) -> [u8]` reads the whole file, and `print_bytes(bytes)`
+writes the exact bytes to stdout (no trailing newline). Paths and contents are
+both `[u8]`. A failed open/read/write aborts the program (panic-on-failure):
+
+```sentinel
+fn main() -> i64 {
+    let path: [u8] = "/tmp/sentinel_demo.txt";
+    let payload: [u8] = "hello";
+
+    write_file(path, payload);
+    let back: [u8] = read_file(path);
+    print_bytes(back);             // writes "hello" (no newline)
+
+    if str_eq(back, payload) { len(back) } else { 0 }   // exit 5
+}
+```
+
+## Generics
+
+Functions and structs can be generic over type parameters, written `<T>`. The
+compiler **monomorphizes** — it emits a specialized copy per concrete type used:
+
+```sentinel
+fn id<T>(x: T) -> T { x }
+
+fn main() -> i64 {
+    id(42)                         // monomorphized to id__i64; exit 42
+}
+```
+
+A generic struct is `struct Box<T> { value: T }`, instantiated as `Box<i64>`.
+Type arguments are inferred at call sites where possible.
+
+## Nullable `?T`
+
+`?T` is a nullable type — a `T` or `null`. A plain `T` widens implicitly to
+`?T` at an annotation boundary, and `null` is the absent value. Inspect with
+`is_some(x)` (true if present), `unwrap_or(x, default)` (the value or a
+fallback), or compare `x == null`:
+
+```sentinel
+fn main() -> i64 {
+    let x: ?i64 = 42;              // implicit i64 -> ?i64 widen
+    unwrap_or(x, 0)                // exit 42
+}
+```
+
+`?T` is how Sentinel models "maybe absent" without a null-pointer footgun —
+you can't use a `?T` as a `T` without going through `unwrap_or` / a check.
+
+## `secret` and constant-time
+
+`secret T` marks a value whose *timing* must not leak. The compiler statically
+**rejects** any program where a `secret` value reaches a branch condition, a
+memory index/address, or a division divisor — the three classic timing
+side-channels. `declassify(s)` is the one sanctioned way to turn a `secret T`
+back into a `T` (you're asserting it's safe to branch on now):
+
+```sentinel
+fn unwrap(s: secret i64) -> i64 {
+    declassify(s)
+}
+
+fn main() -> i64 {
+    let stored: secret i64 = 42;   // implicit i64 -> secret i64 widen
+    let raw: i64 = unwrap(stored);
+    print(raw + 8)                 // "50"
+}
+```
+
+A *branch-free* computation over secrets — using the arithmetic/bitwise
+operators, never an `if` on a secret — passes the check. The canonical shape is
+constant-time equality: XOR the pairs, OR-reduce, and only `declassify` the
+final accumulator. Writing `if (someSecretBool) { ... }`, indexing
+`a[someSecret]`, or dividing by a secret is a compile error
+(`sentinel::mir::secret_leak`).
+
+**What the guarantee is, precisely.** The check is machine-checked on the
+compiler's MIR, with the *type system* as the taint oracle (a value is secret
+iff its type says so), and it runs *before* LLVM optimization — so it constrains
+the program you wrote, not the optimized machine code. It does not yet *force*
+constant-time emission (cmov / speculation barriers / post-codegen assembly
+verification are future work). See the README's "headline capability" section
+for the full framing.
+
+## Effects and handlers
+
+Sentinel has algebraic effects with deep handlers. An `effect` declares
+operations; `perform` invokes one; `handle <body> with { ... }` interprets the
+operations the body performs. A handler arm receives a continuation `k` and may
+resume it with a value:
+
+```sentinel
+effect Io {
+    read() -> i64;
+}
+
+fn main() -> i64 {
+    handle perform Io.read() with {
+        Io.read(k) => k(42)        // resume the continuation with 42
+    }                              // exit 42
+}
+```
+
+Effects are part of a function's type: a function that performs an unhandled
+effect must declare it in its signature with `! { EffectName }` (you'll see this
+on `Async` in the concurrency section). An unhandled effect at `main` is a
+compile error — effects are tracked, not implicit.
+
+## Classes, traits, and delegation
+
+A `class` bundles fields with an `init` constructor and methods. `self: &Self`
+is a shared receiver, `self: &mut Self` a mutating one. Construct with
+`Class::init(...)` and call methods with `instance.method(...)`:
+
+```sentinel
+class Point {
+    let x: i64;
+    pub init(x: i64) {
+        self.x = x;
+        0
+    }
+    pub fn get(self: &Self) -> i64 {
+        self.x
+    }
+}
+
+fn main() -> i64 {
+    let p: Point = Point::init(7);
+    p.get()                        // exit 7
+}
+```
+
+A `trait` declares method signatures; `impl as Trait for Class { ... }` provides
+them, and a call dispatches to the impl:
+
+```sentinel
+trait Counter {
+    fn tick(self: &mut Self, n: i64) -> i64;
+}
+
+class Tally {
+    let count: i64;
+    pub init() { self.count = 0; 0 }
+}
+
+impl as Counter for Tally {
+    fn tick(self: &mut Self, n: i64) -> i64 {
+        self.count = self.count + n;
+        self.count
+    }
+}
+
+fn main() -> i64 {
+    let mut t: Tally = Tally::init();
+    t.tick(42)                     // exit 42
+}
+```
+
+**Delegation** auto-forwards a trait to an inner field. `delegate field: Type to
+Trait;` makes the compiler synthesize an `impl as Trait` that routes each method
+to `self.field.method(...)` — composition without boilerplate:
+
+```sentinel
+class Logger {
+    delegate writer: FileSink to Writer;  // FileSink impls Writer
+    pub init(w: FileSink) { self.writer = w; 0 }
+}
+// l.write(42) now routes to l.writer.write(42)
+```
+
+## Structured concurrency
+
+`scope concurrent { ... }` opens a concurrency scope; `spawn f(args)` starts a
+task (an OS thread at the current minimum), and `task.await` joins it and reads
+its result. The scope discharges the `Async` effect, so concurrency stays
+visible in the type system but `main` doesn't have to declare it:
+
+```sentinel
+fn double(x: i64) -> i64 ! { Async } {
+    x * 2
+}
+
+fn main() -> i64 {
+    let result: i64 = scope concurrent {
+        let t = spawn double(21);  // t : Task<i64>
+        t.await                    // join + read -> 42
+    };
+    result                         // exit 42
+}
+```
+
+A spawned function carries the `Async` effect (`! { Async }`); the `scope`
+handles it. Tasks must be awaited within their scope.
+
+## Modules and multiple files
+
+Each file is a module, named by its path relative to the source root (the entry
+file's directory). `pub` marks an item as importable; `use path::Item;` brings
+it into scope. Given `util.sentinel`:
+
+```sentinel
+// util.sentinel
+pub fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+```
+
+and `app.sentinel` next to it:
+
+```sentinel
+// app.sentinel
+use util::add;
+
+fn main() -> i64 {
+    add(40, 2)                     // exit 42
+}
+```
+
+build the **entry** file — the compiler follows the `use` edges and pulls in the
+modules it needs:
+
+```bash
+snc build app.sentinel -o app
+./app; echo "exit=$?"             # exit=42
+```
+
+`pub` applies to any top-level item (fn, struct, enum, trait, class, effect); a
+non-`pub` item is private to its module. (The compiler currently merges the
+module graph into one unit before codegen; true per-unit separate compilation is
+a deferred follow-on — it doesn't change the source-level model above.)
 
 ## A worked example
 
-Here's the `c05_go_no_go.sentinel` fixture, the canonical "C0 is
-complete" program:
+Two fixtures are worth reading in full as end-to-end tours:
 
-```sentinel
-fn double(x) { x * 2 }
+- [`tests/pass/c44_go_no_go.sentinel`](../tests/pass/c44_go_no_go.sentinel) —
+  the structured-concurrency example above, complete.
+- [`tests/pass/c5_go_no_go.sentinel`](../tests/pass/c5_go_no_go.sentinel) — the
+  **1.0 acceptance program**: a TLS-1.3-handshake-*shaped* program combining a
+  state-machine class, a cipher-suite trait, I/O-as-effects, and a constant-time
+  `Finished`-MAC verify — compiled, run, and passing the constant-time check
+  end to end.
 
-fn pick(cond, a, b) {
-    if cond { a } else { b }
-}
+More broadly, the ~120 fixtures under [`tests/pass/`](../tests/pass/) are each a
+small, CI-verified program; reading them by feature prefix (`c14_*` structs,
+`c5d1_*` enums, `c35*_*` effects, `c41_*`–`c44_*` classes/concurrency, …) is the
+most reliable tour of the surface, because they are exactly what the compiler is
+tested against.
 
-fn main() {
-    let x = 5;
-    let y = pick(x, double(x), 0);
-    print(y)
-}
-```
+## What isn't here yet
 
-Reading through it:
+Sentinel 1.0 was the *bootstrap-compiler* milestone, and Phase D has since grown
+the language to self-host. What remains pending:
 
-1. `fn double(x) { x * 2 }` — a one-argument function returning
-   twice its input. The body is a single expression, the
-   block's tail.
-2. `fn pick(cond, a, b) {...}` — a three-argument function that
-   returns `a` if `cond` is nonzero, otherwise `b`. This is the
-   conditional move from the C standard library, written as
-   ordinary control flow.
-3. `fn main() {...}` — the entry point. Binds `x = 5`, computes
-   `y = pick(5, double(5), 0)`, prints `y`.
-4. `double(5)` evaluates to `10`. `pick(5, 10, 0)` evaluates to
-   `10` because `5` is nonzero (truthy). So `y == 10`. `print(10)`
-   writes `10` to stdout and returns 0. `main`'s tail expression
-   is the return of `print`, so the program exits 0.
+- **Not production-ready, not stable.** Every API can change; only the
+  `abi-v1` *compiled-artifact* contract is frozen. There is no package manager
+  and **no standard library** beyond the handful of built-ins shown here
+  (`print`, `len`, `push`, `pop`, `vec_new`, `vec_to_array`, `str_eq`,
+  `read_file`, `write_file`, `print_bytes`, `i64_to_u8`, `u8_to_i64`,
+  `is_some`, `unwrap_or`, `declassify`).
+- **Single-process.** Cross-process capabilities and actors are deferred.
+- **The borrow checker over-rejects** some safe programs (see the limitations
+  doc); the Polonius-style flow-precise migration is future work.
+- **Constant-time *emission* is not forced** — only the MIR-level rejection is
+  delivered (see the `secret` section).
+- **No floats**, no integer widths beyond `i64`/`i32`/`u8`, no tuples, no
+  closures, no `for`/iterators, no block comments (`//` line comments only).
+- **Tooling is minimal** — the LSP is a stub; there's no formatter or REPL.
 
-To run it yourself:
+When something you expect to work doesn't, check [`STATE.md`](STATE.md) (the
+authoritative feature list) before assuming it's a bug — then, if it really
+looks like one, see [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
-```bash
-cargo run --bin snc -- build tests/pass/c05_go_no_go.sentinel -o /tmp/go_no_go
-/tmp/go_no_go     # prints "10", exits 0
-```
+## Appendix: the C0 language (historical)
 
-The other 21 fixtures under [`tests/pass/`](../tests/pass/) cover
-every C0 feature individually — read them as a tour of the
-surface.
+The very first bootstrap milestone (**Phase C0**) had exactly one type — `i64` —
+and no annotations: `fn double(x) { x * 2 }`. Conditions were C-style truthy
+(`0` false, nonzero true), there were no comparison or logical operators, and
+`print` was the only built-in. That language is gone — annotations are now
+mandatory, conditions are strictly `bool`, and the type system, references,
+secrets, effects, generics, classes, collections, and modules described above
+all arrived in Phases C1–C5 and D. The C0-era `fn f(x)` examples **no longer
+compile**; they're noted here only so old snippets don't confuse you.
 
-## What doesn't work yet
-
-Sentinel-the-language is deliberately small at C0. The things
-below are not bugs, they're roadmap. Most arrive in Phase C1:
-
-- **No types or annotations.** `i64` is everything. `fn f(x: i64)`
-  is a parse error today; the annotation grammar lands at
-  **C1.2**.
-- **No `bool`, `true`, `false`.** Conditions are C-style truthy.
-  `bool` arrives at **C1.3**, and `if 5 { ... }` will become a
-  type error then.
-- **No comparison operators.** `==`, `<`, `>`, `!=` don't exist.
-  Use truthy `if x { ... }` to test for nonzero. Comparisons
-  arrive at **C1.3** with `bool`.
-- **No `&&`, `||`, `!`.** No logical operators yet.
-- **No strings.** `print` takes an `i64`. Strings need either a
-  pointer type or a built-in `String` type; neither is in C0.
-- **No floats, no other integer widths.** `i32` and friends
-  arrive at **C1.3**.
-- **No mutability.** `let mut`, `=` as assignment, and the
-  region/ownership story all arrive at **C2**.
-- **No structs, arrays, tuples, enums.** Structs land at
-  **C1.4**, arrays at **C1.6**, generics at **C1.7**.
-- **No `?T` nullability.** Arrives at **C1.5**.
-- **No effects, no `secret`, no broker integration.** These are
-  the language-level security thesis; they're the whole point of
-  Sentinel but they need the type system underneath them first.
-  Effects integrate at **C3**, `secret` at **C3**, broker at
-  **C5**.
-- **No imports, no modules, no separate compilation.** Every
-  program is a single file.
-- **No standard library.** `print` is the only built-in. Math
-  functions, I/O, collections all wait for the language to
-  reach a stable shape.
-
-When you write something that should work and the compiler
-disagrees, check this list first. If it looks like it should be
-in C0 and isn't working, that's a real bug — open an issue or
-check [`STATE.md`](STATE.md) for the authoritative feature list.
-
-## Where Sentinel is headed
-
-Sentinel exists to solve a specific class of problem: the
-security failures that dominate modern incidents — supply-chain
-attacks, side channels, secret disclosure, untrusted code
-execution. The language-level features for those (effects as
-capabilities, the `secret` qualifier with a constant-time check,
-named regions, the broker as a programmable runtime) are all
-*designed* but not yet *implemented* in the production compiler.
-
-What you're using today is the bootstrap pipeline: the smallest
-slice of compiler infrastructure that can lex, parse, type-check,
-and emit native code. It exists to prove the architecture works.
-The security thesis lands as the type system, effect system, and
-secret qualifier come up through Phase C1, C2, and C3.
-
-If you want the long version of what Sentinel is *for*, read
-[`SENTINEL_SUMMARY.md`](SENTINEL_SUMMARY.md) (one-page pitch),
-[`SENTINEL_DESIGN.md`](SENTINEL_DESIGN.md) (full design), and
-[`HANDOVER.md`](HANDOVER.md) (the implementation plan).
-
-If you want to follow along as features land,
-[`STATE.md`](STATE.md) is updated at every sub-phase boundary.
-
-Welcome aboard.
+If you want the bigger picture of what Sentinel is *for* — the security thesis
+behind `secret`, effects-as-capabilities, and the broker — read
+[`SENTINEL_SUMMARY.md`](SENTINEL_SUMMARY.md) and
+[`SENTINEL_DESIGN2.md`](SENTINEL_DESIGN2.md). [`STATE.md`](STATE.md) tracks what
+is actually built, updated at every sub-phase boundary.
