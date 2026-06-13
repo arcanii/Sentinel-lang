@@ -1315,6 +1315,48 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     oracle Errs on a nested-Handle body today, the `cg_h_*` save/restore is already in place) → the full-corpus
     phase-go → ADR 0045 ACCEPTED.
 
+- **A33 — BAR B: effects/handlers, sub-slice c36b — nested handles LANDED (feat `b63cc98`). THE LAST HANDLER
+  SLICE — ALL EFFECTS/HANDLERS DONE (c35a–e, c36a, c36b).** The production's C3.6(b): a `handle` whose body is
+  itself a `handle`. The inner (NESTED) handle catches the effects it has arms for and PROPAGATES the rest to
+  the enclosing handle, per ADR 0020 D3 deep-handler semantics. The emitting set grew **119 → 121** — the TWO
+  nested fixtures flip `Err → Ok` (byte-identical `scg` == `snc llvm` + behaviourally == inkwell, exit 42 each
+  + leak-free): `c36b_nested_handle_basic` (inner catches `Io`, outer catches `Net`; do_both performs both, so
+  the `Net.fetch` kont — un-caught by the inner — propagates out to the outer's `Net.fetch` arm) and
+  `c36b_nested_handle_inner_full` (the inner fully discharges `Io`; the outer just dispatches PURE_RETURN on
+  the inner's pure-wrap, then `+ 27` → 42). The flip set was verified exact; the only remaining pass-fixture
+  emitting gap is **structured concurrency** (`scope`/`spawn`/`await` — c44_go_no_go + c4_go_no_go).
+  - **The nesting model:** a handle is NESTED iff its dynamic depth > 1 (its body is reached from an enclosing
+    handle). A nested handle's RESULT is a **Kont\*** (not an i64) — either the un-caught continuation (to be
+    dispatched by the outer) or a `kont_pure`-wrapped value. So when nested: the result cell is `ptr`; each
+    arm wraps its i64 via `kont_pure`; the PURE_RETURN block passes the kont THROUGH unchanged (no return arm)
+    or consumes+re-wraps (with a return arm); the switch DEFAULT is a **propagate block** (store the un-caught
+    kont, `br merge`) instead of `unreachable`; the merge loads `ptr`. The OUTER (top-level) handle treats the
+    inner handle's Kont\* result as a kont-producing body and dispatches on it.
+  - **Oracle (`llvm_dump.rs`):** `lower_handle` gains a `handle_depth` field (incremented on entry,
+    decremented on exit) and is split into `lower_handle` (the depth wrapper, so the decrement runs on every
+    `?` exit) + `lower_handle_inner(…, is_nested)`. The body-wrap decision becomes `produces_kont(body) ||
+    matches!(body.kind, Handle)` (a nested-Handle body produces a Kont\*). A new `store_handle_result(is_
+    nested, val, rslot)` wraps the i64 via `kont_pure` when nested (used by the arm store + the pure block).
+    The pure block passes the kont through when `is_nested && return_arm.is_none()`; the default propagates
+    when nested; the merge loads `{i64|ptr}`.
+  - **Sentinel mode-4 (`types.sentinel`):** a `cg_h_depth` field (TyCtx) mirrors the oracle; `is_nested =
+    cg_h_depth > 1` (a local, computed after the increment). It threads to **`dump_tharms`** (a new
+    `is_nested` param → the arm store routes through the new **`cg_store_hresult`**, the `cg_store_handle_
+    result` twin) and is used in the Handle arm's dispatch tail (a `ptr` result cell via `cg_alloca_ptr`, the
+    passthrough/wrap pure block, the propagate default, the `ptr`/`i64` merge load). The body-kont detection
+    (the c36a `cg_tailk` mechanism) needs no change: a nested handle **sets `cg_tailk = is_nested` at its
+    end**, so the enclosing handle's body walk sees that the inner produced a Kont\* (→ no wrap). The depth
+    increments right after `(handle ` and decrements at the arm's end (balanced across the body walk, which an
+    inner handle inc/decs). The `cg_h_*` save/restore (in place since c35a) carries the per-handle state.
+  - **Validation:** 121/121 emitted fixtures `scg` == `snc llvm` byte-for-byte; ALL stage differentials
+    (lex/parse/resolve/effects/types/borrow/mir/ctverify/codegen) byte-identical; the 2 behaviourally ==
+    inkwell (42/42) + leak-free (`leaks --atExit`: 0). Modes 0-3 byte-identical; BOTH bootstrap fixed-point
+    capstones pass (the new types.sentinel code self-compiles identically — the selfhost compiler has no
+    handlers, so the nested paths are inert there). 1476 tests, four-check green. **NEXT: structured
+    concurrency** (`scope concurrent { … }` / `spawn fn(args)` / `expr.await` — the `Async` effect + the
+    `sentinel_task_*`/`sentinel_scope_*` runtime + the per-spawn wrapper synthesis; c44_go_no_go + the
+    full-surface c4_go_no_go), the last full-corpus emitting gap → the phase-go → ADR 0045 ACCEPTED.
+
 ## Decision
 
 ### D1. Goal.

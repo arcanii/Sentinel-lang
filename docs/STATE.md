@@ -114,9 +114,21 @@ ONLY when mode 4 + a `return` token is present (the selfhost compiler has none �
 `cg_apply_return_arm` re-parses the body via `parse_expr` at each site. The `Ret::YesRet` AST change rippled
 mechanically to 4 stages (parser/resolve/effects/merge — all dumps byte-unchanged). Pure-body detection via
 `cg_tailk`. Modes 0–3 byte-identical; both fixed-point paths preserved (the new YesRet shape + types.sentinel
-code self-compile identically). NEXT: **c36b** (nested handle) → the full-corpus phase-go → ACCEPTED. (Full
-Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27; c35b in A28; c35c in A29; c35d in A30; c35e in
-A31; c36a in A32.)
+code self-compile identically). ✅ **effects/handlers c36b — nested handles** (A33, feat `b63cc98`) → **119 →
+121** (c36b_nested_handle_basic / _inner_full, exit 42/42) — **THE LAST HANDLER SLICE; ALL EFFECTS DONE.** A
+`handle` whose body is a handle: the inner (NESTED) handle lowers to a **Kont\*-typed result** — arms wrap their
+i64 via `kont_pure`, the PURE_RETURN case passes the kont through (or re-wraps the return-arm'd value), and the
+switch DEFAULT **propagates** the un-caught kont to the merge so the OUTER handle dispatches it. Oracle:
+`lower_handle` gains a `handle_depth` counter (is_nested = depth > 1; split into `lower_handle` +
+`lower_handle_inner` so depth decrements on every exit), a `ptr` result cell when nested, `store_handle_result`
+(wrap-if-nested), the propagate default, and a nested-Handle body treated as kont-producing. Sentinel: a
+`cg_h_depth` counter mirrors it; `is_nested` threads to `dump_tharms` (the arm store via `cg_store_hresult`) +
+the dispatch tail (ptr rslot, passthrough/wrap, propagate, ptr merge load); a nested handle sets
+`cg_tailk = is_nested` so the enclosing handle's body-kont detection sees the inner produced a Kont\*. Modes
+0–3 byte-identical; both fixed-point paths preserved. **The remaining pass-fixture emitting gap is
+structured concurrency** (`scope`/`spawn`/`await` — c44_go_no_go + c4_go_no_go); NEXT: **concurrency** → the
+full-corpus phase-go → ADR 0045 ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27;
+c35b in A28; c35c in A29; c35d in A30; c35e in A31; c36a in A32; c36b in A33.)
 The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/

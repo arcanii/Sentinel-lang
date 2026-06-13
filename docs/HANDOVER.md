@@ -2082,8 +2082,14 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A32 — effects c36a` commit (this
+    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A33 — effects c36b` commit (this
     verify-HEAD refresh), atop the
+    **effects/handlers c36b feat** (`b63cc98` — nested handles, Kont*-merge + propagate; THE LAST HANDLER
+    SLICE; emitting set 119 → 121: c36b_nested_handle_basic + _inner_full [exit 42/42]; oracle `lower_handle`
+    gains a `handle_depth` counter [is_nested = depth>1] + `lower_handle_inner` + `store_handle_result` [nested
+    arms/pure wrap i64→ptr] + propagate default + nested-Handle body treated as kont-producing; Sentinel
+    `cg_h_depth` + `is_nested`→`dump_tharms`/`cg_store_hresult` + the passthrough/propagate tail + `cg_tailk =
+    is_nested`), atop the
     **effects/handlers c36a feat** (`caf4175` — handle `return` arm + pure-body wrap; emitting set
     116 → 119: c36a_return_arm_transform + _return_arm_after_resume + c37_handle_return [exit 42/42/84]; oracle
     `lower_handle` drops the return-arm gate + wraps pure bodies + `apply_return_arm` inlines at the dispatch
@@ -2124,8 +2130,9 @@ For pasting into a fresh chat to bootstrap context:
     `7054145` + feat `41f00fa`). The 8/N codegen chain below: (8f-2/8f-3) snc llvm lowers the full compiler
     (`59c30a7` A17 + `67fa808`) · (8f-1) selfhost stages self-host (`8b89726` A16 + `3c389cd`) · (8e)
     enums+match (A14/A15) · heap drops (A11–A13) · Vec (A9/A10) · 8d refs/builtins · 8c aggregates · 8b
-    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A32; Bar B in progress —
-    `print` + nullable + secret + generics + classes + effects c35a/b/c/d/e + c36a done, **119/123+ emitting**); the
+    control flow · 8a scalars+oracle. ADR 0045 is ACCEPTED-shape (amendments A1–A33; Bar B in progress —
+    `print` + nullable + secret + generics + classes + ALL effects [c35a/b/c/d/e + c36a/c36b] done, **121/123+
+    emitting**; only structured concurrency [scope/spawn/await] remains); the
     **bootstrap fixed point is reached via BOTH paths** — (b) 8g merge-to-source + (a) the self-hosted merge (`scg` discovers+merges+emits itself).
     Bar B is the remaining open scope for the full-corpus ACCEPTED flip — or an owner-deferred close.
     ⚠ The dev pushes via GitHub Desktop — `git status` may show "ahead N" (uncommitted-to-origin local
@@ -2315,17 +2322,31 @@ For pasting into a fresh chat to bootstrap context:
     de-risked in isolation first). The Handle arm reconstructs `hr` to set `cg_ret_*` before `dump_tharms`;
     `dump_tret` disposes the body in mode 4 / type-dumps in 0-3; pure-body via `cg_tailk`. ⚠ The `YesRet` AST
     change rippled to 4 stages (parser/resolve/effects/merge — bind+ignore, dumps byte-unchanged); `parse_expr`
-    + `slice_of` made `pub`. Both fixed-point capstones pass (the AST change + new code self-compile). **▶ NEXT:
-    c36b** (nested handle — the inkwell `is_nested` path: a nested-`Handle` body lowers to Kont*-typed merge
-    values [arms wrap their i64 via `kont_pure`, the pure-return case passes/rewraps], the switch default is a
-    propagate block contributing the un-caught kont to the merge so the OUTER handle dispatches it; the oracle
-    Errs on a nested-Handle body today [the c36a guard], the `cg_h_*` save/restore is already in place).
+    + `slice_of` made `pub`. Both fixed-point capstones pass (the AST change + new code self-compile). **✅
+    EFFECTS c36b LANDED** (A33, feat `b63cc98`, emitting set **119 → 121**) — **nested handles; THE LAST
+    HANDLER SLICE — ALL EFFECTS DONE.** A `handle` whose body is a handle: the inner (NESTED, depth>1) handle
+    lowers to a **Kont\*-typed result** — arms wrap their i64 via `kont_pure`, the PURE_RETURN case passes the
+    kont through (or re-wraps the return-arm'd value), and the switch DEFAULT **propagates** the un-caught kont
+    to the merge so the OUTER handle dispatches it. TWO fixtures flip: c36b_nested_handle_basic (inner=Io,
+    outer=Net; the Net kont propagates out) / _inner_full (inner fully discharges Io; outer gets PURE_RETURN).
+    Oracle: `lower_handle` gains a `handle_depth` counter (is_nested=depth>1; split into `lower_handle` +
+    `lower_handle_inner`) + a `ptr` result cell when nested + `store_handle_result` (wrap i64→ptr) + the
+    propagate default + a nested-Handle body treated as kont-producing. Sentinel: a `cg_h_depth` counter;
+    `is_nested` threads to `dump_tharms` (the arm store → `cg_store_hresult`) + the dispatch tail (ptr rslot,
+    passthrough/wrap pure block, propagate default, ptr merge load); a nested handle sets `cg_tailk = is_nested`
+    so the enclosing handle's body-kont detection sees the inner produced a Kont\*. **▶ NEXT: structured
+    concurrency** (`scope concurrent { … }` / `spawn fn(args)` / `expr.await` — the `Async` effect + the
+    `sentinel_task_spawn`/`_await`/`sentinel_scope_enter`/`_exit`/`_register` runtime symbols + the per-spawn
+    wrapper synthesis [the production lowers spawn to a synthesized wrapper fn called on a worker thread]; the
+    oracle Errs `expression not yet ported` on scope/spawn/await today; c44_go_no_go [scope+spawn+await] +
+    c4_go_no_go [the full surface: classes+traits+delegation+concurrency]) — the LAST full-corpus emitting gap.
     Sub-phase like the production C3.5(a)–(e)+C3.6 — done: **c35a** inline + **c35b** effecting-fn ABI +
-    **c35c** let-bound perform + **c35d** embedded perform + **c35e** chained lets + **c36a** return arm.
-    Remaining: **c36b** nested
-    handle (the `cg_h_*` save/restore is already in place; `produces_kont` would accept a nested `Handle`) →
-    the full-corpus phase-go (8l) → **ADR 0045 ACCEPTED**. Runtime symbols for those: all the kont symbols
-    (`perform_op`/`kont_resume`/`kont_consume_pure`/`kont_pure`/`kont_push`) are now USED. The path-(a) build
+    **c35c** let-bound perform + **c35d** embedded perform + **c35e** chained lets + **c36a** return arm +
+    **c36b** nested handle. ALL HANDLER SLICES COMPLETE.
+    Remaining: **structured concurrency** (scope/spawn/await) →
+    the full-corpus phase-go (8l) → **ADR 0045 ACCEPTED**. Runtime symbols for the kont path: all the kont
+    symbols (`perform_op`/`kont_resume`/`kont_consume_pure`/`kont_pure`/`kont_push`) are USED; concurrency adds
+    the `sentinel_task_*`/`sentinel_scope_*` set. The path-(a) build
     record + design follows (COMPLETE):
     **✅ (a-1)+(a-1b) DONE (ADR 0045 A19):**
     `selfhost/merge.sentinel` — a Sentinel un-parser (port of `source_dump.rs`) re-emitting a parsed
