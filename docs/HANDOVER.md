@@ -2083,7 +2083,19 @@ For pasting into a fresh chat to bootstrap context:
     itself, each stage differentially validated against the Rust `snc` oracle).
 
     Verify HEAD with `git log -1` — HEAD is a `docs: session handoff` commit (this verify-HEAD +
-    RESUME-AT refresh), atop the **front-end panic-freedom fuzzer + 2 bug fixes** (`ce2ad2e` —
+    RESUME-AT refresh), atop the **scg parser-hardening mirror** (`99d5ee1` — feat(selfhost): mirror
+    the P2.5 parser deep-nesting hardening into scg. The self-hosted parser had the same DoS (SIGSEGV at
+    ~6000 nested brackets). A faithful depth limit would thread `&mut i64` through ~30 recursive parser
+    fns (high churn / differential risk) and the Sentinel parser has no error channel (ADR 0043 D5/D7),
+    so instead a cheap pre-pass: `guard_nesting` (new in parser.sentinel) scans the token stream for max
+    BRACKET nesting and, if >256, CLEARS it so the walk sees an empty program — called after `tokenize`
+    by both the parser `main` AND the shared `types::run` [types/borrow/mir/scg-codegen route through it].
+    Inert for valid programs [nests <~30] → all differentials + both fixed points green [1497 tests];
+    6000 parens now exits cleanly [was SIGSEGV]. Covers the demonstrated paren/brace/bracket DoS;
+    operator-ambiguous nesting [unary/generic] is a residual whose failure stays a CONTROLLED abort; the
+    `pub`-alone case needs no mirror [the Sentinel parser already fails it as a memory-safe bounds-check
+    abort, not snc's `unreachable!()`]), atop the
+    **front-end panic-freedom fuzzer + 2 bug fixes** (`ce2ad2e` —
     review-plan P2.5 / F11: a dependency-free, deterministic, CI-integrated fuzzer
     [`crates/sentinel-syntax/tests/fuzz_panic_freedom.rs` — random bytes + token soup + corpus
     mutations; `SENTINEL_FUZZ_ITERS` override, 2M-iter campaign clean] that FOUND + FIXED two real
@@ -2254,20 +2266,26 @@ For pasting into a fresh chat to bootstrap context:
     honestly; P0.3 `CONTRIBUTING.md`; P0.4 the `SECRETS_LIFECYCLE.md` vision banner; P0.5 the stale ADR
     0019 pointer (already gone); P0.6 the CI/justfile `cargo test --doc` step. So **P1.1 + P1.2 + the
     whole P0 band are complete — AND review-plan P3.1 (the PROGRAMMING_GUIDE rewrite, `2aac7cd`) AND P2
-    (P2.3 `11c4c78` + P2.1/P2.2 `ec81d77` + P2.5 `ce2ad2e`) are done — only P2.4 remains in P2.**
-    **▶ OPEN TRACKS (owner's call — see [[sentinel_review_action_plan]] +
+    (P2.3 `11c4c78` + P2.1/P2.2 `ec81d77` + P2.5 `ce2ad2e` + the scg parser-hardening mirror `99d5ee1`)
+    are done — only P2.4 remains in P2.**
+    **▶ THE OWNER IS HEADING TO THE PER-UNIT SEPARATE-COMPILATION BACK END (ADR 0037 (a)) — the big
+    deferred architectural track (per-unit `.o` + module-qualified `abi-v1` mangling + multi-object link +
+    `linkonce_odr` cross-module generics → incremental builds; independent of the port). A standalone
+    bootstrap prompt for it was provided to the owner this session. It is ADR-FIRST: settle the D7/D9
+    decisions (mangling amendment, the 3 broken whole-program assumptions: `collect_mono_instantiations`,
+    the single `fns: HashMap<FnId, FunctionValue>`, `self.fns.get(&id)` call resolution) before code.**
+    **▶ OTHER OPEN TRACKS (owner's call — see [[sentinel_review_action_plan]] +
     `docs/REVIEW_ACTION_PLAN.md`, the owner's UNTRACKED plan):** (1) **P2.4** — a Linux `ubuntu-24.04` CI
     job (observe-only / continue-on-error; glibc surfaces heap bugs macOS masks; before abi-v1 ossifies;
     NOTE: configurable but only verifiable on GitHub, no Linux locally); (2) **rest of P3 — docs/DX**:
-    P3.2 split STATE.md (banner + capabilities vs an append-only journal), P3.3 DESIGN vs DESIGN2
-    disposition, P3.4 a stale-reference sweep, P3.5 a minimal LSP (wire the salsa pipeline →
-    publishDiagnostics — error-as-you-type, 3 reviewers flagged the stub), P3.6 a diagnostics-quality
-    pass; (3) the per-unit separate-compilation back end (ADR 0037 (a) — incremental builds, independent
-    of the port); (4) **P4** (external CT review of the now-calibrated claim + `docs/ct-model.md` +
-    conformance suite — the artifacts were built to feed it; perf profile; deferred Polonius ergonomics);
-    (5) a follow-on: mirror the P2.5 parser hardening (depth limit + `pub`-EOF) into `selfhost/parser.sentinel`
-    so `scg` is equally robust. Detail: [[sentinel_review_action_plan]] (the full P0–P4 status) +
-    [[sentinel_partial_move_fix]] + `docs/ct-model.md`.
+    P3.2 split STATE.md, P3.3 DESIGN vs DESIGN2 disposition, P3.4 a stale-reference sweep, P3.5 a minimal
+    LSP (wire the salsa pipeline → publishDiagnostics — error-as-you-type, 3 reviewers flagged the stub),
+    P3.6 a diagnostics-quality pass; (3) **P4** (external CT review of the now-calibrated claim +
+    `docs/ct-model.md` + conformance suite — the artifacts were built to feed it; perf profile; deferred
+    Polonius ergonomics); (4) a small follow-on: a FAITHFUL per-function parser depth limit (the `99d5ee1`
+    guard covers bracket nesting only — operator-ambiguous unary/generic nesting is a residual). Detail:
+    [[sentinel_review_action_plan]] (the full P0–P4 status) + [[sentinel_partial_move_fix]] +
+    `docs/ct-model.md` + ADR 0037.
 
     --- BELOW: the Bar B historical record (the completed full-corpus codegen-parity work) ---
     **Bar B headline** (DONE): the Sentinel compiler fully compiles itself, via BOTH fixed-point paths —
