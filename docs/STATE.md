@@ -125,10 +125,21 @@ switch DEFAULT **propagates** the un-caught kont to the merge so the OUTER handl
 `cg_h_depth` counter mirrors it; `is_nested` threads to `dump_tharms` (the arm store via `cg_store_hresult`) +
 the dispatch tail (ptr rslot, passthrough/wrap, propagate, ptr merge load); a nested handle sets
 `cg_tailk = is_nested` so the enclosing handle's body-kont detection sees the inner produced a Kont\*. Modes
-0–3 byte-identical; both fixed-point paths preserved. **The remaining pass-fixture emitting gap is
-structured concurrency** (`scope`/`spawn`/`await` — c44_go_no_go + c4_go_no_go); NEXT: **concurrency** → the
-full-corpus phase-go → ADR 0045 ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27;
-c35b in A28; c35c in A29; c35d in A30; c35e in A31; c36a in A32; c36b in A33.)
+0–3 byte-identical; both fixed-point paths preserved. ✅ **structured concurrency** (A34, feat `0f360cf`) →
+**121 → 123** (c44_go_no_go [scope+spawn+await] + c4_go_no_go [the full C4 surface], exit 42/42) — **THE LAST
+CONSTRUCT; ALL 123 PASS FIXTURES NOW EMIT; BAR B COMPLETE → ADR 0045 ACCEPTED.** `scope`/`spawn`/`await` lower
+to the ADR 0024 runtime (`sentinel_scope_enter`/`_exit`/`_register` + `sentinel_task_spawn`/`_await`); a
+`spawn` packs args into a heap buffer + spawns a `__spawn_wrapper_<id>` (synthesized once per unique target,
+emitted last); a `Task<T>` is an opaque `ptr`. Oracle: 5 RuntimeSyms + `Emit::current_scope` +
+`collect_spawn_targets_*`/`dump_spawn_wrapper` + `Type::Task → ptr` (lower_expr is now EXHAUSTIVE — the catch-all
+is gone). Sentinel: the Scope/Spawn/Await arms gain cg (Spawn branches on `cg_on`, collects args via
+`dump_targs` + `cg_emit_spawn` rather than invoking the target), `cg_scope`/`cg_spawn_t` +
+`cg_emit_spawn_wrapper` (into `cgcls`), `cg_is_task → ptr`. Un-parsers unchanged (concurrency is out of
+`source_dump`'s Bar-A scope, like declassify). Modes 0–3 byte-identical; both fixed-point paths preserved.
+**BAR B IS COMPLETE: the Sentinel compiler reaches the bootstrap fixed point AND emits the full corpus
+byte-identically to the Rust oracle. ADR 0045 → ACCEPTED-WITH-AMENDMENTS (A1–A34).** Deferred follow-on: the
+per-unit separate-compilation back end (ADR 0037 (a)). (Full Bar-B breakdown in ADR 0045 A21; classes in A26;
+c35a in A27; c35b in A28; c35c in A29; c35d in A30; c35e in A31; c36a in A32; c36b in A33; concurrency in A34.)
 The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/

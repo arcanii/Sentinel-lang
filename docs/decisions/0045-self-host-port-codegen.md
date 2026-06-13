@@ -1,10 +1,14 @@
 # ADR 0045: Phase D self-host port — (8/N) codegen + the bootstrap fixed-point
 
-Status: **PROPOSED** — the eighth and **final** sub-phase of the self-host port (ADR 0031
-D5 / ADR 0038 D9), after the lexer (1/N), parser (2/N, ADR 0039), resolve (3/N, ADR 0040),
-types (4/N, ADR 0041), effect-check (5/N, ADR 0042), borrow-check (6/N, ADR 0043), and MIR
-+ const-time (7/N, ADR 0044) — all ACCEPTED. Flips to ACCEPTED(-WITH-AMENDMENTS) as the
-slices land, recording deviations as numbered amendments (the 0039–0044 cadence). Ports
+Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A34) at Bar B close (full-corpus codegen parity).
+The eighth and **final** sub-phase of the self-host port (ADR 0031 D5 / ADR 0038 D9), after
+the lexer (1/N), parser (2/N, ADR 0039), resolve (3/N, ADR 0040), types (4/N, ADR 0041),
+effect-check (5/N, ADR 0042), borrow-check (6/N, ADR 0043), and MIR + const-time (7/N, ADR
+0044) — all ACCEPTED. **The bootstrap fixed point is reached via BOTH paths (A18/A20), and
+Bar B closes the full corpus: all 123 pass fixtures emit byte-identically `scg` == `snc
+llvm` (A21–A34 — print, nullable, secret, generics, classes, every effect/handler slice
+c35a–c36b, and structured concurrency); the only remaining Errs are the 20 ui/ negatives
+(expected compile failures).** Ports
 **`compile_to_object`** (`crates/sentinel-codegen`, 8263 lines — the TypedProgram + DropPlan
 → LLVM IR → object transform) to Sentinel, emitting **textual LLVM IR (`.ll`)** rather than
 calling inkwell (Sentinel has no LLVM/inkwell FFI). This is the **bootstrap-critical
@@ -1356,6 +1360,49 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     concurrency** (`scope concurrent { … }` / `spawn fn(args)` / `expr.await` — the `Async` effect + the
     `sentinel_task_*`/`sentinel_scope_*` runtime + the per-spawn wrapper synthesis; c44_go_no_go + the
     full-surface c4_go_no_go), the last full-corpus emitting gap → the phase-go → ADR 0045 ACCEPTED.
+
+- **A34 — BAR B CLOSE: structured concurrency LANDED → FULL-CORPUS PARITY → ADR 0045 ACCEPTED (feat
+  `0f360cf`).** The last construct the corpus exercises but the selfhost compiler doesn't: `scope concurrent
+  { … }` / `spawn fn(args)` / `expr.await` (ADR 0024's structured concurrency). The emitting set grew **121 →
+  123** — the final TWO fixtures flip `Err → Ok` (byte-identical `scg` == `snc llvm` + behaviourally ==
+  inkwell, exit 42 each + leak-free): `c44_go_no_go` (`scope { let t = spawn double(21); t.await }`) and
+  `c4_go_no_go` (the full Phase-C4 surface — class + trait + named impl + delegation + concurrency composed).
+  **ALL 123 PASS FIXTURES NOW EMIT** — Bar B (full-corpus codegen parity) is COMPLETE; the only remaining
+  Errs are the 20 ui/ negatives (expected compile failures). ADR 0045 → **ACCEPTED-WITH-AMENDMENTS**.
+  - **The lowering** (mirror inkwell): a `scope` calls `sentinel_scope_enter() -> *ScopeCtx`, lowers the body
+    (spawns inside register with the ctx), then `sentinel_scope_exit(scope)` (joins/awaits unawaited tasks);
+    the body's value is the scope's value. A `spawn fn(args)` packs the args into a heap buffer (one i64 slot
+    each, ≥8 bytes via `sentinel_alloc`), calls `sentinel_task_spawn(@__spawn_wrapper_<id>, args, size) ->
+    *Task`, and (inside a scope) `sentinel_scope_register(scope, task)`. A `task.await` calls
+    `sentinel_task_await(task) -> i64`. A `Task<T>` lowers to an opaque `ptr`.
+  - **The per-spawn wrapper** `void @__spawn_wrapper_<id>(ptr task, ptr args)` (synthesized once per unique
+    spawn target — collected across all fn bodies, FnId-sorted + deduped, emitted LAST after the fns +
+    class/impl methods): unpacks `n` i64 args from `args` (8-byte slots), calls the target, stores the result
+    into `task` (offset 0), sets `task->done` (i32 @ 8), returns void. Args are i64 at the C4.4 minimum.
+  - **Oracle (`llvm_dump.rs`):** 5 new `RuntimeSyms` + declares (the `sentinel_task_*`/`sentinel_scope_*`
+    group, after the kont group), `Emit::current_scope`, the Scope/Spawn/Await arms in `lower_expr`,
+    `collect_spawn_targets_*` + `dump_spawn_wrapper`, and `Type::Task(_) -> "ptr"` in `llvm_ty`. With these
+    the `lower_expr` match is now **EXHAUSTIVE over every `TypedExprKind`** — the "expression not yet ported"
+    catch-all is deleted (full expression coverage; clippy flagged it unreachable).
+  - **Sentinel mode-4 (`types.sentinel`):** the Scope/Spawn/Await arms gain cg (the type dump + MIR stay for
+    modes 0-3); **Spawn branches on `cg_on`** — in mode 4 it extracts the call's `Call(name, args)`, collects
+    the args via `dump_targs` (cg operands), and emits `cg_emit_spawn` (alloc + per-arg store + `task_spawn` +
+    `scope_register`) — it does NOT invoke the target. `cg_scope` tracks the enclosing scope; `cg_spawn_t`
+    records targets (deduped) for **`cg_emit_spawn_wrapper`**, emitted into **`cgcls`** (the class/impl-method
+    buffer, folded into `result` AFTER cgout — so the wrappers land last, matching the oracle) via an
+    FnId-order min-scan. New `cg_is_task` → `ptr` in `cgo_ty`/`ll_type_to`. (Args are immediates in the
+    corpus, so the Sentinel's collect-then-store is byte-identical to the oracle's inline lower-then-store; a
+    non-immediate spawn arg would diverge — a documented refinement, not in the corpus.)
+  - **Un-parsers: NO change.** `scope`/`spawn`/`await` are out of `source_dump`'s Bar-A (selfhost) scope —
+    like `declassify` (which `source_dump` already Errs on); the selfhost compiler uses no concurrency, so the
+    fixed-point un-parse is unaffected, and the codegen differential parses the fixtures directly (no
+    un-parser).
+  - **Validation:** 123/123 emitted fixtures `scg` == `snc llvm` byte-for-byte; ALL stage differentials
+    byte-identical; BOTH bootstrap fixed-point capstones pass; behaviourally == inkwell (42/42); leak-free
+    (`leaks --atExit`: 0 on both); 1476 tests, four-check green. **BAR B COMPLETE — ADR 0045 ACCEPTED. The
+    Sentinel compiler reaches the bootstrap fixed point AND emits the full corpus byte-identically to the Rust
+    oracle.** The remaining deferred track is the per-unit separate-compilation back end (ADR 0037 (a)),
+    independent of the port.
 
 ## Decision
 
