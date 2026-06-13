@@ -1206,6 +1206,66 @@ Settled with the owner (as 5/N–7/N were), recommendations grounded in the scou
     (chained effecting lets — `detect_chained_effecting_lets_shape` + N resumers, the resumer-can-perform
     bubble) → c36a (return arm) → c36b (nested handle) → the full-corpus phase-go → ADR 0045 ACCEPTED.
 
+- **A31 — BAR B: effects/handlers, sub-slice c35e — chained effecting lets LANDED (feat `6bdd23b`).** The
+  fifth handler sub-phase (the production's C3.5(e)): an effecting fn whose body is 2+ `let v: i64 =
+  <perform / call-to-effecting>` statements + a pure tail. Each let's perform is reified into its own frame,
+  and a chaining resumer-i ITSELF performs (lowering let-(i+1)'s RHS) + pushes resumer-(i+1) — the runtime's
+  `sentinel_kont_resume` BUBBLES the fresh kont (a non-pure-return resumer result) so the handle's dispatch
+  loop re-dispatches it (ADR 0020 D3 deep-handler semantics; the bubble path was wired at c35c as
+  groundwork). The emitting set grew **113 → 116** — THREE fixtures flip `Err → Ok` (byte-identical `scg` ==
+  `snc llvm` + behaviourally == inkwell, exit 42 each + leak-free): `c35e_chained_perform`
+  (`a = read(); b = read(); a + b`), `c35e_chained_dependent_perform` (the 2nd perform's arg references the
+  1st let — `a = twice(5); b = twice(a); a + b + 12` — exercises forward capture flow), and
+  `c35e_chained_perform_with_capture` (an outer param + both lets in the tail — `base` carried forward
+  through both resumers). The flip set was verified exact.
+  - **The N+1-`define` lowering** (mirror inkwell `compile_effecting_fn_with_chained_lets`): the PARENT
+    pushes resumer-0 onto lets[0]'s kont; resumer-i (i<N-1) binds let-i + captures[i] from `%arg1`, builds
+    captures[i+1] from its OWN slots, lowers lets[i+1]'s RHS → kont, pushes resumer-(i+1), returns the kont;
+    resumer-(N-1) binds let-(N-1) + captures[N-1], lowers the pure tail, `kont_pure`-wraps. Each `define` is
+    its own register space (`next: 0` / `cg_reset`).
+  - **The capture math** (`compute_chained_captures(i)`): the vars referenced in (lets[i+1..]'s RHSes +
+    tail), first-reference order, minus lets[i..] (the resumed-value let + deeper lets, bound in this/deeper
+    resumers). It closes by construction — everything captures[i+1] needs is either resumer-i's value param
+    (let-i) or already in captures[i], so each resumer builds the next struct from its own slots. ⚠ A chained
+    RHS's perform args ARE captured (`walk_collect_rhs_var_refs` descends a top-level `Perform`'s args) —
+    distinct from c35d, where the perform subtree is the PARENT's to lower so its arg vars are skipped. (For
+    the shapes the gate admits, the rhs-walk ≡ the normal walk; the wrapper is defensive.)
+  - **Oracle (`llvm_dump.rs`):** `detect_chained_lets_shape` (effecting non-main, 2+ stmts all `let v: i64 =
+    <produces-kont>`, pure tail) routes `dump_fn_named` → `dump_chained_lets_fn` BEFORE
+    `validate_effecting_fn_body`; `emit_chained_captures_build` is the shared struct-build (also used by
+    c35c's parent). No new runtime symbols (`kont_push`/`kont_pure`/`perform_op` all already declared).
+  - **Un-parsers: NO change** (no new syntax — `snc merge` round-trips all three byte-identically).
+  - **Sentinel mode-4 (`types.sentinel`):** the 2+-stmt branch of `cg_emit_fn_eff` routes to the new
+    **`cg_chained_emit`** (every EMITTED 2+-stmt effecting fn is chained-lets — the oracle defers the rest;
+    no 2+-pure-stmt effecting fn is in the corpus). Move semantics + the no-bind-pattern grammar drove a
+    THREE-PHASE structure: **phase 1** re-parses a disposable copy to bind the let vids (`nextvid++` +
+    `bind_name`, source order); **phase 3** consumes the ORIGINAL body chain for the N+1 lowerings (each
+    RHS/tail walked once by `dump_texpr`); the **capture sets** are computed on-demand per define from FRESH
+    re-parsed copies (`cg_chained_caps` + the new **`cg_walk_ex`** consuming name-collector, which doubles as
+    the copy-disposal walk — sinks every `[u8]`, pushes deduped first-reference VarIds). `cg_chained_parent`
+    reuses emit_tparams's param setup (cgnext at #params); `cg_chained_resumer` `cg_reset`s per define and
+    mirrors the oracle's EXACT `cg_alloca`/`cg_dst` interleaving (bind let-i → unpack captures[i] from
+    `%arg1` → build captures[i+1] + lower, or wrap the tail). The capture struct uses `cg_build_caps_struct`
+    + the `null`-when-empty `cg_caps_op`.
+  - **⚠ A scg type-inference quirk surfaced by the SELF-COMPILE** (not the fixtures): an inline DISCARDED
+    `match` (a `match copy { … };` statement whose result is dropped) defaults its result type to `ptr` in
+    scg, while the Rust oracle infers `i64` from the arms — so the self-compiled alloca diverged (`%v23 =
+    alloca ptr` vs `alloca i64`) even though the fixtures matched (the fixtures never compile
+    `cg_chained_caps`'s SOURCE; the fixed-point capstone does). Fix: the navigate-and-collect moved into a
+    helper **`cg_caps_collect`** whose body is the `match` in TAIL position, where the fn's `i64` return
+    directs inference (the working pattern — cf. `cg_emit_fn_eff`). A discarded `if` does NOT hit this
+    (it infers from the then-branch), so only the match needed it. This is the first Bar-B slice where the
+    new SENTINEL source itself (not just its emitted output) had to self-compile identically — caught loudly
+    by `sentinel_codegen_reaches_the_bootstrap_fixed_point`.
+  - **Validation:** 116/116 emitted fixtures `scg` == `snc llvm` byte-for-byte
+    (`sentinel_codegen_matches_oracle_on_corpus`); the 3 behaviourally == inkwell (exit 42 each +
+    `llvm_behaviour_matches_inkwell_over_emitted_subset`) + leak-free (`leaks --atExit`: 0 leaks). Modes 0–3
+    byte-identical; BOTH bootstrap fixed-point capstones pass (the selfhost compiler declares no effects, so
+    the new lowering paths are inert there — and the fixed point now also covers the new c35e SOURCE
+    compiling identically). 1476 tests, four-check green. **NEXT: c36a** (the handle `return` arm —
+    `lower_handle` Errs on `return_arm` today; the `dump_tret` / pure-path apply) → c36b (nested handle) →
+    the full-corpus phase-go → ADR 0045 ACCEPTED.
+
 ## Decision
 
 ### D1. Goal.

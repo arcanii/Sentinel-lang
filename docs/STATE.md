@@ -88,10 +88,23 @@ walker; before `validate_effecting_fn_body`) + `dump_embedded_shape_fn` + an `Em
 disposable CLASSIFICATION COPY from the same tokens (mode-4 effecting fns only) → `eff_classify` extracts the
 perform as a 1-element `Args` list → `cg_embed_emit` (the letshape mirror, ANONYMOUS `cg_ph` slot instead of a
 let binding; `cg_emit_phload` in the Perform arm). Un-parsers unchanged. Modes 0–3 byte-identical; both
-fixed-point paths preserved. NEXT: **c35e** (chained effecting lets — N resumers + the resumer-can-perform
-bubble) → c36a (return arm) → c36b (nested handle) → the full-corpus phase-go →
-ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27; c35b in A28; c35c in A29; c35d
-in A30.)
+fixed-point paths preserved. ✅ **effects/handlers c35e — chained effecting lets** (A31, feat `6bdd23b`) →
+**113 → 116** (c35e_chained_perform / _chained_dependent_perform / _chained_perform_with_capture, all exit 42).
+A body of 2+ `let v: i64 = perform …` + a pure tail emits **N+1 defines**: the PARENT pushes resumer-0 onto
+let-0's kont; each chaining resumer-i performs let-(i+1) + pushes resumer-(i+1) (the runtime BUBBLES the fresh
+kont so the handle re-dispatches); the last wraps the tail. Oracle: `detect_chained_lets_shape` →
+`dump_chained_lets_fn`; `compute_chained_captures(i)` = vars in (lets[i+1..].RHS + tail) minus lets[i..] (a
+chained RHS's perform args ARE captured — the emitting resumer lowers them, unlike c35d). Sentinel: the
+2+-stmt branch of `cg_emit_fn_eff` → `cg_chained_emit` — phase 1 re-parses a copy to bind the let vids, phase 3
+consumes the ORIGINAL body for the N+1 lowerings, the capture sets are computed on-demand from fresh re-parses
+(`cg_chained_caps` + the `cg_walk_ex` name-collector/disposal walk); `cg_chained_parent` reuses emit_tparams,
+`cg_chained_resumer` cg_resets per define mirroring the oracle's alloca/fresh interleaving. ⚠ The self-compiled
+alloca surfaced a scg quirk — an inline discarded `match` defaults its result to `ptr` (vs the oracle's `i64`),
+so the navigate-collect lives in a helper (`cg_caps_collect`, tail position → i64-directed). Un-parsers
+unchanged. Modes 0–3 byte-identical; both fixed-point paths preserved (the fixed point now also covers the new
+c35e SOURCE self-compiling identically). NEXT: **c36a** (return arm) → c36b (nested handle) → the full-corpus
+phase-go → ACCEPTED. (Full Bar-B breakdown in ADR 0045 A21; classes in A26; c35a in A27; c35b in A28; c35c in
+A29; c35d in A30; c35e in A31.)
 The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
