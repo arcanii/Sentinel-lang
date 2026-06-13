@@ -88,7 +88,14 @@ print(p.y + xv)
 Closure: ADR 0018 step .a fact generator + post-Polonius field-
 precise places ADR.
 
-## Soundness gap: partial move through field projection + drop
+## Soundness gap: partial move through field projection + drop — ✅ CLOSED in `snc` (ADR 0046)
+
+**Status: closed in the Rust bootstrap compiler (`snc`) by ADR 0046**
+(per-(VarId, field-index) partial-move state). The self-hosted
+compiler (`scg`) mirror — `selfhost/borrow.sentinel` +
+`selfhost/types.sentinel`'s drop emission + the `snc borrow` dump +
+the corpus fixtures — is the remaining follow-on (ADR 0046 D6). The
+write-up below is retained as the original gap description.
 
 The under-rejection case. C2.3's docstring noted "Partial moves
 through field projection — `let inner = p.x` doesn't consume p.
@@ -138,36 +145,34 @@ common shape that consuming `p` on first field-access would
 break. The fix is per-field move tracking, not "consume on
 projection."
 
-Closure: a follow-on sub-phase (C2.6 or ADR 0019) adds per-
-(VarId, FieldPath) move state. On `consume_arr(p.items)`:
+**Closure (DONE in `snc` — ADR 0046):** per-(VarId, field-index)
+move state. On `consume_arr(p.items)`:
 
-  - Mark `(p, "items")` as Moved.
-  - At main's drop, skip the items field because it's moved.
-  - On any later read of `p.items[i]`, surface
-    `BorrowError::UseAfterMove` keyed on the field path.
+  - Mark `(p, items)` as Moved (NOT the whole `p`) —
+    `FnCtx.moved_fields` + the `DropPlan.moved_fields` union.
+  - At main's drop, `emit_drop_struct_fields` skips the `items`
+    field (it's in the partial-move set).
+  - On any later read of `p.items[i]` (consuming or not), surface
+    `BorrowError::UseAfterMove`.
   - On any later read of `p.tag`, accept (the tag field is not
-    moved).
+    moved). A whole-binding move of a partially-moved binding is
+    rejected (can't move a partial).
 
-This is roughly half the work of the Polonius migration's fact
-generator; conceptually independent and shippable on its own.
+The reproducer above is now **accepted and correct** (exit 37,
+leak-free: `consume_arr` owns + frees `p.items`, `main` skips it).
+MVP scope = single-level field projections on a directly-named
+binding; deep paths (`p.a.b`), index projections, and match-binding
+field moves are deferred refinements (each sound-by-over-rejection;
+ADR 0046 D5). This was roughly half the work of the Polonius
+migration's fact generator, conceptually independent and shipped on
+its own.
 
-**Until it lands**: programs that pass a Move-typed struct field
-by value to a fn that drops it are unsound. The conservative
-manual fix is to extract the field into a local before consuming
-it:
-
-```sentinel
-let items: [i64] = p.items;       // FieldAccess in let RHS;
-                                  // still not consuming under
-                                  // C2.3 rules! Same bug.
-```
-
-Actually, the manual fix is harder than that — C2.3's non-
-consuming-projection makes any field extraction insufficient.
-The sound shape today is to move the whole struct or to avoid
-storing Move-typed values in struct fields. This is severely
-limiting; closing the gap is the highest-priority post-C2.5 work
-on the borrow-check side.
+**Remaining (`scg` mirror):** `selfhost/borrow.sentinel` +
+`selfhost/types.sentinel`'s drop + the `snc borrow` dump + corpus
+fixtures, so the self-hosted compiler matches `snc` under the
+differential discipline (ADR 0046 D6). Until that lands, the
+self-hosted `scg` still has the gap; the trusted Rust bootstrap
+`snc` does not.
 
 ## Out of scope at this doc
 
@@ -187,4 +192,4 @@ Each row here gets closed by a specific ADR or sub-phase:
 |-------------------------------------|----------------------------------|
 | Borrow past last use                | ADR 0018 step .b / .c (Polonius) |
 | Field-disjoint borrows              | Post-Polonius field-precise places ADR |
-| Partial move + drop unsoundness     | C2.6 (or ADR 0019 — field-precise move state) |
+| Partial move + drop unsoundness     | ✅ CLOSED in `snc` (ADR 0046); `scg` mirror is the follow-on |

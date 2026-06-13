@@ -140,6 +140,13 @@ is gone). Sentinel: the Scope/Spawn/Await arms gain cg (Spawn branches on `cg_on
 byte-identically to the Rust oracle. ADR 0045 → ACCEPTED-WITH-AMENDMENTS (A1–A34).** Deferred follow-on: the
 per-unit separate-compilation back end (ADR 0037 (a)). (Full Bar-B breakdown in ADR 0045 A21; classes in A26;
 c35a in A27; c35b in A28; c35c in A29; c35d in A30; c35e in A31; c36a in A32; c36b in A33; concurrency in A34.)
+**POST-PORT (review action plan P1.2): the partial-move-through-field DOUBLE-FREE is CLOSED in `snc` (ADR
+0046)** — per-(VarId, field) move state in `sentinel-borrow-check` + the `DropPlan.moved_fields` skip in
+`sentinel-codegen`'s recursive struct-field drop; the reproducer is now accepted + correct (exit 37, leak-free)
++ 5 unit tests; the corpus differentials + both fixed-point paths stay green (no existing fixture consumes a
+Move field). The `scg` mirror — `borrow.sentinel` + `types.sentinel` drop + the `snc borrow` dump + corpus
+fixtures (ADR 0046 D6) — is the remaining follow-on; until it lands the self-hosted `scg` still has the gap, the
+trusted Rust bootstrap `snc` does not. See [[borrow-check-limitations]].
 The full slice log:
 (4/N) TYPES COMPLETE;
 ADR 0041 → ACCEPTED. (4a) oracle + probes + (4b) m-1 SCALAR + (4c) STRUCTS/ARRAYS/
