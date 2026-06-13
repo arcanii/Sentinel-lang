@@ -27,7 +27,7 @@
 //! transparent — LLVM's ABI lowering handles the small-struct vs
 //! by-pointer choice.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use inkwell::builder::Builder;
@@ -3674,6 +3674,9 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         program: &TypedProgram,
     ) -> Result<(), CodegenError> {
         let moved = self.drop_plan.moved_sources_for(self.current_fn_id);
+        // ADR 0046: the partial-move set (Move-typed fields consumed by value); the
+        // drop of a partially-moved binding elides these fields (the consumer freed them).
+        let moved_fields = self.drop_plan.moved_fields_for(self.current_fn_id);
         for &id in scope.vars.iter().rev() {
             if Some(id) == tail_returned {
                 continue;
@@ -3695,7 +3698,13 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 Some(&v) => v,
                 None => continue,
             };
-            self.emit_drop_for_binding(ptr, ty, program)?;
+            // ADR 0046: this binding's partially-moved field indices (empty for the
+            // common case) — `emit_drop_struct_fields` skips them.
+            let id_moved_fields: BTreeSet<u32> = moved_fields
+                .iter()
+                .filter_map(|(b, f)| (*b == id).then_some(*f))
+                .collect();
+            self.emit_drop_for_binding(ptr, ty, program, &id_moved_fields)?;
         }
         // C5.4 (2/N) / ADR 0028: if this scope lazily created an arena
         // (i.e. routed ≥1 allocation), bulk-free it in one call. The
@@ -3748,6 +3757,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         ptr: PointerValue<'ctx>,
         ty: Type,
         program: &TypedProgram,
+        // ADR 0046: field indices of THIS binding that were partially moved (and so are
+        // owned + freed by the consumer); `emit_drop_struct_fields` skips them. Empty for
+        // a fully-live binding and for every nested (recursive) field drop.
+        moved_fields: &BTreeSet<u32>,
     ) -> Result<(), CodegenError> {
         // C3 / ADR 0019 D5 (C3.1): unwrap one layer of `secret T`
         // before dispatching on shape. Drop semantics of secrets
@@ -3843,7 +3856,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // dispatch on the field's type — handles Array,
                 // ?Struct/?GenericInstance, nested structs, and
                 // nested generic instances.
-                self.emit_drop_struct_fields(ptr, ty, program)?;
+                self.emit_drop_struct_fields(ptr, ty, program, moved_fields)?;
             }
             Type::Nullable(_)
             | Type::I64
@@ -3875,7 +3888,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // C4.1 / ADR 0022 D9: class drop reuses struct
                 // recursive field drop machinery. Classes own
                 // their fields and follow the standard pattern.
-                self.emit_drop_struct_fields(ptr, ty, program)?;
+                self.emit_drop_struct_fields(ptr, ty, program, moved_fields)?;
             }
             Type::Enum(_) => {
                 // Phase D.1 / ADR 0032 D6 (4/N): an enum owns its
@@ -3940,6 +3953,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         ptr: PointerValue<'ctx>,
         ty: Type,
         program: &TypedProgram,
+        // ADR 0046: field indices of the BINDING being dropped that were partially moved
+        // (the consumer owns + freed them) — skip their drop. Non-empty only at the top
+        // level of a partially-moved binding; a nested struct field carries no moves yet.
+        moved_fields: &BTreeSet<u32>,
     ) -> Result<(), CodegenError> {
         // Resolve (decl, concrete_field_types, llvm_struct_ty).
         let (decl, field_tys, struct_llvm_ty): (
@@ -3986,6 +4003,11 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             if !field_type_needs_drop(*field_ty, program) {
                 continue;
             }
+            // ADR 0046: a field consumed by value (partial move) is owned + freed by the
+            // consumer — skip its drop here so we don't double-free.
+            if moved_fields.contains(&(idx as u32)) {
+                continue;
+            }
             // GenericInstance whose ID is past program bounds —
             // arose from local substitution; LLVM type unavailable
             // so we can't GEP into it. Defensive skip; in practice
@@ -4000,7 +4022,9 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .builder
                 .build_struct_gep(struct_llvm_ty, ptr, idx as u32, "drop_fldptr")
                 .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            self.emit_drop_for_binding(field_ptr, *field_ty, program)?;
+            // ADR 0046: nested struct fields carry no tracked moves at the MVP (deep
+            // paths deferred — D5), so the recursive drop gets an empty move set.
+            self.emit_drop_for_binding(field_ptr, *field_ty, program, &BTreeSet::new())?;
         }
         let _ = decl; // captured for clarity; field types are what we used
         Ok(())

@@ -444,6 +444,18 @@ struct FnCtx {
     /// Never reset by snapshot/restore — always growing within
     /// a single fn analysis.
     moved_sources_union: HashSet<VarId>,
+    /// ADR 0046: per-(VarId, field-index) PARTIAL move state. A
+    /// Move-typed field `p.field` consumed by value (passed to a
+    /// dropping fn) marks `(p, field)` Moved *without* moving the
+    /// whole `p` — so `p`'s other fields stay usable + droppable.
+    /// Any later access of a moved field surfaces `UseAfterMove`;
+    /// snapshot/restored at if/else like [`moved`].
+    moved_fields: HashMap<(VarId, u32), Span>,
+    /// ADR 0046: the DropPlan union of partial moves — every
+    /// `(VarId, field)` ever moved (across branches). Codegen
+    /// skips these fields in the binding's recursive drop. Never
+    /// reset by snapshot/restore.
+    moved_fields_union: HashSet<(VarId, u32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -462,6 +474,8 @@ impl FnCtx {
             places: HashMap::new(),
             moved: HashMap::new(),
             moved_sources_union: HashSet::new(),
+            moved_fields: HashMap::new(),
+            moved_fields_union: HashSet::new(),
         }
     }
 
@@ -580,6 +594,13 @@ pub struct DropPlan {
     /// rather than `HashMap`/`HashSet` so the plan implements
     /// `Hash + Eq` for salsa-tracked caching.
     pub moved_sources: BTreeMap<FnId, BTreeSet<VarId>>,
+    /// ADR 0046: per-fn PARTIAL moves — `(VarId, field-index)`
+    /// pairs for Move-typed fields consumed by value. Codegen
+    /// skips these fields in the binding's recursive drop (the
+    /// consumer owns + frees them). A binding in `moved_sources`
+    /// is skipped wholesale; one with entries here is dropped but
+    /// with the named fields elided.
+    pub moved_fields: BTreeMap<FnId, BTreeSet<(VarId, u32)>>,
 }
 
 impl DropPlan {
@@ -588,6 +609,16 @@ impl DropPlan {
     pub fn moved_sources_for(&self, fn_id: FnId) -> &BTreeSet<VarId> {
         static EMPTY: std::sync::OnceLock<BTreeSet<VarId>> = std::sync::OnceLock::new();
         self.moved_sources
+            .get(&fn_id)
+            .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
+    }
+
+    /// ADR 0046: look up the partial-move set for a fn (empty if
+    /// none). Codegen consults it to skip moved fields in a
+    /// partially-moved binding's drop.
+    pub fn moved_fields_for(&self, fn_id: FnId) -> &BTreeSet<(VarId, u32)> {
+        static EMPTY: std::sync::OnceLock<BTreeSet<(VarId, u32)>> = std::sync::OnceLock::new();
+        self.moved_fields
             .get(&fn_id)
             .unwrap_or_else(|| EMPTY.get_or_init(BTreeSet::new))
     }
@@ -645,6 +676,13 @@ fn borrow_check_fn(
     let mut moved_btree = BTreeSet::new();
     moved_btree.extend(ctx.moved_sources_union.iter().copied());
     drop_plan.moved_sources.insert(fn_def.id, moved_btree);
+    // ADR 0046: the per-fn partial-move set (Move-typed fields consumed by value), so
+    // codegen elides them from the binding's recursive drop.
+    let mut moved_fields_btree = BTreeSet::new();
+    moved_fields_btree.extend(ctx.moved_fields_union.iter().copied());
+    drop_plan
+        .moved_fields
+        .insert(fn_def.id, moved_fields_btree);
 
     // ADR 0017 D7's "second-class refs everywhere" check: if the
     // fn returns a ref, the tail's source must be Incoming. We
@@ -937,18 +975,24 @@ fn walk_expr(
             // moves p, but the merge sees p as Moved after, which
             // is fine when no further uses follow.
             let snapshot_moved = ctx.moved.clone();
+            let snapshot_moved_fields = ctx.moved_fields.clone();
             ctx.push_scope();
             walk_block_contents(then_branch, ctx, errors, program);
             ctx.pop_scope();
             let then_moved = std::mem::replace(&mut ctx.moved, snapshot_moved);
+            let then_moved_fields =
+                std::mem::replace(&mut ctx.moved_fields, snapshot_moved_fields);
             ctx.push_scope();
             walk_block_contents(else_branch, ctx, errors, program);
             ctx.pop_scope();
-            // Merge: any binding moved in the then-branch but
-            // not in the else-branch is conservatively Moved
-            // after (we can't statically know which branch ran).
+            // Merge: any binding (or field — ADR 0046) moved in the then-branch but
+            // not in the else-branch is conservatively Moved after (we can't statically
+            // know which branch ran).
             for (id, span) in then_moved {
                 ctx.moved.entry(id).or_insert(span);
+            }
+            for (key, span) in then_moved_fields {
+                ctx.moved_fields.entry(key).or_insert(span);
             }
         }
 
@@ -1008,12 +1052,27 @@ fn walk_expr(
             }
         }
 
-        TypedExprKind::FieldAccess { target, .. } => {
-            // C2.3: postfix receiver — non-consuming. The target
-            // is read for projection but not moved. Use
-            // walk_expr_lvalue which checks liveness without
-            // consuming.
-            walk_expr_lvalue(target, ctx, errors, program);
+        TypedExprKind::FieldAccess { target, field_index, .. } => {
+            // C2.3 + ADR 0046: in the CONSUMING walk, a Move-typed field passed by
+            // value is a PARTIAL move of the base binding — mark `(base, field)` Moved
+            // (the consumer owns + frees it) WITHOUT moving the whole base, so the
+            // base's other fields stay usable + droppable. A Copy field (`p.tag`: i64)
+            // is the C2.3 non-consuming receiver read. A nested projection (target not
+            // a direct Var) falls back to the conservative non-consuming walk (deep
+            // paths deferred — ADR 0046 D5).
+            if is_copy_type(expr.ty, program) {
+                walk_expr_lvalue(target, ctx, errors, program);
+            } else if let TypedExprKind::Var(base) = &target.kind {
+                check_and_record_field_move(
+                    *base,
+                    *field_index as u32,
+                    &expr.span,
+                    ctx,
+                    errors,
+                );
+            } else {
+                walk_expr_lvalue(target, ctx, errors, program);
+            }
         }
 
         TypedExprKind::ArrayLit { elements, .. } => {
@@ -1128,17 +1187,24 @@ fn walk_expr(
         TypedExprKind::Match { scrutinee, arms, .. } => {
             walk_expr_lvalue(scrutinee, ctx, errors, program);
             let snapshot_moved = ctx.moved.clone();
+            let snapshot_moved_fields = ctx.moved_fields.clone();
             let mut union_moved = snapshot_moved.clone();
+            let mut union_moved_fields = snapshot_moved_fields.clone();
             for arm in arms {
                 ctx.moved = snapshot_moved.clone();
+                ctx.moved_fields = snapshot_moved_fields.clone();
                 ctx.push_scope();
                 walk_expr(&arm.body, ctx, errors, program);
                 ctx.pop_scope();
                 for (id, span) in std::mem::take(&mut ctx.moved) {
                     union_moved.entry(id).or_insert(span);
                 }
+                for (key, span) in std::mem::take(&mut ctx.moved_fields) {
+                    union_moved_fields.entry(key).or_insert(span);
+                }
             }
             ctx.moved = union_moved;
+            ctx.moved_fields = union_moved_fields;
         }
     }
 }
@@ -1166,7 +1232,14 @@ fn walk_expr_lvalue(
             // OutlivesSource check fires.
             walk_expr(inner, ctx, errors, program);
         }
-        TypedExprKind::FieldAccess { target, .. } => {
+        TypedExprKind::FieldAccess { target, field_index, .. } => {
+            // ADR 0046: reading a moved field path — even non-consuming, e.g.
+            // `p.items[0]` after `p.items` was consumed — is use-after-move (the
+            // field's heap is gone). The whole-base move is checked by the recursive
+            // lvalue walk below; here we add the field-specific check.
+            if let TypedExprKind::Var(base) = &target.kind {
+                check_field_use_alive(*base, *field_index as u32, &expr.span, ctx, errors);
+            }
             walk_expr_lvalue(target, ctx, errors, program);
         }
         TypedExprKind::Index { target, index, .. } => {
@@ -1391,10 +1464,43 @@ fn check_and_record_move(
         emit_use_after_move(ctx, errors, id, &move_span, use_span);
         return;
     }
+    // ADR 0046: a partially-moved binding cannot be moved as a whole (it would
+    // double-free the already-moved field). Reject on the first partial move's span.
+    if let Some(move_span) = ctx
+        .moved_fields
+        .iter()
+        .find(|((b, _), _)| *b == id)
+        .map(|(_, s)| s.clone())
+    {
+        emit_use_after_move(ctx, errors, id, &move_span, use_span);
+        return;
+    }
     if !is_copy_type(ty, program) {
         ctx.moved.insert(id, use_span.clone());
         ctx.moved_sources_union.insert(id);
     }
+}
+
+/// ADR 0046: at a Move-typed `base.field` consumed by value, record the PARTIAL move
+/// `(base, field_index)`. If the whole base — or this field — is already Moved, surface
+/// `UseAfterMove`. Only called for non-Copy fields (the caller checks `is_copy_type`).
+fn check_and_record_field_move(
+    base: VarId,
+    field_index: u32,
+    use_span: &Span,
+    ctx: &mut FnCtx,
+    errors: &mut Vec<BorrowError>,
+) {
+    if let Some(move_span) = ctx.moved.get(&base).cloned() {
+        emit_use_after_move(ctx, errors, base, &move_span, use_span);
+        return;
+    }
+    if let Some(move_span) = ctx.moved_fields.get(&(base, field_index)).cloned() {
+        emit_use_after_move(ctx, errors, base, &move_span, use_span);
+        return;
+    }
+    ctx.moved_fields.insert((base, field_index), use_span.clone());
+    ctx.moved_fields_union.insert((base, field_index));
 }
 
 /// C2.3: at a Var(id) read in NON-CONSUMING context (postfix
@@ -1408,6 +1514,24 @@ fn check_use_alive(
 ) {
     if let Some(move_span) = ctx.moved.get(&id).cloned() {
         emit_use_after_move(ctx, errors, id, &move_span, use_span);
+    }
+}
+
+/// ADR 0046: at a NON-consuming `base.field` read, reject if the FIELD has been moved.
+/// The whole-base move is checked separately by the recursive lvalue walk (so this only
+/// fires when the base is live but the named field is gone — no duplicate diagnostic).
+fn check_field_use_alive(
+    base: VarId,
+    field_index: u32,
+    use_span: &Span,
+    ctx: &FnCtx,
+    errors: &mut Vec<BorrowError>,
+) {
+    if ctx.moved.contains_key(&base) {
+        return;
+    }
+    if let Some(move_span) = ctx.moved_fields.get(&(base, field_index)).cloned() {
+        emit_use_after_move(ctx, errors, base, &move_span, use_span);
     }
 }
 
@@ -1986,6 +2110,82 @@ mod tests {
         // `p.x + p.y` reads two fields without consuming p.
         borrow_check_ok(
             "struct Point { x: i64, y: i64 } fn main() -> i64 { let p: Point = Point { x: 3, y: 4 }; p.x + p.y }",
+        );
+    }
+
+    // ----- ADR 0046: partial-move-through-field soundness -----
+
+    #[test]
+    fn partial_move_of_field_then_read_other_field_ok() {
+        // ADR 0046: consuming a Move-typed field (`p.items`: [i64]) by value moves
+        // ONLY that field; reading a different, un-moved field (`p.tag`: i64) is fine.
+        // (The reproducer from borrow-check-limitations.md — formerly accepted-but-UB,
+        // now accepted-and-correct: the consumer owns + frees `items`, drop skips it.)
+        borrow_check_ok(
+            "struct Pair { items: [i64], tag: i64 } \
+             fn consume_arr(xs: [i64]) -> i64 { xs[0] + xs[1] } \
+             fn main() -> i64 { let p: Pair = Pair { items: [10, 20], tag: 7 }; \
+             let used: i64 = consume_arr(p.items); used + p.tag }",
+        );
+    }
+
+    #[test]
+    fn use_after_partial_field_move_rejected() {
+        // ADR 0046: reading a field after it was consumed by value is use-after-move
+        // (the field's heap is gone), even via a non-consuming postfix read.
+        let errs = borrow_check_err(
+            "struct Pair { items: [i64], tag: i64 } \
+             fn consume_arr(xs: [i64]) -> i64 { xs[0] + xs[1] } \
+             fn main() -> i64 { let p: Pair = Pair { items: [10, 20], tag: 7 }; \
+             let used: i64 = consume_arr(p.items); used + p.items[0] }",
+        );
+        assert!(
+            errs.iter().any(|e| matches!(e, BorrowError::UseAfterMove { .. })),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn whole_move_after_partial_field_move_rejected() {
+        // ADR 0046: a partially-moved binding cannot be moved as a whole (it would
+        // double-free the already-moved field).
+        let errs = borrow_check_err(
+            "struct Pair { items: [i64], tag: i64 } \
+             fn consume_arr(xs: [i64]) -> i64 { xs[0] + xs[1] } \
+             fn consume_pair(q: Pair) -> i64 { q.tag } \
+             fn main() -> i64 { let p: Pair = Pair { items: [10, 20], tag: 7 }; \
+             let a: i64 = consume_arr(p.items); a + consume_pair(p) }",
+        );
+        assert!(
+            errs.iter().any(|e| matches!(e, BorrowError::UseAfterMove { .. })),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn double_partial_move_of_same_field_rejected() {
+        // ADR 0046: consuming the same field twice is use-after-move.
+        let errs = borrow_check_err(
+            "struct Pair { items: [i64], tag: i64 } \
+             fn consume_arr(xs: [i64]) -> i64 { xs[0] + xs[1] } \
+             fn main() -> i64 { let p: Pair = Pair { items: [10, 20], tag: 7 }; \
+             consume_arr(p.items) + consume_arr(p.items) }",
+        );
+        assert!(
+            errs.iter().any(|e| matches!(e, BorrowError::UseAfterMove { .. })),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn partial_move_of_two_distinct_fields_ok() {
+        // ADR 0046: moving two DIFFERENT Move-typed fields is fine — each field is
+        // independently owned by its consumer; the binding's drop skips both.
+        borrow_check_ok(
+            "struct Two { a: [i64], b: [i64] } \
+             fn take(xs: [i64]) -> i64 { xs[0] } \
+             fn main() -> i64 { let p: Two = Two { a: [1, 2], b: [3, 4] }; \
+             take(p.a) + take(p.b) }",
         );
     }
 
