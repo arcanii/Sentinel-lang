@@ -159,6 +159,19 @@ struct TyCtx {
     curfn: i64,       // the top-level fn idx being typed (-1 outside a fn body → no record)
     mvf: Vec<i64>,    // moved-source records: owner fn idx
     mvv: Vec<i64>,    // moved-source records: the moved VarId (paired with `mvf`)
+    // (ADR 0046) PARTIAL-move records — a Move-typed `base.field` consumed by value
+    // (returned / passed by value) moves ONLY that field, not the whole `base`. Codegen
+    // elides the field from `base`'s recursive drop; the mode-1 dump emits `#base.field`.
+    // Triple-parallel with `mff` (owner fn idx) / `mfv` (base VarId) / `mfi` (field index).
+    mff: Vec<i64>,    // partial-move records: owner fn idx
+    mfv: Vec<i64>,    // partial-move records: the base VarId (paired with `mff`)
+    mfi: Vec<i64>,    // partial-move records: the moved field index (paired with `mff`)
+    // (ADR 0046) the just-dumped expression's base VarId IFF it is a DIRECT `Var` read,
+    // else -1 — the mode-independent analogue of the cg-only `cg_lastvid`. Reset to -1 at
+    // every `dump_texpr` entry; set to the resolved VarId by the `Var` arm. The
+    // FieldAccess arm reads it (right after the target dump) to detect a `base.field`
+    // PARTIAL move on a directly-named base.
+    mvbv: i64,
     // --- (7/N) MIR lowering (ADR 0044) — built ONLY under `mode == 2` as a guarded
     //     side-effect of the pass-2 walk; PER-FN (reset in `type_fn`). Everything is
     //     a flat append-only parallel-Vec pool tagged by block (so out-of-order block
@@ -2396,7 +2409,33 @@ fn record_move(c: &mut TyCtx, vid: i64) -> i64 {
     }
 }
 
+// (ADR 0046) Record a PARTIAL move: a Move-typed `base.field` consumed by value (the
+// FieldAccess arm has already checked `consuming`, a direct-`Var` base, and a Move field
+// type). Pushes `(curfn, base, field)` into the `mff`/`mfv`/`mfi` side-table — the whole
+// `base` is NOT recorded (its other fields stay droppable). Codegen elides this field
+// from `base`'s recursive drop; the mode-1 dump emits `#base.field`. The borrow-error
+// half (`check_field_use_alive` etc.) is OUT OF SCOPE — the differential only compares
+// fixtures the oracle accepts (ADR 0043 D5/D7), so the Sentinel side records + dumps but
+// never rejects. Mirrors `check_and_record_field_move`'s record half.
+fn record_field_move(c: &mut TyCtx, base: i64, field: i64) -> i64 {
+    if (*c).curfn < 0 {
+        0
+    } else if base < 0 {
+        0
+    } else {
+        let cf: i64 = (*c).curfn;
+        push(&mut (*c).mff, cf);
+        push(&mut (*c).mfv, base);
+        push(&mut (*c).mfi, field);
+        0
+    }
+}
+
 fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    // (ADR 0046) reset the direct-Var tracker on entry; only the `Var` arm re-sets it. So
+    // right after dumping a sub-expression, `mvbv >= 0` iff that sub-expression was a
+    // directly-named binding read — the signal the FieldAccess arm needs for a partial move.
+    (*c).mvbv = 0 - 1;
     match ex {
         Expr::Int(nv) => {
             let w: bool = widen_pre(out, exp, 0, c);
@@ -2488,6 +2527,10 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         Expr::Var(nm) => {
             let vid: i64 = sc_lookup(c, &nm);
             sink_name(gb, nm);
+            // (ADR 0046) record this directly-named binding so an enclosing FieldAccess can
+            // detect a `base.field` partial move (the dump_texpr top reset cleared it, so a
+            // non-`Var` target leaves -1).
+            (*c).mvbv = vid;
             // (6/N) a Var in a consuming position moves it (if non-Copy).
             if (*c).consuming {
                 record_move(c, vid);
@@ -3556,7 +3599,14 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // move `p`.
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
+            // (ADR 0046) `mvbv` carries the just-dumped target's base VarId IFF the target
+            // is a DIRECT `Var` (the Var arm sets it; every other arm leaves -1 via the
+            // dump_texpr top reset + the compound-arm clears). It is the mode-independent
+            // analogue of the cg-only `cg_lastvid`, so the partial-move record fires in
+            // mode 1 (borrow) too. -1 for a nested / `*c` / call target (deep paths
+            // deferred — ADR 0046 D5). Mirrors the oracle's `if let Var(base) = &target`.
             let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
+            let base_vid: i64 = (*c).mvbv;
             let frecv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -3623,6 +3673,27 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 subst_type(c, fty0, &fargs)
             } else {
                 fty0
+            };
+            // (ADR 0046) a Move-typed `base.field` read in a CONSUMING position (`svc` —
+            // returned / passed by value) is a PARTIAL move of `(base, field)`: record it
+            // WITHOUT moving the whole `base`, so `base`'s other fields stay usable +
+            // droppable. A Copy field (`p.tag`: i64) / a non-`Var` base is the C2.3
+            // non-consuming receiver read (no record). `fty` is the SUBSTITUTED field type
+            // (= the oracle's `expr.ty`), so `p.first` where `p: Pair<A,B>` sees the
+            // type-param `A` (Move). Mirrors the consuming-walk FieldAccess arm.
+            if svc {
+                if base_vid >= 0 {
+                    if is_move_type(c, fty) {
+                        record_field_move(c, base_vid, fidx);
+                        0
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            } else {
+                0
             };
             append_str(out, fdn);
             push(out, ' ');
@@ -7321,6 +7392,10 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         curfn: 0 - 1,
         mvf: vec_new(),
         mvv: vec_new(),
+        mff: vec_new(),
+        mfv: vec_new(),
+        mfi: vec_new(),
+        mvbv: 0 - 1,
         mode: mode,
         lastval: 0 - 1,
         mir_cur: 0,
@@ -8159,6 +8234,73 @@ pub fn dump_moves(c: &mut TyCtx, src: &[u8], out: &mut Vec<u8>) -> i64 {
                 0
             };
             vid = vid + 1;
+        }
+        // (ADR 0046) the PARTIAL-move suffix — `#<vid>.<field>` per Move-typed field
+        // consumed by value, ascending (vid, then field) to match the oracle's
+        // `BTreeSet<(VarId, field)>` order, AFTER all whole-binding moved sources. Empty
+        // (no bytes) unless this fn partially-moved a field, so every other line is
+        // byte-unchanged. Dedup + ascending via a per-(vid) membership scan bounded by
+        // the max field index recorded for `(i, vid)`.
+        let mut pvid: i64 = 0;
+        while pvid < nv {
+            let pnf: i64 = len((*c).mff);
+            let mut maxf: i64 = 0 - 1;
+            let mut pk: i64 = 0;
+            while pk < pnf {
+                if (*c).mff[pk] == i {
+                    if (*c).mfv[pk] == pvid {
+                        if (*c).mfi[pk] > maxf {
+                            maxf = (*c).mfi[pk];
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else {
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                pk = pk + 1;
+            }
+            let mut pf: i64 = 0;
+            while pf <= maxf {
+                let pnf2: i64 = len((*c).mff);
+                let mut pk2: i64 = 0;
+                let mut pfound: bool = false;
+                while pk2 < pnf2 {
+                    if (*c).mff[pk2] == i {
+                        if (*c).mfv[pk2] == pvid {
+                            if (*c).mfi[pk2] == pf {
+                                pfound = true;
+                                0
+                            } else {
+                                0
+                            };
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else {
+                        0
+                    };
+                    pk2 = pk2 + 1;
+                }
+                if pfound {
+                    append_str(out, " #");
+                    append_int(out, pvid);
+                    push(out, '.');
+                    append_int(out, pf);
+                    0
+                } else {
+                    0
+                };
+                pf = pf + 1;
+            }
+            pvid = pvid + 1;
         }
         push(out, ')');
         push(out, '\n');
@@ -9156,6 +9298,34 @@ fn cg_is_moved(c: &mut TyCtx, fnidx: i64, vid: i64) -> bool {
     found
 }
 
+// (ADR 0046) is field `fidx` of binding `vid` (in fn `fnidx`) a PARTIAL move — a
+// Move-typed field consumed by value, owned + freed by the consumer? Scans the
+// `mff`/`mfv`/`mfi` side-table. A partially-moved field is ELIDED from `vid`'s recursive
+// struct drop (else a double-free). Mirrors codegen's `moved_fields.contains(&(idx))`.
+fn cg_is_field_moved(c: &mut TyCtx, fnidx: i64, vid: i64, fidx: i64) -> bool {
+    let n: i64 = len((*c).mff);
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < n {
+        if (*c).mff[i] == fnidx {
+            if (*c).mfv[i] == vid {
+                if (*c).mfi[i] == fidx {
+                    found = true;
+                    0
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
 // (8d-drops-2) does a value of type `ty` own heap that scope-exit must `sentinel_free`?
 // An array / `Vec` always does; a struct does iff some field does (recursive — a struct
 // of only scalars drops nothing). Bar-B shapes don't emit → false. Mirrors `needs_drop`.
@@ -9253,7 +9423,12 @@ fn cg_needs_drop(c: &mut TyCtx, ty: i64) -> bool {
 // (`sentinel_free(null)` is a safe no-op); a struct (8d-drops-2) GEPs into each
 // drop-needing field (declaration order) and recurses. Primitives / refs → nothing.
 // Mirrors the oracle's `emit_drop_for_binding` / `emit_drop_struct_fields`.
-fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
+//
+// (ADR 0046) `vid` = the VarId of the binding being dropped, for the partial-move skip:
+// a Move-typed field consumed by value is owned + freed by the consumer, so it is ELIDED
+// here (a double-free otherwise). `vid = -1` for every NESTED / recursive field drop
+// (deep paths deferred — D5), mirroring the oracle's `&BTreeSet::new()` for nested fields.
+fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64, vid: i64) -> i64 {
     if cg_is_array(c, ty) {
         let adv: i64 = cg_dst(c);
         cgo_str(c, "load { i64, ptr }, ptr %v");
@@ -9294,17 +9469,29 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
             while si < snf {
                 if (*c).fldo[si] == ssid {
                     let sft: i64 = (*c).fldty[si];
+                    // (ADR 0046) skip a field consumed by value (partial move) — the
+                    // consumer owns + freed it; dropping it here double-frees. Only at the
+                    // top level of a partially-moved binding (`vid >= 0`).
+                    let sskip: bool = if vid >= 0 {
+                        cg_is_field_moved(c, (*c).curfn, vid, fidx)
+                    } else {
+                        false
+                    };
                     if cg_needs_drop(c, sft) {
-                        let sfp: i64 = cg_dst(c);
-                        cgo_str(c, "getelementptr %Struct.");
-                        cgo_int(c, ssid);
-                        cgo_str(c, ", ptr %v");
-                        cgo_int(c, slot);
-                        cgo_str(c, ", i32 0, i32 ");
-                        cgo_int(c, fidx);
-                        cg_putc(c, '\n');
-                        cg_emit_drop(c, sft, sfp);
-                        0
+                        if sskip {
+                            0
+                        } else {
+                            let sfp: i64 = cg_dst(c);
+                            cgo_str(c, "getelementptr %Struct.");
+                            cgo_int(c, ssid);
+                            cgo_str(c, ", ptr %v");
+                            cgo_int(c, slot);
+                            cgo_str(c, ", i32 0, i32 ");
+                            cgo_int(c, fidx);
+                            cg_putc(c, '\n');
+                            cg_emit_drop(c, sft, sfp, 0 - 1);
+                            0
+                        }
                     } else {
                         0
                     };
@@ -9379,19 +9566,31 @@ fn cg_emit_drop(c: &mut TyCtx, ty: i64, slot: i64) -> i64 {
                         if (*c).fldo[dgi] == gdid {
                             let dgfh: i64 = (*c).fldty[dgi];
                             let dgch: i64 = subst_type(c, dgfh, &dgargs);
+                            // (ADR 0046) same partial-move skip as the plain-struct arm —
+                            // the oracle drops `Struct | GenericInstance` through the same
+                            // `emit_drop_struct_fields(…, moved_fields)`.
+                            let dgskip: bool = if vid >= 0 {
+                                cg_is_field_moved(c, (*c).curfn, vid, dgfidx)
+                            } else {
+                                false
+                            };
                             if cg_needs_drop(c, dgch) {
-                                let dgfp: i64 = cg_dst(c);
-                                cgo_str(c, "getelementptr %");
-                                let mut dgmb: Vec<u8> = vec_new();
-                                cg_mangle_to(&mut dgmb, c, ty);
-                                cgo_str(c, vec_to_array(dgmb));
-                                cgo_str(c, ", ptr %v");
-                                cgo_int(c, slot);
-                                cgo_str(c, ", i32 0, i32 ");
-                                cgo_int(c, dgfidx);
-                                cg_putc(c, '\n');
-                                cg_emit_drop(c, dgch, dgfp);
-                                0
+                                if dgskip {
+                                    0
+                                } else {
+                                    let dgfp: i64 = cg_dst(c);
+                                    cgo_str(c, "getelementptr %");
+                                    let mut dgmb: Vec<u8> = vec_new();
+                                    cg_mangle_to(&mut dgmb, c, ty);
+                                    cgo_str(c, vec_to_array(dgmb));
+                                    cgo_str(c, ", ptr %v");
+                                    cgo_int(c, slot);
+                                    cgo_str(c, ", i32 0, i32 ");
+                                    cgo_int(c, dgfidx);
+                                    cg_putc(c, '\n');
+                                    cg_emit_drop(c, dgch, dgfp, 0 - 1);
+                                    0
+                                }
                             } else {
                                 0
                             };
@@ -9424,7 +9623,7 @@ fn cg_drop_frame(c: &mut TyCtx, mark: i64) -> i64 {
         if cg_is_moved(c, (*c).curfn, vid) {
             0
         } else {
-            cg_emit_drop(c, ty, slot)
+            cg_emit_drop(c, ty, slot, vid)
         };
         i = i - 1;
     }
@@ -9451,7 +9650,7 @@ fn cg_drop_range(c: &mut TyCtx, floor: i64) -> i64 {
         if cg_is_moved(c, (*c).curfn, vid) {
             0
         } else {
-            cg_emit_drop(c, ty, slot)
+            cg_emit_drop(c, ty, slot, vid)
         };
         i = i - 1;
     }

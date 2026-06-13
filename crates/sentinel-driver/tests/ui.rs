@@ -115,3 +115,6 @@ ui_snapshot!(c5d1_non_exhaustive_match, "c5d1_non_exhaustive_match.sentinel");
 
 // ---- D.2 (3/N) u8 mixed-width rejection (types) ----
 ui_snapshot!(c5d2_mixed_width, "c5d2_mixed_width.sentinel");
+
+// ---- ADR 0046 partial-move-through-field: use-after-partial-move (borrow) ----
+ui_snapshot!(c25_use_after_partial_move, "c25_use_after_partial_move.sentinel");

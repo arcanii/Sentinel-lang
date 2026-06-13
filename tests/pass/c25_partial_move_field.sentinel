@@ -1,0 +1,19 @@
+// ADR 0046: the partial-move-through-field soundness fix. Passing a
+// Move-typed struct field (`p.items`: [i64]) BY VALUE to a fn that
+// drops it is a PARTIAL move of just that field — `consume_arr` owns
+// + frees `items`, so `main`'s drop of `p` must SKIP `items` (else a
+// double-free). Reading a DIFFERENT, un-moved field (`p.tag`: i64) is
+// still fine. Pre-ADR-0046 this was accepted-but-UB (the field was
+// never marked moved, then double-freed at `p`'s drop). Now accepted
+// AND correct, leak-free: items[0]+items[1]=30, +tag(7) = 37.
+struct Pair { items: [i64], tag: i64 }
+
+fn consume_arr(xs: [i64]) -> i64 {
+    xs[0] + xs[1]
+}
+
+fn main() -> i64 {
+    let p: Pair = Pair { items: [10, 20], tag: 7 };
+    let used: i64 = consume_arr(p.items);
+    used + p.tag
+}

@@ -674,6 +674,25 @@ fn pass_c25_go_no_go() {
     assert_eq!(r.exit, 0);
 }
 
+// ---- ADR 0046: partial-move-through-field soundness ----
+
+#[test]
+fn pass_c25_partial_move_field() {
+    // ADR 0046: `consume_arr(p.items)` partial-moves only the `items`
+    // field; `main`'s drop of `p` SKIPS it (the consumer freed it), so
+    // no double-free. Reading the un-moved `tag` field is fine.
+    // items[0]+items[1]=30, +tag(7) = 37. (Pre-0046: accepted-but-UB.)
+    assert_eq!(run_exit("c25_partial_move_field.sentinel"), 37);
+}
+
+#[test]
+fn pass_c25_field_read_no_move() {
+    // ADR 0046 regression: a NON-consuming field read (`p.a[0]`) does
+    // NOT record a partial move — both `a` and `b` are still dropped at
+    // scope exit (the C2.3 `p.a + p.b` shape is preserved). 1+3 = 4.
+    assert_eq!(run_exit("c25_field_read_no_move.sentinel"), 4);
+}
+
 // ---- C3.1 / ADR 0019 D5+D6: secret typing + declassify ----
 
 #[test]

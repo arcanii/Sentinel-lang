@@ -1,0 +1,16 @@
+// ADR 0046: reading a field path AFTER that field was consumed by
+// value is use-after-move — the field's heap is gone (the consumer
+// freed it). `consume_arr(p.items)` partial-moves `p.items`; the
+// later `p.items[0]` reads freed memory. The borrow checker rejects
+// with UseAfterMove (a DIFFERENT field, `p.tag`, would still be OK).
+struct Pair { items: [i64], tag: i64 }
+
+fn consume_arr(xs: [i64]) -> i64 {
+    xs[0] + xs[1]
+}
+
+fn main() -> i64 {
+    let p: Pair = Pair { items: [10, 20], tag: 7 };
+    let used: i64 = consume_arr(p.items);
+    used + p.items[0]
+}

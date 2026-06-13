@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c25_use_after_partial_move.sentinel\")"
+---
+sentinel::borrow::use_after_move
+
+  × use of moved binding `p`
+    ╭─[tests/ui/c25_use_after_partial_move.sentinel:15:12]
+ 14 │     let used: i64 = consume_arr(p.items);
+ 15 │     used + p.items[0]
+    ·            ───┬───
+    ·               ╰── 
+ 16 │ }
+    ╰────

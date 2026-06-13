@@ -1,0 +1,12 @@
+// ADR 0046 regression: a NON-consuming field read of a Move-typed
+// field (`p.a[0]`, an index receiver) must NOT record a partial move
+// — the C2.3 "field access is a borrow, not a move" rule is preserved
+// for the common `p.a + p.b` shape. Neither `a` nor `b` is consumed,
+// so BOTH are dropped at `main`'s exit (leak-free), and codegen elides
+// nothing. a[0]+b[0] = 1 + 3 = 4.
+struct Two { a: [i64], b: [i64] }
+
+fn main() -> i64 {
+    let p: Two = Two { a: [1, 2], b: [3, 4] };
+    p.a[0] + p.b[0]
+}

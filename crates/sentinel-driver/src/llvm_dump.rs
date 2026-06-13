@@ -33,7 +33,7 @@
 //! assign-to-var / nested value-block / user-fn call (+ the `u8`↔`i64`
 //! width builtins). Everything else → `Err` (deferred to a later slice).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write;
 
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
@@ -2129,6 +2129,9 @@ impl Emit<'_> {
     fn emit_frame_drops(&mut self, idx: usize) -> Result<(), String> {
         let dp = self.drop_plan;
         let moved = dp.moved_sources_for(self.current_fn);
+        // ADR 0046: the partial-move set (Move-typed fields consumed by value); the drop
+        // of a partially-moved binding elides these fields (the consumer freed them).
+        let moved_fields = dp.moved_fields_for(self.current_fn);
         let scope = self.scopes[idx].clone();
         for &id in scope.iter().rev() {
             if moved.contains(&id) {
@@ -2142,7 +2145,13 @@ impl Emit<'_> {
                 Some(&s) => s,
                 None => continue,
             };
-            self.emit_drop_for_binding(slot, ty)?;
+            // ADR 0046: this binding's partially-moved field indices (empty for the
+            // common case) — `emit_drop_for_binding` skips them in the struct field walk.
+            let id_moved_fields: BTreeSet<u32> = moved_fields
+                .iter()
+                .filter_map(|(b, f)| (*b == id).then_some(*f))
+                .collect();
+            self.emit_drop_for_binding(slot, ty, &id_moved_fields)?;
         }
         Ok(())
     }
@@ -2167,7 +2176,16 @@ impl Emit<'_> {
     /// an empty `vec_new()` drops cleanly with no guard); a struct recurses into its
     /// heap-backed fields (8d-drops-2). Primitives / refs have no heap → nothing. The
     /// Bar-B shapes (nullable/enum/class) are later slices; their fixtures don't emit.
-    fn emit_drop_for_binding(&mut self, ptr_reg: u32, ty: Type) -> Result<(), String> {
+    /// ADR 0046: `moved_fields` = field indices of THIS binding that were partially moved
+    /// (a Move-typed field consumed by value → owned + freed by the consumer), so they are
+    /// elided from the struct field walk below. Empty for a fully-live binding and for
+    /// every NESTED (recursive) field drop (deep paths deferred — D5).
+    fn emit_drop_for_binding(
+        &mut self,
+        ptr_reg: u32,
+        ty: Type,
+        moved_fields: &BTreeSet<u32>,
+    ) -> Result<(), String> {
         match ty {
             Type::Array(_) => {
                 let v = self.fresh();
@@ -2195,6 +2213,11 @@ impl Emit<'_> {
                     if !needs_drop(fty, prog) {
                         continue;
                     }
+                    // ADR 0046: a field consumed by value (partial move) is owned + freed
+                    // by the consumer — skip it here so we don't double-free.
+                    if moved_fields.contains(&(idx as u32)) {
+                        continue;
+                    }
                     let fp = self.fresh();
                     writeln!(
                         self.body,
@@ -2202,7 +2225,9 @@ impl Emit<'_> {
                         id.0
                     )
                     .unwrap();
-                    self.emit_drop_for_binding(fp, fty)?;
+                    // ADR 0046: nested struct fields carry no tracked moves at the MVP
+                    // (deep paths deferred — D5), so the recursive drop gets an empty set.
+                    self.emit_drop_for_binding(fp, fty, &BTreeSet::new())?;
                 }
             }
             // A generic-struct instance drops like a struct, but its LLVM type is the
@@ -2228,13 +2253,18 @@ impl Emit<'_> {
                     if !needs_drop(fty, prog) {
                         continue;
                     }
+                    // ADR 0046: same partial-move skip as the plain-struct arm (the oracle
+                    // drops `Struct | GenericInstance` through one field walk).
+                    if moved_fields.contains(&(idx as u32)) {
+                        continue;
+                    }
                     let fp = self.fresh();
                     writeln!(
                         self.body,
                         "  %v{fp} = getelementptr %{name}, ptr %v{ptr_reg}, i32 0, i32 {idx}"
                     )
                     .unwrap();
-                    self.emit_drop_for_binding(fp, fty)?;
+                    self.emit_drop_for_binding(fp, fty, &BTreeSet::new())?;
                 }
             }
             // 8e-1: an enum owns its heap-boxed payload — load `{ i32, ptr }`, and if
