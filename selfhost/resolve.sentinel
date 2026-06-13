@@ -1255,7 +1255,9 @@ fn dump_rharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut RCtx, gb: &mut V
 fn dump_rret(out: &mut Vec<u8>, r: Ret, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
     match r {
         Ret::NoRet => 0,
-        Ret::YesRet(rnm, rbody) => {
+        Ret::YesRet(rnm, rbody, rnt, rt0) => {
+            let _a: i64 = rnt;
+            let _b: i64 = rt0;
             let mark: i64 = len((*c).scs);
             let rvid: i64 = (*c).nextvid;
             (*c).nextvid = (*c).nextvid + 1;

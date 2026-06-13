@@ -486,7 +486,9 @@ fn walk_harms(a: HArms, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8
 fn walk_ret(r: Ret, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, src: &[u8], fidx: i64, aid: i64) -> i64 {
     match r {
         Ret::NoRet => 0,
-        Ret::YesRet(nm, body) => {
+        Ret::YesRet(nm, body, rnt, rt0) => {
+            let _a: i64 = rnt;
+            let _b: i64 = rt0;
             sink_name(gb, nm);
             walk_eff(body, disch, own, c, gb, src, fidx, aid)
         },

@@ -1137,10 +1137,12 @@ struct Emit<'a> {
     /// `self.f` GEPs from it. `None` for a free fn.
     self_var: Option<VarId>,
     /// Bar B / effects (ADR 0020): the enclosing `handle`s' dispatch context —
-    /// `(loop_block, current_kont_slot)`. A `k(v)` (`ResumeKont`) inside an arm whose
-    /// resume BUBBLES (a resumer performed) stores the bubble kont into the innermost
-    /// handle's `current_kont_slot` and branches to its `loop_block` to re-dispatch.
-    handle_stack: Vec<(u32, u32)>,
+    /// `(loop_block, current_kont_slot, return_arm)`. A `k(v)` (`ResumeKont`) inside an
+    /// arm whose resume BUBBLES (a resumer performed) stores the bubble kont into the
+    /// innermost handle's `current_kont_slot` and branches to its `loop_block` to
+    /// re-dispatch. c36a: the optional `return v => body` arm is carried (owned clone) so
+    /// `k(v)`'s pure-drain path applies it per Phase B's deep-handler re-wrap.
+    handle_stack: Vec<(u32, u32, Option<TypedReturnArm>)>,
     /// Bar B / effects (c35d): inside an embedded-perform RESUMER, the placeholder
     /// slot holding the resumed value. When set, the unique `Perform` in the tail
     /// lowers as a `load` from this slot (the parent already lowered the real
@@ -2076,13 +2078,25 @@ impl Emit<'_> {
         arms: &[TypedHandlerArm],
         return_arm: Option<&TypedReturnArm>,
     ) -> Result<String, String> {
-        if return_arm.is_some() {
-            return Err("handle return arm (deferred to c36a)".into());
+        // c36b deferred: a nested `handle` body needs the propagate / Kont*-merge
+        // machinery (the inkwell `is_nested` path). At c36a the body is a `perform`, a
+        // call-to-effecting, or a PURE expression.
+        if matches!(body.kind, TypedExprKind::Handle { .. }) {
+            return Err("handle nested-handle body (deferred to c36b)".into());
         }
-        if !produces_kont(body, self.program) {
-            return Err("handle body shape (deferred: pure body / nested handle)".into());
-        }
-        let kptr = self.lower_expr(body)?;
+        // Lower the body to an initial kont: a kont-producing body (perform / call-to-
+        // effecting) yields a Kont* directly; a PURE body (c36a/c37 — `handle 42`,
+        // `handle do_pure()`) is wrapped via `sentinel_kont_pure` so the dispatch loop
+        // sees a uniform Kont* (PURE_RETURN-tagged → the pure block fires).
+        let kptr = if produces_kont(body, self.program) {
+            self.lower_expr(body)?
+        } else {
+            let bv = self.lower_expr(body)?;
+            let w = self.fresh();
+            writeln!(self.body, "  %v{w} = call ptr @sentinel_kont_pure(i64 {bv})").unwrap();
+            self.used.kont_pure = true;
+            format!("%v{w}")
+        };
         let cks = self.alloca("ptr");
         writeln!(self.body, "  store ptr {kptr}, ptr %v{cks}").unwrap();
         let rslot = self.alloca("i64");
@@ -2107,7 +2121,7 @@ impl Emit<'_> {
             writeln!(self.body, "  br i1 %v{cmp}, label %bb{arm_b}, label %bb{next_b}").unwrap();
             writeln!(self.body, "bb{arm_b}:").unwrap();
             self.bind_handler_arm_params(arm, ck)?;
-            self.handle_stack.push((loop_b, cks));
+            self.handle_stack.push((loop_b, cks, return_arm.cloned()));
             let av = self.lower_expr(&arm.body)?;
             self.handle_stack.pop();
             writeln!(self.body, "  store i64 {av}, ptr %v{rslot}").unwrap();
@@ -2124,7 +2138,10 @@ impl Emit<'_> {
         let pv = self.fresh();
         writeln!(self.body, "  %v{pv} = call i64 @sentinel_kont_consume_pure(ptr %v{ck})").unwrap();
         self.used.kont_consume_pure = true;
-        writeln!(self.body, "  store i64 %v{pv}, ptr %v{rslot}").unwrap();
+        // c36a: a non-identity `return v => body` arm transforms the body's pure value
+        // (bind `v` to the consumed i64, lower the arm body). Identity (no arm) stores pv.
+        let pure_result = self.apply_return_arm(return_arm, &format!("%v{pv}"))?;
+        writeln!(self.body, "  store i64 {pure_result}, ptr %v{rslot}").unwrap();
         writeln!(self.body, "  br label %bb{merge_b}").unwrap();
         writeln!(self.body, "bb{default_b}:").unwrap();
         writeln!(self.body, "  unreachable").unwrap();
@@ -2132,6 +2149,28 @@ impl Emit<'_> {
         let rv = self.fresh();
         writeln!(self.body, "  %v{rv} = load i64, ptr %v{rslot}").unwrap();
         Ok(format!("%v{rv}"))
+    }
+
+    /// Bar B / effects (c36a / ADR 0020 D4) — apply an optional non-identity `return v =>
+    /// body` arm to a pure i64 `value`: bind `v` (the arm's `value_var_id`) to an i64 slot
+    /// holding `value`, then lower the arm body (which reads `v`) and return its operand.
+    /// With no return arm this is the identity (returns `value`). The binding is a flat
+    /// per-fn slot (like a handler-arm op-param), so no scope teardown is needed.
+    fn apply_return_arm(
+        &mut self,
+        return_arm: Option<&TypedReturnArm>,
+        value: &str,
+    ) -> Result<String, String> {
+        match return_arm {
+            Some(ra) => {
+                let slot = self.alloca("i64");
+                writeln!(self.body, "  store i64 {value}, ptr %v{slot}").unwrap();
+                self.slots.insert(ra.value_var_id, slot);
+                self.var_ty.insert(ra.value_var_id, Type::I64);
+                self.lower_expr(&ra.body)
+            }
+            None => Ok(value.to_string()),
+        }
     }
 
     /// Bar B / effects — bind a handler arm's op-param(s) + the continuation. The single
@@ -2182,20 +2221,26 @@ impl Emit<'_> {
         let pure_b = self.fresh_block();
         let bubble_b = self.fresh_block();
         writeln!(self.body, "  br i1 %v{isp}, label %bb{pure_b}, label %bb{bubble_b}").unwrap();
-        // Bubble: hand the new kont to the enclosing handle's dispatch loop.
-        let (loop_b, cks) = *self
+        // Bubble: hand the new kont to the enclosing handle's dispatch loop. Clone the
+        // frame (its `return_arm` is non-Copy) so the pure path can apply the arm without
+        // re-borrowing `self.handle_stack` across the `lower_expr` it triggers.
+        let frame = self
             .handle_stack
             .last()
-            .ok_or("ResumeKont must be lowered inside a handle arm")?;
+            .ok_or("ResumeKont must be lowered inside a handle arm")?
+            .clone();
+        let (loop_b, cks, ret_arm) = frame;
         writeln!(self.body, "bb{bubble_b}:").unwrap();
         writeln!(self.body, "  store ptr %v{kr}, ptr %v{cks}").unwrap();
         writeln!(self.body, "  br label %bb{loop_b}").unwrap();
-        // Pure: unwrap. (A non-identity return arm is applied here at c36a.)
+        // Pure: unwrap. c36a — `k := \v. handle (kont.resume v) with H` (Phase B), so a
+        // non-identity `return v => body` arm transforms k(v)'s pure result just as it
+        // transforms the body's pure return.
         writeln!(self.body, "bb{pure_b}:").unwrap();
         let pv = self.fresh();
         writeln!(self.body, "  %v{pv} = call i64 @sentinel_kont_consume_pure(ptr %v{kr})").unwrap();
         self.used.kont_consume_pure = true;
-        Ok(format!("%v{pv}"))
+        self.apply_return_arm(ret_arm.as_ref(), &format!("%v{pv}"))
     }
 
     /// Lower a slice of argument expressions to `(ll-type, operand)` pairs, in order —

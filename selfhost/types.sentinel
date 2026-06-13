@@ -38,7 +38,9 @@ use parser::HArms;
 use parser::Ret;
 use parser::tokenize;
 use parser::parse_block;
+use parser::parse_expr;
 use parser::parse_type;
+use parser::slice_of;
 use parser::skip_effect_row;
 use parser::append_int;
 use parser::append_str;
@@ -231,6 +233,16 @@ struct TyCtx {
     cgdt: Vec<i64>,   // scope-drop pool: the binding's type handle
     cgds: Vec<i64>,   // scope-drop pool: the binding's alloca `%vN` (paired with cgdv)
     cg_suppress: bool,   // true while walking an assign target (the Var arm records, no load)
+    // (c36a) the program's tokens, COPIED for re-parsing handle `return` arm bodies at
+    // each pure-drain site (the return arm lowers inline, but move semantics bar reusing
+    // the parsed Expr). Populated once in `run` ONLY when mode 4 + a `return` token is
+    // present (the selfhost compiler has no handlers → these stay empty there).
+    cgtk: Vec<i64>,
+    cgts: Vec<i64>,
+    cgte: Vec<i64>,
+    cg_ret_on: bool,   // (c36a) the enclosing handle has a non-identity `return v => body`
+    cg_ret_ntok: i64,  // (c36a) the return var's token index (re-slice the name per site)
+    cg_ret_tok0: i64,  // (c36a) the return body's start-token index (re-parse per site)
     cg_ph: i64,       // (c35d) inside an embedded-perform RESUMER: the placeholder slot
                       //   holding the resumed value (the Perform arm emits a load from it,
                       //   not a perform call); -1 everywhere else
@@ -3323,7 +3335,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 };
                 if cg_on(c) {
                     (*c).cg_collecting = cg_rk_col;
-                    cg_emit_resume_tail(c, cg_kreg, cg_rk_csnap);
+                    cg_emit_resume_tail(c, cg_kreg, cg_rk_csnap, src, gb);
                     0
                 } else {
                     0
@@ -4355,7 +4367,15 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
         // the return var bind VarIds in the enclosing fn region (scoped per-arm).
         Expr::Handle(hb, ha, hr) => {
             append_str(out, "(handle ");
+            // (c36a) reset cg_tailk so the body walk's result tells us whether the body
+            // produced a kont (a `perform` / effecting-call sets it) or is PURE (an i64
+            // needing a kont_pure wrap — `handle 42`); restore after (the handle's own
+            // result is a plain i64, never a kont).
+            let sv_tailk: bool = (*c).cg_tailk;
+            (*c).cg_tailk = false;
             let bty: i64 = dump_texpr(out, hb, 0 - 1, src, c, gb);
+            let body_is_kont: bool = (*c).cg_tailk;
+            (*c).cg_tailk = sv_tailk;
             let hbv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
@@ -4374,9 +4394,25 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let sv_rslot: i64 = (*c).cg_h_rslot;
             let sv_merge: i64 = (*c).cg_h_merge;
             if cg_on(c) {
+                // (c36a) a PURE body (`handle 42`) wraps via kont_pure so the loop sees a
+                // uniform Kont* (PURE_RETURN-tagged); a kont body is stored as-is.
+                let mut kont_k: i64 = cg_bk;
+                let mut kont_v: i64 = cg_bv;
+                if body_is_kont {
+                    0
+                } else {
+                    let w: i64 = cg_dst(c);
+                    cgo_str(c, "call ptr @sentinel_kont_pure(i64 ");
+                    cgo_operand(c, cg_bk, cg_bv);
+                    cgo_str(c, ")\n");
+                    (*c).cg_used_kontpure = true;
+                    kont_k = 0;
+                    kont_v = w;
+                    0
+                };
                 let cks: i64 = cg_alloca_ptr(c);
                 cgo_str(c, "  store ptr ");
-                cgo_operand(c, cg_bk, cg_bv);
+                cgo_operand(c, kont_k, kont_v);
                 cgo_str(c, ", ptr %v");
                 cgo_int(c, cks);
                 cg_putc(c, '\n');
@@ -4407,6 +4443,25 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            // (c36a) SAVE + set the return-arm cg state (for the k(v) sites in dump_tharms
+            // + the dispatch pure block); `hr` is consumed to peek its token info, then
+            // reconstructed as `hr2` for dump_tret's type dump (modes 0-3) / disposal
+            // (mode 4). Save/restore mirrors the cg_h_* nesting discipline.
+            let sv_ret_on: bool = (*c).cg_ret_on;
+            let sv_ret_ntok: i64 = (*c).cg_ret_ntok;
+            let sv_ret_tok0: i64 = (*c).cg_ret_tok0;
+            let hr2: Ret = match hr {
+                Ret::NoRet => {
+                    (*c).cg_ret_on = false;
+                    Ret::NoRet
+                },
+                Ret::YesRet(rn, rb, rnt, rt0) => {
+                    (*c).cg_ret_on = true;
+                    (*c).cg_ret_ntok = rnt;
+                    (*c).cg_ret_tok0 = rt0;
+                    Ret::YesRet(rn, rb, rnt, rt0)
+                },
+            };
             // (7c) MIR: a handle lowers ONLY its body -> Opaque([body]); the handler arms
             // + return arm are walked for the dump but NOT lowered (suppress their emits).
             let h_sup: bool = (*c).mir_suppress;
@@ -4417,7 +4472,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0
             };
             dump_tharms(out, ha, src, c, gb);
-            dump_tret(out, hr, bty, src, c, gb);
+            dump_tret(out, hr2, bty, src, c, gb);
             if mir_on(c) {
                 (*c).mir_suppress = h_sup;
                 0
@@ -4452,8 +4507,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 cgo_int(c, hck);
                 cgo_str(c, ")\n");
                 (*c).cg_used_consume = true;
-                cgo_str(c, "  store i64 %v");
-                cgo_int(c, pv);
+                // (c36a) the body's pure return runs through the `return` arm (identity if
+                // none) — sets cglk/cglv to the result, stored to the handle's result slot.
+                cg_apply_return_arm(c, 0, pv, src, gb);
+                let rrk: i64 = (*c).cglk;
+                let rrv: i64 = (*c).cglv;
+                cgo_str(c, "  store i64 ");
+                cgo_operand(c, rrk, rrv);
                 cgo_str(c, ", ptr %v");
                 cgo_int(c, hrslot);
                 cg_putc(c, '\n');
@@ -4478,6 +4538,9 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 (*c).cg_h_cks = sv_cks;
                 (*c).cg_h_rslot = sv_rslot;
                 (*c).cg_h_merge = sv_merge;
+                (*c).cg_ret_on = sv_ret_on;
+                (*c).cg_ret_ntok = sv_ret_ntok;
+                (*c).cg_ret_tok0 = sv_ret_tok0;
                 0
             } else {
                 0
@@ -4989,18 +5052,33 @@ fn dump_tharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut TyCtx, gb: &mut 
 fn dump_tret(out: &mut Vec<u8>, r: Ret, bty: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match r {
         Ret::NoRet => 0,
-        Ret::YesRet(rnm, rbody) => {
-            let mark: i64 = len((*c).scs);
-            let rvid: i64 = (*c).nextvid;
-            (*c).nextvid = (*c).nextvid + 1;
-            bind_name(c, rnm, rvid, bty);
-            append_str(out, " (return #");
-            append_int(out, rvid);
-            push(out, ' ');
-            dump_texpr(out, rbody, 0 - 1, src, c, gb);
-            truncate_scope(c, mark);
-            push(out, ')');
-            0
+        Ret::YesRet(rnm, rbody, rnt, rt0) => {
+            let _t1: i64 = rnt;
+            let _t2: i64 = rt0;
+            if cg_on(c) {
+                // (c36a) mode 4: the return arm's cg is emitted INLINE at each pure-drain
+                // site (the dispatch pure block + each k(v) pure path), re-parsed from the
+                // body tokens via the `cg_ret_*` state set in the Handle arm. Here just
+                // dispose the parsed body + name (the `out` type-dump is throwaway in cg).
+                sink_name(gb, rnm);
+                let mut scratch: Vec<i64> = vec_new();
+                cg_walk_ex(c, rbody, false, &mut scratch, gb);
+                0
+            } else {
+                // modes 0-3: the type S-expr `(return #vid <body>)` — `v` binds a VarId
+                // typed as the handle body's type `bty`, scoped to the arm.
+                let mark: i64 = len((*c).scs);
+                let rvid: i64 = (*c).nextvid;
+                (*c).nextvid = (*c).nextvid + 1;
+                bind_name(c, rnm, rvid, bty);
+                append_str(out, " (return #");
+                append_int(out, rvid);
+                push(out, ' ');
+                dump_texpr(out, rbody, 0 - 1, src, c, gb);
+                truncate_scope(c, mark);
+                push(out, ')');
+                0
+            }
         },
     }
 }
@@ -7155,6 +7233,12 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cgdt: vec_new(),
         cgds: vec_new(),
         cg_suppress: false,
+        cgtk: vec_new(),
+        cgts: vec_new(),
+        cgte: vec_new(),
+        cg_ret_on: false,
+        cg_ret_ntok: 0,
+        cg_ret_tok0: 0,
         cg_ph: 0 - 1,
         cg_lastvid: 0 - 1,
         cgbody: vec_new(),
@@ -7208,6 +7292,39 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
     };
     let mut garbage: Vec<u8> = vec_new();
     let mut out: Vec<u8> = vec_new();
+
+    // (c36a) copy the tokens into the ctx for re-parsing handle `return` arm bodies —
+    // ONLY when mode 4 (codegen) AND a `return` token (43) is present. The selfhost
+    // compiler has no handlers (no `return` token), so this is skipped there → the
+    // fixed-point pays nothing; only the c36a/c37 fixtures trigger the copy.
+    if mode == 4 {
+        let mut cg_has_ret: bool = false;
+        let mut cg_ri: i64 = 0;
+        while cg_ri < ntok {
+            if kinds[cg_ri] == 43 {
+                cg_has_ret = true;
+                0
+            } else {
+                0
+            };
+            cg_ri = cg_ri + 1;
+        }
+        if cg_has_ret {
+            let mut cg_ci: i64 = 0;
+            while cg_ci < ntok {
+                push(&mut ctx.cgtk, kinds[cg_ci]);
+                push(&mut ctx.cgts, starts[cg_ci]);
+                push(&mut ctx.cgte, ends[cg_ci]);
+                cg_ci = cg_ci + 1;
+            }
+            0
+        } else {
+            0
+        };
+        0
+    } else {
+        0
+    };
 
     // Pass 1: brace-depth scan. Record top-level item NAMES only — `fn` (FnId 14+,
     // names in `ufs`/`ufe`) + `struct` (StructId, names copied into `snb`/`sts`/`ste`)
@@ -9682,11 +9799,51 @@ fn cg_emit_resume_load(c: &mut TyCtx, kid: i64) -> i64 {
     kreg
 }
 
+// (Bar B / effects c36a / ADR 0020 D4) apply the enclosing handle's `return v => body`
+// arm to a pure i64 value operand (kind `vk`, val `vv`), setting the result operand in
+// cglk/cglv. With no return arm (`cg_ret_on` false) this is the identity (the value
+// passes through). The arm body is RE-PARSED from `cg_ret_tok0` — move semantics bar
+// reusing the parsed Expr, and the body lowers INLINE at each pure-drain site (the
+// dispatch pure block + each k(v) pure path) per Phase B's deep-handler re-wrap
+// (`k := \v. handle (resume v) with H`). `v` binds a fresh i64 slot holding the value;
+// its name is re-sliced from `cg_ret_ntok`. Mirrors the oracle's `apply_return_arm`.
+fn cg_apply_return_arm(c: &mut TyCtx, vk: i64, vv: i64, src: &[u8], gb: &mut Vec<u8>) -> i64 {
+    if (*c).cg_ret_on {
+        let ntok: i64 = (*c).cg_ret_ntok;
+        let ns: i64 = (*c).cgts[ntok];
+        let ne: i64 = (*c).cgte[ntok];
+        let vid: i64 = (*c).nextvid;
+        (*c).nextvid = (*c).nextvid + 1;
+        bind_name(c, slice_of(src, ns, ne), vid, 0);
+        let slot: i64 = cg_alloca(c, 0);
+        cg_slot_set(c, vid, slot);
+        cgo_str(c, "  store i64 ");
+        cgo_operand(c, vk, vv);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, slot);
+        cg_putc(c, '\n');
+        // Re-parse the body from its tokens, lower it (cg → cgbody; type-dump → throwaway).
+        let tok0: i64 = (*c).cg_ret_tok0;
+        let mut cur: i64 = tok0;
+        let rbody: Expr = parse_expr(&(*c).cgtk, &(*c).cgts, &(*c).cgte, src, &mut cur);
+        let mut tb: Vec<u8> = vec_new();
+        let _rr: i64 = dump_texpr(&mut tb, rbody, 0 - 1, src, c, gb);
+        let _tbx: [u8] = vec_to_array(tb);
+        // The result operand is now in cglk/cglv (set by the body lowering).
+        0
+    } else {
+        (*c).cglk = vk;
+        (*c).cglv = vv;
+        0
+    }
+}
+
 // (Bar B / effects) `k(arg)` part 2 (after the arg is collected at `snap`): `kont_resume`
 // then branch on the result's op_id: a PURE_RETURN drains via `consume_pure` (the value);
 // else a resumer bubbled → store the new kont to the enclosing handle's slot + re-enter
-// its loop. The builder ends on the pure block; the result operand is the unwrapped i64.
-fn cg_emit_resume_tail(c: &mut TyCtx, kreg: i64, snap: i64) -> i64 {
+// its loop. The builder ends on the pure block; the result operand is the unwrapped i64
+// (c36a: transformed by the enclosing `return` arm, if any).
+fn cg_emit_resume_tail(c: &mut TyCtx, kreg: i64, snap: i64, src: &[u8], gb: &mut Vec<u8>) -> i64 {
     let argk: i64 = (*c).cgak[snap];
     let argv: i64 = (*c).cgav[snap];
     let kr: i64 = cg_dst(c);
@@ -9742,7 +9899,9 @@ fn cg_emit_resume_tail(c: &mut TyCtx, kreg: i64, snap: i64) -> i64 {
     cgo_str(c, ")\n");
     (*c).cg_used_resume = true;
     (*c).cg_used_consume = true;
-    cg_reg(c, pv);
+    // (c36a) k(v)'s pure result is run through the enclosing `return` arm (identity if
+    // none) — Phase B's `k := \v. handle (resume v) with H`. Sets cglk/cglv to the result.
+    cg_apply_return_arm(c, 0, pv, src, gb);
     0
 }
 

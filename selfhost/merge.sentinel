@@ -715,7 +715,9 @@ fn emit_binds_open(out: &mut Vec<u8>, b: Binds) -> i64 {
 fn emit_ret(out: &mut Vec<u8>, c: &MergeCtx, r: Ret) -> i64 {
     match r {
         Ret::NoRet => 0,
-        Ret::YesRet(rnm, rbody) => {
+        Ret::YesRet(rnm, rbody, rnt, rt0) => {
+            let _a: i64 = rnt;
+            let _b: i64 = rt0;
             append_str(out, "return ");
             append_str(out, rnm);
             append_str(out, " => ");

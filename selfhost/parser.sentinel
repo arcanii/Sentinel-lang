@@ -135,7 +135,11 @@ pub enum HArms {
 
 pub enum Ret {
     NoRet,
-    YesRet([u8], Expr),
+    // `return v => body`: the var name bytes + the body Expr, PLUS the var's token
+    // index + the body's start-token index (c36a). The token indices let the mode-4
+    // codegen RE-PARSE the body at each pure-drain site (the return arm is lowered
+    // inline per Phase B's deep-handler re-wrap; move semantics bar reusing the Expr).
+    YesRet([u8], Expr, i64, i64),
 }
 
 // Statements (ADR 0039 A12) — a block is a `Stmts` cons-list + a tail `Expr`.
@@ -482,7 +486,7 @@ pub fn append_slice(out: &mut Vec<u8>, src: &[u8], start: i64, end: i64) -> i64 
 
 // Copy `src[start..end]` into a fresh owned `[u8]` (an identifier's text for
 // the `Var` / `Call` / `Method` / `Field` nodes — the consuming dump frees it).
-fn slice_of(src: &[u8], start: i64, end: i64) -> [u8] {
+pub fn slice_of(src: &[u8], start: i64, end: i64) -> [u8] {
     let mut v: Vec<u8> = vec_new();
     let mut i: i64 = start;
     while i < end {
@@ -933,10 +937,12 @@ fn parse_harms(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i
         *cur = *cur + 1;
         let rns: i64 = (*s)[*cur];
         let rne: i64 = (*e)[*cur];
+        let r_ntok: i64 = *cur;       // (c36a) the var token index (re-slice the name)
         *cur = *cur + 1;
         *cur = *cur + 1;
+        let r_tok0: i64 = *cur;       // (c36a) the body start-token (re-parse the body)
         let rbody: Expr = parse_expr(k, s, e, src, cur);
-        *ret = Ret::YesRet(slice_of(src, rns, rne), rbody);
+        *ret = Ret::YesRet(slice_of(src, rns, rne), rbody, r_ntok, r_tok0);
         parse_harms(k, s, e, src, cur, ret)
     } else {
         // `Effect.op(params) => body` — the params are STORED (a Binds name-list)
@@ -1179,7 +1185,7 @@ fn parse_or_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut
     }
 }
 
-fn parse_expr(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+pub fn parse_expr(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
     // Control-flow expressions are dispatched at the top (mirroring the Rust
     // parser): `if` and `match`.
     let dt: i64 = (*k)[*cur];
@@ -1984,7 +1990,9 @@ fn dump_harms(out: &mut Vec<u8>, a: HArms) -> i64 {
 fn dump_ret(out: &mut Vec<u8>, r: Ret) -> i64 {
     match r {
         Ret::NoRet => 0,
-        Ret::YesRet(rnm, rbody) => {
+        Ret::YesRet(rnm, rbody, rnt, rt0) => {
+            let _a: i64 = rnt;
+            let _b: i64 = rt0;
             append_str(out, " (return ");
             append_str(out, rnm);
             push(out, ' ');
