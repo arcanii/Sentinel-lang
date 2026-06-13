@@ -37,6 +37,7 @@ use parser::Binds;
 use parser::HArms;
 use parser::Ret;
 use parser::tokenize;
+use parser::guard_nesting;
 use parser::parse_block;
 use parser::parse_expr;
 use parser::parse_type;
@@ -7311,6 +7312,11 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
     let mut starts: Vec<i64> = vec_new();
     let mut ends: Vec<i64> = vec_new();
     tokenize(&src, n, &mut kinds, &mut starts, &mut ends);
+    // Review F11 / P2.5: the shared back-end entry (types / borrow / mir / scg
+    // codegen all route through here) — refuse pathologically deep bracket
+    // nesting before any recursive walk can stack-overflow. Inert for every
+    // valid program, so the differentials + both fixed points are unaffected.
+    guard_nesting(&mut kinds, &mut starts, &mut ends);
     let ntok: i64 = len(kinds);
 
     let mut ctx: TyCtx = TyCtx {

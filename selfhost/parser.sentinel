@@ -2569,6 +2569,76 @@ fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
     }
 }
 
+// Review F11 / P2.5 (the snc parser-hardening mirror): a recursive-descent
+// parser stack-overflows on pathologically deep nesting — a denial of service
+// on adversarial input (the snc fuzzer found ~256 nested `(` aborting). The
+// self-hosted compiler has no `Result`/error channel and the depth limit cannot
+// be threaded through the recursive walk without churning ~30 functions, so this
+// is a cheap pre-pass instead: scan the token stream for the maximum BRACKET
+// nesting (`(` 4 / `{` 6 / `[` 27 push, `)` 5 / `}` 7 / `]` 28 pop), and if it
+// exceeds a safe bound, CLEAR the stream so the walk sees an empty program and
+// cannot overflow. Inert for every valid program (the whole self-hosting compiler
+// nests <~30, the bound is 256), so the stage differentials and BOTH bootstrap
+// fixed points are unaffected. Covers the demonstrated paren/brace/bracket DoS;
+// operator-ambiguous deep nesting (a flat scan can't tell prefix `-`/`*`/`&` or
+// generic `<` from their infix forms) is a residual whose failure stays a
+// controlled abort, not memory unsafety. Called after `tokenize` by every stage
+// entry (this `main` + `types::run`).
+pub fn guard_nesting(k: &mut Vec<i64>, st: &mut Vec<i64>, en: &mut Vec<i64>) -> i64 {
+    let n: i64 = len(*k);
+    let mut i: i64 = 0;
+    let mut depth: i64 = 0;
+    let mut maxd: i64 = 0;
+    while i < n {
+        let t: i64 = (*k)[i];
+        if t == 4 {
+            depth = depth + 1;
+            0
+        } else if t == 6 {
+            depth = depth + 1;
+            0
+        } else if t == 27 {
+            depth = depth + 1;
+            0
+        } else if t == 5 {
+            depth = depth - 1;
+            0
+        } else if t == 7 {
+            depth = depth - 1;
+            0
+        } else if t == 28 {
+            depth = depth - 1;
+            0
+        } else {
+            0
+        };
+        if depth > maxd {
+            maxd = depth;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if maxd > 256 {
+        while len(*k) > 0 {
+            let _a: i64 = pop(k);
+            0
+        }
+        while len(*st) > 0 {
+            let _b: i64 = pop(st);
+            0
+        }
+        while len(*en) > 0 {
+            let _c: i64 = pop(en);
+            0
+        }
+        0
+    } else {
+        0
+    }
+}
+
 fn main() -> i64 {
     let path: [u8] = "input.sentinel";
     let src: [u8] = read_file(path);
@@ -2577,6 +2647,9 @@ fn main() -> i64 {
     let mut starts: Vec<i64> = vec_new();
     let mut ends: Vec<i64> = vec_new();
     tokenize(&src, n, &mut kinds, &mut starts, &mut ends);
+    // Review F11 / P2.5: reject pathologically deep bracket nesting before the
+    // recursive walk can stack-overflow (clears the stream if too deep).
+    guard_nesting(&mut kinds, &mut starts, &mut ends);
     let ntok: i64 = len(kinds);
     let mut out: Vec<u8> = vec_new();
     let mut cur: i64 = 0;
