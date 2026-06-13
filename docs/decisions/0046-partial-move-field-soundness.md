@@ -1,7 +1,10 @@
 # ADR 0046: Partial-move-through-field soundness (per-(VarId, FieldPath) move state)
 
-Status: **PROPOSED** — flips to ACCEPTED-WITH-AMENDMENTS as the slices land (the borrow
-checker first, then the selfhost mirror), recording deviations as numbered amendments.
+Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A3) — `snc` (the borrow checker + both codegen
+backends) and `scg` (the self-hosted mirror) both close the partial-move-through-field
+double-free; the borrow + codegen differentials are byte-identical over the whole corpus
+and both bootstrap fixed points hold. Amendments below record the deviations from the
+PROPOSED plan.
 
 Closes the **partial-move-through-field-projection double-free** documented in
 `docs/borrow-check-limitations.md` (the one *under*-rejection / soundness gap, as opposed
@@ -122,3 +125,43 @@ a Move-typed field), so the mirror lands with the new fixtures, not before.
 - Codegen's drop emission is now partial-move-aware — the DropPlan is the single source of
   truth for both the routing (which frees happen) and the skip (which don't), so they
   cannot diverge.
+
+## Amendments
+
+**A1 — the `.ll` oracle moved too (not just `borrow_dump.rs`).** D6 named `borrow_dump.rs`
+as the oracle that gains the partial-move set, but the codegen differential's oracle is
+`snc llvm` (`llvm_dump.rs`), a *separate* textual-`.ll` backend from the inkwell
+`sentinel-codegen`. The `snc` feat updated only inkwell, so `llvm_dump.rs` still emitted
+the double-free. Closing D6 required mirroring the field-skip into `llvm_dump.rs` too
+(`emit_frame_drops` threads each binding's partial-move set into `emit_drop_for_binding`;
+the Struct + GenericInstance field walks skip a moved field; nested drops get an empty
+set) — so the `.ll` oracle matches inkwell (pinned by `llvm_behaviour_matches_inkwell`)
+*and* the Sentinel mode-4 emission. Both oracle dumps move; otherwise re-blessing the
+codegen differential would have had nothing to re-bless.
+
+**A2 — the `scg` direct-Var detection is a new `mvbv` channel, not an AST peek.** The
+oracle records a partial move only when the field target is `if let Var(base)`. Sentinel
+`match` cannot peek the AST node (no catch-all *binding* pattern — only `_`; no nested
+patterns; no `&Expr` matching), and the existing "last resolved Var" channels
+(`cg_lastvid` / `mir_lastvid`) are written only under their mode guards. So the mirror adds
+`TyCtx.mvbv` — reset to -1 at every `dump_texpr` entry, set to the resolved VarId by the
+`Var` arm — the mode-independent analogue of `cg_lastvid`. The FieldAccess arm reads it
+right after the (forced-non-consuming) target dump: `>= 0` iff the target was a directly-
+named binding. Verified exact (not merely conservative) by byte-identical borrow + codegen
+differentials over the whole corpus + the self-host fixed point.
+
+**A3 — an existing fixture already exercised the path.** D6 (and the `snc` feat) stated the
+existing corpus was unaffected because "no current fixture consumes a Move-typed field."
+That held for *whole-binding* moves but missed **returning a field by value**:
+`c17_go_no_go`'s `fst<A,B>(p) -> A { p.first }` and `snd -> B { p.second }` are partial
+moves of a (generic) field in tail/return position. The borrow oracle now dumps them
+(`#2.0` / `#3.1`) and the Sentinel side reproduces them byte-for-byte — so an existing
+fixture, not only the new reproducer, validates the mirror. The codegen `.ll` for `c17` is
+unchanged (its monomorphised `Pair<i64, i64>` fields are scalar → never dropped → no skip
+observable), which is why the codegen differential and both fixed points stayed green at
+the `snc` feat before this mirror landed.
+
+**Scope unchanged.** Single-level field projections on a directly-named binding (D5);
+deep paths (`p.a.b`), index projections, and match-binding field moves remain deferred —
+each sound-by-over-rejection in `snc`, and `scg` mirrors `snc` exactly (it records + dumps
+but never rejects; error parity is out of differential scope, ADR 0043 D5/D7).

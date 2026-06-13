@@ -88,14 +88,18 @@ print(p.y + xv)
 Closure: ADR 0018 step .a fact generator + post-Polonius field-
 precise places ADR.
 
-## Soundness gap: partial move through field projection + drop — ✅ CLOSED in `snc` (ADR 0046)
+## Soundness gap: partial move through field projection + drop — ✅ CLOSED (ADR 0046)
 
-**Status: closed in the Rust bootstrap compiler (`snc`) by ADR 0046**
-(per-(VarId, field-index) partial-move state). The self-hosted
-compiler (`scg`) mirror — `selfhost/borrow.sentinel` +
-`selfhost/types.sentinel`'s drop emission + the `snc borrow` dump +
-the corpus fixtures — is the remaining follow-on (ADR 0046 D6). The
-write-up below is retained as the original gap description.
+**Status: fully closed — `snc` (the Rust bootstrap compiler) AND `scg`
+(the self-hosted compiler) by ADR 0046** (per-(VarId, field-index)
+partial-move state). `snc` closed it in both the borrow checker and
+both codegen backends (the inkwell `sentinel-codegen` and the `snc
+llvm` `.ll` oracle); `scg` mirrors it in `selfhost/types.sentinel`
+(the move recorder + the mode-1 dump + the mode-4 drop field-skip;
+`selfhost/borrow.sentinel` is a thin wrapper). The borrow + codegen
+differentials are byte-identical over the whole corpus and both
+bootstrap fixed points hold. The write-up below is retained as the
+original gap description.
 
 The under-rejection case. C2.3's docstring noted "Partial moves
 through field projection — `let inner = p.x` doesn't consume p.
@@ -167,12 +171,16 @@ ADR 0046 D5). This was roughly half the work of the Polonius
 migration's fact generator, conceptually independent and shipped on
 its own.
 
-**Remaining (`scg` mirror):** `selfhost/borrow.sentinel` +
-`selfhost/types.sentinel`'s drop + the `snc borrow` dump + corpus
-fixtures, so the self-hosted compiler matches `snc` under the
-differential discipline (ADR 0046 D6). Until that lands, the
-self-hosted `scg` still has the gap; the trusted Rust bootstrap
-`snc` does not.
+**`scg` mirror (DONE — ADR 0046 D6):** `selfhost/types.sentinel` now
+records the partial move (a Move-typed field consumed by value on a
+directly-named base — the direct-Var base detected via the new
+`mvbv` channel), dumps the `#<vid>.<field>` set, and elides the field
+in the mode-4 recursive drop; the `snc borrow` + `snc llvm` oracle
+dumps emit the same set. Three corpus fixtures (the reproducer at
+exit 37, a non-consuming-read regression, a use-after-partial-move
+reject) plus the pre-existing `c17_go_no_go` (which returns a generic
+field by value) exercise it. The self-hosted `scg` no longer has the
+gap.
 
 ## Out of scope at this doc
 
@@ -192,4 +200,4 @@ Each row here gets closed by a specific ADR or sub-phase:
 |-------------------------------------|----------------------------------|
 | Borrow past last use                | ADR 0018 step .b / .c (Polonius) |
 | Field-disjoint borrows              | Post-Polonius field-precise places ADR |
-| Partial move + drop unsoundness     | ✅ CLOSED in `snc` (ADR 0046); `scg` mirror is the follow-on |
+| Partial move + drop unsoundness     | ✅ CLOSED (ADR 0046) — `snc` + `scg` both, differentials byte-identical |

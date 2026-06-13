@@ -2082,13 +2082,21 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs: mark the partial-move soundness gap closed in snc`
-    commit (`19c8681`, this verify-HEAD refresh — borrow-check-limitations.md + STATE banner), atop the
-    **partial-move soundness feat** (`a16881b` — ADR 0046: the partial-move-through-field DOUBLE-FREE is
-    CLOSED in `snc`; per-(VarId, field) move state in sentinel-borrow-check + the `DropPlan.moved_fields`
-    drop-skip in sentinel-codegen; reproducer now accepted+correct [exit 37, leak-free]; 5 unit tests; corpus
-    + both fixed-point paths stay green — no existing fixture consumes a Move field; the `scg` mirror is the
-    pending follow-on [ADR 0046 D6]), atop the **ADR 0046 PROPOSED** doc (`162d8ae`), atop the
+    Verify HEAD with `git log -1` — HEAD is a `docs: ADR 0046 ACCEPTED — scg mirror` commit (this
+    verify-HEAD refresh — ADR flip + STATE banner + borrow-check-limitations + HANDOVER), atop the
+    **scg-mirror feat** (`714ce3f` — feat(selfhost): mirror the partial-move-through-field skip into scg,
+    ADR 0046 D6: the self-hosted `scg` no longer double-frees a Move-typed field consumed by value. The
+    `snc borrow` dump [`borrow_dump.rs`] gains the `#<vid>.<field>` partial-move suffix; the `snc llvm`
+    `.ll` oracle [`llvm_dump.rs`] gains the drop field-skip [A1 — the feat below updated only inkwell, so
+    the `.ll` oracle was stale]; `selfhost/types.sentinel` mirrors record + dump + the mode-4 drop-skip,
+    detecting the direct-Var base via a new mode-independent `mvbv` channel [A2 — Sentinel match can't peek
+    the AST]; an EXISTING fixture `c17_go_no_go` already exercised it [A3 — `fst`/`snd` RETURN a generic
+    field by value]; +3 fixtures [reproducer exit 37 / non-consuming regression exit 4 / use-after reject];
+    borrow + codegen differentials byte-identical, both fixed points hold, 0 leaks, four-check green, 1484
+    tests; ADR 0046 → ACCEPTED-WITH-AMENDMENTS A1–A3), atop the **partial-move soundness feat** (`a16881b` —
+    ADR 0046: the gap CLOSED in `snc`; per-(VarId, field) move state in sentinel-borrow-check + the
+    `DropPlan.moved_fields` drop-skip in sentinel-codegen; reproducer accepted+correct; 5 unit tests), atop
+    the **ADR 0046 PROPOSED** doc (`162d8ae`), atop the
     `docs(selfhost): ADR 0045 A34 — concurrency + ACCEPTED` commit (`672885a`), atop the
     **structured-concurrency feat** (`0f360cf` — scope/spawn/await; **FULL-CORPUS PARITY**, emitting set 121 →
     123: c44_go_no_go [scope+spawn+await] + c4_go_no_go [the full C4 surface]; ALL 123 PASS FIXTURES NOW EMIT →
@@ -2194,25 +2202,25 @@ For pasting into a fresh chat to bootstrap context:
     `sentinel_codegen_reaches_the_bootstrap_fixed_point`; **1473 tests**, modes 0–4 byte-identical, `scg`
     leak-free (`leaks --atExit`: 0 leaks lowering the merged compiler), four-check green.
 
-    ▶ **RESUME AT: the ADR 0046 `scg` MIRROR (the owner-chosen post-port track).** **The self-host port is
-    COMPLETE — Bar B closed, ADR 0045 ACCEPTED-WITH-AMENDMENTS (A1–A34): all 123 pass fixtures emit
-    byte-identically `scg` == `snc llvm`, and the bootstrap fixed point holds via BOTH paths.** The owner then
-    chose (review action plan P1.2) to close the borrow checker's one live memory-safety UNDER-rejection —
-    **the partial-move-through-field double-free — DONE in `snc`** (ADR 0046, feat `a16881b`): per-(VarId,
-    field) move state + the DropPlan field-skip in codegen; the reproducer is now accepted+correct (exit 37,
-    leak-free); 5 unit tests; corpus + fixed-point green. **▶ NEXT — the `scg` MIRROR (ADR 0046 D6), so the
-    self-hosted compiler matches `snc`:** (1) `crates/sentinel-driver/src/borrow_dump.rs` — dump the
-    `moved_fields` set (extends `snc borrow`; existing fixtures show empty → differential stays green); (2)
-    `selfhost/borrow.sentinel` — mirror the per-field move logic + the dump (flat arrays for `moved_fields`,
-    the consuming field-access logic, the UAM checks); re-bless the borrow differential; (3)
-    `selfhost/types.sentinel` — mirror the codegen drop field-skip (its DropPlan side-table is `mvf`/`mvv`; cg
-    drop is `cg_drop_frame`/`cg_is_moved`); re-bless the codegen differential; preserve both fixed-point
-    paths; (4) add corpus fixtures (reproducer → tests/pass exit 37, use-after-partial-move → tests/ui reject,
-    a `p.x+p.y` regression → tests/pass); (5) flip ADR 0046 → ACCEPTED; refresh STATE/limitations. Detail +
-    the exact snc-side changes to mirror: [[sentinel_partial_move_fix]] + `docs/decisions/0046`. **Other open
-    tracks (owner's call):** the per-unit separate-compilation back end (ADR 0037 (a) — incremental builds);
-    review-plan P0.1 (calibrate the README "constant-time, machine-verified" claim — the reviewers' top
-    credibility concern); P2.4 (a Linux CI target); P3.1 (rewrite the stale PROGRAMMING_GUIDE).
+    ▶ **RESUME AT: owner's call among the open tracks — the self-host port AND the ADR 0046 partial-move
+    soundness fix are both COMPLETE.** **The self-host port: Bar B closed, ADR 0045 ACCEPTED-WITH-AMENDMENTS
+    (A1–A34): all 123 pass fixtures emit byte-identically `scg` == `snc llvm`, and the bootstrap fixed point
+    holds via BOTH paths.** **ADR 0046 (the partial-move-through-field double-free, review-plan P1.2):
+    CLOSED in `snc` AND `scg` → ACCEPTED-WITH-AMENDMENTS A1–A3** (feat `a16881b` snc + `714ce3f` the scg
+    mirror): per-(VarId, field) move state in the borrow checker + the `moved_fields` drop-skip in BOTH
+    codegen backends (inkwell + the `snc llvm` `.ll` oracle — A1), mirrored into `selfhost/types.sentinel`
+    (record + dump + mode-4 drop-skip; the direct-Var base via the new `mvbv` channel — A2); the borrow +
+    codegen differentials are byte-identical over the whole corpus (incl. `c17_go_no_go`, which RETURNS a
+    generic field by value — A3) and both fixed points hold; +3 corpus fixtures (reproducer exit 37 / a
+    non-consuming-read regression exit 4 / a use-after-partial-move reject), 0 leaks, 1484 tests. The borrow
+    checker's remaining limitations are all OVER-rejections (ergonomics, ADR 0018) — sound. **▶ OPEN TRACKS
+    (owner's call):** (1) the per-unit separate-compilation back end (ADR 0037 (a) — per-unit `.o` +
+    module-qualified `abi-v1` mangling + multi-object link + `linkonce_odr` cross-module generics →
+    incremental builds; the headline deferred track, independent of the port); (2) review-plan P0.1 —
+    calibrate the README "constant-time, machine-verified" claim to what the MIR pass actually guarantees
+    (the reviewers' top credibility concern; docs-only); (3) P2.4 — a Linux CI target; (4) P3.1 — rewrite
+    the stale PROGRAMMING_GUIDE (still describes pre-C1 "i64 only"). Detail: `docs/REVIEW_ACTION_PLAN.md`
+    (the owner's untracked plan) + [[sentinel_partial_move_fix]] + `docs/decisions/0046`.
 
     --- BELOW: the Bar B historical record (the completed full-corpus codegen-parity work) ---
     **Bar B headline** (DONE): the Sentinel compiler fully compiles itself, via BOTH fixed-point paths —
