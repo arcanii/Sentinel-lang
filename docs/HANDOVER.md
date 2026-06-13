@@ -2082,8 +2082,14 @@ For pasting into a fresh chat to bootstrap context:
     building `snc`, plus selfhost/*.sentinel (the compiler being rewritten in Sentinel
     itself, each stage differentially validated against the Rust `snc` oracle).
 
-    Verify HEAD with `git log -1` — HEAD is a `docs(selfhost): ADR 0045 A34 — concurrency + ACCEPTED` commit
-    (this verify-HEAD refresh), atop the
+    Verify HEAD with `git log -1` — HEAD is a `docs: mark the partial-move soundness gap closed in snc`
+    commit (`19c8681`, this verify-HEAD refresh — borrow-check-limitations.md + STATE banner), atop the
+    **partial-move soundness feat** (`a16881b` — ADR 0046: the partial-move-through-field DOUBLE-FREE is
+    CLOSED in `snc`; per-(VarId, field) move state in sentinel-borrow-check + the `DropPlan.moved_fields`
+    drop-skip in sentinel-codegen; reproducer now accepted+correct [exit 37, leak-free]; 5 unit tests; corpus
+    + both fixed-point paths stay green — no existing fixture consumes a Move field; the `scg` mirror is the
+    pending follow-on [ADR 0046 D6]), atop the **ADR 0046 PROPOSED** doc (`162d8ae`), atop the
+    `docs(selfhost): ADR 0045 A34 — concurrency + ACCEPTED` commit (`672885a`), atop the
     **structured-concurrency feat** (`0f360cf` — scope/spawn/await; **FULL-CORPUS PARITY**, emitting set 121 →
     123: c44_go_no_go [scope+spawn+await] + c4_go_no_go [the full C4 surface]; ALL 123 PASS FIXTURES NOW EMIT →
     **Bar B COMPLETE, ADR 0045 ACCEPTED**; oracle 5 RuntimeSyms + `Emit::current_scope` +
@@ -2188,10 +2194,30 @@ For pasting into a fresh chat to bootstrap context:
     `sentinel_codegen_reaches_the_bootstrap_fixed_point`; **1473 tests**, modes 0–4 byte-identical, `scg`
     leak-free (`leaks --atExit`: 0 leaks lowering the merged compiler), four-check green.
 
-    ▶ **RESUME AT: BAR B — continue the full-corpus codegen (→ ADR 0045 ACCEPTED).** The headline is DONE
-    (the Sentinel compiler fully compiles itself, via BOTH fixed-point paths — (b) 8g merge-to-source A18 +
-    (a) the self-hosted merge A19–A20; `scg` discovers+merges+emits itself, `cc`→`scg'` self-reproduces).
-    **Owner chose Bar B** (full-corpus parity for the ACCEPTED flip). **METHOD** (the established per-slice
+    ▶ **RESUME AT: the ADR 0046 `scg` MIRROR (the owner-chosen post-port track).** **The self-host port is
+    COMPLETE — Bar B closed, ADR 0045 ACCEPTED-WITH-AMENDMENTS (A1–A34): all 123 pass fixtures emit
+    byte-identically `scg` == `snc llvm`, and the bootstrap fixed point holds via BOTH paths.** The owner then
+    chose (review action plan P1.2) to close the borrow checker's one live memory-safety UNDER-rejection —
+    **the partial-move-through-field double-free — DONE in `snc`** (ADR 0046, feat `a16881b`): per-(VarId,
+    field) move state + the DropPlan field-skip in codegen; the reproducer is now accepted+correct (exit 37,
+    leak-free); 5 unit tests; corpus + fixed-point green. **▶ NEXT — the `scg` MIRROR (ADR 0046 D6), so the
+    self-hosted compiler matches `snc`:** (1) `crates/sentinel-driver/src/borrow_dump.rs` — dump the
+    `moved_fields` set (extends `snc borrow`; existing fixtures show empty → differential stays green); (2)
+    `selfhost/borrow.sentinel` — mirror the per-field move logic + the dump (flat arrays for `moved_fields`,
+    the consuming field-access logic, the UAM checks); re-bless the borrow differential; (3)
+    `selfhost/types.sentinel` — mirror the codegen drop field-skip (its DropPlan side-table is `mvf`/`mvv`; cg
+    drop is `cg_drop_frame`/`cg_is_moved`); re-bless the codegen differential; preserve both fixed-point
+    paths; (4) add corpus fixtures (reproducer → tests/pass exit 37, use-after-partial-move → tests/ui reject,
+    a `p.x+p.y` regression → tests/pass); (5) flip ADR 0046 → ACCEPTED; refresh STATE/limitations. Detail +
+    the exact snc-side changes to mirror: [[sentinel_partial_move_fix]] + `docs/decisions/0046`. **Other open
+    tracks (owner's call):** the per-unit separate-compilation back end (ADR 0037 (a) — incremental builds);
+    review-plan P0.1 (calibrate the README "constant-time, machine-verified" claim — the reviewers' top
+    credibility concern); P2.4 (a Linux CI target); P3.1 (rewrite the stale PROGRAMMING_GUIDE).
+
+    --- BELOW: the Bar B historical record (the completed full-corpus codegen-parity work) ---
+    **Bar B headline** (DONE): the Sentinel compiler fully compiles itself, via BOTH fixed-point paths —
+    (b) 8g merge-to-source A18 + (a) the self-hosted merge A19–A20; `scg` discovers+merges+emits itself,
+    `cc`→`scg'` self-reproduces. **METHOD** (the established per-slice
     lock-step): for each construct the corpus uses but the selfhost compiler doesn't, extend the oracle
     (`crates/sentinel-driver/src/llvm_dump.rs`) + the Sentinel mode-4 cg (`selfhost/types.sentinel`),
     **mirroring the inkwell backend** (`crates/sentinel-codegen/src/lib.rs`) for the layout/lowering;
