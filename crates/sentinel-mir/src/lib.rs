@@ -60,9 +60,10 @@
 use sentinel_ast::{BinOp, CmpOp, LogicOp, Span, UnaryOp};
 use sentinel_resolve::VarId;
 use sentinel_types::{
-    Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram, TypedStmt, TypedStmtKind,
+    Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedPattern, TypedProgram, TypedStmt,
+    TypedStmtKind,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// An SSA value, identified by its index into [`MirFunction::value_tys`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -232,6 +233,13 @@ struct FnBuilder {
     /// `VarId → current SSA value`. A `BTreeMap` (not `HashMap`) so the
     /// merge-parameter order is deterministic across runs.
     var_defs: BTreeMap<VarId, MirValue>,
+    /// ADR 0026 D5 / review F4: the VarIds that may legitimately be
+    /// *unbound* in `var_defs` at use — `match`-arm pattern bindings, which
+    /// are arm-scoped and not modeled by this minimal lowering (their use
+    /// resolves to a fresh `Opaque`). Used ONLY by `lookup_var`'s
+    /// debug-build assertion to distinguish that benign case from a genuine
+    /// resolver/lowering bug; it never affects emitted IR.
+    expected_unbound: BTreeSet<VarId>,
 }
 
 impl FnBuilder {
@@ -241,6 +249,7 @@ impl FnBuilder {
             blocks: Vec::new(),
             current: MirBlockId(0),
             var_defs: BTreeMap::new(),
+            expected_unbound: BTreeSet::new(),
         }
     }
 
@@ -309,13 +318,28 @@ impl FnBuilder {
         }
     }
 
-    /// Look up a variable's current SSA value. Unbound is a no-op-safe
-    /// fallback (well-typed bodies always bind before use) so lowering
-    /// stays total.
+    /// Look up a variable's current SSA value. A well-typed body binds every
+    /// regular VarId before use; the one legitimate unbound case is a
+    /// `match`-arm pattern binding (arm-scoped, not modeled here — recorded
+    /// in [`expected_unbound`]), which resolves to a fresh `Opaque`.
+    ///
+    /// ADR 0026 D5 / review F4: any OTHER unbound VarId is a resolver/lowering
+    /// bug. Its taint-free empty `Opaque` could mask a `secret` and
+    /// *false-negative* the constant-time check, so make it LOUD in debug
+    /// builds (where the test suite runs). Release builds keep the total
+    /// fallback so a production compile never aborts on this edge.
     fn lookup_var(&mut self, id: VarId, ty: Type, span: Span) -> MirValue {
         match self.var_defs.get(&id) {
             Some(&v) => v,
-            None => self.emit(MirOp::Opaque(Vec::new()), ty, span),
+            None => {
+                debug_assert!(
+                    self.expected_unbound.contains(&id),
+                    "lower_to_mir: unbound VarId {id:?} is not a match-arm pattern binding — a \
+                     resolver/lowering bug; its taint-free Opaque could mask a secret leak \
+                     (ADR 0026 D5 / review F4)"
+                );
+                self.emit(MirOp::Opaque(Vec::new()), ty, span)
+            }
         }
     }
 }
@@ -540,6 +564,16 @@ impl FnBuilder {
             TypedExprKind::Match { scrutinee, arms, .. } => {
                 let mut vals = vec![self.lower_expr(program, scrutinee)];
                 for arm in arms {
+                    // ADR 0026 D5 / review F4: an arm's pattern bindings are
+                    // arm-scoped VarIds this lowering doesn't model (their use
+                    // resolves to a fresh `Opaque`). Record them so
+                    // `lookup_var`'s unbound assert treats them as benign and
+                    // not a resolver bug.
+                    if let TypedPattern::Variant { bindings, .. } = &arm.pattern {
+                        for b in bindings {
+                            self.expected_unbound.insert(b.var_id);
+                        }
+                    }
                     vals.push(self.lower_expr(program, &arm.body));
                 }
                 self.emit(MirOp::Opaque(vals), ty, span)
@@ -915,6 +949,32 @@ mod tests {
         assert!(
             insts(f).iter().any(|i| matches!(i.op, MirOp::Binary(BinOp::Mul, ..))),
             "`x * 2` lowers to a Binary(Mul)"
+        );
+    }
+
+    #[test]
+    fn match_arm_payload_binding_lowers_without_tripping_the_unbound_assert() {
+        // ADR 0026 D5 / review F4: a `match`-arm pattern binding (`r`, `w`,
+        // `h`) is arm-scoped and unbound in `var_defs`; its use must resolve
+        // to a fresh `Opaque` (taint preserved by type), NOT trip
+        // `lookup_var`'s unbound `debug_assert!`. `expected_unbound` records
+        // it as the benign case. In a debug build a regression panics — so
+        // that this lowers at all is the guard's positive test.
+        let p = lower(
+            "enum Shape { Unit, Circle(i64), Rect(i64, i64) }\n\
+             fn area(s: Shape) -> i64 {\n\
+                 match s {\n\
+                     Shape::Unit => 0,\n\
+                     Shape::Circle(r) => r * r * 3,\n\
+                     Shape::Rect(w, h) => w * h,\n\
+                 }\n\
+             }\n\
+             fn main() -> i64 { area(Shape::Unit) }",
+        );
+        let f = func(&p, "area");
+        assert!(
+            insts(f).iter().any(|i| matches!(i.op, MirOp::Opaque(_))),
+            "the match (and its arm-scoped bindings) funnel through Opaque"
         );
     }
 
