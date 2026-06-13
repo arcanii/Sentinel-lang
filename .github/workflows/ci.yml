@@ -36,3 +36,7 @@ jobs:
 
       - name: Test
         run: cargo nextest run --workspace
+
+      # nextest does not run doctests; the four-check norm includes them.
+      - name: Doctests
+        run: cargo test --doc --workspace

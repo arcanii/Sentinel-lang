@@ -16,7 +16,7 @@ build-release:
 test:
     cargo nextest run --workspace
 
-# Run tests including snapshot review
+# Run the full test suite including doctests (nextest skips doctests)
 test-all:
     cargo nextest run --workspace
     cargo test --workspace --doc
@@ -41,8 +41,8 @@ snc *args:
 bless:
     INSTA_UPDATE=always cargo nextest run --workspace
 
-# Full pre-commit check: format, lint, test
-check-all: fmt-check lint test
+# Full pre-commit check: format, lint, the four-check test suite (incl. doctests)
+check-all: fmt-check lint test-all
 
 # Clean build artifacts
 clean:

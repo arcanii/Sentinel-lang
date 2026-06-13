@@ -1,9 +1,21 @@
 # SECRETS_LIFECYCLE.md — Sentinel Secrets Lifecycle Design
 
-This document specifies the proposed extension of Sentinel's `secret`
+> **Status: VISION / design exploration — NOT on the implementation
+> roadmap.** None of the lifecycle stages (origin, rotation, custody, L1–L4)
+> described below are scheduled or being built. The **shipped** secret
+> surface is exactly: the `secret T` type qualifier (mlock'd, no-core-dump,
+> zeroed on free, kept out of default serialization) **plus** the
+> constant-time verification pass that statically rejects a `secret` reaching
+> a branch / memory index / divisor (see the README headline section for the
+> precise property and its boundaries). This document is a detailed *what-if*
+> for a possible future extension, retained for design continuity — not a
+> commitment. When it and [`STATE.md`](STATE.md) disagree about what exists,
+> STATE.md wins.
+
+This document specifies a proposed extension of Sentinel's `secret`
 qualifier to track full secrets lifecycle. It is a focused design
 proposal, not a high-level survey. It is intended to be detailed enough
-for an engineer to begin prototyping.
+for an engineer to begin prototyping — *if* the extension is ever scheduled.
 
 The 1.0 design (SENTINEL_DESIGN2.md Section 4.5) defines `secret T` as
 a type qualifier with memory-handling guarantees: mlock'd, no-core-dump,
