@@ -1,9 +1,12 @@
 # ADR 0037: Phase D.6 — modules / multi-file (file-as-module + separate compilation)
 
-Status: PROPOSED — **D.6 (1/N) IN PROGRESS; multi-file now COMPILES + RUNS**
-(via the lower-risk Path A merge — owner-chosen: whole-graph front-end + merge
+Status: PROPOSED — **multi-file SURFACE COMPLETE (via the interim Path A merge);
+the TRUE per-unit separate-compilation BACK END is now being built ADR-first — D7
+mangling + the per-unit ID model (D5.1) + the codegen-per-unit boundary (D5.2) are
+PINNED below (a frozen-ABI decision settled before code).** The surface shipped via
+the lower-risk Path A merge — owner-chosen: whole-graph front-end + merge
 into one `Program` → existing pipeline; true per-unit separate-compilation back
-end deferred). Landed green: `use` front-end, module-graph discovery, top-level
+end deferred to the (1/N)/(2/N)/(3/N) sub-phases below (D9). Landed green: `use` front-end, module-graph discovery, top-level
 `pub`, import resolution + visibility, the merge (`merge_modules`), and
 **cross-module items of every kind** — `merge_modules` qualifies fn + struct +
 enum + trait + effect + class + named-impl names by module path and rewrites
@@ -30,6 +33,19 @@ sum types (D.1), strings + a byte type (D.2), growable collections (D.3), file I
 to ACCEPTED-WITH-AMENDMENTS when the MVP sub-phases land. The 4 OPEN DESIGN POINTS
 are SETTLED (owner-confirmed): allow import cycles; AMEND `abi-v1` (not `abi-v2`);
 source root = the entry file's directory; `use a::b::c` = item `c` in module `a::b`.
+
+**▶ THE PER-UNIT BACK END (this revision).** Path A gave Sentinel the multi-file
+*surface* + semantics but compiles the whole graph as ONE object (no per-unit `.o`,
+no incremental rebuilds) — it is NOT separate compilation. This revision settles the
+true back end the ADR always committed to (D1/D5): each module → its own `.o`,
+cross-module refs resolved at LINK time via module-qualified `abi-v1` symbols, and
+`linkonce_odr` cross-unit generic dedup. The frozen-ABI pieces are PINNED here before
+any code: **D7** (the exact module-qualified mangling), the **per-unit ID model**
+(the extern-fn-in-FnId-space model, D5.1), and the **codegen-per-unit boundary** (the
+3 whole-program assumptions to break, D5.2). It is built **additively**: the Path A
+merge + `snc merge` (the self-host fixed-point path) + both bootstrap fixed points
+stay green throughout; the per-unit path lands behind an opt-in until it reaches Path A
+parity, then becomes the default for `snc build` (D9). See **SETTLED DESIGN POINTS**.
 
 Date: 2026-06-01
 Related:
@@ -177,6 +193,56 @@ B needs only A's *declaration* imported (B agrees on layout) — no link symbol.
     **entry module** owns `main` (the C entry). Link order is deterministic (sorted
     by module path) for reproducibility.
 
+### D5.1. The per-unit ID model — extern-fn-in-FnId-space (PINNED).
+
+Each module resolves into its **own** ID space (`FnId`/`StructId`/… restart per
+module: builtins `FnId(0..=13)` shared + fixed, then imported externs, then own items
+— D3). The representation that costs the **least cascade** through types/codegen
+(settled in the impl notes, elevated here): a cross-module call stays an ordinary
+`Call { id: FnId }` — **no new expr variant**. An imported `pub fn` is registered in
+*this* module's `FnId` space (after builtins) as an **extern**: its `FnSignature`
+carries the imported signature (param/return types from the exports table) **plus its
+module-qualified `link_symbol`** (D7) and **no body**. So `fn_signatures` per unit =
+builtins ∪ imported externs ∪ own fns; a call to an imported name resolves to its
+extern `FnId` and type-checks against the imported signature like any other call.
+Imported `pub` **types** (struct/enum) are registered analogously in this unit's
+`StructId`/`EnumId` space with their **layout** from the exports table (a type carries
+*no* link symbol — units agree on layout, D4). A new `resolve_module(program, imports)`
+generalizes `resolve()` (the `imports == []` case = today's single-file resolve,
+preserved bit-for-bit, so the single-file/Path-A paths are byte-unchanged).
+
+### D5.2. The codegen-per-unit boundary — the 3 whole-program assumptions to break.
+
+`compile_to_object` is whole-program today; the readiness scan named three assumptions
+that must become per-unit. Each is pinned here:
+
+  1. **`collect_mono_instantiations` (whole-program generic discovery).** Walks every
+     non-generic fn body in the *whole* program to find `(FnId, type_args)` instances.
+     → Becomes **per-unit**: each unit discovers the instances *it* uses (including of
+     *imported* generics — so a `pub` generic fn's **body** crosses the boundary, unlike
+     a monomorphic fn, D6) and emits each with **`linkonce_odr`** linkage so units that
+     share an instance dedup at link. (2/N — 1/N is non-generic, so 1/N keeps the pass
+     per-entry-module and emits nothing cross-unit from it.)
+  2. **The single `fns: HashMap<FnId, FunctionValue>`.** One map over one global FnId
+     space, every entry a *definition*, every free fn named by its **bare source name**
+     (`add_function(&signature.name, …)`). → Becomes **per-unit**, built from this
+     unit's `fn_signatures`: a **local** fn is *defined* under its module-qualified
+     symbol (D7); an **extern** fn (D5.1) is *declared* (external linkage, its
+     `link_symbol`) — a declaration, not a definition. `main` keeps local linkage + the
+     bare `main` symbol.
+  3. **`self.fns.get(&id)` call resolution.** → **Mechanically unchanged** — the FnId
+     still keys the map. The map simply returns a *declaration* for an imported callee,
+     so the emitted `call` references the external module-qualified symbol and the
+     linker binds it to the defining unit's definition. This is what makes the
+     extern-fn-in-FnId-space model (D5.1) low-cascade: the call path never learns about
+     modules at all.
+
+The driver drives **per module**: `resolve_module → check → effect/borrow/ct → hir →
+compile_to_object` (one `.o` each, the module's path threaded in for mangling), then
+`cc` all `.o` + `libsentinel_runtime.a` in **path-sorted** order (deterministic; entry
+module owns `main`). `compile_to_object(hir, output)` gains the module path (empty =
+single-file = today's bare-name path, unchanged).
+
 ### D6. Cross-module generics (the hard piece) — `(2/N)`.
 
 `collect_mono_instantiations` is **whole-program**: it walks the entire program to
@@ -187,25 +253,59 @@ the generic it needs and emits it with **`linkonce_odr`** linkage, so multiple u
 that instantiate the same `A::id<i64>` **dedup at link time**. This needs: (a)
 per-unit mono discovery (the imported generic's *body* is available for instantiation
 — so a `pub` generic fn's body **does** cross the boundary, unlike a monomorphic fn),
-and (b) `linkonce_odr` + a mangling that makes `A::id<i64>` identical across units.
+and (b) `linkonce_odr` + a mangling that makes `A::id<i64>` identical across units, and
+(c) **module-qualified type tags** in the mono key (D7's last bullet) so
+`id<a::b::Point>` and `id<c::d::Point>` are not `linkonce_odr`-deduped as one.
 This is the single largest mechanic and is **deferred to (2/N)** so (1/N) can land
 non-generic separate compilation first.
 
-### D7. `abi-v1` amendment — module-qualified, collision-free mangling.
+### D7. `abi-v1` amendment — module-qualified, collision-free mangling (PINNED).
 
-Today a free fn is its **bare source name** (`fn double` → symbol `double`) — fine
-single-file, but **not collision-free across modules** (two modules' `foo`) and not
-length-prefixed (ADR 0029's noted soft-spot: `a::b` vs `a_b` could collide). Separate
-compilation makes every `pub` symbol cross-unit, so the mangling must encode the
-module path **unambiguously**. Proposed: a **length-prefixed, module-qualified**
-scheme, e.g. `_S` + per-segment `<len><segment>` for the module path + the item
-(Itanium-ish), so `lex::token::Token::new` and `parse::Token::new` never collide.
-`main` stays `main` (the C entry); `sentinel_*` runtime symbols are unchanged. This
-is a **frozen-ABI change** (ADR 0029 D8): the mangling golden-string tests + the
-spec doc (`docs/abi-v1.md`) update **in the same commit**. Whether this is an
-`abi-v1` **amendment** or an `abi-v2` bump is a design point (P2) — leaning amendment,
-since no existing single-file program's *observable* ABI changes (a single-file
-program is one module; its bare names can be preserved as the empty-module-path case).
+Cross-unit linking *is* symbol resolution, so every cross-module symbol must encode
+its module path **unambiguously**. The frozen scheme (settled — open point 2 = AMEND,
+not `abi-v2`):
+
+  - **The unit of mangling is `(module_path, item)`** where `module_path` is the
+    module's path segments (`[util, math]` for `util/math.sentinel`; **empty** for a
+    single-file program) and `item` is the item's **existing intra-module mangled
+    name** — the C5 `abi-v1` §4 symbol, unchanged: a free fn is its source name
+    (`double`), a mono instance is `mangle_mono_name` (`id__i64`), a class init/method
+    is `Point__init` / `Counter__inc`, an impl method is `add__Point__Display__show`.
+  - **Empty module path → the bare `item`, byte-for-byte.** A single-file program is
+    the empty-module-path case, so **its every symbol is exactly what `abi-v1` emits
+    today** — this is why this is an *amendment*, not an `abi-v2` bump: no existing
+    single-file artifact's observable ABI changes. (`abi_v1_mangling_is_stable` stays
+    green unchanged; a NEW multi-module golden test pins the rest.)
+  - **Non-empty module path → `_S` + a length-prefixed segment per module path
+    segment + a length-prefixed `item`**, each segment `<decimal-byte-len><bytes>`
+    (Itanium-ish source-name encoding). `item` is wrapped as **one** length-prefixed
+    blob (its internal `__` structure is the existing §4 scheme, untouched — the
+    amendment fixes the *module* collision surface, not the intra-module one). Examples:
+    `util::math` fn `add` → `_S4util4math3add`; `lex::token` class-method `Token::new`
+    (item `Token__new`) → `_S3lex5token10Token__new`; `parse` class-method `Token::new`
+    → `_S5parse10Token__new` (distinct module prefix — the two never collide, the D7
+    requirement). The encoding is a prefix-free code over the segment sequence
+    `[m1, …, mk, item]`, so distinct `(module, item)` pairs always yield distinct
+    symbols; decoding is unambiguous because no Sentinel identifier (nor any §4 type
+    tag) starts with a digit, so the greedy length read terminates exactly at the
+    segment bytes. Convention (for `llvm-nm` readability, not parsing): the **last**
+    length-prefixed segment is the item, the rest are the module path.
+  - **Exceptions (unchanged):** the entry module's `main` stays `main` (the one C entry
+    point); the `sentinel_*` runtime symbols (§5) and the inlined builtins are never
+    mangled. `_S` is **reserved** for Sentinel-emitted symbols (like `sentinel_*`) —
+    documented in `abi-v1.md` so user code does not rely on a `_S*` name surviving.
+  - **Cross-module type tags (a 2/N soundness note).** `mangle_type` (§4) renders a
+    `Struct`/`Class`/`Enum` by its **bare** name today. That is sound for 1/N
+    (non-generic: no type appears in a mono key) but **unsound once generics cross
+    units**: `id<a::b::Point>` and `id<c::d::Point>` would both mangle `id__Point` and
+    `linkonce_odr` would wrongly dedup them. So **2/N must module-qualify the type tag**
+    of a cross-module `Struct`/`Class`/`Enum` in a mono key (e.g. its defining module
+    path, length-prefixed) — tracked as a 2/N decision, not a 1/N concern.
+
+This is a **frozen-ABI change** (ADR 0029 D8): the mangling golden tests + the spec
+doc (`docs/abi-v1.md` §4 gains the module-qualified scheme, and §8 drops the
+"separate-compilation linker" + "length-prefixed mangling" out-of-scope bullets)
+update **in the same commit** as the codegen mangling change.
 
 ### D8. Out of scope (deferred).
 
@@ -218,18 +318,35 @@ units (D10 — a Salsa-backed follow-on, not the correctness MVP).
 
 ### D9. Pipeline / sub-phase split.
 
+The multi-file **surface** (the `use` token + parse, top-level `pub`, the resolve
+module graph + discovery, visibility) **already shipped via the interim Path A merge**.
+The sub-phases below are the **per-unit back end** — true separate compilation — built
+**additively** on top of that surface:
+
 | Sub        | Title                                                            | Risk |
 |------------|------------------------------------------------------------------|------|
-| D.6 (1/N)  | File-as-module surface (`use` token + parse, top-level `pub`) +  | high |
-|            | the resolve module graph + per-unit namespaces + visibility +    |      |
-|            | per-unit type-check against imported signatures + **non-generic** |      |
-|            | separate compilation (per-unit `.o`, module-qualified mangling,   |      |
-|            | extern-symbol cross-module calls + types, deterministic link).    |      |
+| D.6 (1/N)  | **Non-generic** per-unit separate compilation: `resolve_module`  | high |
+|            | (per-unit ID spaces + imported externs, D5.1) + per-unit type-   |      |
+|            | check against imported signatures + per-unit codegen (the 3      |      |
+|            | broken assumptions, D5.2) + module-qualified mangling (D7) +      |      |
+|            | extern-symbol cross-module **fn** calls + cross-module **types**  |      |
+|            | (layout import) + deterministic multi-object link.               |      |
 | D.6 (2/N)  | **Cross-module generics** (per-unit instantiation + `linkonce_odr` | high |
-|            | dedup; `pub` generic bodies cross the boundary) + cross-module    |      |
-|            | trait/impl methods + visibility edge cases.                      |      |
+|            | dedup; `pub` generic bodies cross the boundary; module-qualified  |      |
+|            | type tags, D7) + cross-module trait/impl **methods** + effects +  |      |
+|            | visibility edge cases.                                           |      |
 | D.6 (3/N)  | **Incremental caching** of unchanged units (Salsa-backed) + the   | med  |
 |            | per-unit `.o` reproducibility discipline (extend `repro.rs`).     |      |
+
+**Additive discipline (keep-green).** The per-unit back end lands **alongside** the
+Path A merge, not in place of it: `merge_modules` + `run_build_merged` + `snc merge` +
+the **self-host fixed-point paths** (which compile the merged compiler to one unit) +
+both bootstrap fixed points stay green throughout. The per-unit pipeline is reached via
+an **opt-in** (an internal `--separate` flag / env switch on `snc build`, exercised by
+the D10 phase-go) until it reaches Path A parity at the end of (2/N); then it becomes
+the **default** for `snc build` multi-file and the merge is retired for that path (the
+merge + `source_dump` remain for `snc merge` + the self-host port, which are unaffected
+by this track).
 
 ### D10. Phase-go + fixtures.
 
@@ -382,8 +499,8 @@ add the per-unit `linkonce_odr` generic-dedup story (ADR 0037 (2/N)).
 
 ## Revisit
 
-PROPOSED until D.6 (1/N) lands, then ACCEPTED-WITH-AMENDMENTS as sub-phases close.
-Triggers:
+PROPOSED until the per-unit back end's D.6 (1/N) lands (the multi-file surface already
+shipped via Path A), then ACCEPTED-WITH-AMENDMENTS as the sub-phases close. Triggers:
 - **D6 generics**: if `linkonce_odr` per-unit instantiation proves too costly
   (code bloat / link time), consider a whole-program mono pass that still emits
   per-unit objects (a hybrid), or an explicit-instantiation surface.
@@ -392,16 +509,33 @@ Triggers:
 - **D8**: `use` ergonomics (globs / groups / aliases / re-exports) once a self-host
   unit finds single-item `use` too noisy.
 
-## OPEN DESIGN POINTS (to settle at D.6 (1/N))
+## SETTLED DESIGN POINTS
 
-1. **Import cycles.** Allow (separate compilation resolves them at link) vs. forbid
-   for (1/N) simplicity (a topological module order). → leaning **allow**.
-2. **`abi-v1` amendment vs. `abi-v2`.** Module-qualified mangling as an amendment
-   (preserve single-file bare names as the empty-module case) vs. a clean `abi-v2`
-   bump. → leaning **amendment**.
-3. **Source root.** The entry file's directory (`snc build src/main.sentinel` → root
-   `src/`) vs. an explicit `--root` / a project manifest. → leaning **entry-file
-   directory** for the MVP, manifest deferred (D8).
-4. **`use` path resolution.** `use a::b::c` = item `c` in module `a::b` (file
-   `a/b.sentinel`). Confirm the last-segment-is-the-item rule (vs. allowing
-   module-path imports). → leaning **last segment is the item**.
+The four original open points are **settled** (owner-confirmed):
+
+1. **Import cycles → ALLOW.** Separate compilation resolves cross-unit references at
+   link time, so a `use` cycle is not a layering problem; discovery uses a `visited`
+   set. (Realized in `discover_module_graph`.)
+2. **`abi-v1` AMENDMENT, not `abi-v2`.** Module-qualified mangling preserves every
+   single-file symbol as the empty-module-path case (D7), so no existing artifact's
+   observable ABI changes — an amendment.
+3. **Source root → the entry file's directory.** `snc build src/main.sentinel` → root
+   `src/`; an explicit `--root` / manifest is deferred (D8).
+4. **`use a::b::c` → item `c` in module `a::b`.** Last segment is the item; module-path
+   imports are deferred (D8).
+
+Settled in **this revision** (the per-unit back end):
+
+5. **Mangling scheme (D7) → PINNED:** `_S` + length-prefixed module segments +
+   length-prefixed item; empty module path → the bare item (single-file unchanged);
+   `main` / `sentinel_*` exempt; `_S` reserved.
+6. **Per-unit ID model (D5.1) → the extern-fn-in-FnId-space model** (an imported fn =
+   an extern `FnSignature` + `link_symbol`, no body; no new expr variant; imported
+   types are layout-only, no symbol).
+7. **Additive gating (D9) → opt-in `--separate` until (2/N) parity, then default;** the
+   Path A merge + the self-host fixed-point paths stay green throughout.
+
+Deferred to (2/N) (flagged here so it is not forgotten):
+
+8. **Cross-module type tags in mono keys** must be module-qualified (D7 last bullet) —
+   else same-named cross-module types `linkonce_odr`-dedup unsoundly.

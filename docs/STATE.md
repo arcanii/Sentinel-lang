@@ -14,7 +14,21 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
+Last updated: **▶ NEW TRACK — the per-unit SEPARATE-COMPILATION back end (ADR 0037 (a)).
+ADR 0037 FLIPPED toward the per-unit (1/N): D7 module-qualified mangling (`_S` + a
+length-prefixed module segment per path segment + a length-prefixed item; **empty module
+path → the bare item**, so single-file ABI is byte-unchanged → an AMENDMENT, not abi-v2)
++ the per-unit ID model (D5.1 — extern-fn-in-FnId-space: an imported fn is an extern
+`FnSignature` + a module-qualified `link_symbol`, no body, NO new expr variant; imported
+types are layout-only, no symbol) + the codegen-per-unit boundary (D5.2 — the 3 whole-
+program assumptions to break: whole-program `collect_mono_instantiations`, the single
+`fns: HashMap<FnId, FunctionValue>`, and `self.fns.get(&id)` call resolution) are all
+PINNED — a frozen-ABI decision settled BEFORE code. Built ADDITIVELY: the Path A merge +
+`snc merge` + BOTH bootstrap fixed points stay green; the per-unit path is opt-in
+(`--separate`) until (2/N) parity, then becomes the default for `snc build`. NEXT: code
+D.6 (1/N) — the non-generic vertical slice (`resolve_module` + per-unit codegen +
+deterministic multi-object link + the D10 two-module phase-go). Docs-only checkpoint;
+no code yet (ADR-first gate). ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and
 `cc`-ing that `.ll` yields `scg'` which re-emits the same `.ll` byte-for-byte (a true fixed
