@@ -27,8 +27,14 @@ PINNED — a frozen-ABI decision settled BEFORE code. Built ADDITIVELY: the Path
 `snc merge` + BOTH bootstrap fixed points stay green; the per-unit path is opt-in
 (`--separate`) until (2/N) parity, then becomes the default for `snc build`. NEXT: code
 D.6 (1/N) — the non-generic vertical slice (`resolve_module` + per-unit codegen +
-deterministic multi-object link + the D10 two-module phase-go). Docs-only checkpoint;
-no code yet (ADR-first gate). ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
+deterministic multi-object link + the D10 two-module phase-go). ✅ CODE STEP 1 DONE: the
+D7 mangling primitive `mangle_qualified(module_path, item)` + the `abi_v1_mangling_qualified_is_stable`
+golden test + the `docs/abi-v1.md` §4/§7/§8 amendment landed BEHAVIOR-PRESERVINGLY (`671b012`):
+wired at the free-fn site with an EMPTY module path (== the bare name), so single-file ABI is
+byte-unchanged — the pre-existing `abi_v1_mangling_is_stable` + the selfhost differentials + BOTH
+bootstrap fixed points stay byte-identical (four-check green, 1498 tests). NEXT code = the cohesive
+per-unit vertical slice (`resolve_module` + per-unit codegen threading the module path + driver
+`--separate` orchestration + the D10 two-module phase-go). ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and
 `cc`-ing that `.ll` yields `scg'` which re-emits the same `.ll` byte-for-byte (a true fixed

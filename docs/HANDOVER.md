@@ -2291,15 +2291,31 @@ For pasting into a fresh chat to bootstrap context:
     `fns: HashMap<FnId, FunctionValue>`→per-unit, externs DECLARED; `self.fns.get(&id)`→mechanically
     unchanged (returns a declaration for externs, the linker binds it). Built ADDITIVELY (opt-in `--separate`
     until (2/N) parity, then default; the Path A merge + `snc merge` + BOTH bootstrap fixed points stay
-    green). ▶ **NEXT (D.6 1/N): CODE the non-generic vertical slice** — `resolve_module` (per-unit
-    FnId/StructId spaces + imported externs) → per-unit codegen (thread the module path into
-    `compile_to_object`; mangle local defs, declare imported externs) → the driver drives N modules → N `.o`
-    → path-sorted `cc` link → the **D10 two-module phase-go** (`main.sentinel` `use`s a `pub` fn + type from
-    `util/math.sentinel` → TWO `.o` linked → a computed exit code) + ui fixtures for
-    `ModuleNotFound`/`PrivateItem`. ⚠ THE FIRST CODE CHUNK THAT TOUCHES THE MANGLING must land the golden
-    test + the `docs/abi-v1.md` §4/§8 amendment IN THE SAME COMMIT (the C5 D7 discipline) + run the FULL
-    four-check incl. the selfhost differentials + both fixed points (byte-identity confirms the
-    empty-module-path path is unchanged). Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
+    green). ✅ **CODE STEP 1 DONE: the D7 mangling primitive** (`671b012`, feat) — `mangle_qualified(module_path,
+    item)` (empty path → the bare item; non-empty → `_S` + length-prefixed module segs + length-prefixed item)
+    + the `abi_v1_mangling_qualified_is_stable` golden test + the `docs/abi-v1.md` §4/§7/§8 amendment, all in
+    ONE commit (the C5 D7 discipline). WIRED BEHAVIOR-PRESERVINGLY at the free-fn site with an EMPTY module
+    path (== `signature.name`), so single-file ABI is byte-unchanged: the pre-existing `abi_v1_mangling_is_stable`
+    + the selfhost differentials + BOTH fixed points stay byte-identical (four-check green, 1498 tests). Not an
+    oracle-moving change → no selfhost mirror needed yet. ▶ **NEXT (D.6 1/N): the COHESIVE per-unit vertical
+    slice** (resolve + codegen + driver together — `use` does not RUN until all land):
+    (a) **`resolve_module(program, imports)`** in sentinel-resolve — per-unit FnId/StructId spaces; an imported
+    `pub fn` = an extern `FnSignature` (imported sig + `is_extern` + **`origin: Vec<String>`** [its module path]
+    + no body); imported types = layout-only. `resolve()` becomes `resolve_module(program, &[])` (byte-unchanged
+    single-file). ⚠ DESIGN REFINEMENT (vs the ADR impl-note's `link_symbol: String`): carry the **`origin`
+    module path, NOT a pre-mangled string** — codegen owns ALL mangling (one source of truth), computing a LOCAL
+    def's symbol = `mangle_qualified(self.module_path, name)` and an EXTERN decl's = `mangle_qualified(&sig.origin,
+    name)`. Avoids a resolve→codegen mangling dependency.
+    (b) **per-unit codegen** — thread `module_path: &[String]` into `compile_to_object` (empty = today's path);
+    at the free-fn site pass the real path for LOCAL fns and DECLARE externs (external linkage,
+    `mangle_qualified(&origin, name)`, no body); `main` stays bare `main`.
+    (c) **driver** — a pub-signature PRE-PASS builds the exports table keyed by `(module_path, item)` from each
+    module's `pub` items (signatures only — cheap), then drives each module
+    `resolve_module → check → effect/borrow/ct → hir → compile_to_object` → N `.o` → path-sorted `cc` link (entry
+    owns `main`), behind opt-in `--separate`; keep `run_build_merged` the DEFAULT until (2/N) parity.
+    (d) **D10 phase-go**: `main.sentinel` `use`s a `pub` fn + type from `util/math.sentinel` → TWO `.o` linked →
+    a computed exit code; + ui fixtures for `ModuleNotFound`/`PrivateItem`. Each chunk: four-check incl. the
+    selfhost differentials + both fixed points stays green (additive — the merge path is untouched). Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;
     `collect_mono_instantiations` `:1738`; `mangle_mono_name`/`mangle_type` `:2049`/`:2067`; golden test
