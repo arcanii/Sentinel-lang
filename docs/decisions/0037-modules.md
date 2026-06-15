@@ -182,7 +182,13 @@ B needs only A's *declaration* imported (B agrees on layout) — no link symbol.
 
   - **One LLVM module per unit.** Codegen runs **per module**, emitting that module's
     `pub` + private items into its own LLVM module → its own `.o`. The current
-    single-`"sentinel"`-module path becomes the degenerate one-module case.
+    single-`"sentinel"`-module path becomes the degenerate one-module case. Each unit's
+    object is emitted **independently** (inkwell `TargetMachine::write_to_file` per
+    `Module`) — **NOT** `llvm-link`-merged into one IR module before object emission:
+    that IR-merge would be the Path A whole-program model wearing a modular front-end
+    (no independent reproducibility, no incremental rebuild). Cross-unit references are
+    LLVM **external** symbols resolved by the **native linker**, which is what keeps the
+    units independently reproducible + (3/N) incrementally rebuildable.
   - **Cross-module calls → external symbols.** A call to an imported `a::foo` lowers
     to a call to `foo`'s **module-qualified symbol** (D7), **declared external**
     (declaration only) in the calling unit; A's unit **defines + exports** it. The
