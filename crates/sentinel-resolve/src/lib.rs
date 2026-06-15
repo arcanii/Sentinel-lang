@@ -210,6 +210,15 @@ pub struct FnSignature {
     /// `true` iff this is the runtime `print` symbol. Codegen uses
     /// this to map the call to `sentinel_print`.
     pub is_runtime: bool,
+    /// Phase D.6 / ADR 0037 D5.1: `Some(module_path)` iff this fn is an
+    /// EXTERN imported from another module (separate compilation) — its
+    /// body lives in the defining unit, and this unit only *declares* it.
+    /// `None` for local fns + builtins. The path is the **defining**
+    /// module's, so codegen emits the external symbol
+    /// `mangle_qualified(origin, name)` (D7). Single-file / Path-A builds
+    /// pass `imports == []`, so this is never set there — the field is
+    /// inert and the FnId space / output is byte-identical.
+    pub extern_origin: Option<Vec<String>>,
 }
 
 /// A generic type parameter at resolve time per ADR 0016 D9.
@@ -1939,25 +1948,62 @@ fn rewrite_pattern(pat: &mut Pattern, r: &Renamer) {
     }
 }
 
-/// Resolve a [`Program`] to a [`ResolvedProgram`]. Fails fast on
-/// the first error encountered, matching the C0 codegen pass's
-/// existing diagnostic shape. Multi-error accumulation is a future
-/// concern.
-///
-/// Order: structs are registered first (so fn signatures can
-/// reference struct types in their TypeExprs), then fns, then fn
-/// bodies.
+/// Phase D.6 / ADR 0037 D5.1: a `pub fn` imported from another module
+/// (separate compilation). [`resolve_module`] registers each one as an
+/// EXTERN in this module's `FnId` space (a signature + `fn_table` entry,
+/// no body) so a call to its name resolves + arity-checks like any local
+/// call; `origin` (the **defining** module's path) flows to codegen as
+/// the external symbol. The full *typed* signature (param/return `Type`s)
+/// is supplied separately at the types layer — resolve only needs the
+/// name + arity here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedFn {
+    /// The imported item's name, as referenced in the importing module.
+    pub name: String,
+    /// Formal-parameter count (for call arity-checking).
+    pub arity: usize,
+    /// Generic type-parameter count (ADR 0016 D1).
+    pub type_params_count: usize,
+    /// The defining module's path (`["util", "math"]`), for D7 mangling.
+    pub origin: Vec<String>,
+    /// The `use` declaration's span, for collision diagnostics.
+    pub span: Span,
+}
+
+/// Resolve a single-file [`Program`] to a [`ResolvedProgram`] — the
+/// `imports == []` case of [`resolve_module`]. Single-file / Path-A
+/// builds use this and are byte-identical to before the per-unit model.
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
-    // Phase D.6 (1/N) / ADR 0037: the front-end parses top-level `use`
-    // imports, but the module graph + multi-file discovery that resolve
-    // them land in the D.6 (1/N) resolve increment. Until then, reject a
-    // non-empty `use` set so single-file programs (no `use`) are
-    // unaffected and multi-file ones fail honestly rather than silently
-    // dropping the import.
-    if let Some(first_use) = program.uses.first() {
-        return Err(ResolveError::UseDeclNotYet {
-            span: to_source_span(&first_use.span),
-        });
+    resolve_module(program, &[])
+}
+
+/// Resolve a [`Program`] to a [`ResolvedProgram`] against its imported
+/// `pub fn`s (`imports`) — the per-unit resolve of ADR 0037 D5.1.
+/// Imported fns are registered as EXTERNs in this module's `FnId` space
+/// (after builtins, before own fns); a single-file program passes
+/// `imports == []`. Fails fast on the first error encountered, matching
+/// the C0 codegen pass's existing diagnostic shape. Multi-error
+/// accumulation is a future concern.
+///
+/// Order: structs are registered first (so fn signatures can reference
+/// struct types in their TypeExprs), then imported externs, then own
+/// fns, then fn bodies.
+pub fn resolve_module(
+    program: &Program,
+    imports: &[ImportedFn],
+) -> Result<ResolvedProgram, ResolveError> {
+    // Phase D.6 / ADR 0037: the per-unit driver (D5.1) resolves each `use`
+    // to an `imports` entry (an extern, registered below), so a `use` is
+    // expected when `imports` is non-empty. Only the single-file path
+    // (`imports == []`) still rejects a stray `use`: it has no module
+    // graph to resolve it. Single-file programs have no `use` and are
+    // unaffected; the Path-A merge clears `uses` before calling `resolve`.
+    if imports.is_empty() {
+        if let Some(first_use) = program.uses.first() {
+            return Err(ResolveError::UseDeclNotYet {
+                span: to_source_span(&first_use.span),
+            });
+        }
     }
 
     let mut next_fn_id: u32 = 0;
@@ -2361,6 +2407,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 0,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     let unwrap_or_sig = FnSignature {
@@ -2372,6 +2419,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 1,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     let is_some_sig = FnSignature {
@@ -2383,6 +2431,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 1,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     let len_sig = FnSignature {
@@ -2394,6 +2443,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 1,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     // D.2 / ADR 0033 D5: the byte-string builtins. Non-generic
@@ -2407,6 +2457,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 0,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     let u8_to_i64_sig = FnSignature {
@@ -2417,6 +2468,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 0,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     let i64_to_u8_sig = FnSignature {
@@ -2427,6 +2479,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 0,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     // D.3 / ADR 0034 D5: the growable-collection builtins. Generic over
@@ -2441,6 +2494,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 1,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     let push_sig = FnSignature {
@@ -2451,6 +2505,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 1,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     // D.3 (2/N) / ADR 0034 D5: pop + the Vec->array bridge. Both generic
@@ -2463,6 +2518,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 1,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     let vec_to_array_sig = FnSignature {
@@ -2473,6 +2529,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 1,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     // D.4 / ADR 0035 D4: file-I/O builtins. Non-generic (concrete `[u8]`
@@ -2485,6 +2542,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 0,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     let write_file_sig = FnSignature {
@@ -2495,6 +2553,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 0,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
     let print_bytes_sig = FnSignature {
@@ -2505,6 +2564,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
         type_params_count: 0,
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     };
     next_fn_id += 1;
 
@@ -2529,6 +2589,36 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
     fn_table.insert("write_file".to_string(), WRITE_FILE_FN_ID);
     fn_table.insert("print_bytes".to_string(), PRINT_BYTES_FN_ID);
 
+    // Phase D.6 / ADR 0037 D5.1: register each imported `pub fn` as an
+    // EXTERN in this module's FnId space — after builtins, before own fns.
+    // An extern is a signature + `fn_table` entry with NO body, so a call
+    // to its name resolves to its FnId and arity-checks like any local
+    // call; `extern_origin` (the defining module's path) flows to codegen
+    // as the external symbol `mangle_qualified(origin, name)` (D7). A
+    // single-file / Path-A build passes `imports == []`, so this loop is a
+    // no-op and the FnId space + resolved output are byte-identical.
+    for imp in imports {
+        if fn_table.contains_key(&imp.name) {
+            return Err(ResolveError::RedefinedFunction {
+                name: imp.name.clone(),
+                span: to_source_span(&imp.span),
+            });
+        }
+        let id = FnId(next_fn_id);
+        next_fn_id += 1;
+        signatures.push(FnSignature {
+            id,
+            name: imp.name.clone(),
+            name_span: None,
+            arity: imp.arity,
+            type_params_count: imp.type_params_count,
+            is_main: false,
+            is_runtime: false,
+            extern_origin: Some(imp.origin.clone()),
+        });
+        fn_table.insert(imp.name.clone(), id);
+    }
+
     // Pass 1: collect every fn into the table.
     for fn_def in &program.fns {
         if fn_table.contains_key(&fn_def.name) {
@@ -2548,6 +2638,7 @@ pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
             type_params_count: fn_def.type_params.len(),
             is_main,
             is_runtime: false,
+            extern_origin: None,
         });
         fn_table.insert(fn_def.name.clone(), id);
     }
@@ -4586,6 +4677,78 @@ mod tests {
         assert!(matches!(err, ResolveError::UseDeclNotYet { .. }), "got {err:?}");
         // No `use` → resolves fine (regression guard).
         let _ = resolve_ok("fn main() -> i64 { 0 }");
+    }
+
+    // ----- D.6 / ADR 0037 D5.1: resolve_module + imported externs -----
+
+    #[test]
+    fn resolve_module_registers_imported_fn_as_extern() {
+        // An imported `pub fn` becomes an EXTERN in this module's FnId
+        // space (after the 14 builtins 0..=13, before own fns); a call to
+        // it resolves like any local call, and it carries its origin.
+        let main =
+            parse("use util::math::add; fn main() -> i64 { add(1, 2) }").expect("parse");
+        let imports = vec![ImportedFn {
+            name: "add".to_string(),
+            arity: 2,
+            type_params_count: 0,
+            origin: vec!["util".to_string(), "math".to_string()],
+            span: 0..0,
+        }];
+        let rp = resolve_module(&main, &imports).expect("resolve_module");
+
+        // Extern `add` = FnId(14) (right after builtins), marked extern;
+        // own `main` follows at FnId(15).
+        let add_sig = rp.fn_signatures.iter().find(|s| s.name == "add").expect("add sig");
+        assert_eq!(add_sig.id, FnId(14));
+        assert_eq!(add_sig.arity, 2);
+        assert!(!add_sig.is_runtime);
+        assert_eq!(
+            add_sig.extern_origin,
+            Some(vec!["util".to_string(), "math".to_string()])
+        );
+        let main_sig = rp.fn_signatures.iter().find(|s| s.name == "main").expect("main sig");
+        assert_eq!(main_sig.id, FnId(15));
+        assert_eq!(main_sig.extern_origin, None);
+
+        // The extern has NO body — only the one own fn (`main`) is resolved.
+        assert_eq!(rp.fns.len(), 1);
+    }
+
+    #[test]
+    fn use_gate_fires_only_without_imports() {
+        // The `UseDeclNotYet` gate fires for a single-file resolve (no
+        // imports) but is bypassed when the per-unit driver supplies the
+        // matching imports.
+        let main =
+            parse("use util::math::add; fn main() -> i64 { add(1, 2) }").expect("parse");
+        assert!(matches!(resolve(&main), Err(ResolveError::UseDeclNotYet { .. })));
+        let imports = vec![ImportedFn {
+            name: "add".to_string(),
+            arity: 2,
+            type_params_count: 0,
+            origin: vec!["util".to_string(), "math".to_string()],
+            span: 0..0,
+        }];
+        assert!(resolve_module(&main, &imports).is_ok());
+    }
+
+    #[test]
+    fn imported_fn_colliding_with_builtin_rejected() {
+        // An import whose name shadows a builtin (or an own fn) is a
+        // RedefinedFunction — the existing collision guard covers externs.
+        let main = parse("fn main() -> i64 { 0 }").expect("parse");
+        let imports = vec![ImportedFn {
+            name: "print".to_string(),
+            arity: 1,
+            type_params_count: 0,
+            origin: vec!["x".to_string()],
+            span: 0..0,
+        }];
+        assert!(matches!(
+            resolve_module(&main, &imports),
+            Err(ResolveError::RedefinedFunction { .. })
+        ));
     }
 
     // ----- D.6 (1/N) / ADR 0037 D3: cross-module import visibility -----
