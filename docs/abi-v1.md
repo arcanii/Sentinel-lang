@@ -155,11 +155,48 @@ External symbol names for emitted functions. Source of truth:
 `secret T` participates in the monomorphisation key, so `id<i64>` and
 `id<secret i64>` get **distinct** symbols (`id__i64` vs `id__sec_i64`).
 
-**Known `abi-v2` soft-spot:** the scheme is not length-prefixed, so
-exotic identifiers could in principle collide (e.g. `a__b` vs a type tag
-producing `a_` + `_b`). No collision exists in the 1.0 single-file
-surface (user-chosen identifiers, no separate compilation); a
-length-prefixed scheme is a candidate `abi-v2` hardening (ADR 0029 D8).
+**Module-qualified symbols (D.6 / ADR 0037 D7 — an `abi-v1` amendment).**
+Separate compilation makes every cross-unit symbol part of the ABI, so a
+symbol must encode its **module path** unambiguously. The unit of mangling
+is `(module_path, item)`, where `item` is the intra-module symbol above (a
+free fn's source name, a `mangle_mono_name` instance, a class/impl method):
+
+- **Empty module path** — a single-file program (one module, no path) →
+  the **bare `item`, byte-for-byte**. Every single-file artifact's symbols
+  are therefore exactly the rows above, **unchanged** by this amendment
+  (which is why it is an amendment, not an `abi-v2` bump).
+- **Non-empty module path** → `_S` + a length-prefixed segment per
+  module-path segment + a length-prefixed `item`, each
+  `<decimal-byte-len><bytes>` (Itanium-ish source-name encoding); `item`
+  is wrapped as **one** length-prefixed blob. E.g. module `util::math` fn
+  `add` → `_S4util4math3add`; module `lex::token` method `Token::new` (item
+  `Token__new`) → `_S3lex5token10Token__new`; module `parse` method
+  `Token::new` → `_S5parse10Token__new` (distinct module prefix → never
+  collides). The encoding is a prefix-free code over `[seg…, item]`, so
+  distinct `(module, item)` pairs never collide; decoding is unambiguous
+  because no Sentinel identifier (nor any type tag) begins with a digit.
+- **Exempt:** the entry module's `main` (the C entry) and the `sentinel_*`
+  runtime symbols are never module-qualified. **`_S` is reserved** for
+  Sentinel-emitted symbols (like `sentinel_*`); user code must not rely on
+  a `_S*` name surviving.
+
+Source of truth: `mangle_qualified` in `sentinel-codegen/src/lib.rs`
+(realised per unit by the separate-compilation back end, ADR 0037 (a);
+single-file / Path-A builds are the empty-module-path case, so they emit
+the rows above verbatim). A cross-module **type** carries no symbol (units
+agree on layout — ADR 0037 D4), so only fns / methods are module-qualified.
+⚠ A cross-module **type tag inside a mono key** must also become
+module-qualified once generics cross units (ADR 0037 (2/N) — not yet
+realised), else same-named cross-module types would `linkonce_odr`-dedup
+unsoundly.
+
+**Intra-module `__` soft-spot (unchanged):** the *item* scheme is not
+length-prefixed, so exotic identifiers could in principle collide *within*
+a module (e.g. `a__b` vs a type tag producing `a_` + `_b`). No collision
+exists in the 1.0 surface (user-chosen identifiers); the item is wrapped
+verbatim as the length-prefixed blob above, so it never affects
+*cross-module* uniqueness (the module path is fully length-prefixed). Fully
+length-prefixing the item is a candidate `abi-v2` hardening (ADR 0029 D8).
 
 ---
 
@@ -224,8 +261,9 @@ A drift in any layout / mangling / symbol must turn a test **red**:
   asserts in `sentinel-runtime`'s test module
   (`abi_v1_*_layout_is_stable`).
 - **Name mangling (§4)** — golden-string asserts on `mangle_type` /
-  `mangle_mono_name` in `sentinel-codegen`'s test module
-  (`abi_v1_mangling_*`).
+  `mangle_mono_name` / `mangle_qualified` (the module-qualified D7 scheme)
+  in `sentinel-codegen`'s test module (`abi_v1_mangling_*`, incl.
+  `abi_v1_mangling_qualified_is_stable`).
 - **Runtime-symbol set (§5)** — a `sentinel-runtime` test that takes the
   address of every documented symbol (`abi_v1_runtime_symbol_set`), so a
   rename/removal is a compile error on the definition side.
@@ -241,12 +279,15 @@ A drift in any layout / mangling / symbol must turn a test **red**:
 
 ## 8. Out of scope (`abi-v2` / post-1.0)
 
-- The separate-compilation **linker + module surface** (`mod`/`use`,
-  per-unit objects keyed to `abi-v1`) — ADR 0025 D9, post-1.0. `abi-v1`
-  defines the *contract*; it does not ship the units.
+- The separate-compilation **linker** for true per-unit objects — **in
+  progress** (ADR 0037 (a)). The `use`/`pub` module **surface** shipped
+  (D.6), and the **module-qualified mangling** that keys cross-unit symbols
+  is now **§4** (an `abi-v1` amendment). Still out of scope here: per-unit
+  `linkonce_odr` generic dedup + incremental caching (ADR 0037 (2/N)/(3/N)).
 - Cross-architecture beyond x86-64/aarch64 (ADR 0025 D12).
 - A **C-header generator** / ABI-compatibility checker for external FFI.
 - ABI **migration tooling** (`abi-v1`→`v2` shims).
-- A **length-prefixed mangling** scheme (§4 soft-spot).
+- **Fully** length-prefixing the *item* portion of a symbol (the §4
+  intra-module soft-spot). The module path is already length-prefixed (§4).
 - Arrays-of-secrets layout (would add a `secret`-carrying layout; a
   deferred surface).

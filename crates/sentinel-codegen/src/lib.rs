@@ -382,7 +382,13 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
             llvm_basic_type(&context, signature.return_type, &struct_types, &generic_struct_types, &class_types, &secrets)
                 .fn_type(&param_types, false)
         };
-        let fn_value = module.add_function(&signature.name, fn_type, None);
+        // Phase D.6 / ADR 0037 D7: the LLVM symbol is module-qualified.
+        // A single-file program (the only case until the per-unit back
+        // end) is the empty-module-path case → the bare source name,
+        // byte-for-byte (the `abi-v1` amendment preserves single-file
+        // symbols). The per-unit driver will thread the real module path.
+        let symbol = mangle_qualified(&[], &signature.name);
+        let fn_value = module.add_function(&symbol, fn_type, None);
         fns.insert(signature.id, fn_value);
     }
 
@@ -2039,6 +2045,45 @@ fn walk_expr_for_mono(
             }
         }
     }
+}
+
+/// Phase D.6 / ADR 0037 D7 — the module-qualified `abi-v1` amendment.
+/// Wrap an item's intra-module symbol (`item`) with its `module_path`
+/// to form the cross-unit-unique external symbol.
+///
+/// - **Empty `module_path`** (a single-file program — the only case
+///   until the per-unit separate-compilation back end lands) → the
+///   bare `item`, byte-for-byte. Every single-file symbol is therefore
+///   exactly what `abi-v1` emitted before this amendment, which is why
+///   D7 is an *amendment*, not an `abi-v2` bump.
+/// - **Non-empty** → `_S` + a length-prefixed segment per module-path
+///   segment + a length-prefixed `item`, each `<decimal-byte-len><bytes>`
+///   (Itanium-ish source-name encoding). The encoding is a prefix-free
+///   code over the segment sequence `[seg…, item]`, so distinct
+///   `(module, item)` pairs never collide; decoding is unambiguous
+///   because no Sentinel identifier (nor any [`mangle_type`] tag) begins
+///   with a digit. `_S` is reserved for Sentinel-emitted symbols.
+///
+/// `item` is the existing `abi-v1` §4 symbol — a free fn's source name,
+/// [`mangle_mono_name`], or a class/impl method name — wrapped here as
+/// ONE length-prefixed blob, so its internal `__` structure is unchanged
+/// (this amendment closes the *module* collision surface, not the
+/// intra-module one). The entry module's `main` and the `sentinel_*`
+/// runtime symbols are passed through by their callers and never reach
+/// this function with a non-empty path.
+fn mangle_qualified(module_path: &[String], item: &str) -> String {
+    if module_path.is_empty() {
+        return item.to_string();
+    }
+    let mut s = String::with_capacity(item.len() + 8 * module_path.len() + 8);
+    s.push_str("_S");
+    for seg in module_path {
+        s.push_str(&seg.len().to_string()); // byte length (identifiers are ASCII)
+        s.push_str(seg);
+    }
+    s.push_str(&item.len().to_string());
+    s.push_str(item);
+    s
 }
 
 /// C1.7.5 / ADR 0016 D7: produce a mangled LLVM symbol name for a
@@ -7775,6 +7820,44 @@ mod tests {
         );
         // Zero type-args → the bare base name (a non-generic fn).
         assert_eq!(mangle_mono_name("main", &[], &typed), "main");
+    }
+
+    // ===== D.6 / ADR 0037 D7: module-qualified mangling (abi-v1 amendment) =====
+    //
+    // The frozen scheme pins the cross-unit symbol surface (docs/abi-v1.md §4).
+    // A drift here is a deliberate ABI change and must turn this red.
+    #[test]
+    fn abi_v1_mangling_qualified_is_stable() {
+        // Empty module path → the bare item, byte-for-byte: a single-file
+        // program's symbols are UNCHANGED by the amendment (why it is an
+        // amendment, not abi-v2). `main` / runtime names pass through here too.
+        assert_eq!(mangle_qualified(&[], "double"), "double");
+        assert_eq!(mangle_qualified(&[], "id__i64"), "id__i64");
+        assert_eq!(mangle_qualified(&[], "main"), "main");
+
+        // Non-empty → `_S` + <len><seg> per module segment + <len><item>.
+        assert_eq!(
+            mangle_qualified(&["util".to_string(), "math".to_string()], "add"),
+            "_S4util4math3add"
+        );
+        // The item keeps its intra-module `__` scheme as ONE length-prefixed
+        // blob: `Token__new` is 10 bytes → `10Token__new`.
+        assert_eq!(
+            mangle_qualified(&["lex".to_string(), "token".to_string()], "Token__new"),
+            "_S3lex5token10Token__new"
+        );
+        // Distinct module prefixes never collide (the D7 requirement):
+        // `parse::Token::new` vs `lex::token::Token::new` above.
+        assert_eq!(
+            mangle_qualified(&["parse".to_string()], "Token__new"),
+            "_S5parse10Token__new"
+        );
+        // A mono instance under a module: the type-arg tag rides inside the
+        // item blob (`id__i64` is 7 bytes → `7id__i64`).
+        assert_eq!(
+            mangle_qualified(&["util".to_string()], "id__i64"),
+            "_S4util7id__i64"
+        );
     }
 
     // ===== C5 D7 (2/N) / ADR 0029: abi-v1 Type-layout stability =====
