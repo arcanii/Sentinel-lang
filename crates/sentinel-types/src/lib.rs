@@ -2059,6 +2059,12 @@ pub struct TypedFnSignature {
     pub effect_row: Vec<EffectId>,
     pub is_main: bool,
     pub is_runtime: bool,
+    /// Phase D.6 / ADR 0037 D5.1: `Some(module_path)` iff this fn is an
+    /// EXTERN imported from another module — propagated from the resolved
+    /// signature so codegen declares it external as
+    /// `mangle_qualified(origin, name)` (D7). `None` for local fns +
+    /// builtins; inert in single-file / Path-A builds.
+    pub extern_origin: Option<Vec<String>>,
 }
 
 /// C3 / ADR 0019 D4 (C3.2): a top-level effect declaration after
@@ -3281,15 +3287,53 @@ pub enum TypeError {
 /// Fails fast on the first error, matching the C0/C1.1 fail-fast
 /// pattern of lex / parse / resolve.
 ///
+/// Phase D.6 / ADR 0037 D5.1: an imported `pub fn`'s **typed** signature
+/// (the types half of the per-unit extern model). The driver supplies one
+/// per extern, derived from the defining module's checked signature;
+/// [`check_module`] builds the extern's `TypedFnSignature` from it. The
+/// resolved signature (name + arity + `extern_origin`) comes via the
+/// `ResolvedProgram`; this carries the param/return `Type`s resolve does
+/// not have. (1/N is non-generic + primitive-signature; cross-module type
+/// args are a (2/N) concern.)
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypedImportedFn {
+    /// The imported fn's name (matches the resolved extern signature).
+    pub name: String,
+    /// Parameter types, in order.
+    pub param_types: Vec<Type>,
+    /// Return type.
+    pub return_type: Type,
+    /// The fn's effect row (sorted-dedup EffectIds; empty for pure fns).
+    pub effect_row: Vec<EffectId>,
+}
+
+/// Type-check a single-file [`ResolvedProgram`] — the `imports == []` case
+/// of [`check_module`]. Single-file / Path-A builds use this and are
+/// byte-identical to before the per-unit model.
+pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
+    check_module(program, &[])
+}
+
+/// Type-check a [`ResolvedProgram`] against its imported externs'
+/// **typed** signatures (`imports`) — the per-unit type-check of ADR 0037
+/// D5.1. Each imported extern (a resolved signature with `extern_origin`
+/// set, no body) gets a `TypedFnSignature` built from its matching
+/// `imports` entry, so cross-module calls type-check against the imported
+/// signature; a single-file program passes `imports == []`.
+///
 /// Order:
 ///   0. Build struct table (name → StructId) from resolved structs.
 ///   1. Resolve every struct's field types into `TypedStructDecl`s
 ///      — UnknownType fires here for stale references.
 ///   2. Detect recursive structs and emit RecursiveStruct on cycle.
 ///   3. Resolve fn signatures' param + return types (struct names
-///      now resolve cleanly against the struct table).
-///   4. Type-check each fn body.
-pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
+///      now resolve cleanly against the struct table), plus the imported
+///      externs' typed signatures.
+///   4. Type-check each fn body (externs have no body).
+pub fn check_module(
+    program: &ResolvedProgram,
+    imports: &[TypedImportedFn],
+) -> Result<TypedProgram, TypeError> {
     // Pass 0: struct name table + type-param counts + class name
     // table. Both tables must exist before Pass 1 so field /
     // signature type-expressions can reference either.
@@ -3510,6 +3554,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     let unwrap_or_sig = &program.fn_signatures[1];
     typed_signatures.push(TypedFnSignature {
@@ -3527,6 +3572,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     let is_some_sig = &program.fn_signatures[2];
     typed_signatures.push(TypedFnSignature {
@@ -3540,6 +3586,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     let len_sig = &program.fn_signatures[3];
     typed_signatures.push(TypedFnSignature {
@@ -3553,6 +3600,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     // D.2 / ADR 0033 D5: the byte-string builtins — non-generic
     // concrete signatures (no type_params). Calls type-check at D.2
@@ -3569,6 +3617,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     let u8_to_i64_sig = &program.fn_signatures[5];
     typed_signatures.push(TypedFnSignature {
@@ -3582,6 +3631,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     let i64_to_u8_sig = &program.fn_signatures[6];
     typed_signatures.push(TypedFnSignature {
@@ -3595,6 +3645,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     // D.3 / ADR 0034 D5: the growable-collection builtins. Generic over
     // the element T; typed through the uniform generic-call inference
@@ -3617,6 +3668,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     let push_sig = &program.fn_signatures[8];
     let push_mut_vec_ref =
@@ -3631,6 +3683,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     // D.3 (2/N) / ADR 0034 D5: `pop<T>(&mut Vec<T>) -> T` and
     // `vec_to_array<T>(Vec<T>) -> [T]`. Both flow the uniform generic
@@ -3648,6 +3701,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     let vec_to_array_sig = &program.fn_signatures[10];
     typed_signatures.push(TypedFnSignature {
@@ -3660,6 +3714,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     // D.4 / ADR 0035 D4/D7: the file-I/O builtins — non-generic concrete
     // `[u8]` signatures (no type_params), like `str_eq`. Paths + content
@@ -3677,6 +3732,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     let write_file_sig = &program.fn_signatures[12];
     typed_signatures.push(TypedFnSignature {
@@ -3689,6 +3745,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
     // D.4 (2/N) / ADR 0035 D4: `print_bytes([u8]) -> i64` — write a byte
     // array to stdout (the byte/string companion to `print`).
@@ -3703,6 +3760,7 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
         effect_row: vec![],
         is_main: false,
         is_runtime: true,
+        extern_origin: None,
     });
 
     for fn_def in &program.fns {
@@ -3770,7 +3828,40 @@ pub fn check(program: &ResolvedProgram) -> Result<TypedProgram, TypeError> {
             effect_row,
             is_main: resolved_sig.is_main,
             is_runtime: resolved_sig.is_runtime,
+            extern_origin: resolved_sig.extern_origin.clone(),
         });
+    }
+
+    // Phase D.6 / ADR 0037 D5.1: build a TypedFnSignature for each imported
+    // EXTERN (a resolved signature with `extern_origin` set, no body). Its
+    // param/return Types come from the matching `typed_imports` entry (the
+    // driver supplies them from the defining module's checked signature);
+    // codegen later declares it external. `imports == []` (single-file /
+    // Path-A) → no externs → byte-identical. The `sort_by_key` below places
+    // each by its FnId regardless of push order.
+    if !imports.is_empty() {
+        let imports_by_name: HashMap<&str, &TypedImportedFn> =
+            imports.iter().map(|i| (i.name.as_str(), i)).collect();
+        for sig in &program.fn_signatures {
+            if sig.extern_origin.is_none() {
+                continue;
+            }
+            let imp = imports_by_name.get(sig.name.as_str()).expect(
+                "ADR 0037 D5.1: every extern fn_signature has a matching typed import",
+            );
+            typed_signatures.push(TypedFnSignature {
+                id: sig.id,
+                name: sig.name.clone(),
+                name_span: None,
+                type_params: vec![],
+                param_types: imp.param_types.clone(),
+                return_type: imp.return_type,
+                effect_row: imp.effect_row.clone(),
+                is_main: false,
+                is_runtime: false,
+                extern_origin: sig.extern_origin.clone(),
+            });
+        }
     }
 
     // Sort typed_signatures by id so signatures[i] corresponds to
@@ -8388,6 +8479,73 @@ mod tests {
     #[test]
     fn smoke() {
         assert_eq!(crate_name(), "sentinel-types");
+    }
+
+    // ----- D.6 / ADR 0037 D5.1: check_module + imported externs -----
+
+    #[test]
+    fn check_module_builds_extern_typed_signature() {
+        use sentinel_resolve::{resolve_module, ImportedFn};
+        let main =
+            parse("use util::math::add; fn main() -> i64 { add(1, 2) }").expect("parse");
+        let resolved = resolve_module(
+            &main,
+            &[ImportedFn {
+                name: "add".to_string(),
+                arity: 2,
+                type_params_count: 0,
+                origin: vec!["util".to_string(), "math".to_string()],
+                span: 0..0,
+            }],
+        )
+        .expect("resolve_module");
+        let typed_imports = vec![TypedImportedFn {
+            name: "add".to_string(),
+            param_types: vec![Type::I64, Type::I64],
+            return_type: Type::I64,
+            effect_row: vec![],
+        }];
+        let tp = check_module(&resolved, &typed_imports).expect("check_module");
+
+        // The extern's typed signature carries the imported param/return
+        // types + its origin; only `main` has a body.
+        let add = tp.fn_signatures.iter().find(|s| s.name == "add").expect("add sig");
+        assert_eq!(add.param_types, vec![Type::I64, Type::I64]);
+        assert_eq!(add.return_type, Type::I64);
+        assert!(!add.is_runtime);
+        assert_eq!(
+            add.extern_origin,
+            Some(vec!["util".to_string(), "math".to_string()])
+        );
+        assert_eq!(tp.fns.len(), 1);
+    }
+
+    #[test]
+    fn check_module_typechecks_call_against_extern_signature() {
+        use sentinel_resolve::{resolve_module, ImportedFn};
+        // `add` is imported as `(i64, i64) -> i64`; calling it with a bool
+        // first arg must be rejected — proving the extern's typed signature
+        // is consulted for cross-module call checking.
+        let main =
+            parse("use util::math::add; fn main() -> i64 { add(true, 2) }").expect("parse");
+        let resolved = resolve_module(
+            &main,
+            &[ImportedFn {
+                name: "add".to_string(),
+                arity: 2,
+                type_params_count: 0,
+                origin: vec!["util".to_string(), "math".to_string()],
+                span: 0..0,
+            }],
+        )
+        .expect("resolve_module");
+        let typed_imports = vec![TypedImportedFn {
+            name: "add".to_string(),
+            param_types: vec![Type::I64, Type::I64],
+            return_type: Type::I64,
+            effect_row: vec![],
+        }];
+        assert!(check_module(&resolved, &typed_imports).is_err());
     }
 
     // ----- positive paths -----
