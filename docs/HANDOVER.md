@@ -2299,16 +2299,22 @@ For pasting into a fresh chat to bootstrap context:
     + the selfhost differentials + BOTH fixed points stay byte-identical (four-check green, 1498 tests). Not an
     oracle-moving change → no selfhost mirror needed yet. ▶ **NEXT (D.6 1/N): the COHESIVE per-unit vertical
     slice** (resolve + codegen + driver together — `use` does not RUN until all land):
-    (a) **`resolve_module(program, imports)`** in sentinel-resolve — per-unit FnId/StructId spaces; an imported
-    `pub fn` = an extern `FnSignature` (imported sig + `is_extern` + **`origin: Vec<String>`** [its module path]
-    + no body); imported types = layout-only. `resolve()` becomes `resolve_module(program, &[])` (byte-unchanged
-    single-file). ⚠ DESIGN REFINEMENT (vs the ADR impl-note's `link_symbol: String`): carry the **`origin`
-    module path, NOT a pre-mangled string** — codegen owns ALL mangling (one source of truth), computing a LOCAL
-    def's symbol = `mangle_qualified(self.module_path, name)` and an EXTERN decl's = `mangle_qualified(&sig.origin,
-    name)`. Avoids a resolve→codegen mangling dependency.
-    (b) **per-unit codegen** — thread `module_path: &[String]` into `compile_to_object` (empty = today's path);
-    at the free-fn site pass the real path for LOCAL fns and DECLARE externs (external linkage,
-    `mangle_qualified(&origin, name)`, no body); `main` stays bare `main`.
+    ✅ (a) DONE (`8bd44c3`): `resolve_module(program, imports: &[ImportedFn])` in sentinel-resolve —
+    `FnSignature.extern_origin: Option<Vec<String>>`; an imported `pub fn` = an extern (sig + fn_table entry, no
+    body) after builtins / before own fns; `resolve()` = `resolve_module(program, &[])` (single-file
+    byte-identical); the `UseDeclNotYet` gate now fires only when `imports==[]`. Carries `origin` (the module
+    path), NOT a pre-mangled `link_symbol` — codegen owns ALL mangling (LOCAL = `mangle_qualified(self.module_path,
+    name)`, EXTERN = `mangle_qualified(&origin, name)`).
+    ✅ (b-types) DONE (`a6c6113`): `check_module(resolved, imports: &[TypedImportedFn])` —
+    `TypedFnSignature.extern_origin` (propagated); each extern's typed sig built from its `TypedImportedFn`
+    {name, param_types, return_type, effect_row} (id from the resolved extern; the existing `sort_by_key(id)`
+    places it; externs have no body → the body loop skips them); `check()` = `check_module(resolved, &[])`.
+    ▶ (b-codegen) NEXT — thread `module_path: &[String]` into `compile_to_object` (empty = today's bare path);
+    at the free-fn site DEFINE locals under `mangle_qualified(module_path, name)` + branch on
+    `TypedFnSignature.extern_origin`: `Some(origin)` → DECLARE external (`mangle_qualified(&origin, name)`, no
+    body) instead of define; `main` stays bare. ⚠ class/impl/mono mangling stays UNqualified for the first slice
+    (free-fns only). Byte-identical for empty path; the extern branch is dormant until (c) — they are the
+    ENTANGLED CORE, land+verify together.
     (c) **driver** — a pub-signature PRE-PASS builds the exports table keyed by `(module_path, item)` from each
     module's `pub` items (signatures only — cheap), then drives each module
     `resolve_module → check → effect/borrow/ct → hir → compile_to_object` → N `.o` → path-sorted `cc` link (entry

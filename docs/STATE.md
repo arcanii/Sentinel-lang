@@ -32,9 +32,16 @@ D7 mangling primitive `mangle_qualified(module_path, item)` + the `abi_v1_mangli
 golden test + the `docs/abi-v1.md` §4/§7/§8 amendment landed BEHAVIOR-PRESERVINGLY (`671b012`):
 wired at the free-fn site with an EMPTY module path (== the bare name), so single-file ABI is
 byte-unchanged — the pre-existing `abi_v1_mangling_is_stable` + the selfhost differentials + BOTH
-bootstrap fixed points stay byte-identical (four-check green, 1498 tests). NEXT code = the cohesive
-per-unit vertical slice (`resolve_module` + per-unit codegen threading the module path + driver
-`--separate` orchestration + the D10 two-module phase-go). ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
+bootstrap fixed points stay byte-identical (four-check green, 1498 tests). ✅ CODE STEPS 2-3 DONE:
+the per-unit ID model's resolve + types halves — **`resolve_module`** (`8bd44c3`:
+`FnSignature.extern_origin`, imported fns as externs in the per-unit FnId space after builtins,
+`resolve()` = `resolve_module(&[])`) + **`check_module`** (`a6c6113`: `TypedFnSignature.extern_origin`,
+each extern's typed signature built from a `TypedImportedFn`, `check()` = `check_module(&[])`) — both
+additive + behavior-preserving (single-file byte-identical), +5 tests, 1503 tests, both fixed points
+byte-identical. ▶ NEXT = the ENTANGLED CORE (lands+verifies together): (b-codegen) thread `module_path`
+into `compile_to_object` + DECLARE externs; (c) driver pub-signature pre-pass → exports table → N
+modules → N `.o` → `cc` link behind opt-in `--separate`; (d) the D10 two-module phase-go +
+`ModuleNotFound`/`PrivateItem` fixtures. ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and
 `cc`-ing that `.ll` yields `scg'` which re-emits the same `.ll` byte-for-byte (a true fixed
