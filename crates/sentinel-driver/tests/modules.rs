@@ -165,6 +165,24 @@ fn separate_cross_module_call_compiles_and_runs() {
 }
 
 #[test]
+fn separate_cross_module_struct_compiles_and_runs() {
+    // ADR 0037 D4 cross-module TYPES: a `pub struct` imported across units is
+    // LAYOUT-only (no link symbol) — the importer RE-MATERIALIZES the decl in
+    // its own type space (emits its own `%Point`). main imports Point +
+    // constructs/reads it locally. Point { x: 40, y: 2 }: x + y -> exit 42.
+    let dir = temp_project("separate_struct");
+    write(dir.join("util/geo.sentinel"), "pub struct Point { x: i64, y: i64 }\n");
+    write(
+        dir.join("main.sentinel"),
+        "use util::geo::Point;\nfn main() -> i64 { let p = Point { x: 40, y: 2 }; p.x + p.y }\n",
+    );
+    assert_eq!(build_and_run_separate(dir.join("main.sentinel")), 42);
+    // Both units emitted their own object (the importer re-materializes Point).
+    assert!(dir.join("main.o").exists(), "the entry unit's object should exist");
+    assert!(dir.join("util_geo.o").exists(), "the util::geo unit's object should exist");
+}
+
+#[test]
 fn separate_import_of_private_item_is_rejected() {
     // The visibility gate (PrivateItem) runs in --separate too, before any
     // per-unit compilation.

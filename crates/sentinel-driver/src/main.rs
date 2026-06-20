@@ -915,11 +915,18 @@ fn run_build_merged(merged: Program, path: &str, output: Option<&str>) -> ExitCo
 /// bool / u8) — cross-module struct / array / generic / effect signatures
 /// are a later D.6 slice.
 struct ExportedFn {
-    name: String,
     arity: usize,
     type_params_count: usize,
     param_types: Vec<sentinel_types::Type>,
     return_type: sentinel_types::Type,
+}
+
+/// An exported item in the per-unit exports table: a `pub fn` (an extern
+/// the importer DECLARES + links to) or a `pub struct` (a layout the
+/// importer RE-MATERIALIZES — types carry no link symbol, ADR 0037 D4).
+enum ExportedItem {
+    Fn(ExportedFn),
+    Struct(sentinel_ast::StructDecl),
 }
 
 /// Map a scalar [`sentinel_ast::TypeExpr`] to its [`sentinel_types::Type`].
@@ -938,10 +945,11 @@ fn scalar_type(te: &sentinel_ast::TypeExpr) -> Option<sentinel_types::Type> {
     }
 }
 
-/// Extract a module's `pub fn` signatures (scalar params/return, non-
-/// generic, pure) for the exports table. Errors (by message) on the first
-/// `pub fn` outside the first-slice scalar subset.
-fn extract_exports(program: &Program) -> Result<Vec<ExportedFn>, String> {
+/// Extract a module's `pub` items for the exports table: `pub fn`s (scalar
+/// params/return, non-generic, pure — FIRST SLICE) as Fn exports, and
+/// `pub struct`s (non-generic) as Struct exports (the importer inlines the
+/// decl — types are layout, ADR 0037 D4). Errors on an item outside the slice.
+fn extract_exports(program: &Program) -> Result<Vec<(String, ExportedItem)>, String> {
     let mut out = Vec::new();
     for f in &program.fns {
         if f.visibility != sentinel_ast::Visibility::Public {
@@ -979,13 +987,31 @@ fn extract_exports(program: &Program) -> Result<Vec<ExportedFn>, String> {
                 f.name
             )
         })?;
-        out.push(ExportedFn {
-            name: f.name.clone(),
-            arity: f.params.len(),
-            type_params_count: f.type_params.len(),
-            param_types,
-            return_type,
-        });
+        out.push((
+            f.name.clone(),
+            ExportedItem::Fn(ExportedFn {
+                arity: f.params.len(),
+                type_params_count: f.type_params.len(),
+                param_types,
+                return_type,
+            }),
+        ));
+    }
+    // `pub struct`s — the importer re-materializes the decl (ADR 0037 D4:
+    // types are layout, no link symbol). Non-generic for this slice; the
+    // importer re-resolves the field types in its own type space, so a field
+    // referencing an un-imported type surfaces as a normal UnknownType there.
+    for s in &program.structs {
+        if s.visibility != sentinel_ast::Visibility::Public {
+            continue;
+        }
+        if !s.type_params.is_empty() {
+            return Err(format!(
+                "`pub struct {}`: cross-module generics are ADR 0037 (2/N), not yet in --separate",
+                s.name
+            ));
+        }
+        out.push((s.name.clone(), ExportedItem::Struct(s.clone())));
     }
     Ok(out)
 }
@@ -1043,17 +1069,17 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
 
     // Pre-pass: the exports table — each module's `pub fn` signatures keyed
     // by (module_path, fn_name). Signatures only (not bodies) — cheap.
-    let mut exports: HashMap<(Vec<String>, String), ExportedFn> = HashMap::new();
+    let mut exports: HashMap<(Vec<String>, String), ExportedItem> = HashMap::new();
     for m in &modules {
-        let fns = match extract_exports(&m.program) {
-            Ok(f) => f,
+        let items = match extract_exports(&m.program) {
+            Ok(items) => items,
             Err(e) => {
                 eprintln!("snc: {e}");
                 return ExitCode::from(1);
             }
         };
-        for f in fns {
-            exports.insert((m.path.clone(), f.name.clone()), f);
+        for (name, item) in items {
+            exports.insert((m.path.clone(), name), item);
         }
     }
 
@@ -1071,41 +1097,56 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
     for (idx, m) in modules.iter().enumerate() {
         let is_entry = idx == 0;
 
-        // Resolve this module's `use` imports against the exports table into
-        // the resolve-level + types-level extern descriptors.
+        // Resolve this module's `use` imports against the exports table: a
+        // `pub fn` becomes an extern descriptor (resolve + types levels); a
+        // `pub struct` is re-materialized by INLINING its decl into this
+        // unit's program (types are layout — no link symbol, ADR 0037 D4).
         let mut import_fns: Vec<sentinel_resolve::ImportedFn> = Vec::new();
         let mut typed_imports: Vec<sentinel_types::TypedImportedFn> = Vec::new();
+        let mut imported_structs: Vec<sentinel_ast::StructDecl> = Vec::new();
         for u in &m.program.uses {
             let item = u.path.last().expect("validated: >= 1 segment").clone();
             let origin = u.path[..u.path.len() - 1].to_vec();
-            let ex = match exports.get(&(origin.clone(), item.clone())) {
-                Some(e) => e,
+            match exports.get(&(origin.clone(), item.clone())) {
+                Some(ExportedItem::Fn(ex)) => {
+                    import_fns.push(sentinel_resolve::ImportedFn {
+                        name: item.clone(),
+                        arity: ex.arity,
+                        type_params_count: ex.type_params_count,
+                        origin: origin.clone(),
+                        span: u.span.clone(),
+                    });
+                    typed_imports.push(sentinel_types::TypedImportedFn {
+                        name: item,
+                        param_types: ex.param_types.clone(),
+                        return_type: ex.return_type,
+                        effect_row: vec![],
+                    });
+                }
+                Some(ExportedItem::Struct(decl)) => imported_structs.push(decl.clone()),
                 None => {
                     eprintln!(
-                        "snc: `{}` from `{}` is not an exported scalar `pub fn` (this D.6 slice)",
+                        "snc: `{}` from `{}` is not an exported scalar `pub fn` / `pub struct` \
+                         (this D.6 slice)",
                         item,
                         origin.join("::")
                     );
                     return ExitCode::from(1);
                 }
-            };
-            import_fns.push(sentinel_resolve::ImportedFn {
-                name: item.clone(),
-                arity: ex.arity,
-                type_params_count: ex.type_params_count,
-                origin: origin.clone(),
-                span: u.span.clone(),
-            });
-            typed_imports.push(sentinel_types::TypedImportedFn {
-                name: item,
-                param_types: ex.param_types.clone(),
-                return_type: ex.return_type,
-                effect_row: vec![],
-            });
+            }
         }
 
+        // Build this unit's program: own items + the inlined imported struct
+        // decls, with `use`s cleared (the driver has resolved them — fns via
+        // `import_fns`, structs inlined here). resolve_module then
+        // re-materializes the imported structs in this unit's StructId space
+        // alongside its own, transparent to the types + codegen layers.
+        let mut prog = m.program.clone();
+        prog.uses.clear();
+        prog.structs.extend(imported_structs);
+
         // resolve_module → check_module → effect → borrow → CT → hir → object.
-        let resolved = match sentinel_resolve::resolve_module(&m.program, &import_fns) {
+        let resolved = match sentinel_resolve::resolve_module(&prog, &import_fns) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("snc: {e}");
