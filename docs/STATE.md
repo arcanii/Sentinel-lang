@@ -38,10 +38,19 @@ the per-unit ID model's resolve + types halves — **`resolve_module`** (`8bd44c
 `resolve()` = `resolve_module(&[])`) + **`check_module`** (`a6c6113`: `TypedFnSignature.extern_origin`,
 each extern's typed signature built from a `TypedImportedFn`, `check()` = `check_module(&[])`) — both
 additive + behavior-preserving (single-file byte-identical), +5 tests, 1503 tests, both fixed points
-byte-identical. ▶ NEXT = the ENTANGLED CORE (lands+verifies together): (b-codegen) thread `module_path`
-into `compile_to_object` + DECLARE externs; (c) driver pub-signature pre-pass → exports table → N
-modules → N `.o` → `cc` link behind opt-in `--separate`; (d) the D10 two-module phase-go +
-`ModuleNotFound`/`PrivateItem` fixtures. ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
+byte-identical. ✅ CODE STEPS 4-6 DONE — **THE PER-UNIT BACK END's FIRST VERTICAL SLICE IS LANDED +
+WORKING:** (b-codegen) `compile_to_object_for_module` threads the module path + DECLARES imported
+externs (`55bb5f6`); (c)+(d) `snc build --separate` (`b8d0ecb`) — discover → `resolve_imports` gate →
+a pub-signature pre-pass (`extract_exports`, SCALAR sigs) → the exports table → per module
+`resolve_module → check_module → effect/borrow/CT → compile_to_object_for_module(&module.path)` → N
+`.o` → path-sorted `cc` link. 🎯 **THE D10 PHASE-GO IS GREEN: `main.sentinel` `use`s a `pub fn` from
+`util/math.sentinel` → main.o + util_math.o emitted INDEPENDENTLY → linked via `_S4util4math3add` →
+exit 42** + `ModuleNotFound`/`PrivateItem` ui tests. Two whole-program assumptions relaxed for library
+units (no `main`): `MissingMain` moved to the `resolve()` wrapper; `effect_check` Pass 3 guards the
+`main` lookup (both behavior-preserving for the corpus). 1506 tests, both fixed points byte-identical,
+four-check green. ▶ NEXT (1/N): cross-module TYPES (struct/enum layout import — the slice is
+scalar-signature fns first); then (2/N) cross-module generics/traits/effects, (3/N) incremental caching.
+▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and
 `cc`-ing that `.ll` yields `scg'` which re-emits the same `.ll` byte-for-byte (a true fixed

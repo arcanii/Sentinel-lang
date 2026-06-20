@@ -2309,19 +2309,29 @@ For pasting into a fresh chat to bootstrap context:
     `TypedFnSignature.extern_origin` (propagated); each extern's typed sig built from its `TypedImportedFn`
     {name, param_types, return_type, effect_row} (id from the resolved extern; the existing `sort_by_key(id)`
     places it; externs have no body → the body loop skips them); `check()` = `check_module(resolved, &[])`.
-    ▶ (b-codegen) NEXT — thread `module_path: &[String]` into `compile_to_object` (empty = today's bare path);
-    at the free-fn site DEFINE locals under `mangle_qualified(module_path, name)` + branch on
-    `TypedFnSignature.extern_origin`: `Some(origin)` → DECLARE external (`mangle_qualified(&origin, name)`, no
-    body) instead of define; `main` stays bare. ⚠ class/impl/mono mangling stays UNqualified for the first slice
-    (free-fns only). Byte-identical for empty path; the extern branch is dormant until (c) — they are the
-    ENTANGLED CORE, land+verify together.
-    (c) **driver** — a pub-signature PRE-PASS builds the exports table keyed by `(module_path, item)` from each
-    module's `pub` items (signatures only — cheap), then drives each module
-    `resolve_module → check → effect/borrow/ct → hir → compile_to_object` → N `.o` → path-sorted `cc` link (entry
-    owns `main`), behind opt-in `--separate`; keep `run_build_merged` the DEFAULT until (2/N) parity.
-    (d) **D10 phase-go**: `main.sentinel` `use`s a `pub` fn + type from `util/math.sentinel` → TWO `.o` linked →
-    a computed exit code; + ui fixtures for `ModuleNotFound`/`PrivateItem`. Each chunk: four-check incl. the
-    selfhost differentials + both fixed points stays green (additive — the merge path is untouched). Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
+    ✅ (b-codegen) DONE (`55bb5f6`): `compile_to_object_for_module(hir, module_path, output)`
+    (`compile_to_object` delegates with `&[]`); the free-fn site computes the symbol by case — `is_main` →
+    bare `main`; `extern_origin == Some(origin)` → DECLARE external (`mangle_qualified(&origin, name)`, no
+    body — Pass 2 iterates `program.fns` which excludes externs); else LOCAL = `mangle_qualified(module_path,
+    name)`. ⚠ class/impl/mono mangling stays UNqualified (free-fns only, this slice). Byte-identical for the
+    empty path.
+    ✅ (c)+(d) DONE (`b8d0ecb`) — **`snc build --separate` WORKS END-TO-END.** `run_build_separate`:
+    discover → `resolve_imports` (the PrivateItem/ModuleNotFound/UnknownImport gate, reused) → a pub-signature
+    PRE-PASS (`extract_exports`, a lightweight AST walk — FIRST SLICE = SCALAR sigs i64/i32/bool/u8, non-generic,
+    pure) → the exports table keyed by `(module_path, fn_name)` → per module: build `ImportedFn` +
+    `TypedImportedFn` externs from the module's `use`s, then `resolve_module → check_module → effect → borrow →
+    CT → hir → compile_to_object_for_module(&m.path)` → one `.o`; the entry (module 0) must have `main`, a
+    non-entry `main` is rejected → `link_objects` (path-sorted `cc` + runtime). ⚠ TWO whole-program assumptions
+    relaxed for library units (no `main`): `MissingMain` moved from `resolve_module` to the `resolve()` wrapper;
+    `effect_check` Pass 3 guards the `main` lookup (both behavior-preserving for the corpus — all has main). The
+    D10 phase-go is GREEN: `main.sentinel` `use`s `add` from `util/math.sentinel` → main.o + util_math.o emitted
+    INDEPENDENTLY → linked via `_S4util4math3add` → exit 42 (test asserts BOTH `.o` exist) + the two negatives.
+    ▶ **NEXT in (1/N): cross-module TYPES** — a `pub struct`/`pub enum` imported across units (layout import,
+    NO link symbol — units agree on layout, D4). The exports table + `extract_exports` extend to struct/enum
+    layouts; `resolve_module`/`check_module` register imported types in this unit's StructId/EnumId space from
+    the export; codegen emits the layout locally (each unit re-emits the `%Type`). Then (2/N) cross-module
+    generics (`linkonce_odr` + module-qualified type tags) + trait/impl/effects, (3/N) incremental caching +
+    repro. Keep the merge path + both fixed points green (additive). Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;
     `collect_mono_instantiations` `:1738`; `mangle_mono_name`/`mangle_type` `:2049`/`:2067`; golden test
