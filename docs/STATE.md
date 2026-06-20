@@ -72,9 +72,14 @@ Phase-go: main imports `id` from util/math, instantiates id<i64> → exit 42. 15
 byte-identical. ✅ **generics over a CROSS-MODULE STRUCT work too** (`9a8376e`: `id<Point>` w/ Point
 imported → 42) — the type-tag-collision concern does NOT bite the inline-local model (each importer
 qualifies its instance by ITS OWN path + self-contains the inlined struct; no shared symbol to collide),
-so it is needed ONLY for the `linkonce_odr` model. ▶ NEXT in (2/N): `linkonce_odr` dedup (optimization;
-where the type-tag fix becomes necessary) + cross-module trait/impl methods + effects; then (3/N)
-incremental caching + per-unit repro.
+so it is needed ONLY for the `linkonce_odr` model. ✅ **cross-module TRAITS too** (`934f08c`): a `pub
+trait` is INLINED into the importer, which impls it for its OWN class + dispatches — this REQUIRED
+module-qualifying the last 3 codegen symbol kinds (class init/method + impl method, all via
+`mangle_qualified`, calls resolving by ClassId/ImplId+idx maps so localized + byte-identical for the
+empty-path corpus). ⚠ classes are module-LOCAL (the trait is the cross-unit construct, not the class).
+counter.sentinel `pub trait Counter`; entry impls it for `class Tally` → 42. ▶ NEXT in (2/N): cross-module
+EFFECTS (the HARD remaining piece — `op_id=(eid<<16)|op` needs EffectId portability across units) +
+`linkonce_odr` dedup (optimization); then (3/N) incremental caching + per-unit repro.
 ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and

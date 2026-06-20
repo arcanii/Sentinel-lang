@@ -2357,11 +2357,21 @@ For pasting into a fresh chat to bootstrap context:
     `id<c::d::Point>` mis-keying) does NOT bite the inline-local model — each importer qualifies its instance by
     ITS OWN path (`_S4main…id__Point`) + self-contains the inlined struct, so there is no shared symbol to
     collide. The type-tag fix is needed ONLY for the ORIGIN-qualified `linkonce_odr` model. ▶ **NEXT in (2/N):**
-    (a) `linkonce_odr` dedup (an OPTIMIZATION — share instances across importers under the ORIGIN module's
-    qualified symbol; THIS is where the type-tag fix becomes necessary). (b) cross-module trait/impl methods.
-    (c) cross-module effects (the EffectId-portability problem, analogous to the type case — currently pure fns
-    only). Then (3/N) incremental Salsa caching + per-unit `.o` repro. Keep the merge path + both fixed points
-    green (additive).
+    ✅ **cross-module TRAITS DONE** (`934f08c`): a `pub trait` is INLINED into the importer
+    (`ExportedItem::Trait`, `prog.traits.extend`), which impls it for its OWN class + dispatches; the trait is
+    a decl (no link symbol), the impl+class are the importer's own. This REQUIRED module-qualifying the LAST 3
+    codegen symbol kinds — class init (`Class__init`), class method (`Class__method`), impl method
+    (`<prefix>__<Type>__<Trait>__<method>`) — all `mangle_qualified(module_path, …)`; calls resolve via the
+    `class_init_fns`/`class_method_fns`/`impl_method_fns` maps by ClassId/ImplId+idx (NOT by name) so the
+    rename is localized + byte-identical for the empty-path corpus. ⚠ classes are module-LOCAL (can't be
+    `pub`) — the TRAIT is the cross-unit construct, not the class. ▶ **NEXT in (2/N):** (a) cross-module
+    EFFECTS — the HARD remaining piece: a `pub effect` performed in one unit + handled in another. ⚠ the
+    handler runtime dispatches on `op_id = (eid<<16)|op`, so the EffectId must be CONSISTENT across units (the
+    inline model assigns per-unit eids BY POSITION → not guaranteed); needs an eid-portability scheme. Currently
+    pure fns only. (b) `linkonce_odr` dedup (an OPTIMIZATION — share generic/class-method instances across
+    importers under the ORIGIN module's qualified symbol; THIS is where the type-tag fix becomes necessary).
+    Then (3/N) incremental Salsa caching + per-unit `.o` repro. Keep the merge path + both fixed points green
+    (additive).
     Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;
