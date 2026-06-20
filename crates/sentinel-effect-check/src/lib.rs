@@ -200,15 +200,19 @@ pub fn effect_check(program: &TypedProgram) -> (EffectCheckedProgram, Vec<Effect
     }
 
     // Pass 3: main must be effect-free per ADR 0019 D13. Surface
-    // the first effect that bubbles to it.
-    let main = program.main();
-    if let Some(main_row) = effective.get(&main.id) {
-        if let Some(&first) = main_row.iter().next() {
-            let effect_name = effect_name(first, program);
-            errors.push(EffectError::UnhandledEffect {
-                effect_name,
-                span: to_source_span(&main.name_span),
-            });
+    // the first effect that bubbles to it. A separately-compiled LIBRARY
+    // module (ADR 0037) has no `main` — its effect-freedom is checked in
+    // whichever unit IS the entry — so skip Pass 3 when main is absent
+    // (the guarded find is identical to `program.main()` when present).
+    if let Some(main) = program.fns.iter().find(|f| program.signature(f.id).is_main) {
+        if let Some(main_row) = effective.get(&main.id) {
+            if let Some(&first) = main_row.iter().next() {
+                let effect_name = effect_name(first, program);
+                errors.push(EffectError::UnhandledEffect {
+                    effect_name,
+                    span: to_source_span(&main.name_span),
+                });
+            }
         }
     }
 

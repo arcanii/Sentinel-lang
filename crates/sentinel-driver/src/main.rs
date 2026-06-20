@@ -41,7 +41,7 @@ mod resolve_dump;
 mod source_dump;
 mod types_dump;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -86,6 +86,16 @@ fn main() -> ExitCode {
         [_, cmd, path] if cmd == "build" => run_build(path, None),
         [_, cmd, path, flag, output] if cmd == "build" && flag == "-o" => {
             run_build(path, Some(output))
+        }
+        // Phase D.6 / ADR 0037 (a): TRUE per-unit separate compilation
+        // (opt-in until it reaches Path-A parity).
+        [_, cmd, path, sep] if cmd == "build" && sep == "--separate" => {
+            run_build_separate(path, None)
+        }
+        [_, cmd, path, sep, o, output]
+            if cmd == "build" && sep == "--separate" && o == "-o" =>
+        {
+            run_build_separate(path, Some(output))
         }
         [_] => {
             print_usage();
@@ -890,6 +900,273 @@ fn run_build_merged(merged: Program, path: &str, output: Option<&str>) -> ExitCo
         return ExitCode::from(1);
     }
     match link(&object_path, &exe_path) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            eprintln!("snc: link failed: {msg}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Phase D.6 / ADR 0037 (a): an exported `pub fn`'s signature, extracted
+/// from a module's AST for the per-unit exports table. Carries the
+/// resolve-level (arity / type-param count) and the types-level (param /
+/// return `Type`s) info. FIRST SLICE: SCALAR signatures only (i64 / i32 /
+/// bool / u8) — cross-module struct / array / generic / effect signatures
+/// are a later D.6 slice.
+struct ExportedFn {
+    name: String,
+    arity: usize,
+    type_params_count: usize,
+    param_types: Vec<sentinel_types::Type>,
+    return_type: sentinel_types::Type,
+}
+
+/// Map a scalar [`sentinel_ast::TypeExpr`] to its [`sentinel_types::Type`].
+/// `None` for any non-scalar (named type / array / ref / nullable / generic
+/// / secret) — those cross a unit boundary as layout, a later D.6 slice.
+fn scalar_type(te: &sentinel_ast::TypeExpr) -> Option<sentinel_types::Type> {
+    match &te.kind {
+        sentinel_ast::TypeExprKind::Ident(n) => match n.as_str() {
+            "i64" => Some(sentinel_types::Type::I64),
+            "i32" => Some(sentinel_types::Type::I32),
+            "bool" => Some(sentinel_types::Type::Bool),
+            "u8" => Some(sentinel_types::Type::U8),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Extract a module's `pub fn` signatures (scalar params/return, non-
+/// generic, pure) for the exports table. Errors (by message) on the first
+/// `pub fn` outside the first-slice scalar subset.
+fn extract_exports(program: &Program) -> Result<Vec<ExportedFn>, String> {
+    let mut out = Vec::new();
+    for f in &program.fns {
+        if f.visibility != sentinel_ast::Visibility::Public {
+            continue;
+        }
+        if !f.type_params.is_empty() {
+            return Err(format!(
+                "`pub fn {}`: cross-module generics are ADR 0037 (2/N), not yet in --separate",
+                f.name
+            ));
+        }
+        if !f.effect_row.is_empty() {
+            return Err(format!(
+                "`pub fn {}`: cross-module effects are a later D.6 slice, not yet in --separate",
+                f.name
+            ));
+        }
+        let mut param_types = Vec::with_capacity(f.params.len());
+        for p in &f.params {
+            match scalar_type(&p.ty) {
+                Some(t) => param_types.push(t),
+                None => {
+                    return Err(format!(
+                        "`pub fn {}`: only scalar parameter types (i64/i32/bool/u8) cross a \
+                         unit boundary in this D.6 slice",
+                        f.name
+                    ))
+                }
+            }
+        }
+        let return_type = scalar_type(&f.return_type).ok_or_else(|| {
+            format!(
+                "`pub fn {}`: only scalar return types (i64/i32/bool/u8) cross a unit \
+                 boundary in this D.6 slice",
+                f.name
+            )
+        })?;
+        out.push(ExportedFn {
+            name: f.name.clone(),
+            arity: f.params.len(),
+            type_params_count: f.type_params.len(),
+            param_types,
+            return_type,
+        });
+    }
+    Ok(out)
+}
+
+/// Link several object files + the runtime into one executable. The caller
+/// pre-sorts `objects` for a deterministic link.
+fn link_objects(objects: &[PathBuf], exe: &Path) -> Result<(), String> {
+    let runtime = find_runtime()?;
+    let mut cmd = Command::new("cc");
+    for obj in objects {
+        cmd.arg(obj);
+    }
+    cmd.arg(&runtime).arg("-o").arg(exe);
+    let status = cmd.status().map_err(|e| format!("failed to invoke cc: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("cc exited with {status}"))
+    }
+}
+
+/// Phase D.6 / ADR 0037 (a): TRUE per-unit separate compilation —
+/// `snc build --separate <entry>`. Discovers the module graph, then
+/// compiles EACH module to its OWN object independently (`resolve_module` +
+/// `check_module` against the imported `pub fn` signatures, then the
+/// effect / borrow / CT gates + codegen with the module path threaded for
+/// D7 mangling), and links the per-unit objects + the runtime. Cross-module
+/// references resolve at LINK time via module-qualified `abi-v1` symbols —
+/// the back end the merge (`run_build_merged`) stands in for, opt-in until
+/// it reaches parity. A single-file program (no `use`) has no
+/// separate-compilation work and routes to the normal build.
+fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
+    let modules = match discover_module_graph(Path::new(path)) {
+        Ok(m) => m,
+        Err(msg) => {
+            eprintln!("snc: {msg}");
+            return ExitCode::from(1);
+        }
+    };
+    if modules.is_empty() {
+        // Single-file: nothing to compile separately.
+        return run_build(path, output);
+    }
+
+    // Visibility / existence gate (ModuleNotFound / UnknownImport /
+    // PrivateItem) — reuse the Path-A validator before any compilation.
+    let units: Vec<sentinel_resolve::ModuleUnit> = modules
+        .iter()
+        .map(|m| sentinel_resolve::ModuleUnit { path: m.path.clone(), program: &m.program })
+        .collect();
+    if let Err(e) = sentinel_resolve::resolve_imports(&units) {
+        eprintln!("snc: {e}");
+        return ExitCode::from(1);
+    }
+
+    // Pre-pass: the exports table — each module's `pub fn` signatures keyed
+    // by (module_path, fn_name). Signatures only (not bodies) — cheap.
+    let mut exports: HashMap<(Vec<String>, String), ExportedFn> = HashMap::new();
+    for m in &modules {
+        let fns = match extract_exports(&m.program) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("snc: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        for f in fns {
+            exports.insert((m.path.clone(), f.name.clone()), f);
+        }
+    }
+
+    let exe_path: PathBuf = match output {
+        Some(o) => PathBuf::from(o),
+        None => PathBuf::from(path).with_extension(""),
+    };
+    let obj_dir = exe_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    // Compile each module to its own object.
+    let mut objects: Vec<PathBuf> = Vec::new();
+    for (idx, m) in modules.iter().enumerate() {
+        let is_entry = idx == 0;
+
+        // Resolve this module's `use` imports against the exports table into
+        // the resolve-level + types-level extern descriptors.
+        let mut import_fns: Vec<sentinel_resolve::ImportedFn> = Vec::new();
+        let mut typed_imports: Vec<sentinel_types::TypedImportedFn> = Vec::new();
+        for u in &m.program.uses {
+            let item = u.path.last().expect("validated: >= 1 segment").clone();
+            let origin = u.path[..u.path.len() - 1].to_vec();
+            let ex = match exports.get(&(origin.clone(), item.clone())) {
+                Some(e) => e,
+                None => {
+                    eprintln!(
+                        "snc: `{}` from `{}` is not an exported scalar `pub fn` (this D.6 slice)",
+                        item,
+                        origin.join("::")
+                    );
+                    return ExitCode::from(1);
+                }
+            };
+            import_fns.push(sentinel_resolve::ImportedFn {
+                name: item.clone(),
+                arity: ex.arity,
+                type_params_count: ex.type_params_count,
+                origin: origin.clone(),
+                span: u.span.clone(),
+            });
+            typed_imports.push(sentinel_types::TypedImportedFn {
+                name: item,
+                param_types: ex.param_types.clone(),
+                return_type: ex.return_type,
+                effect_row: vec![],
+            });
+        }
+
+        // resolve_module → check_module → effect → borrow → CT → hir → object.
+        let resolved = match sentinel_resolve::resolve_module(&m.program, &import_fns) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("snc: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        let has_main = resolved.fn_signatures.iter().any(|s| s.is_main);
+        if is_entry && !has_main {
+            eprintln!("snc: the entry module `{}` has no `main`", m.path.join("::"));
+            return ExitCode::from(1);
+        }
+        if !is_entry && has_main {
+            eprintln!(
+                "snc: only the entry module may define `main` (`{}` does)",
+                m.path.join("::")
+            );
+            return ExitCode::from(1);
+        }
+        let typed = match sentinel_types::check_module(&resolved, &typed_imports) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("snc: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        let (_ec, effect_errors) = sentinel_effect_check::effect_check(&typed);
+        if !effect_errors.is_empty() {
+            for e in &effect_errors {
+                eprintln!("snc: {e}");
+            }
+            return ExitCode::from(1);
+        }
+        let (drop_plan, borrow_errors) = sentinel_borrow_check::borrow_check(&typed);
+        if !borrow_errors.is_empty() {
+            for e in &borrow_errors {
+                eprintln!("snc: {e}");
+            }
+            return ExitCode::from(1);
+        }
+        let mir = sentinel_mir::lower_to_mir(&typed);
+        let leaks = sentinel_mir::verify_constant_time(&mir);
+        if !leaks.is_empty() {
+            for leak in &leaks {
+                eprintln!("snc: {leak}");
+            }
+            return ExitCode::from(1);
+        }
+        let hir = sentinel_hir::lower_to_hir(&typed, &drop_plan);
+        let obj_path = obj_dir.join(format!("{}.o", m.path.join("_")));
+        if let Err(err) =
+            sentinel_codegen::compile_to_object_for_module(&hir, &m.path, &obj_path)
+        {
+            eprintln!("snc: codegen failed for module `{}`: {err}", m.path.join("::"));
+            return ExitCode::from(1);
+        }
+        objects.push(obj_path);
+    }
+
+    // Deterministic link order (path-sorted) + the runtime.
+    objects.sort();
+    match link_objects(&objects, &exe_path) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("snc: link failed: {msg}");

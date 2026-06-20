@@ -434,9 +434,11 @@ pub struct ResolvedMethodDef {
 }
 
 impl ResolvedProgram {
-    /// The user `main` function. Always present after a successful
-    /// `resolve` (otherwise [`ResolveError::MissingMain`] would have
-    /// fired).
+    /// The user `main` function. Present after a successful [`resolve`]
+    /// (the wrapper enforces `MissingMain`). NOT valid on a separately-
+    /// compiled **library module** resolved via [`resolve_module`] (ADR
+    /// 0037) — those may have no `main`, and the per-unit driver never
+    /// calls this on them.
     pub fn main(&self) -> &ResolvedFnDef {
         self.fns
             .iter()
@@ -1973,8 +1975,17 @@ pub struct ImportedFn {
 /// Resolve a single-file [`Program`] to a [`ResolvedProgram`] — the
 /// `imports == []` case of [`resolve_module`]. Single-file / Path-A
 /// builds use this and are byte-identical to before the per-unit model.
+///
+/// Enforces `MissingMain` here (not in [`resolve_module`]): a single-file
+/// or Path-A program must have `main`, but a separately-compiled **library
+/// module** legitimately has none — the per-unit driver resolves those via
+/// [`resolve_module`] and checks the *entry* module for `main` itself.
 pub fn resolve(program: &Program) -> Result<ResolvedProgram, ResolveError> {
-    resolve_module(program, &[])
+    let resolved = resolve_module(program, &[])?;
+    if !resolved.fn_signatures.iter().any(|s| s.is_main) {
+        return Err(ResolveError::MissingMain);
+    }
+    Ok(resolved)
 }
 
 /// Resolve a [`Program`] to a [`ResolvedProgram`] against its imported
@@ -2643,9 +2654,9 @@ pub fn resolve_module(
         fn_table.insert(fn_def.name.clone(), id);
     }
 
-    if !fn_table.contains_key("main") {
-        return Err(ResolveError::MissingMain);
-    }
+    // `MissingMain` is enforced by the `resolve` wrapper (single-file /
+    // Path-A), not here: a separately-compiled library module (ADR 0037)
+    // legitimately has no `main`. The per-unit driver checks the entry.
 
     // Pass 2: resolve each fn body.
     let mut resolved_fns = Vec::with_capacity(program.fns.len());

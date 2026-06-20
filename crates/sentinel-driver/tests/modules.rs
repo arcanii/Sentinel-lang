@@ -118,6 +118,81 @@ fn use_of_missing_module_is_module_not_found() {
     );
 }
 
+// ===== ADR 0037 (a): TRUE per-unit separate compilation (`--separate`) =====
+
+/// Run `snc build <entry> --separate -o <exe>` and return (success, stderr).
+fn build_separate(entry: PathBuf) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg(&entry)
+        .arg("--separate")
+        .arg("-o")
+        .arg(entry.with_extension(""))
+        .output()
+        .expect("run snc");
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// Build `entry` with `--separate`, assert it compiled, run it, return exit.
+fn build_and_run_separate(entry: PathBuf) -> i32 {
+    let (ok, stderr) = build_separate(entry.clone());
+    assert!(ok, "expected a successful --separate build; stderr:\n{stderr}");
+    let exe = entry.with_extension("");
+    let run = Command::new(&exe).output().expect("run compiled binary");
+    run.status.code().expect("process exited normally")
+}
+
+#[test]
+fn separate_cross_module_call_compiles_and_runs() {
+    // ADR 0037 (a) D10 phase-go: TRUE per-unit separate compilation.
+    // `main.sentinel` uses a `pub fn` from `util/math.sentinel`; EACH module
+    // compiles to its OWN object independently, and the cross-module call
+    // resolves at LINK time via the module-qualified abi-v1 symbol
+    // (`_S4util4math3add`). add(40, 2) -> exit 42.
+    let dir = temp_project("separate");
+    write(dir.join("util/math.sentinel"), "pub fn add(a: i64, b: i64) -> i64 { a + b }\n");
+    write(
+        dir.join("main.sentinel"),
+        "use util::math::add;\nfn main() -> i64 { add(40, 2) }\n",
+    );
+    assert_eq!(build_and_run_separate(dir.join("main.sentinel")), 42);
+    // Two objects were emitted INDEPENDENTLY (per-unit, not one merged .o).
+    assert!(dir.join("main.o").exists(), "the entry unit's object should exist");
+    assert!(
+        dir.join("util_math.o").exists(),
+        "the util::math unit's object should exist"
+    );
+}
+
+#[test]
+fn separate_import_of_private_item_is_rejected() {
+    // The visibility gate (PrivateItem) runs in --separate too, before any
+    // per-unit compilation.
+    let dir = temp_project("separate_private");
+    write(dir.join("util.sentinel"), "fn add(a: i64, b: i64) -> i64 { a + b }\n");
+    write(dir.join("main.sentinel"), "use util::add;\nfn main() -> i64 { 0 }\n");
+    let (ok, stderr) = build_separate(dir.join("main.sentinel"));
+    assert!(!ok, "a private import should fail --separate; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("private to module `util`"),
+        "expected a PrivateItem error naming `util`; stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn separate_use_of_missing_module_is_module_not_found() {
+    // A missing `use`d module file is ModuleNotFound at discovery, in
+    // --separate too.
+    let dir = temp_project("separate_missing");
+    write(dir.join("main.sentinel"), "use absent::thing;\nfn main() -> i64 { 0 }\n");
+    let (ok, stderr) = build_separate(dir.join("main.sentinel"));
+    assert!(!ok, "a missing module should fail --separate; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("module `absent` not found"),
+        "expected a ModuleNotFound naming `absent`; stderr:\n{stderr}"
+    );
+}
+
 // --- D.6 cross-module TYPES (structs + enums) -------------------------------
 // merge_modules now qualifies struct + enum names by module path and
 // rewrites every type reference (annotations, struct literals, enum
