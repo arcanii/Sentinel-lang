@@ -69,9 +69,11 @@ correct model; `linkonce_odr` dedup deferred) — `ExportedItem::GenericFn(Box<F
 THIS unit's path (`mangle_qualified(module_path, &mangle_mono_name(…))` → `_S4main…id__i64`; calls
 resolve via the `(FnId, args)` map not by name, so 1 site; empty path → bare = single-file byte-identical).
 Phase-go: main imports `id` from util/math, instantiates id<i64> → exit 42. 1510 tests, both fixed points
-byte-identical. ▶ NEXT in (2/N): module-qualify cross-module **type tags** in mono keys (`mangle_type`
-renders a Struct by bare name → `id<a::b::Point>` vs `id<c::d::Point>` would mis-key; needed before
-generics over cross-module STRUCTS) + `linkonce_odr` dedup + cross-module trait/impl/effects; then (3/N)
+byte-identical. ✅ **generics over a CROSS-MODULE STRUCT work too** (`9a8376e`: `id<Point>` w/ Point
+imported → 42) — the type-tag-collision concern does NOT bite the inline-local model (each importer
+qualifies its instance by ITS OWN path + self-contains the inlined struct; no shared symbol to collide),
+so it is needed ONLY for the `linkonce_odr` model. ▶ NEXT in (2/N): `linkonce_odr` dedup (optimization;
+where the type-tag fix becomes necessary) + cross-module trait/impl methods + effects; then (3/N)
 incremental caching + per-unit repro.
 ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the

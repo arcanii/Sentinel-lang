@@ -2352,13 +2352,16 @@ For pasting into a fresh chat to bootstrap context:
     ⚠ CALLS resolve via the `(FnId, Vec<Type>)` `mono_fns` map, NOT by name — so the symbol rename is ONE
     codegen site (`compile_to_object_for_module`'s mono pre-pass) + the call sites follow automatically; empty
     path → bare = single-file byte-identical. Phase-go: main imports `id` from util/math, instantiates id<i64>
-    (inferred from 42) → exit 42. ▶ **NEXT in (2/N):** (a) module-qualify cross-module **type tags** in mono
-    keys — `mangle_type` renders a Struct/Enum by BARE name, so `id<a::b::Point>` vs `id<c::d::Point>` would
-    mis-key; needed BEFORE generics over cross-module STRUCTS (the current slice is generics over PRIMITIVES /
-    own types). (b) `linkonce_odr` dedup (optimization — emit cross-unit-shared instances under the ORIGIN
-    module's qualified symbol + `linkonce_odr` so importers share one copy). (c) cross-module trait/impl methods
-    + effects. Then (3/N) incremental Salsa caching + per-unit `.o` repro. Keep the merge path + both fixed
-    points green (additive).
+    (inferred from 42) → exit 42. ✅ **generics over a CROSS-MODULE STRUCT work too** (`9a8376e`, test:
+    `id<Point>` w/ Point imported → 42). ⚠ KEY FINDING: the type-tag-collision concern (`id<a::b::Point>` vs
+    `id<c::d::Point>` mis-keying) does NOT bite the inline-local model — each importer qualifies its instance by
+    ITS OWN path (`_S4main…id__Point`) + self-contains the inlined struct, so there is no shared symbol to
+    collide. The type-tag fix is needed ONLY for the ORIGIN-qualified `linkonce_odr` model. ▶ **NEXT in (2/N):**
+    (a) `linkonce_odr` dedup (an OPTIMIZATION — share instances across importers under the ORIGIN module's
+    qualified symbol; THIS is where the type-tag fix becomes necessary). (b) cross-module trait/impl methods.
+    (c) cross-module effects (the EffectId-portability problem, analogous to the type case — currently pure fns
+    only). Then (3/N) incremental Salsa caching + per-unit `.o` repro. Keep the merge path + both fixed points
+    green (additive).
     Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;
