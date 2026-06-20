@@ -286,6 +286,26 @@ fn separate_cross_module_trait_compiles_and_runs() {
 }
 
 #[test]
+fn separate_cross_module_effect_decl_compiles_and_runs() {
+    // Cross-module `pub effect` DECL (first cut): `io` defines the effect;
+    // the entry imports it and both PERFORMS (in `do_work`) + HANDLES it.
+    // Because perform + handle live in the SAME unit, the effect's EffectId
+    // (→ runtime `op_id = (eid<<16)|op`) is consistent — pure inline, no
+    // codegen/eid-portability change. (Cross-UNIT perform/handle — a library
+    // performs, the entry handles — needs eid portability, a later piece.)
+    // The handler resumes Io.read with 42 -> exit 42.
+    let dir = temp_project("separate_effect");
+    write(dir.join("io.sentinel"), "pub effect Io {\n    read() -> i64;\n}\n");
+    write(
+        dir.join("main.sentinel"),
+        "use io::Io;\n\
+         fn do_work() -> i64 ! { Io } { perform Io.read() }\n\
+         fn main() -> i64 { handle do_work() with { Io.read(k) => k(42) } }\n",
+    );
+    assert_eq!(build_and_run_separate(dir.join("main.sentinel")), 42);
+}
+
+#[test]
 fn separate_import_of_private_item_is_rejected() {
     // The visibility gate (PrivateItem) runs in --separate too, before any
     // per-unit compilation.
