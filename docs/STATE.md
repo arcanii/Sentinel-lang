@@ -77,9 +77,16 @@ trait` is INLINED into the importer, which impls it for its OWN class + dispatch
 module-qualifying the last 3 codegen symbol kinds (class init/method + impl method, all via
 `mangle_qualified`, calls resolving by ClassId/ImplId+idx maps so localized + byte-identical for the
 empty-path corpus). ⚠ classes are module-LOCAL (the trait is the cross-unit construct, not the class).
-counter.sentinel `pub trait Counter`; entry impls it for `class Tally` → 42. ▶ NEXT in (2/N): cross-module
-EFFECTS (the HARD remaining piece — `op_id=(eid<<16)|op` needs EffectId portability across units) +
-`linkonce_odr` dedup (optimization); then (3/N) incremental caching + per-unit repro.
+counter.sentinel `pub trait Counter`; entry impls it for `class Tally` → 42. ✅ **cross-module EFFECT
+DECLS too** (`a0e9595`, first cut): a `pub effect` decl is INLINED; FIRST-CUT scope = `perform`+`handle`
+BOTH in the importer (so the EffectId / runtime `op_id=(eid<<16)|op` is unit-local + consistent — pure
+inline, no codegen change). io.sentinel `pub effect Io`; entry performs + handles it → 42. **So ALL pub
+item kinds now inline (fn/struct/enum/trait/effect-decl).** ▶ NEXT in (2/N): the HARD case = cross-UNIT
+perform/handle (a library performs, the entry handles). ⚠ DESIGN BLOCKER: the `EffectId` is OVERLOADED
+(both the `op_id` basis AND the `program.effects[]` index), so a shared effect can't just take a global
+eid — the fix DECOUPLES them (keep the local table-index eid; add a build-wide op-id base per effect,
+stable by origin+name, threaded resolve→types→codegen). + `linkonce_odr` dedup; then (3/N) incremental
+caching + per-unit repro.
 ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and

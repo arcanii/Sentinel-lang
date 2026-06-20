@@ -2364,14 +2364,22 @@ For pasting into a fresh chat to bootstrap context:
     (`<prefix>__<Type>__<Trait>__<method>`) — all `mangle_qualified(module_path, …)`; calls resolve via the
     `class_init_fns`/`class_method_fns`/`impl_method_fns` maps by ClassId/ImplId+idx (NOT by name) so the
     rename is localized + byte-identical for the empty-path corpus. ⚠ classes are module-LOCAL (can't be
-    `pub`) — the TRAIT is the cross-unit construct, not the class. ▶ **NEXT in (2/N):** (a) cross-module
-    EFFECTS — the HARD remaining piece: a `pub effect` performed in one unit + handled in another. ⚠ the
-    handler runtime dispatches on `op_id = (eid<<16)|op`, so the EffectId must be CONSISTENT across units (the
-    inline model assigns per-unit eids BY POSITION → not guaranteed); needs an eid-portability scheme. Currently
-    pure fns only. (b) `linkonce_odr` dedup (an OPTIMIZATION — share generic/class-method instances across
-    importers under the ORIGIN module's qualified symbol; THIS is where the type-tag fix becomes necessary).
-    Then (3/N) incremental Salsa caching + per-unit `.o` repro. Keep the merge path + both fixed points green
-    (additive).
+    `pub`) — the TRAIT is the cross-unit construct, not the class.
+    ✅ **cross-module EFFECT DECLS DONE (first cut)** (`a0e9595`): a `pub effect` decl is INLINED
+    (`ExportedItem::Effect`, `prog.effects.extend`). FIRST-CUT scope = the `perform` + `handle` BOTH live in the
+    importer, so the effect's EffectId (→ runtime `op_id = (eid<<16)|op`) is unit-local + consistent — PURE
+    INLINE, NO codegen/eid change (op_id is a NUMBER, not a symbol). io.sentinel `pub effect Io`; entry imports
+    it, performs in `do_work` + `handle do_work() with { Io.read(k) => k(42) }` → 42. **So ALL pub item kinds
+    now inline: fn (extern + generic inline) / struct / enum / trait / effect-decl.** ▶ **NEXT in (2/N): the
+    HARD remaining case = cross-UNIT perform/handle** (a library `io::source` PERFORMS, the entry HANDLES it —
+    the merge `cross_module_effect` test's shape). ⚠⚠ DESIGN BLOCKER FOUND: the `EffectId` is OVERLOADED — it is
+    BOTH the `op_id` basis AND the index into `program.effects[]`, so you can't just give a shared effect a
+    global eid (the table index would go out of bounds). The fix DECOUPLES them: keep the local EffectId (table
+    index) + add a SEPARATE build-wide **op-id base** per effect (stable by origin-module+name, computed by the
+    driver + threaded resolve→types→codegen; codegen uses the global base for `(base<<16)|op`). Multi-layer.
+    (b) `linkonce_odr` dedup (an OPTIMIZATION — share generic/class-method instances across importers under the
+    ORIGIN module's qualified symbol; THIS is where the type-tag fix becomes necessary). Then (3/N) incremental
+    Salsa caching + per-unit `.o` repro. Keep the merge path + both fixed points green (additive).
     Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;
