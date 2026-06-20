@@ -2326,12 +2326,21 @@ For pasting into a fresh chat to bootstrap context:
     `effect_check` Pass 3 guards the `main` lookup (both behavior-preserving for the corpus — all has main). The
     D10 phase-go is GREEN: `main.sentinel` `use`s `add` from `util/math.sentinel` → main.o + util_math.o emitted
     INDEPENDENTLY → linked via `_S4util4math3add` → exit 42 (test asserts BOTH `.o` exist) + the two negatives.
-    ▶ **NEXT in (1/N): cross-module TYPES** — a `pub struct`/`pub enum` imported across units (layout import,
-    NO link symbol — units agree on layout, D4). The exports table + `extract_exports` extend to struct/enum
-    layouts; `resolve_module`/`check_module` register imported types in this unit's StructId/EnumId space from
-    the export; codegen emits the layout locally (each unit re-emits the `%Type`). Then (2/N) cross-module
-    generics (`linkonce_odr` + module-qualified type tags) + trait/impl/effects, (3/N) incremental caching +
-    repro. Keep the merge path + both fixed points green (additive). Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
+    ✅ **CROSS-MODULE TYPES (struct + enum) DONE** (`c2646ab` struct + `7b3529b` enum): a cross-module type
+    is LAYOUT-only (NO link symbol, D4), so the importer INLINES the imported decl — the driver clones the
+    per-unit program, CLEARS `uses`, and appends the imported `pub struct`/`pub enum` decls (`prog.structs/.enums.extend`);
+    `resolve_module` then re-materializes them in the unit's StructId/EnumId space, TRANSPARENT to types +
+    codegen (a `ResolvedStructDecl`/variant payload holds id-independent AST `TypeExpr`s, re-resolved per unit).
+    No resolve/types signature change. `ExportedItem = Fn|Struct|Enum`; `extract_exports` pulls pub structs
+    (non-generic) + enums. Phase-gos: main imports `Point`(struct)/`Shape`(enum w/ payloads) from
+    `util/geo.sentinel`, uses/matches LOCALLY → exit 42, both `.o` independent. ▶ **NEXT in (1/N): the
+    TYPE-IN-SIGNATURE case** — a cross-module fn whose signature takes/returns an imported type
+    (`sum(Point)->i64`). ⚠ This needs the fn-extern path to carry the param/return **`TypeExpr`s** (re-resolved
+    in the importer against its now-imported types) instead of resolved `Type`s (the scalar slice's
+    `TypedImportedFn` carries `Type`s, which reference the DEFINING unit's StructId — meaningless in the
+    importer). Order within a unit: register imported TYPES first, then the fn-externs whose sigs reference them.
+    Then (2/N) cross-module generics (`linkonce_odr` + module-qualified type tags) + trait/impl/effects, (3/N)
+    incremental caching + repro. Keep the merge path + both fixed points green (additive). Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;
     `collect_mono_instantiations` `:1738`; `mangle_mono_name`/`mangle_type` `:2049`/`:2067`; golden test

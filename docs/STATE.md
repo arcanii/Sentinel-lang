@@ -47,9 +47,17 @@ a pub-signature pre-pass (`extract_exports`, SCALAR sigs) → the exports table 
 `util/math.sentinel` → main.o + util_math.o emitted INDEPENDENTLY → linked via `_S4util4math3add` →
 exit 42** + `ModuleNotFound`/`PrivateItem` ui tests. Two whole-program assumptions relaxed for library
 units (no `main`): `MissingMain` moved to the `resolve()` wrapper; `effect_check` Pass 3 guards the
-`main` lookup (both behavior-preserving for the corpus). 1506 tests, both fixed points byte-identical,
-four-check green. ▶ NEXT (1/N): cross-module TYPES (struct/enum layout import — the slice is
-scalar-signature fns first); then (2/N) cross-module generics/traits/effects, (3/N) incremental caching.
+`main` lookup (both behavior-preserving for the corpus). ✅ CROSS-MODULE TYPES (struct + enum)
+LANDED — `c2646ab` `pub struct` + `7b3529b` `pub enum`: a cross-module type is LAYOUT-only (no link
+symbol, ADR 0037 D4), so the importer INLINES the imported decl into its per-unit program (driver
+clones the program, clears `uses`, appends the imported struct/enum decls) and re-materializes it in
+its own StructId/EnumId space — transparent to types + codegen (field/variant-payload types are
+id-independent AST TypeExprs, re-resolved per unit). Phase-gos: main imports `Point` (struct) /
+`Shape` (enum w/ payloads) from `util/geo.sentinel`, constructs + uses/matches locally → exit 42, both
+`.o` independent. 1508 tests, both fixed points byte-identical, four-check green. ▶ NEXT (1/N): the
+TYPE-IN-SIGNATURE case (a cross-module fn whose signature takes/returns an imported type, e.g.
+`sum(Point)->i64` — needs the fn-extern path to carry/re-resolve TypeExprs instead of resolved Types);
+then (2/N) cross-module generics/traits/effects, (3/N) incremental caching.
 ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and
