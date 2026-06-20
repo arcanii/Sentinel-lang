@@ -54,10 +54,16 @@ clones the program, clears `uses`, appends the imported struct/enum decls) and r
 its own StructId/EnumId space — transparent to types + codegen (field/variant-payload types are
 id-independent AST TypeExprs, re-resolved per unit). Phase-gos: main imports `Point` (struct) /
 `Shape` (enum w/ payloads) from `util/geo.sentinel`, constructs + uses/matches locally → exit 42, both
-`.o` independent. 1508 tests, both fixed points byte-identical, four-check green. ▶ NEXT (1/N): the
-TYPE-IN-SIGNATURE case (a cross-module fn whose signature takes/returns an imported type, e.g.
-`sum(Point)->i64` — needs the fn-extern path to carry/re-resolve TypeExprs instead of resolved Types);
-then (2/N) cross-module generics/traits/effects, (3/N) incremental caching.
+`.o` independent. ✅ **TYPE-IN-SIGNATURE too** (`5f59591`): a cross-module fn whose signature
+takes/returns an imported type (`sum(p: Point) -> i64`) now works — `TypedImportedFn` carries param/return
+**TypeExprs** that `check_module` RE-RESOLVES in the importer's type space (so `Point` → the importer's
+LOCAL StructId), subsuming the scalar path (`scalar_type` removed); the struct crosses by value (units
+agree on layout). Phase-go: main constructs Point + passes it to `sum` across the boundary → exit 42.
+🎯 **D.6 (1/N) — NON-GENERIC SEPARATE COMPILATION — is FUNCTIONALLY COMPLETE** (per ADR 0037 D9 (1/N):
+`resolve_module` + per-unit codegen + D7 mangling + extern-symbol cross-module fn calls + cross-module
+types [layout import] + deterministic multi-object link). 1509 tests, both fixed points byte-identical,
+four-check green. ▶ NEXT: (2/N) cross-module GENERICS (`linkonce_odr` + module-qualified type tags) +
+trait/impl methods + effects; then (3/N) incremental caching + per-unit repro.
 ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and

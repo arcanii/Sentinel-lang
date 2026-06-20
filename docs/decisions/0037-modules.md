@@ -1,17 +1,18 @@
 # ADR 0037: Phase D.6 — modules / multi-file (file-as-module + separate compilation)
 
-Status: PROPOSED — **the TRUE per-unit separate-compilation BACK END's FIRST VERTICAL
-SLICE is LANDED + WORKING** (`snc build --separate`): module-qualified D7 mangling +
-the per-unit ID model (D5.1) + the codegen-per-unit boundary (D5.2) are PINNED **and
-REALISED** — each module compiles to its OWN object independently, and a cross-module
-**fn call** resolves at LINK time via the module-qualified `abi-v1` symbol. The D10
-phase-go is green: `main.sentinel` `use`s a `pub fn` from `util/math.sentinel` → TWO
-`.o` emitted independently → `cc`-linked via `_S4util4math3add` → exit 42. Built
-ADDITIVELY (opt-in `--separate`; the Path A merge + both bootstrap fixed points are
-untouched). REMAINING in (1/N): cross-module **types** (struct/enum layout import — the
-slice is scalar-signature fns first); then (2/N) cross-module generics + trait/impl +
-effects, (3/N) incremental caching. The multi-file SURFACE shipped earlier via the
-interim Path A merge. The surface shipped via
+Status: PROPOSED — **D.6 (1/N) NON-GENERIC per-unit separate compilation is FUNCTIONALLY
+COMPLETE + WORKING** (`snc build --separate`): module-qualified D7 mangling + the per-unit
+ID model (D5.1) + the codegen-per-unit boundary (D5.2) are PINNED **and REALISED** — each
+module compiles to its OWN object independently; cross-module **fn calls** resolve at LINK
+time via the module-qualified `abi-v1` symbol, and cross-module **types** (`pub struct` /
+`pub enum`, incl. in fn signatures) are LAYOUT-imported (D4 — re-materialized per unit, no
+link symbol). Green phase-gos: cross-module fn (`add` → exit 42), struct (`Point` local use
+→ 42), enum (`Shape` w/ payloads, matched → 42), and the type-in-signature case
+(`sum(p: Point) -> i64`, a struct crossing by value → 42); + `ModuleNotFound`/`PrivateItem`
+rejections. Built ADDITIVELY (opt-in `--separate`; the Path A merge + both bootstrap fixed
+points untouched). ▶ REMAINING: (2/N) cross-module **generics** (`linkonce_odr` + module-
+qualified type tags) + trait/impl + effects; (3/N) incremental caching. The multi-file
+SURFACE shipped earlier via the interim Path A merge. The surface shipped via
 the lower-risk Path A merge — owner-chosen: whole-graph front-end + merge
 into one `Program` → existing pipeline; true per-unit separate-compilation back
 end deferred to the (1/N)/(2/N)/(3/N) sub-phases below (D9). Landed green: `use` front-end, module-graph discovery, top-level
