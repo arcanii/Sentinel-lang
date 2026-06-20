@@ -166,6 +166,22 @@ pub enum CodegenError {
 /// that have been moved away (the destination owns + drops them). See
 /// [`DropPlan`] in sentinel-borrow-check.
 pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenError> {
+    compile_to_object_for_module(hir, &[], output)
+}
+
+/// Phase D.6 / ADR 0037 D5/D7: compile ONE module of a separately-compiled
+/// program to its own object. `module_path` is this module's path (empty
+/// for a single-file program — the [`compile_to_object`] case). A LOCAL fn
+/// symbol is `mangle_qualified(module_path, name)`; an imported EXTERN
+/// (D5.1, `extern_origin` set) is DECLARED external under the DEFINING
+/// module's symbol `mangle_qualified(&origin, name)` and left a declaration
+/// (it has no body) for the linker to bind. `main` stays the bare C entry.
+/// Empty `module_path` → bare names, byte-identical to before the amendment.
+pub fn compile_to_object_for_module(
+    hir: &HirProgram,
+    module_path: &[String],
+    output: &Path,
+) -> Result<(), CodegenError> {
     let program = hir.program();
     let drop_plan = hir.drop_plan();
 
@@ -383,11 +399,19 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
                 .fn_type(&param_types, false)
         };
         // Phase D.6 / ADR 0037 D7: the LLVM symbol is module-qualified.
-        // A single-file program (the only case until the per-unit back
-        // end) is the empty-module-path case → the bare source name,
-        // byte-for-byte (the `abi-v1` amendment preserves single-file
-        // symbols). The per-unit driver will thread the real module path.
-        let symbol = mangle_qualified(&[], &signature.name);
+        // `main` is the bare C entry. An imported EXTERN (D5.1) is DECLARED
+        // under the DEFINING module's symbol (`mangle_qualified(&origin,
+        // name)`) — it has no TypedFnDef body, so Pass 2 (which iterates
+        // `program.fns`) leaves it a declaration the linker binds. A LOCAL
+        // fn is defined under THIS module's symbol. Empty `module_path`
+        // (single-file / Path-A) → bare names, byte-identical to before.
+        let symbol = if signature.is_main {
+            "main".to_string()
+        } else if let Some(origin) = &signature.extern_origin {
+            mangle_qualified(origin, &signature.name)
+        } else {
+            mangle_qualified(module_path, &signature.name)
+        };
         let fn_value = module.add_function(&symbol, fn_type, None);
         fns.insert(signature.id, fn_value);
     }
