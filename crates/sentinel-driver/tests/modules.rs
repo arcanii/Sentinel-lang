@@ -200,6 +200,29 @@ fn separate_cross_module_enum_compiles_and_runs() {
 }
 
 #[test]
+fn separate_cross_module_struct_in_signature_compiles_and_runs() {
+    // The type-in-signature case: a cross-module fn whose SIGNATURE takes an
+    // imported struct (`sum(p: Point) -> i64`). main imports BOTH Point and
+    // sum; it constructs a Point and passes it across the unit boundary. The
+    // extern `sum`'s `Point` param re-resolves to main's LOCAL Point id, and
+    // the C ABI passes the struct by value (both units agree on its layout).
+    // sum(Point { x: 40, y: 2 }) = 40 + 2 -> exit 42.
+    let dir = temp_project("separate_sig");
+    write(
+        dir.join("util/geo.sentinel"),
+        "pub struct Point { x: i64, y: i64 }\n\
+         pub fn sum(p: Point) -> i64 { p.x + p.y }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use util::geo::Point;\nuse util::geo::sum;\n\
+         fn main() -> i64 { sum(Point { x: 40, y: 2 }) }\n",
+    );
+    assert_eq!(build_and_run_separate(dir.join("main.sentinel")), 42);
+    assert!(dir.join("util_geo.o").exists(), "the util::geo unit's object should exist");
+}
+
+#[test]
 fn separate_import_of_private_item_is_rejected() {
     // The visibility gate (PrivateItem) runs in --separate too, before any
     // per-unit compilation.

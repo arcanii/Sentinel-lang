@@ -3299,11 +3299,15 @@ pub enum TypeError {
 pub struct TypedImportedFn {
     /// The imported fn's name (matches the resolved extern signature).
     pub name: String,
-    /// Parameter types, in order.
-    pub param_types: Vec<Type>,
-    /// Return type.
-    pub return_type: Type,
-    /// The fn's effect row (sorted-dedup EffectIds; empty for pure fns).
+    /// Parameter type *expressions*, in order — RE-RESOLVED in the
+    /// importing unit's type space, so a cross-module type (e.g. `Point`)
+    /// maps to the importer's local `StructId`/`EnumId` (the defining
+    /// unit's id is meaningless here) and scalars resolve as usual. The
+    /// importer must have imported any type a signature references.
+    pub param_type_exprs: Vec<TypeExpr>,
+    /// Return type expression (re-resolved in the importer).
+    pub return_type_expr: TypeExpr,
+    /// The fn's effect row (empty for pure fns; cross-module effects 2/N).
     pub effect_row: Vec<EffectId>,
 }
 
@@ -3833,15 +3837,19 @@ pub fn check_module(
     }
 
     // Phase D.6 / ADR 0037 D5.1: build a TypedFnSignature for each imported
-    // EXTERN (a resolved signature with `extern_origin` set, no body). Its
-    // param/return Types come from the matching `typed_imports` entry (the
-    // driver supplies them from the defining module's checked signature);
-    // codegen later declares it external. `imports == []` (single-file /
+    // EXTERN (a resolved signature with `extern_origin` set, no body). The
+    // extern's param/return type EXPRESSIONS (from the matching
+    // `typed_imports` entry) are RE-RESOLVED here in THIS unit's type space —
+    // `struct_table`/`enum_table` include the imported types (inlined by the
+    // driver), so a cross-module `Point` maps to the importer's local
+    // `StructId`, not the defining unit's. `imports == []` (single-file /
     // Path-A) → no externs → byte-identical. The `sort_by_key` below places
     // each by its FnId regardless of push order.
     if !imports.is_empty() {
         let imports_by_name: HashMap<&str, &TypedImportedFn> =
             imports.iter().map(|i| (i.name.as_str(), i)).collect();
+        // Externs are non-generic in this slice → empty type-param scope.
+        let extern_scope: TypeParamScope = HashMap::new();
         for sig in &program.fn_signatures {
             if sig.extern_origin.is_none() {
                 continue;
@@ -3849,13 +3857,38 @@ pub fn check_module(
             let imp = imports_by_name.get(sig.name.as_str()).expect(
                 "ADR 0037 D5.1: every extern fn_signature has a matching typed import",
             );
+            let mut param_types = Vec::with_capacity(imp.param_type_exprs.len());
+            for te in &imp.param_type_exprs {
+                param_types.push(resolve_type_expr_with_scope(
+                    te,
+                    &struct_table,
+                    &class_table,
+                    &enum_table,
+                    &extern_scope,
+                    &mut generic_instances,
+                    &mut refs,
+                    &mut secrets,
+                    &struct_type_param_counts,
+                )?);
+            }
+            let return_type = resolve_type_expr_with_scope(
+                &imp.return_type_expr,
+                &struct_table,
+                &class_table,
+                &enum_table,
+                &extern_scope,
+                &mut generic_instances,
+                &mut refs,
+                &mut secrets,
+                &struct_type_param_counts,
+            )?;
             typed_signatures.push(TypedFnSignature {
                 id: sig.id,
                 name: sig.name.clone(),
                 name_span: None,
                 type_params: vec![],
-                param_types: imp.param_types.clone(),
-                return_type: imp.return_type,
+                param_types,
+                return_type,
                 effect_row: imp.effect_row.clone(),
                 is_main: false,
                 is_runtime: false,
@@ -8476,6 +8509,12 @@ mod tests {
         check(&resolved).expect_err("expected type error")
     }
 
+    /// A bare `Ident` type expression (e.g. `i64`) for building
+    /// `TypedImportedFn`s in tests.
+    fn ident_te(name: &str) -> TypeExpr {
+        Spanned { kind: TypeExprKind::Ident(name.to_string()), span: 0..0 }
+    }
+
     #[test]
     fn smoke() {
         assert_eq!(crate_name(), "sentinel-types");
@@ -8501,8 +8540,8 @@ mod tests {
         .expect("resolve_module");
         let typed_imports = vec![TypedImportedFn {
             name: "add".to_string(),
-            param_types: vec![Type::I64, Type::I64],
-            return_type: Type::I64,
+            param_type_exprs: vec![ident_te("i64"), ident_te("i64")],
+            return_type_expr: ident_te("i64"),
             effect_row: vec![],
         }];
         let tp = check_module(&resolved, &typed_imports).expect("check_module");
@@ -8541,8 +8580,8 @@ mod tests {
         .expect("resolve_module");
         let typed_imports = vec![TypedImportedFn {
             name: "add".to_string(),
-            param_types: vec![Type::I64, Type::I64],
-            return_type: Type::I64,
+            param_type_exprs: vec![ident_te("i64"), ident_te("i64")],
+            return_type_expr: ident_te("i64"),
             effect_row: vec![],
         }];
         assert!(check_module(&resolved, &typed_imports).is_err());

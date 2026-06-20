@@ -917,8 +917,11 @@ fn run_build_merged(merged: Program, path: &str, output: Option<&str>) -> ExitCo
 struct ExportedFn {
     arity: usize,
     type_params_count: usize,
-    param_types: Vec<sentinel_types::Type>,
-    return_type: sentinel_types::Type,
+    /// Param/return type EXPRESSIONS (not resolved `Type`s) — the importer
+    /// re-resolves them in its own type space, so a cross-module type in a
+    /// signature (`sum(Point) -> i64`) maps to the importer's local id.
+    param_type_exprs: Vec<sentinel_ast::TypeExpr>,
+    return_type_expr: sentinel_ast::TypeExpr,
 }
 
 /// An exported item in the per-unit exports table: a `pub fn` (an extern
@@ -930,26 +933,11 @@ enum ExportedItem {
     Enum(sentinel_ast::EnumDecl),
 }
 
-/// Map a scalar [`sentinel_ast::TypeExpr`] to its [`sentinel_types::Type`].
-/// `None` for any non-scalar (named type / array / ref / nullable / generic
-/// / secret) — those cross a unit boundary as layout, a later D.6 slice.
-fn scalar_type(te: &sentinel_ast::TypeExpr) -> Option<sentinel_types::Type> {
-    match &te.kind {
-        sentinel_ast::TypeExprKind::Ident(n) => match n.as_str() {
-            "i64" => Some(sentinel_types::Type::I64),
-            "i32" => Some(sentinel_types::Type::I32),
-            "bool" => Some(sentinel_types::Type::Bool),
-            "u8" => Some(sentinel_types::Type::U8),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// Extract a module's `pub` items for the exports table: `pub fn`s (scalar
-/// params/return, non-generic, pure — FIRST SLICE) as Fn exports, and
-/// `pub struct`s (non-generic) as Struct exports (the importer inlines the
-/// decl — types are layout, ADR 0037 D4). Errors on an item outside the slice.
+/// Extract a module's `pub` items for the exports table: `pub fn`s (non-
+/// generic, pure — params/returns may reference imported types, re-resolved
+/// in the importer) as Fn exports, and `pub struct`s / `pub enum`s as the
+/// corresponding type exports (the importer inlines the decl — types are
+/// layout, ADR 0037 D4). Errors on an item outside the slice.
 fn extract_exports(program: &Program) -> Result<Vec<(String, ExportedItem)>, String> {
     let mut out = Vec::new();
     for f in &program.fns {
@@ -968,33 +956,17 @@ fn extract_exports(program: &Program) -> Result<Vec<(String, ExportedItem)>, Str
                 f.name
             ));
         }
-        let mut param_types = Vec::with_capacity(f.params.len());
-        for p in &f.params {
-            match scalar_type(&p.ty) {
-                Some(t) => param_types.push(t),
-                None => {
-                    return Err(format!(
-                        "`pub fn {}`: only scalar parameter types (i64/i32/bool/u8) cross a \
-                         unit boundary in this D.6 slice",
-                        f.name
-                    ))
-                }
-            }
-        }
-        let return_type = scalar_type(&f.return_type).ok_or_else(|| {
-            format!(
-                "`pub fn {}`: only scalar return types (i64/i32/bool/u8) cross a unit \
-                 boundary in this D.6 slice",
-                f.name
-            )
-        })?;
+        // Carry the param/return type EXPRESSIONS; the importer re-resolves
+        // them in its own type space (scalars + imported types). A signature
+        // type the importer can't resolve surfaces there as a normal
+        // UnknownType (the importer must `use` any type a signature names).
         out.push((
             f.name.clone(),
             ExportedItem::Fn(ExportedFn {
                 arity: f.params.len(),
                 type_params_count: f.type_params.len(),
-                param_types,
-                return_type,
+                param_type_exprs: f.params.iter().map(|p| p.ty.clone()).collect(),
+                return_type_expr: f.return_type.clone(),
             }),
         ));
     }
@@ -1128,8 +1100,8 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
                     });
                     typed_imports.push(sentinel_types::TypedImportedFn {
                         name: item,
-                        param_types: ex.param_types.clone(),
-                        return_type: ex.return_type,
+                        param_type_exprs: ex.param_type_exprs.clone(),
+                        return_type_expr: ex.return_type_expr.clone(),
                         effect_row: vec![],
                     });
                 }
