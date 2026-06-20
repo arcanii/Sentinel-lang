@@ -183,6 +183,23 @@ fn separate_cross_module_struct_compiles_and_runs() {
 }
 
 #[test]
+fn separate_cross_module_enum_compiles_and_runs() {
+    // Cross-module `pub enum` (ADR 0037 D4): same layout-only re-materialization
+    // as a struct (the importer re-emits the `{tag, ptr}` shape). main imports
+    // Shape + constructs/matches it locally (scalar payloads re-resolve in the
+    // importer). Shape::Square(42) -> the Square arm -> exit 42.
+    let dir = temp_project("separate_enum");
+    write(dir.join("util/geo.sentinel"), "pub enum Shape { Circle(i64), Square(i64) }\n");
+    write(
+        dir.join("main.sentinel"),
+        "use util::geo::Shape;\n\
+         fn main() -> i64 { let s = Shape::Square(42); match s { Shape::Circle(r) => r, Shape::Square(v) => v } }\n",
+    );
+    assert_eq!(build_and_run_separate(dir.join("main.sentinel")), 42);
+    assert!(dir.join("util_geo.o").exists(), "the util::geo unit's object should exist");
+}
+
+#[test]
 fn separate_import_of_private_item_is_rejected() {
     // The visibility gate (PrivateItem) runs in --separate too, before any
     // per-unit compilation.

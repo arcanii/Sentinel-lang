@@ -927,6 +927,7 @@ struct ExportedFn {
 enum ExportedItem {
     Fn(ExportedFn),
     Struct(sentinel_ast::StructDecl),
+    Enum(sentinel_ast::EnumDecl),
 }
 
 /// Map a scalar [`sentinel_ast::TypeExpr`] to its [`sentinel_types::Type`].
@@ -1012,6 +1013,14 @@ fn extract_exports(program: &Program) -> Result<Vec<(String, ExportedItem)>, Str
             ));
         }
         out.push((s.name.clone(), ExportedItem::Struct(s.clone())));
+    }
+    // `pub enum`s — same layout-only re-materialization (enums are
+    // non-generic; variant payloads re-resolve in the importer).
+    for e in &program.enums {
+        if e.visibility != sentinel_ast::Visibility::Public {
+            continue;
+        }
+        out.push((e.name.clone(), ExportedItem::Enum(e.clone())));
     }
     Ok(out)
 }
@@ -1104,6 +1113,7 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         let mut import_fns: Vec<sentinel_resolve::ImportedFn> = Vec::new();
         let mut typed_imports: Vec<sentinel_types::TypedImportedFn> = Vec::new();
         let mut imported_structs: Vec<sentinel_ast::StructDecl> = Vec::new();
+        let mut imported_enums: Vec<sentinel_ast::EnumDecl> = Vec::new();
         for u in &m.program.uses {
             let item = u.path.last().expect("validated: >= 1 segment").clone();
             let origin = u.path[..u.path.len() - 1].to_vec();
@@ -1124,10 +1134,11 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
                     });
                 }
                 Some(ExportedItem::Struct(decl)) => imported_structs.push(decl.clone()),
+                Some(ExportedItem::Enum(decl)) => imported_enums.push(decl.clone()),
                 None => {
                     eprintln!(
-                        "snc: `{}` from `{}` is not an exported scalar `pub fn` / `pub struct` \
-                         (this D.6 slice)",
+                        "snc: `{}` from `{}` is not an exported `pub fn` / `pub struct` / \
+                         `pub enum` (this D.6 slice)",
                         item,
                         origin.join("::")
                     );
@@ -1136,14 +1147,16 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
             }
         }
 
-        // Build this unit's program: own items + the inlined imported struct
+        // Build this unit's program: own items + the inlined imported type
         // decls, with `use`s cleared (the driver has resolved them — fns via
-        // `import_fns`, structs inlined here). resolve_module then
-        // re-materializes the imported structs in this unit's StructId space
-        // alongside its own, transparent to the types + codegen layers.
+        // `import_fns`, types inlined here). resolve_module then
+        // re-materializes the imported structs/enums in this unit's
+        // StructId/EnumId space alongside its own, transparent to the types +
+        // codegen layers (a type is layout — no link symbol, ADR 0037 D4).
         let mut prog = m.program.clone();
         prog.uses.clear();
         prog.structs.extend(imported_structs);
+        prog.enums.extend(imported_enums);
 
         // resolve_module → check_module → effect → borrow → CT → hir → object.
         let resolved = match sentinel_resolve::resolve_module(&prog, &import_fns) {
