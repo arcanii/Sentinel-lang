@@ -240,6 +240,28 @@ fn separate_cross_module_generic_fn_compiles_and_runs() {
 }
 
 #[test]
+fn separate_cross_module_generic_over_cross_module_struct_compiles_and_runs() {
+    // Generics over a CROSS-MODULE struct work in the inline-local model:
+    // main imports both `Point` (a struct) and `id<T>` (a generic), then
+    // instantiates id<Point>. Because the instance is qualified by the
+    // IMPORTER's path (`_S4main…id__Point`) and main self-contains both the
+    // inlined Point + the instance, the type-tag-collision concern (which
+    // would bite an ORIGIN-qualified linkonce_odr model) does not arise.
+    // id(Point { 40, 2 }) returns it; q.x + q.y -> exit 42.
+    let dir = temp_project("separate_gen_struct");
+    write(
+        dir.join("util/geo.sentinel"),
+        "pub struct Point { x: i64, y: i64 }\npub fn id<T>(x: T) -> T { x }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use util::geo::Point;\nuse util::geo::id;\n\
+         fn main() -> i64 { let p = Point { x: 40, y: 2 }; let q = id(p); q.x + q.y }\n",
+    );
+    assert_eq!(build_and_run_separate(dir.join("main.sentinel")), 42);
+}
+
+#[test]
 fn separate_import_of_private_item_is_rejected() {
     // The visibility gate (PrivateItem) runs in --separate too, before any
     // per-unit compilation.
