@@ -62,8 +62,17 @@ agree on layout). Phase-go: main constructs Point + passes it to `sum` across th
 🎯 **D.6 (1/N) — NON-GENERIC SEPARATE COMPILATION — is FUNCTIONALLY COMPLETE** (per ADR 0037 D9 (1/N):
 `resolve_module` + per-unit codegen + D7 mangling + extern-symbol cross-module fn calls + cross-module
 types [layout import] + deterministic multi-object link). 1509 tests, both fixed points byte-identical,
-four-check green. ▶ NEXT: (2/N) cross-module GENERICS (`linkonce_odr` + module-qualified type tags) +
-trait/impl methods + effects; then (3/N) incremental caching + per-unit repro.
+four-check green. ✅ **(2/N) OPEN — cross-module GENERIC FNS work** (`f533a62`): a `pub fn id<T>`
+instantiated in a different module is INLINED into the importer + monomorphized LOCALLY (the simplest
+correct model; `linkonce_odr` dedup deferred) — `ExportedItem::GenericFn(Box<FnDef>)`, the importer
+`prog.fns.extend`s the imported generic body, and codegen module-qualifies the mono instance symbol by
+THIS unit's path (`mangle_qualified(module_path, &mangle_mono_name(…))` → `_S4main…id__i64`; calls
+resolve via the `(FnId, args)` map not by name, so 1 site; empty path → bare = single-file byte-identical).
+Phase-go: main imports `id` from util/math, instantiates id<i64> → exit 42. 1510 tests, both fixed points
+byte-identical. ▶ NEXT in (2/N): module-qualify cross-module **type tags** in mono keys (`mangle_type`
+renders a Struct by bare name → `id<a::b::Point>` vs `id<c::d::Point>` would mis-key; needed before
+generics over cross-module STRUCTS) + `linkonce_odr` dedup + cross-module trait/impl/effects; then (3/N)
+incremental caching + per-unit repro.
 ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and

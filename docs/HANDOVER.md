@@ -2342,13 +2342,23 @@ For pasting into a fresh chat to bootstrap context:
     constructs Point + passes it → 42.
     🎯 **D.6 (1/N) — NON-GENERIC SEPARATE COMPILATION — is FUNCTIONALLY COMPLETE** (ADR 0037 D9 (1/N):
     `resolve_module` + per-unit codegen + D7 mangling + extern-symbol cross-module fn calls + cross-module
-    types [struct/enum layout import, incl. in fn signatures] + deterministic multi-object link). ▶ **NEXT:
-    (2/N) cross-module GENERICS** — the single largest mechanic: per-unit instantiation + `linkonce_odr` so
-    units that share `id<i64>` dedup at link; a `pub` generic fn's BODY crosses the boundary (unlike a
-    monomorphic fn — so the exports table carries generic bodies); ⚠ module-qualify cross-module **type tags**
-    in mono keys (`mangle_type` renders a Struct by bare name today → `id<a::b::Point>` and `id<c::d::Point>`
-    would `linkonce_odr`-mis-dedup) — see D6/D7. + cross-module trait/impl methods + effects. Then (3/N)
-    incremental Salsa caching + per-unit `.o` repro. Keep the merge path + both fixed points green (additive).
+    types [struct/enum layout import, incl. in fn signatures] + deterministic multi-object link).
+    ✅ **(2/N) OPEN — cross-module GENERIC FNS WORK** (`f533a62`): a `pub fn id<T>` instantiated in a
+    different module is INLINED into the importer + monomorphized LOCALLY (the SIMPLEST correct model;
+    `linkonce_odr` dedup DEFERRED, allowed by the ADR Revisit). `ExportedItem::GenericFn(Box<FnDef>)` carries
+    the body; the importer `prog.fns.extend`s it (resolve/check/`collect_mono` treat it as a local generic);
+    codegen module-qualifies the mono symbol by THIS unit's path: `mangle_qualified(module_path,
+    &mangle_mono_name(…))` → `_S4main…id__i64` (each importer self-contains its instances, no clash).
+    ⚠ CALLS resolve via the `(FnId, Vec<Type>)` `mono_fns` map, NOT by name — so the symbol rename is ONE
+    codegen site (`compile_to_object_for_module`'s mono pre-pass) + the call sites follow automatically; empty
+    path → bare = single-file byte-identical. Phase-go: main imports `id` from util/math, instantiates id<i64>
+    (inferred from 42) → exit 42. ▶ **NEXT in (2/N):** (a) module-qualify cross-module **type tags** in mono
+    keys — `mangle_type` renders a Struct/Enum by BARE name, so `id<a::b::Point>` vs `id<c::d::Point>` would
+    mis-key; needed BEFORE generics over cross-module STRUCTS (the current slice is generics over PRIMITIVES /
+    own types). (b) `linkonce_odr` dedup (optimization — emit cross-unit-shared instances under the ORIGIN
+    module's qualified symbol + `linkonce_odr` so importers share one copy). (c) cross-module trait/impl methods
+    + effects. Then (3/N) incremental Salsa caching + per-unit `.o` repro. Keep the merge path + both fixed
+    points green (additive).
     Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;
