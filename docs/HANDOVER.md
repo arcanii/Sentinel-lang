@@ -2083,12 +2083,20 @@ For pasting into a fresh chat to bootstrap context:
     itself, each stage differentially validated against the Rust `snc` oracle).
 
     Verify HEAD with `git log -1` — HEAD is a `docs: session handoff` commit (this verify-HEAD +
-    RESUME-AT refresh), atop the **ADR 0037 per-unit-back-end flip** (`7696f5d` — docs(adr 0037): flip
-    toward the per-unit separate-compilation back end; PINS D7 module-qualified mangling [`_S` +
-    length-prefixed module segments + a length-prefixed item; empty module path → the bare item, so
-    single-file ABI is byte-unchanged → an AMENDMENT not abi-v2] + the per-unit ID model [D5.1
-    extern-fn-in-FnId-space] + the codegen-per-unit boundary [D5.2, the 3 whole-program assumptions];
-    docs-only, the ADR-first gate before any code), atop the prior **session handoff** (`4825529`),
+    RESUME-AT refresh), atop the **recon-validated recipe for cross-unit effect perform/handle**
+    (`e98b233`, docs). ⬇ THIS SESSION (25 commits) built the **per-unit SEPARATE-COMPILATION back end**
+    (ADR 0037 (a)) from the proposed ADR to broadly functional — `snc build --separate` compiles each module
+    to its OWN `.o`, linked by module-qualified `abi-v1` symbols, for EVERY `pub` item kind. Chain (newest
+    feats first): `a0e9595` cross-module `pub effect` decls (first cut) · `934f08c` cross-module traits +
+    module-qualified class/impl methods · `9a8376e`/`f533a62` cross-module generic fns (over primitives + a
+    cross-module struct) · `5f59591` type-in-signature fns · `7b3529b`/`c2646ab` cross-module enum/struct
+    layout import · `b8d0ecb` `run_build_separate` (THE WORKING BACK END — D10 phase-go: two `.o` linked via
+    `_S4util4math3add` → exit 42) · `55bb5f6` `compile_to_object_for_module` + extern decls · `a6c6113`
+    `check_module` · `8bd44c3` `resolve_module` · `671b012` the D7 `mangle_qualified` ABI freeze ·
+    `c8ce078`/`7696f5d` the ADR 0037 flip (D7/D5.1/D5.2 PINNED, the ADR-first gate). **1513 tests, four-check
+    green, both bootstrap fixed points byte-identical across ALL 25 commits** (the per-unit machinery is
+    ADDITIVE — dormant on the single-file / Path-A-merge paths, which stay byte-unchanged). Atop the prior
+    **session handoff** (`4825529`),
     atop the **scg parser-hardening mirror** (`99d5ee1` — feat(selfhost): mirror
     the P2.5 parser deep-nesting hardening into scg. The self-hosted parser had the same DoS (SIGSEGV at
     ~6000 nested brackets). A faithful depth limit would thread `&mut i64` through ~30 recursive parser
