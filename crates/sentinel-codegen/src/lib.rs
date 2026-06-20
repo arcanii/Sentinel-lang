@@ -778,7 +778,15 @@ pub fn compile_to_object_for_module(
     // generic-fn-to-generic-fn calls).
     let mut mono_fns: HashMap<(FnId, Vec<Type>), FunctionValue> = HashMap::new();
     for ((fn_id, args), def) in &mono_defs {
-        let mangled = mangle_mono_name(&def.name, args, program);
+        // Phase D.6 / ADR 0037 D6/D7: module-qualify the instance symbol by
+        // THIS unit's module path. Cross-module generics are inlined +
+        // monomorphized per importer, so each importer's instance is uniquely
+        // named (`_S4main6id__i64`) — no cross-unit clash, no `linkonce_odr`
+        // needed yet. Calls resolve via the `mono_fns` (FnId, args) map, not
+        // by name, so this rename is self-contained. Empty `module_path`
+        // (single-file / Path-A) → the bare `id__i64`, byte-identical.
+        let mangled =
+            mangle_qualified(module_path, &mangle_mono_name(&def.name, args, program));
         let param_types: Vec<_> = def
             .params
             .iter()

@@ -223,6 +223,23 @@ fn separate_cross_module_struct_in_signature_compiles_and_runs() {
 }
 
 #[test]
+fn separate_cross_module_generic_fn_compiles_and_runs() {
+    // ADR 0037 D6 cross-module GENERICS (2/N): a `pub fn id<T>` is INLINED
+    // into the importer + monomorphized LOCALLY — its instance is qualified
+    // by the importer's module path (`_S4main…id__i64`), self-contained with
+    // no link symbol (no `linkonce_odr` dedup yet). main imports id +
+    // instantiates id<i64> (inferred from `42`). id(42) -> exit 42.
+    let dir = temp_project("separate_generic");
+    write(dir.join("util/math.sentinel"), "pub fn id<T>(x: T) -> T { x }\n");
+    write(
+        dir.join("main.sentinel"),
+        "use util::math::id;\nfn main() -> i64 { id(42) }\n",
+    );
+    assert_eq!(build_and_run_separate(dir.join("main.sentinel")), 42);
+    assert!(dir.join("main.o").exists(), "the entry unit's object should exist");
+}
+
+#[test]
 fn separate_import_of_private_item_is_rejected() {
     // The visibility gate (PrivateItem) runs in --separate too, before any
     // per-unit compilation.

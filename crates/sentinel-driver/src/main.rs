@@ -924,13 +924,18 @@ struct ExportedFn {
     return_type_expr: sentinel_ast::TypeExpr,
 }
 
-/// An exported item in the per-unit exports table: a `pub fn` (an extern
-/// the importer DECLARES + links to) or a `pub struct` (a layout the
-/// importer RE-MATERIALIZES — types carry no link symbol, ADR 0037 D4).
+/// An exported item in the per-unit exports table. A non-generic `pub fn`
+/// is an EXTERN the importer declares + links to; a `pub struct`/`pub enum`
+/// is a layout the importer RE-MATERIALIZES (no link symbol, ADR 0037 D4);
+/// a GENERIC `pub fn`'s BODY crosses the boundary (ADR 0037 D6) — the
+/// importer INLINES it + monomorphizes LOCALLY, its instances qualified by
+/// the importer's module path (each importer self-contains them; no link
+/// symbol, no `linkonce_odr` dedup yet — a 2/N optimization).
 enum ExportedItem {
     Fn(ExportedFn),
     Struct(sentinel_ast::StructDecl),
     Enum(sentinel_ast::EnumDecl),
+    GenericFn(Box<sentinel_ast::FnDef>),
 }
 
 /// Extract a module's `pub` items for the exports table: `pub fn`s (non-
@@ -944,22 +949,21 @@ fn extract_exports(program: &Program) -> Result<Vec<(String, ExportedItem)>, Str
         if f.visibility != sentinel_ast::Visibility::Public {
             continue;
         }
-        if !f.type_params.is_empty() {
-            return Err(format!(
-                "`pub fn {}`: cross-module generics are ADR 0037 (2/N), not yet in --separate",
-                f.name
-            ));
-        }
         if !f.effect_row.is_empty() {
             return Err(format!(
                 "`pub fn {}`: cross-module effects are a later D.6 slice, not yet in --separate",
                 f.name
             ));
         }
-        // Carry the param/return type EXPRESSIONS; the importer re-resolves
-        // them in its own type space (scalars + imported types). A signature
-        // type the importer can't resolve surfaces there as a normal
-        // UnknownType (the importer must `use` any type a signature names).
+        // A GENERIC `pub fn` exports its BODY (ADR 0037 D6) — the importer
+        // inlines it + monomorphizes locally. A non-generic one is an extern
+        // carrying its param/return TYPE EXPRESSIONS (re-resolved in the
+        // importer, so a cross-module type in a sig maps to the local id; an
+        // un-resolvable type surfaces there as a normal UnknownType).
+        if !f.type_params.is_empty() {
+            out.push((f.name.clone(), ExportedItem::GenericFn(Box::new(f.clone()))));
+            continue;
+        }
         out.push((
             f.name.clone(),
             ExportedItem::Fn(ExportedFn {
@@ -1086,6 +1090,7 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         let mut typed_imports: Vec<sentinel_types::TypedImportedFn> = Vec::new();
         let mut imported_structs: Vec<sentinel_ast::StructDecl> = Vec::new();
         let mut imported_enums: Vec<sentinel_ast::EnumDecl> = Vec::new();
+        let mut imported_generic_fns: Vec<sentinel_ast::FnDef> = Vec::new();
         for u in &m.program.uses {
             let item = u.path.last().expect("validated: >= 1 segment").clone();
             let origin = u.path[..u.path.len() - 1].to_vec();
@@ -1107,6 +1112,9 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
                 }
                 Some(ExportedItem::Struct(decl)) => imported_structs.push(decl.clone()),
                 Some(ExportedItem::Enum(decl)) => imported_enums.push(decl.clone()),
+                Some(ExportedItem::GenericFn(fndef)) => {
+                    imported_generic_fns.push(fndef.as_ref().clone())
+                }
                 None => {
                     eprintln!(
                         "snc: `{}` from `{}` is not an exported `pub fn` / `pub struct` / \
@@ -1120,15 +1128,17 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         }
 
         // Build this unit's program: own items + the inlined imported type
-        // decls, with `use`s cleared (the driver has resolved them — fns via
-        // `import_fns`, types inlined here). resolve_module then
-        // re-materializes the imported structs/enums in this unit's
-        // StructId/EnumId space alongside its own, transparent to the types +
-        // codegen layers (a type is layout — no link symbol, ADR 0037 D4).
+        // decls + imported GENERIC fn bodies, with `use`s cleared (the driver
+        // has resolved them — non-generic fns via `import_fns` externs; types
+        // + generic fns inlined here). resolve_module re-materializes the
+        // imported structs/enums in this unit's StructId/EnumId space and
+        // treats the imported generic fns as local generics (monomorphized
+        // locally, ADR 0037 D6), transparent to the types + codegen layers.
         let mut prog = m.program.clone();
         prog.uses.clear();
         prog.structs.extend(imported_structs);
         prog.enums.extend(imported_enums);
+        prog.fns.extend(imported_generic_fns);
 
         // resolve_module → check_module → effect → borrow → CT → hir → object.
         let resolved = match sentinel_resolve::resolve_module(&prog, &import_fns) {
