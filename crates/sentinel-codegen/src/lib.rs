@@ -692,7 +692,10 @@ pub fn compile_to_object_for_module(
                 );
             }
             let fn_type = void_ty_global.fn_type(&param_tys, false);
-            let mangled = format!("{}__init", cd.name);
+            // Phase D.6 / ADR 0037 D7: module-qualify the symbol (calls
+            // resolve via `class_init_fns` by ClassId, not by name, so the
+            // rename is self-contained). Empty path → bare, unchanged.
+            let mangled = mangle_qualified(module_path, &format!("{}__init", cd.name));
             let fn_value = module.add_function(&mangled, fn_type, None);
             class_init_fns.insert(cd.id, fn_value);
         }
@@ -721,7 +724,9 @@ pub fn compile_to_object_for_module(
                 &secrets,
             )
             .fn_type(&param_tys, false);
-            let mangled = format!("{}__{}", cd.name, m.name);
+            // Phase D.6 / ADR 0037 D7: module-qualified (calls via
+            // `class_method_fns` by (ClassId, idx); empty path → bare).
+            let mangled = mangle_qualified(module_path, &format!("{}__{}", cd.name, m.name));
             let fn_value = module.add_function(&mangled, fn_type, None);
             class_method_fns.insert((cd.id, m_idx), fn_value);
         }
@@ -760,9 +765,11 @@ pub fn compile_to_object_for_module(
             )
             .fn_type(&param_tys, false);
             let prefix = imp.name.as_deref().unwrap_or("default");
-            let mangled = format!(
-                "{prefix}__{}__{}__{}",
-                imp.type_name, imp.trait_name, m.name
+            // Phase D.6 / ADR 0037 D7: module-qualified (calls via
+            // `impl_method_fns` by (ImplId, idx); empty path → bare).
+            let mangled = mangle_qualified(
+                module_path,
+                &format!("{prefix}__{}__{}__{}", imp.type_name, imp.trait_name, m.name),
             );
             let fn_value = module.add_function(&mangled, fn_type, None);
             impl_method_fns.insert((imp.id, m_idx), fn_value);

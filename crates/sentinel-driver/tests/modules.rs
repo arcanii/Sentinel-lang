@@ -262,6 +262,30 @@ fn separate_cross_module_generic_over_cross_module_struct_compiles_and_runs() {
 }
 
 #[test]
+fn separate_cross_module_trait_compiles_and_runs() {
+    // Cross-module `pub trait`: defined in `counter`, IMPORTED into the entry
+    // which impls it for its OWN class + dispatches. The trait decl is
+    // re-materialized (no link symbol); the entry's class init/method + impl
+    // method emit under its module-qualified symbols (`_S4main…`). The defining
+    // `counter` unit has no code (a trait is a decl). t.tick(42): 0 + 42 -> 42.
+    let dir = temp_project("separate_trait");
+    write(
+        dir.join("counter.sentinel"),
+        "pub trait Counter {\n    fn tick(self: &mut Self, n: i64) -> i64;\n}\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use counter::Counter;\n\
+         class Tally {\n    let count: i64;\n    pub init() { self.count = 0; 0 }\n}\n\
+         impl as Counter for Tally {\n\
+         \x20   fn tick(self: &mut Self, n: i64) -> i64 { self.count = self.count + n; self.count }\n\
+         }\n\
+         fn main() -> i64 { let mut t: Tally = Tally::init(); t.tick(42) }\n",
+    );
+    assert_eq!(build_and_run_separate(dir.join("main.sentinel")), 42);
+}
+
+#[test]
 fn separate_import_of_private_item_is_rejected() {
     // The visibility gate (PrivateItem) runs in --separate too, before any
     // per-unit compilation.

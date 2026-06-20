@@ -936,6 +936,10 @@ enum ExportedItem {
     Struct(sentinel_ast::StructDecl),
     Enum(sentinel_ast::EnumDecl),
     GenericFn(Box<sentinel_ast::FnDef>),
+    /// A `pub trait` — a decl the importer RE-MATERIALIZES (no link symbol);
+    /// the importer impls it for its OWN class + dispatches, emitting the
+    /// impl methods under its own module-qualified symbols (ADR 0037 D6).
+    Trait(Box<sentinel_ast::TraitDecl>),
 }
 
 /// Extract a module's `pub` items for the exports table: `pub fn`s (non-
@@ -997,6 +1001,14 @@ fn extract_exports(program: &Program) -> Result<Vec<(String, ExportedItem)>, Str
             continue;
         }
         out.push((e.name.clone(), ExportedItem::Enum(e.clone())));
+    }
+    // `pub trait`s — a decl re-materialized in the importer, which impls it
+    // for its own class (the impl + class are the importer's own; ADR D6).
+    for t in &program.traits {
+        if t.visibility != sentinel_ast::Visibility::Public {
+            continue;
+        }
+        out.push((t.name.clone(), ExportedItem::Trait(Box::new(t.clone()))));
     }
     Ok(out)
 }
@@ -1091,6 +1103,7 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         let mut imported_structs: Vec<sentinel_ast::StructDecl> = Vec::new();
         let mut imported_enums: Vec<sentinel_ast::EnumDecl> = Vec::new();
         let mut imported_generic_fns: Vec<sentinel_ast::FnDef> = Vec::new();
+        let mut imported_traits: Vec<sentinel_ast::TraitDecl> = Vec::new();
         for u in &m.program.uses {
             let item = u.path.last().expect("validated: >= 1 segment").clone();
             let origin = u.path[..u.path.len() - 1].to_vec();
@@ -1115,10 +1128,11 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
                 Some(ExportedItem::GenericFn(fndef)) => {
                     imported_generic_fns.push(fndef.as_ref().clone())
                 }
+                Some(ExportedItem::Trait(decl)) => imported_traits.push(decl.as_ref().clone()),
                 None => {
                     eprintln!(
                         "snc: `{}` from `{}` is not an exported `pub fn` / `pub struct` / \
-                         `pub enum` (this D.6 slice)",
+                         `pub enum` / `pub trait` (this D.6 slice)",
                         item,
                         origin.join("::")
                     );
@@ -1139,6 +1153,7 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         prog.structs.extend(imported_structs);
         prog.enums.extend(imported_enums);
         prog.fns.extend(imported_generic_fns);
+        prog.traits.extend(imported_traits);
 
         // resolve_module → check_module → effect → borrow → CT → hir → object.
         let resolved = match sentinel_resolve::resolve_module(&prog, &import_fns) {
