@@ -2377,6 +2377,27 @@ For pasting into a fresh chat to bootstrap context:
     global eid (the table index would go out of bounds). The fix DECOUPLES them: keep the local EffectId (table
     index) + add a SEPARATE build-wide **op-id base** per effect (stable by origin-module+name, computed by the
     driver + threaded resolve→types→codegen; codegen uses the global base for `(base<<16)|op`). Multi-layer.
+    ▶▶ **RECON-VALIDATED IMPLEMENTATION RECIPE** (mapped this session — execute fresh):
+    (1) THE OP-ID CHOKEPOINT is `encode_op_id(effect_id, op_index) = (eid.0<<16)|(op&0xFFFF)` —
+    `sentinel-codegen/src/lib.rs:6557`, used at exactly 2 sites (`lower_perform` ~`:6002` + the handle dispatch
+    ~`:6309`); the `snc llvm` ORACLE has an identical copy at `crates/sentinel-driver/src/llvm_dump.rs:69`.
+    Make codegen consult a build-wide base map keyed by EFFECT NAME with `.unwrap_or(eid.0)` fallback → empty
+    map = the corpus = `eid` = BYTE-IDENTICAL (so the oracle differential + both fixed points stay green WITHOUT
+    touching `llvm_dump.rs`). Key by name for the MVP (⚠ same-named cross-module effects would collide —
+    origin-qualified key is the robust upgrade). The map lives on `CodegenCtx` (built at `:969`), threaded as a
+    new param to `compile_to_object_for_module` (the `compile_to_object` wrapper + `run_build_merged` pass empty;
+    `run_build_separate` computes name→index, sorted, from ALL graph effects). `TypedProgram.effects[eid].name`
+    is the key (see `TypedEffectDecl`, `sentinel-types/src/lib.rs:2077`).
+    (2) THE COUPLED PIECE — extern EFFECTING fns (`io::source` has `effect_row {Io}`): `extract_exports` must
+    STOP rejecting `pub fn`s with an `effect_row` + carry the effect-row NAMES; `ExportedFn` + `TypedImportedFn`
+    carry `effect_row_names`; `check_module` RE-RESOLVES them to the IMPORTER's EffectIds (against the inlined
+    effect — exactly like the param-TypeExpr re-resolution `5f59591` did for types). The extern's Kont* ABI then
+    follows automatically (`uses_kont_abi` sees the non-empty row → returns `ptr`). The kont itself crosses the
+    boundary via the runtime (opaque `sentinel_kont_*` ptr), so no symbol work there.
+    (3) ⚠⚠ TEST TRAP: a SINGLE-effect program passes WITHOUT the base map (io's eid 0 == importer's eid 0, so
+    op_ids coincide) — a silent fragility. The phase-go MUST use a MULTI-effect program (e.g. the importer
+    declares an OWN effect BEFORE the imported one, shifting its eid) so the base map is actually load-bearing.
+    Reference shape: the merge `cross_module_effect_compiles_and_runs` test (io::source performs, main handles).
     (b) `linkonce_odr` dedup (an OPTIMIZATION — share generic/class-method instances across importers under the
     ORIGIN module's qualified symbol; THIS is where the type-tag fix becomes necessary). Then (3/N) incremental
     Salsa caching + per-unit `.o` repro. Keep the merge path + both fixed points green (additive).
