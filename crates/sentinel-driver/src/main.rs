@@ -1148,6 +1148,10 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         let mut imported_structs: Vec<sentinel_ast::StructDecl> = Vec::new();
         let mut imported_enums: Vec<sentinel_ast::EnumDecl> = Vec::new();
         let mut imported_generic_fns: Vec<sentinel_ast::FnDef> = Vec::new();
+        // ADR 0037 (2/N) `linkonce_odr`: (imported generic fn name → its origin
+        // module path), so codegen can emit collision-safe instances under the
+        // ORIGIN symbol + dedup them across importers.
+        let mut imported_generic_origins: Vec<(String, Vec<String>)> = Vec::new();
         let mut imported_traits: Vec<sentinel_ast::TraitDecl> = Vec::new();
         let mut imported_effects: Vec<sentinel_ast::EffectDecl> = Vec::new();
         for u in &m.program.uses {
@@ -1172,6 +1176,7 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
                 Some(ExportedItem::Struct(decl)) => imported_structs.push(decl.clone()),
                 Some(ExportedItem::Enum(decl)) => imported_enums.push(decl.clone()),
                 Some(ExportedItem::GenericFn(fndef)) => {
+                    imported_generic_origins.push((fndef.name.clone(), origin.clone()));
                     imported_generic_fns.push(fndef.as_ref().clone())
                 }
                 Some(ExportedItem::Trait(decl)) => imported_traits.push(decl.as_ref().clone()),
@@ -1211,6 +1216,21 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
                 return ExitCode::from(1);
             }
         };
+        // ADR 0037 (2/N) `linkonce_odr`: map each imported generic's resolved
+        // FnId → its origin module path (resolve assigned the id when the body
+        // was inlined; names are unique — resolve rejects collisions). Codegen
+        // emits collision-safe instances of these under the origin symbol so
+        // importers share one definition.
+        let generic_origins: HashMap<sentinel_resolve::FnId, Vec<String>> = imported_generic_origins
+            .iter()
+            .filter_map(|(name, origin)| {
+                resolved
+                    .fn_signatures
+                    .iter()
+                    .find(|s| &s.name == name)
+                    .map(|s| (s.id, origin.clone()))
+            })
+            .collect();
         let has_main = resolved.fn_signatures.iter().any(|s| s.is_main);
         if is_entry && !has_main {
             eprintln!("snc: the entry module `{}` has no `main`", m.path.join("::"));
@@ -1256,11 +1276,6 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         let obj_path = obj_dir.join(format!("{}.o", m.path.join("_")));
         // The build-wide op-id base map (computed above) is passed to EVERY
         // unit so a cross-UNIT `perform`/`handle` pair encodes the same op id.
-        // ADR 0037 (2/N) `linkonce_odr`: the imported-generic origin map is
-        // EMPTY here for now (generics still emit importer-qualified, per the
-        // inline-local model) — a later chunk builds it so collision-safe
-        // instances dedup across units.
-        let generic_origins: HashMap<sentinel_resolve::FnId, Vec<String>> = HashMap::new();
         if let Err(err) = sentinel_codegen::compile_to_object_for_module(
             &hir,
             &m.path,

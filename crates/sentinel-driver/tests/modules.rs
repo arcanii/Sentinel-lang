@@ -225,10 +225,11 @@ fn separate_cross_module_struct_in_signature_compiles_and_runs() {
 #[test]
 fn separate_cross_module_generic_fn_compiles_and_runs() {
     // ADR 0037 D6 cross-module GENERICS (2/N): a `pub fn id<T>` is INLINED
-    // into the importer + monomorphized LOCALLY — its instance is qualified
-    // by the importer's module path (`_S4main…id__i64`), self-contained with
-    // no link symbol (no `linkonce_odr` dedup yet). main imports id +
-    // instantiates id<i64> (inferred from `42`). id(42) -> exit 42.
+    // into the importer + monomorphized LOCALLY. The i64 instance is
+    // collision-safe, so it now emits under the ORIGIN-qualified symbol
+    // (`_S4util4math…id__i64`) with `linkonce_odr` linkage (deduped across
+    // importers; see `separate_cross_module_generic_is_linkonce_deduped_*`).
+    // main imports id + instantiates id<i64> (inferred from `42`). id(42) -> 42.
     let dir = temp_project("separate_generic");
     write(dir.join("util/math.sentinel"), "pub fn id<T>(x: T) -> T { x }\n");
     write(
@@ -259,6 +260,36 @@ fn separate_cross_module_generic_over_cross_module_struct_compiles_and_runs() {
          fn main() -> i64 { let p = Point { x: 40, y: 2 }; let q = id(p); q.x + q.y }\n",
     );
     assert_eq!(build_and_run_separate(dir.join("main.sentinel")), 42);
+}
+
+#[test]
+fn separate_cross_module_generic_is_linkonce_deduped_across_importers() {
+    // ADR 0037 (2/N) `linkonce_odr`: TWO units both instantiate `util::id<i64>`.
+    // A collision-safe instance is emitted under the ORIGIN-qualified symbol
+    // (`_S4util4math…id__i64`) with `linkonce_odr` linkage, so the linker keeps
+    // ONE definition. This is LOAD-BEARING two ways: (a) two EXTERNAL defs of
+    // the same symbol would be a duplicate-symbol LINK ERROR, so a successful
+    // link proves the linkage; (b) `nm` shows exactly one such symbol in the
+    // exe — the inline-local model would emit two importer-qualified copies
+    // (`_S4main…` + `_S6helper…`). id(0) + (id(21)+id(21)) -> 0 + 42 -> exit 42.
+    let dir = temp_project("separate_linkonce");
+    write(dir.join("util/math.sentinel"), "pub fn id<T>(x: T) -> T { x }\n");
+    write(
+        dir.join("helper.sentinel"),
+        "use util::math::id;\npub fn doubled() -> i64 { id(21) + id(21) }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use util::math::id;\nuse helper::doubled;\nfn main() -> i64 { id(0) + doubled() }\n",
+    );
+    let entry = dir.join("main.sentinel");
+    assert_eq!(build_and_run_separate(entry.clone()), 42);
+    // Exactly ONE definition of the origin-qualified instance survives the link.
+    let exe = entry.with_extension("");
+    let nm = Command::new("nm").arg(&exe).output().expect("run nm");
+    let syms = String::from_utf8_lossy(&nm.stdout);
+    let count = syms.lines().filter(|l| l.contains("id__i64")).count();
+    assert_eq!(count, 1, "expected one linkonce_odr-deduped id<i64> symbol; nm:\n{syms}");
 }
 
 #[test]

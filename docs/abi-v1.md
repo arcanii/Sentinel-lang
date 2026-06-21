@@ -185,10 +185,19 @@ Source of truth: `mangle_qualified` in `sentinel-codegen/src/lib.rs`
 single-file / Path-A builds are the empty-module-path case, so they emit
 the rows above verbatim). A cross-module **type** carries no symbol (units
 agree on layout — ADR 0037 D4), so only fns / methods are module-qualified.
-⚠ A cross-module **type tag inside a mono key** must also become
-module-qualified once generics cross units (ADR 0037 (2/N) — not yet
-realised), else same-named cross-module types would `linkonce_odr`-dedup
-unsoundly.
+
+**Cross-unit generic dedup (`linkonce_odr`, ADR 0037 (2/N)).** A mono
+instance of an IMPORTED generic fn is emitted under the **origin**-qualified
+symbol (the defining module's path, not the importer's) with `linkonce_odr`
+linkage, so N importers of `util::id<i64>` share ONE `_S4util4math…id__i64`
+definition (the linker dedups; an importer-LOCAL generic stays
+importer-qualified with default linkage). ⚠ This is gated to
+**collision-safe** instances — type args that are all PRIMITIVES — because a
+cross-module **type tag inside a mono key** renders by bare name (§4 above),
+so two same-named cross-module types as args would `linkonce_odr`-dedup
+**unsoundly**. Instances over a named type therefore keep the sound
+importer-qualified per-unit emission until the type tag is itself
+module-qualified (still **not realised** — the remaining (2/N) item).
 
 **Intra-module `__` soft-spot (unchanged):** the *item* scheme is not
 length-prefixed, so exotic identifiers could in principle collide *within*
@@ -282,8 +291,10 @@ A drift in any layout / mangling / symbol must turn a test **red**:
 - The separate-compilation **linker** for true per-unit objects — **in
   progress** (ADR 0037 (a)). The `use`/`pub` module **surface** shipped
   (D.6), and the **module-qualified mangling** that keys cross-unit symbols
-  is now **§4** (an `abi-v1` amendment). Still out of scope here: per-unit
-  `linkonce_odr` generic dedup + incremental caching (ADR 0037 (2/N)/(3/N)).
+  is now **§4** (an `abi-v1` amendment). Per-unit `linkonce_odr` generic
+  dedup is now **partially realised** (§4 — collision-safe primitive-arg
+  instances; named-type args await the module-qualified type tag). Still out
+  of scope here: incremental caching (ADR 0037 (3/N)).
 - Cross-architecture beyond x86-64/aarch64 (ADR 0025 D12).
 - A **C-header generator** / ABI-compatibility checker for external FFI.
 - ABI **migration tooling** (`abi-v1`→`v2` shims).
