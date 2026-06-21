@@ -32,6 +32,7 @@ use std::path::Path;
 
 use inkwell::builder::Builder;
 use inkwell::context::Context;
+use inkwell::module::Linkage;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
@@ -166,7 +167,7 @@ pub enum CodegenError {
 /// that have been moved away (the destination owns + drops them). See
 /// [`DropPlan`] in sentinel-borrow-check.
 pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenError> {
-    compile_to_object_for_module(hir, &[], &HashMap::new(), output)
+    compile_to_object_for_module(hir, &[], &HashMap::new(), &HashMap::new(), output)
 }
 
 /// Phase D.6 / ADR 0037 D5/D7: compile ONE module of a separately-compiled
@@ -185,10 +186,20 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
 /// local id differs between units. EMPTY map (single-file / merged / the
 /// corpus) → codegen falls back to the local `EffectId`, byte-identical to
 /// before this amendment (the oracle's `encode_op_id` is left untouched).
+///
+/// ADR 0037 (2/N) `linkonce_odr`: `generic_origins` maps an IMPORTED generic
+/// fn's `FnId` → its DEFINING module's path. A mono instance of such a fn over
+/// collision-safe type args (primitives — see [`mono_args_dedup_safe`]) is
+/// emitted under the ORIGIN-qualified symbol with `linkonce_odr` linkage, so N
+/// importers share ONE definition (the linker dedups) instead of each emitting
+/// its own importer-qualified copy. EMPTY map (single-file / merged / corpus)
+/// → every generic is treated as local and emitted importer-qualified with the
+/// default linkage, byte-identical to before.
 pub fn compile_to_object_for_module(
     hir: &HirProgram,
     module_path: &[String],
     op_id_base: &HashMap<String, u32>,
+    generic_origins: &HashMap<FnId, Vec<String>>,
     output: &Path,
 ) -> Result<(), CodegenError> {
     let program = hir.program();
@@ -794,15 +805,24 @@ pub fn compile_to_object_for_module(
     // generic-fn-to-generic-fn calls).
     let mut mono_fns: HashMap<(FnId, Vec<Type>), FunctionValue> = HashMap::new();
     for ((fn_id, args), def) in &mono_defs {
-        // Phase D.6 / ADR 0037 D6/D7: module-qualify the instance symbol by
-        // THIS unit's module path. Cross-module generics are inlined +
-        // monomorphized per importer, so each importer's instance is uniquely
-        // named (`_S4main6id__i64`) — no cross-unit clash, no `linkonce_odr`
-        // needed yet. Calls resolve via the `mono_fns` (FnId, args) map, not
-        // by name, so this rename is self-contained. Empty `module_path`
-        // (single-file / Path-A) → the bare `id__i64`, byte-identical.
-        let mangled =
-            mangle_qualified(module_path, &mangle_mono_name(&def.name, args, program));
+        // Phase D.6 / ADR 0037 D6/D7. Two emission models for a mono instance:
+        //  - DEFAULT (local generic, or an imported one over a named-type arg):
+        //    module-qualify by THIS unit's path (`_S4main6id__i64`) with the
+        //    default linkage — each importer self-contains its own copy, no
+        //    cross-unit clash. Empty `module_path` (single-file / Path-A) →
+        //    the bare `id__i64`, byte-identical.
+        //  - (2/N) `linkonce_odr` DEDUP: an IMPORTED generic (`generic_origins`
+        //    holds its origin) instantiated over COLLISION-SAFE args (no named
+        //    type, so `mangle_type` can't alias two cross-module types — ADR
+        //    SETTLED point 8) is emitted under the ORIGIN-qualified symbol with
+        //    `linkonce_odr` linkage, so N importers share ONE definition.
+        let dedup = generic_origins
+            .get(fn_id)
+            .filter(|_| mono_args_dedup_safe(args));
+        let mangled = match dedup {
+            Some(origin) => mangle_qualified(origin, &mangle_mono_name(&def.name, args, program)),
+            None => mangle_qualified(module_path, &mangle_mono_name(&def.name, args, program)),
+        };
         let param_types: Vec<_> = def
             .params
             .iter()
@@ -811,6 +831,10 @@ pub fn compile_to_object_for_module(
         let fn_type = llvm_basic_type(&context, def.return_type, &struct_types, &generic_struct_types, &class_types, &secrets)
             .fn_type(&param_types, false);
         let fn_value = module.add_function(&mangled, fn_type, None);
+        if dedup.is_some() {
+            // Shared across importers → the linker keeps one definition.
+            fn_value.set_linkage(Linkage::LinkOnceODR);
+        }
         mono_fns.insert((*fn_id, args.clone()), fn_value);
     }
 
@@ -2140,6 +2164,20 @@ fn mangle_qualified(module_path: &[String], item: &str) -> String {
     s.push_str(&item.len().to_string());
     s.push_str(item);
     s
+}
+
+/// ADR 0037 (2/N) `linkonce_odr`: may a mono instance over `args` be deduped
+/// across units under an ORIGIN-qualified shared symbol? Only when every arg is
+/// a PRIMITIVE (`i64` / `i32` / `bool` / `u8`). A NAMED type (struct / enum /
+/// class / generic instance) renders via [`mangle_type`] by its BARE name, so
+/// two same-named cross-module types would alias to one symbol and the linker
+/// would wrongly dedup distinct instances (ADR SETTLED point 8 — the deferred
+/// module-qualified type-tag fix). Until then, named-type args keep the sound
+/// per-importer emission; primitives have no such tag and dedup soundly. (A
+/// follow-up can widen this to arrays / nullables / vecs OF primitives.)
+fn mono_args_dedup_safe(args: &[Type]) -> bool {
+    args.iter()
+        .all(|t| matches!(t, Type::I64 | Type::I32 | Type::Bool | Type::U8))
 }
 
 /// C1.7.5 / ADR 0016 D7: produce a mangled LLVM symbol name for a
