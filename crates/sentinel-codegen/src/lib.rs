@@ -166,7 +166,7 @@ pub enum CodegenError {
 /// that have been moved away (the destination owns + drops them). See
 /// [`DropPlan`] in sentinel-borrow-check.
 pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenError> {
-    compile_to_object_for_module(hir, &[], output)
+    compile_to_object_for_module(hir, &[], &HashMap::new(), output)
 }
 
 /// Phase D.6 / ADR 0037 D5/D7: compile ONE module of a separately-compiled
@@ -177,9 +177,18 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
 /// module's symbol `mangle_qualified(&origin, name)` and left a declaration
 /// (it has no body) for the linker to bind. `main` stays the bare C entry.
 /// Empty `module_path` → bare names, byte-identical to before the amendment.
+///
+/// ADR 0037 (2/N): `op_id_base` is the build-wide per-effect op-id base map
+/// (effect NAME → a graph-stable index), which decouples the runtime op id
+/// from each unit's LOCAL `EffectId` so a `perform` in one unit and a
+/// `handle` in another agree on `(base << 16) | op` even when the effect's
+/// local id differs between units. EMPTY map (single-file / merged / the
+/// corpus) → codegen falls back to the local `EffectId`, byte-identical to
+/// before this amendment (the oracle's `encode_op_id` is left untouched).
 pub fn compile_to_object_for_module(
     hir: &HirProgram,
     module_path: &[String],
+    op_id_base: &HashMap<String, u32>,
     output: &Path,
 ) -> Result<(), CodegenError> {
     let program = hir.program();
@@ -978,6 +987,7 @@ pub fn compile_to_object_for_module(
             class_method_fns,
             impl_method_fns,
             secrets,
+            op_id_base: op_id_base.clone(),
             alloc_fn,
             panic_oob_fn,
             free_fn,
@@ -1190,6 +1200,13 @@ struct CodegenCtx<'ctx, 'plan> {
     /// identically to their inner at C3.1 (constant-time codegen
     /// is deferred per ADR 0019 D12).
     secrets: Vec<SecretData>,
+    /// ADR 0037 (2/N): the build-wide op-id base map (effect NAME →
+    /// a graph-stable index), used by [`CodegenCtx::encode_op_id_ctx`]
+    /// to decouple the runtime op id from this unit's LOCAL `EffectId`
+    /// so cross-UNIT `perform`/`handle` agree. Empty (single-file /
+    /// merged / corpus) → fall back to the local `EffectId.0`,
+    /// byte-identical to the standalone [`encode_op_id`].
+    op_id_base: HashMap<String, u32>,
     /// C1.6: `sentinel_alloc(i64) -> ptr` runtime function. Called
     /// to back array storage and `?Struct` heap payloads.
     alloc_fn: FunctionValue<'ctx>,
@@ -5985,6 +6002,37 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         }
     }
 
+    /// ADR 0037 (2/N): encode an op id consulting the build-wide
+    /// op-id base map (effect NAME → a graph-stable index) so a
+    /// `perform` in one separately-compiled unit and a `handle` in
+    /// another agree on `(base << 16) | op` even when the effect's
+    /// LOCAL `EffectId` differs between units (it is BOTH the op-id
+    /// basis AND the `effect_decls[]` index, so it can't be shared
+    /// directly). Empty map (single-file / merged / corpus) → falls
+    /// back to the local `effect_id.0`, byte-identical to the
+    /// standalone [`encode_op_id`] the oracle still mirrors. NOTE
+    /// (MVP): keyed by NAME, so same-named cross-module effects would
+    /// collide — an origin-qualified key is the robust upgrade.
+    fn encode_op_id_ctx(
+        &self,
+        effect_id: EffectId,
+        op_index: usize,
+        program: &TypedProgram,
+    ) -> u32 {
+        match program
+            .effect_decls
+            .get(effect_id.0 as usize)
+            .and_then(|d| self.op_id_base.get(&d.name).copied())
+        {
+            // A graph-stable base for this effect (separate compilation).
+            Some(base) => (base << 16) | ((op_index as u32) & 0xFFFF),
+            // No base (single-file / merged / corpus) → the local id,
+            // delegating to the standalone fn the oracle mirrors so the
+            // byte-for-byte equivalence is self-evident.
+            None => encode_op_id(effect_id, op_index),
+        }
+    }
+
     /// C3.5(a) / ADR 0020 D7: lower `perform Effect.Op(args)` to
     /// a `sentinel_perform_op(op_id, arg)` call. Returns the
     /// continuation pointer; the enclosing handle catches it.
@@ -5999,7 +6047,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         args: &[TypedExpr],
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        let op_id = encode_op_id(effect_id, op_index);
+        let op_id = self.encode_op_id_ctx(effect_id, op_index, program);
         let i32_ty = self.context.i32_type();
         let i64_ty = self.context.i64_type();
         let op_id_v = i32_ty.const_int(op_id as u64, false);
@@ -6306,7 +6354,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .iter()
             .zip(arm_blocks.iter())
             .map(|(a, bb)| {
-                let op_id = encode_op_id(a.effect_id, a.op_index);
+                let op_id = self.encode_op_id_ctx(a.effect_id, a.op_index, program);
                 (i32_ty.const_int(op_id as u64, false), *bb)
             })
             .collect();

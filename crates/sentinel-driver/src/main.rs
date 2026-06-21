@@ -1223,8 +1223,14 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         }
         let hir = sentinel_hir::lower_to_hir(&typed, &drop_plan);
         let obj_path = obj_dir.join(format!("{}.o", m.path.join("_")));
+        // ADR 0037 (2/N): the build-wide op-id base map decouples each
+        // effect's runtime op id from its unit-local `EffectId`. EMPTY here
+        // for now (per-unit op ids fall back to the local id, byte-identical
+        // to before) — a later chunk computes the graph-stable map so a
+        // cross-UNIT `perform`/`handle` pair agrees.
+        let op_id_base: HashMap<String, u32> = HashMap::new();
         if let Err(err) =
-            sentinel_codegen::compile_to_object_for_module(&hir, &m.path, &obj_path)
+            sentinel_codegen::compile_to_object_for_module(&hir, &m.path, &op_id_base, &obj_path)
         {
             eprintln!("snc: codegen failed for module `{}`: {err}", m.path.join("::"));
             return ExitCode::from(1);
