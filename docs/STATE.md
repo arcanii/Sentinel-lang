@@ -14,10 +14,12 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **▶ (2/N) — cross-UNIT effect perform/handle DONE (the LAST hard case;
-`b43b7d6`+`4c3a28b`); ALL pub item kinds now cross a `--separate` boundary. See the
-cross-UNIT paragraph in the running log below. NEXT = `linkonce_odr` dedup / (3/N) incremental
-caching. ▶ NEW TRACK — the per-unit SEPARATE-COMPILATION back end (ADR 0037 (a)).
+Last updated: **▶ (2/N) — `linkonce_odr` GENERIC DEDUP partially realised (`c5ca3b8`+`8d14db8`):
+collision-safe (primitive-arg) instances of imported generics dedup across importers under an
+origin-qualified `linkonce_odr` symbol. PRIOR this session: cross-UNIT effect perform/handle
+(`b43b7d6`+`4c3a28b`) — ALL pub item kinds now cross a `--separate` boundary. See the running log
+below. NEXT = the `mangle_type` type-tag fix (named-type-arg dedup) / (3/N) incremental caching.
+▶ TRACK — the per-unit SEPARATE-COMPILATION back end (ADR 0037 (a)).
 ADR 0037 FLIPPED toward the per-unit (1/N): D7 module-qualified mangling (`_S` + a
 length-prefixed module segment per path segment + a length-prefixed item; **empty module
 path → the bare item**, so single-file ABI is byte-unchanged → an AMENDMENT, not abi-v2)
@@ -100,10 +102,20 @@ param-TypeExpr re-resolution `5f59591`) → the non-empty row drives the extern'
 top-level handler's `unreachable` default makes LLVM ignore a wrong op id, so the load-bearing phase-go uses
 an op-id COLLISION (the entry handler lists arms for its own `Local` + the imported `Io`; no base map → the
 io-unit kont hits the `Local` arm → exit 7, with → the `Io.read` arm → exit 40). ⚠ base map keyed by NAME
-(MVP) → same-named cross-module effects collide (origin-qualified = robust upgrade). ▶ NEXT in (2/N)/(3/N):
-`linkonce_odr` dedup (an OPTIMIZATION — where the `mangle_type` cross-module type-tag fix becomes needed)
-then incremental Salsa caching + per-unit repro. 1515 tests, both fixed points byte-identical, four-check
-green.
+(MVP) → same-named cross-module effects collide (origin-qualified = robust upgrade). 1515 tests, both fixed
+points byte-identical, four-check green. ✅ **`linkonce_odr` GENERIC DEDUP — PARTIALLY REALISED** (`c5ca3b8`
+codegen [1/2, inert] + `8d14db8` the feature [2/2]): a mono instance of an IMPORTED generic over
+COLLISION-SAFE args (primitives) now emits under the ORIGIN-qualified symbol with `linkonce_odr` linkage, so
+N importers of `util::id<i64>` share ONE `_S4util4math…id__i64` def (the linker dedups) instead of each
+carrying an importer-qualified copy. The driver threads a `generic_origins: FnId → origin-path` map to
+codegen (mirroring the op-id base map); `mono_args_dedup_safe` GATES it to primitive args (a named-type tag
+aliases by bare name — ADR point 8 — so those stay per-importer, sound, until the type-tag fix). Empty map
+(single-file / merge / corpus) → the importer-qualified default path, BYTE-IDENTICAL. Load-bearing test
+(two importers of `util::id<i64>`): the build LINKS (two external defs → duplicate-symbol error, so a clean
+link proves the linkage — confirmed by hand) + `nm` shows ONE symbol → exit 42. ▶ NEXT in (2/N)/(3/N): the
+`mangle_type` cross-module type-tag fix (so named-type-arg instances dedup too) + extend dedup to
+trait/class methods; then (3/N) incremental Salsa caching + per-unit repro. 1516 tests, both fixed points
+byte-identical, four-check green.
 ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and

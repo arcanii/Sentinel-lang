@@ -17,9 +17,14 @@ perform/handle** (the last hard case — a library performs, the entry handles; 
 the OVERLOADED `EffectId` (op-id basis AND `effect_decls[]` index) is DECOUPLED by a build-wide
 **op-id base map** (effect NAME → graph-stable index) consulted in codegen, with an empty-map
 delegation to `encode_op_id` so single-file / merge / corpus stay BYTE-IDENTICAL (oracle untouched);
-effecting externs carry `effect_row_names` re-resolved in `check_module`. ▶ REMAINING: (2/N)
-`linkonce_odr` dedup (an OPTIMIZATION — share generic/method instances across importers; needs the
-module-qualified type-tag fix below); (3/N) incremental caching. The multi-file
+effecting externs carry `effect_row_names` re-resolved in `check_module`. ✅ **`linkonce_odr` generic
+dedup — PARTIALLY REALISED** (`c5ca3b8`+`8d14db8`): a mono instance of an IMPORTED generic over
+COLLISION-SAFE args (primitives) emits under the ORIGIN-qualified symbol with `linkonce_odr` linkage,
+so N importers of `util::id<i64>` share ONE `_S4util4math…id__i64` def (the linker dedups; an empty
+`generic_origins` map → the importer-qualified default path, byte-identical). NAMED-type args still
+emit per-importer (sound) pending the module-qualified type-tag fix (point 8). ▶ REMAINING: (2/N) the
+type-tag fix (so named-type-arg instances dedup too) + extending dedup to trait/class methods; (3/N)
+incremental caching. The multi-file
 SURFACE shipped earlier via the interim Path A merge. The surface shipped via
 the lower-risk Path A merge — owner-chosen: whole-graph front-end + merge
 into one `Program` → existing pipeline; true per-unit separate-compilation back
@@ -561,7 +566,10 @@ Settled in **this revision** (the per-unit back end):
 Deferred to (2/N) (flagged here so it is not forgotten):
 
 8. **Cross-module type tags in mono keys** must be module-qualified (D7 last bullet) —
-   else same-named cross-module types `linkonce_odr`-dedup unsoundly.
+   else same-named cross-module types `linkonce_odr`-dedup unsoundly. ⏳ STILL DEFERRED,
+   but no longer a latent hazard: `linkonce_odr` dedup (point 10) is GATED to
+   collision-safe (primitive-arg) instances via `mono_args_dedup_safe`, so a named-type
+   arg keeps the sound per-importer emission. This fix is what UNLOCKS dedup for those.
 
 Realised in (2/N):
 
@@ -578,3 +586,14 @@ Realised in (2/N):
    `effect_row_names`, re-resolved to the importer's `EffectId`s in `check_module`
    (the effect analogue of param-type re-resolution); the Kont* ABI follows via
    `uses_kont_abi`.
+
+10. **Cross-unit generic dedup → origin-qualified `linkonce_odr`** (collision-safe args
+    only). A mono instance of an IMPORTED generic fn (the driver threads a
+    `generic_origins: FnId → origin-module-path` map to codegen, mirroring point 9's
+    base map) over PRIMITIVE type args is emitted under the ORIGIN-qualified symbol with
+    `linkonce_odr` linkage, so N importers share one definition (the linker dedups). An
+    empty map (single-file / merge / corpus) → the importer-qualified default-linkage
+    path, byte-identical. GATED by `mono_args_dedup_safe` to primitive args because a
+    named-type tag aliases by bare name (point 8) — those stay per-importer (sound)
+    until point 8 lands. Verified load-bearing: two importers of `util::id<i64>` LINK
+    (two external defs would be a duplicate-symbol error) and `nm` shows ONE symbol.

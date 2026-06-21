@@ -2261,12 +2261,16 @@ For pasting into a fresh chat to bootstrap context:
     `sentinel_codegen_reaches_the_bootstrap_fixed_point`; **1473 tests**, modes 0–4 byte-identical, `scg`
     leak-free (`leaks --atExit`: 0 leaks lowering the merged compiler), four-check green.
 
-    ▶ **RESUME AT: the per-unit separate-compilation back end (ADR 0037 (a)) — (2/N) is FUNCTIONALLY COMPLETE:
-    EVERY pub item kind now crosses a `--separate` boundary, incl. THE LAST HARD CASE, cross-UNIT effect
-    perform/handle (`b43b7d6`+`4c3a28b`, op-id base map; see the ▶ NOW ON block below for the decoupling + the
-    load-bearing-test KEY FINDING). NEXT = `linkonce_odr` dedup (an optimization — current model duplicates
-    generic/method instances per importer; this is where the `mangle_type` cross-module type-tag fix becomes
-    needed) then (3/N) incremental Salsa caching + per-unit `.o` repro. The self-host port AND the ADR 0046
+    ▶ **RESUME AT: the per-unit separate-compilation back end (ADR 0037 (a)) — (2/N): EVERY pub item kind
+    crosses a `--separate` boundary (incl. cross-UNIT effect perform/handle, `b43b7d6`+`4c3a28b`), and
+    `linkonce_odr` GENERIC DEDUP is PARTIALLY REALISED (`c5ca3b8` codegen + `8d14db8` feature): collision-safe
+    (primitive-arg) instances of imported generics dedup across importers under an origin-qualified
+    `linkonce_odr` symbol (driver threads a `generic_origins: FnId→origin` map to codegen; `mono_args_dedup_safe`
+    gates it; empty map = byte-identical; load-bearing test = two importers of `util::id<i64>` LINK + `nm`=1 →
+    42). See the ▶ NOW ON block below. NEXT in (2/N) = the `mangle_type` cross-module TYPE-TAG fix (ADR SETTLED
+    point 8 — module-qualify a cross-module type's tag in a mono key so NAMED-type-arg instances dedup too;
+    needs struct-origin tracking, which the inline-local model currently erases) + extend dedup to trait/class
+    methods; then (3/N) incremental Salsa caching + per-unit `.o` repro. The self-host port AND the ADR 0046
     partial-move soundness fix are both COMPLETE.** **The
     self-host port: Bar B closed, ADR 0045 ACCEPTED-WITH-AMENDMENTS
     (A1–A34): all 123 pass fixtures emit byte-identically `scg` == `snc llvm`, and the bootstrap fixed point
@@ -2407,11 +2411,23 @@ For pasting into a fresh chat to bootstrap context:
     `Io`→base 0 selects `Io.read` → exit 40 (verified by hand: removing the base map flips 40→7). ⚠ base map keyed
     by NAME (MVP) → same-named cross-module effects collide (origin-qualified = the robust upgrade). Tests:
     `separate_cross_unit_perform_handle_compiles_and_runs` (40) + `separate_effecting_import_without_its_effect_is_rejected`.
-    ▶ **NEXT (2/N)/(3/N):** (b) `linkonce_odr` dedup (an OPTIMIZATION — share generic/class-method instances across
-    importers under the ORIGIN module's qualified symbol; correctness is already fine, this just shrinks binaries;
-    THIS is where the `mangle_type` cross-module type-tag fix becomes necessary). Then (3/N) incremental Salsa
-    caching of unchanged units + per-unit `.o` repro (extend `repro.rs`). Keep the merge path + both fixed points
-    green (additive).
+    ✅ **`linkonce_odr` GENERIC DEDUP — PARTIALLY REALISED** (`c5ca3b8` codegen [1/2, inert] + `8d14db8` feature
+    [2/2]): a mono instance of an IMPORTED generic over COLLISION-SAFE args (primitives — `mono_args_dedup_safe`)
+    emits under the ORIGIN-qualified symbol (`_S4util4math…id__i64`) with `linkonce_odr` linkage, so N importers
+    share ONE definition (the linker dedups). The driver records each imported generic's (name, origin) at the
+    `use` site, maps name→resolved FnId after resolve, and threads a `generic_origins: HashMap<FnId, Vec<String>>`
+    to `compile_to_object_for_module` (mirroring the op-id base map; the `compile_to_object` wrapper +
+    `run_build_merged` pass empty → byte-identical). NAMED-type args stay per-importer (sound) — gated by
+    `mono_args_dedup_safe` because `mangle_type` renders a named type by BARE name (point 8). Load-bearing test
+    (`separate_cross_module_generic_is_linkonce_deduped_across_importers`): two importers of `util::id<i64>` → (a)
+    LINKS (two EXTERNAL defs would be a duplicate-symbol error — confirmed by hand: disabling the linkage →
+    "1 duplicate symbols") + (b) `nm` shows ONE symbol (the inline-local model emits two importer-qualified copies)
+    → exit 42. ▶ **NEXT (2/N)/(3/N):** the `mangle_type` cross-module TYPE-TAG fix (ADR SETTLED point 8) — so
+    NAMED-type-arg instances dedup too; ⚠ needs struct-ORIGIN tracking, which the inline-local model currently
+    ERASES (the driver re-materializes imported structs in the importer's StructId space, losing origin), so this
+    is the harder remaining piece. Then extend dedup to trait/class methods; then (3/N) incremental Salsa caching
+    of unchanged units + per-unit `.o` repro (extend `repro.rs`). Keep the merge path + both fixed points green
+    (additive).
     Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;
