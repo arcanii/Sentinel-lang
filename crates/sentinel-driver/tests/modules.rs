@@ -306,6 +306,67 @@ fn separate_cross_module_effect_decl_compiles_and_runs() {
 }
 
 #[test]
+fn separate_cross_unit_perform_handle_compiles_and_runs() {
+    // The HARD case (ADR 0037 2/N): a library `io::source` PERFORMS `Io.read`
+    // in ITS OWN unit; the entry HANDLES it in ANOTHER unit. The two units
+    // compile to independent objects and number their effects LOCALLY, so the
+    // runtime op id can only agree via the build-wide op-id base map.
+    //
+    // This test is deliberately LOAD-BEARING (the recipe's TEST-TRAP: a naive
+    // single-arm handler passes even with a WRONG op id, because its `default`
+    // is `unreachable` and LLVM collapses the lone arm to run unconditionally,
+    // ignoring the id). Here the entry handler lists arms for TWO effects: its
+    // OWN `Local` (local EffectId 0) and the imported `Io` (local EffectId 1,
+    // since `Local` is declared first). The performed kont carries `io`'s
+    // encoding of `Io.read`. WITHOUT the base map, the entry would encode
+    // `Local.tick` as op id 0 and `Io.read` as `1<<16`, so the kont's id (0)
+    // would COLLIDE with the `Local` arm and resume `k(7)` -> exit 7 (a silent
+    // miscompile). WITH the base map, every unit maps `Io` -> base 0 and
+    // `Local` -> base 1, so the kont selects the `Io.read` arm -> `k(40)` ->
+    // exit 40. (Verified by hand: removing the base map flips 40 -> 7.)
+    let dir = temp_project("separate_xunit_effect");
+    write(
+        dir.join("io.sentinel"),
+        "pub effect Io {\n    read() -> i64;\n}\n\
+         pub fn source() -> i64 ! { Io } { perform Io.read() }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use io::Io;\nuse io::source;\n\
+         effect Local {\n    tick() -> i64;\n}\n\
+         fn main() -> i64 {\n\
+         \x20   handle source() with {\n\
+         \x20       Local.tick(k) => k(7),\n\
+         \x20       Io.read(k) => k(40),\n\
+         \x20   }\n\
+         }\n",
+    );
+    assert_eq!(build_and_run_separate(dir.join("main.sentinel")), 40);
+}
+
+#[test]
+fn separate_effecting_import_without_its_effect_is_rejected() {
+    // Importing an effecting `pub fn` requires importing its effect too (so
+    // it is in scope to be handled) — the effect analogue of importing a type
+    // a signature references. `main` imports `io::source` (effect `Io`) but
+    // not `io::Io`, so re-resolving the extern's row in check_module fails
+    // with a clean `UnknownImportedEffect`, not a panic or a silent miscompile.
+    let dir = temp_project("separate_xunit_effect_missing");
+    write(
+        dir.join("io.sentinel"),
+        "pub effect Io {\n    read() -> i64;\n}\n\
+         pub fn source() -> i64 ! { Io } { perform Io.read() }\n",
+    );
+    write(dir.join("main.sentinel"), "use io::source;\nfn main() -> i64 { source() }\n");
+    let (ok, stderr) = build_separate(dir.join("main.sentinel"));
+    assert!(!ok, "an effecting import without its effect should fail; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("uses effect `Io`, which is not in scope"),
+        "expected an UnknownImportedEffect naming `Io`; stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn separate_import_of_private_item_is_rejected() {
     // The visibility gate (PrivateItem) runs in --separate too, before any
     // per-unit compilation.

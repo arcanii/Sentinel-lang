@@ -2511,6 +2511,16 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0037 (2/N): an imported effecting `pub fn` names an effect the
+    /// importing unit didn't `use`, so it isn't in scope to be handled.
+    /// Span-free: the extern has no body in this unit; the fix is a `use`.
+    #[error(
+        "imported fn `{fn_name}` uses effect `{effect_name}`, which is not in scope \
+         — add a `use` for it"
+    )]
+    #[diagnostic(code(sentinel::types::unknown_imported_effect))]
+    UnknownImportedEffect { fn_name: String, effect_name: String },
+
     #[error("type mismatch: expected {expected}, found {got}")]
     #[diagnostic(code(sentinel::types::mismatch))]
     Mismatch {
@@ -3307,8 +3317,14 @@ pub struct TypedImportedFn {
     pub param_type_exprs: Vec<TypeExpr>,
     /// Return type expression (re-resolved in the importer).
     pub return_type_expr: TypeExpr,
-    /// The fn's effect row (empty for pure fns; cross-module effects 2/N).
-    pub effect_row: Vec<EffectId>,
+    /// ADR 0037 (2/N): the imported fn's declared effect-row NAMES (empty
+    /// for a pure fn). RE-RESOLVED to the importer's `EffectId`s in
+    /// [`check_module`] — like the param/return TypeExprs — against the
+    /// effect decls the driver inlined from the unit's `use`s, so a
+    /// cross-UNIT effecting extern type-checks + lowers under the Kont ABI
+    /// with the importer's local id. The build-wide op-id base map then
+    /// keeps the runtime op id consistent with the performing unit.
+    pub effect_row_names: Vec<String>,
 }
 
 /// Type-check a single-file [`ResolvedProgram`] — the `imports == []` case
@@ -3848,6 +3864,13 @@ pub fn check_module(
     if !imports.is_empty() {
         let imports_by_name: HashMap<&str, &TypedImportedFn> =
             imports.iter().map(|i| (i.name.as_str(), i)).collect();
+        // ADR 0037 (2/N): effect NAME → THIS unit's local EffectId (the
+        // resolved effect decls — own + the driver-inlined imports — carry
+        // their id). Lets an effecting extern's row re-resolve like its
+        // param/return TypeExprs do (a cross-UNIT effect's local id differs
+        // per unit; the build-wide op-id base map reconciles the runtime id).
+        let effect_id_by_name: HashMap<&str, EffectId> =
+            program.effects.iter().map(|ed| (ed.name.as_str(), ed.id)).collect();
         // Externs are non-generic in this slice → empty type-param scope.
         let extern_scope: TypeParamScope = HashMap::new();
         for sig in &program.fn_signatures {
@@ -3882,6 +3905,24 @@ pub fn check_module(
                 &mut secrets,
                 &struct_type_param_counts,
             )?;
+            // ADR 0037 (2/N): re-resolve the extern's effect-row NAMES to
+            // THIS unit's EffectIds (the effect analogue of the param/return
+            // TypeExpr re-resolution above). A name not in scope means the
+            // importer didn't `use` the effect → UnknownImportedEffect.
+            let mut effect_row: Vec<EffectId> = Vec::with_capacity(imp.effect_row_names.len());
+            for name in &imp.effect_row_names {
+                match effect_id_by_name.get(name.as_str()) {
+                    Some(eid) => effect_row.push(*eid),
+                    None => {
+                        return Err(TypeError::UnknownImportedEffect {
+                            fn_name: imp.name.clone(),
+                            effect_name: name.clone(),
+                        });
+                    }
+                }
+            }
+            effect_row.sort_by_key(|e| e.0);
+            effect_row.dedup();
             typed_signatures.push(TypedFnSignature {
                 id: sig.id,
                 name: sig.name.clone(),
@@ -3889,7 +3930,7 @@ pub fn check_module(
                 type_params: vec![],
                 param_types,
                 return_type,
-                effect_row: imp.effect_row.clone(),
+                effect_row,
                 is_main: false,
                 is_runtime: false,
                 extern_origin: sig.extern_origin.clone(),
@@ -8476,6 +8517,16 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             format!("`match` arms have incompatible types: expected {expected}, found {got}"),
             span.offset()..(span.offset() + span.len()),
         ),
+        // ADR 0037 (2/N): span-free (the extern has no body in this unit) —
+        // the range collapses to 0..0; the message names the fix (a `use`).
+        TypeError::UnknownImportedEffect { fn_name, effect_name } => (
+            "sentinel::types::unknown_imported_effect",
+            format!(
+                "imported fn `{fn_name}` uses effect `{effect_name}`, which is not in scope \
+                 — add a `use` for it"
+            ),
+            0..0,
+        ),
     };
     Diagnostic {
         stage: "types",
@@ -8542,7 +8593,7 @@ mod tests {
             name: "add".to_string(),
             param_type_exprs: vec![ident_te("i64"), ident_te("i64")],
             return_type_expr: ident_te("i64"),
-            effect_row: vec![],
+            effect_row_names: vec![],
         }];
         let tp = check_module(&resolved, &typed_imports).expect("check_module");
 
@@ -8582,7 +8633,7 @@ mod tests {
             name: "add".to_string(),
             param_type_exprs: vec![ident_te("i64"), ident_te("i64")],
             return_type_expr: ident_te("i64"),
-            effect_row: vec![],
+            effect_row_names: vec![],
         }];
         assert!(check_module(&resolved, &typed_imports).is_err());
     }

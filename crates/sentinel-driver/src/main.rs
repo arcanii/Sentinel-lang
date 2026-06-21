@@ -922,6 +922,12 @@ struct ExportedFn {
     /// signature (`sum(Point) -> i64`) maps to the importer's local id.
     param_type_exprs: Vec<sentinel_ast::TypeExpr>,
     return_type_expr: sentinel_ast::TypeExpr,
+    /// ADR 0037 (2/N): the fn's declared effect-row NAMES (empty for a pure
+    /// fn). Carried so a cross-UNIT effecting extern (a library `perform`s,
+    /// the entry `handle`s) re-resolves its row to the importer's EffectIds
+    /// in check_module + lowers under the Kont ABI; the build-wide op-id
+    /// base map keeps the runtime op id consistent across the two units.
+    effect_row_names: Vec<String>,
 }
 
 /// An exported item in the per-unit exports table. A non-generic `pub fn`
@@ -959,12 +965,6 @@ fn extract_exports(program: &Program) -> Result<Vec<(String, ExportedItem)>, Str
         if f.visibility != sentinel_ast::Visibility::Public {
             continue;
         }
-        if !f.effect_row.is_empty() {
-            return Err(format!(
-                "`pub fn {}`: cross-module effects are a later D.6 slice, not yet in --separate",
-                f.name
-            ));
-        }
         // A GENERIC `pub fn` exports its BODY (ADR 0037 D6) — the importer
         // inlines it + monomorphizes locally. A non-generic one is an extern
         // carrying its param/return TYPE EXPRESSIONS (re-resolved in the
@@ -974,6 +974,11 @@ fn extract_exports(program: &Program) -> Result<Vec<(String, ExportedItem)>, Str
             out.push((f.name.clone(), ExportedItem::GenericFn(Box::new(f.clone()))));
             continue;
         }
+        // ADR 0037 (2/N): a cross-UNIT effecting `pub fn` is allowed now —
+        // it carries its effect-row NAMES (re-resolved in the importer); the
+        // op-id base map keeps its `perform`'s runtime op id consistent with
+        // the importer's `handle`. (The effect itself must be `pub` + `use`d
+        // by the importer, like a type in a signature.)
         out.push((
             f.name.clone(),
             ExportedItem::Fn(ExportedFn {
@@ -981,6 +986,7 @@ fn extract_exports(program: &Program) -> Result<Vec<(String, ExportedItem)>, Str
                 type_params_count: f.type_params.len(),
                 param_type_exprs: f.params.iter().map(|p| p.ty.clone()).collect(),
                 return_type_expr: f.return_type.clone(),
+                effect_row_names: f.effect_row.iter().map(|e| e.kind.clone()).collect(),
             }),
         ));
     }
@@ -1103,6 +1109,31 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
 
+    // ADR 0037 (2/N): the build-wide op-id base map. Every effect NAME
+    // declared anywhere in the graph gets a graph-stable index (sorted for
+    // determinism). Codegen uses it as the `(base << 16) | op` basis so a
+    // `perform` in the defining unit and a `handle` in an importing unit
+    // agree on the runtime op id even though each unit numbers its own
+    // `EffectId`s locally (the index into its `effect_decls[]`). Built from
+    // the modules' OWN effect decls (pre-inlining), so each effect counts
+    // once at its definition site. (MVP: keyed by NAME — same-named
+    // cross-module effects would collide; an origin-qualified key is the
+    // robust upgrade, flagged in ADR 0037's SETTLED DESIGN POINTS.)
+    let mut effect_names: Vec<String> = Vec::new();
+    for m in &modules {
+        for ed in &m.program.effects {
+            if !effect_names.contains(&ed.name) {
+                effect_names.push(ed.name.clone());
+            }
+        }
+    }
+    effect_names.sort();
+    let op_id_base: HashMap<String, u32> = effect_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), i as u32))
+        .collect();
+
     // Compile each module to its own object.
     let mut objects: Vec<PathBuf> = Vec::new();
     for (idx, m) in modules.iter().enumerate() {
@@ -1135,7 +1166,7 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
                         name: item,
                         param_type_exprs: ex.param_type_exprs.clone(),
                         return_type_expr: ex.return_type_expr.clone(),
-                        effect_row: vec![],
+                        effect_row_names: ex.effect_row_names.clone(),
                     });
                 }
                 Some(ExportedItem::Struct(decl)) => imported_structs.push(decl.clone()),
@@ -1223,12 +1254,8 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         }
         let hir = sentinel_hir::lower_to_hir(&typed, &drop_plan);
         let obj_path = obj_dir.join(format!("{}.o", m.path.join("_")));
-        // ADR 0037 (2/N): the build-wide op-id base map decouples each
-        // effect's runtime op id from its unit-local `EffectId`. EMPTY here
-        // for now (per-unit op ids fall back to the local id, byte-identical
-        // to before) — a later chunk computes the graph-stable map so a
-        // cross-UNIT `perform`/`handle` pair agrees.
-        let op_id_base: HashMap<String, u32> = HashMap::new();
+        // The build-wide op-id base map (computed above) is passed to EVERY
+        // unit so a cross-UNIT `perform`/`handle` pair encodes the same op id.
         if let Err(err) =
             sentinel_codegen::compile_to_object_for_module(&hir, &m.path, &op_id_base, &obj_path)
         {
