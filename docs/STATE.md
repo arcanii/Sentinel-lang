@@ -14,7 +14,10 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **▶ NEW TRACK — the per-unit SEPARATE-COMPILATION back end (ADR 0037 (a)).
+Last updated: **▶ (2/N) — cross-UNIT effect perform/handle DONE (the LAST hard case;
+`b43b7d6`+`4c3a28b`); ALL pub item kinds now cross a `--separate` boundary. See the
+cross-UNIT paragraph in the running log below. NEXT = `linkonce_odr` dedup / (3/N) incremental
+caching. ▶ NEW TRACK — the per-unit SEPARATE-COMPILATION back end (ADR 0037 (a)).
 ADR 0037 FLIPPED toward the per-unit (1/N): D7 module-qualified mangling (`_S` + a
 length-prefixed module segment per path segment + a length-prefixed item; **empty module
 path → the bare item**, so single-file ABI is byte-unchanged → an AMENDMENT, not abi-v2)
@@ -80,13 +83,27 @@ empty-path corpus). ⚠ classes are module-LOCAL (the trait is the cross-unit co
 counter.sentinel `pub trait Counter`; entry impls it for `class Tally` → 42. ✅ **cross-module EFFECT
 DECLS too** (`a0e9595`, first cut): a `pub effect` decl is INLINED; FIRST-CUT scope = `perform`+`handle`
 BOTH in the importer (so the EffectId / runtime `op_id=(eid<<16)|op` is unit-local + consistent — pure
-inline, no codegen change). io.sentinel `pub effect Io`; entry performs + handles it → 42. **So ALL pub
-item kinds now inline (fn/struct/enum/trait/effect-decl).** ▶ NEXT in (2/N): the HARD case = cross-UNIT
-perform/handle (a library performs, the entry handles). ⚠ DESIGN BLOCKER: the `EffectId` is OVERLOADED
-(both the `op_id` basis AND the `program.effects[]` index), so a shared effect can't just take a global
-eid — the fix DECOUPLES them (keep the local table-index eid; add a build-wide op-id base per effect,
-stable by origin+name, threaded resolve→types→codegen). + `linkonce_odr` dedup; then (3/N) incremental
-caching + per-unit repro.
+inline, no codegen change). io.sentinel `pub effect Io`; entry performs + handles it → 42. ✅ **cross-UNIT
+perform/handle DONE — THE HARD CASE** (`b43b7d6` op-id base map [1/2] + `4c3a28b` the feature [2/2]): a
+library `io::source` PERFORMS in ITS OWN unit, the entry HANDLES it in ANOTHER → exit 40. **So ALL pub item
+kinds now cross a `--separate` boundary: fn (extern + generic inline) / struct / enum / trait / effect-decl
+/ effecting fn.** The `EffectId` is OVERLOADED (the `(eid<<16)|op` op-id basis AND the `effect_decls[]`
+index), so a shared effect can't take a global eid — DECOUPLED via a build-wide **op-id base map** (effect
+NAME → a graph-stable sorted index): codegen's `CodegenCtx::encode_op_id_ctx` consults it with a fallback
+that DELEGATES to the standalone `encode_op_id`, so an EMPTY map (single-file / merge / corpus) is
+BYTE-IDENTICAL and the oracle `llvm_dump.rs` is UNTOUCHED; the `compile_to_object` wrapper +
+`run_build_merged` pass empty, `run_build_separate` computes name→index from all modules' own effects.
+COUPLED: `extract_exports` stops rejecting effecting `pub fn`s + `ExportedFn`/`TypedImportedFn` carry
+`effect_row_names`; `check_module` re-resolves them to the importer's EffectIds (effect analogue of the
+param-TypeExpr re-resolution `5f59591`) → the non-empty row drives the extern's Kont* ABI via
+`uses_kont_abi`; a name not `use`d → the new `TypeError::UnknownImportedEffect`. ⚠ KEY FINDING: a single-arm
+top-level handler's `unreachable` default makes LLVM ignore a wrong op id, so the load-bearing phase-go uses
+an op-id COLLISION (the entry handler lists arms for its own `Local` + the imported `Io`; no base map → the
+io-unit kont hits the `Local` arm → exit 7, with → the `Io.read` arm → exit 40). ⚠ base map keyed by NAME
+(MVP) → same-named cross-module effects collide (origin-qualified = robust upgrade). ▶ NEXT in (2/N)/(3/N):
+`linkonce_odr` dedup (an OPTIMIZATION — where the `mangle_type` cross-module type-tag fix becomes needed)
+then incremental Salsa caching + per-unit repro. 1515 tests, both fixed points byte-identical, four-check
+green.
 ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and

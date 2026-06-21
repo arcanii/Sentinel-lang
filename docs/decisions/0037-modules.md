@@ -10,8 +10,16 @@ link symbol). Green phase-gos: cross-module fn (`add` → exit 42), struct (`Poi
 → 42), enum (`Shape` w/ payloads, matched → 42), and the type-in-signature case
 (`sum(p: Point) -> i64`, a struct crossing by value → 42); + `ModuleNotFound`/`PrivateItem`
 rejections. Built ADDITIVELY (opt-in `--separate`; the Path A merge + both bootstrap fixed
-points untouched). ▶ REMAINING: (2/N) cross-module **generics** (`linkonce_odr` + module-
-qualified type tags) + trait/impl + effects; (3/N) incremental caching. The multi-file
+points untouched). **(2/N) is now FUNCTIONALLY COMPLETE — EVERY pub item kind crosses a
+`--separate` boundary:** generics (INLINED + monomorphized locally per importer), trait/impl
+(inlined trait, importer-local impl), effect decls (inlined), and **cross-UNIT effect
+perform/handle** (the last hard case — a library performs, the entry handles; `b43b7d6`+`4c3a28b`):
+the OVERLOADED `EffectId` (op-id basis AND `effect_decls[]` index) is DECOUPLED by a build-wide
+**op-id base map** (effect NAME → graph-stable index) consulted in codegen, with an empty-map
+delegation to `encode_op_id` so single-file / merge / corpus stay BYTE-IDENTICAL (oracle untouched);
+effecting externs carry `effect_row_names` re-resolved in `check_module`. ▶ REMAINING: (2/N)
+`linkonce_odr` dedup (an OPTIMIZATION — share generic/method instances across importers; needs the
+module-qualified type-tag fix below); (3/N) incremental caching. The multi-file
 SURFACE shipped earlier via the interim Path A merge. The surface shipped via
 the lower-risk Path A merge — owner-chosen: whole-graph front-end + merge
 into one `Program` → existing pipeline; true per-unit separate-compilation back
@@ -554,3 +562,19 @@ Deferred to (2/N) (flagged here so it is not forgotten):
 
 8. **Cross-module type tags in mono keys** must be module-qualified (D7 last bullet) —
    else same-named cross-module types `linkonce_odr`-dedup unsoundly.
+
+Realised in (2/N):
+
+9. **Cross-UNIT effect op ids → a build-wide op-id BASE map** (effect NAME → a
+   graph-stable sorted index), NOT a shared global `EffectId`. The `EffectId` is
+   overloaded (the `(eid<<16)|op` op-id basis AND the `effect_decls[]` index), so a
+   shared effect can't take a global id without the table index going out of bounds.
+   Codegen's `encode_op_id_ctx` consults the map and DELEGATES to the standalone
+   `encode_op_id` on a miss, so an empty map (single-file / merge / corpus) is
+   byte-identical — an amendment, not an ABI break, and the `snc llvm` oracle copy of
+   `encode_op_id` is untouched. The map is keyed by NAME for the MVP; same-named
+   cross-module effects would collide — an **origin-qualified key is the robust
+   upgrade** (the same shape as the point-8 type-tag fix). Effecting externs carry
+   `effect_row_names`, re-resolved to the importer's `EffectId`s in `check_module`
+   (the effect analogue of param-type re-resolution); the Kont* ABI follows via
+   `uses_kont_abi`.

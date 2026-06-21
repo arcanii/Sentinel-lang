@@ -2261,9 +2261,13 @@ For pasting into a fresh chat to bootstrap context:
     `sentinel_codegen_reaches_the_bootstrap_fixed_point`; **1473 tests**, modes 0–4 byte-identical, `scg`
     leak-free (`leaks --atExit`: 0 leaks lowering the merged compiler), four-check green.
 
-    ▶ **RESUME AT: the per-unit separate-compilation back end is UNDERWAY — ADR 0037 FLIPPED (step 1,
-    ADR-first, `7696f5d`); NEXT = code D.6 (1/N), the non-generic vertical slice (see the ▶ NOW ON block
-    below). The self-host port AND the ADR 0046 partial-move soundness fix are both COMPLETE.** **The
+    ▶ **RESUME AT: the per-unit separate-compilation back end (ADR 0037 (a)) — (2/N) is FUNCTIONALLY COMPLETE:
+    EVERY pub item kind now crosses a `--separate` boundary, incl. THE LAST HARD CASE, cross-UNIT effect
+    perform/handle (`b43b7d6`+`4c3a28b`, op-id base map; see the ▶ NOW ON block below for the decoupling + the
+    load-bearing-test KEY FINDING). NEXT = `linkonce_odr` dedup (an optimization — current model duplicates
+    generic/method instances per importer; this is where the `mangle_type` cross-module type-tag fix becomes
+    needed) then (3/N) incremental Salsa caching + per-unit `.o` repro. The self-host port AND the ADR 0046
+    partial-move soundness fix are both COMPLETE.** **The
     self-host port: Bar B closed, ADR 0045 ACCEPTED-WITH-AMENDMENTS
     (A1–A34): all 123 pass fixtures emit byte-identically `scg` == `snc llvm`, and the bootstrap fixed point
     holds via BOTH paths.** **ADR 0046 (the partial-move-through-field double-free, review-plan P1.2):
@@ -2378,37 +2382,36 @@ For pasting into a fresh chat to bootstrap context:
     importer, so the effect's EffectId (→ runtime `op_id = (eid<<16)|op`) is unit-local + consistent — PURE
     INLINE, NO codegen/eid change (op_id is a NUMBER, not a symbol). io.sentinel `pub effect Io`; entry imports
     it, performs in `do_work` + `handle do_work() with { Io.read(k) => k(42) }` → 42. **So ALL pub item kinds
-    now inline: fn (extern + generic inline) / struct / enum / trait / effect-decl.** ▶ **NEXT in (2/N): the
-    HARD remaining case = cross-UNIT perform/handle** (a library `io::source` PERFORMS, the entry HANDLES it —
-    the merge `cross_module_effect` test's shape). ⚠⚠ DESIGN BLOCKER FOUND: the `EffectId` is OVERLOADED — it is
-    BOTH the `op_id` basis AND the index into `program.effects[]`, so you can't just give a shared effect a
-    global eid (the table index would go out of bounds). The fix DECOUPLES them: keep the local EffectId (table
-    index) + add a SEPARATE build-wide **op-id base** per effect (stable by origin-module+name, computed by the
-    driver + threaded resolve→types→codegen; codegen uses the global base for `(base<<16)|op`). Multi-layer.
-    ▶▶ **RECON-VALIDATED IMPLEMENTATION RECIPE** (mapped this session — execute fresh):
-    (1) THE OP-ID CHOKEPOINT is `encode_op_id(effect_id, op_index) = (eid.0<<16)|(op&0xFFFF)` —
-    `sentinel-codegen/src/lib.rs:6557`, used at exactly 2 sites (`lower_perform` ~`:6002` + the handle dispatch
-    ~`:6309`); the `snc llvm` ORACLE has an identical copy at `crates/sentinel-driver/src/llvm_dump.rs:69`.
-    Make codegen consult a build-wide base map keyed by EFFECT NAME with `.unwrap_or(eid.0)` fallback → empty
-    map = the corpus = `eid` = BYTE-IDENTICAL (so the oracle differential + both fixed points stay green WITHOUT
-    touching `llvm_dump.rs`). Key by name for the MVP (⚠ same-named cross-module effects would collide —
-    origin-qualified key is the robust upgrade). The map lives on `CodegenCtx` (built at `:969`), threaded as a
-    new param to `compile_to_object_for_module` (the `compile_to_object` wrapper + `run_build_merged` pass empty;
-    `run_build_separate` computes name→index, sorted, from ALL graph effects). `TypedProgram.effects[eid].name`
-    is the key (see `TypedEffectDecl`, `sentinel-types/src/lib.rs:2077`).
-    (2) THE COUPLED PIECE — extern EFFECTING fns (`io::source` has `effect_row {Io}`): `extract_exports` must
-    STOP rejecting `pub fn`s with an `effect_row` + carry the effect-row NAMES; `ExportedFn` + `TypedImportedFn`
-    carry `effect_row_names`; `check_module` RE-RESOLVES them to the IMPORTER's EffectIds (against the inlined
-    effect — exactly like the param-TypeExpr re-resolution `5f59591` did for types). The extern's Kont* ABI then
-    follows automatically (`uses_kont_abi` sees the non-empty row → returns `ptr`). The kont itself crosses the
-    boundary via the runtime (opaque `sentinel_kont_*` ptr), so no symbol work there.
-    (3) ⚠⚠ TEST TRAP: a SINGLE-effect program passes WITHOUT the base map (io's eid 0 == importer's eid 0, so
-    op_ids coincide) — a silent fragility. The phase-go MUST use a MULTI-effect program (e.g. the importer
-    declares an OWN effect BEFORE the imported one, shifting its eid) so the base map is actually load-bearing.
-    Reference shape: the merge `cross_module_effect_compiles_and_runs` test (io::source performs, main handles).
-    (b) `linkonce_odr` dedup (an OPTIMIZATION — share generic/class-method instances across importers under the
-    ORIGIN module's qualified symbol; THIS is where the type-tag fix becomes necessary). Then (3/N) incremental
-    Salsa caching + per-unit `.o` repro. Keep the merge path + both fixed points green (additive).
+    now inline: fn (extern + generic inline) / struct / enum / trait / effect-decl.**
+    ✅ **cross-UNIT perform/handle DONE — THE HARD CASE — THE LAST (2/N) item-kind** (`b43b7d6` the codegen op-id
+    base map [1/2, inert] + `4c3a28b` the feature [2/2]): a library `io::source` PERFORMS in ITS OWN unit, the
+    entry HANDLES it in ANOTHER → exit 40. **So ALL pub item kinds now cross a `--separate` boundary: fn (extern +
+    generic inline) / struct / enum / trait / effect-decl / effecting fn.** The `EffectId` is OVERLOADED (BOTH the
+    `(eid<<16)|op` op-id basis AND the `effect_decls[]` index), so a shared effect can't take a global eid —
+    DECOUPLED via a build-wide **op-id base map** (effect NAME → a graph-stable sorted index). (1) Codegen: a new
+    `CodegenCtx::encode_op_id_ctx` (field `op_id_base` on `CodegenCtx`; new param on `compile_to_object_for_module`)
+    consults the map at BOTH `encode_op_id` call sites (perform + handle dispatch), and on a miss DELEGATES to the
+    standalone `encode_op_id` → an EMPTY map (single-file / merge / corpus) is BYTE-IDENTICAL, so the oracle copy
+    in `llvm_dump.rs` is UNTOUCHED and both fixed points stay green; the `compile_to_object` wrapper +
+    `run_build_merged` pass empty, `run_build_separate` computes name→index sorted from all modules' own effects.
+    (2) Coupled — extern EFFECTING fns: `extract_exports` stops rejecting `effect_row` `pub fn`s, and
+    `ExportedFn`/`TypedImportedFn` carry `effect_row_names`; `check_module` RE-RESOLVES them to the importer's
+    EffectIds (effect analogue of the param-TypeExpr re-resolution `5f59591`, against the driver-inlined effect
+    decls) → the non-empty row drives the extern's Kont* ABI via `uses_kont_abi`; a name not `use`d → the new
+    `TypeError::UnknownImportedEffect`. ⚠⚠ **KEY FINDING beyond the recon recipe** — the recipe's "multi-effect
+    importer so eids differ" is NECESSARY but NOT SUFFICIENT for a load-bearing test: a SINGLE-arm top-level
+    handler has an `unreachable` default, so LLVM collapses the lone arm to run UNCONDITIONALLY (ignoring the op
+    id) → a WRONG id still passes. The load-bearing phase-go needs the wrong id to hit a DIFFERENT REACHABLE arm:
+    the entry handler lists arms for BOTH its own `Local` (local eid 0) AND imported `Io` (local eid 1); without
+    the base map the io-unit kont's id (0) COLLIDES with the `Local` arm → resumes `k(7)` → exit 7, with it
+    `Io`→base 0 selects `Io.read` → exit 40 (verified by hand: removing the base map flips 40→7). ⚠ base map keyed
+    by NAME (MVP) → same-named cross-module effects collide (origin-qualified = the robust upgrade). Tests:
+    `separate_cross_unit_perform_handle_compiles_and_runs` (40) + `separate_effecting_import_without_its_effect_is_rejected`.
+    ▶ **NEXT (2/N)/(3/N):** (b) `linkonce_odr` dedup (an OPTIMIZATION — share generic/class-method instances across
+    importers under the ORIGIN module's qualified symbol; correctness is already fine, this just shrinks binaries;
+    THIS is where the `mangle_type` cross-module type-tag fix becomes necessary). Then (3/N) incremental Salsa
+    caching of unchanged units + per-unit `.o` repro (extend `repro.rs`). Keep the merge path + both fixed points
+    green (additive).
     Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;
