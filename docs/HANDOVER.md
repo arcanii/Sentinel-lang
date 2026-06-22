@@ -2263,15 +2263,16 @@ For pasting into a fresh chat to bootstrap context:
 
     ▶ **RESUME AT: the per-unit separate-compilation back end (ADR 0037 (a)) — (2/N): EVERY pub item kind
     crosses a `--separate` boundary (incl. cross-UNIT effect perform/handle, `b43b7d6`+`4c3a28b`), and
-    `linkonce_odr` GENERIC DEDUP is PARTIALLY REALISED (`c5ca3b8` codegen + `8d14db8` feature): collision-safe
-    (primitive-arg) instances of imported generics dedup across importers under an origin-qualified
-    `linkonce_odr` symbol (driver threads a `generic_origins: FnId→origin` map to codegen; `mono_args_dedup_safe`
-    gates it; empty map = byte-identical; load-bearing test = two importers of `util::id<i64>` LINK + `nm`=1 →
-    42). See the ▶ NOW ON block below. NEXT in (2/N) = the `mangle_type` cross-module TYPE-TAG fix (ADR SETTLED
-    point 8 — module-qualify a cross-module type's tag in a mono key so NAMED-type-arg instances dedup too;
-    needs struct-origin tracking, which the inline-local model currently erases) + extend dedup to trait/class
-    methods; then (3/N) incremental Salsa caching + per-unit `.o` repro. The self-host port AND the ADR 0046
-    partial-move soundness fix are both COMPLETE.** **The
+    `linkonce_odr` GENERIC DEDUP now covers PRIMITIVES + CROSS-MODULE STRUCTS. Primitive-arg dedup (`c5ca3b8`
+    +`8d14db8`); the ADR point-8 TYPE-TAG fix landed FOR STRUCTS (`a75a62c` codegen + `7c6767a` feature): a
+    cross-module struct's tag in a `linkonce_odr` mono key is ORIGIN-qualified (`id__util$geo$Point`, via
+    `mangle_type_dedup` + a driver-threaded `struct_origins: StructId→origin` map), so `id<geo::Point>` dedups
+    across importers AND two same-named cross-module structs stay DISTINCT (`id__a$Point` vs `id__b$Point` —
+    proven sound by the collision test, 8- vs 16-byte). Both maps mirror the op-id base map (empty =
+    byte-identical). See the ▶ NOW ON block below. NEXT in (2/N) = extend the type-tag fix to ENUMS + other
+    named args (same origin-qualified-tag treatment, `mangle_type_dedup` + an enum-origin map) + dedup
+    trait/class methods; then (3/N) incremental Salsa caching + per-unit `.o` repro. The self-host port AND the
+    ADR 0046 partial-move soundness fix are both COMPLETE.** **The
     self-host port: Bar B closed, ADR 0045 ACCEPTED-WITH-AMENDMENTS
     (A1–A34): all 123 pass fixtures emit byte-identically `scg` == `snc llvm`, and the bootstrap fixed point
     holds via BOTH paths.** **ADR 0046 (the partial-move-through-field double-free, review-plan P1.2):
@@ -2422,12 +2423,25 @@ For pasting into a fresh chat to bootstrap context:
     (`separate_cross_module_generic_is_linkonce_deduped_across_importers`): two importers of `util::id<i64>` → (a)
     LINKS (two EXTERNAL defs would be a duplicate-symbol error — confirmed by hand: disabling the linkage →
     "1 duplicate symbols") + (b) `nm` shows ONE symbol (the inline-local model emits two importer-qualified copies)
-    → exit 42. ▶ **NEXT (2/N)/(3/N):** the `mangle_type` cross-module TYPE-TAG fix (ADR SETTLED point 8) — so
-    NAMED-type-arg instances dedup too; ⚠ needs struct-ORIGIN tracking, which the inline-local model currently
-    ERASES (the driver re-materializes imported structs in the importer's StructId space, losing origin), so this
-    is the harder remaining piece. Then extend dedup to trait/class methods; then (3/N) incremental Salsa caching
-    of unchanged units + per-unit `.o` repro (extend `repro.rs`). Keep the merge path + both fixed points green
-    (additive).
+    → exit 42.
+    ✅ **TYPE-TAG FIX (ADR point 8) DONE FOR STRUCTS** (`a75a62c` codegen [1/2, inert] + `7c6767a` feature
+    [2/2]): a cross-module struct's tag in a `linkonce_odr` mono key is ORIGIN-qualified (`id__util$geo$Point`,
+    `$`-joined path) via a NEW `mangle_type_dedup`/`mangle_mono_name_dedup` (a `mangle_type` variant that
+    qualifies a cross-module struct + DELEGATES everything else, so they stay in lock-step) + a driver-threaded
+    `struct_origins: HashMap<StructId, Vec<String>>` (built like `generic_origins`: record imported struct
+    (name, origin) at the `use` site, map name→resolved StructId after resolve). `mono_args_dedup_safe` WIDENED:
+    primitive OR cross-module struct (origin known) OR array/nullable/vec thereof; a LOCAL struct (origin
+    unknown) stays per-importer. KEY INSIGHT (vs the prior handoff's fear): the inline-local model erases struct
+    origin in the StructId SPACE, but the driver still KNOWS the (name, origin) at the `use` site — so threading
+    a name→StructId→origin map is enough; no de-inlining needed. Two load-bearing tests: `id<geo::Point>` across
+    2 importers → ONE `id__geo$Point` (nm); + `separate_same_named_cross_module_structs_dont_alias_in_dedup`
+    (a::Point{x} 8-byte vs b::Point{x,y} 16-byte → DISTINCT `id__a$Point`/`id__b$Point` → no wrong merge → exit
+    12, the exact unsoundness point 8 closes; the `nm` assertion is load-bearing — those tags exist only with
+    the fix). Golden test `abi_v1_mangling_dedup_qualifies_cross_module_struct_tag` + abi-v1.md §4 pin the
+    format. ▶ **NEXT (2/N)/(3/N):** extend the type-tag fix to ENUMS + other named args (an enum-origin map +
+    `mangle_type_dedup`'s Enum arm — same pattern as structs) + dedup trait/class methods; then (3/N)
+    incremental Salsa caching of unchanged units + per-unit `.o` repro (extend `repro.rs`). Keep the merge path +
+    both fixed points green (additive).
     Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;

@@ -21,10 +21,12 @@ effecting externs carry `effect_row_names` re-resolved in `check_module`. ✅ **
 dedup — PARTIALLY REALISED** (`c5ca3b8`+`8d14db8`): a mono instance of an IMPORTED generic over
 COLLISION-SAFE args (primitives) emits under the ORIGIN-qualified symbol with `linkonce_odr` linkage,
 so N importers of `util::id<i64>` share ONE `_S4util4math…id__i64` def (the linker dedups; an empty
-`generic_origins` map → the importer-qualified default path, byte-identical). NAMED-type args still
-emit per-importer (sound) pending the module-qualified type-tag fix (point 8). ▶ REMAINING: (2/N) the
-type-tag fix (so named-type-arg instances dedup too) + extending dedup to trait/class methods; (3/N)
-incremental caching. The multi-file
+`generic_origins` map → the importer-qualified default path, byte-identical). ✅ the module-qualified
+TYPE-TAG fix (point 8) is DONE FOR STRUCTS (`a75a62c`+`7c6767a`): a cross-module struct's tag in a
+`linkonce_odr` mono key is origin-qualified (`id__util$geo$Point`), so `id<geo::Point>` dedups across
+importers AND two same-named structs from different modules stay distinct (proven sound). ▶ REMAINING:
+(2/N) extend the type-tag fix to ENUMS + other named args + dedup trait/class methods; (3/N) incremental
+caching. The multi-file
 SURFACE shipped earlier via the interim Path A merge. The surface shipped via
 the lower-risk Path A merge — owner-chosen: whole-graph front-end + merge
 into one `Program` → existing pipeline; true per-unit separate-compilation back
@@ -563,15 +565,18 @@ Settled in **this revision** (the per-unit back end):
 7. **Additive gating (D9) → opt-in `--separate` until (2/N) parity, then default;** the
    Path A merge + the self-host fixed-point paths stay green throughout.
 
-Deferred to (2/N) (flagged here so it is not forgotten):
-
-8. **Cross-module type tags in mono keys** must be module-qualified (D7 last bullet) —
-   else same-named cross-module types `linkonce_odr`-dedup unsoundly. ⏳ STILL DEFERRED,
-   but no longer a latent hazard: `linkonce_odr` dedup (point 10) is GATED to
-   collision-safe (primitive-arg) instances via `mono_args_dedup_safe`, so a named-type
-   arg keeps the sound per-importer emission. This fix is what UNLOCKS dedup for those.
-
 Realised in (2/N):
+
+8. **Cross-module type tags in mono keys → module-qualified** (D7 last bullet) — ✅ DONE
+   for STRUCTS (`a75a62c`+`7c6767a`). A cross-module struct's tag in a `linkonce_odr` mono
+   key is ORIGIN-qualified (`id__util$geo$Point`, `$`-joined path via `mangle_type_dedup` +
+   a driver-supplied `StructId → origin` map), so two same-named structs from different
+   modules get DISTINCT tags and no longer alias. This WIDENED `mono_args_dedup_safe` from
+   primitives-only to also accept cross-module structs (origin known) + arrays/nullables/vecs
+   thereof; a LOCAL struct (importer-specific) stays per-importer. Proven by the
+   `separate_same_named_cross_module_structs_dont_alias_in_dedup` test (8- vs 16-byte `Point`s
+   → distinct symbols, no wrong merge). ⏳ STILL DEFERRED: ENUMS + other named args (class /
+   generic-instance) — same origin-qualified-tag treatment, the remaining tail.
 
 9. **Cross-UNIT effect op ids → a build-wide op-id BASE map** (effect NAME → a
    graph-stable sorted index), NOT a shared global `EffectId`. The `EffectId` is
