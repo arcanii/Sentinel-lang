@@ -293,6 +293,78 @@ fn separate_cross_module_generic_is_linkonce_deduped_across_importers() {
 }
 
 #[test]
+fn separate_cross_module_generic_over_struct_is_linkonce_deduped() {
+    // ADR 0037 (2/N) point 8: two units both instantiate `util::id<geo::Point>`
+    // — a generic over a CROSS-MODULE struct. The mono key ORIGIN-qualifies the
+    // struct tag (`id__geo$Point`), so the instance dedups under ONE
+    // origin-qualified `linkonce_odr` symbol; a same-named `Point` from another
+    // module would get a DISTINCT tag, so the dedup stays sound. The `nm`
+    // assertion is load-bearing for the point-8 fix: WITHOUT it a struct arg is
+    // not dedup-safe → two importer-qualified copies and NO `id__geo$Point`.
+    // (19+2) + (20+1) -> 21 + 21 -> exit 42.
+    let dir = temp_project("separate_linkonce_struct");
+    write(dir.join("util/math.sentinel"), "pub fn id<T>(x: T) -> T { x }\n");
+    write(dir.join("geo.sentinel"), "pub struct Point { x: i64, y: i64 }\n");
+    write(
+        dir.join("helper.sentinel"),
+        "use util::math::id;\nuse geo::Point;\n\
+         pub fn h() -> i64 { let p: Point = Point { x: 20, y: 1 }; let q: Point = id(p); q.x + q.y }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use util::math::id;\nuse geo::Point;\nuse helper::h;\n\
+         fn main() -> i64 { let p: Point = Point { x: 19, y: 2 }; let q: Point = id(p); q.x + q.y + h() }\n",
+    );
+    let entry = dir.join("main.sentinel");
+    assert_eq!(build_and_run_separate(entry.clone()), 42);
+    let exe = entry.with_extension("");
+    let nm = Command::new("nm").arg(&exe).output().expect("run nm");
+    let syms = String::from_utf8_lossy(&nm.stdout);
+    let count = syms.lines().filter(|l| l.contains("id__geo$Point")).count();
+    assert_eq!(count, 1, "expected one origin-qualified id__geo$Point symbol; nm:\n{syms}");
+}
+
+#[test]
+fn separate_same_named_cross_module_structs_dont_alias_in_dedup() {
+    // ADR 0037 (2/N) point 8 SOUNDNESS: two modules each define a DIFFERENT
+    // `pub struct Point` (different layouts), and two importers instantiate
+    // `util::id<Point>` over them. The origin-qualified mono tag keeps the two
+    // instances DISTINCT (`id__a$Point` vs `id__b$Point`), so the linker does
+    // NOT merge an 8-byte `id` with a 16-byte one — the exact unsoundness a
+    // bare `id__Point` tag would cause. The `nm` assertion is load-bearing for
+    // the fix: those origin-qualified tags exist ONLY when point 8 is active
+    // (else struct args don't dedup → importer-qualified, no `id__a$Point`).
+    // fa()=5, fb()=3+4 -> 5 + 7 -> exit 12.
+    let dir = temp_project("separate_struct_tag_collision");
+    write(dir.join("util/math.sentinel"), "pub fn id<T>(x: T) -> T { x }\n");
+    write(dir.join("a.sentinel"), "pub struct Point { x: i64 }\n");
+    write(dir.join("b.sentinel"), "pub struct Point { x: i64, y: i64 }\n");
+    write(
+        dir.join("usea.sentinel"),
+        "use util::math::id;\nuse a::Point;\n\
+         pub fn fa() -> i64 { let p: Point = Point { x: 5 }; let q: Point = id(p); q.x }\n",
+    );
+    write(
+        dir.join("useb.sentinel"),
+        "use util::math::id;\nuse b::Point;\n\
+         pub fn fb() -> i64 { let p: Point = Point { x: 3, y: 4 }; let q: Point = id(p); q.x + q.y }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use usea::fa;\nuse useb::fb;\nfn main() -> i64 { fa() + fb() }\n",
+    );
+    let entry = dir.join("main.sentinel");
+    assert_eq!(build_and_run_separate(entry.clone()), 12);
+    let exe = entry.with_extension("");
+    let nm = Command::new("nm").arg(&exe).output().expect("run nm");
+    let syms = String::from_utf8_lossy(&nm.stdout);
+    assert!(
+        syms.contains("id__a$Point") && syms.contains("id__b$Point"),
+        "the two same-named structs must keep DISTINCT origin-qualified tags; nm:\n{syms}"
+    );
+}
+
+#[test]
 fn separate_cross_module_trait_compiles_and_runs() {
     // Cross-module `pub trait`: defined in `counter`, IMPORTED into the entry
     // which impls it for its OWN class + dispatches. The trait decl is

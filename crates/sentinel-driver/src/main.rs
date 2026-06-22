@@ -1146,6 +1146,10 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         let mut import_fns: Vec<sentinel_resolve::ImportedFn> = Vec::new();
         let mut typed_imports: Vec<sentinel_types::TypedImportedFn> = Vec::new();
         let mut imported_structs: Vec<sentinel_ast::StructDecl> = Vec::new();
+        // ADR 0037 (2/N) point 8: (imported struct name → its origin module
+        // path), so codegen can ORIGIN-qualify the struct's tag in a
+        // linkonce_odr mono key and dedup `id<geo::Point>` soundly.
+        let mut imported_struct_origins: Vec<(String, Vec<String>)> = Vec::new();
         let mut imported_enums: Vec<sentinel_ast::EnumDecl> = Vec::new();
         let mut imported_generic_fns: Vec<sentinel_ast::FnDef> = Vec::new();
         // ADR 0037 (2/N) `linkonce_odr`: (imported generic fn name → its origin
@@ -1173,7 +1177,10 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
                         effect_row_names: ex.effect_row_names.clone(),
                     });
                 }
-                Some(ExportedItem::Struct(decl)) => imported_structs.push(decl.clone()),
+                Some(ExportedItem::Struct(decl)) => {
+                    imported_struct_origins.push((decl.name.clone(), origin.clone()));
+                    imported_structs.push(decl.clone());
+                }
                 Some(ExportedItem::Enum(decl)) => imported_enums.push(decl.clone()),
                 Some(ExportedItem::GenericFn(fndef)) => {
                     imported_generic_origins.push((fndef.name.clone(), origin.clone()));
@@ -1231,6 +1238,19 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
                     .map(|s| (s.id, origin.clone()))
             })
             .collect();
+        // ADR 0037 (2/N) point 8: imported struct name → resolved StructId →
+        // origin, so codegen origin-qualifies its tag in a linkonce_odr mono
+        // key (names are unique — resolve rejects collisions).
+        let struct_origins: HashMap<sentinel_resolve::StructId, Vec<String>> = imported_struct_origins
+            .iter()
+            .filter_map(|(name, origin)| {
+                resolved
+                    .structs
+                    .iter()
+                    .find(|s| &s.name == name)
+                    .map(|s| (s.id, origin.clone()))
+            })
+            .collect();
         let has_main = resolved.fn_signatures.iter().any(|s| s.is_main);
         if is_entry && !has_main {
             eprintln!("snc: the entry module `{}` has no `main`", m.path.join("::"));
@@ -1276,11 +1296,6 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         let obj_path = obj_dir.join(format!("{}.o", m.path.join("_")));
         // The build-wide op-id base map (computed above) is passed to EVERY
         // unit so a cross-UNIT `perform`/`handle` pair encodes the same op id.
-        // ADR 0037 (2/N) point 8: imported-struct origins module-qualify a
-        // cross-module struct's tag in a linkonce_odr mono key. EMPTY here for
-        // now (a struct arg stays not-dedup-safe → importer-qualified) — a
-        // follow-up builds it so id<geo::Point> dedups soundly across units.
-        let struct_origins: HashMap<sentinel_resolve::StructId, Vec<String>> = HashMap::new();
         if let Err(err) = sentinel_codegen::compile_to_object_for_module(
             &hir,
             &m.path,
