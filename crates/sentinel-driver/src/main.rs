@@ -1276,11 +1276,17 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         let obj_path = obj_dir.join(format!("{}.o", m.path.join("_")));
         // The build-wide op-id base map (computed above) is passed to EVERY
         // unit so a cross-UNIT `perform`/`handle` pair encodes the same op id.
+        // ADR 0037 (2/N) point 8: imported-struct origins module-qualify a
+        // cross-module struct's tag in a linkonce_odr mono key. EMPTY here for
+        // now (a struct arg stays not-dedup-safe → importer-qualified) — a
+        // follow-up builds it so id<geo::Point> dedups soundly across units.
+        let struct_origins: HashMap<sentinel_resolve::StructId, Vec<String>> = HashMap::new();
         if let Err(err) = sentinel_codegen::compile_to_object_for_module(
             &hir,
             &m.path,
             &op_id_base,
             &generic_origins,
+            &struct_origins,
             &obj_path,
         ) {
             eprintln!("snc: codegen failed for module `{}`: {err}", m.path.join("::"));

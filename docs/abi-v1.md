@@ -191,13 +191,23 @@ instance of an IMPORTED generic fn is emitted under the **origin**-qualified
 symbol (the defining module's path, not the importer's) with `linkonce_odr`
 linkage, so N importers of `util::id<i64>` share ONE `_S4util4math…id__i64`
 definition (the linker dedups; an importer-LOCAL generic stays
-importer-qualified with default linkage). ⚠ This is gated to
-**collision-safe** instances — type args that are all PRIMITIVES — because a
-cross-module **type tag inside a mono key** renders by bare name (§4 above),
-so two same-named cross-module types as args would `linkonce_odr`-dedup
-**unsoundly**. Instances over a named type therefore keep the sound
-importer-qualified per-unit emission until the type tag is itself
-module-qualified (still **not realised** — the remaining (2/N) item).
+importer-qualified with default linkage). The dedup is gated to
+**collision-safe** type args, where the mono-key tag is globally unambiguous:
+- a **primitive** (`i64` / `i32` / `bool` / `u8`);
+- a **cross-module struct** whose origin is known — its tag is then
+  **origin-qualified** as `<seg>$…$<Name>` (`$`-joined module path, a
+  valid-in-identifier separator that can't appear in a bare name or path
+  segment), so `id<util::geo::Point>` → `id__util$geo$Point` and a same-named
+  `Point` from another module gets a distinct tag (`mangle_type_dedup` /
+  `mangle_mono_name_dedup`, keyed by a driver-supplied `StructId → origin`
+  map);
+- an array / nullable / vec of a safe element (recursively).
+
+A **local** struct (importer-specific, no shared origin) or any **other**
+named type (enum / class / generic instance) is NOT collision-safe and keeps
+the sound importer-qualified per-unit emission. So `linkonce_odr` dedup now
+covers primitives + cross-module structs; **enums / other named args remain
+the deferred tail.**
 
 **Intra-module `__` soft-spot (unchanged):** the *item* scheme is not
 length-prefixed, so exotic identifiers could in principle collide *within*
