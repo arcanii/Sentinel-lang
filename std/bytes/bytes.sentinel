@@ -1,0 +1,108 @@
+// std::bytes::bytes — utilities over `[u8]` (which is also the string type).
+//
+// These are PUBLIC, ordinary (NOT constant-time) operations: they branch on and
+// index by byte values, so they must not be used on `secret` data (the compiler
+// would reject a secret reaching the `if`/index below). Constant-time byte
+// comparison lives in `std::security::ct` (`ct_memcmp`).
+//
+// They take their buffers by SHARED BORROW (`&[u8]`) so a caller can pass the
+// same array to several of them without it being moved/consumed (`[u8]` is a
+// Move type; a `&[u8]` is Copy). Index through the borrow with `(*a)[i]` and
+// measure with `len(*a)`. They demonstrate the idiomatic `[u8]` patterns: a
+// public-counter `while` loop, borrow-indexing, and building a fresh buffer
+// through a `Vec<u8>`.
+
+// Byte-wise equality of two `[u8]`.
+pub fn eq(a: &[u8], b: &[u8]) -> bool {
+    let an: i64 = len(*a);
+    let bn: i64 = len(*b);
+    if an != bn {
+        false
+    } else {
+        let mut ok: bool = true;
+        let mut i: i64 = 0;
+        while i < an {
+            if (*a)[i] != (*b)[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// The index of the first occurrence of `needle` in `hay`, or `-1` if absent.
+pub fn find(hay: &[u8], needle: u8) -> i64 {
+    let n: i64 = len(*hay);
+    let mut idx: i64 = 0 - 1;
+    let mut i: i64 = 0;
+    while i < n {
+        // Record the FIRST match only (`idx < 0` until one is found).
+        if (*hay)[i] == needle && idx < 0 {
+            idx = i;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    idx
+}
+
+// Whether `hay` contains `needle` at all.
+pub fn contains(hay: &[u8], needle: u8) -> bool {
+    find(hay, needle) >= 0
+}
+
+// The number of occurrences of `needle` in `hay`.
+pub fn count(hay: &[u8], needle: u8) -> i64 {
+    let n: i64 = len(*hay);
+    let mut c: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        if (*hay)[i] == needle {
+            c = c + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    c
+}
+
+// Whether `s` begins with `prefix`.
+pub fn starts_with(s: &[u8], prefix: &[u8]) -> bool {
+    let pn: i64 = len(*prefix);
+    let sn: i64 = len(*s);
+    if pn > sn {
+        false
+    } else {
+        let mut ok: bool = true;
+        let mut i: i64 = 0;
+        while i < pn {
+            if (*s)[i] != (*prefix)[i] {
+                ok = false;
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        ok
+    }
+}
+
+// A fresh `[u8]` of `n` copies of `b` (built through a `Vec<u8>`).
+pub fn repeat(b: u8, n: i64) -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut v, b);
+        i = i + 1;
+    }
+    vec_to_array(v)
+}

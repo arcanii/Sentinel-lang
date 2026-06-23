@@ -171,6 +171,10 @@ const EXAMPLES: &[(&str, i32)] = &[
     // branch-free primitive) — add/rotate-by-public-constant/xor, constant-time
     // via std::security::ct::ct_rotl64. 42 = reproduced the reference output.
     ("examples/security/siphash_round.sentinel", 42),
+    // Ordinary (public) `[u8]` scanning + building via std::bytes::bytes
+    // (find/count/contains/starts_with/eq/repeat over `&[u8]` borrows). 42 =
+    // every utility returned its expected result.
+    ("examples/bytes/scan.sentinel", 42),
 ];
 
 #[test]
@@ -196,6 +200,11 @@ fn bits_rotate() {
 #[test]
 fn siphash_round_constant_time() {
     check_example("examples/security/siphash_round.sentinel", "siphash_round", 42);
+}
+
+#[test]
+fn bytes_scan() {
+    check_example("examples/bytes/scan.sentinel", "scan", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

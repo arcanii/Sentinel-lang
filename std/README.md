@@ -32,7 +32,7 @@ the example entry. See the harness doc-comment for the mechanics.
 | `security`  | `ct`                 | ✅ ct scalars + `ct_memcmp` over `[secret u8]` + `ct_rotl64` |
 | `math`      | `num`                | ✅ min/max/abs/clamp                       |
 | `bits`      | `bits`               | ✅ `rotl64`/`rotr64` (+ `rotl32`/`rotr32`, awaiting i32 construction) |
-| `bytes`     | `bytes`              | ◻ `[u8]`/string utils                    |
+| `bytes`     | `bytes`              | ✅ `eq`/`find`/`contains`/`count`/`starts_with`/`repeat` (over `&[u8]`) |
 
 The list grows as examples force new building blocks.
 

@@ -1,0 +1,33 @@
+// examples/bytes/scan.sentinel — scan and build byte strings with std::bytes.
+//
+// Ordinary (public) `[u8]` processing: find a byte, count occurrences, check a
+// prefix, and build a fresh buffer. Exit 42 means every utility returned the
+// expected result. (Contrast `examples/security/*`, which keep their data
+// `secret` and stay branch-free; this is the everyday, non-secret counterpart.)
+use std::bytes::bytes::find;
+use std::bytes::bytes::count;
+use std::bytes::bytes::contains;
+use std::bytes::bytes::starts_with;
+use std::bytes::bytes::eq;
+use std::bytes::bytes::repeat;
+
+fn main() -> i64 {
+    // Borrow `s` (`&s`) so each utility reads it without consuming it.
+    let s: [u8] = "hello, world";
+    let prefix: [u8] = "hello";
+
+    let comma: i64 = find(&s, ',');          // index 5
+    let ells: i64 = count(&s, 'l');          // l at 2, 3, 10 -> 3
+    let has_w: i64 = if contains(&s, 'w') { 1 } else { 0 };          // 1
+    let pre: i64 = if starts_with(&s, &prefix) { 1 } else { 0 };     // 1
+    let self_eq: i64 = if eq(&s, &s) { 1 } else { 0 };               // 1
+
+    let aaa: [u8] = repeat('a', 4);          // "aaaa"
+    let four: i64 = count(&aaa, 'a');        // 4
+
+    if comma == 5 && ells == 3 && has_w == 1 && pre == 1 && self_eq == 1 && four == 4 {
+        42
+    } else {
+        0
+    }
+}
