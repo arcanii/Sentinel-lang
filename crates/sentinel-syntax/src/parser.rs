@@ -3729,7 +3729,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_mul(&mut self) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_unary()?;
+        let mut lhs = self.parse_cast()?;
         loop {
             let op = match self.peek_kind() {
                 Some(TokenKind::Star) => BinOp::Mul,
@@ -3737,7 +3737,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
-            let rhs = self.parse_unary()?;
+            let rhs = self.parse_cast()?;
             let span = lhs.span.start..rhs.span.end;
             lhs = Spanned {
                 kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
@@ -3745,6 +3745,26 @@ impl<'a> Parser<'a> {
             };
         }
         Ok(lhs)
+    }
+
+    /// ADR 0049: integer cast `expr as T`, between multiplicative and unary
+    /// (Rust precedence: `as` binds tighter than the binary operators but
+    /// looser than unary — `-x as i32` is `(-x) as i32`, `a * b as i32` is
+    /// `a * (b as i32)`). Left-associative (`x as i32 as u8` chains). The `as`
+    /// token is shared with `impl as Trait`, but that is parsed only in item
+    /// position, so there is no conflict here in expression position.
+    fn parse_cast(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_unary()?;
+        while self.peek_kind() == Some(TokenKind::As) {
+            self.advance();
+            let ty = self.parse_type()?;
+            let span = expr.span.start..ty.span.end;
+            expr = Spanned {
+                kind: ExprKind::Cast(Box::new(expr), ty),
+                span,
+            };
+        }
+        Ok(expr)
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
@@ -5068,6 +5088,15 @@ mod tests {
         assert_eq!(pretty("1 + 2 << 1"), "(<< (+ 1 2) 1)");
         assert_eq!(pretty("1 << 2 & 3"), "(& (<< 1 2) 3)");
         assert_eq!(pretty("x << 4 | x >> 60"), "(| (<< x 4) (>> x 60))");
+    }
+
+    #[test]
+    fn parse_cast_basic_and_precedence() {
+        // ADR 0049: `x as T` is a cast; binds tighter than the binary operators
+        // (so `a * b as i32` is `a * (b as i32)`) and chains left-associatively.
+        assert_eq!(pretty("x as i32"), "(cast x i32)");
+        assert_eq!(pretty("a * b as i32"), "(* a (cast b i32))");
+        assert_eq!(pretty("x as i32 as u8"), "(cast (cast x i32) u8)");
     }
 
     #[test]

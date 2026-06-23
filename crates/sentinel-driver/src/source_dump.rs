@@ -623,6 +623,7 @@ fn emit_node(out: &mut String, e: &Expr) -> Result<(), String> {
             out.push_str(" }");
         }
         ExprKind::Declassify(_)
+        | ExprKind::Cast(_, _)
         | ExprKind::Scope { .. }
         | ExprKind::Spawn { .. }
         | ExprKind::Await { .. } => {
@@ -779,6 +780,7 @@ fn logic_symbol(op: LogicOp) -> &'static str {
 fn expr_kind_name(k: &ExprKind) -> &'static str {
     match k {
         ExprKind::Declassify(_) => "declassify",
+        ExprKind::Cast(_, _) => "cast",
         ExprKind::Perform { .. } => "perform",
         ExprKind::Handle { .. } => "handle",
         ExprKind::Scope { .. } => "scope",

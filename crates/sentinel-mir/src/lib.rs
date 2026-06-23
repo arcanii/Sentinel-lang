@@ -474,6 +474,14 @@ impl FnBuilder {
                 let v = self.lower_expr(program, inner);
                 self.emit(MirOp::Opaque(vec![v]), ty, span)
             }
+            // ADR 0049: an integer cast `x as T` is a data-independent width
+            // conversion — carry the operand (so taint propagates) and let the
+            // result type speak (it preserves the operand's secrecy). NOT a
+            // sink: casting a secret is constant-time, so no leak is flagged.
+            TypedExprKind::Cast(inner) => {
+                let v = self.lower_expr(program, inner);
+                self.emit(MirOp::Opaque(vec![v]), ty, span)
+            }
             TypedExprKind::NullLit => self.emit(MirOp::Opaque(Vec::new()), ty, span),
 
             // ---- control flow ----------------------------------------

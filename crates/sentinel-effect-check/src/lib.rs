@@ -303,6 +303,7 @@ fn walk_expr(
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
         | TypedExprKind::Declassify(inner) => walk_expr(inner, effective, async_id, acc),
 
         TypedExprKind::Binary(_, l, r)

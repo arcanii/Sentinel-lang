@@ -1527,6 +1527,7 @@ fn collect_spawn_targets_expr(expr: &TypedExpr, acc: &mut Vec<FnId>) {
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
         | TypedExprKind::Declassify(inner) => collect_spawn_targets_expr(inner, acc),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -1964,6 +1965,7 @@ fn walk_expr_for_mono(
         | TypedExprKind::Var(_) => {}
         TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
         | TypedExprKind::Declassify(inner) => walk_expr_for_mono(
             inner, subst, program, instances, refs, visited, order, pending,
         ),
@@ -5869,6 +5871,28 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // barriers) is a follow-on per ADR 0019 D12.
                 self.lower_expr(inner, program)
             }
+            TypedExprKind::Cast(inner) => {
+                // ADR 0049: integer width conversion. Strip secret (layout-
+                // free), then trunc / sext / zext by width; same width is a
+                // no-op. `u8` is the only UNSIGNED source → zext when widening;
+                // `i32`/`i64` sign-extend.
+                let v = self.lower_expr(inner, program)?.into_int_value();
+                let dst_ty = self.llvm_int_type(expr.ty);
+                let src_w = v.get_type().get_bit_width();
+                let dst_w = dst_ty.get_bit_width();
+                let result = if dst_w == src_w {
+                    return Ok(v.into());
+                } else if dst_w < src_w {
+                    self.builder.build_int_truncate(v, dst_ty, "cast")
+                } else if matches!(self.strip_secret(inner.ty), Type::U8) {
+                    self.builder.build_int_z_extend(v, dst_ty, "cast")
+                } else {
+                    self.builder.build_int_s_extend(v, dst_ty, "cast")
+                };
+                result
+                    .map(|x| x.into())
+                    .map_err(|e| CodegenError::Builder(e.to_string()))
+            }
             TypedExprKind::WidenToNullable(inner) => {
                 // ADR 0014 D3: lower the inner T value and wrap.
                 // For primitives: `{ i1 true, T payload }` inline.
@@ -6871,6 +6895,7 @@ fn expr_performs(expr: &TypedExpr) -> bool {
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
         | TypedExprKind::Declassify(inner) => expr_performs(inner),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -7130,6 +7155,7 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
         | TypedExprKind::Declassify(inner) => walk_collect_var_refs(inner, acc),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -7274,6 +7300,7 @@ fn count_performs(expr: &TypedExpr) -> usize {
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
         | TypedExprKind::Declassify(inner) => count_performs(inner),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -7379,6 +7406,7 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
         | TypedExprKind::Declassify(inner) => find_unique_perform(inner),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -7502,6 +7530,9 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
         TypedExprKind::Declassify(inner) => TypedExprKind::Declassify(
             Box::new(substitute_perform_with_var(inner, placeholder_id)),
         ),
+        TypedExprKind::Cast(inner) => TypedExprKind::Cast(Box::new(
+            substitute_perform_with_var(inner, placeholder_id),
+        )),
         TypedExprKind::Binary(op, l, r) => TypedExprKind::Binary(
             *op,
             Box::new(substitute_perform_with_var(l, placeholder_id)),
@@ -7791,6 +7822,7 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
         | TypedExprKind::Declassify(inner) => {
             find_var_name_in_expr(inner, id)
         }

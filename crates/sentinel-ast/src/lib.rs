@@ -263,6 +263,13 @@ pub enum ExprKind {
     /// variant at C3.0; type-check rejects with
     /// `TypeError::DeclassifyNotYet` until C3.1 lands.
     Declassify(Box<Expr>),
+    /// ADR 0049: integer cast `expr as T` (T ∈ {i64, i32, u8}). A width
+    /// conversion: zero-extend (u8 source) / sign-extend (signed source) /
+    /// truncate / no-op (same width). Preserves secrecy (`(secret T) as U` →
+    /// `secret U`); data-independent, so NOT a constant-time sink. The target
+    /// stays a `TypeExpr` (resolved at the types stage, like a `let`
+    /// annotation). Closes the i32-construction gap.
+    Cast(Box<Expr>, TypeExpr),
     /// `handle expr with { Effect.op(p1, ..., k) => body, return v => body }`
     /// per ADR 0020 D4 + D5 (C3.4). The body's effect row is
     /// reduced by the set of effects handled here per D6. Arms
@@ -1052,6 +1059,9 @@ impl fmt::Display for ExprKind {
             }
             ExprKind::Declassify(inner) => {
                 write!(f, "(declassify {})", inner.kind)
+            }
+            ExprKind::Cast(inner, te) => {
+                write!(f, "(cast {} {})", inner.kind, te.kind)
             }
             ExprKind::Handle { body, arms, return_arm } => {
                 write!(f, "(handle {}", body.kind)?;

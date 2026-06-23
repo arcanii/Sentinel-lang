@@ -1448,6 +1448,39 @@ impl Emit<'_> {
             TypedExprKind::WidenToSecret(inner) | TypedExprKind::Declassify(inner) => {
                 self.lower_expr(inner)
             }
+            TypedExprKind::Cast(inner) => {
+                // ADR 0049: integer width conversion — trunc / sext / zext by
+                // width (u8 is the only unsigned source → zext when widening);
+                // same width is a no-op. (No cast fixture is in the differential
+                // corpus until the selfhost mirror lands, so this is unexercised
+                // there; it keeps `snc llvm` correct on cast programs.)
+                let x = self.lower_expr(inner)?;
+                let src = inner.ty.strip_secret(&self.program.secrets).0;
+                let dst = expr.ty.strip_secret(&self.program.secrets).0;
+                let bits = |t: Type| -> u32 {
+                    match t {
+                        Type::U8 => 8,
+                        Type::I32 => 32,
+                        _ => 64,
+                    }
+                };
+                let (sw, dw) = (bits(src), bits(dst));
+                if sw == dw {
+                    return Ok(x);
+                }
+                let srcty = self.lty(src)?;
+                let dstty = self.lty(dst)?;
+                let op = if dw < sw {
+                    "trunc"
+                } else if matches!(src, Type::U8) {
+                    "zext"
+                } else {
+                    "sext"
+                };
+                let v = self.fresh();
+                writeln!(self.body, "  %v{v} = {op} {srcty} {x} to {dstty}").unwrap();
+                Ok(format!("%v{v}"))
+            }
             TypedExprKind::Var(id) => {
                 let llty = self.lty(expr.ty)?;
                 let v = self.fresh();
@@ -3117,6 +3150,7 @@ fn expr_performs(expr: &TypedExpr) -> bool {
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
         | TypedExprKind::Declassify(inner) => expr_performs(inner),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -3258,6 +3292,7 @@ fn collect_performs<'a>(expr: &'a TypedExpr, acc: &mut Vec<&'a TypedExpr>) {
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
         | TypedExprKind::Declassify(inner) => collect_performs(inner, acc),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -3456,6 +3491,7 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
         TypedExprKind::Unary(_, inner)
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
+        | TypedExprKind::Cast(inner)
         | TypedExprKind::Declassify(inner) => walk_collect_var_refs(inner, acc),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)

@@ -175,6 +175,10 @@ const EXAMPLES: &[(&str, i32)] = &[
     // (find/count/contains/starts_with/eq/repeat over `&[u8]` borrows). 42 =
     // every utility returned its expected result.
     ("examples/bytes/scan.sentinel", 42),
+    // A true 32-bit ChaCha quarter-round over SECRET i32 words (ADR 0049 `as`
+    // cast + ADR 0048 shifts) — add/rotate/xor, constant-time via ct_rotl32.
+    // 42 = reproduced the RFC 8439 §2.1.1 test vector.
+    ("examples/security/chacha_qr.sentinel", 42),
 ];
 
 #[test]
@@ -205,6 +209,11 @@ fn siphash_round_constant_time() {
 #[test]
 fn bytes_scan() {
     check_example("examples/bytes/scan.sentinel", "scan", 42);
+}
+
+#[test]
+fn chacha_quarter_round() {
+    check_example("examples/security/chacha_qr.sentinel", "chacha_qr", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

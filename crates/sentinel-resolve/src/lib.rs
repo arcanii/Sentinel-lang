@@ -699,6 +699,10 @@ pub enum ResolvedExprKind {
     /// the inner is `secret T` and produces T as the result.
     /// Idempotent on non-secret types per ADR 0008 D5.
     Declassify(Box<ResolvedExpr>),
+    /// ADR 0049: integer cast `expr as T`. Mirrors the AST variant; the
+    /// `TypeExpr` target is carried verbatim and resolved at the types stage
+    /// (like a `let` annotation).
+    Cast(Box<ResolvedExpr>, TypeExpr),
     /// C3.4 / ADR 0020 D4 + D5: `handle expr with { arms }`. The
     /// effects handled by `arms` are subtracted from the body's
     /// inferred row at the type-check / effect-check pass per D6.
@@ -1852,7 +1856,9 @@ fn rewrite_expr(expr: &mut Expr, r: &Renamer) {
         | ExprKind::CharLit(_)
         | ExprKind::StringLit(_)
         | ExprKind::Var(_) => {}
-        ExprKind::Unary(_, e) | ExprKind::Declassify(e) => rewrite_expr(e, r),
+        ExprKind::Unary(_, e) | ExprKind::Declassify(e) | ExprKind::Cast(e, _) => {
+            rewrite_expr(e, r)
+        }
         ExprKind::Binary(_, lhs, rhs) | ExprKind::Cmp(_, lhs, rhs) | ExprKind::Logic(_, lhs, rhs) => {
             rewrite_expr(lhs, r);
             rewrite_expr(rhs, r);
@@ -3795,6 +3801,23 @@ fn resolve_expr(
                 next_var_id,
             )?;
             ResolvedExprKind::Declassify(Box::new(inner))
+        }
+        ExprKind::Cast(inner, ty) => {
+            // ADR 0049: resolve the operand; carry the target TypeExpr verbatim
+            // (resolved at the types stage, like a `let` annotation).
+            let inner = resolve_expr(
+                inner,
+                fn_table,
+                signatures,
+                struct_table,
+                class_table,
+                effect_table,
+                effects,
+                impls,
+                vars,
+                next_var_id,
+            )?;
+            ResolvedExprKind::Cast(Box::new(inner), ty.clone())
         }
         ExprKind::Handle { body, arms, return_arm } => resolve_handle_expr(
             body,

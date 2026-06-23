@@ -273,6 +273,11 @@ fn dump_expr(e: &TypedExpr, program: &TypedProgram, out: &mut String) {
             dump_expr(inner, program, out);
             close_ty(out, e.ty, program);
         }
+        TypedExprKind::Cast(inner) => {
+            out.push_str("(cast ");
+            dump_expr(inner, program, out);
+            close_ty(out, e.ty, program);
+        }
         TypedExprKind::Var(id) => {
             out.push_str("(var ");
             push_id(out, id.0);

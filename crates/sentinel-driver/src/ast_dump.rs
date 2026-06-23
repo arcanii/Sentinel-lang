@@ -509,6 +509,13 @@ fn dump_expr(e: &Expr, out: &mut String) {
             dump_expr(inner, out);
             out.push(')');
         }
+        ExprKind::Cast(inner, te) => {
+            out.push_str("(cast ");
+            dump_expr(inner, out);
+            out.push(' ');
+            out.push_str(&te.kind.to_string());
+            out.push(')');
+        }
         ExprKind::Perform { effect, op, args } => {
             out.push_str("(perform ");
             out.push_str(&effect.kind);

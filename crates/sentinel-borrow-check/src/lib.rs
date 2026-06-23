@@ -926,7 +926,10 @@ fn walk_expr(
         // borrow semantics — they're purely type-level. Walk the
         // inner and let normal moves/borrows flow through.
         TypedExprKind::WidenToSecret(inner)
-        | TypedExprKind::Declassify(inner) => {
+        | TypedExprKind::Declassify(inner)
+        // ADR 0049: an integer cast is a pure type-level width conversion of a
+        // Copy scalar — walk the inner; no move/borrow change.
+        | TypedExprKind::Cast(inner) => {
             walk_expr(inner, ctx, errors, program);
         }
 

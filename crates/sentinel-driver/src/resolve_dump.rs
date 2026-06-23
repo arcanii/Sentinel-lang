@@ -327,6 +327,13 @@ fn dump_expr(e: &ResolvedExpr, out: &mut String) {
             dump_expr(inner, out);
             out.push(')');
         }
+        ResolvedExprKind::Cast(inner, te) => {
+            out.push_str("(cast ");
+            dump_expr(inner, out);
+            out.push(' ');
+            out.push_str(&te.kind.to_string());
+            out.push(')');
+        }
         ResolvedExprKind::Perform { effect_id, op_index, effect_name, op_name, args, .. } => {
             out.push_str("(perform ");
             push_id(out, effect_id.0);

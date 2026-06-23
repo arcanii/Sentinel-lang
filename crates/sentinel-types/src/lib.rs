@@ -1636,6 +1636,9 @@ impl TypedExpr {
             TypedExprKind::Declassify(inner) => TypedExprKind::Declassify(
                 Box::new(inner.substitute(subst, instances, refs)),
             ),
+            TypedExprKind::Cast(inner) => {
+                TypedExprKind::Cast(Box::new(inner.substitute(subst, instances, refs)))
+            }
             TypedExprKind::Var(id) => TypedExprKind::Var(*id),
             TypedExprKind::Unary(op, inner) => TypedExprKind::Unary(
                 *op,
@@ -2260,6 +2263,11 @@ pub enum TypedExprKind {
     /// inputs (the inner just flows through, no `Type::Secret`
     /// wrap to strip).
     Declassify(Box<TypedExpr>),
+    /// ADR 0049: integer cast `expr as T`. The resolved target type lives on
+    /// the outer node's `ty` (possibly `secret`, preserving the operand's
+    /// secrecy) — like `Declassify`, no separate target field. Codegen reads
+    /// the source width from the inner's `ty` and the target from `ty`.
+    Cast(Box<TypedExpr>),
     Var(VarId),
     Unary(UnaryOp, Box<TypedExpr>),
     Binary(BinOp, Box<TypedExpr>, Box<TypedExpr>),
@@ -3000,6 +3008,20 @@ pub enum TypeError {
     )]
     SecretShiftAmount {
         #[label("secret shift amount here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0049 — a cast `x as T` requires both the operand and the
+    /// target `T` to be integer types (`i64` / `i32` / `u8`). Anything
+    /// else (a non-integer operand, or a non-integer / `secret` / array
+    /// target) is rejected.
+    #[error("`as` cast requires integer operand and target (i64 / i32 / u8)")]
+    #[diagnostic(
+        code(sentinel::types::non_integer_cast),
+        help("only integer casts are supported; widen secrecy with a `let`, not a cast")
+    )]
+    NonIntegerCast {
+        #[label("invalid cast here")]
         span: miette::SourceSpan,
     },
 
@@ -6860,6 +6882,61 @@ fn check_expr(
                 stripped,
             )
         }
+        ResolvedExprKind::Cast(inner, te) => {
+            // ADR 0049: `expr as T` — an integer width conversion. The operand
+            // must be an integer; the target must be a plain integer type
+            // (i64 / i32 / u8). The result takes the operand's secrecy (a
+            // width conversion is data-independent / constant-time, so casting
+            // a secret is allowed and stays secret — NOT a constant-time sink).
+            let inner_t = check_expr(
+                inner,
+                None,
+                env,
+                signatures,
+                structs,
+                class_decls,
+                enums,
+                instances,
+                refs,
+                secrets,
+                struct_type_param_counts,
+                effect_decls,
+                trait_decls,
+                impl_decls,
+                konts,
+                tasks,
+            )?;
+            let (stripped, was_secret) = inner_t.ty.strip_secret(secrets);
+            if !stripped.is_int() {
+                return Err(TypeError::NonIntegerCast {
+                    span: to_source_span(&inner.span),
+                });
+            }
+            // The target is restricted to a plain integer type ident.
+            let target = match &te.kind {
+                TypeExprKind::Ident(name) => match name.as_str() {
+                    "i64" => Type::I64,
+                    "i32" => Type::I32,
+                    "u8" => Type::U8,
+                    _ => {
+                        return Err(TypeError::NonIntegerCast {
+                            span: to_source_span(&te.span),
+                        })
+                    }
+                },
+                _ => {
+                    return Err(TypeError::NonIntegerCast {
+                        span: to_source_span(&te.span),
+                    })
+                }
+            };
+            let result_ty = if was_secret {
+                Type::Secret(intern_secret(secrets, target))
+            } else {
+                target
+            };
+            (TypedExprKind::Cast(Box::new(inner_t)), result_ty)
+        }
         ResolvedExprKind::Handle { body, arms, return_arm } => check_handle_expr(
             body,
             arms,
@@ -8450,6 +8527,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::SecretShiftAmount { span } => (
             "sentinel::types::secret_shift_amount",
             "variable-time shift by a `secret` amount leaks via timing".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::NonIntegerCast { span } => (
+            "sentinel::types::non_integer_cast",
+            "`as` cast requires integer operand and target (i64 / i32 / u8)".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::SecretInRefDeref { span } => (
@@ -10365,6 +10447,37 @@ fn main() -> i64 {
         // a public shift just produces the left operand's type.
         let p = check_ok("fn main() -> i64 { 256 >> 2 }");
         assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    #[test]
+    fn adr0049_cast_constructs_i32_and_roundtrips() {
+        // ADR 0049: `i64 as i32` (truncate) then `i32 as i64` (sign-extend).
+        let p = check_ok("fn main() -> i64 { (5 as i32) as i64 }");
+        assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    #[test]
+    fn adr0049_cast_preserves_secrecy() {
+        // A cast of a `secret` value stays secret (data-independent, constant-
+        // time — NOT a sink); so `declassify` (which requires a secret operand)
+        // type-checks on the cast result.
+        let p = check_ok(
+            "fn f(x: secret i64) -> i64 { declassify((x as i32) as i64) }\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.main().return_type, Type::I64);
+    }
+
+    #[test]
+    fn adr0049_non_integer_cast_rejects() {
+        // The operand and target must be integers; casting a `bool` is rejected.
+        let err = check_err(
+            "fn f(b: bool) -> i64 { (b as i64) }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::NonIntegerCast { .. }),
+            "got {err:?}"
+        );
     }
 
     // ---- C5.3 / ADR 0027 D5: bitwise operators (secret-preserving) ----
