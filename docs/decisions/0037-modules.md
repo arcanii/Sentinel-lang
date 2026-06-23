@@ -25,8 +25,11 @@ so N importers of `util::id<i64>` share ONE `_S4util4math…id__i64` def (the li
 TYPE-TAG fix (point 8) is DONE FOR STRUCTS + ENUMS (`a75a62c`+`7c6767a`+`7d5dd46`): a cross-module
 struct/enum tag in a `linkonce_odr` mono key is origin-qualified (`id__util$geo$Point` /
 `id__shape$Shape`), so `id<geo::Point>` / `id<shape::Shape>` dedup across importers AND two same-named
-types from different modules stay distinct (proven sound). ▶ REMAINING: (2/N) extend the type-tag fix to
-class / generic-instance args + dedup cross-module trait/class METHODS; (3/N) incremental caching. The
+types from different modules stay distinct (proven sound). ✅ **(3/N) INCREMENTAL CACHING WORKS** (`ced9130`):
+a rebuild reuses an unchanged unit's cached `.o` (a content-fingerprint `.o.fp` sidecar; editing one module
+recompiles only it + its importers, printing `fresh <module>` for the rest) — sound because per-unit codegen
+is reproducible (`299f17c`, the `repro.rs` foundation). ▶ REMAINING: (2/N) extend the type-tag fix to class /
+generic-instance args + dedup cross-module trait/class METHODS; (3/N) a finer per-item fingerprint. The
 multi-file
 SURFACE shipped earlier via the interim Path A merge. The surface shipped via
 the lower-risk Path A merge — owner-chosen: whole-graph front-end + merge
@@ -604,3 +607,16 @@ Realised in (2/N):
     named-type tag aliases by bare name (point 8) — those stay per-importer (sound)
     until point 8 lands. Verified load-bearing: two importers of `util::id<i64>` LINK
     (two external defs would be a duplicate-symbol error) and `nm` shows ONE symbol.
+
+11. **Incremental caching → a per-unit content fingerprint + `.o.fp` sidecar** (3/N).
+    Each unit's `.o` is stamped with `unit_fingerprint(unit)` = a hash over its own
+    source + every imported module's source (the importer inlines their decls /
+    extern-links their fns) + the graph-wide sorted effect names (the op-id base map) +
+    the module path + the compiler version (`DefaultHasher`, fixed keys → process-stable).
+    On a rebuild a unit with a matching fingerprint + an on-disk object is REUSED (the
+    whole per-unit pipeline is skipped, printing `fresh <module>`), so editing one module
+    recompiles only it + its importers. SOUND because per-unit codegen is reproducible
+    (the `repro.rs` per-unit check). Conservative/coarse (whole imported-module source,
+    and a graph-wide effect change recompiles every unit) — a finer per-item fingerprint
+    is the deferred refinement. NOT Salsa-backed (the `--separate` path bypasses Salsa,
+    like the merge path); a content hash is the analogue.

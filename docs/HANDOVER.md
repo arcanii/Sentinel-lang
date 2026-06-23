@@ -2261,19 +2261,20 @@ For pasting into a fresh chat to bootstrap context:
     `sentinel_codegen_reaches_the_bootstrap_fixed_point`; **1473 tests**, modes 0–4 byte-identical, `scg`
     leak-free (`leaks --atExit`: 0 leaks lowering the merged compiler), four-check green.
 
-    ▶ **RESUME AT: the per-unit separate-compilation back end (ADR 0037 (a)) — (2/N): EVERY pub item kind
-    crosses a `--separate` boundary (incl. cross-UNIT effect perform/handle, `b43b7d6`+`4c3a28b`), and
-    `linkonce_odr` GENERIC DEDUP now covers PRIMITIVES + CROSS-MODULE STRUCTS + ENUMS. Primitive-arg dedup
-    (`c5ca3b8`+`8d14db8`); the ADR point-8 TYPE-TAG fix landed for STRUCTS (`a75a62c`+`7c6767a`) and ENUMS
-    (`7d5dd46`): a cross-module struct/enum tag in a `linkonce_odr` mono key is ORIGIN-qualified
-    (`id__util$geo$Point` / `id__shape$Shape`, via `mangle_type_dedup` + a driver-threaded `NamedTypeOrigins
-    { structs: StructId→origin, enums: EnumId→origin }` bundle), so `id<geo::Point>` / `id<shape::Shape>`
-    dedup across importers AND two same-named cross-module types stay DISTINCT (`id__a$Point` vs `id__b$Point`,
-    proven sound by the collision test, 8- vs 16-byte). All maps mirror the op-id base map (empty =
-    byte-identical). See the ▶ NOW ON block below. NEXT in (2/N) = extend the type-tag fix to class /
-    generic-instance args (add their arms to `mangle_type_dedup` + a `NamedTypeOrigins` field — same shape) +
-    dedup cross-module trait/class METHODS; then (3/N) incremental Salsa caching + per-unit `.o` repro. The
-    self-host port AND the ADR 0046 partial-move soundness fix are both COMPLETE.** **The
+    ▶ **RESUME AT: the per-unit separate-compilation back end (ADR 0037 (a)) — (3/N) INCREMENTAL CACHING WORKS
+    (`299f17c` per-unit `.o` reproducibility + `ced9130` the cache): a `--separate` rebuild reuses an unchanged
+    unit's cached `.o` (a `unit_fingerprint` → `<obj>.o.fp` sidecar; editing one module recompiles only it +
+    its importers, the rest print `fresh <module>`) — THE PAYOFF of separate compilation, sound because per-unit
+    codegen is reproducible. (2/N) is otherwise complete: EVERY pub item kind crosses a boundary (incl. cross-UNIT
+    effect perform/handle `b43b7d6`+`4c3a28b`), and `linkonce_odr` GENERIC DEDUP covers PRIMITIVES (`c5ca3b8`
+    +`8d14db8`) + cross-module STRUCTS (`a75a62c`+`7c6767a`) + ENUMS (`7d5dd46`) via origin-qualified mono tags
+    (`id__util$geo$Point` / `id__shape$Shape`, `mangle_type_dedup` + a `NamedTypeOrigins { structs, enums }`
+    bundle; same-named cross-module types stay distinct, proven sound). See the ▶ NOW ON block below. NEXT
+    (remaining tail, all LOWER value): extend the type-tag fix to class / generic-instance type args (add their
+    arms to `mangle_type_dedup` + a `NamedTypeOrigins` field — same shape, rarer) + dedup cross-module
+    trait/class METHODS (mirror the generic-fn `generic_origins` model with a method-origin map) + a finer
+    per-item cache fingerprint. The self-host port AND the ADR 0046 partial-move soundness fix are both
+    COMPLETE.** **The
     self-host port: Bar B closed, ADR 0045 ACCEPTED-WITH-AMENDMENTS
     (A1–A34): all 123 pass fixtures emit byte-identically `scg` == `snc llvm`, and the bootstrap fixed point
     holds via BOTH paths.** **ADR 0046 (the partial-move-through-field double-free, review-plan P1.2):
@@ -2445,12 +2446,26 @@ For pasting into a fresh chat to bootstrap context:
     `NamedTypeOrigins { structs, enums }` (so the codegen sig stays 6 args + a future named-type map is one
     field, not one param). Driver records imported enum (name, origin) at the `use` site → name→resolved
     EnumId. Golden test now covers both; `separate_cross_module_generic_over_enum_is_linkonce_deduped` (nm=1,
-    load-bearing) → 42. So `linkonce_odr` dedup covers primitives + cross-module STRUCTS + ENUMS. ▶ **NEXT
-    (2/N)/(3/N):** extend to class / generic-instance type args (add their arms to `mangle_type_dedup` + a
-    `NamedTypeOrigins` field — same shape, both rarer) + dedup cross-module trait/class METHODS (the methods
-    currently emit importer-qualified; mirror the generic-fn `generic_origins` model with a method-origin map);
-    then (3/N) incremental Salsa caching of unchanged units + per-unit `.o` repro (extend `repro.rs`). Keep the
-    merge path + both fixed points green (additive).
+    load-bearing) → 42. So `linkonce_odr` dedup covers primitives + cross-module STRUCTS + ENUMS.
+    ✅ **(3/N) INCREMENTAL CACHING WORKS — THE PAYOFF** (`299f17c` per-unit `.o` reproducibility foundation +
+    `ced9130` the cache). FOUNDATION: `repro.rs` now builds a multi-file project twice in independent processes
+    and asserts every per-unit `.o` is BYTE-IDENTICAL (a cached `.o` may only be reused if rebuilding reproduces
+    it; the dedup origin maps are lookup-only, so deterministic). THE CACHE: `DiscoveredModule` retains its
+    `source`; `unit_fingerprint(unit)` = a `DefaultHasher` (FIXED keys → process-stable, unlike a HashMap seed)
+    hash over the unit's source + EVERY imported module's source (the importer inlines their decls / extern-links
+    their fns) + the graph-wide sorted effect names (op-id base map) + module path + compiler version, stamped
+    into an `<obj>.o.fp` sidecar. On rebuild a unit with a matching fingerprint + an on-disk object is REUSED —
+    the WHOLE per-unit pipeline (resolve→check→effect/borrow/CT→codegen) is skipped, printing `fresh <module>`.
+    So editing one module recompiles only it + its importers. Tests: no-op rebuild → all `fresh` + runs (42);
+    edit one of two siblings → the other stays `fresh`, the edited module + `main` (imports it) recompile (the
+    `!fresh main` assertion is the INVALIDATION-SOUNDNESS guard — a fingerprint omitting imports' sources would
+    leave `main` STALE), edit takes effect (40+2→42). ⚠ conservative/coarse (whole imported-module source; a
+    graph-wide effect change recompiles every unit); NOT Salsa-backed (`--separate` bypasses Salsa like merge, a
+    content hash is the analogue); the cache lives beside the objects in the `-o` dir. ▶ **NEXT (remaining tail,
+    all LOWER value):** extend the type-tag fix to class / generic-instance type args (add their arms to
+    `mangle_type_dedup` + a `NamedTypeOrigins` field — same shape, rarer) + dedup cross-module trait/class
+    METHODS (currently importer-qualified; mirror the generic-fn `generic_origins` model with a method-origin
+    map) + a finer per-item cache fingerprint. Keep the merge path + both fixed points green (additive).
     Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;
