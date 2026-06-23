@@ -3907,6 +3907,17 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // (6/N) `a[i]` reads `a` + `i` (both non-consuming) — neither is moved.
             let svc: bool = (*c).consuming;
             (*c).consuming = false;
+            // (ADR 0050) when this `Index` is an assign TARGET the enclosing assign set
+            // cg_suppress; but the array + index SUB-exprs are still VALUES (the aggregate
+            // is loaded, the index is a value) — only the `Index` node itself is the place.
+            // Clear cg_suppress for the sub-walks, restore it for the place/read branch.
+            let ix_place: bool = (*c).cg_suppress;
+            if cg_on(c) {
+                (*c).cg_suppress = false;
+                0
+            } else {
+                0
+            };
             let tty: i64 = dump_texpr(out, it, 0 - 1, src, c, gb);
             let ibase: i64 = if mir_on(c) {
                 (*c).lastval
@@ -3942,10 +3953,19 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            if cg_on(c) {
+                (*c).cg_suppress = ix_place;
+                0
+            } else {
+                0
+            };
             (*c).consuming = svc;
             let ety: i64 = array_elem_of(c, tty);
             close_ty(out, ety, c);
             // (7c) MIR: `a[i]` is a Load (base + index — a secret index is the D5 leak).
+            // Under an assign target walk mir_suppress is set, so `mir_emit` returns -1
+            // (no Load emitted) and mir_lastvid stays -1 — the assign funnels the RHS
+            // through Opaque, exactly like a field/`*`-deref store.
             if mir_on(c) {
                 let mc: i64 = (*c).mir_cur;
                 let d: i64 = mir_emit(c, mc, 5, 0, ibase, iidx, ety);
@@ -3955,8 +3975,19 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            // (ADR 0050) codegen: a PLACE (assign target, cg_suppress) leaves the
+            // bounds-checked element GEP pointer in the operand (cg_lastvid=-1, so the
+            // assign stores THROUGH it); a VALUE (read) loads through it.
             if cg_on(c) {
-                cg_emit_index(c, ety, tty, cg_itk, cg_itv, cg_iik, cg_iiv);
+                if ix_place {
+                    let iep: i64 = cg_emit_index_addr(c, ety, tty, cg_itk, cg_itv, cg_iik, cg_iiv);
+                    cg_reg(c, iep);
+                    (*c).cg_lastvid = 0 - 1;
+                    0
+                } else {
+                    cg_emit_index(c, ety, tty, cg_itk, cg_itv, cg_iik, cg_iiv);
+                    0
+                };
                 0
             } else {
                 0
@@ -11233,6 +11264,25 @@ fn cg_emit_arraylit(c: &mut TyCtx, ety: i64, snap: i64) -> i64 {
 // `sentinel_panic_oob` + `unreachable`), then GEP+load. Sets the operand to the
 // loaded value. Blocks: oob first (dead-ends), ok second (continues).
 fn cg_emit_index(c: &mut TyCtx, ety: i64, tty: i64, tk: i64, tv: i64, ik: i64, iv: i64) -> i64 {
+    // `a[i]` read: the bounds-checked element GEP, then a load. The GEP is
+    // factored (`cg_emit_index_addr`) so index-assignment `a[i] = v;` (ADR 0050)
+    // reuses the identical address computation and stores instead.
+    let ep: i64 = cg_emit_index_addr(c, ety, tty, tk, tv, ik, iv);
+    let v: i64 = cg_dst(c);
+    cgo_str(c, "load ");
+    cgo_ty(c, ety);
+    cgo_str(c, ", ptr %v");
+    cgo_int(c, ep);
+    cg_putc(c, '\n');
+    cg_reg(c, v)
+}
+
+// The bounds-checked element GEP shared by `a[i]` (read) and `a[i] = v;` (ADR
+// 0050 index-assign): extract len(0)/data(1 for `[T]`, 2 for `Vec<T>`), check
+// `0 <= i < len` (else `sentinel_panic_oob` + unreachable), then GEP in the
+// in-bounds block. Returns the element-pointer register `ep` — the caller loads
+// through it (read) or stores through it (write).
+fn cg_emit_index_addr(c: &mut TyCtx, ety: i64, tty: i64, tk: i64, tv: i64, ik: i64, iv: i64) -> i64 {
     // `<agg>` is the target's actual type (`{i64,ptr}` for `[T]` with data at field 1,
     // `{i64,i64,ptr}` for `Vec<T>` with data at field 2; len is field 0 for both).
     let ln: i64 = cg_dst(c);
@@ -11299,13 +11349,7 @@ fn cg_emit_index(c: &mut TyCtx, ety: i64, tty: i64, tk: i64, tv: i64, ik: i64, i
     cgo_str(c, ", i64 ");
     cgo_operand(c, ik, iv);
     cg_putc(c, '\n');
-    let v: i64 = cg_dst(c);
-    cgo_str(c, "load ");
-    cgo_ty(c, ety);
-    cgo_str(c, ", ptr %v");
-    cgo_int(c, ep);
-    cg_putc(c, '\n');
-    cg_reg(c, v)
+    ep
 }
 
 fn cg_emit_fn(c: &mut TyCtx, src: &[u8], name_s: i64, name_e: i64, rty: i64) -> i64 {

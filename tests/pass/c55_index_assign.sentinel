@@ -1,0 +1,38 @@
+// c55: mutable index assignment `a[i] = v;` (ADR 0050). Writes an array / Vec
+// element through a PUBLIC index — the read path's bounds-checked element GEP
+// followed by a store. Exercises an array store (literal + loop index), a Vec
+// store (data at field 2, not 1), and a SECRET-value store at a public index
+// (constant-time: the index is public, only the stored value is secret). The
+// self-hosted `scg` mirrors `snc` byte-for-byte across all 8 selfhost stage
+// differentials. Exit 42.
+fn main() -> i64 {
+    // Array: fill via a loop index, then overwrite one element via a literal.
+    let mut a: [i64] = [0, 0, 0, 0];
+    let mut i: i64 = 0;
+    while i < 4 {
+        a[i] = i * 10;
+        i = i + 1;
+    }
+    a[1] = 99;
+
+    // Vec: grow, then mutate an element in place (data pointer is field 2).
+    let mut v: Vec<i64> = vec_new();
+    push(&mut v, 1);
+    push(&mut v, 2);
+    v[0] = 7;
+
+    // Secret store: a secret value at a PUBLIC index — constant-time (the access
+    // pattern is public; only the stored value is secret).
+    let z: secret i64 = 0;
+    let mut s: [secret i64] = [z, z];
+    let k: secret i64 = 5;
+    s[1] = k;
+
+    // a = [0, 99, 20, 30]; v = [7, 2]; declassify(s[1]) = 5.
+    if a[0] == 0 && a[1] == 99 && a[2] == 20 && a[3] == 30
+        && v[0] == 7 && v[1] == 2 && declassify(s[1]) == 5 {
+        42
+    } else {
+        0
+    }
+}
