@@ -20,8 +20,11 @@ For the full design, see [`docs/SENTINEL_DESIGN.md`](docs/SENTINEL_DESIGN.md) an
 > **bootstrap fixed point**: the Sentinel-built compiler compiles its own
 > source to LLVM IR identical to the Rust oracle, and the resulting binary
 > reproduces itself. The Rust `snc` remains the bootstrap seed and the
-> differential reference oracle; full-corpus codegen parity is the remaining
-> work (see Phase D below).
+> differential reference oracle, and **full-corpus codegen parity is reached**
+> (all 123 corpus fixtures emit byte-identically) — the self-host port's goal is
+> met. The active track is now the per-unit **separate-compilation** back end
+> (multi-file modules → independent objects → linked, with incremental
+> rebuilds; see *What works today* and Phase D below).
 
 ## Status
 
@@ -38,11 +41,12 @@ Sentinel is in active development. This is a multi-year research project; nothin
   - ✅ **C3** — `secret` typing + effect rows + the algebraic-effect **handler runtime** (`effect` / `perform` / `handle … with`, deep handlers, continuations).
   - ✅ **C4** — classes + methods + `init` + traits + impls + **delegation** auto-forwarders + **structured concurrency** (`scope`/`spawn`/`await`).
   - 🟢 **C5 — productionization toward 1.0:** an HIR/MIR analysis pipeline; **constant-time `secret` verification, delivered and *machine-checked on the MIR*** (a MIR pass rejects any `secret` reaching a branch, a memory index, or a division divisor — `sentinel::mir::secret_leak`; the type system is the taint oracle and the check runs pre-LLVM — see the headline section for the precise property + its boundaries); bitwise operators `& | ^`; the **Phase A broker wired into compiled programs** as per-scope bump arenas (scope-exit bulk free); a **defined, frozen, layout-tested ABI** (`abi-v1`); and the **1.0 acceptance program — a constant-time TLS-1.3-handshake-shaped go/no-go that passes the verification** (the close bar). **Sentinel 1.0 is declared** (ADR 0025 + 0030 → ACCEPTED) — the bootstrap-compiler milestone, *not* a production release (still single-process, single-file, research-stage).
-- 🟢 **Phase D — Self-hosting** (the Sentinel compiler rewritten in Sentinel) — **the bootstrap fixed point is reached; the Sentinel compiler compiles itself.** Two movements:
+- 🟢 **Phase D — Self-hosting** (the Sentinel compiler rewritten in Sentinel) — **the bootstrap fixed point is reached; the Sentinel compiler compiles itself.** Two movements, then the separate-compilation back end:
   - ✅ **Movement 1 — language + stdlib build-out** (ADR 0031–0037): the 1.0 language couldn't self-host (no sum types/`match`, strings, growable collections, file I/O, loops, or modules — all of which a compiler needs), so Phase D first grew the language. **D.1** sum types + `match`, **D.2** strings + `u8`, **D.3** growable `Vec<T>`, **D.4** file I/O, **D.5** `while`/`break`/`continue`, **D.6** modules / multi-file (`use`) — all landed.
-  - 🟢 **Movement 2 — the port** (ADR 0038–0045): every stage of `snc` is reimplemented in Sentinel (`selfhost/*.sentinel`) and validated **byte-for-byte** against the Rust `snc` via a per-stage dump oracle (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`/`llvm`) over the whole corpus. The whole pipeline through codegen is ported, and **`scg` (the Sentinel-built compiler) discovers, merges, and lowers its own multi-module source to LLVM IR byte-identical to the Rust oracle — then `cc`-ing that IR yields a binary that re-emits the same IR (a true fixed point), leak-free.** Full-corpus codegen parity is **reached** — every one of the 123 pass fixtures emits IR byte-identical to the Rust oracle (the exotic constructs the corpus exercises but the self-hosting compiler doesn't itself use — effects/handlers, generics, classes, nullable, concurrency — were covered slice by slice), so **ADR 0045 is ACCEPTED-WITH-AMENDMENTS**. The Rust bootstrap stays as the seed + oracle. (The per-unit separate-compilation back end from ADR 0037 is an independent deferred track.)
+  - 🟢 **Movement 2 — the port** (ADR 0038–0045): every stage of `snc` is reimplemented in Sentinel (`selfhost/*.sentinel`) and validated **byte-for-byte** against the Rust `snc` via a per-stage dump oracle (`snc lex`/`ast`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`/`llvm`) over the whole corpus. The whole pipeline through codegen is ported, and **`scg` (the Sentinel-built compiler) discovers, merges, and lowers its own multi-module source to LLVM IR byte-identical to the Rust oracle — then `cc`-ing that IR yields a binary that re-emits the same IR (a true fixed point), leak-free.** Full-corpus codegen parity is **reached** — every one of the 123 pass fixtures emits IR byte-identical to the Rust oracle (the exotic constructs the corpus exercises but the self-hosting compiler doesn't itself use — effects/handlers, generics, classes, nullable, concurrency — were covered slice by slice), so **ADR 0045 is ACCEPTED-WITH-AMENDMENTS**. The Rust bootstrap stays as the seed + oracle.
+  - 🟢 **The per-unit separate-compilation back end** (ADR 0037 (a), the active track) — each module compiles to its **own** object, with cross-module references resolved at link time via module-qualified `abi-v1` symbols. Every `pub` item kind crosses a module boundary (fns, structs, enums, generics, traits, effects — including cross-*unit* `perform`/`handle`); generic instances dedup across importers via origin-qualified `linkonce_odr` symbols; and rebuilds are **incremental** (an unchanged unit reuses its cached object). Opt-in behind `snc build --separate`; the whole-graph merge path and both bootstrap fixed points stay green alongside it. Remaining tail items are minor (see [`docs/STATE.md`](docs/STATE.md)).
 
-**1484 tests across the workspace**, four-check green (build · `cargo nextest` · doctests · `clippy -D warnings`). For the authoritative, per-crate state of the codebase — and the per-crate test breakdown — see [`docs/STATE.md`](docs/STATE.md). When STATE.md and any other document disagree, STATE.md wins.
+**1524 tests across the workspace**, four-check green (build · `cargo nextest` · doctests · `clippy -D warnings`). For the authoritative, per-crate state of the codebase — and the per-crate test breakdown — see [`docs/STATE.md`](docs/STATE.md). When STATE.md and any other document disagree, STATE.md wins.
 
 ## What works today
 
@@ -114,7 +118,23 @@ cargo nextest run -p sentinel-driver \
   sentinel_codegen_self_merges_the_compiler_and_reaches_fixed_point
 ```
 
-The Rust `snc` is still what bootstrap-builds the Sentinel compiler the first time and serves as the differential reference; the LLVM toolchain (`clang`/`llc`) is external to both. Full-corpus codegen parity — covering constructs the corpus exercises but the self-hosting compiler doesn't itself use — is the remaining work toward closing Phase D.
+The Rust `snc` is still what bootstrap-builds the Sentinel compiler the first time and serves as the differential reference; the LLVM toolchain (`clang`/`llc`) is external to both. Full-corpus codegen parity — covering constructs the corpus exercises but the self-hosting compiler doesn't itself use — is **reached** (all 123 pass fixtures), so the self-host port's goal is met; the per-unit separate-compilation back end below is the active Phase D track.
+
+### Modules + separate compilation
+
+A program can span multiple files: a file is a module, `use a::b::Item;` imports across modules, and `pub` controls visibility. `snc build --separate` compiles each module to its **own** object and links them — cross-module references bind at link time via module-qualified `abi-v1` symbols, so a rebuild only recompiles the modules that changed (and their importers); unchanged units are reused from their cached objects.
+
+```bash
+# A two-module project:
+#   util/math.sentinel  ->  pub fn add(a: i64, b: i64) -> i64 { a + b }
+#   main.sentinel       ->  use util::math::add;  fn main() -> i64 { add(40, 2) }
+snc build main.sentinel --separate -o app && ./app; echo $?   # 42
+
+# Rebuild with nothing changed: every unit is reused from its cached object.
+snc build main.sentinel --separate -o app    # prints: snc: fresh `main`  /  snc: fresh `util::math`
+```
+
+Every `pub` item kind crosses a module boundary — fns, structs, enums, generics (deduplicated across importers via origin-qualified `linkonce_odr` symbols), traits, and effects, including a library that `perform`s an effect the entry `handle`s. The whole-graph merge path (`snc merge`, used by `snc build`) stays the default; `--separate` is opt-in until it reaches full parity.
 
 ## Build
 
@@ -144,7 +164,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 - `crates/sentinel-mir/` — minimal SSA/CFG (`lower_to_mir`) hosting the **constant-time verification pass** (`verify_constant_time`), wired into `snc`.
 - `crates/sentinel-codegen/` — LLVM IR lowering via inkwell: structs/arrays/nullables/generics/refs/secret, RAII drop, the handler runtime, classes/traits/delegation, structured concurrency, and broker scope-arena routing. Freezes the `abi-v1` layout/mangling/symbol contract (layout-stability tests).
 - `crates/sentinel-runtime/` — the runtime linked into compiled binaries (`sentinel_print`/`alloc`/`free`/`panic_oob`, the broker scope-arena C-ABI, the handler-continuation runtime, the structured-concurrency scheduler).
-- `crates/sentinel-driver/` — the `snc` compiler driver binary + the pass/UI/repro test suites.
+- `crates/sentinel-driver/` — the `snc` compiler driver binary (single-file, `--separate` per-unit, and `merge` paths) + the pass/UI/repro/modules test suites.
 - `crates/sentinel-lsp/` — editor-integration scaffold (stub; ADR 0025 D10).
 - `docs/` — design, status, and process documents:
   - [`PROGRAMMING_GUIDE.md`](docs/PROGRAMMING_GUIDE.md) — intro to writing Sentinel programs today
@@ -155,7 +175,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   - [`abi-v1.md`](docs/abi-v1.md) — the frozen, tested `abi-v1` artifact contract
   - [`SECRETS_LIFECYCLE.md`](docs/SECRETS_LIFECYCLE.md) — secret-memory design
   - [`borrow-check-limitations.md`](docs/borrow-check-limitations.md) — known borrow-check over-rejections + the partial-move soundness gap
-  - [`decisions/`](docs/decisions/) — architecture decision records (45 so far)
+  - [`decisions/`](docs/decisions/) — architecture decision records (46 so far)
 - `selfhost/` — **the compiler rewritten in Sentinel** (Phase D): `lexer`/`parser`/`resolve`/`types`/`effects`/`borrow`/`mir`/`ctverify`/`codegen`/`merge` `.sentinel` stages, each differentially validated byte-for-byte against the Rust `snc`.
 - `tests/pass/` — pass-test fixtures (`.sentinel` programs that should compile + run to a known exit/stdout).
 - `tests/ui/` — UI-test fixtures (`.sentinel` programs that should produce specific diagnostics; `insta` snapshots).
@@ -170,7 +190,7 @@ Sentinel is being built by [Anie Ltd.](https://aniesolutions.ai) as the language
 - **Not stable.** Every API can change. The `abi-v1` *compiled-artifact* contract is frozen and layout-tested; the Rust crate APIs are not.
 - **Constant-time `secret` is delivered and machine-checked** — the compiler statically rejects secret-dependent control flow, memory indexing, and division, verified on the MIR with the type system as the taint oracle (the headline section above states the precise property and its two boundaries). It is *not* a proof about the optimized machine code: the check runs before LLVM optimization and does not yet *force* constant-time emission. What remains future/ecosystem work: explicit speculation-barrier / `cmov` *emission* and post-codegen assembly verification (a branch-free program already passes verification, so this was scoped out of the 1.0 minimum), an independent secret-dataflow oracle, `[secret T]` arrays, and real cipher suites (libraries belong in the ecosystem, not the language).
 - **The borrow checker is conservative, not yet flow-precise.** It is lexical (pre-Polonius), so it *over-rejects* some safe programs — a borrow held past its last use, a field-disjoint borrow through a parent — each with a documented workaround in [`docs/borrow-check-limitations.md`](docs/borrow-check-limitations.md). The one historical *under*-rejection (a Move-typed struct field passed by value could double-free at drop) is **closed** — ADR 0046, in both the Rust `snc` and the self-hosted `scg`. The remaining limitations are all over-rejections (ergonomics, deferred to the Polonius migration), which are sound by construction.
-- **Single-file, single-process, loop-free-by-design *at the 1.0 close bar*.** Those were 1.0 scope limits, not permanent ones: **Phase D's language build-out has since added** sum types + `match`, strings + a `u8` byte type, growable `Vec<T>`, file I/O, `while`/`break`/`continue` loops, and modules / multi-file (`use`) — the features a compiler needs to self-host. Still single-process; cross-process capabilities, actors, and true per-unit separate compilation remain deferred follow-ons.
+- **Single-file, single-process, loop-free-by-design *at the 1.0 close bar*.** Those were 1.0 scope limits, not permanent ones: **Phase D's language build-out has since added** sum types + `match`, strings + a `u8` byte type, growable `Vec<T>`, file I/O, `while`/`break`/`continue` loops, and modules / multi-file (`use`) — the features a compiler needs to self-host. **True per-unit separate compilation has since landed** (modules → independent objects → link, with incremental rebuilds; `snc build --separate`). Still single-process; cross-process capabilities and actors remain deferred follow-ons.
 - **Not accepting general contributions yet.** The design is still fluid — but bug reports, security-relevant findings, docs fixes, and test cases are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License

@@ -3,6 +3,11 @@
 **/target/
 **/*.rs.bk
 *.pdb
+# `snc build` / `snc build --separate` emit object files (and, for the
+# separate-compilation incremental cache, `.o.fp` fingerprint sidecars)
+# beside the linked output.
+*.o
+*.o.fp
 
 # Cargo lock for libraries is committed; this is a workspace with
 # the snc binary, so Cargo.lock IS committed at the workspace root.

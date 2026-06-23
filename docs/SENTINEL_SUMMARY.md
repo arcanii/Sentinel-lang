@@ -103,13 +103,24 @@ bugs); those belong to the silicon and the operator.
 
 ## Implementation Status
 
-Designed. Documented in eight companion documents covering language
-design, security thesis, supply-chain infrastructure, secrets lifecycle,
-implementation handover, post-1.0 backlog, and comparative lessons from
-Java. A staged validation approach has been specified: prototype the
-broker as a Rust crate (6 months), prototype the effect system as a
-research compiler (9 months), then commit to the full bootstrap if both
-prototypes validate. Self-hosting in four stages after 1.0.
+Built, not just specified. The staged validation ran its course: the
+Phase A memory broker (a Rust crate) and the Phase B effect-system
+prototype (a research interpreter) validated the design, and the
+**Phase C bootstrap compiler** then lowered the full language —
+types, generics, borrow check + RAII, `secret` + effect typing, the
+algebraic-effect handler runtime, classes/traits/delegation, structured
+concurrency — to native code via LLVM, closing at **Sentinel 1.0**
+(2026-05-30) with **machine-verified constant-time `secret`**.
+
+**Phase D self-hosts.** The language grew the features a compiler needs
+(sum types + `match`, strings, growable `Vec`, file I/O, loops, modules),
+and the entire compiler pipeline was rewritten in Sentinel
+(`selfhost/*.sentinel`), validated byte-for-byte against the Rust
+bootstrap and reaching the **bootstrap fixed point** — the
+Sentinel-built compiler compiles its own source. Multi-file modules with
+per-unit **separate compilation** and incremental rebuilds are in.
+Production-hardening and tooling (LSP) remain. The README and
+`docs/STATE.md` carry the authoritative, current state.
 
 ## The Strategic Position
 

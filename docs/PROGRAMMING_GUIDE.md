@@ -589,9 +589,10 @@ snc build app.sentinel -o app
 ```
 
 `pub` applies to any top-level item (fn, struct, enum, trait, class, effect); a
-non-`pub` item is private to its module. (The compiler currently merges the
-module graph into one unit before codegen; true per-unit separate compilation is
-a deferred follow-on — it doesn't change the source-level model above.)
+non-`pub` item is private to its module. (`snc build` merges the module graph
+into one unit before codegen; `snc build --separate` instead compiles each module
+to its own object and links them, with incremental rebuilds — the source-level
+model above is identical either way.)
 
 ## A worked example
 
