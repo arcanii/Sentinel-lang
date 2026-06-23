@@ -538,6 +538,53 @@ fn separate_use_of_missing_module_is_module_not_found() {
     );
 }
 
+#[test]
+fn separate_incremental_unchanged_rebuild_is_all_fresh() {
+    // ADR 0037 (3/N): a no-op rebuild reuses every unit's cached object. The
+    // first (cold) build compiles silently; the second — no source change —
+    // reports every unit `fresh` and still links + runs correctly.
+    let dir = temp_project("separate_incremental");
+    write(dir.join("util/math.sentinel"), "pub fn add(a: i64, b: i64) -> i64 { a + b }\n");
+    write(dir.join("main.sentinel"), "use util::math::add;\nfn main() -> i64 { add(40, 2) }\n");
+    let entry = dir.join("main.sentinel");
+    let (ok1, err1) = build_separate(entry.clone());
+    assert!(ok1, "first build failed:\n{err1}");
+    assert!(!err1.contains("fresh"), "the first (cold) build must compile, not reuse:\n{err1}");
+    let (ok2, err2) = build_separate(entry.clone());
+    assert!(ok2, "second build failed:\n{err2}");
+    assert!(err2.contains("fresh `main`"), "main should be cached on rebuild:\n{err2}");
+    assert!(err2.contains("fresh `util::math`"), "util::math should be cached on rebuild:\n{err2}");
+    // The cached build is still correct.
+    assert_eq!(build_and_run_separate(entry), 42);
+}
+
+#[test]
+fn separate_incremental_edit_recompiles_only_affected_units() {
+    // ADR 0037 (3/N) — the incremental payoff + invalidation SOUNDNESS. `main`
+    // imports both `a` and `b`. After editing ONLY `a`, `b` is still `fresh`
+    // while `a` (its source changed) AND `main` (it imports `a`, so a's source
+    // is in main's fingerprint) recompile. The `!fresh main` assertion is the
+    // load-bearing one: if a unit's fingerprint omitted its imports' sources,
+    // `main` would wrongly be `fresh` and the rebuild would be STALE. The edit
+    // (1 -> 40) takes effect: 40 + 2 -> 42.
+    let dir = temp_project("separate_incremental_edit");
+    write(dir.join("a.sentinel"), "pub fn fa() -> i64 { 1 }\n");
+    write(dir.join("b.sentinel"), "pub fn fb() -> i64 { 2 }\n");
+    write(dir.join("main.sentinel"), "use a::fa;\nuse b::fb;\nfn main() -> i64 { fa() + fb() }\n");
+    let entry = dir.join("main.sentinel");
+    let (ok1, err1) = build_separate(entry.clone());
+    assert!(ok1, "first build failed:\n{err1}");
+    // Edit module `a` only.
+    write(dir.join("a.sentinel"), "pub fn fa() -> i64 { 40 }\n");
+    let (ok2, err2) = build_separate(entry.clone());
+    assert!(ok2, "rebuild failed:\n{err2}");
+    assert!(err2.contains("fresh `b`"), "b is unaffected → should be cached:\n{err2}");
+    assert!(!err2.contains("fresh `a`"), "a changed → must recompile:\n{err2}");
+    assert!(!err2.contains("fresh `main`"), "main imports a → must recompile (else STALE):\n{err2}");
+    // The edit took effect.
+    assert_eq!(build_and_run_separate(entry), 42);
+}
+
 // --- D.6 cross-module TYPES (structs + enums) -------------------------------
 // merge_modules now qualifies struct + enum names by module path and
 // rewrites every type reference (annotations, struct literals, enum

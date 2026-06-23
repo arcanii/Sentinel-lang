@@ -653,6 +653,10 @@ fn run_parse(path: &str) -> ExitCode {
 struct DiscoveredModule {
     path: Vec<String>,
     program: Program,
+    /// The module's raw source bytes — retained for the (3/N) incremental
+    /// cache fingerprint (a unit's `.o` is a function of its source + its
+    /// imports' sources + the graph effect set).
+    source: String,
 }
 
 /// Phase D.6 (1/N) / ADR 0037 D3: discover the module graph reachable
@@ -693,7 +697,7 @@ fn discover_module_graph(entry: &Path) -> Result<Vec<DiscoveredModule>, String> 
     // The entry module is first; reached modules are appended (BFS over
     // `out`, scanning each module's `use` edges as we go).
     let mut out: Vec<DiscoveredModule> =
-        vec![DiscoveredModule { path: vec![entry_stem], program: entry_prog }];
+        vec![DiscoveredModule { path: vec![entry_stem], program: entry_prog, source: entry_src }];
     let mut scan = 0;
     while scan < out.len() {
         let modules: Vec<Vec<String>> = out[scan]
@@ -724,7 +728,7 @@ fn discover_module_graph(entry: &Path) -> Result<Vec<DiscoveredModule>, String> 
             let program = sentinel_syntax::parse(&src).map_err(|e| {
                 format!("parse error in module `{}`: {e:?}", module.join("::"))
             })?;
-            out.push(DiscoveredModule { path: module, program });
+            out.push(DiscoveredModule { path: module, program, source: src });
         }
         scan += 1;
     }
@@ -1052,6 +1056,48 @@ fn link_objects(objects: &[PathBuf], exe: &Path) -> Result<(), String> {
 
 /// Phase D.6 / ADR 0037 (a): TRUE per-unit separate compilation —
 /// `snc build --separate <entry>`. Discovers the module graph, then
+/// ADR 0037 (3/N): a content fingerprint for one separately-compiled unit —
+/// a hash over everything that affects its `.o`, so an UNCHANGED unit can reuse
+/// its cached object on the next build. Conservative (sound): the unit's own
+/// source; the source of EVERY module it imports from (the importer INLINES
+/// their `pub` decls + EXTERN-links their fns, so a change there changes this
+/// `.o`); the graph-wide sorted effect names (the op-id base map a unit's
+/// `perform`/`handle` op ids ride on); the unit's module path (its symbol
+/// prefix); and the compiler version (invalidate on upgrade). `DefaultHasher`
+/// has fixed keys → process-stable (unlike a `HashMap`'s random seed). Coarse
+/// by design (a whole imported module's source, not the single item used) — a
+/// finer per-item fingerprint is a future refinement.
+fn unit_fingerprint(
+    m: &DiscoveredModule,
+    source_by_path: &HashMap<&[String], &str>,
+    effect_names: &[String],
+) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    env!("CARGO_PKG_VERSION").hash(&mut h);
+    m.path.hash(&mut h);
+    m.source.hash(&mut h);
+    // Every module this unit imports from, (path, source), sorted for a stable
+    // order regardless of `use`-declaration order.
+    let mut imports: Vec<&[String]> = m
+        .program
+        .uses
+        .iter()
+        .filter(|u| u.path.len() >= 2)
+        .map(|u| &u.path[..u.path.len() - 1])
+        .collect();
+    imports.sort_unstable();
+    imports.dedup();
+    for imp in imports {
+        imp.hash(&mut h);
+        if let Some(src) = source_by_path.get(imp) {
+            src.hash(&mut h);
+        }
+    }
+    effect_names.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
 /// compiles EACH module to its OWN object independently (`resolve_module` +
 /// `check_module` against the imported `pub fn` signatures, then the
 /// effect / borrow / CT gates + codegen with the module path threaded for
@@ -1060,6 +1106,12 @@ fn link_objects(objects: &[PathBuf], exe: &Path) -> Result<(), String> {
 /// the back end the merge (`run_build_merged`) stands in for, opt-in until
 /// it reaches parity. A single-file program (no `use`) has no
 /// separate-compilation work and routes to the normal build.
+///
+/// (3/N) INCREMENTAL: each unit's `.o` is fingerprinted ([`unit_fingerprint`])
+/// into an `<obj>.fp` sidecar; on a rebuild a unit whose fingerprint is
+/// unchanged reuses its cached object (the per-unit pipeline + codegen are
+/// skipped, printing `fresh <module>`) — the per-unit `.o` is reproducible
+/// (see `repro.rs`), so reusing it is sound.
 fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
     let modules = match discover_module_graph(Path::new(path)) {
         Ok(m) => m,
@@ -1134,10 +1186,31 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         .map(|(i, n)| (n.clone(), i as u32))
         .collect();
 
+    // (3/N) incremental cache: module path → its source, for fingerprinting a
+    // unit's cross-module imports.
+    let source_by_path: HashMap<&[String], &str> =
+        modules.iter().map(|m| (m.path.as_slice(), m.source.as_str())).collect();
+
     // Compile each module to its own object.
     let mut objects: Vec<PathBuf> = Vec::new();
     for (idx, m) in modules.iter().enumerate() {
         let is_entry = idx == 0;
+        let obj_path = obj_dir.join(format!("{}.o", m.path.join("_")));
+
+        // (3/N) INCREMENTAL: skip a unit whose object is already on disk with a
+        // matching fingerprint. The whole per-unit pipeline (resolve → check →
+        // effect/borrow/CT → codegen) is bypassed; the cached `.o` is sound to
+        // reuse because per-unit codegen is reproducible (`repro.rs`). A unit
+        // with a build error never wrote a `.o`/`.fp`, so it is never "fresh".
+        let fingerprint = unit_fingerprint(m, &source_by_path, &effect_names);
+        let fp_path = obj_dir.join(format!("{}.o.fp", m.path.join("_")));
+        if obj_path.is_file()
+            && std::fs::read_to_string(&fp_path).ok().as_deref() == Some(fingerprint.as_str())
+        {
+            eprintln!("snc: fresh `{}`", m.path.join("::"));
+            objects.push(obj_path);
+            continue;
+        }
 
         // Resolve this module's `use` imports against the exports table: a
         // `pub fn` becomes an extern descriptor (resolve + types levels); a
@@ -1314,7 +1387,6 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
             return ExitCode::from(1);
         }
         let hir = sentinel_hir::lower_to_hir(&typed, &drop_plan);
-        let obj_path = obj_dir.join(format!("{}.o", m.path.join("_")));
         // The build-wide op-id base map (computed above) is passed to EVERY
         // unit so a cross-UNIT `perform`/`handle` pair encodes the same op id.
         if let Err(err) = sentinel_codegen::compile_to_object_for_module(
@@ -1328,6 +1400,10 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
             eprintln!("snc: codegen failed for module `{}`: {err}", m.path.join("::"));
             return ExitCode::from(1);
         }
+        // (3/N) cache: stamp the unit's fingerprint beside its fresh object so
+        // the next build can reuse it if nothing it depends on changed. A write
+        // failure only forfeits caching (the object is correct), so ignore it.
+        let _ = std::fs::write(&fp_path, &fingerprint);
         objects.push(obj_path);
     }
 
