@@ -1156,6 +1156,15 @@ fn pass_c53_ct_eq() {
 }
 
 #[test]
+fn pass_c54_cast() {
+    // ADR 0049 c54_cast: the integer cast `x as T` (trunc / sign-extend + a
+    // secret-i32 cast). Also exercised byte-for-byte by the selfhost
+    // differentials (corpus auto-scan), proving the self-hosted `scg` mirrors
+    // the cast identically to `snc`. Exit 42.
+    assert_eq!(run_exit("c54_cast.sentinel"), 42);
+}
+
+#[test]
 fn pass_c53_shift() {
     // ADR 0048 c53_shift: shift operators `<<` (shl) / `>>` (logical lshr) over
     // matching-width i64. Also exercised byte-for-byte by the selfhost

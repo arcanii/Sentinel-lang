@@ -110,6 +110,11 @@ pub enum Expr {
     Match(Expr, Arms),
     StructLit([u8], Fields),
     Declassify(Expr),
+    // ADR 0049: integer cast `expr as T` — the operand + the target type NAME
+    // ("i64"/"i32"/"u8"); the types stage maps the name to a scalar code (via
+    // `scalar_code`) and emits the width conversion. Preserves secrecy; NOT a
+    // constant-time sink.
+    Cast(Expr, [u8]),
     Perform([u8], [u8], Args),
     Scope(Expr),
     Spawn(Expr),
@@ -1051,7 +1056,7 @@ fn parse_unary(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i
 }
 
 fn parse_mul(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
-    let lhs: Expr = parse_unary(k, s, e, src, cur);
+    let lhs: Expr = parse_cast(k, s, e, src, cur);
     parse_mul_rest(k, s, e, src, cur, lhs)
 }
 
@@ -1059,12 +1064,35 @@ fn parse_mul_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mu
     let tg: i64 = (*k)[*cur];
     if tg == 11 {
         *cur = *cur + 1;
-        let ra: Expr = parse_unary(k, s, e, src, cur);
+        let ra: Expr = parse_cast(k, s, e, src, cur);
         parse_mul_rest(k, s, e, src, cur, Expr::Binary(3, acc, ra))
     } else if tg == 12 {
         *cur = *cur + 1;
-        let rb: Expr = parse_unary(k, s, e, src, cur);
+        let rb: Expr = parse_cast(k, s, e, src, cur);
         parse_mul_rest(k, s, e, src, cur, Expr::Binary(4, acc, rb))
+    } else {
+        acc
+    }
+}
+
+// ADR 0049: integer cast `expr as T`, between multiplicative and unary (Rust
+// precedence: `as` tighter than `* /`, looser than unary). Left-associative.
+// `as` is token tag 60 (shared with `impl as Trait`, parsed only in item
+// position). The target is a plain type-name ident token, read directly (like
+// `parse_type`'s ident branch) so snc + scg consume the same single token.
+fn parse_cast(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_unary(k, s, e, src, cur);
+    parse_cast_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_cast_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    if (*k)[*cur] == 60 {
+        *cur = *cur + 1;
+        let tns: i64 = (*s)[*cur];
+        let tne: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        let nm: [u8] = slice_of(src, tns, tne);
+        parse_cast_rest(k, s, e, src, cur, Expr::Cast(acc, nm))
     } else {
         acc
     }
@@ -1965,6 +1993,14 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         Expr::Declassify(di) => {
             append_str(out, "(declassify ");
             dump_expr(out, di);
+            push(out, ')');
+            0
+        },
+        Expr::Cast(ci, cnm) => {
+            append_str(out, "(cast ");
+            dump_expr(out, ci);
+            push(out, ' ');
+            append_str(out, cnm);
             push(out, ')');
             0
         },

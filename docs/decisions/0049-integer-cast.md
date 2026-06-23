@@ -1,6 +1,10 @@
 # ADR 0049: Integer cast expression `x as T`
 
-Status: **PROPOSED**
+Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A4) — the cast is in `snc` (Phase 1) AND mirrored
+into the self-hosted `scg` (Phase 2); the corpus differential validates `scg == snc`
+byte-for-byte on a cast fixture, both bootstrap fixed points hold, and the full nextest is
+green. A true 32-bit ChaCha quarter-round over `secret i32` words reproduces the RFC 8439
+test vector. Amendments below record the deviations from the PROPOSED plan.
 
 Adds an integer cast expression `x as T` (T ∈ {`i64`, `i32`, `u8`}). This closes the
 "i32 values are unconstructible" gap surfaced by the examples-as-tests track (an integer
@@ -76,4 +80,28 @@ safety net).
 true **ChaCha quarter-round over `secret i32` words** verifying the RFC 8439 test vector —
 rotations by public constants, all branch-free and constant-time. The existing
 `i64_to_u8` / `u8_to_i64` builtins are unaffected (the cast is the general successor, but
-they remain). Amendments (A1, …) will record any deviation once implemented.
+they remain).
+
+## Amendments (as implemented)
+
+- **A1 — representation.** `snc`: `ExprKind::Cast(Box<Expr>, TypeExpr)` (the typed node
+  carries the resolved target on its `.ty`, like `Declassify`); a new `NonIntegerCast`
+  error. `scg`: `Expr::Cast(Expr, [u8])` — the target type NAME, which the types stage maps
+  to a scalar code via the existing `scalar_code`, computes the width, and emits the
+  conversion. The `as` token already existed (impl heads); the impl `as` parses only in item
+  position, so a cast in expression position has no conflict.
+- **A2 — codegen + MIR, as proposed.** Inkwell + the `snc llvm` oracle + `scg` all emit
+  `trunc` / `sext` / `zext` (u8 source → `zext`; same width → no-op). In MIR a cast is an
+  `Opaque` carrying the operand (no sink — casting a secret is constant-time); the type
+  carries the secret bit, so `(secret T) as U` → `secret U`.
+- **A3 — the let-boundary widen (the one real subtlety).** The cast's result widens to a
+  `secret`/`?` annotation by the EXISTING widen machinery: in `snc` the `let` inserts a
+  `WidenToSecret` node around the cast; in `scg` the cast must emit the widen INLINE
+  (`widen_pre`/`widen_splice` + `mir_widen`/`cg_widen`), which the first cut omitted — caught
+  by the typer corpus differential (`let s: secret i32 = (x as i32)` rendered without the
+  `(widen-secret … :secret i32)` wrapper). Building the cast node into a temp buffer and
+  `widen_splice`-ing it (mirroring the `Binary` arm) fixed it.
+- **A4 — no conversion builtins.** `i64_to_i32` / `i32_to_i64` were NOT added (they would
+  shift FnIds in dumps); the cast subsumes them. The `u8` conversion builtins remain.
+  Validated by `tests/pass/c54_cast` across all 8 selfhost differentials + the
+  `examples/security/chacha_qr` ChaCha quarter-round.

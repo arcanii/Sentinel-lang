@@ -733,6 +733,17 @@ fn scalar_code(q: &[u8]) -> i64 {
     }
 }
 
+// ADR 0049: bit width of a scalar type handle — i64(0)=64, i32(1)=32, u8(3)=8.
+fn scalar_bits(h: i64) -> i64 {
+    if h == 1 {
+        32
+    } else if h == 3 {
+        8
+    } else {
+        64
+    }
+}
+
 // Render a scalar handle (< BASE) structurally.
 fn render_scalar(out: &mut Vec<u8>, h: i64) -> i64 {
     if h == 0 {
@@ -4722,6 +4733,87 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 0
             };
             rt
+        },
+        // ADR 0049: integer cast `expr as T`. Type the operand, then the result is
+        // the target scalar (`cnm`), preserving the operand's secrecy (a width
+        // conversion is data-independent / constant-time — NOT a sink). MIR: an
+        // opaque carrying the operand (like a widen). CG: trunc / sext / zext by
+        // width (u8 source → zext; same width → no-op).
+        Expr::Cast(ci, cnm) => {
+            // The cast's result type depends on the operand's secrecy (known only
+            // after the operand is dumped), so build the node into a temp buffer
+            // and `widen_splice` it (the let-boundary widen — e.g.
+            // `let s: secret i32 = (x as i32)` — must PRECEDE the node).
+            let mut tmp: Vec<u8> = vec_new();
+            append_str(&mut tmp, "(cast ");
+            let it: i64 = dump_texpr(&mut tmp, ci, 0 - 1, src, c, gb);
+            let iv: i64 = if mir_on(c) {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
+            let cguk: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cguv: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
+            let base: i64 = scalar_code(&cnm);
+            let rt: i64 = if is_secret(c, it) {
+                mk_secret(c, base)
+            } else {
+                base
+            };
+            close_ty(&mut tmp, rt, c);
+            // MIR: a width conversion carries the operand (opaque), result `rt` —
+            // NOT a sink (casting a secret is constant-time).
+            if mir_on(c) {
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit_opaque1(c, mc, iv, rt);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
+            // CG: trunc / sext / zext by width (u8 source → zext); same width is a
+            // no-op (propagate the operand).
+            if cg_on(c) {
+                let srcs: i64 = strip_secret(c, it);
+                let sw: i64 = scalar_bits(srcs);
+                let dw: i64 = scalar_bits(base);
+                if sw == dw {
+                    (*c).cglk = cguk;
+                    (*c).cglv = cguv;
+                    0
+                } else {
+                    let op: [u8] = if dw < sw {
+                        "trunc"
+                    } else if srcs == 3 {
+                        "zext"
+                    } else {
+                        "sext"
+                    };
+                    let cd: i64 = cg_conv(c, op, srcs, cguk, cguv, base);
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            let cw: bool = if mir_on(c) {
+                widen_kind(c, exp, rt) != 0
+            } else if cg_on(c) {
+                widen_kind(c, exp, rt) != 0
+            } else {
+                false
+            };
+            mir_widen(c, cw, exp);
+            cg_widen(c, cw, exp);
+            widen_splice(out, tmp, exp, rt, c)
         },
         // (4i) char literal `'c'` → `(char N :u8)` (the decoded byte value, ADR 0033 D2:
         // `u8`). Widens like the other scalar leaves (a `secret u8` / `?u8` context).

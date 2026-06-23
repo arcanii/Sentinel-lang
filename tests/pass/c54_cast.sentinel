@@ -1,0 +1,16 @@
+// c54: the integer cast `x as T` (ADR 0049). `i64 as i32` truncates, `i32 as i64`
+// sign-extends, and a `secret i32` cast preserves secrecy (a width conversion is
+// data-independent / constant-time). Exercises trunc / sext + the secret-cast path
+// across all 8 selfhost stage differentials (the self-hosted `scg` mirrors the
+// `snc` cast byte-for-byte). Exit 42.
+fn main() -> i64 {
+    let big: i64 = 2609737539;            // 0x9b8d6f43
+    let small: i32 = big as i32;          // truncate to the 32-bit value
+    let back: i64 = small as i64;         // sign-extend -> -1685229757
+    let s: secret i32 = 19088743 as i32;  // public i32, widened to secret i32
+    if back == 0 - 1685229757 && declassify(s) == 19088743 as i32 {
+        42
+    } else {
+        0
+    }
+}

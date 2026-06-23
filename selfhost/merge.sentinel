@@ -509,6 +509,16 @@ fn emit_expr(out: &mut Vec<u8>, c: &MergeCtx, ex: Expr) -> i64 {
             push(out, ')');
             0
         },
+        Expr::Cast(ci, cnm) => {
+            // ADR 0049: re-emit `(<inner> as T)` source. (Single-file casts do
+            // not go through the merge un-parser; this keeps it consistent.)
+            push(out, '(');
+            emit_expr(out, c, ci);
+            append_str(out, " as ");
+            append_str(out, cnm);
+            push(out, ')');
+            0
+        },
         Expr::Perform(pe, po, pa) => {
             push(out, '(');
             append_str(out, "perform ");
