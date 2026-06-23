@@ -1,0 +1,27 @@
+// std::math::num — small integer helpers over `i64`.
+//
+// Plain (non-`secret`) arithmetic: these branch on their inputs, so they are
+// NOT constant-time and must not be used on `secret` values (the compiler would
+// reject a secret reaching the `if` conditions below). Constant-time selection
+// lives in `std::security::ct` (`ct_select`).
+
+// The smaller of two values.
+pub fn min(a: i64, b: i64) -> i64 {
+    if a < b { a } else { b }
+}
+
+// The larger of two values.
+pub fn max(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+// Absolute value. `0 - x` negates (Sentinel has no unary `-` builtin name here,
+// but `0 - x` lowers to negation).
+pub fn abs(x: i64) -> i64 {
+    if x < 0 { 0 - x } else { x }
+}
+
+// Clamp `x` into the inclusive range `[lo, hi]` (assumes `lo <= hi`).
+pub fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
+    max(lo, min(x, hi))
+}

@@ -1,0 +1,22 @@
+// examples/math/clamp.sentinel
+//
+// Exercises std::math::num: clamp a value below / above / inside a range, and
+// take an absolute value. Exit 42 means every helper returned the expected
+// result. A second example category beyond `security`, and a non-`secret`
+// module crossing the module boundary (so the harness exercises the cross-unit
+// path on ordinary `i64` code too).
+use std::math::num::clamp;
+use std::math::num::abs;
+
+fn main() -> i64 {
+    let below: i64 = clamp(0 - 10, 5, 99); // below lo -> 5
+    let above: i64 = clamp(1000, 5, 99);   // above hi -> 99
+    let inside: i64 = clamp(42, 5, 99);    // in range -> 42
+    let a: i64 = abs(0 - 42);              // 42
+
+    if below == 5 && above == 99 && inside == 42 && a == 42 {
+        42
+    } else {
+        0
+    }
+}

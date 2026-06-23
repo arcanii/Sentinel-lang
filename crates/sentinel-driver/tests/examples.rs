@@ -157,11 +157,19 @@ const EXAMPLES: &[(&str, i32)] = &[
     // Constant-time fixed-width secure compare over `secret` scalars
     // (std::security::ct). 42 = equal-compared-equal AND tampered-compared-unequal.
     ("examples/security/secure_compare.sentinel", 42),
+    // Integer clamp/abs helpers (std::math::num) — a non-`secret` module
+    // crossing the boundary. 42 = every helper returned its expected result.
+    ("examples/math/clamp.sentinel", 42),
 ];
 
 #[test]
 fn secure_compare_constant_time() {
     check_example("examples/security/secure_compare.sentinel", "secure_compare", 42);
+}
+
+#[test]
+fn math_clamp() {
+    check_example("examples/math/clamp.sentinel", "clamp", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

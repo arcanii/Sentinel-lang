@@ -30,7 +30,7 @@ the example entry. See the harness doc-comment for the mechanics.
 | Category    | Module(s)            | Status                                   |
 | ----------- | -------------------- | ---------------------------------------- |
 | `security`  | `ct`                 | ✅ constant-time scalar primitives        |
-| `math`      | `num`                | ◻ min/max/abs/clamp (next)               |
+| `math`      | `num`                | ✅ min/max/abs/clamp                       |
 | `bits`      | `bits`               | ◻ rotate/shift — **blocked on shift ops**|
 | `bytes`     | `bytes`              | ◻ `[u8]`/string utils                    |
 
