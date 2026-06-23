@@ -1156,6 +1156,15 @@ fn pass_c53_ct_eq() {
 }
 
 #[test]
+fn pass_c53_shift() {
+    // ADR 0048 c53_shift: shift operators `<<` (shl) / `>>` (logical lshr) over
+    // matching-width i64. Also exercised byte-for-byte by the selfhost
+    // differentials (corpus auto-scan), proving the self-hosted `scg` mirrors
+    // shifts identically to the `snc llvm` oracle. (1<<4)+(255>>2)-(8<<1)-21 = 42.
+    assert_eq!(run_exit("c53_shift.sentinel"), 42);
+}
+
+#[test]
 fn pass_c53_secret_array_memcmp() {
     // ADR 0047 c53_secret_array_memcmp: a constant-time memcmp over
     // `[secret u8]` (arrays of secret ELEMENTS). A public-index loop over the

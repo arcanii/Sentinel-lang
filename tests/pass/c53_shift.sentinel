@@ -1,0 +1,20 @@
+// c53: shift operators `<<` / `>>` (ADR 0048). `<<` = LLVM `shl`, `>>` = LOGICAL
+// `lshr` (zero-fill). All operands are i64 (matching width), so no shift-amount
+// coercion is emitted and the snc-llvm oracle and the self-hosted `scg` produce
+// byte-identical `shl i64` / `lshr i64` — the corpus differential validates the
+// selfhost mirror. Covers both a variable shift amount (the fn params) and a
+// literal amount. Exit 42.
+fn shl(x: i64, n: i64) -> i64 {
+    x << n
+}
+
+fn shr(x: i64, n: i64) -> i64 {
+    x >> n
+}
+
+fn main() -> i64 {
+    let a: i64 = shl(1, 4);     // 1 << 4  = 16
+    let b: i64 = shr(255, 2);   // 255 >> 2 = 63 (logical)
+    let lit: i64 = 8 << 1;      // 16
+    a + b - lit - 21            // 16 + 63 - 16 - 21 = 42
+}

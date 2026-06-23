@@ -1,6 +1,9 @@
 # ADR 0048: Shift operators `<<` / `>>` (with a constant-time secret-amount rule)
 
-Status: **PROPOSED**
+Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A5) — shifts are in `snc` (Phase 1) AND mirrored
+into the self-hosted `scg` (Phase 2); the corpus differential validates `scg == snc llvm`
+byte-for-byte on a shift fixture, both bootstrap fixed points hold, and the full nextest is
+green. Amendments below record the deviations from the PROPOSED plan.
 
 Adds bit-shift operators `<<` (shift left) and `>>` (shift right) to the language. This is
 the next language gap on the examples-as-tests + core-library track
@@ -102,20 +105,47 @@ every `match` on `BinOp` (parser, types, codegen, MIR) is forced to gain an arm.
 Validation: a `std/bits` library + an ARX quarter-round example, exercised by the examples
 harness (`snc build`, both `--separate` and merge). The full nextest is the gate.
 
-## Scope — Phase 2 (deferred): the selfhost mirror
+## Scope — Phase 2: the selfhost mirror (DONE)
 
 The self-hosted `scg` and the `snc llvm` textual oracle (`llvm_dump.rs`) each have their own
-parser / Binary-typing / CT-sink copies. They are **not** changed in Phase 1, and the
-selfhost differentials stay byte-identical **because no shift program enters the selfhost
-corpus** (`tests/pass` + `tests/ui`) — the `bits` lib + ARX example live in `std/` +
-`examples/`, compiled by `snc` only. Both bootstrap fixed points hold (the selfhost sources
-use no shifts). Phase 2 mirrors shifts into `scg` + the oracle and adds a `tests/pass`
-shift fixture so the corpus differential validates `scg == snc llvm` byte-for-byte — at
-which point shifts are a fully self-hosted construct.
+parser / Binary-typing / CT-sink copies. Phase 1 left them unchanged (the selfhost
+differentials stayed byte-identical because no shift program was in the corpus). Phase 2
+mirrors shifts into `scg` + the oracle and adds `tests/pass/c53_shift` so the corpus
+differential validates `scg == snc llvm` byte-for-byte — making shifts a fully self-hosted
+construct.
 
 ## Consequences
 
-`std/bits` (rotate/shift) becomes expressible, and the track can build the ChaCha-style ARX
-quarter-round — the recognizable branch-free primitive — over `secret` words, rotating by
-public constants, all passing the constant-time check. Amendments (A1, …) will record any
-deviation once implemented.
+`std/bits` (rotate/shift) becomes expressible, and the track built a SipHash-style ARX
+round — the recognizable branch-free primitive — over `secret` words, rotating by public
+constants, all passing the constant-time check.
+
+## Amendments (as implemented)
+
+- **A1 — lexing, as proposed (no tokens).** Shifts are reconstructed from two span-adjacent
+  `<`/`>` tokens. In `snc` via a `peek2` helper + a `parse_shift` level between bitwise-and
+  and additive; in `scg` (Phase 2) the same, reading the parser's parallel token-span vecs
+  (`(*e)[cur] == (*s)[cur+1]`). The `>` stays `Gt`, so nested generics still close one `>`
+  at a time. `cur+1` is read only when the current token is `<`/`>` (always followed by ≥
+  the EOF token), preserving panic-freedom.
+- **A2 — the constant-time secret-amount rule, as proposed.** A new `TypeError::SecretShiftAmount`
+  (rejecting a secret amount at type-check) + a new MIR `SinkKind::ShiftAmount` backstop;
+  the result takes the LEFT operand's secrecy (a secret value shifted by a public amount is
+  accepted and stays secret). Mirrored in `scg` (the typer `resty` widened to include
+  shifts; the `mir_verify` binop arm flags a secret amount as leak-kind 4 "ShiftAmount").
+  The secret-amount path is type-rejected before MIR, so the MIR sink is a backstop
+  exercised by a Rust unit test (and mirror-correct in `scg`).
+- **A3 — codegen, as proposed.** `shl` / `lshr` (logical, all int types). `snc`'s inkwell
+  backend coerces a mismatched-width amount (zext/trunc); the corpus fixture uses
+  matching-width `i64` shifts so the oracle and `scg` emit a bare `shl i64`/`lshr i64` and
+  stay byte-identical (the oracle has no coercion path — a deferred refinement, harmless
+  since no mismatched-width shift is in the corpus).
+- **A4 — the Phase 2 mirror found a real bug.** `scg`'s Binary arm had a `bop >= 14`
+  short-circuit fork (for `&&`/`||`) that also caught shifts (op-codes 16/17 ≥ 14), lowering
+  `x << n` as a *branch* on `x`. Narrowing both forks (the MIR fork and the codegen fork) to
+  `bop == 14 || bop == 15` fixed it — the MIR then matched the oracle byte-for-byte. The
+  symbol tables in four selfhost files (`parser` / `resolve` / `merge` / `types`, each
+  feeding a stage differential) all needed the `<<`/`>>` rows.
+- **A5 — ChaCha → SipHash.** ChaCha is 32-bit, but i32 values are unconstructible today (an
+  int literal is i64, no `i64_to_i32`), so the headline ARX primitive is a 64-bit SipHash
+  round instead. The i32-construction gap is documented as the next gap.

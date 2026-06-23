@@ -1090,8 +1090,47 @@ fn parse_add_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mu
     }
 }
 
-fn parse_bitand(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+// ADR 0048: shift operators `<<` / `>>` (op-codes 16 / 17), between bitwise-and
+// and additive. They are NOT lexer tokens — a shift is two SPAN-ADJACENT `<` / `>`
+// tokens (tag 15 = Lt, tag 17 = Gt), so nested generics `Vec<Box<i64>>` still
+// close one `>` at a time in the type parser. `*cur + 1` is read only when the
+// current token is `<` / `>`, which is always followed by at least the EOF token.
+fn parse_shift(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
     let lhs: Expr = parse_add(k, s, e, src, cur);
+    parse_shift_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_shift_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let t0: i64 = (*k)[*cur];
+    if t0 == 15 {
+        // possible `<<` — needs the next token to be an adjacent `<`.
+        let t1: i64 = (*k)[*cur + 1];
+        let adj: bool = (*e)[*cur] == (*s)[*cur + 1];
+        if t1 == 15 && adj {
+            *cur = *cur + 2;
+            let rl: Expr = parse_add(k, s, e, src, cur);
+            parse_shift_rest(k, s, e, src, cur, Expr::Binary(16, acc, rl))
+        } else {
+            acc
+        }
+    } else if t0 == 17 {
+        // possible `>>` — needs the next token to be an adjacent `>`.
+        let t1b: i64 = (*k)[*cur + 1];
+        let adjb: bool = (*e)[*cur] == (*s)[*cur + 1];
+        if t1b == 17 && adjb {
+            *cur = *cur + 2;
+            let rr: Expr = parse_add(k, s, e, src, cur);
+            parse_shift_rest(k, s, e, src, cur, Expr::Binary(17, acc, rr))
+        } else {
+            acc
+        }
+    } else {
+        acc
+    }
+}
+
+fn parse_bitand(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_shift(k, s, e, src, cur);
     parse_bitand_rest(k, s, e, src, cur, lhs)
 }
 
@@ -1099,7 +1138,7 @@ fn parse_bitand_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: 
     let tg: i64 = (*k)[*cur];
     if tg == 23 {
         *cur = *cur + 1;
-        let rr: Expr = parse_add(k, s, e, src, cur);
+        let rr: Expr = parse_shift(k, s, e, src, cur);
         parse_bitand_rest(k, s, e, src, cur, Expr::Binary(5, acc, rr))
     } else {
         acc
@@ -1781,7 +1820,7 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         },
         Expr::Binary(bop, l, r) => {
             push(out, '(');
-            let pfx: [u8] = if bop <= 7 {
+            let pfx: [u8] = if bop <= 7 || bop == 16 || bop == 17 {
                 "binop"
             } else if bop <= 13 {
                 "cmp"
@@ -1818,6 +1857,10 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
                 ">="
             } else if bop == 14 {
                 "&&"
+            } else if bop == 16 {
+                "<<"
+            } else if bop == 17 {
+                ">>"
             } else {
                 "||"
             };

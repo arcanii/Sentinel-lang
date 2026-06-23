@@ -813,7 +813,7 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Ve
         },
         Expr::Binary(bop, l, r) => {
             push(out, '(');
-            let pfx: [u8] = if bop <= 7 {
+            let pfx: [u8] = if bop <= 7 || bop == 16 || bop == 17 {
                 "binop"
             } else if bop <= 13 {
                 "cmp"
@@ -850,6 +850,10 @@ fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Ve
                 ">="
             } else if bop == 14 {
                 "&&"
+            } else if bop == 16 {
+                "<<"
+            } else if bop == 17 {
+                ">>"
             } else {
                 "||"
             };

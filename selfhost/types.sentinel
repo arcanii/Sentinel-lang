@@ -2760,7 +2760,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // `a * 2 : i64` widens to `?i64` in a `?i64`-returning branch).
             let mut tmp: Vec<u8> = vec_new();
             push(&mut tmp, '(');
-            let pfx: [u8] = if bop <= 7 {
+            let pfx: [u8] = if bop <= 7 || bop == 16 || bop == 17 {
                 "binop"
             } else if bop <= 13 {
                 "cmp"
@@ -2797,6 +2797,10 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 ">="
             } else if bop == 14 {
                 "&&"
+            } else if bop == 16 {
+                "<<"
+            } else if bop == 17 {
+                ">>"
             } else {
                 "||"
             };
@@ -2826,7 +2830,9 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let mut rhs_blk: i64 = 0 - 1;
             let mut short_blk: i64 = 0 - 1;
             if mir_on(c) {
-                if bop >= 14 {
+                // ADR 0048: only `&&`/`||` (14/15) short-circuit; shifts (16/17)
+                // are ordinary binops and must NOT fork here.
+                if bop == 14 || bop == 15 {
                     rhs_blk = mir_new_block(c);
                     short_blk = mir_new_block(c);
                     let pred: i64 = (*c).mir_cur;
@@ -2853,7 +2859,8 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let mut cg_lmerge: i64 = 0 - 1;
             let mut cg_lslot: i64 = 0 - 1;
             if cg_on(c) {
-                if bop >= 14 {
+                // ADR 0048: only `&&`/`||` (14/15) short-circuit; shifts are binops.
+                if bop == 14 || bop == 15 {
                     cg_lrhs = cg_fresh_block(c);
                     cg_lshort = cg_fresh_block(c);
                     cg_lmerge = cg_fresh_block(c);
@@ -2916,7 +2923,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // -> bool, but secret-preserving: a secret operand → `secret bool` (ADR
             // 0019 D5b; mixed public+secret is rejected upstream, so the left
             // operand's secrecy is the pair's).
-            let resty: i64 = if bop <= 7 {
+            let resty: i64 = if bop <= 7 || bop == 16 || bop == 17 {
                 lt
             } else if is_secret(c, lt) {
                 mk_secret(c, 2)
@@ -2927,9 +2934,9 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // (7/N) MIR: binop (bop<=7) / cmp (8..13) -> an inst; logic (&&/||) -> the
             // short-circuit merge (the (7b) fork above branched on the left).
             if mir_on(c) {
-                if bop <= 13 {
+                if bop <= 13 || bop == 16 || bop == 17 {
                     let mc: i64 = (*c).mir_cur;
-                    let mop: i64 = if bop <= 7 {
+                    let mop: i64 = if bop <= 7 || bop == 16 || bop == 17 {
                         3
                     } else {
                         4
@@ -2968,7 +2975,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             // operand type is `lt` (= resty for binop; the operands' type for cmp). `&&`/
             // `||` (14/15) are control flow (8b) — not emitted here.
             if cg_on(c) {
-                if bop <= 7 {
+                if bop <= 7 || bop == 16 || bop == 17 {
                     let opn: [u8] = if bop == 1 {
                         "add"
                     } else if bop == 2 {
@@ -2985,8 +2992,14 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                         "and"
                     } else if bop == 6 {
                         "or"
-                    } else {
+                    } else if bop == 7 {
                         "xor"
+                    } else if bop == 16 {
+                        // ADR 0048: shift left.
+                        "shl"
+                    } else {
+                        // ADR 0048: LOGICAL shift right (zero-fill, all int types).
+                        "lshr"
                     };
                     cg_bin(c, opn, lt, cglk0, cglv0, cgrk, cgrv);
                     0
@@ -12805,8 +12818,12 @@ fn mir_put_bop(out: &mut Vec<u8>, bop: i64) -> i64 {
         "<="
     } else if bop == 12 {
         ">"
-    } else {
+    } else if bop == 13 {
         ">="
+    } else if bop == 16 {
+        "<<"
+    } else {
+        ">>"
     };
     append_str(out, s);
     0
@@ -13074,7 +13091,7 @@ fn mir_val_secret(c: &mut TyCtx, v: i64) -> bool {
 
 // Append `(leak <SinkKind>)` to `mirout` (via a local buffer + push-fold — a
 // ctx-field `&mut` can't go to a user fn). kind 0 Branch / 1 MemoryIndex /
-// 2 MemoryAddress / 3 Division.
+// 2 MemoryAddress / 3 Division / 4 ShiftAmount (ADR 0048).
 fn mir_emit_leak(c: &mut TyCtx, kind: i64) -> i64 {
     let mut lb: Vec<u8> = vec_new();
     append_str(&mut lb, "(leak ");
@@ -13084,8 +13101,10 @@ fn mir_emit_leak(c: &mut TyCtx, kind: i64) -> i64 {
         "MemoryIndex"
     } else if kind == 2 {
         "MemoryAddress"
-    } else {
+    } else if kind == 3 {
         "Division"
+    } else {
+        "ShiftAmount"
     };
     append_str(&mut lb, nm);
     push(&mut lb, ')');
@@ -13133,11 +13152,22 @@ fn mir_verify_fn(c: &mut TyCtx) -> i64 {
                     };
                     0
                 } else if op == 3 {
-                    // binop: a secret divisor of an integer division (bop 4 = `/`).
+                    // binop: a secret divisor of an integer division (bop 4 = `/`),
+                    // or a secret shift AMOUNT (bop 16 `<<` / 17 `>>`, ADR 0048) —
+                    // the amount is the RIGHT operand (mib); a secret VALUE is fine.
                     if (*c).misym[i] == 4 {
                         let dv: i64 = (*c).mib[i];
                         if mir_val_secret(c, dv) {
                             mir_emit_leak(c, 3);
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else if (*c).misym[i] == 16 || (*c).misym[i] == 17 {
+                        let amt: i64 = (*c).mib[i];
+                        if mir_val_secret(c, amt) {
+                            mir_emit_leak(c, 4);
                             0
                         } else {
                             0

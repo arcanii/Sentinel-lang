@@ -313,6 +313,10 @@ fn binary_sym(bop: i64) -> [u8] {
         ">="
     } else if bop == 14 {
         "&&"
+    } else if bop == 16 {
+        "<<"
+    } else if bop == 17 {
+        ">>"
     } else {
         "||"
     }
