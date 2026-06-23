@@ -2263,16 +2263,17 @@ For pasting into a fresh chat to bootstrap context:
 
     ▶ **RESUME AT: the per-unit separate-compilation back end (ADR 0037 (a)) — (2/N): EVERY pub item kind
     crosses a `--separate` boundary (incl. cross-UNIT effect perform/handle, `b43b7d6`+`4c3a28b`), and
-    `linkonce_odr` GENERIC DEDUP now covers PRIMITIVES + CROSS-MODULE STRUCTS. Primitive-arg dedup (`c5ca3b8`
-    +`8d14db8`); the ADR point-8 TYPE-TAG fix landed FOR STRUCTS (`a75a62c` codegen + `7c6767a` feature): a
-    cross-module struct's tag in a `linkonce_odr` mono key is ORIGIN-qualified (`id__util$geo$Point`, via
-    `mangle_type_dedup` + a driver-threaded `struct_origins: StructId→origin` map), so `id<geo::Point>` dedups
-    across importers AND two same-named cross-module structs stay DISTINCT (`id__a$Point` vs `id__b$Point` —
-    proven sound by the collision test, 8- vs 16-byte). Both maps mirror the op-id base map (empty =
-    byte-identical). See the ▶ NOW ON block below. NEXT in (2/N) = extend the type-tag fix to ENUMS + other
-    named args (same origin-qualified-tag treatment, `mangle_type_dedup` + an enum-origin map) + dedup
-    trait/class methods; then (3/N) incremental Salsa caching + per-unit `.o` repro. The self-host port AND the
-    ADR 0046 partial-move soundness fix are both COMPLETE.** **The
+    `linkonce_odr` GENERIC DEDUP now covers PRIMITIVES + CROSS-MODULE STRUCTS + ENUMS. Primitive-arg dedup
+    (`c5ca3b8`+`8d14db8`); the ADR point-8 TYPE-TAG fix landed for STRUCTS (`a75a62c`+`7c6767a`) and ENUMS
+    (`7d5dd46`): a cross-module struct/enum tag in a `linkonce_odr` mono key is ORIGIN-qualified
+    (`id__util$geo$Point` / `id__shape$Shape`, via `mangle_type_dedup` + a driver-threaded `NamedTypeOrigins
+    { structs: StructId→origin, enums: EnumId→origin }` bundle), so `id<geo::Point>` / `id<shape::Shape>`
+    dedup across importers AND two same-named cross-module types stay DISTINCT (`id__a$Point` vs `id__b$Point`,
+    proven sound by the collision test, 8- vs 16-byte). All maps mirror the op-id base map (empty =
+    byte-identical). See the ▶ NOW ON block below. NEXT in (2/N) = extend the type-tag fix to class /
+    generic-instance args (add their arms to `mangle_type_dedup` + a `NamedTypeOrigins` field — same shape) +
+    dedup cross-module trait/class METHODS; then (3/N) incremental Salsa caching + per-unit `.o` repro. The
+    self-host port AND the ADR 0046 partial-move soundness fix are both COMPLETE.** **The
     self-host port: Bar B closed, ADR 0045 ACCEPTED-WITH-AMENDMENTS
     (A1–A34): all 123 pass fixtures emit byte-identically `scg` == `snc llvm`, and the bootstrap fixed point
     holds via BOTH paths.** **ADR 0046 (the partial-move-through-field double-free, review-plan P1.2):
@@ -2438,10 +2439,18 @@ For pasting into a fresh chat to bootstrap context:
     (a::Point{x} 8-byte vs b::Point{x,y} 16-byte → DISTINCT `id__a$Point`/`id__b$Point` → no wrong merge → exit
     12, the exact unsoundness point 8 closes; the `nm` assertion is load-bearing — those tags exist only with
     the fix). Golden test `abi_v1_mangling_dedup_qualifies_cross_module_struct_tag` + abi-v1.md §4 pin the
-    format. ▶ **NEXT (2/N)/(3/N):** extend the type-tag fix to ENUMS + other named args (an enum-origin map +
-    `mangle_type_dedup`'s Enum arm — same pattern as structs) + dedup trait/class methods; then (3/N)
-    incremental Salsa caching of unchanged units + per-unit `.o` repro (extend `repro.rs`). Keep the merge path +
-    both fixed points green (additive).
+    format.
+    ✅ **+ ENUMS too** (`7d5dd46`): the point-8 fix extends to cross-module enums (`id<shape::Shape>` →
+    `id__shape$Shape`) — `mangle_type_dedup` gained an Enum arm + the two origin maps were BUNDLED into a pub
+    `NamedTypeOrigins { structs, enums }` (so the codegen sig stays 6 args + a future named-type map is one
+    field, not one param). Driver records imported enum (name, origin) at the `use` site → name→resolved
+    EnumId. Golden test now covers both; `separate_cross_module_generic_over_enum_is_linkonce_deduped` (nm=1,
+    load-bearing) → 42. So `linkonce_odr` dedup covers primitives + cross-module STRUCTS + ENUMS. ▶ **NEXT
+    (2/N)/(3/N):** extend to class / generic-instance type args (add their arms to `mangle_type_dedup` + a
+    `NamedTypeOrigins` field — same shape, both rarer) + dedup cross-module trait/class METHODS (the methods
+    currently emit importer-qualified; mirror the generic-fn `generic_origins` model with a method-origin map);
+    then (3/N) incremental Salsa caching of unchanged units + per-unit `.o` repro (extend `repro.rs`). Keep the
+    merge path + both fixed points green (additive).
     Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;

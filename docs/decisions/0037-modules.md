@@ -22,11 +22,12 @@ dedup — PARTIALLY REALISED** (`c5ca3b8`+`8d14db8`): a mono instance of an IMPO
 COLLISION-SAFE args (primitives) emits under the ORIGIN-qualified symbol with `linkonce_odr` linkage,
 so N importers of `util::id<i64>` share ONE `_S4util4math…id__i64` def (the linker dedups; an empty
 `generic_origins` map → the importer-qualified default path, byte-identical). ✅ the module-qualified
-TYPE-TAG fix (point 8) is DONE FOR STRUCTS (`a75a62c`+`7c6767a`): a cross-module struct's tag in a
-`linkonce_odr` mono key is origin-qualified (`id__util$geo$Point`), so `id<geo::Point>` dedups across
-importers AND two same-named structs from different modules stay distinct (proven sound). ▶ REMAINING:
-(2/N) extend the type-tag fix to ENUMS + other named args + dedup trait/class methods; (3/N) incremental
-caching. The multi-file
+TYPE-TAG fix (point 8) is DONE FOR STRUCTS + ENUMS (`a75a62c`+`7c6767a`+`7d5dd46`): a cross-module
+struct/enum tag in a `linkonce_odr` mono key is origin-qualified (`id__util$geo$Point` /
+`id__shape$Shape`), so `id<geo::Point>` / `id<shape::Shape>` dedup across importers AND two same-named
+types from different modules stay distinct (proven sound). ▶ REMAINING: (2/N) extend the type-tag fix to
+class / generic-instance args + dedup cross-module trait/class METHODS; (3/N) incremental caching. The
+multi-file
 SURFACE shipped earlier via the interim Path A merge. The surface shipped via
 the lower-risk Path A merge — owner-chosen: whole-graph front-end + merge
 into one `Program` → existing pipeline; true per-unit separate-compilation back
@@ -568,15 +569,16 @@ Settled in **this revision** (the per-unit back end):
 Realised in (2/N):
 
 8. **Cross-module type tags in mono keys → module-qualified** (D7 last bullet) — ✅ DONE
-   for STRUCTS (`a75a62c`+`7c6767a`). A cross-module struct's tag in a `linkonce_odr` mono
-   key is ORIGIN-qualified (`id__util$geo$Point`, `$`-joined path via `mangle_type_dedup` +
-   a driver-supplied `StructId → origin` map), so two same-named structs from different
-   modules get DISTINCT tags and no longer alias. This WIDENED `mono_args_dedup_safe` from
-   primitives-only to also accept cross-module structs (origin known) + arrays/nullables/vecs
-   thereof; a LOCAL struct (importer-specific) stays per-importer. Proven by the
-   `separate_same_named_cross_module_structs_dont_alias_in_dedup` test (8- vs 16-byte `Point`s
-   → distinct symbols, no wrong merge). ⏳ STILL DEFERRED: ENUMS + other named args (class /
-   generic-instance) — same origin-qualified-tag treatment, the remaining tail.
+   for STRUCTS (`a75a62c`+`7c6767a`) and ENUMS (`7d5dd46`). A cross-module struct/enum tag in a
+   `linkonce_odr` mono key is ORIGIN-qualified (`id__util$geo$Point` / `id__shape$Shape`,
+   `$`-joined path via `mangle_type_dedup` + a driver-supplied `StructId`/`EnumId → origin` map,
+   bundled as `NamedTypeOrigins`), so two same-named types from different modules get DISTINCT
+   tags and no longer alias. This WIDENED `mono_args_dedup_safe` from primitives-only to also
+   accept cross-module structs/enums (origin known) + arrays/nullables/vecs thereof; a LOCAL
+   struct/enum (importer-specific) stays per-importer. Proven sound by
+   `separate_same_named_cross_module_structs_dont_alias_in_dedup` (8- vs 16-byte `Point`s →
+   distinct symbols, no wrong merge). ⏳ STILL DEFERRED: class / generic-instance type args
+   (same treatment) + dedup of cross-module trait/class METHODS — the remaining tail.
 
 9. **Cross-UNIT effect op ids → a build-wide op-id BASE map** (effect NAME → a
    graph-stable sorted index), NOT a shared global `EffectId`. The `EffectId` is

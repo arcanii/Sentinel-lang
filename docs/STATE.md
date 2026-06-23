@@ -14,12 +14,13 @@ the full Sentinel language to native code via LLVM 18. **Phase C closed at
 Sentinel 1.0 (2026-05-30).** sentinel-lsp remains a stub (post-1.0); the
 next phase is **D (self-hosting)**.
 
-Last updated: **▶ (2/N) — `linkonce_odr` GENERIC DEDUP now covers PRIMITIVES + CROSS-MODULE STRUCTS:
-the ADR point-8 TYPE-TAG fix landed for structs (`a75a62c`+`7c6767a`, origin-qualified mono tags →
-`id<geo::Point>` dedups soundly; same-named cross-module structs stay distinct). EARLIER this session:
-cross-UNIT effect perform/handle (`b43b7d6`+`4c3a28b`) + primitive-arg linkonce dedup (`c5ca3b8`+`8d14db8`).
-See the running log below. NEXT = extend the type-tag fix to ENUMS + trait/class-method dedup / (3/N)
-incremental caching. ▶ TRACK — the per-unit SEPARATE-COMPILATION back end (ADR 0037 (a)).
+Last updated: **▶ (2/N) — `linkonce_odr` GENERIC DEDUP now covers PRIMITIVES + CROSS-MODULE STRUCTS +
+ENUMS: the ADR point-8 TYPE-TAG fix landed for structs (`a75a62c`+`7c6767a`) AND enums (`7d5dd46`) —
+origin-qualified mono tags (`id__util$geo$Point` / `id__shape$Shape`) → cross-module-typed generics dedup
+soundly; same-named cross-module types stay distinct. EARLIER this session: cross-UNIT effect perform/handle
+(`b43b7d6`+`4c3a28b`) + primitive-arg linkonce dedup (`c5ca3b8`+`8d14db8`). See the running log below.
+NEXT = class/generic-instance args + trait/class-method dedup / (3/N) incremental caching. ▶ TRACK — the
+per-unit SEPARATE-COMPILATION back end (ADR 0037 (a)).
 ADR 0037 FLIPPED toward the per-unit (1/N): D7 module-qualified mangling (`_S` + a
 length-prefixed module segment per path segment + a length-prefixed item; **empty module
 path → the bare item**, so single-file ABI is byte-unchanged → an AMENDMENT, not abi-v2)
@@ -122,9 +123,14 @@ AND two SAME-NAMED structs from different modules get DISTINCT tags (`id__a$Poin
 linker never merges an 8-byte `id` with a 16-byte one — the exact unsoundness point 8 closes. Empty
 `struct_origins` (single-file / merge / corpus) → a struct is "local" → byte-identical. Two load-bearing
 tests: `id<geo::Point>` across 2 importers → ONE `id__geo$Point` (nm); + the same-named-Point collision →
-distinct symbols → exit 12. ▶ NEXT in (2/N)/(3/N): extend the type-tag fix to ENUMS + other named args +
-dedup trait/class methods; then (3/N) incremental Salsa caching + per-unit repro. 1519 tests, both fixed
-points byte-identical, four-check green.
+distinct symbols → exit 12. 1519 tests, both fixed points byte-identical, four-check green. ✅ **+ ENUMS too**
+(`7d5dd46`): the point-8 fix extends to cross-module enums (`id<shape::Shape>` → `id__shape$Shape`, dedups
+across importers) — `mangle_type_dedup` gains an Enum arm + the two origin maps are BUNDLED as a pub
+`NamedTypeOrigins { structs, enums }` (so the codegen sig stays at 6 args and a future named-type map is one
+more field, not one more param). So `linkonce_odr` dedup now covers primitives + cross-module STRUCTS +
+ENUMS. ▶ NEXT in (2/N)/(3/N): extend the type-tag fix to class / generic-instance args + dedup cross-module
+trait/class METHODS; then (3/N) incremental Salsa caching + per-unit repro. 1520 tests, both fixed points
+byte-identical, four-check green.
 ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and
