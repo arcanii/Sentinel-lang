@@ -386,6 +386,17 @@ pub enum ArrayElem {
     /// / ADR 0016 D6b — partially closes the ADR 0015 D6
     /// deferral.
     GenericInstance(GenericInstanceId),
+    /// ADR 0047: `[secret T]` — an array whose ELEMENTS are individually
+    /// secret (e.g. `[secret u8]`, a secret byte buffer). The [`SecretId`]
+    /// names the element's `secret T` via `TypedProgram.secrets`, exactly as
+    /// [`Type::Secret`] does for scalars — so `ArrayElem` stays `Copy` (a
+    /// `Box` would break it, which is why `[secret T]` is feasible where
+    /// `[?T]`/`[[T]]` were deferred). Indexing yields `Type::Secret(id)` (see
+    /// [`ArrayElem::to_type`]), so the constant-time taint check fires on the
+    /// element automatically, while the array's base pointer + length stay
+    /// public. Admitted only for a secret SCALAR element — the demote guard
+    /// ([`Type::to_array_elem_secret`]) rejects `[secret [T]]` / `[secret ?T]`.
+    Secret(SecretId),
 }
 
 impl ArrayElem {
@@ -399,6 +410,10 @@ impl ArrayElem {
             ArrayElem::Struct(id) => Type::Struct(id),
             ArrayElem::TypeParam(id) => Type::TypeParam(id),
             ArrayElem::GenericInstance(id) => Type::GenericInstance(id),
+            // ADR 0047: a secret array element promotes back to the scalar
+            // `secret T` it names — so `s[i]` on a `[secret T]` types as
+            // `secret T`, seeding the constant-time check with no other change.
+            ArrayElem::Secret(id) => Type::Secret(id),
         }
     }
 
@@ -617,6 +632,25 @@ impl Type {
             // collection nesting at the MVP.
             | Type::Vec(_) => None,
         }
+    }
+
+    /// ADR 0047: demote this Type to an [`ArrayElem`] for use as an array
+    /// element, additionally admitting a `secret` SCALAR element (`[secret u8]`)
+    /// — the form the bare [`Type::to_array_elem`] rejects. A `Type::Secret(id)`
+    /// is admitted **only if** the secret wraps a flat scalar (i.e. its
+    /// `secrets[id].inner` itself demotes), so `[secret [T]]` / `[secret ?T]`
+    /// stay rejected and the depth-1 no-nested-collection rule holds. Used at
+    /// the array-element resolution sites (the `[T]` annotation arm + the two
+    /// array-literal demotes); the bare `to_array_elem` stays conservative for
+    /// callers without the `secrets` interner (e.g. generic substitution, where
+    /// secrets do not compose today).
+    pub fn to_array_elem_secret(self, secrets: &[SecretData]) -> Option<ArrayElem> {
+        if let Type::Secret(id) = self {
+            // `[secret SCALAR]` only: the secret's own inner must demote.
+            let inner = secrets[id.0 as usize].inner;
+            return inner.to_array_elem().map(|_| ArrayElem::Secret(id));
+        }
+        self.to_array_elem()
     }
 
     /// Try to demote this Type to a [`VecElem`] for use as the element
@@ -1164,7 +1198,10 @@ fn resolve_type_expr_with_scope(
                     span: to_source_span(&te.span),
                 });
             }
-            match inner_ty.to_array_elem() {
+            // ADR 0047: admit `[secret SCALAR]` (e.g. `[secret u8]`) in addition
+            // to the flat subset; the guarded demote keeps `[secret [T]]`
+            // rejected as NestedArray.
+            match inner_ty.to_array_elem_secret(secrets) {
                 Some(ae) => Ok(Type::Array(ae)),
                 None => Err(TypeError::NestedArray {
                     span: to_source_span(&te.span),
@@ -6548,7 +6585,7 @@ fn check_expr(
                         });
                     }
                 };
-                let ae = elem_ty.to_array_elem().ok_or_else(|| {
+                let ae = elem_ty.to_array_elem_secret(secrets).ok_or_else(|| {
                     TypeError::NestedArray {
                         span: to_source_span(&expr.span),
                     }
@@ -6596,7 +6633,7 @@ fn check_expr(
                     }
                     typed.push(t);
                 }
-                let ae = elem_ty.to_array_elem().ok_or_else(|| {
+                let ae = elem_ty.to_array_elem_secret(secrets).ok_or_else(|| {
                     TypeError::NestedArray {
                         span: to_source_span(&expr.span),
                     }

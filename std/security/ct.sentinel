@@ -54,3 +54,30 @@ pub fn ct_select(mask: secret i64, a: secret i64, b: secret i64) -> secret i64 {
     let nmask: secret i64 = ct_not(mask);
     (a & mask) | (b & nmask)
 }
+
+// Constant-time compare of two equal-length SECRET byte buffers (ADR 0047 —
+// `[secret u8]`, arrays of secret elements). Returns a secret accumulator that
+// is `0` iff every byte matched, nonzero otherwise — the variable-length analogue
+// of `ct_diff` for a whole buffer (a tag / MAC verify).
+//
+// Constant-time by construction: the loop runs a FIXED number of iterations (the
+// PUBLIC length `len(a)`) and indexes with a PUBLIC counter, so neither the
+// iteration count nor the access pattern depends on the secret contents — there
+// is no data-dependent early-out. Each `a[i]`/`b[i]` comes back `secret u8`, so
+// the XOR/OR reduction stays in the secret domain; the caller `declassify`s the
+// final accumulator and compares it against zero. The compiler's constant-time
+// check verifies the whole path.
+//
+// Precondition: `len(a) == len(b)` (a real tag/MAC compare fixes the width). If
+// `b` is shorter, an out-of-bounds index traps.
+pub fn ct_memcmp(a: [secret u8], b: [secret u8]) -> secret u8 {
+    let n: i64 = len(a);
+    let zero: u8 = i64_to_u8(0);
+    let mut acc: secret u8 = zero;   // u8 -> secret u8 widen
+    let mut i: i64 = 0;
+    while i < n {
+        acc = acc | (a[i] ^ b[i]);   // public index i; secret bytes
+        i = i + 1;
+    }
+    acc
+}

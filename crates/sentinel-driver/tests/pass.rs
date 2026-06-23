@@ -1156,6 +1156,18 @@ fn pass_c53_ct_eq() {
 }
 
 #[test]
+fn pass_c53_secret_array_memcmp() {
+    // ADR 0047 c53_secret_array_memcmp: a constant-time memcmp over
+    // `[secret u8]` (arrays of secret ELEMENTS). A public-index loop over the
+    // full length XOR/OR-reduces the secret bytes; only the final accumulator
+    // is declassified — PASSES the constant-time check. Equal buffers → 0,
+    // one tampered byte → nonzero; exit 42. Also exercised byte-for-byte by the
+    // selfhost codegen differential (corpus auto-scan), proving scg matches the
+    // `snc llvm` oracle on the new construct with no selfhost change.
+    assert_eq!(run_exit("c53_secret_array_memcmp.sentinel"), 42);
+}
+
+#[test]
 fn pass_c54_scope_arena() {
     // ADR 0028 D9 c54_scope_arena: the scope→arena codegen. A
     // non-escaping primitive array's heap buffer is bump-allocated in

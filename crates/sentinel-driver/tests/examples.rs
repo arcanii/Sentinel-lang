@@ -160,6 +160,10 @@ const EXAMPLES: &[(&str, i32)] = &[
     // Integer clamp/abs helpers (std::math::num) — a non-`secret` module
     // crossing the boundary. 42 = every helper returned its expected result.
     ("examples/math/clamp.sentinel", 42),
+    // The flagship: variable-length constant-time memcmp over `[secret u8]`
+    // secret byte buffers (std::security::ct::ct_memcmp, ADR 0047). 42 =
+    // equal-compared-equal AND tampered-compared-unequal.
+    ("examples/security/ct_memcmp.sentinel", 42),
 ];
 
 #[test]
@@ -170,6 +174,11 @@ fn secure_compare_constant_time() {
 #[test]
 fn math_clamp() {
     check_example("examples/math/clamp.sentinel", "clamp", 42);
+}
+
+#[test]
+fn ct_memcmp_secret_bytes() {
+    check_example("examples/security/ct_memcmp.sentinel", "ct_memcmp", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

@@ -1,0 +1,40 @@
+// examples/security/ct_memcmp.sentinel — the flagship.
+//
+// A VARIABLE-LENGTH constant-time secure compare over secret byte buffers, built
+// on `std::security::ct::ct_memcmp`. This is the shape of an HMAC / auth-tag
+// verify: the comparison must not leak, through timing, whether or where two
+// secret buffers differ. The whole reduction is branch-free over the secret
+// bytes — a public-counter loop over the full length, XOR/OR-accumulated in the
+// secret domain, with `declassify` applied only to the final accumulator.
+//
+// This exercises `[secret u8]` (arrays of secret elements, ADR 0047): a secret
+// byte buffer built from secret bytes, indexed by a public counter to yield
+// `secret u8` elements. The compiler's constant-time check verifies the whole
+// path on every build, so this program compiling at all is the guarantee.
+//
+// Exit 42 = a tag compared to an identical copy is equal, AND a one-byte-tampered
+// copy is unequal.
+use std::security::ct::ct_memcmp;
+
+fn main() -> i64 {
+    // A secret tag "hmac", as secret bytes (reusable: `secret u8` is Copy).
+    let h: secret u8 = 'h';
+    let m: secret u8 = 'm';
+    let a: secret u8 = 'a';
+    let c: secret u8 = 'c';
+    let x: secret u8 = 'X';
+
+    // Equal compare: two identical secret buffers. (Arrays are Move, so each
+    // ct_memcmp call consumes its arguments — build fresh buffers per compare.)
+    let t1: [secret u8] = [h, m, a, c];
+    let t2: [secret u8] = [h, m, a, c];
+    let eq: u8 = declassify(ct_memcmp(t1, t2));    // 0 iff equal
+
+    // Tampered compare: the last byte differs.
+    let t3: [secret u8] = [h, m, a, c];
+    let t4: [secret u8] = [h, m, a, x];
+    let ne: u8 = declassify(ct_memcmp(t3, t4));    // nonzero
+
+    let zero: u8 = i64_to_u8(0);
+    if eq == zero && ne != zero { 42 } else { 0 }
+}

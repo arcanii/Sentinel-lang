@@ -29,7 +29,7 @@ the example entry. See the harness doc-comment for the mechanics.
 
 | Category    | Module(s)            | Status                                   |
 | ----------- | -------------------- | ---------------------------------------- |
-| `security`  | `ct`                 | ✅ constant-time scalar primitives        |
+| `security`  | `ct`                 | ✅ ct scalar primitives + `ct_memcmp` over `[secret u8]` |
 | `math`      | `num`                | ✅ min/max/abs/clamp                       |
 | `bits`      | `bits`               | ◻ rotate/shift — **blocked on shift ops**|
 | `bytes`     | `bytes`              | ◻ `[u8]`/string utils                    |
@@ -39,14 +39,15 @@ The list grows as examples force new building blocks.
 ## The point: find + fix language gaps
 
 A real, idiomatic library hits the language's missing pieces, and finding them is
-the most valuable output of this corpus. Two are already tracked:
+the most valuable output of this corpus.
 
-- **No shift operators** (`<<` / `>>`). Blocks a `bits` rotate library and the
-  textbook constant-time primitives that broadcast a sign bit (`x >> (W-1)`).
-- **No `[secret T]` arrays.** `ArrayElem` has no secret form, so a
-  variable-length constant-time `memcmp` over an array of *secret* bytes is not
-  yet expressible — fixed-width compares over `secret` *scalars* are (see
-  `security/ct`). This is the flagship's next target.
+- **Fixed — `[secret T]` arrays** (ADR 0047). `ArrayElem` gained a secret form, so
+  a variable-length constant-time `memcmp` over a buffer of *secret* bytes
+  (`security/ct::ct_memcmp` over `[secret u8]`) is now expressible — the flagship.
+  Surfaced + closed by this corpus (a front-end-only, byte-identical change).
+- **Open — no shift operators** (`<<` / `>>`). Blocks a `bits` rotate library, the
+  textbook constant-time primitives that broadcast a sign bit (`x >> (W-1)`), and
+  an ARX/ChaCha quarter-round. The next gap to close.
 
 When a gap blocks a genuinely idiomatic library, that block is the signal to add
 the feature (ADR-first if it touches the frozen `abi-v1` contract).
