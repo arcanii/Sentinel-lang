@@ -2817,8 +2817,13 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             append_str(&mut tmp, bsym);
             push(&mut tmp, ' ');
-            let lt: i64 = dump_texpr(&mut tmp, l, 0 - 1, src, c, gb);
-            let blv: i64 = if mir_on(c) {
+            // (ADR 0051) Build each operand into its OWN buffer so a public operand can
+            // be wrapped in `(widen-secret …)` when it meets a secret one (the widen
+            // decision needs BOTH operand types, known only after both dumps). The
+            // operands' MIR/CG already emit into the streams during their `dump_texpr`.
+            let mut lbuf: Vec<u8> = vec_new();
+            let lt: i64 = dump_texpr(&mut lbuf, l, 0 - 1, src, c, gb);
+            let mut blv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -2902,7 +2907,6 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
-            push(&mut tmp, ' ');
             // `==`/`!=` (bop 8/9): the right operand inherits the left's type, so
             // `x == null` types the `null` as `x`'s `?T` (ADR 0014 D7).
             let rexp: i64 = if bop == 8 {
@@ -2912,8 +2916,9 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0 - 1
             };
-            let rt: i64 = dump_texpr(&mut tmp, r, rexp, src, c, gb);
-            let brv: i64 = if mir_on(c) {
+            let mut rbuf: Vec<u8> = vec_new();
+            let rt: i64 = dump_texpr(&mut rbuf, r, rexp, src, c, gb);
+            let mut brv: i64 = if mir_on(c) {
                 (*c).lastval
             } else {
                 0 - 1
@@ -2929,18 +2934,74 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             } else {
                 0
             };
+            // (ADR 0051) public->secret OPERAND widen: a SYMMETRIC op (`+ - * & | ^`,
+            // bop 1,2,3,5,6,7) or a comparison (bop 8..13) with the SAME stripped inner
+            // type but exactly ONE secret operand WIDENS the public operand to secret
+            // (result secret). EXCLUDES `/` (4) and the shifts (16,17) — their secret
+            // divisor / shift-amount sinks must STILL reject — and `&&`/`||` (14,15).
+            let lstrip: i64 = strip_secret(c, lt);
+            let rstrip: i64 = strip_secret(c, rt);
+            let lsec: bool = is_secret(c, lt);
+            let rsec: bool = is_secret(c, rt);
+            let wsym: bool = (bop >= 1 && bop <= 3) || bop == 5 || bop == 6 || bop == 7 || (bop >= 8 && bop <= 13);
+            let dowiden: bool = wsym && lstrip == rstrip && lsec != rsec;
+            let starget: i64 = mk_secret(c, lstrip);
+            let widen_l: bool = dowiden && !lsec;
+            let widen_r: bool = dowiden && !rsec;
             // arithmetic (<=7) preserves the operand type — so a secret operand makes
-            // the result secret automatically (`lt` is already `secret T`). cmp/logic
-            // -> bool, but secret-preserving: a secret operand → `secret bool` (ADR
-            // 0019 D5b; mixed public+secret is rejected upstream, so the left
-            // operand's secrecy is the pair's).
+            // the result secret automatically (`lt` is already `secret T`); with the
+            // widen, a `secret op public` arith is secret too (`starget`). cmp -> bool,
+            // but secret-preserving: a secret operand → `secret bool` (ADR 0019 D5b).
             let resty: i64 = if bop <= 7 || bop == 16 || bop == 17 {
-                lt
-            } else if is_secret(c, lt) {
+                if dowiden {
+                    starget
+                } else {
+                    lt
+                }
+            } else if lsec {
+                mk_secret(c, 2)
+            } else if dowiden {
                 mk_secret(c, 2)
             } else {
                 2
             };
+            // (7/N) MIR: the widened PUBLIC operand becomes an `Opaque` carrying its
+            // value (the let-widen machinery, `mir_widen`) — mirrors the oracle lowering
+            // `WidenToSecret` to `Opaque([inner])`. Re-capture the operand's SSA value so
+            // the binop/cmp consumes the widened one.
+            if mir_on(c) {
+                if widen_r {
+                    mir_widen(c, true, starget);
+                    brv = (*c).lastval;
+                    0
+                } else if widen_l {
+                    (*c).lastval = blv;
+                    mir_widen(c, true, starget);
+                    blv = (*c).lastval;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            // Splice the operands into `tmp`, wrapping the public one in `(widen-secret
+            // … :secret T)` when widened (CG: a secret widen is value-level identity, so
+            // the captured operand kinds are unchanged — `cg_widen`/oracle emit nothing).
+            let lexp: i64 = if widen_l {
+                starget
+            } else {
+                0 - 1
+            };
+            widen_splice(&mut tmp, lbuf, lexp, lt, c);
+            push(&mut tmp, ' ');
+            let rexp2: i64 = if widen_r {
+                starget
+            } else {
+                0 - 1
+            };
+            widen_splice(&mut tmp, rbuf, rexp2, rt, c);
             close_ty(&mut tmp, resty, c);
             // (7/N) MIR: binop (bop<=7) / cmp (8..13) -> an inst; logic (&&/||) -> the
             // short-circuit merge (the (7b) fork above branched on the left).

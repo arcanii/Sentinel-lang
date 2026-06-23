@@ -1,0 +1,29 @@
+// c56: public->secret OPERAND widen (ADR 0051). A symmetric binary op
+// (`+ - * & | ^`) or a comparison (`==` etc.) with one SECRET operand and one
+// PUBLIC operand of the SAME inner int type widens the public operand to secret
+// (result secret) — the public side is wrapped `(widen-secret <op> :secret T)`,
+// a codegen no-op, so `secret_x + 5` needs no pre-bound secret constant. `/`,
+// the shifts `<<`/`>>`, and `&&`/`||` are EXCLUDED (their secret divisor /
+// shift-amount sinks still reject). The self-hosted `scg` mirrors `snc`
+// byte-for-byte across all 8 selfhost stage differentials. Exit 42.
+fn main() -> i64 {
+    // A secret i64 combined with PUBLIC constants via every symmetric op — each
+    // public constant is widened to secret in place (no pre-bound secret).
+    let x: secret i64 = 50;
+    let a: secret i64 = x & 60;   // 50 & 60 = 48   (widen &)
+    let b: secret i64 = a | 3;    // 48 | 3  = 51   (widen |)
+    let cc: secret i64 = b ^ 17;  // 51 ^ 17 = 34   (widen ^)
+    let d: secret i64 = cc + 9;   // 34 + 9  = 43   (widen +)
+    let e: secret i64 = d - 1;    // 43 - 1  = 42   (widen -)
+    let f: secret i64 = e * 1;    // 42 * 1  = 42   (widen *)
+
+    // A secret == public comparison widens the public `50` to secret → secret
+    // bool; declassify it to branch (a secret bool cannot reach an `if`).
+    let eq: bool = declassify(x == 50);
+
+    if declassify(f) == 42 && eq {
+        42
+    } else {
+        0
+    }
+}
