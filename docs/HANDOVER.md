@@ -64,22 +64,30 @@ language gaps — finding + fixing those is the most valuable output.
   flagship sequencing targets `[secret T]` arrays; the lib set is `ct` / `math` /
   `bits` (post-shifts) / `bytes`, built incrementally.
 - **Done (commits on `main`):** `25e95a8` foundation (scalar `ct` lib +
-  `secure_compare` example + harness + corpus READMEs), `d1dace8` `math::num`,
-  **`1a84081` the FLAGSHIP — `[secret T]` arrays (ADR 0047 ACCEPTED-WITH-AMENDMENTS
-  A1–A6) + `ct_memcmp` over `[secret u8]`.** The gap closed: arrays of secret
-  ELEMENTS are now representable (`ArrayElem::Secret(SecretId)`), a front-end-only,
-  byte-identical change (one crate, `sentinel-types`; no codegen / CT-check /
-  selfhost change — the selfhost corpus differential proves `scg` == `snc llvm` on
-  the new `tests/pass/c53_secret_array_memcmp` fixture; both bootstrap fixed points
-  hold).
-- **Next (the remaining arc):** **shift operators `<<` / `>>`** — ADR-first
-  (frozen ABI: new `BinOp` + lexer tokens + codegen in both backends + a
-  CT-classification rule: a shift by a public/constant amount is constant-time, a
-  shift by a *secret* amount is rejected like a secret divisor). They unblock a
-  `std/bits` library (rotate/shift), the textbook constant-time sign-bit masks, and
-  the recognizable branch-free primitive (a **ChaCha-style ARX quarter-round**).
-  Then `std/bytes` (`[u8]` / string utilities). Keep both bootstrap fixed points +
-  the selfhost differentials byte-identical (the full nextest is the gate).
+  `secure_compare` + harness + corpus READMEs), `d1dace8` `math::num`, `a4f4b45`
+  docs, and **two fully self-hosted language features** (both ADR-first, byte-
+  identical across `snc` + `scg`, both bootstrap fixed points held):
+  - **`1a84081` — `[secret T]` arrays (ADR 0047 A1–A6) + `ct_memcmp` over
+    `[secret u8]`.** Arrays of secret ELEMENTS (`ArrayElem::Secret(SecretId)`) — a
+    front-end-only change (one crate); the selfhost corpus differential proves `scg`
+    == `snc llvm` on `tests/pass/c53_secret_array_memcmp`.
+  - **`c3e3d7c` (Phase 1, snc) + `47abfd5` (Phase 2, selfhost mirror) — shift
+    operators `<<` / `>>` (ADR 0048 A1–A5).** Logical right shift; a shift by a
+    *secret* amount is rejected (a secret value by a public amount is
+    constant-time). Reconstructed in the parser from two span-adjacent `<`/`>`
+    (no lexer token, so nested generics still close). Shipped `std/bits` (rotates)
+    + `std/security/ct::ct_rotl64` + a **SipHash-style ARX round over secret words**
+    (`examples/security/siphash_round`) — the recognizable branch-free primitive.
+    Validated by `tests/pass/c53_shift` across all 8 selfhost differentials.
+- **Next (open, owner's call — none yet approved):**
+  - **`std/bytes`** (`[u8]` / string utilities — `eq`/`copy`/`fill`/`find`) — a
+    shift-free lib + mirroring examples, plus ergonomic gaps (e.g. a public→secret
+    operand widen).
+  - **The i32-construction gap** — an int literal is `i64` with no `i64_to_i32`, so
+    i32 values can't be built, blocking a true 32-bit **ChaCha quarter-round**.
+    Closing it (a conversion builtin / i32-literal coercion) would unblock ChaCha.
+  Keep both bootstrap fixed points + the selfhost differentials byte-identical (the
+  full nextest is the gate).
 
 **Other open tracks** (owner's call, none on the critical path):
 

@@ -61,14 +61,21 @@ the current state of the workspace without re-reading every commit.
   idiomatic Sentinel programs that double as feature tests — each built BOTH via
   `--separate` and the merge path and asserted on (`crates/sentinel-driver/tests/
   examples.rs`). Shipped: `std/security/ct` (constant-time primitives incl.
-  `ct_memcmp`), `std/math/num`. **It surfaced + closed its first language gap:
-  `[secret T]` arrays — arrays of secret elements** (ADR 0047, `ArrayElem::Secret`)
-  — a front-end-only, byte-identical change enabling a variable-length
-  constant-time `memcmp` over secret bytes. Next gap: shift operators (`<<`/`>>`)
-  for a `bits` library + an ARX quarter-round. See the
+  `ct_memcmp` + `ct_rotl64`), `std/math/num`, `std/bits/bits` (rotates). It has
+  surfaced + closed **two** language gaps so far, each ADR-first + fully
+  self-hosted (snc + `scg`, byte-identical, both fixed points held):
+  - **`[secret T]` arrays** — arrays of secret elements (ADR 0047,
+    `ArrayElem::Secret`) — enabling a variable-length constant-time `memcmp` over
+    secret bytes (`examples/security/ct_memcmp`).
+  - **Shift operators `<<` / `>>`** (ADR 0048; logical right shift; a shift by a
+    *secret* amount is rejected, a secret value by a public amount is
+    constant-time) — enabling `std/bits` + a SipHash-style ARX round over secret
+    words (`examples/security/siphash_round`).
+  Next gap surfaced: i32 values are unconstructible (an int literal is i64, no
+  `i64_to_i32`), blocking a 32-bit ChaCha quarter-round. See the
   `sentinel_examples_and_corelibs` auto-memory.
 
-**1530 tests across the workspace**, four-check green (build · `cargo nextest`
+**1539 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
