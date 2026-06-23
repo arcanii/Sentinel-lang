@@ -49,29 +49,37 @@ reference as you work through the milestones.
   rejected. Added the `while` conformance test (`c52_secret_in_while`) and made
   the `SecretBranch` diagnostic name the actual construct.
 
-**▶ Resume at — the NEXT TRACK: examples-as-tests + core-library scoping.**
-Build real, idiomatic Sentinel programs that double as feature tests, and scope
-+ build the first **core libraries** so a programmer has building blocks instead
-of starting from scratch. This **dogfoods the module system + `--separate`** (the
-best test of those features), **stress-tests the constant-time guarantee on real
-code**, and will surface concrete language gaps (likely `[secret T]` arrays,
-missing bit primitives like rotate, the no-closures limit) — finding + fixing
-those is the most valuable output.
+**▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
+flagship landed).** Real, idiomatic Sentinel programs that double as feature tests
++ the first **core libraries**. **Dogfoods modules + `--separate`**,
+**stress-tests the constant-time guarantee on real code**, and surfaces concrete
+language gaps — finding + fixing those is the most valuable output.
 
-- **Flagship:** a `ct` constant-time-utilities module (`ct_eq` / `ct_select` /
-  `ct_lt` / a ct `memcmp` over `[u8]`, all from the sanctioned branch-free
-  bitwise/arithmetic primitives) + examples building up toward a recognizable
-  branch-free primitive (a ChaCha-style ARX quarter-round, or a ct
-  secure-compare).
-- **Proposed first libs** (agree the set before building): `ct` (constant-time,
-  the flagship + thesis demo), `bytes` (`[u8]` / string utilities), `bits`
-  (rotate / popcount / shifts, for crypto), `math` (min / max / abs and
-  friends).
-- **Structure (proposal, decide early):** `std/*.sentinel` library modules +
-  `examples/*.sentinel` programs that `use` them, each wired as a pass-test
-  (build via `--separate` to dogfood, run + assert an exit code, and confirm the
-  constant-time check passes). Decide the directory layout + test harness up
-  front.
+- **Decisions locked with the owner:** top-level `std/` + `examples/`, each
+  subdivided by **functional category** (security, math, …), examples mirroring
+  std. The harness (`crates/sentinel-driver/tests/examples.rs`) assembles a temp
+  project (copies the `std/` tree next to the flattened entry — module discovery
+  roots at the entry's dir), builds each example BOTH `--separate` and merged, and
+  asserts both back ends agree with the expected exit (a free differential). The
+  flagship sequencing targets `[secret T]` arrays; the lib set is `ct` / `math` /
+  `bits` (post-shifts) / `bytes`, built incrementally.
+- **Done (commits on `main`):** `25e95a8` foundation (scalar `ct` lib +
+  `secure_compare` example + harness + corpus READMEs), `d1dace8` `math::num`,
+  **`1a84081` the FLAGSHIP — `[secret T]` arrays (ADR 0047 ACCEPTED-WITH-AMENDMENTS
+  A1–A6) + `ct_memcmp` over `[secret u8]`.** The gap closed: arrays of secret
+  ELEMENTS are now representable (`ArrayElem::Secret(SecretId)`), a front-end-only,
+  byte-identical change (one crate, `sentinel-types`; no codegen / CT-check /
+  selfhost change — the selfhost corpus differential proves `scg` == `snc llvm` on
+  the new `tests/pass/c53_secret_array_memcmp` fixture; both bootstrap fixed points
+  hold).
+- **Next (the remaining arc):** **shift operators `<<` / `>>`** — ADR-first
+  (frozen ABI: new `BinOp` + lexer tokens + codegen in both backends + a
+  CT-classification rule: a shift by a public/constant amount is constant-time, a
+  shift by a *secret* amount is rejected like a secret divisor). They unblock a
+  `std/bits` library (rotate/shift), the textbook constant-time sign-bit masks, and
+  the recognizable branch-free primitive (a **ChaCha-style ARX quarter-round**).
+  Then `std/bytes` (`[u8]` / string utilities). Keep both bootstrap fixed points +
+  the selfhost differentials byte-identical (the full nextest is the gate).
 
 **Other open tracks** (owner's call, none on the critical path):
 

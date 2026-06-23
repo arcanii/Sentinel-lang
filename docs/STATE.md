@@ -56,8 +56,19 @@ the current state of the workspace without re-reading every commit.
   class / generic-instance type-arg dedup, trait/class-method dedup. Full
   detail in the `sentinel_separate_compilation` auto-memory + ADR 0037.
 - **`sentinel-lsp`** — stub (post-1.0, ADR 0025 D10).
+- **Core libraries + examples-as-tests** 🟢 **underway** (the active track). A
+  top-level `std/` (functional categories) + `examples/` corpus of real,
+  idiomatic Sentinel programs that double as feature tests — each built BOTH via
+  `--separate` and the merge path and asserted on (`crates/sentinel-driver/tests/
+  examples.rs`). Shipped: `std/security/ct` (constant-time primitives incl.
+  `ct_memcmp`), `std/math/num`. **It surfaced + closed its first language gap:
+  `[secret T]` arrays — arrays of secret elements** (ADR 0047, `ArrayElem::Secret`)
+  — a front-end-only, byte-identical change enabling a variable-length
+  constant-time `memcmp` over secret bytes. Next gap: shift operators (`<<`/`>>`)
+  for a `bits` library + an ARX quarter-round. See the
+  `sentinel_examples_and_corelibs` auto-memory.
 
-**1524 tests across the workspace**, four-check green (build · `cargo nextest`
+**1530 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
