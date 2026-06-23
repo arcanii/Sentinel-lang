@@ -1,0 +1,64 @@
+// std::algorithms::seq — basic sequence algorithms over `[i64]`.
+//
+// `sort` is an in-place insertion sort: it permutes the array IN PLACE via
+// mutable index assignment (`a[i] = a[j]`, ADR 0050) — the idiomatic shape for
+// an in-place algorithm. `binary_search` looks up a value in a sorted array via
+// a non-consuming `&[i64]` borrow.
+//
+// These operate on PUBLIC data: a sort's comparisons and swaps, and a binary
+// search's branch on the midpoint, are inherently data-dependent, so they are
+// NOT constant-time and must not run over `secret` values (the compiler's
+// constant-time check would reject a secret comparison reaching the loop / `if`).
+// They are the public-data counterpart to the constant-time `security` library.
+
+// In-place insertion sort. Takes the array by value (consumed), sorts it, and
+// returns it. O(n^2) but allocation-free and stable — the canonical small-array
+// sort. Each inner step shifts a larger element one slot right via index
+// assignment, then drops the key into the opened gap.
+pub fn sort(arr: [i64]) -> [i64] {
+    let mut a: [i64] = arr;
+    let n: i64 = len(a);
+    let mut i: i64 = 1;
+    while i < n {
+        let key: i64 = a[i];
+        let mut j: i64 = i - 1;
+        // Shift every element greater than `key` one position to the right. The
+        // `&&` short-circuits, so `a[j]` is read only while `j >= 0` (no
+        // out-of-bounds at the left edge).
+        while j >= 0 && a[j] > key {
+            a[j + 1] = a[j];
+            j = j - 1;
+        }
+        a[j + 1] = key;
+        i = i + 1;
+    }
+    a
+}
+
+// Binary search in a SORTED array (ascending). Returns the index of `target`, or
+// -1 if absent. Takes `a` as a non-consuming `&[i64]` borrow (indexed via
+// `(*a)[i]`, measured via `len(*a)`), so the caller keeps ownership and can search
+// repeatedly. The midpoint is computed as `lo + (hi - lo) / 2` to avoid overflow.
+pub fn binary_search(a: &[i64], target: i64) -> i64 {
+    let mut lo: i64 = 0;
+    let mut hi: i64 = len(*a) - 1;
+    let mut found: i64 = 0 - 1;
+    while lo <= hi {
+        let mid: i64 = lo + (hi - lo) / 2;
+        let v: i64 = (*a)[mid];
+        if v == target {
+            found = mid;
+            lo = hi + 1;     // halt the loop: the target is located
+            0
+        } else {
+            if v < target {
+                lo = mid + 1;
+                0
+            } else {
+                hi = mid - 1;
+                0
+            }
+        };
+    }
+    found
+}

@@ -1,0 +1,47 @@
+// examples/algorithms/sort_search.sentinel — in-place sort + binary search.
+//
+// Exercises `std::algorithms::seq`: an in-place insertion `sort` (which permutes
+// the array via mutable index assignment, ADR 0050) followed by `binary_search`
+// over the sorted result (a non-consuming `&[i64]` borrow). Ordinary PUBLIC data
+// — the public-data counterpart to the constant-time `security` library.
+//
+// Exit 42 = the array sorted correctly (ascending, endpoints + a midpoint
+// checked), a present value was found at the right index, and an absent value
+// returned -1.
+use std::algorithms::seq::sort;
+use std::algorithms::seq::binary_search;
+
+fn main() -> i64 {
+    let data: [i64] = [5, 2, 9, 1, 7, 3, 8, 4, 6, 0];
+    let sorted: [i64] = sort(data);
+    // sorted = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].
+
+    // Verify it is fully ascending: every adjacent pair is in order.
+    let mut ordered: i64 = 1;
+    let mut i: i64 = 1;
+    while i < 10 {
+        if sorted[i - 1] <= sorted[i] {
+            0
+        } else {
+            ordered = 0;
+            0
+        };
+        i = i + 1;
+    }
+
+    // Search: 7 sits at index 7 after sorting; 42 is absent (-1).
+    let found7: i64 = binary_search(&sorted, 7);
+    let absent: i64 = binary_search(&sorted, 42);
+
+    if ordered == 1
+        && sorted[0] == 0
+        && sorted[9] == 9
+        && sorted[4] == 4
+        && found7 == 7
+        && absent == 0 - 1
+    {
+        42
+    } else {
+        0
+    }
+}

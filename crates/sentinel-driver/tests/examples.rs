@@ -198,6 +198,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // constant-time freeze; only the tag is declassified. 42 = reproduced the
     // RFC 8439 §2.5.2 tag.
     ("examples/security/poly1305.sentinel", 42),
+    // In-place insertion sort + binary search over public `[i64]`
+    // (std::algorithms::seq) — the sort permutes via index assignment (ADR 0050),
+    // the search over a `&[i64]` borrow. 42 = sorted ascending + found a present
+    // value + returned -1 for an absent one.
+    ("examples/algorithms/sort_search.sentinel", 42),
 ];
 
 #[test]
@@ -253,6 +258,11 @@ fn chacha20_stream_cipher() {
 #[test]
 fn poly1305_one_time_mac() {
     check_example("examples/security/poly1305.sentinel", "poly1305", 42);
+}
+
+#[test]
+fn algorithms_sort_search() {
+    check_example("examples/algorithms/sort_search.sentinel", "sort_search", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
