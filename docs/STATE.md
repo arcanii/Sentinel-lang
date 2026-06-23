@@ -16,11 +16,12 @@ next phase is **D (self-hosting)**.
 
 Last updated: **▶ (3/N) — INCREMENTAL CACHING WORKS (`299f17c` per-unit `.o` reproducibility + `ced9130`
 the cache): a `--separate` rebuild reuses an unchanged unit's cached `.o`, so editing one module recompiles
-only it + its importers (the rest print `fresh`). THE PAYOFF of separate compilation. EARLIER this session:
-cross-UNIT effect perform/handle (`b43b7d6`+`4c3a28b`) + `linkonce_odr` GENERIC DEDUP over primitives
-(`c5ca3b8`+`8d14db8`) + cross-module STRUCTS (`a75a62c`+`7c6767a`) + ENUMS (`7d5dd46`) via origin-qualified
-mono tags. See the running log below. NEXT (remaining tail) = class/generic-instance type args +
-trait/class-method dedup + a finer per-item cache fingerprint. ▶ TRACK — the per-unit SEPARATE-COMPILATION
+only it + its importers (the rest print `fresh`), now at ITEM granularity (`63d93cc` — a body-only change to
+an imported fn doesn't even recompile importers, they relink). THE PAYOFF of separate compilation. EARLIER
+this session: cross-UNIT effect perform/handle (`b43b7d6`+`4c3a28b`) + `linkonce_odr` GENERIC DEDUP over
+primitives (`c5ca3b8`+`8d14db8`) + cross-module STRUCTS (`a75a62c`+`7c6767a`) + ENUMS (`7d5dd46`) via
+origin-qualified mono tags. See the running log below. NEXT (remaining tail, all LOWER value) =
+class/generic-instance type args + trait/class-method dedup. ▶ TRACK — the per-unit SEPARATE-COMPILATION
 back end (ADR 0037 (a)).
 ADR 0037 FLIPPED toward the per-unit (1/N): D7 module-qualified mangling (`_S` + a
 length-prefixed module segment per path segment + a length-prefixed item; **empty module
@@ -139,11 +140,16 @@ on-disk object skips the WHOLE per-unit pipeline. SOUND because per-unit codegen
 repro.rs foundation: two `--separate` builds emit byte-identical per-unit `.o`s). Driver-only → byte-identity
 untouched. Tests: no-op rebuild → all `fresh` + runs; edit one of two sibling modules → the sibling stays
 `fresh`, the edited module + `main` (imports it) recompile (the `!fresh main` assertion guards invalidation
-soundness), edit takes effect → 42. ⚠ conservative/coarse (whole imported-module source; a graph-wide effect
-change recompiles all) — finer per-item fingerprint deferred; NOT Salsa-backed (the `--separate` path bypasses
-Salsa, a content hash is the analogue). ▶ NEXT (remaining (2/N) tail): class / generic-instance type args +
-dedup cross-module trait/class METHODS; finer caching. 1523 tests, both fixed points byte-identical,
-four-check green.
+soundness), edit takes effect → 42. ✅ **ITEM-GRANULAR fingerprint** (`63d93cc`): the fingerprint hashes the
+imported ITEMS a unit uses (the `ExportedItem`s, `ExportedFn`/`ExportedItem` derive `Hash`), NOT whole module
+sources — so editing one item doesn't recompile importers of an unchanged sibling, AND a non-generic imported
+fn's BODY change keeps importers `fresh` (they extern-call it → relink picks up the new body; an inlined
+struct/enum/generic/trait/effect carries its full decl so a change there does recompile). Tests cover both
+directions (body change → importer fresh; struct field reorder → importer recompiles). NOT Salsa-backed (the
+`--separate` path bypasses Salsa, a content hash is the analogue). ⚠ remaining coarseness: a graph-wide effect
+change still recompiles every unit (the op-id base map is global). ▶ NEXT (remaining (2/N) tail, all LOWER
+value): class / generic-instance type args + dedup cross-module trait/class METHODS. 1524 tests, both fixed
+points byte-identical, four-check green.
 ▼ PRIOR MILESTONE — 🎯 Phase D movement 2 — the SELF-HOST PORT — (8g) THE BOOTSTRAP FIXED
 POINT IS REACHED (ADR 0045 A18): the Sentinel compiler compiles ITSELF — `scg` lowers the
 whole merged compiler to `.ll` byte-identical to the `snc llvm` oracle (83,536 lines), and

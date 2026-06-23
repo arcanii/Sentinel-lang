@@ -2269,11 +2269,12 @@ For pasting into a fresh chat to bootstrap context:
     effect perform/handle `b43b7d6`+`4c3a28b`), and `linkonce_odr` GENERIC DEDUP covers PRIMITIVES (`c5ca3b8`
     +`8d14db8`) + cross-module STRUCTS (`a75a62c`+`7c6767a`) + ENUMS (`7d5dd46`) via origin-qualified mono tags
     (`id__util$geo$Point` / `id__shape$Shape`, `mangle_type_dedup` + a `NamedTypeOrigins { structs, enums }`
-    bundle; same-named cross-module types stay distinct, proven sound). See the ▶ NOW ON block below. NEXT
-    (remaining tail, all LOWER value): extend the type-tag fix to class / generic-instance type args (add their
-    arms to `mangle_type_dedup` + a `NamedTypeOrigins` field — same shape, rarer) + dedup cross-module
-    trait/class METHODS (mirror the generic-fn `generic_origins` model with a method-origin map) + a finer
-    per-item cache fingerprint. The self-host port AND the ADR 0046 partial-move soundness fix are both
+    bundle; same-named cross-module types stay distinct, proven sound). The cache fingerprint is now
+    ITEM-granular (`63d93cc` — a body-only change to an imported fn doesn't recompile importers, they relink).
+    See the ▶ NOW ON block below. NEXT (remaining tail, all LOWER value): extend the type-tag fix to class /
+    generic-instance type args (add their arms to `mangle_type_dedup` + a `NamedTypeOrigins` field — same
+    shape, rarer) + dedup cross-module trait/class METHODS (mirror the generic-fn `generic_origins` model with
+    a method-origin map). The self-host port AND the ADR 0046 partial-move soundness fix are both
     COMPLETE.** **The
     self-host port: Bar B closed, ADR 0045 ACCEPTED-WITH-AMENDMENTS
     (A1–A34): all 123 pass fixtures emit byte-identically `scg` == `snc llvm`, and the bootstrap fixed point
@@ -2459,13 +2460,19 @@ For pasting into a fresh chat to bootstrap context:
     So editing one module recompiles only it + its importers. Tests: no-op rebuild → all `fresh` + runs (42);
     edit one of two siblings → the other stays `fresh`, the edited module + `main` (imports it) recompile (the
     `!fresh main` assertion is the INVALIDATION-SOUNDNESS guard — a fingerprint omitting imports' sources would
-    leave `main` STALE), edit takes effect (40+2→42). ⚠ conservative/coarse (whole imported-module source; a
-    graph-wide effect change recompiles every unit); NOT Salsa-backed (`--separate` bypasses Salsa like merge, a
-    content hash is the analogue); the cache lives beside the objects in the `-o` dir. ▶ **NEXT (remaining tail,
-    all LOWER value):** extend the type-tag fix to class / generic-instance type args (add their arms to
-    `mangle_type_dedup` + a `NamedTypeOrigins` field — same shape, rarer) + dedup cross-module trait/class
-    METHODS (currently importer-qualified; mirror the generic-fn `generic_origins` model with a method-origin
-    map) + a finer per-item cache fingerprint. Keep the merge path + both fixed points green (additive).
+    leave `main` STALE), edit takes effect (40+2→42); NOT Salsa-backed (`--separate` bypasses Salsa like merge,
+    a content hash is the analogue); the cache lives beside the objects in the `-o` dir.
+    ✅ **ITEM-GRANULAR fingerprint** (`63d93cc`): the fingerprint now hashes the imported ITEMS a unit uses
+    (the matching `ExportedItem`s — `ExportedFn`/`ExportedItem` derive `Hash`; the AST decls already did), NOT
+    whole module sources. PRECISION: an `ExportedItem::Fn` is SIGNATURE-only, so editing a non-generic imported
+    fn's BODY no longer recompiles its importers (they extern-call it → relink picks up the new body); an
+    inlined item (struct/enum/generic body/trait/effect) carries its full decl, so a change there does recompile
+    importers. Tests cover both directions (body change → importer `fresh`; struct field reorder → importer
+    recompiles). ⚠ remaining coarseness: a graph-wide effect change still recompiles every unit (the op-id base
+    map is global). ▶ **NEXT (remaining tail, all LOWER value):** extend the type-tag fix to class /
+    generic-instance type args (add their arms to `mangle_type_dedup` + a `NamedTypeOrigins` field — same shape,
+    rarer) + dedup cross-module trait/class METHODS (currently importer-qualified; mirror the generic-fn
+    `generic_origins` model with a method-origin map). Keep the merge path + both fixed points green (additive).
     Settled decisions: ADR 0037 **SETTLED DESIGN POINTS** +
     D5.1/D5.2/D7/D9; the 2/N cross-module-type-tag soundness fix is flagged there. CODE MAP: mangling site
     `crates/sentinel-codegen/src/lib.rs:385` (`add_function(&signature.name,…)`); the `fns` map `:327`;

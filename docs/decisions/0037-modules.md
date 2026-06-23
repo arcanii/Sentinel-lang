@@ -26,11 +26,12 @@ TYPE-TAG fix (point 8) is DONE FOR STRUCTS + ENUMS (`a75a62c`+`7c6767a`+`7d5dd46
 struct/enum tag in a `linkonce_odr` mono key is origin-qualified (`id__util$geo$Point` /
 `id__shape$Shape`), so `id<geo::Point>` / `id<shape::Shape>` dedup across importers AND two same-named
 types from different modules stay distinct (proven sound). ✅ **(3/N) INCREMENTAL CACHING WORKS** (`ced9130`):
-a rebuild reuses an unchanged unit's cached `.o` (a content-fingerprint `.o.fp` sidecar; editing one module
-recompiles only it + its importers, printing `fresh <module>` for the rest) — sound because per-unit codegen
-is reproducible (`299f17c`, the `repro.rs` foundation). ▶ REMAINING: (2/N) extend the type-tag fix to class /
-generic-instance args + dedup cross-module trait/class METHODS; (3/N) a finer per-item fingerprint. The
-multi-file
+a rebuild reuses an unchanged unit's cached `.o` (an ITEM-granular content-fingerprint `.o.fp` sidecar
+[`63d93cc`]; editing one module recompiles only it + its importers, printing `fresh <module>` for the rest;
+a non-generic imported fn's BODY change doesn't even recompile importers — they relink) — sound because
+per-unit codegen is reproducible (`299f17c`, the `repro.rs` foundation). ▶ REMAINING (all LOWER value): (2/N)
+extend the type-tag fix to class / generic-instance args + dedup cross-module trait/class METHODS; (3/N)
+a graph-wide effect change still recompiles every unit (the op-id base map is global). The multi-file
 SURFACE shipped earlier via the interim Path A merge. The surface shipped via
 the lower-risk Path A merge — owner-chosen: whole-graph front-end + merge
 into one `Program` → existing pipeline; true per-unit separate-compilation back
@@ -610,13 +611,16 @@ Realised in (2/N):
 
 11. **Incremental caching → a per-unit content fingerprint + `.o.fp` sidecar** (3/N).
     Each unit's `.o` is stamped with `unit_fingerprint(unit)` = a hash over its own
-    source + every imported module's source (the importer inlines their decls /
-    extern-links their fns) + the graph-wide sorted effect names (the op-id base map) +
-    the module path + the compiler version (`DefaultHasher`, fixed keys → process-stable).
-    On a rebuild a unit with a matching fingerprint + an on-disk object is REUSED (the
-    whole per-unit pipeline is skipped, printing `fresh <module>`), so editing one module
-    recompiles only it + its importers. SOUND because per-unit codegen is reproducible
-    (the `repro.rs` per-unit check). Conservative/coarse (whole imported-module source,
-    and a graph-wide effect change recompiles every unit) — a finer per-item fingerprint
-    is the deferred refinement. NOT Salsa-backed (the `--separate` path bypasses Salsa,
-    like the merge path); a content hash is the analogue.
+    source + the content of each `pub` ITEM it imports (the matching `ExportedItem`, at
+    ITEM granularity — `63d93cc`, not the whole defining module's source) + the graph-wide
+    sorted effect names (the op-id base map) + the module path + the compiler version
+    (`DefaultHasher`, fixed keys → process-stable). On a rebuild a unit with a matching
+    fingerprint + an on-disk object is REUSED (the whole per-unit pipeline is skipped,
+    printing `fresh <module>`), so editing one module recompiles only it + its importers.
+    SOUND because per-unit codegen is reproducible (the `repro.rs` per-unit check). PRECISE:
+    an `ExportedItem::Fn` is SIGNATURE-only, so editing a non-generic imported fn's BODY
+    does NOT recompile its importers (they extern-call it; the relink picks up the new
+    body); an inlined item (struct / enum / generic body / trait / effect) carries its full
+    decl, so a change there does. NOT Salsa-backed (the `--separate` path bypasses Salsa,
+    like the merge path); a content hash is the analogue. ⏳ remaining coarseness: a
+    graph-wide effect change still recompiles every unit (the op-id base map is global).
