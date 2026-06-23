@@ -167,7 +167,14 @@ pub enum CodegenError {
 /// that have been moved away (the destination owns + drops them). See
 /// [`DropPlan`] in sentinel-borrow-check.
 pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenError> {
-    compile_to_object_for_module(hir, &[], &HashMap::new(), &HashMap::new(), &HashMap::new(), output)
+    compile_to_object_for_module(
+        hir,
+        &[],
+        &HashMap::new(),
+        &HashMap::new(),
+        &NamedTypeOrigins::default(),
+        output,
+    )
 }
 
 /// Phase D.6 / ADR 0037 D5/D7: compile ONE module of a separately-compiled
@@ -196,18 +203,18 @@ pub fn compile_to_object(hir: &HirProgram, output: &Path) -> Result<(), CodegenE
 /// → every generic is treated as local and emitted importer-qualified with the
 /// default linkage, byte-identical to before.
 ///
-/// ADR 0037 (2/N) point 8: `struct_origins` maps an IMPORTED struct's
-/// `StructId` → its defining module path. It module-qualifies a cross-module
-/// struct's tag in a `linkonce_odr` mono key (`id__util$geo$Point`), so a mono
-/// instance over a cross-module struct dedups SOUNDLY — two same-named structs
-/// from different modules no longer alias. EMPTY map → a struct arg is treated
+/// ADR 0037 (2/N) point 8: `named_origins` carries the IMPORTED struct/enum →
+/// defining-module-path maps. They module-qualify a cross-module named type's
+/// tag in a `linkonce_odr` mono key (`id__util$geo$Point`), so a mono instance
+/// over a cross-module struct/enum dedups SOUNDLY — two same-named types from
+/// different modules no longer alias. EMPTY maps → a named-type arg is treated
 /// as not-dedup-safe (kept importer-qualified), byte-identical to before.
 pub fn compile_to_object_for_module(
     hir: &HirProgram,
     module_path: &[String],
     op_id_base: &HashMap<String, u32>,
     generic_origins: &HashMap<FnId, Vec<String>>,
-    struct_origins: &HashMap<StructId, Vec<String>>,
+    named_origins: &NamedTypeOrigins,
     output: &Path,
 ) -> Result<(), CodegenError> {
     let program = hir.program();
@@ -823,15 +830,16 @@ pub fn compile_to_object_for_module(
         //    holds its origin) over COLLISION-SAFE args is emitted under the
         //    ORIGIN-qualified symbol with `linkonce_odr` linkage, so N importers
         //    share ONE definition. The mono name renders a cross-module struct
-        //    arg ORIGIN-qualified (`id__util$geo$Point`, via `struct_origins`)
-        //    so two same-named cross-module structs don't alias (ADR point 8).
+        //    or enum arg ORIGIN-qualified (`id__util$geo$Point`, via
+        //    `named_origins`) so two same-named cross-module types don't alias
+        //    (ADR point 8).
         let dedup = generic_origins
             .get(fn_id)
-            .filter(|_| mono_args_dedup_safe(args, struct_origins));
+            .filter(|_| mono_args_dedup_safe(args, named_origins));
         let mangled = match dedup {
             Some(origin) => mangle_qualified(
                 origin,
-                &mangle_mono_name_dedup(&def.name, args, program, struct_origins),
+                &mangle_mono_name_dedup(&def.name, args, program, named_origins),
             ),
             None => mangle_qualified(module_path, &mangle_mono_name(&def.name, args, program)),
         };
@@ -2178,65 +2186,85 @@ fn mangle_qualified(module_path: &[String], item: &str) -> String {
     s
 }
 
+/// ADR 0037 (2/N) point 8: per-unit origin maps for cross-module NAMED types,
+/// used to module-qualify their tags in `linkonce_odr` mono keys so two
+/// distinct same-named types don't alias to one symbol. Empty maps → every
+/// named type is treated as "local" → the importer-qualified per-unit
+/// emission, byte-identical to before the fix.
+#[derive(Default)]
+pub struct NamedTypeOrigins {
+    /// imported struct `StructId` → its defining module path.
+    pub structs: HashMap<StructId, Vec<String>>,
+    /// imported enum `EnumId` → its defining module path.
+    pub enums: HashMap<EnumId, Vec<String>>,
+}
+
 /// ADR 0037 (2/N) `linkonce_odr`: may a mono instance over `args` be deduped
 /// across units under an ORIGIN-qualified shared symbol? Yes iff every arg's
 /// tag is GLOBALLY UNAMBIGUOUS, so two distinct instances can't alias to one
 /// symbol and be wrongly merged:
 ///   - a PRIMITIVE (`i64` / `i32` / `bool` / `u8`) — no tag ambiguity;
-///   - a CROSS-MODULE struct whose origin is known (`struct_origins`) — its
-///     tag is module-qualified by [`mangle_type_dedup`] (point 8 fix);
+///   - a CROSS-MODULE struct or enum whose origin is known — its tag is
+///     module-qualified by [`mangle_type_dedup`] (point 8 fix);
 ///   - an array / nullable / vec of a safe element (recursively).
 ///
-/// A LOCAL struct (origin unknown — importer-specific) or any other named type
-/// (enum / class / generic-instance) is NOT safe and keeps the per-importer
-/// emission. EMPTY `struct_origins` → every struct is "local" → only primitives
+/// A LOCAL struct/enum (origin unknown — importer-specific) or any other named
+/// type (class / generic-instance) is NOT safe and keeps the per-importer
+/// emission. Empty origin maps → every named type is "local" → only primitives
 /// dedup, matching the pre-point-8 behaviour exactly.
-fn mono_args_dedup_safe(args: &[Type], struct_origins: &HashMap<StructId, Vec<String>>) -> bool {
-    fn safe(t: Type, struct_origins: &HashMap<StructId, Vec<String>>) -> bool {
+fn mono_args_dedup_safe(args: &[Type], origins: &NamedTypeOrigins) -> bool {
+    fn safe(t: Type, origins: &NamedTypeOrigins) -> bool {
         match t {
             Type::I64 | Type::I32 | Type::Bool | Type::U8 => true,
-            Type::Struct(id) => struct_origins.contains_key(&id),
-            Type::Array(e) => safe(e.to_type(), struct_origins),
-            Type::Vec(e) => safe(e.to_type(), struct_origins),
-            Type::Nullable(inner) => safe(inner.to_type(), struct_origins),
+            Type::Struct(id) => origins.structs.contains_key(&id),
+            Type::Enum(id) => origins.enums.contains_key(&id),
+            Type::Array(e) => safe(e.to_type(), origins),
+            Type::Vec(e) => safe(e.to_type(), origins),
+            Type::Nullable(inner) => safe(inner.to_type(), origins),
             _ => false,
         }
     }
-    args.iter().all(|t| safe(*t, struct_origins))
+    args.iter().all(|t| safe(*t, origins))
 }
 
 /// ADR 0037 (2/N) point 8: like [`mangle_mono_name`], but renders a
-/// CROSS-MODULE struct arg ORIGIN-qualified (via [`mangle_type_dedup`]) so a
-/// `linkonce_odr` mono key is globally unambiguous. Only ever called for
+/// CROSS-MODULE named-type arg ORIGIN-qualified (via [`mangle_type_dedup`]) so
+/// a `linkonce_odr` mono key is globally unambiguous. Only ever called for
 /// dedup-safe args ([`mono_args_dedup_safe`]).
 fn mangle_mono_name_dedup(
     base_name: &str,
     type_args: &[Type],
     program: &TypedProgram,
-    struct_origins: &HashMap<StructId, Vec<String>>,
+    origins: &NamedTypeOrigins,
 ) -> String {
     let mut s = String::with_capacity(base_name.len() + 16);
     s.push_str(base_name);
     for t in type_args {
         s.push_str("__");
-        s.push_str(&mangle_type_dedup(*t, program, struct_origins));
+        s.push_str(&mangle_type_dedup(*t, program, origins));
     }
     s
 }
 
 /// ADR 0037 (2/N) point 8: a [`mangle_type`] variant for `linkonce_odr` mono
-/// keys that module-qualifies a CROSS-MODULE struct's tag (`util$geo$Point`,
-/// from `struct_origins`) so two same-named structs from different modules
-/// don't alias. Only the struct + element-wrapping arms differ; everything else
-/// DELEGATES to [`mangle_type`] (so the two stay in lock-step). The delegation
-/// is reached only for primitives in practice — `mono_args_dedup_safe` gates
-/// the call to primitives / origin-known structs / arrays-nullables-vecs of
-/// those, so no ambiguous tag ever flows here.
-fn mangle_type_dedup(
-    ty: Type,
-    program: &TypedProgram,
-    struct_origins: &HashMap<StructId, Vec<String>>,
-) -> String {
+/// keys that module-qualifies a CROSS-MODULE struct/enum tag (`util$geo$Point`,
+/// from `origins`) so two same-named types from different modules don't alias.
+/// Only the named-type + element-wrapping arms differ; everything else DELEGATES
+/// to [`mangle_type`] (so the two stay in lock-step). The delegation is reached
+/// only for primitives in practice — `mono_args_dedup_safe` gates the call to
+/// primitives / origin-known named types / arrays-nullables-vecs of those, so no
+/// ambiguous tag ever flows here.
+fn mangle_type_dedup(ty: Type, program: &TypedProgram, origins: &NamedTypeOrigins) -> String {
+    // `$`-join the origin path onto the bare name: a valid-in-identifier
+    // separator that can't appear in a bare type name or path segment, so
+    // distinct origins never collide. Empty origin → the bare name.
+    let qualify = |origin: &[String], name: String| -> String {
+        if origin.is_empty() {
+            name
+        } else {
+            format!("{}${name}", origin.join("$"))
+        }
+    };
     match ty {
         Type::Struct(id) => {
             let name = program
@@ -2244,19 +2272,26 @@ fn mangle_type_dedup(
                 .get(id.0 as usize)
                 .map(|s| s.name.clone())
                 .unwrap_or_else(|| format!("struct{}", id.0));
-            match struct_origins.get(&id) {
-                // Cross-module: prefix the origin path (`$`-joined, a
-                // valid-in-identifier separator that can't appear in a bare
-                // struct name or origin segment) so distinct origins never
-                // collide.
-                Some(origin) if !origin.is_empty() => format!("{}${name}", origin.join("$")),
-                _ => name,
+            match origins.structs.get(&id) {
+                Some(origin) => qualify(origin, name),
+                None => name,
             }
         }
-        Type::Array(elem) => format!("arr_{}", mangle_type_dedup(elem.to_type(), program, struct_origins)),
-        Type::Vec(elem) => format!("vec_{}", mangle_type_dedup(elem.to_type(), program, struct_origins)),
+        Type::Enum(id) => {
+            let name = program
+                .enums
+                .get(id.0 as usize)
+                .map(|e| e.name.clone())
+                .unwrap_or_else(|| format!("enum{}", id.0));
+            match origins.enums.get(&id) {
+                Some(origin) => qualify(origin, name),
+                None => name,
+            }
+        }
+        Type::Array(elem) => format!("arr_{}", mangle_type_dedup(elem.to_type(), program, origins)),
+        Type::Vec(elem) => format!("vec_{}", mangle_type_dedup(elem.to_type(), program, origins)),
         Type::Nullable(inner) => {
-            format!("opt_{}", mangle_type_dedup(inner.to_type(), program, struct_origins))
+            format!("opt_{}", mangle_type_dedup(inner.to_type(), program, origins))
         }
         _ => mangle_type(ty, program),
     }
@@ -8069,42 +8104,56 @@ mod tests {
 
     // ===== D.6 / ADR 0037 (2/N) point 8: linkonce_odr dedup type tags =====
     //
-    // The `linkonce_odr` mono key for a generic over a CROSS-MODULE struct must
-    // module-qualify that struct's tag so two same-named structs from different
-    // modules don't alias to one symbol. Pins `mangle_type_dedup` /
+    // The `linkonce_odr` mono key for a generic over a CROSS-MODULE struct or
+    // enum must module-qualify that type's tag so two same-named types from
+    // different modules don't alias to one symbol. Pins `mangle_type_dedup` /
     // `mangle_mono_name_dedup` + the `mono_args_dedup_safe` gate.
     #[test]
-    fn abi_v1_mangling_dedup_qualifies_cross_module_struct_tag() {
-        let prog = parse("struct Point { x: i64, y: i64 } fn main() -> i64 { 0 }").expect("parse");
+    fn abi_v1_mangling_dedup_qualifies_cross_module_named_type_tags() {
+        let prog = parse(
+            "struct Point { x: i64, y: i64 } enum Shape { Circle(i64), Square(i64) } \
+             fn main() -> i64 { 0 }",
+        )
+        .expect("parse");
         let resolved = resolve(&prog).expect("resolve");
         let typed = check(&resolved).expect("check");
 
-        let cross: HashMap<StructId, Vec<String>> =
-            HashMap::from([(StructId(0), vec!["util".to_string(), "geo".to_string()])]);
-        let empty: HashMap<StructId, Vec<String>> = HashMap::new();
+        let cross = NamedTypeOrigins {
+            structs: HashMap::from([(StructId(0), vec!["util".to_string(), "geo".to_string()])]),
+            enums: HashMap::from([(EnumId(0), vec!["shape".to_string()])]),
+        };
+        let empty = NamedTypeOrigins::default();
 
-        // Cross-module struct → origin-qualified tag (`$`-joined path + name);
-        // a known origin distinguishes `util::geo::Point` from any other Point.
+        // Cross-module struct / enum → origin-qualified tag (`$`-joined path +
+        // name); a known origin distinguishes it from any same-named type.
         assert_eq!(mangle_type_dedup(Type::Struct(StructId(0)), &typed, &cross), "util$geo$Point");
-        // No origin (local struct) → the bare name, == `mangle_type`.
+        assert_eq!(mangle_type_dedup(Type::Enum(EnumId(0)), &typed, &cross), "shape$Shape");
+        // No origin (local type) → the bare name, == `mangle_type`.
         assert_eq!(mangle_type_dedup(Type::Struct(StructId(0)), &typed, &empty), "Point");
-        // A primitive delegates to `mangle_type` (lock-step), origin map irrelevant.
+        assert_eq!(mangle_type_dedup(Type::Enum(EnumId(0)), &typed, &empty), "Shape");
+        // A primitive delegates to `mangle_type` (lock-step), origin maps irrelevant.
         assert_eq!(mangle_type_dedup(Type::I64, &typed, &cross), "i64");
-        // Container wrapping a cross-module struct recurses.
+        // Container wrapping a cross-module type recurses.
         assert_eq!(
             mangle_type_dedup(Type::Array(ArrayElem::Struct(StructId(0))), &typed, &cross),
             "arr_util$geo$Point"
         );
-        // The mono key composes the qualified tag: `id__util$geo$Point`.
+        // The mono key composes the qualified tag.
         assert_eq!(
             mangle_mono_name_dedup("id", &[Type::Struct(StructId(0))], &typed, &cross),
             "id__util$geo$Point"
         );
+        assert_eq!(
+            mangle_mono_name_dedup("id", &[Type::Enum(EnumId(0))], &typed, &cross),
+            "id__shape$Shape"
+        );
 
-        // The dedup gate: a cross-module struct (origin known) IS safe; a local
-        // struct (origin unknown) is NOT; primitives always are.
+        // The dedup gate: a cross-module struct/enum (origin known) IS safe; a
+        // local one (origin unknown) is NOT; primitives always are.
         assert!(mono_args_dedup_safe(&[Type::Struct(StructId(0))], &cross));
+        assert!(mono_args_dedup_safe(&[Type::Enum(EnumId(0))], &cross));
         assert!(!mono_args_dedup_safe(&[Type::Struct(StructId(0))], &empty));
+        assert!(!mono_args_dedup_safe(&[Type::Enum(EnumId(0))], &empty));
         assert!(mono_args_dedup_safe(&[Type::I64], &empty));
         assert!(mono_args_dedup_safe(&[Type::Array(ArrayElem::Struct(StructId(0)))], &cross));
     }

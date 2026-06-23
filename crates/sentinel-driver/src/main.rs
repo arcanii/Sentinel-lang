@@ -1151,6 +1151,9 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         // linkonce_odr mono key and dedup `id<geo::Point>` soundly.
         let mut imported_struct_origins: Vec<(String, Vec<String>)> = Vec::new();
         let mut imported_enums: Vec<sentinel_ast::EnumDecl> = Vec::new();
+        // ADR 0037 (2/N) point 8: (imported enum name → origin), mirror of the
+        // struct map, so codegen origin-qualifies an enum tag in a mono key.
+        let mut imported_enum_origins: Vec<(String, Vec<String>)> = Vec::new();
         let mut imported_generic_fns: Vec<sentinel_ast::FnDef> = Vec::new();
         // ADR 0037 (2/N) `linkonce_odr`: (imported generic fn name → its origin
         // module path), so codegen can emit collision-safe instances under the
@@ -1181,7 +1184,10 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
                     imported_struct_origins.push((decl.name.clone(), origin.clone()));
                     imported_structs.push(decl.clone());
                 }
-                Some(ExportedItem::Enum(decl)) => imported_enums.push(decl.clone()),
+                Some(ExportedItem::Enum(decl)) => {
+                    imported_enum_origins.push((decl.name.clone(), origin.clone()));
+                    imported_enums.push(decl.clone());
+                }
                 Some(ExportedItem::GenericFn(fndef)) => {
                     imported_generic_origins.push((fndef.name.clone(), origin.clone()));
                     imported_generic_fns.push(fndef.as_ref().clone())
@@ -1251,6 +1257,21 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
                     .map(|s| (s.id, origin.clone()))
             })
             .collect();
+        // …and the same for imported enums (name → resolved EnumId → origin).
+        let enum_origins: HashMap<sentinel_resolve::EnumId, Vec<String>> = imported_enum_origins
+            .iter()
+            .filter_map(|(name, origin)| {
+                resolved
+                    .enums
+                    .iter()
+                    .find(|e| &e.name == name)
+                    .map(|e| (e.id, origin.clone()))
+            })
+            .collect();
+        let named_origins = sentinel_codegen::NamedTypeOrigins {
+            structs: struct_origins,
+            enums: enum_origins,
+        };
         let has_main = resolved.fn_signatures.iter().any(|s| s.is_main);
         if is_entry && !has_main {
             eprintln!("snc: the entry module `{}` has no `main`", m.path.join("::"));
@@ -1301,7 +1322,7 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
             &m.path,
             &op_id_base,
             &generic_origins,
-            &struct_origins,
+            &named_origins,
             &obj_path,
         ) {
             eprintln!("snc: codegen failed for module `{}`: {err}", m.path.join("::"));

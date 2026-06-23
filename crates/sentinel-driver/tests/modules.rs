@@ -365,6 +365,46 @@ fn separate_same_named_cross_module_structs_dont_alias_in_dedup() {
 }
 
 #[test]
+fn separate_cross_module_generic_over_enum_is_linkonce_deduped() {
+    // ADR 0037 (2/N) point 8 (ENUMS): two units both instantiate
+    // `util::id<shape::Shape>` — a generic over a CROSS-MODULE enum. The mono
+    // key origin-qualifies the enum tag (`id__shape$Shape`), so the instance
+    // dedups under ONE origin-qualified `linkonce_odr` symbol (the same
+    // mechanism as structs). `nm`=1 is load-bearing: without the fix an enum
+    // arg isn't dedup-safe → two importer-qualified copies, no `id__shape$Shape`.
+    // 21 + 21 -> exit 42.
+    let dir = temp_project("separate_linkonce_enum");
+    write(dir.join("util/math.sentinel"), "pub fn id<T>(x: T) -> T { x }\n");
+    write(dir.join("shape.sentinel"), "pub enum Shape { Circle(i64), Square(i64) }\n");
+    write(
+        dir.join("helper.sentinel"),
+        "use util::math::id;\nuse shape::Shape;\n\
+         pub fn h() -> i64 {\n\
+         \x20   let s: Shape = Shape::Circle(20);\n\
+         \x20   let r: Shape = id(s);\n\
+         \x20   match r { Shape::Circle(n) => n + 1, Shape::Square(n) => n }\n\
+         }\n",
+    );
+    write(
+        dir.join("main.sentinel"),
+        "use util::math::id;\nuse shape::Shape;\nuse helper::h;\n\
+         fn main() -> i64 {\n\
+         \x20   let s: Shape = Shape::Square(21);\n\
+         \x20   let r: Shape = id(s);\n\
+         \x20   let v: i64 = match r { Shape::Circle(n) => n, Shape::Square(n) => n };\n\
+         \x20   v + h()\n\
+         }\n",
+    );
+    let entry = dir.join("main.sentinel");
+    assert_eq!(build_and_run_separate(entry.clone()), 42);
+    let exe = entry.with_extension("");
+    let nm = Command::new("nm").arg(&exe).output().expect("run nm");
+    let syms = String::from_utf8_lossy(&nm.stdout);
+    let count = syms.lines().filter(|l| l.contains("id__shape$Shape")).count();
+    assert_eq!(count, 1, "expected one origin-qualified id__shape$Shape symbol; nm:\n{syms}");
+}
+
+#[test]
 fn separate_cross_module_trait_compiles_and_runs() {
     // Cross-module `pub trait`: defined in `counter`, IMPORTED into the entry
     // which impls it for its OWN class + dispatches. The trait decl is
