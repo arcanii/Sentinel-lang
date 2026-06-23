@@ -164,6 +164,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // secret byte buffers (std::security::ct::ct_memcmp, ADR 0047). 42 =
     // equal-compared-equal AND tampered-compared-unequal.
     ("examples/security/ct_memcmp.sentinel", 42),
+    // Bit rotation via std::bits::bits (ADR 0048 shift operators). 42 = rotl/
+    // rotr and the masked rotate-by-0 / rotate-by-width identities all hold.
+    ("examples/bits/rotate.sentinel", 42),
+    // One SipHash ARX round over four SECRET 64-bit words (the recognizable
+    // branch-free primitive) — add/rotate-by-public-constant/xor, constant-time
+    // via std::security::ct::ct_rotl64. 42 = reproduced the reference output.
+    ("examples/security/siphash_round.sentinel", 42),
 ];
 
 #[test]
@@ -179,6 +186,16 @@ fn math_clamp() {
 #[test]
 fn ct_memcmp_secret_bytes() {
     check_example("examples/security/ct_memcmp.sentinel", "ct_memcmp", 42);
+}
+
+#[test]
+fn bits_rotate() {
+    check_example("examples/bits/rotate.sentinel", "rotate", 42);
+}
+
+#[test]
+fn siphash_round_constant_time() {
+    check_example("examples/security/siphash_round.sentinel", "siphash_round", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

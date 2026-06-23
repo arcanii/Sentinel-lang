@@ -1,0 +1,54 @@
+// examples/security/siphash_round.sentinel — the flagship branch-free primitive.
+//
+// One round of SipHash's ARX permutation (add / rotate / xor) over four SECRET
+// 64-bit words. SipHash is a real keyed pseudo-random function / MAC, and its
+// round is the recognizable branch-free ARX shape (the same family as the
+// ChaCha quarter-round). Every operation here is data-independent: 64-bit adds
+// (wrapping mod 2^64), XORs, and rotations by PUBLIC constants — so the whole
+// round runs in constant time over secret state. The rotations go through
+// `std::security::ct::ct_rotl64` (a constant-time rotate of a secret word by a
+// public amount, built on the `<<`/`>>` operators from ADR 0048).
+//
+// Because the words are `secret` and nothing branches/indexes/divides on them,
+// the compiler's constant-time check verifies the round on every build — so this
+// program compiling at all is the guarantee. Exit 42 means the round reproduced
+// the reference output for the inputs (v0,v1,v2,v3) = (1,2,3,4).
+use std::security::ct::ct_rotl64;
+
+fn main() -> i64 {
+    let mut v0: secret i64 = 1;
+    let mut v1: secret i64 = 2;
+    let mut v2: secret i64 = 3;
+    let mut v3: secret i64 = 4;
+
+    // SipHash SipRound (RFC-style): add, rotate-by-public-constant, xor.
+    v0 = v0 + v1;
+    v1 = ct_rotl64(v1, 13);
+    v1 = v1 ^ v0;
+    v0 = ct_rotl64(v0, 32);
+
+    v2 = v2 + v3;
+    v3 = ct_rotl64(v3, 16);
+    v3 = v3 ^ v2;
+
+    v0 = v0 + v3;
+    v3 = ct_rotl64(v3, 21);
+    v3 = v3 ^ v0;
+
+    v2 = v2 + v1;
+    v1 = ct_rotl64(v1, 17);
+    v1 = v1 ^ v2;
+    v2 = ct_rotl64(v2, 32);
+
+    // Declassify the mixed state and check it against the reference output.
+    let r0: i64 = declassify(v0);
+    let r1: i64 = declassify(v1);
+    let r2: i64 = declassify(v2);
+    let r3: i64 = declassify(v3);
+
+    if r0 == 12885164039 && r1 == 2147893258 && r2 == 70411693850624 && r3 == 562655657991 {
+        42
+    } else {
+        0
+    }
+}

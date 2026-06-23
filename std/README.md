@@ -29,9 +29,9 @@ the example entry. See the harness doc-comment for the mechanics.
 
 | Category    | Module(s)            | Status                                   |
 | ----------- | -------------------- | ---------------------------------------- |
-| `security`  | `ct`                 | ✅ ct scalar primitives + `ct_memcmp` over `[secret u8]` |
+| `security`  | `ct`                 | ✅ ct scalars + `ct_memcmp` over `[secret u8]` + `ct_rotl64` |
 | `math`      | `num`                | ✅ min/max/abs/clamp                       |
-| `bits`      | `bits`               | ◻ rotate/shift — **blocked on shift ops**|
+| `bits`      | `bits`               | ✅ `rotl64`/`rotr64` (+ `rotl32`/`rotr32`, awaiting i32 construction) |
 | `bytes`     | `bytes`              | ◻ `[u8]`/string utils                    |
 
 The list grows as examples force new building blocks.
@@ -43,11 +43,19 @@ the most valuable output of this corpus.
 
 - **Fixed — `[secret T]` arrays** (ADR 0047). `ArrayElem` gained a secret form, so
   a variable-length constant-time `memcmp` over a buffer of *secret* bytes
-  (`security/ct::ct_memcmp` over `[secret u8]`) is now expressible — the flagship.
-  Surfaced + closed by this corpus (a front-end-only, byte-identical change).
-- **Open — no shift operators** (`<<` / `>>`). Blocks a `bits` rotate library, the
-  textbook constant-time primitives that broadcast a sign bit (`x >> (W-1)`), and
-  an ARX/ChaCha quarter-round. The next gap to close.
+  (`security/ct::ct_memcmp` over `[secret u8]`) is now expressible. Surfaced +
+  closed by this corpus (a front-end-only, byte-identical change).
+- **Fixed — shift operators `<<` / `>>`** (ADR 0048). Logical right shift, with a
+  constant-time rule (a shift by a *secret* amount is rejected like a secret
+  divisor; a secret value shifted by a public amount is constant-time). Unblocks
+  the `bits` rotate library and the SipHash-style ARX round
+  (`examples/security/siphash_round`). (Phase 1 lands shifts in `snc`; the
+  self-hosted mirror is Phase 2.)
+- **Open — i32 values are unconstructible.** An integer literal is `i64` and does
+  not coerce to `i32`, and there is no `i64_to_i32`, so a 32-bit primitive (e.g. a
+  ChaCha quarter-round, which is inherently 32-bit) can't be built yet — hence the
+  ARX demo uses 64-bit SipHash. The 32-bit rotates in `bits` are correct and
+  compile-checked but not yet runnable. The next gap.
 
 When a gap blocks a genuinely idiomatic library, that block is the signal to add
 the feature (ADR-first if it touches the frozen `abi-v1` contract).

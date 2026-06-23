@@ -81,3 +81,15 @@ pub fn ct_memcmp(a: [secret u8], b: [secret u8]) -> secret u8 {
     }
     acc
 }
+
+// Constant-time rotate-left of a 64-bit SECRET word by a PUBLIC amount (ADR
+// 0048). A rotation by a public/constant amount has data-independent latency —
+// constant-time — so the `secret` value's timing does not leak. (A SECRET
+// amount would be a variable-time shift; the compiler rejects that.) This is the
+// rotate an ARX construction needs on its secret state. Masked like
+// `std::bits::bits::rotl64` so a rotate by 0/64 is the identity.
+pub fn ct_rotl64(x: secret i64, n: i64) -> secret i64 {
+    let w: i64 = 64;
+    let mask: i64 = 63;
+    (x << (n & mask)) | (x >> ((w - n) & mask))
+}

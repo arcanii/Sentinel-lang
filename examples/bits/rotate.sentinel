@@ -1,0 +1,18 @@
+// examples/bits/rotate.sentinel — bit rotation via std::bits::bits (ADR 0048
+// shift operators). Checks rotate-left / rotate-right and the masked-identity
+// edge cases (rotate by 0 and by the full width). Exit 42.
+use std::bits::bits::rotl64;
+use std::bits::bits::rotr64;
+
+fn main() -> i64 {
+    let a: i64 = rotl64(1, 4);            // 1 <<rot 4 = 16
+    let b: i64 = rotr64(16, 4);           // inverse -> 1
+    let c: i64 = rotl64(123456789, 0);    // rotate by 0 = identity
+    let d: i64 = rotl64(123456789, 64);   // rotate by full width = identity
+
+    if a == 16 && b == 1 && c == 123456789 && d == 123456789 {
+        42
+    } else {
+        0
+    }
+}

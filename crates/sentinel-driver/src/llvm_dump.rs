@@ -1508,6 +1508,13 @@ impl Emit<'_> {
                     BinOp::BitAnd => "and",
                     BinOp::BitOr => "or",
                     BinOp::BitXor => "xor",
+                    // ADR 0048: `>>` is LOGICAL (zero-fill) for all int types.
+                    // (Phase 2 / full oracle: a mismatched-width shift amount
+                    // would need a trunc/zext here to match the inkwell backend
+                    // byte-for-byte; no shift fixture is in the differential
+                    // corpus yet, so the corpus emission is unaffected.)
+                    BinOp::Shl => "shl",
+                    BinOp::Shr => "lshr",
                 };
                 let v = self.fresh();
                 writeln!(self.body, "  %v{v} = {opcode} {llty} {l}, {r}").unwrap();

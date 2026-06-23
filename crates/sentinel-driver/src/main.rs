@@ -456,6 +456,7 @@ fn run_ctverify(path: &str) -> ExitCode {
             sentinel_mir::SinkKind::MemoryIndex => "MemoryIndex",
             sentinel_mir::SinkKind::MemoryAddress => "MemoryAddress",
             sentinel_mir::SinkKind::Division => "Division",
+            sentinel_mir::SinkKind::ShiftAmount => "ShiftAmount",
         });
         out.push_str(")\n");
     }

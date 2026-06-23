@@ -3032,6 +3032,14 @@ impl<'a> Parser<'a> {
         self.peek().map(|t| t.kind)
     }
 
+    /// The token AFTER the current one (2-token lookahead). ADR 0048: the shift
+    /// operators `<<` / `>>` are reconstructed from two span-adjacent `<` / `>`
+    /// tokens, so the shift parser needs to inspect the next token's kind AND
+    /// span without consuming.
+    fn peek2(&self) -> Option<&Spanned<TokenKind>> {
+        self.tokens.get(self.pos + 1)
+    }
+
     fn advance(&mut self) -> Option<&Spanned<TokenKind>> {
         let t = self.tokens.get(self.pos)?;
         self.pos += 1;
@@ -3651,13 +3659,50 @@ impl<'a> Parser<'a> {
         // Infix `&` is bitwise-and. A *prefix* `&` (borrow) has already
         // been consumed by `parse_unary` while building each operand, so
         // an `&` seen here is unambiguously infix.
-        let mut lhs = self.parse_add()?;
+        let mut lhs = self.parse_shift()?;
         while self.peek_kind() == Some(TokenKind::Amp) {
+            self.advance();
+            let rhs = self.parse_shift()?;
+            let span = lhs.span.start..rhs.span.end;
+            lhs = Spanned {
+                kind: ExprKind::Binary(BinOp::BitAnd, Box::new(lhs), Box::new(rhs)),
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    /// ADR 0048: shift operators `<<` / `>>`, between bitwise-and and additive
+    /// (tighter than `& ^ |` + comparison, looser than `+ -`), left-associative.
+    /// They are NOT lexer tokens: `>` lexes as `Gt` and nested generics close
+    /// one `Gt` at a time (`Vec<Box<i64>>`), so a `>>` token would mis-lex that.
+    /// Instead a shift is two SPAN-ADJACENT `<`/`>` tokens (no whitespace
+    /// between) — unambiguous in expression position, where explicit generic
+    /// args never appear.
+    fn parse_shift(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_add()?;
+        loop {
+            let op = match (self.peek(), self.peek2()) {
+                (Some(a), Some(b)) if a.kind == TokenKind::Lt
+                    && b.kind == TokenKind::Lt
+                    && a.span.end == b.span.start =>
+                {
+                    BinOp::Shl
+                }
+                (Some(a), Some(b)) if a.kind == TokenKind::Gt
+                    && b.kind == TokenKind::Gt
+                    && a.span.end == b.span.start =>
+                {
+                    BinOp::Shr
+                }
+                _ => break,
+            };
+            self.advance();
             self.advance();
             let rhs = self.parse_add()?;
             let span = lhs.span.start..rhs.span.end;
             lhs = Spanned {
-                kind: ExprKind::Binary(BinOp::BitAnd, Box::new(lhs), Box::new(rhs)),
+                kind: ExprKind::Binary(op, Box::new(lhs), Box::new(rhs)),
                 span,
             };
         }
@@ -5005,6 +5050,24 @@ mod tests {
     #[test]
     fn parse_bitor_is_left_associative() {
         assert_eq!(pretty("1 | 2 | 3"), "(| (| 1 2) 3)");
+    }
+
+    #[test]
+    fn parse_shift_basic() {
+        // ADR 0048: `<<` / `>>` are reconstructed from two span-adjacent
+        // `<` / `>` tokens (no dedicated lexer token), left-associative.
+        assert_eq!(pretty("a << b"), "(<< a b)");
+        assert_eq!(pretty("a >> b"), "(>> a b)");
+        assert_eq!(pretty("1 << 2 << 3"), "(<< (<< 1 2) 3)");
+    }
+
+    #[test]
+    fn parse_shift_precedence() {
+        // Shift is looser than additive, tighter than the bitwise ops — so a
+        // rotate `(x << n) | (x >> m)` parses without parentheses.
+        assert_eq!(pretty("1 + 2 << 1"), "(<< (+ 1 2) 1)");
+        assert_eq!(pretty("1 << 2 & 3"), "(& (<< 1 2) 3)");
+        assert_eq!(pretty("x << 4 | x >> 60"), "(| (<< x 4) (>> x 60))");
     }
 
     #[test]

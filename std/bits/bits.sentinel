@@ -1,0 +1,46 @@
+// std::bits::bits — bit rotation built on the shift operators (ADR 0048).
+//
+// A rotate is `(x << k) | (x >> (W - k))` with the shift amounts masked to
+// `[0, W-1]` so a rotate by 0 (or W) is the identity rather than an
+// out-of-range shift (LLVM treats a shift amount >= the bit width as poison).
+// `>>` is LOGICAL (zero-fill), which is exactly what a rotate needs — an
+// arithmetic shift would smear the sign bit into the rotated-in bits.
+//
+// These operate on PUBLIC integers. The constant-time analogue over a `secret`
+// word (rotation by a public amount, which is constant-time) lives in
+// `std::security::ct` as `ct_rotl64`.
+//
+// NOTE (language gap, tracked): the 32-bit rotates below compile and are
+// correct, but i32 VALUES cannot yet be constructed (an integer literal is i64
+// and does not coerce to i32, and there is no `i64_to_i32`), so they cannot yet
+// be exercised at runtime — a future gap to close. The 64-bit rotates are fully
+// usable today.
+
+// Rotate a 64-bit value left by `n` bits.
+pub fn rotl64(x: i64, n: i64) -> i64 {
+    let w: i64 = 64;
+    let mask: i64 = 63;
+    (x << (n & mask)) | (x >> ((w - n) & mask))
+}
+
+// Rotate a 64-bit value right by `n` bits.
+pub fn rotr64(x: i64, n: i64) -> i64 {
+    let w: i64 = 64;
+    let mask: i64 = 63;
+    (x >> (n & mask)) | (x << ((w - n) & mask))
+}
+
+// Rotate a 32-bit value left by `n` bits. (Correct + compile-checked; not yet
+// runnable — see the i32-construction note above.)
+pub fn rotl32(x: i32, n: i64) -> i32 {
+    let w: i64 = 32;
+    let mask: i64 = 31;
+    (x << (n & mask)) | (x >> ((w - n) & mask))
+}
+
+// Rotate a 32-bit value right by `n` bits.
+pub fn rotr32(x: i32, n: i64) -> i32 {
+    let w: i64 = 32;
+    let mask: i64 = 31;
+    (x >> (n & mask)) | (x << ((w - n) & mask))
+}

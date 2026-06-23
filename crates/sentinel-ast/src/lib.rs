@@ -46,6 +46,16 @@ pub enum BinOp {
     BitOr,
     /// C5.3 / ADR 0027: bitwise XOR `^`. Constant-time.
     BitXor,
+    /// ADR 0048: shift left `<<`. Asymmetric (value `<<` amount): the result
+    /// takes the LEFT (value) operand's type/secrecy; a SECRET amount is a
+    /// variable-time shift rejected by the constant-time check (like a secret
+    /// divisor). Lexed in the parser from two span-adjacent `<` tokens.
+    Shl,
+    /// ADR 0048: LOGICAL (zero-fill) shift right `>>` for all integer types —
+    /// so a rotate composes as `(x << n) | (x >> (W - n))`. Lexed from two
+    /// span-adjacent `>` tokens (NOT a lexer token, to keep nested generics
+    /// like `Vec<Box<i64>>` closing one `>` at a time).
+    Shr,
 }
 
 impl BinOp {
@@ -58,6 +68,8 @@ impl BinOp {
             BinOp::BitAnd => "&",
             BinOp::BitOr => "|",
             BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
         }
     }
 }

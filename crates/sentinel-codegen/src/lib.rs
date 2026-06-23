@@ -5659,6 +5659,31 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     BinOp::BitAnd => self.builder.build_and(l, r, "and"),
                     BinOp::BitOr => self.builder.build_or(l, r, "or"),
                     BinOp::BitXor => self.builder.build_xor(l, r, "xor"),
+                    // ADR 0048: shift left / LOGICAL shift right (zero-fill for
+                    // ALL integer types — rotate composition needs `lshr`, not
+                    // `ashr`). LLVM requires the amount to share the value's int
+                    // type, so coerce it to `l`'s width first (zext/trunc; a
+                    // shift count is non-negative, so widening is zero-extend).
+                    BinOp::Shl | BinOp::Shr => {
+                        let lty = l.get_type();
+                        let shamt = match r.get_type().get_bit_width().cmp(&lty.get_bit_width()) {
+                            std::cmp::Ordering::Equal => r,
+                            std::cmp::Ordering::Greater => self
+                                .builder
+                                .build_int_truncate(r, lty, "shamt")
+                                .map_err(|e| CodegenError::Builder(e.to_string()))?,
+                            std::cmp::Ordering::Less => self
+                                .builder
+                                .build_int_z_extend(r, lty, "shamt")
+                                .map_err(|e| CodegenError::Builder(e.to_string()))?,
+                        };
+                        if matches!(op, BinOp::Shl) {
+                            self.builder.build_left_shift(l, shamt, "shl")
+                        } else {
+                            // `false` = logical (lshr, zero-fill), NOT ashr.
+                            self.builder.build_right_shift(l, shamt, false, "lshr")
+                        }
+                    }
                 };
                 result
                     .map(|v| v.into())

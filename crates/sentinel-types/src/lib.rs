@@ -2988,6 +2988,21 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0048 — constant-time rejection: shifting by a `secret`
+    /// amount (`x << secret_n` / `x >> secret_n`) is a variable-time
+    /// operation that leaks the amount via timing, like a secret
+    /// divisor. The shifted VALUE may be secret (constant-time when the
+    /// amount is public); only a secret AMOUNT is rejected.
+    #[error("variable-time shift by a `secret` amount leaks via timing")]
+    #[diagnostic(
+        code(sentinel::types::secret_shift_amount),
+        help("a shift by a secret amount has data-dependent latency; declassify the amount first if the leak is acceptable")
+    )]
+    SecretShiftAmount {
+        #[label("secret shift amount here")]
+        span: miette::SourceSpan,
+    },
+
     /// C3 / ADR 0019 D7 (C3.1) — constant-time rejection:
     /// dereferencing a `secret &T` (where the *pointer* is
     /// secret, distinct from `& secret T` where the pointee is
@@ -6198,9 +6213,9 @@ fn check_expr(
             // Mismatch case (mixed); we only need the l-side
             // wrappers plus the r_secret flag for SecretDivisor.
             let (l_inner, l_secret) = l.ty.strip_secret(secrets);
-            let (_r_inner, r_secret) = r.ty.strip_secret(secrets);
-            // C1.3: arithmetic requires both operands the same int
-            // type (I32 or I64); result is that int type. Bool /
+            let (r_inner, r_secret) = r.ty.strip_secret(secrets);
+            // C1.3: arithmetic requires the LEFT operand be an int
+            // type (I32 / I64 / U8); result is that int type. Bool /
             // struct arithmetic is rejected.
             if !l_inner.is_int() {
                 return Err(TypeError::Mismatch {
@@ -6209,29 +6224,60 @@ fn check_expr(
                     span: to_source_span(&lhs.span),
                 });
             }
-            if l.ty != r.ty {
-                return Err(TypeError::Mismatch {
-                    expected: l.ty,
-                    got: r.ty,
-                    span: to_source_span(&rhs.span),
-                });
-            }
-            // C3 / ADR 0019 D7 (C3.1b) — SecretDivisor: variable-
-            // time `/` on a secret divisor leaks the divisor's bit
-            // pattern via timing. Reject. `secret a / secret b`
-            // hits this; `a / b` (both public) is fine.
-            if matches!(op, BinOp::Div) && r_secret {
-                return Err(TypeError::SecretDivisor {
-                    span: to_source_span(&rhs.span),
-                });
-            }
-            // Result preserves the secret qualifier when both
-            // operands are secret. By this point l_secret ==
-            // r_secret (l.ty == r.ty above).
-            let ty = if l_secret {
-                Type::Secret(intern_secret(secrets, l_inner))
+            let ty = if matches!(op, BinOp::Shl | BinOp::Shr) {
+                // ADR 0048: shifts are ASYMMETRIC (value `<<` amount) and do
+                // NOT obey the matching-secrecy rule the other ops enforce via
+                // `l.ty != r.ty`. The amount may be any integer width/secrecy;
+                // the result takes the VALUE (left) operand's secrecy alone, so
+                // `secret i32 << 16` is accepted and types to `secret i32`.
+                if !r_inner.is_int() {
+                    return Err(TypeError::Mismatch {
+                        expected: Type::I64,
+                        got: r.ty,
+                        span: to_source_span(&rhs.span),
+                    });
+                }
+                // A SECRET amount is a variable-time shift — a timing leak,
+                // exactly like a secret divisor. Reject (the MIR `secret_leak`
+                // pass is the backstop). A secret VALUE shifted by a public
+                // amount is constant-time and accepted.
+                if r_secret {
+                    return Err(TypeError::SecretShiftAmount {
+                        span: to_source_span(&rhs.span),
+                    });
+                }
+                if l_secret {
+                    Type::Secret(intern_secret(secrets, l_inner))
+                } else {
+                    l_inner
+                }
             } else {
-                l_inner
+                // The symmetric ops (`+ - * /` + bitwise): both operands the
+                // same int type. Mixing public + secret operands surfaces as
+                // Mismatch (the "SecretFlow" semantics from Phase B ADR 0008 D4).
+                if l.ty != r.ty {
+                    return Err(TypeError::Mismatch {
+                        expected: l.ty,
+                        got: r.ty,
+                        span: to_source_span(&rhs.span),
+                    });
+                }
+                // C3 / ADR 0019 D7 (C3.1b) — SecretDivisor: variable-time `/`
+                // on a secret divisor leaks the divisor's bit pattern via
+                // timing. Reject. `secret a / secret b` hits this; `a / b`
+                // (both public) is fine.
+                if matches!(op, BinOp::Div) && r_secret {
+                    return Err(TypeError::SecretDivisor {
+                        span: to_source_span(&rhs.span),
+                    });
+                }
+                // Result preserves the secret qualifier when both operands are
+                // secret. By this point l_secret == r_secret (l.ty == r.ty).
+                if l_secret {
+                    Type::Secret(intern_secret(secrets, l_inner))
+                } else {
+                    l_inner
+                }
             };
             (
                 TypedExprKind::Binary(*op, Box::new(l), Box::new(r)),
@@ -8401,6 +8447,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "variable-time division by a `secret` value leaks via timing".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::SecretShiftAmount { span } => (
+            "sentinel::types::secret_shift_amount",
+            "variable-time shift by a `secret` amount leaks via timing".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::SecretInRefDeref { span } => (
             "sentinel::types::secret_in_ref_deref",
             "dereferencing a secret reference leaks via the memory side channel"
@@ -10278,6 +10329,41 @@ fn main() -> i64 {
         // Confirms SecretDivisor only fires when the divisor is
         // secret — public divisor is fine.
         let p = check_ok("fn main() -> i64 { 10 / 2 }");
+        assert_eq!(p.main().body.ty, Type::I64);
+    }
+
+    #[test]
+    fn adr0048_secret_value_public_amount_shift_ok() {
+        // ADR 0048: a `secret` value shifted by a PUBLIC amount is
+        // constant-time and accepted; the result stays secret (so
+        // `declassify` — which requires a secret operand — type-checks).
+        // This is the deliberate exception to the matching-secrecy rule.
+        let p = check_ok(
+            "fn f(a: secret i64, n: i64) -> i64 { declassify(a << n) }\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.main().return_type, Type::I64);
+    }
+
+    #[test]
+    fn adr0048_secret_shift_amount_rejects() {
+        // ADR 0048: shifting by a `secret` amount is variable-time and
+        // rejected with SecretShiftAmount (the analogue of SecretDivisor).
+        let err = check_err(
+            "fn f(a: secret i64, n: secret i64) -> i64 { declassify(a << n) }\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::SecretShiftAmount { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn adr0048_shift_right_is_logical_typing_ok() {
+        // `>>` types the same as `<<` (the lshr-vs-ashr choice is codegen's);
+        // a public shift just produces the left operand's type.
+        let p = check_ok("fn main() -> i64 { 256 >> 2 }");
         assert_eq!(p.main().body.ty, Type::I64);
     }
 

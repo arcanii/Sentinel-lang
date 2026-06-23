@@ -750,6 +750,8 @@ fn bin_symbol(op: BinOp) -> &'static str {
         BinOp::Sub => "-",
         BinOp::Mul => "*",
         BinOp::Div => "/",
+        BinOp::Shl => "<<",
+        BinOp::Shr => ">>",
         BinOp::BitAnd => "&",
         BinOp::BitOr => "|",
         BinOp::BitXor => "^",

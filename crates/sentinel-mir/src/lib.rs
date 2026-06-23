@@ -749,6 +749,10 @@ pub enum SinkKind {
     MemoryAddress,
     /// The divisor of an integer division — a variable-latency operation.
     Division,
+    /// The amount of a bit shift (`x << n` / `x >> n`) — a variable-latency
+    /// operation when `n` is secret (ADR 0048). The shifted VALUE may be
+    /// secret; only a secret AMOUNT leaks.
+    ShiftAmount,
 }
 
 impl std::fmt::Display for SinkKind {
@@ -758,6 +762,7 @@ impl std::fmt::Display for SinkKind {
             SinkKind::MemoryIndex => "a memory index",
             SinkKind::MemoryAddress => "a memory address",
             SinkKind::Division => "a variable-latency division",
+            SinkKind::ShiftAmount => "a variable-latency shift",
         })
     }
 }
@@ -829,6 +834,13 @@ pub fn verify_constant_time(program: &MirProgram) -> Vec<SecretLeak> {
                     }
                     MirOp::Binary(BinOp::Div, _, divisor) if f.is_secret(*divisor) => {
                         leaks.push(secret_leak(SinkKind::Division, &inst.span));
+                    }
+                    // ADR 0048: a shift by a SECRET amount is variable-time (the
+                    // `_` value operand is never flagged — only a secret amount).
+                    MirOp::Binary(BinOp::Shl | BinOp::Shr, _, amount)
+                        if f.is_secret(*amount) =>
+                    {
+                        leaks.push(secret_leak(SinkKind::ShiftAmount, &inst.span));
                     }
                     _ => {}
                 }
@@ -1195,5 +1207,48 @@ mod tests {
         assert!(leaks.iter().any(|l| l.sink == SinkKind::MemoryIndex), "secret index");
         // The opaque base is not secret, so no MemoryAddress leak.
         assert!(!leaks.iter().any(|l| l.sink == SinkKind::MemoryAddress));
+    }
+
+    #[test]
+    fn verify_flags_secret_shift_amount_but_not_secret_value() {
+        // ADR 0048: a shift by a SECRET amount is variable-time (a leak); a
+        // secret VALUE shifted by a PUBLIC amount is constant-time (no leak).
+        // The amount is the RIGHT operand, so the sink mirrors the divisor.
+        let secret = Type::Secret(SecretId(0));
+        // v0: secret; v1: public const; v2: secret-value << public-amount (OK);
+        // v3: public-value >> secret-amount (leak).
+        let f = MirFunction {
+            name: "h".to_string(),
+            value_tys: vec![secret, Type::I64, secret, Type::I64],
+            entry: MirBlockId(0),
+            ret_ty: Type::I64,
+            blocks: vec![MirBlock {
+                params: vec![MirValue(0)],
+                insts: vec![
+                    MirInst { dest: MirValue(1), op: MirOp::ConstInt(3), span: 0..0 },
+                    // v2 = secret(v0) << public(v1) → NOT a leak (value is secret).
+                    MirInst {
+                        dest: MirValue(2),
+                        op: MirOp::Binary(BinOp::Shl, MirValue(0), MirValue(1)),
+                        span: 0..0,
+                    },
+                    // v3 = public(v1) >> secret(v0) → a ShiftAmount leak.
+                    MirInst {
+                        dest: MirValue(3),
+                        op: MirOp::Binary(BinOp::Shr, MirValue(1), MirValue(0)),
+                        span: 0..0,
+                    },
+                ],
+                term: MirTerminator::Return(Some(MirValue(2))),
+            }],
+        };
+        let leaks = verify_constant_time(&MirProgram { functions: vec![f] });
+        // Exactly one ShiftAmount leak — the secret-amount shift; the
+        // secret-value/public-amount shift is NOT flagged.
+        assert_eq!(
+            leaks.iter().filter(|l| l.sink == SinkKind::ShiftAmount).count(),
+            1,
+            "only the secret shift amount leaks"
+        );
     }
 }
