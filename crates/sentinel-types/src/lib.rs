@@ -2906,17 +2906,18 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
-    /// C3 / ADR 0019 D7 (C3.1) — constant-time rejection: an
-    /// `if cond { ... } else { ... }` whose condition has type
-    /// `secret bool` would leak the secret via timing. Reject.
-    /// Workaround: `declassify(cond)` first if the user accepts
-    /// the leak.
-    #[error("`if` on a `secret bool` condition would leak via timing")]
+    /// C3 / ADR 0019 D7 (C3.1) — constant-time rejection: an `if` or
+    /// (since D.5) a `while` whose condition has type `secret bool`
+    /// would leak the secret via timing. Reject. `kw` is the offending
+    /// construct (`"if"` or `"while"`). Workaround: `declassify(cond)`
+    /// first if the user accepts the leak.
+    #[error("`{kw}` on a `secret bool` condition would leak via timing")]
     #[diagnostic(
         code(sentinel::types::secret_branch),
         help("branching on a secret value leaks the secret via timing; declassify the condition first if the leak is acceptable")
     )]
     SecretBranch {
+        kw: &'static str,
         #[label("secret-typed condition here")]
         span: miette::SourceSpan,
     },
@@ -5163,6 +5164,7 @@ fn check_stmt(
             if let Type::Secret(sid) = cond_t.ty {
                 if secrets[sid.0 as usize].inner == Type::Bool {
                     return Err(TypeError::SecretBranch {
+                        kw: "while",
                         span: to_source_span(&cond.span),
                     });
                 }
@@ -6345,6 +6347,7 @@ fn check_expr(
             if let Type::Secret(sid) = cond_t.ty {
                 if secrets[sid.0 as usize].inner == Type::Bool {
                     return Err(TypeError::SecretBranch {
+                        kw: "if",
                         span: to_source_span(&cond.span),
                     });
                 }
@@ -8346,9 +8349,9 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "`secret T` is not yet supported (lands at C3.1)".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
-        TypeError::SecretBranch { span } => (
+        TypeError::SecretBranch { kw, span } => (
             "sentinel::types::secret_branch",
-            "`if` on a `secret bool` condition would leak via timing".to_string(),
+            format!("`{kw}` on a `secret bool` condition would leak via timing"),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::LoopControlOutsideLoop { kw, span } => (

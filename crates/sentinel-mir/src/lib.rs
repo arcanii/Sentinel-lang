@@ -394,11 +394,16 @@ impl FnBuilder {
             }
             TypedStmtKind::While { cond, body } => {
                 // Phase D.5 / ADR 0036: the flat taint IR lowers the
-                // condition + the body once (a `while` cond is non-secret
-                // — `secret bool` is rejected at type-check, ADR 0019 D7);
-                // the body's stmts + tail flow taint to any sinks they
-                // contain. The loop structure adds no new taint path a
-                // single pass misses.
+                // condition + the body once. A `secret`-typed `while`
+                // condition is already rejected at TYPE-CHECK by the
+                // SecretBranch rule (ADR 0019 D7, extended to `while` in
+                // D.5 — `sentinel::types::secret_branch`), exactly as for
+                // `if`, so this pass never sees a secret loop condition;
+                // it still lowers `cond` so any secret operand reaching a
+                // sink *inside* the condition expression is caught. The
+                // body's stmts + tail flow taint to any sinks they contain.
+                // The loop structure adds no new taint path a single pass
+                // misses.
                 self.lower_expr(program, cond);
                 self.lower_block(program, body);
             }
