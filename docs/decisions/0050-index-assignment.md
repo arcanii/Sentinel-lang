@@ -1,11 +1,12 @@
 # ADR 0050: Mutable index assignment `a[i] = v`
 
-Status: **PROPOSED** — lifts the ADR 0017 D12 deferral so an array / `Vec` element can be
-written through an index. Phase 1 implements it in `snc` (the inkwell backend + the `snc
-llvm` textual oracle), validated by an idiomatic, loop-based **ChaCha20 block** over a
-`[secret i32]` state reproducing the RFC 8439 §2.3.2 test vector. Phase 2 mirrors it into the
-self-hosted `scg` (`selfhost/types.sentinel`) and adds a corpus fixture so the differential
-validates `scg == snc` byte-for-byte. Amendments (A1…) will record deviations from this plan.
+Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A5) — the feature is in `snc` (Phase 1: inkwell + the
+`snc llvm` textual oracle) AND mirrored into the self-hosted `scg` (Phase 2); the corpus
+fixture `tests/pass/c55_index_assign` validates `scg == snc` byte-for-byte across all 8
+selfhost stage differentials, both bootstrap fixed points hold, and the full nextest (1553
+tests) is green. A full ChaCha20 block over a `[secret i32]` state, permuted in place via
+index-assign, reproduces the RFC 8439 §2.3.2 test vector. Amendments below record the
+deviations from the PROPOSED plan.
 
 Adds the assignment form `a[i] = v;` — writing the element at a public index `i` of a mutable
 array `[T]` or vector `Vec<T>`. This closes the "array elements cannot be re-assigned" gap
@@ -144,3 +145,43 @@ construct is added (Phase 2), at which point both sides emit it identically.
 - Deferred: Move-element index-assign (drop-on-overwrite), `&mut [T]` element writes, and
   `&mut a[i]` element borrows (the `check_mutable_borrow_target` site keeps erroring — out of
   this ADR's scope).
+
+## Amendments
+
+- **A1 — the parser truly needed no change.** Confirmed end-to-end: `a[i] = v` already parses
+  to `Assign { target: Index{..}, value }` (all lvalue / mutability validation was deferred to
+  the type checker). The only addition was a regression test (`parse_assign_index_stmt`).
+
+- **A2 — no MIR change, no new sink (the constant-time story is the type checker's
+  `IndexNotInt`).** As proposed, but worth recording the mechanism: a secret index on the LHS
+  is rejected when the `Index` target is type-checked (the index must be a public `i64`) — the
+  *same* `IndexNotInt` rule that rejects a secret read-index — so writes inherit the read's
+  already-blessed gate with zero new code. The MIR lowering of an index-assign stays
+  `Opaque(value)` (the existing non-Var store), so `sentinel::mir::secret_leak` is unchanged.
+  Adding a MIR write-index sink would have been *untestable dead code* (the type checker
+  rejects a secret index before MIR runs), so it was deliberately not added.
+
+- **A3 — the scg mirror's load-bearing subtlety: the Index sub-exprs stay VALUES even when the
+  Index is a place.** `a[i] = v`'s element address needs the *loaded* array aggregate
+  (`extractvalue` the data pointer), unlike a struct field-place which GEPs from the base
+  slot. So in `selfhost/types.sentinel`'s `Index` arm, `cg_suppress` is cleared while walking
+  the array + index sub-exprs (they load normally) and restored for the place/read branch —
+  only the `Index` node itself is the place. The read path's address computation was factored
+  into `cg_emit_index_addr` (returning the element pointer), shared by the read (`+ load`) and
+  the write (`cg_reg(ep)` + `cg_lastvid = -1`, so the assign stores through it), keeping
+  oracle and scg byte-identical. `merge.sentinel` needed no change — it already re-emits
+  `(a[i]) = v;` via the existing `Index` / `SAssign` emit.
+
+- **A4 — the MVP Copy-element gate is a new error; `IndexAssignNotSupported` was repurposed,
+  not deleted.** A Move element (struct / generic) is rejected with the new
+  `IndexAssignNonCopyElem`. The pre-existing `IndexAssignNotSupported` variant now fires only
+  for the still-deferred `&mut a[i]` element *borrow* (the `check_mutable_borrow_target` site);
+  its message was updated from "`a[i] = v;`" to "`&mut a[i]`" to match.
+
+- **A5 — the ChaCha20 example uses a pure quarter-round + a 4-field struct, not a `&mut [T]`
+  in-place QR.** Since no `&mut [T]` exists anywhere in the corpus (untested path), the block
+  keeps the state in a local mutable `[secret i32]` and a *pure* `qr(...) -> Qr` (a 4-field
+  secret struct, since Sentinel fns return one value); the round loop reads the four words,
+  calls `qr`, and writes them back via index-assign (`state[i] = o.a; …`). This stays squarely
+  in the MVP (Var-base local array, Copy `secret i32` elements) while still showcasing in-place
+  array permutation under the constant-time check.

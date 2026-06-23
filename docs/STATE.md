@@ -77,10 +77,19 @@ the current state of the workspace without re-reading every commit.
     (an int literal is `i64`); trunc/sext/zext, preserves secrecy, no CT sink —
     enabling a true 32-bit **ChaCha quarter-round** over `secret i32` words
     reproducing the RFC 8439 vector (`examples/security/chacha_qr`).
+  - **Mutable index assignment `a[i] = v`** (ADR 0050) — lifts the ADR 0017 D12
+    deferral so an array / `Vec` element can be written through a public index
+    (the read path's bounds-checked element GEP + a store). Constant-time
+    preserved with no new sink (a secret LHS index is rejected by the existing
+    `IndexNotInt` rule, exactly as for reads; a secret value stored is fine).
+    MVP scope is Copy elements (scalars + `secret` scalars). Enables an
+    idiomatic, loop-based full **ChaCha20 block** over a `[secret i32]` state
+    permuted in place, reproducing the RFC 8439 §2.3.2 vector
+    (`examples/security/chacha20_block`).
   See the
   `sentinel_examples_and_corelibs` auto-memory.
 
-**1546 tests across the workspace**, four-check green (build · `cargo nextest`
+**1553 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

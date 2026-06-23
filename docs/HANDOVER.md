@@ -65,7 +65,7 @@ language gaps — finding + fixing those is the most valuable output.
   `bits` (post-shifts) / `bytes`, built incrementally.
 - **Done (commits on `main`):** `25e95a8` foundation (scalar `ct` lib +
   `secure_compare` + harness + corpus READMEs), `d1dace8` `math::num`, `a4f4b45`
-  docs, and **two fully self-hosted language features** (both ADR-first, byte-
+  docs, and **four fully self-hosted language features** (each ADR-first, byte-
   identical across `snc` + `scg`, both bootstrap fixed points held):
   - **`1a84081` — `[secret T]` arrays (ADR 0047 A1–A6) + `ct_memcmp` over
     `[secret u8]`.** Arrays of secret ELEMENTS (`ArrayElem::Secret(SecretId)`) — a
@@ -87,6 +87,19 @@ language gaps — finding + fixing those is the most valuable output.
     32-bit **ChaCha quarter-round over `secret i32` words**
     (`examples/security/chacha_qr`) reproducing the RFC 8439 §2.1.1 vector.
     Validated by `tests/pass/c54_cast`. The `u8` conversion builtins remain.
+  - **`977d6b5` (Phase 1, snc) + `873775f` (Phase 2, selfhost mirror) — mutable
+    index assignment `a[i] = v` (ADR 0050 A1–A5).** Lifts the ADR 0017 D12
+    deferral so an array / `Vec` element is written through a public index (the
+    read path's bounds-checked element GEP + a store; the GEP factored — inkwell
+    `lower_index_elem_ptr`, scg `cg_emit_index_addr` — and shared by read+write).
+    Constant-time with NO new sink: a secret LHS index is rejected by the existing
+    `IndexNotInt` rule (same as reads); a secret value stored is fine; MIR
+    unchanged (`Opaque(value)`, like a field/deref store). MVP = Copy elements
+    (scalars + `secret` scalars); a Move element → `IndexAssignNonCopyElem`.
+    Parser unchanged (already parsed `Assign{Index,..}`). Shipped a full **ChaCha20
+    block** over a `[secret i32]` state permuted in place
+    (`examples/security/chacha20_block`, RFC 8439 §2.3.2). Validated by
+    `tests/pass/c55_index_assign` across all 8 selfhost differentials.
 - **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
   `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
@@ -94,8 +107,11 @@ language gaps — finding + fixing those is the most valuable output.
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
   - **More examples / `std` categories** — the owner wanted functional categories
-    (networking/threading/process/algorithms/…) as the language grows; e.g. a full
-    ChaCha20 block or a SipHash/Poly1305 MAC built on the now-shipped primitives.
+    (networking/threading/process/algorithms/…) as the language grows. With the
+    full ChaCha20 block now shipped, the obvious next crypto targets are a
+    **SipHash-2-4 or Poly1305 MAC** (compose the shipped round/primitives into a
+    complete keyed PRF / authenticator), or a ChaCha20 *stream* (counter + the
+    block keystream + XOR) — likely few/no language changes.
   - **Secret ergonomics** — a public→secret operand widen (so a constant needn't be
     pre-bound `secret` before combining with a secret), an array-level `[u8] ->
     [secret u8]` widen.

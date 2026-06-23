@@ -57,8 +57,15 @@ the most valuable output of this corpus.
   true 32-bit **ChaCha quarter-round** over `secret i32` words
   (`examples/security/chacha_qr`, RFC 8439 vector) and makes the `bits` 32-bit
   rotates runnable.
+- **Fixed — mutable index assignment `a[i] = v`** (ADR 0050). Lifts the ADR 0017
+  D12 deferral so an array / `Vec` element can be written in place through a public
+  index (the read path's bounds-checked element GEP + a store). Constant-time is
+  preserved with no new sink — a *secret* LHS index is rejected like a secret
+  read-index, while a *secret value* stored at a public index is allowed. Unblocks
+  a full, idiomatic **ChaCha20 block** that permutes a `[secret i32]` state in place
+  (`examples/security/chacha20_block`, RFC 8439 §2.3.2 vector).
 
-All three surfaced gaps are now closed and fully self-hosted (snc + `scg`,
+All four surfaced gaps are now closed and fully self-hosted (snc + `scg`,
 byte-identical, both bootstrap fixed points held). When a gap blocks a genuinely
 idiomatic library, that block is the signal to add the feature (ADR-first if it
 touches the frozen `abi-v1` contract).
