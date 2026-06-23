@@ -1,0 +1,162 @@
+// std::security::aead — the ChaCha20-Poly1305 AEAD (RFC 8439 §2.8).
+//
+// Authenticated Encryption with Associated Data: encrypt a plaintext under a
+// 256-bit SECRET key + 96-bit nonce with the ChaCha20 stream cipher, then
+// authenticate (the public AAD || the ciphertext || their lengths) with the
+// Poly1305 one-time MAC keyed by a per-message one-time key derived from the same
+// ChaCha20 key/nonce. This composes the shipped ChaCha20 and Poly1305 libraries.
+//
+// The pipeline (RFC 8439 §2.8):
+//   1. OTK = first 32 bytes of chacha20_block(state, counter = 0)   (§2.6) — SECRET
+//   2. ciphertext = ChaCha20 encrypt of the plaintext, counter = 1          — SECRET
+//   3. mac_data = AAD || pad16(AAD) || CT || pad16(CT) || le64(|AAD|) || le64(|CT|)
+//   4. tag = Poly1305(OTK, mac_data)
+//
+// CONSTANT-TIME DISCIPLINE. The ChaCha20 key, the 16-word state, the derived OTK,
+// and the keystream are all SECRET and flow only through branch-free operations
+// (the libraries' CT check proves it). The ONE declassify boundary inside the
+// AEAD is the ciphertext: a stream cipher's ciphertext is public output (it goes
+// on the wire), so we declassify each CT byte as we copy it into the public
+// `mac_data` buffer. The AAD and the two 64-bit length fields are public from the
+// start. The OTK stays secret and enters Poly1305 as a `&[secret u8]` — the MAC
+// keeps it secret through the polynomial and only declassifies the final 16 tag
+// bytes (the tag, like the ciphertext, is public output). So the secret key/state
+// never reach a branch or a data-dependent index; only the two public outputs
+// (ciphertext, tag) cross a declassify.
+use std::security::chacha20::chacha20_block;
+use std::security::chacha20::chacha20_xor;
+use std::security::poly1305::poly1305;
+
+// The two public outputs of an AEAD encryption: the ciphertext (declassified —
+// it is public, wire-bound output) and the 16-byte Poly1305 tag.
+pub struct AeadResult { ct: [u8], tag: [u8] }
+
+// Derive the Poly1305 one-time key (RFC 8439 §2.6): the first 32 bytes of the
+// ChaCha20 block over (key, nonce) with counter = 0, serialized little-endian.
+// `state` is the assembled 16-word ChaCha state (constants | key | 0 | nonce).
+// The OTK is SECRET (it is derived from the secret key) — it is built in a
+// `[secret u8]` via index-assign (ADR 0050) and the keystream-word-to-byte
+// serialization `(w >> (8*k)) as u8` preserves secrecy.
+fn derive_otk(state: [secret i32]) -> [secret u8] {
+    let ks: [secret i32] = chacha20_block(state);
+    let z: secret u8 = i64_to_u8(0);
+    let mut otk: [secret u8] = [
+        z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z,
+        z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z
+    ];
+    // Emit words 0..7 (32 bytes) little-endian. Indices are PUBLIC.
+    let mut w: i64 = 0;
+    while w < 8 {
+        let word: secret i32 = ks[w];
+        let mut k: i64 = 0;
+        while k < 4 {
+            let b: secret u8 = (word >> (8 * k)) as u8;
+            otk[w * 4 + k] = b;
+            k = k + 1;
+        }
+        w = w + 1;
+    }
+    otk
+}
+
+// Append the 8 little-endian bytes of a PUBLIC 64-bit value `x` to `v` (the
+// le64 length field of the Poly1305 mac_data). No `%`: byte k = (x >> 8k) & 255.
+fn push_le64(v: &mut Vec<u8>, x: i64) -> i64 {
+    let mut k: i64 = 0;
+    while k < 8 {
+        let byte: i64 = (x >> (8 * k)) & 255;
+        push(v, i64_to_u8(byte));
+        k = k + 1;
+    }
+    0
+}
+
+// Append zero bytes to `v` until its length is a multiple of 16 (pad16). The
+// amount is PUBLIC (it depends only on the public AAD / ciphertext lengths).
+fn pad16(v: &mut Vec<u8>) -> i64 {
+    let mut over: i64 = len(*v) - (len(*v) / 16) * 16;   // len % 16, no `%`
+    while over > 0 {
+        if over < 16 { push(v, i64_to_u8(0)); 0 } else { 0 };
+        over = over + 1;
+        if over == 16 { over = 0; 0 } else { 0 };
+    }
+    0
+}
+
+// ChaCha20-Poly1305 AEAD encryption (RFC 8439 §2.8). Inputs:
+//   key       — the 256-bit ChaCha20 key, 8 little-endian `secret i32` words.
+//   nonce     — the 96-bit nonce, 3 little-endian `secret i32` words.
+//   aad       — the public additional authenticated data (a `&[u8]` borrow).
+//   plaintext — the message to encrypt (a `[secret u8]`, consumed).
+// Returns the ciphertext (public) and the 16-byte Poly1305 tag.
+pub fn chacha20poly1305_encrypt(key: [secret i32], nonce: [secret i32],
+                                aad: &[u8], plaintext: [secret u8]) -> AeadResult {
+    // The ChaCha constants "expand 32-byte k" (RFC 8439 §2.3), as secret i32.
+    let c0: secret i32 = 1634760805 as i32;  // 0x61707865
+    let c1: secret i32 = 857760878 as i32;   // 0x3320646e
+    let c2: secret i32 = 2036477234 as i32;  // 0x79622d32
+    let c3: secret i32 = 1797285236 as i32;  // 0x6b206574
+
+    // ---- (1) Derive the one-time Poly1305 key: chacha20_block with counter = 0.
+    let kk0: secret i32 = key[0]; let kk1: secret i32 = key[1];
+    let kk2: secret i32 = key[2]; let kk3: secret i32 = key[3];
+    let kk4: secret i32 = key[4]; let kk5: secret i32 = key[5];
+    let kk6: secret i32 = key[6]; let kk7: secret i32 = key[7];
+    let nn0: secret i32 = nonce[0];
+    let nn1: secret i32 = nonce[1];
+    let nn2: secret i32 = nonce[2];
+    let ctr0: secret i32 = 0 as i32;
+    let otk_state: [secret i32] = [c0, c1, c2, c3, kk0, kk1, kk2, kk3,
+                                   kk4, kk5, kk6, kk7, ctr0, nn0, nn1, nn2];
+    let otk: [secret u8] = derive_otk(otk_state);
+
+    // ---- (2) Encrypt the plaintext with ChaCha20, counter = 1 (RFC §2.8).
+    let one: secret i32 = 1 as i32;
+    let ct_secret: [secret u8] = chacha20_xor(plaintext, key, nonce, one);
+
+    // ---- (3) Build mac_data = AAD || pad16(AAD) || CT || pad16(CT) ||
+    //          le64(|AAD|) || le64(|CT|) as a PUBLIC Vec<u8>. The AAD is public;
+    //          the ciphertext is DECLASSIFIED here (public, wire-bound output).
+    let alen: i64 = len(*aad);
+    let clen: i64 = len(ct_secret);
+    let mut mac: Vec<u8> = vec_new();
+    // AAD bytes (public).
+    let mut ai: i64 = 0;
+    while ai < alen {
+        push(&mut mac, (*aad)[ai]);
+        ai = ai + 1;
+    }
+    pad16(&mut mac);
+    // Ciphertext bytes, declassified into the public mac buffer. The CT bytes
+    // are the AEAD's public output, so this is a sanctioned declassify boundary.
+    let mut ci: i64 = 0;
+    while ci < clen {
+        let cb: u8 = declassify(ct_secret[ci]);
+        push(&mut mac, cb);
+        ci = ci + 1;
+    }
+    pad16(&mut mac);
+    // The two little-endian 64-bit length fields (public).
+    push_le64(&mut mac, alen);
+    push_le64(&mut mac, clen);
+    let mac_data: [u8] = vec_to_array(mac);
+
+    // ---- (4) tag = Poly1305(OTK, mac_data). The OTK stays SECRET (a `&[secret u8]`
+    // borrow); the message (mac_data) is public; only the 16 tag bytes are
+    // declassified inside the MAC.
+    let tag: [u8] = poly1305(&mac_data, &otk);
+
+    // Materialize the public ciphertext bytes into a fresh [u8] to return alongside
+    // the tag (the secret ct buffer is consumed above only for the public copy in
+    // mac_data; rebuild the public ct here from a second declassify pass).
+    let zb: u8 = i64_to_u8(0);
+    let mut ct_pub: Vec<u8> = vec_new();
+    let mut di: i64 = 0;
+    while di < clen {
+        push(&mut ct_pub, declassify(ct_secret[di]));
+        di = di + 1;
+    }
+    let ct_out: [u8] = vec_to_array(ct_pub);
+
+    AeadResult { ct: ct_out, tag: tag }
+}

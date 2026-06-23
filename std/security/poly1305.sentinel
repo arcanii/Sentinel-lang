@@ -5,6 +5,13 @@
 // the secret clamped multiplier `r` modulo the prime p = 2^130 - 5, then adds the
 // secret pad `s`. This is the MAC half of the ChaCha20-Poly1305 AEAD.
 //
+// The key is ALWAYS secret (a per-message one-time key — in the AEAD it is the
+// OTK derived from the secret ChaCha20 key, RFC §2.6), so this MAC takes it as a
+// `&[secret u8]` borrow and reads each key byte in the secret domain (the secret
+// `as i64` cast preserves secrecy — the public `u8_to_i64` builtin would not
+// accept a `secret u8`). The MESSAGE stays PUBLIC: it is the data being
+// authenticated (for the AEAD, the public/declassified ciphertext + lengths).
+//
 // Representation follows poly1305-donna's 32-bit path: each 130-bit value is a
 // radix-2^26 array of five 26-bit limbs, so a limb*limb product fits in an i64
 // (worst diagonal term ~2^57). The accumulator `h`, the multiplier `r`, the
@@ -33,21 +40,35 @@ fn u32le(m: &[u8], i: i64) -> i64 {
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 }
 
+// Read 4 little-endian SECRET key bytes at `i` from a `&[secret u8]` borrow into
+// a `secret i64`. The `(secret u8) as i64` cast PRESERVES secrecy (unlike the
+// public-only `u8_to_i64` builtin), so the key never leaves the secret domain.
+// The byte indices are PUBLIC (fixed key layout), so the access pattern is
+// data-independent.
+fn u32le_secret(m: &[secret u8], i: i64) -> secret i64 {
+    let b0: secret i64 = (*m)[i] as i64;
+    let b1: secret i64 = (*m)[i + 1] as i64;
+    let b2: secret i64 = (*m)[i + 2] as i64;
+    let b3: secret i64 = (*m)[i + 3] as i64;
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
 // Poly1305 over a public message `msg` (a non-consuming `&[u8]` borrow) keyed by
-// the 256-bit secret one-time key `key` (32 bytes: r in 0..16, s/pad in 16..32).
-// Returns the 16-byte tag as a freshly built `[u8]` (the only declassified value).
-pub fn poly1305(msg: &[u8], key: &[u8]) -> [u8] {
+// the 256-bit SECRET one-time key `key` (a `&[secret u8]` borrow, 32 bytes: r in
+// 0..16, s/pad in 16..32). Returns the 16-byte tag as a freshly built `[u8]`
+// (the only declassified value).
+pub fn poly1305(msg: &[u8], key: &[secret u8]) -> [u8] {
     // The radix-2^26 limb mask and the modular-reduction constant 2^26, widened
     // public -> secret so they can mask / be subtracted from secret values.
     let m26: secret i64 = 67108863;        // 0x3ffffff
     let two26: secret i64 = 67108864;      // 1 << 26
 
-    // ---- Clamp `r` (RFC 8439 §2.5.1): load 4 LE key words, split into 5 limbs,
-    // mask each with the clamp constant. The result is SECRET (it is the key).
-    let kt0: secret i64 = u32le(key, 0);
-    let kt1: secret i64 = u32le(key, 4);
-    let kt2: secret i64 = u32le(key, 8);
-    let kt3: secret i64 = u32le(key, 12);
+    // ---- Clamp `r` (RFC 8439 §2.5.1): load 4 LE key words (SECRET reads), split
+    // into 5 limbs, mask each with the clamp constant. The result is SECRET (the key).
+    let kt0: secret i64 = u32le_secret(key, 0);
+    let kt1: secret i64 = u32le_secret(key, 4);
+    let kt2: secret i64 = u32le_secret(key, 8);
+    let kt3: secret i64 = u32le_secret(key, 12);
     let cm0: secret i64 = 67108863;        // 0x3ffffff
     let cm1: secret i64 = 67108611;        // 0x3ffff03
     let cm2: secret i64 = 67092735;        // 0x3ffc0ff
@@ -65,11 +86,11 @@ pub fn poly1305(msg: &[u8], key: &[u8]) -> [u8] {
     let s3: secret i64 = r3 * five;
     let s4: secret i64 = r4 * five;
 
-    // The pad `s` = key[16..32], four LE 32-bit words (added at the very end).
-    let pad0: secret i64 = u32le(key, 16);
-    let pad1: secret i64 = u32le(key, 20);
-    let pad2: secret i64 = u32le(key, 24);
-    let pad3: secret i64 = u32le(key, 28);
+    // The pad `s` = key[16..32], four LE 32-bit words (SECRET reads, added at the end).
+    let pad0: secret i64 = u32le_secret(key, 16);
+    let pad1: secret i64 = u32le_secret(key, 20);
+    let pad2: secret i64 = u32le_secret(key, 24);
+    let pad3: secret i64 = u32le_secret(key, 28);
 
     // The accumulator h, five secret limbs, mutated in place (ADR 0050) so we
     // never thread a by-value array through the loop (which would move it).

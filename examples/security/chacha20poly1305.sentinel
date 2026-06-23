@@ -1,0 +1,70 @@
+// examples/security/chacha20poly1305.sentinel — the ChaCha20-Poly1305 AEAD.
+//
+// AEAD (RFC 8439 §2.8): encrypt under a 256-bit key + 96-bit nonce with ChaCha20,
+// then authenticate (AAD || ciphertext || lengths) with Poly1305 keyed by a
+// per-message one-time key derived from the same key/nonce. This example composes
+// the shipped ChaCha20 + Poly1305 libraries via `std::security::aead`.
+//
+// Self-check: the RFC 8439 §2.8.2 key (bytes 0x80..0x9f) and nonce
+// (07 00 00 00 40 41 42 43 44 45 46 47), AAD = "" (empty), plaintext = 16 zero
+// bytes. This exercises the SAME pipeline as the full §2.8.2 vector (OTK gen +
+// encrypt + mac-data + tag) on the real §2.8.2 key/nonce, with buffers small
+// enough to hand-build. The reference (a verified ChaCha20-Poly1305 that
+// reproduces the §2.8.2 tag) gives, for this short vector:
+//   ct  = 159 123 233 93 1 253 64 186 21 226 143 251 54 129 10 174
+//   tag = 96 49 155 56 187 162 158 29 234 243 101 202 173 166 24 46
+//
+// CONSTANT-TIME: the secret key/state/OTK flow only through branch-free ops (the
+// libraries' CT check proves it on every build); the only declassify boundaries
+// are the public ciphertext and the public tag. Exit 42 = both the ciphertext and
+// the tag matched the reference byte-for-byte.
+use std::security::aead::AeadResult;
+use std::security::aead::chacha20poly1305_encrypt;
+
+fn main() -> i64 {
+    // The §2.8.2 key (bytes 0x80..0x9f) as 8 little-endian secret i32 words.
+    let k0: secret i32 = 2206368128 as i32;  // 0x83828180
+    let k1: secret i32 = 2273740164 as i32;  // 0x87868584
+    let k2: secret i32 = 2341112200 as i32;  // 0x8b8a8988
+    let k3: secret i32 = 2408484236 as i32;  // 0x8f8e8d8c
+    let k4: secret i32 = 2475856272 as i32;  // 0x93929190
+    let k5: secret i32 = 2543228308 as i32;  // 0x97969594
+    let k6: secret i32 = 2610600344 as i32;  // 0x9b9a9998
+    let k7: secret i32 = 2677972380 as i32;  // 0x9f9e9d9c
+    let key: [secret i32] = [k0, k1, k2, k3, k4, k5, k6, k7];
+
+    // The §2.8.2 nonce 07 00 00 00 | 40 41 42 43 | 44 45 46 47 as 3 LE words.
+    let n0: secret i32 = 7 as i32;           // 0x00000007
+    let n1: secret i32 = 1128415552 as i32;  // 0x43424140
+    let n2: secret i32 = 1195787588 as i32;  // 0x47464544
+    let nonce: [secret i32] = [n0, n1, n2];
+
+    // AAD = "" (empty public buffer).
+    let aad: [u8] = [];
+
+    // Plaintext = 16 zero bytes (secret).
+    let z: secret u8 = i64_to_u8(0);
+    let pt: [secret u8] = [z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z];
+
+    let out: AeadResult = chacha20poly1305_encrypt(key, nonce, &aad, pt);
+
+    // The reference ciphertext + tag for this short vector.
+    let exp_ct: [i64] = [159, 123, 233, 93, 1, 253, 64, 186,
+                         21, 226, 143, 251, 54, 129, 10, 174];
+    let exp_tag: [i64] = [96, 49, 155, 56, 187, 162, 158, 29,
+                          234, 243, 101, 202, 173, 166, 24, 46];
+
+    // OR-accumulate the per-byte diff of both the ciphertext and the tag into a
+    // public accumulator that is 0 iff every byte of both matched.
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 16 {
+        let cb: i64 = u8_to_i64(out.ct[i]);
+        let tb: i64 = u8_to_i64(out.tag[i]);
+        bad = bad | (cb ^ exp_ct[i]);
+        bad = bad | (tb ^ exp_tag[i]);
+        i = i + 1;
+    }
+
+    if bad == 0 { 42 } else { 0 }
+}

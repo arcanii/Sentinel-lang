@@ -7,6 +7,11 @@
 // `declassify`d (the tag is the output). The message bytes are PUBLIC — they are
 // the data being authenticated.
 //
+// The 32-byte key is built from public literal bytes and widened to `[secret u8]`
+// at its `let` (the public -> secret array widen, ADR 0051), then passed as a
+// `&[secret u8]` borrow — a Poly1305 key is always secret (here a fixed test
+// vector; in the AEAD it is the OTK derived from the secret ChaCha20 key).
+//
 // Every operation on the secret key/accumulator is data-independent (radix-2^26
 // multiply-accumulate, carries, and a constant-time freeze), and the loop bound /
 // byte indices are PUBLIC (message length), so the compiler's constant-time check
@@ -18,9 +23,9 @@
 use std::security::poly1305::poly1305;
 
 fn main() -> i64 {
-    // The 32-byte one-time key (RFC 8439 §2.5.2), as PUBLIC [u8] bytes; the
-    // library widens them into the secret domain internally.
-    let key: [u8] = [
+    // The 32-byte one-time key (RFC 8439 §2.5.2), built as PUBLIC [u8] literal
+    // bytes and widened to [secret u8] at the `let` (a Poly1305 key is secret).
+    let key_pub: [u8] = [
         i64_to_u8(133), i64_to_u8(214), i64_to_u8(190), i64_to_u8(120),
         i64_to_u8(87),  i64_to_u8(85),  i64_to_u8(109), i64_to_u8(51),
         i64_to_u8(127), i64_to_u8(68),  i64_to_u8(82),  i64_to_u8(254),
@@ -30,6 +35,7 @@ fn main() -> i64 {
         i64_to_u8(74),  i64_to_u8(191), i64_to_u8(246), i64_to_u8(175),
         i64_to_u8(65),  i64_to_u8(73),  i64_to_u8(245), i64_to_u8(27)
     ];
+    let key: [secret u8] = key_pub;
 
     // The 34-byte message "Cryptographic Forum Research Group".
     let msg: [u8] = [

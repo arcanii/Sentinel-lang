@@ -203,6 +203,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // the search over a `&[i64]` borrow. 42 = sorted ascending + found a present
     // value + returned -1 for an absent one.
     ("examples/algorithms/sort_search.sentinel", 42),
+    // ChaCha20-Poly1305 AEAD (std::security::aead) — composes the shipped ChaCha20
+    // + Poly1305 (refactored to a secret `&[secret u8]` key) per RFC 8439 §2.8:
+    // OTK gen + encrypt + mac-data + tag. 42 = both the ciphertext and the tag
+    // matched the reference for the §2.8.2 key/nonce.
+    ("examples/security/chacha20poly1305.sentinel", 42),
 ];
 
 #[test]
@@ -263,6 +268,11 @@ fn poly1305_one_time_mac() {
 #[test]
 fn algorithms_sort_search() {
     check_example("examples/algorithms/sort_search.sentinel", "sort_search", 42);
+}
+
+#[test]
+fn chacha20poly1305_aead() {
+    check_example("examples/security/chacha20poly1305.sentinel", "chacha20poly1305", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
