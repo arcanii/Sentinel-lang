@@ -42,21 +42,51 @@ reference as you work through the milestones.
 - **ADR 0046** (the partial-move-through-field double-free, the one historical
   borrow-check *under*-rejection) closed in both `snc` and `scg`.
 - **External-review plan** (`docs/REVIEW_ACTION_PLAN.md`, untracked): the P0
-  band, P1, P2 (bar P2.4), and P3.1 are done.
+  band, P1, P2 (bar P2.4), P3.1, and P3.2 (this STATE/HANDOVER split) are done.
+- **Constant-time check audited** against the post-Phase-D language: SOUND — a
+  secret reaching an `if`/`while` condition, a secret `&&`/`||`, a secret
+  array/Vec index, a secret `match` scrutinee, or a secret divisor is all
+  rejected. Added the `while` conformance test (`c52_secret_in_while`) and made
+  the `SecretBranch` diagnostic name the actual construct.
 
-**▶ Resume at / open tracks** (owner's call — none on the critical path):
+**▶ Resume at — the NEXT TRACK: examples-as-tests + core-library scoping.**
+Build real, idiomatic Sentinel programs that double as feature tests, and scope
++ build the first **core libraries** so a programmer has building blocks instead
+of starting from scratch. This **dogfoods the module system + `--separate`** (the
+best test of those features), **stress-tests the constant-time guarantee on real
+code**, and will surface concrete language gaps (likely `[secret T]` arrays,
+missing bit primitives like rotate, the no-closures limit) — finding + fixing
+those is the most valuable output.
 
+- **Flagship:** a `ct` constant-time-utilities module (`ct_eq` / `ct_select` /
+  `ct_lt` / a ct `memcmp` over `[u8]`, all from the sanctioned branch-free
+  bitwise/arithmetic primitives) + examples building up toward a recognizable
+  branch-free primitive (a ChaCha-style ARX quarter-round, or a ct
+  secure-compare).
+- **Proposed first libs** (agree the set before building): `ct` (constant-time,
+  the flagship + thesis demo), `bytes` (`[u8]` / string utilities), `bits`
+  (rotate / popcount / shifts, for crypto), `math` (min / max / abs and
+  friends).
+- **Structure (proposal, decide early):** `std/*.sentinel` library modules +
+  `examples/*.sentinel` programs that `use` them, each wired as a pass-test
+  (build via `--separate` to dogfood, run + assert an exit code, and confirm the
+  constant-time check passes). Decide the directory layout + test harness up
+  front.
+
+**Other open tracks** (owner's call, none on the critical path):
+
+- **Harden constant-time `secret` (the deep version)** — the check is sound for
+  the current language (see Done) but runs pre-LLVM and doesn't force
+  constant-time *emission*; a post-codegen / post-optimization verifier is the
+  highest-ceiling but research-hard item. The real-program work above should
+  inform it (you'll learn what the optimizer does to branch-free secret code).
+- **Linux CI (P2.4)** — glibc surfaces heap bugs macOS masks; worth landing
+  before `abi-v1` ossifies. Rest of P3 (LSP, diagnostics); P4 (perf, deferred
+  ergonomics like `[secret T]` arrays — which the flagship work above will
+  likely force).
 - **Separate-compilation tail** — class / generic-instance type-arg dedup and
   trait/class-method dedup. Low value (classes can't be imported; trait impls
-  are unit-local, so there is little to dedup) — recommend not grinding it.
-- **Harden constant-time `secret`** — the thesis. The check runs pre-LLVM and
-  does not force constant-time *emission*; a post-codegen / assembly verifier
-  (or an independent post-optimization secret-flow oracle) is the
-  highest-leverage remaining work for the security claim.
-- **Review-plan remainder**: P2.4 (a Linux CI job — glibc surfaces heap bugs
-  macOS masks, worth landing before `abi-v1` ossifies); the rest of P3
-  (DX/docs — LSP, diagnostics; this P3.2 STATE/HANDOVER split is now done); P4
-  (external constant-time review, perf, deferred ergonomics).
+  are unit-local) — recommend not grinding it.
 - **Borrow checker** is pre-Polonius — sound but over-rejects; the documented
   over-rejections are in [`borrow-check-limitations.md`](borrow-check-limitations.md),
   deferred to the Polonius migration.
