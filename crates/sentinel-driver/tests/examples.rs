@@ -183,6 +183,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // `[secret i32]` state permuted IN PLACE via index assignment (ADR 0050),
     // constant-time via ct_rotl32. 42 = reproduced the RFC 8439 §2.3.2 block.
     ("examples/security/chacha20_block.sentinel", 42),
+    // SipHash-2-4 keyed MAC over a public message + 128-bit secret key
+    // (std::security::siphash) — branch-free ARX over `secret i64` state. 42 =
+    // reproduced the canonical 0xa129ca6149be45e5 vector AND a tampered message
+    // produced a different tag.
+    ("examples/security/siphash24.sentinel", 42),
 ];
 
 #[test]
@@ -223,6 +228,11 @@ fn chacha_quarter_round() {
 #[test]
 fn chacha20_block_constant_time() {
     check_example("examples/security/chacha20_block.sentinel", "chacha20_block", 42);
+}
+
+#[test]
+fn siphash24_keyed_mac() {
+    check_example("examples/security/siphash24.sentinel", "siphash24", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

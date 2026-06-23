@@ -1,0 +1,45 @@
+// examples/security/siphash24.sentinel — the SipHash-2-4 keyed MAC.
+//
+// Computes a SipHash-2-4 tag over a public message under a 128-bit secret key,
+// via `std::security::siphash::siphash24`. SipHash is a real keyed MAC / PRF; the
+// whole key path (the ARX permutation over four `secret i64` words) is branch-free
+// and constant-time, so this compiling at all is the guarantee (only the final
+// tag is `declassify`d).
+//
+// Self-checking against the canonical SipHash reference vector: key = the 16 bytes
+// 00 01 … 0f, message = the 15 bytes 00 01 … 0e, tag = 0xa129ca6149be45e5 (the
+// signed-i64 value -6833708440360172059). It also demonstrates the MAC property —
+// flipping one message byte changes the tag — so a forgery is detected. Exit 42 =
+// the reference tag matched AND a one-byte-tampered message produced a different tag.
+use std::security::siphash::siphash24;
+
+fn main() -> i64 {
+    // The 128-bit key 00:01:…:0f as two little-endian secret halves.
+    let k0: secret i64 = 506097522914230528;     // 0x0706050403020100
+    let k1: secret i64 = 1084818905618843912;    // 0x0f0e0d0c0b0a0908
+
+    // The canonical 15-byte message 00 01 … 0e.
+    let msg: [u8] = [
+        i64_to_u8(0),  i64_to_u8(1),  i64_to_u8(2),  i64_to_u8(3),
+        i64_to_u8(4),  i64_to_u8(5),  i64_to_u8(6),  i64_to_u8(7),
+        i64_to_u8(8),  i64_to_u8(9),  i64_to_u8(10), i64_to_u8(11),
+        i64_to_u8(12), i64_to_u8(13), i64_to_u8(14)
+    ];
+    let tag: i64 = declassify(siphash24(&msg, k0, k1));
+
+    // A one-byte-tampered copy: the last byte 0x0e -> 0x63. A correct MAC must
+    // produce a different tag (the forgery is detected).
+    let msg2: [u8] = [
+        i64_to_u8(0),  i64_to_u8(1),  i64_to_u8(2),  i64_to_u8(3),
+        i64_to_u8(4),  i64_to_u8(5),  i64_to_u8(6),  i64_to_u8(7),
+        i64_to_u8(8),  i64_to_u8(9),  i64_to_u8(10), i64_to_u8(11),
+        i64_to_u8(12), i64_to_u8(13), i64_to_u8(99)
+    ];
+    let tag2: i64 = declassify(siphash24(&msg2, k0, k1));
+
+    if tag == -6833708440360172059 && tag2 != tag {
+        42
+    } else {
+        0
+    }
+}

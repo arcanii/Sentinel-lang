@@ -1,0 +1,109 @@
+// std::security::siphash — SipHash-2-4, a fast keyed MAC / pseudo-random function.
+//
+// SipHash (Aumasson & Bernstein) authenticates a PUBLIC message under a 128-bit
+// SECRET key and returns a 64-bit tag. It is the standard short-input MAC behind
+// hash-table DoS protection and many `SipHash` keyed-hash APIs. The "2-4" names
+// the round counts: 2 SipRounds per absorbed message word, 4 in finalization.
+//
+// Everything that touches the secret key / state is BRANCH-FREE: the ARX
+// permutation (add / rotate-by-public-constant / xor) over four `secret i64`
+// words, with rotations through `std::security::ct::ct_rotl64`. The message
+// length and block count are PUBLIC, so the absorb loop's bounds and the byte
+// indices never depend on the key — the access pattern is data-independent. The
+// compiler's constant-time check verifies the whole MAC on every build, so a
+// program that uses this library compiling at all is a proof that the key path
+// stayed constant-time. Only the final tag is `declassify`d by the caller (for a
+// real verify, compare it in constant time rather than branching on it).
+use std::security::ct::ct_rotl64;
+
+// The four secret state words a SipRound produces (a Sentinel fn returns one
+// value, so the four-word state is bundled; the round takes the words as SCALAR
+// `secret i64` args — Copy — to avoid moving a by-value struct through the loop).
+struct SipState { v0: secret i64, v1: secret i64, v2: secret i64, v3: secret i64 }
+
+// One SipRound — the ARX permutation over the four secret state words.
+fn sipround(a: secret i64, b: secret i64, c: secret i64, d: secret i64) -> SipState {
+    let mut v0: secret i64 = a;
+    let mut v1: secret i64 = b;
+    let mut v2: secret i64 = c;
+    let mut v3: secret i64 = d;
+    v0 = v0 + v1; v1 = ct_rotl64(v1, 13); v1 = v1 ^ v0; v0 = ct_rotl64(v0, 32);
+    v2 = v2 + v3; v3 = ct_rotl64(v3, 16); v3 = v3 ^ v2;
+    v0 = v0 + v3; v3 = ct_rotl64(v3, 21); v3 = v3 ^ v0;
+    v2 = v2 + v1; v1 = ct_rotl64(v1, 17); v1 = v1 ^ v2; v2 = ct_rotl64(v2, 32);
+    SipState { v0: v0, v1: v1, v2: v2, v3: v3 }
+}
+
+// SipHash-2-4 over a public message `msg` (a non-consuming `&[u8]` borrow) keyed
+// by the 128-bit secret key `(k0, k1)` (the two little-endian halves). Returns
+// the 64-bit tag as a `secret i64`; the caller `declassify`s it (or feeds it to a
+// constant-time verify). `len(msg)` is public, so the loop structure is too.
+pub fn siphash24(msg: &[u8], k0: secret i64, k1: secret i64) -> secret i64 {
+    // The four SipHash initialization constants ("somepseudorandomlygenerated…"),
+    // widened public -> secret at the `let` so they can XOR into the secret key.
+    let c0: secret i64 = 8317987319222330741;    // 0x736f6d6570736575
+    let c1: secret i64 = 7237128888997146477;    // 0x646f72616e646f6d
+    let c2: secret i64 = 7816392313619706465;    // 0x6c7967656e657261
+    let c3: secret i64 = 8387220255154660723;    // 0x7465646279746573
+    let mut v0: secret i64 = c0 ^ k0;
+    let mut v1: secret i64 = c1 ^ k1;
+    let mut v2: secret i64 = c2 ^ k0;
+    let mut v3: secret i64 = c3 ^ k1;
+
+    // Absorb each full 8-byte little-endian message word: v3 ^= m, 2 rounds, v0 ^= m.
+    let n: i64 = len(*msg);
+    let nblocks: i64 = n / 8;
+    let mut blk: i64 = 0;
+    while blk < nblocks {
+        let base: i64 = blk * 8;
+        let mut mw: i64 = 0;
+        let mut j: i64 = 0;
+        while j < 8 {
+            let bi: i64 = u8_to_i64((*msg)[base + j]);
+            mw = mw | (bi << (j * 8));
+            j = j + 1;
+        }
+        let m: secret i64 = mw;          // public word -> secret (it mixes into the key path)
+        v3 = v3 ^ m;
+        let mut rr: i64 = 0;
+        while rr < 2 {
+            let s: SipState = sipround(v0, v1, v2, v3);
+            v0 = s.v0; v1 = s.v1; v2 = s.v2; v3 = s.v3;
+            rr = rr + 1;
+        }
+        v0 = v0 ^ m;
+        blk = blk + 1;
+    }
+
+    // Final block: the 0..7 leftover bytes, with the message length in the top byte.
+    let start: i64 = nblocks * 8;
+    let tail: i64 = n & 7;
+    let mut bw: i64 = (n & 255) << 56;
+    let mut t: i64 = 0;
+    while t < tail {
+        let bi: i64 = u8_to_i64((*msg)[start + t]);
+        bw = bw | (bi << (t * 8));
+        t = t + 1;
+    }
+    let mfin: secret i64 = bw;
+    v3 = v3 ^ mfin;
+    let mut rr2: i64 = 0;
+    while rr2 < 2 {
+        let s: SipState = sipround(v0, v1, v2, v3);
+        v0 = s.v0; v1 = s.v1; v2 = s.v2; v3 = s.v3;
+        rr2 = rr2 + 1;
+    }
+    v0 = v0 ^ mfin;
+
+    // Finalize: fold 0xff into v2, then 4 rounds; the tag is v0 ^ v1 ^ v2 ^ v3.
+    let ff: secret i64 = 255;
+    v2 = v2 ^ ff;
+    let mut rr3: i64 = 0;
+    while rr3 < 4 {
+        let s: SipState = sipround(v0, v1, v2, v3);
+        v0 = s.v0; v1 = s.v1; v2 = s.v2; v3 = s.v3;
+        rr3 = rr3 + 1;
+    }
+
+    (v0 ^ v1) ^ (v2 ^ v3)
+}
