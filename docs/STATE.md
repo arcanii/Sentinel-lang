@@ -62,11 +62,12 @@ the current state of the workspace without re-reading every commit.
   `--separate` and the merge path and asserted on (`crates/sentinel-driver/tests/
   examples.rs`). Shipped libraries: `std/security` (`ct` constant-time primitives
   incl. `ct_memcmp` + `ct_rotl64`/`ct_rotl32`; `siphash` SipHash-2-4 keyed MAC;
-  `chacha20` block + stream cipher; `poly1305` one-time MAC), `std/math/num`,
-  `std/bits/bits` (rotates), `std/bytes/bytes` (`[u8]` utilities over `&[u8]`
-  borrows), and `std/algorithms/seq` (in-place insertion `sort` + `binary_search`
-  over public `[i64]`). The crypto examples reproduce the canonical test vectors
-  (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 / §2.5.2). It has
+  `chacha20` block + stream cipher; `poly1305` one-time MAC over a secret key;
+  `aead` ChaCha20-Poly1305 AEAD composing them), `std/math/num`, `std/bits/bits`
+  (rotates), `std/bytes/bytes` (`[u8]` utilities over `&[u8]` borrows), and
+  `std/algorithms/seq` (in-place insertion `sort` + `binary_search` over public
+  `[i64]`). The crypto examples reproduce the canonical test vectors (SipHash
+  `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 / §2.5.2 / §2.8.2). It has
   surfaced + closed **five** language gaps so far, each ADR-first; the first four
   are fully self-hosted (snc + `scg`, byte-identical, both fixed points held), and
   ADR 0051's operand widen is too (its call-arg/array/return widens are snc-side
@@ -102,7 +103,7 @@ the current state of the workspace without re-reading every commit.
   "build real programs → find the gap → fix it". See the
   `sentinel_examples_and_corelibs` auto-memory.
 
-**1558 tests across the workspace**, four-check green (build · `cargo nextest`
+**1559 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

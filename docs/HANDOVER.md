@@ -120,23 +120,37 @@ language gaps — finding + fixing those is the most valuable output.
 - **`8b09774` — `std/algorithms/seq`** (in-place insertion `sort` via index-assign
   + `binary_search` over public `[i64]`) + `examples/algorithms/sort_search` — the
   first `algorithms` category (the public-data counterpart to `security`).
+- **`b625601` — ADR 0051 payoff cleanup:** the crypto libs (`ct` / `siphash` /
+  `poly1305`) dropped their widen-only `let`s (`ct_not` = `x ^ (0 - 1)`, etc.; the
+  SipHash per-word + Poly1305 per-limb `let _: secret …` widens) — same behavior,
+  re-verified by the example tests.
+- **`5f02d36` — ChaCha20-Poly1305 AEAD** (`std/security/aead::chacha20poly1305_encrypt`
+  + `examples/security/chacha20poly1305`, RFC 8439 §2.8): composes the shipped
+  ChaCha20 + Poly1305 (OTK gen counter-0 → encrypt counter-1 → MAC
+  AAD‖pad‖CT‖pad‖le64×2). Required **`poly1305` to take a SECRET key**
+  (`&[secret u8]`, read via the secrecy-preserving `(secret u8) as i64` cast —
+  `u8_to_i64` is public-only); the standalone poly1305 example now builds its key
+  via the `[u8] → [secret u8]` widen. Reproduces both the ciphertext + tag for the
+  §2.8.2 key/nonce. Only declassify boundaries: the public ciphertext + tag.
 - **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
   `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
   byte utilities must take `&[u8]`, not `[u8]` by value, or the first call consumes
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
-  - **AEAD / more crypto** — compose the shipped primitives into **ChaCha20-Poly1305**
-    (RFC 8439 §2.8, the AEAD construction: encrypt with ChaCha20, MAC the ciphertext
-    with Poly1305, the one-time Poly key from a ChaCha block-0 keystream). Or HMAC /
-    a hash. Likely few/no language changes (the pieces exist).
-  - **Demonstrate the ADR 0051 payoff** — simplify the crypto libs to drop their
-    `let m: secret i64 = <public word>;` widen-only ceremony now that operand /
-    call-arg widening is implicit (a clean follow-up; re-validated by the example
-    tests). Optionally mirror the call-arg/array/return widens into `scg`.
-  - **More `std` categories** — the owner wanted networking / threading / process /
-    algorithms; `algorithms` is now seeded (`seq`). Networking/threading/process need
-    runtime/syscall surface that does not exist yet (a real gap to scope first).
+  - **More crypto** — the AEAD is shipped (`aead`); next could be the full §2.8.2
+    114-byte vector (needs larger hand-built secret buffers — see the friction
+    below), a hash (SHA-256), HMAC, or an X25519 (needs bigint / field arithmetic).
+  - **Secret-buffer ergonomics** — the AEAD + ChaCha20-stream hit the same wall:
+    building variable-length `[secret u8]` is verbose (`Vec<secret T>` is REJECTED,
+    array-repeat `[x; N]` is unsupported, and only fixed-size literals / index-assign
+    work). Supporting `Vec<secret T>` (or a `[secret u8]` builder) is the next real
+    language gap the crypto track surfaced.
+  - **Mirror the ADR 0051 call-arg/array/return widens into `scg`** (operand widen
+    already self-hosted) — low value (pure type-checker ergonomic, no emitted-code
+    impact), but completes the self-hosting.
+  - **More `std` categories** — networking / threading / process need runtime/
+    syscall surface that does not exist yet (a real gap to scope first).
   - **Lower value (and partly blocked):** **Linux CI (P2.4)** needs a Linux/CI
     environment (cannot be validated on this macOS host — needs the owner's CI); the
     separate-comp tail (class/generic-instance dedup) is explicitly low-value; the
