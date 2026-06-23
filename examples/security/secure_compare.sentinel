@@ -1,0 +1,45 @@
+// examples/security/secure_compare.sentinel
+//
+// A constant-time fixed-width secure compare: decide whether two 4-word secret
+// tags are equal WITHOUT leaking, through timing, where (or whether early) they
+// differ. This is the shape of a MAC / authentication-tag verify, where a
+// data-dependent early-out would be an exploitable side channel.
+//
+// The branch-free core XORs each pair and OR-reduces the differences entirely in
+// the `secret` domain (via `std::security::ct`); only the FINAL "any difference"
+// accumulator is `declassify`d and compared against zero. The compiler's
+// constant-time check verifies the whole path on every build — so this program
+// compiling at all is the guarantee. Exit code 42 means: equal tags compared
+// equal AND a one-word-tampered tag compared unequal.
+use std::security::ct::ct_diff;
+use std::security::ct::ct_combine;
+
+// 0 iff every word of `a` equals the corresponding word of `b`. Constant-time:
+// no per-word comparison influences control flow; the reduction is pure bitwise.
+fn tags_equal(
+    a0: secret i64, a1: secret i64, a2: secret i64, a3: secret i64,
+    b0: secret i64, b1: secret i64, b2: secret i64, b3: secret i64,
+) -> i64 {
+    let mut acc: secret i64 = ct_diff(a0, b0);
+    acc = ct_combine(acc, ct_diff(a1, b1));
+    acc = ct_combine(acc, ct_diff(a2, b2));
+    acc = ct_combine(acc, ct_diff(a3, b3));
+    declassify(acc)
+}
+
+fn main() -> i64 {
+    // A secret 4-word tag.
+    let t0: secret i64 = 1111111111;
+    let t1: secret i64 = 2222222222;
+    let t2: secret i64 = 3333333333;
+    let t3: secret i64 = 4444444444;
+
+    // The genuine tag compared to itself: must be equal (accumulator 0).
+    let same: i64 = tags_equal(t0, t1, t2, t3, t0, t1, t2, t3);
+
+    // A tampered tag: one word flipped. Must be unequal (accumulator nonzero).
+    let u3: secret i64 = 9999999999;
+    let tampered: i64 = tags_equal(t0, t1, t2, t3, t0, t1, t2, u3);
+
+    if same == 0 && tampered != 0 { 42 } else { 0 }
+}

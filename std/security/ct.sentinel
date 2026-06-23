@@ -1,0 +1,56 @@
+// std::security::ct — constant-time primitives over `secret` scalars.
+//
+// Every function here is BRANCH-FREE: it computes on `secret` values using only
+// the data-independent operators (`^ & | + -`), never an `if`/`while` on a
+// secret, never a secret array index, never a secret divisor. The compiler's
+// constant-time check (`sentinel::mir::secret_leak`) verifies this on every
+// build — if any of these leaked, `snc build` would reject the module. So a
+// successful build of any program that uses this library is itself a proof that
+// the constant-time discipline held across the call graph.
+//
+// The one sanctioned escape is `declassify`, which the CALLER applies to a final
+// accumulator once the timing-sensitive work is done (e.g. the equality bit of a
+// MAC/tag verify). These primitives stay in the `secret` domain so they compose;
+// the caller decides when a result is safe to branch on.
+//
+// NOTE (language gap, tracked): a clean 0/1 `ct_eq` and a `ct_lt` need to
+// broadcast a sign/MSB into a full-width mask (`x >> (W-1)`), which needs shift
+// operators — Sentinel has none yet. Until shifts land, equality is expressed as
+// "XOR-diff is zero": `ct_diff` + `ct_combine` produce a secret accumulator that
+// is 0 iff all inputs matched, and the caller `declassify`s + compares `== 0`.
+
+// XOR difference of two secret words: `0` iff `a == b`, nonzero otherwise. The
+// building block of a constant-time equality — XOR each pair, then OR-reduce the
+// diffs with `ct_combine`.
+pub fn ct_diff(a: secret i64, b: secret i64) -> secret i64 {
+    a ^ b
+}
+
+// OR-accumulate a difference into a running accumulator. `ct_combine(acc,
+// ct_diff(a, b))` folds another pair into a "any difference seen" accumulator
+// that is `0` iff every folded pair was equal.
+pub fn ct_combine(acc: secret i64, diff: secret i64) -> secret i64 {
+    acc | diff
+}
+
+// Bitwise NOT, branch-free: `x ^ 0xFFFF...FF`. The all-ones constant is `0 - 1`
+// bound as `secret` (a public literal does not widen to `secret` in operand
+// position, so it is widened at the `let` boundary first).
+pub fn ct_not(x: secret i64) -> secret i64 {
+    let ones: secret i64 = 0 - 1;
+    x ^ ones
+}
+
+// Turn a secret selector bit (`0` or `1`) into a full-width mask: `0 -> 0`,
+// `1 -> -1` (all ones). Branch-free via two's-complement negation.
+pub fn ct_mask(bit: secret i64) -> secret i64 {
+    let zero: secret i64 = 0;
+    zero - bit
+}
+
+// Branch-free select: returns `a` when `mask` is all-ones, `b` when `mask` is
+// all-zeros. `(a & mask) | (b & ~mask)` — no branch on the secret selector.
+pub fn ct_select(mask: secret i64, a: secret i64, b: secret i64) -> secret i64 {
+    let nmask: secret i64 = ct_not(mask);
+    (a & mask) | (b & nmask)
+}

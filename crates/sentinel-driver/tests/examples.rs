@@ -1,0 +1,199 @@
+//! Examples-as-tests: the `std/` core libraries + `examples/` programs that
+//! `use` them, each wired as a pass-test.
+//!
+//! This is the examples-as-tests + core-library track. Each example is a real,
+//! idiomatic Sentinel program that doubles as a feature test of the library it
+//! exercises. Every example is built **twice** from the SAME source:
+//!
+//!   1. `snc build <entry> --separate` — the per-unit separate-compilation back
+//!      end (ADR 0037 (a)): each module → its own object, linked via
+//!      module-qualified `abi-v1` symbols. This dogfoods the module system +
+//!      `--separate` on real multi-module programs (the best test of those
+//!      features), including the incremental `.o.fp` cache.
+//!   2. `snc build <entry>` — the default merge path.
+//!
+//! Both must succeed, and both must run to the SAME exit code as each other and
+//! as the table's expected value (a free differential between the two back ends,
+//! and the "exit-code-is-the-answer" convention). A successful build also means
+//! the constant-time check (`sentinel::mir::secret_leak`) passed — so an example
+//! that carries `secret` values (e.g. `secure_compare`) compiling at all is a
+//! proof that the constant-time discipline held across the call graph.
+//!
+//! ## How a multi-file program is assembled here
+//!
+//! Module discovery roots at the entry file's parent directory, and
+//! `use a::b::Item` maps to `<root>/a/b.sentinel` (no parent traversal). So an
+//! entry that does `use std::security::ct::...` needs `std/` to sit next to it.
+//! The repo keeps a clean top-level split (`std/` and `examples/`, each
+//! subdivided by functional category), and this harness reconstructs a buildable
+//! project in a temp dir: it copies the whole `std/` tree next to the example
+//! entry (flattened to the temp root). The repo `.sentinel` files stay the
+//! source of truth; the temp copy is only the build sandbox (and keeps the repo
+//! free of `.o` / `.o.fp` / linked binaries).
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// The repository root (two levels up from this crate's manifest dir,
+/// `crates/sentinel-driver`).
+fn repo_root() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .expect("canonicalize repo root")
+}
+
+/// A fresh temp project directory, unique per test + process so the parallel
+/// runner never collides. Best-effort cleared first.
+fn temp_project(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("snc_examples_{}_{}", std::process::id(), name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp project dir");
+    dir
+}
+
+/// Recursively copy `src` into `dst` (creating `dst`), `.sentinel` files and
+/// all. Used to drop the whole `std/` tree next to an example entry.
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("create dst dir");
+    for entry in std::fs::read_dir(src).expect("read_dir") {
+        let entry = entry.expect("dir entry");
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).expect("copy file");
+        }
+    }
+}
+
+/// Assemble a buildable temp project for one example: copy the repo's `std/`
+/// tree to `<temp>/std`, and the example entry to `<temp>/<stem>.sentinel`
+/// (flattened to the root so `use std::...` resolves). Returns the temp entry.
+fn assemble(rel_entry: &str, test_name: &str) -> PathBuf {
+    let root = repo_root();
+    let dir = temp_project(test_name);
+    copy_dir_recursive(&root.join("std"), &dir.join("std"));
+    let src_entry = root.join(rel_entry);
+    let stem = src_entry
+        .file_name()
+        .expect("entry file name")
+        .to_owned();
+    let temp_entry = dir.join(stem);
+    std::fs::copy(&src_entry, &temp_entry).expect("copy example entry");
+    temp_entry
+}
+
+/// Run a compiled binary and return its exit code (the program's tail value).
+fn run_exit(exe: &Path) -> i32 {
+    let run = Command::new(exe).output().expect("run compiled binary");
+    run.status.code().expect("process exited normally")
+}
+
+/// Build `entry` with `snc build <entry> --separate -o <exe>` (the per-unit
+/// back end), run it, return its exit code.
+fn build_and_run_separate(entry: &Path) -> i32 {
+    let exe = entry.with_extension("sep");
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg(entry)
+        .arg("--separate")
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("run snc --separate");
+    assert!(
+        out.status.success(),
+        "expected a successful `--separate` build of {}; stderr:\n{}",
+        entry.display(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    run_exit(&exe)
+}
+
+/// Build `entry` with `snc build <entry> -o <exe>` (the merge path), run it,
+/// return its exit code.
+fn build_and_run_merge(entry: &Path) -> i32 {
+    let exe = entry.with_extension("mrg");
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg(entry)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("run snc build");
+    assert!(
+        out.status.success(),
+        "expected a successful merge build of {}; stderr:\n{}",
+        entry.display(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    run_exit(&exe)
+}
+
+/// Build one example both ways from the same source, assert both back ends agree
+/// with each other and with `expected` exit.
+fn check_example(rel_entry: &str, test_name: &str, expected: i32) {
+    let entry = assemble(rel_entry, test_name);
+    let sep = build_and_run_separate(&entry);
+    let mrg = build_and_run_merge(&entry);
+    assert_eq!(
+        sep, mrg,
+        "{rel_entry}: --separate exit {sep} != merge exit {mrg} (back-end differential)"
+    );
+    assert_eq!(
+        sep, expected,
+        "{rel_entry}: exit {sep} != expected {expected}"
+    );
+}
+
+/// The example corpus: `(repo-relative entry, expected exit code)`. Every
+/// `.sentinel` file under `examples/` must appear here (enforced by
+/// `every_example_is_registered` below) so no example is silently untested.
+const EXAMPLES: &[(&str, i32)] = &[
+    // Constant-time fixed-width secure compare over `secret` scalars
+    // (std::security::ct). 42 = equal-compared-equal AND tampered-compared-unequal.
+    ("examples/security/secure_compare.sentinel", 42),
+];
+
+#[test]
+fn secure_compare_constant_time() {
+    check_example("examples/security/secure_compare.sentinel", "secure_compare", 42);
+}
+
+/// Coverage guard: every `.sentinel` program under `examples/` must be
+/// registered in `EXAMPLES`, so adding an example file without wiring it as a
+/// test fails CI rather than going silently unexercised.
+#[test]
+fn every_example_is_registered() {
+    fn collect(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("read_dir examples") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                collect(&path, root, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("sentinel") {
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("strip repo root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push(rel);
+            }
+        }
+    }
+    let root = repo_root();
+    let mut found = Vec::new();
+    collect(&root.join("examples"), &root, &mut found);
+    found.sort();
+
+    let mut registered: Vec<String> = EXAMPLES.iter().map(|(p, _)| (*p).to_owned()).collect();
+    registered.sort();
+
+    assert_eq!(
+        found, registered,
+        "every example under examples/ must be registered in EXAMPLES (and vice versa)"
+    );
+}
