@@ -60,9 +60,11 @@ the current state of the workspace without re-reading every commit.
   top-level `std/` (functional categories) + `examples/` corpus of real,
   idiomatic Sentinel programs that double as feature tests — each built BOTH via
   `--separate` and the merge path and asserted on (`crates/sentinel-driver/tests/
-  examples.rs`). Shipped: `std/security/ct` (constant-time primitives incl.
-  `ct_memcmp` + `ct_rotl64`), `std/math/num`, `std/bits/bits` (rotates). It has
-  surfaced + closed **two** language gaps so far, each ADR-first + fully
+  examples.rs`). The agreed starter set is shipped — `std/security/ct`
+  (constant-time primitives incl. `ct_memcmp` + `ct_rotl64`), `std/math/num`,
+  `std/bits/bits` (rotates), `std/bytes/bytes` (`[u8]` utilities over `&[u8]`
+  borrows). It has surfaced + closed **two** language gaps so far, each ADR-first
+  + fully
   self-hosted (snc + `scg`, byte-identical, both fixed points held):
   - **`[secret T]` arrays** — arrays of secret elements (ADR 0047,
     `ArrayElem::Secret`) — enabling a variable-length constant-time `memcmp` over
@@ -75,7 +77,7 @@ the current state of the workspace without re-reading every commit.
   `i64_to_i32`), blocking a 32-bit ChaCha quarter-round. See the
   `sentinel_examples_and_corelibs` auto-memory.
 
-**1539 tests across the workspace**, four-check green (build · `cargo nextest`
+**1540 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

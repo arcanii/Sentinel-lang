@@ -79,13 +79,21 @@ language gaps — finding + fixing those is the most valuable output.
     + `std/security/ct::ct_rotl64` + a **SipHash-style ARX round over secret words**
     (`examples/security/siphash_round`) — the recognizable branch-free primitive.
     Validated by `tests/pass/c53_shift` across all 8 selfhost differentials.
+- **Also done:** `3e98443` **`std/bytes`** (`eq`/`find`/`contains`/`count`/
+  `starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/scan` — the last of
+  the agreed `ct`/`bytes`/`bits`/`math` set. (Finding: byte utilities must take
+  `&[u8]`, not `[u8]` by value, or the first call consumes the array; `&[u8]`
+  params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
-  - **`std/bytes`** (`[u8]` / string utilities — `eq`/`copy`/`fill`/`find`) — a
-    shift-free lib + mirroring examples, plus ergonomic gaps (e.g. a public→secret
-    operand widen).
   - **The i32-construction gap** — an int literal is `i64` with no `i64_to_i32`, so
     i32 values can't be built, blocking a true 32-bit **ChaCha quarter-round**.
-    Closing it (a conversion builtin / i32-literal coercion) would unblock ChaCha.
+    Closing it (a conversion builtin / i32-literal coercion, ADR-first + selfhost
+    mirror like shifts) would unblock ChaCha.
+  - **Secret ergonomics** — a public→secret operand widen (so a constant needn't be
+    pre-bound `secret` before combining with a secret), an array-level `[u8] ->
+    [secret u8]` widen.
+  - More examples / additional `std` categories (the owner wanted functional
+    categories — networking/threading/process/algorithms/… as the language grows).
   Keep both bootstrap fixed points + the selfhost differentials byte-identical (the
   full nextest is the gate).
 
