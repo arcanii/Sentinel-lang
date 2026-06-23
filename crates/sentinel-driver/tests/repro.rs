@@ -23,7 +23,8 @@
 //! own metadata. snc writes `<output>.o` beside the executable and
 //! leaves it on disk.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn workspace_root() -> PathBuf {
@@ -94,3 +95,90 @@ repro!(repro_c17_generics_monomorphization, "c17_go_no_go.sentinel");
 repro!(repro_c35e_chained_perform_with_capture, "c35e_chained_perform_with_capture.sentinel");
 repro!(repro_c36b_nested_handle, "c36b_nested_handle_basic.sentinel");
 repro!(repro_c24_raii_drop, "c24_go_no_go.sentinel");
+
+// ===== ADR 0037 (3/N): per-unit `.o` reproducibility (`--separate`) =====
+//
+// Incremental caching (3/N) reuses an unchanged unit's cached object on the
+// next build, so EACH separately-compiled unit's `.o` must be byte-identical
+// across two independent compilations of the same source — the multi-file
+// analogue of the single-file checks above. If a future change emits a unit
+// from a HashMap/HashSet iteration order, two `snc` processes (two map seeds)
+// diverge and this fails, surfacing the nondeterminism before caching ships.
+
+/// Write a small multi-file project under `root` exercising the `--separate`
+/// per-unit surface: a cross-module extern fn (`add`), a cross-module struct
+/// (`Point`), and a generic instantiated over both a primitive and that struct
+/// (`id<i64>` / `id<Point>` → origin-qualified `linkonce_odr` symbols, the
+/// newest per-unit codegen path). Returns the entry path.
+fn write_separate_project(root: &Path) -> PathBuf {
+    let w = |rel: &str, src: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().expect("rel has a parent")).expect("mkdir");
+        std::fs::write(&p, src).expect("write source");
+    };
+    w(
+        "util/math.sentinel",
+        "pub fn id<T>(x: T) -> T { x }\npub fn add(a: i64, b: i64) -> i64 { a + b }\n",
+    );
+    w("geo.sentinel", "pub struct Point { x: i64, y: i64 }\n");
+    w(
+        "main.sentinel",
+        "use util::math::id;\nuse util::math::add;\nuse geo::Point;\n\
+         fn main() -> i64 {\n\
+         \x20   let p: Point = Point { x: 1, y: 1 };\n\
+         \x20   let q: Point = id(p);\n\
+         \x20   add(id(20), q.x + q.y + 18) + 2\n\
+         }\n",
+    );
+    root.join("main.sentinel")
+}
+
+/// Build `entry` with `--separate` into a fresh `out` dir and return every
+/// emitted per-unit object keyed by file name (`main.o`, `util_math.o`, …).
+/// Each build is a fresh `snc` process (hence a fresh HashMap seed).
+fn compile_separate_objects(entry: &Path, out: &Path) -> BTreeMap<String, Vec<u8>> {
+    std::fs::create_dir_all(out).expect("create out dir");
+    let status = Command::new(snc_binary())
+        .arg("build")
+        .arg(entry)
+        .arg("--separate")
+        .arg("-o")
+        .arg(out.join("main"))
+        .status()
+        .expect("snc invocation failed");
+    assert!(status.success(), "snc build --separate failed");
+    let mut objs = BTreeMap::new();
+    for ent in std::fs::read_dir(out).expect("read out dir") {
+        let path = ent.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) == Some("o") {
+            let name = path.file_name().expect("file name").to_string_lossy().into_owned();
+            objs.insert(name, std::fs::read(&path).expect("read object"));
+        }
+    }
+    objs
+}
+
+#[test]
+fn repro_separate_per_unit_objects() {
+    let base = workspace_root().join("target/sentinel-repro-separate");
+    let _ = std::fs::remove_dir_all(&base);
+    let entry = write_separate_project(&base.join("proj"));
+    let a = compile_separate_objects(&entry, &base.join("out_a"));
+    let b = compile_separate_objects(&entry, &base.join("out_b"));
+
+    assert_eq!(
+        a.keys().collect::<Vec<_>>(),
+        b.keys().collect::<Vec<_>>(),
+        "the two builds emitted different per-unit object sets"
+    );
+    assert!(a.len() >= 3, "expected ≥3 units (main + util_math + geo); got {:?}", a.keys());
+    for (name, bytes_a) in &a {
+        assert_eq!(
+            bytes_a,
+            &b[name],
+            "unit `{name}` is not byte-identical across two independent `--separate` \
+             builds — per-unit codegen is nondeterministic (likely a HashMap/HashSet \
+             iterated to emit; emit from a sorted order). This blocks (3/N) caching."
+        );
+    }
+}
