@@ -79,21 +79,28 @@ language gaps — finding + fixing those is the most valuable output.
     + `std/security/ct::ct_rotl64` + a **SipHash-style ARX round over secret words**
     (`examples/security/siphash_round`) — the recognizable branch-free primitive.
     Validated by `tests/pass/c53_shift` across all 8 selfhost differentials.
-- **Also done:** `3e98443` **`std/bytes`** (`eq`/`find`/`contains`/`count`/
-  `starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/scan` — the last of
-  the agreed `ct`/`bytes`/`bits`/`math` set. (Finding: byte utilities must take
-  `&[u8]`, not `[u8]` by value, or the first call consumes the array; `&[u8]`
-  params + `(*a)[i]` indexing work today.)
+  - **`99eadb5` (Phase 1, snc) + `0b69a7b` (Phase 2, selfhost mirror) — integer
+    cast `x as T` (ADR 0049 A1–A4).** Closes the i32-construction gap (an int
+    literal is `i64`); trunc/sext/zext, preserves secrecy, no CT sink (a new
+    `ExprKind::Cast`, the `as` token reused; chosen over conversion builtins, which
+    would shift FnIds in dumps). Shipped `std/security/ct::ct_rotl32` + a true
+    32-bit **ChaCha quarter-round over `secret i32` words**
+    (`examples/security/chacha_qr`) reproducing the RFC 8439 §2.1.1 vector.
+    Validated by `tests/pass/c54_cast`. The `u8` conversion builtins remain.
+- **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
+  `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
+  scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
+  byte utilities must take `&[u8]`, not `[u8]` by value, or the first call consumes
+  the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
-  - **The i32-construction gap** — an int literal is `i64` with no `i64_to_i32`, so
-    i32 values can't be built, blocking a true 32-bit **ChaCha quarter-round**.
-    Closing it (a conversion builtin / i32-literal coercion, ADR-first + selfhost
-    mirror like shifts) would unblock ChaCha.
+  - **More examples / `std` categories** — the owner wanted functional categories
+    (networking/threading/process/algorithms/…) as the language grows; e.g. a full
+    ChaCha20 block or a SipHash/Poly1305 MAC built on the now-shipped primitives.
   - **Secret ergonomics** — a public→secret operand widen (so a constant needn't be
     pre-bound `secret` before combining with a secret), an array-level `[u8] ->
     [secret u8]` widen.
-  - More examples / additional `std` categories (the owner wanted functional
-    categories — networking/threading/process/algorithms/… as the language grows).
+  - **Lower value:** the separate-comp tail, Linux CI (P2.4), the deeper
+    post-codegen / post-optimization constant-time verifier (research-hard).
   Keep both bootstrap fixed points + the selfhost differentials byte-identical (the
   full nextest is the gate).
 

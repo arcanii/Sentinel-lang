@@ -29,9 +29,9 @@ the example entry. See the harness doc-comment for the mechanics.
 
 | Category    | Module(s)            | Status                                   |
 | ----------- | -------------------- | ---------------------------------------- |
-| `security`  | `ct`                 | ✅ ct scalars + `ct_memcmp` over `[secret u8]` + `ct_rotl64` |
+| `security`  | `ct`                 | ✅ ct scalars + `ct_memcmp` over `[secret u8]` + `ct_rotl64`/`ct_rotl32` |
 | `math`      | `num`                | ✅ min/max/abs/clamp                       |
-| `bits`      | `bits`               | ✅ `rotl64`/`rotr64` (+ `rotl32`/`rotr32`, awaiting i32 construction) |
+| `bits`      | `bits`               | ✅ `rotl64`/`rotr64`/`rotl32`/`rotr32`     |
 | `bytes`     | `bytes`              | ✅ `eq`/`find`/`contains`/`count`/`starts_with`/`repeat` (over `&[u8]`) |
 
 The list grows as examples force new building blocks.
@@ -51,11 +51,14 @@ the most valuable output of this corpus.
   the `bits` rotate library and the SipHash-style ARX round
   (`examples/security/siphash_round`). (Phase 1 lands shifts in `snc`; the
   self-hosted mirror is Phase 2.)
-- **Open — i32 values are unconstructible.** An integer literal is `i64` and does
-  not coerce to `i32`, and there is no `i64_to_i32`, so a 32-bit primitive (e.g. a
-  ChaCha quarter-round, which is inherently 32-bit) can't be built yet — hence the
-  ARX demo uses 64-bit SipHash. The 32-bit rotates in `bits` are correct and
-  compile-checked but not yet runnable. The next gap.
+- **Fixed — the integer cast `x as T`** (ADR 0049). Closes the "i32 values are
+  unconstructible" gap (an integer literal is `i64`): `x as i32` truncates / `x as
+  i64` sign-extends, preserving secrecy and constant-time (no CT sink). Unblocks a
+  true 32-bit **ChaCha quarter-round** over `secret i32` words
+  (`examples/security/chacha_qr`, RFC 8439 vector) and makes the `bits` 32-bit
+  rotates runnable.
 
-When a gap blocks a genuinely idiomatic library, that block is the signal to add
-the feature (ADR-first if it touches the frozen `abi-v1` contract).
+All three surfaced gaps are now closed and fully self-hosted (snc + `scg`,
+byte-identical, both bootstrap fixed points held). When a gap blocks a genuinely
+idiomatic library, that block is the signal to add the feature (ADR-first if it
+touches the frozen `abi-v1` contract).

@@ -63,9 +63,9 @@ the current state of the workspace without re-reading every commit.
   examples.rs`). The agreed starter set is shipped — `std/security/ct`
   (constant-time primitives incl. `ct_memcmp` + `ct_rotl64`), `std/math/num`,
   `std/bits/bits` (rotates), `std/bytes/bytes` (`[u8]` utilities over `&[u8]`
-  borrows). It has surfaced + closed **two** language gaps so far, each ADR-first
-  + fully
-  self-hosted (snc + `scg`, byte-identical, both fixed points held):
+  borrows). It has surfaced + closed **three** language gaps so far, each
+  ADR-first + fully self-hosted (snc + `scg`, byte-identical, both fixed points
+  held):
   - **`[secret T]` arrays** — arrays of secret elements (ADR 0047,
     `ArrayElem::Secret`) — enabling a variable-length constant-time `memcmp` over
     secret bytes (`examples/security/ct_memcmp`).
@@ -73,11 +73,14 @@ the current state of the workspace without re-reading every commit.
     *secret* amount is rejected, a secret value by a public amount is
     constant-time) — enabling `std/bits` + a SipHash-style ARX round over secret
     words (`examples/security/siphash_round`).
-  Next gap surfaced: i32 values are unconstructible (an int literal is i64, no
-  `i64_to_i32`), blocking a 32-bit ChaCha quarter-round. See the
+  - **Integer cast `x as T`** (ADR 0049) — closes the "i32 unconstructible" gap
+    (an int literal is `i64`); trunc/sext/zext, preserves secrecy, no CT sink —
+    enabling a true 32-bit **ChaCha quarter-round** over `secret i32` words
+    reproducing the RFC 8439 vector (`examples/security/chacha_qr`).
+  See the
   `sentinel_examples_and_corelibs` auto-memory.
 
-**1540 tests across the workspace**, four-check green (build · `cargo nextest`
+**1546 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
