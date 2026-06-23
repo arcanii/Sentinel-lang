@@ -1,0 +1,76 @@
+// examples/security/chacha20_stream.sentinel — the ChaCha20 stream cipher.
+//
+// Encrypts a message under a 256-bit key + 96-bit nonce by XORing it with the
+// ChaCha20 keystream (RFC 8439 §2.4), via `std::security::chacha20::chacha20_xor`
+// (which runs the shipped block function per 64-byte chunk and serializes each
+// keystream word little-endian). The whole keystream path is branch-free over
+// `secret i32`/`secret u8`, so the constant-time check verifies the cipher on
+// every build — and decryption is the same XOR, so encrypt then decrypt recovers
+// the plaintext.
+//
+// Self-checking against the RFC 8439 §2.4.2 test vector (key = 00 01 … 1f,
+// nonce = 00:00:00:00:00:00:00:4a:00:00:00:00, initial counter = 1): encrypting
+// the first 16 plaintext bytes "Ladies and Gentl" yields the published ciphertext
+// 6e 2e 35 9a 25 68 f9 80 41 ba 07 28 dd 0d 69 81. Exit 42 = the ciphertext matched
+// the reference AND decrypting it recovered the plaintext.
+use std::security::chacha20::chacha20_xor;
+
+fn main() -> i64 {
+    // The 256-bit key 00:01:…:1f as 8 little-endian words.
+    let k0: secret i32 = 50462976 as i32;    let k1: secret i32 = 117835012 as i32;
+    let k2: secret i32 = 185207048 as i32;   let k3: secret i32 = 252579084 as i32;
+    let k4: secret i32 = 319951120 as i32;   let k5: secret i32 = 387323156 as i32;
+    let k6: secret i32 = 454695192 as i32;   let k7: secret i32 = 522067228 as i32;
+    // The 96-bit nonce 00:00:00:00 00:00:00:4a 00:00:00:00 as 3 little-endian words.
+    let nz: secret i32 = 0 as i32;
+    let nm: secret i32 = 1241513984 as i32;  // 0x4a000000
+    let ctr1: secret i32 = 1 as i32;         // RFC initial block counter
+
+    // Plaintext "Ladies and Gentl" (the first 16 bytes of the §2.4.2 message).
+    let p0: secret u8 = i64_to_u8(76);  let p1: secret u8 = i64_to_u8(97);
+    let p2: secret u8 = i64_to_u8(100); let p3: secret u8 = i64_to_u8(105);
+    let p4: secret u8 = i64_to_u8(101); let p5: secret u8 = i64_to_u8(115);
+    let p6: secret u8 = i64_to_u8(32);  let p7: secret u8 = i64_to_u8(97);
+    let p8: secret u8 = i64_to_u8(110); let p9: secret u8 = i64_to_u8(100);
+    let p10: secret u8 = i64_to_u8(32); let p11: secret u8 = i64_to_u8(71);
+    let p12: secret u8 = i64_to_u8(101); let p13: secret u8 = i64_to_u8(110);
+    let p14: secret u8 = i64_to_u8(116); let p15: secret u8 = i64_to_u8(108);
+    let pt: [secret u8] = [p0, p1, p2, p3, p4, p5, p6, p7,
+                          p8, p9, p10, p11, p12, p13, p14, p15];
+
+    // Encrypt. (key/nonce/msg are consumed by value, so each call gets fresh arrays.)
+    let key1: [secret i32] = [k0, k1, k2, k3, k4, k5, k6, k7];
+    let nonce1: [secret i32] = [nz, nm, nz];
+    let ct: [secret u8] = chacha20_xor(pt, key1, nonce1, ctr1);
+
+    // Check the ciphertext against the RFC 8439 §2.4.2 reference.
+    let exp: [i64] = [110, 46, 53, 154, 37, 104, 249, 128,
+                      65, 186, 7, 40, 221, 13, 105, 129];
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 16 {
+        let cb: i64 = u8_to_i64(declassify(ct[i]));
+        bad = bad | (cb ^ exp[i]);
+        i = i + 1;
+    }
+
+    // Decrypt (the same XOR) and confirm it recovers the plaintext.
+    let key2: [secret i32] = [k0, k1, k2, k3, k4, k5, k6, k7];
+    let nonce2: [secret i32] = [nz, nm, nz];
+    let back: [secret u8] = chacha20_xor(ct, key2, nonce2, ctr1);
+    let plain: [i64] = [76, 97, 100, 105, 101, 115, 32, 97,
+                        110, 100, 32, 71, 101, 110, 116, 108];
+    let mut bad2: i64 = 0;
+    let mut j: i64 = 0;
+    while j < 16 {
+        let bb: i64 = u8_to_i64(declassify(back[j]));
+        bad2 = bad2 | (bb ^ plain[j]);
+        j = j + 1;
+    }
+
+    if bad == 0 && bad2 == 0 {
+        42
+    } else {
+        0
+    }
+}

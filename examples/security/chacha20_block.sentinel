@@ -1,102 +1,47 @@
 // examples/security/chacha20_block.sentinel — a full ChaCha20 block.
 //
 // The ChaCha20 block function (RFC 8439 §2.3) is the keystream core of the
-// ChaCha20 stream cipher: it runs 20 rounds of the ARX quarter-round over a
-// 16-word state, then adds the original state back (the feed-forward). Here the
-// whole 16-word state is SECRET (`[secret i32]`, ADR 0047) and is permuted IN
-// PLACE via mutable index assignment `state[i] = ...` (ADR 0050) — the idiomatic
-// way to express an in-place permutation, and the gap this example forced.
+// ChaCha20 stream cipher: 20 rounds of the ARX quarter-round over a 16-word state,
+// then add the original state back (the feed-forward). Here the whole 16-word
+// state is SECRET (`[secret i32]`, ADR 0047) and is permuted IN PLACE via mutable
+// index assignment (ADR 0050), inside `std::security::chacha20::chacha20_block` —
+// the reusable block this example shares with the ChaCha20 stream cipher.
 //
-// Every operation on the secret state is data-independent: 32-bit wrapping adds
-// (`add i32`), XORs, and rotations by PUBLIC constants (16/12/8/7) through
-// `std::security::ct::ct_rotl32` (ADR 0048 shifts + ADR 0049 i32 cast). The
-// quarter-round is applied to columns and diagonals by PUBLIC indices read from
-// `quads` — so neither the access pattern nor the control flow depends on the
-// secret words. The compiler's constant-time check verifies the whole block on
-// every build, so this program compiling at all is the guarantee.
+// Every operation on the secret state is data-independent (32-bit wrapping adds,
+// XORs, rotations by PUBLIC constants), so the compiler's constant-time check
+// verifies the whole block on every build — this program compiling at all is the
+// guarantee.
 //
 // Self-checking against the RFC 8439 §2.3.2 test vector (key = 00:01:..:1f,
 // nonce = 00:00:00:09:00:00:00:4a:00:00:00:00, counter = 1). Exit 42 = the block
 // reproduced the reference keystream block (all 16 output words matched).
-use std::security::ct::ct_rotl32;
-
-// The four secret words a quarter-round returns (Sentinel fns return one value).
-struct Qr { a: secret i32, b: secret i32, c: secret i32, d: secret i32 }
-
-// The ChaCha quarter-round (RFC 8439 §2.1) over four secret 32-bit words: add,
-// xor, rotate-left-by-public-constant — branch-free and constant-time.
-fn qr(a0: secret i32, b0: secret i32, c0: secret i32, d0: secret i32) -> Qr {
-    let mut a: secret i32 = a0;
-    let mut b: secret i32 = b0;
-    let mut c: secret i32 = c0;
-    let mut d: secret i32 = d0;
-    a = a + b; d = d ^ a; d = ct_rotl32(d, 16);
-    c = c + d; b = b ^ c; b = ct_rotl32(b, 12);
-    a = a + b; d = d ^ a; d = ct_rotl32(d, 8);
-    c = c + d; b = b ^ c; b = ct_rotl32(b, 7);
-    Qr { a: a, b: b, c: c, d: d }
-}
+use std::security::chacha20::chacha20_block;
 
 fn main() -> i64 {
-    // The initial 16-word state: constants | key (8) | counter | nonce (3), each
-    // a 32-bit word built with the `as i32` cast (a literal is `i64`). `secret
-    // i32` is Copy, so the same words seed both the working `state` and `orig`.
+    // The initial 16-word state: constants | key (8) | counter | nonce (3), each a
+    // 32-bit word built with the `as i32` cast (a literal is `i64`).
     let w0: secret i32 = 1634760805 as i32;   // 0x61707865
-    let w1: secret i32 = 857760878 as i32;   // 0x3320646e
+    let w1: secret i32 = 857760878 as i32;    // 0x3320646e
     let w2: secret i32 = 2036477234 as i32;   // 0x79622d32
     let w3: secret i32 = 1797285236 as i32;   // 0x6b206574
-    let w4: secret i32 = 50462976 as i32;   // 0x03020100
-    let w5: secret i32 = 117835012 as i32;   // 0x07060504
-    let w6: secret i32 = 185207048 as i32;   // 0x0b0a0908
-    let w7: secret i32 = 252579084 as i32;   // 0x0f0e0d0c
-    let w8: secret i32 = 319951120 as i32;   // 0x13121110
-    let w9: secret i32 = 387323156 as i32;   // 0x17161514
+    let w4: secret i32 = 50462976 as i32;     // 0x03020100
+    let w5: secret i32 = 117835012 as i32;    // 0x07060504
+    let w6: secret i32 = 185207048 as i32;    // 0x0b0a0908
+    let w7: secret i32 = 252579084 as i32;    // 0x0f0e0d0c
+    let w8: secret i32 = 319951120 as i32;    // 0x13121110
+    let w9: secret i32 = 387323156 as i32;    // 0x17161514
     let w10: secret i32 = 454695192 as i32;   // 0x1b1a1918
     let w11: secret i32 = 522067228 as i32;   // 0x1f1e1d1c
-    let w12: secret i32 = 1 as i32;   // 0x00000001
+    let w12: secret i32 = 1 as i32;           // counter
     let w13: secret i32 = 150994944 as i32;   // 0x09000000
-    let w14: secret i32 = 1241513984 as i32;   // 0x4a000000
-    let w15: secret i32 = 0 as i32;   // 0x00000000
-    let mut state: [secret i32] = [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15];
-    let orig: [secret i32] = [w0, w1, w2, w3, w4, w5, w6, w7, w8, w9, w10, w11, w12, w13, w14, w15];
+    let w14: secret i32 = 1241513984 as i32;  // 0x4a000000
+    let w15: secret i32 = 0 as i32;
+    let state: [secret i32] = [w0, w1, w2, w3, w4, w5, w6, w7,
+                               w8, w9, w10, w11, w12, w13, w14, w15];
 
-    // The 8 quarter-round index quadruples of a double-round: 4 columns then 4
-    // diagonals (RFC 8439 §2.3.1). Public indices — flattened, 4 per quad.
-    let quads: [i64] = [
-        0, 4, 8, 12,   1, 5, 9, 13,   2, 6, 10, 14,   3, 7, 11, 15,
-        0, 5, 10, 15,  1, 6, 11, 12,  2, 7, 8, 13,    3, 4, 9, 14
-    ];
+    let out: [secret i32] = chacha20_block(state);
 
-    // 20 rounds = 10 double-rounds. Each double-round applies the quarter-round
-    // to the 8 quadruples: read the four secret words, mix, write them back via
-    // index assignment `state[i] = ...` (public index, secret value).
-    let mut r: i64 = 0;
-    while r < 10 {
-        let mut q: i64 = 0;
-        while q < 8 {
-            let base: i64 = q * 4;
-            let i0: i64 = quads[base];
-            let i1: i64 = quads[base + 1];
-            let i2: i64 = quads[base + 2];
-            let i3: i64 = quads[base + 3];
-            let o: Qr = qr(state[i0], state[i1], state[i2], state[i3]);
-            state[i0] = o.a;
-            state[i1] = o.b;
-            state[i2] = o.c;
-            state[i3] = o.d;
-            q = q + 1;
-        }
-        r = r + 1;
-    }
-
-    // Feed-forward: add the original state back, word by word (in place).
-    let mut i: i64 = 0;
-    while i < 16 {
-        state[i] = state[i] + orig[i];
-        i = i + 1;
-    }
-
-    // Verify against the RFC 8439 §2.3.2 output block. Declassify each word and
+    // Verify against the RFC 8439 §2.3.2 output block: declassify each word and
     // OR-accumulate the XOR-diff into a public accumulator that is 0 iff every
     // word matched (the `as i64` widens the i32 diff for the reduction).
     let exp: [i32] = [
@@ -108,7 +53,7 @@ fn main() -> i64 {
     let mut bad: i64 = 0;
     let mut j: i64 = 0;
     while j < 16 {
-        let got: i32 = declassify(state[j]);
+        let got: i32 = declassify(out[j]);
         let diff: i32 = got ^ exp[j];
         bad = bad | (diff as i64);
         j = j + 1;

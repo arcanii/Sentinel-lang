@@ -1,0 +1,137 @@
+// std::security::chacha20 — the ChaCha20 block function + stream cipher (RFC 8439).
+//
+// ChaCha20 (Bernstein) is the stream cipher half of the ChaCha20-Poly1305 AEAD.
+// The block function permutes a 16-word state (constants | key | counter | nonce)
+// through 20 ARX rounds and adds the original state back; the stream cipher runs
+// the block per 64-byte chunk (counter 1, 2, …) and XORs the keystream with the
+// message.
+//
+// The entire keystream path is BRANCH-FREE over `secret i32` words: 32-bit
+// wrapping adds, XORs, and rotations by PUBLIC constants (via
+// `std::security::ct::ct_rotl32`). The state is permuted IN PLACE via mutable
+// index assignment (ADR 0050); the message buffer is XORed in place. The counter
+// and the message length are PUBLIC, so the access pattern never depends on the
+// secret key/state — the compiler's constant-time check verifies the whole cipher
+// on every build.
+use std::security::ct::ct_rotl32;
+
+// The four secret words a quarter-round returns (a Sentinel fn returns one value).
+struct Qr { a: secret i32, b: secret i32, c: secret i32, d: secret i32 }
+
+// The ChaCha quarter-round (RFC 8439 §2.1): add, xor, rotate-left-by-public-constant.
+fn qr(a0: secret i32, b0: secret i32, c0: secret i32, d0: secret i32) -> Qr {
+    let mut a: secret i32 = a0;
+    let mut b: secret i32 = b0;
+    let mut c: secret i32 = c0;
+    let mut d: secret i32 = d0;
+    a = a + b; d = d ^ a; d = ct_rotl32(d, 16);
+    c = c + d; b = b ^ c; b = ct_rotl32(b, 12);
+    a = a + b; d = d ^ a; d = ct_rotl32(d, 8);
+    c = c + d; b = b ^ c; b = ct_rotl32(b, 7);
+    Qr { a: a, b: b, c: c, d: d }
+}
+
+// The ChaCha20 block function (RFC 8439 §2.3): 20 rounds (10 column+diagonal
+// double-rounds) over the 16-word `state`, then add the original state back. The
+// input state is consumed; the 16 keystream words are returned.
+pub fn chacha20_block(state: [secret i32]) -> [secret i32] {
+    // Read the 16 input words (Copy) so the same values seed both the working
+    // state and the `orig` snapshot the feed-forward adds back. Index-read does
+    // not consume the array.
+    let s0: secret i32 = state[0];   let s1: secret i32 = state[1];
+    let s2: secret i32 = state[2];   let s3: secret i32 = state[3];
+    let s4: secret i32 = state[4];   let s5: secret i32 = state[5];
+    let s6: secret i32 = state[6];   let s7: secret i32 = state[7];
+    let s8: secret i32 = state[8];   let s9: secret i32 = state[9];
+    let s10: secret i32 = state[10]; let s11: secret i32 = state[11];
+    let s12: secret i32 = state[12]; let s13: secret i32 = state[13];
+    let s14: secret i32 = state[14]; let s15: secret i32 = state[15];
+    let mut work: [secret i32] = [s0, s1, s2, s3, s4, s5, s6, s7,
+                                  s8, s9, s10, s11, s12, s13, s14, s15];
+    let orig: [secret i32] = [s0, s1, s2, s3, s4, s5, s6, s7,
+                              s8, s9, s10, s11, s12, s13, s14, s15];
+
+    // The 8 quarter-round index quadruples of a double-round: 4 columns, 4 diagonals.
+    let quads: [i64] = [
+        0, 4, 8, 12,   1, 5, 9, 13,   2, 6, 10, 14,   3, 7, 11, 15,
+        0, 5, 10, 15,  1, 6, 11, 12,  2, 7, 8, 13,    3, 4, 9, 14
+    ];
+    let mut r: i64 = 0;
+    while r < 10 {
+        let mut q: i64 = 0;
+        while q < 8 {
+            let base: i64 = q * 4;
+            let i0: i64 = quads[base];
+            let i1: i64 = quads[base + 1];
+            let i2: i64 = quads[base + 2];
+            let i3: i64 = quads[base + 3];
+            let o: Qr = qr(work[i0], work[i1], work[i2], work[i3]);
+            work[i0] = o.a;
+            work[i1] = o.b;
+            work[i2] = o.c;
+            work[i3] = o.d;
+            q = q + 1;
+        }
+        r = r + 1;
+    }
+
+    let mut i: i64 = 0;
+    while i < 16 {
+        work[i] = work[i] + orig[i];
+        i = i + 1;
+    }
+    work
+}
+
+// Encrypt / decrypt `msg` (a `[secret u8]`, modified in place and returned) with
+// the ChaCha20 keystream for the 256-bit key `key` (8 little-endian `secret i32`
+// words), the 96-bit nonce `nonce` (3 words), and the starting block `counter`.
+// Decryption is the same operation (XOR is its own inverse). The keystream of
+// block k is `chacha20_block` of the state with `counter + k` in word 12.
+pub fn chacha20_xor(msg: [secret u8], key: [secret i32], nonce: [secret i32], counter: secret i32) -> [secret u8] {
+    let mut m: [secret u8] = msg;
+    let total: i64 = len(m);
+
+    // The ChaCha constants ("expand 32-byte k"), as secret i32 (they seed the
+    // secret state). Read the key + nonce words into Copy locals.
+    let c0: secret i32 = 1634760805 as i32;  // 0x61707865
+    let c1: secret i32 = 857760878 as i32;   // 0x3320646e
+    let c2: secret i32 = 2036477234 as i32;  // 0x79622d32
+    let c3: secret i32 = 1797285236 as i32;  // 0x6b206574
+    let k0: secret i32 = key[0]; let k1: secret i32 = key[1];
+    let k2: secret i32 = key[2]; let k3: secret i32 = key[3];
+    let k4: secret i32 = key[4]; let k5: secret i32 = key[5];
+    let k6: secret i32 = key[6]; let k7: secret i32 = key[7];
+    let nn0: secret i32 = nonce[0];
+    let nn1: secret i32 = nonce[1];
+    let nn2: secret i32 = nonce[2];
+    let one: secret i32 = 1 as i32;
+
+    let mut ctr: secret i32 = counter;
+    let mut blk: i64 = 0;
+    while blk * 64 < total {
+        // The keystream block for this counter: assemble the 16-word state and
+        // permute it. `ctr` sits in word 12.
+        let state: [secret i32] = [c0, c1, c2, c3, k0, k1, k2, k3,
+                                   k4, k5, k6, k7, ctr, nn0, nn1, nn2];
+        let ks: [secret i32] = chacha20_block(state);
+        // XOR the (up to) 64 keystream bytes into the message, little-endian per word.
+        let mut j: i64 = 0;
+        while j < 64 {
+            let pos: i64 = blk * 64 + j;
+            if pos < total {
+                let wi: i64 = j / 4;
+                let bi: i64 = j - wi * 4;
+                let kb: secret u8 = (ks[wi] >> (8 * bi)) as u8;  // serialize LE, stays secret
+                m[pos] = m[pos] ^ kb;
+                0
+            } else {
+                0
+            };
+            j = j + 1;
+        }
+        ctr = ctr + one;
+        blk = blk + 1;
+    }
+    m
+}

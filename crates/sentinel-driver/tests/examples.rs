@@ -188,6 +188,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // reproduced the canonical 0xa129ca6149be45e5 vector AND a tampered message
     // produced a different tag.
     ("examples/security/siphash24.sentinel", 42),
+    // The ChaCha20 stream cipher (std::security::chacha20::chacha20_xor) — the
+    // shipped block keystream XORed into a `[secret u8]` message in place. 42 =
+    // encrypting "Ladies and Gentl" reproduced the RFC 8439 §2.4.2 ciphertext AND
+    // decrypting recovered the plaintext.
+    ("examples/security/chacha20_stream.sentinel", 42),
 ];
 
 #[test]
@@ -233,6 +238,11 @@ fn chacha20_block_constant_time() {
 #[test]
 fn siphash24_keyed_mac() {
     check_example("examples/security/siphash24.sentinel", "siphash24", 42);
+}
+
+#[test]
+fn chacha20_stream_cipher() {
+    check_example("examples/security/chacha20_stream.sentinel", "chacha20_stream", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
