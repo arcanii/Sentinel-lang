@@ -870,9 +870,15 @@ fn walk_assign_target(
             // triggers the write-conflict on p.
             walk_assign_target(inner_target, ctx, errors, program);
         }
-        // `a[i] = v;` is rejected at type-check (per ADR 0017 D12
-        // / TypeError::IndexAssignNotSupported); we won't reach
-        // it here. Fall through to a normal walk for defensiveness.
+        TypedExprKind::Index { target: inner_target, index, .. } => {
+            // `a[i] = v;` (ADR 0050) — the element store mutates the
+            // base collection, so recurse on the base exactly like
+            // field-assign (its Var leaf triggers the write-conflict
+            // on `a`, so a write while `a` is borrowed is rejected).
+            // The index is a read: walk it so its own read-check fires.
+            walk_assign_target(inner_target, ctx, errors, program);
+            walk_expr(index, ctx, errors, program);
+        }
         _ => walk_expr(target, ctx, errors, program),
     }
 }

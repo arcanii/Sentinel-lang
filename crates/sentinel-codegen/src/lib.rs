@@ -3865,6 +3865,12 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     )
                     .map_err(|e| CodegenError::Builder(e.to_string()))
             }
+            TypedExprKind::Index { target, index, elem_ty } => {
+                // `a[i] = v;` (ADR 0050): the lvalue address is the
+                // bounds-checked element pointer — the same GEP the read
+                // path computes; the `Assign` caller stores through it.
+                self.lower_index_elem_ptr(target, index, *elem_ty, program)
+            }
             _ => Err(CodegenError::Builder(
                 "lvalue required but expression is an rvalue".to_string(),
             )),
@@ -5391,6 +5397,31 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         elem_ty: ArrayElem,
         program: &TypedProgram,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        // The bounds-checked element GEP, then a load. The GEP is
+        // factored so index-assignment (`a[i] = v;`, ADR 0050) reuses
+        // the identical address computation and stores instead.
+        let elem_ptr = self.lower_index_elem_ptr(target, index, elem_ty, program)?;
+        let elem_llvm_ty = self.llvm_basic_type(elem_ty.to_type());
+        let elem_val = self
+            .builder
+            .build_load(elem_llvm_ty, elem_ptr, "idx_load")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(elem_val)
+    }
+
+    /// Compute a pointer to element `index` of collection `target` —
+    /// the bounds-checked element GEP shared by the read path (`a[i]`)
+    /// and index-assignment (`a[i] = v;`, ADR 0050). Emits the
+    /// `0 <= i < len` check (calling `sentinel_panic_oob` on failure),
+    /// leaves the builder positioned in the in-bounds block, and
+    /// returns the element pointer for the caller to load / store.
+    fn lower_index_elem_ptr(
+        &mut self,
+        target: &TypedExpr,
+        index: &TypedExpr,
+        elem_ty: ArrayElem,
+        program: &TypedProgram,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
         let array_val = self.lower_expr(target, program)?.into_struct_value();
         let idx = self.lower_expr(index, program)?.into_int_value();
         // `len` is field 0 for both `[T]` (`{len,data}`) and `Vec<T>`
@@ -5445,7 +5476,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .build_unreachable()
             .map_err(|e| CodegenError::Builder(e.to_string()))?;
 
-        // OK branch: GEP + load.
+        // OK branch: GEP to the element address.
         self.builder.position_at_end(ok_bb);
         let elem_llvm_ty = self.llvm_basic_type(elem_ty.to_type());
         let elem_ptr = unsafe {
@@ -5453,11 +5484,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 .build_gep(elem_llvm_ty, data_ptr, &[idx], "idx_gep")
                 .map_err(|e| CodegenError::Builder(e.to_string()))?
         };
-        let elem_val = self
-            .builder
-            .build_load(elem_llvm_ty, elem_ptr, "idx_load")
-            .map_err(|e| CodegenError::Builder(e.to_string()))?;
-        Ok(elem_val)
+        Ok(elem_ptr)
     }
 
     /// Lower `unwrap_or(x: ?T, default: T) -> T` per ADR 0014 D9.

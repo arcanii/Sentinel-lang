@@ -7305,6 +7305,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_assign_index_stmt() {
+        // `a[i] = v;` index-assignment (ADR 0050). The parser already
+        // accepts an `Index` lvalue target (all lvalue / mutability
+        // validation is deferred to the type checker); no parser change.
+        let block =
+            parse_block_str("{ let mut a = [1, 2, 3]; let i = 1; a[i] = 9; a[0] }").expect("parse");
+        match &block.stmts[2].kind {
+            StmtKind::Assign { target, value } => {
+                assert_eq!(target.kind.to_string(), "(index a i)");
+                assert_eq!(value.kind.to_string(), "9");
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_error_assign_missing_semi() {
         let err = parse_block_err("let mut x = 0; x = 5");
         assert!(

@@ -179,6 +179,10 @@ const EXAMPLES: &[(&str, i32)] = &[
     // cast + ADR 0048 shifts) — add/rotate/xor, constant-time via ct_rotl32.
     // 42 = reproduced the RFC 8439 §2.1.1 test vector.
     ("examples/security/chacha_qr.sentinel", 42),
+    // A full ChaCha20 block: 20 rounds + feed-forward over a SECRET 16-word
+    // `[secret i32]` state permuted IN PLACE via index assignment (ADR 0050),
+    // constant-time via ct_rotl32. 42 = reproduced the RFC 8439 §2.3.2 block.
+    ("examples/security/chacha20_block.sentinel", 42),
 ];
 
 #[test]
@@ -214,6 +218,11 @@ fn bytes_scan() {
 #[test]
 fn chacha_quarter_round() {
     check_example("examples/security/chacha_qr.sentinel", "chacha_qr", 42);
+}
+
+#[test]
+fn chacha20_block_constant_time() {
+    check_example("examples/security/chacha20_block.sentinel", "chacha20_block", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

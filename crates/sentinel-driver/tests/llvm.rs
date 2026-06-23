@@ -334,6 +334,79 @@ fn llvm_array_lit_index_and_len() {
 }
 
 #[test]
+fn llvm_index_assign_array() {
+    // ADR 0050: `a[i] = v;` — index assignment. The lvalue address is the SAME
+    // bounds-checked element GEP the read path computes (extract len(0)/data(1),
+    // check `0 <= i < len` else `sentinel_panic_oob` + unreachable, GEP into the
+    // in-bounds block) — but the caller STOREs through it instead of loading.
+    // Here `a[1] = 99` stores into bb1, then `a[1]` reads it back → 99.
+    assert_eq!(
+        llvm_dump(
+            "index_assign",
+            "fn main() -> i64 {\n    let mut a: [i64] = [10, 20, 30];\n    a[1] = 99;\n    a[1]\n}\n"
+        ),
+        concat!(
+            "target triple = \"arm64-apple-darwin\"\n",
+            "\n",
+            "declare ptr @sentinel_alloc(i64)\n",
+            "declare void @sentinel_free(ptr)\n",
+            "declare void @sentinel_panic_oob(i64, i64)\n",
+            "\n",
+            "define i32 @main() {\n",
+            "entry:\n",
+            "  %v8 = alloca { i64, ptr }\n",
+            "  %v0 = getelementptr i64, ptr null, i64 3\n",
+            "  %v1 = ptrtoint ptr %v0 to i64\n",
+            "  %v2 = call ptr @sentinel_alloc(i64 %v1)\n",
+            "  %v3 = getelementptr i64, ptr %v2, i64 0\n",
+            "  store i64 10, ptr %v3\n",
+            "  %v4 = getelementptr i64, ptr %v2, i64 1\n",
+            "  store i64 20, ptr %v4\n",
+            "  %v5 = getelementptr i64, ptr %v2, i64 2\n",
+            "  store i64 30, ptr %v5\n",
+            "  %v6 = insertvalue { i64, ptr } undef, i64 3, 0\n",
+            "  %v7 = insertvalue { i64, ptr } %v6, ptr %v2, 1\n",
+            "  store { i64, ptr } %v7, ptr %v8\n",
+            // `a[1] = 99;` — target GEP (bounds-checked) FIRST, then the value, then store.
+            "  %v9 = load { i64, ptr }, ptr %v8\n",
+            "  %v10 = extractvalue { i64, ptr } %v9, 0\n",
+            "  %v11 = extractvalue { i64, ptr } %v9, 1\n",
+            "  %v12 = icmp sge i64 1, 0\n",
+            "  %v13 = icmp slt i64 1, %v10\n",
+            "  %v14 = and i1 %v12, %v13\n",
+            "  br i1 %v14, label %bb1, label %bb0\n",
+            "bb0:\n",
+            "  call void @sentinel_panic_oob(i64 1, i64 %v10)\n",
+            "  unreachable\n",
+            "bb1:\n",
+            "  %v15 = getelementptr i64, ptr %v11, i64 1\n",
+            "  store i64 99, ptr %v15\n",
+            // `a[1]` read-back — same bounds-checked GEP, then load.
+            "  %v16 = load { i64, ptr }, ptr %v8\n",
+            "  %v17 = extractvalue { i64, ptr } %v16, 0\n",
+            "  %v18 = extractvalue { i64, ptr } %v16, 1\n",
+            "  %v19 = icmp sge i64 1, 0\n",
+            "  %v20 = icmp slt i64 1, %v17\n",
+            "  %v21 = and i1 %v19, %v20\n",
+            "  br i1 %v21, label %bb3, label %bb2\n",
+            "bb2:\n",
+            "  call void @sentinel_panic_oob(i64 1, i64 %v17)\n",
+            "  unreachable\n",
+            "bb3:\n",
+            "  %v22 = getelementptr i64, ptr %v18, i64 1\n",
+            "  %v23 = load i64, ptr %v22\n",
+            "  %v24 = load { i64, ptr }, ptr %v8\n",
+            "  %v25 = extractvalue { i64, ptr } %v24, 1\n",
+            "  call void @sentinel_free(ptr %v25)\n",
+            "  %v26 = trunc i64 %v23 to i32\n",
+            "  ret i32 %v26\n",
+            "}\n",
+            "\n",
+        )
+    );
+}
+
+#[test]
 fn llvm_string_literal_is_a_u8_array() {
     // 8c-3: a string literal is a `[u8]` (ADR 0033) — the decoded bytes heap-copied
     // (`sentinel_alloc` + N constant `i8` stores) into a `{ i64, ptr }`, exactly an

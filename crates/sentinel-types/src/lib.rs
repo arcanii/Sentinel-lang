@@ -2924,15 +2924,34 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
-    /// C2 / ADR 0017 D12: mutable indexing (`a[i] = v;`) is out of
-    /// scope at C2. Future ADRs may add it.
-    #[error("mutable indexing `a[i] = v;` is not supported at C2")]
+    /// C2 / ADR 0017 D12: mutable indexing (`a[i] = v;`) was out of
+    /// scope at C2. ADR 0050 lifts the *assignment* case
+    /// (`check_mutable_lvalue`); this variant now fires only for the
+    /// `&mut a[i]` element-borrow case (`check_mutable_borrow_target`),
+    /// which stays out of scope.
+    #[error("mutable indexing `&mut a[i]` is not supported")]
     #[diagnostic(
         code(sentinel::types::index_assign_not_supported),
-        help("array elements cannot be re-assigned at C2 per ADR 0017 D12; rebuild the array via a new let")
+        help("taking `&mut` of an array element is not supported; bind the element via a new `let` or assign it with `a[i] = v;` (ADR 0050)")
     )]
     IndexAssignNotSupported {
-        #[label("indexing on LHS of assignment")]
+        #[label("indexing on LHS of borrow")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0050: index-assignment `a[i] = v;` ships for Copy elements
+    /// (scalars and `secret` scalars — a plain element store). A **Move**
+    /// element (a struct, or a generic `TypeParam` / `GenericInstance`)
+    /// would need drop-on-overwrite semantics, deferred to a later ADR;
+    /// reject it for now with a clear message.
+    #[error("cannot index-assign an element of non-Copy type `{elem_ty}`")]
+    #[diagnostic(
+        code(sentinel::types::index_assign_non_copy),
+        help("`a[i] = v;` currently supports scalar / `secret` scalar elements; for struct / generic elements rebuild the array via a new `let` (ADR 0050)")
+    )]
+    IndexAssignNonCopyElem {
+        elem_ty: Type,
+        #[label("non-Copy element type")]
         span: miette::SourceSpan,
     },
 
@@ -5457,9 +5476,29 @@ fn check_mutable_lvalue(
         TypedExprKind::FieldAccess { target: inner_target, .. } => {
             check_mutable_lvalue(inner_target, env, refs)
         }
-        TypedExprKind::Index { .. } => Err(TypeError::IndexAssignNotSupported {
-            span: to_source_span(&target.span),
-        }),
+        // ADR 0050: `a[i] = v;`. The base collection must be a mutable
+        // lvalue (recurse, exactly like field-assign), and the element
+        // must be Copy — a scalar or `secret` scalar (a plain store). A
+        // Move element (struct / generic) would need drop-on-overwrite,
+        // deferred. The index is already constrained to a public `i64`
+        // by `IndexNotInt` when the target was type-checked, so a secret
+        // index is rejected for writes exactly as for reads.
+        TypedExprKind::Index { target: inner_target, elem_ty, .. } => {
+            check_mutable_lvalue(inner_target, env, refs)?;
+            match elem_ty {
+                ArrayElem::Struct(_)
+                | ArrayElem::TypeParam(_)
+                | ArrayElem::GenericInstance(_) => Err(TypeError::IndexAssignNonCopyElem {
+                    elem_ty: elem_ty.to_type(),
+                    span: to_source_span(&target.span),
+                }),
+                ArrayElem::I64
+                | ArrayElem::I32
+                | ArrayElem::Bool
+                | ArrayElem::U8
+                | ArrayElem::Secret(_) => Ok(()),
+            }
+        }
         _ => Err(TypeError::AssignToRvalue {
             span: to_source_span(&target.span),
         }),
@@ -8501,7 +8540,12 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         ),
         TypeError::IndexAssignNotSupported { span } => (
             "sentinel::types::index_assign_not_supported",
-            "mutable indexing `a[i] = v;` is not supported at C2".to_string(),
+            "mutable indexing `&mut a[i]` is not supported".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::IndexAssignNonCopyElem { elem_ty, span } => (
+            "sentinel::types::index_assign_non_copy",
+            format!("cannot index-assign an element of non-Copy type `{elem_ty}`"),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::SecretNotYet { span } => (
@@ -9271,6 +9315,56 @@ fn main() -> i64 {
             TypeError::BorrowMutOfImmutable { name, .. } => assert_eq!(name, "counter"),
             other => panic!("expected BorrowMutOfImmutable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn index_assign_scalar_and_secret_ok() {
+        // ADR 0050: `a[i] = v;` type-checks for a mutable array of a Copy
+        // element — a scalar and a `secret` scalar (the secret value is
+        // stored at a PUBLIC index, so the access pattern is public).
+        check_ok(
+            "fn main() -> i64 { let mut a: [i64] = [1, 2, 3]; a[0] = 9; a[0] }",
+        );
+        check_ok(
+            "fn main() -> i64 { let z: secret i64 = 0; let mut s: [secret i64] = [z, z]; let v: secret i64 = 7; s[1] = v; declassify(s[1]) }",
+        );
+    }
+
+    #[test]
+    fn index_assign_to_immutable_rejected() {
+        // The base collection must be a mutable lvalue — the `Index` arm
+        // recurses to the base Var, surfacing `AssignToImmutable` (ADR 0050).
+        let err = check_err(
+            "fn main() -> i64 { let a: [i64] = [1, 2, 3]; a[0] = 9; a[0] }",
+        );
+        match err {
+            TypeError::AssignToImmutable { name, .. } => assert_eq!(name, "a"),
+            other => panic!("expected AssignToImmutable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn index_assign_secret_index_rejected() {
+        // A SECRET index on the LHS is a timing leak — rejected by the same
+        // `IndexNotInt` rule the read path uses (an index must be a public
+        // `i64`), so write and read are symmetric (ADR 0050 constant-time).
+        let err = check_err(
+            "fn main() -> i64 { let mut a: [i64] = [1, 2, 3]; let s: secret i64 = 1; a[s] = 9; a[0] }",
+        );
+        assert!(matches!(err, TypeError::IndexNotInt { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn index_assign_non_copy_element_rejected() {
+        // A Move element (struct) would need drop-on-overwrite, deferred —
+        // rejected with `IndexAssignNonCopyElem` (ADR 0050 MVP scope).
+        let err = check_err(
+            "struct P { x: i64 }\nfn main() -> i64 { let mut a: [P] = [P { x: 1 }]; a[0] = P { x: 2 }; 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::IndexAssignNonCopyElem { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]

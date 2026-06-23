@@ -1373,10 +1373,13 @@ impl Emit<'_> {
                     writeln!(self.body, "  store {llty} {v}, ptr %v{slot}").unwrap();
                     Ok(())
                 }
-                // `*r = x` / `(*c).f = x` — the target pointer (r's value, or the field
-                // GEP) is emitted FIRST, then the value, then the store (the Sentinel
-                // walks target-then-value, and the deref/field target DOES emit).
-                TypedExprKind::Unary(UnaryOp::Deref, _) | TypedExprKind::FieldAccess { .. } => {
+                // `*r = x` / `(*c).f = x` / `a[i] = x` (ADR 0050) — the target pointer
+                // (r's value, the field GEP, or the bounds-checked element GEP) is
+                // emitted FIRST, then the value, then the store (the Sentinel walks
+                // target-then-value, and the deref/field/index target DOES emit).
+                TypedExprKind::Unary(UnaryOp::Deref, _)
+                | TypedExprKind::FieldAccess { .. }
+                | TypedExprKind::Index { .. } => {
                     let ptr = self.lower_lvalue_ptr(target)?;
                     let v = self.lower_expr(value)?;
                     let llty = self.lty(target.ty)?;
@@ -2129,6 +2132,38 @@ impl Emit<'_> {
                 )
                 .unwrap();
                 Ok(format!("%v{fp}"))
+            }
+            // ADR 0050: `a[i] = v;` — the lvalue address is the bounds-checked element
+            // GEP: the read-index sequence (extract len(0)/data(1 for `[T]`, 2 for
+            // `Vec<T>`), check `0 <= i < len`, `sentinel_panic_oob` on miss) MINUS the
+            // load. Returns the element pointer; the `Assign` caller stores through it.
+            TypedExprKind::Index { target, index, elem_ty } => {
+                let arr = self.lower_expr(target)?;
+                let idx = self.lower_expr(index)?;
+                let ety = self.lty(elem_ty.to_type())?;
+                let aggty = self.lty(target.ty)?;
+                let data_field = if matches!(target.ty, Type::Vec(_)) { 2 } else { 1 };
+                let len = self.fresh();
+                writeln!(self.body, "  %v{len} = extractvalue {aggty} {arr}, 0").unwrap();
+                let dat = self.fresh();
+                writeln!(self.body, "  %v{dat} = extractvalue {aggty} {arr}, {data_field}").unwrap();
+                let ge = self.fresh();
+                writeln!(self.body, "  %v{ge} = icmp sge i64 {idx}, 0").unwrap();
+                let lt = self.fresh();
+                writeln!(self.body, "  %v{lt} = icmp slt i64 {idx}, %v{len}").unwrap();
+                let inb = self.fresh();
+                writeln!(self.body, "  %v{inb} = and i1 %v{ge}, %v{lt}").unwrap();
+                let oob_b = self.fresh_block();
+                let ok_b = self.fresh_block();
+                writeln!(self.body, "  br i1 %v{inb}, label %bb{ok_b}, label %bb{oob_b}").unwrap();
+                writeln!(self.body, "bb{oob_b}:").unwrap();
+                writeln!(self.body, "  call void @sentinel_panic_oob(i64 {idx}, i64 %v{len})").unwrap();
+                self.used.panic_oob = true;
+                writeln!(self.body, "  unreachable").unwrap();
+                writeln!(self.body, "bb{ok_b}:").unwrap();
+                let ep = self.fresh();
+                writeln!(self.body, "  %v{ep} = getelementptr {ety}, ptr %v{dat}, i64 {idx}").unwrap();
+                Ok(format!("%v{ep}"))
             }
             _ => Err("address-of a non-place (deferred to a later slice)".into()),
         }
