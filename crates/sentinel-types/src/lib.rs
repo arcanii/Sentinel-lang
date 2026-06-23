@@ -820,6 +820,14 @@ impl Type {
         matches!(self, Type::Secret(_))
     }
 
+    /// ADR 0051: `true` if `self` is a public→secret widen TARGET — a `secret T`
+    /// scalar or a `[secret T]` array. Used by the bidirectional expected-type
+    /// pushdown (call args, returns) so a public value / public `[u8]` flowing
+    /// into a secret position is widened by [`coerce_to_expected`].
+    pub fn is_secret_widen_target(self) -> bool {
+        matches!(self, Type::Secret(_) | Type::Array(ArrayElem::Secret(_)))
+    }
+
     /// C3 / ADR 0019 D5 (C3.1): strip one layer of `secret` if
     /// present. Returns `(inner, was_secret)`. Used by operator
     /// typing to compute the underlying-type compatibility check
@@ -4485,6 +4493,9 @@ pub fn check_module(
                     // infers vec_new's element (the same seeding `?T`/null
                     // and generic struct literals use).
                     || return_type.is_vec()
+                    // ADR 0051: push a `secret T` / `[secret u8]` return type
+                    // down so a public-typed body tail is widened to secret.
+                    || return_type.is_secret_widen_target()
                 {
                     Some(return_type)
                 } else {
@@ -4564,6 +4575,9 @@ pub fn check_module(
                     // infers vec_new's element (the same seeding `?T`/null
                     // and generic struct literals use).
                     || return_type.is_vec()
+                    // ADR 0051: push a `secret T` / `[secret u8]` return type
+                    // down so a public-typed body tail is widened to secret.
+                    || return_type.is_secret_widen_target()
                 {
                     Some(return_type)
                 } else {
@@ -4872,6 +4886,8 @@ fn check_fn(
         if return_type.is_nullable()
             || return_type.is_generic_instance()
             || return_type.is_vec()
+            // ADR 0051: a `secret T` / `[secret u8]` return widens its tail.
+            || return_type.is_secret_widen_target()
         {
             Some(return_type)
         } else {
@@ -5570,11 +5586,49 @@ fn coerce_to_expected(
             });
         }
     }
+    // ADR 0051: implicit `[u8] -> [secret u8]` array widening — a public byte
+    // buffer flowing into a secret-byte context (a `let` annotation, a `secret
+    // [u8]` parameter, or a `secret [u8]` return). `[u8]` and `[secret u8]` share
+    // the `{ i64 len, ptr data }` layout, so this is a pure type re-tag; the
+    // `WidenToSecret` node lowers as identity (ADR 0047 restricts secret arrays
+    // to scalar elements, so the element is always a scalar).
+    if let Type::Array(ArrayElem::Secret(id)) = exp {
+        let elem_scalar = secrets[id.0 as usize].inner;
+        if let Some(public_elem) = elem_scalar.to_array_elem() {
+            if synth.ty == Type::Array(public_elem) {
+                let span = synth.span.clone();
+                return Ok(TypedExpr {
+                    kind: TypedExprKind::WidenToSecret(Box::new(synth)),
+                    span,
+                    ty: exp,
+                });
+            }
+        }
+    }
     Err(TypeError::Mismatch {
         expected: exp,
         got: synth.ty,
         span: to_source_span(span_for_mismatch),
     })
+}
+
+/// Wrap a public expression in `WidenToSecret`, yielding `secret <inner>`
+/// (ADR 0051). The wrap is purely type-level — codegen lowers it as identity,
+/// exactly like the `let pw: secret i64 = 42;` widen. Used by the binary / cmp
+/// operand widen so `secret_x + 5` needs no pre-bound `secret` constant.
+/// `inner` must be `expr`'s (public) type.
+fn widen_operand_to_secret(
+    expr: TypedExpr,
+    inner: Type,
+    secrets: &mut Vec<SecretData>,
+) -> TypedExpr {
+    let span = expr.span.clone();
+    let id = intern_secret(secrets, inner);
+    TypedExpr {
+        kind: TypedExprKind::WidenToSecret(Box::new(expr)),
+        span,
+        ty: Type::Secret(id),
+    }
 }
 
 /// Try to substitute every [`Type::TypeParam`] in `ty` using the
@@ -5915,7 +5969,10 @@ fn check_call(
                 Some(param)
             };
             let arg_expected: Option<Type> = match concrete_param {
-                Some(c) if c.is_nullable() => Some(c),
+                // ADR 0051: push a `secret T` / `[secret u8]` param type down so
+                // a public argument is widened by `coerce_to_expected` (like the
+                // existing `?T` pushdown). `f(42)` for `f(x: secret i64)` works.
+                Some(c) if c.is_nullable() || c.is_secret_widen_target() => Some(c),
                 _ => None,
             };
             // Null literals require a concrete expected — skip
@@ -6285,12 +6342,15 @@ fn check_expr(
                     span: to_source_span(&lhs.span),
                 });
             }
-            let ty = if matches!(op, BinOp::Shl | BinOp::Shr) {
+            let ty;
+            let (l, r) = if matches!(op, BinOp::Shl | BinOp::Shr) {
                 // ADR 0048: shifts are ASYMMETRIC (value `<<` amount) and do
                 // NOT obey the matching-secrecy rule the other ops enforce via
                 // `l.ty != r.ty`. The amount may be any integer width/secrecy;
                 // the result takes the VALUE (left) operand's secrecy alone, so
-                // `secret i32 << 16` is accepted and types to `secret i32`.
+                // `secret i32 << 16` is accepted and types to `secret i32`. The
+                // amount is NEVER widened to secret (ADR 0051) — that would trip
+                // SecretShiftAmount.
                 if !r_inner.is_int() {
                     return Err(TypeError::Mismatch {
                         expected: Type::I64,
@@ -6307,14 +6367,34 @@ fn check_expr(
                         span: to_source_span(&rhs.span),
                     });
                 }
-                if l_secret {
+                ty = if l_secret {
                     Type::Secret(intern_secret(secrets, l_inner))
                 } else {
                     l_inner
-                }
+                };
+                (l, r)
             } else {
-                // The symmetric ops (`+ - * /` + bitwise): both operands the
-                // same int type. Mixing public + secret operands surfaces as
+                // The symmetric ops (`+ - *` + bitwise; `/` handled below):
+                // both operands the same int type. ADR 0051: if the inner int
+                // types match but exactly one operand is secret, WIDEN the
+                // public operand to secret (a monotone, codegen-no-op re-tag) so
+                // `secret_x + 5` needs no pre-bound secret constant. `/` is
+                // EXCLUDED from the widen — its divisor must stay public
+                // (SecretDivisor below); different int WIDTHS still mismatch.
+                let result_secret = l_secret || r_secret;
+                let (l, r) = if !matches!(op, BinOp::Div)
+                    && l_inner == r_inner
+                    && l_secret != r_secret
+                {
+                    if l_secret {
+                        (l, widen_operand_to_secret(r, r_inner, secrets))
+                    } else {
+                        (widen_operand_to_secret(l, l_inner, secrets), r)
+                    }
+                } else {
+                    (l, r)
+                };
+                // Mixing different int WIDTHS (or `secret / public`) surfaces as
                 // Mismatch (the "SecretFlow" semantics from Phase B ADR 0008 D4).
                 if l.ty != r.ty {
                     return Err(TypeError::Mismatch {
@@ -6332,13 +6412,14 @@ fn check_expr(
                         span: to_source_span(&rhs.span),
                     });
                 }
-                // Result preserves the secret qualifier when both operands are
-                // secret. By this point l_secret == r_secret (l.ty == r.ty).
-                if l_secret {
+                // Result is secret iff EITHER operand was secret (the public one
+                // was widened above when they differed).
+                ty = if result_secret {
                     Type::Secret(intern_secret(secrets, l_inner))
                 } else {
                     l_inner
-                }
+                };
+                (l, r)
             };
             (
                 TypedExprKind::Binary(*op, Box::new(l), Box::new(r)),
@@ -6397,13 +6478,11 @@ fn check_expr(
             let r = check_expr(rhs, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             // C3 / ADR 0019 D5 (C3.1b): operator-secret-preserving
             // for comparisons. `secret T == secret T -> secret bool`
-            // per Phase B ADR 0008 D4. Strip wrappers to check
-            // inner compatibility; the wrapper question is set
-            // equality between the two sides.
-            // The `l.ty != r.ty` check below covers the
-            // SecretFlow-via-Mismatch case (mixed secret + public);
-            // we only need the l-side wrappers here.
+            // per Phase B ADR 0008 D4. Strip wrappers to check inner
+            // compatibility; the result is `secret bool` iff either side
+            // is secret.
             let (l_inner, l_secret) = l.ty.strip_secret(secrets);
+            let (r_inner, r_secret) = r.ty.strip_secret(secrets);
             // C1.3: comparisons require both operands the same type.
             // C1.4 + C1.5 keep this as int + bool only (ADR 0013 D6
             // defers struct equality; nullable-vs-nullable equality
@@ -6416,6 +6495,20 @@ fn check_expr(
                     span: to_source_span(&lhs.span),
                 });
             }
+            // ADR 0051: widen a public operand to secret when the other is
+            // secret and the inner types match, so `secret_x == 5` type-checks
+            // to `secret bool` without a pre-bound secret constant. (The result
+            // is secret, so it still cannot reach an `if` — SecretBranch.)
+            let result_secret = l_secret || r_secret;
+            let (l, r) = if l_inner == r_inner && l_secret != r_secret {
+                if l_secret {
+                    (l, widen_operand_to_secret(r, r_inner, secrets))
+                } else {
+                    (widen_operand_to_secret(l, l_inner, secrets), r)
+                }
+            } else {
+                (l, r)
+            };
             if l.ty != r.ty {
                 return Err(TypeError::Mismatch {
                     expected: l.ty,
@@ -6423,7 +6516,7 @@ fn check_expr(
                     span: to_source_span(&rhs.span),
                 });
             }
-            let ty = if l_secret {
+            let ty = if result_secret {
                 Type::Secret(intern_secret(secrets, Type::Bool))
             } else {
                 Type::Bool
@@ -10431,14 +10524,50 @@ fn main() -> i64 {
     }
 
     #[test]
-    fn c31_mixed_public_secret_arithmetic_rejects() {
-        // `secret i64 + i64 -> Mismatch` (SecretFlow via the
-        // existing Mismatch path).
-        let err = check_err(
+    fn c31_mixed_public_secret_arithmetic_widens() {
+        // ADR 0051: `secret i64 + i64` now WIDENS the public operand to secret
+        // (result secret), so it type-checks (it was a Mismatch pre-0051).
+        check_ok(
             "fn f(a: secret i64, b: i64) -> i64 { declassify(a + b) }\
              fn main() -> i64 { 0 }",
         );
-        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+        // The constant-time-sink exclusions are NOT widened: a secret divisor
+        // path (`secret / public` stays a Mismatch — the divisor must be public)
+        // and a secret SHIFT AMOUNT (SecretShiftAmount) still reject.
+        let div = check_err(
+            "fn f(a: secret i64, b: i64) -> i64 { declassify(a / b) }\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(div, TypeError::Mismatch { .. }), "got {div:?}");
+        let sh = check_err(
+            "fn f(a: secret i64, n: secret i64) -> i64 { declassify(a << n) }\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(sh, TypeError::SecretShiftAmount { .. }), "got {sh:?}");
+    }
+
+    #[test]
+    fn adr0051_widen_forms_typecheck_and_stay_constant_time() {
+        // Operand widen (cmp) -> secret bool; the result still cannot branch.
+        check_ok(
+            "fn f(a: secret i64) -> bool { declassify(a == 5) }\nfn main() -> i64 { 0 }",
+        );
+        let branch = check_err(
+            "fn f(a: secret i64) -> i64 { if a == 5 { 1 } else { 0 } }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(branch, TypeError::SecretBranch { .. }), "got {branch:?}");
+        // Call-arg widen: a public argument flows into a secret parameter.
+        check_ok(
+            "fn g(x: secret i64) -> i64 { declassify(x) }\nfn main() -> i64 { g(7) }",
+        );
+        // Array widen: a public `[u8]` flows into a `[secret u8]` annotation.
+        check_ok(
+            "fn main() -> i64 { let p: [u8] = [i64_to_u8(1)]; let s: [secret u8] = p; u8_to_i64(declassify(s[0])) }",
+        );
+        // Return widen: a public-typed tail widens to the secret return type.
+        check_ok(
+            "fn h() -> secret i64 { 9 }\nfn main() -> i64 { declassify(h()) }",
+        );
     }
 
     #[test]
@@ -10588,14 +10717,14 @@ fn main() -> i64 {
     }
 
     #[test]
-    fn c53_bitwise_secret_public_mismatch() {
-        // `secret ^ public` cannot implicitly mix (the SecretFlow rule,
-        // exactly as for arithmetic) — surfaces as a Mismatch.
-        let err = check_err(
+    fn c53_bitwise_secret_public_widens() {
+        // ADR 0051: `secret ^ public` now widens the public operand to secret
+        // (result secret), so it type-checks — the same as `secret + public`
+        // (it was a Mismatch pre-0051).
+        check_ok(
             "fn f(a: secret i64, b: i64) -> i64 { declassify(a ^ b) }\
              fn main() -> i64 { 0 }",
         );
-        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
     }
 
     #[test]
