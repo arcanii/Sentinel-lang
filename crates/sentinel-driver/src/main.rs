@@ -918,6 +918,14 @@ fn run_build_merged(merged: Program, path: &str, output: Option<&str>) -> ExitCo
 /// return `Type`s) info. FIRST SLICE: SCALAR signatures only (i64 / i32 /
 /// bool / u8) — cross-module struct / array / generic / effect signatures
 /// are a later D.6 slice.
+///
+/// `Hash` feeds the (3/N) incremental cache: an importer's fingerprint hashes
+/// the imported ITEMS it uses. Because this is SIGNATURE-only (no body), an
+/// importer of a non-generic `pub fn` is NOT recompiled when only that fn's
+/// body changes — it extern-calls the symbol, so the relink picks up the new
+/// body. (An inlined item — struct / enum / generic body — carries its full
+/// decl, so a change there does recompile importers.)
+#[derive(Hash)]
 struct ExportedFn {
     arity: usize,
     type_params_count: usize,
@@ -941,6 +949,10 @@ struct ExportedFn {
 /// importer INLINES it + monomorphizes LOCALLY, its instances qualified by
 /// the importer's module path (each importer self-contains them; no link
 /// symbol, no `linkonce_odr` dedup yet — a 2/N optimization).
+///
+/// `Hash` (over the contained AST decl, all of which derive it) feeds the
+/// (3/N) incremental cache at item granularity — see [`unit_fingerprint`].
+#[derive(Hash)]
 enum ExportedItem {
     Fn(ExportedFn),
     Struct(sentinel_ast::StructDecl),
@@ -1058,18 +1070,22 @@ fn link_objects(objects: &[PathBuf], exe: &Path) -> Result<(), String> {
 /// `snc build --separate <entry>`. Discovers the module graph, then
 /// ADR 0037 (3/N): a content fingerprint for one separately-compiled unit —
 /// a hash over everything that affects its `.o`, so an UNCHANGED unit can reuse
-/// its cached object on the next build. Conservative (sound): the unit's own
-/// source; the source of EVERY module it imports from (the importer INLINES
-/// their `pub` decls + EXTERN-links their fns, so a change there changes this
-/// `.o`); the graph-wide sorted effect names (the op-id base map a unit's
+/// its cached object on the next build. Sound and ITEM-GRANULAR: the unit's own
+/// source; the content of EACH `pub` ITEM it imports (the matching
+/// [`ExportedItem`] from the exports table, NOT the whole defining module's
+/// source); the graph-wide sorted effect names (the op-id base map a unit's
 /// `perform`/`handle` op ids ride on); the unit's module path (its symbol
 /// prefix); and the compiler version (invalidate on upgrade). `DefaultHasher`
-/// has fixed keys → process-stable (unlike a `HashMap`'s random seed). Coarse
-/// by design (a whole imported module's source, not the single item used) — a
-/// finer per-item fingerprint is a future refinement.
+/// has fixed keys → process-stable (unlike a `HashMap`'s random seed).
+///
+/// Item granularity makes the cache PRECISE: an `ExportedItem::Fn` is
+/// SIGNATURE-only, so editing a non-generic imported fn's BODY doesn't
+/// recompile its importers (they extern-call it; the relink picks up the new
+/// body). Inlined items (struct / enum / generic body / trait / effect) carry
+/// their full decl, so a change there does recompile importers.
 fn unit_fingerprint(
     m: &DiscoveredModule,
-    source_by_path: &HashMap<&[String], &str>,
+    exports: &HashMap<(Vec<String>, String), ExportedItem>,
     effect_names: &[String],
 ) -> String {
     use std::hash::{Hash, Hasher};
@@ -1077,21 +1093,27 @@ fn unit_fingerprint(
     env!("CARGO_PKG_VERSION").hash(&mut h);
     m.path.hash(&mut h);
     m.source.hash(&mut h);
-    // Every module this unit imports from, (path, source), sorted for a stable
-    // order regardless of `use`-declaration order.
-    let mut imports: Vec<&[String]> = m
+    // Each imported item, keyed `(origin_module, item)`, sorted for a stable
+    // order regardless of `use`-declaration order. Hash the item's content so a
+    // change to a USED item recompiles this unit but a change to an unused
+    // sibling in the same module does not.
+    let mut keys: Vec<(Vec<String>, String)> = m
         .program
         .uses
         .iter()
         .filter(|u| u.path.len() >= 2)
-        .map(|u| &u.path[..u.path.len() - 1])
+        .map(|u| {
+            let item = u.path.last().expect("len >= 2").clone();
+            let origin = u.path[..u.path.len() - 1].to_vec();
+            (origin, item)
+        })
         .collect();
-    imports.sort_unstable();
-    imports.dedup();
-    for imp in imports {
-        imp.hash(&mut h);
-        if let Some(src) = source_by_path.get(imp) {
-            src.hash(&mut h);
+    keys.sort();
+    keys.dedup();
+    for key in &keys {
+        key.hash(&mut h);
+        if let Some(item) = exports.get(key) {
+            item.hash(&mut h);
         }
     }
     effect_names.hash(&mut h);
@@ -1186,11 +1208,6 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         .map(|(i, n)| (n.clone(), i as u32))
         .collect();
 
-    // (3/N) incremental cache: module path → its source, for fingerprinting a
-    // unit's cross-module imports.
-    let source_by_path: HashMap<&[String], &str> =
-        modules.iter().map(|m| (m.path.as_slice(), m.source.as_str())).collect();
-
     // Compile each module to its own object.
     let mut objects: Vec<PathBuf> = Vec::new();
     for (idx, m) in modules.iter().enumerate() {
@@ -1202,7 +1219,7 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         // effect/borrow/CT → codegen) is bypassed; the cached `.o` is sound to
         // reuse because per-unit codegen is reproducible (`repro.rs`). A unit
         // with a build error never wrote a `.o`/`.fp`, so it is never "fresh".
-        let fingerprint = unit_fingerprint(m, &source_by_path, &effect_names);
+        let fingerprint = unit_fingerprint(m, &exports, &effect_names);
         let fp_path = obj_dir.join(format!("{}.o.fp", m.path.join("_")));
         if obj_path.is_file()
             && std::fs::read_to_string(&fp_path).ok().as_deref() == Some(fingerprint.as_str())

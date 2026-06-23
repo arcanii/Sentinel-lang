@@ -560,13 +560,13 @@ fn separate_incremental_unchanged_rebuild_is_all_fresh() {
 
 #[test]
 fn separate_incremental_edit_recompiles_only_affected_units() {
-    // ADR 0037 (3/N) — the incremental payoff + invalidation SOUNDNESS. `main`
-    // imports both `a` and `b`. After editing ONLY `a`, `b` is still `fresh`
-    // while `a` (its source changed) AND `main` (it imports `a`, so a's source
-    // is in main's fingerprint) recompile. The `!fresh main` assertion is the
-    // load-bearing one: if a unit's fingerprint omitted its imports' sources,
-    // `main` would wrongly be `fresh` and the rebuild would be STALE. The edit
-    // (1 -> 40) takes effect: 40 + 2 -> 42.
+    // ADR 0037 (3/N) — the incremental payoff + the ITEM-GRANULAR fingerprint.
+    // `main` imports `a` and `b`. Editing `a`'s fn BODY (not its signature)
+    // recompiles ONLY `a`: `b` is untouched, and `main` only extern-CALLS
+    // `a::fa`, so its signature-level fingerprint of `fa` is unchanged → `main`
+    // stays `fresh` and RELINKS against the new `a.o`. (A coarse
+    // whole-module-source fingerprint would have needlessly recompiled `main`.)
+    // The new body (1 -> 40) still takes effect via the relink: 40 + 2 -> 42.
     let dir = temp_project("separate_incremental_edit");
     write(dir.join("a.sentinel"), "pub fn fa() -> i64 { 1 }\n");
     write(dir.join("b.sentinel"), "pub fn fb() -> i64 { 2 }\n");
@@ -574,14 +574,46 @@ fn separate_incremental_edit_recompiles_only_affected_units() {
     let entry = dir.join("main.sentinel");
     let (ok1, err1) = build_separate(entry.clone());
     assert!(ok1, "first build failed:\n{err1}");
-    // Edit module `a` only.
+    // Edit ONLY `a`'s body (its `() -> i64` signature is unchanged).
     write(dir.join("a.sentinel"), "pub fn fa() -> i64 { 40 }\n");
     let (ok2, err2) = build_separate(entry.clone());
     assert!(ok2, "rebuild failed:\n{err2}");
+    assert!(!err2.contains("fresh `a`"), "a's source changed → must recompile:\n{err2}");
     assert!(err2.contains("fresh `b`"), "b is unaffected → should be cached:\n{err2}");
-    assert!(!err2.contains("fresh `a`"), "a changed → must recompile:\n{err2}");
-    assert!(!err2.contains("fresh `main`"), "main imports a → must recompile (else STALE):\n{err2}");
-    // The edit took effect.
+    assert!(
+        err2.contains("fresh `main`"),
+        "main only extern-calls a (sig unchanged) → it should relink, not recompile:\n{err2}"
+    );
+    // The new body takes effect via the relink.
+    assert_eq!(build_and_run_separate(entry), 42);
+}
+
+#[test]
+fn separate_incremental_imported_struct_change_recompiles_importer() {
+    // ADR 0037 (3/N) — the other direction: invalidation when a USED item's
+    // CONTENT changes. `main` inlines `geo::Point`'s layout, so reordering its
+    // fields changes the imported item's fingerprint and recompiles `main`
+    // (even though main's own source is untouched). The `!fresh main` assertion
+    // is load-bearing: it would fail if the fingerprint ignored imported items.
+    // The sum is order-independent, so the build stays correct: 40 + 2 -> 42.
+    let dir = temp_project("separate_incremental_struct");
+    write(dir.join("geo.sentinel"), "pub struct Point { x: i64, y: i64 }\n");
+    write(
+        dir.join("main.sentinel"),
+        "use geo::Point;\n\
+         fn main() -> i64 { let p: Point = Point { x: 40, y: 2 }; p.x + p.y }\n",
+    );
+    let entry = dir.join("main.sentinel");
+    let (ok1, err1) = build_separate(entry.clone());
+    assert!(ok1, "first build failed:\n{err1}");
+    // Reorder Point's fields — main's source is unchanged, but the layout isn't.
+    write(dir.join("geo.sentinel"), "pub struct Point { y: i64, x: i64 }\n");
+    let (ok2, err2) = build_separate(entry.clone());
+    assert!(ok2, "rebuild failed:\n{err2}");
+    assert!(
+        !err2.contains("fresh `main`"),
+        "main inlines Point's layout → it must recompile when Point's decl changes:\n{err2}"
+    );
     assert_eq!(build_and_run_separate(entry), 42);
 }
 
