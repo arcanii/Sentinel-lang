@@ -172,6 +172,7 @@ cargo clippy --workspace --all-targets -- -D warnings
   - [`SENTINEL_DESIGN.md`](docs/SENTINEL_DESIGN.md) / [`SENTINEL_DESIGN2.md`](docs/SENTINEL_DESIGN2.md) — full design
   - [`HANDOVER.md`](docs/HANDOVER.md) — implementation plan and working norms
   - [`STATE.md`](docs/STATE.md) — current implementation state (source of truth)
+  - [`HISTORY.md`](docs/HISTORY.md) — archived milestone-by-milestone running logs (provenance, not maintained)
   - [`abi-v1.md`](docs/abi-v1.md) — the frozen, tested `abi-v1` artifact contract
   - [`SECRETS_LIFECYCLE.md`](docs/SECRETS_LIFECYCLE.md) — secret-memory design
   - [`borrow-check-limitations.md`](docs/borrow-check-limitations.md) — known borrow-check over-rejections + the partial-move soundness gap
