@@ -193,6 +193,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // encrypting "Ladies and Gentl" reproduced the RFC 8439 §2.4.2 ciphertext AND
     // decrypting recovered the plaintext.
     ("examples/security/chacha20_stream.sentinel", 42),
+    // Poly1305 one-time MAC (std::security::poly1305) — a polynomial in the secret
+    // clamped key over GF(2^130-5), as radix-2^26 `secret i64` limbs with a
+    // constant-time freeze; only the tag is declassified. 42 = reproduced the
+    // RFC 8439 §2.5.2 tag.
+    ("examples/security/poly1305.sentinel", 42),
 ];
 
 #[test]
@@ -243,6 +248,11 @@ fn siphash24_keyed_mac() {
 #[test]
 fn chacha20_stream_cipher() {
     check_example("examples/security/chacha20_stream.sentinel", "chacha20_stream", 42);
+}
+
+#[test]
+fn poly1305_one_time_mac() {
+    check_example("examples/security/poly1305.sentinel", "poly1305", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

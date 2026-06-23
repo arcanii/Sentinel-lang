@@ -1,0 +1,68 @@
+// examples/security/poly1305.sentinel — the Poly1305 one-time MAC.
+//
+// Poly1305 (RFC 8439 §2.5) authenticates a PUBLIC message under a 256-bit SECRET
+// one-time key and returns a 128-bit tag. Here the key (the secret multiplier `r`
+// and pad `s`) stays SECRET through the whole polynomial evaluation in
+// `std::security::poly1305::poly1305`; only the final 16 tag bytes are
+// `declassify`d (the tag is the output). The message bytes are PUBLIC — they are
+// the data being authenticated.
+//
+// Every operation on the secret key/accumulator is data-independent (radix-2^26
+// multiply-accumulate, carries, and a constant-time freeze), and the loop bound /
+// byte indices are PUBLIC (message length), so the compiler's constant-time check
+// verifies the whole MAC on every build — this program compiling at all is the
+// guarantee.
+//
+// Self-checking against the RFC 8439 §2.5.2 test vector. Exit 42 = the computed
+// tag matched the reference tag byte-for-byte.
+use std::security::poly1305::poly1305;
+
+fn main() -> i64 {
+    // The 32-byte one-time key (RFC 8439 §2.5.2), as PUBLIC [u8] bytes; the
+    // library widens them into the secret domain internally.
+    let key: [u8] = [
+        i64_to_u8(133), i64_to_u8(214), i64_to_u8(190), i64_to_u8(120),
+        i64_to_u8(87),  i64_to_u8(85),  i64_to_u8(109), i64_to_u8(51),
+        i64_to_u8(127), i64_to_u8(68),  i64_to_u8(82),  i64_to_u8(254),
+        i64_to_u8(66),  i64_to_u8(213), i64_to_u8(6),   i64_to_u8(168),
+        i64_to_u8(1),   i64_to_u8(3),   i64_to_u8(128), i64_to_u8(138),
+        i64_to_u8(251), i64_to_u8(13),  i64_to_u8(178), i64_to_u8(253),
+        i64_to_u8(74),  i64_to_u8(191), i64_to_u8(246), i64_to_u8(175),
+        i64_to_u8(65),  i64_to_u8(73),  i64_to_u8(245), i64_to_u8(27)
+    ];
+
+    // The 34-byte message "Cryptographic Forum Research Group".
+    let msg: [u8] = [
+        i64_to_u8(67),  i64_to_u8(114), i64_to_u8(121), i64_to_u8(112),
+        i64_to_u8(116), i64_to_u8(111), i64_to_u8(103), i64_to_u8(114),
+        i64_to_u8(97),  i64_to_u8(112), i64_to_u8(104), i64_to_u8(105),
+        i64_to_u8(99),  i64_to_u8(32),  i64_to_u8(70),  i64_to_u8(111),
+        i64_to_u8(114), i64_to_u8(117), i64_to_u8(109), i64_to_u8(32),
+        i64_to_u8(82),  i64_to_u8(101), i64_to_u8(115), i64_to_u8(101),
+        i64_to_u8(97),  i64_to_u8(114), i64_to_u8(99),  i64_to_u8(104),
+        i64_to_u8(32),  i64_to_u8(71),  i64_to_u8(114), i64_to_u8(111),
+        i64_to_u8(117), i64_to_u8(112)
+    ];
+
+    let tag: [u8] = poly1305(&msg, &key);
+
+    // The expected 16-byte tag (RFC 8439 §2.5.2).
+    let exp: [u8] = [
+        i64_to_u8(168), i64_to_u8(6),   i64_to_u8(29),  i64_to_u8(193),
+        i64_to_u8(48),  i64_to_u8(81),  i64_to_u8(54),  i64_to_u8(198),
+        i64_to_u8(194), i64_to_u8(43),  i64_to_u8(139), i64_to_u8(175),
+        i64_to_u8(12),  i64_to_u8(1),   i64_to_u8(39),  i64_to_u8(169)
+    ];
+
+    // OR-accumulate the per-byte XOR-diff into a public accumulator; 0 iff every
+    // tag byte matched. Both the computed tag and the expected tag are public here.
+    let mut bad: i64 = 0;
+    let mut j: i64 = 0;
+    while j < 16 {
+        let got: i64 = u8_to_i64(tag[j]);
+        let want: i64 = u8_to_i64(exp[j]);
+        bad = bad | (got ^ want);
+        j = j + 1;
+    }
+    if bad == 0 { 42 } else { 0 }
+}

@@ -1,0 +1,284 @@
+// std::security::poly1305 — the Poly1305 one-time MAC (RFC 8439 §2.5).
+//
+// Poly1305 (Bernstein) authenticates a PUBLIC message under a 256-bit SECRET
+// one-time key `(r, s)` and returns a 128-bit tag. It evaluates a polynomial in
+// the secret clamped multiplier `r` modulo the prime p = 2^130 - 5, then adds the
+// secret pad `s`. This is the MAC half of the ChaCha20-Poly1305 AEAD.
+//
+// Representation follows poly1305-donna's 32-bit path: each 130-bit value is a
+// radix-2^26 array of five 26-bit limbs, so a limb*limb product fits in an i64
+// (worst diagonal term ~2^57). The accumulator `h`, the multiplier `r`, the
+// precomputed `s1..s4 = r1..r4 * 5`, and the pad `s` are all SECRET. The message
+// limbs are PUBLIC (the data being authenticated); each is widened to `secret`
+// at its `let` before it meets the secret accumulator.
+//
+// Everything that touches the secret state is BRANCH-FREE: the multiply-
+// accumulate, the carries, and the final freeze (a constant-time conditional
+// subtraction of p via `std::security::ct::ct_mask` / `ct_select`) use only the
+// data-independent operators. The loop bound (block count) and the byte indices
+// are PUBLIC (message length is public), so the access pattern never depends on
+// the key. The compiler's constant-time check verifies the whole MAC on every
+// build. The single sanctioned `declassify` is on the final 16 tag bytes, after
+// h + s is formed — the tag is the output, safe to serialize.
+use std::security::ct::ct_mask;
+use std::security::ct::ct_select;
+
+// Read 4 little-endian PUBLIC message bytes at `base+off` from a `&[u8]` borrow
+// into a 32-bit value (returned as i64; index-read does not consume the buffer).
+fn u32le(m: &[u8], i: i64) -> i64 {
+    let b0: i64 = u8_to_i64((*m)[i]);
+    let b1: i64 = u8_to_i64((*m)[i + 1]);
+    let b2: i64 = u8_to_i64((*m)[i + 2]);
+    let b3: i64 = u8_to_i64((*m)[i + 3]);
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+// Poly1305 over a public message `msg` (a non-consuming `&[u8]` borrow) keyed by
+// the 256-bit secret one-time key `key` (32 bytes: r in 0..16, s/pad in 16..32).
+// Returns the 16-byte tag as a freshly built `[u8]` (the only declassified value).
+pub fn poly1305(msg: &[u8], key: &[u8]) -> [u8] {
+    // The radix-2^26 limb mask and the modular-reduction constant 2^26, widened
+    // public -> secret so they can mask / be subtracted from secret values.
+    let m26: secret i64 = 67108863;        // 0x3ffffff
+    let two26: secret i64 = 67108864;      // 1 << 26
+
+    // ---- Clamp `r` (RFC 8439 §2.5.1): load 4 LE key words, split into 5 limbs,
+    // mask each with the clamp constant. The result is SECRET (it is the key).
+    let kt0: secret i64 = u32le(key, 0);
+    let kt1: secret i64 = u32le(key, 4);
+    let kt2: secret i64 = u32le(key, 8);
+    let kt3: secret i64 = u32le(key, 12);
+    let cm0: secret i64 = 67108863;        // 0x3ffffff
+    let cm1: secret i64 = 67108611;        // 0x3ffff03
+    let cm2: secret i64 = 67092735;        // 0x3ffc0ff
+    let cm3: secret i64 = 66076671;        // 0x3f03fff
+    let cm4: secret i64 = 1048575;         // 0x00fffff
+    let r0: secret i64 = kt0 & cm0;
+    let r1: secret i64 = ((kt0 >> 26) | (kt1 << 6)) & cm1;
+    let r2: secret i64 = ((kt1 >> 20) | (kt2 << 12)) & cm2;
+    let r3: secret i64 = ((kt2 >> 14) | (kt3 << 18)) & cm3;
+    let r4: secret i64 = (kt3 >> 8) & cm4;
+    // s1..s4 = r1..r4 * 5 (the wrap-around multiplier for the radix-2^26 reduction).
+    let five: secret i64 = 5;
+    let s1: secret i64 = r1 * five;
+    let s2: secret i64 = r2 * five;
+    let s3: secret i64 = r3 * five;
+    let s4: secret i64 = r4 * five;
+
+    // The pad `s` = key[16..32], four LE 32-bit words (added at the very end).
+    let pad0: secret i64 = u32le(key, 16);
+    let pad1: secret i64 = u32le(key, 20);
+    let pad2: secret i64 = u32le(key, 24);
+    let pad3: secret i64 = u32le(key, 28);
+
+    // The accumulator h, five secret limbs, mutated in place (ADR 0050) so we
+    // never thread a by-value array through the loop (which would move it).
+    let z: secret i64 = 0;
+    let mut h: [secret i64] = [z, z, z, z, z];
+
+    // ---- Absorb each 16-byte block. `off`, `n`, `blen` are PUBLIC (message
+    // length), so the loop bound and byte indices never depend on the secret key.
+    let n: i64 = len(*msg);
+    let mut off: i64 = 0;
+    while off < n {
+        let rem: i64 = n - off;
+        // blen = min(16, rem), public.
+        let blen: i64 = if rem < 16 { rem } else { 16 };
+
+        // Assemble the four 32-bit block words from the PUBLIC message bytes,
+        // zero-padding past blen, with the 1 byte appended at position blen for a
+        // partial block. We build the 16 block bytes into public locals first.
+        // bb[i] = msg byte if i < blen, else (1 if i == blen for a partial block,
+        // else 0). For a full block (blen == 16) the high bit is set instead.
+        let mut bw0: i64 = 0;
+        let mut bw1: i64 = 0;
+        let mut bw2: i64 = 0;
+        let mut bw3: i64 = 0;
+        let mut i: i64 = 0;
+        while i < blen {
+            let bi: i64 = u8_to_i64((*msg)[off + i]);
+            // Place byte i into the right word (i/4) at byte (i%4), public shifts.
+            let wi: i64 = i / 4;
+            let bj: i64 = i - wi * 4;
+            let sh: i64 = bj * 8;
+            if wi == 0 { bw0 = bw0 | (bi << sh); 0 }
+            else { if wi == 1 { bw1 = bw1 | (bi << sh); 0 }
+                   else { if wi == 2 { bw2 = bw2 | (bi << sh); 0 }
+                          else { bw3 = bw3 | (bi << sh); 0 } } };
+            i = i + 1;
+        }
+        // Append the 1 byte for a partial (non-full) block at position blen.
+        if blen < 16 {
+            let wi: i64 = blen / 4;
+            let bj: i64 = blen - wi * 4;
+            let sh: i64 = bj * 8;
+            if wi == 0 { bw0 = bw0 | (1 << sh); 0 }
+            else { if wi == 1 { bw1 = bw1 | (1 << sh); 0 }
+                   else { if wi == 2 { bw2 = bw2 | (1 << sh); 0 }
+                          else { bw3 = bw3 | (1 << sh); 0 } } };
+            0
+        } else { 0 };
+        // The high bit (1 << 24, added to limb 4) is set only for a FULL block.
+        let hibit: i64 = if blen < 16 { 0 } else { 16777216 };
+
+        // Split the block into 5 radix-2^26 limbs (PUBLIC), widen each to secret,
+        // and add into the secret accumulator h.
+        let ml0pub: i64 = bw0 & 67108863;
+        let ml1pub: i64 = ((bw0 >> 26) | (bw1 << 6)) & 67108863;
+        let ml2pub: i64 = ((bw1 >> 20) | (bw2 << 12)) & 67108863;
+        let ml3pub: i64 = ((bw2 >> 14) | (bw3 << 18)) & 67108863;
+        let ml4pub: i64 = (bw3 >> 8) | hibit;
+        let ml0: secret i64 = ml0pub;
+        let ml1: secret i64 = ml1pub;
+        let ml2: secret i64 = ml2pub;
+        let ml3: secret i64 = ml3pub;
+        let ml4: secret i64 = ml4pub;
+        h[0] = h[0] + ml0;
+        h[1] = h[1] + ml1;
+        h[2] = h[2] + ml2;
+        h[3] = h[3] + ml3;
+        h[4] = h[4] + ml4;
+
+        // ---- The 5x5 multiply-accumulate h = h * r mod p (radix-2^26 schoolbook
+        // with the *5 wrap on the over-flowing limbs). Each term is secret*secret,
+        // exact in i64 (worst diagonal ~2^57).
+        let hh0: secret i64 = h[0];
+        let hh1: secret i64 = h[1];
+        let hh2: secret i64 = h[2];
+        let hh3: secret i64 = h[3];
+        let hh4: secret i64 = h[4];
+        let d0: secret i64 = hh0 * r0 + hh1 * s4 + hh2 * s3 + hh3 * s2 + hh4 * s1;
+        let d1: secret i64 = hh0 * r1 + hh1 * r0 + hh2 * s4 + hh3 * s3 + hh4 * s2;
+        let d2: secret i64 = hh0 * r2 + hh1 * r1 + hh2 * r0 + hh3 * s4 + hh4 * s3;
+        let d3: secret i64 = hh0 * r3 + hh1 * r2 + hh2 * r1 + hh3 * r0 + hh4 * s4;
+        let d4: secret i64 = hh0 * r4 + hh1 * r3 + hh2 * r2 + hh3 * r1 + hh4 * r0;
+
+        // ---- Carry propagate the 5 limbs back into 26-bit form. Logical `>> 26`
+        // is exact here because every d_i is non-negative (all operands >= 0).
+        let mut c: secret i64 = d0 >> 26;
+        let nh0: secret i64 = d0 & m26;
+        let d1c: secret i64 = d1 + c;
+        c = d1c >> 26;
+        let nh1: secret i64 = d1c & m26;
+        let d2c: secret i64 = d2 + c;
+        c = d2c >> 26;
+        let nh2: secret i64 = d2c & m26;
+        let d3c: secret i64 = d3 + c;
+        c = d3c >> 26;
+        let nh3: secret i64 = d3c & m26;
+        let d4c: secret i64 = d4 + c;
+        c = d4c >> 26;
+        let nh4: secret i64 = d4c & m26;
+        // The top carry wraps into limb 0 times 5 (2^130 == 5 mod p).
+        let h0a: secret i64 = nh0 + c * five;
+        c = h0a >> 26;
+        let h0b: secret i64 = h0a & m26;
+        let h1b: secret i64 = nh1 + c;
+        h[0] = h0b;
+        h[1] = h1b;
+        h[2] = nh2;
+        h[3] = nh3;
+        h[4] = nh4;
+
+        off = off + 16;
+    }
+
+    // ---- Final carry (fully reduce h into five 26-bit limbs).
+    let mut hc: secret i64 = h[1] >> 26;
+    let fh1: secret i64 = h[1] & m26;
+    let fh2a: secret i64 = h[2] + hc;
+    hc = fh2a >> 26;
+    let fh2: secret i64 = fh2a & m26;
+    let fh3a: secret i64 = h[3] + hc;
+    hc = fh3a >> 26;
+    let fh3: secret i64 = fh3a & m26;
+    let fh4a: secret i64 = h[4] + hc;
+    hc = fh4a >> 26;
+    let fh4: secret i64 = fh4a & m26;
+    let fh0a: secret i64 = h[0] + hc * five;
+    hc = fh0a >> 26;
+    let fh0: secret i64 = fh0a & m26;
+    let fh1b: secret i64 = fh1 + hc;
+    // Reduced h limbs:
+    let rh0: secret i64 = fh0;
+    let rh1: secret i64 = fh1b;
+    let rh2: secret i64 = fh2;
+    let rh3: secret i64 = fh3;
+    let rh4: secret i64 = fh4;
+
+    // ---- Compute g = h + 5 (i.e. h - p, since p = 2^130 - 5), constant-time.
+    let g0a: secret i64 = rh0 + five;
+    let mut gc: secret i64 = g0a >> 26;
+    let g0: secret i64 = g0a & m26;
+    let g1a: secret i64 = rh1 + gc;
+    gc = g1a >> 26;
+    let g1: secret i64 = g1a & m26;
+    let g2a: secret i64 = rh2 + gc;
+    gc = g2a >> 26;
+    let g2: secret i64 = g2a & m26;
+    let g3a: secret i64 = rh3 + gc;
+    gc = g3a >> 26;
+    let g3: secret i64 = g3a & m26;
+    // g4 = h4 + carry - 2^26; this is NEGATIVE iff h < p (then we keep h).
+    let g4: secret i64 = rh4 + gc - two26;
+
+    // ---- The constant-time freeze. donna uses mask = (g4 >> 31) - 1 in 32-bit:
+    // mask is 0 when h < p (keep h), all-ones when h >= p (use g). In i64, g4 is
+    // negative iff h < p, so its sign bit (g4 >> 63 logical) is the SELECT BIT:
+    // bit = 1 => h < p => keep h; bit = 0 => h >= p => use g. ct_select(mask, a, b)
+    // returns a when mask is all-ones, so a = h (keep), b = g (use) under this bit.
+    let bit: secret i64 = g4 >> 63;        // 1 if h < p, else 0
+    let mask: secret i64 = ct_mask(bit);   // all-ones if h < p, else 0
+    // g4 must be reduced to 26 bits before selecting (matches donna's g4 &= mask
+    // path: the low 26 bits of (h4 + c - 2^26) are h4+c when h>=p).
+    let g4r: secret i64 = g4 & m26;
+    let sh0: secret i64 = ct_select(mask, rh0, g0);
+    let sh1: secret i64 = ct_select(mask, rh1, g1);
+    let sh2: secret i64 = ct_select(mask, rh2, g2);
+    let sh3: secret i64 = ct_select(mask, rh3, g3);
+    let sh4: secret i64 = ct_select(mask, rh4, g4r);
+
+    // ---- Pack the five 26-bit limbs back into four 32-bit words (LE 128-bit).
+    let u32: secret i64 = 4294967295;      // 0xffffffff mask
+    let w0: secret i64 = (sh0 | (sh1 << 26)) & u32;
+    let w1: secret i64 = ((sh1 >> 6) | (sh2 << 20)) & u32;
+    let w2: secret i64 = ((sh2 >> 12) | (sh3 << 14)) & u32;
+    let w3: secret i64 = ((sh3 >> 18) | (sh4 << 8)) & u32;
+
+    // ---- Add the pad `s` with carry across the four 32-bit words.
+    let f0: secret i64 = w0 + pad0;
+    let o0: secret i64 = f0 & u32;
+    let f1: secret i64 = w1 + pad1 + (f0 >> 32);
+    let o1: secret i64 = f1 & u32;
+    let f2: secret i64 = w2 + pad2 + (f1 >> 32);
+    let o2: secret i64 = f2 & u32;
+    let f3: secret i64 = w3 + pad3 + (f2 >> 32);
+    let o3: secret i64 = f3 & u32;
+
+    // ---- Serialize the 16-byte tag little-endian. This is the ONE declassify:
+    // the tag is the public output once h + s is formed. Build a fresh [u8].
+    let ff: secret i64 = 255;
+    let mut tag: [u8] = [
+        i64_to_u8(0), i64_to_u8(0), i64_to_u8(0), i64_to_u8(0),
+        i64_to_u8(0), i64_to_u8(0), i64_to_u8(0), i64_to_u8(0),
+        i64_to_u8(0), i64_to_u8(0), i64_to_u8(0), i64_to_u8(0),
+        i64_to_u8(0), i64_to_u8(0), i64_to_u8(0), i64_to_u8(0)
+    ];
+    tag[0]  = i64_to_u8(declassify(o0 & ff));
+    tag[1]  = i64_to_u8(declassify((o0 >> 8) & ff));
+    tag[2]  = i64_to_u8(declassify((o0 >> 16) & ff));
+    tag[3]  = i64_to_u8(declassify((o0 >> 24) & ff));
+    tag[4]  = i64_to_u8(declassify(o1 & ff));
+    tag[5]  = i64_to_u8(declassify((o1 >> 8) & ff));
+    tag[6]  = i64_to_u8(declassify((o1 >> 16) & ff));
+    tag[7]  = i64_to_u8(declassify((o1 >> 24) & ff));
+    tag[8]  = i64_to_u8(declassify(o2 & ff));
+    tag[9]  = i64_to_u8(declassify((o2 >> 8) & ff));
+    tag[10] = i64_to_u8(declassify((o2 >> 16) & ff));
+    tag[11] = i64_to_u8(declassify((o2 >> 24) & ff));
+    tag[12] = i64_to_u8(declassify(o3 & ff));
+    tag[13] = i64_to_u8(declassify((o3 >> 8) & ff));
+    tag[14] = i64_to_u8(declassify((o3 >> 16) & ff));
+    tag[15] = i64_to_u8(declassify((o3 >> 24) & ff));
+    tag
+}
