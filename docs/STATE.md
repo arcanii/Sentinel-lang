@@ -60,12 +60,17 @@ the current state of the workspace without re-reading every commit.
   top-level `std/` (functional categories) + `examples/` corpus of real,
   idiomatic Sentinel programs that double as feature tests — each built BOTH via
   `--separate` and the merge path and asserted on (`crates/sentinel-driver/tests/
-  examples.rs`). The agreed starter set is shipped — `std/security/ct`
-  (constant-time primitives incl. `ct_memcmp` + `ct_rotl64`), `std/math/num`,
+  examples.rs`). Shipped libraries: `std/security` (`ct` constant-time primitives
+  incl. `ct_memcmp` + `ct_rotl64`/`ct_rotl32`; `siphash` SipHash-2-4 keyed MAC;
+  `chacha20` block + stream cipher; `poly1305` one-time MAC), `std/math/num`,
   `std/bits/bits` (rotates), `std/bytes/bytes` (`[u8]` utilities over `&[u8]`
-  borrows). It has surfaced + closed **three** language gaps so far, each
-  ADR-first + fully self-hosted (snc + `scg`, byte-identical, both fixed points
-  held):
+  borrows), and `std/algorithms/seq` (in-place insertion `sort` + `binary_search`
+  over public `[i64]`). The crypto examples reproduce the canonical test vectors
+  (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 / §2.5.2). It has
+  surfaced + closed **five** language gaps so far, each ADR-first; the first four
+  are fully self-hosted (snc + `scg`, byte-identical, both fixed points held), and
+  ADR 0051's operand widen is too (its call-arg/array/return widens are snc-side
+  ergonomics):
   - **`[secret T]` arrays** — arrays of secret elements (ADR 0047,
     `ArrayElem::Secret`) — enabling a variable-length constant-time `memcmp` over
     secret bytes (`examples/security/ct_memcmp`).
@@ -86,10 +91,18 @@ the current state of the workspace without re-reading every commit.
     idiomatic, loop-based full **ChaCha20 block** over a `[secret i32]` state
     permuted in place, reproducing the RFC 8439 §2.3.2 vector
     (`examples/security/chacha20_block`).
-  See the
+  - **Implicit public→secret widening** (ADR 0051) — a public `T` widens to
+    `secret T` in operand position (`secret_x + 5`), as a call argument, a return,
+    and `[u8] → [secret u8]` — removing the "bind every constant secret first"
+    ceremony the crypto MACs hit. Monotone + a codegen no-op; the constant-time
+    sinks are untouched (shift amount / divisor / branch / index still reject).
+    The operand widen is self-hosted (`tests/pass/c56_operand_widen`); the
+    call-arg/array/return widens are snc-side.
+  The crypto MACs (SipHash / ChaCha20 stream / Poly1305) drove ADR 0051 —
+  "build real programs → find the gap → fix it". See the
   `sentinel_examples_and_corelibs` auto-memory.
 
-**1553 tests across the workspace**, four-check green (build · `cargo nextest`
+**1558 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

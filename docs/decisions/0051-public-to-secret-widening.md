@@ -1,10 +1,11 @@
 # ADR 0051: Implicit public → secret widening
 
-Status: **PROPOSED** — adds ergonomic, monotone public→secret widening so a public value can
-combine with / flow into a `secret` value without a `let`-boundary pre-bind. Phase 1 implements
-it in the type checker (`snc`); Phase 2 mirrors it into the self-hosted `scg` with a corpus
-fixture so the differential validates `scg == snc` byte-for-byte. Amendments (A1…) will record
-deviations from this plan.
+Status: **ACCEPTED-WITH-AMENDMENTS** (A1–A4) — adds ergonomic, monotone public→secret widening.
+The **operand widen** (binop + cmp) is in `snc` (Phase 1) AND mirrored into the self-hosted
+`scg` (Phase 2); `tests/pass/c56_operand_widen` validates `scg == snc` byte-for-byte across all
+8 selfhost stage differentials, both bootstrap fixed points hold, and the full nextest is green.
+The **call-arg / return / array** widens are snc-side ergonomics (A1). Amendments below record
+the deviations from the PROPOSED plan.
 
 Removes the pervasive friction the examples-as-tests track keeps hitting: mixing a `secret`
 value with a public value in operand position is rejected (`type mismatch: expected secret,
@@ -115,3 +116,44 @@ are unaffected. A new fixture exercises the widen (Phase 2) and `scg` mirrors it
   identical.
 - Deferred: `secret / public` (divisor decoupling), `&&` / `||` public/secret mixing, and the
   general `[T] → [secret T]` array widen (scoped to `[u8]` first, matching ADR 0047).
+
+## Amendments
+
+- **A1 — the OPERAND widen is fully self-hosted; the call-arg / return / array widens are
+  snc-side.** All five widen positions are implemented + validated in `snc` (unit tests +
+  probes). Only the **operand widen** (binop + cmp) is mirrored into `scg`
+  (`selfhost/types.sentinel`) with the corpus fixture `tests/pass/c56_operand_widen`, because
+  the operand widen is the one the crypto code hits constantly. The **call-arg**, **return**,
+  and **`[u8] → [secret u8]` array** widens are deliberately left snc-side: no
+  `selfhost/*.sentinel` source and no corpus fixture uses them, so `scg` self-hosts and the
+  selfhost corpus differentials + both bootstrap fixed points stay **byte-identical without
+  mirroring them**. They are sound, additive, codegen-no-op ergonomics; mirroring them is a
+  low-value follow-up (they don't change any emitted code). This is the first ADR-feature whose
+  self-hosting is *partial by design* — justified because the widen is a pure type-checker
+  ergonomic with zero emitted-code impact, so the "byte-identical" property is preserved
+  trivially for everything self-hosted.
+
+- **A2 — the scg mirror reused the existing `widen_splice` / `mir_widen` machinery wholesale.**
+  The `Expr::Binary` arm now dumps each operand into its own buffer (the widen decision needs
+  *both* operand types, known only after both `dump_texpr` returns), then splices the public
+  operand back wrapped in `(widen-secret … :secret T)` via `widen_splice` (with the secret type
+  as the synthetic expected type, so `widen_kind` returns the widen-secret kind) and wraps its
+  MIR value via `mir_widen` (the `Opaque([inner])` the oracle lowers `WidenToSecret` to).
+  Codegen needed *no* operand change: a secret widen is value-level identity and `secret i64`
+  strips to the same `i64` LLVM type, so the captured operand kinds + the binop/cmp type args
+  are already byte-identical. The corpus exercises the secret-left / public-right direction
+  (the well-tested MIR `widen_r` path); left-widen is implemented for type/text completeness.
+
+- **A3 — two snc unit tests were repurposed, not deleted.** `c31_mixed_public_secret_arithmetic`
+  and `c53_bitwise_secret_public` previously asserted that `secret + public` / `secret ^ public`
+  *reject* (Mismatch); they now assert the **widen** (accept, result secret) plus the preserved
+  sink exclusions (`secret / public` still Mismatch; a secret shift AMOUNT still
+  `SecretShiftAmount`). A new `adr0051_widen_forms_typecheck_and_stay_constant_time` covers all
+  five widen positions + re-confirms a widened `secret == public` (now `secret bool`) still
+  cannot reach an `if` (`SecretBranch`).
+
+- **A4 — `secret / public` stays a `Mismatch` (Div excluded from the operand widen).** Division
+  is special: a secret divisor is variable-time (`SecretDivisor`), so widening a public divisor
+  to secret would *trip the sink*. Rather than decouple Div's operand secrecy (like shifts), the
+  ADR excludes Div from the widen entirely — `secret_x / 5` remains a `Mismatch` (it is not
+  needed by the crypto code). The shift exclusion is the same: the amount is never widened.

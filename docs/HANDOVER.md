@@ -100,23 +100,47 @@ language gaps — finding + fixing those is the most valuable output.
     block** over a `[secret i32]` state permuted in place
     (`examples/security/chacha20_block`, RFC 8439 §2.3.2). Validated by
     `tests/pass/c55_index_assign` across all 8 selfhost differentials.
+- **Crypto band on the shipped 0047–0050 surface (no language change):**
+  `eabafdb` **SipHash-2-4 keyed MAC** (`std/security/siphash`, canonical
+  `0xa129ca…` vector + tamper detection), `26a58e6` **ChaCha20 stream cipher**
+  (`std/security/chacha20::chacha20_xor`, RFC 8439 §2.4.2; the block refactored
+  into the shared lib), `48b1248` **Poly1305 one-time MAC** (`std/security/
+  poly1305`, radix-2^26 `secret i64` limbs, constant-time freeze, RFC 8439 §2.5.2
+  — verified across 10 message lengths). These MACs each hit the "bind every
+  public constant secret first" friction → motivated ADR 0051.
+- **`a05659e` (Phase 1, snc) + `c68e670` (Phase 2, selfhost mirror) — implicit
+  public→secret widening (ADR 0051 A1–A4).** A public `T` widens to `secret T` in
+  operand position (`secret_x + 5`), as a call arg, a return, and `[u8] → [secret
+  u8]` — via the existing `WidenToSecret` node (a codegen no-op). Monotone +
+  sound: the CT sinks (shift amount / divisor / branch / index) are untouched and
+  still reject (Div + shifts are EXCLUDED from the widen). The **operand widen**
+  (binop+cmp) is fully self-hosted (`tests/pass/c56_operand_widen`); the call-arg/
+  array/return widens are snc-side (no selfhost source or corpus fixture uses
+  them, so the differentials + fixed points stay byte-identical without them).
+- **`8b09774` — `std/algorithms/seq`** (in-place insertion `sort` via index-assign
+  + `binary_search` over public `[i64]`) + `examples/algorithms/sort_search` — the
+  first `algorithms` category (the public-data counterpart to `security`).
 - **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
   `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
   byte utilities must take `&[u8]`, not `[u8]` by value, or the first call consumes
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
-  - **More examples / `std` categories** — the owner wanted functional categories
-    (networking/threading/process/algorithms/…) as the language grows. With the
-    full ChaCha20 block now shipped, the obvious next crypto targets are a
-    **SipHash-2-4 or Poly1305 MAC** (compose the shipped round/primitives into a
-    complete keyed PRF / authenticator), or a ChaCha20 *stream* (counter + the
-    block keystream + XOR) — likely few/no language changes.
-  - **Secret ergonomics** — a public→secret operand widen (so a constant needn't be
-    pre-bound `secret` before combining with a secret), an array-level `[u8] ->
-    [secret u8]` widen.
-  - **Lower value:** the separate-comp tail, Linux CI (P2.4), the deeper
-    post-codegen / post-optimization constant-time verifier (research-hard).
+  - **AEAD / more crypto** — compose the shipped primitives into **ChaCha20-Poly1305**
+    (RFC 8439 §2.8, the AEAD construction: encrypt with ChaCha20, MAC the ciphertext
+    with Poly1305, the one-time Poly key from a ChaCha block-0 keystream). Or HMAC /
+    a hash. Likely few/no language changes (the pieces exist).
+  - **Demonstrate the ADR 0051 payoff** — simplify the crypto libs to drop their
+    `let m: secret i64 = <public word>;` widen-only ceremony now that operand /
+    call-arg widening is implicit (a clean follow-up; re-validated by the example
+    tests). Optionally mirror the call-arg/array/return widens into `scg`.
+  - **More `std` categories** — the owner wanted networking / threading / process /
+    algorithms; `algorithms` is now seeded (`seq`). Networking/threading/process need
+    runtime/syscall surface that does not exist yet (a real gap to scope first).
+  - **Lower value (and partly blocked):** **Linux CI (P2.4)** needs a Linux/CI
+    environment (cannot be validated on this macOS host — needs the owner's CI); the
+    separate-comp tail (class/generic-instance dedup) is explicitly low-value; the
+    deeper post-codegen constant-time verifier is research-hard.
   Keep both bootstrap fixed points + the selfhost differentials byte-identical (the
   full nextest is the gate).
 
