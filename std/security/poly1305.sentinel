@@ -121,23 +121,19 @@ pub fn poly1305(msg: &[u8], key: &[u8]) -> [u8] {
         // The high bit (1 << 24, added to limb 4) is set only for a FULL block.
         let hibit: i64 = if blen < 16 { 0 } else { 16777216 };
 
-        // Split the block into 5 radix-2^26 limbs (PUBLIC), widen each to secret,
-        // and add into the secret accumulator h.
+        // Split the block into 5 radix-2^26 limbs (PUBLIC) and add them into the
+        // secret accumulator h. ADR 0051: each public limb widens to secret in
+        // operand position (`h[i] + <public>`), so no per-limb pre-bind is needed.
         let ml0pub: i64 = bw0 & 67108863;
         let ml1pub: i64 = ((bw0 >> 26) | (bw1 << 6)) & 67108863;
         let ml2pub: i64 = ((bw1 >> 20) | (bw2 << 12)) & 67108863;
         let ml3pub: i64 = ((bw2 >> 14) | (bw3 << 18)) & 67108863;
         let ml4pub: i64 = (bw3 >> 8) | hibit;
-        let ml0: secret i64 = ml0pub;
-        let ml1: secret i64 = ml1pub;
-        let ml2: secret i64 = ml2pub;
-        let ml3: secret i64 = ml3pub;
-        let ml4: secret i64 = ml4pub;
-        h[0] = h[0] + ml0;
-        h[1] = h[1] + ml1;
-        h[2] = h[2] + ml2;
-        h[3] = h[3] + ml3;
-        h[4] = h[4] + ml4;
+        h[0] = h[0] + ml0pub;
+        h[1] = h[1] + ml1pub;
+        h[2] = h[2] + ml2pub;
+        h[3] = h[3] + ml3pub;
+        h[4] = h[4] + ml4pub;
 
         // ---- The 5x5 multiply-accumulate h = h * r mod p (radix-2^26 schoolbook
         // with the *5 wrap on the over-flowing limbs). Each term is secret*secret,

@@ -63,15 +63,16 @@ pub fn siphash24(msg: &[u8], k0: secret i64, k1: secret i64) -> secret i64 {
             mw = mw | (bi << (j * 8));
             j = j + 1;
         }
-        let m: secret i64 = mw;          // public word -> secret (it mixes into the key path)
-        v3 = v3 ^ m;
+        // ADR 0051: the public word `mw` widens to secret in operand position
+        // (it mixes into the secret key path) — no pre-bound secret needed.
+        v3 = v3 ^ mw;
         let mut rr: i64 = 0;
         while rr < 2 {
             let s: SipState = sipround(v0, v1, v2, v3);
             v0 = s.v0; v1 = s.v1; v2 = s.v2; v3 = s.v3;
             rr = rr + 1;
         }
-        v0 = v0 ^ m;
+        v0 = v0 ^ mw;
         blk = blk + 1;
     }
 
@@ -85,19 +86,17 @@ pub fn siphash24(msg: &[u8], k0: secret i64, k1: secret i64) -> secret i64 {
         bw = bw | (bi << (t * 8));
         t = t + 1;
     }
-    let mfin: secret i64 = bw;
-    v3 = v3 ^ mfin;
+    v3 = v3 ^ bw;
     let mut rr2: i64 = 0;
     while rr2 < 2 {
         let s: SipState = sipround(v0, v1, v2, v3);
         v0 = s.v0; v1 = s.v1; v2 = s.v2; v3 = s.v3;
         rr2 = rr2 + 1;
     }
-    v0 = v0 ^ mfin;
+    v0 = v0 ^ bw;
 
     // Finalize: fold 0xff into v2, then 4 rounds; the tag is v0 ^ v1 ^ v2 ^ v3.
-    let ff: secret i64 = 255;
-    v2 = v2 ^ ff;
+    v2 = v2 ^ 255;
     let mut rr3: i64 = 0;
     while rr3 < 4 {
         let s: SipState = sipround(v0, v1, v2, v3);

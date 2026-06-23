@@ -33,19 +33,18 @@ pub fn ct_combine(acc: secret i64, diff: secret i64) -> secret i64 {
     acc | diff
 }
 
-// Bitwise NOT, branch-free: `x ^ 0xFFFF...FF`. The all-ones constant is `0 - 1`
-// bound as `secret` (a public literal does not widen to `secret` in operand
-// position, so it is widened at the `let` boundary first).
+// Bitwise NOT, branch-free: `x ^ 0xFFFF...FF`. The all-ones constant `0 - 1`
+// widens public -> secret in operand position (ADR 0051), so it needs no
+// pre-bound `secret`.
 pub fn ct_not(x: secret i64) -> secret i64 {
-    let ones: secret i64 = 0 - 1;
-    x ^ ones
+    x ^ (0 - 1)
 }
 
 // Turn a secret selector bit (`0` or `1`) into a full-width mask: `0 -> 0`,
-// `1 -> -1` (all ones). Branch-free via two's-complement negation.
+// `1 -> -1` (all ones). Branch-free via two's-complement negation; the public
+// `0` widens to secret in operand position (ADR 0051).
 pub fn ct_mask(bit: secret i64) -> secret i64 {
-    let zero: secret i64 = 0;
-    zero - bit
+    0 - bit
 }
 
 // Branch-free select: returns `a` when `mask` is all-ones, `b` when `mask` is
