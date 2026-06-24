@@ -1,0 +1,253 @@
+// std::security::sha512 — a constant-time SHA-512 over a SECRET message (FIPS 180-4).
+//
+// The 64-bit-word twin of `std::security::sha256`. SHA-512 hashes a `[secret u8]`
+// message into a 64-byte SECRET digest, branch-free over `secret i64` words: 64-bit
+// wrapping adds, XORs, ANDs, and rotations / logical shifts by PUBLIC constants (via
+// `std::security::ct::ct_rotr64`). Because a word is a NATIVE `secret i64`, none of
+// the width casts SHA-256 needs (its words are `secret i32`) appear here — the
+// arithmetic is plain `secret i64`. The message CONTENT is secret and flows only
+// through these data-independent ops; the message LENGTH is PUBLIC, so the padding,
+// block count, and every loop bound / array index are public. So a successful build
+// of any program that hashes is a proof the constant-time discipline held: the
+// compiler's check (`sentinel::mir::secret_leak`) rejects any secret reaching a
+// branch, a memory index, or a divisor.
+//
+// SHA-512 vs SHA-256: 64-bit words, 80 rounds, 1024-bit (128-byte) blocks, a 128-bit
+// length field, and different rotation amounts (Σ0 = ROTR 28/34/39, Σ1 = 14/18/41,
+// σ0 = ROTR 1/8 ^ SHR 7, σ1 = ROTR 19/61 ^ SHR 6). Ch/Maj are identical.
+use std::security::ct::ct_rotr64;
+
+// Ch(e,f,g) = (e AND f) XOR ((NOT e) AND g), via the no-NOT identity g ^ (e & (f^g)).
+fn ch(e: secret i64, f: secret i64, g: secret i64) -> secret i64 {
+    g ^ (e & (f ^ g))
+}
+
+// Maj(a,b,c) = (a&b) ^ (a&c) ^ (b&c) — the majority bit at each position.
+fn maj(a: secret i64, b: secret i64, c: secret i64) -> secret i64 {
+    (a & b) ^ (a & c) ^ (b & c)
+}
+
+// Σ0(x) = ROTR(x,28) ^ ROTR(x,34) ^ ROTR(x,39) — the working-var `a` mixer.
+fn big_sigma0(x: secret i64) -> secret i64 {
+    ct_rotr64(x, 28) ^ ct_rotr64(x, 34) ^ ct_rotr64(x, 39)
+}
+
+// Σ1(x) = ROTR(x,14) ^ ROTR(x,18) ^ ROTR(x,41) — the working-var `e` mixer.
+fn big_sigma1(x: secret i64) -> secret i64 {
+    ct_rotr64(x, 14) ^ ct_rotr64(x, 18) ^ ct_rotr64(x, 41)
+}
+
+// σ0(x) = ROTR(x,1) ^ ROTR(x,8) ^ SHR(x,7) — a message-schedule mixer.
+fn small_sigma0(x: secret i64) -> secret i64 {
+    ct_rotr64(x, 1) ^ ct_rotr64(x, 8) ^ (x >> 7)
+}
+
+// σ1(x) = ROTR(x,19) ^ ROTR(x,61) ^ SHR(x,6) — a message-schedule mixer.
+fn small_sigma1(x: secret i64) -> secret i64 {
+    ct_rotr64(x, 19) ^ ct_rotr64(x, 61) ^ (x >> 6)
+}
+
+// The 80 round constants K (FIPS 180-4 §4.2.3), as a `Vec<secret i64>`. The public
+// i64 constants widen to `secret i64` at each push arg (ADR 0051).
+fn k_constants() -> Vec<secret i64> {
+    let mut k: Vec<secret i64> = vec_new();
+    push(&mut k, 4794697086780616226);   push(&mut k, 8158064640168781261);
+    push(&mut k, -5349999486874862801);  push(&mut k, -1606136188198331460);
+    push(&mut k, 4131703408338449720);   push(&mut k, 6480981068601479193);
+    push(&mut k, -7908458776815382629);  push(&mut k, -6116909921290321640);
+    push(&mut k, -2880145864133508542);  push(&mut k, 1334009975649890238);
+    push(&mut k, 2608012711638119052);   push(&mut k, 6128411473006802146);
+    push(&mut k, 8268148722764581231);   push(&mut k, -9160688886553864527);
+    push(&mut k, -7215885187991268811);  push(&mut k, -4495734319001033068);
+    push(&mut k, -1973867731355612462);  push(&mut k, -1171420211273849373);
+    push(&mut k, 1135362057144423861);   push(&mut k, 2597628984639134821);
+    push(&mut k, 3308224258029322869);   push(&mut k, 5365058923640841347);
+    push(&mut k, 6679025012923562964);   push(&mut k, 8573033837759648693);
+    push(&mut k, -7476448914759557205);  push(&mut k, -6327057829258317296);
+    push(&mut k, -5763719355590565569);  push(&mut k, -4658551843659510044);
+    push(&mut k, -4116276920077217854);  push(&mut k, -3051310485924567259);
+    push(&mut k, 489312712824947311);    push(&mut k, 1452737877330783856);
+    push(&mut k, 2861767655752347644);   push(&mut k, 3322285676063803686);
+    push(&mut k, 5560940570517711597);   push(&mut k, 5996557281743188959);
+    push(&mut k, 7280758554555802590);   push(&mut k, 8532644243296465576);
+    push(&mut k, -9096487096722542874);  push(&mut k, -7894198246740708037);
+    push(&mut k, -6719396339535248540);  push(&mut k, -6333637450476146687);
+    push(&mut k, -4446306890439682159);  push(&mut k, -4076793802049405392);
+    push(&mut k, -3345356375505022440);  push(&mut k, -2983346525034927856);
+    push(&mut k, -860691631967231958);   push(&mut k, 1182934255886127544);
+    push(&mut k, 1847814050463011016);   push(&mut k, 2177327727835720531);
+    push(&mut k, 2830643537854262169);   push(&mut k, 3796741975233480872);
+    push(&mut k, 4115178125766777443);   push(&mut k, 5681478168544905931);
+    push(&mut k, 6601373596472566643);   push(&mut k, 7507060721942968483);
+    push(&mut k, 8399075790359081724);   push(&mut k, 8693463985226723168);
+    push(&mut k, -8878714635349349518);  push(&mut k, -8302665154208450068);
+    push(&mut k, -8016688836872298968);  push(&mut k, -6606660893046293015);
+    push(&mut k, -4685533653050689259);  push(&mut k, -4147400797238176981);
+    push(&mut k, -3880063495543823972);  push(&mut k, -3348786107499101689);
+    push(&mut k, -1523767162380948706);  push(&mut k, -757361751448694408);
+    push(&mut k, 500013540394364858);    push(&mut k, 748580250866718886);
+    push(&mut k, 1242879168328830382);   push(&mut k, 1977374033974150939);
+    push(&mut k, 2944078676154940804);   push(&mut k, 3659926193048069267);
+    push(&mut k, 4368137639120453308);   push(&mut k, 4836135668995329356);
+    push(&mut k, 5532061633213252278);   push(&mut k, 6448918945643986474);
+    push(&mut k, 6902733635092675308);   push(&mut k, 7801388544844847127);
+    k
+}
+
+// Compress one 128-byte block (FIPS 180-4 §6.4.2) into the running state H. The
+// state H is an 8-word `[secret i64]` mutated IN PLACE (ADR 0050) so it is never
+// threaded by value through the block loop; `parr` and `k` cross as borrows. Builds
+// the 80-word schedule W, runs 80 rounds, then adds a..h back into H.
+fn compress_block(h8: &mut [secret i64], parr: &[secret u8], base: i64, k: &Vec<secret i64>) -> i64 {
+    // W[0..16]: the 16 big-endian 64-bit words of this block. Each word is 8 secret
+    // bytes assembled big-endian; `(secret u8) as i64` zero-extends (ADR 0049).
+    let mut w: Vec<secret i64> = vec_new();
+    let mut t: i64 = 0;
+    while t < 16 {
+        let off: i64 = base + t * 8;
+        let b0: secret i64 = (*parr)[off] as i64;
+        let b1: secret i64 = (*parr)[off + 1] as i64;
+        let b2: secret i64 = (*parr)[off + 2] as i64;
+        let b3: secret i64 = (*parr)[off + 3] as i64;
+        let b4: secret i64 = (*parr)[off + 4] as i64;
+        let b5: secret i64 = (*parr)[off + 5] as i64;
+        let b6: secret i64 = (*parr)[off + 6] as i64;
+        let b7: secret i64 = (*parr)[off + 7] as i64;
+        let word: secret i64 = (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32)
+            | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
+        push(&mut w, word);
+        t = t + 1;
+    }
+    // W[16..80]: W[i] = σ1(W[i-2]) + W[i-7] + σ0(W[i-15]) + W[i-16] (64-bit wrap).
+    let mut i: i64 = 16;
+    while i < 80 {
+        let s1: secret i64 = small_sigma1(w[i - 2]);
+        let s0: secret i64 = small_sigma0(w[i - 15]);
+        let wi: secret i64 = s1 + w[i - 7] + s0 + w[i - 16];
+        push(&mut w, wi);
+        i = i + 1;
+    }
+
+    // Seed the working vars from the running state H.
+    let mut a: secret i64 = (*h8)[0];
+    let mut b: secret i64 = (*h8)[1];
+    let mut c: secret i64 = (*h8)[2];
+    let mut d: secret i64 = (*h8)[3];
+    let mut e: secret i64 = (*h8)[4];
+    let mut f: secret i64 = (*h8)[5];
+    let mut g: secret i64 = (*h8)[6];
+    let mut hh: secret i64 = (*h8)[7];
+
+    // 80 rounds (FIPS 180-4 §6.4.2 step 3).
+    let mut r: i64 = 0;
+    while r < 80 {
+        let t1: secret i64 = hh + big_sigma1(e) + ch(e, f, g) + (*k)[r] + w[r];
+        let t2: secret i64 = big_sigma0(a) + maj(a, b, c);
+        hh = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+        r = r + 1;
+    }
+
+    // Add the working vars back into H in place (64-bit wrapping).
+    (*h8)[0] = (*h8)[0] + a;
+    (*h8)[1] = (*h8)[1] + b;
+    (*h8)[2] = (*h8)[2] + c;
+    (*h8)[3] = (*h8)[3] + d;
+    (*h8)[4] = (*h8)[4] + e;
+    (*h8)[5] = (*h8)[5] + f;
+    (*h8)[6] = (*h8)[6] + g;
+    (*h8)[7] = (*h8)[7] + hh;
+    0
+}
+
+// SHA-512 of a SECRET message `msg` (FIPS 180-4). Returns the 64-byte SECRET digest
+// as a `[secret u8]` (big-endian serialization of the 8 final hash words). The
+// message length is PUBLIC; the content is secret and never reaches a branch/index.
+pub fn sha512(msg: [secret u8]) -> [secret u8] {
+    let mlen: i64 = len(msg);
+
+    // Pad (FIPS 180-4 §5.1.2): append 0x80, then zeros until the length is 112 mod
+    // 128, then the 128-bit big-endian message bit-length (high 8 bytes are zero for
+    // any practical message). The padding depends only on the PUBLIC length.
+    let mut padded: Vec<secret u8> = vec_new();
+    let mut j: i64 = 0;
+    while j < mlen {
+        push(&mut padded, msg[j]);
+        j = j + 1;
+    }
+    push(&mut padded, i64_to_u8(128));   // the 0x80 terminator
+    let after_one: i64 = mlen + 1;
+    let rem: i64 = after_one - (after_one / 128) * 128;          // (mlen+1) mod 128
+    let zeros: i64 = (112 + 128 - rem) - ((112 + 128 - rem) / 128) * 128;  // (112-rem) mod 128
+    let mut z: i64 = 0;
+    while z < zeros {
+        push(&mut padded, i64_to_u8(0));
+        z = z + 1;
+    }
+    // The 128-bit length: 8 high zero bytes, then the 64-bit big-endian bit length.
+    let mut hb: i64 = 0;
+    while hb < 8 {
+        push(&mut padded, i64_to_u8(0));
+        hb = hb + 1;
+    }
+    let bitlen: i64 = mlen * 8;
+    let mut k8: i64 = 0;
+    while k8 < 8 {
+        let shift: i64 = 8 * (7 - k8);
+        let lb: i64 = (bitlen >> shift) & 255;
+        push(&mut padded, i64_to_u8(lb));
+        k8 = k8 + 1;
+    }
+    let parr: [secret u8] = vec_to_array(padded);
+    let total: i64 = len(parr);
+
+    // Init the running state H = H0 (FIPS 180-4 §5.3.5) as an 8-word `[secret i64]`
+    // mutated in place. The public i64 IV constants widen to `secret i64` (ADR 0051).
+    let mut h8: [secret i64] = [
+        7640891576956012808,  -4942790177534073029,
+        4354685564936845355,  -6534734903238641935,
+        5840696475078001361,  -7276294671716946913,
+        2270897969802886507,   6620516959819538809
+    ];
+    let k: Vec<secret i64> = k_constants();
+
+    // Compress each 128-byte block, mutating H in place.
+    let nblocks: i64 = total / 128;
+    let mut blk: i64 = 0;
+    while blk < nblocks {
+        compress_block(&mut h8, &parr, blk * 128, &k);
+        blk = blk + 1;
+    }
+
+    // Serialize the 8 final hash words big-endian into the 64-byte SECRET digest.
+    let mut out: Vec<secret u8> = vec_new();
+    push_word_be(&mut out, h8[0]);
+    push_word_be(&mut out, h8[1]);
+    push_word_be(&mut out, h8[2]);
+    push_word_be(&mut out, h8[3]);
+    push_word_be(&mut out, h8[4]);
+    push_word_be(&mut out, h8[5]);
+    push_word_be(&mut out, h8[6]);
+    push_word_be(&mut out, h8[7]);
+    vec_to_array(out)
+}
+
+// Append the 8 big-endian bytes of a SECRET 64-bit word `w` to the digest buffer.
+// Byte j (j = 0..7) is (w >> (8*(7-j))) as u8 — the high byte first; the `>>` is by
+// a PUBLIC amount and the `as u8` cast PRESERVES secrecy, so the bytes stay secret.
+fn push_word_be(out: &mut Vec<secret u8>, w: secret i64) -> i64 {
+    let mut j: i64 = 0;
+    while j < 8 {
+        let shift: i64 = 8 * (7 - j);
+        let byte: secret u8 = (w >> shift) as u8;
+        push(out, byte);
+        j = j + 1;
+    }
+    0
+}

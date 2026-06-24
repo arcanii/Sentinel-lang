@@ -1,0 +1,77 @@
+// examples/security/sha512.sentinel — constant-time SHA-512 over three NIST vectors.
+//
+// Hashes three secret messages with std::security::sha512 and checks each 64-byte
+// digest against the published FIPS 180-4 / NIST value:
+//   * "abc"      (single 128-byte block)
+//   * ""         (the empty message — a single all-padding block)
+//   * 200 * 'a'  (a MULTI-BLOCK message: 200 bytes pads to 256 = 2 blocks, so it
+//                 exercises the block loop and the 128-bit length encoding)
+//
+// CONSTANT-TIME DISCIPLINE. Each message is a `[secret u8]`, so the content is
+// secret and the library hashes it through branch-free `secret i64` ops only — the
+// digest comes back `[secret u8]`. The compiler's constant-time check proves on
+// every build that no secret byte reached a branch, a memory index, or a divisor
+// (the LENGTH is public, so padding / block count / loop bounds are public). The
+// only declassify boundary is HERE, XOR-diffing each digest byte against the public
+// NIST constant — the sanctioned "reduce branch-free, declassify the accumulator"
+// pattern. Exit 42 = all three digests matched byte-for-byte.
+use std::security::sha512::sha512;
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- SHA-512("abc"). Bytes 97, 98, 99.
+    let mut m1: Vec<secret u8> = vec_new();
+    push(&mut m1, i64_to_u8(97));
+    push(&mut m1, i64_to_u8(98));
+    push(&mut m1, i64_to_u8(99));
+    let d1: [secret u8] = sha512(vec_to_array(m1));
+    let e1: [i64] = [
+        221, 175, 53, 161, 147, 97, 122, 186, 204, 65, 115, 73, 174, 32, 65, 49,
+        18, 230, 250, 78, 137, 169, 126, 162, 10, 158, 238, 230, 75, 85, 211, 154,
+        33, 146, 153, 42, 39, 79, 193, 168, 54, 186, 60, 35, 163, 254, 235, 189,
+        69, 77, 68, 35, 100, 60, 232, 14, 42, 154, 201, 79, 165, 76, 164, 159
+    ];
+    let mut i1: i64 = 0;
+    while i1 < 64 {
+        bad = bad | (u8_to_i64(declassify(d1[i1])) ^ e1[i1]);
+        i1 = i1 + 1;
+    }
+
+    // ---- SHA-512("") — the empty message.
+    let m2: Vec<secret u8> = vec_new();
+    let d2: [secret u8] = sha512(vec_to_array(m2));
+    let e2: [i64] = [
+        207, 131, 225, 53, 126, 239, 184, 189, 241, 84, 40, 80, 214, 109, 128, 7,
+        214, 32, 228, 5, 11, 87, 21, 220, 131, 244, 169, 33, 211, 108, 233, 206,
+        71, 208, 209, 60, 93, 133, 242, 176, 255, 131, 24, 210, 135, 126, 236, 47,
+        99, 185, 49, 189, 71, 65, 122, 129, 165, 56, 50, 122, 249, 39, 218, 62
+    ];
+    let mut i2: i64 = 0;
+    while i2 < 64 {
+        bad = bad | (u8_to_i64(declassify(d2[i2])) ^ e2[i2]);
+        i2 = i2 + 1;
+    }
+
+    // ---- SHA-512(200 * 'a') — a 2-block message ('a' = byte 97).
+    let mut m3: Vec<secret u8> = vec_new();
+    let mut p3: i64 = 0;
+    while p3 < 200 {
+        push(&mut m3, i64_to_u8(97));
+        p3 = p3 + 1;
+    }
+    let d3: [secret u8] = sha512(vec_to_array(m3));
+    let e3: [i64] = [
+        75, 17, 69, 156, 51, 245, 42, 34, 238, 130, 54, 120, 39, 20, 193, 80,
+        163, 178, 198, 9, 148, 233, 172, 238, 23, 254, 104, 148, 122, 62, 103, 137,
+        243, 30, 118, 104, 57, 69, 146, 218, 123, 239, 130, 124, 221, 202, 136, 196,
+        230, 248, 110, 77, 247, 237, 26, 230, 203, 167, 31, 62, 152, 250, 238, 159
+    ];
+    let mut i3: i64 = 0;
+    while i3 < 64 {
+        bad = bad | (u8_to_i64(declassify(d3[i3])) ^ e3[i3]);
+        i3 = i3 + 1;
+    }
+
+    if bad == 0 { 42 } else { 0 }
+}

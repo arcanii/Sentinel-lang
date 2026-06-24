@@ -116,6 +116,18 @@ pub fn ct_rotr32(x: secret i32, n: i64) -> secret i32 {
     (x >> (n & mask)) | (x << ((w - n) & mask))
 }
 
+// Constant-time rotate-RIGHT of a 64-bit SECRET word by a PUBLIC amount — the
+// 64-bit twin of `ct_rotr32` and the mirror of `ct_rotl64`. This is the rotate
+// SHA-512 needs on its secret state (Σ0/Σ1/σ0/σ1 over 64-bit words): the logical
+// `>>` zero-fills from bit 63, so `(x >> k) | (x << (64 - k))` is a true 64-bit
+// right-rotate. Masked (`& 63`) so a rotate by 0/64 is the identity. The amount
+// `n` is PUBLIC (a SECRET shift amount would be variable-time and is rejected).
+pub fn ct_rotr64(x: secret i64, n: i64) -> secret i64 {
+    let w: i64 = 64;
+    let mask: i64 = 63;
+    (x >> (n & mask)) | (x << ((w - n) & mask))
+}
+
 // Constant-time equality of two GROWABLE secret byte buffers — the
 // variable-length sibling of `ct_memcmp` (ADR 0052 `Vec<secret T>`). Where
 // `ct_memcmp` compares fixed-size `[secret u8]` literals, this compares

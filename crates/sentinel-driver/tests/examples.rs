@@ -244,6 +244,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // build succeeding is the constant-time proof. 42 = the RFC 7748 §5.2 vector AND
     // the §6.1 Diffie-Hellman shared secret matched (and Alice and Bob agreed).
     ("examples/security/x25519.sentinel", 42),
+    // Constant-time SHA-512 over a SECRET message (std::security::sha512, FIPS
+    // 180-4) — the 64-bit-word twin of SHA-256, branch-free over `secret i64` words
+    // (no width casts). 42 = SHA-512("abc"), "", and 200*'a' (multi-block) all
+    // matched their NIST digest.
+    ("examples/security/sha512.sentinel", 42),
 ];
 
 #[test]
@@ -339,6 +344,11 @@ fn aes128_block_constant_time() {
 #[test]
 fn x25519_scalarmult_constant_time() {
     check_example("examples/security/x25519.sentinel", "x25519", 42);
+}
+
+#[test]
+fn sha512_digest() {
+    check_example("examples/security/sha512.sentinel", "sha512", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
