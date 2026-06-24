@@ -219,6 +219,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // identically-built buffers compared equal AND a one-byte-shifted buffer
     // compared unequal.
     ("examples/security/ct_vec_eq.sentinel", 42),
+    // Constant-time SHA-256 over a SECRET message (std::security::sha256, FIPS
+    // 180-4) — the compression is branch-free over `secret i32` words (32-bit ARX
+    // + rotates by public constants via ct_rotr32; schedule W in a `Vec<secret
+    // i32>`, ADR 0052), the digest stays `[secret u8]`. 42 = the digests of "abc",
+    // "" and the 2-block 100*'a' all matched their NIST vector byte-for-byte.
+    ("examples/security/sha256.sentinel", 42),
 ];
 
 #[test]
@@ -294,6 +300,11 @@ fn chacha20poly1305_aead_full_vector() {
 #[test]
 fn ct_vec_eq_secret_vec() {
     check_example("examples/security/ct_vec_eq.sentinel", "ct_vec_eq", 42);
+}
+
+#[test]
+fn sha256_digest() {
+    check_example("examples/security/sha256.sentinel", "sha256", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
