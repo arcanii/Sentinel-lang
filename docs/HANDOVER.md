@@ -50,16 +50,17 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
-SEVEN language gaps closed; crypto band shipped through SHA-256 / HMAC; HEAD
-`87b11ce`, 1570 tests).** Real, idiomatic Sentinel programs that double as feature
-tests + the first **core libraries**. **Dogfoods modules + `--separate`**,
+SEVEN language gaps closed; crypto band shipped through SHA-256 / HMAC / AES-128;
+HEAD `5fd89c7`, 1571 tests).** Real, idiomatic Sentinel programs that double as
+feature tests + the first **core libraries**. **Dogfoods modules + `--separate`**,
 **stress-tests the constant-time guarantee on real code**, and surfaces concrete
 language gaps — finding + fixing those is the most valuable output. The
-high-value, unblocked crypto work (the full §2.8.2 vector, SHA-256, HMAC, and the
-`Vec<secret T>` / `vec_to_array`-over-secret gap-fixes that enabled it) is DONE;
-the cleanly-open next steps are the higher-value crypto/borrow items in **Next**
-below (SHA-512, AES's CT S-box story, X25519, `&mut a[i]` borrows), with
-array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
+high-value, unblocked crypto work (the full §2.8.2 vector, SHA-256, HMAC, the
+constant-time AES-128 block cipher, and the `Vec<secret T>` /
+`vec_to_array`-over-secret gap-fixes that enabled them) is DONE; the cleanly-open
+next steps are the higher-value crypto/borrow items in **Next** below (SHA-512,
+X25519, `&mut a[i]` borrows), with array-repeat `[x; N]` and the `scg`
+widen-mirror deferred as low value.
 
 - **Decisions locked with the owner:** top-level `std/` + `examples/`, each
   subdivided by **functional category** (security, math, …), examples mirroring
@@ -186,18 +187,38 @@ array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     sha256. The key + both padded blocks are secret → fully constant-time; the over-long
     key is hashed first via an `if`-expression branching on the PUBLIC key length.
     Verified vs RFC 4231 TC1/TC2/TC6 (TC6's 131-byte key exercises the hash-first path).
+- **`std/security/aes` — a constant-time AES-128 block cipher** (`5fd89c7`), the
+  sharpest constant-time demonstration so far + a no-language-change library increment.
+  The textbook table-lookup S-box (`sbox[secret_byte]`) is a secret value indexing
+  memory → REJECTED by the CT check, so the library computes the S-box arithmetically:
+  S(x) = Affine(x^-1) with the GF(2^8) inverse as `x^254` (a fixed squaring/multiply
+  chain) + the affine map (byte-rotations + `^ 0x63`) — table-free, branch-free, and it
+  reproduces the standard AES S-box for all 256 inputs. Every transform (ShiftRows,
+  MixColumns via xtime/gf_mul3, AddRoundKey, the RotWord/SubWord/Rcon key schedule) is
+  branch-free with PUBLIC indices/shift amounts. KEY IDIOM: a byte is a byte-valued
+  `secret i64` in [0,255] (AES is pure 8-bit GF math, so the i64 masks `& 255`/`& 1`/
+  `>> 7`/`0 - x` need NO width casts — unlike SHA-256's `secret i32`), entering via
+  `(secret u8) as i64` and leaving via `(secret i64) as u8`; the 16-byte state +
+  176-byte key schedule are mutated in place through `&mut [secret i64]` /
+  `&Vec<secret i64>` borrows (ADR 0050). Only the robust OPERAND widen is used (`^ 99`,
+  `^ rcon[j]`) — `xtime`/`gf_mul3` avoid passing public constants as secret call-args.
+  Verified vs FIPS-197 §C.1 + AES-128(0,0), both `--separate` + merge; an independent
+  differential review confirmed it over 5000 random key/plaintext pairs. Scope = the
+  raw ECB block primitive (no mode). NO ADR, NO `scg` change, NO fixture (library growth,
+  snc-only example like the §2.8.2 full vector).
 - **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
   `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
   byte utilities must take `&[u8]`, not `[u8]` by value, or the first call consumes
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
-  - **More crypto** — the §2.8.2 vector, SHA-256, and HMAC are shipped. Next on the
-    rich surface: SHA-512 (64-bit words, same shape), a block cipher (AES — needs an
-    S-box, a data-dependent table lookup that the CT check *correctly rejects* on a
-    secret index, so AES wants either a bitsliced/CT S-box or a public-data framing — a
-    genuinely interesting CT exercise), or X25519 / Ed25519 (needs bigint / field
-    arithmetic — the next real numeric gap).
+  - **More crypto** — the §2.8.2 vector, SHA-256, HMAC, and a constant-time AES-128
+    block cipher (`aes`, the field-inversion S-box) are shipped. Next on the rich
+    surface: SHA-512 (64-bit words, the same shape as SHA-256 — low risk, likely no
+    new gap), an AES MODE over the shipped block (CTR / GCM — GCM's GHASH is GF(2^128)
+    carry-less mul, a new field-arithmetic exercise), or X25519 / Ed25519 (needs
+    bigint / field arithmetic — the next real numeric gap, though Poly1305's radix-2^26
+    `secret i64` limbs already work so a small-limb field may surface no new feature).
   - **Two deferred items from the list, now LOW value — recommend skipping unless
     wanted:**
     - **array-repeat `[x; N]`** — SHA-256/HMAC built cleanly WITHOUT it (`Vec<secret T>`
