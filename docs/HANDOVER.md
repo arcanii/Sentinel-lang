@@ -50,17 +50,17 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
-SEVEN language gaps closed; crypto band shipped through SHA-256 / HMAC / AES-128;
-HEAD `5fd89c7`, 1571 tests).** Real, idiomatic Sentinel programs that double as
-feature tests + the first **core libraries**. **Dogfoods modules + `--separate`**,
+SEVEN language gaps closed; crypto band shipped through SHA-256 / HMAC / AES-128 /
+X25519; HEAD `b671436`, 1572 tests).** Real, idiomatic Sentinel programs that double
+as feature tests + the first **core libraries**. **Dogfoods modules + `--separate`**,
 **stress-tests the constant-time guarantee on real code**, and surfaces concrete
 language gaps — finding + fixing those is the most valuable output. The
 high-value, unblocked crypto work (the full §2.8.2 vector, SHA-256, HMAC, the
-constant-time AES-128 block cipher, and the `Vec<secret T>` /
-`vec_to_array`-over-secret gap-fixes that enabled them) is DONE; the cleanly-open
-next steps are the higher-value crypto/borrow items in **Next** below (SHA-512,
-X25519, `&mut a[i]` borrows), with array-repeat `[x; N]` and the `scg`
-widen-mirror deferred as low value.
+constant-time AES-128 block cipher, X25519 — the first public-key primitive — and the
+`Vec<secret T>` / `vec_to_array`-over-secret gap-fixes that enabled them) is DONE; the
+cleanly-open next steps are the higher-value crypto/borrow items in **Next** below
+(SHA-512, an AES mode (CTR/GCM), Ed25519, `&mut a[i]` borrows), with array-repeat
+`[x; N]` and the `scg` widen-mirror deferred as low value.
 
 - **Decisions locked with the owner:** top-level `std/` + `examples/`, each
   subdivided by **functional category** (security, math, …), examples mirroring
@@ -206,19 +206,44 @@ widen-mirror deferred as low value.
   differential review confirmed it over 5000 random key/plaintext pairs. Scope = the
   raw ECB block primitive (no mode). NO ADR, NO `scg` change, NO fixture (library growth,
   snc-only example like the §2.8.2 full vector).
+- **`std/security/x25519` — constant-time X25519 / ECDH** (`b671436`), the FIRST
+  public-key primitive + (with AES) the sharpest constant-time demonstration. A naive
+  Montgomery ladder branches on the secret scalar bits (`if bit { swap }`), leaking the
+  private key by timing → REJECTED by the CT check, so the ladder's conditional swap is
+  the branch-free mask-based `sel25519`; the build is the proof the scalar mult is
+  constant-time in the secret scalar. NO language change (library growth) — the probe
+  proved it expressible: field GF(2^255-19) = 16 limbs radix 2^16 in `secret i64` (the
+  TweetNaCl rep; the schoolbook multiply's accumulator peaks ~2^43 < 2^63, so NO 128-bit
+  arithmetic — deliberately NOT radix-2^51, which WOULD hit the 128-bit-multiply wall =
+  the real numeric gap, dodged). KEY IDIOMS: (1) carries need an ARITHMETIC right shift
+  on signed limbs, but `>>` is logical (ADR 0048) → a branch-free `arith_shr(x,n) =
+  (x>>n) | ((0-((x>>63)&1)) << (64-n))` reconstructs it (no new operator); (2) field
+  elements are mutated in place via `&mut [secret i64]` borrows and NEVER aliased —
+  TweetNaCl's output-aliases-input ops become in-place `fadd_assign`/`fsub_assign` or a
+  scratch `tmp` + `fe_copy`; (3) NEW borrow idioms (probe-proven): forwarding a `&mut`
+  borrow into a nested fn (`fmul`→`car25519`) and forwarding a `&` borrow twice
+  (`fsq`→`fmul`) both work. Verified vs RFC 7748 §5.2 + the §6.1 DH round-trip (both
+  parties' shared secrets agree + match the published value), both `--separate` + merge;
+  an independent review modeled the Sentinel source vs a big-integer ladder ground truth
+  over 50 random pairs (no pass-by-luck), confirming the no-alias ladder is byte-identical
+  + the Fermat exponent is exactly 2^255-21. NO ADR/`scg`/fixture (snc-only example).
+  Scope = raw X25519 (one scalar mult; ECDH = two calls).
 - **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
   `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
   byte utilities must take `&[u8]`, not `[u8]` by value, or the first call consumes
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
-  - **More crypto** — the §2.8.2 vector, SHA-256, HMAC, and a constant-time AES-128
-    block cipher (`aes`, the field-inversion S-box) are shipped. Next on the rich
-    surface: SHA-512 (64-bit words, the same shape as SHA-256 — low risk, likely no
-    new gap), an AES MODE over the shipped block (CTR / GCM — GCM's GHASH is GF(2^128)
-    carry-less mul, a new field-arithmetic exercise), or X25519 / Ed25519 (needs
-    bigint / field arithmetic — the next real numeric gap, though Poly1305's radix-2^26
-    `secret i64` limbs already work so a small-limb field may surface no new feature).
+  - **More crypto** — the §2.8.2 vector, SHA-256, HMAC, a constant-time AES-128 block
+    cipher (`aes`, the field-inversion S-box), and X25519 (`x25519`, the first
+    public-key primitive) are shipped. Next on the rich surface: SHA-512 (64-bit words,
+    the same shape as SHA-256 — low risk, likely no new gap), an AES MODE over the
+    shipped block (CTR / GCM — GCM's GHASH is GF(2^128) carry-less mul, a new
+    field-arithmetic exercise), or Ed25519 (signatures — reuses the X25519 field +
+    SHA-512; the twisted-Edwards curve + point decompression are the new parts). NOTE:
+    X25519 confirmed the radix-2^16 field needs no 128-bit arithmetic; a radix-2^51
+    field (or a bigint type) remains the only path to the "next real numeric gap", and
+    no shipped program has demanded it.
   - **Two deferred items from the list, now LOW value — recommend skipping unless
     wanted:**
     - **array-repeat `[x; N]`** — SHA-256/HMAC built cleanly WITHOUT it (`Vec<secret T>`
