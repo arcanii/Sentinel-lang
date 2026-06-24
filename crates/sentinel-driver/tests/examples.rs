@@ -230,6 +230,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // identically-built buffers compared equal AND a one-byte-shifted buffer
     // compared unequal.
     ("examples/security/ct_vec_eq.sentinel", 42),
+    // Constant-time AES-128 block encryption (std::security::aes, FIPS-197) over a
+    // SECRET key + plaintext. The textbook table-lookup S-box (a secret index into
+    // a 256-byte table) is rejected by the constant-time check, so the library
+    // computes the S-box arithmetically (GF(2^8) field inversion + affine),
+    // branch-free; the build succeeding is the constant-time proof. 42 = the
+    // FIPS-197 §C.1 vector AND the AES-128(0,0) vector matched byte-for-byte.
+    ("examples/security/aes128.sentinel", 42),
 ];
 
 #[test]
@@ -315,6 +322,11 @@ fn sha256_digest() {
 #[test]
 fn hmac_sha256_rfc4231() {
     check_example("examples/security/hmac.sentinel", "hmac", 42);
+}
+
+#[test]
+fn aes128_block_constant_time() {
+    check_example("examples/security/aes128.sentinel", "aes128", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

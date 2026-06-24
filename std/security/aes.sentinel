@@ -1,0 +1,290 @@
+// std::security::aes — constant-time AES-128 block encryption (FIPS-197).
+//
+// Encrypts one 16-byte block under a 16-byte key, both SECRET, and returns the
+// 16-byte SECRET ciphertext. The headline is the S-box: a textbook AES looks up
+// `sbox[state_byte]`, i.e. it INDEXES a 256-byte table with a SECRET byte. That is
+// exactly the cache-timing leak that has broken table-based AES in practice — and
+// in Sentinel it does not compile: a secret value reaching a memory index is the
+// constant-time check's (`sentinel::mir::secret_leak`) memory-index sink, so
+// `snc build` REJECTS it. You cannot write the timing-unsafe S-box here.
+//
+// So this library computes the S-box ARITHMETICALLY and branch-free, with no
+// table: S(x) = Affine(x^-1), where the multiplicative inverse in GF(2^8) is the
+// power x^254 built from a fixed chain of field multiplications, and the affine
+// map is a fixed pattern of byte-rotations and an XOR. The inverse-via-x^254
+// circuit reproduces the standard AES S-box for every input (verified against the
+// FIPS-197 table), but its operations are DATA-INDEPENDENT: no branch on a secret,
+// no table indexed by a secret, no secret-dependent shift amount. Likewise every
+// other transform (ShiftRows, MixColumns, AddRoundKey, the key schedule) touches
+// the secret bytes only through `^ & | + - << >>` with PUBLIC shift amounts, and
+// every loop bound / array index is PUBLIC — the cipher's STRUCTURE is public, only
+// the DATA is secret. So a successful build of any program that calls this is
+// itself a proof that the constant-time discipline held across the whole cipher.
+//
+// Representation (the Sentinel constant-time idioms):
+//   * A byte is a byte-valued `secret i64` in [0, 255]; AES is pure 8-bit GF(2^8)
+//     arithmetic (no 32-bit wraparound), so `secret i64` masks (`& 255`, `& 1`,
+//     `>> 7`, `0 - x`) need no width casts. Bytes enter as `secret u8` and are
+//     widened with `(secret u8) as i64` (zero-extend, secrecy preserved, ADR 0049)
+//     and leave with `(secret i64) as u8` (truncate, secrecy preserved).
+//   * Public constants (the reduction polynomial 0x1b, the affine constant 0x63,
+//     the round constants Rcon) add into the secret bytes via the operand widen
+//     (public -> secret, ADR 0051): `y ^ 99`, `acc ^ rcon[j]`.
+//   * The 16-byte state and the 176-byte expanded key are mutated IN PLACE through
+//     `&mut [secret i64]` / read through `&Vec<secret i64>` borrows (ADR 0050), so
+//     no aggregate is moved across the round loop (the SHA-256 / poly1305 idiom).
+//
+// Scope: this is the raw ECB block primitive (one block, no mode, no padding).
+// Real encryption composes it under a mode (CTR/GCM); that is a separate library.
+
+// ---- GF(2^8) field arithmetic, all constant-time over byte-valued secret i64. ----
+
+// Constant-time GF(2^8) multiply (the AES field, reduction polynomial x^8+x^4+x^3
+// +x+1 = 0x1b). Russian-peasant, but BRANCH-FREE: each step folds in `a` under a
+// full-width mask `0 - (b & 1)` (all-ones iff b's low bit is set) instead of an
+// `if`, and the xtime reduction folds in 0x1b under a mask of the high bit. The
+// loop always runs 8 iterations regardless of the operands — data-independent.
+fn gf_mul(a: secret i64, b: secret i64) -> secret i64 {
+    let mut aa: secret i64 = a & 255;
+    let mut bb: secret i64 = b & 255;
+    let mut p: secret i64 = 0;                  // public 0 widens to secret i64
+    let mut i: i64 = 0;
+    while i < 8 {
+        let m: secret i64 = 0 - (bb & 1);       // 0 or -1 (all ones) iff bb is odd
+        p = p ^ (m & aa);
+        let hi: secret i64 = 0 - ((aa >> 7) & 1);  // all ones iff top bit set
+        aa = ((aa << 1) ^ (hi & 27)) & 255;     // xtime: <<1 then conditional ^0x1b
+        bb = bb >> 1;
+        i = i + 1;
+    }
+    p & 255
+}
+
+// Square in GF(2^8) — a field multiply by itself.
+fn gf_sq(x: secret i64) -> secret i64 {
+    gf_mul(x, x)
+}
+
+// Multiply by 2 in GF(2^8) (xtime): shift left one bit, and if a bit fell off the
+// top fold in the reduction polynomial 0x1b — branch-free via the high-bit mask.
+fn xtime(a: secret i64) -> secret i64 {
+    let hi: secret i64 = 0 - ((a >> 7) & 1);
+    ((a << 1) ^ (hi & 27)) & 255
+}
+
+// Multiply by 3 in GF(2^8): 3*a = (2*a) + a = xtime(a) XOR a.
+fn gf_mul3(a: secret i64) -> secret i64 {
+    xtime(a) ^ a
+}
+
+// The multiplicative inverse in GF(2^8): x^-1 = x^254 (and 0 maps to 0, which is
+// AES's convention). 254 = 2+4+8+16+32+64+128, so x^254 is the product of the
+// seven repeated squarings x^2, x^4, ..., x^128 — a fixed chain of field
+// multiplies, entirely data-independent.
+fn gf_inv(x: secret i64) -> secret i64 {
+    let p2: secret i64 = gf_sq(x);        // x^2
+    let p4: secret i64 = gf_sq(p2);       // x^4
+    let p8: secret i64 = gf_sq(p4);       // x^8
+    let p16: secret i64 = gf_sq(p8);      // x^16
+    let p32: secret i64 = gf_sq(p16);     // x^32
+    let p64: secret i64 = gf_sq(p32);     // x^64
+    let p128: secret i64 = gf_sq(p64);    // x^128
+    let mut r: secret i64 = gf_mul(p2, p4);   // x^6
+    r = gf_mul(r, p8);                    // x^14
+    r = gf_mul(r, p16);                   // x^30
+    r = gf_mul(r, p32);                   // x^62
+    r = gf_mul(r, p64);                   // x^126
+    r = gf_mul(r, p128);                  // x^254
+    r
+}
+
+// Rotate the 8 bits of a byte left by a PUBLIC amount n (1..7). The `>>` is logical
+// (zero-fill), so `(y << n) | (y >> (8 - n))` masked to 8 bits is a true byte
+// rotation. The amount is public — a constant-time, data-independent rotation.
+fn rotl8(y: secret i64, n: i64) -> secret i64 {
+    ((y << n) | (y >> (8 - n))) & 255
+}
+
+// The AES S-box, computed constant-time with NO table: S(x) = Affine(x^-1). The
+// affine map is b ^ rotl8(b,1) ^ rotl8(b,2) ^ rotl8(b,3) ^ rotl8(b,4) ^ 0x63 over
+// the inverse b = x^-1 (the public 0x63 = 99 widens into the secret XOR). This
+// reproduces the standard AES S-box for all 256 inputs while staying branch-free.
+fn sub_byte(x: secret i64) -> secret i64 {
+    let b: secret i64 = gf_inv(x);
+    (b ^ rotl8(b, 1) ^ rotl8(b, 2) ^ rotl8(b, 3) ^ rotl8(b, 4) ^ 99) & 255
+}
+
+// ---- Key schedule + round transforms. ----------------------------------------
+
+// Expand the 16-byte cipher key into the 176-byte (11 round keys) schedule, as a
+// `Vec<secret i64>` of byte values. The structure is PUBLIC (the word index `w`,
+// the `w mod 4` test, the Rcon index) — only the key BYTES are secret. Every fourth
+// word is transformed by RotWord (cyclic byte rotate), SubWord (the S-box on each
+// byte), and an XOR with the round constant Rcon (a public byte that widens in).
+fn key_expansion(key: &[secret u8]) -> Vec<secret i64> {
+    let mut rk: Vec<secret i64> = vec_new();
+    // The first round key IS the cipher key (16 secret bytes, widened to i64).
+    let mut i: i64 = 0;
+    while i < 16 {
+        push(&mut rk, (*key)[i] as i64);
+        i = i + 1;
+    }
+    // Rcon[j] for j = 1..10 (index 0 unused). Public; widens into the secret XOR.
+    let rcon: [i64] = [0, 1, 2, 4, 8, 16, 32, 64, 128, 27, 54];
+    // Words 4..43: each word is 4 bytes derived from the previous word and the word
+    // four back. `w mod 4 == 0` (a PUBLIC test) triggers RotWord+SubWord+Rcon.
+    let mut w: i64 = 4;
+    while w < 44 {
+        let mut t0: secret i64 = rk[4 * (w - 1) + 0];
+        let mut t1: secret i64 = rk[4 * (w - 1) + 1];
+        let mut t2: secret i64 = rk[4 * (w - 1) + 2];
+        let mut t3: secret i64 = rk[4 * (w - 1) + 3];
+        let m: i64 = w - (w / 4) * 4;     // w mod 4 (public)
+        if m == 0 {
+            // RotWord([t0,t1,t2,t3]) = [t1,t2,t3,t0], then SubWord, then ^ Rcon.
+            let r0: secret i64 = t1;
+            let r1: secret i64 = t2;
+            let r2: secret i64 = t3;
+            let r3: secret i64 = t0;
+            t0 = sub_byte(r0) ^ rcon[w / 4];
+            t1 = sub_byte(r1);
+            t2 = sub_byte(r2);
+            t3 = sub_byte(r3);
+            0
+        } else { 0 };
+        // word w = word (w-4) XOR the (possibly transformed) previous word. Compute
+        // each byte into a local first to keep the read and the push unambiguous.
+        let v0: secret i64 = rk[4 * (w - 4) + 0] ^ t0;
+        let v1: secret i64 = rk[4 * (w - 4) + 1] ^ t1;
+        let v2: secret i64 = rk[4 * (w - 4) + 2] ^ t2;
+        let v3: secret i64 = rk[4 * (w - 4) + 3] ^ t3;
+        push(&mut rk, v0);
+        push(&mut rk, v1);
+        push(&mut rk, v2);
+        push(&mut rk, v3);
+        w = w + 1;
+    }
+    rk
+}
+
+// AddRoundKey: XOR the 16 round-key bytes for round `rnd` into the state, in place.
+fn add_round_key(s: &mut [secret i64], rk: &Vec<secret i64>, rnd: i64) -> i64 {
+    let mut i: i64 = 0;
+    while i < 16 {
+        (*s)[i] = (*s)[i] ^ (*rk)[16 * rnd + i];
+        i = i + 1;
+    }
+    0
+}
+
+// SubBytes: replace every state byte with its S-box image, in place. The S-box is
+// the constant-time field-inversion circuit above — no table, no secret index.
+fn sub_bytes(s: &mut [secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 16 {
+        (*s)[i] = sub_byte((*s)[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// ShiftRows: cyclically shift row r of the (column-major) state left by r bytes.
+// This is a fixed PUBLIC permutation of the 16 byte positions — it rearranges
+// secret bytes but never indexes by a secret. Snapshot the state, then scatter.
+fn shift_rows(s: &mut [secret i64]) -> i64 {
+    let t0: secret i64 = (*s)[0];
+    let t1: secret i64 = (*s)[1];
+    let t2: secret i64 = (*s)[2];
+    let t3: secret i64 = (*s)[3];
+    let t4: secret i64 = (*s)[4];
+    let t5: secret i64 = (*s)[5];
+    let t6: secret i64 = (*s)[6];
+    let t7: secret i64 = (*s)[7];
+    let t8: secret i64 = (*s)[8];
+    let t9: secret i64 = (*s)[9];
+    let t10: secret i64 = (*s)[10];
+    let t11: secret i64 = (*s)[11];
+    let t12: secret i64 = (*s)[12];
+    let t13: secret i64 = (*s)[13];
+    let t14: secret i64 = (*s)[14];
+    let t15: secret i64 = (*s)[15];
+    // Row 0 (positions 0,4,8,12): unchanged.
+    (*s)[0] = t0;   (*s)[4] = t4;   (*s)[8] = t8;    (*s)[12] = t12;
+    // Row 1 (positions 1,5,9,13): left by 1.
+    (*s)[1] = t5;   (*s)[5] = t9;   (*s)[9] = t13;   (*s)[13] = t1;
+    // Row 2 (positions 2,6,10,14): left by 2.
+    (*s)[2] = t10;  (*s)[6] = t14;  (*s)[10] = t2;   (*s)[14] = t6;
+    // Row 3 (positions 3,7,11,15): left by 3.
+    (*s)[3] = t15;  (*s)[7] = t3;   (*s)[11] = t7;   (*s)[15] = t11;
+    0
+}
+
+// MixColumns: mix each of the 4 columns by the fixed MDS matrix
+//   [2 3 1 1; 1 2 3 1; 1 1 2 3; 3 1 1 2]  over GF(2^8).
+// Multiply-by-2 is xtime, multiply-by-3 is gf_mul3 — both branch-free. Read the
+// column into locals, then write the mixed bytes back in place.
+fn mix_columns(s: &mut [secret i64]) -> i64 {
+    let mut c: i64 = 0;
+    while c < 4 {
+        let base: i64 = 4 * c;
+        let a0: secret i64 = (*s)[base + 0];
+        let a1: secret i64 = (*s)[base + 1];
+        let a2: secret i64 = (*s)[base + 2];
+        let a3: secret i64 = (*s)[base + 3];
+        (*s)[base + 0] = xtime(a0) ^ gf_mul3(a1) ^ a2 ^ a3;
+        (*s)[base + 1] = a0 ^ xtime(a1) ^ gf_mul3(a2) ^ a3;
+        (*s)[base + 2] = a0 ^ a1 ^ xtime(a2) ^ gf_mul3(a3);
+        (*s)[base + 3] = gf_mul3(a0) ^ a1 ^ a2 ^ xtime(a3);
+        c = c + 1;
+    }
+    0
+}
+
+// ---- The block cipher. -------------------------------------------------------
+
+// Encrypt one 16-byte block `pt` under the 16-byte key `key` (both SECRET) and
+// return the 16-byte SECRET ciphertext (FIPS-197 §5.1). The bytes are loaded as
+// byte-valued `secret i64`, run through the initial AddRoundKey, nine full rounds
+// (SubBytes, ShiftRows, MixColumns, AddRoundKey), and a final round without
+// MixColumns, then serialized back to `secret u8`. Constant-time throughout: every
+// loop bound and index is public, and the secret bytes flow only through the
+// branch-free transforms above. Precondition: `len(key) == 16` and `len(pt) == 16`.
+pub fn aes128_encrypt_block(key: [secret u8], pt: [secret u8]) -> [secret u8] {
+    let rk: Vec<secret i64> = key_expansion(&key);
+
+    // Load the 16 plaintext bytes into the state (secret u8 -> secret i64).
+    let mut sv: Vec<secret i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < 16 {
+        push(&mut sv, pt[i] as i64);
+        i = i + 1;
+    }
+    let mut s: [secret i64] = vec_to_array(sv);
+
+    // Initial AddRoundKey (round 0).
+    add_round_key(&mut s, &rk, 0);
+
+    // Rounds 1..9: the full round.
+    let mut r: i64 = 1;
+    while r < 10 {
+        sub_bytes(&mut s);
+        shift_rows(&mut s);
+        mix_columns(&mut s);
+        add_round_key(&mut s, &rk, r);
+        r = r + 1;
+    }
+
+    // Round 10: SubBytes, ShiftRows, AddRoundKey (no MixColumns).
+    sub_bytes(&mut s);
+    shift_rows(&mut s);
+    add_round_key(&mut s, &rk, 10);
+
+    // Serialize the 16 state bytes to the SECRET ciphertext (secret i64 -> secret u8).
+    let mut out: Vec<secret u8> = vec_new();
+    let mut j: i64 = 0;
+    while j < 16 {
+        push(&mut out, s[j] as u8);
+        j = j + 1;
+    }
+    vec_to_array(out)
+}

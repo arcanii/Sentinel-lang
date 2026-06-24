@@ -1,0 +1,69 @@
+// examples/security/aes128.sentinel — constant-time AES-128 over the FIPS-197 vectors.
+//
+// Encrypts two known blocks with std::security::aes and checks each 16-byte
+// ciphertext against the published value:
+//   * FIPS-197 Appendix C.1:  key = 000102..0f, pt = 00112233..ff
+//                             ct  = 69c4e0d86a7b0430d8cdb78070b4c55a
+//   * AES-128(0, 0):          key = 0*16, pt = 0*16
+//                             ct  = 66e94bd4ef8a2c3b884cfa59ca342b2e
+//
+// CONSTANT-TIME DISCIPLINE. The key and plaintext are built as SECRET `[secret u8]`
+// buffers, so both flow through the cipher as secret values. The whole point of
+// this example: a *textbook* AES indexes a 256-byte S-box table with a secret state
+// byte (`sbox[state[i]]`) — the classic cache-timing leak — and that does not even
+// compile in Sentinel (a secret reaching a memory index is rejected by the
+// constant-time check). The library instead computes the S-box arithmetically
+// (GF(2^8) field inversion + the affine map), branch-free, so this program builds
+// at all only because no secret byte reaches a branch, a memory index, or a
+// divisor anywhere in the cipher or its key schedule. The ONLY declassify boundary
+// is HERE: we declassify each ciphertext byte purely to XOR-diff it against the
+// public published constant — the sanctioned "reduce branch-free, declassify the
+// final accumulator" pattern.
+//
+// Exit 42 = both ciphertexts matched their published vector byte-for-byte (the
+// OR-accumulated per-byte diff `bad` is zero).
+use std::security::aes::aes128_encrypt_block;
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- Vector 1: FIPS-197 Appendix C.1. key[i] = i, pt[i] = 0x11 * i.
+    let mut k1: Vec<secret u8> = vec_new();
+    let mut p1: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 16 {
+        push(&mut k1, i64_to_u8(i));
+        push(&mut p1, i64_to_u8(17 * i));
+        i = i + 1;
+    }
+    let c1: [secret u8] = aes128_encrypt_block(vec_to_array(k1), vec_to_array(p1));
+    let e1: [i64] = [
+        105, 196, 224, 216, 106, 123, 4, 48, 216, 205, 183, 128, 112, 180, 197, 90
+    ];
+    let mut a1: i64 = 0;
+    while a1 < 16 {
+        bad = bad | (u8_to_i64(declassify(c1[a1])) ^ e1[a1]);
+        a1 = a1 + 1;
+    }
+
+    // ---- Vector 2: AES-128 of the all-zero block under the all-zero key.
+    let mut k2: Vec<secret u8> = vec_new();
+    let mut p2: Vec<secret u8> = vec_new();
+    let mut z: i64 = 0;
+    while z < 16 {
+        push(&mut k2, i64_to_u8(0));
+        push(&mut p2, i64_to_u8(0));
+        z = z + 1;
+    }
+    let c2: [secret u8] = aes128_encrypt_block(vec_to_array(k2), vec_to_array(p2));
+    let e2: [i64] = [
+        102, 233, 75, 212, 239, 138, 44, 59, 136, 76, 250, 89, 202, 52, 43, 46
+    ];
+    let mut a2: i64 = 0;
+    while a2 < 16 {
+        bad = bad | (u8_to_i64(declassify(c2[a2])) ^ e2[a2]);
+        a2 = a2 + 1;
+    }
+
+    if bad == 0 { 42 } else { 0 }
+}
