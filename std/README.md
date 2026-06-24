@@ -29,7 +29,7 @@ the example entry. See the harness doc-comment for the mechanics.
 
 | Category    | Module(s)            | Status                                   |
 | ----------- | -------------------- | ---------------------------------------- |
-| `security`  | `ct`, `siphash`, `chacha20`, `poly1305`, `aead`, `sha256`, `hmac`, `aes` | ✅ ct scalars + `ct_memcmp` over `[secret u8]` + `ct_vec_eq` over `Vec<secret u8>` + `ct_rotl64`/`ct_rotl32`/`ct_rotr32`; `siphash24` keyed MAC; `chacha20_block` + `chacha20_xor` stream cipher; `poly1305` one-time MAC; `chacha20poly1305_encrypt` AEAD (full RFC 8439 §2.8.2 vector); `sha256` constant-time SHA-256 over a `secret` message; `hmac_sha256` over a `secret` key; `aes128_encrypt_block` constant-time AES-128 (field-inversion S-box, no table) |
+| `security`  | `ct`, `siphash`, `chacha20`, `poly1305`, `aead`, `sha256`, `hmac`, `aes`, `x25519` | ✅ ct scalars + `ct_memcmp` over `[secret u8]` + `ct_vec_eq` over `Vec<secret u8>` + `ct_rotl64`/`ct_rotl32`/`ct_rotr32`; `siphash24` keyed MAC; `chacha20_block` + `chacha20_xor` stream cipher; `poly1305` one-time MAC; `chacha20poly1305_encrypt` AEAD (full RFC 8439 §2.8.2 vector); `sha256` constant-time SHA-256 over a `secret` message; `hmac_sha256` over a `secret` key; `aes128_encrypt_block` constant-time AES-128 (field-inversion S-box, no table); `x25519` constant-time X25519 ECDH over a `secret` scalar (RFC 7748) |
 | `math`      | `num`                | ✅ min/max/abs/clamp                       |
 | `bits`      | `bits`               | ✅ `rotl64`/`rotr64`/`rotl32`/`rotr32`     |
 | `bytes`     | `bytes`              | ✅ `eq`/`find`/`contains`/`count`/`starts_with`/`repeat` (over `&[u8]`) |
@@ -87,9 +87,13 @@ byte-identical, both bootstrap fixed points held). When a gap blocks a genuinely
 idiomatic library, that block is the signal to add the feature (ADR-first if it
 touches the frozen `abi-v1` contract). On the now-rich surface the corpus also
 grew (no language change): the full §2.8.2 AEAD vector, a constant-time **SHA-256**
-over a secret message (`sha256`), **HMAC-SHA256** over a secret key (`hmac`), and a
-constant-time **AES-128** block cipher (`aes`). AES is the sharpest demonstration of
-the constant-time guarantee yet: the textbook table-lookup S-box (`sbox[secret_byte]`)
-is a secret value indexing memory, so it does not compile — Sentinel forces the
-arithmetic, table-free S-box (GF(2^8) field inversion `x^254` + the affine map),
-which is constant-time by construction.
+over a secret message (`sha256`), **HMAC-SHA256** over a secret key (`hmac`), a
+constant-time **AES-128** block cipher (`aes`), and constant-time **X25519** ECDH
+over a secret scalar (`x25519`, RFC 7748 — the first public-key primitive). AES and
+X25519 are the sharpest demonstrations of the constant-time guarantee yet, because in
+each the textbook implementation has a key-dependent side channel that simply does not
+compile: AES's table-lookup S-box (`sbox[secret_byte]`) is a secret value indexing
+memory, and X25519's Montgomery ladder would branch on the secret scalar bits
+(`if bit { swap }`). Sentinel rejects both and forces the constant-time form — AES's
+arithmetic, table-free S-box (GF(2^8) inversion `x^254` + the affine map), and X25519's
+branch-free, mask-based conditional swap.

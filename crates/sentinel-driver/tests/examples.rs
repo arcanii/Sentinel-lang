@@ -237,6 +237,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // branch-free; the build succeeding is the constant-time proof. 42 = the
     // FIPS-197 §C.1 vector AND the AES-128(0,0) vector matched byte-for-byte.
     ("examples/security/aes128.sentinel", 42),
+    // Constant-time X25519 (std::security::x25519, RFC 7748) — the ECDH primitive
+    // over a SECRET scalar. A textbook Montgomery ladder branches on the secret
+    // scalar bits (a key-leaking timing side channel); that is rejected by the
+    // constant-time check, so the ladder's conditional swap is branch-free and the
+    // build succeeding is the constant-time proof. 42 = the RFC 7748 §5.2 vector AND
+    // the §6.1 Diffie-Hellman shared secret matched (and Alice and Bob agreed).
+    ("examples/security/x25519.sentinel", 42),
 ];
 
 #[test]
@@ -327,6 +334,11 @@ fn hmac_sha256_rfc4231() {
 #[test]
 fn aes128_block_constant_time() {
     check_example("examples/security/aes128.sentinel", "aes128", 42);
+}
+
+#[test]
+fn x25519_scalarmult_constant_time() {
+    check_example("examples/security/x25519.sentinel", "x25519", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

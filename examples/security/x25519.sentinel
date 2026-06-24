@@ -1,0 +1,90 @@
+// examples/security/x25519.sentinel — constant-time X25519 over the RFC 7748 vectors.
+//
+// Exercises std::security::x25519 two ways:
+//   * RFC 7748 §5.2 test vector 1: x25519(scalar, u) against the published output.
+//   * RFC 7748 §6.1 Diffie-Hellman: Alice and Bob each derive a public key from the
+//     base point (u = 9), exchange them, and compute the shared secret — the program
+//     checks both sides agree AND match the published shared secret.
+//
+// CONSTANT-TIME DISCIPLINE. Each scalar (the private key) is built as a SECRET
+// `[secret u8]`, so every Montgomery-ladder step runs over secret scalar bits. A
+// textbook ladder would branch on those bits (`if bit { swap }`), leaking the key
+// through timing — and that does not compile in Sentinel. So this program building
+// at all is a proof that the ladder is constant-time in the secret scalar: no secret
+// bit reaches a branch, a memory index, or a divisor across the whole scalar
+// multiplication. The ONLY declassify boundary is HERE, comparing the result bytes
+// against the public test vector (and checking the two derived shared secrets agree)
+// — exactly the sanctioned "reduce branch-free, declassify the final value" pattern.
+//
+// Exit 42 = the §5.2 vector matched AND the DH shared secret matched the published
+// value AND Alice's and Bob's shared secrets were identical (the OR-accumulated diff
+// `bad` is zero).
+use std::security::x25519::x25519;
+
+// Build a 32-byte SECRET buffer from a public byte array (each public byte widens
+// to `secret u8` at the push arg). Takes a borrow so a source can be reused (the
+// DH parties each use their private key twice).
+fn mk32(src: &[i64]) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 32 { push(&mut v, i64_to_u8((*src)[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- RFC 7748 §5.2 test vector 1.
+    let s52src: [i64] = [
+        165, 70, 227, 107, 240, 82, 124, 157, 59, 22, 21, 75, 130, 70, 94, 221,
+        98, 20, 76, 10, 193, 252, 90, 24, 80, 106, 34, 68, 186, 68, 154, 196
+    ];
+    let u52src: [i64] = [
+        230, 219, 104, 103, 88, 48, 48, 219, 53, 148, 193, 164, 36, 177, 95, 124,
+        114, 102, 36, 236, 38, 179, 53, 59, 16, 169, 3, 166, 208, 171, 28, 76
+    ];
+    let r52: [secret u8] = x25519(mk32(&s52src), mk32(&u52src));
+    let e52: [i64] = [
+        195, 218, 85, 55, 157, 233, 198, 144, 142, 148, 234, 77, 242, 141, 8, 79,
+        50, 236, 207, 3, 73, 28, 113, 247, 84, 180, 7, 85, 119, 162, 133, 82
+    ];
+    let mut i: i64 = 0;
+    while i < 32 {
+        bad = bad | (u8_to_i64(declassify(r52[i])) ^ e52[i]);
+        i = i + 1;
+    }
+
+    // ---- RFC 7748 §6.1 Diffie-Hellman over the base point u = 9.
+    let base: [i64] = [
+        9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ];
+    let a_priv: [i64] = [
+        119, 7, 109, 10, 115, 24, 165, 125, 60, 22, 193, 114, 81, 178, 102, 69,
+        223, 76, 47, 135, 235, 192, 153, 42, 177, 119, 251, 165, 29, 185, 44, 42
+    ];
+    let b_priv: [i64] = [
+        93, 171, 8, 126, 98, 74, 138, 75, 121, 225, 127, 139, 131, 128, 14, 230,
+        111, 59, 177, 41, 38, 24, 182, 253, 28, 47, 139, 39, 255, 136, 224, 235
+    ];
+    // Alice and Bob each derive a public key from the base point.
+    let a_pub: [secret u8] = x25519(mk32(&a_priv), mk32(&base));
+    let b_pub: [secret u8] = x25519(mk32(&b_priv), mk32(&base));
+    // Each computes the shared secret from the other's public key.
+    let sh_a: [secret u8] = x25519(mk32(&a_priv), b_pub);
+    let sh_b: [secret u8] = x25519(mk32(&b_priv), a_pub);
+    let esh: [i64] = [
+        74, 93, 157, 91, 164, 206, 45, 225, 114, 142, 59, 244, 128, 53, 15, 37,
+        224, 126, 33, 201, 71, 209, 158, 51, 118, 240, 155, 60, 30, 22, 23, 66
+    ];
+    let mut j: i64 = 0;
+    while j < 32 {
+        let av: i64 = u8_to_i64(declassify(sh_a[j]));
+        let bv: i64 = u8_to_i64(declassify(sh_b[j]));
+        bad = bad | (av ^ esh[j]);   // matches the published shared secret
+        bad = bad | (av ^ bv);       // Alice and Bob agree
+        j = j + 1;
+    }
+
+    if bad == 0 { 42 } else { 0 }
+}
