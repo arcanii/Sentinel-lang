@@ -1,0 +1,112 @@
+// examples/security/chacha20poly1305_full.sentinel — the FULL RFC 8439 §2.8.2 AEAD vector.
+//
+// The complete ChaCha20-Poly1305 AEAD test vector from RFC 8439 §2.8.2 — a
+// 114-byte plaintext ("Ladies and Gentlemen of the class of '99: ..."), 12 bytes
+// of AAD, the §2.8.2 key/nonce. The earlier `chacha20poly1305` example ran the
+// same pipeline on a 16-byte buffer (small enough to hand-build as a literal);
+// this one runs the actual published 114-byte vector.
+//
+// It is the payoff of ADR 0052 + ADR 0053: the variable-length SECRET plaintext
+// is BUILT UP by pushing bytes into a `Vec<secret u8>` and then bridged to the
+// `[secret u8]` the AEAD consumes via `vec_to_array` (ADR 0053 — `vec_to_array`
+// over a secret `Vec`). Before `Vec<secret u8>`, a 114-byte secret buffer needed
+// a 114-element literal of pre-bound secret bytes; now it is a loop.
+//
+// CONSTANT-TIME: the secret key/state/OTK and the secret plaintext flow only
+// through branch-free ops (the libraries' CT check proves it on every build); the
+// only declassify boundaries are the public ciphertext + tag. Exit 42 = the full
+// 114-byte ciphertext AND the 16-byte tag matched the RFC 8439 §2.8.2 vector
+// byte-for-byte.
+use std::security::aead::AeadResult;
+use std::security::aead::chacha20poly1305_encrypt;
+
+fn main() -> i64 {
+    // The §2.8.2 key (bytes 0x80..0x9f) as 8 little-endian secret i32 words.
+    let k0: secret i32 = 2206368128 as i32;  // 0x83828180
+    let k1: secret i32 = 2273740164 as i32;  // 0x87868584
+    let k2: secret i32 = 2341112200 as i32;  // 0x8b8a8988
+    let k3: secret i32 = 2408484236 as i32;  // 0x8f8e8d8c
+    let k4: secret i32 = 2475856272 as i32;  // 0x93929190
+    let k5: secret i32 = 2543228308 as i32;  // 0x97969594
+    let k6: secret i32 = 2610600344 as i32;  // 0x9b9a9998
+    let k7: secret i32 = 2677972380 as i32;  // 0x9f9e9d9c
+    let key: [secret i32] = [k0, k1, k2, k3, k4, k5, k6, k7];
+
+    // The §2.8.2 nonce 07 00 00 00 | 40 41 42 43 | 44 45 46 47 as 3 LE words.
+    let n0: secret i32 = 7 as i32;           // 0x00000007
+    let n1: secret i32 = 1128415552 as i32;  // 0x43424140
+    let n2: secret i32 = 1195787588 as i32;  // 0x47464544
+    let nonce: [secret i32] = [n0, n1, n2];
+
+    let pt_data: [i64] = [
+        76, 97, 100, 105, 101, 115, 32, 97, 110, 100, 32, 71,
+        101, 110, 116, 108, 101, 109, 101, 110, 32, 111, 102, 32,
+        116, 104, 101, 32, 99, 108, 97, 115, 115, 32, 111, 102,
+        32, 39, 57, 57, 58, 32, 73, 102, 32, 73, 32, 99,
+        111, 117, 108, 100, 32, 111, 102, 102, 101, 114, 32, 121,
+        111, 117, 32, 111, 110, 108, 121, 32, 111, 110, 101, 32,
+        116, 105, 112, 32, 102, 111, 114, 32, 116, 104, 101, 32,
+        102, 117, 116, 117, 114, 101, 44, 32, 115, 117, 110, 115,
+        99, 114, 101, 101, 110, 32, 119, 111, 117, 108, 100, 32,
+        98, 101, 32, 105, 116, 46
+    ];
+
+    // Build the 114-byte SECRET plaintext by pushing each byte into a growable
+    // `Vec<secret u8>` (the public byte widens to `secret u8` at the push arg, ADR
+    // 0051), then bridge to `[secret u8]` with `vec_to_array` (ADR 0053).
+    let mut pt_vec: Vec<secret u8> = vec_new();
+    let mut pi: i64 = 0;
+    while pi < 114 {
+        push(&mut pt_vec, i64_to_u8(pt_data[pi]));
+        pi = pi + 1;
+    }
+    let pt: [secret u8] = vec_to_array(pt_vec);
+
+    let aad_data: [i64] = [
+        80, 81, 82, 83, 192, 193, 194, 195, 196, 197, 198, 199
+    ];
+
+    // The 12-byte public AAD, built the same way (a public `Vec<u8>`).
+    let mut aad_vec: Vec<u8> = vec_new();
+    let mut ddi: i64 = 0;
+    while ddi < 12 {
+        push(&mut aad_vec, i64_to_u8(aad_data[ddi]));
+        ddi = ddi + 1;
+    }
+    let aad: [u8] = vec_to_array(aad_vec);
+
+    let out: AeadResult = chacha20poly1305_encrypt(key, nonce, &aad, pt);
+
+    let exp_ct: [i64] = [
+        211, 26, 141, 52, 100, 142, 96, 219, 123, 134, 175, 188,
+        83, 239, 126, 194, 164, 173, 237, 81, 41, 110, 8, 254,
+        169, 226, 181, 167, 54, 238, 98, 214, 61, 190, 164, 94,
+        140, 169, 103, 18, 130, 250, 251, 105, 218, 146, 114, 139,
+        26, 113, 222, 10, 158, 6, 11, 41, 5, 214, 165, 182,
+        126, 205, 59, 54, 146, 221, 189, 127, 45, 119, 139, 140,
+        152, 3, 174, 227, 40, 9, 27, 88, 250, 179, 36, 228,
+        250, 214, 117, 148, 85, 133, 128, 139, 72, 49, 215, 188,
+        63, 244, 222, 240, 142, 75, 122, 157, 229, 118, 210, 101,
+        134, 206, 198, 75, 97, 22
+    ];
+    let exp_tag: [i64] = [
+        26, 225, 11, 89, 79, 9, 226, 106, 126, 144, 46, 203,
+        208, 96, 6, 145
+    ];
+
+    // OR-accumulate the per-byte diff of the full 114-byte ciphertext and the
+    // 16-byte tag; 0 iff every byte of both matched the RFC vector.
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 114 {
+        bad = bad | (u8_to_i64(out.ct[i]) ^ exp_ct[i]);
+        i = i + 1;
+    }
+    let mut j: i64 = 0;
+    while j < 16 {
+        bad = bad | (u8_to_i64(out.tag[j]) ^ exp_tag[j]);
+        j = j + 1;
+    }
+
+    if bad == 0 { 42 } else { 0 }
+}

@@ -433,7 +433,9 @@ impl ArrayElem {
     ) -> ArrayElem {
         self.to_type()
             .substitute(subst, instances, refs)
-            .to_array_elem()
+            // ADR 0053: `to_array_elem_subst` so a TypeParam bound to `secret SCALAR`
+            // round-trips to `ArrayElem::Secret` (the `vec_to_array`-over-secret path).
+            .to_array_elem_subst()
             .unwrap_or(self)
     }
 }
@@ -670,6 +672,23 @@ impl Type {
         self.to_array_elem()
     }
 
+    /// ADR 0053: demote for the generic SUBSTITUTION round-trip — the array twin of
+    /// ADR 0052's [`Type::to_vec_elem_subst`]. Like [`Type::to_array_elem`] but also
+    /// admits a `secret SCALAR` element produced by substituting a TypeParam, so
+    /// `vec_to_array<T>(Vec<T>) -> [T]` instantiated with `T := secret u8` yields
+    /// `[secret u8]` (the `Vec<secret u8> → [secret u8]` bridge; else it falls back
+    /// to `[T]` and the annotation match fails). The [`SecretId`] is taken straight
+    /// from the `Type::Secret`, so no `secrets` table is needed (the resolution-site
+    /// [`Type::to_array_elem_secret`] validates scalar-ness). A `[secret NON-scalar]`
+    /// is unreachable on this path: every source spelling is rejected at resolution,
+    /// so a `secret` reaching here wraps a scalar (see ADR 0053).
+    fn to_array_elem_subst(self) -> Option<ArrayElem> {
+        if let Type::Secret(id) = self {
+            return Some(ArrayElem::Secret(id));
+        }
+        self.to_array_elem()
+    }
+
     /// Try to demote this Type to a [`VecElem`] for use as the element
     /// of a `Vec`. Mirrors [`Type::to_array_elem`]: returns `None` for
     /// every type outside the flat subset (Array, Vec, Nullable, Ref,
@@ -797,7 +816,9 @@ impl Type {
             Type::Array(ae) => {
                 let inner = ae.to_type();
                 let new_inner = inner.substitute(subst, instances, refs);
-                match new_inner.to_array_elem() {
+                // ADR 0053: secret-aware demote so `vec_to_array<T>() -> [T]` over
+                // `T := secret u8` yields `[secret u8]` (mirrors the Vec arm).
+                match new_inner.to_array_elem_subst() {
                     Some(new_ae) => Type::Array(new_ae),
                     None => Type::Array(ae),
                 }
@@ -5721,7 +5742,8 @@ fn try_substitute(
         }
         Type::Array(ae) => {
             let inner = try_substitute(ae.to_type(), subst, instances, refs)?;
-            inner.to_array_elem().map(Type::Array)
+            // ADR 0053: secret-aware demote (the substitution round-trip).
+            inner.to_array_elem_subst().map(Type::Array)
         }
         // Phase D.3 / ADR 0034: concrete iff the element is fully bound.
         Type::Vec(ve) => {
@@ -11481,6 +11503,17 @@ fn main() -> i64 {
             matches!(err, TypeError::VecElementNotSupported { .. }),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn vec_to_array_over_secret_yields_secret_array() {
+        // ADR 0053: `vec_to_array<T>(Vec<T>) -> [T]` over `T := secret u8` must yield
+        // `[secret u8]` (via the secret-aware array substitution `to_array_elem_subst`),
+        // not fall back to `[T]`. The `Vec<secret u8> -> [secret u8]` bridge.
+        let p = check_ok(
+            "fn f(v: Vec<secret u8>) -> [secret u8] { vec_to_array(v) }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(fn_body_ty(&p, "f"), Type::Array(ArrayElem::Secret(_))));
     }
 
     #[test]

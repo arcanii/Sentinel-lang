@@ -208,6 +208,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // OTK gen + encrypt + mac-data + tag. 42 = both the ciphertext and the tag
     // matched the reference for the §2.8.2 key/nonce.
     ("examples/security/chacha20poly1305.sentinel", 42),
+    // The FULL RFC 8439 §2.8.2 AEAD vector (114-byte plaintext + 12-byte AAD): the
+    // secret plaintext is built up by `push` into a `Vec<secret u8>` (ADR 0052) and
+    // bridged to `[secret u8]` via `vec_to_array` (ADR 0053). 42 = the full 114-byte
+    // ciphertext AND the 16-byte tag matched the published vector byte-for-byte.
+    ("examples/security/chacha20poly1305_full.sentinel", 42),
     // Variable-length constant-time compare over GROWABLE secret byte buffers
     // (std::security::ct::ct_vec_eq, ADR 0052 `Vec<secret u8>`) — each buffer is
     // built up by `push` at run time, then reduced branch-free. 42 = two
@@ -279,6 +284,11 @@ fn algorithms_sort_search() {
 #[test]
 fn chacha20poly1305_aead() {
     check_example("examples/security/chacha20poly1305.sentinel", "chacha20poly1305", 42);
+}
+
+#[test]
+fn chacha20poly1305_aead_full_vector() {
+    check_example("examples/security/chacha20poly1305_full.sentinel", "chacha20poly1305_full", 42);
 }
 
 #[test]
