@@ -29,7 +29,7 @@ the example entry. See the harness doc-comment for the mechanics.
 
 | Category    | Module(s)            | Status                                   |
 | ----------- | -------------------- | ---------------------------------------- |
-| `security`  | `ct`, `siphash`, `chacha20`, `poly1305`, `aead` | ✅ ct scalars + `ct_memcmp` over `[secret u8]` + `ct_rotl64`/`ct_rotl32`; `siphash24` keyed MAC; `chacha20_block` + `chacha20_xor` stream cipher; `poly1305` one-time MAC; `chacha20poly1305_encrypt` AEAD |
+| `security`  | `ct`, `siphash`, `chacha20`, `poly1305`, `aead` | ✅ ct scalars + `ct_memcmp` over `[secret u8]` + `ct_vec_eq` over `Vec<secret u8>` + `ct_rotl64`/`ct_rotl32`; `siphash24` keyed MAC; `chacha20_block` + `chacha20_xor` stream cipher; `poly1305` one-time MAC; `chacha20poly1305_encrypt` AEAD |
 | `math`      | `num`                | ✅ min/max/abs/clamp                       |
 | `bits`      | `bits`               | ✅ `rotl64`/`rotr64`/`rotl32`/`rotr32`     |
 | `bytes`     | `bytes`              | ✅ `eq`/`find`/`contains`/`count`/`starts_with`/`repeat` (over `&[u8]`) |
@@ -65,8 +65,17 @@ the most valuable output of this corpus.
   read-index, while a *secret value* stored at a public index is allowed. Unblocks
   a full, idiomatic **ChaCha20 block** that permutes a `[secret i32]` state in place
   (`examples/security/chacha20_block`, RFC 8439 §2.3.2 vector).
+- **Fixed — `Vec<secret T>` growable secret buffers** (ADR 0052, `VecElem::Secret`).
+  The sibling of `[secret T]` on the `Vec` path: a *variable-length* secret byte
+  buffer (`Vec<secret u8>`) can now be built up with `vec_new` + `push` and indexed
+  to yield `secret u8` (public index → the constant-time taint; the buffer's
+  pointer/length/capacity stay public, a secret index is rejected). Front-end-only
+  like `[secret T]`, plus a secret-aware generic-substitution round-trip
+  (`Vec<T>[T:=secret u8]`) since the `Vec` builtins are generic. Unblocks
+  message-length-independent constant-time code — `security/ct::ct_vec_eq` over two
+  growable secret buffers (`examples/security/ct_vec_eq`).
 
-All four surfaced gaps are now closed and fully self-hosted (snc + `scg`,
+All five surfaced gaps are now closed and fully self-hosted (snc + `scg`,
 byte-identical, both bootstrap fixed points held). When a gap blocks a genuinely
 idiomatic library, that block is the signal to add the feature (ADR-first if it
 touches the frozen `abi-v1` contract).

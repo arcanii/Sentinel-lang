@@ -208,6 +208,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // OTK gen + encrypt + mac-data + tag. 42 = both the ciphertext and the tag
     // matched the reference for the §2.8.2 key/nonce.
     ("examples/security/chacha20poly1305.sentinel", 42),
+    // Variable-length constant-time compare over GROWABLE secret byte buffers
+    // (std::security::ct::ct_vec_eq, ADR 0052 `Vec<secret u8>`) — each buffer is
+    // built up by `push` at run time, then reduced branch-free. 42 = two
+    // identically-built buffers compared equal AND a one-byte-shifted buffer
+    // compared unequal.
+    ("examples/security/ct_vec_eq.sentinel", 42),
 ];
 
 #[test]
@@ -273,6 +279,11 @@ fn algorithms_sort_search() {
 #[test]
 fn chacha20poly1305_aead() {
     check_example("examples/security/chacha20poly1305.sentinel", "chacha20poly1305", 42);
+}
+
+#[test]
+fn ct_vec_eq_secret_vec() {
+    check_example("examples/security/ct_vec_eq.sentinel", "ct_vec_eq", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

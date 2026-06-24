@@ -103,3 +103,34 @@ pub fn ct_rotl32(x: secret i32, n: i64) -> secret i32 {
     let mask: i64 = 31;
     (x << (n & mask)) | (x >> ((w - n) & mask))
 }
+
+// Constant-time equality of two GROWABLE secret byte buffers — the
+// variable-length sibling of `ct_memcmp` (ADR 0052 `Vec<secret T>`). Where
+// `ct_memcmp` compares fixed-size `[secret u8]` literals, this compares
+// `Vec<secret u8>` buffers built up by `push` at run time, so the width need not
+// be known when the code is written — the shape of an auth-tag / MAC verify over
+// a message whose length is a run-time value.
+//
+// Constant-time by construction, exactly as `ct_memcmp`: the loop runs a FIXED
+// number of iterations (the PUBLIC length `len(a)`) and indexes with a PUBLIC
+// counter, so neither the iteration count nor the access pattern depends on the
+// secret contents — no data-dependent early-out. Each `a[i]`/`b[i]` comes back
+// `secret u8` (a `Vec<secret u8>` element; the buffer's pointer/length/capacity
+// stay public), so the XOR/OR reduction stays in the secret domain; the caller
+// `declassify`s the final accumulator and compares it against zero. The
+// compiler's constant-time check verifies the whole path.
+//
+// The buffers are consumed (a `Vec` is Move), so the caller builds fresh ones
+// per compare. Precondition: `len(a) == len(b)` (a real tag compare fixes the
+// width); if `b` is shorter, an out-of-bounds index traps.
+pub fn ct_vec_eq(a: Vec<secret u8>, b: Vec<secret u8>) -> secret u8 {
+    let n: i64 = len(a);
+    let zero: u8 = i64_to_u8(0);
+    let mut acc: secret u8 = zero;   // u8 -> secret u8 widen
+    let mut i: i64 = 0;
+    while i < n {
+        acc = acc | (a[i] ^ b[i]);   // public index i; secret bytes
+        i = i + 1;
+    }
+    acc
+}

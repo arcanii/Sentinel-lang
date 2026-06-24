@@ -1,0 +1,46 @@
+// examples/security/ct_vec_eq.sentinel — variable-length constant-time compare.
+//
+// The growable sibling of `ct_memcmp`: a constant-time secure compare over
+// secret byte buffers whose length is a RUN-TIME value, built on
+// `std::security::ct::ct_vec_eq`. This is the shape of an HMAC / auth-tag verify
+// over a message of unknown length — the comparison must not leak, through
+// timing, whether or where two secret buffers differ.
+//
+// This exercises `Vec<secret u8>` (growable vectors of secret elements, ADR
+// 0052): each buffer is BUILT UP by pushing secret bytes in a loop (a width the
+// code doesn't fix), then indexed by a public counter to yield `secret u8`
+// elements. Where `ct_memcmp` needs a fixed `[secret u8]` literal, this grows
+// the buffer at run time — the gap the crypto track surfaced. The compiler's
+// constant-time check verifies the whole branch-free path on every build, so
+// this program compiling at all is the guarantee.
+//
+// Exit 42 = two identically-built secret buffers compare equal, AND a buffer
+// built with one differing byte compares unequal.
+use std::security::ct::ct_vec_eq;
+
+// Build an `n`-byte secret buffer whose byte j is `(base + j)` widened to a
+// secret `u8`. The length `n` is a run-time argument, so the buffer GROWS via
+// `push` (ADR 0052) rather than being a fixed-size literal. The public byte
+// `i64_to_u8(base + j)` widens to `secret u8` at the `push` argument (ADR 0051).
+fn build(base: i64, n: i64) -> Vec<secret u8> {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut j: i64 = 0;
+    while j < n {
+        push(&mut v, i64_to_u8(base + j));
+        j = j + 1;
+    }
+    v
+}
+
+fn main() -> i64 {
+    let zero: u8 = i64_to_u8(0);
+
+    // Equal compare: two identically-built 7-byte secret buffers. (A `Vec` is
+    // Move, so each `ct_vec_eq` call consumes its buffers — build fresh ones.)
+    let eq: u8 = declassify(ct_vec_eq(build(10, 7), build(10, 7)));   // 0 iff equal
+
+    // Tampered compare: same length, every byte shifted by one (a real tamper).
+    let ne: u8 = declassify(ct_vec_eq(build(10, 7), build(11, 7)));   // nonzero
+
+    if eq == zero && ne != zero { 42 } else { 0 }
+}

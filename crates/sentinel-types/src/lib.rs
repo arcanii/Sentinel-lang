@@ -459,6 +459,16 @@ pub enum VecElem {
     TypeParam(TypeParamId),
     /// `Vec<Foo<args>>` — vector of a generic-struct instance.
     GenericInstance(GenericInstanceId),
+    /// ADR 0052: `Vec<secret T>` — a growable vector whose ELEMENTS are
+    /// individually secret (e.g. `Vec<secret u8>`, a variable-length secret byte
+    /// buffer). The exact sibling of [`ArrayElem::Secret`]: the [`SecretId`] names
+    /// the element's `secret T` via `TypedProgram.secrets`, keeping `VecElem`
+    /// `Copy`. Indexing yields `Type::Secret(id)` (see [`VecElem::to_type`]), so
+    /// the constant-time taint check fires on the element automatically, while the
+    /// `Vec`'s base pointer + length + capacity stay public. Admitted only for a
+    /// secret SCALAR element — the demote guard ([`Type::to_vec_elem_secret`])
+    /// rejects `Vec<secret [T]>` / `Vec<secret ?T>`.
+    Secret(SecretId),
 }
 
 impl VecElem {
@@ -473,6 +483,11 @@ impl VecElem {
             VecElem::Struct(id) => Type::Struct(id),
             VecElem::TypeParam(id) => Type::TypeParam(id),
             VecElem::GenericInstance(id) => Type::GenericInstance(id),
+            // ADR 0052: a secret Vec element promotes back to the scalar
+            // `secret T` it names — so `v[j]` on a `Vec<secret T>` types as
+            // `secret T`, seeding the constant-time check (mirrors
+            // [`ArrayElem::to_type`]'s Secret arm).
+            VecElem::Secret(id) => Type::Secret(id),
         }
     }
 
@@ -488,7 +503,9 @@ impl VecElem {
     ) -> VecElem {
         self.to_type()
             .substitute(subst, instances, refs)
-            .to_vec_elem()
+            // ADR 0052: `to_vec_elem_subst` (not the bare `to_vec_elem`) so a
+            // TypeParam bound to `secret SCALAR` round-trips to `VecElem::Secret`.
+            .to_vec_elem_subst()
             .unwrap_or(self)
     }
 }
@@ -682,6 +699,42 @@ impl Type {
         }
     }
 
+    /// ADR 0052: demote this Type to a [`VecElem`] for use as a `Vec` element,
+    /// additionally admitting a `secret` SCALAR element (`Vec<secret u8>`) — the
+    /// form the bare [`Type::to_vec_elem`] rejects. Exactly mirrors
+    /// [`Type::to_array_elem_secret`]: a `Type::Secret(id)` is admitted **only if**
+    /// the secret wraps a flat scalar (its `secrets[id].inner` itself demotes), so
+    /// `Vec<secret [T]>` / `Vec<secret ?T>` stay rejected and the depth-1
+    /// no-nested-collection rule holds. Used at the `Vec<T>` annotation-resolution
+    /// site; the bare `to_vec_elem` stays conservative for callers without the
+    /// `secrets` interner.
+    pub fn to_vec_elem_secret(self, secrets: &[SecretData]) -> Option<VecElem> {
+        if let Type::Secret(id) = self {
+            // `Vec<secret SCALAR>` only: the secret's own inner must demote.
+            let inner = secrets[id.0 as usize].inner;
+            return inner.to_vec_elem().map(|_| VecElem::Secret(id));
+        }
+        self.to_vec_elem()
+    }
+
+    /// ADR 0052: demote for the generic SUBSTITUTION round-trip. Like
+    /// [`Type::to_vec_elem`] but also admits a `secret SCALAR` element produced by
+    /// substituting a TypeParam, so `Vec<T>[T := secret u8] = Vec<secret u8>` (the
+    /// `Vec` builtins `vec_new`/`push` are generic over the element, so the element
+    /// TypeParam may bind to `secret u8`). The [`SecretId`] is taken straight from
+    /// the `Type::Secret`, so — unlike the resolution-site
+    /// [`Type::to_vec_elem_secret`] — no `secrets` table is needed (and
+    /// `Type::substitute` need not thread one, sidestepping the ripple ADR 0047 A2
+    /// avoided). A `Vec<secret NON-scalar>` is unreachable on this path: every
+    /// source spelling is rejected at resolution by `to_vec_elem_secret`, so a
+    /// `secret` reaching here wraps a scalar (see ADR 0052 "Scope / Deferred").
+    fn to_vec_elem_subst(self) -> Option<VecElem> {
+        if let Type::Secret(id) = self {
+            return Some(VecElem::Secret(id));
+        }
+        self.to_vec_elem()
+    }
+
     /// Substitute every [`Type::TypeParam`] inside `self` against
     /// the given substitution map. Used at generic-fn call sites
     /// per ADR 0016 D7c to compute the concrete parameter / return
@@ -754,7 +807,12 @@ impl Type {
             Type::Vec(ve) => {
                 let inner = ve.to_type();
                 let new_inner = inner.substitute(subst, instances, refs);
-                match new_inner.to_vec_elem() {
+                // ADR 0052: `to_vec_elem_subst` round-trips a substituted
+                // `secret SCALAR` element to `VecElem::Secret`, so
+                // `vec_new<T>() -> Vec<T>` instantiated with `T = secret u8`
+                // yields `Vec<secret u8>` (else it falls back to `Vec<T>` and the
+                // `let`-annotation match fails).
+                match new_inner.to_vec_elem_subst() {
                     Some(new_ve) => Type::Vec(new_ve),
                     None => Type::Vec(ve),
                 }
@@ -1284,10 +1342,13 @@ fn resolve_type_expr_with_scope(
                         secrets,
                         struct_type_param_counts,
                     )?;
-                    match elem_ty.to_vec_elem() {
+                    // ADR 0052: admit `Vec<secret SCALAR>` (e.g. `Vec<secret u8>`)
+                    // in addition to the flat subset; the guarded demote keeps
+                    // `Vec<secret [T]>` rejected (the depth-1 rule).
+                    match elem_ty.to_vec_elem_secret(secrets) {
                         Some(ve) => Ok(Type::Vec(ve)),
-                        // Vec<[T]> / Vec<Vec<T>> / Vec<?T> / Vec<&T>:
-                        // outside the flat subset, deferred (D8).
+                        // Vec<[T]> / Vec<Vec<T>> / Vec<?T> / Vec<&T> / Vec<secret [T]>:
+                        // outside the flat (scalar) subset, deferred (D8 / ADR 0052).
                         None => Err(TypeError::VecElementNotSupported {
                             span: to_source_span(&te.span),
                         }),
@@ -5665,7 +5726,8 @@ fn try_substitute(
         // Phase D.3 / ADR 0034: concrete iff the element is fully bound.
         Type::Vec(ve) => {
             let inner = try_substitute(ve.to_type(), subst, instances, refs)?;
-            inner.to_vec_elem().map(Type::Vec)
+            // ADR 0052: secret-aware demote (the substitution round-trip).
+            inner.to_vec_elem_subst().map(Type::Vec)
         }
         Type::GenericInstance(id) => {
             // Concrete only if every arg is concrete (under
@@ -6856,11 +6918,15 @@ fn check_expr(
                 // same flat subset as `ArrayElem`, so the element demotes
                 // to an `ArrayElem` for the typed node (codegen reads the
                 // data pointer from the Vec's field 2 vs the array's
-                // field 1, keyed on the target type).
+                // field 1, keyed on the target type). ADR 0052: the demote
+                // is secret-aware so `v[i]` on a `Vec<secret u8>` yields
+                // `ArrayElem::Secret` (→ `secret u8`, seeding the CT check);
+                // `VecElem::Secret` only ever wraps a scalar, so the demote
+                // is guaranteed `Some`.
                 Type::Vec(ve) => ve
                     .to_type()
-                    .to_array_elem()
-                    .expect("VecElem variants are a subset of ArrayElem"),
+                    .to_array_elem_secret(secrets)
+                    .expect("VecElem variants are a (secret-aware) subset of ArrayElem"),
                 other => {
                     return Err(TypeError::IndexOnNonArray {
                         got: other,
@@ -11343,6 +11409,74 @@ fn main() -> i64 {
     fn nested_vec_element_rejected() {
         // ADR 0034 D8: `Vec<Vec<i64>>` nesting is deferred.
         let err = check_err("fn main() -> i64 { let v: Vec<Vec<i64>> = vec_new(); 0 }");
+        assert!(
+            matches!(err, TypeError::VecElementNotSupported { .. }),
+            "got {err:?}"
+        );
+    }
+
+    // ----- ADR 0052: `Vec<secret T>` (growable buffers of secret elements) -----
+
+    #[test]
+    fn vec_secret_u8_element_resolves() {
+        // ADR 0052: `Vec<secret u8>` is representable — `VecElem::Secret`.
+        let p = check_ok(
+            "fn f(v: Vec<secret u8>) -> Vec<secret u8> { v }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(fn_body_ty(&p, "f"), Type::Vec(VecElem::Secret(_))));
+    }
+
+    #[test]
+    fn vec_new_infers_secret_element_from_annotation() {
+        // ADR 0052: the generic substitution round-trip — `vec_new<T>() -> Vec<T>`
+        // with `T := secret u8` must yield `Vec<secret u8>` (via `to_vec_elem_subst`),
+        // so the `let`-annotation match succeeds (else it falls back to `Vec<T>`).
+        let p = check_ok("fn main() -> i64 { let v: Vec<secret u8> = vec_new(); 0 }");
+        match &p.main().body.stmts[0].kind {
+            TypedStmtKind::Let { ty, .. } => {
+                assert!(matches!(ty, Type::Vec(VecElem::Secret(_))), "got {ty:?}")
+            }
+            other => panic!("expected Let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vec_secret_index_yields_secret() {
+        // ADR 0052: indexing a `Vec<secret u8>` with a public index yields
+        // `secret u8` (seeding the constant-time taint), mirroring `[secret u8]`.
+        let p = check_ok(
+            "fn f(v: Vec<secret u8>, i: i64) -> secret u8 { v[i] }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(fn_body_ty(&p, "f"), Type::Secret(_)));
+    }
+
+    #[test]
+    fn vec_secret_index_assign_typechecks() {
+        // ADR 0052 + ADR 0050: a `secret u8` is a Copy element, writable in place
+        // through a public index (`buf[i] = v`).
+        let p = check_ok(
+            "fn f(x: secret u8) -> i64 { let mut v: Vec<secret u8> = vec_new(); \
+             push(&mut v, x); v[0] = x; 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(fn_body_ty(&p, "f"), Type::I64);
+    }
+
+    #[test]
+    fn vec_secret_index_must_be_public() {
+        // ADR 0052: a SECRET index into a `Vec<secret u8>` is rejected (the
+        // constant-time story), exactly as for a `[secret u8]` array read.
+        let err = check_err(
+            "fn f(v: Vec<secret u8>, i: secret i64) -> secret u8 { v[i] }\n\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::IndexNotInt { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn vec_of_secret_array_element_rejected() {
+        // ADR 0052: the demote guard keeps `Vec<secret [u8]>` rejected (the
+        // depth-1 no-nested-collection rule — a secret wrapping a non-scalar).
+        let err = check_err("fn main() -> i64 { let v: Vec<secret [u8]> = vec_new(); 0 }");
         assert!(
             matches!(err, TypeError::VecElementNotSupported { .. }),
             "got {err:?}"
