@@ -50,10 +50,16 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
-flagship landed).** Real, idiomatic Sentinel programs that double as feature tests
-+ the first **core libraries**. **Dogfoods modules + `--separate`**,
+SEVEN language gaps closed; crypto band shipped through SHA-256 / HMAC; HEAD
+`87b11ce`, 1570 tests).** Real, idiomatic Sentinel programs that double as feature
+tests + the first **core libraries**. **Dogfoods modules + `--separate`**,
 **stress-tests the constant-time guarantee on real code**, and surfaces concrete
-language gaps — finding + fixing those is the most valuable output.
+language gaps — finding + fixing those is the most valuable output. The
+high-value, unblocked crypto work (the full §2.8.2 vector, SHA-256, HMAC, and the
+`Vec<secret T>` / `vec_to_array`-over-secret gap-fixes that enabled it) is DONE;
+the cleanly-open next steps are the higher-value crypto/borrow items in **Next**
+below (SHA-512, AES's CT S-box story, X25519, `&mut a[i]` borrows), with
+array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
 
 - **Decisions locked with the owner:** top-level `std/` + `examples/`, each
   subdivided by **functional category** (security, math, …), examples mirroring
