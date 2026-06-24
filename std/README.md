@@ -29,7 +29,7 @@ the example entry. See the harness doc-comment for the mechanics.
 
 | Category    | Module(s)            | Status                                   |
 | ----------- | -------------------- | ---------------------------------------- |
-| `security`  | `ct`, `siphash`, `chacha20`, `poly1305`, `aead` | ✅ ct scalars + `ct_memcmp` over `[secret u8]` + `ct_vec_eq` over `Vec<secret u8>` + `ct_rotl64`/`ct_rotl32`; `siphash24` keyed MAC; `chacha20_block` + `chacha20_xor` stream cipher; `poly1305` one-time MAC; `chacha20poly1305_encrypt` AEAD |
+| `security`  | `ct`, `siphash`, `chacha20`, `poly1305`, `aead`, `sha256`, `hmac` | ✅ ct scalars + `ct_memcmp` over `[secret u8]` + `ct_vec_eq` over `Vec<secret u8>` + `ct_rotl64`/`ct_rotl32`/`ct_rotr32`; `siphash24` keyed MAC; `chacha20_block` + `chacha20_xor` stream cipher; `poly1305` one-time MAC; `chacha20poly1305_encrypt` AEAD (full RFC 8439 §2.8.2 vector); `sha256` constant-time SHA-256 over a `secret` message; `hmac_sha256` over a `secret` key |
 | `math`      | `num`                | ✅ min/max/abs/clamp                       |
 | `bits`      | `bits`               | ✅ `rotl64`/`rotr64`/`rotl32`/`rotr32`     |
 | `bytes`     | `bytes`              | ✅ `eq`/`find`/`contains`/`count`/`starts_with`/`repeat` (over `&[u8]`) |
@@ -74,8 +74,17 @@ the most valuable output of this corpus.
   (`Vec<T>[T:=secret u8]`) since the `Vec` builtins are generic. Unblocks
   message-length-independent constant-time code — `security/ct::ct_vec_eq` over two
   growable secret buffers (`examples/security/ct_vec_eq`).
+- **Fixed — `vec_to_array` over a secret `Vec`** (ADR 0053, `to_array_elem_subst`).
+  The symmetric completion of ADR 0052: `Vec<secret u8> → [secret u8]`, so a buffer
+  built up with `push` feeds the existing `[secret u8]`-taking crypto. The array
+  substitution demote is made secret-aware (the twin of 0052's `to_vec_elem_subst`),
+  with no codegen or `scg` change. Makes the full RFC 8439 §2.8.2 114-byte AEAD
+  vector idiomatic (build the secret plaintext by `push`, then `vec_to_array`), and
+  underpins the `sha256` schedule/padding.
 
-All five surfaced gaps are now closed and fully self-hosted (snc + `scg`,
+All seven surfaced gaps are now closed and fully self-hosted (snc + `scg`,
 byte-identical, both bootstrap fixed points held). When a gap blocks a genuinely
 idiomatic library, that block is the signal to add the feature (ADR-first if it
-touches the frozen `abi-v1` contract).
+touches the frozen `abi-v1` contract). On the now-rich surface the corpus also
+grew (no language change): the full §2.8.2 AEAD vector, a constant-time **SHA-256**
+over a secret message (`sha256`), and **HMAC-SHA256** over a secret key (`hmac`).

@@ -61,17 +61,20 @@ the current state of the workspace without re-reading every commit.
   idiomatic Sentinel programs that double as feature tests — each built BOTH via
   `--separate` and the merge path and asserted on (`crates/sentinel-driver/tests/
   examples.rs`). Shipped libraries: `std/security` (`ct` constant-time primitives
-  incl. `ct_memcmp` + `ct_rotl64`/`ct_rotl32`; `siphash` SipHash-2-4 keyed MAC;
-  `chacha20` block + stream cipher; `poly1305` one-time MAC over a secret key;
-  `aead` ChaCha20-Poly1305 AEAD composing them), `std/math/num`, `std/bits/bits`
-  (rotates), `std/bytes/bytes` (`[u8]` utilities over `&[u8]` borrows), and
-  `std/algorithms/seq` (in-place insertion `sort` + `binary_search` over public
-  `[i64]`). The crypto examples reproduce the canonical test vectors (SipHash
-  `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 / §2.5.2 / §2.8.2). It has
-  surfaced + closed **six** language gaps so far, each ADR-first; five are fully
-  self-hosted (snc + `scg`, byte-identical, both fixed points held — ADR 0047 / 0048
-  / 0049 / 0050 / 0052), and ADR 0051's operand widen is too (its call-arg / array /
-  return widens are snc-side ergonomics):
+  incl. `ct_memcmp` + `ct_vec_eq` + `ct_rotl64`/`ct_rotl32`/`ct_rotr32`; `siphash`
+  SipHash-2-4 keyed MAC; `chacha20` block + stream cipher; `poly1305` one-time MAC
+  over a secret key; `aead` ChaCha20-Poly1305 AEAD composing them; `sha256` a
+  constant-time SHA-256 over a `secret` message; `hmac` HMAC-SHA256 over a `secret`
+  key), `std/math/num`, `std/bits/bits` (rotates), `std/bytes/bytes` (`[u8]`
+  utilities over `&[u8]` borrows), and `std/algorithms/seq` (in-place insertion
+  `sort` + `binary_search` over public `[i64]`). The crypto examples reproduce the
+  canonical test vectors (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 /
+  §2.5.2 / the full 114-byte §2.8.2 AEAD vector; NIST SHA-256 "abc"/""/multi-block;
+  RFC 4231 HMAC-SHA256 TC1/TC2/TC6). It has surfaced + closed **seven** language
+  gaps so far, each ADR-first; six are fully self-hosted (snc + `scg`,
+  byte-identical, both fixed points held — ADR 0047 / 0048 / 0049 / 0050 / 0052 /
+  0053), and ADR 0051's operand widen is too (its call-arg / array / return widens
+  are snc-side ergonomics):
   - **`[secret T]` arrays** — arrays of secret elements (ADR 0047,
     `ArrayElem::Secret`) — enabling a variable-length constant-time `memcmp` over
     secret bytes (`examples/security/ct_memcmp`).
@@ -109,12 +112,23 @@ the current state of the workspace without re-reading every commit.
     constant-time code — `ct::ct_vec_eq` over two growable secret buffers
     (`examples/security/ct_vec_eq`); validated `scg`==`snc` byte-for-byte
     (`tests/pass/c57_secret_vec`).
-  The crypto MACs (SipHash / ChaCha20 stream / Poly1305) drove ADR 0051, and the
-  variable-length secret-buffer friction drove ADR 0052 —
-  "build real programs → find the gap → fix it". See the
-  `sentinel_examples_and_corelibs` auto-memory.
+  - **`vec_to_array` over a secret `Vec`** (ADR 0053, `to_array_elem_subst`) — the
+    symmetric completion of ADR 0052: `Vec<secret u8> → [secret u8]`, so a growable
+    secret buffer feeds the existing `[secret u8]`-taking crypto. The array
+    substitution demote is made secret-aware (the twin of 0052's `to_vec_elem_subst`);
+    no codegen/`scg` change (`tests/pass/c58_secret_vec_to_array` byte-identical). It
+    is the payoff that makes the full 114-byte §2.8.2 vector idiomatic (build the
+    secret plaintext by `push`, then `vec_to_array`).
+  The crypto MACs (SipHash / ChaCha20 stream / Poly1305) drove ADR 0051, the
+  variable-length secret-buffer friction drove ADR 0052, and feeding a built-up
+  secret buffer to the `[secret u8]` crypto drove ADR 0053 —
+  "build real programs → find the gap → fix it". On the now-rich surface, the track
+  also shipped (no language change) the full RFC 8439 §2.8.2 114-byte AEAD vector, a
+  constant-time **SHA-256** over a secret message (its 64-word schedule a
+  `Vec<secret i32>`), and **HMAC-SHA256** over a secret key (composing SHA-256). See
+  the `sentinel_examples_and_corelibs` auto-memory.
 
-**1566 tests across the workspace**, four-check green (build · `cargo nextest`
+**1570 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

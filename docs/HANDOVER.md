@@ -154,27 +154,59 @@ language gaps — finding + fixing those is the most valuable output.
   fine; `scg` does NOT mirror a `secret u8` let-widen from a CALL result (it mirrors
   literal/var let-widens + the operand widen) — orthogonal ADR 0019/0051 gap, the
   fixture routes around it (bind the public byte to a `u8` var, widen the var).
+- **`vec_to_array` over a secret `Vec` (ADR 0053) + the full §2.8.2 vector + SHA-256 +
+  HMAC.** Continuing "do these in recommended order":
+  - **ADR 0053 — `vec_to_array(Vec<secret u8>) -> [secret u8]`** (the seventh gap, the
+    symmetric completion ADR 0052 deferred). `vec_to_array` is a generic builtin, so
+    its result ran through the ARRAY substitution demote (bare `to_array_elem`, rejects
+    secret → fell back to `[T]`); fixed with `to_array_elem_subst` (the array twin of
+    `to_vec_elem_subst`) at the three array substitution sites. No codegen/CT/`scg`
+    change; `tests/pass/c58_secret_vec_to_array` byte-identical across all 8
+    differentials. (`cf9b0ab`.)
+  - **Full RFC 8439 §2.8.2 114-byte AEAD vector** (`examples/security/chacha20poly1305_full`)
+    — the payoff: the 114-byte secret plaintext is built by `push` into a `Vec<secret u8>`
+    and `vec_to_array`'d into the `[secret u8]` the AEAD consumes; ciphertext + tag match
+    byte-for-byte (verified vs a Python reference), both `--separate` + merge.
+  - **`std/security/sha256` — a constant-time SHA-256 over a `secret` message** (`a573822`).
+    Branch-free `secret i32` compression; the 64-word schedule is a `Vec<secret i32>`
+    (ADR 0052), the padded message a `Vec<secret u8> → [secret u8]` (ADR 0053), the
+    running state mutated in place through a `&mut [secret i32]` borrow (ADR 0050, so it
+    is never moved across the block loop — the move-checker rejects threading an
+    aggregate by value through a loop; this is THE finding). Ch via the no-NOT identity
+    `g ^ (e & (f ^ g))`; added `ct_rotr32`. Verified vs NIST "abc"/""/100×'a' (multi-block).
+    Drafted by a focused sub-agent iterating against a Python reference, then reviewed +
+    re-verified.
+  - **`std/security/hmac` — HMAC-SHA256 over a `secret` key** (`d50c7b0`), composing
+    sha256. The key + both padded blocks are secret → fully constant-time; the over-long
+    key is hashed first via an `if`-expression branching on the PUBLIC key length.
+    Verified vs RFC 4231 TC1/TC2/TC6 (TC6's 131-byte key exercises the hash-first path).
 - **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
   `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
   byte utilities must take `&[u8]`, not `[u8]` by value, or the first call consumes
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
-  - **More crypto** — now UNBLOCKED by `Vec<secret u8>` (ADR 0052): the full RFC 8439
-    §2.8.2 114-byte AEAD vector (build the variable-length `mac_data` buffer with
-    `push`), a hash (SHA-256, over public bytes), HMAC, or an X25519 (needs bigint /
-    field arithmetic). The growable secret buffer is the building block streaming /
-    message-length-independent crypto wanted.
-  - **Remaining secret-buffer / collection ergonomics** — `Vec<secret T>` is shipped
-    (ADR 0052); still open: array-repeat `[x; N]` (a fixed-size initializer),
-    `&mut [T]` element writes / `&mut a[i]` borrows (ADR 0050 deferred these), and
-    `vec_to_array` over a secret `Vec` (`Vec<secret u8> → [secret u8]`, needs the
-    ARRAY substitution demote made secret-aware too — ADR 0052 "Deferred").
-  - **Self-hosting completion** — mirror into `scg`: the ADR 0051 call-arg / array /
-    return widens (operand widen already self-hosted), AND the `secret T` let-widen
-    from a CALL result (ADR 0052 A5 — `scg` mirrors the literal/var let-widen but not
-    a call-RHS public→secret coerce). Both low value (pure type-checker ergonomics, no
-    emitted-code impact), but complete the self-hosting.
+  - **More crypto** — the §2.8.2 vector, SHA-256, and HMAC are shipped. Next on the
+    rich surface: SHA-512 (64-bit words, same shape), a block cipher (AES — needs an
+    S-box, a data-dependent table lookup that the CT check *correctly rejects* on a
+    secret index, so AES wants either a bitsliced/CT S-box or a public-data framing — a
+    genuinely interesting CT exercise), or X25519 / Ed25519 (needs bigint / field
+    arithmetic — the next real numeric gap).
+  - **Two deferred items from the list, now LOW value — recommend skipping unless
+    wanted:**
+    - **array-repeat `[x; N]`** — SHA-256/HMAC built cleanly WITHOUT it (`Vec<secret T>`
+      + `push` covers fixed- and variable-length buffers), so it is no longer driven by
+      any real program. A genuine minor convenience (a `[0; N]` initializer), but a full
+      pipeline feature (parser + types + codegen + selfhost mirror) for small marginal
+      value over `Vec`. Deferred, not blocked.
+    - **Self-hosting completion** — mirror into `scg` the ADR 0051 call-arg/array/return
+      widens + the call-RHS `secret` let-widen (ADR 0052 A5). Pure completionism: NO
+      selfhost-corpus program uses these constructs, so mirroring them has zero
+      functional impact (and carries byte-identity risk) until a fixture needs them.
+      Deferred.
+    - Still genuinely open (medium value): `&mut [T]` element writes / `&mut a[i]`
+      borrows (ADR 0050 deferred these — the SHA-256 state used index-assign through a
+      `&mut [secret i32]`, which works; a `&mut a[i]` *borrow* is the remaining gap).
   - **More `std` categories** — networking / threading / process need runtime/
     syscall surface that does not exist yet (a real gap to scope first).
   - **Lower value (and partly blocked):** **Linux CI (P2.4)** needs a Linux/CI
