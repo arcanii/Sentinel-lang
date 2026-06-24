@@ -132,23 +132,49 @@ language gaps — finding + fixing those is the most valuable output.
   `u8_to_i64` is public-only); the standalone poly1305 example now builds its key
   via the `[u8] → [secret u8]` widen. Reproduces both the ciphertext + tag for the
   §2.8.2 key/nonce. Only declassify boundaries: the public ciphertext + tag.
+- **`Vec<secret T>` growable secret buffers (ADR 0052, `VecElem::Secret`) — fully
+  self-hosted, the sixth gap closed.** The sibling of `[secret T]` (ADR 0047) on the
+  `Vec` path: a *variable-length* secret byte buffer (`Vec<secret u8>`) built with
+  `vec_new` + `push` and indexed to yield `secret u8` (public index → the CT taint;
+  pointer/length/capacity public; a secret index rejected `IndexNotInt`; a branch on
+  a secret element rejected). One crate (`sentinel-types`): `VecElem::Secret` +
+  `to_type` arm + a guarded `to_vec_elem_secret` (resolution) + the Index-arm demote
+  (`to_array_elem_secret`, else the `.expect` panics) — codegen/MIR/borrow unchanged
+  (layout-free secret tag). The ONE substantive difference from `[secret T]`: the
+  `Vec` builtins are GENERIC, so `vec_new<T>()` over `T:=secret u8` needs the
+  substitution round-trip to yield `Vec<secret u8>` — a second `secrets`-free demote
+  `to_vec_elem_subst` (no `secrets`-threading ripple). **No selfhost change** (`scg`'s
+  structural interner already represents `mk_vec(mk_secret(u8))`); `tests/pass/
+  c57_secret_vec` proves `scg`==`snc` byte-for-byte across all 8 differentials, both
+  fixed points hold. Shipped `security/ct::ct_vec_eq` (the variable-length sibling of
+  `ct_memcmp`, over two growable secret buffers) + `examples/security/ct_vec_eq`
+  (builds the buffers by `push` in a loop). FINDINGS: `secret [u8]` (secret-of-array)
+  IS representable, so the resolution guard is load-bearing to reject
+  `Vec<secret [u8]>`; cross-module `pub fn` over `Vec<secret u8>` crosses `--separate`
+  fine; `scg` does NOT mirror a `secret u8` let-widen from a CALL result (it mirrors
+  literal/var let-widens + the operand widen) — orthogonal ADR 0019/0051 gap, the
+  fixture routes around it (bind the public byte to a `u8` var, widen the var).
 - **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
   `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
   byte utilities must take `&[u8]`, not `[u8]` by value, or the first call consumes
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
-  - **More crypto** — the AEAD is shipped (`aead`); next could be the full §2.8.2
-    114-byte vector (needs larger hand-built secret buffers — see the friction
-    below), a hash (SHA-256), HMAC, or an X25519 (needs bigint / field arithmetic).
-  - **Secret-buffer ergonomics** — the AEAD + ChaCha20-stream hit the same wall:
-    building variable-length `[secret u8]` is verbose (`Vec<secret T>` is REJECTED,
-    array-repeat `[x; N]` is unsupported, and only fixed-size literals / index-assign
-    work). Supporting `Vec<secret T>` (or a `[secret u8]` builder) is the next real
-    language gap the crypto track surfaced.
-  - **Mirror the ADR 0051 call-arg/array/return widens into `scg`** (operand widen
-    already self-hosted) — low value (pure type-checker ergonomic, no emitted-code
-    impact), but completes the self-hosting.
+  - **More crypto** — now UNBLOCKED by `Vec<secret u8>` (ADR 0052): the full RFC 8439
+    §2.8.2 114-byte AEAD vector (build the variable-length `mac_data` buffer with
+    `push`), a hash (SHA-256, over public bytes), HMAC, or an X25519 (needs bigint /
+    field arithmetic). The growable secret buffer is the building block streaming /
+    message-length-independent crypto wanted.
+  - **Remaining secret-buffer / collection ergonomics** — `Vec<secret T>` is shipped
+    (ADR 0052); still open: array-repeat `[x; N]` (a fixed-size initializer),
+    `&mut [T]` element writes / `&mut a[i]` borrows (ADR 0050 deferred these), and
+    `vec_to_array` over a secret `Vec` (`Vec<secret u8> → [secret u8]`, needs the
+    ARRAY substitution demote made secret-aware too — ADR 0052 "Deferred").
+  - **Self-hosting completion** — mirror into `scg`: the ADR 0051 call-arg / array /
+    return widens (operand widen already self-hosted), AND the `secret T` let-widen
+    from a CALL result (ADR 0052 A5 — `scg` mirrors the literal/var let-widen but not
+    a call-RHS public→secret coerce). Both low value (pure type-checker ergonomics, no
+    emitted-code impact), but complete the self-hosting.
   - **More `std` categories** — networking / threading / process need runtime/
     syscall surface that does not exist yet (a real gap to scope first).
   - **Lower value (and partly blocked):** **Linux CI (P2.4)** needs a Linux/CI

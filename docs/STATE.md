@@ -68,10 +68,10 @@ the current state of the workspace without re-reading every commit.
   `std/algorithms/seq` (in-place insertion `sort` + `binary_search` over public
   `[i64]`). The crypto examples reproduce the canonical test vectors (SipHash
   `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 / §2.5.2 / §2.8.2). It has
-  surfaced + closed **five** language gaps so far, each ADR-first; the first four
-  are fully self-hosted (snc + `scg`, byte-identical, both fixed points held), and
-  ADR 0051's operand widen is too (its call-arg/array/return widens are snc-side
-  ergonomics):
+  surfaced + closed **six** language gaps so far, each ADR-first; five are fully
+  self-hosted (snc + `scg`, byte-identical, both fixed points held — ADR 0047 / 0048
+  / 0049 / 0050 / 0052), and ADR 0051's operand widen is too (its call-arg / array /
+  return widens are snc-side ergonomics):
   - **`[secret T]` arrays** — arrays of secret elements (ADR 0047,
     `ArrayElem::Secret`) — enabling a variable-length constant-time `memcmp` over
     secret bytes (`examples/security/ct_memcmp`).
@@ -99,11 +99,22 @@ the current state of the workspace without re-reading every commit.
     sinks are untouched (shift amount / divisor / branch / index still reject).
     The operand widen is self-hosted (`tests/pass/c56_operand_widen`); the
     call-arg/array/return widens are snc-side.
-  The crypto MACs (SipHash / ChaCha20 stream / Poly1305) drove ADR 0051 —
+  - **`Vec<secret T>` growable secret buffers** (ADR 0052, `VecElem::Secret`) — the
+    sibling of `[secret T]` on the `Vec` path: a *variable-length* secret byte
+    buffer (`Vec<secret u8>`) is built with `vec_new` + `push` and indexed to yield
+    `secret u8` (public index → the constant-time taint; pointer/length/capacity
+    public; a secret index rejected). Front-end-only like `[secret T]`, plus a
+    secret-aware generic-substitution round-trip (`vec_new<T>()` over `T:=secret u8`)
+    since the `Vec` builtins are generic. Unblocks message-length-independent
+    constant-time code — `ct::ct_vec_eq` over two growable secret buffers
+    (`examples/security/ct_vec_eq`); validated `scg`==`snc` byte-for-byte
+    (`tests/pass/c57_secret_vec`).
+  The crypto MACs (SipHash / ChaCha20 stream / Poly1305) drove ADR 0051, and the
+  variable-length secret-buffer friction drove ADR 0052 —
   "build real programs → find the gap → fix it". See the
   `sentinel_examples_and_corelibs` auto-memory.
 
-**1559 tests across the workspace**, four-check green (build · `cargo nextest`
+**1566 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
