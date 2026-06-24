@@ -213,18 +213,23 @@ const EXAMPLES: &[(&str, i32)] = &[
     // bridged to `[secret u8]` via `vec_to_array` (ADR 0053). 42 = the full 114-byte
     // ciphertext AND the 16-byte tag matched the published vector byte-for-byte.
     ("examples/security/chacha20poly1305_full.sentinel", 42),
+    // Constant-time SHA-256 over a SECRET message (std::security::sha256, FIPS
+    // 180-4) — the compression is branch-free over `secret i32` words; the schedule
+    // is a Vec<secret i32> (ADR 0052) and the padded message a Vec<secret u8> ->
+    // [secret u8] (ADR 0053). 42 = SHA-256("abc"), "", and 100*'a' (multi-block) all
+    // matched their NIST digest.
+    ("examples/security/sha256.sentinel", 42),
+    // HMAC-SHA256 over a SECRET key (std::security::hmac, RFC 2104 / RFC 4231,
+    // composing sha256) — two branch-free SHA-256 passes over the secret key blocks.
+    // 42 = RFC 4231 TC1/TC2/TC6 (TC6's 131-byte key exercises the hash-first path)
+    // all matched their published tag.
+    ("examples/security/hmac.sentinel", 42),
     // Variable-length constant-time compare over GROWABLE secret byte buffers
     // (std::security::ct::ct_vec_eq, ADR 0052 `Vec<secret u8>`) — each buffer is
     // built up by `push` at run time, then reduced branch-free. 42 = two
     // identically-built buffers compared equal AND a one-byte-shifted buffer
     // compared unequal.
     ("examples/security/ct_vec_eq.sentinel", 42),
-    // Constant-time SHA-256 over a SECRET message (std::security::sha256, FIPS
-    // 180-4) — the compression is branch-free over `secret i32` words (32-bit ARX
-    // + rotates by public constants via ct_rotr32; schedule W in a `Vec<secret
-    // i32>`, ADR 0052), the digest stays `[secret u8]`. 42 = the digests of "abc",
-    // "" and the 2-block 100*'a' all matched their NIST vector byte-for-byte.
-    ("examples/security/sha256.sentinel", 42),
 ];
 
 #[test]
@@ -305,6 +310,11 @@ fn ct_vec_eq_secret_vec() {
 #[test]
 fn sha256_digest() {
     check_example("examples/security/sha256.sentinel", "sha256", 42);
+}
+
+#[test]
+fn hmac_sha256_rfc4231() {
+    check_example("examples/security/hmac.sentinel", "hmac", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

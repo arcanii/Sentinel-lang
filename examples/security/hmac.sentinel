@@ -1,0 +1,96 @@
+// examples/security/hmac.sentinel — HMAC-SHA256 over three RFC 4231 vectors.
+//
+// Computes HMAC-SHA256 over three published RFC 4231 test cases with a SECRET key
+// (std::security::hmac, composing std::security::sha256) and checks each 32-byte
+// tag against the published value:
+//   * TC1 — a 20-byte key, "Hi There"
+//   * TC2 — the 4-byte key "Jefe", "what do ya want for nothing?"
+//   * TC6 — a 131-byte key (> the 64-byte block), so the key is HASHED first
+//
+// CONSTANT-TIME DISCIPLINE. The key and message are `[secret u8]`, so HMAC runs
+// entirely in the secret domain — the two SHA-256 passes over (K0 ^ ipad) || m
+// and (K0 ^ opad) || inner are branch-free over secret words, and the tag comes
+// back `[secret u8]`. The compiler's constant-time check proves on every build
+// that no secret byte reached a branch, a memory index, or a divisor (only the
+// key/message LENGTHS are public — the "hash an over-long key" choice in TC6
+// branches on the PUBLIC key length, not a secret). The ONLY declassify boundary
+// is HERE: each tag byte is declassified purely to XOR-diff it against the
+// expected public constant — the sanctioned tag-verify pattern.
+//
+// Exit 42 = all three tags matched their RFC 4231 vector byte-for-byte.
+use std::security::hmac::hmac_sha256;
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- RFC 4231 Test Case 1 (key 20 bytes, data 8 bytes).
+    let k1d: [i64] = [11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11];
+    let mut k1: Vec<secret u8> = vec_new();
+    let mut k1_i: i64 = 0;
+    while k1_i < 20 {
+        push(&mut k1, i64_to_u8(k1d[k1_i]));
+        k1_i = k1_i + 1;
+    }
+    let m1d: [i64] = [72, 105, 32, 84, 104, 101, 114, 101];
+    let mut m1: Vec<secret u8> = vec_new();
+    let mut m1_i: i64 = 0;
+    while m1_i < 8 {
+        push(&mut m1, i64_to_u8(m1d[m1_i]));
+        m1_i = m1_i + 1;
+    }
+    let t1: [secret u8] = hmac_sha256(vec_to_array(k1), vec_to_array(m1));
+    let e1: [i64] = [176, 52, 76, 97, 216, 219, 56, 83, 92, 168, 175, 206, 175, 11, 241, 43, 136, 29, 194, 0, 201, 131, 61, 167, 38, 233, 55, 108, 46, 50, 207, 247];
+    let mut c1: i64 = 0;
+    while c1 < 32 {
+        bad = bad | (u8_to_i64(declassify(t1[c1])) ^ e1[c1]);
+        c1 = c1 + 1;
+    }
+
+    // ---- RFC 4231 Test Case 2 (key 4 bytes, data 28 bytes).
+    let k2d: [i64] = [74, 101, 102, 101];
+    let mut k2: Vec<secret u8> = vec_new();
+    let mut k2_i: i64 = 0;
+    while k2_i < 4 {
+        push(&mut k2, i64_to_u8(k2d[k2_i]));
+        k2_i = k2_i + 1;
+    }
+    let m2d: [i64] = [119, 104, 97, 116, 32, 100, 111, 32, 121, 97, 32, 119, 97, 110, 116, 32, 102, 111, 114, 32, 110, 111, 116, 104, 105, 110, 103, 63];
+    let mut m2: Vec<secret u8> = vec_new();
+    let mut m2_i: i64 = 0;
+    while m2_i < 28 {
+        push(&mut m2, i64_to_u8(m2d[m2_i]));
+        m2_i = m2_i + 1;
+    }
+    let t2: [secret u8] = hmac_sha256(vec_to_array(k2), vec_to_array(m2));
+    let e2: [i64] = [91, 220, 193, 70, 191, 96, 117, 78, 106, 4, 36, 38, 8, 149, 117, 199, 90, 0, 63, 8, 157, 39, 57, 131, 157, 236, 88, 185, 100, 236, 56, 67];
+    let mut c2: i64 = 0;
+    while c2 < 32 {
+        bad = bad | (u8_to_i64(declassify(t2[c2])) ^ e2[c2]);
+        c2 = c2 + 1;
+    }
+
+    // ---- RFC 4231 Test Case 6 (key 131 bytes, data 54 bytes).
+    let k6d: [i64] = [170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170, 170];
+    let mut k6: Vec<secret u8> = vec_new();
+    let mut k6_i: i64 = 0;
+    while k6_i < 131 {
+        push(&mut k6, i64_to_u8(k6d[k6_i]));
+        k6_i = k6_i + 1;
+    }
+    let m6d: [i64] = [84, 101, 115, 116, 32, 85, 115, 105, 110, 103, 32, 76, 97, 114, 103, 101, 114, 32, 84, 104, 97, 110, 32, 66, 108, 111, 99, 107, 45, 83, 105, 122, 101, 32, 75, 101, 121, 32, 45, 32, 72, 97, 115, 104, 32, 75, 101, 121, 32, 70, 105, 114, 115, 116];
+    let mut m6: Vec<secret u8> = vec_new();
+    let mut m6_i: i64 = 0;
+    while m6_i < 54 {
+        push(&mut m6, i64_to_u8(m6d[m6_i]));
+        m6_i = m6_i + 1;
+    }
+    let t6: [secret u8] = hmac_sha256(vec_to_array(k6), vec_to_array(m6));
+    let e6: [i64] = [96, 228, 49, 89, 30, 224, 182, 127, 13, 138, 38, 170, 203, 245, 183, 127, 142, 11, 198, 33, 55, 40, 197, 20, 5, 70, 4, 15, 14, 227, 127, 84];
+    let mut c6: i64 = 0;
+    while c6 < 32 {
+        bad = bad | (u8_to_i64(declassify(t6[c6])) ^ e6[c6]);
+        c6 = c6 + 1;
+    }
+
+    if bad == 0 { 42 } else { 0 }
+}

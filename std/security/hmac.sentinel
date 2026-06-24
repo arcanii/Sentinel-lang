@@ -1,0 +1,78 @@
+// std::security::hmac — HMAC-SHA256 over a SECRET key (RFC 2104 / RFC 4231).
+//
+// HMAC(K, m) = H( (K0 ^ opad) || H( (K0 ^ ipad) || m ) ), where H is SHA-256, K0
+// is the key normalized to the 64-byte block size, ipad = 0x36 repeated and
+// opad = 0x5c repeated. This composes `std::security::sha256` — the keyed
+// message-authentication counterpart of the bare hash.
+//
+// CONSTANT-TIME over the SECRET key. The key and both padded blocks
+// (K0 ^ ipad, K0 ^ opad) are secret, the message is secret, and the two SHA-256
+// passes are branch-free over secret words (the sha256 library's CT check proves
+// it). Nothing is declassified here — the tag stays `[secret u8]`, ready for the
+// caller's constant-time verify (reduce the XOR-diff against the expected tag,
+// then declassify the final accumulator). Only the key/message LENGTHS are
+// public, so the block size, the padding, and every loop bound / index are
+// public — the access pattern never depends on the secret bytes.
+//
+// Key normalization (RFC 2104): a key longer than the block size is hashed first
+// (`K0 = SHA-256(K)`, 32 bytes); any key is then zero-padded to 64 bytes. The
+// "hash first" branch tests `len(key)` — a PUBLIC value — so it is a public
+// branch, not a secret one.
+use std::security::sha256::sha256;
+
+// HMAC-SHA256 of a SECRET message under a SECRET key. Returns the 32-byte SECRET
+// tag as a `[secret u8]`.
+pub fn hmac_sha256(key: [secret u8], msg: [secret u8]) -> [secret u8] {
+    let klen: i64 = len(key);
+
+    // ---- Normalize the key material: hash it if it exceeds the block size
+    // (RFC 2104). `klen` is public, so this is a PUBLIC branch; both arms move
+    // `key` (one hashes it, one returns it), so `key` is fully consumed.
+    let kbytes: [secret u8] = if klen > 64 { sha256(key) } else { key };
+    let kn: i64 = len(kbytes);
+
+    // ---- Build the 64-byte block-sized key K0 = kbytes || zeros. The zero pad
+    // count depends only on the public key length. Keep K0 as a `[secret u8]` so
+    // it can be indexed for BOTH the inner (ipad) and outer (opad) blocks.
+    let mut k0v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < kn {
+        push(&mut k0v, kbytes[i]);          // secret key byte
+        i = i + 1;
+    }
+    while i < 64 {
+        push(&mut k0v, i64_to_u8(0));        // public 0 widens to secret u8
+        i = i + 1;
+    }
+    let k0: [secret u8] = vec_to_array(k0v);
+
+    // ---- inner = SHA-256( (K0 ^ ipad) || msg ), ipad byte = 0x36 (54). The
+    // public pad byte widens to secret in the XOR (ADR 0051); K0[a] is secret.
+    let mut inner_in: Vec<secret u8> = vec_new();
+    let mut a: i64 = 0;
+    while a < 64 {
+        push(&mut inner_in, k0[a] ^ i64_to_u8(54));
+        a = a + 1;
+    }
+    let mlen: i64 = len(msg);
+    let mut b: i64 = 0;
+    while b < mlen {
+        push(&mut inner_in, msg[b]);         // secret message byte
+        b = b + 1;
+    }
+    let inner: [secret u8] = sha256(vec_to_array(inner_in));
+
+    // ---- outer = SHA-256( (K0 ^ opad) || inner ), opad byte = 0x5c (92).
+    let mut outer_in: Vec<secret u8> = vec_new();
+    let mut c: i64 = 0;
+    while c < 64 {
+        push(&mut outer_in, k0[c] ^ i64_to_u8(92));
+        c = c + 1;
+    }
+    let mut d: i64 = 0;
+    while d < 32 {
+        push(&mut outer_in, inner[d]);       // secret inner-digest byte
+        d = d + 1;
+    }
+    sha256(vec_to_array(outer_in))
+}
