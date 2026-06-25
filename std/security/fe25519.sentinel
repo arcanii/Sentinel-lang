@@ -128,6 +128,29 @@ pub fn sel25519(p: &mut [secret i64], q: &mut [secret i64], b: secret i64) -> i6
     0
 }
 
+// z^((p-5)/8) = z^(2^252-3), the exponent point decompression needs for the field
+// square root (TweetNaCl `pow2523`). 251 squarings, multiplying by z at all but one
+// step — data independent, constant-time. The same shape as `finv`.
+pub fn fe_pow2523(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut c: [secret i64] = fe_zero();
+    fe_copy(&mut c, a);
+    let mut i: i64 = 250;
+    while i >= 0 {
+        let mut t: [secret i64] = fe_zero();
+        fsq(&mut t, &c);
+        fe_copy(&mut c, &t);
+        if i != 1 {
+            let mut t2: [secret i64] = fe_zero();
+            fmul(&mut t2, &c, a);
+            fe_copy(&mut c, &t2);
+            0
+        } else { 0 };
+        i = i - 1;
+    }
+    fe_copy(o, &c);
+    0
+}
+
 // The multiplicative inverse: z^(2^255-21) = z^-1 (Fermat). 254 squarings with a
 // multiply by z at all but two steps — data independent, constant-time.
 pub fn finv(o: &mut [secret i64], a: &[secret i64]) -> i64 {
@@ -147,6 +170,18 @@ pub fn finv(o: &mut [secret i64], a: &[secret i64]) -> i64 {
         i = i - 1;
     }
     fe_copy(o, &c);
+    0
+}
+
+// Decode 32 little-endian bytes into a field element (16 bits per limb); the top
+// bit of the 255-bit value is masked off (it carries a sign in point encodings).
+pub fn unpack25519(o: &mut [secret i64], n: &[secret u8]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 16 {
+        (*o)[i] = ((*n)[2 * i] as i64) + (((*n)[2 * i + 1] as i64) << 8);
+        i = i + 1;
+    }
+    (*o)[15] = (*o)[15] & 32767;
     0
 }
 
@@ -187,6 +222,28 @@ pub fn pack25519(n: &[secret i64]) -> [secret u8] {
 }
 
 // ---- Edwards25519 curve constants, as field elements (radix 2^16 limbs). --------
+
+// d = -121665/121666, the twisted-Edwards curve parameter (point decompression uses
+// the single d; the point-addition formula uses 2d below).
+pub fn fe_d() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 30883);  push(&mut v, 4953);   push(&mut v, 19914);  push(&mut v, 30187);
+    push(&mut v, 55467);  push(&mut v, 16705);  push(&mut v, 2637);   push(&mut v, 112);
+    push(&mut v, 59544);  push(&mut v, 30585);  push(&mut v, 16505);  push(&mut v, 36039);
+    push(&mut v, 65139);  push(&mut v, 11119);  push(&mut v, 27886);  push(&mut v, 20995);
+    vec_to_array(v)
+}
+
+// sqrt(-1) = 2^((p-1)/4) mod p — the constant point decompression multiplies the
+// candidate root by when the first square root attempt is on the wrong branch.
+pub fn fe_sqrtm1() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 41136);  push(&mut v, 18958);  push(&mut v, 6951);   push(&mut v, 50414);
+    push(&mut v, 58488);  push(&mut v, 44335);  push(&mut v, 6150);   push(&mut v, 12099);
+    push(&mut v, 55207);  push(&mut v, 15867);  push(&mut v, 153);    push(&mut v, 11085);
+    push(&mut v, 57099);  push(&mut v, 20417);  push(&mut v, 9344);   push(&mut v, 11139);
+    vec_to_array(v)
+}
 
 // d2 = 2*d where d = -121665/121666 (the twisted-Edwards curve parameter, doubled —
 // the form the point-addition formula uses).

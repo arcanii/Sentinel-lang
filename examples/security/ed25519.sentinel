@@ -21,6 +21,7 @@
 // Exit 42 = every public key AND every signature matched its vector.
 use std::security::ed25519::ed25519_pubkey;
 use std::security::ed25519::ed25519_sign;
+use std::security::ed25519::ed25519_verify;
 
 // Build a SECRET byte buffer of the first `n` bytes of a public byte array (each
 // byte widens to `secret u8` at the push). A borrow, so a source can be reused; `n`
@@ -50,6 +51,32 @@ fn check_vector(seedsrc: &[i64], msrc: &[i64], mlen: i64,
         bad = bad | (u8_to_i64(declassify(sig[j])) ^ (*exp_sig)[j]);
         j = j + 1;
     }
+    bad
+}
+
+// Verify a known-good (pk, m, sig) accepts (returns 1), and a one-bit-tampered
+// signature is rejected (returns 0). The expected pk / sig come from the published
+// vector, so verify is exercised against the same known-answer values.
+fn check_verify(exp_pk: &[i64], msrc: &[i64], mlen: i64, exp_sig: &[i64]) -> i64 {
+    let mut bad: i64 = 0;
+    let v: i64 = ed25519_verify(mk_secret(exp_pk, 32), mk_secret(msrc, mlen), mk_secret(exp_sig, 64));
+    bad = bad | (v - 1);                          // a valid signature must accept (1)
+
+    // Flip one bit of S (byte 40) — the equation no longer holds, so verify rejects.
+    let mut tampered: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 64 {
+        if i == 40 {
+            push(&mut tampered, i64_to_u8((*exp_sig)[i] ^ 1));
+            0
+        } else {
+            push(&mut tampered, i64_to_u8((*exp_sig)[i]));
+            0
+        };
+        i = i + 1;
+    }
+    let v2: i64 = ed25519_verify(mk_secret(exp_pk, 32), mk_secret(msrc, mlen), vec_to_array(tampered));
+    bad = bad | v2;                               // a tampered signature must reject (0)
     bad
 }
 
@@ -108,6 +135,21 @@ fn main() -> i64 {
         72, 147, 240, 51, 181, 27, 249, 159, 254, 255, 66, 235, 74, 77, 67, 2
     ];
     bad = bad | check_vector(&seed3, &seed3, 0, &pk3, &sig3);
+
+    // ---- Verify each vector accepts its valid signature and rejects a tampered one.
+    bad = bad | check_verify(&pk1, &m1, 3, &sig1);
+    bad = bad | check_verify(&pk2, &m2, 5, &sig2);
+    bad = bad | check_verify(&pk3, &seed3, 0, &sig3);
+
+    // ---- Malleability: (R, S+L) satisfies the verify equation but S is not reduced
+    // mod L, so a conforming verifier (RFC 8032 §5.1.7) must REJECT it (returns 0).
+    let mall1: [i64] = [
+        111, 66, 236, 212, 110, 9, 159, 43, 39, 39, 93, 206, 137, 120, 123, 124,
+        253, 41, 190, 90, 84, 108, 29, 146, 182, 251, 85, 221, 82, 234, 231, 1,
+        114, 30, 27, 132, 121, 60, 151, 170, 194, 158, 175, 62, 90, 229, 141, 50,
+        76, 29, 212, 22, 233, 80, 215, 4, 44, 1, 14, 138, 7, 172, 206, 30
+    ];
+    bad = bad | ed25519_verify(mk_secret(&pk1, 32), mk_secret(&m1, 3), mk_secret(&mall1, 64));
 
     if bad == 0 { 42 } else { 0 }
 }

@@ -1,8 +1,8 @@
-// std::security::ed25519 — constant-time Ed25519 SIGNING (RFC 8032).
+// std::security::ed25519 — constant-time Ed25519 SIGNING + VERIFICATION (RFC 8032).
 //
-// Deterministic EdDSA over edwards25519. This module implements key generation
-// (the public key) and the SIGN procedure; it does NOT implement verification or
-// point decompression (those need a field square root — a separate follow-up).
+// Deterministic EdDSA over edwards25519. This module implements key generation (the
+// public key), the SIGN procedure, and VERIFY (which decompresses a point — recovers
+// x from y via a field square root — and checks the group equation [S]B = R + [h]A).
 //
 // It composes two PROVEN, fully constant-time foundations:
 //   * std::security::fe25519 — the GF(2^255-19) field as 16 radix-2^16 limbs of
@@ -41,12 +41,17 @@ use std::security::fe25519::fe_copy;
 use std::security::fe25519::fadd;
 use std::security::fe25519::fsub;
 use std::security::fe25519::fmul;
+use std::security::fe25519::fsq;
 use std::security::fe25519::fadd_assign;
 use std::security::fe25519::finv;
 use std::security::fe25519::sel25519;
 use std::security::fe25519::pack25519;
+use std::security::fe25519::unpack25519;
+use std::security::fe25519::fe_pow2523;
 use std::security::fe25519::arith_shr;
+use std::security::fe25519::fe_d;
 use std::security::fe25519::fe_d2;
+use std::security::fe25519::fe_sqrtm1;
 use std::security::fe25519::fe_basex;
 use std::security::fe25519::fe_basey;
 use std::security::sha512::sha512;
@@ -312,6 +317,92 @@ fn reduce(h: &[secret u8]) -> [secret u8] {
     modL(&mut x)
 }
 
+// ---- verification: point decompression + the group equation --------------------
+
+// 1 if the two field elements differ, 0 if equal — branch-free: pack both, OR the
+// byte differences into an accumulator (in [0, 255]), then broadcast its
+// nonzero-ness to a 0/1 via the sign bit of `0 - acc`.
+fn fe_neq(a: &[secret i64], b: &[secret i64]) -> secret i64 {
+    let pa: [secret u8] = pack25519(a);
+    let pb: [secret u8] = pack25519(b);
+    let mut acc: secret i64 = 0;
+    let mut i: i64 = 0;
+    while i < 32 {
+        acc = acc | ((pa[i] as i64) ^ (pb[i] as i64));
+        i = i + 1;
+    }
+    ((0 - acc) >> 63) & 1
+}
+
+// The low bit (parity) of a field element.
+fn fe_parity(x: &[secret i64]) -> secret i64 {
+    let p: [secret u8] = pack25519(x);
+    (p[0] as i64) & 1
+}
+
+// Decompress the NEGATION of a point from its 32-byte encoding (TweetNaCl
+// `unpackneg`): recover x from y + the sign bit. The square root x = (num/den)^((p+3)
+// /8) is computed via `fe_pow2523`, and BOTH the wrong-branch correction (multiply by
+// sqrt(-1)) and the sign fix (negate) are branch-free mask selects (`sel25519`),
+// keeping decompression constant-time even though verification is over public data.
+// Returns 1 if the encoding is a valid curve point, 0 otherwise; the point lands in
+// (rx, ry, rz, rt) and is -P (so the verify equation can use one combined add).
+fn point_decode_neg(rx: &mut [secret i64], ry: &mut [secret i64], rz: &mut [secret i64],
+                    rt: &mut [secret i64], pbytes: &[secret u8]) -> secret i64 {
+    let one: [secret i64] = fe_one();
+    fe_copy(rz, &one);
+    unpack25519(ry, pbytes);                 // Y = decode(bytes), top (sign) bit cleared
+
+    let d: [secret i64] = fe_d();
+    let mut num: [secret i64] = fe_zero();
+    let mut den: [secret i64] = fe_zero();
+    fsq(&mut num, &(*ry));                    // num = y^2
+    fmul(&mut den, &num, &d);                // den = y^2 * d
+    let mut tnum: [secret i64] = fe_zero();
+    fsub(&mut tnum, &num, &one);             // num = y^2 - 1
+    fe_copy(&mut num, &tnum);
+    let mut tden: [secret i64] = fe_zero();
+    fadd(&mut tden, &one, &den);             // den = 1 + y^2*d
+    fe_copy(&mut den, &tden);
+
+    // t = num * den^7
+    let mut d2: [secret i64] = fe_zero(); fsq(&mut d2, &den);
+    let mut d4: [secret i64] = fe_zero(); fsq(&mut d4, &d2);
+    let mut d6: [secret i64] = fe_zero(); fmul(&mut d6, &d4, &d2);
+    let mut t: [secret i64] = fe_zero(); fmul(&mut t, &d6, &num);
+    let mut tt: [secret i64] = fe_zero(); fmul(&mut tt, &t, &den); fe_copy(&mut t, &tt);
+    // t = t^((p-5)/8), then x = num * den^3 * t
+    let mut tp: [secret i64] = fe_zero(); fe_pow2523(&mut tp, &t); fe_copy(&mut t, &tp);
+    let mut ta: [secret i64] = fe_zero(); fmul(&mut ta, &t, &num); fe_copy(&mut t, &ta);
+    let mut tb: [secret i64] = fe_zero(); fmul(&mut tb, &t, &den); fe_copy(&mut t, &tb);
+    let mut tc: [secret i64] = fe_zero(); fmul(&mut tc, &t, &den); fe_copy(&mut t, &tc);
+    fmul(rx, &t, &den);
+
+    // if x^2*den != num, multiply x by sqrt(-1) (the other square-root branch).
+    let mut chk: [secret i64] = fe_zero(); fsq(&mut chk, &(*rx));
+    let mut chkd: [secret i64] = fe_zero(); fmul(&mut chkd, &chk, &den); fe_copy(&mut chk, &chkd);
+    let m1: secret i64 = fe_neq(&chk, &num);
+    let sm: [secret i64] = fe_sqrtm1();
+    let mut xi: [secret i64] = fe_zero(); fmul(&mut xi, &(*rx), &sm);
+    sel25519(rx, &mut xi, m1);
+
+    // valid iff x^2*den == num after the correction.
+    let mut chk2: [secret i64] = fe_zero(); fsq(&mut chk2, &(*rx));
+    let mut chk2d: [secret i64] = fe_zero(); fmul(&mut chk2d, &chk2, &den); fe_copy(&mut chk2, &chk2d);
+    let valid: secret i64 = 1 - fe_neq(&chk2, &num);
+
+    // if parity(x) == the encoded sign bit, negate x — yielding -P.
+    let sign: secret i64 = (((*pbytes)[31] as i64) >> 7) & 1;
+    let par: secret i64 = fe_parity(&(*rx));
+    let negmask: secret i64 = 1 - (par ^ sign);
+    let zero: [secret i64] = fe_zero();
+    let mut negx: [secret i64] = fe_zero(); fsub(&mut negx, &zero, &(*rx));
+    sel25519(rx, &mut negx, negmask);
+
+    fmul(rt, &(*rx), &(*ry));                 // T = X*Y
+    valid
+}
+
 // ---- helpers -------------------------------------------------------------------
 
 // Hash a SECRET seed with SHA-512 and CLAMP the low 32 bytes into the secret scalar
@@ -465,6 +556,87 @@ pub fn ed25519_sign(seed: [secret u8], m: [secret u8]) -> [secret u8] {
     let mut p2: i64 = 0;
     while p2 < 32 { push(&mut sig, s[p2]); p2 = p2 + 1; }
     vec_to_array(sig)
+}
+
+// Verify an Ed25519 signature: returns 1 if `sig` (R || S, 64 bytes) is a valid
+// signature of `m` under public key `pk` (32 bytes), 0 otherwise (RFC 8032 §5.1.7).
+// Decompresses -A from pk, computes [S]B - [h]A (with h = reduce(SHA-512(R||A||m))),
+// and accepts iff it re-encodes to R. Verification is over PUBLIC data, so the
+// result is the sole declassify boundary; the computation nonetheless stays
+// branch-free (it reuses the same constant-time field/group machinery as signing).
+// Inputs are `[secret u8]` for a uniform API with `ed25519_sign`.
+pub fn ed25519_verify(pk: [secret u8], m: [secret u8], sig: [secret u8]) -> i64 {
+    // Decompress -A from the public key.
+    let mut ax: [secret i64] = fe_zero();
+    let mut ay: [secret i64] = fe_zero();
+    let mut az: [secret i64] = fe_zero();
+    let mut at: [secret i64] = fe_zero();
+    let dvalid: secret i64 = point_decode_neg(&mut ax, &mut ay, &mut az, &mut at, &pk);
+
+    // h = reduce(SHA-512(R || A || m)), R = sig[0..32], A = pk.
+    let mlen: i64 = len(m);
+    let mut hm: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 32 { push(&mut hm, sig[i]); i = i + 1; }
+    let mut j: i64 = 0;
+    while j < 32 { push(&mut hm, pk[j]); j = j + 1; }
+    let mut k: i64 = 0;
+    while k < mlen { push(&mut hm, m[k]); k = k + 1; }
+    let hdigest: [secret u8] = sha512(vec_to_array(hm));
+    let h: [secret u8] = reduce(&hdigest);
+
+    // Scalars as 32 i64 limbs: h and S = sig[32..64].
+    let mut hv: Vec<secret i64> = vec_new();
+    let mut hi: i64 = 0;
+    while hi < 32 { push(&mut hv, h[hi] as i64); hi = hi + 1; }
+    let hsc: [secret i64] = vec_to_array(hv);
+    let mut sv: Vec<secret i64> = vec_new();
+    let mut si: i64 = 0;
+    while si < 32 { push(&mut sv, sig[32 + si] as i64); si = si + 1; }
+    let ssc: [secret i64] = vec_to_array(sv);
+
+    // p = [h](-A) ; q = [S]B ; p = p + q = [S]B - [h]A.
+    let mut px: [secret i64] = fe_zero();
+    let mut py: [secret i64] = fe_zero();
+    let mut pz: [secret i64] = fe_zero();
+    let mut pt: [secret i64] = fe_zero();
+    scalarmult(&mut px, &mut py, &mut pz, &mut pt, &ax, &ay, &az, &at, &hsc);
+    let mut qx: [secret i64] = fe_zero();
+    let mut qy: [secret i64] = fe_zero();
+    let mut qz: [secret i64] = fe_zero();
+    let mut qt: [secret i64] = fe_zero();
+    scalarbase(&mut qx, &mut qy, &mut qz, &mut qt, &ssc);
+    point_add(&mut px, &mut py, &mut pz, &mut pt, &qx, &qy, &qz, &qt);
+
+    // S must be canonically reduced, 0 <= S < L (RFC 8032 §5.1.7 step 1) — otherwise
+    // (R, S+L) would be a second accepted signature for the same (pk, m). Compare the
+    // 32 little-endian S bytes against L from the most significant down, branch-free:
+    // a per-byte less-than is the sign bit of (a - b), and we keep the first
+    // difference (`still_eq`). slt = 1 iff S < L.
+    let lbytes: [secret i64] = l_constant();
+    let mut slt: secret i64 = 0;
+    let mut still_eq: secret i64 = 1;
+    let mut bi: i64 = 31;
+    while bi >= 0 {
+        let sb: secret i64 = sig[32 + bi] as i64;
+        let lb: secret i64 = lbytes[bi];
+        let lt: secret i64 = ((sb - lb) >> 63) & 1;     // 1 iff S[bi] < L[bi]
+        let gt: secret i64 = ((lb - sb) >> 63) & 1;     // 1 iff S[bi] > L[bi]
+        slt = slt | (still_eq & lt);
+        still_eq = still_eq & (1 - (lt | gt));
+        bi = bi - 1;
+    }
+
+    // Accept iff pack(p) == R (= sig[0..32]) AND the decompression was valid AND S < L.
+    let packed: [secret u8] = point_pack(&px, &py, &pz, &pt);
+    let mut acc: secret i64 = 0;
+    let mut c: i64 = 0;
+    while c < 32 {
+        acc = acc | ((packed[c] as i64) ^ (sig[c] as i64));
+        c = c + 1;
+    }
+    let eq: secret i64 = 1 - (((0 - acc) >> 63) & 1);   // 1 iff pack(p) == R
+    declassify(eq & dvalid & slt)
 }
 
 // A fresh 64-byte zero buffer (the SHA-512 digest scratch handed to clamped_scalar).
