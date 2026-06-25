@@ -1,0 +1,56 @@
+// c59: borrowing an array / Vec element as a reference, `&mut a[i]` and `&a[i]`
+// (ADR 0054). An element is a mutable place exactly like a struct field
+// `&mut s.f` — the read path's bounds-checked element GEP, taken as an address
+// rather than loaded. The index stays a PUBLIC `i64` (a secret index is rejected
+// by `IndexNotInt`, the constant-time story), so borrowing an element whose VALUE
+// is secret is fine. The self-hosted `scg` mirrors `snc` byte-for-byte across all
+// 8 selfhost stage differentials with NO scg change — the ADR 0050 element-address
+// path (`cg_emit_index_addr`) is reused for the borrow. Exit 42.
+fn bump(x: &mut i64) -> i64 {
+    *x = *x + 5;
+    0
+}
+
+fn readit(x: &i64) -> i64 {
+    *x
+}
+
+fn bump_secret(x: &mut secret i64) -> i64 {
+    *x = *x + 1;
+    0
+}
+
+fn main() -> i64 {
+    // `&mut a[i]` on an array, through a loop (public index).
+    let mut a: [i64] = [10, 20, 30, 40];
+    let mut i: i64 = 0;
+    while i < 4 {
+        bump(&mut a[i]);
+        i = i + 1;
+    }
+    // a = [15, 25, 35, 45].
+
+    // `&a[i]` shared borrow (does not require `a` to be mutable for the read).
+    let r: i64 = readit(&a[2]);   // 35
+
+    // `&mut v[i]` on a Vec (the data pointer is field 2).
+    let mut v: Vec<i64> = vec_new();
+    push(&mut v, 100);
+    push(&mut v, 200);
+    bump(&mut v[1]);              // v[1] -> 205
+
+    // `&mut` on a SECRET element: the index is public, only the value is secret
+    // (constant-time — the access pattern does not depend on the secret).
+    let z: secret i64 = 0;
+    let mut s: [secret i64] = [z, z];
+    bump_secret(&mut s[0]);
+    bump_secret(&mut s[0]);      // s[0] -> 2
+
+    if a[0] == 15 && a[1] == 25 && a[2] == 35 && a[3] == 45
+        && r == 35 && v[0] == 100 && v[1] == 205
+        && declassify(s[0]) == 2 {
+        42
+    } else {
+        0
+    }
+}

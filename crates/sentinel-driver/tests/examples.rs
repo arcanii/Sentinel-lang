@@ -160,6 +160,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // Integer clamp/abs helpers (std::math::num) — a non-`secret` module
     // crossing the boundary. 42 = every helper returned its expected result.
     ("examples/math/clamp.sentinel", 42),
+    // In-place element updates via `&mut a[i]` element borrows (ADR 0054): clamps
+    // array + Vec elements in place by passing them by mutable reference to an
+    // imported helper (std::math::num::clamp_assign). 42 = every element landed at
+    // its clamped value.
+    ("examples/math/inplace.sentinel", 42),
     // The flagship: variable-length constant-time memcmp over `[secret u8]`
     // secret byte buffers (std::security::ct::ct_memcmp, ADR 0047). 42 =
     // equal-compared-equal AND tampered-compared-unequal.
@@ -266,6 +271,11 @@ fn secure_compare_constant_time() {
 #[test]
 fn math_clamp() {
     check_example("examples/math/clamp.sentinel", "clamp", 42);
+}
+
+#[test]
+fn math_inplace_element_borrow() {
+    check_example("examples/math/inplace.sentinel", "inplace", 42);
 }
 
 #[test]

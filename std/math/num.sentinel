@@ -25,3 +25,11 @@ pub fn abs(x: i64) -> i64 {
 pub fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
     max(lo, min(x, hi))
 }
+
+// Clamp the value behind a mutable reference into `[lo, hi]`, in place. Composes
+// with element borrows (ADR 0054): `clamp_assign(&mut a[i], lo, hi)` clamps an
+// array / Vec element in place by passing it by mutable reference.
+pub fn clamp_assign(x: &mut i64, lo: i64, hi: i64) -> i64 {
+    *x = clamp(*x, lo, hi);
+    0
+}

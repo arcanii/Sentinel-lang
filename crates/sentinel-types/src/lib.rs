@@ -5516,9 +5516,16 @@ fn check_mutable_borrow_target(
         TypedExprKind::FieldAccess { target: inner_target, .. } => {
             check_mutable_borrow_target(inner_target, env, refs)
         }
-        TypedExprKind::Index { .. } => Err(TypeError::IndexAssignNotSupported {
-            span: to_source_span(&target.span),
-        }),
+        // ADR 0054: `&mut a[i]`. An array/Vec element is a mutable place exactly
+        // like a struct field `&mut s.f` — recurse so the base collection must be a
+        // mutable lvalue. The index is already constrained to a public `i64` by
+        // `IndexNotInt` when the inner `a[i]` was type-checked, so a secret index is
+        // rejected for borrows exactly as for reads/writes (the constant-time story,
+        // no new sink). Granularity is whole-array (binding-precise), the same
+        // conservative pre-Polonius choice the borrow checker makes for `&mut s.f`.
+        TypedExprKind::Index { target: inner_target, .. } => {
+            check_mutable_borrow_target(inner_target, env, refs)
+        }
         _ => Err(TypeError::BorrowOfRvalue {
             span: to_source_span(&target.span),
         }),

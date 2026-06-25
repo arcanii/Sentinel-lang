@@ -1,0 +1,35 @@
+// examples/math/inplace.sentinel — in-place element updates via `&mut a[i]` (ADR 0054).
+//
+// Borrowing an array / Vec element as `&mut i64` lets a helper mutate it in place —
+// something index-assignment (`a[i] = expr`) cannot do, since the element must be
+// passed BY MUTABLE REFERENCE to the function. Here `std::math::num::clamp_assign`
+// takes `&mut i64` and clamps the referent in place; the program clamps every
+// element of an array and a Vec into [0, 100] by calling it with `&mut a[i]` /
+// `&mut v[i]` across a module boundary (so this also dogfoods modules + `--separate`
+// with the new element borrow). Exit 42 = every element landed at its clamped value.
+use std::math::num::clamp_assign;
+
+fn main() -> i64 {
+    // Clamp each element of an array into [0, 100] in place.
+    let mut a: [i64] = [-5, 50, 200, 100, -1];
+    let mut i: i64 = 0;
+    while i < 5 {
+        clamp_assign(&mut a[i], 0, 100);
+        i = i + 1;
+    }
+    // a = [0, 50, 100, 100, 0].
+
+    // The same on a Vec (the element data pointer is field 2).
+    let mut v: Vec<i64> = vec_new();
+    push(&mut v, 999);
+    push(&mut v, -999);
+    clamp_assign(&mut v[0], 0, 100);   // 100
+    clamp_assign(&mut v[1], 0, 100);   // 0
+
+    if a[0] == 0 && a[1] == 50 && a[2] == 100 && a[3] == 100 && a[4] == 0
+        && v[0] == 100 && v[1] == 0 {
+        42
+    } else {
+        0
+    }
+}
