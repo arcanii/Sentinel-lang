@@ -1,0 +1,476 @@
+// std::security::ed25519 — constant-time Ed25519 SIGNING (RFC 8032).
+//
+// Deterministic EdDSA over edwards25519. This module implements key generation
+// (the public key) and the SIGN procedure; it does NOT implement verification or
+// point decompression (those need a field square root — a separate follow-up).
+//
+// It composes two PROVEN, fully constant-time foundations:
+//   * std::security::fe25519 — the GF(2^255-19) field as 16 radix-2^16 limbs of
+//     `secret i64` (the TweetNaCl representation: every limb product fits an i64,
+//     so the field multiply needs no 128-bit arithmetic), plus the Edwards curve
+//     constants (d2 = 2d, the base point B = (Bx, By)).
+//   * std::security::sha512 — SHA-512 over a `secret` message (RFC 8032 hashes the
+//     seed, the prefix||M, and R||A||M with SHA-512).
+//
+// CONSTANT-TIME STORY. The signing key is SECRET. After hashing the seed, the low
+// 32 bytes are CLAMPED into the secret scalar `a`; every scalar multiplication
+// ([a]B and [r]B) runs over secret scalar BITS. A textbook double-and-add would
+// branch on each bit (`if bit { add }`) and leak the key through timing — and that
+// does NOT compile in Sentinel: a secret value reaching an `if`, an array index, or
+// a divisor is rejected by the compiler's constant-time check
+// (`sentinel::mir::secret_leak`). So this module building at all is a proof the
+// scalar multiplication is constant-time: the ladder uses a branch-free conditional
+// swap (`sel25519`) selected by the secret bit, never a branch. The scalar-mod-L
+// reduction and the muladd S = (r + k*a) mod L likewise compute branch-free on
+// secret limbs. The ONLY values that leave the secret domain are the declassified
+// OUTPUTS — the public key and the signature — which the CALLER declassifies once
+// the timing-sensitive work is done.
+//
+// POINT REPRESENTATION. A curve point is in EXTENDED twisted-Edwards coordinates
+// (X, Y, Z, T) with x = X/Z, y = Y/Z, T = XY/Z. Because Sentinel aggregates cannot
+// be moved through a `while` loop (loop-carried state must be mutated in place),
+// each point is carried as FOUR separate `[secret i64]` field elements (px, py, pz,
+// pt) passed individually as `&`/`&mut` borrows; the loop mutates them in place.
+//
+// ALGORITHM: a faithful transcription of TweetNaCl's `crypto_sign` (the extended-
+// coordinate ladder + `modL`), cross-validated against a reference that reproduces
+// the RFC 8032 test vectors.
+use std::security::fe25519::fe_zero;
+use std::security::fe25519::fe_one;
+use std::security::fe25519::fe_copy;
+use std::security::fe25519::fadd;
+use std::security::fe25519::fsub;
+use std::security::fe25519::fmul;
+use std::security::fe25519::fadd_assign;
+use std::security::fe25519::finv;
+use std::security::fe25519::sel25519;
+use std::security::fe25519::pack25519;
+use std::security::fe25519::arith_shr;
+use std::security::fe25519::fe_d2;
+use std::security::fe25519::fe_basex;
+use std::security::fe25519::fe_basey;
+use std::security::sha512::sha512;
+
+// ---- the Edwards group law in extended coordinates -----------------------------
+
+// point_add: (X1,Y1,Z1,T1) += (X2,Y2,Z2,T2), the unified twisted-Edwards addition
+// (TweetNaCl `add`). The left point is mutated IN PLACE; the right point is read
+// only. Temps a,b,c,d,e,f,g,h are fresh field elements. Where a field op's output
+// would alias one of its inputs (`fmul` etc. require output != input), we compute
+// into a fresh temp and `fe_copy` back; the doubling `d = d + d` uses the in-place
+// `fadd_assign` (only `&mut d` + `&d` — no aliasing of two distinct borrows).
+fn point_add(x1: &mut [secret i64], y1: &mut [secret i64], z1: &mut [secret i64], t1: &mut [secret i64],
+             x2: &[secret i64], y2: &[secret i64], z2: &[secret i64], t2: &[secret i64]) -> i64 {
+    let mut a: [secret i64] = fe_zero();
+    let mut b: [secret i64] = fe_zero();
+    let mut c: [secret i64] = fe_zero();
+    let mut d: [secret i64] = fe_zero();
+    let mut e: [secret i64] = fe_zero();
+    let mut f: [secret i64] = fe_zero();
+    let mut g: [secret i64] = fe_zero();
+    let mut h: [secret i64] = fe_zero();
+    let mut tmp: [secret i64] = fe_zero();
+    let mut tmp2: [secret i64] = fe_zero();
+    let d2: [secret i64] = fe_d2();
+
+    // a = (Y1 - X1) * (Y2 - X2). The left point's coordinates arrive as `&mut`
+    // params; we reborrow them as shared `&` via `&(*y1)` etc. where a read is
+    // needed (the field ops take `&` for their inputs).
+    fsub(&mut a, &(*y1), &(*x1));
+    fsub(&mut tmp, y2, x2);
+    fmul(&mut tmp2, &a, &tmp);
+    fe_copy(&mut a, &tmp2);
+
+    // b = (X1 + Y1) * (X2 + Y2)
+    fadd(&mut b, &(*x1), &(*y1));
+    fadd(&mut tmp, x2, y2);
+    fmul(&mut tmp2, &b, &tmp);
+    fe_copy(&mut b, &tmp2);
+
+    // c = T1 * T2 * (2d)
+    fmul(&mut c, &(*t1), t2);
+    fmul(&mut tmp2, &c, &d2);
+    fe_copy(&mut c, &tmp2);
+
+    // d = 2 * (Z1 * Z2). Doubling needs `d + d`, but the borrow checker forbids
+    // `&d` while `d` is borrowed `&mut`, so add a fresh copy of d into d.
+    fmul(&mut d, &(*z1), z2);
+    fe_copy(&mut tmp, &d);
+    fadd_assign(&mut d, &tmp);
+
+    // e = b - a ; f = d - c ; g = d + c ; h = b + a
+    fsub(&mut e, &b, &a);
+    fsub(&mut f, &d, &c);
+    fadd(&mut g, &d, &c);
+    fadd(&mut h, &b, &a);
+
+    // X3 = e*f ; Y3 = h*g ; Z3 = g*f ; T3 = e*h  (all fresh outputs, no alias).
+    fmul(x1, &e, &f);
+    fmul(y1, &h, &g);
+    fmul(z1, &g, &f);
+    fmul(t1, &e, &h);
+    0
+}
+
+// point_cswap: conditionally swap two points (4 coordinate pairs) when the SECRET
+// bit b == 1 — branch-free, via the field-level constant-time `sel25519`.
+fn point_cswap(x1: &mut [secret i64], y1: &mut [secret i64], z1: &mut [secret i64], t1: &mut [secret i64],
+               x2: &mut [secret i64], y2: &mut [secret i64], z2: &mut [secret i64], t2: &mut [secret i64],
+               b: secret i64) -> i64 {
+    sel25519(x1, x2, b);
+    sel25519(y1, y2, b);
+    sel25519(z1, z2, b);
+    sel25519(t1, t2, b);
+    0
+}
+
+// scalarmult: out_point = [scalar] * q_point, by the constant-time double-and-add
+// ladder (TweetNaCl `scalarmult`). The scalar is 32 SECRET bytes (held as a
+// `[secret i64]` of 32 — each byte zero-extended into an i64 — so a bit can be
+// shifted out). The accumulator `out` starts at the identity (X=0,Y=1,Z=1,T=0).
+//
+// For i = 255 downto 0: extract the secret bit b = (scalar[i/8] >> (i&7)) & 1;
+// conditionally swap (out, q) on b; q = q + out; out = out + out; swap back. The
+// bit is SECRET, but it only drives `sel25519` (a masked, branch-free swap) — never
+// a branch — so the whole multiplication is constant-time in the scalar.
+//
+// `out` is returned through four `&mut` field elements mutated in place; the working
+// copy of q lives in four locals (so the caller's base point is not clobbered).
+fn scalarmult(ox: &mut [secret i64], oy: &mut [secret i64], oz: &mut [secret i64], ot: &mut [secret i64],
+              qx: &[secret i64], qy: &[secret i64], qz: &[secret i64], qt: &[secret i64],
+              scalar: &[secret i64]) -> i64 {
+    // out = identity (X=0, Y=1, Z=1, T=0). Bind the constants to locals first —
+    // a call-result temporary (`&fe_zero()`) is not a borrowable lvalue.
+    let zero: [secret i64] = fe_zero();
+    let one: [secret i64] = fe_one();
+    fe_copy(ox, &zero);
+    fe_copy(oy, &one);
+    fe_copy(oz, &one);
+    fe_copy(ot, &zero);
+
+    // a private, mutable working copy of q (the ladder swaps it with out).
+    let mut wx: [secret i64] = fe_zero();
+    let mut wy: [secret i64] = fe_zero();
+    let mut wz: [secret i64] = fe_zero();
+    let mut wt: [secret i64] = fe_zero();
+    fe_copy(&mut wx, qx);
+    fe_copy(&mut wy, qy);
+    fe_copy(&mut wz, qz);
+    fe_copy(&mut wt, qt);
+
+    let mut i: i64 = 255;
+    while i >= 0 {
+        // The secret scalar bit at position i. i/8 and i&7 are PUBLIC (the loop
+        // counter); the BYTE and thus the bit are secret. `>>` is logical, fine
+        // for an unsigned byte-in-i64.
+        let byte: secret i64 = (*scalar)[i / 8];
+        let b: secret i64 = (byte >> (i - (i / 8) * 8)) & 1;
+
+        point_cswap(ox, oy, oz, ot, &mut wx, &mut wy, &mut wz, &mut wt, b);
+        // q = q + out  (the read-only `out` args reborrow `&mut` params as `&`).
+        point_add(&mut wx, &mut wy, &mut wz, &mut wt, &(*ox), &(*oy), &(*oz), &(*ot));
+        // out = out + out  (double).  point_add needs output != right-operand
+        // borrows, so add a fresh copy of out into out.
+        let mut sx: [secret i64] = fe_zero();
+        let mut sy: [secret i64] = fe_zero();
+        let mut sz: [secret i64] = fe_zero();
+        let mut st: [secret i64] = fe_zero();
+        fe_copy(&mut sx, &(*ox));
+        fe_copy(&mut sy, &(*oy));
+        fe_copy(&mut sz, &(*oz));
+        fe_copy(&mut st, &(*ot));
+        point_add(ox, oy, oz, ot, &sx, &sy, &sz, &st);
+        point_cswap(ox, oy, oz, ot, &mut wx, &mut wy, &mut wz, &mut wt, b);
+
+        i = i - 1;
+    }
+    0
+}
+
+// scalarbase: out = [scalar] * B, where B is the Ed25519 base point in extended
+// coordinates (X = Bx, Y = By, Z = 1, T = Bx*By).
+fn scalarbase(ox: &mut [secret i64], oy: &mut [secret i64], oz: &mut [secret i64], ot: &mut [secret i64],
+              scalar: &[secret i64]) -> i64 {
+    let bx: [secret i64] = fe_basex();
+    let by: [secret i64] = fe_basey();
+    let bz: [secret i64] = fe_one();
+    let mut bt: [secret i64] = fe_zero();
+    fmul(&mut bt, &bx, &by);
+    scalarmult(ox, oy, oz, ot, &bx, &by, &bz, &bt, scalar);
+    0
+}
+
+// point_pack: compress a point to 32 little-endian SECRET bytes (RFC 8032 §5.1.2).
+// Convert to affine (multiply X and Y by Z^-1), pack the y-coordinate, then fold the
+// PARITY of the x-coordinate into the top bit of the last byte.
+fn point_pack(px: &[secret i64], py: &[secret i64], pz: &[secret i64], pt: &[secret i64]) -> [secret u8] {
+    let mut zi: [secret i64] = fe_zero();
+    finv(&mut zi, pz);
+    let mut tx: [secret i64] = fe_zero();
+    let mut ty: [secret i64] = fe_zero();
+    fmul(&mut tx, px, &zi);
+    fmul(&mut ty, py, &zi);
+
+    let yb: [secret u8] = pack25519(&ty);   // 32 bytes (the y coordinate)
+    let xb: [secret u8] = pack25519(&tx);   // 32 bytes (we want bit 0 = x parity)
+
+    // out = yb with the x-parity OR'd into the top bit of byte 31. Compute byte 31
+    // in `secret i64` (zero-extend the bytes) so the shift/OR stay clear, then cast.
+    let mut out: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 31 {
+        push(&mut out, yb[i]);
+        i = i + 1;
+    }
+    let parity: secret i64 = (xb[0] as i64) & 1;
+    let last: secret i64 = (yb[31] as i64) | (parity << 7);
+    push(&mut out, last as u8);
+    vec_to_array(out)
+}
+
+// ---- scalar arithmetic modulo the group order L --------------------------------
+
+// The group order L = 2^252 + 27742317777372353535851937790883648493, as 32 little-
+// endian bytes (RFC 8032 §5.1; the same constant TweetNaCl's `modL` uses). The
+// public bytes widen to `secret i64` at each push (ADR 0051).
+fn l_constant() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 237);  push(&mut v, 211);  push(&mut v, 245);  push(&mut v, 92);
+    push(&mut v, 26);   push(&mut v, 99);   push(&mut v, 18);   push(&mut v, 88);
+    push(&mut v, 214);  push(&mut v, 156);  push(&mut v, 247);  push(&mut v, 162);
+    push(&mut v, 222);  push(&mut v, 249);  push(&mut v, 222);  push(&mut v, 20);
+    push(&mut v, 0);    push(&mut v, 0);    push(&mut v, 0);    push(&mut v, 0);
+    push(&mut v, 0);    push(&mut v, 0);    push(&mut v, 0);    push(&mut v, 0);
+    push(&mut v, 0);    push(&mut v, 0);    push(&mut v, 0);    push(&mut v, 0);
+    push(&mut v, 0);    push(&mut v, 0);    push(&mut v, 0);    push(&mut v, 16);
+    vec_to_array(v)
+}
+
+// modL: reduce a 64-limb little-endian SECRET value `x` modulo L, returning 32
+// little-endian SECRET bytes (TweetNaCl `modL`, transcribed faithfully). All shifts
+// are SIGNED — Sentinel's `>>` is logical, so the signed right shifts go through
+// `arith_shr`. `x` is mutated in place. Every loop bound / index is PUBLIC; only the
+// limb VALUES are secret, and they flow only through +, -, *, &, and the masked
+// arith_shr — no branch, no secret index, no secret divisor.
+fn modL(x: &mut [secret i64]) -> [secret u8] {
+    let l: [secret i64] = l_constant();
+
+    let mut i: i64 = 63;
+    while i >= 32 {
+        let mut carry: secret i64 = 0;
+        let lo: i64 = i - 32;
+        let mut j: i64 = lo;
+        while j < i - 12 {
+            // x[j] += carry - 16 * x[i] * L[j - (i-32)]
+            let term: secret i64 = (*x)[j] + carry - 16 * (*x)[i] * l[j - lo];
+            (*x)[j] = term;
+            carry = arith_shr((*x)[j] + 128, 8);
+            (*x)[j] = (*x)[j] - (carry << 8);
+            j = j + 1;
+        }
+        // here j == i - 12
+        (*x)[j] = (*x)[j] + carry;
+        (*x)[i] = 0;
+        i = i - 1;
+    }
+
+    let mut carry2: secret i64 = 0;
+    let mut j2: i64 = 0;
+    while j2 < 32 {
+        (*x)[j2] = (*x)[j2] + carry2 - (arith_shr((*x)[31], 4)) * l[j2];
+        carry2 = arith_shr((*x)[j2], 8);
+        (*x)[j2] = (*x)[j2] & 255;
+        j2 = j2 + 1;
+    }
+    let mut j3: i64 = 0;
+    while j3 < 32 {
+        (*x)[j3] = (*x)[j3] - carry2 * l[j3];
+        j3 = j3 + 1;
+    }
+
+    let mut out: Vec<secret u8> = vec_new();
+    let mut i2: i64 = 0;
+    while i2 < 32 {
+        (*x)[i2 + 1] = (*x)[i2 + 1] + arith_shr((*x)[i2], 8);
+        push(&mut out, ((*x)[i2] & 255) as u8);
+        i2 = i2 + 1;
+    }
+    vec_to_array(out)
+}
+
+// reduce: SHA-512 digest (64 secret bytes) -> a scalar mod L (32 secret bytes).
+// Copy the 64 bytes into a 64-limb `[secret i64]` (each byte zero-extended), then
+// modL. Used for r = reduce(H(prefix||M)) and k = reduce(H(R||A||M)).
+fn reduce(h: &[secret u8]) -> [secret u8] {
+    let mut v: Vec<secret i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < 64 {
+        push(&mut v, (*h)[i] as i64);
+        i = i + 1;
+    }
+    let mut x: [secret i64] = vec_to_array(v);
+    modL(&mut x)
+}
+
+// ---- helpers -------------------------------------------------------------------
+
+// Hash a SECRET seed with SHA-512 and CLAMP the low 32 bytes into the secret scalar
+// `a` (RFC 8032 §5.1.5): a[0] &= 248, a[31] &= 127, a[31] |= 64. Returns the 32
+// clamped scalar bytes as a `[secret i64]` (each byte as an i64 — the form the
+// ladder's bit-extraction and the muladd both want). The full 64-byte hash is
+// returned via `&mut hout` so the caller can take the prefix h[32..64].
+fn clamped_scalar(seed: &[secret u8], hout: &mut [secret u8]) -> [secret i64] {
+    // Re-materialize the seed as an owned [secret u8] for sha512 (it takes by value).
+    let mut sv: Vec<secret u8> = vec_new();
+    let n: i64 = len(*seed);
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut sv, (*seed)[i]);
+        i = i + 1;
+    }
+    let h: [secret u8] = sha512(vec_to_array(sv));
+
+    // copy the 64-byte hash out
+    let mut j: i64 = 0;
+    while j < 64 {
+        (*hout)[j] = h[j];
+        j = j + 1;
+    }
+
+    // a = clamp(h[0..32]) as 32 i64 limbs.
+    let mut av: Vec<secret i64> = vec_new();
+    let mut k: i64 = 0;
+    while k < 32 {
+        push(&mut av, h[k] as i64);
+        k = k + 1;
+    }
+    let mut a: [secret i64] = vec_to_array(av);
+    a[0] = a[0] & 248;
+    a[31] = a[31] & 127;
+    a[31] = a[31] | 64;
+    a
+}
+
+// Convert the 32 scalar i64 limbs back to a 32-byte buffer (the ladder takes the
+// scalar as a `[secret i64]` of 32 already, so this is only used where a byte view
+// is needed). Unused in the current flow but kept for clarity of the boundary.
+
+// ---- public API ----------------------------------------------------------------
+
+// The Ed25519 public key for a 32-byte SECRET seed: pk = pack([a]B), where a is the
+// clamped secret scalar from SHA-512(seed). Returns 32 SECRET bytes; the caller
+// declassifies. Constant-time in the seed (the only declassify is the caller's).
+pub fn ed25519_pubkey(seed: [secret u8]) -> [secret u8] {
+    let mut hout: [secret u8] = sha512_zeros();
+    let a: [secret i64] = clamped_scalar(&seed, &mut hout);
+
+    let mut ax: [secret i64] = fe_zero();
+    let mut ay: [secret i64] = fe_zero();
+    let mut az: [secret i64] = fe_zero();
+    let mut at: [secret i64] = fe_zero();
+    scalarbase(&mut ax, &mut ay, &mut az, &mut at, &a);
+    point_pack(&ax, &ay, &az, &at)
+}
+
+// The Ed25519 signature of a SECRET message `m` under a 32-byte SECRET seed (RFC
+// 8032 §5.1.6). Returns the 64-byte signature R||S as SECRET bytes; the caller
+// declassifies. Every scalar multiplication runs over the secret scalar branch-free.
+//
+//   h = SHA-512(seed); a = clamp(h[0..32]); A = [a]B; pk = pack(A)
+//   prefix = h[32..64]
+//   r = reduce(SHA-512(prefix || m)); R = [r]B; Rp = pack(R)
+//   k = reduce(SHA-512(Rp || pk || m))
+//   S = (r + k*a) mod L
+//   signature = Rp || S
+pub fn ed25519_sign(seed: [secret u8], m: [secret u8]) -> [secret u8] {
+    let mut hout: [secret u8] = sha512_zeros();
+    let a: [secret i64] = clamped_scalar(&seed, &mut hout);
+
+    // pk = pack([a]B)
+    let mut ax: [secret i64] = fe_zero();
+    let mut ay: [secret i64] = fe_zero();
+    let mut az: [secret i64] = fe_zero();
+    let mut at: [secret i64] = fe_zero();
+    scalarbase(&mut ax, &mut ay, &mut az, &mut at, &a);
+    let pk: [secret u8] = point_pack(&ax, &ay, &az, &at);
+
+    let mlen: i64 = len(m);
+
+    // r = reduce(SHA-512(prefix || m)), prefix = hout[32..64].
+    let mut pm: Vec<secret u8> = vec_new();
+    let mut i: i64 = 32;
+    while i < 64 {
+        push(&mut pm, hout[i]);
+        i = i + 1;
+    }
+    let mut im: i64 = 0;
+    while im < mlen {
+        push(&mut pm, m[im]);
+        im = im + 1;
+    }
+    let rdigest: [secret u8] = sha512(vec_to_array(pm));
+    let r: [secret u8] = reduce(&rdigest);
+
+    // R = pack([r]B). r is 32 bytes -> r limbs as i64.
+    let mut rscalar: Vec<secret i64> = vec_new();
+    let mut ri: i64 = 0;
+    while ri < 32 {
+        push(&mut rscalar, r[ri] as i64);
+        ri = ri + 1;
+    }
+    let rsc: [secret i64] = vec_to_array(rscalar);
+    let mut rx: [secret i64] = fe_zero();
+    let mut ry: [secret i64] = fe_zero();
+    let mut rz: [secret i64] = fe_zero();
+    let mut rt: [secret i64] = fe_zero();
+    scalarbase(&mut rx, &mut ry, &mut rz, &mut rt, &rsc);
+    let rp: [secret u8] = point_pack(&rx, &ry, &rz, &rt);
+
+    // k = reduce(SHA-512(Rp || pk || m)).
+    let mut km: Vec<secret u8> = vec_new();
+    let mut a1: i64 = 0;
+    while a1 < 32 { push(&mut km, rp[a1]); a1 = a1 + 1; }
+    let mut a2: i64 = 0;
+    while a2 < 32 { push(&mut km, pk[a2]); a2 = a2 + 1; }
+    let mut a3: i64 = 0;
+    while a3 < mlen { push(&mut km, m[a3]); a3 = a3 + 1; }
+    let kdigest: [secret u8] = sha512(vec_to_array(km));
+    let k: [secret u8] = reduce(&kdigest);
+
+    // S = (r + k*a) mod L.  x[64] = 0 ; x[0..32] = r ; x[i+j] += k[i]*a[j].
+    let mut xv: Vec<secret i64> = vec_new();
+    let mut z: i64 = 0;
+    while z < 64 { push(&mut xv, 0); z = z + 1; }
+    let mut x: [secret i64] = vec_to_array(xv);
+    let mut c: i64 = 0;
+    while c < 32 {
+        x[c] = r[c] as i64;
+        c = c + 1;
+    }
+    let mut ii: i64 = 0;
+    while ii < 32 {
+        let mut jj: i64 = 0;
+        while jj < 32 {
+            x[ii + jj] = x[ii + jj] + (k[ii] as i64) * a[jj];
+            jj = jj + 1;
+        }
+        ii = ii + 1;
+    }
+    let s: [secret u8] = modL(&mut x);
+
+    // signature = Rp || S.
+    let mut sig: Vec<secret u8> = vec_new();
+    let mut p1: i64 = 0;
+    while p1 < 32 { push(&mut sig, rp[p1]); p1 = p1 + 1; }
+    let mut p2: i64 = 0;
+    while p2 < 32 { push(&mut sig, s[p2]); p2 = p2 + 1; }
+    vec_to_array(sig)
+}
+
+// A fresh 64-byte zero buffer (the SHA-512 digest scratch handed to clamped_scalar).
+fn sha512_zeros() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 64 { push(&mut v, i64_to_u8(0)); i = i + 1; }
+    vec_to_array(v)
+}

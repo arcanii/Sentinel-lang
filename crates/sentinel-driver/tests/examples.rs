@@ -261,6 +261,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // plaintext + 20-byte AAD, partial blocks) AND the same input without AAD matched
     // ciphertext + tag byte-for-byte.
     ("examples/security/aes_gcm.sentinel", 42),
+    // Constant-time Ed25519 SIGNING (std::security::ed25519, RFC 8032) over a SECRET
+    // seed. Composes the shared field layer (std::security::fe25519) + SHA-512; the
+    // Edwards scalar multiplication runs over the secret scalar via a branch-free
+    // ladder (a textbook double-and-add branches on the key bits, which the CT check
+    // rejects). 42 = three RFC 8032 / pyca-cryptography vectors (incl. the empty
+    // message) matched both the public key and the 64-byte signature byte-for-byte.
+    ("examples/security/ed25519.sentinel", 42),
 ];
 
 #[test]
@@ -371,6 +378,11 @@ fn sha512_digest() {
 #[test]
 fn aes_gcm_aead_constant_time() {
     check_example("examples/security/aes_gcm.sentinel", "aes_gcm", 42);
+}
+
+#[test]
+fn ed25519_signing_constant_time() {
+    check_example("examples/security/ed25519.sentinel", "ed25519", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

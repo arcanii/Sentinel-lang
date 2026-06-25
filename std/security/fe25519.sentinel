@@ -1,0 +1,219 @@
+// std::security::fe25519 — the Curve25519 / Edwards25519 base field GF(2^255-19).
+//
+// A field element is 16 limbs of radix 2^16 held in `secret i64` (the TweetNaCl
+// representation): every limb product stays within i64, so the field multiply needs
+// no 128-bit arithmetic. All operations are branch-free and constant-time (every
+// loop bound is public; secrets flow only through `+ - & | << >>`). This is the
+// shared field layer used by X25519 (Montgomery) and Ed25519 (twisted Edwards).
+//
+// Carry propagation needs an ARITHMETIC right shift on signed limbs, but Sentinel's
+// `>>` is logical (ADR 0048); `arith_shr` reconstructs it branch-free.
+
+// Arithmetic right shift of a 64-bit value by a PUBLIC amount (1..63), from logical
+// ops only: shift logically, then OR the sign bit back across the vacated top bits.
+pub fn arith_shr(x: secret i64, n: i64) -> secret i64 {
+    let sign: secret i64 = 0 - ((x >> 63) & 1);
+    (x >> n) | (sign << (64 - n))
+}
+
+// A fresh zeroed 16-limb field element.
+pub fn fe_zero() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < 16 { push(&mut v, 0); i = i + 1; }
+    vec_to_array(v)
+}
+
+// The field element 1.
+pub fn fe_one() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 1);
+    let mut i: i64 = 0;
+    while i < 15 { push(&mut v, 0); i = i + 1; }
+    vec_to_array(v)
+}
+
+pub fn fe_copy(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 16 { (*o)[i] = (*a)[i]; i = i + 1; }
+    0
+}
+
+// Carry-propagate a 16-limb field element in place (radix 2^16; the top limb's
+// carry folds back into limb 0 scaled by 38, since 2^256 ≡ 38 (mod 2^255-19)).
+pub fn car25519(o: &mut [secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 16 {
+        let c: secret i64 = arith_shr((*o)[i], 16);
+        (*o)[i] = (*o)[i] - (c << 16);
+        if i < 15 {
+            (*o)[i + 1] = (*o)[i + 1] + c;
+            0
+        } else {
+            (*o)[0] = (*o)[0] + 38 * c;
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
+pub fn fadd(o: &mut [secret i64], a: &[secret i64], b: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 16 { (*o)[i] = (*a)[i] + (*b)[i]; i = i + 1; }
+    0
+}
+
+pub fn fsub(o: &mut [secret i64], a: &[secret i64], b: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 16 { (*o)[i] = (*a)[i] - (*b)[i]; i = i + 1; }
+    0
+}
+
+pub fn fadd_assign(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 16 { (*o)[i] = (*o)[i] + (*a)[i]; i = i + 1; }
+    0
+}
+
+pub fn fsub_assign(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 16 { (*o)[i] = (*o)[i] - (*a)[i]; i = i + 1; }
+    0
+}
+
+// o = a * b in GF(2^255-19). Schoolbook product into a 31-limb temp, fold 2^256 ≡
+// 38, then two carry passes. Inputs are read fully before the output is written.
+pub fn fmul(o: &mut [secret i64], a: &[secret i64], b: &[secret i64]) -> i64 {
+    let mut tv: Vec<secret i64> = vec_new();
+    let mut z: i64 = 0;
+    while z < 31 { push(&mut tv, 0); z = z + 1; }
+    let mut t: [secret i64] = vec_to_array(tv);
+    let mut i: i64 = 0;
+    while i < 16 {
+        let mut j: i64 = 0;
+        while j < 16 {
+            t[i + j] = t[i + j] + (*a)[i] * (*b)[j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    let mut f: i64 = 0;
+    while f < 15 {
+        t[f] = t[f] + 38 * t[f + 16];
+        f = f + 1;
+    }
+    let mut w: i64 = 0;
+    while w < 16 { (*o)[w] = t[w]; w = w + 1; }
+    car25519(o);
+    car25519(o);
+    0
+}
+
+// o = a^2.
+pub fn fsq(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    fmul(o, a, a)
+}
+
+// Constant-time conditional swap of two field elements when the SECRET bit b is 1.
+pub fn sel25519(p: &mut [secret i64], q: &mut [secret i64], b: secret i64) -> i64 {
+    let c: secret i64 = 0 - b;
+    let mut i: i64 = 0;
+    while i < 16 {
+        let t: secret i64 = c & ((*p)[i] ^ (*q)[i]);
+        (*p)[i] = (*p)[i] ^ t;
+        (*q)[i] = (*q)[i] ^ t;
+        i = i + 1;
+    }
+    0
+}
+
+// The multiplicative inverse: z^(2^255-21) = z^-1 (Fermat). 254 squarings with a
+// multiply by z at all but two steps — data independent, constant-time.
+pub fn finv(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut c: [secret i64] = fe_zero();
+    fe_copy(&mut c, a);
+    let mut i: i64 = 253;
+    while i >= 0 {
+        let mut t: [secret i64] = fe_zero();
+        fsq(&mut t, &c);
+        fe_copy(&mut c, &t);
+        if i != 2 && i != 4 {
+            let mut t2: [secret i64] = fe_zero();
+            fmul(&mut t2, &c, a);
+            fe_copy(&mut c, &t2);
+            0
+        } else { 0 };
+        i = i - 1;
+    }
+    fe_copy(o, &c);
+    0
+}
+
+// Pack a field element to 32 little-endian SECRET bytes, with the constant-time
+// final reduction mod p (subtract p, conditionally keep via sel25519).
+pub fn pack25519(n: &[secret i64]) -> [secret u8] {
+    let mut ov: Vec<secret i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < 16 { push(&mut ov, (*n)[i]); i = i + 1; }
+    let mut o: [secret i64] = vec_to_array(ov);
+    car25519(&mut o);
+    car25519(&mut o);
+    car25519(&mut o);
+    let mut r: i64 = 0;
+    while r < 2 {
+        let mut m: [secret i64] = fe_zero();
+        m[0] = o[0] - 65517;
+        let mut i2: i64 = 1;
+        while i2 < 15 {
+            m[i2] = o[i2] - 65535 - (arith_shr(m[i2 - 1], 16) & 1);
+            m[i2 - 1] = m[i2 - 1] & 65535;
+            i2 = i2 + 1;
+        }
+        m[15] = o[15] - 32767 - (arith_shr(m[14], 16) & 1);
+        let b: secret i64 = arith_shr(m[15], 16) & 1;
+        m[14] = m[14] & 65535;
+        sel25519(&mut o, &mut m, 1 - b);
+        r = r + 1;
+    }
+    let mut out: Vec<secret u8> = vec_new();
+    let mut k: i64 = 0;
+    while k < 16 {
+        push(&mut out, (o[k] & 255) as u8);
+        push(&mut out, ((o[k] >> 8) & 255) as u8);
+        k = k + 1;
+    }
+    vec_to_array(out)
+}
+
+// ---- Edwards25519 curve constants, as field elements (radix 2^16 limbs). --------
+
+// d2 = 2*d where d = -121665/121666 (the twisted-Edwards curve parameter, doubled —
+// the form the point-addition formula uses).
+pub fn fe_d2() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 61785);  push(&mut v, 9906);   push(&mut v, 39828);  push(&mut v, 60374);
+    push(&mut v, 45398);  push(&mut v, 33411);  push(&mut v, 5274);   push(&mut v, 224);
+    push(&mut v, 53552);  push(&mut v, 61171);  push(&mut v, 33010);  push(&mut v, 6542);
+    push(&mut v, 64743);  push(&mut v, 22239);  push(&mut v, 55772);  push(&mut v, 9222);
+    vec_to_array(v)
+}
+
+// The Ed25519 base point B = (Bx, By).
+pub fn fe_basex() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 54554);  push(&mut v, 36645);  push(&mut v, 11616);  push(&mut v, 51542);
+    push(&mut v, 42930);  push(&mut v, 38181);  push(&mut v, 51040);  push(&mut v, 26924);
+    push(&mut v, 56412);  push(&mut v, 64982);  push(&mut v, 57905);  push(&mut v, 49316);
+    push(&mut v, 21502);  push(&mut v, 52590);  push(&mut v, 14035);  push(&mut v, 8553);
+    vec_to_array(v)
+}
+
+pub fn fe_basey() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 26200);  push(&mut v, 26214);  push(&mut v, 26214);  push(&mut v, 26214);
+    push(&mut v, 26214);  push(&mut v, 26214);  push(&mut v, 26214);  push(&mut v, 26214);
+    push(&mut v, 26214);  push(&mut v, 26214);  push(&mut v, 26214);  push(&mut v, 26214);
+    push(&mut v, 26214);  push(&mut v, 26214);  push(&mut v, 26214);  push(&mut v, 26214);
+    vec_to_array(v)
+}

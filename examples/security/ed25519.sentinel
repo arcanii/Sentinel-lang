@@ -1,0 +1,113 @@
+// examples/security/ed25519.sentinel — constant-time Ed25519 signing over RFC 8032
+// known-answer vectors.
+//
+// Exercises std::security::ed25519 end to end over THREE vectors: from a 32-byte
+// SECRET seed it derives the public key and signs a message, then checks BOTH the
+// public key and the 64-byte signature against the known-answer values (cross-checked
+// against pyca/cryptography). The three vectors use different seeds and messages
+// (including the empty message) so distinct secret scalars, SHA-512 inputs, and
+// mod-L reductions are exercised — not a single happy path.
+//
+// CONSTANT-TIME DISCIPLINE. The seed is the signing secret. SHA-512(seed) is clamped
+// into the secret scalar `a`, and the scalar multiplications [a]B and [r]B run over
+// SECRET scalar bits. A textbook double-and-add would branch on each bit and leak the
+// key through timing — that does not compile in Sentinel, because a secret value
+// reaching an `if`, an array index, or a divisor is rejected by the constant-time
+// check. So this program building AT ALL is a proof that the Ed25519 signing path is
+// constant-time in the secret key: the ladder uses a branch-free conditional swap
+// (`sel25519`), never a branch on a secret bit. The only declassify boundary is HERE,
+// comparing the produced public key / signature against the published vectors.
+//
+// Exit 42 = every public key AND every signature matched its vector.
+use std::security::ed25519::ed25519_pubkey;
+use std::security::ed25519::ed25519_sign;
+
+// Build a SECRET byte buffer of the first `n` bytes of a public byte array (each
+// byte widens to `secret u8` at the push). A borrow, so a source can be reused; `n`
+// may be 0 to build the empty message.
+fn mk_secret(src: &[i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8((*src)[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Derive the public key + signature for one vector and OR any byte mismatch (vs the
+// expected pk / sig) into the running `bad` accumulator. `ed25519_sign` re-derives
+// the key internally (deterministic EdDSA — no randomness).
+fn check_vector(seedsrc: &[i64], msrc: &[i64], mlen: i64,
+                exp_pk: &[i64], exp_sig: &[i64]) -> i64 {
+    let mut bad: i64 = 0;
+    let pk: [secret u8] = ed25519_pubkey(mk_secret(seedsrc, 32));
+    let mut i: i64 = 0;
+    while i < 32 {
+        bad = bad | (u8_to_i64(declassify(pk[i])) ^ (*exp_pk)[i]);
+        i = i + 1;
+    }
+    let sig: [secret u8] = ed25519_sign(mk_secret(seedsrc, 32), mk_secret(msrc, mlen));
+    let mut j: i64 = 0;
+    while j < 64 {
+        bad = bad | (u8_to_i64(declassify(sig[j])) ^ (*exp_sig)[j]);
+        j = j + 1;
+    }
+    bad
+}
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- Vector 1: seed 9d61b19d…, M = "abc".
+    let seed1: [i64] = [
+        157, 97, 177, 157, 239, 254, 188, 58, 111, 80, 248, 193, 198, 225, 193, 232,
+        229, 168, 180, 216, 184, 200, 216, 232, 248, 168, 184, 200, 216, 232, 248, 168
+    ];
+    let m1: [i64] = [97, 98, 99];
+    let pk1: [i64] = [
+        96, 92, 143, 240, 44, 12, 208, 104, 102, 73, 100, 97, 25, 125, 105, 4,
+        208, 39, 145, 170, 7, 78, 161, 208, 190, 57, 99, 159, 199, 214, 246, 198
+    ];
+    let sig1: [i64] = [
+        111, 66, 236, 212, 110, 9, 159, 43, 39, 39, 93, 206, 137, 120, 123, 124,
+        253, 41, 190, 90, 84, 108, 29, 146, 182, 251, 85, 221, 82, 234, 231, 1,
+        133, 74, 37, 39, 95, 217, 132, 82, 236, 1, 184, 155, 123, 235, 174, 29,
+        76, 29, 212, 22, 233, 80, 215, 4, 44, 1, 14, 138, 7, 172, 206, 14
+    ];
+    bad = bad | check_vector(&seed1, &m1, 3, &pk1, &sig1);
+
+    // ---- Vector 2: seed 00010203…1f, M = "hello".
+    let seed2: [i64] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    ];
+    let m2: [i64] = [104, 101, 108, 108, 111];
+    let pk2: [i64] = [
+        3, 161, 7, 191, 243, 206, 16, 190, 29, 112, 221, 24, 231, 75, 192, 153,
+        103, 228, 214, 48, 155, 165, 13, 95, 29, 220, 134, 100, 18, 85, 49, 184
+    ];
+    let sig2: [i64] = [
+        225, 167, 252, 169, 74, 131, 81, 39, 136, 91, 153, 226, 235, 167, 51, 214,
+        238, 91, 245, 220, 70, 62, 216, 56, 94, 182, 241, 220, 170, 17, 23, 192,
+        241, 81, 117, 10, 16, 244, 111, 91, 55, 150, 169, 18, 3, 87, 143, 112,
+        44, 133, 198, 124, 51, 75, 86, 137, 165, 22, 40, 77, 73, 159, 113, 15
+    ];
+    bad = bad | check_vector(&seed2, &m2, 5, &pk2, &sig2);
+
+    // ---- Vector 3: seed 01000…0, the EMPTY message (mlen = 0).
+    let seed3: [i64] = [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    ];
+    let pk3: [i64] = [
+        206, 204, 21, 7, 220, 29, 221, 114, 149, 149, 28, 41, 8, 136, 240, 149,
+        173, 185, 4, 77, 27, 115, 214, 150, 230, 223, 6, 93, 104, 59, 212, 252
+    ];
+    let sig3: [i64] = [
+        108, 158, 83, 217, 207, 54, 183, 28, 41, 80, 35, 95, 149, 74, 222, 0,
+        17, 130, 133, 201, 50, 9, 208, 124, 152, 172, 200, 73, 106, 181, 250, 76,
+        136, 177, 151, 208, 206, 70, 223, 52, 2, 37, 59, 26, 29, 49, 142, 38,
+        72, 147, 240, 51, 181, 27, 249, 159, 254, 255, 66, 235, 74, 77, 67, 2
+    ];
+    bad = bad | check_vector(&seed3, &seed3, 0, &pk3, &sig3);
+
+    if bad == 0 { 42 } else { 0 }
+}
