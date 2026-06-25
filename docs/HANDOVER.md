@@ -50,19 +50,21 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
-EIGHT language gaps closed; crypto band shipped through SHA-256/512 + SHA-3, HMAC,
-AES-128 + AES-GCM, X25519, Ed25519 sign+verify; HEAD `b6e031b`, 1577 tests).** Real, idiomatic
-Sentinel programs that double as feature tests + the first **core libraries**.
-**Dogfoods modules + `--separate`**, **stress-tests the constant-time guarantee on
-real code**, and surfaces concrete language gaps — finding + fixing those is the most
-valuable output. The crypto suite now spans a full asymmetric + symmetric stack:
-ciphers + AEAD (ChaCha20-Poly1305, AES-GCM), hashes (SHA-256/512), a MAC (HMAC), a
-block cipher (AES), key exchange (X25519), and signatures (Ed25519 SIGN + VERIFY, the
-latter with point decompression via a field sqrt) — and the eighth language gap
-(`&mut a[i]` element borrows, ADR 0054) is closed. The cleanly-open next steps are in
-**Next** below (SHA-3/Keccak; X448/Ed448; the next real NUMERIC gap is still
-un-surfaced), with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low
-value.
+EIGHT language gaps closed; a comprehensive constant-time crypto suite shipped; HEAD
+`b6e031b` (KMAC) + docs, 1577 tests, four-check green).** Real, idiomatic Sentinel
+programs that double as feature tests + the first **core libraries**. **Dogfoods
+modules + `--separate`**, **stress-tests the constant-time guarantee on real code**,
+and surfaces concrete language gaps — finding + fixing those is the most valuable
+output. The crypto suite is now a full stack, all constant-time + on canonical
+vectors: **hashes** SHA-256 / SHA-512 / SHA-3 (SHA3-256/512); **XOFs** SHAKE128/256;
+**MACs** HMAC-SHA256 + KMAC128/256; **AEAD** ChaCha20-Poly1305 + AES-128-GCM; **block
+cipher** AES-128 (table-free field-inversion S-box); **key exchange** X25519; and
+**signatures** Ed25519 (SIGN + VERIFY, the latter with point decompression via a field
+sqrt + the `S < L` malleability check). The shared `fe25519` field underpins X25519 +
+Ed25519. The eighth language gap (`&mut a[i]` element borrows, ADR 0054) is closed.
+The cleanly-open next steps are in **Next** below (HKDF; more SP 800-185 modes
+[TupleHash/ParallelHash]; X448/Ed448; the next real NUMERIC gap is still un-surfaced),
+with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
 
 - **Decisions locked with the owner:** top-level `std/` + `examples/`, each
   subdivided by **functional category** (security, math, …), examples mirroring
