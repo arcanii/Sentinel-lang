@@ -51,17 +51,18 @@ reference as you work through the milestones.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
 EIGHT language gaps closed; crypto band shipped through SHA-256/512, HMAC, AES-128 +
-AES-GCM, X25519, Ed25519; HEAD `3f35b67`, 1576 tests).** Real, idiomatic Sentinel
-programs that double as feature tests + the first **core libraries**. **Dogfoods
-modules + `--separate`**, **stress-tests the constant-time guarantee on real code**,
-and surfaces concrete language gaps — finding + fixing those is the most valuable
-output. The crypto suite now spans symmetric ciphers + AEAD (ChaCha20-Poly1305,
-AES-GCM), hashes (SHA-256/512), a MAC (HMAC), a block cipher (AES), key exchange
-(X25519), and signatures (Ed25519 signing) — and the eighth language gap (`&mut a[i]`
-element borrows, ADR 0054) is closed. The cleanly-open next steps are in **Next** below
-(Ed25519 VERIFY — needs point decompression + a field sqrt; SHA-3/Keccak; the next
-real NUMERIC gap is still un-surfaced), with array-repeat `[x; N]` and the `scg`
-widen-mirror deferred as low value.
+AES-GCM, X25519, Ed25519 sign+verify; HEAD `9e497a0`, 1576 tests).** Real, idiomatic
+Sentinel programs that double as feature tests + the first **core libraries**.
+**Dogfoods modules + `--separate`**, **stress-tests the constant-time guarantee on
+real code**, and surfaces concrete language gaps — finding + fixing those is the most
+valuable output. The crypto suite now spans a full asymmetric + symmetric stack:
+ciphers + AEAD (ChaCha20-Poly1305, AES-GCM), hashes (SHA-256/512), a MAC (HMAC), a
+block cipher (AES), key exchange (X25519), and signatures (Ed25519 SIGN + VERIFY, the
+latter with point decompression via a field sqrt) — and the eighth language gap
+(`&mut a[i]` element borrows, ADR 0054) is closed. The cleanly-open next steps are in
+**Next** below (SHA-3/Keccak; X448/Ed448; the next real NUMERIC gap is still
+un-surfaced), with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low
+value.
 
 - **Decisions locked with the owner:** top-level `std/` + `examples/`, each
   subdivided by **functional category** (security, math, …), examples mirroring
@@ -262,8 +263,19 @@ widen-mirror deferred as low value.
     an explicit reborrow `&(*x)`. Drafted by a focused sub-agent vs a `cryptography`-verified
     reference, then an independent review modeled the Sentinel source vs `cryptography` over
     120 random seeds (600/600 pk+sig) + 27015 modL cases + 55 point-add/ladder cases — all
-    byte-identical. Reproduces 3 RFC 8032 vectors (incl. empty msg). Scope = SIGNING (verify
-    needs point decompression + a field sqrt — deferred). Library growth, no gap.
+    byte-identical. Reproduces 3 RFC 8032 vectors (incl. empty msg). Library growth, no gap.
+  - **Ed25519 VERIFY** (`9e497a0`) — the natural completion (owner: "proceed on
+    recommendation"). `ed25519_verify` decompresses `-A` from the public key (recover x
+    from y via a field square root `(num/den)^((p+3)/8)` = the new `fe25519::fe_pow2523`
+    `z^((p-5)/8)` chain + `fe_sqrtm1`/`fe_d`/`unpack25519`; the sqrt branch-correction +
+    parity sign-fix are branch-free mask selects), computes `[S]B - [h]A`, accepts iff it
+    re-encodes to `R`. A probe reproduced TweetNaCl `unpackneg(pk1)` byte-for-byte first.
+    ⚠ FINDING (independent review, 150 valid + 310 forgery + 1000 decode-parity cases vs
+    `cryptography`): the faithful TweetNaCl `crypto_sign_open` LACKS the RFC 8032 `S < L`
+    check → `(R, S+L)` is a second accepted signature (malleability, a false-accept).
+    FIXED with a constant-time MSB-first lexicographic `S < L` compare AND-ed into the
+    accept; the example asserts the malleated sig is rejected. Verify is public (the
+    boolean is the sole declassify) but stays branch-free (reuses the CT machinery).
 - **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
   `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
@@ -271,15 +283,14 @@ widen-mirror deferred as low value.
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
   - **More crypto** — the §2.8.2 vector, SHA-256/512, HMAC, AES + AES-GCM, X25519, and
-    Ed25519 SIGNING are all shipped. Cleanly open: **Ed25519 VERIFY** (the natural
-    completion — needs public point DECOMPRESSION, i.e. a field square root via
-    `z^((p+3)/8)` + the `sqrt(-1)` constant, which `fe25519` doesn't yet expose; verify
-    is public so it can be variable-time); **SHA-3 / Keccak** (a sponge — a different
-    permutation shape); or a curve over a DIFFERENT field that actually needs the
-    radix-2^51 / 128-bit-multiply path. NOTE: every shipped primitive (incl. X25519 +
-    Ed25519) fits the radix-2^16 field with NO 128-bit arithmetic, so the "next real
-    numeric gap" (128-bit mul / bigint) is STILL un-surfaced — no shipped program has
-    demanded it.
+    Ed25519 (SIGN + VERIFY, with point decompression via a field sqrt) are all shipped —
+    a full asymmetric + symmetric suite. Cleanly open: **SHA-3 / Keccak** (a sponge — a
+    different permutation shape, a CT exercise on a secret message); a **MAC mode**
+    (CMAC/KMAC) or **X448 / Ed448** (a larger curve); or a curve over a DIFFERENT field
+    that actually needs the radix-2^51 / 128-bit-multiply path. NOTE: every shipped
+    primitive (incl. X25519 + Ed25519) fits the radix-2^16 field with NO 128-bit
+    arithmetic, so the "next real numeric gap" (128-bit mul / bigint) is STILL
+    un-surfaced — no shipped program has demanded it.
   - **Two deferred items from the list, now LOW value — recommend skipping unless
     wanted:**
     - **array-repeat `[x; N]`** — SHA-256/HMAC built cleanly WITHOUT it (`Vec<secret T>`

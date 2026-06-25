@@ -69,8 +69,9 @@ the current state of the workspace without re-reading every commit.
   table-free, field-inversion S-box; `aes_gcm` constant-time AES-128-GCM AEAD (GHASH
   GF(2^128)); `fe25519` the shared GF(2^255-19) field; `x25519` constant-time X25519
   ECDH over a `secret` scalar (RFC 7748 — the first public-key primitive); `ed25519`
-  constant-time Ed25519 SIGNING over a `secret` seed (RFC 8032, composing fe25519 +
-  sha512)), `std/math/num`, `std/bits/bits` (rotates),
+  constant-time Ed25519 SIGNING + verification over a `secret` seed (RFC 8032,
+  composing fe25519 + sha512; verify decompresses a point via a field square
+  root)), `std/math/num`, `std/bits/bits` (rotates),
   `std/bytes/bytes` (`[u8]`
   utilities over `&[u8]` borrows), and `std/algorithms/seq` (in-place insertion
   `sort` + `binary_search` over public `[i64]`). The crypto examples reproduce the
@@ -144,8 +145,9 @@ the current state of the workspace without re-reading every commit.
   **HMAC-SHA256** over a secret key, a constant-time **AES-128** block cipher (`aes`),
   **AES-128-GCM** AEAD (`aes_gcm`, the GHASH GF(2^128) carry-less multiply as the new
   field primitive), constant-time **X25519** ECDH (`x25519`, the first public-key
-  primitive), and constant-time **Ed25519** SIGNING (`ed25519`, RFC 8032, composing
-  the shared `fe25519` field + `sha512`). AES, X25519, and Ed25519 are its sharpest
+  primitive), and constant-time **Ed25519** SIGNING + verification (`ed25519`, RFC 8032, composing
+  the shared `fe25519` field + `sha512`; verify decompresses a point via a field
+  square root and enforces the `S < L` canonicality check). AES, X25519, and Ed25519 are its sharpest
   constant-time demonstrations: in each, the textbook implementation has a
   key-dependent side channel that does not compile — AES's table-lookup S-box
   (`sbox[secret_byte]`) is a secret value indexing memory, and the X25519 / Ed25519
