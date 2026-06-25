@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
 EIGHT language gaps closed; crypto band shipped through SHA-256/512 + SHA-3, HMAC,
-AES-128 + AES-GCM, X25519, Ed25519 sign+verify; HEAD `8908461`, 1577 tests).** Real, idiomatic
+AES-128 + AES-GCM, X25519, Ed25519 sign+verify; HEAD `8d0b4f8`, 1577 tests).** Real, idiomatic
 Sentinel programs that double as feature tests + the first **core libraries**.
 **Dogfoods modules + `--separate`**, **stress-tests the constant-time guarantee on
 real code**, and surfaces concrete language gaps — finding + fixing those is the most
@@ -286,7 +286,12 @@ value.
     sponge absorbs at the rate (136 B for SHA3-256, 72 B for SHA3-512) with the SHA-3
     pad `0x06..0x80`. Verified vs a hashlib-checked reference over abc / "" / multi-block
     / the 135-byte padding edge (`0x06` and `0x80` share a byte) — both instances. NO
-    compiler/scg change (library growth).
+    compiler/scg change (library growth). **Extended with the SHAKE128/256 XOFs**
+    (`8d0b4f8`): `keccak_sponge` gained a domain byte (0x1F vs 0x06) + an arbitrary-
+    length multi-block/partial squeeze (emit ≤ rate bytes, permute, repeat), so output
+    is any length — `sha3_256/512` keep their fixed output, `shake128/256(msg, out_bytes)`
+    are the XOFs. Verified vs hashlib over lengths 16..400 incl. >rate (two-permutation)
+    outputs + the XOF prefix-extension property.
 - **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
   `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
@@ -295,14 +300,15 @@ value.
 - **Next (open, owner's call — none yet approved):**
   - **More crypto** — the §2.8.2 vector, SHA-256/512, SHA-3 (Keccak sponge), HMAC,
     AES + AES-GCM, X25519, and Ed25519 (SIGN + VERIFY) are all shipped — a full
-    asymmetric + symmetric + hash suite. Cleanly open: **SHAKE/cSHAKE/KMAC** (the
-    Keccak sponge is already in `sha3` — XOF + keyed modes are a small extension);
-    **HKDF** (composes HMAC); **X448 / Ed448** (a larger curve — radix-2^28 likely
-    still fits i64); or a curve / bignum primitive over a field that actually needs the
-    radix-2^51 / 128-bit-multiply path. NOTE: every shipped primitive (incl. X25519 +
-    Ed25519 + SHA-3) fits 64-bit limbs with NO 128-bit arithmetic, so the "next real
-    numeric gap" (128-bit mul / bigint) is STILL un-surfaced — no shipped program has
-    demanded it.
+    asymmetric + symmetric + hash + XOF suite. Cleanly open: **cSHAKE / KMAC**
+    (keyed/customized Keccak — builds on the shipped SHAKE; the new piece is the
+    `bytepad` / `encode_string` / `right_encode` length encodings); **HKDF** (composes
+    HMAC); **X448 / Ed448** (a larger curve — radix-2^28 likely still fits i64); or a
+    curve / bignum primitive over a field that actually needs the radix-2^51 /
+    128-bit-multiply path. NOTE: every shipped primitive (incl. X25519 + Ed25519 +
+    SHA-3/SHAKE) fits 64-bit limbs with NO 128-bit arithmetic, so the "next real numeric
+    gap" (128-bit mul / bigint) is STILL un-surfaced — no shipped program has demanded
+    it.
   - **Two deferred items from the list, now LOW value — recommend skipping unless
     wanted:**
     - **array-repeat `[x; N]`** — SHA-256/HMAC built cleanly WITHOUT it (`Vec<secret T>`
