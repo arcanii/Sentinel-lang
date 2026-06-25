@@ -1,0 +1,86 @@
+// examples/security/aes_gcm.sentinel — constant-time AES-128-GCM over a known vector.
+//
+// Encrypts a 60-byte SECRET plaintext under a SECRET key + 96-bit nonce with 20
+// bytes of associated data (the McGrew/Viega GCM "Test Case 4", also reproduced by
+// OpenSSL), and checks the 60-byte ciphertext + 16-byte tag against the published
+// value. The 60-byte plaintext and 20-byte AAD both straddle block boundaries, so
+// this exercises the zero-padding of partial AAD and ciphertext blocks and the
+// length block in GHASH.
+//
+// CONSTANT-TIME DISCIPLINE. The key + plaintext are SECRET, so the AES counter-mode
+// keystream and the GHASH authentication (whose key H = AES_K(0) is secret) are
+// computed branch-free over secret values — the textbook GHASH multiply branches on
+// its operand bits, which would leak H, so the library uses the mask-based bit-by-bit
+// GF(2^128) multiply instead. A successful build is the constant-time proof. The only
+// declassify boundary is HERE, XOR-diffing the ciphertext + tag against the public
+// vector. Exit 42 = both the 60-byte ciphertext and the 16-byte tag matched.
+use std::security::aes_gcm::aes128_gcm_encrypt;
+
+fn mkbytes(src: &[i64]) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let n: i64 = len(*src);
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8((*src)[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn empty_bytes() -> [secret u8] {
+    let e: Vec<secret u8> = vec_new();
+    vec_to_array(e)
+}
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    let key: [i64] = [254, 255, 233, 146, 134, 101, 115, 28, 109, 106, 143, 148, 103, 48, 131, 8];
+    let iv: [i64] = [202, 254, 186, 190, 250, 206, 219, 173, 222, 202, 248, 136];
+    let aad: [i64] = [
+        254, 237, 250, 206, 222, 173, 190, 239, 254, 237, 250, 206, 222, 173, 190, 239,
+        171, 173, 218, 210
+    ];
+    let pt: [i64] = [
+        217, 49, 50, 37, 248, 132, 6, 229, 165, 89, 9, 197, 175, 245, 38, 154,
+        134, 167, 169, 83, 21, 52, 247, 218, 46, 76, 48, 61, 138, 49, 138, 114,
+        28, 60, 12, 149, 149, 104, 9, 83, 47, 207, 14, 36, 73, 166, 181, 37,
+        177, 106, 237, 245, 170, 13, 230, 87, 186, 99, 123, 57
+    ];
+    // Expected ciphertext (60 bytes) then tag (16 bytes).
+    let expect: [i64] = [
+        66, 131, 30, 194, 33, 119, 116, 36, 75, 114, 33, 183, 132, 208, 212, 156,
+        227, 170, 33, 47, 44, 2, 164, 224, 53, 193, 126, 35, 41, 172, 161, 46,
+        33, 213, 20, 178, 84, 102, 147, 28, 125, 143, 106, 90, 172, 132, 170, 5,
+        27, 163, 11, 57, 106, 10, 172, 151, 61, 88, 224, 145,
+        91, 201, 79, 188, 50, 33, 165, 219, 148, 250, 233, 90, 231, 18, 26, 71
+    ];
+
+    let result: [secret u8] = aes128_gcm_encrypt(
+        mkbytes(&key), mkbytes(&iv), mkbytes(&aad), mkbytes(&pt)
+    );
+    // result is ciphertext (60) ‖ tag (16) = 76 bytes.
+    let mut i: i64 = 0;
+    while i < 76 {
+        bad = bad | (u8_to_i64(declassify(result[i])) ^ expect[i]);
+        i = i + 1;
+    }
+
+    // ---- The SAME key/nonce/plaintext but NO associated data: the ciphertext is
+    // identical (counter-mode keystream is unchanged) and only the tag differs,
+    // which checks the GHASH associated-data handling.
+    let expect2: [i64] = [
+        66, 131, 30, 194, 33, 119, 116, 36, 75, 114, 33, 183, 132, 208, 212, 156,
+        227, 170, 33, 47, 44, 2, 164, 224, 53, 193, 126, 35, 41, 172, 161, 46,
+        33, 213, 20, 178, 84, 102, 147, 28, 125, 143, 106, 90, 172, 132, 170, 5,
+        27, 163, 11, 57, 106, 10, 172, 151, 61, 88, 224, 145,
+        204, 21, 171, 204, 25, 17, 97, 80, 26, 171, 171, 70, 184, 251, 172, 133
+    ];
+    let result2: [secret u8] = aes128_gcm_encrypt(
+        mkbytes(&key), mkbytes(&iv), empty_bytes(), mkbytes(&pt)
+    );
+    let mut i2: i64 = 0;
+    while i2 < 76 {
+        bad = bad | (u8_to_i64(declassify(result2[i2])) ^ expect2[i2]);
+        i2 = i2 + 1;
+    }
+
+    if bad == 0 { 42 } else { 0 }
+}

@@ -249,6 +249,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // (no width casts). 42 = SHA-512("abc"), "", and 200*'a' (multi-block) all
     // matched their NIST digest.
     ("examples/security/sha512.sentinel", 42),
+    // Constant-time AES-128-GCM AEAD (std::security::aes_gcm, NIST SP 800-38D) over a
+    // SECRET key + plaintext. Composes the AES block with GHASH, whose GF(2^128)
+    // multiply is the new branch-free field primitive (the textbook version branches
+    // on bits of the secret auth key H). 42 = the McGrew/OpenSSL "TC4" vector (60-byte
+    // plaintext + 20-byte AAD, partial blocks) AND the same input without AAD matched
+    // ciphertext + tag byte-for-byte.
+    ("examples/security/aes_gcm.sentinel", 42),
 ];
 
 #[test]
@@ -349,6 +356,11 @@ fn x25519_scalarmult_constant_time() {
 #[test]
 fn sha512_digest() {
     check_example("examples/security/sha512.sentinel", "sha512", 42);
+}
+
+#[test]
+fn aes_gcm_aead_constant_time() {
+    check_example("examples/security/aes_gcm.sentinel", "aes_gcm", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

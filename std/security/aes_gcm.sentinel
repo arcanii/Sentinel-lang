@@ -1,0 +1,229 @@
+// std::security::aes_gcm — constant-time AES-128-GCM AEAD (NIST SP 800-38D).
+//
+// Authenticated encryption: AES-128 in counter mode for confidentiality plus GHASH
+// for integrity, over a SECRET key + plaintext. Composes the constant-time AES block
+// from `std::security::aes`. Two constant-time stories meet here:
+//   * The block cipher is the table-free, branch-free AES (its S-box is field
+//     inversion, not a secret-indexed table — see `std::security::aes`).
+//   * GHASH multiplies in GF(2^128). The textbook multiply branches on the bits of
+//     its operand; here the authentication key H = AES_K(0) is SECRET, so a branch
+//     would leak it. The multiply is therefore the branch-free, mask-based bit-by-bit
+//     algorithm — no secret bit steers control flow. A 128-bit value is two `secret
+//     i64` limbs ([hi, lo]); the shift/XOR/reduce all stay within i64 (no 128-bit
+//     integer type is needed).
+// Every loop bound and array index is PUBLIC (lengths/counters are public; only the
+// key/plaintext bytes are secret), so a successful build proves the whole AEAD is
+// constant-time in the secret inputs.
+//
+// Scope: AES-128, a 96-bit nonce (the common case; J0 = IV || 0^31 || 1). Returns
+// ciphertext ‖ 16-byte tag. (In practice the nonce + AAD are public; here they are
+// carried in the secret domain for a uniform, over-conservative constant-time path.)
+use std::security::aes::aes128_encrypt_block;
+
+// Clone a borrowed secret byte buffer (the AES block consumes its key by value, and
+// GCM encrypts many blocks under one key, so each call gets a fresh copy).
+fn clone_bytes(b: &[secret u8]) -> [secret u8] {
+    let mut out: Vec<secret u8> = vec_new();
+    let n: i64 = len(*b);
+    let mut i: i64 = 0;
+    while i < n { push(&mut out, (*b)[i]); i = i + 1; }
+    vec_to_array(out)
+}
+
+// Serialize a 128-bit block ([hi, lo]) to 16 big-endian SECRET bytes.
+fn block_to_bytes(blk: &[secret i64]) -> [secret u8] {
+    let mut out: Vec<secret u8> = vec_new();
+    let mut k: i64 = 0;
+    while k < 8 {
+        push(&mut out, ((*blk)[0] >> (8 * (7 - k))) as u8);
+        k = k + 1;
+    }
+    let mut k2: i64 = 0;
+    while k2 < 8 {
+        push(&mut out, ((*blk)[1] >> (8 * (7 - k2))) as u8);
+        k2 = k2 + 1;
+    }
+    vec_to_array(out)
+}
+
+// Read 16 big-endian bytes at `off` into a 128-bit block ([hi, lo]).
+fn read_block(out: &mut [secret i64], buf: &[secret u8], off: i64) -> i64 {
+    let mut hi: secret i64 = 0;
+    let mut k: i64 = 0;
+    while k < 8 {
+        hi = hi | (((*buf)[off + k] as i64) << (8 * (7 - k)));
+        k = k + 1;
+    }
+    let mut lo: secret i64 = 0;
+    let mut k2: i64 = 8;
+    while k2 < 16 {
+        lo = lo | (((*buf)[off + k2] as i64) << (8 * (15 - k2)));
+        k2 = k2 + 1;
+    }
+    (*out)[0] = hi;
+    (*out)[1] = lo;
+    0
+}
+
+// Build J0 from a 12-byte (96-bit) nonce: J0 = IV || 0^31 || 1.
+fn read_j0(out: &mut [secret i64], iv: &[secret u8]) -> i64 {
+    let mut hi: secret i64 = 0;
+    let mut k: i64 = 0;
+    while k < 8 {
+        hi = hi | (((*iv)[k] as i64) << (8 * (7 - k)));
+        k = k + 1;
+    }
+    let mut lo: secret i64 = 0;
+    let mut k2: i64 = 8;
+    while k2 < 12 {
+        lo = lo | (((*iv)[k2] as i64) << (8 * (15 - k2)));
+        k2 = k2 + 1;
+    }
+    (*out)[0] = hi;
+    (*out)[1] = lo | 1;   // the 32-bit counter starts at 1
+    0
+}
+
+// Encrypt one 128-bit block with AES-128 under `key` (cloned per call).
+fn aes_enc_block(key: &[secret u8], blk: &[secret i64]) -> [secret i64] {
+    let kc: [secret u8] = clone_bytes(key);
+    let pt: [secret u8] = block_to_bytes(blk);
+    let ctb: [secret u8] = aes128_encrypt_block(kc, pt);
+    let mut out: [secret i64] = [0, 0];
+    read_block(&mut out, &ctb, 0);
+    out
+}
+
+// Increment the low 32 bits of a counter block in place (GCM inc32), branch-free.
+fn inc32(blk: &mut [secret i64]) -> i64 {
+    let lo: secret i64 = (*blk)[1];
+    let inc: secret i64 = ((lo & 4294967295) + 1) & 4294967295;  // (low32 + 1) mod 2^32
+    let high: secret i64 = lo & (0 - 4294967296);                // preserve the high 32 bits
+    (*blk)[1] = high | inc;
+    0
+}
+
+// out = x * h in GF(2^128) (the GHASH field, reduction poly x^128+x^7+x^2+x+1).
+// Branch-free bit-by-bit: fold V (= h, then h·x, h·x^2, …) into Z under a mask of
+// each bit of x (MSB first); multiply-by-x is a right shift with a conditional XOR
+// of R = 0xE1<<120 under a mask of V's low bit. No branch on any secret bit.
+fn gf128_mul(out: &mut [secret i64], x: &[secret i64], h: &[secret i64]) -> i64 {
+    let mut zh: secret i64 = 0;
+    let mut zl: secret i64 = 0;
+    let mut vh: secret i64 = (*h)[0];
+    let mut vl: secret i64 = (*h)[1];
+    let mut i: i64 = 0;
+    while i < 128 {
+        let xbit: secret i64 = if i < 64 {
+            ((*x)[0] >> (63 - i)) & 1
+        } else {
+            ((*x)[1] >> (127 - i)) & 1
+        };
+        let m: secret i64 = 0 - xbit;
+        zh = zh ^ (vh & m);
+        zl = zl ^ (vl & m);
+        let vm: secret i64 = 0 - (vl & 1);
+        let new_vl: secret i64 = (vl >> 1) | ((vh & 1) << 63);
+        let new_vh: secret i64 = vh >> 1;
+        vh = new_vh ^ (-2233785415175766016 & vm);   // R_hi = 0xE100000000000000
+        vl = new_vl;                                  // R_lo = 0
+        i = i + 1;
+    }
+    (*out)[0] = zh;
+    (*out)[1] = zl;
+    0
+}
+
+// GHASH fold: y = (y XOR blk) * h.
+fn ghash_step(y: &mut [secret i64], blk: &[secret i64], h: &[secret i64]) -> i64 {
+    let mut t: [secret i64] = [0, 0];
+    t[0] = (*y)[0] ^ (*blk)[0];
+    t[1] = (*y)[1] ^ (*blk)[1];
+    let mut prod: [secret i64] = [0, 0];
+    gf128_mul(&mut prod, &t, h);
+    (*y)[0] = prod[0];
+    (*y)[1] = prod[1];
+    0
+}
+
+// AES-128-GCM encryption. Returns ciphertext ‖ 16-byte tag (length len(pt)+16). The
+// nonce `iv` is 12 bytes. All four inputs are SECRET; the tag/ciphertext are the
+// declassify boundary for the caller.
+pub fn aes128_gcm_encrypt(key: [secret u8], iv: [secret u8], aad: [secret u8], pt: [secret u8]) -> [secret u8] {
+    let lena: i64 = len(aad);
+    let lenp: i64 = len(pt);
+
+    // H = AES_K(0^128).
+    let zblk: [secret i64] = [0, 0];
+    let h: [secret i64] = aes_enc_block(&key, &zblk);
+
+    // J0 and the first counter J0+1.
+    let mut j0: [secret i64] = [0, 0];
+    read_j0(&mut j0, &iv);
+    let mut ctr: [secret i64] = [0, 0];
+    ctr[0] = j0[0];
+    ctr[1] = j0[1];
+    inc32(&mut ctr);
+
+    // CTR encryption: ct[off..] = pt[off..] XOR AES_K(ctr).
+    let mut ctv: Vec<secret u8> = vec_new();
+    let mut off: i64 = 0;
+    while off < lenp {
+        let ks: [secret i64] = aes_enc_block(&key, &ctr);
+        let ksb: [secret u8] = block_to_bytes(&ks);
+        let rem: i64 = lenp - off;
+        let take: i64 = if rem < 16 { rem } else { 16 };
+        let mut j: i64 = 0;
+        while j < take {
+            push(&mut ctv, pt[off + j] ^ ksb[j]);
+            j = j + 1;
+        }
+        inc32(&mut ctr);
+        off = off + 16;
+    }
+    let ctarr: [secret u8] = vec_to_array(ctv);
+
+    // GHASH over AAD ‖ pad ‖ CT ‖ pad ‖ [len(AAD)*8 (64) | len(CT)*8 (64)].
+    let mut gbuf: Vec<secret u8> = vec_new();
+    let mut ai: i64 = 0;
+    while ai < lena { push(&mut gbuf, aad[ai]); ai = ai + 1; }
+    let amod: i64 = lena - (lena / 16) * 16;
+    let pad_a: i64 = (16 - amod) - ((16 - amod) / 16) * 16;   // (16 - amod) mod 16
+    let mut pa: i64 = 0;
+    while pa < pad_a { push(&mut gbuf, i64_to_u8(0)); pa = pa + 1; }
+    let mut ci: i64 = 0;
+    while ci < lenp { push(&mut gbuf, ctarr[ci]); ci = ci + 1; }
+    let cmod: i64 = lenp - (lenp / 16) * 16;
+    let pad_c: i64 = (16 - cmod) - ((16 - cmod) / 16) * 16;
+    let mut pc: i64 = 0;
+    while pc < pad_c { push(&mut gbuf, i64_to_u8(0)); pc = pc + 1; }
+    let garr: [secret u8] = vec_to_array(gbuf);
+    let gblocks: i64 = len(garr) / 16;
+
+    let mut y: [secret i64] = [0, 0];
+    let mut bi: i64 = 0;
+    while bi < gblocks {
+        let mut blk: [secret i64] = [0, 0];
+        read_block(&mut blk, &garr, bi * 16);
+        ghash_step(&mut y, &blk, &h);
+        bi = bi + 1;
+    }
+    // The length block: bit-lengths of AAD and CT (public values widen to secret).
+    let lenblk: [secret i64] = [lena * 8, lenp * 8];
+    ghash_step(&mut y, &lenblk, &h);
+
+    // Tag = GHASH XOR AES_K(J0).
+    let ej0: [secret i64] = aes_enc_block(&key, &j0);
+    let mut tag: [secret i64] = [0, 0];
+    tag[0] = y[0] ^ ej0[0];
+    tag[1] = y[1] ^ ej0[1];
+    let tagb: [secret u8] = block_to_bytes(&tag);
+
+    // Output: ciphertext ‖ tag.
+    let mut out: Vec<secret u8> = vec_new();
+    let mut oi: i64 = 0;
+    while oi < lenp { push(&mut out, ctarr[oi]); oi = oi + 1; }
+    let mut ti: i64 = 0;
+    while ti < 16 { push(&mut out, tagb[ti]); ti = ti + 1; }
+    vec_to_array(out)
+}
