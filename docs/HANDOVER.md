@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
 EIGHT language gaps closed; crypto band shipped through SHA-256/512 + SHA-3, HMAC,
-AES-128 + AES-GCM, X25519, Ed25519 sign+verify; HEAD `8d0b4f8`, 1577 tests).** Real, idiomatic
+AES-128 + AES-GCM, X25519, Ed25519 sign+verify; HEAD `b6e031b`, 1577 tests).** Real, idiomatic
 Sentinel programs that double as feature tests + the first **core libraries**.
 **Dogfoods modules + `--separate`**, **stress-tests the constant-time guarantee on
 real code**, and surfaces concrete language gaps — finding + fixing those is the most
@@ -291,7 +291,13 @@ value.
     length multi-block/partial squeeze (emit ≤ rate bytes, permute, repeat), so output
     is any length — `sha3_256/512` keep their fixed output, `shake128/256(msg, out_bytes)`
     are the XOFs. Verified vs hashlib over lengths 16..400 incl. >rate (two-permutation)
-    outputs + the XOF prefix-extension property.
+    outputs + the XOF prefix-extension property. **Then KMAC128/256** (`b6e031b`, SP
+    800-185): the Keccak keyed MACs, wrapping a SECRET key around cSHAKE with the
+    `left_encode`/`right_encode`/`encode_string`/`bytepad` length encodings (the new
+    pieces) + the 0x04 cSHAKE domain byte. CT: the encodings prefix the input with
+    PUBLIC byte-counts, so only the key+message bytes are secret. The Python ref
+    reproduces 5 NIST SP 800-185 samples (empty + tagged customization, both variants,
+    4- + 200-byte data); the Sentinel port reproduces 3 byte-for-byte.
 - **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
   `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
@@ -300,15 +306,14 @@ value.
 - **Next (open, owner's call — none yet approved):**
   - **More crypto** — the §2.8.2 vector, SHA-256/512, SHA-3 (Keccak sponge), HMAC,
     AES + AES-GCM, X25519, and Ed25519 (SIGN + VERIFY) are all shipped — a full
-    asymmetric + symmetric + hash + XOF suite. Cleanly open: **cSHAKE / KMAC**
-    (keyed/customized Keccak — builds on the shipped SHAKE; the new piece is the
-    `bytepad` / `encode_string` / `right_encode` length encodings); **HKDF** (composes
-    HMAC); **X448 / Ed448** (a larger curve — radix-2^28 likely still fits i64); or a
-    curve / bignum primitive over a field that actually needs the radix-2^51 /
-    128-bit-multiply path. NOTE: every shipped primitive (incl. X25519 + Ed25519 +
-    SHA-3/SHAKE) fits 64-bit limbs with NO 128-bit arithmetic, so the "next real numeric
-    gap" (128-bit mul / bigint) is STILL un-surfaced — no shipped program has demanded
-    it.
+    asymmetric + symmetric + hash + XOF + keyed-MAC suite (incl. KMAC128/256). Cleanly
+    open: **HKDF** (composes the shipped HMAC — extract + expand); **cSHAKE / TupleHash
+    / ParallelHash** (more SP 800-185 modes — cSHAKE is already internal to KMAC);
+    **X448 / Ed448** (a larger curve — radix-2^28 likely still fits i64); or a curve /
+    bignum primitive over a field that actually needs the radix-2^51 / 128-bit-multiply
+    path. NOTE: every shipped primitive (incl. X25519 + Ed25519 + SHA-3/SHAKE/KMAC) fits
+    64-bit limbs with NO 128-bit arithmetic, so the "next real numeric gap" (128-bit mul
+    / bigint) is STILL un-surfaced — no shipped program has demanded it.
   - **Two deferred items from the list, now LOW value — recommend skipping unless
     wanted:**
     - **array-repeat `[x; N]`** — SHA-256/HMAC built cleanly WITHOUT it (`Vec<secret T>`

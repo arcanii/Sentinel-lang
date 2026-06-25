@@ -64,8 +64,8 @@ the current state of the workspace without re-reading every commit.
   incl. `ct_memcmp` + `ct_vec_eq` + `ct_rotl64`/`ct_rotl32`/`ct_rotr32`; `siphash`
   SipHash-2-4 keyed MAC; `chacha20` block + stream cipher; `poly1305` one-time MAC
   over a secret key; `aead` ChaCha20-Poly1305 AEAD composing them; `sha256` /
-  `sha512` constant-time SHA-256 / SHA-512 + `sha3` SHA3-256/512 + SHAKE128/256 XOFs
-  (the Keccak sponge) over a `secret` message; `hmac`
+  `sha512` constant-time SHA-256 / SHA-512 + `sha3` SHA3-256/512 + SHAKE128/256 XOFs +
+  KMAC128/256 keyed MACs (the Keccak sponge / SP 800-185) over a `secret` message; `hmac`
   HMAC-SHA256 over a `secret` key; `aes` a constant-time AES-128 block cipher with a
   table-free, field-inversion S-box; `aes_gcm` constant-time AES-128-GCM AEAD (GHASH
   GF(2^128)); `fe25519` the shared GF(2^255-19) field; `x25519` constant-time X25519
@@ -150,9 +150,10 @@ the current state of the workspace without re-reading every commit.
   primitive), and constant-time **Ed25519** SIGNING + verification (`ed25519`, RFC 8032, composing
   the shared `fe25519` field + `sha512`; verify decompresses a point via a field
   square root and enforces the `S < L` canonicality check), and **SHA-3** /
-  SHA3-256/512 + the **SHAKE128/256 XOFs** (`sha3`, the Keccak sponge — a different
-  construction shape from SHA-2's Merkle-Damgård; the XOFs add arbitrary-length output
-  via a multi-block squeeze). AES, X25519, and Ed25519 are its sharpest constant-time
+  SHA3-256/512 + the **SHAKE128/256 XOFs** + the **KMAC128/256 keyed MACs** (`sha3`,
+  the Keccak sponge — a different construction shape from SHA-2's Merkle-Damgård; the
+  XOFs add arbitrary-length output via a multi-block squeeze, and KMAC (SP 800-185)
+  wraps a secret key around cSHAKE). AES, X25519, and Ed25519 are its sharpest constant-time
   demonstrations: in each, the textbook implementation has a key-dependent side
   channel that does not compile — AES's table-lookup S-box (`sbox[secret_byte]`) is a
   secret value indexing memory, and the X25519 / Ed25519 scalar-multiplication ladders
