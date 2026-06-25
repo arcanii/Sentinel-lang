@@ -63,23 +63,26 @@ the current state of the workspace without re-reading every commit.
   examples.rs`). Shipped libraries: `std/security` (`ct` constant-time primitives
   incl. `ct_memcmp` + `ct_vec_eq` + `ct_rotl64`/`ct_rotl32`/`ct_rotr32`; `siphash`
   SipHash-2-4 keyed MAC; `chacha20` block + stream cipher; `poly1305` one-time MAC
-  over a secret key; `aead` ChaCha20-Poly1305 AEAD composing them; `sha256` a
-  constant-time SHA-256 over a `secret` message; `hmac` HMAC-SHA256 over a `secret`
-  key; `aes` a constant-time AES-128 block cipher with a table-free, field-inversion
-  S-box; `x25519` constant-time X25519 ECDH over a `secret` scalar, RFC 7748 — the
-  first public-key primitive), `std/math/num`, `std/bits/bits` (rotates),
+  over a secret key; `aead` ChaCha20-Poly1305 AEAD composing them; `sha256` /
+  `sha512` constant-time SHA-256 / SHA-512 over a `secret` message; `hmac`
+  HMAC-SHA256 over a `secret` key; `aes` a constant-time AES-128 block cipher with a
+  table-free, field-inversion S-box; `aes_gcm` constant-time AES-128-GCM AEAD (GHASH
+  GF(2^128)); `fe25519` the shared GF(2^255-19) field; `x25519` constant-time X25519
+  ECDH over a `secret` scalar (RFC 7748 — the first public-key primitive); `ed25519`
+  constant-time Ed25519 SIGNING over a `secret` seed (RFC 8032, composing fe25519 +
+  sha512)), `std/math/num`, `std/bits/bits` (rotates),
   `std/bytes/bytes` (`[u8]`
   utilities over `&[u8]` borrows), and `std/algorithms/seq` (in-place insertion
   `sort` + `binary_search` over public `[i64]`). The crypto examples reproduce the
   canonical test vectors (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 /
   §2.5.2 / the full 114-byte §2.8.2 AEAD vector; NIST SHA-256 "abc"/""/multi-block;
   RFC 4231 HMAC-SHA256 TC1/TC2/TC6; FIPS-197 §C.1 + AES-128(0,0); RFC 7748 §5.2 +
-  §6.1 X25519/DH). It has surfaced +
-  closed **seven** language
-  gaps so far, each ADR-first; six are fully self-hosted (snc + `scg`,
+  §6.1 X25519/DH; NIST SHA-512 "abc"/""/multi-block; the McGrew/OpenSSL AES-GCM "TC4"
+  vector; RFC 8032 Ed25519 sign vectors). It has surfaced + closed **eight** language
+  gaps so far, each ADR-first; seven are fully self-hosted (snc + `scg`,
   byte-identical, both fixed points held — ADR 0047 / 0048 / 0049 / 0050 / 0052 /
-  0053), and ADR 0051's operand widen is too (its call-arg / array / return widens
-  are snc-side ergonomics):
+  0053 / 0054), and ADR 0051's operand widen is too (its call-arg / array / return
+  widens are snc-side ergonomics):
   - **`[secret T]` arrays** — arrays of secret elements (ADR 0047,
     `ArrayElem::Secret`) — enabling a variable-length constant-time `memcmp` over
     secret bytes (`examples/security/ct_memcmp`).
@@ -124,24 +127,33 @@ the current state of the workspace without re-reading every commit.
     no codegen/`scg` change (`tests/pass/c58_secret_vec_to_array` byte-identical). It
     is the payoff that makes the full 114-byte §2.8.2 vector idiomatic (build the
     secret plaintext by `push`, then `vec_to_array`).
+  - **`&mut a[i]` / `&a[i]` element borrows** (ADR 0054) — borrowing an array / Vec
+    element as a reference, completing the mutable-array story ADR 0050 began
+    (read `a[i]`, write `a[i] = v`, now borrow `&mut a[i]`). A one-arm type-checker
+    relaxation (`Index` joins `FieldAccess` as a borrow target), the element-address
+    GEP reused from ADR 0050; whole-array borrow granularity (pre-Polonius); a secret
+    index still rejected (`IndexNotInt`). Fully self-hosted with NO `scg` change
+    (`tests/pass/c59_borrow_index` byte-identical); `examples/math/inplace` clamps
+    array / Vec elements in place via `clamp_assign(&mut a[i], …)`.
   The crypto MACs (SipHash / ChaCha20 stream / Poly1305) drove ADR 0051, the
   variable-length secret-buffer friction drove ADR 0052, and feeding a built-up
   secret buffer to the `[secret u8]` crypto drove ADR 0053 —
   "build real programs → find the gap → fix it". On the now-rich surface, the track
-  also shipped (no language change) the full RFC 8439 §2.8.2 114-byte AEAD vector, a
-  constant-time **SHA-256** over a secret message (its 64-word schedule a
-  `Vec<secret i32>`), **HMAC-SHA256** over a secret key (composing SHA-256), a
-  constant-time **AES-128** block cipher (`aes`), and constant-time **X25519** ECDH
-  over a secret scalar (`x25519`, RFC 7748 — the first public-key primitive). AES and
-  X25519 are its sharpest constant-time demonstrations: in each, the textbook
-  implementation has a key-dependent side channel that does not compile — AES's
-  table-lookup S-box (`sbox[secret_byte]`) is a secret value indexing memory, and
-  X25519's Montgomery ladder would branch on the secret scalar bits — so Sentinel
-  forces the constant-time form (AES's table-free field-inversion S-box, X25519's
-  branch-free mask-based conditional swap). See the
-  `sentinel_examples_and_corelibs` auto-memory.
+  also shipped (no language change except ADR 0054) the full RFC 8439 §2.8.2 114-byte
+  AEAD vector, a constant-time **SHA-256** + **SHA-512** over a secret message,
+  **HMAC-SHA256** over a secret key, a constant-time **AES-128** block cipher (`aes`),
+  **AES-128-GCM** AEAD (`aes_gcm`, the GHASH GF(2^128) carry-less multiply as the new
+  field primitive), constant-time **X25519** ECDH (`x25519`, the first public-key
+  primitive), and constant-time **Ed25519** SIGNING (`ed25519`, RFC 8032, composing
+  the shared `fe25519` field + `sha512`). AES, X25519, and Ed25519 are its sharpest
+  constant-time demonstrations: in each, the textbook implementation has a
+  key-dependent side channel that does not compile — AES's table-lookup S-box
+  (`sbox[secret_byte]`) is a secret value indexing memory, and the X25519 / Ed25519
+  scalar-multiplication ladders would branch on the secret scalar bits — so Sentinel
+  forces the constant-time form (a table-free field-inversion S-box, a branch-free
+  mask-based conditional swap). See the `sentinel_examples_and_corelibs` auto-memory.
 
-**1572 tests across the workspace**, four-check green (build · `cargo nextest`
+**1576 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

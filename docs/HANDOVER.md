@@ -50,17 +50,18 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
-SEVEN language gaps closed; crypto band shipped through SHA-256 / HMAC / AES-128 /
-X25519; HEAD `b671436`, 1572 tests).** Real, idiomatic Sentinel programs that double
-as feature tests + the first **core libraries**. **Dogfoods modules + `--separate`**,
-**stress-tests the constant-time guarantee on real code**, and surfaces concrete
-language gaps — finding + fixing those is the most valuable output. The
-high-value, unblocked crypto work (the full §2.8.2 vector, SHA-256, HMAC, the
-constant-time AES-128 block cipher, X25519 — the first public-key primitive — and the
-`Vec<secret T>` / `vec_to_array`-over-secret gap-fixes that enabled them) is DONE; the
-cleanly-open next steps are the higher-value crypto/borrow items in **Next** below
-(SHA-512, an AES mode (CTR/GCM), Ed25519, `&mut a[i]` borrows), with array-repeat
-`[x; N]` and the `scg` widen-mirror deferred as low value.
+EIGHT language gaps closed; crypto band shipped through SHA-256/512, HMAC, AES-128 +
+AES-GCM, X25519, Ed25519; HEAD `3f35b67`, 1576 tests).** Real, idiomatic Sentinel
+programs that double as feature tests + the first **core libraries**. **Dogfoods
+modules + `--separate`**, **stress-tests the constant-time guarantee on real code**,
+and surfaces concrete language gaps — finding + fixing those is the most valuable
+output. The crypto suite now spans symmetric ciphers + AEAD (ChaCha20-Poly1305,
+AES-GCM), hashes (SHA-256/512), a MAC (HMAC), a block cipher (AES), key exchange
+(X25519), and signatures (Ed25519 signing) — and the eighth language gap (`&mut a[i]`
+element borrows, ADR 0054) is closed. The cleanly-open next steps are in **Next** below
+(Ed25519 VERIFY — needs point decompression + a field sqrt; SHA-3/Keccak; the next
+real NUMERIC gap is still un-surfaced), with array-repeat `[x; N]` and the `scg`
+widen-mirror deferred as low value.
 
 - **Decisions locked with the owner:** top-level `std/` + `examples/`, each
   subdivided by **functional category** (security, math, …), examples mirroring
@@ -228,22 +229,57 @@ cleanly-open next steps are the higher-value crypto/borrow items in **Next** bel
   over 50 random pairs (no pass-by-luck), confirming the no-alias ladder is byte-identical
   + the Fermat exponent is exactly 2^255-21. NO ADR/`scg`/fixture (snc-only example).
   Scope = raw X25519 (one scalar mult; ECDH = two calls).
+- **Four-increment session (owner-approved "do all four", HEAD `b671436`→`3f35b67`),
+  four-check green each, NEVER pushed:**
+  - **`std/security/sha512` — constant-time SHA-512** (`d6f7ef9`), the 64-bit-word twin
+    of SHA-256. NATIVE `secret i64` words (no width casts — cleaner than SHA-256's
+    `secret i32`), 80 rounds, 128-byte blocks, the SHA-512 rotations; + `ct_rotr64`.
+    Verified vs NIST "abc"/""/200×'a'. Library growth, no gap.
+  - **`std/security/aes_gcm` — constant-time AES-128-GCM AEAD** (`ac57eeb`), composing
+    the AES block + GHASH. The GHASH GF(2^128) carry-less multiply (a 128-bit value =
+    two `secret i64` limbs [hi, lo]; branch-free bit-by-bit shift-and-XOR + reduce, the
+    textbook version branches on bits of the SECRET auth key H = AES_K(0)) is the new
+    field primitive — probe-proven, no 128-bit integer type needed. ⚠ FINDING: the
+    Python ref had to be validated vs OpenSSL (the McGrew "TC3" tag I first hand-typed
+    was a transcription error); reproduces the McGrew/OpenSSL TC4 vector (60B pt + 20B
+    AAD, partial blocks) + a no-AAD differential. Library growth, no gap.
+  - **`&mut a[i]` / `&a[i]` element borrows (ADR 0054)** (`0ec884f`) — the eighth
+    language gap + the only COMPILER change. Phase 1 = ONE arm (the `Index` arm of
+    `check_mutable_borrow_target` recurses on the base, like `FieldAccess`); the
+    element-address GEP (ADR 0050) + the borrow-check Index recursion + the Ref typing
+    were ALL already in place, so codegen + borrow-check needed NO change. Whole-array
+    borrow granularity (pre-Polonius); secret index still `IndexNotInt`. Phase 2 = NO
+    `scg` change (codegen reuses ADR 0050's `cg_emit_index_addr`); `tests/pass/
+    c59_borrow_index` validates `scg`==`snc` across all 8 differentials. +
+    `std::math::num::clamp_assign(&mut i64,…)` + `examples/math/inplace`.
+  - **`std/security/ed25519` — constant-time Ed25519 SIGNING** (`3f35b67`), the capstone.
+    Factored the shared **`std/security/fe25519`** field module (GF(2^255-19), the proven
+    X25519 radix-2^16 ops made `pub` + the Edwards constants d2/Bx/By); ed25519 composes
+    it + `sha512`. A faithful TweetNaCl `crypto_sign` port: extended-coord `point_add`,
+    the cswap double-and-add ladder over the SECRET scalar (branch-free), `point_pack`,
+    `modL` (signed shifts via `arith_shr`). A point = 4 separate `[secret i64]` (aggregates
+    can't move through a loop). ⚠ NEW IDIOM: forwarding a `&mut` param as a `&` arg needs
+    an explicit reborrow `&(*x)`. Drafted by a focused sub-agent vs a `cryptography`-verified
+    reference, then an independent review modeled the Sentinel source vs `cryptography` over
+    120 random seeds (600/600 pk+sig) + 27015 modL cases + 55 point-add/ladder cases — all
+    byte-identical. Reproduces 3 RFC 8032 vectors (incl. empty msg). Scope = SIGNING (verify
+    needs point decompression + a field sqrt — deferred). Library growth, no gap.
 - **Also done:** `d1dace8` `math::num` + `3e98443` **`std/bytes`** (`eq`/`find`/
   `contains`/`count`/`starts_with`/`repeat` over `&[u8]` borrows) + `examples/bytes/
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
   byte utilities must take `&[u8]`, not `[u8]` by value, or the first call consumes
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
-  - **More crypto** — the §2.8.2 vector, SHA-256, HMAC, a constant-time AES-128 block
-    cipher (`aes`, the field-inversion S-box), and X25519 (`x25519`, the first
-    public-key primitive) are shipped. Next on the rich surface: SHA-512 (64-bit words,
-    the same shape as SHA-256 — low risk, likely no new gap), an AES MODE over the
-    shipped block (CTR / GCM — GCM's GHASH is GF(2^128) carry-less mul, a new
-    field-arithmetic exercise), or Ed25519 (signatures — reuses the X25519 field +
-    SHA-512; the twisted-Edwards curve + point decompression are the new parts). NOTE:
-    X25519 confirmed the radix-2^16 field needs no 128-bit arithmetic; a radix-2^51
-    field (or a bigint type) remains the only path to the "next real numeric gap", and
-    no shipped program has demanded it.
+  - **More crypto** — the §2.8.2 vector, SHA-256/512, HMAC, AES + AES-GCM, X25519, and
+    Ed25519 SIGNING are all shipped. Cleanly open: **Ed25519 VERIFY** (the natural
+    completion — needs public point DECOMPRESSION, i.e. a field square root via
+    `z^((p+3)/8)` + the `sqrt(-1)` constant, which `fe25519` doesn't yet expose; verify
+    is public so it can be variable-time); **SHA-3 / Keccak** (a sponge — a different
+    permutation shape); or a curve over a DIFFERENT field that actually needs the
+    radix-2^51 / 128-bit-multiply path. NOTE: every shipped primitive (incl. X25519 +
+    Ed25519) fits the radix-2^16 field with NO 128-bit arithmetic, so the "next real
+    numeric gap" (128-bit mul / bigint) is STILL un-surfaced — no shipped program has
+    demanded it.
   - **Two deferred items from the list, now LOW value — recommend skipping unless
     wanted:**
     - **array-repeat `[x; N]`** — SHA-256/HMAC built cleanly WITHOUT it (`Vec<secret T>`
@@ -256,9 +292,9 @@ cleanly-open next steps are the higher-value crypto/borrow items in **Next** bel
       selfhost-corpus program uses these constructs, so mirroring them has zero
       functional impact (and carries byte-identity risk) until a fixture needs them.
       Deferred.
-    - Still genuinely open (medium value): `&mut [T]` element writes / `&mut a[i]`
-      borrows (ADR 0050 deferred these — the SHA-256 state used index-assign through a
-      `&mut [secret i32]`, which works; a `&mut a[i]` *borrow* is the remaining gap).
+    - **`&mut a[i]` element borrows — DONE** (ADR 0054, `0ec884f`). The remaining
+      borrow-checker limit is element-granular loans (whole-array granularity
+      over-rejects `swap(&mut a[i], &mut a[j])`), deferred to the Polonius migration.
   - **More `std` categories** — networking / threading / process need runtime/
     syscall surface that does not exist yet (a real gap to scope first).
   - **Lower value (and partly blocked):** **Linux CI (P2.4)** needs a Linux/CI
