@@ -3,9 +3,11 @@
 // SHA-3 is the Keccak SPONGE — a fundamentally different construction from the
 // Merkle-Damgård of SHA-2: a 1600-bit state (25 lanes of 64 bits) is permuted by
 // Keccak-f, absorbing message blocks by XOR and squeezing output out. This module
-// implements the fixed-output hashes SHA3-256 / SHA3-512 and the extendable-output
-// functions (XOFs) SHAKE128 / SHAKE256 over a `[secret u8]` message — the XOFs reuse
-// the same sponge with a different domain byte and an arbitrary-length squeeze.
+// implements the fixed-output hashes SHA3-256 / SHA3-512, the extendable-output
+// functions (XOFs) SHAKE128 / SHAKE256, and the keyed MACs KMAC128 / KMAC256 over a
+// `[secret u8]` message — the XOFs reuse the same sponge with a different domain byte
+// and an arbitrary-length squeeze, and KMAC (NIST SP 800-185) wraps a SECRET key
+// around cSHAKE with the standard length encodings.
 //
 // CONSTANT-TIME. The whole permutation is bitwise over `secret i64` lanes — XOR,
 // AND, the no-NOT complement `x ^ (0-1)`, and rotations by PUBLIC constants (via
@@ -200,4 +202,122 @@ pub fn shake128(msg: [secret u8], out_bytes: i64) -> [secret u8] {
 // the 0x1F domain byte, arbitrary-length SECRET output.
 pub fn shake256(msg: [secret u8], out_bytes: i64) -> [secret u8] {
     keccak_sponge(msg, 136, 31, out_bytes)
+}
+
+// ---- KMAC (the Keccak keyed MAC, NIST SP 800-185), built on cSHAKE. The SP 800-185
+// length encodings prefix the input with PUBLIC byte-counts; only the key + message
+// bytes are secret, so KMAC stays constant-time over the secret inputs. -------------
+
+// The number of bytes needed to represent the PUBLIC integer x (at least 1).
+fn byte_len(x: i64) -> i64 {
+    let mut n: i64 = 1;
+    let mut t: i64 = x;
+    while t >= 256 { t = t / 256; n = n + 1; }
+    n
+}
+
+// left_encode(x): the byte-count `n` followed by the `n` big-endian bytes of x.
+fn left_encode(x: i64) -> [secret u8] {
+    let n: i64 = byte_len(x);
+    let mut v: Vec<secret u8> = vec_new();
+    push(&mut v, i64_to_u8(n));
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut v, i64_to_u8((x >> (8 * (n - 1 - i))) & 255));
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+// right_encode(x): the `n` big-endian bytes of x followed by the byte-count `n`.
+fn right_encode(x: i64) -> [secret u8] {
+    let n: i64 = byte_len(x);
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut v, i64_to_u8((x >> (8 * (n - 1 - i))) & 255));
+        i = i + 1;
+    }
+    push(&mut v, i64_to_u8(n));
+    vec_to_array(v)
+}
+
+// Append every byte of `src` to `dst` (the building block for the SP 800-185 strings).
+fn append_bytes(dst: &mut Vec<secret u8>, src: &[secret u8]) -> i64 {
+    let n: i64 = len(*src);
+    let mut i: i64 = 0;
+    while i < n { push(dst, (*src)[i]); i = i + 1; }
+    0
+}
+
+// encode_string(s): left_encode(bit-length of s) followed by s.
+fn encode_string(s: &[secret u8]) -> [secret u8] {
+    let le: [secret u8] = left_encode(len(*s) * 8);
+    let mut v: Vec<secret u8> = vec_new();
+    append_bytes(&mut v, &le);
+    append_bytes(&mut v, s);
+    vec_to_array(v)
+}
+
+// bytepad(x, w): left_encode(w) ‖ x, zero-padded to a multiple of `w` bytes.
+fn bytepad(x: &[secret u8], w: i64) -> [secret u8] {
+    let le: [secret u8] = left_encode(w);
+    let mut v: Vec<secret u8> = vec_new();
+    append_bytes(&mut v, &le);
+    append_bytes(&mut v, x);
+    let cur: i64 = len(le) + len(*x);
+    let rem: i64 = cur - (cur / w) * w;
+    let pad: i64 = (w - rem) - ((w - rem) / w) * w;   // (w - rem) mod w
+    let mut p: i64 = 0;
+    while p < pad { push(&mut v, i64_to_u8(0)); p = p + 1; }
+    vec_to_array(v)
+}
+
+// KMAC over a SECRET key + message with a (public) customization string, at the given
+// rate (168 for KMAC128, 136 for KMAC256). The full cSHAKE input is
+//   bytepad(encode_string("KMAC") ‖ encode_string(custom), rate)
+//   ‖ bytepad(encode_string(key), rate) ‖ msg ‖ right_encode(out_bytes*8),
+// permuted with the cSHAKE domain byte 0x04. Returns the `out_bytes`-byte SECRET tag.
+fn kmac_compute(key: &[secret u8], msg: &[secret u8], custom: &[secret u8], rate: i64, out_bytes: i64) -> [secret u8] {
+    // The function-name string "KMAC" (bytes 75, 77, 65, 67).
+    let mut nm: Vec<secret u8> = vec_new();
+    push(&mut nm, i64_to_u8(75));
+    push(&mut nm, i64_to_u8(77));
+    push(&mut nm, i64_to_u8(65));
+    push(&mut nm, i64_to_u8(67));
+    let name: [secret u8] = vec_to_array(nm);
+
+    // cSHAKE prefix = bytepad(encode_string(name) ‖ encode_string(custom), rate).
+    let es_name: [secret u8] = encode_string(&name);
+    let es_custom: [secret u8] = encode_string(custom);
+    let mut inner: Vec<secret u8> = vec_new();
+    append_bytes(&mut inner, &es_name);
+    append_bytes(&mut inner, &es_custom);
+    let inner_arr: [secret u8] = vec_to_array(inner);
+    let prefix: [secret u8] = bytepad(&inner_arr, rate);
+
+    // The keyed body: bytepad(encode_string(key), rate) ‖ msg ‖ right_encode(out bits).
+    let ek: [secret u8] = encode_string(key);
+    let bp_key: [secret u8] = bytepad(&ek, rate);
+    let re: [secret u8] = right_encode(out_bytes * 8);
+
+    let mut full: Vec<secret u8> = vec_new();
+    append_bytes(&mut full, &prefix);
+    append_bytes(&mut full, &bp_key);
+    append_bytes(&mut full, msg);
+    append_bytes(&mut full, &re);
+
+    keccak_sponge(vec_to_array(full), rate, 4, out_bytes)
+}
+
+// KMAC128 — the Keccak keyed MAC at 128-bit security (cSHAKE128, rate 168 bytes).
+// `out_bytes` is the requested tag length (and is bound into the input via
+// right_encode, so KMAC128 with different output lengths gives unrelated tags).
+pub fn kmac128(key: [secret u8], msg: [secret u8], custom: [secret u8], out_bytes: i64) -> [secret u8] {
+    kmac_compute(&key, &msg, &custom, 168, out_bytes)
+}
+
+// KMAC256 — the Keccak keyed MAC at 256-bit security (cSHAKE256, rate 136 bytes).
+pub fn kmac256(key: [secret u8], msg: [secret u8], custom: [secret u8], out_bytes: i64) -> [secret u8] {
+    kmac_compute(&key, &msg, &custom, 136, out_bytes)
 }

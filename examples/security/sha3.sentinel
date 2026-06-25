@@ -16,6 +16,8 @@ use std::security::sha3::sha3_256;
 use std::security::sha3::sha3_512;
 use std::security::sha3::shake128;
 use std::security::sha3::shake256;
+use std::security::sha3::kmac128;
+use std::security::sha3::kmac256;
 
 fn check256(msg: [secret u8], exp: &[i64]) -> i64 {
     let d: [secret u8] = sha3_256(msg);
@@ -55,6 +57,14 @@ fn abc_msg() -> [secret u8] {
     push(&mut v, i64_to_u8(97));
     push(&mut v, i64_to_u8(98));
     push(&mut v, i64_to_u8(99));
+    vec_to_array(v)
+}
+
+// A SECRET byte buffer from the first `n` bytes of a public array (`n` may be 0).
+fn mk(src: &[i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8((*src)[i])); i = i + 1; }
     vec_to_array(v)
 }
 
@@ -177,6 +187,41 @@ fn main() -> i64 {
         117, 19, 119, 26, 246, 191, 225, 25
     ];
     bad = bad | check_xof(shake256(abc_msg(), 200), &s256_200, 200);
+
+    // ---- KMAC over the NIST SP 800-185 sample key/data. The 32-byte key (0x40..0x5F),
+    // the 4-byte data 00010203, and the "My Tagged Application" customization string.
+    let key: [i64] = [
+        64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+        80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95
+    ];
+    let data4: [i64] = [0, 1, 2, 3];
+    let app: [i64] = [
+        77, 121, 32, 84, 97, 103, 103, 101, 100, 32, 65, 112, 112, 108, 105, 99,
+        97, 116, 105, 111, 110
+    ];
+
+    // KMAC128(key, 00010203, 256-bit tag, no customization) — SP 800-185 sample #1.
+    let ek1: [i64] = [
+        229, 120, 11, 13, 62, 166, 247, 211, 164, 41, 197, 112, 106, 164, 58, 0,
+        250, 219, 215, 212, 150, 40, 131, 158, 49, 135, 36, 63, 69, 110, 225, 78
+    ];
+    bad = bad | check_xof(kmac128(mk(&key, 32), mk(&data4, 4), mk(&data4, 0), 32), &ek1, 32);
+
+    // KMAC128(key, 00010203, 256-bit tag, "My Tagged Application") — sample #2.
+    let ek2: [i64] = [
+        59, 31, 186, 150, 60, 216, 176, 181, 158, 140, 26, 109, 113, 136, 139, 113,
+        67, 101, 26, 248, 186, 10, 112, 112, 192, 151, 158, 40, 17, 50, 74, 165
+    ];
+    bad = bad | check_xof(kmac128(mk(&key, 32), mk(&data4, 4), mk(&app, 21), 32), &ek2, 32);
+
+    // KMAC256(key, 00010203, 512-bit tag, "My Tagged Application") — sample #4.
+    let ek4: [i64] = [
+        32, 197, 112, 195, 19, 70, 247, 3, 201, 172, 54, 198, 28, 3, 203, 100,
+        195, 151, 13, 12, 252, 120, 126, 155, 121, 89, 157, 39, 58, 104, 210, 247,
+        246, 157, 76, 195, 222, 157, 16, 74, 53, 22, 137, 242, 124, 246, 245, 149,
+        31, 1, 3, 243, 63, 79, 36, 135, 16, 36, 217, 194, 119, 115, 168, 221
+    ];
+    bad = bad | check_xof(kmac256(mk(&key, 32), mk(&data4, 4), mk(&app, 21), 64), &ek4, 64);
 
     if bad == 0 { 42 } else { 0 }
 }
