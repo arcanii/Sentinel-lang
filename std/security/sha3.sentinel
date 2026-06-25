@@ -1,0 +1,176 @@
+// std::security::sha3 — constant-time SHA-3 over a SECRET message (FIPS 202).
+//
+// SHA-3 is the Keccak SPONGE — a fundamentally different construction from the
+// Merkle-Damgård of SHA-2: a 1600-bit state (25 lanes of 64 bits) is permuted by
+// Keccak-f, absorbing message blocks by XOR and squeezing the digest out. This
+// module implements SHA3-256 and SHA3-512 over a `[secret u8]` message.
+//
+// CONSTANT-TIME. The whole permutation is bitwise over `secret i64` lanes — XOR,
+// AND, the no-NOT complement `x ^ (0-1)`, and rotations by PUBLIC constants (via
+// `std::security::ct::ct_rotl64`). The message CONTENT is secret and flows only
+// through these data-independent ops; the message LENGTH is PUBLIC, so the padding,
+// the block count, and every loop bound / array index are public — the access
+// pattern never depends on the secret bytes. A successful build is itself a proof:
+// the compiler's constant-time check rejects any secret reaching a branch, a memory
+// index, or a divisor.
+//
+// Implementation notes:
+//   * The state is a 25-lane `[secret i64]` (flat index x + 5y) mutated IN PLACE
+//     through a `&mut [secret i64]` borrow across the 24 rounds.
+//   * Keccak-f's five steps (θ, ρ, π, χ, ι) are branch-free; the round constants and
+//     ρ rotation offsets are PUBLIC tables indexed by the public round / lane index.
+//   * χ's `~B` is the no-NOT complement `B ^ (0 - 1)` (Sentinel has no bitwise NOT).
+//   * The all-`x mod 5` index wraps are PUBLIC arithmetic (`n - (n/5)*5`).
+use std::security::ct::ct_rotl64;
+
+// Keccak-f[1600]: 24 rounds of θ ρ π χ ι over the 25-lane state, in place.
+fn keccak_f(a: &mut [secret i64]) -> i64 {
+    // The 24 round constants (FIPS 202), as signed i64 (public; widen into ι's XOR).
+    let rc: [i64] = [
+        1, 32898, -9223372036854742902, -9223372034707259392,
+        32907, 2147483649, -9223372034707259263, -9223372036854743031,
+        138, 136, 2147516425, 2147483658,
+        2147516555, -9223372036854775669, -9223372036854742903, -9223372036854743037,
+        -9223372036854743038, -9223372036854775680, 32778, -9223372034707292150,
+        -9223372034707259263, -9223372036854742912, 2147483649, -9223372034707259384
+    ];
+    // The ρ rotation offsets, indexed by the lane index x + 5y (public).
+    let rho: [i64] = [
+        0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39,
+        41, 45, 15, 21, 8, 18, 2, 61, 56, 14
+    ];
+
+    let mut rnd: i64 = 0;
+    while rnd < 24 {
+        // ---- θ: C[x] = XOR of column x; D[x] = C[x-1] ^ rotl(C[x+1], 1); A ^= D.
+        let mut cv: Vec<secret i64> = vec_new();
+        let mut x: i64 = 0;
+        while x < 5 {
+            push(&mut cv, (*a)[x] ^ (*a)[x + 5] ^ (*a)[x + 10] ^ (*a)[x + 15] ^ (*a)[x + 20]);
+            x = x + 1;
+        }
+        let c: [secret i64] = vec_to_array(cv);
+        let mut dv: Vec<secret i64> = vec_new();
+        push(&mut dv, c[4] ^ ct_rotl64(c[1], 1));
+        push(&mut dv, c[0] ^ ct_rotl64(c[2], 1));
+        push(&mut dv, c[1] ^ ct_rotl64(c[3], 1));
+        push(&mut dv, c[2] ^ ct_rotl64(c[4], 1));
+        push(&mut dv, c[3] ^ ct_rotl64(c[0], 1));
+        let d: [secret i64] = vec_to_array(dv);
+        let mut i: i64 = 0;
+        while i < 25 {
+            let xx: i64 = i - (i / 5) * 5;       // x = i mod 5
+            (*a)[i] = (*a)[i] ^ d[xx];
+            i = i + 1;
+        }
+
+        // ---- ρ + π: B[y + 5*((2x+3y) mod 5)] = rotl(A[x+5y], rho[x+5y]).
+        let mut bv: Vec<secret i64> = vec_new();
+        let mut z: i64 = 0;
+        while z < 25 { push(&mut bv, 0); z = z + 1; }
+        let mut b: [secret i64] = vec_to_array(bv);
+        let mut xy: i64 = 0;
+        while xy < 25 {
+            let xc: i64 = xy - (xy / 5) * 5;     // x
+            let yc: i64 = xy / 5;                // y
+            let s: i64 = 2 * xc + 3 * yc;
+            let dy: i64 = s - (s / 5) * 5;       // (2x+3y) mod 5
+            b[yc + 5 * dy] = ct_rotl64((*a)[xy], rho[xy]);
+            xy = xy + 1;
+        }
+
+        // ---- χ: A[x+5y] = B[x+5y] ^ ((~B[(x+1)%5+5y]) & B[(x+2)%5+5y]).
+        let mut j: i64 = 0;
+        while j < 25 {
+            let xc: i64 = j - (j / 5) * 5;
+            let yc: i64 = j / 5;
+            let x1: i64 = (xc + 1) - ((xc + 1) / 5) * 5;
+            let x2: i64 = (xc + 2) - ((xc + 2) / 5) * 5;
+            let nb: secret i64 = b[x1 + 5 * yc] ^ (0 - 1);   // ~B
+            (*a)[j] = b[j] ^ (nb & b[x2 + 5 * yc]);
+            j = j + 1;
+        }
+
+        // ---- ι: A[0] ^= RC[round].
+        (*a)[0] = (*a)[0] ^ rc[rnd];
+        rnd = rnd + 1;
+    }
+    0
+}
+
+// The Keccak sponge for the SHA-3 instances: absorb `msg` at the given rate (bytes
+// per block), apply the SHA-3 pad (append 0x06, zero-fill the block, set the top bit
+// of the last byte), then squeeze `out_bytes` bytes (for SHA3-256/512 the output
+// fits the first block, so no extra permutation is needed). Returns the SECRET digest.
+fn keccak_sponge(msg: [secret u8], rate: i64, out_bytes: i64) -> [secret u8] {
+    let mlen: i64 = len(msg);
+
+    // ---- Pad: msg ‖ 0x06 ‖ 0x00* (to a multiple of `rate`), then last byte ^= 0x80.
+    let mut padded: Vec<secret u8> = vec_new();
+    let mut m: i64 = 0;
+    while m < mlen {
+        push(&mut padded, msg[m]);
+        m = m + 1;
+    }
+    push(&mut padded, i64_to_u8(6));
+    // zero-fill until the length is a multiple of `rate`.
+    let after: i64 = mlen + 1;
+    let rem: i64 = after - (after / rate) * rate;        // (mlen+1) mod rate
+    let zeros: i64 = (rate - rem) - ((rate - rem) / rate) * rate;  // (rate-rem) mod rate
+    let mut zc: i64 = 0;
+    while zc < zeros { push(&mut padded, i64_to_u8(0)); zc = zc + 1; }
+    let mut parr: [secret u8] = vec_to_array(padded);
+    let total: i64 = len(parr);
+    parr[total - 1] = parr[total - 1] ^ i64_to_u8(128);  // set the final pad bit (0x80)
+
+    // ---- State: 25 zero lanes, absorbed + permuted block by block.
+    let mut av: Vec<secret i64> = vec_new();
+    let mut zl: i64 = 0;
+    while zl < 25 { push(&mut av, 0); zl = zl + 1; }
+    let mut a: [secret i64] = vec_to_array(av);
+
+    let lanes: i64 = rate / 8;            // lanes absorbed per block
+    let nblocks: i64 = total / rate;
+    let mut blk: i64 = 0;
+    while blk < nblocks {
+        let base: i64 = blk * rate;
+        let mut li: i64 = 0;
+        while li < lanes {
+            // little-endian 8-byte lane.
+            let off: i64 = base + li * 8;
+            let lane: secret i64 = ((parr[off] as i64))
+                | (((parr[off + 1] as i64)) << 8)  | (((parr[off + 2] as i64)) << 16)
+                | (((parr[off + 3] as i64)) << 24) | (((parr[off + 4] as i64)) << 32)
+                | (((parr[off + 5] as i64)) << 40) | (((parr[off + 6] as i64)) << 48)
+                | (((parr[off + 7] as i64)) << 56);
+            a[li] = a[li] ^ lane;
+            li = li + 1;
+        }
+        keccak_f(&mut a);
+        blk = blk + 1;
+    }
+
+    // ---- Squeeze: out_bytes from the first lanes, little-endian.
+    let mut out: Vec<secret u8> = vec_new();
+    let outlanes: i64 = out_bytes / 8;
+    let mut ol: i64 = 0;
+    while ol < outlanes {
+        let mut byte: i64 = 0;
+        while byte < 8 {
+            push(&mut out, (a[ol] >> (8 * byte)) as u8);
+            byte = byte + 1;
+        }
+        ol = ol + 1;
+    }
+    vec_to_array(out)
+}
+
+// SHA3-256 of a SECRET message (FIPS 202): rate 1088 bits (136 bytes), 32-byte digest.
+pub fn sha3_256(msg: [secret u8]) -> [secret u8] {
+    keccak_sponge(msg, 136, 32)
+}
+
+// SHA3-512 of a SECRET message (FIPS 202): rate 576 bits (72 bytes), 64-byte digest.
+pub fn sha3_512(msg: [secret u8]) -> [secret u8] {
+    keccak_sponge(msg, 72, 64)
+}

@@ -261,6 +261,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // plaintext + 20-byte AAD, partial blocks) AND the same input without AAD matched
     // ciphertext + tag byte-for-byte.
     ("examples/security/aes_gcm.sentinel", 42),
+    // Constant-time SHA-3 over a SECRET message (std::security::sha3, FIPS 202) — the
+    // Keccak sponge (a different construction from SHA-2's Merkle-Damgård): the
+    // Keccak-f[1600] permutation is branch-free bitwise ops over 25 `secret i64`
+    // lanes. 42 = SHA3-256("abc"/""/200*'a'/135*'a' padding-edge) and SHA3-512("abc"/
+    // 100*'a') all matched their NIST digest (both rates, single + multi-block).
+    ("examples/security/sha3.sentinel", 42),
     // Constant-time Ed25519 SIGNING + VERIFICATION (std::security::ed25519, RFC 8032)
     // over a SECRET seed. Composes the shared field layer (std::security::fe25519) +
     // SHA-512; the Edwards scalar multiplication runs over the secret scalar via a
@@ -380,6 +386,11 @@ fn sha512_digest() {
 #[test]
 fn aes_gcm_aead_constant_time() {
     check_example("examples/security/aes_gcm.sentinel", "aes_gcm", 42);
+}
+
+#[test]
+fn sha3_keccak_digest() {
+    check_example("examples/security/sha3.sentinel", "sha3", 42);
 }
 
 #[test]

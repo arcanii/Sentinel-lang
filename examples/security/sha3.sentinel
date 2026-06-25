@@ -1,0 +1,102 @@
+// examples/security/sha3.sentinel — constant-time SHA-3 over NIST vectors.
+//
+// Hashes secret messages with std::security::sha3 and checks each digest against the
+// published FIPS 202 / NIST value, across BOTH instances and single + multi-block
+// inputs: SHA3-256 over "abc", "", and 200*'a' (200 > 136 = the rate, so two
+// blocks), and SHA3-512 over "abc" and 100*'a' (100 > 72 = its rate, two blocks).
+//
+// CONSTANT-TIME DISCIPLINE. Each message is a `[secret u8]`, so its content is secret
+// and the Keccak sponge permutes it through branch-free bitwise ops over `secret i64`
+// lanes only — the digest comes back `[secret u8]`. The compiler's constant-time check
+// proves on every build that no secret byte reached a branch, a memory index, or a
+// divisor (the LENGTH is public, so the padding / block count / loop bounds are
+// public). The only declassify boundary is HERE, XOR-diffing each digest byte against
+// the public NIST constant. Exit 42 = every digest matched byte-for-byte.
+use std::security::sha3::sha3_256;
+use std::security::sha3::sha3_512;
+
+fn check256(msg: [secret u8], exp: &[i64]) -> i64 {
+    let d: [secret u8] = sha3_256(msg);
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 32 { bad = bad | (u8_to_i64(declassify(d[i])) ^ (*exp)[i]); i = i + 1; }
+    bad
+}
+
+fn check512(msg: [secret u8], exp: &[i64]) -> i64 {
+    let d: [secret u8] = sha3_512(msg);
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 64 { bad = bad | (u8_to_i64(declassify(d[i])) ^ (*exp)[i]); i = i + 1; }
+    bad
+}
+
+// A SECRET message of `n` copies of byte `b`.
+fn repeat_byte(n: i64, b: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8(b)); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- SHA3-256("abc").
+    let mut abc: Vec<secret u8> = vec_new();
+    push(&mut abc, i64_to_u8(97));
+    push(&mut abc, i64_to_u8(98));
+    push(&mut abc, i64_to_u8(99));
+    let e256abc: [i64] = [
+        58, 152, 93, 167, 79, 226, 37, 178, 4, 92, 23, 45, 107, 211, 144, 189,
+        133, 95, 8, 110, 62, 157, 82, 91, 70, 191, 226, 69, 17, 67, 21, 50
+    ];
+    bad = bad | check256(vec_to_array(abc), &e256abc);
+
+    // ---- SHA3-256("").
+    let empty: Vec<secret u8> = vec_new();
+    let e256empty: [i64] = [
+        167, 255, 198, 248, 191, 30, 215, 102, 81, 193, 71, 86, 160, 97, 214, 98,
+        245, 128, 255, 77, 228, 59, 73, 250, 130, 216, 10, 75, 128, 248, 67, 74
+    ];
+    bad = bad | check256(vec_to_array(empty), &e256empty);
+
+    // ---- SHA3-256(200 * 'a') — two blocks (200 > 136).
+    let e256_200a: [i64] = [
+        204, 227, 68, 133, 186, 242, 191, 42, 202, 153, 185, 72, 51, 137, 42, 79,
+        82, 137, 109, 61, 21, 63, 123, 132, 12, 196, 249, 254, 105, 95, 19, 135
+    ];
+    bad = bad | check256(repeat_byte(200, 97), &e256_200a);
+
+    // ---- SHA3-256(135 * 'a') — the padding edge: 135 = rate-1, so after the 0x06
+    // domain byte the block is full and the final 0x80 bit XORs into the SAME byte.
+    let e256_135a: [i64] = [
+        128, 148, 187, 83, 196, 76, 251, 30, 103, 183, 195, 4, 71, 249, 161, 195,
+        54, 150, 210, 70, 62, 204, 29, 156, 146, 83, 137, 19, 57, 40, 67, 201
+    ];
+    bad = bad | check256(repeat_byte(135, 97), &e256_135a);
+
+    // ---- SHA3-512("abc").
+    let mut abc2: Vec<secret u8> = vec_new();
+    push(&mut abc2, i64_to_u8(97));
+    push(&mut abc2, i64_to_u8(98));
+    push(&mut abc2, i64_to_u8(99));
+    let e512abc: [i64] = [
+        183, 81, 133, 11, 26, 87, 22, 138, 86, 147, 205, 146, 75, 107, 9, 110,
+        8, 246, 33, 130, 116, 68, 247, 13, 136, 79, 93, 2, 64, 210, 113, 46,
+        16, 225, 22, 233, 25, 42, 243, 201, 26, 126, 197, 118, 71, 227, 147, 64,
+        87, 52, 11, 76, 244, 8, 213, 165, 101, 146, 248, 39, 78, 236, 83, 240
+    ];
+    bad = bad | check512(vec_to_array(abc2), &e512abc);
+
+    // ---- SHA3-512(100 * 'a') — two blocks (100 > 72).
+    let e512_100a: [i64] = [
+        180, 121, 36, 245, 225, 28, 218, 156, 30, 207, 126, 83, 100, 167, 127, 104,
+        130, 126, 250, 153, 50, 135, 14, 224, 120, 28, 207, 154, 72, 247, 51, 223,
+        252, 92, 77, 103, 2, 156, 143, 2, 74, 74, 68, 222, 93, 250, 15, 39,
+        60, 3, 147, 143, 116, 254, 177, 62, 94, 153, 170, 125, 107, 153, 24, 36
+    ];
+    bad = bad | check512(repeat_byte(100, 97), &e512_100a);
+
+    if bad == 0 { 42 } else { 0 }
+}
