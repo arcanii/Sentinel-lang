@@ -64,7 +64,8 @@ the current state of the workspace without re-reading every commit.
   incl. `ct_memcmp` + `ct_vec_eq` + `ct_rotl64`/`ct_rotl32`/`ct_rotr32`; `siphash`
   SipHash-2-4 keyed MAC; `chacha20` block + stream cipher; `poly1305` one-time MAC
   over a secret key; `aead` ChaCha20-Poly1305 AEAD composing them; `sha256` /
-  `sha512` constant-time SHA-256 / SHA-512 over a `secret` message; `hmac`
+  `sha512` constant-time SHA-256 / SHA-512 + `sha3` SHA3-256/SHA3-512 (the Keccak
+  sponge) over a `secret` message; `hmac`
   HMAC-SHA256 over a `secret` key; `aes` a constant-time AES-128 block cipher with a
   table-free, field-inversion S-box; `aes_gcm` constant-time AES-128-GCM AEAD (GHASH
   GF(2^128)); `fe25519` the shared GF(2^255-19) field; `x25519` constant-time X25519
@@ -79,7 +80,8 @@ the current state of the workspace without re-reading every commit.
   §2.5.2 / the full 114-byte §2.8.2 AEAD vector; NIST SHA-256 "abc"/""/multi-block;
   RFC 4231 HMAC-SHA256 TC1/TC2/TC6; FIPS-197 §C.1 + AES-128(0,0); RFC 7748 §5.2 +
   §6.1 X25519/DH; NIST SHA-512 "abc"/""/multi-block; the McGrew/OpenSSL AES-GCM "TC4"
-  vector; RFC 8032 Ed25519 sign vectors). It has surfaced + closed **eight** language
+  vector; RFC 8032 Ed25519 sign+verify vectors; NIST SHA3-256/512). It has surfaced +
+  closed **eight** language
   gaps so far, each ADR-first; seven are fully self-hosted (snc + `scg`,
   byte-identical, both fixed points held — ADR 0047 / 0048 / 0049 / 0050 / 0052 /
   0053 / 0054), and ADR 0051's operand widen is too (its call-arg / array / return
@@ -147,15 +149,17 @@ the current state of the workspace without re-reading every commit.
   field primitive), constant-time **X25519** ECDH (`x25519`, the first public-key
   primitive), and constant-time **Ed25519** SIGNING + verification (`ed25519`, RFC 8032, composing
   the shared `fe25519` field + `sha512`; verify decompresses a point via a field
-  square root and enforces the `S < L` canonicality check). AES, X25519, and Ed25519 are its sharpest
-  constant-time demonstrations: in each, the textbook implementation has a
-  key-dependent side channel that does not compile — AES's table-lookup S-box
-  (`sbox[secret_byte]`) is a secret value indexing memory, and the X25519 / Ed25519
-  scalar-multiplication ladders would branch on the secret scalar bits — so Sentinel
-  forces the constant-time form (a table-free field-inversion S-box, a branch-free
-  mask-based conditional swap). See the `sentinel_examples_and_corelibs` auto-memory.
+  square root and enforces the `S < L` canonicality check), and **SHA-3** /
+  SHA3-256/512 (`sha3`, the Keccak sponge — a different construction shape from
+  SHA-2's Merkle-Damgård). AES, X25519, and Ed25519 are its sharpest constant-time
+  demonstrations: in each, the textbook implementation has a key-dependent side
+  channel that does not compile — AES's table-lookup S-box (`sbox[secret_byte]`) is a
+  secret value indexing memory, and the X25519 / Ed25519 scalar-multiplication ladders
+  would branch on the secret scalar bits — so Sentinel forces the constant-time form
+  (a table-free field-inversion S-box, a branch-free mask-based conditional swap). See
+  the `sentinel_examples_and_corelibs` auto-memory.
 
-**1576 tests across the workspace**, four-check green (build · `cargo nextest`
+**1577 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
