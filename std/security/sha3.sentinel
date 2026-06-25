@@ -2,8 +2,10 @@
 //
 // SHA-3 is the Keccak SPONGE — a fundamentally different construction from the
 // Merkle-Damgård of SHA-2: a 1600-bit state (25 lanes of 64 bits) is permuted by
-// Keccak-f, absorbing message blocks by XOR and squeezing the digest out. This
-// module implements SHA3-256 and SHA3-512 over a `[secret u8]` message.
+// Keccak-f, absorbing message blocks by XOR and squeezing output out. This module
+// implements the fixed-output hashes SHA3-256 / SHA3-512 and the extendable-output
+// functions (XOFs) SHAKE128 / SHAKE256 over a `[secret u8]` message — the XOFs reuse
+// the same sponge with a different domain byte and an arbitrary-length squeeze.
 //
 // CONSTANT-TIME. The whole permutation is bitwise over `secret i64` lanes — XOR,
 // AND, the no-NOT complement `x ^ (0-1)`, and rotations by PUBLIC constants (via
@@ -98,21 +100,24 @@ fn keccak_f(a: &mut [secret i64]) -> i64 {
     0
 }
 
-// The Keccak sponge for the SHA-3 instances: absorb `msg` at the given rate (bytes
-// per block), apply the SHA-3 pad (append 0x06, zero-fill the block, set the top bit
-// of the last byte), then squeeze `out_bytes` bytes (for SHA3-256/512 the output
-// fits the first block, so no extra permutation is needed). Returns the SECRET digest.
-fn keccak_sponge(msg: [secret u8], rate: i64, out_bytes: i64) -> [secret u8] {
+// The Keccak sponge, shared by the fixed-output SHA-3 hashes and the SHAKE XOFs.
+// Absorb `msg` at the given `rate` (bytes per block), apply the pad (append the
+// domain-separation byte `dsbyte` — 0x06 for SHA-3, 0x1F for SHAKE — zero-fill the
+// block, set the top bit of the last byte), then squeeze `out_bytes` bytes. The
+// squeeze is the full XOF squeeze: it emits up to `rate` bytes per permutation and
+// runs Keccak-f again whenever more output is requested (the last block may be
+// partial), so `out_bytes` may be ANY length. Returns the SECRET output.
+fn keccak_sponge(msg: [secret u8], rate: i64, dsbyte: i64, out_bytes: i64) -> [secret u8] {
     let mlen: i64 = len(msg);
 
-    // ---- Pad: msg ‖ 0x06 ‖ 0x00* (to a multiple of `rate`), then last byte ^= 0x80.
+    // ---- Pad: msg ‖ dsbyte ‖ 0x00* (to a multiple of `rate`), then last byte ^= 0x80.
     let mut padded: Vec<secret u8> = vec_new();
     let mut m: i64 = 0;
     while m < mlen {
         push(&mut padded, msg[m]);
         m = m + 1;
     }
-    push(&mut padded, i64_to_u8(6));
+    push(&mut padded, i64_to_u8(dsbyte));
     // zero-fill until the length is a multiple of `rate`.
     let after: i64 = mlen + 1;
     let rem: i64 = after - (after / rate) * rate;        // (mlen+1) mod rate
@@ -150,27 +155,49 @@ fn keccak_sponge(msg: [secret u8], rate: i64, out_bytes: i64) -> [secret u8] {
         blk = blk + 1;
     }
 
-    // ---- Squeeze: out_bytes from the first lanes, little-endian.
+    // ---- Squeeze out_bytes (the XOF squeeze): emit up to `rate` bytes from the state,
+    // permute again when more are needed; the last block may be partial. The byte at
+    // position p within a rate block is byte (p mod 8) of lane (p / 8), little-endian.
     let mut out: Vec<secret u8> = vec_new();
-    let outlanes: i64 = out_bytes / 8;
-    let mut ol: i64 = 0;
-    while ol < outlanes {
-        let mut byte: i64 = 0;
-        while byte < 8 {
-            push(&mut out, (a[ol] >> (8 * byte)) as u8);
-            byte = byte + 1;
+    let mut produced: i64 = 0;
+    while produced < out_bytes {
+        let remaining: i64 = out_bytes - produced;
+        let take: i64 = if remaining < rate { remaining } else { rate };
+        let mut p: i64 = 0;
+        while p < take {
+            let lane_idx: i64 = p / 8;
+            let byte_in_lane: i64 = p - lane_idx * 8;
+            push(&mut out, (a[lane_idx] >> (8 * byte_in_lane)) as u8);
+            p = p + 1;
         }
-        ol = ol + 1;
+        produced = produced + take;
+        if produced < out_bytes {
+            keccak_f(&mut a);
+            0
+        } else { 0 };
     }
     vec_to_array(out)
 }
 
 // SHA3-256 of a SECRET message (FIPS 202): rate 1088 bits (136 bytes), 32-byte digest.
 pub fn sha3_256(msg: [secret u8]) -> [secret u8] {
-    keccak_sponge(msg, 136, 32)
+    keccak_sponge(msg, 136, 6, 32)
 }
 
 // SHA3-512 of a SECRET message (FIPS 202): rate 576 bits (72 bytes), 64-byte digest.
 pub fn sha3_512(msg: [secret u8]) -> [secret u8] {
-    keccak_sponge(msg, 72, 64)
+    keccak_sponge(msg, 72, 6, 64)
+}
+
+// SHAKE128 — the extendable-output function (FIPS 202): rate 1344 bits (168 bytes),
+// the 0x1F domain byte, and an arbitrary `out_bytes`-length SECRET output. A longer
+// output is a prefix-extension of a shorter one (the XOF property).
+pub fn shake128(msg: [secret u8], out_bytes: i64) -> [secret u8] {
+    keccak_sponge(msg, 168, 31, out_bytes)
+}
+
+// SHAKE256 — the extendable-output function (FIPS 202): rate 1088 bits (136 bytes),
+// the 0x1F domain byte, arbitrary-length SECRET output.
+pub fn shake256(msg: [secret u8], out_bytes: i64) -> [secret u8] {
+    keccak_sponge(msg, 136, 31, out_bytes)
 }
