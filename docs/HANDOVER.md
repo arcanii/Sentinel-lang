@@ -61,9 +61,10 @@ bidirectional, multi-packet chacha20-poly1305 channel with per-direction seqnr e
 `examples/net/ssh_full_session` running a COMPLETE session (handshake + data phase) over
 one connection via the factored `std::net::ssh_handshake` API, `examples/net/ssh_pubkey_auth`
 running RFC 4252 publickey USER AUTHENTICATION (a session-id-bound Ed25519 signature) on top,
-and `examples/net/ssh_channel_window` running the RFC 4254 CONNECTION layer (a windowed
-session channel) — so the full transport→auth→channel sequence now runs over real sockets;
-HEAD `79bd5e8`, 1592 tests,
+`examples/net/ssh_channel_window` running the RFC 4254 CONNECTION layer (a windowed
+session channel), and `examples/net/ssh_exec` running a `CHANNEL_REQUEST "exec"` command
+request — so the full transport→auth→channel→exec sequence now runs over real sockets;
+HEAD `61c6682`, 1593 tests,
 four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
@@ -434,9 +435,14 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     **So the core SSH-2 sequence a real sshd runs is now COMPLETE end to end over real
     sockets: transport KEX → host-key auth → key derivation → encrypted channel → publickey
     user auth → windowed session channel** — every step machine-checked constant-time, both
-    back ends byte-identical. Cleanly open next (all peripheral / optional now): a `userauth`
-    failure-then-retry loop; `CHANNEL_REQUEST` "exec"/"shell" + an exit-status reply; multiple
-    concurrent channels.
+    back ends byte-identical. AND `CHANNEL_REQUEST "exec"` now runs too — `std::net::ssh_connection`
+    grew the exec/exit-status messages + the framed record I/O (`ssh_send_record`/`ssh_recv_record`,
+    factored out of `ssh_channel_window`), and `examples/net/ssh_exec` (`61c6682`) does
+    `ssh user@host some-command` end to end: open a channel → `CHANNEL_REQUEST "exec"` →
+    `CHANNEL_SUCCESS` → command output as `CHANNEL_DATA` → `"exit-status"` → close. Cleanly
+    open next (all peripheral / optional now): a `userauth`
+    failure-then-retry loop; a `"shell"` request / interactive `CHANNEL_DATA` ping-pong;
+    multiple concurrent channels.
     Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of

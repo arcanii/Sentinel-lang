@@ -118,7 +118,11 @@ the current state of the workspace without re-reading every commit.
   messages — a "session" channel with **windowed flow control** (a 32-byte payload crosses in
   two 16-byte `CHANNEL_DATA` chunks gated by a server-replenished window). So the full SSH-2
   sequence a real `sshd` runs — transport KEX → host-key auth → key derivation → encrypted
-  channel → publickey user auth → windowed session channel — now runs over real sockets.
+  channel → publickey user auth → windowed session channel — now runs over real sockets,
+  and `examples/net/ssh_exec` runs a `CHANNEL_REQUEST "exec"` command request on top
+  (`ssh user@host some-command`: open a channel, run a command, read back its output, exit
+  status, and close; the framed record I/O `ssh_send_record`/`ssh_recv_record` lives in
+  `std/net/ssh_connection`).
   The
   crypto examples reproduce the
   canonical test vectors (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 /
@@ -206,7 +210,7 @@ the current state of the workspace without re-reading every commit.
   (a table-free field-inversion S-box, a branch-free mask-based conditional swap). See
   the `sentinel_examples_and_corelibs` auto-memory.
 
-**1592 tests across the workspace**, four-check green (build · `cargo nextest`
+**1593 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
