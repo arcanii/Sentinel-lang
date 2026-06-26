@@ -390,8 +390,11 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     to send and WIDENED back to secret (public->secret, ADR 0049) on receipt — K and the
     session key never cross the socket. A `read_exact` helper coalesces a TCP write split
     across reads. `examples/net/ssh_session` stays as the vector-anchored in-memory
-    reference. So the loopback `sshd` transport is now REAL-SOCKET end to end. Cleanly open
-    next toward a fuller sshd: a thin `std/net/tcp` wrapper over the raw builtins; a
+    reference. So the loopback `sshd` transport is now REAL-SOCKET end to end. A thin `std/net/tcp` wrapper now factors the socket-boundary helpers (`read_exact`
+    + the secret<->public `declassify_bytes`/`append_declassified`/`widen_bytes` + a
+    `loopback_host`) out of both socket examples (`8ba497c`; `ssh_over_tcp` and `tcp_echo`
+    both dogfood it). Cleanly open
+    next toward a fuller sshd: a
     bidirectional / multi-packet channel (seqnr-incrementing record stream both ways);
     optionally the `ssh-userauth` / `connection` layers. Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more

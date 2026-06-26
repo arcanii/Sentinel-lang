@@ -86,7 +86,9 @@ the current state of the workspace without re-reading every commit.
   `std/bits/bits` (rotates),
   `std/bytes/bytes` (`[u8]`
   utilities over `&[u8]` borrows), `std/algorithms/seq` (in-place insertion
-  `sort` + `binary_search` over public `[i64]`), and `std/net` (`ssh` — the SSH-2
+  `sort` + `binary_search` over public `[i64]`), and `std/net` (`tcp` — a thin
+  ergonomic layer over the raw socket builtins: `read_exact` + the secret<->public
+  byte-boundary helpers both socket examples share; `ssh` — the SSH-2
   transport key exchange, `curve25519-sha256` + `ssh-ed25519`, RFC 4253 / RFC 8731; +
   `ssh_cipher` — the `chacha20-poly1305@openssh.com` binary-packet record cipher that
   protects every packet after NEWKEYS; stitched into a complete end-to-end loopback
