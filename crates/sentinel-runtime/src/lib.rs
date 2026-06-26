@@ -286,6 +286,196 @@ pub extern "C" fn sentinel_print_bytes(data: *const u8, data_len: i64) -> i64 {
     0
 }
 
+// ---- ADR 0056: a TCP sockets runtime surface ---------------------------------------
+//
+// The runtime primitives a `std/net` library would wrap as builtins so a Sentinel
+// program — e.g. the `std::net::ssh` transport — can run over a REAL connection. They
+// follow the file-I/O ABI: byte buffers are `(ptr, len)`, a handle is an opaque `i64`
+// (the OS file descriptor). Per ADR 0056 they RETURN a negative `i64` on failure
+// instead of aborting (a daemon must survive a dropped connection — the deviation from
+// file I/O's panic-on-failure). Blocking sockets; a server spawns one OS-thread task
+// per connection (`sentinel_task_spawn` already uses `std::thread`). Unix-only (raw
+// libc sockets); the build target is macOS / Linux. NOT yet wired as compiler builtins
+// (that needs the FnId registration + the self-hosted-`scg` builtin-table mirror).
+
+/// Create a TCP listener bound to 127.0.0.1:`port` (port 0 = an OS-assigned ephemeral
+/// port — query it with `sentinel_tcp_local_port`). Returns the listener handle (fd)
+/// ≥ 0, or -1 on error.
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn sentinel_tcp_listen(port: i64) -> i64 {
+    // SAFETY: a fixed sequence of libc socket calls on a freshly created fd; the
+    // sockaddr is fully initialized (zeroed + the three set fields) before `bind`.
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return -1;
+        }
+        let yes: libc::c_int = 1;
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEADDR,
+            &yes as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        let mut addr: libc::sockaddr_in = std::mem::zeroed();
+        addr.sin_family = libc::AF_INET as libc::sa_family_t;
+        addr.sin_port = (port as u16).to_be();
+        addr.sin_addr.s_addr = 0x7f00_0001u32.to_be(); // 127.0.0.1, network byte order
+        let alen = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        if libc::bind(fd, &addr as *const libc::sockaddr_in as *const libc::sockaddr, alen) < 0 {
+            libc::close(fd);
+            return -1;
+        }
+        if libc::listen(fd, 16) < 0 {
+            libc::close(fd);
+            return -1;
+        }
+        i64::from(fd)
+    }
+}
+
+/// The local port a listener / connected socket is bound to — for resolving an
+/// ephemeral (`tcp_listen(0)`) port. Returns the port (1..=65535), or -1 on error.
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn sentinel_tcp_local_port(handle: i64) -> i64 {
+    // SAFETY: `getsockname` writes into the zeroed sockaddr / socklen; handle is an fd.
+    unsafe {
+        let mut addr: libc::sockaddr_in = std::mem::zeroed();
+        let mut alen = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        if libc::getsockname(
+            handle as libc::c_int,
+            &mut addr as *mut libc::sockaddr_in as *mut libc::sockaddr,
+            &mut alen,
+        ) < 0
+        {
+            return -1;
+        }
+        i64::from(u16::from_be(addr.sin_port))
+    }
+}
+
+/// Block for an incoming connection on a listener. Returns a connection handle ≥ 0, or
+/// -1 on error.
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn sentinel_tcp_accept(listener: i64) -> i64 {
+    // SAFETY: `accept` on a listener fd; null addr/len means "don't report the peer".
+    let c = unsafe {
+        libc::accept(listener as libc::c_int, std::ptr::null_mut(), std::ptr::null_mut())
+    };
+    if c < 0 {
+        -1
+    } else {
+        i64::from(c)
+    }
+}
+
+/// Connect to `host` (a dotted-quad IPv4 string, e.g. `"127.0.0.1"`) on `port`.
+/// Returns a connection handle ≥ 0, or -1 on error (no DNS — IPv4 literals only).
+#[cfg(unix)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_tcp_connect(host: *const u8, host_len: i64, port: i64) -> i64 {
+    if host_len <= 0 {
+        return -1;
+    }
+    // SAFETY: caller guarantees `host_len` readable bytes at `host`.
+    let bytes = unsafe { std::slice::from_raw_parts(host, host_len as usize) };
+    let s = match std::str::from_utf8(bytes) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 {
+        return -1;
+    }
+    let mut octs = [0u8; 4];
+    for (i, p) in parts.iter().enumerate() {
+        match p.parse::<u8>() {
+            Ok(v) => octs[i] = v,
+            Err(_) => return -1,
+        }
+    }
+    // SAFETY: a fixed libc socket+connect sequence on a freshly created fd.
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return -1;
+        }
+        let mut addr: libc::sockaddr_in = std::mem::zeroed();
+        addr.sin_family = libc::AF_INET as libc::sa_family_t;
+        addr.sin_port = (port as u16).to_be();
+        addr.sin_addr.s_addr = u32::from_be_bytes(octs).to_be();
+        let alen = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        if libc::connect(fd, &addr as *const libc::sockaddr_in as *const libc::sockaddr, alen) < 0 {
+            libc::close(fd);
+            return -1;
+        }
+        i64::from(fd)
+    }
+}
+
+/// Block to read up to `max` bytes from a connection into a fresh `sentinel_alloc`'d
+/// buffer (the caller's scope-exit drop frees it, like `read_file`). `*out_len` is set
+/// to the bytes read (0 = the peer closed / EOF), or -1 on error.
+#[cfg(unix)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_tcp_read(conn: i64, max: i64, out_len: *mut i64) -> *mut u8 {
+    let cap = if max <= 0 { 1 } else { max };
+    let buf = sentinel_alloc(cap);
+    // SAFETY: `buf` has `cap` writable bytes; `out_len` is a writable i64 slot.
+    let n = unsafe { libc::read(conn as libc::c_int, buf as *mut libc::c_void, cap as usize) };
+    unsafe {
+        *out_len = if n < 0 { -1 } else { n as i64 };
+    }
+    buf
+}
+
+/// Write all `data_len` bytes of `data` to a connection. Returns the bytes written, or
+/// -1 on error.
+#[cfg(unix)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_tcp_write(conn: i64, data: *const u8, data_len: i64) -> i64 {
+    if data_len <= 0 {
+        return 0;
+    }
+    // SAFETY: caller guarantees `data_len` readable bytes at `data`.
+    let bytes = unsafe { std::slice::from_raw_parts(data, data_len as usize) };
+    let mut off = 0usize;
+    while off < bytes.len() {
+        // SAFETY: `bytes[off..]` is a valid sub-slice of the caller's buffer.
+        let n = unsafe {
+            libc::write(
+                conn as libc::c_int,
+                bytes[off..].as_ptr() as *const libc::c_void,
+                bytes.len() - off,
+            )
+        };
+        if n <= 0 {
+            return -1;
+        }
+        off += n as usize;
+    }
+    off as i64
+}
+
+/// Close a listener or connection handle. Returns 0, or -1 on error.
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn sentinel_tcp_close(handle: i64) -> i64 {
+    // SAFETY: `close` on an fd; double-close is reported as -1, not UB.
+    if unsafe { libc::close(handle as libc::c_int) } < 0 {
+        -1
+    } else {
+        0
+    }
+}
+
 /// Byte-wise equality of two `[u8]` slices — the `str_eq` builtin
 /// (D.2 / ADR 0033 D5; the lexer's keyword/identifier matcher). Equal
 /// length AND equal bytes. Returns a C `bool`, which Rust's `extern
@@ -1319,5 +1509,51 @@ mod tests {
         // 8 (join_handle_ptr) + 8 (args_free_ptr) = 32.
         assert_eq!(core::mem::size_of::<SentinelTask>(), 32);
         assert_eq!(core::mem::align_of::<SentinelTask>(), 8);
+    }
+
+    // ---- ADR 0056: the TCP sockets runtime surface (loopback) ----
+
+    /// A full loopback exchange over the socket primitives: a server thread accepts
+    /// one connection and echoes what it reads; the client connects to the ephemeral
+    /// port, sends a message, and reads the echo back. Exercises listen / local_port /
+    /// accept / connect / read / write / close end to end.
+    #[cfg(unix)]
+    #[test]
+    fn tcp_loopback_echo() {
+        let lfd = sentinel_tcp_listen(0); // 0 = ephemeral port
+        assert!(lfd >= 0, "listen failed");
+        let port = sentinel_tcp_local_port(lfd);
+        assert!(port > 0, "local_port failed");
+
+        let server = std::thread::spawn(move || {
+            let conn = sentinel_tcp_accept(lfd);
+            assert!(conn >= 0, "accept failed");
+            let mut n: i64 = 0;
+            let buf = sentinel_tcp_read(conn, 64, &mut n);
+            assert!(n > 0, "server read got nothing");
+            assert_eq!(sentinel_tcp_write(conn, buf, n), n, "echo write short");
+            sentinel_free(buf);
+            sentinel_tcp_close(conn);
+            sentinel_tcp_close(lfd);
+        });
+
+        let host = b"127.0.0.1";
+        let conn = sentinel_tcp_connect(host.as_ptr(), host.len() as i64, port);
+        assert!(conn >= 0, "connect failed");
+        let msg = b"hello sentinel sockets";
+        assert_eq!(
+            sentinel_tcp_write(conn, msg.as_ptr(), msg.len() as i64),
+            msg.len() as i64,
+            "client write short"
+        );
+        let mut rlen: i64 = 0;
+        let rbuf = sentinel_tcp_read(conn, 64, &mut rlen);
+        assert_eq!(rlen, msg.len() as i64, "echo length");
+        // SAFETY: `rbuf` holds `rlen` bytes read from the socket.
+        let got = unsafe { std::slice::from_raw_parts(rbuf, rlen as usize) };
+        assert_eq!(got, msg, "echo bytes");
+        sentinel_free(rbuf);
+        sentinel_tcp_close(conn);
+        server.join().expect("server thread");
     }
 }
