@@ -14,15 +14,7 @@
 // The handles are `i64` fds; the payload is a public `[u8]` (the wire is observable —
 // the socket is a public boundary, ADR 0056). Exit 42 = the echo round-tripped.
 use std::math::num::abs;
-
-// "127.0.0.1" as ASCII bytes (no DNS — tcp_connect takes an IPv4 literal).
-fn loopback_host() -> [u8] {
-    let mut v: Vec<u8> = vec_new();
-    push(&mut v, i64_to_u8(49)); push(&mut v, i64_to_u8(50)); push(&mut v, i64_to_u8(55));
-    push(&mut v, i64_to_u8(46)); push(&mut v, i64_to_u8(48)); push(&mut v, i64_to_u8(46));
-    push(&mut v, i64_to_u8(48)); push(&mut v, i64_to_u8(46)); push(&mut v, i64_to_u8(49));
-    vec_to_array(v)
-}
+use std::net::tcp::loopback_host;       // "127.0.0.1" as ASCII bytes for tcp_connect
 
 // The message the client sends (and expects echoed): "sentinel-tcp".
 fn message() -> [u8] {

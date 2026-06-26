@@ -26,6 +26,11 @@
 // the derived session key matched the known-good vector, and the encrypted application
 // packet round-tripped across the wire.
 use std::math::num::abs;
+use std::net::tcp::loopback_host;
+use std::net::tcp::read_exact;
+use std::net::tcp::declassify_bytes;
+use std::net::tcp::append_declassified;
+use std::net::tcp::widen_bytes;
 use std::security::x25519::x25519;
 use std::security::ed25519::ed25519_pubkey;
 use std::security::ed25519::ed25519_sign;
@@ -70,54 +75,8 @@ fn cookie_s() -> [secret u8] { mk([32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 4
 fn banner() -> [secret u8] { mk([83, 83, 72, 45, 50, 46, 48, 45, 83, 101, 110, 116, 105, 110, 101, 108, 95, 48, 46, 49], 20) }
 fn echo_payload() -> [secret u8] { mk([101, 99, 104, 111, 58, 32, 105, 116, 32, 119, 111, 114, 107, 115, 32, 111, 118, 101, 114, 32, 83, 101, 110, 116, 105, 110, 101, 108, 32, 83, 83, 72], 32) }   // "echo: it works over Sentinel SSH"
 
-// ---- the socket boundary: secret<->public byte conversions + a full-length read ----
-
-// "127.0.0.1" as ASCII bytes for tcp_connect.
-fn loopback_host() -> [u8] {
-    let mut v: Vec<u8> = vec_new();
-    push(&mut v, i64_to_u8(49)); push(&mut v, i64_to_u8(50)); push(&mut v, i64_to_u8(55));
-    push(&mut v, i64_to_u8(46)); push(&mut v, i64_to_u8(48)); push(&mut v, i64_to_u8(46));
-    push(&mut v, i64_to_u8(48)); push(&mut v, i64_to_u8(46)); push(&mut v, i64_to_u8(49));
-    vec_to_array(v)
-}
-
-// secret [u8] -> public [u8] (a declassify per byte — these bytes are wire-public).
-fn declass(s: &[secret u8], n: i64) -> [u8] {
-    let mut v: Vec<u8> = vec_new();
-    let mut i: i64 = 0;
-    while i < n { push(&mut v, declassify((*s)[i])); i = i + 1; }
-    vec_to_array(v)
-}
-
-// append the declassified bytes of a secret slice onto a public output buffer.
-fn append_declass(out: &mut Vec<u8>, s: &[secret u8], n: i64) -> i64 {
-    let mut i: i64 = 0;
-    while i < n { push(out, declassify((*s)[i])); i = i + 1; }
-    0
-}
-
-// a window of a public buffer, widened back into the secret domain (public->secret).
-fn widen_slice(p: &[u8], start: i64, n: i64) -> [secret u8] {
-    let mut v: Vec<secret u8> = vec_new();
-    let mut i: i64 = 0;
-    while i < n { push(&mut v, (*p)[start + i]); i = i + 1; }
-    vec_to_array(v)
-}
-
-// read exactly `n` bytes (TCP may deliver a write in several reads); stops early on
-// EOF/error so a dead peer can't hang the loop (the caller length-checks the result).
-fn read_exact(conn: i64, n: i64) -> [u8] {
-    let mut acc: Vec<u8> = vec_new();
-    let mut got: i64 = 0;
-    while got < n {
-        let chunk: [u8] = tcp_read(conn, n - got);
-        let clen: i64 = len(chunk);
-        let mut j: i64 = 0;
-        while j < clen { push(&mut acc, chunk[j]); j = j + 1; }
-        if clen <= 0 { got = n + 1; 0 } else { got = got + clen; 0 };
-    }
-    vec_to_array(acc)
-}
+// The socket boundary helpers (loopback_host / read_exact / declassify_bytes /
+// append_declassified / widen_bytes) come from std::net::tcp.
 
 // compare a recovered secret slice against an expected public vector (XOR-fold).
 fn diff(got: &[secret u8], exp: [i64], n: i64) -> i64 {
@@ -140,7 +99,7 @@ fn ssh_server(listener: i64) -> i64 ! { Async } {
             tcp_close(conn);
             0 - 2
         } else {
-            let qcv: [secret u8] = widen_slice(&qc_pub, 0, 32);
+            let qcv: [secret u8] = widen_bytes(&qc_pub, 0, 32);
 
             // 2. our own ephemeral + host key; the shared secret K = eph_s . Q_C.
             let qsv: [secret u8] = x25519(eph_s(), base9());
@@ -164,10 +123,10 @@ fn ssh_server(listener: i64) -> i64 ! { Async } {
 
             // 5. ship the wire-public values: Q_S | hostpub | sig | record (192 bytes).
             let mut resp: Vec<u8> = vec_new();
-            append_declass(&mut resp, &qsv, 32);
-            append_declass(&mut resp, &hpubv, 32);
-            append_declass(&mut resp, &sig, 64);
-            append_declass(&mut resp, &record, 64);
+            append_declassified(&mut resp, &qsv, 32);
+            append_declassified(&mut resp, &hpubv, 32);
+            append_declassified(&mut resp, &sig, 64);
+            append_declassified(&mut resp, &record, 64);
             let resp_bytes: [u8] = vec_to_array(resp);
             tcp_write(conn, resp_bytes);
             tcp_close(conn);
@@ -189,7 +148,7 @@ fn main() -> i64 {
             let host: [u8] = loopback_host();
             let conn: i64 = tcp_connect(host, port);
             let qcv: [secret u8] = x25519(eph_c(), base9());
-            let qc_pub: [u8] = declass(&qcv, 32);
+            let qc_pub: [u8] = declassify_bytes(&qcv, 32);
             tcp_write(conn, qc_pub);
 
             // ---- read the server's response, widen the four fields. ----
@@ -200,10 +159,10 @@ fn main() -> i64 {
             if len(resp) < 192 {
                 7
             } else {
-                let qsv: [secret u8] = widen_slice(&resp, 0, 32);
-                let hpubv: [secret u8] = widen_slice(&resp, 32, 32);
-                let sig: [secret u8] = widen_slice(&resp, 64, 64);
-                let record: [secret u8] = widen_slice(&resp, 128, 64);
+                let qsv: [secret u8] = widen_bytes(&resp, 0, 32);
+                let hpubv: [secret u8] = widen_bytes(&resp, 32, 32);
+                let sig: [secret u8] = widen_bytes(&resp, 64, 64);
+                let record: [secret u8] = widen_bytes(&resp, 128, 64);
 
                 // ---- derive K = eph_c . Q_S and recompute H exactly as the server did. ----
                 let kc: [secret u8] = x25519(eph_c(), copy_n(&qsv, 32));

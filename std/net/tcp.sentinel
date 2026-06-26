@@ -1,0 +1,76 @@
+// std/net/tcp.sentinel — thin ergonomic helpers over the ADR 0056 raw socket
+// builtins (`tcp_listen`/`tcp_local_port`/`tcp_accept`/`tcp_connect`/`tcp_read`/
+// `tcp_write`/`tcp_close`).
+//
+// The raw builtins are deliberately minimal: `tcp_write` already writes every byte
+// (it loops internally), but `tcp_read` does a single `read(2)` and so may return
+// FEWER bytes than asked for when a peer's write is split across TCP segments. And a
+// socket is the canonical PUBLIC boundary — it carries `[u8]`, never `[secret u8]` —
+// so a program that runs its protocol in the secret domain (the constant-time
+// discipline) has to cross that boundary explicitly at every send and receive. These
+// helpers capture exactly those two recurring needs:
+//
+//   * `read_exact` — coalesce a possibly-split write into the full `n` bytes.
+//   * `declassify_bytes` / `append_declassified` — secret `[u8]` -> public wire bytes
+//     (an explicit `declassify` per byte; use ONLY for values that are genuinely
+//     public on the wire — e.g. an ephemeral public key, a signature, a ciphertext).
+//   * `widen_bytes` — public wire bytes -> the secret domain (public->secret, ADR
+//     0049), so received bytes can feed constant-time crypto.
+//
+// The secret shared secrets a protocol derives (a Diffie-Hellman result, a session
+// key) must NEVER be passed to `declassify_bytes` — they are not wire-public.
+
+// "127.0.0.1" as ASCII bytes, ready for `tcp_connect` (which takes an IPv4 literal,
+// not a hostname — there is no DNS in the runtime).
+pub fn loopback_host() -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    push(&mut v, i64_to_u8(49)); push(&mut v, i64_to_u8(50)); push(&mut v, i64_to_u8(55));
+    push(&mut v, i64_to_u8(46)); push(&mut v, i64_to_u8(48)); push(&mut v, i64_to_u8(46));
+    push(&mut v, i64_to_u8(48)); push(&mut v, i64_to_u8(46)); push(&mut v, i64_to_u8(49));
+    vec_to_array(v)
+}
+
+// Read exactly `n` bytes from `conn`, looping until the buffer is full (a single
+// `tcp_read` may return fewer than requested). Stops early on EOF / error so a dead
+// peer can never hang the loop — the caller MUST length-check the result (a short
+// return means the peer closed before sending `n` bytes).
+pub fn read_exact(conn: i64, n: i64) -> [u8] {
+    let mut acc: Vec<u8> = vec_new();
+    let mut got: i64 = 0;
+    while got < n {
+        let chunk: [u8] = tcp_read(conn, n - got);
+        let clen: i64 = len(chunk);
+        let mut j: i64 = 0;
+        while j < clen { push(&mut acc, chunk[j]); j = j + 1; }
+        if clen <= 0 { got = n + 1; 0 } else { got = got + clen; 0 };
+    }
+    vec_to_array(acc)
+}
+
+// Declassify the first `n` bytes of a secret buffer into a fresh public `[u8]`,
+// ready for `tcp_write`. Use ONLY for wire-public values.
+pub fn declassify_bytes(s: &[secret u8], n: i64) -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, declassify((*s)[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Append the declassified first `n` bytes of a secret buffer onto a public output
+// buffer — for framing several wire-public fields into one record before a single
+// `tcp_write`. Use ONLY for wire-public values.
+pub fn append_declassified(out: &mut Vec<u8>, s: &[secret u8], n: i64) -> i64 {
+    let mut i: i64 = 0;
+    while i < n { push(out, declassify((*s)[i])); i = i + 1; }
+    0
+}
+
+// Widen the `n`-byte window of a public buffer starting at `start` back into the
+// secret domain (public->secret, ADR 0049), so bytes received from a socket can feed
+// constant-time crypto. Widening is always sound (it only ADDS secrecy).
+pub fn widen_bytes(p: &[u8], start: i64, n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, (*p)[start + i]); i = i + 1; }
+    vec_to_array(v)
+}
