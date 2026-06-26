@@ -70,8 +70,9 @@ compare/`parse_int`/`int_to_str`/index-based split/pad over `[u8]`; `examples/te
 ~45 assertions). Maps were attempted first but PROBING found a real **use-after-free**:
 pushing a Move-typed struct (one owning a `[u8]`) into a `Vec` through a by-value parameter
 double-freed the element (the ADR 0034 D8 deferred case) — now FIXED in both backends
-(`e66f57f`, fixture c60), which **unblocks a `Vec<struct>`-based hashmap** (the next piece);
-HEAD `e66f57f`, 1595 tests,
+(`e66f57f`, fixture c60), which unblocked the **`std::collections::map` string-keyed hash
+map** (`3c08f2d` — `[u8]`→`i64`, parallel-array storage + FNV-1a + resize; `examples/collections/map_demo`);
+HEAD `3c08f2d`, 1596 tests,
 four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
@@ -449,18 +450,20 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     `CHANNEL_SUCCESS` → command output as `CHANNEL_DATA` → `"exit-status"` → close. The SSH
     track is at a natural stopping point (the rest is peripheral: a `userauth`
     failure/retry loop; a `"shell"` request; multiple concurrent channels). **▶ THE ACTIVE
-    TRACK IS NOW DATA & TEXT LIBRARIES** (owner-chosen). Shipped: `std::text::str` (`c6c0503`).
-    The UAF blocking maps is fixed (`e66f57f` — push consumes its Move-typed element). **NEXT,
-    in order: (1) a hashmap** — now buildable on `Vec<struct>` (parallel arrays: keys in a
-    `Vec<KeyBox{[u8]}>`, values/buckets/next in `Vec<i64>`, index-based chaining + a public
-    FNV-1a hash; the generic landmines are real so do a CONCRETE string→i64 / string→[u8] map
-    first, not a generic `HashMap<V>`). ⚠ KNOWN GENERIC GAPS (probed): generic ENUMS don't
-    parse (`enum Opt<T>` — so no `Option<T>`); generic struct-literal type-args don't infer
-    through `push`; `Vec<[u8]>` (Vec-of-arrays) is unsupported (D.3 MVP). **(2) JSON** — a
-    concrete recursive `enum Json { Null, Bool, Num, Str([u8]), Arr, Obj }` + parser/serializer,
-    building on `str` + the map. Then the bigger rocks the owner deferred: a **float type**
-    (for general math) and the **FFI/bindings** story (C-ABI export for Python/C/C++/Rust;
-    a general `extern "C"` import for OS bindings) — both ADR-first language work.
+    TRACK IS NOW DATA & TEXT LIBRARIES** (owner-chosen). Shipped: `std::text::str` (`c6c0503`),
+    the UAF fix that unblocked maps (`e66f57f`), and a **string-keyed hash map**
+    `std::collections::map` (`3c08f2d` — `[u8]`→`i64`, parallel-array + index-chaining storage,
+    public FNV-1a, power-of-two resize/rehash; `examples/collections/map_demo`). ⚠ KNOWN
+    GENERIC GAPS (probed, shaped the map's concrete design): generic ENUMS don't parse
+    (`enum Opt<T>` — so no `Option<T>`); generic struct-literal type-args don't infer through
+    `push`; `Vec<[u8]>` (Vec-of-arrays) is unsupported and a non-Copy `Vec` element can't be
+    mutated in place (D.3 MVP). **NEXT: (1) JSON** — a concrete recursive
+    `enum Json { Null, Bool, Num, Str([u8]), Arr, Obj }` + parser/serializer, building on `str`
+    + the map (⚠ the recursive-enum + a `Vec<Json>` array / map-of-Json object will stress the
+    same Vec-element + recursive-drop limits — probe first). Then the bigger rocks the owner
+    deferred: a **float type** (for general math) and the **FFI/bindings** story (C-ABI export
+    for Python/C/C++/Rust; a general `extern "C"` import for OS bindings) — both ADR-first
+    language work.
     Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
