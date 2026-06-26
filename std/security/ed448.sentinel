@@ -1,0 +1,629 @@
+// std::security::ed448 — constant-time Ed448 signatures (RFC 8032), the Edwards
+// sibling of X448 over the same GF(2^448-2^224-1) field (std::security::fe448).
+//
+// Ed448 is the 224-bit-security EdDSA instance on edwards448 ("Goldilocks"), the
+// UNtwisted Edwards curve x^2 + y^2 = 1 + d·x^2·y^2 with d = -39081, cofactor 4. It
+// hashes with SHAKE256 (std::security::sha3) under the "SigEd448" dom4 prefix and
+// works on 57-byte keys / 114-byte signatures.
+//
+// CONSTANT-TIME. The secret seed/scalar drives the scalar multiplication through a
+// branch-free Montgomery ladder (the conditional swap is the mask-based sel448), and
+// the scalar reduction mod the group order L is a branch-free Barrett reduction over
+// byte-limbs — a naive ladder or a data-dependent reduction would leak the key, which
+// the constant-time check rejects, so a successful build is the proof. Verification
+// runs the same branch-free machinery over the (secret-typed) public inputs and
+// declassifies only the final 1/0 accept bit.
+//
+// Implementation notes:
+//   * Points are PROJECTIVE (X:Y:Z); the a=1 untwisted Edwards addition/doubling law
+//     (no T coordinate) differs from Ed25519's a=-1 law.
+//   * Point decompression recovers x from y via x = (u/v)^((p+1)/4) — since
+//     p ≡ 3 (mod 4) there is no sqrt(-1) fixup (unlike Ed25519); the exponent
+//     (p+1)/4 = 2^446 - 2^222 has bits 222..445 set, so the square-and-multiply
+//     condition is the public `i >= 222`.
+//   * The whole thing was modelled in Python against pyca's Ed448 (byte-for-byte over
+//     20 keypairs) and the RFC 8032 §7.4 test vector before porting.
+use std::security::fe448::fe_zero;
+use std::security::fe448::fe_one;
+use std::security::fe448::fe_copy;
+use std::security::fe448::fadd;
+use std::security::fe448::fsub;
+use std::security::fe448::fmul;
+use std::security::fe448::fsq;
+use std::security::fe448::finv;
+use std::security::fe448::sel448;
+use std::security::fe448::car448;
+use std::security::fe448::arith_shr;
+use std::security::fe448::pack448;
+use std::security::fe448::unpack448;
+use std::security::sha3::shake256;
+
+// ---- curve constants (28 radix-2^16 limbs) ------------------------------------
+
+// d = -39081 = p - 39081.
+fn fe_d448() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 26454);
+    let mut i: i64 = 0;
+    while i < 13 { push(&mut v, 65535); i = i + 1; }
+    push(&mut v, 65534);
+    let mut j: i64 = 0;
+    while j < 13 { push(&mut v, 65535); j = j + 1; }
+    vec_to_array(v)
+}
+
+fn fe_bx() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 49246); push(&mut v, 50956); push(&mut v, 43051); push(&mut v, 9766);
+    push(&mut v, 37774); push(&mut v, 35584); push(&mut v, 32993); push(&mut v, 17211);
+    push(&mut v, 25873); push(&mut v, 10934); push(&mut v, 6903);  push(&mut v, 4782);
+    push(&mut v, 42084); push(&mut v, 41939); push(&mut v, 58148); push(&mut v, 60013);
+    push(&mut v, 5991);  push(&mut v, 18191); push(&mut v, 25968); push(&mut v, 40468);
+    push(&mut v, 14042); push(&mut v, 8895);  push(&mut v, 5542);  push(&mut v, 8733);
+    push(&mut v, 3565);  push(&mut v, 27629); push(&mut v, 28870); push(&mut v, 20249);
+    vec_to_array(v)
+}
+
+fn fe_by() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 64020); push(&mut v, 62000); push(&mut v, 31067); push(&mut v, 38920);
+    push(&mut v, 51373); push(&mut v, 20183); push(&mut v, 4908);  push(&mut v, 64957);
+    push(&mut v, 14788); push(&mut v, 59004); push(&mut v, 65308); push(&mut v, 15059);
+    push(&mut v, 49879); push(&mut v, 1440);  push(&mut v, 39966); push(&mut v, 34680);
+    push(&mut v, 38976); push(&mut v, 27811); push(&mut v, 29555); push(&mut v, 19434);
+    push(&mut v, 51042); push(&mut v, 22217); push(&mut v, 8247);  push(&mut v, 34934);
+    push(&mut v, 48164); push(&mut v, 28342); push(&mut v, 18033); push(&mut v, 26943);
+    vec_to_array(v)
+}
+
+// ---- edwards448 point arithmetic (projective X:Y:Z, a=1) ----------------------
+
+// o = 2*P (dbl-2007-bl, a=1): B=(X+Y)^2; C=X^2; D=Y^2; E=C+D; H=Z^2; J=E-2H;
+//   X3=(B-E)*J; Y3=E*(C-D); Z3=E*J.
+fn pt_double(ox: &mut [secret i64], oy: &mut [secret i64], oz: &mut [secret i64],
+             px: &[secret i64], py: &[secret i64], pz: &[secret i64]) -> i64 {
+    let mut xy: [secret i64] = fe_zero(); fadd(&mut xy, px, py);
+    let mut bb: [secret i64] = fe_zero(); fsq(&mut bb, &xy);
+    let mut cc: [secret i64] = fe_zero(); fsq(&mut cc, px);
+    let mut dd: [secret i64] = fe_zero(); fsq(&mut dd, py);
+    let mut ee: [secret i64] = fe_zero(); fadd(&mut ee, &cc, &dd);
+    let mut hh: [secret i64] = fe_zero(); fsq(&mut hh, pz);
+    let mut h2: [secret i64] = fe_zero(); fadd(&mut h2, &hh, &hh);
+    let mut jj: [secret i64] = fe_zero(); fsub(&mut jj, &ee, &h2);
+    let mut be: [secret i64] = fe_zero(); fsub(&mut be, &bb, &ee);
+    fmul(ox, &be, &jj);
+    let mut cmd: [secret i64] = fe_zero(); fsub(&mut cmd, &cc, &dd);
+    fmul(oy, &ee, &cmd);
+    fmul(oz, &ee, &jj);
+    0
+}
+
+// o = P + Q (add-2007-bl, a=1): A=Z1·Z2; B=A^2; C=X1·X2; D=Y1·Y2; E=d·C·D;
+//   F=B-E; G=B+E; X3=A·F·((X1+Y1)(X2+Y2)-C-D); Y3=A·G·(D-C); Z3=F·G.
+fn pt_add(ox: &mut [secret i64], oy: &mut [secret i64], oz: &mut [secret i64],
+          px: &[secret i64], py: &[secret i64], pz: &[secret i64],
+          qx: &[secret i64], qy: &[secret i64], qz: &[secret i64]) -> i64 {
+    let mut aa: [secret i64] = fe_zero(); fmul(&mut aa, pz, qz);
+    let mut bb: [secret i64] = fe_zero(); fsq(&mut bb, &aa);
+    let mut cc: [secret i64] = fe_zero(); fmul(&mut cc, px, qx);
+    let mut dd: [secret i64] = fe_zero(); fmul(&mut dd, py, qy);
+    let dcon: [secret i64] = fe_d448();
+    let mut cdp: [secret i64] = fe_zero(); fmul(&mut cdp, &cc, &dd);
+    let mut ee: [secret i64] = fe_zero(); fmul(&mut ee, &dcon, &cdp);
+    let mut ff: [secret i64] = fe_zero(); fsub(&mut ff, &bb, &ee);
+    let mut gg: [secret i64] = fe_zero(); fadd(&mut gg, &bb, &ee);
+    let mut xy1: [secret i64] = fe_zero(); fadd(&mut xy1, px, py);
+    let mut xy2: [secret i64] = fe_zero(); fadd(&mut xy2, qx, qy);
+    let mut prod: [secret i64] = fe_zero(); fmul(&mut prod, &xy1, &xy2);
+    let mut t1: [secret i64] = fe_zero(); fsub(&mut t1, &prod, &cc);
+    let mut t2: [secret i64] = fe_zero(); fsub(&mut t2, &t1, &dd);
+    let mut af: [secret i64] = fe_zero(); fmul(&mut af, &aa, &ff);
+    fmul(ox, &af, &t2);
+    let mut dmc: [secret i64] = fe_zero(); fsub(&mut dmc, &dd, &cc);
+    let mut ag: [secret i64] = fe_zero(); fmul(&mut ag, &aa, &gg);
+    fmul(oy, &ag, &dmc);
+    fmul(oz, &ff, &gg);
+    0
+}
+
+fn pt_cswap(ax: &mut [secret i64], ay: &mut [secret i64], az: &mut [secret i64],
+            bx: &mut [secret i64], by: &mut [secret i64], bz: &mut [secret i64], bit: secret i64) -> i64 {
+    sel448(ax, bx, bit);
+    sel448(ay, by, bit);
+    sel448(az, bz, bit);
+    0
+}
+
+// out = [scalar]·P by a constant-time Montgomery ladder (448 fixed iterations).
+// The secret scalar bit drives only the branch-free pt_cswap. `scalar` is 57 bytes
+// held as a `[secret i64]`; out must not alias P.
+fn pt_scalarmul(ox: &mut [secret i64], oy: &mut [secret i64], oz: &mut [secret i64],
+                px: &[secret i64], py: &[secret i64], pz: &[secret i64], scalar: &[secret i64]) -> i64 {
+    let zero: [secret i64] = fe_zero();
+    let one: [secret i64] = fe_one();
+    fe_copy(ox, &zero); fe_copy(oy, &one); fe_copy(oz, &one);   // R0 = identity (0:1:1)
+    let mut wx: [secret i64] = fe_zero();
+    let mut wy: [secret i64] = fe_zero();
+    let mut wz: [secret i64] = fe_zero();
+    fe_copy(&mut wx, px); fe_copy(&mut wy, py); fe_copy(&mut wz, pz);   // R1 = P
+    let mut swap: secret i64 = 0;
+    let mut i: i64 = 447;
+    while i >= 0 {
+        let byte: secret i64 = (*scalar)[i / 8];
+        let bit: secret i64 = (byte >> (i - (i / 8) * 8)) & 1;
+        let s: secret i64 = swap ^ bit;
+        pt_cswap(ox, oy, oz, &mut wx, &mut wy, &mut wz, s);
+        swap = bit;
+        // R1 = R0 + R1 ; R0 = 2*R0 (both read the OLD R0).
+        let mut n1x: [secret i64] = fe_zero();
+        let mut n1y: [secret i64] = fe_zero();
+        let mut n1z: [secret i64] = fe_zero();
+        pt_add(&mut n1x, &mut n1y, &mut n1z, &(*ox), &(*oy), &(*oz), &wx, &wy, &wz);
+        let mut n0x: [secret i64] = fe_zero();
+        let mut n0y: [secret i64] = fe_zero();
+        let mut n0z: [secret i64] = fe_zero();
+        pt_double(&mut n0x, &mut n0y, &mut n0z, &(*ox), &(*oy), &(*oz));
+        fe_copy(&mut wx, &n1x); fe_copy(&mut wy, &n1y); fe_copy(&mut wz, &n1z);
+        fe_copy(ox, &n0x); fe_copy(oy, &n0y); fe_copy(oz, &n0z);
+        i = i - 1;
+    }
+    pt_cswap(ox, oy, oz, &mut wx, &mut wy, &mut wz, swap);
+    0
+}
+
+// out = [scalar]·B (the base point).
+fn pt_scalarmul_base(ox: &mut [secret i64], oy: &mut [secret i64], oz: &mut [secret i64], scalar: &[secret i64]) -> i64 {
+    let bx: [secret i64] = fe_bx();
+    let by: [secret i64] = fe_by();
+    let bz: [secret i64] = fe_one();
+    pt_scalarmul(ox, oy, oz, &bx, &by, &bz, scalar)
+}
+
+// ---- point encoding / decoding (RFC 8032 §5.2.2/.3) ---------------------------
+
+// Compress P to 57 SECRET bytes: 56 bytes of affine y, then the parity of x in the
+// top bit of the 57th byte.
+fn pt_encode(px: &[secret i64], py: &[secret i64], pz: &[secret i64]) -> [secret u8] {
+    let mut zi: [secret i64] = fe_zero(); finv(&mut zi, pz);
+    let mut x: [secret i64] = fe_zero(); fmul(&mut x, px, &zi);
+    let mut y: [secret i64] = fe_zero(); fmul(&mut y, py, &zi);
+    let yb: [secret u8] = pack448(&y);
+    let xb: [secret u8] = pack448(&x);
+    let sign: secret i64 = (xb[0] as i64) & 1;
+    let mut out: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 56 { push(&mut out, yb[i]); i = i + 1; }
+    push(&mut out, (sign << 7) as u8);
+    vec_to_array(out)
+}
+
+// o = a^((p+1)/4) = the candidate field square root. (p+1)/4 = 2^446 - 2^222 has bits
+// 222..445 set, so square every step and multiply by a whenever i >= 222.
+fn fe_sqrt_cand(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut c: [secret i64] = fe_zero();
+    fe_copy(&mut c, a);                         // bit 445 (the top) handled by the seed
+    let mut i: i64 = 444;
+    while i >= 0 {
+        let mut t: [secret i64] = fe_zero();
+        fsq(&mut t, &c);
+        fe_copy(&mut c, &t);
+        if i >= 222 {
+            let mut t2: [secret i64] = fe_zero();
+            fmul(&mut t2, &c, a);
+            fe_copy(&mut c, &t2);
+            0
+        } else { 0 };
+        i = i - 1;
+    }
+    fe_copy(o, &c);
+    0
+}
+
+// 1 if the two field elements differ, else 0 (branch-free: pack both, OR the byte
+// diffs, broadcast nonzero-ness through the sign bit).
+fn fe_neq(a: &[secret i64], b: &[secret i64]) -> secret i64 {
+    let pa: [secret u8] = pack448(a);
+    let pb: [secret u8] = pack448(b);
+    let mut acc: secret i64 = 0;
+    let mut i: i64 = 0;
+    while i < 56 {
+        acc = acc | ((pa[i] as i64) ^ (pb[i] as i64));
+        i = i + 1;
+    }
+    ((0 - acc) >> 63) & 1
+}
+
+// The parity (low bit) of a field element.
+fn fe_parity(x: &[secret i64]) -> secret i64 {
+    let p: [secret u8] = pack448(x);
+    (p[0] as i64) & 1
+}
+
+// Decode a 57-byte point encoding into (rx, ry, rz). Recovers x from
+// x^2 = (y^2-1)/(d·y^2-1), x = (x^2)^((p+1)/4); the wrong sign is fixed branch-free.
+// Returns 1 if the encoding is a valid curve point, 0 otherwise (constant-time).
+fn pt_decode(rx: &mut [secret i64], ry: &mut [secret i64], rz: &mut [secret i64], b: &[secret u8]) -> secret i64 {
+    let one: [secret i64] = fe_one();
+    fe_copy(rz, &one);
+    unpack448(ry, b);                          // y = the low 56 bytes
+
+    let d: [secret i64] = fe_d448();
+    let mut y2: [secret i64] = fe_zero(); fsq(&mut y2, &(*ry));
+    let mut u: [secret i64] = fe_zero(); fsub(&mut u, &y2, &one);       // u = y^2 - 1
+    let mut dy2: [secret i64] = fe_zero(); fmul(&mut dy2, &d, &y2);
+    let mut v: [secret i64] = fe_zero(); fsub(&mut v, &dy2, &one);      // v = d·y^2 - 1
+    let mut vi: [secret i64] = fe_zero(); finv(&mut vi, &v);
+    let mut x2: [secret i64] = fe_zero(); fmul(&mut x2, &u, &vi);       // x^2 = u/v
+
+    fe_sqrt_cand(rx, &x2);                      // candidate x
+
+    // valid iff x^2 == the target (the only "is it a square" test).
+    let mut chk: [secret i64] = fe_zero(); fsq(&mut chk, &(*rx));
+    let valid: secret i64 = 1 - fe_neq(&chk, &x2);
+
+    // Fix the sign: if parity(x) != encoded sign bit, negate x (= p - x).
+    let sign: secret i64 = (((*b)[56] as i64) >> 7) & 1;
+    let par: secret i64 = fe_parity(&(*rx));
+    let negmask: secret i64 = par ^ sign;       // 1 ⇒ negate
+    let zero: [secret i64] = fe_zero();
+    let mut negx: [secret i64] = fe_zero(); fsub(&mut negx, &zero, &(*rx));
+    car448(&mut negx); car448(&mut negx); car448(&mut negx);
+    sel448(rx, &mut negx, negmask);
+    valid
+}
+
+// ---- Barrett reduction mod the group order L (byte-limb, branch-free) ---------
+//
+// L (57 bytes) and MU = floor(2^912 / L) (59 bytes) as little-endian byte arrays.
+// reduce_wide(x) = x mod L for any public-length x ≥ 58 bytes, via Barrett: q3 ≈
+// x / L, r = (x mod b^58) - (q3·L mod b^58), then 3 conditional subtractions of L.
+// Every byte-limb product stays < 2^17, so the whole thing fits i64.
+fn l_bytes() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 243); push(&mut v, 68); push(&mut v, 88); push(&mut v, 171);
+    push(&mut v, 146); push(&mut v, 194); push(&mut v, 120); push(&mut v, 35);
+    push(&mut v, 85); push(&mut v, 143); push(&mut v, 197); push(&mut v, 141);
+    push(&mut v, 114); push(&mut v, 194); push(&mut v, 108); push(&mut v, 33);
+    push(&mut v, 144); push(&mut v, 54); push(&mut v, 214); push(&mut v, 174);
+    push(&mut v, 73); push(&mut v, 219); push(&mut v, 78); push(&mut v, 196);
+    push(&mut v, 233); push(&mut v, 35); push(&mut v, 202); push(&mut v, 124);
+    let mut i: i64 = 0;
+    while i < 27 { push(&mut v, 255); i = i + 1; }
+    push(&mut v, 63);
+    push(&mut v, 0);
+    vec_to_array(v)
+}
+
+// L padded to 58 bytes (a trailing zero) for the 58-byte conditional subtractions.
+fn l_bytes58() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    let l: [secret i64] = l_bytes();
+    let mut i: i64 = 0;
+    while i < 57 { push(&mut v, l[i]); i = i + 1; }
+    push(&mut v, 0);
+    vec_to_array(v)
+}
+
+fn mu_bytes() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 10); push(&mut v, 208); push(&mut v, 224); push(&mut v, 176);
+    push(&mut v, 123); push(&mut v, 74); push(&mut v, 213); push(&mut v, 214);
+    push(&mut v, 115); push(&mut v, 200); push(&mut v, 173); push(&mut v, 10);
+    push(&mut v, 167); push(&mut v, 35); push(&mut v, 215); push(&mut v, 216);
+    push(&mut v, 51); push(&mut v, 233); push(&mut v, 253); push(&mut v, 150);
+    push(&mut v, 156); push(&mut v, 18); push(&mut v, 101); push(&mut v, 75);
+    push(&mut v, 18); push(&mut v, 187); push(&mut v, 99); push(&mut v, 193);
+    push(&mut v, 93); push(&mut v, 51); push(&mut v, 8);
+    let mut i: i64 = 0;
+    while i < 27 { push(&mut v, 0); i = i + 1; }
+    push(&mut v, 4);
+    push(&mut v, 0);
+    vec_to_array(v)
+}
+
+fn bzeros(n: i64) -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, 0); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Schoolbook multiply of two little-endian byte-limb arrays (carry-propagated).
+fn bmul(a: &[secret i64], b: &[secret i64]) -> [secret i64] {
+    let la: i64 = len(*a);
+    let lb: i64 = len(*b);
+    let mut out: [secret i64] = bzeros(la + lb);
+    let mut i: i64 = 0;
+    while i < la {
+        let mut carry: secret i64 = 0;
+        let mut j: i64 = 0;
+        while j < lb {
+            let cur: secret i64 = out[i + j] + (*a)[i] * (*b)[j] + carry;
+            out[i + j] = cur & 255;
+            carry = cur >> 8;
+            j = j + 1;
+        }
+        out[i + lb] = out[i + lb] + carry;
+        i = i + 1;
+    }
+    out
+}
+
+// reduce_wide: x (public length ≥ 58, secret bytes) mod L -> 57 little-endian bytes.
+fn reduce_wide(x: &[secret i64]) -> [secret i64] {
+    let lx: i64 = len(*x);
+    // q1 = x >> (8·56)
+    let mut q1v: Vec<secret i64> = vec_new();
+    let mut a: i64 = 56;
+    while a < lx { push(&mut q1v, (*x)[a]); a = a + 1; }
+    let q1: [secret i64] = vec_to_array(q1v);
+    let mu: [secret i64] = mu_bytes();
+    let q2: [secret i64] = bmul(&q1, &mu);
+    // q3 = q2 >> (8·58)
+    let lq2: i64 = len(q2);
+    let mut q3v: Vec<secret i64> = vec_new();
+    let mut c: i64 = 58;
+    while c < lq2 { push(&mut q3v, q2[c]); c = c + 1; }
+    let q3: [secret i64] = vec_to_array(q3v);
+    let l: [secret i64] = l_bytes();
+    let q3l: [secret i64] = bmul(&q3, &l);
+
+    // r = (x mod b^58) - (q3·L mod b^58), 58-byte borrow-subtract (mod b^58).
+    let mut r: [secret i64] = bzeros(58);
+    let mut borrow: secret i64 = 0;
+    let mut b2: i64 = 0;
+    while b2 < 58 {
+        let cur: secret i64 = (*x)[b2] - q3l[b2] - borrow;
+        r[b2] = cur & 255;
+        borrow = arith_shr(cur, 8) & 1;
+        b2 = b2 + 1;
+    }
+
+    // Constant-time conditional subtractions of L. The Barrett estimate leaves
+    // r in [0, ~6L) (this two-step estimator with k=57 is loose by up to ~5L), so
+    // 8 always-executed masked subtractions fully reduce r into [0, L).
+    let lp: [secret i64] = l_bytes58();
+    let mut s: i64 = 0;
+    while s < 8 {
+        let mut diff: [secret i64] = bzeros(58);
+        let mut bb: secret i64 = 0;
+        let mut d: i64 = 0;
+        while d < 58 {
+            let cur2: secret i64 = r[d] - lp[d] - bb;
+            diff[d] = cur2 & 255;
+            bb = arith_shr(cur2, 8) & 1;
+            d = d + 1;
+        }
+        let mask: secret i64 = bb - 1;          // bb==0 (r≥L) ⇒ all ones ⇒ take diff
+        let mut e: i64 = 0;
+        while e < 58 {
+            r[e] = r[e] ^ (mask & (r[e] ^ diff[e]));
+            e = e + 1;
+        }
+        s = s + 1;
+    }
+
+    let mut outv: Vec<secret i64> = vec_new();
+    let mut o: i64 = 0;
+    while o < 57 { push(&mut outv, r[o]); o = o + 1; }
+    vec_to_array(outv)
+}
+
+// (r + k·s) mod L, all three 57-byte little-endian scalars -> 57 bytes.
+fn scalar_muladd(r: &[secret i64], k: &[secret i64], s: &[secret i64]) -> [secret i64] {
+    let prod: [secret i64] = bmul(k, s);        // 114 bytes
+    let lp: i64 = len(prod);
+    let mut acc: [secret i64] = bzeros(lp + 1);
+    let mut carry: secret i64 = 0;
+    let mut i: i64 = 0;
+    while i < lp {
+        let rv: secret i64 = if i < 57 { (*r)[i] } else { 0 };
+        let cur: secret i64 = prod[i] + rv + carry;
+        acc[i] = cur & 255;
+        carry = cur >> 8;
+        i = i + 1;
+    }
+    acc[lp] = carry;
+    reduce_wide(&acc)
+}
+
+// ---- hashing (SHAKE256 + the dom4 prefix) -------------------------------------
+
+// dom4 for pure Ed448 with empty context = "SigEd448" || 0x00 || 0x00.
+fn dom4_prefix(v: &mut Vec<secret u8>) -> i64 {
+    push(v, i64_to_u8(83));  push(v, i64_to_u8(105)); push(v, i64_to_u8(103));
+    push(v, i64_to_u8(69));  push(v, i64_to_u8(100)); push(v, i64_to_u8(52));
+    push(v, i64_to_u8(52));  push(v, i64_to_u8(56));  push(v, i64_to_u8(0));
+    push(v, i64_to_u8(0));
+    0
+}
+
+fn append_u8(dst: &mut Vec<secret u8>, src: &[secret u8], n: i64) -> i64 {
+    let mut i: i64 = 0;
+    while i < n { push(dst, (*src)[i]); i = i + 1; }
+    0
+}
+
+// Convert n secret bytes to an n-entry `[secret i64]` byte-array (for the reducer).
+fn bytes_to_i64(h: &[secret u8], n: i64) -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, (*h)[i] as i64); i = i + 1; }
+    vec_to_array(v)
+}
+
+// A 57-byte scalar `[secret i64]` -> 57 little-endian SECRET bytes.
+fn scalar_to_bytes(s: &[secret i64]) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 57 { push(&mut v, ((*s)[i] & 255) as u8); i = i + 1; }
+    vec_to_array(v)
+}
+
+// h = SHAKE256(seed, 114); the secret scalar is the clamped first 57 bytes; the
+// prefix is the last 57 bytes (returned via `&mut pout`).
+fn clamp_and_prefix(seed: &[secret u8], pout: &mut [secret u8]) -> [secret i64] {
+    let mut sv: Vec<secret u8> = vec_new();
+    append_u8(&mut sv, seed, 57);
+    let h: [secret u8] = shake256(vec_to_array(sv), 114);
+
+    let mut av: Vec<secret i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < 57 { push(&mut av, h[i] as i64); i = i + 1; }
+    let mut a: [secret i64] = vec_to_array(av);
+    a[0] = a[0] & 252;
+    a[56] = 0;
+    a[55] = a[55] | 128;
+
+    let mut j: i64 = 0;
+    while j < 57 { (*pout)[j] = h[57 + j]; j = j + 1; }
+    a
+}
+
+fn pref_zeros() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 57 { push(&mut v, i64_to_u8(0)); i = i + 1; }
+    vec_to_array(v)
+}
+
+// ---- public API ---------------------------------------------------------------
+
+// The Ed448 public key for a 57-byte SECRET seed: A = encode([s]B). 57 SECRET bytes.
+pub fn ed448_pubkey(seed: [secret u8]) -> [secret u8] {
+    let mut prefix: [secret u8] = pref_zeros();
+    let s: [secret i64] = clamp_and_prefix(&seed, &mut prefix);
+    let mut ax: [secret i64] = fe_zero();
+    let mut ay: [secret i64] = fe_zero();
+    let mut az: [secret i64] = fe_zero();
+    pt_scalarmul_base(&mut ax, &mut ay, &mut az, &s);
+    pt_encode(&ax, &ay, &az)
+}
+
+// The Ed448 signature (R || S, 114 SECRET bytes) of a SECRET message under a 57-byte
+// SECRET seed (RFC 8032 §5.2.6). Every scalar multiplication is over the secret
+// scalar branch-free; the caller declassifies the signature.
+pub fn ed448_sign(seed: [secret u8], m: [secret u8]) -> [secret u8] {
+    let mut prefix: [secret u8] = pref_zeros();
+    let s: [secret i64] = clamp_and_prefix(&seed, &mut prefix);
+
+    // A = encode([s]B).
+    let mut ax: [secret i64] = fe_zero();
+    let mut ay: [secret i64] = fe_zero();
+    let mut az: [secret i64] = fe_zero();
+    pt_scalarmul_base(&mut ax, &mut ay, &mut az, &s);
+    let a_enc: [secret u8] = pt_encode(&ax, &ay, &az);
+
+    let mlen: i64 = len(m);
+
+    // r = reduce(SHAKE256(dom4 || prefix || m, 114)).
+    let mut rin: Vec<secret u8> = vec_new();
+    dom4_prefix(&mut rin);
+    append_u8(&mut rin, &prefix, 57);
+    append_u8(&mut rin, &m, mlen);
+    let rdig: [secret u8] = shake256(vec_to_array(rin), 114);
+    let rwide: [secret i64] = bytes_to_i64(&rdig, 114);
+    let r: [secret i64] = reduce_wide(&rwide);
+
+    // R = encode([r]B).
+    let mut rx: [secret i64] = fe_zero();
+    let mut ry: [secret i64] = fe_zero();
+    let mut rz: [secret i64] = fe_zero();
+    pt_scalarmul_base(&mut rx, &mut ry, &mut rz, &r);
+    let r_enc: [secret u8] = pt_encode(&rx, &ry, &rz);
+
+    // k = reduce(SHAKE256(dom4 || R || A || m, 114)).
+    let mut kin: Vec<secret u8> = vec_new();
+    dom4_prefix(&mut kin);
+    append_u8(&mut kin, &r_enc, 57);
+    append_u8(&mut kin, &a_enc, 57);
+    append_u8(&mut kin, &m, mlen);
+    let kdig: [secret u8] = shake256(vec_to_array(kin), 114);
+    let kwide: [secret i64] = bytes_to_i64(&kdig, 114);
+    let k: [secret i64] = reduce_wide(&kwide);
+
+    // S = (r + k·s) mod L.
+    let s_scalar: [secret i64] = scalar_muladd(&r, &k, &s);
+    let s_bytes: [secret u8] = scalar_to_bytes(&s_scalar);
+
+    // signature = R || S.
+    let mut sig: Vec<secret u8> = vec_new();
+    append_u8(&mut sig, &r_enc, 57);
+    append_u8(&mut sig, &s_bytes, 57);
+    vec_to_array(sig)
+}
+
+// Verify an Ed448 signature. Returns 1 (accept) / 0 (reject) — a PUBLIC bit (the
+// only declassify). Branch-free throughout: checks encode([S]B - [k]A) == R, the
+// decompression validity, and S < L (RFC 8032 §5.2.7, the malleability bound).
+pub fn ed448_verify(pk: [secret u8], m: [secret u8], sig: [secret u8]) -> i64 {
+    let mut ax: [secret i64] = fe_zero();
+    let mut ay: [secret i64] = fe_zero();
+    let mut az: [secret i64] = fe_zero();
+    let dvalid: secret i64 = pt_decode(&mut ax, &mut ay, &mut az, &pk);
+
+    let mlen: i64 = len(m);
+
+    // R = sig[0..57]; k = reduce(SHAKE256(dom4 || R || A || m, 114)).
+    let mut kin: Vec<secret u8> = vec_new();
+    dom4_prefix(&mut kin);
+    let mut i: i64 = 0;
+    while i < 57 { push(&mut kin, sig[i]); i = i + 1; }
+    append_u8(&mut kin, &pk, 57);
+    append_u8(&mut kin, &m, mlen);
+    let kdig: [secret u8] = shake256(vec_to_array(kin), 114);
+    let kwide: [secret i64] = bytes_to_i64(&kdig, 114);
+    let k: [secret i64] = reduce_wide(&kwide);
+
+    // S as a 57-byte scalar.
+    let mut sv: Vec<secret i64> = vec_new();
+    let mut si: i64 = 0;
+    while si < 57 { push(&mut sv, sig[57 + si] as i64); si = si + 1; }
+    let s_scalar: [secret i64] = vec_to_array(sv);
+
+    // [S]B and [k]A, then P = [S]B + (-[k]A).
+    let mut sbx: [secret i64] = fe_zero();
+    let mut sby: [secret i64] = fe_zero();
+    let mut sbz: [secret i64] = fe_zero();
+    pt_scalarmul_base(&mut sbx, &mut sby, &mut sbz, &s_scalar);
+    let mut kax: [secret i64] = fe_zero();
+    let mut kay: [secret i64] = fe_zero();
+    let mut kaz: [secret i64] = fe_zero();
+    pt_scalarmul(&mut kax, &mut kay, &mut kaz, &ax, &ay, &az, &k);
+    // negate kA: -(X:Y:Z) = (-X:Y:Z).
+    let zero: [secret i64] = fe_zero();
+    let mut nkax: [secret i64] = fe_zero();
+    fsub(&mut nkax, &zero, &kax);
+    car448(&mut nkax); car448(&mut nkax); car448(&mut nkax);
+    let mut px: [secret i64] = fe_zero();
+    let mut py: [secret i64] = fe_zero();
+    let mut pz: [secret i64] = fe_zero();
+    pt_add(&mut px, &mut py, &mut pz, &sbx, &sby, &sbz, &nkax, &kay, &kaz);
+
+    // Accept iff encode(P) == R, decode valid, and S < L.
+    let packed: [secret u8] = pt_encode(&px, &py, &pz);
+    let mut acc: secret i64 = 0;
+    let mut c: i64 = 0;
+    while c < 57 {
+        acc = acc | ((packed[c] as i64) ^ (sig[c] as i64));
+        c = c + 1;
+    }
+    let eq: secret i64 = 1 - (((0 - acc) >> 63) & 1);
+
+    // S < L: compare the 57 little-endian S bytes against L from the top down.
+    let lb: [secret i64] = l_bytes();
+    let mut slt: secret i64 = 0;
+    let mut still_eq: secret i64 = 1;
+    let mut bi: i64 = 56;
+    while bi >= 0 {
+        let sb: secret i64 = sig[57 + bi] as i64;
+        let lv: secret i64 = lb[bi];
+        let lt: secret i64 = ((sb - lv) >> 63) & 1;
+        let gt: secret i64 = ((lv - sb) >> 63) & 1;
+        slt = slt | (still_eq & lt);
+        still_eq = still_eq & (1 - (lt | gt));
+        bi = bi - 1;
+    }
+
+    declassify(eq & dvalid & slt)
+}

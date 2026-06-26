@@ -296,6 +296,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // sel448 swaps over a fixed 448 iterations. 42 = the RFC 7748 §5.2 vector and a
     // full ECDH exchange (both sides agree on the shared secret) matched byte-for-byte.
     ("examples/security/x448.sentinel", 42),
+    // Constant-time Ed448 signatures (std::security::ed448, RFC 8032) over the
+    // edwards448 curve (the shared std::security::fe448 field) + SHAKE256. Signing
+    // runs the secret scalar through a branch-free Montgomery ladder and a branch-free
+    // Barrett reduction mod the group order. 42 = the RFC 8032 §7.4 vector (public key
+    // + signature) reproduced, a non-empty-message vector reproduced, both verified,
+    // and a tampered signature rejected.
+    ("examples/security/ed448.sentinel", 42),
 ];
 
 #[test]
@@ -431,6 +438,11 @@ fn sp800185_derived_functions() {
 #[test]
 fn x448_scalarmult_constant_time() {
     check_example("examples/security/x448.sentinel", "x448", 42);
+}
+
+#[test]
+fn ed448_signing_constant_time() {
+    check_example("examples/security/ed448.sentinel", "ed448", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

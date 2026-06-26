@@ -1,0 +1,116 @@
+// examples/security/ed448.sentinel — constant-time Ed448 (RFC 8032) over the
+// §7.4 "Blank" test vector: key generation, signing, verification, and rejection.
+//
+// Exercises std::security::ed448 (over the shared std::security::fe448 field +
+// std::security::sha3's SHAKE256):
+//   * ed448_pubkey(seed) reproduces the published 57-byte public key.
+//   * ed448_sign(seed, "") reproduces the published 114-byte signature byte-for-byte.
+//   * ed448_verify accepts that signature, and REJECTS a one-bit-tampered one.
+//
+// CONSTANT-TIME DISCIPLINE. The seed / scalar are `[secret u8]`, so signing runs
+// entirely in the secret domain: the scalar multiplication is a branch-free
+// Montgomery ladder (sel448 swaps) and the reduction mod the group order L is a
+// branch-free Barrett reduction — the compiler's constant-time check proves on every
+// build that no secret scalar bit reached a branch, a memory index, or a divisor.
+// Verification declassifies only its final 1/0 accept bit. The signature bytes are
+// declassified HERE to compare against the published vector.
+//
+// Exit 42 = the public key + signature matched RFC 8032 §7.4, verify accepted the
+// valid signature, and rejected the tampered one.
+use std::security::ed448::ed448_pubkey;
+use std::security::ed448::ed448_sign;
+use std::security::ed448::ed448_verify;
+
+fn mk(data: [i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut v, i64_to_u8(data[i]));
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+fn diff(got: &[secret u8], exp: [i64], n: i64) -> i64 {
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        bad = bad | (u8_to_i64(declassify((*got)[i])) ^ exp[i]);
+        i = i + 1;
+    }
+    bad
+}
+
+// The RFC 8032 §7.4 "Blank" secret key (57 bytes); the message is empty.
+fn seed() -> [secret u8] {
+    mk([108, 130, 165, 98, 203, 128, 141, 16, 214, 50, 190, 137, 200, 81, 62, 191, 108, 146, 159, 52, 221, 250, 140, 159, 99, 201, 150, 14, 246, 227, 72, 163, 82, 140, 138, 63, 204, 47, 4, 78, 57, 163, 252, 91, 148, 73, 47, 143, 3, 46, 117, 73, 162, 0, 152, 249, 91], 57)
+}
+
+fn empty_msg() -> [secret u8] {
+    let v: Vec<secret u8> = vec_new();
+    vec_to_array(v)
+}
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- Public key.
+    let pk: [secret u8] = ed448_pubkey(seed());
+    let epk: [i64] = [95, 215, 68, 155, 89, 180, 97, 253, 44, 231, 135, 236, 97, 106, 212, 106, 29, 161, 52, 36, 133, 167, 14, 31, 138, 14, 167, 93, 128, 233, 103, 120, 237, 241, 36, 118, 155, 70, 199, 6, 27, 214, 120, 61, 241, 229, 15, 108, 209, 250, 26, 190, 175, 232, 37, 97, 128];
+    bad = bad | diff(&pk, epk, 57);
+
+    // ---- Signature.
+    let sig: [secret u8] = ed448_sign(seed(), empty_msg());
+    let esig: [i64] = [83, 58, 55, 246, 187, 228, 87, 37, 31, 2, 60, 13, 136, 249, 118, 174, 45, 251, 80, 74, 132, 62, 52, 210, 7, 79, 216, 35, 212, 26, 89, 31, 43, 35, 63, 3, 79, 98, 130, 129, 242, 253, 122, 34, 221, 212, 125, 120, 40, 197, 155, 208, 162, 27, 253, 57, 128, 255, 13, 32, 40, 212, 177, 138, 157, 246, 62, 0, 108, 93, 28, 45, 52, 91, 146, 93, 141, 192, 11, 65, 4, 133, 45, 185, 154, 197, 199, 205, 218, 133, 48, 161, 19, 160, 244, 219, 182, 17, 73, 240, 90, 115, 99, 38, 140, 113, 217, 88, 8, 255, 46, 101, 38, 0];
+    bad = bad | diff(&sig, esig, 114);
+
+    // ---- Verify the valid signature (accept = 1).
+    let good: i64 = ed448_verify(pk_for_verify(), empty_msg(), sig_for_verify());
+    if good == 1 { bad = bad | 0; 0 } else { bad = bad | 1; 0 };
+
+    // ---- Verify a one-bit-tampered signature (reject = 0).
+    let bad_sig: [secret u8] = tampered_sig();
+    let rejected: i64 = ed448_verify(pk_for_verify(), empty_msg(), bad_sig);
+    if rejected == 0 { bad = bad | 0; 0 } else { bad = bad | 1; 0 };
+
+    // ---- A second vector with a NON-EMPTY message (seed = bytes 0..56, message
+    // "sentinel"), cross-checked against pyca's Ed448. Exercises the message path.
+    let sig2: [secret u8] = ed448_sign(seed2(), msg2());
+    let esig2: [i64] = [206, 133, 218, 109, 8, 33, 250, 171, 176, 139, 250, 86, 184, 220, 94, 161, 230, 219, 245, 52, 253, 233, 145, 241, 45, 5, 244, 222, 240, 82, 234, 148, 242, 44, 11, 31, 69, 255, 60, 148, 184, 74, 151, 44, 187, 198, 60, 127, 114, 154, 196, 70, 90, 10, 151, 78, 0, 206, 81, 161, 222, 75, 196, 163, 113, 11, 16, 112, 114, 76, 64, 189, 55, 65, 2, 210, 112, 13, 246, 91, 146, 124, 114, 104, 1, 27, 228, 160, 137, 181, 67, 205, 25, 54, 172, 126, 211, 38, 249, 21, 9, 123, 107, 242, 145, 184, 88, 212, 215, 64, 61, 251, 2, 0];
+    bad = bad | diff(&sig2, esig2, 114);
+    let good2: i64 = ed448_verify(pk2(), msg2(), sig2_for_verify());
+    if good2 == 1 { bad = bad | 0; 0 } else { bad = bad | 1; 0 };
+
+    if bad == 0 { 42 } else { 0 }
+}
+
+fn seed2() -> [secret u8] {
+    mk([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56], 57)
+}
+
+fn msg2() -> [secret u8] {
+    mk([115, 101, 110, 116, 105, 110, 101, 108], 8)
+}
+
+fn pk2() -> [secret u8] {
+    mk([24, 208, 167, 14, 66, 167, 66, 223, 181, 97, 39, 152, 147, 56, 80, 97, 215, 180, 218, 216, 246, 254, 237, 71, 145, 234, 171, 102, 178, 244, 164, 240, 47, 192, 148, 98, 168, 191, 177, 132, 45, 11, 172, 96, 232, 161, 179, 229, 91, 162, 64, 127, 51, 34, 111, 56, 0], 57)
+}
+
+fn sig2_for_verify() -> [secret u8] {
+    mk([206, 133, 218, 109, 8, 33, 250, 171, 176, 139, 250, 86, 184, 220, 94, 161, 230, 219, 245, 52, 253, 233, 145, 241, 45, 5, 244, 222, 240, 82, 234, 148, 242, 44, 11, 31, 69, 255, 60, 148, 184, 74, 151, 44, 187, 198, 60, 127, 114, 154, 196, 70, 90, 10, 151, 78, 0, 206, 81, 161, 222, 75, 196, 163, 113, 11, 16, 112, 114, 76, 64, 189, 55, 65, 2, 210, 112, 13, 246, 91, 146, 124, 114, 104, 1, 27, 228, 160, 137, 181, 67, 205, 25, 54, 172, 126, 211, 38, 249, 21, 9, 123, 107, 242, 145, 184, 88, 212, 215, 64, 61, 251, 2, 0], 114)
+}
+
+// The public key and signature as fresh secret arrays for the verify calls (verify
+// consumes its arguments, and the sign-path pk/sig above are already consumed).
+fn pk_for_verify() -> [secret u8] {
+    mk([95, 215, 68, 155, 89, 180, 97, 253, 44, 231, 135, 236, 97, 106, 212, 106, 29, 161, 52, 36, 133, 167, 14, 31, 138, 14, 167, 93, 128, 233, 103, 120, 237, 241, 36, 118, 155, 70, 199, 6, 27, 214, 120, 61, 241, 229, 15, 108, 209, 250, 26, 190, 175, 232, 37, 97, 128], 57)
+}
+
+fn sig_for_verify() -> [secret u8] {
+    mk([83, 58, 55, 246, 187, 228, 87, 37, 31, 2, 60, 13, 136, 249, 118, 174, 45, 251, 80, 74, 132, 62, 52, 210, 7, 79, 216, 35, 212, 26, 89, 31, 43, 35, 63, 3, 79, 98, 130, 129, 242, 253, 122, 34, 221, 212, 125, 120, 40, 197, 155, 208, 162, 27, 253, 57, 128, 255, 13, 32, 40, 212, 177, 138, 157, 246, 62, 0, 108, 93, 28, 45, 52, 91, 146, 93, 141, 192, 11, 65, 4, 133, 45, 185, 154, 197, 199, 205, 218, 133, 48, 161, 19, 160, 244, 219, 182, 17, 73, 240, 90, 115, 99, 38, 140, 113, 217, 88, 8, 255, 46, 101, 38, 0], 114)
+}
+
+// The same signature with bit 0 of byte 0 flipped (83 -> 82).
+fn tampered_sig() -> [secret u8] {
+    mk([82, 58, 55, 246, 187, 228, 87, 37, 31, 2, 60, 13, 136, 249, 118, 174, 45, 251, 80, 74, 132, 62, 52, 210, 7, 79, 216, 35, 212, 26, 89, 31, 43, 35, 63, 3, 79, 98, 130, 129, 242, 253, 122, 34, 221, 212, 125, 120, 40, 197, 155, 208, 162, 27, 253, 57, 128, 255, 13, 32, 40, 212, 177, 138, 157, 246, 62, 0, 108, 93, 28, 45, 52, 91, 146, 93, 141, 192, 11, 65, 4, 133, 45, 185, 154, 197, 199, 205, 218, 133, 48, 161, 19, 160, 244, 219, 182, 17, 73, 240, 90, 115, 99, 38, 140, 113, 217, 88, 8, 255, 46, 101, 38, 0], 114)
+}
