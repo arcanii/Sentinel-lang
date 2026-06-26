@@ -1,0 +1,111 @@
+// std::security::hkdf — HKDF (RFC 5869) over SHA-256, composing
+// std::security::hmac.
+//
+// HKDF is the standard "extract-then-expand" key-derivation function: it turns
+// (possibly non-uniform) input keying material into one or more cryptographically
+// strong output keys. Two steps, both just HMAC-SHA256:
+//
+//   HKDF-Extract(salt, IKM) -> PRK = HMAC-SHA256(salt, IKM)
+//   HKDF-Expand(PRK, info, L) -> OKM, the first L bytes of T(1) ‖ T(2) ‖ …, where
+//       T(0) = ""  and  T(i) = HMAC-SHA256(PRK, T(i-1) ‖ info ‖ byte(i)).
+//
+// This composes `std::security::hmac::hmac_sha256` (which itself composes
+// `std::security::sha256`) — no new primitive, the canonical KDF built from the
+// keyed MAC already in the suite.
+//
+// CONSTANT-TIME over the SECRET inputs. The salt, the input keying material, the
+// `info` context, the PRK, and the output keying material are all `[secret u8]`,
+// so every byte stays in the secret domain and the underlying HMAC/SHA-256 are
+// branch-free over secret words (their CT check proves it). Only the LENGTHS are
+// public: the requested output length `L`, the salt/IKM/info lengths, the block
+// count N = ⌈L/32⌉, and the single-byte block counter `i` (1..N) — so every loop
+// bound, index, and the counter byte are public, and the access pattern never
+// depends on a secret byte. Nothing is declassified here; the OKM comes back
+// `[secret u8]` for the caller to use (e.g. as a key) or constant-time-verify.
+//
+// Note on an empty salt: RFC 5869 says an absent salt is treated as HashLen
+// zero bytes. HMAC normalizes its key by zero-padding to the 64-byte block, so
+// `hmac_sha256(<empty>, IKM)` already equals HMAC with 32 (or 64) zero bytes — an
+// empty `[secret u8]` salt therefore yields the RFC's PRK with no special case.
+use std::security::hmac::hmac_sha256;
+
+// HKDF-Extract: PRK = HMAC-SHA256(salt, IKM). The 32-byte SECRET pseudorandom
+// key. `salt` is the HMAC key, `IKM` the HMAC message; both are consumed.
+pub fn hkdf_extract(salt: [secret u8], ikm: [secret u8]) -> [secret u8] {
+    hmac_sha256(salt, ikm)
+}
+
+// HKDF-Expand: derive `length` bytes of output keying material from the 32-byte
+// `prk`. OKM = first `length` bytes of T(1) ‖ T(2) ‖ …, T(i) = HMAC-SHA256(prk,
+// T(i-1) ‖ info ‖ byte(i)). `length` is PUBLIC (RFC 5869 requires it ≤ 255·32).
+pub fn hkdf_expand(prk: [secret u8], info: [secret u8], length: i64) -> [secret u8] {
+    let ilen: i64 = len(info);
+
+    // The running output; we fill whole 32-byte HMAC blocks, then truncate to
+    // `length`. T(i-1) is the previous 32-byte block, i.e. the tail of `okm`.
+    let mut okm: Vec<secret u8> = vec_new();
+    let mut produced: i64 = 0;          // bytes emitted so far (multiple of 32)
+    let mut counter: i64 = 1;           // block index i, 1..N — PUBLIC
+
+    while produced < length {
+        // ---- Assemble the HMAC message T(i-1) ‖ info ‖ byte(i).
+        let mut block_in: Vec<secret u8> = vec_new();
+
+        // T(i-1): empty for the first block; otherwise the last 32 bytes of okm.
+        if counter > 1 {
+            let prev: i64 = produced - 32;
+            let mut j: i64 = 0;
+            while j < 32 {
+                push(&mut block_in, okm[prev + j]);    // secret previous-block byte
+                j = j + 1;
+            }
+            0
+        } else { 0 };
+
+        // info (secret-or-widened context bytes).
+        let mut k: i64 = 0;
+        while k < ilen {
+            push(&mut block_in, info[k]);
+            k = k + 1;
+        }
+
+        // The single-byte block counter — a PUBLIC value widened to secret u8.
+        push(&mut block_in, i64_to_u8(counter));
+
+        // ---- T(i) = HMAC-SHA256(prk, block_in). hmac_sha256 CONSUMES its key,
+        // so rebuild a fresh copy of `prk` each block by indexing the param
+        // (a read — `prk` itself is never moved).
+        let mut prkc: Vec<secret u8> = vec_new();
+        let mut p: i64 = 0;
+        while p < 32 {
+            push(&mut prkc, prk[p]);
+            p = p + 1;
+        }
+        let t: [secret u8] = hmac_sha256(vec_to_array(prkc), vec_to_array(block_in));
+
+        // Append the 32-byte block to the output.
+        let mut q: i64 = 0;
+        while q < 32 {
+            push(&mut okm, t[q]);
+            q = q + 1;
+        }
+        produced = produced + 32;
+        counter = counter + 1;
+    }
+
+    // Truncate to the requested (public) length.
+    let mut out: Vec<secret u8> = vec_new();
+    let mut r: i64 = 0;
+    while r < length {
+        push(&mut out, okm[r]);
+        r = r + 1;
+    }
+    vec_to_array(out)
+}
+
+// HKDF-SHA256: the one-shot extract-then-expand. Derives `length` bytes of
+// output keying material from `salt`, `ikm`, and the application-specific `info`.
+pub fn hkdf_sha256(salt: [secret u8], ikm: [secret u8], info: [secret u8], length: i64) -> [secret u8] {
+    let prk: [secret u8] = hkdf_extract(salt, ikm);
+    hkdf_expand(prk, info, length)
+}

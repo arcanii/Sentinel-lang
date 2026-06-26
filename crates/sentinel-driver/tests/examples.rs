@@ -276,6 +276,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // both the public key and the signature, AND each verified its valid signature and
     // rejected a one-bit-tampered one.
     ("examples/security/ed25519.sentinel", 42),
+    // HKDF-SHA256 key derivation (std::security::hkdf, RFC 5869) — extract-then-
+    // expand built purely from std::security::hmac (→ sha256). Every salt / IKM /
+    // info byte is `[secret u8]`, so the whole derivation is constant-time; only
+    // the output length and the public block counter drive control flow. 42 = the
+    // three RFC 5869 Appendix A vectors (incl. A.3's empty salt + info) reproduced
+    // both the PRK and the OKM byte-for-byte.
+    ("examples/security/hkdf.sentinel", 42),
 ];
 
 #[test]
@@ -396,6 +403,11 @@ fn sha3_keccak_digest() {
 #[test]
 fn ed25519_signing_constant_time() {
     check_example("examples/security/ed25519.sentinel", "ed25519", 42);
+}
+
+#[test]
+fn hkdf_sha256_rfc5869() {
+    check_example("examples/security/hkdf.sentinel", "hkdf", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
