@@ -59,9 +59,11 @@ running the whole SSH-2 handshake over a real socket (a distributed KEX between 
 client/server tasks), `examples/net/ssh_channel_stream` running the data phase (a
 bidirectional, multi-packet chacha20-poly1305 channel with per-direction seqnr evolution),
 `examples/net/ssh_full_session` running a COMPLETE session (handshake + data phase) over
-one connection via the factored `std::net::ssh_handshake` API, and `examples/net/ssh_pubkey_auth`
-running RFC 4252 publickey USER AUTHENTICATION (a session-id-bound Ed25519 signature) on top;
-HEAD `2d55f41`, 1591 tests,
+one connection via the factored `std::net::ssh_handshake` API, `examples/net/ssh_pubkey_auth`
+running RFC 4252 publickey USER AUTHENTICATION (a session-id-bound Ed25519 signature) on top,
+and `examples/net/ssh_channel_window` running the RFC 4254 CONNECTION layer (a windowed
+session channel) — so the full transport→auth→channel sequence now runs over real sockets;
+HEAD `79bd5e8`, 1592 tests,
 four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
@@ -422,10 +424,19 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     request bound to the session id (so a captured signature can't be replayed on another
     session), and the server verifies the signature AND enforces authorized_keys before
     granting access (both failure modes proven by negative probes — an unauthorized key and
-    a wrong-session-id signature each rejected cleanly). Cleanly open
-    next toward a fuller sshd: the
-    `connection` layer (`SSH_MSG_CHANNEL_OPEN` / a windowed data channel on top of the
-    authenticated transport); a `userauth` failure/retry loop (multiple auth attempts).
+    a wrong-session-id signature each rejected cleanly). AND the **connection layer** now
+    exists — `std::net::ssh_connection` + `examples/net/ssh_channel_window` (`79bd5e8`):
+    RFC 4254 channel messages (`CHANNEL_OPEN`/`_CONFIRMATION`/`_DATA`/`_WINDOW_ADJUST`/
+    `_CLOSE`) over the encrypted transport, a "session" channel with WINDOWED FLOW CONTROL
+    — a 32-byte payload crosses in two 16-byte `CHANNEL_DATA` chunks gated by a 16-byte
+    window the server replenishes with `WINDOW_ADJUST`; each message a sealed record under a
+    per-direction seqnr, sent length-prefixed (a seqnr-corruption probe rejects cleanly).
+    **So the core SSH-2 sequence a real sshd runs is now COMPLETE end to end over real
+    sockets: transport KEX → host-key auth → key derivation → encrypted channel → publickey
+    user auth → windowed session channel** — every step machine-checked constant-time, both
+    back ends byte-identical. Cleanly open next (all peripheral / optional now): a `userauth`
+    failure-then-retry loop; `CHANNEL_REQUEST` "exec"/"shell" + an exit-status reply; multiple
+    concurrent channels.
     Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of

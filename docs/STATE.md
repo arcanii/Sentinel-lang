@@ -113,7 +113,12 @@ the current state of the workspace without re-reading every commit.
   `std/net/ssh_userauth` + `examples/net/ssh_pubkey_auth` add RFC 4252 §7 **publickey
   authentication**: the client signs a request bound to the session id (the first exchange
   hash H) so a signature can't be replayed across sessions, and the server verifies the
-  Ed25519 signature and enforces authorized_keys before granting access.
+  Ed25519 signature and enforces authorized_keys before granting access. And the connection
+  layer (`std/net/ssh_connection` + `examples/net/ssh_channel_window`) adds RFC 4254 channel
+  messages — a "session" channel with **windowed flow control** (a 32-byte payload crosses in
+  two 16-byte `CHANNEL_DATA` chunks gated by a server-replenished window). So the full SSH-2
+  sequence a real `sshd` runs — transport KEX → host-key auth → key derivation → encrypted
+  channel → publickey user auth → windowed session channel — now runs over real sockets.
   The
   crypto examples reproduce the
   canonical test vectors (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 /
@@ -201,7 +206,7 @@ the current state of the workspace without re-reading every commit.
   (a table-free field-inversion S-box, a branch-free mask-based conditional swap). See
   the `sentinel_examples_and_corelibs` auto-memory.
 
-**1591 tests across the workspace**, four-check green (build · `cargo nextest`
+**1592 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
