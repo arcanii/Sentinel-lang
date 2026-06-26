@@ -315,6 +315,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // protocol. 42 = the ECDH agreed, the exchange hash matched an independent model,
     // the host-key signature verified, and all six derived session keys matched.
     ("examples/net/ssh_handshake.sentinel", 42),
+    // The SSH encrypted channel (std::net::ssh_cipher — chacha20-poly1305@openssh.com):
+    // the binary packet AEAD that protects every SSH packet after NEWKEYS, composing
+    // ChaCha20 + Poly1305. 42 = a sealed packet matched an independent model byte-for-
+    // byte, its tag verified, the payload round-tripped, and a tampered record was
+    // rejected.
+    ("examples/net/ssh_channel.sentinel", 42),
 ];
 
 #[test]
@@ -465,6 +471,11 @@ fn x25519_64_radix_2_51_u128() {
 #[test]
 fn ssh_handshake_curve25519_sha256() {
     check_example("examples/net/ssh_handshake.sentinel", "ssh_handshake", 42);
+}
+
+#[test]
+fn ssh_channel_chacha20poly1305_openssh() {
+    check_example("examples/net/ssh_channel.sentinel", "ssh_channel", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

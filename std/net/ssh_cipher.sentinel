@@ -1,0 +1,173 @@
+// std::net::ssh_cipher — the SSH binary packet protocol + the
+// chacha20-poly1305@openssh.com record cipher (openssh PROTOCOL.chacha20poly1305),
+// the encrypted-channel layer that runs after the std::net::ssh key exchange.
+//
+// This is the AEAD that protects every SSH packet once NEWKEYS is sent. It composes
+// the shipped std::security::chacha20 + poly1305: a 64-byte key splits into K_2 (the
+// main key) and K_1 (the length key); the 4-byte packet length is encrypted with K_1,
+// the payload with K_2, and a Poly1305 tag (its one-time key generated from K_2's
+// counter-0 keystream) authenticates the whole ciphertext. The packet sequence number
+// is the nonce.
+//
+// CONSTANT-TIME. The plaintext, the keys, the keystream, and the recovered payload are
+// all secret and flow only through branch-free ChaCha20/Poly1305; the tag check is a
+// branch-free compare whose 1-bit verdict is the one declassify. The CIPHERTEXT is
+// public (it goes on the wire) — Poly1305 here takes a public `&[u8]` message, so the
+// ciphertext is declassified to be MAC'd, the sanctioned boundary. The packet length
+// and padding length are public framing (observable on the wire) and are declassified.
+//
+// nonce mapping: openssh uses the original ChaCha20 (64-bit nonce in words 14,15;
+// 64-bit block counter in 12,13). Our chacha20 is the IETF layout (word 12 = counter,
+// words 13,14,15 = nonce). For the sequence numbers in play the openssh counter-high
+// word (13) is 0, so the IETF nonce is [0, LE32(iv[0:4]), LE32(iv[4:8])] where iv is
+// the 8-byte big-endian sequence number — exactly `ssh_nonce` below.
+use std::security::chacha20::chacha20_xor;
+use std::security::poly1305::poly1305;
+
+// 8 little-endian `secret i32` key words from `k[off..off+32]`.
+fn bytes_to_words8(k: &[secret u8], off: i64) -> [secret i32] {
+    let mut v: Vec<secret i32> = vec_new();
+    let mut i: i64 = 0;
+    while i < 8 {
+        let b: i64 = off + 4 * i;
+        let w: secret i32 = ((*k)[b] as i32)
+            | (((*k)[b + 1] as i32) << 8)
+            | (((*k)[b + 2] as i32) << 16)
+            | (((*k)[b + 3] as i32) << 24);
+        push(&mut v, w);
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+// The ChaCha20 nonce (IETF words 13,14,15) for SSH packet sequence number `seqnr`.
+fn ssh_nonce(seqnr: i64) -> [secret i32] {
+    let b0: i64 = (seqnr >> 56) & 255;  let b1: i64 = (seqnr >> 48) & 255;
+    let b2: i64 = (seqnr >> 40) & 255;  let b3: i64 = (seqnr >> 32) & 255;
+    let b4: i64 = (seqnr >> 24) & 255;  let b5: i64 = (seqnr >> 16) & 255;
+    let b6: i64 = (seqnr >> 8) & 255;   let b7: i64 = seqnr & 255;
+    let w14: i64 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    let w15: i64 = b4 | (b5 << 8) | (b6 << 16) | (b7 << 24);
+    let mut v: Vec<secret i32> = vec_new();
+    push(&mut v, 0 as i32);
+    push(&mut v, w14 as i32);
+    push(&mut v, w15 as i32);
+    vec_to_array(v)
+}
+
+// A fresh 32-byte zero buffer (the input whose K_2 counter-0 keystream is the Poly1305 key).
+fn zeros32() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 32 { push(&mut v, i64_to_u8(0)); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Declassify the first `n` bytes of a secret buffer to a PUBLIC `[u8]` (the wire
+// ciphertext that Poly1305 authenticates).
+fn declassify_bytes(a: &[secret u8], n: i64) -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, declassify((*a)[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// SSH padding length for chacha20-poly1305 (8-byte alignment of the 4-byte length +
+// 1-byte padding-length + payload + padding; ≥ 4 bytes of padding).
+pub fn ssh_pad_len(payload_len: i64) -> i64 {
+    let m: i64 = 5 + payload_len;
+    let need: i64 = m - (m / 8) * 8;
+    let pad: i64 = (8 - need) - ((8 - need) / 8) * 8;
+    if pad < 4 { pad + 8 } else { pad }
+}
+
+// Seal a SECRET `payload` into one chacha20-poly1305@openssh.com binary packet under
+// the 64-byte session key `key64` with packet sequence number `seqnr`. Returns the
+// record (encrypted length ‖ encrypted payload ‖ 16-byte tag). Zero padding is used
+// (its content is irrelevant — the receiver discards it).
+pub fn ssh_seal(key64: &[secret u8], seqnr: i64, payload: &[secret u8]) -> [secret u8] {
+    let plen: i64 = len(*payload);
+    let padlen: i64 = ssh_pad_len(plen);
+    let packet_length: i64 = 1 + plen + padlen;
+
+    // plaintext = padding_length ‖ payload ‖ padding.
+    let mut pt: Vec<secret u8> = vec_new();
+    push(&mut pt, i64_to_u8(padlen));
+    let mut i: i64 = 0;
+    while i < plen { push(&mut pt, (*payload)[i]); i = i + 1; }
+    let mut p: i64 = 0;
+    while p < padlen { push(&mut pt, i64_to_u8(0)); p = p + 1; }
+
+    // enc_len = ChaCha20(K_1, nonce, ctr 0) over the 4-byte big-endian packet length.
+    let mut lenb: Vec<secret u8> = vec_new();
+    push(&mut lenb, i64_to_u8((packet_length >> 24) & 255));
+    push(&mut lenb, i64_to_u8((packet_length >> 16) & 255));
+    push(&mut lenb, i64_to_u8((packet_length >> 8) & 255));
+    push(&mut lenb, i64_to_u8(packet_length & 255));
+    let enc_len: [secret u8] = chacha20_xor(vec_to_array(lenb), bytes_to_words8(key64, 32), ssh_nonce(seqnr), 0 as i32);
+
+    // poly_key = first 32 bytes of K_2's counter-0 keystream.
+    let poly_key: [secret u8] = chacha20_xor(zeros32(), bytes_to_words8(key64, 0), ssh_nonce(seqnr), 0 as i32);
+    // enc_pay = ChaCha20(K_2, nonce, ctr 1) over the plaintext.
+    let enc_pay: [secret u8] = chacha20_xor(vec_to_array(pt), bytes_to_words8(key64, 0), ssh_nonce(seqnr), 1 as i32);
+
+    // ct = enc_len ‖ enc_pay ; tag = Poly1305(ct, poly_key) over the public ciphertext.
+    let mut ctv: Vec<secret u8> = vec_new();
+    let mut a: i64 = 0;
+    while a < 4 { push(&mut ctv, enc_len[a]); a = a + 1; }
+    let mut b: i64 = 0;
+    while b < packet_length { push(&mut ctv, enc_pay[b]); b = b + 1; }
+    let ct: [secret u8] = vec_to_array(ctv);
+    let ct_pub: [u8] = declassify_bytes(&ct, 4 + packet_length);
+    let tag: [u8] = poly1305(&ct_pub, &poly_key);
+
+    let mut rec: Vec<secret u8> = vec_new();
+    let mut c: i64 = 0;
+    while c < 4 + packet_length { push(&mut rec, ct[c]); c = c + 1; }
+    let mut t: i64 = 0;
+    while t < 16 { push(&mut rec, tag[t]); t = t + 1; }
+    vec_to_array(rec)
+}
+
+// Verify a record's Poly1305 tag. Returns 1 (authentic) / 0 (forged) — a PUBLIC bit
+// (the only declassify of the comparison). Constant-time over the tag bytes.
+pub fn ssh_open_verify(key64: &[secret u8], seqnr: i64, record: &[secret u8]) -> i64 {
+    let total: i64 = len(*record);
+    let ctlen: i64 = total - 16;
+    let ct_pub: [u8] = declassify_bytes(record, ctlen);
+    let poly_key: [secret u8] = chacha20_xor(zeros32(), bytes_to_words8(key64, 0), ssh_nonce(seqnr), 0 as i32);
+    let tag: [u8] = poly1305(&ct_pub, &poly_key);
+    let mut acc: secret i64 = 0;
+    let mut i: i64 = 0;
+    while i < 16 {
+        acc = acc | ((tag[i] as i64) ^ ((*record)[ctlen + i] as i64));
+        i = i + 1;
+    }
+    declassify(1 - (((0 - acc) >> 63) & 1))
+}
+
+// Decrypt a record to the SECRET payload (strips the SSH padding). The packet length
+// and padding length are public framing and are declassified.
+pub fn ssh_open_payload(key64: &[secret u8], seqnr: i64, record: &[secret u8]) -> [secret u8] {
+    // Decrypt the 4-byte length with K_1.
+    let mut lenb: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 4 { push(&mut lenb, (*record)[i]); i = i + 1; }
+    let declen: [secret u8] = chacha20_xor(vec_to_array(lenb), bytes_to_words8(key64, 32), ssh_nonce(seqnr), 0 as i32);
+    let packet_length: i64 = (u8_to_i64(declassify(declen[0])) << 24)
+        | (u8_to_i64(declassify(declen[1])) << 16)
+        | (u8_to_i64(declassify(declen[2])) << 8)
+        | u8_to_i64(declassify(declen[3]));
+
+    // Decrypt the payload with K_2 (counter 1) and strip the padding.
+    let mut payb: Vec<secret u8> = vec_new();
+    let mut j: i64 = 0;
+    while j < packet_length { push(&mut payb, (*record)[4 + j]); j = j + 1; }
+    let plaintext: [secret u8] = chacha20_xor(vec_to_array(payb), bytes_to_words8(key64, 0), ssh_nonce(seqnr), 1 as i32);
+    let padlen: i64 = u8_to_i64(declassify(plaintext[0]));
+    let paylen: i64 = packet_length - 1 - padlen;
+    let mut out: Vec<secret u8> = vec_new();
+    let mut k: i64 = 0;
+    while k < paylen { push(&mut out, plaintext[1 + k]); k = k + 1; }
+    vec_to_array(out)
+}
