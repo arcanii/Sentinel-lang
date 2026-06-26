@@ -52,8 +52,10 @@ reference as you work through the milestones.
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
 NINE language gaps closed; a comprehensive constant-time crypto suite shipped; a
 complete loopback SSH-2 transport SESSION — KEX + KDF + the chacha20-poly1305@openssh.com
-record cipher — assembled from it, and the ADR 0056 sockets RUNTIME primitives landed;
-HEAD `b90a889` (TCP sockets runtime layer) + docs, 1586 tests, four-check green).** Real,
+record cipher — assembled from it, and the ADR 0056 sockets are now FULLY LIVE (runtime
+primitives + compiler builtins + the `scg` mirror), with `examples/net/tcp_echo` running a
+real loopback TCP echo on a concurrent `spawn`ed server task; HEAD `669665a`, 1587 tests,
+four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
 guarantee on real code**, and surfaces concrete language gaps — finding + fixing those
@@ -78,9 +80,9 @@ or a webserver is the better showcase; `sshd` was chosen (it is crypto end-to-en
 the constant-time/`secret` guarantee covers ~all of it, and the shipped suite already
 IS an SSH cipher suite). Both are blocked on the same missing piece — **sockets** — so
 the service is being built **loopback-first**. Two pieces landed: **ADR 0056** (a TCP
-sockets runtime surface — six file-I/O-style builtins, blocking + one-OS-thread-task-
+sockets runtime surface — seven file-I/O-style builtins, blocking + one-OS-thread-task-
 per-connection mapping onto `scope`/`spawn`, error-returning, the socket as a public
-declassify boundary; PROPOSED, no implementation) and **`std::net::ssh`** — the SSH-2
+declassify boundary; now IMPLEMENTED end to end) and **`std::net::ssh`** — the SSH-2
 transport key exchange (`curve25519-sha256` + `ssh-ed25519`, RFC 4253 / RFC 8731): the
 SSH wire codec, the exchange hash, the host-key signature, and the §7.2 KDF, all in the
 secret domain, run loopback (`examples/net/ssh_handshake`, validated against a Python
@@ -95,10 +97,15 @@ verifies, the payload round-trips, a tampered record is rejected). The three pie
 stitched into ONE end-to-end loopback session in `examples/net/ssh_session` (KEX →
 host-key auth → key derivation → an encrypted application packet; `ssh_kdf` gained a
 second SHA-256 block for the 64-byte key). So the loopback SSH transport is complete
-end to end. Toward running it over a REAL connection, ADR 0056's sockets **runtime
-layer** has landed (`sentinel-runtime`: the six libc TCP primitives + an ephemeral-port
-query, with a Rust loopback-echo test); what remains is wiring them as compiler builtins
-+ the self-hosted-`scg` builtin-table mirror (the FnId-shift crux). The cleanly-open next
+end to end. Toward running it over a REAL connection, ADR 0056's sockets are now LIVE
+end to end: the runtime layer (`sentinel-runtime`: the seven libc TCP primitives, with a
+Rust loopback-echo test, `b90a889`), the compiler builtins (`tcp_listen`/`local_port`/
+`accept`/`connect`/`read`/`write`/`close` at FnId 14..=20, mirroring the file-I/O
+builtins — resolve/types/codegen + the `scg` builtin-table bump, `0845b8a`), and a real
+Sentinel program over them — `examples/net/tcp_echo` (`669665a`): bind 127.0.0.1:0,
+`spawn` a concurrent server task, connect, send, read the echo back, exit 42. The
+FnId-shift crux is closed (builtins 0..=20 ⇒ user fns start at #21; byte-exact, both
+bootstrap fixed points hold). The cleanly-open next
 steps are in **Next**
 below,
 with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
@@ -355,23 +362,21 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     pure library work. Ed448's port surfaced a real bug the Python model had hidden — its
     Barrett reduction leaned on a final big-int `% L` after only 3 conditional
     subtractions; the constant-time port does 8 always-executed masked subtractions.)
-    Cleanly open next: **toward a real `sshd`** — the loopback transport is now
-    complete END TO END (KEX + KDF in `std::net::ssh` + the
-    `chacha20-poly1305@openssh.com` record cipher in `std::net::ssh_cipher`, stitched in
-    `examples/net/ssh_session`: KEX → host-key auth → key derivation → an encrypted
-    application packet). The ADR 0056 sockets **runtime layer is now done** (`b90a889`,
-    `sentinel-runtime`): `sentinel_tcp_listen`/`local_port`/`accept`/`connect`/`read`/
-    `write`/`close` over libc, with a Rust loopback-echo test (OS-thread server task,
-    ephemeral port). The remaining step is **wiring them as compiler builtins** (FnId
-    constants + signatures + codegen, mirroring the file-I/O builtins) + a `std/net/tcp`
-    wrapper + a localhost echo-server example. ⚠ THE CRUX: socket builtins shift every
-    user-fn FnId (unlike ADR 0055's `u128` Type variant), so they WILL break the selfhost
-    differentials unless the 6 builtins are mirrored into the self-hosted `scg` — bump
-    `14`→`20` (the builtin count) at ~15 sites across `selfhost/{resolve,types,effects}.
-    sentinel` + add the 6 builtin name-matches/signatures/declares (the file-I/O builtins
-    11–13 are the exact precedent). This MUST stay byte-exact (the bootstrap fixed point)
-    — do it as one careful focused increment, re-running the full nextest. Also open: a
-    `secp256k1` / `P-256` field at radix 2^52 (more
+    Cleanly open next: **toward a real `sshd`** — the loopback transport is complete END
+    TO END (KEX + KDF in `std::net::ssh` + the `chacha20-poly1305@openssh.com` record
+    cipher in `std::net::ssh_cipher`, stitched in `examples/net/ssh_session`), and the ADR
+    0056 sockets are now LIVE end to end: runtime layer (`b90a889`), compiler builtins at
+    FnId 14..=20 (`0845b8a`, the FnId-shift crux closed byte-exact — builtins 0..=20 ⇒
+    user fns start at #21, both bootstrap fixed points hold), and a real Sentinel program
+    over them — `examples/net/tcp_echo` (`669665a`: bind 127.0.0.1:0, `spawn` a concurrent
+    server task, connect/send/echo/read, exit 42; harness-tested on both back ends). THE
+    REMAINING STEP toward a networked sshd: **run the SSH session over a real socket** —
+    swap `examples/net/ssh_session`'s in-memory pipe for a `tcp_listen`/`accept` server
+    task + a `tcp_connect` client (the byte streams in/out are already `[u8]`), so the KEX
+    + record cipher run across an actual loopback connection. Optionally a thin `std/net/
+    tcp` wrapper over the raw builtins first. ⚠ Sockets carry PUBLIC bytes only (the SSH
+    layer encrypts/`declassify`s secret material before it reaches a `tcp_write`). Also
+    open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
     `u128`** (+ a `tests/pass/cNN` fixture) to fully self-host it (ADR 0055 deferred this
     — snc-side only today); more SP 800-185 XOF variants.

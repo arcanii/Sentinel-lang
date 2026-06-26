@@ -1,11 +1,14 @@
 # ADR 0056: A TCP sockets runtime surface (the networking gap)
 
-Status: **PROPOSED — layer 1 (the runtime primitives) IMPLEMENTED** (`b90a889`). The six
-`extern "C"` socket primitives (+ an ephemeral-port query) are in `sentinel-runtime`
-with a Rust loopback-echo test; the compiler-builtin wiring + the self-hosted-`scg`
-builtin-table mirror (which the FnId shift makes mandatory — see "Touch-points") are the
-remaining, separable step. Scopes the runtime + ABI surface that real network services
-(an `sshd`, an HTTPS server) need but Sentinel lacks today.
+Status: **ACCEPTED — IMPLEMENTED end to end.** The six `extern "C"` socket primitives
+(+ an ephemeral-port query) are in `sentinel-runtime` with a Rust loopback-echo test
+(`b90a889`); the compiler-builtin wiring (FnId 14..=20 — resolve consts/signatures,
+types, codegen) and the self-hosted-`scg` builtin-table mirror (the FnId shift bumped the
+user-fn base `14`→`21`; byte-exact, both bootstrap fixed points hold) landed in
+`0845b8a`; and `examples/net/tcp_echo` (`669665a`) runs a real loopback TCP echo over
+them — bind 127.0.0.1:0, `spawn` a concurrent server task, connect/send/echo/read — wired
+into the examples harness on both back ends. Scopes the runtime + ABI surface that real
+network services (an `sshd`, an HTTPS server) need but Sentinel lacked.
 
 ## Context
 

@@ -92,7 +92,10 @@ the current state of the workspace without re-reading every commit.
   protects every packet after NEWKEYS; stitched into a complete end-to-end loopback
   session in `examples/net/ssh_session` (KEX → host-key auth → key derivation → an
   encrypted application packet): together the constant-time crypto core of an `sshd`,
-  run loopback; sockets are scoped in ADR 0056 but not yet implemented). The
+  run loopback. Real kernel **sockets are now live** (ADR 0056): the
+  `tcp_listen`/`local_port`/`accept`/`connect`/`read`/`write`/`close` builtins (libc,
+  loopback-only), exercised by `examples/net/tcp_echo` — a real localhost TCP echo with
+  a concurrent `spawn`ed server task, the substrate a networked `sshd` runs over. The
   crypto examples reproduce the
   canonical test vectors (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 /
   §2.5.2 / the full 114-byte §2.8.2 AEAD vector; NIST SHA-256 "abc"/""/multi-block;
@@ -179,7 +182,7 @@ the current state of the workspace without re-reading every commit.
   (a table-free field-inversion S-box, a branch-free mask-based conditional swap). See
   the `sentinel_examples_and_corelibs` auto-memory.
 
-**1577 tests across the workspace**, four-check green (build · `cargo nextest`
+**1587 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
