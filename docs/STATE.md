@@ -85,8 +85,11 @@ the current state of the workspace without re-reading every commit.
   against the radix-2^16 `x25519`)), `std/math/num`,
   `std/bits/bits` (rotates),
   `std/bytes/bytes` (`[u8]`
-  utilities over `&[u8]` borrows), and `std/algorithms/seq` (in-place insertion
-  `sort` + `binary_search` over public `[i64]`). The crypto examples reproduce the
+  utilities over `&[u8]` borrows), `std/algorithms/seq` (in-place insertion
+  `sort` + `binary_search` over public `[i64]`), and `std/net/ssh` (the SSH-2 transport
+  key exchange — `curve25519-sha256` + `ssh-ed25519`, RFC 4253 / RFC 8731 — the
+  constant-time crypto core of an `sshd`, run loopback; sockets are scoped in ADR 0056
+  but not yet implemented). The crypto examples reproduce the
   canonical test vectors (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 /
   §2.5.2 / the full 114-byte §2.8.2 AEAD vector; NIST SHA-256 "abc"/""/multi-block;
   RFC 4231 HMAC-SHA256 TC1/TC2/TC6; FIPS-197 §C.1 + AES-128(0,0); RFC 7748 §5.2 +

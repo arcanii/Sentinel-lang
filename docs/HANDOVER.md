@@ -50,8 +50,9 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
-NINE language gaps closed; a comprehensive constant-time crypto suite shipped; HEAD
-`30a9f83` (the `u128` type + radix-2^51 X25519) + docs, 1582 tests, four-check green).** Real,
+NINE language gaps closed; a comprehensive constant-time crypto suite shipped; a
+loopback SSH-2 transport KEX assembled from it; HEAD `1b805f4` (std::net::ssh) + docs,
+1583 tests, four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
 guarantee on real code**, and surfaces concrete language gaps — finding + fixing those
@@ -69,8 +70,23 @@ fields underpin X25519/Ed25519 and X448/Ed448. The ninth language gap — **the 
 gap**, ADR 0055's `u128` type (the 128-bit / radix-2^51 path) — is now closed too,
 demonstrated by `fe25519_64` + `x25519_64` (X25519 at radix 2^51, the field multiply in
 `secret u128`, cross-checked against the radix-2^16 X25519). All four owner-approved
-options for this run (HKDF, SP 800-185, X448/Ed448, the numeric gap) are SHIPPED. The
-cleanly-open next steps are in **Next** below,
+options for that run (HKDF, SP 800-185, X448/Ed448, the numeric gap) are SHIPPED.
+
+**Flagship direction — a secure network service.** The owner asked whether an `sshd`
+or a webserver is the better showcase; `sshd` was chosen (it is crypto end-to-end, so
+the constant-time/`secret` guarantee covers ~all of it, and the shipped suite already
+IS an SSH cipher suite). Both are blocked on the same missing piece — **sockets** — so
+the service is being built **loopback-first**. Two pieces landed: **ADR 0056** (a TCP
+sockets runtime surface — six file-I/O-style builtins, blocking + one-OS-thread-task-
+per-connection mapping onto `scope`/`spawn`, error-returning, the socket as a public
+declassify boundary; PROPOSED, no implementation) and **`std::net::ssh`** — the SSH-2
+transport key exchange (`curve25519-sha256` + `ssh-ed25519`, RFC 4253 / RFC 8731): the
+SSH wire codec, the exchange hash, the host-key signature, and the §7.2 KDF, all in the
+secret domain, run loopback (`examples/net/ssh_handshake`, validated against a Python
+model cross-checked vs paramiko + pyca). FINDING: SSH's `mpint` of the secret shared
+secret has a value-dependent length (a ~1-bit side channel); Sentinel's type system
+forces it into an explicit `declassify` (the audit point) — a leak other SSH stacks
+make silently. The cleanly-open next steps are in **Next** below,
 with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
 
 - **Decisions locked with the owner:** top-level `std/` + `examples/`, each
@@ -325,12 +341,15 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     pure library work. Ed448's port surfaced a real bug the Python model had hidden — its
     Barrett reduction leaned on a final big-int `% L` after only 3 conditional
     subtractions; the constant-time port does 8 always-executed masked subtractions.)
-    Cleanly open next: a `secp256k1` / `P-256` field at radix 2^52 (more `u128` mileage +
-    a recognizable new curve, possibly ECDSA); the **`scg` mirror of `u128`** (+ a
-    `tests/pass/cNN` fixture) to fully self-host it (ADR 0055 deferred this — snc-side
-    only today); more SP 800-185 (cSHAKE/TupleHash/ParallelHash XOF variants); or a
-    non-crypto std category once runtime/syscall surface exists (networking / threading /
-    process — scope the gap first).
+    Cleanly open next: **toward a real `sshd`** — (a) the SSH record cipher
+    (`chacha20-poly1305@openssh.com` — the openssh AEAD framing over the shipped
+    ChaCha20 + Poly1305) + the SSH binary-packet protocol (NEWKEYS, an encrypted echo
+    channel) to finish the loopback transport, then (b) **implement ADR 0056's sockets
+    surface** (the six builtins snc-side + a localhost echo server) to run the handshake
+    over a real connection. Also open: a `secp256k1` / `P-256` field at radix 2^52 (more
+    `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
+    `u128`** (+ a `tests/pass/cNN` fixture) to fully self-host it (ADR 0055 deferred this
+    — snc-side only today); more SP 800-185 XOF variants.
   - **Two deferred items from the list, now LOW value — recommend skipping unless
     wanted:**
     - **array-repeat `[x; N]`** — SHA-256/HMAC built cleanly WITHOUT it (`Vec<secret T>`
