@@ -5,7 +5,7 @@
 //! `snc ast` form (see `tests/ast.rs`) extended with the resolved IDs:
 //! `(var #N)` (VarId), `(call #N …)` (FnId), `(struct-lit #N …)` (StructId),
 //! and the parser's uniform `qcall` / `class-init` disambiguated. Builtins
-//! occupy `FnId 0..=13`, so user fns start at `#14`; the auto-registered
+//! occupy `FnId 0..=20`, so user fns start at `#21`; the auto-registered
 //! built-in `Async` effect is emitted last in every program.
 
 use std::path::PathBuf;
@@ -38,15 +38,15 @@ fn resolve_dump(name: &str, contents: &str) -> String {
 #[test]
 fn resolve_dump_params_var_call() {
     // Params bind VarIds (#0, #1); a free call resolves to the callee's FnId
-    // (user fns start at #14, after the 14 builtins); `main` is #15. The
+    // (user fns start at #21, after the 21 builtins); `main` is #22. The
     // built-in `Async` effect is emitted last.
     assert_eq!(
         resolve_dump(
             "fns",
             "fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { add(1, 2) }\n"
         ),
-        "(fn #14 add ((param #0 a i64) (param #1 b i64)) i64 (block (binop + (var #0) (var #1))))\n\
-         (fn #15 main () i64 (block (call #14 (int 1) (int 2))))\n\
+        "(fn #21 add ((param #0 a i64) (param #1 b i64)) i64 (block (binop + (var #0) (var #1))))\n\
+         (fn #22 main () i64 (block (call #21 (int 1) (int 2))))\n\
          (effect #0 Async)\n"
     );
 }
@@ -56,7 +56,7 @@ fn resolve_dump_let_bindings() {
     // `let` bindings take the next VarId; a later reference resolves to it.
     assert_eq!(
         resolve_dump("lets", "fn main() -> i64 { let x: i64 = 5; let y = x + 1; y }\n"),
-        "(fn #14 main () i64 (block (let #0 i64 (int 5)) (let #1 _ (binop + (var #0) (int 1))) (var #1)))\n\
+        "(fn #21 main () i64 (block (let #0 i64 (int 5)) (let #1 _ (binop + (var #0) (int 1))) (var #1)))\n\
          (effect #0 Async)\n"
     );
 }
@@ -66,7 +66,7 @@ fn resolve_dump_builtin_call() {
     // A call to a runtime builtin resolves to its reserved FnId (`print` = #0).
     assert_eq!(
         resolve_dump("builtin", "fn main() -> i64 { print(42) }\n"),
-        "(fn #14 main () i64 (block (call #0 (int 42))))\n(effect #0 Async)\n"
+        "(fn #21 main () i64 (block (call #0 (int 42))))\n(effect #0 Async)\n"
     );
 }
 
@@ -80,7 +80,7 @@ fn resolve_dump_struct_lit_and_field() {
             "struct Box { v: i64 }\nfn main() -> i64 { let b = Box { v: 42 }; b.v }\n"
         ),
         "(struct #0 Box (field v i64))\n\
-         (fn #14 main () i64 (block (let #0 _ (struct-lit #0 Box (field v (int 42)))) (field (var #0) v)))\n\
+         (fn #21 main () i64 (block (let #0 _ (struct-lit #0 Box (field v (int 42)))) (field (var #0) v)))\n\
          (effect #0 Async)\n"
     );
 }

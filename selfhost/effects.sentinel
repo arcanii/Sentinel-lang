@@ -40,7 +40,7 @@ use parser::append_str;
 use parser::append_slice;
 
 struct ECtx {
-    // user-fn table: name src slices (FnId = 14 + idx).
+    // user-fn table: name src slices (FnId = 21 + idx).
     ufs: Vec<i64>,
     ufe: Vec<i64>,
     // user-effect table: name src slices (EffectId = idx); the built-in `Async` is
@@ -150,7 +150,7 @@ fn sink_name(gb: &mut Vec<u8>, name: [u8]) -> i64 {
 
 // --- table lookups ----------------------------------------------------------
 
-// A call name → its user-fn INDEX (FnId = 14 + idx), or -1 for a builtin / a
+// A call name → its user-fn INDEX (FnId = 21 + idx), or -1 for a builtin / a
 // continuation / any non-user-fn (all effect-free → no edge).
 fn fn_lookup(c: &mut ECtx, src: &[u8], q: &[u8]) -> i64 {
     let n: i64 = len((*c).ufs);
@@ -612,7 +612,7 @@ fn dump_rows(out: &mut Vec<u8>, rows: &Vec<i64>, c: &mut ECtx, src: &[u8]) -> i6
     let mut i: i64 = 0;
     while i < nf {
         append_str(out, "(fn #");
-        append_int(out, 14 + i);
+        append_int(out, 21 + i);
         push(out, ' ');
         append_slice(out, src, (*c).ufs[i], (*c).ufe[i]);
         let row: i64 = (*rows)[i];

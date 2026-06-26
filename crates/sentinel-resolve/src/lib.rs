@@ -134,6 +134,24 @@ pub const WRITE_FILE_FN_ID: FnId = FnId(12);
 /// arg is borrowed (the ADR 0033 A3 rule).
 pub const PRINT_BYTES_FN_ID: FnId = FnId(13);
 
+// ADR 0056: the TCP sockets builtins, wrapping the `sentinel_tcp_*` runtime
+// primitives. Handles are `i64` fds; byte buffers are `[u8]`; failures return a
+// negative `i64`. Codegen lowers each to its `sentinel_tcp_*` symbol.
+/// `tcp_listen(port: i64) -> i64` — bind 127.0.0.1:port + listen (0 = ephemeral).
+pub const TCP_LISTEN_FN_ID: FnId = FnId(14);
+/// `tcp_local_port(handle: i64) -> i64` — the bound local port (for ephemeral).
+pub const TCP_LOCAL_PORT_FN_ID: FnId = FnId(15);
+/// `tcp_accept(listener: i64) -> i64` — block for a connection.
+pub const TCP_ACCEPT_FN_ID: FnId = FnId(16);
+/// `tcp_connect(host: [u8], port: i64) -> i64` — connect to a dotted-quad IPv4.
+pub const TCP_CONNECT_FN_ID: FnId = FnId(17);
+/// `tcp_read(conn: i64, max: i64) -> [u8]` — read up to `max` bytes (empty = EOF).
+pub const TCP_READ_FN_ID: FnId = FnId(18);
+/// `tcp_write(conn: i64, data: [u8]) -> i64` — write all of `data`.
+pub const TCP_WRITE_FN_ID: FnId = FnId(19);
+/// `tcp_close(handle: i64) -> i64` — close a listener / connection.
+pub const TCP_CLOSE_FN_ID: FnId = FnId(20);
+
 /// Identifier for a struct declaration. Added at C1.4 per ADR 0013
 /// D4 / D5; unique per-program, assigned in source order starting
 /// at 0.
@@ -2584,12 +2602,39 @@ pub fn resolve_module(
         extern_origin: None,
     };
     next_fn_id += 1;
+    // ADR 0056: the TCP sockets builtins. Non-generic concrete signatures (typed in
+    // sentinel-types), like the file-I/O builtins; codegen lowers them to `sentinel_tcp_*`.
+    let mk_socket_sig = |id: u32, name: &str, arity: usize| FnSignature {
+        id: FnId(id),
+        name: name.to_string(),
+        name_span: None,
+        arity,
+        type_params_count: 0,
+        is_main: false,
+        is_runtime: true,
+        extern_origin: None,
+    };
+    let tcp_listen_sig = mk_socket_sig(next_fn_id, "tcp_listen", 1);
+    next_fn_id += 1;
+    let tcp_local_port_sig = mk_socket_sig(next_fn_id, "tcp_local_port", 1);
+    next_fn_id += 1;
+    let tcp_accept_sig = mk_socket_sig(next_fn_id, "tcp_accept", 1);
+    next_fn_id += 1;
+    let tcp_connect_sig = mk_socket_sig(next_fn_id, "tcp_connect", 2);
+    next_fn_id += 1;
+    let tcp_read_sig = mk_socket_sig(next_fn_id, "tcp_read", 2);
+    next_fn_id += 1;
+    let tcp_write_sig = mk_socket_sig(next_fn_id, "tcp_write", 2);
+    next_fn_id += 1;
+    let tcp_close_sig = mk_socket_sig(next_fn_id, "tcp_close", 1);
+    next_fn_id += 1;
 
     let mut fn_table: HashMap<String, FnId> = HashMap::new();
     let mut signatures: Vec<FnSignature> = vec![
         print_sig, unwrap_or_sig, is_some_sig, len_sig, str_eq_sig, u8_to_i64_sig,
         i64_to_u8_sig, vec_new_sig, push_sig, pop_sig, vec_to_array_sig, read_file_sig,
-        write_file_sig, print_bytes_sig,
+        write_file_sig, print_bytes_sig, tcp_listen_sig, tcp_local_port_sig,
+        tcp_accept_sig, tcp_connect_sig, tcp_read_sig, tcp_write_sig, tcp_close_sig,
     ];
     fn_table.insert("print".to_string(), PRINT_FN_ID);
     fn_table.insert("unwrap_or".to_string(), UNWRAP_OR_FN_ID);
@@ -2605,6 +2650,13 @@ pub fn resolve_module(
     fn_table.insert("read_file".to_string(), READ_FILE_FN_ID);
     fn_table.insert("write_file".to_string(), WRITE_FILE_FN_ID);
     fn_table.insert("print_bytes".to_string(), PRINT_BYTES_FN_ID);
+    fn_table.insert("tcp_listen".to_string(), TCP_LISTEN_FN_ID);
+    fn_table.insert("tcp_local_port".to_string(), TCP_LOCAL_PORT_FN_ID);
+    fn_table.insert("tcp_accept".to_string(), TCP_ACCEPT_FN_ID);
+    fn_table.insert("tcp_connect".to_string(), TCP_CONNECT_FN_ID);
+    fn_table.insert("tcp_read".to_string(), TCP_READ_FN_ID);
+    fn_table.insert("tcp_write".to_string(), TCP_WRITE_FN_ID);
+    fn_table.insert("tcp_close".to_string(), TCP_CLOSE_FN_ID);
 
     // Phase D.6 / ADR 0037 D5.1: register each imported `pub fn` as an
     // EXTERN in this module's FnId space — after builtins, before own fns.
@@ -4734,7 +4786,7 @@ mod tests {
         // Extern `add` = FnId(14) (right after builtins), marked extern;
         // own `main` follows at FnId(15).
         let add_sig = rp.fn_signatures.iter().find(|s| s.name == "add").expect("add sig");
-        assert_eq!(add_sig.id, FnId(14));
+        assert_eq!(add_sig.id, FnId(21));
         assert_eq!(add_sig.arity, 2);
         assert!(!add_sig.is_runtime);
         assert_eq!(
@@ -4742,7 +4794,7 @@ mod tests {
             Some(vec!["util".to_string(), "math".to_string()])
         );
         let main_sig = rp.fn_signatures.iter().find(|s| s.name == "main").expect("main sig");
-        assert_eq!(main_sig.id, FnId(15));
+        assert_eq!(main_sig.id, FnId(22));
         assert_eq!(main_sig.extern_origin, None);
 
         // The extern has NO body — only the one own fn (`main`) is resolved.
@@ -5018,7 +5070,7 @@ mod tests {
         // FnId(7..=10) = vec_new/push/pop/vec_to_array (D.3),
         // FnId(11..=13) = read_file/write_file/print_bytes (D.4),
         // FnId(14) = main (the first user fn).
-        assert_eq!(p.main().id, FnId(14));
+        assert_eq!(p.main().id, FnId(21));
         assert_eq!(p.fn_signatures[0].name, "print");
         assert!(p.fn_signatures[0].is_runtime);
     }
@@ -5064,7 +5116,7 @@ mod tests {
         // double (first user fn), FnId(15) = main.
         let main = p.main();
         match &main.body.tail.kind {
-            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(14)),
+            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(21)),
             other => panic!("expected Call, got {other:?}"),
         }
     }

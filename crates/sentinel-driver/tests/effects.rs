@@ -42,7 +42,7 @@ fn effects_dump_effect_free() {
             "free",
             "fn add(a: i64, b: i64) -> i64 { a + b }\nfn main() -> i64 { add(1, 2) }\n"
         ),
-        "(fn #14 add)\n(fn #15 main)\n"
+        "(fn #21 add)\n(fn #22 main)\n"
     );
 }
 
@@ -57,7 +57,7 @@ fn effects_dump_annotated_and_handled() {
              fn do_work() -> i64 ! { Io } { perform Io.read() }\n\
              fn main() -> i64 { handle do_work() with { Io.read(k) => k(1) } }\n"
         ),
-        "(fn #14 do_work Io)\n(fn #15 main)\n"
+        "(fn #21 do_work Io)\n(fn #22 main)\n"
     );
 }
 
@@ -73,7 +73,7 @@ fn effects_dump_inferred_through_call_graph() {
              fn b() -> i64 { a() }\n\
              fn main() -> i64 { handle b() with { Io.read(k) => k(1) } }\n"
         ),
-        "(fn #14 a Io)\n(fn #15 b Io)\n(fn #16 main)\n"
+        "(fn #21 a Io)\n(fn #22 b Io)\n(fn #23 main)\n"
     );
 }
 
@@ -87,6 +87,6 @@ fn effects_dump_concurrency_scope_discharges_async() {
             "fn dbl(x: i64) -> i64 ! { Async } { x * 2 }\n\
              fn main() -> i64 { let r: i64 = scope concurrent { let t = spawn dbl(21); t.await }; r }\n"
         ),
-        "(fn #14 dbl Async)\n(fn #15 main)\n"
+        "(fn #21 dbl Async)\n(fn #22 main)\n"
     );
 }

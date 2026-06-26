@@ -123,7 +123,7 @@ struct RCtx {
     nextvid: i64,    // the ACTIVE VarId counter (loaded from fnvid/implvid per item)
     voff: i64,       // effect-op-param count = the fn-region VarId base
     fnvid: i64,      // saved fn-region VarId counter (starts voff)
-    ufs: Vec<i64>,   // user-fn table: name-slice starts (FnId = 14 + index)
+    ufs: Vec<i64>,   // user-fn table: name-slice starts (FnId = 21 + index)
     ufe: Vec<i64>,   // user-fn table: name-slice ends
     sts: Vec<i64>,   // struct table: name-slice starts (StructId = index)
     ste: Vec<i64>,   // struct table: name-slice ends
@@ -266,7 +266,7 @@ fn builtin_id(q: &[u8]) -> i64 {
     }
 }
 
-// Resolve a call name to a FnId: a builtin (0..=13), else a user fn (14 + its
+// Resolve a call name to a FnId: a builtin (0..=13), else a user fn (21 + its
 // index in the user-fn table), else -1.
 fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
     let b: i64 = builtin_id(q);
@@ -279,7 +279,7 @@ fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 14 + i;
+                    found = 21 + i;
                     0
                 } else {
                     0
@@ -2019,7 +2019,7 @@ fn scan_trait_methods(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, tid: i64, cur_st
 }
 
 // Resolve + dump one top-level `fn` (cur at the `fn` token) as
-// `(fn #id name (<params>) <ret> <block>)`, FnId = 14 + fnidx. Builds this fn's
+// `(fn #id name (<params>) <ret> <block>)`, FnId = 21 + fnidx. Builds this fn's
 // scope from the params + pre-scanned `let`s, then resolves the body against it.
 fn resolve_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut RCtx, gb: &mut Vec<u8>, fnidx: i64) -> i64 {
     *cur = *cur + 1;            // skip `fn`
@@ -2034,7 +2034,7 @@ fn resolve_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: 
     *cur = *cur + 1;           // skip `(`
     (*c).base = len((*c).scs);
     append_str(out, "(fn #");
-    append_int(out, 14 + fnidx);
+    append_int(out, 21 + fnidx);
     push(out, ' ');
     append_slice(out, src, name_s, name_e);
     append_str(out, " (");

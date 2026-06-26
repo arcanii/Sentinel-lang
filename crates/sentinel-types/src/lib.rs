@@ -3989,6 +3989,35 @@ pub fn check_module(
         is_runtime: true,
         extern_origin: None,
     });
+    // ADR 0056: the TCP sockets builtins (FnId 14..=20). Concrete signatures —
+    // handles / ports / counts are `i64`, byte buffers are `[u8]`. Codegen lowers
+    // them to the `sentinel_tcp_*` runtime symbols.
+    {
+        let socket_sigs: &[(usize, &[Type], Type)] = &[
+            (14, &[Type::I64], Type::I64),                                      // tcp_listen
+            (15, &[Type::I64], Type::I64),                                      // tcp_local_port
+            (16, &[Type::I64], Type::I64),                                      // tcp_accept
+            (17, &[Type::Array(ArrayElem::U8), Type::I64], Type::I64),          // tcp_connect
+            (18, &[Type::I64, Type::I64], Type::Array(ArrayElem::U8)),          // tcp_read
+            (19, &[Type::I64, Type::Array(ArrayElem::U8)], Type::I64),          // tcp_write
+            (20, &[Type::I64], Type::I64),                                      // tcp_close
+        ];
+        for (idx, params, ret) in socket_sigs {
+            let sig = &program.fn_signatures[*idx];
+            typed_signatures.push(TypedFnSignature {
+                id: sig.id,
+                name: sig.name.clone(),
+                name_span: sig.name_span.clone(),
+                type_params: vec![],
+                param_types: params.to_vec(),
+                return_type: *ret,
+                effect_row: vec![],
+                is_main: false,
+                is_runtime: true,
+                extern_origin: None,
+            });
+        }
+    }
 
     for fn_def in &program.fns {
         let resolved_sig = &program.fn_signatures[fn_def.id.0 as usize];
@@ -9082,7 +9111,7 @@ mod tests {
         // (3)=len, (4)=str_eq, (5)=u8_to_i64, (6)=i64_to_u8 (D.2 / ADR
         // 0033 D5), (7)=vec_new, (8)=push, (9)=pop, (10)=vec_to_array
         // (D.3 / ADR 0034 D5), (11)=read_file, (12)=write_file,
-        // (13)=print_bytes (D.4 / ADR 0035 D4), (14)=main. The generic
+        // (13)=print_bytes (D.4 / ADR 0035 D4), (14..=20)=tcp_* (ADR 0056), (21)=main. The generic
         // builtins occupy FnId(1..=3) per ADR 0014 D9 + ADR 0015 D4; the
         // byte-string builtins FnId(4..=6) per ADR 0033 D5; the collection
         // builtins FnId(7..=10) per ADR 0034 D5; the file-I/O builtins
@@ -9102,7 +9131,15 @@ mod tests {
         assert_eq!(p.fn_signatures[11].name, "read_file");
         assert_eq!(p.fn_signatures[12].name, "write_file");
         assert_eq!(p.fn_signatures[13].name, "print_bytes");
-        assert_eq!(p.fn_signatures[14].name, "main");
+        // ADR 0056: the TCP socket builtins occupy FnId(14..=20).
+        assert_eq!(p.fn_signatures[14].name, "tcp_listen");
+        assert_eq!(p.fn_signatures[15].name, "tcp_local_port");
+        assert_eq!(p.fn_signatures[16].name, "tcp_accept");
+        assert_eq!(p.fn_signatures[17].name, "tcp_connect");
+        assert_eq!(p.fn_signatures[18].name, "tcp_read");
+        assert_eq!(p.fn_signatures[19].name, "tcp_write");
+        assert_eq!(p.fn_signatures[20].name, "tcp_close");
+        assert_eq!(p.fn_signatures[21].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 

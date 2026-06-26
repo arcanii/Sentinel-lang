@@ -47,7 +47,9 @@ use sentinel_hir::HirProgram;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID,
     LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID,
-    U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
+    TCP_ACCEPT_FN_ID, TCP_CLOSE_FN_ID, TCP_CONNECT_FN_ID, TCP_LISTEN_FN_ID, TCP_LOCAL_PORT_FN_ID,
+    TCP_READ_FN_ID, TCP_WRITE_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID,
+    VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
@@ -543,6 +545,37 @@ pub fn compile_to_object_for_module(
             None,
         )
     };
+    // ADR 0056: declare the TCP socket runtime symbols. Handles / ports / counts are
+    // i64; byte buffers are (ptr, i64); `tcp_read` returns the data ptr + writes the
+    // length to an out-param (the read_file ABI).
+    let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+    let i64_ty = context.i64_type();
+    let tcp_listen_fn =
+        module.add_function("sentinel_tcp_listen", i64_ty.fn_type(&[i64_ty.into()], false), None);
+    let tcp_local_port_fn = module.add_function(
+        "sentinel_tcp_local_port",
+        i64_ty.fn_type(&[i64_ty.into()], false),
+        None,
+    );
+    let tcp_accept_fn =
+        module.add_function("sentinel_tcp_accept", i64_ty.fn_type(&[i64_ty.into()], false), None);
+    let tcp_connect_fn = module.add_function(
+        "sentinel_tcp_connect",
+        i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into(), i64_ty.into()], false),
+        None,
+    );
+    let tcp_read_fn = module.add_function(
+        "sentinel_tcp_read",
+        ptr_ty.fn_type(&[i64_ty.into(), i64_ty.into(), ptr_ty.into()], false),
+        None,
+    );
+    let tcp_write_fn = module.add_function(
+        "sentinel_tcp_write",
+        i64_ty.fn_type(&[i64_ty.into(), ptr_ty.into(), i64_ty.into()], false),
+        None,
+    );
+    let tcp_close_fn =
+        module.add_function("sentinel_tcp_close", i64_ty.fn_type(&[i64_ty.into()], false), None);
     // C5.4 (2/N) / ADR 0028: declare the broker scope-arena symbols.
     // `sentinel_arena_enter(capacity: i64) -> *arena` creates a bump
     // arena (capacity 0 → runtime default); `sentinel_arena_alloc(arena,
@@ -1040,6 +1073,13 @@ pub fn compile_to_object_for_module(
             read_file_fn,
             write_file_fn,
             print_bytes_fn,
+            tcp_listen_fn,
+            tcp_local_port_fn,
+            tcp_accept_fn,
+            tcp_connect_fn,
+            tcp_read_fn,
+            tcp_write_fn,
+            tcp_close_fn,
             arena_enter_fn,
             arena_alloc_fn,
             arena_exit_fn,
@@ -1279,6 +1319,15 @@ struct CodegenCtx<'ctx, 'plan> {
     /// D.4 (2/N) / ADR 0035 D4: `sentinel_print_bytes(data_ptr, data_len)
     /// -> i64` — write a `[u8]` to stdout (byte companion to `print`).
     print_bytes_fn: FunctionValue<'ctx>,
+    /// ADR 0056: the TCP socket runtime symbols (handles are i64 fds; byte
+    /// buffers are (ptr, i64); `tcp_read` returns the data ptr + out-len).
+    tcp_listen_fn: FunctionValue<'ctx>,
+    tcp_local_port_fn: FunctionValue<'ctx>,
+    tcp_accept_fn: FunctionValue<'ctx>,
+    tcp_connect_fn: FunctionValue<'ctx>,
+    tcp_read_fn: FunctionValue<'ctx>,
+    tcp_write_fn: FunctionValue<'ctx>,
+    tcp_close_fn: FunctionValue<'ctx>,
     /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
     /// creates a per-scope broker bump arena (capacity 0 → default).
     arena_enter_fn: FunctionValue<'ctx>,
@@ -5088,6 +5137,143 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("sentinel_print_bytes returns i64"))
     }
 
+    /// ADR 0056: lower a one-`i64`-arg socket builtin (`tcp_listen` /
+    /// `tcp_local_port` / `tcp_accept` / `tcp_close`) to its `sentinel_tcp_*` call.
+    fn lower_tcp_int1(
+        &mut self,
+        callee: FunctionValue<'ctx>,
+        arg: &TypedExpr,
+        program: &TypedProgram,
+        label: &str,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let v = self.lower_expr(arg, program)?.into_int_value();
+        let call = self
+            .builder
+            .build_call(callee, &[v.into()], label)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_tcp_* returns i64"))
+    }
+
+    /// ADR 0056: lower `tcp_connect(host: [u8], port: i64) -> i64`. Extracts the
+    /// host `[u8]`'s `{ len, ptr }` and calls `sentinel_tcp_connect(ptr, len, port)`.
+    fn lower_tcp_connect(
+        &mut self,
+        host: &TypedExpr,
+        port: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let host_val = self.lower_expr(host, program)?.into_struct_value();
+        let host_len = self
+            .builder
+            .build_extract_value(host_val, 0, "host_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let host_ptr = self
+            .builder
+            .build_extract_value(host_val, 1, "host_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let port_v = self.lower_expr(port, program)?.into_int_value();
+        let call = self
+            .builder
+            .build_call(
+                self.tcp_connect_fn,
+                &[host_ptr.into(), host_len.into(), port_v.into()],
+                "tcp_connect",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_tcp_connect returns i64"))
+    }
+
+    /// ADR 0056: lower `tcp_read(conn: i64, max: i64) -> [u8]`. Calls
+    /// `sentinel_tcp_read(conn, max, out_len)` (which allocs the buffer + writes the
+    /// length) and assembles the `[u8]` struct `{ len, ptr }` — the read_file ABI.
+    fn lower_tcp_read(
+        &mut self,
+        conn: &TypedExpr,
+        max: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let conn_v = self.lower_expr(conn, program)?.into_int_value();
+        let max_v = self.lower_expr(max, program)?.into_int_value();
+        let out_len_slot = self
+            .builder
+            .build_alloca(i64_type, "tcp_read_len_slot")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let data_ptr = self
+            .builder
+            .build_call(
+                self.tcp_read_fn,
+                &[conn_v.into(), max_v.into(), out_len_slot.into()],
+                "tcp_read",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_tcp_read returns ptr")
+            .into_pointer_value();
+        let len = self
+            .builder
+            .build_load(i64_type, out_len_slot, "tcp_read_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let arr_struct_ty = self
+            .context
+            .struct_type(&[i64_type.into(), ptr_type.into()], false);
+        let agg = arr_struct_ty.get_undef();
+        let with_len = self
+            .builder
+            .build_insert_value(agg, len, 0, "tr_with_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let with_data = self
+            .builder
+            .build_insert_value(with_len, data_ptr, 1, "tr_with_data")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(with_data.into_struct_value().into())
+    }
+
+    /// ADR 0056: lower `tcp_write(conn: i64, data: [u8]) -> i64`. Extracts the data
+    /// `[u8]`'s `{ len, ptr }` and calls `sentinel_tcp_write(conn, ptr, len)`.
+    fn lower_tcp_write(
+        &mut self,
+        conn: &TypedExpr,
+        data: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let conn_v = self.lower_expr(conn, program)?.into_int_value();
+        let data_val = self.lower_expr(data, program)?.into_struct_value();
+        let data_len = self
+            .builder
+            .build_extract_value(data_val, 0, "tw_data_len")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let data_ptr = self
+            .builder
+            .build_extract_value(data_val, 1, "tw_data_ptr")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+        let call = self
+            .builder
+            .build_call(
+                self.tcp_write_fn,
+                &[conn_v.into(), data_ptr.into(), data_len.into()],
+                "tcp_write",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_tcp_write returns i64"))
+    }
+
     /// D.3 / ADR 0034 D7: lower `vec_new() -> Vec<T>` to an empty vector
     /// value `{ i64 len = 0, i64 cap = 0, ptr data = null }`. No
     /// allocation happens until the first `push` (`realloc(null, …)` ==
@@ -5864,6 +6050,33 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 }
                 if *id == PRINT_BYTES_FN_ID {
                     return self.lower_print_bytes(&args[0], program);
+                }
+                // ADR 0056: the TCP socket builtins.
+                if *id == TCP_LISTEN_FN_ID {
+                    return self.lower_tcp_int1(self.tcp_listen_fn, &args[0], program, "tcp_listen");
+                }
+                if *id == TCP_LOCAL_PORT_FN_ID {
+                    return self.lower_tcp_int1(
+                        self.tcp_local_port_fn,
+                        &args[0],
+                        program,
+                        "tcp_local_port",
+                    );
+                }
+                if *id == TCP_ACCEPT_FN_ID {
+                    return self.lower_tcp_int1(self.tcp_accept_fn, &args[0], program, "tcp_accept");
+                }
+                if *id == TCP_CLOSE_FN_ID {
+                    return self.lower_tcp_int1(self.tcp_close_fn, &args[0], program, "tcp_close");
+                }
+                if *id == TCP_CONNECT_FN_ID {
+                    return self.lower_tcp_connect(&args[0], &args[1], program);
+                }
+                if *id == TCP_READ_FN_ID {
+                    return self.lower_tcp_read(&args[0], &args[1], program);
+                }
+                if *id == TCP_WRITE_FN_ID {
+                    return self.lower_tcp_write(&args[0], &args[1], program);
                 }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted

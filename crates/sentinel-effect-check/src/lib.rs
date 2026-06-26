@@ -594,7 +594,7 @@ mod tests {
         // u8_to_i64/i64_to_u8 + D.3's vec_new/push/pop/vec_to_array +
         // D.4's read_file/write_file/print_bytes); FnId(14) = helper,
         // FnId(15) = main.
-        let main_id = FnId(15);
+        let main_id = FnId(22);
         assert!(checked.effective_rows.get(&main_id).unwrap().is_empty());
     }
 
