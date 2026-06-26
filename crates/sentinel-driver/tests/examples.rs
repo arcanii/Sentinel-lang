@@ -376,6 +376,14 @@ const EXAMPLES: &[(&str, i32)] = &[
     // a sealed chacha20-poly1305 record under a per-direction seqnr. 42 = the channel
     // opened, both windowed chunks reassembled intact, and it closed cleanly.
     ("examples/net/ssh_channel_window.sentinel", 42),
+    // An SSH-2 "exec" request over a real socket (RFC 4254 §6.5): the client opens a
+    // session channel and asks the server to run a command; the server replies
+    // CHANNEL_SUCCESS, streams the command output as CHANNEL_DATA, sends a "exit-status"
+    // CHANNEL_REQUEST, and closes — what `ssh user@host some-command` does. Each message
+    // is a sealed chacha20-poly1305 record under a per-direction seqnr. 42 = the exec was
+    // accepted, the output was the expected transform of the command, the exit status was
+    // 0, and the channel closed cleanly.
+    ("examples/net/ssh_exec.sentinel", 42),
 ];
 
 #[test]
@@ -566,6 +574,11 @@ fn ssh_pubkey_auth_userauth() {
 #[test]
 fn ssh_channel_window_flow_control() {
     check_example("examples/net/ssh_channel_window.sentinel", "ssh_channel_window", 42);
+}
+
+#[test]
+fn ssh_exec_command_request() {
+    check_example("examples/net/ssh_exec.sentinel", "ssh_exec", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

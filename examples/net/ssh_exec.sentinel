@@ -1,0 +1,191 @@
+// examples/net/ssh_exec.sentinel — an SSH-2 "exec" request over a real socket: the
+// client opens a session channel, asks the server to run a command, and reads back the
+// command's output, its exit status, and the channel close (RFC 4254 §6.5 / §5.3).
+//
+// This is what a real `ssh user@host some-command` does, end to end on the stack built
+// so far. After the transport handshake yields the directional keys, every connection
+// message is a sealed chacha20-poly1305@openssh.com record under a per-direction seqnr:
+//
+//   client --CHANNEL_OPEN-------------------------------------> server
+//   client <--CHANNEL_OPEN_CONFIRMATION----------------------- server
+//   client --CHANNEL_REQUEST "exec" (command, want_reply)-----> server
+//   client <--CHANNEL_SUCCESS--------------------------------- server   (request accepted)
+//   client <--CHANNEL_DATA (command output)------------------- server
+//   client <--CHANNEL_REQUEST "exit-status" (0)--------------- server
+//   client <--CHANNEL_CLOSE----------------------------------- server
+//   client --CHANNEL_CLOSE------------------------------------> server
+//
+// The "command" here is the byte string "status"; the server "runs" it by transforming
+// it (each byte + 1) and returns that as the channel output with exit status 0 — a
+// deterministic stand-in for real command execution that keeps the example
+// reproducible and constant-time (no branch on the secret command bytes).
+//
+// CONSTANT-TIME: the keys, the command, and its output are `[secret u8]`; only the
+// ciphertext records cross the socket. The exit status is public protocol metadata.
+// Exit 42 = the channel opened, the exec was accepted, the output was the expected
+// transform of the command, the exit status was 0, and the channel closed cleanly.
+use std::math::num::abs;
+use std::net::tcp::loopback_host;
+use std::net::ssh_handshake::ssh_client_handshake;
+use std::net::ssh_handshake::ssh_server_handshake;
+use std::net::ssh_handshake::SshSessionKeys;
+use std::net::ssh_connection::ssh_send_record;
+use std::net::ssh_connection::ssh_recv_record;
+use std::net::ssh_connection::ssh_msg_channel_open;
+use std::net::ssh_connection::ssh_msg_channel_open_confirm;
+use std::net::ssh_connection::ssh_msg_channel_request_exec;
+use std::net::ssh_connection::ssh_msg_channel_success;
+use std::net::ssh_connection::ssh_msg_channel_data;
+use std::net::ssh_connection::ssh_msg_channel_exit_status;
+use std::net::ssh_connection::ssh_msg_channel_close;
+use std::net::ssh_connection::ssh_msg_type;
+use std::net::ssh_connection::ssh_read_u32;
+use std::net::ssh_connection::ssh_channel_data_bytes;
+use std::net::ssh_connection::ssh_exec_command;
+use std::net::ssh_connection::ssh_exit_status;
+
+fn mk(data: [i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8(data[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn eph_c() -> [secret u8] { mk([17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17], 32) }
+fn eph_s() -> [secret u8] { mk([34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34], 32) }
+fn host_seed() -> [secret u8] { mk([57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88], 32) }
+fn cookie_c() -> [secret u8] { mk([16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], 16) }
+fn cookie_s() -> [secret u8] { mk([32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47], 16) }
+fn banner() -> [secret u8] { mk([83, 83, 72, 45, 50, 46, 48, 45, 83, 101, 110, 116, 105, 110, 101, 108, 95, 48, 46, 49], 20) }
+
+// The command the client asks the server to run: "status".
+fn command() -> [secret u8] { mk([115, 116, 97, 116, 117, 115], 6) }
+
+// The server's "execution": transform the command (each byte + 1). Constant-time, no
+// branch on the command bytes.
+fn run(cmd: &[secret u8], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut j: i64 = 0;
+    while j < n { push(&mut v, (*cmd)[j] + i64_to_u8(1)); j = j + 1; }
+    vec_to_array(v)
+}
+
+fn diff_secret(a: &[secret u8], b: &[secret u8], n: i64) -> i64 {
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n { bad = bad | (u8_to_i64(declassify((*a)[i])) ^ u8_to_i64(declassify((*b)[i]))); i = i + 1; }
+    bad
+}
+
+// The server: handshake, open the channel, run the exec request, stream the result.
+fn exec_server(listener: i64) -> i64 ! { Async } {
+    let conn: i64 = tcp_accept(listener);
+    if conn < 0 {
+        0 - 1
+    } else {
+        let es: [secret u8] = eph_s();
+        let hs: [secret u8] = host_seed();
+        let cc: [secret u8] = cookie_c();
+        let cs: [secret u8] = cookie_s();
+        let vb: [secret u8] = banner();
+        let keys = ssh_server_handshake(conn, &es, &hs, &cc, &cs, &vb);
+        let keyc: [secret u8] = keys.keyc;     // client->server (we open)
+        let keyd: [secret u8] = keys.keyd;     // server->client (we seal)
+        let mut bad: i64 = 0;
+
+        // CHANNEL_OPEN -> CHANNEL_OPEN_CONFIRMATION.
+        let open: [secret u8] = ssh_recv_record(conn, &keyc, 0);
+        if ssh_msg_type(&open) == 90 { 0 } else { bad = bad | 1; 0 };
+        let cli_ch: i64 = ssh_read_u32(&open, 12);
+        let conf: [secret u8] = ssh_msg_channel_open_confirm(cli_ch, 0, 32768, 32768);
+        ssh_send_record(conn, &keyd, 0, &conf);
+
+        // CHANNEL_REQUEST "exec" -> CHANNEL_SUCCESS.
+        let req: [secret u8] = ssh_recv_record(conn, &keyc, 1);
+        if ssh_msg_type(&req) == 98 { 0 } else { bad = bad | 2; 0 };
+        let cmd: [secret u8] = ssh_exec_command(&req);
+        let clen: i64 = len(cmd);
+        let succ_msg: [secret u8] = ssh_msg_channel_success(cli_ch);
+        ssh_send_record(conn, &keyd, 1, &succ_msg);
+
+        // run it, stream the output, the exit status, and close.
+        let output: [secret u8] = run(&cmd, clen);
+        let dmsg: [secret u8] = ssh_msg_channel_data(cli_ch, &output);
+        ssh_send_record(conn, &keyd, 2, &dmsg);
+        let est_msg: [secret u8] = ssh_msg_channel_exit_status(cli_ch, 0);
+        ssh_send_record(conn, &keyd, 3, &est_msg);
+        let close_msg: [secret u8] = ssh_msg_channel_close(cli_ch);
+        ssh_send_record(conn, &keyd, 4, &close_msg);
+
+        // the client's CHANNEL_CLOSE.
+        let close: [secret u8] = ssh_recv_record(conn, &keyc, 2);
+        if ssh_msg_type(&close) == 97 { 0 } else { bad = bad | 4; 0 };
+
+        tcp_close(conn);
+        bad
+    }
+}
+
+fn main() -> i64 {
+    let listener: i64 = tcp_listen(0);
+    if listener < 0 {
+        1
+    } else {
+        let port: i64 = tcp_local_port(listener);
+        let result: i64 = scope concurrent {
+            let server = spawn exec_server(listener);
+
+            let host: [u8] = loopback_host();
+            let conn: i64 = tcp_connect(host, port);
+            let ec: [secret u8] = eph_c();
+            let cc: [secret u8] = cookie_c();
+            let cs: [secret u8] = cookie_s();
+            let vb: [secret u8] = banner();
+            let keys = ssh_client_handshake(conn, &ec, &cc, &cs, &vb);
+            let ok_hs: i64 = keys.authed;
+            let keyc: [secret u8] = keys.keyc;     // client->server (we seal)
+            let keyd: [secret u8] = keys.keyd;     // server->client (we open)
+            let mut bad: i64 = if ok_hs == 1 { 0 } else { 16 };
+
+            // open the session channel.
+            let open: [secret u8] = ssh_msg_channel_open(0, 32768, 32768);
+            ssh_send_record(conn, &keyc, 0, &open);
+            let conf: [secret u8] = ssh_recv_record(conn, &keyd, 0);
+            if ssh_msg_type(&conf) == 91 { 0 } else { bad = bad | 32; 0 };
+            let srv_ch: i64 = ssh_read_u32(&conf, 5);
+
+            // ask the server to exec "status".
+            let cmd: [secret u8] = command();
+            let req: [secret u8] = ssh_msg_channel_request_exec(srv_ch, &cmd);
+            ssh_send_record(conn, &keyc, 1, &req);
+
+            // CHANNEL_SUCCESS, then the output, the exit status, and the close.
+            let succ: [secret u8] = ssh_recv_record(conn, &keyd, 1);
+            if ssh_msg_type(&succ) == 99 { 0 } else { bad = bad | 64; 0 };
+            let dout: [secret u8] = ssh_recv_record(conn, &keyd, 2);
+            if ssh_msg_type(&dout) == 94 { 0 } else { bad = bad | 128; 0 };
+            let output: [secret u8] = ssh_channel_data_bytes(&dout);
+            let est: [secret u8] = ssh_recv_record(conn, &keyd, 3);
+            if ssh_msg_type(&est) == 98 { 0 } else { bad = bad | 256; 0 };
+            let status: i64 = ssh_exit_status(&est);
+            let close: [secret u8] = ssh_recv_record(conn, &keyd, 4);
+            if ssh_msg_type(&close) == 97 { 0 } else { bad = bad | 512; 0 };
+
+            // our CHANNEL_CLOSE back.
+            let myclose: [secret u8] = ssh_msg_channel_close(srv_ch);
+            ssh_send_record(conn, &keyc, 2, &myclose);
+            tcp_close(conn);
+            let srv: i64 = server.await;
+            bad = bad | abs(srv);
+
+            // the output must be the expected transform of the command, exit status 0.
+            let expected: [secret u8] = run(&cmd, 6);
+            if len(output) == 6 { bad = bad | diff_secret(&output, &expected, 6); 0 } else { bad = bad | 1024; 0 };
+            if status == 0 { 0 } else { bad = bad | 2048; 0 };
+
+            if bad == 0 { 42 } else { 5 }
+        };
+        tcp_close(listener);
+        result
+    }
+}

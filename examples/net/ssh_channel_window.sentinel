@@ -29,15 +29,11 @@
 // correct flow control, and the channel closed cleanly.
 use std::math::num::abs;
 use std::net::tcp::loopback_host;
-use std::net::tcp::read_exact;
-use std::net::tcp::append_declassified;
-use std::net::tcp::widen_bytes;
 use std::net::ssh_handshake::ssh_client_handshake;
 use std::net::ssh_handshake::ssh_server_handshake;
 use std::net::ssh_handshake::SshSessionKeys;
-use std::net::ssh_cipher::ssh_seal;
-use std::net::ssh_cipher::ssh_open_verify;
-use std::net::ssh_cipher::ssh_open_payload;
+use std::net::ssh_connection::ssh_send_record;
+use std::net::ssh_connection::ssh_recv_record;
 use std::net::ssh_connection::ssh_msg_channel_open;
 use std::net::ssh_connection::ssh_msg_channel_open_confirm;
 use std::net::ssh_connection::ssh_msg_channel_window_adjust;
@@ -83,51 +79,7 @@ fn diff_secret(a: &[secret u8], b: &[secret u8], n: i64) -> i64 {
     bad
 }
 
-// A non-empty placeholder a failed recv returns, so a field read can't index out of
-// bounds (the happy path never hits it — every record verifies).
-fn nothing() -> [secret u8] {
-    let mut v: Vec<secret u8> = vec_new();
-    let mut i: i64 = 0;
-    while i < 64 { push(&mut v, i64_to_u8(0)); i = i + 1; }
-    vec_to_array(v)
-}
-
-// Seal a connection-layer payload and send it length-prefixed (2-byte big-endian
-// record length, so the peer knows how many bytes to read off the stream).
-fn send_record(conn: i64, key: &[secret u8], seqnr: i64, payload: &[secret u8]) -> i64 {
-    let rec: [secret u8] = ssh_seal(key, seqnr, payload);
-    let n: i64 = len(rec);
-    let mut w: Vec<u8> = vec_new();
-    push(&mut w, i64_to_u8((n >> 8) & 255));
-    push(&mut w, i64_to_u8(n & 255));
-    append_declassified(&mut w, &rec, n);
-    let bytes: [u8] = vec_to_array(w);
-    tcp_write(conn, bytes);
-    0
-}
-
-// Read a length-prefixed record, verify its tag, and return the opened payload (verify
-// before decode; a failed verify returns the placeholder).
-fn recv_record(conn: i64, key: &[secret u8], seqnr: i64) -> [secret u8] {
-    let hdr: [u8] = read_exact(conn, 2);
-    if len(hdr) < 2 {
-        nothing()
-    } else {
-        let n: i64 = u8_to_i64(hdr[0]) * 256 + u8_to_i64(hdr[1]);
-        let rec_pub: [u8] = read_exact(conn, n);
-        if len(rec_pub) < n {
-            nothing()
-        } else {
-            let rec: [secret u8] = widen_bytes(&rec_pub, 0, n);
-            let auth: i64 = ssh_open_verify(key, seqnr, &rec);
-            if auth == 1 {
-                ssh_open_payload(key, seqnr, &rec)
-            } else {
-                nothing()
-            }
-        }
-    }
-}
+// The record I/O (ssh_send_record / ssh_recv_record) now lives in std::net::ssh_connection.
 
 // The server: handshake, then service one windowed "session" channel.
 fn channel_server(listener: i64) -> i64 ! { Async } {
@@ -146,31 +98,31 @@ fn channel_server(listener: i64) -> i64 ! { Async } {
         let mut bad: i64 = 0;
 
         // CHANNEL_OPEN -> CHANNEL_OPEN_CONFIRMATION (advertise a 16-byte window).
-        let open: [secret u8] = recv_record(conn, &keyc, 0);
+        let open: [secret u8] = ssh_recv_record(conn, &keyc, 0);
         if ssh_msg_type(&open) == 90 { 0 } else { bad = bad | 1; 0 };
         let cli_ch: i64 = ssh_read_u32(&open, 12);
         let conf: [secret u8] = ssh_msg_channel_open_confirm(cli_ch, 0, 16, 32768);
-        send_record(conn, &keyd, 0, &conf);
+        ssh_send_record(conn, &keyd, 0, &conf);
 
         // DATA chunk 0 -> WINDOW_ADJUST(+16).
-        let d0: [secret u8] = recv_record(conn, &keyc, 1);
+        let d0: [secret u8] = ssh_recv_record(conn, &keyc, 1);
         if ssh_msg_type(&d0) == 94 { 0 } else { bad = bad | 2; 0 };
         let c0: [secret u8] = ssh_channel_data_bytes(&d0);
         let adj0: [secret u8] = ssh_msg_channel_window_adjust(cli_ch, 16);
-        send_record(conn, &keyd, 1, &adj0);
+        ssh_send_record(conn, &keyd, 1, &adj0);
 
         // DATA chunk 1 -> WINDOW_ADJUST(+16).
-        let d1: [secret u8] = recv_record(conn, &keyc, 2);
+        let d1: [secret u8] = ssh_recv_record(conn, &keyc, 2);
         if ssh_msg_type(&d1) == 94 { 0 } else { bad = bad | 4; 0 };
         let c1: [secret u8] = ssh_channel_data_bytes(&d1);
         let adj1: [secret u8] = ssh_msg_channel_window_adjust(cli_ch, 16);
-        send_record(conn, &keyd, 2, &adj1);
+        ssh_send_record(conn, &keyd, 2, &adj1);
 
         // CHANNEL_CLOSE <-> CHANNEL_CLOSE.
-        let close: [secret u8] = recv_record(conn, &keyc, 3);
+        let close: [secret u8] = ssh_recv_record(conn, &keyc, 3);
         if ssh_msg_type(&close) == 97 { 0 } else { bad = bad | 8; 0 };
         let myclose: [secret u8] = ssh_msg_channel_close(cli_ch);
-        send_record(conn, &keyd, 3, &myclose);
+        ssh_send_record(conn, &keyd, 3, &myclose);
 
         // the two chunks must reassemble into the application payload (only compare a
         // chunk that actually carried 16 bytes — a record that failed to open yields an
@@ -209,8 +161,8 @@ fn main() -> i64 {
 
             // CHANNEL_OPEN (our window doesn't matter here; we only send).
             let open: [secret u8] = ssh_msg_channel_open(0, 16, 32768);
-            send_record(conn, &keyc, 0, &open);
-            let conf: [secret u8] = recv_record(conn, &keyd, 0);
+            ssh_send_record(conn, &keyc, 0, &open);
+            let conf: [secret u8] = ssh_recv_record(conn, &keyd, 0);
             if ssh_msg_type(&conf) == 91 { 0 } else { bad = bad | 32; 0 };
             let srv_ch: i64 = ssh_read_u32(&conf, 5);          // server's channel id
             let mut window: i64 = ssh_read_u32(&conf, 9);      // our send window (16)
@@ -220,26 +172,26 @@ fn main() -> i64 {
             // DATA chunk 0: 16 bytes, exhausting the window; then await the adjust.
             let c0: [secret u8] = slice(&ad, 0, 16);
             let d0: [secret u8] = ssh_msg_channel_data(srv_ch, &c0);
-            send_record(conn, &keyc, 1, &d0);
+            ssh_send_record(conn, &keyc, 1, &d0);
             window = window - 16;
             if window < 0 { bad = bad | 64; 0 } else { 0 };
-            let adj0: [secret u8] = recv_record(conn, &keyd, 1);
+            let adj0: [secret u8] = ssh_recv_record(conn, &keyd, 1);
             if ssh_msg_type(&adj0) == 93 { 0 } else { bad = bad | 128; 0 };
             window = window + ssh_read_u32(&adj0, 5);
 
             // DATA chunk 1: another 16 bytes within the replenished window.
             let c1: [secret u8] = slice(&ad, 16, 16);
             let d1: [secret u8] = ssh_msg_channel_data(srv_ch, &c1);
-            send_record(conn, &keyc, 2, &d1);
+            ssh_send_record(conn, &keyc, 2, &d1);
             window = window - 16;
             if window < 0 { bad = bad | 256; 0 } else { 0 };
-            let adj1: [secret u8] = recv_record(conn, &keyd, 2);
+            let adj1: [secret u8] = ssh_recv_record(conn, &keyd, 2);
             if ssh_msg_type(&adj1) == 93 { 0 } else { bad = bad | 512; 0 };
 
             // close the channel.
             let myclose: [secret u8] = ssh_msg_channel_close(srv_ch);
-            send_record(conn, &keyc, 3, &myclose);
-            let close: [secret u8] = recv_record(conn, &keyd, 3);
+            ssh_send_record(conn, &keyc, 3, &myclose);
+            let close: [secret u8] = ssh_recv_record(conn, &keyd, 3);
             if ssh_msg_type(&close) == 97 { 0 } else { bad = bad | 1024; 0 };
 
             tcp_close(conn);

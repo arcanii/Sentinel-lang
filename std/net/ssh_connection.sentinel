@@ -16,6 +16,12 @@
 //   CHANNEL_CLOSE (97)        byte 97 | u32 recipient
 use std::net::ssh::ssh_append_u32;
 use std::net::ssh::ssh_append_string;
+use std::net::ssh_cipher::ssh_seal;
+use std::net::ssh_cipher::ssh_open_verify;
+use std::net::ssh_cipher::ssh_open_payload;
+use std::net::tcp::read_exact;
+use std::net::tcp::append_declassified;
+use std::net::tcp::widen_bytes;
 
 fn lit(data: [i64], n: i64) -> [secret u8] {
     let mut v: Vec<secret u8> = vec_new();
@@ -94,4 +100,111 @@ pub fn ssh_channel_data_bytes(payload: &[secret u8]) -> [secret u8] {
     let mut i: i64 = 0;
     while i < dlen { push(&mut d, (*payload)[9 + i]); i = i + 1; }
     vec_to_array(d)
+}
+
+// ---- CHANNEL_REQUEST exec / exit-status + the request replies (RFC 4254 §6.5) ------
+
+// CHANNEL_REQUEST "exec" (98): byte 98 | u32 recipient | string "exec" | TRUE | string command.
+pub fn ssh_msg_channel_request_exec(recipient: i64, command: &[secret u8]) -> [secret u8] {
+    let mut p: Vec<secret u8> = vec_new();
+    push(&mut p, i64_to_u8(98));
+    ssh_append_u32(&mut p, recipient);
+    let exec: [secret u8] = lit([101, 120, 101, 99], 4);   // "exec"
+    ssh_append_string(&mut p, &exec);
+    push(&mut p, i64_to_u8(1));                            // want_reply = TRUE
+    ssh_append_string(&mut p, command);
+    vec_to_array(p)
+}
+
+// CHANNEL_SUCCESS (99) / CHANNEL_FAILURE (100): the reply to a want_reply request.
+pub fn ssh_msg_channel_success(recipient: i64) -> [secret u8] {
+    let mut p: Vec<secret u8> = vec_new();
+    push(&mut p, i64_to_u8(99));
+    ssh_append_u32(&mut p, recipient);
+    vec_to_array(p)
+}
+
+pub fn ssh_msg_channel_failure(recipient: i64) -> [secret u8] {
+    let mut p: Vec<secret u8> = vec_new();
+    push(&mut p, i64_to_u8(100));
+    ssh_append_u32(&mut p, recipient);
+    vec_to_array(p)
+}
+
+// CHANNEL_REQUEST "exit-status" (98): byte 98 | u32 recipient | string "exit-status" | FALSE | u32 status.
+pub fn ssh_msg_channel_exit_status(recipient: i64, status: i64) -> [secret u8] {
+    let mut p: Vec<secret u8> = vec_new();
+    push(&mut p, i64_to_u8(98));
+    ssh_append_u32(&mut p, recipient);
+    let es: [secret u8] = lit([101, 120, 105, 116, 45, 115, 116, 97, 116, 117, 115], 11);   // "exit-status"
+    ssh_append_string(&mut p, &es);
+    push(&mut p, i64_to_u8(0));                            // want_reply = FALSE
+    ssh_append_u32(&mut p, status);
+    vec_to_array(p)
+}
+
+// The command from a CHANNEL_REQUEST "exec" (stays secret). Layout: the "exec" request
+// type is 4 bytes, so the command-length u32 is at offset 14 and the bytes at offset 18.
+pub fn ssh_exec_command(payload: &[secret u8]) -> [secret u8] {
+    let clen: i64 = ssh_read_u32(payload, 14);
+    let mut c: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < clen { push(&mut c, (*payload)[18 + i]); i = i + 1; }
+    vec_to_array(c)
+}
+
+// The status from a CHANNEL_REQUEST "exit-status" (public). The "exit-status" request
+// type is 11 bytes, so the status u32 is at offset 21.
+pub fn ssh_exit_status(payload: &[secret u8]) -> i64 {
+    ssh_read_u32(payload, 21)
+}
+
+// ---- framed encrypted-record I/O over a socket -------------------------------------
+//
+// A connection-layer message is the payload of a chacha20-poly1305@openssh.com record
+// (per-direction seqnr), sent length-prefixed so the peer knows how many bytes to read.
+
+fn placeholder() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 64 { push(&mut v, i64_to_u8(0)); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Seal `payload` under `key`/`seqnr` and write it with a 2-byte big-endian record-length
+// prefix.
+pub fn ssh_send_record(conn: i64, key: &[secret u8], seqnr: i64, payload: &[secret u8]) -> i64 {
+    let rec: [secret u8] = ssh_seal(key, seqnr, payload);
+    let n: i64 = len(rec);
+    let mut w: Vec<u8> = vec_new();
+    push(&mut w, i64_to_u8((n >> 8) & 255));
+    push(&mut w, i64_to_u8(n & 255));
+    append_declassified(&mut w, &rec, n);
+    let bytes: [u8] = vec_to_array(w);
+    tcp_write(conn, bytes);
+    0
+}
+
+// Read a length-prefixed record, verify its tag, and return the opened payload (verify
+// BEFORE decode; any failure returns a 64-byte placeholder, so a field read can't index
+// out of bounds — the caller checks the message type / length).
+pub fn ssh_recv_record(conn: i64, key: &[secret u8], seqnr: i64) -> [secret u8] {
+    let hdr: [u8] = read_exact(conn, 2);
+    if len(hdr) < 2 {
+        placeholder()
+    } else {
+        let n: i64 = u8_to_i64(hdr[0]) * 256 + u8_to_i64(hdr[1]);
+        let rec_pub: [u8] = read_exact(conn, n);
+        if len(rec_pub) < n {
+            placeholder()
+        } else {
+            let rec: [secret u8] = widen_bytes(&rec_pub, 0, n);
+            let auth: i64 = ssh_open_verify(key, seqnr, &rec);
+            if auth == 1 {
+                ssh_open_payload(key, seqnr, &rec)
+            } else {
+                placeholder()
+            }
+        }
+    }
 }
