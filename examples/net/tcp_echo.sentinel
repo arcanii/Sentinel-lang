@@ -1,0 +1,87 @@
+// examples/net/tcp_echo.sentinel — a real localhost TCP echo over the ADR 0056
+// socket builtins, with the server and client running concurrently in one program.
+//
+// This is the payoff of wiring the `sentinel_tcp_*` runtime primitives as builtins:
+// a Sentinel program that listens on a real TCP socket, accepts a connection on a
+// spawned task (an OS thread, via the structured-concurrency `scope`/`spawn`), and
+// echoes bytes back to a client that connects to it over loopback — the substrate a
+// real `sshd` (std::net::ssh) will run on once it speaks sockets instead of in-memory
+// buffers.
+//
+//   main: bind 127.0.0.1:0 (an ephemeral port) → spawn the echo server → connect to
+//   it, send a message, read the echo back, join the server, and check the round-trip.
+//
+// The handles are `i64` fds; the payload is a public `[u8]` (the wire is observable —
+// the socket is a public boundary, ADR 0056). Exit 42 = the echo round-tripped.
+use std::math::num::abs;
+
+// "127.0.0.1" as ASCII bytes (no DNS — tcp_connect takes an IPv4 literal).
+fn loopback_host() -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    push(&mut v, i64_to_u8(49)); push(&mut v, i64_to_u8(50)); push(&mut v, i64_to_u8(55));
+    push(&mut v, i64_to_u8(46)); push(&mut v, i64_to_u8(48)); push(&mut v, i64_to_u8(46));
+    push(&mut v, i64_to_u8(48)); push(&mut v, i64_to_u8(46)); push(&mut v, i64_to_u8(49));
+    vec_to_array(v)
+}
+
+// The message the client sends (and expects echoed): "sentinel-tcp".
+fn message() -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    let d: [i64] = [115, 101, 110, 116, 105, 110, 101, 108, 45, 116, 99, 112];
+    let mut i: i64 = 0;
+    while i < 12 { push(&mut v, i64_to_u8(d[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// The concurrent echo server: accept one connection, read a chunk, write it straight
+// back, and close. Declares the `Async` effect so it can be `spawn`ed (ADR 0024).
+fn echo_server(listener: i64) -> i64 ! { Async } {
+    let conn: i64 = tcp_accept(listener);
+    if conn < 0 {
+        0 - 1
+    } else {
+        let data: [u8] = tcp_read(conn, 256);
+        tcp_write(conn, data);
+        tcp_close(conn);
+        0
+    }
+}
+
+fn main() -> i64 {
+    let listener: i64 = tcp_listen(0);          // 0 = an OS-assigned ephemeral port
+    if listener < 0 {
+        1
+    } else {
+        let port: i64 = tcp_local_port(listener);
+        let result: i64 = scope concurrent {
+            let server = spawn echo_server(listener);
+
+            // ---- client: connect, send the message, read the echo, join the server.
+            let host: [u8] = loopback_host();
+            let conn: i64 = tcp_connect(host, port);
+            let m: [u8] = message();
+            let mlen: i64 = len(m);
+            tcp_write(conn, m);
+            let reply: [u8] = tcp_read(conn, 256);
+            tcp_close(conn);
+            let srv: i64 = server.await;
+
+            // ---- check the echo round-tripped exactly.
+            let expect: [u8] = message();
+            let rlen: i64 = len(reply);
+            if rlen == mlen {
+                let mut bad: i64 = abs(srv);     // nonzero if the server errored
+                let mut i: i64 = 0;
+                while i < mlen {
+                    bad = bad | (u8_to_i64(reply[i]) ^ u8_to_i64(expect[i]));
+                    i = i + 1;
+                }
+                if bad == 0 { 42 } else { 3 }
+            } else {
+                4
+            }
+        };
+        tcp_close(listener);
+        result
+    }
+}

@@ -6,7 +6,7 @@
 //! MILESTONE-1 (ADR 0040 A2): paramful fns + free calls + arithmetic +
 //! comparisons + unary + variable references over the params (the body is a
 //! block). VarIds are GLOBAL (never reset across fns); builtins occupy FnId
-//! 0..=13 so user fns start at #14; the built-in `Async` effect dumps last.
+//! 0..=20 so user fns start at #21; the built-in `Async` effect dumps last.
 //! MILESTONE-2 (A3): `let` bindings — the binding set is pre-scanned from the
 //! body tokens into the (immutable) scope so a `let` resolves its own VarId by
 //! name (continuing after the params), with `mut` + optional type annotations.

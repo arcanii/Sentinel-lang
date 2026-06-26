@@ -328,6 +328,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // matched H, the signature verified, the derived key matched, and the encrypted
     // packet round-tripped.
     ("examples/net/ssh_session.sentinel", 42),
+    // A real localhost TCP echo over the ADR 0056 socket builtins: bind 127.0.0.1:0,
+    // `spawn` a concurrent server task (an OS thread, via structured concurrency), and
+    // from the main task connect to it, send bytes, and read the echo back — actual
+    // kernel sockets, not in-memory buffers. The substrate a networked sshd runs on.
+    // 42 = the byte round-trip matched and the server task joined cleanly.
+    ("examples/net/tcp_echo.sentinel", 42),
 ];
 
 #[test]
@@ -488,6 +494,11 @@ fn ssh_channel_chacha20poly1305_openssh() {
 #[test]
 fn ssh_session_end_to_end() {
     check_example("examples/net/ssh_session.sentinel", "ssh_session", 42);
+}
+
+#[test]
+fn tcp_echo_loopback() {
+    check_example("examples/net/tcp_echo.sentinel", "tcp_echo", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
