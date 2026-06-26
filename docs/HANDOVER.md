@@ -71,8 +71,11 @@ compare/`parse_int`/`int_to_str`/index-based split/pad over `[u8]`; `examples/te
 pushing a Move-typed struct (one owning a `[u8]`) into a `Vec` through a by-value parameter
 double-freed the element (the ADR 0034 D8 deferred case) — now FIXED in both backends
 (`e66f57f`, fixture c60), which unblocked the **`std::collections::map` string-keyed hash
-map** (`3c08f2d` — `[u8]`→`i64`, parallel-array storage + FNV-1a + resize; `examples/collections/map_demo`);
-HEAD `3c08f2d`, 1596 tests,
+map** (`3c08f2d` — `[u8]`→`i64`, parallel-array storage + FNV-1a + resize) and **`std::data::json`**
+(`9b2777b` — parse/serialize over a cons-list recursive enum); so the tractable data&text
+trio (strings + map + JSON) is done — the remaining big-list items are the float-type and
+FFI/bindings language gaps;
+HEAD `9b2777b`, 1597 tests,
 four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
@@ -457,13 +460,19 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     GENERIC GAPS (probed, shaped the map's concrete design): generic ENUMS don't parse
     (`enum Opt<T>` — so no `Option<T>`); generic struct-literal type-args don't infer through
     `push`; `Vec<[u8]>` (Vec-of-arrays) is unsupported and a non-Copy `Vec` element can't be
-    mutated in place (D.3 MVP). **NEXT: (1) JSON** — a concrete recursive
-    `enum Json { Null, Bool, Num, Str([u8]), Arr, Obj }` + parser/serializer, building on `str`
-    + the map (⚠ the recursive-enum + a `Vec<Json>` array / map-of-Json object will stress the
-    same Vec-element + recursive-drop limits — probe first). Then the bigger rocks the owner
-    deferred: a **float type** (for general math) and the **FFI/bindings** story (C-ABI export
-    for Python/C/C++/Rust; a general `extern "C"` import for OS bindings) — both ADR-first
-    language work.
+    mutated in place (D.3 MVP). AND **JSON shipped** — `std::data::json` (`9b2777b`):
+    `json_parse`/`json_stringify` over a recursive `enum Json { Null, Bool(i64), Num(i64),
+    Str([u8]), ArrNil, ArrCons(Json, Json), ObjNil, ObjCons([u8], Json, Json) }`. ⚠ arrays/
+    objects are CONS-LISTS (nested recursive variants), NOT `Vec<Json>` — `Vec<enum>` /
+    moving a non-Copy element out of a `Vec` by index isn't supported, but a recursive enum
+    + a consuming `match` builds/frees cleanly (the self-host AST pattern); numbers are `i64`
+    (no float type — a fractional part is parsed + dropped); string-lits support `\"`. **So
+    the tractable data&text trio the owner asked for is DONE: strings + map + JSON.** The
+    REMAINING items from the owner's big list are the LANGUAGE-GAP rocks (both ADR-first):
+    a **float type** (the only thing blocking "math functions" beyond integers) and the
+    **FFI/bindings** story — a C-ABI EXPORT for Python/C/C++/Rust calling INTO Sentinel, and a
+    general `extern "C"` IMPORT for the native macOS/Win32/Linux bindings (today only ~31
+    hardcoded runtime builtins). (Crypto from the list was already comprehensive.)
     Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
