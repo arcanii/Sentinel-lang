@@ -1,0 +1,37 @@
+// c60_vec_struct_move — ADR 0034 D8: a Move-typed struct ELEMENT (a struct that owns a
+// `[u8]`) pushed into a `Vec` THROUGH A BY-VALUE FUNCTION PARAMETER is consumed/moved,
+// so it is NOT also freed at the caller's scope exit.
+//
+// Regression for a use-after-free: the borrow checker treated `push`'s by-value element
+// as a non-consuming read (it was assumed Copy), so a Move-typed element passed in as a
+// parameter was double-counted — freed at the helper's scope exit even though the `Vec`
+// now owned it. The later read then dereferenced freed memory and returned garbage
+// (e.g. `3`). Now `push`'s element consumes its source: the `Vec` is the sole owner and
+// frees each element exactly once when the `Vec` itself is dropped.
+//
+// Expected: exit code 42, no stdout. (1+10+20) + (2+30+40) - 61 = 42.
+struct Item { tag: i64, data: [u8] }
+
+fn mkdata(a: i64, b: i64) -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    push(&mut v, i64_to_u8(a));
+    push(&mut v, i64_to_u8(b));
+    vec_to_array(v)
+}
+
+// Receives the Item BY VALUE (the case that used to corrupt) and moves it into the Vec.
+fn add(items: &mut Vec<Item>, it: Item) -> i64 {
+    push(items, it);
+    0
+}
+
+fn main() -> i64 {
+    let mut items: Vec<Item> = vec_new();
+    add(&mut items, Item { tag: 1, data: mkdata(10, 20) });
+    add(&mut items, Item { tag: 2, data: mkdata(30, 40) });
+
+    // read the array data back — must survive the moves (was freed → garbage).
+    let a: i64 = items[0].tag + u8_to_i64(items[0].data[0]) + u8_to_i64(items[0].data[1]);   // 31
+    let b: i64 = items[1].tag + u8_to_i64(items[1].data[0]) + u8_to_i64(items[1].data[1]);   // 72
+    a + b - 61
+}

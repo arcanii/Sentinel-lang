@@ -1317,3 +1317,13 @@ fn pass_selfhost_ast_drop() {
     assert_eq!(r.exit, 11);
     assert_eq!(r.stdout, "(Nab(LNcd))");
 }
+
+#[test]
+fn pass_c60_vec_struct_move() {
+    // ADR 0034 D8: a Move-typed struct element (a struct owning a `[u8]`) pushed
+    // into a `Vec` through a BY-VALUE function parameter is consumed/moved, so it
+    // is not also freed at the caller's scope exit. Regression for a use-after-free
+    // (the element was double-freed; the later read returned garbage). The `Vec`
+    // is the sole owner. (1+10+20) + (2+30+40) - 61 = 42.
+    assert_eq!(run_exit("c60_vec_struct_move.sentinel"), 42);
+}

@@ -2212,7 +2212,8 @@ fn targ_of_builtin(c: &mut TyCtx, fid: i64, firstty: i64, exp: i64) -> i64 {
 // `(targs T)` precedes the args in the output). Returns the call's result type.
 fn dump_gcall(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     let mut abuf: Vec<u8> = vec_new();
-    let firstty: i64 = dump_args_capture_first(&mut abuf, ca, src, c, gb);
+    // (ADR 0034 D8) `push` (fid 8) consumes its element (the arg after the first).
+    let firstty: i64 = dump_args_capture_first(&mut abuf, ca, fid == 8, src, c, gb);
     let targ: i64 = targ_of_builtin(c, fid, firstty, exp);
     append_str(out, " (targs ");
     render_type(out, targ, c);
@@ -2236,7 +2237,12 @@ fn dump_gcall(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8], c: &m
 }
 
 // Dump all call args into `out`, returning the FIRST arg's type (-1 if none).
-fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+// (ADR 0034 D8) `consume_rest` forces a CONSUMING walk of the args AFTER the first —
+// `push`'s by-value element (its 2nd arg) is moved INTO the Vec, which then owns and
+// frees it, so a Move-typed element Var must be recorded as moved (else codegen also
+// frees it at scope exit: a use-after-free). The FIRST arg stays under the ambient
+// context (`push`'s `&mut v` is a borrow, not a move). Other callers pass `false`.
+fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, consume_rest: bool, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
     match a {
         Args::End => 0 - 1,
         Args::Cell(x, rest) => {
@@ -2246,7 +2252,10 @@ fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx
             // (8c-2) codegen: collect the FIRST arg's operand (the rest collect via
             // `dump_targs`) so a generic builtin like `len` can read it back.
             cg_collect(c, t0);
+            let svc: bool = (*c).consuming;
+            if consume_rest { (*c).consuming = true; 0 } else { 0 };
             dump_targs(out, rest, src, c, gb);
+            (*c).consuming = svc;
             t0
         },
     }
@@ -3455,7 +3464,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 } else {
                     0
                 };
-                let rkt: i64 = dump_args_capture_first(out, ca, src, c, gb);
+                let rkt: i64 = dump_args_capture_first(out, ca, false, src, c, gb);
                 (*c).consuming = svk;
                 let krt: i64 = if rkt == 0 - 1 {
                     kty

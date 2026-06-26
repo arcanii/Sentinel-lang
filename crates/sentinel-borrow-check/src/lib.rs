@@ -138,7 +138,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use salsa::Accumulator;
 use sentinel_ast::{Span, UnaryOp};
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
-use sentinel_resolve::{FnId, VarId};
+use sentinel_resolve::{FnId, PUSH_FN_ID, VarId};
 use sentinel_types::{
     NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedProgram,
     TypedStmt, TypedStmtKind,
@@ -1020,7 +1020,8 @@ fn walk_expr(
             // generics to retire this special case.
             let signature = program.signature(*id);
             if signature.is_runtime {
-                for arg in args {
+                let is_push = *id == PUSH_FN_ID;
+                for (argi, arg) in args.iter().enumerate() {
                     match &arg.kind {
                         // D.3 / ADR 0034 D6: a `&mut`/`&` reference
                         // argument to a runtime builtin (e.g. the
@@ -1038,13 +1039,23 @@ fn walk_expr(
                         | TypedExprKind::Unary(UnaryOp::RefMut, _) => {
                             walk_expr(arg, ctx, errors, program);
                         }
-                        // Every other runtime-builtin arg (e.g. `len(a)`,
-                        // `str_eq(a, b)`, and `push`'s by-value element
-                        // `x`) stays a non-consuming lvalue read. NB: a
-                        // Move-typed `push` element (Vec<Struct>) is
-                        // actually consumed; that's deferred with
-                        // droppable-element Vecs (ADR 0034 D8), and the
-                        // MVP's primitive elements are Copy.
+                        // ADR 0034 D8: `push`'s by-value element (the 2nd
+                        // arg) IS consumed — it is moved into the Vec, which
+                        // then owns and frees it. Walk it CONSUMING, exactly
+                        // like a by-value user-fn arg, so a Move-typed element
+                        // (e.g. a `Vec<Struct>` whose struct holds a `[u8]`)
+                        // is marked Moved and NOT also freed at the caller's
+                        // scope exit. Without this, the element's heap buffer
+                        // is double-freed: a use-after-free that silently
+                        // corrupts the stored data. A Copy element (the common
+                        // `Vec<i64>`/`Vec<u8>` case) is a no-op here, so this
+                        // is sound and non-regressing. Every OTHER runtime
+                        // builtin (`len(a)`, `str_eq(a, b)`, …) takes its
+                        // Move-typed args by reference, so they stay a
+                        // non-consuming lvalue read.
+                        _ if is_push && argi == 1 => {
+                            walk_expr(arg, ctx, errors, program);
+                        }
                         _ => walk_expr_lvalue(arg, ctx, errors, program),
                     }
                 }
