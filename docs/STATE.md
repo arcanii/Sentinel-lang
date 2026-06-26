@@ -95,7 +95,12 @@ the current state of the workspace without re-reading every commit.
   run loopback. Real kernel **sockets are now live** (ADR 0056): the
   `tcp_listen`/`local_port`/`accept`/`connect`/`read`/`write`/`close` builtins (libc,
   loopback-only), exercised by `examples/net/tcp_echo` — a real localhost TCP echo with
-  a concurrent `spawn`ed server task, the substrate a networked `sshd` runs over. The
+  a concurrent `spawn`ed server task — and `examples/net/ssh_over_tcp`, which runs the
+  whole SSH-2 handshake **over a real socket**: separate concurrent client/server tasks
+  do a distributed curve25519-sha256 KEX (each derives K independently; the wire-public
+  values are `declassify`d to send and widened back to `[secret u8]` on receipt, K never
+  crossing the wire), host-key auth, key derivation, and an encrypted record round-trip.
+  The
   crypto examples reproduce the
   canonical test vectors (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 /
   §2.5.2 / the full 114-byte §2.8.2 AEAD vector; NIST SHA-256 "abc"/""/multi-block;
@@ -182,7 +187,7 @@ the current state of the workspace without re-reading every commit.
   (a table-free field-inversion S-box, a branch-free mask-based conditional swap). See
   the `sentinel_examples_and_corelibs` auto-memory.
 
-**1587 tests across the workspace**, four-check green (build · `cargo nextest`
+**1588 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

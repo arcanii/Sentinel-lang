@@ -54,7 +54,9 @@ NINE language gaps closed; a comprehensive constant-time crypto suite shipped; a
 complete loopback SSH-2 transport SESSION — KEX + KDF + the chacha20-poly1305@openssh.com
 record cipher — assembled from it, and the ADR 0056 sockets are now FULLY LIVE (runtime
 primitives + compiler builtins + the `scg` mirror), with `examples/net/tcp_echo` running a
-real loopback TCP echo on a concurrent `spawn`ed server task; HEAD `669665a`, 1587 tests,
+real loopback TCP echo on a concurrent `spawn`ed server task AND `examples/net/ssh_over_tcp`
+running the whole SSH-2 handshake over a real socket (a distributed KEX between separate
+client/server tasks); HEAD `aac69a8`, 1588 tests,
 four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
@@ -105,7 +107,13 @@ builtins — resolve/types/codegen + the `scg` builtin-table bump, `0845b8a`), a
 Sentinel program over them — `examples/net/tcp_echo` (`669665a`): bind 127.0.0.1:0,
 `spawn` a concurrent server task, connect, send, read the echo back, exit 42. The
 FnId-shift crux is closed (builtins 0..=20 ⇒ user fns start at #21; byte-exact, both
-bootstrap fixed points hold). The cleanly-open next
+bootstrap fixed points hold). AND the SSH transport now runs OVER a real socket —
+`examples/net/ssh_over_tcp` (`aac69a8`): the client and server are separate concurrent
+tasks doing a DISTRIBUTED curve25519-sha256 KEX (each derives the shared secret K
+independently), host-key auth, the §7.2 KDF, and an encrypted record across the wire; the
+wire-public values are `declassify`d to send and widened back to `[secret u8]` on receipt
+(K never crosses the socket), so the loopback `sshd` transport is now real-socket end to
+end. The cleanly-open next
 steps are in **Next**
 below,
 with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
@@ -369,13 +377,23 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     FnId 14..=20 (`0845b8a`, the FnId-shift crux closed byte-exact — builtins 0..=20 ⇒
     user fns start at #21, both bootstrap fixed points hold), and a real Sentinel program
     over them — `examples/net/tcp_echo` (`669665a`: bind 127.0.0.1:0, `spawn` a concurrent
-    server task, connect/send/echo/read, exit 42; harness-tested on both back ends). THE
-    REMAINING STEP toward a networked sshd: **run the SSH session over a real socket** —
-    swap `examples/net/ssh_session`'s in-memory pipe for a `tcp_listen`/`accept` server
-    task + a `tcp_connect` client (the byte streams in/out are already `[u8]`), so the KEX
-    + record cipher run across an actual loopback connection. Optionally a thin `std/net/
-    tcp` wrapper over the raw builtins first. ⚠ Sockets carry PUBLIC bytes only (the SSH
-    layer encrypts/`declassify`s secret material before it reaches a `tcp_write`). Also
+    server task, connect/send/echo/read, exit 42; harness-tested on both back ends). AND
+    THE SSH SESSION NOW RUNS OVER A REAL SOCKET — `examples/net/ssh_over_tcp` (`aac69a8`):
+    the client and server are SEPARATE concurrent tasks (server `spawn`ed on an OS thread
+    bound to a real ephemeral listener; client connecting from the main task) doing a
+    DISTRIBUTED curve25519-sha256 KEX — each peer holds only its own ephemeral secret and
+    derives the shared secret K independently (real DH, not one fn computing both views) —
+    then ssh-ed25519 host-key auth, the §7.2 KDF, and an encrypted record that round-trips
+    across the wire. ⚠ THE TRUST BOUNDARY (the point): the whole handshake is `[secret u8]`
+    (build = the CT proof), but a socket carries PUBLIC bytes; the wire-public values
+    (ephemeral pubkeys, host key, signature, ciphertext record) are `declassify`d per byte
+    to send and WIDENED back to secret (public->secret, ADR 0049) on receipt — K and the
+    session key never cross the socket. A `read_exact` helper coalesces a TCP write split
+    across reads. `examples/net/ssh_session` stays as the vector-anchored in-memory
+    reference. So the loopback `sshd` transport is now REAL-SOCKET end to end. Cleanly open
+    next toward a fuller sshd: a thin `std/net/tcp` wrapper over the raw builtins; a
+    bidirectional / multi-packet channel (seqnr-incrementing record stream both ways);
+    optionally the `ssh-userauth` / `connection` layers. Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
     `u128`** (+ a `tests/pass/cNN` fixture) to fully self-host it (ADR 0055 deferred this

@@ -7,8 +7,12 @@ types, codegen) and the self-hosted-`scg` builtin-table mirror (the FnId shift b
 user-fn base `14`→`21`; byte-exact, both bootstrap fixed points hold) landed in
 `0845b8a`; and `examples/net/tcp_echo` (`669665a`) runs a real loopback TCP echo over
 them — bind 127.0.0.1:0, `spawn` a concurrent server task, connect/send/echo/read — wired
-into the examples harness on both back ends. Scopes the runtime + ABI surface that real
-network services (an `sshd`, an HTTPS server) need but Sentinel lacked.
+into the examples harness on both back ends. The headline consumer landed too:
+`examples/net/ssh_over_tcp` (`aac69a8`) runs the whole SSH-2 handshake over these sockets
+— separate concurrent client/server tasks doing a distributed curve25519-sha256 KEX, with
+the wire-public values `declassify`d to send and widened back to `[secret u8]` on receipt
+(K never crosses the wire). Scopes the runtime + ABI surface that real network services
+(an `sshd`, an HTTPS server) need but Sentinel lacked.
 
 ## Context
 
