@@ -1,0 +1,87 @@
+// examples/security/x25519_64.sentinel — X25519 at RADIX 2^51 (the 64-bit-limb,
+// 128-bit-product representation; ADR 0055's `u128` type), against RFC 7748 AND
+// cross-checked against the radix-2^16 X25519.
+//
+// This is the demonstrator for the numeric gap: every field shipped so far chose a
+// SMALL limb radix to keep each limb product within `i64`. std::security::fe25519_64
+// uses the IDIOMATIC radix 2^51 (5 limbs of 51 bits), whose limb products are 102 bits
+// and accumulate past `i64` — so the field multiply runs in `secret u128`, which only
+// exists because of ADR 0055.
+//
+//   * RFC 7748 §5.2 vector 1 — x25519_64(scalar, u) reproduces the published result.
+//   * CROSS-CHECK — x25519_64 and the radix-2^16 std::security::x25519 compute the
+//     SAME shared secret for the scalar against the base point (u = 9). Two completely
+//     different limb representations of GF(2^255-19) agreeing is a strong internal
+//     proof that both — and the new `u128` arithmetic — are correct.
+//
+// CONSTANT-TIME DISCIPLINE. The scalar and u-coordinate are `[secret u8]`; the ladder
+// (and now the `secret u128` field multiply) is branch-free, so the compiler's
+// constant-time check proves on every build that no secret bit reached a branch, an
+// index, or a divisor. The only declassify boundary is HERE, comparing the outputs.
+//
+// Exit 42 = the RFC vector matched AND both representations agreed.
+use std::security::x25519::x25519;
+use std::security::x25519_64::x25519_64;
+
+fn mk(data: [i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut v, i64_to_u8(data[i]));
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+// The Curve25519 base u-coordinate (u = 9), 32 little-endian bytes.
+fn base9() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    push(&mut v, i64_to_u8(9));
+    let mut i: i64 = 0;
+    while i < 31 { push(&mut v, i64_to_u8(0)); i = i + 1; }
+    vec_to_array(v)
+}
+
+// The RFC 7748 §5.2 scalar (rebuilt each use — x25519 consumes its argument).
+fn rfc_scalar() -> [secret u8] {
+    mk([165, 70, 227, 107, 240, 82, 124, 157, 59, 22, 21, 75, 130, 70, 94, 221, 98, 20, 76, 10, 193, 252, 90, 24, 80, 106, 34, 68, 186, 68, 154, 196], 32)
+}
+
+// Fold each byte of a secret value against an expected public vector.
+fn diff(got: &[secret u8], exp: [i64], n: i64) -> i64 {
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        bad = bad | (u8_to_i64(declassify((*got)[i])) ^ exp[i]);
+        i = i + 1;
+    }
+    bad
+}
+
+// 0 iff the two secret values are byte-for-byte equal.
+fn seq(a: &[secret u8], b: &[secret u8], n: i64) -> i64 {
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        bad = bad | (u8_to_i64(declassify((*a)[i])) ^ u8_to_i64(declassify((*b)[i])));
+        i = i + 1;
+    }
+    bad
+}
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- RFC 7748 §5.2 vector 1.
+    let u1: [secret u8] = mk([230, 219, 104, 103, 88, 48, 48, 219, 53, 148, 193, 164, 36, 177, 95, 124, 114, 102, 36, 236, 38, 179, 53, 59, 16, 169, 3, 166, 208, 171, 28, 76], 32);
+    let r64: [secret u8] = x25519_64(rfc_scalar(), u1);
+    let e1: [i64] = [195, 218, 85, 55, 157, 233, 198, 144, 142, 148, 234, 77, 242, 141, 8, 79, 50, 236, 207, 3, 73, 28, 113, 247, 84, 180, 7, 85, 119, 162, 133, 82];
+    bad = bad | diff(&r64, e1, 32);
+
+    // ---- Cross-check the two representations on scalar · base point (the public key).
+    let pub64: [secret u8] = x25519_64(rfc_scalar(), base9());
+    let pub16: [secret u8] = x25519(rfc_scalar(), base9());
+    bad = bad | seq(&pub64, &pub16, 32);
+
+    if bad == 0 { 42 } else { 0 }
+}

@@ -1,0 +1,277 @@
+// std::security::fe25519_64 — the Curve25519 base field GF(2^255-19) at RADIX 2^51
+// (5 limbs), the canonical high-performance representation (ref10 / curve25519-donna).
+//
+// This is the radix-2^16 `std::security::fe25519`'s fast sibling and the demonstrator
+// for ADR 0055 (the `u128` type / the 128-bit numeric gap). A field element is FIVE
+// limbs of 51 bits held in `secret i64` (each < 2^52). The field MULTIPLY is where the
+// gap bites: a product of two 51-bit limbs is 102 bits, and the schoolbook accumulator
+// sums ~9 of them — far past `i64`. So `fmul` accumulates into five `secret u128`
+// values (`(a[i] as secret u128) * (b[j] as secret u128)`), folds 2^255 ≡ 19, and
+// carries via `>> 51` / `& (2^51-1)` in `u128` before narrowing back to `i64` limbs.
+// Every shipped field so far chose a SMALLER radix precisely to avoid this; `u128` lets
+// the idiomatic 64-bit-limb form be written directly.
+//
+// CONSTANT-TIME. Every limb / product / accumulator is secret and flows only through
+// `+ - * & | << >>` (the shifts by PUBLIC amounts) — no branch, no secret index, no
+// secret divisor. A `secret u128` reaching a branch is rejected exactly like any other
+// secret, so a successful build is the proof. `fcontract`'s final reduction mod p is the
+// branch-free donna freeze (a fixed add-and-carry that drops bit 255), all in `i64`.
+
+// 2^51 - 1, the limb mask (fits `i64`).
+fn mask51() -> i64 { 2251799813685247 }
+
+pub fn fe_zero() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < 5 { push(&mut v, 0); i = i + 1; }
+    vec_to_array(v)
+}
+
+pub fn fe_one() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 1);
+    let mut i: i64 = 0;
+    while i < 4 { push(&mut v, 0); i = i + 1; }
+    vec_to_array(v)
+}
+
+pub fn fe_copy(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 5 { (*o)[i] = (*a)[i]; i = i + 1; }
+    0
+}
+
+// o = a + b (no reduction; limbs grow by one bit, consumed by the next fmul).
+pub fn fadd(o: &mut [secret i64], a: &[secret i64], b: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 5 { (*o)[i] = (*a)[i] + (*b)[i]; i = i + 1; }
+    0
+}
+
+pub fn fadd_assign(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 5 { (*o)[i] = (*o)[i] + (*a)[i]; i = i + 1; }
+    0
+}
+
+// o = a - b with the donna bias (a multiple of 2p) added so the result stays
+// non-negative without a borrow: limb 0 += 2^54 - 152, limbs 1..4 += 2^54 - 8.
+pub fn fsub(o: &mut [secret i64], a: &[secret i64], b: &[secret i64]) -> i64 {
+    (*o)[0] = (*a)[0] + 18014398509481832 - (*b)[0];   // + (2^54 - 152)
+    (*o)[1] = (*a)[1] + 18014398509481976 - (*b)[1];   // + (2^54 - 8)
+    (*o)[2] = (*a)[2] + 18014398509481976 - (*b)[2];
+    (*o)[3] = (*a)[3] + 18014398509481976 - (*b)[3];
+    (*o)[4] = (*a)[4] + 18014398509481976 - (*b)[4];
+    0
+}
+
+pub fn fsub_assign(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    (*o)[0] = (*o)[0] + 18014398509481832 - (*a)[0];
+    (*o)[1] = (*o)[1] + 18014398509481976 - (*a)[1];
+    (*o)[2] = (*o)[2] + 18014398509481976 - (*a)[2];
+    (*o)[3] = (*o)[3] + 18014398509481976 - (*a)[3];
+    (*o)[4] = (*o)[4] + 18014398509481976 - (*a)[4];
+    0
+}
+
+// o = a * b in GF(2^255-19) — THE u128 use. Products are 102-bit, accumulated into
+// five `secret u128` (the 2^255 ≡ 19 fold scales the high terms by 19), then carried.
+pub fn fmul(o: &mut [secret i64], a: &[secret i64], b: &[secret i64]) -> i64 {
+    let r0: secret i64 = (*a)[0];
+    let r1: secret i64 = (*a)[1];
+    let r2: secret i64 = (*a)[2];
+    let r3: secret i64 = (*a)[3];
+    let r4: secret i64 = (*a)[4];
+    let s0: secret i64 = (*b)[0];
+    let s1: secret i64 = (*b)[1];
+    let s2: secret i64 = (*b)[2];
+    let s3: secret i64 = (*b)[3];
+    let s4: secret i64 = (*b)[4];
+
+    let mut t0: secret u128 = (r0 as u128) * (s0 as u128);
+    let mut t1: secret u128 = (r0 as u128) * (s1 as u128) + (r1 as u128) * (s0 as u128);
+    let mut t2: secret u128 = (r0 as u128) * (s2 as u128) + (r2 as u128) * (s0 as u128) + (r1 as u128) * (s1 as u128);
+    let mut t3: secret u128 = (r0 as u128) * (s3 as u128) + (r3 as u128) * (s0 as u128) + (r1 as u128) * (s2 as u128) + (r2 as u128) * (s1 as u128);
+    let mut t4: secret u128 = (r0 as u128) * (s4 as u128) + (r4 as u128) * (s0 as u128) + (r3 as u128) * (s1 as u128) + (r1 as u128) * (s3 as u128) + (r2 as u128) * (s2 as u128);
+
+    // The wrap-around terms (limb i+5 ≡ 19 * limb i), scaling by 19 in `i64` first.
+    let r1m: secret i64 = r1 * 19;
+    let r2m: secret i64 = r2 * 19;
+    let r3m: secret i64 = r3 * 19;
+    let r4m: secret i64 = r4 * 19;
+    t0 = t0 + (r4m as u128) * (s1 as u128) + (r1m as u128) * (s4 as u128) + (r2m as u128) * (s3 as u128) + (r3m as u128) * (s2 as u128);
+    t1 = t1 + (r4m as u128) * (s2 as u128) + (r2m as u128) * (s4 as u128) + (r3m as u128) * (s3 as u128);
+    t2 = t2 + (r4m as u128) * (s3 as u128) + (r3m as u128) * (s4 as u128);
+    t3 = t3 + (r4m as u128) * (s4 as u128);
+
+    // Carry the five accumulators down to 51-bit `i64` limbs.
+    let m: secret u128 = mask51() as u128;          // public mask widens to secret
+    let o0a: secret i64 = (t0 & m) as i64;
+    t1 = t1 + (t0 >> 51);
+    let o1a: secret i64 = (t1 & m) as i64;
+    t2 = t2 + (t1 >> 51);
+    let o2a: secret i64 = (t2 & m) as i64;
+    t3 = t3 + (t2 >> 51);
+    let o3a: secret i64 = (t3 & m) as i64;
+    t4 = t4 + (t3 >> 51);
+    let o4a: secret i64 = (t4 & m) as i64;
+    let c4: secret i64 = (t4 >> 51) as i64;
+
+    // The final short carry chain (all `i64`): fold the top carry ×19 into limb 0.
+    let mut x0: secret i64 = o0a + c4 * 19;
+    let cc0: secret i64 = x0 >> 51;
+    x0 = x0 & mask51();
+    let mut x1: secret i64 = o1a + cc0;
+    let cc1: secret i64 = x1 >> 51;
+    x1 = x1 & mask51();
+    let x2: secret i64 = o2a + cc1;
+
+    (*o)[0] = x0;
+    (*o)[1] = x1;
+    (*o)[2] = x2;
+    (*o)[3] = o3a;
+    (*o)[4] = o4a;
+    0
+}
+
+pub fn fsq(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    fmul(o, a, a)
+}
+
+// o = a * 121665 (the Montgomery curve constant), then carry. The product is done in
+// `u128` (the donna fscalar_product): an input limb can be ~2^54 (a biased `fsub`
+// result), and 2^54 * 121665 ≈ 2^71 overflows `i64`.
+pub fn fmul121665(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let m: secret u128 = mask51() as u128;
+    let k: secret u128 = 121665 as u128;
+    let mut acc: secret u128 = ((*a)[0] as u128) * k;
+    let o0: secret i64 = (acc & m) as i64;
+    acc = ((*a)[1] as u128) * k + (acc >> 51);
+    let o1: secret i64 = (acc & m) as i64;
+    acc = ((*a)[2] as u128) * k + (acc >> 51);
+    let o2: secret i64 = (acc & m) as i64;
+    acc = ((*a)[3] as u128) * k + (acc >> 51);
+    let o3: secret i64 = (acc & m) as i64;
+    acc = ((*a)[4] as u128) * k + (acc >> 51);
+    let o4: secret i64 = (acc & m) as i64;
+    let c: secret i64 = (acc >> 51) as i64;
+    (*o)[0] = o0 + 19 * c;
+    (*o)[1] = o1;
+    (*o)[2] = o2;
+    (*o)[3] = o3;
+    (*o)[4] = o4;
+    0
+}
+
+// Constant-time conditional swap of two field elements when the SECRET bit b is 1.
+pub fn fe_sel(p: &mut [secret i64], q: &mut [secret i64], b: secret i64) -> i64 {
+    let c: secret i64 = 0 - b;
+    let mut i: i64 = 0;
+    while i < 5 {
+        let t: secret i64 = c & ((*p)[i] ^ (*q)[i]);
+        (*p)[i] = (*p)[i] ^ t;
+        (*q)[i] = (*q)[i] ^ t;
+        i = i + 1;
+    }
+    0
+}
+
+// The multiplicative inverse a^(p-2) = a^-1 (Fermat). (p-2) = 2^255-21 has its top bit
+// (254) set and zeros only at positions 2 and 4 — the same chain shape as the radix-2^16
+// `finv`: 254 squarings with a multiply by a at every step except those two.
+pub fn finv(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut c: [secret i64] = fe_zero();
+    fe_copy(&mut c, a);
+    let mut i: i64 = 253;
+    while i >= 0 {
+        let mut t: [secret i64] = fe_zero();
+        fsq(&mut t, &c);
+        fe_copy(&mut c, &t);
+        if i != 2 && i != 4 {
+            let mut t2: [secret i64] = fe_zero();
+            fmul(&mut t2, &c, a);
+            fe_copy(&mut c, &t2);
+            0
+        } else { 0 };
+        i = i - 1;
+    }
+    fe_copy(o, &c);
+    0
+}
+
+// Read a 64-bit little-endian word from `b` at byte offset `off` (off+7 ≤ 31).
+fn word(b: &[secret u8], off: i64) -> secret i64 {
+    let mut w: secret i64 = 0;
+    let mut k: i64 = 0;
+    while k < 8 {
+        w = w | (((*b)[off + k] as i64) << (8 * k));
+        k = k + 1;
+    }
+    w
+}
+
+// Decode 32 little-endian bytes into 5 radix-2^51 limbs (the top bit is dropped, like
+// the donna `fexpand`).
+pub fn fexpand(o: &mut [secret i64], b: &[secret u8]) -> i64 {
+    let w0: secret i64 = word(b, 0);
+    (*o)[0] = w0 & mask51();
+    let w6: secret i64 = word(b, 6);
+    (*o)[1] = (w6 >> 3) & mask51();
+    let w12: secret i64 = word(b, 12);
+    (*o)[2] = (w12 >> 6) & mask51();
+    let w19: secret i64 = word(b, 19);
+    (*o)[3] = (w19 >> 1) & mask51();
+    let w24: secret i64 = word(b, 24);
+    (*o)[4] = (w24 >> 12) & mask51();
+    0
+}
+
+// One donna carry pass over 5 limbs in place (radix 2^51; the top carry folds ×19).
+fn carry_pass(t: &mut [secret i64]) -> i64 {
+    (*t)[1] = (*t)[1] + ((*t)[0] >> 51); (*t)[0] = (*t)[0] & mask51();
+    (*t)[2] = (*t)[2] + ((*t)[1] >> 51); (*t)[1] = (*t)[1] & mask51();
+    (*t)[3] = (*t)[3] + ((*t)[2] >> 51); (*t)[2] = (*t)[2] & mask51();
+    (*t)[4] = (*t)[4] + ((*t)[3] >> 51); (*t)[3] = (*t)[3] & mask51();
+    (*t)[0] = (*t)[0] + 19 * ((*t)[4] >> 51); (*t)[4] = (*t)[4] & mask51();
+    0
+}
+
+// Serialize a field element to 32 little-endian SECRET bytes (value mod p), via the
+// branch-free donna freeze (all `i64`: limbs stay < 2^53) + a cross-limb byte pack.
+pub fn fcontract(a: &[secret i64]) -> [secret u8] {
+    let mut t: [secret i64] = fe_zero();
+    fe_copy(&mut t, a);
+    carry_pass(&mut t);
+    carry_pass(&mut t);
+    // add 19, carry: now offset by 19, in [19, 2^255-1].
+    t[0] = t[0] + 19;
+    carry_pass(&mut t);
+    // add 2^255 - 19 (as the per-limb biases): now in [2^255, 2^256-20], bit 255 set
+    // iff the value was ≥ p.
+    t[0] = t[0] + 2251799813685229;   // 2^51 - 19
+    t[1] = t[1] + mask51();           // 2^51 - 1
+    t[2] = t[2] + mask51();
+    t[3] = t[3] + mask51();
+    t[4] = t[4] + mask51();
+    // final carry WITHOUT folding the top back (drops bit 255).
+    t[1] = t[1] + (t[0] >> 51); t[0] = t[0] & mask51();
+    t[2] = t[2] + (t[1] >> 51); t[1] = t[1] & mask51();
+    t[3] = t[3] + (t[2] >> 51); t[2] = t[2] & mask51();
+    t[4] = t[4] + (t[3] >> 51); t[3] = t[3] & mask51();
+    t[4] = t[4] & mask51();
+
+    // Byte k spans bits [8k, 8k+7]; pull from limb q = 8k/51 (+ the next limb).
+    let mut out: Vec<secret u8> = vec_new();
+    let mut k: i64 = 0;
+    while k < 32 {
+        let off: i64 = 8 * k;
+        let q: i64 = off / 51;
+        let r: i64 = off - q * 51;
+        let lo: secret i64 = t[q];
+        let hi: secret i64 = if q + 1 < 5 { t[q + 1] } else { 0 };
+        let byte: secret i64 = ((lo >> r) | (hi << (51 - r))) & 255;
+        push(&mut out, byte as u8);
+        k = k + 1;
+    }
+    vec_to_array(out)
+}

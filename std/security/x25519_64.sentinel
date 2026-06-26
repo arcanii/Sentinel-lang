@@ -1,0 +1,88 @@
+// std::security::x25519_64 — constant-time X25519 (RFC 7748) over the RADIX-2^51
+// field (std::security::fe25519_64), the high-performance 64-bit-limb representation.
+//
+// Functionally identical to the radix-2^16 `std::security::x25519` — the SAME
+// constant-time Montgomery ladder (branch-free `fe_sel` swaps on the secret scalar
+// bits) — but the field multiply runs at radix 2^51 with 128-bit products (the ADR
+// 0055 `u128` type). The companion example cross-checks that this and the radix-2^16
+// implementation compute the SAME shared secret on every input — an internal proof
+// that the two limb representations agree.
+use std::security::fe25519_64::fe_zero;
+use std::security::fe25519_64::fe_copy;
+use std::security::fe25519_64::fadd;
+use std::security::fe25519_64::fsub;
+use std::security::fe25519_64::fadd_assign;
+use std::security::fe25519_64::fsub_assign;
+use std::security::fe25519_64::fmul;
+use std::security::fe25519_64::fsq;
+use std::security::fe25519_64::fmul121665;
+use std::security::fe25519_64::fe_sel;
+use std::security::fe25519_64::finv;
+use std::security::fe25519_64::fexpand;
+use std::security::fe25519_64::fcontract;
+
+// X25519: multiply the SECRET scalar by the u-coordinate, returning the 32-byte SECRET
+// result (RFC 7748 §5). 255 fixed ladder iterations; each conditionally swaps the
+// working points on the secret scalar bit via the branch-free fe_sel.
+pub fn x25519_64(scalar: [secret u8], u: [secret u8]) -> [secret u8] {
+    let mut zz: Vec<secret i64> = vec_new();
+    let mut ci: i64 = 0;
+    while ci < 32 { push(&mut zz, scalar[ci] as i64); ci = ci + 1; }
+    let mut z: [secret i64] = vec_to_array(zz);
+    z[0] = z[0] & 248;
+    z[31] = z[31] & 127;
+    z[31] = z[31] | 64;
+
+    let mut x: [secret i64] = fe_zero();
+    fexpand(&mut x, &u);
+
+    let mut a: [secret i64] = fe_zero();
+    let mut b: [secret i64] = fe_zero();
+    let mut c: [secret i64] = fe_zero();
+    let mut d: [secret i64] = fe_zero();
+    let mut e: [secret i64] = fe_zero();
+    let mut f: [secret i64] = fe_zero();
+    let mut tmp: [secret i64] = fe_zero();
+    fe_copy(&mut b, &x);
+    a[0] = 1;
+    d[0] = 1;
+
+    let mut i: i64 = 254;
+    while i >= 0 {
+        let byte_idx: i64 = i / 8;
+        let bit_idx: i64 = i - byte_idx * 8;
+        let bit: secret i64 = (z[byte_idx] >> bit_idx) & 1;
+
+        fe_sel(&mut a, &mut b, bit);
+        fe_sel(&mut c, &mut d, bit);
+        fadd(&mut e, &a, &c);          // e = a + c
+        fsub_assign(&mut a, &c);       // a = a - c
+        fadd(&mut c, &b, &d);          // c = b + d
+        fsub_assign(&mut b, &d);       // b = b - d
+        fsq(&mut d, &e);               // d = e^2
+        fsq(&mut f, &a);               // f = a^2
+        fmul(&mut tmp, &c, &a);        // a = c * a
+        fe_copy(&mut a, &tmp);
+        fmul(&mut c, &b, &e);          // c = b * e
+        fadd(&mut e, &a, &c);          // e = a + c
+        fsub_assign(&mut a, &c);       // a = a - c
+        fsq(&mut b, &a);               // b = a^2
+        fsub(&mut c, &d, &f);          // c = d - f
+        fmul121665(&mut a, &c);        // a = c * 121665
+        fadd_assign(&mut a, &d);       // a = a + d
+        fmul(&mut tmp, &c, &a);        // c = c * a
+        fe_copy(&mut c, &tmp);
+        fmul(&mut a, &d, &f);          // a = d * f
+        fmul(&mut d, &b, &x);          // d = b * x
+        fsq(&mut b, &e);               // b = e^2
+        fe_sel(&mut a, &mut b, bit);
+        fe_sel(&mut c, &mut d, bit);
+
+        i = i - 1;
+    }
+
+    let mut cinv: [secret i64] = fe_zero();
+    finv(&mut cinv, &c);
+    fmul(&mut tmp, &a, &cinv);
+    fcontract(&tmp)
+}

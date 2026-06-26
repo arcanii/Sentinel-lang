@@ -303,6 +303,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // + signature) reproduced, a non-empty-message vector reproduced, both verified,
     // and a tampered signature rejected.
     ("examples/security/ed448.sentinel", 42),
+    // X25519 at radix 2^51 (std::security::x25519_64 over std::security::fe25519_64),
+    // the demonstrator for the `u128` type (ADR 0055 — the 128-bit numeric gap): the
+    // field multiply runs in `secret u128` because a 51-bit limb product is 102 bits.
+    // 42 = the RFC 7748 §5.2 vector reproduced AND the radix-2^51 and radix-2^16
+    // implementations agreed on the same shared secret (an internal consistency proof).
+    ("examples/security/x25519_64.sentinel", 42),
 ];
 
 #[test]
@@ -443,6 +449,11 @@ fn x448_scalarmult_constant_time() {
 #[test]
 fn ed448_signing_constant_time() {
     check_example("examples/security/ed448.sentinel", "ed448", 42);
+}
+
+#[test]
+fn x25519_64_radix_2_51_u128() {
+    check_example("examples/security/x25519_64.sentinel", "x25519_64", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

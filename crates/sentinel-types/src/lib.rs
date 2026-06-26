@@ -65,6 +65,13 @@ pub enum Type {
     /// stays a `Mismatch` (explicit `u8_to_i64`/`i64_to_u8` convert).
     /// A string literal is a `[u8]` (`Array(ArrayElem::U8)`) — ADR D3.
     U8,
+    /// ADR 0055: `u128` — an unsigned 128-bit integer scalar, lowering to
+    /// LLVM `i128`. A primitive integer (joins `is_int`) for 64-bit-limb
+    /// bignum / field arithmetic (radix-2^51): a 64x64 limb product is 128
+    /// bits, which `i64` cannot hold. Unsigned like `u8` (logical `>>`,
+    /// unsigned compares, zero-extend widening); mixed-width arithmetic with
+    /// `i64`/`i32`/`u8` stays a `Mismatch` (use an explicit `x as u128` cast).
+    U128,
     Bool,
     Struct(StructId),
     /// `?T` per ADR 0014 D1. Payload is the inner base type.
@@ -521,7 +528,7 @@ impl Type {
     /// with no other change (mixed-width is still caught by the
     /// `l.ty != r.ty` operand check).
     pub fn is_int(self) -> bool {
-        matches!(self, Type::I32 | Type::I64 | Type::U8)
+        matches!(self, Type::I32 | Type::I64 | Type::U8 | Type::U128)
     }
 
     /// `true` if this is a struct type — either a non-generic
@@ -593,6 +600,9 @@ impl Type {
             // MVP (NullableInner gains no U8 variant); `u8` is added to
             // the exhaustive `Type` matches regardless.
             Type::U8
+            // ADR 0055: `?u128` is out of scope (NullableInner gains no
+            // U128 variant) — `u128` is added to the exhaustive matches.
+            | Type::U128
             | Type::Array(_)
             | Type::Nullable(_)
             | Type::Secret(_)
@@ -635,7 +645,10 @@ impl Type {
             // the outer-secret level) IS representable via
             // `Type::Secret(secret_id_for_[T])` and works through
             // the regular Secret arm.
-            Type::Array(_)
+            // ADR 0055: `[u128]` is out of scope (ArrayElem gains no U128
+            // variant) — the radix-2^51 field uses scalar `u128`.
+            Type::U128
+            | Type::Array(_)
             | Type::Nullable(_)
             | Type::Ref(_)
             | Type::Secret(_)
@@ -705,7 +718,10 @@ impl Type {
             Type::Struct(id) => Some(VecElem::Struct(id)),
             Type::TypeParam(id) => Some(VecElem::TypeParam(id)),
             Type::GenericInstance(id) => Some(VecElem::GenericInstance(id)),
-            Type::Array(_)
+            // ADR 0055: `Vec<u128>` is out of scope (VecElem gains no U128
+            // variant) — the radix-2^51 field uses scalar `u128`.
+            Type::U128
+            | Type::Array(_)
             | Type::Vec(_)
             | Type::Nullable(_)
             | Type::Ref(_)
@@ -784,6 +800,8 @@ impl Type {
             // Phase D.2 / ADR 0033 D4: `u8` is a scalar primitive with
             // no TypeParam payload — substitution is the identity.
             | Type::U8
+            // ADR 0055: `u128` is likewise a scalar — identity.
+            | Type::U128
             | Type::Bool
             | Type::Struct(_)
             | Type::Class(_)
@@ -1020,6 +1038,7 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
         Type::I32 => "i32".to_string(),
         Type::Bool => "bool".to_string(),
         Type::U8 => "u8".to_string(),
+        Type::U128 => "u128".to_string(),
         Type::Struct(id) => match program.and_then(|p| p.structs.get(id.0 as usize)) {
             Some(s) => s.name.clone(),
             None => format!("<struct#{}>", id.0),
@@ -1108,6 +1127,7 @@ impl std::fmt::Display for Type {
             Type::I32 => write!(f, "i32"),
             Type::Bool => write!(f, "bool"),
             Type::U8 => write!(f, "u8"),
+            Type::U128 => write!(f, "u128"),
             Type::Struct(id) => write!(f, "<struct#{}>", id.0),
             Type::Nullable(inner) => write!(f, "?{}", inner.to_type()),
             Type::Array(elem) => write!(f, "[{}]", elem.to_type()),
@@ -1198,6 +1218,9 @@ fn resolve_type_expr_with_scope(
                 // like `i64`/`i32`/`bool`. `[u8]` flows through the array
                 // type-expr path, which demotes via `to_array_elem`.
                 "u8" => Ok(Type::U8),
+                // ADR 0055: `u128` — an unsigned 128-bit integer scalar
+                // (the 64-bit-limb / 128-bit-product numeric gap).
+                "u128" => Ok(Type::U128),
                 // Phase D.3 (2/N) / ADR 0034 D5 (Amendment A1): `String`
                 // is a thin alias for `Vec<u8>` — a growable byte buffer,
                 // not a separate nominal type. Recognised now that the
@@ -1332,7 +1355,7 @@ fn resolve_type_expr_with_scope(
             match name.as_str() {
                 // Phase D.2 / ADR 0033 D4: `u8<...>` is rejected like any
                 // other non-generic primitive.
-                "i64" | "i32" | "bool" | "u8" => Err(TypeError::TypeArgsOnNonGeneric {
+                "i64" | "i32" | "bool" | "u8" | "u128" => Err(TypeError::TypeArgsOnNonGeneric {
                     type_name: name.clone(),
                     span: to_source_span(&te.span),
                 }),
@@ -5736,6 +5759,7 @@ fn try_substitute(
         Type::I64
         | Type::I32
         | Type::U8
+        | Type::U128
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -5805,6 +5829,7 @@ fn contains_type_param(
         Type::I64
         | Type::I32
         | Type::U8
+        | Type::U128
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -7145,6 +7170,7 @@ fn check_expr(
                     "i64" => Type::I64,
                     "i32" => Type::I32,
                     "u8" => Type::U8,
+                    "u128" => Type::U128,
                     _ => {
                         return Err(TypeError::NonIntegerCast {
                             span: to_source_span(&te.span),

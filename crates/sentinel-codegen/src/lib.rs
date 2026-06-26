@@ -1632,7 +1632,10 @@ fn field_type_needs_drop_inner(
             any
         }
         // Phase D.2 / ADR 0033 D4: a `u8` scalar has no heap payload.
-        Type::Nullable(_) | Type::I64 | Type::I32 | Type::U8 | Type::Bool | Type::Ref(_) => false,
+        // ADR 0055: nor does a `u128` scalar.
+        Type::Nullable(_) | Type::I64 | Type::I32 | Type::U8 | Type::U128 | Type::Bool | Type::Ref(_) => {
+            false
+        }
         Type::TypeParam(_) => false,
         // C3 / ADR 0019 D5 (C3.1): drop semantics of `secret T`
         // follow the inner — secrets don't introduce new heap
@@ -1713,6 +1716,9 @@ fn llvm_basic_type<'ctx>(
         // Phase D.2 / ADR 0033 D6: `u8` lowers to LLVM `i8` (signedness
         // lives in the ops — `udiv`/unsigned compares — not the type).
         Type::U8 => context.i8_type().into(),
+        // ADR 0055: `u128` lowers to LLVM `i128` (unsignedness lives in the
+        // ops — logical `>>`, unsigned compares — not the type).
+        Type::U128 => context.i128_type().into(),
         Type::Struct(id) => (*struct_types
             .get(&id)
             .expect("struct declared in pass 0"))
@@ -2217,7 +2223,7 @@ pub struct NamedTypeOrigins {
 fn mono_args_dedup_safe(args: &[Type], origins: &NamedTypeOrigins) -> bool {
     fn safe(t: Type, origins: &NamedTypeOrigins) -> bool {
         match t {
-            Type::I64 | Type::I32 | Type::Bool | Type::U8 => true,
+            Type::I64 | Type::I32 | Type::Bool | Type::U8 | Type::U128 => true,
             Type::Struct(id) => origins.structs.contains_key(&id),
             Type::Enum(id) => origins.enums.contains_key(&id),
             Type::Array(e) => safe(e.to_type(), origins),
@@ -2330,6 +2336,8 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         // Phase D.2 / ADR 0033 D4: `u8` mangles as `u8` (so `[u8]`
         // mangles `arr_u8` via the Array arm below).
         Type::U8 => "u8".to_string(),
+        // ADR 0055: `u128` mangles as `u128`.
+        Type::U128 => "u128".to_string(),
         Type::Struct(id) => program
             .structs
             .get(id.0 as usize)
@@ -2428,6 +2436,8 @@ fn arg_contains_typeparam(
         | Type::I32
         // Phase D.2 / ADR 0033 D4: `u8` carries no TypeParam.
         | Type::U8
+        // ADR 0055: `u128` carries no TypeParam.
+        | Type::U128
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -2484,6 +2494,8 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::I64 => context.i64_type(),
         // Phase D.2 / ADR 0033 D6: `u8` is an int type → LLVM `i8`.
         Type::U8 => context.i8_type(),
+        // ADR 0055: `u128` is an int type → LLVM `i128`.
+        Type::U128 => context.i128_type(),
         Type::Struct(_) => panic!("llvm_int_type called on non-int Type::Struct"),
         Type::Nullable(_) => panic!("llvm_int_type called on non-int Type::Nullable"),
         Type::Array(_) => panic!("llvm_int_type called on non-int Type::Array"),
@@ -4127,6 +4139,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             | Type::I32
             // Phase D.2 / ADR 0033 D4: a `u8` byte has no heap data.
             | Type::U8
+            // ADR 0055: a `u128` scalar has no heap data.
+            | Type::U128
             | Type::Bool
             | Type::Ref(_) => {
                 // Primitives + refs + nullable-of-primitive: no
@@ -5673,7 +5687,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // D.2 / ADR 0033 D6: `u8` is unsigned — `/` is `udiv`
                 // (add/sub/mul/bitwise are sign-agnostic in two's
                 // complement). Both operands share a type (type-checked).
-                let is_unsigned = matches!(self.strip_secret(lhs.ty), Type::U8);
+                let is_unsigned = matches!(self.strip_secret(lhs.ty), Type::U8 | Type::U128);
                 let result = match op {
                     BinOp::Add => self.builder.build_int_add(l, r, "add"),
                     BinOp::Sub => self.builder.build_int_sub(l, r, "sub"),
@@ -5730,7 +5744,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // comparisons use unsigned predicates (a byte ≥ 0x80
                 // must compare as large, not negative). Eq/Ne are
                 // sign-agnostic; nullable operands only ever use Eq/Ne.
-                let is_unsigned = matches!(self.strip_secret(lhs.ty), Type::U8);
+                let is_unsigned = matches!(self.strip_secret(lhs.ty), Type::U8 | Type::U128);
                 let predicate = match op {
                     CmpOp::Eq => IntPredicate::EQ,
                     CmpOp::Ne => IntPredicate::NE,
