@@ -1,0 +1,175 @@
+// examples/net/ssh_channel_stream.sentinel — a bidirectional, multi-packet SSH
+// encrypted channel over a REAL TCP socket: the data phase after NEWKEYS, where the
+// chacha20-poly1305@openssh.com record cipher protects a STREAM of packets each way
+// and the per-direction sequence number drives a fresh nonce for every packet.
+//
+// `examples/net/ssh_over_tcp` shows the KEX/handshake over a socket; this picks up
+// where that leaves off — both peers already share the session secret K and the
+// exchange hash H (the post-NEWKEYS state), so each derives the two DIRECTIONAL keys
+// (RFC 4253 §7.2): key 'C' for client->server, key 'D' for server->client. Then a
+// request/response ping-pong runs over a real loopback connection:
+//
+//   for i in 0..N:
+//     CLIENT  seal(keyc, seqnr=i, request_i)  --record(64B)-->  SERVER
+//     SERVER  open(keyc, seqnr=i) -> request_i ; respond = request_i + 1
+//     SERVER  seal(keyd, seqnr=i, respond)    --record(64B)-->  CLIENT
+//     CLIENT  open(keyd, seqnr=i) -> respond  ; assert respond == request_i + 1
+//
+// WHY THE SEQUENCE NUMBER MATTERS. Each direction has its OWN seqnr counter; the
+// counter is folded into the Poly1305 nonce, so every packet on a key gets a distinct
+// keystream. If the two peers ever disagreed on a packet's seqnr, the tag would fail
+// to verify — so an opened, tag-verified stream of N packets is proof the seqnr
+// evolution stayed in lockstep. The two directions use DIFFERENT keys, so reusing
+// seqnr i on both at once is safe (distinct keystreams).
+//
+// CONSTANT-TIME DISCIPLINE. The keys, the plaintext payloads, and the keystream are
+// all `[secret u8]`; only the ciphertext records (which Poly1305 authenticates) cross
+// the socket, declassified to public `[u8]` on send and widened back on receipt. The
+// session key never touches the wire.
+//
+// Exit 42 = all N packets round-tripped: every record's tag verified under the right
+// directional key + seqnr, and every response was the expected transform of its
+// request.
+use std::math::num::abs;
+use std::net::tcp::loopback_host;
+use std::net::tcp::read_exact;
+use std::net::tcp::declassify_bytes;
+use std::net::tcp::widen_bytes;
+use std::net::ssh::ssh_kdf;
+use std::net::ssh_cipher::ssh_seal;
+use std::net::ssh_cipher::ssh_open_verify;
+use std::net::ssh_cipher::ssh_open_payload;
+
+fn mk(data: [i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8(data[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// The post-NEWKEYS session state, shared by both peers (the same K and H the in-memory
+// examples/net/ssh_session derives from the curve25519-sha256 KEX).
+fn shared_k() -> [secret u8] { mk([158, 0, 64, 152, 239, 192, 145, 212, 236, 38, 99, 180, 233, 245, 207, 212, 215, 6, 69, 113, 105, 11, 75, 234, 151, 171, 20, 106, 185, 243, 80, 86], 32) }
+fn exchange_h() -> [secret u8] { mk([96, 28, 31, 49, 76, 176, 115, 200, 132, 223, 42, 223, 114, 251, 9, 245, 140, 11, 122, 139, 160, 253, 52, 50, 244, 16, 165, 187, 64, 86, 5, 180], 32) }
+
+// A distinct 32-byte request payload per packet index (so a seqnr/key mix-up can't
+// pass unnoticed): byte j of request i is 10*(i+1) + j.
+fn request(i: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut j: i64 = 0;
+    while j < 32 { push(&mut v, i64_to_u8(10 * (i + 1) + j)); j = j + 1; }
+    vec_to_array(v)
+}
+
+// The server's reply transform: add one to every byte (a constant-time op on secret
+// bytes — the public 1 widens to secret in the add).
+fn bump(p: &[secret u8], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut j: i64 = 0;
+    while j < n { push(&mut v, (*p)[j] + i64_to_u8(1)); j = j + 1; }
+    vec_to_array(v)
+}
+
+fn diff(got: &[secret u8], exp: [i64], n: i64) -> i64 {
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n { bad = bad | (u8_to_i64(declassify((*got)[i])) ^ exp[i]); i = i + 1; }
+    bad
+}
+
+fn diff_secret(a: &[secret u8], b: &[secret u8], n: i64) -> i64 {
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n { bad = bad | (u8_to_i64(declassify((*a)[i])) ^ u8_to_i64(declassify((*b)[i]))); i = i + 1; }
+    bad
+}
+
+// The server half: open N request packets under key 'C', reply to each under key 'D',
+// each with the matching per-direction sequence number.
+fn channel_server(listener: i64) -> i64 ! { Async } {
+    let conn: i64 = tcp_accept(listener);
+    if conn < 0 {
+        0 - 1
+    } else {
+        let k: [secret u8] = shared_k();
+        let h: [secret u8] = exchange_h();
+        let keyc: [secret u8] = ssh_kdf(&k, &h, 67, 64);   // client->server
+        let keyd: [secret u8] = ssh_kdf(&k, &h, 68, 64);   // server->client
+        let mut bad: i64 = 0;
+        let mut i: i64 = 0;
+        while i < 4 {
+            let rec_pub: [u8] = read_exact(conn, 64);
+            let rec: [secret u8] = widen_bytes(&rec_pub, 0, 64);
+            // verify the tag BEFORE decrypting: a record that fails its MAC (a desynced
+            // seqnr, a tampered packet) must never be fed to ssh_open_payload.
+            let auth: i64 = ssh_open_verify(&keyc, i, &rec);
+            if auth == 1 {
+                let req: [secret u8] = ssh_open_payload(&keyc, i, &rec);
+                let resp: [secret u8] = bump(&req, 32);
+                let out: [secret u8] = ssh_seal(&keyd, i, &resp);
+                let out_pub: [u8] = declassify_bytes(&out, 64);
+                tcp_write(conn, out_pub);
+                0
+            } else {
+                bad = bad | 1;
+                0
+            };
+            i = i + 1;
+        }
+        tcp_close(conn);
+        bad
+    }
+}
+
+fn main() -> i64 {
+    let listener: i64 = tcp_listen(0);
+    if listener < 0 {
+        1
+    } else {
+        let port: i64 = tcp_local_port(listener);
+        let result: i64 = scope concurrent {
+            let server = spawn channel_server(listener);
+
+            let host: [u8] = loopback_host();
+            let conn: i64 = tcp_connect(host, port);
+            let k: [secret u8] = shared_k();
+            let h: [secret u8] = exchange_h();
+            let keyc: [secret u8] = ssh_kdf(&k, &h, 67, 64);
+            let keyd: [secret u8] = ssh_kdf(&k, &h, 68, 64);
+
+            // anchor: key 'C' matches the known-good ssh_session vector.
+            let mut bad: i64 = diff(&keyc, [172, 214, 253, 157, 251, 132, 14, 195, 33, 74, 78, 11, 251, 153, 21, 223, 138, 41, 110, 92, 174, 2, 182, 43, 68, 113, 167, 136, 102, 155, 118, 33, 48, 152, 218, 26, 197, 230, 50, 247, 29, 15, 172, 105, 119, 66, 193, 153, 150, 184, 111, 125, 23, 193, 114, 108, 76, 144, 46, 95, 2, 102, 54, 249], 64);
+
+            // the request/response ping-pong: N packets each way, seqnr i per packet.
+            let mut i: i64 = 0;
+            while i < 4 {
+                let req: [secret u8] = request(i);
+                let rec: [secret u8] = ssh_seal(&keyc, i, &req);
+                let rec_pub: [u8] = declassify_bytes(&rec, 64);
+                tcp_write(conn, rec_pub);
+
+                let resp_pub: [u8] = read_exact(conn, 64);
+                let resp: [secret u8] = widen_bytes(&resp_pub, 0, 64);
+                // same discipline on the receive side: verify, then decode.
+                let auth: i64 = ssh_open_verify(&keyd, i, &resp);
+                if auth == 1 {
+                    let opened: [secret u8] = ssh_open_payload(&keyd, i, &resp);
+                    let expected: [secret u8] = bump(&req, 32);
+                    bad = bad | diff_secret(&opened, &expected, 32);
+                    0
+                } else {
+                    bad = bad | 8;
+                    0
+                };
+                i = i + 1;
+            }
+
+            tcp_close(conn);
+            let srv: i64 = server.await;
+            bad = bad | abs(srv);
+            if bad == 0 { 42 } else { 5 }
+        };
+        tcp_close(listener);
+        result
+    }
+}

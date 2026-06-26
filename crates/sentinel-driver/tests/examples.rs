@@ -344,6 +344,15 @@ const EXAMPLES: &[(&str, i32)] = &[
     // the two peers agreed on the exchange hash H, the host-key signature verified, the
     // derived session key matched, and the encrypted application packet round-tripped.
     ("examples/net/ssh_over_tcp.sentinel", 42),
+    // A bidirectional, multi-packet SSH encrypted channel over a real TCP socket (the
+    // data phase after NEWKEYS): both peers derive the two directional keys ('C' c->s,
+    // 'D' s->c) from the shared session state, then a request/response ping-pong streams
+    // N chacha20-poly1305@openssh.com records each way, each under its per-direction
+    // sequence number (which drives a fresh nonce per packet). Every record is
+    // tag-verified before it is decrypted (verify-then-decode). 42 = all N packets
+    // round-tripped — every tag verified under the right key+seqnr and every response
+    // was the expected transform of its request (so the seqnr stream stayed in lockstep).
+    ("examples/net/ssh_channel_stream.sentinel", 42),
 ];
 
 #[test]
@@ -514,6 +523,11 @@ fn tcp_echo_loopback() {
 #[test]
 fn ssh_over_tcp_distributed_handshake() {
     check_example("examples/net/ssh_over_tcp.sentinel", "ssh_over_tcp", 42);
+}
+
+#[test]
+fn ssh_channel_stream_multipacket() {
+    check_example("examples/net/ssh_channel_stream.sentinel", "ssh_channel_stream", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
