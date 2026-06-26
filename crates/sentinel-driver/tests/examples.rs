@@ -321,6 +321,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // byte, its tag verified, the payload round-tripped, and a tampered record was
     // rejected.
     ("examples/net/ssh_channel.sentinel", 42),
+    // A complete SSH-2 transport session end-to-end (std::net::ssh + ssh_cipher): the
+    // curve25519-sha256 KEX, the ssh-ed25519 host-key auth, the §7.2 key derivation
+    // (the 64-byte chacha20-poly1305 key), and an encrypted application packet — all
+    // stitched in memory as a real sshd does after NEWKEYS. 42 = the KEX agreed and
+    // matched H, the signature verified, the derived key matched, and the encrypted
+    // packet round-tripped.
+    ("examples/net/ssh_session.sentinel", 42),
 ];
 
 #[test]
@@ -476,6 +483,11 @@ fn ssh_handshake_curve25519_sha256() {
 #[test]
 fn ssh_channel_chacha20poly1305_openssh() {
     check_example("examples/net/ssh_channel.sentinel", "ssh_channel", 42);
+}
+
+#[test]
+fn ssh_session_end_to_end() {
+    check_example("examples/net/ssh_session.sentinel", "ssh_session", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
