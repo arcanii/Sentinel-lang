@@ -89,8 +89,10 @@ the current state of the workspace without re-reading every commit.
   `sort` + `binary_search` over public `[i64]`), and `std/net` (`ssh` — the SSH-2
   transport key exchange, `curve25519-sha256` + `ssh-ed25519`, RFC 4253 / RFC 8731; +
   `ssh_cipher` — the `chacha20-poly1305@openssh.com` binary-packet record cipher that
-  protects every packet after NEWKEYS: together the constant-time crypto core of an
-  `sshd`, run loopback; sockets are scoped in ADR 0056 but not yet implemented). The
+  protects every packet after NEWKEYS; stitched into a complete end-to-end loopback
+  session in `examples/net/ssh_session` (KEX → host-key auth → key derivation → an
+  encrypted application packet): together the constant-time crypto core of an `sshd`,
+  run loopback; sockets are scoped in ADR 0056 but not yet implemented). The
   crypto examples reproduce the
   canonical test vectors (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 /
   §2.5.2 / the full 114-byte §2.8.2 AEAD vector; NIST SHA-256 "abc"/""/multi-block;
