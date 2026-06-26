@@ -85,7 +85,10 @@ the current state of the workspace without re-reading every commit.
   against the radix-2^16 `x25519`)), `std/math/num`,
   `std/bits/bits` (rotates),
   `std/bytes/bytes` (`[u8]`
-  utilities over `&[u8]` borrows), `std/algorithms/seq` (in-place insertion
+  utilities over `&[u8]` borrows), `std/text/str` (the string library: case folding,
+  trim, substring search, slice, concat/repeat/replace, lexicographic compare, decimal
+  `parse_int`/`int_to_str`, index-based `split_count`/`split_nth`, pad — exercised by
+  `examples/text/str_demo`), `std/algorithms/seq` (in-place insertion
   `sort` + `binary_search` over public `[i64]`), and `std/net` (`tcp` — a thin
   ergonomic layer over the raw socket builtins: `read_exact` + the secret<->public
   byte-boundary helpers both socket examples share; `ssh` — the SSH-2
@@ -210,7 +213,7 @@ the current state of the workspace without re-reading every commit.
   (a table-free field-inversion S-box, a branch-free mask-based conditional swap). See
   the `sentinel_examples_and_corelibs` auto-memory.
 
-**1593 tests across the workspace**, four-check green (build · `cargo nextest`
+**1595 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

@@ -63,8 +63,15 @@ one connection via the factored `std::net::ssh_handshake` API, `examples/net/ssh
 running RFC 4252 publickey USER AUTHENTICATION (a session-id-bound Ed25519 signature) on top,
 `examples/net/ssh_channel_window` running the RFC 4254 CONNECTION layer (a windowed
 session channel), and `examples/net/ssh_exec` running a `CHANNEL_REQUEST "exec"` command
-request — so the full transport→auth→channel→exec sequence now runs over real sockets;
-HEAD `61c6682`, 1593 tests,
+request — so the full transport→auth→channel→exec sequence now runs over real sockets. **The
+active sub-track is now DATA & TEXT LIBRARIES** (owner-chosen over float-math / FFI-bindings):
+the **`std::text::str` string library** shipped (`c6c0503` — case/trim/substring/concat/
+compare/`parse_int`/`int_to_str`/index-based split/pad over `[u8]`; `examples/text/str_demo`,
+~45 assertions). Maps were attempted first but PROBING found a real **use-after-free**:
+pushing a Move-typed struct (one owning a `[u8]`) into a `Vec` through a by-value parameter
+double-freed the element (the ADR 0034 D8 deferred case) — now FIXED in both backends
+(`e66f57f`, fixture c60), which **unblocks a `Vec<struct>`-based hashmap** (the next piece);
+HEAD `e66f57f`, 1595 tests,
 four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
@@ -439,10 +446,21 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     grew the exec/exit-status messages + the framed record I/O (`ssh_send_record`/`ssh_recv_record`,
     factored out of `ssh_channel_window`), and `examples/net/ssh_exec` (`61c6682`) does
     `ssh user@host some-command` end to end: open a channel → `CHANNEL_REQUEST "exec"` →
-    `CHANNEL_SUCCESS` → command output as `CHANNEL_DATA` → `"exit-status"` → close. Cleanly
-    open next (all peripheral / optional now): a `userauth`
-    failure-then-retry loop; a `"shell"` request / interactive `CHANNEL_DATA` ping-pong;
-    multiple concurrent channels.
+    `CHANNEL_SUCCESS` → command output as `CHANNEL_DATA` → `"exit-status"` → close. The SSH
+    track is at a natural stopping point (the rest is peripheral: a `userauth`
+    failure/retry loop; a `"shell"` request; multiple concurrent channels). **▶ THE ACTIVE
+    TRACK IS NOW DATA & TEXT LIBRARIES** (owner-chosen). Shipped: `std::text::str` (`c6c0503`).
+    The UAF blocking maps is fixed (`e66f57f` — push consumes its Move-typed element). **NEXT,
+    in order: (1) a hashmap** — now buildable on `Vec<struct>` (parallel arrays: keys in a
+    `Vec<KeyBox{[u8]}>`, values/buckets/next in `Vec<i64>`, index-based chaining + a public
+    FNV-1a hash; the generic landmines are real so do a CONCRETE string→i64 / string→[u8] map
+    first, not a generic `HashMap<V>`). ⚠ KNOWN GENERIC GAPS (probed): generic ENUMS don't
+    parse (`enum Opt<T>` — so no `Option<T>`); generic struct-literal type-args don't infer
+    through `push`; `Vec<[u8]>` (Vec-of-arrays) is unsupported (D.3 MVP). **(2) JSON** — a
+    concrete recursive `enum Json { Null, Bool, Num, Str([u8]), Arr, Obj }` + parser/serializer,
+    building on `str` + the map. Then the bigger rocks the owner deferred: a **float type**
+    (for general math) and the **FFI/bindings** story (C-ABI export for Python/C/C++/Rust;
+    a general `extern "C"` import for OS bindings) — both ADR-first language work.
     Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
