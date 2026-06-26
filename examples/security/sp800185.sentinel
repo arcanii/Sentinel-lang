@@ -1,0 +1,97 @@
+// examples/security/sp800185.sentinel — the SP 800-185 SHA-3 derived functions
+// cSHAKE, TupleHash, and ParallelHash over the published NIST sample vectors.
+//
+// All three build on the same Keccak sponge already proven by the SHA-3 / KMAC
+// example; this exercises the newly-exposed std::security::sha3 entry points:
+//   * cSHAKE128 — Sample #1 (data 00010203, S = "Email Signature", 256-bit out).
+//   * TupleHash128 — Sample #1 (tuple of two strings, no customization) and
+//     Sample #3 (tuple of three strings, S = "My Tuple App").
+//   * TupleHash256 — Sample #4 (tuple of two strings, 512-bit out).
+//   * ParallelHash128 — Sample #1 (block size 8, no customization) and Sample #2
+//     (block size 8, S = "Parallel Data").
+//
+// CONSTANT-TIME DISCIPLINE. Every message / tuple element is `[secret u8]`, so the
+// data flows only through the branch-free Keccak permutation; the compiler's
+// constant-time check proves on each build that no secret byte reached a branch, a
+// memory index, or a divisor. Only PUBLIC framing drives control flow: the tuple
+// element lengths, the ParallelHash block size / block count, the output length, and
+// the SP 800-185 length encodings. The customization strings are public constants
+// (widened to secret). The only declassify boundary is HERE, XOR-diffing each output
+// byte against the published NIST constant. Exit 42 = every output matched.
+use std::security::sha3::cshake128;
+use std::security::sha3::tuplehash128;
+use std::security::sha3::tuplehash256;
+use std::security::sha3::parallelhash128;
+
+// Build an n-byte `[secret u8]` from public byte values (each widens to secret).
+fn mk(data: [i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut v, i64_to_u8(data[i]));
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+// An empty `[secret u8]` (an absent customization string).
+fn empty() -> [secret u8] {
+    let v: Vec<secret u8> = vec_new();
+    vec_to_array(v)
+}
+
+// Fold each byte of a secret output against its expected public NIST vector.
+fn diff(got: &[secret u8], exp: [i64], n: i64) -> i64 {
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        bad = bad | (u8_to_i64(declassify((*got)[i])) ^ exp[i]);
+        i = i + 1;
+    }
+    bad
+}
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- cSHAKE128 Sample #1 — data 00010203, S "Email Signature", 32-byte output.
+    let es: [i64] = [69, 109, 97, 105, 108, 32, 83, 105, 103, 110, 97, 116, 117, 114, 101];
+    let c1: [secret u8] = cshake128(mk([0, 1, 2, 3], 4), 32, mk(es, 15));
+    let ec1: [i64] = [193, 195, 105, 37, 182, 64, 154, 4, 241, 181, 4, 252, 188, 169, 216, 43, 64, 23, 39, 124, 181, 237, 43, 32, 101, 252, 29, 56, 20, 213, 170, 245];
+    bad = bad | diff(&c1, ec1, 32);
+
+    // ---- TupleHash128 Sample #1 — tuple ("000102", "101112131415"), no customization.
+    // `items` is the flat concatenation; `lengths` is the per-element framing (public).
+    let it1: [secret u8] = mk([0, 1, 2, 16, 17, 18, 19, 20, 21], 9);
+    let t1: [secret u8] = tuplehash128(it1, [3, 6], empty(), 32);
+    let et1: [i64] = [197, 216, 120, 108, 26, 251, 155, 130, 17, 26, 179, 75, 101, 178, 192, 4, 143, 166, 78, 109, 72, 226, 99, 38, 76, 225, 112, 125, 63, 252, 142, 209];
+    bad = bad | diff(&t1, et1, 32);
+
+    // ---- TupleHash128 Sample #3 — three-element tuple, S "My Tuple App".
+    let app: [i64] = [77, 121, 32, 84, 117, 112, 108, 101, 32, 65, 112, 112];
+    let it3: [secret u8] = mk([0, 1, 2, 16, 17, 18, 19, 20, 21, 32, 33, 34, 35, 36, 37, 38, 39, 40], 18);
+    let t3: [secret u8] = tuplehash128(it3, [3, 6, 9], mk(app, 12), 32);
+    let et3: [i64] = [230, 15, 32, 44, 137, 162, 99, 30, 218, 141, 76, 88, 140, 165, 253, 7, 243, 158, 81, 81, 153, 141, 236, 207, 151, 58, 219, 56, 4, 187, 110, 132];
+    bad = bad | diff(&t3, et3, 32);
+
+    // ---- TupleHash256 Sample #4 — tuple ("000102", "101112131415"), 64-byte output.
+    let it4: [secret u8] = mk([0, 1, 2, 16, 17, 18, 19, 20, 21], 9);
+    let t4: [secret u8] = tuplehash256(it4, [3, 6], empty(), 64);
+    let et4: [i64] = [207, 183, 5, 140, 172, 165, 230, 104, 248, 26, 18, 162, 10, 33, 149, 206, 151, 169, 37, 241, 219, 163, 231, 68, 154, 86, 248, 34, 1, 236, 96, 115, 17, 172, 38, 150, 177, 171, 94, 162, 53, 45, 241, 66, 59, 222, 123, 212, 187, 120, 201, 174, 209, 168, 83, 199, 134, 114, 249, 235, 35, 187, 225, 148];
+    bad = bad | diff(&t4, et4, 64);
+
+    // ---- ParallelHash128 Sample #1 — 24-byte message, block size 8, no customization.
+    let pm: [i64] = [0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23, 32, 33, 34, 35, 36, 37, 38, 39];
+    let p1: [secret u8] = parallelhash128(mk(pm, 24), 8, empty(), 32);
+    let ep1: [i64] = [186, 141, 193, 209, 217, 121, 51, 29, 63, 129, 54, 3, 198, 127, 114, 96, 154, 181, 228, 75, 148, 160, 184, 249, 175, 70, 81, 68, 84, 162, 180, 245];
+    bad = bad | diff(&p1, ep1, 32);
+
+    // ---- ParallelHash128 Sample #2 — same message, block size 8, S "Parallel Data".
+    let pd: [i64] = [80, 97, 114, 97, 108, 108, 101, 108, 32, 68, 97, 116, 97];
+    let pm2: [i64] = [0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23, 32, 33, 34, 35, 36, 37, 38, 39];
+    let p2: [secret u8] = parallelhash128(mk(pm2, 24), 8, mk(pd, 13), 32);
+    let ep2: [i64] = [252, 72, 77, 203, 63, 132, 220, 238, 220, 53, 52, 56, 21, 27, 238, 88, 21, 125, 110, 254, 208, 68, 90, 129, 241, 101, 228, 149, 121, 91, 114, 6];
+    bad = bad | diff(&p2, ep2, 32);
+
+    if bad == 0 { 42 } else { 0 }
+}

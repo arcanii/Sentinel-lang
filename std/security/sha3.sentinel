@@ -273,11 +273,39 @@ fn bytepad(x: &[secret u8], w: i64) -> [secret u8] {
     vec_to_array(v)
 }
 
-// KMAC over a SECRET key + message with a (public) customization string, at the given
-// rate (168 for KMAC128, 136 for KMAC256). The full cSHAKE input is
-//   bytepad(encode_string("KMAC") ‖ encode_string(custom), rate)
-//   ‖ bytepad(encode_string(key), rate) ‖ msg ‖ right_encode(out_bytes*8),
-// permuted with the cSHAKE domain byte 0x04. Returns the `out_bytes`-byte SECRET tag.
+// cSHAKE (SP 800-185 §3.3): the customizable SHAKE that underpins KMAC, TupleHash,
+// and ParallelHash. With a function-name `name` and customization `custom`, the input
+// is prefixed by bytepad(encode_string(name) ‖ encode_string(custom), rate) and
+// permuted with the cSHAKE domain byte 0x04. When BOTH name and custom are empty,
+// cSHAKE reduces to plain SHAKE (domain 0x1F) — the spec's degenerate case, used by
+// ParallelHash's inner block hashes. `name`/`custom` lengths are PUBLIC, so the
+// branch and prefix sizes never depend on secret bytes. Returns the SECRET output.
+fn cshake_compute(msg: &[secret u8], out_bytes: i64, name: &[secret u8], custom: &[secret u8], rate: i64) -> [secret u8] {
+    if len(*name) + len(*custom) == 0 {
+        // No N and no S: cSHAKE is exactly SHAKE (domain byte 0x1F).
+        let mut mv: Vec<secret u8> = vec_new();
+        append_bytes(&mut mv, msg);
+        keccak_sponge(vec_to_array(mv), rate, 31, out_bytes)
+    } else {
+        // prefix = bytepad(encode_string(name) ‖ encode_string(custom), rate).
+        let es_name: [secret u8] = encode_string(name);
+        let es_custom: [secret u8] = encode_string(custom);
+        let mut inner: Vec<secret u8> = vec_new();
+        append_bytes(&mut inner, &es_name);
+        append_bytes(&mut inner, &es_custom);
+        let inner_arr: [secret u8] = vec_to_array(inner);
+        let prefix: [secret u8] = bytepad(&inner_arr, rate);
+
+        let mut full: Vec<secret u8> = vec_new();
+        append_bytes(&mut full, &prefix);
+        append_bytes(&mut full, msg);
+        keccak_sponge(vec_to_array(full), rate, 4, out_bytes)
+    }
+}
+
+// KMAC (SP 800-185 §4) = cSHAKE(bytepad(encode_string(key), rate) ‖ msg ‖
+// right_encode(out_bytes*8), out_bytes, "KMAC", custom), at the given rate (168 for
+// KMAC128, 136 for KMAC256). Returns the `out_bytes`-byte SECRET tag.
 fn kmac_compute(key: &[secret u8], msg: &[secret u8], custom: &[secret u8], rate: i64, out_bytes: i64) -> [secret u8] {
     // The function-name string "KMAC" (bytes 75, 77, 65, 67).
     let mut nm: Vec<secret u8> = vec_new();
@@ -287,27 +315,17 @@ fn kmac_compute(key: &[secret u8], msg: &[secret u8], custom: &[secret u8], rate
     push(&mut nm, i64_to_u8(67));
     let name: [secret u8] = vec_to_array(nm);
 
-    // cSHAKE prefix = bytepad(encode_string(name) ‖ encode_string(custom), rate).
-    let es_name: [secret u8] = encode_string(&name);
-    let es_custom: [secret u8] = encode_string(custom);
-    let mut inner: Vec<secret u8> = vec_new();
-    append_bytes(&mut inner, &es_name);
-    append_bytes(&mut inner, &es_custom);
-    let inner_arr: [secret u8] = vec_to_array(inner);
-    let prefix: [secret u8] = bytepad(&inner_arr, rate);
-
-    // The keyed body: bytepad(encode_string(key), rate) ‖ msg ‖ right_encode(out bits).
+    // X = bytepad(encode_string(key), rate) ‖ msg ‖ right_encode(out bits).
     let ek: [secret u8] = encode_string(key);
     let bp_key: [secret u8] = bytepad(&ek, rate);
     let re: [secret u8] = right_encode(out_bytes * 8);
+    let mut x: Vec<secret u8> = vec_new();
+    append_bytes(&mut x, &bp_key);
+    append_bytes(&mut x, msg);
+    append_bytes(&mut x, &re);
+    let xarr: [secret u8] = vec_to_array(x);
 
-    let mut full: Vec<secret u8> = vec_new();
-    append_bytes(&mut full, &prefix);
-    append_bytes(&mut full, &bp_key);
-    append_bytes(&mut full, msg);
-    append_bytes(&mut full, &re);
-
-    keccak_sponge(vec_to_array(full), rate, 4, out_bytes)
+    cshake_compute(&xarr, out_bytes, &name, custom, rate)
 }
 
 // KMAC128 — the Keccak keyed MAC at 128-bit security (cSHAKE128, rate 168 bytes).
@@ -320,4 +338,129 @@ pub fn kmac128(key: [secret u8], msg: [secret u8], custom: [secret u8], out_byte
 // KMAC256 — the Keccak keyed MAC at 256-bit security (cSHAKE256, rate 136 bytes).
 pub fn kmac256(key: [secret u8], msg: [secret u8], custom: [secret u8], out_bytes: i64) -> [secret u8] {
     kmac_compute(&key, &msg, &custom, 136, out_bytes)
+}
+
+// cSHAKE128 / cSHAKE256 (SP 800-185 §3.3) exposed as a primitive: SHAKE with a
+// (public) customization string `custom`. The function-name N is empty here (it is
+// reserved for the NIST-defined functions above); with `custom` also empty these
+// reduce to plain SHAKE128 / SHAKE256. `out_bytes` may be any length (the XOF squeeze).
+pub fn cshake128(msg: [secret u8], out_bytes: i64, custom: [secret u8]) -> [secret u8] {
+    let nm: Vec<secret u8> = vec_new();
+    let name: [secret u8] = vec_to_array(nm);          // N = ""
+    cshake_compute(&msg, out_bytes, &name, &custom, 168)
+}
+
+pub fn cshake256(msg: [secret u8], out_bytes: i64, custom: [secret u8]) -> [secret u8] {
+    let nm: Vec<secret u8> = vec_new();
+    let name: [secret u8] = vec_to_array(nm);          // N = ""
+    cshake_compute(&msg, out_bytes, &name, &custom, 136)
+}
+
+// ---- TupleHash (SP 800-185 §5): an UNAMBIGUOUS hash of a SEQUENCE of strings. A
+// flat tuple-of-strings can't be passed directly here, so a TupleHash input is the
+// concatenation `items` of all elements plus the per-element byte `lengths` (PUBLIC,
+// the framing of the tuple is not secret). The hashed input is
+//   encode_string(item_0) ‖ … ‖ encode_string(item_{n-1}) ‖ right_encode(out_bytes*8),
+// fed to cSHAKE with name "TupleHash". -------------------------------------------------
+
+// The function-name string "TupleHash" (T u p l e H a s h).
+fn name_tuplehash() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    push(&mut v, i64_to_u8(84));  push(&mut v, i64_to_u8(117)); push(&mut v, i64_to_u8(112));
+    push(&mut v, i64_to_u8(108)); push(&mut v, i64_to_u8(101)); push(&mut v, i64_to_u8(72));
+    push(&mut v, i64_to_u8(97));  push(&mut v, i64_to_u8(115)); push(&mut v, i64_to_u8(104));
+    vec_to_array(v)
+}
+
+fn tuplehash_compute(items: &[secret u8], lengths: &[i64], custom: &[secret u8], rate: i64, out_bytes: i64) -> [secret u8] {
+    let n: i64 = len(*lengths);
+    let mut z: Vec<secret u8> = vec_new();
+    let mut off: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let li: i64 = (*lengths)[i];
+        // encode_string(item_i) = left_encode(8*li) ‖ item_i.
+        let le: [secret u8] = left_encode(li * 8);
+        append_bytes(&mut z, &le);
+        let mut j: i64 = 0;
+        while j < li {
+            push(&mut z, (*items)[off + j]);
+            j = j + 1;
+        }
+        off = off + li;
+        i = i + 1;
+    }
+    let re: [secret u8] = right_encode(out_bytes * 8);
+    append_bytes(&mut z, &re);
+    let zarr: [secret u8] = vec_to_array(z);
+    let name: [secret u8] = name_tuplehash();
+    cshake_compute(&zarr, out_bytes, &name, custom, rate)
+}
+
+// TupleHash128 / TupleHash256 over the tuple `items` (flat) / `lengths` (per element).
+pub fn tuplehash128(items: [secret u8], lengths: [i64], custom: [secret u8], out_bytes: i64) -> [secret u8] {
+    tuplehash_compute(&items, &lengths, &custom, 168, out_bytes)
+}
+
+pub fn tuplehash256(items: [secret u8], lengths: [i64], custom: [secret u8], out_bytes: i64) -> [secret u8] {
+    tuplehash_compute(&items, &lengths, &custom, 136, out_bytes)
+}
+
+// ---- ParallelHash (SP 800-185 §6): hash `x` in independent `blksize`-byte blocks,
+// each reduced to a chaining value by SHAKE (cv = 32 bytes for ParallelHash128, 64 for
+// ParallelHash256), then hash the concatenation of chaining values. The hashed input is
+//   left_encode(blksize) ‖ cv_0 ‖ … ‖ cv_{n-1} ‖ right_encode(n) ‖ right_encode(out*8),
+// fed to cSHAKE with name "ParallelHash". The block size, count, and last-block length
+// are PUBLIC (derived from the public message length). --------------------------------
+
+// The function-name string "ParallelHash" (P a r a l l e l H a s h).
+fn name_parallelhash() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    push(&mut v, i64_to_u8(80));  push(&mut v, i64_to_u8(97));  push(&mut v, i64_to_u8(114));
+    push(&mut v, i64_to_u8(97));  push(&mut v, i64_to_u8(108)); push(&mut v, i64_to_u8(108));
+    push(&mut v, i64_to_u8(101)); push(&mut v, i64_to_u8(108)); push(&mut v, i64_to_u8(72));
+    push(&mut v, i64_to_u8(97));  push(&mut v, i64_to_u8(115)); push(&mut v, i64_to_u8(104));
+    vec_to_array(v)
+}
+
+fn parallelhash_compute(x: &[secret u8], blksize: i64, custom: &[secret u8], rate: i64, out_bytes: i64, cv_len: i64) -> [secret u8] {
+    let total: i64 = len(*x);
+    let n: i64 = (total + blksize - 1) / blksize;          // ceil(total / blksize)
+    let mut z: Vec<secret u8> = vec_new();
+    let le_b: [secret u8] = left_encode(blksize);
+    append_bytes(&mut z, &le_b);
+
+    let mut i: i64 = 0;
+    while i < n {
+        let start: i64 = i * blksize;
+        let end0: i64 = start + blksize;
+        let end: i64 = if end0 < total { end0 } else { total };
+        // block = x[start..end]; cv = SHAKE(block, cv_len) (cSHAKE with empty N/S).
+        let mut blk: Vec<secret u8> = vec_new();
+        let mut j: i64 = start;
+        while j < end {
+            push(&mut blk, (*x)[j]);
+            j = j + 1;
+        }
+        let cv: [secret u8] = keccak_sponge(vec_to_array(blk), rate, 31, cv_len);
+        append_bytes(&mut z, &cv);
+        i = i + 1;
+    }
+    let re_n: [secret u8] = right_encode(n);
+    append_bytes(&mut z, &re_n);
+    let re_l: [secret u8] = right_encode(out_bytes * 8);
+    append_bytes(&mut z, &re_l);
+
+    let zarr: [secret u8] = vec_to_array(z);
+    let name: [secret u8] = name_parallelhash();
+    cshake_compute(&zarr, out_bytes, &name, custom, rate)
+}
+
+// ParallelHash128 / ParallelHash256 over `x` in `blksize`-byte blocks.
+pub fn parallelhash128(x: [secret u8], blksize: i64, custom: [secret u8], out_bytes: i64) -> [secret u8] {
+    parallelhash_compute(&x, blksize, &custom, 168, out_bytes, 32)
+}
+
+pub fn parallelhash256(x: [secret u8], blksize: i64, custom: [secret u8], out_bytes: i64) -> [secret u8] {
+    parallelhash_compute(&x, blksize, &custom, 136, out_bytes, 64)
 }

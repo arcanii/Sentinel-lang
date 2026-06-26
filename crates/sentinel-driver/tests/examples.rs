@@ -283,6 +283,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // three RFC 5869 Appendix A vectors (incl. A.3's empty salt + info) reproduced
     // both the PRK and the OKM byte-for-byte.
     ("examples/security/hkdf.sentinel", 42),
+    // SP 800-185 SHA-3 derived functions (std::security::sha3) — cSHAKE128,
+    // TupleHash128/256, and ParallelHash128 over the published NIST sample vectors.
+    // Every message / tuple element is `[secret u8]`, so the data flows only through
+    // the branch-free Keccak permutation; only the public framing (tuple lengths,
+    // block size, output length, length encodings) drives control flow. 42 = the
+    // cSHAKE / TupleHash / ParallelHash sample outputs reproduced byte-for-byte.
+    ("examples/security/sp800185.sentinel", 42),
 ];
 
 #[test]
@@ -408,6 +415,11 @@ fn ed25519_signing_constant_time() {
 #[test]
 fn hkdf_sha256_rfc5869() {
     check_example("examples/security/hkdf.sentinel", "hkdf", 42);
+}
+
+#[test]
+fn sp800185_derived_functions() {
+    check_example("examples/security/sp800185.sentinel", "sp800185", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
