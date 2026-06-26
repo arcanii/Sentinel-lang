@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
 EIGHT language gaps closed; a comprehensive constant-time crypto suite shipped; HEAD
-`3f079bf` (SP 800-185 derived functions) + docs, 1579 tests, four-check green).** Real,
+`544310f` (X448 + the fe448 field) + docs, 1580 tests, four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
 guarantee on real code**, and surfaces concrete language gaps — finding + fixing those
@@ -62,10 +62,13 @@ cSHAKE128/256 + TupleHash128/256 + ParallelHash128/256; **AEAD** ChaCha20-Poly13
 AES-128-GCM; **block cipher** AES-128 (table-free field-inversion S-box); **key
 exchange** X25519; **signatures** Ed25519 (SIGN + VERIFY, the latter with point
 decompression via a field sqrt + the `S < L` malleability check); and **KDF**
-HKDF-SHA256 (RFC 5869, extract-then-expand composing HMAC). The shared `fe25519` field
-underpins X25519 + Ed25519. The eighth language gap (`&mut a[i]` element borrows, ADR
-0054) is closed. The cleanly-open next steps are in **Next** below (X448/Ed448; the
-next real NUMERIC gap is still un-surfaced),
+HKDF-SHA256 (RFC 5869, extract-then-expand composing HMAC); and **X448** ECDH (RFC
+7748) over the new shared `fe448` field (GF(2^448-2^224-1), 28 radix-2^16 limbs —
+radix 2^28 would overflow i64). The shared `fe25519`/`fe448` fields underpin
+X25519/Ed25519 and X448. The eighth language gap (`&mut a[i]` element borrows, ADR
+0054) is closed. The cleanly-open next steps are in **Next** below (Ed448 [the Edwards
+sibling of X448, RFC 8032/SHAKE256 — fe448 is in place]; the next real NUMERIC gap is
+still un-surfaced),
 with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
 
 - **Decisions locked with the owner:** top-level `std/` + `examples/`, each
@@ -310,17 +313,16 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
 - **Next (open, owner's call — none yet approved):**
   - **More crypto** — the §2.8.2 vector, SHA-256/512, SHA-3 (Keccak sponge), HMAC,
     HKDF, the full SP 800-185 derived-function family (cSHAKE / KMAC / TupleHash /
-    ParallelHash), AES + AES-GCM, X25519, and Ed25519 (SIGN + VERIFY) are all shipped —
-    a full asymmetric + symmetric + hash + XOF + keyed-MAC + KDF suite. Cleanly open:
-    **X448 / Ed448** (a larger curve — radix-2^28 likely still fits i64); or a curve /
-    bignum primitive over a field that actually needs the radix-2^51 / 128-bit-multiply
-    path. NOTE: every shipped primitive (incl. X25519 + Ed25519 + SHA-3/SHAKE/KMAC +
-    HKDF + the SP 800-185 family) fits 64-bit limbs with NO 128-bit arithmetic, so the
-    "next real numeric gap" (128-bit mul / bigint) is STILL un-surfaced — no shipped
-    program has demanded it. (Neither HKDF nor the SP 800-185 additions needed a
-    language change: HKDF is a pure HMAC composition; cSHAKE was factored out of the
-    existing KMAC code path — TupleHash/ParallelHash compose it — re-validated by the
-    existing KMAC vectors and anchored against the official NIST samples.)
+    ParallelHash), AES + AES-GCM, X25519, Ed25519 (SIGN + VERIFY), and X448 (+ the new
+    fe448 field) are all shipped — a full asymmetric + symmetric + hash + XOF +
+    keyed-MAC + KDF suite. Cleanly open: **Ed448** (the Edwards sibling of X448, RFC
+    8032 — SHAKE256-based, fe448 is already in place); or a curve / bignum primitive
+    over a field that actually needs the radix-2^51 / 128-bit-multiply path. NOTE:
+    every shipped primitive fits 64-bit limbs with NO 128-bit arithmetic — even fe448
+    deliberately uses radix 2^16 (28 limbs) because radix 2^28 (16 limbs) would peak
+    around 2^63.2 and overflow i64 — so the "next real numeric gap" (128-bit mul /
+    bigint) is STILL un-surfaced; no shipped program has demanded it. (None of HKDF, the
+    SP 800-185 additions, or X448 needed a language change.)
   - **Two deferred items from the list, now LOW value — recommend skipping unless
     wanted:**
     - **array-repeat `[x; N]`** — SHA-256/HMAC built cleanly WITHOUT it (`Vec<secret T>`

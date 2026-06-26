@@ -74,7 +74,10 @@ the current state of the workspace without re-reading every commit.
   ECDH over a `secret` scalar (RFC 7748 — the first public-key primitive); `ed25519`
   constant-time Ed25519 SIGNING + verification over a `secret` seed (RFC 8032,
   composing fe25519 + sha512; verify decompresses a point via a field square
-  root)), `std/math/num`, `std/bits/bits` (rotates),
+  root); `fe448` the shared GF(2^448-2^224-1) field (28 radix-2^16 limbs — radix
+  2^28 would overflow i64, so the small radix keeps the multiply within i64) +
+  `x448` constant-time X448 ECDH over a `secret` scalar (RFC 7748)), `std/math/num`,
+  `std/bits/bits` (rotates),
   `std/bytes/bytes` (`[u8]`
   utilities over `&[u8]` borrows), and `std/algorithms/seq` (in-place insertion
   `sort` + `binary_search` over public `[i64]`). The crypto examples reproduce the
