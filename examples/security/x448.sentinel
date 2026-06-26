@@ -1,0 +1,90 @@
+// examples/security/x448.sentinel — constant-time X448 (RFC 7748) over the
+// published §5.2 vector AND a full ECDH exchange.
+//
+// Exercises std::security::x448 (over the shared std::security::fe448 field):
+//   * RFC 7748 §5.2 vector 1 — one scalar multiplication, scalar · u, checked
+//     against the published 56-byte result.
+//   * A full X448 ECDH: from two private scalars a, b derive the public keys
+//     a·G and b·G (G = the base u-coordinate 5), then check that a·(b·G) and
+//     b·(a·G) reproduce the SAME shared secret (and the published public keys).
+//
+// CONSTANT-TIME DISCIPLINE. The scalar (the private key) and the u-coordinate are
+// `[secret u8]`, so the Montgomery ladder runs entirely in the secret domain — its
+// conditional swaps are the branch-free sel448, and the compiler's constant-time
+// check proves on every build that no secret scalar bit reached a branch, a memory
+// index, or a divisor (the ladder runs a fixed 448 iterations). The only declassify
+// boundary is HERE, XOR-diffing each output byte against the published vector.
+//
+// Exit 42 = the RFC vector and both sides of the ECDH matched byte-for-byte.
+use std::security::x448::x448;
+
+fn mk(data: [i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut v, i64_to_u8(data[i]));
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+fn diff(got: &[secret u8], exp: [i64], n: i64) -> i64 {
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        bad = bad | (u8_to_i64(declassify((*got)[i])) ^ exp[i]);
+        i = i + 1;
+    }
+    bad
+}
+
+// The Curve448 base u-coordinate (u = 5), 56 little-endian bytes.
+fn base5() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    push(&mut v, i64_to_u8(5));
+    let mut i: i64 = 0;
+    while i < 55 { push(&mut v, i64_to_u8(0)); i = i + 1; }
+    vec_to_array(v)
+}
+
+// The two private scalars for the ECDH exchange (re-built each call — x448 consumes
+// its scalar, and each scalar is used for both its public key and the shared secret).
+fn priv_a() -> [secret u8] {
+    mk([154, 143, 73, 37, 209, 81, 159, 87, 117, 207, 70, 176, 75, 88, 0, 212, 238, 158, 232, 186, 232, 188, 85, 101, 212, 152, 194, 141, 217, 201, 186, 245, 116, 169, 65, 151, 68, 137, 115, 145, 0, 99, 130, 166, 241, 39, 171, 29, 154, 194, 216, 192, 165, 152, 114, 107], 56)
+}
+
+fn priv_b() -> [secret u8] {
+    mk([28, 48, 106, 122, 194, 160, 226, 224, 153, 11, 41, 68, 112, 203, 163, 57, 230, 69, 55, 114, 176, 117, 129, 29, 143, 173, 13, 29, 105, 39, 193, 32, 187, 94, 232, 151, 43, 13, 62, 33, 55, 76, 156, 146, 27, 9, 209, 176, 54, 111, 16, 182, 81, 115, 153, 45], 56)
+}
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- RFC 7748 §5.2 vector 1: scalar · u.
+    let s1: [secret u8] = mk([61, 38, 47, 221, 249, 236, 142, 136, 73, 82, 102, 254, 161, 154, 52, 210, 136, 130, 172, 239, 4, 81, 4, 208, 209, 170, 225, 33, 112, 10, 119, 156, 152, 76, 36, 248, 205, 215, 143, 191, 244, 73, 67, 235, 163, 104, 245, 75, 41, 37, 154, 79, 28, 96, 10, 211], 56);
+    let u1: [secret u8] = mk([6, 252, 230, 64, 250, 52, 135, 191, 218, 95, 108, 242, 213, 38, 63, 138, 173, 136, 51, 76, 189, 7, 67, 127, 2, 15, 8, 249, 129, 77, 192, 49, 221, 189, 195, 140, 25, 198, 218, 37, 131, 250, 84, 41, 219, 148, 173, 161, 138, 167, 167, 251, 78, 248, 160, 134], 56);
+    let r1: [secret u8] = x448(s1, u1);
+    let e1: [i64] = [206, 62, 79, 249, 90, 96, 220, 102, 151, 218, 29, 177, 216, 94, 106, 251, 223, 121, 181, 10, 36, 18, 215, 84, 109, 95, 35, 159, 225, 79, 186, 173, 235, 68, 95, 198, 106, 1, 176, 119, 157, 152, 34, 57, 97, 17, 30, 33, 118, 98, 130, 247, 61, 217, 107, 111];
+    bad = bad | diff(&r1, e1, 56);
+
+    // ---- X448 ECDH. Derive each public key a·G / b·G and check vs the published value.
+    let apub: [secret u8] = x448(priv_a(), base5());
+    let ea: [i64] = [155, 8, 247, 204, 49, 183, 227, 230, 125, 34, 213, 174, 161, 33, 7, 74, 39, 59, 210, 184, 61, 224, 156, 99, 250, 167, 61, 44, 34, 197, 217, 187, 200, 54, 100, 114, 65, 217, 83, 212, 12, 91, 18, 218, 136, 18, 13, 83, 23, 127, 128, 229, 50, 196, 31, 160];
+    bad = bad | diff(&apub, ea, 56);
+
+    let bpub: [secret u8] = x448(priv_b(), base5());
+    let eb: [i64] = [62, 183, 168, 41, 176, 205, 32, 245, 188, 252, 11, 89, 155, 111, 236, 207, 109, 164, 98, 113, 7, 189, 176, 212, 243, 69, 180, 48, 39, 216, 185, 114, 252, 62, 52, 251, 66, 50, 161, 60, 167, 6, 220, 181, 122, 236, 61, 174, 7, 189, 193, 198, 123, 243, 54, 9];
+    bad = bad | diff(&bpub, eb, 56);
+
+    // The shared secret from both sides: a·(b·G) and b·(a·G) must agree with each
+    // other and with the published value. (apub / bpub are consumed here, so they
+    // are checked above first.)
+    let es: [i64] = [7, 255, 244, 24, 26, 198, 204, 149, 236, 28, 22, 169, 74, 15, 116, 209, 45, 162, 50, 206, 64, 167, 117, 82, 40, 29, 40, 43, 182, 12, 11, 86, 253, 36, 100, 195, 53, 84, 57, 54, 82, 28, 36, 64, 48, 133, 213, 154, 68, 154, 80, 55, 81, 74, 135, 157];
+    let sab: [secret u8] = x448(priv_a(), bpub);
+    bad = bad | diff(&sab, es, 56);
+    let es2: [i64] = [7, 255, 244, 24, 26, 198, 204, 149, 236, 28, 22, 169, 74, 15, 116, 209, 45, 162, 50, 206, 64, 167, 117, 82, 40, 29, 40, 43, 182, 12, 11, 86, 253, 36, 100, 195, 53, 84, 57, 54, 82, 28, 36, 64, 48, 133, 213, 154, 68, 154, 80, 55, 81, 74, 135, 157];
+    let sba: [secret u8] = x448(priv_b(), apub);
+    bad = bad | diff(&sba, es2, 56);
+
+    if bad == 0 { 42 } else { 0 }
+}

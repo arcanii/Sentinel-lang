@@ -1,0 +1,117 @@
+// std::security::x448 — constant-time X448 (RFC 7748), the ECDH primitive over
+// Curve448 (the 224-bit-security sibling of X25519).
+//
+// X448 multiplies a SECRET scalar (a private key) by a u-coordinate (a public key)
+// on Curve448, returning the SECRET shared point. As with X25519 the headline is the
+// Montgomery ladder: a naive ladder BRANCHES on the secret scalar bits, leaking the
+// private key through timing. In Sentinel that does not compile — a secret reaching
+// an `if`/`while` condition is rejected by the constant-time check — so the ladder's
+// conditional swap is the branch-free, mask-based `sel448`, and a successful build is
+// itself a proof that the whole scalar multiplication is constant-time: every loop
+// runs a fixed 448 iterations and no secret bit ever steers control flow or memory.
+//
+// The field is GF(2^448-2^224-1) as 28 radix-2^16 `secret i64` limbs (std::security::
+// fe448), shared with Ed448; the small radix keeps the whole field multiply within
+// i64 (no 128-bit arithmetic). Curve448's Montgomery constant is a24 = (A-2)/4 =
+// (156326-2)/4 = 39081, which fits a single 16-bit limb.
+//
+// Scope: raw X448 (RFC 7748 §5) — one scalar multiplication. ECDH is two calls
+// (your_private · base → your_public; your_private · their_public → shared).
+use std::security::fe448::fe_zero;
+use std::security::fe448::fe_copy;
+use std::security::fe448::fadd;
+use std::security::fe448::fsub;
+use std::security::fe448::fadd_assign;
+use std::security::fe448::fsub_assign;
+use std::security::fe448::fmul;
+use std::security::fe448::fsq;
+use std::security::fe448::sel448;
+use std::security::fe448::finv;
+use std::security::fe448::unpack448;
+use std::security::fe448::pack448;
+
+// The Montgomery constant a24 = 39081, as a field element (a single 16-bit limb).
+fn fe_a24() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 39081);
+    let mut i: i64 = 0;
+    while i < 27 { push(&mut v, 0); i = i + 1; }
+    vec_to_array(v)
+}
+
+// X448: multiply the SECRET scalar by the u-coordinate `u`, returning the 56-byte
+// SECRET result (RFC 7748 §5). The scalar is clamped (clear the low 2 bits of byte 0,
+// set the top bit of byte 55), then a Montgomery ladder runs 448 fixed iterations;
+// each step conditionally swaps the working points on the secret scalar bit via the
+// branch-free sel448. The final projective division x2 / z2 uses the constant-time
+// inverse.
+pub fn x448(scalar: [secret u8], u: [secret u8]) -> [secret u8] {
+    // Clamp the scalar into a 56-entry `secret i64` working copy (byte values).
+    let mut zz: Vec<secret i64> = vec_new();
+    let mut ci: i64 = 0;
+    while ci < 56 { push(&mut zz, scalar[ci] as i64); ci = ci + 1; }
+    let mut z: [secret i64] = vec_to_array(zz);
+    z[0] = z[0] & 252;
+    z[55] = z[55] | 128;
+
+    // Decode the input point.
+    let mut x: [secret i64] = fe_zero();
+    unpack448(&mut x, &u);
+
+    // Ladder state: a=1, b=x, c=0, d=1 (e, f, tmp are scratch).
+    let mut a: [secret i64] = fe_zero();
+    let mut b: [secret i64] = fe_zero();
+    let mut c: [secret i64] = fe_zero();
+    let mut d: [secret i64] = fe_zero();
+    let mut e: [secret i64] = fe_zero();
+    let mut f: [secret i64] = fe_zero();
+    let mut tmp: [secret i64] = fe_zero();
+    fe_copy(&mut b, &x);
+    a[0] = 1;
+    d[0] = 1;
+
+    let mut i: i64 = 447;
+    while i >= 0 {
+        // The i-th scalar bit (PUBLIC index into the secret scalar): byte i/8, bit
+        // i mod 8. The shift amount is public, so this is constant-time.
+        let byte_idx: i64 = i / 8;
+        let bit_idx: i64 = i - byte_idx * 8;
+        let bit: secret i64 = (z[byte_idx] >> bit_idx) & 1;
+
+        sel448(&mut a, &mut b, bit);
+        sel448(&mut c, &mut d, bit);
+        // The Montgomery differential add-and-double (RFC 7748 / TweetNaCl shape),
+        // with distinct outputs and in-place ops chosen so no element aliases another.
+        fadd(&mut e, &a, &c);          // e = a + c
+        fsub_assign(&mut a, &c);       // a = a - c
+        fadd(&mut c, &b, &d);          // c = b + d
+        fsub_assign(&mut b, &d);       // b = b - d
+        fsq(&mut d, &e);               // d = e^2
+        fsq(&mut f, &a);               // f = a^2
+        fmul(&mut tmp, &c, &a);        // a = c * a
+        fe_copy(&mut a, &tmp);
+        fmul(&mut c, &b, &e);          // c = b * e
+        fadd(&mut e, &a, &c);          // e = a + c
+        fsub_assign(&mut a, &c);       // a = a - c
+        fsq(&mut b, &a);               // b = a^2
+        fsub(&mut c, &d, &f);          // c = d - f
+        let a24: [secret i64] = fe_a24();
+        fmul(&mut a, &c, &a24);        // a = c * a24
+        fadd_assign(&mut a, &d);       // a = a + d
+        fmul(&mut tmp, &c, &a);        // c = c * a
+        fe_copy(&mut c, &tmp);
+        fmul(&mut a, &d, &f);          // a = d * f
+        fmul(&mut d, &b, &x);          // d = b * x
+        fsq(&mut b, &e);               // b = e^2
+        sel448(&mut a, &mut b, bit);
+        sel448(&mut c, &mut d, bit);
+
+        i = i - 1;
+    }
+
+    // result = a * c^-1, then serialize.
+    let mut cinv: [secret i64] = fe_zero();
+    finv(&mut cinv, &c);
+    fmul(&mut tmp, &a, &cinv);
+    pack448(&tmp)
+}

@@ -290,6 +290,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // block size, output length, length encodings) drives control flow. 42 = the
     // cSHAKE / TupleHash / ParallelHash sample outputs reproduced byte-for-byte.
     ("examples/security/sp800185.sentinel", 42),
+    // Constant-time X448 ECDH (std::security::x448, RFC 7748) over the larger
+    // Curve448 field (std::security::fe448, GF(2^448-2^224-1) as 28 radix-2^16
+    // limbs). The secret scalar drives the Montgomery ladder through branch-free
+    // sel448 swaps over a fixed 448 iterations. 42 = the RFC 7748 §5.2 vector and a
+    // full ECDH exchange (both sides agree on the shared secret) matched byte-for-byte.
+    ("examples/security/x448.sentinel", 42),
 ];
 
 #[test]
@@ -420,6 +426,11 @@ fn hkdf_sha256_rfc5869() {
 #[test]
 fn sp800185_derived_functions() {
     check_example("examples/security/sp800185.sentinel", "sp800185", 42);
+}
+
+#[test]
+fn x448_scalarmult_constant_time() {
+    check_example("examples/security/x448.sentinel", "x448", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

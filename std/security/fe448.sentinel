@@ -1,0 +1,216 @@
+// std::security::fe448 — the Curve448 / Edwards448 base field GF(2^448-2^224-1).
+//
+// A field element is 28 limbs of radix 2^16 held in `secret i64`. As with the
+// fe25519 (TweetNaCl) representation, the small radix keeps every limb product and
+// the whole schoolbook accumulator well within `i64`: a multiply column sums ~28
+// limb products (each < 2^32) and the 2^448 ≡ 2^224+1 fold adds a couple more, so
+// the worst limb peaks around 2^40 — no 128-bit arithmetic. (Radix 2^28 with 16
+// limbs, the other obvious choice, would push signed limbs past 2^63, so radix 2^16
+// is the safe one here.) All operations are branch-free and constant-time: every
+// loop bound is public and secrets flow only through `+ - & | ^ << >>`. This is the
+// shared field layer for X448 (Montgomery) and Ed448 (Goldilocks / Edwards).
+//
+// The prime is p = 2^448 - 2^224 - 1, so 2^448 ≡ 2^224 + 1 (mod p): a carry out of
+// the top limb folds back into BOTH limb 0 (the +1) and limb 14 (the +2^224 =
+// 2^(16·14)). In radix 2^16, p's limbs are all 0xFFFF except limb 14 = 0xFFFE.
+//
+// Carry propagation needs an ARITHMETIC right shift on signed limbs, but Sentinel's
+// `>>` is logical (ADR 0048); `arith_shr` reconstructs it branch-free.
+
+// Arithmetic right shift of a 64-bit value by a PUBLIC amount (1..63), from logical
+// ops only: shift logically, then OR the sign bit back across the vacated top bits.
+pub fn arith_shr(x: secret i64, n: i64) -> secret i64 {
+    let sign: secret i64 = 0 - ((x >> 63) & 1);
+    (x >> n) | (sign << (64 - n))
+}
+
+// A fresh zeroed 28-limb field element.
+pub fn fe_zero() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < 28 { push(&mut v, 0); i = i + 1; }
+    vec_to_array(v)
+}
+
+// The field element 1.
+pub fn fe_one() -> [secret i64] {
+    let mut v: Vec<secret i64> = vec_new();
+    push(&mut v, 1);
+    let mut i: i64 = 0;
+    while i < 27 { push(&mut v, 0); i = i + 1; }
+    vec_to_array(v)
+}
+
+pub fn fe_copy(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 28 { (*o)[i] = (*a)[i]; i = i + 1; }
+    0
+}
+
+// Carry-propagate a 28-limb field element in place (radix 2^16). The top limb's
+// carry folds into limb 0 (×1) and limb 14 (×1, the 2^224 term), since 2^448 ≡
+// 2^224 + 1 (mod p).
+pub fn car448(o: &mut [secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 28 {
+        let c: secret i64 = arith_shr((*o)[i], 16);
+        (*o)[i] = (*o)[i] - (c << 16);
+        if i < 27 {
+            (*o)[i + 1] = (*o)[i + 1] + c;
+            0
+        } else {
+            (*o)[0] = (*o)[0] + c;
+            (*o)[14] = (*o)[14] + c;
+            0
+        };
+        i = i + 1;
+    }
+    0
+}
+
+pub fn fadd(o: &mut [secret i64], a: &[secret i64], b: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 28 { (*o)[i] = (*a)[i] + (*b)[i]; i = i + 1; }
+    0
+}
+
+pub fn fsub(o: &mut [secret i64], a: &[secret i64], b: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 28 { (*o)[i] = (*a)[i] - (*b)[i]; i = i + 1; }
+    0
+}
+
+pub fn fadd_assign(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 28 { (*o)[i] = (*o)[i] + (*a)[i]; i = i + 1; }
+    0
+}
+
+pub fn fsub_assign(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 28 { (*o)[i] = (*o)[i] - (*a)[i]; i = i + 1; }
+    0
+}
+
+// o = a * b in GF(2^448-2^224-1). Schoolbook product into a 55-limb temp, then the
+// 2^448 ≡ 2^224+1 reduction (high limb k folds to limbs k-14 and k-28, processed
+// high-to-low so the cascade resolves), then three carry passes.
+pub fn fmul(o: &mut [secret i64], a: &[secret i64], b: &[secret i64]) -> i64 {
+    let mut tv: Vec<secret i64> = vec_new();
+    let mut z: i64 = 0;
+    while z < 55 { push(&mut tv, 0); z = z + 1; }
+    let mut t: [secret i64] = vec_to_array(tv);
+    let mut i: i64 = 0;
+    while i < 28 {
+        let mut j: i64 = 0;
+        while j < 28 {
+            t[i + j] = t[i + j] + (*a)[i] * (*b)[j];
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    // Fold the high half down: 2^(16k) ≡ 2^(16(k-14)) + 2^(16(k-28)) for k ≥ 28.
+    let mut k: i64 = 54;
+    while k >= 28 {
+        t[k - 14] = t[k - 14] + t[k];
+        t[k - 28] = t[k - 28] + t[k];
+        t[k] = 0;
+        k = k - 1;
+    }
+    let mut w: i64 = 0;
+    while w < 28 { (*o)[w] = t[w]; w = w + 1; }
+    car448(o);
+    car448(o);
+    car448(o);
+    0
+}
+
+// o = a^2.
+pub fn fsq(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    fmul(o, a, a)
+}
+
+// Constant-time conditional swap of two field elements when the SECRET bit b is 1.
+pub fn sel448(p: &mut [secret i64], q: &mut [secret i64], b: secret i64) -> i64 {
+    let c: secret i64 = 0 - b;
+    let mut i: i64 = 0;
+    while i < 28 {
+        let t: secret i64 = c & ((*p)[i] ^ (*q)[i]);
+        (*p)[i] = (*p)[i] ^ t;
+        (*q)[i] = (*q)[i] ^ t;
+        i = i + 1;
+    }
+    0
+}
+
+// The multiplicative inverse: a^(p-2) = a^-1 (Fermat). (p-2) has its top bit (447)
+// set and zeros only at bit positions 1 and 224, so this is 447 squarings with a
+// multiply by a at every step except those two — data independent, constant-time.
+pub fn finv(o: &mut [secret i64], a: &[secret i64]) -> i64 {
+    let mut c: [secret i64] = fe_zero();
+    fe_copy(&mut c, a);
+    let mut i: i64 = 446;
+    while i >= 0 {
+        let mut t: [secret i64] = fe_zero();
+        fsq(&mut t, &c);
+        fe_copy(&mut c, &t);
+        if i != 1 && i != 224 {
+            let mut t2: [secret i64] = fe_zero();
+            fmul(&mut t2, &c, a);
+            fe_copy(&mut c, &t2);
+            0
+        } else { 0 };
+        i = i - 1;
+    }
+    fe_copy(o, &c);
+    0
+}
+
+// Decode 56 little-endian bytes into a field element (16 bits per limb). The full
+// 448-bit value is used — there is no spare top bit to mask (unlike the 255-bit
+// Curve25519 u-coordinate).
+pub fn unpack448(o: &mut [secret i64], n: &[secret u8]) -> i64 {
+    let mut i: i64 = 0;
+    while i < 28 {
+        (*o)[i] = ((*n)[2 * i] as i64) + (((*n)[2 * i + 1] as i64) << 8);
+        i = i + 1;
+    }
+    0
+}
+
+// Pack a field element to 56 little-endian SECRET bytes, with the constant-time
+// final reduction mod p: subtract p (limbs 0xFFFF, limb 14 = 0xFFFE) with borrow,
+// then conditionally keep the reduced value iff it did not borrow — via sel448.
+pub fn pack448(n: &[secret i64]) -> [secret u8] {
+    let mut ov: Vec<secret i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < 28 { push(&mut ov, (*n)[i]); i = i + 1; }
+    let mut o: [secret i64] = vec_to_array(ov);
+    car448(&mut o);
+    car448(&mut o);
+    car448(&mut o);
+    let mut r: i64 = 0;
+    while r < 2 {
+        let mut m: [secret i64] = fe_zero();
+        m[0] = o[0] - 65535;
+        let mut i2: i64 = 1;
+        while i2 < 28 {
+            let psub: i64 = if i2 == 14 { 65534 } else { 65535 };
+            m[i2] = o[i2] - psub - (arith_shr(m[i2 - 1], 16) & 1);
+            m[i2 - 1] = m[i2 - 1] & 65535;
+            i2 = i2 + 1;
+        }
+        let b: secret i64 = arith_shr(m[27], 16) & 1;   // borrow ⇒ o < p, keep o
+        m[27] = m[27] & 65535;
+        sel448(&mut o, &mut m, 1 - b);
+        r = r + 1;
+    }
+    let mut out: Vec<secret u8> = vec_new();
+    let mut k: i64 = 0;
+    while k < 28 {
+        push(&mut out, (o[k] & 255) as u8);
+        push(&mut out, ((o[k] >> 8) & 255) as u8);
+        k = k + 1;
+    }
+    vec_to_array(out)
+}
