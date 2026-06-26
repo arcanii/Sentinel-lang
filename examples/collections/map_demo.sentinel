@@ -1,0 +1,90 @@
+// examples/collections/map_demo.sentinel — exercises std::collections::map (the
+// string-keyed hash map) and checks it against expected results. Exit 42 = the map
+// behaved as specified across insert / update / lookup / absence / RESIZE / a word-count.
+//
+// This doubles as the feature test for the map: it inserts past the initial bucket
+// count (forcing a rehash) and confirms every key is still retrievable, exercises
+// update-in-place, default-on-absence, presence, and a count-by-key idiom. Keys are
+// built with std::text::str (int_to_str + concat), dogfooding the string library.
+use std::collections::map::Map;
+use std::collections::map::KeyBox;   // Map has a Vec<KeyBox> field — needed for --separate
+use std::collections::map::map_new;
+use std::collections::map::map_set;
+use std::collections::map::map_get;
+use std::collections::map::map_has;
+use std::collections::map::map_len;
+use std::text::str::int_to_str;
+use std::text::str::concat;
+
+fn lit(d: [i64], n: i64) -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8(d[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// key "k<i>" — "k" then the decimal of i (via the string library).
+fn keyn(i: i64) -> [u8] {
+    let pre: [u8] = lit([107], 1);
+    let num: [u8] = int_to_str(i);
+    concat(&pre, &num)
+}
+
+// count-by-key: increment the tally for `k`.
+fn bump(m: &mut Map, k: &[u8]) -> i64 {
+    let n: i64 = map_get(&(*m), k, 0);
+    map_set(m, k, n + 1);
+    0
+}
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- bulk insert past the initial 8 buckets (forces a resize/rehash) ----
+    let mut m: Map = map_new();
+    let mut i: i64 = 0;
+    while i < 20 {
+        let k: [u8] = keyn(i);
+        map_set(&mut m, &k, i * i);
+        i = i + 1;
+    }
+    bad = bad + (if map_len(&m) == 20 { 0 } else { 1 });
+
+    // ---- every key still retrievable after the rehash ----
+    let mut j: i64 = 0;
+    while j < 20 {
+        let k: [u8] = keyn(j);
+        bad = bad + (if map_get(&m, &k, 0 - 1) == j * j { 0 } else { 1 });
+        j = j + 1;
+    }
+
+    // ---- update in place (no growth) ----
+    let k5: [u8] = keyn(5);
+    map_set(&mut m, &k5, 999);
+    bad = bad + (if map_get(&m, &k5, 0 - 1) == 999 { 0 } else { 1 });
+    bad = bad + (if map_len(&m) == 20 { 0 } else { 1 });
+
+    // ---- absence: default + has ----
+    let kabs: [u8] = lit([122, 122], 2);   // "zz"
+    bad = bad + (if map_get(&m, &kabs, 0 - 7) == 0 - 7 { 0 } else { 1 });
+    bad = bad + (if map_has(&m, &kabs) { 1 } else { 0 });
+    bad = bad + (if map_has(&m, &k5) { 0 } else { 1 });
+
+    // ---- count-by-key over the sequence a,b,a,c,a,b -> a=3, b=2, c=1 ----
+    let mut wc: Map = map_new();
+    let wa: [u8] = lit([97], 1);
+    let wb: [u8] = lit([98], 1);
+    let wcc: [u8] = lit([99], 1);
+    bump(&mut wc, &wa);
+    bump(&mut wc, &wb);
+    bump(&mut wc, &wa);
+    bump(&mut wc, &wcc);
+    bump(&mut wc, &wa);
+    bump(&mut wc, &wb);
+    bad = bad + (if map_get(&wc, &wa, 0) == 3 { 0 } else { 1 });
+    bad = bad + (if map_get(&wc, &wb, 0) == 2 { 0 } else { 1 });
+    bad = bad + (if map_get(&wc, &wcc, 0) == 1 { 0 } else { 1 });
+    bad = bad + (if map_len(&wc) == 3 { 0 } else { 1 });
+
+    if bad == 0 { 42 } else { 5 }
+}

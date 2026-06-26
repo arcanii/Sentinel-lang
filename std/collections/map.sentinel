@@ -1,0 +1,157 @@
+// std::collections::map — a string-keyed hash map (`[u8]` -> `i64`).
+//
+// A dictionary with byte-string keys and integer values: the workhorse for counts,
+// indices, symbol tables, sets (presence), and JSON objects. Keys are PUBLIC (the map
+// branches on and indexes by the hash + key bytes, so it is NOT constant-time and must
+// not key on `secret` data).
+//
+// DESIGN — parallel arrays + index chaining (forced by the D.3 `Vec` MVP):
+//   * `Vec<[u8]>` is unsupported, and a non-Copy `Vec` element can't be mutated in
+//     place, so entries live in APPEND-ONLY parallel arrays indexed 0..count: `keys`
+//     (each key boxed in a struct, the only way to put a `[u8]` in a `Vec`), `vals`,
+//     and `hashes` (the full 32-bit FNV-1a hash, cached to avoid re-hashing on resize).
+//   * A separate `buckets: Vec<i64>` is the hash table: `buckets[h]` is the head ENTRY
+//     INDEX of bucket `h` (or -1), and `next[i]` chains entries within a bucket. All
+//     three index arrays are `Vec<i64>` (freely index-assignable), so insertion only
+//     PUSHES a key and rewires i64 links — never mutates a stored struct.
+//   * `cap` (bucket count) is a power of two, so the bucket is `hash & (cap-1)`. The
+//     table doubles + rehashes (from the cached hashes) when `count` exceeds `cap`.
+use std::bytes::bytes::eq;
+
+// `pub` so the `Map` struct (which has a `Vec<KeyBox>` field) resolves when an importer
+// inlines `Map`'s type under separate compilation.
+pub struct KeyBox { k: [u8] }
+
+pub struct Map {
+    keys: Vec<KeyBox>,
+    vals: Vec<i64>,
+    hashes: Vec<i64>,
+    next: Vec<i64>,
+    buckets: Vec<i64>,
+    count: i64,
+    cap: i64,
+}
+
+// FNV-1a over the key bytes, masked to 32 bits (a fast public hash; `h * prime` peaks
+// near 2^56 so it stays within i64, then the mask keeps it non-negative).
+pub fn hash_key(key: &[u8]) -> i64 {
+    let n: i64 = len(*key);
+    let mut h: i64 = 2166136261;
+    let mut i: i64 = 0;
+    while i < n {
+        h = h ^ u8_to_i64((*key)[i]);
+        h = (h * 16777619) & 4294967295;
+        i = i + 1;
+    }
+    h
+}
+
+fn copy_key(key: &[u8]) -> KeyBox {
+    let mut v: Vec<u8> = vec_new();
+    let n: i64 = len(*key);
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, (*key)[i]); i = i + 1; }
+    KeyBox { k: vec_to_array(v) }
+}
+
+// An empty map with 8 buckets.
+pub fn map_new() -> Map {
+    let mut bk: Vec<i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < 8 { push(&mut bk, 0 - 1); i = i + 1; }
+    Map { keys: vec_new(), vals: vec_new(), hashes: vec_new(), next: vec_new(), buckets: bk, count: 0, cap: 8 }
+}
+
+// Compare the stored key at entry `idx` to `key`, byte for byte (only reached on a hash
+// match, so collisions are resolved correctly).
+fn key_eq_at(m: &Map, idx: i64, key: &[u8]) -> bool {
+    let kn: i64 = len((*m).keys[idx].k);
+    let qn: i64 = len(*key);
+    if kn != qn {
+        false
+    } else {
+        let mut ok: bool = true;
+        let mut j: i64 = 0;
+        while j < kn {
+            if (*m).keys[idx].k[j] != (*key)[j] { ok = false; 0 } else { 0 };
+            j = j + 1;
+        }
+        ok
+    }
+}
+
+// The entry index of `key` (hash `h`), or -1 if absent.
+fn map_find(m: &Map, key: &[u8], h: i64) -> i64 {
+    let b: i64 = h & ((*m).cap - 1);
+    let mut idx: i64 = (*m).buckets[b];
+    let mut found: i64 = 0 - 1;
+    while idx >= 0 && found < 0 {
+        if (*m).hashes[idx] == h {
+            if key_eq_at(m, idx, key) { found = idx; 0 } else { 0 };
+            0
+        } else {
+            0
+        };
+        idx = (*m).next[idx];
+    }
+    found
+}
+
+// Double the bucket count and re-link every entry from its cached hash.
+fn map_resize(m: &mut Map) -> i64 {
+    let newcap: i64 = (*m).cap * 2;
+    let mut nb: Vec<i64> = vec_new();
+    let mut i: i64 = 0;
+    while i < newcap { push(&mut nb, 0 - 1); i = i + 1; }
+    let cnt: i64 = (*m).count;
+    let mut e: i64 = 0;
+    while e < cnt {
+        let b: i64 = (*m).hashes[e] & (newcap - 1);
+        (*m).next[e] = nb[b];
+        nb[b] = e;
+        e = e + 1;
+    }
+    (*m).buckets = nb;
+    (*m).cap = newcap;
+    0
+}
+
+// Insert `key -> val`, or update the value if `key` is already present.
+pub fn map_set(m: &mut Map, key: &[u8], val: i64) -> i64 {
+    let h: i64 = hash_key(key);
+    let existing: i64 = map_find(&(*m), key, h);
+    if existing >= 0 {
+        (*m).vals[existing] = val;
+        0
+    } else {
+        let new_idx: i64 = (*m).count;
+        let kb: KeyBox = copy_key(key);
+        push(&mut (*m).keys, kb);
+        push(&mut (*m).vals, val);
+        push(&mut (*m).hashes, h);
+        let b: i64 = h & ((*m).cap - 1);
+        push(&mut (*m).next, (*m).buckets[b]);
+        (*m).buckets[b] = new_idx;
+        (*m).count = (*m).count + 1;
+        if (*m).count > (*m).cap { map_resize(m); 0 } else { 0 };
+        0
+    }
+}
+
+// The value for `key`, or `dflt` if absent.
+pub fn map_get(m: &Map, key: &[u8], dflt: i64) -> i64 {
+    let h: i64 = hash_key(key);
+    let idx: i64 = map_find(m, key, h);
+    if idx >= 0 { (*m).vals[idx] } else { dflt }
+}
+
+// Whether `key` is present.
+pub fn map_has(m: &Map, key: &[u8]) -> bool {
+    let h: i64 = hash_key(key);
+    map_find(m, key, h) >= 0
+}
+
+// The number of entries.
+pub fn map_len(m: &Map) -> i64 {
+    (*m).count
+}

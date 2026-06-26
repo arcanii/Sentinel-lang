@@ -390,6 +390,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // split_nth, since Vec<[u8]> is unavailable), and padding — ~45 assertions over `[u8]`.
     // 42 = every string operation behaved as specified.
     ("examples/text/str_demo.sentinel", 42),
+    // The string-keyed hash map (std::collections::map): insert / update / lookup /
+    // default-on-absence / presence / count-by-key, plus a RESIZE — 20 keys inserted past
+    // the initial 8 buckets force a rehash and all stay retrievable. Parallel-array +
+    // index-chaining storage (the only shape the D.3 Vec MVP allows) with a public FNV-1a
+    // hash; keys built via std::text::str. 42 = every map operation behaved as specified.
+    ("examples/collections/map_demo.sentinel", 42),
 ];
 
 #[test]
@@ -590,6 +596,11 @@ fn ssh_exec_command_request() {
 #[test]
 fn text_str_library() {
     check_example("examples/text/str_demo.sentinel", "str_demo", 42);
+}
+
+#[test]
+fn collections_hash_map() {
+    check_example("examples/collections/map_demo.sentinel", "map_demo", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
