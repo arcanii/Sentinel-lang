@@ -1,0 +1,81 @@
+// std/net/ssh_userauth.sentinel — the SSH-2 "publickey" authentication method
+// (RFC 4252 §7): the layer that runs after the transport handshake, where the client
+// proves it holds the private key for an authorized public key.
+//
+// The security crux is that the signature is bound to the SESSION ID — the first
+// exchange hash H from the transport handshake (std::net::ssh_handshake surfaces it as
+// `SshSessionKeys.session_id`). Because every handshake produces a fresh H, a captured
+// userauth signature cannot be replayed against a different session: a different H ⇒ a
+// different signed blob ⇒ the signature fails to verify. The blob the signature covers
+// is (RFC 4252 §7):
+//
+//   string  session identifier (H)
+//   byte    SSH_MSG_USERAUTH_REQUEST (50)
+//   string  user name
+//   string  "ssh-connection"          (service)
+//   string  "publickey"               (method)
+//   boolean TRUE                       (a signature follows)
+//   string  "ssh-ed25519"             (public key algorithm)
+//   string  <ssh-ed25519 public key blob>
+//
+// Everything stays in the secret domain (the Ed25519 sign/verify are constant-time over
+// the secret key material); the build is the constant-time proof. The signature, the
+// public key, and the user name are wire-public and may be `declassify`d to send.
+use std::net::ssh::ssh_append_string;
+use std::net::ssh::ssh_hostkey_blob;
+use std::security::ed25519::ed25519_sign;
+use std::security::ed25519::ed25519_verify;
+
+fn lit(data: [i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8(data[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn copy_n(a: &[secret u8], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, (*a)[i]); i = i + 1; }
+    vec_to_array(v)
+}
+
+// The RFC 4252 §7 blob a "publickey" userauth request is signed over (everything except
+// the signature itself). Both peers build this identically — the client to sign it, the
+// server to verify — so a discrepancy in any field (notably the session id) breaks the
+// signature.
+pub fn ssh_userauth_signed_data(session_id: &[secret u8], username: &[secret u8],
+                                user_pub: &[secret u8]) -> [secret u8] {
+    let mut out: Vec<secret u8> = vec_new();
+    ssh_append_string(&mut out, session_id);
+    push(&mut out, i64_to_u8(50));                                              // SSH_MSG_USERAUTH_REQUEST
+    ssh_append_string(&mut out, username);
+    let svc: [secret u8] = lit([115, 115, 104, 45, 99, 111, 110, 110, 101, 99, 116, 105, 111, 110], 14);   // "ssh-connection"
+    ssh_append_string(&mut out, &svc);
+    let meth: [secret u8] = lit([112, 117, 98, 108, 105, 99, 107, 101, 121], 9);                           // "publickey"
+    ssh_append_string(&mut out, &meth);
+    push(&mut out, i64_to_u8(1));                                               // boolean TRUE
+    let alg: [secret u8] = lit([115, 115, 104, 45, 101, 100, 50, 53, 53, 49, 57], 11);                     // "ssh-ed25519"
+    ssh_append_string(&mut out, &alg);
+    let blob: [secret u8] = ssh_hostkey_blob(user_pub);                         // the user's public key blob
+    ssh_append_string(&mut out, &blob);
+    vec_to_array(out)
+}
+
+// CLIENT: sign a publickey userauth request with the user's private seed. Returns the
+// 64-byte Ed25519 signature to put on the wire.
+pub fn ssh_userauth_sign(user_seed: &[secret u8], session_id: &[secret u8],
+                         username: &[secret u8], user_pub: &[secret u8]) -> [secret u8] {
+    let data: [secret u8] = ssh_userauth_signed_data(session_id, username, user_pub);
+    ed25519_sign(copy_n(user_seed, 32), data)
+}
+
+// SERVER: verify a publickey userauth signature against the offered public key. Returns
+// 1 iff the signature is valid over the session-bound blob. (Whether `user_pub` is an
+// AUTHORIZED key — the authorized_keys check — is a separate policy decision the caller
+// makes; this only proves possession of the corresponding private key.)
+pub fn ssh_userauth_verify(user_pub: &[secret u8], session_id: &[secret u8],
+                           username: &[secret u8], sig: [secret u8]) -> i64 {
+    let data: [secret u8] = ssh_userauth_signed_data(session_id, username, user_pub);
+    ed25519_verify(copy_n(user_pub, 32), data, sig)
+}

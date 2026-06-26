@@ -1,0 +1,154 @@
+// examples/net/ssh_pubkey_auth.sentinel — SSH-2 "publickey" user authentication
+// (RFC 4252 §7) over a real socket, layered on the transport handshake: the client
+// proves it holds the private key for an authorized public key by signing a request
+// bound to the session id.
+//
+//   1. TRANSPORT — ssh_client_handshake / ssh_server_handshake run the curve25519-sha256
+//      KEX over the socket and return the session id (the first exchange hash H).
+//   2. USERAUTH  — the client signs the RFC 4252 §7 blob (which begins with H) with its
+//      Ed25519 user key and sends  username | user_pubkey | signature ; the server
+//      verifies the signature AND checks the offered key is authorized, then replies
+//      SSH_MSG_USERAUTH_SUCCESS (52) or _FAILURE (51).
+//
+// WHY BIND TO THE SESSION ID. The signature covers H, which is unique per handshake, so
+// a signature captured on one session cannot be replayed on another — a different H
+// yields a different signed blob and the verify fails. (Confirmed during development
+// with a negative probe: signing over the wrong session id is rejected.)
+//
+// The user name, public key, and signature are wire-public (declassified to send); the
+// user's PRIVATE seed and the Ed25519 internals stay in the secret domain, so the build
+// is the constant-time proof. The 1-byte auth verdict is the sanctioned declassify.
+//
+// Exit 42 = the transport authenticated (host key), and the publickey userauth succeeded
+// (valid signature over the session-bound blob from an authorized key).
+use std::math::num::abs;
+use std::net::tcp::loopback_host;
+use std::net::tcp::read_exact;
+use std::net::tcp::append_declassified;
+use std::net::tcp::widen_bytes;
+use std::net::ssh_handshake::ssh_client_handshake;
+use std::net::ssh_handshake::ssh_server_handshake;
+use std::net::ssh_handshake::SshSessionKeys;
+use std::net::ssh_userauth::ssh_userauth_sign;
+use std::net::ssh_userauth::ssh_userauth_verify;
+use std::security::ed25519::ed25519_pubkey;
+
+fn mk(data: [i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8(data[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Transport-handshake key material + protocol framing (as in ssh_full_session).
+fn eph_c() -> [secret u8] { mk([17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17], 32) }
+fn eph_s() -> [secret u8] { mk([34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34], 32) }
+fn host_seed() -> [secret u8] { mk([57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88], 32) }
+fn cookie_c() -> [secret u8] { mk([16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], 16) }
+fn cookie_s() -> [secret u8] { mk([32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47], 16) }
+fn banner() -> [secret u8] { mk([83, 83, 72, 45, 50, 46, 48, 45, 83, 101, 110, 116, 105, 110, 101, 108, 95, 48, 46, 49], 20) }
+
+// The user being authenticated: the name "sentinel" (8 bytes) and its Ed25519 private
+// seed. The server only ever sees the PUBLIC key.
+fn username() -> [secret u8] { mk([115, 101, 110, 116, 105, 110, 101, 108], 8) }
+fn user_seed() -> [secret u8] { mk([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32], 32) }
+
+// The server's authorized_keys: the user's Ed25519 public key (= ed25519_pubkey of the
+// seed above), known to the server in advance. A received key must match this to be
+// accepted — proving the signature alone is not enough.
+fn pubkey_authorized(got: &[secret u8]) -> i64 {
+    let exp: [i64] = [121, 181, 86, 46, 143, 230, 84, 249, 64, 120, 177, 18, 232, 169, 139, 167, 144, 31, 133, 58, 230, 149, 190, 215, 224, 227, 145, 11, 173, 4, 150, 100];
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < 32 { bad = bad | (u8_to_i64(declassify((*got)[i])) ^ exp[i]); i = i + 1; }
+    if bad == 0 { 1 } else { 0 }
+}
+
+// The server: run the transport handshake, then accept one publickey userauth request.
+fn auth_server(listener: i64) -> i64 ! { Async } {
+    let conn: i64 = tcp_accept(listener);
+    if conn < 0 {
+        0 - 1
+    } else {
+        let es: [secret u8] = eph_s();
+        let hs: [secret u8] = host_seed();
+        let cc: [secret u8] = cookie_c();
+        let cs: [secret u8] = cookie_s();
+        let vb: [secret u8] = banner();
+        let keys = ssh_server_handshake(conn, &es, &hs, &cc, &cs, &vb);
+        let sid: [secret u8] = keys.session_id;
+
+        // receive  username(8) | user_pubkey(32) | signature(64) = 104 bytes.
+        let req_pub: [u8] = read_exact(conn, 104);
+        let verdict: i64 = if len(req_pub) < 104 {
+            51
+        } else {
+            let uname: [secret u8] = widen_bytes(&req_pub, 0, 8);
+            let upub: [secret u8] = widen_bytes(&req_pub, 8, 32);
+            let sig: [secret u8] = widen_bytes(&req_pub, 40, 64);
+            let valid: i64 = ssh_userauth_verify(&upub, &sid, &uname, sig);
+            let authz: i64 = pubkey_authorized(&upub);
+            if valid == 1 { if authz == 1 { 52 } else { 51 } } else { 51 }
+        };
+
+        let mut r: Vec<u8> = vec_new();
+        push(&mut r, i64_to_u8(verdict));
+        let r_bytes: [u8] = vec_to_array(r);
+        tcp_write(conn, r_bytes);
+        tcp_close(conn);
+        0
+    }
+}
+
+fn main() -> i64 {
+    let listener: i64 = tcp_listen(0);
+    if listener < 0 {
+        1
+    } else {
+        let port: i64 = tcp_local_port(listener);
+        let result: i64 = scope concurrent {
+            let server = spawn auth_server(listener);
+
+            // ---- transport handshake. ----
+            let host: [u8] = loopback_host();
+            let conn: i64 = tcp_connect(host, port);
+            let ec: [secret u8] = eph_c();
+            let cc: [secret u8] = cookie_c();
+            let cs: [secret u8] = cookie_s();
+            let vb: [secret u8] = banner();
+            let keys = ssh_client_handshake(conn, &ec, &cc, &cs, &vb);
+            let ok_hs: i64 = keys.authed;
+            let sid: [secret u8] = keys.session_id;
+
+            // ---- publickey userauth: sign the session-bound request, send it. ----
+            let us: [secret u8] = user_seed();
+            let un: [secret u8] = username();
+            let upub: [secret u8] = ed25519_pubkey(user_seed());
+            let sig: [secret u8] = ssh_userauth_sign(&us, &sid, &un, &upub);
+
+            let mut req: Vec<u8> = vec_new();
+            append_declassified(&mut req, &un, 8);
+            append_declassified(&mut req, &upub, 32);
+            append_declassified(&mut req, &sig, 64);
+            let req_bytes: [u8] = vec_to_array(req);
+            tcp_write(conn, req_bytes);
+
+            // ---- read the 1-byte auth verdict. ----
+            let res: [u8] = read_exact(conn, 1);
+            tcp_close(conn);
+            let srv: i64 = server.await;
+
+            let mut bad: i64 = if ok_hs == 1 { 0 } else { 16 };
+            bad = bad | abs(srv);
+            let granted: i64 = if len(res) >= 1 {
+                if u8_to_i64(res[0]) == 52 { 0 } else { 32 }
+            } else {
+                64
+            };
+            bad = bad | granted;
+            if bad == 0 { 42 } else { 5 }
+        };
+        tcp_close(listener);
+        result
+    }
+}

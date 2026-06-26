@@ -361,6 +361,13 @@ const EXAMPLES: &[(&str, i32)] = &[
     // packets each way. 42 = the handshake authenticated, the derived key matched the
     // known-good vector, and every data packet round-tripped.
     ("examples/net/ssh_full_session.sentinel", 42),
+    // SSH-2 "publickey" user authentication (RFC 4252 §7) over a real socket, on top of
+    // the transport handshake: the client signs a request bound to the session id (the
+    // first exchange hash H) with its Ed25519 user key, and the server verifies the
+    // signature AND checks the offered key is authorized before replying SUCCESS. Binding
+    // to H means a captured signature can't be replayed on another session. 42 = the
+    // transport authenticated and the publickey userauth succeeded.
+    ("examples/net/ssh_pubkey_auth.sentinel", 42),
 ];
 
 #[test]
@@ -541,6 +548,11 @@ fn ssh_channel_stream_multipacket() {
 #[test]
 fn ssh_full_session_handshake_plus_data() {
     check_example("examples/net/ssh_full_session.sentinel", "ssh_full_session", 42);
+}
+
+#[test]
+fn ssh_pubkey_auth_userauth() {
+    check_example("examples/net/ssh_pubkey_auth.sentinel", "ssh_pubkey_auth", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

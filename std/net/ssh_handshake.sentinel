@@ -31,11 +31,12 @@ use std::security::ed25519::ed25519_pubkey;
 use std::security::ed25519::ed25519_sign;
 use std::security::ed25519::ed25519_verify;
 
-// The result of a handshake half: the two directional record-cipher keys, plus (on the
-// client) whether the host-key signature over the exchange hash verified. After a
-// successful handshake the caller seals client->server packets under `keyc` and opens
-// server->client packets under `keyd` (and vice-versa on the server).
-pub struct SshSessionKeys { keyc: [secret u8], keyd: [secret u8], authed: i64 }
+// The result of a handshake half: the two directional record-cipher keys; the session
+// id (the first exchange hash H, which higher layers like ssh-userauth bind their
+// signatures to); and (on the client) whether the host-key signature over H verified.
+// After a successful handshake the caller seals client->server packets under `keyc` and
+// opens server->client packets under `keyd` (and vice-versa on the server).
+pub struct SshSessionKeys { keyc: [secret u8], keyd: [secret u8], authed: i64, session_id: [secret u8] }
 
 // The X25519 base point u=9.
 fn base9() -> [secret u8] {
@@ -70,7 +71,7 @@ pub fn ssh_server_handshake(conn: i64, eph: &[secret u8], host_seed: &[secret u8
                             banner: &[secret u8]) -> SshSessionKeys {
     let qc_pub: [u8] = read_exact(conn, 32);
     if len(qc_pub) < 32 {
-        SshSessionKeys { keyc: zeros(64), keyd: zeros(64), authed: 0 }
+        SshSessionKeys { keyc: zeros(64), keyd: zeros(64), authed: 0, session_id: zeros(32) }
     } else {
         let qcv: [secret u8] = widen_bytes(&qc_pub, 0, 32);
         let qsv: [secret u8] = x25519(copy_n(eph, 32), base9());
@@ -92,7 +93,7 @@ pub fn ssh_server_handshake(conn: i64, eph: &[secret u8], host_seed: &[secret u8
 
         let keyc: [secret u8] = ssh_kdf(&ks, &h, 67, 64);
         let keyd: [secret u8] = ssh_kdf(&ks, &h, 68, 64);
-        SshSessionKeys { keyc: keyc, keyd: keyd, authed: 1 }
+        SshSessionKeys { keyc: keyc, keyd: keyd, authed: 1, session_id: copy_n(&h, 32) }
     }
 }
 
@@ -108,7 +109,7 @@ pub fn ssh_client_handshake(conn: i64, eph: &[secret u8],
 
     let resp: [u8] = read_exact(conn, 128);
     if len(resp) < 128 {
-        SshSessionKeys { keyc: zeros(64), keyd: zeros(64), authed: 0 }
+        SshSessionKeys { keyc: zeros(64), keyd: zeros(64), authed: 0, session_id: zeros(32) }
     } else {
         let qsv: [secret u8] = widen_bytes(&resp, 0, 32);
         let hpubv: [secret u8] = widen_bytes(&resp, 32, 32);
@@ -123,6 +124,6 @@ pub fn ssh_client_handshake(conn: i64, eph: &[secret u8],
 
         let keyc: [secret u8] = ssh_kdf(&kc, &h, 67, 64);
         let keyd: [secret u8] = ssh_kdf(&kc, &h, 68, 64);
-        SshSessionKeys { keyc: keyc, keyd: keyd, authed: authed }
+        SshSessionKeys { keyc: keyc, keyd: keyd, authed: authed, session_id: copy_n(&h, 32) }
     }
 }
