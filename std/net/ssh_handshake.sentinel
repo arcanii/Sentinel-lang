@@ -1,0 +1,128 @@
+// std/net/ssh_handshake.sentinel — the reusable client/server halves of the SSH-2
+// curve25519-sha256 transport handshake, run over a connected socket.
+//
+// `std::net::ssh` provides the wire codec + KEX primitives (the exchange hash, the
+// §7.2 KDF); this module composes them with X25519 / Ed25519 and the `std::net::tcp`
+// socket-boundary helpers into the two HALVES of a real handshake, so a program no
+// longer has to hand-roll the message exchange. Each half runs its side of:
+//
+//   client --[ Q_C (32) ]------------------------------> server
+//   client <--[ Q_S (32) | hostpub (32) | sig (64) ]---- server
+//
+// and returns the two RFC 4253 §7.2 directional keys ('C' client->server, 'D'
+// server->client) — the inputs the record cipher (`std::net::ssh_cipher`) needs for
+// the data phase. The client half also returns the host-key-signature verdict.
+//
+// The ephemeral scalar and (server side) the host-key seed are PARAMETERS: there is no
+// RNG in the runtime, so the caller supplies the secret key material. Everything stays
+// in the secret domain; only the wire-public KEX values cross the socket (declassified
+// to send, widened back on receipt, via `std::net::tcp`). The shared secret K and the
+// derived session keys never touch the wire.
+use std::net::tcp::read_exact;
+use std::net::tcp::declassify_bytes;
+use std::net::tcp::append_declassified;
+use std::net::tcp::widen_bytes;
+use std::net::ssh::ssh_kexinit_payload;
+use std::net::ssh::ssh_hostkey_blob;
+use std::net::ssh::ssh_exchange_hash;
+use std::net::ssh::ssh_kdf;
+use std::security::x25519::x25519;
+use std::security::ed25519::ed25519_pubkey;
+use std::security::ed25519::ed25519_sign;
+use std::security::ed25519::ed25519_verify;
+
+// The result of a handshake half: the two directional record-cipher keys, plus (on the
+// client) whether the host-key signature over the exchange hash verified. After a
+// successful handshake the caller seals client->server packets under `keyc` and opens
+// server->client packets under `keyd` (and vice-versa on the server).
+pub struct SshSessionKeys { keyc: [secret u8], keyd: [secret u8], authed: i64 }
+
+// The X25519 base point u=9.
+fn base9() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    push(&mut v, i64_to_u8(9));
+    let mut i: i64 = 0;
+    while i < 31 { push(&mut v, i64_to_u8(0)); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn copy_n(a: &[secret u8], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, (*a)[i]); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn zeros(n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8(0)); i = i + 1; }
+    vec_to_array(v)
+}
+
+// The SERVER half: receive Q_C, derive the shared secret K = eph . Q_C, compute and
+// sign the exchange hash H with the host key, send Q_S | hostpub | sig, and return the
+// directional keys. `eph` is the server's ephemeral scalar; `host_seed` the Ed25519
+// host-key seed; `cookie_c`/`cookie_s`/`banner` the (public) protocol framing both
+// peers agree on.
+pub fn ssh_server_handshake(conn: i64, eph: &[secret u8], host_seed: &[secret u8],
+                            cookie_c: &[secret u8], cookie_s: &[secret u8],
+                            banner: &[secret u8]) -> SshSessionKeys {
+    let qc_pub: [u8] = read_exact(conn, 32);
+    if len(qc_pub) < 32 {
+        SshSessionKeys { keyc: zeros(64), keyd: zeros(64), authed: 0 }
+    } else {
+        let qcv: [secret u8] = widen_bytes(&qc_pub, 0, 32);
+        let qsv: [secret u8] = x25519(copy_n(eph, 32), base9());
+        let hpubv: [secret u8] = ed25519_pubkey(copy_n(host_seed, 32));
+        let ks: [secret u8] = x25519(copy_n(eph, 32), copy_n(&qcv, 32));
+
+        let ic: [secret u8] = ssh_kexinit_payload(cookie_c);
+        let is: [secret u8] = ssh_kexinit_payload(cookie_s);
+        let ksb: [secret u8] = ssh_hostkey_blob(&hpubv);
+        let h: [secret u8] = ssh_exchange_hash(banner, banner, &ic, &is, &ksb, &qcv, &qsv, &ks);
+        let sig: [secret u8] = ed25519_sign(copy_n(host_seed, 32), copy_n(&h, 32));
+
+        let mut resp: Vec<u8> = vec_new();
+        append_declassified(&mut resp, &qsv, 32);
+        append_declassified(&mut resp, &hpubv, 32);
+        append_declassified(&mut resp, &sig, 64);
+        let resp_bytes: [u8] = vec_to_array(resp);
+        tcp_write(conn, resp_bytes);
+
+        let keyc: [secret u8] = ssh_kdf(&ks, &h, 67, 64);
+        let keyd: [secret u8] = ssh_kdf(&ks, &h, 68, 64);
+        SshSessionKeys { keyc: keyc, keyd: keyd, authed: 1 }
+    }
+}
+
+// The CLIENT half: send Q_C, receive Q_S | hostpub | sig, derive K = eph . Q_S, recompute
+// the exchange hash H, verify the host-key signature over it, and return the directional
+// keys plus the verify verdict (`authed` = 1 iff the signature checked out).
+pub fn ssh_client_handshake(conn: i64, eph: &[secret u8],
+                            cookie_c: &[secret u8], cookie_s: &[secret u8],
+                            banner: &[secret u8]) -> SshSessionKeys {
+    let qcv: [secret u8] = x25519(copy_n(eph, 32), base9());
+    let qc_pub: [u8] = declassify_bytes(&qcv, 32);
+    tcp_write(conn, qc_pub);
+
+    let resp: [u8] = read_exact(conn, 128);
+    if len(resp) < 128 {
+        SshSessionKeys { keyc: zeros(64), keyd: zeros(64), authed: 0 }
+    } else {
+        let qsv: [secret u8] = widen_bytes(&resp, 0, 32);
+        let hpubv: [secret u8] = widen_bytes(&resp, 32, 32);
+        let sig: [secret u8] = widen_bytes(&resp, 64, 64);
+        let kc: [secret u8] = x25519(copy_n(eph, 32), copy_n(&qsv, 32));
+
+        let ic: [secret u8] = ssh_kexinit_payload(cookie_c);
+        let is: [secret u8] = ssh_kexinit_payload(cookie_s);
+        let ksb: [secret u8] = ssh_hostkey_blob(&hpubv);
+        let h: [secret u8] = ssh_exchange_hash(banner, banner, &ic, &is, &ksb, &qcv, &qsv, &kc);
+        let authed: i64 = ed25519_verify(copy_n(&hpubv, 32), copy_n(&h, 32), copy_n(&sig, 64));
+
+        let keyc: [secret u8] = ssh_kdf(&kc, &h, 67, 64);
+        let keyd: [secret u8] = ssh_kdf(&kc, &h, 68, 64);
+        SshSessionKeys { keyc: keyc, keyd: keyd, authed: authed }
+    }
+}

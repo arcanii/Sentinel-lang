@@ -353,6 +353,14 @@ const EXAMPLES: &[(&str, i32)] = &[
     // round-tripped — every tag verified under the right key+seqnr and every response
     // was the expected transform of its request (so the seqnr stream stayed in lockstep).
     ("examples/net/ssh_channel_stream.sentinel", 42),
+    // A complete SSH-2 session over one real connection — the handshake AND the data
+    // phase — using the reusable std::net::ssh_handshake halves: the client and server
+    // each call one library function (ssh_client_handshake / ssh_server_handshake) that
+    // runs its side of the curve25519-sha256 KEX over the socket and returns the two
+    // directional keys (in an SshSessionKeys struct), then they exchange N encrypted
+    // packets each way. 42 = the handshake authenticated, the derived key matched the
+    // known-good vector, and every data packet round-tripped.
+    ("examples/net/ssh_full_session.sentinel", 42),
 ];
 
 #[test]
@@ -528,6 +536,11 @@ fn ssh_over_tcp_distributed_handshake() {
 #[test]
 fn ssh_channel_stream_multipacket() {
     check_example("examples/net/ssh_channel_stream.sentinel", "ssh_channel_stream", 42);
+}
+
+#[test]
+fn ssh_full_session_handshake_plus_data() {
+    check_example("examples/net/ssh_full_session.sentinel", "ssh_full_session", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
