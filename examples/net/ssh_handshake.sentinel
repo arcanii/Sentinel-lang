@@ -1,0 +1,134 @@
+// examples/net/ssh_handshake.sentinel — a complete SSH-2 transport key exchange
+// (curve25519-sha256 + ssh-ed25519, RFC 4253 / RFC 8731) run LOOPBACK, in memory.
+//
+// This is the constant-time crypto core of an `sshd`, composing the shipped
+// primitives (std::security::x25519 / ed25519 / sha256) through the SSH wire protocol
+// (std::net::ssh). With fixed deterministic ephemeral keys (so the run is reproducible
+// and checkable) it performs, and checks, the whole handshake:
+//   1. ECDH agreement — the client (eph_c · Q_S) and the server (eph_s · Q_C) derive
+//      the SAME shared secret K.
+//   2. The exchange hash H = SHA-256(transcript ‖ mpint(K)) matches the value computed
+//      by an independent Python model (cross-checked there against paramiko's SSH wire
+//      codec + pyca's X25519/Ed25519).
+//   3. The ssh-ed25519 host-key signature over H verifies.
+//   4. The six RFC 4253 §7.2 session keys (the c→s / s→c IVs, encryption keys, and MAC
+//      keys, A..F) match the model byte-for-byte.
+//
+// CONSTANT-TIME DISCIPLINE. The ephemeral private keys, the shared secret, the
+// exchange hash, and the derived session keys are all `[secret u8]`, so the whole
+// handshake runs in the secret domain and the compiler's constant-time check proves on
+// every build that no secret bit reached a branch, a memory index, or a divisor. The
+// one SSH-design wart — the value-dependent LENGTH of mpint(K), a ~1-bit side channel
+// on the shared secret — is forced into the open by the type system as an explicit
+// `declassify` inside std::net::ssh (the audit point; K's bytes stay secret).
+//
+// Exit 42 = K agreed, H matched, the host-key signature verified, and all six derived
+// keys matched the model.
+use std::security::x25519::x25519;
+use std::security::ed25519::ed25519_pubkey;
+use std::security::ed25519::ed25519_sign;
+use std::security::ed25519::ed25519_verify;
+use std::net::ssh::ssh_kexinit_payload;
+use std::net::ssh::ssh_hostkey_blob;
+use std::net::ssh::ssh_exchange_hash;
+use std::net::ssh::ssh_kdf;
+
+fn mk(data: [i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut v, i64_to_u8(data[i]));
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+fn copy32(a: &[secret u8]) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 32 { push(&mut v, (*a)[i]); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn diff(got: &[secret u8], exp: [i64], n: i64) -> i64 {
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        bad = bad | (u8_to_i64(declassify((*got)[i])) ^ exp[i]);
+        i = i + 1;
+    }
+    bad
+}
+
+fn seq(a: &[secret u8], b: &[secret u8], n: i64) -> i64 {
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        bad = bad | (u8_to_i64(declassify((*a)[i])) ^ u8_to_i64(declassify((*b)[i])));
+        i = i + 1;
+    }
+    bad
+}
+
+// The Curve25519 base u-coordinate (u = 9).
+fn base9() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    push(&mut v, i64_to_u8(9));
+    let mut i: i64 = 0;
+    while i < 31 { push(&mut v, i64_to_u8(0)); i = i + 1; }
+    vec_to_array(v)
+}
+
+// Fixed deterministic inputs (rebuilt each use — x25519/ed25519 consume their args).
+fn eph_c() -> [secret u8] { mk([17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17], 32) }
+fn eph_s() -> [secret u8] { mk([34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34], 32) }
+fn host_seed() -> [secret u8] { mk([57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88], 32) }
+fn cookie_c() -> [secret u8] { mk([16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], 16) }
+fn cookie_s() -> [secret u8] { mk([32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47], 16) }
+fn banner() -> [secret u8] { mk([83, 83, 72, 45, 50, 46, 48, 45, 83, 101, 110, 116, 105, 110, 101, 108, 95, 48, 46, 49], 20) }
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- Ephemeral public keys (Q_C, Q_S) and the host public key, computed once.
+    let qcv: [secret u8] = x25519(eph_c(), base9());
+    let qsv: [secret u8] = x25519(eph_s(), base9());
+    let hpubv: [secret u8] = ed25519_pubkey(host_seed());
+
+    // ---- (1) ECDH agreement: client and server derive the SAME shared secret K.
+    let kc: [secret u8] = x25519(eph_c(), copy32(&qsv));   // client: eph_c · Q_S
+    let ks_sh: [secret u8] = x25519(eph_s(), copy32(&qcv)); // server: eph_s · Q_C
+    bad = bad | seq(&kc, &ks_sh, 32);
+
+    // ---- (2) Exchange hash H over the full transcript.
+    let cc: [secret u8] = cookie_c();
+    let cs: [secret u8] = cookie_s();
+    let vb: [secret u8] = banner();
+    let ic: [secret u8] = ssh_kexinit_payload(&cc);
+    let is: [secret u8] = ssh_kexinit_payload(&cs);
+    let ksb: [secret u8] = ssh_hostkey_blob(&hpubv);
+    let h: [secret u8] = ssh_exchange_hash(&vb, &vb, &ic, &is, &ksb, &qcv, &qsv, &kc);
+    let eh: [i64] = [96, 28, 31, 49, 76, 176, 115, 200, 132, 223, 42, 223, 114, 251, 9, 245, 140, 11, 122, 139, 160, 253, 52, 50, 244, 16, 165, 187, 64, 86, 5, 180];
+    bad = bad | diff(&h, eh, 32);
+
+    // ---- (3) The ssh-ed25519 host-key signature over H verifies.
+    let sig: [secret u8] = ed25519_sign(host_seed(), copy32(&h));
+    let ok: i64 = ed25519_verify(copy32(&hpubv), copy32(&h), sig);
+    if ok == 1 { bad = bad | 0; 0 } else { bad = bad | 1; 0 };
+
+    // ---- (4) The six derived session keys (A..F) match the model.
+    let cenc: [secret u8] = ssh_kdf(&kc, &h, 67, 32);   // 'C' enc c->s
+    bad = bad | diff(&cenc, [172, 214, 253, 157, 251, 132, 14, 195, 33, 74, 78, 11, 251, 153, 21, 223, 138, 41, 110, 92, 174, 2, 182, 43, 68, 113, 167, 136, 102, 155, 118, 33], 32);
+    let denc: [secret u8] = ssh_kdf(&kc, &h, 68, 32);   // 'D' enc s->c
+    bad = bad | diff(&denc, [81, 57, 2, 122, 208, 135, 87, 31, 255, 61, 158, 48, 248, 99, 123, 206, 19, 26, 47, 43, 60, 171, 96, 115, 61, 24, 30, 34, 81, 167, 102, 134], 32);
+    let emac: [secret u8] = ssh_kdf(&kc, &h, 69, 32);   // 'E' mac c->s
+    bad = bad | diff(&emac, [196, 123, 51, 36, 248, 160, 86, 186, 69, 75, 177, 44, 19, 146, 200, 12, 91, 212, 204, 105, 218, 229, 38, 30, 104, 120, 30, 53, 47, 99, 147, 2], 32);
+    let fmac: [secret u8] = ssh_kdf(&kc, &h, 70, 32);   // 'F' mac s->c
+    bad = bad | diff(&fmac, [201, 150, 159, 212, 81, 10, 62, 202, 83, 151, 21, 213, 208, 116, 8, 233, 126, 50, 194, 239, 218, 195, 182, 231, 12, 49, 76, 19, 183, 68, 39, 76], 32);
+    let aiv: [secret u8] = ssh_kdf(&kc, &h, 65, 16);    // 'A' iv c->s
+    bad = bad | diff(&aiv, [155, 156, 12, 243, 202, 86, 244, 32, 119, 198, 80, 231, 221, 230, 116, 134], 16);
+    let biv: [secret u8] = ssh_kdf(&kc, &h, 66, 16);    // 'B' iv s->c
+    bad = bad | diff(&biv, [71, 96, 206, 101, 45, 110, 190, 200, 252, 254, 229, 85, 212, 224, 224, 237], 16);
+
+    if bad == 0 { 42 } else { 0 }
+}

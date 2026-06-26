@@ -309,6 +309,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // 42 = the RFC 7748 §5.2 vector reproduced AND the radix-2^51 and radix-2^16
     // implementations agreed on the same shared secret (an internal consistency proof).
     ("examples/security/x25519_64.sentinel", 42),
+    // A complete SSH-2 transport key exchange (std::net::ssh — curve25519-sha256 +
+    // ssh-ed25519, RFC 4253 / RFC 8731) run loopback in memory: the constant-time
+    // crypto core of an sshd, composing X25519 / Ed25519 / SHA-256 through the SSH wire
+    // protocol. 42 = the ECDH agreed, the exchange hash matched an independent model,
+    // the host-key signature verified, and all six derived session keys matched.
+    ("examples/net/ssh_handshake.sentinel", 42),
 ];
 
 #[test]
@@ -454,6 +460,11 @@ fn ed448_signing_constant_time() {
 #[test]
 fn x25519_64_radix_2_51_u128() {
     check_example("examples/security/x25519_64.sentinel", "x25519_64", 42);
+}
+
+#[test]
+fn ssh_handshake_curve25519_sha256() {
+    check_example("examples/net/ssh_handshake.sentinel", "ssh_handshake", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

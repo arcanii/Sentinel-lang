@@ -34,6 +34,7 @@ the example entry. See the harness doc-comment for the mechanics.
 | `bits`      | `bits`               | ✅ `rotl64`/`rotr64`/`rotl32`/`rotr32`     |
 | `bytes`     | `bytes`              | ✅ `eq`/`find`/`contains`/`count`/`starts_with`/`repeat` (over `&[u8]`) |
 | `algorithms`| `seq`                | ✅ in-place `sort` (index-assign) + `binary_search` (over public `[i64]`) |
+| `net`       | `ssh`                | ✅ SSH-2 transport KEX (`curve25519-sha256` + `ssh-ed25519`, RFC 4253 / RFC 8731): the SSH wire codec, the exchange hash, the host-key signature, and the §7.2 key derivation — the constant-time crypto core of an `sshd`, run loopback (no sockets yet; see ADR 0056). The `mpint` of the secret shared secret forces SSH's length side channel into an explicit `declassify`. |
 
 The list grows as examples force new building blocks.
 

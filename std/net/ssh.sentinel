@@ -1,0 +1,174 @@
+// std::net::ssh — the SSH-2 transport key exchange (RFC 4253 + RFC 8731), the
+// constant-time crypto core of an `sshd`, driven LOOPBACK (in-memory) until the
+// sockets surface (ADR 0056) lands.
+//
+// This composes the shipped constant-time primitives into a real protocol: the
+// `curve25519-sha256` key exchange (X25519 ECDH + the SHA-256 exchange hash), the
+// `ssh-ed25519` host-key signature over that hash, and the RFC 4253 §7.2 key
+// derivation. The whole handshake runs in the SECRET domain — the ephemeral private
+// keys, the shared secret, the exchange hash, and the derived session keys are all
+// `[secret u8]`, so the compiler's constant-time check proves on every build that no
+// secret bit reaches a branch, a memory index, or a divisor.
+//
+// ⚠ The ONE place SSH's design is not constant-time-clean is the `mpint` encoding of
+// the shared secret K: a multi-precision integer is minimal-length, so its byte
+// length depends on K's high bytes (whether the top byte is zero / has its high bit
+// set). That length goes into the exchange hash, so it is a ~1-2-bit length side
+// channel on a 256-bit secret. Sentinel's type system FORCES this into the open: the
+// length is computed branch-free and then explicitly `declassify`d in
+// `ssh_append_mpint`, which is the audit point — a leak other implementations make
+// silently. K's bytes themselves never leave the secret domain.
+use std::security::sha256::sha256;
+
+// ---- SSH binary wire codec (RFC 4251 §5) --------------------------------------
+
+// Append a uint32 in big-endian (the public length `x` widens to secret on push).
+pub fn ssh_append_u32(out: &mut Vec<secret u8>, x: i64) -> i64 {
+    push(out, i64_to_u8((x >> 24) & 255));
+    push(out, i64_to_u8((x >> 16) & 255));
+    push(out, i64_to_u8((x >> 8) & 255));
+    push(out, i64_to_u8(x & 255));
+    0
+}
+
+// Append a `string`: a uint32 length prefix followed by the bytes.
+pub fn ssh_append_string(out: &mut Vec<secret u8>, s: &[secret u8]) -> i64 {
+    let n: i64 = len(*s);
+    ssh_append_u32(out, n);
+    let mut i: i64 = 0;
+    while i < n {
+        push(out, (*s)[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// Append raw bytes (no length prefix).
+fn append_raw(out: &mut Vec<secret u8>, s: &[secret u8], n: i64) -> i64 {
+    let mut i: i64 = 0;
+    while i < n {
+        push(out, (*s)[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// Append a public ASCII string literal as an SSH `string` (length-prefixed).
+fn append_str_lit(out: &mut Vec<secret u8>, data: [i64], n: i64) -> i64 {
+    ssh_append_u32(out, n);
+    let mut i: i64 = 0;
+    while i < n {
+        push(out, i64_to_u8(data[i]));
+        i = i + 1;
+    }
+    0
+}
+
+// Append `mpint(K)` for a 32-byte SECRET K (big-endian, K[0] = most significant).
+// CONSTANT-TIME over K's bytes; the content LENGTH is declassified (see the header).
+pub fn ssh_append_mpint(out: &mut Vec<secret u8>, k: &[secret u8]) -> i64 {
+    // buf = 0x00 ‖ K (33 bytes). Find the first non-zero index `s` (1..32, or 33 if
+    // all-zero) and whether buf[s]'s high bit is set — all branch-free.
+    let mut s: secret i64 = 33;
+    let mut signbit: secret i64 = 0;
+    let mut found: secret i64 = 0;
+    let mut i: i64 = 1;
+    while i < 33 {
+        let byte: secret i64 = (*k)[i - 1] as i64;          // buf[i]
+        let nz: secret i64 = ((0 - byte) >> 63) & 1;        // 1 iff byte != 0
+        let first: secret i64 = nz & (1 - found);           // 1 at the first non-zero
+        let fmask: secret i64 = 0 - first;                  // all-ones iff first
+        s = s ^ (fmask & (s ^ i));                          // s = first ? i : s
+        signbit = signbit | (first & ((byte >> 7) & 1));    // high bit of buf[s]
+        found = found | nz;
+        i = i + 1;
+    }
+    // The minimal content is buf[start..33], start = s - signbit (keep a 0x00 if the
+    // top byte's high bit is set). Declassify the length — the SSH side channel.
+    let start: i64 = declassify(s - signbit);
+    let length: i64 = 33 - start;
+    ssh_append_u32(out, length);
+    let mut j: i64 = start;
+    while j < 33 {
+        if j == 0 {
+            push(out, i64_to_u8(0));        // the 0x00 sign byte
+            0
+        } else {
+            push(out, (*k)[j - 1]);         // a secret byte of K
+            0
+        };
+        j = j + 1;
+    }
+    0
+}
+
+// ---- KEXINIT payload + host-key blob ------------------------------------------
+
+// The SSH_MSG_KEXINIT payload (RFC 4253 §7.1) for a fixed single-algorithm suite:
+// curve25519-sha256 / ssh-ed25519 / aes256-ctr / hmac-sha2-256 / none. `cookie` is
+// the 16 random bytes. This is I_C / I_S in the exchange hash.
+pub fn ssh_kexinit_payload(cookie: &[secret u8]) -> [secret u8] {
+    let mut p: Vec<secret u8> = vec_new();
+    push(&mut p, i64_to_u8(20));                          // SSH_MSG_KEXINIT
+    let mut i: i64 = 0;
+    while i < 16 { push(&mut p, (*cookie)[i]); i = i + 1; }
+    append_str_lit(&mut p, [99, 117, 114, 118, 101, 50, 53, 53, 49, 57, 45, 115, 104, 97, 50, 53, 54], 17);   // "curve25519-sha256"
+    append_str_lit(&mut p, [115, 115, 104, 45, 101, 100, 50, 53, 53, 49, 57], 11);                            // "ssh-ed25519"
+    append_str_lit(&mut p, [97, 101, 115, 50, 53, 54, 45, 99, 116, 114], 10);                                 // enc c->s "aes256-ctr"
+    append_str_lit(&mut p, [97, 101, 115, 50, 53, 54, 45, 99, 116, 114], 10);                                 // enc s->c
+    append_str_lit(&mut p, [104, 109, 97, 99, 45, 115, 104, 97, 50, 45, 50, 53, 54], 13);                     // mac c->s "hmac-sha2-256"
+    append_str_lit(&mut p, [104, 109, 97, 99, 45, 115, 104, 97, 50, 45, 50, 53, 54], 13);                     // mac s->c
+    append_str_lit(&mut p, [110, 111, 110, 101], 4);                                                          // compression c->s "none"
+    append_str_lit(&mut p, [110, 111, 110, 101], 4);                                                          // compression s->c
+    ssh_append_u32(&mut p, 0);                            // languages c->s ""
+    ssh_append_u32(&mut p, 0);                            // languages s->c ""
+    push(&mut p, i64_to_u8(0));                           // first_kex_packet_follows = false
+    ssh_append_u32(&mut p, 0);                            // reserved
+    vec_to_array(p)
+}
+
+// The ssh-ed25519 public host-key blob K_S = string("ssh-ed25519") ‖ string(pubkey).
+pub fn ssh_hostkey_blob(edpub: &[secret u8]) -> [secret u8] {
+    let mut b: Vec<secret u8> = vec_new();
+    append_str_lit(&mut b, [115, 115, 104, 45, 101, 100, 50, 53, 53, 49, 57], 11);   // "ssh-ed25519"
+    ssh_append_string(&mut b, edpub);
+    vec_to_array(b)
+}
+
+// ---- the curve25519-sha256 exchange hash + the KDF ----------------------------
+
+// The exchange hash H = SHA-256(string(V_C) ‖ string(V_S) ‖ string(I_C) ‖ string(I_S)
+// ‖ string(K_S) ‖ string(Q_C) ‖ string(Q_S) ‖ mpint(K)) — RFC 4253 §8 / RFC 8731.
+// V = the identification banners, I = the KEXINIT payloads, K_S = the host-key blob,
+// Q = the 32-byte ephemeral X25519 public keys, K = the shared secret. The result is
+// the SECRET 32-byte hash (it contains K) and is also the first-KEX session id.
+pub fn ssh_exchange_hash(vc: &[secret u8], vs: &[secret u8], ic: &[secret u8], is: &[secret u8],
+                         ks: &[secret u8], qc: &[secret u8], qs: &[secret u8], k: &[secret u8]) -> [secret u8] {
+    let mut t: Vec<secret u8> = vec_new();
+    ssh_append_string(&mut t, vc);
+    ssh_append_string(&mut t, vs);
+    ssh_append_string(&mut t, ic);
+    ssh_append_string(&mut t, is);
+    ssh_append_string(&mut t, ks);
+    ssh_append_string(&mut t, qc);
+    ssh_append_string(&mut t, qs);
+    ssh_append_mpint(&mut t, k);
+    sha256(vec_to_array(t))
+}
+
+// One SSH KDF value (RFC 4253 §7.2): K_x = SHA-256(mpint(K) ‖ H ‖ letter ‖ session_id),
+// truncated to `n` bytes. session_id = H (the first key exchange). `n` ≤ 32 here (one
+// SHA-256 block covers every SSH key size in this suite: 16-byte IVs, 32-byte keys);
+// longer outputs would chain extra blocks. `letter` is the ASCII 'A'..'F'.
+pub fn ssh_kdf(k: &[secret u8], h: &[secret u8], letter: i64, n: i64) -> [secret u8] {
+    let mut blk_in: Vec<secret u8> = vec_new();
+    ssh_append_mpint(&mut blk_in, k);
+    append_raw(&mut blk_in, h, 32);
+    push(&mut blk_in, i64_to_u8(letter));
+    append_raw(&mut blk_in, h, 32);                      // session_id = H
+    let b1: [secret u8] = sha256(vec_to_array(blk_in));
+    let mut out: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut out, b1[i]); i = i + 1; }
+    vec_to_array(out)
+}
