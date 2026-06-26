@@ -1,0 +1,97 @@
+// std/net/ssh_connection.sentinel — the SSH-2 connection protocol message codec
+// (RFC 4254 §5): the channel messages that ride INSIDE the encrypted transport (each
+// one is the payload of a chacha20-poly1305@openssh.com record) once a session is
+// authenticated. This is where real work flows — a "session" channel with windowed
+// flow control.
+//
+// This module is just the wire codec (build a message / read a field); the windowing
+// state machine is the caller's. The channel ids, window sizes, and lengths are PUBLIC
+// protocol metadata (read with `declassify`); only the channel DATA stays secret.
+//
+// Message layouts (RFC 4254):
+//   CHANNEL_OPEN (90)         byte 90 | string "session" | u32 sender | u32 window | u32 maxpkt
+//   OPEN_CONFIRMATION (91)    byte 91 | u32 recipient | u32 sender | u32 window | u32 maxpkt
+//   CHANNEL_WINDOW_ADJUST(93) byte 93 | u32 recipient | u32 bytes_to_add
+//   CHANNEL_DATA (94)         byte 94 | u32 recipient | string data
+//   CHANNEL_CLOSE (97)        byte 97 | u32 recipient
+use std::net::ssh::ssh_append_u32;
+use std::net::ssh::ssh_append_string;
+
+fn lit(data: [i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8(data[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// ---- builders (each returns the connection-layer payload to seal + send) -----------
+
+pub fn ssh_msg_channel_open(sender_ch: i64, window: i64, max_packet: i64) -> [secret u8] {
+    let mut p: Vec<secret u8> = vec_new();
+    push(&mut p, i64_to_u8(90));
+    let stype: [secret u8] = lit([115, 101, 115, 115, 105, 111, 110], 7);   // "session"
+    ssh_append_string(&mut p, &stype);
+    ssh_append_u32(&mut p, sender_ch);
+    ssh_append_u32(&mut p, window);
+    ssh_append_u32(&mut p, max_packet);
+    vec_to_array(p)
+}
+
+pub fn ssh_msg_channel_open_confirm(recipient: i64, sender: i64, window: i64, max_packet: i64) -> [secret u8] {
+    let mut p: Vec<secret u8> = vec_new();
+    push(&mut p, i64_to_u8(91));
+    ssh_append_u32(&mut p, recipient);
+    ssh_append_u32(&mut p, sender);
+    ssh_append_u32(&mut p, window);
+    ssh_append_u32(&mut p, max_packet);
+    vec_to_array(p)
+}
+
+pub fn ssh_msg_channel_window_adjust(recipient: i64, add: i64) -> [secret u8] {
+    let mut p: Vec<secret u8> = vec_new();
+    push(&mut p, i64_to_u8(93));
+    ssh_append_u32(&mut p, recipient);
+    ssh_append_u32(&mut p, add);
+    vec_to_array(p)
+}
+
+pub fn ssh_msg_channel_data(recipient: i64, data: &[secret u8]) -> [secret u8] {
+    let mut p: Vec<secret u8> = vec_new();
+    push(&mut p, i64_to_u8(94));
+    ssh_append_u32(&mut p, recipient);
+    ssh_append_string(&mut p, data);
+    vec_to_array(p)
+}
+
+pub fn ssh_msg_channel_close(recipient: i64) -> [secret u8] {
+    let mut p: Vec<secret u8> = vec_new();
+    push(&mut p, i64_to_u8(97));
+    ssh_append_u32(&mut p, recipient);
+    vec_to_array(p)
+}
+
+// ---- readers (public protocol fields are declassified; data stays secret) ----------
+
+// The message type byte (90 / 91 / 93 / 94 / 97).
+pub fn ssh_msg_type(payload: &[secret u8]) -> i64 {
+    u8_to_i64(declassify((*payload)[0]))
+}
+
+// A big-endian u32 field at `offset` — a channel id, window size, or length (public).
+pub fn ssh_read_u32(payload: &[secret u8], offset: i64) -> i64 {
+    let b0: i64 = u8_to_i64(declassify((*payload)[offset]));
+    let b1: i64 = u8_to_i64(declassify((*payload)[offset + 1]));
+    let b2: i64 = u8_to_i64(declassify((*payload)[offset + 2]));
+    let b3: i64 = u8_to_i64(declassify((*payload)[offset + 3]));
+    b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+}
+
+// The data field of a CHANNEL_DATA message — stays in the secret domain. Layout: the
+// data length is the u32 at offset 5, the bytes follow at offset 9.
+pub fn ssh_channel_data_bytes(payload: &[secret u8]) -> [secret u8] {
+    let dlen: i64 = ssh_read_u32(payload, 5);
+    let mut d: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < dlen { push(&mut d, (*payload)[9 + i]); i = i + 1; }
+    vec_to_array(d)
+}

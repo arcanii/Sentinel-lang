@@ -368,6 +368,14 @@ const EXAMPLES: &[(&str, i32)] = &[
     // to H means a captured signature can't be replayed on another session. 42 = the
     // transport authenticated and the publickey userauth succeeded.
     ("examples/net/ssh_pubkey_auth.sentinel", 42),
+    // The SSH-2 connection layer (RFC 4254) over a real socket: a "session" channel with
+    // windowed flow control, riding inside the encrypted transport. After the handshake,
+    // CHANNEL_OPEN/CONFIRMATION negotiate a 16-byte window, then a 32-byte payload crosses
+    // in two CHANNEL_DATA chunks — the client must wait for a CHANNEL_WINDOW_ADJUST after
+    // the first 16 bytes before sending the rest — and the channel CLOSEs. Each message is
+    // a sealed chacha20-poly1305 record under a per-direction seqnr. 42 = the channel
+    // opened, both windowed chunks reassembled intact, and it closed cleanly.
+    ("examples/net/ssh_channel_window.sentinel", 42),
 ];
 
 #[test]
@@ -553,6 +561,11 @@ fn ssh_full_session_handshake_plus_data() {
 #[test]
 fn ssh_pubkey_auth_userauth() {
     check_example("examples/net/ssh_pubkey_auth.sentinel", "ssh_pubkey_auth", 42);
+}
+
+#[test]
+fn ssh_channel_window_flow_control() {
+    check_example("examples/net/ssh_channel_window.sentinel", "ssh_channel_window", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
