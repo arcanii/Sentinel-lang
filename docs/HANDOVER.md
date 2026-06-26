@@ -56,9 +56,11 @@ record cipher — assembled from it, and the ADR 0056 sockets are now FULLY LIVE
 primitives + compiler builtins + the `scg` mirror), with `examples/net/tcp_echo` running a
 real loopback TCP echo on a concurrent `spawn`ed server task AND `examples/net/ssh_over_tcp`
 running the whole SSH-2 handshake over a real socket (a distributed KEX between separate
-client/server tasks) AND `examples/net/ssh_channel_stream` running the data phase (a
-bidirectional, multi-packet chacha20-poly1305 channel with per-direction seqnr evolution);
-HEAD `894a13d`, 1589 tests,
+client/server tasks), `examples/net/ssh_channel_stream` running the data phase (a
+bidirectional, multi-packet chacha20-poly1305 channel with per-direction seqnr evolution),
+and `examples/net/ssh_full_session` running a COMPLETE session (handshake + data phase) over
+one connection via the factored `std::net::ssh_handshake` API;
+HEAD `e552fdf`, 1590 tests,
 four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
@@ -403,12 +405,20 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     decode). The seqnr is load-bearing — folded into the Poly1305 nonce, so a desynced
     counter fails the tag (proven with a negative probe); the two directions use different
     keys so reusing seqnr i on both at once is safe. So the SSH transport is now real-socket
-    end to end through BOTH the handshake and the data phase. Cleanly open
-    next toward a fuller sshd:
-    fold the handshake (`ssh_over_tcp`) and the data phase (`ssh_channel_stream`) into one
-    continuous session; factor a reusable `ssh_client_handshake`/`ssh_server_handshake`
-    pair (returns the directional keys) so the two stop duplicating the KEX; optionally the
-    `ssh-userauth` / `connection` layers. Also
+    end to end through BOTH the handshake and the data phase. AND the handshake is now
+    FACTORED into a reusable library API — `std::net::ssh_handshake` (`e552fdf`):
+    `ssh_client_handshake` / `ssh_server_handshake` each run their half of the
+    curve25519-sha256 KEX over a connected socket and return an
+    `SshSessionKeys { keyc, keyd, authed }` (the two directional keys + the client's
+    host-key verdict). `examples/net/ssh_full_session` runs a COMPLETE session over one
+    connection via that API: connect → handshake → N encrypted request/response packets →
+    close. ⚠ a struct returned across a module boundary needs the struct type explicitly
+    `use`d for `--separate` (the merge path resolves it transitively through the returning
+    fn; separate compilation of the importing unit does not — "unknown type"). Cleanly open
+    next toward a fuller sshd: the
+    **`ssh-userauth` layer** (publickey auth — the client signs a userauth request bound to
+    the session id = the first exchange hash H, the server verifies it); optionally the
+    `connection` layer (channel open / window). Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
     `u128`** (+ a `tests/pass/cNN` fixture) to fully self-host it (ADR 0055 deferred this
