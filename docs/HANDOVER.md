@@ -51,8 +51,9 @@ reference as you work through the milestones.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
 NINE language gaps closed; a comprehensive constant-time crypto suite shipped; a
-loopback SSH-2 transport KEX assembled from it; HEAD `1b805f4` (std::net::ssh) + docs,
-1583 tests, four-check green).** Real,
+loopback SSH-2 transport — KEX + the chacha20-poly1305@openssh.com record cipher —
+assembled from it; HEAD `8c0083c` (std::net::ssh_cipher) + docs, 1584 tests, four-check
+green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
 guarantee on real code**, and surfaces concrete language gaps — finding + fixing those
@@ -86,7 +87,14 @@ secret domain, run loopback (`examples/net/ssh_handshake`, validated against a P
 model cross-checked vs paramiko + pyca). FINDING: SSH's `mpint` of the secret shared
 secret has a value-dependent length (a ~1-bit side channel); Sentinel's type system
 forces it into an explicit `declassify` (the audit point) — a leak other SSH stacks
-make silently. The cleanly-open next steps are in **Next** below,
+make silently. The **record cipher** has now landed too — `std::net::ssh_cipher`, the
+`chacha20-poly1305@openssh.com` binary-packet AEAD (seal / open / tag-verify) that
+protects every packet after NEWKEYS, composing the shipped ChaCha20 + Poly1305
+(`examples/net/ssh_channel`: a sealed packet matches a pyca-anchored model, the tag
+verifies, the payload round-trips, a tampered record is rejected). So the loopback SSH
+transport is functionally complete; the ONE remaining piece for a real `sshd` is
+implementing ADR 0056's sockets surface. The cleanly-open next steps are in **Next**
+below,
 with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
 
 - **Decisions locked with the owner:** top-level `std/` + `examples/`, each
@@ -341,12 +349,14 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     pure library work. Ed448's port surfaced a real bug the Python model had hidden — its
     Barrett reduction leaned on a final big-int `% L` after only 3 conditional
     subtractions; the constant-time port does 8 always-executed masked subtractions.)
-    Cleanly open next: **toward a real `sshd`** — (a) the SSH record cipher
-    (`chacha20-poly1305@openssh.com` — the openssh AEAD framing over the shipped
-    ChaCha20 + Poly1305) + the SSH binary-packet protocol (NEWKEYS, an encrypted echo
-    channel) to finish the loopback transport, then (b) **implement ADR 0056's sockets
-    surface** (the six builtins snc-side + a localhost echo server) to run the handshake
-    over a real connection. Also open: a `secp256k1` / `P-256` field at radix 2^52 (more
+    Cleanly open next: **toward a real `sshd`** — the loopback transport is now
+    functionally complete (KEX in `std::net::ssh` + the
+    `chacha20-poly1305@openssh.com` record cipher in `std::net::ssh_cipher`), so the
+    remaining step is **implement ADR 0056's sockets surface** (the six builtins
+    snc-side + a localhost echo server) to run the handshake + an encrypted channel over
+    a real TCP connection. (Smaller transport polish if wanted: wire the KEX-derived
+    keys into the record cipher end-to-end + the NEWKEYS/version-exchange message flow;
+    today the KEX and the record cipher are demonstrated separately.) Also open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
     `u128`** (+ a `tests/pass/cNN` fixture) to fully self-host it (ADR 0055 deferred this
     — snc-side only today); more SP 800-185 XOF variants.
