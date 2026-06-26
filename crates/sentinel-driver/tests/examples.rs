@@ -384,6 +384,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // accepted, the output was the expected transform of the command, the exit status was
     // 0, and the channel closed cleanly.
     ("examples/net/ssh_exec.sentinel", 42),
+    // The text/string library (std::text::str): ASCII case folding, trimming, substring
+    // search, slicing, concat/repeat/replace, lexicographic compare, decimal parse/format
+    // (with a parse∘format round-trip property), index-based splitting (split_count /
+    // split_nth, since Vec<[u8]> is unavailable), and padding — ~45 assertions over `[u8]`.
+    // 42 = every string operation behaved as specified.
+    ("examples/text/str_demo.sentinel", 42),
 ];
 
 #[test]
@@ -579,6 +585,11 @@ fn ssh_channel_window_flow_control() {
 #[test]
 fn ssh_exec_command_request() {
     check_example("examples/net/ssh_exec.sentinel", "ssh_exec", 42);
+}
+
+#[test]
+fn text_str_library() {
+    check_example("examples/text/str_demo.sentinel", "str_demo", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

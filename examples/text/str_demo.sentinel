@@ -1,0 +1,146 @@
+// examples/text/str_demo.sentinel — exercises std::text::str (the string library) and
+// checks every function against expected results. Exit 42 = all string operations
+// behaved as specified.
+//
+// This doubles as the feature test for the text library: case folding, trimming,
+// substring search, slicing, concatenation, replacement, comparison, decimal
+// parse/format (with a parse∘format round-trip property), index-based splitting, and
+// padding — all over `[u8]`, the string type.
+use std::bytes::bytes::eq;
+use std::text::str::to_upper;
+use std::text::str::to_lower;
+use std::text::str::trim;
+use std::text::str::trim_start;
+use std::text::str::trim_end;
+use std::text::str::find_sub;
+use std::text::str::contains_sub;
+use std::text::str::ends_with;
+use std::text::str::substr;
+use std::text::str::concat;
+use std::text::str::repeat_str;
+use std::text::str::replace_char;
+use std::text::str::compare;
+use std::text::str::parse_int;
+use std::text::str::int_to_str;
+use std::text::str::split_count;
+use std::text::str::split_nth;
+use std::text::str::pad_start;
+use std::text::str::pad_end;
+
+fn lit(d: [i64], n: i64) -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8(d[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// 0 if the two strings are byte-equal, else 1 (folded into the failure accumulator).
+fn streq(a: [u8], b: [u8]) -> i64 {
+    if eq(&a, &b) { 0 } else { 1 }
+}
+
+fn yes(b: bool) -> i64 { if b { 0 } else { 1 } }
+fn no(b: bool) -> i64 { if b { 1 } else { 0 } }
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- case folding ----
+    let case_in: [u8] = lit([97, 66, 51, 99, 33, 122], 6);    // "aB3c!z"
+    bad = bad + streq(to_upper(&case_in), lit([65, 66, 51, 67, 33, 90], 6));    // "AB3C!Z"
+    bad = bad + streq(to_lower(&case_in), lit([97, 98, 51, 99, 33, 122], 6));   // "ab3c!z"
+
+    // ---- trimming ("  \thi \n ") ----
+    let tw: [u8] = lit([32, 32, 9, 104, 105, 32, 10, 32], 8);
+    bad = bad + streq(trim(&tw), lit([104, 105], 2));                            // "hi"
+    bad = bad + streq(trim_start(&tw), lit([104, 105, 32, 10, 32], 5));          // "hi \n "
+    bad = bad + streq(trim_end(&tw), lit([32, 32, 9, 104, 105], 5));             // "  \thi"
+
+    // ---- substring search ----
+    let hay: [u8] = lit([104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100], 11);   // "hello world"
+    let world: [u8] = lit([119, 111, 114, 108, 100], 5);
+    let xyz: [u8] = lit([120, 121, 122], 3);
+    bad = bad + (if find_sub(&hay, &world) == 6 { 0 } else { 1 });
+    bad = bad + (if find_sub(&hay, &xyz) == 0 - 1 { 0 } else { 1 });
+    bad = bad + yes(contains_sub(&hay, &world));
+    bad = bad + no(contains_sub(&hay, &xyz));
+
+    // ---- ends_with ----
+    let fname: [u8] = lit([104, 101, 108, 108, 111, 46, 116, 120, 116], 9);    // "hello.txt"
+    let dotxt: [u8] = lit([46, 116, 120, 116], 4);                             // ".txt"
+    let z: [u8] = lit([122], 1);
+    bad = bad + yes(ends_with(&fname, &dotxt));
+    bad = bad + no(ends_with(&fname, &z));
+
+    // ---- substr (with clamping) ----
+    let hello: [u8] = lit([104, 101, 108, 108, 111], 5);
+    bad = bad + streq(substr(&hello, 1, 3), lit([101, 108, 108], 3));           // "ell"
+    bad = bad + streq(substr(&hello, 3, 10), lit([108, 111], 2));               // "lo" (clamped)
+
+    // ---- concat / repeat / replace ----
+    let foo: [u8] = lit([102, 111, 111], 3);
+    let bar: [u8] = lit([98, 97, 114], 3);
+    bad = bad + streq(concat(&foo, &bar), lit([102, 111, 111, 98, 97, 114], 6));   // "foobar"
+    let ab: [u8] = lit([97, 98], 2);
+    bad = bad + streq(repeat_str(&ab, 3), lit([97, 98, 97, 98, 97, 98], 6));        // "ababab"
+    let csv: [u8] = lit([97, 44, 98, 44, 99], 5);                                   // "a,b,c"
+    bad = bad + streq(replace_char(&csv, i64_to_u8(44), i64_to_u8(59)), lit([97, 59, 98, 59, 99], 5));   // "a;b;c"
+
+    // ---- compare ----
+    let abc: [u8] = lit([97, 98, 99], 3);
+    let abd: [u8] = lit([97, 98, 100], 3);
+    let ab2: [u8] = lit([97, 98], 2);
+    bad = bad + (if compare(&abc, &abd) == 0 - 1 { 0 } else { 1 });
+    bad = bad + (if compare(&abc, &abc) == 0 { 0 } else { 1 });
+    bad = bad + (if compare(&abd, &abc) == 1 { 0 } else { 1 });
+    bad = bad + (if compare(&ab2, &abc) == 0 - 1 { 0 } else { 1 });
+    bad = bad + (if compare(&abc, &ab2) == 1 { 0 } else { 1 });
+
+    // ---- parse_int ----
+    let neg42: [u8] = lit([45, 52, 50], 3);          // "-42"
+    let mixed: [u8] = lit([49, 50, 51, 97, 98, 99], 6);   // "123abc"
+    let zero: [u8] = lit([48], 1);                    // "0"
+    let empty: [u8] = lit([0], 0);                    // ""
+    bad = bad + (if parse_int(&neg42) == 0 - 42 { 0 } else { 1 });
+    bad = bad + (if parse_int(&mixed) == 123 { 0 } else { 1 });
+    bad = bad + (if parse_int(&zero) == 0 { 0 } else { 1 });
+    bad = bad + (if parse_int(&empty) == 0 { 0 } else { 1 });
+
+    // ---- int_to_str ----
+    bad = bad + streq(int_to_str(0), lit([48], 1));                       // "0"
+    bad = bad + streq(int_to_str(0 - 42), lit([45, 52, 50], 3));          // "-42"
+    bad = bad + streq(int_to_str(12345), lit([49, 50, 51, 52, 53], 5));   // "12345"
+
+    // ---- parse∘format round-trip property ----
+    let r0: [u8] = int_to_str(0);
+    let r1: [u8] = int_to_str(7);
+    let r2: [u8] = int_to_str(0 - 42);
+    let r3: [u8] = int_to_str(12345);
+    let r4: [u8] = int_to_str(0 - 1000000);
+    bad = bad + (if parse_int(&r0) == 0 { 0 } else { 1 });
+    bad = bad + (if parse_int(&r1) == 7 { 0 } else { 1 });
+    bad = bad + (if parse_int(&r2) == 0 - 42 { 0 } else { 1 });
+    bad = bad + (if parse_int(&r3) == 12345 { 0 } else { 1 });
+    bad = bad + (if parse_int(&r4) == 0 - 1000000 { 0 } else { 1 });
+
+    // ---- splitting by index ----
+    let csv2: [u8] = lit([97, 98, 99], 3);            // "abc" (no sep)
+    let csv3: [u8] = lit([97, 44, 44, 98], 4);        // "a,,b"
+    let fields: [u8] = lit([97, 44, 98, 98, 44, 99, 99, 99], 8);   // "a,bb,ccc"
+    bad = bad + (if split_count(&csv, i64_to_u8(44)) == 3 { 0 } else { 1 });
+    bad = bad + (if split_count(&csv2, i64_to_u8(44)) == 1 { 0 } else { 1 });
+    bad = bad + (if split_count(&csv3, i64_to_u8(44)) == 3 { 0 } else { 1 });
+    bad = bad + streq(split_nth(&fields, i64_to_u8(44), 0), lit([97], 1));          // "a"
+    bad = bad + streq(split_nth(&fields, i64_to_u8(44), 1), lit([98, 98], 2));      // "bb"
+    bad = bad + streq(split_nth(&fields, i64_to_u8(44), 2), lit([99, 99, 99], 3));  // "ccc"
+    bad = bad + streq(split_nth(&fields, i64_to_u8(44), 5), lit([0], 0));           // "" (out of range)
+
+    // ---- padding ----
+    let seven: [u8] = lit([55], 1);                   // "7"
+    let abcd: [u8] = lit([97, 98, 99, 100], 4);
+    bad = bad + streq(pad_start(&seven, 3, i64_to_u8(48)), lit([48, 48, 55], 3));   // "007"
+    bad = bad + streq(pad_end(&seven, 3, i64_to_u8(48)), lit([55, 48, 48], 3));     // "700"
+    bad = bad + streq(pad_start(&abcd, 3, i64_to_u8(48)), lit([97, 98, 99, 100], 4));   // no-op
+
+    if bad == 0 { 42 } else { 5 }
+}
