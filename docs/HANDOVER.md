@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
 EIGHT language gaps closed; a comprehensive constant-time crypto suite shipped; HEAD
-`b6e031b` (KMAC) + docs, 1577 tests, four-check green).** Real, idiomatic Sentinel
+`57d7aa8` (HKDF) + docs, 1578 tests, four-check green).** Real, idiomatic Sentinel
 programs that double as feature tests + the first **core libraries**. **Dogfoods
 modules + `--separate`**, **stress-tests the constant-time guarantee on real code**,
 and surfaces concrete language gaps — finding + fixing those is the most valuable
@@ -60,9 +60,10 @@ vectors: **hashes** SHA-256 / SHA-512 / SHA-3 (SHA3-256/512); **XOFs** SHAKE128/
 **MACs** HMAC-SHA256 + KMAC128/256; **AEAD** ChaCha20-Poly1305 + AES-128-GCM; **block
 cipher** AES-128 (table-free field-inversion S-box); **key exchange** X25519; and
 **signatures** Ed25519 (SIGN + VERIFY, the latter with point decompression via a field
-sqrt + the `S < L` malleability check). The shared `fe25519` field underpins X25519 +
+sqrt + the `S < L` malleability check); and **KDF** HKDF-SHA256 (RFC 5869, extract-then-
+expand composing HMAC). The shared `fe25519` field underpins X25519 +
 Ed25519. The eighth language gap (`&mut a[i]` element borrows, ADR 0054) is closed.
-The cleanly-open next steps are in **Next** below (HKDF; more SP 800-185 modes
+The cleanly-open next steps are in **Next** below (more SP 800-185 modes
 [TupleHash/ParallelHash]; X448/Ed448; the next real NUMERIC gap is still un-surfaced),
 with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
 
@@ -307,15 +308,18 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (open, owner's call — none yet approved):**
   - **More crypto** — the §2.8.2 vector, SHA-256/512, SHA-3 (Keccak sponge), HMAC,
-    AES + AES-GCM, X25519, and Ed25519 (SIGN + VERIFY) are all shipped — a full
-    asymmetric + symmetric + hash + XOF + keyed-MAC suite (incl. KMAC128/256). Cleanly
-    open: **HKDF** (composes the shipped HMAC — extract + expand); **cSHAKE / TupleHash
-    / ParallelHash** (more SP 800-185 modes — cSHAKE is already internal to KMAC);
-    **X448 / Ed448** (a larger curve — radix-2^28 likely still fits i64); or a curve /
-    bignum primitive over a field that actually needs the radix-2^51 / 128-bit-multiply
-    path. NOTE: every shipped primitive (incl. X25519 + Ed25519 + SHA-3/SHAKE/KMAC) fits
-    64-bit limbs with NO 128-bit arithmetic, so the "next real numeric gap" (128-bit mul
-    / bigint) is STILL un-surfaced — no shipped program has demanded it.
+    HKDF, AES + AES-GCM, X25519, and Ed25519 (SIGN + VERIFY) are all shipped — a full
+    asymmetric + symmetric + hash + XOF + keyed-MAC + KDF suite (incl. KMAC128/256 +
+    HKDF-SHA256). Cleanly open: **cSHAKE / TupleHash / ParallelHash** (more SP 800-185
+    modes — cSHAKE is already internal to KMAC); **X448 / Ed448** (a larger curve —
+    radix-2^28 likely still fits i64); or a curve / bignum primitive over a field that
+    actually needs the radix-2^51 / 128-bit-multiply path. NOTE: every shipped primitive
+    (incl. X25519 + Ed25519 + SHA-3/SHAKE/KMAC + HKDF) fits 64-bit limbs with NO 128-bit
+    arithmetic, so the "next real numeric gap" (128-bit mul / bigint) is STILL
+    un-surfaced — no shipped program has demanded it. (HKDF added nothing here: it is a
+    pure composition of the shipped HMAC — no language change, no new fixture; the
+    expand loop rebuilds a fresh key copy per block since `hmac_sha256` consumes its
+    key, and an empty `[secret u8]` salt yields the RFC PRK via HMAC zero-padding.)
   - **Two deferred items from the list, now LOW value — recommend skipping unless
     wanted:**
     - **array-repeat `[x; N]`** — SHA-256/HMAC built cleanly WITHOUT it (`Vec<secret T>`

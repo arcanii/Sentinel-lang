@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-06-24)
+## Current State (2026-06-26)
 
 > **Phase C closed at Sentinel 1.0 (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -66,7 +66,8 @@ the current state of the workspace without re-reading every commit.
   over a secret key; `aead` ChaCha20-Poly1305 AEAD composing them; `sha256` /
   `sha512` constant-time SHA-256 / SHA-512 + `sha3` SHA3-256/512 + SHAKE128/256 XOFs +
   KMAC128/256 keyed MACs (the Keccak sponge / SP 800-185) over a `secret` message; `hmac`
-  HMAC-SHA256 over a `secret` key; `aes` a constant-time AES-128 block cipher with a
+  HMAC-SHA256 over a `secret` key; `hkdf` HKDF-SHA256 extract-then-expand key
+  derivation (RFC 5869, composing `hmac`); `aes` a constant-time AES-128 block cipher with a
   table-free, field-inversion S-box; `aes_gcm` constant-time AES-128-GCM AEAD (GHASH
   GF(2^128)); `fe25519` the shared GF(2^255-19) field; `x25519` constant-time X25519
   ECDH over a `secret` scalar (RFC 7748 — the first public-key primitive); `ed25519`
