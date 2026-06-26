@@ -102,6 +102,10 @@ the current state of the workspace without re-reading every commit.
   do a distributed curve25519-sha256 KEX (each derives K independently; the wire-public
   values are `declassify`d to send and widened back to `[secret u8]` on receipt, K never
   crossing the wire), host-key auth, key derivation, and an encrypted record round-trip.
+  `examples/net/ssh_channel_stream` runs the **data phase**: a bidirectional, multi-packet
+  encrypted channel — both directional keys (`C`/`D`), a request/response ping-pong of N
+  `chacha20-poly1305@openssh.com` records each way under per-direction sequence numbers
+  (a fresh nonce per packet), each record tag-verified before it is decrypted.
   The
   crypto examples reproduce the
   canonical test vectors (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 /
@@ -189,7 +193,7 @@ the current state of the workspace without re-reading every commit.
   (a table-free field-inversion S-box, a branch-free mask-based conditional swap). See
   the `sentinel_examples_and_corelibs` auto-memory.
 
-**1588 tests across the workspace**, four-check green (build · `cargo nextest`
+**1589 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

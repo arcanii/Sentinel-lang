@@ -56,7 +56,9 @@ record cipher — assembled from it, and the ADR 0056 sockets are now FULLY LIVE
 primitives + compiler builtins + the `scg` mirror), with `examples/net/tcp_echo` running a
 real loopback TCP echo on a concurrent `spawn`ed server task AND `examples/net/ssh_over_tcp`
 running the whole SSH-2 handshake over a real socket (a distributed KEX between separate
-client/server tasks); HEAD `aac69a8`, 1588 tests,
+client/server tasks) AND `examples/net/ssh_channel_stream` running the data phase (a
+bidirectional, multi-packet chacha20-poly1305 channel with per-direction seqnr evolution);
+HEAD `894a13d`, 1589 tests,
 four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
@@ -393,10 +395,20 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     reference. So the loopback `sshd` transport is now REAL-SOCKET end to end. A thin `std/net/tcp` wrapper now factors the socket-boundary helpers (`read_exact`
     + the secret<->public `declassify_bytes`/`append_declassified`/`widen_bytes` + a
     `loopback_host`) out of both socket examples (`8ba497c`; `ssh_over_tcp` and `tcp_echo`
-    both dogfood it). Cleanly open
-    next toward a fuller sshd: a
-    bidirectional / multi-packet channel (seqnr-incrementing record stream both ways);
-    optionally the `ssh-userauth` / `connection` layers. Also
+    both dogfood it). AND the data phase now runs too — `examples/net/ssh_channel_stream`
+    (`894a13d`): a bidirectional, multi-packet encrypted channel over a real socket — both
+    directional keys ('C'/'D', RFC 4253 §7.2), a request/response ping-pong of N
+    `chacha20-poly1305@openssh.com` records each way, each under its per-direction seqnr (a
+    fresh nonce per packet), every record tag-verified BEFORE it is decrypted (verify-then-
+    decode). The seqnr is load-bearing — folded into the Poly1305 nonce, so a desynced
+    counter fails the tag (proven with a negative probe); the two directions use different
+    keys so reusing seqnr i on both at once is safe. So the SSH transport is now real-socket
+    end to end through BOTH the handshake and the data phase. Cleanly open
+    next toward a fuller sshd:
+    fold the handshake (`ssh_over_tcp`) and the data phase (`ssh_channel_stream`) into one
+    continuous session; factor a reusable `ssh_client_handshake`/`ssh_server_handshake`
+    pair (returns the directional keys) so the two stop duplicating the KEX; optionally the
+    `ssh-userauth` / `connection` layers. Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
     `u128`** (+ a `tests/pass/cNN` fixture) to fully self-host it (ADR 0055 deferred this
