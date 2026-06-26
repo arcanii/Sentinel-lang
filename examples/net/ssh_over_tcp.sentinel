@@ -1,0 +1,240 @@
+// examples/net/ssh_over_tcp.sentinel — the SSH-2 transport handshake run over a REAL
+// TCP socket: a distributed curve25519-sha256 key exchange + ssh-ed25519 host-key
+// auth + the §7.2 KDF + an encrypted application packet, with the client and server
+// as SEPARATE concurrent tasks exchanging bytes over loopback.
+//
+// This is `examples/net/ssh_session` (the in-memory reference) lifted onto the ADR
+// 0056 sockets: instead of one function computing both peers' views in memory, the
+// server runs on a `spawn`ed task (an OS thread) bound to a real listener, and the
+// client (the main task) connects to it. Each side holds ONLY its own secret scalar
+// and derives the shared secret K independently — a real distributed Diffie-Hellman.
+//
+//   CLIENT --[ Q_C (32) ]----------------------------------> SERVER
+//   CLIENT <--[ Q_S (32) | hostpub (32) | sig (64) | record (64) ]-- SERVER
+//
+// THE TRUST BOUNDARY (the point of doing this in Sentinel). Everything the crypto
+// touches — the ephemeral scalars, K, the exchange hash H, the session key, the
+// plaintext — is `[secret u8]`, so the whole handshake runs in the secret domain and
+// the build is the constant-time proof. But a socket carries PUBLIC bytes. The values
+// that legitimately go on the wire (the ephemeral PUBLIC keys, the host public key,
+// the signature, the ciphertext record) are exactly the public ones, so sending them
+// is an explicit `declassify` per byte; bytes arriving FROM the socket are public and
+// are widened back into the secret domain (public->secret, ADR 0049) before they feed
+// the crypto. The secret shared secret K and the session key NEVER cross the socket.
+//
+// Exit 42 = the two peers independently agreed on H, the host-key signature verified,
+// the derived session key matched the known-good vector, and the encrypted application
+// packet round-tripped across the wire.
+use std::math::num::abs;
+use std::security::x25519::x25519;
+use std::security::ed25519::ed25519_pubkey;
+use std::security::ed25519::ed25519_sign;
+use std::security::ed25519::ed25519_verify;
+use std::net::ssh::ssh_kexinit_payload;
+use std::net::ssh::ssh_hostkey_blob;
+use std::net::ssh::ssh_exchange_hash;
+use std::net::ssh::ssh_kdf;
+use std::net::ssh_cipher::ssh_seal;
+use std::net::ssh_cipher::ssh_open_verify;
+use std::net::ssh_cipher::ssh_open_payload;
+
+// ---- secret-domain constructors (shared protocol constants + each peer's secrets) --
+
+fn mk(data: [i64], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, i64_to_u8(data[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn copy_n(a: &[secret u8], n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, (*a)[i]); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn base9() -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    push(&mut v, i64_to_u8(9));
+    let mut i: i64 = 0;
+    while i < 31 { push(&mut v, i64_to_u8(0)); i = i + 1; }
+    vec_to_array(v)
+}
+
+fn eph_c() -> [secret u8] { mk([17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17], 32) }
+fn eph_s() -> [secret u8] { mk([34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34], 32) }
+fn host_seed() -> [secret u8] { mk([57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88], 32) }
+fn cookie_c() -> [secret u8] { mk([16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], 16) }
+fn cookie_s() -> [secret u8] { mk([32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47], 16) }
+fn banner() -> [secret u8] { mk([83, 83, 72, 45, 50, 46, 48, 45, 83, 101, 110, 116, 105, 110, 101, 108, 95, 48, 46, 49], 20) }
+fn echo_payload() -> [secret u8] { mk([101, 99, 104, 111, 58, 32, 105, 116, 32, 119, 111, 114, 107, 115, 32, 111, 118, 101, 114, 32, 83, 101, 110, 116, 105, 110, 101, 108, 32, 83, 83, 72], 32) }   // "echo: it works over Sentinel SSH"
+
+// ---- the socket boundary: secret<->public byte conversions + a full-length read ----
+
+// "127.0.0.1" as ASCII bytes for tcp_connect.
+fn loopback_host() -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    push(&mut v, i64_to_u8(49)); push(&mut v, i64_to_u8(50)); push(&mut v, i64_to_u8(55));
+    push(&mut v, i64_to_u8(46)); push(&mut v, i64_to_u8(48)); push(&mut v, i64_to_u8(46));
+    push(&mut v, i64_to_u8(48)); push(&mut v, i64_to_u8(46)); push(&mut v, i64_to_u8(49));
+    vec_to_array(v)
+}
+
+// secret [u8] -> public [u8] (a declassify per byte — these bytes are wire-public).
+fn declass(s: &[secret u8], n: i64) -> [u8] {
+    let mut v: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, declassify((*s)[i])); i = i + 1; }
+    vec_to_array(v)
+}
+
+// append the declassified bytes of a secret slice onto a public output buffer.
+fn append_declass(out: &mut Vec<u8>, s: &[secret u8], n: i64) -> i64 {
+    let mut i: i64 = 0;
+    while i < n { push(out, declassify((*s)[i])); i = i + 1; }
+    0
+}
+
+// a window of a public buffer, widened back into the secret domain (public->secret).
+fn widen_slice(p: &[u8], start: i64, n: i64) -> [secret u8] {
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n { push(&mut v, (*p)[start + i]); i = i + 1; }
+    vec_to_array(v)
+}
+
+// read exactly `n` bytes (TCP may deliver a write in several reads); stops early on
+// EOF/error so a dead peer can't hang the loop (the caller length-checks the result).
+fn read_exact(conn: i64, n: i64) -> [u8] {
+    let mut acc: Vec<u8> = vec_new();
+    let mut got: i64 = 0;
+    while got < n {
+        let chunk: [u8] = tcp_read(conn, n - got);
+        let clen: i64 = len(chunk);
+        let mut j: i64 = 0;
+        while j < clen { push(&mut acc, chunk[j]); j = j + 1; }
+        if clen <= 0 { got = n + 1; 0 } else { got = got + clen; 0 };
+    }
+    vec_to_array(acc)
+}
+
+// compare a recovered secret slice against an expected public vector (XOR-fold).
+fn diff(got: &[secret u8], exp: [i64], n: i64) -> i64 {
+    let mut bad: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n { bad = bad | (u8_to_i64(declassify((*got)[i])) ^ exp[i]); i = i + 1; }
+    bad
+}
+
+// ---- the server task: a real sshd's transport half, on a spawned OS thread --------
+
+fn ssh_server(listener: i64) -> i64 ! { Async } {
+    let conn: i64 = tcp_accept(listener);
+    if conn < 0 {
+        0 - 1
+    } else {
+        // 1. receive the client's ephemeral public key, widen into the secret domain.
+        let qc_pub: [u8] = read_exact(conn, 32);
+        if len(qc_pub) < 32 {
+            tcp_close(conn);
+            0 - 2
+        } else {
+            let qcv: [secret u8] = widen_slice(&qc_pub, 0, 32);
+
+            // 2. our own ephemeral + host key; the shared secret K = eph_s . Q_C.
+            let qsv: [secret u8] = x25519(eph_s(), base9());
+            let hpubv: [secret u8] = ed25519_pubkey(host_seed());
+            let ks: [secret u8] = x25519(eph_s(), copy_n(&qcv, 32));
+
+            // 3. the exchange hash H (all eight inputs), then sign it with the host key.
+            let cc: [secret u8] = cookie_c();
+            let cs: [secret u8] = cookie_s();
+            let vb: [secret u8] = banner();
+            let ic: [secret u8] = ssh_kexinit_payload(&cc);
+            let is: [secret u8] = ssh_kexinit_payload(&cs);
+            let ksb: [secret u8] = ssh_hostkey_blob(&hpubv);
+            let h: [secret u8] = ssh_exchange_hash(&vb, &vb, &ic, &is, &ksb, &qcv, &qsv, &ks);
+            let sig: [secret u8] = ed25519_sign(host_seed(), copy_n(&h, 32));
+
+            // 4. derive the session key and seal one application packet under it.
+            let keyc: [secret u8] = ssh_kdf(&ks, &h, 67, 64);
+            let ep: [secret u8] = echo_payload();
+            let record: [secret u8] = ssh_seal(&keyc, 0, &ep);
+
+            // 5. ship the wire-public values: Q_S | hostpub | sig | record (192 bytes).
+            let mut resp: Vec<u8> = vec_new();
+            append_declass(&mut resp, &qsv, 32);
+            append_declass(&mut resp, &hpubv, 32);
+            append_declass(&mut resp, &sig, 64);
+            append_declass(&mut resp, &record, 64);
+            let resp_bytes: [u8] = vec_to_array(resp);
+            tcp_write(conn, resp_bytes);
+            tcp_close(conn);
+            0
+        }
+    }
+}
+
+fn main() -> i64 {
+    let listener: i64 = tcp_listen(0);          // ephemeral 127.0.0.1 port
+    if listener < 0 {
+        1
+    } else {
+        let port: i64 = tcp_local_port(listener);
+        let result: i64 = scope concurrent {
+            let server = spawn ssh_server(listener);
+
+            // ---- client: connect and send our ephemeral public key Q_C. ----
+            let host: [u8] = loopback_host();
+            let conn: i64 = tcp_connect(host, port);
+            let qcv: [secret u8] = x25519(eph_c(), base9());
+            let qc_pub: [u8] = declass(&qcv, 32);
+            tcp_write(conn, qc_pub);
+
+            // ---- read the server's response, widen the four fields. ----
+            let resp: [u8] = read_exact(conn, 192);
+            tcp_close(conn);
+            let srv: i64 = server.await;
+
+            if len(resp) < 192 {
+                7
+            } else {
+                let qsv: [secret u8] = widen_slice(&resp, 0, 32);
+                let hpubv: [secret u8] = widen_slice(&resp, 32, 32);
+                let sig: [secret u8] = widen_slice(&resp, 64, 64);
+                let record: [secret u8] = widen_slice(&resp, 128, 64);
+
+                // ---- derive K = eph_c . Q_S and recompute H exactly as the server did. ----
+                let kc: [secret u8] = x25519(eph_c(), copy_n(&qsv, 32));
+                let cc: [secret u8] = cookie_c();
+                let cs: [secret u8] = cookie_s();
+                let vb: [secret u8] = banner();
+                let ic: [secret u8] = ssh_kexinit_payload(&cc);
+                let is: [secret u8] = ssh_kexinit_payload(&cs);
+                let ksb: [secret u8] = ssh_hostkey_blob(&hpubv);
+                let h: [secret u8] = ssh_exchange_hash(&vb, &vb, &ic, &is, &ksb, &qcv, &qsv, &kc);
+
+                let mut bad: i64 = abs(srv);
+                bad = bad | diff(&h, [96, 28, 31, 49, 76, 176, 115, 200, 132, 223, 42, 223, 114, 251, 9, 245, 140, 11, 122, 139, 160, 253, 52, 50, 244, 16, 165, 187, 64, 86, 5, 180], 32);
+
+                // ---- authenticate the server: verify its signature over H. ----
+                let ok: i64 = ed25519_verify(copy_n(&hpubv, 32), copy_n(&h, 32), sig);
+                if ok == 1 { bad = bad | 0; 0 } else { bad = bad | 16; 0 };
+
+                // ---- derive the same session key and open the application packet. ----
+                let keyc: [secret u8] = ssh_kdf(&kc, &h, 67, 64);
+                bad = bad | diff(&keyc, [172, 214, 253, 157, 251, 132, 14, 195, 33, 74, 78, 11, 251, 153, 21, 223, 138, 41, 110, 92, 174, 2, 182, 43, 68, 113, 167, 136, 102, 155, 118, 33, 48, 152, 218, 26, 197, 230, 50, 247, 29, 15, 172, 105, 119, 66, 193, 153, 150, 184, 111, 125, 23, 193, 114, 108, 76, 144, 46, 95, 2, 102, 54, 249], 64);
+
+                let auth: i64 = ssh_open_verify(&keyc, 0, &record);
+                if auth == 1 { bad = bad | 0; 0 } else { bad = bad | 32; 0 };
+                let recovered: [secret u8] = ssh_open_payload(&keyc, 0, &record);
+                bad = bad | diff(&recovered, [101, 99, 104, 111, 58, 32, 105, 116, 32, 119, 111, 114, 107, 115, 32, 111, 118, 101, 114, 32, 83, 101, 110, 116, 105, 110, 101, 108, 32, 83, 83, 72], 32);
+
+                if bad == 0 { 42 } else { 5 }
+            }
+        };
+        tcp_close(listener);
+        result
+    }
+}

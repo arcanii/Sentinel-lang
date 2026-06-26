@@ -334,6 +334,16 @@ const EXAMPLES: &[(&str, i32)] = &[
     // kernel sockets, not in-memory buffers. The substrate a networked sshd runs on.
     // 42 = the byte round-trip matched and the server task joined cleanly.
     ("examples/net/tcp_echo.sentinel", 42),
+    // The SSH-2 transport handshake run over a REAL TCP socket (std::net::ssh +
+    // ssh_cipher + ADR 0056 sockets): the client and server are separate concurrent
+    // tasks that exchange the curve25519-sha256 KEX values over loopback — each holds
+    // only its own ephemeral secret and derives the shared secret K independently (a
+    // real distributed Diffie-Hellman). The wire-public values (ephemeral pubkeys, host
+    // key, signature, ciphertext record) are declassified to send and widened back to
+    // the secret domain on receipt; K and the session key never cross the socket. 42 =
+    // the two peers agreed on the exchange hash H, the host-key signature verified, the
+    // derived session key matched, and the encrypted application packet round-tripped.
+    ("examples/net/ssh_over_tcp.sentinel", 42),
 ];
 
 #[test]
@@ -499,6 +509,11 @@ fn ssh_session_end_to_end() {
 #[test]
 fn tcp_echo_loopback() {
     check_example("examples/net/tcp_echo.sentinel", "tcp_echo", 42);
+}
+
+#[test]
+fn ssh_over_tcp_distributed_handshake() {
+    check_example("examples/net/ssh_over_tcp.sentinel", "ssh_over_tcp", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
