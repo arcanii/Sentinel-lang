@@ -1,0 +1,83 @@
+// examples/data/json_demo.sentinel — exercises std::data::json (parse + serialize) and
+// checks it against expected results. Exit 42 = JSON round-trips and parses correctly.
+//
+// This doubles as the feature test for the JSON library: a parse∘serialize round-trip
+// over a comprehensive document and atoms (numbers, strings, booleans, null, nested
+// arrays + objects), whitespace insensitivity, string escapes, and a parse-then-`match`
+// extraction. The value is a cons-list recursive enum; serialize CONSUMES it.
+use std::data::json::Json;
+use std::data::json::json_parse;
+use std::data::json::json_stringify;
+use std::bytes::bytes::eq;
+
+// round-trip: parse `doc`, serialize, and require the output equals `doc` (so `doc`
+// must be canonical — no insignificant whitespace).
+fn rt(doc: [u8]) -> i64 {
+    let v: Json = json_parse(&doc);
+    let out: [u8] = json_stringify(v);
+    if eq(&out, &doc) { 0 } else { 1 }
+}
+
+// parse `doc`, serialize, and require the output equals `exp` (for non-canonical input).
+fn rt2(doc: [u8], exp: [u8]) -> i64 {
+    let v: Json = json_parse(&doc);
+    let out: [u8] = json_stringify(v);
+    if eq(&out, &exp) { 0 } else { 1 }
+}
+
+// parse `doc` and, if it is a number, return its value (else a sentinel).
+fn num_of(doc: [u8]) -> i64 {
+    let v: Json = json_parse(&doc);
+    match v {
+        Json::Num(n) => n,
+        Json::Null => 0 - 999,
+        Json::Bool(b) => 0 - 999,
+        Json::Str(s) => 0 - 999,
+        Json::ArrNil => 0 - 999,
+        Json::ArrCons(a, b) => 0 - 999,
+        Json::ObjNil => 0 - 999,
+        Json::ObjCons(k, vv, r) => 0 - 999,
+    }
+}
+
+fn main() -> i64 {
+    let mut bad: i64 = 0;
+
+    // ---- atoms round-trip ----
+    bad = bad + rt("42");
+    bad = bad + rt("-7");
+    bad = bad + rt("0");
+    bad = bad + rt("true");
+    bad = bad + rt("false");
+    bad = bad + rt("null");
+    bad = bad + rt("\"hi\"");
+    bad = bad + rt("[]");
+    bad = bad + rt("{}");
+
+    // ---- composites round-trip ----
+    bad = bad + rt("[1,2,3]");
+    bad = bad + rt("[[1],[2,3]]");
+    bad = bad + rt("{\"x\":1}");
+    bad = bad + rt("{\"a\":[1,2],\"b\":{\"c\":true}}");
+
+    // ---- a comprehensive canonical document ----
+    bad = bad + rt("{\"name\":\"sentinel\",\"n\":42,\"neg\":-7,\"ok\":true,\"no\":false,\"nil\":null,\"tags\":[\"a\",\"b\"],\"nested\":{\"x\":1}}");
+
+    // ---- whitespace insensitivity (non-canonical input -> canonical output) ----
+    bad = bad + rt2("[ 1 ,  2 , 3 ]", "[1,2,3]");
+    bad = bad + rt2("{ \"a\" : 1 , \"b\" : 2 }", "{\"a\":1,\"b\":2}");
+
+    // ---- string escapes: a JSON string containing a quote and a backslash ----
+    bad = bad + rt("\"a\\\"b\"");      // JSON string  "a\"b"  round-trips
+    bad = bad + rt("\"c\\\\d\"");      // JSON string  "c\\d"  round-trips
+
+    // ---- fractional part is dropped (no float type) ----
+    bad = bad + rt2("3.75", "3");
+
+    // ---- parse then match ----
+    bad = bad + (if num_of("42") == 42 { 0 } else { 1 });
+    bad = bad + (if num_of("-100") == 0 - 100 { 0 } else { 1 });
+    bad = bad + (if num_of("true") == 0 - 999 { 0 } else { 1 });   // not a number
+
+    if bad == 0 { 42 } else { 5 }
+}

@@ -1,0 +1,325 @@
+// std::data::json — a JSON parser + serializer over `[u8]`.
+//
+// The JSON value is a recursive enum. Arrays and objects are CONS-LISTS (nested
+// recursive variants, like a Lisp list) rather than `Vec<Json>`: the D.3 `Vec` MVP
+// can't hold a `Vec<enum>` and can't move a non-Copy element out of a `Vec` by index,
+// but a recursive enum with a consuming `match` builds + frees cleanly (ADR 0032 A1 /
+// the self-host AST). So `[a, b]` is `ArrCons(a, ArrCons(b, ArrNil))` and `{"k": v}` is
+// `ObjCons("k", v, ObjNil)`.
+//
+// NUMBERS are integers (`i64`): the language has no float type, so a JSON number is
+// parsed as its integer part (a fractional part, if present, is skipped). Strings
+// handle the `\" \\ \n \t` escapes. This is a PUBLIC (not constant-time) library —
+// it branches on byte values, so it must not parse `secret` data.
+use std::text::str::int_to_str;
+
+pub enum Json {
+    Null,
+    Bool(i64),          // 0 = false, 1 = true
+    Num(i64),
+    Str([u8]),
+    ArrNil,
+    ArrCons(Json, Json),        // (element, rest-of-array)
+    ObjNil,
+    ObjCons([u8], Json, Json),  // (key, value, rest-of-object)
+}
+
+// A parse cursor: the current offset into the input (the input is threaded separately
+// as a `&[u8]`).
+struct PC { pos: i64 }
+
+fn is_ws(ch: i64) -> bool {
+    ch == 32 || ch == 9 || ch == 10 || ch == 13
+}
+
+// The current byte as an i64, or -1 at end of input.
+fn peek(s: &[u8], c: &PC) -> i64 {
+    if (*c).pos < len(*s) { u8_to_i64((*s)[(*c).pos]) } else { 0 - 1 }
+}
+
+fn skip_ws(s: &[u8], c: &mut PC) -> i64 {
+    let n: i64 = len(*s);
+    let mut go: bool = true;
+    while (*c).pos < n && go {
+        if is_ws(u8_to_i64((*s)[(*c).pos])) { (*c).pos = (*c).pos + 1; 0 } else { go = false; 0 };
+    }
+    0
+}
+
+// ---- parsing ----------------------------------------------------------------------
+
+// Parse a `"..."` string, returning its (unescaped) content bytes.
+fn parse_string(s: &[u8], c: &mut PC) -> [u8] {
+    (*c).pos = (*c).pos + 1;    // opening quote
+    let n: i64 = len(*s);
+    let mut out: Vec<u8> = vec_new();
+    let mut done: bool = false;
+    while (*c).pos < n && done == false {
+        let ch: i64 = u8_to_i64((*s)[(*c).pos]);
+        if ch == 34 {
+            (*c).pos = (*c).pos + 1;
+            done = true;
+            0
+        } else {
+            if ch == 92 {
+                (*c).pos = (*c).pos + 1;
+                let e: i64 = u8_to_i64((*s)[(*c).pos]);
+                let real: i64 = if e == 110 { 10 } else { if e == 116 { 9 } else { e } };
+                push(&mut out, i64_to_u8(real));
+                (*c).pos = (*c).pos + 1;
+                0
+            } else {
+                push(&mut out, (*s)[(*c).pos]);
+                (*c).pos = (*c).pos + 1;
+                0
+            }
+        };
+    }
+    vec_to_array(out)
+}
+
+// Parse an integer (optional '-'); a fractional/exponent part, if present, is skipped.
+fn parse_number(s: &[u8], c: &mut PC) -> Json {
+    let n: i64 = len(*s);
+    let mut neg: bool = false;
+    if peek(s, &(*c)) == 45 { neg = true; (*c).pos = (*c).pos + 1; 0 } else { 0 };
+    let mut acc: i64 = 0;
+    let mut go: bool = true;
+    while (*c).pos < n && go {
+        let ch: i64 = u8_to_i64((*s)[(*c).pos]);
+        if ch >= 48 && ch <= 57 { acc = acc * 10 + (ch - 48); (*c).pos = (*c).pos + 1; 0 } else { go = false; 0 };
+    }
+    // skip a fractional part ('.', digits) — no float type, so it's dropped.
+    let mut go2: bool = true;
+    if peek(s, &(*c)) == 46 {
+        (*c).pos = (*c).pos + 1;
+        while (*c).pos < n && go2 {
+            let ch2: i64 = u8_to_i64((*s)[(*c).pos]);
+            if ch2 >= 48 && ch2 <= 57 { (*c).pos = (*c).pos + 1; 0 } else { go2 = false; 0 };
+        }
+        0
+    } else {
+        0
+    };
+    if neg { Json::Num(0 - acc) } else { Json::Num(acc) }
+}
+
+fn parse_array_elems(s: &[u8], c: &mut PC) -> Json {
+    let elem: Json = parse_value(s, c);
+    skip_ws(s, c);
+    let ch: i64 = peek(s, &(*c));
+    (*c).pos = (*c).pos + 1;    // consume ',' or ']'
+    if ch == 44 {
+        Json::ArrCons(elem, parse_array_elems(s, c))
+    } else {
+        Json::ArrCons(elem, Json::ArrNil)
+    }
+}
+
+fn parse_array(s: &[u8], c: &mut PC) -> Json {
+    (*c).pos = (*c).pos + 1;    // '['
+    skip_ws(s, c);
+    if peek(s, &(*c)) == 93 {
+        (*c).pos = (*c).pos + 1;
+        Json::ArrNil
+    } else {
+        parse_array_elems(s, c)
+    }
+}
+
+fn parse_object_members(s: &[u8], c: &mut PC) -> Json {
+    skip_ws(s, c);
+    let key: [u8] = parse_string(s, c);
+    skip_ws(s, c);
+    (*c).pos = (*c).pos + 1;    // ':'
+    let val: Json = parse_value(s, c);
+    skip_ws(s, c);
+    let ch: i64 = peek(s, &(*c));
+    (*c).pos = (*c).pos + 1;    // consume ',' or '}'
+    if ch == 44 {
+        Json::ObjCons(key, val, parse_object_members(s, c))
+    } else {
+        Json::ObjCons(key, val, Json::ObjNil)
+    }
+}
+
+fn parse_object(s: &[u8], c: &mut PC) -> Json {
+    (*c).pos = (*c).pos + 1;    // '{'
+    skip_ws(s, c);
+    if peek(s, &(*c)) == 125 {
+        (*c).pos = (*c).pos + 1;
+        Json::ObjNil
+    } else {
+        parse_object_members(s, c)
+    }
+}
+
+fn parse_value(s: &[u8], c: &mut PC) -> Json {
+    skip_ws(s, c);
+    let ch: i64 = peek(s, &(*c));
+    if ch == 123 {
+        parse_object(s, c)
+    } else {
+        if ch == 91 {
+            parse_array(s, c)
+        } else {
+            if ch == 34 {
+                Json::Str(parse_string(s, c))
+            } else {
+                if ch == 116 {
+                    (*c).pos = (*c).pos + 4;    // "true"
+                    Json::Bool(1)
+                } else {
+                    if ch == 102 {
+                        (*c).pos = (*c).pos + 5;    // "false"
+                        Json::Bool(0)
+                    } else {
+                        if ch == 110 {
+                            (*c).pos = (*c).pos + 4;    // "null"
+                            Json::Null
+                        } else {
+                            parse_number(s, c)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Parse `s` as a single JSON value.
+pub fn json_parse(s: &[u8]) -> Json {
+    let mut c: PC = PC { pos: 0 };
+    parse_value(s, &mut c)
+}
+
+// ---- serializing (a CONSUMING recursive walk — frees the value as it goes) ---------
+
+fn append_bytes(out: &mut Vec<u8>, s: [u8]) -> i64 {
+    let n: i64 = len(s);
+    let mut i: i64 = 0;
+    while i < n { push(out, s[i]); i = i + 1; }
+    0
+}
+
+// Append `"..."` with the JSON string escapes.
+fn ser_str(out: &mut Vec<u8>, s: [u8]) -> i64 {
+    push(out, i64_to_u8(34));
+    let n: i64 = len(s);
+    let mut i: i64 = 0;
+    while i < n {
+        let ch: i64 = u8_to_i64(s[i]);
+        if ch == 34 {
+            push(out, i64_to_u8(92)); push(out, i64_to_u8(34)); 0
+        } else {
+            if ch == 92 {
+                push(out, i64_to_u8(92)); push(out, i64_to_u8(92)); 0
+            } else {
+                if ch == 10 {
+                    push(out, i64_to_u8(92)); push(out, i64_to_u8(110)); 0
+                } else {
+                    if ch == 9 {
+                        push(out, i64_to_u8(92)); push(out, i64_to_u8(116)); 0
+                    } else {
+                        push(out, s[i]); 0
+                    }
+                }
+            }
+        };
+        i = i + 1;
+    }
+    push(out, i64_to_u8(34));
+    0
+}
+
+fn ser_arr_rest(out: &mut Vec<u8>, j: Json) -> i64 {
+    match j {
+        Json::ArrCons(head, tail) => {
+            push(out, i64_to_u8(44));    // ','
+            ser(out, head);
+            ser_arr_rest(out, tail);
+            0
+        },
+        Json::ArrNil => 0,
+        Json::Null => 0,
+        Json::Bool(b) => 0,
+        Json::Num(v) => 0,
+        Json::Str(s) => 0,
+        Json::ObjNil => 0,
+        Json::ObjCons(k, v, r) => 0,
+    }
+}
+
+fn ser_obj_rest(out: &mut Vec<u8>, j: Json) -> i64 {
+    match j {
+        Json::ObjCons(k, v, rest) => {
+            push(out, i64_to_u8(44));    // ','
+            ser_str(out, k);
+            push(out, i64_to_u8(58));    // ':'
+            ser(out, v);
+            ser_obj_rest(out, rest);
+            0
+        },
+        Json::ObjNil => 0,
+        Json::Null => 0,
+        Json::Bool(b) => 0,
+        Json::Num(v) => 0,
+        Json::Str(s) => 0,
+        Json::ArrNil => 0,
+        Json::ArrCons(a, b) => 0,
+    }
+}
+
+fn ser(out: &mut Vec<u8>, j: Json) -> i64 {
+    match j {
+        Json::Null => {
+            append_bytes(out, mk_null());
+            0
+        },
+        Json::Bool(b) => {
+            if b == 1 { append_bytes(out, mk_true()); 0 } else { append_bytes(out, mk_false()); 0 };
+            0
+        },
+        Json::Num(v) => {
+            append_bytes(out, int_to_str(v));
+            0
+        },
+        Json::Str(s) => {
+            ser_str(out, s);
+            0
+        },
+        Json::ArrNil => {
+            push(out, i64_to_u8(91)); push(out, i64_to_u8(93)); 0
+        },
+        Json::ArrCons(head, tail) => {
+            push(out, i64_to_u8(91));    // '['
+            ser(out, head);
+            ser_arr_rest(out, tail);
+            push(out, i64_to_u8(93));    // ']'
+            0
+        },
+        Json::ObjNil => {
+            push(out, i64_to_u8(123)); push(out, i64_to_u8(125)); 0
+        },
+        Json::ObjCons(k, v, rest) => {
+            push(out, i64_to_u8(123));    // '{'
+            ser_str(out, k);
+            push(out, i64_to_u8(58));     // ':'
+            ser(out, v);
+            ser_obj_rest(out, rest);
+            push(out, i64_to_u8(125));    // '}'
+            0
+        },
+    }
+}
+
+fn mk_null() -> [u8] { let mut v: Vec<u8> = vec_new(); push(&mut v, i64_to_u8(110)); push(&mut v, i64_to_u8(117)); push(&mut v, i64_to_u8(108)); push(&mut v, i64_to_u8(108)); vec_to_array(v) }
+fn mk_true() -> [u8] { let mut v: Vec<u8> = vec_new(); push(&mut v, i64_to_u8(116)); push(&mut v, i64_to_u8(114)); push(&mut v, i64_to_u8(117)); push(&mut v, i64_to_u8(101)); vec_to_array(v) }
+fn mk_false() -> [u8] { let mut v: Vec<u8> = vec_new(); push(&mut v, i64_to_u8(102)); push(&mut v, i64_to_u8(97)); push(&mut v, i64_to_u8(108)); push(&mut v, i64_to_u8(115)); push(&mut v, i64_to_u8(101)); vec_to_array(v) }
+
+// Serialize a JSON value to canonical (no-whitespace) text. CONSUMES the value.
+pub fn json_stringify(j: Json) -> [u8] {
+    let mut out: Vec<u8> = vec_new();
+    ser(&mut out, j);
+    vec_to_array(out)
+}

@@ -396,6 +396,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // index-chaining storage (the only shape the D.3 Vec MVP allows) with a public FNV-1a
     // hash; keys built via std::text::str. 42 = every map operation behaved as specified.
     ("examples/collections/map_demo.sentinel", 42),
+    // The JSON library (std::data::json): a parse∘serialize round-trip over numbers,
+    // strings, booleans, null, and nested arrays + objects, plus whitespace insensitivity,
+    // string escapes, fractional-drop (no float type), and a parse-then-match extraction.
+    // The value is a cons-list recursive enum (no Vec<enum>); serialize consumes it. 42 =
+    // every document round-tripped and parsed as specified.
+    ("examples/data/json_demo.sentinel", 42),
 ];
 
 #[test]
@@ -601,6 +607,11 @@ fn text_str_library() {
 #[test]
 fn collections_hash_map() {
     check_example("examples/collections/map_demo.sentinel", "map_demo", 42);
+}
+
+#[test]
+fn data_json_roundtrip() {
+    check_example("examples/data/json_demo.sentinel", "json_demo", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
