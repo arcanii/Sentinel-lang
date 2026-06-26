@@ -50,8 +50,8 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
-EIGHT language gaps closed; a comprehensive constant-time crypto suite shipped; HEAD
-`2e04702` (Ed448) + docs, 1581 tests, four-check green).** Real,
+NINE language gaps closed; a comprehensive constant-time crypto suite shipped; HEAD
+`30a9f83` (the `u128` type + radix-2^51 X25519) + docs, 1582 tests, four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
 guarantee on real code**, and surfaces concrete language gaps — finding + fixing those
@@ -65,10 +65,12 @@ decompression via a field sqrt + the `S < L` malleability check); and **KDF**
 HKDF-SHA256 (RFC 5869, extract-then-expand composing HMAC); and **X448** ECDH + **Ed448**
 signatures (RFC 7748 / RFC 8032) over the new shared `fe448` field (GF(2^448-2^224-1),
 28 radix-2^16 limbs — radix 2^28 would overflow i64). The shared `fe25519`/`fe448`
-fields underpin X25519/Ed25519 and X448/Ed448. The eighth language gap (`&mut a[i]`
-element borrows, ADR 0054) is closed. The single cleanly-open next step is in **Next**
-below — **the next real NUMERIC gap** (a primitive that genuinely wants radix-2^51 / a
-128-bit multiply) is still un-surfaced,
+fields underpin X25519/Ed25519 and X448/Ed448. The ninth language gap — **the numeric
+gap**, ADR 0055's `u128` type (the 128-bit / radix-2^51 path) — is now closed too,
+demonstrated by `fe25519_64` + `x25519_64` (X25519 at radix 2^51, the field multiply in
+`secret u128`, cross-checked against the radix-2^16 X25519). All four owner-approved
+options for this run (HKDF, SP 800-185, X448/Ed448, the numeric gap) are SHIPPED. The
+cleanly-open next steps are in **Next** below,
 with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
 
 - **Decisions locked with the owner:** top-level `std/` + `examples/`, each
@@ -315,16 +317,20 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     HKDF, the full SP 800-185 derived-function family (cSHAKE / KMAC / TupleHash /
     ParallelHash), AES + AES-GCM, X25519, Ed25519 (SIGN + VERIFY), and X448 + Ed448
     (SIGN + VERIFY, over the new fe448 field) are all shipped — a full asymmetric +
-    symmetric + hash + XOF + keyed-MAC + KDF suite. Cleanly open: a curve / bignum
-    primitive over a field that actually needs the radix-2^51 / 128-bit-multiply path.
-    NOTE: every shipped primitive fits 64-bit limbs with NO 128-bit arithmetic — even
-    fe448 deliberately uses radix 2^16 (28 limbs) because radix 2^28 (16 limbs) would
-    peak around 2^63.2 and overflow i64 — so the "next real numeric gap" (128-bit mul /
-    bigint) is STILL un-surfaced; no shipped program has demanded it. (None of HKDF, the
-    SP 800-185 additions, X448, or Ed448 needed a language change. Ed448's port did
-    surface a real bug the Python model had hidden — its Barrett reduction leaned on a
-    final big-int `% L` after only 3 conditional subtractions; the constant-time port
-    does 8 always-executed masked subtractions instead.)
+    symmetric + hash + XOF + keyed-MAC + KDF suite. The **numeric gap is now CLOSED**:
+    ADR 0055's `u128` type (LLVM `i128`) shipped, with `fe25519_64` + `x25519_64` (X25519
+    at radix 2^51) as the demonstrator — the field multiply runs in `secret u128`,
+    cross-checked byte-for-byte against the radix-2^16 X25519. (Of the run's four items
+    only the numeric gap needed a language change; HKDF / SP 800-185 / X448 / Ed448 were
+    pure library work. Ed448's port surfaced a real bug the Python model had hidden — its
+    Barrett reduction leaned on a final big-int `% L` after only 3 conditional
+    subtractions; the constant-time port does 8 always-executed masked subtractions.)
+    Cleanly open next: a `secp256k1` / `P-256` field at radix 2^52 (more `u128` mileage +
+    a recognizable new curve, possibly ECDSA); the **`scg` mirror of `u128`** (+ a
+    `tests/pass/cNN` fixture) to fully self-host it (ADR 0055 deferred this — snc-side
+    only today); more SP 800-185 (cSHAKE/TupleHash/ParallelHash XOF variants); or a
+    non-crypto std category once runtime/syscall surface exists (networking / threading /
+    process — scope the gap first).
   - **Two deferred items from the list, now LOW value — recommend skipping unless
     wanted:**
     - **array-repeat `[x; N]`** — SHA-256/HMAC built cleanly WITHOUT it (`Vec<secret T>`

@@ -79,7 +79,10 @@ the current state of the workspace without re-reading every commit.
   `x448` constant-time X448 ECDH over a `secret` scalar (RFC 7748) + `ed448`
   constant-time Ed448 SIGNING + verification over a `secret` seed (RFC 8032, composes
   fe448 + SHAKE256; the edwards448 a=1 law + a branch-free Barrett reduction mod the
-  group order)), `std/math/num`,
+  group order); `fe25519_64` the GF(2^255-19) field at **radix 2^51** (5 limbs, the
+  idiomatic ref10/donna form — the field multiply runs in `secret u128`, ADR 0055's
+  new 128-bit integer type) + `x25519_64` X25519 over it (cross-checked byte-for-byte
+  against the radix-2^16 `x25519`)), `std/math/num`,
   `std/bits/bits` (rotates),
   `std/bytes/bytes` (`[u8]`
   utilities over `&[u8]` borrows), and `std/algorithms/seq` (in-place insertion
