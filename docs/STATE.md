@@ -65,7 +65,8 @@ the current state of the workspace without re-reading every commit.
   SipHash-2-4 keyed MAC; `chacha20` block + stream cipher; `poly1305` one-time MAC
   over a secret key; `aead` ChaCha20-Poly1305 AEAD composing them; `sha256` /
   `sha512` constant-time SHA-256 / SHA-512 + `sha3` SHA3-256/512 + SHAKE128/256 XOFs +
-  KMAC128/256 keyed MACs (the Keccak sponge / SP 800-185) over a `secret` message; `hmac`
+  KMAC128/256 keyed MACs + cSHAKE128/256, TupleHash128/256, ParallelHash128/256 (the
+  Keccak sponge / SP 800-185 derived functions) over a `secret` message; `hmac`
   HMAC-SHA256 over a `secret` key; `hkdf` HKDF-SHA256 extract-then-expand key
   derivation (RFC 5869, composing `hmac`); `aes` a constant-time AES-128 block cipher with a
   table-free, field-inversion S-box; `aes_gcm` constant-time AES-128-GCM AEAD (GHASH
