@@ -58,9 +58,10 @@ real loopback TCP echo on a concurrent `spawn`ed server task AND `examples/net/s
 running the whole SSH-2 handshake over a real socket (a distributed KEX between separate
 client/server tasks), `examples/net/ssh_channel_stream` running the data phase (a
 bidirectional, multi-packet chacha20-poly1305 channel with per-direction seqnr evolution),
-and `examples/net/ssh_full_session` running a COMPLETE session (handshake + data phase) over
-one connection via the factored `std::net::ssh_handshake` API;
-HEAD `e552fdf`, 1590 tests,
+`examples/net/ssh_full_session` running a COMPLETE session (handshake + data phase) over
+one connection via the factored `std::net::ssh_handshake` API, and `examples/net/ssh_pubkey_auth`
+running RFC 4252 publickey USER AUTHENTICATION (a session-id-bound Ed25519 signature) on top;
+HEAD `2d55f41`, 1591 tests,
 four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
@@ -409,16 +410,23 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     FACTORED into a reusable library API — `std::net::ssh_handshake` (`e552fdf`):
     `ssh_client_handshake` / `ssh_server_handshake` each run their half of the
     curve25519-sha256 KEX over a connected socket and return an
-    `SshSessionKeys { keyc, keyd, authed }` (the two directional keys + the client's
-    host-key verdict). `examples/net/ssh_full_session` runs a COMPLETE session over one
-    connection via that API: connect → handshake → N encrypted request/response packets →
-    close. ⚠ a struct returned across a module boundary needs the struct type explicitly
-    `use`d for `--separate` (the merge path resolves it transitively through the returning
-    fn; separate compilation of the importing unit does not — "unknown type"). Cleanly open
+    `SshSessionKeys { keyc, keyd, authed, session_id }` (the two directional keys, the
+    client's host-key verdict, and the session id = the first exchange hash H).
+    `examples/net/ssh_full_session` runs a COMPLETE session over one connection via that
+    API: connect → handshake → N encrypted request/response packets → close. ⚠ a struct
+    returned across a module boundary needs the struct type explicitly `use`d for
+    `--separate` (the merge path resolves it transitively through the returning fn;
+    separate compilation of the importing unit does not — "unknown type"). AND the
+    **`ssh-userauth` layer** now exists — `std::net::ssh_userauth` + `examples/net/ssh_pubkey_auth`
+    (`2d55f41`): RFC 4252 §7 publickey auth over a socket — the client Ed25519-signs a
+    request bound to the session id (so a captured signature can't be replayed on another
+    session), and the server verifies the signature AND enforces authorized_keys before
+    granting access (both failure modes proven by negative probes — an unauthorized key and
+    a wrong-session-id signature each rejected cleanly). Cleanly open
     next toward a fuller sshd: the
-    **`ssh-userauth` layer** (publickey auth — the client signs a userauth request bound to
-    the session id = the first exchange hash H, the server verifies it); optionally the
-    `connection` layer (channel open / window). Also
+    `connection` layer (`SSH_MSG_CHANNEL_OPEN` / a windowed data channel on top of the
+    authenticated transport); a `userauth` failure/retry loop (multiple auth attempts).
+    Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
     `u128`** (+ a `tests/pass/cNN` fixture) to fully self-host it (ADR 0055 deferred this

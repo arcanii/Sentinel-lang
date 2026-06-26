@@ -108,8 +108,12 @@ the current state of the workspace without re-reading every commit.
   (a fresh nonce per packet), each record tag-verified before it is decrypted. The KEX is
   now factored into a reusable API (`std/net/ssh_handshake`:
   `ssh_client_handshake`/`ssh_server_handshake` run a handshake half over a socket and
-  return an `SshSessionKeys` struct), and `examples/net/ssh_full_session` runs a **complete
-  session** — handshake + data phase — over one connection via it.
+  return an `SshSessionKeys` struct incl. the session id), and `examples/net/ssh_full_session`
+  runs a **complete session** — handshake + data phase — over one connection via it. On top,
+  `std/net/ssh_userauth` + `examples/net/ssh_pubkey_auth` add RFC 4252 §7 **publickey
+  authentication**: the client signs a request bound to the session id (the first exchange
+  hash H) so a signature can't be replayed across sessions, and the server verifies the
+  Ed25519 signature and enforces authorized_keys before granting access.
   The
   crypto examples reproduce the
   canonical test vectors (SipHash `0xa129ca6149be45e5`, RFC 8439 §2.3.2 / §2.4.2 /
@@ -197,7 +201,7 @@ the current state of the workspace without re-reading every commit.
   (a table-free field-inversion S-box, a branch-free mask-based conditional swap). See
   the `sentinel_examples_and_corelibs` auto-memory.
 
-**1590 tests across the workspace**, four-check green (build · `cargo nextest`
+**1591 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
