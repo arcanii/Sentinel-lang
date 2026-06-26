@@ -1,8 +1,11 @@
 # ADR 0056: A TCP sockets runtime surface (the networking gap)
 
-Status: **PROPOSED** (design only — no implementation in this ADR). Scopes the runtime
-+ ABI surface that real network services (an `sshd`, an HTTPS server) need but Sentinel
-lacks today.
+Status: **PROPOSED — layer 1 (the runtime primitives) IMPLEMENTED** (`b90a889`). The six
+`extern "C"` socket primitives (+ an ephemeral-port query) are in `sentinel-runtime`
+with a Rust loopback-echo test; the compiler-builtin wiring + the self-hosted-`scg`
+builtin-table mirror (which the FnId shift makes mandatory — see "Touch-points") are the
+remaining, separable step. Scopes the runtime + ABI surface that real network services
+(an `sshd`, an HTTPS server) need but Sentinel lacks today.
 
 ## Context
 
