@@ -246,9 +246,14 @@ the current state of the workspace without re-reading every commit.
   shift) and declared `External` under the bare C symbol so `cc` links it against libc; a
   `secret` reaching an `extern` arg is rejected (the FFI fence). It makes OS / native
   bindings *library* work: `std/sys/posix` (process identity) + the `std/math/float` libm
-  transcendentals are the wrappers. Deferred to a Phase 1b: the `ptr` opaque type +
-  `ptr_of`/`cstr` + the pointer/buffer libc calls (`getenv`/`getentropy`), `i32` widths,
-  structs, extra-library `-l`, Win32. And the **C-ABI export (ADR 0059, Phase 1a value
+  transcendentals are the wrappers. **Phase 1b (ADR 0057 A6) now adds the `ptr` opaque type
+  + `ptr_of`/`ptr_of_mut`** — a Sentinel buffer's data pointer crosses to a pointer-taking
+  libc call (no runtime change, no `FnId` shift: `ptr` is a `Type` variant and `ptr_of` is a
+  `UnaryOp` intrinsic, like `f64`/`sqrt`). `std/sys/ffi` wraps `getentropy` (OS randomness
+  into a `[u8]` via `ptr_of_mut`) + `strlen` (over a NUL-terminated `cstr` via `ptr_of`);
+  `examples/sys/ffi_buffers` proves it. The fence holds: `ptr_of` of a `&[secret u8]` is
+  rejected. Still deferred: the C-string READ-back (a null-safe `getenv`), `i32`/`u32`
+  widths, by-pointer structs, extra-library `-l`, `dlopen`, Win32. And the **C-ABI export (ADR 0059, Phase 1a value
   ABI)** — the inverse, Sentinel-as-a-library — is now implemented too: an `export "C" fn`
   annotation (un-mangled C symbol, secret-fenced) + a `snc build --lib` static-archive
   mode (no `main`; the object + the runtime staticlib bundled into one `.a`) +
@@ -283,7 +288,7 @@ the current state of the workspace without re-reading every commit.
   (`std/text/str::parse_f64`/`f64_to_str`), and `std/data/json` now parsing/serializing
   non-integer numbers as `Float(f64)`.
 
-**1628 tests across the workspace**, four-check green (build · `cargo nextest`
+**1633 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

@@ -1,12 +1,14 @@
 # ADR 0057: A foreign-function interface (`extern "C"`) for native OS bindings
 
-Status: **ACCEPTED-WITH-AMENDMENTS (A1–A5).** Phase 1 is implemented `snc`-side as a
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A6).** Phase 1 is implemented `snc`-side as a
 **value-only ABI** (public `i64` + `f64`), which already unlocks the libc identity calls
-and the whole libm math family. The `ptr` opaque type + `ptr_of`/`cstr` (and the
-pointer/buffer libc calls that need them) are split into a **Phase 1b** and remain
-deferred. The design below stands; the amendments at the end record where the
-implementation refined or re-scoped it. This was the ADR-first design gate for the
-"native bindings" item on the core-libraries roadmap.
+and the whole libm math family. **Phase 1b (A6)** adds the **`ptr` opaque type +
+`ptr_of`/`ptr_of_mut`**, so a Sentinel buffer's data pointer can cross to a pointer-taking
+libc call — demonstrated by `getentropy` (OS randomness into a Sentinel buffer) and
+`strlen` (over a NUL-terminated `cstr`). The C-string read-BACK helper (for `getenv` and
+friends, which needs null-handling) remains deferred. The design below stands; the
+amendments at the end record where the implementation refined or re-scoped it. This was the
+ADR-first design gate for the "native bindings" item on the core-libraries roadmap.
 
 ## Context
 
@@ -257,3 +259,25 @@ Demonstrators: `std/sys/posix` + `examples/sys/process_ids` (i64 identity calls)
 `std/math/float` libm bindings + `examples/math/transcendental` (f64). The `scg` mirror is
 deferred (no corpus / `selfhost/*.sentinel` source uses `extern` → every differential +
 both bootstrap fixed points byte-identical).
+
+- **A6 — Phase 1b lands the `ptr` opaque type + `ptr_of`/`ptr_of_mut` (no runtime change,
+  no `FnId` shift).** `Type::Ptr` is a new primitive variant (like `u128`/`f64` — a variant,
+  so NO `FnId` shift), lowering to an LLVM opaque pointer; it is opaque (not indexable, not
+  arithmetic — opacity falls out of `ptr` being absent from the numeric / array type sets),
+  Copy, and owns nothing (no drop). `is_ffi_safe` admits it, so `extern` fns may take /
+  return `ptr`. It is produced only by an FFI return or by `ptr_of(&[u8]) -> ptr` /
+  `ptr_of_mut(&mut [u8]) -> ptr` — two single-argument INTRINSICS modelled on `sqrt`
+  (`UnaryOp::PtrOf` / `UnaryOp::PtrOfMut`, recognised by reserved name in the parser, so
+  NO `FnId`); each extracts the `data` field (field 1) of the borrowed `{ i64 len, ptr data }`
+  slice. `ptr_of_mut` requires a `&mut [u8]` (so C may write through it under an exclusive
+  borrow); `ptr_of` accepts a shared or mutable `&[u8]`. The fence holds: `ptr_of` rejects a
+  `&[secret u8]` (it requires public bytes), and `ptr` is public, so a secret never crosses.
+  `cstr(&[u8]) -> [u8]` (copy + append `\0`) is a PURE Sentinel `std/sys` helper (no compiler
+  support needed). NO runtime change is needed for this slice: `getentropy` / `strlen` are
+  libc symbols `cc` already links. Demonstrators: `std/sys/ffi` (`random_bytes(n)` via
+  `getentropy` + `ptr_of_mut`; `cstr` + `cstr_len(&[u8])` via `strlen` + `ptr_of`) +
+  `examples/sys/ffi_buffers` (asserts `strlen("hello") == 5` and that two `getentropy` draws
+  of 32 bytes differ — proving the OS wrote randomness). STILL deferred: the C-string
+  read-BACK helper (a null-safe `getenv` needs detecting a NULL `ptr` + a length/copy
+  helper), `i32`/`u32` widths, by-pointer structs, extra-library `-l`, `dlopen`, Win32. The
+  `scg` mirror stays deferred (no corpus / `selfhost` fixture uses `ptr_of` / `extern`).

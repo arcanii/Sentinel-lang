@@ -50,16 +50,17 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY).
-CURRENT STATE: HEAD `58b489b`, 1628 tests, four-check green, NEVER pushed.**
+CURRENT STATE: HEAD `659e72d`, 1633 tests, four-check green, NEVER pushed.**
 
 **▶ ONE-LINE STATUS: the owner's WHOLE big-list is implemented** — the comprehensive
 constant-time crypto suite, the networked `sshd`, the data & text trio, and **all three
 remaining language-gap rocks (ADR 0058 `f64` floats · ADR 0057 `extern "C"` FFI import · ADR
 0059 C-ABI export)** + the float follow-ups (libm transcendentals · `f64`⇄string · JSON
 float numbers) + the export `&[u8]` INPUT and owned-`[u8]` RETURN buffer ABI + MULTI-MODULE
-`--lib` (the headline: the verified-constant-time `std/security` suite — `sha256` + `hmac` —
-callable from C as a drop-in library). **What remains are only deferred Phase 1b/2 tails —
-none a new rock; the menu is in the *Next* bullet below.** Read STATE.md §"Current State"
+`--lib` (the verified-constant-time `std/security` suite — `sha256` + `hmac` — callable from
+C as a drop-in library) + the FFI-IMPORT `ptr` opaque type + `ptr_of`/`ptr_of_mut` (ADR 0057
+A6 — OS randomness via `getentropy`, `strlen`). **What remains are only deferred Phase 1b/2
+tails — none a new rock; the menu is in the *Next* bullet below.** Read STATE.md §"Current State"
 for the authoritative live picture. Full detail follows.
 
 SHIPPED to
@@ -430,9 +431,10 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
   A7 ships the return via the out-param pair `(uint8_t** out_data, int64_t* out_len)` +
   `sentinel_free_bytes`, with the ADR's headline demo — a verified-constant-time
   `sha256_oneshot` callable from C (`examples/export/digest_lib.sentinel`); what remains is
-  the caller-provides-buffer convention (fixed-size, no-alloc outputs), AND ADR 0057's
-  import-side `ptr` opaque type + `ptr_of`/`cstr` + a runtime cstr/buffer read-back
-  (`getenv`/`getentropy`);
+  the caller-provides-buffer convention (fixed-size, no-alloc outputs). ADR 0057's
+  import-side `ptr` opaque type + `ptr_of`/`ptr_of_mut` is now DONE (A6 — `std/sys/ffi`:
+  `getentropy` OS randomness + `strlen`; `examples/sys/ffi_buffers`); what remains there is
+  the C-string READ-back helper (a null-safe `getenv`) + the `cstr` read path;
   **(b)** `i32`/`u32` FFI widths + struct-by-pointer; **(c)** extra-library `-l` (so libm
   works on Linux; the Linux `ar`-MRI `--lib` archive path) + `--shared` `.dylib`/`.so`;
   **(d)** the Python (`ctypes`) / Rust (`-sys`) binding generators (ADR 0059 Phase 3);
