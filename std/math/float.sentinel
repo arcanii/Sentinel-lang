@@ -54,3 +54,69 @@ pub fn trunc(x: f64) -> f64 {
 pub fn discriminant(a: f64, b: f64, c: f64) -> f64 {
     b * b - 4.0 * a * c
 }
+
+// ---- Transcendentals via libm (ADR 0057 FFI) -------------------------------
+//
+// The square root ships with the language as the `sqrt` intrinsic
+// (`llvm.sqrt.f64`); the remaining transcendentals (sin/cos/exp/log/pow/…) are
+// hardware-backed libm functions reached through the `extern "C"` FFI. On
+// macOS libm is part of libSystem (linked by `cc` automatically); on Linux a
+// `-lm` link flag is needed (a follow-up once the build threads extra `-l`s).
+// The raw `extern`s are module-private; the `pub fn` wrappers below are the
+// public API (named to avoid colliding with the C symbol they forward to).
+// All PUBLIC — floats are not constant-time, so none of this touches `secret`.
+extern "C" {
+    fn sin(x: f64) -> f64;
+    fn cos(x: f64) -> f64;
+    fn tan(x: f64) -> f64;
+    fn exp(x: f64) -> f64;
+    fn log(x: f64) -> f64;
+    fn pow(base: f64, exponent: f64) -> f64;
+    fn floor(x: f64) -> f64;
+    fn ceil(x: f64) -> f64;
+    fn atan2(y: f64, x: f64) -> f64;
+}
+
+// Trigonometric sine / cosine / tangent of an angle in RADIANS.
+pub fn sine(x: f64) -> f64 {
+    sin(x)
+}
+
+pub fn cosine(x: f64) -> f64 {
+    cos(x)
+}
+
+pub fn tangent(x: f64) -> f64 {
+    tan(x)
+}
+
+// The angle (radians, in (-pi, pi]) of the vector `(x, y)` — `atan2(y, x)`.
+pub fn angle_of(y: f64, x: f64) -> f64 {
+    atan2(y, x)
+}
+
+// `e` raised to the power `x` (the natural exponential).
+pub fn exp_e(x: f64) -> f64 {
+    exp(x)
+}
+
+// The natural logarithm (base e) of `x`.
+pub fn ln(x: f64) -> f64 {
+    log(x)
+}
+
+// `base` raised to the power `exponent`.
+pub fn powf(base: f64, exponent: f64) -> f64 {
+    pow(base, exponent)
+}
+
+// The largest integral value <= `x` (rounds toward negative infinity — unlike
+// `trunc`, which rounds toward zero; they differ for negative inputs).
+pub fn round_down(x: f64) -> f64 {
+    floor(x)
+}
+
+// The smallest integral value >= `x`.
+pub fn round_up(x: f64) -> f64 {
+    ceil(x)
+}

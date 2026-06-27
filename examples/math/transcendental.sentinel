@@ -1,0 +1,40 @@
+// examples/math/transcendental.sentinel
+//
+// The float transcendentals (ADR 0058 f64 + ADR 0057 FFI): std::math::float's
+// sin/cos/exp/log/pow/floor/ceil wrappers forward to the platform math library
+// (libm) through the `extern "C"` FFI. Exit 42 means every check held. The
+// exact-at-special-points results use `==`; the floating-point identities use
+// an epsilon (`|lhs - rhs| < eps`) since libm results are correctly-rounded,
+// not exact. All PUBLIC — floats are excluded from the constant-time domain.
+use std::math::float::sine;
+use std::math::float::cosine;
+use std::math::float::exp_e;
+use std::math::float::ln;
+use std::math::float::powf;
+use std::math::float::round_down;
+use std::math::float::round_up;
+use std::math::float::abs;
+
+fn main() -> i64 {
+    // Exact at the special points (every value here is exactly representable).
+    let exact: bool =
+        cosine(0.0) == 1.0
+        && sine(0.0) == 0.0
+        && exp_e(0.0) == 1.0
+        && ln(1.0) == 0.0
+        && powf(2.0, 10.0) == 1024.0
+        && round_down(3.7) == 3.0
+        && round_up(3.2) == 4.0
+        && round_down(-2.5) == -3.0;   // floor rounds toward -inf
+
+    // Identities hold to within a small epsilon.
+    let eps: f64 = 0.000000001;        // 1e-9
+    let a: f64 = 0.7;
+    let s: f64 = sine(a);
+    let c: f64 = cosine(a);
+    let pythagorean: bool = abs(s * s + c * c - 1.0) < eps;  // sin^2 + cos^2 = 1
+    let inverse: bool = abs(exp_e(ln(5.0)) - 5.0) < eps;     // exp(ln x) = x
+    let power: bool = abs(powf(9.0, 0.5) - 3.0) < eps;       // 9^0.5 = sqrt(9) = 3
+
+    if exact && pythagorean && inverse && power { 42 } else { 0 }
+}

@@ -170,6 +170,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // `sqrt` intrinsic, int<->float `as` casts) — a PUBLIC-only numeric module
     // crossing the boundary (no `secret f64`). 42 = every result matched.
     ("examples/math/quadratic.sentinel", 42),
+    // Float transcendentals (ADR 0058 f64 + ADR 0057 FFI): std::math::float's
+    // sin/cos/exp/log/pow/floor/ceil wrappers forward to libm through the
+    // `extern "C"` FFI. 42 = the special-point values + the sin^2+cos^2=1 /
+    // exp(ln x)=x identities (epsilon-checked) all held.
+    ("examples/math/transcendental.sentinel", 42),
     // The `extern "C"` FFI (ADR 0057): call real POSIX libc functions
     // (getpid/getppid/getuid/getgid) through the safe std::sys::posix
     // wrappers — the i64 value-ABI, resolved against libc by `cc` at link.
@@ -437,6 +442,11 @@ fn math_quadratic_f64() {
 #[test]
 fn sys_process_ids_ffi() {
     check_example("examples/sys/process_ids.sentinel", "process_ids", 42);
+}
+
+#[test]
+fn math_transcendental_libm() {
+    check_example("examples/math/transcendental.sentinel", "transcendental", 42);
 }
 
 #[test]
