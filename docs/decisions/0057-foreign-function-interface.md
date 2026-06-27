@@ -1,12 +1,14 @@
 # ADR 0057: A foreign-function interface (`extern "C"`) for native OS bindings
 
-Status: **ACCEPTED-WITH-AMENDMENTS (A1–A6).** Phase 1 is implemented `snc`-side as a
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A7).** Phase 1 is implemented `snc`-side as a
 **value-only ABI** (public `i64` + `f64`), which already unlocks the libc identity calls
 and the whole libm math family. **Phase 1b (A6)** adds the **`ptr` opaque type +
 `ptr_of`/`ptr_of_mut`**, so a Sentinel buffer's data pointer can cross to a pointer-taking
 libc call — demonstrated by `getentropy` (OS randomness into a Sentinel buffer) and
-`strlen` (over a NUL-terminated `cstr`). The C-string read-BACK helper (for `getenv` and
-friends, which needs null-handling) remains deferred. The design below stands; the
+`strlen` (over a NUL-terminated `cstr`). **Phase 1b (A7)** completes the import buffer ABI
+with the C-string READ-back: an `is_null(ptr) -> bool` intrinsic + a `cstr_read(ptr) -> [u8]`
+helper (null-safe `strlen` + `memcpy`, both libc externs), so `getenv` is callable from
+Sentinel (the value bytes copied out of the returned `char*`). The design below stands; the
 amendments at the end record where the implementation refined or re-scoped it. This was the
 ADR-first design gate for the "native bindings" item on the core-libraries roadmap.
 
@@ -277,7 +279,27 @@ both bootstrap fixed points byte-identical).
   libc symbols `cc` already links. Demonstrators: `std/sys/ffi` (`random_bytes(n)` via
   `getentropy` + `ptr_of_mut`; `cstr` + `cstr_len(&[u8])` via `strlen` + `ptr_of`) +
   `examples/sys/ffi_buffers` (asserts `strlen("hello") == 5` and that two `getentropy` draws
-  of 32 bytes differ — proving the OS wrote randomness). STILL deferred: the C-string
-  read-BACK helper (a null-safe `getenv` needs detecting a NULL `ptr` + a length/copy
-  helper), `i32`/`u32` widths, by-pointer structs, extra-library `-l`, `dlopen`, Win32. The
-  `scg` mirror stays deferred (no corpus / `selfhost` fixture uses `ptr_of` / `extern`).
+  of 32 bytes differ — proving the OS wrote randomness). STILL deferred (until A7): the
+  C-string read-BACK. STILL deferred after A7: `i32`/`u32` widths, by-pointer structs,
+  extra-library `-l`, `dlopen`, Win32. The `scg` mirror stays deferred (no corpus /
+  `selfhost` fixture uses `ptr_of` / `extern`).
+
+- **A7 — Phase 1b completes the import buffer ABI with the C-string READ-back (`is_null` +
+  `cstr_read`), no runtime change / no `FnId` shift.** A `ptr` returned from C (e.g.
+  `char* getenv(const char*)`) is opaque — Sentinel can't deref it — so reading its bytes
+  back needs (1) null detection and (2) a byte copy out. Both are done WITHOUT a runtime
+  builtin (which would shift `FnId`s): (1) a new `is_null(ptr) -> bool` INTRINSIC
+  (`UnaryOp::IsNull`, recognised by reserved name like `ptr_of`/`sqrt`; codegen
+  `build_is_null`); (2) the copy uses libc `strlen` + `memcpy` declared as ordinary
+  `extern`s. The read-back is pure Sentinel: `cstr_read(p)` = `let n = if is_null(p) { 0 }
+  else { strlen(p) }` (Sentinel has no `return`, so the if-expression idiom), build an
+  `n`-byte `[u8]`, then `if n > 0 { memcpy(ptr_of_mut(&mut buf), p, n); 0 } else { 0 }` —
+  guarding `n > 0` so `memcpy` never sees a NULL `src`. `std/sys/ffi` gains `getenv` +
+  `memcpy` externs + `cstr_read` + `env_get(name: &[u8]) -> [u8]` (cstr the name, `getenv`,
+  read back; an unset OR empty var → an empty `[u8]`, documented). `examples/sys/ffi_buffers`
+  gains: `env_get("PATH")` is non-empty (the present-var read-back path) and a bogus name is
+  empty (the NULL path). `is_null`'s operand must be `Type::Ptr` (else a `Mismatch` —
+  reusing the existing error, no new variant). STILL deferred: distinguishing unset from
+  empty (a `?[u8]` return), `i32`/`u32` widths, by-pointer structs, extra-library `-l`,
+  `dlopen`, Win32. The `scg` mirror stays deferred (still no corpus / `selfhost` fixture
+  uses `extern` / the `ptr` intrinsics).

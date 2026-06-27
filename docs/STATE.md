@@ -250,10 +250,14 @@ the current state of the workspace without re-reading every commit.
   + `ptr_of`/`ptr_of_mut`** — a Sentinel buffer's data pointer crosses to a pointer-taking
   libc call (no runtime change, no `FnId` shift: `ptr` is a `Type` variant and `ptr_of` is a
   `UnaryOp` intrinsic, like `f64`/`sqrt`). `std/sys/ffi` wraps `getentropy` (OS randomness
-  into a `[u8]` via `ptr_of_mut`) + `strlen` (over a NUL-terminated `cstr` via `ptr_of`);
-  `examples/sys/ffi_buffers` proves it. The fence holds: `ptr_of` of a `&[secret u8]` is
-  rejected. Still deferred: the C-string READ-back (a null-safe `getenv`), `i32`/`u32`
-  widths, by-pointer structs, extra-library `-l`, `dlopen`, Win32. And the **C-ABI export (ADR 0059, Phase 1a value
+  into a `[u8]` via `ptr_of_mut`) + `strlen` (over a NUL-terminated `cstr` via `ptr_of`); the
+  fence holds: `ptr_of` of a `&[secret u8]` is rejected. **A7 completes the import buffer ABI
+  with the C-string READ-back**: an `is_null(ptr) -> bool` intrinsic + `cstr_read`/`env_get`
+  (null-safe `strlen` + `memcpy`, both libc externs — no runtime change), so `getenv` is
+  callable from Sentinel; `examples/sys/ffi_buffers` proves all of it (`strlen("hello")==5`,
+  two `getentropy` draws differ, `env_get("PATH")` non-empty + a bogus var empty). Still
+  deferred: distinguishing unset from empty (`?[u8]`), `i32`/`u32` widths, by-pointer
+  structs, extra-library `-l`, `dlopen`, Win32. And the **C-ABI export (ADR 0059, Phase 1a value
   ABI)** — the inverse, Sentinel-as-a-library — is now implemented too: an `export "C" fn`
   annotation (un-mangled C symbol, secret-fenced) + a `snc build --lib` static-archive
   mode (no `main`; the object + the runtime staticlib bundled into one `.a`) +
@@ -288,7 +292,7 @@ the current state of the workspace without re-reading every commit.
   (`std/text/str::parse_f64`/`f64_to_str`), and `std/data/json` now parsing/serializing
   non-integer numbers as `Float(f64)`.
 
-**1633 tests across the workspace**, four-check green (build · `cargo nextest`
+**1635 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
