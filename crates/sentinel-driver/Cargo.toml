@@ -23,6 +23,7 @@ sentinel-hir          = { path = "../sentinel-hir" }
 sentinel-mir          = { path = "../sentinel-mir" }
 sentinel-resolve      = { path = "../sentinel-resolve" }
 sentinel-syntax       = { path = "../sentinel-syntax" }
+sentinel-trust        = { path = "../sentinel-trust" }
 sentinel-types        = { path = "../sentinel-types" }
 
 miette     = { workspace = true, features = ["fancy"] }

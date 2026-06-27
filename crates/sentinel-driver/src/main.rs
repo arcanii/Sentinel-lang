@@ -113,6 +113,9 @@ fn main() -> ExitCode {
         {
             run_build_lib_cli(rest)
         }
+        // ADR 0061: verify a detached signature carrier (`<file>.sig`) over a
+        // source file — the standalone counterpart to the build-time trust gate.
+        [_, cmd, rest @ ..] if cmd == "verify" => run_verify(rest),
         [_] => {
             print_usage();
             ExitCode::from(2)
@@ -142,6 +145,8 @@ fn print_usage() {
     eprintln!("                                     compile to a C-ABI static library (ADR 0059)");
     eprintln!("    snc build --shared <file> [-o <lib.dylib>] [--emit-header <h.h>] [--lib-path <dir>]...");
     eprintln!("                                     compile to a C-ABI shared library (dlopen/ctypes)");
+    eprintln!("    snc verify <file> [--sig <sig>]  verify a detached signature (default <file>.sig)");
+    eprintln!("                                     over <file> (ADR 0061 code signing)");
     eprintln!("    snc help                         show this message");
     eprintln!();
     eprintln!("--lib-path <dir> (repeatable) and SNC_LIB_PATH (path-separated) add module-search");
@@ -658,6 +663,74 @@ fn run_merge(path: &str) -> ExitCode {
         }
         Err(why) => {
             eprintln!("snc: merge: {why}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `snc verify <file> [--sig <sigfile>]` — ADR 0061 code signing. Verify a
+/// **detached** signature carrier (default `<file>.sig`) over `<file>` using the
+/// in-process Ed25519 verifier (`sentinel-trust`, the twin of
+/// `std::security::ed25519`). The whole file is the signed body. Prints a
+/// one-line OK with the signer-key fingerprint + the granted capabilities and
+/// exits 0 if valid; prints the reason and exits 1 otherwise. (The in-file `//`
+/// header-block carrier + the build-time gate are follow-up increments.)
+fn run_verify(args: &[String]) -> ExitCode {
+    let mut path: Option<&str> = None;
+    let mut sig: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--sig" => {
+                i += 1;
+                match args.get(i) {
+                    Some(s) => sig = Some(s),
+                    None => {
+                        eprintln!("snc: `--sig` requires a signature path");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            other => {
+                if path.is_some() {
+                    eprintln!("snc: unexpected argument `{other}`");
+                    return ExitCode::from(2);
+                }
+                path = Some(other);
+            }
+        }
+        i += 1;
+    }
+    let Some(path) = path else {
+        eprintln!("snc: `verify` requires a source file");
+        return ExitCode::from(2);
+    };
+
+    let body = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("snc: cannot read `{path}`: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let sig_path = sig.map_or_else(|| format!("{path}.sig"), String::from);
+    let carrier = match std::fs::read_to_string(&sig_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("snc: cannot read signature `{sig_path}`: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match sentinel_trust::verify_signed(&body, &carrier) {
+        Ok(v) => {
+            let fp: String = v.pubkey[..8].iter().map(|b| format!("{b:02x}")).collect();
+            let grants = if v.grants.is_empty() { "(none)".to_string() } else { v.grants.join(",") };
+            println!("snc: signature OK — `{path}` signed by key {fp}…; grants: {grants}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("snc: signature verification FAILED for `{path}`: {e}");
             ExitCode::from(1)
         }
     }

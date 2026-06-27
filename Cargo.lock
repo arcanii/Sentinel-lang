@@ -1187,6 +1187,7 @@ dependencies = [
  "sentinel-mir",
  "sentinel-resolve",
  "sentinel-syntax",
+ "sentinel-trust",
  "sentinel-types",
  "thiserror",
  "tracing",
@@ -1282,6 +1283,10 @@ dependencies = [
  "thiserror",
  "tracing",
 ]
+
+[[package]]
+name = "sentinel-trust"
+version = "0.0.1"
 
 [[package]]
 name = "sentinel-types"

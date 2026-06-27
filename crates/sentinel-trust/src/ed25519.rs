@@ -463,6 +463,89 @@ pub fn ed25519_verify(pk: &[u8; 32], msg: &[u8], sig: &[u8; 64]) -> bool {
     (eq & dvalid & s_lt_l(&sig[32..64])) == 1
 }
 
+/// A **test-only** Ed25519 signer (and pubkey derivation), reusing the field /
+/// group machinery above. It is NOT part of the shipped surface — production
+/// signing is pure Sentinel (`std::security::ed25519`, dogfooded by `snc sign`);
+/// this exists only to generate signature vectors for the format/verify tests
+/// self-containedly. It is itself validated against the RFC 8032 §7.1 vectors
+/// (seed → pk, and `sign(seed, msg)` == the published signature), so a vector it
+/// produces is a genuine Ed25519 signature the shipped verifier accepts.
+#[cfg(test)]
+pub(crate) mod test_sign {
+    use super::{modl, point_pack, reduce, scalarbase, sha512, Point, GF0};
+
+    fn clamped_scalar(seed: &[u8; 32]) -> ([u8; 32], [u8; 32]) {
+        let h = sha512(seed);
+        let mut a = [0u8; 32];
+        a.copy_from_slice(&h[..32]);
+        a[0] &= 248;
+        a[31] &= 127;
+        a[31] |= 64;
+        let mut prefix = [0u8; 32];
+        prefix.copy_from_slice(&h[32..64]);
+        (a, prefix)
+    }
+
+    pub(crate) fn ed25519_pubkey(seed: &[u8; 32]) -> [u8; 32] {
+        let (a, _) = clamped_scalar(seed);
+        let mut p: Point = [GF0; 4];
+        scalarbase(&mut p, &a);
+        point_pack(&p)
+    }
+
+    pub(crate) fn ed25519_sign(seed: &[u8; 32], m: &[u8]) -> [u8; 64] {
+        let (a, prefix) = clamped_scalar(seed);
+        let pk = ed25519_pubkey(seed);
+
+        // r = reduce(SHA-512(prefix || m)); R = [r]B.
+        let mut rbuf = Vec::with_capacity(32 + m.len());
+        rbuf.extend_from_slice(&prefix);
+        rbuf.extend_from_slice(m);
+        let r = reduce(&sha512(&rbuf));
+        let mut rp: Point = [GF0; 4];
+        scalarbase(&mut rp, &r);
+        let rpack = point_pack(&rp);
+
+        // k = reduce(SHA-512(R || A || m)); S = (r + k*a) mod L.
+        let mut kbuf = Vec::with_capacity(64 + m.len());
+        kbuf.extend_from_slice(&rpack);
+        kbuf.extend_from_slice(&pk);
+        kbuf.extend_from_slice(m);
+        let k = reduce(&sha512(&kbuf));
+
+        let mut x = [0i64; 64];
+        for i in 0..32 {
+            x[i] = i64::from(r[i]);
+        }
+        for i in 0..32 {
+            for j in 0..32 {
+                x[i + j] += i64::from(k[i]) * i64::from(a[j]);
+            }
+        }
+        let s = modl(&mut x);
+
+        let mut sig = [0u8; 64];
+        sig[..32].copy_from_slice(&rpack);
+        sig[32..].copy_from_slice(&s);
+        sig
+    }
+
+    #[test]
+    fn matches_rfc8032_test2() {
+        let mut seed = [0u8; 32];
+        let bytes = b"\x4c\xcd\x08\x9b\x28\xff\x96\xda\x9d\xb6\xc3\x46\xec\x11\x4e\x0f\x5b\x8a\x31\x9f\x35\xab\xa6\x24\xda\x8c\xf6\xed\x4f\xb8\xa6\xfb";
+        seed.copy_from_slice(bytes);
+        let pk = ed25519_pubkey(&seed);
+        assert_eq!(
+            pk,
+            *b"\x3d\x40\x17\xc3\xe8\x43\x89\x5a\x92\xb7\x0a\xa7\x4d\x1b\x7e\xbc\x9c\x98\x2c\xcf\x2e\xc4\x96\x8c\xc0\xcd\x55\xf1\x2a\xf4\x66\x0c"
+        );
+        let sig = ed25519_sign(&seed, b"\x72");
+        let expected = b"\x92\xa0\x09\xa9\xf0\xd4\xca\xb8\x72\x0e\x82\x0b\x5f\x64\x25\x40\xa2\xb2\x7b\x54\x16\x50\x3f\x8f\xb3\x76\x22\x23\xeb\xdb\x69\xda\x08\x5a\xc1\xe4\x3e\x15\x99\x6e\x45\x8f\x36\x13\xd0\xf1\x1d\x8c\x38\x7b\x2e\xae\xb4\x30\x2a\xee\xb0\x0d\x29\x16\x12\xbb\x0c\x00";
+        assert_eq!(&sig[..], &expected[..]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ed25519_verify;

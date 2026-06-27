@@ -15,7 +15,12 @@
 //! `getentropy`); only the verify side lives here, inside `snc`'s trust boundary.
 
 mod ed25519;
+mod format;
 mod sha512;
 
 pub use ed25519::ed25519_verify;
+pub use format::{
+    canonical_payload, parse_carrier, serialize_carrier, verify_object, verify_signed, SignedObject,
+    Verified, VerifyError, ALGO_ED25519, DOMAIN,
+};
 pub use sha512::sha512;
