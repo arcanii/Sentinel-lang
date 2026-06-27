@@ -5,8 +5,9 @@
 Sentinel is a memory-safe, capability-bounded systems language being built by [Anie Ltd.](https://aniesolutions.ai) to address the bug classes that dominate modern security incidents — supply-chain attacks, cryptographic side channels, secret disclosure, untrusted-code execution, and information-flow violations — none of which are structurally addressed by any production language today.
 
 For the short-form pitch, see [`docs/SENTINEL_SUMMARY.md`](docs/SENTINEL_SUMMARY.md).
-For the full design, see [`docs/SENTINEL_DESIGN.md`](docs/SENTINEL_DESIGN.md) and
-[`docs/SENTINEL_DESIGN2.md`](docs/SENTINEL_DESIGN2.md).
+For the full design, see [`docs/SENTINEL_DESIGN2.md`](docs/SENTINEL_DESIGN2.md)
+(the design of record; [`SENTINEL_DESIGN.md`](docs/SENTINEL_DESIGN.md) is the
+superseded original vision, kept for provenance).
 **To learn Sentinel programming today, start with the
 [Programming Guide](docs/PROGRAMMING_GUIDE.md).**
 
@@ -169,7 +170,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 - `docs/` — design, status, and process documents:
   - [`PROGRAMMING_GUIDE.md`](docs/PROGRAMMING_GUIDE.md) — intro to writing Sentinel programs today
   - [`SENTINEL_SUMMARY.md`](docs/SENTINEL_SUMMARY.md) — one-page pitch
-  - [`SENTINEL_DESIGN.md`](docs/SENTINEL_DESIGN.md) / [`SENTINEL_DESIGN2.md`](docs/SENTINEL_DESIGN2.md) — full design
+  - [`SENTINEL_DESIGN2.md`](docs/SENTINEL_DESIGN2.md) — full design (design of record); [`SENTINEL_DESIGN.md`](docs/SENTINEL_DESIGN.md) — superseded original vision
   - [`HANDOVER.md`](docs/HANDOVER.md) — implementation plan and working norms
   - [`STATE.md`](docs/STATE.md) — current implementation state (source of truth)
   - [`HISTORY.md`](docs/HISTORY.md) — archived milestone-by-milestone running logs (provenance, not maintained)

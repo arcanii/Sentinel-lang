@@ -125,12 +125,15 @@ reader of a verdict computed elsewhere.
   post-1.0 work.
 - **Pre-optimization.** The check constrains the program, not the optimized
   machine code; constant-time *emission* is future work (README, ADR 0026 D5).
-- **No `secret` aggregates at the MVP.** There is no `secret enum`, and
-  `[secret T]` arrays are future work, so some "secret through an aggregate"
-  flows are not yet *expressible* (and so cannot leak). The conformance suite
-  tests the flows the language admits today (secret scalars through calls,
-  fields, `match`, arithmetic, `&&`/`||`, into each sink), and records the
-  not-yet-expressible ones as deferred.
+- **No `secret enum` at the MVP.** `[secret T]` arrays now exist (ADR 0047) and
+  are covered — a secret array element reaching a branch, index, or divisor is
+  rejected like any other secret (the variable-length constant-time `memcmp`
+  over secret bytes relies on exactly this). What remains not-yet-expressible is
+  a **`secret enum`** (a secret enum *payload*): that "secret through an enum
+  aggregate" flow cannot be written, so it cannot leak. The conformance suite
+  tests the flows the language admits today (secret scalars and secret array
+  elements through calls, fields, `match`, arithmetic, `&&`/`||`, into each
+  sink), and records the not-yet-expressible ones as deferred.
 - **`lookup_var` robustness.** An unbound MIR variable (a resolver/lowering bug)
   would emit a taint-free `Opaque` and could mask a secret; a debug-build
   assertion now makes that loud (review F4), so it cannot pass CI silently.

@@ -1,5 +1,12 @@
 # SENTINEL_DESIGN.md
 
+> **Status: SUPERSEDED — original vision, kept for provenance.** The design of
+> record is **[`SENTINEL_DESIGN2.md`](SENTINEL_DESIGN2.md)** — it preserves this
+> document's core model (type system, memory broker, effects, the path to
+> self-hosting) and sharpens the security positioning. Where the two disagree,
+> DESIGN2 wins; for what is actually *shipped*, [`STATE.md`](STATE.md) is
+> authoritative.
+
 **Sentinel** is a C-like, class-based systems programming language designed
 around a single thesis: *the runtime is part of the language*. The compiler
 and a queryable runtime memory broker jointly enforce memory safety,

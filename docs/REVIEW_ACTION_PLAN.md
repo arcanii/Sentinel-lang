@@ -30,10 +30,13 @@ Current band status (see STATE.md / the commit log for detail):
   front-end panic-freedom fuzzer, which found + fixed two real bugs (P2.5).
   **REMAINING: P2.4 (Linux CI)** — needs CI infrastructure; cannot be validated
   on the macOS dev box.
-- **P3 — P3.1 + P3.2 DONE.** PROGRAMMING_GUIDE.md rewritten to current Sentinel
-  (P3.1); the STATE.md chronology split out to `HISTORY.md` (P3.2). **REMAINING:
-  P3.3 (DESIGN/DESIGN2 disposition), P3.4 (stale-reference sweep), P3.5 (minimal
-  LSP), P3.6 (diagnostics quality pass).**
+- **P3 — P3.1–P3.4 DONE.** PROGRAMMING_GUIDE.md rewritten to current Sentinel
+  (P3.1); the STATE.md chronology split out to `HISTORY.md` (P3.2); DESIGN2 made
+  the design of record with a superseded banner on DESIGN.md (P3.3); a
+  stale-reference sweep across `docs/` (P3.4 — fixed `ct-model.md`,
+  `PROGRAMMING_GUIDE.md`, `abi-v1.md` "deferred" notes; `SESSION_PREP.md` marked
+  historical). **REMAINING: P3.5 (minimal LSP), P3.6 (diagnostics quality
+  pass — audit underway).**
 - **P4 — REMAINING / deferred** (external CT review, perf profile, Polonius +
   field-disjoint borrows, platform/distribution niceties, the CT-emission
   research track) — outreach + deferred ergonomics, post-core by design.

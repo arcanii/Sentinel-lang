@@ -1,5 +1,11 @@
 # SESSION_PREP.md — Paste-ready prompt for the next chat session
 
+> **⚠ HISTORICAL — do not use as current state.** This boot prompt is frozen at
+> the **C3.5(d)** milestone (pre-1.0). The language has since reached 1.0 and
+> self-hosts. To resume work, use **[`HANDOVER.md`](HANDOVER.md) §0** +
+> **[`STATE.md`](STATE.md)** (the source of truth); this file is kept only for
+> provenance and may be deleted.
+
 Copy everything between the two horizontal rules below into the first
 message of a fresh chat. It's a self-contained boot prompt: tells the
 agent what's been done, where the code lives, what to read first, and

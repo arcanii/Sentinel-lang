@@ -619,17 +619,21 @@ the language to self-host. What remains pending:
 
 - **Not production-ready, not stable.** Every API can change; only the
   `abi-v1` *compiled-artifact* contract is frozen. There is no package manager
-  and **no standard library** beyond the handful of built-ins shown here
-  (`print`, `len`, `push`, `pop`, `vec_new`, `vec_to_array`, `str_eq`,
+  and **no installable standard library** beyond the handful of built-ins shown
+  here (`print`, `len`, `push`, `pop`, `vec_new`, `vec_to_array`, `str_eq`,
   `read_file`, `write_file`, `print_bytes`, `i64_to_u8`, `u8_to_i64`,
-  `is_some`, `unwrap_or`, `declassify`).
+  `is_some`, `unwrap_or`, `declassify`) — though a growing `std/` corpus of real
+  Sentinel libraries (constant-time crypto, text, net, collections) is built and
+  tested alongside the examples (see [`STATE.md`](STATE.md)).
 - **Single-process.** Cross-process capabilities and actors are deferred.
 - **The borrow checker over-rejects** some safe programs (see the limitations
   doc); the Polonius-style flow-precise migration is future work.
 - **Constant-time *emission* is not forced** — only the MIR-level rejection is
   delivered (see the `secret` section).
-- **No floats**, no integer widths beyond `i64`/`i32`/`u8`, no tuples, no
-  closures, no `for`/iterators, no block comments (`//` line comments only).
+- **No `f32` (and a small integer-width set).** The `f64` float (public-only —
+  `secret f64` is a type error) and the `u128`/`secret u128` integer *do* exist
+  now; still absent are `f32`, tuples, closures, `for`/iterators, and block
+  comments (`//` line comments only).
 - **Tooling is minimal** — the LSP is a stub; there's no formatter or REPL.
 
 When something you expect to work doesn't, check [`STATE.md`](STATE.md) (the

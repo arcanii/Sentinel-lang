@@ -53,7 +53,7 @@ The in-memory layout of every `Type` constructor. All layouts are
 | `u8` | `i8` (unsigned — signedness lives in the ops: `udiv` / unsigned `icmp`, not the type) — ADR 0033 D4/D6 |
 | `Struct(id)` / `GenericInstance(id)` / `Class(id)` | a **named LLVM struct**, fields in **declaration order** (no reordering) |
 | `[T]` (`Array`) | `{ i64 len, ptr data }` — ADR 0015 D1 |
-| `Vec<T>` (`Vec`) | `{ i64 len, i64 cap, ptr data }` — the `[T]` layout with a capacity field inserted, so `data` is **field 2** (offset 16); 24 bytes, align 8. `data` points at a heap buffer of `cap * sizeof(T)` bytes, the first `len` live; grown by `sentinel_realloc` (§5). `String` = `Vec<u8>` (deferred to D.3 (2/N)). — ADR 0034 D3 |
+| `Vec<T>` (`Vec`) | `{ i64 len, i64 cap, ptr data }` — the `[T]` layout with a capacity field inserted, so `data` is **field 2** (offset 16); 24 bytes, align 8. `data` points at a heap buffer of `cap * sizeof(T)` bytes, the first `len` live; grown by `sentinel_realloc` (§5). `String` = `Vec<u8>` (D.2/D.3, shipped — ADR 0033). — ADR 0034 D3 |
 | `?P` where `P` is primitive | `{ i1 valid, P }` (inline) — ADR 0015 D11 |
 | `?Struct` / `?GenericInstance` | `{ i1 valid, ptr payload }`, `payload` points at a heap-allocated value — ADR 0015 D11 |
 | `&T` / `&mut T` (`Ref`) | opaque `ptr` (LLVM 15+ opaque pointers) — ADR 0017 D11 |
@@ -306,9 +306,11 @@ A drift in any layout / mangling / symbol must turn a test **red**:
   instances; named-type args await the module-qualified type tag). Still out
   of scope here: incremental caching (ADR 0037 (3/N)).
 - Cross-architecture beyond x86-64/aarch64 (ADR 0025 D12).
-- A **C-header generator** / ABI-compatibility checker for external FFI.
+- An ABI-compatibility checker for external FFI. (The **C-header generator** —
+  `snc --emit-header` — has since shipped: ADR 0059.)
 - ABI **migration tooling** (`abi-v1`→`v2` shims).
 - **Fully** length-prefixing the *item* portion of a symbol (the §4
   intra-module soft-spot). The module path is already length-prefixed (§4).
-- Arrays-of-secrets layout (would add a `secret`-carrying layout; a
-  deferred surface).
+- (Arrays-of-secrets — `[secret T]` — have since shipped, ADR 0047; they reuse
+  the `[T]` layout because `secret T` is layout-identical to `T`, so no `abi-v1`
+  change was needed.)
