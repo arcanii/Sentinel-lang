@@ -120,18 +120,34 @@ for the build/test commands (incl. the `vcvars64.bat` recipe for the link-touchi
    instead of re-`use`-ing source, with an explicit TRUST designation tied to
    Sentinel's supply-chain thesis (SENTINEL_DESIGN2 §2 signatures · BACKLOG2 §2 ·
    AI_TOOLING §7.1: "a dependency not in the trust manifest fails to compile").
-   - **The signing & trust model is now DRAFTED — [ADR 0061](decisions/0061-code-signing-and-trust.md)
-     (PROPOSED, 2026-06-28, design-only).** It pins: sign the artifact's RAW bytes
-     (comments included — only the sig container is excluded; "verify the exact bytes you
-     compile"); a signed manifest/header that commits to content hashes + signs its own
-     metadata; Ed25519 dogfooded via `std::security::ed25519`; signed≠trusted, with the
-     CONSUMER's trust manifest (exact-key + TOFU for v1; CA/issuer later) as the authority;
-     and **capability-bounded keys** (trust composes with the effect row — a key's grants
-     bound what its code may do, which is also how *untrusted* is bounded). NOT
-     oracle-moving (a driver+resolve gate around the ADR 0037 module walk; the in-file sig
-     block is a `//` comment the lexer already skips). **Next: owner review of 0061, then
-     implement v1** (`snc sign`/`verify`, the trust-manifest reader, the gate on the
-     module-graph walk).
+   - **The signing & trust model is DRAFTED + v1 is UNDERWAY — [ADR 0061](decisions/0061-code-signing-and-trust.md)
+     (PROPOSED).** Design pins: sign the artifact's RAW bytes (comments included — only the
+     sig container is excluded; "verify the exact bytes you compile"); a signed object that
+     commits to the content hash + signs its own metadata (key + grants); Ed25519 dogfooded;
+     signed≠trusted, the CONSUMER's trust manifest (exact-key + TOFU for v1) as the
+     authority; **capability-bounded keys** (grants ⊆ the effect row — also how *untrusted*
+     is bounded). NOT oracle-moving (a driver+resolve gate; the in-file block is a `//`
+     comment).
+     - **v1 DONE (2026-06-28, Windows-verified, four-check green per crate):**
+       (1) **`sentinel-trust` crate** — in-process **Ed25519 verify + SHA-512** in Rust, the
+       TweetNaCl twin of `std::security::ed25519`, KAT-validated on RFC 8032 (the verify gate
+       lives INSIDE snc's trust boundary — owner-chosen over a shell-out helper). (2) **The
+       format** — `canonical_payload = domain‖algo‖pubkey‖grants‖SHA512(body)` (Rust-only —
+       the Sentinel signer signs opaque bytes, so no second format impl) + the detached/in-file
+       carrier + `verify_signed`; tests prove **a changed comment byte fails** (D2) and
+       **tampered grants fail** (D3/D6). (3) **`snc verify <file> [--sig …]`** (pure Rust). (4)
+       **`tools/trust/sign_core.sentinel`** — the dogfooded opaque-bytes signer; a committed
+       guard proves its output is **BYTE-IDENTICAL** to the Rust twin (Ed25519 is
+       deterministic → Sentinel-signs == Rust-verifies-accepts, proven). Commits
+       `6be5e4e`/`a2158d1`/`49f49b9`.
+     - **v1 REMAINING:** **(a)** `snc sign`/`snc keygen` orchestration subcommands (nicer UX
+       over `sign_core` — Rust builds the payload/carrier + shells out to the Sentinel signer;
+       keygen needs OS entropy — `random_bytes`/getentropy is POSIX so a Windows RNG or
+       macOS/Linux). **(b)** the **build-time gate (D7)** on the ADR 0037 module walk +
+       `require_signatures off|warn|strict` + the consumer **trust manifest (D5)**. **(c)**
+       **capability bounding (D6)** — effects ⊆ grants, after effect-check. The crypto +
+       format + verify + the dogfooded signer (the hard, security-critical core) are DONE;
+       what remains is policy/orchestration wiring.
    - **Still OPEN DESIGN (the other half of the rock):** a Sentinel-shaped INTERFACE
      DESCRIPTOR for a compiled `.lib` (the `--emit-header` is C-only — a consumer needs the
      Sentinel signatures + effect rows to type-check + capability-bound against a binary it
