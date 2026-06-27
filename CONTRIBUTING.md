@@ -68,6 +68,9 @@ guarantee *as stated* is a security bug.
 ## Where to look first
 
 - [`docs/STATE.md`](docs/STATE.md) — authoritative current status.
+- [`docs/project-context.md`](docs/project-context.md) — condensed rules of the road
+  for AI agents (and a fast orientation for humans): stack pins, pipeline invariants,
+  the constant-time `secret` discipline, and the ADR + dual-bootstrap workflow.
 - [`docs/decisions/`](docs/decisions/) — the ADR trail (the "why").
 - [`README.md`](README.md) — what Sentinel is, and explicitly *is not*.
 - [`docs/borrow-check-limitations.md`](docs/borrow-check-limitations.md) —
