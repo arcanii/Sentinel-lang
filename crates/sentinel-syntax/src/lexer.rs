@@ -264,6 +264,21 @@ pub enum TokenKind {
     #[token("::")]
     ColonColon,
 
+    /// ADR 0058: a 64-bit floating-point literal — `3.14`, `1.0`, `0.5`,
+    /// `1e9`, `2.5e-3`, `6.022e23`. The form is `digit+ '.' digit+` (an
+    /// optional exponent suffix) OR `digit+ ('e'|'E') ['+'|'-'] digit+` (a
+    /// bare exponent). A leading digit is *required* (`.5` is not a float —
+    /// it lexes as `Dot` then `IntLit`), which keeps the lexer unambiguous
+    /// against `p.0` field access and leaves a bare `42` an [`IntLit`]
+    /// (existing integer source is unchanged). Logos longest-match picks
+    /// `FloatLit` over `IntLit` for `3.14` (4 chars vs 1); for `42` only
+    /// `IntLit` matches. Like [`IntLit`], the token *recognises* the literal;
+    /// the parser decodes the `f64` value (its IEEE-754 bits) from the span.
+    /// `f64` is a PUBLIC-ONLY type (no `secret f64`) — float ops are not
+    /// constant-time (ADR 0058).
+    #[regex(r"[0-9]+(\.[0-9]+([eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)")]
+    FloatLit,
+
     #[regex(r"[0-9]+")]
     IntLit,
 
@@ -357,6 +372,28 @@ mod tests {
                 TokenKind::Semi,
             ]
         );
+    }
+
+    #[test]
+    fn lex_float_literals() {
+        // ADR 0058: dotted, dotted-with-exponent, and bare-exponent forms all
+        // lex to `FloatLit`; a bare integer stays `IntLit`.
+        assert_eq!(kinds("3.14"), vec![TokenKind::FloatLit]);
+        assert_eq!(kinds("1.0"), vec![TokenKind::FloatLit]);
+        assert_eq!(kinds("0.5"), vec![TokenKind::FloatLit]);
+        assert_eq!(kinds("1e9"), vec![TokenKind::FloatLit]);
+        assert_eq!(kinds("2.5e-3"), vec![TokenKind::FloatLit]);
+        assert_eq!(kinds("6.022E23"), vec![TokenKind::FloatLit]);
+        assert_eq!(kinds("42"), vec![TokenKind::IntLit]);
+        // A leading digit is required: `.5` is `Dot` then `IntLit`, and an
+        // integer field access `p.0` is unaffected (Ident, Dot, IntLit).
+        assert_eq!(kinds(".5"), vec![TokenKind::Dot, TokenKind::IntLit]);
+        assert_eq!(
+            kinds("p.0"),
+            vec![TokenKind::Ident, TokenKind::Dot, TokenKind::IntLit]
+        );
+        // `3.` (no trailing digit) is `IntLit` then `Dot`, not a float.
+        assert_eq!(kinds("3."), vec![TokenKind::IntLit, TokenKind::Dot]);
     }
 
     #[test]
