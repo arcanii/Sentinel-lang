@@ -139,6 +139,14 @@ pub enum UnaryOp {
     /// `*expr` — dereference per ADR 0017 D4. Operand must be a
     /// reference type (`&T` or `&mut T`).
     Deref,
+    /// ADR 0058: `sqrt(expr)` — the IEEE-754 square root of an `f64`,
+    /// lowering to the `llvm.sqrt.f64` intrinsic (a hardware instruction).
+    /// Written in CALL form (`sqrt(x)`), not as a prefix operator — the
+    /// parser recognises the reserved name `sqrt` with exactly one argument
+    /// and produces this node. Modelled as a unary op (rather than a builtin
+    /// fn) so it needs no `FnId` and so causes no `FnId` shift / scg
+    /// re-mirror. Operand and result are `f64`.
+    Sqrt,
 }
 
 impl UnaryOp {
@@ -149,6 +157,10 @@ impl UnaryOp {
             UnaryOp::Ref => "&",
             UnaryOp::RefMut => "&mut",
             UnaryOp::Deref => "*",
+            // Not a true prefix symbol — `sqrt` is written in call form. Used
+            // only for debug rendering (it never round-trips through a
+            // selfhost / Bar-A path, which errors on `f64`).
+            UnaryOp::Sqrt => "sqrt",
         }
     }
 }

@@ -499,6 +499,11 @@ fn emit_node(out: &mut String, e: &Expr) -> Result<(), String> {
         ExprKind::CharLit(b) => emit_char_lit(out, *b),
         ExprKind::StringLit(bytes) => emit_string_lit(out, bytes),
         ExprKind::Var(name) => out.push_str(name),
+        ExprKind::Unary(UnaryOp::Sqrt, _) => {
+            // ADR 0058: `sqrt` operates on `f64`, which is out of the selfhost
+            // Bar-A scope (like `cast` / a float literal) — error cleanly.
+            return Err("merge-to-source: `sqrt` is out of Bar-A scope".to_string());
+        }
         ExprKind::Unary(op, inner) => {
             out.push_str(unary_symbol(*op));
             out.push(' ');
@@ -746,6 +751,9 @@ fn unary_symbol(op: UnaryOp) -> &'static str {
         UnaryOp::Ref => "&",
         UnaryOp::RefMut => "&mut",
         UnaryOp::Deref => "*",
+        // ADR 0058: `sqrt` is call-form, not a prefix operator — the emitter
+        // errors before reaching this (out of Bar-A scope); kept exhaustive.
+        UnaryOp::Sqrt => "sqrt",
     }
 }
 

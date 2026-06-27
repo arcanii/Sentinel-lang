@@ -1517,6 +1517,12 @@ impl Emit<'_> {
                 writeln!(self.body, "  %v{v} = xor i1 {x}, 1").unwrap();
                 Ok(format!("%v{v}"))
             }
+            // ADR 0058: `sqrt` (and `f64`) are not ported to the textual oracle
+            // (snc-only). Erring keeps the selfhost corpus differential skipping
+            // any f64 fixture.
+            TypedExprKind::Unary(UnaryOp::Sqrt, _) => {
+                Err("sqrt not ported (ADR 0058 snc-only)".into())
+            }
             // `&x` / `&mut x` → a pointer to x's storage (its lvalue): for a `Var`,
             // its alloca slot — no instruction. LLVM ignores mutability.
             TypedExprKind::Unary(UnaryOp::Ref, inner)

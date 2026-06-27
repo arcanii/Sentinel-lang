@@ -143,6 +143,13 @@ fn parse_error_to_diagnostic(err: &ParseError) -> Diagnostic {
             message: "nested `secret secret T` is not allowed".to_string(),
             span: span.offset()..(span.offset() + span.len()),
         },
+        ParseError::SqrtArity { span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::sqrt_arity",
+            message: "`sqrt` takes exactly one argument".to_string(),
+            span: span.offset()..(span.offset() + span.len()),
+        },
         ParseError::EmptyEffectAnnotation { span } => Diagnostic {
             stage: "parse",
             severity: Severity::Error,

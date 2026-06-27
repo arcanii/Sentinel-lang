@@ -6556,6 +6556,37 @@ fn check_expr(
                     };
                     (TypedExprKind::Unary(*op, Box::new(inner_t)), ty)
                 }
+                UnaryOp::Sqrt => {
+                    // ADR 0058: `sqrt(x)` — the operand must be `f64`; the
+                    // result is `f64` (lowers to `llvm.sqrt.f64`). `f64` is
+                    // public-only, so there is no secret variant to handle.
+                    let inner_t = check_expr(
+                        inner,
+                        None,
+                        env,
+                        signatures,
+                        structs,
+                        class_decls,
+                        enums,
+                        instances,
+                        refs,
+                        secrets,
+                        struct_type_param_counts,
+                        effect_decls,
+                        trait_decls,
+                        impl_decls,
+                        konts,
+                        tasks,
+                    )?;
+                    if !matches!(inner_t.ty, Type::F64) {
+                        return Err(TypeError::Mismatch {
+                            expected: Type::F64,
+                            got: inner_t.ty,
+                            span: to_source_span(&inner.span),
+                        });
+                    }
+                    (TypedExprKind::Unary(*op, Box::new(inner_t)), Type::F64)
+                }
             }
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
@@ -12044,6 +12075,27 @@ fn main() -> i64 {
         // No implicit int↔float promotion — `f64 + i64` is a Mismatch.
         let err = check_err(
             "fn f(a: f64, b: i64) -> f64 { a + b }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn sqrt_typechecks_f64() {
+        // ADR 0058: `sqrt(f64) -> f64`.
+        let p = check_ok(
+            "fn root(x: f64) -> i64 { let r: f64 = sqrt(x); r as i64 }\
+             fn main() -> i64 { root(16.0) }",
+        );
+        let f = p.fns.iter().find(|f| f.name == "root").expect("root");
+        assert_eq!(f.return_type, Type::I64);
+    }
+
+    #[test]
+    fn sqrt_on_non_f64_rejected() {
+        // `sqrt` requires an `f64` operand — an integer is a Mismatch.
+        let err = check_err(
+            "fn f(x: i64) -> i64 { let r: f64 = sqrt(x); r as i64 }\
+             fn main() -> i64 { 0 }",
         );
         assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
     }

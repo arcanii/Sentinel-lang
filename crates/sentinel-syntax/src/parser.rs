@@ -137,6 +137,19 @@ pub enum ParseError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0058: `sqrt` is a reserved built-in taking EXACTLY one `f64`
+    /// argument (it lowers to the `llvm.sqrt.f64` intrinsic). `sqrt()` /
+    /// `sqrt(a, b)` are rejected at parse time.
+    #[error("`sqrt` takes exactly one argument")]
+    #[diagnostic(
+        code(sentinel::parse::sqrt_arity),
+        help("`sqrt(x)` computes the square root of a single `f64` (ADR 0058)")
+    )]
+    SqrtArity {
+        #[label("`sqrt` call here")]
+        span: miette::SourceSpan,
+    },
+
     /// C3 / ADR 0019 D5: nested `secret secret T` is rejected at
     /// parse time. The depth-1 rule mirrors C1.5's `??T` rejection
     /// per ADR 0014 D6 — qualifier composition stays bounded at
@@ -4296,6 +4309,22 @@ impl<'a> Parser<'a> {
                             });
                         }
                     };
+                    // ADR 0058: `sqrt(x)` is the float square-root intrinsic,
+                    // recognised at the call site by its reserved name and
+                    // lowered to a unary node (no `FnId`, so no `FnId` shift).
+                    // Exactly one argument; any other arity is a parse error.
+                    if name == "sqrt" {
+                        if args.len() != 1 {
+                            return Err(ParseError::SqrtArity {
+                                span: to_source_span(&(name_span.start..rparen_end)),
+                            });
+                        }
+                        let arg = args.into_iter().next().expect("len checked");
+                        return Ok(Spanned {
+                            kind: ExprKind::Unary(UnaryOp::Sqrt, Box::new(arg)),
+                            span: name_span.start..rparen_end,
+                        });
+                    }
                     Ok(Spanned {
                         kind: ExprKind::Call { callee: name, callee_span: name_span.clone(), args },
                         span: name_span.start..rparen_end,
@@ -5195,6 +5224,25 @@ mod tests {
         }
         // A bare integer is still an `IntLit`, not a float.
         assert!(matches!(parse_expr("42").unwrap().kind, ExprKind::IntLit(42)));
+    }
+
+    #[test]
+    fn parse_sqrt_intrinsic() {
+        // ADR 0058: `sqrt(x)` parses to a `Unary(Sqrt, x)` node (no Call).
+        let e = parse_expr("sqrt(2.0)").expect("parse sqrt");
+        assert!(
+            matches!(e.kind, ExprKind::Unary(UnaryOp::Sqrt, _)),
+            "got {:?}",
+            e.kind
+        );
+        // Wrong arity is a parse error.
+        assert!(matches!(parse_expr("sqrt()").unwrap_err(), ParseError::SqrtArity { .. }));
+        assert!(matches!(
+            parse_expr("sqrt(1.0, 2.0)").unwrap_err(),
+            ParseError::SqrtArity { .. }
+        ));
+        // A different name is still a normal call.
+        assert!(matches!(parse_expr("foo(1)").unwrap().kind, ExprKind::Call { .. }));
     }
 
     #[test]

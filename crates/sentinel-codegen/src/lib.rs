@@ -470,6 +470,13 @@ pub fn compile_to_object_for_module(
         let panic_type = void_ty.fn_type(&[i64_ty.into(), i64_ty.into()], false);
         module.add_function("sentinel_panic_oob", panic_type, None)
     };
+    // ADR 0058: the `llvm.sqrt.f64` intrinsic backing `sqrt(x)` — `double
+    // @llvm.sqrt.f64(double)`. A target intrinsic (a hardware `fsqrt`), not a
+    // runtime symbol; declared once and called at each `UnaryOp::Sqrt`.
+    let sqrt_f64_fn = {
+        let f64_ty = context.f64_type();
+        module.add_function("llvm.sqrt.f64", f64_ty.fn_type(&[f64_ty.into()], false), None)
+    };
     // C2.4 / ADR 0017 D8: declare sentinel_free for scope-exit
     // drop emission. Closes the C1.6+ heap-leak deferral.
     let free_fn = {
@@ -1067,6 +1074,7 @@ pub fn compile_to_object_for_module(
             op_id_base: op_id_base.clone(),
             alloc_fn,
             panic_oob_fn,
+            sqrt_f64_fn,
             free_fn,
             str_eq_fn,
             realloc_fn,
@@ -1294,6 +1302,9 @@ struct CodegenCtx<'ctx, 'plan> {
     /// C1.6: `sentinel_alloc(i64) -> ptr` runtime function. Called
     /// to back array storage and `?Struct` heap payloads.
     alloc_fn: FunctionValue<'ctx>,
+    /// ADR 0058: the `llvm.sqrt.f64` intrinsic, declared once at setup and
+    /// called at each `sqrt(x)` (`UnaryOp::Sqrt`).
+    sqrt_f64_fn: FunctionValue<'ctx>,
     /// C1.6: `sentinel_panic_oob(i64 idx, i64 len) -> void` runtime
     /// function. Called from the bounds-check failure block.
     panic_oob_fn: FunctionValue<'ctx>,
@@ -5866,6 +5877,18 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .build_int_neg(v, "neg")
                     .map(|v| v.into())
                     .map_err(|e| CodegenError::Builder(e.to_string()))
+            }
+            // ADR 0058: `sqrt(x)` calls the `llvm.sqrt.f64` intrinsic (a
+            // hardware `fsqrt`). The operand is `f64` (type-checked).
+            TypedExprKind::Unary(UnaryOp::Sqrt, inner) => {
+                let v = self.lower_expr(inner, program)?.into_float_value();
+                let call = self
+                    .builder
+                    .build_call(self.sqrt_f64_fn, &[v.into()], "sqrt")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                call.try_as_basic_value()
+                    .left()
+                    .ok_or_else(|| CodegenError::Builder("llvm.sqrt.f64 returned void".to_string()))
             }
             TypedExprKind::Unary(UnaryOp::Not, inner) => {
                 // `!b` for bool b ≡ `b XOR 1`. The type checker
