@@ -275,6 +275,69 @@ fn export_multi_module_library_from_c() {
     );
 }
 
+/// ADR 0059 A9: `snc build --shared` emits a SHARED library (`.dylib`) a C
+/// program loads at RUNTIME via `dlopen` + `dlsym` — the Python-`ctypes` /
+/// dynamic-FFI path. The driver dlopens the dylib, resolves `sha256_oneshot` +
+/// `sentinel_free_bytes`, runs a verified-constant-time SHA-256 over a C buffer
+/// (the owned-`[u8]` return + the bundled runtime, all through the `.dylib`),
+/// checks the NIST "abc" vector, and exits 42.
+#[test]
+fn export_shared_library_dlopen() {
+    let root = repo_root();
+    let dir = temp_dir("shared");
+
+    let lib_src = dir.join("digest_lib.sentinel");
+    std::fs::copy(root.join("examples/export/digest_lib.sentinel"), &lib_src)
+        .expect("copy digest_lib.sentinel");
+    let driver_c = dir.join("dlopen_driver.c");
+    std::fs::copy(root.join("examples/export/dlopen_driver.c"), &driver_c)
+        .expect("copy dlopen_driver.c");
+
+    // `snc build --shared digest_lib.sentinel -o libsentineldigest.dylib`
+    let dylib = dir.join("libsentineldigest.dylib");
+    let build = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg("--shared")
+        .arg(&lib_src)
+        .arg("-o")
+        .arg(&dylib)
+        .output()
+        .expect("run snc build --shared");
+    assert!(
+        build.status.success(),
+        "snc build --shared failed; stderr:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(dylib.exists(), "the shared library was not produced");
+
+    // Compile the dlopen driver (it links no dylib at build time — it loads it
+    // at runtime), then run it with the dylib path.
+    let driver_bin = dir.join("dlopen_driver");
+    let cc = Command::new("cc")
+        .arg(&driver_c)
+        .arg("-o")
+        .arg(&driver_bin)
+        .output()
+        .expect("run cc on the dlopen driver");
+    assert!(
+        cc.status.success(),
+        "cc failed to build the dlopen driver; stderr:\n{}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+
+    let run = Command::new(&driver_bin)
+        .arg(&dylib)
+        .output()
+        .expect("run the dlopen driver");
+    let code = run.status.code().expect("driver exited normally");
+    assert_eq!(
+        code, 42,
+        "dlopen driver calling the shared library exited {code}, expected 42;\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
 /// `snc build --lib` requires at least one `export "C"` and rejects `main`-less
 /// libraries that export nothing (there is nothing to put in the archive).
 #[test]
@@ -309,4 +372,5 @@ fn export_demonstrator_files_present() {
     assert!(root.join("examples/export/digest_driver.c").exists());
     assert!(root.join("examples/export/crypto_lib.sentinel").exists());
     assert!(root.join("examples/export/crypto_driver.c").exists());
+    assert!(root.join("examples/export/dlopen_driver.c").exists());
 }

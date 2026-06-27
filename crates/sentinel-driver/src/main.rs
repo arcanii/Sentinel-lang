@@ -99,8 +99,12 @@ fn main() -> ExitCode {
         }
         // ADR 0059: `snc build --lib <file> [-o <out.a>] [--emit-header <h.h>]`
         // — compile to a C-ABI static library (no `main`) so other languages
-        // link + call its `export "C"` functions. Flags scan order-free.
-        [_, cmd, rest @ ..] if cmd == "build" && rest.iter().any(|a| a == "--lib") => {
+        // link + call its `export "C"` functions. `--shared` (ADR 0059 A9) emits
+        // a SHARED library (`.dylib`) instead, for `dlopen` / `ctypes`. Flags
+        // scan order-free.
+        [_, cmd, rest @ ..]
+            if cmd == "build" && rest.iter().any(|a| a == "--lib" || a == "--shared") =>
+        {
             run_build_lib_cli(rest)
         }
         [_] => {
@@ -128,6 +132,8 @@ fn print_usage() {
     eprintln!("    snc build <file> [-o <output>]   compile and link to an executable");
     eprintln!("    snc build --lib <file> [-o <lib.a>] [--emit-header <h.h>]");
     eprintln!("                                     compile to a C-ABI static library (ADR 0059)");
+    eprintln!("    snc build --shared <file> [-o <lib.dylib>] [--emit-header <h.h>]");
+    eprintln!("                                     compile to a C-ABI shared library (dlopen/ctypes)");
     eprintln!("    snc help                         show this message");
     eprintln!();
     eprintln!("programs are one or more `fn` definitions; `main` is the entry point.");
@@ -927,16 +933,31 @@ fn run_build_merged(merged: Program, path: &str, output: Option<&str>) -> ExitCo
     }
 }
 
-/// ADR 0059: scan `snc build --lib` flags (order-free): the input path, an
-/// optional `-o <out.a>`, and an optional `--emit-header <h.h>`.
+/// ADR 0059: the library output kind — a static archive (`--lib`) or a shared
+/// object (`--shared`). The whole front end + object emission is identical; only
+/// the final link step (archive vs `-dynamiclib`) and the default extension
+/// differ.
+#[derive(Clone, Copy, PartialEq)]
+enum LibMode {
+    Static,
+    Shared,
+}
+
+/// ADR 0059: scan `snc build --lib` / `--shared` flags (order-free): the input
+/// path, an optional `-o <out>`, and an optional `--emit-header <h.h>`.
 fn run_build_lib_cli(args: &[String]) -> ExitCode {
     let mut path: Option<&str> = None;
     let mut output: Option<&str> = None;
     let mut header: Option<&str> = None;
+    let mut mode = LibMode::Static;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--lib" => i += 1,
+            "--shared" => {
+                mode = LibMode::Shared;
+                i += 1;
+            }
             "-o" => {
                 output = args.get(i + 1).map(|s| s.as_str());
                 i += 2;
@@ -954,21 +975,26 @@ fn run_build_lib_cli(args: &[String]) -> ExitCode {
         }
     }
     match path {
-        Some(p) => run_build_lib(p, output, header),
+        Some(p) => run_build_lib(p, output, header, mode),
         None => {
-            eprintln!("snc: `build --lib` needs an input file");
+            eprintln!("snc: `build --lib` / `--shared` needs an input file");
             ExitCode::from(2)
         }
     }
 }
 
-/// ADR 0059: compile a Sentinel source file to a **C-ABI static library** — no
-/// `main`, the `export "C"` functions exposed under their bare un-mangled
-/// symbols, archived together with the runtime into a `.a` that C / Rust /
-/// Python / … can link and call. Optionally writes a C header. Phase 1a is
-/// SINGLE-FILE + the value ABI (`i64`/`f64`); `use` (multi-module libs), the
-/// `(ptr,len)` buffer ABI, and shared objects are later phases.
-fn run_build_lib(path: &str, output: Option<&str>, header: Option<&str>) -> ExitCode {
+/// ADR 0059: compile a Sentinel source file to a **C-ABI library** — no `main`,
+/// the `export "C"` functions exposed under their bare un-mangled symbols,
+/// bundled with the runtime into a `.a` (`LibMode::Static`) or a `.dylib`
+/// (`LibMode::Shared`, A9 — for `dlopen` / `ctypes`) that C / Rust / Python / …
+/// can link / load and call. Optionally writes a C header. The emitted object is
+/// already PIC (`RelocMode::PIC`), so the same object serves both modes.
+fn run_build_lib(
+    path: &str,
+    output: Option<&str>,
+    header: Option<&str>,
+    mode: LibMode,
+) -> ExitCode {
     let src = match read_source(path) {
         Ok(s) => s,
         Err(code) => return code,
@@ -1051,9 +1077,13 @@ fn run_build_lib(path: &str, output: Option<&str>, header: Option<&str>) -> Exit
         return ExitCode::from(1);
     }
 
+    let default_ext = match mode {
+        LibMode::Static => "a",
+        LibMode::Shared => "dylib",
+    };
     let lib_path: PathBuf = match output {
         Some(o) => PathBuf::from(o),
-        None => PathBuf::from(path).with_extension("a"),
+        None => PathBuf::from(path).with_extension(default_ext),
     };
     let object_path = lib_path.with_extension("o");
     let hir = sentinel_hir::lower_to_hir(&typed, &drop_plan);
@@ -1069,8 +1099,12 @@ fn run_build_lib(path: &str, output: Option<&str>, header: Option<&str>) -> Exit
         }
         return ExitCode::from(1);
     }
-    if let Err(msg) = archive_lib(&object_path, &lib_path) {
-        eprintln!("snc: archive failed: {msg}");
+    let link_result = match mode {
+        LibMode::Static => archive_lib(&object_path, &lib_path),
+        LibMode::Shared => link_shared(&object_path, &lib_path),
+    };
+    if let Err(msg) = link_result {
+        eprintln!("snc: library link failed: {msg}");
         return ExitCode::from(1);
     }
     if let Some(h) = header {
@@ -1100,6 +1134,38 @@ fn archive_lib(object: &Path, lib: &Path) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("libtool exited with {status}"))
+    }
+}
+
+/// ADR 0059 A9: link the emitted (PIC) object + the runtime staticlib into a
+/// SHARED library (`.dylib`) other languages `dlopen` / `ctypes`-load and call.
+/// macOS uses `cc -dynamiclib`; the dylib's `install_name` is set to its own
+/// absolute path so a consumer that links against it (or `dlopen`s it by path)
+/// resolves it at runtime. The runtime's symbols are pulled in from the
+/// staticlib so the `.dylib` is self-contained. (Linux's `cc -shared -fPIC` +
+/// `soname` path is a follow-up, like the static `ar`-MRI path.)
+fn link_shared(object: &Path, lib: &Path) -> Result<(), String> {
+    let runtime = find_runtime()?;
+    // Prefer an absolute install_name so the dylib is locatable; fall back to
+    // the given path if canonicalization fails (the file may not exist yet).
+    let install_name = std::fs::canonicalize(lib.parent().unwrap_or(Path::new(".")))
+        .ok()
+        .and_then(|dir| lib.file_name().map(|f| dir.join(f)))
+        .unwrap_or_else(|| lib.to_path_buf());
+    let status = Command::new("cc")
+        .arg("-dynamiclib")
+        .arg("-install_name")
+        .arg(&install_name)
+        .arg("-o")
+        .arg(lib)
+        .arg(object)
+        .arg(&runtime)
+        .status()
+        .map_err(|e| format!("failed to invoke cc: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("cc -dynamiclib exited with {status}"))
     }
 }
 
