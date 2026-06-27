@@ -1087,6 +1087,20 @@ fn c_type_name(ty: sentinel_types::Type) -> Option<&'static str> {
     }
 }
 
+/// ADR 0059 Phase 1b: `true` iff `ty` is `&[u8]` / `&mut [u8]` — presented to
+/// C as a `(const uint8_t* data, int64_t len)` pair in the generated header.
+fn is_byte_slice_ref_header(ty: sentinel_types::Type, typed: &sentinel_types::TypedProgram) -> bool {
+    if let sentinel_types::Type::Ref(id) = ty {
+        if let Some(rd) = typed.refs.get(id.0 as usize) {
+            return matches!(
+                rd.inner,
+                sentinel_types::Type::Array(sentinel_types::ArrayElem::U8)
+            );
+        }
+    }
+    false
+}
+
 /// ADR 0059: write a C header from the `export "C"` signatures — `#include
 /// <stdint.h>`, include guards, and one prototype per export (the value ABI).
 fn emit_c_header(typed: &sentinel_types::TypedProgram, header: &Path) -> Result<(), String> {
@@ -1107,13 +1121,23 @@ fn emit_c_header(typed: &sentinel_types::TypedProgram, header: &Path) -> Result<
         if sig.param_types.is_empty() {
             params.push_str("void");
         } else {
-            for (i, pty) in sig.param_types.iter().enumerate() {
-                if i > 0 {
-                    params.push_str(", ");
+            let mut first = true;
+            for pty in sig.param_types.iter() {
+                // ADR 0059 Phase 1b: a `&[u8]` param expands to the idiomatic C
+                // `(const uint8_t* data, int64_t len)` pair.
+                let pieces: Vec<&str> = if is_byte_slice_ref_header(*pty, typed) {
+                    vec!["const uint8_t*", "int64_t"]
+                } else {
+                    vec![c_type_name(*pty)
+                        .ok_or_else(|| format!("export `{}` has a non-FFI parameter", sig.name))?]
+                };
+                for piece in pieces {
+                    if !first {
+                        params.push_str(", ");
+                    }
+                    first = false;
+                    params.push_str(piece);
                 }
-                let c = c_type_name(*pty)
-                    .ok_or_else(|| format!("export `{}` has a non-value-ABI parameter", sig.name))?;
-                params.push_str(c);
             }
         }
         out.push_str(&format!("{ret} {}({params});\n", sig.name));

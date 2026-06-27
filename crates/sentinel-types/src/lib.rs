@@ -541,6 +541,21 @@ fn is_ffi_safe(ty: Type) -> bool {
     matches!(ty, Type::I64 | Type::F64)
 }
 
+/// ADR 0059 Phase 1b: `true` iff `ty` is `&[u8]` / `&mut [u8]` — a reference to
+/// a byte array. Such a param is presented to C as the idiomatic
+/// `(const uint8_t* data, int64_t len)` pair (the export wrapper rebuilds the
+/// Sentinel `[u8]` fat pointer internally). The buffer ABI for byte-slice
+/// EXPORT params; a non-byte-slice ref or an owned `[u8]` return is not yet
+/// FFI-safe (later phases).
+fn is_byte_slice_ref(ty: Type, refs: &[RefData]) -> bool {
+    if let Type::Ref(id) = ty {
+        if let Some(rd) = refs.get(id.0 as usize) {
+            return matches!(rd.inner, Type::Array(ArrayElem::U8));
+        }
+    }
+    false
+}
+
 impl Type {
     /// `true` if this is an integer type (`I32`, `I64`, or `U8`).
     /// Used to gate arithmetic-operator typing rules — comparisons
@@ -4370,7 +4385,9 @@ pub fn check_module(
             .find(|s| s.id == *id)
             .expect("ADR 0059: every export FnId has a TypedFnSignature");
         for (idx, pty) in sig.param_types.iter().enumerate() {
-            if !is_ffi_safe(*pty) {
+            // ADR 0059 Phase 1b: a param is the value ABI (`i64`/`f64`) OR a
+            // `&[u8]` byte slice (presented to C as `(ptr, len)`).
+            if !is_ffi_safe(*pty) && !is_byte_slice_ref(*pty, &refs) {
                 let span = program
                     .fns
                     .iter()
@@ -4380,6 +4397,8 @@ pub fn check_module(
                 return Err(TypeError::ExternFfiType { span });
             }
         }
+        // The return type is still value-ABI only (`i64`/`f64`) — an owned
+        // `[u8]` return + `sentinel_free_bytes` is a later phase.
         if !is_ffi_safe(sig.return_type) {
             let span = program
                 .fns
@@ -12230,6 +12249,21 @@ fn main() -> i64 {
              fn main() -> i64 { 0 }",
         );
         assert_eq!(p.exports.len(), 1);
+    }
+
+    #[test]
+    fn export_byte_slice_param_typechecks() {
+        // ADR 0059 Phase 1b: a `&[u8]` export param is FFI-safe (presented to C
+        // as a (ptr, len) pair); other refs are not.
+        let p = check_ok(
+            "export \"C\" fn len_of(a: &[u8]) -> i64 { len(*a) }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.exports.len(), 1);
+        // A `&i64` (non-byte-slice ref) is still rejected.
+        let err = check_err(
+            "export \"C\" fn f(a: &i64) -> i64 { *a }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::ExternFfiType { .. }), "got {err:?}");
     }
 
     #[test]

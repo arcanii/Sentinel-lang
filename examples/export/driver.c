@@ -15,11 +15,20 @@ int main(void) {
     long pick_b = ct_choose(0, 111, 222); /* cond=0 -> b = 222 */
     long sum = sentinel_add(40, 2);       /* 42 */
 
+    /* byte-buffer ABI: pass C arrays as (ptr, len) to a constant-time compare */
+    const unsigned char x[] = "verify-this-tag";
+    const unsigned char y[] = "verify-this-tag";
+    const unsigned char z[] = "verify-this-TAG";
+    long n = 15;
+    long eq = ct_byte_eq(x, n, y, n, n);  /* equal  -> 1 */
+    long ne = ct_byte_eq(x, n, z, n, n);  /* differ -> 0 */
+
     printf("ct_choose(1,111,222) = %ld\n", pick_a);
     printf("ct_choose(0,111,222) = %ld\n", pick_b);
     printf("sentinel_add(40,2)   = %ld\n", sum);
+    printf("ct_byte_eq equal=%ld differ=%ld\n", eq, ne);
 
-    if (pick_a == 111 && pick_b == 222 && sum == 42) {
+    if (pick_a == 111 && pick_b == 222 && sum == 42 && eq == 1 && ne == 0) {
         return 42;
     }
     return 1;

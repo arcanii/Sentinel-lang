@@ -69,6 +69,12 @@ fn export_c_library_called_from_c() {
         h.contains("int64_t sentinel_add(int64_t, int64_t);"),
         "header missing sentinel_add prototype:\n{h}"
     );
+    // ADR 0059 Phase 1b: a `&[u8]` param expands to a C `(const uint8_t*,
+    // int64_t)` pair in the generated prototype.
+    assert!(
+        h.contains("int64_t ct_byte_eq(const uint8_t*, int64_t, const uint8_t*, int64_t, int64_t);"),
+        "header missing the buffer-ABI ct_byte_eq prototype:\n{h}"
+    );
 
     // Compile the C driver against the generated header + library, run it.
     let driver_bin = dir.join("driver");

@@ -29,3 +29,27 @@ export "C" fn ct_choose(cond: i64, a: i64, b: i64) -> i64 {
 export "C" fn sentinel_add(a: i64, b: i64) -> i64 {
     a + b
 }
+
+// THE BYTE-BUFFER HEADLINE (ADR 0059 Phase 1b): a verified-CONSTANT-TIME byte
+// comparison — the classic crypto primitive for MAC / tag / digest verification
+// (a naive `memcmp` leaks where the first mismatch is, via timing). C presents
+// each `&[u8]` as a `(const uint8_t* data, int64_t len)` pair (the compiler
+// emits the wrapper that rebuilds the Sentinel slice). The first `n` bytes are
+// widened to `secret`, XOR-accumulated branch-free (no early-out, no branch on
+// the data), folded to a single 0/1 in constant time, and declassified. Returns
+// 1 iff the first `n` bytes are equal. A foreign caller gets a constant-time
+// equality the compiler proved — over a plain C buffer API.
+export "C" fn ct_byte_eq(a: &[u8], b: &[u8], n: i64) -> i64 {
+    let mut diff: secret i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        let sa: secret i64 = (*a)[i] as i64;
+        let sb: secret i64 = (*b)[i] as i64;
+        diff = diff | (sa ^ sb);
+        i = i + 1;
+    }
+    // `diff` is 0 iff every byte matched; fold to 0/1 without branching:
+    // `(diff | -diff) >> 63` is the sign bit (1 iff diff != 0).
+    let nonzero: secret i64 = ((diff | (0 - diff)) >> 63) & 1;
+    declassify(1 - nonzero)
+}
