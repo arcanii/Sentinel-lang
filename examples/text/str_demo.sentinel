@@ -22,6 +22,8 @@ use std::text::str::replace_char;
 use std::text::str::compare;
 use std::text::str::parse_int;
 use std::text::str::int_to_str;
+use std::text::str::parse_f64;
+use std::text::str::f64_to_str;
 use std::text::str::split_count;
 use std::text::str::split_nth;
 use std::text::str::pad_start;
@@ -141,6 +143,20 @@ fn main() -> i64 {
     bad = bad + streq(pad_start(&seven, 3, i64_to_u8(48)), lit([48, 48, 55], 3));   // "007"
     bad = bad + streq(pad_end(&seven, 3, i64_to_u8(48)), lit([55, 48, 48], 3));     // "700"
     bad = bad + streq(pad_start(&abcd, 3, i64_to_u8(48)), lit([97, 98, 99, 100], 4));   // no-op
+
+    // ---- f64 <-> string (ADR 0058 floats) ----
+    bad = bad + streq(f64_to_str(3.75), "3.75");
+    bad = bad + streq(f64_to_str(0.0 - 2.5), "-2.5");
+    bad = bad + streq(f64_to_str(100.0), "100.0");
+    bad = bad + streq(f64_to_str(0.0), "0.0");
+    // parse ∘ format = identity on exactly-representable decimals (string-exact,
+    // no epsilon needed). Covers the dotted and exponent literal forms.
+    let p1: [u8] = "3.75";
+    let p2: [u8] = "1.5e2";
+    let p3: [u8] = "-0.625";
+    bad = bad + streq(f64_to_str(parse_f64(&p1)), "3.75");
+    bad = bad + streq(f64_to_str(parse_f64(&p2)), "150.0");
+    bad = bad + streq(f64_to_str(parse_f64(&p3)), "-0.625");
 
     if bad == 0 { 42 } else { 5 }
 }

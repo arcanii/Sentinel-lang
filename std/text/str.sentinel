@@ -253,6 +253,109 @@ pub fn int_to_str(n: i64) -> [u8] {
     }
 }
 
+// ---- f64 <-> string (ADR 0058 floats) ----------------------------------------------
+//
+// A first-cut decimal conversion (NOT a correctly-rounded Ryu/Grisu — that is a
+// real algorithm). `parse_f64` accumulates the value as it scans; `f64_to_str`
+// emits a fixed 6-fractional-digit form with trailing zeros trimmed (always at
+// least one digit after the dot, so an integral value prints `X.0`). Round-trips
+// exactly-representable decimals (e.g. `3.75`, `-2.5`, `100.0`).
+
+// Parse `[-] int [. frac] [(e|E) [+|-] exp]` from `s` into an `f64`. A leading
+// non-numeric prefix yields `0.0`; parsing stops at the first byte that does not
+// continue the current part (so a trailing `]`/`,`/`}` from a larger document is
+// simply not consumed here — callers that need the end index parse separately).
+pub fn parse_f64(s: &[u8]) -> f64 {
+    let n: i64 = len(*s);
+    let mut i: i64 = 0;
+    let mut neg: bool = false;
+    if n > 0 && u8_to_i64((*s)[0]) == 45 { neg = true; i = 1; 0 } else { 0 };
+    // Integer part.
+    let mut result: f64 = 0.0;
+    let mut stop: bool = false;
+    while i < n && stop == false {
+        let c: i64 = u8_to_i64((*s)[i]);
+        if c >= 48 && c <= 57 {
+            result = result * 10.0 + ((c - 48) as f64);
+            i = i + 1;
+            0
+        } else { stop = true; 0 };
+    }
+    // Fractional part.
+    if i < n && u8_to_i64((*s)[i]) == 46 {
+        i = i + 1;
+        let mut scale: f64 = 1.0;
+        let mut fstop: bool = false;
+        while i < n && fstop == false {
+            let c: i64 = u8_to_i64((*s)[i]);
+            if c >= 48 && c <= 57 {
+                scale = scale / 10.0;
+                result = result + ((c - 48) as f64) * scale;
+                i = i + 1;
+                0
+            } else { fstop = true; 0 };
+        }
+        0
+    } else { 0 };
+    // Exponent part.
+    if i < n && (u8_to_i64((*s)[i]) == 101 || u8_to_i64((*s)[i]) == 69) {
+        i = i + 1;
+        let mut eneg: bool = false;
+        if i < n {
+            let sc: i64 = u8_to_i64((*s)[i]);
+            if sc == 45 { eneg = true; i = i + 1; 0 } else { if sc == 43 { i = i + 1; 0 } else { 0 } };
+            0
+        } else { 0 };
+        let mut exp: i64 = 0;
+        let mut estop: bool = false;
+        while i < n && estop == false {
+            let c: i64 = u8_to_i64((*s)[i]);
+            if c >= 48 && c <= 57 { exp = exp * 10 + (c - 48); i = i + 1; 0 } else { estop = true; 0 };
+        }
+        let mut e: i64 = 0;
+        while e < exp {
+            if eneg { result = result / 10.0; 0 } else { result = result * 10.0; 0 };
+            e = e + 1;
+        }
+        0
+    } else { 0 };
+    if neg { 0.0 - result } else { result }
+}
+
+// Format `x` as decimal with up to 6 fractional digits (trailing zeros trimmed,
+// minimum one). `f64_to_str(3.75)` = "3.75"; `f64_to_str(100.0)` = "100.0".
+pub fn f64_to_str(x: f64) -> [u8] {
+    let neg: bool = x < 0.0;
+    let v: f64 = if neg { 0.0 - x } else { x };
+    let mut ip: i64 = v as i64;
+    let frac: f64 = v - (ip as f64);
+    let mut fp: i64 = (frac * 1000000.0 + 0.5) as i64;
+    if fp >= 1000000 { ip = ip + 1; fp = fp - 1000000; 0 } else { 0 };
+    // Six fractional digits, most-significant first.
+    let mut digs: Vec<u8> = vec_new();
+    let mut place: i64 = 100000;
+    while place >= 1 {
+        let d: i64 = (fp / place) - ((fp / place) / 10) * 10;
+        push(&mut digs, i64_to_u8(48 + d));
+        place = place / 10;
+    }
+    // Trim trailing zeros, keeping at least one digit.
+    let mut flen: i64 = 6;
+    while flen > 1 && digs[flen - 1] == i64_to_u8(48) {
+        flen = flen - 1;
+    }
+    let mut out: Vec<u8> = vec_new();
+    if neg { push(&mut out, i64_to_u8(45)); 0 } else { 0 };
+    let ipstr: [u8] = int_to_str(ip);
+    let ilen: i64 = len(ipstr);
+    let mut k: i64 = 0;
+    while k < ilen { push(&mut out, ipstr[k]); k = k + 1; }
+    push(&mut out, i64_to_u8(46));
+    let mut j: i64 = 0;
+    while j < flen { push(&mut out, digs[j]); j = j + 1; }
+    vec_to_array(out)
+}
+
 // ---- splitting (by index, since Vec<[u8]> is unavailable) --------------------------
 
 // The number of fields `s` splits into on byte `sep` (= occurrences of `sep` + 1).
