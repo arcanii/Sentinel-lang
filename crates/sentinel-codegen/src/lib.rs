@@ -6104,6 +6104,14 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .build_load(ptr_ty, data_field, "ptr_of")
                     .map_err(|e| CodegenError::Builder(e.to_string()))
             }
+            TypedExprKind::Unary(UnaryOp::IsNull, inner) => {
+                // ADR 0057 Phase 1b: `is_null(p)` → `icmp eq ptr %p, null` (i1).
+                let p = self.lower_expr(inner, program)?.into_pointer_value();
+                self.builder
+                    .build_is_null(p, "is_null")
+                    .map(|v| v.into())
+                    .map_err(|e| CodegenError::Builder(e.to_string()))
+            }
             TypedExprKind::Unary(UnaryOp::Deref, inner) => {
                 // C2 / ADR 0017 D4: `*r` loads the inner type from
                 // r's pointer value. Look up the ref's pointee type

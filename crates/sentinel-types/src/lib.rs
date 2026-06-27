@@ -6844,6 +6844,37 @@ fn check_expr(
                     }
                     (TypedExprKind::Unary(*op, Box::new(inner_t)), Type::Ptr)
                 }
+                UnaryOp::IsNull => {
+                    // ADR 0057 Phase 1b: `is_null(p)` — the operand must be a
+                    // `ptr` (an FFI handle); the result is a public `bool`. Lets a
+                    // wrapper null-check an FFI return before reading through it.
+                    let inner_t = check_expr(
+                        inner,
+                        None,
+                        env,
+                        signatures,
+                        structs,
+                        class_decls,
+                        enums,
+                        instances,
+                        refs,
+                        secrets,
+                        struct_type_param_counts,
+                        effect_decls,
+                        trait_decls,
+                        impl_decls,
+                        konts,
+                        tasks,
+                    )?;
+                    if !matches!(inner_t.ty, Type::Ptr) {
+                        return Err(TypeError::Mismatch {
+                            expected: Type::Ptr,
+                            got: inner_t.ty,
+                            span: to_source_span(&inner.span),
+                        });
+                    }
+                    (TypedExprKind::Unary(*op, Box::new(inner_t)), Type::Bool)
+                }
             }
         }
         ResolvedExprKind::Binary(op, lhs, rhs) => {
@@ -12364,6 +12395,31 @@ fn main() -> i64 {
              fn main() -> i64 { f() }",
         );
         assert!(matches!(err, TypeError::PtrOfArg { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn is_null_typechecks() {
+        // ADR 0057 Phase 1b (A7): `is_null(p)` over a `ptr` (an FFI return) is a
+        // public `bool` — usable as a (public) `if` condition.
+        let p = check_ok(
+            "extern \"C\" { fn getenv(name: ptr) -> ptr; }\
+             fn f() -> i64 { let c: [u8] = \"X\"; let v: ptr = getenv(ptr_of(&c)); \
+             if is_null(v) { 0 } else { 1 } }\
+             fn main() -> i64 { f() }",
+        );
+        assert_eq!(p.main().return_type, Type::I64);
+    }
+
+    #[test]
+    fn is_null_non_ptr_rejected() {
+        // `is_null` requires a `ptr` operand; anything else is a `Mismatch`.
+        let err = check_err(
+            "fn main() -> i64 { if is_null(5) { 1 } else { 0 } }",
+        );
+        assert!(
+            matches!(err, TypeError::Mismatch { expected: Type::Ptr, .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]

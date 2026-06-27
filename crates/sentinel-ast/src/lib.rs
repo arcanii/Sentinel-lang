@@ -156,6 +156,11 @@ pub enum UnaryOp {
     /// ADR 0057 Phase 1b: `ptr_of_mut(expr)` — like `ptr_of` but requires a
     /// `&mut [u8]` (an exclusive borrow, so C may write through the pointer).
     PtrOfMut,
+    /// ADR 0057 Phase 1b: `is_null(expr)` — `true` iff a `ptr` is NULL.
+    /// Recognised by reserved name (like `ptr_of`); operand is `ptr`, result is
+    /// `bool`. Lets a Sentinel wrapper null-check an FFI return (e.g. `getenv`)
+    /// before reading through it. No `FnId`.
+    IsNull,
 }
 
 impl UnaryOp {
@@ -174,6 +179,7 @@ impl UnaryOp {
             // (they never round-trip through a selfhost / Bar-A path).
             UnaryOp::PtrOf => "ptr_of",
             UnaryOp::PtrOfMut => "ptr_of_mut",
+            UnaryOp::IsNull => "is_null",
         }
     }
 }

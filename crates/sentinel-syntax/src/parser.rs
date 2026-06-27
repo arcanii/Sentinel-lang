@@ -150,16 +150,16 @@ pub enum ParseError {
         span: miette::SourceSpan,
     },
 
-    /// ADR 0057 Phase 1b: `ptr_of` / `ptr_of_mut` are reserved built-ins, each
-    /// taking EXACTLY one argument (a `&[u8]` / `&mut [u8]` borrow). Any other
-    /// arity is rejected at parse time.
-    #[error("`ptr_of` / `ptr_of_mut` take exactly one argument")]
+    /// ADR 0057 Phase 1b: `ptr_of` / `ptr_of_mut` / `is_null` are reserved
+    /// built-ins, each taking EXACTLY one argument. Any other arity is rejected
+    /// at parse time.
+    #[error("`ptr_of` / `ptr_of_mut` / `is_null` take exactly one argument")]
     #[diagnostic(
         code(sentinel::parse::ptr_of_arity),
-        help("`ptr_of(&buf)` / `ptr_of_mut(&mut buf)` take a single byte-array borrow (ADR 0057)")
+        help("`ptr_of(&buf)` / `ptr_of_mut(&mut buf)` take a byte-array borrow; `is_null(p)` takes a `ptr` (ADR 0057)")
     )]
     PtrOfArity {
-        #[label("`ptr_of` call here")]
+        #[label("`ptr_of` / `is_null` call here")]
         span: miette::SourceSpan,
     },
 
@@ -4521,11 +4521,11 @@ impl<'a> Parser<'a> {
                             span: name_span.start..rparen_end,
                         });
                     }
-                    // ADR 0057 Phase 1b: `ptr_of(&buf)` / `ptr_of_mut(&mut buf)`
-                    // are the raw-pointer intrinsics, recognised by reserved name
-                    // and lowered to a unary node (no `FnId`, like `sqrt`).
-                    // Exactly one argument.
-                    if name == "ptr_of" || name == "ptr_of_mut" {
+                    // ADR 0057 Phase 1b: `ptr_of(&buf)` / `ptr_of_mut(&mut buf)` /
+                    // `is_null(p)` are the raw-pointer intrinsics, recognised by
+                    // reserved name and lowered to a unary node (no `FnId`, like
+                    // `sqrt`). Exactly one argument.
+                    if name == "ptr_of" || name == "ptr_of_mut" || name == "is_null" {
                         if args.len() != 1 {
                             return Err(ParseError::PtrOfArity {
                                 span: to_source_span(&(name_span.start..rparen_end)),
@@ -4533,6 +4533,8 @@ impl<'a> Parser<'a> {
                         }
                         let op = if name == "ptr_of_mut" {
                             UnaryOp::PtrOfMut
+                        } else if name == "is_null" {
+                            UnaryOp::IsNull
                         } else {
                             UnaryOp::PtrOf
                         };

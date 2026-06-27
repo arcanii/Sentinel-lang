@@ -10,6 +10,7 @@
 // crypto caller would WIDEN `random_bytes(32)` to `secret` to seed a key.
 use std::sys::ffi::random_bytes;
 use std::sys::ffi::cstr_len;
+use std::sys::ffi::env_get;
 use std::bytes::bytes::eq;
 
 fn main() -> i64 {
@@ -26,5 +27,15 @@ fn main() -> i64 {
     let len_ok: bool = len(r1) == 32 && len(r2) == 32;
     let differ: bool = !eq(&r1, &r2);
 
-    if slen == 5 && len_ok && differ { 42 } else { 0 }
+    // `is_null` + the cstr READ-back via `getenv`. PATH is set in any shell /
+    // test environment (the present-var read-back path); a bogus name is unset,
+    // so `getenv` returns NULL and `env_get` yields an empty `[u8]` (the NULL
+    // path). FFI bytes are PUBLIC.
+    let path_name: [u8] = "PATH";
+    let path: [u8] = env_get(&path_name);
+    let bogus_name: [u8] = "SENTINEL_FFI_DEFINITELY_UNSET_X9Z";
+    let bogus: [u8] = env_get(&bogus_name);
+    let env_ok: bool = len(path) > 0 && len(bogus) == 0;
+
+    if slen == 5 && len_ok && differ && env_ok { 42 } else { 0 }
 }

@@ -154,7 +154,7 @@ fn parse_error_to_diagnostic(err: &ParseError) -> Diagnostic {
             stage: "parse",
             severity: Severity::Error,
             code: "sentinel::parse::ptr_of_arity",
-            message: "`ptr_of` / `ptr_of_mut` take exactly one argument".to_string(),
+            message: "`ptr_of` / `ptr_of_mut` / `is_null` take exactly one argument".to_string(),
             span: span.offset()..(span.offset() + span.len()),
         },
         ParseError::EmptyEffectAnnotation { span } => Diagnostic {

@@ -1526,8 +1526,8 @@ impl Emit<'_> {
             // ADR 0057 Phase 1b: `ptr_of` / `ptr_of_mut` (and `ptr` / `extern`)
             // are not ported to the textual oracle (snc-only). Erring keeps the
             // selfhost corpus differential skipping any FFI fixture.
-            TypedExprKind::Unary(UnaryOp::PtrOf | UnaryOp::PtrOfMut, _) => {
-                Err("ptr_of not ported (ADR 0057 snc-only)".into())
+            TypedExprKind::Unary(UnaryOp::PtrOf | UnaryOp::PtrOfMut | UnaryOp::IsNull, _) => {
+                Err("ptr_of / is_null not ported (ADR 0057 snc-only)".into())
             }
             // `&x` / `&mut x` → a pointer to x's storage (its lvalue): for a `Var`,
             // its alloca slot — no instruction. LLVM ignores mutability.

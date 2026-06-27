@@ -21,6 +21,12 @@ extern "C" {
     fn getentropy(buf: ptr, len: i64) -> i64;
     // size_t strlen(const char *s) — the length of a NUL-terminated C string.
     fn strlen(s: ptr) -> i64;
+    // char *getenv(const char *name) — the value of environment variable
+    // `name`, or NULL if unset. The returned pointer is owned by the
+    // environment (do NOT free it); we copy its bytes out immediately.
+    fn getenv(name: ptr) -> ptr;
+    // void *memcpy(void *dst, const void *src, size_t n) — copy `n` bytes.
+    fn memcpy(dst: ptr, src: ptr, n: i64) -> ptr;
 }
 
 // `n` cryptographically-strong random bytes from the OS (`getentropy`). The
@@ -63,4 +69,36 @@ pub fn cstr(s: &[u8]) -> [u8] {
 pub fn cstr_len(s: &[u8]) -> i64 {
     let c: [u8] = cstr(s);
     strlen(ptr_of(&c))
+}
+
+// Read the NUL-terminated C string at `p` into a fresh owned `[u8]` (WITHOUT the
+// terminator). `p` is an opaque FFI `ptr` Sentinel can't dereference, so the
+// read goes through libc: `strlen` for the length, then `memcpy` into a Sentinel
+// buffer. A NULL `p` (e.g. an unset `getenv`) yields an empty `[u8]`. The `n > 0`
+// guard keeps `memcpy` from ever seeing a NULL source.
+pub fn cstr_read(p: ptr) -> [u8] {
+    let n: i64 = if is_null(p) { 0 } else { strlen(p) };
+    let mut buf: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut buf, i64_to_u8(0));
+        i = i + 1;
+    }
+    let mut bytes: [u8] = vec_to_array(buf);
+    if n > 0 {
+        memcpy(ptr_of_mut(&mut bytes), p, n);
+        0
+    } else {
+        0
+    };
+    bytes
+}
+
+// The value of environment variable `name`, copied into an owned `[u8]`. An
+// UNSET variable (and, indistinguishably, an empty one) yields an empty `[u8]`.
+// PUBLIC bytes — the FFI boundary; a caller that needs them secret widens them.
+pub fn env_get(name: &[u8]) -> [u8] {
+    let c: [u8] = cstr(name);
+    let v: ptr = getenv(ptr_of(&c));
+    cstr_read(v)
 }
