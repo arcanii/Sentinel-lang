@@ -262,14 +262,24 @@ the current state of the workspace without re-reading every commit.
   export param is presented to C as a `(const uint8_t*, int64_t)` pair via a generated
   wrapper, so `examples/export/ct_select::ct_byte_eq` — a verified constant-time byte
   comparison (the MAC/tag-verification primitive) — is callable from C over real buffers.
-  Still deferred: the owned-`[u8]` RETURN (out-struct + `sentinel_free_bytes`, the
-  variable-length output like `sha256`), the caller-provides-buffer convention, multi-module
-  libraries, and shared objects.
+  **The owned-`[u8]` RETURN ABI is now implemented too (ADR 0059 A7)** — an `export "C" fn
+  … -> [u8]` hands C a heap buffer via two generated trailing out-params
+  `(uint8_t** out_data, int64_t* out_len)` (the out-param convention, chosen over a
+  by-value struct return for ABI robustness), freed with the exported `sentinel_free_bytes`.
+  THE HEADLINE THESIS now works end to end: `examples/export/digest_lib::sha256_oneshot` is
+  a **verified-constant-time SHA-256 callable from C** (it widens public bytes to `secret`,
+  runs the machine-checked compression, declassifies the digest), and a C driver
+  (`examples/export/digest_driver.c`) checks it against the NIST "abc" vector and frees the
+  buffer — verified constant-time crypto as a drop-in C library, the whole point of the
+  export side; `repeat_byte` shows a variable-length return. Still deferred: the
+  caller-provides-buffer convention (fixed-size, no-alloc outputs), multi-module export
+  libraries (`--lib` with `use`; the demonstrator inlines SHA-256 for now), and shared
+  objects.
   The float follow-ups also landed: the libm transcendentals (above), `f64`⇄string conversion
   (`std/text/str::parse_f64`/`f64_to_str`), and `std/data/json` now parsing/serializing
   non-integer numbers as `Float(f64)`.
 
-**1624 tests across the workspace**, four-check green (build · `cargo nextest`
+**1627 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

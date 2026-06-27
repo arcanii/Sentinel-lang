@@ -1,16 +1,19 @@
 # ADR 0059: A C-ABI export — calling Sentinel from C / C++ / Rust / Python
 
-Status: **ACCEPTED-WITH-AMENDMENTS (A1–A6).** Implemented `snc`-side: the `export "C"`
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A7).** Implemented `snc`-side: the `export "C"`
 annotation, the `--lib` static-archive build mode (no `main`), `--emit-header`, and the
 secret-fence. **Phase 1a** = the value-only ABI (`i64`/`f64`) with a constant-time
-demonstrator (`ct_choose`). **Phase 1b** (A6) now adds the **`&[u8]` INPUT buffer ABI** —
+demonstrator (`ct_choose`). **Phase 1b** (A6) adds the **`&[u8]` INPUT buffer ABI** —
 a `&[u8]` export param is presented to C as a `(const uint8_t* data, int64_t len)` pair via
 a generated wrapper, demonstrated by `ct_byte_eq` (a verified constant-time byte
-comparison) called from C over real buffers. The owned-`[u8]` RETURN (out-struct +
-`sentinel_free_bytes`), multi-module libraries, and shared objects remain deferred. The
-design below stands; the amendments at the end record the re-scoping. This was the
-ADR-first design gate for the "Python / C / C++ / Rust bindings" item on the
-core-libraries roadmap.
+comparison) called from C over real buffers. **Phase 1b (A7)** now adds the **owned-`[u8]`
+RETURN ABI** — an `export "C" fn … -> [u8]` returns a heap buffer to C via the out-param
+pair `(uint8_t** out_data, int64_t* out_len)` plus an exported `sentinel_free_bytes` the C
+caller releases it with; demonstrated by `sha256_oneshot` (a verified-constant-time SHA-256
+callable from C — the headline) and `repeat_byte` (a variable-length output). Multi-module
+libraries and shared objects remain deferred. The design below stands; the amendments at
+the end record the re-scoping. This was the ADR-first design gate for the "Python / C /
+C++ / Rust bindings" item on the core-libraries roadmap.
 
 ## Context
 
@@ -242,6 +245,35 @@ struct exports, and the Python/Rust generators are deferred to later phases.
   comparison (the classic MAC/tag-verification primitive): it widens the first `n` bytes to
   `secret`, XOR-accumulates branch-free, folds to 0/1 in constant time, and declassifies;
   `driver.c` calls it over C buffers (equal → 1, differ → 0) and `tests/export.rs` asserts
-  exit 42. STILL deferred: the owned-`[u8]` RETURN (out-struct + `sentinel_free_bytes`, the
-  variable-length-output crypto like `sha256`), the caller-provides-buffer convention,
-  multi-module libraries, and shared objects.
+  exit 42. STILL deferred (until A7): the owned-`[u8]` RETURN.
+- **A7 — Phase 1b lands the owned-`[u8]` RETURN ABI via the OUT-PARAM convention + an
+  exported `sentinel_free_bytes`.** An `export "C" fn … -> [u8]` now type-checks (the return
+  type may be the PUBLIC owned `[u8]` — `Type::Array(ArrayElem::U8)` — in addition to the
+  value ABI; `[secret u8]` / `secret [u8]` are still fenced out). The wrapper machinery
+  (A6's `__sentinel_impl` post-pass) is generalized to fire whenever an export takes a
+  `&[u8]` param **OR** returns `[u8]` (`export_needs_c_wrapper`). When it returns `[u8]`,
+  the C-ABI wrapper takes **two extra trailing out-params** — `(uint8_t** out_data,
+  int64_t* out_len)` — and returns `void`: it calls the impl (whose Sentinel-ABI return is
+  the `{ i64 len, ptr data }` fat pointer), extracts the two fields, and stores `data` →
+  `*out_data`, `len` → `*out_len`. The buffer is `sentinel_alloc`'d (heap, never arena —
+  a returned value outlives its scope), and **ownership transfers to the C caller**, who
+  releases it with the exported `void sentinel_free_bytes(uint8_t* data)` (a runtime symbol,
+  a thin wrapper over the existing `sentinel_free`; declared in the header when any export
+  returns bytes). The out-param convention (over a by-value `{ uint8_t*; int64_t; }` struct
+  return) is chosen for ABI robustness: a by-value 16-byte struct return relies on LLVM's
+  first-class-aggregate lowering matching the platform's small-struct register/`sret`
+  coercion (which clang applies on the C side), a fragile coincidence across SysV/AAPCS;
+  scalar-only out-params are unambiguous. `--emit-header` renders a `[u8]`-returning export
+  as `void name(<inputs…>, uint8_t**, int64_t*);`. The secret-widen-internally /
+  declassify-on-return pattern is shown end to end: `examples/export/digest_lib.sentinel`
+  exports `sha256_oneshot(msg: &[u8]) -> [u8]` (widen the public bytes to a `[secret u8]`,
+  run the machine-checked constant-time SHA-256 — inlined since single-file `--lib` has no
+  `use` yet — then declassify the digest byte-by-byte into a public owned `[u8]`) plus
+  `repeat_byte(value, count) -> [u8]` (a variable-length output, so the length genuinely
+  flows back from Sentinel to C). `examples/export/digest_driver.c` calls both, checks the
+  digest against the NIST "abc" vector, frees each buffer with `sentinel_free_bytes`, and
+  `tests/export.rs` asserts exit 42. STILL deferred: the caller-provides-buffer convention
+  (for fixed-size outputs with no allocation), multi-module export libraries (`--lib` with
+  `use`; the demonstrator inlines SHA-256 for now), and shared objects (`--shared`). The
+  `scg` mirror stays deferred (no corpus / `selfhost` fixture uses `export` → every
+  differential + both bootstrap fixed points byte-identical).
