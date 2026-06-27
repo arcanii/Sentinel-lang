@@ -87,8 +87,15 @@ to required once green. The analysis suite is green on Windows today and can gat
 the build-and-run integration tests gate after Phases 1–2.
 
 ## Phasing
-- **Phase 1 — portable runtime** (cfg the POSIX bits). Low-risk, independently landable;
-  unblocks the Windows analysis suite under nextest.
+- **Phase 1 — portable runtime** (cfg the POSIX bits). Low-risk, independently landable.
+  **Implemented 2026-06-27** (branch `adr-0060-phase1-portable-runtime`): the sole compile
+  blocker was `path_from_bytes`'s ungated `OsStrExt::from_bytes`; a `#[cfg(windows)]` UTF-8
+  arm (non-UTF-8 path aborts, as it is not representable) fixes it — the Unix arm is
+  byte-identical to before, and the sockets were already `#[cfg(unix)]`-gated. Verified on
+  Windows: `cargo build --workspace` is green, `clippy -p sentinel-runtime -D warnings` is
+  clean, the runtime unit tests pass (20). **Pending on the primary (macOS) box / CI before
+  ACCEPTED:** the full four-check + self-host parity (this change is not oracle-moving, so no
+  `selfhost/` mirror).
 - **Phase 2 — `HostToolchain` link abstraction** (macOS unchanged; add Windows + Linux).
   Delivers `snc build` / `--lib` / `--shared` on Windows + Linux.
 - **Phase 3 — CI lanes** (Windows + Linux), gating as they go green.

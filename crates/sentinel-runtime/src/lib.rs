@@ -178,13 +178,16 @@ pub extern "C" fn sentinel_realloc(ptr: *mut u8, new_size: i64) -> *mut u8 {
 /// Build an `OsString` path from a length-prefixed Sentinel `[u8]`.
 /// D.4 / ADR 0035 D4: Sentinel paths are byte arrays (not NUL-
 /// terminated). Aborts on an embedded NUL (a path can't contain one;
-/// defensive, not a security model). Unix-only (the macOS target —
-/// `OsStrExt::from_bytes` takes raw bytes, so non-UTF-8 paths are fine).
+/// defensive, not a security model). Portable (ADR 0060 Phase 1): on Unix,
+/// `OsStrExt::from_bytes` takes raw bytes, so non-UTF-8 paths are fine; on
+/// Windows, where paths are Unicode and `OsString` has no raw-bytes
+/// constructor, the bytes are interpreted as UTF-8 and a non-UTF-8 path
+/// aborts (it is not representable) — the same panic-on-bad-input stance
+/// as the embedded-NUL case above.
 ///
 /// # Safety
 /// When `len > 0`, `ptr` must point to `len` readable bytes.
 unsafe fn path_from_bytes(ptr: *const u8, len: i64, op: &str) -> std::ffi::OsString {
-    use std::os::unix::ffi::OsStrExt;
     let bytes: &[u8] = if len <= 0 {
         &[]
     } else {
@@ -195,7 +198,21 @@ unsafe fn path_from_bytes(ptr: *const u8, len: i64, op: &str) -> std::ffi::OsStr
         eprintln!("sentinel: {op} failed: path contains an embedded NUL byte");
         std::process::abort();
     }
-    std::ffi::OsStr::from_bytes(bytes).to_os_string()
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(bytes).to_os_string()
+    }
+    #[cfg(windows)]
+    {
+        match std::str::from_utf8(bytes) {
+            Ok(s) => std::ffi::OsString::from(s),
+            Err(_) => {
+                eprintln!("sentinel: {op} failed: path is not valid UTF-8 (required on Windows)");
+                std::process::abort();
+            }
+        }
+    }
 }
 
 /// Read the entire file at `path` (a `[u8]`) into a fresh heap buffer
