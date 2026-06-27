@@ -83,9 +83,17 @@ fn main() -> ExitCode {
         [_, cmd, path] if cmd == "llvm" => run_llvm(path),
         [_, cmd, path] if cmd == "merge" => run_merge(path),
         [_, cmd, path] if cmd == "parse" => run_parse(path),
-        [_, cmd, path] if cmd == "build" => run_build(path, None),
-        [_, cmd, path, flag, output] if cmd == "build" && flag == "-o" => {
-            run_build(path, Some(output))
+        // `snc build <file> [-o <out>] [--link <lib>]...` — the plain executable
+        // build. Excludes the `--separate` / `--lib` / `--shared` sub-modes
+        // (their own arms below); `--link` threads extra native libraries into
+        // the link (ADR 0057 pillar 4 / ADR 0060), e.g. `--link user32`.
+        [_, cmd, rest @ ..]
+            if cmd == "build"
+                && !rest
+                    .iter()
+                    .any(|a| a == "--separate" || a == "--lib" || a == "--shared") =>
+        {
+            run_build_cli(rest)
         }
         // Phase D.6 / ADR 0037 (a): TRUE per-unit separate compilation
         // (opt-in until it reaches Path-A parity).
@@ -129,7 +137,9 @@ fn print_usage() {
     eprintln!("    snc lex <file>                   lex and dump the token stream (self-host oracle)");
     eprintln!("    snc ast <file>                   parse and dump the canonical AST (self-host oracle)");
     eprintln!("    snc parse <file>                 lex, parse, and pretty-print the program");
-    eprintln!("    snc build <file> [-o <output>]   compile and link to an executable");
+    eprintln!("    snc build <file> [-o <output>] [--link <lib>]...");
+    eprintln!("                                     compile + link to an executable (--link adds a");
+    eprintln!("                                     native library to the link, e.g. user32)");
     eprintln!("    snc build --lib <file> [-o <lib.a>] [--emit-header <h.h>]");
     eprintln!("                                     compile to a C-ABI static library (ADR 0059)");
     eprintln!("    snc build --shared <file> [-o <lib.dylib>] [--emit-header <h.h>]");
@@ -756,7 +766,57 @@ fn discover_module_graph(entry: &Path) -> Result<Vec<DiscoveredModule>, String> 
     Ok(out)
 }
 
-fn run_build(path: &str, output: Option<&str>) -> ExitCode {
+/// Parse `snc build <file> [-o <out>] [--link <lib>]...` — flags are order-free
+/// and `--link` is repeatable (ADR 0057 pillar 4 / ADR 0060: thread extra
+/// libraries into the link, e.g. `--link user32` for the Win32 GUI). Routes to
+/// [`run_build`].
+fn run_build_cli(args: &[String]) -> ExitCode {
+    let mut path: Option<&str> = None;
+    let mut output: Option<&str> = None;
+    let mut link_libs: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" => {
+                i += 1;
+                match args.get(i) {
+                    Some(o) => output = Some(o),
+                    None => {
+                        eprintln!("snc: `-o` requires an output path");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--link" => {
+                i += 1;
+                match args.get(i) {
+                    Some(l) => link_libs.push(l.clone()),
+                    None => {
+                        eprintln!("snc: `--link` requires a library name");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            other => {
+                if path.is_some() {
+                    eprintln!("snc: unexpected argument `{other}`");
+                    return ExitCode::from(2);
+                }
+                path = Some(other);
+            }
+        }
+        i += 1;
+    }
+    match path {
+        Some(p) => run_build(p, output, &link_libs),
+        None => {
+            eprintln!("snc: `build` requires a source file");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_build(path: &str, output: Option<&str>, link_libs: &[String]) -> ExitCode {
     let src = match read_source(path) {
         Ok(s) => s,
         Err(code) => return code,
@@ -780,7 +840,7 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
                 .map(|m| sentinel_resolve::ModuleUnit { path: m.path.clone(), program: &m.program })
                 .collect();
             return match sentinel_resolve::merge_modules(&units) {
-                Ok(merged) => run_build_merged(merged, path, output),
+                Ok(merged) => run_build_merged(merged, path, output, link_libs),
                 Err(e) => {
                     eprintln!("snc: {e}");
                     ExitCode::from(1)
@@ -852,7 +912,7 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    match link(&object_path, &exe_path) {
+    match link(&object_path, &exe_path, link_libs) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("snc: link failed: {msg}");
@@ -869,7 +929,7 @@ fn run_build(path: &str, output: Option<&str>) -> ExitCode {
 /// link are the follow-up). Errors are reported by message; span-accurate
 /// multi-source diagnostics + effect-check parity are follow-ups (the
 /// merged program's spans point into per-module sources).
-fn run_build_merged(merged: Program, path: &str, output: Option<&str>) -> ExitCode {
+fn run_build_merged(merged: Program, path: &str, output: Option<&str>, link_libs: &[String]) -> ExitCode {
     let resolved = match sentinel_resolve::resolve(&merged) {
         Ok(r) => r,
         Err(e) => {
@@ -924,7 +984,7 @@ fn run_build_merged(merged: Program, path: &str, output: Option<&str>) -> ExitCo
         eprintln!("snc: codegen failed: {err}");
         return ExitCode::from(1);
     }
-    match link(&object_path, &exe_path) {
+    match link(&object_path, &exe_path, link_libs) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("snc: link failed: {msg}");
@@ -1491,7 +1551,7 @@ fn run_linker(mut cmd: Command, tool: &str) -> Result<(), String> {
 /// native deps ([`WINDOWS_NATIVE_LIBS`]) are named explicitly and the MSVC
 /// environment (the `LIB` search paths) must be present — run snc from a
 /// Developer Command Prompt.
-fn link_exe(objects: &[&Path], exe: &Path) -> Result<(), String> {
+fn link_exe(objects: &[&Path], exe: &Path, link_libs: &[String]) -> Result<(), String> {
     let runtime = find_runtime()?;
     if cfg!(target_os = "windows") {
         let mut cmd = Command::new("link.exe");
@@ -1504,6 +1564,15 @@ fn link_exe(objects: &[&Path], exe: &Path) -> Result<(), String> {
         for lib in WINDOWS_NATIVE_LIBS {
             cmd.arg(lib);
         }
+        // ADR 0057 pillar 4: user-requested extra libraries (`--link user32`).
+        // MSVC links the import library `<name>.lib`.
+        for lib in link_libs {
+            cmd.arg(if lib.ends_with(".lib") {
+                lib.clone()
+            } else {
+                format!("{lib}.lib")
+            });
+        }
         cmd.arg("/DEFAULTLIB:msvcrt");
         run_linker(cmd, "link.exe")
     } else {
@@ -1511,16 +1580,21 @@ fn link_exe(objects: &[&Path], exe: &Path) -> Result<(), String> {
         for obj in objects {
             cmd.arg(obj);
         }
-        cmd.arg(&runtime).arg("-o").arg(exe);
+        cmd.arg(&runtime);
+        // ADR 0057 pillar 4: user-requested extra libraries (`--link m` → `-lm`).
+        for lib in link_libs {
+            cmd.arg(format!("-l{lib}"));
+        }
+        cmd.arg("-o").arg(exe);
         run_linker(cmd, "cc")
     }
 }
 
 /// Link several object files + the runtime into one executable. The caller
 /// pre-sorts `objects` for a deterministic link.
-fn link_objects(objects: &[PathBuf], exe: &Path) -> Result<(), String> {
+fn link_objects(objects: &[PathBuf], exe: &Path, link_libs: &[String]) -> Result<(), String> {
     let refs: Vec<&Path> = objects.iter().map(PathBuf::as_path).collect();
-    link_exe(&refs, exe)
+    link_exe(&refs, exe, link_libs)
 }
 
 /// Phase D.6 / ADR 0037 (a): TRUE per-unit separate compilation —
@@ -1600,8 +1674,9 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
         }
     };
     if modules.is_empty() {
-        // Single-file: nothing to compile separately.
-        return run_build(path, output);
+        // Single-file: nothing to compile separately. (`--separate` does not
+        // thread `--link` yet; ADR 0060 follow-up.)
+        return run_build(path, output, &[]);
     }
 
     // Visibility / existence gate (ModuleNotFound / UnknownImport /
@@ -1883,7 +1958,7 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
 
     // Deterministic link order (path-sorted) + the runtime.
     objects.sort();
-    match link_objects(&objects, &exe_path) {
+    match link_objects(&objects, &exe_path, &[]) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("snc: link failed: {msg}");
@@ -1924,8 +1999,8 @@ fn read_source(path: &str) -> Result<String, ExitCode> {
     })
 }
 
-fn link(object: &Path, exe: &Path) -> Result<(), String> {
-    link_exe(&[object], exe)
+fn link(object: &Path, exe: &Path, link_libs: &[String]) -> Result<(), String> {
+    link_exe(&[object], exe, link_libs)
 }
 
 /// Locate the runtime staticlib adjacent to the snc binary. Cargo puts the snc

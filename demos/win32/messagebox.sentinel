@@ -1,0 +1,38 @@
+// demos/win32/messagebox.sentinel
+//
+// Native GUI via FFI (ADR 0057 + 0060): pop a real Win32 message box
+// (user32.dll `MessageBoxA`) from Sentinel — the "hello, native GUI" demo.
+//
+// Windows only. Build from a Developer Command Prompt:
+//   snc build demos/win32/messagebox.sentinel --link user32 -o messagebox.exe
+// Running it shows a message box and BLOCKS until you click OK, then exits with
+// the button id (IDOK = 1).
+
+extern "C" {
+    // int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType);
+    // HWND (owner) and UINT (style) pass through the i64 register ABI: hWnd = 0
+    // is NULL (no owner window), uType = 0 is MB_OK. The two strings cross as
+    // `const char*` — a NUL-terminated `[u8]`'s data pointer via `ptr_of`.
+    fn MessageBoxA(hwnd: i64, text: ptr, caption: ptr, utype: i64) -> i64;
+}
+
+// Append a NUL terminator so a `[u8]` reads as a C string (`const char*`).
+fn cstr(s: &[u8]) -> [u8] {
+    let n: i64 = len(*s);
+    let mut out: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut out, (*s)[i]);
+        i = i + 1;
+    }
+    push(&mut out, i64_to_u8(0));
+    vec_to_array(out)
+}
+
+fn main() -> i64 {
+    let text: [u8] = "Hello from Sentinel!";
+    let caption: [u8] = "Sentinel";
+    let t: [u8] = cstr(&text);
+    let c: [u8] = cstr(&caption);
+    MessageBoxA(0, ptr_of(&t), ptr_of(&c), 0)
+}

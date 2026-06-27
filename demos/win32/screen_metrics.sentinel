@@ -1,0 +1,25 @@
+// demos/win32/screen_metrics.sentinel
+//
+// Native GUI via FFI (ADR 0057 + 0060): call the Win32 `GetSystemMetrics`
+// (user32.dll) from Sentinel. Non-blocking — it returns the primary screen
+// size, which we print and check. Proves extra-library linking (`--link user32`)
+// + a real Win32 GUI-library call returning correct data.
+//
+// Windows only. Build from a Developer Command Prompt (so the MSVC linker is
+// available), threading user32 into the link:
+//   snc build demos/win32/screen_metrics.sentinel --link user32 -o screen_metrics.exe
+// Running it prints the width and height; exit 42 means both are positive.
+
+extern "C" {
+    // int GetSystemMetrics(int nIndex);  SM_CXSCREEN = 0, SM_CYSCREEN = 1.
+    // The `int` index + result pass through the i64 register ABI.
+    fn GetSystemMetrics(index: i64) -> i64;
+}
+
+fn main() -> i64 {
+    let width: i64 = GetSystemMetrics(0);
+    let height: i64 = GetSystemMetrics(1);
+    print(width);
+    print(height);
+    if width > 0 && height > 0 { 42 } else { 0 }
+}

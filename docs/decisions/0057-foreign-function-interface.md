@@ -1,6 +1,6 @@
 # ADR 0057: A foreign-function interface (`extern "C"`) for native OS bindings
 
-Status: **ACCEPTED-WITH-AMENDMENTS (A1–A7).** Phase 1 is implemented `snc`-side as a
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A8).** Phase 1 is implemented `snc`-side as a
 **value-only ABI** (public `i64` + `f64`), which already unlocks the libc identity calls
 and the whole libm math family. **Phase 1b (A6)** adds the **`ptr` opaque type +
 `ptr_of`/`ptr_of_mut`**, so a Sentinel buffer's data pointer can cross to a pointer-taking
@@ -303,3 +303,18 @@ both bootstrap fixed points byte-identical).
   empty (a `?[u8]` return), `i32`/`u32` widths, by-pointer structs, extra-library `-l`,
   `dlopen`, Win32. The `scg` mirror stays deferred (still no corpus / `selfhost` fixture
   uses `extern` / the `ptr` intrinsics).
+- **A8 — extra-library linking (`--link`) + the first native-GUI calls (Windows).** ADR 0060
+  (Windows host support) ported the toolchain (PE/COFF + `link.exe`), removing the Phase-3
+  Win32 blocker this ADR deferred. On top, `snc build <file> --link <lib>` (repeatable,
+  order-free) threads an extra native library into the link — pillar 4's "extra-library
+  `-l`", now implemented in the ADR 0060 `HostToolchain` backend (`<lib>.lib` on MSVC,
+  `-l<lib>` on Unix). That is already enough to call native **GUI** functions: `demos/win32/`
+  declares `extern "C"` `GetSystemMetrics` + `MessageBoxA` (user32) — `HWND`/`UINT` ride the
+  `i64` register ABI (`NULL`/`MB_OK` = 0), strings cross as `const char*` via a `cstr` +
+  `ptr_of`. Verified on Windows: `snc build … --link user32` links user32, `screen_metrics`
+  prints the live primary-screen size (2560×1440) from `GetSystemMetrics`, and `messagebox`
+  pops a real Win32 message box. STILL deferred for richer GUI: `i32`/`u32` widths, by-pointer
+  structs (`WNDCLASS`/`MSG`), and **function-pointer callbacks** (`WndProc` event loops — the
+  next design gate). `--separate` does not thread `--link` yet. Implemented `snc`-side on
+  branch `adr-0060-phase1-portable-runtime`; the `scg` mirror stays deferred (no `selfhost`
+  fixture uses `extern`); pending the macOS four-check.
