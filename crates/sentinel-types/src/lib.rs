@@ -1542,6 +1542,12 @@ pub struct TypedProgram {
     /// under its BARE name (the C symbol) and to skip emitting a body.
     /// Empty for programs with no FFI.
     pub externs: Vec<FnId>,
+    /// ADR 0059: the `FnId`s of `export "C"` functions (normal fns WITH a
+    /// body, additionally exported under their bare un-mangled C symbol). Tells
+    /// codegen to pin the symbol bare + `External`, and the driver which
+    /// signatures to emit into the generated C header. Empty for non-library
+    /// programs. Each one's signature was validated FFI-safe + secret-fenced.
+    pub exports: Vec<FnId>,
     /// Struct declarations with resolved field types (parallel-tree
     /// mirror of [`sentinel_resolve::ResolvedProgram::structs`]).
     /// Each struct's [`StructId`] matches its index here.
@@ -4351,6 +4357,40 @@ pub fn check_module(
         });
     }
 
+    // ADR 0059: validate each `export "C"` fn's signature. An export is a
+    // normal fn (its body was type-checked above); additionally its params +
+    // return must be FFI-safe public scalars (`i64`/`f64`) and NON-secret — the
+    // same fence as an `extern` import, since the C caller is outside the
+    // verified constant-time region (a secret crosses the boundary only via an
+    // explicit `declassify` inside the export). The FnIds flow to
+    // `TypedProgram.exports` for codegen + the header generator.
+    for id in &program.exports {
+        let sig = typed_signatures
+            .iter()
+            .find(|s| s.id == *id)
+            .expect("ADR 0059: every export FnId has a TypedFnSignature");
+        for (idx, pty) in sig.param_types.iter().enumerate() {
+            if !is_ffi_safe(*pty) {
+                let span = program
+                    .fns
+                    .iter()
+                    .find(|f| f.id == *id)
+                    .map(|f| to_source_span(&f.params[idx].span))
+                    .unwrap_or_else(|| to_source_span(&program.span));
+                return Err(TypeError::ExternFfiType { span });
+            }
+        }
+        if !is_ffi_safe(sig.return_type) {
+            let span = program
+                .fns
+                .iter()
+                .find(|f| f.id == *id)
+                .map(|f| to_source_span(&f.return_type.span))
+                .unwrap_or_else(|| to_source_span(&program.span));
+            return Err(TypeError::ExternFfiType { span });
+        }
+    }
+
     // Sort typed_signatures by id so signatures[i] corresponds to
     // FnId(i) — matches ResolvedProgram's invariant.
     typed_signatures.sort_by_key(|s| s.id.0);
@@ -4943,6 +4983,7 @@ pub fn check_module(
         fns: typed_fns,
         fn_signatures: typed_signatures,
         externs: typed_externs,
+        exports: program.exports.clone(),
         structs: typed_structs,
         generic_instances,
         refs,
@@ -12175,6 +12216,39 @@ fn main() -> i64 {
             "fn f(a: f64, b: i64) -> f64 { a + b }\nfn main() -> i64 { 0 }",
         );
         assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn export_ffi_typechecks() {
+        // ADR 0059: an `export "C"` fn over the value ABI type-checks and is
+        // recorded in `TypedProgram.exports`.
+        let p = check_ok(
+            "export \"C\" fn ct_choose(c: i64, a: i64, b: i64) -> i64 { \
+             let m: secret i64 = 0 - c; let nm: secret i64 = m ^ (0 - 1); \
+             let sa: secret i64 = a; let sb: secret i64 = b; \
+             declassify((sa & m) | (sb & nm)) }\
+             fn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.exports.len(), 1);
+    }
+
+    #[test]
+    fn export_secret_param_rejected() {
+        // The export fence: an export may not take a `secret` param (the C
+        // caller is outside the verified region).
+        let err = check_err(
+            "export \"C\" fn f(x: secret i64) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::ExternFfiType { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn export_non_ffi_return_rejected() {
+        // A non-value-ABI return (`[u8]`) is rejected in Phase 1a.
+        let err = check_err(
+            "export \"C\" fn f() -> [u8] { \"hi\" }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::ExternFfiType { .. }), "got {err:?}");
     }
 
     #[test]

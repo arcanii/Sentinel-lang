@@ -620,6 +620,11 @@ pub struct FnDef {
     /// `ResolveError::EffectAnnotationNotYet` until C3.2 ships the
     /// effect-check query.
     pub effect_row: Vec<Spanned<String>>,
+    /// ADR 0059: `true` iff declared `export "C" fn` — a C-ABI export emitted
+    /// under its un-mangled C symbol (so other languages can call into
+    /// Sentinel). Default `false`. Its signature is restricted to the FFI-safe
+    /// set + the secret-fence (validated at type-check), like an `extern`.
+    pub is_export_c: bool,
     pub body: Block,
     pub span: Span,
 }
@@ -1592,6 +1597,7 @@ mod tests {
             params: vec![],
             return_type: ty_i64(0..3),
             effect_row: vec![],
+            is_export_c: false,
             body: Block { stmts: vec![], tail, span: body_span.clone() },
             span: 0..body_span.end,
         }
@@ -1629,6 +1635,7 @@ mod tests {
             }],
             return_type: ty_i64(0..3),
             effect_row: vec![],
+            is_export_c: false,
             body: Block {
                 stmts: vec![],
                 tail: Spanned {
@@ -1688,6 +1695,7 @@ mod tests {
             ],
             return_type: ty_i64(0..3),
             effect_row: vec![],
+            is_export_c: false,
             body: Block {
                 stmts: vec![],
                 tail: Spanned {

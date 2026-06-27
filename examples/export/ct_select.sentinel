@@ -1,0 +1,31 @@
+// examples/export/ct_select.sentinel
+//
+// A C-ABI EXPORT library (ADR 0059): Sentinel functions other languages call
+// INTO. Built with `snc build --lib ct_select.sentinel -o libsentinelct.a
+// --emit-header sentinelct.h`, it has NO `main` — it is a library. The C driver
+// (driver.c) `#include`s the generated header, links the `.a`, and calls these.
+//
+// THE HEADLINE: `ct_choose` is a verified-CONSTANT-TIME conditional select. It
+// receives PUBLIC ints from C, WIDENS them to `secret` (ADR 0049), runs the
+// branch-free select inside the machine-checked constant-time region (the
+// compiler proves on every build that no secret bit reaches a branch / index /
+// divisor / shift), and `declassify`s the result. So a C / Rust / Python caller
+// gets a verified constant-time primitive behind a plain `int` API — a
+// guarantee a hand-written C function cannot give. Exports take/return only
+// PUBLIC types (the secret-fence); the secret world lives entirely inside.
+
+// Branch-free constant-time select: `cond` (0 or 1) picks `a` (1) or `b` (0),
+// in constant time (no branch on `cond`). The mask `0 - cond` is all-ones for
+// cond=1, zero for cond=0; the result is `(a & mask) | (b & ~mask)`.
+export "C" fn ct_choose(cond: i64, a: i64, b: i64) -> i64 {
+    let mask: secret i64 = 0 - cond;
+    let notmask: secret i64 = mask ^ (0 - 1);
+    let sa: secret i64 = a;
+    let sb: secret i64 = b;
+    declassify((sa & mask) | (sb & notmask))
+}
+
+// A trivial value export, to show the basic (non-secret) case.
+export "C" fn sentinel_add(a: i64, b: i64) -> i64 {
+    a + b
+}

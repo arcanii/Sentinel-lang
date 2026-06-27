@@ -450,6 +450,12 @@ pub fn compile_to_object_for_module(
             // global), so `cc` resolves it against libc at link. It has no
             // TypedFnDef body, so Pass 2 leaves it a declaration.
             signature.name.clone()
+        } else if program.exports.contains(&signature.id) {
+            // ADR 0059: an `export "C"` fn is emitted (body + all) under its
+            // BARE un-mangled C symbol so other languages link + call it. (For
+            // a single-file / merged build `module_path` is empty so the name
+            // is already bare; this also pins it for `--separate`.)
+            signature.name.clone()
         } else if let Some(origin) = &signature.extern_origin {
             mangle_qualified(origin, &signature.name)
         } else {

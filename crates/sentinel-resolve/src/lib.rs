@@ -304,6 +304,12 @@ pub struct ResolvedProgram {
     /// checker resolves them, validates the FFI-safe set, and enforces the
     /// secret-fence). Body-less — no entry in [`fns`].
     pub externs: Vec<ResolvedExternFn>,
+    /// ADR 0059: the [`FnId`]s of `export "C"` functions (a normal fn WITH a
+    /// body in [`fns`], additionally exported under its un-mangled C symbol).
+    /// The type checker validates each one's signature (FFI-safe + the
+    /// secret-fence); codegen pins its symbol bare + `External`; the driver
+    /// reads them for `--emit-header`. Empty for non-library programs.
+    pub exports: Vec<FnId>,
     pub span: Span,
 }
 
@@ -1595,6 +1601,12 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
         // / locals are absent from the map → left untouched at the rewrite.
         let mut rename: HashMap<String, String> = HashMap::new();
         for f in &unit.program.fns {
+            // ADR 0059: an `export "C"` fn keeps its BARE C symbol (like the
+            // entry's `main`) — its name is a stable public symbol, not a
+            // module-internal one — so it is left out of the rename map.
+            if f.is_export_c {
+                continue;
+            }
             let qualified = if is_entry && f.name == "main" {
                 "main".to_string()
             } else {
@@ -2747,6 +2759,7 @@ pub fn resolve_module(
     }
 
     // Pass 1: collect every fn into the table.
+    let mut export_fn_ids: Vec<FnId> = Vec::new();
     for fn_def in &program.fns {
         if fn_table.contains_key(&fn_def.name) {
             return Err(ResolveError::RedefinedFunction {
@@ -2756,6 +2769,12 @@ pub fn resolve_module(
         }
         let id = FnId(next_fn_id);
         next_fn_id += 1;
+        // ADR 0059: record `export "C"` fns by FnId (they are normal fns —
+        // body type-checked + codegen'd — additionally exported under their
+        // bare C symbol).
+        if fn_def.is_export_c {
+            export_fn_ids.push(id);
+        }
         let is_main = fn_def.name == "main";
         signatures.push(FnSignature {
             id,
@@ -3068,6 +3087,7 @@ pub fn resolve_module(
         impls: resolved_impls,
         enums: resolved_enums,
         externs: resolved_externs,
+        exports: export_fn_ids,
         span: program.span.clone(),
     })
 }

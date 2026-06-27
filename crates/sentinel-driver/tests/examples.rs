@@ -653,6 +653,12 @@ fn every_example_is_registered() {
         for entry in std::fs::read_dir(dir).expect("read_dir examples") {
             let path = entry.expect("dir entry").path();
             if path.is_dir() {
+                // ADR 0059: `examples/export/` holds C-ABI LIBRARIES (no `main`)
+                // + their C drivers — exercised by `tests/export.rs`, not the
+                // build-and-run example harness. Skip it here.
+                if path.file_name().and_then(|n| n.to_str()) == Some("export") {
+                    continue;
+                }
                 collect(&path, root, out);
             } else if path.extension().and_then(|e| e.to_str()) == Some("sentinel") {
                 let rel = path

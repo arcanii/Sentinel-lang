@@ -97,6 +97,12 @@ fn main() -> ExitCode {
         {
             run_build_separate(path, Some(output))
         }
+        // ADR 0059: `snc build --lib <file> [-o <out.a>] [--emit-header <h.h>]`
+        // — compile to a C-ABI static library (no `main`) so other languages
+        // link + call its `export "C"` functions. Flags scan order-free.
+        [_, cmd, rest @ ..] if cmd == "build" && rest.iter().any(|a| a == "--lib") => {
+            run_build_lib_cli(rest)
+        }
         [_] => {
             print_usage();
             ExitCode::from(2)
@@ -120,6 +126,8 @@ fn print_usage() {
     eprintln!("    snc ast <file>                   parse and dump the canonical AST (self-host oracle)");
     eprintln!("    snc parse <file>                 lex, parse, and pretty-print the program");
     eprintln!("    snc build <file> [-o <output>]   compile and link to an executable");
+    eprintln!("    snc build --lib <file> [-o <lib.a>] [--emit-header <h.h>]");
+    eprintln!("                                     compile to a C-ABI static library (ADR 0059)");
     eprintln!("    snc help                         show this message");
     eprintln!();
     eprintln!("programs are one or more `fn` definitions; `main` is the entry point.");
@@ -917,6 +925,201 @@ fn run_build_merged(merged: Program, path: &str, output: Option<&str>) -> ExitCo
             ExitCode::from(1)
         }
     }
+}
+
+/// ADR 0059: scan `snc build --lib` flags (order-free): the input path, an
+/// optional `-o <out.a>`, and an optional `--emit-header <h.h>`.
+fn run_build_lib_cli(args: &[String]) -> ExitCode {
+    let mut path: Option<&str> = None;
+    let mut output: Option<&str> = None;
+    let mut header: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--lib" => i += 1,
+            "-o" => {
+                output = args.get(i + 1).map(|s| s.as_str());
+                i += 2;
+            }
+            "--emit-header" => {
+                header = args.get(i + 1).map(|s| s.as_str());
+                i += 2;
+            }
+            p => {
+                if path.is_none() {
+                    path = Some(p);
+                }
+                i += 1;
+            }
+        }
+    }
+    match path {
+        Some(p) => run_build_lib(p, output, header),
+        None => {
+            eprintln!("snc: `build --lib` needs an input file");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// ADR 0059: compile a Sentinel source file to a **C-ABI static library** — no
+/// `main`, the `export "C"` functions exposed under their bare un-mangled
+/// symbols, archived together with the runtime into a `.a` that C / Rust /
+/// Python / … can link and call. Optionally writes a C header. Phase 1a is
+/// SINGLE-FILE + the value ABI (`i64`/`f64`); `use` (multi-module libs), the
+/// `(ptr,len)` buffer ABI, and shared objects are later phases.
+fn run_build_lib(path: &str, output: Option<&str>, header: Option<&str>) -> ExitCode {
+    let src = match read_source(path) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let program = match sentinel_syntax::parse(&src) {
+        Ok(p) => p,
+        Err(e) => {
+            let report = Report::new(e).with_source_code(NamedSource::new(path, src.clone()));
+            eprintln!("{report:?}");
+            return ExitCode::from(1);
+        }
+    };
+    if !program.uses.is_empty() {
+        eprintln!(
+            "snc: `build --lib` does not yet support `use` (multi-module \
+             libraries are a follow-up); inline the dependencies for now"
+        );
+        return ExitCode::from(1);
+    }
+    // Resolve WITHOUT the `main` requirement — a library has no entry point.
+    let resolved = match sentinel_resolve::resolve_module(&program, &[]) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if resolved.exports.is_empty() {
+        eprintln!("snc: `build --lib` produced no `export \"C\"` functions (nothing to export)");
+        return ExitCode::from(1);
+    }
+    let typed = match sentinel_types::check(&resolved) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("snc: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // The same passes the executable build runs (a library is still verified):
+    // effect-check, borrow-check, and the constant-time gate.
+    let (_ec, effect_errors) = sentinel_effect_check::effect_check(&typed);
+    if !effect_errors.is_empty() {
+        for e in &effect_errors {
+            eprintln!("snc: {e}");
+        }
+        return ExitCode::from(1);
+    }
+    let (drop_plan, borrow_errors) = sentinel_borrow_check::borrow_check(&typed);
+    if !borrow_errors.is_empty() {
+        for e in &borrow_errors {
+            eprintln!("snc: {e}");
+        }
+        return ExitCode::from(1);
+    }
+    let mir = sentinel_mir::lower_to_mir(&typed);
+    let leaks = sentinel_mir::verify_constant_time(&mir);
+    if !leaks.is_empty() {
+        for leak in &leaks {
+            eprintln!("snc: {leak}");
+        }
+        return ExitCode::from(1);
+    }
+
+    let lib_path: PathBuf = match output {
+        Some(o) => PathBuf::from(o),
+        None => PathBuf::from(path).with_extension("a"),
+    };
+    let object_path = lib_path.with_extension("o");
+    let hir = sentinel_hir::lower_to_hir(&typed, &drop_plan);
+    if let Err(err) = sentinel_codegen::compile_to_object(&hir, &object_path) {
+        let report = Report::new(err).with_source_code(NamedSource::new(path, src));
+        eprintln!("{report:?}");
+        return ExitCode::from(1);
+    }
+    if let Err(msg) = archive_lib(&object_path, &lib_path) {
+        eprintln!("snc: archive failed: {msg}");
+        return ExitCode::from(1);
+    }
+    if let Some(h) = header {
+        if let Err(msg) = emit_c_header(&typed, Path::new(h)) {
+            eprintln!("snc: header generation failed: {msg}");
+            return ExitCode::from(1);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// ADR 0059: bundle the emitted object together with the runtime staticlib into
+/// ONE self-contained `.a` (so a consumer links a single archive). macOS uses
+/// `libtool -static`; the Sentinel toolchain currently targets macOS (Linux's
+/// `ar`-MRI path is a follow-up).
+fn archive_lib(object: &Path, lib: &Path) -> Result<(), String> {
+    let runtime = find_runtime()?;
+    let status = Command::new("libtool")
+        .arg("-static")
+        .arg("-o")
+        .arg(lib)
+        .arg(object)
+        .arg(&runtime)
+        .status()
+        .map_err(|e| format!("failed to invoke libtool: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("libtool exited with {status}"))
+    }
+}
+
+/// ADR 0059: render a Sentinel `Type` as its C type for the generated header.
+/// Phase 1a is the value ABI: `i64` → `int64_t`, `f64` → `double`.
+fn c_type_name(ty: sentinel_types::Type) -> Option<&'static str> {
+    match ty {
+        sentinel_types::Type::I64 => Some("int64_t"),
+        sentinel_types::Type::F64 => Some("double"),
+        _ => None,
+    }
+}
+
+/// ADR 0059: write a C header from the `export "C"` signatures — `#include
+/// <stdint.h>`, include guards, and one prototype per export (the value ABI).
+fn emit_c_header(typed: &sentinel_types::TypedProgram, header: &Path) -> Result<(), String> {
+    let mut out = String::new();
+    out.push_str("/* Generated by snc (ADR 0059). C-ABI exports of a Sentinel library. */\n");
+    out.push_str("#ifndef SENTINEL_EXPORTS_H\n#define SENTINEL_EXPORTS_H\n\n");
+    out.push_str("#include <stdint.h>\n\n");
+    out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
+    for id in &typed.exports {
+        let sig = typed
+            .fn_signatures
+            .iter()
+            .find(|s| s.id == *id)
+            .ok_or_else(|| "export FnId has no signature".to_string())?;
+        let ret = c_type_name(sig.return_type)
+            .ok_or_else(|| format!("export `{}` has a non-value-ABI return type", sig.name))?;
+        let mut params = String::new();
+        if sig.param_types.is_empty() {
+            params.push_str("void");
+        } else {
+            for (i, pty) in sig.param_types.iter().enumerate() {
+                if i > 0 {
+                    params.push_str(", ");
+                }
+                let c = c_type_name(*pty)
+                    .ok_or_else(|| format!("export `{}` has a non-value-ABI parameter", sig.name))?;
+                params.push_str(c);
+            }
+        }
+        out.push_str(&format!("{ret} {}({params});\n", sig.name));
+    }
+    out.push_str("\n#ifdef __cplusplus\n}\n#endif\n\n#endif /* SENTINEL_EXPORTS_H */\n");
+    std::fs::write(header, out).map_err(|e| format!("write {}: {e}", header.display()))
 }
 
 /// Phase D.6 / ADR 0037 (a): an exported `pub fn`'s signature, extracted

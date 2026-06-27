@@ -375,6 +375,25 @@ impl<'a> Parser<'a> {
                     uses.push(self.parse_use_decl()?);
                 }
                 Some(TokenKind::Fn) => fns.push(self.parse_fn_def(visibility)?),
+                // ADR 0059: `export "C" fn …` — a C-ABI export. The `export "C"`
+                // prefix sets a flag on the otherwise-ordinary fn def. `pub` and
+                // `export` don't combine at the MVP (an export's visibility IS
+                // its C symbol).
+                Some(TokenKind::Export) => {
+                    self.reject_top_level_pub(visibility, "export")?;
+                    self.advance(); // `export`
+                    let abi_span = self.expect_string_lit("an ABI string `\"C\"` after `export`")?;
+                    if &self.src[abi_span.clone()] != "\"C\"" {
+                        return Err(ParseError::UnexpectedToken {
+                            got: self.src[abi_span.clone()].to_string(),
+                            expected: "the ABI string `\"C\"` (the only supported export ABI)",
+                            span: to_source_span(&abi_span),
+                        });
+                    }
+                    let mut f = self.parse_fn_def(Visibility::Private)?;
+                    f.is_export_c = true;
+                    fns.push(f);
+                }
                 Some(TokenKind::Struct) => structs.push(self.parse_struct_decl(visibility)?),
                 Some(TokenKind::Effect) => effects.push(self.parse_effect_decl(visibility)?),
                 Some(TokenKind::Class) => {
@@ -2441,6 +2460,7 @@ impl<'a> Parser<'a> {
             params,
             return_type,
             effect_row,
+            is_export_c: false,
             body,
             span: fn_start..end,
         })
@@ -3184,6 +3204,26 @@ impl<'a> Parser<'a> {
 
     fn eof_span(&self) -> Span {
         self.src.len()..self.src.len()
+    }
+
+    /// ADR 0057/0059: consume a `StringLit` token, returning its SPAN (quotes
+    /// included); otherwise an `UnexpectedToken` / `UnexpectedEof` naming `what`.
+    fn expect_string_lit(&mut self, what: &'static str) -> Result<Span, ParseError> {
+        match self.peek_kind() {
+            Some(TokenKind::StringLit) => Ok(self.advance().expect("peeked").span.clone()),
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: what,
+                    span: to_source_span(&t.span),
+                })
+            }
+            None => Err(ParseError::UnexpectedEof {
+                expected: what,
+                span: to_source_span(&self.eof_span()),
+            }),
+        }
     }
 
     /// ADR 0057: consume a token of exactly `kind`, returning its END offset;
@@ -5386,6 +5426,22 @@ mod tests {
         assert!(matches!(err, ParseError::UnexpectedToken { .. }), "got {err:?}");
         // A missing `;` is rejected.
         assert!(parse("extern \"C\" { fn f() -> i64 } fn main() -> i64 { 0 }").is_err());
+    }
+
+    #[test]
+    fn parse_export_fn() {
+        // ADR 0059: `export "C" fn` sets the export flag on an otherwise
+        // ordinary fn def.
+        let p = parse_ok_program("export \"C\" fn add(a: i64, b: i64) -> i64 { a + b }");
+        assert_eq!(p.fns.len(), 1);
+        assert!(p.fns[0].is_export_c);
+        assert_eq!(p.fns[0].name, "add");
+        // A plain fn is not an export.
+        let p2 = parse_ok_program("fn add(a: i64, b: i64) -> i64 { a + b }");
+        assert!(!p2.fns[0].is_export_c);
+        // A non-`"C"` export ABI is rejected.
+        let err = parse("export \"rust\" fn f() -> i64 { 0 }").unwrap_err();
+        assert!(matches!(err, ParseError::UnexpectedToken { .. }), "got {err:?}");
     }
 
     #[test]

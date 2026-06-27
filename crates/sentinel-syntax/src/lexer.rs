@@ -150,6 +150,11 @@ pub enum TokenKind {
     /// in resolve, which is internal — this is the source syntax).
     #[token("extern")]
     Extern,
+    /// ADR 0059: `export "C" fn …` — mark a function as a C-ABI export with a
+    /// stable un-mangled symbol, so other languages can call INTO Sentinel
+    /// (the inverse of `extern`). A reserved keyword.
+    #[token("export")]
+    Export,
     /// C4 / ADR 0021 D5 + D11: `for` connector inside `impl
     /// [Name as] Trait for Type { ... }`. Reserved at C4.0;
     /// the parser activates it at C4.2. (Future for-loop usage
