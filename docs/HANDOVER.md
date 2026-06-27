@@ -50,7 +50,17 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY).
-CURRENT STATE: HEAD `029bef7`, 1624 tests, four-check green, NEVER pushed.** SHIPPED to
+CURRENT STATE: HEAD `abdf7eb`, 1624 tests, four-check green, NEVER pushed.**
+
+**▶ ONE-LINE STATUS: the owner's WHOLE big-list is implemented** — the comprehensive
+constant-time crypto suite, the networked `sshd`, the data & text trio, and **all three
+remaining language-gap rocks (ADR 0058 `f64` floats · ADR 0057 `extern "C"` FFI import · ADR
+0059 C-ABI export)** + the float follow-ups (libm transcendentals · `f64`⇄string · JSON
+float numbers) + the export `&[u8]` buffer ABI. **What remains are only deferred Phase
+1b/2 tails — none a new rock; the menu is in the *Next* bullet below.** Read STATE.md
+§"Current State" for the authoritative live picture. Full detail follows.
+
+SHIPPED to
 date, in four bands (per-increment record in STATE.md + the commit log + the
 [[sentinel_examples_and_corelibs]] memory): (1) a comprehensive **constant-time crypto
 suite** — `std/security`, ~30 modules, all on canonical vectors (detail below); (2) **NINE
