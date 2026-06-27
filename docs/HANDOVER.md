@@ -486,7 +486,19 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     safe-wrapper modules, and macOS+Linux-first / Win32-later phasing. ⚠ `extern` fns resolve
     BY SYMBOL NAME (NOT a builtin `FnId`) → they AVOID the FnId-shift pain by construction. The
     ADR is the gate; Phase 1 (declarations + `ptr` + secret-fence + a `std/sys/posix` wrapping
-    ~6 libc calls + a demonstrator) is the first implementation increment when picked up.
+    ~6 libc calls + a demonstrator) is the first implementation increment when picked up. **The
+    C-ABI EXPORT side now has a DESIGN too — ADR 0059 (PROPOSED/design-only):** an `export "C"
+    fn` annotation (un-mangled C symbol, the ADR-0057 FFI-safe ABI) + a `--lib` build mode
+    (no `main`; archive the object(s) + the runtime staticlib into a `.a`) + `--emit-header`
+    (a generated C header) + a `(ptr,len)` buffer ABI + `sentinel_free_bytes`. ⚠ THE HEADLINE:
+    the secret-fence means an export takes PUBLIC bytes, WIDENS them to `secret` internally
+    (ADR 0049), runs the machine-checked constant-time impl, and `declassify`s the result — so
+    a C/Python/Rust caller gets **verified constant-time crypto as a drop-in library**. Phasing:
+    static `.a` + header + a C-driver demo first (macOS+Linux); shared libs + struct exports +
+    the Python(`ctypes`)/Rust(`-sys`) generators + Win32 `.dll` later. **▶ ALL THREE big-list
+    rocks now have design ADRs: 0057 (FFI import) · 0058 (float) · 0059 (C-ABI export) — the
+    design phase for the owner's whole list is complete; what remains is IMPLEMENTATION (each
+    a multi-stage compiler increment).**
     Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
