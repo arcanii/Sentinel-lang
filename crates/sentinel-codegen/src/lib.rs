@@ -444,6 +444,12 @@ pub fn compile_to_object_for_module(
         // (single-file / Path-A) → bare names, byte-identical to before.
         let symbol = if signature.is_main {
             "main".to_string()
+        } else if program.externs.contains(&signature.id) {
+            // ADR 0057: an `extern "C"` declaration is declared `External`
+            // under its BARE C symbol (never module-qualified — a C symbol is
+            // global), so `cc` resolves it against libc at link. It has no
+            // TypedFnDef body, so Pass 2 leaves it a declaration.
+            signature.name.clone()
         } else if let Some(origin) = &signature.extern_origin {
             mangle_qualified(origin, &signature.name)
         } else {

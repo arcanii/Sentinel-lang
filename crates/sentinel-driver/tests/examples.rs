@@ -170,6 +170,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // `sqrt` intrinsic, int<->float `as` casts) — a PUBLIC-only numeric module
     // crossing the boundary (no `secret f64`). 42 = every result matched.
     ("examples/math/quadratic.sentinel", 42),
+    // The `extern "C"` FFI (ADR 0057): call real POSIX libc functions
+    // (getpid/getppid/getuid/getgid) through the safe std::sys::posix
+    // wrappers — the i64 value-ABI, resolved against libc by `cc` at link.
+    // 42 = every process-identity invariant held.
+    ("examples/sys/process_ids.sentinel", 42),
     // The flagship: variable-length constant-time memcmp over `[secret u8]`
     // secret byte buffers (std::security::ct::ct_memcmp, ADR 0047). 42 =
     // equal-compared-equal AND tampered-compared-unequal.
@@ -427,6 +432,11 @@ fn math_inplace_element_borrow() {
 #[test]
 fn math_quadratic_f64() {
     check_example("examples/math/quadratic.sentinel", "quadratic", 42);
+}
+
+#[test]
+fn sys_process_ids_ffi() {
+    check_example("examples/sys/process_ids.sentinel", "process_ids", 42);
 }
 
 #[test]

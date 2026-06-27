@@ -532,6 +532,15 @@ impl VecElem {
     }
 }
 
+/// ADR 0057: `true` iff `ty` is a Phase-1 FFI-safe type — a PUBLIC `i64` or
+/// `f64`. A `secret` type is NOT FFI-safe (the constant-time fence: secret
+/// data cannot cross an unverified `extern` call), nor are structs / arrays /
+/// other widths (deferred to a later FFI phase). Gates `extern` param/return
+/// types.
+fn is_ffi_safe(ty: Type) -> bool {
+    matches!(ty, Type::I64 | Type::F64)
+}
+
 impl Type {
     /// `true` if this is an integer type (`I32`, `I64`, or `U8`).
     /// Used to gate arithmetic-operator typing rules — comparisons
@@ -1527,6 +1536,12 @@ fn resolve_type_expr_with_scope(
 pub struct TypedProgram {
     pub fns: Vec<TypedFnDef>,
     pub fn_signatures: Vec<TypedFnSignature>,
+    /// ADR 0057: the `FnId`s of `extern "C"` declarations (body-less C-ABI
+    /// functions). Their [`TypedFnSignature`]s are in `fn_signatures` like
+    /// any fn; this set tells codegen to declare each as an `External` symbol
+    /// under its BARE name (the C symbol) and to skip emitting a body.
+    /// Empty for programs with no FFI.
+    pub externs: Vec<FnId>,
     /// Struct declarations with resolved field types (parallel-tree
     /// mirror of [`sentinel_resolve::ResolvedProgram::structs`]).
     /// Each struct's [`StructId`] matches its index here.
@@ -3168,6 +3183,22 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0057: an `extern "C"` parameter / return type is not in the
+    /// FFI-safe set. Phase 1 allows only PUBLIC `i64` and `f64` (the native
+    /// word + C `double`). A `secret` type is rejected here — the FFI fence:
+    /// an `extern` call jumps into code the compiler cannot verify, so secret
+    /// data may not cross it (declassify first). Structs / arrays / `ptr` /
+    /// other widths are deferred to a later FFI phase.
+    #[error("`extern` fn types must be public FFI-safe scalars (`i64` or `f64`)")]
+    #[diagnostic(
+        code(sentinel::types::extern_ffi_type),
+        help("Phase 1 FFI allows only public `i64` / `f64`; a `secret` value cannot cross the FFI boundary (declassify first), and structs / pointers / other widths are a later phase (ADR 0057)")
+    )]
+    ExternFfiType {
+        #[label("not an FFI-safe type")]
+        span: miette::SourceSpan,
+    },
+
     /// C3 / ADR 0019 D7 (C3.1) — constant-time rejection: an `if` or
     /// (since D.5) a `while` whose condition has type `secret bool`
     /// would leak the secret via timing. Reject. `kw` is the offending
@@ -4259,6 +4290,67 @@ pub fn check_module(
         }
     }
 
+    // ADR 0057: build a TypedFnSignature for each `extern "C"` declaration.
+    // The param/return type-exprs are resolved in THIS unit's type space and
+    // restricted to the FFI-safe public set (`i64` / `f64`) — a `secret`,
+    // struct, array, or other-width type is rejected (the secret-fence + the
+    // Phase-1 ABI). The FnId is recorded in `typed_externs` so codegen
+    // declares it `External` under its bare C symbol. No effect row (an FFI
+    // leaf), no generics. `program.externs == []` → byte-identical.
+    let extern_scope: TypeParamScope = HashMap::new();
+    let mut typed_externs: Vec<FnId> = Vec::with_capacity(program.externs.len());
+    for ext in &program.externs {
+        let mut param_types = Vec::with_capacity(ext.param_types.len());
+        for te in &ext.param_types {
+            let ty = resolve_type_expr_with_scope(
+                te,
+                &struct_table,
+                &class_table,
+                &enum_table,
+                &extern_scope,
+                &mut generic_instances,
+                &mut refs,
+                &mut secrets,
+                &struct_type_param_counts,
+            )?;
+            if !is_ffi_safe(ty) {
+                return Err(TypeError::ExternFfiType {
+                    span: to_source_span(&te.span),
+                });
+            }
+            param_types.push(ty);
+        }
+        let return_type = resolve_type_expr_with_scope(
+            &ext.return_type,
+            &struct_table,
+            &class_table,
+            &enum_table,
+            &extern_scope,
+            &mut generic_instances,
+            &mut refs,
+            &mut secrets,
+            &struct_type_param_counts,
+        )?;
+        if !is_ffi_safe(return_type) {
+            return Err(TypeError::ExternFfiType {
+                span: to_source_span(&ext.return_type.span),
+            });
+        }
+        typed_externs.push(ext.id);
+        typed_signatures.push(TypedFnSignature {
+            id: ext.id,
+            name: ext.name.clone(),
+            name_span: Some(ext.name_span.clone()),
+            type_params: vec![],
+            param_types,
+            return_type,
+            effect_row: vec![],
+            is_main: false,
+            is_runtime: false,
+            extern_origin: None,
+        });
+    }
+
     // Sort typed_signatures by id so signatures[i] corresponds to
     // FnId(i) — matches ResolvedProgram's invariant.
     typed_signatures.sort_by_key(|s| s.id.0);
@@ -4850,6 +4942,7 @@ pub fn check_module(
     Ok(TypedProgram {
         fns: typed_fns,
         fn_signatures: typed_signatures,
+        externs: typed_externs,
         structs: typed_structs,
         generic_instances,
         refs,
@@ -8972,6 +9065,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "bitwise / shift operators are not supported on `f64`".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
+        TypeError::ExternFfiType { span } => (
+            "sentinel::types::extern_ffi_type",
+            "`extern` fn types must be public FFI-safe scalars (`i64` or `f64`)".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
         TypeError::SecretBranch { kw, span } => (
             "sentinel::types::secret_branch",
             format!("`{kw}` on a `secret bool` condition would leak via timing"),
@@ -12077,6 +12175,36 @@ fn main() -> i64 {
             "fn f(a: f64, b: i64) -> f64 { a + b }\nfn main() -> i64 { 0 }",
         );
         assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn extern_ffi_typechecks() {
+        // ADR 0057: an `extern "C"` fn over the FFI-safe set type-checks, and
+        // a call to it resolves + returns its type.
+        let p = check_ok(
+            "extern \"C\" { fn getpid() -> i64; fn pow(b: f64, e: f64) -> f64; }\
+             fn main() -> i64 { let q: f64 = pow(2.0, 3.0); getpid() + (q as i64) }",
+        );
+        // Both externs are recorded.
+        assert_eq!(p.externs.len(), 2);
+    }
+
+    #[test]
+    fn extern_secret_param_rejected() {
+        // The FFI fence: a `secret` value cannot cross an `extern` boundary.
+        let err = check_err(
+            "extern \"C\" { fn f(x: secret i64) -> i64; } fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::ExternFfiType { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn extern_non_ffi_type_rejected() {
+        // A non-FFI-safe type (`u8`, a struct, an array) is rejected in Phase 1.
+        let err = check_err(
+            "extern \"C\" { fn f(x: u8) -> i64; } fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::ExternFfiType { .. }), "got {err:?}");
     }
 
     #[test]

@@ -144,6 +144,12 @@ pub enum TokenKind {
     /// syntax. Reserved keyword (no other use at C4 minimum).
     #[token("as")]
     As,
+    /// ADR 0057: `extern "C" { fn … ; }` — a foreign-function-interface
+    /// block declaring C-ABI functions resolved against libc at link time.
+    /// A reserved keyword (distinct from the cross-module `extern` *concept*
+    /// in resolve, which is internal — this is the source syntax).
+    #[token("extern")]
+    Extern,
     /// C4 / ADR 0021 D5 + D11: `for` connector inside `impl
     /// [Name as] Trait for Type { ... }`. Reserved at C4.0;
     /// the parser activates it at C4.2. (Future for-loop usage

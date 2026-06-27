@@ -564,6 +564,27 @@ pub struct Program {
     /// the enum table + types interns `Type::Enum` at D.1 (3/N); codegen
     /// lowers construction + `match` at D.1 (4/N).
     pub enums: Vec<EnumDecl>,
+    /// ADR 0057: top-level `extern "C" { fn … ; }` foreign-function
+    /// declarations. Always present (empty for programs with no FFI). Each
+    /// is a body-less C-ABI function declaration resolved against libc at
+    /// link time; raw `extern`s live by convention in `std/sys/*` /
+    /// `std/math/float` wrapper modules.
+    pub externs: Vec<ExternFnDecl>,
+    pub span: Span,
+}
+
+/// ADR 0057: a single `extern "C"` foreign-function declaration —
+/// `fn name(p1: T, …) -> T;` with NO body. The name IS the C symbol
+/// (un-mangled); params/return are restricted to the FFI-safe set
+/// (`i64`/`f64`) and may not be `secret` (the constant-time fence). The
+/// compiler emits an LLVM `declare` so `cc` resolves it against the platform
+/// C library at link.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExternFnDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<Param>,
+    pub return_type: TypeExpr,
     pub span: Span,
 }
 
@@ -1587,6 +1608,7 @@ mod tests {
             traits: vec![],
             impls: vec![],
             enums: vec![],
+            externs: vec![],
             span: 0..2,
         };
         assert_eq!(p.to_string(), "(fn main () -> i64 (block 42))");
@@ -1638,6 +1660,7 @@ mod tests {
             traits: vec![],
             impls: vec![],
             enums: vec![],
+            externs: vec![],
             span: 0..20,
         };
         assert_eq!(
@@ -2060,6 +2083,7 @@ mod tests {
             traits: vec![],
             impls: vec![],
             enums: vec![],
+            externs: vec![],
             span: 0..30,
         };
         // Structs first, then fns.

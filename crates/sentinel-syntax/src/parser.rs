@@ -48,7 +48,7 @@
 
 use sentinel_ast::{
     BinOp, Block, ClassDecl, ClassField, CmpOp, DelegateDecl, EffectDecl, EnumDecl, Expr, ExprKind,
-    FieldInit, FnDef, HandlerArm, ImplDecl, ImplMethodDef, InitDef, LogicOp, MatchArm, MethodDef,
+    ExternFnDecl, FieldInit, FnDef, HandlerArm, ImplDecl, ImplMethodDef, InitDef, LogicOp, MatchArm, MethodDef,
     OpDecl, Param, Pattern, Program, ReturnArm, SelfKind, Span, Spanned, Stmt, StmtKind, StructDecl,
     StructField, TraitDecl, TraitMethodSig, TypeExpr, TypeExprKind, TypeParam, UnaryOp,
     UseDecl, VariantDecl, Visibility,
@@ -360,6 +360,7 @@ impl<'a> Parser<'a> {
         let mut traits = Vec::new();
         let mut impls = Vec::new();
         let mut enums = Vec::new();
+        let mut externs = Vec::new();
         while self.peek().is_some() {
             // Phase D.6 (1/N) / ADR 0037 D3: an optional `pub` precedes a
             // top-level item, exporting it across modules. Allowed on the
@@ -387,6 +388,13 @@ impl<'a> Parser<'a> {
                 }
                 // Phase D.1 / ADR 0032: top-level `enum` declarations.
                 Some(TokenKind::Enum) => enums.push(self.parse_enum_decl(visibility)?),
+                // ADR 0057: `extern "C" { fn … ; }` FFI block. `pub` is not
+                // accepted on it (the raw decls are module-private; the safe
+                // wrappers are the exported surface).
+                Some(TokenKind::Extern) => {
+                    self.reject_top_level_pub(visibility, "extern")?;
+                    externs.extend(self.parse_extern_block()?);
+                }
                 Some(other) => {
                     let t = self.peek().expect("peeked");
                     return Err(ParseError::UnexpectedToken {
@@ -413,6 +421,7 @@ impl<'a> Parser<'a> {
             && traits.is_empty()
             && impls.is_empty()
             && enums.is_empty()
+            && externs.is_empty()
         {
             return Err(ParseError::UnexpectedEof {
                 expected: "`fn` (programs are one or more function definitions)",
@@ -427,13 +436,15 @@ impl<'a> Parser<'a> {
         let trait_end = traits.last().map_or(0, |t| t.span.end);
         let impl_end = impls.last().map_or(0, |i| i.span.end);
         let enum_end = enums.last().map_or(0, |e| e.span.end);
+        let extern_end = externs.last().map_or(0, |e| e.span.end);
         let end = fn_end
             .max(struct_end)
             .max(effect_end)
             .max(class_end)
             .max(trait_end)
             .max(impl_end)
-            .max(enum_end);
+            .max(enum_end)
+            .max(extern_end);
         Ok(Program {
             uses,
             fns,
@@ -443,6 +454,7 @@ impl<'a> Parser<'a> {
             traits,
             impls,
             enums,
+            externs,
             span: start..end,
         })
     }
@@ -2189,6 +2201,117 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// ADR 0057: parse an `extern "C" { fn name(params) -> ret; … }` block
+    /// into a list of body-less [`ExternFnDecl`]s. The ABI string must be
+    /// `"C"` (the only supported ABI in Phase 1). Each declaration is
+    /// `fn name(p: T, …) -> T;` — params reuse the normal param grammar; the
+    /// `-> ret` is mandatory (uniform with `fn`); a `;` terminates each (no
+    /// body). FFI-safe type + secret-fence validation happens at type-check.
+    fn parse_extern_block(&mut self) -> Result<Vec<ExternFnDecl>, ParseError> {
+        // `extern`
+        self.advance(); // peeked TokenKind::Extern
+        // ABI string `"C"`.
+        let abi_span = match self.peek_kind() {
+            Some(TokenKind::StringLit) => self.advance().expect("peeked").span.clone(),
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "an ABI string `\"C\"` after `extern`",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "an ABI string `\"C\"` after `extern`",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+        // The literal includes the quotes; the only supported ABI is `C`.
+        if &self.src[abi_span.clone()] != "\"C\"" {
+            return Err(ParseError::UnexpectedToken {
+                got: self.src[abi_span.clone()].to_string(),
+                expected: "the ABI string `\"C\"` (the only supported FFI ABI)",
+                span: to_source_span(&abi_span),
+            });
+        }
+        // `{`
+        self.expect(TokenKind::LBrace, "`{` to open the `extern` block")?;
+        let mut decls = Vec::new();
+        while self.peek_kind() != Some(TokenKind::RBrace) {
+            // `fn`
+            let fn_start = match self.peek_kind() {
+                Some(TokenKind::Fn) => self.advance().expect("peeked").span.start,
+                Some(other) => {
+                    let t = self.peek().expect("peeked");
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{other:?}"),
+                        expected: "`fn` or `}` in an `extern` block",
+                        span: to_source_span(&t.span),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "`fn` or `}` in an `extern` block",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            };
+            // name
+            let (name, name_span) = match self.peek() {
+                Some(t) if t.kind == TokenKind::Ident => {
+                    let span = t.span.clone();
+                    let name = self.src[span.clone()].to_string();
+                    self.advance();
+                    (name, span)
+                }
+                Some(t) => {
+                    let (kind, span) = (t.kind, t.span.clone());
+                    return Err(ParseError::UnexpectedToken {
+                        got: format!("{kind:?}"),
+                        expected: "an extern function name after `fn`",
+                        span: to_source_span(&span),
+                    });
+                }
+                None => {
+                    return Err(ParseError::UnexpectedEof {
+                        expected: "an extern function name after `fn`",
+                        span: to_source_span(&self.eof_span()),
+                    });
+                }
+            };
+            // `(` params `)`
+            self.expect(TokenKind::LParen, "`(` after the extern function name")?;
+            let mut params = Vec::new();
+            if self.peek_kind() != Some(TokenKind::RParen) {
+                params.push(self.parse_param()?);
+                while self.peek_kind() == Some(TokenKind::Comma) {
+                    self.advance();
+                    if self.peek_kind() == Some(TokenKind::RParen) {
+                        break;
+                    }
+                    params.push(self.parse_param()?);
+                }
+            }
+            self.expect(TokenKind::RParen, "`,` or `)` in the extern parameter list")?;
+            // `-> ret`
+            let return_type = self.parse_return_type()?;
+            // `;`
+            let semi_end = self.expect(TokenKind::Semi, "`;` to end the extern declaration")?;
+            decls.push(ExternFnDecl {
+                name,
+                name_span,
+                params,
+                return_type,
+                span: fn_start..semi_end,
+            });
+        }
+        // `}`
+        self.expect(TokenKind::RBrace, "`}` to close the `extern` block")?;
+        Ok(decls)
+    }
+
     fn parse_fn_def(&mut self, visibility: Visibility) -> Result<FnDef, ParseError> {
         let fn_start = match self.peek_kind() {
             Some(TokenKind::Fn) => self.advance().expect("peeked").span.start,
@@ -3061,6 +3184,26 @@ impl<'a> Parser<'a> {
 
     fn eof_span(&self) -> Span {
         self.src.len()..self.src.len()
+    }
+
+    /// ADR 0057: consume a token of exactly `kind`, returning its END offset;
+    /// otherwise an `UnexpectedToken` / `UnexpectedEof` naming `what`.
+    fn expect(&mut self, kind: TokenKind, what: &'static str) -> Result<usize, ParseError> {
+        match self.peek_kind() {
+            Some(k) if k == kind => Ok(self.advance().expect("peeked").span.end),
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: what,
+                    span: to_source_span(&t.span),
+                })
+            }
+            None => Err(ParseError::UnexpectedEof {
+                expected: what,
+                span: to_source_span(&self.eof_span()),
+            }),
+        }
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
@@ -5224,6 +5367,25 @@ mod tests {
         }
         // A bare integer is still an `IntLit`, not a float.
         assert!(matches!(parse_expr("42").unwrap().kind, ExprKind::IntLit(42)));
+    }
+
+    #[test]
+    fn parse_extern_block() {
+        // ADR 0057: an `extern "C"` block parses into body-less decls.
+        let p = parse_ok_program(
+            "extern \"C\" { fn getpid() -> i64; fn pow(b: f64, e: f64) -> f64; }\
+             fn main() -> i64 { getpid() }",
+        );
+        assert_eq!(p.externs.len(), 2);
+        assert_eq!(p.externs[0].name, "getpid");
+        assert_eq!(p.externs[0].params.len(), 0);
+        assert_eq!(p.externs[1].name, "pow");
+        assert_eq!(p.externs[1].params.len(), 2);
+        // A non-`"C"` ABI string is rejected.
+        let err = parse("extern \"rust\" { fn f() -> i64; } fn main() -> i64 { 0 }").unwrap_err();
+        assert!(matches!(err, ParseError::UnexpectedToken { .. }), "got {err:?}");
+        // A missing `;` is rejected.
+        assert!(parse("extern \"C\" { fn f() -> i64 } fn main() -> i64 { 0 }").is_err());
     }
 
     #[test]

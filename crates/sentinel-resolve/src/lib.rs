@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 
 use salsa::Accumulator;
 use sentinel_ast::{
-    BinOp, Block, ClassDecl, CmpOp, EffectDecl, EnumDecl, Expr, ExprKind, FnDef, HandlerArm,
+    BinOp, Block, ClassDecl, CmpOp, EffectDecl, EnumDecl, Expr, ExprKind, ExternFnDecl, FnDef, HandlerArm,
     ImplDecl, LogicOp, MatchArm, Param, Pattern, Program, ReturnArm, SelfKind, Span, Spanned, Stmt,
     StmtKind, StructDecl, TraitDecl, TypeExpr, TypeExprKind, TypeParam as AstTypeParam, UnaryOp,
     Visibility,
@@ -237,6 +237,13 @@ pub struct FnSignature {
     /// pass `imports == []`, so this is never set there — the field is
     /// inert and the FnId space / output is byte-identical.
     pub extern_origin: Option<Vec<String>>,
+    /// ADR 0057: `true` iff this is an `extern "C"` foreign-function
+    /// declaration — a body-less C-ABI function whose `name` IS its C symbol
+    /// (un-mangled). It occupies a user-range `FnId` (registered after the
+    /// builtins, like a local fn — so it causes NO builtin `FnId` shift) but
+    /// has NO `ResolvedFnDef` body; codegen declares it `External` under the
+    /// bare `name` and the linker binds it against libc. Default `false`.
+    pub is_extern_c: bool,
 }
 
 /// A generic type parameter at resolve time per ADR 0016 D9.
@@ -292,6 +299,24 @@ pub struct ResolvedProgram {
     /// classes, and traits. Variant payload types stay as
     /// [`TypeExpr`] (string-keyed) — sentinel-types resolves them.
     pub enums: Vec<ResolvedEnumDecl>,
+    /// ADR 0057: `extern "C"` foreign-function declarations. Each carries its
+    /// (user-range) [`FnId`] + the FFI param/return type-exprs (the type
+    /// checker resolves them, validates the FFI-safe set, and enforces the
+    /// secret-fence). Body-less — no entry in [`fns`].
+    pub externs: Vec<ResolvedExternFn>,
+    pub span: Span,
+}
+
+/// ADR 0057: a resolved `extern "C"` declaration — its `FnId`, the bare C
+/// symbol name, and the param/return type-exprs (left string-keyed for
+/// sentinel-types to resolve + validate as the FFI-safe set).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResolvedExternFn {
+    pub id: FnId,
+    pub name: String,
+    pub name_span: Span,
+    pub param_types: Vec<TypeExpr>,
+    pub return_type: TypeExpr,
     pub span: Span,
 }
 
@@ -1542,11 +1567,23 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
     let mut traits = Vec::new();
     let mut impls = Vec::new();
     let mut enums = Vec::new();
+    // ADR 0057: `extern "C"` decls are collected with their BARE C symbol
+    // names (NOT module-qualified — a C symbol is global), deduplicated by
+    // name (the same libc symbol may be declared in several modules). They
+    // are never added to the per-module `rename` map, so calls to them stay
+    // bare through the reference rewrite.
+    let mut externs: Vec<ExternFnDecl> = Vec::new();
     let mut span_end = 0usize;
 
     for (idx, unit) in modules.iter().enumerate() {
         let is_entry = idx == 0;
         let prefix = unit.path.join("$");
+        for ext in &unit.program.externs {
+            if !externs.iter().any(|e| e.name == ext.name) {
+                span_end = span_end.max(ext.span.end);
+                externs.push(ext.clone());
+            }
+        }
 
         // Build this module's name → qualified-symbol map. EVERY top-level
         // item is qualified by module path — fns, structs, enums, traits,
@@ -1655,6 +1692,7 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
         traits,
         impls,
         enums,
+        externs,
         span: 0..span_end,
     })
 }
@@ -2447,6 +2485,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     let unwrap_or_sig = FnSignature {
@@ -2459,6 +2498,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     let is_some_sig = FnSignature {
@@ -2471,6 +2511,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     let len_sig = FnSignature {
@@ -2483,6 +2524,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     // D.2 / ADR 0033 D5: the byte-string builtins. Non-generic
@@ -2497,6 +2539,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     let u8_to_i64_sig = FnSignature {
@@ -2508,6 +2551,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     let i64_to_u8_sig = FnSignature {
@@ -2519,6 +2563,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     // D.3 / ADR 0034 D5: the growable-collection builtins. Generic over
@@ -2534,6 +2579,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     let push_sig = FnSignature {
@@ -2545,6 +2591,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     // D.3 (2/N) / ADR 0034 D5: pop + the Vec->array bridge. Both generic
@@ -2558,6 +2605,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     let vec_to_array_sig = FnSignature {
@@ -2569,6 +2617,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     // D.4 / ADR 0035 D4: file-I/O builtins. Non-generic (concrete `[u8]`
@@ -2582,6 +2631,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     let write_file_sig = FnSignature {
@@ -2593,6 +2643,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     let print_bytes_sig = FnSignature {
@@ -2604,6 +2655,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     next_fn_id += 1;
     // ADR 0056: the TCP sockets builtins. Non-generic concrete signatures (typed in
@@ -2617,6 +2669,7 @@ pub fn resolve_module(
         is_main: false,
         is_runtime: true,
         extern_origin: None,
+        is_extern_c: false,
     };
     let tcp_listen_sig = mk_socket_sig(next_fn_id, "tcp_listen", 1);
     next_fn_id += 1;
@@ -2688,6 +2741,7 @@ pub fn resolve_module(
             is_main: false,
             is_runtime: false,
             extern_origin: Some(imp.origin.clone()),
+            is_extern_c: false,
         });
         fn_table.insert(imp.name.clone(), id);
     }
@@ -2712,8 +2766,47 @@ pub fn resolve_module(
             is_main,
             is_runtime: false,
             extern_origin: None,
+            is_extern_c: false,
         });
         fn_table.insert(fn_def.name.clone(), id);
+    }
+
+    // ADR 0057: register each `extern "C"` declaration. Like a local fn it
+    // takes a user-range `FnId` (after the builtins — so NO builtin `FnId`
+    // shift) and a `fn_table` entry, so a call to its bare C name resolves +
+    // arity-checks like any call; but it is body-less (`is_extern_c`, no
+    // `ResolvedFnDef`). The param/return type-exprs ride in `resolved_externs`
+    // for the type checker to resolve + FFI-validate.
+    let mut resolved_externs: Vec<ResolvedExternFn> = Vec::with_capacity(program.externs.len());
+    for ext in &program.externs {
+        if fn_table.contains_key(&ext.name) {
+            return Err(ResolveError::RedefinedFunction {
+                name: ext.name.clone(),
+                span: to_source_span(&ext.name_span),
+            });
+        }
+        let id = FnId(next_fn_id);
+        next_fn_id += 1;
+        signatures.push(FnSignature {
+            id,
+            name: ext.name.clone(),
+            name_span: Some(ext.name_span.clone()),
+            arity: ext.params.len(),
+            type_params_count: 0,
+            is_main: false,
+            is_runtime: false,
+            extern_origin: None,
+            is_extern_c: true,
+        });
+        fn_table.insert(ext.name.clone(), id);
+        resolved_externs.push(ResolvedExternFn {
+            id,
+            name: ext.name.clone(),
+            name_span: ext.name_span.clone(),
+            param_types: ext.params.iter().map(|p| p.ty.clone()).collect(),
+            return_type: ext.return_type.clone(),
+            span: ext.span.clone(),
+        });
     }
 
     // `MissingMain` is enforced by the `resolve` wrapper (single-file /
@@ -2974,6 +3067,7 @@ pub fn resolve_module(
         traits: resolved_traits,
         impls: resolved_impls,
         enums: resolved_enums,
+        externs: resolved_externs,
         span: program.span.clone(),
     })
 }

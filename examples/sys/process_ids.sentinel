@@ -1,0 +1,25 @@
+// examples/sys/process_ids.sentinel
+//
+// The `extern "C"` FFI (ADR 0057): call real POSIX libc functions from
+// Sentinel through the safe `std::sys::posix` wrappers. Exit 42 means every
+// invariant held. The actual ids vary per run (a pid is whatever the OS
+// assigns), so the example checks INVARIANTS rather than fixed values — that
+// the calls returned, linked, and produced sane results. A successful build is
+// also the proof that the declared C symbols resolved against libc at link.
+//
+// FFI values are PUBLIC (the unverified boundary): none of this is `secret`.
+use std::sys::posix::pid;
+use std::sys::posix::parent_pid;
+use std::sys::posix::uid;
+use std::sys::posix::gid;
+
+fn main() -> i64 {
+    let p: i64 = pid();         // this process — always positive
+    let pp: i64 = parent_pid(); // the shell / harness — positive
+    let u: i64 = uid();         // real user id — >= 0
+    let g: i64 = gid();         // real group id — >= 0
+
+    // A process is not its own parent, and the ids are well-formed.
+    let ok: bool = p > 0 && pp > 0 && p != pp && u >= 0 && g >= 0;
+    if ok { 42 } else { 0 }
+}

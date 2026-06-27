@@ -1,0 +1,44 @@
+// std::sys::posix — safe wrappers over a handful of POSIX libc calls (ADR 0057).
+//
+// This is the FIRST `std/sys/*` module: it declares raw C-ABI functions via an
+// `extern "C"` block and re-exports them as safe, idiomatic Sentinel `pub fn`s.
+// User code calls the wrappers; the raw `extern`s are module-private by
+// convention (the unverified-leaf boundary lives here, ADR 0057 pillar 3).
+//
+// Phase 1 covers the VALUE-ONLY libc calls that take/return the native word
+// (`i64`): the process / user identity queries. They resolve against the
+// platform C library (libSystem on macOS, glibc on Linux) at link time via the
+// existing `cc` link — no new flags. Calls that take/return pointers or
+// buffers (`getenv`, `getentropy`, …) need the `ptr` opaque type + a cstr
+// read-back helper and are a later FFI phase.
+//
+// FFI is the public, unverified boundary: these are NOT constant-time and must
+// never be passed `secret` data (the compiler rejects a `secret` reaching an
+// `extern` argument — the FFI fence).
+
+extern "C" {
+    fn getpid() -> i64;
+    fn getppid() -> i64;
+    fn getuid() -> i64;
+    fn getgid() -> i64;
+}
+
+// The current process id (always positive).
+pub fn pid() -> i64 {
+    getpid()
+}
+
+// The parent process id (positive; the init process for an orphan).
+pub fn parent_pid() -> i64 {
+    getppid()
+}
+
+// The real user id of the calling process (>= 0; 0 is root).
+pub fn uid() -> i64 {
+    getuid()
+}
+
+// The real group id of the calling process (>= 0).
+pub fn gid() -> i64 {
+    getgid()
+}
