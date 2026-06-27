@@ -63,6 +63,15 @@ to ACCEPTED-WITH-AMENDMENTS when the MVP sub-phases land. The 4 OPEN DESIGN POIN
 are SETTLED (owner-confirmed): allow import cycles; AMEND `abi-v1` (not `abi-v2`);
 source root = the entry file's directory; `use a::b::c` = item `c` in module `a::b`.
 
+**▶ AMENDED 2026-06-28 — a module-search PATH (point 12).** The entry dir stays the
+PRIMARY source root (point 3), but `snc` now also accepts FALLBACK search dirs tried
+after it — the repeatable `--lib-path <dir>` flag (on the three build modes) and the
+`SNC_LIB_PATH` env (honored by every subcommand) — so an entry outside the library
+tree can `use std::…` (e.g. building `demos/win32/messagebox_compact.sentinel` in
+place against the repo `std/`). NOT oracle-moving (it changes only where a module's
+source is read from, not the lowered program); no `selfhost` mirror. See SETTLED
+DESIGN POINTS point 12.
+
 **▶ THE PER-UNIT BACK END (this revision).** Path A gave Sentinel the multi-file
 *surface* + semantics but compiles the whole graph as ONE object (no per-unit `.o`,
 no incremental rebuilds) — it is NOT separate compilation. This revision settles the
@@ -624,3 +633,32 @@ Realised in (2/N):
     decl, so a change there does. NOT Salsa-backed (the `--separate` path bypasses Salsa,
     like the merge path); a content hash is the analogue. ⏳ remaining coarseness: a
     graph-wide effect change still recompiles every unit (the op-id base map is global).
+
+Amended (post-1.0 ergonomics — the module-search path):
+
+12. **A module-search PATH → fallback search dirs tried after the entry dir**
+    (amends point 3; partially cashes in D8's "the root is just a directory" without
+    a manifest). Point 3 fixed the source root at the entry file's OWN directory, so
+    a `use a::b::Item` only ever reads `<entry-dir>/a/b.sentinel` — an entry OUTSIDE
+    the library tree (e.g. `demos/win32/messagebox_compact.sentinel`) therefore
+    cannot `use std::…`. The amendment keeps the entry dir as the **primary** root
+    and adds **fallback** search directories, tried strictly AFTER it (first existing
+    file wins, so a local module still shadows a library one — point 3's behavior is
+    byte-identical when no search dir is configured). Two sources, in priority order:
+    the repeatable **`--lib-path <dir>`** CLI flag (CLI order) then the **`SNC_LIB_PATH`**
+    env (split on the platform path separator — `;` on Windows, `:` on Unix). So an
+    explicit flag outranks the ambient env, and both outrank nothing. The flag is on
+    the three build modes (`build`, `build --lib`/`--shared`, `build --separate`);
+    every `snc` subcommand honors `SNC_LIB_PATH` (the env is read once at the
+    `discover_module_graph` call boundary via `lib_search_dirs`, keeping the graph
+    walk a pure function of its inputs). **NOT oracle-moving** — this changes only
+    WHICH directory a module's source is read from, never the lexed/parsed/lowered
+    program (the merged `Program` for a given resolved file set is identical
+    regardless of where the files were found), and no `selfhost` fixture uses a search
+    path — so no re-bless + no `selfhost` mirror. A `ModuleNotFound` now lists every
+    candidate tried (entry dir + each search dir), so a mis-pointed path is
+    debuggable. **STILL DEFERRED (D8):** a package/manifest system + external
+    dependency resolution + per-dependency versioning — the search path is the
+    minimal "find a library's source from elsewhere" mechanism, NOT a manifest. The
+    trust-model'd PRE-BUILT-library consumption (the next rock — SENTINEL_DESIGN2 §2 /
+    BACKLOG2 §2) builds on top of this, not in place of it.

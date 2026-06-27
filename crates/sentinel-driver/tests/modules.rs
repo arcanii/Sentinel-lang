@@ -9,7 +9,7 @@
 //! a discovered multi-module graph is reported + gated; this verifies the
 //! discovery itself — the path→file mapping and the ModuleNotFound edge.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// A fresh temp project directory (unique per test + process, so the
@@ -876,4 +876,166 @@ fn cross_module_generic_fns_over_generic_struct_compile_and_run() {
          fn main() -> i64 { let p: Pair<i64, i64> = make_pair(42, 99); fst(p) }\n",
     );
     assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
+}
+
+// ===== ADR 0037 amendment: a module-search path (`--lib-path` / `SNC_LIB_PATH`) =====
+//
+// `discover_module_graph` roots resolution at the entry file's own directory,
+// so an entry outside the library tree cannot `use std::…`. The amendment adds
+// fallback search dirs — the repeatable `--lib-path <dir>` flag and the
+// `SNC_LIB_PATH` env (path-separated) — tried AFTER the entry dir, first hit
+// wins (a local module shadows a library one). These drive the real `snc`
+// binary on temp projects where the lib lives in a SEPARATE dir from the entry.
+
+/// Build `entry` with zero or more `--lib-path <dir>` flags (output next to the
+/// entry); return (success, stderr).
+fn build_with_lib_paths(entry: &Path, lib_paths: &[&Path]) -> (bool, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_snc"));
+    cmd.arg("build").arg(entry).arg("-o").arg(entry.with_extension(""));
+    for lp in lib_paths {
+        cmd.arg("--lib-path").arg(lp);
+    }
+    let out = cmd.output().expect("run snc");
+    (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// Run the binary built from `entry` and return its exit code.
+fn run_built(entry: &Path) -> i32 {
+    let exe = entry.with_extension("");
+    let run = Command::new(&exe).output().expect("run compiled binary");
+    run.status.code().expect("process exited normally")
+}
+
+#[test]
+fn lib_path_resolves_module_outside_entry_dir() {
+    // The payoff: the lib lives in a DIFFERENT directory than the entry, so the
+    // entry-dir-only rule can't find it; `--lib-path <libdir>` does.
+    // add(2, 3) -> exit 5.
+    let entrydir = temp_project("libpath_entry");
+    let libdir = temp_project("libpath_lib");
+    write(libdir.join("util.sentinel"), "pub fn add(a: i64, b: i64) -> i64 { a + b }\n");
+    write(entrydir.join("main.sentinel"), "use util::add;\nfn main() -> i64 { add(2, 3) }\n");
+    let entry = entrydir.join("main.sentinel");
+    let (ok, stderr) = build_with_lib_paths(&entry, &[libdir.as_path()]);
+    assert!(ok, "expected `--lib-path` to resolve the out-of-tree module; stderr:\n{stderr}");
+    assert_eq!(run_built(&entry), 5);
+}
+
+#[test]
+fn snc_lib_path_env_resolves_module() {
+    // The env counterpart: `SNC_LIB_PATH=<libdir>` resolves the same out-of-tree
+    // module with no CLI flag. add(10, 5) -> exit 15.
+    let entrydir = temp_project("envpath_entry");
+    let libdir = temp_project("envpath_lib");
+    write(libdir.join("util.sentinel"), "pub fn add(a: i64, b: i64) -> i64 { a + b }\n");
+    write(entrydir.join("main.sentinel"), "use util::add;\nfn main() -> i64 { add(10, 5) }\n");
+    let entry = entrydir.join("main.sentinel");
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg(&entry)
+        .arg("-o")
+        .arg(entry.with_extension(""))
+        .env("SNC_LIB_PATH", &libdir)
+        .output()
+        .expect("run snc");
+    assert!(
+        out.status.success(),
+        "expected `SNC_LIB_PATH` to resolve the out-of-tree module; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(run_built(&entry), 15);
+}
+
+#[test]
+fn entry_dir_shadows_lib_path() {
+    // Precedence: the entry's OWN directory is tried first, so a local `util`
+    // shadows the lib `util`. Local `combine(10, 3) = 7`; the lib's would give
+    // 13 — exit 7 proves the entry dir won.
+    let entrydir = temp_project("shadow_entry");
+    let libdir = temp_project("shadow_lib");
+    write(libdir.join("util.sentinel"), "pub fn combine(a: i64, b: i64) -> i64 { a + b }\n");
+    write(entrydir.join("util.sentinel"), "pub fn combine(a: i64, b: i64) -> i64 { a - b }\n");
+    write(entrydir.join("main.sentinel"), "use util::combine;\nfn main() -> i64 { combine(10, 3) }\n");
+    let entry = entrydir.join("main.sentinel");
+    let (ok, stderr) = build_with_lib_paths(&entry, &[libdir.as_path()]);
+    assert!(ok, "expected a successful build; stderr:\n{stderr}");
+    assert_eq!(run_built(&entry), 7, "the entry-dir module must shadow the --lib-path one");
+}
+
+#[test]
+fn lib_path_flag_outranks_env() {
+    // Precedence among fallbacks: an explicit `--lib-path` is tried before
+    // `SNC_LIB_PATH`. Flag dir's `val() = 1`; env dir's `val() = 2` — exit 1
+    // proves the flag won.
+    let entrydir = temp_project("rank_entry");
+    let flagdir = temp_project("rank_flag");
+    let envdir = temp_project("rank_env");
+    write(flagdir.join("util.sentinel"), "pub fn val() -> i64 { 1 }\n");
+    write(envdir.join("util.sentinel"), "pub fn val() -> i64 { 2 }\n");
+    write(entrydir.join("main.sentinel"), "use util::val;\nfn main() -> i64 { val() }\n");
+    let entry = entrydir.join("main.sentinel");
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg(&entry)
+        .arg("-o")
+        .arg(entry.with_extension(""))
+        .arg("--lib-path")
+        .arg(&flagdir)
+        .env("SNC_LIB_PATH", &envdir)
+        .output()
+        .expect("run snc");
+    assert!(
+        out.status.success(),
+        "expected a successful build; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(run_built(&entry), 1, "`--lib-path` must outrank `SNC_LIB_PATH`");
+}
+
+#[test]
+fn missing_module_lists_searched_dirs() {
+    // A `use` no search dir satisfies is still ModuleNotFound — and the message
+    // now lists every location tried (entry dir + the `--lib-path` candidate),
+    // so a mis-pointed search path is debuggable.
+    let entrydir = temp_project("miss_entry");
+    let libdir = temp_project("miss_lib"); // exists, but lacks the module
+    write(entrydir.join("main.sentinel"), "use absent::thing;\nfn main() -> i64 { 0 }\n");
+    let entry = entrydir.join("main.sentinel");
+    let (ok, stderr) = build_with_lib_paths(&entry, &[libdir.as_path()]);
+    assert!(!ok, "a missing module should fail the build; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("module `absent` not found"),
+        "expected a ModuleNotFound naming `absent`; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("tried") && stderr.contains("miss_lib"),
+        "expected the error to list the searched --lib-path dir; stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn lib_path_separate_resolves_module_outside_entry_dir() {
+    // `--lib-path` threads through the `--separate` back end too (the per-unit
+    // separate-compilation path), not just the merge path. add(20, 22) -> 42.
+    let entrydir = temp_project("sep_libpath_entry");
+    let libdir = temp_project("sep_libpath_lib");
+    write(libdir.join("util.sentinel"), "pub fn add(a: i64, b: i64) -> i64 { a + b }\n");
+    write(entrydir.join("main.sentinel"), "use util::add;\nfn main() -> i64 { add(20, 22) }\n");
+    let entry = entrydir.join("main.sentinel");
+    let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg(&entry)
+        .arg("--separate")
+        .arg("-o")
+        .arg(entry.with_extension(""))
+        .arg("--lib-path")
+        .arg(&libdir)
+        .output()
+        .expect("run snc");
+    assert!(
+        out.status.success(),
+        "expected `--separate --lib-path` to resolve the out-of-tree module; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(run_built(&entry), 42);
 }

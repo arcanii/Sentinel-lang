@@ -51,14 +51,42 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-27 — Windows host + FFI libraries; supersedes the examples-as-tests pointer below)
+### ▶ RESUME HERE (2026-06-28 — module-search path; then Windows host + FFI libraries, 2026-06-27)
 
-All on `main`, HEAD **`b882f55`**, **NEVER pushed**. Verified on **Windows only**
-(see the macOS caveat); the dev box is `x86_64-pc-windows-msvc` with a from-source
-LLVM 18.1.8 at `G:\llvm-18` (`LLVM_SYS_180_PREFIX` set), no `just` — see the
-`build-environment-windows` auto-memory for the build commands + gotchas.
+All on `main`, **NEVER pushed**. Verified on **Windows only** (see the macOS caveat);
+the dev box is `x86_64-pc-windows-msvc` with a from-source LLVM 18.1.8 at `G:\llvm-18`
+(`LLVM_SYS_180_PREFIX` set), no `just` — see the `build-environment-windows` auto-memory
+for the build/test commands (incl. the `vcvars64.bat` recipe for the link-touching tests)
++ gotchas.
 
-**Done this session:**
+**Done 2026-06-28 — the module-search path (HANDOVER §0 NEXT item 1, ADR 0037 point 12):**
+
+- **`--lib-path <dir>` (repeatable) + `SNC_LIB_PATH`** now add fallback module-search
+  dirs, tried AFTER the entry file's own directory (first hit wins, so a local module
+  still shadows a library one). `discover_module_graph` takes an explicit `search_dirs`
+  slice; a `lib_search_dirs(cli)` helper unions the CLI flags (priority) with the env
+  (split on the platform separator) at each call boundary. The flag is on all three
+  build modes (`build`, `build --lib`/`--shared`, `build --separate` — the last routed
+  through a new `run_build_separate_cli` arg-loop); **every** subcommand honors
+  `SNC_LIB_PATH` (incl. `llvm`/`merge`). `ModuleNotFound` now lists every dir tried.
+  **PROVEN:** `demos/win32/messagebox_compact.sentinel` builds **in place** via
+  `snc build … --lib-path .` (no more copy-to-root) — resolves the real
+  `std::sys::win32`→`std::c` FFI graph through the search path, CT-checks, self-links
+  `user32`, links with MSVC → a working `.exe`. NOT oracle-moving (changes only *where*
+  a module's source is read, not the lowered program; no `selfhost` fixture uses a
+  search path) → no re-bless, no `selfhost` mirror. 6 new `tests/modules.rs` tests
+  (resolve out-of-tree via flag + env; entry-dir shadows; flag outranks env; tried-dirs
+  in the error; `--separate` too). Four-check on the driver crate green on Windows
+  (build · `cargo test` · doctests [vacuous — binary crate] · clippy `-D warnings`);
+  pre-existing Windows test failures unchanged (see below).
+- **macOS still BACKLOGGED** — the workspace `just check-all` + self-host differential
+  has not run (argued not oracle-moving, but confirm on the differential). Also note:
+  on Windows, `tests/modules.rs`'s 3 `separate_*_linkonce_*` tests fail at MSVC
+  `link.exe` and `separate_same_named_*` needs `nm` (absent) — **pre-existing**
+  (identical on clean HEAD, the `--separate` generic-dedup path was only ever run on
+  macOS), not from this change.
+
+**Done 2026-06-27:**
 
 - **Windows host support (ADR 0060, PROPOSED→implemented).** **P1**:
   `sentinel-runtime` compiles on Windows (cfg the one POSIX `OsStrExt` path).
@@ -85,16 +113,9 @@ LLVM 18.1.8 at `G:\llvm-18` (`LLVM_SYS_180_PREFIX` set), no `just` — see the
   `ast`/`lex`-dump change; no `selfhost` fixture uses `extern`), so no `selfhost`
   mirror — but the differential should confirm it.
 
-**▶ NEXT (the owner's stated direction — both ADR-first):**
+**▶ NEXT (the owner's stated direction — ADR-first):**
 
-1. **A module-search path for `snc`.** `discover_module_graph`
-   (`crates/sentinel-driver/src/main.rs`) roots resolution at the entry file's own
-   directory (`root = entry.parent()`, ADR 0037), so a program outside the repo tree
-   can't `use std::…`. Add a configurable search path — `--lib-path <dir>` (repeatable)
-   and/or a `SNC_LIB_PATH` env — tried after the entry dir. Unblocks consuming `std/`
-   (and any library) from anywhere, e.g. building `messagebox_compact` in place.
-   Driver + resolution change; not oracle-moving. ADR 0037 amendment.
-2. **Pre-built libraries with a trust model (trusted / untrusted).** Consume a
+1. **Pre-built libraries with a trust model (trusted / untrusted).** Consume a
    *compiled* library (`snc build --lib` already emits a `.a`/`.lib` + a C header)
    instead of re-`use`-ing source, with an explicit TRUST designation tied to
    Sentinel's supply-chain thesis (SENTINEL_DESIGN2 §2 signatures · BACKLOG2 §2 ·

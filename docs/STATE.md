@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-06-27)
+## Current State (2026-06-28)
 
 > **Phase C closed at Sentinel 1.0 (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -13,6 +13,18 @@ the current state of the workspace without re-reading every commit.
 > archived to [`HISTORY.md`](HISTORY.md) (P3.2 cleanup). Sections A/B/C below
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
+
+**Latest (2026-06-28) — a module-search path (ADR 0037 point 12).** `snc` now
+resolves a `use`d module's file by trying the entry file's own directory first
+(the unchanged primary root) and then **fallback search dirs**: the repeatable
+`--lib-path <dir>` flag (on `build` / `build --lib`/`--shared` / `build --separate`)
+and the `SNC_LIB_PATH` env (path-separated, honored by every subcommand), tried in
+that priority order — so an entry OUTSIDE the library tree can `use std::…` (e.g.
+`demos/win32/messagebox_compact.sentinel` builds in place against the repo `std/`).
+First hit wins (a local module still shadows a library one); when none is configured,
+discovery is byte-identical to before. NOT oracle-moving (it changes only where a
+module's source is read, not the lowered program) → no re-bless / `selfhost` mirror.
+Windows-verified; see HANDOVER §0.
 
 - **Phase A — `sentinel-broker`** ✅ complete. Production-shape memory
   subsystem (generational arenas, bump + slab strategies, scoped budgets,

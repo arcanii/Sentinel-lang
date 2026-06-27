@@ -97,14 +97,11 @@ fn main() -> ExitCode {
             run_build_cli(rest)
         }
         // Phase D.6 / ADR 0037 (a): TRUE per-unit separate compilation
-        // (opt-in until it reaches Path-A parity).
-        [_, cmd, path, sep] if cmd == "build" && sep == "--separate" => {
-            run_build_separate(path, None)
-        }
-        [_, cmd, path, sep, o, output]
-            if cmd == "build" && sep == "--separate" && o == "-o" =>
-        {
-            run_build_separate(path, Some(output))
+        // (opt-in until it reaches Path-A parity). Routed through an arg-loop
+        // so `-o` and the repeatable `--lib-path` (ADR 0037 amendment) are
+        // order-free.
+        [_, cmd, rest @ ..] if cmd == "build" && rest.iter().any(|a| a == "--separate") => {
+            run_build_separate_cli(rest)
         }
         // ADR 0059: `snc build --lib <file> [-o <out.a>] [--emit-header <h.h>]`
         // — compile to a C-ABI static library (no `main`) so other languages
@@ -138,14 +135,18 @@ fn print_usage() {
     eprintln!("    snc lex <file>                   lex and dump the token stream (self-host oracle)");
     eprintln!("    snc ast <file>                   parse and dump the canonical AST (self-host oracle)");
     eprintln!("    snc parse <file>                 lex, parse, and pretty-print the program");
-    eprintln!("    snc build <file> [-o <output>] [--link <lib>]...");
+    eprintln!("    snc build <file> [-o <output>] [--link <lib>]... [--lib-path <dir>]...");
     eprintln!("                                     compile + link to an executable (--link adds a");
     eprintln!("                                     native library to the link, e.g. user32)");
-    eprintln!("    snc build --lib <file> [-o <lib.a>] [--emit-header <h.h>]");
+    eprintln!("    snc build --lib <file> [-o <lib.a>] [--emit-header <h.h>] [--lib-path <dir>]...");
     eprintln!("                                     compile to a C-ABI static library (ADR 0059)");
-    eprintln!("    snc build --shared <file> [-o <lib.dylib>] [--emit-header <h.h>]");
+    eprintln!("    snc build --shared <file> [-o <lib.dylib>] [--emit-header <h.h>] [--lib-path <dir>]...");
     eprintln!("                                     compile to a C-ABI shared library (dlopen/ctypes)");
     eprintln!("    snc help                         show this message");
+    eprintln!();
+    eprintln!("--lib-path <dir> (repeatable) and SNC_LIB_PATH (path-separated) add module-search");
+    eprintln!("directories tried after the entry file's own directory, so an entry outside the");
+    eprintln!("library tree can `use std::…` (ADR 0037). All `snc` subcommands honor SNC_LIB_PATH.");
     eprintln!();
     eprintln!("programs are one or more `fn` definitions; `main` is the entry point.");
 }
@@ -512,7 +513,10 @@ fn run_llvm(path: &str) -> ExitCode {
     // program, mirroring `run_build`'s D.6 discovery + `merge_modules`. The single-file
     // `snc llvm` (below) is unchanged; this is what lets the oracle emit the full
     // self-hosting compiler's `.ll` (the multi-module stages: types/codegen/…).
-    match discover_module_graph(Path::new(path)) {
+    // `snc llvm` honors `SNC_LIB_PATH` (env-only; no `--lib-path` flag on the
+    // oracle/bootstrap surfaces) so the self-host stages resolve `std` from
+    // outside the entry's tree if pointed there.
+    match discover_module_graph(Path::new(path), &lib_search_dirs(&[])) {
         Ok(modules) if !modules.is_empty() => {
             let units: Vec<sentinel_resolve::ModuleUnit> = modules
                 .iter()
@@ -614,7 +618,7 @@ fn run_llvm_merged(merged: Program) -> ExitCode {
 /// *same* merged source and must emit byte-identical `.ll`. A single-file
 /// program (no `use`) is parsed and re-printed directly (its own merge).
 fn run_merge(path: &str) -> ExitCode {
-    let merged: Program = match discover_module_graph(Path::new(path)) {
+    let merged: Program = match discover_module_graph(Path::new(path), &lib_search_dirs(&[])) {
         Ok(modules) if !modules.is_empty() => {
             let units: Vec<sentinel_resolve::ModuleUnit> = modules
                 .iter()
@@ -691,6 +695,35 @@ struct DiscoveredModule {
     source: String,
 }
 
+/// The candidate file for module `a::b` under directory `base`:
+/// `<base>/a/b.sentinel` (the file-as-module path→file mapping, ADR 0037).
+fn module_file_in(base: &Path, module: &[String]) -> PathBuf {
+    let mut file = base.to_path_buf();
+    for seg in module {
+        file.push(seg);
+    }
+    file.set_extension("sentinel");
+    file
+}
+
+/// The extra module-search directories, in priority order: the explicit
+/// `--lib-path <dir>` flags (CLI order) followed by the `SNC_LIB_PATH`
+/// environment entries (split on the platform path separator — `;` on
+/// Windows, `:` on Unix). [`discover_module_graph`] tries these **after**
+/// the entry file's own directory (ADR 0037 amendment: the entry dir stays
+/// the primary source root), so an explicit flag outranks the ambient env,
+/// and both outrank nothing — when neither is set this is empty and
+/// discovery is byte-identical to the original single-root behavior. Reading
+/// the env here (rather than inside `discover_module_graph`) keeps the graph
+/// walk a pure function of its inputs.
+fn lib_search_dirs(cli_lib_paths: &[String]) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = cli_lib_paths.iter().map(PathBuf::from).collect();
+    if let Some(env) = std::env::var_os("SNC_LIB_PATH") {
+        dirs.extend(std::env::split_paths(&env));
+    }
+    dirs
+}
+
 /// Phase D.6 (1/N) / ADR 0037 D3: discover the module graph reachable
 /// from `entry` by following `use` edges. File-as-module: a `use
 /// a::b::Item;` references module `a::b`, whose file is
@@ -703,10 +736,20 @@ struct DiscoveredModule {
 /// `use`), or a human-readable error when a `use`d module's file is
 /// missing (ModuleNotFound).
 ///
+/// A module file is resolved by trying the entry's own directory first,
+/// then each of `search_dirs` in order (the ADR 0037 amendment: the
+/// `--lib-path` / `SNC_LIB_PATH` fallbacks from [`lib_search_dirs`]) — the
+/// first existing file wins, so a local module shadows a library one. An
+/// empty `search_dirs` reproduces the original entry-dir-only behavior
+/// exactly.
+///
 /// Parsing the entry is lenient: a parse error there yields "no modules"
 /// so the main Salsa pipeline renders the proper diagnostic rather than
 /// this discovery pass duplicating it.
-fn discover_module_graph(entry: &Path) -> Result<Vec<DiscoveredModule>, String> {
+fn discover_module_graph(
+    entry: &Path,
+    search_dirs: &[PathBuf],
+) -> Result<Vec<DiscoveredModule>, String> {
     let root = entry.parent().unwrap_or_else(|| Path::new("."));
     let entry_stem = entry
         .file_stem()
@@ -743,18 +786,28 @@ fn discover_module_graph(entry: &Path) -> Result<Vec<DiscoveredModule>, String> 
             if !visited.insert(module.clone()) {
                 continue; // already seen — a cycle is fine.
             }
-            let mut file = root.to_path_buf();
-            for seg in &module {
-                file.push(seg);
-            }
-            file.set_extension("sentinel");
-            if !file.is_file() {
-                return Err(format!(
-                    "module `{}` not found (expected file `{}`)",
-                    module.join("::"),
-                    file.display()
-                ));
-            }
+            // Resolve the module's file: the entry's own directory first
+            // (ADR 0037's primary source root), then each configured search
+            // dir (`--lib-path` then `SNC_LIB_PATH`); the first existing file
+            // wins, so a local module shadows a library one.
+            let candidates: Vec<PathBuf> = std::iter::once(root.to_path_buf())
+                .chain(search_dirs.iter().cloned())
+                .map(|base| module_file_in(&base, &module))
+                .collect();
+            let file = match candidates.iter().find(|f| f.is_file()) {
+                Some(f) => f.clone(),
+                None => {
+                    let tried = candidates
+                        .iter()
+                        .map(|f| format!("`{}`", f.display()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(format!(
+                        "module `{}` not found (tried {tried})",
+                        module.join("::")
+                    ));
+                }
+            };
             let src = std::fs::read_to_string(&file)
                 .map_err(|e| format!("cannot read module `{}`: {e}", file.display()))?;
             let program = sentinel_syntax::parse(&src).map_err(|e| {
@@ -775,6 +828,7 @@ fn run_build_cli(args: &[String]) -> ExitCode {
     let mut path: Option<&str> = None;
     let mut output: Option<&str> = None;
     let mut link_libs: Vec<String> = Vec::new();
+    let mut lib_paths: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -798,6 +852,19 @@ fn run_build_cli(args: &[String]) -> ExitCode {
                     }
                 }
             }
+            // ADR 0037 amendment: a module-search dir tried after the entry's
+            // own directory, so an entry outside the repo can `use std::…`.
+            // Repeatable; outranks `SNC_LIB_PATH`.
+            "--lib-path" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => lib_paths.push(d.clone()),
+                    None => {
+                        eprintln!("snc: `--lib-path` requires a directory");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             other => {
                 if path.is_some() {
                     eprintln!("snc: unexpected argument `{other}`");
@@ -809,7 +876,7 @@ fn run_build_cli(args: &[String]) -> ExitCode {
         i += 1;
     }
     match path {
-        Some(p) => run_build(p, output, &link_libs),
+        Some(p) => run_build(p, output, &link_libs, &lib_paths),
         None => {
             eprintln!("snc: `build` requires a source file");
             ExitCode::from(2)
@@ -817,7 +884,7 @@ fn run_build_cli(args: &[String]) -> ExitCode {
     }
 }
 
-fn run_build(path: &str, output: Option<&str>, link_libs: &[String]) -> ExitCode {
+fn run_build(path: &str, output: Option<&str>, link_libs: &[String], lib_paths: &[String]) -> ExitCode {
     let src = match read_source(path) {
         Ok(s) => s,
         Err(code) => return code,
@@ -829,7 +896,7 @@ fn run_build(path: &str, output: Option<&str>, link_libs: &[String]) -> ExitCode
     // codegen + link — lands in the next D.6 (1/N) increment; until then a
     // discovered multi-module graph is reported + gated honestly (and a
     // missing `use`d file is surfaced here as ModuleNotFound).
-    match discover_module_graph(Path::new(path)) {
+    match discover_module_graph(Path::new(path), &lib_search_dirs(lib_paths)) {
         Ok(modules) if !modules.is_empty() => {
             // Multi-file (Path A): merge the graph into one `Program` —
             // qualify each module's fns + rewrite cross-module references,
@@ -1019,6 +1086,7 @@ fn run_build_lib_cli(args: &[String]) -> ExitCode {
     let mut path: Option<&str> = None;
     let mut output: Option<&str> = None;
     let mut header: Option<&str> = None;
+    let mut lib_paths: Vec<String> = Vec::new();
     let mut mode = LibMode::Static;
     let mut i = 0;
     while i < args.len() {
@@ -1036,6 +1104,14 @@ fn run_build_lib_cli(args: &[String]) -> ExitCode {
                 header = args.get(i + 1).map(|s| s.as_str());
                 i += 2;
             }
+            // ADR 0037 amendment: extra module-search dir (after the entry's
+            // own dir), so a library entry can `use std::…` from anywhere.
+            "--lib-path" => {
+                if let Some(d) = args.get(i + 1) {
+                    lib_paths.push(d.clone());
+                }
+                i += 2;
+            }
             p => {
                 if path.is_none() {
                     path = Some(p);
@@ -1045,7 +1121,7 @@ fn run_build_lib_cli(args: &[String]) -> ExitCode {
         }
     }
     match path {
-        Some(p) => run_build_lib(p, output, header, mode),
+        Some(p) => run_build_lib(p, output, header, mode, &lib_paths),
         None => {
             eprintln!("snc: `build --lib` / `--shared` needs an input file");
             ExitCode::from(2)
@@ -1064,6 +1140,7 @@ fn run_build_lib(
     output: Option<&str>,
     header: Option<&str>,
     mode: LibMode,
+    lib_paths: &[String],
 ) -> ExitCode {
     let src = match read_source(path) {
         Ok(s) => s,
@@ -1083,7 +1160,7 @@ fn run_build_lib(
     // library (no `use`) keeps the entry program unchanged. `merge_modules`
     // keeps `export "C"` names bare (A3) and clears `uses`, so the merged
     // program resolves + codegen's the export wrappers exactly as single-file.
-    let (program, is_merged) = match discover_module_graph(Path::new(path)) {
+    let (program, is_merged) = match discover_module_graph(Path::new(path), &lib_search_dirs(lib_paths)) {
         Ok(modules) if !modules.is_empty() => {
             let units: Vec<sentinel_resolve::ModuleUnit> = modules
                 .iter()
@@ -1623,6 +1700,61 @@ fn link_objects(objects: &[PathBuf], exe: &Path, link_libs: &[String]) -> Result
     link_exe(&refs, exe, link_libs)
 }
 
+/// Parse `snc build --separate <file> [-o <out>] [--lib-path <dir>]...` —
+/// flags are order-free and `--lib-path` is repeatable (ADR 0037 amendment:
+/// extra module-search dirs tried after the entry's own directory). The
+/// `--separate` token itself is consumed by the dispatcher's guard, so it is
+/// skipped here. Routes to [`run_build_separate`].
+fn run_build_separate_cli(args: &[String]) -> ExitCode {
+    let mut path: Option<&str> = None;
+    let mut output: Option<&str> = None;
+    let mut lib_paths: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            // Valueless flag (consumed by the dispatcher's guard too): the
+            // loop-tail `i += 1` advances past it — no per-arm bump (that would
+            // double-advance and skip the next token).
+            "--separate" => {}
+            "-o" => {
+                i += 1;
+                match args.get(i) {
+                    Some(o) => output = Some(o),
+                    None => {
+                        eprintln!("snc: `-o` requires an output path");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--lib-path" => {
+                i += 1;
+                match args.get(i) {
+                    Some(d) => lib_paths.push(d.clone()),
+                    None => {
+                        eprintln!("snc: `--lib-path` requires a directory");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            other => {
+                if path.is_some() {
+                    eprintln!("snc: unexpected argument `{other}`");
+                    return ExitCode::from(2);
+                }
+                path = Some(other);
+            }
+        }
+        i += 1;
+    }
+    match path {
+        Some(p) => run_build_separate(p, output, &lib_paths),
+        None => {
+            eprintln!("snc: `build --separate` requires a source file");
+            ExitCode::from(2)
+        }
+    }
+}
+
 /// Phase D.6 / ADR 0037 (a): TRUE per-unit separate compilation —
 /// `snc build --separate <entry>`. Discovers the module graph, then
 /// ADR 0037 (3/N): a content fingerprint for one separately-compiled unit —
@@ -1691,8 +1823,8 @@ fn unit_fingerprint(
 /// unchanged reuses its cached object (the per-unit pipeline + codegen are
 /// skipped, printing `fresh <module>`) — the per-unit `.o` is reproducible
 /// (see `repro.rs`), so reusing it is sound.
-fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
-    let modules = match discover_module_graph(Path::new(path)) {
+fn run_build_separate(path: &str, output: Option<&str>, lib_paths: &[String]) -> ExitCode {
+    let modules = match discover_module_graph(Path::new(path), &lib_search_dirs(lib_paths)) {
         Ok(m) => m,
         Err(msg) => {
             eprintln!("snc: {msg}");
@@ -1702,7 +1834,7 @@ fn run_build_separate(path: &str, output: Option<&str>) -> ExitCode {
     if modules.is_empty() {
         // Single-file: nothing to compile separately. (`--separate` does not
         // thread `--link` yet; ADR 0060 follow-up.)
-        return run_build(path, output, &[]);
+        return run_build(path, output, &[], lib_paths);
     }
 
     // Visibility / existence gate (ModuleNotFound / UnknownImport /

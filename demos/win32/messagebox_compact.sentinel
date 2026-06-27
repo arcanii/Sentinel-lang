@@ -5,14 +5,14 @@
 // (which in turn uses std::c) — so the whole program is a few lines. user32
 // self-links via the library's `extern "C" link("user32")`, so NO `--link`.
 //
-// BUILD CAVEAT: Sentinel resolves `use a::b::Item` to `<entry-dir>/a/b.sentinel`
-// — the source root is the entry file's OWN directory (ADR 0037) — and std/ is
-// not adjacent to demos/. So, unlike the standalone messagebox.sentinel, this
-// file only builds from a location where `std/` is reachable. Simplest is the
-// repo root: copy it there (so std/ sits beside it), then build (Windows only):
-//   copy demos\win32\messagebox_compact.sentinel messagebox_compact.sentinel
-//   snc build messagebox_compact.sentinel -o %TEMP%\messagebox_compact.exe
+// BUILD: this file `use`s the std::sys::win32 library, which lives under the repo
+// `std/` tree — not adjacent to demos/. Point snc at the library root with
+// `--lib-path` (ADR 0037 point 12: fallback module-search dirs tried after the
+// entry file's own dir), so it builds IN PLACE — no copy needed. From the repo
+// root (Windows):
+//   snc build demos\win32\messagebox_compact.sentinel -o %TEMP%\messagebox_compact.exe --lib-path .
 //   %TEMP%\messagebox_compact.exe   (prints screen size, beeps, pops a box)
+// (Or `set SNC_LIB_PATH=.` once and drop the flag — every snc subcommand honors it.)
 
 use std::sys::win32::screen_width;
 use std::sys::win32::screen_height;
