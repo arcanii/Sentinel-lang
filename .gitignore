@@ -28,3 +28,7 @@
 
 # Generated documentation builds
 /book/
+
+# BMad Method install + Claude Code skills (local tooling, not versioned)
+/_bmad/
+/.claude/
