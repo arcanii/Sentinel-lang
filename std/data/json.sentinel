@@ -12,11 +12,13 @@
 // handle the `\" \\ \n \t` escapes. This is a PUBLIC (not constant-time) library —
 // it branches on byte values, so it must not parse `secret` data.
 use std::text::str::int_to_str;
+use std::text::str::f64_to_str;
 
 pub enum Json {
     Null,
     Bool(i64),          // 0 = false, 1 = true
-    Num(i64),
+    Num(i64),           // an integer number (no '.' / exponent)
+    Float(f64),         // ADR 0058: a non-integer number (has '.' or an exponent)
     Str([u8]),
     ArrNil,
     ArrCons(Json, Json),        // (element, rest-of-array)
@@ -78,30 +80,69 @@ fn parse_string(s: &[u8], c: &mut PC) -> [u8] {
     vec_to_array(out)
 }
 
-// Parse an integer (optional '-'); a fractional/exponent part, if present, is skipped.
+// Parse a JSON number. An integer (only digits + optional '-') yields `Num`;
+// a number with a fractional part ('.') or an exponent ('e'/'E') yields a
+// `Float` (ADR 0058). The integer part is accumulated as BOTH `i64` (for the
+// integer case) and `f64` (for the float case) in one scan over the digits.
 fn parse_number(s: &[u8], c: &mut PC) -> Json {
     let n: i64 = len(*s);
     let mut neg: bool = false;
     if peek(s, &(*c)) == 45 { neg = true; (*c).pos = (*c).pos + 1; 0 } else { 0 };
     let mut acc: i64 = 0;
+    let mut fval: f64 = 0.0;
     let mut go: bool = true;
     while (*c).pos < n && go {
         let ch: i64 = u8_to_i64((*s)[(*c).pos]);
-        if ch >= 48 && ch <= 57 { acc = acc * 10 + (ch - 48); (*c).pos = (*c).pos + 1; 0 } else { go = false; 0 };
+        if ch >= 48 && ch <= 57 {
+            acc = acc * 10 + (ch - 48);
+            fval = fval * 10.0 + ((ch - 48) as f64);
+            (*c).pos = (*c).pos + 1;
+            0
+        } else { go = false; 0 };
     }
-    // skip a fractional part ('.', digits) — no float type, so it's dropped.
-    let mut go2: bool = true;
+    let mut is_float: bool = false;
+    // Fractional part ('.', digits) — accumulates into `fval`.
     if peek(s, &(*c)) == 46 {
+        is_float = true;
         (*c).pos = (*c).pos + 1;
+        let mut scale: f64 = 1.0;
+        let mut go2: bool = true;
         while (*c).pos < n && go2 {
             let ch2: i64 = u8_to_i64((*s)[(*c).pos]);
-            if ch2 >= 48 && ch2 <= 57 { (*c).pos = (*c).pos + 1; 0 } else { go2 = false; 0 };
+            if ch2 >= 48 && ch2 <= 57 {
+                scale = scale / 10.0;
+                fval = fval + ((ch2 - 48) as f64) * scale;
+                (*c).pos = (*c).pos + 1;
+                0
+            } else { go2 = false; 0 };
         }
         0
-    } else {
+    } else { 0 };
+    // Exponent part ('e'/'E', optional sign, digits) — scales `fval`.
+    if peek(s, &(*c)) == 101 || peek(s, &(*c)) == 69 {
+        is_float = true;
+        (*c).pos = (*c).pos + 1;
+        let mut eneg: bool = false;
+        let pk: i64 = peek(s, &(*c));
+        if pk == 45 { eneg = true; (*c).pos = (*c).pos + 1; 0 } else { if pk == 43 { (*c).pos = (*c).pos + 1; 0 } else { 0 } };
+        let mut exp: i64 = 0;
+        let mut go3: bool = true;
+        while (*c).pos < n && go3 {
+            let ch3: i64 = u8_to_i64((*s)[(*c).pos]);
+            if ch3 >= 48 && ch3 <= 57 { exp = exp * 10 + (ch3 - 48); (*c).pos = (*c).pos + 1; 0 } else { go3 = false; 0 };
+        }
+        let mut e: i64 = 0;
+        while e < exp {
+            if eneg { fval = fval / 10.0; 0 } else { fval = fval * 10.0; 0 };
+            e = e + 1;
+        }
         0
-    };
-    if neg { Json::Num(0 - acc) } else { Json::Num(acc) }
+    } else { 0 };
+    if is_float {
+        if neg { Json::Float(0.0 - fval) } else { Json::Float(fval) }
+    } else {
+        if neg { Json::Num(0 - acc) } else { Json::Num(acc) }
+    }
 }
 
 fn parse_array_elems(s: &[u8], c: &mut PC) -> Json {
@@ -244,6 +285,7 @@ fn ser_arr_rest(out: &mut Vec<u8>, j: Json) -> i64 {
         Json::Null => 0,
         Json::Bool(b) => 0,
         Json::Num(v) => 0,
+        Json::Float(v) => 0,
         Json::Str(s) => 0,
         Json::ObjNil => 0,
         Json::ObjCons(k, v, r) => 0,
@@ -264,6 +306,7 @@ fn ser_obj_rest(out: &mut Vec<u8>, j: Json) -> i64 {
         Json::Null => 0,
         Json::Bool(b) => 0,
         Json::Num(v) => 0,
+        Json::Float(v) => 0,
         Json::Str(s) => 0,
         Json::ArrNil => 0,
         Json::ArrCons(a, b) => 0,
@@ -282,6 +325,10 @@ fn ser(out: &mut Vec<u8>, j: Json) -> i64 {
         },
         Json::Num(v) => {
             append_bytes(out, int_to_str(v));
+            0
+        },
+        Json::Float(v) => {
+            append_bytes(out, f64_to_str(v));
             0
         },
         Json::Str(s) => {

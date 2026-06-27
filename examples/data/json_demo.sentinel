@@ -30,6 +30,7 @@ fn num_of(doc: [u8]) -> i64 {
     let v: Json = json_parse(&doc);
     match v {
         Json::Num(n) => n,
+        Json::Float(f) => f as i64,    // a float IS a number — its integer part
         Json::Null => 0 - 999,
         Json::Bool(b) => 0 - 999,
         Json::Str(s) => 0 - 999,
@@ -71,8 +72,16 @@ fn main() -> i64 {
     bad = bad + rt("\"a\\\"b\"");      // JSON string  "a\"b"  round-trips
     bad = bad + rt("\"c\\\\d\"");      // JSON string  "c\\d"  round-trips
 
-    // ---- fractional part is dropped (no float type) ----
-    bad = bad + rt2("3.75", "3");
+    // ---- float numbers now round-trip (ADR 0058; was a dropped fraction) ----
+    bad = bad + rt2("3.75", "3.75");
+    bad = bad + rt2("-2.5", "-2.5");
+    bad = bad + rt2("0.625", "0.625");
+    bad = bad + rt2("1.5e2", "150.0");        // exponent -> canonical decimal
+    bad = bad + rt2("3.14159", "3.14159");
+    bad = bad + rt2("[1,2.5,3]", "[1,2.5,3]"); // ints and floats coexist in an array
+    bad = bad + rt2("{\"pi\":3.14159,\"n\":42}", "{\"pi\":3.14159,\"n\":42}");
+    // an integer (no '.'/exponent) stays an integer (Num, not Float)
+    bad = bad + rt2("100", "100");
 
     // ---- parse then match ----
     bad = bad + (if num_of("42") == 42 { 0 } else { 1 });
