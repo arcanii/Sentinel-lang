@@ -29,7 +29,12 @@ Current band status (see STATE.md / the commit log for detail):
   conformance suite (P2.2) + the `lookup_var` loud fallback guard (P2.3) + the
   front-end panic-freedom fuzzer, which found + fixed two real bugs (P2.5).
   **REMAINING: P2.4 (Linux CI)** — needs CI infrastructure; cannot be validated
-  on the macOS dev box.
+  on the macOS dev box. **Platform-portability root cause now scoped** in
+  [ADR 0060](decisions/0060-windows-host-support.md) (PROPOSED): a Windows bring-up
+  (2026-06-27) proved the lock-in is the runtime's POSIX APIs + the driver's
+  `cc`/`libtool` link path — *not* the analysis/codegen, which build and pass 929
+  unit tests on Windows. 0060 proposes a `HostToolchain` abstraction covering
+  Windows **and** the P2.4 Linux lane.
 - **P3 — P3.1–P3.4 DONE.** PROGRAMMING_GUIDE.md rewritten to current Sentinel
   (P3.1); the STATE.md chronology split out to `HISTORY.md` (P3.2); DESIGN2 made
   the design of record with a superseded banner on DESIGN.md (P3.3); a
