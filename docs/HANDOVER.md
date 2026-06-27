@@ -468,8 +468,14 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     + a consuming `match` builds/frees cleanly (the self-host AST pattern); numbers are `i64`
     (no float type — a fractional part is parsed + dropped); string-lits support `\"`. **So
     the tractable data&text trio the owner asked for is DONE: strings + map + JSON.** The
-    REMAINING items from the owner's big list are the LANGUAGE-GAP rocks (both ADR-first):
-    a **float type** (the only thing blocking "math functions" beyond integers) and the
+    REMAINING items from the owner's big list are the LANGUAGE-GAP rocks (both now have a
+    DESIGN ADR — PROPOSED/design-only): a **float type** (**ADR 0058** — an IEEE-754 `f64`,
+    PUBLIC-ONLY: ⚠ NO `secret f64` because float ops aren't constant-time [subnormals/div/NaN
+    microcode], so floats are a disjoint PUBLIC domain and the CT proof is unweakened —
+    contrast `u128`, which IS secret-able; `Type::F64`→LLVM `double`, float literals,
+    `fadd`/`fcmp`/`sitofp`, `sqrt` via the intrinsic, transcendentals + float↔string deferred
+    to a `std/math/float` lib; snc-side first like u128, no FnId shift; the only thing
+    blocking "math functions" beyond integers) and the
     **FFI/bindings** story — a C-ABI EXPORT for Python/C/C++/Rust calling INTO Sentinel, and a
     general `extern "C"` IMPORT for the native macOS/Win32/Linux bindings (today only ~31
     hardcoded runtime builtins). (Crypto from the list was already comprehensive.) **The FFI
