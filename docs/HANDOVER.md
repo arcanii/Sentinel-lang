@@ -49,8 +49,65 @@ reference as you work through the milestones.
   rejected. Added the `while` conformance test (`c52_secret_in_while`) and made
   the `SecretBranch` diagnostic name the actual construct.
 
-**▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY).
-CURRENT STATE: HEAD `048bfac`, 1636 tests, four-check green, NEVER pushed.**
+---
+
+### ▶ RESUME HERE (2026-06-27 — Windows host + FFI libraries; supersedes the examples-as-tests pointer below)
+
+All on `main`, HEAD **`b882f55`**, **NEVER pushed**. Verified on **Windows only**
+(see the macOS caveat); the dev box is `x86_64-pc-windows-msvc` with a from-source
+LLVM 18.1.8 at `G:\llvm-18` (`LLVM_SYS_180_PREFIX` set), no `just` — see the
+`build-environment-windows` auto-memory for the build commands + gotchas.
+
+**Done this session:**
+
+- **Windows host support (ADR 0060, PROPOSED→implemented).** **P1**:
+  `sentinel-runtime` compiles on Windows (cfg the one POSIX `OsStrExt` path).
+  **P2**: a `HostToolchain` link backend replaces the macOS-hardcoded
+  `cc`/`libtool`/`.a` with host dispatch — Windows `link.exe` + `lib.exe` + the
+  runtime's native libs (`ws2_32`/`userenv`/`dbghelp`/… + `/defaultlib:msvcrt`);
+  Linux `cc`/`ar` wired (unvalidated). `snc build` / `--lib` produce working
+  `.exe`/`.lib` on Windows. The whole workspace builds + the 929 analysis-pipeline
+  unit tests pass on Windows.
+- **FFI library ergonomics (ADR 0057 A8/A9).** `snc build --link <lib>` threads an
+  extra native lib into the link; **`extern "C" link("user32") { … }`** self-links,
+  so a binding module declares its own native libs and consumers need no `--link`.
+- **std reorg + first binding library.** `std::c` (portable C-string helpers
+  `cstr`/`cstr_len`/`cstr_read`); **`std::sys::win32`** (user32: `message_box` /
+  `screen_width|height` / `beep`, self-linking `user32`); `demos/win32/` (standalone
+  `messagebox` + library-using `messagebox_compact`). PROVEN end-to-end — a Sentinel
+  program pops a real Win32 message box and reads the live screen size (2560×1440).
+- **Docs.** REVIEW_ACTION_PLAN P3.3/P3.4 + the P3.6 diagnostics audit
+  (`docs/diagnostics-audit.md`); `docs/project-context.md` added + imported by a root
+  `CLAUDE.md`.
+- **macOS NOT verified — BACKLOGGED.** Everything above is Windows-validated only; the
+  macOS `just check-all` (workspace nextest · clippy --all-targets · doctests) +
+  self-host parity has not run. Argued **not oracle-moving** (no emitted-IR or
+  `ast`/`lex`-dump change; no `selfhost` fixture uses `extern`), so no `selfhost`
+  mirror — but the differential should confirm it.
+
+**▶ NEXT (the owner's stated direction — both ADR-first):**
+
+1. **A module-search path for `snc`.** `discover_module_graph`
+   (`crates/sentinel-driver/src/main.rs`) roots resolution at the entry file's own
+   directory (`root = entry.parent()`, ADR 0037), so a program outside the repo tree
+   can't `use std::…`. Add a configurable search path — `--lib-path <dir>` (repeatable)
+   and/or a `SNC_LIB_PATH` env — tried after the entry dir. Unblocks consuming `std/`
+   (and any library) from anywhere, e.g. building `messagebox_compact` in place.
+   Driver + resolution change; not oracle-moving. ADR 0037 amendment.
+2. **Pre-built libraries with a trust model (trusted / untrusted).** Consume a
+   *compiled* library (`snc build --lib` already emits a `.a`/`.lib` + a C header)
+   instead of re-`use`-ing source, with an explicit TRUST designation tied to
+   Sentinel's supply-chain thesis (SENTINEL_DESIGN2 §2 signatures · BACKLOG2 §2 ·
+   AI_TOOLING §7.1: "a dependency not in the trust manifest fails to compile"). Open
+   design: a Sentinel-shaped interface descriptor for a `.lib` (the `--emit-header` is
+   C-only — a consumer needs the Sentinel signatures + effect rows); how *untrusted*
+   is bounded (the FFI secret-fence + the effect/capability system already gate it);
+   signing/manifest for *trusted*. This is the next rock.
+
+---
+
+**▶ (Superseded) prior pointer — the examples-as-tests + core-libraries track (COMPLETE):
+HEAD was `048bfac`, 1636 tests, four-check green.**
 
 **▶ ONE-LINE STATUS: the owner's WHOLE big-list is implemented** — the comprehensive
 constant-time crypto suite, the networked `sshd`, the data & text trio, and **all three
