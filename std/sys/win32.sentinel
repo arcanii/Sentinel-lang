@@ -1,0 +1,48 @@
+// std::sys::win32 — Win32 (user32.dll) native bindings. WINDOWS ONLY.
+//
+// Wraps a handful of user32 GUI/system calls over the C-ABI FFI (ADR 0057). A
+// program that uses this module links the import library with `--link user32`
+// (ADR 0057 A8), e.g.:
+//   snc build myprog.sentinel --link user32 -o myprog.exe
+//
+// These symbols live in user32.dll and are only resolvable on Windows. The
+// granularity is deliberate (one module per native lib): because `use` pulls in
+// the whole module, keeping a module to a single import library means using any
+// function needs exactly one `--link`. `HWND`/`UINT`/`int` ride the i64 register
+// ABI; strings cross as `const char*` via `std::c::cstr`. FFI is the PUBLIC,
+// unverified boundary — `secret` cannot cross an `extern` argument (the fence).
+use std::c::cstr;
+
+extern "C" {
+    // int MessageBoxA(HWND hWnd, LPCSTR text, LPCSTR caption, UINT type);
+    fn MessageBoxA(hwnd: i64, text: ptr, caption: ptr, utype: i64) -> i64;
+    // int GetSystemMetrics(int nIndex);
+    fn GetSystemMetrics(index: i64) -> i64;
+    // BOOL MessageBeep(UINT uType);
+    fn MessageBeep(utype: i64) -> i64;
+}
+
+// Pop a modal message box (no owner window, an OK button) with `text` + a title
+// `caption`. Returns the clicked button id (IDOK = 1). BLOCKS until the user
+// responds. Link with `--link user32`.
+pub fn message_box(text: &[u8], caption: &[u8]) -> i64 {
+    let t: [u8] = cstr(text);
+    let c: [u8] = cstr(caption);
+    MessageBoxA(0, ptr_of(&t), ptr_of(&c), 0)
+}
+
+// The primary screen width in pixels (GetSystemMetrics SM_CXSCREEN).
+pub fn screen_width() -> i64 {
+    GetSystemMetrics(0)
+}
+
+// The primary screen height in pixels (GetSystemMetrics SM_CYSCREEN).
+pub fn screen_height() -> i64 {
+    GetSystemMetrics(1)
+}
+
+// Play the standard system beep (MessageBeep(0xFFFFFFFF)). Non-blocking; returns
+// nonzero on success. Passing `0 - 1` yields `0xFFFFFFFF` in the low 32 bits.
+pub fn beep() -> i64 {
+    MessageBeep(0 - 1)
+}
