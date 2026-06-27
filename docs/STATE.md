@@ -271,15 +271,19 @@ the current state of the workspace without re-reading every commit.
   runs the machine-checked compression, declassifies the digest), and a C driver
   (`examples/export/digest_driver.c`) checks it against the NIST "abc" vector and frees the
   buffer — verified constant-time crypto as a drop-in C library, the whole point of the
-  export side; `repeat_byte` shows a variable-length return. Still deferred: the
-  caller-provides-buffer convention (fixed-size, no-alloc outputs), multi-module export
-  libraries (`--lib` with `use`; the demonstrator inlines SHA-256 for now), and shared
-  objects.
+  export side; `repeat_byte` shows a variable-length return. **And `--lib` is now
+  MULTI-MODULE (ADR 0059 A8)** — it discovers the `use` graph and merges it (the executable
+  build's Path-A machinery), so a library can span modules: `examples/export/crypto_lib`
+  `use`s the REAL `std::security::sha256` + `std::security::hmac` (no inlining) and exports
+  `sha256_oneshot` + `hmac_sha256_oneshot` to C (checked against NIST SHA-256 / RFC 4231
+  HMAC vectors) — the verified-constant-time crypto suite as a drop-in C library, at scale.
+  Still deferred: the caller-provides-buffer convention (fixed-size, no-alloc outputs) and
+  shared objects (`--shared`).
   The float follow-ups also landed: the libm transcendentals (above), `f64`⇄string conversion
   (`std/text/str::parse_f64`/`f64_to_str`), and `std/data/json` now parsing/serializing
   non-integer numbers as `Float(f64)`.
 
-**1627 tests across the workspace**, four-check green (build · `cargo nextest`
+**1628 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

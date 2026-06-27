@@ -1,8 +1,8 @@
 # ADR 0059: A C-ABI export — calling Sentinel from C / C++ / Rust / Python
 
-Status: **ACCEPTED-WITH-AMENDMENTS (A1–A7).** Implemented `snc`-side: the `export "C"`
-annotation, the `--lib` static-archive build mode (no `main`), `--emit-header`, and the
-secret-fence. **Phase 1a** = the value-only ABI (`i64`/`f64`) with a constant-time
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A8).** Implemented `snc`-side: the `export "C"`
+annotation, the `--lib` static-archive build mode (no `main`, now MULTI-MODULE via `use`),
+`--emit-header`, and the secret-fence. **Phase 1a** = the value-only ABI (`i64`/`f64`) with a constant-time
 demonstrator (`ct_choose`). **Phase 1b** (A6) adds the **`&[u8]` INPUT buffer ABI** —
 a `&[u8]` export param is presented to C as a `(const uint8_t* data, int64_t len)` pair via
 a generated wrapper, demonstrated by `ct_byte_eq` (a verified constant-time byte
@@ -272,8 +272,28 @@ struct exports, and the Python/Rust generators are deferred to later phases.
   `repeat_byte(value, count) -> [u8]` (a variable-length output, so the length genuinely
   flows back from Sentinel to C). `examples/export/digest_driver.c` calls both, checks the
   digest against the NIST "abc" vector, frees each buffer with `sentinel_free_bytes`, and
-  `tests/export.rs` asserts exit 42. STILL deferred: the caller-provides-buffer convention
-  (for fixed-size outputs with no allocation), multi-module export libraries (`--lib` with
-  `use`; the demonstrator inlines SHA-256 for now), and shared objects (`--shared`). The
-  `scg` mirror stays deferred (no corpus / `selfhost` fixture uses `export` → every
-  differential + both bootstrap fixed points byte-identical).
+  `tests/export.rs` asserts exit 42. STILL deferred (until A8): multi-module export
+  libraries. STILL deferred after A8: the caller-provides-buffer convention (for fixed-size
+  outputs with no allocation) and shared objects (`--shared`). The `scg` mirror stays
+  deferred (no corpus / `selfhost` fixture uses `export` → every differential + both
+  bootstrap fixed points byte-identical).
+- **A8 — Phase 1b adds MULTI-MODULE export libraries (`--lib` with `use`).** `snc build
+  --lib` now discovers the `use` graph and `merge_modules`-es it into one `Program` before
+  resolving-WITHOUT-`main` — reusing the executable build's Path-A discovery + merge
+  (`discover_module_graph` + `merge_modules`, then `resolve_module(&merged, &[])`). No new
+  resolve/codegen logic was needed: `merge_modules` already keeps `export "C"` names BARE
+  (A3) and clears `uses`, so the merged program resolves and codegen's export-wrapper
+  post-pass (A6/A7) fire unchanged; `resolve_module` collects the merged program's
+  `is_export_c` fns into `exports` exactly as in the single-file path. A single-file `--lib`
+  (no `use`) is unchanged. The merged program still emits ONE object archived into the `.a`
+  (per-unit `--separate`-into-archive is a deeper follow-up; functionally identical output).
+  The demonstrator `examples/export/crypto_lib.sentinel` `use`s the REAL
+  `std::security::sha256` + `std::security::hmac` (no inlining) and exports
+  `sha256_oneshot` + `hmac_sha256_oneshot` — the verified-constant-time crypto suite as a
+  drop-in C library, the ADR's thesis at scale. `examples/export/crypto_driver.c` checks
+  both against canonical vectors (NIST SHA-256 "abc"; RFC 4231 HMAC-SHA256 TC1) and frees
+  each buffer; `tests/export.rs::export_multi_module_library_from_c` assembles a temp project
+  (the `std/` tree next to the entry, as the example harness does), builds the multi-module
+  `.a` + header, compiles + runs the C driver, asserts exit 42. STILL deferred: the
+  caller-provides-buffer convention and shared objects (`--shared`). The `scg` mirror stays
+  deferred (still no corpus / `selfhost` fixture uses `export`).
