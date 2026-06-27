@@ -1122,18 +1122,53 @@ fn run_build_lib(
 /// `ar`-MRI path is a follow-up).
 fn archive_lib(object: &Path, lib: &Path) -> Result<(), String> {
     let runtime = find_runtime()?;
-    let status = Command::new("libtool")
-        .arg("-static")
-        .arg("-o")
-        .arg(lib)
-        .arg(object)
-        .arg(&runtime)
-        .status()
-        .map_err(|e| format!("failed to invoke libtool: {e}"))?;
+    if cfg!(target_os = "windows") {
+        // MSVC: `lib.exe` merges objects + static libs into one archive.
+        let mut cmd = Command::new("lib.exe");
+        cmd.arg("/NOLOGO")
+            .arg(format!("/OUT:{}", lib.display()))
+            .arg(object)
+            .arg(&runtime);
+        run_linker(cmd, "lib.exe")
+    } else if cfg!(target_os = "macos") {
+        let mut cmd = Command::new("libtool");
+        cmd.arg("-static").arg("-o").arg(lib).arg(object).arg(&runtime);
+        run_linker(cmd, "libtool")
+    } else {
+        // Linux: `ar` cannot merge an archive positionally, so drive `ar -M`
+        // with an MRI script that pulls the runtime archive's members + the
+        // emitted object into one static archive.
+        archive_lib_ar_mri(object, &runtime, lib)
+    }
+}
+
+/// Linux `--lib`: merge the runtime archive + the emitted object into a single
+/// static archive via an `ar -M` MRI script (ADR 0060 Phase 2). The `cc`/exe
+/// path is already portable; only archiving differs from macOS's `libtool`.
+fn archive_lib_ar_mri(object: &Path, runtime: &Path, lib: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = Command::new("ar")
+        .arg("-M")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to invoke `ar`: {e}"))?;
+    let script = format!(
+        "create {}\naddlib {}\naddmod {}\nsave\nend\n",
+        lib.display(),
+        runtime.display(),
+        object.display(),
+    );
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "ar: failed to open stdin".to_string())?
+        .write_all(script.as_bytes())
+        .map_err(|e| format!("ar: failed to write MRI script: {e}"))?;
+    let status = child.wait().map_err(|e| format!("ar: wait failed: {e}"))?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("libtool exited with {status}"))
+        Err(format!("`ar` exited with {status}"))
     }
 }
 
@@ -1146,26 +1181,45 @@ fn archive_lib(object: &Path, lib: &Path) -> Result<(), String> {
 /// `soname` path is a follow-up, like the static `ar`-MRI path.)
 fn link_shared(object: &Path, lib: &Path) -> Result<(), String> {
     let runtime = find_runtime()?;
-    // Prefer an absolute install_name so the dylib is locatable; fall back to
-    // the given path if canonicalization fails (the file may not exist yet).
-    let install_name = std::fs::canonicalize(lib.parent().unwrap_or(Path::new(".")))
-        .ok()
-        .and_then(|dir| lib.file_name().map(|f| dir.join(f)))
-        .unwrap_or_else(|| lib.to_path_buf());
-    let status = Command::new("cc")
-        .arg("-dynamiclib")
-        .arg("-install_name")
-        .arg(&install_name)
-        .arg("-o")
-        .arg(lib)
-        .arg(object)
-        .arg(&runtime)
-        .status()
-        .map_err(|e| format!("failed to invoke cc: {e}"))?;
-    if status.success() {
-        Ok(())
+    if cfg!(target_os = "windows") {
+        // A Windows DLL requires exporting the `export "C"` symbols (a `.def`
+        // file or dllexport) — deferred to an ADR 0060 Phase 2 follow-up.
+        return Err("snc build --shared is not yet supported on Windows \
+                    (ADR 0060 follow-up: DLL symbol export); use --lib for a \
+                    static library"
+            .to_string());
+    }
+    if cfg!(target_os = "macos") {
+        // Prefer an absolute install_name so the dylib is locatable; fall back
+        // to the given path if canonicalization fails (the file may not exist
+        // yet).
+        let install_name = std::fs::canonicalize(lib.parent().unwrap_or(Path::new(".")))
+            .ok()
+            .and_then(|dir| lib.file_name().map(|f| dir.join(f)))
+            .unwrap_or_else(|| lib.to_path_buf());
+        let mut cmd = Command::new("cc");
+        cmd.arg("-dynamiclib")
+            .arg("-install_name")
+            .arg(&install_name)
+            .arg("-o")
+            .arg(lib)
+            .arg(object)
+            .arg(&runtime);
+        run_linker(cmd, "cc -dynamiclib")
     } else {
-        Err(format!("cc -dynamiclib exited with {status}"))
+        // Linux: a PIC shared object with a soname (ADR 0060 Phase 2).
+        let soname = lib
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "libsentinel.so".to_string());
+        let mut cmd = Command::new("cc");
+        cmd.arg("-shared")
+            .arg(format!("-Wl,-soname,{soname}"))
+            .arg("-o")
+            .arg(lib)
+            .arg(object)
+            .arg(&runtime);
+        run_linker(cmd, "cc -shared")
     }
 }
 
@@ -1396,21 +1450,77 @@ fn extract_exports(program: &Program) -> Result<Vec<(String, ExportedItem)>, Str
     Ok(out)
 }
 
-/// Link several object files + the runtime into one executable. The caller
-/// pre-sorts `objects` for a deterministic link.
-fn link_objects(objects: &[PathBuf], exe: &Path) -> Result<(), String> {
-    let runtime = find_runtime()?;
-    let mut cmd = Command::new("cc");
-    for obj in objects {
-        cmd.arg(obj);
-    }
-    cmd.arg(&runtime).arg("-o").arg(exe);
-    let status = cmd.status().map_err(|e| format!("failed to invoke cc: {e}"))?;
+/// ADR 0060 Phase 2: native system libraries a Rust `staticlib` pulls in that a
+/// foreign (non-cargo) link must resolve explicitly. On Unix `cc` links the
+/// platform's C/runtime deps automatically, so this is empty there; on Windows
+/// the MSVC linker needs them named — this is the set `rustc --print
+/// native-static-libs` reports for `sentinel-runtime`.
+#[allow(dead_code)]
+const WINDOWS_NATIVE_LIBS: &[&str] = &[
+    "legacy_stdio_definitions.lib",
+    "kernel32.lib",
+    "ntdll.lib",
+    "userenv.lib",
+    "ws2_32.lib",
+    "dbghelp.lib",
+];
+
+/// Run a linker/archiver `cmd`, mapping spawn + nonzero-exit failures to a
+/// `String`. `tool` names the program for diagnostics; a spawn failure on
+/// Windows points the user at the Developer-prompt requirement.
+fn run_linker(mut cmd: Command, tool: &str) -> Result<(), String> {
+    let status = cmd.status().map_err(|e| {
+        if cfg!(target_os = "windows") {
+            format!(
+                "failed to invoke `{tool}`: {e} — on Windows, run snc from a Developer \
+                 Command Prompt so the MSVC linker + libraries are on PATH"
+            )
+        } else {
+            format!("failed to invoke `{tool}`: {e}")
+        }
+    })?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("cc exited with {status}"))
+        Err(format!("`{tool}` exited with {status}"))
     }
+}
+
+/// Link object(s) + the runtime into an executable. ADR 0060 Phase 2: `cc` on
+/// Unix (macOS + Linux); the MSVC `link.exe` on Windows, where the runtime's
+/// native deps ([`WINDOWS_NATIVE_LIBS`]) are named explicitly and the MSVC
+/// environment (the `LIB` search paths) must be present — run snc from a
+/// Developer Command Prompt.
+fn link_exe(objects: &[&Path], exe: &Path) -> Result<(), String> {
+    let runtime = find_runtime()?;
+    if cfg!(target_os = "windows") {
+        let mut cmd = Command::new("link.exe");
+        cmd.arg("/NOLOGO").arg("/SUBSYSTEM:CONSOLE");
+        cmd.arg(format!("/OUT:{}", exe.display()));
+        for obj in objects {
+            cmd.arg(obj);
+        }
+        cmd.arg(&runtime);
+        for lib in WINDOWS_NATIVE_LIBS {
+            cmd.arg(lib);
+        }
+        cmd.arg("/DEFAULTLIB:msvcrt");
+        run_linker(cmd, "link.exe")
+    } else {
+        let mut cmd = Command::new("cc");
+        for obj in objects {
+            cmd.arg(obj);
+        }
+        cmd.arg(&runtime).arg("-o").arg(exe);
+        run_linker(cmd, "cc")
+    }
+}
+
+/// Link several object files + the runtime into one executable. The caller
+/// pre-sorts `objects` for a deterministic link.
+fn link_objects(objects: &[PathBuf], exe: &Path) -> Result<(), String> {
+    let refs: Vec<&Path> = objects.iter().map(PathBuf::as_path).collect();
+    link_exe(&refs, exe)
 }
 
 /// Phase D.6 / ADR 0037 (a): TRUE per-unit separate compilation —
@@ -1815,35 +1925,29 @@ fn read_source(path: &str) -> Result<String, ExitCode> {
 }
 
 fn link(object: &Path, exe: &Path) -> Result<(), String> {
-    let runtime = find_runtime()?;
-    let status = Command::new("cc")
-        .arg(object)
-        .arg(&runtime)
-        .arg("-o")
-        .arg(exe)
-        .status()
-        .map_err(|e| format!("failed to invoke cc: {e}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("cc exited with {status}"))
-    }
+    link_exe(&[object], exe)
 }
 
-/// Locate `libsentinel_runtime.a` adjacent to the snc binary. Cargo
-/// puts the snc bin and the runtime staticlib in the same target
-/// directory (`target/<profile>/`), so a single lookup off
-/// `current_exe().parent()` covers both `cargo run --bin snc` and
-/// `CARGO_BIN_EXE_snc`-driven integration tests.
+/// Locate the runtime staticlib adjacent to the snc binary. Cargo puts the snc
+/// bin and the runtime staticlib in the same target directory
+/// (`target/<profile>/`), so a single lookup off `current_exe().parent()`
+/// covers both `cargo run --bin snc` and `CARGO_BIN_EXE_snc`-driven integration
+/// tests. ADR 0060 Phase 2: the staticlib name is host-dependent —
+/// `libsentinel_runtime.a` (Unix) vs `sentinel_runtime.lib` (MSVC).
 fn find_runtime() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe(): {e}"))?;
     let dir = exe
         .parent()
         .ok_or_else(|| "current_exe has no parent directory".to_string())?;
-    let runtime = dir.join("libsentinel_runtime.a");
+    let name = if cfg!(target_os = "windows") {
+        "sentinel_runtime.lib"
+    } else {
+        "libsentinel_runtime.a"
+    };
+    let runtime = dir.join(name);
     if !runtime.exists() {
         return Err(format!(
-            "libsentinel_runtime.a not found at {} — \
+            "{name} not found at {} — \
              run `cargo build -p sentinel-runtime` to produce it",
             runtime.display()
         ));

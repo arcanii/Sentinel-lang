@@ -97,7 +97,18 @@ the build-and-run integration tests gate after Phases 1–2.
   ACCEPTED:** the full four-check + self-host parity (this change is not oracle-moving, so no
   `selfhost/` mirror).
 - **Phase 2 — `HostToolchain` link abstraction** (macOS unchanged; add Windows + Linux).
-  Delivers `snc build` / `--lib` / `--shared` on Windows + Linux.
+  **Implemented 2026-06-27** (same branch): the five macOS-hardcoded link sites (`link`,
+  `link_objects`, `archive_lib`, `link_shared`, `find_runtime`) now dispatch on host. Windows
+  links via the MSVC `link.exe` (naming the runtime's native deps — `ws2_32`/`userenv`/
+  `dbghelp`/`ntdll`/`kernel32`/`legacy_stdio_definitions` + `/defaultlib:msvcrt`, the set
+  `rustc --print native-static-libs` reports) and archives via `lib.exe`; the runtime staticlib
+  resolves as `sentinel_runtime.lib`. **Verified end-to-end on Windows** (run from a Developer
+  prompt so the MSVC env is present): `snc build` → a working `.exe` (`c02_arithmetic` → exit 13;
+  `c04_print_simple` → stdout `42`); `snc build --lib --emit-header` → a `.lib` + C header.
+  Deferred: `--shared` on Windows (DLL symbol export — a clear error for now); the Linux
+  `ar`-MRI (`--lib`) and `cc -shared` paths are wired but unvalidated on this box (the `cc` exe
+  path already worked on Linux). The macOS branches are behavior-preserving; pending the
+  macOS four-check on the primary box.
 - **Phase 3 — CI lanes** (Windows + Linux), gating as they go green.
 
 ## Self-host
