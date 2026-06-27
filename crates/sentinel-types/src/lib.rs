@@ -72,6 +72,19 @@ pub enum Type {
     /// unsigned compares, zero-extend widening); mixed-width arithmetic with
     /// `i64`/`i32`/`u8` stays a `Mismatch` (use an explicit `x as u128` cast).
     U128,
+    /// ADR 0058: `f64` — an IEEE-754 binary64 (double-precision) float,
+    /// lowering to LLVM `double`. A **PUBLIC-ONLY** scalar primitive — it
+    /// joins a NEW `is_float` predicate (NOT `is_int`), because float
+    /// arithmetic is a different LLVM op family (`fadd`/`fsub`/`fmul`/`fdiv`/
+    /// `fneg`/ordered `fcmp`), not the width-agnostic integer ops. There is
+    /// NO `secret f64`: float ops are not constant-time on real hardware
+    /// (subnormal slow paths, data-dependent `fdiv`/`sqrt`, NaN microcode
+    /// branches), so a `secret f64` would be a FALSE constant-time guarantee.
+    /// `secret f64` is rejected at type resolution and a `secret` value
+    /// cannot be cast to `f64` (the fence). Mixed int/float arithmetic is a
+    /// `Mismatch` (no implicit promotion — use an explicit `x as f64` /
+    /// `x as i64` cast). Copy, like the other scalars.
+    F64,
     Bool,
     Struct(StructId),
     /// `?T` per ADR 0014 D1. Payload is the inner base type.
@@ -531,6 +544,16 @@ impl Type {
         matches!(self, Type::I32 | Type::I64 | Type::U8 | Type::U128)
     }
 
+    /// ADR 0058: `true` if this is a floating-point type (`F64`). Kept
+    /// SEPARATE from [`is_int`] on purpose — float arithmetic lowers to a
+    /// different LLVM op family (`fadd`/`fcmp`/…), and `f64` is excluded from
+    /// the `secret` / constant-time domain, so the two predicates must not be
+    /// conflated. Gates float `+ - * /`, comparisons, unary `-`, and the
+    /// int↔float `as` casts.
+    pub fn is_float(self) -> bool {
+        matches!(self, Type::F64)
+    }
+
     /// `true` if this is a struct type — either a non-generic
     /// nominal `Struct(_)` or a generic-instance `GenericInstance(_)`
     /// (which is also a struct at the runtime level). Used by the
@@ -603,6 +626,9 @@ impl Type {
             // ADR 0055: `?u128` is out of scope (NullableInner gains no
             // U128 variant) — `u128` is added to the exhaustive matches.
             | Type::U128
+            // ADR 0058: `?f64` is out of scope (NullableInner gains no F64
+            // variant) — scalar `f64` only this increment.
+            | Type::F64
             | Type::Array(_)
             | Type::Nullable(_)
             | Type::Secret(_)
@@ -648,6 +674,9 @@ impl Type {
             // ADR 0055: `[u128]` is out of scope (ArrayElem gains no U128
             // variant) — the radix-2^51 field uses scalar `u128`.
             Type::U128
+            // ADR 0058: `[f64]` is out of scope (ArrayElem gains no F64
+            // variant) — scalar `f64` only this increment.
+            | Type::F64
             | Type::Array(_)
             | Type::Nullable(_)
             | Type::Ref(_)
@@ -721,6 +750,9 @@ impl Type {
             // ADR 0055: `Vec<u128>` is out of scope (VecElem gains no U128
             // variant) — the radix-2^51 field uses scalar `u128`.
             Type::U128
+            // ADR 0058: `Vec<f64>` is out of scope (VecElem gains no F64
+            // variant) — scalar `f64` only this increment.
+            | Type::F64
             | Type::Array(_)
             | Type::Vec(_)
             | Type::Nullable(_)
@@ -802,6 +834,8 @@ impl Type {
             | Type::U8
             // ADR 0055: `u128` is likewise a scalar — identity.
             | Type::U128
+            // ADR 0058: `f64` is likewise a scalar — identity.
+            | Type::F64
             | Type::Bool
             | Type::Struct(_)
             | Type::Class(_)
@@ -1039,6 +1073,7 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
         Type::Bool => "bool".to_string(),
         Type::U8 => "u8".to_string(),
         Type::U128 => "u128".to_string(),
+        Type::F64 => "f64".to_string(),
         Type::Struct(id) => match program.and_then(|p| p.structs.get(id.0 as usize)) {
             Some(s) => s.name.clone(),
             None => format!("<struct#{}>", id.0),
@@ -1128,6 +1163,7 @@ impl std::fmt::Display for Type {
             Type::Bool => write!(f, "bool"),
             Type::U8 => write!(f, "u8"),
             Type::U128 => write!(f, "u128"),
+            Type::F64 => write!(f, "f64"),
             Type::Struct(id) => write!(f, "<struct#{}>", id.0),
             Type::Nullable(inner) => write!(f, "?{}", inner.to_type()),
             Type::Array(elem) => write!(f, "[{}]", elem.to_type()),
@@ -1221,6 +1257,9 @@ fn resolve_type_expr_with_scope(
                 // ADR 0055: `u128` — an unsigned 128-bit integer scalar
                 // (the 64-bit-limb / 128-bit-product numeric gap).
                 "u128" => Ok(Type::U128),
+                // ADR 0058: `f64` — an IEEE-754 double-precision float
+                // (PUBLIC-ONLY; `secret f64` is rejected in the Secret arm).
+                "f64" => Ok(Type::F64),
                 // Phase D.3 (2/N) / ADR 0034 D5 (Amendment A1): `String`
                 // is a thin alias for `Vec<u8>` — a growable byte buffer,
                 // not a separate nominal type. Recognised now that the
@@ -1355,7 +1394,7 @@ fn resolve_type_expr_with_scope(
             match name.as_str() {
                 // Phase D.2 / ADR 0033 D4: `u8<...>` is rejected like any
                 // other non-generic primitive.
-                "i64" | "i32" | "bool" | "u8" | "u128" => Err(TypeError::TypeArgsOnNonGeneric {
+                "i64" | "i32" | "bool" | "u8" | "u128" | "f64" => Err(TypeError::TypeArgsOnNonGeneric {
                     type_name: name.clone(),
                     span: to_source_span(&te.span),
                 }),
@@ -1464,6 +1503,16 @@ fn resolve_type_expr_with_scope(
                 secrets,
                 struct_type_param_counts,
             )?;
+            // ADR 0058: `secret f64` is rejected — float ops are not
+            // constant-time, so a secret float would be a false guarantee.
+            // Floats are a disjoint PUBLIC domain (the fence that keeps the
+            // constant-time proof sound; contrast `secret u128`, which is
+            // valid because integer ops CAN be made constant-time).
+            if matches!(inner_ty, Type::F64) {
+                return Err(TypeError::SecretFloat {
+                    span: to_source_span(&inner.span),
+                });
+            }
             let id = intern_secret(secrets, inner_ty);
             Ok(Type::Secret(id))
         }
@@ -3080,6 +3129,37 @@ pub enum TypeError {
     )]
     SecretNotYet {
         #[label("`secret T` here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0058: `secret f64` is rejected. Floating-point operations are
+    /// not constant-time on real hardware (subnormal slow paths,
+    /// data-dependent `fdiv`/`sqrt` latency, NaN microcode branches), so a
+    /// `secret f64` would advertise a constant-time guarantee the hardware
+    /// cannot keep. Floats are a disjoint PUBLIC domain; the `secret` /
+    /// constant-time type system is for integer crypto. Surfaced both at a
+    /// `secret f64` annotation and at an `x as f64` cast of a `secret` value
+    /// (the fence — no secret float value can ever exist).
+    #[error("`secret f64` is not allowed — float operations are not constant-time")]
+    #[diagnostic(
+        code(sentinel::types::secret_float),
+        help("floats are a public-only domain (ADR 0058); keep secret data in integer types, or `declassify` before converting to `f64`")
+    )]
+    SecretFloat {
+        #[label("`secret f64` here")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0058: bitwise (`& | ^`) and shift (`<< >>`) operators are not
+    /// supported on `f64`. Floats support only `+ - * /` and the ordered
+    /// comparisons; bit manipulation is meaningless on an IEEE-754 value.
+    #[error("bitwise / shift operators are not supported on `f64`")]
+    #[diagnostic(
+        code(sentinel::types::float_bitwise),
+        help("`f64` supports `+ - * /`, comparisons, unary `-`, and `sqrt`; reinterpret via an `as` cast to an integer type for bit manipulation")
+    )]
+    FloatBitwise {
+        #[label("bitwise / shift on `f64` here")]
         span: miette::SourceSpan,
     },
 
@@ -5789,6 +5869,8 @@ fn try_substitute(
         | Type::I32
         | Type::U8
         | Type::U128
+        // ADR 0058: `f64` is a scalar — no TypeParam payload.
+        | Type::F64
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -5859,6 +5941,8 @@ fn contains_type_param(
         | Type::I32
         | Type::U8
         | Type::U128
+        // ADR 0058: `f64` is a scalar — never a TypeParam.
+        | Type::F64
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -6430,7 +6514,10 @@ fn check_expr(
                         inner_t.ty.strip_secret(secrets);
                     let ty = match op {
                         UnaryOp::Neg => {
-                            if !inner_unwrapped.is_int() {
+                            // ADR 0058: unary `-` on `f64` lowers to `fneg`.
+                            // `f64` is public-only, so the secret branch never
+                            // fires for it (it can't be secret).
+                            if !inner_unwrapped.is_int() && !inner_unwrapped.is_float() {
                                 return Err(TypeError::Mismatch {
                                     expected: Type::I64,
                                     got: inner_t.ty,
@@ -6479,8 +6566,9 @@ fn check_expr(
             let (r_inner, r_secret) = r.ty.strip_secret(secrets);
             // C1.3: arithmetic requires the LEFT operand be an int
             // type (I32 / I64 / U8); result is that int type. Bool /
-            // struct arithmetic is rejected.
-            if !l_inner.is_int() {
+            // struct arithmetic is rejected. ADR 0058: `f64` is also a
+            // valid arithmetic operand (handled by the float branch below).
+            if !l_inner.is_int() && !l_inner.is_float() {
                 return Err(TypeError::Mismatch {
                     expected: Type::I64,
                     got: l.ty,
@@ -6488,7 +6576,29 @@ fn check_expr(
                 });
             }
             let ty;
-            let (l, r) = if matches!(op, BinOp::Shl | BinOp::Shr) {
+            let (l, r) = if l_inner.is_float() {
+                // ADR 0058: float arithmetic — `+ - * /` only, lowering to
+                // `fadd`/`fsub`/`fmul`/`fdiv`. Bitwise (`& | ^`) and shifts
+                // (`<< >>`) are rejected (FloatBitwise). `f64` is public-only
+                // (no `secret f64`), so none of the secret machinery (widen,
+                // SecretDivisor, SecretShiftAmount) applies. Both operands
+                // must be the same type — a mixed `f64`/int operand surfaces
+                // as `Mismatch` (no implicit int↔float promotion; use `as`).
+                if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) {
+                    return Err(TypeError::FloatBitwise {
+                        span: to_source_span(&expr.span),
+                    });
+                }
+                if l.ty != r.ty {
+                    return Err(TypeError::Mismatch {
+                        expected: l.ty,
+                        got: r.ty,
+                        span: to_source_span(&rhs.span),
+                    });
+                }
+                ty = l_inner;
+                (l, r)
+            } else if matches!(op, BinOp::Shl | BinOp::Shr) {
                 // ADR 0048: shifts are ASYMMETRIC (value `<<` amount) and do
                 // NOT obey the matching-secrecy rule the other ops enforce via
                 // `l.ty != r.ty`. The amount may be any integer width/secrecy;
@@ -7188,18 +7298,25 @@ fn check_expr(
                 tasks,
             )?;
             let (stripped, was_secret) = inner_t.ty.strip_secret(secrets);
-            if !stripped.is_int() {
+            // ADR 0049 + ADR 0058: the operand must be an integer OR a float
+            // (`i64 as f64` / `f64 as i64` move between the domains via
+            // `sitofp`/`fptosi`, the ONLY bridge — there is no implicit
+            // conversion).
+            if !stripped.is_int() && !stripped.is_float() {
                 return Err(TypeError::NonIntegerCast {
                     span: to_source_span(&inner.span),
                 });
             }
-            // The target is restricted to a plain integer type ident.
+            // The target is restricted to a plain integer or float type ident.
             let target = match &te.kind {
                 TypeExprKind::Ident(name) => match name.as_str() {
                     "i64" => Type::I64,
                     "i32" => Type::I32,
                     "u8" => Type::U8,
                     "u128" => Type::U128,
+                    // ADR 0058: `x as f64` (`sitofp`/`uitofp`); the result is
+                    // PUBLIC — see the secret rejection below.
+                    "f64" => Type::F64,
                     _ => {
                         return Err(TypeError::NonIntegerCast {
                             span: to_source_span(&te.span),
@@ -7212,6 +7329,16 @@ fn check_expr(
                     })
                 }
             };
+            // ADR 0058 (the fence): casting a `secret` value to `f64` would
+            // create a `secret f64`, which does not exist. Reject — the user
+            // must `declassify` first if they intend a public float. (A
+            // secret→secret-int cast stays secret as before; only the f64
+            // target is fenced.)
+            if matches!(target, Type::F64) && was_secret {
+                return Err(TypeError::SecretFloat {
+                    span: to_source_span(&expr.span),
+                });
+            }
             let result_ty = if was_secret {
                 Type::Secret(intern_secret(secrets, target))
             } else {
@@ -8794,6 +8921,16 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::SecretNotYet { span } => (
             "sentinel::types::secret_not_yet",
             "`secret T` is not yet supported (lands at C3.1)".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::SecretFloat { span } => (
+            "sentinel::types::secret_float",
+            "`secret f64` is not allowed — float operations are not constant-time".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::FloatBitwise { span } => (
+            "sentinel::types::float_bitwise",
+            "bitwise / shift operators are not supported on `f64`".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::SecretBranch { kw, span } => (
@@ -11832,6 +11969,85 @@ fn main() -> i64 {
         );
         assert!(
             matches!(err, TypeError::LoopControlOutsideLoop { kw: "break", .. }),
+            "got {err:?}"
+        );
+    }
+
+    // ===== ADR 0058: the `f64` float type =====
+    // (Float literals land in a later stage; these build `f64` via `as`
+    // casts, which is the only way to obtain a float value at this stage.)
+
+    #[test]
+    fn f64_arithmetic_and_compare_typecheck() {
+        // `+ - * /`, unary `-`, and ordered comparison all type to the
+        // expected types (`f64` arithmetic, `bool` comparison).
+        let p = check_ok(
+            "fn f(a: f64, b: f64) -> i64 { let s: f64 = a + b; let d: f64 = a - b; \
+             let m: f64 = a * b; let q: f64 = a / b; let n: f64 = -a; \
+             if s > d { (m as i64) + (q as i64) + (n as i64) } else { 0 } }\
+             fn main() -> i64 { f(7 as f64, 3 as f64) }",
+        );
+        let f = p.fns.iter().find(|f| f.name == "f").expect("f");
+        assert_eq!(f.return_type, Type::I64);
+    }
+
+    #[test]
+    fn f64_int_casts_typecheck() {
+        // `i64 as f64` (sitofp) and `f64 as i64` (fptosi) round-trip.
+        let p = check_ok(
+            "fn rt(x: i64) -> i64 { let f: f64 = x as f64; f as i64 }\
+             fn main() -> i64 { rt(42) }",
+        );
+        assert_eq!(p.main().return_type, Type::I64);
+    }
+
+    #[test]
+    fn secret_f64_annotation_rejected() {
+        // ADR 0058 (the fence): `secret f64` is a type error — float ops
+        // are not constant-time, so a secret float is a false guarantee.
+        let err = check_err(
+            "fn f(x: secret f64) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::SecretFloat { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn secret_cast_to_f64_rejected() {
+        // Casting a `secret` value to `f64` would create a `secret f64` —
+        // rejected (the fence; `declassify` first if a public float is meant).
+        let err = check_err(
+            "fn f(x: secret i64) -> i64 { let y: f64 = x as f64; y as i64 }\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::SecretFloat { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn f64_bitwise_rejected() {
+        // Bitwise / shift operators are meaningless on a float.
+        let err = check_err(
+            "fn f(a: f64, b: f64) -> f64 { a & b }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::FloatBitwise { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn f64_mixed_int_float_rejected() {
+        // No implicit int↔float promotion — `f64 + i64` is a Mismatch.
+        let err = check_err(
+            "fn f(a: f64, b: i64) -> f64 { a + b }\nfn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::Mismatch { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn f64_type_args_rejected() {
+        // `f64<...>` is rejected like any other non-generic primitive.
+        let err = check_err(
+            "fn f(x: f64<i64>) -> i64 { 0 }\nfn main() -> i64 { 0 }",
+        );
+        assert!(
+            matches!(err, TypeError::TypeArgsOnNonGeneric { .. }),
             "got {err:?}"
         );
     }

@@ -1418,7 +1418,10 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         // Phase D.2 / ADR 0033 D4: `u8` is a 1-byte Copy scalar (a
         // `[u8]` string is `Type::Array(_)` below → Move, owning a heap
         // buffer like any array).
-        Type::I64 | Type::I32 | Type::U8 | Type::U128 | Type::Bool | Type::Ref(_) => true,
+        // ADR 0058: `f64` is a Copy scalar (a `double`, no heap payload).
+        Type::I64 | Type::I32 | Type::U8 | Type::U128 | Type::F64 | Type::Bool | Type::Ref(_) => {
+            true
+        }
         Type::Nullable(inner) => is_copy_nullable_inner(inner),
         Type::Struct(_)
         | Type::Array(_)

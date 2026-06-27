@@ -40,7 +40,7 @@ use inkwell::types::{BasicType, BasicTypeEnum, IntType, StructType};
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue,
 };
-use inkwell::{IntPredicate, OptimizationLevel};
+use inkwell::{FloatPredicate, IntPredicate, OptimizationLevel};
 use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_hir::HirProgram;
@@ -1681,10 +1681,15 @@ fn field_type_needs_drop_inner(
             any
         }
         // Phase D.2 / ADR 0033 D4: a `u8` scalar has no heap payload.
-        // ADR 0055: nor does a `u128` scalar.
-        Type::Nullable(_) | Type::I64 | Type::I32 | Type::U8 | Type::U128 | Type::Bool | Type::Ref(_) => {
-            false
-        }
+        // ADR 0055: nor does a `u128` scalar. ADR 0058: nor does an `f64`.
+        Type::Nullable(_)
+        | Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Bool
+        | Type::Ref(_) => false,
         Type::TypeParam(_) => false,
         // C3 / ADR 0019 D5 (C3.1): drop semantics of `secret T`
         // follow the inner — secrets don't introduce new heap
@@ -1768,6 +1773,10 @@ fn llvm_basic_type<'ctx>(
         // ADR 0055: `u128` lowers to LLVM `i128` (unsignedness lives in the
         // ops — logical `>>`, unsigned compares — not the type).
         Type::U128 => context.i128_type().into(),
+        // ADR 0058: `f64` lowers to LLVM `double` (IEEE-754 binary64). Float
+        // arithmetic is a different op family (`fadd`/`fcmp`/…) than the
+        // integer types above.
+        Type::F64 => context.f64_type().into(),
         Type::Struct(id) => (*struct_types
             .get(&id)
             .expect("struct declared in pass 0"))
@@ -2272,7 +2281,7 @@ pub struct NamedTypeOrigins {
 fn mono_args_dedup_safe(args: &[Type], origins: &NamedTypeOrigins) -> bool {
     fn safe(t: Type, origins: &NamedTypeOrigins) -> bool {
         match t {
-            Type::I64 | Type::I32 | Type::Bool | Type::U8 | Type::U128 => true,
+            Type::I64 | Type::I32 | Type::Bool | Type::U8 | Type::U128 | Type::F64 => true,
             Type::Struct(id) => origins.structs.contains_key(&id),
             Type::Enum(id) => origins.enums.contains_key(&id),
             Type::Array(e) => safe(e.to_type(), origins),
@@ -2387,6 +2396,8 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         Type::U8 => "u8".to_string(),
         // ADR 0055: `u128` mangles as `u128`.
         Type::U128 => "u128".to_string(),
+        // ADR 0058: `f64` mangles as `f64`.
+        Type::F64 => "f64".to_string(),
         Type::Struct(id) => program
             .structs
             .get(id.0 as usize)
@@ -2487,6 +2498,8 @@ fn arg_contains_typeparam(
         | Type::U8
         // ADR 0055: `u128` carries no TypeParam.
         | Type::U128
+        // ADR 0058: `f64` carries no TypeParam.
+        | Type::F64
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -2545,6 +2558,9 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         Type::U8 => context.i8_type(),
         // ADR 0055: `u128` is an int type → LLVM `i128`.
         Type::U128 => context.i128_type(),
+        // ADR 0058: `f64` is a FLOAT, not an int — float values are loaded
+        // via `llvm_basic_type`/`f64_type`, never here.
+        Type::F64 => panic!("llvm_int_type called on non-int Type::F64"),
         Type::Struct(_) => panic!("llvm_int_type called on non-int Type::Struct"),
         Type::Nullable(_) => panic!("llvm_int_type called on non-int Type::Nullable"),
         Type::Array(_) => panic!("llvm_int_type called on non-int Type::Array"),
@@ -4190,6 +4206,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             | Type::U8
             // ADR 0055: a `u128` scalar has no heap data.
             | Type::U128
+            // ADR 0058: an `f64` scalar has no heap data.
+            | Type::F64
             | Type::Bool
             | Type::Ref(_) => {
                 // Primitives + refs + nullable-of-primitive: no
@@ -5826,6 +5844,16 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 Ok(loaded)
             }
             TypedExprKind::Unary(UnaryOp::Neg, inner) => {
+                // ADR 0058: `-x` on an `f64` lowers to `fneg`; integers use
+                // `neg` (two's-complement negate).
+                if self.strip_secret(inner.ty).is_float() {
+                    let v = self.lower_expr(inner, program)?.into_float_value();
+                    return self
+                        .builder
+                        .build_float_neg(v, "fneg")
+                        .map(|v| v.into())
+                        .map_err(|e| CodegenError::Builder(e.to_string()));
+                }
                 let v = self.lower_expr(inner, program)?.into_int_value();
                 self.builder
                     .build_int_neg(v, "neg")
@@ -5868,6 +5896,26 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .map_err(|e| CodegenError::Builder(e.to_string()))
             }
             TypedExprKind::Binary(op, lhs, rhs) => {
+                // ADR 0058: float arithmetic lowers to the `f*` op family
+                // (`fadd`/`fsub`/`fmul`/`fdiv`). The type checker guarantees
+                // only `+ - * /` reach here for `f64` (bitwise / shift are
+                // rejected as FloatBitwise), and that both operands are `f64`.
+                if self.strip_secret(lhs.ty).is_float() {
+                    let l = self.lower_expr(lhs, program)?.into_float_value();
+                    let r = self.lower_expr(rhs, program)?.into_float_value();
+                    let result = match op {
+                        BinOp::Add => self.builder.build_float_add(l, r, "fadd"),
+                        BinOp::Sub => self.builder.build_float_sub(l, r, "fsub"),
+                        BinOp::Mul => self.builder.build_float_mul(l, r, "fmul"),
+                        BinOp::Div => self.builder.build_float_div(l, r, "fdiv"),
+                        _ => unreachable!(
+                            "type-check rejects bitwise / shift on f64 (FloatBitwise)"
+                        ),
+                    };
+                    return result
+                        .map(|v| v.into())
+                        .map_err(|e| CodegenError::Builder(e.to_string()));
+                }
                 let l = self.lower_expr(lhs, program)?.into_int_value();
                 let r = self.lower_expr(rhs, program)?.into_int_value();
                 // D.2 / ADR 0033 D6: `u8` is unsigned — `/` is `udiv`
@@ -5926,6 +5974,29 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // unreachable here for nullable values.
                 let lhs_is_nullable = lhs.ty.is_nullable();
                 let rhs_is_nullable = rhs.ty.is_nullable();
+                // ADR 0058: `f64` comparisons lower to `fcmp` with the
+                // C-style predicates — ordered for `== < <= > >=` (so any
+                // NaN operand compares false) and UNordered-not-equal for
+                // `!=` (so `NaN != NaN` is true, matching IEEE 754 / C / Rust).
+                // `f64` is never nullable, so this is handled before the
+                // nullable / integer-predicate paths below.
+                if self.strip_secret(lhs.ty).is_float() {
+                    let fpred = match op {
+                        CmpOp::Eq => FloatPredicate::OEQ,
+                        CmpOp::Ne => FloatPredicate::UNE,
+                        CmpOp::Lt => FloatPredicate::OLT,
+                        CmpOp::Le => FloatPredicate::OLE,
+                        CmpOp::Gt => FloatPredicate::OGT,
+                        CmpOp::Ge => FloatPredicate::OGE,
+                    };
+                    let l = self.lower_expr(lhs, program)?.into_float_value();
+                    let r = self.lower_expr(rhs, program)?.into_float_value();
+                    return self
+                        .builder
+                        .build_float_compare(fpred, l, r, "fcmp")
+                        .map(|v| v.into())
+                        .map_err(|e| CodegenError::Builder(e.to_string()));
+                }
                 // D.2 / ADR 0033 D6: `u8` is unsigned, so the ordered
                 // comparisons use unsigned predicates (a byte ≥ 0x80
                 // must compare as large, not negative). Eq/Ne are
@@ -6126,6 +6197,45 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 self.lower_expr(inner, program)
             }
             TypedExprKind::Cast(inner) => {
+                // ADR 0058: int ↔ float conversions are the ONLY bridge
+                // between the integer and float domains (no implicit
+                // conversion). Handle them before the ADR 0049 integer-width
+                // path below. `f64` is public-only, so no secret f64 appears.
+                let src = self.strip_secret(inner.ty);
+                let dst = self.strip_secret(expr.ty);
+                if dst.is_float() && src.is_float() {
+                    // `f64 as f64` — a no-op.
+                    return self.lower_expr(inner, program);
+                }
+                if dst.is_float() {
+                    // int → f64: unsigned sources (`u8`/`u128`) `uitofp`,
+                    // signed (`i32`/`i64`) `sitofp`.
+                    let v = self.lower_expr(inner, program)?.into_int_value();
+                    let f64t = self.context.f64_type();
+                    let is_unsigned = matches!(src, Type::U8 | Type::U128);
+                    let r = if is_unsigned {
+                        self.builder.build_unsigned_int_to_float(v, f64t, "uitofp")
+                    } else {
+                        self.builder.build_signed_int_to_float(v, f64t, "sitofp")
+                    };
+                    return r
+                        .map(|x| x.into())
+                        .map_err(|e| CodegenError::Builder(e.to_string()));
+                }
+                if src.is_float() {
+                    // f64 → int: `fptosi` / `fptoui` (truncation toward zero).
+                    let v = self.lower_expr(inner, program)?.into_float_value();
+                    let dst_ty = self.llvm_int_type(expr.ty);
+                    let is_unsigned = matches!(dst, Type::U8 | Type::U128);
+                    let r = if is_unsigned {
+                        self.builder.build_float_to_unsigned_int(v, dst_ty, "fptoui")
+                    } else {
+                        self.builder.build_float_to_signed_int(v, dst_ty, "fptosi")
+                    };
+                    return r
+                        .map(|x| x.into())
+                        .map_err(|e| CodegenError::Builder(e.to_string()));
+                }
                 // ADR 0049: integer width conversion. Strip secret (layout-
                 // free), then trunc / sext / zext by width; same width is a
                 // no-op. `u8` is the only UNSIGNED source → zext when widening;
