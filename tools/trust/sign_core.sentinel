@@ -1,0 +1,83 @@
+// tools/trust/sign_core.sentinel — ADR 0061 v1 signing core (the dogfooded
+// Ed25519 signer the `snc sign` flow delegates to).
+//
+// It does NO format work: the canonical payload and the carrier are built in
+// Rust by `snc` (so the signature format has a single, Rust-only implementation,
+// ADR 0061 D2/D3). This program only performs the Ed25519 math over OPAQUE bytes
+// — exactly the half of signing that the language owner chose to keep in Sentinel
+// (dogfooding the verified-constant-time `std::security::ed25519`).
+//
+// Sentinel has no argv, so `snc` hands data through fixed filenames in a private
+// temp working directory (the same fixed-path convention the self-host compiler
+// uses with `input.sentinel`):
+//
+//   seed.bin     ->  32-byte Ed25519 seed (the secret signing key)
+//   payload.bin  ->  the canonical signed payload (snc-built)
+//   sigout.bin   <-  32-byte public key  ||  64-byte signature  (96 bytes)
+//
+// CONSTANT-TIME: the public seed widens to `secret` (ADR 0051), the signing runs
+// over the secret scalar branch-free (a secret bit reaching a branch/index would
+// not compile — `sentinel::mir::secret_leak`), and ONLY the public key and the
+// signature are declassified out. The public key is emitted alongside the
+// signature so `snc` can bind it into the carrier without a separate keygen step.
+use std::security::ed25519::ed25519_pubkey;
+use std::security::ed25519::ed25519_sign;
+
+// Declassify a `[secret u8]` to `[u8]` byte-by-byte — declassify is per-scalar
+// (there is no array-declassify); a public key / signature is sanctioned public
+// output. (The proven `examples/export/crypto_lib` idiom.)
+fn reveal(d: [secret u8]) -> [u8] {
+    let n: i64 = len(d);
+    let mut out: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut out, declassify(d[i]));
+        i = i + 1;
+    }
+    vec_to_array(out)
+}
+
+// Widen a public byte buffer into a `[secret u8]` (ADR 0051 call-arg widen at the
+// push) — the secret-fence input side.
+fn widen(src: &[u8]) -> [secret u8] {
+    let n: i64 = len(*src);
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut v, (*src)[i]);
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+fn main() -> i64 {
+    let p_seed: [u8] = "seed.bin";
+    let seed_bytes: [u8] = read_file(p_seed);
+    let p_payload: [u8] = "payload.bin";
+    let payload_bytes: [u8] = read_file(p_payload);
+
+    // pk = pack([a]B); sig = R || S over the payload. Seed widens to secret for
+    // each (constant-time) op; outputs are revealed (declassified) to public.
+    let seed_for_pk: [secret u8] = widen(&seed_bytes);
+    let pk: [u8] = reveal(ed25519_pubkey(seed_for_pk));
+    let seed_for_sig: [secret u8] = widen(&seed_bytes);
+    let msg: [secret u8] = widen(&payload_bytes);
+    let sig: [u8] = reveal(ed25519_sign(seed_for_sig, msg));
+
+    // out = pk(32) || sig(64).
+    let mut out: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 32 {
+        push(&mut out, pk[i]);
+        i = i + 1;
+    }
+    let mut j: i64 = 0;
+    while j < 64 {
+        push(&mut out, sig[j]);
+        j = j + 1;
+    }
+
+    let p_out: [u8] = "sigout.bin";
+    write_file(p_out, vec_to_array(out));
+    0
+}
