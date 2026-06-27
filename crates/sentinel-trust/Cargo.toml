@@ -1,0 +1,15 @@
+[package]
+name        = "sentinel-trust"
+description = "Code signing & supply-chain trust (ADR 0061): in-process Ed25519 verification (the build-time gate's twin of std::security::ed25519), signed manifests, the consumer trust model"
+
+edition.workspace      = true
+rust-version.workspace = true
+version.workspace      = true
+authors.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

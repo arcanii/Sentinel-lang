@@ -22,6 +22,7 @@ members = [
     "crates/sentinel-driver",
     "crates/sentinel-runtime",
     "crates/sentinel-lsp",
+    "crates/sentinel-trust",
 ]
 
 [workspace.package]
