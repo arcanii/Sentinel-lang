@@ -1,0 +1,65 @@
+// examples/export/crypto_lib.sentinel
+//
+// A MULTI-MODULE C-ABI EXPORT library (ADR 0059 Phase 1b, A8): the verified-
+// constant-time crypto suite as a drop-in C library. Unlike digest_lib.sentinel
+// (which inlines SHA-256 because single-file `--lib` had no `use`), this entry
+// `use`s the REAL `std/security` modules — `snc build --lib` now discovers the
+// `use` graph and merges it, so a library can span modules:
+//   snc build --lib crypto_lib.sentinel -o libsentinelcrypto.a \
+//       --emit-header sentinelcrypto.h
+// (with the `std/` tree at the source root). The module graph merged here is
+// crypto_lib -> {sha256, hmac} -> sha256 -> ct.
+//
+// Each export is a thin PUBLIC-bytes wrapper: it widens the public input bytes
+// to `secret` (ADR 0051), calls the machine-checked constant-time library
+// primitive, and `declassify`s the (public) digest/tag into an owned `[u8]` the
+// C caller frees with `sentinel_free_bytes` (ADR 0059 A7). So a C / Rust /
+// Python caller gets the WHOLE verified-constant-time suite behind a plain
+// byte-buffer API — the export side's reason to exist.
+use std::security::sha256::sha256;
+use std::security::hmac::hmac_sha256;
+
+// Declassify a secret digest/tag into an owned public `[u8]`. A digest is public
+// output (nothing about the secret message survives a one-way hash beyond the
+// digest), so revealing it is the sanctioned boundary; the wrapper declassifies
+// byte-by-byte (a scalar `declassify` per byte — there is no array-`declassify`).
+fn reveal(d: [secret u8]) -> [u8] {
+    let n: i64 = len(d);
+    let mut out: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut out, declassify(d[i]));
+        i = i + 1;
+    }
+    vec_to_array(out)
+}
+
+// Widen a public byte buffer into a `[secret u8]` message (ADR 0051 call-arg
+// widen at the push), the input side of the secret-fence.
+fn widen(src: &[u8]) -> [secret u8] {
+    let n: i64 = len(*src);
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut v, (*src)[i]);
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+// Constant-time SHA-256 callable from C, returning the owned 32-byte digest.
+export "C" fn sha256_oneshot(msg: &[u8]) -> [u8] {
+    let m: [secret u8] = widen(msg);
+    let d: [secret u8] = sha256(m);
+    reveal(d)
+}
+
+// Constant-time HMAC-SHA256 callable from C over a public key + message,
+// returning the owned 32-byte tag. The key is widened to `secret` internally —
+// a C caller gets a verified-constant-time MAC over a plain buffer API.
+export "C" fn hmac_sha256_oneshot(key: &[u8], msg: &[u8]) -> [u8] {
+    let k: [secret u8] = widen(key);
+    let m: [secret u8] = widen(msg);
+    let t: [secret u8] = hmac_sha256(k, m);
+    reveal(t)
+}

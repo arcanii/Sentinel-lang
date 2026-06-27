@@ -973,7 +973,7 @@ fn run_build_lib(path: &str, output: Option<&str>, header: Option<&str>) -> Exit
         Ok(s) => s,
         Err(code) => return code,
     };
-    let program = match sentinel_syntax::parse(&src) {
+    let entry_program = match sentinel_syntax::parse(&src) {
         Ok(p) => p,
         Err(e) => {
             let report = Report::new(e).with_source_code(NamedSource::new(path, src.clone()));
@@ -981,13 +981,32 @@ fn run_build_lib(path: &str, output: Option<&str>, header: Option<&str>) -> Exit
             return ExitCode::from(1);
         }
     };
-    if !program.uses.is_empty() {
-        eprintln!(
-            "snc: `build --lib` does not yet support `use` (multi-module \
-             libraries are a follow-up); inline the dependencies for now"
-        );
-        return ExitCode::from(1);
-    }
+    // ADR 0059 A8: a library may span modules. Discover the `use` graph and
+    // `merge_modules` it into one `Program` (the executable build's Path-A
+    // discovery + merge, ADR 0037), then resolve WITHOUT `main`. A single-file
+    // library (no `use`) keeps the entry program unchanged. `merge_modules`
+    // keeps `export "C"` names bare (A3) and clears `uses`, so the merged
+    // program resolves + codegen's the export wrappers exactly as single-file.
+    let (program, is_merged) = match discover_module_graph(Path::new(path)) {
+        Ok(modules) if !modules.is_empty() => {
+            let units: Vec<sentinel_resolve::ModuleUnit> = modules
+                .iter()
+                .map(|m| sentinel_resolve::ModuleUnit { path: m.path.clone(), program: &m.program })
+                .collect();
+            match sentinel_resolve::merge_modules(&units) {
+                Ok(merged) => (merged, true),
+                Err(e) => {
+                    eprintln!("snc: {e}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        Ok(_) => (entry_program, false), // single-file
+        Err(msg) => {
+            eprintln!("snc: {msg}");
+            return ExitCode::from(1);
+        }
+    };
     // Resolve WITHOUT the `main` requirement — a library has no entry point.
     let resolved = match sentinel_resolve::resolve_module(&program, &[]) {
         Ok(r) => r,
@@ -1039,8 +1058,15 @@ fn run_build_lib(path: &str, output: Option<&str>, header: Option<&str>) -> Exit
     let object_path = lib_path.with_extension("o");
     let hir = sentinel_hir::lower_to_hir(&typed, &drop_plan);
     if let Err(err) = sentinel_codegen::compile_to_object(&hir, &object_path) {
-        let report = Report::new(err).with_source_code(NamedSource::new(path, src));
-        eprintln!("{report:?}");
+        // A merged program's spans point into per-module sources, so attach the
+        // single entry source only for a single-file build (else report by
+        // message, like the executable merge path).
+        if is_merged {
+            eprintln!("snc: codegen failed: {err}");
+        } else {
+            let report = Report::new(err).with_source_code(NamedSource::new(path, src));
+            eprintln!("{report:?}");
+        }
         return ExitCode::from(1);
     }
     if let Err(msg) = archive_lib(&object_path, &lib_path) {

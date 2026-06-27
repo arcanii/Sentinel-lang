@@ -26,6 +26,23 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// Recursively copy `src` into `dst` — used to drop the repo's `std/` tree next
+/// to a multi-module library entry so `use std::...` resolves (mirrors the
+/// example harness's `copy_dir_recursive`).
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).expect("create dst dir");
+    for entry in std::fs::read_dir(src).expect("read_dir") {
+        let entry = entry.expect("dir entry");
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).expect("copy file");
+        }
+    }
+}
+
 #[test]
 fn export_c_library_called_from_c() {
     let root = repo_root();
@@ -182,6 +199,82 @@ fn export_owned_bytes_return_from_c() {
     );
 }
 
+/// ADR 0059 Phase 1b (A8): a MULTI-MODULE export library. The entry `use`s the
+/// real `std/security` SHA-256 + HMAC modules (no inlining); `snc build --lib`
+/// discovers the `use` graph, merges it, and archives one library. The C driver
+/// links it and checks both primitives against canonical vectors — the whole
+/// verified-constant-time crypto suite as a drop-in C library.
+#[test]
+fn export_multi_module_library_from_c() {
+    let root = repo_root();
+    let dir = temp_dir("crypto");
+
+    // Assemble a temp project: the `std/` tree at the source root + the entry,
+    // so `use std::security::sha256` resolves to `<dir>/std/security/sha256.sentinel`.
+    copy_dir_recursive(&root.join("std"), &dir.join("std"));
+    let lib_src = dir.join("crypto_lib.sentinel");
+    std::fs::copy(root.join("examples/export/crypto_lib.sentinel"), &lib_src)
+        .expect("copy crypto_lib.sentinel");
+    let driver_c = dir.join("crypto_driver.c");
+    std::fs::copy(root.join("examples/export/crypto_driver.c"), &driver_c)
+        .expect("copy crypto_driver.c");
+
+    let lib_a = dir.join("libsentinelcrypto.a");
+    let header = dir.join("sentinelcrypto.h");
+    let build = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("build")
+        .arg("--lib")
+        .arg(&lib_src)
+        .arg("-o")
+        .arg(&lib_a)
+        .arg("--emit-header")
+        .arg(&header)
+        .output()
+        .expect("run snc build --lib");
+    assert!(
+        build.status.success(),
+        "multi-module snc build --lib failed; stderr:\n{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    assert!(lib_a.exists(), "the static library was not produced");
+
+    let h = std::fs::read_to_string(&header).expect("read header");
+    assert!(
+        h.contains("void sha256_oneshot(const uint8_t*, int64_t, uint8_t**, int64_t*);"),
+        "header missing sha256_oneshot prototype:\n{h}"
+    );
+    assert!(
+        h.contains(
+            "void hmac_sha256_oneshot(const uint8_t*, int64_t, const uint8_t*, int64_t, uint8_t**, int64_t*);"
+        ),
+        "header missing hmac_sha256_oneshot prototype:\n{h}"
+    );
+
+    let driver_bin = dir.join("crypto_driver");
+    let cc = Command::new("cc")
+        .arg(&driver_c)
+        .arg(&lib_a)
+        .arg("-I")
+        .arg(&dir)
+        .arg("-o")
+        .arg(&driver_bin)
+        .output()
+        .expect("run cc on the C driver");
+    assert!(
+        cc.status.success(),
+        "cc failed to build the C driver against the multi-module library; stderr:\n{}",
+        String::from_utf8_lossy(&cc.stderr)
+    );
+
+    let run = Command::new(&driver_bin).output().expect("run the C driver");
+    let code = run.status.code().expect("driver exited normally");
+    assert_eq!(
+        code, 42,
+        "C driver calling the multi-module exports exited {code}, expected 42;\nstdout:\n{}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+}
+
 /// `snc build --lib` requires at least one `export "C"` and rejects `main`-less
 /// libraries that export nothing (there is nothing to put in the archive).
 #[test]
@@ -214,4 +307,6 @@ fn export_demonstrator_files_present() {
     assert!(root.join("examples/export/driver.c").exists());
     assert!(root.join("examples/export/digest_lib.sentinel").exists());
     assert!(root.join("examples/export/digest_driver.c").exists());
+    assert!(root.join("examples/export/crypto_lib.sentinel").exists());
+    assert!(root.join("examples/export/crypto_driver.c").exists());
 }
