@@ -1,14 +1,16 @@
 # ADR 0059: A C-ABI export — calling Sentinel from C / C++ / Rust / Python
 
-Status: **ACCEPTED-WITH-AMENDMENTS (A1–A5).** Phase 1a is implemented `snc`-side: the
-`export "C"` annotation, the `--lib` static-archive build mode (no `main`),
-`--emit-header`, and the secret-fence — over the **value-only ABI** (`i64`/`f64`), with a
-constant-time demonstrator (`ct_choose`: public ints → widen → branch-free select →
-declassify) called from a C driver in a harness test. The `(ptr,len)` buffer ABI (for
-`&[u8]`/`[u8]` crypto), `sentinel_free_bytes`, multi-module libraries, and shared objects
-are split into a **Phase 1b/2** and remain deferred. The design below stands; the
-amendments at the end record the re-scoping. This was the ADR-first design gate for the
-"Python / C / C++ / Rust bindings" item on the core-libraries roadmap.
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A6).** Implemented `snc`-side: the `export "C"`
+annotation, the `--lib` static-archive build mode (no `main`), `--emit-header`, and the
+secret-fence. **Phase 1a** = the value-only ABI (`i64`/`f64`) with a constant-time
+demonstrator (`ct_choose`). **Phase 1b** (A6) now adds the **`&[u8]` INPUT buffer ABI** —
+a `&[u8]` export param is presented to C as a `(const uint8_t* data, int64_t len)` pair via
+a generated wrapper, demonstrated by `ct_byte_eq` (a verified constant-time byte
+comparison) called from C over real buffers. The owned-`[u8]` RETURN (out-struct +
+`sentinel_free_bytes`), multi-module libraries, and shared objects remain deferred. The
+design below stands; the amendments at the end record the re-scoping. This was the
+ADR-first design gate for the "Python / C / C++ / Rust bindings" item on the
+core-libraries roadmap.
 
 ## Context
 
@@ -227,3 +229,19 @@ struct exports, and the Python/Rust generators are deferred to later phases.
   primitive over a plain C ABI. The byte-buffer crypto export (`sha256` from C) lands with
   Phase 1b's buffer ABI. The `scg` mirror is deferred (no corpus / `selfhost` source uses
   `export` → every differential + both bootstrap fixed points byte-identical).
+- **A6 — Phase 1b lands the `&[u8]` INPUT buffer ABI via a generated wrapper.** A `&[u8]`
+  export param is now FFI-safe (`is_byte_slice_ref`). When an export takes one, codegen
+  emits its real Sentinel-ABI body under an internal `<name>__sentinel_impl` symbol and
+  generates a C-ABI **wrapper** under the bare `<name>` (modelled on the existing
+  `__spawn_wrapper` post-pass): the wrapper takes each `&[u8]` as a
+  `(const uint8_t* data, int64_t len)` pair, rebuilds the Sentinel `{ i64 len, ptr data }`
+  fat pointer on the stack, forwards value params straight through, calls the impl, and
+  returns the value-ABI result; `--emit-header` expands `&[u8]` to the C pair. Sentinel
+  internal calls still resolve to the impl (via the `fns` map). The demonstrator gains
+  `ct_byte_eq(a: &[u8], b: &[u8], n: i64) -> i64` — a verified constant-time byte
+  comparison (the classic MAC/tag-verification primitive): it widens the first `n` bytes to
+  `secret`, XOR-accumulates branch-free, folds to 0/1 in constant time, and declassifies;
+  `driver.c` calls it over C buffers (equal → 1, differ → 0) and `tests/export.rs` asserts
+  exit 42. STILL deferred: the owned-`[u8]` RETURN (out-struct + `sentinel_free_bytes`, the
+  variable-length-output crypto like `sha256`), the caller-provides-buffer convention,
+  multi-module libraries, and shared objects.

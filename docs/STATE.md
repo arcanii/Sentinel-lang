@@ -258,13 +258,18 @@ the current state of the workspace without re-reading every commit.
   branch-free select, and `declassify`s — a foreign caller getting a **verified
   constant-time primitive over a plain C ABI** (`tests/export.rs` asserts exit 42). So
   **all three big-list rocks (0057 FFI import · 0058 floats · 0059 C-ABI export) are now
-  implemented.** Deferred to a Phase 1b: the `(ptr,len)` buffer ABI for byte-buffer crypto
-  exports (`sha256` from C), `sentinel_free_bytes`, multi-module libraries, shared objects.
+  implemented.** And the export side reaches real byte-buffer crypto (Phase 1b): a `&[u8]`
+  export param is presented to C as a `(const uint8_t*, int64_t)` pair via a generated
+  wrapper, so `examples/export/ct_select::ct_byte_eq` — a verified constant-time byte
+  comparison (the MAC/tag-verification primitive) — is callable from C over real buffers.
+  Still deferred: the owned-`[u8]` RETURN (out-struct + `sentinel_free_bytes`, the
+  variable-length output like `sha256`), the caller-provides-buffer convention, multi-module
+  libraries, and shared objects.
   The float follow-ups also landed: the libm transcendentals (above), `f64`⇄string conversion
   (`std/text/str::parse_f64`/`f64_to_str`), and `std/data/json` now parsing/serializing
   non-integer numbers as `Float(f64)`.
 
-**1623 tests across the workspace**, four-check green (build · `cargo nextest`
+**1624 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
