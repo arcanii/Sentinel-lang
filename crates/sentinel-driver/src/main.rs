@@ -179,7 +179,13 @@ fn run_lex(path: &str) -> ExitCode {
 fn is_value_bearing(kind: TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Ident | TokenKind::IntLit | TokenKind::StringLit | TokenKind::CharLit
+        TokenKind::Ident
+            | TokenKind::IntLit
+            // ADR 0058: a float literal carries its text (`3.14` vs `2.5`),
+            // so it is value-bearing like `IntLit`.
+            | TokenKind::FloatLit
+            | TokenKind::StringLit
+            | TokenKind::CharLit
     )
 }
 

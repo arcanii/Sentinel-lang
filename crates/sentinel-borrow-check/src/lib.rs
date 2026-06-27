@@ -892,6 +892,8 @@ fn walk_expr(
     match &expr.kind {
         // Leaves — no children.
         TypedExprKind::IntLit(_)
+        // ADR 0058: a float literal is a leaf (a Copy `f64` constant).
+        | TypedExprKind::FloatLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
         // D.2 / ADR 0033: char/string literals have no sub-expressions

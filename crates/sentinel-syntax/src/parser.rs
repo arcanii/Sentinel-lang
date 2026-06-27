@@ -3982,6 +3982,18 @@ impl<'a> Parser<'a> {
                 })?;
                 Ok(Spanned { kind: ExprKind::IntLit(n), span })
             }
+            Some(TokenKind::FloatLit) => {
+                // ADR 0058: decode the float literal text once into its
+                // IEEE-754 bits (stored in the AST so `ExprKind` keeps its
+                // `Eq`/`Hash` derives). The lexer regex guarantees a valid
+                // `digit+.digit+`/exponent form, so `f64::parse` cannot fail
+                // — an out-of-range magnitude saturates to ±inf (well-defined,
+                // not an error), so no FloatLitOverflow case is needed.
+                let span = self.advance().expect("peeked").span.clone();
+                let text = &self.src[span.clone()];
+                let value: f64 = text.parse().expect("lexer guarantees a valid float literal");
+                Ok(Spanned { kind: ExprKind::FloatLit(value.to_bits()), span })
+            }
             Some(TokenKind::StringLit) => {
                 // D.2 / ADR 0033 D2: decode `"..."` into its bytes. Like
                 // `IntLit`, the value is recovered from the span at parse
@@ -5163,6 +5175,26 @@ mod tests {
     fn parse_error_int_lit_overflow() {
         let err = parse_expr("99999999999999999999").unwrap_err();
         assert!(matches!(err, ParseError::IntLitOverflow { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_float_literal() {
+        // ADR 0058: a float literal decodes to its IEEE-754 bits.
+        for (src, val) in [
+            ("1.25", 1.25_f64),
+            ("1.0", 1.0_f64),
+            ("0.5", 0.5_f64),
+            ("1e9", 1e9_f64),
+            ("2.5e-3", 2.5e-3_f64),
+        ] {
+            let e = parse_expr(src).expect("parse float");
+            match e.kind {
+                ExprKind::FloatLit(bits) => assert_eq!(f64::from_bits(bits), val, "{src}"),
+                other => panic!("{src}: expected FloatLit, got {other:?}"),
+            }
+        }
+        // A bare integer is still an `IntLit`, not a float.
+        assert!(matches!(parse_expr("42").unwrap().kind, ExprKind::IntLit(42)));
     }
 
     #[test]

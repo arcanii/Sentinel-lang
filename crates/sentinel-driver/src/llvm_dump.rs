@@ -1444,6 +1444,11 @@ impl Emit<'_> {
     fn lower_expr(&mut self, expr: &TypedExpr) -> Result<String, String> {
         match &expr.kind {
             TypedExprKind::IntLit(n) => Ok(n.to_string()),
+            // ADR 0058: `f64` is not ported to the textual `snc llvm` oracle
+            // (snc-side-only this increment). It Errs cleanly, so the selfhost
+            // corpus codegen differential SKIPS any f64 fixture (the skip is
+            // keyed on the oracle erroring) — scg stays untouched.
+            TypedExprKind::FloatLit(_) => Err("float literal not ported (ADR 0058 snc-only)".into()),
             TypedExprKind::BoolLit(b) => Ok(if *b { "1".into() } else { "0".into() }),
             TypedExprKind::CharLit(b) => Ok(b.to_string()),
             // `secret T` lowers identically to `T` (ADR 0019 D12); declassify
@@ -3177,6 +3182,7 @@ fn expr_performs(expr: &TypedExpr) -> bool {
                 || return_arm.as_deref().is_some_and(|ra| expr_performs(&ra.body))
         }
         TypedExprKind::IntLit(_)
+        | TypedExprKind::FloatLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
         | TypedExprKind::CharLit(_)
@@ -3319,6 +3325,7 @@ fn collect_performs<'a>(expr: &'a TypedExpr, acc: &mut Vec<&'a TypedExpr>) {
     match &expr.kind {
         TypedExprKind::Perform { .. } => unreachable!("handled above"),
         TypedExprKind::IntLit(_)
+        | TypedExprKind::FloatLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
         | TypedExprKind::CharLit(_)

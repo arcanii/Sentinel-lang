@@ -622,7 +622,11 @@ fn emit_node(out: &mut String, e: &Expr) -> Result<(), String> {
             }
             out.push_str(" }");
         }
-        ExprKind::Declassify(_)
+        // ADR 0058: a float literal is out of the selfhost Bar-A scope (no
+        // selfhost source uses `f64`), like `cast` / `declassify` — the
+        // merge-to-source path errors cleanly rather than rendering it.
+        ExprKind::FloatLit(_)
+        | ExprKind::Declassify(_)
         | ExprKind::Cast(_, _)
         | ExprKind::Scope { .. }
         | ExprKind::Spawn { .. }
@@ -779,6 +783,7 @@ fn logic_symbol(op: LogicOp) -> &'static str {
 
 fn expr_kind_name(k: &ExprKind) -> &'static str {
     match k {
+        ExprKind::FloatLit(_) => "float literal",
         ExprKind::Declassify(_) => "declassify",
         ExprKind::Cast(_, _) => "cast",
         ExprKind::Perform { .. } => "perform",

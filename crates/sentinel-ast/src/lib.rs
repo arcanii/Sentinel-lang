@@ -194,6 +194,12 @@ impl UnaryOp {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExprKind {
     IntLit(i64),
+    /// ADR 0058: a 64-bit float literal — `3.14`, `1e9`. The payload is
+    /// the IEEE-754 bit pattern (`f64::to_bits`), NOT the `f64` itself, so
+    /// `ExprKind` can keep deriving `Eq`/`Hash` (which `f64` does not
+    /// implement). The parser decodes the literal text once; codegen
+    /// reconstructs the value via `f64::from_bits`. Types to `Type::F64`.
+    FloatLit(u64),
     BoolLit(bool),
     /// The `null` keyword literal per ADR 0014 D2. The type checker
     /// resolves its `?T` type from the surrounding context.
@@ -1003,6 +1009,9 @@ impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ExprKind::IntLit(n) => write!(f, "{n}"),
+            // ADR 0058: render the literal's value (`{:?}` keeps a decimal
+            // point so the rendered form re-lexes as a float, e.g. `1.0`).
+            ExprKind::FloatLit(bits) => write!(f, "{:?}", f64::from_bits(*bits)),
             ExprKind::BoolLit(b) => write!(f, "{b}"),
             ExprKind::NullLit => write!(f, "null"),
             // D.2 / ADR 0033 D2: literals render as their decoded

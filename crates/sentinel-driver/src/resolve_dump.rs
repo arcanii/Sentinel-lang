@@ -211,6 +211,12 @@ fn dump_expr(e: &ResolvedExpr, out: &mut String) {
             out.push_str(&n.to_string());
             out.push(')');
         }
+        // ADR 0058: a float literal renders by value (`{:?}` keeps the dot).
+        ResolvedExprKind::FloatLit(bits) => {
+            out.push_str("(float ");
+            out.push_str(&format!("{:?}", f64::from_bits(*bits)));
+            out.push(')');
+        }
         ResolvedExprKind::BoolLit(b) => {
             out.push_str(if *b { "(bool true)" } else { "(bool false)" });
         }

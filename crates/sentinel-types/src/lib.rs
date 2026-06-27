@@ -1787,6 +1787,7 @@ impl TypedExpr {
             TypedExprKind::BoolLit(b) => TypedExprKind::BoolLit(*b),
             TypedExprKind::NullLit => TypedExprKind::NullLit,
             // D.2 / ADR 0033: literal bytes carry no TypeParam — identity.
+            TypedExprKind::FloatLit(bits) => TypedExprKind::FloatLit(*bits),
             TypedExprKind::CharLit(b) => TypedExprKind::CharLit(*b),
             TypedExprKind::StringLit(bytes) => TypedExprKind::StringLit(bytes.clone()),
             TypedExprKind::WidenToNullable(inner) => TypedExprKind::WidenToNullable(
@@ -2392,6 +2393,10 @@ pub struct TypedExpr {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypedExprKind {
     IntLit(i64),
+    /// ADR 0058: a float literal — the IEEE-754 bits. Always carries
+    /// [`Type::F64`]. Codegen lowers it to a `double` constant via
+    /// `f64::from_bits`.
+    FloatLit(u64),
     /// Bool literal. Always carries [`Type::Bool`].
     BoolLit(bool),
     /// Null literal per ADR 0014 D2. Always carries
@@ -6367,6 +6372,9 @@ fn check_expr(
         // string literal IS a `[u8]` (the bytes carry verbatim — the
         // array machinery handles len/index/drop/move). No new typing
         // surface beyond the literal's own type.
+        // ADR 0058: a float literal always types to `f64` (public — there
+        // is no secret float). The bits carry through verbatim.
+        ResolvedExprKind::FloatLit(bits) => (TypedExprKind::FloatLit(*bits), Type::F64),
         ResolvedExprKind::CharLit(b) => (TypedExprKind::CharLit(*b), Type::U8),
         ResolvedExprKind::StringLit(bytes) => (
             TypedExprKind::StringLit(bytes.clone()),

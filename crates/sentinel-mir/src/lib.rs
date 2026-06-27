@@ -432,9 +432,12 @@ impl FnBuilder {
             // D.2 / ADR 0033: char/string literals are public constants
             // (never secret) — model as Opaque with no operands so taint
             // can't flow in (MIR is the constant-time analysis substrate).
-            TypedExprKind::CharLit(_) | TypedExprKind::StringLit(_) => {
-                self.emit(MirOp::Opaque(Vec::new()), ty, span)
-            }
+            // ADR 0058: a float literal is likewise a public constant (there
+            // is no secret f64), so it joins them — the CT analysis has
+            // nothing to track for the float domain.
+            TypedExprKind::FloatLit(_)
+            | TypedExprKind::CharLit(_)
+            | TypedExprKind::StringLit(_) => self.emit(MirOp::Opaque(Vec::new()), ty, span),
             TypedExprKind::Var(id) => self.lookup_var(*id, ty, span),
 
             // ---- secret-relevant arithmetic / comparison -------------

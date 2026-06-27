@@ -649,6 +649,9 @@ pub type ResolvedExpr = Spanned<ResolvedExprKind>;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ResolvedExprKind {
     IntLit(i64),
+    /// ADR 0058: a 64-bit float literal — the IEEE-754 bits (mirrors AST's
+    /// [`sentinel_ast::ExprKind::FloatLit`]). Types to `Type::F64`.
+    FloatLit(u64),
     /// Bool literal (`true` / `false`) per ADR 0012 D5. Added at C1.3.
     BoolLit(bool),
     /// Null literal per ADR 0014 D2. Added at C1.5. The type is
@@ -1869,6 +1872,7 @@ fn rewrite_stmt(stmt: &mut Stmt, r: &Renamer) {
 fn rewrite_expr(expr: &mut Expr, r: &Renamer) {
     match &mut expr.kind {
         ExprKind::IntLit(_)
+        | ExprKind::FloatLit(_)
         | ExprKind::BoolLit(_)
         | ExprKind::NullLit
         | ExprKind::CharLit(_)
@@ -3485,6 +3489,8 @@ fn resolve_expr(
 ) -> Result<ResolvedExpr, ResolveError> {
     let kind = match &expr.kind {
         ExprKind::IntLit(n) => ResolvedExprKind::IntLit(*n),
+        // ADR 0058: a float literal carries its IEEE bits through verbatim.
+        ExprKind::FloatLit(bits) => ResolvedExprKind::FloatLit(*bits),
         ExprKind::BoolLit(b) => ResolvedExprKind::BoolLit(*b),
         ExprKind::NullLit => ResolvedExprKind::NullLit,
         // D.2 / ADR 0033 (3/N): char/string literals now flow through —

@@ -282,6 +282,8 @@ fn walk_expr(
 ) {
     match &expr.kind {
         TypedExprKind::IntLit(_)
+        // ADR 0058: a float literal is pure (no effects), like any literal.
+        | TypedExprKind::FloatLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
         // D.2 / ADR 0033: literals are pure (no effects).

@@ -401,6 +401,13 @@ fn dump_expr(e: &Expr, out: &mut String) {
             out.push_str(&n.to_string());
             out.push(')');
         }
+        // ADR 0058: render a float literal by its value (`{:?}` keeps a
+        // decimal point, so `1.0` not `1`).
+        ExprKind::FloatLit(bits) => {
+            out.push_str("(float ");
+            out.push_str(&format!("{:?}", f64::from_bits(*bits)));
+            out.push(')');
+        }
         ExprKind::BoolLit(b) => {
             out.push_str(if *b { "(bool true)" } else { "(bool false)" });
         }

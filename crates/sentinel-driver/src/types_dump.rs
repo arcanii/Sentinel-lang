@@ -236,6 +236,12 @@ fn dump_expr(e: &TypedExpr, program: &TypedProgram, out: &mut String) {
             out.push_str(&n.to_string());
             close_ty(out, e.ty, program);
         }
+        // ADR 0058: a float literal renders by value (`{:?}` keeps the dot).
+        TypedExprKind::FloatLit(bits) => {
+            out.push_str("(float ");
+            out.push_str(&format!("{:?}", f64::from_bits(*bits)));
+            close_ty(out, e.ty, program);
+        }
         TypedExprKind::BoolLit(b) => {
             out.push_str(if *b { "(bool true" } else { "(bool false" });
             close_ty(out, e.ty, program);

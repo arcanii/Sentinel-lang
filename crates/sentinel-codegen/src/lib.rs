@@ -1628,6 +1628,7 @@ fn collect_spawn_targets_expr(expr: &TypedExpr, acc: &mut Vec<FnId>) {
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => {}
@@ -2024,6 +2025,7 @@ fn walk_expr_for_mono(
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => {}
@@ -5816,6 +5818,11 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 let llvm_ty = self.llvm_int_type(expr.ty);
                 Ok(llvm_ty.const_int(*n as u64, true).into())
             }
+            // ADR 0058: a float literal is a `double` constant, reconstructed
+            // from the stored IEEE-754 bits (no allocation).
+            TypedExprKind::FloatLit(bits) => {
+                Ok(self.context.f64_type().const_float(f64::from_bits(*bits)).into())
+            }
             // D.2 / ADR 0033 D6: a char literal is an `i8` constant of
             // the byte value (no allocation).
             TypedExprKind::CharLit(b) => {
@@ -7253,6 +7260,7 @@ fn expr_performs(expr: &TypedExpr) -> bool {
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => false,
@@ -7514,6 +7522,7 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_) => {}
         TypedExprKind::Unary(_, inner)
@@ -7658,6 +7667,7 @@ fn count_performs(expr: &TypedExpr) -> usize {
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => 0,
@@ -7764,6 +7774,7 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => None,
@@ -7878,6 +7889,7 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
         TypedExprKind::BoolLit(b) => TypedExprKind::BoolLit(*b),
         TypedExprKind::NullLit => TypedExprKind::NullLit,
         // D.2 / ADR 0033: literal bytes carry no perform — clone as-is.
+        TypedExprKind::FloatLit(bits) => TypedExprKind::FloatLit(*bits),
         TypedExprKind::CharLit(b) => TypedExprKind::CharLit(*b),
         TypedExprKind::StringLit(bytes) => TypedExprKind::StringLit(bytes.clone()),
         TypedExprKind::Var(id) => TypedExprKind::Var(*id),
@@ -8180,6 +8192,7 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
         TypedExprKind::IntLit(_)
         | TypedExprKind::BoolLit(_)
         | TypedExprKind::NullLit
+        | TypedExprKind::FloatLit(_)
         | TypedExprKind::CharLit(_)
         | TypedExprKind::StringLit(_)
         | TypedExprKind::Var(_) => None,
