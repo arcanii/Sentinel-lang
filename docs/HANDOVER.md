@@ -50,7 +50,7 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY).
-CURRENT STATE: HEAD `2431aee`, 1597 tests, four-check green, NEVER pushed.** SHIPPED to
+CURRENT STATE: HEAD `673a921`, 1610 tests, four-check green, NEVER pushed.** SHIPPED to
 date, in four bands (per-increment record in STATE.md + the commit log + the
 [[sentinel_examples_and_corelibs]] memory): (1) a comprehensive **constant-time crypto
 suite** — `std/security`, ~30 modules, all on canonical vectors (detail below); (2) **NINE
@@ -61,10 +61,19 @@ auth → §7.2 KDF → encrypted channel → publickey userauth → windowed cha
 ssh_connection}` + 7 `examples/net/*`, all over real loopback TCP via the ADR 0056 socket
 builtins; and (4) the **data & text trio** (below). A real **use-after-free** was found +
 fixed along the way (ADR 0034 D8 — push now consumes its Move-typed element, both backends
-byte-identical). **▶ AND THE DESIGN PHASE FOR THE OWNER'S WHOLE LIST IS COMPLETE: all three
-remaining language-gap rocks now have PROPOSED design ADRs — 0057 (`extern "C"` FFI import
-for OS bindings) · 0058 (an IEEE-754 `f64` float type, public-only) · 0059 (a C-ABI export
-so other languages call into Sentinel).** What remains is IMPLEMENTATION (see **Next**). **The
+byte-identical). **▶ AND THE FIRST OF THE THREE REMAINING LANGUAGE-GAP ROCKS IS NOW
+IMPLEMENTED: the IEEE-754 `f64` float type (ADR 0058 → ACCEPTED-WITH-AMENDMENTS A1–A7),
+built `snc`-side in four staged commits** (lexer float token → `Type::F64` +
+arithmetic/casts → float literals [IEEE bits] → the `sqrt` intrinsic) **+ a demonstrator**
+(`std/math/float` + `examples/math/quadratic`: the quadratic formula + 2-D geometry).
+PUBLIC-ONLY — `secret f64` is a type error (float ops aren't constant-time), so floats are a
+disjoint public domain and the constant-time guarantee is unweakened. Like `u128` (ADR 0055)
+it is `snc`-side only with NO `FnId` shift (a `Type` variant; `sqrt` is a `UnaryOp`, not a
+builtin) — the demonstrator lives in `examples/` (NOT `tests/pass`), so the `scg` mirror is
+deferred and every selfhost differential + both bootstrap fixed points stay byte-identical.
+**The other two rocks — 0057 (`extern "C"` FFI import for OS bindings) · 0059 (a C-ABI
+export so other languages call into Sentinel) — still have PROPOSED design ADRs only.** What
+remains is IMPLEMENTATION of those two (see **Next**). **The
 active sub-track is now DATA & TEXT LIBRARIES** (owner-chosen over float-math / FFI-bindings):
 the **`std::text::str` string library** shipped (`c6c0503` — case/trim/substring/concat/
 compare/`parse_int`/`int_to_str`/index-based split/pad over `[u8]`; `examples/text/str_demo`,
@@ -377,18 +386,22 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
   byte utilities must take `&[u8]`, not `[u8]` by value, or the first call consumes
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
-- **Next (owner's call):** the SSH / networked-`sshd` track and the data & text trio
-  (strings + map + JSON) are DONE, and **all three remaining big-list rocks now have
-  PROPOSED design ADRs** — so the next move is **IMPLEMENTATION** of one of them.
-  Recommended order: **ADR 0058 (the `f64` float type)** first — the most self-contained
-  (a clean new `Type` variant like `u128`, no `FnId` shift) and it unlocks "math
-  functions" beyond integers; then **ADR 0057 (`extern "C"` FFI import** for native OS
-  bindings); then **ADR 0059 (the C-ABI export** — Sentinel-as-a-library for other
-  languages, whose headline is verified constant-time crypto as a drop-in). ⚠ Each is a
-  genuine multi-stage COMPILER increment (lexer/parser/types/codegen + the `scg` mirror
-  following the first `tests/pass/cNN` fixture), **not** a single-`go` library increment —
-  build it stage by stage, four-checking each, like the prior language gaps (ADRs
-  0047–0055). The detailed list below is now the HISTORICAL per-increment record — most of
+- **Next (owner's call):** the SSH / networked-`sshd` track, the data & text trio
+  (strings + map + JSON), and **the `f64` float type (ADR 0058)** are DONE, leaving **two
+  big-list rocks, both with PROPOSED design ADRs** — so the next move is **IMPLEMENTATION**
+  of one of them. Recommended order: **ADR 0057 (`extern "C"` FFI import** for native OS
+  bindings) — `extern` fns resolve BY SYMBOL NAME, so like `f64`/`u128` they avoid the
+  `FnId`-shift pain by construction; then **ADR 0059 (the C-ABI export** —
+  Sentinel-as-a-library for other languages, whose headline is verified constant-time
+  crypto as a drop-in). ⚠ Each is a genuine multi-stage COMPILER increment
+  (lexer/parser/types/codegen + the `scg` mirror following the first `tests/pass/cNN`
+  fixture), **not** a single-`go` library increment — build it stage by stage,
+  four-checking each, like the prior language gaps (ADRs 0047–0055) and `f64` (ADR 0058,
+  staged lexer → type → literals → `sqrt`). Possible float follow-ups (lower priority): a
+  `std/math/float` transcendental layer (`sin`/`cos`/`exp`/`log`/`pow` — Sentinel
+  approximations or libm via the ADR 0057 FFI), `f64` ⇄ string format/parse, `f32`, and
+  `json` parsing non-integer numbers as `f64`. The detailed list below is now the
+  HISTORICAL per-increment record — most of
   its "cleanly open next" items are shipped (read STATE.md §"Current State" + the commit
   log + the [[sentinel_examples_and_corelibs]] memory for the live picture).
   - **More crypto** — the §2.8.2 vector, SHA-256/512, SHA-3 (Keccak sponge), HMAC,

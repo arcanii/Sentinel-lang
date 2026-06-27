@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-06-26)
+## Current State (2026-06-27)
 
 > **Phase C closed at Sentinel 1.0 (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -83,6 +83,9 @@ the current state of the workspace without re-reading every commit.
   idiomatic ref10/donna form — the field multiply runs in `secret u128`, ADR 0055's
   new 128-bit integer type) + `x25519_64` X25519 over it (cross-checked byte-for-byte
   against the radix-2^16 `x25519`)), `std/math/num`,
+  `std/math/float` (the PUBLIC `f64` helpers — `abs`/`min`/`max`/`sq`/`hypot`/`lerp`/
+  `trunc`/`discriminant` — the float counterpart to `std/math/num`, exercised by
+  `examples/math/quadratic`, ADR 0058),
   `std/bits/bits` (rotates),
   `std/bytes/bytes` (`[u8]`
   utilities over `&[u8]` borrows), `std/text/str` (the string library: case folding,
@@ -92,8 +95,10 @@ the current state of the workspace without re-reading every commit.
   `sort` + `binary_search` over public `[i64]`), `std/collections/map` (a string-keyed
   hash map `[u8]`→`i64`: parallel-array + index-chaining storage, public FNV-1a hash,
   power-of-two resize/rehash; `examples/collections/map_demo`), `std/data/json` (a JSON
-  parser + serializer over a cons-list recursive `Json` enum — integer numbers [no float
-  type], strings with escapes, booleans, null, nested arrays + objects; `examples/data/json_demo`),
+  parser + serializer over a cons-list recursive `Json` enum — integer numbers (the `f64`
+  type now exists, ADR 0058, but `json` still parses the integer part; a float-number
+  upgrade is follow-up work), strings with escapes, booleans, null, nested arrays +
+  objects; `examples/data/json_demo`),
   and `std/net` (`tcp` — a thin
   ergonomic layer over the raw socket builtins: `read_exact` + the secret<->public
   byte-boundary helpers both socket examples share; `ssh` — the SSH-2
@@ -217,8 +222,23 @@ the current state of the workspace without re-reading every commit.
   would branch on the secret scalar bits — so Sentinel forces the constant-time form
   (a table-free field-inversion S-box, a branch-free mask-based conditional swap). See
   the `sentinel_examples_and_corelibs` auto-memory.
+  Beyond those self-hosted gaps, the track added **two new scalar TYPES, `snc`-side only**
+  (a `Type` variant causes no `FnId` shift, so — like the demonstrators living in
+  `examples/`, not `tests/pass` — the `scg` mirror is deferred and every selfhost
+  differential + both bootstrap fixed points stay byte-identical): **`u128`** (ADR 0055,
+  the 128-bit integer for radix-2^51 field arithmetic, `secret`-able) and **`f64`** (ADR
+  0058, an IEEE-754 double for "math functions" beyond integers). `f64` is **PUBLIC-ONLY**:
+  float ops are not constant-time on real hardware, so `secret f64` is a type error and
+  floats are a disjoint public domain — the constant-time guarantee is unweakened (contrast
+  `secret u128`, valid because integer ops can be constant-time). `f64` ships float
+  literals (`3.14`/`1e9`, stored as IEEE bits), `+ - * /` + unary `-` + ordered `fcmp`,
+  the int↔float `as` casts (`sitofp`/`fptosi`/…), and `sqrt` (the `llvm.sqrt.f64`
+  intrinsic, surfaced as a `UnaryOp` so it needs no `FnId`); `std/math/float` +
+  `examples/math/quadratic` (the quadratic formula + 2-D geometry) are the demonstrator.
+  The remaining big-list rocks — the **FFI import** (ADR 0057) and **C-ABI export** (ADR
+  0059) — still have PROPOSED design ADRs only.
 
-**1597 tests across the workspace**, four-check green (build · `cargo nextest`
+**1610 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

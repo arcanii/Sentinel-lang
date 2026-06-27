@@ -1,10 +1,11 @@
 # ADR 0058: A 64-bit floating-point type (`f64`) — public-only
 
-Status: **PROPOSED — design only.** This ADR records the design for adding an IEEE-754
-double-precision float type `f64` to the language. No implementation lands with this ADR;
-it is the ADR-first design gate for "math functions" beyond integers — the second of the
-two remaining language-gap rocks on the core-libraries roadmap (the other is the FFI of
-ADR 0057).
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A7).** Implemented `snc`-side in four staged
+commits (lexer → `Type::F64` + arithmetic/casts → float literals → `sqrt`) plus a
+demonstrator. The design below stands; the amendments at the end record where the
+implementation refined it. This was the ADR-first design gate for "math functions" beyond
+integers — the second of the two remaining language-gap rocks on the core-libraries
+roadmap (the other is the FFI of ADR 0057).
 
 ## Context
 
@@ -139,3 +140,53 @@ libm via ADR 0057), float ⇄ string formatting/parsing, `f32`, and the `scg` mi
 Downstream beneficiaries once the type lands: `std/data/json` can parse non-integer
 numbers as `f64` instead of dropping the fraction, and a real `std/math` grows past
 integer min/max/clamp.
+
+## Amendments (at implementation)
+
+- **A1 — `sqrt` is a `UnaryOp::Sqrt` intrinsic, NOT a numbered builtin fn.** Adding a
+  builtin (like `read_file` / the TCP ops) would consume an `FnId` and shift EVERY user
+  `FnId`, re-blessing every golden resolve/MIR/types dump AND breaking the `scg` selfhost
+  differentials (which print `FnId`s by number) — the exact churn ADR 0056's socket
+  builtins paid. Instead `sqrt(x)` is recognised by the parser as the reserved name `sqrt`
+  with exactly one argument and lowered to a new `UnaryOp::Sqrt` (the existing `Unary`
+  node, already threaded through every stage). No `FnId`, so no shift — consistent with
+  "`Type::F64` is a variant → no FnId shift" extended to `sqrt`. Wrong arity is a new
+  `ParseError::SqrtArity`; the operand must be `f64` (else `Mismatch`). Codegen calls
+  `llvm.sqrt.f64` (declared once at setup, stored as `sqrt_f64_fn`).
+- **A2 — float literals store IEEE-754 BITS (`u64`), not an `f64`.** `ExprKind` /
+  `ResolvedExprKind` / `TypedExprKind` derive `Eq` + `Hash` (Salsa needs them), which
+  `f64` does not implement. So `FloatLit(u64)` carries `f64::to_bits`; the parser decodes
+  the literal text once, codegen reconstructs via `f64::from_bits`. (The lexer regex
+  guarantees a valid literal, so `f64::parse` cannot fail — an out-of-range magnitude
+  saturates to ±inf, well-defined, so there is no overflow error, unlike `IntLit`.)
+- **A3 — BOTH the `scg` mirror AND a `tests/pass/cNN` fixture are deferred; the
+  demonstrator is an `examples/` program (snc-only), exactly as `u128` (ADR 0055) did.**
+  The "Self-hosting" section above contemplated deferring the mirror "until a
+  `tests/pass/cNN` fixture uses `f64`". In practice the two are coupled: a clean-typing
+  `f64` `tests/pass` fixture is auto-scanned by the FRONT-END selfhost differentials
+  (`selfhost_types` / `_mir` / …), which run `scg` whenever the Rust oracle (`snc types`)
+  *accepts* the fixture — and `snc types` accepts valid `f64`. `scg` does not know `f64`,
+  so it would diverge → RED. (Only the *codegen* corpus differential skips it, because the
+  `snc llvm` textual oracle Errs on `f64` via its `llvm_ty` catch-all.) So a `tests/pass`
+  `f64` fixture is impossible WITHOUT the full `scg` front-end mirror. The demonstrator is
+  therefore `examples/math/quadratic.sentinel` (built by the examples harness both
+  `--separate` and merged, a free back-end differential), and there is no `f64`
+  `tests/pass` fixture this increment. Both bootstrap fixed points + every selfhost
+  differential stay byte-identical (no corpus / `selfhost/*.sentinel` source uses `f64`).
+- **A4 — two new type errors + one parse error.** `SecretFloat` (the fence) fires at a
+  `secret f64` annotation AND at an `x as f64` cast of a `secret` value — no secret float
+  can ever exist. `FloatBitwise` rejects `& | ^ << >>` on `f64`. `SqrtArity` (parse)
+  rejects `sqrt()` / `sqrt(a, b)`.
+- **A5 — `fcmp` predicate mapping is C-style.** `== → oeq`, `< → olt`, `<= → ole`,
+  `> → ogt`, `>= → oge` (ordered: any `NaN` operand compares false), but `!= → une`
+  (unordered-or-not-equal) so `NaN != NaN` is *true* — matching the ADR's "IEEE 754, so
+  `NaN != NaN`" intent and C / Rust semantics (the design said "ordered predicates"
+  loosely; `!=` is the one that must be unordered).
+- **A6 — `[f64]` / `Vec<f64>` / `?f64` are out of scope this increment** (the
+  `ArrayElem` / `VecElem` / `NullableInner` demotes reject `f64`), exactly as `u128`
+  deferred `[u128]`. Scalar `f64` only; the demonstrator needs nothing more.
+- **A7 — a new `std::math::float` library** (`abs` / `min` / `max` / `sq` / `hypot` /
+  `lerp` / `trunc` / `discriminant`) is the demonstrator's public, branch-on-input (so
+  public-only) numeric module — the float counterpart to `std::math::num`. The example
+  `examples/math/quadratic.sentinel` solves the quadratic formula and a 3-4-5 triangle
+  across the module boundary.
