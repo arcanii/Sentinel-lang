@@ -1,11 +1,13 @@
-// std::sys::ffi — buffer FFI helpers over the `ptr` opaque type (ADR 0057 Phase 1b).
+// std::sys::ffi — OS buffer FFI over the `ptr` opaque type (ADR 0057 Phase 1b).
 //
 // The VALUE-only `std::sys::posix` covers libc calls that take/return the native
-// word (`i64`). This module adds the calls that take a POINTER + length — the
-// pattern most of libc uses (`void*` + `size_t`). The `ptr` opaque type is a raw
-// C address: it is NOT dereferenceable in Sentinel and is produced only by
-// `ptr_of(&[u8])` / `ptr_of_mut(&mut [u8])` (a buffer's data pointer) or an FFI
-// return, and consumed only by passing it back to an `extern` call.
+// word (`i64`). This module adds the OS-specific calls that take a POINTER +
+// length: `getentropy` (POSIX randomness) and `getenv`. The PORTABLE C-string
+// helpers (`cstr` / `cstr_len` / `cstr_read`) live in `std::c` (ADR 0057 A8);
+// this module `use`s them. The `ptr` opaque type is a raw C address: it is NOT
+// dereferenceable in Sentinel and is produced only by `ptr_of(&[u8])` /
+// `ptr_of_mut(&mut [u8])` or an FFI return, and consumed only by passing it back
+// to an `extern` call.
 //
 // FFI is the public, unverified boundary: these are NOT constant-time and the
 // compiler rejects a `secret` (or a `&[secret u8]` via `ptr_of`) crossing an
@@ -14,19 +16,19 @@
 // the call site (an explicit, auditable boundary), exactly like the socket /
 // declassify boundaries.
 
+use std::c::cstr;
+use std::c::cstr_read;
+
 extern "C" {
     // int getentropy(void *buf, size_t buflen) — fill `buf` with `buflen`
     // cryptographically-strong random bytes (buflen <= 256). Returns 0 on
-    // success; we treat a valid small buffer as always succeeding.
+    // success; we treat a valid small buffer as always succeeding. POSIX-only
+    // (macOS / Linux); not available on Windows.
     fn getentropy(buf: ptr, len: i64) -> i64;
-    // size_t strlen(const char *s) — the length of a NUL-terminated C string.
-    fn strlen(s: ptr) -> i64;
     // char *getenv(const char *name) — the value of environment variable
     // `name`, or NULL if unset. The returned pointer is owned by the
     // environment (do NOT free it); we copy its bytes out immediately.
     fn getenv(name: ptr) -> ptr;
-    // void *memcpy(void *dst, const void *src, size_t n) — copy `n` bytes.
-    fn memcpy(dst: ptr, src: ptr, n: i64) -> ptr;
 }
 
 // `n` cryptographically-strong random bytes from the OS (`getentropy`). The
@@ -43,54 +45,6 @@ pub fn random_bytes(n: i64) -> [u8] {
     }
     let mut bytes: [u8] = vec_to_array(buf);
     getentropy(ptr_of_mut(&mut bytes), n);
-    bytes
-}
-
-// Copy `s` into a fresh NUL-terminated buffer (a C string). `ptr_of` of the
-// result is the `const char*` a libc string API wants. Pure Sentinel — no
-// compiler support needed (the NUL is just an appended 0 byte). `s` must not
-// contain an embedded NUL (a C string can't represent one; `strlen` would stop
-// early there).
-pub fn cstr(s: &[u8]) -> [u8] {
-    let n: i64 = len(*s);
-    let mut out: Vec<u8> = vec_new();
-    let mut i: i64 = 0;
-    while i < n {
-        push(&mut out, (*s)[i]);
-        i = i + 1;
-    }
-    push(&mut out, i64_to_u8(0));
-    vec_to_array(out)
-}
-
-// The length libc `strlen` reports for `s` (after NUL-terminating it). For a
-// buffer with no embedded NUL this equals `len(*s)` — it demonstrates handing a
-// Sentinel buffer's pointer to a pointer-taking libc call via `ptr_of`.
-pub fn cstr_len(s: &[u8]) -> i64 {
-    let c: [u8] = cstr(s);
-    strlen(ptr_of(&c))
-}
-
-// Read the NUL-terminated C string at `p` into a fresh owned `[u8]` (WITHOUT the
-// terminator). `p` is an opaque FFI `ptr` Sentinel can't dereference, so the
-// read goes through libc: `strlen` for the length, then `memcpy` into a Sentinel
-// buffer. A NULL `p` (e.g. an unset `getenv`) yields an empty `[u8]`. The `n > 0`
-// guard keeps `memcpy` from ever seeing a NULL source.
-pub fn cstr_read(p: ptr) -> [u8] {
-    let n: i64 = if is_null(p) { 0 } else { strlen(p) };
-    let mut buf: Vec<u8> = vec_new();
-    let mut i: i64 = 0;
-    while i < n {
-        push(&mut buf, i64_to_u8(0));
-        i = i + 1;
-    }
-    let mut bytes: [u8] = vec_to_array(buf);
-    if n > 0 {
-        memcpy(ptr_of_mut(&mut bytes), p, n);
-        0
-    } else {
-        0
-    };
     bytes
 }
 

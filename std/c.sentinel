@@ -1,0 +1,67 @@
+// std::c — portable C standard-library interop.
+//
+// Helpers for crossing the C-string boundary (`const char*` <-> Sentinel `[u8]`)
+// plus the `string.h` symbols they need. These are PORTABLE C — the C runtime is
+// present on every host (macOS / Linux libc, Windows msvcrt) — so, unlike
+// `std::sys::*`, this module carries no OS-specific assumptions and is the right
+// home for general C-FFI support (native bindings, GUI, …). The `extern` calls
+// are the PUBLIC, unverified FFI boundary: NOT constant-time, and the compiler
+// rejects a `secret` (or a `&[secret u8]` via `ptr_of`) crossing an `extern`
+// argument — the FFI fence.
+//
+// `cstr` is pure Sentinel (just an appended NUL); `cstr_len` / `cstr_read` go
+// through libc `strlen` / `memcpy` over the opaque `ptr` type.
+
+extern "C" {
+    // size_t strlen(const char *s) — the length of a NUL-terminated C string.
+    fn strlen(s: ptr) -> i64;
+    // void *memcpy(void *dst, const void *src, size_t n) — copy `n` bytes.
+    fn memcpy(dst: ptr, src: ptr, n: i64) -> ptr;
+}
+
+// Copy `s` into a fresh NUL-terminated buffer (a C string). `ptr_of` of the
+// result is the `const char*` a C API wants. Pure Sentinel — the NUL is just an
+// appended 0 byte. `s` must not contain an embedded NUL (a C string can't
+// represent one; `strlen` would stop early there).
+pub fn cstr(s: &[u8]) -> [u8] {
+    let n: i64 = len(*s);
+    let mut out: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut out, (*s)[i]);
+        i = i + 1;
+    }
+    push(&mut out, i64_to_u8(0));
+    vec_to_array(out)
+}
+
+// The length libc `strlen` reports for `s` (after NUL-terminating it). For a
+// buffer with no embedded NUL this equals `len(*s)` — it also demonstrates
+// handing a Sentinel buffer's pointer to a pointer-taking C call via `ptr_of`.
+pub fn cstr_len(s: &[u8]) -> i64 {
+    let c: [u8] = cstr(s);
+    strlen(ptr_of(&c))
+}
+
+// Read the NUL-terminated C string at `p` into a fresh owned `[u8]` (WITHOUT the
+// terminator). `p` is an opaque FFI `ptr` Sentinel can't dereference, so the
+// read goes through libc: `strlen` for the length, then `memcpy` into a Sentinel
+// buffer. A NULL `p` yields an empty `[u8]`. The `n > 0` guard keeps `memcpy`
+// from ever seeing a NULL source.
+pub fn cstr_read(p: ptr) -> [u8] {
+    let n: i64 = if is_null(p) { 0 } else { strlen(p) };
+    let mut buf: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut buf, i64_to_u8(0));
+        i = i + 1;
+    }
+    let mut bytes: [u8] = vec_to_array(buf);
+    if n > 0 {
+        memcpy(ptr_of_mut(&mut bytes), p, n);
+        0
+    } else {
+        0
+    };
+    bytes
+}

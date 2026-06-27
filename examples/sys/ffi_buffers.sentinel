@@ -9,7 +9,7 @@
 // FFI values are PUBLIC (the unverified boundary): none of this is `secret`. A
 // crypto caller would WIDEN `random_bytes(32)` to `secret` to seed a key.
 use std::sys::ffi::random_bytes;
-use std::sys::ffi::cstr_len;
+use std::c::cstr_len;
 use std::sys::ffi::env_get;
 use std::bytes::bytes::eq;
 
