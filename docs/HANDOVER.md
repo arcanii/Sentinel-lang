@@ -472,7 +472,15 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
     a **float type** (the only thing blocking "math functions" beyond integers) and the
     **FFI/bindings** story — a C-ABI EXPORT for Python/C/C++/Rust calling INTO Sentinel, and a
     general `extern "C"` IMPORT for the native macOS/Win32/Linux bindings (today only ~31
-    hardcoded runtime builtins). (Crypto from the list was already comprehensive.)
+    hardcoded runtime builtins). (Crypto from the list was already comprehensive.) **The FFI
+    IMPORT side now has a DESIGN — ADR 0057 (`extern "C"`), PROPOSED/design-only:** a
+    user-declarable `extern "C" { fn …; }` resolved against libc by the existing `cc` link, an
+    opaque `ptr` type + `ptr_of`/`cstr` marshalling, a **secret-fence** (a `secret` value can't
+    cross an FFI arg — keeps the CT proof sound, like the socket boundary), `std/sys/*`
+    safe-wrapper modules, and macOS+Linux-first / Win32-later phasing. ⚠ `extern` fns resolve
+    BY SYMBOL NAME (NOT a builtin `FnId`) → they AVOID the FnId-shift pain by construction. The
+    ADR is the gate; Phase 1 (declarations + `ptr` + secret-fence + a `std/sys/posix` wrapping
+    ~6 libc calls + a demonstrator) is the first implementation increment when picked up.
     Also
     open: a `secp256k1` / `P-256` field at radix 2^52 (more
     `u128` mileage + a recognizable new curve, possibly ECDSA); the **`scg` mirror of
