@@ -1,9 +1,13 @@
 # ADR 0059: A C-ABI export — calling Sentinel from C / C++ / Rust / Python
 
-Status: **PROPOSED — design only.** This ADR records the design for *exporting* Sentinel
-functions with a stable C ABI, so programs in other languages can call **into** Sentinel
-(the complement of ADR 0057, which is the *import* direction — Sentinel calling out to C).
-No implementation lands with this ADR; it is the ADR-first design gate for the
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A5).** Phase 1a is implemented `snc`-side: the
+`export "C"` annotation, the `--lib` static-archive build mode (no `main`),
+`--emit-header`, and the secret-fence — over the **value-only ABI** (`i64`/`f64`), with a
+constant-time demonstrator (`ct_choose`: public ints → widen → branch-free select →
+declassify) called from a C driver in a harness test. The `(ptr,len)` buffer ABI (for
+`&[u8]`/`[u8]` crypto), `sentinel_free_bytes`, multi-module libraries, and shared objects
+are split into a **Phase 1b/2** and remain deferred. The design below stands; the
+amendments at the end record the re-scoping. This was the ADR-first design gate for the
 "Python / C / C++ / Rust bindings" item on the core-libraries roadmap.
 
 ## Context
@@ -186,3 +190,40 @@ demonstrator: export `sha256` (+ maybe `ed25519`) from Sentinel, build `libsenti
 + `sentinelcrypto.h`, and call it from a small C program in a harness test — showing that a
 foreign caller gets the constant-time primitive over a public-bytes API. Shared libraries,
 struct exports, and the Python/Rust generators are deferred to later phases.
+
+## Amendments (at implementation)
+
+- **A1 — Phase 1 is split; the implemented increment (Phase 1a) is the VALUE-ONLY ABI
+  (`i64`/`f64`).** An export's params/returns are restricted to public `i64`/`f64` (reusing
+  ADR 0057's `is_ffi_safe`), so its signature IS already the C ABI — no wrapper, no buffer
+  marshalling. The `(ptr,len)` buffer ABI (for `&[u8]` params + owned `[u8]` returns +
+  `sentinel_free_bytes` + the caller-provides-buffer convention) — i.e. the byte-buffer
+  crypto exports like `sha256` — is re-scoped to **Phase 1b**, along with multi-module
+  libraries (`use`; Phase 1a is SINGLE-FILE) and shared objects (Phase 2). This is the same
+  split ADR 0057's import side took (value-only first, `ptr`/buffers second).
+- **A2 — export info flows via a `Vec<FnId>`, not a per-signature flag.** `resolve` records
+  each `export "C"` fn's id in `ResolvedProgram.exports`; types validates each one's
+  signature (FFI-safe + the secret-fence, reusing `ExternFfiType`) and carries the ids to
+  `TypedProgram.exports`; codegen + the header generator read that set. An export is an
+  ordinary fn (its body is type-/borrow-/CT-checked and codegen'd normally) — `export "C"`
+  only pins its symbol and validates its boundary.
+- **A3 — the C symbol stays BARE.** `merge_modules` keeps export fn names out of the
+  per-module rename map (like the entry's `main`), and codegen emits an export under its
+  bare un-mangled name + `External` linkage (a single-file / merged build's empty
+  `module_path` already gives bare names; this also pins it for `--separate`). Non-export
+  fns staying internal (`linkonce_odr`/private) for a minimal symbol surface is a deferred
+  polish — at Phase 1a they remain `External` (extra, harmless public symbols).
+- **A4 — `--lib` archives with `libtool -static` (macOS).** The emitted object + the
+  runtime staticlib are bundled into one self-contained `.a`. The Linux `ar`-MRI path and
+  `--shared` (PIC `.dylib`/`.so`) are deferred. The pipeline (resolve-without-`main` via
+  `resolve_module`, then effect-/borrow-/CT-check) is the executable build's, minus the
+  link-to-exe step; a library is still fully verified.
+- **A5 — the demonstrator is value-granular but shows the full headline.** Since the buffer
+  ABI is Phase 1b, the constant-time demonstrator is `ct_choose(cond, a, b)` — a branch-free
+  conditional select that widens the public ints to `secret`, runs the machine-checked
+  constant-time select, and `declassify`s the result. `examples/export/{ct_select.sentinel,
+  driver.c}` + `tests/export.rs` build the `.a` + header, compile a C driver against them,
+  run it, and assert exit 42 — a C program getting Sentinel's verified-constant-time
+  primitive over a plain C ABI. The byte-buffer crypto export (`sha256` from C) lands with
+  Phase 1b's buffer ABI. The `scg` mirror is deferred (no corpus / `selfhost` source uses
+  `export` → every differential + both bootstrap fixed points byte-identical).

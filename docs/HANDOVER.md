@@ -50,7 +50,7 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY).
-CURRENT STATE: HEAD `37b34dc`, 1616 tests, four-check green, NEVER pushed.** SHIPPED to
+CURRENT STATE: HEAD `6aea6e0`, 1623 tests, four-check green, NEVER pushed.** SHIPPED to
 date, in four bands (per-increment record in STATE.md + the commit log + the
 [[sentinel_examples_and_corelibs]] memory): (1) a comprehensive **constant-time crypto
 suite** — `std/security`, ~30 modules, all on canonical vectors (detail below); (2) **NINE
@@ -82,9 +82,16 @@ identity) + `std/math/float`'s **libm transcendentals** are the wrappers
 `ptr` opaque type + `ptr_of`/`cstr` + pointer/buffer libc calls (`getenv`/`getentropy`),
 `i32` widths, structs, extra `-l`, Win32. The **float follow-ups** also landed:
 `f64`⇄string in `std/text/str` (`parse_f64`/`f64_to_str`) and `std/data/json` now
-parses/serializes non-integer numbers as `Float(f64)`. **The LAST rock — ADR 0059 (a C-ABI
-export so other languages call into Sentinel) — is the only one still at PROPOSED design
-only.** What remains is IMPLEMENTATION of it (see **Next**). **The
+parses/serializes non-integer numbers as `Float(f64)`. **AND THE LAST ROCK IS NOW
+IMPLEMENTED: the C-ABI export (ADR 0059 → ACCEPTED-WITH-AMENDMENTS A1–A5), Phase 1a VALUE
+ABI** — an `export "C" fn` (un-mangled C symbol, secret-fenced) + a `snc build --lib`
+static-archive mode (no `main`) + `--emit-header`. The HEADLINE is proven: a C driver
+(`examples/export/driver.c`) links the snc-built `.a` + header and calls a Sentinel
+`export "C"` constant-time select that widens public ints to `secret`, runs the
+machine-checked branch-free select, and `declassify`s — a foreign caller getting a verified
+constant-time primitive over a plain C ABI (`tests/export.rs` asserts exit 42). **SO ALL
+THREE BIG-LIST ROCKS — 0057 (FFI import) · 0058 (floats) · 0059 (C-ABI export) — are
+implemented.** What remains is the deferred Phase 1b/2 tails (see **Next**). **The
 active sub-track is now DATA & TEXT LIBRARIES** (owner-chosen over float-math / FFI-bindings):
 the **`std::text::str` string library** shipped (`c6c0503` — case/trim/substring/concat/
 compare/`parse_int`/`int_to_str`/index-based split/pad over `[u8]`; `examples/text/str_demo`,
@@ -398,21 +405,24 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
   byte utilities must take `&[u8]`, not `[u8]` by value, or the first call consumes
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
 - **Next (owner's call):** the SSH / networked-`sshd` track, the data & text trio, **the
-  `f64` float type (ADR 0058)**, the **`extern "C"` FFI import (ADR 0057 Phase 1)**, and the
-  **float follow-ups** (libm transcendentals · `f64`⇄string · JSON float numbers) are all
-  DONE, leaving **one big-list rock: ADR 0059 (the C-ABI export** — the inverse of 0057,
-  Sentinel-as-a-library so C / Rust / Python call INTO Sentinel; its headline is
-  machine-verified constant-time crypto as a drop-in). It is a genuine multi-stage COMPILER
-  + tooling increment (`export "C" fn` + a `--lib` build mode + `--emit-header` + a
-  `(ptr,len)` buffer ABI; export fns resolve by symbol name → no `FnId` shift, `--lib` is
-  driver-only) — build it stage by stage, four-checking each, like `f64`/FFI. Other open
-  follow-ups (lower priority): **ADR 0057 Phase 1b** — the `ptr` opaque type +
-  `ptr_of`/`cstr` + a runtime cstr/buffer read-back, unblocking `getenv`/`getentropy` (the
-  ADR's pid+`$VAR`+random-bytes demo) + `i32` widths + extra-library `-l` (so libm works on
-  Linux too); and `f32`, an `extern`-symbol-aliasing form (`fn name = "c_sym"(…)` so a libm
-  wrapper can reuse the idiomatic name), a correctly-rounded float formatter (Ryū/Grisú vs
-  the current first-cut fixed-precision `f64_to_str`). The detailed list below is now the
-  HISTORICAL per-increment record — most of
+  `f64` float type (ADR 0058)**, the **`extern "C"` FFI import (ADR 0057 Phase 1)**, the
+  **float follow-ups** (libm transcendentals · `f64`⇄string · JSON float numbers), and **the
+  C-ABI export (ADR 0059 Phase 1a)** are all DONE — **the owner's whole big-list is
+  implemented.** What remains are the deferred **Phase 1b/2 tails** of the FFI/export
+  rocks, each a focused follow-up: **(a) the buffer ABI** shared by both — ADR 0057's `ptr`
+  opaque type + `ptr_of`/`cstr` + a runtime cstr/buffer read-back (imports: `getenv`/
+  `getentropy`) AND ADR 0059's `(ptr,len)` export buffer ABI + `sentinel_free_bytes` (the
+  byte-buffer crypto export — `sha256`/`ed25519` callable from C, the ADR's headline demo);
+  **(b)** `i32`/`u32` FFI widths + struct-by-pointer; **(c)** extra-library `-l` (so libm
+  works on Linux; the Linux `ar`-MRI `--lib` archive path) + `--shared` `.dylib`/`.so`;
+  **(d)** the Python (`ctypes`) / Rust (`-sys`) binding generators (ADR 0059 Phase 3);
+  **(e)** multi-module export libraries (`--lib` with `use`); **(f)** Win32 (ADR 0057/0059
+  Phase 3). Plus the standalone float follow-ups: `f32`, an `extern`-symbol-aliasing form
+  (`fn name = "c_sym"(…)` so a libm wrapper can reuse the idiomatic name), and a
+  correctly-rounded float formatter (Ryū/Grisú vs the first-cut fixed-precision
+  `f64_to_str`). The `scg` self-host mirror of `f64`/FFI/export also remains deferred until
+  a `tests/pass` fixture exercises them. The detailed list below is now the HISTORICAL
+  per-increment record — most of
   its "cleanly open next" items are shipped (read STATE.md §"Current State" + the commit
   log + the [[sentinel_examples_and_corelibs]] memory for the live picture).
   - **More crypto** — the §2.8.2 vector, SHA-256/512, SHA-3 (Keccak sponge), HMAC,

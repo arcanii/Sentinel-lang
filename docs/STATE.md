@@ -248,13 +248,23 @@ the current state of the workspace without re-reading every commit.
   bindings *library* work: `std/sys/posix` (process identity) + the `std/math/float` libm
   transcendentals are the wrappers. Deferred to a Phase 1b: the `ptr` opaque type +
   `ptr_of`/`cstr` + the pointer/buffer libc calls (`getenv`/`getentropy`), `i32` widths,
-  structs, extra-library `-l`, Win32. The **C-ABI export (ADR 0059)** — the inverse,
-  Sentinel-as-a-library — is the last rock still at PROPOSED design only. The float
-  follow-ups also landed: the libm transcendentals (above), `f64`⇄string conversion
+  structs, extra-library `-l`, Win32. And the **C-ABI export (ADR 0059, Phase 1a value
+  ABI)** — the inverse, Sentinel-as-a-library — is now implemented too: an `export "C" fn`
+  annotation (un-mangled C symbol, secret-fenced) + a `snc build --lib` static-archive
+  mode (no `main`; the object + the runtime staticlib bundled into one `.a`) +
+  `--emit-header`. THE HEADLINE works end to end: a C program (`examples/export/driver.c`)
+  links the snc-built `.a` + header and calls a Sentinel `export "C"` constant-time
+  conditional select that widens its public ints to `secret`, runs the machine-checked
+  branch-free select, and `declassify`s — a foreign caller getting a **verified
+  constant-time primitive over a plain C ABI** (`tests/export.rs` asserts exit 42). So
+  **all three big-list rocks (0057 FFI import · 0058 floats · 0059 C-ABI export) are now
+  implemented.** Deferred to a Phase 1b: the `(ptr,len)` buffer ABI for byte-buffer crypto
+  exports (`sha256` from C), `sentinel_free_bytes`, multi-module libraries, shared objects.
+  The float follow-ups also landed: the libm transcendentals (above), `f64`⇄string conversion
   (`std/text/str::parse_f64`/`f64_to_str`), and `std/data/json` now parsing/serializing
   non-integer numbers as `Float(f64)`.
 
-**1616 tests across the workspace**, four-check green (build · `cargo nextest`
+**1623 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker
