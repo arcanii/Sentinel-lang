@@ -165,6 +165,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // imported helper (std::math::num::clamp_assign). 42 = every element landed at
     // its clamped value.
     ("examples/math/inplace.sentinel", 42),
+    // The `f64` float type (ADR 0058): the quadratic formula + 2-D geometry over
+    // std::math::float (float literals, `+ - * /`, unary `-`, ordered `==`, the
+    // `sqrt` intrinsic, int<->float `as` casts) — a PUBLIC-only numeric module
+    // crossing the boundary (no `secret f64`). 42 = every result matched.
+    ("examples/math/quadratic.sentinel", 42),
     // The flagship: variable-length constant-time memcmp over `[secret u8]`
     // secret byte buffers (std::security::ct::ct_memcmp, ADR 0047). 42 =
     // equal-compared-equal AND tampered-compared-unequal.
@@ -417,6 +422,11 @@ fn math_clamp() {
 #[test]
 fn math_inplace_element_borrow() {
     check_example("examples/math/inplace.sentinel", "inplace", 42);
+}
+
+#[test]
+fn math_quadratic_f64() {
+    check_example("examples/math/quadratic.sentinel", "quadratic", 42);
 }
 
 #[test]

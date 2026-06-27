@@ -1,0 +1,56 @@
+// std::math::float — small helpers over the `f64` floating-point type (ADR 0058).
+//
+// `f64` is a PUBLIC-ONLY type: float operations are not constant-time on real
+// hardware (subnormal slow paths, data-dependent `fdiv`/`sqrt` latency, NaN
+// microcode branches), so there is no `secret f64` and these helpers must not
+// be used on secret data — the secret / constant-time world stays integer-only
+// (`std::security::*`). These are ordinary numerics: geometry, statistics,
+// physics, general "math functions" beyond the integers.
+//
+// Built on the language primitives: `+ - * /`, unary `-`, ordered comparisons,
+// the `sqrt` intrinsic (`llvm.sqrt.f64`), and the int<->float `as` casts.
+
+// Absolute value.
+pub fn abs(x: f64) -> f64 {
+    if x < 0.0 { -x } else { x }
+}
+
+// The smaller of two values. (Branches on its inputs — public only.)
+pub fn min(a: f64, b: f64) -> f64 {
+    if a < b { a } else { b }
+}
+
+// The larger of two values.
+pub fn max(a: f64, b: f64) -> f64 {
+    if a > b { a } else { b }
+}
+
+// `x` squared.
+pub fn sq(x: f64) -> f64 {
+    x * x
+}
+
+// The Euclidean length of the 2-D vector `(x, y)` = sqrt(x^2 + y^2). Also the
+// hypotenuse of a right triangle with legs `x` and `y`.
+pub fn hypot(x: f64, y: f64) -> f64 {
+    sqrt(x * x + y * y)
+}
+
+// Linear interpolation: the point `t` of the way from `a` to `b`
+// (`t = 0.0 -> a`, `t = 1.0 -> b`).
+pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
+    a + (b - a) * t
+}
+
+// Truncate toward zero to an integral value, as an `f64`. Round-trips through
+// `i64` (`f64 as i64` is `fptosi`, `i64 as f64` is `sitofp`). For non-negative
+// inputs this is `floor`; for negatives it rounds toward zero, not down.
+pub fn trunc(x: f64) -> f64 {
+    (x as i64) as f64
+}
+
+// The discriminant `b^2 - 4ac` of the quadratic `a*x^2 + b*x + c`. Positive
+// means two distinct real roots, zero one (repeated), negative none.
+pub fn discriminant(a: f64, b: f64, c: f64) -> f64 {
+    b * b - 4.0 * a * c
+}

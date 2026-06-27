@@ -1,0 +1,71 @@
+// examples/math/quadratic.sentinel
+//
+// The IEEE-754 `f64` float type (ADR 0058) on real "math functions" beyond the
+// integers: the quadratic formula and 2-D geometry. Exercises float literals
+// (`3.0`, `-5.0`, `0.25`), float arithmetic (`+ - * /`), unary `-`, ordered
+// comparison (`==`), the `sqrt` intrinsic, and the int<->float `as` casts —
+// all crossing a module boundary into `std::math::float` (so the harness runs
+// the cross-unit `--separate` path on `f64` too). Exit 42 means every result
+// matched. `f64` is public-only: none of this is `secret` (floats are excluded
+// from the constant-time domain by design).
+use std::math::float::abs;
+use std::math::float::min;
+use std::math::float::max;
+use std::math::float::hypot;
+use std::math::float::lerp;
+use std::math::float::trunc;
+use std::math::float::sq;
+use std::math::float::discriminant;
+
+// Solve a*x^2 + b*x + c = 0 for its larger real root via the quadratic formula.
+// (The example below picks a, b, c so the discriminant is a perfect square, so
+// every value here is exactly representable and `==` is safe.)
+fn root_hi(a: f64, b: f64, c: f64) -> f64 {
+    let d: f64 = discriminant(a, b, c);
+    (-b + sqrt(d)) / (2.0 * a)
+}
+
+fn root_lo(a: f64, b: f64, c: f64) -> f64 {
+    let d: f64 = discriminant(a, b, c);
+    (-b - sqrt(d)) / (2.0 * a)
+}
+
+// Evaluate a*x^2 + b*x + c at x.
+fn poly(a: f64, b: f64, c: f64, x: f64) -> f64 {
+    a * sq(x) + b * x + c
+}
+
+fn main() -> i64 {
+    // --- 2-D geometry: the 3-4-5 right triangle has hypotenuse 5.0 ----------
+    let len: f64 = hypot(3.0, 4.0);
+
+    // --- the helpers --------------------------------------------------------
+    let av: f64 = abs(-7.5);          // 7.5
+    let mx: f64 = max(2.0, 9.0);      // 9.0
+    let mn: f64 = min(2.0, 9.0);      // 2.0
+    let mid: f64 = lerp(0.0, 10.0, 0.25); // a quarter of the way: 2.5
+    let tr: f64 = trunc(3.9);         // toward zero: 3.0
+    let trn: f64 = trunc(-3.9);       // toward zero: -3.0
+
+    // --- the quadratic x^2 - 5x + 6 = 0  (roots 3 and 2) --------------------
+    let a: f64 = 1.0;
+    let b: f64 = -5.0;
+    let c: f64 = 6.0;
+    let hi: f64 = root_hi(a, b, c);   // 3.0
+    let lo: f64 = root_lo(a, b, c);   // 2.0
+    // The roots really are roots: the polynomial evaluates to (exactly) 0.
+    let res_hi: f64 = poly(a, b, c, hi);
+    let res_lo: f64 = poly(a, b, c, lo);
+
+    let geometry_ok: bool = len == 5.0;
+    let helpers_ok: bool =
+        av == 7.5 && mx == 9.0 && mn == 2.0 && mid == 2.5 && tr == 3.0 && trn == -3.0;
+    let quadratic_ok: bool =
+        hi == 3.0 && lo == 2.0 && res_hi == 0.0 && res_lo == 0.0;
+
+    if geometry_ok && helpers_ok && quadratic_ok {
+        42
+    } else {
+        0
+    }
+}
