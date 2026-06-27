@@ -180,6 +180,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // wrappers — the i64 value-ABI, resolved against libc by `cc` at link.
     // 42 = every process-identity invariant held.
     ("examples/sys/process_ids.sentinel", 42),
+    // The buffer FFI (ADR 0057 Phase 1b): the `ptr` opaque type + `ptr_of` /
+    // `ptr_of_mut` over pointer-taking libc calls (`getentropy`, `strlen`)
+    // through std::sys::ffi. 42 = strlen("hello")==5 AND two getentropy draws
+    // differ (the OS wrote randomness).
+    ("examples/sys/ffi_buffers.sentinel", 42),
     // The flagship: variable-length constant-time memcmp over `[secret u8]`
     // secret byte buffers (std::security::ct::ct_memcmp, ADR 0047). 42 =
     // equal-compared-equal AND tampered-compared-unequal.
@@ -442,6 +447,11 @@ fn math_quadratic_f64() {
 #[test]
 fn sys_process_ids_ffi() {
     check_example("examples/sys/process_ids.sentinel", "process_ids", 42);
+}
+
+#[test]
+fn sys_ffi_buffers_ptr() {
+    check_example("examples/sys/ffi_buffers.sentinel", "ffi_buffers", 42);
 }
 
 #[test]

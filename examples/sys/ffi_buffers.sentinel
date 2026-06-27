@@ -1,0 +1,30 @@
+// examples/sys/ffi_buffers.sentinel
+//
+// The buffer FFI (ADR 0057 Phase 1b): call POINTER-taking libc functions from
+// Sentinel through the safe `std::sys::ffi` wrappers, using the `ptr` opaque
+// type + `ptr_of` / `ptr_of_mut`. Exit 42 means every invariant held; a
+// successful build is also the proof the declared C symbols (`getentropy`,
+// `strlen`) resolved against libc at link.
+//
+// FFI values are PUBLIC (the unverified boundary): none of this is `secret`. A
+// crypto caller would WIDEN `random_bytes(32)` to `secret` to seed a key.
+use std::sys::ffi::random_bytes;
+use std::sys::ffi::cstr_len;
+use std::bytes::bytes::eq;
+
+fn main() -> i64 {
+    // `ptr_of` + a NUL-terminated cstr handed to libc `strlen`. "hello" has no
+    // embedded NUL, so strlen reports its 5 bytes.
+    let hello: [u8] = "hello";
+    let slen: i64 = cstr_len(&hello);
+
+    // `ptr_of_mut` + OS randomness via `getentropy`. Two 32-byte draws differ
+    // with overwhelming probability (and if getentropy were a no-op, both would
+    // be all-zero and EQUAL) — so `differ` proves the OS actually wrote bytes.
+    let r1: [u8] = random_bytes(32);
+    let r2: [u8] = random_bytes(32);
+    let len_ok: bool = len(r1) == 32 && len(r2) == 32;
+    let differ: bool = !eq(&r1, &r2);
+
+    if slen == 5 && len_ok && differ { 42 } else { 0 }
+}

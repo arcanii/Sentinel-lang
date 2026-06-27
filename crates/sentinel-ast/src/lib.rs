@@ -147,6 +147,15 @@ pub enum UnaryOp {
     /// fn) so it needs no `FnId` and so causes no `FnId` shift / scg
     /// re-mirror. Operand and result are `f64`.
     Sqrt,
+    /// ADR 0057 Phase 1b: `ptr_of(expr)` — the raw C data pointer of a
+    /// borrowed byte array `&[u8]` (the `data` field of the `{ len, data }`
+    /// slice). Written in call form, recognised by the parser's reserved-name
+    /// pass (like `sqrt`), so it needs no `FnId`. Operand is `&[u8]` (or
+    /// `&mut [u8]`); result is the opaque `ptr` for passing to an `extern`.
+    PtrOf,
+    /// ADR 0057 Phase 1b: `ptr_of_mut(expr)` — like `ptr_of` but requires a
+    /// `&mut [u8]` (an exclusive borrow, so C may write through the pointer).
+    PtrOfMut,
 }
 
 impl UnaryOp {
@@ -161,6 +170,10 @@ impl UnaryOp {
             // only for debug rendering (it never round-trips through a
             // selfhost / Bar-A path, which errors on `f64`).
             UnaryOp::Sqrt => "sqrt",
+            // ADR 0057 Phase 1b — call-form intrinsics, debug rendering only
+            // (they never round-trip through a selfhost / Bar-A path).
+            UnaryOp::PtrOf => "ptr_of",
+            UnaryOp::PtrOfMut => "ptr_of_mut",
         }
     }
 }

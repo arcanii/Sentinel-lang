@@ -85,6 +85,16 @@ pub enum Type {
     /// `Mismatch` (no implicit promotion — use an explicit `x as f64` /
     /// `x as i64` cast). Copy, like the other scalars.
     F64,
+    /// ADR 0057 Phase 1b: `ptr` — an opaque raw C pointer (a machine-word
+    /// address), lowering to an LLVM opaque pointer. It is NOT dereferenceable
+    /// or indexable in Sentinel and joins no numeric predicate (so arithmetic /
+    /// indexing it is a `Mismatch` — opacity falls out of its absence from the
+    /// numeric / array sets). It is produced ONLY by an FFI return or by
+    /// `ptr_of(&[u8])` / `ptr_of_mut(&mut [u8])` (the buffer's `data` field) and
+    /// consumed ONLY by passing it to an `extern` call — modelling a C handle
+    /// (`void*` / `char*`) as an opaque token. PUBLIC and FFI-safe (it may cross
+    /// the FFI fence); Copy; owns nothing (no drop).
+    Ptr,
     Bool,
     Struct(StructId),
     /// `?T` per ADR 0014 D1. Payload is the inner base type.
@@ -538,7 +548,8 @@ impl VecElem {
 /// other widths (deferred to a later FFI phase). Gates `extern` param/return
 /// types.
 fn is_ffi_safe(ty: Type) -> bool {
-    matches!(ty, Type::I64 | Type::F64)
+    // ADR 0057: public `i64` / `f64` (value ABI) + the opaque `ptr` (Phase 1b).
+    matches!(ty, Type::I64 | Type::F64 | Type::Ptr)
 }
 
 /// ADR 0059 Phase 1b: `true` iff `ty` is `&[u8]` / `&mut [u8]` — a reference to
@@ -663,6 +674,8 @@ impl Type {
             // ADR 0058: `?f64` is out of scope (NullableInner gains no F64
             // variant) — scalar `f64` only this increment.
             | Type::F64
+            // ADR 0057: `?ptr` is out of scope — `ptr` is an FFI-only opaque.
+            | Type::Ptr
             | Type::Array(_)
             | Type::Nullable(_)
             | Type::Secret(_)
@@ -711,6 +724,8 @@ impl Type {
             // ADR 0058: `[f64]` is out of scope (ArrayElem gains no F64
             // variant) — scalar `f64` only this increment.
             | Type::F64
+            // ADR 0057: `[ptr]` is out of scope — `ptr` is an FFI-only opaque.
+            | Type::Ptr
             | Type::Array(_)
             | Type::Nullable(_)
             | Type::Ref(_)
@@ -787,6 +802,8 @@ impl Type {
             // ADR 0058: `Vec<f64>` is out of scope (VecElem gains no F64
             // variant) — scalar `f64` only this increment.
             | Type::F64
+            // ADR 0057: `Vec<ptr>` is out of scope — `ptr` is an FFI-only opaque.
+            | Type::Ptr
             | Type::Array(_)
             | Type::Vec(_)
             | Type::Nullable(_)
@@ -870,6 +887,8 @@ impl Type {
             | Type::U128
             // ADR 0058: `f64` is likewise a scalar — identity.
             | Type::F64
+            // ADR 0057: `ptr` is a scalar opaque — substitution is the identity.
+            | Type::Ptr
             | Type::Bool
             | Type::Struct(_)
             | Type::Class(_)
@@ -1108,6 +1127,7 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
         Type::U8 => "u8".to_string(),
         Type::U128 => "u128".to_string(),
         Type::F64 => "f64".to_string(),
+        Type::Ptr => "ptr".to_string(),
         Type::Struct(id) => match program.and_then(|p| p.structs.get(id.0 as usize)) {
             Some(s) => s.name.clone(),
             None => format!("<struct#{}>", id.0),
@@ -1198,6 +1218,7 @@ impl std::fmt::Display for Type {
             Type::U8 => write!(f, "u8"),
             Type::U128 => write!(f, "u128"),
             Type::F64 => write!(f, "f64"),
+            Type::Ptr => write!(f, "ptr"),
             Type::Struct(id) => write!(f, "<struct#{}>", id.0),
             Type::Nullable(inner) => write!(f, "?{}", inner.to_type()),
             Type::Array(elem) => write!(f, "[{}]", elem.to_type()),
@@ -1294,6 +1315,10 @@ fn resolve_type_expr_with_scope(
                 // ADR 0058: `f64` — an IEEE-754 double-precision float
                 // (PUBLIC-ONLY; `secret f64` is rejected in the Secret arm).
                 "f64" => Ok(Type::F64),
+                // ADR 0057 Phase 1b: `ptr` — an opaque raw C pointer for the
+                // FFI (produced by `ptr_of`/an extern return; consumed by an
+                // extern call). Not dereferenceable / indexable in Sentinel.
+                "ptr" => Ok(Type::Ptr),
                 // Phase D.3 (2/N) / ADR 0034 D5 (Amendment A1): `String`
                 // is a thin alias for `Vec<u8>` — a growable byte buffer,
                 // not a separate nominal type. Recognised now that the
@@ -3227,6 +3252,21 @@ pub enum TypeError {
     )]
     ExternFfiType {
         #[label("not an FFI-safe type")]
+        span: miette::SourceSpan,
+    },
+
+    /// ADR 0057 Phase 1b: `ptr_of` / `ptr_of_mut` were applied to something
+    /// other than a borrow of a PUBLIC byte array. `ptr_of` needs `&[u8]` (or
+    /// `&mut [u8]`); `ptr_of_mut` needs `&mut [u8]` specifically. A
+    /// `&[secret u8]` is rejected — the FFI fence keeps a secret buffer's
+    /// pointer from crossing to unverified C.
+    #[error("`ptr_of` / `ptr_of_mut` need a borrow of a public `[u8]` (`&[u8]` / `&mut [u8]`)")]
+    #[diagnostic(
+        code(sentinel::types::ptr_of_arg),
+        help("write `ptr_of(&buf)` over a `[u8]` (or `ptr_of_mut(&mut buf)` for a writable buffer); a `[secret u8]` cannot cross the FFI fence (ADR 0057)")
+    )]
+    PtrOfArg {
+        #[label("not a public byte-array borrow")]
         span: miette::SourceSpan,
     },
 
@@ -6041,6 +6081,8 @@ fn try_substitute(
         | Type::U128
         // ADR 0058: `f64` is a scalar — no TypeParam payload.
         | Type::F64
+        // ADR 0057: `ptr` is a scalar opaque — no TypeParam payload.
+        | Type::Ptr
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -6113,6 +6155,8 @@ fn contains_type_param(
         | Type::U128
         // ADR 0058: `f64` is a scalar — never a TypeParam.
         | Type::F64
+        // ADR 0057: `ptr` is a scalar opaque — never a TypeParam.
+        | Type::Ptr
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -6751,6 +6795,54 @@ fn check_expr(
                         });
                     }
                     (TypedExprKind::Unary(*op, Box::new(inner_t)), Type::F64)
+                }
+                UnaryOp::PtrOf | UnaryOp::PtrOfMut => {
+                    // ADR 0057 Phase 1b: `ptr_of(&[u8])` / `ptr_of_mut(&mut [u8])`
+                    // take a borrow of a PUBLIC byte array and produce the opaque
+                    // `ptr` (the buffer's `data` field) for an `extern` call.
+                    // `ptr_of_mut` requires a `&mut` borrow (so C may write
+                    // through it). A `&[secret u8]` is rejected — the FFI fence:
+                    // a secret buffer's pointer may not cross to unverified C.
+                    let inner_t = check_expr(
+                        inner,
+                        None,
+                        env,
+                        signatures,
+                        structs,
+                        class_decls,
+                        enums,
+                        instances,
+                        refs,
+                        secrets,
+                        struct_type_param_counts,
+                        effect_decls,
+                        trait_decls,
+                        impl_decls,
+                        konts,
+                        tasks,
+                    )?;
+                    let (rd_inner, rd_mutable) = match inner_t.ty {
+                        Type::Ref(id) => (refs[id.0 as usize].inner, refs[id.0 as usize].mutable),
+                        _ => {
+                            return Err(TypeError::PtrOfArg {
+                                span: to_source_span(&inner.span),
+                            });
+                        }
+                    };
+                    // The referent must be a PUBLIC `[u8]` (a `[secret u8]` has an
+                    // `ArrayElem::Secret` element, so this rejects it — the fence).
+                    if !matches!(rd_inner, Type::Array(ArrayElem::U8)) {
+                        return Err(TypeError::PtrOfArg {
+                            span: to_source_span(&inner.span),
+                        });
+                    }
+                    // `ptr_of_mut` needs an exclusive (`&mut`) borrow.
+                    if matches!(op, UnaryOp::PtrOfMut) && !rd_mutable {
+                        return Err(TypeError::PtrOfArg {
+                            span: to_source_span(&inner.span),
+                        });
+                    }
+                    (TypedExprKind::Unary(*op, Box::new(inner_t)), Type::Ptr)
                 }
             }
         }
@@ -9140,6 +9232,11 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
         TypeError::ExternFfiType { span } => (
             "sentinel::types::extern_ffi_type",
             "`extern` fn types must be public FFI-safe scalars (`i64` or `f64`)".to_string(),
+            span.offset()..(span.offset() + span.len()),
+        ),
+        TypeError::PtrOfArg { span } => (
+            "sentinel::types::ptr_of_arg",
+            "`ptr_of` / `ptr_of_mut` need a borrow of a public `[u8]`".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::SecretBranch { kw, span } => (
@@ -12218,6 +12315,55 @@ fn main() -> i64 {
             "fn f(x: secret f64) -> i64 { 0 }\nfn main() -> i64 { 0 }",
         );
         assert!(matches!(err, TypeError::SecretFloat { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn ptr_of_typechecks() {
+        // ADR 0057 Phase 1b: `ptr_of(&[u8])` / `ptr_of_mut(&mut [u8])` produce
+        // `ptr`, which an `extern` may take. A whole FFI buffer call type-checks.
+        let p = check_ok(
+            "extern \"C\" { fn getentropy(b: ptr, n: i64) -> i64; fn strlen(s: ptr) -> i64; }\
+             fn f() -> i64 { let b: [u8] = \"hi\"; let mut m: [u8] = \"ab\"; \
+             getentropy(ptr_of_mut(&mut m), 2) + strlen(ptr_of(&b)) }\
+             fn main() -> i64 { f() }",
+        );
+        assert_eq!(p.main().return_type, Type::I64);
+    }
+
+    #[test]
+    fn ptr_of_non_byte_ref_rejected() {
+        // `ptr_of` of something that is not a `&[u8]` (here a bare `[u8]`, not a
+        // reference) is rejected.
+        let err = check_err(
+            "extern \"C\" { fn strlen(s: ptr) -> i64; }\
+             fn f() -> i64 { let b: [u8] = \"hi\"; strlen(ptr_of(b)) }\
+             fn main() -> i64 { f() }",
+        );
+        assert!(matches!(err, TypeError::PtrOfArg { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn ptr_of_mut_requires_mutable_borrow() {
+        // `ptr_of_mut` needs a `&mut` borrow (C may write through it); a shared
+        // `&buf` is rejected.
+        let err = check_err(
+            "extern \"C\" { fn getentropy(b: ptr, n: i64) -> i64; }\
+             fn f() -> i64 { let b: [u8] = \"hi\"; getentropy(ptr_of_mut(&b), 2) }\
+             fn main() -> i64 { f() }",
+        );
+        assert!(matches!(err, TypeError::PtrOfArg { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn ptr_of_secret_buffer_rejected() {
+        // The FFI fence: a `&[secret u8]` cannot cross via `ptr_of` — a secret
+        // buffer's pointer may not reach unverified C.
+        let err = check_err(
+            "extern \"C\" { fn strlen(s: ptr) -> i64; }\
+             fn f() -> i64 { let b: [secret u8] = \"hi\"; strlen(ptr_of(&b)) }\
+             fn main() -> i64 { f() }",
+        );
+        assert!(matches!(err, TypeError::PtrOfArg { .. }), "got {err:?}");
     }
 
     #[test]

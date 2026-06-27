@@ -150,6 +150,19 @@ pub enum ParseError {
         span: miette::SourceSpan,
     },
 
+    /// ADR 0057 Phase 1b: `ptr_of` / `ptr_of_mut` are reserved built-ins, each
+    /// taking EXACTLY one argument (a `&[u8]` / `&mut [u8]` borrow). Any other
+    /// arity is rejected at parse time.
+    #[error("`ptr_of` / `ptr_of_mut` take exactly one argument")]
+    #[diagnostic(
+        code(sentinel::parse::ptr_of_arity),
+        help("`ptr_of(&buf)` / `ptr_of_mut(&mut buf)` take a single byte-array borrow (ADR 0057)")
+    )]
+    PtrOfArity {
+        #[label("`ptr_of` call here")]
+        span: miette::SourceSpan,
+    },
+
     /// C3 / ADR 0019 D5: nested `secret secret T` is rejected at
     /// parse time. The depth-1 rule mirrors C1.5's `??T` rejection
     /// per ADR 0014 D6 — qualifier composition stays bounded at
@@ -4505,6 +4518,27 @@ impl<'a> Parser<'a> {
                         let arg = args.into_iter().next().expect("len checked");
                         return Ok(Spanned {
                             kind: ExprKind::Unary(UnaryOp::Sqrt, Box::new(arg)),
+                            span: name_span.start..rparen_end,
+                        });
+                    }
+                    // ADR 0057 Phase 1b: `ptr_of(&buf)` / `ptr_of_mut(&mut buf)`
+                    // are the raw-pointer intrinsics, recognised by reserved name
+                    // and lowered to a unary node (no `FnId`, like `sqrt`).
+                    // Exactly one argument.
+                    if name == "ptr_of" || name == "ptr_of_mut" {
+                        if args.len() != 1 {
+                            return Err(ParseError::PtrOfArity {
+                                span: to_source_span(&(name_span.start..rparen_end)),
+                            });
+                        }
+                        let op = if name == "ptr_of_mut" {
+                            UnaryOp::PtrOfMut
+                        } else {
+                            UnaryOp::PtrOf
+                        };
+                        let arg = args.into_iter().next().expect("len checked");
+                        return Ok(Spanned {
+                            kind: ExprKind::Unary(op, Box::new(arg)),
                             span: name_span.start..rparen_end,
                         });
                     }

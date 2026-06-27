@@ -150,6 +150,13 @@ fn parse_error_to_diagnostic(err: &ParseError) -> Diagnostic {
             message: "`sqrt` takes exactly one argument".to_string(),
             span: span.offset()..(span.offset() + span.len()),
         },
+        ParseError::PtrOfArity { span } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::ptr_of_arity",
+            message: "`ptr_of` / `ptr_of_mut` take exactly one argument".to_string(),
+            span: span.offset()..(span.offset() + span.len()),
+        },
         ParseError::EmptyEffectAnnotation { span } => Diagnostic {
             stage: "parse",
             severity: Severity::Error,

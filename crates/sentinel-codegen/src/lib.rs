@@ -1831,6 +1831,8 @@ fn field_type_needs_drop_inner(
         | Type::U8
         | Type::U128
         | Type::F64
+        // ADR 0057: a raw `ptr` is a scalar address — no heap to drop.
+        | Type::Ptr
         | Type::Bool
         | Type::Ref(_) => false,
         Type::TypeParam(_) => false,
@@ -1920,6 +1922,9 @@ fn llvm_basic_type<'ctx>(
         // arithmetic is a different op family (`fadd`/`fcmp`/…) than the
         // integer types above.
         Type::F64 => context.f64_type().into(),
+        // ADR 0057 Phase 1b: `ptr` — an opaque raw C pointer (LLVM opaque
+        // pointer); the FFI handle / buffer-data type.
+        Type::Ptr => context.ptr_type(inkwell::AddressSpace::default()).into(),
         Type::Struct(id) => (*struct_types
             .get(&id)
             .expect("struct declared in pass 0"))
@@ -2458,7 +2463,9 @@ pub struct NamedTypeOrigins {
 fn mono_args_dedup_safe(args: &[Type], origins: &NamedTypeOrigins) -> bool {
     fn safe(t: Type, origins: &NamedTypeOrigins) -> bool {
         match t {
-            Type::I64 | Type::I32 | Type::Bool | Type::U8 | Type::U128 | Type::F64 => true,
+            Type::I64 | Type::I32 | Type::Bool | Type::U8 | Type::U128 | Type::F64 | Type::Ptr => {
+                true
+            }
             Type::Struct(id) => origins.structs.contains_key(&id),
             Type::Enum(id) => origins.enums.contains_key(&id),
             Type::Array(e) => safe(e.to_type(), origins),
@@ -2575,6 +2582,7 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         Type::U128 => "u128".to_string(),
         // ADR 0058: `f64` mangles as `f64`.
         Type::F64 => "f64".to_string(),
+        Type::Ptr => "ptr".to_string(),
         Type::Struct(id) => program
             .structs
             .get(id.0 as usize)
@@ -2677,6 +2685,8 @@ fn arg_contains_typeparam(
         | Type::U128
         // ADR 0058: `f64` carries no TypeParam.
         | Type::F64
+        // ADR 0057: a raw `ptr` carries no TypeParam.
+        | Type::Ptr
         | Type::Bool
         | Type::Struct(_)
         | Type::Class(_)
@@ -2738,6 +2748,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
         // ADR 0058: `f64` is a FLOAT, not an int — float values are loaded
         // via `llvm_basic_type`/`f64_type`, never here.
         Type::F64 => panic!("llvm_int_type called on non-int Type::F64"),
+        Type::Ptr => panic!("llvm_int_type called on non-int Type::Ptr"),
         Type::Struct(_) => panic!("llvm_int_type called on non-int Type::Struct"),
         Type::Nullable(_) => panic!("llvm_int_type called on non-int Type::Nullable"),
         Type::Array(_) => panic!("llvm_int_type called on non-int Type::Array"),
@@ -4385,6 +4396,8 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             | Type::U128
             // ADR 0058: an `f64` scalar has no heap data.
             | Type::F64
+            // ADR 0057: a raw `ptr` is a scalar address — no heap data.
+            | Type::Ptr
             | Type::Bool
             | Type::Ref(_) => {
                 // Primitives + refs + nullable-of-primitive: no
@@ -6071,6 +6084,25 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // type-check time; LLVM doesn't distinguish.
                 let ptr = self.lower_lvalue_ptr(inner, program)?;
                 Ok(ptr.into())
+            }
+            TypedExprKind::Unary(UnaryOp::PtrOf | UnaryOp::PtrOfMut, inner) => {
+                // ADR 0057 Phase 1b: `ptr_of(&[u8])` / `ptr_of_mut(&mut [u8])`
+                // yields the buffer's raw `data` pointer. `inner` is a `&[u8]`
+                // (Type::Ref), which lowers to a pointer to the
+                // `{ i64 len, ptr data }` slice struct; load its data field
+                // (field 1) — the `void*`/`char*` for an extern call.
+                let slice_ptr = self.lower_expr(inner, program)?.into_pointer_value();
+                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                let slice_ty = self
+                    .context
+                    .struct_type(&[self.context.i64_type().into(), ptr_ty.into()], false);
+                let data_field = self
+                    .builder
+                    .build_struct_gep(slice_ty, slice_ptr, 1, "ptr_of_data")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                self.builder
+                    .build_load(ptr_ty, data_field, "ptr_of")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))
             }
             TypedExprKind::Unary(UnaryOp::Deref, inner) => {
                 // C2 / ADR 0017 D4: `*r` loads the inner type from

@@ -5,12 +5,13 @@
 // User code calls the wrappers; the raw `extern`s are module-private by
 // convention (the unverified-leaf boundary lives here, ADR 0057 pillar 3).
 //
-// Phase 1 covers the VALUE-ONLY libc calls that take/return the native word
+// This module covers the VALUE-ONLY libc calls that take/return the native word
 // (`i64`): the process / user identity queries. They resolve against the
 // platform C library (libSystem on macOS, glibc on Linux) at link time via the
-// existing `cc` link — no new flags. Calls that take/return pointers or
-// buffers (`getenv`, `getentropy`, …) need the `ptr` opaque type + a cstr
-// read-back helper and are a later FFI phase.
+// existing `cc` link — no new flags. Calls that take/return POINTERS + a length
+// (`getentropy`, `strlen`, …) use the `ptr` opaque type + `ptr_of` / `ptr_of_mut`
+// (ADR 0057 Phase 1b) and live in `std::sys::ffi`; the C-string READ-back (for
+// `getenv`, which needs null-handling) is still a later FFI phase.
 //
 // FFI is the public, unverified boundary: these are NOT constant-time and must
 // never be passed `secret` data (the compiler rejects a `secret` reaching an

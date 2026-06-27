@@ -1,0 +1,66 @@
+// std::sys::ffi — buffer FFI helpers over the `ptr` opaque type (ADR 0057 Phase 1b).
+//
+// The VALUE-only `std::sys::posix` covers libc calls that take/return the native
+// word (`i64`). This module adds the calls that take a POINTER + length — the
+// pattern most of libc uses (`void*` + `size_t`). The `ptr` opaque type is a raw
+// C address: it is NOT dereferenceable in Sentinel and is produced only by
+// `ptr_of(&[u8])` / `ptr_of_mut(&mut [u8])` (a buffer's data pointer) or an FFI
+// return, and consumed only by passing it back to an `extern` call.
+//
+// FFI is the public, unverified boundary: these are NOT constant-time and the
+// compiler rejects a `secret` (or a `&[secret u8]` via `ptr_of`) crossing an
+// `extern` argument — the FFI fence. A crypto caller that wants OS randomness
+// for a secret key takes the PUBLIC bytes here and WIDENS them to `secret` at
+// the call site (an explicit, auditable boundary), exactly like the socket /
+// declassify boundaries.
+
+extern "C" {
+    // int getentropy(void *buf, size_t buflen) — fill `buf` with `buflen`
+    // cryptographically-strong random bytes (buflen <= 256). Returns 0 on
+    // success; we treat a valid small buffer as always succeeding.
+    fn getentropy(buf: ptr, len: i64) -> i64;
+    // size_t strlen(const char *s) — the length of a NUL-terminated C string.
+    fn strlen(s: ptr) -> i64;
+}
+
+// `n` cryptographically-strong random bytes from the OS (`getentropy`). The
+// buffer is a Sentinel `[u8]`; its data pointer crosses to libc via
+// `ptr_of_mut` (an exclusive borrow, so C may write through it), and the filled
+// buffer is returned. PUBLIC bytes — a caller widens them to `secret` to seed a
+// key. `n` should be in 1..=256 (getentropy's limit).
+pub fn random_bytes(n: i64) -> [u8] {
+    let mut buf: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut buf, i64_to_u8(0));
+        i = i + 1;
+    }
+    let mut bytes: [u8] = vec_to_array(buf);
+    getentropy(ptr_of_mut(&mut bytes), n);
+    bytes
+}
+
+// Copy `s` into a fresh NUL-terminated buffer (a C string). `ptr_of` of the
+// result is the `const char*` a libc string API wants. Pure Sentinel — no
+// compiler support needed (the NUL is just an appended 0 byte). `s` must not
+// contain an embedded NUL (a C string can't represent one; `strlen` would stop
+// early there).
+pub fn cstr(s: &[u8]) -> [u8] {
+    let n: i64 = len(*s);
+    let mut out: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut out, (*s)[i]);
+        i = i + 1;
+    }
+    push(&mut out, i64_to_u8(0));
+    vec_to_array(out)
+}
+
+// The length libc `strlen` reports for `s` (after NUL-terminating it). For a
+// buffer with no embedded NUL this equals `len(*s)` — it demonstrates handing a
+// Sentinel buffer's pointer to a pointer-taking libc call via `ptr_of`.
+pub fn cstr_len(s: &[u8]) -> i64 {
+    let c: [u8] = cstr(s);
+    strlen(ptr_of(&c))
+}

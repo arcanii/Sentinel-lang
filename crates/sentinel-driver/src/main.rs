@@ -1109,6 +1109,8 @@ fn c_type_name(ty: sentinel_types::Type) -> Option<&'static str> {
     match ty {
         sentinel_types::Type::I64 => Some("int64_t"),
         sentinel_types::Type::F64 => Some("double"),
+        // ADR 0057 Phase 1b: the opaque `ptr` is a C `void*`.
+        sentinel_types::Type::Ptr => Some("void*"),
         _ => None,
     }
 }

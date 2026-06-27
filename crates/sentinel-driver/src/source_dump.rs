@@ -504,6 +504,11 @@ fn emit_node(out: &mut String, e: &Expr) -> Result<(), String> {
             // Bar-A scope (like `cast` / a float literal) — error cleanly.
             return Err("merge-to-source: `sqrt` is out of Bar-A scope".to_string());
         }
+        ExprKind::Unary(UnaryOp::PtrOf | UnaryOp::PtrOfMut, _) => {
+            // ADR 0057 Phase 1b: `ptr_of` / `ptr_of_mut` are FFI call-form
+            // intrinsics, out of the selfhost Bar-A scope (like `sqrt`).
+            return Err("merge-to-source: `ptr_of` is out of Bar-A scope".to_string());
+        }
         ExprKind::Unary(op, inner) => {
             out.push_str(unary_symbol(*op));
             out.push(' ');
@@ -754,6 +759,10 @@ fn unary_symbol(op: UnaryOp) -> &'static str {
         // ADR 0058: `sqrt` is call-form, not a prefix operator — the emitter
         // errors before reaching this (out of Bar-A scope); kept exhaustive.
         UnaryOp::Sqrt => "sqrt",
+        // ADR 0057 Phase 1b: `ptr_of` / `ptr_of_mut` are call-form FFI
+        // intrinsics — the emitter errors before reaching this; kept exhaustive.
+        UnaryOp::PtrOf => "ptr_of",
+        UnaryOp::PtrOfMut => "ptr_of_mut",
     }
 }
 

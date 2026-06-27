@@ -1421,9 +1421,15 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         // `[u8]` string is `Type::Array(_)` below → Move, owning a heap
         // buffer like any array).
         // ADR 0058: `f64` is a Copy scalar (a `double`, no heap payload).
-        Type::I64 | Type::I32 | Type::U8 | Type::U128 | Type::F64 | Type::Bool | Type::Ref(_) => {
-            true
-        }
+        // ADR 0057: `ptr` is a Copy scalar (an opaque address, owns nothing).
+        Type::I64
+        | Type::I32
+        | Type::U8
+        | Type::U128
+        | Type::F64
+        | Type::Ptr
+        | Type::Bool
+        | Type::Ref(_) => true,
         Type::Nullable(inner) => is_copy_nullable_inner(inner),
         Type::Struct(_)
         | Type::Array(_)
