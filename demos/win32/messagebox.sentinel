@@ -1,20 +1,26 @@
 // demos/win32/messagebox.sentinel
 //
-// Native GUI via FFI (ADR 0057 + 0060): pop a real Win32 message box
-// (user32.dll `MessageBoxA`) from Sentinel — the "hello, native GUI" demo.
+// Native GUI via FFI (ADR 0057): a self-contained showcase of the Win32 user32
+// bindings. The functions below mirror the `std::sys::win32` library
+// (message_box / screen_width / screen_height / beep) — a real program would
+// `use std::sys::win32::message_box;` instead of redeclaring them, but a demo
+// here is standalone (one file; `use` resolves modules relative to the file's
+// own directory, and std/ is not adjacent to demos/), so it carries its own
+// copies to stay buildable in place.
 //
-// Windows only. Build from a Developer Command Prompt (the `link("user32")`
-// annotation self-links user32, so no `--link` flag is needed):
+// The `extern` block SELF-LINKS user32 (ADR 0057 A9: `link("user32")`), so no
+// `--link` flag is needed. Windows only. Build from a Developer Command Prompt:
 //   snc build demos/win32/messagebox.sentinel -o messagebox.exe
-// Running it shows a message box and BLOCKS until you click OK, then exits with
-// the button id (IDOK = 1).
+// Running it prints the screen size, beeps, then pops a message box (BLOCKS
+// until you click OK); it exits with the clicked button id (IDOK = 1).
 
 extern "C" link("user32") {
-    // int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType);
-    // HWND (owner) and UINT (style) pass through the i64 register ABI: hWnd = 0
-    // is NULL (no owner window), uType = 0 is MB_OK. The two strings cross as
-    // `const char*` — a NUL-terminated `[u8]`'s data pointer via `ptr_of`.
+    // int MessageBoxA(HWND hWnd, LPCSTR text, LPCSTR caption, UINT type);
     fn MessageBoxA(hwnd: i64, text: ptr, caption: ptr, utype: i64) -> i64;
+    // int GetSystemMetrics(int nIndex);  SM_CXSCREEN = 0, SM_CYSCREEN = 1.
+    fn GetSystemMetrics(index: i64) -> i64;
+    // BOOL MessageBeep(UINT uType);
+    fn MessageBeep(utype: i64) -> i64;
 }
 
 // Append a NUL terminator so a `[u8]` reads as a C string (`const char*`).
@@ -30,10 +36,41 @@ fn cstr(s: &[u8]) -> [u8] {
     vec_to_array(out)
 }
 
-fn main() -> i64 {
-    let text: [u8] = "Hello from Sentinel!";
-    let caption: [u8] = "Sentinel";
-    let t: [u8] = cstr(&text);
-    let c: [u8] = cstr(&caption);
+// Pop a modal message box (no owner window, an OK button) with `text` + a title
+// `caption`. Returns the clicked button id (IDOK = 1). BLOCKS until dismissed.
+// HWND/UINT pass through the i64 register ABI (NULL = 0, MB_OK = 0); the strings
+// cross as `const char*` via `cstr` + `ptr_of`.
+fn message_box(text: &[u8], caption: &[u8]) -> i64 {
+    let t: [u8] = cstr(text);
+    let c: [u8] = cstr(caption);
     MessageBoxA(0, ptr_of(&t), ptr_of(&c), 0)
+}
+
+// The primary screen width in pixels (GetSystemMetrics SM_CXSCREEN).
+fn screen_width() -> i64 {
+    GetSystemMetrics(0)
+}
+
+// The primary screen height in pixels (GetSystemMetrics SM_CYSCREEN).
+fn screen_height() -> i64 {
+    GetSystemMetrics(1)
+}
+
+// Play the standard system beep (MessageBeep(0xFFFFFFFF), via `0 - 1`).
+fn beep() -> i64 {
+    MessageBeep(0 - 1)
+}
+
+fn main() -> i64 {
+    // Exercise the screen-metric + beep bindings...
+    let w: i64 = screen_width();
+    let h: i64 = screen_height();
+    print(w);
+    print(h);
+    beep();
+    // ...then the headline: a native Win32 message box from Sentinel. The
+    // strings are bound to `let`s first — `&` needs an lvalue, not a literal.
+    let text: [u8] = "Hello from Sentinel on Win32!";
+    let caption: [u8] = "Sentinel";
+    message_box(&text, &caption)
 }
