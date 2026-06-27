@@ -49,21 +49,22 @@ reference as you work through the milestones.
   rejected. Added the `while` conformance test (`c52_secret_in_while`) and made
   the `SecretBranch` diagnostic name the actual construct.
 
-**▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY —
-NINE language gaps closed; a comprehensive constant-time crypto suite shipped; a
-complete loopback SSH-2 transport SESSION — KEX + KDF + the chacha20-poly1305@openssh.com
-record cipher — assembled from it, and the ADR 0056 sockets are now FULLY LIVE (runtime
-primitives + compiler builtins + the `scg` mirror), with `examples/net/tcp_echo` running a
-real loopback TCP echo on a concurrent `spawn`ed server task AND `examples/net/ssh_over_tcp`
-running the whole SSH-2 handshake over a real socket (a distributed KEX between separate
-client/server tasks), `examples/net/ssh_channel_stream` running the data phase (a
-bidirectional, multi-packet chacha20-poly1305 channel with per-direction seqnr evolution),
-`examples/net/ssh_full_session` running a COMPLETE session (handshake + data phase) over
-one connection via the factored `std::net::ssh_handshake` API, `examples/net/ssh_pubkey_auth`
-running RFC 4252 publickey USER AUTHENTICATION (a session-id-bound Ed25519 signature) on top,
-`examples/net/ssh_channel_window` running the RFC 4254 CONNECTION layer (a windowed
-session channel), and `examples/net/ssh_exec` running a `CHANNEL_REQUEST "exec"` command
-request — so the full transport→auth→channel→exec sequence now runs over real sockets. **The
+**▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY).
+CURRENT STATE: HEAD `2431aee`, 1597 tests, four-check green, NEVER pushed.** SHIPPED to
+date, in four bands (per-increment record in STATE.md + the commit log + the
+[[sentinel_examples_and_corelibs]] memory): (1) a comprehensive **constant-time crypto
+suite** — `std/security`, ~30 modules, all on canonical vectors (detail below); (2) **NINE
+language gaps closed ADR-first** (ADRs 0047–0055, incl. the `u128` type); (3) a **complete
+networked `sshd` over real sockets** — the full SSH-2 sequence (transport KEX → host-key
+auth → §7.2 KDF → encrypted channel → publickey userauth → windowed channel →
+`CHANNEL_REQUEST "exec"`) in `std/net/{tcp,ssh,ssh_cipher,ssh_handshake,ssh_userauth,
+ssh_connection}` + 7 `examples/net/*`, all over real loopback TCP via the ADR 0056 socket
+builtins; and (4) the **data & text trio** (below). A real **use-after-free** was found +
+fixed along the way (ADR 0034 D8 — push now consumes its Move-typed element, both backends
+byte-identical). **▶ AND THE DESIGN PHASE FOR THE OWNER'S WHOLE LIST IS COMPLETE: all three
+remaining language-gap rocks now have PROPOSED design ADRs — 0057 (`extern "C"` FFI import
+for OS bindings) · 0058 (an IEEE-754 `f64` float type, public-only) · 0059 (a C-ABI export
+so other languages call into Sentinel).** What remains is IMPLEMENTATION (see **Next**). **The
 active sub-track is now DATA & TEXT LIBRARIES** (owner-chosen over float-math / FFI-bindings):
 the **`std::text::str` string library** shipped (`c6c0503` — case/trim/substring/concat/
 compare/`parse_int`/`int_to_str`/index-based split/pad over `[u8]`; `examples/text/str_demo`,
@@ -74,8 +75,8 @@ double-freed the element (the ADR 0034 D8 deferred case) — now FIXED in both b
 map** (`3c08f2d` — `[u8]`→`i64`, parallel-array storage + FNV-1a + resize) and **`std::data::json`**
 (`9b2777b` — parse/serialize over a cons-list recursive enum); so the tractable data&text
 trio (strings + map + JSON) is done — the remaining big-list items are the float-type and
-FFI/bindings language gaps;
-HEAD `9b2777b`, 1597 tests,
+FFI/bindings language gaps, which now have design ADRs 0057/0058/0059;
+HEAD `2431aee`, 1597 tests,
 four-check green).** Real,
 idiomatic Sentinel programs that double as feature tests + the first **core
 libraries**. **Dogfoods modules + `--separate`**, **stress-tests the constant-time
@@ -376,7 +377,20 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
   scan` — the agreed `ct`/`bytes`/`bits`/`math` starter set is complete. (Finding:
   byte utilities must take `&[u8]`, not `[u8]` by value, or the first call consumes
   the array; `&[u8]` params + `(*a)[i]` indexing work today.)
-- **Next (open, owner's call — none yet approved):**
+- **Next (owner's call):** the SSH / networked-`sshd` track and the data & text trio
+  (strings + map + JSON) are DONE, and **all three remaining big-list rocks now have
+  PROPOSED design ADRs** — so the next move is **IMPLEMENTATION** of one of them.
+  Recommended order: **ADR 0058 (the `f64` float type)** first — the most self-contained
+  (a clean new `Type` variant like `u128`, no `FnId` shift) and it unlocks "math
+  functions" beyond integers; then **ADR 0057 (`extern "C"` FFI import** for native OS
+  bindings); then **ADR 0059 (the C-ABI export** — Sentinel-as-a-library for other
+  languages, whose headline is verified constant-time crypto as a drop-in). ⚠ Each is a
+  genuine multi-stage COMPILER increment (lexer/parser/types/codegen + the `scg` mirror
+  following the first `tests/pass/cNN` fixture), **not** a single-`go` library increment —
+  build it stage by stage, four-checking each, like the prior language gaps (ADRs
+  0047–0055). The detailed list below is now the HISTORICAL per-increment record — most of
+  its "cleanly open next" items are shipped (read STATE.md §"Current State" + the commit
+  log + the [[sentinel_examples_and_corelibs]] memory for the live picture).
   - **More crypto** — the §2.8.2 vector, SHA-256/512, SHA-3 (Keccak sponge), HMAC,
     HKDF, the full SP 800-185 derived-function family (cSHAKE / KMAC / TupleHash /
     ParallelHash), AES + AES-GCM, X25519, Ed25519 (SIGN + VERIFY), and X448 + Ed448
