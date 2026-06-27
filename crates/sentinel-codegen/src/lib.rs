@@ -455,11 +455,12 @@ pub fn compile_to_object_for_module(
             // BARE un-mangled C symbol so other languages link + call it. (For
             // a single-file / merged build `module_path` is empty so the name
             // is already bare; this also pins it for `--separate`.) BUT a
-            // BUFFER export (ADR 0059 Phase 1b — a `&[u8]` param) gets a
-            // C-translating WRAPPER under the bare name (built post-Pass-2), so
-            // its real (Sentinel-ABI) body lives under an internal `__impl`
-            // symbol; Sentinel-internal calls resolve to that via the `fns` map.
-            if export_has_buffer_param(signature, program) {
+            // BUFFER export (ADR 0059 Phase 1b — a `&[u8]` param and/or a `[u8]`
+            // return) gets a C-translating WRAPPER under the bare name (built
+            // post-Pass-1), so its real (Sentinel-ABI) body lives under an
+            // internal `__impl` symbol; Sentinel-internal calls resolve to that
+            // via the `fns` map.
+            if export_needs_c_wrapper(signature, program) {
                 format!("{}__sentinel_impl", signature.name)
             } else {
                 signature.name.clone()
@@ -1075,25 +1076,35 @@ pub fn compile_to_object_for_module(
         }
 
         // ADR 0059 Phase 1b: emit a C-ABI WRAPPER for each `export "C"` fn that
-        // takes a `&[u8]` param. The fn's real (Sentinel-ABI) body lives under
-        // `<name>__sentinel_impl` (declared in Pass 1, body in Pass 2); this
-        // wrapper, under the BARE C `<name>`, presents each `&[u8]` to C as a
-        // `(const uint8_t* data, int64_t len)` pair, rebuilds the Sentinel
-        // `{ i64 len, ptr data }` fat pointer on the stack, and forwards to the
-        // impl. Value params (`i64`/`f64`) pass straight through; the return is
-        // value-ABI. (Calling a not-yet-defined impl is fine — Pass 2 fills its
-        // body; the wrapper references the declaration.)
+        // takes a `&[u8]` param (A6) and/or returns `[u8]` (A7). The fn's real
+        // (Sentinel-ABI) body lives under `<name>__sentinel_impl` (declared in
+        // Pass 1, body in Pass 2); this wrapper, under the BARE C `<name>`,
+        // translates the boundary:
+        //   * each `&[u8]` param is presented to C as a
+        //     `(const uint8_t* data, int64_t len)` pair, rebuilt into the Sentinel
+        //     `{ i64 len, ptr data }` fat pointer on the stack and forwarded;
+        //   * value params (`i64`/`f64`) pass straight through;
+        //   * a value return (`i64`/`f64`) is forwarded straight back;
+        //   * a `[u8]` return (A7) is handed to C via TWO trailing out-params
+        //     `(uint8_t** out_data, int64_t* out_len)` — the wrapper returns
+        //     `void`, splits the impl's `{ i64 len, ptr data }` result, and stores
+        //     `data → *out_data`, `len → *out_len`. The buffer is heap-owned;
+        //     the C caller frees it with `sentinel_free_bytes`.
+        // (Calling a not-yet-defined impl is fine — Pass 2 fills its body; the
+        // wrapper references the declaration.)
         {
             let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
             let i64_ty = context.i64_type();
             let slice_ty = context.struct_type(&[i64_ty.into(), ptr_ty.into()], false);
             for id in &program.exports {
                 let sig = program.signature(*id);
-                if !export_has_buffer_param(sig, program) {
+                if !export_needs_c_wrapper(sig, program) {
                     continue;
                 }
+                let ret_is_bytes = export_returns_byte_array(sig);
                 let impl_fn = *fns.get(id).expect("export impl declared in Pass 1");
                 // C wrapper signature: each `&[u8]` → (ptr, i64); else the type.
+                // A `[u8]` return appends two out-params (out_data, out_len).
                 let mut c_params: Vec<inkwell::types::BasicMetadataTypeEnum> = Vec::new();
                 for pty in &sig.param_types {
                     if is_byte_slice_ref_cg(*pty, program) {
@@ -1105,8 +1116,17 @@ pub fn compile_to_object_for_module(
                         );
                     }
                 }
-                let ret = llvm_basic_type(&context, sig.return_type, &struct_types, &generic_struct_types, &class_types, &secrets);
-                let wrapper = module.add_function(&sig.name, ret.fn_type(&c_params, false), None);
+                if ret_is_bytes {
+                    c_params.push(ptr_ty.into()); // uint8_t** out_data
+                    c_params.push(ptr_ty.into()); // int64_t*  out_len
+                }
+                let wrapper_ty = if ret_is_bytes {
+                    context.void_type().fn_type(&c_params, false)
+                } else {
+                    llvm_basic_type(&context, sig.return_type, &struct_types, &generic_struct_types, &class_types, &secrets)
+                        .fn_type(&c_params, false)
+                };
+                let wrapper = module.add_function(&sig.name, wrapper_ty, None);
                 let entry = context.append_basic_block(wrapper, "entry");
                 let wb = context.create_builder();
                 wb.position_at_end(entry);
@@ -1141,8 +1161,27 @@ pub fn compile_to_object_for_module(
                 let result = call
                     .try_as_basic_value()
                     .left()
-                    .expect("ADR 0059 Phase 1b: a buffer export returns a value-ABI type");
-                wb.build_return(Some(&result)).map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    .expect("ADR 0059 Phase 1b: an export impl returns a value-ABI or `[u8]` type");
+                if ret_is_bytes {
+                    // The impl returned the Sentinel `{ i64 len, ptr data }` fat
+                    // pointer. Split it and store through the C out-params; the
+                    // wrapper returns void. `out_data`/`out_len` are the two
+                    // trailing params (after all forwarded inputs).
+                    let sv = result.into_struct_value();
+                    let len_v = wb
+                        .build_extract_value(sv, 0, "ret_len")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    let data_v = wb
+                        .build_extract_value(sv, 1, "ret_data")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    let out_data = wrapper.get_nth_param(c_idx).expect("wrapper out_data param").into_pointer_value();
+                    let out_len = wrapper.get_nth_param(c_idx + 1).expect("wrapper out_len param").into_pointer_value();
+                    wb.build_store(out_data, data_v).map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    wb.build_store(out_len, len_v).map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    wb.build_return(None).map_err(|e| CodegenError::Builder(e.to_string()))?;
+                } else {
+                    wb.build_return(Some(&result)).map_err(|e| CodegenError::Builder(e.to_string()))?;
+                }
             }
         }
 
@@ -2354,10 +2393,25 @@ fn is_byte_slice_ref_cg(ty: Type, program: &TypedProgram) -> bool {
     false
 }
 
-/// ADR 0059 Phase 1b: `true` iff an `export "C"` fn takes a `&[u8]` param, so
-/// its bare C symbol is a generated wrapper (not the fn body directly).
+/// ADR 0059 Phase 1b: `true` iff an `export "C"` fn takes a `&[u8]` param.
 fn export_has_buffer_param(sig: &TypedFnSignature, program: &TypedProgram) -> bool {
     sig.param_types.iter().any(|t| is_byte_slice_ref_cg(*t, program))
+}
+
+/// ADR 0059 Phase 1b (A7): `true` iff an `export "C"` fn returns an owned PUBLIC
+/// `[u8]` — handed to C via the `(uint8_t** out_data, int64_t* out_len)`
+/// out-params (its bare C symbol is a generated wrapper).
+fn export_returns_byte_array(sig: &TypedFnSignature) -> bool {
+    matches!(sig.return_type, Type::Array(ArrayElem::U8))
+}
+
+/// ADR 0059 Phase 1b: `true` iff an `export "C"` fn needs a C-ABI translating
+/// WRAPPER — because it takes a `&[u8]` param (A6) and/or returns `[u8]` (A7).
+/// Such a fn's real Sentinel-ABI body lives under `<name>__sentinel_impl` and the
+/// bare C `<name>` is the wrapper (built in the post-Pass-1 loop); a pure value
+/// (`i64`/`f64`) export needs none — its signature IS already the C ABI.
+fn export_needs_c_wrapper(sig: &TypedFnSignature, program: &TypedProgram) -> bool {
+    export_has_buffer_param(sig, program) || export_returns_byte_array(sig)
 }
 
 fn mangle_qualified(module_path: &[String], item: &str) -> String {

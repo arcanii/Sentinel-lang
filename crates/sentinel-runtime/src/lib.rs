@@ -117,6 +117,26 @@ pub extern "C" fn sentinel_free(ptr: *mut u8) {
     }
 }
 
+/// Release a byte buffer a Sentinel `export "C"` function returned to C. ADR
+/// 0059 Phase 1b (A7): the public ownership contract for the owned-`[u8]` return
+/// ABI — an exported `fn … -> [u8]` hands the C caller a heap buffer (via the
+/// `(uint8_t** out_data, int64_t* out_len)` out-params), and the caller frees it
+/// with this. It is a thin, deliberately-named alias for [`sentinel_free`] (the
+/// returned buffer is `sentinel_alloc`'d, so it is `free`-able): C consumers of a
+/// Sentinel library see one clear free symbol and need know nothing about the
+/// `sentinel_alloc`/`free` internals. The header generator emits its prototype
+/// (`void sentinel_free_bytes(uint8_t* data);`) whenever an export returns bytes.
+///
+/// # Safety
+///
+/// `data` must be a pointer an `export "C"` function wrote to `*out_data` (or be
+/// null — a no-op). Double-free or free of an unrelated pointer is undefined
+/// behavior, exactly as for `sentinel_free`/libc `free`.
+#[no_mangle]
+pub extern "C" fn sentinel_free_bytes(data: *mut u8) {
+    sentinel_free(data);
+}
+
 /// Resize a heap buffer previously returned by [`sentinel_alloc`] /
 /// [`sentinel_realloc`] (or null) to `new_size` bytes, preserving its
 /// contents up to the smaller of the old and new sizes. D.3 / ADR 0034

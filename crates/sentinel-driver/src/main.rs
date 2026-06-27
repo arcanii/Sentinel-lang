@@ -1109,38 +1109,57 @@ fn emit_c_header(typed: &sentinel_types::TypedProgram, header: &Path) -> Result<
     out.push_str("#ifndef SENTINEL_EXPORTS_H\n#define SENTINEL_EXPORTS_H\n\n");
     out.push_str("#include <stdint.h>\n\n");
     out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
+    let mut any_bytes_return = false;
     for id in &typed.exports {
         let sig = typed
             .fn_signatures
             .iter()
             .find(|s| s.id == *id)
             .ok_or_else(|| "export FnId has no signature".to_string())?;
-        let ret = c_type_name(sig.return_type)
-            .ok_or_else(|| format!("export `{}` has a non-value-ABI return type", sig.name))?;
-        let mut params = String::new();
-        if sig.param_types.is_empty() {
-            params.push_str("void");
+        // ADR 0059 Phase 1b (A7): an owned `[u8]` return is handed to C via two
+        // trailing out-params `(uint8_t** out_data, int64_t* out_len)`, and the
+        // function returns `void`; a value return (`i64`/`f64`) is rendered
+        // directly. Collect the input-param pieces, then append the out-params.
+        let ret_is_bytes = matches!(
+            sig.return_type,
+            sentinel_types::Type::Array(sentinel_types::ArrayElem::U8)
+        );
+        let ret = if ret_is_bytes {
+            "void"
         } else {
-            let mut first = true;
-            for pty in sig.param_types.iter() {
-                // ADR 0059 Phase 1b: a `&[u8]` param expands to the idiomatic C
-                // `(const uint8_t* data, int64_t len)` pair.
-                let pieces: Vec<&str> = if is_byte_slice_ref_header(*pty, typed) {
-                    vec!["const uint8_t*", "int64_t"]
-                } else {
-                    vec![c_type_name(*pty)
-                        .ok_or_else(|| format!("export `{}` has a non-FFI parameter", sig.name))?]
-                };
-                for piece in pieces {
-                    if !first {
-                        params.push_str(", ");
-                    }
-                    first = false;
-                    params.push_str(piece);
-                }
+            c_type_name(sig.return_type)
+                .ok_or_else(|| format!("export `{}` has a non-value-ABI return type", sig.name))?
+        };
+        let mut pieces: Vec<&str> = Vec::new();
+        for pty in sig.param_types.iter() {
+            // ADR 0059 Phase 1b: a `&[u8]` param expands to the idiomatic C
+            // `(const uint8_t* data, int64_t len)` pair.
+            if is_byte_slice_ref_header(*pty, typed) {
+                pieces.push("const uint8_t*");
+                pieces.push("int64_t");
+            } else {
+                pieces.push(
+                    c_type_name(*pty)
+                        .ok_or_else(|| format!("export `{}` has a non-FFI parameter", sig.name))?,
+                );
             }
         }
+        if ret_is_bytes {
+            any_bytes_return = true;
+            pieces.push("uint8_t**"); // out_data: the heap buffer (C frees it)
+            pieces.push("int64_t*"); // out_len:  the byte count
+        }
+        let params = if pieces.is_empty() {
+            "void".to_string()
+        } else {
+            pieces.join(", ")
+        };
         out.push_str(&format!("{ret} {}({params});\n", sig.name));
+    }
+    // ADR 0059 Phase 1b (A7): a C caller releases an owned `[u8]` return with
+    // this runtime export (supplied by the bundled runtime staticlib).
+    if any_bytes_return {
+        out.push_str("\nvoid sentinel_free_bytes(uint8_t* data);\n");
     }
     out.push_str("\n#ifdef __cplusplus\n}\n#endif\n\n#endif /* SENTINEL_EXPORTS_H */\n");
     std::fs::write(header, out).map_err(|e| format!("write {}: {e}", header.display()))

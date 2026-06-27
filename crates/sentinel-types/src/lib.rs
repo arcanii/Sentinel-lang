@@ -556,6 +556,16 @@ fn is_byte_slice_ref(ty: Type, refs: &[RefData]) -> bool {
     false
 }
 
+/// ADR 0059 Phase 1b (A7): `true` iff `ty` is an owned PUBLIC `[u8]` — the
+/// FFI-safe RETURN type for a byte-buffer export. C receives it via the
+/// out-param pair `(uint8_t** out_data, int64_t* out_len)` and frees it with
+/// `sentinel_free_bytes`. A `[secret u8]` (`ArrayElem::Secret`) or a
+/// `secret [u8]` (`Type::Secret`) is NOT matched — the secret-fence stands, so
+/// a secret value can cross the boundary only via an explicit `declassify`.
+fn is_owned_byte_array(ty: Type) -> bool {
+    matches!(ty, Type::Array(ArrayElem::U8))
+}
+
 impl Type {
     /// `true` if this is an integer type (`I32`, `I64`, or `U8`).
     /// Used to gate arithmetic-operator typing rules — comparisons
@@ -4397,9 +4407,11 @@ pub fn check_module(
                 return Err(TypeError::ExternFfiType { span });
             }
         }
-        // The return type is still value-ABI only (`i64`/`f64`) — an owned
-        // `[u8]` return + `sentinel_free_bytes` is a later phase.
-        if !is_ffi_safe(sig.return_type) {
+        // ADR 0059 Phase 1b (A7): the return is the value ABI (`i64`/`f64`) OR
+        // an owned PUBLIC `[u8]` (presented to C via the `(uint8_t** out_data,
+        // int64_t* out_len)` out-params + `sentinel_free_bytes`). A `[secret u8]`
+        // return is still fenced (not `is_owned_byte_array`).
+        if !is_ffi_safe(sig.return_type) && !is_owned_byte_array(sig.return_type) {
             let span = program
                 .fns
                 .iter()
@@ -12277,10 +12289,34 @@ fn main() -> i64 {
     }
 
     #[test]
-    fn export_non_ffi_return_rejected() {
-        // A non-value-ABI return (`[u8]`) is rejected in Phase 1a.
-        let err = check_err(
+    fn export_owned_byte_array_return_typechecks() {
+        // ADR 0059 Phase 1b (A7): an owned PUBLIC `[u8]` return is FFI-safe
+        // (presented to C via the (uint8_t** out_data, int64_t* out_len) pair +
+        // sentinel_free_bytes).
+        let p = check_ok(
             "export \"C\" fn f() -> [u8] { \"hi\" }\nfn main() -> i64 { 0 }",
+        );
+        assert_eq!(p.exports.len(), 1);
+    }
+
+    #[test]
+    fn export_secret_byte_array_return_rejected() {
+        // The export fence still stands: a `[secret u8]` return cannot cross the
+        // boundary (a secret leaves the verified region only via `declassify`).
+        let err = check_err(
+            "export \"C\" fn f(a: &[u8]) -> [secret u8] { \
+             let mut v: Vec<secret u8> = vec_new(); push(&mut v, (*a)[0]); vec_to_array(v) }\
+             fn main() -> i64 { 0 }",
+        );
+        assert!(matches!(err, TypeError::ExternFfiType { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn export_non_ffi_return_rejected() {
+        // A non-FFI return (a struct) is still rejected — only value-ABI scalars
+        // and the owned `[u8]` byte buffer may cross.
+        let err = check_err(
+            "struct P { x: i64 }\nexport \"C\" fn f() -> P { P { x: 1 } }\nfn main() -> i64 { 0 }",
         );
         assert!(matches!(err, TypeError::ExternFfiType { .. }), "got {err:?}");
     }

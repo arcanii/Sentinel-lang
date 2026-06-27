@@ -1,0 +1,264 @@
+// examples/export/digest_lib.sentinel
+//
+// THE C-ABI EXPORT HEADLINE (ADR 0059 Phase 1b, A7): verified-constant-time
+// crypto as a drop-in C library. Built with
+//   snc build --lib digest_lib.sentinel -o libsentineldigest.a \
+//       --emit-header sentineldigest.h
+// it has NO `main` — it is a library. The C driver (digest_driver.c) #includes
+// the generated header, links the `.a`, and calls these.
+//
+// `sha256_oneshot` exports a constant-time SHA-256 returning an OWNED byte
+// buffer to C. The owned-`[u8]` RETURN ABI (A7): an `export "C" fn … -> [u8]`
+// hands C a heap buffer via two trailing out-params the compiler generates,
+// `(uint8_t** out_data, int64_t* out_len)`, and the C caller releases it with
+// the exported `sentinel_free_bytes`. The export FENCE keeps the boundary
+// PUBLIC: the function takes public bytes, WIDENS them to `secret` internally
+// (ADR 0051), runs the machine-checked constant-time compression (the compiler
+// proves on every build that no secret bit reaches a branch / index / divisor /
+// shift), and `declassify`s the digest to return it. So a C / Rust / Python
+// caller gets a verified-constant-time hash behind a plain byte-buffer API.
+//
+// `repeat_byte` is a VARIABLE-LENGTH owned return: the output length is chosen
+// by the caller and flows back through `out_len`, demonstrating that the owned
+// buffer ABI is genuinely length-carrying (not a fixed-size out-buffer).
+//
+// SHA-256 is inlined here (rather than `use std::security::sha256`) because
+// single-file `--lib` does not support `use` yet — multi-module export
+// libraries are a follow-up. The implementation is a verbatim copy of the
+// verified `std/security/sha256` (NIST-vector-checked) plus the `ct_rotr32`
+// rotate from `std/security/ct`.
+
+// ---- constant-time 32-bit right-rotate (from std::security::ct) ----------
+fn ct_rotr32(x: secret i32, n: i64) -> secret i32 {
+    let w: i64 = 32;
+    let mask: i64 = 31;
+    (x >> (n & mask)) | (x << ((w - n) & mask))
+}
+
+// ---- SHA-256 (verbatim from std::security::sha256) -----------------------
+fn ch(e: secret i32, f: secret i32, g: secret i32) -> secret i32 {
+    g ^ (e & (f ^ g))
+}
+
+fn maj(a: secret i32, b: secret i32, c: secret i32) -> secret i32 {
+    (a & b) ^ (a & c) ^ (b & c)
+}
+
+fn big_sigma0(x: secret i32) -> secret i32 {
+    ct_rotr32(x, 2) ^ ct_rotr32(x, 13) ^ ct_rotr32(x, 22)
+}
+
+fn big_sigma1(x: secret i32) -> secret i32 {
+    ct_rotr32(x, 6) ^ ct_rotr32(x, 11) ^ ct_rotr32(x, 25)
+}
+
+fn small_sigma0(x: secret i32) -> secret i32 {
+    ct_rotr32(x, 7) ^ ct_rotr32(x, 18) ^ (x >> 3)
+}
+
+fn small_sigma1(x: secret i32) -> secret i32 {
+    ct_rotr32(x, 17) ^ ct_rotr32(x, 19) ^ (x >> 10)
+}
+
+fn k_constants() -> Vec<secret i32> {
+    let mut k: Vec<secret i32> = vec_new();
+    push(&mut k, 1116352408 as i32);  push(&mut k, 1899447441 as i32);
+    push(&mut k, -1245643825 as i32); push(&mut k, -373957723 as i32);
+    push(&mut k, 961987163 as i32);   push(&mut k, 1508970993 as i32);
+    push(&mut k, -1841331548 as i32); push(&mut k, -1424204075 as i32);
+    push(&mut k, -670586216 as i32);  push(&mut k, 310598401 as i32);
+    push(&mut k, 607225278 as i32);   push(&mut k, 1426881987 as i32);
+    push(&mut k, 1925078388 as i32);  push(&mut k, -2132889090 as i32);
+    push(&mut k, -1680079193 as i32); push(&mut k, -1046744716 as i32);
+    push(&mut k, -459576895 as i32);  push(&mut k, -272742522 as i32);
+    push(&mut k, 264347078 as i32);   push(&mut k, 604807628 as i32);
+    push(&mut k, 770255983 as i32);   push(&mut k, 1249150122 as i32);
+    push(&mut k, 1555081692 as i32);  push(&mut k, 1996064986 as i32);
+    push(&mut k, -1740746414 as i32); push(&mut k, -1473132947 as i32);
+    push(&mut k, -1341970488 as i32); push(&mut k, -1084653625 as i32);
+    push(&mut k, -958395405 as i32);  push(&mut k, -710438585 as i32);
+    push(&mut k, 113926993 as i32);   push(&mut k, 338241895 as i32);
+    push(&mut k, 666307205 as i32);   push(&mut k, 773529912 as i32);
+    push(&mut k, 1294757372 as i32);  push(&mut k, 1396182291 as i32);
+    push(&mut k, 1695183700 as i32);  push(&mut k, 1986661051 as i32);
+    push(&mut k, -2117940946 as i32); push(&mut k, -1838011259 as i32);
+    push(&mut k, -1564481375 as i32); push(&mut k, -1474664885 as i32);
+    push(&mut k, -1035236496 as i32); push(&mut k, -949202525 as i32);
+    push(&mut k, -778901479 as i32);  push(&mut k, -694614492 as i32);
+    push(&mut k, -200395387 as i32);  push(&mut k, 275423344 as i32);
+    push(&mut k, 430227734 as i32);   push(&mut k, 506948616 as i32);
+    push(&mut k, 659060556 as i32);   push(&mut k, 883997877 as i32);
+    push(&mut k, 958139571 as i32);   push(&mut k, 1322822218 as i32);
+    push(&mut k, 1537002063 as i32);  push(&mut k, 1747873779 as i32);
+    push(&mut k, 1955562222 as i32);  push(&mut k, 2024104815 as i32);
+    push(&mut k, -2067236844 as i32); push(&mut k, -1933114872 as i32);
+    push(&mut k, -1866530822 as i32); push(&mut k, -1538233109 as i32);
+    push(&mut k, -1090935817 as i32); push(&mut k, -965641998 as i32);
+    k
+}
+
+fn compress_block(h8: &mut [secret i32], parr: &[secret u8], base: i64, k: &Vec<secret i32>) -> i64 {
+    let mut w: Vec<secret i32> = vec_new();
+    let mut t: i64 = 0;
+    while t < 16 {
+        let off: i64 = base + t * 4;
+        let b0: secret i32 = (*parr)[off] as i32;
+        let b1: secret i32 = (*parr)[off + 1] as i32;
+        let b2: secret i32 = (*parr)[off + 2] as i32;
+        let b3: secret i32 = (*parr)[off + 3] as i32;
+        let word: secret i32 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+        push(&mut w, word);
+        t = t + 1;
+    }
+    let mut i: i64 = 16;
+    while i < 64 {
+        let s1: secret i32 = small_sigma1(w[i - 2]);
+        let s0: secret i32 = small_sigma0(w[i - 15]);
+        let wi: secret i32 = s1 + w[i - 7] + s0 + w[i - 16];
+        push(&mut w, wi);
+        i = i + 1;
+    }
+
+    let mut a: secret i32 = (*h8)[0];
+    let mut b: secret i32 = (*h8)[1];
+    let mut c: secret i32 = (*h8)[2];
+    let mut d: secret i32 = (*h8)[3];
+    let mut e: secret i32 = (*h8)[4];
+    let mut f: secret i32 = (*h8)[5];
+    let mut g: secret i32 = (*h8)[6];
+    let mut hh: secret i32 = (*h8)[7];
+
+    let mut r: i64 = 0;
+    while r < 64 {
+        let t1: secret i32 = hh + big_sigma1(e) + ch(e, f, g) + (*k)[r] + w[r];
+        let t2: secret i32 = big_sigma0(a) + maj(a, b, c);
+        hh = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
+        r = r + 1;
+    }
+
+    (*h8)[0] = (*h8)[0] + a;
+    (*h8)[1] = (*h8)[1] + b;
+    (*h8)[2] = (*h8)[2] + c;
+    (*h8)[3] = (*h8)[3] + d;
+    (*h8)[4] = (*h8)[4] + e;
+    (*h8)[5] = (*h8)[5] + f;
+    (*h8)[6] = (*h8)[6] + g;
+    (*h8)[7] = (*h8)[7] + hh;
+    0
+}
+
+fn push_word_be(out: &mut Vec<secret u8>, w: secret i32) -> i64 {
+    let mut j: i64 = 0;
+    while j < 4 {
+        let shift: i64 = 8 * (3 - j);
+        let byte: secret u8 = (w >> shift) as u8;
+        push(out, byte);
+        j = j + 1;
+    }
+    0
+}
+
+fn sha256(msg: [secret u8]) -> [secret u8] {
+    let mlen: i64 = len(msg);
+
+    let mut padded: Vec<secret u8> = vec_new();
+    let mut j: i64 = 0;
+    while j < mlen {
+        push(&mut padded, msg[j]);
+        j = j + 1;
+    }
+    push(&mut padded, i64_to_u8(128));
+    let after_one: i64 = mlen + 1;
+    let rem: i64 = after_one - (after_one / 64) * 64;
+    let zeros: i64 = (56 + 64 - rem) - ((56 + 64 - rem) / 64) * 64;
+    let mut z: i64 = 0;
+    while z < zeros {
+        push(&mut padded, i64_to_u8(0));
+        z = z + 1;
+    }
+    let bitlen: i64 = mlen * 8;
+    let mut k8: i64 = 0;
+    while k8 < 8 {
+        let shift: i64 = 8 * (7 - k8);
+        let lb: i64 = (bitlen >> shift) & 255;
+        push(&mut padded, i64_to_u8(lb));
+        k8 = k8 + 1;
+    }
+    let parr: [secret u8] = vec_to_array(padded);
+    let total: i64 = len(parr);
+
+    let mut h8: [secret i32] = [
+        1779033703 as i32,  -1150833019 as i32,
+        1013904242 as i32,  -1521486534 as i32,
+        1359893119 as i32,  -1694144372 as i32,
+        528734635 as i32,    1541459225 as i32
+    ];
+    let k: Vec<secret i32> = k_constants();
+
+    let nblocks: i64 = total / 64;
+    let mut blk: i64 = 0;
+    while blk < nblocks {
+        compress_block(&mut h8, &parr, blk * 64, &k);
+        blk = blk + 1;
+    }
+
+    let mut out: Vec<secret u8> = vec_new();
+    push_word_be(&mut out, h8[0]);
+    push_word_be(&mut out, h8[1]);
+    push_word_be(&mut out, h8[2]);
+    push_word_be(&mut out, h8[3]);
+    push_word_be(&mut out, h8[4]);
+    push_word_be(&mut out, h8[5]);
+    push_word_be(&mut out, h8[6]);
+    push_word_be(&mut out, h8[7]);
+    vec_to_array(out)
+}
+
+// ---- THE EXPORTS ---------------------------------------------------------
+
+// Constant-time SHA-256 callable from C, returning the 32-byte digest as an
+// OWNED `[u8]` (the C caller frees it with `sentinel_free_bytes`). The public
+// input bytes are widened to a `[secret u8]` message, hashed by the
+// machine-checked constant-time compression, and the (public) digest is
+// declassified byte-by-byte into the returned public buffer.
+export "C" fn sha256_oneshot(msg: &[u8]) -> [u8] {
+    let n: i64 = len(*msg);
+    let mut sm: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut sm, (*msg)[i]); // public u8 -> secret u8 (ADR 0051 call-arg widen)
+        i = i + 1;
+    }
+    let smsg: [secret u8] = vec_to_array(sm);
+    let digest: [secret u8] = sha256(smsg);
+
+    let mut out: Vec<u8> = vec_new();
+    let mut j: i64 = 0;
+    while j < 32 {
+        push(&mut out, declassify(digest[j])); // a digest is public output
+        j = j + 1;
+    }
+    vec_to_array(out)
+}
+
+// A variable-length owned return: `count` copies of `value`'s low byte. The
+// output length is the caller's choice and flows back through `out_len`,
+// showing the owned-buffer ABI carries a runtime-chosen length (public data;
+// this demonstrates the ABI mechanics, not constant-time).
+export "C" fn repeat_byte(value: i64, count: i64) -> [u8] {
+    let b: u8 = i64_to_u8(value);
+    let mut out: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < count {
+        push(&mut out, b);
+        i = i + 1;
+    }
+    vec_to_array(out)
+}
