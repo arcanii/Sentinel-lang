@@ -35,8 +35,11 @@ Current band status (see STATE.md / the commit log for detail):
   the design of record with a superseded banner on DESIGN.md (P3.3); a
   stale-reference sweep across `docs/` (P3.4 — fixed `ct-model.md`,
   `PROGRAMMING_GUIDE.md`, `abi-v1.md` "deferred" notes; `SESSION_PREP.md` marked
-  historical). **REMAINING: P3.5 (minimal LSP), P3.6 (diagnostics quality
-  pass — audit underway).**
+  historical). **P3.6 audit DONE** → [`diagnostics-audit.md`](diagnostics-audit.md):
+  the headline is a plumbing bug (the `Diagnostic` accumulator + `render_diagnostics`
+  drop ~25 already-authored `help:`/label strings; only the MIR `secret_leak` path
+  renders them) plus a CT-index mis-framing; the fixes need the build box (re-bless).
+  **REMAINING: P3.5 (minimal LSP), P3.6 *implementation* (apply the audit fixes).**
 - **P4 — REMAINING / deferred** (external CT review, perf profile, Polonius +
   field-disjoint borrows, platform/distribution niceties, the CT-emission
   research track) — outreach + deferred ergonomics, post-core by design.
