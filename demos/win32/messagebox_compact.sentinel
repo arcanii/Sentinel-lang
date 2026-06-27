@@ -1,0 +1,29 @@
+// demos/win32/messagebox_compact.sentinel
+//
+// The COMPACT, library-using counterpart to messagebox.sentinel: instead of
+// redeclaring the Win32 bindings inline, it `use`s the std::sys::win32 library
+// (which in turn uses std::c) — so the whole program is a few lines. user32
+// self-links via the library's `extern "C" link("user32")`, so NO `--link`.
+//
+// BUILD CAVEAT: Sentinel resolves `use a::b::Item` to `<entry-dir>/a/b.sentinel`
+// — the source root is the entry file's OWN directory (ADR 0037) — and std/ is
+// not adjacent to demos/. So, unlike the standalone messagebox.sentinel, this
+// file only builds from a location where `std/` is reachable. Simplest is the
+// repo root: copy it there (so std/ sits beside it), then build (Windows only):
+//   copy demos\win32\messagebox_compact.sentinel messagebox_compact.sentinel
+//   snc build messagebox_compact.sentinel -o %TEMP%\messagebox_compact.exe
+//   %TEMP%\messagebox_compact.exe   (prints screen size, beeps, pops a box)
+
+use std::sys::win32::screen_width;
+use std::sys::win32::screen_height;
+use std::sys::win32::beep;
+use std::sys::win32::message_box;
+
+fn main() -> i64 {
+    print(screen_width());
+    print(screen_height());
+    beep();
+    let text: [u8] = "Hello from Sentinel on Win32!";
+    let caption: [u8] = "Sentinel";
+    message_box(&text, &caption)
+}

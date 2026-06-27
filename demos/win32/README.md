@@ -26,8 +26,20 @@ a program needs beyond what its modules declare.)
 - **`screen_metrics`** — calls `GetSystemMetrics` (non-blocking); prints the
   primary screen width + height; exits `42` when both are positive. Good for an
   automated check.
-- **`messagebox`** — calls `MessageBoxA`; pops a real message box and blocks until
-  you click OK (so don't run it headless), then exits with the button id.
+- **`messagebox`** — STANDALONE (one file, no `use`): inlines the same Win32
+  bindings as `std::sys::win32` (`message_box` / `screen_width|height` / `beep`);
+  prints the screen size, beeps, then pops a real message box (blocks until OK).
+- **`messagebox_compact`** — the LIBRARY-USING version of the same program:
+  `use std::sys::win32::message_box;` instead of inlining, so it is a few lines.
+  Because `use` resolves modules relative to the entry file's own directory and
+  `std/` is not adjacent to `demos/`, this one builds only from a std-adjacent
+  location — copy it to the repo root first:
 
-Both prove the same path: an `extern "C"` declaration + `--link user32` resolves a
-real Win32 GUI symbol and calls it from verified Sentinel.
+  ```
+  copy demos\win32\messagebox_compact.sentinel messagebox_compact.sentinel
+  snc build messagebox_compact.sentinel -o %TEMP%\messagebox_compact.exe
+  ```
+
+These prove that Sentinel calls real Win32 GUI symbols from verified code — and,
+with `std::sys::win32` self-linking `user32` (ADR 0057 A9), a real program is a
+plain `use` + call with no `--link` flag.
