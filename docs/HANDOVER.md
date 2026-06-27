@@ -119,11 +119,24 @@ for the build/test commands (incl. the `vcvars64.bat` recipe for the link-touchi
    *compiled* library (`snc build --lib` already emits a `.a`/`.lib` + a C header)
    instead of re-`use`-ing source, with an explicit TRUST designation tied to
    Sentinel's supply-chain thesis (SENTINEL_DESIGN2 §2 signatures · BACKLOG2 §2 ·
-   AI_TOOLING §7.1: "a dependency not in the trust manifest fails to compile"). Open
-   design: a Sentinel-shaped interface descriptor for a `.lib` (the `--emit-header` is
-   C-only — a consumer needs the Sentinel signatures + effect rows); how *untrusted*
-   is bounded (the FFI secret-fence + the effect/capability system already gate it);
-   signing/manifest for *trusted*. This is the next rock.
+   AI_TOOLING §7.1: "a dependency not in the trust manifest fails to compile").
+   - **The signing & trust model is now DRAFTED — [ADR 0061](decisions/0061-code-signing-and-trust.md)
+     (PROPOSED, 2026-06-28, design-only).** It pins: sign the artifact's RAW bytes
+     (comments included — only the sig container is excluded; "verify the exact bytes you
+     compile"); a signed manifest/header that commits to content hashes + signs its own
+     metadata; Ed25519 dogfooded via `std::security::ed25519`; signed≠trusted, with the
+     CONSUMER's trust manifest (exact-key + TOFU for v1; CA/issuer later) as the authority;
+     and **capability-bounded keys** (trust composes with the effect row — a key's grants
+     bound what its code may do, which is also how *untrusted* is bounded). NOT
+     oracle-moving (a driver+resolve gate around the ADR 0037 module walk; the in-file sig
+     block is a `//` comment the lexer already skips). **Next: owner review of 0061, then
+     implement v1** (`snc sign`/`verify`, the trust-manifest reader, the gate on the
+     module-graph walk).
+   - **Still OPEN DESIGN (the other half of the rock):** a Sentinel-shaped INTERFACE
+     DESCRIPTOR for a compiled `.lib` (the `--emit-header` is C-only — a consumer needs the
+     Sentinel signatures + effect rows to type-check + capability-bound against a binary it
+     does not have the source for). 0061 assumes such a descriptor exists (it signs it);
+     specifying it is the companion ADR.
 
 ---
 
