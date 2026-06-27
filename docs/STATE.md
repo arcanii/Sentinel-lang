@@ -84,20 +84,25 @@ the current state of the workspace without re-reading every commit.
   new 128-bit integer type) + `x25519_64` X25519 over it (cross-checked byte-for-byte
   against the radix-2^16 `x25519`)), `std/math/num`,
   `std/math/float` (the PUBLIC `f64` helpers — `abs`/`min`/`max`/`sq`/`hypot`/`lerp`/
-  `trunc`/`discriminant` — the float counterpart to `std/math/num`, exercised by
-  `examples/math/quadratic`, ADR 0058),
+  `trunc`/`discriminant` + the **libm transcendentals** `sine`/`cosine`/`tangent`/`exp_e`/
+  `ln`/`powf`/`round_down`/`round_up`/`angle_of` bound through the ADR 0057 FFI — the float
+  counterpart to `std/math/num`, exercised by `examples/math/quadratic` +
+  `examples/math/transcendental`, ADR 0058),
+  `std/sys/posix` (the first `std/sys/*` FFI wrapper — `pid`/`parent_pid`/`uid`/`gid` over
+  the libc identity calls via `extern "C"`, ADR 0057; `examples/sys/process_ids`),
   `std/bits/bits` (rotates),
   `std/bytes/bytes` (`[u8]`
   utilities over `&[u8]` borrows), `std/text/str` (the string library: case folding,
   trim, substring search, slice, concat/repeat/replace, lexicographic compare, decimal
-  `parse_int`/`int_to_str`, index-based `split_count`/`split_nth`, pad — exercised by
+  `parse_int`/`int_to_str` + the float `parse_f64`/`f64_to_str` (ADR 0058), index-based
+  `split_count`/`split_nth`, pad — exercised by
   `examples/text/str_demo`), `std/algorithms/seq` (in-place insertion
   `sort` + `binary_search` over public `[i64]`), `std/collections/map` (a string-keyed
   hash map `[u8]`→`i64`: parallel-array + index-chaining storage, public FNV-1a hash,
   power-of-two resize/rehash; `examples/collections/map_demo`), `std/data/json` (a JSON
-  parser + serializer over a cons-list recursive `Json` enum — integer numbers (the `f64`
-  type now exists, ADR 0058, but `json` still parses the integer part; a float-number
-  upgrade is follow-up work), strings with escapes, booleans, null, nested arrays +
+  parser + serializer over a cons-list recursive `Json` enum — integer `Num(i64)` AND
+  non-integer `Float(f64)` numbers (ADR 0058: the parser detects a `.`/exponent, the
+  serializer emits via `f64_to_str`), strings with escapes, booleans, null, nested arrays +
   objects; `examples/data/json_demo`),
   and `std/net` (`tcp` — a thin
   ergonomic layer over the raw socket builtins: `read_exact` + the secret<->public
@@ -235,10 +240,21 @@ the current state of the workspace without re-reading every commit.
   the int↔float `as` casts (`sitofp`/`fptosi`/…), and `sqrt` (the `llvm.sqrt.f64`
   intrinsic, surfaced as a `UnaryOp` so it needs no `FnId`); `std/math/float` +
   `examples/math/quadratic` (the quadratic formula + 2-D geometry) are the demonstrator.
-  The remaining big-list rocks — the **FFI import** (ADR 0057) and **C-ABI export** (ADR
-  0059) — still have PROPOSED design ADRs only.
+  The **`extern "C"` FFI import (ADR 0057, Phase 1 value ABI)** is now implemented too: a
+  user-declarable `extern "C" { fn …; }` block over the public `i64`/`f64` ABI, resolved
+  by SYMBOL NAME (a user-range `FnId`, like a cross-module import — no builtin `FnId`
+  shift) and declared `External` under the bare C symbol so `cc` links it against libc; a
+  `secret` reaching an `extern` arg is rejected (the FFI fence). It makes OS / native
+  bindings *library* work: `std/sys/posix` (process identity) + the `std/math/float` libm
+  transcendentals are the wrappers. Deferred to a Phase 1b: the `ptr` opaque type +
+  `ptr_of`/`cstr` + the pointer/buffer libc calls (`getenv`/`getentropy`), `i32` widths,
+  structs, extra-library `-l`, Win32. The **C-ABI export (ADR 0059)** — the inverse,
+  Sentinel-as-a-library — is the last rock still at PROPOSED design only. The float
+  follow-ups also landed: the libm transcendentals (above), `f64`⇄string conversion
+  (`std/text/str::parse_f64`/`f64_to_str`), and `std/data/json` now parsing/serializing
+  non-integer numbers as `Float(f64)`.
 
-**1610 tests across the workspace**, four-check green (build · `cargo nextest`
+**1616 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

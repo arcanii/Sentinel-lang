@@ -1,10 +1,12 @@
 # ADR 0057: A foreign-function interface (`extern "C"`) for native OS bindings
 
-Status: **PROPOSED — design only.** This ADR records the design for a user-declarable
-`extern "C"` foreign-function interface (FFI) so Sentinel programs can call native
-libc / OS-API functions (macOS, Linux, and — later — Win32) without each one being
-hard-coded into the compiler. No implementation lands with this ADR; it is the
-ADR-first design gate for the "native bindings" item on the core-libraries roadmap.
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A5).** Phase 1 is implemented `snc`-side as a
+**value-only ABI** (public `i64` + `f64`), which already unlocks the libc identity calls
+and the whole libm math family. The `ptr` opaque type + `ptr_of`/`cstr` (and the
+pointer/buffer libc calls that need them) are split into a **Phase 1b** and remain
+deferred. The design below stands; the amendments at the end record where the
+implementation refined or re-scoped it. This was the ADR-first design gate for the
+"native bindings" item on the core-libraries roadmap.
 
 ## Context
 
@@ -209,3 +211,49 @@ demonstrator, with the `scg` mirror following the first fixture. Everything beyo
 payoff: the OS-bindings item becomes *library* work (declare + wrap a symbol) instead of
 a compiler change per call — the same shift the data/text libraries made for their
 domain.
+
+## Amendments (at implementation)
+
+- **A1 — Phase 1 is split; the implemented increment is the VALUE-ONLY ABI (`i64` +
+  `f64`).** A new `is_ffi_safe` admits only public `i64` / `f64`. This already covers the
+  argument-less libc identity calls (`getpid`/`getppid`/`getuid`/`getgid`) AND the entire
+  libm math family (`sin`/`cos`/`exp`/`log`/`pow`/`floor`/`ceil`/… are all `f64`-scalar) —
+  so it is high-value on its own. The `ptr` opaque type + `ptr_of`/`ptr_of_mut`/`cstr`
+  (and the libc calls that need them — `getenv`, `getentropy`, …) are re-scoped to a
+  **Phase 1b** and deferred. `getentropy`-style read-back also needs a runtime
+  cstr/buffer-read helper (a `ptr` is not dereferenceable in Sentinel), which is the bulk
+  of the remaining Phase-1b work. The design's Phase-2 `f64` gate is moot now that floats
+  ship (ADR 0058), so `f64` is in this first increment.
+- **A2 — `extern "C"` fns reuse the cross-module-import "body-less fn" machinery, not a
+  brand-new `ExternFn` runtime kind.** An `extern` is registered as a `FnSignature` with a
+  new `is_extern_c` flag in the USER `FnId` range (after the builtins — exactly like a D.6
+  cross-module import, so NO builtin `FnId` shift) + a `fn_table` entry; its param/return
+  type-exprs ride in a `ResolvedExternFn`; types builds a `TypedFnSignature` and records
+  the id in `TypedProgram.externs`; codegen declares it `External` under its BARE name and
+  Pass 2 (which iterates `program.fns`) leaves it a declaration. So the ADR's "resolved by
+  symbol name, no builtin FnId slot" is realised as the import machinery + a flag.
+- **A3 — the C symbol stays BARE in every path.** `merge_modules` collects externs without
+  adding them to the per-module rename map (so calls stay un-qualified) and dedups by name
+  (a C symbol declared in several modules is one symbol); codegen forces the bare name for
+  any `TypedProgram.externs` id (the merge path's empty `module_path` already gave bare
+  names; this fixes `--separate`, where the unit's `module_path` would otherwise mangle it).
+  Externs do NOT cross the separate-compilation import boundary — only their safe `pub fn`
+  wrappers do (via the existing import path) — so no new cross-unit extern export was
+  needed.
+- **A4 — the fence is one error, `ExternFfiType`.** A non-FFI-safe `extern` param/return
+  type (including any `secret` type) is rejected at the declaration. Combined with the
+  no-narrowing rule (a `secret` value cannot be passed where a public type is expected),
+  this enforces "a `secret` reaching an `extern` argument is a compile error" without a
+  separate call-site check.
+- **A5 — libm wrappers are named to avoid the C-symbol collision.** A `pub fn` cannot
+  share a name with the `extern` it forwards to (both would occupy the `fn_table` slot), so
+  `std/math/float` exposes `sine`/`cosine`/`tangent`/`exp_e`/`ln`/`powf`/`round_down`/
+  `round_up`/`angle_of` over the raw `sin`/`cos`/… externs. An `extern`-symbol-aliasing
+  form (`fn name = "c_sym"(…)`) that would let a wrapper reuse the idiomatic name is a
+  natural Phase-1b/2 ergonomic. On macOS libm is in libSystem (linked by `cc`); on Linux
+  `-lm` is needed — deferred until the build threads extra `-l` flags (ADR pillar 4).
+
+Demonstrators: `std/sys/posix` + `examples/sys/process_ids` (i64 identity calls);
+`std/math/float` libm bindings + `examples/math/transcendental` (f64). The `scg` mirror is
+deferred (no corpus / `selfhost/*.sentinel` source uses `extern` → every differential +
+both bootstrap fixed points byte-identical).
