@@ -286,13 +286,18 @@ the current state of the workspace without re-reading every commit.
   `use`s the REAL `std::security::sha256` + `std::security::hmac` (no inlining) and exports
   `sha256_oneshot` + `hmac_sha256_oneshot` to C (checked against NIST SHA-256 / RFC 4231
   HMAC vectors) — the verified-constant-time crypto suite as a drop-in C library, at scale.
-  Still deferred: the caller-provides-buffer convention (fixed-size, no-alloc outputs) and
-  shared objects (`--shared`).
+  **And `--shared` now emits a `.dylib` (ADR 0059 A9)** for `dlopen` / `ctypes` — the same
+  PIC object, linked `cc -dynamiclib` instead of archived; `examples/export/dlopen_driver.c`
+  `dlopen`s a `--shared`-built `digest_lib.dylib`, `dlsym`s `sha256_oneshot` +
+  `sentinel_free_bytes`, and runs the verified-constant-time SHA-256 through the shared
+  library (the substrate the Python/Rust binding generators build on). Still deferred: the
+  caller-provides-buffer convention (fixed-size, no-alloc outputs), the Linux `cc -shared`
+  path, and the per-language binding generators.
   The float follow-ups also landed: the libm transcendentals (above), `f64`⇄string conversion
   (`std/text/str::parse_f64`/`f64_to_str`), and `std/data/json` now parsing/serializing
   non-integer numbers as `Float(f64)`.
 
-**1635 tests across the workspace**, four-check green (build · `cargo nextest`
+**1636 tests across the workspace**, four-check green (build · `cargo nextest`
 · `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
 
 ## Section A — sentinel-broker

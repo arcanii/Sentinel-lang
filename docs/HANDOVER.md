@@ -50,16 +50,17 @@ reference as you work through the milestones.
   the `SecretBranch` diagnostic name the actual construct.
 
 **▶ Resume at — the ACTIVE TRACK: examples-as-tests + core libraries (UNDERWAY).
-CURRENT STATE: HEAD `cc89058`, 1635 tests, four-check green, NEVER pushed.**
+CURRENT STATE: HEAD `048bfac`, 1636 tests, four-check green, NEVER pushed.**
 
 **▶ ONE-LINE STATUS: the owner's WHOLE big-list is implemented** — the comprehensive
 constant-time crypto suite, the networked `sshd`, the data & text trio, and **all three
 remaining language-gap rocks (ADR 0058 `f64` floats · ADR 0057 `extern "C"` FFI import · ADR
 0059 C-ABI export)** + the float follow-ups (libm transcendentals · `f64`⇄string · JSON
 float numbers) + the export `&[u8]` INPUT and owned-`[u8]` RETURN buffer ABI + MULTI-MODULE
-`--lib` (the verified-constant-time `std/security` suite — `sha256` + `hmac` — callable from
-C as a drop-in library) + the FFI-IMPORT buffer ABI (ADR 0057 A6/A7 — the `ptr` type +
-`ptr_of`/`ptr_of_mut` + `is_null`: OS randomness via `getentropy`, env vars via `getenv`).
+`--lib` + `--shared` `.dylib` (the verified-constant-time `std/security` suite — `sha256` +
+`hmac` — callable from C as a static OR dlopen/ctypes-loadable drop-in library) + the
+FFI-IMPORT buffer ABI (ADR 0057 A6/A7 — the `ptr` type + `ptr_of`/`ptr_of_mut` + `is_null`:
+OS randomness via `getentropy`, env vars via `getenv`).
 **What remains are only deferred Phase 1b/2
 tails — none a new rock; the menu is in the *Next* bullet below.** Read STATE.md §"Current State"
 for the authoritative live picture. Full detail follows.
@@ -439,8 +440,10 @@ with array-repeat `[x; N]` and the `scg` widen-mirror deferred as low value.
   `examples/sys/ffi_buffers`); what remains there is only the niceties (a `?[u8]` to tell an
   unset var from an empty one);
   **(b)** `i32`/`u32` FFI widths + struct-by-pointer; **(c)** extra-library `-l` (so libm
-  works on Linux; the Linux `ar`-MRI `--lib` archive path) + `--shared` `.dylib`/`.so`;
-  **(d)** the Python (`ctypes`) / Rust (`-sys`) binding generators (ADR 0059 Phase 3);
+  works on Linux; the Linux `ar`-MRI `--lib` + `cc -shared` paths) — `--shared` `.dylib` is
+  now DONE on macOS (ADR 0059 A9 — `dlopen`/`ctypes` substrate; `examples/export/dlopen_driver.c`);
+  **(d)** the Python (`ctypes`) / Rust (`-sys`) binding generators (ADR 0059 Phase 3 — now
+  unblocked: `ctypes.CDLL(path)` loads the `--shared` dylib);
   **(e)** ~~multi-module export libraries (`--lib` with `use`)~~ DONE (ADR 0059 A8 —
   `--lib` now discovers + merges the `use` graph; `examples/export/crypto_lib` exports the
   real `std::security` SHA-256 + HMAC to C); **(f)** Win32 (ADR 0057/0059

@@ -1,7 +1,8 @@
 # ADR 0059: A C-ABI export — calling Sentinel from C / C++ / Rust / Python
 
-Status: **ACCEPTED-WITH-AMENDMENTS (A1–A8).** Implemented `snc`-side: the `export "C"`
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A9).** Implemented `snc`-side: the `export "C"`
 annotation, the `--lib` static-archive build mode (no `main`, now MULTI-MODULE via `use`),
+the `--shared` SHARED-library mode (`.dylib`, A9 — for `dlopen` / `ctypes`),
 `--emit-header`, and the secret-fence. **Phase 1a** = the value-only ABI (`i64`/`f64`) with a constant-time
 demonstrator (`ct_choose`). **Phase 1b** (A6) adds the **`&[u8]` INPUT buffer ABI** —
 a `&[u8]` export param is presented to C as a `(const uint8_t* data, int64_t len)` pair via
@@ -294,6 +295,26 @@ struct exports, and the Python/Rust generators are deferred to later phases.
   both against canonical vectors (NIST SHA-256 "abc"; RFC 4231 HMAC-SHA256 TC1) and frees
   each buffer; `tests/export.rs::export_multi_module_library_from_c` assembles a temp project
   (the `std/` tree next to the entry, as the example harness does), builds the multi-module
-  `.a` + header, compiles + runs the C driver, asserts exit 42. STILL deferred: the
-  caller-provides-buffer convention and shared objects (`--shared`). The `scg` mirror stays
-  deferred (still no corpus / `selfhost` fixture uses `export`).
+  `.a` + header, compiles + runs the C driver, asserts exit 42. STILL deferred (until A9):
+  shared objects. STILL deferred after A9: the caller-provides-buffer convention. The `scg`
+  mirror stays deferred (still no corpus / `selfhost` fixture uses `export`).
+- **A9 — `--shared` emits a SHARED library (`.dylib`) for `dlopen` / `ctypes` (macOS).** The
+  whole front end + object emission is shared with `--lib`; only the final link step and the
+  default output extension differ (a `LibMode::{Static,Shared}` threaded through
+  `run_build_lib`). NO codegen change was needed — the emitted object is ALREADY PIC
+  (`RelocMode::PIC`, used since the executable path), so the same object links into either a
+  static archive or a shared object. `link_shared` runs `cc -dynamiclib -install_name
+  <abspath> -o <lib>.dylib <obj> <runtime.a>`: the runtime's symbols are pulled in from the
+  staticlib so the `.dylib` is self-contained, and the `install_name` is the dylib's own
+  absolute path so a consumer resolves it. This is the foundation the per-language binding
+  generators (Python `ctypes`, …) build on — `ctypes.CDLL(path)` is exactly `dlopen(path)`.
+  Demonstrator: `examples/export/dlopen_driver.c` `dlopen`s a `--shared`-built
+  `digest_lib.dylib`, `dlsym`s `sha256_oneshot` + `sentinel_free_bytes`, runs the
+  verified-constant-time SHA-256 over a C buffer (exercising the owned-`[u8]` return AND the
+  bundled runtime's alloc/free, all through the `.dylib`), checks the NIST "abc" vector, and
+  exits 42; `tests/export.rs::export_shared_library_dlopen` builds the dylib, compiles the
+  dlopen driver (which links no dylib at build time), runs it, and asserts 42 (ASan-clean).
+  STILL deferred: the caller-provides-buffer convention, the Linux `cc -shared` + `soname`
+  path, and the Python/Rust binding generators (which now have their substrate). The `scg`
+  mirror stays deferred (driver-only; the emitted object is byte-identical — only the link
+  step differs, so the ADR 0045 differential is untouched).
