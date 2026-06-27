@@ -2268,6 +2268,52 @@ impl<'a> Parser<'a> {
                 span: to_source_span(&abi_span),
             });
         }
+        // ADR 0057 A9: optional `link("lib"[, "lib"]*)` before the block — extra
+        // native libraries to thread into the link, so a consumer of this module
+        // needs no `--link` flag. `link` is contextual (it stays a valid
+        // identifier elsewhere).
+        let mut link_libs: Vec<String> = Vec::new();
+        if self.peek_kind() == Some(TokenKind::Ident)
+            && self.peek().is_some_and(|t| &self.src[t.span.clone()] == "link")
+        {
+            self.advance(); // `link`
+            self.expect(TokenKind::LParen, "`(` after `link`")?;
+            loop {
+                let lib_span = match self.peek_kind() {
+                    Some(TokenKind::StringLit) => self.advance().expect("peeked").span.clone(),
+                    other => {
+                        let span = self
+                            .peek()
+                            .map(|t| t.span.clone())
+                            .unwrap_or_else(|| self.eof_span());
+                        return Err(ParseError::UnexpectedToken {
+                            got: format!("{other:?}"),
+                            expected: "a library-name string in `link(...)`",
+                            span: to_source_span(&span),
+                        });
+                    }
+                };
+                // The literal includes its quotes; strip them for the lib name.
+                let lib = self.src[lib_span.clone()].trim_matches('"').to_string();
+                if lib.is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        got: self.src[lib_span.clone()].to_string(),
+                        expected: "a non-empty library name in `link(...)`",
+                        span: to_source_span(&lib_span),
+                    });
+                }
+                link_libs.push(lib);
+                if self.peek_kind() == Some(TokenKind::Comma) {
+                    self.advance();
+                    if self.peek_kind() == Some(TokenKind::RParen) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RParen, "`)` to close `link(...)`")?;
+        }
         // `{`
         self.expect(TokenKind::LBrace, "`{` to open the `extern` block")?;
         let mut decls = Vec::new();
@@ -2336,6 +2382,7 @@ impl<'a> Parser<'a> {
                 name_span,
                 params,
                 return_type,
+                link_libs: link_libs.clone(),
                 span: fn_start..semi_end,
             });
         }

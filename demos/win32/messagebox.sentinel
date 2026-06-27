@@ -3,12 +3,13 @@
 // Native GUI via FFI (ADR 0057 + 0060): pop a real Win32 message box
 // (user32.dll `MessageBoxA`) from Sentinel — the "hello, native GUI" demo.
 //
-// Windows only. Build from a Developer Command Prompt:
-//   snc build demos/win32/messagebox.sentinel --link user32 -o messagebox.exe
+// Windows only. Build from a Developer Command Prompt (the `link("user32")`
+// annotation self-links user32, so no `--link` flag is needed):
+//   snc build demos/win32/messagebox.sentinel -o messagebox.exe
 // Running it shows a message box and BLOCKS until you click OK, then exits with
 // the button id (IDOK = 1).
 
-extern "C" {
+extern "C" link("user32") {
     // int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType);
     // HWND (owner) and UINT (style) pass through the i64 register ABI: hWnd = 0
     // is NULL (no owner window), uType = 0 is MB_OK. The two strings cross as

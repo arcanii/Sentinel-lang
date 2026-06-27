@@ -15,9 +15,13 @@ From a **Developer Command Prompt for VS** (so the MSVC `link.exe` + libraries a
 on `PATH`), with `snc` built (`cargo build -p sentinel-driver -p sentinel-runtime`):
 
 ```
-snc build demos/win32/screen_metrics.sentinel --link user32 -o screen_metrics.exe
-snc build demos/win32/messagebox.sentinel     --link user32 -o messagebox.exe
+snc build demos/win32/screen_metrics.sentinel -o screen_metrics.exe
+snc build demos/win32/messagebox.sentinel     -o messagebox.exe
 ```
+
+(No `--link` flag: each `extern` block declares `link("user32")`, so `snc`
+self-links it — ADR 0057 A9. You can still add `--link <lib>` manually for libs
+a program needs beyond what its modules declare.)
 
 - **`screen_metrics`** — calls `GetSystemMetrics` (non-blocking); prints the
   primary screen width + height; exits `42` when both are positive. Good for an

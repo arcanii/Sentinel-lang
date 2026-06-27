@@ -1,6 +1,6 @@
 # ADR 0057: A foreign-function interface (`extern "C"`) for native OS bindings
 
-Status: **ACCEPTED-WITH-AMENDMENTS (A1–A8).** Phase 1 is implemented `snc`-side as a
+Status: **ACCEPTED-WITH-AMENDMENTS (A1–A9).** Phase 1 is implemented `snc`-side as a
 **value-only ABI** (public `i64` + `f64`), which already unlocks the libc identity calls
 and the whole libm math family. **Phase 1b (A6)** adds the **`ptr` opaque type +
 `ptr_of`/`ptr_of_mut`**, so a Sentinel buffer's data pointer can cross to a pointer-taking
@@ -318,3 +318,16 @@ both bootstrap fixed points byte-identical).
   next design gate). `--separate` does not thread `--link` yet. Implemented `snc`-side on
   branch `adr-0060-phase1-portable-runtime`; the `scg` mirror stays deferred (no `selfhost`
   fixture uses `extern`); pending the macOS four-check.
+- **A9 — self-linking extern blocks (`extern "C" link("lib") { … }`).** Complements A8's
+  `--link` CLI flag with a source-level annotation: an extern block declares the native
+  libraries its symbols come from, so a *consumer* of the module needs no `--link`. The
+  parser parses `link("a"[, "b"]*)` after the ABI string (`link` is contextual — still a
+  valid identifier elsewhere); the libs ride on each `ExternFnDecl` as pure link metadata
+  (resolve/types/codegen ignore it); the driver unions them with the CLI `--link` set
+  (deduped) from the parsed/merged program's externs and passes them to the linker. This
+  makes binding libraries self-contained: `std::sys::win32` declares `link("user32")`, so a
+  program that `use`s it builds with a plain `snc build prog.sentinel` — no flag. Verified on
+  Windows: a `use std::sys::win32` program with NO `--link` builds + runs (live screen size
+  via `GetSystemMetrics`). NOT oracle-moving — the annotation never reaches the emitted IR or
+  the `snc ast`/`lex` dumps, so both fixed points are unaffected and no `selfhost` mirror is
+  needed. Implemented on branch `std-c-cstring`; pending the macOS four-check.

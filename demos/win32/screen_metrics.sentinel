@@ -5,12 +5,12 @@
 // size, which we print and check. Proves extra-library linking (`--link user32`)
 // + a real Win32 GUI-library call returning correct data.
 //
-// Windows only. Build from a Developer Command Prompt (so the MSVC linker is
-// available), threading user32 into the link:
-//   snc build demos/win32/screen_metrics.sentinel --link user32 -o screen_metrics.exe
+// Windows only. Build from a Developer Command Prompt (the `link("user32")`
+// annotation self-links user32, so no `--link` flag is needed):
+//   snc build demos/win32/screen_metrics.sentinel -o screen_metrics.exe
 // Running it prints the width and height; exit 42 means both are positive.
 
-extern "C" {
+extern "C" link("user32") {
     // int GetSystemMetrics(int nIndex);  SM_CXSCREEN = 0, SM_CYSCREEN = 1.
     // The `int` index + result pass through the i64 register ABI.
     fn GetSystemMetrics(index: i64) -> i64;

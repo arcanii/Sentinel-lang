@@ -46,6 +46,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use miette::{LabeledSpan, MietteDiagnostic, NamedSource, Report, Severity as MietteSeverity, SourceSpan};
+use sentinel_ast::ExternFnDecl;
 use sentinel_base::{Diagnostic, SentinelDb, Severity, SourceFile};
 use sentinel_borrow_check::borrow_check_query;
 use sentinel_syntax::{Program, TokenKind};
@@ -912,7 +913,13 @@ fn run_build(path: &str, output: Option<&str>, link_libs: &[String]) -> ExitCode
         return ExitCode::from(1);
     }
 
-    match link(&object_path, &exe_path, link_libs) {
+    // ADR 0057 A9: union the CLI `--link` libs with any declared via
+    // `extern "C" link("…") { … }` in this program's extern blocks.
+    let extern_libs = match sentinel_syntax::parse_query(&db, file).as_ref() {
+        Some(p) => collect_link_libs(link_libs, &p.externs),
+        None => link_libs.to_vec(),
+    };
+    match link(&object_path, &exe_path, &extern_libs) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("snc: link failed: {msg}");
@@ -930,6 +937,9 @@ fn run_build(path: &str, output: Option<&str>, link_libs: &[String]) -> ExitCode
 /// multi-source diagnostics + effect-check parity are follow-ups (the
 /// merged program's spans point into per-module sources).
 fn run_build_merged(merged: Program, path: &str, output: Option<&str>, link_libs: &[String]) -> ExitCode {
+    // ADR 0057 A9: union the CLI `--link` libs with any declared via
+    // `extern "C" link("…") { … }` across the merged modules' extern blocks.
+    let extern_libs = collect_link_libs(link_libs, &merged.externs);
     let resolved = match sentinel_resolve::resolve(&merged) {
         Ok(r) => r,
         Err(e) => {
@@ -984,7 +994,7 @@ fn run_build_merged(merged: Program, path: &str, output: Option<&str>, link_libs
         eprintln!("snc: codegen failed: {err}");
         return ExitCode::from(1);
     }
-    match link(&object_path, &exe_path, link_libs) {
+    match link(&object_path, &exe_path, &extern_libs) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("snc: link failed: {msg}");
@@ -1551,6 +1561,22 @@ fn run_linker(mut cmd: Command, tool: &str) -> Result<(), String> {
 /// native deps ([`WINDOWS_NATIVE_LIBS`]) are named explicitly and the MSVC
 /// environment (the `LIB` search paths) must be present — run snc from a
 /// Developer Command Prompt.
+/// ADR 0057 A9: union the CLI `--link` libraries with any declared in the
+/// program's extern blocks (`extern "C" link("…") { … }`), deduped and
+/// order-preserving (CLI first, then source-declared). Lets a binding module be
+/// self-linking — a consumer needs no `--link` flag.
+fn collect_link_libs(cli: &[String], externs: &[ExternFnDecl]) -> Vec<String> {
+    let mut libs: Vec<String> = cli.to_vec();
+    for e in externs {
+        for l in &e.link_libs {
+            if !libs.iter().any(|x| x == l) {
+                libs.push(l.clone());
+            }
+        }
+    }
+    libs
+}
+
 fn link_exe(objects: &[&Path], exe: &Path, link_libs: &[String]) -> Result<(), String> {
     let runtime = find_runtime()?;
     if cfg!(target_os = "windows") {

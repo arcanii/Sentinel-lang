@@ -604,6 +604,12 @@ pub struct ExternFnDecl {
     pub name_span: Span,
     pub params: Vec<Param>,
     pub return_type: TypeExpr,
+    /// ADR 0057 A9: native libraries declared via `extern "C" link("user32") {…}`
+    /// — threaded into the link so a consumer of the module needs no `--link`
+    /// flag. Empty for a plain `extern "C" {…}`. Every decl in one block shares
+    /// the block's list. Pure link metadata: resolve/types/codegen ignore it; the
+    /// driver collects it from the parsed program.
+    pub link_libs: Vec<String>,
     pub span: Span,
 }
 
