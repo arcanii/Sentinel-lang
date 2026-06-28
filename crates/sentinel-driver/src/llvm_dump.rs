@@ -1456,13 +1456,51 @@ impl Emit<'_> {
             TypedExprKind::WidenToSecret(inner) | TypedExprKind::Declassify(inner) => {
                 self.lower_expr(inner)
             }
-            // ADR 0065: `return e` — the text-IR dump is a v1 STUB (it flows the
-            // inner value without the `ret` + scope drops). The real
-            // control-flow lowering lives in `sentinel-codegen` (the executable
-            // path); `return` is examples-only and never enters the self-host
-            // differential, so `snc llvm` is not authoritative for it yet
-            // (mirroring it here is the stage-4 self-host work).
-            TypedExprKind::Return(inner) => self.lower_expr(inner),
+            // ADR 0065 stage 4: `return e` — evaluate `e`, drop EVERY live scope
+            // frame down to the FUNCTION floor (the ADR 0036 break/continue
+            // machinery with floor 0 = "break all the way out"), then `ret` with the
+            // SAME ABI as the epilogue (`main` truncates i64→i32; an effecting fn
+            // wraps a pure value via `sentinel_kont_pure`; an ordinary fn rets its
+            // value). The current block is now terminated, so park the builder on a
+            // fresh dead block — the unreachable remainder of the enclosing block /
+            // if-arm (its store-to-result + merge branch) lands there, never on the
+            // terminated block. Drops rely on the moved set alone (a returned binding
+            // is recorded moved, so skipped), the same one-free invariant the
+            // loop-exit drops use. CONSTANT-TIME unchanged: `return` is unconditional
+            // control flow, not a branch on a value, so it is no new `secret_leak`
+            // sink. This is byte-identical to the self-hosted `scg` (the `cg` mode of
+            // `dump_texpr` in `selfhost/types.sentinel`).
+            TypedExprKind::Return(inner) => {
+                let val = self.lower_expr(inner)?;
+                // Floor 0: drain ALL open scope frames (params + body + any nested).
+                self.emit_loop_exit_drops(0)?;
+                let sig = self.program.signature(self.current_fn);
+                let is_main = sig.is_main;
+                let is_eff = uses_kont_abi(sig, self.program);
+                if is_main {
+                    let t = self.fresh();
+                    writeln!(self.body, "  %v{t} = trunc i64 {val} to i32").unwrap();
+                    writeln!(self.body, "  ret i32 %v{t}").unwrap();
+                } else if is_eff {
+                    // Effecting ABI: wrap the pure value as a PURE_RETURN kont so the
+                    // caller's `handle` sees a uniform Kont* (the effect-free path; a
+                    // `return` crossing a `handle` is ADR 0065 stage 3).
+                    let kp = self.fresh();
+                    writeln!(self.body, "  %v{kp} = call ptr @sentinel_kont_pure(i64 {val})").unwrap();
+                    self.used.kont_pure = true;
+                    writeln!(self.body, "  ret ptr %v{kp}").unwrap();
+                } else {
+                    // `inner.ty` is the fn's return type (the typer checked it), so
+                    // its LLVM type is the epilogue's `ret` type (secret stripped).
+                    let rty = self.lty(inner.ty)?;
+                    writeln!(self.body, "  ret {rty} {val}").unwrap();
+                }
+                let dead = self.fresh_block();
+                writeln!(self.body, "bb{dead}:").unwrap();
+                // `return` is divergent: hand back a typed-zero placeholder operand
+                // (only ever stored into the now-dead block).
+                Ok("0".to_string())
+            }
             TypedExprKind::Cast(inner) => {
                 // ADR 0049: integer width conversion — trunc / sext / zext by
                 // width (u8 is the only unsigned source → zext when widening);

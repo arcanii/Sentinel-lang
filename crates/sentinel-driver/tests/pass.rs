@@ -1319,6 +1319,18 @@ fn pass_selfhost_ast_drop() {
 }
 
 #[test]
+fn pass_c65_return() {
+    // ADR 0065 c65_return: explicit early `return`. Exercises a guard return
+    // (`checked_div`), a heap binding live across an early return (`first_or_default`
+    // — the load-bearing drop-on-both-paths case), a `;`-terminated statement-position
+    // return (`clamp_low`), and an early `return 42` on success. Also exercised
+    // byte-for-byte by the selfhost differentials (corpus auto-scan), proving the
+    // self-hosted `scg` mirrors `return`'s control-flow lowering identically to the
+    // `snc llvm` oracle. Exit 42 iff every sub-result is correct.
+    assert_eq!(run_exit("c65_return.sentinel"), 42);
+}
+
+#[test]
 fn pass_c60_vec_struct_move() {
     // ADR 0034 D8: a Move-typed struct element (a struct owning a `[u8]`) pushed
     // into a `Vec` through a BY-VALUE function parameter is consumed/moved, so it

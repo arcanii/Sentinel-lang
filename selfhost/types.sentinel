@@ -4835,16 +4835,20 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             rt
         },
-        // ADR 0065: `return <expr>` — a divergent expression. The inner is the
-        // returned value (consumed, like a tail return); the node's type is the
-        // inner's type carried verbatim (a divergent placeholder — the join-site
-        // divergence that lets a `return` branch unify with its sibling is the
-        // stage-4 acceptance follow-up, orthogonal to this dump). NOT a taint
-        // sink — `return` is unconditional control flow, so in MIR mode it
-        // carries the inner's value (left in `lastval` by dumping the inner; no
-        // op emitted), exactly as the Rust MIR Opaque-carries it. Dumps
-        // `(return <inner :T> :T)`. (Not yet exercised — `return` fixtures stay
-        // out of the typing/codegen corpora until the full stage-4 mirror.)
+        // ADR 0065 stage 4: `return <expr>` — a divergent expression. The inner is
+        // the returned value (consumed, like a tail return); the node's type is the
+        // inner's type carried verbatim. Dumps `(return <inner :T> :T)`. NOT a taint
+        // sink — `return` is unconditional control flow.
+        //   MIR: Opaque-carries the inner value (result type = the inner's type),
+        //   mirroring the Rust MIR `Return(inner) => Opaque(vec![v])` — the verifier
+        //   still sees a secret divisor inside `return a / b`.
+        //   CG (the byte-identical twin of `snc llvm`'s `llvm_dump` Return arm):
+        //   evaluate the inner, drop EVERY live binding down to the fn floor
+        //   (`cg_drop_range` floor 0 = "break all the way out"; the moved set skips a
+        //   returned binding), then `ret` with the epilogue ABI (`main` i64→i32;
+        //   effecting → `sentinel_kont_pure`; ordinary → the value), then park a dead
+        //   block for the now-unreachable remainder. The produced operand is a
+        //   typed-zero placeholder (only ever stored into the dead block).
         Expr::Return(ri) => {
             append_str(out, "(return ");
             let svc: bool = (*c).consuming;
@@ -4852,6 +4856,56 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             let it: i64 = dump_texpr(out, ri, 0 - 1, src, c, gb);
             (*c).consuming = svc;
             close_ty(out, it, c);
+            if mir_on(c) {
+                let mc: i64 = (*c).mir_cur;
+                let iv: i64 = (*c).lastval;
+                let d: i64 = mir_emit_opaque1(c, mc, iv, it);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
+            if cg_on(c) {
+                let rk: i64 = (*c).cglk;
+                let rv: i64 = (*c).cglv;
+                cg_drop_range(c, 0);
+                if (*c).cgmain {
+                    let td: i64 = cg_dst(c);
+                    cgo_str(c, "trunc i64 ");
+                    cgo_operand(c, rk, rv);
+                    cgo_str(c, " to i32\n");
+                    cgo_str(c, "  ret i32 %v");
+                    cgo_int(c, td);
+                    cg_putc(c, '\n');
+                    0
+                } else if (*c).cg_eff {
+                    let kp: i64 = cg_dst(c);
+                    cgo_str(c, "call ptr @sentinel_kont_pure(i64 ");
+                    cgo_operand(c, rk, rv);
+                    cgo_str(c, ")\n");
+                    (*c).cg_used_kontpure = true;
+                    cgo_str(c, "  ret ptr %v");
+                    cgo_int(c, kp);
+                    cg_putc(c, '\n');
+                    0
+                } else {
+                    cgo_str(c, "  ret ");
+                    cgo_ty(c, it);
+                    cg_putc(c, ' ');
+                    cgo_operand(c, rk, rv);
+                    cg_putc(c, '\n');
+                    0
+                };
+                let dead: i64 = cg_fresh_block(c);
+                cgo_str(c, "bb");
+                cgo_int(c, dead);
+                cgo_str(c, ":\n");
+                (*c).cglk = 1;
+                (*c).cglv = 0;
+                0
+            } else {
+                0
+            };
             it
         },
         // ADR 0049: integer cast `expr as T`. Type the operand, then the result is

@@ -1,0 +1,64 @@
+// tests/pass/c65_return.sentinel — explicit early `return` (ADR 0065), self-contained.
+//
+// `return expr` exits a function early (C-style) instead of only via the tail. It is a
+// DIVERGENT expression valid as a branch tail (`if guard { return x } else { … }`) and as
+// a `;`-terminated statement. Drops are correct across an early return: a heap binding
+// live when the return fires is freed on the early-exit path AND on the fall-through path
+// — never leaked, never double-freed (the same one-free invariant `break`/`continue`
+// verify). Constant-time is UNCHANGED: `return` is unconditional control flow, not a
+// branch on a value, so it is no new `secret_leak` sink.
+//
+// Unlike `examples/lang/early_return.sentinel` (the snc-only demonstrator), this lives in
+// tests/pass so it enters the self-host differential corpora: `snc llvm` == the
+// self-hosted `scg` byte-for-byte, both bootstrap fixed points hold. Exit 42 = every
+// check held.
+
+// Early return as a guard: bail out on the error case up front instead of nesting the
+// real work in an else.
+fn checked_div(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return 0 - 1
+    } else {
+        a / b
+    }
+}
+
+// A heap binding (`buf`) is live when the early return fires. On the `present` path it is
+// read (`len`) then dropped by the early-exit drops; on the fall-through path it drops at
+// scope end — exactly once on either path.
+fn first_or_default(present: bool, fallback: i64) -> i64 {
+    let buf: [u8] = "payload";
+    if present {
+        return len(buf)
+    } else {
+        fallback
+    }
+}
+
+// `return` as a `;`-terminated STATEMENT before the tail: a guard that short-circuits the
+// rest of the body.
+fn clamp_low(x: i64, lo: i64) -> i64 {
+    if x < lo {
+        return lo
+    } else {
+        0
+    };
+    x
+}
+
+fn main() -> i64 {
+    let c1: i64 = checked_div(84, 2);          // 42 (normal path)
+    let c2: i64 = checked_div(5, 0);           // -1 (early-return guard)
+    let c3: i64 = first_or_default(true, 9);   // 7  (heap live across the return)
+    let c4: i64 = first_or_default(false, 9);  // 9  (fall-through)
+    let c5: i64 = clamp_low(3, 10);            // 10 (statement-position return)
+    let c6: i64 = clamp_low(20, 10);           // 20 (fall-through to the tail)
+    let ok: bool =
+        c1 == 42 && c2 == 0 - 1 && c3 == 7 && c4 == 9 && c5 == 10 && c6 == 20;
+    // Early return on success; otherwise fall through to the failure code.
+    if ok {
+        return 42
+    } else {
+        0
+    }
+}
