@@ -9,6 +9,8 @@ use std::data::json::Json;
 use std::data::json::json_parse;
 use std::data::json::json_stringify;
 use std::bytes::bytes::eq;
+use std::test::check;
+use std::test::report;
 
 // round-trip: parse `doc`, serialize, and require the output equals `doc` (so `doc`
 // must be canonical — no insignificant whitespace).
@@ -42,51 +44,66 @@ fn num_of(doc: [u8]) -> i64 {
 }
 
 fn main() -> i64 {
-    let mut bad: i64 = 0;
+    let mut passed: i64 = 0;
+    let mut e: i64 = 0;   // per-section error accumulator
 
     // ---- atoms round-trip ----
-    bad = bad + rt("42");
-    bad = bad + rt("-7");
-    bad = bad + rt("0");
-    bad = bad + rt("true");
-    bad = bad + rt("false");
-    bad = bad + rt("null");
-    bad = bad + rt("\"hi\"");
-    bad = bad + rt("[]");
-    bad = bad + rt("{}");
+    e = 0;
+    e = e + rt("42");
+    e = e + rt("-7");
+    e = e + rt("0");
+    e = e + rt("true");
+    e = e + rt("false");
+    e = e + rt("null");
+    e = e + rt("\"hi\"");
+    e = e + rt("[]");
+    e = e + rt("{}");
+    passed = passed + check("atoms round-trip (number / bool / null / string / [] / {})", e == 0);
 
     // ---- composites round-trip ----
-    bad = bad + rt("[1,2,3]");
-    bad = bad + rt("[[1],[2,3]]");
-    bad = bad + rt("{\"x\":1}");
-    bad = bad + rt("{\"a\":[1,2],\"b\":{\"c\":true}}");
+    e = 0;
+    e = e + rt("[1,2,3]");
+    e = e + rt("[[1],[2,3]]");
+    e = e + rt("{\"x\":1}");
+    e = e + rt("{\"a\":[1,2],\"b\":{\"c\":true}}");
+    passed = passed + check("nested arrays + objects round-trip", e == 0);
 
     // ---- a comprehensive canonical document ----
-    bad = bad + rt("{\"name\":\"sentinel\",\"n\":42,\"neg\":-7,\"ok\":true,\"no\":false,\"nil\":null,\"tags\":[\"a\",\"b\"],\"nested\":{\"x\":1}}");
+    e = 0;
+    e = e + rt("{\"name\":\"sentinel\",\"n\":42,\"neg\":-7,\"ok\":true,\"no\":false,\"nil\":null,\"tags\":[\"a\",\"b\"],\"nested\":{\"x\":1}}");
+    passed = passed + check("comprehensive canonical document round-trip", e == 0);
 
     // ---- whitespace insensitivity (non-canonical input -> canonical output) ----
-    bad = bad + rt2("[ 1 ,  2 , 3 ]", "[1,2,3]");
-    bad = bad + rt2("{ \"a\" : 1 , \"b\" : 2 }", "{\"a\":1,\"b\":2}");
+    e = 0;
+    e = e + rt2("[ 1 ,  2 , 3 ]", "[1,2,3]");
+    e = e + rt2("{ \"a\" : 1 , \"b\" : 2 }", "{\"a\":1,\"b\":2}");
+    passed = passed + check("whitespace insensitivity (non-canonical -> canonical)", e == 0);
 
     // ---- string escapes: a JSON string containing a quote and a backslash ----
-    bad = bad + rt("\"a\\\"b\"");      // JSON string  "a\"b"  round-trips
-    bad = bad + rt("\"c\\\\d\"");      // JSON string  "c\\d"  round-trips
+    e = 0;
+    e = e + rt("\"a\\\"b\"");      // JSON string  "a\"b"  round-trips
+    e = e + rt("\"c\\\\d\"");      // JSON string  "c\\d"  round-trips
+    passed = passed + check("string escapes (quote, backslash)", e == 0);
 
     // ---- float numbers now round-trip (ADR 0058; was a dropped fraction) ----
-    bad = bad + rt2("3.75", "3.75");
-    bad = bad + rt2("-2.5", "-2.5");
-    bad = bad + rt2("0.625", "0.625");
-    bad = bad + rt2("1.5e2", "150.0");        // exponent -> canonical decimal
-    bad = bad + rt2("3.14159", "3.14159");
-    bad = bad + rt2("[1,2.5,3]", "[1,2.5,3]"); // ints and floats coexist in an array
-    bad = bad + rt2("{\"pi\":3.14159,\"n\":42}", "{\"pi\":3.14159,\"n\":42}");
+    e = 0;
+    e = e + rt2("3.75", "3.75");
+    e = e + rt2("-2.5", "-2.5");
+    e = e + rt2("0.625", "0.625");
+    e = e + rt2("1.5e2", "150.0");        // exponent -> canonical decimal
+    e = e + rt2("3.14159", "3.14159");
+    e = e + rt2("[1,2.5,3]", "[1,2.5,3]"); // ints and floats coexist in an array
+    e = e + rt2("{\"pi\":3.14159,\"n\":42}", "{\"pi\":3.14159,\"n\":42}");
     // an integer (no '.'/exponent) stays an integer (Num, not Float)
-    bad = bad + rt2("100", "100");
+    e = e + rt2("100", "100");
+    passed = passed + check("float numbers round-trip, ints stay ints (ADR 0058)", e == 0);
 
     // ---- parse then match ----
-    bad = bad + (if num_of("42") == 42 { 0 } else { 1 });
-    bad = bad + (if num_of("-100") == 0 - 100 { 0 } else { 1 });
-    bad = bad + (if num_of("true") == 0 - 999 { 0 } else { 1 });   // not a number
+    e = 0;
+    e = e + (if num_of("42") == 42 { 0 } else { 1 });
+    e = e + (if num_of("-100") == 0 - 100 { 0 } else { 1 });
+    e = e + (if num_of("true") == 0 - 999 { 0 } else { 1 });   // not a number
+    passed = passed + check("parse then match-extract a number", e == 0);
 
-    if bad == 0 { 42 } else { 5 }
+    report(passed, 7)
 }

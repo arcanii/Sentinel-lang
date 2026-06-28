@@ -29,6 +29,9 @@
 //
 // Expected: exit code 42, no stdout.
 
+use std::test::check;
+use std::test::report;
+
 trait Meter {
     fn tick(self: &mut Self, n: i64) -> i64;
 }
@@ -101,5 +104,10 @@ fn main() -> i64 {
     let b: i64 = Add::tick(&mut dial, 4);
     let c: i64 = Scale::tick(&mut dial, 7);
 
-    a + b + c
+    let mut passed: i64 = 0;
+    passed = passed + check("3-level delegation top.tick(20) == 20", a == 20);
+    passed = passed + check("named impl Add::tick(dial, 4) == 4", b == 4);
+    passed = passed + check("named impl Scale::tick(dial, 7) == 18 (v: 4 + 7*2)", c == 18);
+
+    report(passed, 3)
 }

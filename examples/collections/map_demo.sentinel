@@ -15,6 +15,8 @@ use std::collections::map::map_has;
 use std::collections::map::map_len;
 use std::text::str::int_to_str;
 use std::text::str::concat;
+use std::test::check;
+use std::test::report;
 
 fn lit(d: [i64], n: i64) -> [u8] {
     let mut v: Vec<u8> = vec_new();
@@ -38,7 +40,8 @@ fn bump(m: &mut Map, k: &[u8]) -> i64 {
 }
 
 fn main() -> i64 {
-    let mut bad: i64 = 0;
+    let mut passed: i64 = 0;
+    let mut e: i64 = 0;   // per-section error accumulator
 
     // ---- bulk insert past the initial 8 buckets (forces a resize/rehash) ----
     let mut m: Map = map_new();
@@ -48,27 +51,33 @@ fn main() -> i64 {
         map_set(&mut m, &k, i * i);
         i = i + 1;
     }
-    bad = bad + (if map_len(&m) == 20 { 0 } else { 1 });
+    passed = passed + check("bulk insert of 20 keys -> len 20 (forces a rehash)", map_len(&m) == 20);
 
     // ---- every key still retrievable after the rehash ----
+    e = 0;
     let mut j: i64 = 0;
     while j < 20 {
         let k: [u8] = keyn(j);
-        bad = bad + (if map_get(&m, &k, 0 - 1) == j * j { 0 } else { 1 });
+        e = e + (if map_get(&m, &k, 0 - 1) == j * j { 0 } else { 1 });
         j = j + 1;
     }
+    passed = passed + check("all 20 keys retrievable after rehash", e == 0);
 
     // ---- update in place (no growth) ----
     let k5: [u8] = keyn(5);
     map_set(&mut m, &k5, 999);
-    bad = bad + (if map_get(&m, &k5, 0 - 1) == 999 { 0 } else { 1 });
-    bad = bad + (if map_len(&m) == 20 { 0 } else { 1 });
+    e = 0;
+    e = e + (if map_get(&m, &k5, 0 - 1) == 999 { 0 } else { 1 });
+    e = e + (if map_len(&m) == 20 { 0 } else { 1 });
+    passed = passed + check("update in place (value changes, len unchanged at 20)", e == 0);
 
     // ---- absence: default + has ----
     let kabs: [u8] = lit([122, 122], 2);   // "zz"
-    bad = bad + (if map_get(&m, &kabs, 0 - 7) == 0 - 7 { 0 } else { 1 });
-    bad = bad + (if map_has(&m, &kabs) { 1 } else { 0 });
-    bad = bad + (if map_has(&m, &k5) { 0 } else { 1 });
+    e = 0;
+    e = e + (if map_get(&m, &kabs, 0 - 7) == 0 - 7 { 0 } else { 1 });
+    e = e + (if map_has(&m, &kabs) { 1 } else { 0 });
+    e = e + (if map_has(&m, &k5) { 0 } else { 1 });
+    passed = passed + check("absence (default on missing key, map_has present/absent)", e == 0);
 
     // ---- count-by-key over the sequence a,b,a,c,a,b -> a=3, b=2, c=1 ----
     let mut wc: Map = map_new();
@@ -81,10 +90,12 @@ fn main() -> i64 {
     bump(&mut wc, &wcc);
     bump(&mut wc, &wa);
     bump(&mut wc, &wb);
-    bad = bad + (if map_get(&wc, &wa, 0) == 3 { 0 } else { 1 });
-    bad = bad + (if map_get(&wc, &wb, 0) == 2 { 0 } else { 1 });
-    bad = bad + (if map_get(&wc, &wcc, 0) == 1 { 0 } else { 1 });
-    bad = bad + (if map_len(&wc) == 3 { 0 } else { 1 });
+    e = 0;
+    e = e + (if map_get(&wc, &wa, 0) == 3 { 0 } else { 1 });
+    e = e + (if map_get(&wc, &wb, 0) == 2 { 0 } else { 1 });
+    e = e + (if map_get(&wc, &wcc, 0) == 1 { 0 } else { 1 });
+    e = e + (if map_len(&wc) == 3 { 0 } else { 1 });
+    passed = passed + check("count-by-key (a=3, b=2, c=1, len 3)", e == 0);
 
-    if bad == 0 { 42 } else { 5 }
+    report(passed, 5)
 }
