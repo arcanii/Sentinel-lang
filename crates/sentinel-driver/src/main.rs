@@ -145,9 +145,11 @@ fn print_usage() {
     eprintln!("    snc parse <file>                 lex, parse, and pretty-print the program");
     eprintln!("    snc build <file> [-o <output>] [--link <lib>]... [--lib-path <dir>]...");
     eprintln!("              [--require-signatures off|warn|strict] [--trust <manifest>]");
+    eprintln!("              [--target windows|linux|macos]");
     eprintln!("                                     compile + link to an executable (--link adds a");
     eprintln!("                                     native library; --require-signatures gates the");
-    eprintln!("                                     build on ADR 0061 module signatures)");
+    eprintln!("                                     build on ADR 0061 module signatures; --target");
+    eprintln!("                                     selects conditional-compilation codepaths)");
     eprintln!("    snc build --lib <file> [-o <lib.a>] [--emit-header <h.h>] [--lib-path <dir>]...");
     eprintln!("                                     compile to a C-ABI static library (ADR 0059)");
     eprintln!("    snc build --shared <file> [-o <lib.dylib>] [--emit-header <h.h>] [--lib-path <dir>]...");
@@ -531,7 +533,7 @@ fn run_llvm(path: &str) -> ExitCode {
     // `snc llvm` honors `SNC_LIB_PATH` (env-only; no `--lib-path` flag on the
     // oracle/bootstrap surfaces) so the self-host stages resolve `std` from
     // outside the entry's tree if pointed there.
-    match discover_module_graph(Path::new(path), &lib_search_dirs(&[])) {
+    match discover_module_graph(Path::new(path), &lib_search_dirs(&[]), &host_target_os()) {
         Ok(modules) if !modules.is_empty() => {
             let units: Vec<sentinel_resolve::ModuleUnit> = modules
                 .iter()
@@ -633,7 +635,7 @@ fn run_llvm_merged(merged: Program) -> ExitCode {
 /// *same* merged source and must emit byte-identical `.ll`. A single-file
 /// program (no `use`) is parsed and re-printed directly (its own merge).
 fn run_merge(path: &str) -> ExitCode {
-    let merged: Program = match discover_module_graph(Path::new(path), &lib_search_dirs(&[])) {
+    let merged: Program = match discover_module_graph(Path::new(path), &lib_search_dirs(&[]), &host_target_os()) {
         Ok(modules) if !modules.is_empty() => {
             let units: Vec<sentinel_resolve::ModuleUnit> = modules
                 .iter()
@@ -781,15 +783,51 @@ struct DiscoveredModule {
     file: PathBuf,
 }
 
-/// The candidate file for module `a::b` under directory `base`:
-/// `<base>/a/b.sentinel` (the file-as-module path→file mapping, ADR 0037).
-fn module_file_in(base: &Path, module: &[String]) -> PathBuf {
+/// The candidate file for module `a::b` under directory `base`, with the
+/// file-name suffix `suf` on the last segment: `<base>/a/b<suf>.sentinel` (the
+/// file-as-module path→file mapping, ADR 0037; the suffix is the ADR 0062
+/// target selector, e.g. `_windows`). An empty `suf` is the portable default.
+fn module_file_with_suffix(base: &Path, module: &[String], suf: &str) -> PathBuf {
     let mut file = base.to_path_buf();
-    for seg in module {
-        file.push(seg);
+    let last = module.len().saturating_sub(1);
+    for (i, seg) in module.iter().enumerate() {
+        if i == last {
+            file.push(format!("{seg}{suf}"));
+        } else {
+            file.push(seg);
+        }
     }
     file.set_extension("sentinel");
     file
+}
+
+/// The active target OS for this host (ADR 0062 D1) — `std::env::consts::OS`
+/// ("windows" / "linux" / "macos" / …). The default when `--target` is absent.
+fn host_target_os() -> String {
+    std::env::consts::OS.to_string()
+}
+
+/// Normalize a user-supplied `--target` value to the canonical OS atom
+/// (ADR 0062 D1): `win32`→`windows`, `darwin`/`osx`→`macos`, else lowercased
+/// as-is.
+fn normalize_target(s: &str) -> String {
+    match s.to_ascii_lowercase().as_str() {
+        "win32" | "win" => "windows".to_string(),
+        "darwin" | "osx" => "macos".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The module-file suffixes to try for `target_os`, most-specific first (ADR
+/// 0062 D2): the exact `_<os>`, then the `_unix` family for linux/macos, then
+/// the empty (portable default) suffix.
+fn target_suffixes(target_os: &str) -> Vec<String> {
+    let mut suffixes = vec![format!("_{target_os}")];
+    if target_os == "linux" || target_os == "macos" {
+        suffixes.push("_unix".to_string());
+    }
+    suffixes.push(String::new());
+    suffixes
 }
 
 /// The extra module-search directories, in priority order: the explicit
@@ -835,6 +873,7 @@ fn lib_search_dirs(cli_lib_paths: &[String]) -> Vec<PathBuf> {
 fn discover_module_graph(
     entry: &Path,
     search_dirs: &[PathBuf],
+    target_os: &str,
 ) -> Result<Vec<DiscoveredModule>, String> {
     let root = entry.parent().unwrap_or_else(|| Path::new("."));
     let entry_stem = entry
@@ -876,14 +915,19 @@ fn discover_module_graph(
             if !visited.insert(module.clone()) {
                 continue; // already seen — a cycle is fine.
             }
-            // Resolve the module's file: the entry's own directory first
-            // (ADR 0037's primary source root), then each configured search
-            // dir (`--lib-path` then `SNC_LIB_PATH`); the first existing file
-            // wins, so a local module shadows a library one.
-            let candidates: Vec<PathBuf> = std::iter::once(root.to_path_buf())
-                .chain(search_dirs.iter().cloned())
-                .map(|base| module_file_in(&base, &module))
-                .collect();
+            // Resolve the module's file: base-major (the entry's own directory
+            // first — ADR 0037's primary source root — then each `--lib-path` /
+            // `SNC_LIB_PATH` dir), suffix-minor within a base (the ADR 0062
+            // target-conditional variants `_<os>` → `_unix` → default). The
+            // first existing file wins, so a local module shadows a library one,
+            // and a target-specific variant shadows the portable default.
+            let suffixes = target_suffixes(target_os);
+            let mut candidates: Vec<PathBuf> = Vec::new();
+            for base in std::iter::once(root.to_path_buf()).chain(search_dirs.iter().cloned()) {
+                for suf in &suffixes {
+                    candidates.push(module_file_with_suffix(&base, &module, suf));
+                }
+            }
             let file = match candidates.iter().find(|f| f.is_file()) {
                 Some(f) => f.clone(),
                 None => {
@@ -920,6 +964,7 @@ fn run_build_cli(args: &[String]) -> ExitCode {
     let mut link_libs: Vec<String> = Vec::new();
     let mut lib_paths: Vec<String> = Vec::new();
     let mut trust = trust_tools::TrustOpts::default();
+    let mut target = host_target_os();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -979,6 +1024,18 @@ fn run_build_cli(args: &[String]) -> ExitCode {
                     }
                 }
             }
+            // ADR 0062: the target OS for conditional-compilation file selection
+            // (default = the host). Selects `_<os>` / `_unix` module variants.
+            "--target" => {
+                i += 1;
+                match args.get(i) {
+                    Some(t) => target = normalize_target(t),
+                    None => {
+                        eprintln!("snc: `--target` requires an OS (windows | linux | macos)");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             other => {
                 if path.is_some() {
                     eprintln!("snc: unexpected argument `{other}`");
@@ -990,7 +1047,7 @@ fn run_build_cli(args: &[String]) -> ExitCode {
         i += 1;
     }
     match path {
-        Some(p) => run_build(p, output, &link_libs, &lib_paths, &trust),
+        Some(p) => run_build(p, output, &link_libs, &lib_paths, &trust, &target),
         None => {
             eprintln!("snc: `build` requires a source file");
             ExitCode::from(2)
@@ -1018,6 +1075,7 @@ fn run_build(
     link_libs: &[String],
     lib_paths: &[String],
     trust: &trust_tools::TrustOpts,
+    target: &str,
 ) -> ExitCode {
     let src = match read_source(path) {
         Ok(s) => s,
@@ -1026,8 +1084,9 @@ fn run_build(
 
     // Phase D.6 (1/N) / ADR 0037: discover the module graph by following
     // `use` edges. A single-file program (no `use`) compiles exactly as before;
-    // a multi-module graph is merged (Path A) and compiled as one object.
-    let modules = match discover_module_graph(Path::new(path), &lib_search_dirs(lib_paths)) {
+    // a multi-module graph is merged (Path A) and compiled as one object. Module
+    // files are resolved for `target` (ADR 0062 target-conditional selection).
+    let modules = match discover_module_graph(Path::new(path), &lib_search_dirs(lib_paths), target) {
         Ok(m) => m,
         Err(msg) => {
             eprintln!("snc: {msg}");
@@ -1320,7 +1379,7 @@ fn run_build_lib(
     // library (no `use`) keeps the entry program unchanged. `merge_modules`
     // keeps `export "C"` names bare (A3) and clears `uses`, so the merged
     // program resolves + codegen's the export wrappers exactly as single-file.
-    let (program, is_merged) = match discover_module_graph(Path::new(path), &lib_search_dirs(lib_paths)) {
+    let (program, is_merged) = match discover_module_graph(Path::new(path), &lib_search_dirs(lib_paths), &host_target_os()) {
         Ok(modules) if !modules.is_empty() => {
             let units: Vec<sentinel_resolve::ModuleUnit> = modules
                 .iter()
@@ -1984,7 +2043,7 @@ fn unit_fingerprint(
 /// skipped, printing `fresh <module>`) — the per-unit `.o` is reproducible
 /// (see `repro.rs`), so reusing it is sound.
 fn run_build_separate(path: &str, output: Option<&str>, lib_paths: &[String]) -> ExitCode {
-    let modules = match discover_module_graph(Path::new(path), &lib_search_dirs(lib_paths)) {
+    let modules = match discover_module_graph(Path::new(path), &lib_search_dirs(lib_paths), &host_target_os()) {
         Ok(m) => m,
         Err(msg) => {
             eprintln!("snc: {msg}");
@@ -1993,8 +2052,8 @@ fn run_build_separate(path: &str, output: Option<&str>, lib_paths: &[String]) ->
     };
     if modules.is_empty() {
         // Single-file: nothing to compile separately. (`--separate` does not
-        // thread `--link` / the trust gate yet; follow-ups.)
-        return run_build(path, output, &[], lib_paths, &trust_tools::TrustOpts::default());
+        // thread `--link` / the trust gate / `--target` yet; follow-ups.)
+        return run_build(path, output, &[], lib_paths, &trust_tools::TrustOpts::default(), &host_target_os());
     }
 
     // Visibility / existence gate (ModuleNotFound / UnknownImport /
