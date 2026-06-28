@@ -58,6 +58,95 @@ fn build_sentinel_codegen(tmp: &Path) -> PathBuf {
     bin
 }
 
+/// Compile the scg-emitted `.ll` (capstone 2's L1) into a runnable executable,
+/// returning its path. On Unix this is one `cc` invocation. Windows has no
+/// `cc`/clang DRIVER (the from-source LLVM at `$LLVM_SYS_180_PREFIX` ships the
+/// `llvm-*` tools but not the clang driver), so we go `llc` (`.ll` -> `.obj`) +
+/// the MSVC `link.exe` with the SAME runtime + native libs + 16 MB stack snc's
+/// own link backend uses (ADR 0060). That makes the bootstrap fixed point
+/// verifiable on Windows too — it was only ever blocked by the 1 MB default
+/// stack (now fixed) plus this missing `cc`, not by anything fundamental.
+fn compile_ll_to_exe(ll_path: &Path, out_stem: &Path) -> PathBuf {
+    let snc_dir = Path::new(env!("CARGO_BIN_EXE_snc"))
+        .parent()
+        .expect("snc binary dir");
+    if cfg!(target_os = "windows") {
+        let obj = out_stem.with_extension("obj");
+        let exe = out_stem.with_extension("exe");
+        let llc = PathBuf::from(
+            std::env::var("LLVM_SYS_180_PREFIX")
+                .expect("LLVM_SYS_180_PREFIX set (for llc on Windows)"),
+        )
+        .join("bin")
+        .join("llc.exe");
+        // snc hardcodes `target triple = "arm64-apple-darwin"` in the TEXT IR
+        // (macOS-first); inkwell overrides it to the host TargetMachine on a
+        // real build, so `snc build` works on Windows. `llc` honors the text
+        // triple literally, so we must tell it the host triple explicitly (the
+        // same thing inkwell does) — else it emits a Mach-O object link.exe
+        // rejects (LNK1107). The IR carries no datalayout, so llc uses the
+        // x86_64-windows default.
+        let llc_out = Command::new(&llc)
+            .arg(ll_path)
+            .arg("-mtriple=x86_64-pc-windows-msvc")
+            .arg("-filetype=obj")
+            .arg("-o")
+            .arg(&obj)
+            .output()
+            .expect("run llc on the scg-emitted .ll");
+        assert!(
+            llc_out.status.success(),
+            "llc of the scg-emitted .ll failed:\n{}",
+            String::from_utf8_lossy(&llc_out.stderr)
+        );
+        // Mirror sentinel-driver's `link_exe` (ADR 0060): the runtime `.lib` +
+        // the native deps + msvcrt + the 16 MB stack. Requires the MSVC env
+        // (LIB paths) on PATH, exactly like a normal `snc build` on Windows.
+        let runtime = snc_dir.join("sentinel_runtime.lib");
+        let mut link = Command::new("link.exe");
+        link.arg("/NOLOGO")
+            .arg("/SUBSYSTEM:CONSOLE")
+            .arg("/STACK:16777216")
+            .arg(format!("/OUT:{}", exe.display()))
+            .arg(&obj)
+            .arg(&runtime);
+        for lib in [
+            "legacy_stdio_definitions.lib",
+            "kernel32.lib",
+            "ntdll.lib",
+            "userenv.lib",
+            "ws2_32.lib",
+            "dbghelp.lib",
+        ] {
+            link.arg(lib);
+        }
+        link.arg("/DEFAULTLIB:msvcrt");
+        let link_out = link.output().expect("run link.exe on the scg .obj");
+        assert!(
+            link_out.status.success(),
+            "link.exe of the scg .obj failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&link_out.stdout),
+            String::from_utf8_lossy(&link_out.stderr)
+        );
+        exe
+    } else {
+        let runtime = snc_dir.join("libsentinel_runtime.a");
+        let cc = Command::new("cc")
+            .arg(ll_path)
+            .arg(&runtime)
+            .arg("-o")
+            .arg(out_stem)
+            .output()
+            .expect("run cc on the scg-emitted .ll");
+        assert!(
+            cc.status.success(),
+            "cc of the scg-emitted .ll failed:\n{}",
+            String::from_utf8_lossy(&cc.stderr)
+        );
+        out_stem.to_path_buf()
+    }
+}
+
 /// Straight-line seeds (8a): const + main-trunc, params + arith + call, a `let` chain,
 /// cmp + unary-not + bool, unary negate, bitwise ops, and mut + assign-to-var.
 const SEEDS: &[&str] = &[
@@ -405,26 +494,11 @@ fn sentinel_codegen_reaches_the_bootstrap_fixed_point() {
         oracle.stdout.len()
     );
 
-    // scg' = cc(L1). The runtime archive sits beside the snc binary.
-    let runtime = Path::new(env!("CARGO_BIN_EXE_snc"))
-        .parent()
-        .expect("snc binary dir")
-        .join("libsentinel_runtime.a");
+    // scg' = compile(L1) — `cc` on Unix, `llc` + `link.exe` on Windows. The
+    // runtime sits beside the snc binary.
     let l1_path = tmp.join("L1.ll");
     std::fs::write(&l1_path, &l1.stdout).expect("write L1.ll");
-    let scg_prime = tmp.join("scg_prime");
-    let cc = Command::new("cc")
-        .arg(&l1_path)
-        .arg(&runtime)
-        .arg("-o")
-        .arg(&scg_prime)
-        .output()
-        .expect("run cc on the scg-emitted .ll");
-    assert!(
-        cc.status.success(),
-        "cc of the scg-emitted .ll failed:\n{}",
-        String::from_utf8_lossy(&cc.stderr)
-    );
+    let scg_prime = compile_ll_to_exe(&l1_path, &tmp.join("scg_prime"));
 
     // L2 = scg'(M). Capstone 2: L2 == L1 — the bootstrap fixed point.
     let r2 = tmp.join("r2");
@@ -497,26 +571,10 @@ fn sentinel_codegen_self_merges_the_compiler_and_reaches_fixed_point() {
         oracle.stdout.len()
     );
 
-    // scg' = cc(L1); L2 = scg'(compiler); assert L2 == L1 (the fixed point).
-    let runtime = Path::new(env!("CARGO_BIN_EXE_snc"))
-        .parent()
-        .expect("snc binary dir")
-        .join("libsentinel_runtime.a");
+    // scg' = compile(L1); L2 = scg'(compiler); assert L2 == L1 (the fixed point).
     let l1_path = tmp.join("L1.ll");
     std::fs::write(&l1_path, &l1.stdout).expect("write L1.ll");
-    let scg_prime = tmp.join("scg_prime");
-    let cc = Command::new("cc")
-        .arg(&l1_path)
-        .arg(&runtime)
-        .arg("-o")
-        .arg(&scg_prime)
-        .output()
-        .expect("run cc on the scg-emitted .ll");
-    assert!(
-        cc.status.success(),
-        "cc of the scg-emitted .ll failed:\n{}",
-        String::from_utf8_lossy(&cc.stderr)
-    );
+    let scg_prime = compile_ll_to_exe(&l1_path, &tmp.join("scg_prime"));
     let l2 = Command::new(&scg_prime).current_dir(&run).output().expect("run scg'");
     assert!(l2.status.success(), "scg' failed:\n{}", String::from_utf8_lossy(&l2.stderr));
     assert_eq!(

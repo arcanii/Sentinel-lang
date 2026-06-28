@@ -1879,6 +1879,16 @@ fn link_exe(objects: &[&Path], exe: &Path, link_libs: &[String]) -> Result<(), S
     if cfg!(target_os = "windows") {
         let mut cmd = Command::new("link.exe");
         cmd.arg("/NOLOGO").arg("/SUBSYSTEM:CONSOLE");
+        // ADR 0060 (Windows host): `link.exe` defaults to a 1 MB stack, but
+        // Unix (macOS / Linux) main threads get 8 MB. Deeply-recursive Sentinel
+        // programs — e.g. the self-hosted compiler `scg` over a large input —
+        // overflow 1 MB and crash with STATUS_STACK_OVERFLOW (0xC00000FD: empty
+        // stderr, non-zero exit). Reserve 16 MB: ≥ Unix's 8 MB (so anything that
+        // runs on Unix runs here) plus headroom for deeper recursion. `/STACK`
+        // sets the RESERVE, lazily committed on 64-bit, so the larger size costs
+        // nothing until actually used. NOT oracle-moving (linker invocation
+        // only; emitted IR / dumps unchanged).
+        cmd.arg("/STACK:16777216");
         cmd.arg(format!("/OUT:{}", exe.display()));
         for obj in objects {
             cmd.arg(obj);
