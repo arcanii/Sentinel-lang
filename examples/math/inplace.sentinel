@@ -8,6 +8,8 @@
 // `&mut v[i]` across a module boundary (so this also dogfoods modules + `--separate`
 // with the new element borrow). Exit 42 = every element landed at its clamped value.
 use std::math::num::clamp_assign;
+use std::test::check;
+use std::test::report;
 
 fn main() -> i64 {
     // Clamp each element of an array into [0, 100] in place.
@@ -26,10 +28,11 @@ fn main() -> i64 {
     clamp_assign(&mut v[0], 0, 100);   // 100
     clamp_assign(&mut v[1], 0, 100);   // 0
 
-    if a[0] == 0 && a[1] == 50 && a[2] == 100 && a[3] == 100 && a[4] == 0
-        && v[0] == 100 && v[1] == 0 {
-        42
-    } else {
-        0
-    }
+    let mut passed: i64 = 0;
+    passed = passed + check("array clamped to [0,50,100,100,0]",
+        a[0] == 0 && a[1] == 50 && a[2] == 100 && a[3] == 100 && a[4] == 0);
+    passed = passed + check("vec[0] 999 -> 100", v[0] == 100);
+    passed = passed + check("vec[1] -999 -> 0", v[1] == 0);
+
+    report(passed, 3)
 }

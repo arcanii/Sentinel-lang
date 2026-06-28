@@ -1,12 +1,14 @@
 // examples/math/clamp.sentinel
 //
 // Exercises std::math::num: clamp a value below / above / inside a range, and
-// take an absolute value. Exit 42 means every helper returned the expected
-// result. A second example category beyond `security`, and a non-`secret`
-// module crossing the module boundary (so the harness exercises the cross-unit
-// path on ordinary `i64` code too).
+// take an absolute value. Each check PRINTS its name + ok/FAIL at run time (via
+// std::test), so running the program shows the conditions and their evaluation;
+// exit 42 means every check passed (the harness's exit-code-is-the-answer
+// convention). A non-`secret` module crossing the module boundary.
 use std::math::num::clamp;
 use std::math::num::abs;
+use std::test::check;
+use std::test::report;
 
 fn main() -> i64 {
     let below: i64 = clamp(0 - 10, 5, 99); // below lo -> 5
@@ -14,9 +16,11 @@ fn main() -> i64 {
     let inside: i64 = clamp(42, 5, 99);    // in range -> 42
     let a: i64 = abs(0 - 42);              // 42
 
-    if below == 5 && above == 99 && inside == 42 && a == 42 {
-        42
-    } else {
-        0
-    }
+    let mut passed: i64 = 0;
+    passed = passed + check("clamp(-10, 5, 99) == 5", below == 5);
+    passed = passed + check("clamp(1000, 5, 99) == 99", above == 99);
+    passed = passed + check("clamp(42, 5, 99) == 42", inside == 42);
+    passed = passed + check("abs(-42) == 42", a == 42);
+
+    report(passed, 4)
 }

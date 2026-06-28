@@ -10,6 +10,8 @@ use std::bytes::bytes::contains;
 use std::bytes::bytes::starts_with;
 use std::bytes::bytes::eq;
 use std::bytes::bytes::repeat;
+use std::test::check;
+use std::test::report;
 
 fn main() -> i64 {
     // Borrow `s` (`&s`) so each utility reads it without consuming it.
@@ -18,16 +20,17 @@ fn main() -> i64 {
 
     let comma: i64 = find(&s, ',');          // index 5
     let ells: i64 = count(&s, 'l');          // l at 2, 3, 10 -> 3
-    let has_w: i64 = if contains(&s, 'w') { 1 } else { 0 };          // 1
-    let pre: i64 = if starts_with(&s, &prefix) { 1 } else { 0 };     // 1
-    let self_eq: i64 = if eq(&s, &s) { 1 } else { 0 };               // 1
 
     let aaa: [u8] = repeat('a', 4);          // "aaaa"
     let four: i64 = count(&aaa, 'a');        // 4
 
-    if comma == 5 && ells == 3 && has_w == 1 && pre == 1 && self_eq == 1 && four == 4 {
-        42
-    } else {
-        0
-    }
+    let mut passed: i64 = 0;
+    passed = passed + check("find ',' in \"hello, world\" == 5", comma == 5);
+    passed = passed + check("count 'l' == 3", ells == 3);
+    passed = passed + check("contains 'w'", contains(&s, 'w'));
+    passed = passed + check("starts_with \"hello\"", starts_with(&s, &prefix));
+    passed = passed + check("eq(s, s)", eq(&s, &s));
+    passed = passed + check("count 'a' in repeat('a',4) == 4", four == 4);
+
+    report(passed, 6)
 }

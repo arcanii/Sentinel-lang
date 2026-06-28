@@ -1,0 +1,34 @@
+// std::test — tiny check/report helpers for the examples corpus.
+//
+// The `examples/` programs double as feature tests; these helpers let each one
+// SHOW its work at run time — print every condition it checks and whether it
+// held — instead of silently computing an exit code. `check` reports one named
+// condition and returns 1/0 so `main` can tally the passes; `report` prints the
+// verdict and maps a full pass to the conventional success exit code 42 (so the
+// exit code still encodes pass/fail for the build harness).
+
+// Report one named check: print "<label>: ok" or "<label>: FAIL", and return 1
+// if the condition held (so the caller can tally) else 0.
+pub fn check(label: [u8], cond: bool) -> i64 {
+    print_bytes(label);
+    if cond {
+        print_bytes(": ok\n");
+        1
+    } else {
+        print_bytes(": FAIL\n");
+        0
+    }
+}
+
+// Print the overall verdict and return the corpus success code: 42 iff every
+// check passed (`passed == total`), else 0. The per-check lines printed by
+// `check` carry the detail; this is the summary line + the exit code.
+pub fn report(passed: i64, total: i64) -> i64 {
+    if passed == total {
+        print_bytes("-> ALL CHECKS PASSED\n");
+        42
+    } else {
+        print_bytes("-> SOME CHECKS FAILED\n");
+        0
+    }
+}

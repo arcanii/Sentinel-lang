@@ -3,6 +3,8 @@
 // edge cases (rotate by 0 and by the full width). Exit 42.
 use std::bits::bits::rotl64;
 use std::bits::bits::rotr64;
+use std::test::check;
+use std::test::report;
 
 fn main() -> i64 {
     let a: i64 = rotl64(1, 4);            // 1 <<rot 4 = 16
@@ -10,9 +12,11 @@ fn main() -> i64 {
     let c: i64 = rotl64(123456789, 0);    // rotate by 0 = identity
     let d: i64 = rotl64(123456789, 64);   // rotate by full width = identity
 
-    if a == 16 && b == 1 && c == 123456789 && d == 123456789 {
-        42
-    } else {
-        0
-    }
+    let mut passed: i64 = 0;
+    passed = passed + check("rotl64(1, 4) == 16", a == 16);
+    passed = passed + check("rotr64(16, 4) == 1", b == 1);
+    passed = passed + check("rotl64(x, 0) == x", c == 123456789);
+    passed = passed + check("rotl64(x, 64) == x", d == 123456789);
+
+    report(passed, 4)
 }
