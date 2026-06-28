@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c43_delegate_same_method_ambiguous.sentinel\")"
+---
+sentinel::types::ambiguous_method_call
+
+  × ambiguous method call `read` on `<class#2>`
+    ╭─[tests/ui/c43_delegate_same_method_ambiguous.sentinel:60:7]
+ 59 │     let c: Combined = Combined::init();
+ 60 │     c.read()
+    ·       ──┬─
+    ·         ╰── 
+ 61 │ }
+    ╰────

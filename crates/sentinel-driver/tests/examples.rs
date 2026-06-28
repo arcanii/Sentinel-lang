@@ -422,6 +422,14 @@ const EXAMPLES: &[(&str, i32)] = &[
     // The value is a cons-list recursive enum (no Vec<enum>); serialize consumes it. 42 =
     // every document round-tripped and parsed as specified.
     ("examples/data/json_demo.sentinel", 42),
+    // Composition-by-delegation, the hard cases (ADR 0021 D6): (1) MULTIPLE LEVELS —
+    // `Logged` delegates Meter to `Buffered` which delegates Meter to `Counter`, so one
+    // `tick` forwards three deep to the real impl; (2) the MULTIPLE-INHERITANCE / diamond
+    // problem — the same method `tick` from two sources, which Sentinel rejects as an
+    // ambiguous bare call and resolves with NAMED impls (`Add`/`Scale`) + qualified
+    // `Name::tick(..)` calls (composition + names, no diamond/MRO). 42 = the multi-level
+    // tick (20) + the two named ticks (4 + 18).
+    ("examples/lang/delegation.sentinel", 42),
 ];
 
 #[test]
@@ -652,6 +660,11 @@ fn collections_hash_map() {
 #[test]
 fn data_json_roundtrip() {
     check_example("examples/data/json_demo.sentinel", "json_demo", 42);
+}
+
+#[test]
+fn lang_delegation_levels_and_multiple_inheritance() {
+    check_example("examples/lang/delegation.sentinel", "delegation", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

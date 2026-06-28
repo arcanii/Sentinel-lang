@@ -1,0 +1,105 @@
+// examples/lang/delegation — composition-by-delegation, the hard cases.
+//
+// Sentinel has NO inheritance; a class reuses behavior by DELEGATING a trait to a
+// field: `delegate field: T to Trait;` synthesizes a default `impl as Trait` that
+// forwards every trait method to `self.field.method(...)` (ADR 0021 D6). This demo
+// covers the two things composition must answer that single inheritance fudges:
+//
+//   (1) MULTIPLE LEVELS — a delegate whose target is ITSELF a delegator. `Logged`
+//       delegates Meter to a `Buffered`, which delegates Meter to a `Counter`. A
+//       single `top.tick(n)` forwards transparently three deep (Logged → Buffered
+//       → Counter) to the one real `impl`. Delegation composes to any depth.
+//
+//   (2) THE "MULTIPLE INHERITANCE" / DIAMOND PROBLEM — the SAME method name reaching
+//       a value from two sources. Sentinel deliberately has no diamond: a bare
+//       `x.tick(..)` when two impls of `Meter` exist for `Dial` is rejected as an
+//       AMBIGUOUS call (and two `delegate`s of the same trait, or a delegate that
+//       collides with a manual impl, are rejected too — see
+//       tests/ui/c43_delegate_collides_with_impl). The answer is NAMED impls plus
+//       qualified calls: `impl Add as Meter` / `impl Scale as Meter` coexist, and
+//       `Add::tick(&mut d, ..)` / `Scale::tick(&mut d, ..)` pick one BY NAME. So
+//       "the same function from a different source" is resolved by *naming the
+//       source*, not by a linearization/MRO — composition + names, no diamond.
+//
+// Trace → exit 42:
+//   top.tick(20)            = 20   (3 forwarding hops land one tick on Counter)
+//   Add::tick(&mut dial, 4) =  4   (dial.v: 0 → 4)
+//   Scale::tick(&mut dial,7)= 18   (dial.v: 4 → 4 + 7*2 = 18)
+//   20 + 4 + 18             = 42
+//
+// Expected: exit code 42, no stdout.
+
+trait Meter {
+    fn tick(self: &mut Self, n: i64) -> i64;
+}
+
+// The one real implementation (delegation level 0).
+class Counter {
+    let total: i64;
+    pub init() {
+        self.total = 0;
+        0
+    }
+}
+
+impl as Meter for Counter {
+    fn tick(self: &mut Self, n: i64) -> i64 {
+        self.total = self.total + n;
+        self.total
+    }
+}
+
+// (1) MULTIPLE LEVELS. Each class IS-A Meter purely by forwarding to the next.
+class Buffered {
+    delegate inner: Counter to Meter;
+    pub init() {
+        self.inner = Counter::init();
+        0
+    }
+}
+
+class Logged {
+    delegate inner: Buffered to Meter; // Buffered is itself a delegator → 3 levels deep
+    pub init() {
+        self.inner = Buffered::init();
+        0
+    }
+}
+
+// (2) THE MULTIPLE-INHERITANCE CASE. Two implementations of the SAME method `tick`
+// for `Dial`. A bare `dial.tick(..)` is ambiguous; NAMED impls + qualified calls
+// resolve it — this is Sentinel's whole answer to multiple inheritance.
+class Dial {
+    let v: i64;
+    pub init() {
+        self.v = 0;
+        0
+    }
+}
+
+impl Add as Meter for Dial {
+    fn tick(self: &mut Self, n: i64) -> i64 {
+        self.v = self.v + n;
+        self.v
+    }
+}
+
+impl Scale as Meter for Dial {
+    fn tick(self: &mut Self, n: i64) -> i64 {
+        self.v = self.v + n * 2;
+        self.v
+    }
+}
+
+fn main() -> i64 {
+    // (1) one tick travels Logged → Buffered → Counter.
+    let mut top: Logged = Logged::init();
+    let a: i64 = top.tick(20);
+
+    // (2) the same `tick`, two sources, disambiguated BY NAME (not a diamond).
+    let mut dial: Dial = Dial::init();
+    let b: i64 = Add::tick(&mut dial, 4);
+    let c: i64 = Scale::tick(&mut dial, 7);
+
+    a + b + c
+}

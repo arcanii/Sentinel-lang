@@ -101,6 +101,7 @@ ui_snapshot!(c42_duplicate_impl_name, "c42_duplicate_impl_name.sentinel");
 // ---- C4.3 delegation rejections (resolve) ----
 ui_snapshot!(c43_delegate_collides_with_impl, "c43_delegate_collides_with_impl.sentinel");
 ui_snapshot!(c43_delegate_undefined_trait, "c43_delegate_undefined_trait.sentinel");
+ui_snapshot!(c43_delegate_same_method_ambiguous, "c43_delegate_same_method_ambiguous.sentinel");
 
 // ---- C4.4 structured-concurrency rejections (types) ----
 ui_snapshot!(c44_spawn_non_fn_call, "c44_spawn_non_fn_call.sentinel");

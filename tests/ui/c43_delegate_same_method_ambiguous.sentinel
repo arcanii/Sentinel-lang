@@ -1,0 +1,61 @@
+// C4.3 / ADR 0021 D6 — the MULTIPLE-INHERITANCE problem, caught.
+//
+// `Combined` delegates two DIFFERENT traits (`Reader`, `Counter`) to two fields,
+// but both traits declare a method named `read`. A bare `c.read()` therefore has
+// two equally-valid sources — the classic diamond. Sentinel has no method-
+// resolution order, so it REJECTS the ambiguous call rather than silently picking
+// one. (The fix is named impls + a qualified `Name::read(&c)` call — see
+// tests/pass/c4_named_impl and examples/lang/delegation.)
+//
+// Expected: snc rejects with an ambiguous-method-call diagnostic naming `read`.
+
+trait Reader {
+    fn read(self: &Self) -> i64;
+}
+
+trait Counter {
+    fn read(self: &Self) -> i64;
+}
+
+class A {
+    let v: i64;
+    pub init() {
+        self.v = 7;
+        0
+    }
+}
+
+impl as Reader for A {
+    fn read(self: &Self) -> i64 {
+        self.v
+    }
+}
+
+class B {
+    let v: i64;
+    pub init() {
+        self.v = 100;
+        0
+    }
+}
+
+impl as Counter for B {
+    fn read(self: &Self) -> i64 {
+        self.v
+    }
+}
+
+class Combined {
+    delegate a: A to Reader;
+    delegate b: B to Counter;
+    pub init() {
+        self.a = A::init();
+        self.b = B::init();
+        0
+    }
+}
+
+fn main() -> i64 {
+    let c: Combined = Combined::init();
+    c.read()
+}
