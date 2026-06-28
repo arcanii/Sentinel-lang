@@ -79,6 +79,21 @@ for the build/test commands (incl. the `vcvars64.bat` recipe for the link-touchi
   in the error; `--separate` too). Four-check on the driver crate green on Windows
   (build · `cargo test` · doctests [vacuous — binary crate] · clippy `-D warnings`);
   pre-existing Windows test failures unchanged (see below).
+- **Code signing & supply-chain trust — ADR 0061 v1 COMPLETE** (see NEXT item 1 below for
+  the full breakdown): a new **`sentinel-trust`** crate (Ed25519 verify twin of
+  `std::security::ed25519`) + the format + `snc sign`/`keygen`/`verify` + the build-time
+  gate (`--require-signatures`) + capability bounding. 6 commits `6be5e4e`…`a032888`.
+- **Conditional compilation — ADR 0062 (file-level), PROPOSED→IMPLEMENTED** (`48a291c`).
+  A module `a::b` resolves per the active target to `b_<os>.sentinel` → `b_unix.sentinel`
+  (linux/macos) → `b.sentinel` (most-specific first); the suffix is a selector stripped to
+  module `a::b`, so importers always write `use a::b::item`. Target = host OS by default
+  (codegen is host-only, ADR 0060); **`snc build --target windows|linux|macos`** overrides
+  it (win32/darwin aliased). NOT oracle-moving (only `discover_module_graph`'s candidate
+  list grows — base-major over the ADR 0037 search path, suffix-minor within a base; no
+  selfhost file uses a suffix → byte-identical resolution; no lex/parse/IR change). Item-
+  level `#[cfg]` (in-file, oracle-moving) is the deferred follow-up; `tests/conditional.rs`.
+  **▶ first real consumer = `std::sys::random`** (`_windows` BCryptGenRandom / `_unix`
+  getentropy), which closes the ADR 0061 Windows-`keygen` gap.
 - **macOS still BACKLOGGED** — the workspace `just check-all` + self-host differential
   has not run (argued not oracle-moving, but confirm on the differential). Also note:
   on Windows, `tests/modules.rs`'s 3 `separate_*_linkonce_*` tests fail at MSVC

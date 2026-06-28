@@ -42,6 +42,18 @@ trusted-but-over-reaching module (v1 enforces `ffi`). NOT oracle-moving (a drive
 gate; the in-file sig block is a `//` comment) → no re-bless / `selfhost` mirror.
 Windows-verified; see ADR 0061 + HANDOVER §0.
 
+**Latest (2026-06-28) — file-level conditional compilation (ADR 0062).** A program or
+`std` module can now ship platform-specific codepaths/libraries. Module `a::b` resolves
+per the active target, most-specific first, to `b_<os>.sentinel` → `b_unix.sentinel`
+(linux/macos) → `b.sentinel`; the `_<os>` suffix is a *selector* stripped to recover
+module `a::b`, so importers always write `use a::b::item`. Target = the host OS by default
+(codegen is host-only, ADR 0060); **`snc build --target windows|linux|macos`** selects
+another platform's codepaths. Resolution stays base-major over the ADR 0037 search path,
+suffix-minor within a base (a local module still shadows a library one). NOT oracle-moving
+(only the resolver's candidate list grows; no `selfhost` file uses a suffix → byte-identical
+resolution; no lex/parse/IR change) → no re-bless / `selfhost` mirror. Item-level `#[cfg]`
+(in-file, oracle-moving) is the deferred follow-up. Windows-verified; see ADR 0062.
+
 - **Phase A — `sentinel-broker`** ✅ complete. Production-shape memory
   subsystem (generational arenas, bump + slab strategies, scoped budgets,
   secret-memory policy: `mlock` + zero-on-free). Also backs compiled programs
