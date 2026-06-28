@@ -110,6 +110,9 @@ pub enum Expr {
     Match(Expr, Arms),
     StructLit([u8], Fields),
     Declassify(Expr),
+    // ADR 0065: `return expr` — an early return (a divergent expression). Mirrors
+    // the Rust `ExprKind::Return`; dumps as `(return <inner>)` like declassify.
+    Return(Expr),
     // ADR 0049: integer cast `expr as T` — the operand + the target type NAME
     // ("i64"/"i32"/"u8"); the types stage maps the name to a scalar code (via
     // `scalar_code`) and emits the width conversion. Preserves secrecy; NOT a
@@ -882,6 +885,13 @@ fn parse_atom(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i6
         let dinner: Expr = parse_expr(k, s, e, src, cur);
         *cur = *cur + 1;
         Expr::Declassify(dinner)
+    } else if tag == 43 {
+        // ADR 0065: `return <expr>` — consume the keyword, then a full
+        // expression (greedy: `return a + b` is `return (a + b)`). The handler
+        // `return v => body` ARM is parsed in `parse_harms`, never here.
+        *cur = *cur + 1;
+        let rinner: Expr = parse_expr(k, s, e, src, cur);
+        Expr::Return(rinner)
     } else if tag == 37 {
         // `perform Effect.op(args)`.
         *cur = *cur + 1;
@@ -1993,6 +2003,12 @@ fn dump_expr(out: &mut Vec<u8>, ex: Expr) -> i64 {
         Expr::Declassify(di) => {
             append_str(out, "(declassify ");
             dump_expr(out, di);
+            push(out, ')');
+            0
+        },
+        Expr::Return(ri) => {
+            append_str(out, "(return ");
+            dump_expr(out, ri);
             push(out, ')');
             0
         },

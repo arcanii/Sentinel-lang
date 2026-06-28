@@ -509,6 +509,16 @@ fn emit_expr(out: &mut Vec<u8>, c: &MergeCtx, ex: Expr) -> i64 {
             push(out, ')');
             0
         },
+        // ADR 0065: `return <expr>` re-emitted as source. (Not exercised by the
+        // merge differential — `return` fixtures are single-file, and the
+        // multi-module merge corpus uses none — but the match must be total.)
+        Expr::Return(ri) => {
+            push(out, '(');
+            append_str(out, "return ");
+            emit_expr(out, c, ri);
+            push(out, ')');
+            0
+        },
         Expr::Cast(ci, cnm) => {
             // ADR 0049: re-emit `(<inner> as T)` source. (Single-file casts do
             // not go through the merge un-parser; this keeps it consistent.)

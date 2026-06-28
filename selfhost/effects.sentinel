@@ -357,6 +357,7 @@ fn walk_eff(e: Expr, disch: i64, own: &mut i64, c: &mut ECtx, gb: &mut Vec<u8>, 
             walk_fields(fields, disch, own, c, gb, src, fidx, aid)
         },
         Expr::Declassify(inner) => walk_eff(inner, disch, own, c, gb, src, fidx, aid),
+        Expr::Return(inner) => walk_eff(inner, disch, own, c, gb, src, fidx, aid),
         Expr::Cast(inner, cnm) => {
             sink_name(gb, cnm);
             walk_eff(inner, disch, own, c, gb, src, fidx, aid)

@@ -4835,6 +4835,25 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
             };
             rt
         },
+        // ADR 0065: `return <expr>` — a divergent expression. The inner is the
+        // returned value (consumed, like a tail return); the node's type is the
+        // inner's type carried verbatim (a divergent placeholder — the join-site
+        // divergence that lets a `return` branch unify with its sibling is the
+        // stage-4 acceptance follow-up, orthogonal to this dump). NOT a taint
+        // sink — `return` is unconditional control flow, so in MIR mode it
+        // carries the inner's value (left in `lastval` by dumping the inner; no
+        // op emitted), exactly as the Rust MIR Opaque-carries it. Dumps
+        // `(return <inner :T> :T)`. (Not yet exercised — `return` fixtures stay
+        // out of the typing/codegen corpora until the full stage-4 mirror.)
+        Expr::Return(ri) => {
+            append_str(out, "(return ");
+            let svc: bool = (*c).consuming;
+            (*c).consuming = true;
+            let it: i64 = dump_texpr(out, ri, 0 - 1, src, c, gb);
+            (*c).consuming = svc;
+            close_ty(out, it, c);
+            it
+        },
         // ADR 0049: integer cast `expr as T`. Type the operand, then the result is
         // the target scalar (`cnm`), preserving the operand's secrecy (a width
         // conversion is data-independent / constant-time — NOT a sink). MIR: an
@@ -12204,6 +12223,7 @@ fn cg_walk_ex(c: &mut TyCtx, ex: Expr, collect: bool, out: &mut Vec<i64>, gb: &m
             0
         },
         Expr::Declassify(inner) => cg_walk_ex(c, inner, collect, out, gb),
+        Expr::Return(inner) => cg_walk_ex(c, inner, collect, out, gb),
         Expr::Perform(pe, po, pa) => {
             sink_name(gb, pe);
             sink_name(gb, po);
