@@ -31,7 +31,7 @@
 //     NOT); Maj uses only `&`/`^`.
 //   * A word -> 4 big-endian bytes is `(w >> (8*(3-j))) as u8` — a secret `>>` by
 //     a public amount then an `as u8` cast that PRESERVES secrecy (ADR 0049).
-use std::security::ct::ct_rotr32;
+use Sentinel::ct::ct_rotr32;
 
 // Ch(e, f, g) = (e AND f) XOR ((NOT e) AND g). Sentinel has no bitwise NOT, so
 // use the equivalent no-NOT identity: g ^ (e & (f ^ g)). Selects bit-for-bit

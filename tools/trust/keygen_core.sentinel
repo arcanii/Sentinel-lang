@@ -19,28 +19,9 @@
 // over the secret scalar branch-free, and only the public key is declassified.
 use std::sys::random::random_bytes;
 use std::security::ed25519::ed25519_pubkey;
-
-fn reveal(d: [secret u8]) -> [u8] {
-    let n: i64 = len(d);
-    let mut out: Vec<u8> = vec_new();
-    let mut i: i64 = 0;
-    while i < n {
-        push(&mut out, declassify(d[i]));
-        i = i + 1;
-    }
-    vec_to_array(out)
-}
-
-fn widen(src: &[u8]) -> [secret u8] {
-    let n: i64 = len(*src);
-    let mut v: Vec<secret u8> = vec_new();
-    let mut i: i64 = 0;
-    while i < n {
-        push(&mut v, (*src)[i]);
-        i = i + 1;
-    }
-    vec_to_array(v)
-}
+// The public⇄secret boundary helpers from the Sentinel:: core base (ADR 0064).
+use Sentinel::secrets::widen;
+use Sentinel::secrets::reveal;
 
 fn main() -> i64 {
     let seed: [u8] = random_bytes(32);

@@ -15,7 +15,7 @@
 // SHA-512 vs SHA-256: 64-bit words, 80 rounds, 1024-bit (128-byte) blocks, a 128-bit
 // length field, and different rotation amounts (Σ0 = ROTR 28/34/39, Σ1 = 14/18/41,
 // σ0 = ROTR 1/8 ^ SHR 7, σ1 = ROTR 19/61 ^ SHR 6). Ch/Maj are identical.
-use std::security::ct::ct_rotr64;
+use Sentinel::ct::ct_rotr64;
 
 // Ch(e,f,g) = (e AND f) XOR ((NOT e) AND g), via the no-NOT identity g ^ (e & (f^g)).
 fn ch(e: secret i64, f: secret i64, g: secret i64) -> secret i64 {

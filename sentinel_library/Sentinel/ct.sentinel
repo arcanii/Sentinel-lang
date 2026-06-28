@@ -1,4 +1,5 @@
-// std::security::ct — constant-time primitives over `secret` scalars.
+// Sentinel::ct — constant-time primitives over `secret` scalars (ADR 0064: the
+// `Sentinel::` core base — moved here from `std::security::ct`).
 //
 // Every function here is BRANCH-FREE: it computes on `secret` values using only
 // the data-independent operators (`^ & | + -`), never an `if`/`while` on a

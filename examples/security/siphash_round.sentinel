@@ -13,7 +13,7 @@
 // the compiler's constant-time check verifies the round on every build — so this
 // program compiling at all is the guarantee. Exit 42 means the round reproduced
 // the reference output for the inputs (v0,v1,v2,v3) = (1,2,3,4).
-use std::security::ct::ct_rotl64;
+use Sentinel::ct::ct_rotl64;
 
 fn main() -> i64 {
     let mut v0: secret i64 = 1;

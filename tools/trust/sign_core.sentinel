@@ -22,33 +22,11 @@
 // signature so `snc` can bind it into the carrier without a separate keygen step.
 use std::security::ed25519::ed25519_pubkey;
 use std::security::ed25519::ed25519_sign;
-
-// Declassify a `[secret u8]` to `[u8]` byte-by-byte — declassify is per-scalar
-// (there is no array-declassify); a public key / signature is sanctioned public
-// output. (The proven `examples/export/crypto_lib` idiom.)
-fn reveal(d: [secret u8]) -> [u8] {
-    let n: i64 = len(d);
-    let mut out: Vec<u8> = vec_new();
-    let mut i: i64 = 0;
-    while i < n {
-        push(&mut out, declassify(d[i]));
-        i = i + 1;
-    }
-    vec_to_array(out)
-}
-
-// Widen a public byte buffer into a `[secret u8]` (ADR 0051 call-arg widen at the
-// push) — the secret-fence input side.
-fn widen(src: &[u8]) -> [secret u8] {
-    let n: i64 = len(*src);
-    let mut v: Vec<secret u8> = vec_new();
-    let mut i: i64 = 0;
-    while i < n {
-        push(&mut v, (*src)[i]);
-        i = i + 1;
-    }
-    vec_to_array(v)
-}
+// The public⇄secret boundary helpers, from the Sentinel:: core base (ADR 0064;
+// these were copy-pasted here before): `widen` lifts the public seed into the
+// secret domain; `reveal` declassifies the public key + signature back out.
+use Sentinel::secrets::widen;
+use Sentinel::secrets::reveal;
 
 fn main() -> i64 {
     let p_seed: [u8] = "seed.bin";

@@ -11,8 +11,8 @@
 // constant-time check verifies the whole path on every build — so this program
 // compiling at all is the guarantee. Exit code 42 means: equal tags compared
 // equal AND a one-word-tampered tag compared unequal.
-use std::security::ct::ct_diff;
-use std::security::ct::ct_combine;
+use Sentinel::ct::ct_diff;
+use Sentinel::ct::ct_combine;
 
 // 0 iff every word of `a` equals the corresponding word of `b`. Constant-time:
 // no per-word comparison influences control flow; the reduction is pure bitwise.

@@ -16,7 +16,7 @@
 //
 // Exit 42 = two identically-built secret buffers compare equal, AND a buffer
 // built with one differing byte compares unequal.
-use std::security::ct::ct_vec_eq;
+use Sentinel::ct::ct_vec_eq;
 
 // Build an `n`-byte secret buffer whose byte j is `(base + j)` widened to a
 // secret `u8`. The length `n` is a run-time argument, so the buffer GROWS via

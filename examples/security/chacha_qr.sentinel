@@ -17,7 +17,7 @@
 // The compiler's constant-time check verifies the whole round on every build, so
 // this program compiling at all is the guarantee. Exit 42 = the round reproduced
 // the reference output.
-use std::security::ct::ct_rotl32;
+use Sentinel::ct::ct_rotl32;
 
 fn main() -> i64 {
     let mut a: secret i32 = 286331153 as i32;   // 0x11111111

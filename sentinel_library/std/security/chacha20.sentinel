@@ -13,7 +13,7 @@
 // and the message length are PUBLIC, so the access pattern never depends on the
 // secret key/state — the compiler's constant-time check verifies the whole cipher
 // on every build.
-use std::security::ct::ct_rotl32;
+use Sentinel::ct::ct_rotl32;
 
 // The four secret words a quarter-round returns (a Sentinel fn returns one value).
 struct Qr { a: secret i32, b: secret i32, c: secret i32, d: secret i32 }

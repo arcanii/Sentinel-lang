@@ -7,8 +7,9 @@
 // `use` graph and merges it, so a library can span modules:
 //   snc build --lib crypto_lib.sentinel -o libsentinelcrypto.a \
 //       --emit-header sentinelcrypto.h
-// (with the `std/` tree at the source root). The module graph merged here is
-// crypto_lib -> {sha256, hmac} -> sha256 -> ct.
+// (with the `sentinel_library/` tree at the source root). The module graph merged
+// here is crypto_lib -> {sha256, hmac} -> sha256 -> Sentinel::ct, plus the
+// boundary helpers from the Sentinel:: core base.
 //
 // Each export is a thin PUBLIC-bytes wrapper: it widens the public input bytes
 // to `secret` (ADR 0051), calls the machine-checked constant-time library
@@ -18,34 +19,11 @@
 // byte-buffer API — the export side's reason to exist.
 use std::security::sha256::sha256;
 use std::security::hmac::hmac_sha256;
-
-// Declassify a secret digest/tag into an owned public `[u8]`. A digest is public
-// output (nothing about the secret message survives a one-way hash beyond the
-// digest), so revealing it is the sanctioned boundary; the wrapper declassifies
-// byte-by-byte (a scalar `declassify` per byte — there is no array-`declassify`).
-fn reveal(d: [secret u8]) -> [u8] {
-    let n: i64 = len(d);
-    let mut out: Vec<u8> = vec_new();
-    let mut i: i64 = 0;
-    while i < n {
-        push(&mut out, declassify(d[i]));
-        i = i + 1;
-    }
-    vec_to_array(out)
-}
-
-// Widen a public byte buffer into a `[secret u8]` message (ADR 0051 call-arg
-// widen at the push), the input side of the secret-fence.
-fn widen(src: &[u8]) -> [secret u8] {
-    let n: i64 = len(*src);
-    let mut v: Vec<secret u8> = vec_new();
-    let mut i: i64 = 0;
-    while i < n {
-        push(&mut v, (*src)[i]);
-        i = i + 1;
-    }
-    vec_to_array(v)
-}
+// The public⇄secret boundary helpers, from the Sentinel:: core base (ADR 0064;
+// previously copy-pasted here): `widen` lifts public input into the secret
+// domain; `reveal` declassifies the public digest/tag into an owned `[u8]`.
+use Sentinel::secrets::widen;
+use Sentinel::secrets::reveal;
 
 // Constant-time SHA-256 callable from C, returning the owned 32-byte digest.
 export "C" fn sha256_oneshot(msg: &[u8]) -> [u8] {

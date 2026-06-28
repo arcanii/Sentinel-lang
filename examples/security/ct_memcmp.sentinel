@@ -14,7 +14,7 @@
 //
 // Exit 42 = a tag compared to an identical copy is equal, AND a one-byte-tampered
 // copy is unequal.
-use std::security::ct::ct_memcmp;
+use Sentinel::ct::ct_memcmp;
 
 fn main() -> i64 {
     // A secret tag "hmac", as secret bytes (reusable: `secret u8` is Copy).

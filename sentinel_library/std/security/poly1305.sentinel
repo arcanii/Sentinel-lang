@@ -27,8 +27,8 @@
 // the key. The compiler's constant-time check verifies the whole MAC on every
 // build. The single sanctioned `declassify` is on the final 16 tag bytes, after
 // h + s is formed — the tag is the output, safe to serialize.
-use std::security::ct::ct_mask;
-use std::security::ct::ct_select;
+use Sentinel::ct::ct_mask;
+use Sentinel::ct::ct_select;
 
 // Read 4 little-endian PUBLIC message bytes at `base+off` from a `&[u8]` borrow
 // into a 32-bit value (returned as i64; index-read does not consume the buffer).

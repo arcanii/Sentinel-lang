@@ -14,7 +14,7 @@
 // program that uses this library compiling at all is a proof that the key path
 // stayed constant-time. Only the final tag is `declassify`d by the caller (for a
 // real verify, compare it in constant time rather than branching on it).
-use std::security::ct::ct_rotl64;
+use Sentinel::ct::ct_rotl64;
 
 // The four secret state words a SipRound produces (a Sentinel fn returns one
 // value, so the four-word state is bundled; the round takes the words as SCALAR
