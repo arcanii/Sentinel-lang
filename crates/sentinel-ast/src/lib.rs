@@ -402,6 +402,17 @@ pub enum ExprKind {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+    /// ADR 0065: `return expr` — an explicit early return from the enclosing
+    /// function. A **divergent** expression (Rust-style `return: !`): it never
+    /// yields a value to its position, so it is valid both as an
+    /// expression-statement (`return x;`) and as a block/branch tail
+    /// (`if bad { return 0 } else { … }`). The inner expression's type must
+    /// match the function's declared return type; the `Return` node itself
+    /// unifies with whatever type its position expects (localized divergence,
+    /// no full never type). Lowering drops every live scope frame down to the
+    /// function and branches to the function exit (D4), reusing the ADR 0036
+    /// `break`/`continue` machinery with the floor set to the function.
+    Return(Box<Expr>),
 }
 
 /// C4.4 / ADR 0024 D1: scope-mode tag. Only `Concurrent` ships
@@ -1131,6 +1142,9 @@ impl fmt::Display for ExprKind {
             }
             ExprKind::Declassify(inner) => {
                 write!(f, "(declassify {})", inner.kind)
+            }
+            ExprKind::Return(inner) => {
+                write!(f, "(return {})", inner.kind)
             }
             ExprKind::Cast(inner, te) => {
                 write!(f, "(cast {} {})", inner.kind, te.kind)

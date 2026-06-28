@@ -4366,6 +4366,25 @@ impl<'a> Parser<'a> {
                     span: d_start..rp_end,
                 })
             }
+            Some(TokenKind::Return) => {
+                // ADR 0065: `return <expr>` — an explicit early return, a
+                // divergent expression. It consumes a full expression to its
+                // right (`return a + b` is `return (a + b)`), so it is the
+                // function's value on this path. Struct literals are
+                // unambiguous after `return` (like after `declassify(`), so
+                // allow them. (The handler `return v => body` ARM is parsed
+                // separately inside `parse_handle_expr`, never via this site.)
+                let r_start = self.advance().expect("peeked").span.start;
+                let saved = self.allow_struct_lit;
+                self.allow_struct_lit = true;
+                let inner = self.parse_expr()?;
+                self.allow_struct_lit = saved;
+                let end = inner.span.end;
+                Ok(Spanned {
+                    kind: ExprKind::Return(Box::new(inner)),
+                    span: r_start..end,
+                })
+            }
             Some(TokenKind::Handle) => self.parse_handle_expr(),
             Some(TokenKind::Perform) => self.parse_perform_expr(),
             Some(TokenKind::LBracket) => {

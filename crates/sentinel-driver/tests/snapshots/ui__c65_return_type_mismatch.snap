@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c65_return_type_mismatch.sentinel\")"
+---
+sentinel::types::mismatch
+
+  × type mismatch: expected i64, found bool
+   ╭─[tests/ui/c65_return_type_mismatch.sentinel:6:16]
+ 5 │     if c {
+ 6 │         return c
+   ·                ┬
+   ·                ╰── 
+ 7 │     } else {
+   ╰────

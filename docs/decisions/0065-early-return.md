@@ -1,9 +1,12 @@
 # ADR 0065: `return expr` — explicit early return (C-style)
 
-Status: **PROPOSED (design).** Add an explicit `return expr` so a function can return early from
-any point, instead of only by its tail expression. Owner-directed (2026-06-28): "the function
-return in Sentinel is not clear; we should have a `return x;` C-style." Scope confirmed: **full
-early return** (return from anywhere), coexisting with the existing tail-expression return.
+Status: **PROPOSED → IMPLEMENTING.** Stages **1–2 (the effect-free path) are implemented
+snc-side** (Windows-verified, four-check green; demonstrator + UI rejection fixture); stages **3
+(cross-handler unwind) and 4 (selfhost mirror + both fixed points) are pending.** Add an explicit
+`return expr` so a function can return early from any point, instead of only by its tail
+expression. Owner-directed (2026-06-28): "the function return in Sentinel is not clear; we should
+have a `return x;` C-style." Scope confirmed: **full early return** (return from anywhere),
+coexisting with the existing tail-expression return.
 
 This is **oracle-moving** — new surface syntax changes the parser/AST and thus `snc`'s
 `ast`/`parse` dumps and emitted IR — so it follows the full rhythm: **ADR PROPOSED → Rust `snc`
@@ -145,11 +148,19 @@ selfhost compiler sources need not *use* `return` (they keep tail returns), but 
 
 ## Phasing
 
-1. **Rust `snc` front end** — parser (`return <expr>`), `ExprKind::Return`, resolve, divergent typing
-   (D3). `ast`/`parse` fixtures + re-bless.
-2. **Rust `snc` lowering, effect-free path** — borrow-check (D7), MIR/codegen drop-to-function-floor +
-   exit-block branch + dead-block (D4), both LLVM + Cranelift. `tests/pass` + `tests/ui` + the CT
-   conformance fixture. End-to-end green for all non-effect code (the whole current corpus).
+1. ✅ **Rust `snc` front end** (DONE) — parser (`return <expr>`), `ExprKind::Return` threaded through
+   resolve/types, divergent typing (D3), the `expr_diverges`/`block_diverges` join-site integration
+   (if/body/method-body). `current_return_type` stashed on the per-fn `VarTypeEnv`.
+2. ✅ **Rust `snc` lowering, effect-free path** (DONE) — borrow-check (D7, passthrough + the
+   path-insensitive over-rejection note), MIR (Opaque-carry the inner — control flow is codegen's),
+   codegen `emit_return_drops` (floor = fn) + `build_fn_return` (the main i64→i32 / effecting-kont
+   ABI shared with the epilogue) + the dead-block parking (D4). Demonstrator
+   `examples/lang/early_return.sentinel` (heap binding live across the return; both back ends) +
+   `tests/ui/c65_return_type_mismatch`. Kept in `examples/` (snc-only, OUT of the scg differential)
+   so both fixed points stay byte-identical without the stage-4 mirror — the u128/f64 pattern.
+   **Known v1 limitations:** `match`-arm divergence is NOT yet integrated (a `match` arm that
+   `return`s over-rejects the arm-type join — restructure, or wait for the refinement; consistent
+   with the over-rejecting lexical checker); the `snc llvm` text-IR dump for `return` is a stub.
 3. **Rust `snc` — `return` crossing a `handle`** (D6) — `sentinel_kont_free` + handle-region tracking
    + the teardown-on-early-return; `tests/pass` with effects (`return` before/after a `perform`
    inside a `handle`). Closes any handle-codegen gaps it surfaces (Risk note).

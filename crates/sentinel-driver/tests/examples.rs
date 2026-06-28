@@ -432,6 +432,12 @@ const EXAMPLES: &[(&str, i32)] = &[
     // `Name::tick(..)` calls (composition + names, no diamond/MRO). 42 = the multi-level
     // tick (20) + the two named ticks (4 + 18).
     ("examples/lang/delegation.sentinel", 42),
+    // Explicit early `return` (ADR 0065): `return expr` exits the enclosing
+    // function early as a divergent branch tail (a guard `if b == 0 { return -1 }
+    // else { a / b }`), including a heap binding live across the return (dropped
+    // exactly once on the early-exit and fall-through paths). 42 = every check
+    // held (and `main` itself early-returns 42 on success).
+    ("examples/lang/early_return.sentinel", 42),
 ];
 
 #[test]
@@ -667,6 +673,11 @@ fn data_json_roundtrip() {
 #[test]
 fn lang_delegation_levels_and_multiple_inheritance() {
     check_example("examples/lang/delegation.sentinel", "delegation", 42);
+}
+
+#[test]
+fn lang_early_return() {
+    check_example("examples/lang/early_return.sentinel", "early_return", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

@@ -1719,6 +1719,7 @@ fn collect_spawn_targets_expr(expr: &TypedExpr, acc: &mut Vec<FnId>) {
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
         | TypedExprKind::Declassify(inner) => collect_spawn_targets_expr(inner, acc),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -2179,6 +2180,7 @@ fn walk_expr_for_mono(
         TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
         | TypedExprKind::Declassify(inner) => walk_expr_for_mono(
             inner, subst, program, instances, refs, visited, order, pending,
         ),
@@ -4270,6 +4272,75 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         for i in (scope_floor..self.scope_stack.len()).rev() {
             let frame = self.scope_stack[i].clone();
             self.emit_frame_drops(&frame, None, program)?;
+        }
+        Ok(())
+    }
+
+    /// ADR 0065: emit the drops for an early `return` — drain EVERY live scope
+    /// frame (the whole function, floor 0) in reverse, skipping the binding
+    /// being returned (when the returned expression is a `Var`) so its heap is
+    /// not freed out from under the returned value. This is `emit_loop_exit_drops`
+    /// with the floor at the function and the fn-tail return's `tail_returned`
+    /// skip applied across all frames. Single-free holds because the early-return
+    /// path and the normal fall-through path are mutually exclusive basic blocks
+    /// (the branch to a merge block is emitted into the post-return DEAD block,
+    /// so the merge — and its end-of-scope drops — is reached only when the
+    /// return was NOT taken).
+    fn emit_return_drops(
+        &mut self,
+        tail_returned: Option<VarId>,
+        program: &TypedProgram,
+    ) -> Result<(), CodegenError> {
+        for i in (0..self.scope_stack.len()).rev() {
+            let frame = self.scope_stack[i].clone();
+            self.emit_frame_drops(&frame, tail_returned, program)?;
+        }
+        Ok(())
+    }
+
+    /// ADR 0065: emit the function-exit `ret`, converting `val` to the current
+    /// function's actual LLVM return type the SAME way the normal epilogue does
+    /// — `main` truncates its `i64` body value to the `i32` C-ABI exit code; an
+    /// effecting fn wraps a pure value in a kont (`sentinel_kont_pure`). Shared
+    /// by the early-`return` lowering so both ABIs agree with the epilogue (the
+    /// bug it fixes: an early `return 42` in `main` emitting a raw `ret i64`
+    /// against the `i32` LLVM `main`).
+    fn build_fn_return(
+        &mut self,
+        val: BasicValueEnum<'ctx>,
+        program: &TypedProgram,
+    ) -> Result<(), CodegenError> {
+        let sig = program.signature(self.current_fn_id);
+        if sig.is_main {
+            let i32_type = self.context.i32_type();
+            let body_int = val.into_int_value();
+            let exit = self
+                .builder
+                .build_int_truncate(body_int, i32_type, "exit")
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_return(Some(&exit))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        } else if uses_kont_abi(sig, program) {
+            let ret_val: BasicValueEnum<'ctx> = if val.is_pointer_value() {
+                val
+            } else {
+                let int_val = val.into_int_value();
+                let call = self
+                    .builder
+                    .build_call(self.kont_pure_fn, &[int_val.into()], "pure_kont")
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                call.try_as_basic_value()
+                    .left()
+                    .expect("sentinel_kont_pure returns ptr")
+            };
+            self.builder
+                .build_return(Some(&ret_val))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        } else {
+            self.builder
+                .build_return(Some(&val))
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
         }
         Ok(())
     }
@@ -6430,6 +6501,31 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // barriers) is a follow-on per ADR 0019 D12.
                 self.lower_expr(inner, program)
             }
+            TypedExprKind::Return(inner) => {
+                // ADR 0065: `return e` — evaluate `e`, drop EVERY live scope
+                // frame (down to the function floor, skipping the returned
+                // binding so its heap survives the return), then `ret` the
+                // value. The current block is now terminated; park the builder
+                // on a fresh dead block so the unreachable remainder of the
+                // enclosing block / if-arm (its store-to-result + merge branch)
+                // is never appended to a terminated block. This is the
+                // `break`/`continue` shape (ADR 0036) with the floor set to the
+                // whole function ("break all the way out").
+                let val = self.lower_expr(inner, program)?;
+                let tail_returned = tail_returned_var(inner);
+                self.emit_return_drops(tail_returned, program)?;
+                // Convert + `ret` exactly as the epilogue does (main i64→i32,
+                // effecting → kont) so the early-return ABI matches.
+                self.build_fn_return(val, program)?;
+                let current_fn = self.current_fn.expect("current_fn set by compile_fn");
+                let dead_bb = self.context.append_basic_block(current_fn, "after_return");
+                self.builder.position_at_end(dead_bb);
+                // `return` is divergent: the produced value is never read (the
+                // dead block is discarded by LLVM). Hand back a typed
+                // placeholder so the now-unreachable caller IR still
+                // type-checks.
+                Ok(self.llvm_basic_type(expr.ty).const_zero())
+            }
             TypedExprKind::Cast(inner) => {
                 // ADR 0058: int ↔ float conversions are the ONLY bridge
                 // between the integer and float domains (no implicit
@@ -7495,6 +7591,7 @@ fn expr_performs(expr: &TypedExpr) -> bool {
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
         | TypedExprKind::Declassify(inner) => expr_performs(inner),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -7756,6 +7853,7 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
         | TypedExprKind::Declassify(inner) => walk_collect_var_refs(inner, acc),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -7902,6 +8000,7 @@ fn count_performs(expr: &TypedExpr) -> usize {
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
         | TypedExprKind::Declassify(inner) => count_performs(inner),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -8009,6 +8108,7 @@ fn find_unique_perform(expr: &TypedExpr) -> Option<&TypedExpr> {
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
         | TypedExprKind::Declassify(inner) => find_unique_perform(inner),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -8133,6 +8233,9 @@ fn substitute_perform_with_var(expr: &TypedExpr, placeholder_id: VarId) -> Typed
         TypedExprKind::Declassify(inner) => TypedExprKind::Declassify(
             Box::new(substitute_perform_with_var(inner, placeholder_id)),
         ),
+        TypedExprKind::Return(inner) => TypedExprKind::Return(Box::new(
+            substitute_perform_with_var(inner, placeholder_id),
+        )),
         TypedExprKind::Cast(inner) => TypedExprKind::Cast(Box::new(
             substitute_perform_with_var(inner, placeholder_id),
         )),
@@ -8427,6 +8530,7 @@ fn find_var_name_in_expr(expr: &TypedExpr, id: VarId) -> Option<&str> {
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
         | TypedExprKind::Declassify(inner) => {
             find_var_name_in_expr(inner, id)
         }

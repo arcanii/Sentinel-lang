@@ -1456,6 +1456,13 @@ impl Emit<'_> {
             TypedExprKind::WidenToSecret(inner) | TypedExprKind::Declassify(inner) => {
                 self.lower_expr(inner)
             }
+            // ADR 0065: `return e` — the text-IR dump is a v1 STUB (it flows the
+            // inner value without the `ret` + scope drops). The real
+            // control-flow lowering lives in `sentinel-codegen` (the executable
+            // path); `return` is examples-only and never enters the self-host
+            // differential, so `snc llvm` is not authoritative for it yet
+            // (mirroring it here is the stage-4 self-host work).
+            TypedExprKind::Return(inner) => self.lower_expr(inner),
             TypedExprKind::Cast(inner) => {
                 // ADR 0049: integer width conversion — trunc / sext / zext by
                 // width (u8 is the only unsigned source → zext when widening);
@@ -3204,6 +3211,7 @@ fn expr_performs(expr: &TypedExpr) -> bool {
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
         | TypedExprKind::Declassify(inner) => expr_performs(inner),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -3347,6 +3355,7 @@ fn collect_performs<'a>(expr: &'a TypedExpr, acc: &mut Vec<&'a TypedExpr>) {
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
         | TypedExprKind::Declassify(inner) => collect_performs(inner, acc),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)
@@ -3546,6 +3555,7 @@ fn walk_collect_var_refs(expr: &TypedExpr, acc: &mut Vec<VarId>) {
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
+        | TypedExprKind::Return(inner)
         | TypedExprKind::Declassify(inner) => walk_collect_var_refs(inner, acc),
         TypedExprKind::Binary(_, l, r)
         | TypedExprKind::Cmp(_, l, r)

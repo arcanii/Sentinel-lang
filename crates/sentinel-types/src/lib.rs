@@ -1870,6 +1870,9 @@ impl TypedExpr {
             TypedExprKind::Declassify(inner) => TypedExprKind::Declassify(
                 Box::new(inner.substitute(subst, instances, refs)),
             ),
+            TypedExprKind::Return(inner) => {
+                TypedExprKind::Return(Box::new(inner.substitute(subst, instances, refs)))
+            }
             TypedExprKind::Cast(inner) => {
                 TypedExprKind::Cast(Box::new(inner.substitute(subst, instances, refs)))
             }
@@ -2501,6 +2504,16 @@ pub enum TypedExprKind {
     /// inputs (the inner just flows through, no `Type::Secret`
     /// wrap to strip).
     Declassify(Box<TypedExpr>),
+    /// ADR 0065: `return expr` — an early return (divergent expression). The
+    /// inner expression's type is checked against the enclosing function's
+    /// declared return type; the outer `Return` node's `ty` is the **inner's
+    /// type carried verbatim** (a concrete placeholder), but the node is
+    /// *divergent* — at every type-join site (if/match branches, block tail)
+    /// the checker treats a `Return` (or a branch that always returns) as
+    /// yielding no value, so it unifies with whatever the position expects
+    /// (see `expr_diverges`). Codegen lowers it as control flow (drops +
+    /// branch to the function exit), so the `ty` is never read as a value.
+    Return(Box<TypedExpr>),
     /// ADR 0049: integer cast `expr as T`. The resolved target type lives on
     /// the outer node's `ty` (possibly `secret`, preserving the operand's
     /// secrecy) — like `Declassify`, no separate target field. Codegen reads
@@ -4824,6 +4837,9 @@ pub fn check_module(
             // `out_ptr`).
             env.insert(init_def.self_var_id, (Type::Class(cd.id), true));
             env.record_name(init_def.self_var_id, "self");
+            // ADR 0065: an `init` body produces the class value; a `return`
+            // inside it returns the constructed object.
+            env.set_return_type(Type::Class(cd.id));
             // Bind init params.
             for tp in &typed_class_decls[idx]
                 .init
@@ -4907,6 +4923,8 @@ pub fn check_module(
                 env.record_name(tp.id, tp.name.clone());
             }
             let return_type = sig.return_type;
+            // ADR 0065: record the return type for early `return` in the body.
+            env.set_return_type(return_type);
             let body_expected =
                 if return_type.is_nullable()
                     || return_type.is_generic_instance()
@@ -4941,7 +4959,7 @@ pub fn check_module(
                 &mut konts,
                 &mut tasks,
             )?;
-            if body.ty != return_type {
+            if !block_diverges(&body) && body.ty != return_type {
                 return Err(TypeError::ReturnTypeMismatch {
                     name: format!("{}::{}", cd.name, m.name),
                     expected: return_type,
@@ -4989,6 +5007,8 @@ pub fn check_module(
                 env.record_name(tp.id, tp.name.clone());
             }
             let return_type = sig.return_type;
+            // ADR 0065: record the return type for early `return` in the body.
+            env.set_return_type(return_type);
             let body_expected =
                 if return_type.is_nullable()
                     || return_type.is_generic_instance()
@@ -5023,7 +5043,7 @@ pub fn check_module(
                 &mut konts,
                 &mut tasks,
             )?;
-            if body.ty != return_type {
+            if !block_diverges(&body) && body.ty != return_type {
                 return Err(TypeError::ReturnTypeMismatch {
                     name: format!(
                         "impl {} for {} :: {}",
@@ -5297,6 +5317,9 @@ fn check_fn(
     }
 
     let return_type = signature.return_type;
+    // ADR 0065: record the return type so an early `return expr` in the body
+    // checks its inner against it.
+    env.set_return_type(return_type);
     // ADR 0014 D5: push the declared return type down into the body
     // so NullLit / T→?T widening at the tail can resolve against it.
     // We only push for the type-shapes that actually NEED context:
@@ -5336,7 +5359,11 @@ fn check_fn(
         tasks,
     )?;
 
-    if body.ty != return_type {
+    // ADR 0065: if every path through the body early-`return`s (so it has no
+    // reachable tail value), each `return` already checked its own inner
+    // against `return_type` — skip the tail-vs-return-type match (the tail is
+    // dead). Otherwise the tail must produce the declared return type.
+    if !block_diverges(&body) && body.ty != return_type {
         return Err(TypeError::ReturnTypeMismatch {
             name: fn_def.name.clone(),
             expected: return_type,
@@ -5394,6 +5421,12 @@ struct VarTypeEnv {
     /// (you cannot `break` out of a fn into an enclosing loop). Not part
     /// of the scope save/restore — only the `types` map is snapshot.
     loop_depth: u32,
+    /// ADR 0065: the enclosing function's declared return type, set when the
+    /// per-fn env is built (a fresh env per fn, like `loop_depth`). A
+    /// `return expr` checks its inner against this. `None` only in the
+    /// degenerate case of checking an expression with no enclosing fn (never
+    /// happens for real bodies); the `Return` arm then skips the match.
+    current_return_type: Option<Type>,
 }
 
 impl VarTypeEnv {
@@ -5428,6 +5461,12 @@ impl VarTypeEnv {
     /// enclosing `while` loop (so `break`/`continue` are legal here).
     fn in_loop(&self) -> bool {
         self.loop_depth > 0
+    }
+
+    /// ADR 0065: record the enclosing function's declared return type, so a
+    /// `return expr` deep in the body can check its inner against it.
+    fn set_return_type(&mut self, ty: Type) {
+        self.current_return_type = Some(ty);
     }
 }
 
@@ -5528,6 +5567,50 @@ fn check_block(
         span: block.span.clone(),
         ty,
     })
+}
+
+/// ADR 0065: whether evaluating `e` always diverges (returns from the enclosing
+/// function), so it yields no value to its position. Consulted at type-join
+/// sites (if/match branches, the fn body tail) so a `return` branch unifies
+/// with whatever the other branch produces, and a fully-returning body is not
+/// re-checked against the declared return type. Structural + conservative: only
+/// `Return`, and a `Block`/`If`/`Match` ALL of whose paths diverge, count.
+/// Exotic embeddings (`f(return x)`) are treated as non-divergent — sound, just
+/// over-rejecting, matching the 1.0 lexical-checker philosophy.
+fn expr_diverges(e: &TypedExpr) -> bool {
+    match &e.kind {
+        TypedExprKind::Return(_) => true,
+        TypedExprKind::Block(b) => block_diverges(b),
+        TypedExprKind::If { then_branch, else_branch, .. } => {
+            block_diverges(then_branch) && block_diverges(else_branch)
+        }
+        TypedExprKind::Match { arms, .. } => {
+            !arms.is_empty() && arms.iter().all(|a| expr_diverges(&a.body))
+        }
+        _ => false,
+    }
+}
+
+/// ADR 0065: whether a block always diverges — either some statement before the
+/// tail unconditionally diverges (making the tail dead), or the tail diverges.
+fn block_diverges(b: &TypedBlock) -> bool {
+    if expr_diverges(&b.tail) {
+        return true;
+    }
+    b.stmts.iter().any(stmt_diverges)
+}
+
+/// ADR 0065: whether a statement unconditionally diverges. A `while` may not
+/// run, and `break`/`continue` stay inside the function, so only a diverging
+/// value-expression counts.
+fn stmt_diverges(s: &TypedStmt) -> bool {
+    match &s.kind {
+        TypedStmtKind::Expr(e) => expr_diverges(e),
+        TypedStmtKind::Let { value, .. } | TypedStmtKind::Assign { value, .. } => {
+            expr_diverges(value)
+        }
+        TypedStmtKind::While { .. } | TypedStmtKind::Break | TypedStmtKind::Continue => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7183,14 +7266,28 @@ fn check_expr(
             // branches so `null` in either branch can resolve.
             let then_t = check_block(then_branch, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
             let else_t = check_block(else_branch, expected, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
-            if then_t.ty != else_t.ty {
-                return Err(TypeError::Mismatch {
-                    expected: then_t.ty,
-                    got: else_t.ty,
-                    span: to_source_span(&else_branch.span),
-                });
-            }
-            let ty = then_t.ty;
+            // ADR 0065: a branch that always diverges (an early `return`)
+            // yields no value, so it does not constrain the join — the `if`'s
+            // type is the OTHER branch's. If both diverge, the `if` diverges
+            // too (its `ty` is a placeholder, treated as bottom by parents).
+            let then_div = block_diverges(&then_t);
+            let else_div = block_diverges(&else_t);
+            let ty = if then_div && else_div {
+                then_t.ty
+            } else if then_div {
+                else_t.ty
+            } else if else_div {
+                then_t.ty
+            } else {
+                if then_t.ty != else_t.ty {
+                    return Err(TypeError::Mismatch {
+                        expected: then_t.ty,
+                        got: else_t.ty,
+                        span: to_source_span(&else_branch.span),
+                    });
+                }
+                then_t.ty
+            };
             (
                 TypedExprKind::If {
                     cond: Box::new(cond_t),
@@ -7599,6 +7696,56 @@ fn check_expr(
                 TypedExprKind::Declassify(Box::new(inner_t)),
                 stripped,
             )
+        }
+        ResolvedExprKind::Return(inner) => {
+            // ADR 0065: `return expr` — an early return. Check the inner
+            // against the enclosing function's declared return type, with the
+            // SAME expected-type pushdown the body tail uses (nullable /
+            // generic-instance / Vec / secret-widen returns need the context;
+            // primitives synthesise and compare). The `Return` node is
+            // divergent — its `ty` is a placeholder treated as bottom at join
+            // sites (see `expr_diverges`).
+            let ret_ty = env.current_return_type;
+            let inner_expected = match ret_ty {
+                Some(rt)
+                    if rt.is_nullable()
+                        || rt.is_generic_instance()
+                        || rt.is_vec()
+                        || rt.is_secret_widen_target() =>
+                {
+                    Some(rt)
+                }
+                _ => None,
+            };
+            let inner_t = check_expr(
+                inner,
+                inner_expected,
+                env,
+                signatures,
+                structs,
+                class_decls,
+                enums,
+                instances,
+                refs,
+                secrets,
+                struct_type_param_counts,
+                effect_decls,
+                trait_decls,
+                impl_decls,
+                konts,
+                tasks,
+            )?;
+            if let Some(rt) = ret_ty {
+                if inner_t.ty != rt {
+                    return Err(TypeError::Mismatch {
+                        expected: rt,
+                        got: inner_t.ty,
+                        span: to_source_span(&inner.span),
+                    });
+                }
+            }
+            let ty = inner_t.ty;
+            (TypedExprKind::Return(Box::new(inner_t)), ty)
         }
         ResolvedExprKind::Cast(inner, te) => {
             // ADR 0049: `expr as T` — an integer width conversion. The operand

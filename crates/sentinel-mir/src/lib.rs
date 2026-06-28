@@ -485,6 +485,18 @@ impl FnBuilder {
                 let v = self.lower_expr(program, inner);
                 self.emit(MirOp::Opaque(vec![v]), ty, span)
             }
+            // ADR 0065: `return expr` — for the constant-time analysis, lower
+            // the inner (so a secret-relevant op INSIDE it — e.g. a secret
+            // divisor in `return a / b` — is still flagged) and carry it as an
+            // Opaque. The early return itself is unconditional control flow,
+            // not a sink: returning a secret VALUE is allowed (the caller holds
+            // it). The real control-flow lowering (drops + branch to the
+            // function exit) lives in codegen — MIR is the verification
+            // substrate only.
+            TypedExprKind::Return(inner) => {
+                let v = self.lower_expr(program, inner);
+                self.emit(MirOp::Opaque(vec![v]), ty, span)
+            }
             TypedExprKind::NullLit => self.emit(MirOp::Opaque(Vec::new()), ty, span),
 
             // ---- control flow ----------------------------------------

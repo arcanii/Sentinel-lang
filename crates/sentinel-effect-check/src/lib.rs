@@ -306,6 +306,9 @@ fn walk_expr(
         | TypedExprKind::WidenToNullable(inner)
         | TypedExprKind::WidenToSecret(inner)
         | TypedExprKind::Cast(inner)
+        // ADR 0065: a `return expr` contributes whatever effects its inner
+        // performs (the early return itself raises no effect).
+        | TypedExprKind::Return(inner)
         | TypedExprKind::Declassify(inner) => walk_expr(inner, effective, async_id, acc),
 
         TypedExprKind::Binary(_, l, r)

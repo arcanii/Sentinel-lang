@@ -937,7 +937,13 @@ fn walk_expr(
         | TypedExprKind::Declassify(inner)
         // ADR 0049: an integer cast is a pure type-level width conversion of a
         // Copy scalar — walk the inner; no move/borrow change.
-        | TypedExprKind::Cast(inner) => {
+        | TypedExprKind::Cast(inner)
+        // ADR 0065: `return expr` moves/borrows its inner exactly as a tail
+        // value being returned does — walk it. (The lexical 1.0 checker is
+        // path-insensitive, so code after an early return on a divergent path
+        // is still walked; that over-rejection matches the documented 1.0
+        // behavior — fix a false rejection by scoping, not by weakening this.)
+        | TypedExprKind::Return(inner) => {
             walk_expr(inner, ctx, errors, program);
         }
 

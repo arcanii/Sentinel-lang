@@ -635,8 +635,11 @@ fn emit_node(out: &mut String, e: &Expr) -> Result<(), String> {
         // ADR 0058: a float literal is out of the selfhost Bar-A scope (no
         // selfhost source uses `f64`), like `cast` / `declassify` — the
         // merge-to-source path errors cleanly rather than rendering it.
+        // ADR 0065: `return` is likewise examples-only (no selfhost source uses
+        // it), so it joins this clean-error group until the stage-4 mirror.
         ExprKind::FloatLit(_)
         | ExprKind::Declassify(_)
+        | ExprKind::Return(_)
         | ExprKind::Cast(_, _)
         | ExprKind::Scope { .. }
         | ExprKind::Spawn { .. }
@@ -803,6 +806,7 @@ fn expr_kind_name(k: &ExprKind) -> &'static str {
     match k {
         ExprKind::FloatLit(_) => "float literal",
         ExprKind::Declassify(_) => "declassify",
+        ExprKind::Return(_) => "return",
         ExprKind::Cast(_, _) => "cast",
         ExprKind::Perform { .. } => "perform",
         ExprKind::Handle { .. } => "handle",

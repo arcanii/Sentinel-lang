@@ -751,6 +751,10 @@ pub enum ResolvedExprKind {
     /// the inner is `secret T` and produces T as the result.
     /// Idempotent on non-secret types per ADR 0008 D5.
     Declassify(Box<ResolvedExpr>),
+    /// ADR 0065: `return expr` — an early return (divergent expression).
+    /// Resolution just resolves the inner expression; the function-return-type
+    /// match + divergent typing are the types stage's job.
+    Return(Box<ResolvedExpr>),
     /// ADR 0049: integer cast `expr as T`. Mirrors the AST variant; the
     /// `TypeExpr` target is carried verbatim and resolved at the types stage
     /// (like a `let` annotation).
@@ -1928,9 +1932,10 @@ fn rewrite_expr(expr: &mut Expr, r: &Renamer) {
         | ExprKind::CharLit(_)
         | ExprKind::StringLit(_)
         | ExprKind::Var(_) => {}
-        ExprKind::Unary(_, e) | ExprKind::Declassify(e) | ExprKind::Cast(e, _) => {
-            rewrite_expr(e, r)
-        }
+        ExprKind::Unary(_, e)
+        | ExprKind::Declassify(e)
+        | ExprKind::Return(e)
+        | ExprKind::Cast(e, _) => rewrite_expr(e, r),
         ExprKind::Binary(_, lhs, rhs) | ExprKind::Cmp(_, lhs, rhs) | ExprKind::Logic(_, lhs, rhs) => {
             rewrite_expr(lhs, r);
             rewrite_expr(rhs, r);
@@ -3973,6 +3978,24 @@ fn resolve_expr(
                 next_var_id,
             )?;
             ResolvedExprKind::Declassify(Box::new(inner))
+        }
+        ExprKind::Return(inner) => {
+            // ADR 0065: `return expr` — resolve the inner expression; the
+            // function-return-type match + divergent typing land at the types
+            // stage. (Mirrors `Declassify` in shape.)
+            let inner = resolve_expr(
+                inner,
+                fn_table,
+                signatures,
+                struct_table,
+                class_table,
+                effect_table,
+                effects,
+                impls,
+                vars,
+                next_var_id,
+            )?;
+            ResolvedExprKind::Return(Box::new(inner))
         }
         ExprKind::Cast(inner, ty) => {
             // ADR 0049: resolve the operand; carry the target TypeExpr verbatim

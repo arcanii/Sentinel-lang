@@ -1,0 +1,14 @@
+// ADR 0065: a `return expr` whose value type does not match the enclosing
+// function's declared return type is rejected. Here `f` returns `i64` but the
+// early `return c` produces a `bool`.
+fn f(c: bool) -> i64 {
+    if c {
+        return c
+    } else {
+        0
+    }
+}
+
+fn main() -> i64 {
+    f(true)
+}
