@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-28 — module-search path; then Windows host + FFI libraries, 2026-06-27)
+### ▶ RESUME HERE (2026-06-28 — ▶ NEXT: the `/sentinel_library` reorg + the `Sentinel::` core base; then the rest of this session)
 
 All on `main`, **NEVER pushed**. Verified on **Windows only** (see the macOS caveat);
 the dev box is `x86_64-pc-windows-msvc` with a from-source LLVM 18.1.8 at `G:\llvm-18`
@@ -100,6 +100,23 @@ for the build/test commands (incl. the `vcvars64.bat` recipe for the link-touchi
   blocked on `getentropy`), two draws give different seeds (real entropy), and the full
   author flow `snc keygen` (generated key) → `sign` → `verify` works end to end. So ADR
   0061 v1's `snc keygen` is now cross-platform.
+- **Pre-built library consumption — [ADR 0063](decisions/0063-prebuilt-library-consumption.md)
+  PROPOSED + phase 1a (`5ef9938`/`8d8f99c`).** The other half of the pre-built-libraries
+  rock: consume a *compiled* lib via a signed **`.sif` interface descriptor** (the serialized
+  ADR 0037 exports table). Format **(a)** (owner-chosen): a structured header (dedicated
+  reader) + an interface body of Sentinel signature decls reconstructed via `parse` +
+  `extract_exports` (no new syntax → not oracle-moving). **Phase 1a DONE:**
+  `crates/sentinel-driver/src/descriptor.rs` (emit + read non-generic `pub fn` signatures,
+  round-trip tested). **▶ Found + recorded:** the `.sif` pairs with an object exporting `pub
+  fn` **abi-v1** symbols, but `snc build --lib` is the **C-ABI** path — so the producer needs
+  settling (recommend: extend `--separate`, which already emits those symbols). REMAINING:
+  producer wiring (`--emit-interface`), `.sif`-backed resolution + link, the ADR 0061 gate
+  over the `.sif`, struct/enum/generic slices.
+- **A proper delegation example (`5ef9938`).** `examples/lang/delegation.sentinel` (a NEW
+  `examples/lang/` category) shows MULTIPLE LEVELS (3-deep transitive delegation) + the
+  MULTIPLE-INHERITANCE problem resolved by NAMED impls + qualified calls (no diamond/MRO);
+  `tests/ui/c43_delegate_same_method_ambiguous` pins the ambiguous-call rejection. Built via
+  both back ends → 42.
 - **macOS still BACKLOGGED** — the workspace `just check-all` + self-host differential
   has not run (argued not oracle-moving, but confirm on the differential). Also note:
   on Windows, `tests/modules.rs`'s 3 `separate_*_linkonce_*` tests fail at MSVC
@@ -135,6 +152,32 @@ for the build/test commands (incl. the `vcvars64.bat` recipe for the link-touchi
   mirror — but the differential should confirm it.
 
 **▶ NEXT (the owner's stated direction — ADR-first):**
+
+0. **▶ DO THIS FIRST — the `/sentinel_library` reorg + the `Sentinel::` core base
+   (owner-directed 2026-06-28).** Move the libraries under a top-level **`/sentinel_library/`**
+   so the repo can host MANY first-party libraries (std + new ones, refactoring into them as
+   patterns recur). **The core library base = `Sentinel::`** (owner's proposal, recommended):
+   `/sentinel_library/Sentinel/` — the small, identity-defining FOUNDATION the rest builds on.
+   Seed it with the **secret-boundary helpers** `Sentinel::secret::{widen, reveal}` (the
+   `widen(&[u8])->[secret u8]` / `reveal([secret u8])->[u8]` pair is currently COPY-PASTED in
+   `examples/export/crypto_lib`, `tools/trust/sign_core`, `tools/trust/keygen_core` — DRY it
+   here) + the constant-time core (`Sentinel::ct`, moved from `std/security/ct`). Rationale:
+   Sentinel's foundational data types (Vec/array/string/print/`secret`) are COMPILER BUILTINS,
+   so the foundational *library* layer is the constant-time `secret` vocabulary — which is
+   Sentinel's reason to exist; branding it `Sentinel::` (capital, first-party) is right.
+   `std::` stays the broad **batteries** (security suite, sys, math, text, data, net,
+   collections), relocated to `/sentinel_library/std/`, and `use`s `Sentinel::` for the core.
+   - **NOT oracle-moving** (a filesystem move + module-path edits + a search-root change; no
+     lex/parse/IR change; no `selfhost/` file moves — they stay put). **TOUCH POINTS:** (a)
+     the move itself; (b) `crates/sentinel-driver/tests/examples.rs` — `assemble()` copies the
+     `std/` tree next to each example (`repo_root().join("std")`) → copy `/sentinel_library/`
+     instead; (c) every `--lib-path .`/`--lib-path <repo-root>` in `demos/*/` BUILD comments,
+     the `tools/trust/*` build invocations, and the `sign_core.rs`/`conditional.rs` test
+     `--lib-path` args → point at `/sentinel_library`; (d) the `use std::…` → `use Sentinel::…`
+     edits ONLY for the modules that move into the core (ct/secret); the rest stay `std::…`
+     (just relocated). Do it incrementally + keep four-check green; start by moving `std/` →
+     `/sentinel_library/std/` (namespace unchanged) + repointing the harness, THEN carve out
+     `Sentinel::`. ADR-worthy (an ADR 0064 "library layout + the `Sentinel::` core base").
 
 1. **Pre-built libraries with a trust model (trusted / untrusted).** Consume a
    *compiled* library (`snc build --lib` already emits a `.a`/`.lib` + a C header)
