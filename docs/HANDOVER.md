@@ -169,11 +169,18 @@ for the build/test commands (incl. the `vcvars64.bat` recipe for the link-touchi
      - **v1 DEFERRED** (next, all in ADR 0061 *Phasing*): the in-file-block gate +
        `--separate`/`--lib` gating; TOFU/issuer policies; the keystore + hardware keys;
        rotation; revocation; build-env attestation; multi-party signing.
-   - **Still OPEN DESIGN (the other half of the rock):** a Sentinel-shaped INTERFACE
-     DESCRIPTOR for a compiled `.lib` (the `--emit-header` is C-only — a consumer needs the
-     Sentinel signatures + effect rows to type-check + capability-bound against a binary it
-     does not have the source for). 0061's format **signs** such a descriptor; specifying it
-     is the **companion ADR** — the natural next step now that signing/trust is in place.
+   - **The other half of the rock — now DESIGNED: [ADR 0063](decisions/0063-prebuilt-library-consumption.md)
+     (PROPOSED).** Consume a *compiled* Sentinel library via a **signed interface descriptor**
+     (`foo.sif`): the serialized ADR 0037 exports table (pub fn signatures + effect rows,
+     struct/enum layouts — the table is AST-based, not interned types, so it serializes
+     cheaply). The consumer resolves `use foo::item` against the `.sif` (the existing
+     extern-fn-in-FnId-space import model, ADR 0037 D5.1) + links the object; the ADR 0061
+     gate verifies the `.sif` + capability-bounds it. **The one real fork = the descriptor
+     format:** (a) a structured file read by a dedicated reader — **NOT oracle-moving,
+     recommended**; vs (b) a Sentinel-source `pub extern fn` form — oracle-moving. Phasing:
+     (1) descriptor emission, (2) descriptor-backed resolution + link, (3) the trust gate
+     over the `.sif`. v1 scope mirrors `--separate` (non-generic fns + structs/enums). **▶
+     READY TO IMPLEMENT** pending the format fork.
 
 ---
 
