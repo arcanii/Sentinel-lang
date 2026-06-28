@@ -5,7 +5,7 @@ HANDOVER.md, STATE.md is the source of truth. New contributors (or
 new chat sessions) should be able to read this file and understand
 the current state of the workspace without re-reading every commit.
 
-## Current State (2026-06-28)
+## Current State (2026-06-29)
 
 > **Phase C closed at Sentinel 1.0 (2026-05-30); Phase D self-hosts; the
 > per-unit separate-compilation back end is functionally complete.**
@@ -13,6 +13,32 @@ the current state of the workspace without re-reading every commit.
 > archived to [`HISTORY.md`](HISTORY.md) (P3.2 cleanup). Sections A/B/C below
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
+
+**Latest (2026-06-29) — early `return`: the effect-free path is COMPLETE and self-hosted (ADR
+0065 stage-4 codegen + typing acceptance).** The **real `return` control-flow text-IR** now lands
+**byte-identical in both text emitters** — the `snc llvm` oracle (`crates/sentinel-driver/src/
+llvm_dump.rs`) and the self-hosted `scg` (the `cg` mode of `dump_texpr` in `selfhost/types.sentinel`):
+evaluate the inner → drop every live binding down to the function floor (the ADR 0036 break/continue
+machinery with floor 0) → `ret` with the epilogue ABI (`main` i64→i32; an effecting fn wraps a pure
+value via `sentinel_kont_pure`; an ordinary fn rets its value) → park a dead block for the unreachable
+remainder. Selfhost MIR mirrors the Rust `Return(inner) => Opaque(vec![v])`. Two new single-file
+fixtures — `tests/pass/c65_return.sentinel` (return in an `if` guard + a heap binding live across the
+return + a statement-position return) and `tests/pass/c65_return_match.sentinel` (return inside a
+`match` arm) — bring `return` INTO **every** self-host differential corpus (types/mir/borrow/effects/
+codegen); `snc llvm` == `scg` byte-for-byte and **both bootstrap fixed points hold**. The two deferred
+v1 **typing limitations are CLOSED** (sentinel-types): the **coerce-skip** (a divergent `return` is no
+longer coerced to the expected type, so `return e` is valid in any context — `check_expr` returns early
+on `expr_diverges`) and the **match-arm divergence** (the result-type join skips a diverging arm, like
+the if-join). Mismatched-divergent demonstrators (`examples/lang/early_return*.sentinel`) are snc-only
+(out of the differential, the u128/f64 pattern); the selfhost typer needs no `expr_diverges` mirror (it
+is a pure dumper). **Constant-time UNCHANGED.** Windows four-check green. **Remaining: stage 3 —
+`return` crossing a `handle` (D6).** Assessment (2026-06-29): blocked on a **pre-existing
+staged-effect-runtime gap** — a handle body whose control flow reaches a `perform` (an `if`/`match`
+branch that performs) is not a supported body shape and currently **silently miscompiles**,
+INDEPENDENT of `return` (`handle if c { perform … } else { … } with { … }` already miscomputes). So
+stage 3 = (3a) make control-flow handle bodies lower correctly, then (3b) the kont teardown
+(`sentinel_kont_free` + handle-region pop); both across the three emitters. Until then the safe interim
+is to reject `return` inside a `handle` body. See ADR 0065 Phasing + HANDOVER §0.
 
 **Latest (2026-06-28) — explicit early `return`, effect-free path (ADR 0065 stages 1–2).** Sentinel
 now has a C-style **`return expr`** that exits a function early, instead of only the tail
@@ -372,8 +398,12 @@ resolution; no lex/parse/IR change) → no re-bless / `selfhost` mirror. Item-le
   (`std/text/str::parse_f64`/`f64_to_str`), and `std/data/json` now parsing/serializing
   non-integer numbers as `Float(f64)`.
 
-**1636 tests across the workspace**, four-check green (build · `cargo nextest`
-· `cargo test --doc` · `clippy -D warnings`). macOS / Apple Silicon / LLVM 18.
+**~1640 tests across the workspace**, four-check green (build · `cargo nextest`
+· `cargo test --doc` · `clippy -D warnings`). Verified on **Windows / x86_64-msvc /
+from-source LLVM 18** (the dev box; the self-host differential + both bootstrap fixed
+points run here, ADR 0065 era) and historically on **macOS / Apple Silicon / LLVM 18**
+(the standing cross-platform confirmation). The one Windows-only `pass.rs` failure
+(`c5d4_file_io`) is a hardcoded-`/tmp` POSIX-path issue, not a regression.
 
 ## Section A — sentinel-broker
 

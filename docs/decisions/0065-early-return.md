@@ -1,8 +1,15 @@
 # ADR 0065: `return expr` — explicit early return (C-style)
 
-Status: **PROPOSED → IMPLEMENTING.** Stages **1–2 (the effect-free path) are implemented
-snc-side** (Windows-verified, four-check green; demonstrator + UI rejection fixture); stages **3
-(cross-handler unwind) and 4 (selfhost mirror + both fixed points) are pending.** Add an explicit
+Status: **PROPOSED → IMPLEMENTING.** The **entire effect-free path is implemented and
+self-hosted** (Windows-verified, four-check green, both bootstrap fixed points hold): stages
+**1–2** (front end + effect-free lowering, snc-side), the **stage-4 front end** (selfhost
+parser + resolver mirror), and the **stage-4 codegen** (real `return` text-IR, byte-identical in
+the `snc llvm` oracle + the self-hosted `scg`) — `return` is in the typing/mir/borrow/effects/codegen
+differential corpora via `tests/pass/c65_return*.sentinel`. The two deferred v1 typing limitations are
+**CLOSED**: the join-site **divergence acceptance** (a divergent `return` is no longer coerced to the
+expected type — `coerce_to_expected` skips it) and the **match-arm divergence** (a returning arm no
+longer over-rejects the arm-type join). Stage **3 (the cross-handler unwind, D6) remains** — see the
+assessment in Phasing stage 3 (it is blocked on a pre-existing staged-effect-runtime gap). Add an explicit
 `return expr` so a function can return early from any point, instead of only by its tail
 expression. Owner-directed (2026-06-28): "the function return in Sentinel is not clear; we should
 have a `return x;` C-style." Scope confirmed: **full early return** (return from anywhere),
@@ -158,16 +165,43 @@ selfhost compiler sources need not *use* `return` (they keep tail returns), but 
    `examples/lang/early_return.sentinel` (heap binding live across the return; both back ends) +
    `tests/ui/c65_return_type_mismatch`. Kept in `examples/` (snc-only, OUT of the scg differential)
    so both fixed points stay byte-identical without the stage-4 mirror — the u128/f64 pattern.
-   **Known v1 limitations:** `match`-arm divergence is NOT yet integrated (a `match` arm that
-   `return`s over-rejects the arm-type join — restructure, or wait for the refinement; consistent
-   with the over-rejecting lexical checker); the `snc llvm` text-IR dump for `return` is a stub.
-3. **Rust `snc` — `return` crossing a `handle`** (D6) — `sentinel_kont_free` + handle-region tracking
-   + the teardown-on-early-return; `tests/pass` with effects (`return` before/after a `perform`
-   inside a `handle`). Closes any handle-codegen gaps it surfaces (Risk note).
-4. **Self-host mirror** — port stages 1–3 into `selfhost/*.sentinel`; `scg` == `snc` byte-identical;
-   both fixed points green.
-5. **ADR ACCEPTED**; update STATE/HANDOVER; (optionally) re-spell example tails as explicit
-   `return`s where it reads clearer.
+   **(Both former v1 limitations — the `match`-arm divergence and the `snc llvm` text-IR stub — are
+   now CLOSED; see stage 4.)**
+3. **`return` crossing a `handle`** (D6) — **REMAINS; assessed 2026-06-29.** Intended work:
+   `sentinel_kont_free` + handle-region tracking + the teardown-on-early-return; `tests/pass` with
+   effects (`return` before/after a `perform` inside a `handle`). **Assessment (the Risk note bites):**
+   stage 3 is **blocked on a pre-existing staged-effect-runtime gap.** The handle/`perform` codegen
+   only supports specific body *shapes* (a direct `perform`, the let-shape, the embedded-perform, and
+   chained lets — `compile_effecting_fn_with_*`). A handle body with **control flow that reaches a
+   `perform`** (an `if`/`match` whose branch performs) is **not** a supported shape and currently
+   **silently miscompiles** — it builds but returns the wrong value. This was verified to be
+   independent of `return`: `handle if c { perform … } else { perform … } with { … }` already
+   miscomputes (exit 0 vs the expected 42), so a `return` inside a handle body cannot be implemented
+   until that gap is closed. Stage 3 is therefore really **(3a) make control-flow handle bodies lower
+   correctly** (frame reification at `if`/`match` sites — the incremental work ADR 0020 anticipated),
+   **then (3b) the `return`-crossing-`handle` teardown** (`sentinel_kont_free` + the handle-region
+   pop) — both across the three emitters (inkwell + `llvm_dump` + selfhost). Until (3a/3b) land, the
+   safest interim is to **reject** a `return` whose lexical parent is a `handle` body/arm with a clear
+   diagnostic (the Open-questions item below), so the miscompile is never silent — a small bounded
+   prerequisite the follow-up should weigh against implementing D6 outright.
+4. ✅ **Stage-4 codegen + self-host + typing acceptance** (DONE 2026-06-29). The **real `return`
+   text-IR** lands byte-identical in both text emitters: the `snc llvm` oracle
+   (`crates/sentinel-driver/src/llvm_dump.rs`) and the self-hosted `scg` (the `cg` mode of
+   `dump_texpr` in `selfhost/types.sentinel`) — eval inner → drop every live binding to the fn floor
+   (`emit_loop_exit_drops(0)` / `cg_drop_range(c, 0)`) → `ret` with the epilogue ABI (main i64→i32;
+   effecting → `sentinel_kont_pure`; ordinary) → park a dead block. Selfhost MIR mirrors the Rust
+   `Return(inner) => Opaque(vec![v])`. `tests/pass/c65_return.sentinel` (return in `if` + a heap
+   binding live across the return + statement-position) and `tests/pass/c65_return_match.sentinel`
+   (return in a `match` arm) bring `return` INTO every differential corpus; both fixed points hold.
+   The two **typing limitations are CLOSED** (sentinel-types): the **coerce-skip** (a divergent node
+   is not coerced to the expected type, so `return e` is valid in any context — `check_expr` returns
+   early on `expr_diverges`) and the **match-arm divergence** (skip diverging arms in the result-type
+   join). Demonstrators `examples/lang/early_return*.sentinel` (snc-only) cover the mismatched-divergent
+   cases (out of the differential, the u128/f64 pattern). The **selfhost typer needs no `expr_diverges`
+   mirror** — it is a pure dumper (never rejects), and the only observable difference is the node type
+   for a *mismatched*-divergent join, which is snc-only.
+5. **ADR ACCEPTED** — pending stage 3 + a cross-platform (macOS) confirmation; update STATE/HANDOVER;
+   (optionally) re-spell example tails as explicit `return`s where it reads clearer.
 
 ## Non-goals (v1)
 

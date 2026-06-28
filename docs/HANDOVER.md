@@ -51,31 +51,45 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-28 — ADR 0065 stages 1–2 + stage-4 FRONT-END done; the SELF-HOST DIFFERENTIAL NOW RUNS ON WINDOWS; ▶ NEXT: ADR 0065 stage-4 CODEGEN (real `return` text-IR) + typing-acceptance + a tests/pass fixture, then stage 3 (return crossing a handle))
+### ▶ RESUME HERE (2026-06-29 — ADR 0065 EFFECT-FREE PATH COMPLETE + self-hosted (stage-4 codegen byte-identical, both fixed points green) + the two typing limitations CLOSED; ▶ NEXT: stage 3 — `return` crossing a `handle` (D6), which is BLOCKED on a pre-existing staged-effect-runtime gap, see the assessment below)
 
-> **▶ BIG CHANGE this session — the self-host differential is NO LONGER macOS-only.** It was
-> blocked by link.exe's 1 MB default stack (scg overflowed it: STATUS_STACK_OVERFLOW
-> `0xC00000FD`, empty stderr — the "scg fails on Windows" mystery) + the test's hardcoded `cc`.
-> Both fixed (commits `a5dc5da1`/`ea5ae168`): `link_exe` sets `/STACK:16777216`; `selfhost_codegen`
-> capstone-2 uses `llc` (`-mtriple=x86_64-pc-windows-msvc`) + `link.exe`. **ALL `selfhost_*` tests
-> pass under vcvars → both bootstrap fixed points + the oracle-moving "both fixed points green"
-> gate are verifiable HERE.** The macOS run drops to a FINAL cross-platform confirmation (+ the
-> POSIX/socket examples that link-fail on Windows), not the verification gate. See the
-> `build-environment-windows` auto-memory.
+> **▶ ADR 0065 effect-free path is DONE and self-hosted** (commits `3bc85e95`, `6114dc5f`). The
+> **real `return` control-flow text-IR** is byte-identical in BOTH text emitters — the `snc llvm`
+> oracle (`crates/sentinel-driver/src/llvm_dump.rs`, was a stub) and the self-hosted `scg` (the
+> `cg` mode of `dump_texpr` in `selfhost/types.sentinel`, was carrying just the operand): eval
+> inner → drop every live binding to the fn floor (`emit_loop_exit_drops(0)` / `cg_drop_range(c,0)`)
+> → `ret` w/ the epilogue ABI (main i64→i32; effecting → `sentinel_kont_pure`; ordinary) → park a
+> dead block. Selfhost MIR mirrors the Rust `Return → Opaque([inner])`. Two single-file fixtures —
+> `tests/pass/c65_return.sentinel` (return in an `if` + a heap binding live across the return +
+> statement-position) and `tests/pass/c65_return_match.sentinel` (return in a `match` arm) — bring
+> `return` INTO every differential corpus; `snc llvm` == `scg` byte-for-byte, **both bootstrap
+> fixed points hold** (verified on Windows under vcvars). The two deferred typing limitations are
+> **CLOSED** in `sentinel-types`: the **coerce-skip** (a divergent node returns early from
+> `check_expr` before `coerce_to_expected`, so `return e` is valid in ANY expected context) and the
+> **match-arm divergence** (the result-type join skips a diverging arm). Mismatched-divergent
+> demonstrators are `examples/lang/early_return*.sentinel` (snc-only). The selfhost typer needs NO
+> `expr_diverges` mirror — it is a pure dumper (never rejects), and the only difference is the node
+> type for a *mismatched*-divergent join (snc-only).
 >
-> **ADR 0065 status:** stages 1–2 (effect-free `return`, snc-side) DONE four-check green; stage-4
-> FRONT-END (selfhost parser + resolver mirror `return`; c65 back in the resolve differential)
-> DONE + verified (commit `6feb0299`). **REMAINING:** stage-4 CODEGEN — the real `return`
-> control-flow text-IR (eval inner → scope-drops to fn floor → `ret` w/ the main i64→i32 /
-> effecting-kont ABI → dead block) in BOTH the Rust `llvm_dump` (currently a stub) AND
-> `selfhost/codegen` (the `cg` mode in `types.sentinel::dump_texpr`, currently carries the
-> operand), BYTE-IDENTICAL; + the selfhost types divergence-ACCEPTANCE (mirror `expr_diverges`
-> at the if-join + body check, like the Rust `sentinel-types`); + a `tests/pass` `return` fixture
-> to exercise the full path (brings `return` INTO the typing/codegen differential corpora). THEN
-> stage 3 (`return` crossing a `handle` — the D6 kont-frame unwind; assess the handle/perform
-> codegen first). Also the deferred match-arm divergence (Rust + selfhost). Spec = the inkwell
-> Return lowering in `crates/sentinel-codegen/src/lib.rs` (`emit_return_drops` + `build_fn_return`
-> + the Return arm).
+> **▶ STAGE 3 (`return` crossing a `handle`, D6) — REMAINS, and is BLOCKED first.** Assessment
+> (2026-06-29): the handle/`perform` codegen is staged — it supports only specific body *shapes*
+> (direct `perform`, let-shape, embedded-perform, chained lets — `compile_effecting_fn_with_*`). A
+> handle body whose **control flow reaches a `perform`** (an `if`/`match` whose branch performs) is
+> NOT a supported shape and currently **SILENTLY MISCOMPILES** — it builds but returns the wrong
+> value. This was confirmed INDEPENDENT of `return`: `handle if c { perform Io.read() } else {
+> perform Io.read() } with { Io.read(k) => k(42) }` already returns 0 instead of 42 (test it with
+> `snc build` on a scratch file). So a `return` inside a handle body cannot be done until that gap
+> is closed. **Stage 3 = (3a) make control-flow handle bodies lower correctly** (frame reification
+> at `if`/`match` sites — the incremental work ADR 0020 anticipated) **THEN (3b) the
+> `return`-crossing-`handle` teardown** (a new runtime `sentinel_kont_free` that walks `frames_head`
+> freeing each captured block/frame, + handle-region tracking in codegen so an early return tears
+> down the in-flight kont) — both across the three emitters. The effect runtime is the youngest
+> subsystem (`crates/sentinel-runtime/src/lib.rs`: `SentinelKont`/`SentinelFrame`/`kont_push`/
+> `kont_resume`). **Safer interim (a small bounded prerequisite):** REJECT a `return` whose lexical
+> parent is a `handle` body/arm with a clear diagnostic so the miscompile is never silent (the ADR
+> open question). Weigh that against implementing D6 outright. Spec for the `return` lowering = the
+> inkwell `crates/sentinel-codegen/src/lib.rs` (`emit_return_drops` + `build_fn_return` + the Return
+> arm). Also pending: the final macOS cross-platform confirmation; then ADR 0065 ACCEPTED.
 
 All on `main`, **NEVER pushed**. Verified on **Windows only** (see the macOS caveat);
 the dev box is `x86_64-pc-windows-msvc` with a from-source LLVM 18.1.8 at `G:\llvm-18`
