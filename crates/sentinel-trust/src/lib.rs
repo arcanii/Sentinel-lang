@@ -17,6 +17,7 @@
 mod ed25519;
 mod format;
 mod sha512;
+mod trust_model;
 
 pub use ed25519::ed25519_verify;
 pub use format::{
@@ -24,3 +25,4 @@ pub use format::{
     Verified, VerifyError, ALGO_ED25519, DOMAIN,
 };
 pub use sha512::sha512;
+pub use trust_model::{evaluate, GateOutcome, SigPolicy, TrustManifest, TrustedKey};

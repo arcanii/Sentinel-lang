@@ -12,10 +12,135 @@
 //! has no argv, data crosses through fixed filenames in a private temp dir (the
 //! `input.sentinel` convention the self-host compiler uses).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use sentinel_trust::{canonical_payload, serialize_carrier, sha512, SignedObject};
+use sentinel_trust::{
+    canonical_payload, evaluate, serialize_carrier, sha512, GateOutcome, SigPolicy, SignedObject,
+    TrustManifest,
+};
+
+/// The default consumer trust manifest filename, looked for in the working
+/// directory when `--trust` is not given.
+const DEFAULT_MANIFEST: &str = "sentinel-trust.toml";
+
+/// The ADR 0061 trust-gate configuration parsed from `snc build` flags.
+pub struct TrustOpts {
+    pub policy: SigPolicy,
+    pub manifest_path: Option<String>,
+}
+
+impl Default for TrustOpts {
+    fn default() -> Self {
+        Self { policy: SigPolicy::Off, manifest_path: None }
+    }
+}
+
+/// One module presented to the gate: a display label, its source file (whose
+/// `<file>.sig` is the detached carrier), and its raw bytes.
+pub struct GateUnit {
+    pub label: String,
+    pub file: PathBuf,
+    pub source: Vec<u8>,
+}
+
+fn short_fp(pk: &[u8; 32]) -> String {
+    pk[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn sig_path_for(file: &Path) -> PathBuf {
+    let mut s = file.as_os_str().to_os_string();
+    s.push(".sig");
+    PathBuf::from(s)
+}
+
+fn load_manifest(explicit: Option<&str>) -> Result<TrustManifest, String> {
+    let path = match explicit {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let def = PathBuf::from(DEFAULT_MANIFEST);
+            if !def.is_file() {
+                // No manifest → trust nobody (the gate reports per policy). Strict
+                // then refuses everything, which is the safe default.
+                return Ok(TrustManifest::default());
+            }
+            def
+        }
+    };
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read trust manifest `{}`: {e}", path.display()))?;
+    TrustManifest::parse(&text)
+}
+
+/// Run the ADR 0061 build-time trust gate (D7) over `units` under `opts`. On a
+/// strict violation, prints diagnostics and returns the build's exit code. On
+/// success returns each trusted module's **effective grants** (label → grants)
+/// for the capability check (D6).
+pub fn run_trust_gate(
+    units: &[GateUnit],
+    opts: &TrustOpts,
+) -> Result<HashMap<String, Vec<String>>, ExitCode> {
+    let mut grants_by_label = HashMap::new();
+    if opts.policy == SigPolicy::Off {
+        return Ok(grants_by_label);
+    }
+    let manifest = match load_manifest(opts.manifest_path.as_deref()) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("snc: trust: {e}");
+            return Err(ExitCode::from(1));
+        }
+    };
+
+    let mut violations = 0u32;
+    for u in units {
+        let sig_path = sig_path_for(&u.file);
+        let carrier = std::fs::read_to_string(&sig_path).ok();
+        match evaluate(&u.source, carrier.as_deref(), &manifest) {
+            GateOutcome::Trusted { pubkey, grants } => {
+                eprintln!("snc: trust: `{}` verified — key {}…", u.label, short_fp(&pubkey));
+                grants_by_label.insert(u.label.clone(), grants);
+            }
+            GateOutcome::Unsigned => report(
+                opts.policy,
+                &mut violations,
+                &format!("`{}` is unsigned (no `{}`)", u.label, sig_path.display()),
+            ),
+            GateOutcome::BadSignature(e) => {
+                report(opts.policy, &mut violations, &format!("`{}`: {e}", u.label));
+            }
+            GateOutcome::Untrusted { pubkey } => report(
+                opts.policy,
+                &mut violations,
+                &format!(
+                    "`{}` is signed by an UNTRUSTED key {}… (not in the trust manifest)",
+                    u.label,
+                    short_fp(&pubkey)
+                ),
+            ),
+        }
+    }
+
+    if opts.policy == SigPolicy::Strict && violations > 0 {
+        eprintln!(
+            "snc: trust: {violations} signature violation(s) — build refused (--require-signatures strict)"
+        );
+        return Err(ExitCode::from(1));
+    }
+    Ok(grants_by_label)
+}
+
+fn report(policy: SigPolicy, violations: &mut u32, msg: &str) {
+    match policy {
+        SigPolicy::Strict => {
+            eprintln!("snc: trust: ERROR: {msg}");
+            *violations += 1;
+        }
+        SigPolicy::Warn => eprintln!("snc: trust: warning: {msg}"),
+        SigPolicy::Off => {}
+    }
+}
 
 /// Locate a signing core by name (`sign_core` / `keygen_core`): an explicit
 /// `--…` path if given, else next to the running `snc` executable.

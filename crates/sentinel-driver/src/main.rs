@@ -144,8 +144,10 @@ fn print_usage() {
     eprintln!("    snc ast <file>                   parse and dump the canonical AST (self-host oracle)");
     eprintln!("    snc parse <file>                 lex, parse, and pretty-print the program");
     eprintln!("    snc build <file> [-o <output>] [--link <lib>]... [--lib-path <dir>]...");
+    eprintln!("              [--require-signatures off|warn|strict] [--trust <manifest>]");
     eprintln!("                                     compile + link to an executable (--link adds a");
-    eprintln!("                                     native library to the link, e.g. user32)");
+    eprintln!("                                     native library; --require-signatures gates the");
+    eprintln!("                                     build on ADR 0061 module signatures)");
     eprintln!("    snc build --lib <file> [-o <lib.a>] [--emit-header <h.h>] [--lib-path <dir>]...");
     eprintln!("                                     compile to a C-ABI static library (ADR 0059)");
     eprintln!("    snc build --shared <file> [-o <lib.dylib>] [--emit-header <h.h>] [--lib-path <dir>]...");
@@ -774,6 +776,9 @@ struct DiscoveredModule {
     /// cache fingerprint (a unit's `.o` is a function of its source + its
     /// imports' sources + the graph effect set).
     source: String,
+    /// The resolved source file on disk — used by the ADR 0061 trust gate to
+    /// locate the module's detached signature (`<file>.sig`).
+    file: PathBuf,
 }
 
 /// The candidate file for module `a::b` under directory `base`:
@@ -852,8 +857,12 @@ fn discover_module_graph(
     visited.insert(vec![entry_stem.clone()]);
     // The entry module is first; reached modules are appended (BFS over
     // `out`, scanning each module's `use` edges as we go).
-    let mut out: Vec<DiscoveredModule> =
-        vec![DiscoveredModule { path: vec![entry_stem], program: entry_prog, source: entry_src }];
+    let mut out: Vec<DiscoveredModule> = vec![DiscoveredModule {
+        path: vec![entry_stem],
+        program: entry_prog,
+        source: entry_src,
+        file: entry.to_path_buf(),
+    }];
     let mut scan = 0;
     while scan < out.len() {
         let modules: Vec<Vec<String>> = out[scan]
@@ -894,7 +903,7 @@ fn discover_module_graph(
             let program = sentinel_syntax::parse(&src).map_err(|e| {
                 format!("parse error in module `{}`: {e:?}", module.join("::"))
             })?;
-            out.push(DiscoveredModule { path: module, program, source: src });
+            out.push(DiscoveredModule { path: module, program, source: src, file });
         }
         scan += 1;
     }
@@ -910,6 +919,7 @@ fn run_build_cli(args: &[String]) -> ExitCode {
     let mut output: Option<&str> = None;
     let mut link_libs: Vec<String> = Vec::new();
     let mut lib_paths: Vec<String> = Vec::new();
+    let mut trust = trust_tools::TrustOpts::default();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -946,6 +956,29 @@ fn run_build_cli(args: &[String]) -> ExitCode {
                     }
                 }
             }
+            // ADR 0061 D7: the trust gate. `--require-signatures off|warn|strict`
+            // gates the build on each module's detached signature; `--trust <file>`
+            // names the consumer trust manifest (default `sentinel-trust.toml`).
+            "--require-signatures" => {
+                i += 1;
+                match args.get(i).and_then(|m| sentinel_trust::SigPolicy::parse(m)) {
+                    Some(p) => trust.policy = p,
+                    None => {
+                        eprintln!("snc: `--require-signatures` expects off | warn | strict");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--trust" => {
+                i += 1;
+                match args.get(i) {
+                    Some(t) => trust.manifest_path = Some(t.clone()),
+                    None => {
+                        eprintln!("snc: `--trust` requires a manifest path");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             other => {
                 if path.is_some() {
                     eprintln!("snc: unexpected argument `{other}`");
@@ -957,7 +990,7 @@ fn run_build_cli(args: &[String]) -> ExitCode {
         i += 1;
     }
     match path {
-        Some(p) => run_build(p, output, &link_libs, &lib_paths),
+        Some(p) => run_build(p, output, &link_libs, &lib_paths, &trust),
         None => {
             eprintln!("snc: `build` requires a source file");
             ExitCode::from(2)
@@ -965,42 +998,69 @@ fn run_build_cli(args: &[String]) -> ExitCode {
     }
 }
 
-fn run_build(path: &str, output: Option<&str>, link_libs: &[String], lib_paths: &[String]) -> ExitCode {
+fn run_build(
+    path: &str,
+    output: Option<&str>,
+    link_libs: &[String],
+    lib_paths: &[String],
+    trust: &trust_tools::TrustOpts,
+) -> ExitCode {
     let src = match read_source(path) {
         Ok(s) => s,
         Err(code) => return code,
     };
 
     // Phase D.6 (1/N) / ADR 0037: discover the module graph by following
-    // `use` edges. A single-file program (no `use`) compiles exactly as
-    // before. Multi-module compilation — per-unit resolve + separate
-    // codegen + link — lands in the next D.6 (1/N) increment; until then a
-    // discovered multi-module graph is reported + gated honestly (and a
-    // missing `use`d file is surfaced here as ModuleNotFound).
-    match discover_module_graph(Path::new(path), &lib_search_dirs(lib_paths)) {
-        Ok(modules) if !modules.is_empty() => {
-            // Multi-file (Path A): merge the graph into one `Program` —
-            // qualify each module's fns + rewrite cross-module references,
-            // enforcing `use`/`pub` visibility — then compile it. (Per-unit
-            // object emission + module-qualified mangling + multi-object
-            // link is the follow-up; this first slice emits one object.)
-            let units: Vec<sentinel_resolve::ModuleUnit> = modules
-                .iter()
-                .map(|m| sentinel_resolve::ModuleUnit { path: m.path.clone(), program: &m.program })
-                .collect();
-            return match sentinel_resolve::merge_modules(&units) {
-                Ok(merged) => run_build_merged(merged, path, output, link_libs),
-                Err(e) => {
-                    eprintln!("snc: {e}");
-                    ExitCode::from(1)
-                }
-            };
-        }
-        Ok(_) => {} // single-file: fall through to the existing pipeline.
+    // `use` edges. A single-file program (no `use`) compiles exactly as before;
+    // a multi-module graph is merged (Path A) and compiled as one object.
+    let modules = match discover_module_graph(Path::new(path), &lib_search_dirs(lib_paths)) {
+        Ok(m) => m,
         Err(msg) => {
             eprintln!("snc: {msg}");
             return ExitCode::from(1);
         }
+    };
+
+    // ADR 0061 build-time trust gate (D7): verify each module's detached
+    // signature (`<file>.sig`) against the consumer trust manifest, per
+    // `--require-signatures`. Off by default → no behavior change. The returned
+    // per-module grants feed the capability check (D6).
+    let gate_units: Vec<trust_tools::GateUnit> = if modules.is_empty() {
+        vec![trust_tools::GateUnit {
+            label: path.to_string(),
+            file: PathBuf::from(path),
+            source: src.clone().into_bytes(),
+        }]
+    } else {
+        modules
+            .iter()
+            .map(|m| trust_tools::GateUnit {
+                label: m.path.join("::"),
+                file: m.file.clone(),
+                source: m.source.clone().into_bytes(),
+            })
+            .collect()
+    };
+    let _grants = match trust_tools::run_trust_gate(&gate_units, trust) {
+        Ok(g) => g,
+        Err(code) => return code,
+    };
+
+    if !modules.is_empty() {
+        // Multi-file (Path A): merge the graph into one `Program` — qualify each
+        // module's fns + rewrite cross-module references, enforcing `use`/`pub`
+        // visibility — then compile it.
+        let units: Vec<sentinel_resolve::ModuleUnit> = modules
+            .iter()
+            .map(|m| sentinel_resolve::ModuleUnit { path: m.path.clone(), program: &m.program })
+            .collect();
+        return match sentinel_resolve::merge_modules(&units) {
+            Ok(merged) => run_build_merged(merged, path, output, link_libs),
+            Err(e) => {
+                eprintln!("snc: {e}");
+                ExitCode::from(1)
+            }
+        };
     }
     let db = SentinelDatabase::default();
     let file = SourceFile::new(&db, path.to_string(), src.clone());
@@ -1914,8 +1974,8 @@ fn run_build_separate(path: &str, output: Option<&str>, lib_paths: &[String]) ->
     };
     if modules.is_empty() {
         // Single-file: nothing to compile separately. (`--separate` does not
-        // thread `--link` yet; ADR 0060 follow-up.)
-        return run_build(path, output, &[], lib_paths);
+        // thread `--link` / the trust gate yet; follow-ups.)
+        return run_build(path, output, &[], lib_paths, &trust_tools::TrustOpts::default());
     }
 
     // Visibility / existence gate (ModuleNotFound / UnknownImport /

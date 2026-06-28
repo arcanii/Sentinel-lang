@@ -9,7 +9,7 @@
 //! so on a box without one (e.g. Windows outside an MSVC env) the tests skip
 //! cleanly. A *compile* error in the tool still fails loudly.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sentinel_trust::{canonical_payload, sha512};
@@ -47,7 +47,7 @@ fn fresh_dir(tag: &str) -> PathBuf {
 
 /// Build `sign_core` into `work`. Returns `Some(exe)`, or `None` if no host
 /// linker is available (the test then skips). A compile error panics.
-fn build_sign_core(work: &PathBuf) -> Option<PathBuf> {
+fn build_sign_core(work: &Path) -> Option<PathBuf> {
     let root = repo_root();
     let src = root.join("tools").join("trust").join("sign_core.sentinel");
     let exe = work.join(format!("sign_core{}", std::env::consts::EXE_SUFFIX));
@@ -131,4 +131,49 @@ fn snc_sign_then_verify_round_trips() {
         .expect("run snc verify");
     assert!(verify.status.success(), "snc verify failed:\n{}", String::from_utf8_lossy(&verify.stderr));
     assert!(String::from_utf8_lossy(&verify.stdout).contains("signature OK"));
+}
+
+#[test]
+fn signed_trusted_module_builds_and_runs_under_strict() {
+    // The gate's success path (D7): a real program, signed by a trusted key,
+    // passes `--require-signatures strict` and builds + runs. add → exit 7.
+    let work = fresh_dir("gatebuild");
+    let Some(signer) = build_sign_core(&work) else { return };
+
+    let mut key = vec![42u8; 32];
+    key.extend_from_slice(&unhex(GOLDEN_PK));
+    std::fs::write(work.join("my.key"), &key).unwrap();
+
+    let entry = work.join("app.sentinel");
+    std::fs::write(&entry, "fn main() -> i64 { 7 }\n").unwrap();
+
+    // Sign the program, then trust its key in the default manifest.
+    let sign = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("sign")
+        .arg(&entry)
+        .arg("--key")
+        .arg(work.join("my.key"))
+        .arg("--signer")
+        .arg(&signer)
+        .output()
+        .expect("run snc sign");
+    assert!(sign.status.success(), "snc sign failed:\n{}", String::from_utf8_lossy(&sign.stderr));
+    std::fs::write(work.join("sentinel-trust.toml"), format!("[[keys]]\npubkey = \"{GOLDEN_PK}\"\n")).unwrap();
+
+    // Build under strict (cwd = work so the default trust manifest is found).
+    let exe = work.join(format!("app{}", std::env::consts::EXE_SUFFIX));
+    let build = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .current_dir(&work)
+        .arg("build")
+        .arg("app.sentinel")
+        .arg("-o")
+        .arg(&exe)
+        .arg("--require-signatures")
+        .arg("strict")
+        .output()
+        .expect("run snc build");
+    assert!(build.status.success(), "strict build of a trusted module failed:\n{}", String::from_utf8_lossy(&build.stderr));
+
+    let run = Command::new(&exe).output().expect("run app");
+    assert_eq!(run.status.code(), Some(7), "the gated program must run normally");
 }
