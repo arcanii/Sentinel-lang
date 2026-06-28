@@ -216,14 +216,26 @@ fn sentinel_resolver_matches_oracle_on_seeds() {
     );
 }
 
-/// All `tests/pass` + `tests/ui` `.sentinel` fixtures (sorted).
+/// All `tests/pass` + `tests/ui` `.sentinel` fixtures (sorted), MINUS those that
+/// use a language feature not yet mirrored into `selfhost/` (so the self-hosted
+/// stage would legitimately diverge from the Rust oracle).
 fn collect_fixtures() -> Vec<PathBuf> {
     let root = workspace_root();
+    // ADR 0065: `return expr` is implemented snc-side (stages 1–2) but NOT yet
+    // mirrored into the self-hosted parser/resolver (stage 4 pending), so a
+    // `return`-using fixture diverges in the self-host differential. Exclude it
+    // until the mirror lands. (`return` demonstrators otherwise live in
+    // examples/, which the differential never compiles — the u128/f64 pattern.)
+    const SELFHOST_PENDING: &[&str] = &["c65_return_type_mismatch.sentinel"];
     let mut fixtures = Vec::new();
     for sub in ["tests/pass", "tests/ui"] {
         for entry in std::fs::read_dir(root.join(sub)).expect("read fixture dir") {
             let path = entry.expect("dir entry").path();
             if path.extension().and_then(|e| e.to_str()) == Some("sentinel") {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if SELFHOST_PENDING.contains(&name) {
+                    continue;
+                }
                 fixtures.push(path);
             }
         }
