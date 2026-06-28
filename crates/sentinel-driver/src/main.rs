@@ -34,6 +34,7 @@
 
 mod ast_dump;
 mod borrow_dump;
+mod descriptor;
 mod effects_dump;
 mod llvm_dump;
 mod mir_dump;
