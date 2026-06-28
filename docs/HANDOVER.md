@@ -51,13 +51,53 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-28 — the `/sentinel_library` reorg + the `Sentinel::` core base DONE (ADR 0064); ▶ NEXT: finish the ADR 0063 producer)
+### ▶ RESUME HERE (2026-06-28 — early `return` effect-free path DONE (ADR 0065 stages 1–2); ▶ NEXT: ADR 0065 stage 3 (return crossing a handle) + stage 4 (selfhost mirror); also the print-each-check rollout + the ADR 0063 producer)
 
 All on `main`, **NEVER pushed**. Verified on **Windows only** (see the macOS caveat);
 the dev box is `x86_64-pc-windows-msvc` with a from-source LLVM 18.1.8 at `G:\llvm-18`
 (`LLVM_SYS_180_PREFIX` set), no `just` — see the `build-environment-windows` auto-memory
 for the build/test commands (incl. the `vcvars64.bat` recipe for the link-touching tests)
 + gotchas.
+
+**Done 2026-06-28 — explicit early `return`, effect-free path (ADR 0065 stages 1–2, commit
+`ddef38dc`):**
+
+- **`return expr` exits a function early** as a **divergent expression** (`ExprKind::Return`,
+  Rust-style), valid as a branch tail (`if guard { return x } else { … }`). Threaded through
+  ast → parser → resolve → types → borrow → effect → mir → codegen + the driver dumps. The
+  template for the ~30 mechanical sites was `Declassify(Box<Expr>)` (a single-inner passthrough);
+  only the **divergent typing** and the **control-flow codegen** are real new logic.
+- **Typing (the subtle part):** the inner checks against the enclosing fn's return type — stashed
+  on the per-fn `VarTypeEnv` as `current_return_type` (like `loop_depth` for break/continue) — and
+  `expr_diverges`/`block_diverges` (structural: `Return`, and `Block`/`If`/`Match` all of whose
+  paths diverge) integrate at the **If join**, the **fn-body** check, and the **method-body**
+  checks so a `return` branch unifies with the other branch and a fully-returning body skips the
+  tail-vs-return-type match. Mismatch reuses the generic `Mismatch` ("expected X, found Y").
+- **Codegen (the ADR 0036 break/continue shape, floor = the function):** `emit_return_drops`
+  drains EVERY live scope frame, value-aware (skips the returned binding so its heap survives — the
+  use-after-free guard); `build_fn_return` converts + `ret`s with the SAME ABI as the epilogue
+  (`main` i64→i32, effecting → kont_pure) — the bug it fixes was an early `return 42` in `main`
+  emitting a raw `ret i64` against the `i32` LLVM `main`; then a dead block is parked so the
+  unreachable if-arm store/merge never appends to a terminated block. Single-free holds because the
+  return-block and the merge-block are mutually exclusive.
+- **Constant-time UNCHANGED** — `return` is unconditional control flow, no new `secret_leak` sink
+  (a secret `if`-condition is still rejected at the `if`); returning a `secret` value is fine. MIR
+  carries the inner Opaque (so a secret divisor inside `return a / b` is still flagged).
+- **snc-side only; demonstrator `examples/lang/early_return.sentinel`** (heap binding live across
+  the return; both back ends, exit 42) + `tests/ui/c65_return_type_mismatch`. **Kept in `examples/`
+  (NOT `tests/pass`)** so `return` stays OUT of the scg differential corpus — both fixed points are
+  byte-identical without the stage-4 mirror (the u128/f64 pattern). Windows four-check green
+  (build · cargo test · doctests · clippy `-D warnings`); analysis unit tests + the selfhost
+  **dump** differential (types/resolve/mir/borrow/effects) unchanged → no regression.
+- **▶ CONFIRMED the bootstrap is NOT broken:** the `selfhost_codegen` (scg-run) test fails on
+  Windows, but it fails **identically on clean HEAD** (git-stash-verified) — the scg self-hosted
+  binary has never run on Windows (the macOS-only-validated path, already backlogged). Not my
+  change.
+- **Pending — stage 3 (`return` crossing a `handle`, ADR 0065 D6):** the `sentinel_kont_free` +
+  handle-region teardown on the effect runtime (the youngest subsystem — risk-noted). **Stage 4
+  (selfhost mirror + both fixed points)** is fundamentally a **macOS** task (scg doesn't run on
+  Windows). **Known v1 stubs:** `match`-arm divergence (a `match` arm that `return`s over-rejects
+  the arm-join — restructure for now) and the `snc llvm` text-IR dump for `return`.
 
 **Done 2026-06-28 — the `/sentinel_library` reorg + the `Sentinel::` core base (ADR 0064
 ACCEPTED, was NEXT item 0):**

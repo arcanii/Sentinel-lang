@@ -14,6 +14,26 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-06-28) — explicit early `return`, effect-free path (ADR 0065 stages 1–2).** Sentinel
+now has a C-style **`return expr`** that exits a function early, instead of only the tail
+expression. It is a **divergent expression** (`ExprKind::Return`, Rust-style `return: !`): valid as
+a branch tail (`if guard { return x } else { … }`), so a function can bail out. Typing checks the
+inner against the enclosing fn's return type (stashed on the per-fn `VarTypeEnv`) and uses a
+structural divergence predicate (`expr_diverges`/`block_diverges`) so a `return` branch unifies with
+the other branch and a fully-returning body skips the tail-vs-return-type match. Codegen reuses the
+ADR 0036 `break`/`continue` machinery with the floor set to the **function**: evaluate the inner,
+drop every live scope frame (value-aware so the returned binding survives — no use-after-free), then
+`ret` via a shared `build_fn_return` (the `main` i64→i32 / effecting-kont ABI), parking a dead block
+for the now-unreachable remainder. **Constant-time UNCHANGED** — `return` is unconditional control
+flow, not a branch on a value, so it is no new `secret_leak` sink (a secret `if`-condition is still
+rejected at the `if`); returning a `secret` value is fine. Implemented **snc-side** with the
+demonstrator in `examples/` (`examples/lang/early_return.sentinel`, snc-only like u128/f64 — OUT of
+the scg differential, so both fixed points stay byte-identical without the stage-4 mirror) +
+`tests/ui/c65_return_type_mismatch`. Windows four-check green; analysis unit tests + the selfhost
+**dump** differential unchanged (no regression). **Pending:** stage 3 (`return` crossing a `handle`
+— the D6 kont-frame unwind) + stage 4 (selfhost mirror + both fixed points). Known v1 stubs:
+`match`-arm divergence and the `snc llvm` text-IR dump for `return`. See ADR 0065 + HANDOVER §0.
+
 **Latest (2026-06-28) — library layout reorg + the `Sentinel::` core base (ADR 0064).** The
 first-party libraries now live under a top-level **`sentinel_library/`** tree so the repo can
 host many of them. A new **`Sentinel::` core base** (`sentinel_library/Sentinel/`) is the
