@@ -31,13 +31,12 @@ a program needs beyond what its modules declare.)
   prints the screen size, beeps, then pops a real message box (blocks until OK).
 - **`messagebox_compact`** — the LIBRARY-USING version of the same program:
   `use std::sys::win32::message_box;` instead of inlining, so it is a few lines.
-  Because `use` resolves modules relative to the entry file's own directory and
-  `std/` is not adjacent to `demos/`, this one builds only from a std-adjacent
-  location — copy it to the repo root first:
+  The `std/` library lives under `sentinel_library/` (ADR 0064), not adjacent to
+  `demos/`; point `snc` at it with `--lib-path` (ADR 0037 point 12) so it builds
+  IN PLACE — no copy needed. From the repo root:
 
   ```
-  copy demos\win32\messagebox_compact.sentinel messagebox_compact.sentinel
-  snc build messagebox_compact.sentinel -o %TEMP%\messagebox_compact.exe
+  snc build demos\win32\messagebox_compact.sentinel -o %TEMP%\messagebox_compact.exe --lib-path sentinel_library
   ```
 
 These prove that Sentinel calls real Win32 GUI symbols from verified code — and,

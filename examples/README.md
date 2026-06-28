@@ -1,7 +1,8 @@
 # `examples/` — programs that use the core libraries
 
-Real, idiomatic Sentinel programs that `use` the [`std/`](../std/) core
-libraries. Each one doubles as a **feature test**: it is compiled and run by
+Real, idiomatic Sentinel programs that `use` the first-party libraries under
+[`sentinel_library/`](../sentinel_library/) — `std/` the batteries + `Sentinel/`
+the core base (ADR 0064). Each one doubles as a **feature test**: it is compiled and run by
 `cargo nextest`, and its exit code is asserted — the "exit-code-is-the-answer"
 convention.
 

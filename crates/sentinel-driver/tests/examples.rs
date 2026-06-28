@@ -23,13 +23,14 @@
 //!
 //! Module discovery roots at the entry file's parent directory, and
 //! `use a::b::Item` maps to `<root>/a/b.sentinel` (no parent traversal). So an
-//! entry that does `use std::security::ct::...` needs `std/` to sit next to it.
-//! The repo keeps a clean top-level split (`std/` and `examples/`, each
-//! subdivided by functional category), and this harness reconstructs a buildable
-//! project in a temp dir: it copies the whole `std/` tree next to the example
-//! entry (flattened to the temp root). The repo `.sentinel` files stay the
-//! source of truth; the temp copy is only the build sandbox (and keeps the repo
-//! free of `.o` / `.o.fp` / linked binaries).
+//! entry that does `use std::security::sha256::...` / `use Sentinel::ct::...`
+//! needs `std/` / `Sentinel/` to sit next to it. The repo keeps the first-party
+//! libraries under a top-level `sentinel_library/` tree (`std/` the batteries +
+//! `Sentinel/` the core base, ADR 0064), and this harness reconstructs a
+//! buildable project in a temp dir: it copies the whole `sentinel_library/` tree
+//! next to the example entry (flattened to the temp root). The repo `.sentinel`
+//! files stay the source of truth; the temp copy is only the build sandbox (and
+//! keeps the repo free of `.o` / `.o.fp` / linked binaries).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -55,7 +56,7 @@ fn temp_project(name: &str) -> PathBuf {
 }
 
 /// Recursively copy `src` into `dst` (creating `dst`), `.sentinel` files and
-/// all. Used to drop the whole `std/` tree next to an example entry.
+/// all. Used to drop the whole `sentinel_library/` tree next to an example entry.
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).expect("create dst dir");
     for entry in std::fs::read_dir(src).expect("read_dir") {
@@ -70,13 +71,14 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     }
 }
 
-/// Assemble a buildable temp project for one example: copy the repo's `std/`
-/// tree to `<temp>/std`, and the example entry to `<temp>/<stem>.sentinel`
-/// (flattened to the root so `use std::...` resolves). Returns the temp entry.
+/// Assemble a buildable temp project for one example: copy the repo's
+/// `sentinel_library/` trees (`std/` + `Sentinel/`, ADR 0064) to `<temp>/`, and
+/// the example entry to `<temp>/<stem>.sentinel` (flattened to the root so
+/// `use std::...` / `use Sentinel::...` resolves). Returns the temp entry.
 fn assemble(rel_entry: &str, test_name: &str) -> PathBuf {
     let root = repo_root();
     let dir = temp_project(test_name);
-    copy_dir_recursive(&root.join("std"), &dir.join("std"));
+    copy_dir_recursive(&root.join("sentinel_library"), &dir);
     let src_entry = root.join(rel_entry);
     let stem = src_entry
         .file_name()

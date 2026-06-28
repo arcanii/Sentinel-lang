@@ -26,9 +26,10 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// Recursively copy `src` into `dst` — used to drop the repo's `std/` tree next
-/// to a multi-module library entry so `use std::...` resolves (mirrors the
-/// example harness's `copy_dir_recursive`).
+/// Recursively copy `src` into `dst` — used to drop the repo's
+/// `sentinel_library/` tree (`std/` + `Sentinel/`, ADR 0064) next to a
+/// multi-module library entry so `use std::...` / `use Sentinel::...` resolves
+/// (mirrors the example harness's `copy_dir_recursive`).
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
     std::fs::create_dir_all(dst).expect("create dst dir");
     for entry in std::fs::read_dir(src).expect("read_dir") {
@@ -209,9 +210,11 @@ fn export_multi_module_library_from_c() {
     let root = repo_root();
     let dir = temp_dir("crypto");
 
-    // Assemble a temp project: the `std/` tree at the source root + the entry,
-    // so `use std::security::sha256` resolves to `<dir>/std/security/sha256.sentinel`.
-    copy_dir_recursive(&root.join("std"), &dir.join("std"));
+    // Assemble a temp project: the `sentinel_library/` trees at the source root
+    // + the entry, so `use std::security::sha256` resolves to
+    // `<dir>/std/security/sha256.sentinel` and `use Sentinel::secrets` to
+    // `<dir>/Sentinel/secrets.sentinel` (ADR 0064).
+    copy_dir_recursive(&root.join("sentinel_library"), &dir);
     let lib_src = dir.join("crypto_lib.sentinel");
     std::fs::copy(root.join("examples/export/crypto_lib.sentinel"), &lib_src)
         .expect("copy crypto_lib.sentinel");

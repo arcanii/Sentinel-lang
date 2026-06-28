@@ -6,13 +6,13 @@
 // self-links via the library's `extern "C" link("user32")`, so NO `--link`.
 //
 // BUILD: this file `use`s the std::sys::win32 library, which lives under the repo
-// `std/` tree — not adjacent to demos/. Point snc at the library root with
-// `--lib-path` (ADR 0037 point 12: fallback module-search dirs tried after the
-// entry file's own dir), so it builds IN PLACE — no copy needed. From the repo
-// root (Windows):
-//   snc build demos\win32\messagebox_compact.sentinel -o %TEMP%\messagebox_compact.exe --lib-path .
+// `sentinel_library/std/` tree (ADR 0064) — not adjacent to demos/. Point snc at
+// the library root with `--lib-path` (ADR 0037 point 12: fallback module-search
+// dirs tried after the entry file's own dir), so it builds IN PLACE — no copy
+// needed. From the repo root (Windows):
+//   snc build demos\win32\messagebox_compact.sentinel -o %TEMP%\messagebox_compact.exe --lib-path sentinel_library
 //   %TEMP%\messagebox_compact.exe   (prints screen size, beeps, pops a box)
-// (Or `set SNC_LIB_PATH=.` once and drop the flag — every snc subcommand honors it.)
+// (Or `set SNC_LIB_PATH=sentinel_library` once and drop the flag — every snc subcommand honors it.)
 
 use std::sys::win32::screen_width;
 use std::sys::win32::screen_height;

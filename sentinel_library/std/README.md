@@ -3,8 +3,8 @@
 Real, idiomatic Sentinel library modules — the building blocks a programmer
 gets instead of starting from scratch. They are written in Sentinel itself, and
 they double as feature tests: every module is exercised by a program under
-[`../examples/`](../examples/) that is compiled, run, and asserted on by
-`cargo nextest` (see [the harness](../crates/sentinel-driver/tests/examples.rs)).
+[`examples/`](../../examples/) that is compiled, run, and asserted on by
+`cargo nextest` (see [the harness](../../crates/sentinel-driver/tests/examples.rs)).
 
 ## Layout: functional categories
 

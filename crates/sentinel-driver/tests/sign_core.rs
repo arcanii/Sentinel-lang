@@ -5,9 +5,9 @@
 //! opaque payload bytes `snc` hands it, using the verified-constant-time
 //! `std::security::ed25519`). These tests build + run it.
 //!
-//! Building the tool requires a host linker (it reaches `std/` via `--lib-path`),
-//! so on a box without one (e.g. Windows outside an MSVC env) the tests skip
-//! cleanly. A *compile* error in the tool still fails loudly.
+//! Building the tool requires a host linker (it reaches `sentinel_library/` via
+//! `--lib-path`, ADR 0064), so on a box without one (e.g. Windows outside an MSVC
+//! env) the tests skip cleanly. A *compile* error in the tool still fails loudly.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -52,13 +52,15 @@ fn build_core(work: &Path, name: &str) -> Option<PathBuf> {
     let root = repo_root();
     let src = root.join("tools").join("trust").join(format!("{name}.sentinel"));
     let exe = work.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    // The cores `use std::…` / `use Sentinel::…` (ADR 0064): point the
+    // module-search path at the first-party library tree.
     let build = Command::new(env!("CARGO_BIN_EXE_snc"))
         .arg("build")
         .arg(&src)
         .arg("-o")
         .arg(&exe)
         .arg("--lib-path")
-        .arg(&root)
+        .arg(root.join("sentinel_library"))
         .output()
         .expect("run snc build");
     if build.status.success() {

@@ -184,7 +184,7 @@ fn locate_core(explicit: Option<&str>, name: &str) -> Result<PathBuf, String> {
     } else {
         Err(format!(
             "signing tool `{name}` not found at `{}` — build it once:\n    \
-             snc build tools/trust/{name}.sentinel --lib-path <repo-root> -o {}\n  \
+             snc build tools/trust/{name}.sentinel --lib-path <repo-root>/sentinel_library -o {}\n  \
              or pass its path explicitly.",
             cand.display(),
             cand.display()
