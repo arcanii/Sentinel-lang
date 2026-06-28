@@ -165,7 +165,22 @@ CT-checked as always.
 ## Open questions
 
 - **D2a format** — structured (recommended, non-oracle-moving) vs `pub extern fn` (oracle-
-  moving). The decision gates everything else.
+  moving). The decision gates everything else. **▶ RESOLVED: (a)** (owner-chosen). Realized
+  (phase 1a, `8d8f99c`) as a structured header (dedicated reader) + an interface body of
+  ordinary Sentinel signature decls reconstructed via `parse` + `extract_exports` (no new
+  syntax → not oracle-moving). The non-generic-`pub fn` slice round-trips.
+- **▶ The producer object + its symbols (found during 1a).** The `.sif` pairs with an object
+  that exports the lib's `pub fn`s under their **module-qualified `abi-v1`** symbols (ADR
+  0037 D7) — what a *Sentinel* consumer links against. But `snc build --lib` (ADR 0059) is
+  the **C-ABI** path: it exports `export "C"` symbols, not the `pub fn` abi-v1 ones. So the
+  producer is NOT simply `--lib --emit-interface`. Options: (i) a distinct **`--staticlib`
+  (Sentinel-ABI)** mode that emits one object exporting the `pub fn` abi-v1 symbols + the
+  `.sif`; (ii) extend the `--separate` per-unit emission (which already exports those
+  symbols) to also bundle a `.sif` + archive; (iii) make `--lib` additionally export the
+  `pub fn` abi-v1 symbols (alongside the C-ABI ones) + emit the `.sif`. **Recommendation:
+  (ii)** — `--separate` already emits abi-v1 pub-fn symbols + is the natural "Sentinel
+  library" producer; add `.sif` emission + a `--lib`-style archive of the units. To settle
+  before producer wiring (phase 1b).
 - **Descriptor ↔ object binding** — the `.sif` commits to the object's SHA-512 (recommended,
   so a swapped object fails); confirm the object path/name convention.
 - **Manifest home** — extend `sentinel-trust.toml` with a `[lib]`/`[[lib]]` block vs a sibling
