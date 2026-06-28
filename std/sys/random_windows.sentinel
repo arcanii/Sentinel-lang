@@ -1,0 +1,32 @@
+// std::sys::random — OS CSPRNG, Windows variant (ADR 0062 conditional compilation:
+// the `_windows` file, selected on a Windows target).
+//
+// Wraps `RtlGenRandom` (exported from advapi32.dll as `SystemFunction036`), the
+// classic Windows system CSPRNG: `BOOLEAN RtlGenRandom(PVOID buf, ULONG len)` —
+// fill `buf` with `len` random bytes. The `extern` block SELF-LINKS advapi32 (ADR
+// 0057 A9: `extern "C" link("advapi32")`), so a consumer needs no `--link`.
+//
+// This is the Windows counterpart of `random_unix.sentinel`'s `getentropy`: it is
+// what lets `std::sys::random::random_bytes` (and thus `snc keygen`) work on
+// Windows, where `getentropy` does not exist (ADR 0061 keygen gap closed). PUBLIC
+// bytes — the FFI fence; a crypto caller widens them to `secret` at the call site.
+//
+// `BOOLEAN` is returned in AL; we ignore the return and trust the fill (as the
+// POSIX `getentropy` wrapper does). `len` is a `ULONG` (32-bit) — the callee reads
+// the low 32 bits of the i64 we pass, fine for `n <= 256`.
+extern "C" link("advapi32") {
+    fn SystemFunction036(buf: ptr, len: i64) -> i64;
+}
+
+// `n` cryptographically-strong random bytes from the OS. `n` in 1..=256.
+pub fn random_bytes(n: i64) -> [u8] {
+    let mut buf: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut buf, i64_to_u8(0));
+        i = i + 1;
+    }
+    let mut bytes: [u8] = vec_to_array(buf);
+    SystemFunction036(ptr_of_mut(&mut bytes), n);
+    bytes
+}

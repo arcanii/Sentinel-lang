@@ -9,14 +9,15 @@
 //
 //   keyout.bin  <-  32-byte seed (the SECRET key)  ||  32-byte public key
 //
-// PLATFORM: `getentropy` is POSIX, so this links on macOS / Linux. A Windows
-// build needs a `getentropy` shim (a small follow-up parallel to the ADR 0060
-// Windows-host work); until then, generate a key on a POSIX host, or provide a
-// seed file directly to `snc sign`.
+// PLATFORM: the entropy source is `std::sys::random` (ADR 0062 conditional
+// compilation) — `getentropy` on linux/macos, `RtlGenRandom` on Windows — so this
+// builds and runs on **all three** targets (the ADR 0061 Windows-keygen gap is
+// closed). The `_windows` variant self-links advapi32 (ADR 0057 A9), so a consumer
+// needs no `--link`.
 //
 // CONSTANT-TIME: the seed widens to `secret`, the public-key scalar-mult runs
 // over the secret scalar branch-free, and only the public key is declassified.
-use std::sys::ffi::random_bytes;
+use std::sys::random::random_bytes;
 use std::security::ed25519::ed25519_pubkey;
 
 fn reveal(d: [secret u8]) -> [u8] {

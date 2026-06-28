@@ -45,12 +45,13 @@ fn fresh_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// Build `sign_core` into `work`. Returns `Some(exe)`, or `None` if no host
-/// linker is available (the test then skips). A compile error panics.
-fn build_sign_core(work: &Path) -> Option<PathBuf> {
+/// Build a `tools/trust/<name>.sentinel` core into `work`. Returns `Some(exe)`,
+/// or `None` if no host linker is available (the test then skips). A compile
+/// error panics.
+fn build_core(work: &Path, name: &str) -> Option<PathBuf> {
     let root = repo_root();
-    let src = root.join("tools").join("trust").join("sign_core.sentinel");
-    let exe = work.join(format!("sign_core{}", std::env::consts::EXE_SUFFIX));
+    let src = root.join("tools").join("trust").join(format!("{name}.sentinel"));
+    let exe = work.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     let build = Command::new(env!("CARGO_BIN_EXE_snc"))
         .arg("build")
         .arg(&src)
@@ -68,7 +69,11 @@ fn build_sign_core(work: &Path) -> Option<PathBuf> {
         eprintln!("skipping — no host linker:\n{err}");
         return None;
     }
-    panic!("snc build of sign_core failed:\n{err}");
+    panic!("snc build of {name} failed:\n{err}");
+}
+
+fn build_sign_core(work: &Path) -> Option<PathBuf> {
+    build_core(work, "sign_core")
 }
 
 #[test]
@@ -176,4 +181,60 @@ fn signed_trusted_module_builds_and_runs_under_strict() {
 
     let run = Command::new(&exe).output().expect("run app");
     assert_eq!(run.status.code(), Some(7), "the gated program must run normally");
+}
+
+#[test]
+fn snc_keygen_generates_a_key_then_signs_and_verifies() {
+    // The full author flow with a freshly GENERATED key — exercises
+    // `std::sys::random` (getentropy on unix / RtlGenRandom on Windows, selected
+    // by ADR 0062 conditional compilation), which closes the Windows keygen gap.
+    let work = fresh_dir("keygen");
+    let Some(keygen) = build_core(&work, "keygen_core") else { return };
+    let Some(signer) = build_core(&work, "sign_core") else { return };
+
+    // snc keygen -o my.key --keygen-tool <keygen_core>
+    let key = work.join("my.key");
+    let kg = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("keygen")
+        .arg("-o")
+        .arg(&key)
+        .arg("--keygen-tool")
+        .arg(&keygen)
+        .output()
+        .expect("run snc keygen");
+    assert!(kg.status.success(), "snc keygen failed:\n{}", String::from_utf8_lossy(&kg.stderr));
+    assert_eq!(std::fs::read(&key).unwrap().len(), 64, "key file is seed(32)||pubkey(32)");
+
+    // A second keygen must differ (real OS entropy, not zeros).
+    let key2 = work.join("my2.key");
+    let _ = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("keygen")
+        .arg("-o")
+        .arg(&key2)
+        .arg("--keygen-tool")
+        .arg(&keygen)
+        .output()
+        .expect("run snc keygen");
+    assert_ne!(std::fs::read(&key).unwrap(), std::fs::read(&key2).unwrap(), "two keygens must differ");
+
+    // Sign a file with the generated key, then verify.
+    let body = work.join("app.sentinel");
+    std::fs::write(&body, "fn main() -> i64 { 0 }\n").unwrap();
+    let sign = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("sign")
+        .arg(&body)
+        .arg("--key")
+        .arg(&key)
+        .arg("--signer")
+        .arg(&signer)
+        .output()
+        .expect("run snc sign");
+    assert!(sign.status.success(), "snc sign failed:\n{}", String::from_utf8_lossy(&sign.stderr));
+
+    let verify = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("verify")
+        .arg(&body)
+        .output()
+        .expect("run snc verify");
+    assert!(verify.status.success(), "snc verify failed:\n{}", String::from_utf8_lossy(&verify.stderr));
 }

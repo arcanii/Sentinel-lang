@@ -1,0 +1,27 @@
+// std::sys::random — OS CSPRNG, POSIX variant (ADR 0062 conditional compilation:
+// the `_unix` family file, selected on linux / macos).
+//
+// Wraps `getentropy(2)` (the same call `std::sys::ffi` exposes), filling a public
+// `[u8]` whose data pointer crosses to libc via `ptr_of_mut`. PUBLIC bytes — a
+// crypto caller WIDENS them to `secret` at the call site (the FFI fence rejects a
+// `secret` crossing an `extern` arg). The Windows variant lives in
+// `random_windows.sentinel`; importers write `use std::sys::random::random_bytes`
+// and the resolver picks the right file per `--target` / host.
+extern "C" {
+    // int getentropy(void *buf, size_t buflen) — fill `buf` with `buflen`
+    // cryptographically-strong random bytes (buflen <= 256). 0 on success.
+    fn getentropy(buf: ptr, len: i64) -> i64;
+}
+
+// `n` cryptographically-strong random bytes from the OS. `n` in 1..=256.
+pub fn random_bytes(n: i64) -> [u8] {
+    let mut buf: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut buf, i64_to_u8(0));
+        i = i + 1;
+    }
+    let mut bytes: [u8] = vec_to_array(buf);
+    getentropy(ptr_of_mut(&mut bytes), n);
+    bytes
+}
