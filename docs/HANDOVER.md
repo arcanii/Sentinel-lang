@@ -51,7 +51,31 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-28 — early `return` effect-free path DONE (ADR 0065 stages 1–2); ▶ NEXT: ADR 0065 stage 3 (return crossing a handle) + stage 4 (selfhost mirror); also the print-each-check rollout + the ADR 0063 producer)
+### ▶ RESUME HERE (2026-06-28 — ADR 0065 stages 1–2 + stage-4 FRONT-END done; the SELF-HOST DIFFERENTIAL NOW RUNS ON WINDOWS; ▶ NEXT: ADR 0065 stage-4 CODEGEN (real `return` text-IR) + typing-acceptance + a tests/pass fixture, then stage 3 (return crossing a handle))
+
+> **▶ BIG CHANGE this session — the self-host differential is NO LONGER macOS-only.** It was
+> blocked by link.exe's 1 MB default stack (scg overflowed it: STATUS_STACK_OVERFLOW
+> `0xC00000FD`, empty stderr — the "scg fails on Windows" mystery) + the test's hardcoded `cc`.
+> Both fixed (commits `a5dc5da1`/`ea5ae168`): `link_exe` sets `/STACK:16777216`; `selfhost_codegen`
+> capstone-2 uses `llc` (`-mtriple=x86_64-pc-windows-msvc`) + `link.exe`. **ALL `selfhost_*` tests
+> pass under vcvars → both bootstrap fixed points + the oracle-moving "both fixed points green"
+> gate are verifiable HERE.** The macOS run drops to a FINAL cross-platform confirmation (+ the
+> POSIX/socket examples that link-fail on Windows), not the verification gate. See the
+> `build-environment-windows` auto-memory.
+>
+> **ADR 0065 status:** stages 1–2 (effect-free `return`, snc-side) DONE four-check green; stage-4
+> FRONT-END (selfhost parser + resolver mirror `return`; c65 back in the resolve differential)
+> DONE + verified (commit `6feb0299`). **REMAINING:** stage-4 CODEGEN — the real `return`
+> control-flow text-IR (eval inner → scope-drops to fn floor → `ret` w/ the main i64→i32 /
+> effecting-kont ABI → dead block) in BOTH the Rust `llvm_dump` (currently a stub) AND
+> `selfhost/codegen` (the `cg` mode in `types.sentinel::dump_texpr`, currently carries the
+> operand), BYTE-IDENTICAL; + the selfhost types divergence-ACCEPTANCE (mirror `expr_diverges`
+> at the if-join + body check, like the Rust `sentinel-types`); + a `tests/pass` `return` fixture
+> to exercise the full path (brings `return` INTO the typing/codegen differential corpora). THEN
+> stage 3 (`return` crossing a `handle` — the D6 kont-frame unwind; assess the handle/perform
+> codegen first). Also the deferred match-arm divergence (Rust + selfhost). Spec = the inkwell
+> Return lowering in `crates/sentinel-codegen/src/lib.rs` (`emit_return_drops` + `build_fn_return`
+> + the Return arm).
 
 All on `main`, **NEVER pushed**. Verified on **Windows only** (see the macOS caveat);
 the dev box is `x86_64-pc-windows-msvc` with a from-source LLVM 18.1.8 at `G:\llvm-18`
