@@ -438,6 +438,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // exactly once on the early-exit and fall-through paths). 42 = every check
     // held (and `main` itself early-returns 42 on success).
     ("examples/lang/early_return.sentinel", 42),
+    // `return` inside a `match` arm (ADR 0065), the diverging-arm-type-join case: a
+    // `match` yields a `bool`, but its `Halt` arm early-`return`s the function's `i64`
+    // directly. A diverging arm yields no value, so it does not constrain the arm-type
+    // join (pre-0065 this was a "match arms have incompatible types" reject). 42 = held.
+    ("examples/lang/early_return_match.sentinel", 42),
 ];
 
 #[test]
@@ -678,6 +683,11 @@ fn lang_delegation_levels_and_multiple_inheritance() {
 #[test]
 fn lang_early_return() {
     check_example("examples/lang/early_return.sentinel", "early_return", 42);
+}
+
+#[test]
+fn lang_early_return_match() {
+    check_example("examples/lang/early_return_match.sentinel", "early_return_match", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

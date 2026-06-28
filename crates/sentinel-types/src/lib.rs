@@ -8067,6 +8067,18 @@ fn check_expr(
         )?,
     };
     let synth = TypedExpr { kind, span: expr.span.clone(), ty };
+    // ADR 0065: a DIVERGENT node (an early `return`, or a fully-diverging
+    // if/match/block) never produces a value, so it must NOT be coerced to the
+    // expected type — `return e` is valid in ANY expected context (an arm of a
+    // `match` / branch of an `if` / a `let` whose type differs from `e`'s). The
+    // node carries its own (divergent-placeholder) type; the enclosing join
+    // (the if-join / match-arm join) recognises the divergence and takes the
+    // OTHER paths' type. Without this skip, `coerce_to_expected` would reject a
+    // sound program — e.g. `let r: bool = match c { A => return 0, B => b }`,
+    // where the `A` arm `return`s the function's `i64`.
+    if expr_diverges(&synth) {
+        return Ok(synth);
+    }
     // ADR 0014 D3: apply T→?T widening if the expected type is ?T and
     // the synthesized type is T.
     coerce_to_expected(synth, expected, &expr.span, secrets)
@@ -8910,6 +8922,11 @@ fn check_match_expr(
     let mut covered = vec![false; variants.len()];
     let mut has_wildcard = false;
     let mut result_ty: Option<Type> = None;
+    // ADR 0065: the type of the first arm that DIVERGES (its body always
+    // `return`s). Used only when EVERY arm diverges (the whole `match`
+    // diverges) — a placeholder treated as bottom by parents, like a fully
+    // diverging `if`.
+    let mut fallback_ty: Option<Type> = None;
     let mut typed_arms = Vec::with_capacity(arms.len());
 
     for arm in arms {
@@ -9022,15 +9039,26 @@ fn check_match_expr(
         // the generic `Mismatch` inside the arm); the explicit check
         // below catches divergence in the inferred (`expected == None`)
         // case, like `if`'s then/else equality.
-        match result_ty {
-            None => result_ty = Some(body_typed.ty),
-            Some(rt) => {
-                if body_typed.ty != rt {
-                    return Err(TypeError::MatchArmTypeMismatch {
-                        expected: rt,
-                        got: body_typed.ty,
-                        span: to_source_span(&arm.body.span),
-                    });
+        //
+        // ADR 0065: an arm that always diverges (an early `return`) yields no
+        // value, so it does not constrain the join — the `match`'s type is the
+        // OTHER arms', exactly like an `if` branch that diverges. A diverging
+        // arm is recorded only as a `fallback_ty` (used if EVERY arm diverges).
+        if expr_diverges(&body_typed) {
+            if fallback_ty.is_none() {
+                fallback_ty = Some(body_typed.ty);
+            }
+        } else {
+            match result_ty {
+                None => result_ty = Some(body_typed.ty),
+                Some(rt) => {
+                    if body_typed.ty != rt {
+                        return Err(TypeError::MatchArmTypeMismatch {
+                            expected: rt,
+                            got: body_typed.ty,
+                            span: to_source_span(&arm.body.span),
+                        });
+                    }
                 }
             }
         }
@@ -9060,10 +9088,12 @@ fn check_match_expr(
     }
 
     // `result_ty` is None only for a zero-arm match — which, for a
-    // non-empty enum, already failed exhaustiveness above. The
-    // remaining (empty-enum) case is unconstructable; default to i64
-    // (the node is dead, and codegen rejects `match` at (3/N) anyway).
-    let result_ty = result_ty.unwrap_or(Type::I64);
+    // non-empty enum, already failed exhaustiveness above — or when EVERY
+    // arm diverges (ADR 0065), in which case `fallback_ty` carries a
+    // placeholder (the whole `match` diverges). The remaining (empty-enum)
+    // case is unconstructable; default to i64 (the node is dead, and codegen
+    // rejects `match` at (3/N) anyway).
+    let result_ty = result_ty.or(fallback_ty).unwrap_or(Type::I64);
 
     Ok((
         TypedExprKind::Match {

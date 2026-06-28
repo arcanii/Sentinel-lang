@@ -1331,6 +1331,15 @@ fn pass_c65_return() {
 }
 
 #[test]
+fn pass_c65_return_match() {
+    // ADR 0065 c65_return_match: `return` inside a `match` arm — a distinct codegen path
+    // from `return`-inside-an-`if`. All arms are `i64` (the `Neg` arm early-returns -1),
+    // so it enters the selfhost differential too (snc llvm == scg byte-for-byte over the
+    // match + return lowering). Exit 42.
+    assert_eq!(run_exit("c65_return_match.sentinel"), 42);
+}
+
+#[test]
 fn pass_c60_vec_struct_move() {
     // ADR 0034 D8: a Move-typed struct element (a struct owning a `[u8]`) pushed
     // into a `Vec` through a BY-VALUE function parameter is consumed/moved, so it

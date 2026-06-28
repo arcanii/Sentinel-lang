@@ -1,0 +1,43 @@
+// examples/lang/early_return_match.sentinel — `return` inside a `match` arm (ADR 0065),
+// the DIVERGING-ARM-TYPE-JOIN case.
+//
+// A `match` arm that always `return`s yields no value, so it does NOT constrain the
+// arm-type join — the `match`'s type is the OTHER arms', exactly like a diverging `if`
+// branch. This lets an arm bail out with the FUNCTION's return type even when that differs
+// from the `match`'s own value type. Here the `match` yields a `bool` (did we run?), but
+// the `Halt` arm early-`return`s the function's `i64` result directly. Pre-ADR-0065 this
+// was rejected ("`match` arms have incompatible types: expected bool, found i64"); now the
+// diverging arm is skipped at the join (the deferred match-arm divergence, closed).
+//
+// snc-only demonstrator (the mismatched-divergent dump is a documented selfhost edge — the
+// CG result slot uses the live arm's type in both emitters; the demonstrator stays OUT of
+// the differential, the early_return / u128 / f64 pattern). Exit 42 = every check held.
+use std::test::check;
+
+enum Cmd { Run(i64), Halt }
+
+// `ran: bool` is the match's value, but the `Halt` arm returns the fn's `i64` directly — a
+// diverging arm whose type (`i64`) differs from the live arm's (`bool`).
+fn exec(c: Cmd) -> i64 {
+    let ran: bool = match c {
+        Cmd::Halt => return 0 - 1,
+        Cmd::Run(n) => n > 0,
+    };
+    if ran {
+        100
+    } else {
+        0
+    }
+}
+
+fn main() -> i64 {
+    let mut passed: i64 = 0;
+    passed = passed + check("exec(Run(5)) ran -> 100", exec(Cmd::Run(5)) == 100);
+    passed = passed + check("exec(Run(0)) did not run -> 0", exec(Cmd::Run(0)) == 0);
+    passed = passed + check("exec(Halt) bailed early -> -1", exec(Cmd::Halt) == 0 - 1);
+    if passed == 3 {
+        return 42
+    } else {
+        0
+    }
+}

@@ -1,0 +1,41 @@
+// tests/pass/c65_return_match.sentinel — `return` inside a `match` arm (ADR 0065).
+//
+// A `match` arm may early-`return`. Here every arm has the same type (`i64`), so the
+// arm-type join is satisfied with or without the divergence refinement — the point is to
+// bring `return`-inside-a-`match`-arm INTO the self-host differential corpora (a distinct
+// codegen path from `return`-inside-an-`if`): `snc llvm` == the self-hosted `scg`
+// byte-for-byte. The diverging `Neg` arm bails out early; the `Zero`/`Pos` arms give the
+// `match` its value. Exit 42.
+
+enum Sign { Neg, Zero, Pos }
+
+fn classify(n: i64) -> Sign {
+    if n < 0 {
+        Sign::Neg
+    } else if n == 0 {
+        Sign::Zero
+    } else {
+        Sign::Pos
+    }
+}
+
+// The `Neg` arm early-returns (a diverging arm); the others yield the magnitude.
+fn nonneg_or_bail(n: i64) -> i64 {
+    match classify(n) {
+        Sign::Neg => return 0 - 1,
+        Sign::Zero => 0,
+        Sign::Pos => n,
+    }
+}
+
+fn main() -> i64 {
+    let a: i64 = nonneg_or_bail(7);       // 7  (Pos)
+    let b: i64 = nonneg_or_bail(0);       // 0  (Zero)
+    let c: i64 = nonneg_or_bail(0 - 4);   // -1 (Neg → early return)
+    let ok: bool = a == 7 && b == 0 && c == 0 - 1;
+    if ok {
+        return 42
+    } else {
+        0
+    }
+}
