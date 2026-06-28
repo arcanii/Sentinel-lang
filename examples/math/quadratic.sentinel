@@ -16,6 +16,8 @@ use std::math::float::lerp;
 use std::math::float::trunc;
 use std::math::float::sq;
 use std::math::float::discriminant;
+use std::test::check;
+use std::test::report;
 
 // Solve a*x^2 + b*x + c = 0 for its larger real root via the quadratic formula.
 // (The example below picks a, b, c so the discriminant is a perfect square, so
@@ -57,15 +59,16 @@ fn main() -> i64 {
     let res_hi: f64 = poly(a, b, c, hi);
     let res_lo: f64 = poly(a, b, c, lo);
 
-    let geometry_ok: bool = len == 5.0;
-    let helpers_ok: bool =
-        av == 7.5 && mx == 9.0 && mn == 2.0 && mid == 2.5 && tr == 3.0 && trn == -3.0;
-    let quadratic_ok: bool =
-        hi == 3.0 && lo == 2.0 && res_hi == 0.0 && res_lo == 0.0;
+    let mut passed: i64 = 0;
+    passed = passed + check("hypot(3,4) == 5 (geometry)", len == 5.0);
+    passed = passed + check(
+        "abs/min/max/lerp/trunc helpers",
+        av == 7.5 && mx == 9.0 && mn == 2.0 && mid == 2.5 && tr == 3.0 && trn == -3.0,
+    );
+    passed = passed + check(
+        "quadratic roots 3.0 and 2.0, residuals 0.0",
+        hi == 3.0 && lo == 2.0 && res_hi == 0.0 && res_lo == 0.0,
+    );
 
-    if geometry_ok && helpers_ok && quadratic_ok {
-        42
-    } else {
-        0
-    }
+    report(passed, 3)
 }

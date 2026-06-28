@@ -12,6 +12,8 @@ use std::sys::ffi::random_bytes;
 use std::c::cstr_len;
 use std::sys::ffi::env_get;
 use std::bytes::bytes::eq;
+use std::test::check;
+use std::test::report;
 
 fn main() -> i64 {
     // `ptr_of` + a NUL-terminated cstr handed to libc `strlen`. "hello" has no
@@ -24,8 +26,6 @@ fn main() -> i64 {
     // be all-zero and EQUAL) — so `differ` proves the OS actually wrote bytes.
     let r1: [u8] = random_bytes(32);
     let r2: [u8] = random_bytes(32);
-    let len_ok: bool = len(r1) == 32 && len(r2) == 32;
-    let differ: bool = !eq(&r1, &r2);
 
     // `is_null` + the cstr READ-back via `getenv`. PATH is set in any shell /
     // test environment (the present-var read-back path); a bogus name is unset,
@@ -35,7 +35,12 @@ fn main() -> i64 {
     let path: [u8] = env_get(&path_name);
     let bogus_name: [u8] = "SENTINEL_FFI_DEFINITELY_UNSET_X9Z";
     let bogus: [u8] = env_get(&bogus_name);
-    let env_ok: bool = len(path) > 0 && len(bogus) == 0;
 
-    if slen == 5 && len_ok && differ && env_ok { 42 } else { 0 }
+    let mut passed: i64 = 0;
+    passed = passed + check("strlen(\"hello\") == 5 (ptr_of)", slen == 5);
+    passed = passed + check("two getentropy draws are 32 bytes", len(r1) == 32 && len(r2) == 32);
+    passed = passed + check("two getentropy draws differ (OS wrote bytes)", !eq(&r1, &r2));
+    passed = passed + check("getenv PATH non-empty, bogus unset empty", len(path) > 0 && len(bogus) == 0);
+
+    report(passed, 4)
 }

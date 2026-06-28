@@ -10,6 +10,8 @@
 // returned -1.
 use std::algorithms::seq::sort;
 use std::algorithms::seq::binary_search;
+use std::test::check;
+use std::test::report;
 
 fn main() -> i64 {
     let data: [i64] = [5, 2, 9, 1, 7, 3, 8, 4, 6, 0];
@@ -33,15 +35,12 @@ fn main() -> i64 {
     let found7: i64 = binary_search(&sorted, 7);
     let absent: i64 = binary_search(&sorted, 42);
 
-    if ordered == 1
-        && sorted[0] == 0
-        && sorted[9] == 9
-        && sorted[4] == 4
-        && found7 == 7
-        && absent == 0 - 1
-    {
-        42
-    } else {
-        0
-    }
+    let mut passed: i64 = 0;
+    passed = passed + check("sorted ascending (every adjacent pair)", ordered == 1);
+    passed = passed + check("sorted endpoints [0]==0 && [9]==9", sorted[0] == 0 && sorted[9] == 9);
+    passed = passed + check("sorted midpoint [4] == 4", sorted[4] == 4);
+    passed = passed + check("binary_search(7) == index 7", found7 == 7);
+    passed = passed + check("binary_search(42 absent) == -1", absent == 0 - 1);
+
+    report(passed, 5)
 }
