@@ -620,6 +620,24 @@ dependency graph: who reviewed what, when, against which commit. The
 output is a queryable database supporting compliance reporting and
 security incident response.
 
+### 10.8 Memory-Query Introspection Examples
+
+The broker exposes memory-query APIs — `where_is(handle)` (locate an
+allocation: arena / slot / generation), `list_arenas()` (enumerate live
+arenas), and `stats()` (live arenas, total allocations / frees) — but today
+they are exercised only incidentally inside the broker's Rust demos
+(`where_is`/`stats` in `token_bucket`, `stats` in `credential_store`,
+`list_arenas` in `request_pipeline`), and not at all from the Sentinel
+language. When there is a chance:
+
+- Add a focused `crates/sentinel-broker/examples/memory_query.rs` that runs
+  all three together end-to-end (allocate across a couple of arenas →
+  `list_arenas()` → `where_is()` a few handles → free some → `stats()`
+  before/after) as the single clear reference for the query surface.
+- Surface the introspection at the Sentinel-language level and show it in the
+  `examples/` corpus, so a Sentinel program can query its own memory layout —
+  useful for debugging, leak hunting, and teaching the broker model.
+
 ---
 
 ## 11. Embedded and Resource-Constrained Targets
