@@ -26,6 +26,22 @@ discovery is byte-identical to before. NOT oracle-moving (it changes only where 
 module's source is read, not the lowered program) → no re-bless / `selfhost` mirror.
 Windows-verified; see HANDOVER §0.
 
+**Latest (2026-06-28) — code signing & supply-chain trust, v1 (ADR 0061
+ACCEPTED-WITH-AMENDMENTS).** A new **`sentinel-trust`** crate + `snc` subcommands make
+*"the code you build is the code you reviewed, signed by an authorized party"* a build
+property (BACKLOG2 §2 / AI_TOOLING §7.1). **Verify** — in-process Ed25519 + SHA-512 in
+Rust, the **byte-identical twin** of `std::security::ed25519` (KAT-validated on RFC 8032),
+so the build-time verifier sits inside `snc`'s trust boundary. **Sign** stays Sentinel
+(the dogfooded `tools/trust/{sign,keygen}_core.sentinel`); **`snc keygen` / `snc sign` /
+`snc verify`** orchestrate. The signature covers the artifact's **raw bytes — comments
+included** (only the carrier is excluded; "verify the exact bytes you compile"), via a
+Rust-only canonical payload, so there is no second format impl. **`snc build
+--require-signatures off|warn|strict`** + `--trust <manifest>` (the consumer
+`sentinel-trust.toml`) gates the build (D7); **capability bounding** (D6) refuses a
+trusted-but-over-reaching module (v1 enforces `ffi`). NOT oracle-moving (a driver+resolve
+gate; the in-file sig block is a `//` comment) → no re-bless / `selfhost` mirror.
+Windows-verified; see ADR 0061 + HANDOVER §0.
+
 - **Phase A — `sentinel-broker`** ✅ complete. Production-shape memory
   subsystem (generational arenas, bump + slab strategies, scoped budgets,
   secret-memory policy: `mlock` + zero-on-free). Also backs compiled programs

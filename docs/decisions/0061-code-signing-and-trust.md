@@ -1,12 +1,47 @@
 # ADR 0061: Code signing & supply-chain trust — signed artifacts, a consumer trust manifest, capability-bounded keys
 
-Status: **PROPOSED.** A design ADR for the "trusted" half of the pre-built-libraries
-rock (HANDOVER §0 NEXT). It is the first concrete, v1-scoped realization of the vision
-in **BACKLOG2 §2** ("Cryptographic Signatures and Supply-Chain Provenance") and the
-mechanism **AI_TOOLING §7.1** names ("a dependency not in the trust manifest fails to
-compile"). Design-only — nothing implemented yet; pins the model before code per the
-repo's ADR-first norm. **Not oracle-moving** (see *Self-host*); does **not** touch the
-constant-time machinery (see *Constant-time guarantee*).
+Status: **ACCEPTED-WITH-AMENDMENTS — v1 IMPLEMENTED (2026-06-28, Windows-verified).**
+The first concrete, v1-scoped realization of **BACKLOG2 §2** ("Cryptographic Signatures
+and Supply-Chain Provenance") + the **AI_TOOLING §7.1** mechanism ("a dependency not in
+the trust manifest fails to compile"). **Not oracle-moving** (see *Self-host*); does
+**not** touch the constant-time machinery (see *Constant-time guarantee*).
+
+**v1 shipped** (new `sentinel-trust` crate + `snc` subcommands):
+- **Verify (D4)** — in-process **Ed25519 + SHA-512** in Rust, the TweetNaCl twin of
+  `std::security::ed25519`, KAT-validated on RFC 8032 (verify lives inside `snc`'s trust
+  boundary — chosen over a shell-out helper). Cross-checked **byte-identical** to the
+  Sentinel signer.
+- **Format (D2/D3)** — `canonical_payload = domain‖algo‖pubkey‖grants‖SHA512(body)`
+  (Rust-only — the Sentinel signer signs opaque bytes, so no second format impl) + the
+  detached / in-file-`//`-block carrier + `verify_signed`. **Comments are signed**;
+  **grants are bound** (both tested).
+- **Sign (dogfood)** — `tools/trust/{sign,keygen}_core.sentinel` (the verified-constant-time
+  `std::security::ed25519`) + `snc sign` / `snc keygen` / `snc verify` (Rust orchestration).
+- **Gate (D7)** — `snc build --require-signatures off|warn|strict` + `--trust <manifest>`
+  (the consumer `sentinel-trust.toml`, D5); runs over the module graph after discovery.
+- **Capability bounding (D6)** — a trusted module's used capabilities ⊆ its key's grants;
+  v1 enforces **`ffi`** (an `extern "C"` block).
+
+**Amendments from the design (v1 pragmatics):**
+- **A1.** The canonical carrier is the **detached `.sig`** (the in-file `//` block parses
+  via the same parser, but the build-time gate consumes detached carriers; the in-file
+  block's body-exclusion split is a follow-up).
+- **A2.** Verify is a **Rust twin** of `std::security::ed25519` (owner-chosen "twin oracle"
+  over the ADR 0059 link-in, which stays the north star for making verify *literally*
+  Sentinel). Sign **is** Sentinel (the dogfooded cores); `snc sign`/`keygen` shell out to
+  them (acceptable on the author side — a tampered signer only yields signatures verify
+  rejects).
+- **A3.** The signed-object metadata is bound as a **rigid canonical byte payload**, not a
+  TOML serialization (no canonicalization TCB); the human-readable carrier is hex, no
+  base64 dep.
+- **A4.** Capability taxonomy is **`ffi`-first** (from `program.externs`, no AST walk);
+  `network`/`filesystem`/… (builtin-call scanning) extend from here.
+- **A5.** `keygen` entropy is POSIX `getentropy` (macOS/Linux); a Windows RNG is a small
+  follow-up. `snc sign` (no entropy) runs everywhere.
+
+**v1 deferred** (unchanged from *Phasing*): the in-file-block gate, `--separate`/`--lib`
+gating, TOFU/issuer policies, the keystore + hardware keys, rotation, revocation,
+build-env attestation, multi-party signing, and the per-language binding generators.
 
 ## Context
 
