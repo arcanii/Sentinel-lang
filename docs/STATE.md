@@ -14,6 +14,21 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-06-28) — library layout reorg + the `Sentinel::` core base (ADR 0064).** The
+first-party libraries now live under a top-level **`sentinel_library/`** tree so the repo can
+host many of them. A new **`Sentinel::` core base** (`sentinel_library/Sentinel/`) is the
+identity-defining foundation — the constant-time `secret` vocabulary the batteries build on:
+**`Sentinel::ct`** (the branch-free constant-time primitives, moved from `std::security::ct`)
+and **`Sentinel::secrets`** (the `widen`/`reveal` public⇄secret boundary helpers, DRY'd from
+three byte-identical copy-paste sites — `examples/export/crypto_lib` +
+`tools/trust/{sign,keygen}_core`). `std::` stays the batteries, relocated to
+`sentinel_library/std/` (namespace unchanged) and `use`-ing `Sentinel::ct` in its crypto
+modules. NOT oracle-moving (a filesystem move + module-path edits + a harness search-root
+change; module resolution is generic path-mapping, so no compiler change; no `selfhost/` file
+moves) → no re-bless / `selfhost` mirror, both bootstrap fixed points byte-identical. (`secret`
+is a keyword, so the boundary module is `Sentinel::secrets`, plural.) Done in two four-check-green
+phases (relocate, then carve out the core). Windows-verified; see ADR 0064 + HANDOVER §0.
+
 **Latest (2026-06-28) — a module-search path (ADR 0037 point 12).** `snc` now
 resolves a `use`d module's file by trying the entry file's own directory first
 (the unchanged primary root) and then **fallback search dirs**: the repeatable

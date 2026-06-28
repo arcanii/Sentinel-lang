@@ -51,13 +51,42 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-28 — ▶ NEXT: the `/sentinel_library` reorg + the `Sentinel::` core base; then the rest of this session)
+### ▶ RESUME HERE (2026-06-28 — the `/sentinel_library` reorg + the `Sentinel::` core base DONE (ADR 0064); ▶ NEXT: finish the ADR 0063 producer)
 
 All on `main`, **NEVER pushed**. Verified on **Windows only** (see the macOS caveat);
 the dev box is `x86_64-pc-windows-msvc` with a from-source LLVM 18.1.8 at `G:\llvm-18`
 (`LLVM_SYS_180_PREFIX` set), no `just` — see the `build-environment-windows` auto-memory
 for the build/test commands (incl. the `vcvars64.bat` recipe for the link-touching tests)
 + gotchas.
+
+**Done 2026-06-28 — the `/sentinel_library` reorg + the `Sentinel::` core base (ADR 0064
+ACCEPTED, was NEXT item 0):**
+
+- **The libraries now live under a top-level `sentinel_library/` tree** so the repo can host
+  MANY first-party libs. A new **`Sentinel::` core base** (`sentinel_library/Sentinel/`) holds
+  the constant-time `secret` vocabulary: **`Sentinel::ct`** (moved from `std::security::ct`) +
+  **`Sentinel::secrets`** (the `widen`/`reveal` boundary pair, DRY'd from the three byte-identical
+  copies in `examples/export/crypto_lib` + `tools/trust/{sign,keygen}_core`). `std::` is the
+  batteries, relocated to `sentinel_library/std/` (namespace unchanged) + `use`-ing `Sentinel::ct`
+  in its crypto modules.
+- **Done in two four-check-green phases** (commits `884d57a8` relocate, `1b520f78` carve-out;
+  ADR `544acf39`): **(1)** `git mv std → sentinel_library/std` + repoint the harnesses
+  (`examples.rs`/`export.rs` copy `sentinel_library/` next to each entry) + the `--lib-path`
+  refs (`sign_core.rs`, `trust_tools.rs` hint, `demos/win32` docs); **(2)** carve out `Sentinel::`
+  — move `ct`, add `secrets`, switch the 12 `use std::security::ct::X` → `use Sentinel::ct::X`
+  and the 3 boundary sites → `use Sentinel::secrets::{widen,reveal}`.
+- **NAMING:** the owner proposed `Sentinel::secret`, but `secret` is a keyword (a `use`-path
+  segment must lex as `Ident`), so the module is **`Sentinel::secrets`** (plural — owner-confirmed).
+- **NOT oracle-moving** (filesystem move + module-path edits + harness search-root change; no
+  lex/parse/IR change; no `selfhost/` moves) → no re-bless / mirror; both fixed points byte-identical.
+- **Windows-verified:** clippy `--all-targets` green; the ct-direct examples
+  (`secure_compare`/`ct_memcmp`/`chacha_qr`/`siphash_round`) green BOTH `--separate` + merge (so
+  `Sentinel::ct` crosses separate compilation); the 6 ct-consuming std-crypto examples
+  (`sha256`/`siphash24`/`poly1305`/`sha512`/`sha3`/`chacha20_stream`) build+run 42 (merge);
+  `sign_core` byte-identical-to-the-Rust-twin STILL holds (DRY'd `widen`/`reveal` unchanged) +
+  `keygen` flow green; `crypto_lib` multi-module `--lib` archives clean. macOS differential +
+  the crypto `--separate`/`export.rs` cc paths remain on the standing macOS BACKLOG (not
+  oracle-moving → expected byte-identical).
 
 **Done 2026-06-28 — the module-search path (HANDOVER §0 NEXT item 1, ADR 0037 point 12):**
 
@@ -153,31 +182,12 @@ for the build/test commands (incl. the `vcvars64.bat` recipe for the link-touchi
 
 **▶ NEXT (the owner's stated direction — ADR-first):**
 
-0. **▶ DO THIS FIRST — the `/sentinel_library` reorg + the `Sentinel::` core base
-   (owner-directed 2026-06-28).** Move the libraries under a top-level **`/sentinel_library/`**
-   so the repo can host MANY first-party libraries (std + new ones, refactoring into them as
-   patterns recur). **The core library base = `Sentinel::`** (owner's proposal, recommended):
-   `/sentinel_library/Sentinel/` — the small, identity-defining FOUNDATION the rest builds on.
-   Seed it with the **secret-boundary helpers** `Sentinel::secret::{widen, reveal}` (the
-   `widen(&[u8])->[secret u8]` / `reveal([secret u8])->[u8]` pair is currently COPY-PASTED in
-   `examples/export/crypto_lib`, `tools/trust/sign_core`, `tools/trust/keygen_core` — DRY it
-   here) + the constant-time core (`Sentinel::ct`, moved from `std/security/ct`). Rationale:
-   Sentinel's foundational data types (Vec/array/string/print/`secret`) are COMPILER BUILTINS,
-   so the foundational *library* layer is the constant-time `secret` vocabulary — which is
-   Sentinel's reason to exist; branding it `Sentinel::` (capital, first-party) is right.
-   `std::` stays the broad **batteries** (security suite, sys, math, text, data, net,
-   collections), relocated to `/sentinel_library/std/`, and `use`s `Sentinel::` for the core.
-   - **NOT oracle-moving** (a filesystem move + module-path edits + a search-root change; no
-     lex/parse/IR change; no `selfhost/` file moves — they stay put). **TOUCH POINTS:** (a)
-     the move itself; (b) `crates/sentinel-driver/tests/examples.rs` — `assemble()` copies the
-     `std/` tree next to each example (`repo_root().join("std")`) → copy `/sentinel_library/`
-     instead; (c) every `--lib-path .`/`--lib-path <repo-root>` in `demos/*/` BUILD comments,
-     the `tools/trust/*` build invocations, and the `sign_core.rs`/`conditional.rs` test
-     `--lib-path` args → point at `/sentinel_library`; (d) the `use std::…` → `use Sentinel::…`
-     edits ONLY for the modules that move into the core (ct/secret); the rest stay `std::…`
-     (just relocated). Do it incrementally + keep four-check green; start by moving `std/` →
-     `/sentinel_library/std/` (namespace unchanged) + repointing the harness, THEN carve out
-     `Sentinel::`. ADR-worthy (an ADR 0064 "library layout + the `Sentinel::` core base").
+0. ✅ **DONE (2026-06-28, ADR 0064 ACCEPTED) — the `/sentinel_library` reorg + the `Sentinel::`
+   core base.** See the "Done 2026-06-28 — the `/sentinel_library` reorg" block above for the
+   full record. Libraries now live under `sentinel_library/` (`std/` batteries + the `Sentinel/`
+   core base = `Sentinel::ct` + `Sentinel::secrets`); landed in two four-check-green phases,
+   Windows-verified, not oracle-moving. (Module name is `Sentinel::secrets`, plural — `secret`
+   is a keyword.)
 
 1. **Pre-built libraries with a trust model (trusted / untrusted).** Consume a
    *compiled* library (`snc build --lib` already emits a `.a`/`.lib` + a C header)

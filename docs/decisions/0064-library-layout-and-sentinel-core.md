@@ -1,6 +1,8 @@
 # ADR 0064: Library layout — a top-level `/sentinel_library/` + the `Sentinel::` core base
 
-Status: **PROPOSED (design).** Give the repo a real home for *many* first-party libraries
+Status: **ACCEPTED — v1 implemented (2026-06-28, Windows-verified; macOS `just check-all` +
+self-host differential backlogged like the rest of this session — not oracle-moving, so the
+differential is expected byte-identical).** Give the repo a real home for *many* first-party libraries
 (a top-level `/sentinel_library/`), and carve an identity-defining FOUNDATION out of `std`:
 the `Sentinel::` core base — the small constant-time `secret` vocabulary the rest builds on.
 `std::` stays the broad **batteries**, relocated under the new tree and `use`-ing `Sentinel::`
@@ -103,7 +105,7 @@ Sentinel::secrets::reveal;`. `reveal` is an array-level declassify built on the 
 >   blast radius, marginal benefit). Rejected for a naming convenience.
 > - (c) A different word (`Sentinel::boundary`, `Sentinel::taint`) — further from the owner's
 >   intent than (a).
-> This ADR adopts **(a) `Sentinel::secrets`** pending owner confirmation.
+> **Owner-confirmed (2026-06-28): (a) `Sentinel::secrets`.**
 
 ### D4. `std::` stays the batteries, relocated and re-pointed at the core.
 
@@ -191,8 +193,8 @@ module is CT-checked exactly as before.
 
 ## Open questions
 
-- **The `Sentinel::secrets` name** (D3 naming note) — `secrets` (recommended) vs a parser
-  change to allow `secret` vs another word. Owner confirm.
+- ~~**The `Sentinel::secrets` name**~~ — RESOLVED (2026-06-28): owner-confirmed
+  `Sentinel::secrets` (D3 naming note); both phases (D7) landed Windows-verified.
 - **Flat vs nested core.** v1 keeps `Sentinel::` flat (`Sentinel::ct`, `Sentinel::secrets`). If
   the core grows, a shallow grouping may help — deferred until it does.
 - **Should `std::security` re-export `Sentinel::ct`** for discoverability (so crypto authors
