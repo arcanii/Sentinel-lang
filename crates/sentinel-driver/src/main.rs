@@ -998,6 +998,20 @@ fn run_build_cli(args: &[String]) -> ExitCode {
     }
 }
 
+/// ADR 0061 D6 — the capabilities a module's code exercises, for the trust gate's
+/// capability bounding. v1 enforces **`ffi`** (the module declares an `extern "C"`
+/// block — i.e. native-code execution, the most security-relevant capability);
+/// the taxonomy (`network` from the socket builtins, `filesystem` from
+/// `read_file`/`write_file`, …) extends from here. A trusted module's used
+/// capabilities must be ⊆ its signing key's grants, or the build is refused.
+fn module_capabilities(program: &Program) -> Vec<String> {
+    let mut caps = Vec::new();
+    if !program.externs.is_empty() {
+        caps.push("ffi".to_string());
+    }
+    caps
+}
+
 fn run_build(
     path: &str,
     output: Option<&str>,
@@ -1026,10 +1040,14 @@ fn run_build(
     // `--require-signatures`. Off by default → no behavior change. The returned
     // per-module grants feed the capability check (D6).
     let gate_units: Vec<trust_tools::GateUnit> = if modules.is_empty() {
+        // Single-file: parse the entry for its capability set (the main pipeline
+        // re-parses + reports any error; here a parse failure just yields no caps).
+        let capabilities = sentinel_syntax::parse(&src).map(|p| module_capabilities(&p)).unwrap_or_default();
         vec![trust_tools::GateUnit {
             label: path.to_string(),
             file: PathBuf::from(path),
             source: src.clone().into_bytes(),
+            capabilities,
         }]
     } else {
         modules
@@ -1038,6 +1056,7 @@ fn run_build(
                 label: m.path.join("::"),
                 file: m.file.clone(),
                 source: m.source.clone().into_bytes(),
+                capabilities: module_capabilities(&m.program),
             })
             .collect()
     };

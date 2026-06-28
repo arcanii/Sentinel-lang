@@ -79,6 +79,36 @@ fn strict_refuses_a_tampered_module_even_from_a_trusted_key() {
     assert!(stderr.contains("does not verify"), "stderr:\n{stderr}");
 }
 
+/// An `extern "C"`-declaring module (capability `ffi`), validly signed by
+/// `GOLDEN_PK` but granted only `alloc` — drives the D6 capability-bounding path.
+const EXTERN_BODY: &str = "extern \"C\" { fn c_abs(x: i64) -> i64; }\nfn main() -> i64 { 0 }\n";
+const EXTERN_SIG_GRANT_ALLOC: &str = "\
+sentinel-signature v1
+algorithm: ed25519
+key: 197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61
+grants: alloc
+signature: 38c000fb3a45bbd2063215cad9e1ee1166402e4567bd25b04f5a9f34e8a0cc6fdd7ba5c74846cc293d4bce52095de2b4c7c8b77daf4fd3a404927c2759982809
+";
+
+#[test]
+fn strict_refuses_a_capability_the_key_was_not_granted() {
+    // D6 headline: the key IS trusted and the signature IS valid, but the module
+    // exercises `ffi` (an `extern "C"` block) while its grant is only `alloc`.
+    // A compromised/over-reaching key cannot pivot beyond its declared envelope.
+    let dir = temp_dir("cap");
+    std::fs::write(dir.join("trust.toml"), format!("[[keys]]\npubkey = \"{GOLDEN_PK}\"\n")).unwrap();
+    std::fs::write(dir.join("ffi.sentinel"), EXTERN_BODY).unwrap();
+    std::fs::write(dir.join("ffi.sentinel.sig"), EXTERN_SIG_GRANT_ALLOC).unwrap();
+    let (ok, stderr) = build_in(
+        &dir,
+        "ffi.sentinel",
+        &["--require-signatures", "strict", "--trust", "trust.toml"],
+    );
+    assert!(!ok, "strict must refuse an ungranted capability; stderr:\n{stderr}");
+    assert!(stderr.contains("capabilit"), "stderr:\n{stderr}");
+    assert!(stderr.contains("ffi"), "the ungranted capability should be named; stderr:\n{stderr}");
+}
+
 #[test]
 fn warn_reports_but_does_not_refuse_the_gate() {
     // In warn mode an unsigned module produces a warning, not a gate failure. The

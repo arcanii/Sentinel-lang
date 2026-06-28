@@ -38,11 +38,13 @@ impl Default for TrustOpts {
 }
 
 /// One module presented to the gate: a display label, its source file (whose
-/// `<file>.sig` is the detached carrier), and its raw bytes.
+/// `<file>.sig` is the detached carrier), its raw bytes, and the **capabilities**
+/// its code exercises (ADR 0061 D6 — checked against the signing key's grants).
 pub struct GateUnit {
     pub label: String,
     pub file: PathBuf,
     pub source: Vec<u8>,
+    pub capabilities: Vec<String>,
 }
 
 fn short_fp(pk: &[u8; 32]) -> String {
@@ -99,8 +101,29 @@ pub fn run_trust_gate(
         let carrier = std::fs::read_to_string(&sig_path).ok();
         match evaluate(&u.source, carrier.as_deref(), &manifest) {
             GateOutcome::Trusted { pubkey, grants } => {
-                eprintln!("snc: trust: `{}` verified — key {}…", u.label, short_fp(&pubkey));
-                grants_by_label.insert(u.label.clone(), grants);
+                // D6 capability bounding: every capability the module exercises
+                // must be granted to its signing key. A trusted-but-over-reaching
+                // module (e.g. a crypto key's code opening FFI) is refused — a
+                // compromised key cannot pivot beyond its declared envelope.
+                let ungranted: Vec<&String> =
+                    u.capabilities.iter().filter(|c| !grants.contains(c)).collect();
+                if ungranted.is_empty() {
+                    eprintln!("snc: trust: `{}` verified — key {}…", u.label, short_fp(&pubkey));
+                    grants_by_label.insert(u.label.clone(), grants);
+                } else {
+                    report(
+                        opts.policy,
+                        &mut violations,
+                        &format!(
+                            "`{}` exercises capabilit{} {:?} not granted to its key {}… (grants: {:?})",
+                            u.label,
+                            if ungranted.len() == 1 { "y" } else { "ies" },
+                            ungranted,
+                            short_fp(&pubkey),
+                            grants
+                        ),
+                    );
+                }
             }
             GateOutcome::Unsigned => report(
                 opts.policy,
