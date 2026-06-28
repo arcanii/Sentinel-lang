@@ -92,8 +92,14 @@ for the build/test commands (incl. the `vcvars64.bat` recipe for the link-touchi
   list grows — base-major over the ADR 0037 search path, suffix-minor within a base; no
   selfhost file uses a suffix → byte-identical resolution; no lex/parse/IR change). Item-
   level `#[cfg]` (in-file, oracle-moving) is the deferred follow-up; `tests/conditional.rs`.
-  **▶ first real consumer = `std::sys::random`** (`_windows` BCryptGenRandom / `_unix`
-  getentropy), which closes the ADR 0061 Windows-`keygen` gap.
+- **`std::sys::random` — DONE (`c230ff3`), the ADR 0062 first consumer; the Windows
+  `keygen` gap is CLOSED.** `random_unix.sentinel` (getentropy) + `random_windows.sentinel`
+  (RtlGenRandom via advapi32's `SystemFunction036`, self-linking advapi32 — ADR 0057 A9);
+  both export `random_bytes(n) -> [u8]`. `keygen_core` now `use`s `std::sys::random`, so it
+  builds + runs on **all three** targets. **PROVEN on Windows:** `keygen_core` links (was
+  blocked on `getentropy`), two draws give different seeds (real entropy), and the full
+  author flow `snc keygen` (generated key) → `sign` → `verify` works end to end. So ADR
+  0061 v1's `snc keygen` is now cross-platform.
 - **macOS still BACKLOGGED** — the workspace `just check-all` + self-host differential
   has not run (argued not oracle-moving, but confirm on the differential). Also note:
   on Windows, `tests/modules.rs`'s 3 `separate_*_linkonce_*` tests fail at MSVC

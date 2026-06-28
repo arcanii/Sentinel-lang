@@ -115,7 +115,9 @@ module is.
 
 ## Follow-ups
 
-1. **`std::sys::random`** (`_windows` = `BCryptGenRandom`, `_unix` = `getentropy`) — closes
-   the ADR 0061 Windows-`keygen` gap; the first real consumer.
+1. ✅ **`std::sys::random`** (`_windows` = `RtlGenRandom`/`SystemFunction036` via advapi32,
+   `_unix` = `getentropy`) — **DONE** (`c230ff3`), the first real consumer. Closes the ADR
+   0061 Windows-`keygen` gap: `keygen_core` (and thus `snc keygen` → `sign` → `verify`) now
+   builds + runs on all three targets, proven on Windows.
 2. `--target` on `--lib`/`--separate`/`llvm`/`merge`.
 3. Item-level `#[cfg(...)]` (a companion ADR; oracle-moving).

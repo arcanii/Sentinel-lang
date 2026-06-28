@@ -36,8 +36,9 @@ the trust manifest fails to compile"). **Not oracle-moving** (see *Self-host*); 
   base64 dep.
 - **A4.** Capability taxonomy is **`ffi`-first** (from `program.externs`, no AST walk);
   `network`/`filesystem`/… (builtin-call scanning) extend from here.
-- **A5.** `keygen` entropy is POSIX `getentropy` (macOS/Linux); a Windows RNG is a small
-  follow-up. `snc sign` (no entropy) runs everywhere.
+- **A5.** `keygen` entropy is `std::sys::random` — `getentropy` on unix, `RtlGenRandom`
+  (advapi32) on Windows, selected by ADR 0062 conditional compilation. **`snc keygen` now
+  runs on all three targets** (the initial POSIX-only limitation is resolved; `c230ff3`).
 
 **v1 deferred** (unchanged from *Phasing*): the in-file-block gate, `--separate`/`--lib`
 gating, TOFU/issuer policies, the keystore + hardware keys, rotation, revocation,
