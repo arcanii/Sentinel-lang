@@ -39,6 +39,7 @@ mod llvm_dump;
 mod mir_dump;
 mod resolve_dump;
 mod source_dump;
+mod trust_tools;
 mod types_dump;
 
 use std::collections::{BTreeSet, HashMap};
@@ -116,6 +117,10 @@ fn main() -> ExitCode {
         // ADR 0061: verify a detached signature carrier (`<file>.sig`) over a
         // source file — the standalone counterpart to the build-time trust gate.
         [_, cmd, rest @ ..] if cmd == "verify" => run_verify(rest),
+        // ADR 0061: author-side signing (Rust orchestration over the dogfooded
+        // Sentinel `sign_core` / `keygen_core`).
+        [_, cmd, rest @ ..] if cmd == "keygen" => trust_tools::run_keygen(rest),
+        [_, cmd, rest @ ..] if cmd == "sign" => trust_tools::run_sign(rest),
         [_] => {
             print_usage();
             ExitCode::from(2)
@@ -145,6 +150,9 @@ fn print_usage() {
     eprintln!("                                     compile to a C-ABI static library (ADR 0059)");
     eprintln!("    snc build --shared <file> [-o <lib.dylib>] [--emit-header <h.h>] [--lib-path <dir>]...");
     eprintln!("                                     compile to a C-ABI shared library (dlopen/ctypes)");
+    eprintln!("    snc keygen [-o <keyfile>]        generate an Ed25519 signing keypair (ADR 0061)");
+    eprintln!("    snc sign <file> --key <keyfile> [-o <sig>] [--grant <cap>]...");
+    eprintln!("                                     sign <file>, writing a detached signature");
     eprintln!("    snc verify <file> [--sig <sig>]  verify a detached signature (default <file>.sig)");
     eprintln!("                                     over <file> (ADR 0061 code signing)");
     eprintln!("    snc help                         show this message");

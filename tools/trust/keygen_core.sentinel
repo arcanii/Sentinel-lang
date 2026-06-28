@@ -1,0 +1,66 @@
+// tools/trust/keygen_core.sentinel — ADR 0061 v1 keygen core (the dogfooded
+// Ed25519 key generator the `snc keygen` flow delegates to).
+//
+// Draws a fresh 32-byte seed from the OS CSPRNG (`std::sys::ffi::random_bytes`,
+// which wraps `getentropy`) and derives the Ed25519 public key from it with the
+// verified-constant-time `std::security::ed25519`. Writes seed‖pubkey (64 bytes)
+// to a fixed file, the same fixed-path convention `sign_core` uses (Sentinel has
+// no argv):
+//
+//   keyout.bin  <-  32-byte seed (the SECRET key)  ||  32-byte public key
+//
+// PLATFORM: `getentropy` is POSIX, so this links on macOS / Linux. A Windows
+// build needs a `getentropy` shim (a small follow-up parallel to the ADR 0060
+// Windows-host work); until then, generate a key on a POSIX host, or provide a
+// seed file directly to `snc sign`.
+//
+// CONSTANT-TIME: the seed widens to `secret`, the public-key scalar-mult runs
+// over the secret scalar branch-free, and only the public key is declassified.
+use std::sys::ffi::random_bytes;
+use std::security::ed25519::ed25519_pubkey;
+
+fn reveal(d: [secret u8]) -> [u8] {
+    let n: i64 = len(d);
+    let mut out: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut out, declassify(d[i]));
+        i = i + 1;
+    }
+    vec_to_array(out)
+}
+
+fn widen(src: &[u8]) -> [secret u8] {
+    let n: i64 = len(*src);
+    let mut v: Vec<secret u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut v, (*src)[i]);
+        i = i + 1;
+    }
+    vec_to_array(v)
+}
+
+fn main() -> i64 {
+    let seed: [u8] = random_bytes(32);
+
+    let seed_secret: [secret u8] = widen(&seed);
+    let pk: [u8] = reveal(ed25519_pubkey(seed_secret));
+
+    // out = seed(32) || pk(32).
+    let mut out: Vec<u8> = vec_new();
+    let mut i: i64 = 0;
+    while i < 32 {
+        push(&mut out, seed[i]);
+        i = i + 1;
+    }
+    let mut j: i64 = 0;
+    while j < 32 {
+        push(&mut out, pk[j]);
+        j = j + 1;
+    }
+
+    let p_out: [u8] = "keyout.bin";
+    write_file(p_out, vec_to_array(out));
+    0
+}
