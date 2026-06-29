@@ -633,6 +633,52 @@ The ADR must decide:
 
 Low urgency relative to the threading / concurrency track.
 
+### 11.8 Multi-File Modules + Explicit Module Declarations (self-host modularization)
+
+`selfhost/types.sentinel` is **13.7k lines — 62% of the self-host, ~5× the next
+file** — holding the type interner, generic-fn inference, borrow-move analysis,
+the codegen (`cg`) text emitter, AND the MIR dump in one file. Every
+oracle-moving change touches it in many scattered places; it is the self-host's
+chief maintainability liability and should be split into focused modules
+(maintainer-flagged 2026-06-29).
+
+The blocker is the module model. ADR 0037 is **one file = one module**, the
+module name IMPLICIT from the file path, with per-item `use` (e.g. `use
+parser::Expr;`; the self-host already uses this across lexer/parser/resolve/
+effects/merge/types). Splitting types.sentinel under that model is possible but
+ugly: only **2 of its 313 fns are `pub`**, so a split would force pub-ifying
+~hundreds of internal helpers and FRAGMENT the `types::` namespace that
+importers (`use types::run;`) depend on; and the one shared mutable `TyCtx`
+struct couples the typer / cg / mir tightly. (Classes are NOT the issue —
+types.sentinel uses none, §11.7; `TyCtx` is a struct, which crosses fine.)
+
+The clean enabler (the 2026-06-29 proposal) is **explicit module declarations +
+multi-file modules**: a file declares its module name (decoupling identity from
+path), and SEVERAL files may declare the SAME module name to form one logical
+module. types.sentinel then splits into focused files (e.g. `types_interner`,
+`types_infer`, `types_borrow`, `types_cg`, `types_mir`) that together ARE the
+`types` module — internal helpers stay module-private (visible across the
+module's files, not pub-exported), and the public API (`run`) + the `types::`
+namespace importers use are UNCHANGED. This is the Rust `mod` / C++-namespace
+model.
+
+The ADR must decide:
+- **Syntax + semantics** of the declaration (`module types;`?), and how multiple
+  files merge into one module — visibility across the files, ordering, and
+  whether a private item in file A is visible in file B of the same module.
+- **Keep ADR 0037's implicit path-based modules** as the default (so existing
+  single-file modules / the `std` library are unchanged), with the explicit
+  declaration as an opt-in for multi-file modules.
+- **Byte-identical at both bootstrap fixed points** — the hard part. This is a
+  bootstrap RESTRUCTURING, not just a language feature: the merge must produce
+  identical IR + symbols after the split (FnId numbering, `__spawn_wrapper_<id>`,
+  and mangled names must not shift, or shift identically on the Rust + selfhost
+  sides). Sequence it ADR → mechanism (multi-file modules) → re-bless → split
+  types.sentinel file-by-file, differential green at each step.
+
+Orthogonal to the threading / concurrency track; high maintainability value.
+ADR-first.
+
 ---
 
 ## 12. What Sentinel Will Never Do
