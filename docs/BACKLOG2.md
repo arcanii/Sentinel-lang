@@ -638,6 +638,34 @@ language. When there is a chance:
   `examples/` corpus, so a Sentinel program can query its own memory layout —
   useful for debugging, leak hunting, and teaching the broker model.
 
+### 10.9 Module-System Documentation and Cross-File Examples
+
+The module / `use` system already lets a program span files and reference any
+`pub` item across modules — fns, structs, enums, **classes**, traits, and
+effects all cross the boundary (ADR 0037, incl. per-unit separate compilation
+0037(a), the entry-dir + `--lib-path` / `SNC_LIB_PATH` module-search path
+0037 point 12, and the per-OS `b_<os>.sentinel` conditional files of ADR 0062).
+But there is no single developer-facing answer to *"how does a Sentinel program
+reference source in another file?"* — the mechanism is documented only
+implicitly across ADRs and exercised mainly by `std/` + `selfhost/`. When there
+is a chance:
+
+- Add a focused, minimal `examples/modules/` program demonstrating cross-file
+  use **of a class**: file B defines a `pub class` (with a field + a method);
+  file A `use`s it, constructs an instance, and calls the method — built BOTH
+  via `--separate` and the merge path and asserted in
+  `crates/sentinel-driver/tests/examples.rs` (exit 42), so it doubles as a
+  regression test that a class crosses a module boundary. (This is the concrete
+  worked example requested 2026-06-29.)
+- Write a short module-system guide (a `docs/` page or a README section) that
+  states the rules in one place: a module is a file; `use a::b::Item;` brings
+  `Item` into scope; the file resolves over the search path (entry dir first,
+  then `--lib-path` / `SNC_LIB_PATH`); `pub` is required to export; classes
+  (ADR 0022), structs, enums, generics, traits, effects, and `perform`/`handle`
+  all cross units; and the `--separate` / `--lib` / `--shared` build modes
+  (ADR 0037 / 0059). Keep it lean — it is onboarding documentation for an
+  already-shipped feature, not new design.
+
 ---
 
 ## 11. Embedded and Resource-Constrained Targets
