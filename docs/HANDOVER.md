@@ -51,7 +51,30 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-29 — ADR 0065 EFFECT-FREE PATH COMPLETE + self-hosted (stage-4 codegen byte-identical, both fixed points green) + the two typing limitations CLOSED; ▶ NEXT: stage 3 — `return` crossing a `handle` (D6), which is BLOCKED on a pre-existing staged-effect-runtime gap, see the assessment below)
+### ▶ RESUME HERE (2026-06-29 — ▶ NEXT FOCUS: THREADING + MULTI-PROCESSING (ADR-first; the near-term maintainer ask). ADR 0065 early-`return` is in good shape and PAUSED: the effect-free path is complete + self-hosted (byte-identical, both fixed points green), the two typing limitations are CLOSED, the D6 kont-leak is fixed, and the control-flow-handle-body common cases (if/match tail-perform) now lower correctly — what's left of 0065 is the snc-only frame-reification + text-emitter mirror + macOS, all documented below.)
+
+> **▶ NEXT FOCUS — THREADING + MULTI-PROCESSING (ADR-first, cross-platform from the start).** The
+> maintainer's near-term ask (see the `threading-multiprocessing-planned` auto-memory, flagged
+> 2026-06-27). Sentinel ALREADY has **structured concurrency (ADR 0024)**: the surface `scope
+> concurrent { spawn f(); … }` + `.await`, the **`Async` effect** (discharged by the scope so `main`
+> stays effect-free), and a runtime task model in `crates/sentinel-runtime/src/lib.rs`
+> (`sentinel_task_spawn` already uses a real `std::thread` OS thread — so basic threading is
+> cross-platform via Rust std; `SentinelTask`/`SentinelScopeCtx`, ADR 0024 D9 ownership). The NEW ask
+> is the richer surface the maintainer wants — likely shared state + synchronization across threads
+> (mutex/channels — interacting with the lexical borrow checker AND the `secret`/constant-time model),
+> a thread/worker abstraction beyond the structured-scope, and genuinely-new **MULTI-PROCESSING**
+> (process spawn + IPC — the cross-process/actor model was deferred post-1.0 in SENTINEL_DESIGN2 §6 /
+> BACKLOG; this revisits it). **Design ADR-FIRST** (propose in `docs/decisions/`, get the shape right
+> before code), **cross-platform from the start** (the OS layer is currently POSIX-coupled — sockets
+> are `#[cfg(unix)]`, ADR 0060 / the `build-environment-windows` memory; do NOT add another
+> Unix-only subsystem). Mind the load-bearing invariants: the **constant-time `secret`** guarantee
+> (no secret may cross a thread/process boundary in a way that leaks; FFI/ABI secret fences exist),
+> the **one-shot continuations** + deep-handler effect runtime, the **lexical borrow checker** (shared
+> mutable state is exactly what it forbids — a channel/ownership-transfer model fits better than
+> shared `&mut`), and the **both-bootstrap-fixed-points** rhythm for anything oracle-moving. This block doubles as the
+> kickoff brief; the maintainer also has a standalone seed prompt to open the new session.
+>
+> **— ADR 0065 status (PAUSED, for reference) —**
 
 > **▶ ADR 0065 effect-free path is DONE and self-hosted** (commits `3bc85e95`, `6114dc5f`). The
 > **real `return` control-flow text-IR** is byte-identical in BOTH text emitters — the `snc llvm`
