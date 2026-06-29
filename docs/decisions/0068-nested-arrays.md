@@ -1,10 +1,13 @@
 # ADR 0068: Nested arrays — lift the depth-1 array rule (`[[T]]`) via an array interner
 
-Status: **PROPOSED** (2026-06-30). Direction confirmed by the maintainer
-(chose "lift the array-depth rule" over a process-args builder API). Oracle-moving
-→ follows the both-bootstrap-fixed-points rhythm (Rust `snc` + fixtures →
-re-bless the per-stage differential → mirror into `selfhost/*.sentinel` → both
-fixed points byte-identical → ACCEPTED).
+Status: **ACCEPTED** (2026-06-30) — implemented in both compilers, full self-host
+differential green, both bootstrap fixed points byte-identical, Windows four-check
+green. Direction confirmed by the maintainer (chose "lift the array-depth rule"
+over a process-args builder API). The self-host needed NO change (scg's array type
+is handle-based — `mk_array` over a type handle — so nesting already worked); the
+Rust side carried the representational change (`ArrayElem::Array(ArrayId)` + the
+`arrays` interner). Fixture: `tests/pass/c68_nested_array`. Commits `914c301`
+(representation) + `e29c6c9` (resolution + codegen + differential).
 
 Date: 2026-06-30
 

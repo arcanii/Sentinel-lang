@@ -14,6 +14,25 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-06-30) — NESTED ARRAYS `[[T]]` (ADR 0068 ACCEPTED), lifting the depth-1 array rule.**
+`[[u8]]` (a list of byte-strings, e.g. process argv) is now a first-class type — the ADR 0015 D6
+depth-1 rule is lifted. Kept `Type: Copy` via an **interner**: `ArrayElem::Array(ArrayId)` + a
+`TypedProgram.arrays` table (the same pattern as `Ref`/`Secret`/`Channel`), additive so the outer
+`Type::Array(ArrayElem)` shape is unchanged. The `arrays` interner threads (`&mut`) through
+`resolve_type_expr` + the check pipeline (alongside `secrets`/`refs`); `[[T]]` annotations + nested
+literals resolve; element promotion at codegen/type-check routes through `array_elem_type`/`_in`
+(the table-less `ArrayElem::to_type()` can't resolve `Array(id)`; render uses an id-fallback like the
+other interned types). Codegen literal/index/move reuse the existing element-size machinery (a nested
+element is a `{i64,ptr}`, 16 bytes); **drop is single-free of the outer buffer — consistent with the
+existing array/Vec drop** (which already doesn't recurse into element heap; per-element recursive drop
+for all element-owning containers is a separate future cleanup). **The self-host needed NO change**
+(scg's array type is handle-based, `mk_array` over a type handle — nesting already worked); the Rust
+side carried the representational restriction. Fixture `tests/pass/c68_nested_array` (`[[u8]]` literal
++ param + outer/inner `len` + index) is byte-identical across all 9 differential stages, both fixed
+points hold, runs 42 (incl. 3-level `[[[i64]]]`). `[?T]`/`[&T]`/`[secret [T]]` + generic-nested
+`[[T]]` (with a TypeParam leaf) remain deferred (D6). Windows four-check green. This unblocks ADR 0066
+**M2.1 `process_spawn(path, args: [[u8]])`** (the next focus). See ADR 0068 + HANDOVER §0.
+
 **Latest (2026-06-30) — `?T` made FULLY GENERAL over scalars (ADR 0066 M1.2b enabler).**
 `NullableInner` gained **`U8`/`U128`/`F64`/`Ptr`**, so `?u8`/`?u128`/`?f64`/`?ptr` are now
 representable (previously only `?i64`/`?i32`/`?bool` were — those were the scalars with a
