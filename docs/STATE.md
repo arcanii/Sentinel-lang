@@ -14,6 +14,22 @@ the current state of the workspace without re-reading every commit.
 > are the durable per-crate reference; the [README](../README.md) is the
 > overview.
 
+**Latest (2026-06-30) — `?T` made FULLY GENERAL over scalars (ADR 0066 M1.2b enabler).**
+`NullableInner` gained **`U8`/`U128`/`F64`/`Ptr`**, so `?u8`/`?u128`/`?f64`/`?ptr` are now
+representable (previously only `?i64`/`?i32`/`?bool` were — those were the scalars with a
+`NullableInner` variant). All are inline `{ i1 valid, T }` (heap indirection is only the
+`Struct`/`GenericInstance` case), so the codegen LLVM-type lowering, `null` construction, and
+`Some`/widen already handle them via their existing `_`/`to_type` paths — the only new arm rustc
+demanded was `is_copy_nullable_inner` (the new scalars are Copy). The **self-host needed NO change**
+(scg's nullable is type-handle-general — `mk_nullable` over any inner). This is the enabler for
+generic channel ELEMENTS (a `recv<Channel<u8>> -> ?u8` needs `u8` to have a `NullableInner`; the
+element set is the natural intersection word-scalar ∩ has-nullable-inner = {i64,i32,u8,bool,f64,ptr}).
+Fixture `tests/pass/c66_nullable_u8` (`?u8` null + implicit `u8→?u8` widen + `is_some` + `unwrap_or`
++ a `?u8` param) is byte-identical across all 9 differential stages, both fixed points hold;
+`?f64`/`?ptr` are also representable but snc-only (outside the differential). Windows build + clippy
+green. **The generic channel BUILTINS that consume this are unblocked but not yet wired** (the next
+concurrency step); the active direction is M2 (processes). See ADR 0066 D3/D4 + HANDOVER §0.
+
 **Latest (2026-06-30) — ADR 0066 concurrency RESUMED: M1.2b `Channel<T>` reaches TYPE-ANNOTATION
 position → a channel-typed fn param → the cross-thread producer/consumer worker, self-hosted.** The
 maintainer un-paused the threading track. M1.2 had `Channel<i64>` only as the *result* of
