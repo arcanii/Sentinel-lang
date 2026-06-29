@@ -117,19 +117,24 @@ pub enum CodegenError {
     )]
     StringCodegenNotYetSupported,
 
-    /// C3.5(a) / ADR 0020 D9: at C3.5(a) the handler codegen
-    /// supports only the restricted case where the `handle` body
-    /// is a direct `perform Op(args)` expression — no fn-call-
-    /// that-performs, no nested handles, no let-bound perform.
-    /// At C3.5(b) the surface extends to allow Call-to-effecting-fn
-    /// bodies; general-case (let-bound perform, perform-in-binop,
-    /// ...) lands at C3.5(c) / C3.6.
+    /// ADR 0020 D9 / ADR 0065 stage 3a: a `handle` body that
+    /// `perform`s must produce a continuation (`Kont*`) DIRECTLY —
+    /// a `perform Op(args)`, a call to an effecting fn, or a nested
+    /// `handle`. A `perform` reached through CONTROL FLOW (an
+    /// `if`/`match` branch, or a non-tail `let` with a perform RHS)
+    /// is not yet supported: the perform's `Kont*` would be stored
+    /// into the `i64`-typed merge slot and wrongly `kont_pure`-
+    /// wrapped — a silent miscompile this rejection prevents. (A
+    /// fully PURE body, and an early `return` inside the body, are
+    /// fine — neither produces a stray kont.) General frame
+    /// reification at arbitrary `if`/`match` sites is the deferred
+    /// follow-up.
     #[error(
-        "handle body must be a direct `perform Op(args)` or a call to an effecting fn at C3.5(b); let-bound performs and other inline forms land at C3.5(c)/C3.6"
+        "a `handle` body that `perform`s must do so directly (a `perform Op(args)`, a call to an effecting fn, or a nested `handle`); a `perform` reached through control flow (an `if`/`match` branch, or a non-tail `let`) is not yet supported"
     )]
     #[diagnostic(
         code(sentinel::codegen::handle_body_not_direct_perform),
-        help("rewrite the handle body to inline the perform call or call an effecting fn, or wait for general-case frame reification at C3.5(c)/C3.6 per ADR 0020 D9")
+        help("extract the performing computation into an effecting fn and call it from the handle body, or restructure so the `perform` is the body's tail; general perform-in-control-flow reification is a deferred follow-up (ADR 0020 D9 / ADR 0065 stage 3a)")
     )]
     HandleBodyNotDirectPerform,
 
@@ -7215,6 +7220,19 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         program: &TypedProgram,
         is_nested: bool,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        // ADR 0020 D9 / ADR 0065 stage 3a: the body must lower to a clean
+        // value the dispatch loop can use — a `Kont*` (a direct `perform`, a
+        // call to an effecting fn, or a nested `handle`) or a fully PURE i64
+        // (kont_pure-wrapped below). A body that `perform`s through CONTROL
+        // FLOW (an `if`/`match` branch, or a non-tail `let` with a perform RHS)
+        // produces neither: the perform's `Kont*` lands in the `i64`-typed merge
+        // slot and gets wrongly kont_pure-wrapped — a silent miscompile. Reject
+        // it cleanly here (the idiom is to call an effecting fn). An early
+        // `return` in the body is fine — it is not a `perform`.
+        if !handle_body_produces_kont(body, program) && expr_performs(body) {
+            return Err(CodegenError::HandleBodyNotDirectPerform);
+        }
+
         // Lower the body.
         //
         //   - Perform / Call-to-effecting / nested Handle:
@@ -7728,6 +7746,21 @@ fn tail_produces_kont(tail: &TypedExpr, program: &TypedProgram) -> bool {
         }
         _ => false,
     }
+}
+
+/// ADR 0020 D9 / ADR 0065 stage 3a: does this `handle` BODY lower to a clean
+/// `Kont*` the dispatch loop can consume directly? Like [`tail_produces_kont`],
+/// but a nested `handle` ALSO qualifies — a nested handle's merge is
+/// `Kont*`-typed (`handle_depth > 1`), so `handle (handle … with …) with …`
+/// (c36b) is supported. A body that does NOT produce a clean kont yet still
+/// `perform`s somewhere (an `if`/`match` branch that performs, a non-tail `let`
+/// with a perform) would store the perform's `Kont*` into the `i64`-typed merge
+/// slot and miscompile — [`CodegenCtx::lower_handle_inner`] rejects that.
+fn handle_body_produces_kont(body: &TypedExpr, program: &TypedProgram) -> bool {
+    // A nested handle's merge is `Kont*`-typed (`handle_depth > 1`); otherwise
+    // reuse the effecting-fn-tail predicate (direct `perform` / call-to-effecting
+    // / a block whose tail does). Mirrors `llvm_dump`'s `body_is_kont`.
+    matches!(body.kind, TypedExprKind::Handle { .. }) || tail_produces_kont(body, program)
 }
 
 /// C3.5(c) / ADR 0020 D7: detect the "single-let-with-effecting-

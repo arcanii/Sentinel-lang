@@ -187,12 +187,18 @@ selfhost compiler sources need not *use* `return` (they keep tail returns), but 
    selfhost `cg` mode still omit it — invisible to the exit code; the self-hosted `scg` compiles
    handle-free sources so its bootstrap is unaffected) and the **selfhost MIR collapse** (snc MIR
    collapses a `handle` to opaques without lowering the arm's `return`; the selfhost MIR lowers it, so
-   they diverge — a separate selfhost-MIR faithfulness item). **Still genuinely BLOCKED, orthogonal to
-   `return`:** a handle body whose control flow REACHES a `perform` (an `if`/`match` branch that
-   performs) is not a supported body shape and **silently miscompiles** (verified independent of
-   `return`: `handle if c { perform … } else { perform … } with { … }` returns 0 not 42) — the idiom
-   is to put performs in an effecting fn; closing this (frame reification at `if`/`match` sites) is the
-   ADR-0020-anticipated incremental work, tracked separately.
+   they diverge — a separate selfhost-MIR faithfulness item). **The orthogonal gap is now REJECTED, not
+   miscompiled (stage 3a interim, 2026-06-29):** a handle body whose control flow REACHES a `perform`
+   (an `if`/`match` branch that performs, or a non-tail `let` with a perform RHS) is not a supported
+   body shape — it would store the perform's `Kont*` into the `i64`-typed merge slot and miscompile.
+   The orphaned `CodegenError::HandleBodyNotDirectPerform` is now re-wired in **both** the inkwell back
+   end (`lower_handle_inner`: `!handle_body_produces_kont(body) && expr_performs(body)`) and the
+   `snc llvm` text dumper, so the former **silent miscompile is a clean compile error** (the idiom is
+   to put performs in an effecting fn and call it). A pure body — and an early `return` inside the
+   body/arm — is fine. `tests/ui/c65_handle_perform_in_control_flow.sentinel` pins the diagnostic; no
+   over-rejection (the 23 effecting pass tests + c36b's literal nested `handle` still compile).
+   **Fully supporting** control-flow-reaching performs (frame reification at `if`/`match` sites) is the
+   ADR-0020-anticipated incremental work, still deferred.
 4. ✅ **Stage-4 codegen + self-host + typing acceptance** (DONE 2026-06-29). The **real `return`
    text-IR** lands byte-identical in both text emitters: the `snc llvm` oracle
    (`crates/sentinel-driver/src/llvm_dump.rs`) and the self-hosted `scg` (the `cg` mode of

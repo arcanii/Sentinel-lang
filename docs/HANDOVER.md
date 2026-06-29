@@ -87,12 +87,16 @@ reference as you work through the milestones.
 > to the exit code; `scg` compiles handle-free sources so its bootstrap is unaffected), and the
 > **selfhost MIR collapse** (snc MIR collapses a `handle` to opaques without lowering the arm's
 > `return`; the selfhost MIR lowers it → a MIR-differential divergence, why the fixture is examples/
-> not tests/pass). **STILL BLOCKED, orthogonal to `return` (separately flagged as a background
-> task):** a handle body whose control flow REACHES a `perform` (an `if`/`match` branch that
-> performs) is not a supported body shape and **silently miscompiles** (`handle if c { perform … }
-> else { perform … } with { … }` returns 0 not 42, no `return` involved) — the idiom is performs in
-> an effecting fn; the fix is frame reification at `if`/`match` sites (ADR-0020-anticipated). Also
-> pending: the final macOS cross-platform confirmation; then ADR 0065 ACCEPTED.
+> not tests/pass). **Orthogonal gap now REJECTED (stage 3a interim), not silently miscompiled:** a
+> handle body whose control flow REACHES a `perform` (an `if`/`match` branch, or a non-tail `let`)
+> is not a supported shape — it would miscompile (`handle if c { perform … } else { perform … } with
+> { … }` returned 0 not 42, no `return` involved). The orphaned
+> `CodegenError::HandleBodyNotDirectPerform` is now re-wired in BOTH the inkwell `lower_handle_inner`
+> (`!handle_body_produces_kont(body) && expr_performs(body)`) and the `snc llvm` dumper, so it is a
+> CLEAN COMPILE ERROR; `tests/ui/c65_handle_perform_in_control_flow.sentinel` pins it (no
+> over-rejection — c36b's literal nested `handle` + the 23 effecting tests still compile). FULLY
+> supporting it (frame reification at `if`/`match` sites) is the ADR-0020-anticipated deferred work.
+> Also pending: the final macOS cross-platform confirmation; then ADR 0065 ACCEPTED.
 
 All on `main`, **NEVER pushed**. Verified on **Windows only** (see the macOS caveat);
 the dev box is `x86_64-pc-windows-msvc` with a from-source LLVM 18.1.8 at `G:\llvm-18`

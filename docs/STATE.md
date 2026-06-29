@@ -36,8 +36,10 @@ is a pure dumper). **Constant-time UNCHANGED.** Windows four-check green. **Rema
 staged-effect-runtime gap** — a handle body whose control flow reaches a `perform` (an `if`/`match`
 branch that performs) is not a supported body shape and currently **silently miscompiles**,
 INDEPENDENT of `return` (`handle if c { perform … } else { … } with { … }` already miscomputes). So
-a handle body whose control flow reaches a `perform` is not a supported body shape and silently
-miscompiles (orthogonal to `return`, separately tracked). **D6 update (same day):** a `return` from a
+a handle body whose control flow reaches a `perform` is not a supported body shape and (as of the
+stage-3a interim, same day) is now a CLEAN COMPILE ERROR rather than a silent miscompile — the
+orphaned `CodegenError::HandleBodyNotDirectPerform` is re-wired in inkwell + the `snc llvm` dumper
+(`tests/ui/c65_handle_perform_in_control_flow`; no over-rejection); fully supporting it is deferred. **D6 update (same day):** a `return` from a
 handler ARM (instead of resuming `k`) or a handle BODY already produced the CORRECT value — the only
 gap was a kont **leak** (the abandoned continuation was never freed). FIXED: a new runtime
 `sentinel_kont_free` (frees the kont + its captured frame chain; 2 unit tests) + the inkwell `Return`

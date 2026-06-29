@@ -120,6 +120,13 @@ ui_snapshot!(c5d2_mixed_width, "c5d2_mixed_width.sentinel");
 // ---- ADR 0065 early-return type mismatch (types) ----
 ui_snapshot!(c65_return_type_mismatch, "c65_return_type_mismatch.sentinel");
 
+// ---- ADR 0020 D9 / ADR 0065 stage 3a: a handle body that performs through
+// control flow (an if/match branch) is rejected, not silently miscompiled (codegen) ----
+ui_snapshot!(
+    c65_handle_perform_in_control_flow,
+    "c65_handle_perform_in_control_flow.sentinel"
+);
+
 // ---- ADR 0046 partial-move-through-field: use-after-partial-move (borrow) ----
 ui_snapshot!(c25_use_after_partial_move, "c25_use_after_partial_move.sentinel");
 

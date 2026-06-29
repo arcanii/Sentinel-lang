@@ -2491,6 +2491,21 @@ impl Emit<'_> {
         // loop sees a uniform Kont* (PURE_RETURN-tagged → the pure block fires).
         let body_is_kont = produces_kont(body, self.program)
             || matches!(body.kind, TypedExprKind::Handle { .. });
+        // ADR 0020 D9 / ADR 0065 stage 3a: reject a body that `perform`s through
+        // CONTROL FLOW (an `if`/`match` branch, or a non-tail `let`) — not a clean
+        // kont, yet not pure either, so it would store the perform's `Kont*` into
+        // the `i64` merge slot and miscompile. Mirrors inkwell's `lower_handle_inner`
+        // (`!handle_body_produces_kont && expr_performs`). A pure body / an early
+        // `return` is fine. Erroring here makes `snc llvm` skip the fixture in the
+        // differential exactly as `snc build` rejects it.
+        if !body_is_kont && expr_performs(body) {
+            return Err(
+                "a `handle` body that performs must do so directly (a `perform`, a \
+                 call to an effecting fn, or a nested `handle`); a perform through \
+                 control flow is not yet supported"
+                    .to_string(),
+            );
+        }
         let kptr = if body_is_kont {
             self.lower_expr(body)?
         } else {

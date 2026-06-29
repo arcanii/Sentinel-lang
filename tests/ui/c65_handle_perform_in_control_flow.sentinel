@@ -1,0 +1,20 @@
+// tests/ui/c65_handle_perform_in_control_flow.sentinel — ADR 0020 D9 / ADR 0065 stage 3a.
+//
+// A `handle` body that `perform`s through CONTROL FLOW (here an `if` branch) is REJECTED:
+// the perform's continuation (`Kont*`) would be stored into the `i64`-typed merge slot and
+// wrongly treated as a pure value — a silent miscompile this rejection prevents. The idiom
+// is to put the performing computation in an effecting fn and call it from the handle body.
+// (A fully pure body, or an early `return` inside the body, is fine — neither leaks a kont.)
+effect Io {
+    read() -> i64;
+}
+
+fn do_work(flag: bool) -> i64 {
+    handle if flag { perform Io.read() } else { perform Io.read() } with {
+        Io.read(k) => k(42)
+    }
+}
+
+fn main() -> i64 {
+    do_work(true)
+}

@@ -1,0 +1,14 @@
+---
+source: crates/sentinel-driver/tests/ui.rs
+expression: "reject_stderr(\"c65_handle_perform_in_control_flow.sentinel\")"
+---
+sentinel::codegen::handle_body_not_direct_perform
+
+  × a `handle` body that `perform`s must do so directly (a `perform Op(args)`,
+  │ a call to an effecting fn, or a nested `handle`); a `perform` reached
+  │ through control flow (an `if`/`match` branch, or a non-tail `let`) is not
+  │ yet supported
+  help: extract the performing computation into an effecting fn and call it
+        from the handle body, or restructure so the `perform` is the body's
+        tail; general perform-in-control-flow reification is a deferred
+        follow-up (ADR 0020 D9 / ADR 0065 stage 3a)
