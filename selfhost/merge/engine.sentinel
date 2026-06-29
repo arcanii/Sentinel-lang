@@ -401,12 +401,16 @@ fn enqueue_entry(c: &mut MergeCtx, p: [u8], x: [u8]) -> i64 {
     0
 }
 
+// ADR 0067: true if the entry is multi-module and so must be QUALIFIED — it has a
+// `use` (tag 58) OR a `part` (tag 65, i.e. it is a multi-file-module root). A
+// genuinely single-file entry (neither) stays a passthrough. (snc qualifies a
+// no-`use`-but-has-`part` entry too — its discovery returns the root + parts.)
 fn has_use(k: &Vec<i64>) -> bool {
     let ntok: i64 = len((*k));
     let mut i: i64 = 0;
     let mut found: bool = false;
     while i < ntok {
-        if (*k)[i] == 58 {
+        if (*k)[i] == 58 || (*k)[i] == 65 {
             found = true;
             0
         } else {

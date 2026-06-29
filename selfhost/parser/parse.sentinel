@@ -1,0 +1,814 @@
+module parser;
+
+// --- the precedence ladder (mirrors the Rust parser exactly) ---------------
+// parse_expr -> or -> and -> cmp -> bitor -> bitxor -> bitand -> add -> mul ->
+// unary -> postfix -> atom. Left-assoc levels + the postfix chain fold via
+// `parse_X` + `parse_X_rest(acc)`.
+
+fn parse_atom(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let tag: i64 = (*k)[*cur];
+    if tag == 1 {
+        let ist: i64 = (*s)[*cur];
+        let ien: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        Expr::Int(parse_int(src, ist, ien))
+    } else if tag == 62 {
+        // Char literal — decode the single body byte at start+1.
+        let cst: i64 = (*s)[*cur];
+        *cur = *cur + 1;
+        Expr::Char(decode_byte_at(src, cst + 1))
+    } else if tag == 63 {
+        // String literal — decode the body (between the quotes) to its bytes.
+        let sst: i64 = (*s)[*cur];
+        let sen: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        Expr::Str(decode_string(src, sst + 1, sen - 1))
+    } else if tag == 4 {
+        *cur = *cur + 1;
+        let pin: Expr = parse_expr(k, s, e, src, cur);
+        *cur = *cur + 1;
+        pin
+    } else if tag == 2 {
+        let vst: i64 = (*s)[*cur];
+        let ven: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        if is_kw_true(src, vst, ven) {
+            Expr::Bool(true)
+        } else if is_kw_false(src, vst, ven) {
+            Expr::Bool(false)
+        } else if is_kw_null(src, vst, ven) {
+            Expr::Null
+        } else if (*k)[*cur] == 30 {
+            // `Name::tail ...` — qualified call / class init / unit construction.
+            // `Name::init(args)` is a class init; everything else (incl. bare
+            // `Name::Variant` with no parens) is a qualified call.
+            *cur = *cur + 1;
+            let mst: i64 = (*s)[*cur];
+            let men: i64 = (*e)[*cur];
+            let isinit: bool = is_kw_init(src, mst, men);
+            *cur = *cur + 1;
+            if (*k)[*cur] == 4 {
+                *cur = *cur + 1;
+                let qargs: Args = parse_args(k, s, e, src, cur, 5);
+                if isinit {
+                    Expr::ClassInit(slice_of(src, vst, ven), qargs)
+                } else {
+                    Expr::Qcall(slice_of(src, vst, ven), slice_of(src, mst, men), qargs)
+                }
+            } else {
+                Expr::Qcall(slice_of(src, vst, ven), slice_of(src, mst, men), Args::End)
+            }
+        } else if (*k)[*cur] == 4 {
+            // `name(args)` — a free function call (the callee is a name, not an
+            // expr; only postfix `.m(args)` calls a value).
+            *cur = *cur + 1;
+            let cargs: Args = parse_args(k, s, e, src, cur, 5);
+            Expr::Call(slice_of(src, vst, ven), cargs)
+        } else if (*k)[*cur] == 6 && (*k)[*cur + 1] == 2 && (*k)[*cur + 2] == 31 {
+            // `Name { field : ... }` — a struct literal. The `{ Ident :`
+            // lookahead is the disambiguation (vs the Rust parser's
+            // `allow_struct_lit` flag): `{ Ident :` only ever begins a struct
+            // literal — a block / match-body / if-body never starts with a
+            // single-colon `Ident :` — so it is context-free on clean input.
+            *cur = *cur + 1;
+            let sfields: Fields = parse_fields(k, s, e, src, cur);
+            Expr::StructLit(slice_of(src, vst, ven), sfields)
+        } else {
+            Expr::Var(slice_of(src, vst, ven))
+        }
+    } else if tag == 27 {
+        // `[e1, e2, ...]` — array literal (an atom-position `[`; a post-atom `[`
+        // is the index operator, handled in parse_postfix_rest).
+        *cur = *cur + 1;
+        let aelems: Args = parse_args(k, s, e, src, cur, 28);
+        Expr::Array(aelems)
+    } else if tag == 6 {
+        // `{ <expr> }` — a brace block in expression position (parse_block
+        // consumes both braces).
+        parse_block(k, s, e, src, cur)
+    } else if tag == 36 {
+        // `declassify ( <expr> )`.
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let dinner: Expr = parse_expr(k, s, e, src, cur);
+        *cur = *cur + 1;
+        Expr::Declassify(dinner)
+    } else if tag == 43 {
+        // ADR 0065: `return <expr>` — consume the keyword, then a full
+        // expression (greedy: `return a + b` is `return (a + b)`). The handler
+        // `return v => body` ARM is parsed in `parse_harms`, never here.
+        *cur = *cur + 1;
+        let rinner: Expr = parse_expr(k, s, e, src, cur);
+        Expr::Return(rinner)
+    } else if tag == 37 {
+        // `perform Effect.op(args)`.
+        *cur = *cur + 1;
+        let pes: i64 = (*s)[*cur];
+        let pee: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let pos: i64 = (*s)[*cur];
+        let poe: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let pargs: Args = parse_args(k, s, e, src, cur, 5);
+        Expr::Perform(slice_of(src, pes, pee), slice_of(src, pos, poe), pargs)
+    } else if tag == 38 {
+        // `scope concurrent { <block> }` — `concurrent` is a positional ident.
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let sbody: Expr = parse_block(k, s, e, src, cur);
+        Expr::Scope(sbody)
+    } else if tag == 39 {
+        // `spawn <postfix>` — the spawn target parses as a postfix chain.
+        *cur = *cur + 1;
+        let scall: Expr = parse_postfix(k, s, e, src, cur);
+        Expr::Spawn(scall)
+    } else if tag == 41 {
+        // `handle <body> with { arms }`.
+        parse_handle(k, s, e, src, cur)
+    } else {
+        *cur = *cur + 1;
+        Expr::Int(0)
+    }
+}
+
+// `handle <body> with { Eff.op(params) => arm, ... return v => arm }`. Handler
+// arms accumulate into an `HArms` list (params parsed but dropped); the single
+// optional `return` arm is filled into `ret` so it can dump LAST regardless of
+// where it appears in the source.
+fn parse_handle(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    *cur = *cur + 1;
+    let hbody: Expr = parse_expr(k, s, e, src, cur);
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let mut hret: Ret = Ret::NoRet;
+    let harms: HArms = parse_harms(k, s, e, src, cur, &mut hret);
+    Expr::Handle(hbody, harms, hret)
+}
+
+fn parse_harms(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, ret: &mut Ret) -> HArms {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        HArms::HEnd
+    } else if t == 29 {
+        *cur = *cur + 1;
+        parse_harms(k, s, e, src, cur, ret)
+    } else if t == 43 {
+        // `return <name> => <body>` — kept separate so it dumps last.
+        *cur = *cur + 1;
+        let rns: i64 = (*s)[*cur];
+        let rne: i64 = (*e)[*cur];
+        let r_ntok: i64 = *cur;       // (c36a) the var token index (re-slice the name)
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let r_tok0: i64 = *cur;       // (c36a) the body start-token (re-parse the body)
+        let rbody: Expr = parse_expr(k, s, e, src, cur);
+        *ret = Ret::YesRet(slice_of(src, rns, rne), rbody, r_ntok, r_tok0);
+        parse_harms(k, s, e, src, cur, ret)
+    } else {
+        // `Effect.op(params) => body` — the params are STORED (a Binds name-list)
+        // so resolve can bind their VarIds; `dump_harms` omits them (ast parity).
+        let hes: i64 = (*s)[*cur];
+        let hee: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let hos: i64 = (*s)[*cur];
+        let hoe: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let hparams: Binds = parse_binds(k, s, e, src, cur);
+        *cur = *cur + 1;
+        let hbody: Expr = parse_expr(k, s, e, src, cur);
+        let hrest: HArms = parse_harms(k, s, e, src, cur, ret);
+        HArms::HCell(slice_of(src, hes, hee), slice_of(src, hos, hoe), hparams, hbody, hrest)
+    }
+}
+
+// Parse a comma-separated expression list, the opening bracket already consumed,
+// up to and consuming the closing-bracket token `term` (`)`=5 for call args,
+// `]`=28 for array elements). Builds the cons-list head-first via recursion.
+fn parse_args(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, term: i64) -> Args {
+    let t: i64 = (*k)[*cur];
+    if t == term {
+        *cur = *cur + 1;
+        Args::End
+    } else if t == 29 {
+        *cur = *cur + 1;
+        parse_args(k, s, e, src, cur, term)
+    } else {
+        let head: Expr = parse_expr(k, s, e, src, cur);
+        let tail: Args = parse_args(k, s, e, src, cur, term);
+        Args::Cell(head, tail)
+    }
+}
+
+// Postfix chain: `.field`, `.method(args)`, `[index]` applied left-to-right.
+fn parse_postfix(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_atom(k, s, e, src, cur);
+    parse_postfix_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_postfix_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let t: i64 = (*k)[*cur];
+    if t == 26 {
+        // `.` — `.await`, field access, or (with a following `(`) a method call.
+        *cur = *cur + 1;
+        if (*k)[*cur] == 40 {
+            *cur = *cur + 1;
+            parse_postfix_rest(k, s, e, src, cur, Expr::Await(acc))
+        } else {
+            let fs: i64 = (*s)[*cur];
+            let fe: i64 = (*e)[*cur];
+            *cur = *cur + 1;
+            if (*k)[*cur] == 4 {
+                *cur = *cur + 1;
+                let margs: Args = parse_args(k, s, e, src, cur, 5);
+                parse_postfix_rest(k, s, e, src, cur, Expr::Method(acc, slice_of(src, fs, fe), margs))
+            } else {
+                parse_postfix_rest(k, s, e, src, cur, Expr::Field(acc, slice_of(src, fs, fe)))
+            }
+        }
+    } else if t == 27 {
+        // `[` — index.
+        *cur = *cur + 1;
+        let idx: Expr = parse_expr(k, s, e, src, cur);
+        *cur = *cur + 1;
+        parse_postfix_rest(k, s, e, src, cur, Expr::Index(acc, idx))
+    } else {
+        acc
+    }
+}
+
+fn parse_unary(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let utag: i64 = (*k)[*cur];
+    if utag == 10 {
+        *cur = *cur + 1;
+        let nu: Expr = parse_unary(k, s, e, src, cur);
+        Expr::Unary(1, nu)
+    } else if utag == 24 {
+        *cur = *cur + 1;
+        let bu: Expr = parse_unary(k, s, e, src, cur);
+        Expr::Unary(2, bu)
+    } else if utag == 11 {
+        // prefix `*` — deref (distinct from the infix `*` multiply, handled in
+        // parse_mul_rest; this is the operand-leading position).
+        *cur = *cur + 1;
+        let du: Expr = parse_unary(k, s, e, src, cur);
+        Expr::Unary(3, du)
+    } else if utag == 23 {
+        // prefix `&` / `&mut` — address-of (distinct from the infix bitand).
+        *cur = *cur + 1;
+        if (*k)[*cur] == 46 {
+            *cur = *cur + 1;
+            let mu: Expr = parse_unary(k, s, e, src, cur);
+            Expr::Unary(5, mu)
+        } else {
+            let ru: Expr = parse_unary(k, s, e, src, cur);
+            Expr::Unary(4, ru)
+        }
+    } else {
+        parse_postfix(k, s, e, src, cur)
+    }
+}
+
+fn parse_mul(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_cast(k, s, e, src, cur);
+    parse_mul_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_mul_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 11 {
+        *cur = *cur + 1;
+        let ra: Expr = parse_cast(k, s, e, src, cur);
+        parse_mul_rest(k, s, e, src, cur, Expr::Binary(3, acc, ra))
+    } else if tg == 12 {
+        *cur = *cur + 1;
+        let rb: Expr = parse_cast(k, s, e, src, cur);
+        parse_mul_rest(k, s, e, src, cur, Expr::Binary(4, acc, rb))
+    } else {
+        acc
+    }
+}
+
+// ADR 0049: integer cast `expr as T`, between multiplicative and unary (Rust
+// precedence: `as` tighter than `* /`, looser than unary). Left-associative.
+// `as` is token tag 60 (shared with `impl as Trait`, parsed only in item
+// position). The target is a plain type-name ident token, read directly (like
+// `parse_type`'s ident branch) so snc + scg consume the same single token.
+fn parse_cast(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_unary(k, s, e, src, cur);
+    parse_cast_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_cast_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    if (*k)[*cur] == 60 {
+        *cur = *cur + 1;
+        let tns: i64 = (*s)[*cur];
+        let tne: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        let nm: [u8] = slice_of(src, tns, tne);
+        parse_cast_rest(k, s, e, src, cur, Expr::Cast(acc, nm))
+    } else {
+        acc
+    }
+}
+
+fn parse_add(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_mul(k, s, e, src, cur);
+    parse_add_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_add_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 9 {
+        *cur = *cur + 1;
+        let ra: Expr = parse_mul(k, s, e, src, cur);
+        parse_add_rest(k, s, e, src, cur, Expr::Binary(1, acc, ra))
+    } else if tg == 10 {
+        *cur = *cur + 1;
+        let rb: Expr = parse_mul(k, s, e, src, cur);
+        parse_add_rest(k, s, e, src, cur, Expr::Binary(2, acc, rb))
+    } else {
+        acc
+    }
+}
+
+// ADR 0048: shift operators `<<` / `>>` (op-codes 16 / 17), between bitwise-and
+// and additive. They are NOT lexer tokens — a shift is two SPAN-ADJACENT `<` / `>`
+// tokens (tag 15 = Lt, tag 17 = Gt), so nested generics `Vec<Box<i64>>` still
+// close one `>` at a time in the type parser. `*cur + 1` is read only when the
+// current token is `<` / `>`, which is always followed by at least the EOF token.
+fn parse_shift(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_add(k, s, e, src, cur);
+    parse_shift_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_shift_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let t0: i64 = (*k)[*cur];
+    if t0 == 15 {
+        // possible `<<` — needs the next token to be an adjacent `<`.
+        let t1: i64 = (*k)[*cur + 1];
+        let adj: bool = (*e)[*cur] == (*s)[*cur + 1];
+        if t1 == 15 && adj {
+            *cur = *cur + 2;
+            let rl: Expr = parse_add(k, s, e, src, cur);
+            parse_shift_rest(k, s, e, src, cur, Expr::Binary(16, acc, rl))
+        } else {
+            acc
+        }
+    } else if t0 == 17 {
+        // possible `>>` — needs the next token to be an adjacent `>`.
+        let t1b: i64 = (*k)[*cur + 1];
+        let adjb: bool = (*e)[*cur] == (*s)[*cur + 1];
+        if t1b == 17 && adjb {
+            *cur = *cur + 2;
+            let rr: Expr = parse_add(k, s, e, src, cur);
+            parse_shift_rest(k, s, e, src, cur, Expr::Binary(17, acc, rr))
+        } else {
+            acc
+        }
+    } else {
+        acc
+    }
+}
+
+fn parse_bitand(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_shift(k, s, e, src, cur);
+    parse_bitand_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_bitand_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 23 {
+        *cur = *cur + 1;
+        let rr: Expr = parse_shift(k, s, e, src, cur);
+        parse_bitand_rest(k, s, e, src, cur, Expr::Binary(5, acc, rr))
+    } else {
+        acc
+    }
+}
+
+fn parse_bitxor(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_bitand(k, s, e, src, cur);
+    parse_bitxor_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_bitxor_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 22 {
+        *cur = *cur + 1;
+        let rr: Expr = parse_bitand(k, s, e, src, cur);
+        parse_bitxor_rest(k, s, e, src, cur, Expr::Binary(7, acc, rr))
+    } else {
+        acc
+    }
+}
+
+fn parse_bitor(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_bitxor(k, s, e, src, cur);
+    parse_bitor_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_bitor_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 21 {
+        *cur = *cur + 1;
+        let rr: Expr = parse_bitxor(k, s, e, src, cur);
+        parse_bitor_rest(k, s, e, src, cur, Expr::Binary(6, acc, rr))
+    } else {
+        acc
+    }
+}
+
+// Comparison is non-associative (a single optional `cmp_op`, no `_rest`); the
+// token tag (13..=18) maps to the op-code (8..=13) by subtracting 5.
+fn parse_cmp(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_bitor(k, s, e, src, cur);
+    let tg: i64 = (*k)[*cur];
+    if tg >= 13 && tg <= 18 {
+        let op: i64 = tg - 5;
+        *cur = *cur + 1;
+        let rhs: Expr = parse_bitor(k, s, e, src, cur);
+        Expr::Binary(op, lhs, rhs)
+    } else {
+        lhs
+    }
+}
+
+fn parse_and(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_cmp(k, s, e, src, cur);
+    parse_and_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_and_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 19 {
+        *cur = *cur + 1;
+        let rr: Expr = parse_cmp(k, s, e, src, cur);
+        parse_and_rest(k, s, e, src, cur, Expr::Binary(14, acc, rr))
+    } else {
+        acc
+    }
+}
+
+fn parse_or(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    let lhs: Expr = parse_and(k, s, e, src, cur);
+    parse_or_rest(k, s, e, src, cur, lhs)
+}
+
+fn parse_or_rest(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, acc: Expr) -> Expr {
+    let tg: i64 = (*k)[*cur];
+    if tg == 20 {
+        *cur = *cur + 1;
+        let rr: Expr = parse_and(k, s, e, src, cur);
+        parse_or_rest(k, s, e, src, cur, Expr::Binary(15, acc, rr))
+    } else {
+        acc
+    }
+}
+
+pub fn parse_expr(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    // Control-flow expressions are dispatched at the top (mirroring the Rust
+    // parser): `if` and `match`.
+    let dt: i64 = (*k)[*cur];
+    if dt == 32 {
+        parse_if(k, s, e, src, cur)
+    } else if dt == 34 {
+        parse_match(k, s, e, src, cur)
+    } else {
+        parse_or(k, s, e, src, cur)
+    }
+}
+
+// `match <scrutinee> { pat => body, ... }` — arms comma-separated (trailing
+// comma allowed), bodies are expressions (not blocks).
+fn parse_match(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    *cur = *cur + 1;
+    let scr: Expr = parse_expr(k, s, e, src, cur);
+    *cur = *cur + 1;
+    let marms: Arms = parse_arms(k, s, e, src, cur);
+    Expr::Match(scr, marms)
+}
+
+// Parse match arms up to and consuming the closing `}` (tag 7).
+fn parse_arms(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Arms {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        Arms::ArmEnd
+    } else if t == 29 {
+        *cur = *cur + 1;
+        parse_arms(k, s, e, src, cur)
+    } else {
+        let pat: Pattern = parse_pattern(k, s, e, src, cur);
+        *cur = *cur + 1;
+        let body: Expr = parse_expr(k, s, e, src, cur);
+        let rest: Arms = parse_arms(k, s, e, src, cur);
+        Arms::ArmCell(pat, body, rest)
+    }
+}
+
+// `_` wildcard, or `Enum::Variant` with an optional positional binding list.
+fn parse_pattern(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Pattern {
+    let hs: i64 = (*s)[*cur];
+    let he: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    if is_wildcard(src, hs, he) {
+        Pattern::PatWild
+    } else {
+        *cur = *cur + 1;
+        let vs: i64 = (*s)[*cur];
+        let ve: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        if (*k)[*cur] == 4 {
+            *cur = *cur + 1;
+            let pbinds: Binds = parse_binds(k, s, e, src, cur);
+            Pattern::PatVariant(slice_of(src, hs, he), slice_of(src, vs, ve), pbinds)
+        } else {
+            Pattern::PatVariant(slice_of(src, hs, he), slice_of(src, vs, ve), Binds::BindEnd)
+        }
+    }
+}
+
+// Parse a positional binding list up to and consuming the closing `)` (tag 5).
+fn parse_binds(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Binds {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        Binds::BindEnd
+    } else if t == 29 {
+        *cur = *cur + 1;
+        parse_binds(k, s, e, src, cur)
+    } else {
+        let bsx: i64 = (*s)[*cur];
+        let bex: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        let brest: Binds = parse_binds(k, s, e, src, cur);
+        Binds::BindCell(slice_of(src, bsx, bex), brest)
+    }
+}
+
+// Parse struct-literal fields (`name : value`, comma-separated) up to and
+// consuming the closing `}` (tag 7). The opening `{` is already consumed.
+fn parse_fields(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Fields {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        Fields::FieldEnd
+    } else if t == 29 {
+        *cur = *cur + 1;
+        parse_fields(k, s, e, src, cur)
+    } else {
+        let fnm_s: i64 = (*s)[*cur];
+        let fnm_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let fval: Expr = parse_expr(k, s, e, src, cur);
+        let frest: Fields = parse_fields(k, s, e, src, cur);
+        Fields::FieldCell(slice_of(src, fnm_s, fnm_e), fval, frest)
+    }
+}
+
+// A brace block `{ <stmt>* <tail> }` → `(block <stmt>... <tail>)`. The opening
+// `{` is consumed here; `parse_stmts` consumes the closing `}` and fills the tail
+// (via a `&mut Expr` out-param). A statement-only block (no tail expr — e.g. a
+// `while` body) keeps the default `(int 0)` tail, exactly matching the oracle's
+// synthesised unit tail; a regular block always finds a tail. (No
+// `allow_stmt_only` distinction is needed on clean input.)
+pub fn parse_block(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    *cur = *cur + 1;
+    let mut btail: Expr = Expr::SynthZero;
+    let bstmts: Stmts = parse_stmts(k, s, e, src, cur, &mut btail);
+    Expr::Block(bstmts, btail)
+}
+
+// Parse statements up to and consuming the closing `}` (tag 7). The tail
+// expression (a trailing expr not followed by `;` or `=`) is written into
+// `*tail` and ends the list.
+fn parse_stmts(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, tail: &mut Expr) -> Stmts {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        Stmts::SEnd
+    } else if t == 45 {
+        let sl: Stmt = parse_let(k, s, e, src, cur);
+        let r1: Stmts = parse_stmts(k, s, e, src, cur, tail);
+        Stmts::SCell(sl, r1)
+    } else if t == 47 {
+        *cur = *cur + 1;
+        let wc: Expr = parse_expr(k, s, e, src, cur);
+        let wb: Expr = parse_block(k, s, e, src, cur);
+        let r2: Stmts = parse_stmts(k, s, e, src, cur, tail);
+        Stmts::SCell(Stmt::SWhile(wc, wb), r2)
+    } else if t == 48 {
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let r3: Stmts = parse_stmts(k, s, e, src, cur, tail);
+        Stmts::SCell(Stmt::SBreak, r3)
+    } else if t == 49 {
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let r4: Stmts = parse_stmts(k, s, e, src, cur, tail);
+        Stmts::SCell(Stmt::SContinue, r4)
+    } else {
+        let ex: Expr = parse_expr(k, s, e, src, cur);
+        if (*k)[*cur] == 25 {
+            *cur = *cur + 1;
+            let av: Expr = parse_expr(k, s, e, src, cur);
+            *cur = *cur + 1;
+            let r5: Stmts = parse_stmts(k, s, e, src, cur, tail);
+            Stmts::SCell(Stmt::SAssign(ex, av), r5)
+        } else if (*k)[*cur] == 44 {
+            *cur = *cur + 1;
+            let r6: Stmts = parse_stmts(k, s, e, src, cur, tail);
+            Stmts::SCell(Stmt::SExpr(ex), r6)
+        } else {
+            *cur = *cur + 1;
+            *tail = ex;
+            Stmts::SEnd
+        }
+    }
+}
+
+// `let [mut] <name> [: <type>] = <value> ;`. The `: type` annotation is optional
+// (dumps `_` when absent).
+fn parse_let(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Stmt {
+    *cur = *cur + 1;
+    let lmut: bool = (*k)[*cur] == 46;
+    if lmut {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    let lns: i64 = (*s)[*cur];
+    let lne: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    let lty: TyOpt = if (*k)[*cur] == 31 {
+        *cur = *cur + 1;
+        TyOpt::SomeTy(parse_type(k, s, e, src, cur))
+    } else {
+        TyOpt::NoTy
+    };
+    *cur = *cur + 1;
+    let lv: Expr = parse_expr(k, s, e, src, cur);
+    *cur = *cur + 1;
+    Stmt::SLet(lmut, slice_of(src, lns, lne), lty, lv)
+}
+
+// A type expression. `secret T` / `&T` / `&mut T` / `?T` / `[T]` / `Ident` /
+// `Ident<args>`, mirroring the Rust `parse_type`.
+pub fn parse_type(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> TypeE {
+    let t: i64 = (*k)[*cur];
+    if t == 51 {
+        *cur = *cur + 1;
+        let si: TypeE = parse_type(k, s, e, src, cur);
+        TypeE::TSecret(si)
+    } else if t == 23 {
+        *cur = *cur + 1;
+        if (*k)[*cur] == 46 {
+            *cur = *cur + 1;
+            let mi: TypeE = parse_type(k, s, e, src, cur);
+            TypeE::TRefMut(mi)
+        } else {
+            let ri: TypeE = parse_type(k, s, e, src, cur);
+            TypeE::TRef(ri)
+        }
+    } else if t == 50 {
+        *cur = *cur + 1;
+        let oi: TypeE = parse_type(k, s, e, src, cur);
+        TypeE::TNullable(oi)
+    } else if t == 27 {
+        *cur = *cur + 1;
+        let ai: TypeE = parse_type(k, s, e, src, cur);
+        *cur = *cur + 1;
+        TypeE::TArray(ai)
+    } else {
+        let tns: i64 = (*s)[*cur];
+        let tne: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        if (*k)[*cur] == 15 {
+            *cur = *cur + 1;
+            let targs: TyArgs = parse_type_args(k, s, e, src, cur);
+            TypeE::TGeneric(slice_of(src, tns, tne), targs)
+        } else {
+            TypeE::TIdent(slice_of(src, tns, tne))
+        }
+    }
+}
+
+// Generic type-argument list up to and consuming the closing `>` (tag 17). Nested
+// generics close fine: `Vec<Box<i64>>` lexes the final `>>` as two `Gt` tokens.
+fn parse_type_args(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> TyArgs {
+    let t: i64 = (*k)[*cur];
+    if t == 17 {
+        *cur = *cur + 1;
+        TyArgs::TAEnd
+    } else if t == 29 {
+        *cur = *cur + 1;
+        parse_type_args(k, s, e, src, cur)
+    } else {
+        let head: TypeE = parse_type(k, s, e, src, cur);
+        let tail: TyArgs = parse_type_args(k, s, e, src, cur);
+        TyArgs::TACell(head, tail)
+    }
+}
+
+// Parse a fn parameter list (`[mut] name : type`, comma-separated) up to and
+// consuming the closing `)` (tag 5). The opening `(` is already consumed.
+pub fn parse_params(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Params {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        Params::PEnd
+    } else if t == 29 {
+        *cur = *cur + 1;
+        parse_params(k, s, e, src, cur)
+    } else {
+        let pm: bool = (*k)[*cur] == 46;
+        if pm {
+            *cur = *cur + 1;
+            0
+        } else {
+            0
+        };
+        let pns: i64 = (*s)[*cur];
+        let pne: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let pty: TypeE = parse_type(k, s, e, src, cur);
+        let prest: Params = parse_params(k, s, e, src, cur);
+        Params::PCell(pm, slice_of(src, pns, pne), pty, prest)
+    }
+}
+
+// Skip a generic type-parameter list `<...>` (cur at the `<`, tag 15), balancing
+// nested `<`/`>` — the `snc ast` dump emits no type params, so they are consumed
+// but not stored.
+pub fn skip_type_params(k: &Vec<i64>, cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    let mut depth: i64 = 1;
+    while depth > 0 {
+        let t: i64 = (*k)[*cur];
+        depth = if t == 15 {
+            depth + 1
+        } else if t == 17 {
+            depth - 1
+        } else {
+            depth
+        };
+        *cur = *cur + 1;
+    }
+    0
+}
+
+// Skip a fn effect row `! { Eff, ... }` (cur at the `!`, tag 24); the dump omits
+// it. The body is labels + commas — no nested braces — so skip to the `}`.
+pub fn skip_effect_row(k: &Vec<i64>, cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    while (*k)[*cur] != 7 {
+        *cur = *cur + 1;
+    }
+    *cur = *cur + 1;
+    0
+}
+
+// (2d-5) Consume a method's mandatory `self : & [mut] Self` receiver clause (cur
+// at `self`) and return whether it is exclusive (`&mut Self`). `self` / `Self`
+// lex as plain idents here, so consume positionally: ident `:`(31) `&`(23)
+// `[mut(46)]` ident. Used by trait / impl / class method headers.
+pub fn parse_self_kind(k: &Vec<i64>, cur: &mut i64) -> bool {
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    let excl: bool = (*k)[*cur] == 46;
+    if excl {
+        *cur = *cur + 1;
+        0
+    } else {
+        0
+    };
+    *cur = *cur + 1;
+    excl
+}
+
+// `if <cond> { <then> } else { <else> }` — `else` is mandatory (Sentinel has no
+// bare `if`); `else if` chains by wrapping the inner `if` in a block, matching
+// the Rust parser.
+fn parse_if(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> Expr {
+    *cur = *cur + 1;
+    let cnd: Expr = parse_expr(k, s, e, src, cur);
+    let thn: Expr = parse_block(k, s, e, src, cur);
+    *cur = *cur + 1;
+    let els: Expr = if (*k)[*cur] == 32 {
+        Expr::Block(Stmts::SEnd, parse_if(k, s, e, src, cur))
+    } else {
+        parse_block(k, s, e, src, cur)
+    };
+    Expr::If(cnd, thn, els)
+}
+

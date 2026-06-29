@@ -53,6 +53,7 @@ fn build_sentinel_codegen(tmp: &Path) -> PathBuf {
     let root = workspace_root();
     std::fs::copy(root.join("selfhost/parser.sentinel"), tmp.join("parser.sentinel"))
         .expect("stage parser.sentinel");
+    stage_module_parts(&root, tmp, "parser");
     std::fs::copy(root.join("selfhost/types.sentinel"), tmp.join("types.sentinel"))
         .expect("stage types.sentinel");
     stage_module_parts(&root, tmp, "types");
@@ -394,6 +395,19 @@ fn sentinel_codegen_matches_oracle_on_selfhost_stages() {
         let src = root.join("selfhost").join(format!("{stage}.sentinel"));
         let bytes = std::fs::read(&src).expect("read selfhost stage");
         std::fs::write(&input, &bytes).expect("stage input");
+        // ADR 0067: a multi-file stage (parser) is staged AS input.sentinel, so its
+        // parts resolve under `input/` (the staged stem) for both the oracle + cg.
+        let parts_src = root.join("selfhost").join(stage);
+        if parts_src.is_dir() {
+            let pd = work.join("input");
+            std::fs::create_dir_all(&pd).expect("create input parts dir");
+            for ent in std::fs::read_dir(&parts_src).expect("read stage parts") {
+                let p = ent.expect("dir entry").path();
+                if p.extension().and_then(|x| x.to_str()) == Some("sentinel") {
+                    std::fs::copy(&p, pd.join(p.file_name().unwrap())).expect("stage a part");
+                }
+            }
+        }
         let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
             .arg("llvm")
             .arg(&input)
@@ -571,6 +585,7 @@ fn sentinel_codegen_self_merges_the_compiler_and_reaches_fixed_point() {
     // `types`, so its parts resolve under `run/types/`).
     stage_module_parts(&root, &run, "types");
     stage_module_parts(&root, &run, "merge");
+    stage_module_parts(&root, &run, "parser");
 
     // The Rust oracle: `snc llvm` on the entry (discovers + merge_modules + dumps).
     let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))

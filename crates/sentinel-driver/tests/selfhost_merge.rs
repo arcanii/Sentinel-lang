@@ -47,6 +47,7 @@ fn build_sentinel_merge(tmp: &Path) -> PathBuf {
     let root = workspace_root();
     std::fs::copy(root.join("selfhost/parser.sentinel"), tmp.join("parser.sentinel"))
         .expect("stage parser.sentinel");
+    stage_parts_for(&root, "parser", tmp, "parser");
     let entry = tmp.join("merge.sentinel");
     std::fs::copy(root.join("selfhost/merge.sentinel"), &entry).expect("stage merge.sentinel");
     // ADR 0067: merge is a multi-file module — stage its `merge/` parts dir.
@@ -87,10 +88,16 @@ fn sentinel_merge_unparser_round_trips_single_module_stages() {
         let src = root.join("selfhost").join(format!("{stage}.sentinel"));
         let bytes = std::fs::read(&src).expect("read selfhost stage");
         std::fs::write(&input, &bytes).expect("stage input");
+        // ADR 0067: a multi-file stage (parser) staged AS input.sentinel needs its
+        // parts under `input/` so the merge binary discovers them.
+        stage_parts_for(&root, stage, &work, "input");
 
+        // ADR 0067: compare against `snc llvm` of the staged `input.sentinel` (what
+        // the un-parser read) — not `&src` — so both sides use the same entry stem
+        // (`input`) for a now-multi-file stage like parser.
         let orig = Command::new(env!("CARGO_BIN_EXE_snc"))
             .arg("llvm")
-            .arg(&src)
+            .arg(&input)
             .output()
             .expect("run snc llvm (original)");
         assert!(

@@ -18,12 +18,30 @@ fn workspace_root() -> PathBuf {
         .expect("canonicalize workspace root")
 }
 
+/// ADR 0067: stage a multi-file module's `<module>/` parts dir alongside the
+/// staged `<module>.sentinel`. A no-op if the module has no parts dir.
+fn stage_module_parts(root: &Path, dst: &Path, module: &str) {
+    let src = root.join("selfhost").join(module);
+    if !src.is_dir() {
+        return;
+    }
+    let pd = dst.join(module);
+    std::fs::create_dir_all(&pd).expect("create parts dir");
+    for ent in std::fs::read_dir(&src).expect("read parts dir") {
+        let p = ent.expect("dir entry").path();
+        if p.extension().and_then(|x| x.to_str()) == Some("sentinel") {
+            std::fs::copy(&p, pd.join(p.file_name().unwrap())).expect("stage a part");
+        }
+    }
+}
+
 /// Stage `parser.sentinel` + `effects.sentinel` into `tmp` (so `use parser::…`
 /// resolves to the sibling file) and compile the entry `effects.sentinel`.
 fn build_sentinel_effect_checker(tmp: &Path) -> PathBuf {
     let root = workspace_root();
     std::fs::copy(root.join("selfhost/parser.sentinel"), tmp.join("parser.sentinel"))
         .expect("stage parser.sentinel");
+    stage_module_parts(&root, tmp, "parser");
     let entry = tmp.join("effects.sentinel");
     std::fs::copy(root.join("selfhost/effects.sentinel"), &entry).expect("stage effects.sentinel");
     let bin = tmp.join("seffects");

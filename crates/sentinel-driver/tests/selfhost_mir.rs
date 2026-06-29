@@ -24,15 +24,19 @@ fn workspace_root() -> PathBuf {
         .expect("canonicalize workspace root")
 }
 
-/// ADR 0067: `types` is a multi-file module — stage every file in its `types/`
-/// parts dir alongside the staged `types.sentinel` so discovery finds the parts.
-fn stage_types_parts(root: &Path, dst: &Path) {
-    let pd = dst.join("types");
-    std::fs::create_dir_all(&pd).expect("create types/ parts dir");
-    for ent in std::fs::read_dir(root.join("selfhost/types")).expect("read types/ parts") {
+/// ADR 0067: stage a multi-file module's `<module>/` parts dir alongside the
+/// staged `<module>.sentinel`. A no-op if the module has no parts dir.
+fn stage_module_parts(root: &Path, dst: &Path, module: &str) {
+    let src = root.join("selfhost").join(module);
+    if !src.is_dir() {
+        return;
+    }
+    let pd = dst.join(module);
+    std::fs::create_dir_all(&pd).expect("create parts dir");
+    for ent in std::fs::read_dir(&src).expect("read parts dir") {
         let p = ent.expect("dir entry").path();
         if p.extension().and_then(|x| x.to_str()) == Some("sentinel") {
-            std::fs::copy(&p, pd.join(p.file_name().unwrap())).expect("stage a types part");
+            std::fs::copy(&p, pd.join(p.file_name().unwrap())).expect("stage a part");
         }
     }
 }
@@ -44,9 +48,10 @@ fn build_sentinel_mir_lowerer(tmp: &Path) -> PathBuf {
     let root = workspace_root();
     std::fs::copy(root.join("selfhost/parser.sentinel"), tmp.join("parser.sentinel"))
         .expect("stage parser.sentinel");
+    stage_module_parts(&root, tmp, "parser");
     std::fs::copy(root.join("selfhost/types.sentinel"), tmp.join("types.sentinel"))
         .expect("stage types.sentinel");
-    stage_types_parts(&root, tmp);
+    stage_module_parts(&root, tmp, "types");
     let entry = tmp.join("mir.sentinel");
     std::fs::copy(root.join("selfhost/mir.sentinel"), &entry).expect("stage mir.sentinel");
     let bin = tmp.join("smir");
@@ -222,9 +227,10 @@ fn build_sentinel_ctverifier(tmp: &Path) -> PathBuf {
     let root = workspace_root();
     std::fs::copy(root.join("selfhost/parser.sentinel"), tmp.join("parser.sentinel"))
         .expect("stage parser.sentinel");
+    stage_module_parts(&root, tmp, "parser");
     std::fs::copy(root.join("selfhost/types.sentinel"), tmp.join("types.sentinel"))
         .expect("stage types.sentinel");
-    stage_types_parts(&root, tmp);
+    stage_module_parts(&root, tmp, "types");
     let entry = tmp.join("ctverify.sentinel");
     std::fs::copy(root.join("selfhost/ctverify.sentinel"), &entry).expect("stage ctverify.sentinel");
     let bin = tmp.join("sctv");
