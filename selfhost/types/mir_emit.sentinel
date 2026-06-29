@@ -1,0 +1,292 @@
+module types;
+
+// Reset the per-fn MIR pools (between fns; value/block ids are per-fn).
+fn mir_reset(c: &mut TyCtx) -> i64 {
+    clear_i64(&mut (*c).mvty);
+    clear_i64(&mut (*c).miblk);
+    clear_i64(&mut (*c).midst);
+    clear_i64(&mut (*c).miop);
+    clear_i64(&mut (*c).misym);
+    clear_i64(&mut (*c).mia);
+    clear_i64(&mut (*c).mib);
+    clear_i64(&mut (*c).mbpb);
+    clear_i64(&mut (*c).mbpv);
+    clear_i64(&mut (*c).mtb);
+    clear_i64(&mut (*c).mtk);
+    clear_i64(&mut (*c).mta);
+    clear_i64(&mut (*c).mtt);
+    clear_i64(&mut (*c).mte);
+    clear_i64(&mut (*c).mtjs);
+    clear_i64(&mut (*c).mtje);
+    clear_i64(&mut (*c).mtj);
+    clear_i64(&mut (*c).mvdv);
+    clear_i64(&mut (*c).mvdl);
+    clear_i64(&mut (*c).margs);
+    clear_i64(&mut (*c).mias);
+    clear_i64(&mut (*c).miae);
+    clear_i64(&mut (*c).miargs);
+    (*c).mir_nblk = 0;
+    (*c).mir_cur = 0;
+    (*c).lastval = 0 - 1;
+    0
+}
+
+fn mir_new_value(c: &mut TyCtx, ty: i64) -> i64 {
+    let id: i64 = len((*c).mvty);
+    push(&mut (*c).mvty, ty);
+    id
+}
+
+fn mir_new_block(c: &mut TyCtx) -> i64 {
+    let id: i64 = (*c).mir_nblk;
+    (*c).mir_nblk = (*c).mir_nblk + 1;
+    id
+}
+
+fn mir_add_param(c: &mut TyCtx, blk: i64, ty: i64) -> i64 {
+    let v: i64 = mir_new_value(c, ty);
+    push(&mut (*c).mbpb, blk);
+    push(&mut (*c).mbpv, v);
+    v
+}
+
+// Append an instruction (op, sub-code sym, operands a/b) to block `blk`.
+fn mir_emit(c: &mut TyCtx, blk: i64, op: i64, sym: i64, a: i64, b: i64, ty: i64) -> i64 {
+    if (*c).mir_suppress {
+        0 - 1
+    } else {
+        let d: i64 = mir_new_value(c, ty);
+        push(&mut (*c).miblk, blk);
+        push(&mut (*c).midst, d);
+        push(&mut (*c).miop, op);
+        push(&mut (*c).misym, sym);
+        push(&mut (*c).mia, a);
+        push(&mut (*c).mib, b);
+        push(&mut (*c).mias, 0);
+        push(&mut (*c).miae, 0);
+        d
+    }
+}
+
+// (7c) a variadic inst (op 6 call / op 7 opaque): the operands are margs[snap..] —
+// copied into the flat `miargs` pool (recording the per-inst slice), then margs is
+// truncated back to `snap`. `fidsym` holds the callee FnId for a call (else 0).
+fn mir_emit_va(c: &mut TyCtx, blk: i64, op: i64, fidsym: i64, snap: i64, ty: i64) -> i64 {
+    if (*c).mir_suppress {
+        while len((*c).margs) > snap {
+            let _x: i64 = pop(&mut (*c).margs);
+            0
+        }
+        0 - 1
+    } else {
+        mir_emit_va_do(c, blk, op, fidsym, snap, ty)
+    }
+}
+
+fn mir_emit_va_do(c: &mut TyCtx, blk: i64, op: i64, fidsym: i64, snap: i64, ty: i64) -> i64 {
+    let d: i64 = mir_new_value(c, ty);
+    let mas: i64 = len((*c).miargs);
+    let mn: i64 = len((*c).margs);
+    let mut i: i64 = snap;
+    while i < mn {
+        let av: i64 = (*c).margs[i];
+        push(&mut (*c).miargs, av);
+        i = i + 1;
+    }
+    let mae: i64 = len((*c).miargs);
+    while len((*c).margs) > snap {
+        let _x: i64 = pop(&mut (*c).margs);
+        0
+    }
+    push(&mut (*c).miblk, blk);
+    push(&mut (*c).midst, d);
+    push(&mut (*c).miop, op);
+    push(&mut (*c).misym, fidsym);
+    push(&mut (*c).mia, 0);
+    push(&mut (*c).mib, 0);
+    push(&mut (*c).mias, mas);
+    push(&mut (*c).miae, mae);
+    d
+}
+
+// (7c) push a child's MirValue onto the operand stack (called by the arg-list
+// walkers under mode 2); returns the stack depth BEFORE the push is irrelevant —
+// callers snapshot `len(margs)` themselves.
+fn mir_margs_push(c: &mut TyCtx, v: i64) -> i64 {
+    push(&mut (*c).margs, v);
+    0
+}
+
+// (7c) an Opaque with NO operands (a public constant: null / char / string lit).
+fn mir_emit_opaque0(c: &mut TyCtx, blk: i64, ty: i64) -> i64 {
+    let snap: i64 = len((*c).margs);
+    mir_emit_va(c, blk, 7, 0, snap, ty)
+}
+
+// (7c) an Opaque with ONE operand (a field read, a widen, spawn/await, …).
+fn mir_emit_opaque1(c: &mut TyCtx, blk: i64, a: i64, ty: i64) -> i64 {
+    let snap: i64 = len((*c).margs);
+    push(&mut (*c).margs, a);
+    mir_emit_va(c, blk, 7, 0, snap, ty)
+}
+
+fn mir_margs_len(c: &mut TyCtx) -> i64 {
+    len((*c).margs)
+}
+
+// (7c) push the just-walked child's MirValue onto the operand stack IFF a variadic
+// arm is collecting (called by the shared arg-list walkers after each element).
+fn mir_collect(c: &mut TyCtx) -> i64 {
+    if mir_on(c) {
+        if (*c).mir_collecting {
+            let v: i64 = (*c).lastval;
+            push(&mut (*c).margs, v);
+            0
+        } else {
+            0
+        };
+        0
+    } else {
+        0
+    };
+    0
+}
+
+// (7c) at a widen site (`w` = the dump emitted a `(widen-* …)` wrapper), the MIR
+// adds an Opaque value wrapping the node's value, typed as `exp` — matching the
+// Rust's explicit `WidenToSecret`/`WidenToNullable` node (a dump-time wrapper here,
+// an IR node there, lowered to `Opaque([inner])`).
+fn mir_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
+    if mir_on(c) {
+        if w {
+            let iv: i64 = (*c).lastval;
+            let mc: i64 = (*c).mir_cur;
+            let snap: i64 = mir_margs_len(c);
+            mir_margs_push(c, iv);
+            let d: i64 = mir_emit_va(c, mc, 7, 0, snap, exp);
+            (*c).lastval = d;
+            0
+        } else {
+            0
+        };
+        0
+    } else {
+        0
+    };
+    0
+}
+
+// (Bar B) codegen counterpart to `mir_widen`: when a node widened to `exp` and `exp`
+// is a nullable `?T` (kind 4), wrap the threaded operand into `{ i1 1, <op> }` via an
+// `insertvalue` chain (mirrors the oracle's WidenToNullable). A `secret` widen (`w`
+// true, but `exp` is kind 3) is value-level identity → no-op. The `?Struct`/`?GI`
+// heap-box widen is unexercised (the corpus only widens primitives, and reaches
+// `?Struct` via `null`), so the inline-payload chain suffices.
+fn cg_widen(c: &mut TyCtx, w: bool, exp: i64) -> i64 {
+    if cg_on(c) {
+        if w {
+            if cg_is_nullable(c, exp) {
+                let ik: i64 = (*c).cglk;
+                let iv: i64 = (*c).cglv;
+                let nin: i64 = nullable_inner_of(c, exp);
+                let a0: i64 = cg_dst(c);
+                cgo_str(c, "insertvalue ");
+                cgo_ty(c, exp);
+                cgo_str(c, " undef, i1 1, 0\n");
+                let a1: i64 = cg_dst(c);
+                cgo_str(c, "insertvalue ");
+                cgo_ty(c, exp);
+                cgo_str(c, " %v");
+                cgo_int(c, a0);
+                cgo_str(c, ", ");
+                cgo_ty(c, nin);
+                cg_putc(c, ' ');
+                cgo_operand(c, ik, iv);
+                cgo_str(c, ", 1\n");
+                cg_reg(c, a1);
+                0
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        0
+    } else {
+        0
+    };
+    0
+}
+
+fn mir_term_return(c: &mut TyCtx, blk: i64, v: i64) -> i64 {
+    push(&mut (*c).mtb, blk);
+    push(&mut (*c).mtk, 2);
+    push(&mut (*c).mta, v);
+    push(&mut (*c).mtt, 0 - 1);
+    push(&mut (*c).mte, 0 - 1);
+    push(&mut (*c).mtjs, 0);
+    push(&mut (*c).mtje, 0);
+    0
+}
+
+// (7b) a conditional branch (branch args are always empty — the Rust lowering
+// passes values via the JUMPs to the merge, not the branch).
+fn mir_term_branch(c: &mut TyCtx, blk: i64, cond: i64, tb: i64, eb: i64) -> i64 {
+    push(&mut (*c).mtb, blk);
+    push(&mut (*c).mtk, 1);
+    push(&mut (*c).mta, cond);
+    push(&mut (*c).mtt, tb);
+    push(&mut (*c).mte, eb);
+    push(&mut (*c).mtjs, 0);
+    push(&mut (*c).mtje, 0);
+    0
+}
+
+// (7b) an unconditional jump to `target`, passing `args` to its block params.
+fn mir_term_jump(c: &mut TyCtx, blk: i64, target: i64, args: &Vec<i64>) -> i64 {
+    let st: i64 = len((*c).mtj);
+    let na: i64 = len(*args);
+    let mut i: i64 = 0;
+    while i < na {
+        let a: i64 = (*args)[i];
+        push(&mut (*c).mtj, a);
+        i = i + 1;
+    }
+    let en: i64 = len((*c).mtj);
+    push(&mut (*c).mtb, blk);
+    push(&mut (*c).mtk, 0);
+    push(&mut (*c).mta, target);
+    push(&mut (*c).mtt, 0 - 1);
+    push(&mut (*c).mte, 0 - 1);
+    push(&mut (*c).mtjs, st);
+    push(&mut (*c).mtje, en);
+    0
+}
+
+// var_defs: append-only (var,val) pairs; newest-first lookup.
+fn mir_vd_set(c: &mut TyCtx, var: i64, val: i64) -> i64 {
+    push(&mut (*c).mvdv, var);
+    push(&mut (*c).mvdl, val);
+    0
+}
+
+fn mir_vd_get(c: &mut TyCtx, var: i64) -> i64 {
+    let mut i: i64 = len((*c).mvdv) - 1;
+    let mut found: i64 = 0 - 1;
+    while i >= 0 {
+        if found < 0 {
+            if (*c).mvdv[i] == var {
+                found = (*c).mvdl[i];
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i - 1;
+    }
+    found
+}
+
