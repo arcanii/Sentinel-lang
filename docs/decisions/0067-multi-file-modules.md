@@ -460,10 +460,25 @@ distinct output name.
   each helper takes the uniform `out, <payload>, exp, src, c, gb`.) This is the
   technique for the remaining single-function giants.
 
-**Optional follow-ups (not required):** the same arm-extraction on `cg_effects` (the
-handler-runtime, still 2655) and on `run` (the ~900-line dispatcher in the `types`
-root); the byte-identical decl sweep (`module X;` on every remaining selfhost/`std`
-library file) + the mandatory-enforcement flip; `--separate` over multi-file modules.
+**A third round (maintainer request) addressed the last two giants:**
+- **`types/cg_effects`** (2655) was mis-grouped — a clean 3-way *file-split* (all
+  separate fns): `cg_effects` 1587 (handler-runtime core) + `cg_chained` 780
+  (the chained-handler `cg_chained_*`/`eff_*` family) + `mir_emit` 292 (the `mir_*`
+  MIR-emission helpers that had been living there).
+- **`run`** (the ~926-line dispatcher) — its opening ~210-line `TyCtx { … }` literal
+  is extracted into `new_tyctx(mode)` (`types/tyctx.sentinel`), shrinking `run` to
+  ~720 and the `types` root to 1464. `run`'s remaining body is a **tightly-coupled
+  multi-pass pipeline** (the emit passes + the assembly share ~12 live locals —
+  `itembuf`/`garbage`(gb)/`out`/`result`/`rsrc`/`rbs`/`rbe`/`itempos`/`itemkind`/
+  `ctx` — with intertwined out/result/gb threading), so further phase-extraction is
+  deferred to a deliberate pass rather than a rushed one. `cg_emit_call` (a ~558-line
+  builtin `if fid==N` dispatch) is one cohesive fn, left intact.
+
+The self-host is now **31 files, none over ~1600 lines** (from a 13,718-line monolith
++ the 2655/2842 giants). **Optional remaining:** `run`'s pass-pipeline extraction
+(needs careful param threading) + `cg_emit_call`; the byte-identical decl sweep
+(`module X;` on every remaining selfhost/`std` file) + the mandatory-enforcement flip;
+`--separate` over multi-file modules.
 
 ## Revisit
 
