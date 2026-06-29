@@ -662,12 +662,10 @@ file, so a non-`main` library file can't live there).
 file B," but **`pub class` is rejected** ("`pub` only on
 `fn`/`struct`/`enum`/`trait`/`effect`"): a Sentinel `class` (ADR 0022) is
 module-LOCAL and cannot cross a unit boundary. The cross-module form of "a type
-with behaviour" is a `pub struct` + `pub fn`s, or a `pub trait` + `impl`. **Open
-language question (a Language-Evolution / BACKLOG.md §11 candidate):** should
-`class` become `pub`-exportable so classes cross modules like structs do — or is
-module-local `class` an intentional design (structs are the cross-module data
-type, classes the local-encapsulation type)? Decide before documenting it as a
-rule.
+with behaviour" is a `pub struct` + `pub fn`s, or a `pub trait` + `impl`.
+**Whether `class` should become `pub`-exportable is captured as a separate,
+ADR-needed Language-Evolution item — see BACKLOG.md §11.7 (Cross-Module
+Classes).**
 
 **Still TODO — the module-system guide.** Write a short `docs/` page (or README
 section) stating the rules in one place: a module is a file; `use a::b::Item;`

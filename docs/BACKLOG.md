@@ -602,6 +602,37 @@ covering **Step 0 + the deprecation as one design** (the bounded `return value;`
 terminator fix and the implicit-tail deprecation, with the warn→error migration
 and bootstrap rewrite). Not now — after the threading / concurrency track.
 
+### 11.7 Cross-Module Classes (`pub class`)
+
+Today a Sentinel `class` (ADR 0022) is module-LOCAL: **`pub class` is rejected**
+(`pub` is allowed only on `fn` / `struct` / `enum` / `trait` / `effect`), so a
+class cannot cross a module / separate-compilation boundary. The cross-module
+form of "a type with behaviour" is a `pub struct` + `pub fn`s, or a `pub trait`
++ `impl` (see BACKLOG2 §10.9 + `examples/modules/rect_demo.sentinel`). A
+2026-06-29 ask for a cross-FILE class example surfaced this; making classes
+exportable is a real language feature that **needs an ADR** (maintainer-confirmed
+2026-06-29).
+
+The ADR must decide:
+
+- **Whether to do it at all.** Is module-local `class` intentional — structs the
+  cross-module *data* type, classes the local *encapsulation* type — or a gap to
+  close? If kept local, document the rule and the struct/trait alternative.
+- **Visibility surface.** `pub class` to export the type; methods are already
+  `pub fn`; FIELDS presumably stay private across the boundary (construct via
+  `init`, access via methods — encapsulation preserved).
+- **The cross-unit ABI.** A class `init` (the `out_ptr` convention) and its
+  methods (the `self_ptr` convention) are `abi-v1`; a cross-unit class needs
+  module-qualified symbols for `init` + each method, exactly as struct / trait /
+  impl methods already cross (ADR 0037 D7 mangling). Pin the mangled names.
+- **Delegation across modules.** A `delegate field: T to Trait` whose `T` is an
+  imported class (ADR 0021 D6) — does the synthesized `impl` cross cleanly?
+- **The bootstrap.** The self-hosted compiler must handle cross-module classes
+  too (both fixed points byte-identical), and `--separate` / `--lib` /
+  `--shared` must link them.
+
+Low urgency relative to the threading / concurrency track.
+
 ---
 
 ## 12. What Sentinel Will Never Do
