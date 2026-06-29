@@ -45,11 +45,12 @@ use sentinel_ast::{BinOp, CmpOp, LogicOp, UnaryOp};
 use sentinel_borrow_check::DropPlan;
 use sentinel_hir::HirProgram;
 use sentinel_resolve::{
-    ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID,
-    LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID,
-    TCP_ACCEPT_FN_ID, TCP_CLOSE_FN_ID, TCP_CONNECT_FN_ID, TCP_LISTEN_FN_ID, TCP_LOCAL_PORT_FN_ID,
-    TCP_READ_FN_ID, TCP_WRITE_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID,
-    VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
+    ClassId, EffectId, EnumId, FnId, ImplId, StructId, VarId, CHANNEL_CLOSE_FN_ID,
+    CHANNEL_NEW_FN_ID, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID,
+    PUSH_FN_ID, READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, TCP_ACCEPT_FN_ID,
+    TCP_CLOSE_FN_ID, TCP_CONNECT_FN_ID, TCP_LISTEN_FN_ID, TCP_LOCAL_PORT_FN_ID, TCP_READ_FN_ID,
+    TCP_WRITE_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID,
+    WRITE_FILE_FN_ID,
 };
 use sentinel_ast::SelfKind;
 use sentinel_types::{
@@ -607,6 +608,26 @@ pub fn compile_to_object_for_module(
     );
     let tcp_close_fn =
         module.add_function("sentinel_tcp_close", i64_ty.fn_type(&[i64_ty.into()], false), None);
+    // ADR 0066 M1.2: declare the channel runtime symbols (cross-platform mpsc).
+    // `sentinel_channel_new() -> ptr`, `_send(ptr, i64) -> i64`,
+    // `_recv(ptr, ptr out) -> i64` (0 = some / 1 = closed), `_close(ptr) -> i64`.
+    let channel_new_fn =
+        module.add_function("sentinel_channel_new", ptr_ty.fn_type(&[], false), None);
+    let channel_send_fn = module.add_function(
+        "sentinel_channel_send",
+        i64_ty.fn_type(&[ptr_ty.into(), i64_ty.into()], false),
+        None,
+    );
+    let channel_recv_fn = module.add_function(
+        "sentinel_channel_recv",
+        i64_ty.fn_type(&[ptr_ty.into(), ptr_ty.into()], false),
+        None,
+    );
+    let channel_close_fn = module.add_function(
+        "sentinel_channel_close",
+        i64_ty.fn_type(&[ptr_ty.into()], false),
+        None,
+    );
     // C5.4 (2/N) / ADR 0028: declare the broker scope-arena symbols.
     // `sentinel_arena_enter(capacity: i64) -> *arena` creates a bump
     // arena (capacity 0 → runtime default); `sentinel_arena_alloc(arena,
@@ -1269,6 +1290,10 @@ pub fn compile_to_object_for_module(
             tcp_read_fn,
             tcp_write_fn,
             tcp_close_fn,
+            channel_new_fn,
+            channel_send_fn,
+            channel_recv_fn,
+            channel_close_fn,
             arena_enter_fn,
             arena_alloc_fn,
             arena_exit_fn,
@@ -1521,6 +1546,13 @@ struct CodegenCtx<'ctx, 'plan> {
     tcp_read_fn: FunctionValue<'ctx>,
     tcp_write_fn: FunctionValue<'ctx>,
     tcp_close_fn: FunctionValue<'ctx>,
+    /// ADR 0066 M1.2: the channel runtime symbols (cross-platform mpsc).
+    /// `channel_new() -> ptr`, `send(ptr, i64) -> i64`, `recv(ptr, ptr) -> i64`
+    /// (0 = some / 1 = closed), `close(ptr) -> i64`.
+    channel_new_fn: FunctionValue<'ctx>,
+    channel_send_fn: FunctionValue<'ctx>,
+    channel_recv_fn: FunctionValue<'ctx>,
+    channel_close_fn: FunctionValue<'ctx>,
     /// C5.4 (2/N) / ADR 0028: `sentinel_arena_enter(i64) -> *arena`
     /// creates a per-scope broker bump arena (capacity 0 → default).
     arena_enter_fn: FunctionValue<'ctx>,
@@ -5828,6 +5860,112 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             .expect("sentinel_tcp_write returns i64"))
     }
 
+    /// ADR 0066 M1.2: `channel_new() -> Channel<i64>` — a `ptr` from
+    /// `sentinel_channel_new()`.
+    fn lower_channel_new(&mut self) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let call = self
+            .builder
+            .build_call(self.channel_new_fn, &[], "channel_new")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_channel_new returns ptr"))
+    }
+
+    /// ADR 0066 M1.2: `send(ch, v) -> i64` — move `v` (an i64 at the minimum)
+    /// into the channel; the i64 status is the expression value.
+    fn lower_channel_send(
+        &mut self,
+        ch: &TypedExpr,
+        value: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let ch_v = self.lower_expr(ch, program)?.into_pointer_value();
+        let val_v = self.lower_expr(value, program)?.into_int_value();
+        let call = self
+            .builder
+            .build_call(
+                self.channel_send_fn,
+                &[ch_v.into(), val_v.into()],
+                "channel_send",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_channel_send returns i64"))
+    }
+
+    /// ADR 0066 M1.2: `recv(ch) -> ?i64` — call `sentinel_channel_recv(ch, out)`
+    /// which writes the value to a stack `out` slot and returns a status
+    /// (0 = some / 1 = closed), then BUILD the `?i64` (`{ i1 valid, i64 value }`,
+    /// ADR 0066 D4): `valid = (status == 0)`, `value = *out`.
+    fn lower_channel_recv(
+        &mut self,
+        ch: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let i64_ty = self.context.i64_type();
+        let ch_v = self.lower_expr(ch, program)?.into_pointer_value();
+        let out_slot = self
+            .builder
+            .build_alloca(i64_ty, "recv_out")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let status = self
+            .builder
+            .build_call(
+                self.channel_recv_fn,
+                &[ch_v.into(), out_slot.into()],
+                "channel_recv",
+            )
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_channel_recv returns i64")
+            .into_int_value();
+        let valid = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, status, i64_ty.const_zero(), "recv_valid")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let value = self
+            .builder
+            .build_load(i64_ty, out_slot, "recv_val")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        // `?i64` is `{ i1, i64 }` (the inline-payload nullable, ADR 0014 D2).
+        let opt_ty = self
+            .context
+            .struct_type(&[self.context.bool_type().into(), i64_ty.into()], false);
+        let agg = opt_ty.get_undef();
+        let with_valid = self
+            .builder
+            .build_insert_value(agg, valid, 0, "recv_opt_valid")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        let with_value = self
+            .builder
+            .build_insert_value(with_valid, value, 1, "recv_opt_value")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(with_value.into_struct_value().into())
+    }
+
+    /// ADR 0066 M1.2: `channel_close(ch) -> i64` — drop the sender (signals recv
+    /// EOF). The i64 status (always 0) is the expression value.
+    fn lower_channel_close(
+        &mut self,
+        ch: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
+        let ch_v = self.lower_expr(ch, program)?.into_pointer_value();
+        let call = self
+            .builder
+            .build_call(self.channel_close_fn, &[ch_v.into()], "channel_close")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .expect("sentinel_channel_close returns i64"))
+    }
+
     /// D.3 / ADR 0034 D7: lower `vec_new() -> Vec<T>` to an empty vector
     /// value `{ i64 len = 0, i64 cap = 0, ptr data = null }`. No
     /// allocation happens until the first `push` (`realloc(null, …)` ==
@@ -6729,6 +6867,19 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 if *id == TCP_WRITE_FN_ID {
                     return self.lower_tcp_write(&args[0], &args[1], program);
                 }
+                // ADR 0066 M1.2: the channel builtins.
+                if *id == CHANNEL_NEW_FN_ID {
+                    return self.lower_channel_new();
+                }
+                if *id == SEND_FN_ID {
+                    return self.lower_channel_send(&args[0], &args[1], program);
+                }
+                if *id == RECV_FN_ID {
+                    return self.lower_channel_recv(&args[0], program);
+                }
+                if *id == CHANNEL_CLOSE_FN_ID {
+                    return self.lower_channel_close(&args[0], program);
+                }
                 // C1.7.5 / ADR 0016 D7: user-defined generic-fn
                 // calls route to the monomorphic instance emitted
                 // in the pre-pass. Non-generic calls take the
@@ -7214,7 +7365,7 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                         .builder
                         .build_bit_cast(raw, self.context.f64_type(), "await_dec")
                         .map_err(|e| CodegenError::Builder(e.to_string()))?,
-                    Type::Ptr | Type::Task(_) => self
+                    Type::Ptr | Type::Task(_) | Type::Channel(_) => self
                         .builder
                         .build_int_to_ptr(
                             raw,

@@ -136,6 +136,14 @@ supported (rejected at type-check — ADR 0066 D6 / D8).
 |-------|------|--------|
 | `registry_ptr` | `*mut ScopeRegistry` | 0 |
 
+### `SentinelChannel` — fully opaque (ADR 0066 M1.2)
+
+Unlike `SentinelTask`, codegen **never reads `SentinelChannel`'s fields** — it
+only holds the `*mut SentinelChannel` returned by `sentinel_channel_new` and
+passes it back to the other `sentinel_channel_*` symbols. The struct's layout
+(an mpsc sender/receiver behind `Mutex`es) is therefore a runtime-internal
+detail, **not** ABI, and carries no size/offset contract here.
+
 ---
 
 ## 4. Name mangling
@@ -263,6 +271,10 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_scope_enter` | `() -> ptr` | concurrency |
 | `sentinel_scope_register` | `(ptr scope, ptr task) -> void` | concurrency |
 | `sentinel_scope_exit` | `(ptr scope) -> void` | concurrency |
+| `sentinel_channel_new` | `() -> ptr` | channels (ADR 0066 M1.2) — a new mpsc `Channel<i64>` |
+| `sentinel_channel_send` | `(ptr ch, i64 value) -> i64` | channels — move `value` in; 0 ok / -1 closed |
+| `sentinel_channel_recv` | `(ptr ch, ptr out) -> i64` | channels — block; writes `*out`, returns 0 (some) / 1 (closed). Codegen builds the `?i64` |
+| `sentinel_channel_close` | `(ptr ch) -> i64` | channels — drop the sender (signals recv EOF) |
 
 **Runtime-internal (not codegen-declared):** `sentinel_kont_panic_resumed`
 — the runtime's `sentinel_kont_resume` calls it on the consumed-twice

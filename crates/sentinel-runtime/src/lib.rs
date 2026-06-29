@@ -1270,6 +1270,133 @@ pub extern "C" fn sentinel_scope_exit(scope: *mut SentinelScopeCtx) {
     }
 }
 
+// =============================================================================
+// ADR 0066 M1.2: typed message-passing channels (`Channel<i64>` at the minimum).
+//
+// A `SentinelChannel` wraps a CROSS-PLATFORM `std::sync::mpsc` channel (NOT the
+// `#[cfg(unix)]` socket path — channels work on every host). Both the sender
+// and the receiver live behind a `Mutex`, so the whole struct is `Sync`: the
+// handle is a raw `ptr` shared producer↔consumer by COPYING (ADR 0066 D2 — the
+// `Channel` type is `Copy`), and concurrent `send`/`recv` from different threads
+// is sound. It is the VALUES that move (an `i64` per `send` at the minimum), not
+// the handle.
+//
+// M1.2-minimum limitations (documented, deferred):
+//   * the element is `i64` (`Channel<i64>`); word-scalar / aggregate elements
+//     are M1.2b / later.
+//   * the struct is LEAKED — a `Copy` handle has no single owner to free it
+//     (no `Arc`/refcount yet), so there is nothing safe to free on
+//     `channel_close` (another copy may still hold the ptr). Scope-owned
+//     channel cleanup is a follow-on (cf. ADR 0024's task ownership).
+//   * one `Sender` (not cloned): `channel_close` drops it, signalling recv EOF.
+
+/// A heap-allocated mpsc channel. Codegen holds an opaque `*mut SentinelChannel`
+/// (the `Type::Channel` LLVM type is `ptr`). `sender` is `None` after
+/// `channel_close` (dropping the `Sender` makes a drained `recv` return EOF).
+pub struct SentinelChannel {
+    sender: std::sync::Mutex<Option<std::sync::mpsc::Sender<i64>>>,
+    receiver: std::sync::Mutex<std::sync::mpsc::Receiver<i64>>,
+}
+
+/// ADR 0066 M1.2: allocate a new unbounded mpsc channel; return an opaque
+/// `*mut SentinelChannel` (the codegen LLVM type for `Type::Channel` is `ptr`).
+#[no_mangle]
+pub extern "C" fn sentinel_channel_new() -> *mut SentinelChannel {
+    let (tx, rx) = std::sync::mpsc::channel::<i64>();
+    let ch = Box::new(SentinelChannel {
+        sender: std::sync::Mutex::new(Some(tx)),
+        receiver: std::sync::Mutex::new(rx),
+    });
+    Box::into_raw(ch)
+}
+
+/// ADR 0066 M1.2: move `value` into the channel. Returns 0 on success, or -1 if
+/// the channel is already closed (the sender was dropped) or the receiver is
+/// gone (the value is discarded, like writing to a closed pipe).
+///
+/// # Safety
+///
+/// `ch` must be a `*mut SentinelChannel` returned by `sentinel_channel_new`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_channel_send(ch: *mut SentinelChannel, value: i64) -> i64 {
+    if ch.is_null() {
+        return -1;
+    }
+    // SAFETY: `ch` is a live SentinelChannel per the caller contract; the
+    // struct is `Sync`, so a shared `&` from this (possibly producer) thread
+    // is sound.
+    let chan = unsafe { &*ch };
+    match chan.sender.lock() {
+        Ok(guard) => match guard.as_ref() {
+            Some(tx) => match tx.send(value) {
+                Ok(()) => 0,
+                Err(_) => -1,
+            },
+            None => -1,
+        },
+        Err(_) => -1,
+    }
+}
+
+/// ADR 0066 M1.2: block for the next value. On success writes it to `*out` and
+/// returns 0; when the channel is closed AND drained (all senders dropped),
+/// returns 1 and leaves `*out` untouched. Codegen builds the `?i64`
+/// (`{ i1 valid, i64 }`) from the (return == 0, *out) pair (ADR 0066 D4).
+///
+/// # Safety
+///
+/// `ch` must be a `*mut SentinelChannel` from `sentinel_channel_new`; `out`
+/// must be a valid, writable `*mut i64`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_channel_recv(ch: *mut SentinelChannel, out: *mut i64) -> i64 {
+    if ch.is_null() {
+        return 1;
+    }
+    // SAFETY: `ch` is a live SentinelChannel (Sync) per the caller contract.
+    let chan = unsafe { &*ch };
+    let result = match chan.receiver.lock() {
+        Ok(rx) => rx.recv(),
+        Err(_) => return 1,
+    };
+    match result {
+        Ok(v) => {
+            if !out.is_null() {
+                // SAFETY: `out` is a valid writable i64 slot per the contract.
+                unsafe {
+                    *out = v;
+                }
+            }
+            0
+        }
+        // All senders dropped + the queue is drained: closed.
+        Err(_) => 1,
+    }
+}
+
+/// ADR 0066 M1.2: drop the channel's sender, so a drained `recv` returns EOF
+/// (closed). Idempotent; returns 0. Does NOT free the struct (a `Copy` handle
+/// may have other live copies — M1.2-minimum leak, see the module note above).
+///
+/// # Safety
+///
+/// `ch` must be a `*mut SentinelChannel` returned by `sentinel_channel_new`.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+pub extern "C" fn sentinel_channel_close(ch: *mut SentinelChannel) -> i64 {
+    if ch.is_null() {
+        return 0;
+    }
+    // SAFETY: `ch` is a live SentinelChannel (Sync) per the caller contract.
+    let chan = unsafe { &*ch };
+    if let Ok(mut guard) = chan.sender.lock() {
+        // Drop the Sender (idempotent: a second close finds None).
+        *guard = None;
+    }
+    0
+}
+
 /// Returns the crate name as a sanity-check that the build is wired up.
 pub fn crate_name() -> &'static str {
     "sentinel-runtime"
@@ -1514,12 +1641,19 @@ mod tests {
             sentinel_scope_enter as *const (),
             sentinel_scope_register as *const (),
             sentinel_scope_exit as *const (),
+            // ADR 0066 M1.2: the channel builtins (cross-platform, unlike the
+            // `#[cfg(unix)]` socket symbols which are absent from this set).
+            sentinel_channel_new as *const (),
+            sentinel_channel_send as *const (),
+            sentinel_channel_recv as *const (),
+            sentinel_channel_close as *const (),
         ];
-        // 24 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
+        // 28 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
         // sentinel_write_file / sentinel_print_bytes, and ADR 0065 D6's
-        // sentinel_kont_free) + sentinel_kont_panic_resumed.
-        assert_eq!(symbols.len(), 24);
+        // sentinel_kont_free) + sentinel_kont_panic_resumed + ADR 0066 M1.2's
+        // 4 sentinel_channel_* symbols.
+        assert_eq!(symbols.len(), 28);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 
@@ -1621,6 +1755,49 @@ mod tests {
         // 8 (join_handle_ptr) + 8 (args_free_ptr) = 32.
         assert_eq!(core::mem::size_of::<SentinelTask>(), 32);
         assert_eq!(core::mem::align_of::<SentinelTask>(), 8);
+    }
+
+    // ---- ADR 0066 M1.2: the channel runtime surface ----
+
+    #[test]
+    fn sentinel_channel_send_recv_round_trips() {
+        let ch = sentinel_channel_new();
+        assert!(!ch.is_null());
+        sentinel_channel_send(ch, 42);
+        let mut out: i64 = 0;
+        let r = sentinel_channel_recv(ch, &mut out as *mut i64);
+        assert_eq!(r, 0, "recv of an available value returns 0 (some)");
+        assert_eq!(out, 42);
+        // After close + drain, recv reports closed (1 = null).
+        sentinel_channel_close(ch);
+        let r2 = sentinel_channel_recv(ch, &mut out as *mut i64);
+        assert_eq!(r2, 1, "recv on a closed+drained channel returns 1 (null)");
+    }
+
+    #[test]
+    fn sentinel_channel_cross_thread_producer() {
+        // The worker pattern (ADR 0066 D2): a producer thread holds a COPY of
+        // the handle (the ptr), sends, then closes; the consumer recvs until
+        // EOF. Exercises that the channel is Sync (shared across threads) and
+        // that close signals recv EOF.
+        let ch = sentinel_channel_new();
+        let addr = ch as usize; // raw ptr isn't Send; pass the address.
+        let producer = std::thread::spawn(move || {
+            let ch = addr as *mut SentinelChannel;
+            sentinel_channel_send(ch, 10);
+            sentinel_channel_send(ch, 32);
+            sentinel_channel_close(ch);
+        });
+        let mut sum: i64 = 0;
+        loop {
+            let mut out: i64 = 0;
+            if sentinel_channel_recv(ch, &mut out as *mut i64) != 0 {
+                break;
+            }
+            sum += out;
+        }
+        producer.join().unwrap();
+        assert_eq!(sum, 42);
     }
 
     // ---- ADR 0056: the TCP sockets runtime surface (loopback) ----

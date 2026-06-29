@@ -1157,7 +1157,17 @@ pub fn intern_kont(konts: &mut Vec<KontData>, arg_ty: Type, ret_ty: Type) -> Kon
 pub fn is_spawn_word_scalar(ty: Type) -> bool {
     matches!(
         ty,
-        Type::I64 | Type::I32 | Type::U8 | Type::Bool | Type::F64 | Type::Ptr | Type::Task(_)
+        Type::I64
+            | Type::I32
+            | Type::U8
+            | Type::Bool
+            | Type::F64
+            | Type::Ptr
+            | Type::Task(_)
+            // ADR 0066 M1.2/D4: a `Channel<T>` handle is a pointer — passing a
+            // channel endpoint into a spawned producer/consumer is the whole
+            // point of the worker pattern.
+            | Type::Channel(_)
     )
 }
 

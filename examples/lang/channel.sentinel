@@ -1,0 +1,37 @@
+// ADR 0066 M1.2: channels — a `Channel<i64>` used as a message queue. `main`
+// sends two messages, closes the channel, then DRAINS it with `recv` until the
+// channel is closed (a `null` `?i64`), summing the values.
+//
+// Validates the channel builtins end to end on the real build path:
+//   * channel_new()      -> a Channel<i64> handle (a ptr),
+//   * send(ch, v)        -> move an i64 into the channel,
+//   * channel_close(ch)  -> drop the sender, signalling recv EOF,
+//   * recv(ch)           -> ?i64 (some / null), consumed via is_some / unwrap_or.
+// The handle is Copy (ADR 0066 D2), so `ch` is reused across all four calls.
+//
+// 10 + 32 = 42. Exit 42.
+//
+// (The cross-thread producer/consumer form — `spawn`ing a worker with the
+// channel endpoint — lands with the `Channel<T>` type annotation + the selfhost
+// mirror; the runtime's cross-thread path is already covered by the
+// `sentinel_channel_cross_thread_producer` unit test.)
+
+fn main() -> i64 {
+    let ch = channel_new();
+    send(ch, 10);
+    send(ch, 32);
+    channel_close(ch);
+    let mut sum: i64 = 0;
+    let mut draining: bool = true;
+    while draining {
+        let m = recv(ch);
+        if is_some(m) {
+            sum = sum + unwrap_or(m, 0);
+            0
+        } else {
+            draining = false;
+            0
+        };
+    }
+    sum
+}

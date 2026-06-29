@@ -458,6 +458,10 @@ const EXAMPLES: &[(&str, i32)] = &[
     // into the Task's i64 slot; `.await` decodes it. snc-only (f64 is
     // snc-side; the selfhost mirror lands in M1.1 Phase B). 42 = decoded.
     ("examples/lang/task_generic.sentinel", 42),
+    // ADR 0066 M1.2: channels — channel_new / send / channel_close / recv (the
+    // ?i64 some-or-null) over a Channel<i64> queue. snc-only (the selfhost
+    // mirror lands in M1.2 Phase B). 10 + 32 = 42.
+    ("examples/lang/channel.sentinel", 42),
 ];
 
 #[test]
@@ -718,6 +722,11 @@ fn lang_handle_control_flow() {
 #[test]
 fn lang_task_generic() {
     check_example("examples/lang/task_generic.sentinel", "task_generic", 42);
+}
+
+#[test]
+fn lang_channel() {
+    check_example("examples/lang/channel.sentinel", "channel", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be
