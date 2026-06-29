@@ -51,7 +51,7 @@ reference as you work through the milestones.
 
 ---
 
-### ▶ RESUME HERE (2026-06-30 — ▶ SELF-HOST MODULARIZATION (ADR 0067) is DONE: multi-file modules implemented in BOTH compilers + `selfhost/types.sentinel` split 13.7k → 3.4k lines. The next pick is the maintainer's call: optional ADR-0067 follow-ups (the `module X;` decl sweep + mandatory-enforcement flip; further decl-emit splitting; `--separate` over multi-file modules), or RESUME the PAUSED ADR 0066 concurrency track (M1.2b generic `Channel<T>` → M1.3 worker pattern → M2 processes). Both bootstrap fixed points byte-identical; Windows four-check green.)
+### ▶ RESUME HERE (2026-06-30 — ▶ ADR 0067 SELF-HOST MODULARIZATION is COMPLETE: multi-file modules in BOTH compilers + a full file-split of the self-host. `selfhost/types.sentinel` 13,718 → a 1,464-line root over ~14 `types/` parts; `parser`/`resolve`/`merge` each split into a root + parts; `cg_effects` split 3-way; `dump_texpr` (the ~2.7k-line giant) broken up via arm-extraction; `run`'s `TyCtx` ctor extracted. The self-host is now **31 files, none over ~1600 lines**; both bootstrap fixed points byte-identical throughout; Windows four-check green. ▶ NEXT is the maintainer's call — (a) ADR-0067 TAILS: `run`'s coupled pass-pipeline + `cg_emit_call`; the byte-identical `module X;` decl sweep across the remaining selfhost/`std` files + the mandatory-enforcement flip; `--separate` over multi-file modules; (b) RESUME the PAUSED ADR 0066 concurrency (M1.2b generic `Channel<T>` → M1.3 worker → M2 processes); or (c) a deferred ADR-needed backlog item (§11.6 `return value;` terminator, §11.7 cross-module `pub class`, BACKLOG2 §10.9 module-system guide doc).)
 
 > **▶ DONE (2026-06-30) — SELF-HOST MODULARIZATION via MULTI-FILE MODULES (ADR 0067
 > ACCEPTED-WITH-AMENDMENTS).** The maintainer's "maintainability is biting now" focus (BACKLOG §11.8)
@@ -71,18 +71,27 @@ reference as you work through the milestones.
 >   `scg` — `selfhost/parser.sentinel` parse/dump (tags 64/65) + `selfhost/merge.sentinel` skip-directives
 >   + **`append_module_parts`** (concatenates a module's parts onto its root → per-module rename + part
 >   discovery fall out for free; emission order matches the Rust union rename byte-for-byte).
-> - **Commits:** `27070f827` (D9.1 Rust) · `363eaa5db` (D9.3a parse/dump/skip) · `7531c343e` (D9.3b concat)
->   · `fc5773a434`/`cc5b1420b5`/`798722f3ae`/`5b5ec67037` (D9.4 the four types split cuts).
-> - **THEN further modularization (maintainer request, same day):** `parser` → parser +
->   parser/{parse,dump}; `resolve` → resolve + resolve/{dump,decls}; `merge` → merge +
->   merge/{emit,engine}; `types/cg` → cg/cg_class/cg_effects; `types/borrow` → borrow/borrow_stmts
->   (`dafdb943a6`/`f7b4b060f3`/`c090eb7247`/`4a92ed2`). A scg merge bug was fixed along the way: a
->   no-`use` multi-file entry must still qualify (`merge_mode` triggers on a `part`, matching snc).
->   Full differential 24/24 green throughout.
-> - **Optional follow-ups (NOT required — ADR 0067 *Revisit*):** the byte-identical `module X;` decl
->   sweep across the remaining selfhost/`std` library files + the mandatory-enforcement flip;
->   refactoring `dump_texpr` / `cg_effects` (single giant fns) into sub-functions for finer files;
->   `--separate` over multi-file modules.
+> - **Mechanism commits:** `27070f827` (D9.1 Rust) · `363eaa5db` (D9.3a parse/dump/skip) · `7531c343e`
+>   (D9.3b concat) · `fc5773a434`/`cc5b1420b5`/`798722f3ae`/`5b5ec67037` (D9.4 the four types split cuts).
+> - **THEN the rest of the self-host was split (maintainer request, same day), full differential green
+>   at every step:**
+>   - **Round 2 (`dafdb943a6`/`f7b4b060f3`/`c090eb7247`/`4a92ed2`):** `parser` → root + parser/{parse,dump};
+>     `resolve` → root + resolve/{dump,decls}; `merge` → root + merge/{emit,engine}; `types/cg` →
+>     cg/cg_class/cg_effects; `types/borrow` → borrow/borrow_stmts. A scg merge bug was fixed: a
+>     no-`use` multi-file entry must still QUALIFY (`merge_mode` triggers on a `part`, matching snc).
+>   - **Round 3 (`ce6c93d`/`08cfd1f`/`19bed14`):** the `types` root's decl-emit → types/decl_{fn,class,synth};
+>     **`dump_texpr` broken up** (a behavior-preserving refactor: its 7 biggest match-arm bodies →
+>     `dump_te_*` helpers in `types/borrow_arms.sentinel`, verified byte-identical); `cg_effects` split
+>     3-way (cg_effects/cg_chained/mir_emit); `run`'s ~210-line `TyCtx{…}` literal → `new_tyctx` in
+>     `types/tyctx.sentinel`.
+> - **Technique for single-fn giants:** Sentinel `match` has NO binding catch-all (`other =>` — only
+>   `_`), so extract arm BODIES into per-arm helpers (unused params tolerated → uniform param set);
+>   drove it with an awk pass (match `^        Expr::X(`, redirect body until `^        },` into a fn).
+> - **ADR-0067 TAILS (NOT required — ADR 0067 *Revisit*):** `run`'s remaining body is a tightly-coupled
+>   multi-pass pipeline (emit passes + assembly share ~12 live locals — `itembuf`/`garbage`(=gb)/`out`/
+>   `result`/`rsrc`/`rbs`/`rbe`/`itempos`/`itemkind`/`ctx`), so its extraction needs careful param
+>   threading — DEFERRED; `cg_emit_call` (~558-line `if fid==N` builtin dispatch) left as one fn. Plus
+>   the `module X;` decl sweep + mandatory-enforcement flip; `--separate` over multi-file modules.
 > - Constant-time `secret` + the lexical borrow checker UNCHANGED (a front-end/discovery/merge concern).
 >
 > **— Concurrency track (ADR 0066): M1.1 + M1.2 DONE & self-hosted; rest PAUSED (resumable next) —**
