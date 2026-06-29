@@ -1,0 +1,601 @@
+module resolve;
+
+// --- resolved dump (1-phase consuming map: Expr → resolved S-expr) -----------
+
+fn dump_rargs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(hd, tl) => {
+            push(out, ' ');
+            dump_rexpr(out, hd, src, c, gb);
+            dump_rargs(out, tl, src, c, gb);
+            0
+        },
+    }
+}
+
+// (3c) A match-arm pattern's payload bindings: each binds a fresh VarId (in
+// source order) into the arm's scope + dumps ` #vid`. The names' bytes are routed
+// into the blob by bind_name (which also disposes the AST `[u8]`).
+fn dump_rbinds(out: &mut Vec<u8>, b: Binds, c: &mut RCtx) -> i64 {
+    match b {
+        Binds::BindEnd => 0,
+        Binds::BindCell(nm, rest) => {
+            let bvid: i64 = (*c).nextvid;
+            (*c).nextvid = (*c).nextvid + 1;
+            bind_name(c, nm, bvid);
+            append_str(out, " #");
+            append_int(out, bvid);
+            dump_rbinds(out, rest, c);
+            0
+        },
+    }
+}
+
+// `_` → `(pat _)`; `Enum::Variant(b1,…)` → `(pat Enum Variant #vid…)` (the enum +
+// variant names are emitted, which disposes them; the payloads bind VarIds).
+fn dump_rpat(out: &mut Vec<u8>, p: Pattern, c: &mut RCtx) -> i64 {
+    match p {
+        Pattern::PatWild => {
+            append_str(out, "(pat _)");
+            0
+        },
+        Pattern::PatVariant(en, vn, bs) => {
+            append_str(out, "(pat ");
+            append_str(out, en);
+            push(out, ' ');
+            append_str(out, vn);
+            dump_rbinds(out, bs, c);
+            push(out, ')');
+            0
+        },
+    }
+}
+
+fn dump_rexpr(out: &mut Vec<u8>, ex: Expr, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    match ex {
+        Expr::Int(nv) => {
+            append_str(out, "(int ");
+            append_int(out, nv);
+            push(out, ')');
+            0
+        },
+        Expr::Bool(bv) => {
+            let blit: [u8] = if bv {
+                "(bool true)"
+            } else {
+                "(bool false)"
+            };
+            append_str(out, blit);
+            0
+        },
+        Expr::Null => {
+            append_str(out, "(null)");
+            0
+        },
+        Expr::Char(cv) => {
+            append_str(out, "(char ");
+            append_int(out, cv);
+            push(out, ')');
+            0
+        },
+        Expr::Str(sb) => {
+            append_str(out, "(str");
+            let sn: i64 = len(sb);
+            let mut si: i64 = 0;
+            while si < sn {
+                push(out, ' ');
+                append_int(out, u8_to_i64(sb[si]));
+                si = si + 1;
+            }
+            push(out, ')');
+            sink_name(gb, sb);
+            0
+        },
+        Expr::Var(nm) => {
+            let vid: i64 = sc_lookup(c, src, &nm);
+            sink_name(gb, nm);
+            append_str(out, "(var #");
+            append_int(out, vid);
+            push(out, ')');
+            0
+        },
+        Expr::Unary(uop, inner) => {
+            append_str(out, "(unary ");
+            let usym: [u8] = if uop == 1 {
+                "-"
+            } else if uop == 2 {
+                "!"
+            } else if uop == 3 {
+                "*"
+            } else if uop == 4 {
+                "&"
+            } else {
+                "&mut"
+            };
+            append_str(out, usym);
+            push(out, ' ');
+            dump_rexpr(out, inner, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Binary(bop, l, r) => {
+            push(out, '(');
+            let pfx: [u8] = if bop <= 7 || bop == 16 || bop == 17 {
+                "binop"
+            } else if bop <= 13 {
+                "cmp"
+            } else {
+                "logic"
+            };
+            append_str(out, pfx);
+            push(out, ' ');
+            let bsym: [u8] = if bop == 1 {
+                "+"
+            } else if bop == 2 {
+                "-"
+            } else if bop == 3 {
+                "*"
+            } else if bop == 4 {
+                "/"
+            } else if bop == 5 {
+                "&"
+            } else if bop == 6 {
+                "|"
+            } else if bop == 7 {
+                "^"
+            } else if bop == 8 {
+                "=="
+            } else if bop == 9 {
+                "!="
+            } else if bop == 10 {
+                "<"
+            } else if bop == 11 {
+                "<="
+            } else if bop == 12 {
+                ">"
+            } else if bop == 13 {
+                ">="
+            } else if bop == 14 {
+                "&&"
+            } else if bop == 16 {
+                "<<"
+            } else if bop == 17 {
+                ">>"
+            } else {
+                "||"
+            };
+            append_str(out, bsym);
+            push(out, ' ');
+            dump_rexpr(out, l, src, c, gb);
+            push(out, ' ');
+            dump_rexpr(out, r, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Call(cn, ca) => {
+            // A callee that resolves to an in-scope VarId is a continuation-resume
+            // `k(arg)` (vars shadow fns — mirror lib.rs:3516); else a free-fn call.
+            let kid: i64 = sc_lookup(c, src, &cn);
+            if kid >= 0 {
+                sink_name(gb, cn);
+                append_str(out, "(resume-kont #");
+                append_int(out, kid);
+                dump_rargs(out, ca, src, c, gb);
+                push(out, ')');
+                0
+            } else {
+                let fid: i64 = fn_lookup(c, src, &cn);
+                sink_name(gb, cn);
+                append_str(out, "(call #");
+                append_int(out, fid);
+                dump_rargs(out, ca, src, c, gb);
+                push(out, ')');
+                0
+            }
+        },
+        Expr::Method(mt, mn, ma) => {
+            append_str(out, "(method ");
+            dump_rexpr(out, mt, src, c, gb);
+            push(out, ' ');
+            append_str(out, mn);
+            dump_rargs(out, ma, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Field(ft, fdn) => {
+            append_str(out, "(field ");
+            dump_rexpr(out, ft, src, c, gb);
+            push(out, ' ');
+            append_str(out, fdn);
+            push(out, ')');
+            0
+        },
+        Expr::Index(it, ii) => {
+            append_str(out, "(index ");
+            dump_rexpr(out, it, src, c, gb);
+            push(out, ' ');
+            dump_rexpr(out, ii, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Qcall(qi, qm, qa) => {
+            // `Name::method(args)` / paren-less `Name::Variant`. Resolve splits on
+            // the leading name: an enum (checked FIRST, mirror lib.rs:3830) →
+            // `(enum-construct #E Enum Variant args)`; else the `(qcall …)`
+            // placeholder until (3b-4) makes it `(qcall-impl …)`.
+            let qeid: i64 = enum_lookup(c, src, &qi);
+            if qeid >= 0 {
+                append_str(out, "(enum-construct #");
+                append_int(out, qeid);
+                push(out, ' ');
+                append_str(out, qi);
+                push(out, ' ');
+                append_str(out, qm);
+                dump_rargs(out, qa, src, c, gb);
+                push(out, ')');
+                0
+            } else {
+                // a named impl: `Impl::method(args)` → `(qcall-impl #I
+                // method_index ImplName method args)` (mirror lib.rs:3852). The
+                // impl's trait (its stored trait-name slice → TraitId) gives the
+                // method's index in that trait's method list.
+                let iidx: i64 = impl_lookup(c, src, &qi);
+                let its: i64 = (*c).imts[iidx];
+                let ite: i64 = (*c).imte[iidx];
+                let qtid: i64 = trait_lookup_slice(c, src, its, ite);
+                let qmidx: i64 = method_index_in_trait(c, src, qtid, &qm);
+                append_str(out, "(qcall-impl #");
+                append_int(out, iidx);
+                push(out, ' ');
+                append_int(out, qmidx);
+                push(out, ' ');
+                append_str(out, qi);
+                push(out, ' ');
+                append_str(out, qm);
+                dump_rargs(out, qa, src, c, gb);
+                push(out, ')');
+                0
+            }
+        },
+        Expr::ClassInit(ci, cia) => {
+            // `Name::init(args)`. An enum named `Name` (checked FIRST, mirror
+            // lib.rs:3768) → `(enum-construct #E Name init args)` (unreachable on
+            // clean fixtures — the parser rejects an `init` enum variant — but
+            // faithful); else the `(class-init …)` placeholder until (3b-5).
+            let ceid: i64 = enum_lookup(c, src, &ci);
+            if ceid >= 0 {
+                append_str(out, "(enum-construct #");
+                append_int(out, ceid);
+                push(out, ' ');
+                append_str(out, ci);
+                append_str(out, " init");
+                dump_rargs(out, cia, src, c, gb);
+                push(out, ')');
+                0
+            } else {
+                // `Name::init(args)` → `(class-init #C Name args)` (mirror
+                // lib.rs:3790).
+                let cidx: i64 = class_lookup(c, src, &ci);
+                append_str(out, "(class-init #");
+                append_int(out, cidx);
+                push(out, ' ');
+                append_str(out, ci);
+                dump_rargs(out, cia, src, c, gb);
+                push(out, ')');
+                0
+            }
+        },
+        Expr::Array(ae) => {
+            append_str(out, "(array");
+            dump_rargs(out, ae, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::If(ic, it2, ie2) => {
+            append_str(out, "(if ");
+            dump_rexpr(out, ic, src, c, gb);
+            push(out, ' ');
+            dump_rexpr(out, it2, src, c, gb);
+            push(out, ' ');
+            dump_rexpr(out, ie2, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Block(bstmts, btail) => {
+            append_str(out, "(block");
+            dump_rstmts(out, bstmts, src, c, gb);
+            push(out, ' ');
+            dump_rexpr(out, btail, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::SynthZero => {
+            append_str(out, "(int 0)");
+            0
+        },
+        Expr::Match(mscr, marms) => {
+            append_str(out, "(match ");
+            dump_rexpr(out, mscr, src, c, gb);
+            dump_rarms(out, marms, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::StructLit(sn, sf) => {
+            let sid: i64 = struct_lookup(c, src, &sn);
+            append_str(out, "(struct-lit #");
+            append_int(out, sid);
+            push(out, ' ');
+            append_str(out, sn);
+            dump_rfields(out, sf, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Declassify(di) => {
+            append_str(out, "(declassify ");
+            dump_rexpr(out, di, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Return(ri) => {
+            append_str(out, "(return ");
+            dump_rexpr(out, ri, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Cast(ci, cnm) => {
+            append_str(out, "(cast ");
+            dump_rexpr(out, ci, src, c, gb);
+            push(out, ' ');
+            append_str(out, cnm);
+            push(out, ')');
+            0
+        },
+        Expr::Perform(pe, po, pa) => {
+            // `perform Eff.op(args)` → `(perform #E op_index Eff op args)` (mirror
+            // resolve_perform_expr, lib.rs:4250). op_index = the op's position in
+            // the effect's op list.
+            let peid: i64 = effect_lookup(c, src, &pe);
+            let poidx: i64 = op_index_lookup(c, src, peid, &po);
+            append_str(out, "(perform #");
+            append_int(out, peid);
+            push(out, ' ');
+            append_int(out, poidx);
+            push(out, ' ');
+            append_str(out, pe);
+            push(out, ' ');
+            append_str(out, po);
+            dump_rargs(out, pa, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Scope(sb) => {
+            append_str(out, "(scope ");
+            dump_rexpr(out, sb, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Spawn(sc) => {
+            append_str(out, "(spawn ");
+            dump_rexpr(out, sc, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Await(aw) => {
+            append_str(out, "(await ");
+            dump_rexpr(out, aw, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Expr::Handle(hb, ha, hr) => {
+            append_str(out, "(handle ");
+            dump_rexpr(out, hb, src, c, gb);
+            dump_rharms(out, ha, src, c, gb);
+            dump_rret(out, hr, src, c, gb);
+            push(out, ')');
+            0
+        },
+    }
+}
+
+fn dump_rstmts(out: &mut Vec<u8>, st: Stmts, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    match st {
+        Stmts::SEnd => 0,
+        Stmts::SCell(one, rest) => {
+            push(out, ' ');
+            dump_rstmt(out, one, src, c, gb);
+            dump_rstmts(out, rest, src, c, gb);
+            0
+        },
+    }
+}
+
+fn dump_rstmt(out: &mut Vec<u8>, s: Stmt, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    match s {
+        Stmt::SLet(lmf, lnm, lty, lval) => {
+            // DURING-WALK binding (mirror the Rust source-order walk): resolve the
+            // VALUE first — it may bind nested vars (a `match`/`if` in the value),
+            // which take the lower VarIds — THEN bind the `let` var. So the value is
+            // dumped into a temp buffer, the let's VarId is taken AFTER, and the
+            // value is spliced in. Format: `(let #vid [mut] <ty-or-_> <value>)`.
+            let mut vbuf: Vec<u8> = vec_new();
+            dump_rexpr(&mut vbuf, lval, src, c, gb);
+            let lvid: i64 = (*c).nextvid;
+            (*c).nextvid = (*c).nextvid + 1;
+            bind_name(c, lnm, lvid);
+            append_str(out, "(let #");
+            append_int(out, lvid);
+            push(out, ' ');
+            if lmf {
+                append_str(out, "mut ");
+                0
+            } else {
+                0
+            };
+            dump_rtyopt(out, lty);
+            push(out, ' ');
+            append_str(out, vec_to_array(vbuf));
+            push(out, ')');
+            0
+        },
+        Stmt::SAssign(atgt, aval) => {
+            append_str(out, "(assign ");
+            dump_rexpr(out, atgt, src, c, gb);
+            push(out, ' ');
+            dump_rexpr(out, aval, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Stmt::SWhile(wcond, wbody) => {
+            append_str(out, "(while ");
+            dump_rexpr(out, wcond, src, c, gb);
+            push(out, ' ');
+            dump_rexpr(out, wbody, src, c, gb);
+            push(out, ')');
+            0
+        },
+        Stmt::SBreak => {
+            append_str(out, "(break)");
+            0
+        },
+        Stmt::SContinue => {
+            append_str(out, "(continue)");
+            0
+        },
+        Stmt::SExpr(sx) => {
+            append_str(out, "(expr ");
+            dump_rexpr(out, sx, src, c, gb);
+            push(out, ')');
+            0
+        },
+    }
+}
+
+// Consuming dump of an optional `let` type annotation: the type, or `_`.
+fn dump_rtyopt(out: &mut Vec<u8>, ty: TyOpt) -> i64 {
+    match ty {
+        TyOpt::NoTy => {
+            push(out, '_');
+            0
+        },
+        TyOpt::SomeTy(t) => {
+            dump_type(out, t);
+            0
+        },
+    }
+}
+
+// match arms (3c — placeholder): resolve the body, sink the pattern bindings.
+// (3c) Each match arm: snapshot the scope, dump the pattern (binding its payload
+// VarIds), resolve the body (which sees the payloads), then TRUNCATE the scope
+// back (the payloads are scoped to this arm only; VarIds stay sequential).
+fn dump_rarms(out: &mut Vec<u8>, a: Arms, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        Arms::ArmEnd => 0,
+        Arms::ArmCell(ap, abody, arest) => {
+            append_str(out, " (arm ");
+            let mark: i64 = len((*c).scs);
+            dump_rpat(out, ap, c);
+            push(out, ' ');
+            dump_rexpr(out, abody, src, c, gb);
+            truncate_scope(c, mark);
+            push(out, ')');
+            dump_rarms(out, arest, src, c, gb);
+            0
+        },
+    }
+}
+
+fn dump_rfields(out: &mut Vec<u8>, f: Fields, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fv, fr) => {
+            append_str(out, " (field ");
+            append_str(out, fnm);
+            push(out, ' ');
+            dump_rexpr(out, fv, src, c, gb);
+            push(out, ')');
+            dump_rfields(out, fr, src, c, gb);
+            0
+        },
+    }
+}
+
+// (3c) A handler arm's params: each binds a fresh VarId (in source order) into the
+// arm's scope + dumps `#vid` (space-separated, first no leading space — they sit
+// inside the `(…)`). The names' bytes route into the blob (bind_name disposes the
+// AST `[u8]`).
+fn dump_rhparams(out: &mut Vec<u8>, b: Binds, c: &mut RCtx, first: bool) -> i64 {
+    match b {
+        Binds::BindEnd => 0,
+        Binds::BindCell(nm, rest) => {
+            if first {
+                0
+            } else {
+                push(out, ' ');
+                0
+            };
+            let pvid: i64 = (*c).nextvid;
+            (*c).nextvid = (*c).nextvid + 1;
+            bind_name(c, nm, pvid);
+            push(out, '#');
+            append_int(out, pvid);
+            dump_rhparams(out, rest, c, false);
+            0
+        },
+    }
+}
+
+// (3c) Each handler arm → `(arm #eid op_index Eff op (#paramvids) body)` (mirror
+// resolve_dump.rs:342): the effect/op resolve to their IDs; the params bind VarIds
+// scoped to the arm (truncated after).
+fn dump_rharms(out: &mut Vec<u8>, a: HArms, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        HArms::HEnd => 0,
+        HArms::HCell(hef, hop, hparams, hbody, hrest) => {
+            let heid: i64 = effect_lookup(c, src, &hef);
+            let hoidx: i64 = op_index_lookup(c, src, heid, &hop);
+            append_str(out, " (arm #");
+            append_int(out, heid);
+            push(out, ' ');
+            append_int(out, hoidx);
+            push(out, ' ');
+            append_str(out, hef);
+            push(out, ' ');
+            append_str(out, hop);
+            append_str(out, " (");
+            let mark: i64 = len((*c).scs);
+            dump_rhparams(out, hparams, c, true);
+            append_str(out, ") ");
+            dump_rexpr(out, hbody, src, c, gb);
+            truncate_scope(c, mark);
+            push(out, ')');
+            dump_rharms(out, hrest, src, c, gb);
+            0
+        },
+    }
+}
+
+// (3c) The optional `return v => body` arm → `(return #vid body)`: `v` binds a
+// VarId scoped to the return arm (truncated after).
+fn dump_rret(out: &mut Vec<u8>, r: Ret, src: &[u8], c: &mut RCtx, gb: &mut Vec<u8>) -> i64 {
+    match r {
+        Ret::NoRet => 0,
+        Ret::YesRet(rnm, rbody, rnt, rt0) => {
+            let _a: i64 = rnt;
+            let _b: i64 = rt0;
+            let mark: i64 = len((*c).scs);
+            let rvid: i64 = (*c).nextvid;
+            (*c).nextvid = (*c).nextvid + 1;
+            bind_name(c, rnm, rvid);
+            append_str(out, " (return #");
+            append_int(out, rvid);
+            push(out, ' ');
+            dump_rexpr(out, rbody, src, c, gb);
+            truncate_scope(c, mark);
+            push(out, ')');
+            0
+        },
+    }
+}
+
