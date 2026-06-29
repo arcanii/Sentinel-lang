@@ -261,6 +261,14 @@ fn builtin_id(q: &[u8]) -> i64 {
         12
     } else if name_eq_lit(q, "print_bytes") {
         13
+    } else if name_eq_lit(q, "channel_new") {
+        21
+    } else if name_eq_lit(q, "send") {
+        22
+    } else if name_eq_lit(q, "recv") {
+        23
+    } else if name_eq_lit(q, "channel_close") {
+        24
     } else {
         0 - 1
     }
