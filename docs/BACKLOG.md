@@ -542,6 +542,61 @@ need refinement: cancellation semantics, structured concurrency
 primitives, async drop, async traits, async closures. None of
 these are 1.0 blockers but all will need attention.
 
+### 11.6 Explicit `return` as the Canonical Function-Return Form
+
+Today a function's return value falls out of its trailing **tail expression**
+(Rust-style, expression-oriented): `fn add(a, b) -> i64 { a + b }`. ADR 0065
+added an explicit `return expr` (primarily for early return). A proposal
+(2026-06-29) is to make the explicit **`return value;`** the canonical form and
+emit a **deprecation warning** for the implicit "floating" / "hanging"
+tail-expression return — the clarity argument being that, for a security
+language, "the last expression is silently the return value" is an avoidable
+foot-gun, and an explicit `return value;` is unambiguous.
+
+Feasible without new infrastructure: `sentinel-base` already has a non-fatal
+`Severity::Warning` (rendered by the driver), currently unused — a deprecation
+warning would be the first emitter.
+
+**Step 0 (the bounded, do-first fix — confirmed gap, 2026-06-29):** a trailing
+`return value;` (WITH the semicolon) **does not parse today** — `fn main() ->
+i64 { return 42; }` errors `blocks must end with an expression`. Only `return
+42` (no semicolon, return-as-tail) or a *hanging* tail value works; `return x;`
+is valid mid-block (followed by a tail) but not as the block terminator. So the
+form the proposal calls "correct" isn't even writable. The first, separable fix
+(an ADR 0065 follow-up, NO deprecation) is to let a **value-block end with a
+divergent statement** — `return …;` (and `break;` / `continue;`) — with no
+trailing tail expression, since the block diverges before any tail is reached.
+This reuses ADR 0065's `block_diverges` machinery; it is a parser + block-typing
+change (and the selfhost mirror + a differential fixture if it enters the
+corpus), with NO IR change (`return 42;`-as-terminator lowers identically to
+`return 42`-as-tail). This step alone makes `return value;` canonical-capable;
+the deprecation below is the separate, larger piece.
+
+The sharp edges the deprecation ADR must resolve **before any warning is
+emitted**:
+
+- **Scope precisely.** The warning must target ONLY a *function-body* implicit
+  tail return — NOT expression tails. `if c { 42 } else { 0 }`, `match` arms,
+  and `scope` / block values are sub-expression results, not returns, and the
+  language stays expression-oriented there. The deprecated case is narrowly "a
+  function whose value comes from an implicit tail rather than an explicit
+  `return`."
+- **The bootstrap + corpus.** Every function in `selfhost/*.sentinel`, every
+  `examples/` program, and every fixture uses implicit tail returns — a naive
+  warning floods all of them. Decide: warn-only indefinitely, or warn → later
+  error behind an edition (11.1) with a mechanical migration to explicit
+  `return` that stays **byte-identical at both bootstrap fixed points**
+  (`return tail;` as the last statement must lower identically to the implicit
+  epilogue — verify, since ADR 0065's `return` drops-to-floor should coincide
+  with the normal epilogue's drops for a tail-position return).
+- **Philosophical call.** This nudges the language from Rust-style
+  expression-oriented returns toward C/Go-style statement-oriented returns — a
+  language-identity decision, not a lint.
+
+Recommendation: ADR-first; pin scope + migration + bootstrap handling before
+emitting anything. Low urgency relative to the threading / concurrency track.
+(Filed in BACKLOG.md §11 because BACKLOG2.md has no Language-Evolution section.)
+
 ---
 
 ## 12. What Sentinel Will Never Do
