@@ -1,17 +1,18 @@
 // tests/ui/c65_handle_perform_in_control_flow.sentinel — ADR 0020 D9 / ADR 0065 stage 3a.
 //
-// A `handle` body that `perform`s through CONTROL FLOW (here an `if` branch) is REJECTED:
-// the perform's continuation (`Kont*`) would be stored into the `i64`-typed merge slot and
-// wrongly treated as a pure value — a silent miscompile this rejection prevents. The idiom
-// is to put the performing computation in an effecting fn and call it from the handle body.
-// (A fully pure body, or an early `return` inside the body, is fine — neither leaks a kont.)
+// A `perform` in TAIL position of an `if`/`else` branch IS supported (stage 3a normalizes
+// each branch to a continuation). This fixture is the HARDER case still rejected: a NON-tail
+// perform — here `perform Io.read() + 1`, where the perform feeds a surrounding `+ 1`.
+// Reifying the `+ 1` as a resumer frame needs per-eval-site frame reification (deferred), so
+// it is rejected cleanly rather than miscompiled. The idiom is to extract the performing
+// computation into an effecting fn and call it from the handle body.
 effect Io {
     read() -> i64;
 }
 
 fn do_work(flag: bool) -> i64 {
-    handle if flag { perform Io.read() } else { perform Io.read() } with {
-        Io.read(k) => k(42)
+    handle if flag { perform Io.read() + 1 } else { 5 } with {
+        Io.read(k) => k(41)
     }
 }
 

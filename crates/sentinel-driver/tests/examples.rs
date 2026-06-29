@@ -448,6 +448,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // it on the return path), and a handle body early-returns before any `perform`. Both
     // resume + early-return paths run leak-free with no double-free. 42 = held. snc-only.
     ("examples/lang/early_return_handle.sentinel", 42),
+    // A handle body that performs through CONTROL FLOW (ADR 0065 stage 3a): a `perform`
+    // in an `if`/`else` branch is normalized to a continuation the handler dispatches,
+    // rather than being hoisted into a separate effecting fn. snc-only (the text oracle +
+    // selfhost don't yet mirror the normalization). 42 = held.
+    ("examples/lang/handle_control_flow.sentinel", 42),
 ];
 
 #[test]
@@ -698,6 +703,11 @@ fn lang_early_return_match() {
 #[test]
 fn lang_early_return_handle() {
     check_example("examples/lang/early_return_handle.sentinel", "early_return_handle", 42);
+}
+
+#[test]
+fn lang_handle_control_flow() {
+    check_example("examples/lang/handle_control_flow.sentinel", "handle_control_flow", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

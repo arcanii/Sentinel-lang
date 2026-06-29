@@ -1,0 +1,47 @@
+// examples/lang/handle_control_flow.sentinel — a `handle` body that performs through
+// CONTROL FLOW (ADR 0065 stage 3a). A `perform` reached via an `if`/`else` branch is now
+// NORMALIZED to a continuation the handler dispatches: each control-flow leaf becomes a
+// `Kont*` (a direct `perform` as-is; a pure value wrapped via `sentinel_kont_pure`), and
+// the `if` merges them as a continuation instead of stuffing the `perform`'s `Kont*` into
+// an `i64` slot. Previously this silently miscompiled, then (interim) was rejected; now it
+// runs — the performing computation no longer has to be hoisted into a separate effecting
+// fn.
+//
+// snc-only demonstrator: the lift is in the runtime + the inkwell back end; the `snc llvm`
+// text oracle + the selfhost still reject / don't mirror the normalization (a deferred
+// text-emitter follow-up), so this stays OUT of the differential (the early_return / u128 /
+// f64 pattern). A NON-tail perform in a branch (`perform Op() + 1`) and a `let`-bound
+// perform inside the body still need frame reification and are rejected. Exit 42.
+use std::test::check;
+
+effect Io {
+    read() -> i64;
+}
+
+// A `perform` in one branch, a pure value in the other.
+fn pick(flag: bool) -> i64 {
+    handle if flag { perform Io.read() } else { 5 } with {
+        Io.read(k) => k(40)
+    }
+}
+
+// Nested control flow reaching a `perform` deeper in.
+fn nested(a: bool, b: bool) -> i64 {
+    handle if a { if b { perform Io.read() } else { 1 } } else { 2 } with {
+        Io.read(k) => k(40)
+    }
+}
+
+fn main() -> i64 {
+    let mut passed: i64 = 0;
+    passed = passed + check("pick(true) performs -> 40", pick(true) == 40);
+    passed = passed + check("pick(false) pure -> 5", pick(false) == 5);
+    passed = passed + check("nested(true, true) performs -> 40", nested(true, true) == 40);
+    passed = passed + check("nested(true, false) pure -> 1", nested(true, false) == 1);
+    passed = passed + check("nested(false, false) pure -> 2", nested(false, false) == 2);
+    if passed == 5 {
+        return 42
+    } else {
+        0
+    }
+}

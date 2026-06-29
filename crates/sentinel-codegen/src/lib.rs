@@ -117,24 +117,22 @@ pub enum CodegenError {
     )]
     StringCodegenNotYetSupported,
 
-    /// ADR 0020 D9 / ADR 0065 stage 3a: a `handle` body that
-    /// `perform`s must produce a continuation (`Kont*`) DIRECTLY —
-    /// a `perform Op(args)`, a call to an effecting fn, or a nested
-    /// `handle`. A `perform` reached through CONTROL FLOW (an
-    /// `if`/`match` branch, or a non-tail `let` with a perform RHS)
-    /// is not yet supported: the perform's `Kont*` would be stored
-    /// into the `i64`-typed merge slot and wrongly `kont_pure`-
-    /// wrapped — a silent miscompile this rejection prevents. (A
-    /// fully PURE body, and an early `return` inside the body, are
-    /// fine — neither produces a stray kont.) General frame
-    /// reification at arbitrary `if`/`match` sites is the deferred
-    /// follow-up.
+    /// ADR 0020 D9 / ADR 0065 stage 3a: a `handle` body's `perform`
+    /// reached through control flow is supported only when it sits in
+    /// TAIL position of an `if`/`else` branch (each branch normalized
+    /// to a `Kont*`). A perform that needs per-eval-site frame
+    /// reification is NOT yet supported: a NON-tail perform
+    /// (`perform Op() + 1`, `f(perform Op())`), a `match` body, or a
+    /// `let`-bound perform inside the body. Such a body would store the
+    /// perform's `Kont*` into the `i64`-typed merge slot and miscompile;
+    /// this rejection prevents that. (A directly kont-producing body, a
+    /// fully PURE body, and an early `return` are all fine.)
     #[error(
-        "a `handle` body that `perform`s must do so directly (a `perform Op(args)`, a call to an effecting fn, or a nested `handle`); a `perform` reached through control flow (an `if`/`match` branch, or a non-tail `let`) is not yet supported"
+        "this `handle` body `perform`s in a position that needs frame reification (a non-tail `perform Op() + …`, a `match` body, or a `let`-bound perform inside the body); a `perform` in tail position of an `if`/`else` branch IS supported"
     )]
     #[diagnostic(
         code(sentinel::codegen::handle_body_not_direct_perform),
-        help("extract the performing computation into an effecting fn and call it from the handle body, or restructure so the `perform` is the body's tail; general perform-in-control-flow reification is a deferred follow-up (ADR 0020 D9 / ADR 0065 stage 3a)")
+        help("move the `perform` to the tail of its `if`/`else` branch, or extract the performing computation into an effecting fn and call it from the handle body; general perform-in-control-flow reification is a deferred follow-up (ADR 0020 D9 / ADR 0065 stage 3a)")
     )]
     HandleBodyNotDirectPerform,
 
@@ -4719,6 +4717,119 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         Ok(loaded)
     }
 
+    /// ADR 0065 stage 3a: lower a handle BODY (or a control-flow sub-position of
+    /// one) so it produces a `Kont*` the dispatch loop consumes directly,
+    /// normalizing each control-flow leaf to a continuation. A direct `perform`
+    /// / call-to-effecting / nested `handle` already lowers to a `Kont*`; a PURE
+    /// leaf is wrapped via `sentinel_kont_pure`; an `if`/block recurses so each
+    /// branch/tail is itself normalized. Used only when the body performs
+    /// through control flow (gated by [`body_normalizable_to_kont`] in
+    /// [`Self::lower_handle_inner`]); a directly-kont-producing or pure body
+    /// keeps the simpler path. (A NON-tail perform — `perform Op() + 1` — is
+    /// rejected upstream; `match` bodies are deferred.)
+    fn lower_body_as_kont(
+        &mut self,
+        body: &TypedExpr,
+        program: &TypedProgram,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        match &body.kind {
+            TypedExprKind::If { cond, then_branch, else_branch } => {
+                self.lower_if_as_kont(cond, then_branch, else_branch, program)
+            }
+            TypedExprKind::Block(b) => self.lower_block_as_kont(b, program),
+            _ => {
+                // A leaf: a kont-producer (perform / call-to-effecting / nested
+                // handle) yields a `Kont*` directly; a pure i64 is wrapped so the
+                // dispatch loop sees a uniform `Kont*` (PURE_RETURN-tagged).
+                let v = self.lower_expr(body, program)?;
+                if v.is_pointer_value() {
+                    Ok(v.into_pointer_value())
+                } else {
+                    let call = self
+                        .builder
+                        .build_call(self.kont_pure_fn, &[v.into_int_value().into()], "pure_kont")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    Ok(call
+                        .try_as_basic_value()
+                        .left()
+                        .expect("sentinel_kont_pure returns ptr")
+                        .into_pointer_value())
+                }
+            }
+        }
+    }
+
+    /// ADR 0065 stage 3a: the `Kont*`-producing twin of [`Self::lower_if`] — the
+    /// result slot is a `ptr` (every branch normalized to a `Kont*` via
+    /// [`Self::lower_body_as_kont`]) instead of the branch value type, so a
+    /// `perform` in a branch flows out as a continuation the handle dispatches
+    /// (rather than a `Kont*` stuffed into an `i64` slot — the miscompile).
+    fn lower_if_as_kont(
+        &mut self,
+        cond: &TypedExpr,
+        then_branch: &TypedBlock,
+        else_branch: &TypedBlock,
+        program: &TypedProgram,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        debug_assert_eq!(cond.ty, Type::Bool);
+        let cond_i1 = self.lower_expr(cond, program)?.into_int_value();
+        let current_fn = self.current_fn.expect("current_fn set by compile_fn");
+        let then_bb = self.context.append_basic_block(current_fn, "then");
+        let else_bb = self.context.append_basic_block(current_fn, "else");
+        let merge_bb = self.context.append_basic_block(current_fn, "ifmerge");
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let result = self.binding_alloca(ptr_ty.into(), "ifkont")?;
+        self.builder
+            .build_conditional_branch(cond_i1, then_bb, else_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        self.builder.position_at_end(then_bb);
+        let then_kont = self.lower_block_as_kont(then_branch, program)?;
+        self.builder
+            .build_store(result, then_kont)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        self.builder.position_at_end(else_bb);
+        let else_kont = self.lower_block_as_kont(else_branch, program)?;
+        self.builder
+            .build_store(result, else_kont)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        self.builder
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        self.builder.position_at_end(merge_bb);
+        let loaded = self
+            .builder
+            .build_load(ptr_ty, result, "ifkont_val")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(loaded.into_pointer_value())
+    }
+
+    /// ADR 0065 stage 3a: the `Kont*`-producing twin of [`Self::lower_block`] —
+    /// the statements lower normally (with scope drops), then the TAIL is
+    /// normalized to a `Kont*`. Intermediate statements may not perform (the
+    /// let-bound-perform-inside-a-handle-body case needs frame reification and
+    /// is rejected by [`block_normalizable_to_kont`]); the tail is a `Kont*`
+    /// pointer (never a tail-returned `Var`), so nothing is move-skipped.
+    fn lower_block_as_kont(
+        &mut self,
+        block: &TypedBlock,
+        program: &TypedProgram,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        self.scope_stack.push(ScopeFrame::default());
+        for stmt in &block.stmts {
+            self.lower_stmt(stmt, program)?;
+        }
+        let kont = self.lower_body_as_kont(&block.tail, program)?;
+        self.emit_scope_drops(None, program)?;
+        self.scope_stack.pop();
+        Ok(kont)
+    }
+
     /// Phase D.1 / ADR 0032 D4: the LLVM type of a variant's heap-boxed
     /// payload — an anonymous struct `{ field0, field1, … }` of the
     /// variant's (already-resolved) payload types. The single source of
@@ -7220,43 +7331,46 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         program: &TypedProgram,
         is_nested: bool,
     ) -> Result<BasicValueEnum<'ctx>, CodegenError> {
-        // ADR 0020 D9 / ADR 0065 stage 3a: the body must lower to a clean
-        // value the dispatch loop can use — a `Kont*` (a direct `perform`, a
-        // call to an effecting fn, or a nested `handle`) or a fully PURE i64
-        // (kont_pure-wrapped below). A body that `perform`s through CONTROL
-        // FLOW (an `if`/`match` branch, or a non-tail `let` with a perform RHS)
-        // produces neither: the perform's `Kont*` lands in the `i64`-typed merge
-        // slot and gets wrongly kont_pure-wrapped — a silent miscompile. Reject
-        // it cleanly here (the idiom is to call an effecting fn). An early
-        // `return` in the body is fine — it is not a `perform`.
-        if !handle_body_produces_kont(body, program) && expr_performs(body) {
+        // ADR 0020 D9 / ADR 0065 stage 3a: classify the body.
+        //   - Directly kont-producing (a `perform`, a call to an effecting fn, a
+        //     nested `handle`, a block whose tail is one) OR fully PURE: the
+        //     simple path below — lower it, use the `Kont*` as-is or kont_pure-
+        //     wrap the i64.
+        //   - Performs through CONTROL FLOW (an `if` whose branch performs, a
+        //     block whose tail does): NORMALIZE each control-flow leaf to a
+        //     `Kont*` via `lower_body_as_kont` (else the perform's `Kont*` would
+        //     land in an `i64` merge slot and miscompile). `match` bodies and a
+        //     NON-tail perform (`perform Op() + 1`) need frame reification and
+        //     are not yet normalizable → rejected cleanly.
+        // An early `return` in the body is fine — it is not a `perform`.
+        let cf_perform = expr_performs(body) && !handle_body_produces_kont(body, program);
+        if cf_perform && !body_normalizable_to_kont(body, program) {
             return Err(CodegenError::HandleBodyNotDirectPerform);
         }
-
-        // Lower the body.
-        //
-        //   - Perform / Call-to-effecting / nested Handle:
-        //     produces a Kont* directly.
-        //   - Pure expression (i64): wrap via sentinel_kont_pure
-        //     so the dispatch loop sees a uniform Kont* (the
-        //     switch then matches PURE_RETURN_OP_ID).
-        let body_val = self.lower_expr(body, program)?;
-        let initial_kont = if body_val.is_pointer_value() {
-            body_val.into_pointer_value()
+        let initial_kont = if cf_perform {
+            self.lower_body_as_kont(body, program)?
         } else {
-            let wrap_call = self
-                .builder
-                .build_call(
-                    self.kont_pure_fn,
-                    &[body_val.into_int_value().into()],
-                    "body_pure_wrap",
-                )
-                .map_err(|e| CodegenError::Builder(e.to_string()))?;
-            wrap_call
-                .try_as_basic_value()
-                .left()
-                .expect("sentinel_kont_pure returns ptr")
-                .into_pointer_value()
+            // Perform / Call-to-effecting / nested Handle → a Kont* directly;
+            // a pure expression (i64) → wrapped so the dispatch loop sees a
+            // uniform Kont* (the switch then matches PURE_RETURN_OP_ID).
+            let body_val = self.lower_expr(body, program)?;
+            if body_val.is_pointer_value() {
+                body_val.into_pointer_value()
+            } else {
+                let wrap_call = self
+                    .builder
+                    .build_call(
+                        self.kont_pure_fn,
+                        &[body_val.into_int_value().into()],
+                        "body_pure_wrap",
+                    )
+                    .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                wrap_call
+                    .try_as_basic_value()
+                    .left()
+                    .expect("sentinel_kont_pure returns ptr")
+                    .into_pointer_value()
+            }
         };
 
         let i32_ty = self.context.i32_type();
@@ -7761,6 +7875,35 @@ fn handle_body_produces_kont(body: &TypedExpr, program: &TypedProgram) -> bool {
     // reuse the effecting-fn-tail predicate (direct `perform` / call-to-effecting
     // / a block whose tail does). Mirrors `llvm_dump`'s `body_is_kont`.
     matches!(body.kind, TypedExprKind::Handle { .. }) || tail_produces_kont(body, program)
+}
+
+/// ADR 0065 stage 3a: can this handle body that performs through CONTROL FLOW be
+/// normalized to a clean `Kont*` (each `if`/`match` leaf made a continuation)?
+/// True iff every control-flow leaf is itself a clean kont-producer (a direct
+/// `perform` / call-to-effecting / nested `handle`) OR fully pure (kont_pure-
+/// wrapped). A leaf that performs through a NON-tail position (`perform Op() + 1`,
+/// `f(perform Op())`) needs per-eval-site frame reification and is NOT
+/// normalizable — it stays rejected ([`CodegenError::HandleBodyNotDirectPerform`]).
+/// `match` is deferred (treated as not-normalizable, so a performing `match` body
+/// stays rejected for now). Drives [`CodegenCtx::lower_body_as_kont`].
+fn body_normalizable_to_kont(body: &TypedExpr, program: &TypedProgram) -> bool {
+    match &body.kind {
+        TypedExprKind::If { then_branch, else_branch, .. } => {
+            block_normalizable_to_kont(then_branch, program)
+                && block_normalizable_to_kont(else_branch, program)
+        }
+        TypedExprKind::Block(b) => block_normalizable_to_kont(b, program),
+        // A leaf: a clean kont-producer, or fully pure.
+        _ => handle_body_produces_kont(body, program) || !expr_performs(body),
+    }
+}
+
+/// ADR 0065 stage 3a: a block is normalizable iff no intermediate statement
+/// performs (a let-bound perform inside a handle body needs frame reification —
+/// deferred) and its tail is normalizable.
+fn block_normalizable_to_kont(block: &TypedBlock, program: &TypedProgram) -> bool {
+    !block.stmts.iter().any(|s| stmt_performs(&s.kind))
+        && body_normalizable_to_kont(&block.tail, program)
 }
 
 /// C3.5(c) / ADR 0020 D7: detect the "single-let-with-effecting-

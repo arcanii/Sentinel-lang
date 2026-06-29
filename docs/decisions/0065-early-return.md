@@ -187,18 +187,21 @@ selfhost compiler sources need not *use* `return` (they keep tail returns), but 
    selfhost `cg` mode still omit it — invisible to the exit code; the self-hosted `scg` compiles
    handle-free sources so its bootstrap is unaffected) and the **selfhost MIR collapse** (snc MIR
    collapses a `handle` to opaques without lowering the arm's `return`; the selfhost MIR lowers it, so
-   they diverge — a separate selfhost-MIR faithfulness item). **The orthogonal gap is now REJECTED, not
-   miscompiled (stage 3a interim, 2026-06-29):** a handle body whose control flow REACHES a `perform`
-   (an `if`/`match` branch that performs, or a non-tail `let` with a perform RHS) is not a supported
-   body shape — it would store the perform's `Kont*` into the `i64`-typed merge slot and miscompile.
-   The orphaned `CodegenError::HandleBodyNotDirectPerform` is now re-wired in **both** the inkwell back
-   end (`lower_handle_inner`: `!handle_body_produces_kont(body) && expr_performs(body)`) and the
-   `snc llvm` text dumper, so the former **silent miscompile is a clean compile error** (the idiom is
-   to put performs in an effecting fn and call it). A pure body — and an early `return` inside the
-   body/arm — is fine. `tests/ui/c65_handle_perform_in_control_flow.sentinel` pins the diagnostic; no
-   over-rejection (the 23 effecting pass tests + c36b's literal nested `handle` still compile).
-   **Fully supporting** control-flow-reaching performs (frame reification at `if`/`match` sites) is the
-   ADR-0020-anticipated incremental work, still deferred.
+   they diverge — a separate selfhost-MIR faithfulness item). **The orthogonal gap is being LIFTED (stage 3a,
+   2026-06-29):** a handle body that performs through control flow used to silently miscompile (the
+   perform's `Kont*` stored into the `i64`-typed merge slot and `kont_pure`-wrapped). First it was
+   made a clean rejection; now the **common case is SUPPORTED** in the inkwell back end — a `perform`
+   in TAIL position of an `if`/`else` branch (incl. nested `if`s, and a pure sibling branch) is
+   NORMALIZED to a continuation: `lower_body_as_kont` / `lower_if_as_kont` / `lower_block_as_kont` make
+   the `if`'s result slot a `ptr`, each leaf a `Kont*` (a direct `perform` as-is, a pure value
+   `kont_pure`-wrapped), so the handle dispatches the merged continuation. Demonstrator
+   `examples/lang/handle_control_flow.sentinel` (snc-only). **Still rejected** (needs per-eval-site
+   frame reification — `CodegenError::HandleBodyNotDirectPerform`, pinned by
+   `tests/ui/c65_handle_perform_in_control_flow.sentinel`): a NON-tail perform (`perform Op() + 1`), a
+   `match` body, and a `let`-bound perform inside the body. **Deferred (snc-only):** the `snc llvm`
+   oracle + selfhost still reject ALL control-flow performs (not yet 3a-aware), so the demonstrator is
+   out of the differential (the text-emitter mirror is the follow-up). No over-rejection (the 23
+   effecting pass tests + c36b's literal nested `handle` still compile).
 4. ✅ **Stage-4 codegen + self-host + typing acceptance** (DONE 2026-06-29). The **real `return`
    text-IR** lands byte-identical in both text emitters: the `snc llvm` oracle
    (`crates/sentinel-driver/src/llvm_dump.rs`) and the self-hosted `scg` (the `cg` mode of

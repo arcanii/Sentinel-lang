@@ -87,16 +87,20 @@ reference as you work through the milestones.
 > to the exit code; `scg` compiles handle-free sources so its bootstrap is unaffected), and the
 > **selfhost MIR collapse** (snc MIR collapses a `handle` to opaques without lowering the arm's
 > `return`; the selfhost MIR lowers it → a MIR-differential divergence, why the fixture is examples/
-> not tests/pass). **Orthogonal gap now REJECTED (stage 3a interim), not silently miscompiled:** a
-> handle body whose control flow REACHES a `perform` (an `if`/`match` branch, or a non-tail `let`)
-> is not a supported shape — it would miscompile (`handle if c { perform … } else { perform … } with
-> { … }` returned 0 not 42, no `return` involved). The orphaned
-> `CodegenError::HandleBodyNotDirectPerform` is now re-wired in BOTH the inkwell `lower_handle_inner`
-> (`!handle_body_produces_kont(body) && expr_performs(body)`) and the `snc llvm` dumper, so it is a
-> CLEAN COMPILE ERROR; `tests/ui/c65_handle_perform_in_control_flow.sentinel` pins it (no
-> over-rejection — c36b's literal nested `handle` + the 23 effecting tests still compile). FULLY
-> supporting it (frame reification at `if`/`match` sites) is the ADR-0020-anticipated deferred work.
-> Also pending: the final macOS cross-platform confirmation; then ADR 0065 ACCEPTED.
+> not tests/pass). **Orthogonal gap — stage 3a, now being LIFTED:** a handle body that performs
+> through control flow used to silently miscompile (`handle if c { perform … } else { perform … }
+> with { … }` returned 0 not 42, no `return` involved); first made a clean rejection, now the COMMON
+> CASE is SUPPORTED in the inkwell back end — a `perform` in TAIL position of an `if`/`else` branch
+> (incl. nested `if`s + a pure sibling) is normalized to a continuation
+> (`lower_body_as_kont`/`lower_if_as_kont`/`lower_block_as_kont`: the `if` result slot becomes a
+> `ptr`, each leaf a `Kont*`). Demonstrator `examples/lang/handle_control_flow.sentinel` (snc-only,
+> exit 42). STILL REJECTED (`CodegenError::HandleBodyNotDirectPerform`, pinned by
+> `tests/ui/c65_handle_perform_in_control_flow`): a NON-tail perform (`perform Op() + 1`), a `match`
+> body, a `let`-bound perform inside the body — each needs per-eval-site frame reification. DEFERRED
+> (snc-only): the `snc llvm` oracle + selfhost still reject ALL control-flow performs (not 3a-aware) —
+> the text-emitter mirror is the follow-up; that is why the demonstrator is examples/ not tests/pass.
+> No over-rejection (c36b's literal nested `handle` + the 23 effecting tests still compile). Also
+> pending: the final macOS cross-platform confirmation; then ADR 0065 ACCEPTED.
 
 All on `main`, **NEVER pushed**. Verified on **Windows only** (see the macOS caveat);
 the dev box is `x86_64-pc-windows-msvc` with a from-source LLVM 18.1.8 at `G:\llvm-18`
