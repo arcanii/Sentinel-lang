@@ -28,6 +28,7 @@ part interner;
 part infer;
 part borrow;
 part borrow_stmts;
+part borrow_arms;
 part decl_fn;
 part decl_class;
 part decl_synth;

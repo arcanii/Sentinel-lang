@@ -1,0 +1,1526 @@
+module types;
+
+fn dump_te_binary(out: &mut Vec<u8>, bop: i64, l: Expr, r: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+            // The result type is known only AFTER the operands synthesize, but a
+            // `(widen-null …)` wrapper must PRECEDE the node — so build the binop into
+            // a temp buffer, then splice with the optional wrapper (`maybe_double`'s
+            // `a * 2 : i64` widens to `?i64` in a `?i64`-returning branch).
+            let mut tmp: Vec<u8> = vec_new();
+            push(&mut tmp, '(');
+            let pfx: [u8] = if bop <= 7 || bop == 16 || bop == 17 {
+                "binop"
+            } else if bop <= 13 {
+                "cmp"
+            } else {
+                "logic"
+            };
+            append_str(&mut tmp, pfx);
+            push(&mut tmp, ' ');
+            let bsym: [u8] = if bop == 1 {
+                "+"
+            } else if bop == 2 {
+                "-"
+            } else if bop == 3 {
+                "*"
+            } else if bop == 4 {
+                "/"
+            } else if bop == 5 {
+                "&"
+            } else if bop == 6 {
+                "|"
+            } else if bop == 7 {
+                "^"
+            } else if bop == 8 {
+                "=="
+            } else if bop == 9 {
+                "!="
+            } else if bop == 10 {
+                "<"
+            } else if bop == 11 {
+                "<="
+            } else if bop == 12 {
+                ">"
+            } else if bop == 13 {
+                ">="
+            } else if bop == 14 {
+                "&&"
+            } else if bop == 16 {
+                "<<"
+            } else if bop == 17 {
+                ">>"
+            } else {
+                "||"
+            };
+            append_str(&mut tmp, bsym);
+            push(&mut tmp, ' ');
+            // (ADR 0051) Build each operand into its OWN buffer so a public operand can
+            // be wrapped in `(widen-secret …)` when it meets a secret one (the widen
+            // decision needs BOTH operand types, known only after both dumps). The
+            // operands' MIR/CG already emit into the streams during their `dump_texpr`.
+            let mut lbuf: Vec<u8> = vec_new();
+            let lt: i64 = dump_texpr(&mut lbuf, l, 0 - 1, src, c, gb);
+            let mut blv: i64 = if mir_on(c) {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
+            // (8/N) codegen: capture the left operand (overwritten by the right walk).
+            let cglk0: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cglv0: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
+            // (7b) MIR: `&&`/`||` (bop 14/15) is a short-circuit BRANCH on the left — the
+            // right operand evaluates only on the non-short edge. Fork now (before the
+            // right walk, which then emits into `rhs_blk`). And: true->rhs, false->short;
+            // Or: true->short, false->rhs.
+            let mut rhs_blk: i64 = 0 - 1;
+            let mut short_blk: i64 = 0 - 1;
+            if mir_on(c) {
+                // ADR 0048: only `&&`/`||` (14/15) short-circuit; shifts (16/17)
+                // are ordinary binops and must NOT fork here.
+                if bop == 14 || bop == 15 {
+                    rhs_blk = mir_new_block(c);
+                    short_blk = mir_new_block(c);
+                    let pred: i64 = (*c).mir_cur;
+                    if bop == 14 {
+                        mir_term_branch(c, pred, blv, rhs_blk, short_blk);
+                        0
+                    } else {
+                        mir_term_branch(c, pred, blv, short_blk, rhs_blk);
+                        0
+                    };
+                    (*c).mir_cur = rhs_blk;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            // (8b) cg: && / || short-circuit — branch on the left BEFORE the right walk
+            // so the right operand emits into the rhs block. Allocate rhs/short/merge.
+            let mut cg_lrhs: i64 = 0 - 1;
+            let mut cg_lshort: i64 = 0 - 1;
+            let mut cg_lmerge: i64 = 0 - 1;
+            let mut cg_lslot: i64 = 0 - 1;
+            if cg_on(c) {
+                // ADR 0048: only `&&`/`||` (14/15) short-circuit; shifts are binops.
+                if bop == 14 || bop == 15 {
+                    cg_lrhs = cg_fresh_block(c);
+                    cg_lshort = cg_fresh_block(c);
+                    cg_lmerge = cg_fresh_block(c);
+                    cgo_str(c, "  br i1 ");
+                    cgo_operand(c, cglk0, cglv0);
+                    if bop == 14 {
+                        cgo_str(c, ", label %bb");
+                        cgo_int(c, cg_lrhs);
+                        cgo_str(c, ", label %bb");
+                        cgo_int(c, cg_lshort);
+                        0
+                    } else {
+                        cgo_str(c, ", label %bb");
+                        cgo_int(c, cg_lshort);
+                        cgo_str(c, ", label %bb");
+                        cgo_int(c, cg_lrhs);
+                        0
+                    };
+                    cg_putc(c, '\n');
+                    cgo_str(c, "bb");
+                    cgo_int(c, cg_lrhs);
+                    cgo_str(c, ":\n");
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            // `==`/`!=` (bop 8/9): the right operand inherits the left's type, so
+            // `x == null` types the `null` as `x`'s `?T` (ADR 0014 D7).
+            let rexp: i64 = if bop == 8 {
+                lt
+            } else if bop == 9 {
+                lt
+            } else {
+                0 - 1
+            };
+            let mut rbuf: Vec<u8> = vec_new();
+            let rt: i64 = dump_texpr(&mut rbuf, r, rexp, src, c, gb);
+            let mut brv: i64 = if mir_on(c) {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
+            // (8/N) codegen: capture the right operand.
+            let cgrk: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cgrv: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
+            // (ADR 0051) public->secret OPERAND widen: a SYMMETRIC op (`+ - * & | ^`,
+            // bop 1,2,3,5,6,7) or a comparison (bop 8..13) with the SAME stripped inner
+            // type but exactly ONE secret operand WIDENS the public operand to secret
+            // (result secret). EXCLUDES `/` (4) and the shifts (16,17) — their secret
+            // divisor / shift-amount sinks must STILL reject — and `&&`/`||` (14,15).
+            let lstrip: i64 = strip_secret(c, lt);
+            let rstrip: i64 = strip_secret(c, rt);
+            let lsec: bool = is_secret(c, lt);
+            let rsec: bool = is_secret(c, rt);
+            let wsym: bool = (bop >= 1 && bop <= 3) || bop == 5 || bop == 6 || bop == 7 || (bop >= 8 && bop <= 13);
+            let dowiden: bool = wsym && lstrip == rstrip && lsec != rsec;
+            let starget: i64 = mk_secret(c, lstrip);
+            let widen_l: bool = dowiden && !lsec;
+            let widen_r: bool = dowiden && !rsec;
+            // arithmetic (<=7) preserves the operand type — so a secret operand makes
+            // the result secret automatically (`lt` is already `secret T`); with the
+            // widen, a `secret op public` arith is secret too (`starget`). cmp -> bool,
+            // but secret-preserving: a secret operand → `secret bool` (ADR 0019 D5b).
+            let resty: i64 = if bop <= 7 || bop == 16 || bop == 17 {
+                if dowiden {
+                    starget
+                } else {
+                    lt
+                }
+            } else if lsec {
+                mk_secret(c, 2)
+            } else if dowiden {
+                mk_secret(c, 2)
+            } else {
+                2
+            };
+            // (7/N) MIR: the widened PUBLIC operand becomes an `Opaque` carrying its
+            // value (the let-widen machinery, `mir_widen`) — mirrors the oracle lowering
+            // `WidenToSecret` to `Opaque([inner])`. Re-capture the operand's SSA value so
+            // the binop/cmp consumes the widened one.
+            if mir_on(c) {
+                if widen_r {
+                    mir_widen(c, true, starget);
+                    brv = (*c).lastval;
+                    0
+                } else if widen_l {
+                    (*c).lastval = blv;
+                    mir_widen(c, true, starget);
+                    blv = (*c).lastval;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            // Splice the operands into `tmp`, wrapping the public one in `(widen-secret
+            // … :secret T)` when widened (CG: a secret widen is value-level identity, so
+            // the captured operand kinds are unchanged — `cg_widen`/oracle emit nothing).
+            let lexp: i64 = if widen_l {
+                starget
+            } else {
+                0 - 1
+            };
+            widen_splice(&mut tmp, lbuf, lexp, lt, c);
+            push(&mut tmp, ' ');
+            let rexp2: i64 = if widen_r {
+                starget
+            } else {
+                0 - 1
+            };
+            widen_splice(&mut tmp, rbuf, rexp2, rt, c);
+            close_ty(&mut tmp, resty, c);
+            // (7/N) MIR: binop (bop<=7) / cmp (8..13) -> an inst; logic (&&/||) -> the
+            // short-circuit merge (the (7b) fork above branched on the left).
+            if mir_on(c) {
+                if bop <= 13 || bop == 16 || bop == 17 {
+                    let mc: i64 = (*c).mir_cur;
+                    let mop: i64 = if bop <= 7 || bop == 16 || bop == 17 {
+                        3
+                    } else {
+                        4
+                    };
+                    let d: i64 = mir_emit(c, mc, mop, bop, blv, brv, resty);
+                    (*c).lastval = d;
+                    0
+                } else {
+                    // logic short-circuit merge: the rhs value (brv) flows from the rhs
+                    // exit; the short block yields a constant (false for &&, true for ||);
+                    // both jump to a merge whose single param is the result.
+                    let rhs_exit: i64 = (*c).mir_cur;
+                    let sb: i64 = if bop == 15 {
+                        1
+                    } else {
+                        0
+                    };
+                    let sval: i64 = mir_emit(c, short_blk, 1, 0, sb, 0, resty);
+                    let merge: i64 = mir_new_block(c);
+                    let result: i64 = mir_add_param(c, merge, resty);
+                    let mut ra: Vec<i64> = vec_new();
+                    let mut sa: Vec<i64> = vec_new();
+                    push(&mut ra, brv);
+                    push(&mut sa, sval);
+                    mir_term_jump(c, rhs_exit, merge, &ra);
+                    mir_term_jump(c, short_blk, merge, &sa);
+                    (*c).mir_cur = merge;
+                    (*c).lastval = result;
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            // (8/N) codegen: binop (bop<=7) -> the int op; cmp (8..13) -> `icmp`. The
+            // operand type is `lt` (= resty for binop; the operands' type for cmp). `&&`/
+            // `||` (14/15) are control flow (8b) — not emitted here.
+            if cg_on(c) {
+                if bop <= 7 || bop == 16 || bop == 17 {
+                    let opn: [u8] = if bop == 1 {
+                        "add"
+                    } else if bop == 2 {
+                        "sub"
+                    } else if bop == 3 {
+                        "mul"
+                    } else if bop == 4 {
+                        if lt == 3 {
+                            "udiv"
+                        } else {
+                            "sdiv"
+                        }
+                    } else if bop == 5 {
+                        "and"
+                    } else if bop == 6 {
+                        "or"
+                    } else if bop == 7 {
+                        "xor"
+                    } else if bop == 16 {
+                        // ADR 0048: shift left.
+                        "shl"
+                    } else {
+                        // ADR 0048: LOGICAL shift right (zero-fill, all int types).
+                        "lshr"
+                    };
+                    cg_bin(c, opn, lt, cglk0, cglv0, cgrk, cgrv);
+                    0
+                } else if bop <= 13 {
+                    let prd: [u8] = if bop == 8 {
+                        "eq"
+                    } else if bop == 9 {
+                        "ne"
+                    } else if bop == 10 {
+                        if lt == 3 {
+                            "ult"
+                        } else {
+                            "slt"
+                        }
+                    } else if bop == 11 {
+                        if lt == 3 {
+                            "ule"
+                        } else {
+                            "sle"
+                        }
+                    } else if bop == 12 {
+                        if lt == 3 {
+                            "ugt"
+                        } else {
+                            "sgt"
+                        }
+                    } else {
+                        if lt == 3 {
+                            "uge"
+                        } else {
+                            "sge"
+                        }
+                    };
+                    // (Bar B) a nullable operand (`x == null`) compares the i1 valid
+                    // bits, not the payloads (only eq/ne are type-legal → `prd` fits).
+                    let cmp_ln: bool = cg_is_nullable(c, lt);
+                    let cmp_rn: bool = cg_is_nullable(c, rt);
+                    let cmp_null: bool = cmp_ln || cmp_rn;
+                    if cmp_null {
+                        cg_cmp_null(c, prd, lt, rt, cglk0, cglv0, cgrk, cgrv);
+                        0
+                    } else {
+                        cg_cmp(c, prd, lt, cglk0, cglv0, cgrk, cgrv);
+                        0
+                    };
+                    0
+                } else {
+                    // bop 14/15: && / || — the rhs walked into the rhs block (forked
+                    // above). Store the rhs value + the short constant (0 for &&, 1 for
+                    // ||); the merge loads the i1 result. No phi.
+                    cg_lslot = cg_alloca(c, 2);
+                    cgo_str(c, "  store i1 ");
+                    cgo_operand(c, cgrk, cgrv);
+                    cgo_str(c, ", ptr %v");
+                    cgo_int(c, cg_lslot);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "  br label %bb");
+                    cgo_int(c, cg_lmerge);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "bb");
+                    cgo_int(c, cg_lshort);
+                    cgo_str(c, ":\n");
+                    let cg_sc: i64 = if bop == 15 {
+                        1
+                    } else {
+                        0
+                    };
+                    cgo_str(c, "  store i1 ");
+                    cgo_int(c, cg_sc);
+                    cgo_str(c, ", ptr %v");
+                    cgo_int(c, cg_lslot);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "  br label %bb");
+                    cgo_int(c, cg_lmerge);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "bb");
+                    cgo_int(c, cg_lmerge);
+                    cgo_str(c, ":\n");
+                    let cg_lld: i64 = cg_fresh(c);
+                    cgo_str(c, "  %v");
+                    cgo_int(c, cg_lld);
+                    cgo_str(c, " = load i1, ptr %v");
+                    cgo_int(c, cg_lslot);
+                    cg_putc(c, '\n');
+                    cg_reg(c, cg_lld);
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            let bw: bool = if mir_on(c) {
+                widen_kind(c, exp, resty) != 0
+            } else if cg_on(c) {
+                widen_kind(c, exp, resty) != 0
+            } else {
+                false
+            };
+            mir_widen(c, bw, exp);
+            cg_widen(c, bw, exp);
+            widen_splice(out, tmp, exp, resty, c)
+}
+
+fn dump_te_unary(out: &mut Vec<u8>, uop: i64, inner: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+            append_str(out, "(unary ");
+            let usym: [u8] = if uop == 1 {
+                "-"
+            } else if uop == 2 {
+                "!"
+            } else if uop == 3 {
+                "*"
+            } else if uop == 4 {
+                "&"
+            } else {
+                "&mut"
+            };
+            append_str(out, usym);
+            push(out, ' ');
+            // (6/N) a `&`/`&mut` borrow + `*` deref operand is NON-consuming (and `-`/`!`
+            // operands are Copy scalars → moot); never a move.
+            let svc: bool = (*c).consuming;
+            (*c).consuming = false;
+            // (8d) codegen lvalue handling: `&`/`&mut` want the inner's ADDRESS — suppress
+            // its Var load (the slot IS the pointer); `*` wants the inner's VALUE (the
+            // pointer, loaded). `un_place` = whether THIS unary is itself an assign-target
+            // place (an `*r = …` set cg_suppress before walking us).
+            let un_place: bool = (*c).cg_suppress;
+            if cg_on(c) {
+                if uop == 4 {
+                    (*c).cg_suppress = true;
+                    0
+                } else if uop == 5 {
+                    (*c).cg_suppress = true;
+                    0
+                } else {
+                    (*c).cg_suppress = false;
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            let it: i64 = dump_texpr(out, inner, 0 - 1, src, c, gb);
+            let iv: i64 = if mir_on(c) {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
+            // (8/N) codegen: capture the inner operand (kind+value) before emitting.
+            let cguk: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cguv: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
+            // (8d) the inner Var's id (recorded under suppress) — for `&v`'s slot.
+            let un_vid: i64 = if cg_on(c) {
+                (*c).cg_lastvid
+            } else {
+                0 - 1
+            };
+            if cg_on(c) {
+                (*c).cg_suppress = un_place;
+                0
+            } else {
+                0
+            };
+            (*c).consuming = svc;
+            // `!` -> bool; `&`/`&mut` -> a ref type; `*` -> strip a ref; `-` -> operand.
+            let rt: i64 = if uop == 2 {
+                2
+            } else if uop == 4 {
+                mk_ref(c, 0, it)
+            } else if uop == 5 {
+                mk_ref(c, 1, it)
+            } else if uop == 3 {
+                strip_ref(c, it)
+            } else {
+                it
+            };
+            close_ty(out, rt, c);
+            // (7/N) MIR: `*p` (uop 3) -> a Load (op 5, no index; a secret pointer is the
+            // D5 leak); every other unary (- ! & &mut) -> a unary inst (op 2). One emit
+            // (a per-branch `let` would collide in the flat namespace).
+            if mir_on(c) {
+                let mc: i64 = (*c).mir_cur;
+                let uo: i64 = if uop == 3 {
+                    5
+                } else {
+                    2
+                };
+                let us: i64 = if uop == 3 {
+                    0
+                } else {
+                    uop
+                };
+                let ub: i64 = if uop == 3 {
+                    0 - 1
+                } else {
+                    0
+                };
+                let d: i64 = mir_emit(c, mc, uo, us, iv, ub, rt);
+                (*c).lastval = d;
+                (*c).mir_lastvid = 0 - 1;
+                0
+            } else {
+                0
+            };
+            // (8/N) codegen: `-x`→`sub <ty> 0, x`; `!b`→`xor i1 b, 1`; (8d) `*r`→`load <rt>,
+            // ptr <r-val>` (or, as an assign-target place, leave r's pointer + signal -1);
+            // `&v`/`&mut v`→v's alloca slot (the pointer; no instruction).
+            if cg_on(c) {
+                if uop == 1 {
+                    cg_neg(c, rt, cguk, cguv);
+                    0
+                } else if uop == 2 {
+                    cg_not(c, cguk, cguv);
+                    0
+                } else if uop == 3 {
+                    if un_place {
+                        (*c).cg_lastvid = 0 - 1;
+                        0
+                    } else {
+                        let und: i64 = cg_dst(c);
+                        cgo_str(c, "load ");
+                        cgo_ty(c, rt);
+                        cgo_str(c, ", ptr ");
+                        cgo_operand(c, cguk, cguv);
+                        cg_putc(c, '\n');
+                        cg_reg(c, und);
+                        0
+                    };
+                    0
+                } else {
+                    if un_vid >= 0 {
+                        let uncgsl: i64 = cg_slot_get(c, un_vid);
+                        cg_reg(c, uncgsl);
+                        0
+                    } else {
+                        // `&*r` reborrow: the inner deref-place already left r's pointer
+                        // in the operand (un_vid = -1) — that IS the address; keep it.
+                        0
+                    };
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            rt
+}
+
+fn dump_te_if(out: &mut Vec<u8>, cnd: Expr, thn: Expr, els: Expr, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+            append_str(out, "(if ");
+            // (6/N) the condition is a read (non-consuming); the branches INHERIT the
+            // if's consuming context (a returned/moved if moves its branch-tail Vars —
+            // the conservative union: a Var moved in EITHER branch is recorded).
+            let svc: bool = (*c).consuming;
+            (*c).consuming = false;
+            dump_texpr(out, cnd, 0 - 1, src, c, gb);
+            (*c).consuming = svc;
+            // (8b) codegen: capture the cond operand, allocate the then/else/merge block
+            // labels (+ the if-result slot, filled after the then walk), then branch on the
+            // cond and open the then block. No phi — the arms store into the result slot.
+            let cgC_k: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cgC_v: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
+            let mut cg_then: i64 = 0 - 1;
+            let mut cg_else: i64 = 0 - 1;
+            let mut cg_merge: i64 = 0 - 1;
+            let mut cg_rslot: i64 = 0 - 1;
+            if cg_on(c) {
+                cg_then = cg_fresh_block(c);
+                cg_else = cg_fresh_block(c);
+                cg_merge = cg_fresh_block(c);
+                cgo_str(c, "  br i1 ");
+                cgo_operand(c, cgC_k, cgC_v);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, cg_then);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, cg_else);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, cg_then);
+                cgo_str(c, ":\n");
+                0
+            } else {
+                0
+            };
+            // (7b) MIR: branch on the cond into fresh then/else blocks; snapshot var_defs.
+            let cv: i64 = if mir_on(c) {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
+            let mut tb: i64 = 0 - 1;
+            let mut eb: i64 = 0 - 1;
+            let mut snap: i64 = 0;
+            if mir_on(c) {
+                tb = mir_new_block(c);
+                eb = mir_new_block(c);
+                let pred: i64 = (*c).mir_cur;
+                snap = mir_vd_len(c);
+                mir_term_branch(c, pred, cv, tb, eb);
+                (*c).mir_cur = tb;
+                0
+            } else {
+                0
+            };
+            push(out, ' ');
+            // Both branches inherit the `if`'s expectation, so a `?T`-returning `if`
+            // widens each branch's tail (and the `if`'s type is that branch type).
+            let tt: i64 = dump_texpr(out, thn, exp, src, c, gb);
+            // (8b) codegen: capture the then operand; reserve the if-result slot (its type
+            // `tt` is known only now); store the then value, branch to merge, open the else.
+            let cgT_k: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cgT_v: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
+            if cg_on(c) {
+                cg_rslot = cg_alloca(c, tt);
+                cgo_str(c, "  store ");
+                cgo_ty(c, tt);
+                cg_putc(c, ' ');
+                cgo_operand(c, cgT_k, cgT_v);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, cg_rslot);
+                cg_putc(c, '\n');
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, cg_merge);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, cg_else);
+                cgo_str(c, ":\n");
+                0
+            } else {
+                0
+            };
+            // (7b) MIR: capture the then value/exit + the then-arm rebindings (saved to a
+            // side list), then restore var_defs to the branch + switch to the else block.
+            let then_val: i64 = if mir_on(c) {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
+            let mut then_exit: i64 = 0 - 1;
+            let mut tsv: Vec<i64> = vec_new();
+            let mut tsval: Vec<i64> = vec_new();
+            if mir_on(c) {
+                then_exit = (*c).mir_cur;
+                let tlen: i64 = mir_vd_len(c);
+                let mut ki: i64 = snap;
+                while ki < tlen {
+                    let kv: i64 = (*c).mvdv[ki];
+                    let kl: i64 = (*c).mvdl[ki];
+                    push(&mut tsv, kv);
+                    push(&mut tsval, kl);
+                    ki = ki + 1;
+                }
+                mir_vd_trunc(c, snap);
+                (*c).mir_cur = eb;
+                0
+            } else {
+                0
+            };
+            push(out, ' ');
+            dump_texpr(out, els, exp, src, c, gb);
+            // (7b) MIR: build the merge — result param first, then one param per variable
+            // that diverged across the arms (VarId-sorted), reconciled via the arms' jumps.
+            if mir_on(c) {
+                let else_val: i64 = (*c).lastval;
+                let else_exit: i64 = (*c).mir_cur;
+                let elen: i64 = mir_vd_len(c);
+                let merge: i64 = mir_new_block(c);
+                let result: i64 = mir_add_param(c, merge, tt);
+                let mut then_args: Vec<i64> = vec_new();
+                let mut else_args: Vec<i64> = vec_new();
+                push(&mut then_args, then_val);
+                push(&mut else_args, else_val);
+                let nv: i64 = (*c).nextvid;
+                let mut vid: i64 = 0;
+                while vid < nv {
+                    let bv: i64 = mir_vd_lp(c, snap, vid);
+                    if bv >= 0 {
+                        let ts: i64 = mir_side_lookup(&tsv, &tsval, vid);
+                        let tvv: i64 = if ts < 0 {
+                            bv
+                        } else {
+                            ts
+                        };
+                        let es: i64 = mir_vd_lr(c, snap, elen, vid);
+                        let evv: i64 = if es < 0 {
+                            bv
+                        } else {
+                            es
+                        };
+                        if tvv != evv {
+                            let pty: i64 = (*c).mvty[tvv];
+                            let p: i64 = mir_add_param(c, merge, pty);
+                            push(&mut then_args, tvv);
+                            push(&mut else_args, evv);
+                            mir_vd_set(c, vid, p);
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else {
+                        0
+                    };
+                    vid = vid + 1;
+                }
+                mir_term_jump(c, then_exit, merge, &then_args);
+                mir_term_jump(c, else_exit, merge, &else_args);
+                (*c).mir_cur = merge;
+                (*c).lastval = result;
+                0
+            } else {
+                0
+            };
+            // (8b) codegen: store the else value, branch to merge, open merge, load result.
+            if cg_on(c) {
+                let cgE_k: i64 = (*c).cglk;
+                let cgE_v: i64 = (*c).cglv;
+                cgo_str(c, "  store ");
+                cgo_ty(c, tt);
+                cg_putc(c, ' ');
+                cgo_operand(c, cgE_k, cgE_v);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, cg_rslot);
+                cg_putc(c, '\n');
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, cg_merge);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, cg_merge);
+                cgo_str(c, ":\n");
+                let cg_ld: i64 = cg_fresh(c);
+                cgo_str(c, "  %v");
+                cgo_int(c, cg_ld);
+                cgo_str(c, " = load ");
+                cgo_ty(c, tt);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, cg_rslot);
+                cg_putc(c, '\n');
+                cg_reg(c, cg_ld);
+                0
+            } else {
+                0
+            };
+            close_ty(out, tt, c);
+            tt
+}
+
+fn dump_te_call(out: &mut Vec<u8>, cn: [u8], ca: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+            // (4g) a callee resolving to an in-scope VAR is a continuation-resume
+            // `k(arg)` (vars shadow fns) → `(resume-kont #vid <args> :T)`, T = the
+            // resume value's type; else a free-fn call.
+            let kid: i64 = sc_lookup(c, &cn);
+            if kid >= 0 {
+                sink_name(gb, cn);
+                let kty: i64 = env_get(c, kid);
+                // (Bar B / effects) cg: load the kont FIRST (the oracle's order), then
+                // collect the resume arg, then emit kont_resume + the pure/bubble split.
+                let cg_kreg: i64 = if cg_on(c) {
+                    cg_emit_resume_load(c, kid)
+                } else {
+                    0 - 1
+                };
+                let cg_rk_col: bool = (*c).cg_collecting;
+                let cg_rk_csnap: i64 = if cg_on(c) {
+                    len((*c).cgak)
+                } else {
+                    0
+                };
+                if cg_on(c) {
+                    (*c).cg_collecting = true;
+                    0
+                } else {
+                    0
+                };
+                append_str(out, "(resume-kont #");
+                append_int(out, kid);
+                // (6/N) resume-kont args are consuming (passed by value to the cont).
+                let svk: bool = (*c).consuming;
+                (*c).consuming = true;
+                // (7c) MIR: a resume-kont funnels its args through Opaque.
+                let rk_col: bool = (*c).mir_collecting;
+                if mir_on(c) {
+                    (*c).mir_collecting = true;
+                    0
+                } else {
+                    0
+                };
+                let rk_snap: i64 = if mir_on(c) {
+                    mir_margs_len(c)
+                } else {
+                    0
+                };
+                let rkt: i64 = dump_args_capture_first(out, ca, false, src, c, gb);
+                (*c).consuming = svk;
+                let krt: i64 = if rkt == 0 - 1 {
+                    kty
+                } else {
+                    rkt
+                };
+                close_ty(out, krt, c);
+                if mir_on(c) {
+                    (*c).mir_collecting = rk_col;
+                    let kmc: i64 = (*c).mir_cur;
+                    let kd: i64 = mir_emit_va(c, kmc, 7, 0, rk_snap, krt);
+                    (*c).lastval = kd;
+                    0
+                } else {
+                    0
+                };
+                if cg_on(c) {
+                    (*c).cg_collecting = cg_rk_col;
+                    cg_emit_resume_tail(c, cg_kreg, cg_rk_csnap, src, gb);
+                    0
+                } else {
+                    0
+                };
+                krt
+            } else {
+                let fid: i64 = fn_lookup(c, src, &cn);
+                sink_name(gb, cn);
+                append_str(out, "(call #");
+                append_int(out, fid);
+                // Generic builtins (e.g. `len: <T>([T]) -> i64`) emit `(targs T)`
+                // before the args; T is inferred from the first arg, so the args are
+                // dumped to a temp buffer first. The return type may depend on T.
+                // (4h) a generic USER fn (FnId 14+ with type-params) infers + emits
+                // `(targs …)` then substitutes its return type; a generic BUILTIN
+                // (len/unwrap_or/is_some) uses the existing first-arg `dump_gcall`;
+                // everything else dumps args straight with the declared return type.
+                let isgenfn: bool = if fid >= 25 {
+                    (*c).uftp[fid - 25] > 0
+                } else {
+                    false
+                };
+                // (6/N) USER-fn (FnId >= 14) args are CONSUMING (moved into the callee);
+                // BUILTIN args (len/push/vec_to_array/print/…) are NON-consuming (the
+                // builtins borrow / don't move). `argcons` gates the args' move-recording.
+                let argcons: bool = fid >= 25;
+                let svf: bool = (*c).consuming;
+                (*c).consuming = argcons;
+                // (7c) MIR: ALL calls — plain, generic-builtin (len/push/vec_new/…), and
+                // generic-user — lower to a `call <name> <args>` (the Rust uses the
+                // signature name for every callee). The arg-list walkers collect the
+                // operand values while `mir_collecting` is set; the targs/inference in
+                // the dump path is orthogonal.
+                let cl_col: bool = (*c).mir_collecting;
+                if mir_on(c) {
+                    (*c).mir_collecting = true;
+                    0
+                } else {
+                    0
+                };
+                let cl_snap: i64 = if mir_on(c) {
+                    mir_margs_len(c)
+                } else {
+                    0
+                };
+                // (8/N) codegen: collect the args' operands during the walk (gated), then
+                // emit the call (or zext/trunc width builtin) after.
+                let cg_col: bool = (*c).cg_collecting;
+                if cg_on(c) {
+                    (*c).cg_collecting = true;
+                    0
+                } else {
+                    0
+                };
+                let cg_snap: i64 = if cg_on(c) {
+                    len((*c).cgak)
+                } else {
+                    0
+                };
+                let rt: i64 = if is_generic_builtin(fid) {
+                    dump_gcall(out, fid, ca, exp, src, c, gb)
+                } else if isgenfn {
+                    dump_generic_call(out, fid, ca, src, c, gb)
+                } else {
+                    dump_targs(out, ca, src, c, gb);
+                    fn_ret(c, fid)
+                };
+                (*c).consuming = svf;
+                close_ty(out, rt, c);
+                if mir_on(c) {
+                    (*c).mir_collecting = cl_col;
+                    let mc: i64 = (*c).mir_cur;
+                    let d: i64 = mir_emit_va(c, mc, 6, fid, cl_snap, rt);
+                    (*c).lastval = d;
+                    0
+                } else {
+                    0
+                };
+                if cg_on(c) {
+                    (*c).cg_collecting = cg_col;
+                    cg_emit_call(c, src, fid, cg_snap, rt);
+                    0
+                } else {
+                    0
+                };
+                rt
+            }
+}
+
+fn dump_te_field(out: &mut Vec<u8>, ft: Expr, fdn: [u8], exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+            append_str(out, "(field ");
+            // (6/N) a field-access receiver is a READ (non-consuming) — `p.x` does not
+            // move `p`.
+            let svc: bool = (*c).consuming;
+            (*c).consuming = false;
+            // (ADR 0046) `mvbv` carries the just-dumped target's base VarId IFF the target
+            // is a DIRECT `Var` (the Var arm sets it; every other arm leaves -1 via the
+            // dump_texpr top reset + the compound-arm clears). It is the mode-independent
+            // analogue of the cg-only `cg_lastvid`, so the partial-move record fires in
+            // mode 1 (borrow) too. -1 for a nested / `*c` / call target (deep paths
+            // deferred — ADR 0046 D5). Mirrors the oracle's `if let Var(base) = &target`.
+            let tty: i64 = dump_texpr(out, ft, 0 - 1, src, c, gb);
+            let base_vid: i64 = (*c).mvbv;
+            let frecv: i64 = if mir_on(c) {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
+            // (8c-1) codegen: capture the target aggregate operand (the field read is
+            // an `extractvalue` on it, emitted after the field index is known below).
+            let cg_ftk: i64 = if cg_on(c) {
+                (*c).cglk
+            } else {
+                0
+            };
+            let cg_ftv: i64 = if cg_on(c) {
+                (*c).cglv
+            } else {
+                0
+            };
+            // (8g) the target's resolved VarId: >=0 means the target is a plain
+            // `Var` (a local/param struct) whose ADDRESS is its alloca slot (a
+            // field-place `c.f = …` / `&mut c.f` GEPs into the slot); -1 means the
+            // target left its pointer in the operand (a `*c` deref or a nested
+            // field-place). Captured here, before the field-index work, mirroring
+            // the oracle's recursive `lower_lvalue_ptr`.
+            let cg_ftvid: i64 = if cg_on(c) {
+                (*c).cg_lastvid
+            } else {
+                0 - 1
+            };
+            (*c).consuming = svc;
+            push(out, ' ');
+            // The target is a struct, a generic-instance struct, or a class (a
+            // `&self`-receiver strips its ref). (4h) for a generic instance the
+            // declared field type is SUBSTITUTED with the instance's type-args
+            // (`b.value` where `b: Box<i64>` → `i64`; `p.first` where `p: Pair<A,B>`
+            // → `<T#0>`).
+            let bare: i64 = strip_ref(c, tty);
+            let fd_gd: i64 = gi_decl_of(c, bare);
+            let sid: i64 = if fd_gd >= 0 {
+                fd_gd
+            } else {
+                struct_of_handle(c, bare)
+            };
+            let ccid: i64 = class_of_handle(c, bare);
+            let fidx: i64 = if sid >= 0 {
+                field_index(c, sid, &fdn)
+            } else {
+                class_field_index(c, ccid, &fdn)
+            };
+            let fty0: i64 = if sid >= 0 {
+                field_type(c, sid, &fdn)
+            } else {
+                class_field_type(c, ccid, &fdn)
+            };
+            let fty: i64 = if fd_gd >= 0 {
+                let mut fargs: Vec<i64> = vec_new();
+                let fd_gas: i64 = gi_argstart(c, bare);
+                let fd_gae: i64 = gi_argend(c, bare);
+                let mut fd_j: i64 = fd_gas;
+                while fd_j < fd_gae {
+                    let fd_a: i64 = (*c).gia[fd_j];
+                    push(&mut fargs, fd_a);
+                    fd_j = fd_j + 1;
+                }
+                subst_type(c, fty0, &fargs)
+            } else {
+                fty0
+            };
+            // (ADR 0046) a Move-typed `base.field` read in a CONSUMING position (`svc` —
+            // returned / passed by value) is a PARTIAL move of `(base, field)`: record it
+            // WITHOUT moving the whole `base`, so `base`'s other fields stay usable +
+            // droppable. A Copy field (`p.tag`: i64) / a non-`Var` base is the C2.3
+            // non-consuming receiver read (no record). `fty` is the SUBSTITUTED field type
+            // (= the oracle's `expr.ty`), so `p.first` where `p: Pair<A,B>` sees the
+            // type-param `A` (Move). Mirrors the consuming-walk FieldAccess arm.
+            if svc {
+                if base_vid >= 0 {
+                    if is_move_type(c, fty) {
+                        record_field_move(c, base_vid, fidx);
+                        0
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            append_str(out, fdn);
+            push(out, ' ');
+            append_int(out, fidx);
+            close_ty(out, fty, c);
+            // (7c) MIR: a field read funnels through Opaque (the receiver carried).
+            if mir_on(c) {
+                let mc: i64 = (*c).mir_cur;
+                let snap: i64 = mir_margs_len(c);
+                mir_margs_push(c, frecv);
+                let d: i64 = mir_emit_va(c, mc, 7, 0, snap, fty);
+                (*c).lastval = d;
+                (*c).mir_lastvid = 0 - 1;
+                0
+            } else {
+                0
+            };
+            // (8c-1) codegen: `%vD = extractvalue %Struct.N <target>, <fidx>`. Only a
+            // plain struct target (kind 6) — a class/generic-instance target makes the
+            // oracle Err (that fixture is skipped), so its bytes are never compared.
+            if cg_on(c) {
+                let cg_fsid: i64 = struct_of_handle(c, bare);
+                if cg_fsid >= 0 {
+                    if (*c).cg_suppress {
+                        // (8f-3) lvalue field — `&mut (*c).f` / `(*c).f = x`. The field's
+                        // ADDRESS: GEP into the target's pointer (the target `*c` left c's
+                        // pointer in the operand). cg_lastvid=-1 signals a place, so the
+                        // enclosing `&mut`/assign uses the operand as the address.
+                        let cg_fgp: i64 = cg_dst(c);
+                        cgo_str(c, "getelementptr %Struct.");
+                        cgo_int(c, cg_fsid);
+                        cgo_str(c, ", ptr ");
+                        // (8g) the base pointer: a plain-`Var` target (a local/param
+                        // struct, cg_ftvid>=0) GEPs into its alloca SLOT; otherwise the
+                        // target (a `*c` deref or nested field-place) already left its
+                        // pointer in the operand. Matches the oracle's `lower_lvalue_ptr`
+                        // (Var -> slot, Deref -> the value, FieldAccess -> the inner GEP).
+                        if cg_ftvid >= 0 {
+                            let cg_fbase: i64 = cg_slot_get(c, cg_ftvid);
+                            cgo_operand(c, 0, cg_fbase);
+                            0
+                        } else {
+                            cgo_operand(c, cg_ftk, cg_ftv);
+                            0
+                        };
+                        cgo_str(c, ", i32 0, i32 ");
+                        cgo_int(c, fidx);
+                        cg_putc(c, '\n');
+                        cg_reg(c, cg_fgp);
+                        (*c).cg_lastvid = 0 - 1;
+                        0
+                    } else {
+                        cg_extract(c, bare, cg_ftk, cg_ftv, fidx);
+                        0
+                    };
+                    0
+                } else if gi_decl_of(c, bare) >= 0 {
+                    // (Bar B) generic-instance field access. RVALUE = extractvalue from
+                    // the `%<mangled>` aggregate (cgo_ty(bare) renders it). The lvalue
+                    // field-place mirrors the struct case with the `%<mangled>` base.
+                    if (*c).cg_suppress {
+                        let cg_ggp: i64 = cg_dst(c);
+                        cgo_str(c, "getelementptr ");
+                        cgo_ty(c, bare);
+                        cgo_str(c, ", ptr ");
+                        if cg_ftvid >= 0 {
+                            let cg_gbase: i64 = cg_slot_get(c, cg_ftvid);
+                            cgo_operand(c, 0, cg_gbase);
+                            0
+                        } else {
+                            cgo_operand(c, cg_ftk, cg_ftv);
+                            0
+                        };
+                        cgo_str(c, ", i32 0, i32 ");
+                        cgo_int(c, fidx);
+                        cg_putc(c, '\n');
+                        cg_reg(c, cg_ggp);
+                        (*c).cg_lastvid = 0 - 1;
+                        0
+                    } else {
+                        cg_extract(c, bare, cg_ftk, cg_ftv, fidx);
+                        0
+                    };
+                    0
+                } else if class_of_handle(c, bare) >= 0 {
+                    // (Bar B / classes) class field access — the SAME shape as a generic
+                    // instance, with `%Class.N` (cgo_ty(bare)). LVALUE (`self.f = x` /
+                    // `&self.f` / a method receiver `self.f.m()`): GEP into the target's
+                    // pointer (a plain-Var target GEPs its slot; `self`/a nested place left
+                    // its pointer in the operand — `self`'s is `%arg0`). RVALUE: extractvalue
+                    // from the loaded `%Class.N` aggregate.
+                    if (*c).cg_suppress {
+                        let cg_cgp: i64 = cg_dst(c);
+                        cgo_str(c, "getelementptr ");
+                        cgo_ty(c, bare);
+                        cgo_str(c, ", ptr ");
+                        if cg_ftvid >= 0 {
+                            let cg_cbase: i64 = cg_slot_get(c, cg_ftvid);
+                            cgo_operand(c, 0, cg_cbase);
+                            0
+                        } else {
+                            cgo_operand(c, cg_ftk, cg_ftv);
+                            0
+                        };
+                        cgo_str(c, ", i32 0, i32 ");
+                        cgo_int(c, fidx);
+                        cg_putc(c, '\n');
+                        cg_reg(c, cg_cgp);
+                        (*c).cg_lastvid = 0 - 1;
+                        0
+                    } else {
+                        cg_extract(c, bare, cg_ftk, cg_ftv, fidx);
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            fty
+}
+
+fn dump_te_method(out: &mut Vec<u8>, mt: Expr, mn: [u8], ma: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+            let mut tbuf: Vec<u8> = vec_new();
+            // (6/N) a method receiver is borrowed (`self: &Self`/`&mut Self`) →
+            // non-consuming; the args are consuming (forced by `dump_targs`).
+            let svc: bool = (*c).consuming;
+            (*c).consuming = false;
+            // (Bar B / classes) cg: the receiver supplies the `self` POINTER — walk it as
+            // a PLACE (suppress, like the oracle's `lower_lvalue_ptr`): a plain `Var`
+            // leaves its VarId (the alloca slot IS the address; `self` → `%arg0`), a
+            // `self.field` deref/place leaves the GEP pointer in the operand.
+            let cg_m_sup: bool = (*c).cg_suppress;
+            if cg_on(c) {
+                (*c).cg_suppress = true;
+                0
+            } else {
+                0
+            };
+            let tty: i64 = dump_texpr(&mut tbuf, mt, 0 - 1, src, c, gb);
+            // capture the self-ptr operand (resolve the suppressed-place result), BEFORE
+            // the args walk clobbers cglk/cglv/cg_lastvid.
+            let cg_m_lvid: i64 = if cg_on(c) {
+                (*c).cg_lastvid
+            } else {
+                0 - 1
+            };
+            let cg_m_selfk: i64 = if cg_m_lvid >= 0 {
+                0
+            } else {
+                (*c).cglk
+            };
+            let cg_m_selfv: i64 = if cg_m_lvid >= 0 {
+                cg_slot_get(c, cg_m_lvid)
+            } else {
+                (*c).cglv
+            };
+            if cg_on(c) {
+                (*c).cg_suppress = cg_m_sup;
+                0
+            } else {
+                0
+            };
+            let cg_m_col: bool = (*c).cg_collecting;
+            let cg_m_snap: i64 = if cg_on(c) {
+                len((*c).cgak)
+            } else {
+                0
+            };
+            if cg_on(c) {
+                (*c).cg_collecting = true;
+                0
+            } else {
+                0
+            };
+            let mrecv: i64 = if mir_on(c) {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
+            (*c).consuming = svc;
+            let rcid: i64 = class_of_handle(c, strip_ref(c, tty));
+            // (7c) MIR: a method call -> Opaque([receiver, ...args]).
+            let m_col: bool = (*c).mir_collecting;
+            let m_snap: i64 = if mir_on(c) {
+                mir_margs_len(c)
+            } else {
+                0
+            };
+            if mir_on(c) {
+                mir_margs_push(c, mrecv);
+                (*c).mir_collecting = true;
+                0
+            } else {
+                0
+            };
+            let mrt: i64 = if class_has_method(c, rcid, &mn) {
+                let midx: i64 = class_method_index(c, rcid, &mn);
+                let mret: i64 = class_method_ret(c, rcid, &mn);
+                append_str(out, "(method #");
+                append_int(out, rcid);
+                push(out, ' ');
+                append_int(out, midx);
+                push(out, ' ');
+                append_str(out, vec_to_array(tbuf));
+                push(out, ' ');
+                append_str(out, mn);
+                dump_cargs(out, ma, src, c, gb);
+                close_ty(out, mret, c);
+                if cg_on(c) {
+                    (*c).cg_collecting = cg_m_col;
+                    cg_emit_class_mcall(c, mret, cg_m_selfk, cg_m_selfv, cg_m_snap, rcid, midx);
+                    0
+                } else {
+                    0
+                };
+                mret
+            } else {
+                let idef: i64 = impl_for_class(c, rcid, &mn);
+                let mtid: i64 = impl_trait_of(c, idef);
+                let midx2: i64 = trait_method_index(c, mtid, &mn);
+                let mret2: i64 = trait_method_ret(c, mtid, &mn);
+                append_str(out, "(impl-method #");
+                append_int(out, idef);
+                push(out, ' ');
+                append_int(out, midx2);
+                push(out, ' ');
+                append_str(out, vec_to_array(tbuf));
+                push(out, ' ');
+                append_str(out, mn);
+                dump_cargs(out, ma, src, c, gb);
+                close_ty(out, mret2, c);
+                if cg_on(c) {
+                    (*c).cg_collecting = cg_m_col;
+                    cg_emit_impl_mcall(c, mret2, cg_m_selfk, cg_m_selfv, cg_m_snap, idef, mtid, midx2);
+                    0
+                } else {
+                    0
+                };
+                mret2
+            };
+            if mir_on(c) {
+                (*c).mir_collecting = m_col;
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit_va(c, mc, 7, 0, m_snap, mrt);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
+            mrt
+}
+
+fn dump_te_handle(out: &mut Vec<u8>, hb: Expr, ha: HArms, hr: Ret, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+            append_str(out, "(handle ");
+            // (c36b) track dynamic nesting depth: this handle is NESTED (its result is a
+            // Kont* the enclosing handle dispatches on) iff depth > 1 after entry. The
+            // counter persists across the body walk (an inner handle inc/decs it).
+            (*c).cg_h_depth = (*c).cg_h_depth + 1;
+            let is_nested: bool = (*c).cg_h_depth > 1;
+            // (c36a) reset cg_tailk so the body walk's result tells us whether the body
+            // produced a kont (a `perform` / effecting-call / a nested handle sets it) or
+            // is PURE (an i64 needing a kont_pure wrap — `handle 42`). At the END this
+            // handle sets cg_tailk = is_nested (its own result's kont-ness).
+            (*c).cg_tailk = false;
+            let bty: i64 = dump_texpr(out, hb, 0 - 1, src, c, gb);
+            let body_is_kont: bool = (*c).cg_tailk;
+            let hbv: i64 = if mir_on(c) {
+                (*c).lastval
+            } else {
+                0 - 1
+            };
+            // (Bar B / effects) cg: the dispatch loop. Capture the body's kont operand,
+            // SAVE the enclosing handle state (nesting), then store the kont + open the
+            // loop (load the kont + its op_id). `dump_tharms` emits the per-arm if-else
+            // chain; the pure-check tail + merge follow.
+            let cg_bk: i64 = (*c).cglk;
+            let cg_bv: i64 = (*c).cglv;
+            let sv_opid: i64 = (*c).cg_h_opid;
+            let sv_ck: i64 = (*c).cg_h_ck;
+            let sv_loop: i64 = (*c).cg_h_loop;
+            let sv_cks: i64 = (*c).cg_h_cks;
+            let sv_rslot: i64 = (*c).cg_h_rslot;
+            let sv_merge: i64 = (*c).cg_h_merge;
+            if cg_on(c) {
+                // (c36a) a PURE body (`handle 42`) wraps via kont_pure so the loop sees a
+                // uniform Kont* (PURE_RETURN-tagged); a kont body is stored as-is.
+                let mut kont_k: i64 = cg_bk;
+                let mut kont_v: i64 = cg_bv;
+                if body_is_kont {
+                    0
+                } else {
+                    let w: i64 = cg_dst(c);
+                    cgo_str(c, "call ptr @sentinel_kont_pure(i64 ");
+                    cgo_operand(c, cg_bk, cg_bv);
+                    cgo_str(c, ")\n");
+                    (*c).cg_used_kontpure = true;
+                    kont_k = 0;
+                    kont_v = w;
+                    0
+                };
+                let cks: i64 = cg_alloca_ptr(c);
+                cgo_str(c, "  store ptr ");
+                cgo_operand(c, kont_k, kont_v);
+                cgo_str(c, ", ptr %v");
+                cgo_int(c, cks);
+                cg_putc(c, '\n');
+                // (c36b) nested ⇒ the result cell is a Kont* (ptr); top-level ⇒ i64.
+                let rslot: i64 = if is_nested {
+                    cg_alloca_ptr(c)
+                } else {
+                    cg_alloca(c, 0)
+                };
+                let loop_b: i64 = cg_fresh_block(c);
+                let merge_b: i64 = cg_fresh_block(c);
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, loop_b);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, loop_b);
+                cgo_str(c, ":\n");
+                let ck: i64 = cg_dst(c);
+                cgo_str(c, "load ptr, ptr %v");
+                cgo_int(c, cks);
+                cg_putc(c, '\n');
+                let opid: i64 = cg_dst(c);
+                cgo_str(c, "load i32, ptr %v");
+                cgo_int(c, ck);
+                cg_putc(c, '\n');
+                (*c).cg_h_opid = opid;
+                (*c).cg_h_ck = ck;
+                (*c).cg_h_loop = loop_b;
+                (*c).cg_h_cks = cks;
+                (*c).cg_h_rslot = rslot;
+                (*c).cg_h_merge = merge_b;
+                0
+            } else {
+                0
+            };
+            // (c36a) SAVE + set the return-arm cg state (for the k(v) sites in dump_tharms
+            // + the dispatch pure block); `hr` is consumed to peek its token info, then
+            // reconstructed as `hr2` for dump_tret's type dump (modes 0-3) / disposal
+            // (mode 4). Save/restore mirrors the cg_h_* nesting discipline.
+            let sv_ret_on: bool = (*c).cg_ret_on;
+            let sv_ret_ntok: i64 = (*c).cg_ret_ntok;
+            let sv_ret_tok0: i64 = (*c).cg_ret_tok0;
+            let hr2: Ret = match hr {
+                Ret::NoRet => {
+                    (*c).cg_ret_on = false;
+                    Ret::NoRet
+                },
+                Ret::YesRet(rn, rb, rnt, rt0) => {
+                    (*c).cg_ret_on = true;
+                    (*c).cg_ret_ntok = rnt;
+                    (*c).cg_ret_tok0 = rt0;
+                    Ret::YesRet(rn, rb, rnt, rt0)
+                },
+            };
+            // (7c) MIR: a handle lowers ONLY its body -> Opaque([body]); the handler arms
+            // + return arm are walked for the dump but NOT lowered (suppress their emits).
+            let h_sup: bool = (*c).mir_suppress;
+            if mir_on(c) {
+                (*c).mir_suppress = true;
+                0
+            } else {
+                0
+            };
+            dump_tharms(out, ha, src, c, gb, is_nested);
+            dump_tret(out, hr2, bty, src, c, gb);
+            if mir_on(c) {
+                (*c).mir_suppress = h_sup;
+                0
+            } else {
+                0
+            };
+            close_ty(out, bty, c);
+            // (cg) the PURE_RETURN check (the chain's tail) + the merge; restore state.
+            if cg_on(c) {
+                let hopid: i64 = (*c).cg_h_opid;
+                let hck: i64 = (*c).cg_h_ck;
+                let hrslot: i64 = (*c).cg_h_rslot;
+                let hmerge: i64 = (*c).cg_h_merge;
+                let cmpp: i64 = cg_dst(c);
+                cgo_str(c, "icmp eq i32 %v");
+                cgo_int(c, hopid);
+                cgo_str(c, ", 4294967295\n");
+                let pure_b: i64 = cg_fresh_block(c);
+                let default_b: i64 = cg_fresh_block(c);
+                cgo_str(c, "  br i1 %v");
+                cgo_int(c, cmpp);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, pure_b);
+                cgo_str(c, ", label %bb");
+                cgo_int(c, default_b);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, pure_b);
+                cgo_str(c, ":\n");
+                // (c36b) the pure block: a NESTED handle with NO return arm passes the
+                // PURE_RETURN kont THROUGH (the enclosing handle consumes it — no consume
+                // here); else consume + apply the return arm (identity if none) + (nested:
+                // re-wrap the i64 result as a kont so the outer dispatches it).
+                let pass_through: bool = if is_nested {
+                    !(*c).cg_ret_on
+                } else {
+                    false
+                };
+                if pass_through {
+                    cgo_str(c, "  store ptr %v");
+                    cgo_int(c, hck);
+                    cgo_str(c, ", ptr %v");
+                    cgo_int(c, hrslot);
+                    cg_putc(c, '\n');
+                    0
+                } else {
+                    let pv: i64 = cg_dst(c);
+                    cgo_str(c, "call i64 @sentinel_kont_consume_pure(ptr %v");
+                    cgo_int(c, hck);
+                    cgo_str(c, ")\n");
+                    (*c).cg_used_consume = true;
+                    cg_apply_return_arm(c, 0, pv, src, gb);
+                    let rrk: i64 = (*c).cglk;
+                    let rrv: i64 = (*c).cglv;
+                    cg_store_hresult(c, is_nested, rrk, rrv, hrslot);
+                    0
+                };
+                cgo_str(c, "  br label %bb");
+                cgo_int(c, hmerge);
+                cg_putc(c, '\n');
+                cgo_str(c, "bb");
+                cgo_int(c, default_b);
+                cgo_str(c, ":\n");
+                // (c36b) nested default = PROPAGATE the un-caught kont to the merge (it's an
+                // effect for an enclosing handle); top-level = unreachable (full coverage).
+                if is_nested {
+                    cgo_str(c, "  store ptr %v");
+                    cgo_int(c, hck);
+                    cgo_str(c, ", ptr %v");
+                    cgo_int(c, hrslot);
+                    cg_putc(c, '\n');
+                    cgo_str(c, "  br label %bb");
+                    cgo_int(c, hmerge);
+                    cg_putc(c, '\n');
+                    0
+                } else {
+                    cgo_str(c, "  unreachable\n");
+                    0
+                };
+                cgo_str(c, "bb");
+                cgo_int(c, hmerge);
+                cgo_str(c, ":\n");
+                let rv: i64 = cg_dst(c);
+                if is_nested {
+                    cgo_str(c, "load ptr, ptr %v")
+                } else {
+                    cgo_str(c, "load i64, ptr %v")
+                };
+                cgo_int(c, hrslot);
+                cg_putc(c, '\n');
+                cg_reg(c, rv);
+                (*c).cg_h_opid = sv_opid;
+                (*c).cg_h_ck = sv_ck;
+                (*c).cg_h_loop = sv_loop;
+                (*c).cg_h_cks = sv_cks;
+                (*c).cg_h_rslot = sv_rslot;
+                (*c).cg_h_merge = sv_merge;
+                (*c).cg_ret_on = sv_ret_on;
+                (*c).cg_ret_ntok = sv_ret_ntok;
+                (*c).cg_ret_tok0 = sv_ret_tok0;
+                0
+            } else {
+                0
+            };
+            if mir_on(c) {
+                let mc: i64 = (*c).mir_cur;
+                let d: i64 = mir_emit_opaque1(c, mc, hbv, bty);
+                (*c).lastval = d;
+                0
+            } else {
+                0
+            };
+            // (c36b) this handle's RESULT is a Kont* iff nested → the enclosing context's
+            // body-kont detection (cg_tailk) sees it; pop the nesting depth.
+            (*c).cg_tailk = is_nested;
+            (*c).cg_h_depth = (*c).cg_h_depth - 1;
+            bty
+}
