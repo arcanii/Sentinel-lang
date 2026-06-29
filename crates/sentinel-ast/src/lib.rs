@@ -554,8 +554,52 @@ impl fmt::Display for UseDecl {
     }
 }
 
+/// ADR 0067 D2: an explicit `module a::b;` declaration — the file's owning
+/// module path, decoupling module identity from the file path so several
+/// files may declare the SAME module to form one logical multi-file module.
+/// `path` is the `::`-separated segment list as written. At most one per
+/// file; the path is checked against the file's location at discovery
+/// (`ModuleDeclMismatch`). Consumed at discovery/merge — NOT carried into
+/// the typed program.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModuleDecl {
+    pub path: Vec<String>,
+    pub span: Span,
+}
+
+impl fmt::Display for ModuleDecl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(module {})", self.path.join("::"))
+    }
+}
+
+/// ADR 0067 D3: a `part name;` directive in a module root — names an
+/// additional source file `<module-dir>/name.sentinel` that declares the
+/// SAME module, forming a multi-file module (the manifest, read by path so
+/// no directory-listing builtin is needed). `name` is the file stem (one
+/// identifier, no `::` path).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PartDecl {
+    pub name: String,
+    pub span: Span,
+}
+
+impl fmt::Display for PartDecl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(part {})", self.name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Program {
+    /// ADR 0067 D2: the file's explicit `module` declaration, if any. `None`
+    /// for a file with no `module` decl (the entry / single-file case — its
+    /// identity is its file stem, ADR 0037). At most one per file.
+    pub module: Option<ModuleDecl>,
+    /// ADR 0067 D3: `part` directives in a module root — the manifest naming
+    /// the other files of this multi-file module. Empty for a single-file
+    /// module. Consumed at discovery — NOT carried into the typed program.
+    pub parts: Vec<PartDecl>,
     /// Phase D.6 (1/N) / ADR 0037: top-level `use` imports. Always
     /// present (empty for single-file programs). Resolve rejects a
     /// non-empty `uses` with `UseDeclNotYet` until the D.6 (1/N) resolve
@@ -1645,6 +1689,8 @@ mod tests {
     #[test]
     fn display_program_one_main() {
         let p = Program {
+            module: None,
+            parts: vec![],
             uses: vec![],
             fns: vec![main_fn(lit(42, 0..2))],
             structs: vec![],
@@ -1698,6 +1744,8 @@ mod tests {
             span: 0..9,
         });
         let p = Program {
+            module: None,
+            parts: vec![],
             uses: vec![],
             fns: vec![double, main],
             structs: vec![],
@@ -2122,6 +2170,8 @@ mod tests {
             span: 0..19,
         };
         let p = Program {
+            module: None,
+            parts: vec![],
             uses: vec![],
             fns: vec![main_fn(lit(7, 0..1))],
             structs: vec![s],

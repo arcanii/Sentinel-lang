@@ -1507,31 +1507,43 @@ pub fn resolve_imports(modules: &[ModuleUnit]) -> Result<(), ResolveError> {
             // last segment; the last is the imported item (open point 4).
             let item = u.path.last().expect("use path has ≥ 1 segment");
             let module_path = &u.path[..u.path.len() - 1];
-            let target = match modules.iter().find(|m| m.path.as_slice() == module_path) {
-                Some(t) => t,
-                None => {
-                    return Err(ResolveError::ModuleNotFound {
-                        module: module_path.join("::"),
-                        span: to_source_span(&u.span),
-                    });
+            // ADR 0067: a module may span several files (a root + `part`s), all
+            // sharing this path — so search EVERY matching unit for the item.
+            // `pub` in any of them exports it; found-but-private in all is a
+            // PrivateItem; absent everywhere is UnknownImport.
+            let targets: Vec<&ModuleUnit> =
+                modules.iter().filter(|m| m.path.as_slice() == module_path).collect();
+            if targets.is_empty() {
+                return Err(ResolveError::ModuleNotFound {
+                    module: module_path.join("::"),
+                    span: to_source_span(&u.span),
+                });
+            }
+            let mut found_private = false;
+            let mut found_pub = false;
+            for t in &targets {
+                match pub_item_visibility(t.program, item) {
+                    Some(true) => {
+                        found_pub = true;
+                        break;
+                    }
+                    Some(false) => found_private = true,
+                    None => {}
                 }
-            };
-            match pub_item_visibility(target.program, item) {
-                None => {
-                    return Err(ResolveError::UnknownImport {
-                        item: item.clone(),
-                        module: module_path.join("::"),
-                        span: to_source_span(&u.span),
-                    });
-                }
-                Some(false) => {
+            }
+            if !found_pub {
+                if found_private {
                     return Err(ResolveError::PrivateItem {
                         item: item.clone(),
                         module: module_path.join("::"),
                         span: to_source_span(&u.span),
                     });
                 }
-                Some(true) => {} // `pub` — visible across modules.
+                return Err(ResolveError::UnknownImport {
+                    item: item.clone(),
+                    module: module_path.join("::"),
+                    span: to_source_span(&u.span),
+                });
             }
         }
     }
@@ -1601,29 +1613,27 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
     let mut externs: Vec<ExternFnDecl> = Vec::new();
     let mut span_end = 0usize;
 
-    for (idx, unit) in modules.iter().enumerate() {
-        let is_entry = idx == 0;
+    // ADR 0067: build ONE rename map per MODULE PATH — the union of every
+    // file (root + parts) sharing that path. A multi-file module's parts share
+    // a namespace, so a non-`pub` helper defined in one part is visible from
+    // another and rewrites to the same `module$helper` symbol. For a
+    // single-file module the union is just that file, byte-identical to the
+    // per-unit map this replaces. EVERY top-level item is qualified by module
+    // path (fns, structs, enums, traits, effects, classes, named impls) so
+    // same-named items across modules never clash; only the ENTRY module's
+    // `main` keeps its bare symbol. `use`d imports map to their defining
+    // module's qualified symbol (resolve_imports gated existence + visibility).
+    // Builtins / primitives / type params / locals are absent → left untouched.
+    let entry_path: Vec<String> = modules.first().map(|m| m.path.clone()).unwrap_or_default();
+    let mut group_rename: HashMap<Vec<String>, HashMap<String, String>> = HashMap::new();
+    for unit in modules {
+        let is_entry = unit.path == entry_path;
         let prefix = unit.path.join("$");
-        for ext in &unit.program.externs {
-            if !externs.iter().any(|e| e.name == ext.name) {
-                span_end = span_end.max(ext.span.end);
-                externs.push(ext.clone());
-            }
-        }
-
-        // Build this module's name → qualified-symbol map. EVERY top-level
-        // item is qualified by module path — fns, structs, enums, traits,
-        // effects, classes, AND named impls — so same-named items across
-        // modules never clash; only the entry's `main` keeps its symbol.
-        // `use`d imports map to their defining module's qualified symbol
-        // (resolve_imports already gated existence + visibility, and every
-        // importable kind is qualified). Builtins / primitives / type params
-        // / locals are absent from the map → left untouched at the rewrite.
-        let mut rename: HashMap<String, String> = HashMap::new();
+        let map = group_rename.entry(unit.path.clone()).or_default();
         for f in &unit.program.fns {
             // ADR 0059: an `export "C"` fn keeps its BARE C symbol (like the
-            // entry's `main`) — its name is a stable public symbol, not a
-            // module-internal one — so it is left out of the rename map.
+            // entry's `main`) — a stable public symbol, not module-internal —
+            // so it is left out of the rename map.
             if f.is_export_c {
                 continue;
             }
@@ -1632,75 +1642,88 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
             } else {
                 format!("{prefix}${}", f.name)
             };
-            rename.insert(f.name.clone(), qualified);
+            map.insert(f.name.clone(), qualified);
         }
         for s in &unit.program.structs {
-            rename.insert(s.name.clone(), format!("{prefix}${}", s.name));
+            map.insert(s.name.clone(), format!("{prefix}${}", s.name));
         }
         for e in &unit.program.enums {
-            rename.insert(e.name.clone(), format!("{prefix}${}", e.name));
+            map.insert(e.name.clone(), format!("{prefix}${}", e.name));
         }
         for t in &unit.program.traits {
-            rename.insert(t.name.clone(), format!("{prefix}${}", t.name));
+            map.insert(t.name.clone(), format!("{prefix}${}", t.name));
         }
         for ef in &unit.program.effects {
-            rename.insert(ef.name.clone(), format!("{prefix}${}", ef.name));
+            map.insert(ef.name.clone(), format!("{prefix}${}", ef.name));
         }
         for c in &unit.program.classes {
-            rename.insert(c.name.clone(), format!("{prefix}${}", c.name));
+            map.insert(c.name.clone(), format!("{prefix}${}", c.name));
         }
         for i in &unit.program.impls {
             if let Some(n) = &i.name {
-                rename.insert(n.clone(), format!("{prefix}${n}"));
+                map.insert(n.clone(), format!("{prefix}${n}"));
             }
         }
         for u in &unit.program.uses {
             let item = u.path.last().expect("validated: ≥ 1 segment");
             let module_path = &u.path[..u.path.len() - 1];
-            rename.insert(item.clone(), format!("{}${}", module_path.join("$"), item));
+            map.insert(item.clone(), format!("{}${}", module_path.join("$"), item));
         }
+    }
+
+    for unit in modules.iter() {
+        for ext in &unit.program.externs {
+            if !externs.iter().any(|e| e.name == ext.name) {
+                span_end = span_end.max(ext.span.end);
+                externs.push(ext.clone());
+            }
+        }
+
+        // ADR 0067: this unit's items are qualified + rewritten through its
+        // MODULE-WIDE rename map (shared by every file of the module).
+        let rename = &group_rename[&unit.path];
 
         // Clone + qualify each declaration's name, then reference-rewrite its
         // body + signature with this module's map.
         for f in &unit.program.fns {
             let mut nf = f.clone();
             nf.name = rename.get(&f.name).cloned().unwrap_or_else(|| f.name.clone());
-            rewrite_fn_def(&mut nf, &rename);
+            rewrite_fn_def(&mut nf, rename);
             span_end = span_end.max(nf.span.end);
             fns.push(nf);
         }
         for s in &unit.program.structs {
             let mut ns = s.clone();
             ns.name = rename.get(&s.name).cloned().unwrap_or_else(|| s.name.clone());
-            rewrite_struct_decl(&mut ns, &rename);
+            rewrite_struct_decl(&mut ns, rename);
             span_end = span_end.max(ns.span.end);
             structs.push(ns);
         }
         for e in &unit.program.enums {
             let mut ne = e.clone();
             ne.name = rename.get(&e.name).cloned().unwrap_or_else(|| e.name.clone());
-            rewrite_enum_decl(&mut ne, &rename);
+            rewrite_enum_decl(&mut ne, rename);
             span_end = span_end.max(ne.span.end);
             enums.push(ne);
         }
         for t in &unit.program.traits {
             let mut nt = t.clone();
             nt.name = rename.get(&t.name).cloned().unwrap_or_else(|| t.name.clone());
-            rewrite_trait_decl(&mut nt, &rename);
+            rewrite_trait_decl(&mut nt, rename);
             span_end = span_end.max(nt.span.end);
             traits.push(nt);
         }
         for ef in &unit.program.effects {
             let mut nef = ef.clone();
             nef.name = rename.get(&ef.name).cloned().unwrap_or_else(|| ef.name.clone());
-            rewrite_effect_decl(&mut nef, &rename);
+            rewrite_effect_decl(&mut nef, rename);
             span_end = span_end.max(nef.span.end);
             effects.push(nef);
         }
         for c in &unit.program.classes {
             let mut nc = c.clone();
             nc.name = rename.get(&c.name).cloned().unwrap_or_else(|| c.name.clone());
-            rewrite_class_decl(&mut nc, &rename);
+            rewrite_class_decl(&mut nc, rename);
             span_end = span_end.max(nc.span.end);
             classes.push(nc);
         }
@@ -1709,13 +1732,17 @@ pub fn merge_modules(modules: &[ModuleUnit]) -> Result<Program, ResolveError> {
             if let Some(n) = &i.name {
                 ni.name = Some(rename.get(n).cloned().unwrap_or_else(|| n.clone()));
             }
-            rewrite_impl_decl(&mut ni, &rename);
+            rewrite_impl_decl(&mut ni, rename);
             span_end = span_end.max(ni.span.end);
             impls.push(ni);
         }
     }
 
     Ok(Program {
+        // ADR 0067: `module` / `part` are discovery directives, consumed
+        // before merge — the single merged program carries neither.
+        module: None,
+        parts: Vec::new(),
         uses: Vec::new(),
         fns,
         structs,

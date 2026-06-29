@@ -871,6 +871,66 @@ fn lib_search_dirs(cli_lib_paths: &[String]) -> Vec<PathBuf> {
 /// Parsing the entry is lenient: a parse error there yields "no modules"
 /// so the main Salsa pipeline renders the proper diagnostic rather than
 /// this discovery pass duplicating it.
+/// ADR 0067 D2: if `prog` carries an explicit `module` declaration, it must
+/// name the path the file is being loaded as. Discovery errors are plain
+/// strings (surfaced by the caller's pipeline).
+fn check_module_decl(prog: &Program, expected: &[String], file: &Path) -> Result<(), String> {
+    if let Some(decl) = &prog.module {
+        if decl.path.as_slice() != expected {
+            return Err(format!(
+                "module declaration `module {};` in `{}` does not match its location \
+                 (expected `module {};`)",
+                decl.path.join("::"),
+                file.display(),
+                expected.join("::"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// ADR 0067 D3: read a module's root file PLUS every `part` it declares,
+/// returning them as sibling [`DiscoveredModule`]s sharing `module_path` (a
+/// multi-file module). Parts live in `<root-stem>/<part>.sentinel` — read by
+/// path, so no directory-listing builtin is needed (the constraint that keeps
+/// the self-host mirror buildable). Validates each file's optional `module`
+/// decl against `module_path` (`ModuleDeclMismatch`); a missing part file is a
+/// focused error.
+fn read_module_with_parts(
+    module_path: Vec<String>,
+    root_file: PathBuf,
+    root_source: String,
+    root_program: Program,
+) -> Result<Vec<DiscoveredModule>, String> {
+    check_module_decl(&root_program, &module_path, &root_file)?;
+    let part_dir = root_file.with_extension("");
+    let part_decls = root_program.parts.clone();
+    let mut out = vec![DiscoveredModule {
+        path: module_path.clone(),
+        program: root_program,
+        source: root_source,
+        file: root_file,
+    }];
+    for part in &part_decls {
+        let part_file = part_dir.join(format!("{}.sentinel", part.name));
+        if !part_file.is_file() {
+            return Err(format!(
+                "module `{}` declares `part {};` but its file `{}` does not exist",
+                module_path.join("::"),
+                part.name,
+                part_file.display(),
+            ));
+        }
+        let src = std::fs::read_to_string(&part_file)
+            .map_err(|e| format!("cannot read part `{}`: {e}", part_file.display()))?;
+        let program = sentinel_syntax::parse(&src)
+            .map_err(|e| format!("parse error in part `{}`: {e:?}", part_file.display()))?;
+        check_module_decl(&program, &module_path, &part_file)?;
+        out.push(DiscoveredModule { path: module_path.clone(), program, source: src, file: part_file });
+    }
+    Ok(out)
+}
+
 fn discover_module_graph(
     entry: &Path,
     search_dirs: &[PathBuf],
@@ -889,20 +949,19 @@ fn discover_module_graph(
         // Defer to the main pipeline for a proper parse diagnostic.
         Err(_) => return Ok(Vec::new()),
     };
-    if entry_prog.uses.is_empty() {
+    // ADR 0067: a multi-file-module root has `part`s even with no `use`, so it
+    // still needs discovery; only a truly standalone file (no `use`, no parts)
+    // skips the module graph.
+    if entry_prog.uses.is_empty() && entry_prog.parts.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut visited: BTreeSet<Vec<String>> = BTreeSet::new();
     visited.insert(vec![entry_stem.clone()]);
-    // The entry module is first; reached modules are appended (BFS over
-    // `out`, scanning each module's `use` edges as we go).
-    let mut out: Vec<DiscoveredModule> = vec![DiscoveredModule {
-        path: vec![entry_stem],
-        program: entry_prog,
-        source: entry_src,
-        file: entry.to_path_buf(),
-    }];
+    // The entry module is first (its `part`s right after it); reached modules
+    // are appended (BFS over `out`, scanning each module's `use` edges as we go).
+    let mut out: Vec<DiscoveredModule> =
+        read_module_with_parts(vec![entry_stem], entry.to_path_buf(), entry_src, entry_prog)?;
     let mut scan = 0;
     while scan < out.len() {
         let modules: Vec<Vec<String>> = out[scan]
@@ -948,7 +1007,8 @@ fn discover_module_graph(
             let program = sentinel_syntax::parse(&src).map_err(|e| {
                 format!("parse error in module `{}`: {e:?}", module.join("::"))
             })?;
-            out.push(DiscoveredModule { path: module, program, source: src, file });
+            // ADR 0067: attach the module's `part` files (same module path).
+            out.extend(read_module_with_parts(module, file, src, program)?);
         }
         scan += 1;
     }

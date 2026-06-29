@@ -49,7 +49,7 @@
 use sentinel_ast::{
     BinOp, Block, ClassDecl, ClassField, CmpOp, DelegateDecl, EffectDecl, EnumDecl, Expr, ExprKind,
     ExternFnDecl, FieldInit, FnDef, HandlerArm, ImplDecl, ImplMethodDef, InitDef, LogicOp, MatchArm, MethodDef,
-    OpDecl, Param, Pattern, Program, ReturnArm, SelfKind, Span, Spanned, Stmt, StmtKind, StructDecl,
+    ModuleDecl, OpDecl, Param, PartDecl, Pattern, Program, ReturnArm, SelfKind, Span, Spanned, Stmt, StmtKind, StructDecl,
     StructField, TraitDecl, TraitMethodSig, TypeExpr, TypeExprKind, TypeParam, UnaryOp,
     UseDecl, VariantDecl, Visibility,
 };
@@ -125,6 +125,20 @@ pub enum ParseError {
     EmptyTypeParams {
         #[label("expected at least one type parameter")]
         span: miette::SourceSpan,
+    },
+
+    /// ADR 0067 D2: a file declared `module` more than once. A file belongs
+    /// to exactly one module.
+    #[error("duplicate `module` declaration")]
+    #[diagnostic(
+        code(sentinel::parse::duplicate_module_decl),
+        help("a file declares its module at most once, before any items")
+    )]
+    DuplicateModuleDecl {
+        #[label("second `module` declaration here")]
+        span: miette::SourceSpan,
+        #[label("first declared here")]
+        first: miette::SourceSpan,
     },
 
     #[error("empty generic argument list `<>` is not allowed")]
@@ -366,6 +380,10 @@ impl<'a> Parser<'a> {
     pub fn parse_program(&mut self) -> Result<Program, ParseError> {
         let start = self.peek().map_or(0, |t| t.span.start);
         let mut uses = Vec::new();
+        // ADR 0067 D2/D3: the file's explicit `module` decl (at most one) and
+        // its `part` manifest (a multi-file-module root). Consumed at discovery.
+        let mut module: Option<ModuleDecl> = None;
+        let mut parts: Vec<PartDecl> = Vec::new();
         let mut fns = Vec::new();
         let mut structs = Vec::new();
         let mut effects = Vec::new();
@@ -386,6 +404,24 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::Use) => {
                     self.reject_top_level_pub(visibility, "use")?;
                     uses.push(self.parse_use_decl()?);
+                }
+                // ADR 0067 D2: `module a::b;` — the file's owning module. At
+                // most one; not an importable item, so `pub` is rejected.
+                Some(TokenKind::Module) => {
+                    self.reject_top_level_pub(visibility, "module")?;
+                    let decl = self.parse_module_decl()?;
+                    if let Some(prev) = &module {
+                        return Err(ParseError::DuplicateModuleDecl {
+                            span: to_source_span(&decl.span),
+                            first: to_source_span(&prev.span),
+                        });
+                    }
+                    module = Some(decl);
+                }
+                // ADR 0067 D3: `part name;` — a multi-file-module manifest entry.
+                Some(TokenKind::Part) => {
+                    self.reject_top_level_pub(visibility, "part")?;
+                    parts.push(self.parse_part_decl()?);
                 }
                 Some(TokenKind::Fn) => fns.push(self.parse_fn_def(visibility)?),
                 // ADR 0059: `export "C" fn …` — a C-ABI export. The `export "C"`
@@ -446,7 +482,12 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        if fns.is_empty()
+        // ADR 0067: a `module` decl or a `part` manifest makes the file a
+        // valid (possibly item-less) module root, so the "needs ≥1 item"
+        // rule only applies to a file with no module/part declarations.
+        if module.is_none()
+            && parts.is_empty()
+            && fns.is_empty()
             && structs.is_empty()
             && effects.is_empty()
             && classes.is_empty()
@@ -478,6 +519,8 @@ impl<'a> Parser<'a> {
             .max(enum_end)
             .max(extern_end);
         Ok(Program {
+            module,
+            parts,
             uses,
             fns,
             structs,
@@ -489,6 +532,107 @@ impl<'a> Parser<'a> {
             externs,
             span: start..end,
         })
+    }
+
+    /// ADR 0067 D2: parse `module a::b;` — one or more `::`-separated
+    /// identifier segments followed by `;`. Unlike `use` (whose last segment
+    /// is the imported item, so ≥ 2 segments), a `module` path is a plain
+    /// module path (≥ 1 segment). Checked against the file's location at
+    /// discovery.
+    fn parse_module_decl(&mut self) -> Result<ModuleDecl, ParseError> {
+        let start = self.advance().expect("peeked Module").span.start;
+        let mut path = Vec::new();
+        let first = self.peek().ok_or_else(|| ParseError::UnexpectedEof {
+            expected: "identifier after `module`",
+            span: to_source_span(&self.eof_span()),
+        })?;
+        if first.kind != TokenKind::Ident {
+            let kind = first.kind;
+            let span = first.span.clone();
+            return Err(ParseError::UnexpectedToken {
+                got: format!("{kind:?}"),
+                expected: "identifier after `module`",
+                span: to_source_span(&span),
+            });
+        }
+        path.push(self.src[first.span.clone()].to_string());
+        self.advance();
+        while self.peek_kind() == Some(TokenKind::ColonColon) {
+            self.advance();
+            let seg = self.peek().ok_or_else(|| ParseError::UnexpectedEof {
+                expected: "identifier after `::` in a `module` path",
+                span: to_source_span(&self.eof_span()),
+            })?;
+            if seg.kind != TokenKind::Ident {
+                let kind = seg.kind;
+                let span = seg.span.clone();
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{kind:?}"),
+                    expected: "identifier after `::` in a `module` path",
+                    span: to_source_span(&span),
+                });
+            }
+            path.push(self.src[seg.span.clone()].to_string());
+            self.advance();
+        }
+        let semi_end = match self.peek_kind() {
+            Some(TokenKind::Semi) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`;` after a `module` declaration",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`;` after a `module` declaration",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+        Ok(ModuleDecl { path, span: start..semi_end })
+    }
+
+    /// ADR 0067 D3: parse `part name;` — a single identifier (the part file's
+    /// stem) followed by `;`. Names `<module-dir>/name.sentinel`, an
+    /// additional file of the SAME multi-file module.
+    fn parse_part_decl(&mut self) -> Result<PartDecl, ParseError> {
+        let start = self.advance().expect("peeked Part").span.start;
+        let name_tok = self.peek().ok_or_else(|| ParseError::UnexpectedEof {
+            expected: "a part name after `part`",
+            span: to_source_span(&self.eof_span()),
+        })?;
+        if name_tok.kind != TokenKind::Ident {
+            let kind = name_tok.kind;
+            let span = name_tok.span.clone();
+            return Err(ParseError::UnexpectedToken {
+                got: format!("{kind:?}"),
+                expected: "a part name (identifier) after `part`",
+                span: to_source_span(&span),
+            });
+        }
+        let name = self.src[name_tok.span.clone()].to_string();
+        self.advance();
+        let semi_end = match self.peek_kind() {
+            Some(TokenKind::Semi) => self.advance().expect("peeked").span.end,
+            Some(other) => {
+                let t = self.peek().expect("peeked");
+                return Err(ParseError::UnexpectedToken {
+                    got: format!("{other:?}"),
+                    expected: "`;` after a `part` declaration",
+                    span: to_source_span(&t.span),
+                });
+            }
+            None => {
+                return Err(ParseError::UnexpectedEof {
+                    expected: "`;` after a `part` declaration",
+                    span: to_source_span(&self.eof_span()),
+                });
+            }
+        };
+        Ok(PartDecl { name, span: start..semi_end })
     }
 
     /// Phase D.6 (1/N) / ADR 0037 D2: parse a top-level import
@@ -5948,6 +6092,54 @@ mod tests {
         assert!(matches!(
             err,
             ParseError::UnexpectedToken { expected, .. } if expected == "`;` after a `use` import"
+        ));
+    }
+
+    #[test]
+    fn parse_module_and_part_decls() {
+        // ADR 0067 D2/D3: `module a::b;` parses into `Program.module`; `part
+        // name;` directives parse into `Program.parts`, ahead of items.
+        let p = parse_ok_program(
+            "module lib;\npart helpers;\npart more;\npub fn f() -> i64 { 0 }",
+        );
+        let m = p.module.expect("module decl present");
+        assert_eq!(m.path, vec!["lib"]);
+        assert_eq!(m.to_string(), "(module lib)");
+        assert_eq!(p.parts.len(), 2);
+        assert_eq!(p.parts[0].name, "helpers");
+        assert_eq!(p.parts[1].to_string(), "(part more)");
+        assert_eq!(p.fns.len(), 1);
+    }
+
+    #[test]
+    fn parse_module_nested_path() {
+        // A `::`-pathed module declaration (`module a::b;`).
+        let p = parse_ok_program("module a::b;\nfn helper() -> i64 { 0 }");
+        assert_eq!(p.module.expect("module").path, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_module_root_manifest_without_items_ok() {
+        // A pure manifest root (a `module` decl + `part`s, no items of its own)
+        // is a valid program — the "needs ≥1 item" rule only binds files with
+        // no module/part declarations.
+        let p = parse_ok_program("module lib;\npart a;\npart b;\n");
+        assert!(p.fns.is_empty());
+        assert_eq!(p.parts.len(), 2);
+    }
+
+    #[test]
+    fn parse_duplicate_module_decl_rejected() {
+        let err = parse("module a;\nmodule b;\nfn main() -> i64 { 0 }").unwrap_err();
+        assert!(matches!(err, ParseError::DuplicateModuleDecl { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_part_requires_semicolon() {
+        let err = parse("part helpers fn main() -> i64 { 0 }").unwrap_err();
+        assert!(matches!(
+            err,
+            ParseError::UnexpectedToken { expected, .. } if expected == "`;` after a `part` declaration"
         ));
     }
 

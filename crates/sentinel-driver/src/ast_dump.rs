@@ -18,13 +18,16 @@
 //!
 //! (2d-1, this increment): `use a::b::Item;` → `(use a b Item)`.
 
-use sentinel_ast::{Block, ClassDecl, EffectDecl, EnumDecl, Expr, ExprKind, FnDef, ImplDecl, Param,
-    Pattern, Program, SelfKind, Stmt, StmtKind, StructDecl, TraitDecl, TypeExpr, TypeExprKind,
-    UseDecl};
+use sentinel_ast::{Block, ClassDecl, EffectDecl, EnumDecl, Expr, ExprKind, FnDef, ImplDecl,
+    ModuleDecl, Param, PartDecl, Pattern, Program, SelfKind, Stmt, StmtKind, StructDecl, TraitDecl,
+    TypeExpr, TypeExprKind, UseDecl};
 
 /// One top-level declaration, tagged for the source-order re-collation in
 /// [`dump`]. Grows a variant per (2d) increment as each decl kind lands.
 enum Item<'a> {
+    /// ADR 0067: `module a::b;` / `part name;` discovery directives.
+    Module(&'a ModuleDecl),
+    Part(&'a PartDecl),
     Use(&'a UseDecl),
     Fn(&'a FnDef),
     Struct(&'a StructDecl),
@@ -68,6 +71,13 @@ fn dump_method_sig(name: &str, self_kind: SelfKind, params: &[Param], return_typ
 /// by span start to recover the source order the Sentinel parser produces.
 pub fn dump(program: &Program) -> String {
     let mut items: Vec<(usize, Item)> = Vec::new();
+    // ADR 0067: the `module` decl + `part` manifest sort first (smallest span).
+    if let Some(m) = &program.module {
+        items.push((m.span.start, Item::Module(m)));
+    }
+    for p in &program.parts {
+        items.push((p.span.start, Item::Part(p)));
+    }
     for u in &program.uses {
         items.push((u.span.start, Item::Use(u)));
     }
@@ -102,6 +112,8 @@ pub fn dump(program: &Program) -> String {
         }
         first = false;
         match item {
+            Item::Module(m) => dump_module(m, &mut out),
+            Item::Part(p) => dump_part(p, &mut out),
             Item::Use(u) => dump_use(u, &mut out),
             Item::Fn(f) => dump_fn(f, &mut out),
             Item::Struct(s) => dump_struct(s, &mut out),
@@ -114,6 +126,23 @@ pub fn dump(program: &Program) -> String {
     }
     out.push('\n');
     out
+}
+
+/// ADR 0067: `module a::b;` → `(module a b)` (segments space-separated, like
+/// `use`); `part name;` → `(part name)`.
+fn dump_module(m: &ModuleDecl, out: &mut String) {
+    out.push_str("(module");
+    for seg in &m.path {
+        out.push(' ');
+        out.push_str(seg);
+    }
+    out.push(')');
+}
+
+fn dump_part(p: &PartDecl, out: &mut String) {
+    out.push_str("(part ");
+    out.push_str(&p.name);
+    out.push(')');
 }
 
 /// `use a::b::Item;` → `(use a b Item)` (each path segment space-separated).

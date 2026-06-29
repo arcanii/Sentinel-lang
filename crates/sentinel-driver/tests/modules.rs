@@ -118,6 +118,78 @@ fn use_of_missing_module_is_module_not_found() {
     );
 }
 
+// ===== ADR 0067: multi-file modules (`module` decl + `part` manifest) =====
+
+#[test]
+fn multi_file_module_builds_and_runs() {
+    // The phase-go: module `lib` spans two files — a root `lib.sentinel`
+    // (manifest + a `pub fn`) and a part `lib/helpers.sentinel`. The root's
+    // `pub compute` calls a NON-`pub` `helper` defined in the PART, proving
+    // module-private visibility spans the module's files (ADR 0067 D4). The
+    // entry imports only the public `compute`. compute(4) = helper(4)+2 = 42.
+    let dir = temp_project("mfm");
+    write(
+        dir.join("lib.sentinel"),
+        "module lib;\npart helpers;\npub fn compute(x: i64) -> i64 { helper(x) + 2 }\n",
+    );
+    write(dir.join("lib/helpers.sentinel"), "module lib;\nfn helper(x: i64) -> i64 { x * 10 }\n");
+    write(dir.join("main.sentinel"), "use lib::compute;\nfn main() -> i64 { compute(4) }\n");
+    assert_eq!(build_and_run(dir.join("main.sentinel")), 42);
+}
+
+#[test]
+fn multi_file_entry_root_with_parts() {
+    // The ENTRY itself is a multi-file-module root: `app.sentinel` declares a
+    // `part util` and calls its private `helper`; `main` stays the bare C
+    // entry while sharing the module group with the part. helper()+1 = 42.
+    // (An explicit `-o` is used because the default output name for an entry
+    // root `app.sentinel` would be `app`, colliding with its parts dir `app/`.)
+    let dir = temp_project("mfm_entry");
+    let entry = dir.join("app.sentinel");
+    write(entry.clone(), "module app;\npart util;\nfn main() -> i64 { helper() + 1 }\n");
+    write(dir.join("app/util.sentinel"), "module app;\nfn helper() -> i64 { 41 }\n");
+    let exe = dir.join("app_bin");
+    let (ok, stderr) = {
+        let out = Command::new(env!("CARGO_BIN_EXE_snc"))
+            .args(["build", entry.to_str().unwrap(), "-o", exe.to_str().unwrap()])
+            .output()
+            .expect("run snc");
+        (out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    assert!(ok, "expected a successful entry-root build; stderr:\n{stderr}");
+    let code = Command::new(&exe).output().expect("run binary").status.code().expect("exit");
+    assert_eq!(code, 42);
+}
+
+#[test]
+fn missing_part_file_is_rejected() {
+    // ADR 0067 D3: a `part` whose file is absent is a focused discovery error.
+    let dir = temp_project("mfm_nopart");
+    write(dir.join("lib.sentinel"), "module lib;\npart ghost;\npub fn f() -> i64 { 1 }\n");
+    write(dir.join("main.sentinel"), "use lib::f;\nfn main() -> i64 { f() }\n");
+    let (ok, stderr) = build(dir.join("main.sentinel"));
+    assert!(!ok, "a missing part file should fail the build; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("part ghost") && stderr.contains("does not exist"),
+        "expected a missing-part error naming `ghost`; stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn module_decl_mismatch_is_rejected() {
+    // ADR 0067 D2: a file whose `module` decl disagrees with its location is
+    // rejected (`lib.sentinel` claiming `module wrong;`).
+    let dir = temp_project("mfm_mismatch");
+    write(dir.join("lib.sentinel"), "module wrong;\npub fn f() -> i64 { 1 }\n");
+    write(dir.join("main.sentinel"), "use lib::f;\nfn main() -> i64 { f() }\n");
+    let (ok, stderr) = build(dir.join("main.sentinel"));
+    assert!(!ok, "a mismatched module decl should fail the build; stderr:\n{stderr}");
+    assert!(
+        stderr.contains("does not match its location"),
+        "expected a ModuleDeclMismatch error; stderr:\n{stderr}"
+    );
+}
+
 // ===== ADR 0037 (a): TRUE per-unit separate compilation (`--separate`) =====
 
 /// Run `snc build <entry> --separate -o <exe>` and return (success, stderr).

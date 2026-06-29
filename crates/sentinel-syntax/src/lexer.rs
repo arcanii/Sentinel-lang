@@ -182,6 +182,18 @@ pub enum TokenKind {
     /// (`pub` stays a contextual keyword — an `Ident` "pub" — as since C4.1.)
     #[token("use")]
     Use,
+    /// ADR 0067 D2: `module a::b;` — declares the file's owning module
+    /// explicitly (decoupling module identity from the file path so several
+    /// files can form one logical module). A reserved keyword token (the
+    /// top-level dispatch is token-based); parses to a `ModuleDecl`.
+    #[token("module")]
+    Module,
+    /// ADR 0067 D3: `part name;` — in a module root, names an additional
+    /// source file `<module-dir>/name.sentinel` that is part of the SAME
+    /// module (the manifest for a multi-file module). A reserved keyword
+    /// token; parses to a `PartDecl`.
+    #[token("part")]
+    Part,
     /// Phase D.1 / ADR 0032: `enum Name { V1, V2(T), … }` declares a
     /// sum type (tagged union). Additive at D.1 (1/N) — the parser
     /// consumes it at (2/N).

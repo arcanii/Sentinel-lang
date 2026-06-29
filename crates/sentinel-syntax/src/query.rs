@@ -192,6 +192,15 @@ fn parse_error_to_diagnostic(err: &ParseError) -> Diagnostic {
             message: "expression nested too deeply".to_string(),
             span: span.offset()..(span.offset() + span.len()),
         },
+        // ADR 0067 D2: a file declared `module` more than once. Point at the
+        // offending second declaration.
+        ParseError::DuplicateModuleDecl { span, .. } => Diagnostic {
+            stage: "parse",
+            severity: Severity::Error,
+            code: "sentinel::parse::duplicate_module_decl",
+            message: "duplicate `module` declaration".to_string(),
+            span: span.offset()..(span.offset() + span.len()),
+        },
     }
 }
 
