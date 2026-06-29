@@ -597,6 +597,11 @@ Recommendation: ADR-first; pin scope + migration + bootstrap handling before
 emitting anything. Low urgency relative to the threading / concurrency track.
 (Filed in BACKLOG.md §11 because BACKLOG2.md has no Language-Evolution section.)
 
+**Action (deferred, maintainer-confirmed 2026-06-29):** draft a dedicated ADR
+covering **Step 0 + the deprecation as one design** (the bounded `return value;`
+terminator fix and the implicit-tail deprecation, with the warn→error migration
+and bootstrap rewrite). Not now — after the threading / concurrency track.
+
 ---
 
 ## 12. What Sentinel Will Never Do
