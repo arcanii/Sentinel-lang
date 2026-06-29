@@ -268,6 +268,15 @@ pub struct ChannelData {
     pub elem_ty: Type,
 }
 
+/// ADR 0068: identifier for an interned NESTED-array element. A
+/// `Type::Array(ArrayElem::Array(id))` is a `[[T]]` whose inner array's
+/// element is `arrays[id]` (an [`ArrayElem`]). This is how the depth-1 array
+/// rule (ADR 0015 D6) is lifted while keeping `Type: Copy` — the inner element
+/// lives in [`TypedProgram::arrays`] and the variant carries only a `u32`,
+/// exactly like [`ChanId`] / [`SecretId`] / [`GenericInstanceId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ArrayId(pub u32);
+
 /// Phase D.1 / ADR 0032 D3: the underlying data of a [`Type::Enum`].
 /// Owned by [`TypedProgram::enums`] (the [`EnumId`] indexes that
 /// vec); nominal, like [`ClassData`]. Variant payload types are
@@ -469,6 +478,14 @@ pub enum ArrayElem {
     /// public. Admitted only for a secret SCALAR element — the demote guard
     /// ([`Type::to_array_elem_secret`]) rejects `[secret [T]]` / `[secret ?T]`.
     Secret(SecretId),
+    /// ADR 0068: a NESTED array element — `[[T]]`'s element is itself an array.
+    /// The [`ArrayId`] indexes [`TypedProgram::arrays`], where the *inner*
+    /// array's [`ArrayElem`] lives, so `[[u8]]` is
+    /// `Array(Array(id))` with `arrays[id] = U8`. Lifts the ADR 0015 D6 depth-1
+    /// rule while keeping `Type: Copy` (a `u32`, not a `Box`). Its element type
+    /// is recovered via [`TypedProgram::array_elem_type`] (the bare
+    /// [`ArrayElem::to_type`] can't — it has no interner handle).
+    Array(ArrayId),
 }
 
 impl ArrayElem {
@@ -486,6 +503,15 @@ impl ArrayElem {
             // `secret T` it names — so `s[i]` on a `[secret T]` types as
             // `secret T`, seeding the constant-time check with no other change.
             ArrayElem::Secret(id) => Type::Secret(id),
+            // ADR 0068: a nested-array element needs the `arrays` interner to
+            // recover its inner element, which this bare (table-less) method
+            // doesn't have. Promotion of a nested element goes through
+            // [`TypedProgram::array_elem_type`]; this arm is unreachable for the
+            // flat-element callers (codegen / type-check route nested elements
+            // through the program-aware helper). See ADR 0068 D1.
+            ArrayElem::Array(_) => {
+                unreachable!("ArrayElem::Array: use TypedProgram::array_elem_type (ADR 0068)")
+            }
         }
     }
 
@@ -503,6 +529,14 @@ impl ArrayElem {
         instances: &mut Vec<GenericInstanceData>,
         refs: &mut Vec<RefData>,
     ) -> ArrayElem {
+        // ADR 0068: a nested-array element carries no TypeParam (its inner
+        // element is interned), so substitution is the identity. (Substitution
+        // INTO a nested array — `[T]` with `T := [u8]` — is the deferred
+        // generic-nested case, D6; the `to_type()` call below would panic on
+        // `Array`, so short-circuit here.)
+        if let ArrayElem::Array(_) = self {
+            return self;
+        }
         self.to_type()
             .substitute(subst, instances, refs)
             // ADR 0053: `to_array_elem_subst` so a TypeParam bound to `secret SCALAR`
@@ -1211,6 +1245,21 @@ pub fn intern_channel(channels: &mut Vec<ChannelData>, elem_ty: Type) -> ChanId 
     id
 }
 
+/// ADR 0068: intern a nested array's inner [`ArrayElem`] into `arrays`,
+/// returning its [`ArrayId`]. Linear search, dedup by structural equality;
+/// mirrors [`intern_channel`]'s shape. `Type::Array(ArrayElem::Array(id))` is
+/// then the `[[T]]` whose inner element is `arrays[id]`.
+pub fn intern_array_elem(arrays: &mut Vec<ArrayElem>, elem: ArrayElem) -> ArrayId {
+    for (idx, existing) in arrays.iter().enumerate() {
+        if *existing == elem {
+            return ArrayId(idx as u32);
+        }
+    }
+    let id = ArrayId(arrays.len() as u32);
+    arrays.push(elem);
+    id
+}
+
 /// Format a [`Type`] for display, looking up the struct name when
 /// the type is `Struct(StructId)`. Pass `None` when no program is
 /// available (e.g. error rendering in tests) — struct types render
@@ -1783,6 +1832,11 @@ pub struct TypedProgram {
     /// indexes this vector to recover `(elem_ty)`. Populated during
     /// type-check of `channel_new` calls.
     pub channels: Vec<ChannelData>,
+    /// ADR 0068: interned NESTED-array elements. Each
+    /// `Type::Array(ArrayElem::Array(id))` (`[[T]]`) indexes this vector to
+    /// recover the *inner* array's [`ArrayElem`]. Populated when a `[[T]]` type
+    /// annotation / literal is resolved. Same scheme as [`channels`] / [`refs`].
+    pub arrays: Vec<ArrayElem>,
     /// C4.1 / ADR 0022 D1: class declarations with resolved field
     /// types + init signature + method signatures. Each ClassId
     /// matches its index here.
@@ -1860,6 +1914,25 @@ impl TypedProgram {
     /// Panics on out-of-range — IDs only come from [`intern_channel`].
     pub fn channel_data(&self, id: ChanId) -> &ChannelData {
         &self.channels[id.0 as usize]
+    }
+
+    /// ADR 0068: the inner [`ArrayElem`] of a nested-array element. Panics on
+    /// out-of-range — IDs only come from [`intern_array_elem`].
+    pub fn array_elem(&self, id: ArrayId) -> ArrayElem {
+        self.arrays[id.0 as usize]
+    }
+
+    /// ADR 0068: promote an [`ArrayElem`] to its [`Type`], resolving a nested
+    /// `Array(id)` via the [`arrays`](Self::arrays) interner (which the bare,
+    /// table-less [`ArrayElem::to_type`] cannot). For a flat element this is just
+    /// `ae.to_type()`; for `Array(id)` it is `[inner]` = `Type::Array(arrays[id])`.
+    /// This is the canonical "element type of an array" accessor for codegen /
+    /// type-check sites that may see a nested element.
+    pub fn array_elem_type(&self, ae: ArrayElem) -> Type {
+        match ae {
+            ArrayElem::Array(id) => Type::Array(self.array_elem(id)),
+            flat => flat.to_type(),
+        }
     }
 
     /// Look up the [`ClassData`] for a class type per ADR 0022 D1
@@ -3962,6 +4035,11 @@ pub fn check_module(
     // ADR 0066 M1.2: the channel-type interner. M1.2 minimum interns a single
     // `Channel<i64>` while building the channel-builtin signatures below.
     let mut channels: Vec<ChannelData> = Vec::new();
+    // ADR 0068: the nested-array element interner — will be populated when a
+    // `[[T]]` type annotation / literal is resolved (the resolution-wiring slice).
+    // Empty for now (the representation lands first; `resolve_type_expr` still
+    // rejects `[[T]]` until the interner is threaded through the check pipeline).
+    let arrays: Vec<ArrayElem> = Vec::new();
 
     // Pass 0.5 / ADR 0032 (3/N): resolve enum variant payload types.
     // Each payload `TypeExpr` is resolved against the name tables (so
@@ -5292,6 +5370,8 @@ pub fn check_module(
         // ADR 0066 M1.2: populated when the channel builtins are typed
         // (their `Channel<i64>` return/param interns here). Empty until then.
         channels,
+        // ADR 0068: nested-array element interner (populated by `[[T]]` resolution).
+        arrays,
         class_decls: typed_class_decls,
         trait_decls: typed_trait_decls,
         impl_decls: typed_impl_decls,
@@ -6237,6 +6317,15 @@ fn check_mutable_lvalue(
                 | ArrayElem::Bool
                 | ArrayElem::U8
                 | ArrayElem::Secret(_) => Ok(()),
+                // ADR 0068: a nested-array element (`a[i] = v` on a `[[T]]`) is
+                // non-Copy (the inner `[T]` owns a buffer), so index-assignment
+                // is rejected once nested arrays are constructible (drop-on-
+                // overwrite deferred). Unreachable until the resolution-wiring
+                // slice produces `ArrayElem::Array` (the precise element type
+                // for the diagnostic needs the `arrays` interner, threaded then).
+                ArrayElem::Array(_) => {
+                    unreachable!("ArrayElem::Array pre-resolution-wiring (ADR 0068)")
+                }
             }
         }
         _ => Err(TypeError::AssignToRvalue {
