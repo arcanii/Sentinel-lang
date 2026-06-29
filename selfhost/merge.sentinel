@@ -1382,6 +1382,10 @@ fn emit_item(out: &mut Vec<u8>, c: &MergeCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Ve
     let lead: i64 = (*k)[*cur];
     if lead == 58 {
         skip_use(k, cur)
+    } else if lead == 64 {
+        skip_use(k, cur)
+    } else if lead == 65 {
+        skip_use(k, cur)
     } else if lead == 52 {
         emit_struct_decl(out, c, k, s, e, src, cur)
     } else if lead == 53 {

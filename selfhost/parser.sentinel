@@ -83,11 +83,17 @@
 // 36 declassify 37 perform 38 scope 39 spawn 40 await 41 handle 42 with
 // 43 return | 44 ; 45 let 46 mut 47 while 48 break 49 continue | 50 ? 51 secret
 // | (2d top-level decls) 52 struct 53 enum 54 trait 55 impl 56 class 57 effect
-// 58 use 59 pub 60 as 61 for | (2d-8 literals) 62 CharLit 63 StringLit.
+// 58 use 59 pub 60 as 61 for | (2d-8 literals) 62 CharLit 63 StringLit |
+// (ADR 0067 multi-file modules) 64 module 65 part.
 // Expr unary op-codes: 1 - 2 ! 3 * (deref) 4 & (ref) 5 &mut (refmut).
 // Expr op-codes (internal; the dump emits node names + operator symbols):
 // binop 1 + 2 - 3 * 4 / 5 & 6 | 7 ^ ; cmp 8 == 9 != 10 < 11 <= 12 > 13 >= ;
 // logic 14 && 15 || ; unary 1 - 2 !.
+
+// ADR 0067: this file's explicit module declaration (pilot for the multi-file
+// modules mirror). Path-derived identity is unchanged (`parser`), so the merge
+// drops it byte-identically.
+module parser;
 
 pub enum Expr {
     Int(i64),
@@ -381,6 +387,18 @@ fn is_kw_use(src: &[u8], start: i64, end: i64) -> bool {
     end - start == 3 && (*src)[start] == 'u' && (*src)[start + 1] == 's' && (*src)[start + 2] == 'e'
 }
 
+// ADR 0067 D2/D3: `module a::b;` + `part name;` (multi-file modules).
+fn is_kw_module(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 6 && (*src)[start] == 'm' && (*src)[start + 1] == 'o'
+        && (*src)[start + 2] == 'd' && (*src)[start + 3] == 'u' && (*src)[start + 4] == 'l'
+        && (*src)[start + 5] == 'e'
+}
+
+fn is_kw_part(src: &[u8], start: i64, end: i64) -> bool {
+    end - start == 4 && (*src)[start] == 'p' && (*src)[start + 1] == 'a'
+        && (*src)[start + 2] == 'r' && (*src)[start + 3] == 't'
+}
+
 fn is_kw_pub(src: &[u8], start: i64, end: i64) -> bool {
     end - start == 3 && (*src)[start] == 'p' && (*src)[start + 1] == 'u' && (*src)[start + 2] == 'b'
 }
@@ -647,6 +665,10 @@ pub fn tokenize(src: &[u8], n: i64, kinds: &mut Vec<i64>, starts: &mut Vec<i64>,
                 51
             } else if is_kw_use(src, start, ie) {
                 58
+            } else if is_kw_module(src, start, ie) {
+                64
+            } else if is_kw_part(src, start, ie) {
+                65
             } else if is_kw_pub(src, start, ie) {
                 59
             } else if is_kw_struct(src, start, ie) {
@@ -2180,6 +2202,35 @@ fn dump_use_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, sr
     0
 }
 
+// ADR 0067: `module a :: b ;` → `(module a b)` (a path is just idents, like
+// `use`); the leading `module` is at the cursor, the trailing `;` is consumed.
+fn dump_module_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    append_str(out, "(module ");
+    append_slice(out, src, (*s)[*cur], (*e)[*cur]);
+    *cur = *cur + 1;
+    while (*k)[*cur] == 30 {
+        *cur = *cur + 1;
+        push(out, ' ');
+        append_slice(out, src, (*s)[*cur], (*e)[*cur]);
+        *cur = *cur + 1;
+    }
+    *cur = *cur + 1;
+    push(out, ')');
+    0
+}
+
+// ADR 0067: `part name ;` → `(part name)` (one ident; the `;` is consumed).
+fn dump_part_decl(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    *cur = *cur + 1;
+    append_str(out, "(part ");
+    append_slice(out, src, (*s)[*cur], (*e)[*cur]);
+    *cur = *cur + 1;
+    *cur = *cur + 1;
+    push(out, ')');
+    0
+}
+
 // A `fn` definition (the leading `fn` is at the cursor) → `(fn name (<param>…)
 // <ret> <block>)`. Factored out of the old main loop so main can dispatch on the
 // leading decl token. fn header: `fn` NAME `<type-params>?` `(` params `)` `->`
@@ -2647,6 +2698,10 @@ fn dump_item(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &
     let lead: i64 = (*k)[*cur];
     if lead == 58 {
         dump_use_decl(out, k, s, e, src, cur)
+    } else if lead == 64 {
+        dump_module_decl(out, k, s, e, src, cur)
+    } else if lead == 65 {
+        dump_part_decl(out, k, s, e, src, cur)
     } else if lead == 52 {
         dump_struct_decl(out, k, s, e, src, cur)
     } else if lead == 53 {
