@@ -1,0 +1,22 @@
+// std::math::geometry — a reusable `Rect` data type + operations, used as the
+// worked cross-file example. A `pub struct` and `pub fn`s defined HERE are
+// `use`d from a program in ANOTHER file (examples/modules/rect_demo.sentinel).
+// Every `pub` item crosses a module / separate-compilation boundary (ADR 0037).
+//
+// NOTE: Sentinel `class`es are module-LOCAL — `pub class` is rejected by the
+// parser, so a `class` cannot cross a module boundary. The cross-module form of
+// "a type with behaviour" is a `pub struct` + `pub fn`s (or a `pub trait` +
+// impl). See BACKLOG §10.9.
+
+pub struct Rect {
+    width: i64,
+    height: i64,
+}
+
+pub fn rect(width: i64, height: i64) -> Rect {
+    Rect { width: width, height: height }
+}
+
+pub fn area(r: Rect) -> i64 {
+    r.width * r.height
+}

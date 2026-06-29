@@ -1,0 +1,24 @@
+// examples/modules/rect_demo — the worked MULTI-FILE example
+// (ADR 0037 modules / BACKLOG §10.9): a program in THIS file uses a `pub struct`
+// (`Rect`) and `pub fn`s (`rect`, `area`) defined in ANOTHER file, the library
+// module `std::math::geometry`.
+//
+// Each `use` brings one item across the module boundary; the `Rect` value and
+// the `rect` / `area` calls cross the separate-compilation UNIT boundary (the
+// harness builds this BOTH `--separate`, where `std::math::geometry` is its own
+// object linked in, AND via the merge path). This is how a Sentinel program
+// references source defined in a different file.
+//
+// (A `class` can't cross a module boundary — `pub class` is rejected — so the
+// reusable type here is a `pub struct` + `pub fn`s. See std::math::geometry.)
+//
+// A 6 × 7 rectangle has area 42. Exit 42.
+
+use std::math::geometry::Rect;
+use std::math::geometry::rect;
+use std::math::geometry::area;
+
+fn main() -> i64 {
+    let r: Rect = rect(6, 7);
+    area(r)
+}
