@@ -1,0 +1,578 @@
+module types;
+
+// --- the typed dump (1-phase consuming map: Expr -> typed S-expr) ------------
+//
+// Each `dump_t*` for an expression RETURNS the node's inferred type handle and
+// appends ` :<type>` before its closing paren (`close_ty`), so a parent can use a
+// child's type. (Resolve's `dump_r*` returned nothing — types threads the type
+// up.)
+
+// Close a typed expression node: ` :<type>)`.
+fn close_ty(out: &mut Vec<u8>, ty: i64, c: &mut TyCtx) -> i64 {
+    append_str(out, " :");
+    render_type(out, ty, c);
+    push(out, ')');
+    0
+}
+
+// (6/N) dump an arg list in a CONSUMING context (constructor / method / perform /
+// enum-construct args — moved into the callee). Sets `consuming` true around the args.
+fn dump_cargs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let svc: bool = (*c).consuming;
+    (*c).consuming = true;
+    dump_targs(out, a, src, c, gb);
+    (*c).consuming = svc;
+    0
+}
+
+fn dump_targs(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(x, rest) => {
+            push(out, ' ');
+            // (6/N) args INHERIT the caller's consuming context (the call arm sets it —
+            // user-fn/construct args consume, builtin args do not).
+            let cg_argty: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            mir_collect(c);
+            cg_collect(c, cg_argty);
+            dump_targs(out, rest, src, c, gb)
+        },
+    }
+}
+
+// (4c-2) array-literal elements: dump every element; RETURN the first element's
+// type (the inferred array element type). Empty → i64 default (a context-typed
+// follow-up). The first is dumped here; the rest reuse `dump_targs`.
+fn dump_array_elems(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(x, rest) => {
+            push(out, ' ');
+            // (6/N) the array arm sets consuming=true before this; elements inherit it.
+            let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            mir_collect(c);
+            // (8c-2) codegen: collect the FIRST element's operand (the rest collect
+            // via `dump_targs`); the array arm emits the alloc+stores over them.
+            cg_collect(c, t0);
+            dump_targs(out, rest, src, c, gb);
+            t0
+        },
+    }
+}
+
+// --- (4h) generic-fn inference (unify_one + substitution) -------------------
+
+// Substitute the type-params in `h` using the resolved type-arg list `args`
+// (indexed by type-param index). Recurses through compound shells; leaves
+// concrete types (scalars, structs, enums, classes) unchanged. (Generic-instance
+// substitution — kind 10 — lands with (4h-2)'s `mk_generic`.)
+fn subst_type(c: &mut TyCtx, h: i64, args: &Vec<i64>) -> i64 {
+    if h < tbase() {
+        h
+    } else {
+        let idx: i64 = h - tbase();
+        let k: i64 = (*c).tk[idx];
+        if k == 9 {
+            let pi: i64 = (*c).ta[idx];
+            (*args)[pi]
+        } else if k == 1 {
+            let inn: i64 = (*c).ta[idx];
+            let si: i64 = subst_type(c, inn, args);
+            mk_array(c, si)
+        } else if k == 4 {
+            let inn4: i64 = (*c).ta[idx];
+            let s4: i64 = subst_type(c, inn4, args);
+            mk_nullable(c, s4)
+        } else if k == 3 {
+            let inn3: i64 = (*c).ta[idx];
+            let s3: i64 = subst_type(c, inn3, args);
+            mk_secret(c, s3)
+        } else if k == 2 {
+            let m2: i64 = (*c).ta[idx];
+            let inn2: i64 = (*c).tb[idx];
+            let s2: i64 = subst_type(c, inn2, args);
+            mk_ref(c, m2, s2)
+        } else if k == 10 {
+            // A generic instance whose own args may be type-params (e.g. make_pair's
+            // return `Pair<<T#0>, <T#1>>` substituted to `Pair<i64, i64>`): substitute
+            // each arg, then re-intern. The arg slice [grs..gre] is stable under the
+            // recursive `mk_generic` appends (gia is append-only).
+            let gdecl: i64 = (*c).ta[idx];
+            let grec: i64 = (*c).tb[idx];
+            let grs: i64 = (*c).girs[grec];
+            let gre: i64 = (*c).gire[grec];
+            let mut gnewargs: Vec<i64> = vec_new();
+            let mut ggi: i64 = grs;
+            while ggi < gre {
+                let goa: i64 = (*c).gia[ggi];
+                let gsa: i64 = subst_type(c, goa, args);
+                push(&mut gnewargs, gsa);
+                ggi = ggi + 1;
+            }
+            mk_generic(c, gdecl, &gnewargs)
+        } else {
+            h
+        }
+    }
+}
+
+// Record a type-param binding (param index `pidx` → arg type `at`) into the
+// parallel (`bi`, `bt`) accumulator lists; FIRST binding wins (clean fixtures are
+// consistent, so a re-encounter of the same param need not re-check).
+fn subst_bind(bi: &mut Vec<i64>, bt: &mut Vec<i64>, pidx: i64, at: i64) -> i64 {
+    let n: i64 = len(*bi);
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < n {
+        if (*bi)[i] == pidx {
+            found = true;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if found {
+        0
+    } else {
+        push(bi, pidx);
+        push(bt, at);
+        0
+    }
+}
+
+// The bound type for param index `pidx` (-1 if unbound — defensive).
+fn subst_get(bi: &mut Vec<i64>, bt: &mut Vec<i64>, pidx: i64) -> i64 {
+    let n: i64 = len(*bi);
+    let mut i: i64 = 0;
+    let mut r: i64 = 0 - 1;
+    while i < n {
+        if r == 0 - 1 {
+            if (*bi)[i] == pidx {
+                r = (*bt)[i];
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    r
+}
+
+// Unify a (possibly type-param-bearing) declared param type `pt` against a
+// concrete arg type `at`, recording type-param bindings. Structural: matches the
+// array/nullable/secret shells and recurses; a bare type-param binds. (Ref +
+// generic-instance unify land with (4h-2).)
+fn unify_one(c: &mut TyCtx, pt: i64, at: i64, bi: &mut Vec<i64>, bt: &mut Vec<i64>) -> i64 {
+    if pt < tbase() {
+        0
+    } else {
+        let idx: i64 = pt - tbase();
+        let k: i64 = (*c).tk[idx];
+        if k == 9 {
+            let pidx: i64 = (*c).ta[idx];
+            subst_bind(bi, bt, pidx, at)
+        } else if k == 1 {
+            let pin: i64 = (*c).ta[idx];
+            let ain: i64 = array_elem_of(c, at);
+            unify_one(c, pin, ain, bi, bt)
+        } else if k == 4 {
+            let pin4: i64 = (*c).ta[idx];
+            let ain4: i64 = nullable_inner_of(c, at);
+            unify_one(c, pin4, ain4, bi, bt)
+        } else if k == 3 {
+            let pin3: i64 = (*c).ta[idx];
+            let ain3: i64 = strip_secret(c, at);
+            unify_one(c, pin3, ain3, bi, bt)
+        } else if k == 10 {
+            // A generic-instance param (e.g. `p: Pair<A, B>`) unifies pairwise against
+            // a same-decl arg instance (`Pair<i64, i64>`), binding each type-param.
+            let ptd: i64 = (*c).ta[idx];
+            let atd: i64 = gi_decl_of(c, at);
+            if atd == ptd {
+                let prec: i64 = (*c).tb[idx];
+                let prs: i64 = (*c).girs[prec];
+                let pre: i64 = (*c).gire[prec];
+                let ats: i64 = gi_argstart(c, at);
+                let ucount: i64 = pre - prs;
+                let mut ugi: i64 = 0;
+                while ugi < ucount {
+                    let upa: i64 = (*c).gia[prs + ugi];
+                    let uaa: i64 = (*c).gia[ats + ugi];
+                    unify_one(c, upa, uaa, bi, bt);
+                    ugi = ugi + 1;
+                }
+                0
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    }
+}
+
+// Dump every call arg into `out`, pushing each arg's synthesized type onto `atys`
+// (so a generic call can unify the fn's params against them).
+fn dump_args_capture_all(out: &mut Vec<u8>, a: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>, atys: &mut Vec<i64>) -> i64 {
+    match a {
+        Args::End => 0,
+        Args::Cell(x, rest) => {
+            push(out, ' ');
+            // (6/N) generic-call args inherit the caller's consuming context (set true
+            // by the user-fn call arm).
+            let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            mir_collect(c);
+            // (Bar B / generics-b) codegen: collect the arg operand so cg_emit_call can
+            // pass it to the monomorphic callee (mirrors dump_targs / dump_args_capture_first).
+            cg_collect(c, t0);
+            push(atys, t0);
+            dump_args_capture_all(out, rest, src, c, gb, atys)
+        },
+    }
+}
+
+// (4h) a call to a generic USER fn: infer the type-args by unifying the fn's
+// declared param types against the args' synthesized types, emit `(targs t0 t1 …)`
+// (space-separated) BEFORE the args, and return the SUBSTITUTED declared return
+// type. Args are dumped to a temp buffer first — the targs precede them in the
+// output but are inferred from them.
+fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut abuf: Vec<u8> = vec_new();
+    let mut atys: Vec<i64> = vec_new();
+    dump_args_capture_all(&mut abuf, ca, src, c, gb, &mut atys);
+    let ntp: i64 = (*c).uftp[fid - 25];
+    let ps: i64 = (*c).ufps[fid - 25];
+    let pe: i64 = (*c).ufpe[fid - 25];
+    let np: i64 = pe - ps;
+    let na: i64 = len(atys);
+    let lim: i64 = if np < na {
+        np
+    } else {
+        na
+    };
+    let mut bi: Vec<i64> = vec_new();
+    let mut bt: Vec<i64> = vec_new();
+    let mut pi: i64 = 0;
+    while pi < lim {
+        let pty: i64 = (*c).ufpp[ps + pi];
+        let aty: i64 = atys[pi];
+        unify_one(c, pty, aty, &mut bi, &mut bt);
+        pi = pi + 1;
+    }
+    // Build the resolved subst list in type-param INDEX order (0..ntp).
+    let mut subst: Vec<i64> = vec_new();
+    let mut ti: i64 = 0;
+    while ti < ntp {
+        let bd: i64 = subst_get(&mut bi, &mut bt, ti);
+        push(&mut subst, bd);
+        ti = ti + 1;
+    }
+    // (Bar B / generics-b) codegen: record this monomorphic instance (for later mono
+    // emission) + stash the inferred type-args so the following `cg_emit_call` mangles
+    // the callee (`id__i64`). Recording is skipped during a mono re-walk (`cg_mono_on`)
+    // — its nested generic calls are concrete but the corpus has none (no transitive).
+    if cg_on(c) {
+        if (*c).cg_mono_on {
+            0
+        } else {
+            cg_mono_record(c, fid, &subst);
+            0
+        };
+        clear_i64(&mut (*c).cg_targs);
+        let mut csi: i64 = 0;
+        let csn: i64 = len(subst);
+        while csi < csn {
+            let cst: i64 = subst[csi];
+            push(&mut (*c).cg_targs, cst);
+            csi = csi + 1;
+        }
+        0
+    } else {
+        0
+    };
+    append_str(out, " (targs");
+    let mut tj: i64 = 0;
+    while tj < ntp {
+        push(out, ' ');
+        let th: i64 = subst[tj];
+        render_type(out, th, c);
+        tj = tj + 1;
+    }
+    push(out, ')');
+    let argbytes: [u8] = vec_to_array(abuf);
+    append_str(out, argbytes);
+    let rh: i64 = (*c).ufret[fid - 25];
+    subst_type(c, rh, &subst)
+}
+
+// The element type of an array type handle (kind 1), or i64 default.
+fn array_elem_of(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0
+    } else {
+        let idx: i64 = h - tbase();
+        // (4i) the element of a `[T]` (kind 1) OR a `Vec<T>` (kind 11) — so `len`
+        // and `v[i]` index work uniformly over arrays and vecs.
+        if (*c).tk[idx] == 1 {
+            (*c).ta[idx]
+        } else if (*c).tk[idx] == 11 {
+            (*c).ta[idx]
+        } else {
+            0
+        }
+    }
+}
+
+// (4i) the element type of a `Vec<T>` handle (kind 11), or i64 default.
+fn vec_elem_of(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 11 {
+            (*c).ta[idx]
+        } else {
+            0
+        }
+    }
+}
+
+// (4i) the result type of a `Task<T>` handle (kind 12), or i64 default — the type
+// `t.await` yields.
+fn task_elem_of(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 12 {
+            (*c).ta[idx]
+        } else {
+            0
+        }
+    }
+}
+
+// The inner type of a nullable handle (kind 4), or i64 default.
+fn nullable_inner_of(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 4 {
+            (*c).ta[idx]
+        } else {
+            0
+        }
+    }
+}
+
+// Generic builtins that emit `(targs T)`: unwrap_or (#1), is_some (#2), len (#3),
+// (4i) the D.3 Vec ops vec_new (#7), push (#8), pop (#9), vec_to_array (#10).
+fn is_generic_builtin(fid: i64) -> bool {
+    fid == 1 || fid == 2 || fid == 3 || fid == 7 || fid == 8 || fid == 9 || fid == 10
+}
+
+// The inferred type-arg T for a generic builtin. `firstty` = the first arg's type
+// (-1 if none); `exp` = the call's expected type (for vec_new, which has no args).
+fn targ_of_builtin(c: &mut TyCtx, fid: i64, firstty: i64, exp: i64) -> i64 {
+    if fid == 3 {
+        array_elem_of(c, firstty)            // len: [T]/Vec<T> element
+    } else if fid == 1 {
+        nullable_inner_of(c, firstty)        // unwrap_or: ?T inner
+    } else if fid == 2 {
+        nullable_inner_of(c, firstty)        // is_some: ?T inner
+    } else if fid == 7 {
+        vec_elem_of(c, exp)                  // vec_new: T from the expected Vec<T>
+    } else if fid == 8 {
+        let sr8: i64 = strip_ref(c, firstty);   // push: &mut Vec<T> → T
+        vec_elem_of(c, sr8)
+    } else if fid == 9 {
+        let sr9: i64 = strip_ref(c, firstty);   // pop: &mut Vec<T> → T
+        vec_elem_of(c, sr9)
+    } else if fid == 10 {
+        vec_elem_of(c, firstty)              // vec_to_array: Vec<T> → T
+    } else {
+        0
+    }
+}
+
+// Dump a generic-builtin call's `(targs T)` + args. Args go to a temp buffer
+// first (T is inferred from the first arg — or from `exp` for vec_new — but
+// `(targs T)` precedes the args in the output). Returns the call's result type.
+fn dump_gcall(out: &mut Vec<u8>, fid: i64, ca: Args, exp: i64, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut abuf: Vec<u8> = vec_new();
+    // (ADR 0034 D8) `push` (fid 8) consumes its element (the arg after the first).
+    let firstty: i64 = dump_args_capture_first(&mut abuf, ca, fid == 8, src, c, gb);
+    let targ: i64 = targ_of_builtin(c, fid, firstty, exp);
+    append_str(out, " (targs ");
+    render_type(out, targ, c);
+    push(out, ')');
+    append_str(out, vec_to_array(abuf));
+    // result type: unwrap_or → T; is_some → bool; vec_new → Vec<T>; pop → T;
+    // vec_to_array → [T]; len/push → i64 (the catch-all).
+    if fid == 1 {
+        targ
+    } else if fid == 2 {
+        2
+    } else if fid == 7 {
+        mk_vec(c, targ)
+    } else if fid == 9 {
+        targ
+    } else if fid == 10 {
+        mk_array(c, targ)
+    } else {
+        0
+    }
+}
+
+// Dump all call args into `out`, returning the FIRST arg's type (-1 if none).
+// (ADR 0034 D8) `consume_rest` forces a CONSUMING walk of the args AFTER the first —
+// `push`'s by-value element (its 2nd arg) is moved INTO the Vec, which then owns and
+// frees it, so a Move-typed element Var must be recorded as moved (else codegen also
+// frees it at scope exit: a use-after-free). The FIRST arg stays under the ambient
+// context (`push`'s `&mut v` is a borrow, not a move). Other callers pass `false`.
+fn dump_args_capture_first(out: &mut Vec<u8>, a: Args, consume_rest: bool, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        Args::End => 0 - 1,
+        Args::Cell(x, rest) => {
+            push(out, ' ');
+            let t0: i64 = dump_texpr(out, x, 0 - 1, src, c, gb);
+            mir_collect(c);
+            // (8c-2) codegen: collect the FIRST arg's operand (the rest collect via
+            // `dump_targs`) so a generic builtin like `len` can read it back.
+            cg_collect(c, t0);
+            let svc: bool = (*c).consuming;
+            if consume_rest { (*c).consuming = true; 0 } else { 0 };
+            dump_targs(out, rest, src, c, gb);
+            (*c).consuming = svc;
+            t0
+        },
+    }
+}
+
+// (4c-1) struct-literal fields: emit each field's VALUE positionally (the names
+// are dropped — the typed StructLit is nameless/positional). Source order. (4h) for
+// a GENERIC struct-lit (`gen`), the field's declared type is SUBSTITUTED with the
+// instance's type-args `gargs` before it expects the value (so `Box { value: 42 }`
+// types `42` against `i64`, and `Pair { first: a }` against `<T#0>`).
+fn dump_sfields(out: &mut Vec<u8>, f: Fields, sid: i64, gen: bool, gargs: &Vec<i64>, src: &[u8], c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    match f {
+        Fields::FieldEnd => 0,
+        Fields::FieldCell(fnm, fval, rest) => {
+            // Each field VALUE is coerced to the field's DECLARED type — a `?T` field
+            // widens a `T` value / types a bare `null`. Look up the type by name
+            // BEFORE `fnm` is sunk.
+            let ftype0: i64 = field_type(c, sid, &fnm);
+            let ftype: i64 = if gen {
+                subst_type(c, ftype0, gargs)
+            } else {
+                ftype0
+            };
+            sink_name(gb, fnm);
+            push(out, ' ');
+            let sf_vty: i64 = dump_texpr(out, fval, ftype, src, c, gb);
+            mir_collect(c);
+            // (8c-1) codegen: collect this field's operand + type onto the shared
+            // arg stacks (gated by `cg_collecting`); the struct-lit arm emits the
+            // `insertvalue` chain over them after the walk (the call-arg pattern).
+            cg_collect(c, sf_vty);
+            dump_sfields(out, rest, sid, gen, gargs, src, c, gb)
+        },
+    }
+}
+
+// --- (4c-3 / 4d) implicit widening — nullable `?T` (ADR 0014 D3) + secret
+//     `secret T` (ADR 0019 D5) -----------------------------------------------
+
+// The widen KIND for a value of natural type `nt` meeting expectation `exp`:
+//   0 = none, 1 = `widen-null` (`?nt` expected), 2 = `widen-secret` (`secret nt`
+//   expected). `exp` of -1 / a scalar / any non-coercing compound → 0. Both `?T`
+//   (kind 4) and `secret T` (kind 3) store the inner `T` in payload A (`ta`).
+fn widen_kind(c: &mut TyCtx, exp: i64, nt: i64) -> i64 {
+    if exp < tbase() {
+        0
+    } else {
+        let k: i64 = (*c).tk[exp - tbase()];
+        if k == 4 {
+            if (*c).ta[exp - tbase()] == nt {
+                1
+            } else {
+                0
+            }
+        } else if k == 3 {
+            if (*c).ta[exp - tbase()] == nt {
+                2
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    }
+}
+
+// True iff `h` is a secret type `secret T` (interner kind 3).
+fn is_secret(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        (*c).tk[h - tbase()] == 3
+    }
+}
+
+// Strip one `secret` layer: `secret T` → `T`; any other type unchanged. Used by
+// `declassify` (D6) and the secret-preserving cmp/logic result type (D5b).
+fn strip_secret(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        h
+    } else if (*c).tk[h - tbase()] == 3 {
+        (*c).ta[h - tbase()]
+    } else {
+        h
+    }
+}
+
+// Emit the widen prefix iff a value of natural type `nt` widens to `exp` — `?T` →
+// `(widen-null `, `secret T` → `(widen-secret `; return whether it did (so the
+// caller closes the wrapper after the node via `widen_post` — `close_ty` renders
+// `:?T` / `:secret T` from `exp` itself, so the suffix needs no kind).
+fn widen_pre(out: &mut Vec<u8>, exp: i64, nt: i64, c: &mut TyCtx) -> bool {
+    let wk: i64 = widen_kind(c, exp, nt);
+    if wk == 1 {
+        append_str(out, "(widen-null ");
+        0
+    } else if wk == 2 {
+        append_str(out, "(widen-secret ");
+        0
+    } else {
+        0
+    };
+    wk != 0
+}
+
+// Close a widened node: append ` :?T)` iff `w`; return the node's resulting type
+// (`exp` when widened, else the natural `nt`).
+fn widen_post(out: &mut Vec<u8>, w: bool, exp: i64, nt: i64, c: &mut TyCtx) -> i64 {
+    if w {
+        close_ty(out, exp, c);
+        exp
+    } else {
+        nt
+    }
+}
+
+// Splice a composite already emitted into `tmp` (natural type `nt`) into `out`,
+// wrapping it in `(widen-null … :?T)` iff a `?nt` is expected. Consumes `tmp`. Used
+// where the node's type is known only AFTER its children synthesize — the wrapper
+// must precede the node, so the node is built in a temp first.
+fn widen_splice(out: &mut Vec<u8>, tmp: Vec<u8>, exp: i64, nt: i64, c: &mut TyCtx) -> i64 {
+    let w: bool = widen_pre(out, exp, nt, c);
+    append_str(out, vec_to_array(tmp));
+    widen_post(out, w, exp, nt, c)
+}
+

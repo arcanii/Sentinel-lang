@@ -1,0 +1,1379 @@
+module types;
+
+// --- the type interner (ADR 0041 D4) ----------------------------------------
+
+// Hash-cons: linear-scan for `(kind, a, b)`; return the existing handle else
+// append. Structurally-equal types share a handle → equality is integer `==`.
+fn intern_type(c: &mut TyCtx, kind: i64, a: i64, b: i64) -> i64 {
+    let n: i64 = len((*c).tk);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if (*c).tk[i] == kind {
+                if (*c).ta[i] == a {
+                    if (*c).tb[i] == b {
+                        found = tbase() + i;
+                        0
+                    } else {
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if found == 0 - 1 {
+        push(&mut (*c).tk, kind);
+        push(&mut (*c).ta, a);
+        push(&mut (*c).tb, b);
+        tbase() + n
+    } else {
+        found
+    }
+}
+
+fn mk_array(c: &mut TyCtx, inner: i64) -> i64 { intern_type(c, 1, inner, 0) }
+fn mk_ref(c: &mut TyCtx, m: i64, inner: i64) -> i64 { intern_type(c, 2, m, inner) }
+fn mk_secret(c: &mut TyCtx, inner: i64) -> i64 { intern_type(c, 3, inner, 0) }
+fn mk_nullable(c: &mut TyCtx, inner: i64) -> i64 { intern_type(c, 4, inner, 0) }
+// (4h) a type-parameter handle, indexed by its position in the decl's `<…>` list
+// (interner kind 9; renders `<T#idx>`). The name is always `T` in the dump (only
+// the index distinguishes them, matching the Rust `type_display`).
+fn mk_tparam(c: &mut TyCtx, idx: i64) -> i64 { intern_type(c, 9, idx, 0) }
+// (4i) a growable `Vec<T>` handle (interner kind 11; a = element type handle);
+// renders `Vec<T>`. The D.3 collections type — distinct from `[T]` (kind 1).
+fn mk_vec(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 11, elem, 0) }
+// (4i) a `Task<T>` handle (interner kind 12; a = the spawned result type); renders
+// `Task<T>`. The C4.4 structured-concurrency type (`spawn e → Task<U>`).
+fn mk_task(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 12, elem, 0) }
+// (ADR 0066 M1.2) a `Channel<T>` handle (interner kind 13; a = the element type
+// handle); renders `Channel<T>`. Lowers to an opaque `ptr` (*SentinelChannel).
+fn mk_channel(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 13, elem, 0) }
+
+// --- (4h) type-param scope --------------------------------------------------
+
+// Resolve a type-name query `q` to its type-param INDEX (position in the active
+// `<…>` list), or -1 if `q` is not an in-scope type-param. Compares against `tpb`.
+fn tp_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let qn: i64 = len(*q);
+    let n: i64 = len((*c).tpns);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            let st: i64 = (*c).tpns[i];
+            let en: i64 = (*c).tpne[i];
+            if en - st == qn {
+                let mut j: i64 = 0;
+                let mut ok: bool = true;
+                while j < qn {
+                    if (*c).tpb[st + j] != (*q)[j] {
+                        ok = false;
+                        0
+                    } else {
+                        0
+                    };
+                    j = j + 1;
+                }
+                if ok {
+                    found = i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Clear the type-param scope (called at the start of each generic decl's typing —
+// type-params don't nest in this language, so a full reset is correct).
+fn tp_reset(c: &mut TyCtx) -> i64 {
+    let mut t: i64 = len((*c).tpns);
+    while t > 0 {
+        pop(&mut (*c).tpns);
+        pop(&mut (*c).tpne);
+        t = t - 1;
+    }
+    let mut b: i64 = len((*c).tpb);
+    while b > 0 {
+        pop(&mut (*c).tpb);
+        b = b - 1;
+    }
+    0
+}
+
+// If the cursor sits at a `<` (token 15), copy the type-param NAMES into the scope
+// (resetting it first) and advance the cursor past the closing `>` (17); else just
+// reset. Mirrors `skip_type_params`'s `<`/`>` depth walk, recording the first ident
+// after each `<`/`,` (so a hypothetical `<T: Bound>` records only `T`).
+fn tp_setup(c: &mut TyCtx, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64) -> i64 {
+    tp_reset(c);
+    if (*k)[*cur] != 15 {
+        0
+    } else {
+        *cur = *cur + 1;            // skip `<`
+        let mut depth: i64 = 1;
+        let mut wantn: bool = true;
+        while depth > 0 {
+            let t: i64 = (*k)[*cur];
+            if t == 15 {
+                depth = depth + 1;
+                0
+            } else if t == 17 {
+                depth = depth - 1;
+                0
+            } else if depth == 1 {
+                if t == 29 {
+                    wantn = true;
+                    0
+                } else if wantn {
+                    let ns: i64 = (*s)[*cur];
+                    let ne: i64 = (*e)[*cur];
+                    let bst: i64 = len((*c).tpb);
+                    let mut bi: i64 = ns;
+                    while bi < ne {
+                        push(&mut (*c).tpb, (*src)[bi]);
+                        bi = bi + 1;
+                    }
+                    push(&mut (*c).tpns, bst);
+                    push(&mut (*c).tpne, bst + (ne - ns));
+                    wantn = false;
+                    0
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            *cur = *cur + 1;
+        }
+        0
+    }
+}
+
+// --- (4h) generic-instance interner -----------------------------------------
+
+// A generic-instance handle `Decl<args>` (interner kind 10): the StructId lives in
+// `ta`, an arg-slice RECORD index in `tb`. Hash-cons on the StructId + the arg-list
+// CONTENT (ADR 0041 A1), so two `Pair<i64,i64>`s share one handle. The arg list is
+// appended to the `gia` pool; `girs`/`gire` record its (start,end) slice.
+fn mk_generic(c: &mut TyCtx, declid: i64, args: &Vec<i64>) -> i64 {
+    let na: i64 = len(*args);
+    let n: i64 = len((*c).tk);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if (*c).tk[i] == 10 {
+                if (*c).ta[i] == declid {
+                    let rec: i64 = (*c).tb[i];
+                    let rs: i64 = (*c).girs[rec];
+                    let re: i64 = (*c).gire[rec];
+                    if re - rs == na {
+                        let mut j: i64 = 0;
+                        let mut ok: bool = true;
+                        while j < na {
+                            if (*c).gia[rs + j] != (*args)[j] {
+                                ok = false;
+                                0
+                            } else {
+                                0
+                            };
+                            j = j + 1;
+                        }
+                        if ok {
+                            found = tbase() + i;
+                            0
+                        } else {
+                            0
+                        };
+                        0
+                    } else {
+                        0
+                    };
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    if found == 0 - 1 {
+        let rs2: i64 = len((*c).gia);
+        let mut j2: i64 = 0;
+        while j2 < na {
+            let av: i64 = (*args)[j2];
+            push(&mut (*c).gia, av);
+            j2 = j2 + 1;
+        }
+        let re2: i64 = len((*c).gia);
+        let rec2: i64 = len((*c).girs);
+        push(&mut (*c).girs, rs2);
+        push(&mut (*c).gire, re2);
+        let ni: i64 = len((*c).tk);
+        push(&mut (*c).tk, 10);
+        push(&mut (*c).ta, declid);
+        push(&mut (*c).tb, rec2);
+        tbase() + ni
+    } else {
+        found
+    }
+}
+
+// If `h` is a generic instance (kind 10), its decl StructId; else -1.
+fn gi_decl_of(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0 - 1
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 10 {
+            (*c).ta[idx]
+        } else {
+            0 - 1
+        }
+    }
+}
+
+// The arg-slice start of a generic instance (assumes `h` is kind 10).
+fn gi_argstart(c: &mut TyCtx, h: i64) -> i64 {
+    let rec: i64 = (*c).tb[h - tbase()];
+    (*c).girs[rec]
+}
+
+// The arg-slice end of a generic instance (assumes `h` is kind 10).
+fn gi_argend(c: &mut TyCtx, h: i64) -> i64 {
+    let rec: i64 = (*c).tb[h - tbase()];
+    (*c).gire[rec]
+}
+
+// Scalar codes: i64=0, i32=1, bool=2, u8=3. -1 if `q` is not a scalar name.
+fn scalar_code(q: &[u8]) -> i64 {
+    if name_eq_lit(q, "i64") {
+        0
+    } else if name_eq_lit(q, "i32") {
+        1
+    } else if name_eq_lit(q, "bool") {
+        2
+    } else if name_eq_lit(q, "u8") {
+        3
+    } else {
+        0 - 1
+    }
+}
+
+// ADR 0049: bit width of a scalar type handle — i64(0)=64, i32(1)=32, u8(3)=8.
+fn scalar_bits(h: i64) -> i64 {
+    if h == 1 {
+        32
+    } else if h == 3 {
+        8
+    } else {
+        64
+    }
+}
+
+// Render a scalar handle (< BASE) structurally.
+fn render_scalar(out: &mut Vec<u8>, h: i64) -> i64 {
+    if h == 0 {
+        append_str(out, "i64")
+    } else if h == 1 {
+        append_str(out, "i32")
+    } else if h == 2 {
+        append_str(out, "bool")
+    } else if h == 3 {
+        append_str(out, "u8")
+    } else {
+        append_str(out, "?T")
+    }
+}
+
+// Render a type handle structurally — the `type_display` form (no interner IDs).
+fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
+    if h < tbase() {
+        render_scalar(out, h)
+    } else {
+        let idx: i64 = h - tbase();
+        let k: i64 = (*c).tk[idx];
+        let a: i64 = (*c).ta[idx];
+        let b: i64 = (*c).tb[idx];
+        if k == 1 {
+            push(out, '[');
+            render_type(out, a, c);
+            push(out, ']');
+            0
+        } else if k == 2 {
+            push(out, '&');
+            if a == 1 {
+                append_str(out, "mut ")
+            } else {
+                0
+            };
+            render_type(out, b, c);
+            0
+        } else if k == 3 {
+            append_str(out, "secret ");
+            render_type(out, a, c);
+            0
+        } else if k == 4 {
+            push(out, '?');
+            render_type(out, a, c);
+            0
+        } else if k == 6 {
+            // Struct: render its name from the struct-name blob (a = StructId).
+            let bs: i64 = (*c).sts[a];
+            let be: i64 = (*c).ste[a];
+            let mut bi: i64 = bs;
+            while bi < be {
+                push(out, (*c).snb[bi]);
+                bi = bi + 1;
+            }
+            0
+        } else if k == 7 {
+            // Enum: render its name from the enum-name blob (a = EnumId).
+            let es: i64 = (*c).ets[a];
+            let ee: i64 = (*c).ete[a];
+            let mut ei: i64 = es;
+            while ei < ee {
+                push(out, (*c).snb[ei]);
+                ei = ei + 1;
+            }
+            0
+        } else if k == 8 {
+            // Class: render its name from the class-name blob (a = ClassId).
+            let cs: i64 = (*c).clns[a];
+            let ce: i64 = (*c).clne[a];
+            let mut ci: i64 = cs;
+            while ci < ce {
+                push(out, (*c).snb[ci]);
+                ci = ci + 1;
+            }
+            0
+        } else if k == 9 {
+            // (4h) TypeParam: `<T#idx>` (a = param index).
+            append_str(out, "<T#");
+            append_int(out, a);
+            push(out, '>')
+        } else if k == 10 {
+            // (4h) GenericInstance: `Decl<arg0, arg1, …>` (a = StructId, b = the
+            // arg-slice record index). Args are comma-space separated (the type
+            // render uses `, `; the `(targs …)` list uses spaces — distinct).
+            let gs: i64 = (*c).sts[a];
+            let ge: i64 = (*c).ste[a];
+            let mut gi: i64 = gs;
+            while gi < ge {
+                push(out, (*c).snb[gi]);
+                gi = gi + 1;
+            }
+            push(out, '<');
+            let grec: i64 = b;
+            let grs: i64 = (*c).girs[grec];
+            let gre: i64 = (*c).gire[grec];
+            let mut ga: i64 = grs;
+            while ga < gre {
+                if ga > grs {
+                    append_str(out, ", ")
+                } else {
+                    0
+                };
+                let ah: i64 = (*c).gia[ga];
+                render_type(out, ah, c);
+                ga = ga + 1;
+            }
+            push(out, '>')
+        } else if k == 11 {
+            // (4i) Vec<T>: `Vec<` + element + `>`.
+            append_str(out, "Vec<");
+            render_type(out, a, c);
+            push(out, '>')
+        } else if k == 12 {
+            // (4i) Task<T>: `Task<` + result type + `>`.
+            append_str(out, "Task<");
+            render_type(out, a, c);
+            push(out, '>')
+        } else if k == 13 {
+            // (ADR 0066 M1.2) Channel<T>: `Channel<` + element + `>`.
+            append_str(out, "Channel<");
+            render_type(out, a, c);
+            push(out, '>')
+        } else {
+            append_str(out, "??")
+        }
+    }
+}
+
+fn mk_struct(c: &mut TyCtx, sid: i64) -> i64 { intern_type(c, 6, sid, 0) }
+
+// Resolve a struct name (a query `[u8]`) to its StructId (its index in the struct
+// table), or -1. Compares against the struct-name blob.
+fn struct_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).sts);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if snb_eq(c, (*c).sts[i], (*c).ste[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The StructId underlying a type handle (a struct type, kind 6), or -1.
+fn struct_of_handle(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0 - 1
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 6 {
+            (*c).ta[idx]
+        } else {
+            0 - 1
+        }
+    }
+}
+
+// --- (4e) enum / variant tables --------------------------------------------
+
+// The `Enum` type handle for EnumId `eid` (interner kind 7; render → its name).
+fn mk_enum(c: &mut TyCtx, eid: i64) -> i64 { intern_type(c, 7, eid, 0) }
+
+// Resolve an enum name (a query `[u8]`) to its EnumId, or -1. Keyed on `snb`.
+fn enum_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).ets);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if snb_eq(c, (*c).ets[i], (*c).ete[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The EnumId underlying a type handle (an enum type, kind 7), or -1.
+fn enum_of_handle(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0 - 1
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 7 {
+            (*c).ta[idx]
+        } else {
+            0 - 1
+        }
+    }
+}
+
+// The variant index (0-based, decl order) of variant `q` in enum `eid`, or -1.
+fn variant_index(c: &mut TyCtx, eid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).varo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).varo[i] == eid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).varns[i], (*c).varne[i], q) {
+                    found = idx;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The FLAT variant-table index of the `vidx`-th variant of enum `eid` (so its
+// payload slice is `varps[j]..varpe[j]`), or -1.
+fn variant_flat(c: &mut TyCtx, eid: i64, vidx: i64) -> i64 {
+    let n: i64 = len((*c).varo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).varo[i] == eid {
+            if idx == vidx {
+                if found == 0 - 1 {
+                    found = i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Pop the scope (name blob slices + VarIds) back to `mark` — a match arm's payload
+// bindings are scoped to that arm only (VarIds stay monotonic; the env is NOT
+// popped — it is VarId-indexed + append-only).
+fn truncate_scope(c: &mut TyCtx, mark: i64) -> i64 {
+    let mut t: i64 = len((*c).scs);
+    while t > mark {
+        pop(&mut (*c).scs);
+        pop(&mut (*c).sce);
+        pop(&mut (*c).scv);
+        t = t - 1;
+    }
+    0
+}
+
+// --- (4f) class / method tables --------------------------------------------
+
+// The `Class` type handle for ClassId `cid` (interner kind 8; render → its name).
+fn mk_class(c: &mut TyCtx, cid: i64) -> i64 { intern_type(c, 8, cid, 0) }
+
+// Resolve a class name (a query `[u8]`) to its ClassId, or -1. Keyed on `snb`.
+fn class_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clns);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if snb_eq(c, (*c).clns[i], (*c).clne[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The ClassId underlying a type handle (a class type, kind 8), or -1.
+fn class_of_handle(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        0 - 1
+    } else {
+        let idx: i64 = h - tbase();
+        if (*c).tk[idx] == 8 {
+            (*c).ta[idx]
+        } else {
+            0 - 1
+        }
+    }
+}
+
+// Strip one reference layer: `&T` / `&mut T` (kind 2, inner in `tb`) → `T`; else
+// unchanged. A method receiver `c.m()` carries the class value, but a `&Class` /
+// `&mut Class` (e.g. a `self` re-borrow) strips to the class.
+fn strip_ref(c: &mut TyCtx, h: i64) -> i64 {
+    if h < tbase() {
+        h
+    } else if (*c).tk[h - tbase()] == 2 {
+        (*c).tb[h - tbase()]
+    } else {
+        h
+    }
+}
+
+// The field index (0-based, decl order) of class field `q` in class `cid`, or -1.
+fn class_field_index(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clfo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).clfo[i] == cid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).clfs[i], (*c).clfe[i], q) {
+                    found = idx;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The type handle of class field `q` in class `cid`, or -1.
+fn class_field_type(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clfo);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).clfo[i] == cid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).clfs[i], (*c).clfe[i], q) {
+                    found = (*c).clft[i];
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// True iff class `cid` declares its OWN method `q` (vs. a default-impl method).
+fn class_has_method(c: &mut TyCtx, cid: i64, q: &[u8]) -> bool {
+    let n: i64 = len((*c).clmo);
+    let mut i: i64 = 0;
+    let mut found: bool = false;
+    while i < n {
+        if (*c).clmo[i] == cid {
+            if snb_eq(c, (*c).clms[i], (*c).clme[i], q) {
+                found = true;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The method index (0-based, decl order) of class method `q` in class `cid`, or -1.
+fn class_method_index(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clmo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).clmo[i] == cid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).clms[i], (*c).clme[i], q) {
+                    found = idx;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The return-type handle of class method `q` in class `cid`, or i64 default.
+fn class_method_ret(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).clmo);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0;
+    let mut hit: bool = false;
+    while i < n {
+        if (*c).clmo[i] == cid {
+            if hit {
+                0
+            } else {
+                if snb_eq(c, (*c).clms[i], (*c).clme[i], q) {
+                    found = (*c).clmr[i];
+                    hit = true;
+                    0
+                } else {
+                    0
+                };
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Resolve a trait name to its TraitId, or -1. Keyed on `snb`.
+fn trait_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).trns);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if snb_eq(c, (*c).trns[i], (*c).trne[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The method index (0-based, decl order) of method `q` in trait `tid`, or -1.
+fn trait_method_index(c: &mut TyCtx, tid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).trmo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).trmo[i] == tid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).trms[i], (*c).trme[i], q) {
+                    found = idx;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The return-type handle of method `q` in trait `tid`, or i64 default.
+fn trait_method_ret(c: &mut TyCtx, tid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).trmo);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0;
+    let mut hit: bool = false;
+    while i < n {
+        if (*c).trmo[i] == tid {
+            if hit {
+                0
+            } else {
+                if snb_eq(c, (*c).trms[i], (*c).trme[i], q) {
+                    found = (*c).trmr[i];
+                    hit = true;
+                    0
+                } else {
+                    0
+                };
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Resolve an impl NAME to its ImplId, or -1 (skips the 0,0 default-impl slots).
+fn impl_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).imns);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if (*c).imne[i] > (*c).imns[i] {
+                if snb_eq(c, (*c).imns[i], (*c).imne[i], q) {
+                    found = i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The TraitId of impl `iid`.
+fn impl_trait_of(c: &mut TyCtx, iid: i64) -> i64 {
+    if iid < 0 {
+        0 - 1
+    } else {
+        (*c).imtid[iid]
+    }
+}
+
+// Find the (default) impl whose target class is `cid` AND whose trait declares the
+// method `q` — the receiver-typed impl-method dispatch (a class with no OWN `q`), or
+// -1.
+fn impl_for_class(c: &mut TyCtx, cid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).imcid);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if (*c).imcid[i] == cid {
+                let tid: i64 = (*c).imtid[i];
+                if trait_method_index(c, tid, q) >= 0 {
+                    found = i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// Resolve an effect name (a query `[u8]`) to its EffectId, or -1. Keyed on SRC
+// (the perform/handle emit the effect name from the AST, not the interner).
+fn effect_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
+    let n: i64 = len((*c).efs);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if found == 0 - 1 {
+            if name_eq_src(src, (*c).efs[i], (*c).efe[i], q) {
+                found = i;
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The op index (0-based, decl order) of op `q` in effect `eid`, or -1.
+fn op_index_lookup(c: &mut TyCtx, src: &[u8], eid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).efoo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).efoo[i] == eid {
+            if found == 0 - 1 {
+                if name_eq_src(src, (*c).efos[i], (*c).efoe[i], q) {
+                    found = idx;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The return-type handle of the `oidx`-th op of effect `eid`, or i64 default.
+fn op_ret(c: &mut TyCtx, eid: i64, oidx: i64) -> i64 {
+    let n: i64 = len((*c).efoo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0;
+    let mut hit: bool = false;
+    while i < n {
+        if (*c).efoo[i] == eid {
+            if hit {
+                0
+            } else {
+                if idx == oidx {
+                    found = (*c).efor[i];
+                    hit = true;
+                    0
+                } else {
+                    0
+                };
+                idx = idx + 1;
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The field index (0-based, decl order) of field `q` in struct `sid`, or -1.
+fn field_index(c: &mut TyCtx, sid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).fldo);
+    let mut i: i64 = 0;
+    let mut idx: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).fldo[i] == sid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).flds[i], (*c).flde[i], q) {
+                    found = idx;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            idx = idx + 1;
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// The type handle of field `q` in struct `sid`, or -1.
+fn field_type(c: &mut TyCtx, sid: i64, q: &[u8]) -> i64 {
+    let n: i64 = len((*c).fldo);
+    let mut i: i64 = 0;
+    let mut found: i64 = 0 - 1;
+    while i < n {
+        if (*c).fldo[i] == sid {
+            if found == 0 - 1 {
+                if snb_eq(c, (*c).flds[i], (*c).flde[i], q) {
+                    found = (*c).fldty[i];
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    found
+}
+
+// A `TypeE` (surface type AST) -> a type handle (interning compounds). Consumes
+// the `TypeE` (disposing any owned name `[u8]` into `gb`). At m-1 only scalars are
+// validated; a non-scalar `TIdent` (a struct/enum/class name) defaults to i64
+// (the decl tables land at 4c).
+fn type_of_typeexpr(c: &mut TyCtx, t: TypeE, gb: &mut Vec<u8>) -> i64 {
+    match t {
+        TypeE::TIdent(nm) => {
+            // (4h) an in-scope type-param shadows everything else → `<T#idx>`.
+            let tpidx: i64 = tp_lookup(c, &nm);
+            // (4i) `String` is a built-in alias for `Vec<u8>` (ADR 0034 — the oracle
+            // desugars it, rendering `Vec<u8>`); a type-param named `String` shadows it.
+            let is_string: bool = if tpidx >= 0 {
+                false
+            } else {
+                name_eq_lit(&nm, "String")
+            };
+            let sc: i64 = if tpidx >= 0 {
+                0 - 1
+            } else if is_string {
+                0 - 1
+            } else {
+                scalar_code(&nm)
+            };
+            let sid: i64 = if tpidx >= 0 {
+                0 - 1
+            } else if sc >= 0 {
+                0 - 1
+            } else {
+                struct_lookup(c, &nm)
+            };
+            let eid: i64 = if tpidx >= 0 {
+                0 - 1
+            } else if sc >= 0 {
+                0 - 1
+            } else if sid >= 0 {
+                0 - 1
+            } else {
+                enum_lookup(c, &nm)
+            };
+            let cid: i64 = if tpidx >= 0 {
+                0 - 1
+            } else if sc >= 0 {
+                0 - 1
+            } else if sid >= 0 {
+                0 - 1
+            } else if eid >= 0 {
+                0 - 1
+            } else {
+                class_lookup(c, &nm)
+            };
+            sink_name(gb, nm);
+            if tpidx >= 0 {
+                // (Bar B / generics-b) during a mono re-walk, a type-param resolves to
+                // the instance's CONCRETE arg (`T` → `i64`) so the body lowers concretely;
+                // otherwise it's the abstract `<T#idx>` (the type dump + the seed walk).
+                if (*c).cg_mono_on {
+                    (*c).cg_mono_args[tpidx]
+                } else {
+                    mk_tparam(c, tpidx)
+                }
+            } else if is_string {
+                mk_vec(c, 3)
+            } else if sc >= 0 {
+                sc
+            } else if sid >= 0 {
+                mk_struct(c, sid)
+            } else if eid >= 0 {
+                mk_enum(c, eid)
+            } else if cid >= 0 {
+                mk_class(c, cid)
+            } else {
+                0
+            }
+        },
+        TypeE::TNullable(inner) => {
+            let ih: i64 = type_of_typeexpr(c, inner, gb);
+            mk_nullable(c, ih)
+        },
+        TypeE::TArray(inner) => {
+            let ih: i64 = type_of_typeexpr(c, inner, gb);
+            mk_array(c, ih)
+        },
+        TypeE::TRef(inner) => {
+            let ih: i64 = type_of_typeexpr(c, inner, gb);
+            mk_ref(c, 0, ih)
+        },
+        TypeE::TRefMut(inner) => {
+            let ih: i64 = type_of_typeexpr(c, inner, gb);
+            mk_ref(c, 1, ih)
+        },
+        TypeE::TSecret(inner) => {
+            let ih: i64 = type_of_typeexpr(c, inner, gb);
+            mk_secret(c, ih)
+        },
+        TypeE::TGeneric(gn, ga) => {
+            // (4i) `Vec<T>` → the kind-11 Vec type (D.3 collections). (4h) else
+            // `Name<args>` for a user struct → a GenericInstance (resolving each arg,
+            // which may itself be a type-param). Any other generic (no such type)
+            // keeps the placeholder (dispose + i64) — it only occurs in rejected fixtures.
+            let is_vec: bool = name_eq_lit(&gn, "Vec");
+            let gsid: i64 = if is_vec {
+                0 - 1
+            } else {
+                struct_lookup(c, &gn)
+            };
+            sink_name(gb, gn);
+            if is_vec {
+                let mut vav: Vec<i64> = vec_new();
+                collect_tyargs(c, ga, gb, &mut vav);
+                let velem: i64 = if len(vav) > 0 {
+                    vav[0]
+                } else {
+                    0
+                };
+                mk_vec(c, velem)
+            } else if gsid >= 0 {
+                let mut gav: Vec<i64> = vec_new();
+                collect_tyargs(c, ga, gb, &mut gav);
+                mk_generic(c, gsid, &gav)
+            } else {
+                dispose_tyargs(c, ga, gb);
+                0
+            }
+        },
+    }
+}
+
+// (4h) Resolve a `TyArgs` cons-list into a flat `Vec<i64>` of type handles (each arg
+// may be a type-param, scalar, struct, or nested generic).
+fn collect_tyargs(c: &mut TyCtx, a: TyArgs, gb: &mut Vec<u8>, av: &mut Vec<i64>) -> i64 {
+    match a {
+        TyArgs::TAEnd => 0,
+        TyArgs::TACell(t, rest) => {
+            let h: i64 = type_of_typeexpr(c, t, gb);
+            push(av, h);
+            collect_tyargs(c, rest, gb, av)
+        },
+    }
+}
+
+// Consume a `TyArgs` cons-list (disposing its `TypeE`s) — the non-struct-generic
+// placeholder (e.g. `Vec<T>` annotations, still typed as i64).
+fn dispose_tyargs(c: &mut TyCtx, a: TyArgs, gb: &mut Vec<u8>) -> i64 {
+    match a {
+        TyArgs::TAEnd => 0,
+        TyArgs::TACell(t, rest) => {
+            type_of_typeexpr(c, t, gb);
+            dispose_tyargs(c, rest, gb)
+        },
+    }
+}
+
+// --- the builtin / user-fn return-type tables -------------------------------
+
+// The 14 runtime builtins -> FnId (0..=13), or -1.
+fn builtin_id(q: &[u8]) -> i64 {
+    if name_eq_lit(q, "print") {
+        0
+    } else if name_eq_lit(q, "unwrap_or") {
+        1
+    } else if name_eq_lit(q, "is_some") {
+        2
+    } else if name_eq_lit(q, "len") {
+        3
+    } else if name_eq_lit(q, "str_eq") {
+        4
+    } else if name_eq_lit(q, "u8_to_i64") {
+        5
+    } else if name_eq_lit(q, "i64_to_u8") {
+        6
+    } else if name_eq_lit(q, "vec_new") {
+        7
+    } else if name_eq_lit(q, "push") {
+        8
+    } else if name_eq_lit(q, "pop") {
+        9
+    } else if name_eq_lit(q, "vec_to_array") {
+        10
+    } else if name_eq_lit(q, "read_file") {
+        11
+    } else if name_eq_lit(q, "write_file") {
+        12
+    } else if name_eq_lit(q, "print_bytes") {
+        13
+    } else if name_eq_lit(q, "channel_new") {
+        21
+    } else if name_eq_lit(q, "send") {
+        22
+    } else if name_eq_lit(q, "recv") {
+        23
+    } else if name_eq_lit(q, "channel_close") {
+        24
+    } else {
+        0 - 1
+    }
+}
+
+// A builtin FnId -> its return-type handle (the scalar-returning ones; the
+// generic/array ones land at 4c/4h, defaulting to i64 for m-1).
+fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
+    if fid == 2 {
+        2
+    } else if fid == 3 {
+        0
+    } else if fid == 4 {
+        2
+    } else if fid == 5 {
+        0
+    } else if fid == 6 {
+        3
+    } else if fid == 11 {
+        mk_array(c, 3)
+    } else if fid == 21 {
+        mk_channel(c, 0)
+    } else if fid == 23 {
+        mk_nullable(c, 0)
+    } else {
+        0
+    }
+}
+
+// Resolve a call name to a FnId: a builtin (0..=13), else a user fn (21 + idx),
+// else -1.
+fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
+    let b: i64 = builtin_id(q);
+    if b >= 0 {
+        b
+    } else {
+        let n: i64 = len((*c).ufs);
+        let mut i: i64 = 0;
+        let mut found: i64 = 0 - 1;
+        while i < n {
+            if found == 0 - 1 {
+                if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
+                    found = 25 + i;
+                    0
+                } else {
+                    0
+                };
+                0
+            } else {
+                0
+            };
+            i = i + 1;
+        }
+        found
+    }
+}
+
+// The return-type handle for a resolved FnId.
+fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
+    if fid < 25 {
+        builtin_ret(c, fid)
+    } else {
+        (*c).ufret[fid - 25]
+    }
+}
+
+// --- scope + env ------------------------------------------------------------
+
+// Resolve a variable name to its VarId — newest-first over `[base, top)`; -1 if
+// absent.
+fn sc_lookup(c: &mut TyCtx, q: &[u8]) -> i64 {
+    let top: i64 = len((*c).scs);
+    let mut i: i64 = top - 1;
+    let mut found: i64 = 0 - 1;
+    while i >= (*c).base {
+        if found == 0 - 1 {
+            if blob_eq(c, (*c).scs[i], (*c).sce[i], q) {
+                found = (*c).scv[i];
+                0
+            } else {
+                0
+            };
+            0
+        } else {
+            0
+        };
+        i = i - 1;
+    }
+    found
+}
+
+// Read a VarId's type from the append-only env (vid == push order).
+fn env_get(c: &mut TyCtx, vid: i64) -> i64 {
+    (*c).env[vid]
+}
+
+// Bind a name given as a `src` slice (a param): copy its bytes into the blob,
+// record the scope entry (slice + VarId) AND push its type into the env. Called
+// in VarId order, so the push lands at index `vid`.
+fn bind_src(c: &mut TyCtx, src: &[u8], ns: i64, ne: i64, vid: i64, ty: i64) -> i64 {
+    let st: i64 = len((*c).nb);
+    let mut i: i64 = ns;
+    while i < ne {
+        push(&mut (*c).nb, (*src)[i]);
+        i = i + 1;
+    }
+    push(&mut (*c).scs, st);
+    push(&mut (*c).sce, st + (ne - ns));
+    push(&mut (*c).scv, vid);
+    push(&mut (*c).env, ty);
+    0
+}
+
+// Bind a name given as an owned `[u8]` (a `let`): push its bytes into the blob
+// (which also DISPOSES the `[u8]`), record the scope entry + env type.
+fn bind_name(c: &mut TyCtx, name: [u8], vid: i64, ty: i64) -> i64 {
+    let st: i64 = len((*c).nb);
+    let n: i64 = len(name);
+    let mut i: i64 = 0;
+    while i < n {
+        push(&mut (*c).nb, name[i]);
+        i = i + 1;
+    }
+    push(&mut (*c).scs, st);
+    push(&mut (*c).sce, st + n);
+    push(&mut (*c).scv, vid);
+    push(&mut (*c).env, ty);
+    0
+}
+
