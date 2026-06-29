@@ -1752,6 +1752,46 @@ fn mc_reset_rename(c: &mut MergeCtx) -> i64 {
     0
 }
 
+// ADR 0067: if module file `mpath` (root source `root`) declares `part`s, append
+// each part file's source so the module is processed as ONE combined token stream
+// (the multi-file-module concat). The emission order — the root's items, then each
+// part's in part-declaration order — matches the Rust merge byte-for-byte (its
+// per-module union rename + root-then-parts unit order). `mpath` ends in
+// ".sentinel" (9 bytes); a `part name;` reads `<stem>/name.sentinel`. The
+// `module`/`part` directives are dropped later by emit_item, so a module with no
+// parts returns its root unchanged (byte-identical to the pre-ADR-0067 path).
+fn append_module_parts(root: [u8], mpath: [u8]) -> [u8] {
+    let rn: i64 = len(root);
+    let mut k: Vec<i64> = vec_new();
+    let mut s: Vec<i64> = vec_new();
+    let mut e: Vec<i64> = vec_new();
+    tokenize(&root, rn, &mut k, &mut s, &mut e);
+    let ntok: i64 = len(k);
+    let mut comb: Vec<u8> = vec_new();
+    append_slice(&mut comb, &root, 0, rn);
+    let stem_end: i64 = len(mpath) - 9;
+    let mut i: i64 = 0;
+    while i < ntok {
+        if k[i] == 65 {
+            let mut pp: Vec<u8> = vec_new();
+            append_slice(&mut pp, &mpath, 0, stem_end);
+            push(&mut pp, '/');
+            append_slice(&mut pp, &root, s[i + 1], e[i + 1]);
+            append_str(&mut pp, ".sentinel");
+            let ppath: [u8] = vec_to_array(pp);
+            let psrc: [u8] = read_file(ppath);
+            push(&mut comb, i64_to_u8(10));
+            append_slice(&mut comb, &psrc, 0, len(psrc));
+            i = i + 2;
+            0
+        } else {
+            i = i + 1;
+            0
+        };
+    }
+    vec_to_array(comb)
+}
+
 // Enqueue the entry module: path `p`, prefix `x` (the entry stem).
 fn enqueue_entry(c: &mut MergeCtx, p: [u8], x: [u8]) -> i64 {
     let ps: i64 = len((*c).qpath);
@@ -1820,7 +1860,10 @@ pub fn merge_source() -> [u8] {
     let mut scan: i64 = 0;
     while scan < mc_count(&c) {
         let mpath: [u8] = mc_module_path(&c, scan);
-        let msrc: [u8] = read_file(mpath);
+        let mpath2: [u8] = mc_module_path(&c, scan);
+        let root_src: [u8] = read_file(mpath);
+        // ADR 0067: fold in any `part` files so a multi-file module is one stream.
+        let msrc: [u8] = append_module_parts(root_src, mpath2);
         let mn: i64 = len(msrc);
         let mut k: Vec<i64> = vec_new();
         let mut s: Vec<i64> = vec_new();

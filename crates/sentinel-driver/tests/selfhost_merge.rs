@@ -199,3 +199,80 @@ fn sentinel_merge_matches_oracle_on_multi_module_stages() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// ADR 0067: the Sentinel merge handles a MULTI-FILE module (a `module` root with a
+/// `part` manifest). `append_module_parts` folds `lib/helpers.sentinel` into the
+/// `lib.sentinel` root, so the module's two files share one rename scope — the
+/// root's `pub compute` calls a NON-`pub` `helper` defined in the PART. The
+/// Sentinel merge's `snc llvm` must be byte-identical to the Rust oracle's (which
+/// discovers the part via `read_module_with_parts` + the per-module-path union
+/// rename), proving the self-host concatenation == the Rust group-merge.
+#[test]
+fn sentinel_merge_handles_multi_file_module() {
+    let tmp = std::env::temp_dir().join(format!("snc_merge_mfm_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp dir");
+    let merge = build_sentinel_merge(&tmp);
+
+    let work = tmp.join("work");
+    std::fs::create_dir_all(work.join("lib")).expect("create work + part dir");
+    std::fs::write(
+        work.join("input.sentinel"),
+        "use lib::compute;\nfn main() -> i64 { compute(4) }\n",
+    )
+    .expect("stage entry");
+    std::fs::write(
+        work.join("lib.sentinel"),
+        "module lib;\npart helpers;\npub fn compute(x: i64) -> i64 { helper(x) + 2 }\n",
+    )
+    .expect("stage root");
+    std::fs::write(
+        work.join("lib/helpers.sentinel"),
+        "module lib;\nfn helper(x: i64) -> i64 { x * 10 }\n",
+    )
+    .expect("stage part");
+
+    let oracle = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(work.join("input.sentinel"))
+        .output()
+        .expect("run snc llvm (oracle)");
+    assert!(
+        oracle.status.success(),
+        "snc llvm rejected the multi-file-module entry:\n{}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+
+    let merged = Command::new(&merge)
+        .current_dir(&work)
+        .output()
+        .expect("run the Sentinel merge");
+    assert!(
+        merged.status.success(),
+        "the Sentinel merge failed on the multi-file module:\n{}",
+        String::from_utf8_lossy(&merged.stderr)
+    );
+    let merged_path = work.join("merged.sentinel");
+    std::fs::write(&merged_path, &merged.stdout).expect("write merged source");
+
+    let sg = Command::new(env!("CARGO_BIN_EXE_snc"))
+        .arg("llvm")
+        .arg(&merged_path)
+        .output()
+        .expect("run snc llvm (sentinel-merged)");
+    assert!(
+        sg.status.success(),
+        "snc llvm rejected the Sentinel-merged multi-file module:\n{}",
+        String::from_utf8_lossy(&sg.stderr)
+    );
+
+    assert_eq!(
+        oracle.stdout,
+        sg.stdout,
+        "multi-file module: the Sentinel merge diverged from the Rust merge (oracle {} vs sentinel {} bytes)",
+        oracle.stdout.len(),
+        sg.stdout.len()
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
