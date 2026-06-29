@@ -373,6 +373,17 @@ pub enum NullableInner {
     I64,
     I32,
     Bool,
+    /// ADR 0066 M1.2b: `?T` made fully general over scalars — `?u8` / `?u128`
+    /// / `?f64` / `?ptr` join `?i64` / `?i32` / `?bool` (previously these scalars
+    /// had no `NullableInner` variant, so `recv<Channel<u8>> -> ?u8` was not
+    /// representable). All are inline `{ i1 valid, T value }` like the other
+    /// scalars (no heap indirection — that is only the `Struct`/`GenericInstance`
+    /// case). This unblocks generic channel ELEMENTS (the word-scalar element set
+    /// is exactly word-scalar ∩ has-nullable-inner = {i64,i32,u8,bool,f64,ptr}).
+    U8,
+    U128,
+    F64,
+    Ptr,
     Struct(StructId),
     /// `?T` where T is a generic type parameter (only meaningful
     /// inside a generic fn body). C1.7 / ADR 0016 D6b.
@@ -396,6 +407,11 @@ impl NullableInner {
             NullableInner::I64 => Type::I64,
             NullableInner::I32 => Type::I32,
             NullableInner::Bool => Type::Bool,
+            // ADR 0066 M1.2b: the scalar `?T` generalization.
+            NullableInner::U8 => Type::U8,
+            NullableInner::U128 => Type::U128,
+            NullableInner::F64 => Type::F64,
+            NullableInner::Ptr => Type::Ptr,
             NullableInner::Struct(id) => Type::Struct(id),
             NullableInner::TypeParam(id) => Type::TypeParam(id),
             NullableInner::GenericInstance(id) => Type::GenericInstance(id),
@@ -682,6 +698,13 @@ impl Type {
             Type::TypeParam(id) => Some(NullableInner::TypeParam(id)),
             Type::GenericInstance(id) => Some(NullableInner::GenericInstance(id)),
             Type::Ref(id) => Some(NullableInner::Ref(id)),
+            // ADR 0066 M1.2b: `?T` is now general over scalars — `?u8` / `?u128`
+            // / `?f64` / `?ptr` are representable (they were previously in the
+            // `None` group below). All inline `{ i1, T }`.
+            Type::U8 => Some(NullableInner::U8),
+            Type::U128 => Some(NullableInner::U128),
+            Type::F64 => Some(NullableInner::F64),
+            Type::Ptr => Some(NullableInner::Ptr),
             // C3 / ADR 0019 D5: `?(secret T)` is not yet
             // representable — NullableInner has no Secret variant
             // at C3.1 (depth-1 composition limit). Caller surfaces
@@ -690,19 +713,7 @@ impl Type {
             // variant at C4.1; `?Class` shows up naturally only when
             // classes become storable in arrays / nullable
             // wrappers).
-            // Phase D.2 / ADR 0033 D3 + D8: `?u8` is out of scope at the
-            // MVP (NullableInner gains no U8 variant); `u8` is added to
-            // the exhaustive `Type` matches regardless.
-            Type::U8
-            // ADR 0055: `?u128` is out of scope (NullableInner gains no
-            // U128 variant) — `u128` is added to the exhaustive matches.
-            | Type::U128
-            // ADR 0058: `?f64` is out of scope (NullableInner gains no F64
-            // variant) — scalar `f64` only this increment.
-            | Type::F64
-            // ADR 0057: `?ptr` is out of scope — `ptr` is an FFI-only opaque.
-            | Type::Ptr
-            | Type::Array(_)
+            Type::Array(_)
             | Type::Nullable(_)
             | Type::Secret(_)
             | Type::Kont(_)

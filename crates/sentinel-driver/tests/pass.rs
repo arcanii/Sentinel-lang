@@ -1127,6 +1127,15 @@ fn pass_c66_channel_worker() {
 }
 
 #[test]
+fn pass_c66_nullable_u8() {
+    // ADR 0066 M1.2b: `?T` generalized over scalars — `?u8` (null, an implicit
+    // u8→?u8 widen, is_some, unwrap_or, a ?u8 param). 30 + 12 = 42.
+    let r = build_and_run("c66_nullable_u8.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c66_channel_pipeline() {
     // ADR 0066 M1.2b/M1.3: a TWO-channel-arg spawn `relay(src, dst)` — the
     // corpus's first 2-arg spawn, pinning the multi-arg packed-args lowering

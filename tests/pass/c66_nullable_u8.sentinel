@@ -1,0 +1,32 @@
+// ADR 0066 M1.2b: `?T` generalized over scalars. `?u8` had no `NullableInner`
+// variant before (only `?i64`/`?i32`/`?bool` did), so `?u8` was not representable
+// — the gap that blocked a generic `recv<Channel<u8>> -> ?u8`. This fixture
+// exercises the new scalar nullable directly: a `?u8` parameter, a `null` `?u8`,
+// an implicit `u8 -> ?u8` widen, and `is_some` / `unwrap_or` over `?u8`. (`?f64`
+// and `?ptr` are also now representable but are snc-only types, outside the
+// self-host differential, so this differential fixture covers the `?u8` case.)
+//
+// 30 (from the some-valued `?u8`) + 12 (the none branch) = 42. Exit 42.
+
+fn pick(v: ?u8, fallback: u8) -> u8 {
+    unwrap_or(v, fallback)
+}
+
+fn main() -> i64 {
+    let none_u8: ?u8 = null;
+    let some_u8: ?u8 = 30 as u8;
+    let mut acc: i64 = 0;
+    if is_some(some_u8) {
+        acc = acc + u8_to_i64(pick(some_u8, 0 as u8));
+        0
+    } else {
+        0
+    };
+    if is_some(none_u8) {
+        0
+    } else {
+        acc = acc + 12;
+        0
+    };
+    acc
+}

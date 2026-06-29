@@ -1480,7 +1480,14 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
 
 fn is_copy_nullable_inner(inner: NullableInner) -> bool {
     match inner {
-        NullableInner::I64 | NullableInner::I32 | NullableInner::Bool => true,
+        // ADR 0066 M1.2b: the scalar `?T` set — all Copy (no heap payload).
+        NullableInner::I64
+        | NullableInner::I32
+        | NullableInner::Bool
+        | NullableInner::U8
+        | NullableInner::U128
+        | NullableInner::F64
+        | NullableInner::Ptr => true,
         NullableInner::Ref(_) => true,
         NullableInner::Struct(_)
         | NullableInner::GenericInstance(_)
