@@ -9,8 +9,10 @@ declarations", D2; parts-manifest vs a `read_dir` builtin, D3). This is an
 follows the both-bootstrap-fixed-points rhythm: Rust `snc` + fixtures → re-bless
 the parse/ast/resolve differential → mirror into `selfhost/` → both fixed points
 byte-identical (snc == scg) → ACCEPTED-WITH-AMENDMENTS as the split lands.
-**D9 step 1 (the Rust `snc` mechanism) is IMPLEMENTED and four-check green** — see
-the *Implementation status* section.
+**D9 steps 1–3 are IMPLEMENTED — the multi-file-module mechanism is fully
+self-hosted in BOTH compilers, both bootstrap fixed points byte-identical** — see
+the *Implementation status* section. The remaining work is step 4 (the actual
+`types.sentinel` split), now mechanical.
 
 Date: 2026-06-29
 
@@ -379,8 +381,34 @@ named for the entry). A follow-up could detect the collision and pick a distinct
 default; for now pass an explicit `-o`.
 
 **Out of step-1 scope (follow-ups):** `--separate` over multi-file modules (the
-merge path is primary and the only one the self-host uses); the self-host mirror
-(step 3); the byte-identical decl sweep + mandatory-enforcement flip.
+merge path is primary and the only one the self-host uses); the byte-identical decl
+sweep + mandatory-enforcement flip.
+
+**D9 steps 2–3 — the self-host mirror — landed** (commits `363eaa5db` + `7531c343e`),
+full differential green (24 tests; both fixed points byte-identical):
+
+- **`selfhost/parser.sentinel`:** `is_kw_module`/`is_kw_part` recognizers; tokenizer
+  tags 64 (`module`) / 65 (`part`); `dump_module_decl`/`dump_part_decl` emitting
+  `(module a b)` / `(part name)`; dump_item dispatch. (Step 2 "re-bless" was a
+  no-op — no existing fixture has the directives, so nothing moved.)
+- **`selfhost/merge.sentinel`:** `emit_item` skips `module`/`part` (via `skip_use`,
+  both end in `;`); `append_module_parts` folds a module root's `part` files onto the
+  root as one combined token stream, so `build_rename`/`enqueue_uses`/`emit` span all
+  the module's files — the **per-module rename + part discovery fall out of the
+  concat**. The emission order (root items, then each part in declaration order)
+  matches the Rust per-module-path union rename + root-then-parts unit order
+  byte-for-byte; a module with no parts is inert (returns its root unchanged).
+- **Verified:** a live `module parser;` pilot decl in `selfhost/parser.sentinel`
+  (exercising the merge-skip as a library across every differential) + a synthetic
+  multi-file-module merge test (`sentinel_merge_handles_multi_file_module`, scg's
+  concat-merge byte-identical to the Rust oracle).
+
+**Remaining — step 4 (now mechanical):** split `selfhost/types.sentinel` into a root
+(`module types;` + the `part` manifest) + `types/{interner,infer,borrow,cg,mir}.sentinel`
+parts, one part per commit, with the full differential green at each step (the
+`selfhost_*` harnesses that stage `types.sentinel` must also stage the `types/`
+parts dir). The byte-identical decl sweep + mandatory-enforcement flip can ride
+alongside.
 
 ## Revisit
 
