@@ -1098,6 +1098,15 @@ fn pass_c44_go_no_go() {
 }
 
 #[test]
+fn pass_c66_channel() {
+    // ADR 0066 M1.2: a Channel<i64> — channel_new / send / channel_close / recv
+    // (the ?i64 some/null) consumed via unwrap_or. In every differential corpus.
+    let r = build_and_run("c66_channel.sentinel");
+    assert_eq!(r.exit, 42);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
 fn pass_c66_task_bool() {
     // ADR 0066 M1.1: a generic `Task<bool>` spawn over a `bool` arg — the
     // wrapper loads `i1`, encodes the result (`zext i1`), `.await` decodes

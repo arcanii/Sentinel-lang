@@ -43,8 +43,9 @@ use sentinel_borrow_check::DropPlan;
 use sentinel_codegen::collect_mono_instantiations;
 use sentinel_resolve::{
     ClassId, EffectId, EnumId, FnId, StructId, VarId, I64_TO_U8_FN_ID, IS_SOME_FN_ID, LEN_FN_ID,
-    POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID, PUSH_FN_ID, READ_FILE_FN_ID, STR_EQ_FN_ID,
-    U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID, VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
+    CHANNEL_CLOSE_FN_ID, CHANNEL_NEW_FN_ID, POP_FN_ID, PRINT_BYTES_FN_ID, PRINT_FN_ID, PUSH_FN_ID,
+    READ_FILE_FN_ID, RECV_FN_ID, SEND_FN_ID, STR_EQ_FN_ID, U8_TO_I64_FN_ID, UNWRAP_OR_FN_ID,
+    VEC_NEW_FN_ID, VEC_TO_ARRAY_FN_ID, WRITE_FILE_FN_ID,
 };
 use sentinel_types::{
     NullableInner, Type, TypedBlock, TypedExpr, TypedExprKind, TypedFnDef, TypedFnSignature,
@@ -122,6 +123,12 @@ struct RuntimeSyms {
     scope_register: bool,
     /// `sentinel_scope_exit(scope) -> void`.
     scope_exit: bool,
+    /// ADR 0066 M1.2: the channel runtime symbols. `sentinel_channel_new() -> ptr`,
+    /// `_send(ptr, i64) -> i64`, `_recv(ptr, ptr) -> i64`, `_close(ptr) -> i64`.
+    channel_new: bool,
+    channel_send: bool,
+    channel_recv: bool,
+    channel_close: bool,
 }
 
 impl RuntimeSyms {
@@ -146,6 +153,10 @@ impl RuntimeSyms {
         self.scope_enter |= other.scope_enter;
         self.scope_register |= other.scope_register;
         self.scope_exit |= other.scope_exit;
+        self.channel_new |= other.channel_new;
+        self.channel_send |= other.channel_send;
+        self.channel_recv |= other.channel_recv;
+        self.channel_close |= other.channel_close;
     }
 
     /// Emit the `declare`s for the used symbols, in the fixed canonical order,
@@ -210,6 +221,20 @@ impl RuntimeSyms {
         if self.scope_exit {
             writeln!(out, "declare void @sentinel_scope_exit(ptr)").unwrap();
         }
+        // ADR 0066 M1.2: the channel runtime group (recv returns the i64 status,
+        // not i1 — codegen computes the valid bit via `icmp eq … 0`).
+        if self.channel_new {
+            writeln!(out, "declare ptr @sentinel_channel_new()").unwrap();
+        }
+        if self.channel_send {
+            writeln!(out, "declare i64 @sentinel_channel_send(ptr, i64)").unwrap();
+        }
+        if self.channel_recv {
+            writeln!(out, "declare i64 @sentinel_channel_recv(ptr, ptr)").unwrap();
+        }
+        if self.channel_close {
+            writeln!(out, "declare i64 @sentinel_channel_close(ptr)").unwrap();
+        }
         if self.memcpy {
             writeln!(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)").unwrap();
         }
@@ -232,6 +257,10 @@ impl RuntimeSyms {
             || self.scope_enter
             || self.scope_register
             || self.scope_exit
+            || self.channel_new
+            || self.channel_send
+            || self.channel_recv
+            || self.channel_close
             || self.memcpy
     }
 }
@@ -3039,6 +3068,47 @@ impl Emit<'_> {
             writeln!(self.body, "  %v{a1} = insertvalue {{ i64, ptr }} %v{a0}, ptr %v{dest}, 1").unwrap();
             return Ok(format!("%v{a1}"));
         }
+        // ADR 0066 M1.2: the channel builtins. channel_new -> a ptr; send/close ->
+        // i64 status; recv -> ?i64 built from the runtime's (status, *out) pair.
+        if id == CHANNEL_NEW_FN_ID {
+            let v = self.fresh();
+            writeln!(self.body, "  %v{v} = call ptr @sentinel_channel_new()").unwrap();
+            self.used.channel_new = true;
+            return Ok(format!("%v{v}"));
+        }
+        if id == SEND_FN_ID {
+            let ch = self.lower_expr(&args[0])?;
+            let val = self.lower_expr(&args[1])?;
+            let v = self.fresh();
+            writeln!(self.body, "  %v{v} = call i64 @sentinel_channel_send(ptr {ch}, i64 {val})").unwrap();
+            self.used.channel_send = true;
+            return Ok(format!("%v{v}"));
+        }
+        if id == CHANNEL_CLOSE_FN_ID {
+            let ch = self.lower_expr(&args[0])?;
+            let v = self.fresh();
+            writeln!(self.body, "  %v{v} = call i64 @sentinel_channel_close(ptr {ch})").unwrap();
+            self.used.channel_close = true;
+            return Ok(format!("%v{v}"));
+        }
+        if id == RECV_FN_ID {
+            // recv(ch) -> ?i64: write the value to a stack out-slot, then build the
+            // `{ i1 valid, i64 value }` from the i64 status (valid = status == 0).
+            let ch = self.lower_expr(&args[0])?;
+            let out = self.alloca("i64");
+            let status = self.fresh();
+            writeln!(self.body, "  %v{status} = call i64 @sentinel_channel_recv(ptr {ch}, ptr %v{out})").unwrap();
+            self.used.channel_recv = true;
+            let valid = self.fresh();
+            writeln!(self.body, "  %v{valid} = icmp eq i64 %v{status}, 0").unwrap();
+            let value = self.fresh();
+            writeln!(self.body, "  %v{value} = load i64, ptr %v{out}").unwrap();
+            let a0 = self.fresh();
+            writeln!(self.body, "  %v{a0} = insertvalue {{ i1, i64 }} undef, i1 %v{valid}, 0").unwrap();
+            let a1 = self.fresh();
+            writeln!(self.body, "  %v{a1} = insertvalue {{ i1, i64 }} %v{a0}, i64 %v{value}, 1").unwrap();
+            return Ok(format!("%v{a1}"));
+        }
         if id.0 < FIRST_USER_FN {
             return Err(format!("builtin call #{} (deferred to a later slice)", id.0));
         }
@@ -3138,6 +3208,8 @@ fn llvm_ty(ty: Type, program: &TypedProgram) -> Result<String, String> {
         // Bar B / concurrency (ADR 0024): a `Task<i64>` is an opaque `*Task` (the runtime
         // SentinelTask struct) — codegen only ever holds/passes the pointer.
         Type::Task(_) => Ok("ptr".to_string()),
+        // ADR 0066 M1.2: a `Channel<i64>` is an opaque `*SentinelChannel`.
+        Type::Channel(_) => Ok("ptr".to_string()),
         other => Err(format!("type not yet ported (8a scalars only): {other:?}")),
     }
 }

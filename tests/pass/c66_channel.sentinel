@@ -1,0 +1,15 @@
+// ADR 0066 M1.2: channels in the self-host differential. `channel_new` -> a
+// `Channel<i64>`; `send` moves an i64 in; `channel_close` drops the sender; and
+// `recv` -> `?i64` (some / null), consumed via `unwrap_or`. This brings the four
+// channel builtins + the `recv` `?i64` build into every differential corpus
+// (types/resolve/mir/borrow/effects/codegen — `snc llvm` == `scg`).
+//
+// send 42, close, then recv yields the queued some(42); unwrap_or -> 42. Exit 42.
+
+fn main() -> i64 {
+    let ch = channel_new();
+    send(ch, 42);
+    channel_close(ch);
+    let m = recv(ch);
+    unwrap_or(m, 0)
+}

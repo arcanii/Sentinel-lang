@@ -335,6 +335,10 @@ struct TyCtx {
     cg_used_scopeenter: bool,
     cg_used_scoperegister: bool,
     cg_used_scopeexit: bool,
+    cg_used_channelnew: bool,
+    cg_used_channelsend: bool,
+    cg_used_channelrecv: bool,
+    cg_used_channelclose: bool,
     cg_scope: i64,         // the enclosing `scope`'s *ScopeCtx register (-1 = no scope)
     cg_spawn_t: Vec<i64>,  // spawn-target FnIds (sorted+deduped) → one wrapper each at end
     cg_eff: bool,     // (c35b) is the fn being emitted effecting (Kont* ABI: ret ptr)?
@@ -505,6 +509,9 @@ fn mk_vec(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 11, elem, 0) }
 // (4i) a `Task<T>` handle (interner kind 12; a = the spawned result type); renders
 // `Task<T>`. The C4.4 structured-concurrency type (`spawn e → Task<U>`).
 fn mk_task(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 12, elem, 0) }
+// (ADR 0066 M1.2) a `Channel<T>` handle (interner kind 13; a = the element type
+// handle); renders `Channel<T>`. Lowers to an opaque `ptr` (*SentinelChannel).
+fn mk_channel(c: &mut TyCtx, elem: i64) -> i64 { intern_type(c, 13, elem, 0) }
 
 // --- (4h) type-param scope --------------------------------------------------
 
@@ -860,6 +867,11 @@ fn render_type(out: &mut Vec<u8>, h: i64, c: &mut TyCtx) -> i64 {
         } else if k == 12 {
             // (4i) Task<T>: `Task<` + result type + `>`.
             append_str(out, "Task<");
+            render_type(out, a, c);
+            push(out, '>')
+        } else if k == 13 {
+            // (ADR 0066 M1.2) Channel<T>: `Channel<` + element + `>`.
+            append_str(out, "Channel<");
             render_type(out, a, c);
             push(out, '>')
         } else {
@@ -1708,6 +1720,10 @@ fn builtin_ret(c: &mut TyCtx, fid: i64) -> i64 {
         3
     } else if fid == 11 {
         mk_array(c, 3)
+    } else if fid == 21 {
+        mk_channel(c, 0)
+    } else if fid == 23 {
+        mk_nullable(c, 0)
     } else {
         0
     }
@@ -1743,7 +1759,7 @@ fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
 
 // The return-type handle for a resolved FnId.
 fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
-    if fid < 21 {
+    if fid < 25 {
         builtin_ret(c, fid)
     } else {
         (*c).ufret[fid - 25]
@@ -3509,7 +3525,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 // `(targs …)` then substitutes its return type; a generic BUILTIN
                 // (len/unwrap_or/is_some) uses the existing first-arg `dump_gcall`;
                 // everything else dumps args straight with the declared return type.
-                let isgenfn: bool = if fid >= 21 {
+                let isgenfn: bool = if fid >= 25 {
                     (*c).uftp[fid - 25] > 0
                 } else {
                     false
@@ -3517,7 +3533,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 // (6/N) USER-fn (FnId >= 14) args are CONSUMING (moved into the callee);
                 // BUILTIN args (len/push/vec_to_array/print/…) are NON-consuming (the
                 // builtins borrow / don't move). `argcons` gates the args' move-recording.
-                let argcons: bool = fid >= 21;
+                let argcons: bool = fid >= 25;
                 let svf: bool = (*c).consuming;
                 (*c).consuming = argcons;
                 // (7c) MIR: ALL calls — plain, generic-builtin (len/push/vec_new/…), and
@@ -7824,6 +7840,10 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         cg_used_scopeenter: false,
         cg_used_scoperegister: false,
         cg_used_scopeexit: false,
+        cg_used_channelnew: false,
+        cg_used_channelsend: false,
+        cg_used_channelrecv: false,
+        cg_used_channelclose: false,
         cg_scope: 0 - 1,
         cg_spawn_t: vec_new(),
         cg_eff: false,
@@ -8463,6 +8483,31 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
+        // (ADR 0066 M1.2) the channel runtime group (recv returns the i64 status).
+        if ctx.cg_used_channelnew {
+            append_str(result, "declare ptr @sentinel_channel_new()\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_channelsend {
+            append_str(result, "declare i64 @sentinel_channel_send(ptr, i64)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_channelrecv {
+            append_str(result, "declare i64 @sentinel_channel_recv(ptr, ptr)\n");
+            0
+        } else {
+            0
+        };
+        if ctx.cg_used_channelclose {
+            append_str(result, "declare i64 @sentinel_channel_close(ptr)\n");
+            0
+        } else {
+            0
+        };
         // (8d-Vec-2) the `llvm.memcpy` intrinsic declares LAST — after the
         // `sentinel_*` runtime-symbol group (it is an `@llvm.*` intrinsic, not a
         // runtime symbol), matching the oracle's `RuntimeSyms::emit_declares`.
@@ -8472,7 +8517,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
         } else {
             0
         };
-        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_taskspawn || ctx.cg_used_taskawait || ctx.cg_used_scopeenter || ctx.cg_used_scoperegister || ctx.cg_used_scopeexit || ctx.cg_used_memcpy;
+        let cg_anydecl: bool = ctx.cg_used_alloc || ctx.cg_used_realloc || ctx.cg_used_free || ctx.cg_used_panic || ctx.cg_used_streq || ctx.cg_used_rdfile || ctx.cg_used_wrfile || ctx.cg_used_print || ctx.cg_used_prbytes || ctx.cg_used_perform || ctx.cg_used_resume || ctx.cg_used_consume || ctx.cg_used_kontpure || ctx.cg_used_kontpush || ctx.cg_used_taskspawn || ctx.cg_used_taskawait || ctx.cg_used_scopeenter || ctx.cg_used_scoperegister || ctx.cg_used_scopeexit || ctx.cg_used_channelnew || ctx.cg_used_channelsend || ctx.cg_used_channelrecv || ctx.cg_used_channelclose || ctx.cg_used_memcpy;
         if cg_anydecl {
             push(result, '\n');
             0
@@ -8867,6 +8912,15 @@ fn cg_is_task(c: &mut TyCtx, h: i64) -> bool {
     }
 }
 
+// (ADR 0066 M1.2) is `h` a `Channel<T>` (interner kind 13)? Lowers to `ptr`.
+fn cg_is_channel(c: &mut TyCtx, h: i64) -> bool {
+    if h < tbase() {
+        false
+    } else {
+        (*c).tk[h - tbase()] == 13
+    }
+}
+
 // (Bar B) true iff `h` is a nullable `?T` (interner kind 4).
 fn cg_is_nullable(c: &mut TyCtx, h: i64) -> bool {
     if h < tbase() {
@@ -9056,6 +9110,9 @@ fn cgo_ty(c: &mut TyCtx, h: i64) -> i64 {
         } else if cg_is_task(c, hs) {
             // (concurrency) a `Task<T>` is an opaque `*Task` pointer.
             cgo_str(c, "ptr")
+        } else if cg_is_channel(c, hs) {
+            // (ADR 0066 M1.2) a `Channel<T>` is an opaque `*SentinelChannel`.
+            cgo_str(c, "ptr")
         } else {
             cgo_str(c, "i64")
         }
@@ -9112,6 +9169,9 @@ fn ll_type_to(out: &mut Vec<u8>, c: &mut TyCtx, h: i64) -> i64 {
             append_int(out, llcid)
         } else if cg_is_task(c, hs) {
             // (concurrency) a `Task<T>` is an opaque `*Task` pointer.
+            append_str(out, "ptr")
+        } else if cg_is_channel(c, hs) {
+            // (ADR 0066 M1.2) a `Channel<T>` is an opaque `*SentinelChannel`.
             append_str(out, "ptr")
         } else {
             append_str(out, "i64")
@@ -10952,6 +11012,72 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         (*c).cg_used_prbytes = true;
         cg_reg(c, d3);
         0
+    } else if fid == 21 {
+        // (ADR 0066 M1.2) channel_new() -> a Channel<i64> (ptr).
+        let cn_d: i64 = cg_dst(c);
+        cgo_str(c, "call ptr @sentinel_channel_new()\n");
+        (*c).cg_used_channelnew = true;
+        cg_reg(c, cn_d);
+        0
+    } else if fid == 22 {
+        // (ADR 0066 M1.2) send(ch, v) -> i64 status.
+        let cs_chk: i64 = (*c).cgak[snap];
+        let cs_chv: i64 = (*c).cgav[snap];
+        let cs_vk: i64 = (*c).cgak[snap + 1];
+        let cs_vv: i64 = (*c).cgav[snap + 1];
+        let cs_d: i64 = cg_dst(c);
+        cgo_str(c, "call i64 @sentinel_channel_send(ptr ");
+        cgo_operand(c, cs_chk, cs_chv);
+        cgo_str(c, ", i64 ");
+        cgo_operand(c, cs_vk, cs_vv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_channelsend = true;
+        cg_reg(c, cs_d);
+        0
+    } else if fid == 23 {
+        // (ADR 0066 M1.2) recv(ch) -> ?i64: write to a stack out-slot, build the
+        // `{ i1 valid, i64 value }` from the i64 status (valid = status == 0).
+        let cr_chk: i64 = (*c).cgak[snap];
+        let cr_chv: i64 = (*c).cgav[snap];
+        let cr_slot: i64 = cg_alloca(c, 0);
+        let cr_status: i64 = cg_dst(c);
+        cgo_str(c, "call i64 @sentinel_channel_recv(ptr ");
+        cgo_operand(c, cr_chk, cr_chv);
+        cgo_str(c, ", ptr %v");
+        cgo_int(c, cr_slot);
+        cgo_str(c, ")\n");
+        (*c).cg_used_channelrecv = true;
+        let cr_valid: i64 = cg_dst(c);
+        cgo_str(c, "icmp eq i64 %v");
+        cgo_int(c, cr_status);
+        cgo_str(c, ", 0\n");
+        let cr_value: i64 = cg_dst(c);
+        cgo_str(c, "load i64, ptr %v");
+        cgo_int(c, cr_slot);
+        cg_putc(c, '\n');
+        let cr_o0: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i1, i64 } undef, i1 %v");
+        cgo_int(c, cr_valid);
+        cgo_str(c, ", 0\n");
+        let cr_o1: i64 = cg_dst(c);
+        cgo_str(c, "insertvalue { i1, i64 } %v");
+        cgo_int(c, cr_o0);
+        cgo_str(c, ", i64 %v");
+        cgo_int(c, cr_value);
+        cgo_str(c, ", 1\n");
+        cg_reg(c, cr_o1);
+        0
+    } else if fid == 24 {
+        // (ADR 0066 M1.2) channel_close(ch) -> i64 status.
+        let cc_chk: i64 = (*c).cgak[snap];
+        let cc_chv: i64 = (*c).cgav[snap];
+        let cc_d: i64 = cg_dst(c);
+        cgo_str(c, "call i64 @sentinel_channel_close(ptr ");
+        cgo_operand(c, cc_chk, cc_chv);
+        cgo_str(c, ")\n");
+        (*c).cg_used_channelclose = true;
+        cg_reg(c, cc_d);
+        0
     } else if fid == 12 {
         // (8d) write_file(path, data) -> i64.
         let w_pk: i64 = (*c).cgak[snap];
@@ -11270,7 +11396,7 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         cgo_str(c, ", 1\n");
         cg_reg(c, vt_a1);
         0
-    } else if fid >= 21 {
+    } else if fid >= 25 {
         // (Bar B / effects c35b) a call to an effecting fn yields a Kont* (`ptr`), not
         // its declared return type — and a tail effecting-call makes the caller's tail
         // kont-producing (so an enclosing effecting fn returns it as-is).
@@ -13369,7 +13495,7 @@ fn mir_dump_block(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], blk: i64) -> i64
 // (7c) render a call's callee name: a USER fn (FnId >= 14) from `ufs`/`ufe` via
 // `src`; else a builtin's fixed name (FnId 0..=13 — the resolve/runtime map).
 fn mir_put_callee(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], fid: i64) -> i64 {
-    if fid >= 21 {
+    if fid >= 25 {
         let s: i64 = (*c).ufs[fid - 25];
         let e: i64 = (*c).ufe[fid - 25];
         append_slice(out, src, s, e);
@@ -13401,6 +13527,16 @@ fn mir_put_callee(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], fid: i64) -> i64
             "read_file"
         } else if fid == 12 {
             "write_file"
+        } else if fid == 13 {
+            "print_bytes"
+        } else if fid == 21 {
+            "channel_new"
+        } else if fid == 22 {
+            "send"
+        } else if fid == 23 {
+            "recv"
+        } else if fid == 24 {
+            "channel_close"
         } else {
             "print_bytes"
         };
