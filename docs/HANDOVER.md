@@ -71,25 +71,28 @@ reference as you work through the milestones.
 > `expr_diverges` mirror — it is a pure dumper (never rejects), and the only difference is the node
 > type for a *mismatched*-divergent join (snc-only).
 >
-> **▶ STAGE 3 (`return` crossing a `handle`, D6) — REMAINS, and is BLOCKED first.** Assessment
-> (2026-06-29): the handle/`perform` codegen is staged — it supports only specific body *shapes*
-> (direct `perform`, let-shape, embedded-perform, chained lets — `compile_effecting_fn_with_*`). A
-> handle body whose **control flow reaches a `perform`** (an `if`/`match` whose branch performs) is
-> NOT a supported shape and currently **SILENTLY MISCOMPILES** — it builds but returns the wrong
-> value. This was confirmed INDEPENDENT of `return`: `handle if c { perform Io.read() } else {
-> perform Io.read() } with { Io.read(k) => k(42) }` already returns 0 instead of 42 (test it with
-> `snc build` on a scratch file). So a `return` inside a handle body cannot be done until that gap
-> is closed. **Stage 3 = (3a) make control-flow handle bodies lower correctly** (frame reification
-> at `if`/`match` sites — the incremental work ADR 0020 anticipated) **THEN (3b) the
-> `return`-crossing-`handle` teardown** (a new runtime `sentinel_kont_free` that walks `frames_head`
-> freeing each captured block/frame, + handle-region tracking in codegen so an early return tears
-> down the in-flight kont) — both across the three emitters. The effect runtime is the youngest
-> subsystem (`crates/sentinel-runtime/src/lib.rs`: `SentinelKont`/`SentinelFrame`/`kont_push`/
-> `kont_resume`). **Safer interim (a small bounded prerequisite):** REJECT a `return` whose lexical
-> parent is a `handle` body/arm with a clear diagnostic so the miscompile is never silent (the ADR
-> open question). Weigh that against implementing D6 outright. Spec for the `return` lowering = the
-> inkwell `crates/sentinel-codegen/src/lib.rs` (`emit_return_drops` + `build_fn_return` + the Return
-> arm). Also pending: the final macOS cross-platform confirmation; then ADR 0065 ACCEPTED.
+> **▶ STAGE 3 (`return` crossing a `handle`, D6) — the LEAK is FIXED; what's left is snc-only
+> faithfulness + an orthogonal gap.** Assessment (2026-06-29): the FUNCTIONAL behaviour already
+> worked — a `return` from a handler ARM (instead of resuming `k`) or from a handle BODY produces
+> the CORRECT value today (verified exit 42 on both paths). The only D6 gap was a kont **LEAK** (the
+> abandoned continuation `ret`s without being freed). **FIXED** (commit on `main`): a new runtime
+> `sentinel_kont_free(kont)` in `crates/sentinel-runtime/src/lib.rs` (frees the kont + walks
+> `frames_head` freeing each captured block/frame, inverse of `kont_push`; 2 unit tests), and the
+> inkwell `Return` arm (`crates/sentinel-codegen/src/lib.rs`) frees each active handle region's
+> in-flight kont (innermost first via `handle_stack`) before the `ret` — the one-free invariant.
+> Demonstrator `examples/lang/early_return_handle.sentinel` (exit 42, leak-free, no double-free; the
+> 23 effecting pass tests unaffected; full differential + both fixed points still green).
+> **Deferred (snc-only — the demonstrator is in examples/, OUT of the differential):** the **text-IR
+> mirror** of `kont_free` (the `snc llvm` oracle + the selfhost `cg` mode still omit it — invisible
+> to the exit code; `scg` compiles handle-free sources so its bootstrap is unaffected), and the
+> **selfhost MIR collapse** (snc MIR collapses a `handle` to opaques without lowering the arm's
+> `return`; the selfhost MIR lowers it → a MIR-differential divergence, why the fixture is examples/
+> not tests/pass). **STILL BLOCKED, orthogonal to `return` (separately flagged as a background
+> task):** a handle body whose control flow REACHES a `perform` (an `if`/`match` branch that
+> performs) is not a supported body shape and **silently miscompiles** (`handle if c { perform … }
+> else { perform … } with { … }` returns 0 not 42, no `return` involved) — the idiom is performs in
+> an effecting fn; the fix is frame reification at `if`/`match` sites (ADR-0020-anticipated). Also
+> pending: the final macOS cross-platform confirmation; then ADR 0065 ACCEPTED.
 
 All on `main`, **NEVER pushed**. Verified on **Windows only** (see the macOS caveat);
 the dev box is `x86_64-pc-windows-msvc` with a from-source LLVM 18.1.8 at `G:\llvm-18`

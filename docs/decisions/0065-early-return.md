@@ -8,8 +8,11 @@ the `snc llvm` oracle + the self-hosted `scg`) — `return` is in the typing/mir
 differential corpora via `tests/pass/c65_return*.sentinel`. The two deferred v1 typing limitations are
 **CLOSED**: the join-site **divergence acceptance** (a divergent `return` is no longer coerced to the
 expected type — `coerce_to_expected` skips it) and the **match-arm divergence** (a returning arm no
-longer over-rejects the arm-type join). Stage **3 (the cross-handler unwind, D6) remains** — see the
-assessment in Phasing stage 3 (it is blocked on a pre-existing staged-effect-runtime gap). Add an explicit
+longer over-rejects the arm-type join). Stage **3 (the cross-handler unwind, D6)**: the functional behaviour already worked, and the
+remaining **kont LEAK is now FIXED** in the runtime (`sentinel_kont_free`) + the inkwell back end
+(the `Return` arm frees an abandoned handle kont). What remains is snc-only faithfulness (the
+text-IR + selfhost-MIR mirror) and an orthogonal, separately-tracked gap (a handle body whose
+control flow reaches a `perform` silently miscompiles) — see Phasing stage 3. Add an explicit
 `return expr` so a function can return early from any point, instead of only by its tail
 expression. Owner-directed (2026-06-28): "the function return in Sentinel is not clear; we should
 have a `return x;` C-style." Scope confirmed: **full early return** (return from anywhere),
@@ -168,22 +171,28 @@ selfhost compiler sources need not *use* `return` (they keep tail returns), but 
    **(Both former v1 limitations — the `match`-arm divergence and the `snc llvm` text-IR stub — are
    now CLOSED; see stage 4.)**
 3. **`return` crossing a `handle`** (D6) — **REMAINS; assessed 2026-06-29.** Intended work:
-   `sentinel_kont_free` + handle-region tracking + the teardown-on-early-return; `tests/pass` with
-   effects (`return` before/after a `perform` inside a `handle`). **Assessment (the Risk note bites):**
-   stage 3 is **blocked on a pre-existing staged-effect-runtime gap.** The handle/`perform` codegen
-   only supports specific body *shapes* (a direct `perform`, the let-shape, the embedded-perform, and
-   chained lets — `compile_effecting_fn_with_*`). A handle body with **control flow that reaches a
-   `perform`** (an `if`/`match` whose branch performs) is **not** a supported shape and currently
-   **silently miscompiles** — it builds but returns the wrong value. This was verified to be
-   independent of `return`: `handle if c { perform … } else { perform … } with { … }` already
-   miscomputes (exit 0 vs the expected 42), so a `return` inside a handle body cannot be implemented
-   until that gap is closed. Stage 3 is therefore really **(3a) make control-flow handle bodies lower
-   correctly** (frame reification at `if`/`match` sites — the incremental work ADR 0020 anticipated),
-   **then (3b) the `return`-crossing-`handle` teardown** (`sentinel_kont_free` + the handle-region
-   pop) — both across the three emitters (inkwell + `llvm_dump` + selfhost). Until (3a/3b) land, the
-   safest interim is to **reject** a `return` whose lexical parent is a `handle` body/arm with a clear
-   diagnostic (the Open-questions item below), so the miscompile is never silent — a small bounded
-   prerequisite the follow-up should weigh against implementing D6 outright.
+   `sentinel_kont_free` + handle-region tracking + the teardown-on-early-return. **Assessment +
+   leak fix (2026-06-29):** the FUNCTIONAL behaviour already worked — a `return` from a handle BODY
+   (pure rest) and a `return` from a handler ARM (instead of resuming `k`) both produce the CORRECT
+   value today (verified: exit 42 on both paths). The only D6 gap was a **memory LEAK** — the arm/body
+   `return` abandoned the in-flight kont without freeing it (the IR `ret`s without a free). **FIXED in
+   the runtime + the inkwell back end:** a new `sentinel_kont_free(kont)` (frees the kont + walks
+   `frames_head` freeing each captured block/frame, the inverse of `kont_push`; 2 runtime unit tests),
+   and the inkwell `Return` arm frees each active handle region's in-flight kont (innermost first,
+   `handle_stack`) before the `ret` — the one-free invariant (resume frees on the normal path, this on
+   the early-return path, mutually exclusive). Demonstrator `examples/lang/early_return_handle.sentinel`
+   (arm-return + body-return; exit 42, both paths leak-free, no double-free; the 23 effecting pass
+   tests unaffected). **Deferred (snc-only, the demonstrator stays OUT of the differential — the
+   early_return / u128 / f64 pattern):** the **text-IR mirror** of `kont_free` (the `snc llvm` oracle +
+   selfhost `cg` mode still omit it — invisible to the exit code; the self-hosted `scg` compiles
+   handle-free sources so its bootstrap is unaffected) and the **selfhost MIR collapse** (snc MIR
+   collapses a `handle` to opaques without lowering the arm's `return`; the selfhost MIR lowers it, so
+   they diverge — a separate selfhost-MIR faithfulness item). **Still genuinely BLOCKED, orthogonal to
+   `return`:** a handle body whose control flow REACHES a `perform` (an `if`/`match` branch that
+   performs) is not a supported body shape and **silently miscompiles** (verified independent of
+   `return`: `handle if c { perform … } else { perform … } with { … }` returns 0 not 42) — the idiom
+   is to put performs in an effecting fn; closing this (frame reification at `if`/`match` sites) is the
+   ADR-0020-anticipated incremental work, tracked separately.
 4. ✅ **Stage-4 codegen + self-host + typing acceptance** (DONE 2026-06-29). The **real `return`
    text-IR** lands byte-identical in both text emitters: the `snc llvm` oracle
    (`crates/sentinel-driver/src/llvm_dump.rs`) and the self-hosted `scg` (the `cg` mode of

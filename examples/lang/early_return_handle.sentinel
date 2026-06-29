@@ -1,0 +1,48 @@
+// examples/lang/early_return_handle.sentinel — `return` crossing a `handle` (ADR 0065 D6).
+//
+// A `return` may exit a function from inside a handled computation. Two shapes:
+//   - from a handler ARM body (`Io.read(k) => if bail { return … } else { k(…) }`): the
+//     arm `return`s instead of resuming `k`, ABANDONING the in-flight continuation. The
+//     runtime `sentinel_kont_free` frees it (+ any captured frames) on the return path —
+//     the one-free invariant: `sentinel_kont_resume` frees on the normal path, this on the
+//     early-return path, mutually exclusive. Both paths run leak-free with no double-free.
+//   - from the handle BODY before any `perform` (a pure guard): a plain early return, no
+//     continuation allocated yet.
+//
+// snc-only demonstrator (the kont-teardown lands in the runtime + the inkwell back end; the
+// text-IR oracle does not yet emit the D6 `kont_free`, and the selfhost MIR collapses a
+// `handle` to opaques where the inkwell path lowers the arm's `return` — both deferred
+// faithfulness items, invisible to the exit code. So this stays OUT of the differential, the
+// early_return / u128 / f64 pattern). Constant-time unchanged. Exit 42 = every check held.
+use std::test::check;
+
+effect Io {
+    read() -> i64;
+}
+
+// The handler arm early-returns on `bail` (abandoning the kont) instead of resuming `k`.
+fn arm_bail(bail: bool) -> i64 {
+    handle perform Io.read() with {
+        Io.read(k) => if bail { return 0 - 1 } else { k(42) }
+    }
+}
+
+// The handle BODY early-returns before any `perform`; otherwise the body is a pure value.
+fn body_bail(bail: bool) -> i64 {
+    handle if bail { return 0 - 7 } else { 100 } with {
+        Io.read(k) => k(0)
+    }
+}
+
+fn main() -> i64 {
+    let mut passed: i64 = 0;
+    passed = passed + check("arm_bail(false) resumes k(42)", arm_bail(false) == 42);
+    passed = passed + check("arm_bail(true) returns, kont freed", arm_bail(true) == 0 - 1);
+    passed = passed + check("body_bail(false) pure body", body_bail(false) == 100);
+    passed = passed + check("body_bail(true) early-returns", body_bail(true) == 0 - 7);
+    if passed == 4 {
+        return 42
+    } else {
+        0
+    }
+}

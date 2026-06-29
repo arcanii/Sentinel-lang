@@ -245,6 +245,7 @@ Codegen declares these as external; `sentinel-runtime` defines them
 | `sentinel_kont_pure` | `(i64 value) -> ptr` | handlers |
 | `sentinel_kont_consume_pure` | `(ptr kont) -> i64` | handlers |
 | `sentinel_kont_push` | `(ptr kont, ptr resumer, ptr captured) -> void` | handlers |
+| `sentinel_kont_free` | `(ptr kont) -> void` | handlers — free an abandoned kont (+ its captured frame chain) when an early `return` crosses a `handle` (ADR 0065 D6) |
 | `sentinel_task_spawn` | `(ptr wrapper, ptr args, i64 args_size) -> ptr` | concurrency (ADR 0024) |
 | `sentinel_task_await` | `(ptr task) -> i64` | concurrency |
 | `sentinel_scope_enter` | `() -> ptr` | concurrency |

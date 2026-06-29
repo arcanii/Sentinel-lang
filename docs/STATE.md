@@ -36,9 +36,15 @@ is a pure dumper). **Constant-time UNCHANGED.** Windows four-check green. **Rema
 staged-effect-runtime gap** — a handle body whose control flow reaches a `perform` (an `if`/`match`
 branch that performs) is not a supported body shape and currently **silently miscompiles**,
 INDEPENDENT of `return` (`handle if c { perform … } else { … } with { … }` already miscomputes). So
-stage 3 = (3a) make control-flow handle bodies lower correctly, then (3b) the kont teardown
-(`sentinel_kont_free` + handle-region pop); both across the three emitters. Until then the safe interim
-is to reject `return` inside a `handle` body. See ADR 0065 Phasing + HANDOVER §0.
+a handle body whose control flow reaches a `perform` is not a supported body shape and silently
+miscompiles (orthogonal to `return`, separately tracked). **D6 update (same day):** a `return` from a
+handler ARM (instead of resuming `k`) or a handle BODY already produced the CORRECT value — the only
+gap was a kont **leak** (the abandoned continuation was never freed). FIXED: a new runtime
+`sentinel_kont_free` (frees the kont + its captured frame chain; 2 unit tests) + the inkwell `Return`
+arm frees each active handle region's in-flight kont before the `ret` (the one-free invariant). The
+`return`-crossing-`handle` demonstrator is `examples/lang/early_return_handle.sentinel` (snc-only: the
+text-IR + selfhost-MIR mirror of `kont_free` are deferred faithfulness items, invisible to the exit
+code). See ADR 0065 Phasing stage 3 + HANDOVER §0.
 
 **Latest (2026-06-28) — explicit early `return`, effect-free path (ADR 0065 stages 1–2).** Sentinel
 now has a C-style **`return expr`** that exits a function early, instead of only the tail

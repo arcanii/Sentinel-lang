@@ -950,6 +950,43 @@ pub extern "C" fn sentinel_kont_consume_pure(kont: *mut SentinelKont) -> i64 {
     value
 }
 
+/// ADR 0065 D6: free an ABANDONED continuation — one allocated by a
+/// `perform` (or augmented by `sentinel_kont_push`) but never resumed,
+/// because an early `return` crossed its `handle` boundary (a handler arm
+/// body, or the handled computation, `return`s instead of resuming `k`).
+/// Walks `frames_head` freeing each captured-state block + frame node (the
+/// inverse of [`sentinel_kont_push`]), then frees the kont itself.
+///
+/// The **one-free invariant** (ADR 0020 D2 / ADR 0065 D6): a kont is freed
+/// exactly once — by [`sentinel_kont_resume`] on the normal path, or by this
+/// on the early-return path, which are mutually exclusive (codegen emits this
+/// only on a `return` path that did not resume the kont). `sentinel_free` of
+/// a null pointer is a safe no-op, so a frameless kont (the direct-`perform`
+/// case, `frames_head == null`) frees cleanly with no guard.
+///
+/// # Safety
+///
+/// `kont` must be a live `SentinelKont` that has NOT been resumed — calling
+/// this on a resumed (already-freed) kont would double-free. The codegen
+/// contract guarantees the mutual exclusion.
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn sentinel_kont_free(kont: *mut SentinelKont) {
+    // SAFETY: caller guarantees `kont` is a live, un-resumed SentinelKont;
+    // read its frame-chain head.
+    let mut current_frame = unsafe { (*kont).frames_head };
+    while !current_frame.is_null() {
+        // SAFETY: current_frame is non-null and was allocated by
+        // sentinel_kont_push from a live kont; read its captured ptr + next.
+        let (captured, next) =
+            unsafe { ((*current_frame).captured, (*current_frame).next) };
+        sentinel_free(captured);
+        sentinel_free(current_frame as *mut u8);
+        current_frame = next;
+    }
+    sentinel_free(kont as *mut u8);
+}
+
 /// Reserved op_id sentinel used by [`sentinel_kont_pure`] and
 /// recognised by handle codegen's runtime switch as the "pure
 /// return" tag per ADR 0020 D4. The value is chosen to avoid
@@ -1353,6 +1390,43 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_kont_free_frees_an_abandoned_frameless_kont() {
+        // ADR 0065 D6: a kont allocated by a `perform` but never resumed
+        // (an early `return` crossed its `handle`). Freeing a frameless kont
+        // (frames_head == null — the direct-`perform` case) just frees the
+        // kont; it must not crash or double-free.
+        let k = sentinel_perform_op(0, 7);
+        // SAFETY: k is a live, un-resumed kont.
+        unsafe {
+            assert!((*k).frames_head.is_null(), "a direct perform has no frames");
+        }
+        sentinel_kont_free(k);
+    }
+
+    #[test]
+    fn sentinel_kont_free_walks_and_frees_the_captured_frame_chain() {
+        // ADR 0065 D6: an abandoned kont WITH pushed evaluation frames —
+        // `sentinel_kont_free` walks `frames_head` freeing each captured block
+        // + frame node (the inverse of `sentinel_kont_push`), then the kont.
+        // The resumer is never invoked on the free path.
+        unsafe extern "C" fn never_called(_v: i64, _c: *mut u8) -> *mut SentinelKont {
+            // kont_free frees the chain WITHOUT calling any resumer.
+            core::ptr::null_mut()
+        }
+        let k = sentinel_perform_op(0, 0);
+        // Push two frames, each with a heap-allocated captured-state block.
+        sentinel_kont_push(k, never_called, sentinel_alloc(16));
+        sentinel_kont_push(k, never_called, sentinel_alloc(8));
+        // SAFETY: k is live with two pushed frames.
+        unsafe {
+            assert!(!(*k).frames_head.is_null(), "two frames were pushed");
+        }
+        // Frees the kont + both frame nodes + both captured blocks; no leak or
+        // double-free (a sanitizer build would flag either).
+        sentinel_kont_free(k);
+    }
+
+    #[test]
     fn sentinel_kont_struct_layout_is_stable() {
         // Layout invariant: codegen reads `op_id` via GEP at
         // offset 0 + `arg` at offset 8 (after the 4-byte op_id +
@@ -1433,6 +1507,7 @@ mod tests {
             sentinel_kont_pure as *const (),
             sentinel_kont_consume_pure as *const (),
             sentinel_kont_push as *const (),
+            sentinel_kont_free as *const (),
             sentinel_kont_panic_resumed as *const (),
             sentinel_task_spawn as *const (),
             sentinel_task_await as *const (),
@@ -1440,11 +1515,11 @@ mod tests {
             sentinel_scope_register as *const (),
             sentinel_scope_exit as *const (),
         ];
-        // 23 symbols: 22 codegen-declared (incl. D.2's sentinel_str_eq,
+        // 24 symbols: 23 codegen-declared (incl. D.2's sentinel_str_eq,
         // D.3's sentinel_realloc, D.4's sentinel_read_file /
-        // sentinel_write_file / sentinel_print_bytes) +
-        // sentinel_kont_panic_resumed.
-        assert_eq!(symbols.len(), 23);
+        // sentinel_write_file / sentinel_print_bytes, and ADR 0065 D6's
+        // sentinel_kont_free) + sentinel_kont_panic_resumed.
+        assert_eq!(symbols.len(), 24);
         assert!(symbols.iter().all(|&s| !s.is_null()), "every symbol has an address");
     }
 

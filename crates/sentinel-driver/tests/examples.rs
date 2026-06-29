@@ -443,6 +443,11 @@ const EXAMPLES: &[(&str, i32)] = &[
     // directly. A diverging arm yields no value, so it does not constrain the arm-type
     // join (pre-0065 this was a "match arms have incompatible types" reject). 42 = held.
     ("examples/lang/early_return_match.sentinel", 42),
+    // `return` crossing a `handle` (ADR 0065 D6): a handler arm early-returns instead of
+    // resuming `k` (abandoning the in-flight kont — the runtime `sentinel_kont_free` frees
+    // it on the return path), and a handle body early-returns before any `perform`. Both
+    // resume + early-return paths run leak-free with no double-free. 42 = held. snc-only.
+    ("examples/lang/early_return_handle.sentinel", 42),
 ];
 
 #[test]
@@ -688,6 +693,11 @@ fn lang_early_return() {
 #[test]
 fn lang_early_return_match() {
     check_example("examples/lang/early_return_match.sentinel", "early_return_match", 42);
+}
+
+#[test]
+fn lang_early_return_handle() {
+    check_example("examples/lang/early_return_handle.sentinel", "early_return_handle", 42);
 }
 
 /// Coverage guard: every `.sentinel` program under `examples/` must be

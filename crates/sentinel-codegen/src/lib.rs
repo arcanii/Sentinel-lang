@@ -692,6 +692,21 @@ pub fn compile_to_object_for_module(
             None,
         )
     };
+    // ADR 0065 D6: sentinel_kont_free(kont) frees an ABANDONED
+    // continuation — one allocated by a `perform` but never resumed,
+    // because an early `return` crossed its `handle` boundary. Emitted on
+    // the return path for each active handle region's in-flight kont (the
+    // one-free invariant: resume frees on the normal path, this on the
+    // early-return path, mutually exclusive).
+    let kont_free_fn = {
+        let ptr_ty = context.ptr_type(inkwell::AddressSpace::default());
+        let void_ty = context.void_type();
+        module.add_function(
+            "sentinel_kont_free",
+            void_ty.fn_type(&[ptr_ty.into()], false),
+            None,
+        )
+    };
     // C3.5(c) / ADR 0020 D7: sentinel_kont_push pushes a captured
     // evaluation frame onto a kont's chain. Used at every "could-
     // be-captured" eval site (let-stmt with effecting RHS at
@@ -1226,6 +1241,7 @@ pub fn compile_to_object_for_module(
             kont_resume_fn,
             kont_pure_fn,
             kont_consume_pure_fn,
+            kont_free_fn,
             kont_push_fn,
             task_spawn_fn,
             task_await_fn,
@@ -1501,6 +1517,12 @@ struct CodegenCtx<'ctx, 'plan> {
     /// invoked from handle codegen's runtime switch's "pure
     /// return" case.
     kont_consume_pure_fn: FunctionValue<'ctx>,
+    /// ADR 0065 D6: `sentinel_kont_free(kont)` frees an abandoned
+    /// continuation (allocated by a `perform`, never resumed because an
+    /// early `return` crossed its `handle`). Emitted on the return path
+    /// for each active handle region's in-flight kont; the one-free
+    /// invariant keeps it mutually exclusive with `kont_resume`.
+    kont_free_fn: FunctionValue<'ctx>,
     /// C3.5(c) / ADR 0020 D7: `sentinel_kont_push(kont, resumer,
     /// captured)` adds a captured evaluation frame to the kont's
     /// chain. Emitted at let-stmts whose RHS produces a kont.
@@ -6514,6 +6536,34 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 let val = self.lower_expr(inner, program)?;
                 let tail_returned = tail_returned_var(inner);
                 self.emit_return_drops(tail_returned, program)?;
+                // ADR 0065 D6: this `return` may cross one or more `handle`
+                // regions (a handler arm body — or the handled computation —
+                // that `return`s instead of resuming `k`). Each such region has
+                // an in-flight kont (the one being dispatched, allocated by a
+                // `perform`) that is now ABANDONED — never resumed on this path —
+                // so free it + its captured frames, innermost handle first. The
+                // one-free invariant holds: `sentinel_kont_resume` frees on the
+                // normal path, this on the early-return path (mutually
+                // exclusive). `handle_stack` is empty for a `return` outside any
+                // handle (the common case) — no kont teardown, just the ret.
+                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+                // Snapshot the slots (Copy) so the loop doesn't hold a borrow of
+                // `self.handle_stack` while it mutably borrows `self.builder`.
+                let kont_slots: Vec<PointerValue<'ctx>> = self
+                    .handle_stack
+                    .iter()
+                    .rev()
+                    .map(|c| c.current_kont_slot)
+                    .collect();
+                for slot in kont_slots {
+                    let kont = self
+                        .builder
+                        .build_load(ptr_ty, slot, "abandoned_kont")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                    self.builder
+                        .build_call(self.kont_free_fn, &[kont.into()], "")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?;
+                }
                 // Convert + `ret` exactly as the epilogue does (main i64→i32,
                 // effecting → kont) so the early-return ABI matches.
                 self.build_fn_return(val, program)?;
