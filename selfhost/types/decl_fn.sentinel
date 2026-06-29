@@ -1,0 +1,540 @@
+module types;
+
+// --- fn header parse --------------------------------------------------------
+
+// Parse + emit a fn's params from tokens (mirrors resolve's `emit_params`): each
+// `(param #vid [mut] <name> <type>)`, binding the param's VarId + its type in the
+// env. Ends on `)` (kind 5); skips `,` (kind 29). `first` suppresses the leading
+// space.
+fn emit_tparams(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, first: bool) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        emit_tparams(out, k, s, e, src, cur, c, gb, first)
+    } else {
+        if first {
+            0
+        } else {
+            push(out, ' ');
+            0
+        };
+        let pm: bool = (*k)[*cur] == 46;
+        if pm {
+            *cur = *cur + 1;
+            0
+        } else {
+            0
+        };
+        let ns: i64 = (*s)[*cur];
+        let ne: i64 = (*e)[*cur];
+        *cur = *cur + 1;
+        *cur = *cur + 1;
+        let pte: TypeE = parse_type(k, s, e, src, cur);
+        let pty: i64 = type_of_typeexpr(c, pte, gb);
+        let vid: i64 = (*c).nextvid;
+        (*c).nextvid = (*c).nextvid + 1;
+        bind_src(c, src, ns, ne, vid, pty);
+        // (7/N) MIR: the param is an SSA param of the entry block; bind var_defs.
+        if mir_on(c) {
+            let mc: i64 = (*c).mir_cur;
+            let pv: i64 = mir_add_param(c, mc, pty);
+            mir_vd_set(c, vid, pv);
+            0
+        } else {
+            0
+        };
+        // (8/N) codegen: hoist the param's alloca (recorded) + emit its store to cgbody
+        // (the store is the first thing in the body; the alloca lands in the entry block).
+        // The param index = len(cgpty) before the push (params record in order).
+        if cg_on(c) {
+            let cgpidx: i64 = len((*c).cgpty);
+            let cgslot: i64 = cg_alloca(c, pty);
+            cg_slot_set(c, vid, cgslot);
+            cg_drop_record(c, vid, pty, cgslot);
+            push(&mut (*c).cgpty, pty);
+            cgo_str(c, "  store ");
+            cgo_ty(c, pty);
+            cgo_str(c, " %arg");
+            // (Bar B / classes) a method's declared params are `%arg1..` (self is %arg0);
+            // `cg_arg_base` is 1 for a method, 0 for a free fn.
+            cgo_int(c, cgpidx + (*c).cg_arg_base);
+            cgo_str(c, ", ptr %v");
+            cgo_int(c, cgslot);
+            cg_putc(c, '\n');
+            0
+        } else {
+            0
+        };
+        append_str(out, "(param #");
+        append_int(out, vid);
+        push(out, ' ');
+        if pm {
+            append_str(out, "mut ")
+        } else {
+            0
+        };
+        append_slice(out, src, ns, ne);
+        push(out, ' ');
+        render_type(out, pty, c);
+        push(out, ')');
+        emit_tparams(out, k, s, e, src, cur, c, gb, false)
+    }
+}
+
+// Type-check one top-level `fn`, emitting `(fn #id name (params) <ret> <block>)`.
+fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>, fnidx: i64) -> i64 {
+    *cur = *cur + 1;            // skip `fn`
+    let name_s: i64 = (*s)[*cur];
+    let name_e: i64 = (*e)[*cur];
+    *cur = *cur + 1;
+    // (4h) set up the type-param scope so the params/body/return type as `<T#i>`;
+    // `tp_setup` resets first (so a non-generic fn gets an empty scope) + advances
+    // past `>` (or no-ops, leaving the cursor at `(`).
+    tp_setup(c, k, s, e, src, cur);
+    *cur = *cur + 1;           // skip `(`
+    (*c).base = len((*c).scs);
+    // (7/N) MIR: start this fn's lowering — fresh pools + an entry block (b0).
+    // Params are added as the entry's SSA params by `emit_tparams` (mode 2).
+    if mir_on(c) {
+        mir_reset(c);
+        let eb: i64 = mir_new_block(c);
+        (*c).mir_cur = eb;
+        0
+    } else {
+        0
+    };
+    // (8/N) codegen: reset the per-fn cg state; `main` gets the C-ABI i32-trunc return.
+    if cg_on(c) {
+        cg_reset(c);
+        (*c).cgmain = cg_is_main(src, name_s, name_e);
+        // (Bar B / effects c35b) an effecting fn (non-Async row, recorded in pass-1)
+        // uses the Kont* ABI — `cg_emit_fn` returns `ptr` (wrapping a pure tail).
+        (*c).cg_eff = (*c).ufeff[fnidx] != 0;
+        0
+    } else {
+        0
+    };
+    // (8d-drops) the param frame's mark (0 after cg_reset). `emit_tparams` records the
+    // params into the drop pools; the body block (frame 1) drops its own locals; then
+    // the param frame (frame 0) is freed below — matching the production scope-0/1 order.
+    let cgpmark: i64 = if cg_on(c) {
+        len((*c).cgdv)
+    } else {
+        0
+    };
+    append_str(out, "(fn #");
+    append_int(out, 25 + fnidx);
+    push(out, ' ');
+    append_slice(out, src, name_s, name_e);
+    append_str(out, " (");
+    // (Bar B / effects c35c) the param VarId range [cg_pv0, cg_pvn) — the let-shape
+    // capture set (the effecting fn's params, the only in-scope vars its pure tail can
+    // reference besides the let-bound var).
+    let cg_pv0: i64 = (*c).nextvid;
+    emit_tparams(out, k, s, e, src, cur, c, gb, true);
+    let cg_pvn: i64 = (*c).nextvid;
+    append_str(out, ") ");
+    *cur = *cur + 1;           // skip `->`
+    let rte: TypeE = parse_type(k, s, e, src, cur);
+    let rty: i64 = type_of_typeexpr(c, rte, gb);
+    if (*k)[*cur] == 24 {
+        skip_effect_row(k, cur)
+    } else {
+        0
+    };
+    let body_tok0: i64 = *cur;
+    let body: Expr = parse_block(k, s, e, src, cur);
+    render_type(out, rty, c);
+    push(out, ' ');
+    // (8/N) codegen: the body walk appends to cgbody (allocas recorded for hoisting); the
+    // `define` header + entry-block allocas + ret are assembled into cgout at teardown.
+    // (6/N) record this fn's moves: `curfn` = its idx (only top-level fn bodies — methods
+    // aren't in `program.fns`), and the body's tail is CONSUMING (the returned value).
+    (*c).curfn = fnidx;
+    (*c).consuming = true;
+    // (Bar B / effects c35c) an EFFECTING fn (Kont* ABI) routes through `cg_emit_fn_eff`,
+    // which consumes `body` + assembles the define(s): a let-bound-perform body becomes a
+    // RESUMER fn + a parent that pushes a captured frame (two defines); any other
+    // effecting body (c32/c33/c35b) walks + assembles straight-line. A NON-effecting fn
+    // (or modes 0-3) walks here; `cg_emit_fn` below assembles its single define.
+    // The fn return type is the body's expectation — a `?T`-returning fn widens its
+    // tail (`dump_texpr` on the body `Block` threads `rty` to the tail).
+    let cg_eff_fn: bool = cg_on(c) && (*c).cg_eff;
+    if cg_eff_fn {
+        // (c35d) classify the tail from a re-parsed CLASSIFICATION COPY of the same
+        // tokens (mode-4 effecting fns only — modes 0-3 and pure fns never re-parse):
+        // move semantics bar inspect-then-reuse of `body`, so a disposable second
+        // parse carries the embedded-perform detection + extraction.
+        let mut cur2: i64 = body_tok0;
+        let body2: Expr = parse_block(k, s, e, src, &mut cur2);
+        let embed: Args = eff_classify(body2);
+        cg_emit_fn_eff(out, c, body, rty, src, name_s, name_e, cgpmark, cg_pv0, cg_pvn, gb, embed, k, s, e, body_tok0);
+        0
+    } else {
+        dump_texpr(out, body, rty, src, c, gb);
+        // (8d-drops) free the param frame (frame 0) — AFTER the body-block drops (emitted
+        // inside the Block arm), BEFORE `curfn` is cleared (cg_is_moved keys on it).
+        if cg_on(c) {
+            cg_drop_frame(c, cgpmark);
+            0
+        } else {
+            0
+        };
+        0
+    };
+    (*c).curfn = 0 - 1;
+    // (7/N) MIR: the body's value (`lastval`) is the fn's return; terminate the
+    // current block + dump this fn's MIR into `mirout`.
+    if mir_on(c) {
+        let bv: i64 = (*c).lastval;
+        let cb: i64 = (*c).mir_cur;
+        mir_term_return(c, cb, bv);
+        if (*c).mode == 3 {
+            // (7d) mode 3: verify this fn's MIR (leaks accumulate in `mirout`).
+            mir_verify_fn(c);
+            0
+        } else {
+            // mode 2: dump this fn's MIR into a LOCAL buffer (distinct from `c`), then
+            // fold into the `mirout` FIELD via a `push` loop (a builtin works on a Vec
+            // field of `*c`).
+            let mut mb: Vec<u8> = vec_new();
+            mir_dump_fn(&mut mb, c, src, name_s, name_e, rty);
+            let mbn: i64 = len(mb);
+            let mut mbi: i64 = 0;
+            while mbi < mbn {
+                push(&mut (*c).mirout, mb[mbi]);
+                mbi = mbi + 1;
+            }
+            let _mbx: [u8] = vec_to_array(mb);
+            0
+        };
+        0
+    } else {
+        0
+    };
+    // (8/N) codegen: assemble the fn into cgout — header + hoisted allocas + body + ret.
+    // (c35c) an EFFECTING fn already assembled its define(s) inside `cg_emit_fn_eff`.
+    if cg_on(c) {
+        if (*c).cg_eff {
+            0
+        } else {
+            cg_emit_fn(c, src, name_s, name_e, rty);
+            0
+        }
+    } else {
+        0
+    };
+    push(out, ')');
+    // (4h) clear the type-param scope so a following NON-generic decl (whose pass-2
+    // typing doesn't call `tp_setup`) doesn't see this fn's type-params.
+    tp_reset(c);
+    0
+}
+
+// PASS-1.5 signature scan (was `scan_fn_ret`): position a cursor at the `fn` token
+// `p1`, set up its type-param scope (`<…>`), and record its full SIGNATURE into the
+// (Bar B / effects c35b) is the src slice [st..en] the built-in effect name `Async`?
+// (mirror of `cg_is_main`'s in-place literal compare.)
+fn cg_is_async(src: &[u8], st: i64, en: i64) -> bool {
+    if en - st != 5 {
+        false
+    } else if (*src)[st] == 'A' {
+        if (*src)[st + 1] == 's' {
+            if (*src)[st + 2] == 'y' {
+                if (*src)[st + 3] == 'n' {
+                    (*src)[st + 4] == 'c'
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+// (Bar B / effects c35b) does the effect row whose `!` is at token `at` contain any
+// effect OTHER than the built-in `Async`? Such a row gives the fn the Kont* ABI (it
+// returns `ptr`). `! { Async }` alone stays a plain value-returning fn (Async is a
+// direct-runtime marker — spawn/await, never `handle`). Peeks; does not advance.
+// Mirrors the oracle / inkwell `uses_kont_abi`.
+fn eff_row_is_kont(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], at: i64) -> bool {
+    let mut i: i64 = at + 2;   // skip `!` then `{`
+    let mut kont: bool = false;
+    while (*k)[i] != 7 {       // up to `}`
+        if (*k)[i] != 29 {     // an effect-name ident (not a `,` separator)
+            if cg_is_async(src, (*s)[i], (*e)[i]) {
+                0
+            } else {
+                kont = true;
+                0
+            }
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    kont
+}
+
+// fn tables — `ufret` (return handle), `uftp` (type-param count, 0 = non-generic),
+// `ufeff` (1 = effecting / Kont* ABI), and `ufps`/`ufpe` (the param-type slice into
+// `ufpp`). All push once per fn in source order, so they stay index-aligned. The
+// type-param scope is reset after. Lets a forward-declared (and possibly generic) fn
+// type + infer correctly at calls.
+fn scan_fn_sig(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut cur: i64 = p1 + 1;     // at name
+    cur = cur + 1;                 // skip name
+    tp_setup(c, k, s, e, src, &mut cur);   // parse `<…>` type-params (advances past `>`)
+    let ntp: i64 = len((*c).tpns);
+    cur = cur + 1;                 // skip `(`
+    let ps: i64 = len((*c).ufpp);
+    scan_paramtypes(k, s, e, src, &mut cur, c, gb);
+    let pe: i64 = len((*c).ufpp);
+    cur = cur + 1;                 // skip `->`
+    let rte: TypeE = parse_type(k, s, e, src, &mut cur);
+    let rty: i64 = type_of_typeexpr(c, rte, gb);
+    push(&mut (*c).ufret, rty);
+    push(&mut (*c).uftp, ntp);
+    // (Bar B / effects c35b) record whether this fn is effecting (a non-Async effect
+    // row at `cur` — token 24 = `!`). `cur` sits past the return type here.
+    let eff: bool = if (*k)[cur] == 24 {
+        eff_row_is_kont(k, s, e, src, cur)
+    } else {
+        false
+    };
+    push(&mut (*c).ufeff, if eff { 1 } else { 0 });
+    push(&mut (*c).ufps, ps);
+    push(&mut (*c).ufpe, pe);
+    tp_reset(c);
+    0
+}
+
+// Walk a param list (no emit, no var-bind) recording each param's type handle into
+// `ufpp` (for generic-call unification) — mirrors `emit_tparams`'s token walk under
+// the active type-param scope. Ends past `)`.
+fn scan_paramtypes(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        scan_paramtypes(k, s, e, src, cur, c, gb)
+    } else {
+        let pm: bool = (*k)[*cur] == 46;
+        if pm {
+            *cur = *cur + 1;
+            0
+        } else {
+            0
+        };
+        *cur = *cur + 1;           // skip name
+        *cur = *cur + 1;           // skip `:`
+        let pte: TypeE = parse_type(k, s, e, src, cur);
+        let pty: i64 = type_of_typeexpr(c, pte, gb);
+        push(&mut (*c).ufpp, pty);
+        scan_paramtypes(k, s, e, src, cur, c, gb)
+    }
+}
+
+// (4c-1) emit a struct decl head from the struct + field tables:
+// `(struct #sid Name (field name <type>)…)`.
+fn type_struct(out: &mut Vec<u8>, c: &mut TyCtx, sid: i64) -> i64 {
+    append_str(out, "(struct #");
+    append_int(out, sid);
+    push(out, ' ');
+    let ns: i64 = (*c).sts[sid];
+    let ne: i64 = (*c).ste[sid];
+    let mut bi: i64 = ns;
+    while bi < ne {
+        push(out, (*c).snb[bi]);
+        bi = bi + 1;
+    }
+    let nf: i64 = len((*c).fldo);
+    let mut i: i64 = 0;
+    while i < nf {
+        if (*c).fldo[i] == sid {
+            append_str(out, " (field ");
+            let fs: i64 = (*c).flds[i];
+            let fe: i64 = (*c).flde[i];
+            let mut fi2: i64 = fs;
+            while fi2 < fe {
+                push(out, (*c).snb[fi2]);
+                fi2 = fi2 + 1;
+            }
+            push(out, ' ');
+            let fh: i64 = (*c).fldty[i];
+            render_type(out, fh, c);
+            push(out, ')');
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    push(out, ')');
+    0
+}
+
+// PASS-1.5 struct-field scan: record each field `(StructId, name, type-handle)`
+// into the field table. Runs after ALL struct NAMES are registered (pass 1), so
+// a field type referencing another struct resolves.
+fn scan_struct_fields(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, sid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut cur: i64 = p1 + 1;     // at name
+    cur = cur + 1;                 // skip name
+    // (4h) set up the struct's type-param scope so field types reference `<T#i>`
+    // (`struct Box<T> { value: T }` → field `value: <T#0>`); `tp_setup` advances
+    // past `>` (or no-ops, leaving the cursor at `{`).
+    tp_setup(c, k, s, e, src, &mut cur);
+    cur = cur + 1;                 // skip `{`
+    scan_fields_loop(k, s, e, src, &mut cur, sid, c, gb);
+    tp_reset(c)
+}
+
+fn scan_fields_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, sid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        scan_fields_loop(k, s, e, src, cur, sid, c, gb)
+    } else {
+        let fnm_s: i64 = (*s)[*cur];
+        let fnm_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;           // skip name
+        *cur = *cur + 1;           // skip `:`
+        let fte: TypeE = parse_type(k, s, e, src, cur);
+        let fth: i64 = type_of_typeexpr(c, fte, gb);
+        let bst: i64 = len((*c).snb);
+        let mut bi: i64 = fnm_s;
+        while bi < fnm_e {
+            push(&mut (*c).snb, (*src)[bi]);
+            bi = bi + 1;
+        }
+        push(&mut (*c).fldo, sid);
+        push(&mut (*c).flds, bst);
+        push(&mut (*c).flde, bst + (fnm_e - fnm_s));
+        push(&mut (*c).fldty, fth);
+        scan_fields_loop(k, s, e, src, cur, sid, c, gb)
+    }
+}
+
+// (4e) emit an enum decl head from the enum + variant tables (UNCHANGED from
+// resolve — payload types need no inference, but rendered from the interned
+// handles): `(enum #eid Name (variant V <payload-types>…)…)`.
+fn type_enum(out: &mut Vec<u8>, c: &mut TyCtx, eid: i64) -> i64 {
+    append_str(out, "(enum #");
+    append_int(out, eid);
+    push(out, ' ');
+    let ns: i64 = (*c).ets[eid];
+    let ne: i64 = (*c).ete[eid];
+    let mut bi: i64 = ns;
+    while bi < ne {
+        push(out, (*c).snb[bi]);
+        bi = bi + 1;
+    }
+    let nv: i64 = len((*c).varo);
+    let mut i: i64 = 0;
+    while i < nv {
+        if (*c).varo[i] == eid {
+            append_str(out, " (variant ");
+            let vs: i64 = (*c).varns[i];
+            let ve: i64 = (*c).varne[i];
+            let mut vi2: i64 = vs;
+            while vi2 < ve {
+                push(out, (*c).snb[vi2]);
+                vi2 = vi2 + 1;
+            }
+            let ps: i64 = (*c).varps[i];
+            let pe: i64 = (*c).varpe[i];
+            let mut pj: i64 = ps;
+            while pj < pe {
+                push(out, ' ');
+                let ph: i64 = (*c).varpay[pj];
+                render_type(out, ph, c);
+                pj = pj + 1;
+            }
+            push(out, ')');
+            0
+        } else {
+            0
+        };
+        i = i + 1;
+    }
+    push(out, ')');
+    0
+}
+
+// PASS-1.5 enum-variant scan: record each variant `(EnumId, name, payload-type
+// slice)` into the variant table (payload types interned into `varpay`). Runs after
+// ALL decl NAMES are registered (pass 1), so a payload type referencing any
+// struct/enum resolves.
+fn scan_enum_variants(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], p1: i64, eid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let mut cur: i64 = p1 + 1;     // at name
+    cur = cur + 1;                 // skip name
+    cur = cur + 1;                 // skip `{` (enums are non-generic)
+    scan_evar_loop(k, s, e, src, &mut cur, eid, c, gb)
+}
+
+fn scan_evar_loop(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, eid: i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 7 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        scan_evar_loop(k, s, e, src, cur, eid, c, gb)
+    } else {
+        let vn_s: i64 = (*s)[*cur];
+        let vn_e: i64 = (*e)[*cur];
+        *cur = *cur + 1;           // skip variant name
+        let bst: i64 = len((*c).snb);
+        let mut bi: i64 = vn_s;
+        while bi < vn_e {
+            push(&mut (*c).snb, (*src)[bi]);
+            bi = bi + 1;
+        }
+        let pst: i64 = len((*c).varpay);
+        if (*k)[*cur] == 4 {
+            *cur = *cur + 1;       // skip `(`
+            scan_payloads(k, s, e, src, cur, c, gb);
+            0
+        } else {
+            0
+        };
+        let pen: i64 = len((*c).varpay);
+        push(&mut (*c).varo, eid);
+        push(&mut (*c).varns, bst);
+        push(&mut (*c).varne, bst + (vn_e - vn_s));
+        push(&mut (*c).varps, pst);
+        push(&mut (*c).varpe, pen);
+        scan_evar_loop(k, s, e, src, cur, eid, c, gb)
+    }
+}
+
+// Parse + intern a variant's positional payload types into `varpay`. Ends past `)`.
+fn scan_payloads(k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u8], cur: &mut i64, c: &mut TyCtx, gb: &mut Vec<u8>) -> i64 {
+    let t: i64 = (*k)[*cur];
+    if t == 5 {
+        *cur = *cur + 1;
+        0
+    } else if t == 29 {
+        *cur = *cur + 1;
+        scan_payloads(k, s, e, src, cur, c, gb)
+    } else {
+        let pte: TypeE = parse_type(k, s, e, src, cur);
+        let pth: i64 = type_of_typeexpr(c, pte, gb);
+        push(&mut (*c).varpay, pth);
+        scan_payloads(k, s, e, src, cur, c, gb)
+    }
+}
+
