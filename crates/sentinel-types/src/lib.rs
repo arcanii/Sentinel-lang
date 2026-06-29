@@ -1100,10 +1100,37 @@ pub fn intern_kont(konts: &mut Vec<KontData>, arg_ty: Type, ret_ty: Type) -> Kon
     id
 }
 
+/// ADR 0066 M1.1: is `ty` a **word-sized scalar** that the per-spawn
+/// wrapper can pack into an 8-byte arg slot and encode into the Task's
+/// `i64` result slot? These are the single-LLVM-value types ≤ 8 bytes:
+/// the scalars `i64`/`i32`/`u8`/`bool`/`f64`/`ptr` and the pointer-lowered
+/// `Task`/class handles. Codegen encodes the result to/from `i64`
+/// (zext/trunc for narrow ints, bitcast for `f64`, ptrtoint/inttoptr for
+/// pointers), so the runtime `SentinelTask.result` slot stays `i64` and
+/// existing `Task<i64>` IR is byte-identical (the i64 case is a no-op).
+///
+/// Deferred (a clean `SpawnTypeUnsupported` diagnostic): `u128` (16 bytes)
+/// and the aggregates `struct`/`enum`/`Vec`/`[T]`/`?T`, which need a wider
+/// slot plus a boxed result (a D6 follow-on); and `secret`, where a secret
+/// crossing a thread boundary lands with channels (ADR 0066 D8 / M1.2).
+pub fn is_spawn_word_scalar(ty: Type) -> bool {
+    matches!(
+        ty,
+        Type::I64
+            | Type::I32
+            | Type::U8
+            | Type::Bool
+            | Type::F64
+            | Type::Ptr
+            | Type::Task(_)
+            | Type::Class(_)
+    )
+}
+
 /// Intern a `result_ty` into `tasks`, returning its [`TaskId`] per
-/// ADR 0024 D4 (C4.4). Linear search; at C4.4 minimum `result_ty`
-/// is always `I64` so the table holds at most one entry. Mirrors
-/// [`intern_kont`]'s shape.
+/// ADR 0024 D4 (C4.4), generalised by ADR 0066 M1.1 to any word-sized
+/// scalar `result_ty` (see [`is_spawn_word_scalar`]). Linear search,
+/// dedup by structural equality; mirrors [`intern_kont`]'s shape.
 pub fn intern_task(tasks: &mut Vec<TaskData>, result_ty: Type) -> TaskId {
     for (idx, existing) in tasks.iter().enumerate() {
         if existing.result_ty == result_ty {
@@ -3607,16 +3634,24 @@ pub enum TypeError {
         span: miette::SourceSpan,
     },
 
-    /// C4.4 / ADR 0024 D7: a spawned fn's return type isn't `i64`.
-    /// `Task<T>` is restricted to `Task<i64>` at C4.4 minimum.
-    #[error("`spawn` target must return `i64` (got `{got}`)")]
+    /// ADR 0066 M1.1: a `spawn` argument or result type that codegen
+    /// can't yet pack/return. M1.1 lifts the ADR 0024 D7 `Task<i64>`-only
+    /// restriction to any **word-sized scalar** (`i64`/`i32`/`u8`/`bool`/
+    /// `f64`/`ptr`/`Task`/class) — the value the per-spawn wrapper packs
+    /// into an 8-byte slot and encodes into the Task's `i64` result slot
+    /// (see [`is_spawn_word_scalar`]). Aggregates (`u128`/struct/enum/
+    /// `Vec`/`[T]`/`?T`) and `secret` are deferred: a struct needs a
+    /// wider slot + a boxed result, and `secret` crossing a thread
+    /// boundary lands with channels (ADR 0066 D8 / M1.2).
+    #[error("`spawn` {role} type `{got}` is not supported yet")]
     #[diagnostic(
-        code(sentinel::types::spawn_result_must_be_i64),
-        help("at C4.4 minimum `Task<T>` is restricted to `Task<i64>` per ADR 0024 D7; broader result types are deferred")
+        code(sentinel::types::spawn_type_unsupported),
+        help("ADR 0066 M1.1 supports word-sized scalar `spawn` arg/result types (i64/i32/u8/bool/f64/ptr/Task/class); aggregates (u128/struct/enum/Vec/[T]/?T) and `secret` are deferred")
     )]
-    SpawnResultMustBeI64 {
+    SpawnTypeUnsupported {
         got: Type,
-        #[label("spawned call returns a non-i64 type")]
+        role: &'static str,
+        #[label("unsupported `spawn` type")]
         span: miette::SourceSpan,
     },
 
@@ -7975,9 +8010,13 @@ fn check_expr(
                 ty,
             )
         }
-        // C4.4 / ADR 0024 D2 + D7: `spawn fn(args)` — the target
-        // must be a direct call (D2); its return type is restricted
-        // to i64 (D7); the result is `Task<i64>`.
+        // C4.4 / ADR 0024 D2 + ADR 0066 M1.1: `spawn fn(args)` — the
+        // target must be a direct call (D2). ADR 0066 M1.1 lifts the
+        // ADR 0024 D7 `Task<i64>`-only restriction: the result type may
+        // be any word-sized scalar, and the result is `Task<result_ty>`.
+        // Each spawned-fn argument must also be a word-sized scalar (the
+        // per-spawn wrapper packs each into an 8-byte slot); aggregates +
+        // `secret` are deferred (`is_spawn_word_scalar`).
         ResolvedExprKind::Spawn { call_expr } => {
             if !matches!(call_expr.kind, ResolvedExprKind::Call { .. }) {
                 return Err(TypeError::SpawnMustBeCall {
@@ -7985,13 +8024,25 @@ fn check_expr(
                 });
             }
             let typed_call = check_expr(call_expr, None, env, signatures, structs, class_decls, enums, instances, refs, secrets, struct_type_param_counts, effect_decls, trait_decls, impl_decls, konts, tasks)?;
-            if typed_call.ty != Type::I64 {
-                return Err(TypeError::SpawnResultMustBeI64 {
+            if !is_spawn_word_scalar(typed_call.ty) {
+                return Err(TypeError::SpawnTypeUnsupported {
                     got: typed_call.ty,
+                    role: "result",
                     span: to_source_span(&call_expr.span),
                 });
             }
-            let task_id = intern_task(tasks, Type::I64);
+            if let TypedExprKind::Call { args, .. } = &typed_call.kind {
+                for arg in args {
+                    if !is_spawn_word_scalar(arg.ty) {
+                        return Err(TypeError::SpawnTypeUnsupported {
+                            got: arg.ty,
+                            role: "argument",
+                            span: to_source_span(&call_expr.span),
+                        });
+                    }
+                }
+            }
+            let task_id = intern_task(tasks, typed_call.ty);
             (
                 TypedExprKind::Spawn { call: Box::new(typed_call), task_id },
                 Type::Task(task_id),
@@ -9587,9 +9638,9 @@ fn type_error_to_diagnostic(err: &TypeError) -> Diagnostic {
             "`spawn` requires a function-call target".to_string(),
             span.offset()..(span.offset() + span.len()),
         ),
-        TypeError::SpawnResultMustBeI64 { got, span } => (
-            "sentinel::types::spawn_result_must_be_i64",
-            format!("`spawn` target must return `i64` (got `{got}`)"),
+        TypeError::SpawnTypeUnsupported { got, role, span } => (
+            "sentinel::types::spawn_type_unsupported",
+            format!("`spawn` {role} type `{got}` is not supported yet"),
             span.offset()..(span.offset() + span.len()),
         ),
         TypeError::AwaitOnNonTask { got, span } => (

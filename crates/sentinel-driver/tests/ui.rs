@@ -106,7 +106,9 @@ ui_snapshot!(c43_delegate_same_method_ambiguous, "c43_delegate_same_method_ambig
 // ---- C4.4 structured-concurrency rejections (types) ----
 ui_snapshot!(c44_spawn_non_fn_call, "c44_spawn_non_fn_call.sentinel");
 ui_snapshot!(c44_await_on_non_task, "c44_await_on_non_task.sentinel");
-ui_snapshot!(c44_spawn_result_must_be_i64, "c44_spawn_result_must_be_i64.sentinel");
+// ADR 0066 M1.1: word-sized scalar spawn results are now accepted; an
+// aggregate (here `u128`) is the deferred case that's still rejected.
+ui_snapshot!(c66_spawn_aggregate_unsupported, "c66_spawn_aggregate_unsupported.sentinel");
 
 // ---- C5.2 constant-time verification rejection (the MIR D5 pass) ----
 ui_snapshot!(c52_secret_leak, "c52_secret_leak.sentinel");

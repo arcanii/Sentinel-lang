@@ -1,0 +1,16 @@
+// ADR 0066 M1.1: `Task<T>` now accepts any WORD-SIZED scalar result
+// (i64/i32/u8/bool/f64/ptr/Task/class), generalising the old ADR 0024 D7
+// `Task<i64>`-only restriction. A non-word type — here the 16-byte `u128`
+// — is still deferred: it needs a wider arg slot + a boxed result (ADR
+// 0066 D6). Spawning a fn that returns `u128` is therefore rejected.
+//
+// Expected: compile error `sentinel::types::spawn_type_unsupported`.
+
+fn big() -> u128 {
+    1 as u128
+}
+
+fn main() -> i64 {
+    spawn big();
+    0
+}

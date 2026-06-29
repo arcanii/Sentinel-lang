@@ -1057,15 +1057,20 @@ pub fn compile_to_object_for_module(
                     .get_nth_param(1)
                     .expect("wrapper args param")
                     .into_pointer_value();
+                // ADR 0066 M1.1: each arg occupies an 8-byte slot, but is
+                // loaded with the target fn's actual param type (was always
+                // i64 at C4.4) so a non-i64 word-scalar arg round-trips.
+                let param_tys = target_fn.get_type().get_param_types();
+                debug_assert_eq!(param_tys.len(), n_args);
                 let mut call_args = Vec::with_capacity(n_args);
-                for i in 0..n_args {
+                for (i, &param_ty) in param_tys.iter().enumerate() {
                     let offset = i64_ty.const_int((i * 8) as u64, false);
                     let slot = unsafe {
                         wb.build_in_bounds_gep(i8_ty, args_ptr, &[offset], &format!("arg_slot_{i}"))
                             .map_err(|e| CodegenError::Builder(e.to_string()))?
                     };
                     let val = wb
-                        .build_load(i64_ty, slot, &format!("arg_{i}"))
+                        .build_load(param_ty, slot, &format!("arg_{i}"))
                         .map_err(|e| CodegenError::Builder(e.to_string()))?;
                     call_args.push(val.into());
                 }
@@ -1075,9 +1080,36 @@ pub fn compile_to_object_for_module(
                 let result = call
                     .try_as_basic_value()
                     .left()
-                    .expect("spawn target returns i64");
+                    .expect("spawn target returns a value");
+                // ADR 0066 M1.1: encode the result to an i64 bit-pattern for
+                // the runtime's `SentinelTask.result` slot (kept i64, so the
+                // ABI + the Task<i64> IR are unchanged — the i64 case is a
+                // no-op). zext a narrow int, bitcast an f64, ptrtoint a
+                // pointer; await (below) does the inverse decode.
+                let encoded: IntValue = match result {
+                    BasicValueEnum::IntValue(iv) => {
+                        if iv.get_type().get_bit_width() == 64 {
+                            iv
+                        } else {
+                            wb.build_int_z_extend(iv, i64_ty, "spawn_res_enc")
+                                .map_err(|e| CodegenError::Builder(e.to_string()))?
+                        }
+                    }
+                    BasicValueEnum::FloatValue(fv) => wb
+                        .build_bit_cast(fv, i64_ty, "spawn_res_enc")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                        .into_int_value(),
+                    BasicValueEnum::PointerValue(pv) => wb
+                        .build_ptr_to_int(pv, i64_ty, "spawn_res_enc")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?,
+                    other => {
+                        return Err(CodegenError::Builder(format!(
+                            "spawn result type unsupported in wrapper (ADR 0066 M1.1 word-scalar only): {other:?}"
+                        )));
+                    }
+                };
                 // task->result at offset 0.
-                wb.build_store(task_ptr, result)
+                wb.build_store(task_ptr, encoded)
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
                 // task->done = 1 at offset 8.
                 let done_off = i64_ty.const_int(8, false);
@@ -7130,7 +7162,9 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 Ok(task_ptr)
             }
 
-            // C4.4 / ADR 0024 D8: `task.await` — join + read result.
+            // C4.4 / ADR 0024 D8 + ADR 0066 M1.1: `task.await` — join +
+            // read the i64 result slot, then DECODE it back to the Task's
+            // result type (the inverse of the wrapper's encode above).
             TypedExprKind::Await { task_expr, .. } => {
                 let task_val = self.lower_expr(task_expr, program)?;
                 let task_ptr = task_val.into_pointer_value();
@@ -7138,10 +7172,49 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                     .builder
                     .build_call(self.task_await_fn, &[task_ptr.into()], "task_await")
                     .map_err(|e| CodegenError::Builder(e.to_string()))?;
-                Ok(await_call
+                let raw = await_call
                     .try_as_basic_value()
                     .left()
-                    .expect("task_await returns i64"))
+                    .expect("task_await returns i64")
+                    .into_int_value();
+                let decoded: BasicValueEnum = match expr.ty {
+                    // i64 result: the slot IS the value — byte-identical to C4.4.
+                    Type::I64 => raw.into(),
+                    Type::I32 => self
+                        .builder
+                        .build_int_truncate(raw, self.context.i32_type(), "await_dec")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                        .into(),
+                    Type::U8 => self
+                        .builder
+                        .build_int_truncate(raw, self.context.i8_type(), "await_dec")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                        .into(),
+                    Type::Bool => self
+                        .builder
+                        .build_int_truncate(raw, self.context.bool_type(), "await_dec")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                        .into(),
+                    Type::F64 => self
+                        .builder
+                        .build_bit_cast(raw, self.context.f64_type(), "await_dec")
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?,
+                    Type::Ptr | Type::Task(_) | Type::Class(_) => self
+                        .builder
+                        .build_int_to_ptr(
+                            raw,
+                            self.context.ptr_type(inkwell::AddressSpace::default()),
+                            "await_dec",
+                        )
+                        .map_err(|e| CodegenError::Builder(e.to_string()))?
+                        .into(),
+                    other => {
+                        return Err(CodegenError::Builder(format!(
+                            "await result type unsupported (ADR 0066 M1.1 word-scalar only): {other:?}"
+                        )));
+                    }
+                };
+                Ok(decoded)
             }
 
             // Phase D.1 / ADR 0032 (4/N): enum construction lowers to

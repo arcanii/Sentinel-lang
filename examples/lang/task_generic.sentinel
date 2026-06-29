@@ -1,0 +1,34 @@
+// ADR 0066 M1.1: `Task<T>` generalised beyond the ADR 0024 `Task<i64>`-only
+// restriction. This spawns a worker that takes an `i32` argument and returns
+// an `f64` result — exercising the two trickiest cases at once:
+//
+//   * the per-spawn wrapper loads the arg with its REAL type (`i32`), not the
+//     old hard-coded `i64`;
+//   * the wrapper ENCODES the `f64` result into the Task's `i64` result slot
+//     (a `bitcast`), and `.await` DECODES it back to `f64` (the inverse).
+//
+// The runtime `SentinelTask.result` slot stays `i64`, so there is no ABI
+// change and existing `Task<i64>` IR is byte-identical (the i64 case encodes
+// to a no-op).
+//
+// Trace: `spawn dbl(21)` runs `(21 as f64) * 2.0 = 42.0` on a worker thread;
+// `.await` decodes 42.0; `r as i64` truncates to 42. The scope discharges the
+// Async effect so `main` stays effect-free. Exit 42.
+//
+// snc-only demonstrator (f64 is snc-side per ADR 0058) — OUT of the scg
+// differential; the selfhost mirror + a `tests/pass/c66` differential fixture
+// (over a selfhost-supported type) land in M1.1 Phase B.
+//
+// Expected: exit code 42, no stdout.
+
+fn dbl(x: i32) -> f64 ! { Async } {
+    (x as f64) * 2.0
+}
+
+fn main() -> i64 {
+    let r: f64 = scope concurrent {
+        let t = spawn dbl(21 as i32);
+        t.await
+    };
+    r as i64
+}
