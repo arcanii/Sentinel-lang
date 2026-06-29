@@ -191,6 +191,16 @@ pub enum Type {
     /// Non-generic at the D.1 MVP (generic enums are D.1b per
     /// ADR 0032 D9).
     Enum(EnumId),
+    /// ADR 0066 M1.2: `Channel<T>` — a typed message-passing channel
+    /// handle (mpsc, ownership-transfer `send`/`recv`). The [`ChanId`]
+    /// indexes into `TypedProgram.channels`, where `ChannelData { elem_ty }`
+    /// lives. Twelfth interner-table-style variant; preserves `Copy + Hash`
+    /// (a `ChanId` is just a `u32`). The handle is **`Copy`** (like `Task`)
+    /// — it is shared producer↔consumer by copying; it is the *values* that
+    /// move on `send`, fitting the lexical borrow checker (ADR 0066 D2). At
+    /// M1.2 minimum `elem_ty` is a word-sized scalar (the payload moves as
+    /// an `i64`-encoded value, reusing the M1.1 spawn encode/decode).
+    Channel(ChanId),
 }
 
 /// Identifier for an interned reference type. C2 / ADR 0017 D11.
@@ -240,6 +250,22 @@ pub struct TaskId(pub u32);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TaskData {
     pub result_ty: Type,
+}
+
+/// Identifier for an interned channel type per ADR 0066 M1.2.
+/// Assigned in source-encounter order during type-check of a
+/// `channel_new` call; same scheme as [`TaskId`] / [`KontId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChanId(pub u32);
+
+/// The underlying data of a [`Type::Channel`] per ADR 0066 M1.2.
+/// `elem_ty` = the message type the channel carries (`send` moves a
+/// value of this type in; `recv` yields `?elem_ty`). Owned by
+/// [`TypedProgram::channels`]. At M1.2 minimum `elem_ty` is a word-sized
+/// scalar (see [`is_spawn_word_scalar`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChannelData {
+    pub elem_ty: Type,
 }
 
 /// Phase D.1 / ADR 0032 D3: the underlying data of a [`Type::Enum`].
@@ -681,6 +707,9 @@ impl Type {
             | Type::Secret(_)
             | Type::Kont(_)
             | Type::Task(_)
+            // ADR 0066 M1.2: no `?Channel` / `[Channel]` (a channel handle
+            // is not a nullable payload nor an array element at M1.2).
+            | Type::Channel(_)
             | Type::Class(_)
             | Type::TraitSelf(_)
             // Phase D.1 / ADR 0032: `?Enum` is out of scope at the MVP
@@ -732,6 +761,9 @@ impl Type {
             | Type::Secret(_)
             | Type::Kont(_)
             | Type::Task(_)
+            // ADR 0066 M1.2: no `?Channel` / `[Channel]` (a channel handle
+            // is not a nullable payload nor an array element at M1.2).
+            | Type::Channel(_)
             | Type::Class(_)
             | Type::TraitSelf(_)
             // Phase D.1 / ADR 0032: `[Enum]` is out of scope at the MVP
@@ -811,6 +843,9 @@ impl Type {
             | Type::Secret(_)
             | Type::Kont(_)
             | Type::Task(_)
+            // ADR 0066 M1.2: no `?Channel` / `[Channel]` (a channel handle
+            // is not a nullable payload nor an array element at M1.2).
+            | Type::Channel(_)
             | Type::Class(_)
             | Type::TraitSelf(_)
             | Type::Enum(_) => None,
@@ -995,6 +1030,9 @@ impl Type {
                 // ADR 0024 D10).
                 self
             }
+            // ADR 0066 M1.2: `Channel<i64>` carries no TypeParam at the
+            // minimum — pass through unchanged.
+            Type::Channel(_) => self,
         }
     }
 
@@ -1138,6 +1176,20 @@ pub fn intern_task(tasks: &mut Vec<TaskData>, result_ty: Type) -> TaskId {
     id
 }
 
+/// Intern an `elem_ty` into `channels`, returning its [`ChanId`] per
+/// ADR 0066 M1.2. Linear search, dedup by structural equality; mirrors
+/// [`intern_task`]'s shape.
+pub fn intern_channel(channels: &mut Vec<ChannelData>, elem_ty: Type) -> ChanId {
+    for (idx, existing) in channels.iter().enumerate() {
+        if existing.elem_ty == elem_ty {
+            return ChanId(idx as u32);
+        }
+    }
+    let id = ChanId(channels.len() as u32);
+    channels.push(ChannelData { elem_ty });
+    id
+}
+
 /// Format a [`Type`] for display, looking up the struct name when
 /// the type is `Struct(StructId)`. Pass `None` when no program is
 /// available (e.g. error rendering in tests) — struct types render
@@ -1217,6 +1269,15 @@ pub fn type_display(ty: Type, program: Option<&TypedProgram>) -> String {
             }
             format!("<task#{}>", id.0)
         }
+        // ADR 0066 M1.2: render `Channel<elem>` (mirrors `Task<…>`).
+        Type::Channel(id) => {
+            if let Some(p) = program {
+                if let Some(data) = p.channels.get(id.0 as usize) {
+                    return format!("Channel<{}>", type_display(data.elem_ty, program));
+                }
+            }
+            format!("<channel#{}>", id.0)
+        }
         Type::Class(id) => match program.and_then(|p| p.class_decls.get(id.0 as usize)) {
             Some(c) => c.name.clone(),
             None => format!("<class#{}>", id.0),
@@ -1252,6 +1313,7 @@ impl std::fmt::Display for Type {
             Type::Secret(id) => write!(f, "<secret#{}>", id.0),
             Type::Kont(id) => write!(f, "<kont#{}>", id.0),
             Type::Task(id) => write!(f, "<task#{}>", id.0),
+            Type::Channel(id) => write!(f, "<channel#{}>", id.0),
             Type::Class(id) => write!(f, "<class#{}>", id.0),
             Type::TraitSelf(id) => write!(f, "<Self-trait#{}>", id.0),
             Type::Enum(id) => write!(f, "<enum#{}>", id.0),
@@ -1662,6 +1724,10 @@ pub struct TypedProgram {
     /// expressions; at C4.4 minimum holds at most one entry
     /// (`Task<i64>`) per the D7 result-type restriction.
     pub tasks: Vec<TaskData>,
+    /// ADR 0066 M1.2: interned channel types. Each `Type::Channel(id)`
+    /// indexes this vector to recover `(elem_ty)`. Populated during
+    /// type-check of `channel_new` calls.
+    pub channels: Vec<ChannelData>,
     /// C4.1 / ADR 0022 D1: class declarations with resolved field
     /// types + init signature + method signatures. Each ClassId
     /// matches its index here.
@@ -1733,6 +1799,12 @@ impl TypedProgram {
     /// / [`intern_task`].
     pub fn task_data(&self, id: TaskId) -> &TaskData {
         &self.tasks[id.0 as usize]
+    }
+
+    /// Look up the `(elem_ty)` for a channel type per ADR 0066 M1.2.
+    /// Panics on out-of-range — IDs only come from [`intern_channel`].
+    pub fn channel_data(&self, id: ChanId) -> &ChannelData {
+        &self.channels[id.0 as usize]
     }
 
     /// Look up the [`ClassData`] for a class type per ADR 0022 D1
@@ -3817,6 +3889,9 @@ pub fn check_module(
     let mut generic_instances: Vec<GenericInstanceData> = Vec::new();
     let mut refs: Vec<RefData> = Vec::new();
     let mut secrets: Vec<SecretData> = Vec::new();
+    // ADR 0066 M1.2: the channel-type interner. M1.2 minimum interns a single
+    // `Channel<i64>` while building the channel-builtin signatures below.
+    let mut channels: Vec<ChannelData> = Vec::new();
 
     // Pass 0.5 / ADR 0032 (3/N): resolve enum variant payload types.
     // Each payload `TypeExpr` is resolved against the name tables (so
@@ -4234,6 +4309,37 @@ pub fn check_module(
             (20, &[Type::I64], Type::I64),                                      // tcp_close
         ];
         for (idx, params, ret) in socket_sigs {
+            let sig = &program.fn_signatures[*idx];
+            typed_signatures.push(TypedFnSignature {
+                id: sig.id,
+                name: sig.name.clone(),
+                name_span: sig.name_span.clone(),
+                type_params: vec![],
+                param_types: params.to_vec(),
+                return_type: *ret,
+                effect_row: vec![],
+                is_main: false,
+                is_runtime: true,
+                extern_origin: None,
+            });
+        }
+    }
+    // ADR 0066 M1.2: the channel builtins (FnId 21..=24). At M1.2 minimum the
+    // element type is `i64`, so `Channel<i64>` is interned ONCE here and used
+    // directly in concrete signatures (no generic-builtin path). `send` /
+    // `channel_close` return an `i64` status (like the socket builtins); `recv`
+    // returns `?i64` (`null` = closed+drained, ADR 0066 D4). Codegen lowers
+    // each to its `sentinel_channel_*` runtime symbol.
+    {
+        let chan_i64 = Type::Channel(intern_channel(&mut channels, Type::I64));
+        let opt_i64 = Type::Nullable(NullableInner::I64);
+        let channel_sigs: &[(usize, &[Type], Type)] = &[
+            (21, &[], chan_i64),                       // channel_new() -> Channel<i64>
+            (22, &[chan_i64, Type::I64], Type::I64),   // send(Channel<i64>, i64) -> i64
+            (23, &[chan_i64], opt_i64),                // recv(Channel<i64>) -> ?i64
+            (24, &[chan_i64], Type::I64),              // channel_close(Channel<i64>) -> i64
+        ];
+        for (idx, params, ret) in channel_sigs {
             let sig = &program.fn_signatures[*idx];
             typed_signatures.push(TypedFnSignature {
                 id: sig.id,
@@ -5113,6 +5219,9 @@ pub fn check_module(
         effect_decls: typed_effect_decls,
         konts,
         tasks,
+        // ADR 0066 M1.2: populated when the channel builtins are typed
+        // (their `Channel<i64>` return/param interns here). Empty until then.
+        channels,
         class_decls: typed_class_decls,
         trait_decls: typed_trait_decls,
         impl_decls: typed_impl_decls,
@@ -6245,6 +6354,8 @@ fn try_substitute(
         Type::Kont(_) => Some(ty),
         // C4.4 / ADR 0024 D4: `Task<i64>` carries no TypeParam.
         Type::Task(_) => Some(ty),
+        // ADR 0066 M1.2: `Channel<i64>` carries no TypeParam.
+        Type::Channel(_) => Some(ty),
     }
 }
 
@@ -6291,6 +6402,8 @@ fn contains_type_param(
         Type::Kont(_) => false,
         // C4.4 / ADR 0024 D4: `Task<i64>` carries no TypeParam.
         Type::Task(_) => false,
+        // ADR 0066 M1.2: `Channel<i64>` carries no TypeParam.
+        Type::Channel(_) => false,
     }
 }
 
@@ -9837,7 +9950,12 @@ mod tests {
         assert_eq!(p.fn_signatures[18].name, "tcp_read");
         assert_eq!(p.fn_signatures[19].name, "tcp_write");
         assert_eq!(p.fn_signatures[20].name, "tcp_close");
-        assert_eq!(p.fn_signatures[21].name, "main");
+        // ADR 0066 M1.2: the channel builtins occupy FnId(21..=24).
+        assert_eq!(p.fn_signatures[21].name, "channel_new");
+        assert_eq!(p.fn_signatures[22].name, "send");
+        assert_eq!(p.fn_signatures[23].name, "recv");
+        assert_eq!(p.fn_signatures[24].name, "channel_close");
+        assert_eq!(p.fn_signatures[25].name, "main");
         assert!(p.signature(main.id).is_main);
     }
 

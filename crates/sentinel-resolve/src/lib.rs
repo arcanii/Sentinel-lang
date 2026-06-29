@@ -152,6 +152,22 @@ pub const TCP_WRITE_FN_ID: FnId = FnId(19);
 /// `tcp_close(handle: i64) -> i64` — close a listener / connection.
 pub const TCP_CLOSE_FN_ID: FnId = FnId(20);
 
+// ADR 0066 M1.2: the channel builtins, wrapping the `sentinel_channel_*`
+// runtime primitives (cross-platform `std::sync::mpsc`). At M1.2 minimum the
+// element type is `i64` (`Channel<i64>`); the handle is an opaque `ptr`.
+// Codegen lowers each to its `sentinel_channel_*` symbol. NOTE: appending
+// these shifts the user-fn FnId base from 21 to 25 — mirrored in the selfhost
+// resolver to keep both bootstrap fixed points byte-identical (the
+// `__spawn_wrapper_<id>` symbol embeds the FnId).
+/// `channel_new() -> Channel<i64>` — a new unbounded mpsc channel handle.
+pub const CHANNEL_NEW_FN_ID: FnId = FnId(21);
+/// `send(ch: Channel<i64>, v: i64)` — move `v` into the channel.
+pub const SEND_FN_ID: FnId = FnId(22);
+/// `recv(ch: Channel<i64>) -> ?i64` — block for a value; `null` = closed+drained.
+pub const RECV_FN_ID: FnId = FnId(23);
+/// `channel_close(ch: Channel<i64>)` — drop the sender side (signals recv EOF).
+pub const CHANNEL_CLOSE_FN_ID: FnId = FnId(24);
+
 /// Identifier for a struct declaration. Added at C1.4 per ADR 0013
 /// D4 / D5; unique per-program, assigned in source order starting
 /// at 0.
@@ -2702,6 +2718,17 @@ pub fn resolve_module(
     next_fn_id += 1;
     let tcp_close_sig = mk_socket_sig(next_fn_id, "tcp_close", 1);
     next_fn_id += 1;
+    // ADR 0066 M1.2: the channel builtins (reuse the runtime-builtin sig
+    // builder). `channel_new` is nullary; `send`/`recv`/`channel_close` take
+    // the channel handle (+ the value for `send`).
+    let channel_new_sig = mk_socket_sig(next_fn_id, "channel_new", 0);
+    next_fn_id += 1;
+    let send_sig = mk_socket_sig(next_fn_id, "send", 2);
+    next_fn_id += 1;
+    let recv_sig = mk_socket_sig(next_fn_id, "recv", 1);
+    next_fn_id += 1;
+    let channel_close_sig = mk_socket_sig(next_fn_id, "channel_close", 1);
+    next_fn_id += 1;
 
     let mut fn_table: HashMap<String, FnId> = HashMap::new();
     let mut signatures: Vec<FnSignature> = vec![
@@ -2709,6 +2736,7 @@ pub fn resolve_module(
         i64_to_u8_sig, vec_new_sig, push_sig, pop_sig, vec_to_array_sig, read_file_sig,
         write_file_sig, print_bytes_sig, tcp_listen_sig, tcp_local_port_sig,
         tcp_accept_sig, tcp_connect_sig, tcp_read_sig, tcp_write_sig, tcp_close_sig,
+        channel_new_sig, send_sig, recv_sig, channel_close_sig,
     ];
     fn_table.insert("print".to_string(), PRINT_FN_ID);
     fn_table.insert("unwrap_or".to_string(), UNWRAP_OR_FN_ID);
@@ -2731,6 +2759,10 @@ pub fn resolve_module(
     fn_table.insert("tcp_read".to_string(), TCP_READ_FN_ID);
     fn_table.insert("tcp_write".to_string(), TCP_WRITE_FN_ID);
     fn_table.insert("tcp_close".to_string(), TCP_CLOSE_FN_ID);
+    fn_table.insert("channel_new".to_string(), CHANNEL_NEW_FN_ID);
+    fn_table.insert("send".to_string(), SEND_FN_ID);
+    fn_table.insert("recv".to_string(), RECV_FN_ID);
+    fn_table.insert("channel_close".to_string(), CHANNEL_CLOSE_FN_ID);
 
     // Phase D.6 / ADR 0037 D5.1: register each imported `pub fn` as an
     // EXTERN in this module's FnId space — after builtins, before own fns.
@@ -4926,10 +4958,10 @@ mod tests {
         }];
         let rp = resolve_module(&main, &imports).expect("resolve_module");
 
-        // Extern `add` = FnId(14) (right after builtins), marked extern;
-        // own `main` follows at FnId(15).
+        // Extern `add` = FnId(25) (right after the 25 builtins 0..=24, ADR
+        // 0066 M1.2 base shift), marked extern; own `main` follows at FnId(26).
         let add_sig = rp.fn_signatures.iter().find(|s| s.name == "add").expect("add sig");
-        assert_eq!(add_sig.id, FnId(21));
+        assert_eq!(add_sig.id, FnId(25));
         assert_eq!(add_sig.arity, 2);
         assert!(!add_sig.is_runtime);
         assert_eq!(
@@ -4937,7 +4969,7 @@ mod tests {
             Some(vec!["util".to_string(), "math".to_string()])
         );
         let main_sig = rp.fn_signatures.iter().find(|s| s.name == "main").expect("main sig");
-        assert_eq!(main_sig.id, FnId(22));
+        assert_eq!(main_sig.id, FnId(26));
         assert_eq!(main_sig.extern_origin, None);
 
         // The extern has NO body — only the one own fn (`main`) is resolved.
@@ -5208,12 +5240,10 @@ mod tests {
         assert_eq!(p.fns.len(), 1);
         assert_eq!(p.main().name, "main");
         assert!(p.main().signature(&p).is_main);
-        // FnId(0) = print, FnId(1) = unwrap_or, FnId(2) = is_some,
-        // FnId(3) = len, FnId(4..=6) = str_eq/u8_to_i64/i64_to_u8 (D.2),
-        // FnId(7..=10) = vec_new/push/pop/vec_to_array (D.3),
-        // FnId(11..=13) = read_file/write_file/print_bytes (D.4),
-        // FnId(14) = main (the first user fn).
-        assert_eq!(p.main().id, FnId(21));
+        // FnId(0..=13) = the original 14 runtime builtins; FnId(14..=20) =
+        // the socket builtins (ADR 0056); FnId(21..=24) = the channel builtins
+        // (ADR 0066 M1.2); FnId(25) = main (the first user fn).
+        assert_eq!(p.main().id, FnId(25));
         assert_eq!(p.fn_signatures[0].name, "print");
         assert!(p.fn_signatures[0].is_runtime);
     }
@@ -5253,13 +5283,12 @@ mod tests {
             },
             other => panic!("expected Binary, got {other:?}"),
         }
-        // FnId(0..=13) = the 14 runtime builtins (print, unwrap_or,
-        // is_some, len, str_eq, u8_to_i64, i64_to_u8, vec_new, push, pop,
-        // vec_to_array, read_file, write_file, print_bytes); FnId(14) =
-        // double (first user fn), FnId(15) = main.
+        // FnId(0..=24) = the runtime builtins (0..=13 original, 14..=20
+        // sockets, 21..=24 channels per ADR 0066 M1.2); FnId(25) = double
+        // (first user fn), FnId(26) = main.
         let main = p.main();
         match &main.body.tail.kind {
-            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(21)),
+            ResolvedExprKind::Call { id, .. } => assert_eq!(*id, FnId(25)),
             other => panic!("expected Call, got {other:?}"),
         }
     }

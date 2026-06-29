@@ -279,7 +279,7 @@ fn fn_lookup(c: &mut RCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 21 + i;
+                    found = 25 + i;
                     0
                 } else {
                     0
@@ -2040,7 +2040,7 @@ fn resolve_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: 
     *cur = *cur + 1;           // skip `(`
     (*c).base = len((*c).scs);
     append_str(out, "(fn #");
-    append_int(out, 21 + fnidx);
+    append_int(out, 25 + fnidx);
     push(out, ' ');
     append_slice(out, src, name_s, name_e);
     append_str(out, " (");

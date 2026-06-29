@@ -1913,6 +1913,9 @@ fn field_type_needs_drop_inner(
         // no codegen-emitted drop. A Task value held past its scope
         // is reclaimed at scope_exit.
         Type::Task(_) => false,
+        // ADR 0066 M1.2: a Channel handle is runtime-reclaimed, not
+        // codegen-dropped (like Task).
+        Type::Channel(_) => false,
         // Phase D.1 / ADR 0032 D6 (4/N): an enum owns its heap-boxed
         // payload, so it needs drop (free the payload box) iff *some*
         // variant carries a payload — a pure-unit enum (every variant
@@ -2074,6 +2077,9 @@ fn llvm_basic_type<'ctx>(
         // C4.4 / ADR 0024 D8: Task lowers to an opaque pointer
         // (*SentinelTask); the runtime owns the struct layout.
         Type::Task(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
+        // ADR 0066 M1.2: a Channel lowers to an opaque pointer
+        // (*SentinelChannel); the runtime owns the struct layout.
+        Type::Channel(_) => context.ptr_type(inkwell::AddressSpace::default()).into(),
         // Phase D.1 / ADR 0032 D4: an enum lowers to the abi-v1
         // `{ i32 tag, ptr payload }` — a 4-byte discriminant (variant
         // index, source order) + an opaque pointer to a heap-allocated
@@ -2704,6 +2710,8 @@ fn mangle_type(ty: Type, program: &TypedProgram) -> String {
         // C4.4 / ADR 0024: Task<i64> carries no TypeParam so it
         // never appears in a mono key; defensive label only.
         Type::Task(id) => format!("task{}", id.0),
+        // ADR 0066 M1.2: Channel<i64> carries no TypeParam; defensive label.
+        Type::Channel(id) => format!("chan{}", id.0),
         // C4.1 / ADR 0022 D9: render class types by name.
         Type::Class(id) => program
             .class_decls
@@ -2769,6 +2777,8 @@ fn arg_contains_typeparam(
         Type::Kont(_) => false,
         // C4.4 / ADR 0024: Task<i64> carries no TypeParam.
         Type::Task(_) => false,
+        // ADR 0066 M1.2: Channel<i64> carries no TypeParam.
+        Type::Channel(_) => false,
     }
 }
 
@@ -2834,6 +2844,7 @@ fn llvm_int_type<'ctx>(context: &'ctx Context, ty: Type) -> IntType<'ctx> {
             "llvm_int_type called on Type::Kont — handlers not lowered at C3.4 (ADR 0020 D9)"
         ),
         Type::Task(_) => panic!("llvm_int_type called on non-int Type::Task"),
+        Type::Channel(_) => panic!("llvm_int_type called on non-int Type::Channel"),
         Type::Class(_) => panic!("llvm_int_type called on non-int Type::Class"),
         Type::Enum(_) => panic!("llvm_int_type called on non-int Type::Enum"),
         Type::TraitSelf(_) => {
@@ -4546,6 +4557,10 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
                 // C4.4 / ADR 0024 D8: Task cleanup is the runtime's
                 // job (sentinel_task_await / sentinel_scope_exit
                 // free the Task). No codegen-emitted drop.
+            }
+            Type::Channel(_) => {
+                // ADR 0066 M1.2: Channel cleanup is the runtime's job;
+                // no codegen-emitted drop (the handle is a Copy pointer).
             }
             Type::Class(_) => {
                 // C4.1 / ADR 0022 D9: class drop reuses struct

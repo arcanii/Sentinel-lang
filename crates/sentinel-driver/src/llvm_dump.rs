@@ -58,7 +58,11 @@ use sentinel_types::{
 const TARGET_TRIPLE: &str = "arm64-apple-darwin";
 
 /// The lowest user FnId — ids 0..=13 are runtime/builtins (ADR 0044 FnId map).
-const FIRST_USER_FN: u32 = 14;
+// ADR 0056 added the socket builtins (14..=20); ADR 0066 M1.2 added the
+// channel builtins (21..=24), shifting the user-fn base to 25. A call to a
+// builtin FnId not caught by a special lowering arm above returns Err (the
+// fixture is skipped); the channel builtins ARE specially lowered.
+const FIRST_USER_FN: u32 = 25;
 
 /// Bar B / effects (ADR 0020): the reserved kont op_id for a PURE_RETURN wrap
 /// (`u32::MAX`) — the handle dispatch + `k(v)` pure-check compare against it.

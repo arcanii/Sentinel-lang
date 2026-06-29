@@ -1718,7 +1718,7 @@ fn fn_lookup(c: &mut TyCtx, src: &[u8], q: &[u8]) -> i64 {
         while i < n {
             if found == 0 - 1 {
                 if name_eq_src(src, (*c).ufs[i], (*c).ufe[i], q) {
-                    found = 21 + i;
+                    found = 25 + i;
                     0
                 } else {
                     0
@@ -1738,7 +1738,7 @@ fn fn_ret(c: &mut TyCtx, fid: i64) -> i64 {
     if fid < 21 {
         builtin_ret(c, fid)
     } else {
-        (*c).ufret[fid - 21]
+        (*c).ufret[fid - 25]
     }
 }
 
@@ -2051,9 +2051,9 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut 
     let mut abuf: Vec<u8> = vec_new();
     let mut atys: Vec<i64> = vec_new();
     dump_args_capture_all(&mut abuf, ca, src, c, gb, &mut atys);
-    let ntp: i64 = (*c).uftp[fid - 21];
-    let ps: i64 = (*c).ufps[fid - 21];
-    let pe: i64 = (*c).ufpe[fid - 21];
+    let ntp: i64 = (*c).uftp[fid - 25];
+    let ps: i64 = (*c).ufps[fid - 25];
+    let pe: i64 = (*c).ufpe[fid - 25];
     let np: i64 = pe - ps;
     let na: i64 = len(atys);
     let lim: i64 = if np < na {
@@ -2112,7 +2112,7 @@ fn dump_generic_call(out: &mut Vec<u8>, fid: i64, ca: Args, src: &[u8], c: &mut 
     push(out, ')');
     let argbytes: [u8] = vec_to_array(abuf);
     append_str(out, argbytes);
-    let rh: i64 = (*c).ufret[fid - 21];
+    let rh: i64 = (*c).ufret[fid - 25];
     subst_type(c, rh, &subst)
 }
 
@@ -3502,7 +3502,7 @@ fn dump_texpr(out: &mut Vec<u8>, ex: Expr, exp: i64, src: &[u8], c: &mut TyCtx, 
                 // (len/unwrap_or/is_some) uses the existing first-arg `dump_gcall`;
                 // everything else dumps args straight with the declared return type.
                 let isgenfn: bool = if fid >= 21 {
-                    (*c).uftp[fid - 21] > 0
+                    (*c).uftp[fid - 25] > 0
                 } else {
                     false
                 };
@@ -6022,7 +6022,7 @@ fn type_fn(out: &mut Vec<u8>, k: &Vec<i64>, s: &Vec<i64>, e: &Vec<i64>, src: &[u
         0
     };
     append_str(out, "(fn #");
-    append_int(out, 21 + fnidx);
+    append_int(out, 25 + fnidx);
     push(out, ' ');
     append_slice(out, src, name_s, name_e);
     append_str(out, " (");
@@ -8081,7 +8081,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
             // modes 0–3 it's dumped normally.
             let cg_skip_gen: bool = ctx.mode == 4 && ctx.uftp[fnct] > 0;
             if cg_skip_gen {
-                push(&mut ctx.cggfn_id, 21 + fnct);
+                push(&mut ctx.cggfn_id, 25 + fnct);
                 push(&mut ctx.cggfn_pos, itempos[ia]);
                 0
             } else {
@@ -8297,7 +8297,7 @@ pub fn run(src: [u8], mode: i64, result: &mut Vec<u8>) -> i64 {
             ctx.cg_mono_on = true;
             let mut mcur: i64 = mpos;
             let mut mbuf: Vec<u8> = vec_new();
-            type_fn(&mut mbuf, &kinds, &starts, &ends, &src, &mut mcur, &mut ctx, &mut garbage, mfid - 21);
+            type_fn(&mut mbuf, &kinds, &starts, &ends, &src, &mut mcur, &mut ctx, &mut garbage, mfid - 25);
             let _mbx: [u8] = vec_to_array(mbuf);
             ctx.cg_mono_on = false;
             mqi = mqi + 1;
@@ -8515,7 +8515,7 @@ pub fn dump_moves(c: &mut TyCtx, src: &[u8], out: &mut Vec<u8>) -> i64 {
     let mut i: i64 = 0;
     while i < nf {
         append_str(out, "(fn #");
-        append_int(out, 21 + i);
+        append_int(out, 25 + i);
         push(out, ' ');
         append_slice(out, src, (*c).ufs[i], (*c).ufe[i]);
         let mut vid: i64 = 0;
@@ -10684,17 +10684,17 @@ fn cg_emit_spawn_wrapper(c: &mut TyCtx, fid: i64, src: &[u8]) -> i64 {
     // the wrappers land LAST — after the fns + class/impl methods (the oracle's order).
     (*c).cg_to_body = false;
     (*c).cg_to_cls = true;
-    let ns: i64 = (*c).ufs[fid - 21];
-    let ne: i64 = (*c).ufe[fid - 21];
-    let np: i64 = (*c).ufpe[fid - 21] - (*c).ufps[fid - 21];
+    let ns: i64 = (*c).ufs[fid - 25];
+    let ne: i64 = (*c).ufe[fid - 25];
+    let np: i64 = (*c).ufpe[fid - 25] - (*c).ufps[fid - 25];
     cgo_str(c, "define void @__spawn_wrapper_");
     cgo_int(c, fid);
     cgo_str(c, "(ptr %arg0, ptr %arg1) {\nentry:\n");
     // ADR 0066 M1.1: load each arg with its real param type + encode the result into
     // the Task's i64 slot (mirrors the oracle's dump_spawn_wrapper). i64 args/result are
     // byte-identical to C4.4.
-    let ps: i64 = (*c).ufps[fid - 21];
-    let reth: i64 = strip_secret(c, (*c).ufret[fid - 21]);
+    let ps: i64 = (*c).ufps[fid - 25];
+    let reth: i64 = strip_secret(c, (*c).ufret[fid - 25]);
     let mut loads: Vec<i64> = vec_new();
     let mut ptys: Vec<i64> = vec_new();
     let mut i: i64 = 0;
@@ -11266,7 +11266,7 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
         // (Bar B / effects c35b) a call to an effecting fn yields a Kont* (`ptr`), not
         // its declared return type — and a tail effecting-call makes the caller's tail
         // kont-producing (so an enclosing effecting fn returns it as-is).
-        let efc: bool = (*c).ufeff[fid - 21] != 0;
+        let efc: bool = (*c).ufeff[fid - 25] != 0;
         let d: i64 = cg_dst(c);
         cgo_str(c, "call ");
         if efc {
@@ -11275,12 +11275,12 @@ fn cg_emit_call(c: &mut TyCtx, src: &[u8], fid: i64, snap: i64, rty: i64) -> i64
             cgo_ty(c, rty)
         };
         cgo_str(c, " @");
-        let us: i64 = (*c).ufs[fid - 21];
-        let ue: i64 = (*c).ufe[fid - 21];
+        let us: i64 = (*c).ufs[fid - 25];
+        let ue: i64 = (*c).ufe[fid - 25];
         cgo_slice(c, src, us, ue);
         // (Bar B / generics-b) a generic callee resolves to its monomorphic symbol
         // `name__<arg0>__…`; `cg_targs` was set by the preceding `dump_generic_call`.
-        if (*c).uftp[fid - 21] > 0 {
+        if (*c).uftp[fid - 25] > 0 {
             let ctargs: Vec<i64> = cg_copy_targs(c, 1);
             cg_emit_mono_suffix(c, &ctargs);
             0
@@ -13362,8 +13362,8 @@ fn mir_dump_block(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], blk: i64) -> i64
 // `src`; else a builtin's fixed name (FnId 0..=13 — the resolve/runtime map).
 fn mir_put_callee(out: &mut Vec<u8>, c: &mut TyCtx, src: &[u8], fid: i64) -> i64 {
     if fid >= 21 {
-        let s: i64 = (*c).ufs[fid - 21];
-        let e: i64 = (*c).ufe[fid - 21];
+        let s: i64 = (*c).ufs[fid - 25];
+        let e: i64 = (*c).ufe[fid - 25];
         append_slice(out, src, s, e);
         0
     } else {

@@ -1471,6 +1471,10 @@ fn is_copy_type(ty: Type, program: &TypedProgram) -> bool {
         // Treat it as Copy to avoid spurious move tracking — double-
         // await is idempotent-safe at the runtime (the `owned` flag).
         Type::Task(_) => true,
+        // ADR 0066 M1.2: a Channel handle is pointer-like + Copy (shared
+        // producer↔consumer by copying; it is the values that move on
+        // `send`, not the handle). Runtime-reclaimed, not codegen-drop.
+        Type::Channel(_) => true,
     }
 }
 
