@@ -640,31 +640,42 @@ language. When there is a chance:
 
 ### 10.9 Module-System Documentation and Cross-File Examples
 
-The module / `use` system already lets a program span files and reference any
-`pub` item across modules — fns, structs, enums, **classes**, traits, and
-effects all cross the boundary (ADR 0037, incl. per-unit separate compilation
-0037(a), the entry-dir + `--lib-path` / `SNC_LIB_PATH` module-search path
-0037 point 12, and the per-OS `b_<os>.sentinel` conditional files of ADR 0062).
-But there is no single developer-facing answer to *"how does a Sentinel program
-reference source in another file?"* — the mechanism is documented only
-implicitly across ADRs and exercised mainly by `std/` + `selfhost/`. When there
-is a chance:
+The module / `use` system lets a program span files and reference a `pub` item
+across modules — `pub fn` / `pub struct` / `pub enum` / `pub trait` /
+`pub effect` (and generics, `perform`/`handle`) all cross the boundary (ADR
+0037, incl. per-unit separate compilation 0037(a), the entry-dir + `--lib-path`
+/ `SNC_LIB_PATH` module-search path 0037 point 12, and the per-OS
+`b_<os>.sentinel` conditional files of ADR 0062). But there was no single
+developer-facing answer to *"how does a Sentinel program reference source in
+another file?"*
 
-- Add a focused, minimal `examples/modules/` program demonstrating cross-file
-  use **of a class**: file B defines a `pub class` (with a field + a method);
-  file A `use`s it, constructs an instance, and calls the method — built BOTH
-  via `--separate` and the merge path and asserted in
-  `crates/sentinel-driver/tests/examples.rs` (exit 42), so it doubles as a
-  regression test that a class crosses a module boundary. (This is the concrete
-  worked example requested 2026-06-29.)
-- Write a short module-system guide (a `docs/` page or a README section) that
-  states the rules in one place: a module is a file; `use a::b::Item;` brings
-  `Item` into scope; the file resolves over the search path (entry dir first,
-  then `--lib-path` / `SNC_LIB_PATH`); `pub` is required to export; classes
-  (ADR 0022), structs, enums, generics, traits, effects, and `perform`/`handle`
-  all cross units; and the `--separate` / `--lib` / `--shared` build modes
-  (ADR 0037 / 0059). Keep it lean — it is onboarding documentation for an
-  already-shipped feature, not new design.
+**Worked example — DONE (2026-06-29, commit on `main`):**
+`examples/modules/rect_demo.sentinel` `use`s a `pub struct` (`Rect`) + `pub fn`s
+(`rect`, `area`) from the library module `std::math::geometry`
+(`sentinel_library/std/math/geometry.sentinel`); built BOTH `--separate` (the
+library is its own linked object) and merged, asserted exit 42 in
+`examples.rs`. The pattern: **library module in `sentinel_library/`, example in
+`examples/` that `use`s it** (the `examples/` coverage guard collects every
+file, so a non-`main` library file can't live there).
+
+**Finding — `class` is NOT cross-module.** The original ask was "a class in
+file B," but **`pub class` is rejected** ("`pub` only on
+`fn`/`struct`/`enum`/`trait`/`effect`"): a Sentinel `class` (ADR 0022) is
+module-LOCAL and cannot cross a unit boundary. The cross-module form of "a type
+with behaviour" is a `pub struct` + `pub fn`s, or a `pub trait` + `impl`. **Open
+language question (a Language-Evolution / BACKLOG.md §11 candidate):** should
+`class` become `pub`-exportable so classes cross modules like structs do — or is
+module-local `class` an intentional design (structs are the cross-module data
+type, classes the local-encapsulation type)? Decide before documenting it as a
+rule.
+
+**Still TODO — the module-system guide.** Write a short `docs/` page (or README
+section) stating the rules in one place: a module is a file; `use a::b::Item;`
+brings `Item` into scope; the file resolves over the search path (entry dir
+first, then `--lib-path` / `SNC_LIB_PATH`); `pub` is required to export; which
+item kinds cross a unit (fn/struct/enum/trait/effect/generics —
+**not** `class`); and the `--separate` / `--lib` / `--shared` build modes (ADR
+0037 / 0059). Lean onboarding docs for a shipped feature, not new design.
 
 ---
 
