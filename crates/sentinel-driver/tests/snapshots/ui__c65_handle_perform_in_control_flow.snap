@@ -5,10 +5,10 @@ expression: "reject_stderr(\"c65_handle_perform_in_control_flow.sentinel\")"
 sentinel::codegen::handle_body_not_direct_perform
 
   × this `handle` body `perform`s in a position that needs frame reification
-  │ (a non-tail `perform Op() + …`, a `match` body, or a `let`-bound perform
-  │ inside the body); a `perform` in tail position of an `if`/`else` branch IS
+  │ (a non-tail `perform Op() + …`, or a `let`-bound perform inside the body);
+  │ a `perform` in tail position of an `if`/`else` branch or `match` arm IS
   │ supported
-  help: move the `perform` to the tail of its `if`/`else` branch, or extract
-        the performing computation into an effecting fn and call it from the
-        handle body; general perform-in-control-flow reification is a deferred
-        follow-up (ADR 0020 D9 / ADR 0065 stage 3a)
+  help: move the `perform` to the tail of its `if`/`else` branch or `match`
+        arm, or extract the performing computation into an effecting fn and
+        call it from the handle body; general perform-in-control-flow
+        reification is a deferred follow-up (ADR 0020 D9 / ADR 0065 stage 3a)

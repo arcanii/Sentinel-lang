@@ -38,10 +38,11 @@ branch that performs) is not a supported body shape and currently **silently mis
 INDEPENDENT of `return` (`handle if c { perform … } else { … } with { … }` already miscomputes). So
 a handle body that performs through control flow used to silently miscompile; stage 3a (same day)
 first made it a clean error, then SUPPORTED the common case in the inkwell back end — a `perform` in
-TAIL position of an `if`/`else` branch (incl. nested + a pure sibling) is normalized to a
-continuation (`lower_body_as_kont`; demonstrator `examples/lang/handle_control_flow.sentinel`,
-snc-only). A non-tail perform, a `match` body, and a `let`-bound perform stay rejected
-(`tests/ui/c65_handle_perform_in_control_flow`); the `snc llvm` + selfhost mirror is deferred. **D6 update (same day):** a `return` from a
+TAIL position of an `if`/`else` branch or a `match` arm (incl. nested + a pure sibling) is normalized
+to a continuation (`lower_body_as_kont`/`lower_if_as_kont`/`lower_match_as_kont`; demonstrator
+`examples/lang/handle_control_flow.sentinel`, snc-only, if + match). A non-tail perform and a
+`let`-bound perform stay rejected (`tests/ui/c65_handle_perform_in_control_flow`); the `snc llvm` +
+selfhost mirror is deferred. **D6 update (same day):** a `return` from a
 handler ARM (instead of resuming `k`) or a handle BODY already produced the CORRECT value — the only
 gap was a kont **leak** (the abandoned continuation was never freed). FIXED: a new runtime
 `sentinel_kont_free` (frees the kont + its captured frame chain; 2 unit tests) + the inkwell `Return`

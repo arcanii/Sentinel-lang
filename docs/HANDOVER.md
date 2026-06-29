@@ -91,12 +91,12 @@ reference as you work through the milestones.
 > through control flow used to silently miscompile (`handle if c { perform … } else { perform … }
 > with { … }` returned 0 not 42, no `return` involved); first made a clean rejection, now the COMMON
 > CASE is SUPPORTED in the inkwell back end — a `perform` in TAIL position of an `if`/`else` branch
-> (incl. nested `if`s + a pure sibling) is normalized to a continuation
-> (`lower_body_as_kont`/`lower_if_as_kont`/`lower_block_as_kont`: the `if` result slot becomes a
-> `ptr`, each leaf a `Kont*`). Demonstrator `examples/lang/handle_control_flow.sentinel` (snc-only,
-> exit 42). STILL REJECTED (`CodegenError::HandleBodyNotDirectPerform`, pinned by
-> `tests/ui/c65_handle_perform_in_control_flow`): a NON-tail perform (`perform Op() + 1`), a `match`
-> body, a `let`-bound perform inside the body — each needs per-eval-site frame reification. DEFERRED
+> OR a `match` arm (incl. nested `if`s + a pure sibling) is normalized to a continuation
+> (`lower_body_as_kont`/`lower_if_as_kont`/`lower_match_as_kont`/`lower_block_as_kont`: the result
+> slot becomes a `ptr`, each leaf a `Kont*`). Demonstrator `examples/lang/handle_control_flow.sentinel`
+> (snc-only, exit 42, if + match). STILL REJECTED (`CodegenError::HandleBodyNotDirectPerform`, pinned
+> by `tests/ui/c65_handle_perform_in_control_flow`): a NON-tail perform (`perform Op() + 1`) and a
+> `let`-bound perform inside the body — each needs per-eval-site frame reification. DEFERRED
 > (snc-only): the `snc llvm` oracle + selfhost still reject ALL control-flow performs (not 3a-aware) —
 > the text-emitter mirror is the follow-up; that is why the demonstrator is examples/ not tests/pass.
 > No over-rejection (c36b's literal nested `handle` + the 23 effecting tests still compile). Also

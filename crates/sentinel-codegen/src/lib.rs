@@ -118,21 +118,21 @@ pub enum CodegenError {
     StringCodegenNotYetSupported,
 
     /// ADR 0020 D9 / ADR 0065 stage 3a: a `handle` body's `perform`
-    /// reached through control flow is supported only when it sits in
-    /// TAIL position of an `if`/`else` branch (each branch normalized
-    /// to a `Kont*`). A perform that needs per-eval-site frame
-    /// reification is NOT yet supported: a NON-tail perform
-    /// (`perform Op() + 1`, `f(perform Op())`), a `match` body, or a
-    /// `let`-bound perform inside the body. Such a body would store the
-    /// perform's `Kont*` into the `i64`-typed merge slot and miscompile;
-    /// this rejection prevents that. (A directly kont-producing body, a
-    /// fully PURE body, and an early `return` are all fine.)
+    /// reached through control flow is supported when it sits in TAIL
+    /// position of an `if`/`else` branch or a `match` arm (each leaf
+    /// normalized to a `Kont*`). A perform that needs per-eval-site
+    /// frame reification is NOT yet supported: a NON-tail perform
+    /// (`perform Op() + 1`, `f(perform Op())`) or a `let`-bound perform
+    /// inside the body. Such a body would store the perform's `Kont*`
+    /// into the `i64`-typed merge slot and miscompile; this rejection
+    /// prevents that. (A directly kont-producing body, a fully PURE
+    /// body, and an early `return` are all fine.)
     #[error(
-        "this `handle` body `perform`s in a position that needs frame reification (a non-tail `perform Op() + …`, a `match` body, or a `let`-bound perform inside the body); a `perform` in tail position of an `if`/`else` branch IS supported"
+        "this `handle` body `perform`s in a position that needs frame reification (a non-tail `perform Op() + …`, or a `let`-bound perform inside the body); a `perform` in tail position of an `if`/`else` branch or `match` arm IS supported"
     )]
     #[diagnostic(
         code(sentinel::codegen::handle_body_not_direct_perform),
-        help("move the `perform` to the tail of its `if`/`else` branch, or extract the performing computation into an effecting fn and call it from the handle body; general perform-in-control-flow reification is a deferred follow-up (ADR 0020 D9 / ADR 0065 stage 3a)")
+        help("move the `perform` to the tail of its `if`/`else` branch or `match` arm, or extract the performing computation into an effecting fn and call it from the handle body; general perform-in-control-flow reification is a deferred follow-up (ADR 0020 D9 / ADR 0065 stage 3a)")
     )]
     HandleBodyNotDirectPerform,
 
@@ -4736,6 +4736,9 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
             TypedExprKind::If { cond, then_branch, else_branch } => {
                 self.lower_if_as_kont(cond, then_branch, else_branch, program)
             }
+            TypedExprKind::Match { scrutinee, enum_id, arms } => {
+                self.lower_match_as_kont(scrutinee, *enum_id, arms, program)
+            }
             TypedExprKind::Block(b) => self.lower_block_as_kont(b, program),
             _ => {
                 // A leaf: a kont-producer (perform / call-to-effecting / nested
@@ -4828,6 +4831,93 @@ impl<'ctx, 'plan> CodegenCtx<'ctx, 'plan> {
         self.emit_scope_drops(None, program)?;
         self.scope_stack.pop();
         Ok(kont)
+    }
+
+    /// ADR 0065 stage 3a: the `Kont*`-producing twin of [`Self::lower_match`] —
+    /// a `tag` switch whose result slot is a `ptr`, each arm body normalized to
+    /// a `Kont*` via [`Self::lower_body_as_kont`]. So a `match` body that
+    /// performs in a (tail-position) arm flows the continuation out for the
+    /// handle to dispatch, instead of stuffing the `Kont*` into an `i64` slot.
+    fn lower_match_as_kont(
+        &mut self,
+        scrutinee: &TypedExpr,
+        enum_id: EnumId,
+        arms: &[TypedMatchArm],
+        program: &TypedProgram,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        let scrut = self.lower_expr(scrutinee, program)?.into_struct_value();
+        let tag = self
+            .builder
+            .build_extract_value(scrut, 0, "match_tag")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_int_value();
+        let payload_ptr = self
+            .builder
+            .build_extract_value(scrut, 1, "match_payload")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?
+            .into_pointer_value();
+
+        let current_fn = self.current_fn.expect("current_fn set");
+        let i32_ty = self.context.i32_type();
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let result = self.binding_alloca(ptr_ty.into(), "matchkont")?;
+        let merge_bb = self.context.append_basic_block(current_fn, "matchmerge");
+        let default_bb = self.context.append_basic_block(current_fn, "matchdefault");
+
+        let mut cases: Vec<(IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> = Vec::new();
+        let mut variant_arms: Vec<(inkwell::basic_block::BasicBlock<'ctx>, &TypedMatchArm)> =
+            Vec::new();
+        let mut wildcard_arm: Option<&TypedMatchArm> = None;
+        for arm in arms {
+            match &arm.pattern {
+                TypedPattern::Variant { variant_index, .. } => {
+                    let bb = self.context.append_basic_block(current_fn, "matcharm");
+                    cases.push((i32_ty.const_int(*variant_index as u64, false), bb));
+                    variant_arms.push((bb, arm));
+                }
+                TypedPattern::Wildcard(_) => wildcard_arm = Some(arm),
+            }
+        }
+
+        self.builder
+            .build_switch(tag, default_bb, &cases)
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+
+        for (bb, arm) in &variant_arms {
+            self.builder.position_at_end(*bb);
+            if let TypedPattern::Variant { variant_index, bindings, .. } = &arm.pattern {
+                self.bind_pattern_payloads(payload_ptr, enum_id, *variant_index, bindings, program)?;
+            }
+            let kont = self.lower_body_as_kont(&arm.body, program)?;
+            self.builder
+                .build_store(result, kont)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
+
+        self.builder.position_at_end(default_bb);
+        if let Some(arm) = wildcard_arm {
+            let kont = self.lower_body_as_kont(&arm.body, program)?;
+            self.builder
+                .build_store(result, kont)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        } else {
+            self.builder
+                .build_unreachable()
+                .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        }
+
+        self.builder.position_at_end(merge_bb);
+        let loaded = self
+            .builder
+            .build_load(ptr_ty, result, "matchkont_val")
+            .map_err(|e| CodegenError::Builder(e.to_string()))?;
+        Ok(loaded.into_pointer_value())
     }
 
     /// Phase D.1 / ADR 0032 D4: the LLVM type of a variant's heap-boxed
@@ -7884,13 +7974,15 @@ fn handle_body_produces_kont(body: &TypedExpr, program: &TypedProgram) -> bool {
 /// wrapped). A leaf that performs through a NON-tail position (`perform Op() + 1`,
 /// `f(perform Op())`) needs per-eval-site frame reification and is NOT
 /// normalizable — it stays rejected ([`CodegenError::HandleBodyNotDirectPerform`]).
-/// `match` is deferred (treated as not-normalizable, so a performing `match` body
-/// stays rejected for now). Drives [`CodegenCtx::lower_body_as_kont`].
+/// Drives [`CodegenCtx::lower_body_as_kont`].
 fn body_normalizable_to_kont(body: &TypedExpr, program: &TypedProgram) -> bool {
     match &body.kind {
         TypedExprKind::If { then_branch, else_branch, .. } => {
             block_normalizable_to_kont(then_branch, program)
                 && block_normalizable_to_kont(else_branch, program)
+        }
+        TypedExprKind::Match { arms, .. } => {
+            arms.iter().all(|a| body_normalizable_to_kont(&a.body, program))
         }
         TypedExprKind::Block(b) => block_normalizable_to_kont(b, program),
         // A leaf: a clean kont-producer, or fully pure.

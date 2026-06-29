@@ -191,14 +191,15 @@ selfhost compiler sources need not *use* `return` (they keep tail returns), but 
    2026-06-29):** a handle body that performs through control flow used to silently miscompile (the
    perform's `Kont*` stored into the `i64`-typed merge slot and `kont_pure`-wrapped). First it was
    made a clean rejection; now the **common case is SUPPORTED** in the inkwell back end — a `perform`
-   in TAIL position of an `if`/`else` branch (incl. nested `if`s, and a pure sibling branch) is
-   NORMALIZED to a continuation: `lower_body_as_kont` / `lower_if_as_kont` / `lower_block_as_kont` make
-   the `if`'s result slot a `ptr`, each leaf a `Kont*` (a direct `perform` as-is, a pure value
-   `kont_pure`-wrapped), so the handle dispatches the merged continuation. Demonstrator
-   `examples/lang/handle_control_flow.sentinel` (snc-only). **Still rejected** (needs per-eval-site
-   frame reification — `CodegenError::HandleBodyNotDirectPerform`, pinned by
-   `tests/ui/c65_handle_perform_in_control_flow.sentinel`): a NON-tail perform (`perform Op() + 1`), a
-   `match` body, and a `let`-bound perform inside the body. **Deferred (snc-only):** the `snc llvm`
+   in TAIL position of an `if`/`else` branch OR a `match` arm (incl. nested `if`s, and a pure sibling
+   branch/arm) is NORMALIZED to a continuation: `lower_body_as_kont` / `lower_if_as_kont` /
+   `lower_match_as_kont` / `lower_block_as_kont` make the result slot a `ptr` and each leaf a `Kont*`
+   (a direct `perform` as-is, a pure value `kont_pure`-wrapped), so the handle dispatches the merged
+   continuation. Demonstrator `examples/lang/handle_control_flow.sentinel` (snc-only). **Still
+   rejected** (needs per-eval-site frame reification — `CodegenError::HandleBodyNotDirectPerform`,
+   pinned by `tests/ui/c65_handle_perform_in_control_flow.sentinel`): a NON-tail perform
+   (`perform Op() + 1`) and a `let`-bound perform inside the body. **Deferred (snc-only):** the
+   `snc llvm`
    oracle + selfhost still reject ALL control-flow performs (not yet 3a-aware), so the demonstrator is
    out of the differential (the text-emitter mirror is the follow-up). No over-rejection (the 23
    effecting pass tests + c36b's literal nested `handle` still compile).

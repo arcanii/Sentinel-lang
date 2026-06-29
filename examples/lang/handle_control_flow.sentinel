@@ -1,6 +1,6 @@
 // examples/lang/handle_control_flow.sentinel — a `handle` body that performs through
-// CONTROL FLOW (ADR 0065 stage 3a). A `perform` reached via an `if`/`else` branch is now
-// NORMALIZED to a continuation the handler dispatches: each control-flow leaf becomes a
+// CONTROL FLOW (ADR 0065 stage 3a). A `perform` reached via an `if`/`else` branch or a
+// `match` arm is now NORMALIZED to a continuation the handler dispatches: each leaf becomes a
 // `Kont*` (a direct `perform` as-is; a pure value wrapped via `sentinel_kont_pure`), and
 // the `if` merges them as a continuation instead of stuffing the `perform`'s `Kont*` into
 // an `i64` slot. Previously this silently miscompiled, then (interim) was rejected; now it
@@ -18,7 +18,23 @@ effect Io {
     read() -> i64;
 }
 
-// A `perform` in one branch, a pure value in the other.
+enum Sign {
+    Neg,
+    Zero,
+    Pos,
+}
+
+fn classify(n: i64) -> Sign {
+    if n < 0 {
+        Sign::Neg
+    } else if n == 0 {
+        Sign::Zero
+    } else {
+        Sign::Pos
+    }
+}
+
+// A `perform` in one `if` branch, a pure value in the other.
 fn pick(flag: bool) -> i64 {
     handle if flag { perform Io.read() } else { 5 } with {
         Io.read(k) => k(40)
@@ -32,6 +48,17 @@ fn nested(a: bool, b: bool) -> i64 {
     }
 }
 
+// A `perform` in a tail-position `match` arm (the other arms are pure).
+fn handle_sign(n: i64) -> i64 {
+    handle match classify(n) {
+        Sign::Neg => perform Io.read(),
+        Sign::Zero => 0,
+        Sign::Pos => n,
+    } with {
+        Io.read(k) => k(99)
+    }
+}
+
 fn main() -> i64 {
     let mut passed: i64 = 0;
     passed = passed + check("pick(true) performs -> 40", pick(true) == 40);
@@ -39,7 +66,10 @@ fn main() -> i64 {
     passed = passed + check("nested(true, true) performs -> 40", nested(true, true) == 40);
     passed = passed + check("nested(true, false) pure -> 1", nested(true, false) == 1);
     passed = passed + check("nested(false, false) pure -> 2", nested(false, false) == 2);
-    if passed == 5 {
+    passed = passed + check("handle_sign(-5) match arm performs -> 99", handle_sign(0 - 5) == 99);
+    passed = passed + check("handle_sign(0) pure arm -> 0", handle_sign(0) == 0);
+    passed = passed + check("handle_sign(7) pure arm -> 7", handle_sign(7) == 7);
+    if passed == 8 {
         return 42
     } else {
         0
